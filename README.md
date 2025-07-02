@@ -1,5 +1,8 @@
 # ETS2_OPD
 This is a python program that acts like a One-Pedal-Drive (OPD) system for Euro Truck Simulator 2. If you release the gas pedal, the truck will slowly brake. This makes traffic easier to drive in, especially in TruckersMP.
+
+![image_2025-07-02_202137925](https://github.com/user-attachments/assets/0b35aa19-340f-44a9-8e8b-0493c9cd30ca)
+
 ## features
 This also includes quality of life features like:
 - live braking and accelerating bar on the bottom of the screen
