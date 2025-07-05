@@ -1,0 +1,18 @@
+{
+    "bar_variable": true,
+    "gas_exponent_variable": 2.0,
+    "brake_exponent_variable": 1.5,
+    "max_opd_brake_variable": 0.03,
+    "offset_variable": 0.2,
+    "gasaxis": 5,
+    "brakeaxis": 1,
+    "polling_rate": 50,
+    "opd_mode_variable": true,
+    "hazards_variable": true,
+    "autodisable_hazards": true,
+    "horn_variable": true,
+    "airhorn_variable": true,
+    "autostart_variable": true,
+    "hide_button_action": true,
+    "device": "03003fed4f04000096b6000000000000"
+}
