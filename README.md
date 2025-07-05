@@ -11,17 +11,17 @@ This also includes quality of life features like:
 - auto disable hazards
 - exponential braking and accelerating
 ## .exe install
-1. Download the .exe
-2. Run the .exe
+1. Download the .zip
+2. Run MonoCruise.exe
 3. Wait until the UI pops up saying "Waiting for ETS2..."
 4. Open ETS2
 5. Press ok or enter when asked for SDK confirmation.
-6. Open the settings tab on the OPD window
+6. Open the settings tab on the MonoCruise window
 7. Press "Connect to pedals"
 8. Press your brake pedal
 9. Press your gas pedal
 
-Now you're done and can use the OPD system in ETS2.
+Now you're done and can use MonoCruise in ETS2.
 
 > [!IMPORTANT]
 > The MonoCruise window should remain open if you want to use it
