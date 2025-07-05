@@ -10,6 +10,7 @@ This also includes quality of life features like:
 - auto enable hazard lights when braking for traffic
 - auto disable hazards
 - exponential braking and accelerating
+- auto start and stop for non-intrucive UX
 ## .exe install
 1. Download the .zip
 2. Run MonoCruise.exe
