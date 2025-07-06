@@ -545,7 +545,7 @@ def plot_onepedaldrive(return_result=False):
         def draw_seg(a, b, color):
             draw.line([a, b], fill=color, width=2)
 
-        pos_color = (0, 0, 225)
+        pos_color = (50, 50, 225)
         neg_color = (255, 50, 50)
         if y1 >= 0 and y2 >= 0:
             draw_seg(p1, p2, pos_color)
@@ -584,7 +584,7 @@ def overlay_dot_layer(x_value,
     pil_copy = image.copy()
     draw = ImageDraw.Draw(pil_copy)
     dot = to_img_coords(x_value, y_val)
-    dot_color = (0, 0, 225) if y_val >= 0 else (255, 50, 50)
+    dot_color = (50, 50, 225) if y_val >= 0 else (255, 50, 50)
     r = 7  # radius
     bbox = [dot[0] - r, dot[1] - r, dot[0] + r, dot[1] + r]
     draw.ellipse(bbox, fill=dot_color)
@@ -592,7 +592,11 @@ def overlay_dot_layer(x_value,
     # Label it
     font = ImageFont.load_default(25)
     text = f"{round(y_val, 2)}"
-    draw.text((dot[0] + 5, dot[1] + 5), text, fill=dot_color, font=font)
+    if dot[0]<345:
+        draw.text((dot[0] + 7, min(dot[1], 369) + 5), text, fill=dot_color, font=font)
+    else:
+        draw.text((dot[0] - 60, max(dot[1], 30) - 35), text, fill=dot_color, font=font)
+
 
     # Resize & convert to CTkImage
     resized = pil_copy.resize((new_width, new_height), Image.LANCZOS)
@@ -615,12 +619,13 @@ def onepedaldrive(gasval, brakeval):
     offset = offset_variable.get()
     brake_exponent = brake_exponent_variable.get()
     gas_exponent = gas_exponent_variable.get()
+    opd_mode = opd_mode_variable.get()
     
     val1 = min(max(gasval, 0), 1)
     val2 = (min(max(brakeval, 0), 1)**brake_exponent)*-1
     sum_values = val1+val2
 
-    if opd_mode_variable.get() == True:
+    if opd_mode == True:
         if sum_values<=offset:
             value = ((1)/(1+offset))*sum_values-((offset)/(1+offset))
         else:
@@ -630,9 +635,9 @@ def onepedaldrive(gasval, brakeval):
 
     a = -(max_opd_brake_variable.get())**(1/brake_exponent)
 
-    if sum_values>=0 and sum_values<=offset:
+    if sum_values>=0 and sum_values<=offset and opd_mode:
         value = (a/(offset**brake_exponent))*((-sum_values+offset)**brake_exponent)
-    if sum_values<0:
+    if sum_values<0 and opd_mode:
         value = interpolate(-1,a,sum_values,-1,0)
 
     gasval = max(0, value)
@@ -645,10 +650,16 @@ def onepedaldrive(gasval, brakeval):
 
 def send(a, b, controller):
     global bar_val
+    global brake_exponent_variable
+    global gas_exponent_variable
+    global brakeval
+    global gasval
+    global gear
 
     bar_val = a-b
-    a = a
-    b = b
+    if gear == 0:
+        a = gasval**gas_exponent_variable.get() #for those people that like revvvving that engine
+    b = max(b,brakeval**brake_exponent_variable.get())
  
     setattr(controller, "aforward", float(a))
     setattr(controller, "abackward", float(b))
@@ -827,6 +838,8 @@ def main():
     global gas_output
     global brake_output
     global autostart_variable
+    global brakeval
+    global gasval
     # Initialize pygame for joystick handling
     
     # Start SDK check thread
@@ -943,12 +956,14 @@ def main():
                 continue
 
             if int(data["routeDistance"]) != 0:
-                if int(data["routeDistance"]) < 50:
+                if int(data["routeDistance"]) < 150 and not arrived:
                     arrived = True
-                elif int(data["routeDistance"]) > 1000:
+                    cmd_print("arrived at destination")
+                elif int(data["routeDistance"]) > 1500:
                     arrived = False
             else:
                 arrived = False
+            print(arrived)
 
             speed = round(data["speed"] * 3.6,3)  # Convert speed from m/s to km/h
             gear = int(data["gearDashboard"])
@@ -960,7 +975,9 @@ def main():
             
             if data["cruiseControl"] == True and data["cruiseControlSpeed"] > 0 and brakeval == 0:
                 opdbrakeval = 0
-            elif stopped == True and gasval > 0 and speed <= 1 and gear != 0:
+            elif stopped == True and gasval > 0 and speed >= -0.3 and gear < 0:
+                opdbrakeval = 0.05
+            elif stopped == True and gasval > 0 and speed <= 0.3 and gear > 0:
                 opdbrakeval = 0.05
             elif stopped == True:
                 opdbrakeval = max(0, opdbrakeval)
@@ -989,6 +1006,7 @@ def main():
                     horn = True
                     cmd_print("#####HONKING!#####", "#FF2020", 3)
             elif prev_speed-speed >= 5 and arrived == False:
+                setattr(controller, "accmode", False)
                 stopped = True
                 em_stop = True
                 send(0,1, controller)
@@ -1063,6 +1081,12 @@ def main():
                 hazards_prompted = False
                 time.sleep(0.05)
                 setattr(controller, "accmode", False)
+            elif autodisable_hazards_var == False:
+                hazards_prompted = False
+            
+            #added this to prevent the hazards_prompted from staying on and blocking the hazards activation
+            if hazards_prompted == True and not data["lightsHazards"]:
+                hazards_prompted = False
 
             prev_brakeval = brakeval
             prev_speed = speed
