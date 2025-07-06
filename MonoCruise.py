@@ -745,19 +745,30 @@ def log_error(error, context=None):
     # with open('error_log.txt', 'a') as f:
     #     f.write(str(error_details) + '\n')
 
-def is_process_running(exe_name):
-    """
-    Scan all visible processes for exe_name (case-insensitive).
-    Ignore AccessDenied errors.
-    """
-    for proc in psutil.process_iter(["name"]):
-        try:
-            if proc.info["name"] and proc.info["name"].lower() == exe_name.lower():
+def is_process_running(process_name):
+    try:
+        import psutil
+        i=0
+        # Iterate through all running processes
+        for proc in psutil.process_iter(['name']):
+            try:
+                if proc.info['name'] == process_name:
+                    i+=1
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+            time.sleep(0.001)
+
+        if process_name == "MonoCruise.exe":
+            if i>=2:
                 return True
-        except psutil.AccessDenied:
-            continue
-        time.sleep(0.001)
-    return False
+            else: 
+                return False
+        elif i>=1:
+            return True
+        return False
+    except ImportError:
+        # If psutil is not available, return False
+        return False
 
 
 
@@ -1292,6 +1303,11 @@ cmd_label = None
 device = 0
 global controller
 global connected_joystick_label
+
+#checking if MonoCruise is already running
+if is_process_running("MonoCruise.exe"):
+    sys.exit()
+
 cmd_print("Starting MonoCruise...")
 try:
 
