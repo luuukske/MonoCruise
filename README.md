@@ -14,15 +14,23 @@ This also includes quality of life features like:
 ## .exe install
 1. Download the .zip
 2. Run MonoCruise.exe
-3. Wait until the UI pops up saying "Waiting for ETS2..."
-4. Open ETS2
-5. Press ok or enter when asked for SDK confirmation.
-6. Open the settings tab on the MonoCruise window
-7. Press "Connect to pedals"
-8. Press your brake pedal
-9. Press your gas pedal
+3. Open the settings tab on the MonoCruise window
+4. Press "Connect to pedals"
+   
+   <img src="https://github.com/user-attachments/assets/b4b010d3-e3b6-4abf-a29a-a1a9fa72668c" alt="Alt text" width="400"/>
+
+5. Press your brake pedal
+6. Press your gas pedal
+7. Open ETS2
+8. Press ok or enter when asked for SDK confirmation.
+
+   <img src="https://github.com/user-attachments/assets/76c706de-60b6-457c-ae78-0dc6185810df" alt="Alt text" width="400"/>
+
+9. Wait for MonoCruise to connect
 
 Now you're done and can use MonoCruise in ETS2.
+
+MonoCruise will automatically start together with ETS2. you can disable this in the settings.
 
 > [!IMPORTANT]
 > The MonoCruise window should remain open if you want to use it
