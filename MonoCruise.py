@@ -2,20 +2,20 @@ print("hello?")
 import threading
 import customtkinter as ctk
 import tkinter as tk
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import sys
 import ctypes
 import os
 import pygame
 import json
 import time
-from cv2 import line, putText, circle, resize, cvtColor, COLOR_BGR2RGB, FONT_HERSHEY_SIMPLEX, circle, putText
 import numpy as np
 import traceback
 import inspect
 from datetime import datetime
 import psutil
 import subprocess
+import winreg
 
 try:
     import truck_telemetry
@@ -110,6 +110,57 @@ def deserialize_joystick(uuid_str):
             return j
     return None
 
+def add_to_startup(exe_path: str, app_name: str):
+    """
+    Adds the specified executable to Windows startup.
+
+    Parameters:
+    - exe_path: Full path to the .exe file
+    - app_name: Name of the application (used as the registry key name)
+    """
+    if not os.path.isfile(exe_path):
+        raise FileNotFoundError(f"The file '{exe_path}' does not exist.")
+
+    try:
+        # Access the registry key for the current user's startup
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0,
+            winreg.KEY_SET_VALUE
+        )
+        # Set the value; this adds the app to startup
+        winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, exe_path)
+        winreg.CloseKey(key)
+        print(f"'{app_name}' has been added to startup.")
+    except Exception as e:
+        print(f"Failed to add to startup: {e}")
+
+def remove_from_startup(app_name: str):
+    """
+    Removes the specified application from Windows startup for the current user.
+
+    Parameters:
+    - app_name: The registry value name you used when adding the app (e.g. "MyCoolApp").
+    """
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0,
+            winreg.KEY_SET_VALUE
+        )
+        # Delete the registry value; raises FileNotFoundError if it doesn't exist
+        winreg.DeleteValue(key, app_name)
+        winreg.CloseKey(key)
+        print(f"'{app_name}' has been removed from startup.")
+    except FileNotFoundError:
+        print(f"No startup entry named '{app_name}' was found.")
+    except PermissionError:
+        print("Permission denied: you might need to run this with elevated privileges.")
+    except Exception as e:
+        print(f"Failed to remove from startup: {e}")
+
 
 def load_variables(filename):
     """
@@ -183,6 +234,8 @@ def check_and_start_exe():
             cmd_print(f"Started {exe_name}", display_duration=2)
         except Exception as e:
             cmd_print(f"Failed to start {exe_name}: {e}", display_duration=3)
+        finally:
+            add_to_startup(exe_path, "ETS2_checker_MonoCruise")
     
     elif not should_be_running and is_running:
         # Should not be running but is - stop it
@@ -219,6 +272,7 @@ def check_and_start_exe():
             cmd_print(f"Failed to stop {exe_name}: {e}", display_duration=3)
         finally:
             _running_process = None
+            remove_from_startup("ETS2_checker_MonoCruise")
     
 
 def save_variables(filename, **kwargs):
@@ -447,119 +501,102 @@ class LoadingDots:
         self._after_id = self.label.after(50, self.update_dots)
 
 def plot_onepedaldrive(return_result=False):
-    background_color = hex_to_rgb(DEFAULT_COLOR)
-    
-    # Create the base canvas.
-    height, width = 400, 400
-    img = np.empty((height, width, 3), dtype=np.uint8)
-    img[:] = background_color
+    # Canvas setup
+    bg_color = hex_to_rgb(DEFAULT_COLOR)
+    width, height = 400, 400
+    img_pil = Image.new("RGB", (width, height), bg_color)
+    draw = ImageDraw.Draw(img_pil)
+    font = ImageFont.load_default(20)
 
-    # Sample 300 points from -1 to 1; for positive x apply gas, for negative apply brake.
+    # Sample & compute
     num_points = 100
-    x_values = np.linspace(-1, 1, num_points)
-    y_values = []
-    for x in x_values:
-        if x >= 0:
-            gas = x
-            brake = 0
-        else:
-            gas = 0
-            brake = -x  # Convert negative x (brake) to positive.
-        gas_output, brake_output = onepedaldrive(gas, brake)
-        y_values.append(gas_output - brake_output)
+    xs = np.linspace(-1, 1, num_points)
+    ys = []
+    for x in xs:
+        gas, brake = (x, 0) if x >= 0 else (0, -x)
+        g_out, b_out = onepedaldrive(gas, brake)
+        ys.append(g_out - b_out)
 
-    # Determine the y-range for correct scaling.
-    y_min, y_max = min(y_values), max(y_values)
+    y_min, y_max = min(ys), max(ys)
     if abs(y_max - y_min) < 1e-6:
         y_max = y_min + 1e-6
 
-    # Mapping function: converts (x, y) in data coordinates to image (pixel) coordinates.
+    # Coordinate mapper
     def to_img_coords(x, y):
-        col = int((x - (-1)) / (1 - (-1)) * width)
+        col = int((x + 1) / 2 * width)
         row = height - int((y - y_min) / (y_max - y_min) * height)
-        return (col, row)
+        return col, row
 
-    # Draw guidelines for 0 (x-axis and y-axis) in light grey.
-    guideline_color = (100, 100, 100)
-    origin = to_img_coords(0, 0)
-    line(img, (0, origin[1]), (width - 1, origin[1]), guideline_color, 2)
-    line(img, (origin[0], 0), (origin[0], height - 1), guideline_color, 2)
+    # Draw axes
+    gx, gy = to_img_coords(0, 0)
+    grey = (100, 100, 100)
+    draw.line([(0, gy), (width - 1, gy)], fill=grey, width=2)
+    draw.line([(gx, 0), (gx, height - 1)], fill=grey, width=2)
+    draw.text((5, gy - 0), "input", fill=grey, font=font)
+    draw.text((gx - 80, 10), "outputs", fill=grey, font=font)
 
-    # Add axis labels.
-    putText(img, "input", (5, origin[1] - 10), FONT_HERSHEY_SIMPLEX, 0.7, guideline_color, 2)
-    putText(img, "outputs", (origin[0] - 90, 30), FONT_HERSHEY_SIMPLEX, 0.7, guideline_color, 2)
+    # Plot curve segments
+    for i in range(len(xs) - 1):
+        x1, y1 = xs[i], ys[i]
+        x2, y2 = xs[i+1], ys[i+1]
+        p1, p2 = to_img_coords(x1, y1), to_img_coords(x2, y2)
 
-    # Draw the graph: blue for segments where output is non-negative, red for negative.
-    # Split segments if the graph crosses y = 0.
-    for i in range(len(x_values) - 1):
-        x1, y1 = x_values[i], y_values[i]
-        x2, y2 = x_values[i + 1], y_values[i + 1]
-        pt1 = to_img_coords(x1, y1)
-        pt2 = to_img_coords(x2, y2)
+        # decide color and split at y=0 if needed
+        def draw_seg(a, b, color):
+            draw.line([a, b], fill=color, width=2)
+
+        pos_color = (0, 0, 225)
+        neg_color = (255, 50, 50)
         if y1 >= 0 and y2 >= 0:
-            line(img, pt1, pt2, (255, 50, 50), 2)
+            draw_seg(p1, p2, pos_color)
         elif y1 < 0 and y2 < 0:
-            line(img, pt1, pt2, (0, 0, 225), 2)
+            draw_seg(p1, p2, neg_color)
         else:
-            # Calculate the intersection point at y = 0.
             t = -y1 / (y2 - y1)
-            x_int = x1 + t * (x2 - x1)
-            pt_int = to_img_coords(x_int, 0)
+            xi = x1 + t * (x2 - x1)
+            pi = to_img_coords(xi, 0)
             if y1 < 0:
-                line(img, pt1, pt_int, (0, 0, 225), 2)
-                line(img, pt_int, pt2, (255, 50, 50), 2)
+                draw_seg(p1, pi, neg_color)
+                draw_seg(pi, p2, pos_color)
             else:
-                line(img, pt1, pt_int, (255, 50, 50), 2)
-                line(img, pt_int, pt2, (0, 0, 225), 2)
+                draw_seg(p1, pi, pos_color)
+                draw_seg(pi, p2, neg_color)
 
     if return_result:
-        # Return the image, the conversion function, y-range, and origin.
-        return img, to_img_coords
+        return img_pil, to_img_coords
 
-def overlay_dot_layer(x_value, new_width=600, new_height=600, image=None, to_img_coords=None):
-    global gas_output
-    global brake_output
+
+def overlay_dot_layer(x_value,
+                      new_width=600,
+                      new_height=600,
+                      image=None,
+                      to_img_coords=None):
     """
-    Overlays a dot on the graph at the specified x_value.
-    The dot (diameter 10) changes color based on whether the y output is negative.
-    The resulting image is resized to (new_width, new_height), converted to a CTkImage, and returned.
+    Overlays a dot + label at x_value onto a PIL image,
+    then resizes and wraps it in a CTkImage.
     """
-    # Get the base graph image and helper data
-    
-    # Compute the output at the chosen x_value.
-    if x_value >= 0:
-        gas = x_value
-        brake = 0
-    else:
-        gas = 0
-        brake = -x_value
-    y_val = gas_output - brake_output
+    # Recompute y_val for the chosen x
+    gas, brake = (x_value, 0) if x_value >= 0 else (0, -x_value)
+    g_out, b_out = onepedaldrive(gas, brake)
+    y_val = g_out - b_out
 
-    # Map the (x_value, y_val) to pixel coordinates.
-    dot_center = to_img_coords(x_value, y_val)
-    
-    # Choose dot color: blue for non-negative, red for negative.
-    dot_color = (255, 50, 50) if y_val >= 0 else (0, 0, 225)
-    
-    #create a duplicate of the image
-    image_duplicate = image.copy()
+    # Draw on a copy
+    pil_copy = image.copy()
+    draw = ImageDraw.Draw(pil_copy)
+    dot = to_img_coords(x_value, y_val)
+    dot_color = (0, 0, 225) if y_val >= 0 else (255, 50, 50)
+    r = 7  # radius
+    bbox = [dot[0] - r, dot[1] - r, dot[0] + r, dot[1] + r]
+    draw.ellipse(bbox, fill=dot_color)
 
-    # Draw the filled circle (radius=5 for diameter 10) on the image.
-    circle(image_duplicate, dot_center, 7, dot_color, -1)
-    # add text to the dot saying the value of the output
-    putText(image_duplicate, f"{round(y_val, 2)}", (dot_center[0] - 10, dot_center[1] - 10), FONT_HERSHEY_SIMPLEX, 0.7, dot_color, 2)
-    
-    # Resize the image to the dimensions specified by the function arguments.
-    resized_img = resize(image_duplicate, (new_width, new_height))
-    
-    # Convert the OpenCV image from BGR to RGB, then create a PIL image.
-    resized_img_rgb = cvtColor(resized_img, COLOR_BGR2RGB)
-    pil_image = Image.fromarray(resized_img_rgb)
-    
-    # Convert the PIL image into a CTkImage with the new size.
-    ctk_image = ctk.CTkImage(pil_image, size=(new_width, new_height))
-    
-    return ctk_image
+    # Label it
+    font = ImageFont.load_default(25)
+    text = f"{round(y_val, 2)}"
+    draw.text((dot[0] + 5, dot[1] + 5), text, fill=dot_color, font=font)
+
+    # Resize & convert to CTkImage
+    resized = pil_copy.resize((new_width, new_height), Image.LANCZOS)
+    return ctk.CTkImage(resized, size=(new_width, new_height))
 
 def interpolate(a, b, x, ya, yb):
     return a + (b - a) * ((x - ya) / (yb - ya))
@@ -717,6 +754,8 @@ def is_process_running(exe_name):
 def sdk_check_thread():
     global autostart_variable
     global root
+    if autostart_variable:
+        root.iconify()
     """Background thread to check for ETS2 SDK connection"""
     time.sleep(0.2)
     cmd_print("SDK check thread starting...")
@@ -725,6 +764,8 @@ def sdk_check_thread():
     while not exit_event.is_set():
         try:
             truck_telemetry.init()  # Signal that ETS2 has been detected
+            if first:
+                print(f"starting in {'manual' if manual_start else 'auto'} start mode")
             while not exit_event.is_set():
                 # Try to get data to check if SDK is still connected
                 data = truck_telemetry.get_data()
@@ -732,25 +773,28 @@ def sdk_check_thread():
                     raise Exception("SDK_NOT_ACTIVE")
                 ets2_detected.set()
                 time.sleep(0.5)  # Small sleep to prevent CPU hogging
+                first = False
         except Exception as e:
             if isinstance(e, FileNotFoundError) or str(e) == "Not support this telemetry sdk version" or str(e) == "SDK_NOT_ACTIVE":
                 print(isinstance(e, FileNotFoundError), str(e) == "Not support this telemetry sdk version", str(e) == "SDK_NOT_ACTIVE")
                 #print("ETS2 not found, please start the game first.")
                 ets2_detected.clear()
-                game_running = is_process_running("eurotrucks2.exe")
                 if first:
-                    if not game_running:
+                    if not ets2_detected.is_set():
                         manual_start = True
-                    print(f"starting in {'manual' if manual_start else 'auto'} start mode")
-                if autostart_variable.get()==True and not first and not game_running and not manual_start:
-                    exit_event.set()
+                        root.deiconify()
+
+                if autostart_variable.get()==True and not first and not ets2_detected.is_set() and not manual_start and root.state() == 'iconic':
                     print("shutting down")
+                    time.sleep(1)
+                    exit_event.set()
                 time.sleep(0.2)
             else:
                 print(e)
                 context = get_error_context()
                 log_error(e, context)
-        finally:
+        if first:
+            print(f"starting in {'manual' if manual_start else 'auto'} start mode")
             first=False
 
 def main():
@@ -1511,12 +1555,12 @@ try:
     gas_exponent_label = new_label(scrollable_frame, 21, 0, "Gas exponent:")
     gas_exponent_variable = ctk.DoubleVar(value=2)
     temp_gas_exponent_variable = ctk.DoubleVar(value=2)
-    gas_exponent_entry = new_entry(scrollable_frame, 21, 1, gas_exponent_variable, temp_gas_exponent_variable, command=refresh_live_visualization, max_value=2.5, min_value=0.5)
+    gas_exponent_entry = new_entry(scrollable_frame, 21, 1, gas_exponent_variable, temp_gas_exponent_variable, command=refresh_live_visualization, max_value=2.5, min_value=0.8)
 
     brake_exponent_label = new_label(scrollable_frame, 22, 0, "Brake exponent:")
     brake_exponent_variable = ctk.DoubleVar(value=2)
     temp_brake_exponent_variable = ctk.DoubleVar(value=2)
-    brake_exponent_entry = new_entry(scrollable_frame, 22, 1, brake_exponent_variable, temp_brake_exponent_variable, command=refresh_live_visualization, max_value=2.5, min_value=0.5)
+    brake_exponent_entry = new_entry(scrollable_frame, 22, 1, brake_exponent_variable, temp_brake_exponent_variable, command=refresh_live_visualization, max_value=2.5, min_value=0.8)
 
 
 
@@ -1959,7 +2003,7 @@ try:
 
     settings_frame.configure(width=1, fg_color="transparent")
     settings_frame.pack(padx=0)
-    
+
     cmd_print("Starting mainloop...")
     # Start the mainloop in the main thread
     root.mainloop()
