@@ -172,6 +172,7 @@ def check_and_start_exe():
                 if _running_process is None:
                     _running_process = psutil.Process(running_pid)
                 break
+            time.sleep(0.0005)
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
     
@@ -220,31 +221,29 @@ def check_and_start_exe():
             _running_process = None
     
 
-def save_variables(filename, **kwargs): #for starting and stopping the watchdog on ETS2
+def save_variables(filename, **kwargs):
     """
     Saves given variables to a JSON file while preserving any existing values.
-    
-    For the key "device", only the joystick's UUID (as a string) is saved.
-    This function merges new key/value pairs with the previously cached data
-    so that existing data is not lost, and it ensures that _data_cache["device"]
-    remains a string.
-    
-    Args:
-        filename (str): The name of the JSON file.
-        **kwargs: Arbitrary keyword arguments representing variables.
+    Runs check_and_start_exe() only when autostart_variable flips state.
     """
     global _data_cache
+
+    # If no new data, just return existing cache
     if not kwargs:
         return load_variables(filename)
-    
+
+    # Load existing data on first call
     if _data_cache is None:
         _data_cache = load_variables(filename)
-    
-    # If "device" exists in _data_cache but is not a string, convert it.
+
+    # Normalize device entry
     if "device" in _data_cache and not isinstance(_data_cache["device"], str):
         _data_cache["device"] = serialize_joystick(_data_cache["device"])
-    
-    # Merge new values into a copy of the current data.
+
+    # Capture old autostart value
+    old_autostart = _data_cache.get("autostart_variable")
+
+    # Merge new values into a copy
     merged_data = _data_cache.copy()
     for key, value in kwargs.items():
         if key == "device":
@@ -252,17 +251,19 @@ def save_variables(filename, **kwargs): #for starting and stopping the watchdog 
         else:
             merged_data[key] = value
 
-    # Only update the file if something has changed.
+    # Only write file and trigger exe logic when something actually changed
     if merged_data != _data_cache:
-        _data_cache = merged_data  # Update the global cache.
+        _data_cache = merged_data
         with open(filename, "w") as file:
             json.dump(merged_data, file, indent=4)
-        cmd_print(f"Changes detected. Variables saved to '{filename}'.", display_duration=1)
-        
-        # Check if autostart_variable was changed and handle exe accordingly
-        if "autostart_variable" in kwargs:
-            check_and_start_exe()
 
+        cmd_print(f"Changes detected. Variables saved to '{filename}'.", display_duration=1)
+
+        # Compare old vs new autostart state
+        if "autostart_variable" in kwargs:
+            new_autostart = merged_data.get("autostart_variable")
+            if old_autostart != new_autostart:
+                check_and_start_exe()
 
 
 def cmd_print(text, color=CMD_COLOR, display_duration=10):
@@ -572,11 +573,14 @@ def onepedaldrive(gasval, brakeval):
     global gear
     global data
     global offset_variable
+    global max_opd_brake_variable
 
     offset = offset_variable.get()
+    brake_exponent = brake_exponent_variable.get()
+    gas_exponent = gas_exponent_variable.get()
     
     val1 = min(max(gasval, 0), 1)
-    val2 = (min(max(brakeval, 0), 1)**1.5)*-1
+    val2 = (min(max(brakeval, 0), 1)**brake_exponent)*-1
     sum_values = val1+val2
 
     if opd_mode_variable.get() == True:
@@ -587,11 +591,18 @@ def onepedaldrive(gasval, brakeval):
     else:
         value = sum_values
 
+    a = -(max_opd_brake_variable.get())**(1/brake_exponent)
+
+    if sum_values>=0 and sum_values<=offset:
+        value = (a/(offset**brake_exponent))*((-sum_values+offset)**brake_exponent)
+    if sum_values<0:
+        value = interpolate(-1,a,sum_values,-1,0)
+
     gasval = max(0, value)
     brakeval = min(min(0, value),val2)*-1
 
-    gasval = gasval**gas_exponent_variable.get()
-    brakeval = brakeval**brake_exponent_variable.get()
+    gasval = gasval**gas_exponent
+    brakeval = brakeval**brake_exponent
 
     return gasval, brakeval
 
@@ -1311,10 +1322,13 @@ try:
         return label
     
     def new_entry(master, row, column, textvariable, temp_textvariable, command=None, max_value=None, min_value=None):
+        # Keep this variable accessible—can be a global or instance variable depending on context
+        timer_id = None
+
         def entry_wait(*args):
+            nonlocal timer_id  # If inside a closure; or use global if defined globally
+
             def validate():
-                if command is not None:
-                    command()
                 try:
                     val = float(temp_textvariable.get())
                     if val < min_value:
@@ -1325,8 +1339,16 @@ try:
                         textvariable.set(val)  # Apply value only if valid
                 except ValueError:
                     temp_textvariable.set(textvariable.get())  # Revert if input isn't a number
+                finally:
+                    if command is not None:
+                        command()
 
-            master.after(2000, validate)  # Wait 2 seconds before validating
+            # Cancel the previous timer if it exists
+            if timer_id is not None:
+                master.after_cancel(timer_id)
+
+            # Set a new timer and save its ID
+            timer_id = master.after(2000, validate)
 
         temp_textvariable.trace_add("write", entry_wait)  # Monitor changes in temp_textvariable
 
