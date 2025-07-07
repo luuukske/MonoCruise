@@ -16,6 +16,7 @@ from datetime import datetime
 import psutil
 import subprocess
 import winreg
+import math
 
 try:
     import truck_telemetry
@@ -657,14 +658,16 @@ def send(a, b, controller):
     global gear
     global total_weight_tons
     global weight_adjustment
+    global gas_output
+    global brake_output
 
     if weight_adjustment.get():
-        wheight_exp = (0.33*((total_weight_tons-8.93)/(11.7))+1)
+        wheight_exp = (0.25*((total_weight_tons-8.93)/(11.7))+1)
     else:
         wheight_exp = 1
     b = b*wheight_exp
 
-    bar_val = a-b
+    bar_val = gas_output-brake_output
     if gear == 0:
         a = gasval**gas_exponent_variable.get() #for those people that like revvvving that engine
     b = max(b,brakeval**brake_exponent_variable.get())
@@ -922,11 +925,15 @@ def main():
         # Main game loop
         prev_brakeval = 0
         # prev_gasval = 1   (not used)
+        avg_speed = 0
         brakeval = 0
         gasval = 0
         prev_speed = 0
         opdgasval = 0
         opdbrakeval = 0
+        prev_opdbrakeval = 0
+        gas_output = 0
+        brake_output = 0
         arrived = False
         stopped = False
         horn = False
@@ -934,6 +941,8 @@ def main():
         latency_timestamp = time.time()-0.015
         latency = 0.015
         hazards_prompted = False
+        offset = 0.5
+        prev_stop = time.time()
 
         # start the bar thread
         bar_var_update()
@@ -1002,6 +1011,8 @@ def main():
             if not data["sdkActive"]:
                 continue
 
+            slope = data['rotationY']
+
             if int(data["routeDistance"]) != 0:
                 if int(data["routeDistance"]) < 150 and not arrived:
                     arrived = True
@@ -1011,7 +1022,7 @@ def main():
             else:
                 arrived = False
 
-            speed = round(data["speed"] * 3.6,3)  # Convert speed from m/s to km/h
+            speed = round(data["speed"] * 3.6, 4)  # Convert speed from m/s to km/h
             gear = int(data["gearDashboard"])
 
             total_weight_tons = calc_truck_weight(data)
@@ -1025,30 +1036,60 @@ def main():
             """
 
             opdgasval, opdbrakeval = onepedaldrive(gasval, brakeval)
-            gas_output = opdgasval
-            brake_output = opdbrakeval
 
-            
+            '''
             if data["cruiseControl"] == True and data["cruiseControlSpeed"] > 0 and brakeval == 0:
                 opdbrakeval = 0
             elif stopped == True and gasval > 0 and speed >= -0.3 and gear < 0:
-                opdbrakeval = 0.05
+                opdbrakeval = 0.1
             elif stopped == True and gasval > 0 and speed <= 0.3 and gear > 0:
-                opdbrakeval = 0.05
+                opdbrakeval = 0.1
             elif stopped == True:
                 opdbrakeval = max(0, opdbrakeval)
+            '''
+            offset = offset_variable.get()
+            a = 0.02-slope/2
+            if stopped:
+                if gear > 0 and speed < 3 and gasval <= (0.7+offset*0.7) and gasval != 0:
+                    opdbrakeval += min(0.03*(((-round(speed+0.8,1)+4)**5)/(4**5))+slope*2, 0.3)
+                elif gear < 0 and speed > -3 and gasval <= (0.7+offset*0.7) and gasval != 0:
+                    opdbrakeval += min(0.03*(((round(speed+0.8,1)+4)**5)/(4**5))-slope, 0.3)
+                elif gasval == 0 and gear != 0:
+                    opdbrakeval += 0.02
+                delta_time = time.time()-prev_stop
+                t = 1
+                if prev_stop != 0 and delta_time < t:
+                    opdbrakeval = opdbrakeval*(delta_time/t)+prev_opdbrakeval*(1-delta_time/t)
+                else:
+                    prev_stop = 0
+            elif opdgasval == 0:
+                if speed > 0:
+                    b = opdbrakeval/2
+                    opdbrakeval = max(opdbrakeval*((-1/(b*speed+1))+1)+a*(1-(-1/(b*speed+1)+1))+-slope,0)
+                elif speed < 0:
+                    b =  opdbrakeval/2
+                    opdbrakeval = max(opdbrakeval*((-1/(b*-speed+1))+1)+a*(1-(-1/(b*-speed+1)+1))+slope,0)
+            
+            if speed <= 0.1 and speed >= -0.1 and gasval == 0 and gear != 0 and not stopped:
+                stopped = True
+                prev_opdbrakeval = opdbrakeval
+                prev_stop = time.time()
+            elif stopped == True and (speed >= 4 and gear > 0 or speed <= -4 and gear < 0):
+                stopped = False
+                prev_stop = 0
+            elif stopped and opdgasval > 0.75:
+                stopped = False
+                prev_stop = 0
+            if data["parkBrake"] == True and speed <= 2 and speed >= -2 and not stopped:
+                stopped = True
+                prev_opdbrakeval = opdbrakeval
+                prev_stop = time.time()
 
-            if speed <= 0.3 and speed >= -0.3 and gasval == 0 and gear != 0:
-                stopped = True
-            #if gear >= 0 and speed <= -0.01:
-            #    stopped = False
-            #    opdbrakeval = max(0.75 , opdbrakeval)
-            elif stopped == True and (speed >= 0.5 or speed <= -0.5):
-                stopped = False
-            elif stopped == True and opdgasval > 0.75:
-                stopped = False
-            if data["parkBrake"] == True and speed <= 2 and speed >= -2:
-                stopped = True
+            gas_output = opdgasval
+            brake_output = opdbrakeval
+            # print(f"gas: {gas_output}\tbrake: {brake_output}\tstopped: {stopped}")
+
+            #stopped = False
 
             if debug_mode.get() == True:
                 print(f"gasvalue: {round(opdgasval,3)} \tbrakevalue: {round(opdbrakeval,3)} \tspeed: {round(speed,3)} \tprev_speed: {round(prev_speed,3)} \tstopped: {stopped} \tgasval: {round(gasval,3)} \tbrakeval: {round(brakeval,3)} \tdiff: {round(prev_brakeval-brakeval,3)} \tdiff2: {round(prev_speed-speed,3)} \tlatency: {round(latency,3)} \tdist: {round(data['routeDistance'],3)} \tarrived: {arrived} \thazards: {data['lightsHazards']} \thazards_var: {hazards_variable_var} \thazards_prompted: {hazards_prompted}")
@@ -1264,7 +1305,7 @@ class AnimatedBar:
         self.animate()
 
     def animate(self):
-        global em_stop, opdgasval, opdbrakeval, bar_variable, close_bar_event
+        global em_stop, gas_output, brake_output, bar_variable, close_bar_event
 
         #if the screen changes size, update the size of the bar
         if self.screen_width != self.root.winfo_screenwidth() or self.screen_height != self.root.winfo_screenheight():
@@ -1276,8 +1317,8 @@ class AnimatedBar:
             self.root.destroy()
             return
 
-        temp_gasval = (opdgasval+self.temp_gasval*5)/6
-        temp_brakeval = (opdbrakeval+self.temp_brakeval*5)/6
+        temp_gasval = (gas_output+self.temp_gasval*10)/11
+        temp_brakeval = (brake_output+self.temp_brakeval*10)/11
 
         value = temp_gasval-temp_brakeval
 
