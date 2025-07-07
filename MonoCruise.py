@@ -656,14 +656,18 @@ def send(a, b, controller):
     global gasval
     global gear
     global total_weight_tons
+    global weight_adjustment
 
-    wheight_exp = (0.1*((total_weight_tons-8.93)/(11.7))+1)
+    if weight_adjustment.get():
+        wheight_exp = (0.33*((total_weight_tons-8.93)/(11.7))+1)
+    else:
+        wheight_exp = 1
     b = b*wheight_exp
 
     bar_val = a-b
     if gear == 0:
         a = gasval**gas_exponent_variable.get() #for those people that like revvvving that engine
-    b = max(b,brakeval**brake_exponent_variable.get())*wheight_exp
+    b = max(b,brakeval**brake_exponent_variable.get())
  
     setattr(controller, "aforward", float(a))
     setattr(controller, "abackward", float(b))
