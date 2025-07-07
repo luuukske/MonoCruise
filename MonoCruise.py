@@ -655,11 +655,15 @@ def send(a, b, controller):
     global brakeval
     global gasval
     global gear
+    global total_weight_tons
+
+    wheight_exp = (0.1*((total_weight_tons-8.93)/(11.7))+1)
+    b = b*wheight_exp
 
     bar_val = a-b
     if gear == 0:
         a = gasval**gas_exponent_variable.get() #for those people that like revvvving that engine
-    b = max(b,brakeval**brake_exponent_variable.get())
+    b = max(b,brakeval**brake_exponent_variable.get())*wheight_exp
  
     setattr(controller, "aforward", float(a))
     setattr(controller, "abackward", float(b))
@@ -819,6 +823,31 @@ def sdk_check_thread():
             print(f"starting in {'manual' if manual_start else 'auto'} start mode")
             first=False
 
+def calc_truck_weight(data):
+    # Extract weight information
+    trailer_mass = data.get('unitMass', 0)  # trailer weight in kg
+    cargo_mass = data.get('cargoMass', 0)  # Cargo weight in kg
+    
+    # Get trailer information from trailer array
+    trailers = data.get('trailer', [])
+    trailer_attached = False
+    unit_mass = 8500 + data.get('fuel', 300)
+    
+    if trailers and len(trailers) > 0:
+        first_trailer = trailers[0]
+        trailer_attached = first_trailer.get('attached', False)
+    
+    # Check if cargo is loaded
+    is_cargo_loaded = data.get('isCargoLoaded', False)
+    
+    # Only include trailer and cargo weight if trailer is actually attached
+    if trailer_attached:
+        total_weight_kg = unit_mass + trailer_mass + cargo_mass*is_cargo_loaded
+    else:
+        total_weight_kg = unit_mass
+
+    return total_weight_kg / 1000
+
 def main():
     global controller
     """Main game logic"""
@@ -851,6 +880,7 @@ def main():
     global autostart_variable
     global brakeval
     global gasval
+    global total_weight_tons
     # Initialize pygame for joystick handling
     
     # Start SDK check thread
@@ -876,7 +906,8 @@ def main():
                            autodisable_hazards = autodisable_hazards.get(),
                            horn_variable = horn_variable.get(),
                            airhorn_variable = airhorn_variable.get(),
-                           autostart_variable = autostart_variable.get()
+                           autostart_variable = autostart_variable.get(),
+                           weight_adjustment = weight_adjustment.get()
                            )
             
         check_and_start_exe()
@@ -922,7 +953,8 @@ def main():
                            autodisable_hazards = autodisable_hazards.get(),
                            horn_variable = horn_variable.get(),
                            airhorn_variable = airhorn_variable.get(),
-                           autostart_variable = autostart_variable.get()
+                           autostart_variable = autostart_variable.get(),
+                           weight_adjustment = weight_adjustment.get()
                            )
 
             while gasaxis == 0 or brakeaxis == 0 or device == 0:
@@ -974,10 +1006,19 @@ def main():
                     arrived = False
             else:
                 arrived = False
-            print(arrived)
 
             speed = round(data["speed"] * 3.6,3)  # Convert speed from m/s to km/h
             gear = int(data["gearDashboard"])
+
+            total_weight_tons = calc_truck_weight(data)
+
+            """
+            text_file = open("Output.txt", "w")
+
+            text_file.write(f"Data: {data}")
+
+            text_file.close()
+            """
 
             opdgasval, opdbrakeval = onepedaldrive(gasval, brakeval)
             gas_output = opdgasval
@@ -1602,7 +1643,9 @@ try:
     temp_brake_exponent_variable = ctk.DoubleVar(value=2)
     brake_exponent_entry = new_entry(scrollable_frame, 22, 1, brake_exponent_variable, temp_brake_exponent_variable, command=refresh_live_visualization, max_value=2.5, min_value=0.8)
 
-
+    new_label(scrollable_frame, 23, 0, "weight adjustment brake:")
+    weight_adjustment = ctk.BooleanVar(value=True)
+    opd_mode_checkbutton = new_checkbutton(scrollable_frame, 23, 1, weight_adjustment)
 
 
     # list of implemented libraries shown as a discription
@@ -2016,6 +2059,9 @@ try:
     except Exception: pass
     try:
         autostart_variable.set(_data_cache["autostart_variable"])
+    except Exception: pass
+    try:
+        weight_adjustment.set(_data_cache["weight_adjustment"])
     except Exception: pass
 
     try:
