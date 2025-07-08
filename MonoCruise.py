@@ -662,7 +662,7 @@ def send(a, b, controller):
     global brake_output
 
     if weight_adjustment.get():
-        wheight_exp = (0.25*((total_weight_tons-8.93)/(11.7))+1)
+        wheight_exp = (0.27*((total_weight_tons-8.93)/(11.7))+1)
     else:
         wheight_exp = 1
     b = b*wheight_exp
@@ -1048,27 +1048,30 @@ def main():
                 opdbrakeval = max(0, opdbrakeval)
             '''
             offset = offset_variable.get()
-            a = 0.02-slope/2
+            a = (0.035)-slope/2
             if stopped:
                 if gear > 0 and speed < 3 and gasval <= (0.7+offset*0.7) and gasval != 0:
                     opdbrakeval += min(0.03*(((-round(speed+0.8,1)+4)**5)/(4**5))+slope*2, 0.3)
                 elif gear < 0 and speed > -3 and gasval <= (0.7+offset*0.7) and gasval != 0:
-                    opdbrakeval += min(0.03*(((round(speed+0.8,1)+4)**5)/(4**5))-slope, 0.3)
+                    opdbrakeval += min(0.03*(((round(speed+0.8,1)+4)**5)/(4**5))-slope*2, 0.3)
                 elif gasval == 0 and gear != 0:
-                    opdbrakeval += 0.02
+                    opdbrakeval += 0.06
                 delta_time = time.time()-prev_stop
-                t = 1
+                t = 0.5
                 if prev_stop != 0 and delta_time < t:
                     opdbrakeval = opdbrakeval*(delta_time/t)+prev_opdbrakeval*(1-delta_time/t)
                 else:
                     prev_stop = 0
-            elif opdgasval == 0:
+            elif opdgasval == 0 and opd_mode_variable.get() and opdbrakeval < 0.3:
                 if speed > 0:
-                    b = opdbrakeval/2
-                    opdbrakeval = max(opdbrakeval*((-1/(b*speed+1))+1)+a*(1-(-1/(b*speed+1)+1))+-slope,0)
+                    b = max(opdbrakeval**0.8/2, 0.3)
+                    opdbrakeval = max(opdbrakeval*((-1/(b*speed+1))+1)+a*(1-(-1/(b*speed+1)+1)),0)
                 elif speed < 0:
-                    b =  opdbrakeval/2
-                    opdbrakeval = max(opdbrakeval*((-1/(b*-speed+1))+1)+a*(1-(-1/(b*-speed+1)+1))+slope,0)
+                    b =  max(opdbrakeval**0.8/2,0.3)
+                    opdbrakeval = max(opdbrakeval*((-1/(b*-speed+1))+1)+a*(1-(-1/(b*-speed+1)+1)),0)
+            
+            if data["cruiseControl"]:
+                opdbrakeval = 0
             
             if speed <= 0.1 and speed >= -0.1 and gasval == 0 and gear != 0 and not stopped:
                 stopped = True
@@ -1172,7 +1175,7 @@ def main():
                 setattr(controller, "accmode", False)
             """
 
-            if autodisable_hazards_var == True and hazards_prompted == True and speed > 10 and data["lightsHazards"] == True and gasval > 0.5 and brakeval == 0:
+            if autodisable_hazards_var == True and hazards_prompted == True and speed > 10 and data["lightsHazards"] == True and opdgasval > 0.5 and brakeval == 0:
                 cmd_print("autodisabled hazards")
                 setattr(controller, "accmode", True)
                 hazards_prompted = False
