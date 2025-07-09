@@ -28,14 +28,16 @@ try:
 except:
     raise Exception("scscontroller is not installed")
 
+'''
 # Get system DPI scaling
 try:
     user32 = ctypes.windll.user32
     user32.SetProcessDPIAware()
     scaling = user32.GetDpiForSystem() / 96.0
 except:
-    scaling = 1.0
-
+    scaling = 1
+'''
+scaling = 1.7
 # Configure default font
 try:
     # Try to use Segoe UI on Windows
@@ -916,8 +918,6 @@ def main():
                            autostart_variable = autostart_variable.get(),
                            weight_adjustment = weight_adjustment.get()
                            )
-            
-        check_and_start_exe()
 
         if exit_event.is_set():
             return
@@ -946,6 +946,9 @@ def main():
 
         # start the bar thread
         bar_var_update()
+        
+        check_and_start_exe()
+
 
         img, to_img_coords = plot_onepedaldrive(return_result=True)
 
@@ -1455,7 +1458,7 @@ try:
 
     # create a settings page with a scollable frame that stretches to the the support buttons
     settings_frame_width = 400
-    settings_frame = ctk.CTkFrame(main_frame, width=settings_frame_width)
+    settings_frame = ctk.CTkFrame(main_frame, width=settings_frame_width*scaling)
     settings_frame.pack(side="left", fill="y", expand=False, padx=(5,0), pady=5)
     settings_frame.pack_propagate(False)  # Prevent frame from shrinking to fit contents
 
