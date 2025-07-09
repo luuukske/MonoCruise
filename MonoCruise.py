@@ -1,4 +1,3 @@
-print("hello?")
 import threading
 import customtkinter as ctk
 import tkinter as tk
@@ -28,7 +27,6 @@ try:
 except:
     raise Exception("scscontroller is not installed")
 
-'''
 # Get system DPI scaling
 try:
     user32 = ctypes.windll.user32
@@ -36,8 +34,6 @@ try:
     scaling = user32.GetDpiForSystem() / 96.0
 except:
     scaling = 1
-'''
-scaling = 1.7
 # Configure default font
 try:
     # Try to use Segoe UI on Windows
@@ -951,6 +947,11 @@ def main():
 
 
         img, to_img_coords = plot_onepedaldrive(return_result=True)
+        pil_copy = img.copy()
+        new_width = 200
+        new_height = 200
+        img_copy = ctk.CTkImage(pil_copy.resize((new_width, new_height), Image.LANCZOS), size=(new_width, new_height))
+
 
         while 1:
 
@@ -1007,11 +1008,17 @@ def main():
                 cmd_print("Waiting for ETS2 SDK connection...")
                 opdgasval = 0
                 opdbrakeval = 0
+                gas_output = 0
+                brake_output = 0
+                live_visualization_frame.configure(image=img_copy)
+                live_visualization_frame.image = img_copy
                 time.sleep(0.5)
                 continue
 
-            data = truck_telemetry.get_data()
-            if not data["sdkActive"]:
+            try:
+                data = truck_telemetry.get_data()
+            except:
+                ets2_detected.clear()
                 continue
 
             slope = data['rotationY']
@@ -1194,23 +1201,29 @@ def main():
             prev_brakeval = brakeval
             prev_speed = speed
 
-
-
-
-
-
-
-            
-
             # update the live visualization frame and enlarges it to the available space of the frame with a min size of 200x200 and a max size of 1000x1000
 
             # calculate the size of the frame
+            '''
             frame_width = live_visualization_frame.winfo_width()-100
             frame_height = live_visualization_frame.winfo_height()-100
-            frame_size = min(min(max(200, frame_width), 1000), min(max(200, frame_height), 1000))
+            frame_size = min(min(max(200, frame_width), 1000), min(max(200, frame_height), 1000)) '''
             image = overlay_dot_layer(gasval-brakeval, 200, 200, img, to_img_coords)
             live_visualization_frame.configure(image=image)
             live_visualization_frame.image = image
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1429,10 +1442,10 @@ try:
         pass  # Ignore if icon file not found or on non-Windows platform
     
     # Apply scaling to window sizes
-    base_width = 400
-    base_height = 300
-    root.geometry(f"{int(base_width * scaling)}x{int(base_height * scaling)}")
-    root.minsize(int(base_width * scaling), int(base_height * scaling))
+    base_width = 700
+    base_height = 500
+    root.geometry(f"{int(base_width)}x{int(base_height)}")
+    root.minsize(int(base_width), int(base_height))
     
     # Configure root window for better performance
     root.update_idletasks()  # Process any pending events
@@ -1458,7 +1471,7 @@ try:
 
     # create a settings page with a scollable frame that stretches to the the support buttons
     settings_frame_width = 400
-    settings_frame = ctk.CTkFrame(main_frame, width=settings_frame_width*scaling)
+    settings_frame = ctk.CTkFrame(main_frame, width=settings_frame_width)
     settings_frame.pack(side="left", fill="y", expand=False, padx=(5,0), pady=5)
     settings_frame.pack_propagate(False)  # Prevent frame from shrinking to fit contents
 
