@@ -634,7 +634,7 @@ def onepedaldrive(gasval, brakeval):
 
     a = -(max_opd_brake_variable.get())**(1/brake_exponent)
 
-    if sum_values>=0 and sum_values<=offset and opd_mode:
+    if sum_values>0 and sum_values<=offset and opd_mode:
         value = (a/(offset**brake_exponent))*((-sum_values+offset)**brake_exponent)
     if sum_values<0 and opd_mode:
         value = interpolate(-1,a,sum_values,-1,0)
@@ -973,6 +973,12 @@ def main():
                            autostart_variable = autostart_variable.get(),
                            weight_adjustment = weight_adjustment.get()
                            )
+
+            if offset_variable.get() == 0:
+                opd_mode_variable.set(False)
+                temp_offset_variable.set(0.2)
+                offset_variable.set(0.2)
+                opd_mode_var_update()
 
             while gasaxis == 0 or brakeaxis == 0 or device == 0:
                 if exit_event.is_set():
