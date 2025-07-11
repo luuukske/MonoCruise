@@ -1,6 +1,9 @@
 import threading
 import customtkinter as ctk
 import tkinter as tk
+# Create the main window
+root = ctk.CTk()
+
 from PIL import Image, ImageDraw, ImageFont
 import sys
 import ctypes
@@ -15,12 +18,41 @@ from datetime import datetime
 import psutil
 import subprocess
 import winreg
-import math
+from CTkMessagebox import CTkMessagebox
+from connect_SDK import setup_ets2_sdk
 
 try:
     import truck_telemetry
+    truck_telemetry.init()  # Signals if ETS2 SDK has been detected
 except:
-    raise Exception("truck_telemetry is not installed")
+
+    msg = CTkMessagebox(title="SDK not isntalled", message='Should i automatically install the SDK for you? ETS2 will close automatically.',
+                  icon="warning", option_1="Cancel", option_2="Install", wraplength=500, sound=True)
+    
+    if msg.get()=="Install":
+        print("installing SDK")
+        try:
+            if not setup_ets2_sdk():
+                raise Exception("error")
+            else:
+                print("installed SDK")
+                msg = CTkMessagebox(title="SDK not enabled", message='Press "OK" when ETS2 opens up.',
+                  icon="warning", option_1="Okay", wraplength=500, sound=False)
+                msg.get()
+                while 1:
+                    try:
+                        truck_telemetry.init()
+                        break
+                    except:
+                        time.sleep(0.2)
+        except:
+            raise Exception("Error installing SDK")
+    else:
+        exit()
+    msg = CTkMessagebox(title="Done",message="The ETS2 SDK is now installed.",
+                  icon="check", option_1="Thanks", wraplength=500, button_color="green", button_hover_color="darkgreen", topmost=True)
+    msg.get()
+    
 try:
     sys.path.append('./_internal')
     from scscontroller import SCSController
@@ -794,7 +826,6 @@ def sdk_check_thread():
     manual_start = False
     while not exit_event.is_set():
         try:
-            truck_telemetry.init()  # Signal that ETS2 has been detected
             if first:
                 print(f"starting in {'manual' if manual_start else 'auto'} start mode")
             while not exit_event.is_set():
@@ -1439,8 +1470,6 @@ try:
 
     controller = SCSController()
     
-    # Create the main window
-    root = ctk.CTk()
     root.title("MonoCruise")
     try:
         root.iconbitmap(os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico"))
