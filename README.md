@@ -12,21 +12,20 @@ This also includes quality of life features like:
 - exponential braking and accelerating
 - auto start and stop for non-intrucive UX
 ## .exe install
-1. Download the .zip
-2. Run MonoCruise.exe
-3. Follow the on-screen instructions
-4. Press ok or enter when asked for SDK confirmation.
+1. Download and run "MonoCruise installer.exe"
+2. Follow the on-screen instructions
+3. Press ok or enter when asked for SDK confirmation.
 
    <img src="https://github.com/user-attachments/assets/76c706de-60b6-457c-ae78-0dc6185810df" alt="Alt text" width="400"/>
 
-5. Wait for MonoCruise to connect
-6. Open the settings tab on the MonoCruise window
-7. Press "Connect to pedals"
+4. Wait for MonoCruise to connect
+5. Open the settings tab on the MonoCruise window
+6. Press "Connect to pedals"
    
    <img src="https://github.com/user-attachments/assets/b4b010d3-e3b6-4abf-a29a-a1a9fa72668c" alt="Alt text" width="400"/>
 
-8. Press your brake pedal
-9. Press your gas pedal
+7. Press your brake pedal
+8. Press your gas pedal
 
 Now you're done and can use MonoCruise in ETS2.
 
