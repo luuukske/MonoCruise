@@ -403,11 +403,29 @@ def cmd_print(text, color=CMD_COLOR, display_duration=10):
     threading.Thread(target=fade_and_clear, args=(local_fade_id, text), daemon=True).start()
 
 def connect_joystick():
+    def capture_default_positions(joystick):
+        """Capture the default (resting) positions of all axes for a joystick"""
+        positions = {}
+        for axis in range(joystick.get_numaxes()):
+            positions[axis] = joystick.get_axis(axis)
+        return positions
+
+    def check_axis_inversion(joystick, axis, default_position, current_position, threshold=0.1):
+        """
+        Check if an axis is inverted based on movement direction
+        Returns True if inverted, False if normal
+        """
+        movement = current_position - default_position
+        # If movement is negative when we expect positive (pressing pedal), it's inverted
+        return movement < -threshold
+
     """Main game logic"""
     global device
     global axis
     global gasaxis
     global brakeaxis
+    global gas_inverted
+    global brake_inverted
     global pygame
     global connected_joystick_label
     global connected_joystick_gas_axis_label
@@ -420,6 +438,9 @@ def connect_joystick():
     gasaxis = 0
     brakeaxis = 0
     device = 0
+    gas_inverted = False
+    brake_inverted = False
+    default_axis_positions = {}
     joysticks = {}
     pygame.joystick.quit()
     pygame.quit()
@@ -440,36 +461,63 @@ def connect_joystick():
                 if event.type == pygame.JOYDEVICEADDED:
                     joy = pygame.joystick.Joystick(event.device_index)
                     joysticks[joy.get_instance_id()] = joy
+                    
+                    # Capture default positions when joystick connects
+                    default_axis_positions[joy.get_instance_id()] = capture_default_positions(joy)
+                    
                     if joy.get_name() != "vJoy Device":
                         cmd_print(f"Joystick connected: {joy.get_name()}")
+                        cmd_print(f"Default positions captured for {joy.get_numaxes()} axes")
                     restart_connection_label.configure(text="tap the brake pedal")
+                    
                 elif event.type == pygame.JOYAXISMOTION:
                     if event.instance_id in joysticks and joysticks[event.instance_id].get_name() != "vJoy Device":
                         device = joysticks[event.instance_id]
-                        if brakeaxis == 0:
-                            brakeaxis = event.axis
-                            cmd_print(f"Brake axis set to {brakeaxis}")
-                            connected_joystick_brake_axis_label.configure(text=f"axis {brakeaxis}")
-                            restart_connection_label.configure(text="saving...")
-                            time.sleep(0.5)
-                            restart_connection_label.configure(text="tap the gas pedal")
-                        elif event.axis != brakeaxis:
-                            gasaxis = event.axis
-                            cmd_print(f"Gas axis set to {gasaxis}")
-                            connected_joystick_gas_axis_label.configure(text=f"axis {gasaxis}")
-                            restart_connection_label.configure(text="saving...")
-                            time.sleep(0.5)
-                            restart_connection_label.configure(text="")
-                            device.init()
-                            break
+                        
+                        # Get default position for this axis
+                        default_pos = default_axis_positions.get(event.instance_id, {}).get(event.axis, 0)
+                        current_pos = event.value
+                        
+                        # Check for significant movement (threshold to avoid noise)
+                        if abs(current_pos - default_pos) > 0.3:
+                            if brakeaxis == 0:
+                                brakeaxis = event.axis
+                                # Check if brake axis is inverted
+                                brake_inverted = check_axis_inversion(device, event.axis, default_pos, current_pos)
+                                
+                                cmd_print(f"Brake axis set to {brakeaxis}")
+                                cmd_print(f"Brake axis inverted: {brake_inverted}")
+                                connected_joystick_brake_axis_label.configure(text=f"axis {brakeaxis}")
+                                restart_connection_label.configure(text="saving...")
+                                time.sleep(0.5)
+                                restart_connection_label.configure(text="tap the gas pedal")
+                                
+                            elif event.axis != brakeaxis:
+                                gasaxis = event.axis
+                                # Check if gas axis is inverted
+                                gas_inverted = check_axis_inversion(device, event.axis, default_pos, current_pos)
+                                
+                                cmd_print(f"Gas axis set to {gasaxis}")
+                                cmd_print(f"Gas axis inverted: {gas_inverted}")
+                                connected_joystick_gas_axis_label.configure(text=f"axis {gasaxis}")
+                                restart_connection_label.configure(text="saving...")
+                                time.sleep(0.5)
+                                restart_connection_label.configure(text="")
+                                device.init()
+                                break
+                                
                 elif event.type == pygame.JOYDEVICEREMOVED:
                     if event.instance_id in joysticks:
                         cmd_print(f"Joystick disconnected: {joysticks[event.instance_id].get_name()}")
+                        # Clean up default positions for disconnected joystick
+                        if event.instance_id in default_axis_positions:
+                            del default_axis_positions[event.instance_id]
                         del joysticks[event.instance_id]
             
             if gasaxis != 0 and brakeaxis != 0:
                 restart_connection_button.configure(text="reconnect to pedals")
                 cmd_print("pedals connected")
+                cmd_print(f"Final configuration - Gas: axis {gasaxis} (inverted: {gas_inverted}), Brake: axis {brakeaxis} (inverted: {brake_inverted})")
                 break
                 
             time.sleep(0.1)  # Small sleep to prevent CPU hogging
@@ -999,6 +1047,8 @@ def main():
                            offset_variable = offset_variable.get(),
                            gasaxis = gasaxis,
                            brakeaxis  =  brakeaxis,
+                           gas_inverted = gas_inverted,
+                           brake_inverted = brake_inverted,
                            polling_rate = polling_rate.get(),
                            opd_mode_variable = opd_mode_variable.get(),
                            hazards_variable = hazards_variable.get(),
@@ -1041,8 +1091,14 @@ def main():
             # get input
             for event in pygame.event.get():
                 if event.type == pygame.JOYAXISMOTION:
-                    brakeval = round((device.get_axis(brakeaxis)*-1+1)/2,3)
-                    gasval = round((device.get_axis(gasaxis)*-1+1)/2,3)
+                    if brake_inverted:
+                        brakeval = round((device.get_axis(brakeaxis)*-1+1)/2,3)
+                    else:
+                        brakeval = round((device.get_axis(brakeaxis)+1)/2,3)
+                    if gas_inverted:
+                        gasval = round((device.get_axis(gasaxis)*-1+1)/2,3)
+                    else:
+                        gasval = round((device.get_axis(gasaxis)+1)/2,3)
 
 
             if not ets2_detected.is_set():
@@ -1146,7 +1202,7 @@ def main():
             #stopped = False
 
             if debug_mode.get() == True:
-                print(f"gasvalue: {round(opdgasval,3)} \tbrakevalue: {round(opdbrakeval,3)} \tspeed: {round(speed,3)} \tprev_speed: {round(prev_speed,3)} \tstopped: {stopped} \tgasval: {round(gasval,3)} \tbrakeval: {round(brakeval,3)} \tdiff: {round(prev_brakeval-brakeval,3)} \tdiff2: {round(prev_speed-speed,3)} \tlatency: {round(latency,3)} \tdist: {round(data['routeDistance'],3)} \tarrived: {arrived} \thazards: {data['lightsHazards']} \thazards_var: {hazards_variable_var} \thazards_prompted: {hazards_prompted}")
+                print(f"gasvalue: {round(opdgasval,3)} \tbrakevalue: {round(opdbrakeval,3)} \tspeed: {round(speed,3)} \tstopped: {stopped} \tgasval: {round(gasval,3)} \tbrakeval: {round(brakeval,3)} \tdiff: {round(prev_brakeval-brakeval,3)} \tdiff2: {round(prev_speed-speed,3)} \thazards: {data['lightsHazards']} \thazards_var: {hazards_variable_var} \thazards_prompted: {hazards_prompted}")
             
             if (prev_brakeval-brakeval <= -0.07*latency_multiplier or brakeval >= 0.8) and stopped == False and speed > 10 and arrived == False:
                 stopped = True
@@ -1466,9 +1522,13 @@ try:
     try:
         gasaxis = _data_cache["gasaxis"]
         brakeaxis = _data_cache["brakeaxis"]
+        gas_inverted = _data_cache["gas_inverted"]
+        brake_inverted = _data_cache["brake_inverted"]
     except:
         gasaxis = 0
         brakeaxis = 0
+        gas_inverted = False
+        brake_inverted = False
 
     pygame.init()
 
@@ -2119,6 +2179,9 @@ try:
     #set variables from the save file
     
     debug_mode = ctk.BooleanVar(value=False)
+    try:
+        debug_mode.set(_data_cache["debug_mode"])
+    except Exception: pass
     try:
         bar_variable.set(_data_cache["bar_variable"])
     except Exception: pass
