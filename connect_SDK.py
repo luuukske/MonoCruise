@@ -58,7 +58,7 @@ def setup_ets2_sdk():
         # Find ETS2 installation
         ets2_path = find_ets2_path()
         if not ets2_path:
-            return False
+            return False, False
         
         # Check if SDK is already installed
         plugins_dir = ets2_path / "bin" / "win_x64" / "plugins"
@@ -67,8 +67,7 @@ def setup_ets2_sdk():
 
         
         if sdk_dll_1.exists() and sdk_dll_2.exists():
-            launch_game(ets2_path)
-            return True
+            return True, True
         
         # Check if game is running and close it if needed
         game_was_running = is_game_running()
@@ -81,9 +80,9 @@ def setup_ets2_sdk():
         source_dll_2 = script_dir / "TruckyTelemetry.dll"
         
         if not source_dll_1.exists():
-            return False
+            return False, False
         if not source_dll_2.exists():
-            return False
+            return False, False
         
         # Create plugins directory if needed
         plugins_dir.mkdir(parents=True, exist_ok=True)
@@ -95,10 +94,10 @@ def setup_ets2_sdk():
         # Launch game to create shared memory folder
         launch_game(ets2_path)
         
-        return True
+        return True, False
         
     except:
-        return False
+        return False, False
 
 # Usage
 if __name__ == "__main__":

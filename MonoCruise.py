@@ -26,32 +26,32 @@ try:
     truck_telemetry.init()  # Signals if ETS2 SDK has been detected
 except:
 
-    msg = CTkMessagebox(title="SDK not isntalled", message='Should i automatically install the SDK for you? ETS2 will close automatically.',
-                  icon="warning", option_1="Cancel", option_2="Install", wraplength=500, sound=True)
-    
-    if msg.get()=="Install":
-        print("installing SDK")
-        try:
-            if not setup_ets2_sdk():
-                raise Exception("error")
-            else:
-                print("installed SDK")
-                msg = CTkMessagebox(title="SDK not enabled", message='Press "OK" when ETS2 opens up.',
-                  icon="warning", option_1="Okay", wraplength=500, sound=False)
-                msg.get()
-                while 1:
-                    try:
-                        truck_telemetry.init()
-                        break
-                    except:
-                        time.sleep(0.2)
-        except:
-            raise Exception("Error installing SDK")
-    else:
-        exit()
-    msg = CTkMessagebox(title="Done",message="The ETS2 SDK is now installed.",
-                  icon="check", option_1="Thanks", wraplength=500, button_color="green", button_hover_color="darkgreen", topmost=True)
-    msg.get()
+    installed, DLL_excist = setup_ets2_sdk()
+    if not DLL_excist:
+        msg = CTkMessagebox(title="SDK not isntalled", message='Should i automatically install the SDK for you? ETS2 will close automatically.',
+                    icon="warning", option_1="Cancel", option_2="Install", wraplength=500, sound=True)
+        
+        if msg.get()=="Install":
+            print("installing SDK")
+            setup_ets2_sdk()
+            try:
+                if not installed:
+                    raise Exception("error")
+                else:
+                    print("installed SDK")
+                    msg = CTkMessagebox(title="SDK not enabled", message='Press "OK" when ETS2 opens up.',
+                    icon="warning", option_1="Okay", wraplength=500, sound=False)
+                    msg.get()
+                    while 1:
+                        try:
+                            truck_telemetry.init()
+                            break
+                        except:
+                            time.sleep(0.2)
+            except:
+                raise Exception("Error installing SDK")
+        else:
+            exit()
     
 try:
     sys.path.append('./_internal')
@@ -830,6 +830,7 @@ def sdk_check_thread():
                 print(f"starting in {'manual' if manual_start else 'auto'} start mode")
             while not exit_event.is_set():
                 # Try to get data to check if SDK is still connected
+                truck_telemetry.init()
                 data = truck_telemetry.get_data()
                 if not data["sdkActive"]:  # Check if SDK is still active
                     raise Exception("SDK_NOT_ACTIVE")
@@ -850,6 +851,9 @@ def sdk_check_thread():
                     print("shutting down")
                     time.sleep(1)
                     exit_event.set()
+                elif not manual_start:
+                    manual_start = True
+
                 time.sleep(0.2)
             else:
                 print(e)
