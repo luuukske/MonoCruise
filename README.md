@@ -3,7 +3,7 @@ MonoCruise is a python program that acts like a One-Pedal-Drive (OPD) system for
 
 ![image_2025-07-02_202137925](https://github.com/user-attachments/assets/0b35aa19-340f-44a9-8e8b-0493c9cd30ca)
 
-## features
+### features
 This also includes quality of life features like:
 - live braking and accelerating bar on the bottom of the screen
 - automatically horn when braking hard
