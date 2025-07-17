@@ -19,36 +19,34 @@ import psutil
 import subprocess
 import winreg
 from CTkMessagebox import CTkMessagebox
-from connect_SDK import setup_ets2_sdk
+from connect_SDK import check_ets2_sdk, check_ats_sdk, check_and_install_scs_sdk
 
 try:
     import truck_telemetry
     truck_telemetry.init()  # Signals if ETS2 SDK has been detected
 except:
-
-    installed, DLL_excist = setup_ets2_sdk()
-    if not DLL_excist:
-        msg = CTkMessagebox(title="SDK not isntalled", message='Should i automatically install the SDK for you? ETS2 will close automatically.',
-                    icon="warning", option_1="Cancel", option_2="Install", wraplength=500, sound=True)
-        
-        if msg.get()=="Install":
-            print("installing SDK")
-            setup_ets2_sdk()
+    if not check_ets2_sdk() and not check_ats_sdk():
+        print("SDK not installed, trying to install it automatically.")
+        msg = CTkMessagebox(title="SDK not installed", message='Do you want to install the SDK automatically?',
+            icon="warning", option_1="Cancel",option_2="Okay", wraplength=300, sound=True)
+        msg.get()
+        if msg.get() == "Okay":
             try:
-                if not installed:
-                    raise Exception("error")
-                else:
-                    print("installed SDK")
-                    msg = CTkMessagebox(title="SDK not enabled", message='Press "OK" when ETS2 opens up.',
-                    icon="warning", option_1="Okay", wraplength=500, sound=False)
-                    msg.get()
-                    while 1:
-                        try:
-                            truck_telemetry.init()
-                            break
-                        except:
-                            time.sleep(0.2)
+                # Attempt to install the SDK automatically
+                print("installing SDK")
+                result = check_and_install_scs_sdk()
+                if result["summary"]["failed_installs"] > 0:
+                    raise Exception("SDK installation failed")
+                
+                if result is None:
+                    raise Exception("Error checking or installing SDK")
+                print("installed SDK")
+                msg = CTkMessagebox(title="SDK installed", message='SDK installed successfully. You can now open ETS2.',
+                            icon="warning", option_1="Okay", wraplength=300, sound=True)
+                msg.get()
             except:
+                msg = CTkMessagebox(title="Error installing SDK", message='SDK not installed. manually install the SDK and restart the program.',
+                    icon="cancel", option_1="Okay", wraplength=400, sound=False)
                 raise Exception("Error installing SDK")
         else:
             exit()
