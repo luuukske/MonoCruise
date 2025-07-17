@@ -523,6 +523,14 @@ def check_and_install_scs_sdk():
     
     if summary["successful_installs"] > 0 or summary["already_had_sdk"] > 0:
         print(f"\nSDK is now ready for use in {summary['successful_installs'] + summary['already_had_sdk']} installation(s)!")
+        msg = CTkMessagebox(title="SDK installed", message='SDK installed successfully. You can now open ETS2.',
+            icon="warning", option_1="Okay", wraplength=300, sound=True)
+        msg.get()
+    if summary["failed_installs"] > 0:
+        print("Some installations failed. Please check the logs for details.")
+        msg = CTkMessagebox(title="SDK installation failed", message='Some installations failed. Please check the logs for details.',
+            icon="warning", option_1="Okay", wraplength=300, sound=True)
+        msg.get()
     
     return result
 

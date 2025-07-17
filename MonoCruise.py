@@ -24,6 +24,7 @@ try:
     from scscontroller import SCSController
 except:
     raise Exception("scscontroller is not installed")
+
 from connect_SDK import check_ets2_sdk, check_ats_sdk, check_and_install_scs_sdk
 
 try:
@@ -46,12 +47,7 @@ except:
                 if result is None:
                     raise Exception("Error checking or installing SDK")
                 print("installed SDK")
-                msg = CTkMessagebox(title="SDK installed", message='SDK installed successfully. You can now open ETS2.',
-                            icon="warning", option_1="Okay", wraplength=300, sound=True)
-                msg.get()
             except:
-                msg = CTkMessagebox(title="Error installing SDK", message='SDK not installed. manually install the SDK and restart the program.',
-                    icon="cancel", option_1="Okay", wraplength=400, sound=False)
                 raise Exception("Error installing SDK")
         else:
             exit()
@@ -413,8 +409,6 @@ def connect_joystick():
         Returns True if inverted, False if normal
         """
         movement = default_position - current_position
-        # If movement is negative when we expect positive (pressing pedal), it's inverted
-        print(f"Checking axis {axis}: default={default_position}, current={current_position}, movement={movement}")
         return movement < -threshold
 
     """Main game logic"""
@@ -1811,21 +1805,32 @@ try:
 
     # list of implemented libraries shown as a discription
     implemented_libraries_label = ctk.CTkLabel(scrollable_frame, text="Implemented libraries:",  font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, height=0)
-    implemented_libraries_label.grid(row=46, column=0, padx=10, pady=(10,0), columnspan=2, sticky="new")
+    implemented_libraries_label.grid(row=44, column=0, padx=10, pady=(10,0), columnspan=2, sticky="new")
 
     SCSController_label = ctk.CTkLabel(scrollable_frame, text="SCSController - tumppi066",  font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, height=0)
-    SCSController_label.grid(row=47, column=0, padx=10, pady=0, columnspan=2, sticky="new")
+    SCSController_label.grid(row=45, column=0, padx=10, pady=0, columnspan=2, sticky="new")
 
     pygame_label = ctk.CTkLabel(scrollable_frame, text="pygame - pygame",  font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, height=0)
-    pygame_label.grid(row=48, column=0, padx=10, pady=0, columnspan=2, sticky="new")
+    pygame_label.grid(row=46, column=0, padx=10, pady=0, columnspan=2, sticky="new")
 
     truck_telemetry_label = ctk.CTkLabel(scrollable_frame, text="Truck telemetry - Dreagonmon",  font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, height=0)
-    truck_telemetry_label.grid(row=49, column=0, padx=10, pady=0, columnspan=2, sticky="new")
+    truck_telemetry_label.grid(row=47, column=0, padx=10, pady=0, columnspan=2, sticky="new")
 
     customtkinter_label = ctk.CTkLabel(scrollable_frame, text="customtkinter - csm10495",  font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, height=0)
-    customtkinter_label.grid(row=50, column=0, padx=10, pady=0, columnspan=2, sticky="new")
+    customtkinter_label.grid(row=48, column=0, padx=10, pady=0, columnspan=2, sticky="new")
 
-
+    #create a button to reinstall the SDK
+    reinstall_SDK_button = ctk.CTkButton(
+        scrollable_frame,
+        text="reinstall SDK",
+        font=default_font,
+        text_color="lightgrey",
+        fg_color=WAITING_COLOR,
+        corner_radius=5,
+        hover_color="#333366",
+        command=lambda: threading.Thread(target=check_and_install_scs_sdk, daemon=True).start()
+    )
+    reinstall_SDK_button.grid(row=49, column=0, padx=10, pady=(20,1), columnspan=2, sticky="ew")
 
 
     confirmation = False
@@ -1857,7 +1862,7 @@ try:
 
     # create a reset button
     reset_button = ctk.CTkButton(scrollable_frame, text="reset all settings", font=default_font, text_color="lightgrey", fg_color=WAITING_COLOR, corner_radius=5, hover_color="#333366", command=reset_button_action)
-    reset_button.grid(row=50, column=0, padx=10, pady=(20,1), columnspan=2, sticky="ew")
+    reset_button.grid(row=50, column=0, padx=10, pady=(5,1), columnspan=2, sticky="ew")
 
     # discription for the reset button
     reset_button_description = ctk.CTkLabel(scrollable_frame, text="this requires a program restart", font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, bg_color="transparent", anchor="center", wraplength=165, height=10)
