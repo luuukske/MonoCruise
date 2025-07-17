@@ -515,8 +515,8 @@ def connect_joystick():
             time.sleep(0.1)  # Small sleep to prevent CPU hogging
         # give the name of the joystick
         #make the name end with ... if the pixels available is smaller than the text
-        if len(device.get_name()) > 25:
-            connected_joystick_label.configure(text=f"{device.get_name()[:25]}...")
+        if len(device.get_name()) > 20:
+            connected_joystick_label.configure(text=f"{device.get_name()[:20]}...")
         else:
             connected_joystick_label.configure(text=f"{device.get_name()}")
 
@@ -598,13 +598,33 @@ def plot_onepedaldrive(return_result=False):
         row = height - int((y - y_min) / (y_max - y_min) * height)
         return col, row
 
-    # Draw axes
-    gx, gy = to_img_coords(0, 0)
+    # Blend function to mix colors with grey
+    def blend_with_grey(color, grey, ratio=0.25):
+        return tuple(int(ratio * c + (1 - ratio) * g) for c, g in zip(color, grey))
+
+    # Define base colors
+    pos_color = (50, 50, 225)
+    neg_color = (255, 50, 50)
     grey = (100, 100, 100)
-    draw.line([(0, gy), (width - 1, gy)], fill=grey, width=2)
-    draw.line([(gx, 0), (gx, height - 1)], fill=grey, width=2)
-    draw.text((5, gy - 0), "input", fill=grey, font=font)
-    draw.text((gx - 80, 10), "outputs", fill=grey, font=font)
+
+    # Blended axis colors
+    pos_axis_color = blend_with_grey(pos_color, grey)
+    neg_axis_color = blend_with_grey(neg_color, grey)
+
+    # Draw axes with color split
+    gx, gy = to_img_coords(0, 0)
+
+    # Horizontal axis (X)
+    draw.line([(0, gy), (gx, gy)], fill=neg_axis_color, width=2)  # Negative X
+    draw.line([(gx, gy), (width - 1, gy)], fill=pos_axis_color, width=2)  # Positive X
+
+    # Vertical axis (Y)
+    draw.line([(gx, height - 1), (gx, gy)], fill=neg_axis_color, width=2)  # Negative Y
+    draw.line([(gx, gy), (gx, 0)], fill=pos_axis_color, width=2)  # Positive Y
+
+    # Axis labels
+    draw.text((5, gy - 30), "pedals", fill=grey, font=font)
+    draw.text((gx - 110, 5), "game input", fill=grey, font=font)
 
     # Plot curve segments
     for i in range(len(xs) - 1):
@@ -616,8 +636,6 @@ def plot_onepedaldrive(return_result=False):
         def draw_seg(a, b, color):
             draw.line([a, b], fill=color, width=2)
 
-        pos_color = (50, 50, 225)
-        neg_color = (255, 50, 50)
         if y1 >= 0 and y2 >= 0:
             draw_seg(p1, p2, pos_color)
         elif y1 < 0 and y2 < 0:
@@ -1658,7 +1676,7 @@ try:
     connected_joystick_label = new_label(scrollable_frame, 1, 0, "Connected pedals:")
 
     try:
-        connected_joystick_label = ctk.CTkLabel(scrollable_frame, text=f"{device.get_name()[:25]}...", font=default_font, text_color="lightgrey", fg_color=DEFAULT_COLOR, corner_radius=5)
+        connected_joystick_label = ctk.CTkLabel(scrollable_frame, text=f"{device.get_name()[:20]}...", font=default_font, text_color="lightgrey", fg_color=DEFAULT_COLOR, corner_radius=5)
     except:
         connected_joystick_label = ctk.CTkLabel(scrollable_frame, text="None connected", font=default_font, text_color="lightgrey", fg_color=DEFAULT_COLOR, corner_radius=5)
     connected_joystick_label.grid(row=1, column=1, padx=10, pady=1, sticky="e")
