@@ -19,6 +19,11 @@ import psutil
 import subprocess
 import winreg
 from CTkMessagebox import CTkMessagebox
+try:
+    sys.path.append('./_internal')
+    from scscontroller import SCSController
+except:
+    raise Exception("scscontroller is not installed")
 from connect_SDK import check_ets2_sdk, check_ats_sdk, check_and_install_scs_sdk
 
 try:
@@ -50,12 +55,6 @@ except:
                 raise Exception("Error installing SDK")
         else:
             exit()
-    
-try:
-    sys.path.append('./_internal')
-    from scscontroller import SCSController
-except:
-    raise Exception("scscontroller is not installed")
 
 # Get system DPI scaling
 try:
@@ -413,8 +412,9 @@ def connect_joystick():
         Check if an axis is inverted based on movement direction
         Returns True if inverted, False if normal
         """
-        movement = current_position - default_position
+        movement = default_position - current_position
         # If movement is negative when we expect positive (pressing pedal), it's inverted
+        print(f"Checking axis {axis}: default={default_position}, current={current_position}, movement={movement}")
         return movement < -threshold
 
     """Main game logic"""
