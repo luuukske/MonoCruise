@@ -724,7 +724,7 @@ def onepedaldrive(gasval, brakeval):
 
     a = -(max_opd_brake_variable.get())**(1/brake_exponent)
 
-    if sum_values>0 and sum_values<=offset and opd_mode:
+    if sum_values>=0 and sum_values<=offset and opd_mode:
         value = (a/(offset**brake_exponent))*((-sum_values+offset)**brake_exponent)
     if sum_values<0 and opd_mode:
         value = interpolate(-1,a,sum_values,-1,0)
@@ -1714,7 +1714,7 @@ try:
     temp_polling_rate = ctk.IntVar(value=50)
     input_polling_rate_label = new_entry(scrollable_frame, 8, 1, polling_rate, temp_polling_rate, max_value=100, min_value=10)
 
-    description_label = ctk.CTkLabel(scrollable_frame, text="lower values mean more input lag, higher values mean more cpu usage", font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, bg_color="transparent", anchor="e", wraplength=185, height=10)
+    description_label = ctk.CTkLabel(scrollable_frame, text="lower values mean more input lag, higher values mean more cpu usage", font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, bg_color="transparent", anchor="e", wraplength=185, height=10, justify="right")
     description_label.grid(row=9, column=0, padx=10, pady=(0,4), columnspan=2, sticky="nsew")
 
     def hazards_var_update():
@@ -1783,14 +1783,18 @@ try:
         if opd_mode_variable.get() == True:
             offset_label.grid(row=19, column=0, padx=10, pady=1, sticky="w")
             offset_entry.grid(row=19, column=1, padx=10, pady=1, sticky="e")
-            max_opd_brake_label.grid(row=20, column=0, padx=10, pady=1, sticky="w")
-            max_opd_brake_entry.grid(row=20, column=1, padx=10, pady=1, sticky="e")
+            description_offset_label.grid(row=20, column=0, padx=10, pady=(0,8), columnspan=2, sticky="nsew")
+            max_opd_brake_label.grid(row=21, column=0, padx=10, pady=1, sticky="w")
+            max_opd_brake_entry.grid(row=21, column=1, padx=10, pady=1, sticky="e")
+            description_max_opd_label.grid(row=22, column=0, padx=10, pady=(0,8), columnspan=2, sticky="nsew")
             refresh_live_visualization()
         else:
             offset_label.grid_forget()
             offset_entry.grid_forget()
+            description_offset_label.grid_forget()
             max_opd_brake_label.grid_forget()
             max_opd_brake_entry.grid_forget()
+            description_max_opd_label.grid_forget()
             refresh_live_visualization()
 
     opd_mode_variable = ctk.BooleanVar(value=True)
@@ -1801,24 +1805,30 @@ try:
     temp_offset_variable = ctk.DoubleVar(value=0.2)
     offset_entry = new_entry(scrollable_frame, 19, 1, offset_variable, temp_offset_variable, command=refresh_live_visualization, max_value=0.5, min_value=0)
 
-    max_opd_brake_label = new_label(scrollable_frame, 20, 0, "  Max OPD brake:")
+    description_offset_label = ctk.CTkLabel(scrollable_frame, text="The amount you have to press the gas to not be braking or accelerating", font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, bg_color="transparent", anchor="e", wraplength=185, height=10, justify="right")
+    description_offset_label.grid(row=20, column=0, padx=10, pady=(0,8), columnspan=2, sticky="nsew")
+
+    max_opd_brake_label = new_label(scrollable_frame, 21, 0, "  Max OPD brake:")
     max_opd_brake_variable = ctk.DoubleVar(value=0.03)
     temp_max_opd_brake_variable = ctk.DoubleVar(value=0.03)
-    max_opd_brake_entry = new_entry(scrollable_frame, 20, 1, max_opd_brake_variable, temp_max_opd_brake_variable, command=refresh_live_visualization, max_value=0.2, min_value=0)
+    max_opd_brake_entry = new_entry(scrollable_frame, 21, 1, max_opd_brake_variable, temp_max_opd_brake_variable, command=refresh_live_visualization, max_value=0.2, min_value=0)
 
-    gas_exponent_label = new_label(scrollable_frame, 21, 0, "Gas exponent:")
+    description_max_opd_label = ctk.CTkLabel(scrollable_frame, text="The amount of braking when not touching the pedals", font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, bg_color="transparent", anchor="e", wraplength=185, height=10, justify="right")
+    description_max_opd_label.grid(row=22, column=0, padx=10, pady=(0,8), columnspan=2, sticky="nsew")
+
+    gas_exponent_label = new_label(scrollable_frame, 23, 0, "Gas exponent:")
     gas_exponent_variable = ctk.DoubleVar(value=2)
     temp_gas_exponent_variable = ctk.DoubleVar(value=2)
-    gas_exponent_entry = new_entry(scrollable_frame, 21, 1, gas_exponent_variable, temp_gas_exponent_variable, command=refresh_live_visualization, max_value=2.5, min_value=0.8)
+    gas_exponent_entry = new_entry(scrollable_frame, 23, 1, gas_exponent_variable, temp_gas_exponent_variable, command=refresh_live_visualization, max_value=2.5, min_value=0.8)
 
-    brake_exponent_label = new_label(scrollable_frame, 22, 0, "Brake exponent:")
+    brake_exponent_label = new_label(scrollable_frame, 24, 0, "Brake exponent:")
     brake_exponent_variable = ctk.DoubleVar(value=2)
     temp_brake_exponent_variable = ctk.DoubleVar(value=2)
-    brake_exponent_entry = new_entry(scrollable_frame, 22, 1, brake_exponent_variable, temp_brake_exponent_variable, command=refresh_live_visualization, max_value=2.5, min_value=0.8)
+    brake_exponent_entry = new_entry(scrollable_frame, 24, 1, brake_exponent_variable, temp_brake_exponent_variable, command=refresh_live_visualization, max_value=2.5, min_value=0.8)
 
-    new_label(scrollable_frame, 23, 0, "weight adjustment brake:")
+    new_label(scrollable_frame, 25, 0, "weight adjustment brake:")
     weight_adjustment = ctk.BooleanVar(value=True)
-    opd_mode_checkbutton = new_checkbutton(scrollable_frame, 23, 1, weight_adjustment)
+    opd_mode_checkbutton = new_checkbutton(scrollable_frame, 25, 1, weight_adjustment)
 
 
     # list of implemented libraries shown as a discription
