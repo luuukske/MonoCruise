@@ -748,9 +748,19 @@ def send(a, b, controller):
     global weight_adjustment
     global gas_output
     global brake_output
+    global exit_event
+
+    if exit_event.is_set():
+        setattr(controller, "aforward", 0.0)
+        setattr(controller, "abackward", 0.0)
+        return
 
     if weight_adjustment.get():
-        wheight_exp = (0.27*((total_weight_tons-8.93)/(11.7))+1)
+        try:
+            wheight_exp = (0.27*((total_weight_tons-8.93)/(11.7))+1)
+        except:
+            wheight_exp = 1
+            cmd_print("Error calculating weight adjustment", "#FF2020", 10)
     else:
         wheight_exp = 1
     b = b*wheight_exp
@@ -1014,12 +1024,14 @@ def main():
         # Main game loop
         prev_brakeval = 0
         # prev_gasval = 1   (not used)
-        avg_speed = 0
+        
         brakeval = 0
         gasval = 0
         prev_speed = 0
         opdgasval = 0
         opdbrakeval = 0
+        gas_output = 0
+        brake_output = 0
         prev_opdbrakeval = 0
         gas_output = 0
         brake_output = 0
