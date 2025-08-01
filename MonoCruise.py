@@ -259,6 +259,12 @@ def load_variables(filename):
         else:
             device_instance_id = device.get_instance_id()
             print(f"Recovered joystick: {device.get_name()}")
+    else:
+        recovered = None
+        device = None
+        device_instance_id = 0
+        device_lost = False
+        _data_cache["device"] = None  # Ensure device is None if not found to avoid KeyErrors
             
     
     return _data_cache
@@ -441,7 +447,12 @@ def connect_joystick():
         """Capture the default (resting) positions of all axes for a joystick"""
         positions = {}
         for axis in range(joystick.get_numaxes()):
-            positions[axis] = joystick.get_axis(axis)
+            if joystick.get_axis(axis) < -0.5:
+                positions[axis] = -1
+            elif joystick.get_axis(axis) >= -0.5:
+                positions[axis] = 0
+            print(f"Default position for axis {axis} in device {joystick.get_name()}: {joystick.get_axis(axis)}")
+        print(positions)
         return positions
 
     def check_axis_inversion(joystick, axis, default_position, current_position, threshold=0.1):
@@ -453,6 +464,8 @@ def connect_joystick():
         return movement < -threshold
 
     """Main game logic"""
+    global exit_event
+    global recovered
     global device
     global device_lost
     global device_instance_id
@@ -466,10 +479,12 @@ def connect_joystick():
     global connected_joystick_gas_axis_label
     global connected_joystick_brake_axis_label
     global restart_connection_label
+    global pauze_pedal_detection
 
     if gasaxis != 0 or brakeaxis != 0:
         restart_connection_button.configure(text="reconnect to pedals")
 
+    pauze_pedal_detection =True
     gasaxis = 0
     brakeaxis = 0
     if device is not None:
@@ -478,18 +493,19 @@ def connect_joystick():
         except:
             pass
     device = None
+    recovered = None
     device_instance_id = 0
     gas_inverted = False
     brake_inverted = False
     default_axis_positions = {}
     joysticks = {}
-    pygame.quit()
+    pygame.joystick.quit()
     time.sleep(0.1)
 
     connected_joystick_label.configure(text="None connected")
     connected_joystick_gas_axis_label.configure(text="None")
     connected_joystick_brake_axis_label.configure(text="None")
-    pygame.init()
+    pygame.joystick.init()
     
     try:
         # Wait for joystick input
@@ -576,6 +592,7 @@ def connect_joystick():
             else:
                 connected_joystick_label.configure(text=f"{device.get_name()}")
             device_lost = False
+            pauze_pedal_detection = False
 
         #save variables to the file
         save_variables(os.path.join(os.path.dirname(os.path.abspath(__file__)), "saves.json"),
@@ -1181,7 +1198,7 @@ def main():
             airhorn_variable_var = airhorn_variable.get()
 
             # get input if pygame is initialized
-            if pygame.get_init():
+            if pygame.get_init() and not pauze_pedal_detection:
                 for event in pygame.event.get():
                     if event.type == pygame.JOYDEVICEREMOVED: # in developmentn, this event is triggered when the joystick is disconnected
                         if event.instance_id == device_instance_id:
@@ -1755,12 +1772,14 @@ global bar_variable
 global bar_val
 global debug_mode
 global data
+global pauze_pedal_detection
 
 data = None
 cmd_label = None
 device = None
 device_instance_id = 0
 device_lost = False
+pauze_pedal_detection = False
 global controller
 global connected_joystick_label
 
