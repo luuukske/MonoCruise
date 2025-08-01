@@ -86,6 +86,7 @@ ui_ready = threading.Event()       # Event to signal UI is ready
 # Banner colors
 WAITING_COLOR = "#1f538d"  # Blue
 CONNECTED_COLOR = "#304230"  # Light grey
+LOST_COLOR = "#FF0000"  # Red
 DEFAULT_COLOR = "#2B2B2B"  # Dark grey
 SETTINGS_COLOR = "#454545"  # Dark grey
 DISABLED_COLOR = "#404040"  # Dark grey
@@ -128,7 +129,10 @@ def deserialize_joystick(uuid_str):
     
     count = pygame.joystick.get_count()
     for i in range(count):
-        j = pygame.joystick.Joystick(i)
+        try:
+            j = pygame.joystick.Joystick(i)
+        except:
+            continue
         j.init()
         if hasattr(j, "get_guid") and str(j.get_guid()) == uuid_str:
             return j
@@ -185,6 +189,40 @@ def remove_from_startup(app_name: str):
     except Exception as e:
         print(f"Failed to remove from startup: {e}")
 
+def check_wheel_connected():
+    global device, recovered
+
+    """
+    Checks if a wheel is connected and tries to init from the recovered joystick if available.
+    
+    Args:
+        device (pygame.joystick.Joystick): The joystick object to check.
+        recovered (pygame.joystick.Joystick, optional): A previously recovered joystick object from the save file.
+        
+    Returns:
+        bool: True if the wheel is connected, False otherwise.
+    """
+    if device is not None:
+        try:
+            device.get_instance_id()
+            return True
+        except:
+            if recovered is not None:
+                device = None
+            cmd_print("Error: couldn't find pedals", "#FF2020", 10)
+            return False
+    else:
+        if recovered is not None:
+            try:
+                recovered.get_instance_id()
+                device = recovered
+                device.init()
+                device.get_instance_id()
+                return True
+            except:
+                return False
+        else:
+            return False
 
 def load_variables(filename):
     """
@@ -199,7 +237,7 @@ def load_variables(filename):
     Returns:
         dict: A dictionary containing the saved variables.
     """
-    global _data_cache, device, debug_mode
+    global _data_cache, device, device_instance_id, debug_mode, recovered, device_lost
     if _data_cache is None or _data_cache == {}:
         if os.path.exists(filename):
             try:
@@ -215,10 +253,13 @@ def load_variables(filename):
     if "device" in _data_cache and isinstance(_data_cache["device"], str):
         recovered = deserialize_joystick(_data_cache["device"])
         device = recovered  # Set the global device variable
-        if recovered:
-            print(f"Recovered joystick: {recovered.get_name()}")
-        else:
+        if not check_wheel_connected():
             print("Joystick with saved UUID not found among connected devices.")
+            device_lost = True
+        else:
+            device_instance_id = device.get_instance_id()
+            print(f"Recovered joystick: {device.get_name()}")
+            
     
     return _data_cache
 
@@ -413,6 +454,8 @@ def connect_joystick():
 
     """Main game logic"""
     global device
+    global device_lost
+    global device_instance_id
     global axis
     global gasaxis
     global brakeaxis
@@ -429,29 +472,40 @@ def connect_joystick():
 
     gasaxis = 0
     brakeaxis = 0
-    device = 0
+    if device is not None:
+        try:
+            device.quit()
+        except:
+            pass
+    device = None
+    device_instance_id = 0
     gas_inverted = False
     brake_inverted = False
     default_axis_positions = {}
     joysticks = {}
-    pygame.joystick.quit()
     pygame.quit()
+    time.sleep(0.1)
 
     connected_joystick_label.configure(text="None connected")
     connected_joystick_gas_axis_label.configure(text="None")
     connected_joystick_brake_axis_label.configure(text="None")
-    # Initialize pygame for joystick handling
     pygame.init()
-    pygame.joystick.init()
     
     try:
         # Wait for joystick input
         cmd_print("Waiting for joystick input...")
         restart_connection_label.configure(text="connecting...")
         while not exit_event.is_set():
+            while not pygame.get_init():
+                pygame.init()
             for event in pygame.event.get():
                 if event.type == pygame.JOYDEVICEADDED:
-                    joy = pygame.joystick.Joystick(event.device_index)
+                    try:
+                        joy = pygame.joystick.Joystick(event.device_index)
+                    except Exception as e:
+                        cmd_print("Failed to initialize joystick", "#FF2020", 30)
+                        pygame.init()
+                        continue
                     joysticks[joy.get_instance_id()] = joy
                     
                     # Capture default positions when joystick connects
@@ -465,7 +519,8 @@ def connect_joystick():
                 elif event.type == pygame.JOYAXISMOTION:
                     if event.instance_id in joysticks and joysticks[event.instance_id].get_name() != "vJoy Device":
                         device = joysticks[event.instance_id]
-                        
+                        device_instance_id = device.get_instance_id()
+
                         # Get default position for this axis
                         default_pos = default_axis_positions.get(event.instance_id, {}).get(event.axis, 0)
                         current_pos = event.value
@@ -515,10 +570,12 @@ def connect_joystick():
             time.sleep(0.1)  # Small sleep to prevent CPU hogging
         # give the name of the joystick
         #make the name end with ... if the pixels available is smaller than the text
-        if len(device.get_name()) > 20:
-            connected_joystick_label.configure(text=f"{device.get_name()[:20]}...")
-        else:
-            connected_joystick_label.configure(text=f"{device.get_name()}")
+        if device is not None:
+            if len(device.get_name()) > 20:
+                connected_joystick_label.configure(text=f"{device.get_name()[:20]}...")
+            else:
+                connected_joystick_label.configure(text=f"{device.get_name()}")
+            device_lost = False
 
         #save variables to the file
         save_variables(os.path.join(os.path.dirname(os.path.abspath(__file__)), "saves.json"),
@@ -552,7 +609,8 @@ class LoadingDots:
             self._after_id = None
     
     def update_dots(self):
-        if not self.is_playing:
+        if not self.is_playing or exit_event.is_set():
+            self.stop()
             return
         
         current_time = time.time()
@@ -749,6 +807,7 @@ def send(a, b, controller):
     global gas_output
     global brake_output
     global exit_event
+    global data
 
     if exit_event.is_set():
         setattr(controller, "aforward", 0.0)
@@ -760,19 +819,22 @@ def send(a, b, controller):
             wheight_exp = (0.27*((total_weight_tons-8.93)/(11.7))+1)
         except:
             wheight_exp = 1
-            cmd_print("Error calculating weight adjustment", "#FF2020", 10)
+            if not device_lost:
+                cmd_print("Error calculating weight adjustment", "#FF2020", 10)
     else:
         wheight_exp = 1
     b = b*wheight_exp
 
     bar_val = gas_output-brake_output
-    if gear == 0:
-        a = gasval**gas_exponent_variable.get() #for those people that like revvvving that engine
+    try:
+        if gear == 0:
+            a = gasval**gas_exponent_variable.get() #for those people that like revvvving that engine
+    except:
+        a = gasval
     b = max(b,brakeval**brake_exponent_variable.get())
  
     setattr(controller, "aforward", float(a))
     setattr(controller, "abackward", float(b))
-
 def get_error_context():
     """Get detailed context about where an error occurred"""
     frame = inspect.currentframe().f_back
@@ -963,6 +1025,9 @@ def main():
     global brakeaxis
     global joy
     global device
+    global device_instance_id
+    global device_lost
+    global recovered
     global axis
     global polling_rate
     global hazards_variable
@@ -1087,12 +1152,17 @@ def main():
                 offset_variable.set(0.2)
                 opd_mode_var_update()
 
-            while gasaxis == 0 or brakeaxis == 0 or device == 0:
+            """ (old code, not used anymore)
+            while (not isinstance(_data_cache["device"], str) or not _data_cache["device"] == "") and device_lost == True:
+                if recovered is None:
+                    recovered = deserialize_joystick(_data_cache["device"])
+                    check_wheel_connected()
                 if exit_event.is_set():
                     break
                 time.sleep(0.5)
                 opdgasval = 0
                 opdbrakeval = 0
+            """
 
             if exit_event.is_set():
                 break
@@ -1110,18 +1180,116 @@ def main():
             horn_variable_var = horn_variable.get()
             airhorn_variable_var = airhorn_variable.get()
 
-            # get input
-            for event in pygame.event.get():
-                if event.type == pygame.JOYAXISMOTION:
-                    if brake_inverted:
-                        brakeval = round((device.get_axis(brakeaxis)*-1+1)/2,3)
-                    else:
-                        brakeval = round((device.get_axis(brakeaxis)+1)/2,3)
-                    if gas_inverted:
-                        gasval = round((device.get_axis(gasaxis)*-1+1)/2,3)
-                    else:
-                        gasval = round((device.get_axis(gasaxis)+1)/2,3)
+            # get input if pygame is initialized
+            if pygame.get_init():
+                for event in pygame.event.get():
+                    if event.type == pygame.JOYDEVICEREMOVED: # in developmentn, this event is triggered when the joystick is disconnected
+                        if event.instance_id == device_instance_id:
+                            cmd_print("Your pedals disconnected", "#FF2020", 15)
+                            # Handle the disconnection for your specific device
+                            device_lost = True
+                            device.quit()
+                            device = None
+                            connected_joystick_label.configure(text="None connected")
+                            
+                    elif event.type == pygame.JOYDEVICEADDED:
+                        # Optionally handle reconnection
+                        if device_lost is True:  # If your device was previously disconnected
+                            # You might want to check if this is the same type of device
+                            i = 0
+                            cmd_print("reconnecting to pedals", display_duration=63)
+                            time.sleep(5)
+                            while 1:
+                                try:
+                                    recovered = deserialize_joystick(_data_cache["device"])
+                                    recovered.init()
+                                    device_instance_id = recovered.get_instance_id()
+                                    device = recovered
+                                    device.init()
+                                    break
+                                except Exception as e:
+                                    print(f"Error reinitializing device: {e}")
+                                    time.sleep(0.2)
+                                    i+=1
+                                    if i > 30:
+                                        cmd_print("Failed to reconnect to pedals, reconfigure please", "#FF2020", 30)
+                                        device_lost = True
+                                        device = None
+                                        connected_joystick_label.configure(text="None connected")
+                                        break
+                            if device is None:
+                                continue
+                            device.quit()
+                            time.sleep(3) # a reinitialization is required to avoid inconsistent behavior
+                            try:
+                                device.init()
+                                cmd_print("succesfully reconnected")
+                                device_lost = False  # Reset the flag
+                            except Exception as e:
+                                cmd_print(f"Error reinitializing device: {e}", "#FF2020", 15)
+                                device_lost = True
+                            if device is not None:
+                                if len(device.get_name()) > 20:
+                                    connected_joystick_label.configure(text=f"{device.get_name()[:20]}...")
+                                else:
+                                    connected_joystick_label.configure(text=f"{device.get_name()}")
+                            reset_operational_variables()  # Reset all operational variables
+                    if event.type == pygame.JOYAXISMOTION and device is not None:
+                        try:
+                            if brake_inverted:
+                                brakeval = round((device.get_axis(brakeaxis)*-1+1)/2,3)
+                            else:
+                                brakeval = round((device.get_axis(brakeaxis)+1)/2,3)
+                            if gas_inverted:
+                                gasval = round((device.get_axis(gasaxis)*-1+1)/2,3)
+                            else:
+                                gasval = round((device.get_axis(gasaxis)+1)/2,3)
+                        except Exception as e:
+                            cmd_print(f"E reading joy: {e}", "#FF2020", 15)
+            else:
+                pygame.init()
+                pygame.joystick.init()
 
+
+            if device_lost == True:
+                gasval = 0
+                brakeval = 0
+                opdbrakeval = 0
+                opdgasval = 0
+                gas_output = 0
+                brake_output = 0
+                if em_stop == False:
+                    send(0, 0.15, controller)
+                else:
+                    send(0, 1, controller)
+                #activate hazards and horn if they are not already 
+                setattr(controller, "wipers4", True)
+                setattr(controller, "wipers3", True)
+
+                try:
+                    if data["lightsHazards"] == False and not hazards_prompted:
+                        setattr(controller, "accmode", True)
+                        hazards_prompted = True
+                        time.sleep(0.05)
+                        setattr(controller, "accmode", False)
+                except:
+                    pass
+
+                live_visualization_frame.configure(image=img_copy)
+                live_visualization_frame.image = img_copy
+
+                time.sleep(0.2)
+                if data is not None:
+                    setattr(controller, "steering", float(-data["gameSteer"]))
+                else:
+                    setattr(controller, "steering", 0.0)
+
+                setattr(controller, "wipers4", False)
+                setattr(controller, "wipers3", False)
+                time.sleep(0.8)
+
+            if not check_wheel_connected():
+                continue
 
             if not ets2_detected.is_set():
                 cmd_print("Waiting for ETS2 SDK connection...")
@@ -1268,9 +1436,23 @@ def main():
                             setattr(controller, "wipers3", True)
                         if airhorn_variable_var == True:
                             setattr(controller, "wipers4", True)
-                    for event in pygame.event.get():
-                        if event.type == pygame.JOYAXISMOTION:
-                            brakeval = round((device.get_axis(brakeaxis)*-1+1)/2,3)
+                            
+                    if check_wheel_connected() and device is not None:
+                        if pygame.get_init():
+                            pygame.init()
+                            pygame.joystick.init()
+                        for event in pygame.event.get():
+                            if event.type == pygame.JOYAXISMOTION:
+                                brakeval = round((device.get_axis(brakeaxis)*-1+1)/2,3)
+                            if event.type == pygame.JOYDEVICEREMOVED:
+                                if event.instance_id == device_instance_id:
+                                    cmd_print("Your pedals disconnected", "#FF2020", 15)
+                                    device_lost = True
+                                    break
+                    elif speed > 0.1:
+                        brakeval = 1
+                    else:
+                        break
                     time.sleep(0.05)
                     prev_brakeval = brakeval
                     # prev_gasval = gasval
@@ -1279,8 +1461,9 @@ def main():
                     speed = round(data["speed"] * 3.6,3)
                     timestamp = time.time()
                     latency_timestamp = time.time()-0.005
-                send(0,0, controller)
-                em_stop = False
+                if device_lost == False:
+                    send(0,0, controller)
+                    em_stop = False
 
                 """
                 if data["lightsHazards"] == True and speed > 10 and hazards_variable_var == True:
@@ -1397,7 +1580,14 @@ class AnimatedBar:
         
         # Remove window decorations and force window always on top.
         self.root.overrideredirect(True)
-        self.root.attributes("-topmost", True)
+        def keep_on_top():
+            if exit_event.is_set() or close_bar_event.is_set():
+                return
+            root.lift()
+            root.attributes('-topmost', True)
+            root.after(2000, keep_on_top)  # Check every 2 seconds
+
+        keep_on_top()
         
         # Set the window background (and canvas background) to the transparent key color.
         self.root.config(bg=self.transparent_color)
@@ -1485,7 +1675,7 @@ class AnimatedBar:
             if gas_extension == 0:
                 self.canvas.itemconfig(self.gas_rect, state='hidden')
             else:
-                # Make sure the gas bar is visible if it’s needed.
+                # Make sure the gas bar is visible if it's needed.
                 self.canvas.coords(self.gas_rect, self.center, 0, self.center + gas_extension, self.bar_width)
                 self.canvas.itemconfig(self.gas_rect, fill="blue", outline="blue", state='normal')
 
@@ -1503,8 +1693,50 @@ class AnimatedBar:
 
             self.root.after(10, self.animate)
 
+def reset_operational_variables():
+    """
+    Resets all operational variables to their initial state after device reconnection.
+    This prevents issues with stale data from before the disconnection.
+    """
+    global prev_brakeval, prev_speed, opdgasval, opdbrakeval, gas_output, brake_output
+    global prev_opdbrakeval, arrived, stopped, horn, em_stop, latency_timestamp
+    global latency, hazards_prompted, offset, prev_stop, gasval, brakeval
+    
+    # Reset brake and speed tracking variables
+    prev_brakeval = 0
+    prev_speed = 0
+    
+    # Reset pedal values
+    brakeval = 0
+    gasval = 0
+    
+    # Reset one-pedal drive outputs
+    opdgasval = 0
+    opdbrakeval = 0
+    gas_output = 0
+    brake_output = 0
+    prev_opdbrakeval = 0
+    
+    # Reset game state variables
+    arrived = False
+    stopped = False
+    horn = False
+    em_stop = False
+    
+    # Reset timing variables
+    latency_timestamp = time.time() - 0.015
+    latency = 0.015
+    prev_stop = time.time()
+
+    setattr(controller, "steering", 0.0)
+    setattr(controller, "accmode", False)
+    setattr(controller, "wipers4", False)
+    setattr(controller, "wipers3", False)
+
 
 global device
+global device_instance_id
+global device_lost
 global gasaxis
 global brakeaxis
 global polling_rate
@@ -1522,9 +1754,13 @@ global max_opd_brake_variable
 global bar_variable
 global bar_val
 global debug_mode
+global data
 
+data = None
 cmd_label = None
-device = 0
+device = None
+device_instance_id = 0
+device_lost = False
 global controller
 global connected_joystick_label
 
@@ -1534,9 +1770,7 @@ if is_process_running("MonoCruise.exe"):
 
 cmd_print("Starting MonoCruise...")
 try:
-
     # load from save file
-
     save_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saves.json")
     load_variables(save_file_path)
 
@@ -1553,9 +1787,19 @@ try:
         brake_inverted = False
 
     pygame.init()
+    pygame.joystick.init()
 
     controller = SCSController()
+
+    #reset the all used sdk variables
+    setattr(controller, "accmode", False)
+    setattr(controller, "wipers4", False)
+    setattr(controller, "wipers3", False)
     
+    setattr(controller, "steering", 0.0)
+    setattr(controller, "aforward", 0.0)
+    setattr(controller, "abackward", 0.0)
+
     root.title("MonoCruise")
     try:
         root.iconbitmap(os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico"))
@@ -1606,7 +1850,7 @@ try:
 
     # create a scrollable frame for the settings that stretches from the left to the right of the settings frame
     scrollable_frame = ctk.CTkScrollableFrame(settings_frame, bg_color="transparent", fg_color="transparent", border_width=1, border_color="#404040", corner_radius=5)
-    scrollable_frame.pack(side="top", fill="both", expand=True, padx=5, pady=(5,0))
+    scrollable_frame.pack(side="top", fill="both", expand=True, padx=5, pady=(5,5))
     #make the grid expand to the side of the scrollable frame
     scrollable_frame.grid_columnconfigure(1, weight=1)
     scrollable_frame.pack_propagate(False)
@@ -2066,7 +2310,7 @@ try:
             
     def update_transition():
         """Update the color transition animation"""
-        if not ui_state.transition_active:
+        if not ui_state.transition_active or exit_event.is_set():
             return
             
         current_time = time.time()
@@ -2130,7 +2374,7 @@ try:
         # SETUP MODE: if either gasaxis or brakeaxis equals 0,
         # display "finish setup in settings" and use WAITING_COLOR.
         # ---------------------------
-        if gasaxis == 0 or brakeaxis == 0 or device == 0:
+        if not isinstance(_data_cache["device"], str) or _data_cache["device"] == "" or gasaxis == 0 or brakeaxis == 0:
             current_mode = "setup"
             target_color = WAITING_COLOR
 
@@ -2154,12 +2398,15 @@ try:
             return
 
         # ---------------------------
-        # WAITING vs RUNNING MODE:
-        # When gasaxis and brakeaxis are nonzero, check ETS2 connection.
+        # WAITING vs RUNNING MODE vs LOST MODE:
+        # When gasaxis and brakeaxis are nonzero, check ETS2 connection. If the pedals are disconnected, set the mode to lost.
         # ---------------------------
-        if ets2_detected.is_set():
+        if ets2_detected.is_set() and device_lost == False:
             current_mode = "running"
             target_color = CONNECTED_COLOR
+        elif device_lost == True:
+            current_mode = "lost"
+            target_color = LOST_COLOR
         else:
             current_mode = "waiting"
             target_color = WAITING_COLOR
@@ -2188,6 +2435,15 @@ try:
             # so the dots animation can continue to update it.
             loading_label.configure(
                 font=default_font,
+                text_color="white",
+                bg_color="transparent"
+            )
+        elif current_mode == "lost":
+            if dots_anim.is_playing:
+                dots_anim.stop()
+            loading_label.configure(
+                text="Pedals disconnected",
+                font=default_font_bold,
                 text_color="white",
                 bg_color="transparent"
             )
