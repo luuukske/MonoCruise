@@ -411,7 +411,11 @@ def cmd_print(text, color=CMD_COLOR, display_duration=10):
         background_color = "#202020"   # color to fade into (usually matching the background)
 
         # Immediately update the label with the new text and reset its text color.
-        cmd_label.after(0, lambda: cmd_label.configure(text=txt, text_color=original_color))
+        #cmd_label.after(0, lambda: cmd_label.configure(text=txt, text_color=original_color))
+        if exit_event.is_set():
+            return
+        
+        cmd_label.configure(text=txt, text_color=original_color)
 
         # Wait for 10 seconds while the text is fully visible.
         # Instead of one long sleep, we check in small intervals if the fade should be canceled.
@@ -451,11 +455,9 @@ def connect_joystick():
                 positions[axis] = -1
             elif joystick.get_axis(axis) >= -0.5:
                 positions[axis] = 0
-            print(f"Default position for axis {axis} in device {joystick.get_name()}: {joystick.get_axis(axis)}")
-        print(positions)
         return positions
 
-    def check_axis_inversion(joystick, axis, default_position, current_position, threshold=0.1):
+    def check_axis_inversion(joystick, axis, default_position, current_position, threshold=0.5):
         """
         Check if an axis is inverted based on movement direction
         Returns True if inverted, False if normal
@@ -517,10 +519,13 @@ def connect_joystick():
             for event in pygame.event.get():
                 if event.type == pygame.JOYDEVICEADDED:
                     try:
+                        time.sleep(0.1)
                         joy = pygame.joystick.Joystick(event.device_index)
                     except Exception as e:
+                        pygame.quit()
                         cmd_print("Failed to initialize joystick", "#FF2020", 30)
                         pygame.init()
+                        pygame.joystick.init()
                         continue
                     joysticks[joy.get_instance_id()] = joy
                     
@@ -935,7 +940,6 @@ def log_error(error, context=None):
 
 def is_process_running(process_name):
     try:
-        import psutil
         i=0
         # Iterate through all running processes
         for proc in psutil.process_iter(['name']):
@@ -964,7 +968,8 @@ def is_process_running(process_name):
 def sdk_check_thread():
     global autostart_variable
     global root
-    if autostart_variable:
+    global device_lost
+    if autostart_variable and not device_lost:
         root.iconify()
     """Background thread to check for ETS2 SDK connection"""
     time.sleep(0.2)
@@ -1109,6 +1114,7 @@ def main():
         
         brakeval = 0
         gasval = 0
+        speed = 0
         prev_speed = 0
         opdgasval = 0
         opdbrakeval = 0
@@ -1118,6 +1124,7 @@ def main():
         gas_output = 0
         brake_output = 0
         arrived = False
+        iconified = False
         stopped = False
         horn = False
         em_stop = False
@@ -1140,7 +1147,8 @@ def main():
         img_copy = ctk.CTkImage(pil_copy.resize((new_width, new_height), Image.LANCZOS), size=(new_width, new_height))
 
 
-        while 1:
+        while not exit_event.is_set():
+            timestamp = time.time()
 
             # save variables to the file
             save_variables(os.path.join(os.path.dirname(os.path.abspath(__file__)), "saves.json"),
@@ -1182,14 +1190,26 @@ def main():
             """
 
             if exit_event.is_set():
-                break
-
-            timestamp = time.time()
+                print("Mainloop exited, cleaning up...")
+                return
 
             latency = timestamp - latency_timestamp
             latency_timestamp = timestamp
 
             latency_multiplier = (latency / 0.015) * 2
+
+            # make the program run at the input polling rate
+            try:
+                polling_rate.set(max(10, min(100, polling_rate.get())))
+                time.sleep(max(0.005, 1/polling_rate.get() - (time.time()-timestamp))) # 0.005 min is for stability
+            except:
+                cmd_print("unreliable input values!")
+
+            timestamp = time.time()
+
+            if exit_event.is_set():
+                print("Mainloop exited, cleaning up...")
+                return
 
             # get app settings
             hazards_variable_var = hazards_variable.get()
@@ -1198,16 +1218,21 @@ def main():
             airhorn_variable_var = airhorn_variable.get()
 
             # get input if pygame is initialized
-            if pygame.get_init() and not pauze_pedal_detection:
+            if pygame.get_init() and not pauze_pedal_detection and not exit_event.is_set():
                 for event in pygame.event.get():
-                    if event.type == pygame.JOYDEVICEREMOVED: # in developmentn, this event is triggered when the joystick is disconnected
+                    if event.type == pygame.JOYDEVICEREMOVED: # in development, this event is triggered when the joystick is disconnected
                         if event.instance_id == device_instance_id:
                             cmd_print("Your pedals disconnected", "#FF2020", 15)
                             # Handle the disconnection for your specific device
                             device_lost = True
                             device.quit()
                             device = None
-                            connected_joystick_label.configure(text="None connected")
+                            #maximize root
+                            root.deiconify()
+                            root.focus_force()
+                            root.lift()
+                            root.attributes('-topmost', True)
+                            root.attributes('-topmost', False)
                             
                     elif event.type == pygame.JOYDEVICEADDED:
                         # Optionally handle reconnection
@@ -1216,14 +1241,23 @@ def main():
                             i = 0
                             cmd_print("reconnecting to pedals", display_duration=63)
                             time.sleep(5)
-                            while 1:
+                            while not exit_event.is_set():
                                 try:
                                     recovered = deserialize_joystick(_data_cache["device"])
-                                    recovered.init()
-                                    device_instance_id = recovered.get_instance_id()
-                                    device = recovered
-                                    device.init()
-                                    break
+                                    if recovered is not None:
+                                        recovered.init()
+                                        device_instance_id = recovered.get_instance_id()
+                                        device = recovered
+                                        device.init()
+                                        break
+                                    else:
+                                        cmd_print("Failed to reconnect to pedals, reconfigure please", "#FF2020", 30)
+                                        device_lost = False
+                                        device = None
+                                        connected_joystick_label.configure(text="None connected")
+                                        gasaxis = 0
+                                        brakeaxis = 0
+                                        break
                                 except Exception as e:
                                     print(f"Error reinitializing device: {e}")
                                     time.sleep(0.2)
@@ -1234,10 +1268,14 @@ def main():
                                         device = None
                                         connected_joystick_label.configure(text="None connected")
                                         break
+                            if exit_event.is_set():
+                                print("Mainloop exited, cleaning up...")
+                                return
+                            
                             if device is None:
                                 continue
                             device.quit()
-                            time.sleep(3) # a reinitialization is required to avoid inconsistent behavior
+                            time.sleep(4) # a reinitialization is required to avoid inconsistent behavior
                             try:
                                 device.init()
                                 cmd_print("succesfully reconnected")
@@ -1250,7 +1288,8 @@ def main():
                                     connected_joystick_label.configure(text=f"{device.get_name()[:20]}...")
                                 else:
                                     connected_joystick_label.configure(text=f"{device.get_name()}")
-                            reset_operational_variables()  # Reset all operational variables
+
+                                reset_operational_variables()  # Reset all operational variables
                     if event.type == pygame.JOYAXISMOTION and device is not None:
                         try:
                             if brake_inverted:
@@ -1280,8 +1319,9 @@ def main():
                 else:
                     send(0, 1, controller)
                 #activate hazards and horn if they are not already 
-                setattr(controller, "wipers4", True)
-                setattr(controller, "wipers3", True)
+                if speed > 0.1:
+                    setattr(controller, "wipers4", True)
+                    setattr(controller, "wipers3", True)
 
                 try:
                     if data["lightsHazards"] == False and not hazards_prompted:
@@ -1296,7 +1336,7 @@ def main():
                 live_visualization_frame.image = img_copy
 
                 time.sleep(0.2)
-                if data is not None:
+                if data is not None or speed > 0.1:
                     setattr(controller, "steering", float(-data["gameSteer"]))
                 else:
                     setattr(controller, "steering", 0.0)
@@ -1324,6 +1364,8 @@ def main():
             except:
                 ets2_detected.clear()
                 continue
+
+            pauzed = data['paused']
 
             slope = data['rotationY']
 
@@ -1411,7 +1453,7 @@ def main():
             if debug_mode.get() == True:
                 print(f"gasvalue: {round(opdgasval,3)} \tbrakevalue: {round(opdbrakeval,3)} \tspeed: {round(speed,3)} \tstopped: {stopped} \tgasval: {round(gasval,3)} \tbrakeval: {round(brakeval,3)} \tdiff: {round(prev_brakeval-brakeval,3)} \tdiff2: {round(prev_speed-speed,3)} \thazards: {data['lightsHazards']} \thazards_var: {hazards_variable_var} \thazards_prompted: {hazards_prompted}")
             
-            if (prev_brakeval-brakeval <= -0.07*latency_multiplier or brakeval >= 0.8) and stopped == False and speed > 10 and arrived == False:
+            if ((prev_brakeval-brakeval <= -0.07*latency_multiplier or brakeval >= 0.8 or data["parkBrake"]) and stopped == False and speed > 10 and arrived == False and not pauzed):
                 stopped = True
                 em_stop = True
                 send(0,1, controller)
@@ -1419,10 +1461,9 @@ def main():
                 if prev_brakeval-brakeval <= -0.15*latency_multiplier and speed > 40:
                     horn = True
                     cmd_print("#####HONKING!#####", "#FF2020", 3)
-            elif prev_speed-speed >= 5 and arrived == False:
+            elif prev_speed-speed >= 5 and arrived == False and not pauzed:
                 setattr(controller, "accmode", False)
                 stopped = True
-                em_stop = True
                 send(0,1, controller)
                 cmd_print("#####crash#####", "#FF2020", 10)
                 if data["lightsHazards"] == False and hazards_variable_var == True:
@@ -1445,7 +1486,7 @@ def main():
                     setattr(controller, "wipers3", True)
                 time.sleep(0.1)
                 setattr(controller, "accmode", False)
-                while (brakeval > 0.8 or prev_brakeval-brakeval <= -0.03*latency_multiplier):
+                while (brakeval > 0.8 or prev_brakeval-brakeval <= -0.03*latency_multiplier or data["parkBrake"]) and not exit_event.is_set():
                     if prev_brakeval-brakeval <= -0.15*latency_multiplier and horn == False:
                         cmd_print("#####/HONKING!\#####", "#FF2020", 3)
                         horn = True
@@ -1555,21 +1596,14 @@ def main():
 
 
 
-            # make the program run at the input polling rate
-            try:
-                polling_rate.set(max(10, min(100, polling_rate.get())))
-                time.sleep(max(0.005, 1/polling_rate.get() - (time.time()-timestamp))) # 0.005 min is for stability
-            except:
-                if not exit_event.is_set():
-                    cmd_print("unreliable input values!")
-                    
+        print("Main loop exited, cleaning up...")
+        return
     except Exception as e:
         context = get_error_context()
         log_error(e, context)
-        raise
-    finally:
         exit_event.set()
-        pygame.quit()
+        raise e  # Re-raise the exception to be caught by the main thread
+    return
 
 def game_thread():
     cmd_print("Game thread starting...")
@@ -1578,14 +1612,11 @@ def game_thread():
         ui_ready.wait()
         cmd_print("UI is ready, game logic starting...")
         main()
+        print("Game thread finished execution.")
     except Exception as e:
         context = get_error_context()
         log_error(e, context)
-    finally:
-        # Signal exit even if there was an exception
         exit_event.set()
-        if pygame.get_init():
-            pygame.quit()
 
 class AnimatedBar:
     def __init__(self, root):
@@ -1597,18 +1628,14 @@ class AnimatedBar:
         
         # Remove window decorations and force window always on top.
         self.root.overrideredirect(True)
-        def keep_on_top():
-            if exit_event.is_set() or close_bar_event.is_set():
-                return
-            root.lift()
-            root.attributes('-topmost', True)
-            root.after(2000, keep_on_top)  # Check every 2 seconds
-
-        keep_on_top()
         
         # Set the window background (and canvas background) to the transparent key color.
         self.root.config(bg=self.transparent_color)
         self.root.wm_attributes("-transparentcolor", self.transparent_color)
+        self.root.wm_attributes("-toolwindow", True)
+        self.root.wm_attributes("-topmost", True)  # Keep the window on top
+        self.root.wm_attributes("-disabled", False)  # Disable user interaction
+        self.root.wm_attributes("-alpha", 0.9) # Set the window transparency to 80%
         
         # Get screen dimensions.
         self.screen_width = self.root.winfo_screenwidth()
@@ -1661,6 +1688,9 @@ class AnimatedBar:
         if exit_event.is_set() or close_bar_event.is_set():
             self.root.destroy()
             return
+    
+        
+        self.root.lift()
 
         temp_gasval = (gas_output+self.temp_gasval*10)/11
         temp_brakeval = (brake_output+self.temp_brakeval*10)/11
@@ -1715,13 +1745,15 @@ def reset_operational_variables():
     Resets all operational variables to their initial state after device reconnection.
     This prevents issues with stale data from before the disconnection.
     """
-    global prev_brakeval, prev_speed, opdgasval, opdbrakeval, gas_output, brake_output
+    global prev_brakeval, prev_speed, speed, opdgasval, opdbrakeval, gas_output, brake_output
     global prev_opdbrakeval, arrived, stopped, horn, em_stop, latency_timestamp
-    global latency, hazards_prompted, offset, prev_stop, gasval, brakeval
+    global latency, hazards_prompted, offset, prev_stop, gasval, brakeval, bar_val
     
     # Reset brake and speed tracking variables
     prev_brakeval = 0
     prev_speed = 0
+    speed = 0
+    prev_opdbrakeval = 0
     
     # Reset pedal values
     brakeval = 0
@@ -1733,6 +1765,7 @@ def reset_operational_variables():
     gas_output = 0
     brake_output = 0
     prev_opdbrakeval = 0
+    bar_val = 0
     
     # Reset game state variables
     arrived = False
@@ -2039,7 +2072,10 @@ try:
             
             close_bar_event.set()
             if bar_thread is not None:
-                bar_thread.join()
+                bar_thread.join(timeout=2)
+                if bar_thread.is_alive():
+                    raise RuntimeError("Failed to close the bar thread gracefully.")
+                    
                 bar_thread = None
 
     bar_variable = ctk.BooleanVar(value=True)
@@ -2477,13 +2513,15 @@ try:
         cmd_print("UI closing, cleaning up threads...")
 
         # Stop the dots animation if it's still running
-        if dots_anim and dots_anim.is_playing:
+        if dots_anim.is_playing: # and dots_anim (testing)
             dots_anim.stop()
         # Set the exit event to stop all threads
         exit_event.set()
+
+        time.sleep(0.1) # Give threads time to finish
+
         # Clean up pygame
-        if pygame.get_init():
-            pygame.quit()
+        pygame.quit()
 
         if ets2_detected.is_set():
             send(0,0, controller)
@@ -2580,12 +2618,30 @@ try:
     
     # When mainloop exits, set exit event
     exit_event.set()
-    cmd_print("Mainloop exited, cleaning up...")
     
     # Clean up pygame
     if pygame.get_init():
         pygame.quit()
 
+    print("Cleaning up threads...")
+
+    # join all threads to ensure they are cleaned up
+    if thread_game is not None and thread_game.is_alive():
+        print("Joining game thread...")
+        thread_game.join(timeout=1)  # Ensure the game thread is cleaned up
+        if thread_game.is_alive():
+            print("Game thread did not finish in time, forcing exit.")
+        else:
+            print("Game thread joined.")
+        thread_game = None
+    if bar_thread is not None and bar_thread.is_alive():
+        print("Joining bar thread...")
+        bar_thread.join(timeout=1)  # Ensure the bar thread is cleaned up
+    if dots_anim.is_playing:
+        dots_anim.stop()
+    if bar_thread is not None and bar_thread.is_alive():
+        bar_thread.join(timeout=1)  # Ensure the bar thread is cleaned up
+    # Close the controller
     controller.close()
         
     sys.exit(0)
