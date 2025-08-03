@@ -1,6 +1,4 @@
-from cgitb import text
 import threading
-from charset_normalizer import detect
 import customtkinter as ctk
 import tkinter as tk
 # Create the main window
