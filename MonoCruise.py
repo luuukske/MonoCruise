@@ -1,4 +1,6 @@
+from cgitb import text
 import threading
+from charset_normalizer import detect
 import customtkinter as ctk
 import tkinter as tk
 # Create the main window
@@ -11,6 +13,7 @@ import os
 import pygame
 import json
 import time
+import keyboard
 import numpy as np
 import traceback
 import inspect
@@ -79,15 +82,18 @@ ctk.set_default_color_theme("blue")
 
 # Global event for thread control
 exit_event = threading.Event()
+close_buttons_threads = threading.Event()  # Event to signal button threads to close
 close_bar_event = threading.Event()
 ets2_detected = threading.Event()  # Event for ETS2 detection
 ui_ready = threading.Event()       # Event to signal UI is ready
 
 # Banner colors
 WAITING_COLOR = "#1f538d"  # Blue
+KEY_ON_COLOR = "#1f53FF"  # lighter blue
 CONNECTED_COLOR = "#304230"  # Light grey
 LOST_COLOR = "#FF0000"  # Red
 DEFAULT_COLOR = "#2B2B2B"  # Dark grey
+VAR_LABEL_COLOR = "#2E2E2E"  # White
 SETTINGS_COLOR = "#454545"  # Dark grey
 DISABLED_COLOR = "#404040"  # Dark grey
 CMD_COLOR = "#808080"  # Light grey
@@ -189,6 +195,29 @@ def remove_from_startup(app_name: str):
     except Exception as e:
         print(f"Failed to remove from startup: {e}")
 
+def refresh_button_labels():
+    global device
+    global cc_dec_button
+    global cc_inc_button
+    global cc_start_button
+    global cc_start_label
+    global cc_inc_label
+    global cc_dec_label
+
+    if device is not None and device.get_init():
+        if cc_start_button is not None:
+            cc_dec_label.configure(text=format_button_text(cc_dec_button))
+        else:
+            cc_dec_label.configure(text="None")
+        if cc_inc_button is not None:
+            cc_inc_label.configure(text=format_button_text(cc_inc_button))
+        else:
+            cc_inc_label.configure(text="None")
+        if cc_start_button is not None:
+            cc_start_label.configure(text=format_button_text(cc_start_button))
+        else:
+            cc_start_label.configure(text="None")
+
 def check_wheel_connected():
     global device, recovered
 
@@ -218,6 +247,7 @@ def check_wheel_connected():
                 device = recovered
                 device.init()
                 device.get_instance_id()
+                refresh_button_labels()
                 return True
             except:
                 return False
@@ -345,7 +375,6 @@ def check_and_start_exe():
             _running_process = None
             remove_from_startup("ETS2_checker_MonoCruise")
     
-
 def save_variables(filename, **kwargs):
     """
     Saves given variables to a JSON file while preserving any existing values.
@@ -389,7 +418,6 @@ def save_variables(filename, **kwargs):
             new_autostart = merged_data.get("autostart_variable")
             if old_autostart != new_autostart:
                 check_and_start_exe()
-
 
 def cmd_print(text, color=CMD_COLOR, display_duration=10):
     global current_fade_id, cmd_label
@@ -444,7 +472,253 @@ def cmd_print(text, color=CMD_COLOR, display_duration=10):
         cmd_label.after(0, lambda: cmd_label.configure(text=""))
 
     # Start the fade routine in a daemon thread so that it doesn't block your main thread.
-    threading.Thread(target=fade_and_clear, args=(local_fade_id, text), daemon=True).start()
+    threading.Thread(target=fade_and_clear, args=(local_fade_id, text), daemon=True, name="fade cmd_print()").start()
+
+def get_button(button):
+    """
+    Returns the current state/value of the button stored in button index.
+    For regular buttons: returns True if pressed, False if released.
+    For hat directions: returns True if hat is in that direction, False otherwise.
+    
+    Returns:
+        bool or None: Current state of the button at button index, or None if button is None or device unavailable
+    """
+    global device
+    
+    if isinstance(button, str):
+        return keyboard.is_pressed(button)
+    
+    if button is None or device is None or not device.get_init() or device_lost:
+        return None
+    
+    button_count = device.get_numbuttons()
+    
+    # Regular button
+    if button < button_count:
+        return device.get_button(button)
+    
+    # Hat direction - convert back to hat index and direction
+    hat_button_index = button - button_count
+    hat_index = hat_button_index // 4
+    direction_index = hat_button_index % 4
+    
+    if hat_index >= device.get_numhats():
+        return None
+    
+    hat_x, hat_y = device.get_hat(hat_index)
+    
+    # Check if hat is currently in the direction that button represents
+    if direction_index == 0:    # Up
+        return hat_y == 1
+    elif direction_index == 1:  # Right
+        return hat_x == 1
+    elif direction_index == 2:  # Down
+        return hat_y == -1
+    elif direction_index == 3:  # Left
+        return hat_x == -1
+    
+    return False
+
+def detect_joystick_movement(button_type="None given"):
+    """
+    Detects any movement (state changes) on the global joystick device or keyboard presses.
+    Triggers on button presses (0 -> 1) AND releases (1 -> 0).
+    Triggers on any hat position changes.
+    Triggers on keyboard key presses (character keys only, no function keys).
+    Regular buttons are indexed normally (0, 1, 2, etc.)
+    Hat directions are mapped as:
+    - Hat Up: button_count + (hat_index * 4) + 0
+    - Hat Right: button_count + (hat_index * 4) + 1  
+    - Hat Down: button_count + (hat_index * 4) + 2
+    - Hat Left: button_count + (hat_index * 4) + 3
+    
+    Keyboard keys are stored as their Keyboard name capitalized.
+    
+    Updates global variable given as input with the detected input.
+    """
+    global device
+    global close_buttons_threads
+    global unassign
+    global exit_event
+    global device_lost
+    global SETTINGS_COLOR
+    
+    button = None  # Reset variable to None at the start
+    input_type = None  # Track whether input was joystick or keyboard
+    input_value = None  # Store the actual input (button index, hat direction, or key)
+    _prev_button_states = []
+    _prev_hat_states = []
+    key_pressed = threading.Event()
+    detected_key = None
+
+    global unassign_button
+    global cc_start_label
+    global cc_inc_label
+    global cc_dec_label
+    global cc_start_button
+    global cc_inc_button
+    global cc_dec_button
+
+    if button_type == "start":
+        cc_start_label.configure(border_color="green")
+        cmd_print("Waiting for start button press...")
+    elif button_type == "inc":
+        cc_inc_label.configure(border_color="green")
+        cmd_print("Waiting for increase button press...")
+    elif button_type == "dec":
+        cc_dec_label.configure(border_color="green")
+        cmd_print("Waiting for decrease button press...")
+    else:
+        raise ValueError(f"Unknown button type: {button_type}")
+
+    def on_key_press(event):
+        nonlocal detected_key, key_pressed, button_type
+        button = event.name.capitalize()  # Get the key name in capitalized format
+        detected_key = button  # Store the detected key
+        if check_key(button, button_type):
+            key_pressed.set()
+
+    def check_key(button, button_type):
+        global cc_start_button, cc_inc_button, cc_dec_button
+        if (button_type == "start" and (cc_inc_button == button or cc_dec_button == button)) or \
+            (button_type == "inc" and (cc_start_button == button or cc_dec_button == button)) or \
+            (button_type == "dec" and (cc_start_button == button or cc_inc_button == button)):
+            cmd_print(f'"{button}" button cannot be used twice.', "#FF2020", 10)
+            return False
+        else:
+            return True
+    # Set up keyboard listener
+    keyboard.on_press(on_key_press)
+
+    while button is None:
+        
+        if device is None or not device.get_init() or exit_event.is_set() or close_buttons_threads.is_set() or device_lost:
+            break
+            
+        if unassign:
+            break
+        
+        # Check for keyboard input
+        if key_pressed.is_set():
+            button = detected_key  # Use hash to create unique button number
+            input_type = "key"
+            input_value = button
+            break
+        
+        # Check joystick input (existing logic) - only if device exists
+        if device is not None and device.get_init():
+            try:
+                button_count = device.get_numbuttons()
+                hat_count = device.get_numhats()
+            except Exception as e:
+                break
+            
+            # Initialize previous states if needed
+            if len(_prev_button_states) != button_count:
+                _prev_button_states = [False] * button_count
+            if len(_prev_hat_states) != hat_count:
+                _prev_hat_states = [(0, 0)] * hat_count
+            
+            # Check for button state changes (any change: 0 -> 1 or 1 -> 0)
+            for i in range(button_count):
+                try:
+                    current_state = device.get_button(i)
+                    if current_state != _prev_button_states[i]:  # Any state change
+                        if check_key(i, button_type):
+                            button = i
+                            input_type = "button"
+                            input_value = i
+                            _prev_button_states[i] = current_state
+                            break
+                except Exception as e:
+                    break
+            
+            if button is not None:
+                break
+            
+            # Check for hat state changes
+            for hat_index in range(hat_count):
+                try:
+                    current_hat = device.get_hat(hat_index)
+                    prev_hat = _prev_hat_states[hat_index]
+                    
+                    if current_hat != prev_hat:  # Hat position changed
+                        hat_x, hat_y = current_hat
+                        hat_button_base = button_count + (hat_index * 4)
+                        
+                        # Trigger on any movement TO a direction (including from center)
+                        # For hat movement, we report the new position being moved to
+                        if hat_y == 1:  # Moved to Up
+                            temp_button = hat_button_base + 0
+                            if check_key(temp_button, button_type):
+                                button = temp_button
+                                input_type = "hat"
+                                input_value = "up"
+                        elif hat_x == 1:  # Moved to Right
+                            temp_button = hat_button_base + 1
+                            if check_key(temp_button, button_type):
+                                button = temp_button
+                                input_type = "hat"
+                                input_value = "right"
+                        elif hat_y == -1:  # Moved to Down
+                            temp_button = hat_button_base + 2
+                            if check_key(temp_button, button_type):
+                                button = temp_button
+                                input_type = "hat"
+                                input_value = "down"
+                        elif hat_x == -1:  # Moved to Left
+                            temp_button = hat_button_base + 3
+                            if check_key(temp_button, button_type):
+                                button = temp_button
+                                input_type = "hat"
+                                input_value = "left"
+                        
+                        _prev_hat_states[hat_index] = current_hat
+                except Exception as e:
+                    break
+
+            time.sleep(0.01)  # Reduced sleep time for better responsiveness
+
+    # Clean up keyboard listener
+    keyboard.unhook_all()
+
+    unassign = False
+
+    if device is None or not device.get_init() or exit_event.is_set() or close_buttons_threads.is_set() or device_lost:
+        try:
+            unassign_button.configure(state="disabled")
+        except:
+            pass
+        return
+
+
+    # Format the display text based on input type
+    if input_type == "key" and len(input_value) == 1:
+        display_text = f"key {input_value.capitalize()}"
+    elif input_type == "key":
+        display_text = f"{input_value.capitalize()}"
+    elif input_type == "button":
+        display_text = f"button {int(input_value)}"
+    elif input_type == "hat":
+        display_text = f"hat {input_value}"
+    else:
+        display_text = "None"
+
+
+    if button_type == "start":
+        cc_start_button = button
+        cc_start_label.configure(border_color=SETTINGS_COLOR, text=display_text)
+    elif button_type == "inc":
+        cc_inc_button = button
+        cc_inc_label.configure(border_color=SETTINGS_COLOR, text=display_text)
+    elif button_type == "dec":
+        cc_dec_button = button
+        cc_dec_label.configure(border_color=SETTINGS_COLOR, text=display_text)
+    else:
+        raise ValueError(f"Unknown button type: {button_type}")
+    
+    unassign_button.configure(state="disabled")
+    return
 
 def connect_joystick():
     def capture_default_positions(joystick):
@@ -734,7 +1008,6 @@ def plot_onepedaldrive(return_result=False):
     if return_result:
         return img_pil, to_img_coords
 
-
 def overlay_dot_layer(x_value,
                       new_width=600,
                       new_height=600,
@@ -857,6 +1130,7 @@ def send(a, b, controller):
  
     setattr(controller, "aforward", float(a))
     setattr(controller, "abackward", float(b))
+
 def get_error_context():
     """Get detailed context about where an error occurred"""
     frame = inspect.currentframe().f_back
@@ -882,6 +1156,71 @@ def get_error_context():
         return context
     except Exception as e:
         return {'error': f"Failed to get error context: {str(e)}"}
+
+def format_button_text(button_index):
+    """
+    Formats the display text for a button based on its index.
+    
+    Args:
+        button_index: The button index as stored by detect_joystick_movement()
+                     - Keyboard keys: 10000 + hash(key_name) (e.g., 10000+, stored with key name)
+                     - Joystick buttons: 0, 1, 2, etc.
+                     - Hat directions: button_count + (hat_index * 4) + direction_offset
+    
+    Returns:
+        str: Formatted text in the format "type value"
+             - Keys: "key a", "key space", etc.
+             - Buttons: "button 0", "button 1", etc.
+             - Hats: "hat up", "hat right", etc.
+    """
+    global device
+    
+    if button_index is None:
+        return "None"
+    
+    # Check if it's a keyboard key (10000+ range)
+    if isinstance(button_index, str) :
+        # For keyboard keys, we need to store the key name separately
+        # This is a limitation - we'll need to modify the storage system
+        # For now, return a generic keyboard indicator
+        if len(button_index) == 1:
+            return f"key {button_index}"
+        else:
+            return str(button_index)
+    
+    # If we have a joystick device, check if it's a hat or regular button
+    if device is not None and device.get_init():
+        try:
+            button_count = device.get_numbuttons()
+            
+            # If the index is within regular button range
+            if button_index < button_count:
+                return f"button {button_index}"
+            
+            # If the index is beyond regular buttons, it's a hat direction
+            elif button_index >= button_count:
+                hat_count = device.get_numhats()
+                if hat_count > 0:
+                    # Calculate which hat and direction
+                    hat_offset = button_index - button_count
+                    hat_index = hat_offset // 4
+                    direction_offset = hat_offset % 4
+                    
+                    # Make sure this is a valid hat index
+                    if hat_index < hat_count:
+                        directions = ["up", "right", "down", "left"]
+                        direction = directions[direction_offset]
+                        return f"hat {direction}"
+            
+        except Exception as e:
+            print(f"Error formatting button text: {e}")
+    
+    # Fallback for when device is not available or index doesn't match expected patterns
+    # Assume it's a regular button if it's a small number
+    if button_index < 100:  # Arbitrary threshold for likely button indices
+        return f"button {button_index}"
+    else:
+        return f"Unknown input ({button_index})"
 
 def log_error(error, context=None):
     """Log detailed error information and append to a log file"""
@@ -961,9 +1300,6 @@ def is_process_running(process_name):
     except ImportError:
         # If psutil is not available, return False
         return False
-
-
-
 
 def sdk_check_thread():
     global autostart_variable
@@ -1062,6 +1398,7 @@ def main():
     global data
     global img
     global to_img_coords
+    global img_copy
     global gas_exponent_variable
     global brake_exponent_variable
     global max_opd_brake_variable
@@ -1076,10 +1413,16 @@ def main():
     global brakeval
     global gasval
     global total_weight_tons
+    global cc_dec_label
+    global cc_inc_label
+    global cc_start_label
+    global cc_dec
+    global cc_inc
+    global cc_start
     # Initialize pygame for joystick handling
     
     # Start SDK check thread
-    sdk_thread = threading.Thread(target=sdk_check_thread, daemon=True)
+    sdk_thread = threading.Thread(target=sdk_check_thread, daemon=True, name="SDK Check Thread")
     sdk_thread.start()
     
     try:
@@ -1088,22 +1431,25 @@ def main():
                 break
             time.sleep(0.5)
             save_variables(os.path.join(os.path.dirname(os.path.abspath(__file__)), "saves.json"),
-                           bar_variable = bar_variable.get(),
-                           gas_exponent_variable = gas_exponent_variable.get(),
-                           brake_exponent_variable = brake_exponent_variable.get(),
-                           max_opd_brake_variable = max_opd_brake_variable.get(),
-                           offset_variable = offset_variable.get(),
-                           gasaxis = gasaxis,
-                           brakeaxis  =  brakeaxis,
-                           polling_rate = polling_rate.get(),
-                           opd_mode_variable = opd_mode_variable.get(),
-                           hazards_variable = hazards_variable.get(),
-                           autodisable_hazards = autodisable_hazards.get(),
-                           horn_variable = horn_variable.get(),
-                           airhorn_variable = airhorn_variable.get(),
-                           autostart_variable = autostart_variable.get(),
-                           weight_adjustment = weight_adjustment.get()
-                           )
+                            bar_variable = bar_variable.get(),
+                            gas_exponent_variable = gas_exponent_variable.get(),
+                            brake_exponent_variable = brake_exponent_variable.get(),
+                            max_opd_brake_variable = max_opd_brake_variable.get(),
+                            offset_variable = offset_variable.get(),
+                            gasaxis = gasaxis,
+                            brakeaxis  =  brakeaxis,
+                            polling_rate = polling_rate.get(),
+                            opd_mode_variable = opd_mode_variable.get(),
+                            hazards_variable = hazards_variable.get(),
+                            autodisable_hazards = autodisable_hazards.get(),
+                            horn_variable = horn_variable.get(),
+                            airhorn_variable = airhorn_variable.get(),
+                            autostart_variable = autostart_variable.get(),
+                            weight_adjustment = weight_adjustment.get(),
+                            cc_dec_button = cc_dec_button,
+                            cc_inc_button = cc_inc_button,
+                            cc_start_button = cc_start_button
+                            )
 
         if exit_event.is_set():
             return
@@ -1116,6 +1462,11 @@ def main():
         gasval = 0
         speed = 0
         prev_speed = 0
+        gear = 0
+        data = {}
+        cc_start = False
+        cc_dec = False
+        cc_inc = False
         opdgasval = 0
         opdbrakeval = 0
         gas_output = 0
@@ -1124,7 +1475,6 @@ def main():
         gas_output = 0
         brake_output = 0
         arrived = False
-        iconified = False
         stopped = False
         horn = False
         em_stop = False
@@ -1146,30 +1496,35 @@ def main():
         new_height = 200
         img_copy = ctk.CTkImage(pil_copy.resize((new_width, new_height), Image.LANCZOS), size=(new_width, new_height))
 
+        refresh_button_labels()
+
 
         while not exit_event.is_set():
             timestamp = time.time()
 
             # save variables to the file
             save_variables(os.path.join(os.path.dirname(os.path.abspath(__file__)), "saves.json"),
-                           bar_variable = bar_variable.get(),
-                           gas_exponent_variable = gas_exponent_variable.get(),
-                           brake_exponent_variable = brake_exponent_variable.get(),
-                           max_opd_brake_variable = max_opd_brake_variable.get(),
-                           offset_variable = offset_variable.get(),
-                           gasaxis = gasaxis,
-                           brakeaxis  =  brakeaxis,
-                           gas_inverted = gas_inverted,
-                           brake_inverted = brake_inverted,
-                           polling_rate = polling_rate.get(),
-                           opd_mode_variable = opd_mode_variable.get(),
-                           hazards_variable = hazards_variable.get(),
-                           autodisable_hazards = autodisable_hazards.get(),
-                           horn_variable = horn_variable.get(),
-                           airhorn_variable = airhorn_variable.get(),
-                           autostart_variable = autostart_variable.get(),
-                           weight_adjustment = weight_adjustment.get()
-                           )
+                            bar_variable = bar_variable.get(),
+                            gas_exponent_variable = gas_exponent_variable.get(),
+                            brake_exponent_variable = brake_exponent_variable.get(),
+                            max_opd_brake_variable = max_opd_brake_variable.get(),
+                            offset_variable = offset_variable.get(),
+                            gasaxis = gasaxis,
+                            brakeaxis  =  brakeaxis,
+                            gas_inverted = gas_inverted,
+                            brake_inverted = brake_inverted,
+                            polling_rate = polling_rate.get(),
+                            opd_mode_variable = opd_mode_variable.get(),
+                            hazards_variable = hazards_variable.get(),
+                            autodisable_hazards = autodisable_hazards.get(),
+                            horn_variable = horn_variable.get(),
+                            airhorn_variable = airhorn_variable.get(),
+                            autostart_variable = autostart_variable.get(),
+                            weight_adjustment = weight_adjustment.get(),
+                            cc_dec_button = cc_dec_button,
+                            cc_inc_button = cc_inc_button,
+                            cc_start_button = cc_start_button
+                            )
 
             if offset_variable.get() == 0:
                 opd_mode_variable.set(False)
@@ -1217,6 +1572,33 @@ def main():
             horn_variable_var = horn_variable.get()
             airhorn_variable_var = airhorn_variable.get()
 
+            if buttons_thread is None or not buttons_thread.is_alive():
+                cc_dec = get_button(cc_dec_button)
+                if cc_dec:
+                    if cc_dec_label.cget("border_color") != KEY_ON_COLOR:
+                        cc_dec_label.configure(border_color=KEY_ON_COLOR)
+                else:
+                    if cc_dec_label.cget("border_color") != SETTINGS_COLOR:
+                        cc_dec_label.configure(border_color=SETTINGS_COLOR)
+                cc_inc = get_button(cc_inc_button)
+                if cc_inc:
+                    if cc_inc_label.cget("border_color") != KEY_ON_COLOR:
+                        cc_inc_label.configure(border_color=KEY_ON_COLOR)
+                else:
+                    if cc_inc_label.cget("border_color") != SETTINGS_COLOR:
+                        cc_inc_label.configure(border_color=SETTINGS_COLOR)
+                cc_start = get_button(cc_start_button)
+                if cc_start:
+                    if cc_start_label.cget("border_color") != KEY_ON_COLOR:
+                        cc_start_label.configure(border_color=KEY_ON_COLOR)
+                else:
+                    if cc_start_label.cget("border_color") != SETTINGS_COLOR:
+                        cc_start_label.configure(border_color=SETTINGS_COLOR)
+            else:
+                cc_dec = False
+                cc_inc = False
+                cc_start = False
+
             # get input if pygame is initialized
             if pygame.get_init() and not pauze_pedal_detection and not exit_event.is_set():
                 for event in pygame.event.get():
@@ -1249,6 +1631,7 @@ def main():
                                         device_instance_id = recovered.get_instance_id()
                                         device = recovered
                                         device.init()
+                                        refresh_button_labels()
                                         break
                                     else:
                                         cmd_print("Failed to reconnect to pedals, reconfigure please", "#FF2020", 30)
@@ -1356,7 +1739,7 @@ def main():
                 brake_output = 0
                 live_visualization_frame.configure(image=img_copy)
                 live_visualization_frame.image = img_copy
-                time.sleep(0.5)
+                time.sleep(0.05)
                 continue
 
             try:
@@ -1806,13 +2189,19 @@ global bar_val
 global debug_mode
 global data
 global pauze_pedal_detection
+global cc_start_button
+global cc_inc_button
+global cc_dec_button
+global unassign
 
 data = None
 cmd_label = None
 device = None
+buttons_thread = None
 device_instance_id = 0
 device_lost = False
 pauze_pedal_detection = False
+unassign = False
 global controller
 global connected_joystick_label
 
@@ -1829,14 +2218,32 @@ try:
     # load from save file
     try:
         gasaxis = _data_cache["gasaxis"]
-        brakeaxis = _data_cache["brakeaxis"]
-        gas_inverted = _data_cache["gas_inverted"]
-        brake_inverted = _data_cache["brake_inverted"]
     except:
         gasaxis = 0
+    try:
+        brakeaxis = _data_cache["brakeaxis"]
+    except:
         brakeaxis = 0
+    try:
+        gas_inverted = _data_cache["gas_inverted"]
+    except:
         gas_inverted = False
+    try:
+        brake_inverted = _data_cache["brake_inverted"]
+    except:
         brake_inverted = False
+    try:
+        cc_start_button = _data_cache["cc_start_button"]
+    except:
+        cc_start_button = None
+    try:
+        cc_inc_button = _data_cache["cc_inc_button"]
+    except:
+        cc_inc_button = None
+    try:
+        cc_dec_button = _data_cache["cc_dec_button"]
+    except:
+        cc_dec_button = None
 
     pygame.init()
     pygame.joystick.init()
@@ -1914,10 +2321,19 @@ try:
     def refresh_live_visualization():
         global img
         global to_img_coords
+        global img_copy
+        global live_visualization_frame
         img, to_img_coords = plot_onepedaldrive(return_result=True)
+        pil_copy = img.copy()
+        new_width = 200
+        new_height = 200
+        img_copy = ctk.CTkImage(pil_copy.resize((new_width, new_height), Image.LANCZOS), size=(new_width, new_height))
+        live_visualization_frame.configure(image=img_copy)
+        live_visualization_frame.image = img_copy
+
 
     def new_checkbutton(master, row, column, variable, command=None):
-        checkbutton = ctk.CTkCheckBox(master, text="", command=command, font=default_font, text_color="lightgrey", fg_color=SETTINGS_COLOR, corner_radius=5, variable=variable, checkbox_width=20, checkbox_height=20, width=24, height=24, border_color=SETTINGS_COLOR, border_width=1)
+        checkbutton = ctk.CTkCheckBox(master, text="", command=command, font=default_font, text_color="lightgrey", fg_color=SETTINGS_COLOR, corner_radius=5, variable=variable, checkbox_width=20, checkbox_height=20, width=24, height=24, border_color=SETTINGS_COLOR, border_width=1.5)
         checkbutton.grid(row=row, column=column, padx=5, pady=1, sticky="e")
         return checkbutton
 
@@ -1930,6 +2346,8 @@ try:
     def new_entry(master, row, column, textvariable, temp_textvariable, command=None, max_value=None, min_value=None):
         # Keep this variable accessible—can be a global or instance variable depending on context
         timer_id = None
+        def remove_focus(*args):
+            master.focus()
 
         def entry_wait(*args):
             nonlocal timer_id  # If inside a closure; or use global if defined globally
@@ -1938,14 +2356,16 @@ try:
                 try:
                     val = float(temp_textvariable.get())
                     if val < min_value:
-                        temp_textvariable.set(min_value)  # Revert to 10 if too low
+                        temp_textvariable.set(min_value)  # Revert to min if too low
                     elif val > max_value:
-                        temp_textvariable.set(max_value)  # Revert to 100 if too high
+                        temp_textvariable.set(max_value)  # Revert to max if too high
                     else:
                         textvariable.set(val)  # Apply value only if valid
                 except ValueError:
                     temp_textvariable.set(textvariable.get())  # Revert if input isn't a number
                 finally:
+                    remove_focus() # remove focus on entry field
+                    print("test")
                     if command is not None:
                         command()
 
@@ -1966,10 +2386,12 @@ try:
             fg_color=DEFAULT_COLOR,
             corner_radius=5,
             width=50,
-            border_width=1,
+            border_width=1.5,
             border_color=SETTINGS_COLOR
         )
         entry.grid(row=row, column=column, padx=10, pady=1, sticky="e")
+        entry.bind("<Return>", remove_focus)
+        entry.bind("<Escape>", remove_focus)
         
         return entry
 
@@ -1984,22 +2406,22 @@ try:
     connected_joystick_label = new_label(scrollable_frame, 1, 0, "Connected pedals:")
 
     try:
-        connected_joystick_label = ctk.CTkLabel(scrollable_frame, text=f"{device.get_name()[:20]}...", font=default_font, text_color="lightgrey", fg_color=DEFAULT_COLOR, corner_radius=5)
+        connected_joystick_label = ctk.CTkLabel(scrollable_frame, text=f"{device.get_name()[:20]}...", font=default_font, text_color="lightgrey", fg_color=VAR_LABEL_COLOR, corner_radius=5)
     except:
-        connected_joystick_label = ctk.CTkLabel(scrollable_frame, text="None connected", font=default_font, text_color="lightgrey", fg_color=DEFAULT_COLOR, corner_radius=5)
+        connected_joystick_label = ctk.CTkLabel(scrollable_frame, text="None connected", font=default_font, text_color="lightgrey", fg_color=VAR_LABEL_COLOR, corner_radius=5)
     connected_joystick_label.grid(row=1, column=1, padx=10, pady=1, sticky="e")
 
     connected_joystick_gas_axis_label = new_label(scrollable_frame, 2, 0, "Gas axis:")
 
-    connected_joystick_gas_axis_label = ctk.CTkLabel(scrollable_frame, text="None" if gasaxis is 0 and device is not 0 else f"axis {gasaxis}", font=default_font, text_color="lightgrey", fg_color=DEFAULT_COLOR, corner_radius=5)
+    connected_joystick_gas_axis_label = ctk.CTkLabel(scrollable_frame, text="None" if gasaxis is 0 and device is not 0 else f"axis {gasaxis}", font=default_font, text_color="lightgrey", fg_color=VAR_LABEL_COLOR, corner_radius=5)
     connected_joystick_gas_axis_label.grid(row=2, column=1, padx=10, pady=1, sticky="e")
 
     connected_joystick_brake_axis_label = new_label(scrollable_frame, 3, 0, "Brake axis:")
 
-    connected_joystick_brake_axis_label = ctk.CTkLabel(scrollable_frame, text="None" if brakeaxis is 0 and device is not 0 else f"axis {brakeaxis}", font=default_font, text_color="lightgrey", fg_color=DEFAULT_COLOR, corner_radius=5)
+    connected_joystick_brake_axis_label = ctk.CTkLabel(scrollable_frame, text="None" if brakeaxis is 0 and device is not 0 else f"axis {brakeaxis}", font=default_font, text_color="lightgrey", fg_color=VAR_LABEL_COLOR, corner_radius=5)
     connected_joystick_brake_axis_label.grid(row=3, column=1, padx=10, pady=1, sticky="e")
 
-    restart_connection_button = ctk.CTkButton(scrollable_frame, text="connect to pedals", font=default_font, text_color="lightgrey", fg_color=WAITING_COLOR, corner_radius=5, hover_color="#333366", command=lambda: threading.Thread(target=connect_joystick).start())
+    restart_connection_button = ctk.CTkButton(scrollable_frame, text="connect to pedals", font=default_font, text_color="lightgrey", fg_color=WAITING_COLOR, corner_radius=5, hover_color="#333366", command=lambda: threading.Thread(target=connect_joystick, name="connect joystick thread").start())
     restart_connection_button.grid(row=4, column=0, padx=40, pady=(1,0), columnspan=2, sticky="ew")
 
     restart_connection_label = ctk.CTkLabel(scrollable_frame, text="", font=default_font, text_color="darkred", corner_radius=5)
@@ -2066,7 +2488,7 @@ try:
         if bar_variable.get() == True:
             close_bar_event.clear()
             if bar_thread is None:
-                bar_thread = threading.Thread(target=lambda: start_bar_thread(), daemon=True)
+                bar_thread = threading.Thread(target=lambda: start_bar_thread(), daemon=True, name="bar Thread")
             bar_thread.start()
         else:
             
@@ -2082,22 +2504,89 @@ try:
     bar_label = new_label(scrollable_frame, 16, 0, "Live bottom bar:")
     bar_checkbutton = new_checkbutton(scrollable_frame, 16, 1, bar_variable, command=bar_var_update)
 
+    def detect_cc_button(button_type):
+        global device
+        global buttons_thread
+        global close_buttons_threads
+        global cc_start_button
+        global cc_inc_button
+        global cc_dec_button
+        global cc_start_label
+        global cc_inc_label
+        global cc_dec_label
+
+        if buttons_thread is not None and buttons_thread.is_alive():
+            close_buttons_threads.set()
+            cc_dec_label.configure(border_color=SETTINGS_COLOR)
+            cc_inc_label.configure(border_color=SETTINGS_COLOR)
+            cc_start_label.configure(border_color=SETTINGS_COLOR)
+            buttons_thread.join(timeout=2)
+            if buttons_thread.is_alive():
+                raise RuntimeError("Failed to close the buttons thread gracefully.")
+            else:
+                # Only clear if the thread actually finished
+                close_buttons_threads.clear()
+        else:
+            cc_dec_label.configure(border_color=SETTINGS_COLOR)
+            cc_inc_label.configure(border_color=SETTINGS_COLOR)
+            cc_start_label.configure(border_color=SETTINGS_COLOR)
+            # Make sure the flag is clear if no thread was running
+            close_buttons_threads.clear()
+            
+        buttons_thread = threading.Thread(target=detect_joystick_movement, daemon=True, args=(button_type,), name="buttons Thread")
+        buttons_thread.start()
+        unassign_button.configure(state="normal")
+
+
+    cc_title = ctk.CTkLabel(scrollable_frame, text="Cruise Control", font=default_font_bold, text_color="lightgrey", fg_color=SETTINGS_COLOR, corner_radius=5)
+    cc_title.grid(row=20, column=0, padx=10, pady=1, columnspan=2, sticky="new")
+
+    new_label(scrollable_frame, 21, 0, "start button:")
+
+    cc_start_label = ctk.CTkButton(scrollable_frame, text="None", font=default_font, text_color="lightgrey", width=150, fg_color=VAR_LABEL_COLOR, corner_radius=5, command=lambda: detect_cc_button("start"), border_width=1.5, border_color=SETTINGS_COLOR)
+    cc_start_label.grid(row=21, column=1, padx=10, pady=1, sticky="e")
+
+    new_label(scrollable_frame, 22, 0, "increase button:")
+
+    cc_inc_label = ctk.CTkButton(scrollable_frame, text="None", font=default_font, text_color="lightgrey", width=150, fg_color=VAR_LABEL_COLOR, corner_radius=5, command=lambda: detect_cc_button("inc"), border_width=1.5, border_color=SETTINGS_COLOR)
+    cc_inc_label.grid(row=22, column=1, padx=10, pady=1, sticky="e")
+
+    new_label(scrollable_frame, 23, 0, "decrease button:")
+
+    cc_dec_label = ctk.CTkButton(scrollable_frame, text="None", font=default_font, text_color="lightgrey", width=150, fg_color=VAR_LABEL_COLOR, corner_radius=5, command=lambda: detect_cc_button("dec"), border_width=1.5, border_color=SETTINGS_COLOR)
+    cc_dec_label.grid(row=23, column=1, padx=10, pady=1, sticky="e")
+
+    def unassign_true():
+        global unassign
+        unassign = True
+
+    unassign_button = ctk.CTkButton(scrollable_frame,width=150, text="Unassign", font=default_font, text_color="lightgrey", fg_color=WAITING_COLOR, corner_radius=5, hover_color="#333366", command=unassign_true, state="disabled")
+    unassign_button.grid(row=24, column=0, padx=10, pady=(1,0), columnspan=2, sticky="e")
+
+
+
+
+
+
+
+
+
 
     # create a title for the one-pedal-drive system
     opd_title = ctk.CTkLabel(scrollable_frame, text="One-Pedal-Drive", font=default_font_bold, text_color="lightgrey", fg_color=SETTINGS_COLOR, corner_radius=5)
-    opd_title.grid(row=17, column=0, padx=10, pady=1, columnspan=2, sticky="new")
+    opd_title.grid(row=37, column=0, padx=10, pady=1, columnspan=2, sticky="new")
 
     # create a label for the one-pedal-drive system
-    opd_mode_label = new_label(scrollable_frame, 18, 0, "One Pedal Drive mode:")
+    opd_mode_label = new_label(scrollable_frame, 38, 0, "One Pedal Drive mode:")
 
     def opd_mode_var_update():
         if opd_mode_variable.get() == True:
-            offset_label.grid(row=19, column=0, padx=10, pady=1, sticky="w")
-            offset_entry.grid(row=19, column=1, padx=10, pady=1, sticky="e")
-            description_offset_label.grid(row=20, column=0, padx=10, pady=(0,8), columnspan=2, sticky="nsew")
-            max_opd_brake_label.grid(row=21, column=0, padx=10, pady=1, sticky="w")
-            max_opd_brake_entry.grid(row=21, column=1, padx=10, pady=1, sticky="e")
-            description_max_opd_label.grid(row=22, column=0, padx=10, pady=(0,8), columnspan=2, sticky="nsew")
+            offset_label.grid(row=39, column=0, padx=10, pady=1, sticky="w")
+            offset_entry.grid(row=39, column=1, padx=10, pady=1, sticky="e")
+            description_offset_label.grid(row=40, column=0, padx=10, pady=(0,8), columnspan=2, sticky="nsew")
+            max_opd_brake_label.grid(row=41, column=0, padx=10, pady=1, sticky="w")
+            max_opd_brake_entry.grid(row=41, column=1, padx=10, pady=1, sticky="e")
+            description_max_opd_label.grid(row=42, column=0, padx=10, pady=(0,8), columnspan=2, sticky="nsew")
             refresh_live_visualization()
         else:
             offset_label.grid_forget()
@@ -2109,54 +2598,54 @@ try:
             refresh_live_visualization()
 
     opd_mode_variable = ctk.BooleanVar(value=True)
-    opd_mode_checkbutton = new_checkbutton(scrollable_frame, 18, 1, opd_mode_variable, command=opd_mode_var_update)
+    opd_mode_checkbutton = new_checkbutton(scrollable_frame, 38, 1, opd_mode_variable, command=opd_mode_var_update)
 
-    offset_label = new_label(scrollable_frame, 19, 0, "  Offset:")
+    offset_label = new_label(scrollable_frame, 39, 0, "  Offset:")
     offset_variable = ctk.DoubleVar(value=0.2)
     temp_offset_variable = ctk.DoubleVar(value=0.2)
-    offset_entry = new_entry(scrollable_frame, 19, 1, offset_variable, temp_offset_variable, command=refresh_live_visualization, max_value=0.5, min_value=0)
+    offset_entry = new_entry(scrollable_frame, 39, 1, offset_variable, temp_offset_variable, command=refresh_live_visualization, max_value=0.5, min_value=0)
 
     description_offset_label = ctk.CTkLabel(scrollable_frame, text="The amount you have to press the gas to not be braking or accelerating", font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, bg_color="transparent", anchor="e", wraplength=185, height=10, justify="right")
-    description_offset_label.grid(row=20, column=0, padx=10, pady=(0,8), columnspan=2, sticky="nsew")
+    description_offset_label.grid(row=40, column=0, padx=10, pady=(0,8), columnspan=2, sticky="nsew")
 
-    max_opd_brake_label = new_label(scrollable_frame, 21, 0, "  Max OPD brake:")
+    max_opd_brake_label = new_label(scrollable_frame, 41, 0, "  Max OPD brake:")
     max_opd_brake_variable = ctk.DoubleVar(value=0.03)
     temp_max_opd_brake_variable = ctk.DoubleVar(value=0.03)
-    max_opd_brake_entry = new_entry(scrollable_frame, 21, 1, max_opd_brake_variable, temp_max_opd_brake_variable, command=refresh_live_visualization, max_value=0.2, min_value=0)
+    max_opd_brake_entry = new_entry(scrollable_frame, 41, 1, max_opd_brake_variable, temp_max_opd_brake_variable, command=refresh_live_visualization, max_value=0.2, min_value=0)
 
     description_max_opd_label = ctk.CTkLabel(scrollable_frame, text="The amount of braking when not touching the pedals", font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, bg_color="transparent", anchor="e", wraplength=185, height=10, justify="right")
-    description_max_opd_label.grid(row=22, column=0, padx=10, pady=(0,8), columnspan=2, sticky="nsew")
+    description_max_opd_label.grid(row=42, column=0, padx=10, pady=(0,8), columnspan=2, sticky="nsew")
 
-    gas_exponent_label = new_label(scrollable_frame, 23, 0, "Gas exponent:")
+    gas_exponent_label = new_label(scrollable_frame, 43, 0, "Gas exponent:")
     gas_exponent_variable = ctk.DoubleVar(value=2)
     temp_gas_exponent_variable = ctk.DoubleVar(value=2)
-    gas_exponent_entry = new_entry(scrollable_frame, 23, 1, gas_exponent_variable, temp_gas_exponent_variable, command=refresh_live_visualization, max_value=2.5, min_value=0.8)
+    gas_exponent_entry = new_entry(scrollable_frame, 43, 1, gas_exponent_variable, temp_gas_exponent_variable, command=refresh_live_visualization, max_value=2.5, min_value=0.8)
 
-    brake_exponent_label = new_label(scrollable_frame, 24, 0, "Brake exponent:")
+    brake_exponent_label = new_label(scrollable_frame, 44, 0, "Brake exponent:")
     brake_exponent_variable = ctk.DoubleVar(value=2)
     temp_brake_exponent_variable = ctk.DoubleVar(value=2)
-    brake_exponent_entry = new_entry(scrollable_frame, 24, 1, brake_exponent_variable, temp_brake_exponent_variable, command=refresh_live_visualization, max_value=2.5, min_value=0.8)
+    brake_exponent_entry = new_entry(scrollable_frame, 44, 1, brake_exponent_variable, temp_brake_exponent_variable, command=refresh_live_visualization, max_value=2.5, min_value=0.8)
 
-    new_label(scrollable_frame, 25, 0, "weight adjustment brake:")
+    new_label(scrollable_frame, 45, 0, "weight adjustment brake:")
     weight_adjustment = ctk.BooleanVar(value=True)
-    opd_mode_checkbutton = new_checkbutton(scrollable_frame, 25, 1, weight_adjustment)
+    opd_mode_checkbutton = new_checkbutton(scrollable_frame, 45, 1, weight_adjustment)
 
 
     # list of implemented libraries shown as a discription
     implemented_libraries_label = ctk.CTkLabel(scrollable_frame, text="Implemented libraries:",  font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, height=0)
-    implemented_libraries_label.grid(row=44, column=0, padx=10, pady=(10,0), columnspan=2, sticky="new")
+    implemented_libraries_label.grid(row=49, column=0, padx=10, pady=(10,0), columnspan=2, sticky="new")
 
     SCSController_label = ctk.CTkLabel(scrollable_frame, text="SCSController - tumppi066",  font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, height=0)
-    SCSController_label.grid(row=45, column=0, padx=10, pady=0, columnspan=2, sticky="new")
+    SCSController_label.grid(row=50, column=0, padx=10, pady=0, columnspan=2, sticky="new")
 
     pygame_label = ctk.CTkLabel(scrollable_frame, text="pygame - pygame",  font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, height=0)
-    pygame_label.grid(row=46, column=0, padx=10, pady=0, columnspan=2, sticky="new")
+    pygame_label.grid(row=51, column=0, padx=10, pady=0, columnspan=2, sticky="new")
 
     truck_telemetry_label = ctk.CTkLabel(scrollable_frame, text="Truck telemetry - Dreagonmon",  font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, height=0)
-    truck_telemetry_label.grid(row=47, column=0, padx=10, pady=0, columnspan=2, sticky="new")
+    truck_telemetry_label.grid(row=52, column=0, padx=10, pady=0, columnspan=2, sticky="new")
 
     customtkinter_label = ctk.CTkLabel(scrollable_frame, text="customtkinter - csm10495",  font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, height=0)
-    customtkinter_label.grid(row=48, column=0, padx=10, pady=0, columnspan=2, sticky="new")
+    customtkinter_label.grid(row=53, column=0, padx=10, pady=0, columnspan=2, sticky="new")
 
     #create a button to reinstall the SDK
     reinstall_SDK_button = ctk.CTkButton(
@@ -2167,9 +2656,9 @@ try:
         fg_color=WAITING_COLOR,
         corner_radius=5,
         hover_color="#333366",
-        command=lambda: threading.Thread(target=check_and_install_scs_sdk, daemon=True).start()
+        command=lambda: threading.Thread(target=check_and_install_scs_sdk, daemon=True, name="reintall SDK").start()
     )
-    reinstall_SDK_button.grid(row=49, column=0, padx=10, pady=(20,1), columnspan=2, sticky="ew")
+    reinstall_SDK_button.grid(row=54, column=0, padx=10, pady=(20,1), columnspan=2, sticky="ew")
 
 
     confirmation = False
@@ -2201,11 +2690,11 @@ try:
 
     # create a reset button
     reset_button = ctk.CTkButton(scrollable_frame, text="reset all settings", font=default_font, text_color="lightgrey", fg_color=WAITING_COLOR, corner_radius=5, hover_color="#333366", command=reset_button_action)
-    reset_button.grid(row=50, column=0, padx=10, pady=(5,1), columnspan=2, sticky="ew")
+    reset_button.grid(row=55, column=0, padx=10, pady=(5,1), columnspan=2, sticky="ew")
 
     # discription for the reset button
     reset_button_description = ctk.CTkLabel(scrollable_frame, text="this requires a program restart", font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, bg_color="transparent", anchor="center", wraplength=165, height=10)
-    reset_button_description.grid(row=51, column=0, padx=10, pady=(0,4), columnspan=2, sticky="nsew")
+    reset_button_description.grid(row=56, column=0, padx=10, pady=(0,4), columnspan=2, sticky="nsew")
 
 
 
@@ -2599,7 +3088,7 @@ try:
     dots_anim.start()
     
     # Start the game thread
-    thread_game = threading.Thread(target=game_thread, daemon=True)
+    thread_game = threading.Thread(target=game_thread, daemon=True, name="MonoCruise Game Thread")
     thread_game.start()
     
     # Signal that UI is ready
