@@ -91,8 +91,9 @@ KEY_ON_COLOR = "#1f53FF"  # lighter blue
 CONNECTED_COLOR = "#304230"  # Light grey
 LOST_COLOR = "#FF0000"  # Red
 DEFAULT_COLOR = "#2B2B2B"  # Dark grey
-VAR_LABEL_COLOR = "#2E2E2E"  # White
+VAR_LABEL_COLOR = "#2B2B2B"
 SETTINGS_COLOR = "#454545"  # Dark grey
+SETTING_HEADERS_COLOR = "#454545"  # Dark grey
 DISABLED_COLOR = "#404040"  # Dark grey
 CMD_COLOR = "#808080"  # Light grey
 TRANSITION_DURATION = 1  # seconds
@@ -204,17 +205,17 @@ def refresh_button_labels():
 
     if device is not None and device.get_init():
         if cc_start_button is not None:
-            cc_dec_label.configure(text=format_button_text(cc_dec_button))
+            cc_dec_label.configure(text=format_button_text(cc_dec_button), text_color="lightgrey")
         else:
-            cc_dec_label.configure(text="None")
+            cc_dec_label.configure(text="None", text_color=SETTINGS_COLOR)
         if cc_inc_button is not None:
-            cc_inc_label.configure(text=format_button_text(cc_inc_button))
+            cc_inc_label.configure(text=format_button_text(cc_inc_button), text_color="lightgrey")
         else:
-            cc_inc_label.configure(text="None")
+            cc_inc_label.configure(text="None", text_color=SETTINGS_COLOR)
         if cc_start_button is not None:
-            cc_start_label.configure(text=format_button_text(cc_start_button))
+            cc_start_label.configure(text=format_button_text(cc_start_button), text_color="lightgrey")
         else:
-            cc_start_label.configure(text="None")
+            cc_start_label.configure(text="None", text_color=SETTINGS_COLOR)
 
 def check_wheel_connected():
     global device, recovered
@@ -559,13 +560,13 @@ def detect_joystick_movement(button_type="None given"):
 
     if button_type == "start":
         cc_start_label.configure(border_color="green")
-        cmd_print("Waiting for start button press...")
+        cmd_print("Waiting for start button press...", display_duration=1)
     elif button_type == "inc":
         cc_inc_label.configure(border_color="green")
-        cmd_print("Waiting for increase button press...")
+        cmd_print("Waiting for increase button press...", display_duration=1)
     elif button_type == "dec":
         cc_dec_label.configure(border_color="green")
-        cmd_print("Waiting for decrease button press...")
+        cmd_print("Waiting for decrease button press...", display_duration=1)
     else:
         raise ValueError(f"Unknown button type: {button_type}")
 
@@ -581,7 +582,7 @@ def detect_joystick_movement(button_type="None given"):
         if (button_type == "start" and (cc_inc_button == button or cc_dec_button == button)) or \
             (button_type == "inc" and (cc_start_button == button or cc_dec_button == button)) or \
             (button_type == "dec" and (cc_start_button == button or cc_inc_button == button)):
-            cmd_print(f'"{button}" button cannot be used twice.', "#FF2020", 10)
+            cmd_print(f'"{format_button_text(button)}" button cannot be used twice.', "#FF2020", 10)
             return False
         else:
             return True
@@ -598,10 +599,19 @@ def detect_joystick_movement(button_type="None given"):
         
         # Check for keyboard input
         if key_pressed.is_set():
-            button = detected_key  # Use hash to create unique button number
-            input_type = "key"
-            input_value = button
-            break
+            if detected_key == "Backspace" or detected_key == "Delete":
+                cmd_print("Unassigning button...", "#FF2020", 10)
+                unassign_button.configure(state="normal")
+                unassign = True
+                break
+            elif detected_key != "Esc" and detected_key != "Escape" and detected_key != "Enter" and detected_key != "Return":
+                print(f"Detected key: {detected_key}")
+                button = detected_key  # Use hash to create unique button number
+                input_type = "key"
+                input_value = button
+                break
+            else:
+                close_buttons_threads.set()  # Exit if Esc or Enter is pressed
         
         # Check joystick input (existing logic) - only if device exists
         if device is not None and device.get_init():
@@ -691,7 +701,7 @@ def detect_joystick_movement(button_type="None given"):
 
 
     # Format the display text based on input type
-    if input_type == "key" and len(input_value) == 1:
+    if input_type == "key" and len(input_value) <= 2:
         display_text = f"key {input_value.capitalize()}"
     elif input_type == "key":
         display_text = f"{input_value.capitalize()}"
@@ -705,13 +715,13 @@ def detect_joystick_movement(button_type="None given"):
 
     if button_type == "start":
         cc_start_button = button
-        cc_start_label.configure(border_color=SETTINGS_COLOR, text=display_text)
+        cc_start_label.configure(border_color=SETTINGS_COLOR, text=display_text, text_color="lightgrey" if display_text != "None" else SETTINGS_COLOR)
     elif button_type == "inc":
         cc_inc_button = button
-        cc_inc_label.configure(border_color=SETTINGS_COLOR, text=display_text)
+        cc_inc_label.configure(border_color=SETTINGS_COLOR, text=display_text, text_color="lightgrey" if display_text != "None" else SETTINGS_COLOR)
     elif button_type == "dec":
         cc_dec_button = button
-        cc_dec_label.configure(border_color=SETTINGS_COLOR, text=display_text)
+        cc_dec_label.configure(border_color=SETTINGS_COLOR, text=display_text, text_color="lightgrey" if display_text != "None" else SETTINGS_COLOR)
     else:
         raise ValueError(f"Unknown button type: {button_type}")
     
@@ -1181,7 +1191,7 @@ def format_button_text(button_index):
         # For keyboard keys, we need to store the key name separately
         # This is a limitation - we'll need to modify the storage system
         # For now, return a generic keyboard indicator
-        if len(button_index) == 1:
+        if len(button_index) <= 2:
             return f"key {button_index}"
         else:
             return str(button_index)
@@ -1374,6 +1384,66 @@ def calc_truck_weight(data):
 
     return total_weight_kg / 1000
 
+def refresh_button_detection():
+    global cc_dec_button
+    global cc_inc_button
+    global cc_start_button
+    global cc_dec_label
+    global cc_inc_label
+    global cc_start_label
+    global cc_dec
+    global cc_inc
+    global cc_start
+
+    cc_dec = get_button(cc_dec_button)
+    cc_inc = get_button(cc_inc_button)
+    cc_start = get_button(cc_start_button)
+
+    if cc_dec:
+        if cc_dec_label.cget("border_color") != KEY_ON_COLOR:
+            cc_dec_label.configure(border_color=KEY_ON_COLOR)
+    else:
+        if cc_dec_label.cget("border_color") != SETTINGS_COLOR:
+            cc_dec_label.configure(border_color=SETTINGS_COLOR)
+    if cc_inc:
+        if cc_inc_label.cget("border_color") != KEY_ON_COLOR:
+            cc_inc_label.configure(border_color=KEY_ON_COLOR)
+    else:
+        if cc_inc_label.cget("border_color") != SETTINGS_COLOR:
+            cc_inc_label.configure(border_color=SETTINGS_COLOR)
+    if cc_start:
+        if cc_start_label.cget("border_color") != KEY_ON_COLOR:
+            cc_start_label.configure(border_color=KEY_ON_COLOR)
+    else:
+        if cc_start_label.cget("border_color") != SETTINGS_COLOR:
+            cc_start_label.configure(border_color=SETTINGS_COLOR)
+
+def main_cruise_control():
+    global exit_event
+    global cc_inc_button
+    global cc_dec_button
+    global cc_start_button
+    global cc_dec
+    global cc_inc
+    global cc_start
+    global buttons_thread
+    global brakeval
+    while not exit_event.is_set() and not (cc_dec_button is None and cc_inc_button is None and cc_start_button is None):
+        try:
+            if buttons_thread is None or not buttons_thread.is_alive():
+                refresh_button_detection()
+            else:
+                time.sleep(0.2)
+            _prev_cc_dec = cc_dec
+            _prev_cc_inc = cc_inc
+            _prev_cc_start = cc_start
+            time.sleep(0.02)
+        except Exception as e:
+            context = get_error_context()
+            log_error(e, context)
+            time.sleep(1)
+    
+
 def main():
     global controller
     """Main game logic"""
@@ -1417,11 +1487,14 @@ def main():
     global cc_dec
     global cc_inc
     global cc_start
+    global cruise_control_thread
     # Initialize pygame for joystick handling
     
     # Start SDK check thread
     sdk_thread = threading.Thread(target=sdk_check_thread, daemon=True, name="SDK Check Thread")
     sdk_thread.start()
+
+    cruise_control_thread = None
     
     try:
         while gasaxis == 0 or brakeaxis == 0:
@@ -1446,7 +1519,12 @@ def main():
                             weight_adjustment = weight_adjustment.get(),
                             cc_dec_button = cc_dec_button,
                             cc_inc_button = cc_inc_button,
-                            cc_start_button = cc_start_button
+                            cc_start_button = cc_start_button,
+                            cc_mode = cc_mode.get(),
+                            long_increments = long_increments.get(),
+                            short_increments = short_increments.get(),
+                            long_press_resume = long_press_resume.get(),
+                            show_cc_ui = show_cc_ui.get()
                             )
 
         if exit_event.is_set():
@@ -1521,7 +1599,12 @@ def main():
                             weight_adjustment = weight_adjustment.get(),
                             cc_dec_button = cc_dec_button,
                             cc_inc_button = cc_inc_button,
-                            cc_start_button = cc_start_button
+                            cc_start_button = cc_start_button,
+                            cc_mode = cc_mode.get(),
+                            long_increments = long_increments.get(),
+                            short_increments = short_increments.get(),
+                            long_press_resume = long_press_resume.get(),
+                            show_cc_ui = show_cc_ui.get()
                             )
 
             if offset_variable.get() == 0:
@@ -1570,32 +1653,11 @@ def main():
             horn_variable_var = horn_variable.get()
             airhorn_variable_var = airhorn_variable.get()
 
-            if buttons_thread is None or not buttons_thread.is_alive():
-                cc_dec = get_button(cc_dec_button)
-                if cc_dec:
-                    if cc_dec_label.cget("border_color") != KEY_ON_COLOR:
-                        cc_dec_label.configure(border_color=KEY_ON_COLOR)
-                else:
-                    if cc_dec_label.cget("border_color") != SETTINGS_COLOR:
-                        cc_dec_label.configure(border_color=SETTINGS_COLOR)
-                cc_inc = get_button(cc_inc_button)
-                if cc_inc:
-                    if cc_inc_label.cget("border_color") != KEY_ON_COLOR:
-                        cc_inc_label.configure(border_color=KEY_ON_COLOR)
-                else:
-                    if cc_inc_label.cget("border_color") != SETTINGS_COLOR:
-                        cc_inc_label.configure(border_color=SETTINGS_COLOR)
-                cc_start = get_button(cc_start_button)
-                if cc_start:
-                    if cc_start_label.cget("border_color") != KEY_ON_COLOR:
-                        cc_start_label.configure(border_color=KEY_ON_COLOR)
-                else:
-                    if cc_start_label.cget("border_color") != SETTINGS_COLOR:
-                        cc_start_label.configure(border_color=SETTINGS_COLOR)
-            else:
-                cc_dec = False
-                cc_inc = False
-                cc_start = False
+            if cc_dec_button is not None or cc_inc_button is not None or cc_start_button is not None:
+                # start a background checker to prevent ignored button presses
+                if cruise_control_thread is None or not cruise_control_thread.is_alive():
+                    cruise_control_thread = threading.Thread(target=main_cruise_control, daemon=True, name="cruise control thread")
+                    cruise_control_thread.start()
 
             # get input if pygame is initialized
             if pygame.get_init() and not pauze_pedal_detection and not exit_event.is_set():
@@ -2393,13 +2455,85 @@ try:
         
         return entry
 
+    def new_optionmenu(master, row, column, values, value, default_value=None, command=None):
+        """
+        Creates a pre-configured CTkOptionMenu with automatic value extraction and storage,
+        wrapped in a bordered frame. Returns the numeric value directly.
+        
+        Args:
+            master: Parent widget
+            row: Grid row position
+            column: Grid column position
+            values: List of option values (e.g., ["1 km/h", "3 km/h", "5 km/h"])
+            value: ctk.StringVar to hold the selected value
+            default_value: values to set at start (optional)
+            command: Optional callback function to execute after value change
+        
+        Returns:
+            optionmenu_widget: The created CTkOptionMenu widget
+        """
+        def remove_focus(*args):
+            master.focus()
+        
+        # Set default value if not provided
+        if default_value is None:
+            default_value = values[0]
+        
+        # Create StringVar for the option menu
+        if value is not None:
+            # If a value is provided, use it to set the default value
+            if value not in values:
+                cmd_print(f"{value} not in allowed options. value set to default.", "#FF2020", 5)
+                value.set(value=value)
+        elif value is None:
+            value = ctk.StringVar(value=default_value)
+        
+        def update_value(selected_value):
+            # Execute additional command if provided
+            if command is not None:
+                command()
+        
+        # Create bordered frame
+        frame = ctk.CTkFrame(
+            master,
+            border_width=1.5,
+            border_color=SETTINGS_COLOR,
+            fg_color="transparent",
+            corner_radius=5
+        )
+        
+        # Grid the frame
+        frame.grid(row=row, column=column, padx=(0,8), pady=1, sticky="e")
+        
+        # Create the option menu inside the frame
+        optionmenu = ctk.CTkOptionMenu(
+            frame,
+            values=values,
+            variable=value,
+            command=update_value,
+            width=100, 
+            fg_color=DEFAULT_COLOR,
+            button_color=DEFAULT_COLOR,
+            button_hover_color=DEFAULT_COLOR,
+            corner_radius=3.5,
+            bg_color=SETTINGS_COLOR
+        )
+        
+        # Grid the option menu inside the frame with some padding
+        optionmenu.grid(row=0, column=0, padx=1.5, pady=1.5)
+        
+        # Bind events
+        optionmenu.bind("<Return>", remove_focus)
+        optionmenu.bind("<Escape>", remove_focus)
+        
+        return optionmenu
 
 
 
 
     # Create a label for input settings
-    settings_label_1 = ctk.CTkLabel(scrollable_frame, text="Inputs", font=default_font_bold, text_color="lightgrey", fg_color=SETTINGS_COLOR, corner_radius=5)
-    settings_label_1.grid(row=0, column=0, padx=10, pady=1, columnspan=2, sticky="new")
+    settings_label_1 = ctk.CTkLabel(scrollable_frame, text="Inputs", font=default_font_bold, text_color="lightgrey", fg_color=SETTING_HEADERS_COLOR, corner_radius=5)
+    settings_label_1.grid(row=0, column=0, padx=0, pady=1, columnspan=2, sticky="new")
 
     connected_joystick_label = new_label(scrollable_frame, 1, 0, "Connected pedals:")
 
@@ -2429,8 +2563,8 @@ try:
 
 
     # create a label for program settings
-    settings_label_2 = ctk.CTkLabel(scrollable_frame, text="Program settings", font=default_font_bold, text_color="lightgrey", fg_color=SETTINGS_COLOR, corner_radius=5)
-    settings_label_2.grid(row=6, column=0, padx=10, pady=1, columnspan=2, sticky="new")
+    settings_label_2 = ctk.CTkLabel(scrollable_frame, text="Program settings", font=default_font_bold, text_color="lightgrey", fg_color=SETTING_HEADERS_COLOR, corner_radius=5)
+    settings_label_2.grid(row=6, column=0, padx=0, pady=1, columnspan=2, sticky="new")
 
     autostart_variable = ctk.BooleanVar(value=True)
     autostart_MonoCruise_label = new_label(scrollable_frame,7 ,0 , "Autostart MonoCruise:")
@@ -2536,32 +2670,80 @@ try:
         unassign_button.configure(state="normal")
 
 
-    cc_title = ctk.CTkLabel(scrollable_frame, text="Cruise Control", font=default_font_bold, text_color="lightgrey", fg_color=SETTINGS_COLOR, corner_radius=5)
-    cc_title.grid(row=20, column=0, padx=10, pady=1, columnspan=2, sticky="new")
+    cc_title = ctk.CTkLabel(scrollable_frame, text="Cruise Control", font=default_font_bold, text_color="lightgrey", fg_color=SETTING_HEADERS_COLOR, corner_radius=5)
+    cc_title.grid(row=19, column=0, padx=0, pady=(20,3), columnspan=2, sticky="new")
+    # create a label for the modes
+    ctk.CTkLabel(scrollable_frame, text="Mode:", font=default_font, text_color="lightgrey").grid(row=21, column=0, padx=10, pady=0, sticky="w", columnspan=2)
 
-    new_label(scrollable_frame, 21, 0, "start button:")
+    cc_mode = ctk.StringVar(value="Cruise Control")
+    # Create border frame with 1.5px border
+    cc_mode_border_frame = ctk.CTkFrame(scrollable_frame,
+                                    fg_color=DEFAULT_COLOR,
+                                    border_color=SETTINGS_COLOR,
+                                    border_width=1.5,
+                                    corner_radius=7)
 
-    cc_start_label = ctk.CTkButton(scrollable_frame, text="None", font=default_font, text_color="lightgrey", width=150, fg_color=VAR_LABEL_COLOR, corner_radius=5, command=lambda: detect_cc_button("start"), border_width=1.5, border_color=SETTINGS_COLOR)
-    cc_start_label.grid(row=21, column=1, padx=10, pady=1, sticky="e")
+    cc_mode_border_frame.grid(row=21, column=0, padx=10, pady=(8,8), columnspan=2, sticky="e")
 
-    new_label(scrollable_frame, 22, 0, "increase button:")
+    # Create the segmented button inside the border frame
+    cc_mode_segmented_button = ctk.CTkSegmentedButton(cc_mode_border_frame, values=["Cruise control", "Speed limiter"],
+                                                      variable=cc_mode, dynamic_resizing=False, width=220, selected_hover_color=WAITING_COLOR,
+                                                      selected_color=WAITING_COLOR, text_color="lightgrey",bg_color="transparent", 
+                                                      corner_radius=5, font=default_font, fg_color=DEFAULT_COLOR, unselected_color=DEFAULT_COLOR, border_width=1.5)
+    cc_mode_segmented_button.grid(row=0, column=0, padx=3, pady=3, sticky="nsew")
+    cc_mode.set("Cruise control")  # Set default value
 
-    cc_inc_label = ctk.CTkButton(scrollable_frame, text="None", font=default_font, text_color="lightgrey", width=150, fg_color=VAR_LABEL_COLOR, corner_radius=5, command=lambda: detect_cc_button("inc"), border_width=1.5, border_color=SETTINGS_COLOR)
-    cc_inc_label.grid(row=22, column=1, padx=10, pady=1, sticky="e")
+    new_label(scrollable_frame, 22, 0, "Enable/Disable button:")
 
-    new_label(scrollable_frame, 23, 0, "decrease button:")
+    cc_start_label = ctk.CTkButton(scrollable_frame, text="None", font=default_font, text_color=SETTINGS_COLOR, width=150, fg_color=VAR_LABEL_COLOR, corner_radius=5, command=lambda: detect_cc_button("start"), border_width=1.5, border_color=SETTINGS_COLOR)
+    cc_start_label.grid(row=22, column=1, padx=10, pady=1, sticky="e")
 
-    cc_dec_label = ctk.CTkButton(scrollable_frame, text="None", font=default_font, text_color="lightgrey", width=150, fg_color=VAR_LABEL_COLOR, corner_radius=5, command=lambda: detect_cc_button("dec"), border_width=1.5, border_color=SETTINGS_COLOR)
-    cc_dec_label.grid(row=23, column=1, padx=10, pady=1, sticky="e")
+    new_label(scrollable_frame, 23, 0, "Increase button:")
+
+    cc_inc_label = ctk.CTkButton(scrollable_frame, text="None", font=default_font, text_color=SETTINGS_COLOR, width=150, fg_color=VAR_LABEL_COLOR, corner_radius=5, command=lambda: detect_cc_button("inc"), border_width=1.5, border_color=SETTINGS_COLOR)
+    cc_inc_label.grid(row=23, column=1, padx=10, pady=1, sticky="e")
+
+    new_label(scrollable_frame, 24, 0, "Decrease button:")
+
+    cc_dec_label = ctk.CTkButton(scrollable_frame, text="None", font=default_font, text_color=SETTINGS_COLOR, width=150, fg_color=VAR_LABEL_COLOR, corner_radius=5, command=lambda: detect_cc_button("dec"), border_width=1.5, border_color=SETTINGS_COLOR)
+    cc_dec_label.grid(row=24, column=1, padx=10, pady=1, sticky="e")
 
     def unassign_true():
         global unassign
         unassign = True
 
     unassign_button = ctk.CTkButton(scrollable_frame,width=150, text="Unassign", font=default_font, text_color="lightgrey", fg_color=WAITING_COLOR, corner_radius=5, hover_color="#333366", command=unassign_true, state="disabled")
-    unassign_button.grid(row=24, column=0, padx=10, pady=(1,0), columnspan=2, sticky="e")
+    unassign_button.grid(row=25, column=0, padx=10, pady=(1,8), columnspan=2, sticky="e")
 
+    short_increments = ctk.StringVar(value="1 km/h")
+    short_press_increments_label = new_label(scrollable_frame, 26, 0, "Short press increments:")
+    short_press_increments_options = new_optionmenu(
+        scrollable_frame, 26, 1, 
+        values=["1 km/h", "2 km/h", "3 km/h", "5 km/h", "10 km/h"], 
+        default_value="1 km/h",
+        value=short_increments
+    )
 
+    long_increments = ctk.StringVar(value="5 km/h")
+    long_press_increments_label = new_label(scrollable_frame, 27, 0, "Long press increments:")
+    long_press_increments_options = new_optionmenu(
+        scrollable_frame, 27, 1, 
+        values=["1 km/h", "2 km/h", "3 km/h", "5 km/h", "10 km/h"], 
+        default_value="5 km/h",
+        value=long_increments,
+    )
+
+    long_press_resume_label = new_label(scrollable_frame, 28, 0, "Hold enable to resume:")
+    long_press_resume = ctk.BooleanVar(value=True)
+    long_press_resume_button = new_checkbutton(
+        scrollable_frame, 28, 1,
+        long_press_resume)
+
+    show_cc_ui_label = new_label(scrollable_frame, 29, 0, "Show set speed on screen:")
+    show_cc_ui = ctk.BooleanVar(value=True)
+    show_cc_ui_button = new_checkbutton(
+        scrollable_frame, 29, 1,
+        show_cc_ui)
 
 
 
@@ -2571,8 +2753,8 @@ try:
 
 
     # create a title for the one-pedal-drive system
-    opd_title = ctk.CTkLabel(scrollable_frame, text="One-Pedal-Drive", font=default_font_bold, text_color="lightgrey", fg_color=SETTINGS_COLOR, corner_radius=5)
-    opd_title.grid(row=37, column=0, padx=10, pady=1, columnspan=2, sticky="new")
+    opd_title = ctk.CTkLabel(scrollable_frame, text="One-Pedal-Drive", font=default_font_bold, text_color="lightgrey", fg_color=SETTING_HEADERS_COLOR, corner_radius=5)
+    opd_title.grid(row=37, column=0, padx=0, pady=(20,3), columnspan=2, sticky="new")
 
     # create a label for the one-pedal-drive system
     opd_mode_label = new_label(scrollable_frame, 38, 0, "One Pedal Drive mode:")
@@ -2624,7 +2806,7 @@ try:
     temp_brake_exponent_variable = ctk.DoubleVar(value=2)
     brake_exponent_entry = new_entry(scrollable_frame, 44, 1, brake_exponent_variable, temp_brake_exponent_variable, command=refresh_live_visualization, max_value=2.5, min_value=0.8)
 
-    new_label(scrollable_frame, 45, 0, "weight adjustment brake:")
+    new_label(scrollable_frame, 45, 0, "Weight adjustment brake:")
     weight_adjustment = ctk.BooleanVar(value=True)
     opd_mode_checkbutton = new_checkbutton(scrollable_frame, 45, 1, weight_adjustment)
 
@@ -3071,6 +3253,21 @@ try:
     except Exception: pass
     try:
         weight_adjustment.set(_data_cache["weight_adjustment"])
+    except Exception: pass
+    try:
+        cc_mode.set(_data_cache["cc_mode"])
+    except Exception: pass
+    try:
+        short_increments.set(_data_cache["short_increments"])
+    except Exception: pass
+    try:
+        long_increments.set(_data_cache["long_increments"])
+    except Exception: pass
+    try:
+        long_press_resume.set(_data_cache["long_press_resume"])
+    except Exception: pass
+    try:
+        show_cc_ui.set(_data_cache["show_cc_ui"])
     except Exception: pass
 
     try:
