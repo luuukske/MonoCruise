@@ -449,8 +449,10 @@ def cmd_print(text, color=CMD_COLOR, display_duration=10):
         #cmd_label.after(0, lambda: cmd_label.configure(text=txt, text_color=original_color))
         if exit_event.is_set():
             return
-        
-        cmd_label.configure(text=txt, text_color=original_color)
+        try:
+            cmd_label.configure(text=txt, text_color=original_color)
+        except:
+            pass
 
         # Wait for 10 seconds while the text is fully visible.
         # Instead of one long sleep, we check in small intervals if the fade should be canceled.
@@ -1614,33 +1616,47 @@ def cc_target_speed_thread_func():
     global exit_event
     global target_speed
     global speed
+    global data
     global cc_mode
     global cc_enabled
     global cc_gas
     global cc_brake
+    global cc_locked
 
+    cc_locked = False
     prev_speed = speed
+    prev_target_speed = target_speed
     prev_cc_gas = 0.0
     prev_cc_brake = 0.0
     integral_sum = 0.0
     ff_est = 0.0
-    alpha  = 0.7
+    alpha  = 0.3
     P = 0.15
-    I = 0.02    # Integral gain
-    D = 0.15
-    max_integral = 0.4 / I
+    I = 0.005    # Integral gain
+    D = 0.08
+    max_integral = 0.3 / I
     prev_time = time.time()-0.1
 
     while not exit_event.is_set() and cc_enabled and not em_stop:
         if target_speed is not None and not pauzed:
 
+            slope = data['rotationY']
+            print(f"rotationY: {slope}")
             error = target_speed - speed
             dt = time.time() - prev_time
             prev_time = time.time()
 
             # Integral term
-            if abs(prev_speed-speed) < 0.07 and cc_gas != 1.0:
-                integral_sum += error * dt
+            if cc_locked:
+                if error < 0:
+                    integral_sum += -(-error/10)**0.6 * dt *5
+                else:
+                    integral_sum += (error/10)**0.6 * dt *5
+
+            if ((error > 0 and (prev_speed - speed) > 0) or (error < 0 and (prev_speed - speed) < 0)) and abs(error) < 5 and abs(prev_speed - speed) < 0.05:
+                cc_locked = True
+            elif prev_target_speed != target_speed or abs(error) > 5:
+                cc_locked = False
             integral_sum = max(-max_integral, min(max_integral, integral_sum))
 
             # Derivative term
@@ -1650,7 +1666,9 @@ def cc_target_speed_thread_func():
             base_val = (error * P +
                         integral_sum * I +
                         derivative * D +
-                        speed * 0.005)
+                        speed * 0.002 +
+                        slope * 25
+                        )
 
             # Adapt feed-forward: low-pass filter of the control effort
             ff_est = alpha * ff_est + (1.0 - alpha) * base_val
@@ -1659,11 +1677,11 @@ def cc_target_speed_thread_func():
             temp_val = base_val + ff_est
 
 
-            cc_gas = (min(max(temp_val, 0),1)+prev_cc_gas*2)/3
+            cc_gas = (min(max(temp_val, 0),1)+prev_cc_gas*1)/2
             if temp_val > 0:
                 cc_brake = 0.0
             else:
-                cc_brake = ((min(max((-temp_val/40), 0),0.2)+ prev_cc_brake*2)/3)
+                cc_brake = ((min(max((-temp_val/60), 0),0.2)+ prev_cc_brake*1)/2)
 
             print(f"cc_gas: {round(cc_gas,3)} \t cc_brake: {round(cc_brake,3)} \t speed: {round(speed,1)} kmph \t target_speed: {target_speed} kmph \t integral_sum: {round(integral_sum,3)}")
 
@@ -1672,9 +1690,11 @@ def cc_target_speed_thread_func():
 
 
         elif not pauzed:
+            cc_locked = False
             cc_gas = 0.0
             cc_brake = 0.0
 
+        prev_target_speed = target_speed
         prev_speed = speed
         prev_cc_gas = cc_gas
         prev_cc_brake = cc_brake
@@ -1727,6 +1747,7 @@ def main():
     global cc_brake
     global cc_gas
     global cruise_control_thread
+    global cc_locked
     # Initialize pygame for joystick handling
     
     # Start SDK check thread
@@ -2116,6 +2137,8 @@ def main():
                 opdbrakeval = cc_brake
                 opdgasval = max(cc_gas, opdgasval)
             elif (cc_enabled and cc_mode.get() == "Speed limiter"):
+                if opdgasval > cc_gas and cc_gas == 1.0:
+                    cc_locked = True
                 opdbrakeval = max(cc_brake, opdbrakeval)
                 opdgasval = min(cc_gas, opdgasval)
             
@@ -2309,6 +2332,7 @@ def game_thread():
         exit_event.set()
 
 class AnimatedBar:
+    global cc_enabled, cc_locked #################################################### still to be defined
     def __init__(self, root):
         self.root = root
         self.temp_gasval = 0
@@ -2381,9 +2405,12 @@ class AnimatedBar:
     
         
         self.root.lift()
-
-        temp_gasval = (gas_output+self.temp_gasval*10)/11
-        temp_brakeval = (brake_output+self.temp_brakeval*10)/11
+        if cc_enabled and cc_locked:
+            average = 20
+        else:
+            average = 10
+        temp_gasval = (gas_output+self.temp_gasval*average)/(average+1)
+        temp_brakeval = (brake_output+self.temp_brakeval*average)/(average+1)
 
         value = temp_gasval-temp_brakeval
 
@@ -2500,7 +2527,11 @@ global cc_start_button
 global cc_inc_button
 global cc_dec_button
 global unassign
+global cc_enabled
+global cc_locked
 
+cc_enabled = False
+cc_locked = False
 data = None
 cmd_label = None
 device = None
