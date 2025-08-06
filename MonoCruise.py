@@ -23,6 +23,14 @@ from CTkMessagebox import CTkMessagebox
 try:
     sys.path.append('./_internal')
     from scscontroller import SCSController
+
+    from test import create_live_graph, LiveDashGraph
+    dashboard = create_live_graph(
+        max_points=200,      # Show last 100 data points
+        update_interval=50, # Update every 50ms
+        port=8050           # Dashboard at http://127.0.0.1:8050
+    )
+
 except:
     raise Exception("scscontroller is not installed")
 
@@ -1418,8 +1426,32 @@ def refresh_button_detection():
         if cc_start_label.cget("border_color") != SETTINGS_COLOR:
             cc_start_label.configure(border_color=SETTINGS_COLOR)
 
+def change_target_speed(increments):
+    global target_speed
+    global speed # ignore for now
+
+    if abs(increments) >= 5:
+        if increments > 0:
+            target_speed = ((target_speed // abs(increments)) + 1) * abs(increments)
+        else:
+            # Check if target_speed is already a multiple of abs(increments)
+            if target_speed % abs(increments) == 0:
+                # If it's already a multiple, go to the previous multiple
+                target_speed = ((target_speed // abs(increments)) - 1) * abs(increments)
+            else:
+                # If it's not a multiple, round down to the nearest multiple
+                target_speed = ((target_speed // abs(increments))) * abs(increments)
+    else:
+        target_speed += increments
+    if target_speed < 20:
+        target_speed = 20
+    elif target_speed > 130:
+        target_speed = 130
+
 def main_cruise_control():
     global exit_event
+    global cc_mode
+    global cc_enabled
     global cc_inc_button
     global cc_dec_button
     global cc_start_button
@@ -1428,21 +1460,225 @@ def main_cruise_control():
     global cc_start
     global buttons_thread
     global brakeval
+    global target_speed
+    global speed
+    global pauzed
+    global long_increments
+    global short_increments
+    global long_press_resume
+
+    cc_target_speed_thread = threading.Thread(target=cc_target_speed_thread_func, daemon=True, name="CC Target Speed Thread")
+    time_pressed_dec = None
+    time_pressed_inc = None
+    time_pressed_start = None
+    target_speed = None
+    long_press_dec = False
+    long_press_inc = False
+    long_press_start = False
+    cc_enabled = False
+    long_increment_int = int(long_increments.get().split()[0])
+    short_increment_int = int(short_increments.get().split()[0])
     while not exit_event.is_set() and not (cc_dec_button is None and cc_inc_button is None and cc_start_button is None):
         try:
-            if buttons_thread is None or not buttons_thread.is_alive():
+            if (buttons_thread is  None or not buttons_thread.is_alive()) and not device_lost:
                 refresh_button_detection()
             else:
                 time.sleep(0.2)
-            _prev_cc_dec = cc_dec
-            _prev_cc_inc = cc_inc
-            _prev_cc_start = cc_start
+                continue
+            
+            long_increment_int = int(long_increments.get().split()[0])
+            short_increment_int = int(short_increments.get().split()[0])
+            all_buttons_assigned = cc_dec_button is not None and cc_inc_button is not None and cc_start_button is not None
+
+            if cc_dec and not cc_inc and not cc_start and all_buttons_assigned:
+                if time_pressed_dec is None:
+                    time_pressed_dec = time.time()
+                delt_time_dec = (time.time() - time_pressed_dec)
+                if (not long_press_dec and delt_time_dec > 0.6) or (long_press_dec and delt_time_dec > 0.4):
+                    long_press_dec = True
+                    time_pressed_dec = time.time()
+                    if cc_dec:
+
+                        # long press
+                        print("long press on dec")
+                        if target_speed is not None:
+                            change_target_speed(-long_increment_int)
+
+            elif time_pressed_dec != None:
+                if not long_press_dec:
+
+                    # short press
+                    print("short press dec")
+                    if target_speed is not None:
+                        change_target_speed(-short_increment_int)
+
+                else:
+                    long_press_dec = False
+                time_pressed_dec = None
+
+            #########################################
+
+            if cc_inc and not cc_dec and not cc_start and all_buttons_assigned:
+                if time_pressed_inc is None:
+                    time_pressed_inc = time.time()
+                delt_time_inc = (time.time() - time_pressed_inc)
+                if (not long_press_inc and delt_time_inc > 0.6) or (long_press_inc and delt_time_inc > 0.4):
+                    long_press_inc = True
+                    time_pressed_inc = time.time()
+                    if cc_inc:
+
+                        # long press
+                        print("long press on inc")
+                        if not cc_enabled:
+                            target_speed = int(speed)
+                        cc_enabled = True
+                        cmd_print("Cruise control enabled")
+                        if target_speed is not None:
+                            change_target_speed(long_increment_int)
+
+            elif time_pressed_inc != None:
+                if not long_press_inc:
+
+                    # short press
+                    print("short press inc")
+                    if not cc_enabled:
+                        target_speed = int(speed)
+                    cc_enabled = True
+                    cmd_print("Cruise control enabled")
+                    if target_speed is not None:
+                        change_target_speed(short_increment_int)
+
+                else:
+                    long_press_inc = False
+                time_pressed_inc = None
+
+            ########################################
+
+            if cc_start and not cc_dec and not cc_inc and all_buttons_assigned:
+                if time_pressed_start is None:
+                    time_pressed_start = time.time()
+                delt_time_start = (time.time() - time_pressed_start)
+                if (not long_press_start and delt_time_start > 0.5):
+                    long_press_start = True
+                    if cc_start and long_press_resume.get():
+
+                        # long press
+                        print("long press on start")
+                        if target_speed is None and speed is not None:
+                            target_speed = int(speed)
+                        if not cc_enabled:
+                            cc_enabled = True
+                            cmd_print("Cruise control resuming")
+                    elif not long_press_resume.get():
+                        cmd_print("Long press resume is disabled")
+
+            elif time_pressed_start != None:
+                if not long_press_start:
+
+                    # short press
+                    print("short press start")
+                    if cc_enabled:
+                        cc_enabled = False
+                        cmd_print("Cruise control disabled")
+                    else:
+                        target_speed = max(min(int(speed),130), 20)
+                        cc_enabled = True
+                        cmd_print("Cruise control enabled")
+
+                else:
+                    long_press_start = False
+                time_pressed_start = None
+            
+            if not all_buttons_assigned and (cc_dec or cc_inc or cc_start):
+                cmd_print("Please assign all cruise control buttons in the settings", "#FF2020", 10)
+                time.sleep(0.5)
+                continue
+            
+            if cc_mode.get() == "Cruise control":
+                if brakeval > 0.1 or em_stop:
+                    if cc_enabled:
+                        cc_enabled = False
+                        cmd_print("Cruise control disabled due to brake input")
+
             time.sleep(0.02)
+            if target_speed is not None:
+                if cc_enabled and not cc_target_speed_thread.is_alive():
+                    cc_target_speed_thread = threading.Thread(target=cc_target_speed_thread_func, daemon=True, name="CC Target Speed Thread")
+                    cc_target_speed_thread.start()
         except Exception as e:
             context = get_error_context()
             log_error(e, context)
             time.sleep(1)
     
+def cc_target_speed_thread_func():
+    global exit_event
+    global target_speed
+    global speed
+    global cc_mode
+    global cc_enabled
+    global cc_gas
+    global cc_brake
+
+    prev_speed = speed
+    prev_cc_gas = 0.0
+    prev_cc_brake = 0.0
+    integral_sum = 0.0
+    ff_est = 0.0
+    alpha  = 0.7
+    P = 0.15
+    I = 0.02    # Integral gain
+    D = 0.15
+    max_integral = 0.4 / I
+    prev_time = time.time()-0.1
+
+    while not exit_event.is_set() and cc_enabled and not em_stop:
+        if target_speed is not None and not pauzed:
+
+            error = target_speed - speed
+            dt = time.time() - prev_time
+            prev_time = time.time()
+
+            # Integral term
+            if abs(prev_speed-speed) < 0.07 and cc_gas != 1.0:
+                integral_sum += error * dt
+            integral_sum = max(-max_integral, min(max_integral, integral_sum))
+
+            # Derivative term
+            derivative = (prev_speed - speed) / dt
+
+            # Base PID
+            base_val = (error * P +
+                        integral_sum * I +
+                        derivative * D +
+                        speed * 0.005)
+
+            # Adapt feed-forward: low-pass filter of the control effort
+            ff_est = alpha * ff_est + (1.0 - alpha) * base_val
+
+            # Final output includes adaptive feed-forward
+            temp_val = base_val + ff_est
+
+
+            cc_gas = (min(max(temp_val, 0),1)+prev_cc_gas*2)/3
+            if temp_val > 0:
+                cc_brake = 0.0
+            else:
+                cc_brake = ((min(max((-temp_val/40), 0),0.2)+ prev_cc_brake*2)/3)
+
+            print(f"cc_gas: {round(cc_gas,3)} \t cc_brake: {round(cc_brake,3)} \t speed: {round(speed,1)} kmph \t target_speed: {target_speed} kmph \t integral_sum: {round(integral_sum,3)}")
+
+            dashboard.add_data_point(target_speed, speed)
+
+
+
+        elif not pauzed:
+            cc_gas = 0.0
+            cc_brake = 0.0
+
+        prev_speed = speed
+        prev_cc_gas = cc_gas
+        prev_cc_brake = cc_brake
+        time.sleep(0.1)
 
 def main():
     global controller
@@ -1464,6 +1700,7 @@ def main():
     global stopped
     global gear
     global data
+    global pauzed
     global img
     global to_img_coords
     global img_copy
@@ -1487,6 +1724,8 @@ def main():
     global cc_dec
     global cc_inc
     global cc_start
+    global cc_brake
+    global cc_gas
     global cruise_control_thread
     # Initialize pygame for joystick handling
     
@@ -1543,6 +1782,8 @@ def main():
         cc_start = False
         cc_dec = False
         cc_inc = False
+        cc_gas = 0.0
+        cc_brake = 0.0
         opdgasval = 0
         opdbrakeval = 0
         gas_output = 0
@@ -1869,8 +2110,14 @@ def main():
                     b =  max(opdbrakeval**0.8/2,0.3)
                     opdbrakeval = max(opdbrakeval*((-1/(b*-speed+1))+1)+a*(1-(-1/(b*-speed+1)+1)),0)
             
-            if data["cruiseControl"]:
+            if data["cruiseControl"] and not cc_enabled:
                 opdbrakeval = 0
+            elif (cc_enabled and cc_mode.get() == "Cruise control"):
+                opdbrakeval = cc_brake
+                opdgasval = max(cc_gas, opdgasval)
+            elif (cc_enabled and cc_mode.get() == "Speed limiter"):
+                opdbrakeval = max(cc_brake, opdbrakeval)
+                opdgasval = min(cc_gas, opdgasval)
             
             if speed <= 0.1 and speed >= -0.1 and gasval == 0 and gear != 0 and not stopped:
                 stopped = True
