@@ -5,6 +5,7 @@ MonoCruise is a python program that acts like a One-Pedal-Drive (OPD) system for
 
 ### features
 This also includes quality of life features like:
+- a better cruise control system
 - live braking and accelerating bar on the bottom of the screen
 - automatically horn when braking hard
 - auto enable hazard lights when braking for traffic
@@ -12,20 +13,36 @@ This also includes quality of life features like:
 - exponential braking and accelerating
 - auto start and stop for non-intrucive UX
 ## .exe install
-1. Download and run "MonoCruise installer.exe"
-2. Follow the on-screen instructions
-3. Press ok or enter when asked for SDK confirmation.
+   
+   > [!WARNING]
+   > Beta version. please proceed with caution.
+
+1. Download and run "MonoCruise installer.exe".
+2. Run MonoCruise.
+3. Follow the on-screen instructions.
+
+   this will install the required SDK files to communicate with the game code.
+4. Press ok or enter when asked for SDK confirmation.
 
    <img src="https://github.com/user-attachments/assets/76c706de-60b6-457c-ae78-0dc6185810df" alt="Alt text" width="400"/>
 
-4. Wait for MonoCruise to connect
-5. Open the settings tab on the MonoCruise window
-6. Press "Connect to pedals"
+5. Wait for MonoCruise to connect.
+6. Open the settings tab on the MonoCruise window.
+7. Press "Connect to pedals".
    
    <img src="https://github.com/user-attachments/assets/b4b010d3-e3b6-4abf-a29a-a1a9fa72668c" alt="Alt text" width="400"/>
 
-7. Press your brake pedal
-8. Press your gas pedal
+8. Press your brake pedal.
+9. Press your gas pedal.
+
+#### set up your cruise control (optional):
+10. scroll down to the cruise control settings
+11. press the button next to the button you want to assign
+
+       <img src="https://github.com/user-attachments/assets/e38a6fc1-2ce7-4cd7-8b48-d0e6aba333e6" alt="Alt text" width="400"/>
+
+12. press your key/button you want to be assigned
+
 
 Now you're done and can use MonoCruise in ETS2.
 
