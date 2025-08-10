@@ -20,24 +20,14 @@ import psutil
 import subprocess
 import winreg
 from CTkMessagebox import CTkMessagebox
-try:
-    sys.path.append('./_internal')
-    from scscontroller import SCSController
+sys.path.append('./_internal')
+from scscontroller import SCSController
 
-    from test import create_live_graph, LiveDashGraph
-    dashboard = create_live_graph(
-        max_points=200,      # Show last 100 data points
-        update_interval=50, # Update every 50ms
-        port=8050           # Dashboard at http://127.0.0.1:8050
-    )
-
-except:
-    raise Exception("scscontroller is not installed")
 
 from connect_SDK import check_ets2_sdk, check_ats_sdk, check_and_install_scs_sdk
 
+import truck_telemetry
 try:
-    import truck_telemetry
     truck_telemetry.init()  # Signals if ETS2 SDK has been detected
 except:
     if not check_ets2_sdk() and not check_ats_sdk():
@@ -1428,6 +1418,50 @@ def refresh_button_detection():
         if cc_start_label.cget("border_color") != SETTINGS_COLOR:
             cc_start_label.configure(border_color=SETTINGS_COLOR)
 
+class CruiseControlPanel:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.overrideredirect(True)
+        self.root.attributes("-topmost", True)
+        self.root.attributes("-toolwindow", True)
+        self.root.config(bg="black")
+        self.root.attributes("-transparentcolor", "black")
+
+        self.label = tk.Label(
+            self.root,
+            text="-- km/h",
+            font=("Segoe UI", 17, "bold"),
+            bg="black",
+            fg="white"
+        )
+        self.label.pack(padx=20, pady=20)
+        self.root.geometry("+100+100")
+
+    def update(self, value=None):
+        global cc_enabled
+        global cc_mode
+        display_text = "-- km/h" if value is None else f"{value} km/h"
+        if cc_enabled:
+            if cc_mode.get() == "Cruise control":
+                color = "lightblue"
+            elif cc_mode.get() == "Speed limiter":
+                color = "green"
+        else:
+            color = "grey"
+
+        self.label.config(text=display_text, fg=color)
+
+    def close(self):
+        try:
+            self.root.destroy()
+        except:
+            pass
+
+def start_panel():
+    global panel
+    panel = CruiseControlPanel()
+    panel.root.mainloop()
+
 def change_target_speed(increments):
     global target_speed
     global speed # ignore for now
@@ -1465,6 +1499,7 @@ def main_cruise_control():
     global target_speed
     global speed
     global pauzed
+    global panel
     global long_increments
     global short_increments
     global long_press_resume
@@ -1478,14 +1513,20 @@ def main_cruise_control():
     long_press_inc = False
     long_press_start = False
     cc_enabled = False
-    long_increment_int = int(long_increments.get().split()[0])
-    short_increment_int = int(short_increments.get().split()[0])
+    try:
+        long_increment_int = int(long_increments.get().split()[0])
+        short_increment_int = int(short_increments.get().split()[0])
+    except ValueError:
+        cmd_print("Invalid increment values in settings", "#FF2020", 10)
+    panel = CruiseControlPanel()
+    threading.Thread(target=start_panel, daemon=True, name="Cruise control panel").start()
+
+
     while not exit_event.is_set() and not (cc_dec_button is None and cc_inc_button is None and cc_start_button is None):
         try:
-            if (buttons_thread is  None or not buttons_thread.is_alive()) and not device_lost:
-                refresh_button_detection()
-            else:
-                time.sleep(0.2)
+            refresh_button_detection()
+            if (buttons_thread is not None and buttons_thread.is_alive()) or device_lost or not ets2_detected.is_set() or device is None or not device.get_init():
+                time.sleep(0.04)
                 continue
             
             long_increment_int = int(long_increments.get().split()[0])
@@ -1602,15 +1643,19 @@ def main_cruise_control():
                         cc_enabled = False
                         cmd_print("Cruise control disabled due to brake input")
 
-            time.sleep(0.02)
             if target_speed is not None:
                 if cc_enabled and not cc_target_speed_thread.is_alive():
                     cc_target_speed_thread = threading.Thread(target=cc_target_speed_thread_func, daemon=True, name="CC Target Speed Thread")
                     cc_target_speed_thread.start()
+
+            panel.update(target_speed)
+            time.sleep(0.02)
         except Exception as e:
+            panel.close()
             context = get_error_context()
             log_error(e, context)
             time.sleep(1)
+    panel.close()
     
 def cc_target_speed_thread_func():
     global exit_event
@@ -1622,52 +1667,58 @@ def cc_target_speed_thread_func():
     global cc_gas
     global cc_brake
     global cc_locked
+    global cc_limiting
+    global brake_exponent_variable
 
     cc_locked = False
+    cc_limiting = False
     prev_speed = speed
     prev_target_speed = target_speed
     prev_cc_gas = 0.0
     prev_cc_brake = 0.0
+    ds = 0.0
     integral_sum = 0.0
     ff_est = 0.0
-    alpha  = 0.3
-    P = 0.15
-    I = 0.005    # Integral gain
-    D = 0.08
+    alpha  = 0.8
+    P = 0.09
+    I = 0.01
+    D = 0.07
     max_integral = 0.3 / I
+    max_proportional = 0.3
     prev_time = time.time()-0.1
 
     while not exit_event.is_set() and cc_enabled and not em_stop:
         if target_speed is not None and not pauzed:
 
             slope = data['rotationY']
-            print(f"rotationY: {slope}")
             error = target_speed - speed
             dt = time.time() - prev_time
+            av_ds = (ds*4 + (prev_speed - speed)) / 5
+            ds = prev_speed - speed
             prev_time = time.time()
 
             # Integral term
             if cc_locked:
                 if error < 0:
-                    integral_sum += -(-error/10)**0.6 * dt *5
+                    integral_sum += -(-error/10) * dt *5 * min(abs(1/(max(av_ds*3, 0.01))), 5)
                 else:
-                    integral_sum += (error/10)**0.6 * dt *5
+                    integral_sum += (error/10) * dt *5 * min(abs(1/(max(av_ds*3, 0.01))), 5)
 
-            if ((error > 0 and (prev_speed - speed) > 0) or (error < 0 and (prev_speed - speed) < 0)) and abs(error) < 5 and abs(prev_speed - speed) < 0.05:
+            if ((error > 0 and (ds) > 0) or (error < 0 and (ds) < 0)) and abs(error) < 3 and abs(ds) < 0.05 and not (cc_mode.get() == "Speed limiter" and cc_limiting):
                 cc_locked = True
-            elif prev_target_speed != target_speed or abs(error) > 5:
+            elif prev_target_speed != target_speed or abs(error) > 2 or (cc_mode.get() == "Speed limiter" and not cc_limiting):
                 cc_locked = False
             integral_sum = max(-max_integral, min(max_integral, integral_sum))
 
             # Derivative term
-            derivative = (prev_speed - speed) / dt
+            derivative = (av_ds) / dt
 
             # Base PID
-            base_val = (error * P +
+            base_val = (max(error * P,-max_proportional) +
                         integral_sum * I +
                         derivative * D +
                         speed * 0.002 +
-                        slope * 25
+                        slope * 18
                         )
 
             # Adapt feed-forward: low-pass filter of the control effort
@@ -1681,11 +1732,9 @@ def cc_target_speed_thread_func():
             if temp_val > 0:
                 cc_brake = 0.0
             else:
-                cc_brake = ((min(max((-temp_val/60), 0),0.2)+ prev_cc_brake*1)/2)
+                cc_brake = ((min(max((-temp_val/100)**0.6, 0),0.07)+ prev_cc_brake*0)/1)
 
             print(f"cc_gas: {round(cc_gas,3)} \t cc_brake: {round(cc_brake,3)} \t speed: {round(speed,1)} kmph \t target_speed: {target_speed} kmph \t integral_sum: {round(integral_sum,3)}")
-
-            dashboard.add_data_point(target_speed, speed)
 
 
 
@@ -1748,6 +1797,7 @@ def main():
     global cc_gas
     global cruise_control_thread
     global cc_locked
+    global cc_limiting
     # Initialize pygame for joystick handling
     
     # Start SDK check thread
@@ -2138,7 +2188,9 @@ def main():
                 opdgasval = max(cc_gas, opdgasval)
             elif (cc_enabled and cc_mode.get() == "Speed limiter"):
                 if opdgasval > cc_gas and cc_gas == 1.0:
-                    cc_locked = True
+                    cc_limiting = True
+                else:
+                    cc_limiting = False
                 opdbrakeval = max(cc_brake, opdbrakeval)
                 opdgasval = min(cc_gas, opdgasval)
             
