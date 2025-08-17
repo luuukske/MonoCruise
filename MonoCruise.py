@@ -4,7 +4,8 @@ import tkinter as tk
 # Create the main window
 root = ctk.CTk()
 
-from PIL import Image, ImageDraw, ImageFont
+
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 import sys
 import ctypes
 import os
@@ -16,6 +17,7 @@ import numpy as np
 import traceback
 import inspect
 from datetime import datetime
+from functools import lru_cache
 import psutil
 import subprocess
 import winreg
@@ -83,17 +85,20 @@ close_bar_event = threading.Event()
 ets2_detected = threading.Event()  # Event for ETS2 detection
 ui_ready = threading.Event()       # Event to signal UI is ready
 
-# Banner colors
-WAITING_COLOR = "#1f538d"  # Blue
-KEY_ON_COLOR = "#1f53FF"  # lighter blue
-CONNECTED_COLOR = "#304230"  # Light grey
-LOST_COLOR = "#FF0000"  # Red
-DEFAULT_COLOR = "#2B2B2B"  # Dark grey
+# colors
+WAITING_COLOR = "#1f538d"
+KEY_ON_COLOR = "#1f53FF"
+CONNECTED_COLOR = "#304230"
+LOST_COLOR = "#FF0000"
+DEFAULT_COLOR = "#2B2B2B"
 VAR_LABEL_COLOR = "#2B2B2B"
-SETTINGS_COLOR = "#454545"  # Dark grey
-SETTING_HEADERS_COLOR = "#454545"  # Dark grey
-DISABLED_COLOR = "#404040"  # Dark grey
-CMD_COLOR = "#808080"  # Light grey
+SETTINGS_COLOR = "#454545"
+SETTING_HEADERS_COLOR = "#454545"
+DISABLED_COLOR = "#F1F1F1"
+CMD_COLOR = "#808080"
+SPEEDLIMITER_COLOR = "#008B00"
+CRUISECONTROL_COLOR = "#4876FF"
+
 TRANSITION_DURATION = 1  # seconds
 TRANSITION_FRAMERATE = 30  # frames per second
 
@@ -376,6 +381,9 @@ def save_variables(filename, **kwargs):
     """
     Saves given variables to a JSON file while preserving any existing values.
     Runs check_and_start_exe() only when autostart_variable flips state.
+    args:
+        filename (str): The name of the JSON file to save variables to.
+        **kwargs: Key-value pairs of variables to save. If a key already exists, its value will be updated.
     """
     global _data_cache
 
@@ -572,6 +580,9 @@ def detect_joystick_movement(button_type="None given"):
 
     def on_key_press(event):
         nonlocal detected_key, key_pressed, button_type
+        # Check exit conditions first
+        if close_buttons_threads.is_set() or exit_event.is_set() or device_lost or unassign:
+            return
         button = event.name.capitalize()  # Get the key name in capitalized format
         detected_key = button  # Store the detected key
         if check_key(button, button_type):
@@ -586,32 +597,39 @@ def detect_joystick_movement(button_type="None given"):
             return False
         else:
             return True
+    
     # Set up keyboard listener
-    keyboard.on_press(on_key_press)
+    try:
+        keyboard.on_press(on_key_press)
+    except Exception as e:
+        pass
 
-    while button is None:
+    # FIXED: Add close_buttons_threads check to the main loop condition
+    while (button is None and 
+           not close_buttons_threads.is_set() and 
+           not exit_event.is_set() and 
+           not device_lost and 
+           not unassign):
         
-        if device is None or not device.get_init() or exit_event.is_set() or close_buttons_threads.is_set() or device_lost:
-            break
-            
-        if unassign:
+        if device is None or not device.get_init():
             break
         
         # Check for keyboard input
         if key_pressed.is_set():
             if detected_key == "Backspace" or detected_key == "Delete":
-                cmd_print("Unassigning button...", "#FF2020", 10)
+                cmd_print("Unassigning button...")
                 unassign_button.configure(state="normal")
                 unassign = True
                 break
             elif detected_key != "Esc" and detected_key != "Escape" and detected_key != "Enter" and detected_key != "Return":
                 print(f"Detected key: {detected_key}")
-                button = detected_key  # Use hash to create unique button number
+                button = detected_key
                 input_type = "key"
                 input_value = button
                 break
             else:
                 close_buttons_threads.set()  # Exit if Esc or Enter is pressed
+                break
         
         # Check joystick input (existing logic) - only if device exists
         if device is not None and device.get_init():
@@ -629,6 +647,10 @@ def detect_joystick_movement(button_type="None given"):
             
             # Check for button state changes (any change: 0 -> 1 or 1 -> 0)
             for i in range(button_count):
+                # FIXED: Check exit conditions and break from main loop if needed
+                if close_buttons_threads.is_set() or exit_event.is_set() or device_lost or unassign:
+                    button = "EXIT"  # Set a flag to exit main loop
+                    break
                 try:
                     current_state = device.get_button(i)
                     if current_state != _prev_button_states[i]:  # Any state change
@@ -641,11 +663,18 @@ def detect_joystick_movement(button_type="None given"):
                 except Exception as e:
                     break
             
+            # FIXED: Check if we should exit the main loop
+            if button == "EXIT":
+                break
             if button is not None:
                 break
             
             # Check for hat state changes
             for hat_index in range(hat_count):
+                # FIXED: Check exit conditions and break from main loop if needed
+                if close_buttons_threads.is_set() or exit_event.is_set() or device_lost or unassign:
+                    button = "EXIT"  # Set a flag to exit main loop
+                    break
                 try:
                     current_hat = device.get_hat(hat_index)
                     prev_hat = _prev_hat_states[hat_index]
@@ -682,23 +711,40 @@ def detect_joystick_movement(button_type="None given"):
                                 input_value = "left"
                         
                         _prev_hat_states[hat_index] = current_hat
+                        if button is not None:
+                            break
                 except Exception as e:
                     break
+            
+            # FIXED: Check if we should exit the main loop
+            if button == "EXIT":
+                break
 
-            time.sleep(0.01)  # Reduced sleep time for better responsiveness
+        time.sleep(0.005)  # Reduced sleep time for faster exit response
 
-    # Clean up keyboard listener
-    keyboard.unhook_all()
+    # Clean up keyboard listener immediately
+    try:
+        keyboard.unhook_all()
+    except Exception as e:
+        pass
 
     unassign = False
 
-    if device is None or not device.get_init() or exit_event.is_set() or close_buttons_threads.is_set() or device_lost:
+    # FIXED: Check for EXIT flag and handle it properly
+    if (button == "EXIT" or 
+        device is None or 
+        not device.get_init() or 
+        exit_event.is_set() or 
+        close_buttons_threads.is_set() or 
+        device_lost):
         try:
             unassign_button.configure(state="disabled")
+            cc_start_label.configure(border_color=SETTINGS_COLOR)
+            cc_inc_label.configure(border_color=SETTINGS_COLOR)
+            cc_dec_label.configure(border_color=SETTINGS_COLOR)
         except:
             pass
         return
-
 
     # Format the display text based on input type
     if input_type == "key" and len(input_value) <= 2:
@@ -711,7 +757,6 @@ def detect_joystick_movement(button_type="None given"):
         display_text = f"hat {input_value}"
     else:
         display_text = "None"
-
 
     if button_type == "start":
         cc_start_button = button
@@ -1418,51 +1463,370 @@ def refresh_button_detection():
         if cc_start_label.cget("border_color") != SETTINGS_COLOR:
             cc_start_label.configure(border_color=SETTINGS_COLOR)
 
-class CruiseControlPanel:
-    def __init__(self):
-        self.root = tk.Tk()
-        self.root.overrideredirect(True)
-        self.root.attributes("-topmost", True)
-        self.root.attributes("-toolwindow", True)
-        self.root.config(bg="black")
-        self.root.attributes("-transparentcolor", "black")
+class cc_panel:
+    def __init__(self, text_content: str, cc_mode: str = "Cruise control", cc_enabled: bool = True):
+        """
+        Initialize the cruise control display panel.
+        
+        Args:
+            text_content: Initial speed text to display (e.g., "100 km/h")
+            cc_mode: Cruise control mode ("Speed limiter" or "Cruise control")
+            cc_enabled: Whether the cruise control system is enabled
+        """
+        self.scale_mult = 0.8
+        self.panel_x = int(300 * self.scale_mult)
+        self.panel_y = int(100 * self.scale_mult)
+        self.bg_color = "#D3D3D3"
+        self.fg_color = "#000000"
+        self.radius = int(30 * self.scale_mult)
+        self.cc_mode = cc_mode
+        self.cc_enabled = cc_enabled
+        self.text_color = self._get_color_for_mode(cc_mode, cc_enabled)
+        self.text_content = text_content
+        self.icon_spacing = int(20 * self.scale_mult)
+        self.opacity = 0.6
+        
+        self.gui_thread = None
+        self.root1 = None
+        self.root2 = None
+        self.running = False
+        
+        self.tk_img1 = None
+        self.tk_img2 = None
 
-        self.label = tk.Label(
-            self.root,
-            text="-- km/h",
-            font=("Segoe UI", 17, "bold"),
-            bg="black",
-            fg="white"
-        )
-        self.label.pack(padx=20, pady=20)
-        self.root.geometry("+100+100")
+        # Cache expensive operations
+        self.font = self._load_font()
+        self._icon_cache = {}
+        self._position_cache = {}
+        self._bg_rgb = self._hex_to_rgb(self.bg_color)
+        
+        self.icon = self._load_icon()
+        self.text_position, self.icon_position = self._calculate_positions()
 
-    def update(self, value=None):
-        global cc_enabled
-        global cc_mode
-        display_text = "-- km/h" if value is None else f"{value} km/h"
-        if cc_enabled:
-            if cc_mode.get() == "Cruise control":
-                color = "lightblue"
-            elif cc_mode.get() == "Speed limiter":
-                color = "green"
-        else:
-            color = "grey"
+        self.img1, self.img2 = self._create_images()
+        self._start_gui_thread()
 
-        self.label.config(text=display_text, fg=color)
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def _hex_to_rgb(hex_color):
+        """Convert hex color to RGB tuple (cached)"""
+        if isinstance(hex_color, str) and hex_color.startswith('#'):
+            hex_color = hex_color.lstrip('#')
+            return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+        return hex_color
 
-    def close(self):
+    def _start_gui_thread(self):
+        """Start the GUI in a separate thread"""
+        self.running = True
+        self.gui_thread = threading.Thread(target=self._show_images, daemon=True)
+        self.gui_thread.start()
+
+    def stop(self):
+        """Stop the GUI and close all windows."""
+        self.running = False
+        
+        def close_window(root):
+            if root and root.winfo_exists():
+                try:
+                    root.after(0, root.quit)
+                except:
+                    pass
+        
+        close_window(self.root1)
+        close_window(self.root2)
+
+    def move(self, x: int, y: int):
+        """Move both windows to the specified position."""
+        if self.root1 and self.root2:
+            self.root1.geometry(f"+{x}+{y}")
+            self.root2.geometry(f"+{x}+{y}")
+
+    def update(self, new_text, cc_mode: str = None, cc_enabled: bool = None):
+        """Update the display with new information."""
+        needs_icon_reload = cc_mode is not None and cc_mode != self.cc_mode
+        needs_color_update = cc_enabled is not None and cc_enabled != self.cc_enabled
+        needs_text_update = new_text != self.text_content
+        
+        # Only update what actually changed
+        if not (needs_icon_reload or needs_color_update or needs_text_update):
+            return
+            
+        self.text_content = new_text
+        
+        if needs_icon_reload:
+            self.cc_mode = cc_mode
+            self.icon = self._load_icon()
+        
+        if needs_color_update:
+            self.cc_enabled = cc_enabled
+        
+        if needs_color_update or needs_icon_reload:
+            self.text_color = self._get_color_for_mode(self.cc_mode, self.cc_enabled)
+        
+        if needs_text_update or needs_icon_reload:
+            self.text_position, self.icon_position = self._calculate_positions()
+        
+        self.img1, self.img2 = self._create_images()
+        
+        if self.root1 and self.root2:
+            self.root1.after(0, self._update_gui_images)
+
+    def _update_gui_images(self):
+        """Update the GUI images (must be called from main thread)"""
+        if not (self.root1 and self.root2):
+            return
+            
         try:
-            self.root.destroy()
-        except:
-            pass
+            # Reuse existing PhotoImage objects if possible
+            if hasattr(self, 'tk_img1') and self.tk_img1:
+                self.tk_img1.paste(self.img1)
+            else:
+                self.tk_img1 = ImageTk.PhotoImage(image=self.img1, master=self.root1)
+                
+            if hasattr(self, 'tk_img2') and self.tk_img2:
+                self.tk_img2.paste(self.img2)
+            else:
+                self.tk_img2 = ImageTk.PhotoImage(image=self.img2, master=self.root2)
+            
+            self.root1.winfo_children()[0].configure(image=self.tk_img1)
+            self.root2.winfo_children()[0].configure(image=self.tk_img2)
+        except Exception as e:
+            print(f"Error updating GUI images: {e}")
 
-def start_panel():
-    global panel
-    panel = CruiseControlPanel()
-    panel.root.mainloop()
+    @lru_cache(maxsize=4)
+    def _load_font(self):
+        """Load font (cached)"""
+        try:
+            return ImageFont.truetype("arialbd.ttf", int(40 * self.scale_mult))
+        except IOError:
+            return ImageFont.load_default()
 
-def change_target_speed(increments):
+    def _load_icon(self):
+        """Load and resize the cruise control icon based on current mode (with caching)"""
+        # Create cache key
+        cache_key = (self.cc_mode, self.text_content, self.scale_mult)
+        if cache_key in self._icon_cache:
+            return self._icon_cache[cache_key]
+            
+        try:
+            icon_file = "speed limiter.png" if self.cc_mode == "Speed limiter" else "cruise control.png"
+            icon = Image.open(icon_file)
+            
+            # Calculate icon size
+            temp_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+            bbox = temp_draw.textbbox((0, 0), self.text_content, font=self.font)
+            text_height = bbox[3] - bbox[1]
+            icon_size = int(text_height * 2)
+            
+            icon = icon.resize((icon_size, icon_size), Image.Resampling.LANCZOS)
+            
+        except (IOError, FileNotFoundError):
+            # Create simple placeholder
+            icon_size = int(80 * self.scale_mult)
+            icon = Image.new("RGBA", (icon_size, icon_size), (255, 255, 255, 255))
+            draw = ImageDraw.Draw(icon)
+            draw.ellipse([10, 10, icon_size-10, icon_size-10], outline=(0, 0, 0), width=3)
+            draw.text((icon_size//2-5, icon_size//2-10), "CC", fill=(0, 0, 0))
+        
+        # Cache the result
+        self._icon_cache[cache_key] = icon
+        return icon
+
+    def _calculate_positions(self):
+        """Calculate positions for both text and icon (with caching)"""
+        cache_key = (self.text_content, self.cc_mode, self.scale_mult)
+        if cache_key in self._position_cache:
+            return self._position_cache[cache_key]
+            
+        # Use a minimal temporary draw object
+        temp_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        
+        # Get text dimensions
+        text_bbox = temp_draw.textbbox((0, 0), self.text_content, font=self.font)
+        text_w = text_bbox[2] - text_bbox[0]
+        text_h = text_bbox[3] - text_bbox[1]
+        
+        # Get icon dimensions
+        icon_w, icon_h = self.icon.size
+        
+        # Calculate positions
+        right_margin = int(20 * self.scale_mult)
+        icon_x = self.panel_x - icon_w - right_margin
+        icon_y = (self.panel_y - icon_h) // 2
+        text_x = icon_x - self.icon_spacing - text_w - text_bbox[0]
+        text_y = (self.panel_y - text_h) // 2 - text_bbox[1]
+        
+        result = ((text_x, text_y), (icon_x, icon_y))
+        self._position_cache[cache_key] = result
+        return result
+
+    def _multiply_text_color_numpy(self, image, multiply_color, exception_color):
+        """
+        Optimized color multiplication using NumPy for better performance.
+        """
+        multiply_rgb = self._hex_to_rgb(multiply_color)
+        exception_rgb = self._hex_to_rgb(exception_color)
+        
+        # Convert PIL image to numpy array
+        img_array = np.array(image.convert('RGB'), dtype=np.uint8)
+        
+        # Create mask for pixels that are NOT the exception color
+        mask = ~np.all(img_array == exception_rgb, axis=2)
+        
+        # Apply multiplication only to non-exception pixels
+        multiply_factors = np.array(multiply_rgb, dtype=np.float32) / 255.0
+        
+        # Vectorized multiplication
+        img_float = img_array.astype(np.float32)
+        img_float[mask] *= multiply_factors
+        
+        # Clip values and convert back
+        img_array = np.clip(img_float, 0, 255).astype(np.uint8)
+        
+        return Image.fromarray(img_array)
+
+    def _create_images(self):
+        """Create the display images with optimizations"""
+        # Create base image once
+        base_shape = Image.new("RGB", (self.panel_x, self.panel_y), self.bg_color)
+        draw_base = ImageDraw.Draw(base_shape)
+        draw_base.rounded_rectangle(
+            [(0, 0), (self.panel_x, self.panel_y)],
+            radius=self.radius,
+            fill=self.fg_color,
+            outline="black",
+        )
+        
+        # Image 1
+        img1 = base_shape.copy()
+        draw1 = ImageDraw.Draw(img1)
+        draw1.text(self.text_position, self.text_content, font=self.font, fill=self.text_color)
+        
+        # Optimize icon pasting
+        colored_icon = self._multiply_text_color_numpy(self.icon, self.text_color, self.bg_color)
+        img1.paste(colored_icon, self.icon_position, 
+                  self.icon if self.icon.mode == 'RGBA' else None)
+
+        # Image 2 - optimized with numpy operations
+        img2 = Image.new("RGB", (self.panel_x, self.panel_y), self.bg_color)
+        draw2 = ImageDraw.Draw(img2)
+        draw2.text(self.text_position, self.text_content, font=self.font, fill="white")
+        img2.paste(self.icon, self.icon_position, 
+                  self.icon if self.icon.mode == 'RGBA' else None)
+        
+        img2 = self._remove_anti_aliasing_numpy(img2, threshold=234)
+        img2 = self._multiply_text_color_numpy(img2, self.text_color, self.bg_color)
+
+        return img1, img2
+
+    def _remove_anti_aliasing_numpy(self, image, threshold=234):
+        """Optimized anti-aliasing removal using NumPy"""
+        img_array = np.array(image.convert('RGB'), dtype=np.uint8)
+        
+        # Convert to grayscale for brightness check
+        grayscale = np.dot(img_array[...,:3], [0.299, 0.587, 0.114])
+        
+        # Create mask for pixels above threshold
+        mask = grayscale >= threshold
+        
+        # Create result array filled with background color
+        bg_rgb = self._bg_rgb
+        result = np.full_like(img_array, bg_rgb, dtype=np.uint8)
+        
+        # Keep original colors where mask is True
+        result[mask] = img_array[mask]
+        
+        return Image.fromarray(result)
+
+    def _make_draggable(self, window1, window2):
+        """Make both windows draggable together (optimized to reduce redundant calculations)"""
+        drag_data = {'start_x1': 0, 'start_y1': 0, 'start_x2': 0, 'start_y2': 0}
+        
+        def start_move(event):
+            drag_data['start_x1'] = event.x_root - window1.winfo_x()
+            drag_data['start_y1'] = event.y_root - window1.winfo_y()
+            drag_data['start_x2'] = event.x_root - window2.winfo_x()
+            drag_data['start_y2'] = event.y_root - window2.winfo_y()
+
+        def stop_move(event):
+            try:
+                save_variables(os.path.join(os.path.dirname(os.path.abspath(__file__)), "saves.json"),
+                            panel_x=window1.winfo_x(),
+                            panel_y=window1.winfo_y())
+            except:
+                pass  # Ignore save errors
+
+        def do_move(event):
+            x1 = event.x_root - drag_data['start_x1']
+            y1 = event.y_root - drag_data['start_y1']
+            x2 = event.x_root - drag_data['start_x2']
+            y2 = event.y_root - drag_data['start_y2']
+            
+            window1.geometry(f"+{x1}+{y1}")
+            window2.geometry(f"+{x2}+{y2}")
+
+        # Bind events to both windows
+        for window in [window1, window2]:
+            window.bind("<Button-1>", start_move)
+            window.bind("<B1-Motion>", do_move)
+            window.bind("<ButtonRelease-1>", stop_move)
+
+    def _show_images(self):
+        """Display the GUI windows"""
+        if not all(hasattr(self, attr) for attr in ['img1', 'img2']):
+            print("Images not loaded")
+            return
+
+        try:
+            # Create first window
+            root1 = tk.Tk()
+            self._setup_window(root1)
+            
+            tk_img1 = ImageTk.PhotoImage(self.img1, master=root1)
+            self.tk_img1 = tk_img1
+            
+            label1 = tk.Label(root1, image=tk_img1, bd=0, highlightthickness=0, bg=self.bg_color)
+            label1.pack(padx=0, pady=0)
+
+            # Create second window
+            root2 = tk.Toplevel()
+            self._setup_window(root2)
+            
+            tk_img2 = ImageTk.PhotoImage(self.img2, master=root2)
+            self.tk_img2 = tk_img2
+            
+            label2 = tk.Label(root2, image=tk_img2, bd=0, highlightthickness=0, bg=self.bg_color)
+            label2.pack(padx=0, pady=0)
+
+            # Position windows
+            root1.update_idletasks()
+            root2.geometry(f"+{root1.winfo_x()}+{root1.winfo_y()}")
+
+            self._make_draggable(root1, root2)
+            self.root1 = root1
+            self.root2 = root2
+            self.root1.mainloop()
+            
+        except Exception as e:
+            print(f"Error in _show_images: {e}")
+
+    def _setup_window(self, window):
+        """Common window setup"""
+        window.overrideredirect(True)
+        window.attributes("-topmost", True)
+        window.attributes("-toolwindow", True)
+        window.attributes("-transparentcolor", self.bg_color)
+        window.attributes("-alpha", self.opacity)
+        window.configure(bg=self.bg_color)
+        window.update_idletasks()
+
+    def _get_color_for_mode(self, mode: str, enabled: bool):
+        """Get the appropriate color based on the cruise control mode"""
+        if not enabled:
+            return DISABLED_COLOR
+        return SPEEDLIMITER_COLOR if mode == "Speed limiter" else CRUISECONTROL_COLOR
+
+def change_target_speed(increments, app=None):
     global target_speed
     global speed # ignore for now
 
@@ -1483,6 +1847,11 @@ def change_target_speed(increments):
         target_speed = 20
     elif target_speed > 130:
         target_speed = 130
+    if app is not None:
+        if target_speed is not None:
+            app.update(f"{int(target_speed)} km/h", cc_mode.get(), True)
+        else:
+            app.update("-- km/h", cc_mode.get(), True)
 
 def main_cruise_control():
     global exit_event
@@ -1505,6 +1874,7 @@ def main_cruise_control():
     global long_press_resume
 
     cc_target_speed_thread = threading.Thread(target=cc_target_speed_thread_func, daemon=True, name="CC Target Speed Thread")
+    app = None
     time_pressed_dec = None
     time_pressed_inc = None
     time_pressed_start = None
@@ -1518,13 +1888,24 @@ def main_cruise_control():
         short_increment_int = int(short_increments.get().split()[0])
     except ValueError:
         cmd_print("Invalid increment values in settings", "#FF2020", 10)
-    panel = CruiseControlPanel()
-    threading.Thread(target=start_panel, daemon=True, name="Cruise control panel").start()
+        long_increment_int = 5
+        short_increment_int = 1
+        long_increments.set(f"5 km/h")
+        short_increments.set(f"1 km/h")
 
 
     while not exit_event.is_set() and not (cc_dec_button is None and cc_inc_button is None and cc_start_button is None):
         try:
-            refresh_button_detection()
+            try:
+                if not pauzed and ets2_detected.is_set():
+                    app = cc_panel("-- km/h", "Cruise control", False)
+            except:
+                time.sleep(0.1)
+                continue
+
+            if buttons_thread is None or not buttons_thread.is_alive():
+                refresh_button_detection()
+
             if (buttons_thread is not None and buttons_thread.is_alive()) or device_lost or not ets2_detected.is_set() or device is None or not device.get_init():
                 time.sleep(0.04)
                 continue
@@ -1537,7 +1918,7 @@ def main_cruise_control():
                 if time_pressed_dec is None:
                     time_pressed_dec = time.time()
                 delt_time_dec = (time.time() - time_pressed_dec)
-                if (not long_press_dec and delt_time_dec > 0.6) or (long_press_dec and delt_time_dec > 0.4):
+                if (not long_press_dec and delt_time_dec > 0.3) or (long_press_dec and delt_time_dec > 0.6):
                     long_press_dec = True
                     time_pressed_dec = time.time()
                     if cc_dec:
@@ -1545,7 +1926,7 @@ def main_cruise_control():
                         # long press
                         print("long press on dec")
                         if target_speed is not None:
-                            change_target_speed(-long_increment_int)
+                            change_target_speed(-long_increment_int, app)
 
             elif time_pressed_dec != None:
                 if not long_press_dec:
@@ -1553,7 +1934,7 @@ def main_cruise_control():
                     # short press
                     print("short press dec")
                     if target_speed is not None:
-                        change_target_speed(-short_increment_int)
+                        change_target_speed(-short_increment_int, app)
 
                 else:
                     long_press_dec = False
@@ -1565,7 +1946,7 @@ def main_cruise_control():
                 if time_pressed_inc is None:
                     time_pressed_inc = time.time()
                 delt_time_inc = (time.time() - time_pressed_inc)
-                if (not long_press_inc and delt_time_inc > 0.6) or (long_press_inc and delt_time_inc > 0.4):
+                if (not long_press_inc and delt_time_inc > 0.3) or (long_press_inc and delt_time_inc > 0.6):
                     long_press_inc = True
                     time_pressed_inc = time.time()
                     if cc_inc:
@@ -1577,7 +1958,7 @@ def main_cruise_control():
                         cc_enabled = True
                         cmd_print("Cruise control enabled")
                         if target_speed is not None:
-                            change_target_speed(long_increment_int)
+                            change_target_speed(long_increment_int, app)
 
             elif time_pressed_inc != None:
                 if not long_press_inc:
@@ -1589,7 +1970,7 @@ def main_cruise_control():
                     cc_enabled = True
                     cmd_print("Cruise control enabled")
                     if target_speed is not None:
-                        change_target_speed(short_increment_int)
+                        change_target_speed(short_increment_int, app)
 
                 else:
                     long_press_inc = False
@@ -1612,6 +1993,7 @@ def main_cruise_control():
                         if not cc_enabled:
                             cc_enabled = True
                             cmd_print("Cruise control resuming")
+                        app.update(f"{int(target_speed)} km/h", cc_mode.get(), True)
                     elif not long_press_resume.get():
                         cmd_print("Long press resume is disabled")
 
@@ -1627,6 +2009,7 @@ def main_cruise_control():
                         target_speed = max(min(int(speed),130), 20)
                         cc_enabled = True
                         cmd_print("Cruise control enabled")
+                    app.update(f"{int(target_speed)} km/h", cc_mode.get(), cc_enabled)
 
                 else:
                     long_press_start = False
@@ -1641,6 +2024,7 @@ def main_cruise_control():
                 if brakeval > 0.1 or em_stop:
                     if cc_enabled:
                         cc_enabled = False
+                        app.update(f"{int(target_speed)} km/h", cc_mode.get(), cc_enabled)
                         cmd_print("Cruise control disabled due to brake input")
 
             if target_speed is not None:
@@ -1648,14 +2032,26 @@ def main_cruise_control():
                     cc_target_speed_thread = threading.Thread(target=cc_target_speed_thread_func, daemon=True, name="CC Target Speed Thread")
                     cc_target_speed_thread.start()
 
-            panel.update(target_speed)
+            # update panel
+            if app is not None and app.running:
+                if target_speed is not None:
+                    app.update(f"{int(target_speed)} km/h", cc_mode.get(), cc_enabled)
+                else:
+                    app.update(f"-- km/h", cc_mode.get(), False)
+            else:
+                app = cc_panel("-- km/h", cc_mode.get(), cc_enabled)
             time.sleep(0.02)
         except Exception as e:
-            panel.close()
+            # close panel
+            try:
+                if app is not None and app.running:
+                    app.stop()
+            except:
+                pass
             context = get_error_context()
             log_error(e, context)
             time.sleep(1)
-    panel.close()
+    #close panel
     
 def cc_target_speed_thread_func():
     global exit_event
@@ -1864,6 +2260,7 @@ def main():
         brake_output = 0
         arrived = False
         stopped = False
+        pauzed = False
         horn = False
         em_stop = False
         latency_timestamp = time.time()-0.015
@@ -2579,8 +2976,10 @@ global cc_start_button
 global cc_inc_button
 global cc_dec_button
 global unassign
+''' temporaraly commented out global variables bcs of ghost error
 global cc_enabled
 global cc_locked
+'''
 
 cc_enabled = False
 cc_locked = False
@@ -2812,9 +3211,9 @@ try:
         # Create StringVar for the option menu
         if value is not None:
             # If a value is provided, use it to set the default value
-            if value not in values:
+            if value.get() not in values:
                 cmd_print(f"{value} not in allowed options. value set to default.", "#FF2020", 5)
-                value.set(value=value)
+                value.set(value=default_value)
         elif value is None:
             value = ctk.StringVar(value=default_value)
         
@@ -2982,18 +3381,35 @@ try:
             cc_dec_label.configure(border_color=SETTINGS_COLOR)
             cc_inc_label.configure(border_color=SETTINGS_COLOR)
             cc_start_label.configure(border_color=SETTINGS_COLOR)
-            buttons_thread.join(timeout=2)
+            
+            # Force unhook keyboard listeners before joining
+            try:
+                keyboard.unhook_all()
+            except:
+                pass
+                
+            buttons_thread.join(timeout=0.5)
             if buttons_thread.is_alive():
-                raise RuntimeError("Failed to close the buttons thread gracefully.")
-            else:
-                # Only clear if the thread actually finished
-                close_buttons_threads.clear()
+                # If still alive, try one more time with keyboard cleanup
+                try:
+                    keyboard.unhook_all()
+                except:
+                    pass
+                buttons_thread.join(timeout=1.0)
+                if buttons_thread.is_alive():
+                    raise TimeoutError("Failed to close the buttons thread gracefully.")
+            
+            close_buttons_threads.clear()
         else:
             cc_dec_label.configure(border_color=SETTINGS_COLOR)
             cc_inc_label.configure(border_color=SETTINGS_COLOR)
             cc_start_label.configure(border_color=SETTINGS_COLOR)
-            # Make sure the flag is clear if no thread was running
             close_buttons_threads.clear()
+            # Clean up any lingering keyboard hooks
+            try:
+                keyboard.unhook_all()
+            except:
+                pass
             
         buttons_thread = threading.Thread(target=detect_joystick_movement, daemon=True, args=(button_type,), name="buttons Thread")
         buttons_thread.start()
@@ -3045,7 +3461,7 @@ try:
     unassign_button = ctk.CTkButton(scrollable_frame,width=150, text="Unassign", font=default_font, text_color="lightgrey", fg_color=WAITING_COLOR, corner_radius=5, hover_color="#333366", command=unassign_true, state="disabled")
     unassign_button.grid(row=25, column=0, padx=10, pady=(1,8), columnspan=2, sticky="e")
 
-    short_increments = ctk.StringVar(value="1 km/h")
+    short_increments = ctk.StringVar(value=_data_cache["short_increments"] if "short_increments" in _data_cache else "1 km/h")
     short_press_increments_label = new_label(scrollable_frame, 26, 0, "Short press increments:")
     short_press_increments_options = new_optionmenu(
         scrollable_frame, 26, 1, 
@@ -3054,7 +3470,7 @@ try:
         value=short_increments
     )
 
-    long_increments = ctk.StringVar(value="5 km/h")
+    long_increments = ctk.StringVar(value=_data_cache["long_increments"] if "long_increments" in _data_cache else "5 km/h")
     long_press_increments_label = new_label(scrollable_frame, 27, 0, "Long press increments:")
     long_press_increments_options = new_optionmenu(
         scrollable_frame, 27, 1, 
