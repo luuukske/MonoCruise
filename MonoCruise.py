@@ -56,10 +56,11 @@ except:
 # Get system DPI scaling
 try:
     user32 = ctypes.windll.user32
-    user32.SetProcessDPIAware()
+    user32.SetProcessDPIAware(2)
     scaling = user32.GetDpiForSystem() / 96.0
-except:
+except Exception as e:
     scaling = 1
+    print(e)
 # Configure default font
 try:
     # Try to use Segoe UI on Windows
@@ -543,29 +544,20 @@ def detect_joystick_movement(button_type="None given"):
     
     Updates global variable given as input with the detected input.
     """
-    global device
-    global close_buttons_threads
-    global unassign
-    global exit_event
-    global device_lost
-    global SETTINGS_COLOR
-    
-    button = None  # Reset variable to None at the start
-    input_type = None  # Track whether input was joystick or keyboard
-    input_value = None  # Store the actual input (button index, hat direction, or key)
+    global device, close_buttons_threads, unassign, exit_event, device_lost, SETTINGS_COLOR
+    global unassign_button, cc_start_label, cc_inc_label, cc_dec_label
+    global cc_start_button, cc_inc_button, cc_dec_button
+
+    button = None
+    input_type = None
+    input_value = None
     _prev_button_states = []
     _prev_hat_states = []
     key_pressed = threading.Event()
     detected_key = None
+    should_exit = threading.Event()
 
-    global unassign_button
-    global cc_start_label
-    global cc_inc_label
-    global cc_dec_label
-    global cc_start_button
-    global cc_inc_button
-    global cc_dec_button
-
+    # Configure UI based on button type
     if button_type == "start":
         cc_start_label.configure(border_color="green")
         cmd_print("Waiting for start button press...", display_duration=1)
@@ -579,64 +571,63 @@ def detect_joystick_movement(button_type="None given"):
         raise ValueError(f"Unknown button type: {button_type}")
 
     def on_key_press(event):
-        nonlocal detected_key, key_pressed, button_type
-        # Check exit conditions first
-        if close_buttons_threads.is_set() or exit_event.is_set() or device_lost or unassign:
+        nonlocal detected_key, key_pressed
+        # Check exit conditions
+        if (close_buttons_threads.is_set() or exit_event.is_set() or 
+            device_lost or unassign or should_exit.is_set()):
             return
-        button = event.name.capitalize()  # Get the key name in capitalized format
-        detected_key = button  # Store the detected key
+            
+        button = event.name.capitalize()
+        detected_key = button
         if check_key(button, button_type):
             key_pressed.set()
 
     def check_key(button, button_type):
         global cc_start_button, cc_inc_button, cc_dec_button
-        if (button_type == "start" and (cc_inc_button == button or cc_dec_button == button)) or \
-            (button_type == "inc" and (cc_start_button == button or cc_dec_button == button)) or \
-            (button_type == "dec" and (cc_start_button == button or cc_inc_button == button)):
+        if ((button_type == "start" and (cc_inc_button == button or cc_dec_button == button)) or
+            (button_type == "inc" and (cc_start_button == button or cc_dec_button == button)) or
+            (button_type == "dec" and (cc_start_button == button or cc_inc_button == button))):
             cmd_print(f'"{format_button_text(button)}" button cannot be used twice.', "#FF2020", 10)
             return False
-        else:
-            return True
+        return True
     
     # Set up keyboard listener
+    keyboard_hook = None
     try:
-        keyboard.on_press(on_key_press)
-    except Exception as e:
+        keyboard_hook = keyboard.on_press(on_key_press)
+    except Exception:
         pass
 
-    # FIXED: Add close_buttons_threads check to the main loop condition
-    while (button is None and 
-           not close_buttons_threads.is_set() and 
-           not exit_event.is_set() and 
-           not device_lost and 
-           not unassign):
+    # Main detection loop
+    while (button is None and not close_buttons_threads.is_set() and 
+           not exit_event.is_set() and not device_lost and 
+           not unassign and not should_exit.is_set()):
         
         if device is None or not device.get_init():
             break
         
         # Check for keyboard input
         if key_pressed.is_set():
-            if detected_key == "Backspace" or detected_key == "Delete":
+            if detected_key in ("Backspace", "Delete"):
                 cmd_print("Unassigning button...")
                 unassign_button.configure(state="normal")
                 unassign = True
                 break
-            elif detected_key != "Esc" and detected_key != "Escape" and detected_key != "Enter" and detected_key != "Return":
-                print(f"Detected key: {detected_key}")
+            elif detected_key not in ("Esc", "Escape", "Enter", "Return"):
                 button = detected_key
                 input_type = "key"
                 input_value = button
                 break
             else:
-                close_buttons_threads.set()  # Exit if Esc or Enter is pressed
+                close_buttons_threads.set()
                 break
         
-        # Check joystick input (existing logic) - only if device exists
+        # Check joystick input
         if device is not None and device.get_init():
             try:
                 button_count = device.get_numbuttons()
                 hat_count = device.get_numhats()
-            except Exception as e:
+            except Exception:
                 break
             
             # Initialize previous states if needed
@@ -645,112 +636,97 @@ def detect_joystick_movement(button_type="None given"):
             if len(_prev_hat_states) != hat_count:
                 _prev_hat_states = [(0, 0)] * hat_count
             
-            # Check for button state changes (any change: 0 -> 1 or 1 -> 0)
+            # Check for button state changes
             for i in range(button_count):
-                # FIXED: Check exit conditions and break from main loop if needed
-                if close_buttons_threads.is_set() or exit_event.is_set() or device_lost or unassign:
-                    button = "EXIT"  # Set a flag to exit main loop
+                if (close_buttons_threads.is_set() or exit_event.is_set() or 
+                    device_lost or unassign or should_exit.is_set()):
+                    button = "EXIT"
                     break
                 try:
                     current_state = device.get_button(i)
-                    if current_state != _prev_button_states[i]:  # Any state change
+                    if current_state != _prev_button_states[i]:
                         if check_key(i, button_type):
                             button = i
                             input_type = "button"
                             input_value = i
                             _prev_button_states[i] = current_state
                             break
-                except Exception as e:
+                except Exception:
                     break
             
-            # FIXED: Check if we should exit the main loop
-            if button == "EXIT":
-                break
-            if button is not None:
+            if button == "EXIT" or button is not None:
                 break
             
             # Check for hat state changes
             for hat_index in range(hat_count):
-                # FIXED: Check exit conditions and break from main loop if needed
-                if close_buttons_threads.is_set() or exit_event.is_set() or device_lost or unassign:
-                    button = "EXIT"  # Set a flag to exit main loop
+                if (close_buttons_threads.is_set() or exit_event.is_set() or 
+                    device_lost or unassign or should_exit.is_set()):
+                    button = "EXIT"
                     break
                 try:
                     current_hat = device.get_hat(hat_index)
                     prev_hat = _prev_hat_states[hat_index]
                     
-                    if current_hat != prev_hat:  # Hat position changed
+                    if current_hat != prev_hat:
                         hat_x, hat_y = current_hat
                         hat_button_base = button_count + (hat_index * 4)
                         
-                        # Trigger on any movement TO a direction (including from center)
-                        # For hat movement, we report the new position being moved to
-                        if hat_y == 1:  # Moved to Up
-                            temp_button = hat_button_base + 0
+                        # Map hat directions to button indices
+                        direction_map = {
+                            (0, 1): (hat_button_base + 0, "up"),
+                            (1, 0): (hat_button_base + 1, "right"),
+                            (0, -1): (hat_button_base + 2, "down"),
+                            (-1, 0): (hat_button_base + 3, "left")
+                        }
+                        
+                        if current_hat in direction_map:
+                            temp_button, direction = direction_map[current_hat]
                             if check_key(temp_button, button_type):
                                 button = temp_button
                                 input_type = "hat"
-                                input_value = "up"
-                        elif hat_x == 1:  # Moved to Right
-                            temp_button = hat_button_base + 1
-                            if check_key(temp_button, button_type):
-                                button = temp_button
-                                input_type = "hat"
-                                input_value = "right"
-                        elif hat_y == -1:  # Moved to Down
-                            temp_button = hat_button_base + 2
-                            if check_key(temp_button, button_type):
-                                button = temp_button
-                                input_type = "hat"
-                                input_value = "down"
-                        elif hat_x == -1:  # Moved to Left
-                            temp_button = hat_button_base + 3
-                            if check_key(temp_button, button_type):
-                                button = temp_button
-                                input_type = "hat"
-                                input_value = "left"
+                                input_value = direction
                         
                         _prev_hat_states[hat_index] = current_hat
                         if button is not None:
                             break
-                except Exception as e:
+                except Exception:
                     break
             
-            # FIXED: Check if we should exit the main loop
             if button == "EXIT":
                 break
 
-        time.sleep(0.005)  # Reduced sleep time for faster exit response
+        time.sleep(0.005)
 
-    # Clean up keyboard listener immediately
+    # Cleanup
+    should_exit.set()
+    time.sleep(0.01)
+    
+    try:
+        if keyboard_hook is not None:
+            keyboard.unhook(keyboard_hook)
+        else:
+            keyboard.unhook_all()
+    except Exception:
+        pass
+    
     try:
         keyboard.unhook_all()
-    except Exception as e:
+    except Exception:
         pass
 
     unassign = False
 
-    # FIXED: Check for EXIT flag and handle it properly
-    if (button == "EXIT" or 
-        device is None or 
-        not device.get_init() or 
-        exit_event.is_set() or 
-        close_buttons_threads.is_set() or 
-        device_lost):
-        try:
-            unassign_button.configure(state="disabled")
-            cc_start_label.configure(border_color=SETTINGS_COLOR)
-            cc_inc_label.configure(border_color=SETTINGS_COLOR)
-            cc_dec_label.configure(border_color=SETTINGS_COLOR)
-        except:
-            pass
+    # Handle early exit conditions
+    if (button == "EXIT" or device is None or not device.get_init() or 
+        exit_event.is_set() or close_buttons_threads.is_set() or device_lost):
+        close_buttons_threads.clear()
         return
 
-    # Format the display text based on input type
+    # Format display text based on input type
     if input_type == "key" and len(input_value) <= 2:
         display_text = f"key {input_value.capitalize()}"
     elif input_type == "key":
-        display_text = f"{input_value.capitalize()}"
+        display_text = input_value.capitalize()
     elif input_type == "button":
         display_text = f"button {int(input_value)}"
     elif input_type == "hat":
@@ -758,20 +734,21 @@ def detect_joystick_movement(button_type="None given"):
     else:
         display_text = "None"
 
+    # Update UI based on button type
+    text_color = "lightgrey" if display_text != "None" else SETTINGS_COLOR
+    
     if button_type == "start":
         cc_start_button = button
-        cc_start_label.configure(border_color=SETTINGS_COLOR, text=display_text, text_color="lightgrey" if display_text != "None" else SETTINGS_COLOR)
+        cc_start_label.configure(border_color=SETTINGS_COLOR, text=display_text, text_color=text_color)
     elif button_type == "inc":
         cc_inc_button = button
-        cc_inc_label.configure(border_color=SETTINGS_COLOR, text=display_text, text_color="lightgrey" if display_text != "None" else SETTINGS_COLOR)
+        cc_inc_label.configure(border_color=SETTINGS_COLOR, text=display_text, text_color=text_color)
     elif button_type == "dec":
         cc_dec_button = button
-        cc_dec_label.configure(border_color=SETTINGS_COLOR, text=display_text, text_color="lightgrey" if display_text != "None" else SETTINGS_COLOR)
-    else:
-        raise ValueError(f"Unknown button type: {button_type}")
+        cc_dec_label.configure(border_color=SETTINGS_COLOR, text=display_text, text_color=text_color)
     
     unassign_button.configure(state="disabled")
-    return
+    close_buttons_threads.clear()
 
 def connect_joystick():
     def capture_default_positions(joystick):
@@ -1380,7 +1357,6 @@ def sdk_check_thread():
                 first = False
         except Exception as e:
             if isinstance(e, FileNotFoundError) or str(e) == "Not support this telemetry sdk version" or str(e) == "SDK_NOT_ACTIVE":
-                print(isinstance(e, FileNotFoundError), str(e) == "Not support this telemetry sdk version", str(e) == "SDK_NOT_ACTIVE")
                 #print("ETS2 not found, please start the game first.")
                 ets2_detected.clear()
                 if first:
@@ -1473,7 +1449,7 @@ class cc_panel:
             cc_mode: Cruise control mode ("Speed limiter" or "Cruise control")
             cc_enabled: Whether the cruise control system is enabled
         """
-        self.scale_mult = 0.8
+        self.scale_mult = 1.2
         self.start_x = x_co
         self.start_y = y_co
         self.panel_x = int(300 * self.scale_mult)
@@ -1486,7 +1462,7 @@ class cc_panel:
         self.text_color = self._get_color_for_mode(cc_mode, cc_enabled)
         self.text_content = text_content
         self.icon_spacing = int(20 * self.scale_mult)
-        self.opacity = 0.6
+        self.opacity = 0.7
         
         self.gui_thread = None
         self.root1 = None
@@ -1829,6 +1805,7 @@ class cc_panel:
 
     def _setup_window(self, window):
         """Common window setup"""
+        window.wthdraw()  # Hide the window initially
         window.overrideredirect(True)
         window.attributes("-topmost", True)
         window.attributes("-transparentcolor", self.bg_color)
@@ -1883,13 +1860,14 @@ def main_cruise_control():
     global cc_start
     global buttons_thread
     global brakeval
+    global gasval
     global target_speed
     global speed
     global pauzed
     global panel
     global long_increments
     global short_increments
-    global long_press_resume
+    global long_press_reset
 
     cc_target_speed_thread = threading.Thread(target=cc_target_speed_thread_func, daemon=True, name="CC Target Speed Thread")
     time_pressed_dec = None
@@ -1909,7 +1887,13 @@ def main_cruise_control():
         short_increment_int = 1
         long_increments.set(f"5 km/h")
         short_increments.set(f"1 km/h")
-    app = cc_panel("-- km/h", "Cruise control", False, _data_cache["panel_x"], _data_cache["panel_y"])
+    if _data_cache and "panel_x" in _data_cache and "panel_y" in _data_cache:
+        panel_x = _data_cache["panel_x"]
+        panel_y = _data_cache["panel_y"]
+    else:
+        panel_x = 100
+        panel_y = 100
+    app = cc_panel("-- km/h", "Cruise control", False, panel_x, panel_y)
 
 
     while not exit_event.is_set() and not (cc_dec_button is None and cc_inc_button is None and cc_start_button is None):
@@ -1927,6 +1911,11 @@ def main_cruise_control():
             short_increment_int = int(short_increments.get().split()[0])
             all_buttons_assigned = cc_dec_button is not None and cc_inc_button is not None and cc_start_button is not None
 
+            if not all_buttons_assigned and (cc_dec or cc_inc or cc_start):
+                cmd_print("Please assign all cruise control buttons in the settings", "#FF2020", 10)
+                time.sleep(0.5)
+                continue
+
             if cc_dec and not cc_inc and not cc_start and all_buttons_assigned:
                 if time_pressed_dec is None:
                     time_pressed_dec = time.time()
@@ -1938,7 +1927,7 @@ def main_cruise_control():
 
                         # long press
                         print("long press on dec")
-                        if target_speed is not None:
+                        if target_speed != None:
                             change_target_speed(-long_increment_int, app)
 
             elif time_pressed_dec != None:
@@ -1946,7 +1935,7 @@ def main_cruise_control():
 
                     # short press
                     print("short press dec")
-                    if target_speed is not None:
+                    if target_speed != None:
                         change_target_speed(-short_increment_int, app)
 
                 else:
@@ -1966,24 +1955,26 @@ def main_cruise_control():
 
                         # long press
                         print("long press on inc")
-                        if not cc_enabled:
-                            target_speed = int(speed)
-                        cc_enabled = True
-                        cmd_print("Cruise control enabled")
-                        if target_speed is not None:
+                        if target_speed is None:
+                            target_speed = max(min(int(round(speed)),130), 20)
+                        else:
                             change_target_speed(long_increment_int, app)
+                        if not cc_enabled:
+                            cc_enabled = True
+                            cmd_print("Cruise control enabled")
 
             elif time_pressed_inc != None:
                 if not long_press_inc:
 
                     # short press
                     print("short press inc")
-                    if not cc_enabled:
-                        target_speed = int(speed)
-                    cc_enabled = True
-                    cmd_print("Cruise control enabled")
-                    if target_speed is not None:
+                    if target_speed is None:
+                        target_speed = max(min(int(round(speed)),130), 20)
+                    else:
                         change_target_speed(short_increment_int, app)
+                    if not cc_enabled:
+                        cc_enabled = True
+                        cmd_print("Cruise control enabled")
 
                 else:
                     long_press_inc = False
@@ -1997,18 +1988,16 @@ def main_cruise_control():
                 delt_time_start = (time.time() - time_pressed_start)
                 if (not long_press_start and delt_time_start > 0.5):
                     long_press_start = True
-                    if cc_start and long_press_resume.get():
+                    if cc_start and long_press_reset.get():
 
                         # long press
                         print("long press on start")
-                        if target_speed is None and speed is not None:
-                            target_speed = int(speed)
+                        target_speed = max(min(int(round(speed)),130), 20)
                         if not cc_enabled:
                             cc_enabled = True
-                            cmd_print("Cruise control resuming")
                         app.update(f"{int(target_speed)} km/h", cc_mode.get(), True)
-                    elif not long_press_resume.get():
-                        cmd_print("Long press resume is disabled")
+                    elif not long_press_reset.get():
+                        cmd_print("Long press to reset is disabled")
 
             elif time_pressed_start != None:
                 if not long_press_start:
@@ -2019,19 +2008,16 @@ def main_cruise_control():
                         cc_enabled = False
                         cmd_print("Cruise control disabled")
                     else:
-                        target_speed = max(min(int(speed),130), 20)
                         cc_enabled = True
                         cmd_print("Cruise control enabled")
+
+                    if target_speed == None:
+                        target_speed = max(min(int(round(speed)),130), 20)
                     app.update(f"{int(target_speed)} km/h", cc_mode.get(), cc_enabled)
 
                 else:
                     long_press_start = False
                 time_pressed_start = None
-            
-            if not all_buttons_assigned and (cc_dec or cc_inc or cc_start):
-                cmd_print("Please assign all cruise control buttons in the settings", "#FF2020", 10)
-                time.sleep(0.5)
-                continue
             
             if cc_mode.get() == "Cruise control":
                 if brakeval > 0.1 or em_stop:
@@ -2051,9 +2037,11 @@ def main_cruise_control():
                     if show_cc_ui.get() and ets2_detected.is_set():
                         if not app.root1.winfo_viewable() and not app.root2.winfo_viewable():
                             app.show()
+                            cmd_print("Cruise control panel shown")
                     else:
                         if app.root1.winfo_viewable() and app.root2.winfo_viewable():
                             app.hide()
+                            cmd_print("Cruise control panel hidden")
                 except:
                     pass
 
@@ -2077,7 +2065,7 @@ def main_cruise_control():
             context = get_error_context()
             log_error(e, context)
             time.sleep(1)
-    app.close()
+    app.stop()
     
 def cc_target_speed_thread_func():
     global exit_event
@@ -2102,11 +2090,11 @@ def cc_target_speed_thread_func():
     integral_sum = 0.0
     ff_est = 0.0
     alpha  = 0.8
-    P = 0.09
+    P = 0.11
     I = 0.01
     D = 0.07
     max_integral = 0.3 / I
-    max_proportional = 0.3
+    max_proportional = 0.5
     prev_time = time.time()-0.1
 
     while not exit_event.is_set() and cc_enabled and not em_stop:
@@ -2135,8 +2123,14 @@ def cc_target_speed_thread_func():
             # Derivative term
             derivative = (av_ds) / dt
 
+            # Proportional term
+            if error < 0:
+                proportional = -((-error)**0.8) * P
+            else:
+                proportional = (error**0.8) * P
+
             # Base PID
-            base_val = (max(error * P,-max_proportional) +
+            base_val = (max(proportional,-max_proportional) +
                         integral_sum * I +
                         derivative * D +
                         speed * 0.002 +
@@ -2255,7 +2249,7 @@ def main():
                             cc_mode = cc_mode.get(),
                             long_increments = long_increments.get(),
                             short_increments = short_increments.get(),
-                            long_press_resume = long_press_resume.get(),
+                            long_press_reset = long_press_reset.get(),
                             show_cc_ui = show_cc_ui.get()
                             )
 
@@ -2338,7 +2332,7 @@ def main():
                             cc_mode = cc_mode.get(),
                             long_increments = long_increments.get(),
                             short_increments = short_increments.get(),
-                            long_press_resume = long_press_resume.get(),
+                            long_press_reset = long_press_reset.get(),
                             show_cc_ui = show_cc_ui.get()
                             )
 
@@ -3180,7 +3174,6 @@ try:
                     temp_textvariable.set(textvariable.get())  # Revert if input isn't a number
                 finally:
                     remove_focus() # remove focus on entry field
-                    print("test")
                     if command is not None:
                         command()
 
@@ -3300,12 +3293,12 @@ try:
 
     connected_joystick_gas_axis_label = new_label(scrollable_frame, 2, 0, "Gas axis:")
 
-    connected_joystick_gas_axis_label = ctk.CTkLabel(scrollable_frame, text="None" if gasaxis is 0 and device is not 0 else f"axis {gasaxis}", font=default_font, text_color="lightgrey", fg_color=VAR_LABEL_COLOR, corner_radius=5)
+    connected_joystick_gas_axis_label = ctk.CTkLabel(scrollable_frame, text="None" if gasaxis == 0 and device != 0 else f"axis {gasaxis}", font=default_font, text_color="lightgrey", fg_color=VAR_LABEL_COLOR, corner_radius=5)
     connected_joystick_gas_axis_label.grid(row=2, column=1, padx=10, pady=1, sticky="e")
 
     connected_joystick_brake_axis_label = new_label(scrollable_frame, 3, 0, "Brake axis:")
 
-    connected_joystick_brake_axis_label = ctk.CTkLabel(scrollable_frame, text="None" if brakeaxis is 0 and device is not 0 else f"axis {brakeaxis}", font=default_font, text_color="lightgrey", fg_color=VAR_LABEL_COLOR, corner_radius=5)
+    connected_joystick_brake_axis_label = ctk.CTkLabel(scrollable_frame, text="None" if brakeaxis == 0 and device != 0 else f"axis {brakeaxis}", font=default_font, text_color="lightgrey", fg_color=VAR_LABEL_COLOR, corner_radius=5)
     connected_joystick_brake_axis_label.grid(row=3, column=1, padx=10, pady=1, sticky="e")
 
     restart_connection_button = ctk.CTkButton(scrollable_frame, text="connect to pedals", font=default_font, text_color="lightgrey", fg_color=WAITING_COLOR, corner_radius=5, hover_color="#333366", command=lambda: threading.Thread(target=connect_joystick, name="connect joystick thread").start())
@@ -3414,18 +3407,8 @@ try:
             except:
                 pass
                 
-            buttons_thread.join(timeout=0.5)
-            if buttons_thread.is_alive():
-                # If still alive, try one more time with keyboard cleanup
-                try:
-                    keyboard.unhook_all()
-                except:
-                    pass
-                buttons_thread.join(timeout=1.0)
-                if buttons_thread.is_alive():
-                    raise TimeoutError("Failed to close the buttons thread gracefully.")
-            
-            close_buttons_threads.clear()
+            while close_buttons_threads.is_set():
+                time.sleep(0.1)
         else:
             cc_dec_label.configure(border_color=SETTINGS_COLOR)
             cc_inc_label.configure(border_color=SETTINGS_COLOR)
@@ -3505,17 +3488,18 @@ try:
         value=long_increments,
     )
 
-    long_press_resume_label = new_label(scrollable_frame, 28, 0, "Hold enable to resume:")
-    long_press_resume = ctk.BooleanVar(value=True)
-    long_press_resume_button = new_checkbutton(
+    long_press_reset_label = new_label(scrollable_frame, 28, 0, "Hold enable to reset:")
+    long_press_reset = ctk.BooleanVar(value=True)
+    long_press_reset_button = new_checkbutton(
         scrollable_frame, 28, 1,
-        long_press_resume)
+        long_press_reset)
 
     show_cc_ui_label = new_label(scrollable_frame, 29, 0, "Show set speed on screen:")
     show_cc_ui = ctk.BooleanVar(value=True)
     show_cc_ui_button = new_checkbutton(
         scrollable_frame, 29, 1,
         show_cc_ui)
+    ctk.CTkLabel(scrollable_frame, text="just drag it across the screen to move", font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, bg_color="transparent", anchor="e", wraplength=185, height=10, justify="right").grid(row=30, column=0, padx=10, pady=(0,8), columnspan=2, sticky="nsew")
 
 
 
@@ -4037,7 +4021,7 @@ try:
         long_increments.set(_data_cache["long_increments"])
     except Exception: pass
     try:
-        long_press_resume.set(_data_cache["long_press_resume"])
+        long_press_reset.set(_data_cache["long_press_reset"])
     except Exception: pass
     try:
         show_cc_ui.set(_data_cache["show_cc_ui"])
