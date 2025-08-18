@@ -1464,7 +1464,7 @@ def refresh_button_detection():
             cc_start_label.configure(border_color=SETTINGS_COLOR)
 
 class cc_panel:
-    def __init__(self, text_content: str, cc_mode: str = "Cruise control", cc_enabled: bool = True):
+    def __init__(self, text_content: str, cc_mode: str = "Cruise control", cc_enabled: bool = True, x_co = 100, y_co = 100):
         """
         Initialize the cruise control display panel.
         
@@ -1474,6 +1474,8 @@ class cc_panel:
             cc_enabled: Whether the cruise control system is enabled
         """
         self.scale_mult = 0.8
+        self.start_x = x_co
+        self.start_y = y_co
         self.panel_x = int(300 * self.scale_mult)
         self.panel_y = int(100 * self.scale_mult)
         self.bg_color = "#D3D3D3"
@@ -1520,6 +1522,18 @@ class cc_panel:
         self.running = True
         self.gui_thread = threading.Thread(target=self._show_images, daemon=True)
         self.gui_thread.start()
+
+    def show(self):
+        """Show both windows (deiconify)."""
+        if self.root1 and self.root2:
+            self.root1.after(0, self.root1.deiconify)
+            self.root2.after(0, self.root2.deiconify)
+
+    def hide(self):
+        """Hide both windows (withdraw)."""
+        if self.root1 and self.root2:
+            self.root1.after(0, self.root1.withdraw)
+            self.root2.after(0, self.root2.withdraw)
 
     def stop(self):
         """Stop the GUI and close all windows."""
@@ -1590,6 +1604,8 @@ class cc_panel:
             
             self.root1.winfo_children()[0].configure(image=self.tk_img1)
             self.root2.winfo_children()[0].configure(image=self.tk_img2)
+            self.root1.lift()
+            self.root2.lift()
         except Exception as e:
             print(f"Error updating GUI images: {e}")
 
@@ -1781,6 +1797,7 @@ class cc_panel:
             # Create first window
             root1 = tk.Tk()
             self._setup_window(root1)
+            root1.attributes("-alpha", self.opacity)
             
             tk_img1 = ImageTk.PhotoImage(self.img1, master=root1)
             self.tk_img1 = tk_img1
@@ -1789,7 +1806,7 @@ class cc_panel:
             label1.pack(padx=0, pady=0)
 
             # Create second window
-            root2 = tk.Toplevel()
+            root2 = tk.Toplevel(root1)
             self._setup_window(root2)
             
             tk_img2 = ImageTk.PhotoImage(self.img2, master=root2)
@@ -1800,7 +1817,7 @@ class cc_panel:
 
             # Position windows
             root1.update_idletasks()
-            root2.geometry(f"+{root1.winfo_x()}+{root1.winfo_y()}")
+            root1.geometry(f"+{root1.winfo_x()}+{root1.winfo_y()}")
 
             self._make_draggable(root1, root2)
             self.root1 = root1
@@ -1814,10 +1831,12 @@ class cc_panel:
         """Common window setup"""
         window.overrideredirect(True)
         window.attributes("-topmost", True)
-        window.attributes("-toolwindow", True)
         window.attributes("-transparentcolor", self.bg_color)
-        window.attributes("-alpha", self.opacity)
         window.configure(bg=self.bg_color)
+        
+        if self.start_x != None and self.start_y != None:
+            window.geometry(f"+{self.start_x}+{self.start_y}")
+            
         window.update_idletasks()
 
     def _get_color_for_mode(self, mode: str, enabled: bool):
@@ -1828,7 +1847,6 @@ class cc_panel:
 
 def change_target_speed(increments, app=None):
     global target_speed
-    global speed # ignore for now
 
     if abs(increments) >= 5:
         if increments > 0:
@@ -1874,7 +1892,6 @@ def main_cruise_control():
     global long_press_resume
 
     cc_target_speed_thread = threading.Thread(target=cc_target_speed_thread_func, daemon=True, name="CC Target Speed Thread")
-    app = None
     time_pressed_dec = None
     time_pressed_inc = None
     time_pressed_start = None
@@ -1892,21 +1909,17 @@ def main_cruise_control():
         short_increment_int = 1
         long_increments.set(f"5 km/h")
         short_increments.set(f"1 km/h")
+    app = cc_panel("-- km/h", "Cruise control", False, _data_cache["panel_x"], _data_cache["panel_y"])
 
 
     while not exit_event.is_set() and not (cc_dec_button is None and cc_inc_button is None and cc_start_button is None):
         try:
-            try:
-                if not pauzed and ets2_detected.is_set():
-                    app = cc_panel("-- km/h", "Cruise control", False)
-            except:
-                time.sleep(0.1)
-                continue
 
             if buttons_thread is None or not buttons_thread.is_alive():
                 refresh_button_detection()
 
             if (buttons_thread is not None and buttons_thread.is_alive()) or device_lost or not ets2_detected.is_set() or device is None or not device.get_init():
+                app.hide()
                 time.sleep(0.04)
                 continue
             
@@ -2033,13 +2046,26 @@ def main_cruise_control():
                     cc_target_speed_thread.start()
 
             # update panel
-            if app is not None and app.running:
+            if not exit_event.is_set():
+                try:
+                    if show_cc_ui.get() and ets2_detected.is_set():
+                        if not app.root1.winfo_viewable() and not app.root2.winfo_viewable():
+                            app.show()
+                    else:
+                        if app.root1.winfo_viewable() and app.root2.winfo_viewable():
+                            app.hide()
+                except:
+                    pass
+
                 if target_speed is not None:
                     app.update(f"{int(target_speed)} km/h", cc_mode.get(), cc_enabled)
                 else:
                     app.update(f"-- km/h", cc_mode.get(), False)
             else:
-                app = cc_panel("-- km/h", cc_mode.get(), cc_enabled)
+                try:
+                    app.stop()
+                except:
+                    pass
             time.sleep(0.02)
         except Exception as e:
             # close panel
@@ -2051,7 +2077,7 @@ def main_cruise_control():
             context = get_error_context()
             log_error(e, context)
             time.sleep(1)
-    #close panel
+    app.close()
     
 def cc_target_speed_thread_func():
     global exit_event
@@ -3931,6 +3957,7 @@ try:
         if dots_anim.is_playing: # and dots_anim (testing)
             dots_anim.stop()
         # Set the exit event to stop all threads
+        print("UI closed, quitting MonoCruise")
         exit_event.set()
 
         time.sleep(0.1) # Give threads time to finish
@@ -4046,6 +4073,7 @@ try:
     # Start the mainloop in the main thread
     root.mainloop()
     
+    print("Mainloop exited")
     # When mainloop exits, set exit event
     exit_event.set()
     
