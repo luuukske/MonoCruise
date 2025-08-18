@@ -3395,6 +3395,10 @@ try:
         global cc_inc_label
         global cc_dec_label
 
+        if device is None:
+            cmd_print("No joystick connected. Please connect your pedals first.", "#FF2020", 5)
+            return
+
         if buttons_thread is not None and buttons_thread.is_alive():
             close_buttons_threads.set()
             cc_dec_label.configure(border_color=SETTINGS_COLOR)
