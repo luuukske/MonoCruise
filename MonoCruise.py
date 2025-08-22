@@ -1,8 +1,6 @@
 import threading
 import customtkinter as ctk
 import tkinter as tk
-# Create the main window
-root = ctk.CTk()
 
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
@@ -55,12 +53,15 @@ except:
 
 # Get system DPI scaling
 try:
-    user32 = ctypes.windll.user32
-    user32.SetProcessDPIAware(2)
-    scaling = user32.GetDpiForSystem() / 96.0
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    scaling = ctypes.windll.user32.GetDpiForSystem() / 96.0
 except Exception as e:
     scaling = 1
     print(e)
+    
+# Create the main window
+root = ctk.CTk()
+
 # Configure default font
 try:
     # Try to use Segoe UI on Windows
@@ -1805,7 +1806,7 @@ class cc_panel:
 
     def _setup_window(self, window):
         """Common window setup"""
-        window.wthdraw()  # Hide the window initially
+        window.withdraw()  # Hide the window initially
         window.overrideredirect(True)
         window.attributes("-topmost", True)
         window.attributes("-transparentcolor", self.bg_color)
@@ -1893,7 +1894,8 @@ def main_cruise_control():
     else:
         panel_x = 100
         panel_y = 100
-    app = cc_panel("-- km/h", "Cruise control", False, panel_x, panel_y)
+    app = cc_panel("-- km/h", cc_mode.get(), False, panel_x, panel_y)
+    #app.update(f"-- km/h", cc_mode.get(), False)
 
 
     while not exit_event.is_set() and not (cc_dec_button is None and cc_inc_button is None and cc_start_button is None):
@@ -1957,7 +1959,9 @@ def main_cruise_control():
                         print("long press on inc")
                         if target_speed is None:
                             target_speed = max(min(int(round(speed)),130), 20)
-                        else:
+                        elif speed > target_speed:
+                            target_speed = max(min(int(round(speed)),130), 20)
+                        elif cc_enabled:
                             change_target_speed(long_increment_int, app)
                         if not cc_enabled:
                             cc_enabled = True
@@ -1970,7 +1974,9 @@ def main_cruise_control():
                     print("short press inc")
                     if target_speed is None:
                         target_speed = max(min(int(round(speed)),130), 20)
-                    else:
+                    elif speed > target_speed:
+                        target_speed = max(min(int(round(speed)),130), 20)
+                    elif cc_enabled:
                         change_target_speed(short_increment_int, app)
                     if not cc_enabled:
                         cc_enabled = True
@@ -2072,6 +2078,7 @@ def cc_target_speed_thread_func():
     global target_speed
     global speed
     global data
+    global total_weight_tons
     global cc_mode
     global cc_enabled
     global cc_gas
@@ -2087,12 +2094,13 @@ def cc_target_speed_thread_func():
     prev_cc_gas = 0.0
     prev_cc_brake = 0.0
     ds = 0.0
+    av_ds = 0.0
     integral_sum = 0.0
     ff_est = 0.0
     alpha  = 0.8
-    P = 0.11
+    P = 0.13
     I = 0.01
-    D = 0.07
+    D = 0.08
     max_integral = 0.3 / I
     max_proportional = 0.5
     prev_time = time.time()-0.1
@@ -2101,20 +2109,27 @@ def cc_target_speed_thread_func():
         if target_speed is not None and not pauzed:
 
             slope = data['rotationY']
-            error = target_speed - speed
+            weight_adjustment = (0.27*((total_weight_tons-8.93)/(8.5))+1)
+            if cc_mode.get() == "Speed limiter":
+                error = (target_speed-0.1) - speed
+            else:
+                error = target_speed - speed
             dt = time.time() - prev_time
-            av_ds = (ds*4 + (prev_speed - speed)) / 5
+            av_ds = (av_ds*4 + (prev_speed - speed)) / 5
             ds = prev_speed - speed
             prev_time = time.time()
 
             # Integral term
-            if cc_locked:
+            if cc_locked and not prev_cc_gas >= 0.9:
                 if error < 0:
-                    integral_sum += -(-error/10) * dt *5 * min(abs(1/(max(av_ds*3, 0.01))), 5)
+                    if cc_mode.get() == "Cruise control":
+                        integral_sum += -(-error/10) * dt *5 * min(abs(1/(max(av_ds*3, 0.01))), 5)
+                    else:
+                        integral_sum += -(-error/10) * dt *10 * min(abs(1/(max(av_ds*3, 0.01))), 5)
                 else:
                     integral_sum += (error/10) * dt *5 * min(abs(1/(max(av_ds*3, 0.01))), 5)
 
-            if ((error > 0 and (ds) > 0) or (error < 0 and (ds) < 0)) and abs(error) < 3 and abs(ds) < 0.05 and not (cc_mode.get() == "Speed limiter" and cc_limiting):
+            if ((error > 0 and (ds) > 0) or (error < 0 and (ds) < 0)) and abs(error) < 3 and abs(av_ds) < 0.05 and not (cc_mode.get() == "Speed limiter" and cc_limiting):
                 cc_locked = True
             elif prev_target_speed != target_speed or abs(error) > 2 or (cc_mode.get() == "Speed limiter" and not cc_limiting):
                 cc_locked = False
@@ -2130,11 +2145,11 @@ def cc_target_speed_thread_func():
                 proportional = (error**0.8) * P
 
             # Base PID
-            base_val = (max(proportional,-max_proportional) +
+            slope_factor = 36 if slope > 0 else 18
+            base_val = (max(proportional, -max_proportional) +
                         integral_sum * I +
                         derivative * D +
-                        speed * 0.002 +
-                        slope * 18
+                        (speed * 0.0015 + slope * slope_factor) * weight_adjustment
                         )
 
             # Adapt feed-forward: low-pass filter of the control effort
@@ -2144,13 +2159,13 @@ def cc_target_speed_thread_func():
             temp_val = base_val + ff_est
 
 
-            cc_gas = (min(max(temp_val, 0),1)+prev_cc_gas*1)/2
+            cc_gas = ((min(max(temp_val, 0),1)+prev_cc_gas*1)/2)
             if temp_val > 0:
                 cc_brake = 0.0
             else:
                 cc_brake = ((min(max((-temp_val/100)**0.6, 0),0.07)+ prev_cc_brake*0)/1)
 
-            print(f"cc_gas: {round(cc_gas,3)} \t cc_brake: {round(cc_brake,3)} \t speed: {round(speed,1)} kmph \t target_speed: {target_speed} kmph \t integral_sum: {round(integral_sum,3)}")
+            print(f"cc_gas: {round(cc_gas,3)} \t cc_brake: {round(cc_brake,3)} \t speed: {round(speed,1)} kmph \t target_speed: {target_speed} kmph \t integral_sum: {round(integral_sum,3)} \t weight_adjustment: {weight_adjustment}")
 
 
 
