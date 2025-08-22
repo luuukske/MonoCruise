@@ -1463,7 +1463,7 @@ class cc_panel:
         self.text_color = self._get_color_for_mode(cc_mode, cc_enabled)
         self.text_content = text_content
         self.icon_spacing = int(20 * self.scale_mult)
-        self.opacity = 0.7
+        self.opacity = 0.6
         
         self.gui_thread = None
         self.root1 = None
@@ -1839,8 +1839,8 @@ def change_target_speed(increments, app=None):
                 target_speed = ((target_speed // abs(increments))) * abs(increments)
     else:
         target_speed += increments
-    if target_speed < 20:
-        target_speed = 20
+    if target_speed < 30:
+        target_speed = 30
     elif target_speed > 130:
         target_speed = 130
     if app is not None:
@@ -1957,12 +1957,10 @@ def main_cruise_control():
 
                         # long press
                         print("long press on inc")
-                        if target_speed is None:
-                            target_speed = max(min(int(round(speed)),130), 20)
-                        elif speed > target_speed:
-                            target_speed = max(min(int(round(speed)),130), 20)
-                        elif cc_enabled:
+                        if cc_enabled:
                             change_target_speed(long_increment_int, app)
+                        elif target_speed is None or (speed > target_speed):
+                            target_speed = max(min(int(round(speed)),130), 30)
                         if not cc_enabled:
                             cc_enabled = True
                             cmd_print("Cruise control enabled")
@@ -1972,12 +1970,10 @@ def main_cruise_control():
 
                     # short press
                     print("short press inc")
-                    if target_speed is None:
-                        target_speed = max(min(int(round(speed)),130), 20)
-                    elif speed > target_speed:
-                        target_speed = max(min(int(round(speed)),130), 20)
-                    elif cc_enabled:
+                    if cc_enabled:
                         change_target_speed(short_increment_int, app)
+                    elif target_speed is None or speed > target_speed:
+                        target_speed = max(min(int(round(speed)),130), 30)
                     if not cc_enabled:
                         cc_enabled = True
                         cmd_print("Cruise control enabled")
@@ -1998,7 +1994,7 @@ def main_cruise_control():
 
                         # long press
                         print("long press on start")
-                        target_speed = max(min(int(round(speed)),130), 20)
+                        target_speed = max(min(int(round(speed)),130), 30)
                         if not cc_enabled:
                             cc_enabled = True
                         app.update(f"{int(target_speed)} km/h", cc_mode.get(), True)
@@ -2018,7 +2014,7 @@ def main_cruise_control():
                         cmd_print("Cruise control enabled")
 
                     if target_speed == None:
-                        target_speed = max(min(int(round(speed)),130), 20)
+                        target_speed = max(min(int(round(speed)),130), 30)
                     app.update(f"{int(target_speed)} km/h", cc_mode.get(), cc_enabled)
 
                 else:
@@ -2098,7 +2094,7 @@ def cc_target_speed_thread_func():
     integral_sum = 0.0
     ff_est = 0.0
     alpha  = 0.8
-    P = 0.13
+    P = 0.11
     I = 0.01
     D = 0.08
     max_integral = 0.3 / I
@@ -2144,26 +2140,28 @@ def cc_target_speed_thread_func():
             else:
                 proportional = (error**0.8) * P
 
+            slow_speed_adjustment = (-(2**(-(max(target_speed, 30)*0.04)+0.3))+1)*1.3
+
             # Base PID
-            slope_factor = 36 if slope > 0 else 18
-            base_val = (max(proportional, -max_proportional) +
+            base_val = (max(proportional, -max_proportional) * slow_speed_adjustment +
                         integral_sum * I +
-                        derivative * D +
-                        (speed * 0.0015 + slope * slope_factor) * weight_adjustment
+                        derivative * D * slow_speed_adjustment +
+                        (speed * 0.0015 + slope * 18 * slow_speed_adjustment) * weight_adjustment
                         )
 
             # Adapt feed-forward: low-pass filter of the control effort
             ff_est = alpha * ff_est + (1.0 - alpha) * base_val
 
             # Final output includes adaptive feed-forward
-            temp_val = base_val + ff_est
+            temp_val = (base_val + ff_est)
+            print((-(2**(-(max(speed, 40)*0.04)+1))+1.12))
 
 
             cc_gas = ((min(max(temp_val, 0),1)+prev_cc_gas*1)/2)
             if temp_val > 0:
                 cc_brake = 0.0
             else:
-                cc_brake = ((min(max((-temp_val/100)**0.6, 0),0.07)+ prev_cc_brake*0)/1)
+                cc_brake = ((min(max((-temp_val/20)**1.2, 0),0.07)+ prev_cc_brake*0)/1)
 
             print(f"cc_gas: {round(cc_gas,3)} \t cc_brake: {round(cc_brake,3)} \t speed: {round(speed,1)} kmph \t target_speed: {target_speed} kmph \t integral_sum: {round(integral_sum,3)} \t weight_adjustment: {weight_adjustment}")
 
@@ -2553,6 +2551,15 @@ def main():
                 continue
 
             pauzed = data['paused']
+            '''
+            # INSERT_YOUR_CODE
+            # Save all data values to a txt file for logging/debugging
+            try:
+                with open("all_data_log.txt", "a", encoding="utf-8") as f:
+                    f.write(f"{datetime.now().isoformat()} | {json.dumps(data, ensure_ascii=False)}\n")
+            except Exception as e:
+                print(f"Failed to log data: {e}")
+            '''
 
             slope = data['rotationY']
 
@@ -3011,10 +3018,6 @@ global cc_start_button
 global cc_inc_button
 global cc_dec_button
 global unassign
-''' temporaraly commented out global variables bcs of ghost error
-global cc_enabled
-global cc_locked
-'''
 
 cc_enabled = False
 cc_locked = False
@@ -3141,7 +3144,6 @@ try:
 
     #start of the settings
 
-
     def refresh_live_visualization():
         global img
         global to_img_coords
@@ -3155,13 +3157,11 @@ try:
         live_visualization_frame.configure(image=img_copy)
         live_visualization_frame.image = img_copy
 
-
     def new_checkbutton(master, row, column, variable, command=None):
         checkbutton = ctk.CTkCheckBox(master, text="", command=command, font=default_font, text_color="lightgrey", fg_color=SETTINGS_COLOR, corner_radius=5, variable=variable, checkbox_width=20, checkbox_height=20, width=24, height=24, border_color=SETTINGS_COLOR, border_width=1.5)
         checkbutton.grid(row=row, column=column, padx=5, pady=1, sticky="e")
         return checkbutton
 
-    
     def new_label(master, row, column, text):
         label = ctk.CTkLabel(master, text=text, font=default_font, text_color="lightgrey")
         label.grid(row=row, column=column, padx=10, pady=1, sticky="w")
