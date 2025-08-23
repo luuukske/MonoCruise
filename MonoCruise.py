@@ -1603,7 +1603,7 @@ class cc_panel:
             
         try:
             icon_file = "speed limiter.png" if self.cc_mode == "Speed limiter" else "cruise control.png"
-            icon = Image.open(icon_file)
+            icon = Image.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), icon_file))
             
             # Calculate icon size
             temp_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
@@ -2097,8 +2097,8 @@ def cc_target_speed_thread_func():
     P = 0.11
     I = 0.01
     D = 0.08
-    max_integral = 0.3 / I
-    max_proportional = 0.5
+    max_integral = 0.2 / I
+    max_proportional = 1
     prev_time = time.time()-0.1
 
     while not exit_event.is_set() and cc_enabled and not em_stop:
