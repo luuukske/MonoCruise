@@ -1,6 +1,7 @@
 import threading
 import customtkinter as ctk
 import tkinter as tk
+version = "v1.0.0"
 
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
@@ -22,6 +23,7 @@ import winreg
 from CTkMessagebox import CTkMessagebox
 sys.path.append('./_internal')
 from scscontroller import SCSController
+
 
 
 from connect_SDK import check_ets2_sdk, check_ats_sdk, check_and_install_scs_sdk
@@ -1917,6 +1919,14 @@ def main_cruise_control():
                 cmd_print("Please assign all cruise control buttons in the settings", "#FF2020", 10)
                 time.sleep(0.5)
                 continue
+            if cc_mode.get() == "Cruise control":
+                if (cc_inc or cc_start) and data.get('parkBrake', False):
+                    cmd_print("Cruise control cannot be used with parking brake engaged", "#FF2020", 10)
+                    continue
+                    
+                if (cc_inc or cc_start) and data.get('gear', 0) <= 0:
+                    cmd_print("Cruise control can only be used in drive", "#FF2020", 10)
+                    continue
 
             if cc_dec and not cc_inc and not cc_start and all_buttons_assigned:
                 if time_pressed_dec is None:
@@ -2022,7 +2032,7 @@ def main_cruise_control():
                 time_pressed_start = None
             
             if cc_mode.get() == "Cruise control":
-                if brakeval > 0.1 or em_stop:
+                if brakeval > 0.1 or em_stop or data.get('userBrake', 0.0) > 0.5 or data.get('parkBrake', False):
                     if cc_enabled:
                         cc_enabled = False
                         app.update(f"{int(target_speed)} km/h", cc_mode.get(), cc_enabled)
@@ -2036,14 +2046,12 @@ def main_cruise_control():
             # update panel
             if not exit_event.is_set():
                 try:
-                    if show_cc_ui.get() and ets2_detected.is_set():
+                    if show_cc_ui.get() and ets2_detected.is_set() and all_buttons_assigned:
                         if not app.root1.winfo_viewable() and not app.root2.winfo_viewable():
                             app.show()
-                            cmd_print("Cruise control panel shown")
                     else:
                         if app.root1.winfo_viewable() and app.root2.winfo_viewable():
                             app.hide()
-                            cmd_print("Cruise control panel hidden")
                 except:
                     pass
 
@@ -2068,7 +2076,7 @@ def main_cruise_control():
             log_error(e, context)
             time.sleep(1)
     app.stop()
-    
+
 def cc_target_speed_thread_func():
     global exit_event
     global target_speed
@@ -2082,6 +2090,7 @@ def cc_target_speed_thread_func():
     global cc_locked
     global cc_limiting
     global brake_exponent_variable
+    global _data_cache
 
     cc_locked = False
     cc_limiting = False
@@ -2098,12 +2107,12 @@ def cc_target_speed_thread_func():
     I = 0.01
     D = 0.08
     max_integral = 0.2 / I
-    max_proportional = 1
+    max_proportional = 1.3
     prev_time = time.time()-0.1
 
     while not exit_event.is_set() and cc_enabled and not em_stop:
         if target_speed is not None and not pauzed:
-
+            
             slope = data['rotationY']
             weight_adjustment = (0.27*((total_weight_tons-8.93)/(8.5))+1)
             if cc_mode.get() == "Speed limiter":
@@ -2154,7 +2163,6 @@ def cc_target_speed_thread_func():
 
             # Final output includes adaptive feed-forward
             temp_val = (base_val + ff_est)
-            print((-(2**(-(max(speed, 40)*0.04)+1))+1.12))
 
 
             cc_gas = ((min(max(temp_val, 0),1)+prev_cc_gas*1)/2)
@@ -2163,9 +2171,7 @@ def cc_target_speed_thread_func():
             else:
                 cc_brake = ((min(max((-temp_val/20)**1.2, 0),0.07)+ prev_cc_brake*0)/1)
 
-            print(f"cc_gas: {round(cc_gas,3)} \t cc_brake: {round(cc_brake,3)} \t speed: {round(speed,1)} kmph \t target_speed: {target_speed} kmph \t integral_sum: {round(integral_sum,3)} \t weight_adjustment: {weight_adjustment}")
-
-
+            #print(f"cc_gas: {round(cc_gas,3)} \t cc_brake: {round(cc_brake,3)} \t speed: {round(speed,1)} kmph \t target_speed: {target_speed} kmph \t integral_sum: {round(integral_sum,3)} \t weight_adjustment: {weight_adjustment}")
 
         elif not pauzed:
             cc_locked = False
@@ -2619,6 +2625,9 @@ def main():
                 elif speed < 0:
                     b =  max(opdbrakeval**0.8/2,0.3)
                     opdbrakeval = max(opdbrakeval*((-1/(b*-speed+1))+1)+a*(1-(-1/(b*-speed+1)+1)),0)
+            
+            if data.get('userThrottle', 0.0) > 0.0:
+                opdbrakeval = 0.0
             
             if data["cruiseControl"] and not cc_enabled:
                 opdbrakeval = 0
@@ -3770,7 +3779,7 @@ try:
     )
     gear_icon_button.pack(side="top", padx=0, pady=5, anchor="nw")
 
-
+    ctk.CTkLabel(main_frame, text=version, font=("Segoe UI", 11), text_color="#505050", fg_color="transparent", corner_radius=5, bg_color="transparent", anchor="e", wraplength=185, height=10, justify="right").pack(side="bottom", padx=0, pady=5, anchor="se")
 
 
     # Create a class to hold UI state
