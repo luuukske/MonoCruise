@@ -13,9 +13,6 @@ This also includes quality of life features like:
 - exponential braking and accelerating
 - auto start and stop for non-intrucive UX
 ## .exe install
-   
-   > [!WARNING]
-   > Beta version. please proceed with caution.
 
 1. Download and run "MonoCruise installer.exe".
 2. Run MonoCruise.
