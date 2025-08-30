@@ -1,8 +1,10 @@
 import threading
 import customtkinter as ctk
 import tkinter as tk
-version = "v1.0.0"
+version = "v1.0.1"
 
+# temporary for radar output
+import cv2
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 import sys
@@ -23,6 +25,7 @@ import winreg
 from CTkMessagebox import CTkMessagebox
 sys.path.append('./_internal')
 from scscontroller import SCSController
+from ETS2radar.ETS2radar import ETS2Radar
 
 
 
@@ -2032,7 +2035,7 @@ def main_cruise_control():
                 time_pressed_start = None
             
             if cc_mode.get() == "Cruise control":
-                if brakeval > 0.1 or em_stop or data.get('userBrake', 0.0) > 0.5 or data.get('parkBrake', False):
+                if brakeval > 0.1 or em_stop or data.get('parkBrake', False):
                     if cc_enabled:
                         cc_enabled = False
                         app.update(f"{int(target_speed)} km/h", cc_mode.get(), cc_enabled)
@@ -2077,6 +2080,214 @@ def main_cruise_control():
             time.sleep(1)
     app.stop()
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+from collections import defaultdict, deque
+import numpy as np
+
+# memory of previous data for each lead vehicle (fixed-length queue)
+_prev_data = defaultdict(lambda: deque(maxlen=10))
+_current_lead_id = None
+
+def adaptive_cruise_control(vehicles_in_lane, ego_speed, min_gap=10.0, acc_time_gap=1, debug=False):
+    """
+    Adaptive Cruise Control logic with lead vehicle acceleration anticipation.
+    All input values are averaged over time. Queue resets when lead_id changes.
+    
+    Args:
+        vehicles_in_lane: List of (vehicle_id, distance_m, speed_kmph) sorted by distance (closest first).
+        ego_speed: Ego vehicle speed in km/h.
+        min_gap: Minimum gap to lead vehicle in meters.
+        acc_time_gap: Desired time gap to lead vehicle in seconds.
+        debug: Enable detailed debug prints.
+    Returns:
+        acc_value: Float in [-1, 1]. Positive = accelerate, negative = brake.
+    """
+    global _current_lead_id
+
+    if not vehicles_in_lane:
+        return 1.0  # full accelerate if free road
+
+    # Lead vehicle
+    lead_id, lead_dist_raw, lead_speed_raw = vehicles_in_lane[0]
+
+    # Check if lead vehicle changed - if so, reset the queue
+    if _current_lead_id != lead_id:
+        _prev_data[lead_id].clear()
+        _current_lead_id = lead_id
+        if debug:
+            print(f"Lead vehicle changed to {lead_id}, queue reset")
+
+    # Update deque with all input data (distance, speed, ego_speed)
+    data_point = {
+        'distance': lead_dist_raw,
+        'speed': lead_speed_raw,
+        'ego_speed': ego_speed
+    }
+    _prev_data[lead_id].append(data_point)
+
+    # Calculate averaged values
+    data_history = list(_prev_data[lead_id])
+    
+    lead_dist = np.mean([d['distance'] for d in data_history])
+    lead_speed = np.mean([d['speed'] for d in data_history])
+    avg_ego_speed = np.mean([d['ego_speed'] for d in data_history])
+
+    # Calculate desired gap using averaged ego speed
+    desired_gap = max(avg_ego_speed / 3.6 * acc_time_gap, min_gap)
+    gap_error = lead_dist - desired_gap
+    speed_error = lead_speed - avg_ego_speed
+
+    # calculate closeness amplifier using averaged values
+    actual_time_gap = max(min(lead_dist / (max(avg_ego_speed, 1) / 3.6), 10), 0.01)
+    closeness_amp = pow(0.8, actual_time_gap*5-3) + 0.5
+    if speed_error < 0:
+        closeness_amp = closeness_amp ** 1.5
+    else:
+        closeness_amp = 1
+
+    acceleration_amp = max(-(actual_time_gap/2)**3+1, 0.2)
+    
+    # calculate slow speed adjustment using averaged ego speed
+    slow_speed_adj = pow(0.8, max(avg_ego_speed, 0.0))*2.5
+
+    # Compute average delta_v using averaged speeds from first and last data points
+    delta_v = 0.0
+    if len(data_history) > 1:
+        delta_v = data_history[-1]['speed'] - data_history[0]['speed']
+
+    # Gains
+    K_gap = 0.10 * closeness_amp * (slow_speed_adj/2+1)
+    K_speed = 0.13 * closeness_amp * (slow_speed_adj/2+1)
+    K_acc = 0.20 *acceleration_amp
+
+    # Control law (sum of weighted errors)
+    acc_raw = K_gap * np.sign(gap_error)*((abs(gap_error)/10)**0.7)*10 + K_speed * speed_error + K_acc * delta_v
+    if acc_raw <= 0:
+        acc_raw -= slow_speed_adj
+
+    # disabled clamping to make it able to emergency brake
+    acc_value = acc_raw / 1.5
+
+    if debug:
+        print(f"Lead id={lead_id} raw_dist={lead_dist_raw:.1f}m avg_dist={lead_dist:.1f}m")
+        print(f"Gap error={gap_error:.2f} | Speed error={speed_error:.2f} | Delta_v={delta_v:.2f}")
+
+    return acc_value
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 def cc_target_speed_thread_func():
     global exit_event
     global target_speed
@@ -2091,11 +2302,13 @@ def cc_target_speed_thread_func():
     global cc_limiting
     global brake_exponent_variable
     global _data_cache
+    global acc_data
 
     cc_locked = False
     cc_limiting = False
     prev_speed = speed
     prev_target_speed = target_speed
+    prev_acc_dist = None
     prev_cc_gas = 0.0
     prev_cc_brake = 0.0
     ds = 0.0
@@ -2108,70 +2321,71 @@ def cc_target_speed_thread_func():
     D = 0.08
     max_integral = 0.2 / I
     max_proportional = 1.3
+
     prev_time = time.time()-0.1
 
     while not exit_event.is_set() and cc_enabled and not em_stop:
         if target_speed is not None and not pauzed:
-            
+
+            if cc_mode.get() != "Cruise control":
+                acc_data = None
+
             slope = data['rotationY']
             weight_adjustment = (0.27*((total_weight_tons-8.93)/(8.5))+1)
             if cc_mode.get() == "Speed limiter":
                 error = (target_speed-0.1) - speed
             else:
                 error = target_speed - speed
+
             dt = time.time() - prev_time
             av_ds = (av_ds*4 + (prev_speed - speed)) / 5
             ds = prev_speed - speed
             prev_time = time.time()
 
-            # Integral term
             if cc_locked and not prev_cc_gas >= 0.9:
                 if error < 0:
                     if cc_mode.get() == "Cruise control":
-                        integral_sum += -(-error/10) * dt *5 * min(abs(1/(max(av_ds*3, 0.01))), 5)
+                        integral_sum += -(-error/10) * dt * 5 * min(abs(1/(max(av_ds*3, 0.01))), 5)
                     else:
-                        integral_sum += -(-error/10) * dt *10 * min(abs(1/(max(av_ds*3, 0.01))), 5)
+                        integral_sum += -(-error/10) * dt * 10 * min(abs(1/(max(av_ds*3, 0.01))), 5)
                 else:
-                    integral_sum += (error/10) * dt *5 * min(abs(1/(max(av_ds*3, 0.01))), 5)
+                    integral_sum += (error/10) * dt * 5 * min(abs(1/(max(av_ds*3, 0.01))), 5)
 
             if ((error > 0 and (ds) > 0) or (error < 0 and (ds) < 0)) and abs(error) < 3 and abs(av_ds) < 0.05 and not (cc_mode.get() == "Speed limiter" and cc_limiting):
                 cc_locked = True
             elif prev_target_speed != target_speed or abs(error) > 2 or (cc_mode.get() == "Speed limiter" and not cc_limiting):
                 cc_locked = False
+
             integral_sum = max(-max_integral, min(max_integral, integral_sum))
 
-            # Derivative term
             derivative = (av_ds) / dt
 
-            # Proportional term
             if error < 0:
                 proportional = -((-error)**0.8) * P
             else:
                 proportional = (error**0.8) * P
 
             slow_speed_adjustment = (-(2**(-(max(target_speed, 30)*0.04)+0.3))+1)*1.3
+            physics_adjustment = (speed * 0.0015 + slope * 18 * slow_speed_adjustment) * weight_adjustment
 
-            # Base PID
             base_val = (max(proportional, -max_proportional) * slow_speed_adjustment +
                         integral_sum * I +
                         derivative * D * slow_speed_adjustment +
-                        (speed * 0.0015 + slope * 18 * slow_speed_adjustment) * weight_adjustment
-                        )
+                        physics_adjustment)
+            
+            acc_val = adaptive_cruise_control(acc_data, speed, 10, 1.5, data["accelerationZ"]) + physics_adjustment
 
-            # Adapt feed-forward: low-pass filter of the control effort
             ff_est = alpha * ff_est + (1.0 - alpha) * base_val
 
-            # Final output includes adaptive feed-forward
-            temp_val = (base_val + ff_est)
+            temp_val = min(base_val + ff_est, acc_val)
 
-
-            cc_gas = ((min(max(temp_val, 0),1)+prev_cc_gas*1)/2)
+            cc_gas = (min(max(temp_val, 0), 1) + prev_cc_gas) / 2
             if temp_val > 0:
                 cc_brake = 0.0
             else:
-                cc_brake = ((min(max((-temp_val/20)**1.2, 0),0.07)+ prev_cc_brake*0)/1)
-
-            #print(f"cc_gas: {round(cc_gas,3)} \t cc_brake: {round(cc_brake,3)} \t speed: {round(speed,1)} kmph \t target_speed: {target_speed} kmph \t integral_sum: {round(integral_sum,3)} \t weight_adjustment: {weight_adjustment}")
+                cc_brake = min(max((-temp_val/20)**1.2, 0), 0.07)
+            if acc_val < 0:
+                cc_brake = max(cc_brake, max((min(abs(acc_val)/7, 2)**2),0.0))
 
         elif not pauzed:
             cc_locked = False
@@ -2183,6 +2397,9 @@ def cc_target_speed_thread_func():
         prev_cc_gas = cc_gas
         prev_cc_brake = cc_brake
         time.sleep(0.1)
+
+
+
 
 def main():
     global controller
@@ -2233,6 +2450,7 @@ def main():
     global cruise_control_thread
     global cc_locked
     global cc_limiting
+    global acc_data
     # Initialize pygame for joystick handling
     
     # Start SDK check thread
@@ -2306,6 +2524,9 @@ def main():
         latency = 0.015
         hazards_prompted = False
         offset = 0.5
+        cv2.namedWindow("ETS2 Radar", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("ETS2 Radar", 600, 600)
+        radar = ETS2Radar(show_window=True, fov_angle=40)
         prev_stop = time.time()
 
         # start the bar thread
@@ -2557,15 +2778,9 @@ def main():
                 continue
 
             pauzed = data['paused']
-            '''
-            # INSERT_YOUR_CODE
-            # Save all data values to a txt file for logging/debugging
-            try:
-                with open("all_data_log.txt", "a", encoding="utf-8") as f:
-                    f.write(f"{datetime.now().isoformat()} | {json.dumps(data, ensure_ascii=False)}\n")
-            except Exception as e:
-                print(f"Failed to log data: {e}")
-            '''
+
+            # radar code
+            acc_data = radar.update(data)
 
             slope = data['rotationY']
 
@@ -2632,7 +2847,10 @@ def main():
             if data["cruiseControl"] and not cc_enabled:
                 opdbrakeval = 0
             elif (cc_enabled and cc_mode.get() == "Cruise control"):
-                opdbrakeval = cc_brake
+                if gasval <= 0.0:
+                    opdbrakeval = cc_brake
+                else:
+                    opdbrakeval = 0.0
                 opdgasval = max(cc_gas, opdgasval)
             elif (cc_enabled and cc_mode.get() == "Speed limiter"):
                 if opdgasval > cc_gas and cc_gas == 1.0:
@@ -2810,13 +3028,14 @@ def main():
 
 
         print("Main loop exited, cleaning up...")
+        radar.cleanup()
         return
     except Exception as e:
         context = get_error_context()
         log_error(e, context)
         exit_event.set()
+        radar.cleanup()
         raise e  # Re-raise the exception to be caught by the main thread
-    return
 
 def game_thread():
     cmd_print("Game thread starting...")
