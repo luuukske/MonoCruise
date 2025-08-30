@@ -4,7 +4,10 @@ import numpy as np
 import numpy.typing as npt
 import truck_telemetry
 from shapely.geometry import Polygon, Point
-from ETS2radar.main import Module
+try:
+    from ETS2radar.main import Module
+except:
+    exit()
 import collections
 import time
 
@@ -91,6 +94,7 @@ class ETS2Radar:
         self.vehicle_histories: Dict[int, Deque[Coordinate]] = collections.defaultdict(
             lambda: collections.deque(maxlen=25)
         )
+        self.ego_trajectory: Deque[Coordinate] = collections.deque(maxlen=25)
         self.vehicle_speeds: Dict[int, float] = {}
         self.lane_state_tracker: Dict[int, VehicleTracker] = {}
         self.ego_path_tracker: Dict[int, EgoPathTracker] = {}
@@ -139,7 +143,7 @@ class ETS2Radar:
         if offset is not None:
             try:
                 x = float(offset)
-                offset_score = (2 ** (-(x / 15) ** 2) * 2 - 1)/2
+                offset_score = (2 ** (-(x / 10) ** 2) * 2 - 1)/2
                 distance_amp = (2**(-(distance/100))+1/((distance+3)/10))
                 # Clamp each score increment to [-1, 1]
                 offset_score = max(-1.0, min(1.0, offset_score*distance_amp))
@@ -391,6 +395,19 @@ class ETS2Radar:
 
         return intersection_point, intersection_angle
 
+
+
+
+
+
+
+
+
+
+
+
+
+
     def draw_radar(
         self,
         vehicles: List[Any],
@@ -403,8 +420,12 @@ class ETS2Radar:
         """
         Render the radar and return in-lane vehicle info. Also updates vehicle scores.
         This is the main in-lane vehicle detection logic.
-        """
 
+        NOTE: This function was extended to draw a predictive ego path derived from the
+        past positions stored in self.ego_trajectory. The predicted path is approximated
+        by fitting a circle to the recent trajectory and drawing the forward arc (or a
+        straight line when fitting fails).
+        """
         # Get window size (or fallback to defaults)
         try:
             _, _, win_w, win_h = cv2.getWindowImageRect("ETS2 Radar")
@@ -448,6 +469,15 @@ class ETS2Radar:
         self.draw_fov_cone(img, center, scale)
         cv2.circle(img, center, 5, (0, 255, 255), -1)
 
+        # --- Predict and draw ego path from history (new) ---
+        try:
+            path_pts, curvature = self.predict_ego_path_using_history(px, pz, yaw_rad, path_length=self.ego_path_length)
+            # Only draw the portion that is inside the FOV mask (optional optimization)
+            self.draw_ego_path(img, path_pts, center, scale, color=(0, 200, 0), thickness=1, show_info=True, curvature=curvature)
+        except Exception:
+            # Don't let prediction errors break the radar
+            pass
+
         # Collect all vehicle polygons and check for collisions
         origin = Point(0, 0)
         vehicle_data = []
@@ -489,13 +519,6 @@ class ETS2Radar:
                     group.append(other_vdata)
                     processed.add(j)
             vehicle_groups.append(group)
-
-        # Generate the ego steering path polygon (used for future expansion/path collision)
-        if not hasattr(self, 'ego_path_length'):
-            self.ego_path_length = MAX_DISTANCE # 40 + int(ego_speed) * 0.8
-        ego_path_points = self.generate_ego_steering_path(ego_steer, self.ego_path_length)
-        ego_path_polygon = self.create_path_polygon(ego_path_points, width=1)
-        self.draw_ego_path(img, ego_path_points, center, scale)
 
         # Main vehicle-in-lane detection loop
         in_lane_vehicles = []
@@ -594,43 +617,95 @@ class ETS2Radar:
             cv2.imshow("ETS2 Radar", img)
 
         return result
+    
 
-    def generate_ego_steering_path(
+
+
+
+
+
+
+
+
+
+    def predict_ego_path_using_history(
         self,
-        ego_steer,
-        path_length,
-        wheelbase=4.0,
-        max_steer_angle_deg=40.0
+        px: float,
+        pz: float,
+        yaw_rad: float,
+        path_length: float = 40.0,
+        max_history: int = 25
     ):
         """
-        Generate path points using bicycle model based on steering input.
-        Used for drawing ego path and for future collision prediction.
+        Predict the most likely ego path using the past positions stored in self.ego_trajectory.
+
+        Approach:
+        - Use up to `max_history` past positions (already in world coords).
+        - Transform them into ego-space (so ego is at origin facing +z).
+        - Fit a circle to the transformed points using fit_circle(). If the fit succeeds,
+          generate an arc forward from the ego origin along that circle.
+        - If the fit fails or the radius is extremely large (near-straight), fallback to a straight line.
+        - Return the generated path points (as ego-space (x, y) where y is forward) and an
+          approximate signed curvature (1/radius, sign indicates turn direction).
         """
-        points = [(0.0, 0.0)]
-        max_steer_angle = np.radians(max_steer_angle_deg)
-        delta = -ego_steer * max_steer_angle  # map [-1, 1] -> [-max_angle, max_angle]
+        # Gather history (most recent last)
+        hist = list(self.ego_trajectory)[-max_history:]
+        if len(hist) < 3:
+            # Not enough data -> straight fallback
+            pts = [(0.0, float(i)) for i in range(int(path_length) + 1)]
+            return pts, 0.0
 
-        if abs(delta) < 1e-3:
-            for i in range(1, int(path_length)):
-                points.append((0.0, float(i)))
-            return points
+        # Transform history into ego-space (x lateral, z forward)
+        ego_pts: List[Tuple[float, float]] = []
+        for wx, wz in hist:
+            dx = wx - px
+            dz = wz - pz
+            # Use same transform as used elsewhere: rotate_point(-dx, dz, -yaw)
+            x_e, z_e = self.rotate_point(-dx, dz, -yaw_rad)
+            ego_pts.append((x_e, z_e))
 
-        curvature = np.tan(delta) / wheelbase
-        radius = 1.0 / curvature
+        xs = [p[0] for p in ego_pts]
+        zs = [p[1] for p in ego_pts]
 
-        step = 1.0  # step size in meters
-        num_steps = int(path_length / step)
+        fit = self.fit_circle(xs, zs)
+        # If fit is not usable or radius is too large -> straight line
+        if fit is None:
+            # Straight forward path
+            pts = [(0.0, float(i)) for i in range(int(path_length) + 1)]
+            return pts, 0.0
 
-        heading = 0.0
-        x, y = 0.0, 0.0
+        xc, zc, r = fit
+        if r == 0 or r > 1e4:
+            pts = [(0.0, float(i)) for i in range(int(path_length) + 1)]
+            return pts, 0.0
 
-        for _ in range(num_steps):
-            heading += curvature * step
-            x += step * np.sin(heading)
-            y += step * np.cos(heading)
-            points.append((x, y))
+        # Determine direction of travel along circle from history (sign of curvature)
+        # Use the last two history vectors from center to decide direction
+        x_last, z_last = ego_pts[-1]
+        x_prev, z_prev = ego_pts[-2]
+        v_end = np.array([x_last - xc, z_last - zc])
+        v_prev = np.array([x_prev - xc, z_prev - zc])
+        cross = v_end[0] * v_prev[1] - v_end[1] * v_prev[0]
+        direction = 1 if cross > 0 else -1
 
-        return points
+        # Angle of the vector from center to the ego origin (0,0)
+        theta0 = np.arctan2(-zc, -xc)  # angle from center to origin
+
+        # Generate arc points forward from the ego origin along the fitted circle
+        num_points = max(2, int(path_length)) * 2  # denser sampling
+        arc_points: List[Tuple[float, float]] = []
+        for s in np.linspace(0.0, path_length, num_points):
+            # param angle step based on arc length s = r * delta_theta
+            delta_theta = s / r
+            angle = theta0 - direction * delta_theta
+            x = xc + r * np.cos(angle)
+            z = zc + r * np.sin(angle)
+            # Convert to ego-space coords where forward is positive y
+            arc_points.append((float(x), float(z)))
+
+        # Signed curvature
+        curvature = (direction * (1.0 / r)) if r != 0 else 0.0
+        return arc_points, curvature
 
     def create_path_polygon(
         self,
@@ -683,27 +758,47 @@ class ETS2Radar:
 
     def draw_ego_path(
         self,
-        img,
-        path_points,
-        center,
-        scale
+        img: npt.NDArray[np.uint8],
+        path_points: List[Tuple[float, float]],
+        center: ScreenCoordinate,
+        scale: float,
+        color: RGBColor = (0, 255, 0),
+        thickness: int = 1,
+        show_info: bool = True,
+        curvature: Optional[float] = None
     ):
         """
         Draw the ego vehicle's predicted path on the radar.
+
+        - path_points: list of (x, y) in ego-space where y is forward.
+        - thickness: line thickness (user requested 1).
+        - curvature: optional signed curvature value to display.
         """
-        if len(path_points) < 2:
+        if not path_points or len(path_points) < 2:
             return
+
         # Convert path points to screen coordinates
         screen_points = []
         for x, y in path_points:
             screen_x = int(center[0] + x * scale)
             screen_y = int(center[1] - y * scale)
             screen_points.append((screen_x, screen_y))
-        # Draw path as connected lines
+
+        # Draw the connected path with specified thickness
         for i in range(len(screen_points) - 1):
-            cv2.line(img, screen_points[i], screen_points[i+1], (0, 255, 0), 1)
-        # Draw path boundaries (optional - shows width)
-        # This would require converting the path polygon to screen coordinates
+            cv2.line(img, screen_points[i], screen_points[i + 1], color, thickness)
+
+        # Optionally draw curvature text
+        if show_info and curvature is not None:
+            try:
+                k = float(curvature)
+                text = f"curv={k:.4f} m^-1"
+                # Place the text near the first point of the path (just above ego)
+                base_pos = (center[0] + 8, center[1] - 12)
+                cv2.putText(img, text, base_pos,
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+            except Exception:
+                pass
 
     def update(self, data=None):
         """
@@ -719,6 +814,7 @@ class ETS2Radar:
         ego_steer = data.get("gameSteer", 0.0)
         speed = data.get("speed", 0.0)
         self.ego_path_length = MAX_DISTANCE # 40 + int(speed) * 0.8  # Dynamic path length based on speed
+        self.ego_trajectory.append((px, pz))
 
         vehicles = self.module.run()
         # Filter vehicles not on the truck's plane
