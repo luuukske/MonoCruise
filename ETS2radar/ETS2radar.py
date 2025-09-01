@@ -7,6 +7,10 @@ from shapely.geometry import Polygon, Point
 try:
     from ETS2radar.main import Module
 except:
+    print("\n")
+    print("#"*20)
+    print("\nwrong file stubid\n")
+    print("#"*20)
     exit()
 import collections
 import time
@@ -22,6 +26,7 @@ Corner = Tuple[float, float, float]  # (x, y, z)
 MAX_DISTANCE: int = 150  # meters
 REFRESH_INTERVAL: float = 0.1  # seconds
 FOV_ANGLE: int = 25  # degrees (half-angle of cone)
+POSITION_SNAP: float = 1.0  # meters: only save every 10 meters
 
 class VehicleTracker:
     """
@@ -94,11 +99,16 @@ class ETS2Radar:
         self.vehicle_histories: Dict[int, Deque[Coordinate]] = collections.defaultdict(
             lambda: collections.deque(maxlen=25)
         )
-        self.ego_trajectory: Deque[Coordinate] = collections.deque(maxlen=25)
+        self.vehicle_last_saved_position: Dict[int, Optional[Coordinate]] = collections.defaultdict(lambda: None)
+
+        self.ego_trajectory: Deque[Coordinate] = collections.deque(maxlen=10)
+        self.ego_last_saved_position: Optional[Coordinate] = None
+
         self.vehicle_speeds: Dict[int, float] = {}
         self.lane_state_tracker: Dict[int, VehicleTracker] = {}
         self.ego_path_tracker: Dict[int, EgoPathTracker] = {}
         self.ego_path_length: float = MAX_DISTANCE
+        self.vehicle_world_pos_history = {}
 
         # Scoring system for vehicles (used for robust lane detection)
         self.vehicle_scores: Dict[int, float] = collections.defaultdict(float)
@@ -110,7 +120,7 @@ class ETS2Radar:
 
         print("ETS2 Radar initialized.")
 
-    def calculate_score(
+    def calculate_offset_score(
         self,
         vid: int,
         offset: Optional[float],
@@ -119,64 +129,140 @@ class ETS2Radar:
     ) -> float:
         """
         Calculate the new score for a vehicle, including previous score.
-
-        The offset score formula is:
-            f(x) = 2^(-((x/10)^2))*2 - 1
-
-        The score to be added to previous is clamped between -1 and 1.
-        The cumulative score is clamped between -5 and +5.
-
-        Args:
-            vid: Vehicle ID.
-            offset: Offset value from fitted arc (None if not available).
-            previous_score: Optional previous score for this vehicle.
-
-        Returns:
-            The new clamped score for this vehicle.
+        If the vehicle has a trail (i.e. history deque exists and not empty) but not enough points (<10), score is -1.
+        If no trail (no history or empty), score is 0.
+        Otherwise, use the offset formula as before.
         """
         if previous_score is None:
             previous_score = self.vehicle_scores.get(vid, 0.0)
 
-        score_increment = -0.1
+        score_increment = 0.0
+
+        # Check if vehicle has a trail/history
+        history = self.vehicle_histories.get(vid, None)
+        if history is not None and offset is None:
+            # Has a trail but not intersecting with base: penalize
+            score_increment = -0.8
 
         # Offset method
         if offset is not None:
             try:
                 x = float(offset)
-                offset_score = (2 ** (-(x / 10) ** 2) * 2 - 1)/2
-                distance_amp = (2**(-(distance/100))+1/((distance+3)/10))
-                # Clamp each score increment to [-1, 1]
-                offset_score = max(-1.0, min(1.0, offset_score*distance_amp))
+                offset_score = (2 ** (-(x / 9) ** 2) * 2.5 - 1.5) / 1
+                distance_amp = (2 ** (-(distance / 100)) + 1 / ((distance + 3) / 8)-1)/2+1
+                offset_score = max(-1.0, min(1.0, offset_score * distance_amp))
                 score_increment += offset_score
             except Exception:
                 pass
         else:
-            score_increment += -0.5
+            score_increment += -0.1
 
-        # Clamp total score to [-10, +10]
-        # Adjust score change rate: decrease faster if previous_score > 0, increase faster if previous_score < 0
         if (previous_score > 0 and score_increment < 0) or (previous_score < 0 and score_increment > 0):
-            new_score = previous_score + score_increment * 1.5  # slower increase, faster decrease
+            new_score = previous_score + score_increment * 1.2
         else:
             new_score = previous_score + score_increment
         new_score = max(-10.0, min(10.0, new_score))
         return new_score
+
+    def calculate_angle_score(
+        self,
+        vid: int,
+        ego_path: List[Tuple[float, float]],
+        vehicle_centroid: Tuple[float, float],
+        distance: float,
+        previous_score: Optional[float] = None
+    ) -> float:
+        """
+        Calculate score contribution from the intersection between ego_path and invisible circle.
+
+        Args:
+            vid: Vehicle ID.
+            ego_path: List of ego path points (ego-space coordinates).
+            vehicle_centroid: (x, z) position of the vehicle in ego-space.
+            distance: Distance between ego and vehicle (radius of circle).
+            previous_score: Optional previous score.
+
+        Returns:
+            Score contribution from the angular difference.
+        """
+        # Find intersection of ego_path with circle of radius=distance, centered at ego (0,0)
+        intersection_points = []
+        for i in range(1, len(ego_path)):
+            p1 = ego_path[i-1]
+            p2 = ego_path[i]
+            # Line segment from p1 to p2
+            # Parametric line: p = p1 + t*(p2-p1), t ∈ [0,1]
+            dx = p2[0] - p1[0]
+            dz = p2[1] - p1[1]
+            a = dx**2 + dz**2
+            b = 2 * (p1[0]*dx + p1[1]*dz)
+            c = p1[0]**2 + p1[1]**2 - distance**2
+
+            discriminant = b**2 - 4*a*c
+            if discriminant < 0 or a == 0:
+                continue
+            sqrt_disc = np.sqrt(discriminant)
+            for sign in [-1, 1]:
+                t = (-b + sign * sqrt_disc) / (2 * a)
+                if 0.0 <= t <= 1.0:
+                    ix = p1[0] + t * dx
+                    iz = p1[1] + t * dz
+                    intersection_points.append((ix, iz))
+        if not intersection_points:
+            return 0.0
+
+        # Pick the intersection point closest to the ego (should be only one in forward path)
+        intersection = min(intersection_points, key=lambda p: p[1])  # furthest forward
+
+        # Calculate angle from ego to intersection and from ego to vehicle
+        intersection_angle = np.arctan2(intersection[0], intersection[1])
+        vehicle_angle = np.arctan2(vehicle_centroid[0], vehicle_centroid[1])
+        angle_diff = intersection_angle - vehicle_angle
+        # Normalize angle_diff to [-pi, pi]
+        while angle_diff > np.pi:
+            angle_diff -= 2*np.pi
+        while angle_diff < -np.pi:
+            angle_diff += 2*np.pi
+
+        # Use formula for scoring
+        try:
+            x = float(np.degrees(angle_diff))
+            angle_score = (3 ** (-(x / 5) ** 2) * 2 - 1)/2 - (abs(x)/40)**6
+            distance_amp = (2**(-(distance/100))+1/((distance+3)/8)-1)/2+1
+            # Clamp each score increment to [-1, 1]
+            angle_score = max(-1.0, min(1.0, angle_score*distance_amp))
+            score_increment += angle_score
+        except Exception:
+                pass
+
+        # Add to previous_score or return as separate contribution
+        if previous_score is not None:
+            new_score = previous_score + angle_score
+            new_score = max(-10.0, min(10.0, new_score))
+            return new_score
+        return angle_score
 
     def world_to_screen(
         self,
         dx: float,
         dz: float,
         center: ScreenCoordinate,
-        scale: float
+        scale: float,
+        int_out = True
     ) -> ScreenCoordinate:
         """
         Convert a world-relative point (dx, dz) to screen coordinates.
         Used for visualization.
         """
         cx, cy = center
-        sx: int = int(cx + dx * scale)
-        sy: int = int(cy - dz * scale)
-        return sx, sy
+        if int_out:
+            sx: int = int(cx + dx * scale)
+            sy: int = int(cy - dz * scale)
+            return sx, sy
+        else:
+            sx: float = float(cx + dx * scale)
+            sy: float = float(cy - dz * scale)
+            return sx, sy
 
     def rotate_point(
         self,
@@ -318,15 +404,11 @@ class ETS2Radar:
     ) -> Tuple[Optional[float], Optional[float]]:
         """
         Draw a fixed-length arc (from a circle fit) behind or in front of the vehicle.
-        Used both for lane detection and visualization.
-
-        Returns:
-            tuple: (intersection_point, normalized_angle)
+        Returns intersection info for scoring.
+        Now: If there are not enough history points, does nothing (no synthetic straight trail).
         """
-        base_radius: float = 10.0 * scale
-        r_steer: float = base_radius / abs(ego_steer) if abs(ego_steer) != 0.0 else 0.0
-
         if len(history) < 10:
+            # Not enough points: do not draw anything, no offset/angle
             return None, None
 
         xs, zs = zip(*history)
@@ -338,54 +420,54 @@ class ETS2Radar:
         x_end, z_end = xs[-1], zs[-1]
         x_prev, z_prev = xs[-2], zs[-2]
 
-        v_end: npt.NDArray[np.float64] = np.array([x_end - xc, z_end - zc])
-        v_prev: npt.NDArray[np.float64] = np.array([x_prev - xc, z_prev - zc])
-        theta_end: float = np.arctan2(v_end[1], v_end[0])
-        cross: float = v_end[0]*v_prev[1] - v_end[1]*v_prev[0]
-        direction: int = 1 if cross > 0 else -1
+        v_end = np.array([x_end - xc, z_end - zc])
+        v_prev = np.array([x_prev - xc, z_prev - zc])
+        theta_end = np.arctan2(v_end[1], v_end[0])
+        cross = v_end[0] * v_prev[1] - v_end[1] * v_prev[0]
+        direction = 1 if cross > 0 else -1
 
         if reverse:
             direction *= -1
 
-        arc_angle: float = arc_length / r if r != 0 else 0.0
-        arc_points: List[ScreenCoordinate] = []
-        num_points: int = 30
+        arc_angle = arc_length / r if r != 0 else 0.0
+        arc_points = []
+        num_points = 30
 
         for i in range(num_points + 1):
-            t: float = i / num_points
-            angle: float = theta_end - direction * t * arc_angle
-            x: float = xc + r * np.cos(angle)
-            z: float = zc + r * np.sin(angle)
-            dx: float = x - px
-            dz: float = z - pz
+            t = i / num_points
+            angle = theta_end - direction * t * arc_angle
+            x = xc + r * np.cos(angle)
+            z = zc + r * np.sin(angle)
+            dx = x - px
+            dz = z - pz
             dxr, dzr = self.rotate_point(-dx, dz, -yaw_rad)
             arc_points.append(self.world_to_screen(dxr, dzr, center, scale))
 
         # Draw arc for visualization only
         if self.show_window and arc_points:
-            arr: npt.NDArray[np.int32] = np.array(arc_points, dtype=np.int32)
+            arr = np.array(arc_points, dtype=np.int32)
             cv2.polylines(img, [arr], isClosed=False, color=color, thickness=1)
-            curvature: float = 1.0 / r if r != 0 else 0.0
+            curvature = 1.0 / r if r != 0 else 0.0
             cv2.putText(img, f"curv={curvature:.3f}", arc_points[-1],
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
         # Find intersection with screen bottom
-        intersection_point: Optional[float] = None
-        intersection_angle: Optional[float] = None
-        screen_height: int = img.shape[0] if self.show_window else 600
+        intersection_point = None
+        intersection_angle = None
+        screen_height = img.shape[0] if self.show_window else 600
 
         for i, (x, y) in enumerate(arc_points):
             if y >= screen_height:
                 intersection_point = float(x - 300)
                 if i > 0:
-                    prev_point = arc_points[i-1]
-                    tangent_x: float = float(x - prev_point[0])
-                    tangent_y: float = float(y - prev_point[1])
-                    tangent_angle: float = np.arctan2(tangent_y, tangent_x)
-                    baseline_angle: float = abs(tangent_angle)
-                    if baseline_angle > np.pi/2:
+                    prev_point = arc_points[i - 1]
+                    tangent_x = float(x - prev_point[0])
+                    tangent_y = float(y - prev_point[1])
+                    tangent_angle = np.arctan2(tangent_y, tangent_x)
+                    baseline_angle = abs(tangent_angle)
+                    if baseline_angle > np.pi / 2:
                         baseline_angle = np.pi - baseline_angle
-                    normalized_angle: float = 2.0 - (2.0 * baseline_angle / (np.pi/2))
+                    normalized_angle = 2.0 - (2.0 * baseline_angle / (np.pi / 2))
                     if tangent_x < 0:
                         normalized_angle = -abs(normalized_angle)
                     else:
@@ -408,6 +490,124 @@ class ETS2Radar:
 
 
 
+    def draw_vehicle_heading_line(self, img, pos_history, center, scale, color=(0, 255, 0), thickness=1):
+        """
+        Draw a fixed 100m long line estimating the direction the vehicle is heading in,
+        based on the average of all 5 points in pos_history (deque).
+        Returns the line endpoints for future intersection detection.
+        """
+        if len(pos_history) < 5:  # We need at least 5 points
+            return None, None
+
+        # Calculate average x and z positions
+        avg_x = sum(pos[0] for pos in pos_history) / len(pos_history)
+        avg_z = sum(pos[1] for pos in pos_history) / len(pos_history)
+
+        # Get the current (newest) position as the line's starting point
+        x_curr, z_curr = pos_history[-1]
+
+        # Mirror avg_x and avg_z around the current x and z (curr)
+        avg_x = 2 * x_curr - avg_x
+        avg_z = 2 * z_curr - avg_z
+
+        # Calculate heading vector (from current to average)
+        dx = avg_x - x_curr
+        dz = avg_z - z_curr
+        norm = (dx**2 + dz**2) ** 0.5
+        if norm == 0:
+            return None, None
+
+        # Normalize the heading vector
+        dx /= norm
+        dz /= norm
+
+        # 100 meters ahead
+        x_end = x_curr + dx * 100.0
+        z_end = z_curr + dz * 100.0
+
+        # Convert world coordinates to screen coordinates
+        start_screen = self.world_to_screen(x_curr, z_curr, center, scale, int_out=True)
+        end_screen = self.world_to_screen(x_end, z_end, center, scale, int_out=True)
+
+        # Draw the line (no arrow)
+        cv2.line(img, start_screen, end_screen, color, thickness)
+
+        # Output endpoints for intersection detection
+        return (x_curr, z_curr), (x_end, z_end)
+
+    def draw_ego_rectangle(self, img, center, scale, width=2.0, length=6.0, color=(0, 255, 255), thickness=2):
+        """
+        Draw a rectangle representing the ego vehicle at the center point.
+        Width: 2m, Length: 6m (extending forward from ego point)
+        Returns the rectangle corners in world coordinates for intersection detection.
+        """
+        # Ego vehicle rectangle corners in world coordinates (ego is at origin 0,0)
+        half_width = width / 2.0
+        # Rectangle extends from 0 to length forward (positive z direction)
+        corners_world = [
+            (-half_width, 0),      # rear left
+            (half_width, 0),       # rear right
+            (half_width, length),  # front right
+            (-half_width, length)  # front left
+        ]
+        
+        # Convert to screen coordinates
+        corners_screen = []
+        for x, z in corners_world:
+            screen_pt = self.world_to_screen(x, z, center, scale, int_out=True)
+            corners_screen.append(screen_pt)
+        
+        # Draw the rectangle
+        pts = np.array(corners_screen, np.int32)
+        cv2.polylines(img, [pts], True, color, thickness)
+        
+        return corners_world
+
+    def line_intersects_rectangle(self, line_start, line_end, rect_corners):
+        """
+        Check if a line segment intersects with a rectangle.
+        line_start, line_end: (x, z) tuples in world coordinates
+        rect_corners: list of 4 (x, z) tuples representing rectangle corners
+        Returns True if intersection exists, False otherwise
+        """
+        if line_start is None or line_end is None:
+            return False
+            
+        from shapely.geometry import LineString, Polygon
+        
+        try:
+            # Create line and rectangle geometries
+            line = LineString([line_start, line_end])
+            rectangle = Polygon(rect_corners)
+            
+            # Check for intersection
+            return line.intersects(rectangle)
+        except:
+            return False
+
+    def estimate_vehicle_acceleration(self, vid, current_speed, dt=0.1):
+        """
+        Estimate vehicle acceleration using existing vehicle_speeds tracking.
+        
+        Parameters:
+            vid: Vehicle ID
+            current_speed: Current vehicle speed (m/s)
+            dt: Time delta between measurements (seconds)
+        
+        Returns:
+            float: Estimated acceleration (m/s^2, positive for deceleration)
+        """
+        # Get previous speed from existing tracking
+        previous_speed = self.vehicle_speeds.get(vid, current_speed)
+        
+        # Calculate acceleration (positive when decelerating)
+        acceleration = (previous_speed - current_speed) / dt
+        
+        # Update the speed tracking for next iteration
+        self.vehicle_speeds[vid] = current_speed
+        
+        return max(acceleration, 0.0)  # Return only deceleration (positive values)
+
     def draw_radar(
         self,
         vehicles: List[Any],
@@ -416,30 +616,15 @@ class ETS2Radar:
         yaw_rad: float,
         ego_steer: float = 0.0,
         ego_speed: float = 0.0
-    ) -> List[VehicleData]:
-        """
-        Render the radar and return in-lane vehicle info. Also updates vehicle scores.
-        This is the main in-lane vehicle detection logic.
-
-        NOTE: This function was extended to draw a predictive ego path derived from the
-        past positions stored in self.ego_trajectory. The predicted path is approximated
-        by fitting a circle to the recent trajectory and drawing the forward arc (or a
-        straight line when fitting fails).
-        """
-        # Get window size (or fallback to defaults)
+    ) -> List[Any]:
         try:
             _, _, win_w, win_h = cv2.getWindowImageRect("ETS2 Radar")
         except:
             win_w, win_h = 600, 600
 
-        # Scale so that z = max_distance → y = 0 (top of window)
         scale = win_h / self.max_distance
         center = (win_w // 2, win_h)
-
-        # Blank canvas
         img = np.zeros((win_h, win_w, 3), dtype=np.uint8)
-
-        # Create FOV mask
         mask = np.zeros((win_h, win_w), dtype=np.uint8)
         cone_len = int(self.max_distance * scale)
         pts = [(center[0], center[1])]
@@ -449,7 +634,6 @@ class ETS2Radar:
             pts.append((x, y))
         cv2.fillPoly(mask, [np.array(pts, np.int32)], 255)
 
-        # Draw range rings
         for r in range(25, self.max_distance + 1, 25):
             try:
                 radius = int(r * scale)
@@ -459,26 +643,24 @@ class ETS2Radar:
             except:
                 continue
 
-        # Draw crosshairs
         tmp = np.zeros_like(img)
         cv2.line(tmp, (center[0], 0), (center[0], win_h), (100, 100, 100), 1)
         cv2.line(tmp, (0, center[1]), (win_w, center[1]), (100, 100, 100), 1)
         img = cv2.bitwise_or(img, cv2.bitwise_and(tmp, tmp, mask=mask))
 
-        # Draw FOV cone outline and ego-truck dot
         self.draw_fov_cone(img, center, scale)
         cv2.circle(img, center, 5, (0, 255, 255), -1)
+        
+        # Draw ego vehicle rectangle (2m wide, 6m long)
+        ego_rect_corners = self.draw_ego_rectangle(img, center, scale, width=2.0, length=6.0, color=(0, 255, 255), thickness=2)
 
-        # --- Predict and draw ego path from history (new) ---
+        path_pts, curvature = [], 0.0
         try:
             path_pts, curvature = self.predict_ego_path_using_history(px, pz, yaw_rad, path_length=self.ego_path_length)
-            # Only draw the portion that is inside the FOV mask (optional optimization)
             self.draw_ego_path(img, path_pts, center, scale, color=(0, 200, 0), thickness=1, show_info=True, curvature=curvature)
         except Exception:
-            # Don't let prediction errors break the radar
             pass
 
-        # Collect all vehicle polygons and check for collisions
         origin = Point(0, 0)
         vehicle_data = []
         for v in vehicles:
@@ -492,7 +674,6 @@ class ETS2Radar:
                     'centroid': poly.centroid,
                     'trailers': []
                 })
-                # Add trailers to the same vehicle group
                 for t in getattr(v, 'trailers', []):
                     poly_t = self.get_vehicle_polygon(t, px, pz, yaw_rad)
                     trailer_closest_distance = min(Point(coord).distance(origin) for coord in poly_t.exterior.coords[:-1])
@@ -503,7 +684,6 @@ class ETS2Radar:
                             'distance': trailer_closest_distance
                         })
 
-        # Detect colliding vehicles and group them (used for clutter reduction)
         collision_threshold = 0.5
         vehicle_groups = []
         processed = set()
@@ -520,10 +700,8 @@ class ETS2Radar:
                     processed.add(j)
             vehicle_groups.append(group)
 
-        # Main vehicle-in-lane detection loop
         in_lane_vehicles = []
         for group in vehicle_groups:
-            # For colliding vehicles, only keep the closest one
             if len(group) > 1:
                 group = [min(group, key=lambda x: x['distance'])]
             main_vehicle = group[0]
@@ -531,7 +709,6 @@ class ETS2Radar:
             poly = main_vehicle['polygon']
             distance = main_vehicle['distance']
             dx, dz = main_vehicle['centroid'].x, main_vehicle['centroid'].y
-            # Use closest trailer distance if any
             overall_closest_distance = distance
             for trailer_data in main_vehicle['trailers']:
                 trailer_distance = trailer_data['distance']
@@ -539,15 +716,21 @@ class ETS2Radar:
                     overall_closest_distance = trailer_distance
             vid = getattr(v, 'id', id(v))
 
-            # Lane detection only by trajectory, no path collision
+            # --- Update vehicle world pos history instead of screen pos history ---
+            if vid not in self.vehicle_world_pos_history:
+                self.vehicle_world_pos_history[vid] = collections.deque(maxlen=10)
+            self.vehicle_world_pos_history[vid].append((dx, dz))
+
+            # Calculate acceleration using vehicle's speed data
+            vehicle_speed = getattr(v, 'speed', 0)
+            acceleration = self.calculate_vehicle_acceleration(vid, vehicle_speed)
+
             offset_for_score: Optional[float] = None
             score_val = self.vehicle_scores.get(vid, 0.0)
-            # Only consider in-lane if score > 0
             if self.is_in_front_cone(dx, dz):
                 hist = self.vehicle_histories.get(vid, [])
                 vehicle_speed = getattr(v, 'speed', 0)
                 if vehicle_speed < 2 and len(hist) == 0:
-                    # Synthetic trajectory for stationary vehicles
                     cx = np.mean([c[0] for c in v.get_corners()])
                     cz = np.mean([c[2] for c in v.get_corners()])
                     corners = v.get_corners()
@@ -574,20 +757,25 @@ class ETS2Radar:
                         hist = synthetic_hist
                 if hist:
                     offset, angle = self.draw_fitted_arc(img, hist, px, pz, yaw_rad, center, scale,
-                                                arc_length=130, color=(0,80,80), reverse=True, ego_steer=ego_steer)
+                                                arc_length=150, color=(0,80,80), reverse=True, ego_steer=ego_steer)
                     offset_for_score = offset
                 previous_score = self.vehicle_scores.get(vid, 0.0)
-                score_val = self.calculate_score(vid, offset_for_score, previous_score, overall_closest_distance)
+                score_val = self.calculate_offset_score(vid, offset_for_score, previous_score, overall_closest_distance)
+                score_val = self.calculate_angle_score(
+                    vid,
+                    path_pts,
+                    (dx, dz),
+                    overall_closest_distance,
+                    previous_score=score_val
+                )
                 self.vehicle_scores[vid] = score_val
-            # Lane status for output (score-based)
             if self.is_in_front_cone(dx, dz) and score_val > 0:
-                in_lane_vehicles.append((v, overall_closest_distance - 4.2))
+                in_lane_vehicles.append((v, overall_closest_distance - 4.2, acceleration))
 
-            # Draw vehicle based on lane status
+            # Draw vehicle
             if self.is_in_front_cone(dx, dz):
                 if score_val > 0:
                     self.draw_vehicle(img, poly, center, scale, (0,0,255))
-                    # Draw score text
                     veh_scr_x, veh_scr_y = self.world_to_screen(dx, dz, center, scale)
                     cv2.putText(img, f"score:{score_val:.2f}", (veh_scr_x-25, veh_scr_y-12),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,0), 1, cv2.LINE_AA)
@@ -595,6 +783,49 @@ class ETS2Radar:
                     self.draw_vehicle(img, poly, center, scale, (0,0,100))
             else:
                 self.draw_vehicle(img, poly, center, scale, (200,200,0))
+
+            ''' temporaraly moved to main MonoCruise code
+            # Estimate front vehicle acceleration
+            try:
+                vehicle_speed_ms = vehicle_speed if hasattr(v, 'speed') else 0.0  # Convert km/h to m/s if needed
+                a_front = 0.0 #self.estimate_vehicle_acceleration(vid, vehicle_speed_ms)
+            except:
+                a_front = 0.0
+                vehicle_speed_ms = 0.0
+            
+            # Ensure a_front is non-negative (deceleration magnitude)
+            a_front = abs(a_front) if a_front < 0 else max(a_front, 0.05)  # Minimum assumption of 0.05 m/s^2
+
+            # start_co and end_co represent the heading line for intersecting detection in this format (x,y)
+            start_co, end_co = self.draw_vehicle_heading_line(
+                                    img,
+                                    self.vehicle_world_pos_history[vid],
+                                    center,
+                                    scale,
+                                    color=(0,255,0),
+                                    thickness=2
+                                )
+
+            # --- Check for intersection with ego rectangle ---
+            if start_co is not None and end_co is not None:
+                if self.line_intersects_rectangle(start_co, end_co, ego_rect_corners):
+                    # Vehicle's heading line intersects with ego rectangle - run emergency analysis
+                    AEB_brake, AEB_warn = self.determine_emergency(float(overall_closest_distance),
+                                                                   ego_speed,
+                                                                   25,
+                                                                   vehicle_speed_ms,
+                                                                   a_front
+                                                                   )
+                    if AEB_brake:
+                        print("#"*40)
+                        print("        BRAKE NOW")
+                        print("#"*40)
+                    elif AEB_warn:
+                        print("AEB warning")
+                    # You can store or use these values as needed
+                    # For now, we'll just pass them (implement your logic here)
+                    '''
+
             for trailer_data in main_vehicle['trailers']:
                 poly_t = trailer_data['polygon']
                 tx, tz = poly_t.centroid.x, poly_t.centroid.y
@@ -604,19 +835,53 @@ class ETS2Radar:
                     else:
                         self.draw_vehicle(img, poly_t, center, scale, (100,0,0))
 
-        # Sort and output only the closest 3 vehicles in-lane
         in_lane_vehicles.sort(key=lambda x: x[1])
         result = []
-        for v, dist in in_lane_vehicles[:3]:
+        for v, dist, accel in in_lane_vehicles[:3]:
             speed_raw = getattr(v, 'speed', 0)
             speed_kmh = speed_raw * 3.6
-            result.append((v.id, dist, speed_kmh))
+            result.append((v.id, dist, speed_kmh, accel))
 
-        # Show radar window if enabled
         if self.show_window:
             cv2.imshow("ETS2 Radar", img)
 
         return result
+    
+    def calculate_vehicle_acceleration(self, vehicle_id: int, current_speed: float) -> float:
+        """
+        Calculate vehicle acceleration using the vehicle's reported speed data.
+        Returns acceleration in m/s².
+        """
+        # Initialize speed history if not exists
+        if not hasattr(self, 'vehicle_speed_history'):
+            self.vehicle_speed_history = {}
+        
+        if vehicle_id not in self.vehicle_speed_history:
+            self.vehicle_speed_history[vehicle_id] = collections.deque(maxlen=10)
+        
+        # Store current speed (assuming it's already in m/s, adjust if needed)
+        # If speed is in km/h, uncomment the next line:
+        # current_speed = current_speed / 3.6
+        
+        self.vehicle_speed_history[vehicle_id].append(current_speed)
+        
+        speeds = list(self.vehicle_speed_history[vehicle_id])
+        
+        # Need at least 6 speed measurements (5 intervals)
+        if len(speeds) < 6:
+            return 0.0
+        
+        dt_frame = 1.0 / 30.0  # Time per frame (assuming 30 FPS)
+        
+        # Get speed from 5 data points ago and current speed
+        old_speed = speeds[-6]  # 5 data points ago
+        current_speed = speeds[-1]  # Current speed
+        
+        # Calculate acceleration over 5 frame intervals
+        time_interval = 5.0 * dt_frame  # 5 frames worth of time
+        acceleration = (current_speed - old_speed) / time_interval
+        
+        return acceleration
     
 
 
@@ -800,6 +1065,35 @@ class ETS2Radar:
             except Exception:
                 pass
 
+    def should_save_position(self, last: Optional[Coordinate], current: Coordinate) -> bool:
+        """
+        Checks if the distance between last and current is at least POSITION_SNAP meters.
+        """
+        if last is None:
+            return True
+        dx = current[0] - last[0]
+        dz = current[1] - last[1]
+        distance = np.sqrt(dx*dx + dz*dz)
+        return distance >= POSITION_SNAP
+
+    def update_vehicle_history(self, vid: int, position: Coordinate) -> None:
+        """
+        Only save vehicle positions if moved >= POSITION_SNAP meters since last saved.
+        """
+        last = self.vehicle_last_saved_position[vid]
+        if self.should_save_position(last, position):
+            self.vehicle_histories[vid].append(position)
+            self.vehicle_last_saved_position[vid] = position
+
+    def update_ego_trajectory(self, position: Coordinate) -> None:
+        """
+        Only save ego positions if moved >= POSITION_SNAP meters since last saved.
+        """
+        last = self.ego_last_saved_position
+        if self.should_save_position(last, position):
+            self.ego_trajectory.append(position)
+            self.ego_last_saved_position = position
+
     def update(self, data=None):
         """
         Update radar data and return closest 3 in-lane vehicles.
@@ -813,8 +1107,8 @@ class ETS2Radar:
         yawr = yawn * 2 * np.pi
         ego_steer = data.get("gameSteer", 0.0)
         speed = data.get("speed", 0.0)
-        self.ego_path_length = MAX_DISTANCE # 40 + int(speed) * 0.8  # Dynamic path length based on speed
-        self.ego_trajectory.append((px, pz))
+        self.ego_path_length = MAX_DISTANCE
+        self.update_ego_trajectory((px, pz))
 
         vehicles = self.module.run()
         # Filter vehicles not on the truck's plane
@@ -830,7 +1124,7 @@ class ETS2Radar:
                     poly = self.get_vehicle_polygon(v, px, pz, yawr)
                     cx = np.mean([c[0] for c in v.get_corners()])
                     cz = np.mean([c[2] for c in v.get_corners()])
-                    self.vehicle_histories[vid].append((cx, cz))
+                    self.update_vehicle_history(vid, (cx, cz))
                 # Always update speed for all vehicles
                 self.vehicle_speeds[vid] = getattr(v, 'speed', 0)
 
