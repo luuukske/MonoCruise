@@ -26,7 +26,7 @@ Corner = Tuple[float, float, float]  # (x, y, z)
 MAX_DISTANCE: int = 150  # meters
 REFRESH_INTERVAL: float = 0.1  # seconds
 FOV_ANGLE: int = 25  # degrees (half-angle of cone)
-POSITION_SNAP: float = 1.0  # meters: only save every 10 meters
+POSITION_SNAP: float = 1.5  # meters: only save every 10 meters
 
 class VehicleTracker:
     """
@@ -125,7 +125,8 @@ class ETS2Radar:
         vid: int,
         offset: Optional[float],
         previous_score: Optional[float] = None,
-        distance: float = 30
+        distance: float = 30,
+        angle: float = 0.0
     ) -> float:
         """
         Calculate the new score for a vehicle, including previous score.
@@ -136,13 +137,15 @@ class ETS2Radar:
         if previous_score is None:
             previous_score = self.vehicle_scores.get(vid, 0.0)
 
-        score_increment = 0.0
-
         # Check if vehicle has a trail/history
         history = self.vehicle_histories.get(vid, None)
         if history is not None and offset is None:
             # Has a trail but not intersecting with base: penalize
             score_increment = -0.8
+        elif history is None:
+            score_increment = -0.3
+        else:
+            score_increment = 0.0
 
         # Offset method
         if offset is not None:
@@ -158,9 +161,10 @@ class ETS2Radar:
             score_increment += -0.1
 
         if (previous_score > 0 and score_increment < 0) or (previous_score < 0 and score_increment > 0):
-            new_score = previous_score + score_increment * 1.2
+            new_score = previous_score + score_increment * 0.8
         else:
             new_score = previous_score + score_increment
+            
         new_score = max(-10.0, min(10.0, new_score))
         return new_score
 
@@ -477,64 +481,6 @@ class ETS2Radar:
 
         return intersection_point, intersection_angle
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def draw_vehicle_heading_line(self, img, pos_history, center, scale, color=(0, 255, 0), thickness=1):
-        """
-        Draw a fixed 100m long line estimating the direction the vehicle is heading in,
-        based on the average of all 5 points in pos_history (deque).
-        Returns the line endpoints for future intersection detection.
-        """
-        if len(pos_history) < 5:  # We need at least 5 points
-            return None, None
-
-        # Calculate average x and z positions
-        avg_x = sum(pos[0] for pos in pos_history) / len(pos_history)
-        avg_z = sum(pos[1] for pos in pos_history) / len(pos_history)
-
-        # Get the current (newest) position as the line's starting point
-        x_curr, z_curr = pos_history[-1]
-
-        # Mirror avg_x and avg_z around the current x and z (curr)
-        avg_x = 2 * x_curr - avg_x
-        avg_z = 2 * z_curr - avg_z
-
-        # Calculate heading vector (from current to average)
-        dx = avg_x - x_curr
-        dz = avg_z - z_curr
-        norm = (dx**2 + dz**2) ** 0.5
-        if norm == 0:
-            return None, None
-
-        # Normalize the heading vector
-        dx /= norm
-        dz /= norm
-
-        # 100 meters ahead
-        x_end = x_curr + dx * 100.0
-        z_end = z_curr + dz * 100.0
-
-        # Convert world coordinates to screen coordinates
-        start_screen = self.world_to_screen(x_curr, z_curr, center, scale, int_out=True)
-        end_screen = self.world_to_screen(x_end, z_end, center, scale, int_out=True)
-
-        # Draw the line (no arrow)
-        cv2.line(img, start_screen, end_screen, color, thickness)
-
-        # Output endpoints for intersection detection
-        return (x_curr, z_curr), (x_end, z_end)
-
     def draw_ego_rectangle(self, img, center, scale, width=2.0, length=6.0, color=(0, 255, 255), thickness=2):
         """
         Draw a rectangle representing the ego vehicle at the center point.
@@ -562,51 +508,125 @@ class ETS2Radar:
         cv2.polylines(img, [pts], True, color, thickness)
         
         return corners_world
+ 
 
-    def line_intersects_rectangle(self, line_start, line_end, rect_corners):
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    def check_vehicle_in_ego_path(
+        self,
+        path_points: List[Tuple[float, float]],
+        vehicle_polygon: Polygon,
+        path_width: float = 1.5
+    ) -> bool:
         """
-        Check if a line segment intersects with a rectangle.
-        line_start, line_end: (x, z) tuples in world coordinates
-        rect_corners: list of 4 (x, z) tuples representing rectangle corners
-        Returns True if intersection exists, False otherwise
-        """
-        if line_start is None or line_end is None:
-            return False
+        Check if a vehicle polygon intersects with the ego path polygon.
+        
+        Args:
+            path_points: List of (x, z) points defining the ego path in ego-space
+            vehicle_polygon: Shapely polygon of the vehicle in ego-space
+            path_width: Width of the ego path in meters
             
-        from shapely.geometry import LineString, Polygon
+        Returns:
+            True if vehicle intersects with the ego path
+        """
+        if not path_points or len(path_points) < 2:
+            return False
         
         try:
-            # Create line and rectangle geometries
-            line = LineString([line_start, line_end])
-            rectangle = Polygon(rect_corners)
+            path_polygon = self.create_path_polygon(path_points, path_width)
+            if path_polygon is None:
+                return False
             
-            # Check for intersection
-            return line.intersects(rectangle)
-        except:
+            # Check if vehicle polygon intersects with path polygon
+            return vehicle_polygon.intersects(path_polygon)
+        except Exception:
             return False
 
-    def estimate_vehicle_acceleration(self, vid, current_speed, dt=0.1):
+    def draw_ego_path_with_width(
+        self,
+        img: npt.NDArray[np.uint8],
+        path_points: List[Tuple[float, float]],
+        center: ScreenCoordinate,
+        scale: float,
+        path_width: float = 1.5,
+        color: RGBColor = (0, 255, 0),
+        thickness: int = 1,
+        show_info: bool = True,
+        curvature: Optional[float] = None
+    ):
         """
-        Estimate vehicle acceleration using existing vehicle_speeds tracking.
+        Draw the ego vehicle's predicted path with visible width on the radar.
         
-        Parameters:
-            vid: Vehicle ID
-            current_speed: Current vehicle speed (m/s)
-            dt: Time delta between measurements (seconds)
-        
-        Returns:
-            float: Estimated acceleration (m/s^2, positive for deceleration)
+        Args:
+            path_width: Width of the path in meters (default 1.5m)
         """
-        # Get previous speed from existing tracking
-        previous_speed = self.vehicle_speeds.get(vid, current_speed)
-        
-        # Calculate acceleration (positive when decelerating)
-        acceleration = (previous_speed - current_speed) / dt
-        
-        # Update the speed tracking for next iteration
-        self.vehicle_speeds[vid] = current_speed
-        
-        return max(acceleration, 0.0)  # Return only deceleration (positive values)
+        if not path_points or len(path_points) < 2:
+            return
+
+        # Create path polygon for visualization
+        path_polygon = self.create_path_polygon(path_points, path_width)
+        if path_polygon is not None:
+            try:
+                # Convert polygon exterior coordinates to screen coordinates
+                exterior_coords = list(path_polygon.exterior.coords)
+                screen_coords = []
+                for x, z in exterior_coords:
+                    screen_x = int(center[0] + x * scale)
+                    screen_y = int(center[1] - z * scale)
+                    screen_coords.append((screen_x, screen_y))
+                
+                # Draw filled path polygon with transparency effect
+                if len(screen_coords) >= 3:
+                    # Create a copy of the image for overlay
+                    overlay = img.copy()
+                    pts = np.array(screen_coords, np.int32)
+                    cv2.fillPoly(overlay, [pts], (0, 100, 0))  # Dark green fill
+                    # Blend with original image (30% opacity)
+                    cv2.addWeighted(overlay, 0.3, img, 0.7, 0, img)
+                    
+                    # Draw path outline
+                    cv2.polylines(img, [pts], True, color, thickness)
+            except Exception:
+                pass
+
+        # Draw center line as fallback/reference
+        screen_points = []
+        for x, z in path_points:
+            screen_x = int(center[0] + x * scale)
+            screen_y = int(center[1] - z * scale)
+            screen_points.append((screen_x, screen_y))
+
+        # Draw the connected path center line
+        for i in range(len(screen_points) - 1):
+            cv2.line(img, screen_points[i], screen_points[i + 1], color, thickness)
+
+        # Optionally draw curvature text
+        if show_info and curvature is not None:
+            try:
+                k = float(curvature)
+                text = f"curv={k:.4f} m^-1"
+                base_pos = (center[0] + 8, center[1] - 12)
+                cv2.putText(img, text, base_pos,
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+            except Exception:
+                pass
 
     def draw_radar(
         self,
@@ -657,7 +677,8 @@ class ETS2Radar:
         path_pts, curvature = [], 0.0
         try:
             path_pts, curvature = self.predict_ego_path_using_history(px, pz, yaw_rad, path_length=self.ego_path_length)
-            self.draw_ego_path(img, path_pts, center, scale, color=(0, 200, 0), thickness=1, show_info=True, curvature=curvature)
+            # Draw ego path with 1.5m width
+            self.draw_ego_path_with_width(img, path_pts, center, scale, path_width=1.5, color=(0, 200, 0), thickness=1, show_info=True, curvature=curvature)
         except Exception:
             pass
 
@@ -714,6 +735,9 @@ class ETS2Radar:
                 trailer_distance = trailer_data['distance']
                 if trailer_distance < overall_closest_distance:
                     overall_closest_distance = trailer_distance
+                
+            distance_amp = max((1/(overall_closest_distance*0.05)) - overall_closest_distance*0.01 + 1, 0)
+            
             vid = getattr(v, 'id', id(v))
 
             # --- Update vehicle world pos history instead of screen pos history ---
@@ -726,6 +750,7 @@ class ETS2Radar:
             acceleration = self.calculate_vehicle_acceleration(vid, vehicle_speed)
 
             offset_for_score: Optional[float] = None
+            angle_for_score: Optional[float] = None
             score_val = self.vehicle_scores.get(vid, 0.0)
             if self.is_in_front_cone(dx, dz):
                 hist = self.vehicle_histories.get(vid, [])
@@ -759,8 +784,9 @@ class ETS2Radar:
                     offset, angle = self.draw_fitted_arc(img, hist, px, pz, yaw_rad, center, scale,
                                                 arc_length=150, color=(0,80,80), reverse=True, ego_steer=ego_steer)
                     offset_for_score = offset
+                    angle_for_score = angle
                 previous_score = self.vehicle_scores.get(vid, 0.0)
-                score_val = self.calculate_offset_score(vid, offset_for_score, previous_score, overall_closest_distance)
+                score_val = self.calculate_offset_score(vid, offset_for_score, previous_score, overall_closest_distance, angle_for_score)
                 score_val = self.calculate_angle_score(
                     vid,
                     path_pts,
@@ -768,14 +794,31 @@ class ETS2Radar:
                     overall_closest_distance,
                     previous_score=score_val
                 )
+                
+                # NEW: Check if vehicle is in ego path and adjust score accordingly
+                if path_pts:  # Only if we have a valid ego path
+                    is_in_path = self.check_vehicle_in_ego_path(path_pts, poly, path_width=1.5)
+                    if is_in_path:
+                        score_val += 0.5 * distance_amp  # Boost score for vehicles in ego path
+                    else:
+                        score_val -= 0.2 * distance_amp  # Penalty for vehicles not in ego path
+                
+                # Clamp score to valid range
+                score_val = max(-10.0, min(10.0, score_val))
                 self.vehicle_scores[vid] = score_val
+                
             if self.is_in_front_cone(dx, dz) and score_val > 0:
                 in_lane_vehicles.append((v, overall_closest_distance - 4.2, acceleration))
 
             # Draw vehicle
             if self.is_in_front_cone(dx, dz):
                 if score_val > 0:
-                    self.draw_vehicle(img, poly, center, scale, (0,0,255))
+                    # Check if vehicle is in ego path for different coloring
+                    vehicle_color = (0, 0, 255)  # Default red for in-lane
+                    if path_pts and self.check_vehicle_in_ego_path(path_pts, poly, path_width=1.5):
+                        vehicle_color = (0, 100, 255)  # Orange-red for vehicles in ego path
+                    
+                    self.draw_vehicle(img, poly, center, scale, vehicle_color)
                     veh_scr_x, veh_scr_y = self.world_to_screen(dx, dz, center, scale)
                     cv2.putText(img, f"score:{score_val:.2f}", (veh_scr_x-25, veh_scr_y-12),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,0), 1, cv2.LINE_AA)
@@ -784,54 +827,16 @@ class ETS2Radar:
             else:
                 self.draw_vehicle(img, poly, center, scale, (200,200,0))
 
-            ''' temporaraly moved to main MonoCruise code
-            # Estimate front vehicle acceleration
-            try:
-                vehicle_speed_ms = vehicle_speed if hasattr(v, 'speed') else 0.0  # Convert km/h to m/s if needed
-                a_front = 0.0 #self.estimate_vehicle_acceleration(vid, vehicle_speed_ms)
-            except:
-                a_front = 0.0
-                vehicle_speed_ms = 0.0
-            
-            # Ensure a_front is non-negative (deceleration magnitude)
-            a_front = abs(a_front) if a_front < 0 else max(a_front, 0.05)  # Minimum assumption of 0.05 m/s^2
-
-            # start_co and end_co represent the heading line for intersecting detection in this format (x,y)
-            start_co, end_co = self.draw_vehicle_heading_line(
-                                    img,
-                                    self.vehicle_world_pos_history[vid],
-                                    center,
-                                    scale,
-                                    color=(0,255,0),
-                                    thickness=2
-                                )
-
-            # --- Check for intersection with ego rectangle ---
-            if start_co is not None and end_co is not None:
-                if self.line_intersects_rectangle(start_co, end_co, ego_rect_corners):
-                    # Vehicle's heading line intersects with ego rectangle - run emergency analysis
-                    AEB_brake, AEB_warn = self.determine_emergency(float(overall_closest_distance),
-                                                                   ego_speed,
-                                                                   25,
-                                                                   vehicle_speed_ms,
-                                                                   a_front
-                                                                   )
-                    if AEB_brake:
-                        print("#"*40)
-                        print("        BRAKE NOW")
-                        print("#"*40)
-                    elif AEB_warn:
-                        print("AEB warning")
-                    # You can store or use these values as needed
-                    # For now, we'll just pass them (implement your logic here)
-                    '''
-
             for trailer_data in main_vehicle['trailers']:
                 poly_t = trailer_data['polygon']
                 tx, tz = poly_t.centroid.x, poly_t.centroid.y
                 if self.is_in_front_cone(tx, tz):
                     if score_val > 0:
-                        self.draw_vehicle(img, poly_t, center, scale, (255,0,0))
+                        # Use same color logic for trailers
+                        trailer_color = (255, 0, 0)  # Default red for in-lane trailers
+                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly_t, path_width=1.5):
+                            trailer_color = (255, 50, 0)  # Orange for trailers in ego path
+                        self.draw_vehicle(img, poly_t, center, scale, trailer_color)
                     else:
                         self.draw_vehicle(img, poly_t, center, scale, (100,0,0))
 
@@ -857,25 +862,24 @@ class ETS2Radar:
             self.vehicle_speed_history = {}
         
         if vehicle_id not in self.vehicle_speed_history:
-            self.vehicle_speed_history[vehicle_id] = collections.deque(maxlen=10)
+            self.vehicle_speed_history[vehicle_id] = collections.deque(maxlen=5)
         
-        # Store current speed (assuming it's already in m/s, adjust if needed)
-        # If speed is in km/h, uncomment the next line:
-        # current_speed = current_speed / 3.6
+        # Store current speed
+        current_speed = current_speed / 3.6
         
+        # Get speed from 5 data points ago and current speed
+
         self.vehicle_speed_history[vehicle_id].append(current_speed)
         
         speeds = list(self.vehicle_speed_history[vehicle_id])
+        old_speed = speeds[-len(speeds)]  # 10 data points ago
         
         # Need at least 6 speed measurements (5 intervals)
         if len(speeds) < 6:
             return 0.0
         
-        dt_frame = 1.0 / 30.0  # Time per frame (assuming 30 FPS)
+        dt_frame = 0.1  # Time per frame
         
-        # Get speed from 5 data points ago and current speed
-        old_speed = speeds[-6]  # 5 data points ago
-        current_speed = speeds[-1]  # Current speed
         
         # Calculate acceleration over 5 frame intervals
         time_interval = 5.0 * dt_frame  # 5 frames worth of time

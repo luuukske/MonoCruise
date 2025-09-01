@@ -2135,9 +2135,8 @@ import numpy as np
 
 # memory of previous data for each lead vehicle (fixed-length queue)
 _prev_data = defaultdict(lambda: deque(maxlen=5))
-_current_lead_id = None
 
-def adaptive_cruise_control(vehicles_in_lane, ego_speed, min_gap=3.0, acc_time_gap=1, debug=False):
+def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.3, debug=True):
     """
     Adaptive Cruise Control logic with lead vehicle acceleration anticipation.
     All input values are averaged over time. Queue resets when lead_id changes.
@@ -2151,57 +2150,45 @@ def adaptive_cruise_control(vehicles_in_lane, ego_speed, min_gap=3.0, acc_time_g
     Returns:
         acc_value: Float in [-1, 1]. Positive = accelerate, negative = brake.
     """
-    global _current_lead_id
+    global data_history
 
-    if not vehicles_in_lane:
-        return 1.0  # full accelerate if free road
 
-    # Lead vehicle
-    lead_id, lead_dist_raw, lead_speed_raw, a_lead = vehicles_in_lane[0]
-    print(a_lead)
+    try:
+        if not data_history:
+            raise
+    except:
+        return 2.0 # full accelerate if free road
 
-    # Check if lead vehicle changed - if so, reset the queue
-    if _current_lead_id != lead_id:
-        _prev_data[lead_id].clear()
-        _current_lead_id = lead_id
-
-    # Update deque with all input data (distance, speed, ego_speed)
-    data_point = {
-        'distance': lead_dist_raw,
-        'speed': lead_speed_raw,
-        'ego_speed': ego_speed
-    }
-    _prev_data[lead_id].append(data_point)
-
-    # Calculate averaged values
-    data_history = list(_prev_data[lead_id])
-    
     lead_dist = np.mean([d['distance'] for d in data_history])
     lead_speed = np.mean([d['speed'] for d in data_history])
     avg_ego_speed = np.mean([d['ego_speed'] for d in data_history])
+    a_lead = data_history[-1]['a_lead']
+    
 
     # Calculate desired gap using averaged ego speed
-    desired_gap = max(avg_ego_speed / 3.6 * acc_time_gap, min_gap)
+    desired_gap = min_gap + acc_time_gap * (avg_ego_speed / 3.6)
     gap_error = lead_dist - desired_gap
     speed_error = lead_speed - avg_ego_speed
 
     # calculate closeness amplifier using averaged values
     actual_time_gap = max(min(lead_dist / (max(avg_ego_speed, 1) / 3.6), 10), 0.01)
     closeness_amp = pow(0.8, actual_time_gap*5-3) + 0.5
-    if speed_error < 0:
+    if speed_error < 0.1:
         closeness_amp = closeness_amp**1.5
     else:
         closeness_amp = 0.8
 
     acceleration_amp = max(-(actual_time_gap/2)**3+1, 0.2)
+    if a_lead > 0:
+        acceleration_amp *= 0.8
     
     # calculate slow speed adjustment using averaged ego speed
     slow_speed_adj = pow(0.8, max(avg_ego_speed, 0.0))*2.5
 
     # Gains
     K_gap = 0.10 * closeness_amp * (slow_speed_adj+1)
-    K_speed = 0.14 * closeness_amp * (slow_speed_adj/2+1)
-    K_acc = 0.3 *acceleration_amp
+    K_speed = 0.12 * closeness_amp * (slow_speed_adj/2+1)
+    K_acc = 0.12 *acceleration_amp
 
     # Control law (sum of weighted errors)
     acc_raw = K_gap * np.sign(gap_error)*((abs(gap_error)/10)**0.7)*10 + K_speed * speed_error + K_acc * a_lead
@@ -2213,7 +2200,6 @@ def adaptive_cruise_control(vehicles_in_lane, ego_speed, min_gap=3.0, acc_time_g
 
     
     if debug:
-        print(f"Lead id={lead_id} raw_dist={lead_dist_raw:.1f}m avg_dist={lead_dist:.1f}m")
         print(f"Gap error={gap_error:.2f} | Speed error={speed_error:.2f} | a_lead={a_lead:.2f}")
     
     return acc_value
@@ -2360,7 +2346,6 @@ def cc_target_speed_thread_func():
     global cc_limiting
     global brake_exponent_variable
     global _data_cache
-    global acc_data
 
     cc_locked = False
     cc_limiting = False
@@ -2384,9 +2369,6 @@ def cc_target_speed_thread_func():
 
     while not exit_event.is_set() and cc_enabled and not em_stop:
         if target_speed is not None and not pauzed:
-
-            if cc_mode.get() != "Cruise control":
-                acc_data = None
 
             slope = data['rotationY']
             weight_adjustment = (0.27*((total_weight_tons-8.93)/(8.5))+1)
@@ -2431,7 +2413,10 @@ def cc_target_speed_thread_func():
                         derivative * D * slow_speed_adjustment +
                         physics_adjustment)
             
-            acc_val = adaptive_cruise_control(acc_data, speed, 10, 1.5, data["accelerationZ"]) + physics_adjustment
+            if cc_mode.get() == "Cruise control":
+                acc_val = adaptive_cruise_control(speed) + physics_adjustment
+            else:
+                acc_val = 2
 
             ff_est = alpha * ff_est + (1.0 - alpha) * base_val
 
@@ -2508,7 +2493,7 @@ def main():
     global cruise_control_thread
     global cc_locked
     global cc_limiting
-    global acc_data
+    global data_history
     # Initialize pygame for joystick handling
     
     # Start SDK check thread
@@ -2582,6 +2567,9 @@ def main():
         latency = 0.015
         hazards_prompted = False
         offset = 0.5
+        _current_lead_id = None
+
+
         cv2.namedWindow("ETS2 Radar", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("ETS2 Radar", 600, 600)
         radar = ETS2Radar(show_window=True, fov_angle=40)
@@ -2839,6 +2827,33 @@ def main():
 
             # radar code
             acc_data = radar.update(data)
+
+            if acc_data:
+                # Lead vehicle
+                lead_id, lead_dist_raw, lead_speed_raw, a_lead = acc_data[0]
+
+                # Check if lead vehicle changed - if so, reset the queue
+                if _current_lead_id != lead_id:
+                    _prev_data[lead_id].clear()
+                    _current_lead_id = lead_id
+
+                # Update deque with all input data (distance, speed, ego_speed)
+                data_point = {
+                    'distance': lead_dist_raw,
+                    'speed': lead_speed_raw,
+                    'ego_speed': speed,
+                    'a_lead': a_lead
+                }
+                _prev_data[lead_id].append(data_point)
+
+                # Calculate averaged values
+                data_history = list(_prev_data[lead_id])
+            elif _current_lead_id:
+                print("clearing _prev_data")
+                _prev_data[_current_lead_id].clear()
+                _current_lead_id = None
+                # Clear data_history when no vehicles are detected
+                data_history = None
 
             slope = data['rotationY']
 
