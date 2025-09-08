@@ -86,6 +86,9 @@ class ETS2Radar:
         self.max_distance: int = max_distance
         self.fov_angle: int = fov_angle
         self.refresh_interval: float = REFRESH_INTERVAL
+        self.blinker_time_window: float = 1.5 # seconds to estimate changing lane
+        self.last_left_blinker: int = 0 # timestamp of last left blinker on
+        self.last_right_blinker: int = 0 # timestamp of last right blinker on
 
         # Initialize telemetry and module
         self.module: Module = Module()
@@ -127,7 +130,7 @@ class ETS2Radar:
         previous_score: Optional[float] = None,
         distance: float = 30,
         angle: float = 0.0,
-        ego_speed: float = 0.0
+        data: Optional[Dict[str, Any]] = None
     ) -> float:
         """
         Calculate the new score for a vehicle, including previous score.
@@ -625,7 +628,8 @@ class ETS2Radar:
         pz: float,
         yaw_rad: float,
         ego_steer: float = 0.0,
-        ego_speed: float = 0.0
+        ego_speed: float = 0.0,
+        data: Optional[Dict[str, Any]] = None
     ) -> List[Any]:
         try:
             _, _, win_w, win_h = cv2.getWindowImageRect("ETS2 Radar")
@@ -711,6 +715,27 @@ class ETS2Radar:
                     processed.add(j)
             vehicle_groups.append(group)
 
+
+        now = time.time()
+
+        if data.get("blinkerRightActive", False):
+            self.last_right_blinker = now
+        if data.get("blinkerLeftActive", False):
+            self.last_left_blinker = now
+
+        # Normalized time since last activation (0 → 1)
+        t_left = (now - self.last_left_blinker) / self.blinker_time_window
+        t_right = (now - self.last_right_blinker) / self.blinker_time_window
+
+        # Smooth decay: cos starts at 1, ends at 0
+        val_left = -np.cos(t_left * np.pi / 2) if t_left <= 1 else 0
+        val_right = np.cos(t_right * np.pi / 2) if t_right <= 1 else 0
+
+        blinker_offset = val_left + val_right
+
+        print(f"blinker left: {val_left:.2f}\t right: {val_right:.2f}\t total: {blinker_offset:.2f}")
+
+
         in_lane_vehicles = []
         for group in vehicle_groups:
             if len(group) > 1:
@@ -773,10 +798,13 @@ class ETS2Radar:
                 if hist:
                     offset, angle = self.draw_fitted_arc(img, hist, px, pz, yaw_rad, center, scale,
                                                 arc_length=150, color=(0,80,80), reverse=True, ego_steer=ego_steer)
-                    offset_for_score = offset
+                    if offset is not None:
+                        offset_for_score = offset - blinker_offset*10 * max(min((ego_speed-5)/3, 1),0)
+                    else:
+                        offset_for_score = None
                     angle_for_score = angle
                 previous_score = self.vehicle_scores.get(vid, 0.0)
-                offset_score = self.calculate_offset_score(vid, offset_for_score, overall_closest_distance, angle_for_score, ego_speed)
+                offset_score = self.calculate_offset_score(vid, offset_for_score, overall_closest_distance, angle_for_score, data)
                 angle_score = self.calculate_angle_score(
                     vid,
                     path_pts,
@@ -1135,7 +1163,7 @@ class ETS2Radar:
                 self.vehicle_speeds[vid] = getattr(v, 'speed', 0)
 
         # Main detection and visualization
-        in_lane_vehicles = self.draw_radar(vehicles, px, pz, yawr, ego_steer, speed)
+        in_lane_vehicles = self.draw_radar(vehicles, px, pz, yawr, ego_steer, speed, data)
         return in_lane_vehicles
 
     def run(self):
