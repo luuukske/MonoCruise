@@ -2136,7 +2136,7 @@ import numpy as np
 # memory of previous data for each lead vehicle (fixed-length queue)
 _prev_data = defaultdict(lambda: deque(maxlen=5))
 
-def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.3, debug=True):
+def adaptive_cruise_control(ego_speed, min_gap=7.0, acc_time_gap=1.3, debug=True):
     """
     Adaptive Cruise Control logic with lead vehicle acceleration anticipation.
     All input values are averaged over time. Queue resets when lead_id changes.
@@ -2180,7 +2180,7 @@ def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.3, debug=True
 
     acceleration_amp = max(-(actual_time_gap/2)**3+1, 0.2)
     if a_lead > 0:
-        acceleration_amp *= 0.8
+        acceleration_amp *= 0.6
     
     # calculate slow speed adjustment using averaged ego speed
     slow_speed_adj = pow(0.8, max(avg_ego_speed, 0.0))*2.5
@@ -2188,12 +2188,12 @@ def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.3, debug=True
     # Gains
     K_gap = 0.10 * closeness_amp * (slow_speed_adj+1)
     K_speed = 0.12 * closeness_amp * (slow_speed_adj/2+1)
-    K_acc = 0.12 *acceleration_amp
+    K_acc = 0.16 *acceleration_amp
 
     # Control law (sum of weighted errors)
     acc_raw = K_gap * np.sign(gap_error)*((abs(gap_error)/10)**0.7)*10 + K_speed * speed_error + K_acc * a_lead
     if acc_raw <= 0:
-        acc_raw -= slow_speed_adj
+        acc_raw -= slow_speed_adj*2
 
     # disabled clamping to make it able to emergency brake
     acc_value = acc_raw / 1.5
@@ -2262,75 +2262,130 @@ def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.3, debug=True
 
 
 
+class AEBSoundHandler:
+    def __init__(self, sound_file_path):
+        """
+        Advanced handler with manual seamless looping control
+        """
+        # Optimized mixer settings
+        pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=256)
+        pygame.mixer.init()
+        
+        self.sound = pygame.mixer.Sound(sound_file_path)
+        self.AEB_warn = False
+        self.sound_thread = None
+        self.stop_event = threading.Event()
+        self.channels = []
+        
+    def start_warning(self):
+        """Enable AEB warning with seamless looping"""
+        if not self.AEB_warn:
+            self.AEB_warn = True
+            self.stop_event.clear()
+            self.sound_thread = threading.Thread(target=self._seamless_loop)
+            self.sound_thread.daemon = True
+            self.sound_thread.start()
+            print("AEB Warning: ENABLED - Seamless sound loop active")
+    
+    def stop_warning(self):
+        """Disable AEB warning and wait for current sound to finish naturally"""
+        if self.AEB_warn:
+            self.AEB_warn = False
+            self.stop_event.set()
+            print("AEB Warning: DISABLED - Waiting for current sound to finish...")
+            
+            # Wait for the background thread to finish naturally
+            if self.sound_thread and self.sound_thread.is_alive():
+                self.sound_thread.join()
+            
+            # Wait for any remaining channels to finish
+            while any(channel.get_busy() for channel in self.channels):
+                time.sleep(0.01)
+            
+            self.channels.clear()
+            print("Sound finished playing naturally")
+    
+    def _seamless_loop(self):
+        """Create seamless looping by overlapping sound instances"""
+        # Start first instance
+        channel1 = self.sound.play()
+        self.channels.append(channel1)
+        
+        sound_length = self.sound.get_length()
+        overlap_time = 0.15  # 150ms overlap to ensure seamless transition
+        
+        while self.AEB_warn and not self.stop_event.is_set():
+            # Wait until near the end of current sound
+            time.sleep(sound_length - overlap_time)
+            
+            if self.AEB_warn and not self.stop_event.is_set():
+                # Start next instance before current one ends
+                new_channel = self.sound.play()
+                self.channels.append(new_channel)
+                
+                # Clean up finished channels
+                self.channels = [ch for ch in self.channels if ch.get_busy()]
+        
+        # Stop all channels when exiting loop
+        for channel in self.channels:
+            channel.stop()
+        self.channels.clear()
+    
+    def is_warning_active(self):
+        """Check if AEB warning is currently active"""
+        return self.AEB_warn
+    
+    def cleanup(self):
+        """Clean up resources"""
+        self.stop_warning()
+        pygame.mixer.quit()
+    
+    def is_warning_active(self):
+        """Check if AEB warning is currently active"""
+        return self.AEB_warn
+    
+    def cleanup(self):
+        """Clean up resources"""
+        self.stop_warning()
+        pygame.mixer.quit()
 
-
-def determine_emergency(gap, v_ego, a_ego_max, v_lead, a_lead, crash_threshold=60.0):
+def determine_emergency(gap, v_ego, a_ego_max, v_lead, a_lead):
     """
-    Returns two booleans:
-    AEB_brake: True if collision occurs when ego coasts 0.1 s before braking
-    AEB_warn : True if collision occurs when ego coasts 1.1 s before braking
+    gap: current distance to lead vehicle (m)
+    v_ego: ego vehicle speed (m/s)
+    a_ego_max: maximum deceleration of ego vehicle (m/s^2, positive value)
+    v_lead: lead vehicle speed (m/s)
+    a_lead: lead vehicle acceleration (m/s^2), positive = speeding up, negative = braking
     """
-    gap        = np.atleast_1d(gap).astype(float)
-    v_ego_init = np.atleast_1d(v_ego).astype(float)
-    v_lead_init= np.atleast_1d(v_lead).astype(float)
-    a_lead     = np.atleast_1d(a_lead).astype(float)
-    a_ego_max  = np.atleast_1d(a_ego_max).astype(float)
+    # Relative speed (closing speed)
+    v_rel = v_ego - v_lead
 
-    # If -a_lead exceeds crash_threshold, set a_lead = 0 and v_lead = 0
-    mask = (-a_lead > crash_threshold)
-    if np.any(mask):
-        a_lead = np.where(mask, 0.0, a_lead)
-        v_lead_init = np.where(mask, 0.0, v_lead_init)
+    # If we're not closing in, no emergency
+    if v_rel <= 0:
+        return False, False
 
-    def will_collide(delay):
-        # --- Phase 1: coasting delay ---
-        # Lead stop time only if braking
-        t_lead_stop = np.where(a_lead > 0, v_lead_init / a_lead, 1e9)
-        t1 = np.minimum(delay, t_lead_stop)
+    # Relative acceleration:
+    # Ego decelerates at -a_ego_max, lead accelerates at a_lead
+    # This is the acceleration of ego relative to lead
+    a_rel = -a_ego_max - a_lead
 
-        # Update gap and velocities, clamping at zero
-        gap1 = gap - (v_ego_init - v_lead_init) * t1 - 0.5 * np.clip(a_lead, 0, None) * t1**2
-        v_ego_after = np.maximum(0.0, v_ego_init)  # ego coasts, no decel in phase 1
-        v_lead_after = np.where(
-            a_lead > 0,
-            np.maximum(0.0, v_lead_init - a_lead * t1),
-            np.maximum(0.0, v_lead_init + np.clip(a_lead, None, 0) * t1)
-        )
+    # Braking distance to match lead vehicle's speed considering lead's acceleration
+    braking_distance = -(v_rel ** 2) / (2 * a_rel)  # a_rel is negative, so result is positive
 
-        if np.any(gap1 <= 0):
-            return True
+    # Distance margin before braking is needed
+    distance_margin = gap - braking_distance
 
-        # Remaining coasting if delay > t1
-        dt_coast2 = np.maximum(0.0, delay - t1)
-        gap2 = gap1 - (v_ego_after - v_lead_after) * dt_coast2
-        v_ego_delay = v_ego_after
-        v_lead_delay = v_lead_after
+    # Time until braking is needed
+    if distance_margin <= 0:
+        time_to_brake = 0
+    else:
+        time_to_brake = distance_margin / v_rel
 
-        if np.any(gap2 <= 0):
-            return True
+    # Determine warnings
+    AEB_brake = time_to_brake <= 0.1
+    AEB_warn = time_to_brake <= 1.1
 
-        # --- Phase 2: braking ---
-        a_rel = -a_ego_max + a_lead
-        v_rel0 = v_ego_delay - v_lead_delay
-
-        # Times to key events (stop times clamped)
-        t_lead_stop2 = np.where(a_lead > 0, v_lead_delay / a_lead, 1e9)
-        t_ego_stop = np.where(a_ego_max > 0, v_ego_delay / a_ego_max, 1e9)
-        t_rel_zero = np.where(a_rel < 0, v_rel0 / (-a_rel), 1e9)
-
-        # Check at each candidate time
-        for t_end in [t_lead_stop2, t_ego_stop, t_rel_zero]:
-            t_end = np.minimum.reduce([t_end, t_lead_stop2, t_ego_stop])
-            # Clamp velocities at zero before computing gap
-            v_ego_end = np.maximum(0.0, v_ego_delay - a_ego_max * t_end)
-            v_lead_end = np.maximum(0.0, v_lead_delay - np.clip(a_lead, 0, None) * t_end)
-            gap_end = gap2 - (v_ego_delay - v_lead_delay) * t_end - 0.5 * a_rel * t_end**2
-            if np.any(gap_end <= 0):
-                return True
-
-        return False
-
-    return will_collide(0.1), will_collide(1.1)
+    return AEB_brake, AEB_warn
 
 def cc_target_speed_thread_func():
     global exit_event
@@ -2494,6 +2549,7 @@ def main():
     global cc_locked
     global cc_limiting
     global data_history
+    global AEB_warn
     # Initialize pygame for joystick handling
     
     # Start SDK check thread
@@ -2573,6 +2629,7 @@ def main():
         cv2.namedWindow("ETS2 Radar", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("ETS2 Radar", 600, 600)
         radar = ETS2Radar(show_window=True, fov_angle=40)
+        AEBSound = AEBSoundHandler(os.path.join(os.path.dirname(os.path.abspath(__file__)), "AEBsfx.wav"))
         prev_stop = time.time()
 
         # start the bar thread
@@ -2828,26 +2885,56 @@ def main():
             # radar code
             acc_data = radar.update(data)
 
+            # Initialize emergency flags
+            AEB_brake = False
+            AEB_warn = False
+            AEB_warn_temp = False
+
             if acc_data:
-                # Lead vehicle
-                lead_id, lead_dist_raw, lead_speed_raw, a_lead = acc_data[0]
+                # Get the closest vehicle (first in the sorted list)
+                closest_vehicle = acc_data[0]
+                closest_lead_id, closest_lead_dist_raw, closest_lead_speed_raw, closest_a_lead = closest_vehicle
 
-                # Check if lead vehicle changed - if so, reset the queue
-                if _current_lead_id != lead_id:
-                    _prev_data[lead_id].clear()
-                    _current_lead_id = lead_id
+                # Check if lead vehicle changed - if so, reset the queue for the closest vehicle
+                if _current_lead_id != closest_lead_id:
+                    _prev_data[closest_lead_id].clear()
+                    _current_lead_id = closest_lead_id
 
-                # Update deque with all input data (distance, speed, ego_speed)
+                # Update deque with closest vehicle data
                 data_point = {
-                    'distance': lead_dist_raw,
-                    'speed': lead_speed_raw,
+                    'distance': closest_lead_dist_raw,
+                    'speed': closest_lead_speed_raw,
                     'ego_speed': speed,
-                    'a_lead': a_lead
+                    'a_lead': closest_a_lead
                 }
-                _prev_data[lead_id].append(data_point)
+                _prev_data[closest_lead_id].append(data_point)
 
-                # Calculate averaged values
-                data_history = list(_prev_data[lead_id])
+                # Calculate averaged values for the closest vehicle
+                data_history = list(_prev_data[closest_lead_id])
+
+                # Process each detected vehicle for emergency detection
+                for vehicle_data in acc_data:
+                    lead_id, lead_dist_raw, lead_speed_raw, a_lead = vehicle_data
+
+                    # Update deque for this vehicle if it's not the closest (closest already updated above)
+                    if lead_id != closest_lead_id:
+                        data_point = {
+                            'distance': lead_dist_raw,
+                            'speed': lead_speed_raw,
+                            'ego_speed': speed,
+                            'a_lead': a_lead
+                        }
+                        _prev_data[lead_id].append(data_point)
+
+                    # Determine emergency for this specific vehicle
+                    vehicle_AEB_brake, vehicle_AEB_warn = determine_emergency(lead_dist_raw, speed, 30, lead_speed_raw, 0.0)
+                    
+                    # If any vehicle triggers emergency, set the overall flag to True
+                    if vehicle_AEB_brake:
+                        AEB_brake = True
+                    if vehicle_AEB_warn:
+                        AEB_warn_temp = True
+
             elif _current_lead_id:
                 print("clearing _prev_data")
                 _prev_data[_current_lead_id].clear()
@@ -2880,6 +2967,31 @@ def main():
             """
 
             opdgasval, opdbrakeval = onepedaldrive(gasval, brakeval)
+
+            if AEB_warn_temp:
+                if opdbrakeval > 0 or cc_brake > 0:
+                    AEB_warn = False
+                    AEB_warn_temp = False
+                
+                if speed < 10:
+                    AEB_brake = False
+                    AEB_warn = False
+                    AEB_warn_temp = False
+
+            if AEB_brake:
+                AEB_warn = True
+                AEBSound.start_warning()
+                print("\n" + "@"*50)
+                print("!!!   AEB_BRAKE ACTIVATED - EMERGENCY BRAKING   !!!".center(50))
+                print("@"*50 + "\n")
+            elif AEB_warn_temp:
+                AEB_warn = True
+                AEBSound.start_warning()
+                print("\n" + "="*50)
+                print("!!!   AEB_WARN ACTIVATED - WARNING   !!!".center(50))
+                print("="*50 + "\n")
+            else:
+                AEBSound.stop_warning()
 
             '''
             if data["cruiseControl"] == True and data["cruiseControlSpeed"] > 0 and brakeval == 0:
@@ -2917,21 +3029,25 @@ def main():
             if data.get('userThrottle', 0.0) > 0.0:
                 opdbrakeval = 0.0
             
-            if data["cruiseControl"] and not cc_enabled:
-                opdbrakeval = 0
-            elif (cc_enabled and cc_mode.get() == "Cruise control"):
-                if gasval <= 0.0:
-                    opdbrakeval = cc_brake
-                else:
-                    opdbrakeval = 0.0
-                opdgasval = max(cc_gas, opdgasval)
-            elif (cc_enabled and cc_mode.get() == "Speed limiter"):
-                if opdgasval > cc_gas and cc_gas == 1.0:
-                    cc_limiting = True
-                else:
-                    cc_limiting = False
-                opdbrakeval = max(cc_brake, opdbrakeval)
-                opdgasval = min(cc_gas, opdgasval)
+            if not AEB_brake:
+                if data["cruiseControl"] and not cc_enabled:
+                    opdbrakeval = 0
+                elif (cc_enabled and cc_mode.get() == "Cruise control"):
+                    if gasval <= 0.0:
+                        opdbrakeval = cc_brake
+                    else:
+                        opdbrakeval = 0.0
+                    opdgasval = max(cc_gas, opdgasval)
+                elif (cc_enabled and cc_mode.get() == "Speed limiter"):
+                    if opdgasval > cc_gas and cc_gas == 1.0:
+                        cc_limiting = True
+                    else:
+                        cc_limiting = False
+                    opdbrakeval = max(cc_brake, opdbrakeval)
+                    opdgasval = min(cc_gas, opdgasval)
+            else:
+                opdbrakeval = 1.0
+                opdgasval = 0.0
             
             if speed <= 0.1 and speed >= -0.1 and gasval == 0 and gear != 0 and not stopped:
                 stopped = True
@@ -3102,6 +3218,7 @@ def main():
 
         print("Main loop exited, cleaning up...")
         radar.cleanup()
+        AEBSound.cleanup()
         return
     except Exception as e:
         context = get_error_context()
@@ -3183,7 +3300,7 @@ class AnimatedBar:
         self.animate()
 
     def animate(self):
-        global em_stop, gas_output, brake_output, bar_variable, close_bar_event
+        global em_stop, gas_output, brake_output, bar_variable, close_bar_event, AEB_warn
 
         #if the screen changes size, update the size of the bar
         if self.screen_width != self.root.winfo_screenwidth() or self.screen_height != self.root.winfo_screenheight():
@@ -3206,7 +3323,7 @@ class AnimatedBar:
 
         value = temp_gasval-temp_brakeval
 
-        if em_stop:
+        if em_stop or AEB_warn:
             # Emergency mode: the entire bar flickers between red and transparent every 200ms.
             self.flicker_state = not self.flicker_state
             flicker_color = "red" if self.flicker_state else self.transparent_color
@@ -3319,7 +3436,9 @@ global cc_start_button
 global cc_inc_button
 global cc_dec_button
 global unassign
+global AEB_warn
 
+AEB_warn = False
 cc_enabled = False
 cc_locked = False
 data = None

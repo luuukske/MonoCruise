@@ -26,7 +26,7 @@ Corner = Tuple[float, float, float]  # (x, y, z)
 MAX_DISTANCE: int = 150  # meters
 REFRESH_INTERVAL: float = 0.1  # seconds
 FOV_ANGLE: int = 25  # degrees (half-angle of cone)
-POSITION_SNAP: float = 1.5  # meters: only save every 10 meters
+POSITION_SNAP: float = 1  # meters: only save every 10 meters
 
 class VehicleTracker:
     """
@@ -126,7 +126,8 @@ class ETS2Radar:
         offset: Optional[float],
         previous_score: Optional[float] = None,
         distance: float = 30,
-        angle: float = 0.0
+        angle: float = 0.0,
+        ego_speed: float = 0.0
     ) -> float:
         """
         Calculate the new score for a vehicle, including previous score.
@@ -141,7 +142,7 @@ class ETS2Radar:
         history = self.vehicle_histories.get(vid, None)
         if history is not None and offset is None:
             # Has a trail but not intersecting with base: penalize
-            score_increment = -0.8
+            score_increment = -0.3
         elif history is None:
             score_increment = -0.3
         else:
@@ -153,28 +154,22 @@ class ETS2Radar:
                 x = float(offset)
                 offset_score = (2 ** (-(x / 9) ** 2) * 2.5 - 1.5) / 1
                 distance_amp = (2 ** (-(distance / 100)) + 1 / ((distance + 3) / 8)-1)/2+1
-                offset_score = max(-1.0, min(1.0, offset_score * distance_amp))
+                offset_score = max(-1.5, min(1.5, offset_score * distance_amp))
                 score_increment += offset_score
             except Exception:
                 pass
         else:
             score_increment += -0.1
-
-        if (previous_score > 0 and score_increment < 0) or (previous_score < 0 and score_increment > 0):
-            new_score = previous_score + score_increment * 0.8
-        else:
-            new_score = previous_score + score_increment
             
-        new_score = max(-10.0, min(10.0, new_score))
-        return new_score
+        return score_increment
 
     def calculate_angle_score(
         self,
         vid: int,
         ego_path: List[Tuple[float, float]],
+        ego_speed: float,
         vehicle_centroid: Tuple[float, float],
-        distance: float,
-        previous_score: Optional[float] = None
+        distance: float
     ) -> float:
         """
         Calculate score contribution from the intersection between ego_path and invisible circle.
@@ -231,19 +226,14 @@ class ETS2Radar:
         # Use formula for scoring
         try:
             x = float(np.degrees(angle_diff))
-            angle_score = (3 ** (-(x / 5) ** 2) * 2 - 1)/2 - (abs(x)/40)**6
+            angle_score = ((3 ** (-(x / 5) ** 2) * 2 - 1)/2 - (abs(x)/40)**6)
             distance_amp = (2**(-(distance/100))+1/((distance+3)/8)-1)/2+1
-            # Clamp each score increment to [-1, 1]
-            angle_score = max(-1.0, min(1.0, angle_score*distance_amp))
+            # Clamp each score increment to [-1.5, 0.5]
+            angle_score = max(-1.5, min(0.5, angle_score*distance_amp))
             score_increment += angle_score
         except Exception:
                 pass
 
-        # Add to previous_score or return as separate contribution
-        if previous_score is not None:
-            new_score = previous_score + angle_score
-            new_score = max(-10.0, min(10.0, new_score))
-            return new_score
         return angle_score
 
     def world_to_screen(
@@ -736,7 +726,7 @@ class ETS2Radar:
                 if trailer_distance < overall_closest_distance:
                     overall_closest_distance = trailer_distance
                 
-            distance_amp = max((1/(overall_closest_distance*0.05)) - overall_closest_distance*0.01 + 1, 0)
+            distance_amp = max((1/(overall_closest_distance*0.02)) - overall_closest_distance*0.005 + 0.5, 0)
             
             vid = getattr(v, 'id', id(v))
 
@@ -786,29 +776,31 @@ class ETS2Radar:
                     offset_for_score = offset
                     angle_for_score = angle
                 previous_score = self.vehicle_scores.get(vid, 0.0)
-                score_val = self.calculate_offset_score(vid, offset_for_score, previous_score, overall_closest_distance, angle_for_score)
-                score_val = self.calculate_angle_score(
+                offset_score = self.calculate_offset_score(vid, offset_for_score, overall_closest_distance, angle_for_score, ego_speed)
+                angle_score = self.calculate_angle_score(
                     vid,
                     path_pts,
+                    ego_speed,
                     (dx, dz),
                     overall_closest_distance,
-                    previous_score=score_val
                 )
-                
                 # NEW: Check if vehicle is in ego path and adjust score accordingly
                 if path_pts:  # Only if we have a valid ego path
                     is_in_path = self.check_vehicle_in_ego_path(path_pts, poly, path_width=1.5)
                     if is_in_path:
-                        score_val += 0.5 * distance_amp  # Boost score for vehicles in ego path
+                        path_score = 0.3 * min(distance_amp, 3)  # Boost score for vehicles in ego path
                     else:
-                        score_val -= 0.2 * distance_amp  # Penalty for vehicles not in ego path
+                        path_score = 0.1 * min(distance_amp, 3)  # Penalty for vehicles not in ego path
+                else:
+                    path_score = 0.0
                 
+                score_val = previous_score + (offset_score + angle_score + path_score) * max((abs(vehicle_speed)/90)**0.8, 0.5)
                 # Clamp score to valid range
-                score_val = max(-10.0, min(10.0, score_val))
+                score_val = max(-5.0, min(15.0, score_val))
                 self.vehicle_scores[vid] = score_val
                 
             if self.is_in_front_cone(dx, dz) and score_val > 0:
-                in_lane_vehicles.append((v, overall_closest_distance - 4.2, acceleration))
+                in_lane_vehicles.append((v, overall_closest_distance - 3, acceleration))
 
             # Draw vehicle
             if self.is_in_front_cone(dx, dz):
@@ -858,34 +850,44 @@ class ETS2Radar:
         Returns acceleration in m/s².
         """
         # Initialize speed history if not exists
-        if not hasattr(self, 'vehicle_speed_history'):
+        if not hasattr(self, 'vehicle_speed_history') or not hasattr(self, 'vehicle_acceleration_filtered'):
             self.vehicle_speed_history = {}
+            self.vehicle_acceleration_filtered = {}
         
         if vehicle_id not in self.vehicle_speed_history:
             self.vehicle_speed_history[vehicle_id] = collections.deque(maxlen=5)
-        
-        # Store current speed
-        current_speed = current_speed / 3.6
-        
-        # Get speed from 5 data points ago and current speed
 
-        self.vehicle_speed_history[vehicle_id].append(current_speed)
+        if vehicle_id not in self.vehicle_acceleration_filtered:
+            self.vehicle_acceleration_filtered[vehicle_id] = 0.0
+        
+        # Store current speed (convert from km/h to m/s)
+        current_speed_ms = current_speed / 3.6
+        
+        # Add current speed to history
+        self.vehicle_speed_history[vehicle_id].append(current_speed_ms)
         
         speeds = list(self.vehicle_speed_history[vehicle_id])
-        old_speed = speeds[-len(speeds)]  # 10 data points ago
         
-        # Need at least 6 speed measurements (5 intervals)
-        if len(speeds) < 6:
+        # Need at least 5 speed measurements to calculate over 4 intervals
+        if len(speeds) < 5:
             return 0.0
         
+        # Get the oldest speed (first element) and newest speed (last element)
+        old_speed = speeds[0]  # First/oldest speed
+        new_speed = speeds[-1]  # Last/newest speed (current speed)
+        
         dt_frame = 0.1  # Time per frame
+        time_interval = (len(speeds) - 1) * dt_frame  # Time between first and last measurement
         
+        # Calculate acceleration
+        acceleration = (new_speed - old_speed) / time_interval
         
-        # Calculate acceleration over 5 frame intervals
-        time_interval = 5.0 * dt_frame  # 5 frames worth of time
-        acceleration = (current_speed - old_speed) / time_interval
+        # Apply low pass filter to smooth the acceleration output
+        alpha = 0.3  # Filter coefficient (0 = no filtering, 1 = no smoothing)
+        filtered_acceleration = alpha * acceleration + (1 - alpha) * self.vehicle_acceleration_filtered[vehicle_id]
+        self.vehicle_acceleration_filtered[vehicle_id] = filtered_acceleration
         
-        return acceleration
+        return filtered_acceleration
     
 
 
