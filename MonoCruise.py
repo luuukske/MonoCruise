@@ -2187,16 +2187,18 @@ def adaptive_cruise_control(ego_speed, min_gap=7.0, acc_time_gap=1.3, debug=True
 
     # Gains
     K_gap = 0.10 * closeness_amp * (slow_speed_adj+1)
-    K_speed = 0.12 * closeness_amp * (slow_speed_adj/2+1)
-    K_acc = 0.16 *acceleration_amp
+    K_speed = 0.15 * closeness_amp * (slow_speed_adj/1.5+1)
+    K_acc = 0.25 *acceleration_amp
 
     # Control law (sum of weighted errors)
     acc_raw = K_gap * np.sign(gap_error)*((abs(gap_error)/10)**0.7)*10 + K_speed * speed_error + K_acc * a_lead
     if acc_raw <= 0:
-        acc_raw -= slow_speed_adj*2
+        acc_raw -= slow_speed_adj*1
+    else:
+        acc_raw /= slow_speed_adj+1
 
     # disabled clamping to make it able to emergency brake
-    acc_value = acc_raw / 1.5
+    acc_value = acc_raw / 1.3
 
     
     if debug:
@@ -2628,7 +2630,7 @@ def main():
 
         cv2.namedWindow("ETS2 Radar", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("ETS2 Radar", 600, 600)
-        radar = ETS2Radar(show_window=True, fov_angle=40)
+        radar = ETS2Radar(show_window=True, fov_angle=30)
         AEBSound = AEBSoundHandler(os.path.join(os.path.dirname(os.path.abspath(__file__)), "AEBsfx.wav"))
         prev_stop = time.time()
 
@@ -2927,7 +2929,9 @@ def main():
                         _prev_data[lead_id].append(data_point)
 
                     # Determine emergency for this specific vehicle
-                    vehicle_AEB_brake, vehicle_AEB_warn = determine_emergency(lead_dist_raw, speed, 30, lead_speed_raw, 0.0)
+                    # temporarily disabled AEB because of inacurate detection
+                    #vehicle_AEB_brake, vehicle_AEB_warn = determine_emergency(lead_dist_raw, speed, 30, lead_speed_raw, 0.0)
+                    vehicle_AEB_brake, vehicle_AEB_warn = False, False
                     
                     # If any vehicle triggers emergency, set the overall flag to True
                     if vehicle_AEB_brake:

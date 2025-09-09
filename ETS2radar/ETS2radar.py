@@ -86,9 +86,11 @@ class ETS2Radar:
         self.max_distance: int = max_distance
         self.fov_angle: int = fov_angle
         self.refresh_interval: float = REFRESH_INTERVAL
-        self.blinker_time_window: float = 1.5 # seconds to estimate changing lane
+        self.blinker_time_window: float = 2.5 # seconds to estimate changing lane
         self.last_left_blinker: int = 0 # timestamp of last left blinker on
         self.last_right_blinker: int = 0 # timestamp of last right blinker on
+        self.in_lane_scores_reset: bool = False
+        self.reset_in_lane_scores: bool = False
 
         # Initialize telemetry and module
         self.module: Module = Module()
@@ -678,10 +680,13 @@ class ETS2Radar:
 
         origin = Point(0, 0)
         vehicle_data = []
+        detected_ids = set()
         for v in vehicles:
             poly = self.get_vehicle_polygon(v, px, pz, yaw_rad)
             closest_distance = min(Point(coord).distance(origin) for coord in poly.exterior.coords[:-1])
             if closest_distance <= self.max_distance:
+                vid = getattr(v, 'id', id(v))
+                detected_ids.add(vid)
                 vehicle_data.append({
                     'vehicle': v,
                     'polygon': poly,
@@ -715,13 +720,69 @@ class ETS2Radar:
                     processed.add(j)
             vehicle_groups.append(group)
 
+        # --- VEHICLE DATA RESET LOGIC ---
+        # Find all known vehicle IDs (with score/history etc.)
+        all_known_ids = set(self.vehicle_scores.keys()) | set(self.vehicle_histories.keys()) | set(self.vehicle_last_saved_position.keys()) | set(self.vehicle_speed_history.keys()) if hasattr(self, 'vehicle_speed_history') else set()
+        # Check for ID disappearance or jump
+        ids_to_reset = set()
+        for vid in all_known_ids:
+            if vid not in detected_ids:
+                ids_to_reset.add(vid)
+            else:
+                # Check for large position jumps (>100 m/s)
+                # Compare previous and current position in self.vehicle_histories
+                hist = self.vehicle_histories.get(vid, None)
+                if hist and len(hist) >= 2:
+                    prev_pos = hist[-2]
+                    curr_pos = hist[-1]
+                    dx = curr_pos[0] - prev_pos[0]
+                    dz = curr_pos[1] - prev_pos[1]
+                    dist = np.sqrt(dx * dx + dz * dz)
+                    # Estimate velocity over last frame (assuming 0.1s/frame)
+                    velocity = dist / 0.1
+                    if velocity > 100.0:
+                        ids_to_reset.add(vid)
+        # Reset all data for these IDs
+        for vid in ids_to_reset:
+            self.vehicle_scores.pop(vid, None)
+            self.vehicle_histories.pop(vid, None)
+            self.vehicle_last_saved_position.pop(vid, None)
+            if hasattr(self, 'vehicle_speed_history'):
+                self.vehicle_speed_history.pop(vid, None)
+            if hasattr(self, 'vehicle_acceleration_filtered'):
+                self.vehicle_acceleration_filtered.pop(vid, None)
+            if hasattr(self, 'vehicle_world_pos_history'):
+                self.vehicle_world_pos_history.pop(vid, None)
+            if hasattr(self, 'lane_state_tracker'):
+                self.lane_state_tracker.pop(vid, None)
+            if hasattr(self, 'ego_path_tracker'):
+                self.ego_path_tracker.pop(vid, None)
+            # You may need to reset more if you add more vehicle-specific state
 
         now = time.time()
 
-        if data.get("blinkerRightActive", False):
+        # Only update blinker timestamps when they first become active (edge detection)
+        if data.get("blinkerRightActive", False) and not getattr(self, 'prev_right_active', False):
             self.last_right_blinker = now
-        if data.get("blinkerLeftActive", False):
+        if data.get("blinkerLeftActive", False) and not getattr(self, 'prev_left_active', False):
             self.last_left_blinker = now
+        
+        # Store previous state for edge detection
+        self.prev_right_active = data.get("blinkerRightActive", False)
+        self.prev_left_active = data.get("blinkerLeftActive", False)
+
+        if (data.get("blinkerRightActive", False) or data.get("blinkerLeftActive", False)) and not self.in_lane_scores_reset:
+            self.reset_in_lane_scores = True
+        else:
+            self.reset_in_lane_scores = False
+        if not (data.get("blinkerRightActive", False) or data.get("blinkerLeftActive", False)):
+            self.in_lane_scores_reset = False
+            self.reset_in_lane_scores = False
+
+        #print debug for blinker score reset
+        if self.reset_in_lane_scores:
+            self.in_lane_scores_reset = True
+            print("Resetting in-lane scores due to blinker change.")
 
         # Normalized time since last activation (0 → 1)
         t_left = (now - self.last_left_blinker) / self.blinker_time_window
@@ -732,9 +793,6 @@ class ETS2Radar:
         val_right = np.cos(t_right * np.pi / 2) if t_right <= 1 else 0
 
         blinker_offset = val_left + val_right
-
-        print(f"blinker left: {val_left:.2f}\t right: {val_right:.2f}\t total: {blinker_offset:.2f}")
-
 
         in_lane_vehicles = []
         for group in vehicle_groups:
@@ -799,7 +857,7 @@ class ETS2Radar:
                     offset, angle = self.draw_fitted_arc(img, hist, px, pz, yaw_rad, center, scale,
                                                 arc_length=150, color=(0,80,80), reverse=True, ego_steer=ego_steer)
                     if offset is not None:
-                        offset_for_score = offset - blinker_offset*10 * max(min((ego_speed-5)/3, 1),0)
+                        offset_for_score = offset - blinker_offset*15 * max(min((ego_speed-5)/3, 1),0)
                     else:
                         offset_for_score = None
                     angle_for_score = angle
@@ -822,7 +880,11 @@ class ETS2Radar:
                 else:
                     path_score = 0.0
                 
-                score_val = previous_score + (offset_score + angle_score + path_score) * max((abs(vehicle_speed)/90)**0.8, 0.5)
+                if self.reset_in_lane_scores:
+                    score_val = -5.0  # Reset to -5 on blinker change
+                else:
+                    score_val = previous_score + (offset_score + angle_score + path_score) * max((abs(vehicle_speed)/90)**0.8, 0.5)
+
                 # Clamp score to valid range
                 score_val = max(-5.0, min(15.0, score_val))
                 self.vehicle_scores[vid] = score_val
