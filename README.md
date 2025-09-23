@@ -6,6 +6,7 @@ MonoCruise is a python program that acts like a One-Pedal-Drive (OPD) system for
 ### features
 This also includes quality of life features like:
 - a better cruise control system
+- smoother Adaptive Cruise Control (releases with v1.0.1)
 - live braking and accelerating bar on the bottom of the screen
 - automatically horn when braking hard
 - auto enable hazard lights when braking for traffic
@@ -32,7 +33,7 @@ This also includes quality of life features like:
 8. Press your brake pedal.
 9. Press your gas pedal.
 
-#### set up your cruise control (optional):
+### set up the cruise control (optional):
 10. scroll down to the cruise control settings
 11. press the button next to the button you want to assign
 
@@ -40,12 +41,19 @@ This also includes quality of life features like:
 
 12. press your key/button you want to be assigned
 
-
 Now you're done and can use MonoCruise in ETS2.
 
 MonoCruise will automatically start together with ETS2. you can disable this in the settings.
 
 > [!IMPORTANT]
 > The MonoCruise window should remain open if you want to use it
+
+## Adaptive Cruise Control (v1.0.1 only):
+you can enable the experemental ACC and it will hold a safe distance from the lead vehicle (singleplayer or TruckersMP). you currently cannot change the following distance, but that's comming.
+   
+> [!CAUTION]
+> The ACC is EXTREMELY experemental. 
+> The ACC has a tendency to brakecheck, BE MINDFULL WHEN TURNING ON!
+
 ## .py install
 Not supported yet, but you can try it.
