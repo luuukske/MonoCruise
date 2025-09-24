@@ -1,6 +1,7 @@
 import threading
 import customtkinter as ctk
 import tkinter as tk
+from tkinter import messagebox
 version = "v1.0.1"
 
 # temporary for radar output
@@ -27,15 +28,15 @@ sys.path.append('./_internal')
 from scscontroller import SCSController
 from ETS2radar.ETS2radar import ETS2Radar
 
+import pymsgbox
 
-
-from connect_SDK import check_ets2_sdk, check_ats_sdk, check_and_install_scs_sdk
+from connect_SDK import check_and_install_scs_sdk, check_scs_sdk, update_sdk_dlls
 
 import truck_telemetry
 try:
     truck_telemetry.init()  # Signals if ETS2 SDK has been detected
 except:
-    if not check_ets2_sdk() and not check_ats_sdk():
+    if not check_scs_sdk("ets2") and not check_scs_sdk("ats"):
         print("SDK not installed, trying to install it automatically.")
         msg = CTkMessagebox(title="SDK not installed", message='Do you want to install the SDK automatically?',
             icon="warning", option_1="Cancel",option_2="Okay", wraplength=300, sound=True)
@@ -45,16 +46,18 @@ except:
                 # Attempt to install the SDK automatically
                 print("installing SDK")
                 result = check_and_install_scs_sdk()
-                if result["summary"]["failed_installs"] > 0:
-                    raise Exception("SDK installation failed")
                 
-                if result is None:
+                if result is None or result["summary"]["failed_installs"] > 0:
                     raise Exception("Error checking or installing SDK")
+                if result["summary"]["total_installations"] == 0:
+                    pymsgbox.alert('No ETS2/ATS locations found. MonoCruise requires ETS2/ATS to run, duhh...', 'Error')
+                    sys.exit()
+
                 print("installed SDK")
             except:
-                raise Exception("Error installing SDK")
+                pymsgbox.alert('Failed to check ETS2/ATS install', 'Error')
         else:
-            exit()
+            sys.exit()
 
 # Get system DPI scaling
 try:
@@ -63,7 +66,7 @@ try:
 except Exception as e:
     scaling = 1
     print(e)
-    
+
 # Create the main window
 root = ctk.CTk()
 
@@ -1362,26 +1365,21 @@ def sdk_check_thread():
                 time.sleep(0.5)  # Small sleep to prevent CPU hogging
                 first = False
         except Exception as e:
-            if isinstance(e, FileNotFoundError) or str(e) == "Not support this telemetry sdk version" or str(e) == "SDK_NOT_ACTIVE":
-                #print("ETS2 not found, please start the game first.")
-                ets2_detected.clear()
-                if first:
-                    if not ets2_detected.is_set():
-                        manual_start = True
-                        root.deiconify()
-
-                if autostart_variable.get()==True and not first and not ets2_detected.is_set() and not manual_start and root.state() == 'iconic':
-                    print("shutting down")
-                    time.sleep(1)
-                    exit_event.set()
-                elif not manual_start:
+            #print("ETS2 not found, please start the game first.")
+            ets2_detected.clear()
+            if first:
+                if not ets2_detected.is_set():
                     manual_start = True
+                    root.deiconify()
 
-                time.sleep(0.2)
-            else:
-                print(e)
-                context = get_error_context()
-                log_error(e, context)
+            if autostart_variable.get()==True and not first and not ets2_detected.is_set() and not manual_start and root.state() == 'iconic':
+                print("shutting down")
+                time.sleep(1)
+                exit_event.set()
+            elif not manual_start:
+                manual_start = True
+
+            time.sleep(0.2)
         if first:
             print(f"starting in {'manual' if manual_start else 'auto'} start mode")
             first=False
@@ -2500,6 +2498,25 @@ def cc_target_speed_thread_func():
 
 
 
+import threading
+
+_hazards_pulse_thread = None
+
+def _set_hazards_pulse():
+    setattr(controller, "accmode", True)
+    time.sleep(0.05)
+    setattr(controller, "accmode", False)
+
+def change_hazards_state(state):
+    global data
+    global _hazards_pulse_thread
+    cmd_print(f"change_hazards_state: setting hazards to {state} (current: {data['lightsHazards']})", "#00FF00", 5)
+    setattr(controller, "accmode", False)
+    if data["lightsHazards"] != state:
+        # Only start the thread if there is no other thread running or the previous one is not alive
+        if _hazards_pulse_thread is None or not _hazards_pulse_thread.is_alive():
+            _hazards_pulse_thread = threading.Thread(target=_set_hazards_pulse, daemon=True, name="hazards Pulse Thread")
+            _hazards_pulse_thread.start()
 
 def main():
     global controller
@@ -2841,11 +2858,9 @@ def main():
                     setattr(controller, "wipers3", True)
 
                 try:
-                    if data["lightsHazards"] == False and not hazards_prompted:
-                        setattr(controller, "accmode", True)
+                    if hazards_variable_var:
+                        change_hazards_state(True)
                         hazards_prompted = True
-                        time.sleep(0.05)
-                        setattr(controller, "accmode", False)
                 except:
                     pass
 
@@ -2853,7 +2868,7 @@ def main():
                 live_visualization_frame.image = img_copy
 
                 time.sleep(0.2)
-                if data is not None or speed > 0.1:
+                if (data is not None or speed > 0.1) and ets2_detected.is_set() and data is not None:
                     setattr(controller, "steering", float(-data["gameSteer"]))
                 else:
                     setattr(controller, "steering", 0.0)
@@ -2884,8 +2899,9 @@ def main():
 
             pauzed = data['paused']
 
-            # radar code
-            acc_data = radar.update(data)
+            if not device_lost and device is not None:
+                # radar code
+                acc_data = radar.update(data)
 
             # Initialize emergency flags
             AEB_brake = False
@@ -3033,6 +3049,11 @@ def main():
             if data.get('userThrottle', 0.0) > 0.0:
                 opdbrakeval = 0.0
             
+            if cc_brake >= 1:
+                if hazards_variable_var:
+                    change_hazards_state(True)
+                    hazards_prompted = True
+
             if not AEB_brake:
                 if data["cruiseControl"] and not cc_enabled:
                     opdbrakeval = 0
@@ -3086,15 +3107,12 @@ def main():
                     horn = True
                     cmd_print("#####HONKING!#####", "#FF2020", 3)
             elif prev_speed-speed >= 5 and arrived == False and not pauzed:
-                setattr(controller, "accmode", False)
                 stopped = True
                 send(0,1, controller)
                 cmd_print("#####crash#####", "#FF2020", 10)
-                if data["lightsHazards"] == False and hazards_variable_var == True:
-                    setattr(controller, "accmode", True)
+                if hazards_variable_var:
+                    change_hazards_state(True)
                     hazards_prompted = True
-                    time.sleep(0.05)
-                    setattr(controller, "accmode", False)
 
             else:
                 send(opdgasval, opdbrakeval, controller)
@@ -3108,7 +3126,7 @@ def main():
                     setattr(controller, "wipers4", True)
                 if airhorn_variable_var == True and horn == True:
                     setattr(controller, "wipers3", True)
-                time.sleep(0.1)
+                time.sleep(0.07)
                 setattr(controller, "accmode", False)
                 while (brakeval > 0.8 or prev_brakeval-brakeval <= -0.03*latency_multiplier or data["parkBrake"]) and not exit_event.is_set():
                     if prev_brakeval-brakeval <= -0.15*latency_multiplier and horn == False:
@@ -3125,7 +3143,10 @@ def main():
                             pygame.joystick.init()
                         for event in pygame.event.get():
                             if event.type == pygame.JOYAXISMOTION:
-                                brakeval = round((device.get_axis(brakeaxis)*-1+1)/2,3)
+                                if brake_inverted:
+                                    brakeval = round((device.get_axis(brakeaxis)*-1+1)/2,3)
+                                else:
+                                    brakeval = round((device.get_axis(brakeaxis)+1)/2,3)
                             if event.type == pygame.JOYDEVICEREMOVED:
                                 if event.instance_id == device_instance_id:
                                     cmd_print("Your pedals disconnected", "#FF2020", 15)
@@ -3169,12 +3190,12 @@ def main():
                 setattr(controller, "accmode", False)
             """
 
-            if autodisable_hazards_var == True and hazards_prompted == True and speed > 10 and data["lightsHazards"] == True and opdgasval > 0.5 and brakeval == 0:
+            if autodisable_hazards_var == True and hazards_prompted == True and speed > 10 and data["lightsHazards"] == True and opdgasval > 0.5 and opdbrakeval == 0:
                 cmd_print("autodisabled hazards")
-                setattr(controller, "accmode", True)
-                hazards_prompted = False
-                time.sleep(0.05)
-                setattr(controller, "accmode", False)
+                
+                if hazards_variable_var:
+                    change_hazards_state(False)
+                    hazards_prompted = False
             elif autodisable_hazards_var == False:
                 hazards_prompted = False
             
@@ -4026,6 +4047,10 @@ try:
     customtkinter_label = ctk.CTkLabel(scrollable_frame, text="customtkinter - csm10495",  font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, height=0)
     customtkinter_label.grid(row=53, column=0, padx=10, pady=0, columnspan=2, sticky="new")
 
+    def reinstall_function():
+        _ = update_sdk_dlls()
+        _ = check_and_install_scs_sdk()
+
     #create a button to reinstall the SDK
     reinstall_SDK_button = ctk.CTkButton(
         scrollable_frame,
@@ -4035,7 +4060,7 @@ try:
         fg_color=WAITING_COLOR,
         corner_radius=5,
         hover_color="#333366",
-        command=lambda: threading.Thread(target=check_and_install_scs_sdk, daemon=True, name="reintall SDK").start()
+        command=lambda: threading.Thread(target=reinstall_function, daemon=True, name="reintall SDK").start()
     )
     reinstall_SDK_button.grid(row=54, column=0, padx=10, pady=(20,1), columnspan=2, sticky="ew")
 

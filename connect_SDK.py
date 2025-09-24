@@ -13,8 +13,30 @@ SDK_DLLS = [
     "ets2_la_plugin.dll"
 ]
 
+def is_steam_installed():
+    """
+    Checks if Steam is installed by looking for its registry key.
+    Returns True if installed, False otherwise.
+    """
+    try:
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam")
+        winreg.CloseKey(key)
+        return True
+    except FileNotFoundError:
+        pass
+
+    try:
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam")
+        winreg.CloseKey(key)
+        return True
+    except FileNotFoundError:
+        pass
+
+    return False
+
 def find_scs_game_path(game_type="ets2"):
-    """Find SCS game installation directory"""
+    if not is_steam_installed():
+        return "steam_not_installed"
     game_configs = {
         "ets2": {
             "steam_id": "227300",
@@ -27,14 +49,10 @@ def find_scs_game_path(game_type="ets2"):
             "exe_name": "amtrucks.exe"
         }
     }
-    
     if game_type not in game_configs:
         return None
-    
     config = game_configs[game_type]
     found_paths = []
-    
-    # Try Steam registry (main installation)
     try:
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 
                            rf"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App {config['steam_id']}")
@@ -44,8 +62,6 @@ def find_scs_game_path(game_type="ets2"):
             found_paths.append(Path(path))
     except:
         pass
-    
-    # Try to find Steam library folders
     steam_paths = []
     try:
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 
@@ -55,12 +71,10 @@ def find_scs_game_path(game_type="ets2"):
         steam_paths.append(Path(steam_path))
     except:
         pass
-    
     steam_paths.extend([
         Path("C:/Program Files (x86)/Steam"),
         Path("C:/Program Files/Steam"),
     ])
-    
     for steam_path in steam_paths:
         if steam_path.exists():
             library_vdf = steam_path / "steamapps" / "libraryfolders.vdf"
@@ -77,11 +91,9 @@ def find_scs_game_path(game_type="ets2"):
                                 found_paths.append(game_path)
                 except:
                     pass
-            
             default_game = steam_path / "steamapps" / "common" / config['folder_name']
             if default_game.exists():
                 found_paths.append(default_game)
-    
     import string
     for drive in string.ascii_uppercase:
         drive_paths = [
@@ -94,40 +106,31 @@ def find_scs_game_path(game_type="ets2"):
         for p in drive_paths:
             if p.exists():
                 found_paths.append(p)
-    
     unique_paths = []
     for path in found_paths:
         if path not in unique_paths and validate_scs_game_installation(path, game_type):
             unique_paths.append(path)
-    
     return unique_paths[0] if unique_paths else None
 
 def validate_scs_game_installation(game_path, game_type="ets2"):
-    """Validate that the game exe exists in the expected location"""
-    if not game_path:
+    if not game_path or game_path == "steam_not_installed":
         return False
-    
     exe_names = {
         "ets2": "eurotrucks2.exe",
         "ats": "amtrucks.exe"
     }
-    
     if game_type not in exe_names:
         return False
-    
     exe_path = game_path / "bin" / "win_x64" / exe_names[game_type]
     return exe_path.exists()
 
 def is_scs_game_running(game_type="ets2"):
-    """Check if SCS game is running"""
     exe_names = {
         "ets2": "eurotrucks2.exe",
         "ats": "amtrucks.exe"
     }
-    
     if game_type not in exe_names:
         return False
-    
     target_exe = exe_names[game_type]
     for proc in psutil.process_iter(['name']):
         if proc.info['name'] and target_exe in proc.info['name'].lower():
@@ -135,15 +138,12 @@ def is_scs_game_running(game_type="ets2"):
     return False
 
 def close_scs_game(game_type="ets2"):
-    """Close SCS game if running"""
     exe_names = {
         "ets2": "eurotrucks2.exe",
         "ats": "amtrucks.exe"
     }
-    
     if game_type not in exe_names:
         return
-    
     target_exe = exe_names[game_type]
     for proc in psutil.process_iter(['name', 'pid']):
         if proc.info['name'] and target_exe in proc.info['name'].lower():
@@ -152,7 +152,7 @@ def close_scs_game(game_type="ets2"):
                 proc.wait(timeout=10)
             except:
                 proc.kill()
-    time.sleep(1)  # Wait for complete shutdown
+    time.sleep(1)
 
 def launch_scs_game(game_path, game_type="ets2"):
     """Launch SCS game"""
@@ -169,19 +169,20 @@ def launch_scs_game(game_path, game_type="ets2"):
         subprocess.Popen([str(exe_path)], cwd=str(exe_path.parent))
 
 def get_sdk_dll_paths(game_path):
-    """Get the paths to the SDK DLLs, returns dict of dll name -> path"""
     dll_paths = {}
     for dll_name in SDK_DLLS:
         dll_paths[dll_name] = game_path / "bin" / "win_x64" / "plugins" / dll_name
     return dll_paths
 
 def has_sdk_dlls(game_path):
-    """Check if all relevant SDK DLLs are installed for a given game installation"""
+    if game_path == "steam_not_installed":
+        return False
     dll_paths = get_sdk_dll_paths(game_path)
     return all(path.exists() for path in dll_paths.values())
 
 def find_all_scs_game_installations(game_type="ets2"):
-    """Find all SCS game installations on the system"""
+    if not is_steam_installed():
+        return "steam_not_installed"
     game_configs = {
         "ets2": {
             "steam_id": "227300",
@@ -194,13 +195,10 @@ def find_all_scs_game_installations(game_type="ets2"):
             "exe_name": "amtrucks.exe"
         }
     }
-    
     if game_type not in game_configs:
         return []
-    
     config = game_configs[game_type]
     found_paths = []
-    
     try:
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 
                            rf"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App {config['steam_id']}")
@@ -210,7 +208,6 @@ def find_all_scs_game_installations(game_type="ets2"):
             found_paths.append(Path(path))
     except:
         pass
-    
     steam_paths = []
     try:
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 
@@ -224,7 +221,6 @@ def find_all_scs_game_installations(game_type="ets2"):
         Path("C:/Program Files (x86)/Steam"),
         Path("C:/Program Files/Steam"),
     ])
-    
     for steam_path in steam_paths:
         if steam_path.exists():
             library_vdf = steam_path / "steamapps" / "libraryfolders.vdf"
@@ -244,7 +240,6 @@ def find_all_scs_game_installations(game_type="ets2"):
             default_game = steam_path / "steamapps" / "common" / config['folder_name']
             if default_game.exists():
                 found_paths.append(default_game)
-    
     import string
     for drive in string.ascii_uppercase:
         drive_paths = [
@@ -257,12 +252,10 @@ def find_all_scs_game_installations(game_type="ets2"):
         for p in drive_paths:
             if p.exists():
                 found_paths.append(p)
-    
     unique_paths = []
     for path in found_paths:
         if path not in unique_paths and validate_scs_game_installation(path, game_type):
             unique_paths.append(path)
-    
     return unique_paths
 
 # Main functions
@@ -359,9 +352,11 @@ def install_scs_sdk(game_type="ets2", target_path=None):
                     print(f"Error copying {dll_name}: {e}")
                     success = False
 
+            """ # temporarily disable because it's anoying...
             if game_was_running:
                 print(f"Relaunching {game_type.upper()}...")
                 launch_scs_game(game_path, game_type)
+            """
 
             if success:
                 print(f"SDK DLLs installed successfully to: {dll_paths}")
@@ -512,3 +507,69 @@ def check_and_install_scs_sdk():
         )
         msg.get()
     return result
+
+def update_sdk_dlls():
+    """
+    Update all installed SDK DLLs (scs-telemetry.dll, input_semantical.dll, ets2_la_plugin.dll)
+    to all locations where ALL are already installed.
+    If the game is running, ask the user for confirmation before closing and updating.
+    Skips locations where not all DLLs are present.
+    Only overwrites if source DLL exists.
+    Returns a list of (game_path, updated_dlls, skipped_dlls, errors)
+    Returns 'steam_not_installed' if Steam is missing.
+    """
+    if not is_steam_installed():
+        print("Steam is not installed on this system.")
+        return "steam_not_installed"
+
+    script_dir = Path(__file__).parent
+    results = []
+    for game_type in ["ets2", "ats"]:
+        all_paths = find_all_scs_game_installations(game_type)
+        if all_paths == "steam_not_installed":
+            return "steam_not_installed"
+        for game_path in all_paths:
+            dll_paths = get_sdk_dll_paths(game_path)
+            if all(path.exists() for path in dll_paths.values()):
+                updated_dlls = []
+                skipped_dlls = []
+                errors = []
+
+                # Check if the game is running
+                running = is_scs_game_running(game_type)
+                if running:
+                    msg = CTkMessagebox(
+                        title=f"{game_type.upper()} is running",
+                        message=f"{game_type.upper()} is currently running at {game_path}.\nDo you want to close it automatically to update the SDK DLLs?",
+                        icon="warning",
+                        option_1="Cancel",
+                        option_2="Close and Update",
+                        wraplength=400,
+                        sound=True
+                    )
+                    user_choice = msg.get()
+                    if user_choice == "Close and Update":
+                        close_scs_game(game_type)
+                        print(f"Closed {game_type.upper()} for update at {game_path}")
+                    else:
+                        print(f"Skipped updating {game_path} for {game_type.upper()} because the user cancelled.")
+                        results.append((game_path, [], SDK_DLLS, [("User cancelled update because game was running.", "")]))
+                        continue
+
+                for dll_name, target_path in dll_paths.items():
+                    source_dll = script_dir / dll_name
+                    if source_dll.exists():
+                        try:
+                            shutil.copy2(source_dll, target_path)
+                            updated_dlls.append(dll_name)
+                            print(f"Updated {dll_name} in {target_path}")
+                        except Exception as e:
+                            errors.append((dll_name, str(e)))
+                            print(f"Failed to update {dll_name} in {target_path}: {e}")
+                    else:
+                        skipped_dlls.append(dll_name)
+                        print(f"Source DLL {dll_name} not found in script directory, skipped updating.")
+                results.append((game_path, updated_dlls, skipped_dlls, errors))
+            else:
+                print(f"Skipped {game_path} for {game_type.upper()} - not all SDK DLLs are installed.")
+    return results
