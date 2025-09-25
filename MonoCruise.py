@@ -30,6 +30,10 @@ from ETS2radar.ETS2radar import ETS2Radar
 
 import pymsgbox
 
+# Create the main window
+root = ctk.CTk()
+root.withdraw()
+
 from connect_SDK import check_and_install_scs_sdk, check_scs_sdk, update_sdk_dlls
 
 import truck_telemetry
@@ -45,7 +49,7 @@ except:
             try:
                 # Attempt to install the SDK automatically
                 print("installing SDK")
-                result = check_and_install_scs_sdk()
+                result = check_and_install_scs_sdk(root)
                 
                 if result is None or result["summary"]["failed_installs"] > 0:
                     raise Exception("Error checking or installing SDK")
@@ -66,9 +70,6 @@ try:
 except Exception as e:
     scaling = 1
     print(e)
-
-# Create the main window
-root = ctk.CTk()
 
 # Configure default font
 try:
@@ -348,7 +349,10 @@ def check_and_start_exe():
         except Exception as e:
             cmd_print(f"Failed to start {exe_name}: {e}", display_duration=3)
         finally:
-            add_to_startup(exe_path, "ETS2_checker_MonoCruise")
+            try:
+                add_to_startup(exe_path, "ETS2_checker_MonoCruise")
+            except Exception as e:
+                cmd_print(f"Failed to add to startup: {e}", display_duration=3)
     
     elif not should_be_running and is_running:
         # Should not be running but is - stop it
@@ -2665,7 +2669,6 @@ def main():
 
         refresh_button_labels()
 
-
         while not exit_event.is_set():
             timestamp = time.time()
 
@@ -3542,6 +3545,7 @@ try:
     base_height = 500
     root.geometry(f"{int(base_width)}x{int(base_height)}")
     root.minsize(int(base_width), int(base_height))
+    root.deiconify()
     
     # Configure root window for better performance
     root.update_idletasks()  # Process any pending events
@@ -4048,8 +4052,8 @@ try:
     customtkinter_label.grid(row=53, column=0, padx=10, pady=0, columnspan=2, sticky="new")
 
     def reinstall_function():
-        _ = update_sdk_dlls()
-        _ = check_and_install_scs_sdk()
+        _ = update_sdk_dlls(root)
+        _ = check_and_install_scs_sdk(root)
 
     #create a button to reinstall the SDK
     reinstall_SDK_button = ctk.CTkButton(
