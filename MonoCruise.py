@@ -63,6 +63,8 @@ except:
         else:
             sys.exit()
 
+root.withdraw()
+
 # Get system DPI scaling
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -1524,11 +1526,14 @@ class cc_panel:
         self.running = False
         
         def close_window(root):
-            if root and root.winfo_exists():
-                try:
-                    root.after(0, root.quit)
-                except:
-                    pass
+            try:
+                if root and root.winfo_exists():
+                    try:
+                        root.after(0, root.quit)
+                    except:
+                        pass
+            except:
+                pass
         
         close_window(self.root1)
         close_window(self.root2)
@@ -2405,6 +2410,7 @@ def cc_target_speed_thread_func():
     global cc_limiting
     global brake_exponent_variable
     global _data_cache
+    global acc_enabled
 
     cc_locked = False
     cc_limiting = False
@@ -2472,7 +2478,7 @@ def cc_target_speed_thread_func():
                         derivative * D * slow_speed_adjustment +
                         physics_adjustment)
             
-            if cc_mode.get() == "Cruise control":
+            if cc_mode.get() == "Cruise control" and acc_enabled.get():
                 acc_val = adaptive_cruise_control(speed) + physics_adjustment
             else:
                 acc_val = 2
@@ -2573,6 +2579,7 @@ def main():
     global cc_limiting
     global data_history
     global AEB_warn
+    global acc_enabled
     # Initialize pygame for joystick handling
     
     # Start SDK check thread
@@ -2609,7 +2616,8 @@ def main():
                             long_increments = long_increments.get(),
                             short_increments = short_increments.get(),
                             long_press_reset = long_press_reset.get(),
-                            show_cc_ui = show_cc_ui.get()
+                            show_cc_ui = show_cc_ui.get(),
+                            acc_enabled = acc_enabled.get()
                             )
 
         if exit_event.is_set():
@@ -2698,7 +2706,8 @@ def main():
                             long_increments = long_increments.get(),
                             short_increments = short_increments.get(),
                             long_press_reset = long_press_reset.get(),
-                            show_cc_ui = show_cc_ui.get()
+                            show_cc_ui = show_cc_ui.get(),
+                            acc_enabled = acc_enabled.get()
                             )
 
             if offset_variable.get() == 0:
@@ -2785,6 +2794,19 @@ def main():
                                         device_instance_id = recovered.get_instance_id()
                                         device = recovered
                                         device.init()
+                                        # Set brakeval and gasval using the current joystick values after reconnecting
+                                        try:
+                                            if brake_inverted:
+                                                brakeval = round((device.get_axis(brakeaxis)*-1+1)/2,3)
+                                            else:
+                                                brakeval = round((device.get_axis(brakeaxis)+1)/2,3)
+                                            if gas_inverted:
+                                                gasval = round((device.get_axis(gasaxis)*-1+1)/2,3)
+                                            else:
+                                                gasval = round((device.get_axis(gasaxis)+1)/2,3)
+                                        except Exception as e:
+                                            brakeval = 0
+                                            gasval = 0
                                         refresh_button_labels()
                                         break
                                     else:
@@ -2902,7 +2924,7 @@ def main():
 
             pauzed = data['paused']
 
-            if not device_lost and device is not None:
+            if not device_lost and device is not None and acc_enabled.get():
                 # radar code
                 acc_data = radar.update(data)
 
@@ -2911,7 +2933,7 @@ def main():
             AEB_warn = False
             AEB_warn_temp = False
 
-            if acc_data:
+            if acc_data and acc_enabled.get():
                 # Get the closest vehicle (first in the sorted list)
                 closest_vehicle = acc_data[0]
                 closest_lead_id, closest_lead_dist_raw, closest_lead_speed_raw, closest_a_lead = closest_vehicle
@@ -3465,6 +3487,7 @@ global cc_inc_button
 global cc_dec_button
 global unassign
 global AEB_warn
+global acc_enabled
 
 AEB_warn = False
 cc_enabled = False
@@ -3545,7 +3568,6 @@ try:
     base_height = 500
     root.geometry(f"{int(base_width)}x{int(base_height)}")
     root.minsize(int(base_width), int(base_height))
-    root.deiconify()
     
     # Configure root window for better performance
     root.update_idletasks()  # Process any pending events
@@ -3969,6 +3991,51 @@ try:
         show_cc_ui)
     ctk.CTkLabel(scrollable_frame, text="just drag it across the screen to move", font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, bg_color="transparent", anchor="e", wraplength=185, height=10, justify="right").grid(row=30, column=0, padx=10, pady=(0,8), columnspan=2, sticky="nsew")
 
+    # Adaptive Cruise Control (ACC) toggle
+    acc_enabled = ctk.BooleanVar(value=_data_cache["acc_enabled"] if "acc_enabled" in _data_cache else False)
+    def confirm_acc_enabled():
+        if acc_enabled.get() == True:
+            msg = CTkMessagebox(
+                title="Adaptive Cruise Control (BETA)",
+                message=(
+                    "Adaptive Cruise Control is enabled.\n\n"
+                    "WARNING: This feature is in BETA and may brake unexpectedly. "
+                    "Use with caution!"
+                ),
+                icon="warning", 
+                wraplength=600,
+                sound=True,
+                width=400,
+                height=100,
+                option_1="I won't complain about it",
+                option_2="Cancel",
+            )
+            if msg.get() != "I won't complain about it": 
+                print("Confermation dialog closed")
+                acc_enabled.set(False)
+                acc_toggle.deselect()
+
+    acc_label = new_label(scrollable_frame, 31, 0, "Adaptive Cruise Control:")
+    # Add a rounded "BETA" label next to the ACC label
+    experimental_label = ctk.CTkLabel(
+        scrollable_frame,
+        width=40,
+        height=20,
+        text="BETA",
+        font=("Segoe UI", 11, "bold"),
+        text_color="white",
+        fg_color=LOST_COLOR,
+        corner_radius=15,
+        bg_color="transparent",
+        padx=5,
+        pady=1
+    )
+    experimental_label.grid(row=31, column=1, padx=(4, 0), pady=1, sticky="w")
+    acc_toggle = new_checkbutton(
+        scrollable_frame, 31, 1,
+        acc_enabled,
+        command=confirm_acc_enabled
+    )
 
 
 
@@ -4497,6 +4564,9 @@ try:
     except Exception: pass
     try:
         show_cc_ui.set(_data_cache["show_cc_ui"])
+    except Exception: pass
+    try:
+        acc_enabled.set(_data_cache["acc_enabled"])
     except Exception: pass
 
     try:
