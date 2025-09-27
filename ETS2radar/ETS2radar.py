@@ -840,7 +840,7 @@ class ETS2Radar:
                     forward_x = front_center_x - rear_center_x
                     forward_z = front_center_z - rear_center_z
                     forward_length = np.sqrt(forward_x**2 + forward_z**2)
-                    if forward_length > 0:
+                    if forward_length > 0 and False: #disable synthetic history because of false detections
                         forward_x /= forward_length
                         forward_z /= forward_length
                         synthetic_hist = []
