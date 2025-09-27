@@ -1881,6 +1881,8 @@ def main_cruise_control():
     global long_increments
     global short_increments
     global long_press_reset
+    global cc_gas
+    global cc_brake
 
     cc_target_speed_thread = threading.Thread(target=cc_target_speed_thread_func, daemon=True, name="CC Target Speed Thread")
     time_pressed_dec = None
@@ -1891,6 +1893,8 @@ def main_cruise_control():
     long_press_inc = False
     long_press_start = False
     cc_enabled = False
+    cc_gas = gasval
+    cc_brake = 0
     try:
         long_increment_int = int(long_increments.get().split()[0])
         short_increment_int = int(short_increments.get().split()[0])
@@ -2028,6 +2032,8 @@ def main_cruise_control():
                     print("short press start")
                     if cc_enabled:
                         cc_enabled = False
+                        cc_gas = 0
+                        cc_brake = 0
                         cmd_print("Cruise control disabled")
                     else:
                         cc_enabled = True
@@ -2045,6 +2051,8 @@ def main_cruise_control():
                 if brakeval > 0.1 or em_stop or data.get('parkBrake', False):
                     if cc_enabled:
                         cc_enabled = False
+                        cc_gas = 0
+                        cc_brake = 0
                         app.update(f"{int(target_speed)} km/h", cc_mode.get(), cc_enabled)
                         cmd_print("Cruise control disabled due to brake input")
 
@@ -2141,9 +2149,43 @@ from collections import defaultdict, deque
 import numpy as np
 
 # memory of previous data for each lead vehicle (fixed-length queue)
-_prev_data = defaultdict(lambda: deque(maxlen=5))
+_prev_data = defaultdict(lambda: deque(maxlen=10))
 
-def adaptive_cruise_control(ego_speed, min_gap=7.0, acc_time_gap=1.3, debug=True):
+# Low-pass filter state
+_filter_state = {'prev_output': 0.0, 'initialized': False}
+
+def low_pass_filter(current_value, alpha=0.3, emergency_threshold=-2.0):
+    """
+    Low-pass filter with emergency brake override.
+    
+    Args:
+        current_value: Current acceleration command
+        alpha: Filter coefficient (0-1). Lower = more smoothing
+        emergency_threshold: Threshold below which to bypass filter for emergency braking
+    
+    Returns:
+        filtered_value: Smoothed acceleration command
+    """
+    global _filter_state
+    
+    # Initialize filter on first call
+    if not _filter_state['initialized']:
+        _filter_state['prev_output'] = current_value
+        _filter_state['initialized'] = True
+        return current_value
+    
+    # Emergency brake override - bypass filter for large deceleration commands
+    if current_value < emergency_threshold:
+        _filter_state['prev_output'] = current_value
+        return current_value
+    
+    # Apply low-pass filter: y[n] = α * x[n] + (1-α) * y[n-1]
+    filtered_value = alpha * current_value + (1 - alpha) * _filter_state['prev_output']
+    _filter_state['prev_output'] = filtered_value
+    
+    return filtered_value
+
+def adaptive_cruise_control(ego_speed, min_gap=4.0, acc_time_gap=1.2, debug=True):
     """
     Adaptive Cruise Control logic with lead vehicle acceleration anticipation.
     All input values are averaged over time. Queue resets when lead_id changes.
@@ -2159,21 +2201,21 @@ def adaptive_cruise_control(ego_speed, min_gap=7.0, acc_time_gap=1.3, debug=True
     """
     global data_history
 
-
     try:
         if not data_history:
             raise
     except:
+        # Reset filter state when no lead vehicle
+        _filter_state['initialized'] = False
         return 2.0 # full accelerate if free road
 
     lead_dist = np.mean([d['distance'] for d in data_history])
     lead_speed = np.mean([d['speed'] for d in data_history])
     avg_ego_speed = np.mean([d['ego_speed'] for d in data_history])
-    a_lead = data_history[-1]['a_lead']
-    
+    a_lead = data_history[-1]['a_lead'] #latest lead vehicle acceleration
 
     # Calculate desired gap using averaged ego speed
-    desired_gap = min_gap + acc_time_gap * (avg_ego_speed / 3.6)
+    desired_gap = min_gap + acc_time_gap * max(avg_ego_speed / 3.6, 0)
     gap_error = lead_dist - desired_gap
     speed_error = lead_speed - avg_ego_speed
 
@@ -2181,25 +2223,28 @@ def adaptive_cruise_control(ego_speed, min_gap=7.0, acc_time_gap=1.3, debug=True
     actual_time_gap = max(min(lead_dist / (max(avg_ego_speed, 1) / 3.6), 10), 0.01)
     closeness_amp = pow(0.8, actual_time_gap*5-3) + 0.5
     if speed_error < 0.1:
-        closeness_amp = closeness_amp**1.5
+        closeness_amp = closeness_amp**1.3
     else:
-        closeness_amp = 0.8
+        closeness_amp = 0.7
 
     acceleration_amp = max(-(actual_time_gap/2)**3+1, 0.2)
     if a_lead > 0:
-        acceleration_amp *= 0.6
+        acceleration_amp *= 0.5
     
     # calculate slow speed adjustment using averaged ego speed
-    slow_speed_adj = pow(0.8, max(avg_ego_speed, 0.0))*2.5
+    slow_speed_adj = pow(0.8, max(avg_ego_speed, 0.0))*2.2
 
     # Gains
-    K_gap = 0.10 * closeness_amp * (slow_speed_adj+1)
-    K_speed = 0.15 * closeness_amp * (slow_speed_adj/1.5+1)
-    K_acc = 0.25 *acceleration_amp
+    K_gap = 0.11 * closeness_amp * (slow_speed_adj/2+1)
+    K_speed = 0.14 * closeness_amp * (slow_speed_adj/3+1)
+    K_acc = 0.20 *acceleration_amp
+
+    if lead_speed-avg_ego_speed > 5 and gap_error < 2:
+        K_gap *= 0.3
 
     # Control law (sum of weighted errors)
     acc_raw = K_gap * np.sign(gap_error)*((abs(gap_error)/10)**0.7)*10 + K_speed * speed_error + K_acc * a_lead
-    if acc_raw <= 0:
+    if acc_raw <= 0.5:
         acc_raw -= slow_speed_adj*1
     else:
         acc_raw /= slow_speed_adj+1
@@ -2207,11 +2252,17 @@ def adaptive_cruise_control(ego_speed, min_gap=7.0, acc_time_gap=1.3, debug=True
     # disabled clamping to make it able to emergency brake
     acc_value = acc_raw / 1.3
 
+    if acc_value > 0:
+        acc_value /= slow_speed_adj/4+1
+
+    # Apply low-pass filter with emergency brake override
+    filtered_acc_value = low_pass_filter(acc_value, alpha=0.3, emergency_threshold=-3.0)
     
     if debug:
         print(f"Gap error={gap_error:.2f} | Speed error={speed_error:.2f} | a_lead={a_lead:.2f}")
+        print(f"Raw acc={acc_value:.3f} | Filtered acc={filtered_acc_value:.3f}")
     
-    return acc_value
+    return filtered_acc_value
 
 
 
@@ -2471,7 +2522,7 @@ def cc_target_speed_thread_func():
                 proportional = (error**0.8) * P
 
             slow_speed_adjustment = (-(2**(-(max(target_speed, 30)*0.04)+0.3))+1)*1.3
-            physics_adjustment = (speed * 0.0015 + slope * 18 * slow_speed_adjustment) * weight_adjustment
+            physics_adjustment = (speed * 0.0015 + slope * 23 * slow_speed_adjustment) * weight_adjustment
 
             base_val = (max(proportional, -max_proportional) * slow_speed_adjustment +
                         integral_sum * I +
@@ -2659,7 +2710,7 @@ def main():
 
         cv2.namedWindow("ETS2 Radar", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("ETS2 Radar", 600, 600)
-        radar = ETS2Radar(show_window=True, fov_angle=30)
+        radar = ETS2Radar(show_window=True, fov_angle=35)
         AEBSound = AEBSoundHandler(os.path.join(os.path.dirname(os.path.abspath(__file__)), "AEBsfx.wav"))
         prev_stop = time.time()
 
@@ -2951,6 +3002,18 @@ def main():
                     'a_lead': closest_a_lead
                 }
                 _prev_data[closest_lead_id].append(data_point)
+
+                # if multiple vehicles are detected, take acceleration and speed into account.
+                # 70% lead vehicle, 30% vehicle after that (if 3 vehicles; for 2nd vehicle data_point, 70% of 2nd vehicle, 30% of 3rd vehicle).
+                if len(acc_data) > 1:
+                    for i in range(1, len(acc_data)):
+                        other_speed = acc_data[i][2]
+                        other_a_lead = acc_data[i][3]
+                        
+                        if data_point['a_lead'] < -2:
+                            data_point['a_lead'] = data_point['a_lead'] * 0.8 + other_a_lead * 0.2
+                        if data_point['speed']-other_speed < -10:
+                            data_point['speed'] = data_point['speed'] * 0.8 + other_speed * 0.2
 
                 # Calculate averaged values for the closest vehicle
                 data_history = list(_prev_data[closest_lead_id])

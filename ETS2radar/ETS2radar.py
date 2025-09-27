@@ -1,3 +1,4 @@
+from turtle import speed
 from typing import List, Tuple, Dict, Optional, Any, Deque, Union
 import cv2
 import numpy as np
@@ -26,7 +27,7 @@ Corner = Tuple[float, float, float]  # (x, y, z)
 MAX_DISTANCE: int = 150  # meters
 REFRESH_INTERVAL: float = 0.1  # seconds
 FOV_ANGLE: int = 25  # degrees (half-angle of cone)
-POSITION_SNAP: float = 1  # meters: only save every 10 meters
+POSITION_SNAP: float = 1.5  # meters: only save every 10 meters
 
 class VehicleTracker:
     """
@@ -86,11 +87,13 @@ class ETS2Radar:
         self.max_distance: int = max_distance
         self.fov_angle: int = fov_angle
         self.refresh_interval: float = REFRESH_INTERVAL
-        self.blinker_time_window: float = 2.5 # seconds to estimate changing lane
+        self.blinker_time_window: float = 2 # seconds to estimate changing lane
         self.last_left_blinker: int = 0 # timestamp of last left blinker on
         self.last_right_blinker: int = 0 # timestamp of last right blinker on
         self.in_lane_scores_reset: bool = False
         self.reset_in_lane_scores: bool = False
+        self.last_timestamp: int = time.time()
+        self.prev_dt_frame: float = 0.1
 
         # Initialize telemetry and module
         self.module: Module = Module()
@@ -147,9 +150,9 @@ class ETS2Radar:
         history = self.vehicle_histories.get(vid, None)
         if history is not None and offset is None:
             # Has a trail but not intersecting with base: penalize
-            score_increment = -0.3
+            score_increment = -0.7
         elif history is None:
-            score_increment = -0.3
+            score_increment = -0.2
         else:
             score_increment = 0.0
 
@@ -158,13 +161,11 @@ class ETS2Radar:
             try:
                 x = float(offset)
                 offset_score = (2 ** (-(x / 9) ** 2) * 2.5 - 1.5) / 1
-                distance_amp = (2 ** (-(distance / 100)) + 1 / ((distance + 3) / 8)-1)/2+1
-                offset_score = max(-1.5, min(1.5, offset_score * distance_amp))
+                distance_amp = (2 ** (-(distance / 100)) + 1 / ((distance + 3) / 8)-1)/3+1
+                offset_score = max(-1.5, min(1, offset_score * distance_amp))
                 score_increment += offset_score
             except Exception:
                 pass
-        else:
-            score_increment += -0.1
             
         return score_increment
 
@@ -231,10 +232,10 @@ class ETS2Radar:
         # Use formula for scoring
         try:
             x = float(np.degrees(angle_diff))
-            angle_score = ((3 ** (-(x / 5) ** 2) * 2 - 1)/2 - (abs(x)/40)**6)
+            angle_score = ((3 ** (-(x / 5) ** 2) * 2 - 1)/2 - (abs(x)/20)**6)
             distance_amp = (2**(-(distance/100))+1/((distance+3)/8)-1)/2+1
-            # Clamp each score increment to [-1.5, 0.5]
-            angle_score = max(-1.5, min(0.5, angle_score*distance_amp))
+            # Clamp each score increment to [-2, 0.5] # temporarily set to max 0
+            angle_score = max(-2, min(0, angle_score*distance_amp))
             score_increment += angle_score
         except Exception:
                 pass
@@ -372,7 +373,7 @@ class ETS2Radar:
         xs_array: npt.NDArray[np.float64] = np.array(xs)
         zs_array: npt.NDArray[np.float64] = np.array(zs)
 
-        if len(xs_array) < 10:
+        if len(xs_array) < 5:
             return None
 
         # Least squares fitting
@@ -406,7 +407,7 @@ class ETS2Radar:
         Returns intersection info for scoring.
         Now: If there are not enough history points, does nothing (no synthetic straight trail).
         """
-        if len(history) < 10:
+        if len(history) < 5:
             # Not enough points: do not draw anything, no offset/angle
             return None, None
 
@@ -704,7 +705,7 @@ class ETS2Radar:
                             'distance': trailer_closest_distance
                         })
 
-        collision_threshold = 0.5
+        collision_threshold = 0
         vehicle_groups = []
         processed = set()
         for i, vdata in enumerate(vehicle_data):
@@ -771,7 +772,7 @@ class ETS2Radar:
         self.prev_right_active = data.get("blinkerRightActive", False)
         self.prev_left_active = data.get("blinkerLeftActive", False)
 
-        if (data.get("blinkerRightActive", False) or data.get("blinkerLeftActive", False)) and not self.in_lane_scores_reset:
+        if (data.get("blinkerRightActive", False) or data.get("blinkerLeftActive", False)) and not self.in_lane_scores_reset and ego_speed > 60:
             self.reset_in_lane_scores = True
         else:
             self.reset_in_lane_scores = False
@@ -803,13 +804,13 @@ class ETS2Radar:
             poly = main_vehicle['polygon']
             distance = main_vehicle['distance']
             dx, dz = main_vehicle['centroid'].x, main_vehicle['centroid'].y
-            overall_closest_distance = distance
+            overall_closest_distance = distance-main_vehicle['vehicle'].size.length/2
             for trailer_data in main_vehicle['trailers']:
-                trailer_distance = trailer_data['distance']
+                trailer_distance = trailer_data['distance']-trailer_data['trailer'].size.length/2
                 if trailer_distance < overall_closest_distance:
                     overall_closest_distance = trailer_distance
                 
-            distance_amp = max((1/(overall_closest_distance*0.02)) - overall_closest_distance*0.005 + 0.5, 0)
+            distance_amp = max((1/(overall_closest_distance*0.02)) - overall_closest_distance*0.01 + 0.6, 0)
             
             vid = getattr(v, 'id', id(v))
 
@@ -857,7 +858,7 @@ class ETS2Radar:
                     offset, angle = self.draw_fitted_arc(img, hist, px, pz, yaw_rad, center, scale,
                                                 arc_length=150, color=(0,80,80), reverse=True, ego_steer=ego_steer)
                     if offset is not None:
-                        offset_for_score = offset - blinker_offset*15 * max(min((ego_speed-5)/3, 1),0)
+                        offset_for_score = offset - blinker_offset*20 * max(min((ego_speed-5)/3, 1),0)
                     else:
                         offset_for_score = None
                     angle_for_score = angle
@@ -872,23 +873,23 @@ class ETS2Radar:
                 )
                 # NEW: Check if vehicle is in ego path and adjust score accordingly
                 if path_pts:  # Only if we have a valid ego path
-                    is_in_path = self.check_vehicle_in_ego_path(path_pts, poly, path_width=1.5)
+                    is_in_path = self.check_vehicle_in_ego_path(path_pts, poly, path_width=1)
                     if is_in_path:
-                        path_score = 0.3 * min(distance_amp, 3)  # Boost score for vehicles in ego path
+                        path_score = min(0.3 * distance_amp, 5)  # Boost score for vehicles in ego path
                     else:
-                        path_score = 0.1 * min(distance_amp, 3)  # Penalty for vehicles not in ego path
+                        path_score = -min(0.2 * distance_amp, 3)  # Penalty for vehicles not in ego path
                 else:
                     path_score = 0.0
                 
                 if self.reset_in_lane_scores:
-                    score_val = -5.0  # Reset to -5 on blinker change
+                    score_val = -2.0  # Reset to -2 on blinker change
                 else:
                     score_val = previous_score + (offset_score + angle_score + path_score) * max((abs(vehicle_speed)/90)**0.8, 0.5)
 
                 # Clamp score to valid range
                 score_val = max(-5.0, min(15.0, score_val))
                 self.vehicle_scores[vid] = score_val
-                
+
             if self.is_in_front_cone(dx, dz) and score_val > 0:
                 in_lane_vehicles.append((v, overall_closest_distance - 3, acceleration))
 
@@ -897,7 +898,7 @@ class ETS2Radar:
                 if score_val > 0:
                     # Check if vehicle is in ego path for different coloring
                     vehicle_color = (0, 0, 255)  # Default red for in-lane
-                    if path_pts and self.check_vehicle_in_ego_path(path_pts, poly, path_width=1.5):
+                    if path_pts and self.check_vehicle_in_ego_path(path_pts, poly, path_width=1):
                         vehicle_color = (0, 100, 255)  # Orange-red for vehicles in ego path
                     
                     self.draw_vehicle(img, poly, center, scale, vehicle_color)
@@ -916,7 +917,7 @@ class ETS2Radar:
                     if score_val > 0:
                         # Use same color logic for trailers
                         trailer_color = (255, 0, 0)  # Default red for in-lane trailers
-                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly_t, path_width=1.5):
+                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly_t, path_width=1):
                             trailer_color = (255, 50, 0)  # Orange for trailers in ego path
                         self.draw_vehicle(img, poly_t, center, scale, trailer_color)
                     else:
@@ -939,13 +940,19 @@ class ETS2Radar:
         Calculate vehicle acceleration using the vehicle's reported speed data.
         Returns acceleration in m/s².
         """
+
+        now = time.time()
+        dt_frame = (min(now - self.last_timestamp, 0.5)+self.prev_dt_frame*10)/11
+        self.prev_dt_frame = dt_frame
+        self.last_timestamp = now
+
         # Initialize speed history if not exists
         if not hasattr(self, 'vehicle_speed_history') or not hasattr(self, 'vehicle_acceleration_filtered'):
             self.vehicle_speed_history = {}
             self.vehicle_acceleration_filtered = {}
         
         if vehicle_id not in self.vehicle_speed_history:
-            self.vehicle_speed_history[vehicle_id] = collections.deque(maxlen=5)
+            self.vehicle_speed_history[vehicle_id] = collections.deque(maxlen=10)
 
         if vehicle_id not in self.vehicle_acceleration_filtered:
             self.vehicle_acceleration_filtered[vehicle_id] = 0.0
@@ -963,17 +970,16 @@ class ETS2Radar:
             return 0.0
         
         # Get the oldest speed (first element) and newest speed (last element)
-        old_speed = speeds[0]  # First/oldest speed
+        old_speed = np.mean(speeds[:-1]) # average of all speeds except the last one
         new_speed = speeds[-1]  # Last/newest speed (current speed)
         
-        dt_frame = 0.1  # Time per frame
         time_interval = (len(speeds) - 1) * dt_frame  # Time between first and last measurement
         
         # Calculate acceleration
-        acceleration = (new_speed - old_speed) / time_interval
+        acceleration = (new_speed - old_speed) / max(time_interval, 0.01)
         
         # Apply low pass filter to smooth the acceleration output
-        alpha = 0.3  # Filter coefficient (0 = no filtering, 1 = no smoothing)
+        alpha = 0.5  # Filter coefficient (0 = no filtering, 1 = no smoothing)
         filtered_acceleration = alpha * acceleration + (1 - alpha) * self.vehicle_acceleration_filtered[vehicle_id]
         self.vehicle_acceleration_filtered[vehicle_id] = filtered_acceleration
         
