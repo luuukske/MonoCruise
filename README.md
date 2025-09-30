@@ -1,12 +1,15 @@
-# MonoCruise ETS2
-MonoCruise is a python program that acts like a One-Pedal-Drive (OPD) system for Euro Truck Simulator 2. If you release the gas pedal, the truck will slowly brake. This makes traffic easier to drive in, especially in TruckersMP.
+# MonoCruise
+MonoCruise is a third-party software that sits in between ETS2/ATS and your pedals. 
+MonoCruise has a ton of quality of life features, like a better Adaptive Cruise Controll or a One-Pedal Driving system for heavy traffic.
+every feature (including the ACC) works in TruckersMP and singleplayer ETS2/ATS.
 
 ![image_2025-07-02_202137925](https://github.com/user-attachments/assets/0b35aa19-340f-44a9-8e8b-0493c9cd30ca)
 
 ### features
 This also includes quality of life features like:
-- a better cruise control system
 - smoother Adaptive Cruise Control (releases with v1.0.1)
+- better Cruise Control
+- One-Pedal driving system
 - live braking and accelerating bar on the bottom of the screen
 - automatically horn when braking hard
 - auto enable hazard lights when braking for traffic
