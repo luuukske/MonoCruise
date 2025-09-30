@@ -1,4 +1,7 @@
 # MonoCruise
+[![Download MonoCruise](https://img.shields.io/sourceforge/dw/monocruise.svg)](https://sourceforge.net/projects/monocruise/files/latest/download)
+[![Download MonoCruise](https://img.shields.io/sourceforge/dt/monocruise.svg)](https://sourceforge.net/projects/monocruise/files/latest/download)
+
 MonoCruise is a third-party software that sits in between ETS2/ATS and your pedals. 
 MonoCruise has a ton of quality of life features, like a better Adaptive Cruise Controll or a One-Pedal Driving system for heavy traffic.
 every feature (including the ACC) works in TruckersMP and singleplayer ETS2/ATS.
