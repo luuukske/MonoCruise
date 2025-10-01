@@ -63,3 +63,15 @@ you can enable the experemental ACC and it will hold a safe distance from the le
 
 ## .py install
 Not supported yet, but you can try it.
+
+## uses:
+This project is licensed under the MIT License.
+It includes third-party code under the CC0-1.0, MIT, and BSD 3-Clause licenses.
+
+See THIRD_PARTY_LICENSES for details.
+- [ETS2LA plugin](https://gitlab.com/ETS2LA/ets2la_plugin): used for getting ai/MP vehicles data for Adaptive Cruise Control.
+- [Truck_Telemetry](https://github.com/dreagonmon/truck_telemetry): used to get data from the game. 
+- [scscontroller](https://github.com/ETS2LA/scs-sdk-controller/tree/main): used to send commands to the game like braking, gas, hazards, etc..
+- [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter): used as a modern UI for Python.
+- [pygame](https://github.com/pygame/pygame): used to get pedal values and to play sounds.
+
