@@ -632,7 +632,8 @@ class ETS2Radar:
         yaw_rad: float,
         ego_steer: float = 0.0,
         ego_speed: float = 0.0,
-        data: Optional[Dict[str, Any]] = None
+        data: Optional[Dict[str, Any]] = None,
+        cc_app=None
     ) -> List[Any]:
         try:
             _, _, win_w, win_h = cv2.getWindowImageRect("ETS2 Radar")
@@ -804,11 +805,11 @@ class ETS2Radar:
             poly = main_vehicle['polygon']
             distance = main_vehicle['distance']
             dx, dz = main_vehicle['centroid'].x, main_vehicle['centroid'].y
-            overall_closest_distance = distance-main_vehicle['vehicle'].size.length/2
+            overall_closest_distance = distance#-main_vehicle['vehicle'].size.length/2
             for trailer_data in main_vehicle['trailers']:
-                trailer_distance = trailer_data['distance']-trailer_data['trailer'].size.length/2
+                trailer_distance = trailer_data['distance']#-trailer_data['trailer'].size.length/2
                 if trailer_distance < overall_closest_distance:
-                    overall_closest_distance = trailer_distance
+                    overall_closest_distance = trailer_distance + 3
                 
             distance_amp = max((1/(overall_closest_distance*0.02)) - overall_closest_distance*0.01 + 0.6, 0)
             
@@ -840,20 +841,6 @@ class ETS2Radar:
                     forward_x = front_center_x - rear_center_x
                     forward_z = front_center_z - rear_center_z
                     forward_length = np.sqrt(forward_x**2 + forward_z**2)
-                    if forward_length > 0 and False: #disable synthetic history because of false detections
-                        forward_x /= forward_length
-                        forward_z /= forward_length
-                        synthetic_hist = []
-                        rear_x = rear_center_x
-                        rear_z = rear_center_z
-                        for i in range(10):
-                            back_distance = i * 5
-                            hist_x = rear_x - forward_x * back_distance
-                            hist_z = rear_z - forward_z * back_distance
-                            synthetic_hist.insert(0, (hist_x, hist_z))
-                        synthetic_hist.append((rear_x, rear_z))
-                        synthetic_hist.append((cx, cz))
-                        hist = synthetic_hist
                 if hist:
                     offset, angle = self.draw_fitted_arc(img, hist, px, pz, yaw_rad, center, scale,
                                                 arc_length=150, color=(0,80,80), reverse=True, ego_steer=ego_steer)
@@ -891,7 +878,7 @@ class ETS2Radar:
                 self.vehicle_scores[vid] = score_val
 
             if self.is_in_front_cone(dx, dz) and score_val > 0:
-                in_lane_vehicles.append((v, overall_closest_distance - 3, acceleration))
+                in_lane_vehicles.append((v, overall_closest_distance - 4.5, acceleration))
 
             # Draw vehicle
             if self.is_in_front_cone(dx, dz):
@@ -929,6 +916,16 @@ class ETS2Radar:
             speed_raw = getattr(v, 'speed', 0)
             speed_kmh = speed_raw * 3.6
             result.append((v.id, dist, speed_kmh, accel))
+        try:
+            if len(getattr(in_lane_vehicles[0][0], 'trailers', [])) > 0:
+                if cc_app is not None:
+                    cc_app.update(acc_truck=True)
+            else:
+                if cc_app is not None:
+                    cc_app.update(acc_truck=False)
+        except:
+            if cc_app is not None:
+                cc_app.update(acc_truck=False)
 
         if self.show_window:
             cv2.imshow("ETS2 Radar", img)
@@ -939,6 +936,7 @@ class ETS2Radar:
         """
         Calculate vehicle acceleration using the vehicle's reported speed data.
         Returns acceleration in m/s².
+        Filters out suspicious acceleration jumps >20 m/s² by waiting 0.2s to confirm.
         """
 
         now = time.time()
@@ -946,10 +944,22 @@ class ETS2Radar:
         self.prev_dt_frame = dt_frame
         self.last_timestamp = now
 
-        # Initialize speed history if not exists
+        # Initialize tracking dictionaries if not exists
         if not hasattr(self, 'vehicle_speed_history') or not hasattr(self, 'vehicle_acceleration_filtered'):
             self.vehicle_speed_history = {}
             self.vehicle_acceleration_filtered = {}
+            self.vehicle_last_valid_acceleration = {}
+            self.vehicle_suspicious_accel_timestamp = {}
+            self.vehicle_pending_acceleration = {}
+        
+        if not hasattr(self, 'vehicle_last_valid_acceleration'):
+            self.vehicle_last_valid_acceleration = {}
+        
+        if not hasattr(self, 'vehicle_suspicious_accel_timestamp'):
+            self.vehicle_suspicious_accel_timestamp = {}
+        
+        if not hasattr(self, 'vehicle_pending_acceleration'):
+            self.vehicle_pending_acceleration = {}
         
         if vehicle_id not in self.vehicle_speed_history:
             self.vehicle_speed_history[vehicle_id] = collections.deque(maxlen=10)
@@ -975,15 +985,54 @@ class ETS2Radar:
         
         time_interval = (len(speeds) - 1) * dt_frame  # Time between first and last measurement
         
-        # Calculate acceleration
-        acceleration = (new_speed - old_speed) / max(time_interval, 0.01)
+        # Calculate raw acceleration
+        raw_acceleration = (new_speed - old_speed) / max(time_interval, 0.01)
+        
+        # Filter out suspicious acceleration changes: if acceleration changes by >20 m/s² in one loop,
+        # wait 0.2s before accepting the new acceleration value
+        filtered_acceleration = raw_acceleration
+        
+        # Check if we have a previous valid acceleration to compare against
+        if vehicle_id in self.vehicle_last_valid_acceleration:
+            last_valid_accel = self.vehicle_last_valid_acceleration[vehicle_id]
+            
+            # Calculate the change in acceleration
+            accel_change = abs(raw_acceleration - last_valid_accel)
+            
+            if accel_change > 20.0:  # m/s² - suspicious change detected
+                # Track when suspicious acceleration was first detected
+                if vehicle_id not in self.vehicle_suspicious_accel_timestamp:
+                    self.vehicle_suspicious_accel_timestamp[vehicle_id] = now
+                    self.vehicle_pending_acceleration[vehicle_id] = raw_acceleration
+                
+                # Check if 0.2s has passed since first suspicious detection
+                time_since_suspicious = now - self.vehicle_suspicious_accel_timestamp[vehicle_id]
+                
+                if time_since_suspicious < 0.2:
+                    # Use last valid acceleration instead of the suspicious one
+                    filtered_acceleration = last_valid_accel
+                else:
+                    # 0.2s has passed, accept the new acceleration
+                    self.vehicle_last_valid_acceleration[vehicle_id] = raw_acceleration
+                    del self.vehicle_suspicious_accel_timestamp[vehicle_id]
+                    del self.vehicle_pending_acceleration[vehicle_id]
+            else:
+                # Normal acceleration change, update last valid and clear suspicious flag
+                self.vehicle_last_valid_acceleration[vehicle_id] = raw_acceleration
+                if vehicle_id in self.vehicle_suspicious_accel_timestamp:
+                    del self.vehicle_suspicious_accel_timestamp[vehicle_id]
+                if vehicle_id in self.vehicle_pending_acceleration:
+                    del self.vehicle_pending_acceleration[vehicle_id]
+        else:
+            # First time seeing this vehicle, set initial acceleration
+            self.vehicle_last_valid_acceleration[vehicle_id] = raw_acceleration
         
         # Apply low pass filter to smooth the acceleration output
         alpha = 0.5  # Filter coefficient (0 = no filtering, 1 = no smoothing)
-        filtered_acceleration = alpha * acceleration + (1 - alpha) * self.vehicle_acceleration_filtered[vehicle_id]
-        self.vehicle_acceleration_filtered[vehicle_id] = filtered_acceleration
+        smoothed_acceleration = alpha * filtered_acceleration + (1 - alpha) * self.vehicle_acceleration_filtered[vehicle_id]
+        self.vehicle_acceleration_filtered[vehicle_id] = smoothed_acceleration
         
-        return filtered_acceleration
+        return smoothed_acceleration
     
 
 
@@ -1196,7 +1245,7 @@ class ETS2Radar:
             self.ego_trajectory.append(position)
             self.ego_last_saved_position = position
 
-    def update(self, data=None):
+    def update(self, data=None, cc_app=None):
         """
         Update radar data and return closest 3 in-lane vehicles.
         This is the main loop for updating vehicle histories and in-lane status.
@@ -1231,7 +1280,7 @@ class ETS2Radar:
                 self.vehicle_speeds[vid] = getattr(v, 'speed', 0)
 
         # Main detection and visualization
-        in_lane_vehicles = self.draw_radar(vehicles, px, pz, yawr, ego_steer, speed, data)
+        in_lane_vehicles = self.draw_radar(vehicles, px, pz, yawr, ego_steer, speed, data, cc_app)
         return in_lane_vehicles
 
     def run(self):

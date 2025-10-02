@@ -1,13 +1,14 @@
 import threading
 import customtkinter as ctk
 import tkinter as tk
-from tkinter import messagebox
-version = "v1.0.1"
+from tkinter import mainloop, messagebox
+version = "v1.0.2"
 
 # temporary for radar output
 import cv2
-
+from math import sqrt, inf
 from PIL import Image, ImageDraw, ImageFont, ImageTk
+from typing import Tuple, List
 import sys
 import ctypes
 import os
@@ -30,8 +31,22 @@ from ETS2radar.ETS2radar import ETS2Radar
 
 import pymsgbox
 
-# Create the main window
+
+# CRITICAL: Set DPI awareness BEFORE creating any windows
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    scaling = ctypes.windll.user32.GetDpiForSystem() / 96.0 *2
+except Exception as e:
+    scaling = 1
+    print(f"DPI awareness setup failed: {e}")
+
+# Create the main window (AFTER DPI awareness is set)
 root = ctk.CTk()
+# Apply scaling factor to all tkinter widgets
+try:
+    root.tk.call('tk', 'scaling', scaling)
+except:
+    pass
 root.withdraw()
 
 from connect_SDK import check_and_install_scs_sdk, check_scs_sdk, update_sdk_dlls
@@ -64,14 +79,6 @@ except:
             sys.exit()
 
 root.withdraw()
-
-# Get system DPI scaling
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    scaling = ctypes.windll.user32.GetDpiForSystem() / 96.0
-except Exception as e:
-    scaling = 1
-    print(e)
 
 # Configure default font
 try:
@@ -1450,7 +1457,7 @@ def refresh_button_detection():
             cc_start_label.configure(border_color=SETTINGS_COLOR)
 
 class cc_panel:
-    def __init__(self, text_content: str, cc_mode: str = "Cruise control", cc_enabled: bool = True, x_co = 100, y_co = 100):
+    def __init__(self, text_content: str, cc_mode: str = "Cruise control", cc_enabled: bool = True, x_co = 100, y_co = 100, acc_enabled: bool = False):
         """
         Initialize the cruise control display panel.
         
@@ -1459,7 +1466,7 @@ class cc_panel:
             cc_mode: Cruise control mode ("Speed limiter" or "Cruise control")
             cc_enabled: Whether the cruise control system is enabled
         """
-        self.scale_mult = 1.2
+        self.scale_mult = 0.6 * scaling
         self.start_x = x_co
         self.start_y = y_co
         self.panel_x = int(300 * self.scale_mult)
@@ -1473,6 +1480,11 @@ class cc_panel:
         self.text_content = text_content
         self.icon_spacing = int(20 * self.scale_mult)
         self.opacity = 0.6
+        self.blinker_t_off = 0.1
+        self.blinker_t_on = 0.15
+        self.time_after_AEB_warn = 2
+        self.acc_enabled = acc_enabled
+        self.acc_truck = False
         
         self.gui_thread = None
         self.root1 = None
@@ -1481,6 +1493,20 @@ class cc_panel:
         
         self.tk_img1 = None
         self.tk_img2 = None
+
+        self.distance_to_lead = 2
+        self.acc_locked = False
+        self.AEB_warn = False
+        self.last_AEB_warn_true = 0  # Last time AEB_warn was True
+        self.AEB_warn_off_time = 0   # Time when AEB_warn transitioned to False
+        self.last_acc_lock = 0
+        
+        # Blinking thread variables
+        self.blink_thread = None
+        self.blink_running = False
+        self.hide_icon = False
+        self.blink_lock = threading.Lock()  # Thread safety for blinking state
+        self._update_in_progress = False  # Prevent recursive updates
 
         # Cache expensive operations
         self.font = self._load_font()
@@ -1509,6 +1535,77 @@ class cc_panel:
         self.gui_thread = threading.Thread(target=self._show_images, daemon=True)
         self.gui_thread.start()
 
+    def _blink_thread(self):
+        """Thread that handles the blinking effect for AEB warnings - runs independently"""
+        try:
+            while self.running and self.blink_running:
+                # Check if we should continue blinking
+                with self.blink_lock:
+                    current_time = time.time()
+                    
+                    # Check if blinking should continue
+                    if self.AEB_warn:
+                        AEB_warn_active = True
+                    elif self.AEB_warn_off_time > 0:
+                        time_since_off = current_time - self.AEB_warn_off_time
+                        AEB_warn_active = time_since_off < self.time_after_AEB_warn
+                    else:
+                        AEB_warn_active = False
+                    
+                    if not AEB_warn_active:
+                        # Time to stop blinking - ensure icon is visible
+                        self.hide_icon = False
+                        self.blink_running = False
+                        break
+                
+                # Toggle the icon visibility
+                with self.blink_lock:
+                    self.hide_icon = not self.hide_icon
+                    hide_state = self.hide_icon
+                
+                # Render with current hide state
+                self._render_and_update()
+                
+                # Sleep based on current state
+                if hide_state:
+                    time.sleep(self.blinker_t_off)  # Icon hidden - shorter delay
+                else:
+                    time.sleep(self.blinker_t_on)  # Icon visible - longer delay
+        finally:
+            # Ensure clean state when thread exits
+            with self.blink_lock:
+                self.blink_running = False
+                self.hide_icon = False
+            # Final render to show icon properly
+            self.update(complete_update=True)
+
+    def _start_blinking(self):
+        """Start the blinking thread if not already running"""
+        with self.blink_lock:
+            if not self.blink_running:
+                self.blink_running = True
+                self.hide_icon = False
+                self.blink_thread = threading.Thread(target=self._blink_thread, daemon=True, name="CC_panelBlinking Thread")
+                self.blink_thread.start()
+
+    def _stop_blinking(self):
+        """Stop the blinking thread gracefully"""
+        # Signal the thread to stop - it will handle cleanup itself
+        with self.blink_lock:
+            if self.blink_running:
+                self.blink_running = False
+    
+    def _render_and_update(self):
+        """Internal method to render images and update GUI (used by blink thread)"""
+        # This is called by the blink thread, so we need to be careful about state
+        # Don't recalculate everything, just re-render with current hide_icon state
+        try:
+            self.img1, self.img2 = self._create_images()
+            if self.root1 and self.root2:
+                self.root1.after(0, self._update_gui_images)
+        except Exception as e:
+            print(f"Error in _render_and_update: {e}")
+
     def show(self):
         """Show both windows (deiconify)."""
         if self.root1 and self.root2:
@@ -1525,15 +1622,15 @@ class cc_panel:
         """Stop the GUI and close all windows."""
         self.running = False
         
+        # Stop the blinking thread if it's running
+        self._stop_blinking()
+        
         def close_window(root):
-            try:
-                if root and root.winfo_exists():
-                    try:
-                        root.after(0, root.quit)
-                    except:
-                        pass
-            except:
-                pass
+            if root and root.winfo_exists():
+                try:
+                    root.after(0, root.quit)
+                except:
+                    pass
         
         close_window(self.root1)
         close_window(self.root2)
@@ -1544,35 +1641,133 @@ class cc_panel:
             self.root1.geometry(f"+{x}+{y}")
             self.root2.geometry(f"+{x}+{y}")
 
-    def update(self, new_text, cc_mode: str = None, cc_enabled: bool = None):
-        """Update the display with new information."""
-        needs_icon_reload = cc_mode is not None and cc_mode != self.cc_mode
-        needs_color_update = cc_enabled is not None and cc_enabled != self.cc_enabled
-        needs_text_update = new_text != self.text_content
+    def update(self, new_text: str = None, cc_mode: str = None, cc_enabled: bool = None,
+              acc_locked: bool = None, distance_to_lead: int = None, AEB_warn: bool = None,
+              complete_update: bool = False, acc_enabled: bool = None, acc_truck: bool = None):
+        """Update the display with new information.
         
-        # Only update what actually changed
-        if not (needs_icon_reload or needs_color_update or needs_text_update):
+        Args:
+            new_text: The new text to display
+            cc_mode: The new cruise control mode
+            cc_enabled: Whether the cruise control is enabled
+            acc_locked: Whether the Adaptive Cruise Control is locked
+            distance_to_lead: The distance lines to show under the vehicle
+            AEB_warn: Whether the AEB warning is active
+            complete_update: Whether to update all the information
+            acc_enabled: Whether the Adaptive Cruise Control is enabled
+            acc_truck: Whether a truck is being tracked
+        """
+        # Prevent recursive/concurrent updates
+        if self._update_in_progress:
             return
+        
+        try:
+            self._update_in_progress = True
             
-        self.text_content = new_text
-        
-        if needs_icon_reload:
+            if new_text is None:
+                new_text = self.text_content
+            if cc_mode is None:
+                cc_mode = self.cc_mode
+            if cc_enabled is None:
+                cc_enabled = self.cc_enabled
+            if acc_locked is None:
+                acc_locked = self.acc_locked
+            if distance_to_lead is None:
+                distance_to_lead = self.distance_to_lead
+            if AEB_warn is None:
+                AEB_warn = self.AEB_warn
+            if acc_enabled is None:
+                acc_enabled = self.acc_enabled
+            if acc_truck is None:
+                acc_truck = self.acc_truck
+
+            needs_icon_reload = (
+                cc_mode != self.cc_mode
+                or AEB_warn != self.AEB_warn
+                or acc_locked != self.acc_locked
+                or acc_enabled != self.acc_enabled
+                or acc_truck != self.acc_truck
+                or (self.acc_locked and distance_to_lead != self.distance_to_lead)
+                or complete_update
+            )
+
+            needs_color_update = (
+                cc_enabled != self.cc_enabled
+                or AEB_warn != self.AEB_warn
+                or complete_update
+            )
+
+            needs_text_update = (
+                new_text != self.text_content
+                or complete_update
+            )
+            
+            # Early return if nothing changed
+            if not (needs_icon_reload or needs_color_update or needs_text_update):
+                return
+            
+            # Update state variables
             self.cc_mode = cc_mode
-            self.icon = self._load_icon()
-        
-        if needs_color_update:
             self.cc_enabled = cc_enabled
-        
-        if needs_color_update or needs_icon_reload:
-            self.text_color = self._get_color_for_mode(self.cc_mode, self.cc_enabled)
-        
-        if needs_text_update or needs_icon_reload:
-            self.text_position, self.icon_position = self._calculate_positions()
-        
-        self.img1, self.img2 = self._create_images()
-        
-        if self.root1 and self.root2:
-            self.root1.after(0, self._update_gui_images)
+            self.acc_locked = acc_locked
+            self.distance_to_lead = distance_to_lead
+            self.text_content = new_text
+            self.acc_enabled = acc_enabled
+            self.acc_truck = acc_truck
+            
+            # Thread-safe update of AEB state
+            with self.blink_lock:
+                old_AEB_warn = self.AEB_warn
+                self.AEB_warn = AEB_warn
+                current_time = time.time()
+                
+                # Track AEB_warn transitions
+                if AEB_warn:
+                    # AEB_warn is currently True
+                    self.last_AEB_warn_true = current_time
+                    # Reset the off time since we're back to True
+                    self.AEB_warn_off_time = 0
+                elif old_AEB_warn and not AEB_warn:
+                    # AEB_warn just transitioned from True to False
+                    self.AEB_warn_off_time = current_time
+                
+                # Check if blinking should be active
+                # Blink if: AEB_warn is True OR (AEB_warn recently turned off and still within cooldown)
+                if self.AEB_warn:
+                    AEB_warn_active = True
+                elif self.AEB_warn_off_time > 0:
+                    time_since_off = current_time - self.AEB_warn_off_time
+                    AEB_warn_active = time_since_off < self.time_after_AEB_warn
+                else:
+                    AEB_warn_active = False
+                
+                # Start blinking if needed (immediate response)
+                if AEB_warn_active and not self.blink_running:
+                    self.blink_running = True
+                    self.hide_icon = False
+                    self.blink_thread = threading.Thread(target=self._blink_thread, daemon=True, name="CC_panelBlinking Thread")
+                    self.blink_thread.start()
+                # Note: Don't stop blinking from here - let the blink thread handle its own stopping
+                # based on the cooldown timer. This prevents race conditions and ensures smooth operation.
+            
+            # Only do expensive recalculations if needed
+            if needs_icon_reload:
+                self.icon = self._load_icon()
+            
+            if needs_color_update or needs_icon_reload:
+                self.text_color = self._get_color_for_mode(self.cc_mode, self.cc_enabled)
+            
+            if needs_text_update or needs_icon_reload:
+                self.text_position, self.icon_position = self._calculate_positions()
+            
+            # Render and update GUI
+            self.img1, self.img2 = self._create_images()
+            
+            if self.root1 and self.root2:
+                self.root1.after(0, self._update_gui_images)
+                
+        finally:
+            self._update_in_progress = False
 
     def _update_gui_images(self):
         """Update the GUI images (must be called from main thread)"""
@@ -1593,8 +1788,6 @@ class cc_panel:
             
             self.root1.winfo_children()[0].configure(image=self.tk_img1)
             self.root2.winfo_children()[0].configure(image=self.tk_img2)
-            self.root1.lift()
-            self.root2.lift()
         except Exception as e:
             print(f"Error updating GUI images: {e}")
 
@@ -1608,14 +1801,32 @@ class cc_panel:
 
     def _load_icon(self):
         """Load and resize the cruise control icon based on current mode (with caching)"""
-        # Create cache key
-        cache_key = (self.cc_mode, self.text_content, self.scale_mult)
+        # Determine which icon to use
+        is_aeb_warning = self.blink_running or self.AEB_warn
+        
+        # Create cache key - include AEB warning state and distance_to_lead
+        cache_key = (self.cc_mode, self.text_content, self.scale_mult, is_aeb_warning, self.acc_locked, self.distance_to_lead, self.acc_enabled, self.acc_truck)
         if cache_key in self._icon_cache:
             return self._icon_cache[cache_key]
             
         try:
-            icon_file = "speed limiter.png" if self.cc_mode == "Speed limiter" else "cruise control.png"
-            icon = Image.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), icon_file))
+            if is_aeb_warning or (self.acc_locked and not self.acc_truck and self.cc_mode == "Cruise control" and self.acc_enabled):
+                icon_file = "car1.png"
+            elif self.acc_locked and self.acc_truck and self.cc_mode == "Cruise control" and self.acc_enabled:
+                icon_file = "truck1.png"
+            #elif self.acc_enabled and self.cc_mode == "Cruise control" and not self.acc_locked:
+            #    icon_file = None  # blank icon case (acc_enabled but not acc_locked)
+            elif self.cc_mode == "Speed limiter" :
+                icon_file = "speed limiter.png"
+            elif self.cc_mode == "Cruise control":
+                icon_file = "cruise control.png"
+            else:
+                raise ValueError("Invalid state for icon selection")
+            if icon_file is not None:
+                icon = Image.open(icon_file)
+            else:
+                # Create a blank/transparent icon - size will be determined later
+                icon = None
             
             # Calculate icon size
             temp_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
@@ -1623,7 +1834,66 @@ class cc_panel:
             text_height = bbox[3] - bbox[1]
             icon_size = int(text_height * 2)
             
-            icon = icon.resize((icon_size, icon_size), Image.Resampling.LANCZOS)
+            # If acc_locked, add distance lines underneath the icon
+            if self.acc_enabled and self.cc_mode == "Cruise control" and not self.AEB_warn and self.acc_locked:
+                # Clamp distance_to_lead between 1 and 3
+                num_lines = max(1, min(3, self.distance_to_lead))
+                
+                # Line parameters
+                line_width = int(4 * self.scale_mult)
+                line_spacing = int(3 * self.scale_mult)
+                
+                # Calculate total height needed for lines
+                lines_height = num_lines * line_width + (num_lines - 1) * line_spacing
+                spacing_between_icon_and_lines = line_spacing
+                
+                # Calculate scaled icon height to fit everything in icon_size
+                scaled_icon_height = icon_size - lines_height - spacing_between_icon_and_lines - int((3+7*(not self.acc_truck))*self.scale_mult)
+                if scaled_icon_height % 2 == icon_size % 2:
+                    scaled_icon_height += 1  # Ensure scaled_icon_height can be placed in the middle of the icon
+                
+                # Resize the original icon to the scaled size
+                if icon is not None:
+                    icon = icon.resize((scaled_icon_height, scaled_icon_height), Image.Resampling.LANCZOS)
+                else:
+                    # Create a blank transparent icon
+                    icon = Image.new("RGBA", (scaled_icon_height, scaled_icon_height), (0, 0, 0, 0))
+                
+                # Create a new image to hold icon + lines
+                composite = Image.new("RGBA", (icon_size, icon_size), (0, 0, 0, 255))
+                
+                # Calculate where the lines start
+                lines_start_y = icon_size - lines_height - 1
+                
+                # Position the icon so its center is in the middle between the top (0) and the topmost line
+                # Center should be at: lines_start_y / 2
+                # Top of icon should be at: (lines_start_y / 2) - (scaled_icon_height / 2)
+                icon_center_y = lines_start_y / 2 
+                icon_y_offset = int(icon_center_y - (scaled_icon_height / 2)) + int((1.5+8*(not self.acc_truck))*self.scale_mult)
+                
+                # Paste the scaled icon centered horizontally and positioned vertically
+                icon_x_offset = (icon_size - scaled_icon_height) // 2
+                composite.paste(icon, (icon_x_offset, icon_y_offset), icon if icon.mode == 'RGBA' else None)
+                
+                # Draw the lines underneath
+                draw = ImageDraw.Draw(composite)
+                
+                for i in range(num_lines):
+                    line_y = lines_start_y + i * (line_width + line_spacing)
+                    # Draw white line centered horizontally
+                    line_x_start = -2*(i-num_lines)*self.scale_mult
+                    line_x_end = icon_size + 2*(i-num_lines)*self.scale_mult-1
+                    draw.rounded_rectangle(
+                        [line_x_start, line_y+1, line_x_end, line_y + line_width],
+                        radius=line_width / 2,
+                        fill=(255, 255, 255, 255)
+                    )
+                
+                icon = composite
+
+                icon.save("test_icon.png")
+            else:
+                icon = icon.resize((icon_size, icon_size), Image.Resampling.LANCZOS)
             
         except (IOError, FileNotFoundError):
             # Create simple placeholder
@@ -1631,7 +1901,7 @@ class cc_panel:
             icon = Image.new("RGBA", (icon_size, icon_size), (255, 255, 255, 255))
             draw = ImageDraw.Draw(icon)
             draw.ellipse([10, 10, icon_size-10, icon_size-10], outline=(0, 0, 0), width=3)
-            draw.text((icon_size//2-5, icon_size//2-10), "CC", fill=(0, 0, 0))
+            draw.text((icon_size//2-5, icon_size//2-10), "err", fill=(0, 0, 0))
         
         # Cache the result
         self._icon_cache[cache_key] = icon
@@ -1639,7 +1909,7 @@ class cc_panel:
 
     def _calculate_positions(self):
         """Calculate positions for both text and icon (with caching)"""
-        cache_key = (self.text_content, self.cc_mode, self.scale_mult)
+        cache_key = (self.text_content, self.cc_mode, self.scale_mult, self.blink_running, self.acc_enabled)
         if cache_key in self._position_cache:
             return self._position_cache[cache_key]
             
@@ -1657,7 +1927,7 @@ class cc_panel:
         # Calculate positions
         right_margin = int(20 * self.scale_mult)
         icon_x = self.panel_x - icon_w - right_margin
-        icon_y = (self.panel_y - icon_h) // 2
+        icon_y = (self.panel_y - icon_h) // 2 - 2 - int(6*(not self.blink_running and self.acc_enabled)*self.scale_mult)
         text_x = icon_x - self.icon_spacing - text_w - text_bbox[0]
         text_y = (self.panel_y - text_h) // 2 - text_bbox[1]
         
@@ -1692,6 +1962,10 @@ class cc_panel:
 
     def _create_images(self):
         """Create the display images with optimizations"""
+        # Capture hide_icon state at the start to avoid race conditions
+        with self.blink_lock:
+            hide_icon = self.hide_icon
+        
         # Create base image once
         base_shape = Image.new("RGB", (self.panel_x, self.panel_y), self.bg_color)
         draw_base = ImageDraw.Draw(base_shape)
@@ -1701,6 +1975,25 @@ class cc_panel:
             fill=self.fg_color,
             outline="black",
         )
+
+        # Determine icon color based on AEB warning status
+        current_time = time.time()
+        if self.AEB_warn:
+            AEB_warn_active = True
+        elif self.AEB_warn_off_time > 0:
+            time_since_off = current_time - self.AEB_warn_off_time
+            AEB_warn_active = time_since_off < self.time_after_AEB_warn
+        else:
+            AEB_warn_active = False
+            
+        if AEB_warn_active:
+            icon_color = "#FF0000"
+        else:
+            icon_color = self.text_color
+        
+        # Prepare icon with potential scaling if acc_locked is active
+        icon_to_use = self.icon
+        icon_position_to_use = self.icon_position
         
         # Image 1
         img1 = base_shape.copy()
@@ -1708,19 +2001,44 @@ class cc_panel:
         draw1.text(self.text_position, self.text_content, font=self.font, fill=self.text_color)
         
         # Optimize icon pasting
-        colored_icon = self._multiply_text_color_numpy(self.icon, self.text_color, self.bg_color)
-        img1.paste(colored_icon, self.icon_position, 
-                  self.icon if self.icon.mode == 'RGBA' else None)
+        if not hide_icon:
+            colored_icon = self._multiply_text_color_numpy(icon_to_use, icon_color, self.bg_color)
+            img1.paste(colored_icon, icon_position_to_use, 
+                      icon_to_use if icon_to_use.mode == 'RGBA' else None)
 
         # Image 2 - optimized with numpy operations
-        img2 = Image.new("RGB", (self.panel_x, self.panel_y), self.bg_color)
-        draw2 = ImageDraw.Draw(img2)
-        draw2.text(self.text_position, self.text_content, font=self.font, fill="white")
-        img2.paste(self.icon, self.icon_position, 
-                  self.icon if self.icon.mode == 'RGBA' else None)
+        # Process text separately
+        text_img = Image.new("RGB", (self.panel_x, self.panel_y), self.bg_color)
+        draw_text = ImageDraw.Draw(text_img)
+        draw_text.text(self.text_position, self.text_content, font=self.font, fill="white")
+        text_img = self._remove_anti_aliasing_numpy(text_img, threshold=234)
+        text_img = self._multiply_text_color_numpy(text_img, self.text_color, self.bg_color)
         
-        img2 = self._remove_anti_aliasing_numpy(img2, threshold=234)
-        img2 = self._multiply_text_color_numpy(img2, self.text_color, self.bg_color)
+        # Process icon separately
+        if not hide_icon:
+            icon_img = Image.new("RGB", (self.panel_x, self.panel_y), self.bg_color)
+            icon_img.paste(icon_to_use, icon_position_to_use, 
+                          icon_to_use if icon_to_use.mode == 'RGBA' else None)
+            icon_img = self._remove_anti_aliasing_numpy(icon_img, threshold=234)
+            icon_img = self._multiply_text_color_numpy(icon_img, icon_color, self.bg_color)
+        
+        # Combine text and icon onto final image
+        img2 = Image.new("RGB", (self.panel_x, self.panel_y), self.bg_color)
+        
+        # Paste text (create mask from text_img where it's not background)
+        text_array = np.array(text_img)
+        bg_array = np.array(self._bg_rgb)
+        text_mask = ~np.all(text_array == bg_array, axis=2)
+        img2_array = np.array(img2)
+        img2_array[text_mask] = text_array[text_mask]
+        
+        # Paste icon (create mask from icon_img where it's not background)
+        if not hide_icon:
+            icon_array = np.array(icon_img)
+            icon_mask = ~np.all(icon_array == bg_array, axis=2)
+            img2_array[icon_mask] = icon_array[icon_mask]
+        
+        img2 = Image.fromarray(img2_array)
 
         return img1, img2
 
@@ -1795,7 +2113,7 @@ class cc_panel:
             label1.pack(padx=0, pady=0)
 
             # Create second window
-            root2 = tk.Toplevel(root1)
+            root2 = tk.Toplevel()
             self._setup_window(root2)
             
             tk_img2 = ImageTk.PhotoImage(self.img2, master=root2)
@@ -1818,9 +2136,9 @@ class cc_panel:
 
     def _setup_window(self, window):
         """Common window setup"""
-        window.withdraw()  # Hide the window initially
         window.overrideredirect(True)
         window.attributes("-topmost", True)
+        window.attributes("-toolwindow", True)  # Hide from Alt+Tab and taskbar
         window.attributes("-transparentcolor", self.bg_color)
         window.configure(bg=self.bg_color)
         
@@ -1857,9 +2175,9 @@ def change_target_speed(increments, app=None):
         target_speed = 130
     if app is not None:
         if target_speed is not None:
-            app.update(f"{int(target_speed)} km/h", cc_mode.get(), True)
+            cc_app.update(f"{int(target_speed)} km/h", cc_mode=cc_mode.get(), cc_enabled=True)
         else:
-            app.update("-- km/h", cc_mode.get(), True)
+            cc_app.update("-- km/h", cc_mode=cc_mode.get(), cc_enabled=True)
 
 def main_cruise_control():
     global exit_event
@@ -1883,6 +2201,7 @@ def main_cruise_control():
     global long_press_reset
     global cc_gas
     global cc_brake
+    global cc_app
 
     cc_target_speed_thread = threading.Thread(target=cc_target_speed_thread_func, daemon=True, name="CC Target Speed Thread")
     time_pressed_dec = None
@@ -1910,8 +2229,8 @@ def main_cruise_control():
     else:
         panel_x = 100
         panel_y = 100
-    app = cc_panel("-- km/h", cc_mode.get(), False, panel_x, panel_y)
-    #app.update(f"-- km/h", cc_mode.get(), False)
+    cc_app = cc_panel(text_content="-- km/h", cc_mode=cc_mode.get(), cc_enabled=False, x_co=panel_x, y_co=panel_y, acc_enabled=acc_enabled.get())
+    #cc_app.update(f"-- km/h", cc_mode.get(), False)
 
 
     while not exit_event.is_set() and not (cc_dec_button is None and cc_inc_button is None and cc_start_button is None):
@@ -1921,7 +2240,7 @@ def main_cruise_control():
                 refresh_button_detection()
 
             if (buttons_thread is not None and buttons_thread.is_alive()) or device_lost or not ets2_detected.is_set() or device is None or not device.get_init():
-                app.hide()
+                cc_app.hide()
                 time.sleep(0.04)
                 continue
             
@@ -1954,7 +2273,7 @@ def main_cruise_control():
                         # long press
                         print("long press on dec")
                         if target_speed != None:
-                            change_target_speed(-long_increment_int, app)
+                            change_target_speed(-long_increment_int, cc_app)
 
             elif time_pressed_dec != None:
                 if not long_press_dec:
@@ -1962,7 +2281,7 @@ def main_cruise_control():
                     # short press
                     print("short press dec")
                     if target_speed != None:
-                        change_target_speed(-short_increment_int, app)
+                        change_target_speed(-short_increment_int, cc_app)
 
                 else:
                     long_press_dec = False
@@ -1982,7 +2301,7 @@ def main_cruise_control():
                         # long press
                         print("long press on inc")
                         if cc_enabled:
-                            change_target_speed(long_increment_int, app)
+                            change_target_speed(long_increment_int, cc_app)
                         elif target_speed is None or (speed > target_speed):
                             target_speed = max(min(int(round(speed)),130), 30)
                         if not cc_enabled:
@@ -1995,7 +2314,7 @@ def main_cruise_control():
                     # short press
                     print("short press inc")
                     if cc_enabled:
-                        change_target_speed(short_increment_int, app)
+                        change_target_speed(short_increment_int, cc_app)
                     elif target_speed is None or speed > target_speed:
                         target_speed = max(min(int(round(speed)),130), 30)
                     if not cc_enabled:
@@ -2021,7 +2340,7 @@ def main_cruise_control():
                         target_speed = max(min(int(round(speed)),130), 30)
                         if not cc_enabled:
                             cc_enabled = True
-                        app.update(f"{int(target_speed)} km/h", cc_mode.get(), True)
+                        cc_app.update(f"{int(target_speed)} km/h", cc_mode=cc_mode.get(), cc_enabled=True)
                     elif not long_press_reset.get():
                         cmd_print("Long press to reset is disabled")
 
@@ -2041,7 +2360,7 @@ def main_cruise_control():
 
                     if target_speed == None:
                         target_speed = max(min(int(round(speed)),130), 30)
-                    app.update(f"{int(target_speed)} km/h", cc_mode.get(), cc_enabled)
+                    cc_app.update(f"{int(target_speed)} km/h", cc_mode=cc_mode.get(), cc_enabled=cc_enabled)
 
                 else:
                     long_press_start = False
@@ -2053,7 +2372,7 @@ def main_cruise_control():
                         cc_enabled = False
                         cc_gas = 0
                         cc_brake = 0
-                        app.update(f"{int(target_speed)} km/h", cc_mode.get(), cc_enabled)
+                        cc_app.update(f"{int(target_speed)} km/h", cc_mode=cc_mode.get(), cc_enabled=cc_enabled)
                         cmd_print("Cruise control disabled due to brake input")
 
             if target_speed is not None:
@@ -2065,35 +2384,35 @@ def main_cruise_control():
             if not exit_event.is_set():
                 try:
                     if show_cc_ui.get() and ets2_detected.is_set() and all_buttons_assigned:
-                        if not app.root1.winfo_viewable() and not app.root2.winfo_viewable():
-                            app.show()
+                        if not cc_app.root1.winfo_viewable() and not cc_app.root2.winfo_viewable():
+                            cc_app.show()
                     else:
-                        if app.root1.winfo_viewable() and app.root2.winfo_viewable():
-                            app.hide()
+                        if cc_app.root1.winfo_viewable() and cc_app.root2.winfo_viewable():
+                            cc_app.hide()
                 except:
                     pass
 
                 if target_speed is not None:
-                    app.update(f"{int(target_speed)} km/h", cc_mode.get(), cc_enabled)
+                    cc_app.update(f"{int(target_speed)} km/h", cc_mode=cc_mode.get(), cc_enabled=cc_enabled)
                 else:
-                    app.update(f"-- km/h", cc_mode.get(), False)
+                    cc_app.update(f"-- km/h", cc_mode=cc_mode.get(), cc_enabled=False)
             else:
                 try:
-                    app.stop()
+                    cc_app.stop()
                 except:
                     pass
             time.sleep(0.02)
         except Exception as e:
             # close panel
             try:
-                if app is not None and app.running:
-                    app.stop()
+                if cc_app is not None and cc_app.running:
+                    cc_app.stop()
             except:
                 pass
             context = get_error_context()
             log_error(e, context)
             time.sleep(1)
-    app.stop()
+    cc_app.stop()
 
 
 
@@ -2236,8 +2555,8 @@ def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.1, debug=True
 
     # Gains
     K_gap = 0.07 * closeness_amp * (slow_speed_adj/1+1)
-    K_speed = 0.14 * closeness_amp * (slow_speed_adj/3+1)
-    K_acc = 0.20 *acceleration_amp
+    K_speed = 0.16 * closeness_amp * (slow_speed_adj/3+1)
+    K_acc = 0.25 *acceleration_amp
 
     if lead_speed-avg_ego_speed > 5 and gap_error < 2:
         K_gap *= 0.3
@@ -2245,7 +2564,7 @@ def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.1, debug=True
     # Control law (sum of weighted errors)
     acc_raw = K_gap * np.sign(gap_error)*((abs(gap_error)/10)**0.8)*10 + K_speed * speed_error + K_acc * a_lead
     if acc_raw <= 0.5:
-        acc_raw -= slow_speed_adj*0.7
+        acc_raw -= slow_speed_adj*0.9
     else:
         acc_raw /= slow_speed_adj+1
 
@@ -2388,7 +2707,8 @@ class AEBSoundHandler:
         
         # Stop all channels when exiting loop
         for channel in self.channels:
-            channel.stop()
+            if channel.get_busy():
+                channel.stop()
         self.channels.clear()
     
     def is_warning_active(self):
@@ -2409,43 +2729,161 @@ class AEBSoundHandler:
         self.stop_warning()
         pygame.mixer.quit()
 
+import math
+
 def determine_emergency(gap, v_ego, a_ego_max, v_lead, a_lead):
     """
-    gap: current distance to lead vehicle (m)
-    v_ego: ego vehicle speed (m/s)
-    a_ego_max: maximum deceleration of ego vehicle (m/s^2, positive value)
-    v_lead: lead vehicle speed (m/s)
-    a_lead: lead vehicle acceleration (m/s^2), positive = speeding up, negative = braking
+    Determines emergency braking status based on relative dynamics.
+    
+    Args:
+        gap: Distance to lead vehicle (m)
+        v_ego: Ego vehicle velocity (m/s)
+        a_ego_max: Maximum ego deceleration (m/s², should be negative)
+        v_lead: Lead vehicle velocity (m/s)
+        a_lead: Lead vehicle acceleration (m/s²)
+    
+    Returns:
+        tuple: (AEB_brake, AEB_warn, time_to_brake)
     """
-    # Relative speed (closing speed)
-    v_rel = v_ego - v_lead
-
-    # If we're not closing in, no emergency
-    if v_rel <= 0:
-        return False, False
-
-    # Relative acceleration:
-    # Ego decelerates at -a_ego_max, lead accelerates at a_lead
-    # This is the acceleration of ego relative to lead
-    a_rel = -a_ego_max - a_lead
-
-    # Braking distance to match lead vehicle's speed considering lead's acceleration
-    braking_distance = -(v_rel ** 2) / (2 * a_rel)  # a_rel is negative, so result is positive
-
-    # Distance margin before braking is needed
-    distance_margin = gap - braking_distance
-
-    # Time until braking is needed
-    if distance_margin <= 0:
-        time_to_brake = 0
+    
+    # Safety margin (small buffer)
+    SAFETY_MARGIN = 0.5  # meters
+    
+    # Handle edge cases
+    if gap <= 0:
+        return True, True, 0.0
+    
+    if v_ego <= 0:
+        return False, False, float('inf')
+    
+    # Ensure a_ego_max is negative (deceleration)
+    if a_ego_max > 0:
+        a_ego_max = -a_ego_max
+    
+    # Determine if lead vehicle will stop and calculate its stopping distance
+    lead_will_stop = a_lead < 0 and v_lead > 0
+    
+    if lead_will_stop:
+        t_lead_stop = -v_lead / a_lead
+        d_lead_stop = v_lead * t_lead_stop + 0.5 * a_lead * t_lead_stop**2
+        x_lead_final = gap + d_lead_stop
+        
+        # Check if lead vehicle is braking extremely hard (harder than ego's max)
+        # In this case, treat lead's final position as a stationary target
+        if a_lead < a_ego_max * 1.5:  # 1.5x harder braking than ego
+            use_static_target = True
+        else:
+            use_static_target = False
     else:
-        time_to_brake = distance_margin / v_rel
-
-    # Determine warnings
-    AEB_brake = time_to_brake <= 0.1
-    AEB_warn = time_to_brake <= 1.1
-
-    return AEB_brake, AEB_warn
+        use_static_target = False
+        x_lead_final = None
+        t_lead_stop = float('inf')
+    
+    # Function to calculate minimum gap at any future time given coast time
+    def min_gap_after_braking(t_coast):
+        """Calculate minimum gap if ego coasts for t_coast then brakes maximally."""
+        
+        # Positions and velocities at start of braking
+        x_ego_0 = 0  # ego starts at origin
+        v_ego_0 = v_ego
+        
+        if use_static_target:
+            # Lead vehicle stops, use final position
+            x_lead_0 = x_lead_final
+            v_lead_0 = 0
+            a_lead_effective = 0
+        else:
+            # Lead continues with acceleration
+            x_lead_0 = gap + v_lead * t_coast + 0.5 * a_lead * t_coast**2
+            v_lead_0 = v_lead + a_lead * t_coast
+            
+            # Check if lead has stopped during coast
+            if lead_will_stop and t_coast >= t_lead_stop:
+                x_lead_0 = x_lead_final
+                v_lead_0 = 0
+                a_lead_effective = 0
+            else:
+                a_lead_effective = a_lead
+        
+        x_ego_0 = v_ego * t_coast
+        
+        # During braking phase, find minimum gap
+        # Relative position: gap_rel(τ) = x_lead - x_ego
+        # gap_rel(τ) = (x_lead_0 - x_ego_0) + (v_lead_0 - v_ego_0) * τ + 0.5 * (a_lead_effective - a_ego_max) * τ^2
+        
+        gap_0 = x_lead_0 - x_ego_0
+        v_rel_0 = v_lead_0 - v_ego_0
+        a_rel = a_lead_effective - a_ego_max
+        
+        # Find when relative velocity becomes zero (minimum gap occurs here or at vehicle stops)
+        # v_rel(τ) = v_rel_0 + a_rel * τ = 0
+        # τ = -v_rel_0 / a_rel
+        
+        if abs(a_rel) < 1e-6:  # Nearly equal accelerations
+            # Gap changes linearly
+            # Ego stops at: τ_ego_stop = -v_ego_0 / a_ego_max
+            tau_ego_stop = -v_ego_0 / a_ego_max if a_ego_max != 0 else float('inf')
+            if v_lead_0 > 0 and a_lead_effective < 0:
+                tau_lead_stop = -v_lead_0 / a_lead_effective
+            else:
+                tau_lead_stop = float('inf')
+            
+            tau_critical = min(tau_ego_stop, tau_lead_stop)
+            if tau_critical < 0:
+                return gap_0
+            min_gap = gap_0 + v_rel_0 * tau_critical
+        else:
+            tau_min_gap = -v_rel_0 / a_rel
+            
+            # Check when vehicles stop
+            tau_ego_stop = -v_ego_0 / a_ego_max
+            if v_lead_0 > 0 and a_lead_effective < 0:
+                tau_lead_stop = -v_lead_0 / a_lead_effective
+            else:
+                tau_lead_stop = float('inf')
+            
+            # Minimum gap occurs at one of these critical times
+            critical_times = [0, tau_min_gap, tau_ego_stop, tau_lead_stop]
+            critical_times = [t for t in critical_times if t >= 0]
+            
+            min_gap = float('inf')
+            for tau in critical_times:
+                # Don't exceed vehicle stopping times
+                if tau > tau_ego_stop:
+                    continue
+                if tau > tau_lead_stop and a_lead_effective < 0:
+                    continue
+                    
+                gap_at_tau = gap_0 + v_rel_0 * tau + 0.5 * a_rel * tau**2
+                min_gap = min(min_gap, gap_at_tau)
+        
+        return min_gap
+    
+    # Binary search for maximum safe coasting time
+    t_min, t_max = 0.0, 100.0  # Search range in seconds
+    tolerance = 0.001  # 1ms precision
+    
+    # Quick check: can we avoid collision at all?
+    if min_gap_after_braking(0.0) < SAFETY_MARGIN:
+        return True, True, 0.0
+    
+    # Binary search for critical time
+    while t_max - t_min > tolerance:
+        t_mid = (t_min + t_max) / 2
+        min_gap = min_gap_after_braking(t_mid)
+        
+        if min_gap >= SAFETY_MARGIN:
+            t_min = t_mid  # Can coast longer
+        else:
+            t_max = t_mid  # Must brake sooner
+    
+    time_to_brake = t_min
+    
+    # Determine activation flags
+    AEB_brake = time_to_brake <= 0.05
+    AEB_warn = time_to_brake <= 0.7
+    
+    return AEB_brake, AEB_warn, time_to_brake
 
 def cc_target_speed_thread_func():
     global exit_event
@@ -2625,6 +3063,7 @@ def main():
     global cc_start
     global cc_brake
     global cc_gas
+    global cc_app
     global cruise_control_thread
     global cc_locked
     global cc_limiting
@@ -2712,6 +3151,7 @@ def main():
         cv2.resizeWindow("ETS2 Radar", 600, 600)
         radar = ETS2Radar(show_window=True, fov_angle=35)
         AEBSound = AEBSoundHandler(os.path.join(os.path.dirname(os.path.abspath(__file__)), "AEBsfx.wav"))
+        cc_app = None
         prev_stop = time.time()
 
         # start the bar thread
@@ -2945,7 +3385,7 @@ def main():
 
                 time.sleep(0.2)
                 if (data is not None or speed > 0.1) and ets2_detected.is_set() and data is not None:
-                    setattr(controller, "steering", float(-data["gameSteer"]))
+                    setattr(controller, "steering", float(-getattr(data, "gameSteer", 0.0)))
                 else:
                     setattr(controller, "steering", 0.0)
 
@@ -2977,7 +3417,7 @@ def main():
 
             if not device_lost and device is not None and acc_enabled.get():
                 # radar code
-                acc_data = radar.update(data)
+                acc_data = radar.update(data, cc_app)
 
             # Initialize emergency flags
             AEB_brake = False
@@ -3009,10 +3449,16 @@ def main():
                     for i in range(1, len(acc_data)):
                         other_speed = acc_data[i][2]
                         other_a_lead = acc_data[i][3]
-                        
-                        if data_point['a_lead'] > -2 and data_point['speed']-other_speed < -10:
+
+                        # Only use weighted average if the vehicle in front (closest) has *greater* acceleration (i.e., less negative or more positive) than the next vehicle
+                        if other_a_lead < data_point['a_lead']:
                             data_point['a_lead'] = data_point['a_lead'] * 0.85 + other_a_lead * 0.15
+                        # Otherwise, keep the closest vehicle's acceleration
+
+                        # Same logic for speed: only use weighted if the vehicle in front is faster than the next vehicle
+                        if other_speed < data_point['speed']:
                             data_point['speed'] = data_point['speed'] * 0.85 + other_speed * 0.15
+                        # Otherwise, keep the closest vehicle's speed
 
                 # Calculate averaged values for the closest vehicle
                 data_history = list(_prev_data[closest_lead_id])
@@ -3033,9 +3479,11 @@ def main():
 
                     # Determine emergency for this specific vehicle
                     # temporarily disabled AEB because of inacurate detection
-                    #vehicle_AEB_brake, vehicle_AEB_warn = determine_emergency(lead_dist_raw, speed, 30, lead_speed_raw, 0.0)
-                    vehicle_AEB_brake, vehicle_AEB_warn = False, False
+                    print(f"lead_dist_raw: {lead_dist_raw}, speed: {speed}, lead_speed_raw: {lead_speed_raw}, a_lead: {a_lead}")
+                    vehicle_AEB_brake, vehicle_AEB_warn, time_to_brake = determine_emergency(lead_dist_raw-1, speed/3.6, -5.5, lead_speed_raw/3.6, a_lead/16)
                     
+                    print(f"vehicle_AEB_brake: {vehicle_AEB_brake}, vehicle_AEB_warn: {vehicle_AEB_warn}, time_to_brake: {time_to_brake}")
+                    print("-"*40)
                     # If any vehicle triggers emergency, set the overall flag to True
                     if vehicle_AEB_brake:
                         AEB_brake = True
@@ -3093,12 +3541,14 @@ def main():
                 print("@"*50 + "\n")
             elif AEB_warn_temp:
                 AEB_warn = True
+                cc_app.update(AEB_warn=True, acc_locked=True, acc_enabled=acc_enabled.get()) if cc_app is not None else None
                 AEBSound.start_warning()
                 print("\n" + "="*50)
                 print("!!!   AEB_WARN ACTIVATED - WARNING   !!!".center(50))
                 print("="*50 + "\n")
             else:
                 AEBSound.stop_warning()
+                cc_app.update(AEB_warn=False, acc_locked=(len(acc_data) > 0), acc_enabled=acc_enabled.get()) if cc_app is not None else None
 
             '''
             if data["cruiseControl"] == True and data["cruiseControlSpeed"] > 0 and brakeval == 0:
@@ -3141,7 +3591,7 @@ def main():
                     change_hazards_state(True)
                     hazards_prompted = True
 
-            if not AEB_brake:
+            if not (AEB_brake and gasval <= 0.9):
                 if data["cruiseControl"] and not cc_enabled:
                     opdbrakeval = 0
                 elif (cc_enabled and cc_mode.get() == "Cruise control"):
@@ -4538,12 +4988,16 @@ try:
 
         cmd_print("UI closing, cleaning up threads...")
 
+        #hide main window
+        root.withdraw()
+
+        exit_event.set()
+
         # Stop the dots animation if it's still running
         if dots_anim.is_playing: # and dots_anim (testing)
             dots_anim.stop()
         # Set the exit event to stop all threads
         print("UI closed, quitting MonoCruise")
-        exit_event.set()
 
         time.sleep(0.1) # Give threads time to finish
 
@@ -4552,6 +5006,9 @@ try:
 
         if ets2_detected.is_set():
             send(0,0, controller)
+            setattr(controller, "steering", 0.0)
+            setattr(controller, "aforward", 0.0)
+            setattr(controller, "abackward", 0.0)
             setattr(controller, "wipers3", False)
             setattr(controller, "wipers4", False)
             setattr(controller, "accmode", False)
