@@ -5,6 +5,8 @@ import numpy as np
 import numpy.typing as npt
 import truck_telemetry
 from shapely.geometry import Polygon, Point
+from ETS2radar.classes import Vehicle
+
 try:
     from ETS2radar.main import Module
 except:
@@ -117,6 +119,9 @@ class ETS2Radar:
         self.ego_path_tracker: Dict[int, EgoPathTracker] = {}
         self.ego_path_length: float = MAX_DISTANCE
         self.vehicle_world_pos_history = {}
+        
+        # Store filtered vehicles with unique IDs for next run
+        self.filtered_vehicles: List[Vehicle] = []
 
         # Scoring system for vehicles (used for robust lane detection)
         self.vehicle_scores: Dict[int, float] = collections.defaultdict(float)
@@ -124,7 +129,7 @@ class ETS2Radar:
         # Setup window if requested
         if self.show_window:
             cv2.namedWindow("ETS2 Radar", cv2.WINDOW_NORMAL)
-            cv2.resizeWindow("ETS2 Radar", 600, 600)
+            cv2.resizeWindow("ETS2 Radar", 600, 600) 
 
         print("ETS2 Radar initialized.")
 
@@ -152,7 +157,7 @@ class ETS2Radar:
             # Has a trail but not intersecting with base: penalize
             score_increment = -0.7
         elif history is None:
-            score_increment = -0.2
+            score_increment = -0.15
         else:
             score_increment = 0.0
 
@@ -669,8 +674,10 @@ class ETS2Radar:
         self.draw_fov_cone(img, center, scale)
         cv2.circle(img, center, 5, (0, 255, 255), -1)
         
+        """
         # Draw ego vehicle rectangle (2m wide, 6m long)
         ego_rect_corners = self.draw_ego_rectangle(img, center, scale, width=2.0, length=6.0, color=(0, 255, 255), thickness=2)
+        """
 
         path_pts, curvature = [], 0.0
         try:
@@ -705,22 +712,6 @@ class ETS2Radar:
                             'polygon': poly_t,
                             'distance': trailer_closest_distance
                         })
-
-        collision_threshold = 0
-        vehicle_groups = []
-        processed = set()
-        for i, vdata in enumerate(vehicle_data):
-            if i in processed:
-                continue
-            group = [vdata]
-            processed.add(i)
-            for j, other_vdata in enumerate(vehicle_data):
-                if j in processed or i == j:
-                    continue
-                if vdata['polygon'].distance(other_vdata['polygon']) < collision_threshold:
-                    group.append(other_vdata)
-                    processed.add(j)
-            vehicle_groups.append(group)
 
         # --- VEHICLE DATA RESET LOGIC ---
         # Find all known vehicle IDs (with score/history etc.)
@@ -797,16 +788,13 @@ class ETS2Radar:
         blinker_offset = val_left + val_right
 
         in_lane_vehicles = []
-        for group in vehicle_groups:
-            if len(group) > 1:
-                group = [min(group, key=lambda x: x['distance'])]
-            main_vehicle = group[0]
-            v = main_vehicle['vehicle']
-            poly = main_vehicle['polygon']
-            distance = main_vehicle['distance']
-            dx, dz = main_vehicle['centroid'].x, main_vehicle['centroid'].y
-            overall_closest_distance = distance#-main_vehicle['vehicle'].size.length/2
-            for trailer_data in main_vehicle['trailers']:
+        for vdata in vehicle_data:
+            v = vdata['vehicle']
+            poly = vdata['polygon']
+            distance = vdata['distance']
+            dx, dz = vdata['centroid'].x, vdata['centroid'].y
+            overall_closest_distance = distance#-vdata['vehicle'].size.length/2
+            for trailer_data in vdata['trailers']:
                 trailer_distance = trailer_data['distance']#-trailer_data['trailer'].size.length/2
                 if trailer_distance < overall_closest_distance:
                     overall_closest_distance = trailer_distance + 3
@@ -862,9 +850,9 @@ class ETS2Radar:
                 if path_pts:  # Only if we have a valid ego path
                     is_in_path = self.check_vehicle_in_ego_path(path_pts, poly, path_width=1)
                     if is_in_path:
-                        path_score = min(0.3 * distance_amp, 5)  # Boost score for vehicles in ego path
+                        path_score = min(0.3 * distance_amp, 10)  # Boost score for vehicles in ego path
                     else:
-                        path_score = -min(0.2 * distance_amp, 3)  # Penalty for vehicles not in ego path
+                        path_score = -min(0.3 * distance_amp, 3)  # Penalty for vehicles not in ego path
                 else:
                     path_score = 0.0
                 
@@ -880,26 +868,49 @@ class ETS2Radar:
             if self.is_in_front_cone(dx, dz) and score_val > 0:
                 in_lane_vehicles.append((v, overall_closest_distance - 4.5, acceleration))
 
-            # Draw vehicle
+            # Draw vehicle with ID labels
+            veh_scr_x, veh_scr_y = self.world_to_screen(dx, dz, center, scale)
+            
             if self.is_in_front_cone(dx, dz):
-                if score_val > 0:
-                    # Check if vehicle is in ego path for different coloring
-                    vehicle_color = (0, 0, 255)  # Default red for in-lane
-                    if path_pts and self.check_vehicle_in_ego_path(path_pts, poly, path_width=1):
-                        vehicle_color = (0, 100, 255)  # Orange-red for vehicles in ego path
-                    
-                    self.draw_vehicle(img, poly, center, scale, vehicle_color)
-                    veh_scr_x, veh_scr_y = self.world_to_screen(dx, dz, center, scale)
-                    cv2.putText(img, f"score:{score_val:.2f}", (veh_scr_x-25, veh_scr_y-12),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,0), 1, cv2.LINE_AA)
+                if not v.is_tmp or not v.is_trailer:
+                    if score_val > 0:
+                        # Check if vehicle is in ego path for different coloring
+                        vehicle_color = (0, 0, 255)  # Default red for in-lane
+                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly, path_width=1):
+                            vehicle_color = (0, 100, 255)  # Orange-red for vehicles in ego path
+                        
+                        self.draw_vehicle(img, poly, center, scale, vehicle_color)
+                    else:
+                        self.draw_vehicle(img, poly, center, scale, (0,0,100))
                 else:
-                    self.draw_vehicle(img, poly, center, scale, (0,0,100))
+                    if score_val > 0:
+                        # Use same color logic for trailers
+                        trailer_color = (255, 0, 0)  # Default red for in-lane trailers
+                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly, path_width=1):
+                            trailer_color = (255, 50, 0)  # Orange for trailers in ego path
+                        self.draw_vehicle(img, poly, center, scale, trailer_color)
+                    else:
+                        self.draw_vehicle(img, poly, center, scale, (100,0,0))
             else:
                 self.draw_vehicle(img, poly, center, scale, (200,200,0))
+            
+            # ALWAYS draw ID label for debugging
+            id_label = f"ID:{vid}"
+            if v.is_tmp:
+                id_label += " TMP"
+            if v.is_trailer:
+                id_label += " TRAILER"
+            cv2.putText(img, id_label, (veh_scr_x-30, veh_scr_y-15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255), 1, cv2.LINE_AA)
+            if self.is_in_front_cone(dx, dz) and score_val > 0:
+                cv2.putText(img, f"s:{score_val:.1f}", (veh_scr_x-30, veh_scr_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,255,0), 1, cv2.LINE_AA)
 
-            for trailer_data in main_vehicle['trailers']:
+            for trailer_idx, trailer_data in enumerate(vdata['trailers']):
                 poly_t = trailer_data['polygon']
                 tx, tz = poly_t.centroid.x, poly_t.centroid.y
+                t_scr_x, t_scr_y = self.world_to_screen(tx, tz, center, scale)
+                
                 if self.is_in_front_cone(tx, tz):
                     if score_val > 0:
                         # Use same color logic for trailers
@@ -909,15 +920,41 @@ class ETS2Radar:
                         self.draw_vehicle(img, poly_t, center, scale, trailer_color)
                     else:
                         self.draw_vehicle(img, poly_t, center, scale, (100,0,0))
+                else:
+                    self.draw_vehicle(img, poly_t, center, scale, (200,200,0))
+                
+                # Draw trailer label
+                trailer_label = f"T{trailer_idx} of ID:{vid}"
+                cv2.putText(img, trailer_label, (t_scr_x-30, t_scr_y-15),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255,0,255), 1, cv2.LINE_AA)
 
         in_lane_vehicles.sort(key=lambda x: x[1])
+        
+        # Filter out vehicles that come after a vehicle with both is_tmp and is_trailer
+        filtered_vehicles = []
+        skip_next = False
+        
+        for i, (v, dist, accel) in enumerate(in_lane_vehicles):
+            if skip_next:
+                skip_next = False
+                continue
+            
+            # Check if current vehicle has both is_tmp and is_trailer
+            if v.is_tmp and v.is_trailer:
+                # Add this vehicle (the trailer) and skip the next one (the tractor)
+                filtered_vehicles.append((v, dist, accel))
+                skip_next = True
+            else:
+                # Add vehicle normally
+                filtered_vehicles.append((v, dist, accel))
+        
         result = []
-        for v, dist, accel in in_lane_vehicles[:3]:
+        for v, dist, accel in filtered_vehicles[:3]:
             speed_raw = getattr(v, 'speed', 0)
             speed_kmh = speed_raw * 3.6
             result.append((v.id, dist, speed_kmh, accel))
         try:
-            if len(getattr(in_lane_vehicles[0][0], 'trailers', [])) > 0:
+            if len(filtered_vehicles) > 0 and len(getattr(filtered_vehicles[0][0], 'trailers', [])) > 0:
                 if cc_app is not None:
                     cc_app.update(acc_truck=True)
             else:
@@ -1227,6 +1264,54 @@ class ETS2Radar:
         distance = np.sqrt(dx*dx + dz*dz)
         return distance >= POSITION_SNAP
 
+    def handle_duplicate_vehicle_ids(self, vehicles: List[Vehicle]) -> List[Vehicle]:
+        """
+        Handle duplicate vehicle IDs by appending index numbers.
+        If there are 3 vehicles with ID 123, they become 1231, 1232, 1233.
+        """
+        # Count occurrences of each ID
+        id_counts = {}
+        for vehicle in vehicles:
+            vehicle_id = getattr(vehicle, 'id', id(vehicle))
+            id_counts[vehicle_id] = id_counts.get(vehicle_id, 0) + 1
+        
+        # Create new vehicles with unique IDs
+        filtered_vehicles = []
+        id_indices = {}  # Track current index for each original ID
+        
+        for vehicle in vehicles:
+            original_id = getattr(vehicle, 'id', id(vehicle))
+            
+            # If this ID appears multiple times, create a unique ID
+            if id_counts[original_id] > 1:
+                if original_id not in id_indices:
+                    id_indices[original_id] = 1
+                else:
+                    id_indices[original_id] += 1
+                
+                # Create new ID by appending index
+                new_id = int(str(original_id) + str(id_indices[original_id]))
+                
+                # Create a copy of the vehicle with the new ID
+                new_vehicle = Vehicle(
+                    position=vehicle.position,
+                    rotation=vehicle.rotation,
+                    size=vehicle.size,
+                    speed=vehicle.speed,
+                    acceleration=vehicle.acceleration,
+                    trailer_count=vehicle.trailer_count,
+                    trailers=vehicle.trailers,
+                    id=new_id,
+                    is_tmp=vehicle.is_tmp,
+                    is_trailer=vehicle.is_trailer
+                )
+                filtered_vehicles.append(new_vehicle)
+            else:
+                # Keep original vehicle if ID is unique
+                filtered_vehicles.append(vehicle)
+        
+        return filtered_vehicles
+
     def update_vehicle_history(self, vid: int, position: Coordinate) -> None:
         """
         Only save vehicle positions if moved >= POSITION_SNAP meters since last saved.
@@ -1264,6 +1349,12 @@ class ETS2Radar:
         vehicles = self.module.run()
         # Filter vehicles not on the truck's plane
         vehicles = [v for v in vehicles if abs(v.position.y - data.get("coordinateY", 0.0)) < 6.0]
+        
+        # Handle duplicate vehicle IDs
+        vehicles = self.handle_duplicate_vehicle_ids(vehicles)
+        
+        # Save filtered vehicles for next run
+        self.filtered_vehicles = vehicles
 
         # Update histories with world coordinates
         if not data["paused"]:

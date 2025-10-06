@@ -1768,6 +1768,9 @@ class cc_panel:
                 
         finally:
             self._update_in_progress = False
+            if self.root1 and self.root2:
+                self.root1.after(0, self.root1.lift())
+                self.root2.after(0, self.root2.lift())
 
     def _update_gui_images(self):
         """Update the GUI images (must be called from main thread)"""
@@ -2230,7 +2233,7 @@ def main_cruise_control():
         panel_x = 100
         panel_y = 100
     cc_app = cc_panel(text_content="-- km/h", cc_mode=cc_mode.get(), cc_enabled=False, x_co=panel_x, y_co=panel_y, acc_enabled=acc_enabled.get())
-    #cc_app.update(f"-- km/h", cc_mode.get(), False)
+    cc_app.update("-- km/h", cc_mode=cc_mode.get(), cc_enabled=False, acc_enabled=acc_enabled.get(), complete_update=True)
 
 
     while not exit_event.is_set() and not (cc_dec_button is None and cc_inc_button is None and cc_start_button is None):
@@ -2504,7 +2507,7 @@ def low_pass_filter(current_value, alpha=0.3, emergency_threshold=-2.0):
     
     return filtered_value
 
-def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.1, debug=True):
+def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.1, debug=False):
     """
     Adaptive Cruise Control logic with lead vehicle acceleration anticipation.
     All input values are averaged over time. Queue resets when lead_id changes.
@@ -2556,7 +2559,7 @@ def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.1, debug=True
     # Gains
     K_gap = 0.07 * closeness_amp * (slow_speed_adj/1+1)
     K_speed = 0.16 * closeness_amp * (slow_speed_adj/3+1)
-    K_acc = 0.25 *acceleration_amp
+    K_acc = 0.27 *acceleration_amp
 
     if lead_speed-avg_ego_speed > 5 and gap_error < 2:
         K_gap *= 0.3
