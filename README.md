@@ -1,7 +1,8 @@
-# MonoCruise
+<a href="https://sourceforge.net/p/monocruise/"><img alt="Download MonoCruise" src="https://sourceforge.net/sflogo.php?type=18&amp;group_id=3904914" width=150></a>
 [![Download MonoCruise](https://img.shields.io/sourceforge/dw/monocruise.svg)](https://sourceforge.net/projects/monocruise/files/latest/download)
 [![Download MonoCruise](https://img.shields.io/sourceforge/dt/monocruise.svg)](https://sourceforge.net/projects/monocruise/files/latest/download)
 
+# MonoCruise
 MonoCruise is a third-party software that sits in between ETS2/ATS and your pedals. 
 MonoCruise has a ton of quality of life features, like a better Adaptive Cruise Controll or a One-Pedal Driving system for heavy traffic.
 every feature (including the ACC) works in TruckersMP and singleplayer ETS2/ATS.
@@ -10,7 +11,7 @@ every feature (including the ACC) works in TruckersMP and singleplayer ETS2/ATS.
 
 ### features
 This also includes quality of life features like:
-- smoother Adaptive Cruise Control (releases with v1.0.1)
+- smoother Adaptive Cruise Control (v1.0.1 and above)
 - better Cruise Control
 - One-Pedal driving system
 - live braking and accelerating bar on the bottom of the screen
@@ -22,6 +23,9 @@ This also includes quality of life features like:
 ## .exe install
 
 1. Download and run "MonoCruise installer.exe".
+
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="https://sourceforge.net/projects/monocruise/files/latest/download"><img alt="Download MonoCruise" src="https://a.fsdn.com/con/app/sf-download-button" width=276 height=48 srcset="https://a.fsdn.com/con/app/sf-download-button?button_size=2x 2x"></a>
+
 2. Run MonoCruise.
 3. Follow the on-screen instructions.
 
@@ -54,7 +58,7 @@ MonoCruise will automatically start together with ETS2. you can disable this in 
 > [!IMPORTANT]
 > The MonoCruise window should remain open if you want to use it
 
-## Adaptive Cruise Control (v1.0.1 only):
+## Adaptive Cruise Control (v1.0.1 and above):
 you can enable the experemental ACC and it will hold a safe distance from the lead vehicle (singleplayer or TruckersMP). you currently cannot change the following distance, but that's comming.
    
 > [!CAUTION]
