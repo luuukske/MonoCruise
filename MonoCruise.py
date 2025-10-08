@@ -2558,8 +2558,8 @@ def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.1, debug=Fals
 
     # Gains
     K_gap = 0.07 * closeness_amp * (slow_speed_adj/1+1)
-    K_speed = 0.16 * closeness_amp * (slow_speed_adj/3+1)
-    K_acc = 0.27 *acceleration_amp
+    K_speed = 0.13 * closeness_amp * (slow_speed_adj/3+1)
+    K_acc = 0.33 *acceleration_amp
 
     if lead_speed-avg_ego_speed > 5 and gap_error < 2:
         K_gap *= 0.3
