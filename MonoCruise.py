@@ -2584,7 +2584,7 @@ def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.1, debug=True
 
     if acc_value > 0:
         acc_value /= slow_speed_adj/3+1
-        acc_value /= 1.2s
+        acc_value /= 1.2
 
     # Apply low-pass filter with emergency brake override
     filtered_acc_value = low_pass_filter(acc_value, alpha=0.3, emergency_threshold=-2.0)
@@ -5210,4 +5210,5 @@ except Exception as e:
         controller.close()
         sys.exit(1)
     except:
+
         pass
