@@ -632,7 +632,7 @@ def detect_joystick_movement(button_type="None given"):
         if key_pressed.is_set():
             if detected_key in ("Backspace", "Delete"):
                 cmd_print("Unassigning button...")
-                unassign_button.configure(state="normal")
+                #unassign_button.configure(state="normal")
                 unassign = True
                 break
             elif detected_key not in ("Esc", "Escape", "Enter", "Return"):
@@ -769,7 +769,7 @@ def detect_joystick_movement(button_type="None given"):
         cc_dec_button = button
         cc_dec_label.configure(border_color=SETTINGS_COLOR, text=display_text, text_color=text_color)
     
-    unassign_button.configure(state="disabled")
+    #unassign_button.configure(state="disabled")
     close_buttons_threads.clear()
 
 def connect_joystick():
@@ -1111,7 +1111,7 @@ def onepedaldrive(gasval, brakeval):
     global max_opd_brake_variable
 
     offset = offset_variable.get()
-    brake_exponent = brake_exponent_variable.get()
+    brake_exponent = brake_exponent_variable.get()**0.5
     gas_exponent = gas_exponent_variable.get()
     opd_mode = opd_mode_variable.get()
     
@@ -2471,10 +2471,15 @@ from collections import defaultdict, deque
 import numpy as np
 
 # memory of previous data for each lead vehicle (fixed-length queue)
-_prev_data = defaultdict(lambda: deque(maxlen=10))
+_prev_data = defaultdict(lambda: deque(maxlen=5))
 
 # Low-pass filter state
 _filter_state = {'prev_output': 0.0, 'initialized': False}
+
+def calculate_braking(v, ego_speed):
+    """
+    calculates the required deceleration to
+    """
 
 def low_pass_filter(current_value, alpha=0.3, emergency_threshold=-2.0):
     """
@@ -2507,7 +2512,7 @@ def low_pass_filter(current_value, alpha=0.3, emergency_threshold=-2.0):
     
     return filtered_value
 
-def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.1, debug=False):
+def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.1, debug=True):
     """
     Adaptive Cruise Control logic with lead vehicle acceleration anticipation.
     All input values are averaged over time. Queue resets when lead_id changes.
@@ -2557,15 +2562,18 @@ def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.1, debug=Fals
     slow_speed_adj = pow(0.8, max(avg_ego_speed, 0.0))*2.2
 
     # Gains
-    K_gap = 0.07 * closeness_amp * (slow_speed_adj/1+1)
-    K_speed = 0.13 * closeness_amp * (slow_speed_adj/3+1)
-    K_acc = 0.33 *acceleration_amp
+    K_gap = 0.08 * closeness_amp * (slow_speed_adj*2+1)
+    K_speed = 0.12 * closeness_amp * (slow_speed_adj/3+1)
+    K_acc = 0.55 *acceleration_amp
 
-    if lead_speed-avg_ego_speed > 5 and gap_error < 2:
-        K_gap *= 0.3
+    if speed_error > -5 and a_lead > -1:
+        K_gap *= 0.5
 
     # Control law (sum of weighted errors)
     acc_raw = K_gap * np.sign(gap_error)*((abs(gap_error)/10)**0.8)*10 + K_speed * speed_error + K_acc * a_lead
+    # calculates the required deceleration to reach the lead vehicle
+    acc_raw
+
     if acc_raw <= 0.5:
         acc_raw -= slow_speed_adj*0.9
     else:
@@ -2576,6 +2584,7 @@ def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.1, debug=Fals
 
     if acc_value > 0:
         acc_value /= slow_speed_adj/3+1
+        acc_value /= 1.2s
 
     # Apply low-pass filter with emergency brake override
     filtered_acc_value = low_pass_filter(acc_value, alpha=0.3, emergency_threshold=-2.0)
@@ -3110,7 +3119,8 @@ def main():
                             short_increments = short_increments.get(),
                             long_press_reset = long_press_reset.get(),
                             show_cc_ui = show_cc_ui.get(),
-                            acc_enabled = acc_enabled.get()
+                            acc_enabled = acc_enabled.get(),
+                            AEB_enabled = AEB_enabled.get()
                             )
 
         if exit_event.is_set():
@@ -3201,7 +3211,8 @@ def main():
                             short_increments = short_increments.get(),
                             long_press_reset = long_press_reset.get(),
                             show_cc_ui = show_cc_ui.get(),
-                            acc_enabled = acc_enabled.get()
+                            acc_enabled = acc_enabled.get(),
+                            AEB_enabled = AEB_enabled.get()
                             )
 
             if offset_variable.get() == 0:
@@ -3453,15 +3464,12 @@ def main():
                         other_speed = acc_data[i][2]
                         other_a_lead = acc_data[i][3]
 
-                        # Only use weighted average if the vehicle in front (closest) has *greater* acceleration (i.e., less negative or more positive) than the next vehicle
-                        if other_a_lead < data_point['a_lead']:
-                            data_point['a_lead'] = data_point['a_lead'] * 0.85 + other_a_lead * 0.15
-                        # Otherwise, keep the closest vehicle's acceleration
-
-                        # Same logic for speed: only use weighted if the vehicle in front is faster than the next vehicle
-                        if other_speed < data_point['speed']:
-                            data_point['speed'] = data_point['speed'] * 0.85 + other_speed * 0.15
-                        # Otherwise, keep the closest vehicle's speed
+                        # If the farther vehicle has both lower speed and acceleration than the closer vehicle,
+                        # use the farther vehicle's values as the lead values
+                        if other_speed < data_point['speed'] and other_a_lead < data_point['a_lead']:
+                            data_point['speed'] = other_speed*0.5 + data_point['speed']*0.5
+                            data_point['a_lead'] = other_a_lead*0.5 + data_point['a_lead']*0.5
+                        # Otherwise, keep the closest vehicle's values
 
                 # Calculate averaged values for the closest vehicle
                 data_history = list(_prev_data[closest_lead_id])
@@ -3482,11 +3490,8 @@ def main():
 
                     # Determine emergency for this specific vehicle
                     # temporarily disabled AEB because of inacurate detection
-                    print(f"lead_dist_raw: {lead_dist_raw}, speed: {speed}, lead_speed_raw: {lead_speed_raw}, a_lead: {a_lead}")
                     vehicle_AEB_brake, vehicle_AEB_warn, time_to_brake = determine_emergency(lead_dist_raw-1, speed/3.6, -5.5, lead_speed_raw/3.6, a_lead/16)
-                    
-                    print(f"vehicle_AEB_brake: {vehicle_AEB_brake}, vehicle_AEB_warn: {vehicle_AEB_warn}, time_to_brake: {time_to_brake}")
-                    print("-"*40)
+            
                     # If any vehicle triggers emergency, set the overall flag to True
                     if vehicle_AEB_brake:
                         AEB_brake = True
@@ -3531,7 +3536,7 @@ def main():
                     AEB_warn = False
                     AEB_warn_temp = False
                 
-                if speed < 10:
+                if speed < 30:
                     AEB_brake = False
                     AEB_warn = False
                     AEB_warn_temp = False
@@ -4122,6 +4127,7 @@ try:
 
     # create a scrollable frame for the settings that stretches from the left to the right of the settings frame
     scrollable_frame = ctk.CTkScrollableFrame(settings_frame, bg_color="transparent", fg_color="transparent", border_width=1, border_color="#404040", corner_radius=5)
+    scrollable_frame._parent_canvas.configure(yscrollincrement=3)
     scrollable_frame.pack(side="top", fill="both", expand=True, padx=5, pady=(5,5))
     #make the grid expand to the side of the scrollable frame
     scrollable_frame.grid_columnconfigure(1, weight=1)
@@ -4427,7 +4433,7 @@ try:
             
         buttons_thread = threading.Thread(target=detect_joystick_movement, daemon=True, args=(button_type,), name="buttons Thread")
         buttons_thread.start()
-        unassign_button.configure(state="normal")
+        #unassign_button.configure(state="normal")
 
 
     cc_title = ctk.CTkLabel(scrollable_frame, text="Cruise Control", font=default_font_bold, text_color="lightgrey", fg_color=SETTING_HEADERS_COLOR, corner_radius=5)
@@ -4472,7 +4478,7 @@ try:
         global unassign
         unassign = True
 
-    unassign_button = ctk.CTkButton(scrollable_frame,width=150, text="Unassign", font=default_font, text_color="lightgrey", fg_color=WAITING_COLOR, corner_radius=5, hover_color="#333366", command=unassign_true, state="disabled")
+    unassign_button = ctk.CTkButton(scrollable_frame,width=150, text="Unassign", font=default_font, text_color="lightgrey", fg_color=WAITING_COLOR, corner_radius=5, hover_color="#333366", command=unassign_true, state="normal")
     unassign_button.grid(row=25, column=0, padx=10, pady=(1,8), columnspan=2, sticky="e")
 
     short_increments = ctk.StringVar(value=_data_cache["short_increments"] if "short_increments" in _data_cache else "1 km/h")
@@ -4511,17 +4517,16 @@ try:
     def confirm_acc_enabled():
         if acc_enabled.get() == True:
             msg = CTkMessagebox(
-                title="Adaptive Cruise Control (BETA)",
+                title="Adaptive Cruise Control BETA",
                 message=(
-                    "Adaptive Cruise Control is enabled.\n\n"
                     "WARNING: This feature is in BETA and may brake unexpectedly. "
                     "Use with caution!"
                 ),
                 icon="warning", 
-                wraplength=600,
+                wraplength=400,
                 sound=True,
-                width=400,
-                height=100,
+                width=500,
+                height=250,
                 option_1="I won't complain about it",
                 option_2="Cancel",
             )
@@ -4552,7 +4557,48 @@ try:
         command=confirm_acc_enabled
     )
 
+    AEB_enabled = ctk.BooleanVar(value=_data_cache["AEB_enabled"] if "AEB_enabled" in _data_cache else False)
+    def confirm_AEB_enabled():
+        if AEB_enabled.get() == True:
+            msg = CTkMessagebox(
+                title="Emergency Braking BETA",
+                message=(
+                    "WARNING: This feature is in BETA and may brake unexpectedly. "
+                    "Use with caution!"
+                ),
+                icon="warning", 
+                wraplength=400,
+                sound=True,
+                width=500,
+                height=250,
+                option_1="I won't complain about it",
+                option_2="Cancel",
+            )
+            if msg.get() != "I won't complain about it": 
+                print("Confermation dialog closed")
+                AEB_enabled.set(False)
+                AEB_toggle.deselect()
 
+    AEB_label = new_label(scrollable_frame, 32, 0, "Emergency Braking:")
+    AEB_toggle = new_checkbutton(
+        scrollable_frame, 32, 1,
+        AEB_enabled,
+        command=confirm_AEB_enabled
+    )
+    # Add a rounded "BETA" label next to the ACC label
+    ctk.CTkLabel(
+        scrollable_frame,
+        width=40,
+        height=20,
+        text="BETA",
+        font=("Segoe UI", 11, "bold"),
+        text_color="white",
+        fg_color=LOST_COLOR,
+        corner_radius=15,
+        bg_color="transparent",
+        padx=5,
+        pady=1
+    ).grid(row=32, column=1, padx=(4, 0), pady=1, sticky="w")
 
 
 
@@ -4597,7 +4643,7 @@ try:
     max_opd_brake_label = new_label(scrollable_frame, 41, 0, "  Max OPD brake:")
     max_opd_brake_variable = ctk.DoubleVar(value=0.03)
     temp_max_opd_brake_variable = ctk.DoubleVar(value=0.03)
-    max_opd_brake_entry = new_entry(scrollable_frame, 41, 1, max_opd_brake_variable, temp_max_opd_brake_variable, command=refresh_live_visualization, max_value=0.2, min_value=0)
+    max_opd_brake_entry = new_entry(scrollable_frame, 41, 1, max_opd_brake_variable, temp_max_opd_brake_variable, command=refresh_live_visualization, max_value=0.5, min_value=0)
 
     description_max_opd_label = ctk.CTkLabel(scrollable_frame, text="The amount of braking when not touching the pedals", font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, bg_color="transparent", anchor="e", wraplength=185, height=10, justify="right")
     description_max_opd_label.grid(row=42, column=0, padx=10, pady=(0,8), columnspan=2, sticky="nsew")
@@ -5089,6 +5135,9 @@ try:
     except Exception: pass
     try:
         acc_enabled.set(_data_cache["acc_enabled"])
+    except Exception: pass
+    try:
+        AEB_enabled.set(_data_cache["AEB_enabled"])
     except Exception: pass
 
     try:
