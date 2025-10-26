@@ -2563,19 +2563,22 @@ def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.1, debug=True
 
     # Gains
     K_gap = 0.08 * closeness_amp * (slow_speed_adj*2+1)
-    K_speed = 0.12 * closeness_amp * (slow_speed_adj/3+1)
-    K_acc = 0.55 *acceleration_amp
+    K_speed = 0.13 * closeness_amp * (slow_speed_adj/3+1)
+    K_acc = 0.75 *acceleration_amp
 
     if speed_error > -5 and a_lead > -1:
-        K_gap *= 0.5
+        K_gap *= 0.7
 
     # Control law (sum of weighted errors)
-    acc_raw = K_gap * np.sign(gap_error)*((abs(gap_error)/10)**0.8)*10 + K_speed * speed_error + K_acc * a_lead
-    # calculates the required deceleration to reach the lead vehicle
-    acc_raw
+    gap_error_val = np.sign(gap_error)*((abs(gap_error)/10)**0.8)*10
+    speed_error_val = np.sign(speed_error)*min(((abs(speed_error)/10)**1.3)*10, abs(speed_error))
+    a_lead_val = np.sign(a_lead)*min(((abs(a_lead)/5)**1.3)*5, abs(a_lead))
 
-    if acc_raw <= 0.5:
-        acc_raw -= slow_speed_adj*0.9
+    acc_raw = K_gap * gap_error_val + K_speed * speed_error_val + K_acc * a_lead_val
+    # calculates the required deceleration to reach the lead vehicle
+
+    if acc_raw <= 0.2:
+        acc_raw -= slow_speed_adj*0.5
     else:
         acc_raw /= slow_speed_adj+1
 
@@ -2653,95 +2656,114 @@ def adaptive_cruise_control(ego_speed, min_gap=5.0, acc_time_gap=1.1, debug=True
 
 
 
+class SoundState():
+    STOPPED = 0
+    RUNNING = 1
+    SHUTTING_DOWN = 2
+
 class AEBSoundHandler:
     def __init__(self, sound_file_path):
         """
-        Advanced handler with manual seamless looping control
+        A robust, state-managed sound handler for seamless looping, non-blocking stops,
+        and the ability to resume during shutdown.
         """
-        # Optimized mixer settings
         pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=256)
         pygame.mixer.init()
         
         self.sound = pygame.mixer.Sound(sound_file_path)
-        self.AEB_warn = False
-        self.sound_thread = None
-        self.stop_event = threading.Event()
-        self.channels = []
         
+        self._state = SoundState.STOPPED
+        self._sound_thread = None
+        self._lock = threading.Lock() # To ensure thread-safe state changes
+
     def start_warning(self):
-        """Enable AEB warning with seamless looping"""
-        if not self.AEB_warn:
-            self.AEB_warn = True
-            self.stop_event.clear()
-            self.sound_thread = threading.Thread(target=self._seamless_loop)
-            self.sound_thread.daemon = True
-            self.sound_thread.start()
+        """
+        Starts the warning sound loop. If the sound is in the process of shutting down,
+        it will cancel the shutdown and continue looping seamlessly.
+        """
+        with self._lock:
+            if self._state == SoundState.RUNNING:
+                return # Already running, do nothing.
+
+            if self._state == SoundState.SHUTTING_DOWN:
+                # The thread is still alive, just tell it to continue running.
+                self._state = SoundState.RUNNING
+                print("AEB Warning: Shutdown cancelled. Resuming loop.")
+                return
+
+            # If we are here, the state is STOPPED. Start a new thread.
+            self._state = SoundState.RUNNING
+            self._sound_thread = threading.Thread(target=self._sound_loop_manager)
+            self._sound_thread.daemon = True
+            self._sound_thread.start()
             print("AEB Warning: ENABLED - Seamless sound loop active")
     
     def stop_warning(self):
-        """Disable AEB warning and wait for current sound to finish naturally"""
-        if self.AEB_warn:
-            self.AEB_warn = False
-            self.stop_event.set()
-            print("AEB Warning: DISABLED - Waiting for current sound to finish...")
+        """
+        Signals the warning to stop non-blockingly. 
+        The loop will run one more full time before the thread terminates.
+        """
+        with self._lock:
+            # Only act if the sound is currently in the RUNNING state.
+            if self._state == SoundState.RUNNING:
+                self._state = SoundState.SHUTTING_DOWN
+                print("AEB Warning: DISABLING - Loop will run one more time.")
             
-            # Wait for the background thread to finish naturally
-            if self.sound_thread and self.sound_thread.is_alive():
-                self.sound_thread.join()
-            
-            # Wait for any remaining channels to finish
-            while any(channel.get_busy() for channel in self.channels):
-                time.sleep(0.01)
-            
-            self.channels.clear()
-            print("Sound finished playing naturally")
-    
-    def _seamless_loop(self):
-        """Create seamless looping by overlapping sound instances"""
-        # Start first instance
-        channel1 = self.sound.play()
-        self.channels.append(channel1)
-        
+    def _sound_loop_manager(self):
+        """
+        Manages the sound loop based on the current state. This method is the
+        heart of the thread and handles all state transitions.
+        """
         sound_length = self.sound.get_length()
-        overlap_time = 0.15  # 150ms overlap to ensure seamless transition
+        overlap_time = 0.15
+        sleep_duration = max(0, sound_length - overlap_time)
         
-        while self.AEB_warn and not self.stop_event.is_set():
-            # Wait until near the end of current sound
-            time.sleep(sound_length - overlap_time)
-            
-            if self.AEB_warn and not self.stop_event.is_set():
-                # Start next instance before current one ends
-                new_channel = self.sound.play()
-                self.channels.append(new_channel)
-                
-                # Clean up finished channels
-                self.channels = [ch for ch in self.channels if ch.get_busy()]
+        # Keep track of the last channel to manage its lifecycle.
+        last_channel = self.sound.play()
         
-        # Stop all channels when exiting loop
-        for channel in self.channels:
-            if channel.get_busy():
-                channel.stop()
-        self.channels.clear()
-    
-    def is_warning_active(self):
-        """Check if AEB warning is currently active"""
-        return self.AEB_warn
-    
-    def cleanup(self):
-        """Clean up resources"""
-        self.stop_warning()
-        pygame.mixer.quit()
-    
-    def is_warning_active(self):
-        """Check if AEB warning is currently active"""
-        return self.AEB_warn
-    
-    def cleanup(self):
-        """Clean up resources"""
-        self.stop_warning()
-        pygame.mixer.quit()
+        while True:
+            time.sleep(sleep_duration)
 
-import math
+            with self._lock:
+                # Check the state to decide the next action.
+                if self._state == SoundState.RUNNING:
+                    # Business as usual: play the next overlapping sound.
+                    last_channel = self.sound.play()
+                
+                elif self._state == SoundState.SHUTTING_DOWN:
+                    # Stop was requested. Play one final overlapping sound and break the loop.
+                    print("Playing final loop iteration...")
+                    last_channel = self.sound.play()
+                    break # Exit the loop to begin the final wait.
+
+        # --- Finalization Sequence ---
+        # The loop has been exited, meaning we are shutting down.
+        # We must now wait for the very last sound to finish playing completely.
+        if last_channel:
+            while last_channel.get_busy():
+                time.sleep(0.01)
+        
+        # Safely mark the state as STOPPED, so a new thread can be created next time.
+        with self._lock:
+            self._state = SoundState.STOPPED
+        print("Sound has finished playing naturally. Thread is closing.")
+
+    def is_warning_active(self):
+        """Checks if the sound loop is in a running state."""
+        with self._lock:
+            return self._state == SoundState.RUNNING
+    
+    def cleanup(self):
+        """
+        Stops the sound loop and blocks until all activity is finished.
+        This is a destructive action for shutting down the application.
+        """
+        self.stop_warning()
+        # Join the thread only if it exists and is alive.
+        if self._sound_thread and self.sound_thread.is_alive():
+            self._sound_thread.join()
+        pygame.mixer.quit()
+        print("Cleanup complete.")
 
 def determine_emergency(gap, v_ego, a_ego_max, v_lead, a_lead):
     """
@@ -2759,7 +2781,7 @@ def determine_emergency(gap, v_ego, a_ego_max, v_lead, a_lead):
     """
     
     # Safety margin (small buffer)
-    SAFETY_MARGIN = 0.5  # meters
+    SAFETY_MARGIN = 0.7  # meters
     
     # Handle edge cases
     if gap <= 0:
@@ -2873,7 +2895,7 @@ def determine_emergency(gap, v_ego, a_ego_max, v_lead, a_lead):
     
     # Binary search for maximum safe coasting time
     t_min, t_max = 0.0, 100.0  # Search range in seconds
-    tolerance = 0.001  # 1ms precision
+    tolerance = 0.01  # 1ms precision
     
     # Quick check: can we avoid collision at all?
     if min_gap_after_braking(0.0) < SAFETY_MARGIN:
@@ -2892,8 +2914,8 @@ def determine_emergency(gap, v_ego, a_ego_max, v_lead, a_lead):
     time_to_brake = t_min
     
     # Determine activation flags
-    AEB_brake = time_to_brake <= 0.05
-    AEB_warn = time_to_brake <= 0.7
+    AEB_brake = time_to_brake <= 0.1
+    AEB_warn = time_to_brake <= 1.5
     
     return AEB_brake, AEB_warn, time_to_brake
 
@@ -3082,6 +3104,7 @@ def main():
     global data_history
     global AEB_warn
     global acc_enabled
+    global cc_enabled
     # Initialize pygame for joystick handling
     
     # Start SDK check thread
@@ -3434,6 +3457,8 @@ def main():
                 acc_data = radar.update(data, cc_app)
 
             # Initialize emergency flags
+                AEB_initiated = AEB_warn
+
             AEB_brake = False
             AEB_warn = False
             AEB_warn_temp = False
@@ -3488,9 +3513,9 @@ def main():
                         }
                         _prev_data[lead_id].append(data_point)
 
-                    # Determine emergency for this specific vehicle
-                    # temporarily disabled AEB because of inacurate detection
-                    vehicle_AEB_brake, vehicle_AEB_warn, time_to_brake = determine_emergency(lead_dist_raw-1, speed/3.6, -5.5, lead_speed_raw/3.6, a_lead/16)
+                    vehicle_AEB_brake, vehicle_AEB_warn, time_to_brake = determine_emergency(
+                        lead_dist_raw, speed/3.6, -8.5, lead_speed_raw/3.6, a_lead
+                    )
             
                     # If any vehicle triggers emergency, set the overall flag to True
                     if vehicle_AEB_brake:
@@ -3536,7 +3561,7 @@ def main():
                     AEB_warn = False
                     AEB_warn_temp = False
                 
-                if speed < 30:
+                if speed < 30 and not AEB_initiated:
                     AEB_brake = False
                     AEB_warn = False
                     AEB_warn_temp = False
@@ -3544,66 +3569,36 @@ def main():
             if AEB_brake:
                 AEB_warn = True
                 AEBSound.start_warning()
+                change_hazards_state(True)
+                hazards_prompted = True
                 print("\n" + "@"*50)
                 print("!!!   AEB_BRAKE ACTIVATED - EMERGENCY BRAKING   !!!".center(50))
                 print("@"*50 + "\n")
             elif AEB_warn_temp:
                 AEB_warn = True
+                change_hazards_state(True)
                 cc_app.update(AEB_warn=True, acc_locked=True, acc_enabled=acc_enabled.get()) if cc_app is not None else None
                 AEBSound.start_warning()
                 print("\n" + "="*50)
                 print("!!!   AEB_WARN ACTIVATED - WARNING   !!!".center(50))
                 print("="*50 + "\n")
             else:
-                AEBSound.stop_warning()
+                if AEBSound.is_warning_active():
+                    AEBSound.stop_warning()
+                    if not AEB_brake:
+                        change_hazards_state(False)
                 cc_app.update(AEB_warn=False, acc_locked=(len(acc_data) > 0), acc_enabled=acc_enabled.get()) if cc_app is not None else None
 
-            '''
-            if data["cruiseControl"] == True and data["cruiseControlSpeed"] > 0 and brakeval == 0:
-                opdbrakeval = 0
-            elif stopped == True and gasval > 0 and speed >= -0.3 and gear < 0:
-                opdbrakeval = 0.1
-            elif stopped == True and gasval > 0 and speed <= 0.3 and gear > 0:
-                opdbrakeval = 0.1
-            elif stopped == True:
-                opdbrakeval = max(0, opdbrakeval)
-            '''
-            offset = offset_variable.get()
-            a = (0.035)-slope/2
-            if stopped:
-                if gear > 0 and speed < 3 and gasval <= (0.7+offset*0.7) and gasval != 0:
-                    opdbrakeval += min(0.03*(((-round(speed+0.8,1)+4)**5)/(4**5))+slope*2, 0.3)
-                elif gear < 0 and speed > -3 and gasval <= (0.7+offset*0.7) and gasval != 0:
-                    opdbrakeval += min(0.03*(((round(speed+0.8,1)+4)**5)/(4**5))-slope*2, 0.3)
-                elif gasval == 0 and gear != 0:
-                    opdbrakeval += 0.06
-                delta_time = time.time()-prev_stop
-                t = 0.5
-                if prev_stop != 0 and delta_time < t:
-                    opdbrakeval = opdbrakeval*(delta_time/t)+prev_opdbrakeval*(1-delta_time/t)
-                else:
-                    prev_stop = 0
-            elif opdgasval == 0 and opd_mode_variable.get() and opdbrakeval < 0.3:
-                if speed > 0:
-                    b = max(opdbrakeval**0.8/2, 0.3)
-                    opdbrakeval = max(opdbrakeval*((-1/(b*speed+1))+1)+a*(1-(-1/(b*speed+1)+1)),0)
-                elif speed < 0:
-                    b =  max(opdbrakeval**0.8/2,0.3)
-                    opdbrakeval = max(opdbrakeval*((-1/(b*-speed+1))+1)+a*(1-(-1/(b*-speed+1)+1)),0)
-            
-            if data.get('userThrottle', 0.0) > 0.0:
-                opdbrakeval = 0.0
-            
-            if cc_brake >= 1:
-                if hazards_variable_var:
-                    change_hazards_state(True)
-                    hazards_prompted = True
 
+            # Apply CC/AEB
             if not (AEB_brake and gasval <= 0.9):
                 if data["cruiseControl"] and not cc_enabled:
                     opdbrakeval = 0
                 elif (cc_enabled and cc_mode.get() == "Cruise control"):
-                    if gasval <= 0.0:
+                    if prev_speed-speed >= 5:
+                        cc_enabled = False
+                        opdbrakeval = 1.0
+                    elif gasval <= 0.0:
                         opdbrakeval = cc_brake
                     else:
                         opdbrakeval = 0.0
@@ -3618,7 +3613,41 @@ def main():
             else:
                 opdbrakeval = 1.0
                 opdgasval = 0.0
+
+            # Then apply stopping logic (filters CC brake)
+            offset = offset_variable.get()
+            a = (0.035)-slope/2
+
+            effective_gas = max(gasval, opdgasval)
             
+            if stopped:
+                if gear > 0 and speed < 3 and effective_gas <= (0.7+offset*0.7) and effective_gas != 0:
+                    opdbrakeval += min(0.03*(((-round(speed+0.8,1)+4)**5)/(4**5))+slope*2, 0.3)
+                elif gear < 0 and speed > -3 and effective_gas <= (0.7+offset*0.7) and effective_gas != 0:
+                    opdbrakeval += min(0.03*(((round(speed+0.8,1)+4)**5)/(4**5))-slope*2, 0.3)
+                elif effective_gas == 0 and gear != 0:
+                    opdbrakeval += 0.06
+                delta_time = time.time()-prev_stop
+                t = 0.5
+                if prev_stop != 0 and delta_time < t:
+                    opdbrakeval = opdbrakeval*(delta_time/t)+prev_opdbrakeval*(1-delta_time/t)
+                else:
+                    prev_stop = 0
+            elif opdgasval == 0 and opd_mode_variable.get() and opdbrakeval < 0.3:
+                if speed > 0:
+                    b = max(opdbrakeval**0.8/2, 0.3)
+                    opdbrakeval = max(opdbrakeval*((-1/(b*speed+1))+1)+a*(1-(-1/(b*speed+1)+1)),0)
+                elif speed < 0:
+                    b = max(opdbrakeval**0.8/2,0.3)
+                    opdbrakeval = max(opdbrakeval*((-1/(b*-speed+1))+1)+a*(1-(-1/(b*-speed+1)+1)),0)
+
+            # Hazards logic
+            if cc_brake >= 1:
+                if hazards_variable_var and not hazards_prompted:
+                    change_hazards_state(True)
+                    hazards_prompted = True
+
+            # Stopped state detection
             if speed <= 0.1 and speed >= -0.1 and gasval == 0 and gear != 0 and not stopped:
                 stopped = True
                 prev_opdbrakeval = opdbrakeval
@@ -3636,11 +3665,9 @@ def main():
 
             gas_output = opdgasval
             brake_output = opdbrakeval
-            # print(f"gas: {gas_output}\tbrake: {brake_output}\tstopped: {stopped}")
-
-            #stopped = False
 
             if debug_mode.get() == True:
+                print(f"FINAL OUTPUT: brake={brake_output}, gas={gas_output}")
                 print(f"gasvalue: {round(opdgasval,3)} \tbrakevalue: {round(opdbrakeval,3)} \tspeed: {round(speed,3)} \tstopped: {stopped} \tgasval: {round(gasval,3)} \tbrakeval: {round(brakeval,3)} \tdiff: {round(prev_brakeval-brakeval,3)} \tdiff2: {round(prev_speed-speed,3)} \thazards: {data['lightsHazards']} \thazards_var: {hazards_variable_var} \thazards_prompted: {hazards_prompted}")
             
             if ((prev_brakeval-brakeval <= -0.07*latency_multiplier or brakeval >= 0.8 or data["parkBrake"]) and stopped == False and speed > 10 and arrived == False and not pauzed):
@@ -3655,7 +3682,7 @@ def main():
                 stopped = True
                 send(0,1, controller)
                 cmd_print("#####crash#####", "#FF2020", 10)
-                if hazards_variable_var:
+                if hazards_variable_var and not hazards_prompted:
                     change_hazards_state(True)
                     hazards_prompted = True
 
@@ -5210,5 +5237,4 @@ except Exception as e:
         controller.close()
         sys.exit(1)
     except:
-
         pass

@@ -5,9 +5,9 @@ import numpy as np
 import numpy.typing as npt
 import truck_telemetry
 from shapely.geometry import Polygon, Point
-from ETS2radar.classes import Vehicle
 
 try:
+    from ETS2radar.classes import Vehicle
     from ETS2radar.main import Module
 except:
     print("\n")
@@ -27,7 +27,7 @@ Corner = Tuple[float, float, float]  # (x, y, z)
 
 # Constants
 MAX_DISTANCE: int = 150  # meters
-REFRESH_INTERVAL: float = 0.1  # seconds
+REFRESH_INTERVAL: float = 0.1  # only used when running run() loop
 FOV_ANGLE: int = 25  # degrees (half-angle of cone)
 POSITION_SNAP: float = 1.5  # meters: only save every 10 meters
 
@@ -89,7 +89,7 @@ class ETS2Radar:
         self.max_distance: int = max_distance
         self.fov_angle: int = fov_angle
         self.refresh_interval: float = REFRESH_INTERVAL
-        self.blinker_time_window: float = 2 # seconds to estimate changing lane
+        self.blinker_time_window: float = 2.5 # seconds to estimate changing lane
         self.last_left_blinker: int = 0 # timestamp of last left blinker on
         self.last_right_blinker: int = 0 # timestamp of last right blinker on
 
@@ -768,34 +768,23 @@ class ETS2Radar:
 
         now = time.time()
 
-        # Only update blinker timestamps when they first become active (edge detection)
-        if data.get("blinkerRightActive", False) and not getattr(self, 'prev_right_active', False):
+        # Edge detection and speed check for blinker activation
+        if data.get("blinkerRightActive", False) and not getattr(self, 'prev_right_active', False) and ego_speed*3.6 >= 65:
             self.last_right_blinker = now
-        if data.get("blinkerLeftActive", False) and not getattr(self, 'prev_left_active', False):
+            for vid in self.vehicle_scores:
+                self.vehicle_scores[vid] = 0.0
+        if data.get("blinkerLeftActive", False) and not getattr(self, 'prev_left_active', False) and ego_speed*3.6 >= 65:
             self.last_left_blinker = now
-        
-        # Store previous state for edge detection
+            for vid in self.vehicle_scores:
+                self.vehicle_scores[vid] = 0.0
+
         self.prev_right_active = data.get("blinkerRightActive", False)
         self.prev_left_active = data.get("blinkerLeftActive", False)
 
-        if (data.get("blinkerRightActive", False) or data.get("blinkerLeftActive", False)) and not self.in_lane_scores_reset and ego_speed > 60:
-            self.reset_in_lane_scores = True
-        else:
-            self.reset_in_lane_scores = False
-        if not (data.get("blinkerRightActive", False) or data.get("blinkerLeftActive", False)):
-            self.in_lane_scores_reset = False
-            self.reset_in_lane_scores = False
-
-        #print debug for blinker score reset
-        if self.reset_in_lane_scores:
-            self.in_lane_scores_reset = True
-            print("Resetting in-lane scores due to blinker change.")
-
-        # Normalized time since last activation (0 → 1)
+        # Calculate blinker offset with gradual return to origin
         t_left = (now - self.last_left_blinker) / self.blinker_time_window
         t_right = (now - self.last_right_blinker) / self.blinker_time_window
 
-        # Smooth decay: cos starts at 1, ends at 0
         val_left = -np.cos(t_left * np.pi / 2) if t_left <= 1 else 0
         val_right = np.cos(t_right * np.pi / 2) if t_right <= 1 else 0
 
@@ -853,7 +842,7 @@ class ETS2Radar:
                     offset, angle = self.draw_fitted_arc(img, hist, px, pz, yaw_rad, center, scale,
                                                 arc_length=150, color=(0,80,80), reverse=True, ego_steer=ego_steer)
                     if offset is not None:
-                        offset_for_score = offset - blinker_offset*20 * max(min((ego_speed-5)/3, 1),0)
+                        offset_for_score = offset - blinker_offset * 20
                     else:
                         offset_for_score = None
                     angle_for_score = angle
@@ -1104,6 +1093,8 @@ class ETS2Radar:
             filtered_acceleration = self._apply_acceleration_filtering(
                 vehicle_id, raw_acceleration, now
             )
+        else:
+            filtered_acceleration = raw_acceleration
         
         # Apply adaptive EMA smoothing
         ema_acceleration = self._apply_acceleration_ema(
@@ -1113,9 +1104,9 @@ class ETS2Radar:
         # Apply final low pass filter to smooth the acceleration output
         alpha = 0.5  # Filter coefficient (0 = no filtering, 1 = no smoothing)
         smoothed_acceleration = alpha * ema_acceleration + (1 - alpha) * self.vehicle_acceleration_filtered[vehicle_id]
-        self.vehicle_acceleration_filtered[vehicle_id] = smoothed_acceleration
+        self.vehicle_acceleration_filtered[vehicle_id] = round(smoothed_acceleration, 4)
         
-        return smoothed_acceleration
+        return round(smoothed_acceleration, 4)
     
     def _apply_acceleration_ema(self, vehicle_id: int, acceleration: float) -> float:
         """
@@ -1198,11 +1189,11 @@ class ETS2Radar:
     def filter_vehicle_speed(self, vehicle_id: int, current_speed: float, is_tmp: bool = False) -> float:
         """
         Filter vehicle speed data to remove noise and outliers.
-        Returns filtered speed in m/s.
+        Returns filtered speed in km/h.
         
         Args:
             vehicle_id: Unique identifier for the vehicle
-            current_speed: Current speed in m/s
+            current_speed: Current speed in km/h
             is_tmp: Whether this is a temporary/transient vehicle (applies advanced filtering)
         
         Advanced filtering (for is_tmp=True vehicles):
@@ -1269,9 +1260,11 @@ class ETS2Radar:
             filtered_speed = self._apply_speed_filtering(
                 vehicle_id, current_speed, now
             )
+        else:
+            filtered_speed = current_speed
         
         # Apply adaptive EMA smoothing
-        ema_speed = self._apply_speed_ema(vehicle_id, filtered_speed)
+        ema_speed = round(self._apply_speed_ema(vehicle_id, filtered_speed), 4)
         
         # Add filtered speed to history for future analysis
         self.vehicle_filtered_speed_history[vehicle_id].append(ema_speed)
