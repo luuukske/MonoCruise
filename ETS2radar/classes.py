@@ -6,7 +6,7 @@ I DO NOT TAKE ANY CREDIT FOR THIS CODE.
 import math
 import time
 
-tmp_speed_update_frequency = 0.5 # seconds
+TMP_speed_update_frequency = 0.5 # seconds
 
 # TODO: Switch __dict__ to __iter__ and dict() for typing support.
 # TODO: f = Class() -> dict(f) instead of f.__dict__()
@@ -244,7 +244,7 @@ class Vehicle:
             return
         
         time_diff = time.time() - vehicle.time
-        if time_diff < tmp_speed_update_frequency:
+        if time_diff < TMP_speed_update_frequency:
             self.time = vehicle.time
             self.speed = vehicle.speed
             self.speed_position = vehicle.speed_position
