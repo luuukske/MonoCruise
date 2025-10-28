@@ -2539,8 +2539,8 @@ def calculate_stopping_acceleration(ego_speed_kmh, lead_speed_kmh, lead_dist, a_
         else:
             required_decel_ms2 = -4.0
     
-    # Convert to controller output using the 0.75 factor
-    stopping_acc_value = required_decel_ms2 * 0.75
+    # Convert to controller output using the 0.78 factor
+    stopping_acc_value = required_decel_ms2 * 0.78
     
     # Prepare debug info
     stop_info = {
@@ -2617,12 +2617,12 @@ def adaptive_cruise_control(ego_speed, min_gap=4.0, acc_time_gap=1.3, stopping_g
     a_lead = np.mean([d['a_lead'] for d in data_history])
 
     # Calculate desired gap using averaged ego speed
-    desired_gap = min_gap + acc_time_gap * max((lead_speed*0.3+avg_ego_speed*0.7) / 3.6, 0)
+    desired_gap = min_gap + acc_time_gap * max((lead_speed*0.7+avg_ego_speed*0.3) / 3.6, 0)
     gap_error = lead_dist - desired_gap
     speed_error = lead_speed - avg_ego_speed
 
     # calculate closeness amplifier using averaged values
-    actual_time_gap = max(min(lead_dist / (max((lead_speed*0.3+avg_ego_speed*0.7), 1) / 3.6), 10), 0.01)
+    actual_time_gap = max(min(lead_dist / (max((lead_speed*0.7+avg_ego_speed*0.3), 1) / 3.6), 10), 0.01)
     closeness_amp = pow(0.8, actual_time_gap*10-3) + 0.6
     if speed_error < 0.1:
         closeness_amp = closeness_amp**0.8
@@ -2638,9 +2638,9 @@ def adaptive_cruise_control(ego_speed, min_gap=4.0, acc_time_gap=1.3, stopping_g
     slow_speed_increase = pow(0.8, max(avg_ego_speed*0.9, 0.0))*1.5
 
     # Gains
-    K_gap = 0.085 * closeness_amp * (slow_speed_adj*2+1)
-    K_speed = 0.13 * closeness_amp * (slow_speed_adj/3+1)
-    K_acc = 0.72 *acceleration_amp
+    K_gap = 0.085 * closeness_amp #* (slow_speed_adj*2+1)
+    K_speed = 0.13 * closeness_amp #* (slow_speed_adj/3+1)
+    K_acc = 0.75 *acceleration_amp
 
     if speed_error > -5 and a_lead > -1:
         K_gap *= 0.7
@@ -2657,7 +2657,7 @@ def adaptive_cruise_control(ego_speed, min_gap=4.0, acc_time_gap=1.3, stopping_g
 
     if acc_value > 0 and a_lead < 2:
         acc_value /= slow_speed_adj+1
-        acc_value /= 1.2
+        acc_value /= 1.3
 
     # ========== STOPPING DISTANCE CALCULATION ==========
     # Only apply stopping distance calculation when lead vehicle is actually coming to a stop
@@ -2679,13 +2679,13 @@ def adaptive_cruise_control(ego_speed, min_gap=4.0, acc_time_gap=1.3, stopping_g
         predicted_lead_stopping_dist = float('inf')
     
     # Determine if lead vehicle is actually coming to a stop (red light scenario)
-    is_lead_stopping_for_redlight = (
+    is_lead_stopping = (
         (lead_speed < 20 and a_lead < -1.5) or  # Low speed + hard braking
         (lead_speed < 1) or  # Very low speed (almost stopped)
         (a_lead < -2.0 and time_to_stop_lead < 5)  # Hard braking that will result in stop within 5 seconds
     )
     
-    if is_lead_stopping_for_redlight:
+    if is_lead_stopping :
         # Calculate stopping acceleration with dynamic gap
         stopping_acc_value, stop_info = calculate_stopping_acceleration(
             ego_speed_kmh=avg_ego_speed,
