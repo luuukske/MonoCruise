@@ -1,14 +1,11 @@
 import threading
 import customtkinter as ctk
 import tkinter as tk
-from tkinter import mainloop, messagebox
 version = "v1.0.2"
 
 # temporary for radar output
 import cv2
-from math import sqrt, inf
 from PIL import Image, ImageDraw, ImageFont, ImageTk
-from typing import Tuple, List
 import sys
 import ctypes
 import os
@@ -213,11 +210,11 @@ def remove_from_startup(app_name: str):
         winreg.CloseKey(key)
         print(f"'{app_name}' has been removed from startup.")
     except FileNotFoundError:
-        print(f"No startup entry named '{app_name}' was found.")
+        cmd_print(f"No startup entry named '{app_name}' was found.", "#FF2020", 10)
     except PermissionError:
-        print("Permission denied: you might need to run this with elevated privileges.")
+        cmd_print("Permission denied: you might need to run this with elevated privileges.", "#FF2020", 10)
     except Exception as e:
-        print(f"Failed to remove from startup: {e}")
+        cmd_print(f"Failed to remove from startup: {e}", "#FF2020", 10)
 
 def refresh_button_labels():
     global device
@@ -1156,6 +1153,7 @@ def send(a, b, controller):
     global gas_output
     global brake_output
     global exit_event
+    global weight_var
     global data
 
     if exit_event.is_set():
@@ -1165,14 +1163,16 @@ def send(a, b, controller):
 
     if weight_adjustment.get():
         try:
-            wheight_exp = (0.27*((total_weight_tons-8.93)/(11.7))+1)
+            weight_var = (0.27*((total_weight_tons-8.93)/(11.7))+1) #prev 11.7
+            print(f"Weight adjustment applied: {weight_var}")
         except:
-            wheight_exp = 1
+            weight_var = 1
             if not device_lost:
                 cmd_print("Error calculating weight adjustment", "#FF2020", 10)
     else:
-        wheight_exp = 1
-    b = b*wheight_exp
+        weight_var = 1
+    b = b**(1/weight_var)
+    a = a
 
     bar_val = gas_output-brake_output
     try:
@@ -1180,7 +1180,7 @@ def send(a, b, controller):
             a = gasval**gas_exponent_variable.get() #for those people that like revvvving that engine
     except:
         a = gasval
-    b = max(b,brakeval**brake_exponent_variable.get())
+    b = max(b,max(brakeval,0)**brake_exponent_variable.get())
  
     setattr(controller, "aforward", float(a))
     setattr(controller, "abackward", float(b))
@@ -2566,7 +2566,7 @@ def calculate_stopping_acceleration(ego_speed_kmh, lead_speed_kmh, lead_dist, a_
     return stopping_acc_value, stop_info
 
 
-def low_pass_filter(current_value, alpha=0.3, emergency_threshold=-2.0):
+def low_pass_filter(current_value, alpha=0.2, emergency_threshold=-2.0):
     """
     Low-pass filter with emergency brake override.
     
@@ -2613,120 +2613,133 @@ def adaptive_cruise_control(ego_speed, min_gap=4.0, acc_time_gap=1.3, stopping_g
     Returns:
         acc_value: Float in [-1, 1]. Positive = accelerate, negative = brake.
     """
-    global data_history
-
     try:
-        if not data_history:
-            raise
-    except:
-        # Reset filter state when no lead vehicle
-        _filter_state['initialized'] = False
-        return 2.0 # full accelerate if free road
+        global data_history
 
-    lead_dist = np.mean([d['distance'] for d in data_history])
-    lead_speed = np.mean([d['speed'] for d in data_history])
-    avg_ego_speed = np.mean([d['ego_speed'] for d in data_history])
-    a_lead = np.mean([d['a_lead'] for d in data_history])
+        if 'data_history' in globals() and data_history is not None:
+            lead_dist = np.mean([d['distance'] for d in data_history])
+            lead_speed = np.mean([d['speed'] for d in data_history])
+            avg_ego_speed = np.mean([d['ego_speed'] for d in data_history])
+            a_lead = np.mean([d['a_lead'] for d in data_history])
 
-    # Calculate desired gap using averaged ego speed
-    desired_gap = min_gap + acc_time_gap * max((lead_speed*0.7+avg_ego_speed*0.3) / 3.6, 0)
-    gap_error = lead_dist - desired_gap
-    speed_error = lead_speed - avg_ego_speed
+            # Calculate desired gap using averaged ego speed
+            desired_gap = min_gap + acc_time_gap * max((lead_speed*0.7+avg_ego_speed*0.3) / 3.6, 0)
+            gap_error = lead_dist - desired_gap
+            speed_error = lead_speed - avg_ego_speed
 
-    # calculate closeness amplifier using averaged values
-    actual_time_gap = max(min(lead_dist / (max((lead_speed*0.7+avg_ego_speed*0.3), 1) / 3.6), 10), 0.01)
-    closeness_amp = pow(0.8, actual_time_gap*10-3) + 0.6
-    if speed_error < 0.1:
-        closeness_amp = closeness_amp**0.8
-    else:
-        closeness_amp = 0.7
+            # calculate closeness amplifier using averaged values
+            actual_time_gap = max(min(lead_dist / (max((lead_speed*0.7+avg_ego_speed*0.3), 1) / 3.6), 10), 0.01)
+            closeness_amp = pow(0.8, actual_time_gap*10-3) + 0.6
+            if speed_error < 0.1:
+                closeness_amp = closeness_amp**0.8
+            else:
+                closeness_amp = 0.7
 
-    acceleration_amp = max(-(actual_time_gap/2)**3+1, 0.2)
-    if a_lead > 0:
-        acceleration_amp *= 0.85
-    
-    # calculate slow speed adjustment using averaged ego speed
-    slow_speed_adj = pow(0.8, max(avg_ego_speed*0.3, 0.0))*1.5
-    slow_speed_increase = pow(0.8, max(avg_ego_speed*0.9, 0.0))*1.5
+            acceleration_amp = max(-(actual_time_gap/2)**3+1, 0.2)
+            if a_lead > 0:
+                acceleration_amp *= 0.85
+            
+            # calculate slow speed adjustment using averaged ego speed
+            slow_speed_adj = pow(0.8, max(avg_ego_speed*0.3, 0.0))*1.5
+            slow_speed_increase = pow(0.8, max(avg_ego_speed*0.9, 0.0))*1.5
 
-    # Gains
-    K_gap = 0.085 * closeness_amp
-    K_speed = 0.13 * closeness_amp
-    K_acc = 0.75 *acceleration_amp
+            # Gains
+            K_gap = 0.085 * closeness_amp
+            K_speed = 0.13 * closeness_amp
+            K_acc = 0.75 *acceleration_amp
 
-    if speed_error > -5 and a_lead > -1:
-        K_gap *= 0.7
+            if speed_error > -5 and a_lead > -1:
+                K_gap *= 0.7
 
-    # Control law (sum of weighted errors)
-    gap_error_val = np.sign(gap_error)*((abs(gap_error)/10)**0.8)*10
-    speed_error_val = np.sign(speed_error)*min(((abs(speed_error)/5)**1.3)*5, abs(speed_error))
-    a_lead_val = a_lead
+            # Control law (sum of weighted errors)
+            gap_error_val = np.sign(gap_error)*((abs(gap_error)/10)**0.8)*10
+            speed_error_val = np.sign(speed_error)*min(((abs(speed_error)/5)**1.3)*5, abs(speed_error))
+            a_lead_val = a_lead
 
-    acc_raw = K_gap * gap_error_val + K_speed * speed_error_val + K_acc * a_lead_val
+            acc_raw = K_gap * gap_error_val + K_speed * speed_error_val + K_acc * a_lead_val
 
-    acc_value = acc_raw / 1.3
+            acc_value = acc_raw / 1.3
 
-    if acc_value > 0 and a_lead < 2:
-        acc_value /= slow_speed_adj+1
-        acc_value /= 1.3
+            if acc_value > 0 and a_lead < 2:
+                acc_value /= slow_speed_adj+1
+                acc_value /= 1.3
 
-    # ========== STOPPING DISTANCE CALCULATION ==========
-    is_lead_stopping = (a_lead < -1.0) or (lead_speed <= 2.0)
-    
-    if is_lead_stopping and acc_value < 0:
-        stopping_acc_value, stop_info = calculate_stopping_acceleration(
-            ego_speed_kmh=avg_ego_speed,
-            lead_speed_kmh=lead_speed,
-            lead_dist=lead_dist,
-            a_lead=a_lead,
-            min_gap=min_gap,
-            stopping_gap=stopping_gap
-        )
+            # ========== STOPPING DISTANCE CALCULATION ==========
+            # Detect if the lead is stopping, or if ego will stop in <= 3 sec, or ego is almost stationary
+            ego_speed_ms = avg_ego_speed / 3.6 if 'avg_ego_speed' in locals() else 0
+            # Use nominal deceleration as in calculate_stopping_acceleration (assume -3.0 m/s^2 if not available)
+            nominal_decel = 3.0 # Positive value, see below
+            ego_stop_time = abs(ego_speed_ms) / nominal_decel if nominal_decel > 0 and ego_speed_ms > 0.1 else float('inf')
+            is_ego_almost_stopped = avg_ego_speed <= 3.0
+            # Trigger stopping if conditions are met:
+            is_lead_stopping = (a_lead < -1.0) or (lead_speed <= 3.0) or (ego_stop_time <= 3.0) or is_ego_almost_stopped
+
+            if is_lead_stopping and acc_value < 0:
+                stopping_acc_value, stop_info = calculate_stopping_acceleration(
+                    ego_speed_kmh=avg_ego_speed,
+                    lead_speed_kmh=lead_speed,
+                    lead_dist=lead_dist,
+                    a_lead=a_lead,
+                    min_gap=min_gap,
+                    stopping_gap=stopping_gap
+                )
+                
+                final_acc_value = stopping_acc_value
+                control_mode = "STOPPING"
+                
+                if debug:
+                    print(f"\t[STOP CALC] Dynamic gap={stop_info['dynamic_gap']:.2f}m")
+                    print(f"\t[STOP CALC] Ego stop dist={stop_info['ego_stopping_dist']:.2f}m\tLead stop dist={stop_info['lead_stopping_dist']:.2f}m")
+                    print(f"\t[STOP CALC] Target stop pos={stop_info['target_stop_position']:.2f}m\tRequired decel={stop_info['required_decel_ms2']:.2f}m/s²")
+                    print(f"\t[STOP CALC] PID acc={acc_value:.3f}\tStop acc={stopping_acc_value:.3f}")
+            else:
+                final_acc_value = acc_value
+                control_mode = "PID_NORMAL"
+
+            # ========== LOW SPEED GAP CLOSING OFFSET ==========
+            gap_excess = max(gap_error - stopping_gap, 0)
+            
+            relative_speed = abs(speed_error)
+            speed_threshold = 15
+            relative_speed_factor = max(0, 1 - (relative_speed / speed_threshold))
+            
+            low_speed_threshold = 15
+            low_speed_factor = max(0, 1 - (avg_ego_speed / low_speed_threshold))
+            
+            activation_factor = relative_speed_factor * low_speed_factor
+            
+            max_offset = 0.8
+            gap_closing_offset = min(gap_excess * 0.12, max_offset) * activation_factor
+            
+            if gap_closing_offset > 0.01 and final_acc_value < 0.5:
+                final_acc_value += gap_closing_offset
+                if debug and activation_factor > 0.1:
+                    print(f"  [GAP CLOSE] Excess={gap_excess:.2f}m\tRel.Speed={relative_speed:.2f}km/h\tActivation={activation_factor:.2f}\tOffset={gap_closing_offset:.3f}")
+
+            # Add slow speed adjustment for braking
+            if final_acc_value <= 0.2:
+                final_acc_value -= slow_speed_increase
         
-        final_acc_value = stopping_acc_value
-        control_mode = "STOPPING"
-        
+            if debug:
+                print(f"Gap={lead_dist:.2f}\tGap error={gap_error:.2f}\tSpeed error={speed_error:.2f}\ta_lead={a_lead:.2f}")
+            
+        else:
+            # No lead vehicle detected
+            final_acc_value = 2.0
+            control_mode = "NO_LEAD"
+
+        # Apply low-pass filter with emergency brake override
+        filtered_acc_value = low_pass_filter(final_acc_value)
+
         if debug:
-            print(f"\t[STOP CALC] Dynamic gap={stop_info['dynamic_gap']:.2f}m")
-            print(f"\t[STOP CALC] Ego stop dist={stop_info['ego_stopping_dist']:.2f}m\tLead stop dist={stop_info['lead_stopping_dist']:.2f}m")
-            print(f"\t[STOP CALC] Target stop pos={stop_info['target_stop_position']:.2f}m\tRequired decel={stop_info['required_decel_ms2']:.2f}m/s²")
-            print(f"\t[STOP CALC] PID acc={acc_value:.3f}\tStop acc={stopping_acc_value:.3f}")
-    else:
-        final_acc_value = acc_value
-        control_mode = "PID_NORMAL"
-
-    # ========== LOW SPEED GAP CLOSING OFFSET ==========
-    gap_excess = max(gap_error - stopping_gap, 0)
-    
-    relative_speed = abs(speed_error)
-    speed_threshold = 15
-    relative_speed_factor = max(0, 1 - (relative_speed / speed_threshold))
-    
-    low_speed_threshold = 15
-    low_speed_factor = max(0, 1 - (avg_ego_speed / low_speed_threshold))
-    
-    activation_factor = relative_speed_factor * low_speed_factor
-    
-    max_offset = 0.8
-    gap_closing_offset = min(gap_excess * 0.12, max_offset) * activation_factor
-    
-    if gap_closing_offset > 0.01 and final_acc_value < 0.5:
-        final_acc_value += gap_closing_offset
-        if debug and activation_factor > 0.1:
-            print(f"  [GAP CLOSE] Excess={gap_excess:.2f}m\tRel.Speed={relative_speed:.2f}km/h\tActivation={activation_factor:.2f}\tOffset={gap_closing_offset:.3f}")
-
-    # Add slow speed adjustment for braking
-    if final_acc_value <= 0.2:
-        final_acc_value -= slow_speed_increase
-
-    # Apply low-pass filter with emergency brake override
-    filtered_acc_value = low_pass_filter(final_acc_value, alpha=0.4, emergency_threshold=-2.0)
-    
-    if debug:
-        print(f"Gap={lead_dist:.2f}\tGap error={gap_error:.2f}\tSpeed error={speed_error:.2f}\ta_lead={a_lead:.2f}")
-        print(f"Mode={control_mode}\tRaw acc={final_acc_value:.3f}\tFiltered acc={filtered_acc_value:.3f}")
-    
-    return filtered_acc_value
+            print(f"Mode={control_mode}\tRaw acc={final_acc_value:.3f}\tFiltered acc={filtered_acc_value:.3f}")
+        
+        return filtered_acc_value
+    except Exception as e:
+        context = get_error_context()
+        log_error(e, context)
+        cmd_print("Error in adaptive cruise control calculation", "#FF2020", 10)
+        return -1.0 # brake in case of error
 
 
 
@@ -3064,6 +3077,7 @@ def cc_target_speed_thread_func():
     global brake_exponent_variable
     global _data_cache
     global acc_enabled
+    global weight_var
 
     cc_locked = False
     cc_limiting = False
@@ -3089,7 +3103,6 @@ def cc_target_speed_thread_func():
         if target_speed is not None and not pauzed:
 
             slope = data['rotationY']
-            weight_adjustment = (0.27*((total_weight_tons-8.93)/(8.5))+1)
             if cc_mode.get() == "Speed limiter":
                 error = (target_speed-0.1) - speed
             else:
@@ -3124,7 +3137,7 @@ def cc_target_speed_thread_func():
                 proportional = (error**0.8) * P
 
             slow_speed_adjustment = (-(2**(-(max(target_speed, 30)*0.04)+0.3))+1)*1.3
-            physics_adjustment = (speed * 0.0025 + slope * 23 * slow_speed_adjustment) * weight_adjustment
+            physics_adjustment = (speed * 0.0025 + slope * 23 * slow_speed_adjustment)  * weight_var
 
             base_val = (max(proportional, -max_proportional) * slow_speed_adjustment +
                         integral_sum * I +
@@ -3581,18 +3594,20 @@ def main():
 
             pauzed = data['paused']
 
-            if not device_lost and device is not None and acc_enabled.get():
+            if not device_lost and device is not None and (acc_enabled.get() or AEB_enabled.get()):
                 # radar code
                 acc_data = radar.update(data, cc_app)
+            else:
+                acc_data = None
 
             # Initialize emergency flags
-                AEB_initiated = AEB_warn
+            AEB_initiated = AEB_warn
 
             AEB_brake = False
             AEB_warn = False
             AEB_warn_temp = False
 
-            if acc_data and acc_enabled.get():
+            if acc_data:
                 # Get the closest vehicle (first in the sorted list)
                 closest_vehicle = acc_data[0]
                 closest_lead_id, closest_lead_dist_raw, closest_lead_speed_raw, closest_a_lead = closest_vehicle
@@ -3645,7 +3660,7 @@ def main():
 
                     if AEB_enabled.get():
                         vehicle_AEB_brake, vehicle_AEB_warn, time_to_brake = determine_emergency(
-                            lead_dist_raw, speed/3.6, -8, lead_speed_raw/3.6, a_lead/1.5
+                            lead_dist_raw, speed/3.6, -8.1, lead_speed_raw/3.6, a_lead
                         )
                     else:
                         vehicle_AEB_brake, vehicle_AEB_warn, time_to_brake = False, False, float('inf')
@@ -3711,13 +3726,15 @@ def main():
                 AEB_warn = True
                 cc_app.update(AEB_warn=True, acc_locked=True, acc_enabled=acc_enabled.get()) if cc_app is not None else None
                 AEBSound.start_warning()
+                change_hazards_state(True)
+                hazards_prompted = True
                 print("\n" + "="*50)
                 print("!!!   AEB_WARN ACTIVATED - WARNING   !!!".center(50))
                 print("="*50 + "\n")
             else:
                 if AEBSound.is_warning_active():
                     AEBSound.stop_warning()
-                cc_app.update(AEB_warn=False, acc_locked=(len(acc_data) > 0), acc_enabled=acc_enabled.get()) if cc_app is not None else None
+                cc_app.update(AEB_warn=False, acc_locked=(len(acc_data) > 0) if acc_enabled.get() and acc_data else False, acc_enabled=acc_enabled.get()) if cc_app is not None else None
 
 
             # Apply CC/AEB
@@ -3892,7 +3909,7 @@ def main():
                 setattr(controller, "accmode", False)
             """
 
-            if autodisable_hazards_var == True and hazards_prompted == True and speed > 10 and data["lightsHazards"] == True and opdgasval > 0.5 and opdbrakeval == 0:
+            if autodisable_hazards_var == True and hazards_prompted == True and speed > 10 and data["lightsHazards"] == True and opdgasval > 0.5 and opdbrakeval == 0 and not AEB_warn:
                 cmd_print("autodisabled hazards")
                 
                 if hazards_variable_var:
@@ -4676,7 +4693,7 @@ try:
             msg = CTkMessagebox(
                 title="Adaptive Cruise Control BETA",
                 message=(
-                    "WARNING: This feature is in BETA and may brake unexpectedly. "
+                    "WARNING: This feature is in BETA and may brake unexpectedly in MP. "
                     "Use with caution!"
                 ),
                 icon="warning", 

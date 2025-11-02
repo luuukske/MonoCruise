@@ -1,5 +1,4 @@
-from turtle import speed
-from typing import List, Tuple, Dict, Optional, Any, Deque, Union
+from typing import List, Tuple, Dict, Optional, Any, Deque
 import cv2
 import numpy as np
 import numpy.typing as npt
@@ -822,7 +821,7 @@ class ETS2Radar:
                     offset, angle = self.draw_fitted_arc(img, hist, px, pz, yaw_rad, center, scale,
                                                 arc_length=150, color=(0,80,80), reverse=True, ego_steer=ego_steer)
                     if offset is not None:
-                        offset_for_score = offset - blinker_offset * 25
+                        offset_for_score = offset - blinker_offset * 18
                     else:
                         offset_for_score = None
                     angle_for_score = angle
