@@ -1,6 +1,7 @@
 """
-this is code by tumppi for ETS2LA. i (Lukas Deschryver) did some minor modifications to make it work with MonoCruise.
-I DO NOT TAKE ANY CREDIT FOR THIS CODE.
+this is code partially by tumppi for ETS2LA.
+i (Lukas Deschryver) did some minor modifications to make it work with MonoCruise and smoother in MP.
+I DO NOT TAKE CREDIT FOR THIS CODE.
 """
 
 from ETS2radar.classes import Position, Quaternion, Size, Trailer, Vehicle
@@ -13,12 +14,13 @@ class Module():
     vehicle_format = "ffffffffffffhhbb"
     trailer_format = "ffffffffff"
     vehicle_object_format = vehicle_format + trailer_format + trailer_format
-    total_format = "=" + vehicle_object_format * 40
+    total_format = "=" + vehicle_object_format * 60
     
     last_vehicles: dict[int, Vehicle] = {}
     
     start_time = 0
     message_shown = False
+    paused = True
     
     def imports(self):
         self.start_time = time.time()
@@ -28,7 +30,7 @@ class Module():
         self.buf = None
         while self.buf is None:
             try:
-                size = 5360
+                size = 8040
                 self.buf = mmap.mmap(0, size, r"Local\ETS2LATraffic")
             except: 
                 if time.time() - self.start_time > 5 and not self.message_shown:
@@ -58,19 +60,20 @@ class Module():
 
         return Vehicle(position, rotation, size, speed, acceleration, trailer_count, trailers, id, is_tmp, is_trailer)
 
-    def get_traffic(self):
+    def get_traffic(self, paused):
+        self.paused = paused
         if self.buf is None:
             return None
         
         try:
-            data = struct.unpack(self.total_format, self.buf[:5360])
+            data = struct.unpack(self.total_format, self.buf[:8040])
             vehicles: list[Vehicle] = []
-            for i in range(0, 40):
+            for i in range(0, 60):
                 position = Position(data[0], data[1], data[2])
                 rotation = Quaternion(data[3], data[4], data[5], data[6])
                 size = Size(data[7], data[8], data[9])
-                speed = data[10]
-                acceleration = data[11]
+                speed = data[10]  # Read but will be recalculated
+                acceleration = data[11]  # Read but will be recalculated
                 trailer_count = data[12]
                 id = data[13]
                 is_tmp = data[14]
@@ -90,11 +93,19 @@ class Module():
                 
                 data = data[16 + (2 * 10):]
             
-            if len(vehicles) > 0:
-                if vehicles[0].is_tmp:
-                    for vehicle in vehicles:
-                        if vehicle.id in self.last_vehicles:
-                            vehicle.update_from_last(self.last_vehicles[vehicle.id])
+            # Update all vehicles with calculated speed/acceleration from position history
+            if len(vehicles) > 0 and not self.paused:
+                for vehicle in vehicles:
+                    if vehicle.id in self.last_vehicles:
+                        vehicle.update_from_last(self.last_vehicles[vehicle.id])
+                    else:
+                        # Initialize position history for new vehicles
+                        from collections import deque
+                        maxlen = int(1 / 0.1)  # SPEED_CALCULATION_WINDOW / frame time
+                        vehicle.position_history = deque(maxlen=maxlen)
+                        current_time = time.time()
+                        vehicle.position_history.append((current_time, Position(vehicle.position.x, vehicle.position.y, vehicle.position.z)))
+                        vehicle._previous_speed = 0.0
 
             self.last_vehicles = {vehicle.id: vehicle for vehicle in vehicles}
             return vehicles
@@ -102,5 +113,5 @@ class Module():
             logging.exception("Failed to read camera properties")
             return None
     
-    def run(self):
-        return self.get_traffic()
+    def run(self, paused):
+        return self.get_traffic(paused)

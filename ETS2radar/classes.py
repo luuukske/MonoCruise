@@ -1,12 +1,14 @@
 """
-this is code by tumppi for ETS2LA. i (Lukas Deschryver) did some minor modifications to make it work with MonoCruise.
-I DO NOT TAKE ANY CREDIT FOR THIS CODE.
+this is code partially by tumppi for ETS2LA.
+i (Lukas Deschryver) did some minor modifications to make it work with MonoCruise and smoother in MP.
+I DO NOT TAKE CREDIT FOR THIS CODE.
 """
 
 import math
 import time
+from collections import deque
 
-TMP_speed_update_frequency = 0.5 # seconds
+SPEED_CALCULATION_WINDOW = 1 # seconds - time window for calculating maxlen of position history
 
 # TODO: Switch __dict__ to __iter__ and dict() for typing support.
 # TODO: f = Class() -> dict(f) instead of f.__dict__()
@@ -220,7 +222,9 @@ class Vehicle:
     is_tmp: bool
     is_trailer: bool
     time: float = 0.0
-    speed_position: Position = Position(0, 0, 0)
+    
+    # Position history for speed/acceleration calculation
+    position_history: list[tuple[float, Position]]  # List of (timestamp, position)
     
     def __init__(self, position: Position, rotation: Quaternion, size: Size, 
                 speed: float, acceleration: float, 
@@ -238,31 +242,61 @@ class Vehicle:
         self.is_trailer = is_trailer
 
         self.time = time.time()
+        self.position_history = deque(maxlen=int(SPEED_CALCULATION_WINDOW / 0.1)) # Assuming 0.1s frame time
+        self._previous_speed = 0.0
 
     def update_from_last(self, vehicle):
-        if not self.is_tmp:
+        """Update this vehicle's calculated properties from the previous frame"""
+        if hasattr(vehicle, 'position_history') and isinstance(vehicle.position_history, deque):
+            self.position_history = vehicle.position_history.copy()
+            if hasattr(vehicle, '_previous_speed'):
+                self._previous_speed = vehicle._previous_speed
+        
+        current_time = time.time()
+        self.position_history.append((current_time, Position(self.position.x, self.position.y, self.position.z)))
+        
+        self._calculate_speed_and_acceleration()
+        
+    def _calculate_speed_and_acceleration(self):
+        """Calculate speed and acceleration from position history"""
+        if len(self.position_history) < 2:
             return
         
-        time_diff = time.time() - vehicle.time
-        if time_diff < TMP_speed_update_frequency:
-            self.time = vehicle.time
-            self.speed = vehicle.speed
-            self.speed_position = vehicle.speed_position
+        mid = len(self.position_history) // 2
+        old_half = list(self.position_history)[:mid]
+        new_half = list(self.position_history)[mid:]
+        
+        old_time = sum(t for t, _ in old_half) / len(old_half)
+        old_x = sum(p.x for _, p in old_half) / len(old_half)
+        old_y = sum(p.y for _, p in old_half) / len(old_half)
+        old_z = sum(p.z for _, p in old_half) / len(old_half)
+        
+        new_time = sum(t for t, _ in new_half) / len(new_half)
+        new_x = sum(p.x for _, p in new_half) / len(new_half)
+        new_y = sum(p.y for _, p in new_half) / len(new_half)
+        new_z = sum(p.z for _, p in new_half) / len(new_half)
+        
+        time_diff = new_time - old_time
+        if time_diff < 0.01:
             return
         
-        last_position = vehicle.speed_position
         distance = math.sqrt(
-            (self.position.x - last_position.x) ** 2 +
-            (self.position.y - last_position.y) ** 2 +
-            (self.position.z - last_position.z) ** 2
+            (new_x - old_x) ** 2 +
+            (new_y - old_y) ** 2 +
+            (new_z - old_z) ** 2
         )
         
-        if distance > 0.1:
-            self.speed = distance / time_diff
-        else:
-            self.speed = 0
-            
-        self.speed_position = Position(self.position.x, self.position.y, self.position.z)
+        if distance > 50:
+            self.speed = 0.0
+            self.acceleration = 0.0
+            self._previous_speed = 0.0
+            self.position_history.clear()
+            return
+
+        new_speed = distance / time_diff
+        self.acceleration = (new_speed - self._previous_speed) / time_diff
+        self._previous_speed = new_speed
+        self.speed = new_speed
         
     def is_zero(self):
         return self.position.is_zero() and self.rotation.is_zero()

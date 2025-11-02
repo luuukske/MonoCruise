@@ -34,19 +34,21 @@ import pymsgbox
 
 # CRITICAL: Set DPI awareness BEFORE creating any windows
 try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(1)
-    scaling = ctypes.windll.user32.GetDpiForSystem() / 96.0 *2
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    scaling = ctypes.windll.user32.GetDpiForSystem() / 96.0
 except Exception as e:
     scaling = 1
     print(f"DPI awareness setup failed: {e}")
 
 # Create the main window (AFTER DPI awareness is set)
 root = ctk.CTk()
+"""
 # Apply scaling factor to all tkinter widgets
 try:
     root.tk.call('tk', 'scaling', scaling)
 except:
     pass
+"""
 root.withdraw()
 
 from connect_SDK import check_and_install_scs_sdk, check_scs_sdk, update_sdk_dlls
@@ -1466,7 +1468,7 @@ class cc_panel:
             cc_mode: Cruise control mode ("Speed limiter" or "Cruise control")
             cc_enabled: Whether the cruise control system is enabled
         """
-        self.scale_mult = 0.6 * scaling
+        self.scale_mult = 0.8 * scaling
         self.start_x = x_co
         self.start_y = y_co
         self.panel_x = int(300 * self.scale_mult)
@@ -2065,14 +2067,21 @@ class cc_panel:
         return Image.fromarray(result)
 
     def _make_draggable(self, window1, window2):
-        """Make both windows draggable together (optimized to reduce redundant calculations)"""
-        drag_data = {'start_x1': 0, 'start_y1': 0, 'start_x2': 0, 'start_y2': 0}
-        
+        """Make both windows draggable together (DPI-aware)"""
+        drag_data = {'offset_x': 0, 'offset_y': 0}
+
+        # Structure for GetCursorPos
+        class POINT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
         def start_move(event):
-            drag_data['start_x1'] = event.x_root - window1.winfo_x()
-            drag_data['start_y1'] = event.y_root - window1.winfo_y()
-            drag_data['start_x2'] = event.x_root - window2.winfo_x()
-            drag_data['start_y2'] = event.y_root - window2.winfo_y()
+            # Get cursor position using ctypes
+            point = POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(point))
+            
+            # Calculate the offset from the window's top-left corner to the cursor
+            drag_data['offset_x'] = point.x - window1.winfo_x()
+            drag_data['offset_y'] = point.y - window1.winfo_y()
 
         def stop_move(event):
             try:
@@ -2080,16 +2089,19 @@ class cc_panel:
                             panel_x=window1.winfo_x(),
                             panel_y=window1.winfo_y())
             except:
-                pass  # Ignore save errors
+                pass
 
         def do_move(event):
-            x1 = event.x_root - drag_data['start_x1']
-            y1 = event.y_root - drag_data['start_y1']
-            x2 = event.x_root - drag_data['start_x2']
-            y2 = event.y_root - drag_data['start_y2']
+            # Get cursor position using ctypes for DPI-awareness
+            point = POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(point))
+
+            # Calculate new position based on reliable cursor position and stored offset
+            x = point.x - drag_data['offset_x']
+            y = point.y - drag_data['offset_y']
             
-            window1.geometry(f"+{x1}+{y1}")
-            window2.geometry(f"+{x2}+{y2}")
+            window1.geometry(f"+{x}+{y}")
+            window2.geometry(f"+{x}+{y}")
 
         # Bind events to both windows
         for window in [window1, window2]:
@@ -2638,8 +2650,8 @@ def adaptive_cruise_control(ego_speed, min_gap=4.0, acc_time_gap=1.3, stopping_g
     slow_speed_increase = pow(0.8, max(avg_ego_speed*0.9, 0.0))*1.5
 
     # Gains
-    K_gap = 0.085 * closeness_amp #* (slow_speed_adj*2+1)
-    K_speed = 0.13 * closeness_amp #* (slow_speed_adj/3+1)
+    K_gap = 0.085 * closeness_amp
+    K_speed = 0.13 * closeness_amp
     K_acc = 0.75 *acceleration_amp
 
     if speed_error > -5 and a_lead > -1:
@@ -2651,7 +2663,6 @@ def adaptive_cruise_control(ego_speed, min_gap=4.0, acc_time_gap=1.3, stopping_g
     a_lead_val = a_lead
 
     acc_raw = K_gap * gap_error_val + K_speed * speed_error_val + K_acc * a_lead_val
-    # calculates the required deceleration to reach the lead vehicle
 
     acc_value = acc_raw / 1.3
 
@@ -2660,33 +2671,9 @@ def adaptive_cruise_control(ego_speed, min_gap=4.0, acc_time_gap=1.3, stopping_g
         acc_value /= 1.3
 
     # ========== STOPPING DISTANCE CALCULATION ==========
-    # Only apply stopping distance calculation when lead vehicle is actually coming to a stop
-    # Criteria:
-    # 1. Lead vehicle is braking significantly (a_lead < -1.5 m/s²)
-    # 2. Lead vehicle speed is low (< 20 km/h) OR will be low soon
-    # 3. Lead vehicle appears to be stopping (not just slowing down)
+    is_lead_stopping = (a_lead < -1.0) or (lead_speed <= 2.0)
     
-    lead_speed_ms = lead_speed / 3.6
-    
-    # Predict if lead vehicle will come to complete stop based on current deceleration
-    if a_lead < -0.5 and lead_speed_ms > 0.1:
-        # Calculate time to stop: t = v / |a|
-        time_to_stop_lead = lead_speed_ms / abs(a_lead)
-        # Calculate stopping distance: s = v*t + 0.5*a*t²
-        predicted_lead_stopping_dist = lead_speed_ms * time_to_stop_lead + 0.5 * a_lead * (time_to_stop_lead ** 2)
-    else:
-        time_to_stop_lead = float('inf')
-        predicted_lead_stopping_dist = float('inf')
-    
-    # Determine if lead vehicle is actually coming to a stop (red light scenario)
-    is_lead_stopping = (
-        (lead_speed < 20 and a_lead < -1.5) or  # Low speed + hard braking
-        (lead_speed < 1) or  # Very low speed (almost stopped)
-        (a_lead < -2.0 and time_to_stop_lead < 5)  # Hard braking that will result in stop within 5 seconds
-    )
-    
-    if is_lead_stopping :
-        # Calculate stopping acceleration with dynamic gap
+    if is_lead_stopping and acc_value < 0:
         stopping_acc_value, stop_info = calculate_stopping_acceleration(
             ego_speed_kmh=avg_ego_speed,
             lead_speed_kmh=lead_speed,
@@ -2696,70 +2683,48 @@ def adaptive_cruise_control(ego_speed, min_gap=4.0, acc_time_gap=1.3, stopping_g
             stopping_gap=stopping_gap
         )
         
-        # Apply logic based on your requirements
-        if stopping_acc_value+1 < acc_value or lead_speed < 1:
-            # Stopping calculation requires more braking than PID
-            # Use only stopping calculation (ignore PID)
-            final_acc_value = (acc_value + stopping_acc_value*5) / 6
-            control_mode = "STOPPING_ONLY"
-        else:
-            # PID requires more braking, average the two
-            final_acc_value = (acc_value + stopping_acc_value*2) / 3
-            control_mode = "AVERAGE"
+        final_acc_value = stopping_acc_value
+        control_mode = "STOPPING"
         
         if debug:
-            print(f"  [STOP CALC] Dynamic gap={stop_info['dynamic_gap']:.2f}m | Time to stop lead={time_to_stop_lead:.2f}s")
-            print(f"  [STOP CALC] Ego stop dist={stop_info['ego_stopping_dist']:.2f}m | Lead stop dist={stop_info['lead_stopping_dist']:.2f}m")
-            print(f"  [STOP CALC] Target stop pos={stop_info['target_stop_position']:.2f}m | Required decel={stop_info['required_decel_ms2']:.2f}m/s²")
-            print(f"  [STOP CALC] PID acc={acc_value:.3f} | Stop acc={stopping_acc_value:.3f} | Mode={control_mode}")
+            print(f"\t[STOP CALC] Dynamic gap={stop_info['dynamic_gap']:.2f}m")
+            print(f"\t[STOP CALC] Ego stop dist={stop_info['ego_stopping_dist']:.2f}m\tLead stop dist={stop_info['lead_stopping_dist']:.2f}m")
+            print(f"\t[STOP CALC] Target stop pos={stop_info['target_stop_position']:.2f}m\tRequired decel={stop_info['required_decel_ms2']:.2f}m/s²")
+            print(f"\t[STOP CALC] PID acc={acc_value:.3f}\tStop acc={stopping_acc_value:.3f}")
     else:
         final_acc_value = acc_value
         control_mode = "PID_NORMAL"
 
     # ========== LOW SPEED GAP CLOSING OFFSET ==========
-    # Calculate a smooth offset to help close gap at low speeds
-    # Gradually introduce offset as relative speed decreases
+    gap_excess = max(gap_error - stopping_gap, 0)
     
-    # Calculate how much the gap exceeds the desired stopping gap
-    gap_excess = max(gap_error - stopping_gap, 0)  # Only positive excess
-    
-    # Calculate relative speed factor (0 to 1)
-    # When relative speed is high, factor is 0 (no offset)
-    # When relative speed is low, factor is 1 (full offset)
     relative_speed = abs(speed_error)
-    speed_threshold = 15  # km/h - speed difference threshold for full offset activation
+    speed_threshold = 15
     relative_speed_factor = max(0, 1 - (relative_speed / speed_threshold))
     
-    # Calculate low speed factor (0 to 1)
-    # When ego speed is high, factor is 0 (no offset)
-    # When ego speed is low, factor is 1 (full offset)
-    low_speed_threshold = 15  # km/h - ego speed threshold
+    low_speed_threshold = 15
     low_speed_factor = max(0, 1 - (avg_ego_speed / low_speed_threshold))
     
-    # Combined activation factor (both conditions must be met)
     activation_factor = relative_speed_factor * low_speed_factor
     
-    # Calculate the offset based on gap excess
-    # More excess gap = more offset (up to a maximum)
-    max_offset = 0.8  # Maximum acceleration offset
+    max_offset = 0.8
     gap_closing_offset = min(gap_excess * 0.12, max_offset) * activation_factor
     
-    # Apply offset to final acceleration value
-    if gap_closing_offset > 0.01 and final_acc_value < 0.5:  # Only apply when not already accelerating hard
+    if gap_closing_offset > 0.01 and final_acc_value < 0.5:
         final_acc_value += gap_closing_offset
         if debug and activation_factor > 0.1:
-            print(f"  [GAP CLOSE] Excess={gap_excess:.2f}m | Rel.Speed={relative_speed:.2f}km/h | Activation={activation_factor:.2f} | Offset={gap_closing_offset:.3f}")
+            print(f"  [GAP CLOSE] Excess={gap_excess:.2f}m\tRel.Speed={relative_speed:.2f}km/h\tActivation={activation_factor:.2f}\tOffset={gap_closing_offset:.3f}")
 
     # Add slow speed adjustment for braking
-    if final_acc_value <= 0.4:
+    if final_acc_value <= 0.2:
         final_acc_value -= slow_speed_increase
 
     # Apply low-pass filter with emergency brake override
-    filtered_acc_value = low_pass_filter(final_acc_value, alpha=0.6, emergency_threshold=-2.0)
+    filtered_acc_value = low_pass_filter(final_acc_value, alpha=0.4, emergency_threshold=-2.0)
     
     if debug:
-        print(f"Gap={lead_dist:.2f} | Gap error={gap_error:.2f} | Speed error={speed_error:.2f} | a_lead={a_lead:.2f}")
-        print(f"Mode={control_mode} | Raw acc={final_acc_value:.3f} | Filtered acc={filtered_acc_value:.3f}")
+        print(f"Gap={lead_dist:.2f}\tGap error={gap_error:.2f}\tSpeed error={speed_error:.2f}\ta_lead={a_lead:.2f}")
+        print(f"Mode={control_mode}\tRaw acc={final_acc_value:.3f}\tFiltered acc={filtered_acc_value:.3f}")
     
     return filtered_acc_value
 
@@ -2946,7 +2911,7 @@ def determine_emergency(gap, v_ego, a_ego_max, v_lead, a_lead):
     """
     
     # Safety margin (small buffer)
-    SAFETY_MARGIN = 1  # meters
+    SAFETY_MARGIN = 1.2  # meters
     
     # Handle edge cases
     if gap <= 0:
@@ -3678,9 +3643,12 @@ def main():
                         }
                         _prev_data[lead_id].append(data_point)
 
-                    vehicle_AEB_brake, vehicle_AEB_warn, time_to_brake = determine_emergency(
-                        lead_dist_raw, speed/3.6, -8.5, lead_speed_raw/3.6, a_lead/1.5
-                    )
+                    if AEB_enabled.get():
+                        vehicle_AEB_brake, vehicle_AEB_warn, time_to_brake = determine_emergency(
+                            lead_dist_raw, speed/3.6, -8, lead_speed_raw/3.6, a_lead/1.5
+                        )
+                    else:
+                        vehicle_AEB_brake, vehicle_AEB_warn, time_to_brake = False, False, float('inf')
             
                     # If any vehicle triggers emergency, set the overall flag to True
                     if vehicle_AEB_brake:
@@ -3741,7 +3709,6 @@ def main():
                 print("@"*50 + "\n")
             elif AEB_warn_temp:
                 AEB_warn = True
-                change_hazards_state(True)
                 cc_app.update(AEB_warn=True, acc_locked=True, acc_enabled=acc_enabled.get()) if cc_app is not None else None
                 AEBSound.start_warning()
                 print("\n" + "="*50)

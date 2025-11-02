@@ -121,9 +121,6 @@ class ETS2Radar:
         self.ego_path_tracker: Dict[int, EgoPathTracker] = {}
         self.ego_path_length: float = MAX_DISTANCE
         self.vehicle_world_pos_history = {}
-        
-        # Store filtered vehicles with unique IDs for next run
-        self.filtered_vehicles: List[Vehicle] = []
 
         # Scoring system for vehicles (used for robust lane detection)
         self.vehicle_scores: Dict[int, float] = collections.defaultdict(float)
@@ -744,20 +741,6 @@ class ETS2Radar:
             self.vehicle_last_saved_position.pop(vid, None)
             if hasattr(self, 'vehicle_speed_history'):
                 self.vehicle_speed_history.pop(vid, None)
-            if hasattr(self, 'vehicle_acceleration_filtered'):
-                self.vehicle_acceleration_filtered.pop(vid, None)
-            if hasattr(self, 'vehicle_filtered_speed_history'):
-                self.vehicle_filtered_speed_history.pop(vid, None)
-            if hasattr(self, 'vehicle_speed_outlier_count'):
-                self.vehicle_speed_outlier_count.pop(vid, None)
-            if hasattr(self, 'vehicle_last_valid_speed'):
-                self.vehicle_last_valid_speed.pop(vid, None)
-            if hasattr(self, 'vehicle_speed_suspicious_timestamp'):
-                self.vehicle_speed_suspicious_timestamp.pop(vid, None)
-            if hasattr(self, 'vehicle_pending_speed'):
-                self.vehicle_pending_speed.pop(vid, None)
-            if hasattr(self, 'vehicle_speed_trend_history'):
-                self.vehicle_speed_trend_history.pop(vid, None)
             if hasattr(self, 'vehicle_world_pos_history'):
                 self.vehicle_world_pos_history.pop(vid, None)
             if hasattr(self, 'lane_state_tracker'):
@@ -811,23 +794,20 @@ class ETS2Radar:
                 self.vehicle_world_pos_history[vid] = collections.deque(maxlen=10)
             self.vehicle_world_pos_history[vid].append((dx, dz))
 
-            # Filter and calculate acceleration using vehicle's speed data
+            # Use speed and acceleration directly from vehicle
             raw_vehicle_speed = getattr(v, 'speed', 0)  # Speed in m/s
             is_tmp = getattr(v, 'is_tmp', False)
-            
-            # Apply speed filtering
-            filtered_vehicle_speed = self.filter_vehicle_speed(vid, raw_vehicle_speed, is_tmp)
-            
-            # Calculate acceleration using filtered speed data
-            acceleration = self.calculate_vehicle_acceleration(vid, filtered_vehicle_speed, is_tmp)
+
+            # Use speed/acceleration from vehicle class directly
+            vehicle_speed = getattr(v, 'speed', 0)
+            acceleration = getattr(v, 'acceleration', 0)
 
             offset_for_score: Optional[float] = None
             angle_for_score: Optional[float] = None
             score_val = self.vehicle_scores.get(vid, 0.0)
             if self.is_in_front_cone(dx, dz):
                 hist = self.vehicle_histories.get(vid, [])
-                # Use filtered speed for scoring calculations
-                if filtered_vehicle_speed < 2 and len(hist) == 0:
+                if vehicle_speed < 2 and len(hist) == 0:
                     cx = np.mean([c[0] for c in v.get_corners()])
                     cz = np.mean([c[2] for c in v.get_corners()])
                     corners = v.get_corners()
@@ -868,7 +848,7 @@ class ETS2Radar:
                 if self.reset_in_lane_scores:
                     score_val = -2.0  # Reset to -2 on blinker change
                 else:
-                    score_val = previous_score + (offset_score + angle_score + path_score) * max((abs(filtered_vehicle_speed)/90)**0.8, 0.5)
+                    score_val = previous_score + (offset_score + angle_score + path_score) * max((abs(vehicle_speed)/90)**0.8, 0.5)
 
                 # Clamp score to valid range
                 score_val = max(-5.0, min(15.0, score_val))
@@ -966,17 +946,10 @@ class ETS2Radar:
         for v, dist, accel in filtered_vehicles[:3]:
             # Use filtered speed if available, otherwise use raw speed
             vid = getattr(v, 'id', id(v))
-            if hasattr(self, 'vehicle_filtered_speed_history') and vid in self.vehicle_filtered_speed_history:
-                # Get the most recent filtered speed
-                filtered_speeds = list(self.vehicle_filtered_speed_history[vid])
-                if filtered_speeds:
-                    speed_raw = filtered_speeds[-1]  # Most recent filtered speed in m/s
-                else:
-                    speed_raw = getattr(v, 'speed', 0)
-            else:
-                speed_raw = getattr(v, 'speed', 0)
+            speed_raw = getattr(v, 'speed', 0)
             speed_kmh = speed_raw * 3.6
             result.append((v.id, dist, speed_kmh, accel))
+
         try:
             if len(filtered_vehicles) > 0 and (len(getattr(filtered_vehicles[0][0], 'trailers', [])) > 0 or getattr(filtered_vehicles[0][0], 'is_trailer', False)):
                 if cc_app is not None:
@@ -993,367 +966,6 @@ class ETS2Radar:
 
         return result
         
-    def calculate_vehicle_acceleration(self, vehicle_id: int, current_speed: float, is_tmp: bool = False) -> float:
-        """
-        Calculate vehicle acceleration using the vehicle's reported speed data.
-        Returns acceleration in m/s².
-        
-        Args:
-            vehicle_id: Unique identifier for the vehicle
-            current_speed: Current speed in km/h
-            is_tmp: Whether this is a temporary/transient vehicle (applies advanced filtering)
-        
-        Advanced filtering (for is_tmp=True vehicles):
-        - Multi-stage outlier detection using statistical methods
-        - Adaptive thresholds based on recent acceleration patterns
-        - Robust filtering that handles both sudden spikes and gradual drifts
-        - Exponential moving average for smooth but responsive filtering
-        """
-
-        now = time.time()
-        dt_frame = (min(now - self.last_timestamp, 0.5)+self.prev_dt_frame*10)/11
-        self.prev_dt_frame = dt_frame
-        self.last_timestamp = now
-
-        # Initialize tracking dictionaries if not exists
-        if not hasattr(self, 'vehicle_speed_history') or not hasattr(self, 'vehicle_acceleration_filtered'):
-            self.vehicle_speed_history = {}
-            self.vehicle_acceleration_filtered = {}
-            self.vehicle_last_valid_acceleration = {}
-            self.vehicle_suspicious_accel_timestamp = {}
-            self.vehicle_pending_acceleration = {}
-            self.vehicle_acceleration_history = {}
-            self.vehicle_outlier_count = {}
-            self.vehicle_acceleration_ema = {}
-            self.vehicle_accel_confirmation_count = {}
-        
-        if not hasattr(self, 'vehicle_last_valid_acceleration'):
-            self.vehicle_last_valid_acceleration = {}
-        
-        if not hasattr(self, 'vehicle_suspicious_accel_timestamp'):
-            self.vehicle_suspicious_accel_timestamp = {}
-        
-        if not hasattr(self, 'vehicle_pending_acceleration'):
-            self.vehicle_pending_acceleration = {}
-            
-        if not hasattr(self, 'vehicle_acceleration_history'):
-            self.vehicle_acceleration_history = {}
-            
-        if not hasattr(self, 'vehicle_outlier_count'):
-            self.vehicle_outlier_count = {}
-            
-        if not hasattr(self, 'vehicle_acceleration_ema'):
-            self.vehicle_acceleration_ema = {}
-            
-        if not hasattr(self, 'vehicle_accel_confirmation_count'):
-            self.vehicle_accel_confirmation_count = {}
-        
-        if vehicle_id not in self.vehicle_speed_history:
-            self.vehicle_speed_history[vehicle_id] = collections.deque(maxlen=10)
-
-        if vehicle_id not in self.vehicle_acceleration_filtered:
-            self.vehicle_acceleration_filtered[vehicle_id] = 0.0
-            
-        if vehicle_id not in self.vehicle_acceleration_history:
-            self.vehicle_acceleration_history[vehicle_id] = collections.deque(maxlen=20)
-            
-        if vehicle_id not in self.vehicle_outlier_count:
-            self.vehicle_outlier_count[vehicle_id] = 0
-            
-        if vehicle_id not in self.vehicle_acceleration_ema:
-            self.vehicle_acceleration_ema[vehicle_id] = 0.0
-            
-        if vehicle_id not in self.vehicle_accel_confirmation_count:
-            self.vehicle_accel_confirmation_count[vehicle_id] = 0
-        
-        # Store current speed (convert from km/h to m/s)
-        current_speed_ms = current_speed / 3.6
-        
-        # Add current speed to history
-        self.vehicle_speed_history[vehicle_id].append(current_speed_ms)
-        
-        speeds = list(self.vehicle_speed_history[vehicle_id])
-        
-        # Need at least 5 speed measurements to calculate over 4 intervals
-        if len(speeds) < 5:
-            return 0.0
-        
-        # Get the oldest speed (first element) and newest speed (last element)
-        old_speed = np.mean(speeds[:-1]) # average of all speeds except the last one
-        new_speed = speeds[-1]  # Last/newest speed (current speed)
-        
-        time_interval = (len(speeds) - 1) * dt_frame  # Time between first and last measurement
-        
-        # Calculate raw acceleration
-        raw_acceleration = (new_speed - old_speed) / max(time_interval, 0.01)
-        
-        # Apply different filtering strategies based on is_tmp flag (tmp stands for TrcukersMP)
-        if is_tmp:
-            # Basic filtering for permanent vehicles
-            filtered_acceleration = self._apply_acceleration_filtering(
-                vehicle_id, raw_acceleration, now
-            )
-        else:
-            filtered_acceleration = raw_acceleration
-        
-        # Apply adaptive EMA smoothing
-        ema_acceleration = self._apply_acceleration_ema(
-            vehicle_id, filtered_acceleration
-        )
-        
-        # Apply final low pass filter to smooth the acceleration output
-        alpha = 0.5  # Filter coefficient (0 = no filtering, 1 = no smoothing)
-        smoothed_acceleration = alpha * ema_acceleration + (1 - alpha) * self.vehicle_acceleration_filtered[vehicle_id]
-        self.vehicle_acceleration_filtered[vehicle_id] = round(smoothed_acceleration, 4)
-        
-        return round(smoothed_acceleration, 4)
-    
-    def _apply_acceleration_ema(self, vehicle_id: int, acceleration: float) -> float:
-        """
-        Apply exponential moving average to acceleration with adaptive alpha.
-        Uses faster response for sustained changes, slower for noise/outliers.
-        """
-        if self.vehicle_acceleration_ema[vehicle_id] == 0.0:
-            # Initialize EMA with first value
-            self.vehicle_acceleration_ema[vehicle_id] = acceleration
-            return acceleration
-        
-        current_ema = self.vehicle_acceleration_ema[vehicle_id]
-        accel_diff = abs(acceleration - current_ema)
-        
-        # Adaptive alpha based on consistency of change direction
-        if accel_diff > 5.0:  # Large change detected
-            # Check if change is consistent (real) or sporadic (noise/lag)
-            if self.vehicle_accel_confirmation_count[vehicle_id] >= 2:
-                # Sustained change confirmed - use faster response
-                alpha = 0.4
-            else:
-                # Possible outlier - use slower response
-                alpha = 0.1
-                self.vehicle_accel_confirmation_count[vehicle_id] += 1
-        else:
-            # Normal change - balanced response
-            alpha = 0.3
-            self.vehicle_accel_confirmation_count[vehicle_id] = 0
-        
-        # Apply EMA: new_ema = alpha * new_value + (1 - alpha) * old_ema
-        new_ema = alpha * acceleration + (1 - alpha) * current_ema
-        self.vehicle_acceleration_ema[vehicle_id] = new_ema
-        
-        return new_ema
-    
-    def _apply_acceleration_filtering(self, vehicle_id: int, raw_acceleration: float, now: float) -> float:
-        """
-        Basic acceleration filtering for permanent vehicles.
-        Simple outlier detection with fixed thresholds.
-        """
-        # Check if we have a previous valid acceleration to compare against
-        if vehicle_id in self.vehicle_last_valid_acceleration:
-            last_valid_accel = self.vehicle_last_valid_acceleration[vehicle_id]
-            
-            # Calculate the change in acceleration
-            accel_change = abs(raw_acceleration - last_valid_accel)
-            
-            if accel_change > 10.0:  # m/s² - suspicious change detected
-                # Track when suspicious acceleration was first detected
-                if vehicle_id not in self.vehicle_suspicious_accel_timestamp:
-                    self.vehicle_suspicious_accel_timestamp[vehicle_id] = now
-                    self.vehicle_pending_acceleration[vehicle_id] = raw_acceleration
-                
-                # Check if 0.2s has passed since first suspicious detection
-                time_since_suspicious = now - self.vehicle_suspicious_accel_timestamp[vehicle_id]
-                
-                if time_since_suspicious < 0.2:
-                    # Use last valid acceleration instead of the suspicious one
-                    return last_valid_accel
-                else:
-                    # 0.2s has passed, accept the new acceleration
-                    self.vehicle_last_valid_acceleration[vehicle_id] = raw_acceleration
-                    if vehicle_id in self.vehicle_suspicious_accel_timestamp:
-                        del self.vehicle_suspicious_accel_timestamp[vehicle_id]
-                    if vehicle_id in self.vehicle_pending_acceleration:
-                        del self.vehicle_pending_acceleration[vehicle_id]
-            else:
-                # Normal acceleration change, update last valid and clear suspicious flag
-                self.vehicle_last_valid_acceleration[vehicle_id] = raw_acceleration
-                if vehicle_id in self.vehicle_suspicious_accel_timestamp:
-                    del self.vehicle_suspicious_accel_timestamp[vehicle_id]
-                if vehicle_id in self.vehicle_pending_acceleration:
-                    del self.vehicle_pending_acceleration[vehicle_id]
-        else:
-            # First time seeing this vehicle, set initial acceleration
-            self.vehicle_last_valid_acceleration[vehicle_id] = raw_acceleration
-        
-        return raw_acceleration
-    
-    def filter_vehicle_speed(self, vehicle_id: int, current_speed: float, is_tmp: bool = False) -> float:
-        """
-        Filter vehicle speed data to remove noise and outliers.
-        Returns filtered speed in km/h.
-        
-        Args:
-            vehicle_id: Unique identifier for the vehicle
-            current_speed: Current speed in km/h
-            is_tmp: Whether this is a temporary/transient vehicle (applies advanced filtering)
-        
-        Advanced filtering (for is_tmp=True vehicles):
-        - Multi-stage outlier detection using statistical methods
-        - Adaptive thresholds based on recent speed patterns
-        - Robust filtering that handles both sudden spikes and gradual drifts
-        - Physics-based validation (realistic speed changes)
-        - Exponential moving average for smooth but responsive filtering
-        """
-        
-        now = time.time()
-        
-        # Initialize tracking dictionaries if not exists
-        if not hasattr(self, 'vehicle_filtered_speed_history'):
-            self.vehicle_filtered_speed_history = {}
-            self.vehicle_speed_outlier_count = {}
-            self.vehicle_last_valid_speed = {}
-            self.vehicle_speed_suspicious_timestamp = {}
-            self.vehicle_pending_speed = {}
-            self.vehicle_speed_trend_history = {}
-            self.vehicle_speed_ema = {}
-            self.vehicle_speed_confirmation_count = {}
-        
-        if not hasattr(self, 'vehicle_speed_outlier_count'):
-            self.vehicle_speed_outlier_count = {}
-            
-        if not hasattr(self, 'vehicle_last_valid_speed'):
-            self.vehicle_last_valid_speed = {}
-            
-        if not hasattr(self, 'vehicle_speed_suspicious_timestamp'):
-            self.vehicle_speed_suspicious_timestamp = {}
-            
-        if not hasattr(self, 'vehicle_pending_speed'):
-            self.vehicle_pending_speed = {}
-            
-        if not hasattr(self, 'vehicle_speed_trend_history'):
-            self.vehicle_speed_trend_history = {}
-            
-        if not hasattr(self, 'vehicle_speed_ema'):
-            self.vehicle_speed_ema = {}
-            
-        if not hasattr(self, 'vehicle_speed_confirmation_count'):
-            self.vehicle_speed_confirmation_count = {}
-        
-        # Initialize vehicle-specific tracking
-        if vehicle_id not in self.vehicle_filtered_speed_history:
-            self.vehicle_filtered_speed_history[vehicle_id] = collections.deque(maxlen=15)
-            
-        if vehicle_id not in self.vehicle_speed_outlier_count:
-            self.vehicle_speed_outlier_count[vehicle_id] = 0
-            
-        if vehicle_id not in self.vehicle_speed_trend_history:
-            self.vehicle_speed_trend_history[vehicle_id] = collections.deque(maxlen=10)
-            
-        if vehicle_id not in self.vehicle_speed_ema:
-            self.vehicle_speed_ema[vehicle_id] = current_speed
-            
-        if vehicle_id not in self.vehicle_speed_confirmation_count:
-            self.vehicle_speed_confirmation_count[vehicle_id] = 0
-        
-        # Apply different filtering strategies based on is_tmp flag (tmp stands for TrcukersMP)
-        if is_tmp:
-            # Basic filtering for permanent vehicles
-            filtered_speed = self._apply_speed_filtering(
-                vehicle_id, current_speed, now
-            )
-        else:
-            filtered_speed = current_speed
-        
-        # Apply adaptive EMA smoothing
-        ema_speed = round(self._apply_speed_ema(vehicle_id, filtered_speed), 4)
-        
-        # Add filtered speed to history for future analysis
-        self.vehicle_filtered_speed_history[vehicle_id].append(ema_speed)
-        
-        return ema_speed
-    
-    def _apply_speed_ema(self, vehicle_id: int, speed: float) -> float:
-        """
-        Apply exponential moving average to speed with adaptive alpha.
-        Uses faster response for sustained changes, slower for noise/outliers.
-        """
-        current_ema = self.vehicle_speed_ema[vehicle_id]
-        speed_diff = abs(speed - current_ema)
-        
-        # Adaptive alpha based on magnitude and consistency of change
-        if speed_diff > 2.0:  # Significant change (>7 km/h)
-            # Check if change is consistent (real) or sporadic (noise/lag)
-            if self.vehicle_speed_confirmation_count[vehicle_id] >= 2:
-                # Sustained change confirmed (likely real crash/acceleration) - fast response
-                alpha = 0.5
-            else:
-                # Possible lag spike - slower response to avoid overreacting
-                alpha = 0.2
-                self.vehicle_speed_confirmation_count[vehicle_id] += 1
-        else:
-            # Normal driving - balanced response
-            alpha = 0.3
-            self.vehicle_speed_confirmation_count[vehicle_id] = 0
-        
-        # Apply EMA: new_ema = alpha * new_value + (1 - alpha) * old_ema
-        new_ema = alpha * speed + (1 - alpha) * current_ema
-        self.vehicle_speed_ema[vehicle_id] = new_ema
-        
-        return new_ema
-    
-    def _apply_speed_filtering(self, vehicle_id: int, current_speed: float, now: float) -> float:
-        """
-        Basic speed filtering for permanent vehicles.
-        Simple outlier detection with fixed thresholds and physics-based validation.
-        """
-        # Physics-based validation: check for unrealistic speed values
-        if current_speed < 0 or current_speed > 200:  # 0-200 m/s (0-720 km/h) reasonable range
-            # Use last valid speed if available, otherwise return 0
-            if vehicle_id in self.vehicle_last_valid_speed:
-                return self.vehicle_last_valid_speed[vehicle_id]
-            return 0.0
-        
-        # Check if we have a previous valid speed to compare against
-        if vehicle_id in self.vehicle_last_valid_speed:
-            last_valid_speed = self.vehicle_last_valid_speed[vehicle_id]
-            
-            # Calculate the change in speed
-            speed_change = abs(current_speed - last_valid_speed)
-            
-            # Physics-based threshold: maximum realistic acceleration is ~10 m/s²
-            # Assuming 0.2s time step, max speed change should be ~1 m/s
-            max_realistic_change = 3.0  # m/s per frame
-            
-            if speed_change > max_realistic_change:
-                # Track when suspicious speed was first detected
-                if vehicle_id not in self.vehicle_speed_suspicious_timestamp:
-                    self.vehicle_speed_suspicious_timestamp[vehicle_id] = now
-                    self.vehicle_pending_speed[vehicle_id] = current_speed
-                
-                # Check if 0.2s has passed since first suspicious detection
-                time_since_suspicious = now - self.vehicle_speed_suspicious_timestamp[vehicle_id]
-                
-                if time_since_suspicious < 0.2:
-                    # Use last valid speed instead of the suspicious one
-                    return last_valid_speed
-                else:
-                    # 0.2s has passed, accept the new speed
-                    self.vehicle_last_valid_speed[vehicle_id] = current_speed
-                    if vehicle_id in self.vehicle_speed_suspicious_timestamp:
-                        del self.vehicle_speed_suspicious_timestamp[vehicle_id]
-                    if vehicle_id in self.vehicle_pending_speed:
-                        del self.vehicle_pending_speed[vehicle_id]
-            else:
-                # Normal speed change, update last valid and clear suspicious flag
-                self.vehicle_last_valid_speed[vehicle_id] = current_speed
-                if vehicle_id in self.vehicle_speed_suspicious_timestamp:
-                    del self.vehicle_speed_suspicious_timestamp[vehicle_id]
-                if vehicle_id in self.vehicle_pending_speed:
-                    del self.vehicle_pending_speed[vehicle_id]
-        else:
-            # First time seeing this vehicle, set initial speed
-            self.vehicle_last_valid_speed[vehicle_id] = current_speed
-            
-        return current_speed
     
     
 
@@ -1630,34 +1242,28 @@ class ETS2Radar:
         self.ego_path_length = MAX_DISTANCE
         self.update_ego_trajectory((px, pz))
 
-        vehicles = self.module.run()
+        paused = data.get("paused", False)
+
+        vehicles = self.module.run(paused)
+        if vehicles is None:
+            return []
+
         # Filter vehicles not on the truck's plane
         vehicles = [v for v in vehicles if abs(v.position.y - data.get("coordinateY", 0.0)) < 6.0]
         
         # Handle duplicate vehicle IDs
         vehicles = self.handle_duplicate_vehicle_ids(vehicles)
-        
-        # Save filtered vehicles for next run
-        self.filtered_vehicles = vehicles
 
         # Update histories with world coordinates
-        if not data["paused"]:
+        if not paused:
             for v in vehicles:
                 vid = getattr(v, 'id', id(v))
-                # Apply speed filtering and update speed storage
-                raw_speed = getattr(v, 'speed', 0)
-                is_tmp = getattr(v, 'is_tmp', False)
-                filtered_speed = self.filter_vehicle_speed(vid, raw_speed, is_tmp)
-                
-                # Only update history for moving vehicles (filtered speed > 5)
-                # Stationary vehicles will get synthetic trajectories in draw_radar
-                if filtered_speed > 5:
-                    poly = self.get_vehicle_polygon(v, px, pz, yawr)
-                    cx = np.mean([c[0] for c in v.get_corners()])
-                    cz = np.mean([c[2] for c in v.get_corners()])
-                    self.update_vehicle_history(vid, (cx, cz))
-                # Always update speed for all vehicles (store filtered speed)
-                self.vehicle_speeds[vid] = filtered_speed
+                poly = self.get_vehicle_polygon(v, px, pz, yawr)
+                cx = np.mean([c[0] for c in v.get_corners()])
+                cz = np.mean([c[2] for c in v.get_corners()])
+                self.update_vehicle_history(vid, (cx, cz))
+                # Always update speed for all vehicles (store speed value)
+                self.vehicle_speeds[vid] = getattr(v, 'speed', 0)
 
         # Main detection and visualization
         in_lane_vehicles = self.draw_radar(vehicles, px, pz, yawr, ego_steer, speed, data, cc_app)
