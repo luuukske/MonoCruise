@@ -1,0 +1,15 @@
+CTkMessagebox
+customtkinter
+darkdetect
+keyboard
+numpy
+opencv-python
+packaging
+pillow
+psutil
+puremagic
+pygame
+PyMsgBox
+pypdf
+shapely
+truck-telemetry
