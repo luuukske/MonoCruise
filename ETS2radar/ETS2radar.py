@@ -636,7 +636,8 @@ class ETS2Radar:
         ego_steer: float = 0.0,
         ego_speed: float = 0.0,
         data: Optional[Dict[str, Any]] = None,
-        cc_app=None
+        cc_app=None,
+        paused: bool = False
     ) -> List[Any]:
         try:
             _, _, win_w, win_h = cv2.getWindowImageRect("ETS2 Radar")
@@ -845,9 +846,11 @@ class ETS2Radar:
                     path_score = 0.0
                 
                 if self.reset_in_lane_scores:
-                    score_val = -2.0  # Reset to -2 on blinker change
-                else:
+                    score_val = 0.0  # Reset to 0 on blinker change
+                elif not paused:
                     score_val = previous_score + (offset_score + angle_score + path_score) * max((abs(vehicle_speed)/90)**0.8, 0.5)
+                else:
+                    score_val = previous_score
 
                 # Clamp score to valid range
                 score_val = max(-5.0, min(15.0, score_val))
@@ -1265,7 +1268,7 @@ class ETS2Radar:
                 self.vehicle_speeds[vid] = getattr(v, 'speed', 0)
 
         # Main detection and visualization
-        in_lane_vehicles = self.draw_radar(vehicles, px, pz, yawr, ego_steer, speed, data, cc_app)
+        in_lane_vehicles = self.draw_radar(vehicles, px, pz, yawr, ego_steer, speed, data, cc_app, paused)
         return in_lane_vehicles
 
     def run(self):

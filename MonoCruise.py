@@ -1163,16 +1163,15 @@ def send(a, b, controller):
 
     if weight_adjustment.get():
         try:
-            weight_var = (0.27*((total_weight_tons-8.93)/(11.7))+1) #prev 11.7
-            print(f"Weight adjustment applied: {weight_var}")
+            weight_var = (0.27*((total_weight_tons-8.93)/(11.7))+1)
         except:
             weight_var = 1
             if not device_lost:
                 cmd_print("Error calculating weight adjustment", "#FF2020", 10)
     else:
         weight_var = 1
-    b = b**(1/weight_var)
-    a = a
+    b = (b**(1/weight_var)).real
+    a = (a).real
 
     bar_val = gas_output-brake_output
     try:
@@ -1180,10 +1179,10 @@ def send(a, b, controller):
             a = gasval**gas_exponent_variable.get() #for those people that like revvvving that engine
     except:
         a = gasval
-    b = max(b,max(brakeval,0)**brake_exponent_variable.get())
+    b = max(b,(max(brakeval.real,0)**brake_exponent_variable.get()))
  
-    setattr(controller, "aforward", float(a))
-    setattr(controller, "abackward", float(b))
+    setattr(controller, "aforward", float(a.real))
+    setattr(controller, "abackward", float(b.real))
 
 def get_error_context():
     """Get detailed context about where an error occurred"""
@@ -1278,6 +1277,16 @@ def format_button_text(button_index):
 
 def log_error(error, context=None):
     """Log detailed error information and append to a log file"""
+
+
+    global controller
+    if controller is not None:
+        try:
+            setattr(controller, "aforward", 0.0)
+            setattr(controller, "abackward", 0.1)
+        except:
+            pass
+
     if context is None:
         context = get_error_context()
     
@@ -1828,7 +1837,7 @@ class cc_panel:
             else:
                 raise ValueError("Invalid state for icon selection")
             if icon_file is not None:
-                icon = Image.open(icon_file)
+                icon = Image.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), icon_file))
             else:
                 # Create a blank/transparent icon - size will be determined later
                 icon = None
@@ -2118,6 +2127,7 @@ class cc_panel:
         try:
             # Create first window
             root1 = tk.Tk()
+            root1.withdraw()  # Hide until fully set up
             self._setup_window(root1)
             root1.attributes("-alpha", self.opacity)
             
@@ -2129,6 +2139,7 @@ class cc_panel:
 
             # Create second window
             root2 = tk.Toplevel()
+            root2.withdraw()  # Hide until fully set up
             self._setup_window(root2)
             
             tk_img2 = ImageTk.PhotoImage(self.img2, master=root2)
@@ -2245,7 +2256,8 @@ def main_cruise_control():
         panel_x = 100
         panel_y = 100
     cc_app = cc_panel(text_content="-- km/h", cc_mode=cc_mode.get(), cc_enabled=False, x_co=panel_x, y_co=panel_y, acc_enabled=acc_enabled.get())
-    cc_app.update("-- km/h", cc_mode=cc_mode.get(), cc_enabled=False, acc_enabled=acc_enabled.get(), complete_update=True)
+    time.sleep(0.05)  # Give some time for the GUI to initialize
+    #cc_app.update("-- km/h", cc_mode=cc_mode.get(), cc_enabled=False, acc_enabled=acc_enabled.get(), complete_update=True, acc_truck=False, acc_locked=False)
 
 
     while not exit_event.is_set() and not (cc_dec_button is None and cc_inc_button is None and cc_start_button is None):
@@ -2398,7 +2410,7 @@ def main_cruise_control():
             # update panel
             if not exit_event.is_set():
                 try:
-                    if show_cc_ui.get() and ets2_detected.is_set() and all_buttons_assigned:
+                    if show_cc_ui.get() and ets2_detected.is_set() and all_buttons_assigned and not pauzed:
                         if not cc_app.root1.winfo_viewable() and not cc_app.root2.winfo_viewable():
                             cc_app.show()
                     else:
@@ -2645,8 +2657,8 @@ def adaptive_cruise_control(ego_speed, min_gap=4.0, acc_time_gap=1.3, stopping_g
 
             # Gains
             K_gap = 0.085 * closeness_amp
-            K_speed = 0.13 * closeness_amp
-            K_acc = 0.75 *acceleration_amp
+            K_speed = 0.14 * closeness_amp
+            K_acc = 0.77 *acceleration_amp
 
             if speed_error > -5 and a_lead > -1:
                 K_gap *= 0.7
@@ -2666,13 +2678,12 @@ def adaptive_cruise_control(ego_speed, min_gap=4.0, acc_time_gap=1.3, stopping_g
 
             # ========== STOPPING DISTANCE CALCULATION ==========
             # Detect if the lead is stopping, or if ego will stop in <= 3 sec, or ego is almost stationary
-            ego_speed_ms = avg_ego_speed / 3.6 if 'avg_ego_speed' in locals() else 0
+            lead_speed_ms = lead_speed / 3.6 if 'lead_speed' in locals() else 0
             # Use nominal deceleration as in calculate_stopping_acceleration (assume -3.0 m/s^2 if not available)
             nominal_decel = 3.0 # Positive value, see below
-            ego_stop_time = abs(ego_speed_ms) / nominal_decel if nominal_decel > 0 and ego_speed_ms > 0.1 else float('inf')
-            is_ego_almost_stopped = avg_ego_speed <= 3.0
+            stopping_time = abs(lead_speed_ms) / nominal_decel if nominal_decel > 0 and lead_speed_ms > 0.1 else float('inf')
             # Trigger stopping if conditions are met:
-            is_lead_stopping = (a_lead < -1.0) or (lead_speed <= 3.0) or (ego_stop_time <= 3.0) or is_ego_almost_stopped
+            is_lead_stopping = (a_lead < -1.0) or (stopping_time <= 3.0) or (lead_speed <= 1.0)
 
             if is_lead_stopping and acc_value < 0:
                 stopping_acc_value, stop_info = calculate_stopping_acceleration(
@@ -2739,7 +2750,7 @@ def adaptive_cruise_control(ego_speed, min_gap=4.0, acc_time_gap=1.3, stopping_g
         context = get_error_context()
         log_error(e, context)
         cmd_print("Error in adaptive cruise control calculation", "#FF2020", 10)
-        return -1.0 # brake in case of error
+        return -1.0 # brake in case of error (-1 for light braking)
 
 
 
