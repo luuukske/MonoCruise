@@ -2509,8 +2509,8 @@ class ACCConfig:
     """Configuration parameters for the ACC controller."""
     # Controller gains
     K_P: float = 0.05  # Proportional gain on gap error
-    K_D: float = 0.30  # Derivative gain on relative speed (speed error)
-    K_F: float = 1.0  # Feed-forward gain on lead vehicle acceleration
+    K_D: float = 0.32  # Derivative gain on relative speed (speed error)
+    K_F: float = 1.0   # Feed-forward gain on lead vehicle acceleration
 
     # Time gaps
     TIME_GAP_FOLLOW: float = 1.3  # Desired time gap in seconds when following
@@ -2519,12 +2519,12 @@ class ACCConfig:
     MIN_GAP: float = 4.0          # Minimum allowed gap in meters
     STOPPING_GAP: float = 2.5     # Desired gap when stopped behind a vehicle
     MAX_ACCEL: float = 1.5        # Maximum acceleration in m/s^2
-    MAX_DECEL: float = -5       # Maximum deceleration (braking) in m/s^2
-    EMERGENCY_DECEL: float = -8 # Emergency braking deceleration in m/s^2
-    MIN_TIME_GAP: float = 0.5  # Minimum time gap for stopping scenarios
+    MAX_DECEL: float = -5         # Maximum deceleration (braking) in m/s^2
+    EMERGENCY_DECEL: float = -8   # Emergency braking deceleration in m/s^2
+    MIN_TIME_GAP: float = 0.5     # Minimum time gap for stopping scenarios
 
     # Filtering
-    FILTER_ALPHA: float = 0.2  # Low-pass filter coefficient (lower is smoother)
+    FILTER_ALPHA: float = 0.2     # Low-pass filter coefficient (lower is smoother)
 
 @dataclass
 class LeadVehicleData:
@@ -2585,31 +2585,45 @@ class MonoCruiseACC:
         """Calculates acceleration based on the PD + feed-forward controller."""
         # Dynamic desired gap based on time gap and a minimum physical distance
         desired_gap = self.config.MIN_GAP + self.config.TIME_GAP_FOLLOW * ego_speed
-        actual_time_gap = max(lead.distance / max(ego_speed, 0.1), 0)
+        actual_time_gap = max(lead.distance / max(ego_speed, 0.1), 0.0)
         
         gap_error = lead.distance - desired_gap
-        speed_error = lead.speed - ego_speed # This is the derivative of gap error
-        stopping = lead.speed < 2 or lead.accel < -0.5
+        speed_error = lead.speed - ego_speed  # This is the derivative of gap error
+        rel_speed = ego_speed - lead.speed    # Positive when closing in
 
-        closeness_amp = pow(0.8, actual_time_gap*10-3) + 0.6
+        # Amplitude scaling based on closeness/time-gap (keeps P noticeable)
+        closeness_amp = pow(0.8, actual_time_gap * 10 - 3) + 0.6
         if speed_error < 0.1:
             closeness_amp = closeness_amp**0.8
         else:
-            closeness_amp = 0.7
+            closeness_amp = max(0.7, min(closeness_amp, 1.2))
 
         # PD + Feed-Forward Control Law
         p_term = self.config.K_P * gap_error
-        d_term = self.config.K_D * speed_error if not stopping else 0.0
+        d_term = self.config.K_D * speed_error
         ff_term = self._calculate_FF_accel(lead, ego_speed)
-        
-        target_accel = p_term*closeness_amp + d_term*closeness_amp + ff_term
+
+        controller_accel = closeness_amp * (p_term + d_term) + ff_term
+
+        # Closing-in detection: ego faster and too close vs desired gap
+        stopping = (lead.speed < 2) or (lead.accel < -1 and rel_speed > 0)
+
+        # When closing in, blend in the stopping-distance based decel by averaging.
+        if stopping:
+            stopping_decel = self._calculate_stopping_accel(lead, ego_speed)
+            target_accel = (controller_accel*0.4 + stopping_decel*0.6)
+        else:
+            stopping_decel = 0.0
+            target_accel = controller_accel
 
         self.debug_info.update({
-            # add debug info here
             "gap_error": gap_error,
             "speed_error": speed_error,
             "p_term": p_term,
             "d_term": d_term,
+            "ff_term": ff_term,
+            "controller_accel": controller_accel,
+            "stopping_decel": stopping_decel,
         })
         return target_accel
 
@@ -2620,7 +2634,7 @@ class MonoCruiseACC:
         """
         # Time-based gap for natural scaling
         time_gap = self.config.MIN_TIME_GAP
-        dynamic_gap = self.config.STOPPING_GAP + max(0, ego_speed * time_gap)
+        dynamic_gap = self.config.STOPPING_GAP + max(0.0, ego_speed * time_gap)
         
         # Speed-dependent minimum safe distance
         min_safe_distance = max(1.0, ego_speed * 0.2)
@@ -2635,7 +2649,7 @@ class MonoCruiseACC:
             case = "stopped"
             
             if target_stop_pos > min_safe_distance:
-                required_decel = -(ego_speed ** 2) / (2 * target_stop_pos)
+                required_decel = -(ego_speed ** 2) / (2 * max(target_stop_pos, 1e-3))
             else:
                 required_decel = self.config.EMERGENCY_DECEL
         
@@ -2646,7 +2660,7 @@ class MonoCruiseACC:
             case = "decel"
             
             if target_stop_pos > min_safe_distance:
-                required_decel = -(ego_speed ** 2) / (2 * target_stop_pos)
+                required_decel = -(ego_speed ** 2) / (2 * max(target_stop_pos, 1e-3))
             else:
                 required_decel = self.config.EMERGENCY_DECEL
         
@@ -2667,7 +2681,7 @@ class MonoCruiseACC:
                     # Already matched speeds, just maintain lead accel
                     required_decel = lead_accel_clamped
                 else:
-                    required_decel = lead_accel_clamped - (rel_speed ** 2) / (2 * distance_to_target)
+                    required_decel = lead_accel_clamped - (rel_speed ** 2) / (2 * max(distance_to_target, 1e-3))
             else:
                 required_decel = self.config.EMERGENCY_DECEL
 
@@ -2684,25 +2698,16 @@ class MonoCruiseACC:
         return required_decel
 
     def _calculate_FF_accel(self, lead: LeadVehicleData, ego_speed: float) -> float:
-        """Calculates feed-forward acceleration based on lead vehicle's acceleration."""
+        """Feed-forward is ONLY based on the lead vehicle's acceleration."""
+        # Conservative scaling with time-gap to avoid overreacting at short gaps.
+        actual_time_gap = max(lead.distance / max(ego_speed, 0.1), 0.0)
+        acceleration_amp = max(-(actual_time_gap / 2.0) ** 3 + 1.0, 0.2)
 
-        actual_time_gap = max(lead.distance / max(ego_speed, 0.1), 0)
-        acceleration_amp = max(-(actual_time_gap/2)**3+1, 0.2)
-
-        target_accel = lead.accel * self.config.K_F * acceleration_amp
-        
-        if lead.speed < ego_speed or lead.accel < -2:
-            # When the lead is braking, rely more braking distance calculation
-            target_accel = self._calculate_stopping_accel(lead, ego_speed)
-        
-        elif lead.accel > 1:
-            # When the lead is accelerating strongly, be more conservative
-            target_accel = target_accel ** 0.5
+        target_accel = self.config.K_F * lead.accel * acceleration_amp
 
         self.debug_info.update({
-            # add debug info here
             "FF_result": target_accel,
-
+            "FF_accel_amp": acceleration_amp,
         })
 
         return target_accel
@@ -2727,7 +2732,7 @@ class MonoCruiseACC:
             if lead_vehicle_data is not None:
                 lead_data_obj = LeadVehicleData(
                     distance=lead_vehicle_data['distance'],
-                    speed=lead_vehicle_data['speed'] / 3.6, # Convert km/h to m/s
+                    speed=lead_vehicle_data['speed'] / 3.6,  # Convert km/h to m/s
                     accel=lead_vehicle_data['a_lead']
                 )
 
@@ -2735,23 +2740,34 @@ class MonoCruiseACC:
 
             # --- State Machine ---
             if lead is None:
-                target_accel = self.config.MAX_ACCEL # Default to max accel (cruise)
+                target_accel = self.config.MAX_ACCEL  # Default to max accel (cruise)
+                self.debug_info.update({
+                    "ego_speed": ego_speed,
+                    "lead_present": False
+                })
             else:
                 target_accel = self._calculate_accel(lead, ego_speed)
 
-            slow_speed_increase = (1 - (abs(ego_speed) / 7)**2) * 0.5
-            target_accel -= min(slow_speed_increase,0.2)
+                # for overwriting the engine idle at slow speeds (reduce creep)
+                slow_speed_increase = (1 - (abs(ego_speed) / 5) ** 3) * 0.2 if round(ego_speed,1) == 0.0 else 0
+                target_accel -= max(slow_speed_increase,0)
+
+                self.debug_info.update({
+                    "ego_speed": ego_speed,
+                    "lead_present": True,
+                    "lead_accel": lead.accel,
+                    "lead_speed": lead.speed,
+                    "lead_distance": lead.distance
+                })
 
             # Apply safety clamps and filtering
             final_accel = np.clip(target_accel, self.config.MAX_DECEL, self.config.MAX_ACCEL)
             filtered_accel = self._low_pass_filter(final_accel)
 
             self.debug_info.update({
-                # add debug info here
                 "target_accel": target_accel,
-                "ego_speed": ego_speed,
-                "lead_accel": lead.accel,
-                "lead_speed": lead.speed,
+                "final_accel_clipped": final_accel,
+                "filtered_accel": filtered_accel,
             })
 
             return filtered_accel
@@ -3171,7 +3187,7 @@ def cc_target_speed_thread_func():
                         physics_adjustment)
             
             if cc_mode.get() == "Cruise control" and acc_enabled.get() and data_history is not None and len(data_history) > 0:
-                acc_val = ACC.update(speed, data_history[0]) * 0.78 + physics_adjustment
+                acc_val = ACC.update(speed, data_history[0]) * 0.8 + physics_adjustment
                 print("\n\n")
                 print("ACC debug info:", end=' ')
                 print(*[f"{k}: {round(v, 2) if isinstance(v, float) else v}" for k, v in ACC.debug_info.items()], sep='\t')
