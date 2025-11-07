@@ -25,6 +25,7 @@ from CTkMessagebox import CTkMessagebox
 sys.path.append('./_internal')
 from scscontroller import SCSController
 from ETS2radar.ETS2radar import ETS2Radar
+from collections import defaultdict, deque
 
 import pymsgbox
 
@@ -2491,266 +2492,276 @@ def main_cruise_control():
 
 
 
-from collections import defaultdict, deque
+"""
+MonoCruise: Production-Ready Adaptive Cruise Control
+
+This module provides a class-based, production-ready implementation of an 
+Adaptive Cruise Control (ACC) system. It is designed for clarity, safety, 
+and tunability for use in simulation environments.
+"""
+
+from collections import deque
+from dataclasses import dataclass
 import numpy as np
 
-# memory of previous data for each lead vehicle (fixed-length queue)
-_prev_data = defaultdict(lambda: deque(maxlen=5))
+@dataclass
+class ACCConfig:
+    """Configuration parameters for the ACC controller."""
+    # Controller gains
+    K_P: float = 0.05  # Proportional gain on gap error
+    K_D: float = 0.30  # Derivative gain on relative speed (speed error)
+    K_F: float = 1.0  # Feed-forward gain on lead vehicle acceleration
 
-# Low-pass filter state
-_filter_state = {'prev_output': 0.0, 'initialized': False}
+    # Time gaps
+    TIME_GAP_FOLLOW: float = 1.3  # Desired time gap in seconds when following
+    
+    # Physical constraints and limits
+    MIN_GAP: float = 4.0          # Minimum allowed gap in meters
+    STOPPING_GAP: float = 2.5     # Desired gap when stopped behind a vehicle
+    MAX_ACCEL: float = 1.5        # Maximum acceleration in m/s^2
+    MAX_DECEL: float = -5       # Maximum deceleration (braking) in m/s^2
+    EMERGENCY_DECEL: float = -8 # Emergency braking deceleration in m/s^2
+    MIN_TIME_GAP: float = 0.5  # Minimum time gap for stopping scenarios
 
-def calculate_stopping_acceleration(ego_speed_kmh, lead_speed_kmh, lead_dist, a_lead, min_gap=5.0, stopping_gap=2.0):
+    # Filtering
+    FILTER_ALPHA: float = 0.2  # Low-pass filter coefficient (lower is smoother)
+
+@dataclass
+class LeadVehicleData:
+    """Represents sensor data for a lead vehicle."""
+    distance: float  # Distance to lead vehicle in meters
+    speed: float     # Speed of lead vehicle in m/s
+    accel: float     # Acceleration of lead vehicle in m/s^2
+
+class MonoCruiseACC:
     """
-    Calculate required acceleration/deceleration to stop safely behind lead vehicle.
-    
-    Args:
-        ego_speed_kmh: Ego vehicle speed in km/h
-        lead_speed_kmh: Lead vehicle speed in km/h
-        lead_dist: Distance to lead vehicle in meters
-        a_lead: Lead vehicle acceleration in m/s²
-        min_gap: Minimum gap to maintain in meters (for cruising)
-        stopping_gap: Minimum gap when coming to a complete stop in meters
-    
-    Returns:
-        stopping_acc_value: Required acceleration (negative for braking) in controller units
-        stop_info: Dictionary with debug information
+    An Adaptive Cruise Control system designed for responsiveness, safety, and
+    readability. It uses a PD controller with a feed-forward term for lead
+    vehicle acceleration.
     """
-    # Convert speeds from km/h to m/s
-    ego_speed_ms = ego_speed_kmh / 3.6
-    lead_speed_ms = lead_speed_kmh / 3.6
-    
-    # Calculate dynamic gap based on ego speed
-    # As ego speed approaches 0, reduce gap from min_gap to stopping_gap
-    # Use a smooth transition based on ego speed
-    speed_factor = min(ego_speed_kmh / 20.0, 1.0)  # Normalize by 20 km/h
-    dynamic_gap = stopping_gap + (min_gap - stopping_gap) * speed_factor
-    
-    # Calculate stopping distance for ego vehicle (assuming constant deceleration)
-    # Using kinematic equation: v² = u² + 2as -> s = (v² - u²) / (2a)
-    # For stopping: v = 0, so s = -u² / (2a)
-    # Assume a comfortable deceleration of -3 m/s² (can be tuned)
-    assumed_decel_ego = -3.0  # m/s²
-    ego_stopping_dist = -(ego_speed_ms ** 2) / (2 * assumed_decel_ego) if ego_speed_ms > 0.1 else 0
-    
-    # Calculate predicted stopping distance for lead vehicle
-    # If lead continues current deceleration
-    if a_lead < -0.1:
-        lead_stopping_dist = -(lead_speed_ms ** 2) / (2 * a_lead)
-    else:
-        lead_stopping_dist = 0
-    
-    # Calculate required stopping position using dynamic gap
-    target_stop_position = lead_dist + lead_stopping_dist - dynamic_gap
-    
-    # Calculate required deceleration to stop at target position
-    # s = target_stop_position, u = ego_speed_ms, v = 0
-    # a = -u² / (2s)
-    if target_stop_position > 0.5:  # Avoid division by very small numbers
-        required_decel_ms2 = -(ego_speed_ms ** 2) / (2 * target_stop_position)
+
+    def __init__(self, config: ACCConfig = ACCConfig()):
+        self.config = config
+        self._lead_history = deque(maxlen=5)
+        self._ego_speed_history = deque(maxlen=5)
+        self._filter_state = {'prev_output': 0.0, 'initialized': False}
+
+        self.debug_info = {}
+
+    def _low_pass_filter(self, value: float) -> float:
+        """Applies a low-pass filter to a value, with emergency override."""
+        if not self._filter_state['initialized']:
+            self._filter_state['prev_output'] = value
+            self._filter_state['initialized'] = True
+            return value
+
+        # Emergency override: if rapid braking is commanded, bypass the filter
+        if value < self.config.MAX_DECEL:
+            self._filter_state['prev_output'] = value
+            return value
+
+        filtered = self.config.FILTER_ALPHA * value + (1 - self.config.FILTER_ALPHA) * self._filter_state['prev_output']
+        self._filter_state['prev_output'] = filtered
+        return filtered
+
+    def _get_smoothed_inputs(self, lead_vehicle: LeadVehicleData | None, ego_speed_ms: float) -> tuple[LeadVehicleData | None, float]:
+        """Smooths inputs using a moving average over a short history."""
+        self._ego_speed_history.append(ego_speed_ms)
         
-        # Limit deceleration to comfortable range when at low speeds
-        # This prevents harsh braking when close to stopping
-        if ego_speed_kmh < 10:
-            # Gradually reduce max allowed deceleration as speed decreases
-            max_decel = -2.0 - (ego_speed_kmh / 10.0) * 1.5  # Range: -2.0 to -3.5 m/s²
-            required_decel_ms2 = max(required_decel_ms2, max_decel)
-    else:
-        # Emergency stop if target position is too close or negative
-        # But still limit if at very low speed
-        if ego_speed_kmh < 5:
-            required_decel_ms2 = -2.5
+        if lead_vehicle is None:
+            self._lead_history.clear()
+            return None, np.mean(self._ego_speed_history)
+
+        self._lead_history.append(lead_vehicle)
+        
+        smoothed_lead = LeadVehicleData(
+            distance=np.mean([d.distance for d in self._lead_history]),
+            speed=np.mean([d.speed for d in self._lead_history]),
+            accel=np.mean([d.accel for d in self._lead_history])
+        )
+        return smoothed_lead, np.mean(self._ego_speed_history)
+
+    def _calculate_accel(self, lead: LeadVehicleData, ego_speed: float) -> float:
+        """Calculates acceleration based on the PD + feed-forward controller."""
+        # Dynamic desired gap based on time gap and a minimum physical distance
+        desired_gap = self.config.MIN_GAP + self.config.TIME_GAP_FOLLOW * ego_speed
+        actual_time_gap = max(lead.distance / max(ego_speed, 0.1), 0)
+        
+        gap_error = lead.distance - desired_gap
+        speed_error = lead.speed - ego_speed # This is the derivative of gap error
+        stopping = lead.speed < 2 or lead.accel < -0.5
+
+        closeness_amp = pow(0.8, actual_time_gap*10-3) + 0.6
+        if speed_error < 0.1:
+            closeness_amp = closeness_amp**0.8
         else:
-            required_decel_ms2 = -4.0
-    
-    # Convert to controller output using the 0.78 factor
-    stopping_acc_value = required_decel_ms2 * 0.78
-    
-    # Prepare debug info
-    stop_info = {
-        'ego_stopping_dist': ego_stopping_dist,
-        'lead_stopping_dist': lead_stopping_dist,
-        'target_stop_position': target_stop_position,
-        'required_decel_ms2': required_decel_ms2,
-        'dynamic_gap': dynamic_gap
-    }
-    
-    return stopping_acc_value, stop_info
+            closeness_amp = 0.7
 
+        # PD + Feed-Forward Control Law
+        p_term = self.config.K_P * gap_error
+        d_term = self.config.K_D * speed_error if not stopping else 0.0
+        ff_term = self._calculate_FF_accel(lead, ego_speed)
+        
+        target_accel = p_term*closeness_amp + d_term*closeness_amp + ff_term
 
-def low_pass_filter(current_value, alpha=0.2, emergency_threshold=-2.0):
-    """
-    Low-pass filter with emergency brake override.
-    
-    Args:
-        current_value: Current acceleration command
-        alpha: Filter coefficient (0-1). Lower = more smoothing
-        emergency_threshold: Threshold below which to bypass filter for emergency braking
-    
-    Returns:
-        filtered_value: Smoothed acceleration command
-    """
-    global _filter_state
-    
-    # Initialize filter on first call
-    if not _filter_state['initialized']:
-        _filter_state['prev_output'] = current_value
-        _filter_state['initialized'] = True
-        return current_value
-    
-    # Emergency brake override - bypass filter for large deceleration commands
-    if current_value < emergency_threshold:
-        _filter_state['prev_output'] = current_value
-        return current_value
-    
-    # Apply low-pass filter: y[n] = α * x[n] + (1-α) * y[n-1]
-    filtered_value = alpha * current_value + (1 - alpha) * _filter_state['prev_output']
-    _filter_state['prev_output'] = filtered_value
-    
-    return filtered_value
+        self.debug_info.update({
+            # add debug info here
+            "gap_error": gap_error,
+            "speed_error": speed_error,
+            "p_term": p_term,
+            "d_term": d_term,
+        })
+        return target_accel
 
-
-def adaptive_cruise_control(ego_speed, min_gap=4.0, acc_time_gap=1.3, stopping_gap=2.0, debug=True):
-    """
-    Adaptive Cruise Control logic with lead vehicle acceleration anticipation.
-    All input values are averaged over time. Queue resets when lead_id changes.
-    
-    Args:
-        vehicles_in_lane: List of (vehicle_id, distance_m, speed_kmph) sorted by distance (closest first).
-        ego_speed: Ego vehicle speed in km/h.
-        min_gap: Minimum gap to lead vehicle in meters (cruising).
-        acc_time_gap: Desired time gap to lead vehicle in seconds.
-        stopping_gap: Minimum gap when stopped in meters (typically 2-3m).
-        debug: Enable detailed debug prints.
-    Returns:
-        acc_value: Float in [-1, 1]. Positive = accelerate, negative = brake.
-    """
-    try:
-        global data_history
-
-        if 'data_history' in globals() and data_history is not None:
-            lead_dist = np.mean([d['distance'] for d in data_history])
-            lead_speed = np.mean([d['speed'] for d in data_history])
-            avg_ego_speed = np.mean([d['ego_speed'] for d in data_history])
-            a_lead = np.mean([d['a_lead'] for d in data_history])
-
-            # Calculate desired gap using averaged ego speed
-            desired_gap = min_gap + acc_time_gap * max((lead_speed*0.7+avg_ego_speed*0.3) / 3.6, 0)
-            gap_error = lead_dist - desired_gap
-            speed_error = lead_speed - avg_ego_speed
-
-            # calculate closeness amplifier using averaged values
-            actual_time_gap = max(min(lead_dist / (max((lead_speed*0.7+avg_ego_speed*0.3), 1) / 3.6), 10), 0.01)
-            closeness_amp = pow(0.8, actual_time_gap*10-3) + 0.6
-            if speed_error < 0.1:
-                closeness_amp = closeness_amp**0.8
-            else:
-                closeness_amp = 0.7
-
-            acceleration_amp = max(-(actual_time_gap/2)**3+1, 0.2)
-            if a_lead > 0:
-                acceleration_amp *= 0.85
+    def _calculate_stopping_accel(self, lead: LeadVehicleData, ego_speed: float) -> float:
+        """Calculates required deceleration to safely stop behind a lead vehicle.
+        
+        Uses kinematic equations accounting for relative motion and lead vehicle acceleration.
+        """
+        # Time-based gap for natural scaling
+        time_gap = self.config.MIN_TIME_GAP
+        dynamic_gap = self.config.STOPPING_GAP + max(0, ego_speed * time_gap)
+        
+        # Speed-dependent minimum safe distance
+        min_safe_distance = max(1.0, ego_speed * 0.2)
+        
+        # Clamp lead accel to reasonable bounds (-10 to +3 m/s²)
+        lead_accel_clamped = max(-10.0, min(3.0, lead.accel))
+        
+        # State machine with clear priority
+        if lead.speed < 0.5:
+            # Lead is stopped or nearly stopped
+            target_stop_pos = lead.distance - dynamic_gap
+            case = "stopped"
             
-            # calculate slow speed adjustment using averaged ego speed
-            slow_speed_adj = pow(0.8, max(avg_ego_speed*0.3, 0.0))*1.5
-            slow_speed_increase = pow(0.8, max(avg_ego_speed*0.9, 0.0))*1.5
+            if target_stop_pos > min_safe_distance:
+                required_decel = -(ego_speed ** 2) / (2 * target_stop_pos)
+            else:
+                required_decel = self.config.EMERGENCY_DECEL
+        
+        elif lead_accel_clamped < -0.1:
+            # Lead is actively braking
+            lead_stop_dist = -(lead.speed ** 2) / (2 * lead_accel_clamped)
+            target_stop_pos = lead.distance + lead_stop_dist - dynamic_gap
+            case = "decel"
+            
+            if target_stop_pos > min_safe_distance:
+                required_decel = -(ego_speed ** 2) / (2 * target_stop_pos)
+            else:
+                required_decel = self.config.EMERGENCY_DECEL
+        
+        else:
+            # Lead is cruising or accelerating
+            distance_to_target = lead.distance - dynamic_gap
+            case = "closing"
+            
+            if distance_to_target > min_safe_distance:
+                rel_speed = ego_speed - lead.speed
+                
+                # Kinematic solution: match speeds at target distance
+                # d = v_rel*t + 0.5*(a_ego - a_lead)*t²
+                # Want: v_ego_final = v_lead_final
+                # Solution: a_ego = a_lead - v_rel² / (2*d)
+                
+                if abs(rel_speed) < 0.01:
+                    # Already matched speeds, just maintain lead accel
+                    required_decel = lead_accel_clamped
+                else:
+                    required_decel = lead_accel_clamped - (rel_speed ** 2) / (2 * distance_to_target)
+            else:
+                required_decel = self.config.EMERGENCY_DECEL
 
-            # Gains
-            K_gap = 0.085 * closeness_amp
-            K_speed = 0.14 * closeness_amp
-            K_acc = 0.77 *acceleration_amp
+        # Clamp to reasonable vehicle limits
+        required_decel = max(self.config.MAX_DECEL, min(0.0, required_decel))
+        
+        self.debug_info.update({
+            "dynamic_gap": dynamic_gap,
+            "case": case,
+            "target_distance": lead.distance - dynamic_gap,
+            "min_safe_distance": min_safe_distance,
+        })
+        
+        return required_decel
 
-            if speed_error > -5 and a_lead > -1:
-                K_gap *= 0.7
+    def _calculate_FF_accel(self, lead: LeadVehicleData, ego_speed: float) -> float:
+        """Calculates feed-forward acceleration based on lead vehicle's acceleration."""
 
-            # Control law (sum of weighted errors)
-            gap_error_val = np.sign(gap_error)*((abs(gap_error)/10)**0.8)*10
-            speed_error_val = np.sign(speed_error)*min(((abs(speed_error)/5)**1.3)*5, abs(speed_error))
-            a_lead_val = a_lead
+        actual_time_gap = max(lead.distance / max(ego_speed, 0.1), 0)
+        acceleration_amp = max(-(actual_time_gap/2)**3+1, 0.2)
 
-            acc_raw = K_gap * gap_error_val + K_speed * speed_error_val + K_acc * a_lead_val
+        target_accel = lead.accel * self.config.K_F * acceleration_amp
+        
+        if lead.speed < ego_speed or lead.accel < -2:
+            # When the lead is braking, rely more braking distance calculation
+            target_accel = self._calculate_stopping_accel(lead, ego_speed)
+        
+        elif lead.accel > 1:
+            # When the lead is accelerating strongly, be more conservative
+            target_accel = target_accel ** 0.5
 
-            acc_value = acc_raw / 1.3
+        self.debug_info.update({
+            # add debug info here
+            "FF_result": target_accel,
 
-            if acc_value > 0 and a_lead < 2:
-                acc_value /= slow_speed_adj+1
-                acc_value /= 1.3
+        })
 
-            # ========== STOPPING DISTANCE CALCULATION ==========
-            # Detect if the lead is stopping, or if ego will stop in <= 3 sec, or ego is almost stationary
-            lead_speed_ms = lead_speed / 3.6 if 'lead_speed' in locals() else 0
-            # Use nominal deceleration as in calculate_stopping_acceleration (assume -3.0 m/s^2 if not available)
-            nominal_decel = 3.0 # Positive value, see below
-            stopping_time = abs(lead_speed_ms) / nominal_decel if nominal_decel > 0 and lead_speed_ms > 0.1 else float('inf')
-            # Trigger stopping if conditions are met:
-            is_lead_stopping = (a_lead < -1.0) or (stopping_time <= 3.0) or (lead_speed <= 1.0)
+        return target_accel
 
-            if is_lead_stopping and acc_value < 0:
-                stopping_acc_value, stop_info = calculate_stopping_acceleration(
-                    ego_speed_kmh=avg_ego_speed,
-                    lead_speed_kmh=lead_speed,
-                    lead_dist=lead_dist,
-                    a_lead=a_lead,
-                    min_gap=min_gap,
-                    stopping_gap=stopping_gap
+    def update(self, ego_speed_kmh: float, lead_vehicle_data: dict | None) -> float:
+        """
+        Calculates the target acceleration for the ego vehicle.
+
+        Args:
+            ego_speed_kmh: Current speed of the ego vehicle in km/h.
+            lead_vehicle_data: A dictionary with 'distance', 'speed', 'a_lead' of the lead vehicle.
+                               Speed should be in km/h, distance in m, accel in m/s^2.
+                               If no lead vehicle, this should be None.
+
+        Returns:
+            Target acceleration in m/s^2.
+        """
+        try:
+            ego_speed_ms = ego_speed_kmh / 3.6
+            
+            lead_data_obj = None
+            if lead_vehicle_data is not None:
+                lead_data_obj = LeadVehicleData(
+                    distance=lead_vehicle_data['distance'],
+                    speed=lead_vehicle_data['speed'] / 3.6, # Convert km/h to m/s
+                    accel=lead_vehicle_data['a_lead']
                 )
-                
-                final_acc_value = stopping_acc_value
-                control_mode = "STOPPING"
-                
-                if debug:
-                    print(f"\t[STOP CALC] Dynamic gap={stop_info['dynamic_gap']:.2f}m")
-                    print(f"\t[STOP CALC] Ego stop dist={stop_info['ego_stopping_dist']:.2f}m\tLead stop dist={stop_info['lead_stopping_dist']:.2f}m")
-                    print(f"\t[STOP CALC] Target stop pos={stop_info['target_stop_position']:.2f}m\tRequired decel={stop_info['required_decel_ms2']:.2f}m/s²")
-                    print(f"\t[STOP CALC] PID acc={acc_value:.3f}\tStop acc={stopping_acc_value:.3f}")
+
+            lead, ego_speed = self._get_smoothed_inputs(lead_data_obj, ego_speed_ms)
+
+            # --- State Machine ---
+            if lead is None:
+                target_accel = self.config.MAX_ACCEL # Default to max accel (cruise)
             else:
-                final_acc_value = acc_value
-                control_mode = "PID_NORMAL"
+                target_accel = self._calculate_accel(lead, ego_speed)
 
-            # ========== LOW SPEED GAP CLOSING OFFSET ==========
-            gap_excess = max(gap_error - stopping_gap, 0)
-            
-            relative_speed = abs(speed_error)
-            speed_threshold = 15
-            relative_speed_factor = max(0, 1 - (relative_speed / speed_threshold))
-            
-            low_speed_threshold = 15
-            low_speed_factor = max(0, 1 - (avg_ego_speed / low_speed_threshold))
-            
-            activation_factor = relative_speed_factor * low_speed_factor
-            
-            max_offset = 0.8
-            gap_closing_offset = min(gap_excess * 0.12, max_offset) * activation_factor
-            
-            if gap_closing_offset > 0.01 and final_acc_value < 0.5:
-                final_acc_value += gap_closing_offset
-                if debug and activation_factor > 0.1:
-                    print(f"  [GAP CLOSE] Excess={gap_excess:.2f}m\tRel.Speed={relative_speed:.2f}km/h\tActivation={activation_factor:.2f}\tOffset={gap_closing_offset:.3f}")
+            slow_speed_increase = (1 - (abs(ego_speed) / 7)**2) * 0.5
+            target_accel -= min(slow_speed_increase,0.2)
 
-            # Add slow speed adjustment for braking
-            if final_acc_value <= 0.2:
-                final_acc_value -= slow_speed_increase
-        
-            if debug:
-                print(f"Gap={lead_dist:.2f}\tGap error={gap_error:.2f}\tSpeed error={speed_error:.2f}\ta_lead={a_lead:.2f}")
-            
-        else:
-            # No lead vehicle detected
-            final_acc_value = 2.0
-            control_mode = "NO_LEAD"
+            # Apply safety clamps and filtering
+            final_accel = np.clip(target_accel, self.config.MAX_DECEL, self.config.MAX_ACCEL)
+            filtered_accel = self._low_pass_filter(final_accel)
 
-        # Apply low-pass filter with emergency brake override
-        filtered_acc_value = low_pass_filter(final_acc_value)
+            self.debug_info.update({
+                # add debug info here
+                "target_accel": target_accel,
+                "ego_speed": ego_speed,
+                "lead_accel": lead.accel,
+                "lead_speed": lead.speed,
+            })
 
-        if debug:
-            print(f"Mode={control_mode}\tRaw acc={final_acc_value:.3f}\tFiltered acc={filtered_acc_value:.3f}")
-        
-        return filtered_acc_value
-    except Exception as e:
-        context = get_error_context()
-        log_error(e, context)
-        cmd_print("Error in adaptive cruise control calculation", "#FF2020", 10)
-        return -1.0 # brake in case of error (-1 for light braking)
+            return filtered_accel
+
+        except Exception as e:
+            cmd_print(f"Error in ACC calculation: {e}", "#FF2020", 10)
+            print(self.debug_info)
+            log_error(e, get_error_context())
+            # Fail-safe: apply gentle braking in case of any error
+            return -1.0
 
 
 
@@ -3089,6 +3100,10 @@ def cc_target_speed_thread_func():
     global _data_cache
     global acc_enabled
     global weight_var
+    global data_history
+    global ACC
+
+    ACC = MonoCruiseACC()
 
     cc_locked = False
     cc_limiting = False
@@ -3103,7 +3118,7 @@ def cc_target_speed_thread_func():
     ff_est = 0.0
     alpha  = 0.8
     P = 0.11
-    I = 0.01
+    I = 0.0105
     D = 0.08
     max_integral = 0.2 / I
     max_proportional = 1.3
@@ -3155,8 +3170,11 @@ def cc_target_speed_thread_func():
                         derivative * D * slow_speed_adjustment +
                         physics_adjustment)
             
-            if cc_mode.get() == "Cruise control" and acc_enabled.get():
-                acc_val = adaptive_cruise_control(speed) + physics_adjustment
+            if cc_mode.get() == "Cruise control" and acc_enabled.get() and data_history is not None and len(data_history) > 0:
+                acc_val = ACC.update(speed, data_history[0]) * 0.78 + physics_adjustment
+                print("\n\n")
+                print("ACC debug info:", end=' ')
+                print(*[f"{k}: {round(v, 2) if isinstance(v, float) else v}" for k, v in ACC.debug_info.items()], sep='\t')
             else:
                 acc_val = 2
 
@@ -3338,7 +3356,11 @@ def main():
 
         cv2.namedWindow("ETS2 Radar", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("ETS2 Radar", 600, 600)
+
         radar = ETS2Radar(show_window=True, fov_angle=35)
+        # memory of previous data for each lead vehicle (fixed-length queue)
+        _prev_data = defaultdict(lambda: deque(maxlen=5))
+        
         AEBSound = AEBSoundHandler(os.path.join(os.path.dirname(os.path.abspath(__file__)), "AEBsfx.wav"))
         cc_app = None
         prev_stop = time.time()
@@ -3687,6 +3709,8 @@ def main():
                 _prev_data[_current_lead_id].clear()
                 _current_lead_id = None
                 # Clear data_history when no vehicles are detected
+                data_history = None
+            else:
                 data_history = None
 
             slope = data['rotationY']

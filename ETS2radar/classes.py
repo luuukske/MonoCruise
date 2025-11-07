@@ -247,15 +247,17 @@ class Vehicle:
 
     def update_from_last(self, vehicle):
         """Update this vehicle's calculated properties from the previous frame"""
-        if hasattr(vehicle, 'position_history') and isinstance(vehicle.position_history, deque):
-            self.position_history = vehicle.position_history.copy()
-            if hasattr(vehicle, '_previous_speed'):
-                self._previous_speed = vehicle._previous_speed
-        
-        current_time = time.time()
-        self.position_history.append((current_time, Position(self.position.x, self.position.y, self.position.z)))
-        
-        self._calculate_speed_and_acceleration()
+        # Only calculate speed/acceleration for TruckersMP multiplayer vehicles
+        if self.is_tmp:
+            if hasattr(vehicle, 'position_history') and isinstance(vehicle.position_history, deque):
+                self.position_history = vehicle.position_history.copy()
+                if hasattr(vehicle, '_previous_speed'):
+                    self._previous_speed = vehicle._previous_speed
+            
+            current_time = time.time()
+            self.position_history.append((current_time, Position(self.position.x, self.position.y, self.position.z)))
+            
+            self._calculate_speed_and_acceleration()
         
     def _calculate_speed_and_acceleration(self):
         """Calculate speed and acceleration from position history"""
