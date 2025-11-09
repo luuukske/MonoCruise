@@ -836,13 +836,23 @@ class ETS2Radar:
                     (dx, dz),
                     overall_closest_distance,
                 )
-                # NEW: Check if vehicle is in ego path and adjust score accordingly
-                if path_pts:  # Only if we have a valid ego path
+
+                # Check if vehicle is in ego path
+                if path_pts:
                     is_in_path = self.check_vehicle_in_ego_path(path_pts, poly, path_width=1)
-                    if is_in_path:
-                        path_score = min(0.3 * distance_amp, 10)  # Boost score for vehicles in ego path
+                    
+                    # Also check trailers
+                    trailer_in_path = False
+                    for trailer_data in vdata['trailers']:
+                        if self.check_vehicle_in_ego_path(path_pts, trailer_data['polygon'], path_width=1):
+                            trailer_in_path = True
+                            break
+                    
+                    # Vehicle or any of its trailers in path = positive score
+                    if is_in_path or trailer_in_path:
+                        path_score = min(0.3 * distance_amp, 10)
                     else:
-                        path_score = -min(0.3 * distance_amp, 3)  # Penalty for vehicles not in ego path
+                        path_score = -min(0.3 * distance_amp, 3)
                 else:
                     path_score = 0.0
                 
@@ -1038,7 +1048,7 @@ class ETS2Radar:
         direction = 1 if cross > 0 else -1
 
         fitted_curvature = (direction * (1.0 / r)) if r != 0 else 0.0
-        steer_curvature = ego_steer * 0.15
+        steer_curvature = ego_steer * 0.17
 
         speed_kmh = abs(ego_speed)
         if speed_kmh < 15.0:

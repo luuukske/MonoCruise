@@ -2509,7 +2509,7 @@ class ACCConfig:
     """Configuration parameters for the ACC controller."""
     # Controller gains
     K_P: float = 0.05  # Proportional gain on gap error
-    K_D: float = 0.32  # Derivative gain on relative speed (speed error)
+    K_D: float = 0.35  # Derivative gain on relative speed (speed error)
     K_F: float = 1.0   # Feed-forward gain on lead vehicle acceleration
 
     # Time gaps
@@ -2517,9 +2517,9 @@ class ACCConfig:
     
     # Physical constraints and limits
     MIN_GAP: float = 4.0          # Minimum allowed gap in meters
-    STOPPING_GAP: float = 2.5     # Desired gap when stopped behind a vehicle
+    STOPPING_GAP: float = 3.0     # Desired gap when stopped behind a vehicle
     MAX_ACCEL: float = 1.5        # Maximum acceleration in m/s^2
-    MAX_DECEL: float = -5         # Maximum deceleration (braking) in m/s^2
+    MAX_DECEL: float = -6.5         # Maximum deceleration (braking) in m/s^2
     EMERGENCY_DECEL: float = -8   # Emergency braking deceleration in m/s^2
     MIN_TIME_GAP: float = 0.5     # Minimum time gap for stopping scenarios
 
@@ -2603,6 +2603,10 @@ class MonoCruiseACC:
         d_term = self.config.K_D * speed_error
         ff_term = self._calculate_FF_accel(lead, ego_speed)
 
+        if ego_speed < 2.0 and lead.accel > 1:
+            ff_term *= 2
+            p_term *= 0.5
+
         controller_accel = closeness_amp * (p_term + d_term) + ff_term
 
         # Closing-in detection: ego faster and too close vs desired gap
@@ -2650,6 +2654,7 @@ class MonoCruiseACC:
             
             if target_stop_pos > min_safe_distance:
                 required_decel = -(ego_speed ** 2) / (2 * max(target_stop_pos, 1e-3))
+                required_decel *= 1.2  # Slightly more aggressive at start to look safer
             else:
                 required_decel = self.config.EMERGENCY_DECEL
         
@@ -2749,7 +2754,7 @@ class MonoCruiseACC:
                 target_accel = self._calculate_accel(lead, ego_speed)
 
                 # for overwriting the engine idle at slow speeds (reduce creep)
-                slow_speed_increase = (1 - (abs(ego_speed) / 5) ** 3) * 0.2 if round(ego_speed,1) == 0.0 else 0
+                slow_speed_increase = (1 - (abs(ego_speed) / 7) ** 2) * 0.3
                 target_accel -= max(slow_speed_increase,0)
 
                 self.debug_info.update({
