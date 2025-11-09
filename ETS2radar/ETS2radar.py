@@ -23,6 +23,7 @@ ScreenCoordinate = Tuple[int, int]
 VehicleData = Tuple[int, float, float]  # (vehicle_id, distance, speed)
 RGBColor = Tuple[int, int, int]
 Corner = Tuple[float, float, float]  # (x, y, z)
+ego_steering = collections.deque(maxlen=10)
 
 # Constants
 MAX_DISTANCE: int = 150  # meters
@@ -680,7 +681,7 @@ class ETS2Radar:
 
         path_pts, curvature = [], 0.0
         try:
-            path_pts, curvature = self.predict_ego_path_using_history(px, pz, yaw_rad, path_length=self.ego_path_length)
+            path_pts, curvature = self.predict_ego_path_using_history(px, pz, yaw_rad, path_length=self.ego_path_length, ego_steer=ego_steer, ego_speed=ego_speed)
             # Draw ego path with 1.5m width
             self.draw_ego_path_with_width(img, path_pts, center, scale, path_width=1.5, color=(0, 200, 0), thickness=1, show_info=True, curvature=curvature)
         except Exception:
@@ -984,6 +985,8 @@ class ETS2Radar:
         px: float,
         pz: float,
         yaw_rad: float,
+        ego_steer: float,
+        ego_speed: float,
         path_length: float = 40.0,
         max_history: int = 25
     ):
@@ -993,35 +996,32 @@ class ETS2Radar:
         Approach:
         - Use up to `max_history` past positions (already in world coords).
         - Transform them into ego-space (so ego is at origin facing +z).
-        - Fit a circle to the transformed points using fit_circle(). If the fit succeeds,
-          generate an arc forward from the ego origin along that circle.
-        - If the fit fails or the radius is extremely large (near-straight), fallback to a straight line.
-        - Return the generated path points (as ego-space (x, y) where y is forward) and an
-          approximate signed curvature (1/radius, sign indicates turn direction).
+        - Fit a circle to the transformed points. Extract signed curvature (1/radius).
+        - Blend fitted curvature with steering input based on speed:
+          * < 15 km/h: 100% steering
+          * 15-30 km/h: linear interpolation from 100% to 30% steering
+          * >= 30 km/h: 30% steering, 70% history
+        - Generate arc forward from ego origin using curvature, with center always below the screen (negative z).
+        - If fit fails or radius is extremely large, fallback to straight line.
+        - Return the generated path points (as ego-space (x, y) where y is forward) and signed curvature.
         """
-        # Gather history (most recent last)
         hist = list(self.ego_trajectory)[-max_history:]
         if len(hist) < 3:
-            # Not enough data -> straight fallback
             pts = [(0.0, float(i)) for i in range(int(path_length) + 1)]
             return pts, 0.0
 
-        # Transform history into ego-space (x lateral, z forward)
         ego_pts: List[Tuple[float, float]] = []
         for wx, wz in hist:
             dx = wx - px
             dz = wz - pz
-            # Use same transform as used elsewhere: rotate_point(-dx, dz, -yaw)
-            x_e, z_e = self.rotate_point(-dx, dz, -yaw_rad)
+            x_e, z_e = self.rotate_point(dx, dz, -yaw_rad)
             ego_pts.append((x_e, z_e))
 
         xs = [p[0] for p in ego_pts]
         zs = [p[1] for p in ego_pts]
 
         fit = self.fit_circle(xs, zs)
-        # If fit is not usable or radius is too large -> straight line
         if fit is None:
-            # Straight forward path
             pts = [(0.0, float(i)) for i in range(int(path_length) + 1)]
             return pts, 0.0
 
@@ -1030,8 +1030,6 @@ class ETS2Radar:
             pts = [(0.0, float(i)) for i in range(int(path_length) + 1)]
             return pts, 0.0
 
-        # Determine direction of travel along circle from history (sign of curvature)
-        # Use the last two history vectors from center to decide direction
         x_last, z_last = ego_pts[-1]
         x_prev, z_prev = ego_pts[-2]
         v_end = np.array([x_last - xc, z_last - zc])
@@ -1039,23 +1037,41 @@ class ETS2Radar:
         cross = v_end[0] * v_prev[1] - v_end[1] * v_prev[0]
         direction = 1 if cross > 0 else -1
 
-        # Angle of the vector from center to the ego origin (0,0)
-        theta0 = np.arctan2(-zc, -xc)  # angle from center to origin
+        fitted_curvature = (direction * (1.0 / r)) if r != 0 else 0.0
+        steer_curvature = ego_steer * 0.15
 
-        # Generate arc points forward from the ego origin along the fitted circle
-        num_points = max(2, int(path_length)) * 2  # denser sampling
+        speed_kmh = abs(ego_speed)
+        if speed_kmh < 15.0:
+            steer_weight = 1.0
+        elif speed_kmh < 30.0:
+            steer_weight = 1.0 - ((speed_kmh - 15.0) / 15.0) * 0.7
+        else:
+            steer_weight = 0.3
+
+        history_weight = 1.0 - steer_weight
+        curvature = steer_weight * steer_curvature + history_weight * fitted_curvature
+
+        if curvature == 0.0:
+            pts = [(0.0, float(i)) for i in range(int(path_length) + 1)]
+            return pts, 0.0
+
+        radius = abs(1.0 / curvature)
+        lateral_offset = radius if curvature < 0 else -radius
+        center_x = lateral_offset
+        center_z = -abs(np.sqrt(max(0, radius**2 - center_x**2)))
+
+        theta0 = np.arctan2(-center_z, -center_x)
+        turn_direction = -1 if curvature > 0 else 1
+
+        num_points = max(2, int(path_length)) * 2
         arc_points: List[Tuple[float, float]] = []
         for s in np.linspace(0.0, path_length, num_points):
-            # param angle step based on arc length s = r * delta_theta
-            delta_theta = s / r
-            angle = theta0 - direction * delta_theta
-            x = xc + r * np.cos(angle)
-            z = zc + r * np.sin(angle)
-            # Convert to ego-space coords where forward is positive y
+            delta_theta = s / radius
+            angle = theta0 + turn_direction * delta_theta
+            x = center_x + radius * np.cos(angle)
+            z = center_z + radius * -np.sin(angle)
             arc_points.append((float(x), float(z)))
 
-        # Signed curvature
-        curvature = (direction * (1.0 / r)) if r != 0 else 0.0
         return arc_points, curvature
 
     def create_path_polygon(
@@ -1107,6 +1123,7 @@ class ETS2Radar:
         except:
             return None
 
+    '''
     def draw_ego_path(
         self,
         img: npt.NDArray[np.uint8],
@@ -1150,6 +1167,7 @@ class ETS2Radar:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
             except Exception:
                 pass
+    '''
 
     def should_save_position(self, last: Optional[Coordinate], current: Coordinate) -> bool:
         """
@@ -1243,6 +1261,8 @@ class ETS2Radar:
         speed = data.get("speed", 0.0)
         self.ego_path_length = MAX_DISTANCE
         self.update_ego_trajectory((px, pz))
+        ego_steering.append(ego_steer)
+        ego_steer = np.mean(ego_steering)
 
         paused = data.get("paused", False)
 
