@@ -5,15 +5,9 @@ import numpy.typing as npt
 import truck_telemetry
 from shapely.geometry import Polygon, Point
 
-try:
-    from ETS2radar.classes import Vehicle
-    from ETS2radar.main import Module
-except:
-    print("\n")
-    print("#"*20)
-    print("\nwrong file stubid\n")
-    print("#"*20)
-    exit()
+from ETS2radar.classes import Vehicle
+from ETS2radar.main import Module
+
 import collections
 import time
 
@@ -932,27 +926,23 @@ class ETS2Radar:
 
         in_lane_vehicles.sort(key=lambda x: x[1])
         
-        # Filter out vehicles that come after a vehicle with both is_tmp and is_trailer
+        # Process vehicles with special handling for is_tmp trailers
         filtered_vehicles = []
-        skip_next = False
         
         for i, (v, dist, accel) in enumerate(in_lane_vehicles):
-            if skip_next:
-                skip_next = False
-                continue
-            
-            # Check if current vehicle has both is_tmp and is_trailer
+            # Handle is_tmp trailers - use trailer's distance but speed/accel from vehicle behind it
             if v.is_tmp and v.is_trailer:
-                # Add this vehicle (the trailer) and skip the next one (the tractor)
-                filtered_vehicles.append((v, dist, accel))
-                
-                if hasattr(v, 'trailer_count'):
-                    v.trailer_count += 1
+                # Get the next vehicle in the list (behind the trailer) for speed and acceleration
+                if i + 1 < len(in_lane_vehicles):
+                    next_v, _, next_accel = in_lane_vehicles[i + 1]
+                    # Use trailer's distance but next vehicle's speed and acceleration
+                    v.speed = next_v.speed
+                    filtered_vehicles.append((v, dist, next_accel))
                 else:
-                    v.trailer_count = 1
-                skip_next = True
+                    # No vehicle behind, use trailer's own values
+                    filtered_vehicles.append((v, dist, accel))
             else:
-                # Add vehicle normally
+                # Non-trailer vehicle, add normally
                 filtered_vehicles.append((v, dist, accel))
         
         result = []

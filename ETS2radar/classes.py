@@ -1,12 +1,14 @@
-"""
-this is code partially by tumppi for ETS2LA.
-i (Lukas Deschryver) did some minor modifications to make it work with MonoCruise and smoother in MP.
-I DO NOT TAKE CREDIT FOR THIS CODE.
-"""
-
 import math
 import time
 from collections import deque
+import threading
+import numpy as np
+
+# testing
+from ETS2radar.radar_visualizer import RadarVisualizer
+
+Visualizer = RadarVisualizer()
+threading.Thread(target=Visualizer.start, daemon=True).start()
 
 SPEED_CALCULATION_WINDOW = 1 # seconds - time window for calculating maxlen of position history
 
@@ -58,6 +60,167 @@ def rotate_around_point(point, center, pitch, yaw, roll):
         y + center[1],
         z + center[2]
     ]
+
+from collections import deque
+import numpy as np
+
+class KalmanFilter:
+    """
+    Kalman filter for estimating position, velocity (speed), and acceleration.
+    State vector: [x, y, z, vx, vy, vz, ax, ay, az]
+    Uses historical position buffer to handle multiplayer lag and jitter.
+    """
+    def __init__(self):
+        self.state = np.zeros(9)
+        self.P = np.eye(9) * 1000
+        
+        self.Q_base = np.eye(9)
+        self.Q_base[0:3, 0:3] *= 0.1
+        self.Q_base[3:6, 3:6] *= 0.4
+        self.Q_base[6:9, 6:9] *= 0.6
+        
+        self.R_base = np.eye(3) * 0.5
+        
+        self.H = np.zeros((3, 9))
+        self.H[0:3, 0:3] = np.eye(3)
+        
+        self.position_buffer = deque(maxlen=10)
+        self.buffer_window = 0.4
+        
+        self.ema_position = None
+        self.ema_alpha = 1
+        
+        self.initialized = False
+        self.last_time = None
+        
+    def predict(self, dt):
+        if dt <= 0:
+            return
+            
+        F = np.eye(9)
+        F[0:3, 3:6] = np.eye(3) * dt
+        F[0:3, 6:9] = np.eye(3) * 0.5 * dt**2
+        F[3:6, 6:9] = np.eye(3) * dt
+        
+        self.state = F @ self.state
+        
+        speed = np.linalg.norm(self.state[3:6])
+        speed_factor = 1.0 + (speed / 10.0)
+        Q = self.Q_base * speed_factor
+        
+        self.P = F @ self.P @ F.T + Q
+        
+    def update(self, measurement):
+        y = measurement - (self.H @ self.state)
+        
+        speed = np.linalg.norm(self.state[3:6])
+        speed_factor = 1.0 + (speed / 10.0)
+        R = self.R_base * speed_factor
+        
+        S = self.H @ self.P @ self.H.T + R
+        K = self.P @ self.H.T @ np.linalg.inv(S)
+        
+        self.state = self.state + K @ y
+        
+        I = np.eye(9)
+        self.P = (I - K @ self.H) @ self.P
+    
+    def _apply_ema(self, measurement):
+        if self.ema_position is None:
+            self.ema_position = measurement.copy()
+            return measurement
+        
+        self.ema_position = self.ema_alpha * measurement + (1 - self.ema_alpha) * self.ema_position
+        return self.ema_position
+    
+    def _get_buffered_position(self, current_time):
+        if len(self.position_buffer) < 2:
+            return self.position_buffer[-1][0] if self.position_buffer else None
+        
+        cutoff_time = current_time - self.buffer_window
+        valid_positions = [pos for pos, t in self.position_buffer if t >= cutoff_time]
+        
+        if len(valid_positions) == 0:
+            valid_positions = [pos for pos, t in self.position_buffer]
+        
+        if len(valid_positions) == 1:
+            return valid_positions[0]
+        
+        positions_array = np.array(valid_positions)
+        return np.median(positions_array, axis=0)
+    
+    def _detect_outlier(self, measurement):
+        if len(self.position_buffer) < 3:
+            return False
+        
+        recent_positions = np.array([pos for pos, _ in list(self.position_buffer)[-10:]])
+        mean_pos = np.mean(recent_positions, axis=0)
+        std_pos = np.std(recent_positions, axis=0)
+        
+        z_scores = np.abs((measurement - mean_pos) / (std_pos + 1e-6))
+        return np.any(z_scores > 3.0)
+        
+    def process(self, position, current_time):
+        measurement = np.array([position.x, position.y, position.z])
+        
+        self.position_buffer.append((measurement, current_time))
+        
+        buffered_measurement = self._get_buffered_position(current_time)
+        if buffered_measurement is None:
+            return 0.0, 0.0
+        
+        if self._detect_outlier(buffered_measurement):
+            return self.state[3:6].dot(self.state[3:6])**0.5 if self.initialized else 0.0, 0.0
+        
+        smoothed_measurement = self._apply_ema(buffered_measurement)
+        
+        if not self.initialized:
+            self.state[0:3] = smoothed_measurement
+            self.state[3:9] = 0
+            self.initialized = True
+            self.last_time = current_time
+            return 0.0, 0.0
+        
+        dt = current_time - self.last_time
+        if dt <= 0 or dt > 1.0:
+            self.last_time = current_time
+            return 0.0, 0.0
+        
+        self.predict(dt)
+        
+        predicted_pos = self.state[0:3]
+        distance = np.linalg.norm(smoothed_measurement - predicted_pos)
+        if distance > 50:
+            self.state[0:3] = smoothed_measurement
+            self.state[3:9] = 0
+            self.P = np.eye(9) * 1000
+            self.position_buffer.clear()
+            self.position_buffer.append((measurement, current_time))
+            self.last_time = current_time
+            return 0.0, 0.0
+        
+        self.update(smoothed_measurement)
+        self.last_time = current_time
+        
+        velocity = self.state[3:6]
+        speed = np.linalg.norm(velocity)
+        
+        if speed < 0.3:
+            speed = 0.0
+            signed_accel = 0.0
+        else:
+            velocity_direction = velocity / speed
+            acceleration_3d = self.state[6:9]
+            signed_accel = np.dot(acceleration_3d, velocity_direction)
+        
+        return speed, signed_accel
+        
+    def reset(self):
+        self.state = np.zeros(9)
+        self.P = np.eye(9) * 1000
+        self.ema_position = None
+        self.initialized = False
+        self.last_time = None
 
 class Position():
     x: float
@@ -214,7 +377,9 @@ class Vehicle:
     rotation: Quaternion
     size: Size
     speed: float
+    raw_speed: float
     acceleration: float
+    raw_accel: float
     trailer_count: int
     id: int
     trailers: list[Trailer]
@@ -223,8 +388,8 @@ class Vehicle:
     is_trailer: bool
     time: float = 0.0
     
-    # Position history for speed/acceleration calculation
-    position_history: list[tuple[float, Position]]  # List of (timestamp, position)
+    # Kalman filter for speed/acceleration estimation
+    kalman_filter: KalmanFilter
     
     def __init__(self, position: Position, rotation: Quaternion, size: Size, 
                 speed: float, acceleration: float, 
@@ -234,7 +399,9 @@ class Vehicle:
         self.rotation = rotation
         self.size = size
         self.speed = speed
+        self.raw_speed = speed
         self.acceleration = acceleration
+        self.raw_accel = acceleration
         self.trailer_count = trailer_count
         self.trailers = trailers
         self.id = id
@@ -242,63 +409,28 @@ class Vehicle:
         self.is_trailer = is_trailer
 
         self.time = time.time()
-        self.position_history = deque(maxlen=int(SPEED_CALCULATION_WINDOW / 0.1)) # Assuming 0.1s frame time
-        self._previous_speed = 0.0
+        self.kalman_filter = KalmanFilter()
 
     def update_from_last(self, vehicle):
         """Update this vehicle's calculated properties from the previous frame"""
         # Only calculate speed/acceleration for TruckersMP multiplayer vehicles
         if self.is_tmp:
-            if hasattr(vehicle, 'position_history') and isinstance(vehicle.position_history, deque):
-                self.position_history = vehicle.position_history.copy()
-                if hasattr(vehicle, '_previous_speed'):
-                    self._previous_speed = vehicle._previous_speed
+            # Transfer Kalman filter from previous vehicle
+            if hasattr(vehicle, 'kalman_filter'):
+                self.kalman_filter = vehicle.kalman_filter
+            else:
+                self.kalman_filter = KalmanFilter()
             
             current_time = time.time()
-            self.position_history.append((current_time, Position(self.position.x, self.position.y, self.position.z)))
-            
-            self._calculate_speed_and_acceleration()
-        
-    def _calculate_speed_and_acceleration(self):
-        """Calculate speed and acceleration from position history"""
-        if len(self.position_history) < 2:
-            return
-        
-        mid = len(self.position_history) // 2
-        old_half = list(self.position_history)[:mid]
-        new_half = list(self.position_history)[mid:]
-        
-        old_time = sum(t for t, _ in old_half) / len(old_half)
-        old_x = sum(p.x for _, p in old_half) / len(old_half)
-        old_y = sum(p.y for _, p in old_half) / len(old_half)
-        old_z = sum(p.z for _, p in old_half) / len(old_half)
-        
-        new_time = sum(t for t, _ in new_half) / len(new_half)
-        new_x = sum(p.x for _, p in new_half) / len(new_half)
-        new_y = sum(p.y for _, p in new_half) / len(new_half)
-        new_z = sum(p.z for _, p in new_half) / len(new_half)
-        
-        time_diff = new_time - old_time
-        if time_diff < 0.01:
-            return
-        
-        distance = math.sqrt(
-            (new_x - old_x) ** 2 +
-            (new_y - old_y) ** 2 +
-            (new_z - old_z) ** 2
-        )
-        
-        if distance > 50:
-            self.speed = 0.0
-            self.acceleration = 0.0
-            self._previous_speed = 0.0
-            self.position_history.clear()
-            return
+            self._calculate_speed_and_acceleration(current_time)
 
-        new_speed = distance / time_diff
-        self.acceleration = (new_speed - self._previous_speed) / time_diff
-        self._previous_speed = new_speed
-        self.speed = new_speed
+        Visualizer.push_data(vehicle.id, vehicle.speed, vehicle.acceleration, vehicle.raw_speed, vehicle.raw_accel)
+        
+    def _calculate_speed_and_acceleration(self, current_time):
+        """Calculate speed and acceleration using Kalman filter"""
+        speed, accel = self.kalman_filter.process(self.position, current_time)
+        self.speed = speed
+        self.acceleration = accel
         
     def is_zero(self):
         return self.position.is_zero() and self.rotation.is_zero()

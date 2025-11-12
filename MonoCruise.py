@@ -1,3 +1,4 @@
+print("boot")
 import threading
 import customtkinter as ctk
 import tkinter as tk
@@ -52,6 +53,7 @@ root.withdraw()
 from connect_SDK import check_and_install_scs_sdk, check_scs_sdk, update_sdk_dlls
 
 import truck_telemetry
+print("finished imports")
 try:
     truck_telemetry.init()  # Signals if ETS2 SDK has been detected
 except:
@@ -2513,7 +2515,7 @@ class ACCConfig:
     K_F: float = 1.0   # Feed-forward gain on lead vehicle acceleration
 
     # Time gaps
-    TIME_GAP_FOLLOW: float = 1.3  # Desired time gap in seconds when following
+    TIME_GAP_FOLLOW: float = 1.5  # Desired time gap in seconds when following
     
     # Physical constraints and limits
     MIN_GAP: float = 4.0          # Minimum allowed gap in meters
@@ -2542,7 +2544,7 @@ class MonoCruiseACC:
 
     def __init__(self, config: ACCConfig = ACCConfig()):
         self.config = config
-        self._lead_history = deque(maxlen=5)
+        self._lead_history = deque(maxlen=3)
         self._ego_speed_history = deque(maxlen=5)
         self._filter_state = {'prev_output': 0.0, 'initialized': False}
 
