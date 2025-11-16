@@ -2,7 +2,7 @@ print("boot")
 import threading
 import customtkinter as ctk
 import tkinter as tk
-version = "v1.0.2"
+version = "v1.0.3"
 
 # temporary for radar output
 import cv2
@@ -2511,7 +2511,7 @@ class ACCConfig:
     """Configuration parameters for the ACC controller."""
     # Controller gains
     K_P: float = 0.05  # Proportional gain on gap error
-    K_D: float = 0.35  # Derivative gain on relative speed (speed error)
+    K_D: float = 0.32  # Derivative gain on relative speed (speed error)
     K_F: float = 1.0   # Feed-forward gain on lead vehicle acceleration
 
     # Time gaps
@@ -2526,7 +2526,7 @@ class ACCConfig:
     MIN_TIME_GAP: float = 0.5     # Minimum time gap for stopping scenarios
 
     # Filtering
-    FILTER_ALPHA: float = 0.2     # Low-pass filter coefficient (lower is smoother)
+    FILTER_ALPHA: float = 0.35     # Low-pass filter coefficient (lower is smoother)
 
 @dataclass
 class LeadVehicleData:
@@ -2604,6 +2604,9 @@ class MonoCruiseACC:
         p_term = self.config.K_P * gap_error
         d_term = self.config.K_D * speed_error
         ff_term = self._calculate_FF_accel(lead, ego_speed)
+
+        d_term = np.sign(d_term)*min(abs(d_term/1)**1.5*1,abs(d_term))
+        ff_term = np.sign(ff_term)*min(abs(ff_term/1)**1.7*0.7,abs(ff_term))
 
         if ego_speed < 2.0 and lead.accel > 1:
             ff_term *= 2
