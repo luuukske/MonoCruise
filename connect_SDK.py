@@ -286,7 +286,7 @@ def check_all_scs_sdk_installations(game_type="ets2"):
         installations.append((game_path, sdk_installed))
     return installations
 
-def install_scs_sdk(game_type="ets2", target_path=None, root=None):
+def install_scs_sdk(game_type="ets2", target_path=None):
     """
     Install all required SDK DLLs if not already installed.
     Args:
@@ -319,7 +319,6 @@ def install_scs_sdk(game_type="ets2", target_path=None, root=None):
 
         missing_dlls = [name for name, installed in dlls_installed.items() if not installed]
         msg = CTkMessagebox(
-            root=root,
             title="SDK not installed",
             message=f'Should I automatically install the SDK DLLs ({", ".join(missing_dlls)}) for {game_type.upper()}? The game will close automatically if running.',
             icon="warning",
@@ -372,7 +371,7 @@ def install_scs_sdk(game_type="ets2", target_path=None, root=None):
         print(f"Error during SDK installation: {e}")
         return False, False
 
-def install_scs_sdk_to_all(game_type="ets2", root=None):
+def install_scs_sdk_to_all(game_type="ets2"):
     """
     Install all required SDK DLLs to all found game installations.
     Returns list of tuples: (game_path, success, was_already_installed)
@@ -389,19 +388,7 @@ def install_scs_sdk_to_all(game_type="ets2", root=None):
         results.append((game_path, success, was_installed))
     return results
 
-def install_scs_sdk_to_both_games(root=None):
-    """
-    Install all required SDK DLLs to all ETS2 and ATS installations found on the system.
-    Returns dict with results for both games: {"ets2": [...], "ats": [...]}
-    """
-    results = {}
-    print("=== Installing SDK to ETS2 ===")
-    results["ets2"] = install_scs_sdk_to_all("ets2", root)
-    print("\n=== Installing SDK to ATS ===")
-    results["ats"] = install_scs_sdk_to_all("ats", root)
-    return results
-
-def check_and_install_scs_sdk(root):
+def check_and_install_scs_sdk():
     """
     Check if all SDK DLLs are installed in any SCS game (ETS2 or ATS) and install to all found games if needed.
     Only installs if valid game installations (with .exe files) are found.
@@ -458,7 +445,7 @@ def check_and_install_scs_sdk(root):
 
     for game_type in result["found_games"]:
         print(f"\n=== Processing {game_type.upper()} installations ===")
-        game_results = install_scs_sdk_to_all(game_type, root)
+        game_results = install_scs_sdk_to_all(game_type)
         result["installation_results"][game_type] = game_results
         for path, success, was_installed in game_results:
             result["summary"]["total_installations"] += 1
@@ -488,7 +475,6 @@ def check_and_install_scs_sdk(root):
     if summary["successful_installs"] > 0 or summary["already_had_sdk"] > 0:
         print(f"\nSDK DLLs are now ready for use in {summary['successful_installs'] + summary['already_had_sdk']} installation(s)!")
         msg = CTkMessagebox(
-            root=root,
             title="SDK installed",
             message='SDK DLLs installed successfully. You can now open the game.',
             icon="warning",
@@ -500,7 +486,6 @@ def check_and_install_scs_sdk(root):
     if summary["failed_installs"] > 0:
         print("Some installations failed. Please check the logs for details.")
         msg = CTkMessagebox(
-            root=root,
             title="SDK installation failed",
             message='Some installations failed. Please check the logs for details.',
             icon="warning",
@@ -511,7 +496,7 @@ def check_and_install_scs_sdk(root):
         msg.get()
     return result
 
-def update_sdk_dlls(root):
+def update_sdk_dlls():
     """
     Update all installed SDK DLLs (scs-telemetry.dll, input_semantical.dll, ets2_la_plugin.dll)
     to all locations where ALL are already installed.
@@ -542,7 +527,6 @@ def update_sdk_dlls(root):
                 running = is_scs_game_running(game_type)
                 if running:
                     msg = CTkMessagebox(
-                        root=root,
                         title=f"{game_type.upper()} is running",
                         message=f"{game_type.upper()} is currently running at {game_path}.\nDo you want to close it automatically to update the SDK DLLs?",
                         icon="warning",
@@ -564,6 +548,9 @@ def update_sdk_dlls(root):
                     source_dll = script_dir / dll_name
                     if source_dll.exists():
                         try:
+                            target_file = target_path / dll_name
+                            if target_file.exists():
+                                target_file.unlink()
                             shutil.copy2(source_dll, target_path)
                             updated_dlls.append(dll_name)
                             print(f"Updated {dll_name} in {target_path}")

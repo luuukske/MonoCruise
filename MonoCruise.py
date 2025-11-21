@@ -2759,8 +2759,8 @@ class MonoCruiseACC:
                 target_accel = self._calculate_accel(lead, ego_speed)
 
                 # for overwriting the engine idle at slow speeds (reduce creep)
-                slow_speed_increase = (1 - (abs(ego_speed) / 7) ** 2) * 0.3
-                target_accel -= max(slow_speed_increase,0)
+                slow_speed_increase = max( ((1 - ((abs(speed)+0.1) / 5.5) ** 2.22) * (-0.6/(abs(speed)+0.1)+1))/0.715 * 0.04 , 0)
+                target_accel -= slow_speed_increase
 
                 self.debug_info.update({
                     "ego_speed": ego_speed,
@@ -3874,6 +3874,11 @@ def main():
             gas_output = opdgasval
             brake_output = opdbrakeval
 
+            """ test for removing the creeping
+            if opdgasval == 0.0:
+                opdbrakeval += max( ((1 - ((abs(speed)+0.1) / 5.5) ** 2.22) * (-0.6/(abs(speed)+0.1)+1))/0.715 * 0.04 , 0)
+            """
+
             if debug_mode.get() == True:
                 print(f"FINAL OUTPUT: brake={brake_output}, gas={gas_output}")
                 print(f"gasvalue: {round(opdgasval,3)} \tbrakevalue: {round(opdbrakeval,3)} \tspeed: {round(speed,3)} \tstopped: {stopped} \tgasval: {round(gasval,3)} \tbrakeval: {round(brakeval,3)} \tdiff: {round(prev_brakeval-brakeval,3)} \tdiff2: {round(prev_speed-speed,3)} \thazards: {data['lightsHazards']} \thazards_var: {hazards_variable_var} \thazards_prompted: {hazards_prompted}")
@@ -4915,8 +4920,8 @@ try:
     customtkinter_label.grid(row=53, column=0, padx=10, pady=0, columnspan=2, sticky="new")
 
     def reinstall_function():
-        _ = update_sdk_dlls(root)
-        _ = check_and_install_scs_sdk(root)
+        _ = update_sdk_dlls()
+        _ = check_and_install_scs_sdk()
 
     #create a button to reinstall the SDK
     reinstall_SDK_button = ctk.CTkButton(
