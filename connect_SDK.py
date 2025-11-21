@@ -319,7 +319,6 @@ def install_scs_sdk(game_type="ets2", target_path=None):
 
         missing_dlls = [name for name, installed in dlls_installed.items() if not installed]
         msg = CTkMessagebox(
-            master=root,
             title="SDK not installed",
             message=f'Should I automatically install the SDK DLLs ({", ".join(missing_dlls)}) for {game_type.upper()}? The game will close automatically if running.',
             icon="warning",
