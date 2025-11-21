@@ -2544,7 +2544,7 @@ class MonoCruiseACC:
 
     def __init__(self, config: ACCConfig = ACCConfig()):
         self.config = config
-        self._lead_history = deque(maxlen=3)
+        self._lead_history = deque(maxlen=5)
         self._ego_speed_history = deque(maxlen=5)
         self._filter_state = {'prev_output': 0.0, 'initialized': False}
 
@@ -2615,7 +2615,7 @@ class MonoCruiseACC:
         controller_accel = closeness_amp * (p_term + d_term) + ff_term
 
         # Closing-in detection: ego faster and too close vs desired gap
-        stopping = (lead.speed < 2) or (lead.accel < -1 and rel_speed > 0)
+        stopping = (lead.speed < 0.5) or (lead.accel < -1 and rel_speed > 0)
 
         # When closing in, blend in the stopping-distance based decel by averaging.
         if stopping:
@@ -2751,6 +2751,8 @@ class MonoCruiseACC:
             # --- State Machine ---
             if lead is None:
                 target_accel = self.config.MAX_ACCEL  # Default to max accel (cruise)
+                self._filter_state['initialized'] = False
+
                 self.debug_info.update({
                     "ego_speed": ego_speed,
                     "lead_present": False
@@ -2759,7 +2761,7 @@ class MonoCruiseACC:
                 target_accel = self._calculate_accel(lead, ego_speed)
 
                 # for overwriting the engine idle at slow speeds (reduce creep)
-                slow_speed_increase = max( ((1 - ((abs(speed)+0.1) / 5.5) ** 2.22) * (-0.6/(abs(speed)+0.1)+1))/0.715 * 0.04 , 0)
+                slow_speed_increase = max( ((1 - ((abs(speed)+0.1) / 5.5) ** 2.22) * (-0.6/(abs(speed)+0.1)+1))/0.715 * 0.06 , 0)
                 target_accel -= slow_speed_increase
 
                 self.debug_info.update({
@@ -3197,7 +3199,7 @@ def cc_target_speed_thread_func():
                         physics_adjustment)
             
             if cc_mode.get() == "Cruise control" and acc_enabled.get() and data_history is not None and len(data_history) > 0:
-                acc_val = ACC.update(speed, data_history[0]) * 0.8 + physics_adjustment
+                acc_val = ACC.update(speed, data_history[0]) * 0.82 + physics_adjustment
                 print("\n\n")
                 print("ACC debug info:", end=' ')
                 print(*[f"{k}: {round(v, 2) if isinstance(v, float) else v}" for k, v in ACC.debug_info.items()], sep='\t')
