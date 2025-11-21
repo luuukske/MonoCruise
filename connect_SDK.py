@@ -319,6 +319,7 @@ def install_scs_sdk(game_type="ets2", target_path=None):
 
         missing_dlls = [name for name, installed in dlls_installed.items() if not installed]
         msg = CTkMessagebox(
+            master=root,
             title="SDK not installed",
             message=f'Should I automatically install the SDK DLLs ({", ".join(missing_dlls)}) for {game_type.upper()}? The game will close automatically if running.',
             icon="warning",
@@ -388,7 +389,7 @@ def install_scs_sdk_to_all(game_type="ets2"):
         results.append((game_path, success, was_installed))
     return results
 
-def check_and_install_scs_sdk():
+def check_and_install_scs_sdk(root):
     """
     Check if all SDK DLLs are installed in any SCS game (ETS2 or ATS) and install to all found games if needed.
     Only installs if valid game installations (with .exe files) are found.
@@ -475,6 +476,7 @@ def check_and_install_scs_sdk():
     if summary["successful_installs"] > 0 or summary["already_had_sdk"] > 0:
         print(f"\nSDK DLLs are now ready for use in {summary['successful_installs'] + summary['already_had_sdk']} installation(s)!")
         msg = CTkMessagebox(
+            master=root,
             title="SDK installed",
             message='SDK DLLs installed successfully. You can now open the game.',
             icon="warning",
@@ -486,6 +488,7 @@ def check_and_install_scs_sdk():
     if summary["failed_installs"] > 0:
         print("Some installations failed. Please check the logs for details.")
         msg = CTkMessagebox(
+            master=root,
             title="SDK installation failed",
             message='Some installations failed. Please check the logs for details.',
             icon="warning",
@@ -496,7 +499,7 @@ def check_and_install_scs_sdk():
         msg.get()
     return result
 
-def update_sdk_dlls():
+def update_sdk_dlls(root):
     """
     Update all installed SDK DLLs (scs-telemetry.dll, input_semantical.dll, ets2_la_plugin.dll)
     to all locations where ALL are already installed.
@@ -527,6 +530,7 @@ def update_sdk_dlls():
                 running = is_scs_game_running(game_type)
                 if running:
                     msg = CTkMessagebox(
+                        master=root,
                         title=f"{game_type.upper()} is running",
                         message=f"{game_type.upper()} is currently running at {game_path}.\nDo you want to close it automatically to update the SDK DLLs?",
                         icon="warning",

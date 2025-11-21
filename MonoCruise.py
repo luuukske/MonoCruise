@@ -4920,8 +4920,8 @@ try:
     customtkinter_label.grid(row=53, column=0, padx=10, pady=0, columnspan=2, sticky="new")
 
     def reinstall_function():
-        _ = update_sdk_dlls()
-        _ = check_and_install_scs_sdk()
+        _ = update_sdk_dlls(root)
+        _ = check_and_install_scs_sdk(root)
 
     #create a button to reinstall the SDK
     reinstall_SDK_button = ctk.CTkButton(
