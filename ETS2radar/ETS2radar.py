@@ -1,5 +1,6 @@
 from typing import List, Tuple, Dict, Optional, Any, Deque
 import cv2
+from jinja2.runtime import V
 import numpy as np
 import numpy.typing as npt
 import truck_telemetry
@@ -10,6 +11,7 @@ from ETS2radar.main import Module
 
 import collections
 import time
+import threading
 
 # Type aliases for clarity
 Coordinate = Tuple[float, float]
@@ -24,6 +26,7 @@ MAX_DISTANCE: int = 150  # meters
 REFRESH_INTERVAL: float = 0.1  # only used when running run() loop
 FOV_ANGLE: int = 25  # degrees (half-angle of cone)
 POSITION_SNAP: float = 1.5  # meters: only save every 10 meters
+PATH_WIDTH: float = 2.5  # meters: width of ego path for collision detection
 
 class VehicleTracker:
     """
@@ -87,6 +90,8 @@ class ETS2Radar:
         self.last_left_blinker: int = 0 # timestamp of last left blinker on
         self.last_right_blinker: int = 0 # timestamp of last right blinker on
 
+        self.capturing_positions = False
+        self.vehicles: List[Vehicle] = []
 
         self.in_lane_scores_reset: bool = False
         self.reset_in_lane_scores: bool = False
@@ -130,7 +135,6 @@ class ETS2Radar:
         self,
         vid: int,
         offset: Optional[float],
-        previous_score: Optional[float] = None,
         distance: float = 30,
         angle: float = 0.0,
         data: Optional[Dict[str, Any]] = None
@@ -141,16 +145,13 @@ class ETS2Radar:
         If no trail (no history or empty), score is 0.
         Otherwise, use the offset formula as before.
         """
-        if previous_score is None:
-            previous_score = self.vehicle_scores.get(vid, 0.0)
-
         # Check if vehicle has a trail/history
         history = self.vehicle_histories.get(vid, None)
         if history is not None and offset is None:
             # Has a trail but not intersecting with base: penalize
-            score_increment = -0.7
+            score_increment = -0.4
         elif history is None:
-            score_increment = -0.15
+            score_increment = -0.1
         else:
             score_increment = 0.0
 
@@ -158,10 +159,11 @@ class ETS2Radar:
         if offset is not None:
             try:
                 x = float(offset)
-                offset_score = (2 ** (-(x / 9) ** 2) * 2.5 - 1.5) / 1
+                angle_amp = (2 ** (-(angle / 0.06) ** 2)) / 1
+                offset_score = (2 ** (-(x / 9) ** 2) * 2.5 * angle_amp - 1) / 1
                 distance_amp = (2 ** (-(distance / 100)) + 1 / ((distance + 3) / 8)-1)/3+1
-                offset_score = max(-1.5, min(1, offset_score * distance_amp))
-                score_increment += offset_score
+                offset_score = max(-1, min(1, offset_score * distance_amp))
+                score_increment += offset_score * 1.5 * (angle_amp/2 + 0.5)
             except Exception:
                 pass
             
@@ -234,7 +236,6 @@ class ETS2Radar:
             distance_amp = (2**(-(distance/100))+1/((distance+3)/8)-1)/2+1
             # Clamp each score increment to [-2, 0.5] # temporarily set to max 0
             angle_score = max(-2, min(0, angle_score*distance_amp))
-            score_increment += angle_score
         except Exception:
                 pass
 
@@ -527,7 +528,7 @@ class ETS2Radar:
         self,
         path_points: List[Tuple[float, float]],
         vehicle_polygon: Polygon,
-        path_width: float = 2
+        path_width: float = PATH_WIDTH
     ) -> bool:
         """
         Check if a vehicle polygon intersects with the ego path polygon.
@@ -559,7 +560,7 @@ class ETS2Radar:
         path_points: List[Tuple[float, float]],
         center: ScreenCoordinate,
         scale: float,
-        path_width: float = 1.5,
+        path_width: float = PATH_WIDTH,
         color: RGBColor = (0, 255, 0),
         thickness: int = 1,
         show_info: bool = True,
@@ -624,10 +625,10 @@ class ETS2Radar:
 
     def draw_radar(
         self,
-        vehicles: List[Any],
+        vehicles: List[Vehicle],
         px: float,
         pz: float,
-        yaw_rad: float,
+        yaw: float,
         ego_steer: float = 0.0,
         ego_speed: float = 0.0,
         data: Optional[Dict[str, Any]] = None,
@@ -639,6 +640,11 @@ class ETS2Radar:
         except:
             win_w, win_h = 600, 600
 
+        vehicles = self.vehicles
+        
+        yaw_rad = (yaw + 0.5) * 2 * np.pi
+        yaw_deg = yaw * 360
+        
         scale = win_h / self.max_distance
         center = (win_w // 2, win_h)
         img = np.zeros((win_h, win_w, 3), dtype=np.uint8)
@@ -676,8 +682,8 @@ class ETS2Radar:
         path_pts, curvature = [], 0.0
         try:
             path_pts, curvature = self.predict_ego_path_using_history(px, pz, yaw_rad, path_length=self.ego_path_length, ego_steer=ego_steer, ego_speed=ego_speed)
-            # Draw ego path with 1.5m width
-            self.draw_ego_path_with_width(img, path_pts, center, scale, path_width=1.5, color=(0, 200, 0), thickness=1, show_info=True, curvature=curvature)
+            # Draw ego path with 2m width
+            self.draw_ego_path_with_width(img, path_pts, center, scale, path_width=PATH_WIDTH, color=(0, 200, 0), thickness=1, show_info=True, curvature=curvature)
         except Exception:
             pass
 
@@ -784,7 +790,7 @@ class ETS2Radar:
             
             vid = getattr(v, 'id', id(v))
 
-            # --- Update vehicle world pos history instead of screen pos history ---
+            # Update vehicle world pos history instead of screen pos history
             if vid not in self.vehicle_world_pos_history:
                 self.vehicle_world_pos_history[vid] = collections.deque(maxlen=10)
             self.vehicle_world_pos_history[vid].append((dx, dz))
@@ -823,6 +829,10 @@ class ETS2Radar:
                     angle_for_score = angle
                 previous_score = self.vehicle_scores.get(vid, 0.0)
                 offset_score = self.calculate_offset_score(vid, offset_for_score, overall_closest_distance, angle_for_score, data)
+
+                #temp
+                offset_score = 0.0
+                """
                 angle_score = self.calculate_angle_score(
                     vid,
                     path_pts,
@@ -830,35 +840,49 @@ class ETS2Radar:
                     (dx, dz),
                     overall_closest_distance,
                 )
+                """
+
+                _, y, _ = getattr(v, 'rotation', None).euler()
+
+                yaw_diff = min([abs(y - yaw_deg), abs((y - yaw_deg) + 360), abs((y - yaw_deg) - 360)])
+                yaw_score = ((2**(-(abs(yaw_diff)/90)**5))/1 - 1) * 1.5
+                if score_val > 0:
+                    print(f"Vehicle ID {vid} angle diff: {yaw_diff:.2f} degrees")
+                
+                angle_score = 0.0  # Temporarily disable angle score contribution
 
                 # Check if vehicle is in ego path
                 if path_pts:
-                    is_in_path = self.check_vehicle_in_ego_path(path_pts, poly, path_width=1)
+                    is_in_path = self.check_vehicle_in_ego_path(path_pts, poly, path_width=PATH_WIDTH)
                     
                     # Also check trailers
                     trailer_in_path = False
                     for trailer_data in vdata['trailers']:
-                        if self.check_vehicle_in_ego_path(path_pts, trailer_data['polygon'], path_width=1):
+                        if self.check_vehicle_in_ego_path(path_pts, trailer_data['polygon'], path_width=PATH_WIDTH):
                             trailer_in_path = True
                             break
                     
+                    slow_speed_score_amp = 1.6+(ego_speed*3.6/100)*(5.5-1.6)
+
+                    path_score_base = pow(1.03, -overall_closest_distance) * (slow_speed_score_amp - abs(blinker_offset * 0.5) * slow_speed_score_amp)
+
                     # Vehicle or any of its trailers in path = positive score
                     if is_in_path or trailer_in_path:
-                        path_score = min(0.3 * distance_amp, 10)
+                        path_score = min(path_score_base, 5)
                     else:
-                        path_score = -min(0.3 * distance_amp, 3)
+                        path_score = -min(path_score_base * 0.5, 4)
                 else:
                     path_score = 0.0
                 
                 if self.reset_in_lane_scores:
                     score_val = 0.0  # Reset to 0 on blinker change
                 elif not paused:
-                    score_val = previous_score + (offset_score + angle_score + path_score) * max((abs(vehicle_speed)/90)**0.8, 0.5)
+                    score_val = previous_score + (offset_score + angle_score + yaw_score + path_score) * max((abs(vehicle_speed)/90)**0.8, 0.5)
                 else:
                     score_val = previous_score
 
                 # Clamp score to valid range
-                score_val = max(-5.0, min(15.0, score_val))
+                score_val = max(-3.0, min(15.0, score_val))
                 self.vehicle_scores[vid] = score_val
 
             if self.is_in_front_cone(dx, dz) and score_val > 0:
@@ -872,7 +896,7 @@ class ETS2Radar:
                     if score_val > 0:
                         # Check if vehicle is in ego path for different coloring
                         vehicle_color = (0, 0, 255)  # Default red for in-lane
-                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly, path_width=1):
+                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly, path_width=PATH_WIDTH):
                             vehicle_color = (0, 100, 255)  # Orange-red for vehicles in ego path
                         
                         self.draw_vehicle(img, poly, center, scale, vehicle_color)
@@ -882,7 +906,7 @@ class ETS2Radar:
                     if score_val > 0:
                         # Use same color logic for trailers
                         trailer_color = (255, 0, 0)  # Default red for in-lane trailers
-                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly, path_width=1):
+                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly, path_width=PATH_WIDTH):
                             trailer_color = (255, 50, 0)  # Orange for trailers in ego path
                         self.draw_vehicle(img, poly, center, scale, trailer_color)
                     else:
@@ -911,7 +935,7 @@ class ETS2Radar:
                     if score_val > 0:
                         # Use same color logic for trailers
                         trailer_color = (255, 0, 0)  # Default red for in-lane trailers
-                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly_t, path_width=1):
+                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly_t, path_width=PATH_WIDTH):
                             trailer_color = (255, 50, 0)  # Orange for trailers in ego path
                         self.draw_vehicle(img, poly_t, center, scale, trailer_color)
                     else:
@@ -1255,8 +1279,8 @@ class ETS2Radar:
             data = truck_telemetry.get_data()
         px = data.get("coordinateX", 0.0)
         pz = data.get("coordinateZ", 0.0)
-        yawn = data.get("rotationX", 0.0) + 0.5
-        yawr = yawn * 2 * np.pi
+        yaw = data.get("rotationX", 0.0)
+        yaw_rad = (yaw + 0.5) * 2 * np.pi
         ego_steer = data.get("gameSteer", 0.0)
         speed = data.get("speed", 0.0)
         self.ego_path_length = MAX_DISTANCE
@@ -1275,12 +1299,13 @@ class ETS2Radar:
         
         # Handle duplicate vehicle IDs
         vehicles = self.handle_duplicate_vehicle_ids(vehicles)
+        self.vehicles = vehicles
 
-        # Update histories with world coordinates
         if not paused:
             for v in vehicles:
+                # Update histories with world coordinates
                 vid = getattr(v, 'id', id(v))
-                poly = self.get_vehicle_polygon(v, px, pz, yawr)
+                poly = self.get_vehicle_polygon(v, px, pz, yaw_rad)
                 cx = np.mean([c[0] for c in v.get_corners()])
                 cz = np.mean([c[2] for c in v.get_corners()])
                 self.update_vehicle_history(vid, (cx, cz))
@@ -1288,8 +1313,38 @@ class ETS2Radar:
                 self.vehicle_speeds[vid] = getattr(v, 'speed', 0)
 
         # Main detection and visualization
-        in_lane_vehicles = self.draw_radar(vehicles, px, pz, yawr, ego_steer, speed, data, cc_app, paused)
+        in_lane_vehicles = self.draw_radar(vehicles, px, pz, yaw, ego_steer, speed, data, cc_app, paused)
+        self.start_position_capture()
         return in_lane_vehicles
+
+    def start_position_capture(self):
+        """
+        Start capturing vehicle positions for history.
+        """
+        if self.capturing_positions:
+            return
+        self.capturing_positions = True
+
+        # Start a thread to capture positions every 0.02 seconds
+        def capture_thread():
+            """Thread function that captures positions for high_res vehicles."""
+            while self.capturing_positions:
+                try:
+                    # Call add_position_to_queue for vehicles
+                    for vehicle in self.vehicles:
+                        vehicle.add_position_to_queue()
+                    
+                    # Sleep for 0.005 seconds (200 Hz)
+                    time.sleep(0.005)
+                except Exception as e:
+                    # Continue running even if there's an error
+                    print(f"Error in position capture thread: {e}")
+                    time.sleep(0.02)
+        
+        # Start the thread as a daemon so it stops when main program exits
+        capture_thread_obj = threading.Thread(target=capture_thread, daemon=True)
+        capture_thread_obj.start()
+
 
     def run(self):
         """
@@ -1315,6 +1370,7 @@ class ETS2Radar:
         """
         Clean up window resources (call at exit).
         """
+        self.capturing_positions = False
         if self.show_window:
             cv2.destroyAllWindows()
 

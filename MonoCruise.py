@@ -1183,6 +1183,7 @@ def send(a, b, controller):
     except:
         a = gasval
     b = max(b,(max(brakeval.real,0)**brake_exponent_variable.get()))
+    b = b**0.91 # because all the systems were tuned for 110% brake output
  
     setattr(controller, "aforward", float(a.real))
     setattr(controller, "abackward", float(b.real))
@@ -2511,7 +2512,7 @@ class ACCConfig:
     """Configuration parameters for the ACC controller."""
     # Controller gains
     K_P: float = 0.05  # Proportional gain on gap error
-    K_D: float = 0.32  # Derivative gain on relative speed (speed error)
+    K_D: float = 0.33  # Derivative gain on relative speed (speed error)
     K_F: float = 1.0   # Feed-forward gain on lead vehicle acceleration
 
     # Time gaps
@@ -2519,14 +2520,15 @@ class ACCConfig:
     
     # Physical constraints and limits
     MIN_GAP: float = 4.0          # Minimum allowed gap in meters
-    STOPPING_GAP: float = 3.0     # Desired gap when stopped behind a vehicle
+    STOPPING_GAP: float = 3.5     # Desired gap when stopped behind a vehicle
     MAX_ACCEL: float = 1.5        # Maximum acceleration in m/s^2
     MAX_DECEL: float = -6.5         # Maximum deceleration (braking) in m/s^2
     EMERGENCY_DECEL: float = -8   # Emergency braking deceleration in m/s^2
     MIN_TIME_GAP: float = 0.5     # Minimum time gap for stopping scenarios
+    acc_amp: float = 1.04        # Acceleration amplitude scaling factor
 
     # Filtering
-    FILTER_ALPHA: float = 0.35     # Low-pass filter coefficient (lower is smoother)
+    FILTER_ALPHA: float = 0.3     # Low-pass filter coefficient (lower is smoother)
 
 @dataclass
 class LeadVehicleData:
@@ -2605,9 +2607,11 @@ class MonoCruiseACC:
         d_term = self.config.K_D * speed_error
         ff_term = self._calculate_FF_accel(lead, ego_speed)
 
-        d_term = np.sign(d_term)*min(abs(d_term/1)**1.5*1,abs(d_term))
-        ff_term = np.sign(ff_term)*min(abs(ff_term/1)**1.7*0.7,abs(ff_term))
-
+        """ disabled due to unresposive feel at slow decels
+        d_term = np.sign(d_term)*min(abs(d_term/1)**1.2*1,abs(d_term))
+        ff_term = np.sign(ff_term)*min(abs(ff_term/1)**1.3*0.7,abs(ff_term))
+        """
+        
         if ego_speed < 2.0 and lead.accel > 1:
             ff_term *= 2
             p_term *= 0.5
@@ -2620,7 +2624,7 @@ class MonoCruiseACC:
         # When closing in, blend in the stopping-distance based decel by averaging.
         if stopping:
             stopping_decel = self._calculate_stopping_accel(lead, ego_speed)
-            target_accel = (controller_accel*0.4 + stopping_decel*0.6)
+            target_accel = (controller_accel*0.3 + stopping_decel*0.7)
         else:
             stopping_decel = 0.0
             target_accel = controller_accel
@@ -2649,7 +2653,7 @@ class MonoCruiseACC:
         min_safe_distance = max(1.0, ego_speed * 0.2)
         
         # Clamp lead accel to reasonable bounds (-10 to +3 m/s²)
-        lead_accel_clamped = max(-10.0, min(3.0, lead.accel))
+        lead_accel_clamped = max(-10.0, min(3.0, lead.accel*self.config.acc_amp))
         
         # State machine with clear priority
         if lead.speed < 0.5:
@@ -2713,7 +2717,7 @@ class MonoCruiseACC:
         actual_time_gap = max(lead.distance / max(ego_speed, 0.1), 0.0)
         acceleration_amp = max(-(actual_time_gap / 2.0) ** 3 + 1.0, 0.2)
 
-        target_accel = self.config.K_F * lead.accel * acceleration_amp
+        target_accel = self.config.K_F * lead.accel * self.config.acc_amp * acceleration_amp
 
         self.debug_info.update({
             "FF_result": target_accel,
@@ -2751,7 +2755,6 @@ class MonoCruiseACC:
             # --- State Machine ---
             if lead is None:
                 target_accel = self.config.MAX_ACCEL  # Default to max accel (cruise)
-                self._filter_state['initialized'] = False
 
                 self.debug_info.update({
                     "ego_speed": ego_speed,
@@ -2759,9 +2762,10 @@ class MonoCruiseACC:
                 })
             else:
                 target_accel = self._calculate_accel(lead, ego_speed)
+                    
 
                 # for overwriting the engine idle at slow speeds (reduce creep)
-                slow_speed_increase = max( ((1 - ((abs(speed)+0.1) / 5.5) ** 2.22) * (-0.6/(abs(speed)+0.1)+1))/0.715 * 0.06 , 0)
+                slow_speed_increase = max( ((1 - ((abs(speed)+0.1) / 5.5) ** 2.22) * (-0.6/(abs(speed)+0.1)+1))/0.715 * 0.08 , 0)
                 target_accel -= slow_speed_increase
 
                 self.debug_info.update({
@@ -2775,6 +2779,9 @@ class MonoCruiseACC:
             # Apply safety clamps and filtering
             final_accel = np.clip(target_accel, self.config.MAX_DECEL, self.config.MAX_ACCEL)
             filtered_accel = self._low_pass_filter(final_accel)
+
+            if ego_speed < 5 and filtered_accel < 0.2 and filtered_accel >= 0.0:
+                filtered_accel = 0.0
 
             self.debug_info.update({
                 "target_accel": target_accel,
@@ -2953,7 +2960,7 @@ class AEBSoundHandler:
         """
         self.stop_warning()
         # Join the thread only if it exists and is alive.
-        if self._sound_thread and self.sound_thread.is_alive():
+        if self._sound_thread and self._sound_thread.is_alive():
             self._sound_thread.join()
         pygame.mixer.quit()
         print("Cleanup complete.")
@@ -2977,7 +2984,7 @@ def determine_emergency(gap, v_ego, a_ego_max, v_lead, a_lead):
     SAFETY_MARGIN = 1.2  # meters
     
     # Handle edge cases
-    if gap <= 0:
+    if gap <= 0 and v_ego > 0.1:
         return True, True, 0.0
     
     if v_ego <= 0:
@@ -3201,8 +3208,9 @@ def cc_target_speed_thread_func():
             if cc_mode.get() == "Cruise control" and acc_enabled.get() and data_history is not None and len(data_history) > 0:
                 acc_val = ACC.update(speed, data_history[0]) * 0.82 + physics_adjustment
                 print("\n\n")
-                print("ACC debug info:", end=' ')
-                print(*[f"{k}: {round(v, 2) if isinstance(v, float) else v}" for k, v in ACC.debug_info.items()], sep='\t')
+                if False:
+                    print("ACC debug info:", end=' ')
+                    print(*[f"{k}: {round(v, 2) if isinstance(v, float) else v}" for k, v in ACC.debug_info.items()], sep='\t')
             else:
                 acc_val = 2
 
@@ -3721,7 +3729,7 @@ def main():
 
                     if AEB_enabled.get():
                         vehicle_AEB_brake, vehicle_AEB_warn, time_to_brake = determine_emergency(
-                            lead_dist_raw, speed/3.6, -8.1, lead_speed_raw/3.6, a_lead
+                            max(lead_dist_raw, 0), speed/3.6, -8.1, lead_speed_raw/3.6, a_lead
                         )
                     else:
                         vehicle_AEB_brake, vehicle_AEB_warn, time_to_brake = False, False, float('inf')

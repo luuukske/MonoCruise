@@ -1,7 +1,9 @@
 import math
+import queue
 import time
 from collections import deque
 import threading
+from turtle import pos
 import numpy as np
 
 # testing
@@ -11,6 +13,7 @@ Visualizer = RadarVisualizer()
 threading.Thread(target=Visualizer.start, daemon=True).start()
 
 SPEED_CALCULATION_WINDOW = 1 # seconds - time window for calculating maxlen of position history
+POSITION_QUEUE_MAXLEN = 20 # maximum number of positions to store in queue for averaging
 
 # TODO: Switch __dict__ to __iter__ and dict() for typing support.
 # TODO: f = Class() -> dict(f) instead of f.__dict__()
@@ -61,10 +64,8 @@ def rotate_around_point(point, center, pitch, yaw, roll):
         z + center[2]
     ]
 
-from collections import deque
 import numpy as np
-
-import numpy as np
+import time
 from collections import deque
 
 class KalmanFilter:
@@ -72,31 +73,41 @@ class KalmanFilter:
     Kalman filter for estimating position, velocity (speed), and acceleration.
     State vector: [x, y, z, vx, vy, vz, ax, ay, az]
     Uses historical position buffer to handle multiplayer lag and jitter.
-    Adapts filtering strength based on raw speed calculated from buffered measurements.
+    Adapts filtering strength exponentially based on raw speed.
     """
     def __init__(self):
         self.state = np.zeros(9)
         self.P = np.eye(9) * 1000
         
+        # Base Q values (tuned for base_speed_kmh)
         self.Q_base = np.eye(9)
-        self.Q_base[0:3, 0:3] *= 0.0
-        self.Q_base[3:6, 3:6] *= 0.15
-        self.Q_base[6:9, 6:9] *= 2.5
+        self.Q_base[0:3, 0:3] *= 0.02
+        self.Q_base[3:6, 3:6] *= 0.05
+        self.Q_base[6:9, 6:9] *= 1.3
         
         self.R_base = np.eye(3) * 0.5
         
         self.H = np.zeros((3, 9))
         self.H[0:3, 0:3] = np.eye(3)
         
-        self.position_buffer = deque(maxlen=10)
-        self.buffer_window = 0.4
+        self.position_buffer = deque(maxlen=20)
+        self.buffer_window = 0.0
         
         self.ema_position = None
-        self.base_speed_kmh = 60.0
+        self.base_speed_kmh = 40
         
         self.initialized = False
         self.last_time = None
+        
+        # Lag Spike Detection Variables
+        self.lag_spike = False
+        self.last_lag_spike_time = None
+        
         self.stationary_frames = 0
+        self.last_filtered_speed = 0.0
+        self.prev_last_filtered_speed = 0.0
+        
+        self.last_raw_velocity = np.zeros(3)
         
     def _calculate_raw_speed(self, current_time):
         if len(self.position_buffer) < 2:
@@ -122,16 +133,51 @@ class KalmanFilter:
         speed_ms = distance / dt
         
         return speed_ms
+    
+    def _calculate_raw_velocity_and_accel(self, current_time):
+        if len(self.position_buffer) < 2:
+            return np.zeros(3), 0.0, 0.0
+        
+        cutoff_time = current_time - self.buffer_window
+        valid_samples = [(pos, t) for pos, t in self.position_buffer if t >= cutoff_time]
+        
+        if len(valid_samples) < 2:
+            valid_samples = list(self.position_buffer)
+        
+        if len(valid_samples) < 2:
+            return np.zeros(3), 0.0, 0.0
+        
+        pos1, t1 = valid_samples[0]
+        pos2, t2 = valid_samples[-1]
+        
+        dt = t2 - t1
+        if dt <= 0:
+            return np.zeros(3), 0.0, 0.0
+        
+        raw_velocity = (pos2 - pos1) / dt
+        raw_speed = np.linalg.norm(raw_velocity)
+        
+        raw_accel_vec = (raw_velocity - self.last_raw_velocity) / dt
+        if raw_speed > 0.3:
+            velocity_direction = raw_velocity / raw_speed
+            raw_signed_accel = np.dot(raw_accel_vec, velocity_direction)
+        else:
+            raw_signed_accel = 0.0
+        
+        self.last_raw_velocity = raw_velocity
+        
+        return raw_velocity, raw_speed, raw_signed_accel
         
     def predict(self, dt, raw_speed_ms):
         if dt <= 0:
             return
         
-        speed_kmh = raw_speed_ms * 3.6
+        speed_kmh = self.last_filtered_speed * 3.6 # Ensure units match
         
-        if speed_kmh < 0.5:
+        # Stationarity check: Reset high-order states if barely moving
+        if (raw_speed_ms * 3.6) < 0.5:
             self.stationary_frames += 1
-            if self.stationary_frames > 3:
+            if self.stationary_frames > 5:
                 self.state[3:9] = 0
                 return
         else:
@@ -144,20 +190,28 @@ class KalmanFilter:
         
         self.state = F @ self.state
         
-        speed_factor = max(0.0 + (speed_kmh / self.base_speed_kmh), 0.1)
-        Q = self.Q_base * speed_factor
+        # --- ADAPTIVE Q SCALING ---
+        speed_ratio = speed_kmh / self.base_speed_kmh
+        
+        # High Q at low speed (Responsive), Low Q at high speed (Smooth/Stiff)
+        q_scale = np.exp(1.0 - speed_ratio)
+
+        if self.lag_spike:
+            # If spike detected, trust model strictly (reduce Q significantly)
+            # or allow snap (increase Q). Current logic reduces Q to smooth over spike.
+            q_scale *= 0.1
+        
+        # Clamp to prevent Q from vanishing
+        q_scale = max(0.05, q_scale)
+        
+        Q = self.Q_base * q_scale
         
         self.P = F @ self.P @ F.T + Q
         
-    def update(self, measurement, raw_speed_ms, is_lag_spike):
+    def update(self, measurement, raw_speed_ms):
         y = measurement - (self.H @ self.state)
         
-        speed_kmh = raw_speed_ms * 3.6
-        speed_factor = max(0.0 + (speed_kmh / self.base_speed_kmh), 0.1)
-        R = self.R_base * speed_factor
-
-        if is_lag_spike:
-            R *= 10.0  # Increase measurement noise to distrust the measurement
+        R = self.R_base.copy()
         
         S = self.H @ self.P @ self.H.T + R
         K = self.P @ self.H.T @ np.linalg.inv(S)
@@ -170,7 +224,9 @@ class KalmanFilter:
     def _apply_ema(self, measurement, raw_speed_ms):
         speed_kmh = raw_speed_ms * 3.6
         ema_alpha = speed_kmh / self.base_speed_kmh
-        ema_alpha = np.clip(ema_alpha, 0.1, 1.0)
+        ema_alpha = np.clip(ema_alpha, 0.08, 1.0)
+        if self.lag_spike:
+            ema_alpha *= 0.3
         
         if self.ema_position is None:
             self.ema_position = measurement.copy()
@@ -197,22 +253,36 @@ class KalmanFilter:
     
     def _detect_lag_spike(self, measurement, dt):
         if not self.initialized or dt <= 0:
-            return False
+            return
 
-        # Estimate velocity from measurement change
         measured_velocity = (measurement - self.state[0:3]) / dt
-        
-        # Estimate acceleration
         measured_acceleration = (measured_velocity - self.state[3:6]) / dt
+        
+        accel_magnitude = np.linalg.norm(measured_acceleration)
+        current_sys_time = time.time()
 
-        # Check for huge acceleration/deceleration (e.g., > 1g)
-        if np.linalg.norm(measured_acceleration) > 10:
-            return True
+        # 1. Detect new spike
+        if accel_magnitude > 1000:
+            print(f"#################\nLag spike detected (Accel: {accel_magnitude:.2f})\n##############")
+            self.last_lag_spike_time = current_sys_time
+            self.lag_spike = True
 
-        return False
+        # 2. Check existing spike timer (0.7s duration)
+        if self.last_lag_spike_time is not None:
+            if (current_sys_time - self.last_lag_spike_time) < 0.7:
+                self.lag_spike = True
+            else:
+                self.lag_spike = False
+                self.last_lag_spike_time = None
+        else:
+            self.lag_spike = False
         
     def process(self, position, current_time):
         measurement = np.array([position.x, position.y, position.z])
+        if self.initialized:
+            dt = current_time - self.last_time
+        else:
+            dt = 0.1
         
         self.position_buffer.append((measurement, current_time))
         
@@ -221,6 +291,8 @@ class KalmanFilter:
         buffered_measurement = self._get_buffered_position(current_time)
         if buffered_measurement is None:
             return 0.0, 0.0
+
+        self._detect_lag_spike(buffered_measurement, dt)
 
         smoothed_measurement = self._apply_ema(buffered_measurement, raw_speed_ms)
         
@@ -231,10 +303,8 @@ class KalmanFilter:
             self.last_time = current_time
             return 0.0, 0.0
         
-        dt = current_time - self.last_time
         if dt <= 0 or dt > 1.0:
             self.last_time = current_time
-            # Re-initialize state if time gap is too large
             self.state[0:3] = smoothed_measurement
             self.state[3:9] = 0
             return 0.0, 0.0
@@ -243,7 +313,7 @@ class KalmanFilter:
         
         predicted_pos = self.state[0:3]
         distance = np.linalg.norm(smoothed_measurement - predicted_pos)
-        if distance > 25.0: # Reset if measurement is too far from prediction
+        if distance > 25.0:
             self.state[0:3] = smoothed_measurement
             self.state[3:9] = 0
             self.P = np.eye(9) * 1000
@@ -253,25 +323,25 @@ class KalmanFilter:
             self.last_time = current_time
             return 0.0, 0.0
             
-        is_lag_spike = self._detect_lag_spike(smoothed_measurement, dt)
-
-        self.update(smoothed_measurement, raw_speed_ms, is_lag_spike)
+        self.update(smoothed_measurement, raw_speed_ms)
         self.last_time = current_time
         
-        velocity = self.state[3:6]
-        speed = np.linalg.norm(velocity)
+        filtered_velocity = self.state[3:6]
+        filtered_speed = np.linalg.norm(filtered_velocity)
         
-        # If speed is very low, consider it zero to prevent micro-movements
-        if speed <= 0.3:
-            speed = 0.0
-            self.state[3:6] = 0 # Also zero out velocity state
-            signed_accel = 0.0
+        if filtered_speed <= 0.3:
+            filtered_speed = 0.0
+            self.state[3:6] = 0
+            filtered_signed_accel = 0.0
         else:
-            velocity_direction = velocity / speed
+            velocity_direction = filtered_velocity / filtered_speed
             acceleration_3d = self.state[6:9]
-            signed_accel = np.dot(acceleration_3d, velocity_direction)
+            filtered_signed_accel = np.dot(acceleration_3d, velocity_direction)
         
-        return speed, signed_accel
+        self.prev_last_filtered_speed = self.last_filtered_speed
+        self.last_filtered_speed = filtered_speed
+
+        return filtered_speed, filtered_signed_accel
         
     def reset(self):
         self.state = np.zeros(9)
@@ -280,7 +350,10 @@ class KalmanFilter:
         self.initialized = False
         self.last_time = None
         self.stationary_frames = 0
+        self.lag_spike = False
+        self.last_lag_spike_time = None
         self.position_buffer.clear()
+        self.last_raw_velocity = np.zeros(3)
 
 class Position():
     x: float
@@ -296,7 +369,7 @@ class Position():
         return self.x == 0 and self.y == 0 and self.z == 0
         
     def __str__(self):
-        return f"Position({self.x:.2f}, {self.y:.2f}, {self.z:.2f})"
+        return f"Position({self.x:.3f}, {self.y:.3f}, {self.z:.3f})"
     
 class Quaternion():
     w: float
@@ -447,6 +520,7 @@ class Vehicle:
     is_tmp: bool
     is_trailer: bool
     time: float = 0.0
+    position_queue: deque
     
     # Kalman filter for speed/acceleration estimation
     kalman_filter: KalmanFilter
@@ -467,24 +541,70 @@ class Vehicle:
         self.id = id
         self.is_tmp = is_tmp
         self.is_trailer = is_trailer
+        
+        self.high_res = True
 
         self.time = time.time()
         self.kalman_filter = KalmanFilter()
+        self.position_queue = deque(maxlen=POSITION_QUEUE_MAXLEN)
+        
+        # Add initial position to queue for is_tmp vehicles
+        if self.is_tmp and self.high_res:
+            self.add_position_to_queue()
 
+    def add_position_to_queue(self):
+        """Add the vehicle's current position to the queue for averaging. Only used for is_tmp vehicles."""
+        if self.is_tmp and self.high_res:
+            self.position_queue.append(self.position)
+    
+    def _get_averaged_position(self) -> Position | None:
+        """Calculate the average of all positions in the queue.
+        
+        Returns:
+            Position object with averaged x, y, z coordinates, or None if queue is empty.
+        """
+        if len(self.position_queue) == 0:
+            return None
+        elif len(self.position_queue) == 1:
+            return self.position_queue[0]
+        
+        # Calculate mean of x, y, z coordinates from all Position objects in queue
+        count = len(self.position_queue)
+        sum_x = sum(pos.x for pos in self.position_queue)
+        sum_y = sum(pos.y for pos in self.position_queue)
+        sum_z = sum(pos.z for pos in self.position_queue)
+        pos = Position(sum_x / count, sum_y / count, sum_z / count)
+        self.position_queue.clear()
+        
+        return pos
+    
     def update_from_last(self, vehicle):
         """Update this vehicle's calculated properties from the previous frame"""
         # Calculate raw speed and acceleration from position delta
+        self.position_queue = vehicle.position_queue.copy()
         self._calculate_raw_speed_and_acceleration(vehicle)
         
         # Only calculate Kalman-filtered speed/acceleration for TruckersMP multiplayer vehicles
-        if self.is_tmp:
+        if self.is_tmp and self.high_res:
+            # Add current position to queue
+            self.add_position_to_queue()
+            
             if hasattr(vehicle, 'kalman_filter'):
                 self.kalman_filter = vehicle.kalman_filter
             else:
                 self.kalman_filter = KalmanFilter()
             
+            # Get averaged position from queue
+            averaged_position = self._get_averaged_position()
+            # Fall back to current position if queue is empty
+            position_to_use = averaged_position if averaged_position is not None else self.position
+            
             current_time = time.time()
-            self._calculate_speed_and_acceleration(current_time)
+            self._calculate_speed_and_acceleration(current_time, position_to_use)
+        elif self.is_tmp:
+            # For non-high-res TMP vehicles, just copy last speed/accel
+            self.speed = self.raw_speed
+            self.acceleration = self.raw_accel
 
         Visualizer.push_data(self.id, self.speed, self.acceleration, self.raw_speed, self.raw_accel)
         
@@ -497,18 +617,27 @@ class Vehicle:
             self.raw_accel = 0.0
             return
         
-        dx = self.position.x - prev_vehicle.position.x
-        dy = self.position.y - prev_vehicle.position.y
-        dz = self.position.z - prev_vehicle.position.z
+        cur_pos = self.position
+        prev_pos = prev_vehicle.position
+
+        dx = cur_pos.x - prev_pos.x
+        dy = cur_pos.y - prev_pos.y
+        dz = cur_pos.z - prev_pos.z
         
         distance = math.sqrt(dx*dx + dy*dy + dz*dz)
         self.raw_speed = distance / dt
         
         self.raw_accel = 0.0
         
-    def _calculate_speed_and_acceleration(self, current_time):
-        """Calculate speed and acceleration using Kalman filter"""
-        speed, accel = self.kalman_filter.process(self.position, current_time)
+    def _calculate_speed_and_acceleration(self, current_time, position: Position | None = None):
+        """Calculate speed and acceleration using Kalman filter
+        
+        Args:
+            current_time: Current timestamp
+            position: Optional Position to use instead of self.position (for averaged positions)
+        """
+        position_to_use = position if position is not None else self.position
+        speed, accel = self.kalman_filter.process(position_to_use, current_time)
         self.speed = speed
         self.acceleration = accel
         
