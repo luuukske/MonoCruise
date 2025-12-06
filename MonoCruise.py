@@ -2512,7 +2512,7 @@ class ACCConfig:
     """Configuration parameters for the ACC controller."""
     # Controller gains
     K_P: float = 0.05  # Proportional gain on gap error
-    K_D: float = 0.33  # Derivative gain on relative speed (speed error)
+    K_D: float = 0.35  # Derivative gain on relative speed (speed error)
     K_F: float = 1.0   # Feed-forward gain on lead vehicle acceleration
 
     # Time gaps
@@ -2613,7 +2613,7 @@ class MonoCruiseACC:
         """
         
         if ego_speed < 2.0 and lead.accel > 1:
-            ff_term *= 2
+            ff_term *= 1
             p_term *= 0.5
 
         controller_accel = closeness_amp * (p_term + d_term) + ff_term
@@ -3389,11 +3389,11 @@ def main():
         offset = 0.5
         _current_lead_id = None
 
+        if debug_mode.get():
+            cv2.namedWindow("ETS2 Radar", cv2.WINDOW_NORMAL)
+            cv2.resizeWindow("ETS2 Radar", 600, 600)
 
-        cv2.namedWindow("ETS2 Radar", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("ETS2 Radar", 600, 600)
-
-        radar = ETS2Radar(show_window=True, fov_angle=35)
+        radar = ETS2Radar(show_window=debug_mode.get(), fov_angle=35)
         # memory of previous data for each lead vehicle (fixed-length queue)
         _prev_data = defaultdict(lambda: deque(maxlen=5))
         
@@ -3727,14 +3727,16 @@ def main():
                         }
                         _prev_data[lead_id].append(data_point)
 
-                    if AEB_enabled.get():
+                    if AEB_enabled.get() or speed > 0.5:
                         vehicle_AEB_brake, vehicle_AEB_warn, time_to_brake = determine_emergency(
-                            max(lead_dist_raw, 0), speed/3.6, -8.1, lead_speed_raw/3.6, a_lead
+                            max(lead_dist_raw, 0.0), speed/3.6, -8.1, lead_speed_raw/3.6, a_lead
                         )
                     else:
                         vehicle_AEB_brake, vehicle_AEB_warn, time_to_brake = False, False, float('inf')
             
                     # If any vehicle triggers emergency, set the overall flag to True
+                    if AEB_initiated and time_to_brake <= 2:
+                        AEB_warn = True
                     if vehicle_AEB_brake:
                         AEB_brake = True
                     if vehicle_AEB_warn:
@@ -3890,8 +3892,8 @@ def main():
             """
 
             if debug_mode.get() == True:
-                print(f"FINAL OUTPUT: brake={brake_output}, gas={gas_output}")
-                print(f"gasvalue: {round(opdgasval,3)} \tbrakevalue: {round(opdbrakeval,3)} \tspeed: {round(speed,3)} \tstopped: {stopped} \tgasval: {round(gasval,3)} \tbrakeval: {round(brakeval,3)} \tdiff: {round(prev_brakeval-brakeval,3)} \tdiff2: {round(prev_speed-speed,3)} \thazards: {data['lightsHazards']} \thazards_var: {hazards_variable_var} \thazards_prompted: {hazards_prompted}")
+                print(f"FINAL OUTPUT: brake={brake_output}, gas={gas_output}\n")
+                print(f"gasvalue: {round(opdgasval,3)} \tbrakevalue: {round(opdbrakeval,3)} \tspeed: {round(speed,3)} \tstopped: {stopped} \tgasval: {round(gasval,3)} \tbrakeval: {round(brakeval,3)} \tdiff: {round(prev_brakeval-brakeval,3)} \tdiff2: {round(prev_speed-speed,3)} \thazards: {data['lightsHazards']} \thazards_var: {hazards_variable_var} \thazards_prompted: {hazards_prompted}\n")
             
             if ((prev_brakeval-brakeval <= -0.07*latency_multiplier or brakeval >= 0.8 or data["parkBrake"]) and stopped == False and speed > 10 and arrived == False and not pauzed):
                 stopped = True
@@ -5358,9 +5360,6 @@ try:
     except Exception: pass
     try:
         airhorn_variable.set(_data_cache["airhorn_variable"])
-    except Exception: pass
-    try:
-        debug_mode.set(_data_cache["debug_mode"])
     except Exception: pass
     try:
         autostart_variable.set(_data_cache["autostart_variable"])

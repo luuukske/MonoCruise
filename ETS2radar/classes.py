@@ -7,10 +7,10 @@ from turtle import pos
 import numpy as np
 
 # testing
-from ETS2radar.radar_visualizer import RadarVisualizer
+#from ETS2radar.radar_visualizer import RadarVisualizer
 
-Visualizer = RadarVisualizer()
-threading.Thread(target=Visualizer.start, daemon=True).start()
+#Visualizer = RadarVisualizer()
+#threading.Thread(target=Visualizer.start, daemon=True).start()
 
 SPEED_CALCULATION_WINDOW = 1 # seconds - time window for calculating maxlen of position history
 POSITION_QUEUE_MAXLEN = 20 # maximum number of positions to store in queue for averaging
@@ -63,297 +63,306 @@ def rotate_around_point(point, center, pitch, yaw, roll):
         y + center[1],
         z + center[2]
     ]
-
-import numpy as np
 import time
 from collections import deque
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+import numpy as np
+
+
+@dataclass
+class FilterConfig:
+    base_speed_kmh: float = 40.0
+    buffer_len: int = 20
+    buffer_window_s: float = 0.25
+
+    min_dt: float = 1e-3
+    max_dt: float = 1.0
+    snap_distance: float = 25.0
+
+    ema_alpha_min: float = 0.05
+    ema_alpha_max: float = 0.8
+
+    q_scale_min: float = 0.05
+    q_scale_lag_multiplier: float = 0.1
+
+    stationary_speed_kmh: float = 0.5
+    stationary_frames_threshold: int = 2
+
+    mahalanobis_gate: float = 5.0
+    r_inflate_when_gated: float = 4.0
 
 class KalmanFilter:
     """
-    Kalman filter for estimating position, velocity (speed), and acceleration.
-    State vector: [x, y, z, vx, vy, vz, ax, ay, az]
-    Uses historical position buffer to handle multiplayer lag and jitter.
-    Adapts filtering strength exponentially based on raw speed.
+    Kalman filter for estimating position, velocity, and acceleration.
+    State: [x, y, z, vx, vy, vz, ax, ay, az]
+
+    - Adaptive Q based on speed
+    - EMA smoothing of measurements (speed-based alpha)
+    - Median buffer for jitter
+    - Mahalanobis gating to down-weight outliers
     """
-    def __init__(self):
+
+    def __init__(self, config: FilterConfig = FilterConfig()):
+        self.cfg = config
+
         self.state = np.zeros(9)
-        self.P = np.eye(9) * 1000
-        
-        # Base Q values (tuned for base_speed_kmh)
+        self.P = np.eye(9) * 1000.0
+
         self.Q_base = np.eye(9)
-        self.Q_base[0:3, 0:3] *= 0.02
-        self.Q_base[3:6, 3:6] *= 0.05
-        self.Q_base[6:9, 6:9] *= 1.3
-        
+        self.Q_base[0:3, 0:3] *= 0.001
+        self.Q_base[3:6, 3:6] *= 0.0005
+        self.Q_base[6:9, 6:9] *= 0.7
+
         self.R_base = np.eye(3) * 0.5
-        
+
         self.H = np.zeros((3, 9))
         self.H[0:3, 0:3] = np.eye(3)
-        
-        self.position_buffer = deque(maxlen=20)
-        self.buffer_window = 0.0
-        
-        self.ema_position = None
-        self.base_speed_kmh = 40
-        
+        self.H_T = self.H.T
+
+        self.position_buffer = deque(maxlen=self.cfg.buffer_len)
+
+        self.ema_position: Optional[np.ndarray] = None
         self.initialized = False
-        self.last_time = None
-        
-        # Lag Spike Detection Variables
-        self.lag_spike = False
-        self.last_lag_spike_time = None
-        
+        self.last_time: Optional[float] = None
+
         self.stationary_frames = 0
         self.last_filtered_speed = 0.0
         self.prev_last_filtered_speed = 0.0
-        
-        self.last_raw_velocity = np.zeros(3)
-        
-    def _calculate_raw_speed(self, current_time):
+
+        self.last_raw_velocity_vec = np.zeros(3)
+        self.last_raw_velocity: float = 0.0
+        self.last_smoothed_measurement: Optional[np.ndarray] = None
+
+        # Store last raw measurement for lag detection
+        self.last_raw_position: Optional[np.ndarray] = None
+        self.last_raw_time: Optional[float] = None
+
+    # ---------- Helper calculations ----------
+    def _calculate_raw_speed(self, current_time: float) -> float:
+        """Calculate raw speed from position buffer (for other uses)."""
         if len(self.position_buffer) < 2:
             return 0.0
-        
-        cutoff_time = current_time - self.buffer_window
-        valid_samples = [(pos, t) for pos, t in self.position_buffer if t >= cutoff_time]
-        
-        if len(valid_samples) < 2:
-            valid_samples = list(self.position_buffer)
-        
+
+        cutoff_time = current_time - self.cfg.buffer_window_s
+        valid_samples = [(p, t) for p, t in self.position_buffer if t >= cutoff_time] or list(self.position_buffer)
         if len(valid_samples) < 2:
             return 0.0
-        
+
         pos1, t1 = valid_samples[0]
         pos2, t2 = valid_samples[-1]
-        
         dt = t2 - t1
         if dt <= 0:
             return 0.0
-        
+
         distance = np.linalg.norm(pos2 - pos1)
-        speed_ms = distance / dt
-        
-        return speed_ms
-    
-    def _calculate_raw_velocity_and_accel(self, current_time):
+        return distance / dt
+
+    def _calculate_raw_velocity_and_accel(self, current_time: float) -> Tuple[np.ndarray, float, float]:
+        """Calculate velocity and accel from buffer (for state initialization)."""
         if len(self.position_buffer) < 2:
             return np.zeros(3), 0.0, 0.0
-        
-        cutoff_time = current_time - self.buffer_window
-        valid_samples = [(pos, t) for pos, t in self.position_buffer if t >= cutoff_time]
-        
-        if len(valid_samples) < 2:
-            valid_samples = list(self.position_buffer)
-        
+
+        cutoff_time = current_time - self.cfg.buffer_window_s
+        valid_samples = [(p, t) for p, t in self.position_buffer if t >= cutoff_time] or list(self.position_buffer)
         if len(valid_samples) < 2:
             return np.zeros(3), 0.0, 0.0
-        
+
         pos1, t1 = valid_samples[0]
         pos2, t2 = valid_samples[-1]
-        
         dt = t2 - t1
         if dt <= 0:
             return np.zeros(3), 0.0, 0.0
-        
+
         raw_velocity = (pos2 - pos1) / dt
         raw_speed = np.linalg.norm(raw_velocity)
-        
-        raw_accel_vec = (raw_velocity - self.last_raw_velocity) / dt
-        if raw_speed > 0.3:
-            velocity_direction = raw_velocity / raw_speed
-            raw_signed_accel = np.dot(raw_accel_vec, velocity_direction)
-        else:
-            raw_signed_accel = 0.0
-        
-        self.last_raw_velocity = raw_velocity
-        
+
+        raw_accel_vec = (raw_velocity - self.last_raw_velocity_vec) / dt
+        raw_signed_accel = np.dot(raw_accel_vec, raw_velocity / raw_speed) if raw_speed > 0.3 else 0.0
+
         return raw_velocity, raw_speed, raw_signed_accel
-        
-    def predict(self, dt, raw_speed_ms):
-        if dt <= 0:
+
+    def _apply_ema(self, measurement: np.ndarray, raw_speed_ms: float, 
+                   current_time: float) -> np.ndarray:
+        """Apply EMA smoothing with lag-aware multiplier."""
+        speed_kmh = raw_speed_ms * 3.6
+        alpha = speed_kmh / self.cfg.base_speed_kmh
+        alpha = np.clip(alpha, self.cfg.ema_alpha_min, self.cfg.ema_alpha_max)
+
+        # Ensure alpha doesn't go below minimum
+        alpha = max(alpha, self.cfg.ema_alpha_min * 0.5)
+
+        if self.ema_position is None:
+            self.ema_position = measurement.copy()
+            return measurement
+
+        self.ema_position = alpha * measurement + (1 - alpha) * self.ema_position
+        return self.ema_position
+
+    def _get_buffered_position(self, current_time: float) -> Optional[np.ndarray]:
+        if not self.position_buffer:
+            return None
+        if len(self.position_buffer) == 1:
+            return self.position_buffer[-1][0]
+
+        cutoff_time = current_time - self.cfg.buffer_window_s
+        valid_positions = [p for p, t in self.position_buffer if t >= cutoff_time] or [p for p, _ in self.position_buffer]
+        if len(valid_positions) == 1:
+            return valid_positions[0]
+
+        return np.median(np.asarray(valid_positions), axis=0)
+
+    def _mahalanobis_distance(self, residual: np.ndarray, S: np.ndarray) -> float:
+        try:
+            x = np.linalg.solve(S, residual)
+            return float(np.sqrt(residual.T @ x))
+        except np.linalg.LinAlgError:
+            return np.inf
+
+    def _extract_outputs_from_state(self) -> Tuple[float, float]:
+        v = self.state[3:6]
+        speed = float(np.linalg.norm(v))
+        if speed <= 0.3:
+            return 0.0, 0.0
+        direction = v / speed
+        accel = float(np.dot(self.state[6:9], direction))
+        return speed, accel
+
+    # ---------- Kalman steps ----------
+    def predict(self, dt: float, raw_speed_ms: float):
+        if dt <= self.cfg.min_dt:
             return
-        
-        speed_kmh = self.last_filtered_speed * 3.6 # Ensure units match
-        
-        # Stationarity check: Reset high-order states if barely moving
-        if (raw_speed_ms * 3.6) < 0.5:
+
+        speed_kmh = self.last_filtered_speed * 3.6
+        stationary = (raw_speed_ms * 3.6) < self.cfg.stationary_speed_kmh
+
+        if stationary:
             self.stationary_frames += 1
-            if self.stationary_frames > 5:
-                self.state[3:9] = 0
+            if self.stationary_frames > self.cfg.stationary_frames_threshold:
+                self.state[3:9] = 0.0
                 return
         else:
             self.stationary_frames = 0
-            
+
         F = np.eye(9)
         F[0:3, 3:6] = np.eye(3) * dt
         F[0:3, 6:9] = np.eye(3) * 0.5 * dt**2
         F[3:6, 6:9] = np.eye(3) * dt
-        
-        self.state = F @ self.state
-        
-        # --- ADAPTIVE Q SCALING ---
-        speed_ratio = speed_kmh / self.base_speed_kmh
-        
-        # High Q at low speed (Responsive), Low Q at high speed (Smooth/Stiff)
-        q_scale = np.exp(1.0 - speed_ratio)
 
-        if self.lag_spike:
-            # If spike detected, trust model strictly (reduce Q significantly)
-            # or allow snap (increase Q). Current logic reduces Q to smooth over spike.
-            q_scale *= 0.1
-        
-        # Clamp to prevent Q from vanishing
-        q_scale = max(0.05, q_scale)
-        
+        self.state = F @ self.state
+
+        speed_ratio = max(speed_kmh, 0.0) / max(self.cfg.base_speed_kmh, 1e-6)
+        q_scale = np.exp(1.0 - speed_ratio)
+        q_scale = max(self.cfg.q_scale_min, q_scale)
         Q = self.Q_base * q_scale
-        
+
         self.P = F @ self.P @ F.T + Q
-        
-    def update(self, measurement, raw_speed_ms):
-        y = measurement - (self.H @ self.state)
-        
+
+    def update(self, measurement: np.ndarray, raw_speed_ms: float):
+        residual = measurement - (self.H @ self.state)
         R = self.R_base.copy()
-        
-        S = self.H @ self.P @ self.H.T + R
-        K = self.P @ self.H.T @ np.linalg.inv(S)
-        
-        self.state = self.state + K @ y
-        
+
+        S = self.H @ self.P @ self.H_T + R
+        md = self._mahalanobis_distance(residual, S)
+        if md > self.cfg.mahalanobis_gate:
+            R *= self.cfg.r_inflate_when_gated
+            S = self.H @ self.P @ self.H_T + R
+
+        try:
+            K = self.P @ self.H_T @ np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            S += np.eye(3) * 1e-6
+            K = self.P @ self.H_T @ np.linalg.inv(S)
+
+        self.state = self.state + K @ residual
         I = np.eye(9)
         self.P = (I - K @ self.H) @ self.P
-    
-    def _apply_ema(self, measurement, raw_speed_ms):
-        speed_kmh = raw_speed_ms * 3.6
-        ema_alpha = speed_kmh / self.base_speed_kmh
-        ema_alpha = np.clip(ema_alpha, 0.08, 1.0)
-        if self.lag_spike:
-            ema_alpha *= 0.3
-        
-        if self.ema_position is None:
-            self.ema_position = measurement.copy()
-            return measurement
-        
-        self.ema_position = ema_alpha * measurement + (1 - ema_alpha) * self.ema_position
-        return self.ema_position
-    
-    def _get_buffered_position(self, current_time):
-        if len(self.position_buffer) < 2:
-            return self.position_buffer[-1][0] if self.position_buffer else None
-        
-        cutoff_time = current_time - self.buffer_window
-        valid_positions = [pos for pos, t in self.position_buffer if t >= cutoff_time]
-        
-        if len(valid_positions) == 0:
-            valid_positions = [pos for pos, t in self.position_buffer]
-        
-        if len(valid_positions) == 1:
-            return valid_positions[0]
-        
-        positions_array = np.array(valid_positions)
-        return np.median(positions_array, axis=0)
-    
-    def _detect_lag_spike(self, measurement, dt):
-        if not self.initialized or dt <= 0:
-            return
 
-        measured_velocity = (measurement - self.state[0:3]) / dt
-        measured_acceleration = (measured_velocity - self.state[3:6]) / dt
+    # ---------- Public API ----------
+    def process(self, position, current_time: float) -> Tuple[float, float]:
+        measurement = np.array([position.x, position.y, position.z], dtype=float)
+        dt = (current_time - self.last_time) if self.initialized else 0.1
         
-        accel_magnitude = np.linalg.norm(measured_acceleration)
-        current_sys_time = time.time()
+        # Update raw position tracking
+        self.last_raw_position = measurement.copy()
+        self.last_raw_time = current_time
 
-        # 1. Detect new spike
-        if accel_magnitude > 1000:
-            print(f"#################\nLag spike detected (Accel: {accel_magnitude:.2f})\n##############")
-            self.last_lag_spike_time = current_sys_time
-            self.lag_spike = True
-
-        # 2. Check existing spike timer (0.7s duration)
-        if self.last_lag_spike_time is not None:
-            if (current_sys_time - self.last_lag_spike_time) < 0.7:
-                self.lag_spike = True
-            else:
-                self.lag_spike = False
-                self.last_lag_spike_time = None
-        else:
-            self.lag_spike = False
-        
-    def process(self, position, current_time):
-        measurement = np.array([position.x, position.y, position.z])
-        if self.initialized:
-            dt = current_time - self.last_time
-        else:
-            dt = 0.1
-        
+        # Add to buffer for median filtering
         self.position_buffer.append((measurement, current_time))
-        
-        raw_speed_ms = self._calculate_raw_speed(current_time)
-        
+
+        # Get buffered velocity for state updates
+        buffered_velocity_vec, buffered_speed_ms, _ = self._calculate_raw_velocity_and_accel(current_time)
+        self.last_raw_velocity_vec = buffered_velocity_vec
+        self.last_raw_velocity = buffered_speed_ms
+
         buffered_measurement = self._get_buffered_position(current_time)
         if buffered_measurement is None:
             return 0.0, 0.0
 
-        self._detect_lag_spike(buffered_measurement, dt)
+        # Apply EMA with lag-aware alpha
+        smoothed_measurement = self._apply_ema(buffered_measurement, buffered_speed_ms, current_time)
+        self.last_smoothed_measurement = smoothed_measurement
 
-        smoothed_measurement = self._apply_ema(buffered_measurement, raw_speed_ms)
-        
         if not self.initialized:
             self.state[0:3] = smoothed_measurement
-            self.state[3:9] = 0
+            self.state[3:6] = buffered_velocity_vec
+            self.state[6:9] = 0.0
             self.initialized = True
             self.last_time = current_time
-            return 0.0, 0.0
-        
-        if dt <= 0 or dt > 1.0:
+            speed, accel = self._extract_outputs_from_state()
+            self.last_filtered_speed = speed
+            return speed, accel
+
+        if dt <= self.cfg.min_dt or dt > self.cfg.max_dt:
             self.last_time = current_time
             self.state[0:3] = smoothed_measurement
-            self.state[3:9] = 0
-            return 0.0, 0.0
-        
-        self.predict(dt, raw_speed_ms)
-        
+            self.state[3:6] = buffered_velocity_vec
+            self.state[6:9] = 0.0
+            self.P = np.eye(9) * 500.0
+            speed, accel = self._extract_outputs_from_state()
+            self.last_filtered_speed = speed
+            return speed, accel
+
+        # Normal predict/update
+        self.predict(dt, buffered_speed_ms)
+
         predicted_pos = self.state[0:3]
         distance = np.linalg.norm(smoothed_measurement - predicted_pos)
-        if distance > 25.0:
+        if distance > self.cfg.snap_distance:
             self.state[0:3] = smoothed_measurement
-            self.state[3:9] = 0
-            self.P = np.eye(9) * 1000
+            self.state[3:6] = buffered_velocity_vec
+            self.state[6:9] = 0.0
+            self.P = np.eye(9) * 1000.0
             self.position_buffer.clear()
             self.position_buffer.append((measurement, current_time))
             self.ema_position = None
             self.last_time = current_time
-            return 0.0, 0.0
-            
-        self.update(smoothed_measurement, raw_speed_ms)
+            speed, accel = self._extract_outputs_from_state()
+            self.last_filtered_speed = speed
+            return speed, accel
+
+        self.update(smoothed_measurement, buffered_speed_ms)
         self.last_time = current_time
-        
-        filtered_velocity = self.state[3:6]
-        filtered_speed = np.linalg.norm(filtered_velocity)
-        
-        if filtered_speed <= 0.3:
-            filtered_speed = 0.0
-            self.state[3:6] = 0
-            filtered_signed_accel = 0.0
-        else:
-            velocity_direction = filtered_velocity / filtered_speed
-            acceleration_3d = self.state[6:9]
-            filtered_signed_accel = np.dot(acceleration_3d, velocity_direction)
-        
+
+        filtered_speed, filtered_signed_accel = self._extract_outputs_from_state()
         self.prev_last_filtered_speed = self.last_filtered_speed
         self.last_filtered_speed = filtered_speed
 
         return filtered_speed, filtered_signed_accel
-        
+
     def reset(self):
-        self.state = np.zeros(9)
-        self.P = np.eye(9) * 1000
-        self.ema_position = None
-        self.initialized = False
-        self.last_time = None
-        self.stationary_frames = 0
-        self.lag_spike = False
-        self.last_lag_spike_time = None
-        self.position_buffer.clear()
-        self.last_raw_velocity = np.zeros(3)
+        self.__init__(self.cfg)
+    
+    @property
+    def is_lag_recovery_active(self) -> bool:
+        """Check if currently recovering from lag (for debugging/UI)."""
+        return False
+    
+    @property
+    def ema_multiplier(self) -> float:
+        """Current EMA multiplier (for debugging/UI)."""
+        return 1.0
 
 class Position():
     x: float
@@ -606,7 +615,7 @@ class Vehicle:
             self.speed = self.raw_speed
             self.acceleration = self.raw_accel
 
-        Visualizer.push_data(self.id, self.speed, self.acceleration, self.raw_speed, self.raw_accel)
+        #Visualizer.push_data(self.id, self.speed, self.acceleration, self.kalman_filter.last_raw_velocity, 0.0)
         
     def _calculate_raw_speed_and_acceleration(self, prev_vehicle):
         """Calculate raw speed and acceleration from position delta"""

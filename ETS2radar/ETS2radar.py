@@ -1,6 +1,5 @@
 from typing import List, Tuple, Dict, Optional, Any, Deque
 import cv2
-from jinja2.runtime import V
 import numpy as np
 import numpy.typing as npt
 import truck_telemetry
@@ -26,7 +25,7 @@ MAX_DISTANCE: int = 150  # meters
 REFRESH_INTERVAL: float = 0.1  # only used when running run() loop
 FOV_ANGLE: int = 25  # degrees (half-angle of cone)
 POSITION_SNAP: float = 1.5  # meters: only save every 10 meters
-PATH_WIDTH: float = 2.5  # meters: width of ego path for collision detection
+PATH_WIDTH: float = 2.2  # meters: width of ego path for collision detection
 
 class VehicleTracker:
     """
@@ -149,9 +148,9 @@ class ETS2Radar:
         history = self.vehicle_histories.get(vid, None)
         if history is not None and offset is None:
             # Has a trail but not intersecting with base: penalize
-            score_increment = -0.4
+            score_increment = -0.5
         elif history is None:
-            score_increment = -0.1
+            score_increment = -0.2
         else:
             score_increment = 0.0
 
@@ -163,7 +162,7 @@ class ETS2Radar:
                 offset_score = (2 ** (-(x / 9) ** 2) * 2.5 * angle_amp - 1) / 1
                 distance_amp = (2 ** (-(distance / 100)) + 1 / ((distance + 3) / 8)-1)/3+1
                 offset_score = max(-1, min(1, offset_score * distance_amp))
-                score_increment += offset_score * 1.5 * (angle_amp/2 + 0.5)
+                score_increment += offset_score * 1.5 * (angle_amp*0.7 + 0.3)
             except Exception:
                 pass
             
@@ -831,7 +830,7 @@ class ETS2Radar:
                 offset_score = self.calculate_offset_score(vid, offset_for_score, overall_closest_distance, angle_for_score, data)
 
                 #temp
-                offset_score = 0.0
+                angle_score = 0.0
                 """
                 angle_score = self.calculate_angle_score(
                     vid,
@@ -846,8 +845,6 @@ class ETS2Radar:
 
                 yaw_diff = min([abs(y - yaw_deg), abs((y - yaw_deg) + 360), abs((y - yaw_deg) - 360)])
                 yaw_score = ((2**(-(abs(yaw_diff)/90)**5))/1 - 1) * 1.5
-                if score_val > 0:
-                    print(f"Vehicle ID {vid} angle diff: {yaw_diff:.2f} degrees")
                 
                 angle_score = 0.0  # Temporarily disable angle score contribution
 
@@ -862,7 +859,7 @@ class ETS2Radar:
                             trailer_in_path = True
                             break
                     
-                    slow_speed_score_amp = 1.6+(ego_speed*3.6/100)*(5.5-1.6)
+                    slow_speed_score_amp = 1.4+(ego_speed*3.6/100)*(6.0-1.4)
 
                     path_score_base = pow(1.03, -overall_closest_distance) * (slow_speed_score_amp - abs(blinker_offset * 0.5) * slow_speed_score_amp)
 
@@ -870,7 +867,7 @@ class ETS2Radar:
                     if is_in_path or trailer_in_path:
                         path_score = min(path_score_base, 5)
                     else:
-                        path_score = -min(path_score_base * 0.5, 4)
+                        path_score = -min(path_score_base * 0.6, 4)
                 else:
                     path_score = 0.0
                 
@@ -882,7 +879,7 @@ class ETS2Radar:
                     score_val = previous_score
 
                 # Clamp score to valid range
-                score_val = max(-3.0, min(15.0, score_val))
+                score_val = max(-5.0, min(15.0, score_val))
                 self.vehicle_scores[vid] = score_val
 
             if self.is_in_front_cone(dx, dz) and score_val > 0:
