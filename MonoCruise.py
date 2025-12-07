@@ -4579,8 +4579,8 @@ try:
 
     input_polling_rate_label = new_label(scrollable_frame, 8, 0, "Target polling rate (Hz):")
 
-    polling_rate = ctk.IntVar(value=50)
-    temp_polling_rate = ctk.IntVar(value=50)
+    polling_rate = ctk.IntVar(value=60)
+    temp_polling_rate = ctk.IntVar(value=60)
     input_polling_rate_label = new_entry(scrollable_frame, 8, 1, polling_rate, temp_polling_rate, max_value=100, min_value=10)
 
     description_label = ctk.CTkLabel(scrollable_frame, text="lower values mean more input lag, higher values mean more cpu usage", font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, bg_color="transparent", anchor="e", wraplength=185, height=10, justify="right")
@@ -4733,21 +4733,21 @@ try:
     unassign_button = ctk.CTkButton(scrollable_frame,width=150, text="Unassign", font=default_font, text_color="lightgrey", fg_color=WAITING_COLOR, corner_radius=5, hover_color="#333366", command=unassign_true, state="normal")
     unassign_button.grid(row=25, column=0, padx=10, pady=(1,8), columnspan=2, sticky="e")
 
-    short_increments = ctk.StringVar(value=_data_cache["short_increments"] if "short_increments" in _data_cache else "1 km/h")
+    short_increments = ctk.StringVar(value=_data_cache["short_increments"] if "short_increments" in _data_cache else "5 km/h")
     short_press_increments_label = new_label(scrollable_frame, 26, 0, "Short press increments:")
     short_press_increments_options = new_optionmenu(
         scrollable_frame, 26, 1, 
         values=["1 km/h", "2 km/h", "3 km/h", "5 km/h", "10 km/h"], 
-        default_value="1 km/h",
+        default_value="5 km/h",
         value=short_increments
     )
 
-    long_increments = ctk.StringVar(value=_data_cache["long_increments"] if "long_increments" in _data_cache else "5 km/h")
+    long_increments = ctk.StringVar(value=_data_cache["long_increments"] if "long_increments" in _data_cache else "1 km/h")
     long_press_increments_label = new_label(scrollable_frame, 27, 0, "Long press increments:")
     long_press_increments_options = new_optionmenu(
         scrollable_frame, 27, 1, 
         values=["1 km/h", "2 km/h", "3 km/h", "5 km/h", "10 km/h"], 
-        default_value="5 km/h",
+        default_value="1 km/h",
         value=long_increments,
     )
 

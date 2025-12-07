@@ -148,9 +148,9 @@ class ETS2Radar:
         history = self.vehicle_histories.get(vid, None)
         if history is not None and offset is None:
             # Has a trail but not intersecting with base: penalize
-            score_increment = -0.5
+            score_increment = -0.4
         elif history is None:
-            score_increment = -0.2
+            score_increment = -0.16
         else:
             score_increment = 0.0
 
@@ -162,7 +162,7 @@ class ETS2Radar:
                 offset_score = (2 ** (-(x / 9) ** 2) * 2.5 * angle_amp - 1) / 1
                 distance_amp = (2 ** (-(distance / 100)) + 1 / ((distance + 3) / 8)-1)/3+1
                 offset_score = max(-1, min(1, offset_score * distance_amp))
-                score_increment += offset_score * 1.5 * (angle_amp*0.7 + 0.3)
+                score_increment += offset_score * 1.5 * (angle_amp*0.4 + 0.6)
             except Exception:
                 pass
             
@@ -859,7 +859,7 @@ class ETS2Radar:
                             trailer_in_path = True
                             break
                     
-                    slow_speed_score_amp = 1.4+(ego_speed*3.6/100)*(6.0-1.4)
+                    slow_speed_score_amp = 1.4+(ego_speed*3.6/100)*(5.5-1.4)
 
                     path_score_base = pow(1.03, -overall_closest_distance) * (slow_speed_score_amp - abs(blinker_offset * 0.5) * slow_speed_score_amp)
 
