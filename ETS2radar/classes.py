@@ -1,3 +1,9 @@
+"""
+this is code partially by tumppi for ETS2LA.
+i (Lukas Deschryver) did some minor modifications to make it work with MonoCruise and smoother in MP.
+I DO NOT TAKE CREDIT FOR THIS CODE (except for the filtering, imm weally pwoud of that :) ).
+"""
+
 import math
 import queue
 import time
@@ -594,7 +600,7 @@ class Vehicle:
         self._calculate_raw_speed_and_acceleration(vehicle)
         
         # Only calculate Kalman-filtered speed/acceleration for TruckersMP multiplayer vehicles
-        if self.is_tmp and self.high_res:
+        if not (self.is_tmp and self.high_res):
             # Add current position to queue
             self.add_position_to_queue()
             

@@ -25,7 +25,8 @@ MAX_DISTANCE: int = 150  # meters
 REFRESH_INTERVAL: float = 0.1  # only used when running run() loop
 FOV_ANGLE: int = 25  # degrees (half-angle of cone)
 POSITION_SNAP: float = 1.5  # meters: only save every 10 meters
-PATH_WIDTH: float = 2.2  # meters: width of ego path for collision detection
+
+PATH_WISTH_ORIGINAL: float = 2.0
 
 class VehicleTracker:
     """
@@ -527,7 +528,7 @@ class ETS2Radar:
         self,
         path_points: List[Tuple[float, float]],
         vehicle_polygon: Polygon,
-        path_width: float = PATH_WIDTH
+        path_width: float
     ) -> bool:
         """
         Check if a vehicle polygon intersects with the ego path polygon.
@@ -559,7 +560,7 @@ class ETS2Radar:
         path_points: List[Tuple[float, float]],
         center: ScreenCoordinate,
         scale: float,
-        path_width: float = PATH_WIDTH,
+        path_width: float,
         color: RGBColor = (0, 255, 0),
         thickness: int = 1,
         show_info: bool = True,
@@ -643,6 +644,8 @@ class ETS2Radar:
         
         yaw_rad = (yaw + 0.5) * 2 * np.pi
         yaw_deg = yaw * 360
+
+        path_width = PATH_WISTH_ORIGINAL + np.sin((abs(ego_steer*1.5)) * (np.pi/2)) * 4.0
         
         scale = win_h / self.max_distance
         center = (win_w // 2, win_h)
@@ -682,7 +685,7 @@ class ETS2Radar:
         try:
             path_pts, curvature = self.predict_ego_path_using_history(px, pz, yaw_rad, path_length=self.ego_path_length, ego_steer=ego_steer, ego_speed=ego_speed)
             # Draw ego path with 2m width
-            self.draw_ego_path_with_width(img, path_pts, center, scale, path_width=PATH_WIDTH, color=(0, 200, 0), thickness=1, show_info=True, curvature=curvature)
+            self.draw_ego_path_with_width(img, path_pts, center, scale, path_width=path_width, color=(0, 200, 0), thickness=1, show_info=True, curvature=curvature)
         except Exception:
             pass
 
@@ -850,18 +853,18 @@ class ETS2Radar:
 
                 # Check if vehicle is in ego path
                 if path_pts:
-                    is_in_path = self.check_vehicle_in_ego_path(path_pts, poly, path_width=PATH_WIDTH)
+                    is_in_path = self.check_vehicle_in_ego_path(path_pts, poly, path_width=path_width)
                     
                     # Also check trailers
                     trailer_in_path = False
                     for trailer_data in vdata['trailers']:
-                        if self.check_vehicle_in_ego_path(path_pts, trailer_data['polygon'], path_width=PATH_WIDTH):
+                        if self.check_vehicle_in_ego_path(path_pts, trailer_data['polygon'], path_width=path_width):
                             trailer_in_path = True
                             break
                     
                     slow_speed_score_amp = 1.4+(ego_speed*3.6/100)*(5.5-1.4)
 
-                    path_score_base = pow(1.03, -overall_closest_distance) * (slow_speed_score_amp - abs(blinker_offset * 0.5) * slow_speed_score_amp)
+                    path_score_base = pow(1.03, -overall_closest_distance) * (slow_speed_score_amp - abs(blinker_offset**2 * 0.4) * slow_speed_score_amp)
 
                     # Vehicle or any of its trailers in path = positive score
                     if is_in_path or trailer_in_path:
@@ -893,7 +896,7 @@ class ETS2Radar:
                     if score_val > 0:
                         # Check if vehicle is in ego path for different coloring
                         vehicle_color = (0, 0, 255)  # Default red for in-lane
-                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly, path_width=PATH_WIDTH):
+                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly, path_width=path_width):
                             vehicle_color = (0, 100, 255)  # Orange-red for vehicles in ego path
                         
                         self.draw_vehicle(img, poly, center, scale, vehicle_color)
@@ -903,7 +906,7 @@ class ETS2Radar:
                     if score_val > 0:
                         # Use same color logic for trailers
                         trailer_color = (255, 0, 0)  # Default red for in-lane trailers
-                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly, path_width=PATH_WIDTH):
+                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly, path_width=path_width):
                             trailer_color = (255, 50, 0)  # Orange for trailers in ego path
                         self.draw_vehicle(img, poly, center, scale, trailer_color)
                     else:
@@ -932,7 +935,7 @@ class ETS2Radar:
                     if score_val > 0:
                         # Use same color logic for trailers
                         trailer_color = (255, 0, 0)  # Default red for in-lane trailers
-                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly_t, path_width=PATH_WIDTH):
+                        if path_pts and self.check_vehicle_in_ego_path(path_pts, poly_t, path_width=path_width):
                             trailer_color = (255, 50, 0)  # Orange for trailers in ego path
                         self.draw_vehicle(img, poly_t, center, scale, trailer_color)
                     else:
@@ -1281,15 +1284,18 @@ class ETS2Radar:
         ego_steer = data.get("gameSteer", 0.0)
         speed = data.get("speed", 0.0)
         self.ego_path_length = MAX_DISTANCE
-        self.update_ego_trajectory((px, pz))
         ego_steering.append(ego_steer)
         ego_steer = np.mean(ego_steering)
 
         paused = data.get("paused", False)
 
+        new_capture = truck_telemetry.get_data()
+        px = new_capture.get("coordinateX", 0.0)
+        pz = new_capture.get("coordinateZ", 0.0)
         vehicles = self.module.run(paused)
         if vehicles is None:
             return []
+        self.update_ego_trajectory((px, pz))
 
         # Filter vehicles not on the truck's plane
         vehicles = [v for v in vehicles if abs(v.position.y - data.get("coordinateY", 0.0)) < 6.0]

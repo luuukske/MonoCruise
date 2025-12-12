@@ -2,7 +2,7 @@ print("boot")
 import threading
 import customtkinter as ctk
 import tkinter as tk
-version = "v1.0.3"
+version = "v1.0.4"
 
 # temporary for radar output
 import cv2
@@ -23,13 +23,13 @@ import psutil
 import subprocess
 import winreg
 from CTkMessagebox import CTkMessagebox
-sys.path.append('./_internal')
+from collections import defaultdict, deque
 from scscontroller import SCSController
 from ETS2radar.ETS2radar import ETS2Radar
-from collections import defaultdict, deque
 
 import pymsgbox
 
+sys.path.append('./_internal')
 
 # CRITICAL: Set DPI awareness BEFORE creating any windows
 try:
@@ -1164,16 +1164,7 @@ def send(a, b, controller):
         setattr(controller, "abackward", 0.0)
         return
 
-    if weight_adjustment.get():
-        try:
-            weight_var = (0.27*((total_weight_tons-8.93)/(11.7))+1)
-        except:
-            weight_var = 1
-            if not device_lost:
-                cmd_print("Error calculating weight adjustment", "#FF2020", 10)
-    else:
-        weight_var = 1
-    b = (b**(1/weight_var)).real
+    b = (b).real
     a = (a).real
 
     bar_val = gas_output-brake_output
@@ -1481,7 +1472,8 @@ class cc_panel:
             cc_mode: Cruise control mode ("Speed limiter" or "Cruise control")
             cc_enabled: Whether the cruise control system is enabled
         """
-        self.scale_mult = 0.8 * scaling
+        global cc_panel_scaling
+        self.scale_mult = 0.5 * scaling * (int(cc_panel_scaling.get().replace("%", "")) / 100)
         self.start_x = x_co
         self.start_y = y_co
         self.panel_x = int(300 * self.scale_mult)
@@ -2184,6 +2176,7 @@ class cc_panel:
         return SPEEDLIMITER_COLOR if mode == "Speed limiter" else CRUISECONTROL_COLOR
 
 def change_target_speed(increments, app=None):
+    """Change the target speed based on increments and clamp the resulting speed"""
     global target_speed
 
     if abs(increments) >= 5:
@@ -2516,7 +2509,7 @@ class ACCConfig:
     K_F: float = 1.0   # Feed-forward gain on lead vehicle acceleration
 
     # Time gaps
-    TIME_GAP_FOLLOW: float = 1.5  # Desired time gap in seconds when following
+    TIME_GAP_FOLLOW: float = 1.3  # Desired time gap in seconds when following
     
     # Physical constraints and limits
     MIN_GAP: float = 4.0          # Minimum allowed gap in meters
@@ -3134,7 +3127,7 @@ def cc_target_speed_thread_func():
     global brake_exponent_variable
     global _data_cache
     global acc_enabled
-    global weight_var
+    global weight_adjustment
     global data_history
     global ACC
 
@@ -3151,11 +3144,11 @@ def cc_target_speed_thread_func():
     av_ds = 0.0
     integral_sum = 0.0
     ff_est = 0.0
-    alpha  = 0.8
+    alpha  = 0.0 # prev 0.8
     P = 0.11
-    I = 0.0105
+    I = 0.023
     D = 0.08
-    max_integral = 0.2 / I
+    max_integral = 0.3 / I
     max_proportional = 1.3
 
     prev_time = time.time()-0.1
@@ -3163,11 +3156,13 @@ def cc_target_speed_thread_func():
     while not exit_event.is_set() and cc_enabled and not em_stop:
         if target_speed is not None and not pauzed:
 
-            slope = data['rotationY']
-            if cc_mode.get() == "Speed limiter":
-                error = (target_speed-0.1) - speed
+            slope = data.get('rotationY', 0.0)
+            gear = data.get("gear", 1.0)
+            print(gear)
+            if cc_mode.get() == "Speed limiter" or target_speed == 100:
+                error = (target_speed-0.2) - speed
             else:
-                error = target_speed - speed
+                error = (target_speed-0.1) - speed
 
             dt = time.time() - prev_time
             av_ds = (av_ds*4 + (prev_speed - speed)) / 5
@@ -3177,11 +3172,11 @@ def cc_target_speed_thread_func():
             if cc_locked and not prev_cc_gas >= 0.9:
                 if error < 0:
                     if cc_mode.get() == "Cruise control":
-                        integral_sum += -(-error/10) * dt * 5 * min(abs(1/(max(av_ds*3, 0.01))), 5)
+                        integral_sum += -(-error/10)**1.3 * dt * 5 * min(abs(1/(max(av_ds*3, 0.01))), 5)
                     else:
-                        integral_sum += -(-error/10) * dt * 10 * min(abs(1/(max(av_ds*3, 0.01))), 5)
+                        integral_sum += -(-error/10)**1.3 * dt * 10 * min(abs(1/(max(av_ds*3, 0.01))), 5)
                 else:
-                    integral_sum += (error/10) * dt * 5 * min(abs(1/(max(av_ds*3, 0.01))), 5)
+                    integral_sum += (error/10)**1.3 * dt * 5 * min(abs(1/(max(av_ds*3, 0.01))), 5)
 
             if ((error > 0 and (ds) > 0) or (error < 0 and (ds) < 0)) and abs(error) < 3 and abs(av_ds) < 0.05 and not (cc_mode.get() == "Speed limiter" and cc_limiting):
                 cc_locked = True
@@ -3189,6 +3184,7 @@ def cc_target_speed_thread_func():
                 cc_locked = False
 
             integral_sum = max(-max_integral, min(max_integral, integral_sum))
+            print(f"Integral sum: {integral_sum:.3f}, slope: {(slope * 2 * np.pi):.3f}, speed: {speed:.2f}")
 
             derivative = (av_ds) / dt
 
@@ -3198,12 +3194,27 @@ def cc_target_speed_thread_func():
                 proportional = (error**0.8) * P
 
             slow_speed_adjustment = (-(2**(-(max(target_speed, 30)*0.04)+0.3))+1)*1.3
-            physics_adjustment = (speed * 0.0025 + slope * 23 * slow_speed_adjustment)  * weight_var
+            
+            weight_var = (0.27*((total_weight_tons-8.93)/(12.7))+1)
+
+            # Tunable coefficients
+            ROLLING_RESISTANCE_COEFF = 0.0018  # Tune for flat road steady-state
+            DRAG_COEFF = 0.0000               # Tune for high-speed wind response
+            SLOPE_FORCE_SCALAR = 0.0000018       # Tune until hills feel right
+
+
+            physics_adjustment = (
+                # Rolling resistance
+                ROLLING_RESISTANCE_COEFF * speed * ((weight_var-1)*0.9 + 1)
+                # Aerodynamic drag
+                + DRAG_COEFF * (speed / 3.6) ** 2
+                # Slope force:  m * g * sin(θ)
+                + (((total_weight_tons-9)/1.15 + 9) * 1000) * 9.81 * np.sin(slope * 2 * np.pi) * (speed *0 / 3.6 + 100/3.6) * SLOPE_FORCE_SCALAR
+            ) * slow_speed_adjustment
 
             base_val = (max(proportional, -max_proportional) * slow_speed_adjustment +
                         integral_sum * I +
-                        derivative * D * slow_speed_adjustment +
-                        physics_adjustment)
+                        derivative * D * slow_speed_adjustment) * weight_var + physics_adjustment
             
             if cc_mode.get() == "Cruise control" and acc_enabled.get() and data_history is not None and len(data_history) > 0:
                 acc_val = ACC.update(speed, data_history[0]) * 0.82 + physics_adjustment
@@ -3218,11 +3229,14 @@ def cc_target_speed_thread_func():
 
             temp_val = min(base_val + ff_est, acc_val)
 
+            if base_val + ff_est > acc_val:
+                cc_locked = False
+
             cc_gas = (min(max(temp_val, 0), 1) + prev_cc_gas) / 2
             if temp_val > 0:
                 cc_brake = 0.0
             else:
-                cc_brake = min(max((-temp_val/20)**1.2, 0), 0.07)
+                cc_brake = min(max((min(abs(temp_val/7), 2)**2.5),0.0), 0.07)
             if acc_val < 0:
                 cc_brake = max(cc_brake, max((min(abs(acc_val/7), 2)**2.5),0.0))
 
@@ -3312,6 +3326,7 @@ def main():
     global AEB_warn
     global acc_enabled
     global cc_enabled
+    global cc_panel_scaling
     # Initialize pygame for joystick handling
     
     # Start SDK check thread
@@ -3350,7 +3365,8 @@ def main():
                             long_press_reset = long_press_reset.get(),
                             show_cc_ui = show_cc_ui.get(),
                             acc_enabled = acc_enabled.get(),
-                            AEB_enabled = AEB_enabled.get()
+                            AEB_enabled = AEB_enabled.get(),
+                            cc_panel_scaling = cc_panel_scaling.get()
                             )
 
         if exit_event.is_set():
@@ -3393,7 +3409,7 @@ def main():
             cv2.namedWindow("ETS2 Radar", cv2.WINDOW_NORMAL)
             cv2.resizeWindow("ETS2 Radar", 600, 600)
 
-        radar = ETS2Radar(show_window=debug_mode.get(), fov_angle=35)
+        radar = ETS2Radar(show_window=debug_mode.get(), fov_angle=45)
         # memory of previous data for each lead vehicle (fixed-length queue)
         _prev_data = defaultdict(lambda: deque(maxlen=5))
         
@@ -3446,7 +3462,8 @@ def main():
                             long_press_reset = long_press_reset.get(),
                             show_cc_ui = show_cc_ui.get(),
                             acc_enabled = acc_enabled.get(),
-                            AEB_enabled = AEB_enabled.get()
+                            AEB_enabled = AEB_enabled.get(),
+                            cc_panel_scaling = cc_panel_scaling.get()
                             )
 
             if offset_variable.get() == 0:
@@ -3809,6 +3826,16 @@ def main():
                     AEBSound.stop_warning()
                 cc_app.update(AEB_warn=False, acc_locked=(len(acc_data) > 0) if acc_enabled.get() and acc_data else False, acc_enabled=acc_enabled.get()) if cc_app is not None else None
 
+            if weight_adjustment.get():
+                try:
+                    weight_var = (0.27*((total_weight_tons-8.93)/(12.7))+1)
+                except:
+                    weight_var = 1
+                    if not device_lost:
+                        cmd_print("Error calculating weight adjustment", "#FF2020", 10)
+            else:
+                weight_var = 1
+            opdbrakeval = (opdbrakeval**(1/weight_var)).real
 
             # Apply CC/AEB
             if not (AEB_brake and gasval <= 0.9):
@@ -4260,6 +4287,7 @@ global cc_dec_button
 global unassign
 global AEB_warn
 global acc_enabled
+global cc_panel_scaling
 
 AEB_warn = False
 cc_enabled = False
@@ -4764,6 +4792,16 @@ try:
         show_cc_ui)
     ctk.CTkLabel(scrollable_frame, text="just drag it across the screen to move", font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, bg_color="transparent", anchor="e", wraplength=185, height=10, justify="right").grid(row=30, column=0, padx=10, pady=(0,8), columnspan=2, sticky="nsew")
 
+    cc_panel_scaling_label = new_label(scrollable_frame, 31, 0, "Cruise Control UI scaling:")    
+    cc_panel_scaling = ctk.StringVar(value=_data_cache["cc_panel_scaling"] if "cc_panel_scaling" in _data_cache else "100%")
+    cc_panel_scaling_options = new_optionmenu(
+        scrollable_frame, 31, 1, 
+        values=["25%", "50%", "75%", "100%", "150%", "200%"], 
+        default_value="100%",
+        value=cc_panel_scaling,
+    )
+
+
     # Adaptive Cruise Control (ACC) toggle
     acc_enabled = ctk.BooleanVar(value=_data_cache["acc_enabled"] if "acc_enabled" in _data_cache else False)
     def confirm_acc_enabled():
@@ -4787,7 +4825,7 @@ try:
                 acc_enabled.set(False)
                 acc_toggle.deselect()
 
-    acc_label = new_label(scrollable_frame, 31, 0, "Adaptive Cruise Control:")
+    acc_label = new_label(scrollable_frame, 32, 0, "Adaptive Cruise Control:")
     # Add a rounded "BETA" label next to the ACC label
     experimental_label = ctk.CTkLabel(
         scrollable_frame,
@@ -4802,9 +4840,9 @@ try:
         padx=5,
         pady=1
     )
-    experimental_label.grid(row=31, column=1, padx=(4, 0), pady=1, sticky="w")
+    experimental_label.grid(row=32, column=1, padx=(4, 0), pady=1, sticky="w")
     acc_toggle = new_checkbutton(
-        scrollable_frame, 31, 1,
+        scrollable_frame, 32, 1,
         acc_enabled,
         command=confirm_acc_enabled
     )
@@ -4831,9 +4869,9 @@ try:
                 AEB_enabled.set(False)
                 AEB_toggle.deselect()
 
-    AEB_label = new_label(scrollable_frame, 32, 0, "Emergency Braking:")
+    AEB_label = new_label(scrollable_frame, 33, 0, "Emergency Braking:")
     AEB_toggle = new_checkbutton(
-        scrollable_frame, 32, 1,
+        scrollable_frame, 33, 1,
         AEB_enabled,
         command=confirm_AEB_enabled
     )
@@ -4850,7 +4888,7 @@ try:
         bg_color="transparent",
         padx=5,
         pady=1
-    ).grid(row=32, column=1, padx=(4, 0), pady=1, sticky="w")
+    ).grid(row=33, column=1, padx=(4, 0), pady=1, sticky="w")
 
 
 
@@ -4917,7 +4955,10 @@ try:
 
     # list of implemented libraries shown as a discription
     implemented_libraries_label = ctk.CTkLabel(scrollable_frame, text="Implemented libraries:",  font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, height=0)
-    implemented_libraries_label.grid(row=49, column=0, padx=10, pady=(10,0), columnspan=2, sticky="new")
+    implemented_libraries_label.grid(row=48, column=0, padx=10, pady=(10,0), columnspan=2, sticky="new")
+
+    customtkinter_label = ctk.CTkLabel(scrollable_frame, text="ETS2LA traffic - tumppi066",  font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, height=0)
+    customtkinter_label.grid(row=49, column=0, padx=10, pady=0, columnspan=2, sticky="new")
 
     SCSController_label = ctk.CTkLabel(scrollable_frame, text="SCSController - tumppi066",  font=("Segoe UI", 11), text_color="#606060", fg_color="transparent", corner_radius=5, height=0)
     SCSController_label.grid(row=50, column=0, padx=10, pady=0, columnspan=2, sticky="new")
@@ -5387,6 +5428,9 @@ try:
     except Exception: pass
     try:
         AEB_enabled.set(_data_cache["AEB_enabled"])
+    except Exception: pass
+    try:
+        cc_panel_scaling.set(_data_cache["cc_panel_scaling"])
     except Exception: pass
 
     try:
