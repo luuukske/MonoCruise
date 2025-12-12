@@ -1364,7 +1364,7 @@ def sdk_check_thread():
     global root
     global device_lost
     if autostart_variable and not device_lost:
-        root.iconify()
+        root.after(0, root.iconify)
     """Background thread to check for ETS2 SDK connection"""
     time.sleep(0.2)
     cmd_print("SDK check thread starting...")
@@ -1389,7 +1389,7 @@ def sdk_check_thread():
             if first:
                 if not ets2_detected.is_set():
                     manual_start = True
-                    root.deiconify()
+                    root.after(0, root.deiconify)
 
             if autostart_variable.get()==True and not first and not ets2_detected.is_set() and not manual_start and root.state() == 'iconic':
                 print("shutting down")
@@ -3144,10 +3144,12 @@ def cc_target_speed_thread_func():
     av_ds = 0.0
     integral_sum = 0.0
     ff_est = 0.0
-    alpha  = 0.0 # prev 0.8
-    P = 0.11
-    I = 0.023
-    D = 0.08
+    alpha  = 0.8 # prev 0.8
+    prev_physics_adjustment = 0.0
+    prev_slope = 0.0
+    P = 0.1
+    I = 0.020
+    D = 0.072
     max_integral = 0.3 / I
     max_proportional = 1.3
 
@@ -3157,8 +3159,6 @@ def cc_target_speed_thread_func():
         if target_speed is not None and not pauzed:
 
             slope = data.get('rotationY', 0.0)
-            gear = data.get("gear", 1.0)
-            print(gear)
             if cc_mode.get() == "Speed limiter" or target_speed == 100:
                 error = (target_speed-0.2) - speed
             else:
@@ -3198,26 +3198,45 @@ def cc_target_speed_thread_func():
             weight_var = (0.27*((total_weight_tons-8.93)/(12.7))+1)
 
             # Tunable coefficients
-            ROLLING_RESISTANCE_COEFF = 0.0018  # Tune for flat road steady-state
+            ROLLING_RESISTANCE_COEFF = 0.0015  # Tune for flat road steady-state
             DRAG_COEFF = 0.0000               # Tune for high-speed wind response
             SLOPE_FORCE_SCALAR = 0.0000018       # Tune until hills feel right
+            FF_PREDICTION_TIME = 0.4  # Feed-forward prediction time horizon (seconds)
+            FF_GAIN = 0.5  # Feed-forward gain (tune for responsiveness)
 
-
+            # Calculate base physics adjustment
             physics_adjustment = (
                 # Rolling resistance
-                ROLLING_RESISTANCE_COEFF * speed * ((weight_var-1)*0.9 + 1)
+                ROLLING_RESISTANCE_COEFF * speed
                 # Aerodynamic drag
                 + DRAG_COEFF * (speed / 3.6) ** 2
                 # Slope force:  m * g * sin(θ)
-                + (((total_weight_tons-9)/1.15 + 9) * 1000) * 9.81 * np.sin(slope * 2 * np.pi) * (speed *0 / 3.6 + 100/3.6) * SLOPE_FORCE_SCALAR
+                + (((total_weight_tons-9)/10 + 9) * 1000) * 9.81 * np.tan(slope * 2 * np.pi) * (speed *0 / 3.6 + 100/3.6) * SLOPE_FORCE_SCALAR
             ) * slow_speed_adjustment
+
+            # Feed-forward system: predict future physics_adjustment based on slope rate of change
+            if dt > 0:
+                slope_derivative = (slope - prev_slope) / dt
+                # Predict future slope change
+                predicted_slope_change = slope_derivative * FF_PREDICTION_TIME
+                # Calculate predicted physics adjustment change due to slope
+                predicted_slope_force_change = (((total_weight_tons-9)/1.15 + 9) * 1000) * 9.81 * (
+                    np.tan((slope + predicted_slope_change) * 2 * np.pi) - np.tan(slope * 2 * np.pi)
+                ) * (speed *0 / 3.6 + 100/3.6) * SLOPE_FORCE_SCALAR * slow_speed_adjustment
+                # Apply feed-forward term
+                physics_adjustment_ff = physics_adjustment + predicted_slope_force_change * FF_GAIN
+            else:
+                physics_adjustment_ff = physics_adjustment
 
             base_val = (max(proportional, -max_proportional) * slow_speed_adjustment +
                         integral_sum * I +
-                        derivative * D * slow_speed_adjustment) * weight_var + physics_adjustment
+                        derivative * D * slow_speed_adjustment) * weight_var + physics_adjustment_ff
+            
+            prev_physics_adjustment = physics_adjustment_ff
+            prev_slope = slope
             
             if cc_mode.get() == "Cruise control" and acc_enabled.get() and data_history is not None and len(data_history) > 0:
-                acc_val = ACC.update(speed, data_history[0]) * 0.82 + physics_adjustment
+                acc_val = ACC.update(speed, data_history[0]) * 0.82 + physics_adjustment_ff
                 print("\n\n")
                 if False:
                     print("ACC debug info:", end=' ')
@@ -3227,7 +3246,13 @@ def cc_target_speed_thread_func():
 
             ff_est = alpha * ff_est + (1.0 - alpha) * base_val
 
-            temp_val = min(base_val + ff_est, acc_val)
+            temp_val = base_val + ff_est
+            if temp_val >= 0:
+                temp_val = (temp_val*weight_var)
+            else:
+                temp_val = (abs(temp_val)**(1/weight_var)) * np.sign(temp_val)
+
+            temp_val = min(temp_val, acc_val)
 
             if base_val + ff_est > acc_val:
                 cc_locked = False
