@@ -570,7 +570,7 @@ def detect_joystick_movement(button_type="None given"):
     """
     global device, close_buttons_threads, unassign, exit_event, device_lost, SETTINGS_COLOR
     global unassign_button, cc_start_label, cc_inc_label, cc_dec_label
-    global cc_start_button, cc_inc_button, cc_dec_button
+    global cc_start_button, cc_inc_button, cc_dec_button, ignore_button_inputs
 
     button = None
     input_type = None
@@ -760,7 +760,8 @@ def detect_joystick_movement(button_type="None given"):
 
     # Update UI based on button type
     text_color = "lightgrey" if display_text != "None" else SETTINGS_COLOR
-    
+    ignore_button_inputs = True
+
     if button_type == "start":
         cc_start_button = button
         cc_start_label.configure(border_color=SETTINGS_COLOR, text=display_text, text_color=text_color)
@@ -1438,10 +1439,19 @@ def refresh_button_detection():
     global cc_dec
     global cc_inc
     global cc_start
+    global ignore_button_inputs
 
     cc_dec = get_button(cc_dec_button)
     cc_inc = get_button(cc_inc_button)
     cc_start = get_button(cc_start_button)
+    if not (cc_dec or cc_inc or cc_start):
+        ignore_button_inputs = False
+
+    if ignore_button_inputs:
+        cc_dec = False
+        cc_inc = False
+        cc_start = False
+        return
 
     if cc_dec:
         if cc_dec_label.cget("border_color") != KEY_ON_COLOR:
@@ -1613,11 +1623,30 @@ class cc_panel:
         except Exception as e:
             print(f"Error in _render_and_update: {e}")
 
+    def update_scaling(self):
+        """Update scaling and recreate images."""
+        global cc_panel_scaling
+        self.scale_mult = 0.5 * scaling * (int(cc_panel_scaling.get().replace("%", "")) / 100)
+        self.panel_x = int(300 * self.scale_mult)
+        self.panel_y = int(100 * self.scale_mult)
+        self.radius = int(30 * self.scale_mult)
+        self.icon_spacing = int(20 * self.scale_mult)
+
+        self.root1.geometry(f"{self.panel_x}x{self.panel_y}+{self.start_x}+{self.start_y}")
+        self.root2.geometry(f"{self.panel_x}x{self.panel_y}+{self.start_x}+{self.start_y}")
+
+        # Recalculate positions and reload icon
+        self.font = self._load_font()
+        self.update(complete_update=True)
+
     def show(self):
-        """Show both windows (deiconify)."""
+        """Show both windows (deiconify) and update scale."""
+
         if self.root1 and self.root2:
             self.root1.after(0, self.root1.deiconify)
             self.root2.after(0, self.root2.deiconify)
+
+        self.update_scaling()
 
     def hide(self):
         """Hide both windows (withdraw)."""
@@ -1627,6 +1656,9 @@ class cc_panel:
 
     def stop(self):
         """Stop the GUI and close all windows."""
+        time.sleep(1)
+        self.hide()
+        time.sleep(1)
         self.running = False
         
         # Stop the blinking thread if it's running
@@ -1712,6 +1744,8 @@ class cc_panel:
             # Early return if nothing changed
             if not (needs_icon_reload or needs_color_update or needs_text_update):
                 return
+
+            self.update_scaling()  # Ensure scaling is up to date
             
             # Update state variables
             self.cc_mode = cc_mode
@@ -1900,8 +1934,6 @@ class cc_panel:
                     )
                 
                 icon = composite
-
-                icon.save("test_icon.png")
             else:
                 icon = icon.resize((icon_size, icon_size), Image.Resampling.LANCZOS)
             
@@ -2198,9 +2230,9 @@ def change_target_speed(increments, app=None):
         target_speed = 130
     if app is not None:
         if target_speed is not None:
-            cc_app.update(f"{int(target_speed)} km/h", cc_mode=cc_mode.get(), cc_enabled=True)
+            cc_app.update(f"{int(target_speed)} km/h", cc_mode=cc_mode.get())
         else:
-            cc_app.update("-- km/h", cc_mode=cc_mode.get(), cc_enabled=True)
+            cc_app.update("-- km/h", cc_mode=cc_mode.get())
 
 def main_cruise_control():
     global exit_event
@@ -2225,6 +2257,7 @@ def main_cruise_control():
     global cc_gas
     global cc_brake
     global cc_app
+    global ignore_button_inputs
 
     cc_target_speed_thread = threading.Thread(target=cc_target_speed_thread_func, daemon=True, name="CC Target Speed Thread")
     time_pressed_dec = None
@@ -2253,7 +2286,7 @@ def main_cruise_control():
         panel_x = 100
         panel_y = 100
     cc_app = cc_panel(text_content="-- km/h", cc_mode=cc_mode.get(), cc_enabled=False, x_co=panel_x, y_co=panel_y, acc_enabled=acc_enabled.get())
-    time.sleep(0.05)  # Give some time for the GUI to initialize
+    time.sleep(0.1)  # Give some time for the GUI to initialize
     #cc_app.update("-- km/h", cc_mode=cc_mode.get(), cc_enabled=False, acc_enabled=acc_enabled.get(), complete_update=True, acc_truck=False, acc_locked=False)
 
 
@@ -2266,6 +2299,10 @@ def main_cruise_control():
             if (buttons_thread is not None and buttons_thread.is_alive()) or device_lost or not ets2_detected.is_set() or device is None or not device.get_init():
                 cc_app.hide()
                 time.sleep(0.04)
+                continue
+            
+            if ignore_button_inputs:
+                time.sleep(0.1)
                 continue
             
             long_increment_int = int(long_increments.get().split()[0])
@@ -2281,7 +2318,7 @@ def main_cruise_control():
                     cmd_print("Cruise control cannot be used with parking brake engaged", "#FF2020", 10)
                     continue
                     
-                if (cc_inc or cc_start) and data.get('gear', 0) <= 0:
+                if (cc_inc or cc_start) and data.get('gearDashboard', 0) <= 0:
                     cmd_print("Cruise control can only be used in drive", "#FF2020", 10)
                     continue
 
@@ -2415,7 +2452,7 @@ def main_cruise_control():
                             cc_app.hide()
                 except:
                     pass
-
+                
                 if target_speed is not None:
                     cc_app.update(f"{int(target_speed)} km/h", cc_mode=cc_mode.get(), cc_enabled=cc_enabled)
                 else:
@@ -3144,14 +3181,14 @@ def cc_target_speed_thread_func():
     av_ds = 0.0
     integral_sum = 0.0
     ff_est = 0.0
-    alpha  = 0.8 # prev 0.8
+    alpha  = 0.7 # prev 0.8
     prev_physics_adjustment = 0.0
     prev_slope = 0.0
-    P = 0.1
-    I = 0.020
+    P = 0.11
+    I = 0.022
     D = 0.072
     max_integral = 0.3 / I
-    max_proportional = 1.3
+    max_proportional = 1.7
 
     prev_time = time.time()-0.1
 
@@ -3160,9 +3197,9 @@ def cc_target_speed_thread_func():
 
             slope = data.get('rotationY', 0.0)
             if cc_mode.get() == "Speed limiter" or target_speed == 100:
-                error = (target_speed-0.2) - speed
-            else:
                 error = (target_speed-0.1) - speed
+            else:
+                error = (target_speed) - speed
 
             dt = time.time() - prev_time
             av_ds = (av_ds*4 + (prev_speed - speed)) / 5
@@ -3171,17 +3208,19 @@ def cc_target_speed_thread_func():
 
             if cc_locked and not prev_cc_gas >= 0.9:
                 if error < 0:
-                    if cc_mode.get() == "Cruise control":
-                        integral_sum += -(-error/10)**1.3 * dt * 5 * min(abs(1/(max(av_ds*3, 0.01))), 5)
+                    if cc_mode.get() == "Cruise control" or target_speed != 100:
+                        integral_sum += -(-error/10)**1.2 * dt * 5 * min(abs(1/(max(av_ds*3, 0.01))), 5)
                     else:
-                        integral_sum += -(-error/10)**1.3 * dt * 10 * min(abs(1/(max(av_ds*3, 0.01))), 5)
+                        integral_sum += -(-error/10)**1.2 * dt * 10 * min(abs(1/(max(av_ds*3, 0.01))), 5)
                 else:
                     integral_sum += (error/10)**1.3 * dt * 5 * min(abs(1/(max(av_ds*3, 0.01))), 5)
 
-            if ((error > 0 and (ds) > 0) or (error < 0 and (ds) < 0)) and abs(error) < 3 and abs(av_ds) < 0.05 and not (cc_mode.get() == "Speed limiter" and cc_limiting):
+            if ((error > 0 and (ds) > 0) or (error < 0 and (ds) < 0)) and abs(error) < 3 and abs(av_ds) < 0.05 and (cc_mode.get() != "Speed limiter" or cc_limiting):
                 cc_locked = True
             elif prev_target_speed != target_speed or abs(error) > 2 or (cc_mode.get() == "Speed limiter" and not cc_limiting):
                 cc_locked = False
+
+            print(cc_limiting)
 
             integral_sum = max(-max_integral, min(max_integral, integral_sum))
             print(f"Integral sum: {integral_sum:.3f}, slope: {(slope * 2 * np.pi):.3f}, speed: {speed:.2f}")
@@ -3200,9 +3239,9 @@ def cc_target_speed_thread_func():
             # Tunable coefficients
             ROLLING_RESISTANCE_COEFF = 0.0015  # Tune for flat road steady-state
             DRAG_COEFF = 0.0000               # Tune for high-speed wind response
-            SLOPE_FORCE_SCALAR = 0.0000018       # Tune until hills feel right
-            FF_PREDICTION_TIME = 0.4  # Feed-forward prediction time horizon (seconds)
-            FF_GAIN = 0.5  # Feed-forward gain (tune for responsiveness)
+            SLOPE_FORCE_SCALAR = 0.00000162       # Tune until hills feel right
+            FF_PREDICTION_TIME = 0.6  # Feed-forward prediction time horizon (seconds)
+            FF_GAIN = 0.7  # Feed-forward gain (tune for responsiveness)
 
             # Calculate base physics adjustment
             physics_adjustment = (
@@ -3211,7 +3250,7 @@ def cc_target_speed_thread_func():
                 # Aerodynamic drag
                 + DRAG_COEFF * (speed / 3.6) ** 2
                 # Slope force:  m * g * sin(θ)
-                + (((total_weight_tons-9)/10 + 9) * 1000) * 9.81 * np.tan(slope * 2 * np.pi) * (speed *0 / 3.6 + 100/3.6) * SLOPE_FORCE_SCALAR
+                + (((total_weight_tons-9)/3 + 9) * 1000) * 9.81 * np.tan(slope * 2 * np.pi) * (speed *0 / 3.6 + 100/3.6) * SLOPE_FORCE_SCALAR
             ) * slow_speed_adjustment
 
             # Feed-forward system: predict future physics_adjustment based on slope rate of change
@@ -3220,7 +3259,7 @@ def cc_target_speed_thread_func():
                 # Predict future slope change
                 predicted_slope_change = slope_derivative * FF_PREDICTION_TIME
                 # Calculate predicted physics adjustment change due to slope
-                predicted_slope_force_change = (((total_weight_tons-9)/1.15 + 9) * 1000) * 9.81 * (
+                predicted_slope_force_change = (((total_weight_tons-9)/3 + 9) * 1000) * 9.81 * (
                     np.tan((slope + predicted_slope_change) * 2 * np.pi) - np.tan(slope * 2 * np.pi)
                 ) * (speed *0 / 3.6 + 100/3.6) * SLOPE_FORCE_SCALAR * slow_speed_adjustment
                 # Apply feed-forward term
@@ -3237,8 +3276,8 @@ def cc_target_speed_thread_func():
             
             if cc_mode.get() == "Cruise control" and acc_enabled.get() and data_history is not None and len(data_history) > 0:
                 acc_val = ACC.update(speed, data_history[0]) * 0.82 + physics_adjustment_ff
-                print("\n\n")
                 if False:
+                    print("\n\n")
                     print("ACC debug info:", end=' ')
                     print(*[f"{k}: {round(v, 2) if isinstance(v, float) else v}" for k, v in ACC.debug_info.items()], sep='\t')
             else:
@@ -3250,7 +3289,7 @@ def cc_target_speed_thread_func():
             if temp_val >= 0:
                 temp_val = (temp_val*weight_var)
             else:
-                temp_val = (abs(temp_val)**(1/weight_var)) * np.sign(temp_val)
+                temp_val = -(abs(temp_val*1.3)**(1/weight_var))
 
             temp_val = min(temp_val, acc_val)
 
@@ -3819,12 +3858,12 @@ def main():
 
             opdgasval, opdbrakeval = onepedaldrive(gasval, brakeval)
 
-            if AEB_warn_temp:
+            if AEB_warn_temp or AEB_brake:
                 if opdbrakeval > 0 or cc_brake > 0:
                     AEB_warn = False
                     AEB_warn_temp = False
                 
-                if speed < 30 and not AEB_initiated:
+                if speed < 35 and not AEB_initiated:
                     AEB_brake = False
                     AEB_warn = False
                     AEB_warn_temp = False
@@ -3876,7 +3915,7 @@ def main():
                         opdbrakeval = 0.0
                     opdgasval = max(cc_gas, opdgasval)
                 elif (cc_enabled and cc_mode.get() == "Speed limiter"):
-                    if opdgasval > cc_gas and cc_gas == 1.0:
+                    if opdgasval > cc_gas:
                         cc_limiting = True
                     else:
                         cc_limiting = False
@@ -4120,7 +4159,7 @@ class AnimatedBar:
         self.root = root
         self.temp_gasval = 0
         self.temp_brakeval = 0
-        self.bar_width = 7         # Height (in pixels) of the bar.
+        self.bar_width = 5         # Height (in pixels) of the bar.
         self.transparent_color = "magenta"
         
         # Remove window decorations and force window always on top.
@@ -4132,7 +4171,7 @@ class AnimatedBar:
         self.root.wm_attributes("-toolwindow", True)
         self.root.wm_attributes("-topmost", True)  # Keep the window on top
         self.root.wm_attributes("-disabled", False)  # Disable user interaction
-        self.root.wm_attributes("-alpha", 0.9) # Set the window transparency to 80%
+        self.root.wm_attributes("-alpha", 0.8) # Set the window transparency to 80%
         
         # Get screen dimensions.
         self.screen_width = self.root.winfo_screenwidth()
@@ -4182,9 +4221,13 @@ class AnimatedBar:
             self.screen_height = self.root.winfo_screenheight()
             self.root.geometry(f"{self.screen_width}x{self.bar_width}+0+{self.screen_height - self.bar_width}")
 
-        if exit_event.is_set() or close_bar_event.is_set():
+        close_bar = exit_event.is_set() or close_bar_event.is_set() or not bar_variable.get()
+        if close_bar and max(self.temp_gasval, self.temp_brakeval) < 0.0005:
             self.root.destroy()
             return
+        elif close_bar:
+            gas_output = 0
+            brake_output = 0
     
         
         self.root.lift()
@@ -4678,6 +4721,11 @@ try:
         global bar_thread
 
         if bar_variable.get() == True:
+            if bar_thread is not None:
+                if bar_thread.is_alive():
+                    raise RuntimeError("Failed to close the bar thread gracefully.")
+                    
+                bar_thread = None
             close_bar_event.clear()
             if bar_thread is None:
                 bar_thread = threading.Thread(target=lambda: start_bar_thread(), daemon=True, name="bar Thread")
@@ -4685,12 +4733,6 @@ try:
         else:
             
             close_bar_event.set()
-            if bar_thread is not None:
-                bar_thread.join(timeout=2)
-                if bar_thread.is_alive():
-                    raise RuntimeError("Failed to close the bar thread gracefully.")
-                    
-                bar_thread = None
 
     bar_variable = ctk.BooleanVar(value=True)
     bar_label = new_label(scrollable_frame, 16, 0, "Live bottom bar:")
@@ -4756,11 +4798,17 @@ try:
 
     cc_mode_border_frame.grid(row=21, column=0, padx=10, pady=(8,8), columnspan=2, sticky="e")
 
+    def change_cc_color(event):
+        if cc_mode.get() == "Cruise control":
+            cc_mode_segmented_button.configure(selected_color=WAITING_COLOR, selected_hover_color=WAITING_COLOR)
+        else:
+            cc_mode_segmented_button.configure(selected_color=CONNECTED_COLOR, selected_hover_color=CONNECTED_COLOR)
+
     # Create the segmented button inside the border frame
-    cc_mode_segmented_button = ctk.CTkSegmentedButton(cc_mode_border_frame, values=["Cruise control", "Speed limiter"],
+    cc_mode_segmented_button = ctk.CTkSegmentedButton(cc_mode_border_frame, values=["Cruise control", "Speed limiter"], command=change_cc_color,
                                                       variable=cc_mode, dynamic_resizing=False, width=220, selected_hover_color=WAITING_COLOR,
                                                       selected_color=WAITING_COLOR, text_color="lightgrey",bg_color="transparent", 
-                                                      corner_radius=5, font=default_font, fg_color=DEFAULT_COLOR, unselected_color=DEFAULT_COLOR, border_width=1.5)
+                                                      corner_radius=5, font=default_font, fg_color=DEFAULT_COLOR, unselected_color=DEFAULT_COLOR, border_width=1.5, unselected_hover_color="gray20")
     cc_mode_segmented_button.grid(row=0, column=0, padx=3, pady=3, sticky="nsew")
     cc_mode.set("Cruise control")  # Set default value
 
