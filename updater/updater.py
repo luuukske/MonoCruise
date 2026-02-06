@@ -211,28 +211,11 @@ class ProgressPanel(QFrame):
         v_container.addWidget(self.finished_icon, alignment=Qt.AlignmentFlag.AlignHCenter)
         
         layout.addLayout(v_container)
-        
-        # Download progress smoothing
-        self._download_smoothed = 0.0
-        self._download_raw = 0.0
-        self._smoothing_factor = 0.002  # Lower = smoother (0.0 to 1.0)
     
     def set_download_progress(self, progress: float):
         self.download_icon.set_active(True)
-        
-        # Store raw progress
-        self._download_raw = max(0.0, min(1.0, progress))
-        
-        # If download is actually complete, set to 100% regardless of smoothing
-        if self._download_raw >= 1.0:
-            self._download_smoothed = 1.0
-        else:
-            # Apply exponential moving average for smoothing
-            # EMA: smoothed = smoothed + alpha * (raw - smoothed)
-            self._download_smoothed = self._download_smoothed + self._smoothing_factor * (self._download_raw - self._download_smoothed)
-        
-        # Apply subtle easing (progress^0.83) to make it appear faster
-        eased_progress = self._download_smoothed ** 0.83
+        # Apply subtle easing (progress^1.6) to make it appear faster
+        eased_progress = progress ** 0.83
         self.line_download_to_install.set_progress(eased_progress)
     
     def set_install_progress(self, progress: float):
@@ -252,9 +235,6 @@ class ProgressPanel(QFrame):
         self.finished_icon.set_active(False)
         self.line_download_to_install.set_progress(0)
         self.line_install_to_finished.set_progress(0)
-        # Reset smoothing state
-        self._download_smoothed = 0.0
-        self._download_raw = 0.0
 
 
 class SelectorSection(QFrame):
