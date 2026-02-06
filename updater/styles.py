@@ -12,6 +12,13 @@ COLOR_BUTTON_UPDATE = "#4caf50"
 COLOR_BUTTON_UPDATE_HOVER = "#388e3c"
 COLOR_PRERELEASE = "#f44336"  # Red for pre-release badge
 
+# Alert colors (GitHub-style)
+COLOR_NOTE = "#0969da"        # Blue for NOTE alerts
+COLOR_TIP = "#1a7f37"         # Green for TIP alerts
+COLOR_IMPORTANT = "#8250df"   # Purple for IMPORTANT alerts
+COLOR_WARNING = "#9a6700"     # Orange for WARNING alerts
+COLOR_CAUTION = "#cf222e"     # Red for CAUTION alerts
+
 # Text colors
 TEXT_PRIMARY = "#ffffff"
 TEXT_SECONDARY = "#b0b0b0"
@@ -174,6 +181,20 @@ STYLESHEET = f"""
     QSlider::sub-page:horizontal {{
         background: {COLOR_BUTTON_BLUE};
         border-radius: 3px;
+    }}
+    
+    /* Markdown styles for QLabel/QTextBrowser */
+    QLabel[objectName="markdownContent"] {{
+        color: {TEXT_PRIMARY};
+        line-height: 1.6;
+    }}
+    
+    QTextBrowser {{
+        background-color: transparent;
+        border: none;
+        color: {TEXT_PRIMARY};
+        font-family: {FONT_FAMILY};
+        line-height: 1.6;
     }}
 """
 

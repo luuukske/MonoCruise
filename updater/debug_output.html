@@ -1,0 +1,130 @@
+
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {
+                    color: #ffffff;
+                    font-family: Inter, Sans-serif;
+                    font-size: 14px;
+                    line-height: 1.6;
+                    margin: 0;
+                    padding: 8px;
+                }
+                h1, h2, h3, h4, h5, h6 {
+                    color: #ffffff;
+                    font-weight: 600;
+                    line-height: 1.25;
+                    margin-top: 16px;
+                    margin-bottom: 8px;
+                    padding-top: 8px;
+                    padding-bottom: 4px;
+                }
+                h1 { font-size: 2em; border-bottom: 1px solid #3a3a3a; padding-bottom: 0.3em; }
+                h2 { font-size: 1.5em; border-bottom: 1px solid #3a3a3a; padding-bottom: 0.3em; }
+                h3 { font-size: 1.25em; }
+                h4 { font-size: 1em; }
+                h5 { font-size: 0.875em; }
+                h6 { font-size: 0.85em; color: #b0b0b0; }
+                p {
+                    margin-top: 0;
+                    margin-bottom: 10px;
+                }
+                a {
+                    color: #0969da;
+                    text-decoration: none;
+                }
+                a:hover {
+                    text-decoration: underline;
+                }
+                code {
+                    background-color: #3a3a3a;
+                    padding: 2px 6px;
+                    border-radius: 3px;
+                    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+                    font-size: 85%;
+                }
+                pre {
+                    background-color: #1e1e1e;
+                    border: 1px solid #3a3a3a;
+                    border-radius: 6px;
+                    padding: 16px;
+                    overflow: auto;
+                    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+                    font-size: 85%;
+                    line-height: 1.45;
+                }
+                pre code {
+                    background-color: transparent;
+                    padding: 0;
+                    border-radius: 0;
+                }
+                blockquote {
+                    border-left: 3px solid #3a3a3a;
+                    padding-left: 16px;
+                    margin: 0;
+                    color: #b0b0b0;
+                }
+                ul, ol {
+                    margin-top: 0;
+                    margin-bottom: 16px;
+                    padding-left: 1em;
+                }
+                li {
+                    margin-top: 0.25em;
+                }
+                hr {
+                    border: none;
+                    border-top: 1px solid #3a3a3a;
+                    margin: 24px 0;
+                }
+                table {
+                    border-collapse: collapse;
+                    border-spacing: 0;
+                    width: 100%;
+                    margin: 16px 0;
+                }
+                table th, table td {
+                    border: 1px solid #3a3a3a;
+                    padding: 6px 13px;
+                }
+                table th {
+                    background-color: #1e1e1e;
+                    font-weight: 600;
+                }
+                img {
+                    max-width: 100%;
+                    height: auto;
+                }
+            </style>
+        </head>
+        <body>
+            <h3>added:</h3>
+<ul style="margin: 10px 0; padding-left: 25px;"><li style="margin: 3px 0;">accurate hill estimation for cc and limiter.</li> <li style="margin: 3px 0;">added a feed-forward system for the hill angle to prevent drifting when going over steep hills.</li> <li style="margin: 3px 0;">ego_path now gets wider as you turn.</li></ul>
+<p style="margin: 5px 0;">this improves the vehicle detection in corners.</p>
+<ul style="margin: 10px 0; padding-left: 25px;"><li style="margin: 3px 0;">scaling for the CC_panel</li> <li style="margin: 3px 0;">reintroduced a color change when switching to limiter in settings.</li></ul>
+<h3>fixed:</h3>
+<ul style="margin: 10px 0; padding-left: 25px;"><li style="margin: 3px 0;">The ACC tends to overreact when a lag spike happens in MP.</li> <li style="margin: 3px 0;">bug where you couldn&#x27;t start the CC when the engine is off or the vehicle is stationary.</li> <li style="margin: 3px 0;">reduced lag from impacting vehicle speeds in MP</li> <li style="margin: 3px 0;">improved CC weight tuning.</li> <li style="margin: 3px 0;">fixed the limiter where it wouldn&#x27;t accommodate according to the actual speed on a long-term base.</li> <li style="margin: 3px 0;">updated ETS2LA plugin:</li> <li style="margin: 3px 0;">improved classification of trailers in MP, linking both trailers and tractors to each other.</li> <li style="margin: 3px 0;">improved distance calculation for MP.</li></ul>
+
+        <table cellpadding="0" cellspacing="0" style="margin: 10px 0; border-collapse: collapse;">
+            <tr>
+                <td style="width: 0; background-color: #0969da; padding-left: 1px; padding-right: 2px;"></td>
+                <td style="padding: 10px 15px;">
+                    <div style="color: #0969da; margin-bottom: 5px; display: flex; align-items: center;">
+                        <img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiMwOTY5ZGEiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiBjbGFzcz0ibHVjaWRlIGx1Y2lkZS1pbmZvLWljb24gbHVjaWRlLWluZm8iPjxjaXJjbGUgY3g9IjEyIiBjeT0iMTIiIHI9IjEwIi8+PHBhdGggZD0iTTEyIDE2di00Ii8+PHBhdGggZD0iTTEyIDhoLjAxIi8+PC9zdmc+" style="margin-right: 6px; vertical-align: middle;" width="16" height="16"/>
+                        Note
+                    </div>
+                    <div style="color: #b0b0b0;">
+                        This new version of the plugin doesn&#x27;t support anything under v1.57
+                    </div>
+                </td>
+            </tr>
+        </table>
+        
+<ul style="margin: 10px 0; padding-left: 25px;"><li style="margin: 3px 0;">error with root.iconify() fixed.</li> <li style="margin: 3px 0;">removed the debug .png image.</li> <li style="margin: 3px 0;">optimized ETS2<i>checker</i>MonoCruise.exe for less ram usage and making it faster. (13.1MB -&gt; 10.6MB)</li></ul>
+<h3>known:</h3>
+<ul style="margin: 10px 0; padding-left: 25px;"><li style="margin: 3px 0;">The big toolbar on top of the window. This is a temporary switchback from DPI aware UI before switching to the new UI module.</li> <li style="margin: 3px 0;">the ACC crashes into people sometimes because the trailers aren&#x27;t being detected... this is a known issues with the ETS2LA plugin.</li></ul>
+<p style="margin: 5px 0;"><b>Full Changelog</b>: <a href="https://github.com/luuukske/MonoCruise/compare/v1.0.3...v1.0.4" style="color: #0969da;">https://github.com/luuukske/MonoCruise/compare/v1.0.3...v1.0.4</a></p>
+        </body>
+        </html>
+        

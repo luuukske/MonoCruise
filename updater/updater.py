@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import tempfile
 import zipfile
 from PyQt6.QtWidgets import (
@@ -16,6 +17,7 @@ from styles import (
     BLUE_BUTTON_STYLE, UPDATE_BUTTON_STYLE, RELEASE_TITLE_STYLE, PRERELEASE_BADGE_STYLE
 )
 from github_api import GitHubAPI
+from markdown_renderer import GitHubMarkdownRenderer
 
 REPO_OWNER = "luuukske"
 REPO_NAME = "test-updater"
@@ -303,11 +305,21 @@ class DetailsSection(QFrame):
         
         layout.addLayout(title_row)
         
-        # Release body
+        # Release body (supports HTML for markdown rendering)
         self.release_body = QLabel()
         self.release_body.setWordWrap(True)
-        self.release_body.setStyleSheet(f"color: {TEXT_SECONDARY};")
         self.release_body.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.release_body.setTextFormat(Qt.TextFormat.RichText)
+        self.release_body.setOpenExternalLinks(True)
+        # Base styles for markdown content
+        self.release_body.setStyleSheet(f"""
+            QLabel {{
+                color: {TEXT_SECONDARY};
+                font-family: Inter, Sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+            }}
+        """)
         
         scroll = QScrollArea()
         scroll.setWidget(self.release_body)
@@ -380,9 +392,35 @@ class SelectorPanel(QWidget):
         self.details.release_title.setText(
             self.current_release['name'] or self.current_release['tag_name']
         )
-        self.details.release_body.setText(
-            self.current_release.get('body', 'No description')
-        )
+        # Render markdown to HTML
+        markdown_text = self.current_release.get('body', 'No description')
+        renderer = GitHubMarkdownRenderer()
+        html_content = renderer.render(markdown_text)
+        
+        # DEBUG: Export full HTML to file for debugging
+        debug_file = os.path.join(os.path.dirname(__file__), 'debug_output.html')
+        try:
+            with open(debug_file, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            print(f"Debug HTML exported to: {debug_file}")
+        except Exception as e:
+            print(f"Failed to write debug file: {e}")
+        
+        # Extract body content for QLabel (which doesn't handle full HTML documents)
+        # The renderer returns full HTML, so we extract just the body content
+        body_match = re.search(r'<body[^>]*>(.*?)</body>', html_content, re.DOTALL)
+        style_match = re.search(r'<style[^>]*>(.*?)</style>', html_content, re.DOTALL)
+        
+        if body_match:
+            body_content = body_match.group(1)
+            # Include styles inline if found
+            if style_match:
+                styles = style_match.group(1)
+                body_content = f'<style>{styles}</style>{body_content}'
+            self.details.release_body.setText(body_content)
+        else:
+            # Fallback: use the HTML as-is (might not render well)
+            self.details.release_body.setText(html_content)
         
         if self.current_release.get('prerelease'):
             self.details.prerelease_badge.show()
