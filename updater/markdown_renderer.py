@@ -80,17 +80,14 @@ class GitHubMarkdownRenderer:
         while i < len(lines):
             line = lines[i]
             
-            # Handle code blocks
             if line.strip().startswith('```'):
                 if in_code_block:
-                    # End code block
                     result.append(self._render_code_block('\n'.join(code_block_content), code_language))
                     code_block_content = []
                     code_language = ""
                     in_code_block = False
                     last_was_header = False
                 else:
-                    # Start code block
                     in_code_block = True
                     code_language = line.strip()[3:].strip()
                 i += 1
@@ -101,10 +98,8 @@ class GitHubMarkdownRenderer:
                 i += 1
                 continue
             
-            # Handle GitHub alerts (>[!TYPE])
             alert_match = re.match(r'^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]', line)
             if alert_match:
-                # Close any open list
                 if in_list:
                     result.append(self._render_list(list_items))
                     list_items = []
@@ -117,51 +112,66 @@ class GitHubMarkdownRenderer:
                 i += 1
                 continue
             
-            # Continue alert content
             if in_alert:
                 if line.startswith('>'):
-                    # Strip the > prefix and add to alert
                     content = line[1:].strip() if len(line) > 1 else ""
                     alert_content.append(content)
                     i += 1
                     continue
                 else:
-                    # End of alert
                     result.append(self._render_alert(alert_type, '\n'.join(alert_content)))
                     in_alert = False
                     alert_type = ""
                     alert_content = []
                     last_was_header = False
             
-            # Handle unordered lists
             list_match = re.match(r'^(\s*)[-*+]\s+(.+)$', line)
-            if list_match:
+            ordered_match = re.match(r'^(\s*)\d+\.\s+(.+)$', line)
+
+            if list_match or ordered_match:
                 if not in_list:
                     in_list = True
-                list_items.append(list_match.group(2))
+                
+                if list_match:
+                    indent_level = len(list_match.group(1)) // 2
+                    content = list_match.group(2)
+                    list_items.append(('ul', indent_level, content))
+                else:
+                    indent_level = len(ordered_match.group(1)) // 2
+                    content = ordered_match.group(2)
+                    list_items.append(('ol', indent_level, content))
+                
                 i += 1
                 continue
             elif in_list and line.strip() == "":
-                # Empty line might continue list
+                # Empty line ends the list
+                result.append(self._render_list(list_items))
+                list_items = []
+                in_list = False
+                last_was_header = False
                 i += 1
                 continue
             elif in_list:
-                # End of list
+                # Continuation line → belongs to previous list item
+                if list_items and line.strip() and not re.match(r'^(#{1,6})\s+', line) \
+                and not line.strip().startswith('>') \
+                and not re.match(r'^[-*_]{3,}\s*$', line):
+                    # Store raw text with a marker, process later in _render_list
+                    prev = list_items[-1]
+                    list_items[-1] = (
+                        prev[0],
+                        prev[1],
+                        prev[2] + '\n' + line.strip()  # Use \n as separator
+                    )
+                    i += 1
+                    continue
+
+                # Otherwise: terminate list
                 result.append(self._render_list(list_items))
                 list_items = []
                 in_list = False
                 last_was_header = False
             
-            # Handle ordered lists
-            ordered_match = re.match(r'^(\s*)\d+\.\s+(.+)$', line)
-            if ordered_match:
-                if not in_list:
-                    in_list = True
-                list_items.append(('ol', ordered_match.group(2)))
-                i += 1
-                continue
-            
-            # Handle headers
             header_match = re.match(r'^(#{1,6})\s+(.+)$', line)
             if header_match:
                 level = len(header_match.group(1))
@@ -171,14 +181,12 @@ class GitHubMarkdownRenderer:
                 i += 1
                 continue
             
-            # Handle horizontal rules
             if re.match(r'^[-*_]{3,}\s*$', line):
                 result.append(f'<hr style="border: none; border-top: 1px solid {BG_SECTION_BORDER}; margin: 15px 0;">')
                 last_was_header = False
                 i += 1
                 continue
             
-            # Handle blockquotes (non-alert)
             if line.startswith('>') and not in_alert:
                 content = line[1:].strip() if len(line) > 1 else ""
                 content = self._process_inline(content)
@@ -187,20 +195,16 @@ class GitHubMarkdownRenderer:
                 i += 1
                 continue
             
-            # Handle empty lines
             if line.strip() == "":
-                # Skip all breakpoints - GitHub markdown doesn't add extra spacing from empty lines
                 last_was_header = False
                 i += 1
                 continue
             
-            # Regular paragraph
             content = self._process_inline(line)
             result.append(f'<p style="margin: 5px 0;">{content}</p>')
             last_was_header = False
             i += 1
         
-        # Close any remaining open elements
         if in_code_block:
             result.append(self._render_code_block('\n'.join(code_block_content), code_language))
         if in_list:
@@ -295,22 +299,51 @@ class GitHubMarkdownRenderer:
         '''
     
     def _render_list(self, items: list) -> str:
-        """Render a list (ordered or unordered)."""
         if not items:
             return ""
-        
-        # Check if ordered list
-        is_ordered = isinstance(items[0], tuple) and items[0][0] == 'ol'
-        
-        tag = 'ol' if is_ordered else 'ul'
-        list_items = []
-        
-        for item in items:
-            content = item[1] if isinstance(item, tuple) else item
+
+        html_out = []
+        stack = []
+
+        def open_list(tag, indent):
+            # Use circle for nested unordered lists (indent > 0)
+            if tag == 'ul' and indent > 0:
+                style = "margin: 6px 0; padding-left: 25px; list-style-type: circle;"
+            else:
+                style = "margin: 6px 0; padding-left: 25px;"
+            html_out.append(f'<{tag} style="{style}">')
+            stack.append(tag)
+
+        def close_list():
+            tag = stack.pop()
+            html_out.append(f'</{tag}>')
+
+        prev_indent = 0
+
+        for tag, indent, content in items:
+            # Process inline FIRST, then replace newlines with <br>
             content = self._process_inline(content)
-            list_items.append(f'<li style="margin: 3px 0;">{content}</li>')
-        
-        return f'<{tag} style="margin: 10px 0; padding-left: 25px;">{" ".join(list_items)}</{tag}>'
+            content = content.replace('\n', '<br>')
+
+            while indent < prev_indent:
+                close_list()
+                prev_indent -= 1
+
+            while indent > prev_indent:
+                open_list(tag, indent)
+                prev_indent += 1
+
+            if not stack or stack[-1] != tag:
+                open_list(tag, indent)
+
+            html_out.append(f'<li style="margin: 3px 0;">{content}</li>')
+            prev_indent = indent
+
+        while stack:
+            close_list()
+
+        return "\n".join(html_out)
+
     
     def _hex_to_rgb(self, hex_color: str) -> str:
         """Convert hex color to RGB string for rgba()."""
@@ -405,7 +438,6 @@ class GitHubMarkdownRenderer:
                     margin: 16px 0;
                 }}
                 table th, table td {{
-                    border: 1px solid {BG_SECTION_BORDER};
                     padding: 6px 13px;
                 }}
                 table th {{
