@@ -143,49 +143,26 @@
             <div class="container">
                 <h3>added:</h3>
 <ul>
-<li>Icons for the on-screen panel when ACC is locked on. there is an icon for a car and a truck.</li>
-<li>### <b>AEB-system</b> <br>Incredibly experimental and an optional feature. (use at your own risk).<br>
-        <table cellpadding="0" cellspacing="0" class="alert alert-caution">
-            <tr>
-                <td class="alert-border"></td>
-                <td class="alert-content">
-                    <div class="alert-title">
-                        <img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiNjZjIyMmUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIiBjbGFzcz0ibHVjaWRlIGx1Y2lkZS1vY3RhZ29uLWFsZXJ0LWljb24gbHVjaWRlLW9jdGFnb24tYWxlcnQiPjxwYXRoIGQ9Ik0xMiAxNmguMDEiLz48cGF0aCBkPSJNMTIgOHY0Ii8+PHBhdGggZD0iTTE1LjMxMiAyYTIgMiAwIDAgMSAxLjQxNC41ODZsNC42ODggNC42ODhBMiAyIDAgMCAxIDIyIDguNjg4djYuNjI0YTIgMiAwIDAgMS0uNTg2IDEuNDE0bC00LjY4OCA0LjY4OGEyIDIgMCAwIDEtMS40MTQuNTg2SDguNjg4YTIgMiAwIDAgMS0xLjQxNC0uNTg2bC00LjY4OC00LjY4OEEyIDIgMCAwIDEgMiAxNS4zMTJWOC42ODhhMiAyIDAgMCAxIC41ODYtMS40MTRsNC42ODgtNC42ODhBMiAyIDAgMCAxIDguNjg4IDJ6Ii8+PC9zdmc+" width="16" height="16"/>
-                        Caution
-                    </div>
-                    <div class="alert-text">
-                        The AEB system uses the in-lane vehicles from the ACC,
-so the system isn&#x27;t as reliable and <b>doesn&#x27;t brake for everything!</b>
-                    </div>
-                </td>
-            </tr>
-        </table>
-        </li>
+<li>added a version label at the bottom of the main frame.</li>
 </ul>
 <h3>fixed:</h3>
 <ul>
-<li>Improved slow/stationary vehicles detection for ACC.</li>
-<li>TruckersMP vehicle classification. Now the trailers are detected better.</li>
-<li>Improved the MP acceleration calculation to better filter out lag.</li>
-<li>Incorrect distance calculation for trailers in SP.</li>
-<li>Braking exponent being calculated wrong (how did i only see this now💀).</li>
-<li>Made the unassign button light up again even if no button is selected.</li>
-<li>The confirmation for the ACC would clip the text.</li>
-<li>Moved to Python v3.13.7</li>
-<li>Radar now doesn&#x27;t score the vehicles when paused</li>
+<li>bug where the cc icons wouldn&#x27;t load.</li>
+<li>cc is now able to brake faster.</li>
+<li>MonoCruise will not brake when manually trying to drive with keyboard.</li>
+<li>cc now will not activate when in park or neutral.</li>
+<li>bug where the input pedals start at fully pressed with inverted pedals.</li>
+<li>cc now deactivates when user presses &quot;S&quot; on the keyboard.</li>
+<li>the cc panel now only opens when all buttons are assigned</li>
 </ul>
 <h3>known:</h3>
 <ul>
-<li>sometimes MC crashes when vehicles are driving away</li>
-<li>Brake might be seen as inverted to the actual at start. Still don&#x27;t know why...</li>
-<li>Two icons are shown on top of each other sometimes.</li>
-<li>The big toolbar on top of the window. This is a temporary switchback from DPI aware UI before switching to the new GPU UI.</li>
+<li>Anti-Virus tends to dislike unsigned code, so errors of files being quarantined are to be expected until i can sign the code...</li>
+<li>when ETS2 isn&#x27;t installed, this causes unexpected behavior.</li>
+<li>when trying to cancel the SDK installation, the program will return an error.</li>
+<li>error while starting: &#x27;image &quot;pyimage3&quot; doesn&#x27;t exist&#x27;</li>
 </ul>
-<p>In the next updates I&#x27;m adding better scaling for those on a smaller screen or a bigger screen for more customizability.</p>
-<p>I&#x27;m also hoping to fully fix the braking from the acc (and even better MP smoothing).</p>
-<p>I&#x27;m also aware that the file size is larger than 1.0.0. This is because of debugging for the ACC. When the ACC works flawlessly, I&#x27;ll be able to remove it.</p>
-<p><b>Full Changelog</b>: <a href="https://github.com/luuukske/MonoCruise/compare/v1.0.1...v1.0.2">https://github.com/luuukske/MonoCruise/compare/v1.0.1...v1.0.2</a></p>
-<p><a href="https://a.fsdn.com/con/app/sf-download-button"><a href="https://sourceforge.net/projects/monocruise/files/v1.0.2/MonoCruise.installer.exe/download">[Image: Download MonoCruise</a>]</a></p>
+<p><b>Full Changelog</b>: <a href="https://github.com/luuukske/MonoCruise/compare/v0.18-beta...v1.0.0">https://github.com/luuukske/MonoCruise/compare/v0.18-beta...v1.0.0</a></p>
             </div>
         </body>
         </html>
