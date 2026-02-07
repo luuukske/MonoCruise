@@ -217,15 +217,12 @@ class GitHubMarkdownRenderer:
         
         # Bold + Italic (must come before individual)
         text = re.sub(r'\*\*\*(.+?)\*\*\*', r'<b><i>\1</i></b>', text)
-        text = re.sub(r'___(.+?)___', r'<b><i>\1</i></b>', text)
         
         # Bold
         text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-        text = re.sub(r'__(.+?)__', r'<b>\1</b>', text)
         
         # Italic
         text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
-        text = re.sub(r'_(.+?)_', r'<i>\1</i>', text)
         
         # Strikethrough
         text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text)
@@ -359,10 +356,6 @@ class GitHubMarkdownRenderer:
                 }}
                 a {{
                     color: {COLOR_NOTE};
-                    text-decoration: none;
-                }}
-                a:hover {{
-                    text-decoration: underline;
                 }}
                 code {{
                     background-color: {BG_SECTION_BORDER};
