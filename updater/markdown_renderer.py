@@ -15,7 +15,6 @@ from styles import (
 class GitHubMarkdownRenderer:
     """Converts GitHub-flavored Markdown to HTML for QTextBrowser."""
     
-    # SVG icon templates (color will be replaced dynamically)
     SVG_ICONS = {
         'NOTE': '''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="ALERT_COLOR" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-info-icon lucide-info"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>''',
         'TIP': '''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="ALERT_COLOR" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-lightbulb-icon lucide-lightbulb"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/></svg>''',
@@ -24,7 +23,6 @@ class GitHubMarkdownRenderer:
         'CAUTION': '''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="ALERT_COLOR" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-octagon-alert-icon lucide-octagon-alert"><path d="M12 16h.01"/><path d="M12 8v4"/><path d="M15.312 2a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586l-4.688-4.688A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2z"/></svg>''',
     }
     
-    # Alert type configurations
     ALERT_TYPES = {
         'NOTE': {'color': COLOR_NOTE, 'icon': 'ℹ️'},
         'TIP': {'color': COLOR_TIP, 'icon': '💡'},
@@ -34,7 +32,7 @@ class GitHubMarkdownRenderer:
     }
     
     def __init__(self):
-        self.video_urls = []  # Store found video URLs
+        self.video_urls = []
     
     def render(self, markdown_text: str) -> str:
         """Convert markdown to HTML and extract video URLs."""
@@ -43,13 +41,9 @@ class GitHubMarkdownRenderer:
         if not markdown_text:
             return ""
         
-        # Extract video URLs before processing
         self._extract_video_urls(markdown_text)
-        
-        # Process the markdown
         html_content = self._process_markdown(markdown_text)
         
-        # Wrap in styled container
         return self._wrap_html(html_content)
     
     def get_first_video_url(self) -> str | None:
@@ -58,7 +52,6 @@ class GitHubMarkdownRenderer:
     
     def _extract_video_urls(self, text: str):
         """Find all .mp4 URLs in the text."""
-        # Match URLs ending in .mp4 (with optional query params)
         mp4_pattern = r'https?://[^\s<>\[\]()]+\.mp4(?:\?[^\s<>\[\]()]*)?'
         self.video_urls = re.findall(mp4_pattern, text, re.IGNORECASE)
     
@@ -72,11 +65,11 @@ class GitHubMarkdownRenderer:
         code_language = ""
         in_list = False
         list_items = []
-        list_indent_level = 0  # Track current list indentation
+        list_indent_level = 0
         in_alert = False
         alert_type = ""
         alert_content = []
-        alert_indent = 0  # Track alert indentation
+        alert_indent = 0
         last_was_header = False
         
         while i < len(lines):
@@ -102,10 +95,8 @@ class GitHubMarkdownRenderer:
             
             alert_match = re.match(r'^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]', line)
             if alert_match:
-                # Capture current list indent before potentially closing the list
                 if in_list:
-                    alert_indent = list_indent_level + 1  # Nest inside current list level
-                    # Don't close the list yet - we'll embed the alert in it
+                    alert_indent = list_indent_level + 1
                 else:
                     alert_indent = 0
                 
@@ -122,11 +113,9 @@ class GitHubMarkdownRenderer:
                     i += 1
                     continue
                 else:
-                    # Render alert with indentation
                     alert_html = self._render_alert(alert_type, '\n'.join(alert_content))
                     
                     if in_list and alert_indent > 0:
-                        # Add alert as a list item continuation
                         if list_items:
                             prev = list_items[-1]
                             list_items[-1] = (
@@ -161,11 +150,10 @@ class GitHubMarkdownRenderer:
                     content = ordered_match.group(2)
                     list_items.append(('ol', indent_level, content))
                 
-                list_indent_level = indent_level  # Track current indent
+                list_indent_level = indent_level
                 i += 1
                 continue
             elif in_list and line.strip() == "":
-                # Empty line ends the list
                 result.append(self._render_list(list_items))
                 list_items = []
                 in_list = False
@@ -174,7 +162,6 @@ class GitHubMarkdownRenderer:
                 i += 1
                 continue
             elif in_list:
-                # Continuation line → belongs to previous list item
                 if list_items and line.strip() and not re.match(r'^(#{1,6})\s+', line) \
                 and not line.strip().startswith('>') \
                 and not re.match(r'^[-*_]{3,}\s*$', line):
@@ -187,7 +174,6 @@ class GitHubMarkdownRenderer:
                     i += 1
                     continue
 
-                # Otherwise: terminate list
                 result.append(self._render_list(list_items))
                 list_items = []
                 in_list = False
@@ -204,7 +190,7 @@ class GitHubMarkdownRenderer:
                 continue
             
             if re.match(r'^[-*_]{3,}\s*$', line):
-                result.append(f'<hr style="border: none; border-top: 1px solid {BG_SECTION_BORDER}; margin: 15px 0;">')
+                result.append('<hr>')
                 last_was_header = False
                 i += 1
                 continue
@@ -212,7 +198,7 @@ class GitHubMarkdownRenderer:
             if line.startswith('>') and not in_alert:
                 content = line[1:].strip() if len(line) > 1 else ""
                 content = self._process_inline(content)
-                result.append(f'<blockquote style="border-left: 3px solid {BG_SECTION_BORDER}; padding-left: 10px; margin: 10px 0; color: {TEXT_SECONDARY};">{content}</blockquote>')
+                result.append(f'<blockquote>{content}</blockquote>')
                 last_was_header = False
                 i += 1
                 continue
@@ -223,7 +209,7 @@ class GitHubMarkdownRenderer:
                 continue
             
             content = self._process_inline(line)
-            result.append(f'<p style="margin: 5px 0;">{content}</p>')
+            result.append(f'<p>{content}</p>')
             last_was_header = False
             i += 1
         
@@ -238,32 +224,15 @@ class GitHubMarkdownRenderer:
     
     def _process_inline(self, text: str) -> str:
         """Process inline markdown elements."""
-        # Escape HTML first
         text = html.escape(text)
-        
-        # Bold + Italic (must come before individual)
         text = re.sub(r'\*\*\*(.+?)\*\*\*', r'<b><i>\1</i></b>', text)
-        
-        # Bold
         text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-        
-        # Italic
         text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
-        
-        # Strikethrough
         text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text)
-        
-        # Inline code
-        text = re.sub(r'`([^`]+)`', rf'<code style="background-color: {BG_SECTION_BORDER}; padding: 2px 5px; border-radius: 3px;">\1</code>', text)
-        
-        # Links [text](url)
-        text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', rf'<a href="\2" style="color: {COLOR_NOTE};">\1</a>', text)
-        
-        # Images ![alt](url) - render as linked text since QTextBrowser has limited image support
-        text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', rf'<a href="\2" style="color: {COLOR_NOTE};">[Image: \1]</a>', text)
-        
-        # Auto-link URLs (not already in links)
-        text = re.sub(r'(?<!href=")(https?://[^\s<>"]+)', rf'<a href="\1" style="color: {COLOR_NOTE};">\1</a>', text)
+        text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+        text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
+        text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', r'<a href="\2">[Image: \1]</a>', text)
+        text = re.sub(r'(?<!href=")(https?://[^\s<>"]+)', r'<a href="\1">\1</a>', text)
         
         return text
     
@@ -273,11 +242,9 @@ class GitHubMarkdownRenderer:
         alert_color = config['color']
         alert_title = alert_type.capitalize()
         
-        # Get SVG icon and replace color placeholder
         svg_template = self.SVG_ICONS.get(alert_type, '')
         svg_icon = svg_template.replace('ALERT_COLOR', alert_color)
         
-        # Encode SVG for inline data URI
         import base64
         svg_encoded = base64.b64encode(svg_icon.encode('utf-8')).decode('utf-8')
         svg_data_uri = f'data:image/svg+xml;base64,{svg_encoded}'
@@ -285,15 +252,15 @@ class GitHubMarkdownRenderer:
         processed_content = self._process_inline(content)
         
         return f'''
-        <table cellpadding="0" cellspacing="0" style="margin: 10px 0 10px 0px; border-collapse: collapse;">
+        <table cellpadding="0" cellspacing="0" class="alert alert-{alert_type.lower()}">
             <tr>
-                <td style="width: 0; background-color: {alert_color}; padding-left: 1px; padding-right: 2px;"></td>
-                <td style="padding: 10px 15px;">
-                    <div style="color: {alert_color}; margin-bottom: 5px; display: flex; align-items: center;">
-                        <img src="{svg_data_uri}" style="margin-right: 6px; vertical-align: middle;" width="16" height="16"/>
+                <td class="alert-border"></td>
+                <td class="alert-content">
+                    <div class="alert-title">
+                        <img src="{svg_data_uri}" width="16" height="16"/>
                         {alert_title}
                     </div>
-                    <div style="color: {TEXT_SECONDARY};">
+                    <div class="alert-text">
                         {processed_content}
                     </div>
                 </td>
@@ -304,19 +271,12 @@ class GitHubMarkdownRenderer:
     def _render_code_block(self, code: str, language: str = "") -> str:
         """Render a code block."""
         escaped_code = html.escape(code)
-        lang_label = f'<span style="color: {TEXT_SECONDARY}; font-size: 11px;">{language}</span><br>' if language else ''
+        lang_label = f'<span class="code-lang">{language}</span><br>' if language else ''
         
         return f'''
-        <div style="
-            background-color: {BG_SECTION_BORDER};
-            border-radius: 5px;
-            padding: 10px;
-            margin: 10px 0;
-            font-family: monospace;
-            overflow-x: auto;
-        ">
+        <div class="code-block">
             {lang_label}
-            <pre style="margin: 0; white-space: pre-wrap; word-wrap: break-word;">{escaped_code}</pre>
+            <pre>{escaped_code}</pre>
         </div>
         '''
     
@@ -329,10 +289,9 @@ class GitHubMarkdownRenderer:
 
         def open_list(tag, indent):
             if tag == 'ul' and indent > 0:
-                style = "margin: 6px 0; padding-left: 25px; list-style-type: circle;"
+                html_out.append(f'<{tag} class="nested-list">')
             else:
-                style = "margin: 6px 0; padding-left: 25px;"
-            html_out.append(f'<{tag} style="{style}">')
+                html_out.append(f'<{tag}>')
             stack.append(tag)
 
         def close_list():
@@ -342,17 +301,15 @@ class GitHubMarkdownRenderer:
         prev_indent = 0
 
         for tag, indent, content in items:
-            # Check for embedded alerts
             if '__ALERT__' in content:
-                # Split content around alerts
                 parts = re.split(r'__ALERT__|__ENDALERT__', content)
                 processed_parts = []
                 for j, part in enumerate(parts):
-                    if j % 2 == 0:  # Regular content
+                    if j % 2 == 0:
                         if part.strip():
                             processed = self._process_inline(part)
                             processed_parts.append(processed.replace('\n', '<br>'))
-                    else:  # Alert HTML (already processed)
+                    else:
                         processed_parts.append(part)
                 content = ''.join(processed_parts)
             else:
@@ -370,14 +327,13 @@ class GitHubMarkdownRenderer:
             if not stack or stack[-1] != tag:
                 open_list(tag, indent)
 
-            html_out.append(f'<li style="margin: 3px 0;">{content}</li>')
+            html_out.append(f'<li>{content}</li>')
             prev_indent = indent
 
         while stack:
             close_list()
 
         return "\n".join(html_out)
-
     
     def _hex_to_rgb(self, hex_color: str) -> str:
         """Convert hex color to RGB string for rgba()."""
@@ -394,6 +350,12 @@ class GitHubMarkdownRenderer:
         <html>
         <head>
             <style>
+                * {{
+                    max-width: 100%;
+                    overflow-wrap: break-word;
+                    text-overflow: break-word;
+                    overflow-wrap: anywhere;
+                }}
                 body {{
                     color: {TEXT_PRIMARY};
                     font-family: {FONT_FAMILY};
@@ -401,6 +363,13 @@ class GitHubMarkdownRenderer:
                     line-height: 1.6;
                     margin: 0;
                     padding: 8px;
+                    overflow-wrap: break-word;
+                    word-break: break-word;
+                }}
+                .container {{
+                    overflow-wrap: break-word;
+                    word-break: break-word;
+                    overflow-x: clip;
                 }}
                 h1, h2, h3, h4, h5, h6 {{
                     color: {TEXT_PRIMARY};
@@ -411,81 +380,116 @@ class GitHubMarkdownRenderer:
                     padding-top: 8px;
                     padding-bottom: 4px;
                 }}
-                h1 {{ font-size: 2em; border-bottom: 1px solid {BG_SECTION_BORDER}; padding-bottom: 0.3em; }}
-                h2 {{ font-size: 1.5em; border-bottom: 1px solid {BG_SECTION_BORDER}; padding-bottom: 0.3em; }}
+                h1 {{
+                    font-size: 2em;
+                    border-bottom: 1px solid {BG_SECTION_BORDER};
+                    padding-bottom: 0.3em;
+                }}
+                h2 {{
+                    font-size: 1.5em;
+                    border-bottom: 1px solid {BG_SECTION_BORDER};
+                    padding-bottom: 0.3em;
+                }}
                 h3 {{ font-size: 1.25em; }}
                 h4 {{ font-size: 1em; }}
                 h5 {{ font-size: 0.875em; }}
-                h6 {{ font-size: 0.85em; color: {TEXT_SECONDARY}; }}
+                h6 {{
+                    font-size: 0.85em;
+                    color: {TEXT_SECONDARY};
+                }}
                 p {{
-                    margin-top: 0;
-                    margin-bottom: 10px;
+                    margin: 5px 0;
                 }}
                 a {{
                     color: {COLOR_NOTE};
                 }}
                 code {{
                     background-color: {BG_SECTION_BORDER};
-                    padding: 2px 6px;
+                    padding: 2px 5px;
                     border-radius: 3px;
                     font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
                     font-size: 85%;
                 }}
                 pre {{
-                    background-color: {BG_SECTION};
-                    border: 1px solid {BG_SECTION_BORDER};
-                    border-radius: 6px;
-                    padding: 16px;
-                    overflow: auto;
-                    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-                    font-size: 85%;
-                    line-height: 1.45;
-                }}
-                pre code {{
-                    background-color: transparent;
-                    padding: 0;
-                    border-radius: 0;
+                    margin: 0;
+                    white-space: pre-wrap;
+                    word-wrap: break-word;
                 }}
                 blockquote {{
                     border-left: 3px solid {BG_SECTION_BORDER};
-                    padding-left: 16px;
-                    margin: 0;
+                    padding-left: 10px;
+                    margin: 10px 0;
                     color: {TEXT_SECONDARY};
                 }}
                 ul, ol {{
-                    margin-top: 0;
-                    margin-bottom: 16px;
-                    padding-left: 1em;
+                    margin: 6px 0;
+                    padding-left: 25px;
+                }}
+                ul.nested-list {{
+                    margin: 6px 0;
+                    padding-left: 25px;
+                    list-style-type: circle;
                 }}
                 li {{
-                    margin-top: 0.25em;
+                    margin: 3px 0;
                 }}
                 hr {{
                     border: none;
                     border-top: 1px solid {BG_SECTION_BORDER};
-                    margin: 24px 0;
+                    margin: 15px 0;
                 }}
-                table {{
+                .code-block {{
+                    background-color: {BG_SECTION_BORDER};
+                    border-radius: 5px;
+                    padding: 10px;
+                    margin: 10px 0;
+                    font-family: monospace;
+                    overflow-x: auto;
+                }}
+                .code-lang {{
+                    color: {TEXT_SECONDARY};
+                    font-size: 11px;
+                }}
+                .alert {{
+                    margin: 10px 0;
                     border-collapse: collapse;
-                    border-spacing: 0;
-                    width: 100%;
-                    margin: 16px 0;
                 }}
-                table th, table td {{
-                    padding: 6px 13px;
+                .alert-border {{
+                    width: 0;
+                    padding-left: 1px;
+                    padding-right: 2px;
                 }}
-                table th {{
-                    background-color: {BG_SECTION};
-                    font-weight: 600;
+                .alert-content {{
+                    padding: 10px 15px;
                 }}
-                img {{
-                    max-width: 100%;
-                    height: auto;
+                .alert-title {{
+                    margin-bottom: 5px;
+                    display: flex;
+                    align-items: center;
                 }}
+                .alert-title img {{
+                    margin-right: 6px;
+                    vertical-align: middle;
+                }}
+                .alert-text {{
+                    color: {TEXT_SECONDARY};
+                }}
+                .alert-note .alert-border {{ background-color: {COLOR_NOTE}; }}
+                .alert-note .alert-title {{ color: {COLOR_NOTE}; }}
+                .alert-tip .alert-border {{ background-color: {COLOR_TIP}; }}
+                .alert-tip .alert-title {{ color: {COLOR_TIP}; }}
+                .alert-important .alert-border {{ background-color: {COLOR_IMPORTANT}; }}
+                .alert-important .alert-title {{ color: {COLOR_IMPORTANT}; }}
+                .alert-warning .alert-border {{ background-color: {COLOR_WARNING}; }}
+                .alert-warning .alert-title {{ color: {COLOR_WARNING}; }}
+                .alert-caution .alert-border {{ background-color: {COLOR_CAUTION}; }}
+                .alert-caution .alert-title {{ color: {COLOR_CAUTION}; }}
             </style>
         </head>
         <body>
-            {content}
+            <div class="container">
+                {content}
+            </div>
         </body>
         </html>
         '''

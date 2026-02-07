@@ -1,7 +1,7 @@
 # Background colors
 BG_MAIN = "#2b2b2b"           # Main dark grey background
 BG_SECTION = "#1e1e1e"        # Darker section background
-BG_SECTION_BORDER = "#3a3a3a" # Subtle border color
+BG_SECTION_BORDER = "#4a4a4a" # Subtle border color
 
 # Accent colors
 COLOR_INACTIVE = "#4a4a4a"    # Inactive icons/progress
@@ -239,7 +239,7 @@ UPDATE_BUTTON_STYLE = f"""
 
 RELEASE_TITLE_STYLE = f"""
     QLabel#releaseTitle {{
-        font-size: 18px;
+        font-size: 22px;
         font-weight: bold;
     }}
 """

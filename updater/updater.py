@@ -20,7 +20,7 @@ from github_api import GitHubAPI
 from markdown_renderer import GitHubMarkdownRenderer
 
 REPO_OWNER = "luuukske"
-REPO_NAME = "test-updater"
+REPO_NAME = "MonoCruise"
 
 # Embedded SVG icons
 SVG_ICONS = {
@@ -322,6 +322,7 @@ class DetailsSection(QFrame):
         """)
         
         scroll = QScrollArea()
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(self.release_body)
         scroll.setWidgetResizable(True)
         layout.addWidget(scroll, stretch=1)
