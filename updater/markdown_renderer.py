@@ -72,10 +72,12 @@ class GitHubMarkdownRenderer:
         code_language = ""
         in_list = False
         list_items = []
+        list_indent_level = 0  # Track current list indentation
         in_alert = False
         alert_type = ""
         alert_content = []
-        last_was_header = False  # Track if last element was a header
+        alert_indent = 0  # Track alert indentation
+        last_was_header = False
         
         while i < len(lines):
             line = lines[i]
@@ -100,11 +102,12 @@ class GitHubMarkdownRenderer:
             
             alert_match = re.match(r'^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]', line)
             if alert_match:
+                # Capture current list indent before potentially closing the list
                 if in_list:
-                    result.append(self._render_list(list_items))
-                    list_items = []
-                    in_list = False
-                    last_was_header = False
+                    alert_indent = list_indent_level + 1  # Nest inside current list level
+                    # Don't close the list yet - we'll embed the alert in it
+                else:
+                    alert_indent = 0
                 
                 alert_type = alert_match.group(1)
                 in_alert = True
@@ -119,15 +122,32 @@ class GitHubMarkdownRenderer:
                     i += 1
                     continue
                 else:
-                    result.append(self._render_alert(alert_type, '\n'.join(alert_content)))
+                    # Render alert with indentation
+                    alert_html = self._render_alert(alert_type, '\n'.join(alert_content))
+                    
+                    if in_list and alert_indent > 0:
+                        # Add alert as a list item continuation
+                        if list_items:
+                            prev = list_items[-1]
+                            list_items[-1] = (
+                                prev[0],
+                                prev[1],
+                                prev[2] + '\n' + f'__ALERT__{alert_html}__ENDALERT__'
+                            )
+                        else:
+                            result.append(alert_html)
+                    else:
+                        result.append(alert_html)
+                    
                     in_alert = False
                     alert_type = ""
                     alert_content = []
+                    alert_indent = 0
                     last_was_header = False
             
             list_match = re.match(r'^(\s*)[-*+]\s+(.+)$', line)
             ordered_match = re.match(r'^(\s*)\d+\.\s+(.+)$', line)
-
+            
             if list_match or ordered_match:
                 if not in_list:
                     in_list = True
@@ -141,6 +161,7 @@ class GitHubMarkdownRenderer:
                     content = ordered_match.group(2)
                     list_items.append(('ol', indent_level, content))
                 
+                list_indent_level = indent_level  # Track current indent
                 i += 1
                 continue
             elif in_list and line.strip() == "":
@@ -148,6 +169,7 @@ class GitHubMarkdownRenderer:
                 result.append(self._render_list(list_items))
                 list_items = []
                 in_list = False
+                list_indent_level = 0
                 last_was_header = False
                 i += 1
                 continue
@@ -156,12 +178,11 @@ class GitHubMarkdownRenderer:
                 if list_items and line.strip() and not re.match(r'^(#{1,6})\s+', line) \
                 and not line.strip().startswith('>') \
                 and not re.match(r'^[-*_]{3,}\s*$', line):
-                    # Store raw text with a marker, process later in _render_list
                     prev = list_items[-1]
                     list_items[-1] = (
                         prev[0],
                         prev[1],
-                        prev[2] + '\n' + line.strip()  # Use \n as separator
+                        prev[2] + '\n' + line.strip()
                     )
                     i += 1
                     continue
@@ -170,6 +191,7 @@ class GitHubMarkdownRenderer:
                 result.append(self._render_list(list_items))
                 list_items = []
                 in_list = False
+                list_indent_level = 0
                 last_was_header = False
             
             header_match = re.match(r'^(#{1,6})\s+(.+)$', line)
@@ -263,7 +285,7 @@ class GitHubMarkdownRenderer:
         processed_content = self._process_inline(content)
         
         return f'''
-        <table cellpadding="0" cellspacing="0" style="margin: 10px 0; border-collapse: collapse;">
+        <table cellpadding="0" cellspacing="0" style="margin: 10px 0 10px 0px; border-collapse: collapse;">
             <tr>
                 <td style="width: 0; background-color: {alert_color}; padding-left: 1px; padding-right: 2px;"></td>
                 <td style="padding: 10px 15px;">
@@ -306,7 +328,6 @@ class GitHubMarkdownRenderer:
         stack = []
 
         def open_list(tag, indent):
-            # Use circle for nested unordered lists (indent > 0)
             if tag == 'ul' and indent > 0:
                 style = "margin: 6px 0; padding-left: 25px; list-style-type: circle;"
             else:
@@ -321,9 +342,22 @@ class GitHubMarkdownRenderer:
         prev_indent = 0
 
         for tag, indent, content in items:
-            # Process inline FIRST, then replace newlines with <br>
-            content = self._process_inline(content)
-            content = content.replace('\n', '<br>')
+            # Check for embedded alerts
+            if '__ALERT__' in content:
+                # Split content around alerts
+                parts = re.split(r'__ALERT__|__ENDALERT__', content)
+                processed_parts = []
+                for j, part in enumerate(parts):
+                    if j % 2 == 0:  # Regular content
+                        if part.strip():
+                            processed = self._process_inline(part)
+                            processed_parts.append(processed.replace('\n', '<br>'))
+                    else:  # Alert HTML (already processed)
+                        processed_parts.append(part)
+                content = ''.join(processed_parts)
+            else:
+                content = self._process_inline(content)
+                content = content.replace('\n', '<br>')
 
             while indent < prev_indent:
                 close_list()
