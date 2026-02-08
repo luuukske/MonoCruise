@@ -18,6 +18,7 @@ from styles import (
 )
 from github_api import GitHubAPI
 from markdown_renderer import GitHubMarkdownRenderer
+from video_player import VideoPlayer
 
 REPO_OWNER = "luuukske"
 REPO_NAME = "test-updater"
@@ -305,13 +306,35 @@ class DetailsSection(QFrame):
         
         layout.addLayout(title_row)
         
+        # Scroll area for video player and release body
+        scroll = QScrollArea()
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidgetResizable(True)
+        
+        # Container widget for scroll content
+        scroll_content = QWidget()
+        scroll_content.setStyleSheet(f"background-color: {BG_SECTION};")
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(10)
+        
+        # Video player (centered, not full width)
+        video_container = QHBoxLayout()
+        video_container.setContentsMargins(0, 0, 0, 0)
+        
+        self.video_player = VideoPlayer()
+        video_container.addStretch()
+        video_container.addWidget(self.video_player)
+        video_container.addStretch()
+        
+        scroll_layout.addLayout(video_container)
+        
         # Release body (supports HTML for markdown rendering)
         self.release_body = QLabel()
         self.release_body.setWordWrap(True)
         self.release_body.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.release_body.setTextFormat(Qt.TextFormat.RichText)
         self.release_body.setOpenExternalLinks(True)
-        # Base styles for markdown content
         self.release_body.setStyleSheet(f"""
             QLabel {{
                 color: {TEXT_SECONDARY};
@@ -320,11 +343,11 @@ class DetailsSection(QFrame):
                 line-height: 1.6;
             }}
         """)
+        scroll_layout.addWidget(self.release_body)
         
-        scroll = QScrollArea()
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(self.release_body)
-        scroll.setWidgetResizable(True)
+        scroll_layout.addStretch()
+        
+        scroll.setWidget(scroll_content)
         layout.addWidget(scroll, stretch=1)
 
 
@@ -387,16 +410,25 @@ class SelectorPanel(QWidget):
         if index < 0 or index >= len(self.releases):
             self.current_release = None
             self.details.update_btn.setEnabled(False)
+            self.details.video_player.clear()
             return
         
         self.current_release = self.releases[index]
         self.details.release_title.setText(
             self.current_release['name'] or self.current_release['tag_name']
         )
+        
         # Render markdown to HTML
         markdown_text = self.current_release.get('body', 'No description')
         renderer = GitHubMarkdownRenderer()
         html_content = renderer.render(markdown_text)
+        
+        # Load video if found
+        video_url = renderer.get_video_url()
+        if video_url:
+            self.details.video_player.load_video(video_url)
+        else:
+            self.details.video_player.clear()
         
         # DEBUG: Export full HTML to file for debugging
         debug_file = os.path.join(os.path.dirname(__file__), 'debug_output.html')
@@ -407,20 +439,17 @@ class SelectorPanel(QWidget):
         except Exception as e:
             print(f"Failed to write debug file: {e}")
         
-        # Extract body content for QLabel (which doesn't handle full HTML documents)
-        # The renderer returns full HTML, so we extract just the body content
+        # Extract body content for QLabel
         body_match = re.search(r'<body[^>]*>(.*?)</body>', html_content, re.DOTALL)
         style_match = re.search(r'<style[^>]*>(.*?)</style>', html_content, re.DOTALL)
         
         if body_match:
             body_content = body_match.group(1)
-            # Include styles inline if found
             if style_match:
                 styles = style_match.group(1)
                 body_content = f'<style>{styles}</style>{body_content}'
             self.details.release_body.setText(body_content)
         else:
-            # Fallback: use the HTML as-is (might not render well)
             self.details.release_body.setText(html_content)
         
         if self.current_release.get('prerelease'):

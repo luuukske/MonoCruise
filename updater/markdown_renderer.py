@@ -32,28 +32,64 @@ class GitHubMarkdownRenderer:
     }
     
     def __init__(self):
-        self.video_urls = []
+        self.video_url = None
     
     def render(self, markdown_text: str) -> str:
-        """Convert markdown to HTML and extract video URLs."""
-        self.video_urls = []
+        """Convert markdown to HTML and extract video URL."""
+        self.video_url = None
         
         if not markdown_text:
             return ""
         
-        self._extract_video_urls(markdown_text)
+        # Extract and remove the first video link from the top
+        markdown_text = self._extract_and_remove_video(markdown_text)
         html_content = self._process_markdown(markdown_text)
         
         return self._wrap_html(html_content)
     
-    def get_first_video_url(self) -> str | None:
-        """Return the first .mp4 URL found, or None."""
-        return self.video_urls[0] if self.video_urls else None
+    def get_video_url(self) -> str | None:
+        """Return the extracted video URL, or None."""
+        return self.video_url
     
-    def _extract_video_urls(self, text: str):
-        """Find all .mp4 URLs in the text."""
-        mp4_pattern = r'https?://[^\s<>\[\]()]+\.mp4(?:\?[^\s<>\[\]()]*)?'
-        self.video_urls = re.findall(mp4_pattern, text, re.IGNORECASE)
+    def _extract_and_remove_video(self, text: str) -> str:
+        """Extract the first .mp4 video link from the top and remove it."""
+        lines = text.split('\n')
+        new_lines = []
+        video_found = False
+        
+        for i, line in enumerate(lines):
+            if video_found:
+                new_lines.append(line)
+                continue
+            
+            stripped = line.strip()
+            
+            # Skip empty lines at the top before finding video
+            if not stripped and not new_lines:
+                new_lines.append(line)
+                continue
+            
+            # Check for markdown link format: [text](url.mp4)
+            md_link_match = re.match(r'^\[([^\]]*)\]\((https?://[^\s)]+\.mp4(?:\?[^\s)]*)?)\)\s*$', stripped, re.IGNORECASE)
+            if md_link_match:
+                self.video_url = md_link_match.group(2)
+                video_found = True
+                continue
+            
+            # Check for bare URL format: https://...mp4
+            bare_url_match = re.match(r'^(https?://[^\s<>\[\]()]+\.mp4(?:\?[^\s<>\[\]()]*)?)\s*$', stripped, re.IGNORECASE)
+            if bare_url_match:
+                self.video_url = bare_url_match.group(1)
+                video_found = True
+                continue
+            
+            # If we hit non-empty, non-video content, stop looking
+            if stripped:
+                video_found = True  # Stop looking for video
+            
+            new_lines.append(line)
+        
+        return '\n'.join(new_lines)
     
     def _process_markdown(self, text: str) -> str:
         """Process markdown text to HTML."""
