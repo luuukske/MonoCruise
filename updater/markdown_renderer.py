@@ -8,7 +8,7 @@ import re
 import html
 from styles import (
     COLOR_NOTE, COLOR_TIP, COLOR_IMPORTANT, COLOR_WARNING, COLOR_CAUTION,
-    TEXT_PRIMARY, TEXT_SECONDARY, BG_SECTION_BORDER, FONT_FAMILY, BG_SECTION
+    TEXT_PRIMARY, TEXT_SECONDARY, BG_SECTION_BORDER, FONT_FAMILY, COLOR_QUOTE
 )
 
 
@@ -56,175 +56,190 @@ class GitHubMarkdownRenderer:
         self.video_urls = re.findall(mp4_pattern, text, re.IGNORECASE)
     
     def _process_markdown(self, text: str) -> str:
-            """Process markdown text to HTML."""
-            # Filter out SourceForge badge lines
-            text = re.sub(r'^\s*\[!\[.*?\]\(https://a\.fsdn\.com/.*?\)\]\(https://sourceforge\.net/.*?\)\s*$', 
-                        '', text, flags=re.MULTILINE)
+        """Process markdown text to HTML."""
+        # Filter out SourceForge badge lines
+        text = re.sub(r'^\s*\[!\[.*?\]\(https://a\.fsdn\.com/.*?\)\]\(https://sourceforge\.net/.*?\)\s*$', 
+                    '', text, flags=re.MULTILINE)
+        
+        lines = text.split('\n')
+        result = []
+        i = 0
+        in_code_block = False
+        code_block_content = []
+        code_language = ""
+        in_list = False
+        list_items = []
+        list_indent_level = 0
+        in_alert = False
+        alert_type = ""
+        alert_content = []
+        alert_indent = 0
+        in_quote = False
+        quote_content = []
+        last_was_header = False
+        
+        while i < len(lines):
+            line = lines[i]
             
-            lines = text.split('\n')
-            result = []
-            i = 0
-            in_code_block = False
-            code_block_content = []
-            code_language = ""
-            in_list = False
-            list_items = []
-            list_indent_level = 0
-            in_alert = False
-            alert_type = ""
-            alert_content = []
-            alert_indent = 0
-            last_was_header = False
-            
-            while i < len(lines):
-                line = lines[i]
-                
-                if line.strip().startswith('```'):
-                    if in_code_block:
-                        result.append(self._render_code_block('\n'.join(code_block_content), code_language))
-                        code_block_content = []
-                        code_language = ""
-                        in_code_block = False
-                        last_was_header = False
-                    else:
-                        in_code_block = True
-                        code_language = line.strip()[3:].strip()
-                    i += 1
-                    continue
-                
+            if line.strip().startswith('```'):
                 if in_code_block:
-                    code_block_content.append(line)
-                    i += 1
-                    continue
-                
-                alert_match = re.match(r'^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]', line)
-                if alert_match:
-                    if in_list:
-                        alert_indent = list_indent_level + 1
-                    else:
-                        alert_indent = 0
-                    
-                    alert_type = alert_match.group(1)
-                    in_alert = True
-                    alert_content = []
-                    i += 1
-                    continue
-                
-                if in_alert:
-                    if line.startswith('>'):
-                        content = line[1:].strip() if len(line) > 1 else ""
-                        alert_content.append(content)
-                        i += 1
-                        continue
-                    else:
-                        alert_html = self._render_alert(alert_type, '\n'.join(alert_content))
-                        
-                        if in_list and alert_indent > 0:
-                            if list_items:
-                                prev = list_items[-1]
-                                list_items[-1] = (
-                                    prev[0],
-                                    prev[1],
-                                    prev[2] + '\n' + f'__ALERT__{alert_html}__ENDALERT__'
-                                )
-                            else:
-                                result.append(alert_html)
-                        else:
-                            result.append(alert_html)
-                        
-                        in_alert = False
-                        alert_type = ""
-                        alert_content = []
-                        alert_indent = 0
-                        last_was_header = False
-                
-                list_match = re.match(r'^(\s*)[-*+]\s+(.+)$', line)
-                ordered_match = re.match(r'^(\s*)\d+\.\s+(.+)$', line)
-                
-                if list_match or ordered_match:
-                    if not in_list:
-                        in_list = True
-                    
-                    if list_match:
-                        indent_level = len(list_match.group(1)) // 2
-                        content = list_match.group(2)
-                        list_items.append(('ul', indent_level, content))
-                    else:
-                        indent_level = len(ordered_match.group(1)) // 2
-                        content = ordered_match.group(2)
-                        list_items.append(('ol', indent_level, content))
-                    
-                    list_indent_level = indent_level
-                    i += 1
-                    continue
-                elif in_list and line.strip() == "":
-                    result.append(self._render_list(list_items))
-                    list_items = []
-                    in_list = False
-                    list_indent_level = 0
+                    result.append(self._render_code_block('\n'.join(code_block_content), code_language))
+                    code_block_content = []
+                    code_language = ""
+                    in_code_block = False
                     last_was_header = False
-                    i += 1
-                    continue
-                elif in_list:
-                    if list_items and line.strip() and not re.match(r'^(#{1,6})\s+', line) \
-                    and not line.strip().startswith('>') \
-                    and not re.match(r'^[-*_]{3,}\s*$', line):
-                        prev = list_items[-1]
-                        list_items[-1] = (
-                            prev[0],
-                            prev[1],
-                            prev[2] + '\n' + line.strip()
-                        )
-                        i += 1
-                        continue
-
-                    result.append(self._render_list(list_items))
-                    list_items = []
-                    in_list = False
-                    list_indent_level = 0
-                    last_was_header = False
-                
-                header_match = re.match(r'^(#{1,6})\s+(.+)$', line)
-                if header_match:
-                    level = len(header_match.group(1))
-                    content = self._process_inline(header_match.group(2))
-                    result.append(f'<h{level}>{content}</h{level}>')
-                    last_was_header = True
-                    i += 1
-                    continue
-                
-                if re.match(r'^[-*_]{3,}\s*$', line):
-                    result.append('<hr>')
-                    last_was_header = False
-                    i += 1
-                    continue
-                
-                if line.startswith('>') and not in_alert:
-                    content = line[1:].strip() if len(line) > 1 else ""
-                    content = self._process_inline(content)
-                    result.append(f'<blockquote>{content}</blockquote>')
-                    last_was_header = False
-                    i += 1
-                    continue
-                
-                if line.strip() == "":
-                    last_was_header = False
-                    i += 1
-                    continue
-                
-                content = self._process_inline(line)
-                result.append(f'<p>{content}</p>')
-                last_was_header = False
+                else:
+                    in_code_block = True
+                    code_language = line.strip()[3:].strip()
                 i += 1
+                continue
             
             if in_code_block:
-                result.append(self._render_code_block('\n'.join(code_block_content), code_language))
-            if in_list:
-                result.append(self._render_list(list_items))
-            if in_alert:
-                result.append(self._render_alert(alert_type, '\n'.join(alert_content)))
+                code_block_content.append(line)
+                i += 1
+                continue
             
-            return '\n'.join(result)
+            alert_match = re.match(r'^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]', line)
+            if alert_match:
+                if in_quote:
+                    result.append(self._render_quote('\n'.join(quote_content)))
+                    quote_content = []
+                    in_quote = False
+                
+                if in_list:
+                    alert_indent = list_indent_level + 1
+                else:
+                    alert_indent = 0
+                
+                alert_type = alert_match.group(1)
+                in_alert = True
+                alert_content = []
+                i += 1
+                continue
+            
+            if in_alert:
+                if line.startswith('>'):
+                    content = line[1:].strip() if len(line) > 1 else ""
+                    alert_content.append(content)
+                    i += 1
+                    continue
+                else:
+                    alert_html = self._render_alert(alert_type, '\n'.join(alert_content))
+                    
+                    if in_list and alert_indent > 0:
+                        if list_items:
+                            prev = list_items[-1]
+                            list_items[-1] = (
+                                prev[0],
+                                prev[1],
+                                prev[2] + '\n' + f'__ALERT__{alert_html}__ENDALERT__'
+                            )
+                        else:
+                            result.append(alert_html)
+                    else:
+                        result.append(alert_html)
+                    
+                    in_alert = False
+                    alert_type = ""
+                    alert_content = []
+                    alert_indent = 0
+                    last_was_header = False
+            
+            if line.startswith('>') and not alert_match:
+                if not in_quote:
+                    in_quote = True
+                content = line[1:].strip() if len(line) > 1 else ""
+                quote_content.append(content)
+                i += 1
+                continue
+            elif in_quote:
+                result.append(self._render_quote('\n'.join(quote_content)))
+                quote_content = []
+                in_quote = False
+            
+            list_match = re.match(r'^(\s*)[-*+]\s+(.+)$', line)
+            ordered_match = re.match(r'^(\s*)\d+\.\s+(.+)$', line)
+            
+            if list_match or ordered_match:
+                if not in_list:
+                    in_list = True
+                
+                if list_match:
+                    indent_level = len(list_match.group(1)) // 2
+                    content = list_match.group(2)
+                    list_items.append(('ul', indent_level, content))
+                else:
+                    indent_level = len(ordered_match.group(1)) // 2
+                    content = ordered_match.group(2)
+                    list_items.append(('ol', indent_level, content))
+                
+                list_indent_level = indent_level
+                i += 1
+                continue
+            elif in_list and line.strip() == "":
+                result.append(self._render_list(list_items))
+                list_items = []
+                in_list = False
+                list_indent_level = 0
+                last_was_header = False
+                i += 1
+                continue
+            elif in_list:
+                if list_items and line.strip() and not re.match(r'^[-\s]*(#{1,6})\s+', line) \
+                and not line.strip().startswith('>') \
+                and not re.match(r'^[-*_]{3,}\s*$', line):
+                    prev = list_items[-1]
+                    list_items[-1] = (
+                        prev[0],
+                        prev[1],
+                        prev[2] + '\n' + line.strip()
+                    )
+                    i += 1
+                    continue
+
+                result.append(self._render_list(list_items))
+                list_items = []
+                in_list = False
+                list_indent_level = 0
+            
+            header_match = re.match(r'^[-\s]*(#{1,6})\s+(.+)$', line)
+            if header_match:
+                level = len(header_match.group(1))
+                text = header_match.group(2)
+                result.append(f'<h{level}>{self._process_inline(text)}</h{level}>')
+                last_was_header = True
+                i += 1
+                continue
+            
+            if re.match(r'^[-*_]{3,}\s*$', line):
+                result.append('<hr>')
+                last_was_header = False
+                i += 1
+                continue
+            
+            if line.strip() == "":
+                if last_was_header:
+                    last_was_header = False
+                else:
+                    result.append("<p></p>")
+                i += 1
+                continue
+            
+            processed = self._process_inline(line)
+            result.append(f'<p>{processed}</p>')
+            last_was_header = False
+            i += 1
+        
+        if in_list:
+            result.append(self._render_list(list_items))
+        
+        if in_alert:
+            result.append(self._render_alert(alert_type, '\n'.join(alert_content)))
+        
+        if in_quote:
+            result.append(self._render_quote('\n'.join(quote_content)))
+        
+        return '\n'.join(result)
     
     def _process_inline(self, text: str) -> str:
         """Process inline markdown elements."""
@@ -240,6 +255,18 @@ class GitHubMarkdownRenderer:
         
         return text
     
+    def _render_quote(self, content: str) -> str:
+        """Render a standard blockquote with grey left border."""
+        processed_content = self._process_inline(content).replace('\n', '<br>')
+        return f'''
+        <table class="quote" cellspacing="0" cellpadding="0">
+            <tr>
+                <td class="quote-border"></td>
+                <td class="quote-content">{processed_content}</td>
+            </tr>
+        </table>
+        '''
+
     def _render_alert(self, alert_type: str, content: str) -> str:
         """Render a GitHub-style alert box using table for QLabel compatibility."""
         config = self.ALERT_TYPES.get(alert_type, self.ALERT_TYPES['NOTE'])
@@ -310,10 +337,13 @@ class GitHubMarkdownRenderer:
                 processed_parts = []
                 for j, part in enumerate(parts):
                     if j % 2 == 0:
+                        # This is regular text content
                         if part.strip():
                             processed = self._process_inline(part)
-                            processed_parts.append(processed.replace('\n', '<br>'))
+                            # Don't add <br> at the end if an alert follows
+                            processed_parts.append(processed.replace('\n', '<br>').rstrip('<br>'))
                     else:
+                        # This is alert HTML - add it directly without extra spacing
                         processed_parts.append(part)
                 content = ''.join(processed_parts)
             else:
@@ -435,7 +465,7 @@ class GitHubMarkdownRenderer:
                     list-style-type: circle;
                 }}
                 li {{
-                    margin: 3px 0;
+                    margin: 5px 0;
                 }}
                 hr {{
                     border: none;
@@ -488,6 +518,20 @@ class GitHubMarkdownRenderer:
                 .alert-warning .alert-title {{ color: {COLOR_WARNING}; }}
                 .alert-caution .alert-border {{ background-color: {COLOR_CAUTION}; }}
                 .alert-caution .alert-title {{ color: {COLOR_CAUTION}; }}
+                .quote {{
+                    margin: 10px 0;
+                    border-collapse: collapse;
+                }}
+                .quote-border {{
+                    width: 0;
+                    padding-left: 1px;
+                    padding-right: 2px;
+                    background-color: {COLOR_QUOTE};
+                }}
+                .quote-content {{
+                    padding: 10px 15px;
+                    color: {TEXT_SECONDARY};
+                }}
             </style>
         </head>
         <body>

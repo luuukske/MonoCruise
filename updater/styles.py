@@ -18,6 +18,7 @@ COLOR_TIP = "#1a7f37"         # Green for TIP alerts
 COLOR_IMPORTANT = "#8250df"   # Purple for IMPORTANT alerts
 COLOR_WARNING = "#9a6700"     # Orange for WARNING alerts
 COLOR_CAUTION = "#cf222e"     # Red for CAUTION alerts
+COLOR_QUOTE = "#5a5a5a"       # Grey for blockquotes
 
 # Text colors
 TEXT_PRIMARY = "#ffffff"

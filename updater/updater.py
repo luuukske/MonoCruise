@@ -20,7 +20,7 @@ from github_api import GitHubAPI
 from markdown_renderer import GitHubMarkdownRenderer
 
 REPO_OWNER = "luuukske"
-REPO_NAME = "MonoCruise"
+REPO_NAME = "test-updater"
 
 # Embedded SVG icons
 SVG_ICONS = {
