@@ -559,6 +559,10 @@ class UpdaterWindow(QMainWindow):
     
     def _cleanup_worker(self):
         if self.worker is not None:
+            # Wait for the thread to fully exit before destroying the object.
+            # The custom finished_signal fires from inside run(), so the
+            # thread is still alive at that point.
+            self.worker.wait()
             self.worker.deleteLater()
             self.worker = None
 
