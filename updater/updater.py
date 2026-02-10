@@ -76,6 +76,11 @@ class UpdateWorker(QThread):
                        if not any(skip in m for skip in self.updater_files)]
             
             for i, member in enumerate(members):
+                # Guard against Zip Slip: reject entries that escape install_dir
+                target = os.path.realpath(os.path.join(self.install_dir, member))
+                if not target.startswith(os.path.realpath(self.install_dir) + os.sep) \
+                        and target != os.path.realpath(self.install_dir):
+                    raise ValueError(f"Blocked malicious zip entry: {member}")
                 zf.extract(member, self.install_dir)
                 self.install_progress.emit((i + 1) / len(members))
 
@@ -124,6 +129,8 @@ class ProgressLine(QWidget):
             path_progress = QPainterPath()
             path_progress.addRoundedRect(0, y_offset, width, progress_height, radius, radius)
             painter.fillPath(path_progress, QBrush(QColor(COLOR_ACTIVE)))
+
+        painter.end()
 
 
 class IconWidget(QLabel):
@@ -397,6 +404,7 @@ class SelectorPanel(QWidget):
     def _on_branch_changed(self, branch: str):
         if not branch:
             return
+        self.api.invalidate_cache()
         self.releases = self.api.get_releases_for_branch(branch)
         self.selector.version_combo.clear()
         
@@ -429,15 +437,6 @@ class SelectorPanel(QWidget):
             self.details.video_player.load_video(video_url)
         else:
             self.details.video_player.clear()
-        
-        # DEBUG: Export full HTML to file for debugging
-        debug_file = os.path.join(os.path.dirname(__file__), 'debug_output.html')
-        try:
-            with open(debug_file, 'w', encoding='utf-8') as f:
-                f.write(html_content)
-            print(f"Debug HTML exported to: {debug_file}")
-        except Exception as e:
-            print(f"Failed to write debug file: {e}")
         
         # Extract body content for QLabel
         body_match = re.search(r'<body[^>]*>(.*?)</body>', html_content, re.DOTALL)
@@ -502,6 +501,10 @@ class UpdaterWindow(QMainWindow):
         if not self.selector_panel.current_release:
             return
         
+        # Prevent launching a second worker while one is still running
+        if self.worker is not None and self.worker.isRunning():
+            return
+        
         self.progress_panel.reset()
         self.selector_panel.update_btn.setEnabled(False)
         
@@ -525,10 +528,17 @@ class UpdaterWindow(QMainWindow):
     
     def _on_update_finished(self):
         self.selector_panel.update_btn.setEnabled(True)
+        self._cleanup_worker()
     
     def _on_error(self, message: str):
         self.selector_panel.update_btn.setEnabled(True)
         self.selector_panel.details.release_title.setText(f"Error: {message}")
+        self._cleanup_worker()
+    
+    def _cleanup_worker(self):
+        if self.worker is not None:
+            self.worker.deleteLater()
+            self.worker = None
 
 
 def main():

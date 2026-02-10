@@ -201,11 +201,16 @@ class VideoPlayer(QWidget):
         self._is_playing = False
         self._has_started = False
         self._generating_thumbnail = False
+        self._thumbnail_retries = 0
 
         # Frame storage
         self._current_frame: QImage | None = None
         self._thumbnail: QImage | None = None
         self._first_frame: QImage | None = None  # cached for reuse at end-of-media
+
+        # Scaled-frame cache to avoid re-scaling on every paintEvent
+        self._scaled_cache: QImage | None = None
+        self._scaled_cache_key: tuple | None = None  # (frame id, width, height, dpr)
 
         # Transparent background
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -327,15 +332,21 @@ class VideoPlayer(QWidget):
         frame = self._current_frame if self._is_playing else self._thumbnail
 
         if frame and not frame.isNull():
-            # Scale to device-pixel dimensions so the image stays sharp
-            # on high-DPI / 4K screens.
+            # Use a cached scaled image to avoid expensive SmoothTransformation
+            # on every repaint (~30-60 fps during playback).
             dpr = self.devicePixelRatioF()
-            scaled = frame.scaled(
-                int(w * dpr), int(h * dpr),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            scaled.setDevicePixelRatio(dpr)
+            cache_key = (id(frame), w, h, dpr)
+            if self._scaled_cache_key != cache_key:
+                scaled = frame.scaled(
+                    int(w * dpr), int(h * dpr),
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                scaled.setDevicePixelRatio(dpr)
+                self._scaled_cache = scaled
+                self._scaled_cache_key = cache_key
+            else:
+                scaled = self._scaled_cache
             x = int((w - scaled.width() / dpr) / 2)
             y = int((h - scaled.height() / dpr) / 2)
             painter.drawImage(x, y, scaled)
@@ -443,9 +454,12 @@ class VideoPlayer(QWidget):
         self._metadata_checked = False
         self._has_started = False
         self._generating_thumbnail = True
+        self._thumbnail_retries = 0
         self._current_frame = None
         self._thumbnail = None
         self._first_frame = None
+        self._scaled_cache = None
+        self._scaled_cache_key = None
         self._play_btn_opacity = 1.0
         self._play_btn_target = 1.0
         self._ctrl_opacity = 0.0
@@ -465,6 +479,8 @@ class VideoPlayer(QWidget):
         # Play briefly to grab a thumbnail frame
         QTimer.singleShot(100, self._generate_thumbnail)
 
+    _MAX_THUMBNAIL_RETRIES = 30  # ~3 seconds at 100ms intervals
+
     def _generate_thumbnail(self):
         status = self.media_player.mediaStatus()
         if status in (
@@ -477,7 +493,13 @@ class VideoPlayer(QWidget):
             self.media_player.play()
             QTimer.singleShot(80, self._pause_for_thumbnail)
         else:
-            QTimer.singleShot(100, self._generate_thumbnail)
+            self._thumbnail_retries += 1
+            if self._thumbnail_retries < self._MAX_THUMBNAIL_RETRIES:
+                QTimer.singleShot(100, self._generate_thumbnail)
+            else:
+                # Give up – show a black frame instead of spinning forever
+                self._generating_thumbnail = False
+                self.update()
 
     def _pause_for_thumbnail(self):
         self.media_player.pause()
@@ -503,6 +525,8 @@ class VideoPlayer(QWidget):
         self._current_frame = None
         self._thumbnail = None
         self._first_frame = None
+        self._scaled_cache = None
+        self._scaled_cache_key = None
         self._aspect_ratio = self.DEFAULT_ASPECT_RATIO
         self._metadata_checked = False
         self._has_started = False

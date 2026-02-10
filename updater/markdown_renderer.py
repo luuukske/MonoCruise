@@ -6,6 +6,7 @@ code blocks, links, images, lists, and basic formatting.
 
 import re
 import html
+import base64
 from styles import (
     COLOR_NOTE, COLOR_TIP, COLOR_IMPORTANT, COLOR_WARNING, COLOR_CAUTION,
     TEXT_PRIMARY, TEXT_SECONDARY, BG_SECTION_BORDER, FONT_FAMILY, COLOR_QUOTE
@@ -312,7 +313,6 @@ class GitHubMarkdownRenderer:
         svg_template = self.SVG_ICONS.get(alert_type, '')
         svg_icon = svg_template.replace('ALERT_COLOR', alert_color)
         
-        import base64
         svg_encoded = base64.b64encode(svg_icon.encode('utf-8')).decode('utf-8')
         svg_data_uri = f'data:image/svg+xml;base64,{svg_encoded}'
         

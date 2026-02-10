@@ -1,26 +1,37 @@
+import html as _html
 import requests
 import re
 from typing import Optional
+
+_REQUEST_TIMEOUT = 15  # seconds
 
 class GitHubAPI:
     def __init__(self, owner: str, repo: str):
         self.owner = owner
         self.repo = repo
         self.base_url = f"https://api.github.com/repos/{owner}/{repo}"
+        self._releases_cache: list[dict] | None = None
     
     def get_branches(self) -> list[dict]:
         """Fetch all branches from the repository."""
-        response = requests.get(f"{self.base_url}/branches")
+        response = requests.get(f"{self.base_url}/branches", timeout=_REQUEST_TIMEOUT)
         if response.status_code == 200:
             return response.json()
         return []
     
     def get_releases(self) -> list[dict]:
         """Fetch all releases including pre-releases."""
-        response = requests.get(f"{self.base_url}/releases")
+        if self._releases_cache is not None:
+            return self._releases_cache
+        response = requests.get(f"{self.base_url}/releases", timeout=_REQUEST_TIMEOUT)
         if response.status_code == 200:
-            return response.json()
+            self._releases_cache = response.json()
+            return self._releases_cache
         return []
+    
+    def invalidate_cache(self):
+        """Clear cached releases so the next call fetches fresh data."""
+        self._releases_cache = None
     
     def get_releases_for_branch(self, branch: str) -> list[dict]:
         """Filter releases by target branch (target_commitish)."""
@@ -46,7 +57,7 @@ class GitHubAPI:
     
     def download_asset(self, url: str, dest: str, progress_callback=None):
         """Download an asset with progress reporting."""
-        response = requests.get(url, stream=True)
+        response = requests.get(url, stream=True, timeout=_REQUEST_TIMEOUT)
         total = int(response.headers.get('content-length', 0))
         downloaded = 0
         
@@ -71,14 +82,14 @@ class GitHubAPI:
         }
         
         try:
-            response = requests.post(url, json=payload, headers=headers)
+            response = requests.post(url, json=payload, headers=headers, timeout=_REQUEST_TIMEOUT)
             if response.status_code == 200:
                 return response.text
         except Exception as e:
             print(f"Error rendering markdown: {e}")
         
-        # Fallback: return plain text wrapped in <pre>
-        return f"<pre>{text}</pre>"
+        # Fallback: return plain text wrapped in <pre> (escaped to prevent XSS)
+        return f"<pre>{_html.escape(text)}</pre>"
     
     @staticmethod
     def extract_first_mp4_url(text: str) -> Optional[str]:
