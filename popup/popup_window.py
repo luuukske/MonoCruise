@@ -5,10 +5,10 @@ import os
 from typing import Optional
 from enum import Enum, auto
 
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel, QGraphicsOpacityEffect, QApplication
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSize, QElapsedTimer, QRectF
-from PyQt6.QtGui import QFont, QPainter, QColor, QBrush, QPen, QPainterPath, QCursor
-from PyQt6.QtSvgWidgets import QSvgWidget
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QGraphicsOpacityEffect, QApplication
+from PySide6.QtCore import Qt, QTimer, Signal, QSize, QElapsedTimer, QRectF
+from PySide6.QtGui import QFont, QPainter, QColor, QBrush, QPen, QPainterPath, QCursor
+from PySide6.QtSvgWidgets import QSvgWidget
 
 from popup_animator import PopupAnimator
 from message_queue import MessageQueue
@@ -71,7 +71,7 @@ class PopupWindow(QWidget):
     - Higher priority interrupts: current scales out, new slides in
     """
     
-    _new_message_signal = pyqtSignal(object)
+    _new_message_signal = Signal(object)
     
     BORDER_WIDTH = 2
     BORDER_RADIUS = 10

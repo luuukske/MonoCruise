@@ -4,7 +4,7 @@ Entry point for the popup notification system.
 import sys
 import threading
 import time
-from PyQt6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 from popup_window import PopupWindow
 from message_types import MessageStyle
 

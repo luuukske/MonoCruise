@@ -1,5 +1,5 @@
 """
-Offline GitHub-flavored Markdown to HTML converter for PyQt6.
+Offline GitHub-flavored Markdown to HTML converter for PySide6.
 Supports GitHub alerts (NOTE, TIP, IMPORTANT, WARNING, CAUTION),
 code blocks, links, images, lists, and basic formatting.
 """

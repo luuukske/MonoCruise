@@ -1,22 +1,22 @@
 """
-Video player widget using PyQt6 Multimedia with QVideoSink.
+Video player widget using PySide6 Multimedia with QVideoSink.
 Renders frames manually for rounded corners and transparent background.
 Shows thumbnail with big play button when paused or not started.
 """
 
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QSlider, QLabel
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink, QVideoFrame
-from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal, QRect, QRectF, QPoint
-from PyQt6.QtGui import QCursor, QPainter, QColor, QPolygon, QImage, QPainterPath
+from PySide6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QSlider, QLabel
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink, QVideoFrame
+from PySide6.QtCore import Qt, QUrl, QTimer, Signal, QRect, QRectF, QPoint
+from PySide6.QtGui import QCursor, QPainter, QColor, QPolygon, QImage, QPainterPath
 
 
 class _ControlBar(QWidget):
     """Bottom overlay control bar: play/pause, time labels, progress slider."""
 
-    play_clicked = pyqtSignal()
-    slider_moved = pyqtSignal(int)
-    slider_pressed = pyqtSignal()
-    slider_released = pyqtSignal()
+    play_clicked = Signal()
+    slider_moved = Signal(int)
+    slider_pressed = Signal()
+    slider_released = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -559,6 +559,11 @@ class VideoPlayer(QWidget):
 
         if self._is_playing:
             self._fade_out_play_btn()
+            # Show controls when playback starts (e.g. user clicked video to start)
+            # so the overlay appears even if the mouse was already over the widget.
+            if self._has_started:
+                self._show_controls()
+                self._hide_timer.start()
         elif state == QMediaPlayer.PlaybackState.PausedState and was_playing:
             # Capture thumbnail of where the player paused
             if self._current_frame and not self._current_frame.isNull():

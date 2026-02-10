@@ -1,17 +1,17 @@
 """
-animations for popup widgets using PyQt6.
+animations for popup widgets using PySide6.
 """
 
 from typing import Optional
-from PyQt6.QtCore import (
+from PySide6.QtCore import (
     QObject, QPropertyAnimation, QParallelAnimationGroup,
-    QEasingCurve, pyqtSignal, QPoint, pyqtProperty, QRectF, Qt
+    QEasingCurve, Signal, QPoint, Property, QRectF, Qt
 )
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QWidget, QGraphicsOpacityEffect, QGraphicsView, 
     QGraphicsScene, QGraphicsProxyWidget, QApplication
 )
-from PyQt6.QtGui import QTransform, QPainter, QColor
+from PySide6.QtGui import QTransform, QPainter, QColor
 
 
 class ScalableContainer(QGraphicsView):
@@ -85,7 +85,7 @@ class ScalableContainer(QGraphicsView):
 
 
 class PopupAnimator(QObject):
-    animation_finished = pyqtSignal(str)
+    animation_finished = Signal(str)
     
     DURATION_SLIDE = 400
     DURATION_SCALE = 250
@@ -153,8 +153,8 @@ class PopupAnimator(QObject):
         self._current_scale = scale
         self._scalable.set_scale(scale)
     
-    # Define as a pyqtProperty so QPropertyAnimation can use it
-    scale = pyqtProperty(float, _get_scale, _apply_scale)
+    # Define as a Property so QPropertyAnimation can use it
+    scale = Property(float, _get_scale, _apply_scale)
 
     def _create_scale_animation(self, start: float, end: float, duration: int) -> QPropertyAnimation:
         anim = QPropertyAnimation(self, b"scale")

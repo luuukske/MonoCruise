@@ -3,13 +3,13 @@ import os
 import re
 import tempfile
 import zipfile
-from PyQt6.QtWidgets import (
+from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QComboBox, QPushButton, QFrame, QScrollArea, QSpacerItem, QSizePolicy
 )
-from PyQt6.QtSvg import QSvgRenderer
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QByteArray
-from PyQt6.QtGui import QPixmap, QFontDatabase, QPainter, QCursor
+from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtCore import Qt, QThread, Signal, QByteArray
+from PySide6.QtGui import QPixmap, QFontDatabase, QPainter, QCursor
 
 from styles import (
     STYLESHEET, BG_SECTION, BG_SECTION_BORDER, COLOR_INACTIVE, 
@@ -33,11 +33,11 @@ SVG_ICONS = {
 
 class UpdateWorker(QThread):
     """Background worker for downloading and installing updates."""
-    download_progress = pyqtSignal(float)
-    install_progress = pyqtSignal(float)
-    stage_changed = pyqtSignal(str)  # 'download', 'install', 'finished'
-    error = pyqtSignal(str)
-    finished_signal = pyqtSignal()
+    download_progress = Signal(float)
+    install_progress = Signal(float)
+    stage_changed = Signal(str)  # 'download', 'install', 'finished'
+    error = Signal(str)
+    finished_signal = Signal()
 
     def __init__(self, api: GitHubAPI, release: dict, install_dir: str):
         super().__init__()
@@ -102,7 +102,7 @@ class ProgressLine(QWidget):
         self.update()
         
     def paintEvent(self, event):
-        from PyQt6.QtGui import QPainter, QBrush, QColor, QPainterPath
+        from PySide6.QtGui import QPainter, QBrush, QColor, QPainterPath
         
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
