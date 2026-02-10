@@ -1,161 +1,47 @@
 """
-Simple video player widget using PyQt6 Multimedia.
-Minimalistic overlay controls that fade on hover.
+Video player widget using PyQt6 Multimedia with QVideoSink.
+Renders frames manually for rounded corners and transparent background.
+Shows thumbnail with big play button when paused or not started.
 """
 
-from PyQt6.QtWidgets import (
-    QWidget, QHBoxLayout, QPushButton,
-    QSlider, QLabel
-)
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PyQt6.QtMultimediaWidgets import QVideoWidget
-from PyQt6.QtCore import Qt, QUrl, QTimer, QPropertyAnimation, QEasingCurve, pyqtSignal, pyqtProperty
-from PyQt6.QtGui import QCursor, QPainter, QColor, QPolygon
-from PyQt6.QtCore import QPoint
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QSlider, QLabel
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink, QVideoFrame
+from PyQt6.QtCore import Qt, QUrl, QTimer, pyqtSignal, QRect, QRectF, QPoint
+from PyQt6.QtGui import QCursor, QPainter, QColor, QPolygon, QImage, QPainterPath
 
 
-class PlayPauseButton(QPushButton):
-    """Custom play/pause button with white icons."""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._is_playing = False
-        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.setStyleSheet("background: transparent; border: none;")
-    
-    def set_playing(self, is_playing: bool):
-        self._is_playing = is_playing
-        self.update()
-    
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # Draw hover background
-        if self.underMouse():
-            painter.setBrush(QColor(255, 255, 255, 40))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(self.rect(), 4, 4)
-        
-        # Draw icon
-        painter.setBrush(QColor(255, 255, 255))
-        painter.setPen(Qt.PenStyle.NoPen)
-        
-        w = self.width()
-        h = self.height()
-        
-        if self._is_playing:
-            # Pause icon (two vertical bars)
-            bar_width = w // 5
-            bar_height = h // 2
-            gap = bar_width
-            left_x = (w - (2 * bar_width + gap)) // 2
-            top_y = (h - bar_height) // 2
-            
-            painter.drawRect(left_x, top_y, bar_width, bar_height)
-            painter.drawRect(left_x + bar_width + gap, top_y, bar_width, bar_height)
-        else:
-            # Play icon (triangle)
-            triangle_width = w // 3
-            triangle_height = h // 2
-            left_x = (w - triangle_width) // 2 + 2
-            top_y = (h - triangle_height) // 2
-            
-            triangle = QPolygon([
-                QPoint(left_x, top_y),
-                QPoint(left_x, top_y + triangle_height),
-                QPoint(left_x + triangle_width, top_y + triangle_height // 2)
-            ])
-            painter.drawPolygon(triangle)
-        
-        painter.end()
+class _ControlBar(QWidget):
+    """Bottom overlay control bar: play/pause, time labels, progress slider."""
 
-
-class VideoOverlayControls(QWidget):
-    """Overlay controls for video player."""
-    
     play_clicked = pyqtSignal()
     slider_moved = pyqtSignal(int)
     slider_pressed = pyqtSignal()
     slider_released = pyqtSignal()
-    
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        
-        self._control_height = 40
-        self._opacity = 1.0  # Start visible
+        self._opacity = 0.0
+        self._is_playing = False
         self._setup_ui()
-        self._setup_animation()
-    
-    def _get_opacity(self):
-        return self._opacity
-    
-    def _set_opacity(self, value):
-        self._opacity = value
-        self.update()
-        # Update child widgets opacity effect
-        for child in self.findChildren(QWidget):
-            child.update()
-    
-    opacity_prop = pyqtProperty(float, _get_opacity, _set_opacity)
-    
+        self.hide()
+
     def _setup_ui(self):
-        """Setup the control UI."""
-        font_size = max(10, self._control_height // 4)
-        slider_height = max(4, self._control_height // 10)
-        slider_radius = max(2, self._control_height // 20)
-        handle_size = max(10, self._control_height // 4)
-        
-        self.setStyleSheet(f"""
-            QLabel#timeLabel {{
-                background: transparent;
-                color: white;
-                font-size: {font_size}px;
-            }}
-            QSlider {{
-                background: transparent;
-            }}
-            QSlider::groove:horizontal {{
-                background: rgba(255, 255, 255, 0.3);
-                height: {slider_height}px;
-                border-radius: {slider_radius}px;
-            }}
-            QSlider::handle:horizontal {{
-                background: white;
-                width: {handle_size}px;
-                height: {handle_size}px;
-                margin: -{handle_size // 3}px 0;
-                border-radius: {handle_size // 2}px;
-            }}
-            QSlider::sub-page:horizontal {{
-                background: rgba(255, 255, 255, 0.8);
-                border-radius: {slider_radius}px;
-            }}
-        """)
-        
-        # Clear existing layout if rebuilding
-        if self.layout():
-            while self.layout().count():
-                item = self.layout().takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
-            QWidget().setLayout(self.layout())
-        
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(10)
-        
-        # Play/Pause button
-        self.play_button = PlayPauseButton()
-        self.play_button.setFixedSize(max(28, self._control_height - 12), max(28, self._control_height - 12))
-        self.play_button.clicked.connect(self.play_clicked.emit)
-        layout.addWidget(self.play_button)
-        
-        # Current time label
-        self.current_time_label = QLabel("0:00")
-        self.current_time_label.setObjectName("timeLabel")
-        layout.addWidget(self.current_time_label)
-        
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(8)
+
+        # Play/Pause button (invisible - icon drawn in paintEvent)
+        self.play_btn = QPushButton()
+        self.play_btn.setFixedSize(24, 24)
+        self.play_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.play_btn.setStyleSheet("background: transparent; border: none;")
+        self.play_btn.clicked.connect(self.play_clicked.emit)
+        layout.addWidget(self.play_btn)
+
+        # Current time
+        self.time_label = QLabel("0:00")
+        layout.addWidget(self.time_label)
+
         # Progress slider
         self.progress_slider = QSlider(Qt.Orientation.Horizontal)
         self.progress_slider.setRange(0, 0)
@@ -164,321 +50,617 @@ class VideoOverlayControls(QWidget):
         self.progress_slider.sliderPressed.connect(self.slider_pressed.emit)
         self.progress_slider.sliderReleased.connect(self.slider_released.emit)
         layout.addWidget(self.progress_slider, stretch=1)
-        
-        # Duration label
+
+        # Duration
         self.duration_label = QLabel("0:00")
-        self.duration_label.setObjectName("timeLabel")
         layout.addWidget(self.duration_label)
-    
-    def _setup_animation(self):
-        """Setup fade animation."""
-        self._fade_animation = QPropertyAnimation(self, b"opacity_prop")
-        self._fade_animation.setDuration(300)
-        self._fade_animation.setEasingCurve(QEasingCurve.Type.InOutQuad)
-    
-    def fade_in(self):
-        """Fade in the controls."""
-        self._fade_animation.stop()
-        self._fade_animation.setStartValue(self._opacity)
-        self._fade_animation.setEndValue(1.0)
-        self._fade_animation.start()
-    
-    def fade_out(self):
-        """Fade out the controls."""
-        self._fade_animation.stop()
-        self._fade_animation.setStartValue(self._opacity)
-        self._fade_animation.setEndValue(0.0)
-        self._fade_animation.start()
-    
+
+        self._apply_style()
+
+    def _apply_style(self):
+        a = int(255 * self._opacity)
+        a_low = int(77 * self._opacity)
+        a_high = int(204 * self._opacity)
+
+        self.setStyleSheet(f"""
+            QWidget {{
+                background: transparent;
+            }}
+            QLabel {{
+                color: rgba(255, 255, 255, {a});
+                font-size: 11px;
+                background: transparent;
+            }}
+            QPushButton {{
+                background: transparent;
+                border: none;
+            }}
+            QSlider {{
+                background: transparent;
+            }}
+            QSlider::groove:horizontal {{
+                background: rgba(255, 255, 255, {a_low});
+                height: 4px;
+                border-radius: 2px;
+            }}
+            QSlider::handle:horizontal {{
+                background: rgba(255, 255, 255, {a});
+                width: 10px;
+                height: 10px;
+                margin: -3px 0;
+                border-radius: 5px;
+            }}
+            QSlider::sub-page:horizontal {{
+                background: rgba(255, 255, 255, {a_high});
+                border-radius: 2px;
+            }}
+        """)
+
+    def set_opacity(self, opacity: float):
+        self._opacity = opacity
+        # Hide interactive child widgets at very low opacity to prevent
+        # the slider/labels from flashing while nearly transparent.
+        visible = opacity > 0.15
+        self.progress_slider.setVisible(visible)
+        self.time_label.setVisible(visible)
+        self.duration_label.setVisible(visible)
+        self.play_btn.setVisible(visible)
+        self._apply_style()
+        self.update()
+
     def paintEvent(self, event):
-        """Custom paint to draw background with opacity."""
+        if self._opacity <= 0:
+            return
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # Draw semi-transparent background
-        alpha = int(140 * self._opacity)
-        bg_color = QColor(0, 0, 0, alpha)
-        painter.setBrush(bg_color)
+
+        # Semi-transparent dark background
+        alpha = int(160 * self._opacity)
+        painter.setBrush(QColor(0, 0, 0, alpha))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(self.rect(), 8, 8)
-        
+        painter.drawRoundedRect(self.rect(), 6, 6)
+
+        # Draw play/pause icon on the button area
+        btn = self.play_btn.geometry()
+        painter.setOpacity(self._opacity)
+        painter.setBrush(QColor(255, 255, 255))
+        painter.setPen(Qt.PenStyle.NoPen)
+        cx, cy = btn.center().x(), btn.center().y()
+
+        if self._is_playing:
+            # Pause bars
+            bw, bh, gap = 3, 10, 4
+            painter.drawRect(cx - gap // 2 - bw, cy - bh // 2, bw, bh)
+            painter.drawRect(cx + gap // 2, cy - bh // 2, bw, bh)
+        else:
+            # Play triangle
+            tw, th = 8, 10
+            lx = cx - tw // 2 + 1
+            ty = cy - th // 2
+            painter.drawPolygon(QPolygon([
+                QPoint(lx, ty),
+                QPoint(lx, ty + th),
+                QPoint(lx + tw, ty + th // 2),
+            ]))
+
         painter.end()
-    
-    def set_control_height(self, height: int):
-        """Update control sizing based on player dimensions."""
-        self._control_height = height
-        self._setup_ui()
-    
-    def set_playing(self, is_playing: bool):
-        """Update play button icon."""
-        self.play_button.set_playing(is_playing)
-    
-    def set_position(self, position: int):
-        """Update slider position."""
+
+    def mousePressEvent(self, event):
+        """Accept all clicks so they don't propagate to the VideoPlayer."""
+        event.accept()
+
+    def set_playing(self, playing: bool):
+        self._is_playing = playing
+        self.update()
+
+    def set_position(self, ms: int):
         if not self.progress_slider.isSliderDown():
-            self.progress_slider.setValue(position)
-        self.current_time_label.setText(self._format_time(position))
-    
-    def set_duration(self, duration: int):
-        """Update slider range and duration label."""
-        self.progress_slider.setRange(0, duration)
-        self.duration_label.setText(self._format_time(duration))
-    
-    def get_opacity(self) -> float:
-        """Get current opacity."""
-        return self._opacity
-    
+            self.progress_slider.setValue(ms)
+        self.time_label.setText(self._format_time(ms))
+
+    def set_duration(self, ms: int):
+        self.progress_slider.setRange(0, ms)
+        self.duration_label.setText(self._format_time(ms))
+
     @staticmethod
     def _format_time(ms: int) -> str:
-        """Format milliseconds as M:SS or H:MM:SS."""
         seconds = ms // 1000
         minutes = seconds // 60
-        seconds = seconds % 60
+        seconds %= 60
         hours = minutes // 60
-        minutes = minutes % 60
-        
+        minutes %= 60
         if hours > 0:
             return f"{hours}:{minutes:02d}:{seconds:02d}"
         return f"{minutes}:{seconds:02d}"
 
 
 class VideoPlayer(QWidget):
-    """Minimalistic video player with overlay controls."""
-    
+    """
+    Video player with rounded corners and transparent surroundings.
+
+    Uses QVideoSink to capture frames and paint them manually, enabling
+    rounded-corner clipping and a transparent widget background. When
+    paused or not yet started the last frame is shown as a thumbnail
+    with a large centered play button overlay.
+    """
+
     DEFAULT_HEIGHT = 300
     DEFAULT_ASPECT_RATIO = 16 / 9
-    CONTROL_HEIGHT_PERCENT = 0.15
-    
+    CORNER_RADIUS = 10
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        
+
+        # State
         self._aspect_ratio = self.DEFAULT_ASPECT_RATIO
         self._video_url = None
         self._is_slider_pressed = False
         self._metadata_checked = False
         self._mouse_inside = False
-        
+        self._is_playing = False
+        self._has_started = False
+        self._generating_thumbnail = False
+
+        # Frame storage
+        self._current_frame: QImage | None = None
+        self._thumbnail: QImage | None = None
+        self._first_frame: QImage | None = None  # cached for reuse at end-of-media
+
+        # Transparent background
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet("background: transparent;")
+        self.setMouseTracking(True)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+
+        # Media pipeline
         self._setup_media()
-        self._setup_ui()
+
+        # Overlay controls (child widget)
+        self.controls = _ControlBar(self)
+        self.controls.play_clicked.connect(self._toggle_play)
+        self.controls.slider_moved.connect(self._seek)
+        self.controls.slider_pressed.connect(self._on_slider_pressed)
+        self.controls.slider_released.connect(self._on_slider_released)
+
         self._update_size()
-        
-        # Timer for hover detection
+
+        # --- Timers ---
+
+        # Hover polling
         self._hover_timer = QTimer(self)
         self._hover_timer.setInterval(50)
         self._hover_timer.timeout.connect(self._check_hover)
-        
-        # Hide by default
+
+        # Delayed control hide
+        self._hide_timer = QTimer(self)
+        self._hide_timer.setInterval(2000)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.timeout.connect(self._delayed_hide_controls)
+
+        # Controls fade animation
+        self._ctrl_opacity = 0.0
+        self._ctrl_target = 0.0
+        self._ctrl_fade = QTimer(self)
+        self._ctrl_fade.setInterval(16)
+        self._ctrl_fade.timeout.connect(self._animate_ctrl_fade)
+
+        # Big play-button fade animation
+        self._play_btn_opacity = 1.0
+        self._play_btn_target = 1.0
+        self._play_btn_fade = QTimer(self)
+        self._play_btn_fade.setInterval(16)
+        self._play_btn_fade.timeout.connect(self._animate_play_btn_fade)
+
+        self._play_btn_hovered = False
+
         self.hide()
-    
+
+    # ------------------------------------------------------------------
+    #  Media setup
+    # ------------------------------------------------------------------
+
     def _setup_media(self):
-        """Setup media player components."""
         self.media_player = QMediaPlayer()
         self.audio_output = QAudioOutput()
         self.media_player.setAudioOutput(self.audio_output)
-        
-        # Connect signals
+
+        self.video_sink = QVideoSink()
+        self.video_sink.videoFrameChanged.connect(self._on_video_frame)
+        self.media_player.setVideoOutput(self.video_sink)
+
         self.media_player.positionChanged.connect(self._position_changed)
         self.media_player.durationChanged.connect(self._duration_changed)
         self.media_player.playbackStateChanged.connect(self._state_changed)
         self.media_player.errorOccurred.connect(self._handle_error)
         self.media_player.mediaStatusChanged.connect(self._media_status_changed)
-    
-    def _setup_ui(self):
-        """Setup the player UI."""
-        # Video widget - child of this widget
-        self.video_widget = QVideoWidget(self)
-        self.video_widget.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
-        self.video_widget.setStyleSheet("background-color: #000000;")
-        self.media_player.setVideoOutput(self.video_widget)
-        
-        # Overlay controls - child of this widget, on top of video
-        self.controls = VideoOverlayControls(self)
-        self.controls.play_clicked.connect(self._toggle_play)
-        self.controls.slider_moved.connect(self._seek)
-        self.controls.slider_pressed.connect(self._slider_pressed)
-        self.controls.slider_released.connect(self._slider_released)
-    
+
+    # ------------------------------------------------------------------
+    #  Sizing
+    # ------------------------------------------------------------------
+
     def _update_size(self):
-        """Update player size based on aspect ratio."""
         height = self.DEFAULT_HEIGHT
         width = int(height * self._aspect_ratio)
-        
-        self.setFixedHeight(height)
-        self.setFixedWidth(width)
-        
-        # Video fills entire widget
-        self.video_widget.setGeometry(0, 0, width, height)
-        
-        # Control sizing
-        control_height = int(min(width, height) * self.CONTROL_HEIGHT_PERCENT)
-        self.controls.set_control_height(control_height)
-        
-        # Position controls at bottom with padding
-        control_width = width - 20
-        self.controls.setGeometry(
-            10,
-            height - control_height - 10,
-            control_width,
-            control_height
-        )
-        
-        # Ensure controls are on top
-        self.controls.raise_()
-    
+        self.setFixedSize(width, height)
+
+        ctrl_h = max(36, int(height * 0.12))
+        pad = 8
+        self.controls.setGeometry(QRect(
+            pad, height - ctrl_h - pad,
+            width - 2 * pad, ctrl_h,
+        ))
+
+    # ------------------------------------------------------------------
+    #  Frame capture
+    # ------------------------------------------------------------------
+
+    def _on_video_frame(self, frame: QVideoFrame):
+        if not frame.isValid():
+            return
+        image = frame.toImage()
+        if image.isNull():
+            return
+        self._current_frame = image.convertToFormat(QImage.Format.Format_ARGB32)
+        # While paused, keep the thumbnail in sync with the current frame
+        # (e.g. the user seeks while paused)
+        if not self._is_playing:
+            self._thumbnail = self._current_frame
+        self.update()
+
+    # ------------------------------------------------------------------
+    #  Painting
+    # ------------------------------------------------------------------
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w, h = self.width(), self.height()
+
+        # Clip everything to rounded rect
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(0, 0, w, h), self.CORNER_RADIUS, self.CORNER_RADIUS)
+        painter.setClipPath(clip)
+
+        # Choose which image to draw
+        frame = self._current_frame if self._is_playing else self._thumbnail
+
+        if frame and not frame.isNull():
+            # Scale to device-pixel dimensions so the image stays sharp
+            # on high-DPI / 4K screens.
+            dpr = self.devicePixelRatioF()
+            scaled = frame.scaled(
+                int(w * dpr), int(h * dpr),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            scaled.setDevicePixelRatio(dpr)
+            x = int((w - scaled.width() / dpr) / 2)
+            y = int((h - scaled.height() / dpr) / 2)
+            painter.drawImage(x, y, scaled)
+        else:
+            painter.fillRect(0, 0, w, h, QColor(0, 0, 0))
+
+        # Show big play button only when video hasn't been started yet
+        if not self._has_started and self._play_btn_opacity > 0:
+            # Subtle dark overlay so the play button pops
+            painter.setOpacity(self._play_btn_opacity * 0.15)
+            painter.fillRect(0, 0, w, h, QColor(0, 0, 0))
+            painter.setOpacity(1.0)
+
+            self._paint_big_play_button(painter, w, h)
+
+        painter.end()
+
+    def _paint_big_play_button(self, painter: QPainter, w: int, h: int):
+        """Draw the large centered play-button circle with triangle."""
+        painter.save()
+        painter.setOpacity(self._play_btn_opacity)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        cx, cy = w // 2, h // 2
+        radius = min(w, h) // 6
+        radius = max(28, min(radius, 45))
+
+        # Dark circle
+        bg_alpha = 190 if self._play_btn_hovered else 150
+        painter.setBrush(QColor(0, 0, 0, bg_alpha))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(cx - radius, cy - radius, radius * 2, radius * 2)
+
+        # White play triangle (offset a bit right for visual centering)
+        tw = int(radius * 0.75)
+        th = int(radius * 0.9)
+        offset = int(tw * 0.12)
+        lx = cx - tw // 2 + offset
+        ty = cy - th // 2
+
+        painter.setBrush(QColor(255, 255, 255))
+        painter.drawPolygon(QPolygon([
+            QPoint(lx, ty),
+            QPoint(lx, ty + th),
+            QPoint(lx + tw, ty + th // 2),
+        ]))
+
+        painter.restore()
+
+    # ------------------------------------------------------------------
+    #  Fade animations
+    # ------------------------------------------------------------------
+
+    def _animate_ctrl_fade(self):
+        diff = self._ctrl_target - self._ctrl_opacity
+        if abs(diff) < 0.02:
+            self._ctrl_opacity = self._ctrl_target
+            self._ctrl_fade.stop()
+            if self._ctrl_opacity <= 0:
+                self.controls.hide()
+        else:
+            self._ctrl_opacity += diff * 0.18
+        self.controls.set_opacity(self._ctrl_opacity)
+
+    def _show_controls(self):
+        self.controls.show()
+        self._ctrl_target = 1.0
+        self._ctrl_fade.start()
+
+    def _hide_controls_anim(self):
+        self._ctrl_target = 0.0
+        self._ctrl_fade.start()
+
+    def _animate_play_btn_fade(self):
+        diff = self._play_btn_target - self._play_btn_opacity
+        if abs(diff) < 0.02:
+            self._play_btn_opacity = self._play_btn_target
+            self._play_btn_fade.stop()
+        else:
+            self._play_btn_opacity += diff * 0.18
+        self.update()
+
+    def _fade_out_play_btn(self):
+        self._play_btn_target = 0.0
+        self._play_btn_fade.start()
+
+    def _fade_in_play_btn(self):
+        self._play_btn_target = 1.0
+        if self._play_btn_opacity < 0.01:
+            self._play_btn_opacity = 0.0
+        self._play_btn_fade.start()
+
+    # ------------------------------------------------------------------
+    #  Public API
+    # ------------------------------------------------------------------
+
     def load_video(self, url: str):
-        """Load a video from URL."""
+        """Load a video from *url*. Shows thumbnail + play button once ready."""
         if not url:
             self.hide()
             return
-        
+
         self._video_url = url
         self._aspect_ratio = self.DEFAULT_ASPECT_RATIO
         self._metadata_checked = False
+        self._has_started = False
+        self._generating_thumbnail = True
+        self._current_frame = None
+        self._thumbnail = None
+        self._first_frame = None
+        self._play_btn_opacity = 1.0
+        self._play_btn_target = 1.0
+        self._ctrl_opacity = 0.0
+        self._ctrl_target = 0.0
+        self.controls.hide()
+
         self._update_size()
-        
+
         self.media_player.setSource(QUrl(url))
-        self.controls.set_playing(False)
         self.controls.set_position(0)
         self.controls.set_duration(0)
-        
-        # Start with controls visible
-        self.controls._opacity = 1.0
-        self.controls.update()
-        
+        self.controls.set_playing(False)
+
         self.show()
-        
-        # Start hover timer
         self._hover_timer.start()
-        
-        # Play briefly then pause to get thumbnail
+
+        # Play briefly to grab a thumbnail frame
         QTimer.singleShot(100, self._generate_thumbnail)
-    
+
     def _generate_thumbnail(self):
-        """Play briefly and pause to generate a thumbnail frame."""
-        if self.media_player.mediaStatus() in (
+        status = self.media_player.mediaStatus()
+        if status in (
             QMediaPlayer.MediaStatus.LoadedMedia,
             QMediaPlayer.MediaStatus.BufferedMedia,
-            QMediaPlayer.MediaStatus.BufferingMedia
+            QMediaPlayer.MediaStatus.BufferingMedia,
         ):
+            # Mute so the brief play is silent
+            self.audio_output.setMuted(True)
             self.media_player.play()
-            QTimer.singleShot(50, self._pause_for_thumbnail)
+            QTimer.singleShot(80, self._pause_for_thumbnail)
         else:
-            # Media not ready yet, try again
             QTimer.singleShot(100, self._generate_thumbnail)
-    
+
     def _pause_for_thumbnail(self):
-        """Pause after brief play to show thumbnail."""
         self.media_player.pause()
+        if self._current_frame and not self._current_frame.isNull():
+            self._thumbnail = self._current_frame
+            self._first_frame = self._current_frame
         self.media_player.setPosition(0)
-    
+        self._has_started = False
+        self._is_playing = False
+        self._generating_thumbnail = False
+        self.audio_output.setMuted(False)
+        self.update()
+
     def clear(self):
-        """Clear the current video."""
+        """Stop playback and hide the widget."""
         self._hover_timer.stop()
+        self._hide_timer.stop()
+        self._ctrl_fade.stop()
+        self._play_btn_fade.stop()
         self.media_player.stop()
         self.media_player.setSource(QUrl())
         self._video_url = None
+        self._current_frame = None
+        self._thumbnail = None
+        self._first_frame = None
         self._aspect_ratio = self.DEFAULT_ASPECT_RATIO
         self._metadata_checked = False
+        self._has_started = False
+        self._generating_thumbnail = False
         self.controls.set_position(0)
         self.controls.set_duration(0)
         self.hide()
-    
+
+    # ------------------------------------------------------------------
+    #  Playback controls
+    # ------------------------------------------------------------------
+
     def _toggle_play(self):
-        """Toggle between play and pause."""
-        if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+        if self._is_playing:
             self.media_player.pause()
         else:
+            if not self._has_started:
+                self._has_started = True
+            # If at end, restart
+            dur = self.media_player.duration()
+            if dur > 0 and self.media_player.position() >= dur - 100:
+                self.media_player.setPosition(0)
             self.media_player.play()
-    
+
     def _seek(self, position: int):
-        """Seek to position in video."""
         self.media_player.setPosition(position)
-    
-    def _slider_pressed(self):
-        """Track when slider is being dragged."""
+
+    def _on_slider_pressed(self):
         self._is_slider_pressed = True
-    
-    def _slider_released(self):
-        """Track when slider drag ends."""
+
+    def _on_slider_released(self):
         self._is_slider_pressed = False
         self._seek(self.controls.progress_slider.value())
-    
+
+    # ------------------------------------------------------------------
+    #  Media-player signal handlers
+    # ------------------------------------------------------------------
+
     def _position_changed(self, position: int):
-        """Update UI when playback position changes."""
         if not self._is_slider_pressed:
             self.controls.set_position(position)
-    
+
     def _duration_changed(self, duration: int):
-        """Update UI when video duration is known."""
         if duration > 0:
             self.controls.set_duration(duration)
-    
+
     def _state_changed(self, state: QMediaPlayer.PlaybackState):
-        """Update play button based on state."""
-        is_playing = state == QMediaPlayer.PlaybackState.PlayingState
-        self.controls.set_playing(is_playing)
-    
+        if self._generating_thumbnail:
+            return
+
+        was_playing = self._is_playing
+        self._is_playing = state == QMediaPlayer.PlaybackState.PlayingState
+        self.controls.set_playing(self._is_playing)
+
+        if self._is_playing:
+            self._fade_out_play_btn()
+        elif state == QMediaPlayer.PlaybackState.PausedState and was_playing:
+            # Capture thumbnail of where the player paused
+            if self._current_frame and not self._current_frame.isNull():
+                self._thumbnail = self._current_frame
+
+        self.update()
+
     def _media_status_changed(self, status: QMediaPlayer.MediaStatus):
-        """Handle media status changes."""
-        if status in (QMediaPlayer.MediaStatus.LoadedMedia,
-                      QMediaPlayer.MediaStatus.BufferedMedia):
+        if self._generating_thumbnail:
+            return
+
+        if status in (
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        ):
             self._check_video_size()
-    
+
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            # Loop back to the start using the cached first frame —
+            # no play needed so there's no audio blip or frame flicker.
+            self._has_started = False
+            self._is_playing = False
+            self._play_btn_opacity = 1.0
+            self._play_btn_target = 1.0
+            if self._first_frame and not self._first_frame.isNull():
+                self._thumbnail = self._first_frame
+                # Also reset the \"current\" frame so starting playback again
+                # does not briefly show the last frame from the previous run.
+                self._current_frame = self._first_frame
+            self.controls.set_position(0)
+            self.controls.set_playing(False)
+            self.media_player.setPosition(0)
+            self.update()
+
     def _check_video_size(self):
-        """Check video size from video sink when available."""
         if self._metadata_checked:
             return
-            
-        video_sink = self.video_widget.videoSink()
-        if video_sink:
-            video_size = video_sink.videoSize()
-            if video_size.isValid() and video_size.width() > 0 and video_size.height() > 0:
-                new_ratio = video_size.width() / video_size.height()
-                if abs(new_ratio - self._aspect_ratio) > 0.01:
-                    self._aspect_ratio = new_ratio
-                    self._update_size()
-                self._metadata_checked = True
-    
+        size = self.video_sink.videoSize()
+        if size.isValid() and size.width() > 0 and size.height() > 0:
+            new_ratio = size.width() / size.height()
+            if abs(new_ratio - self._aspect_ratio) > 0.01:
+                self._aspect_ratio = new_ratio
+                self._update_size()
+            self._metadata_checked = True
+
     def _handle_error(self, error, error_string: str):
-        """Handle media player errors."""
         print(f"Video player error: {error_string}")
-    
+
+    # ------------------------------------------------------------------
+    #  Hover / mouse
+    # ------------------------------------------------------------------
+
     def _check_hover(self):
-        """Check if mouse is inside the widget."""
         if not self.isVisible():
             return
-            
-        global_pos = QCursor.pos()
-        widget_rect = self.rect()
-        local_pos = self.mapFromGlobal(global_pos)
-        is_inside = widget_rect.contains(local_pos)
-        
-        if is_inside and not self._mouse_inside:
+
+        local = self.mapFromGlobal(QCursor.pos())
+        inside = self.rect().contains(local)
+
+        # Track play-button hover for visual feedback
+        if not self._has_started:
+            cx, cy = self.width() // 2, self.height() // 2
+            radius = min(self.width(), self.height()) // 6
+            radius = max(28, min(radius, 45))
+            dx, dy = local.x() - cx, local.y() - cy
+            was = self._play_btn_hovered
+            self._play_btn_hovered = inside and (dx * dx + dy * dy <= radius * radius)
+            if was != self._play_btn_hovered:
+                self.update()
+
+        if inside and not self._mouse_inside:
             self._mouse_inside = True
-            self.controls.fade_in()
-        elif not is_inside and self._mouse_inside:
+            self._hide_timer.stop()
+            if self._has_started:
+                self._show_controls()
+        elif not inside and self._mouse_inside:
             self._mouse_inside = False
-            self.controls.fade_out()
-    
+            if self._has_started:
+                self._hide_timer.start()
+
+    def _delayed_hide_controls(self):
+        if not self._mouse_inside and self._is_playing:
+            self._hide_controls_anim()
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return super().mousePressEvent(event)
+
+        # Let the control bar handle its own clicks
+        if self.controls.isVisible() and self.controls.geometry().contains(event.pos()):
+            return super().mousePressEvent(event)
+
+        # Click on the video area → toggle play
+        if not self._has_started:
+            self._has_started = True
+        self._toggle_play()
+
     def showEvent(self, event):
-        """Handle show event."""
         super().showEvent(event)
-        self.controls.raise_()
         self._hover_timer.start()
-    
+
     def hideEvent(self, event):
-        """Handle hide event."""
         super().hideEvent(event)
         self._hover_timer.stop()
-    
-    def mousePressEvent(self, event):
-        """Handle click on video area to toggle play."""
-        controls_rect = self.controls.geometry()
-        if not controls_rect.contains(event.pos()):
-            self._toggle_play()
-        super().mousePressEvent(event)
-    
-    def resizeEvent(self, event):
-        """Handle resize."""
-        super().resizeEvent(event)
-        self._update_size()
+        self._hide_timer.stop()
