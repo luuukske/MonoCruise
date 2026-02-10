@@ -118,8 +118,6 @@ class PopupWindow(QWidget):
         self._opacity.setOpacity(0.0)
         self.setGraphicsEffect(self._opacity)
     
-    TITLE_TOP_MARGIN = 5
-    
     def _setup_content(self):
         self._container = PopupContainer()
         self._container.setFixedSize(self._panel_width, self._panel_height)
@@ -164,22 +162,30 @@ class PopupWindow(QWidget):
         self._position_text_labels()
     
     def _position_text_labels(self):
-        """Position title at fixed top margin, message centered in remaining space."""
+        """Position title and message evenly spaced over the available vertical space."""
         if not hasattr(self, '_text_area'):
             return
         
         area_w = self._text_area.width()
         area_h = self._text_area.height()
         
-        # Title at fixed offset from top
         title_h = self._title_label.sizeHint().height()
-        self._title_label.setGeometry(0, self.TITLE_TOP_MARGIN, area_w, title_h)
-        
-        # Message centered in the space below the title
-        msg_top = self.TITLE_TOP_MARGIN + title_h
-        remaining_h = area_h - msg_top
         msg_h = self._label.sizeHint().height()
-        msg_y = msg_top + (remaining_h - msg_h) // 2
+        
+        # Calculate even spacing: divide available space into 3 sections
+        # Section 1: top padding + title
+        # Section 2: middle padding + message  
+        # Section 3: bottom padding
+        total_content_h = title_h + msg_h
+        available_padding = area_h - total_content_h
+        section_padding = available_padding // 3
+        
+        # Position title in first section
+        title_y = section_padding
+        self._title_label.setGeometry(0, title_y, area_w, title_h)
+        
+        # Position message in second section
+        msg_y = title_y + title_h + section_padding
         self._label.setGeometry(0, msg_y, area_w, msg_h)
     
     def _setup_animator(self):
