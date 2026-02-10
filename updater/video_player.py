@@ -188,6 +188,8 @@ class VideoPlayer(QWidget):
     DEFAULT_HEIGHT = 300
     DEFAULT_ASPECT_RATIO = 16 / 9
     CORNER_RADIUS = 10
+    # Cap decoded frame size to limit RAM (widget is small anyway)
+    MAX_FRAME_DIMENSION = 1280
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -231,11 +233,6 @@ class VideoPlayer(QWidget):
         self._update_size()
 
         # --- Timers ---
-
-        # Hover polling
-        self._hover_timer = QTimer(self)
-        self._hover_timer.setInterval(50)
-        self._hover_timer.timeout.connect(self._check_hover)
 
         # Delayed control hide
         self._hide_timer = QTimer(self)
@@ -297,8 +294,39 @@ class VideoPlayer(QWidget):
         ))
 
     # ------------------------------------------------------------------
-    #  Frame capture
+    #  Frame capture (memory: cap size, store thumbnail at display size)
     # ------------------------------------------------------------------
+
+    def _cap_frame_size(self, image: QImage) -> QImage:
+        """Return a copy capped to MAX_FRAME_DIMENSION to limit RAM."""
+        w, h = image.width(), image.height()
+        if w <= self.MAX_FRAME_DIMENSION and h <= self.MAX_FRAME_DIMENSION:
+            return image.convertToFormat(QImage.Format.Format_ARGB32)
+        if w >= h:
+            new_w = self.MAX_FRAME_DIMENSION
+            new_h = int(h * self.MAX_FRAME_DIMENSION / w)
+        else:
+            new_h = self.MAX_FRAME_DIMENSION
+            new_w = int(w * self.MAX_FRAME_DIMENSION / h)
+        return image.scaled(
+            new_w, new_h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        ).convertToFormat(QImage.Format.Format_ARGB32)
+
+    def _scaled_for_display(self, image: QImage) -> QImage:
+        """Return a copy scaled to widget size for thumbnail/poster (saves RAM)."""
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0 or image.isNull():
+            return image
+        dpr = self.devicePixelRatioF()
+        scaled = image.scaled(
+            int(w * dpr), int(h * dpr),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        scaled.setDevicePixelRatio(dpr)
+        return scaled
 
     def _on_video_frame(self, frame: QVideoFrame):
         if not frame.isValid():
@@ -306,11 +334,10 @@ class VideoPlayer(QWidget):
         image = frame.toImage()
         if image.isNull():
             return
-        self._current_frame = image.convertToFormat(QImage.Format.Format_ARGB32)
-        # While paused, keep the thumbnail in sync with the current frame
-        # (e.g. the user seeks while paused)
+        self._current_frame = self._cap_frame_size(image)
+        # While paused, keep the thumbnail in sync (store at display size to save RAM)
         if not self._is_playing:
-            self._thumbnail = self._current_frame
+            self._thumbnail = self._scaled_for_display(self._current_frame)
         self.update()
 
     # ------------------------------------------------------------------
@@ -468,13 +495,17 @@ class VideoPlayer(QWidget):
 
         self._update_size()
 
+        # Re-attach the video sink in case clear() detached it
+        if self.media_player.videoOutput() is None:
+            self.video_sink.videoFrameChanged.connect(self._on_video_frame)
+            self.media_player.setVideoOutput(self.video_sink)
+
         self.media_player.setSource(QUrl(url))
         self.controls.set_position(0)
         self.controls.set_duration(0)
         self.controls.set_playing(False)
 
         self.show()
-        self._hover_timer.start()
 
         # Play briefly to grab a thumbnail frame
         QTimer.singleShot(100, self._generate_thumbnail)
@@ -504,8 +535,9 @@ class VideoPlayer(QWidget):
     def _pause_for_thumbnail(self):
         self.media_player.pause()
         if self._current_frame and not self._current_frame.isNull():
-            self._thumbnail = self._current_frame
-            self._first_frame = self._current_frame
+            display = self._scaled_for_display(self._current_frame)
+            self._thumbnail = display
+            self._first_frame = display
         self.media_player.setPosition(0)
         self._has_started = False
         self._is_playing = False
@@ -514,13 +546,23 @@ class VideoPlayer(QWidget):
         self.update()
 
     def clear(self):
-        """Stop playback and hide the widget."""
-        self._hover_timer.stop()
+        """Stop playback, release GPU/media resources, and hide the widget."""
+        # Stop all timers first
         self._hide_timer.stop()
         self._ctrl_fade.stop()
         self._play_btn_fade.stop()
+
+        # Tear down the media pipeline to free GPU decoder resources
         self.media_player.stop()
         self.media_player.setSource(QUrl())
+        if self.media_player.videoOutput() is not None:
+            try:
+                self.video_sink.videoFrameChanged.disconnect(self._on_video_frame)
+            except RuntimeError:
+                pass  # Already disconnected
+            self.media_player.setVideoOutput(None)
+
+        # Release frame data (can be tens of MBs)
         self._video_url = None
         self._current_frame = None
         self._thumbnail = None
@@ -589,9 +631,9 @@ class VideoPlayer(QWidget):
                 self._show_controls()
                 self._hide_timer.start()
         elif state == QMediaPlayer.PlaybackState.PausedState and was_playing:
-            # Capture thumbnail of where the player paused
+            # Capture thumbnail at display size to save RAM
             if self._current_frame and not self._current_frame.isNull():
-                self._thumbnail = self._current_frame
+                self._thumbnail = self._scaled_for_display(self._current_frame)
 
         self.update()
 
@@ -640,37 +682,41 @@ class VideoPlayer(QWidget):
     #  Hover / mouse
     # ------------------------------------------------------------------
 
-    def _check_hover(self):
-        if not self.isVisible():
+    def _update_play_btn_hover(self, local_pos):
+        """Track play-button hover for visual feedback (event-driven)."""
+        if self._has_started:
             return
-
-        local = self.mapFromGlobal(QCursor.pos())
-        inside = self.rect().contains(local)
-
-        # Track play-button hover for visual feedback
-        if not self._has_started:
-            cx, cy = self.width() // 2, self.height() // 2
-            radius = min(self.width(), self.height()) // 6
-            radius = max(28, min(radius, 45))
-            dx, dy = local.x() - cx, local.y() - cy
-            was = self._play_btn_hovered
-            self._play_btn_hovered = inside and (dx * dx + dy * dy <= radius * radius)
-            if was != self._play_btn_hovered:
-                self.update()
-
-        if inside and not self._mouse_inside:
-            self._mouse_inside = True
-            self._hide_timer.stop()
-            if self._has_started:
-                self._show_controls()
-        elif not inside and self._mouse_inside:
-            self._mouse_inside = False
-            if self._has_started:
-                self._hide_timer.start()
+        cx, cy = self.width() // 2, self.height() // 2
+        radius = min(self.width(), self.height()) // 6
+        radius = max(28, min(radius, 45))
+        dx, dy = local_pos.x() - cx, local_pos.y() - cy
+        was = self._play_btn_hovered
+        self._play_btn_hovered = dx * dx + dy * dy <= radius * radius
+        if was != self._play_btn_hovered:
+            self.update()
 
     def _delayed_hide_controls(self):
         if not self._mouse_inside and self._is_playing:
             self._hide_controls_anim()
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._mouse_inside = True
+        self._hide_timer.stop()
+        if self._has_started:
+            self._show_controls()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._mouse_inside = False
+        self._play_btn_hovered = False
+        self.update()
+        if self._has_started:
+            self._hide_timer.start()
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        self._update_play_btn_hover(event.pos())
 
     def mousePressEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
@@ -685,11 +731,6 @@ class VideoPlayer(QWidget):
             self._has_started = True
         self._toggle_play()
 
-    def showEvent(self, event):
-        super().showEvent(event)
-        self._hover_timer.start()
-
     def hideEvent(self, event):
         super().hideEvent(event)
-        self._hover_timer.stop()
         self._hide_timer.stop()

@@ -321,20 +321,16 @@ class DetailsSection(QFrame):
         # Container widget for scroll content
         scroll_content = QWidget()
         scroll_content.setStyleSheet(f"background-color: {BG_SECTION};")
-        scroll_layout = QVBoxLayout(scroll_content)
-        scroll_layout.setContentsMargins(0, 0, 0, 0)
-        scroll_layout.setSpacing(10)
+        self.scroll_layout = QVBoxLayout(scroll_content)
+        self.scroll_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll_layout.setSpacing(10)
         
-        # Video player (centered, not full width)
-        video_container = QHBoxLayout()
-        video_container.setContentsMargins(0, 0, 0, 0)
+        # Video player placeholder (created lazily to avoid GPU/RAM cost)
+        self.video_container = QHBoxLayout()
+        self.video_container.setContentsMargins(0, 0, 0, 0)
+        self.video_player = None  # Created on demand
         
-        self.video_player = VideoPlayer()
-        video_container.addStretch()
-        video_container.addWidget(self.video_player)
-        video_container.addStretch()
-        
-        scroll_layout.addLayout(video_container)
+        self.scroll_layout.addLayout(self.video_container)
         
         # Release body (supports HTML for markdown rendering)
         self.release_body = QLabel()
@@ -350,12 +346,37 @@ class DetailsSection(QFrame):
                 line-height: 1.6;
             }}
         """)
-        scroll_layout.addWidget(self.release_body)
+        self.scroll_layout.addWidget(self.release_body)
         
-        scroll_layout.addStretch()
+        self.scroll_layout.addStretch()
         
         scroll.setWidget(scroll_content)
         layout.addWidget(scroll, stretch=1)
+
+
+    def ensure_video_player(self):
+        """Create the VideoPlayer lazily when a video URL is found."""
+        if self.video_player is not None:
+            return self.video_player
+        self.video_player = VideoPlayer()
+        self.video_container.addStretch()
+        self.video_container.addWidget(self.video_player)
+        self.video_container.addStretch()
+        return self.video_player
+
+    def destroy_video_player(self):
+        """Fully destroy the VideoPlayer to release GPU/RAM resources."""
+        if self.video_player is None:
+            return
+        self.video_player.clear()
+        self.video_player.setParent(None)
+        self.video_player.deleteLater()
+        self.video_player = None
+        # Clear the stretch items from the container layout
+        while self.video_container.count():
+            item = self.video_container.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
 
 class SelectorPanel(QWidget):
@@ -418,7 +439,7 @@ class SelectorPanel(QWidget):
         if index < 0 or index >= len(self.releases):
             self.current_release = None
             self.details.update_btn.setEnabled(False)
-            self.details.video_player.clear()
+            self.details.destroy_video_player()
             return
         
         self.current_release = self.releases[index]
@@ -431,12 +452,13 @@ class SelectorPanel(QWidget):
         renderer = GitHubMarkdownRenderer()
         html_content = renderer.render(markdown_text)
         
-        # Load video if found
+        # Load video if found — create player lazily, destroy when not needed
         video_url = renderer.get_video_url()
         if video_url:
-            self.details.video_player.load_video(video_url)
+            player = self.details.ensure_video_player()
+            player.load_video(video_url)
         else:
-            self.details.video_player.clear()
+            self.details.destroy_video_player()
         
         # Extract body content for QLabel
         body_match = re.search(r'<body[^>]*>(.*?)</body>', html_content, re.DOTALL)
