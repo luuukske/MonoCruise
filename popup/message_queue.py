@@ -46,9 +46,14 @@ class MessageQueue:
         with self._lock:
             return len(self._heap)
     
-    def has_higher_priority_than(self, priority: int) -> bool:
-        """Check if there's a message with higher priority than given."""
+    def has_higher_priority_than(self, message: PopupMessage) -> bool:
+        """Check if there's a message that should be shown before the given one."""
         with self._lock:
             if self._heap:
-                return self._heap[0].priority > priority
+                top = self._heap[0]
+                # Higher type rank wins outright
+                if top.type_rank != message.type_rank:
+                    return top.type_rank > message.type_rank
+                # Same type: higher priority wins
+                return top.priority > message.priority
             return False

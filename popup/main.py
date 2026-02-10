@@ -6,7 +6,6 @@ import threading
 import time
 from PySide6.QtWidgets import QApplication
 from popup_window import PopupWindow
-from message_types import MessageStyle
 
 
 def main():
@@ -23,59 +22,51 @@ def main():
                 break
             elif cmd == 'e':
                 popup.emit_message(
-                    text="Error: Something went wrong!\nPlease check the logs.",
-                    style=MessageStyle.ERROR,
-                    duration_ms=5000,
-                    priority=10
+                    title="Error",
+                    message="Something went wrong!\nPlease check the logs.",
+                    message_type="e"
                 )
             elif cmd == 'w':
                 popup.emit_message(
-                    text="Warning: Low disk space detected.",
-                    style=MessageStyle.WARNING,
-                    duration_ms=4000,
-                    priority=5
+                    title="Warning",
+                    message="Low disk space detected.",
+                    message_type="w"
                 )
             elif cmd == 'c':
                 popup.emit_message(
-                    text="Success: Operation completed!",
-                    style=MessageStyle.CHECK,
-                    duration_ms=3000,
-                    priority=1
+                    title="Success",
+                    message="Operation completed!",
+                    message_type="c"
                 )
             elif cmd == 'n':
                 popup.emit_message(
-                    text="Notice: New update available.",
-                    style=MessageStyle.NOTICE,
-                    duration_ms=3000,
-                    priority=0
+                    title="Notice",
+                    message="New update available.",
+                    message_type="n"
                 )
             elif cmd == 'p':
                 popup.emit_message(
-                    text="1. Low priority (0)",
-                    style=MessageStyle.NOTICE,
-                    duration_ms=3000,
-                    priority=0
+                    title="Info",
+                    message="Low priority (0)",
+                    message_type="n"
                 )
                 time.sleep(0.1)
                 popup.emit_message(
-                    text="2. Medium priority (5)",
-                    style=MessageStyle.WARNING,
-                    duration_ms=3000,
-                    priority=5
+                    title="Warning",
+                    message="Medium priority (5)",
+                    message_type="w"
                 )
                 time.sleep(0.1)
                 popup.emit_message(
-                    text="3. High priority (10)",
-                    style=MessageStyle.ERROR,
-                    duration_ms=3000,
-                    priority=10
+                    title="Error",
+                    message="High priority (10)",
+                    message_type="e"
                 )
                 time.sleep(0.1)
                 popup.emit_message(
-                    text="4. CRITICAL (100) - Should interrupt!",
-                    style=MessageStyle.ERROR,
-                    duration_ms=5000,
-                    priority=100
+                    title="CRITICAL",
+                    message="Should interrupt!",
+                    message_type="e"
                 )
     
     trigger_thread = threading.Thread(target=wait_for_trigger, daemon=True)

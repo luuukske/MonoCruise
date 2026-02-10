@@ -12,7 +12,7 @@ from PySide6.QtSvgWidgets import QSvgWidget
 
 from popup_animator import PopupAnimator
 from message_queue import MessageQueue
-from message_types import PopupMessage, MessageStyle, StyleConfig, STYLE_CONFIGS
+from message_types import PopupMessage, MessageStyle, StyleConfig, STYLE_CONFIGS, MESSAGE_TYPE_MAP
 
 
 class State(Enum):
@@ -118,6 +118,8 @@ class PopupWindow(QWidget):
         self._opacity.setOpacity(0.0)
         self.setGraphicsEffect(self._opacity)
     
+    TITLE_TOP_MARGIN = 5
+    
     def _setup_content(self):
         self._container = PopupContainer()
         self._container.setFixedSize(self._panel_width, self._panel_height)
@@ -125,24 +127,60 @@ class PopupWindow(QWidget):
         padding = int(self._screen.height() * 0.01)
         gap = int(self._panel_width * 0.05)
         
-        layout = QHBoxLayout(self._container)
-        layout.setContentsMargins(padding, padding, padding, padding)
-        layout.setSpacing(gap)
+        h_layout = QHBoxLayout(self._container)
+        h_layout.setContentsMargins(padding, padding, padding, padding)
+        h_layout.setSpacing(gap)
         
         self._icon = QSvgWidget()
         self._icon.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         icon_size = self._panel_height - (2 * padding) - (2 * self.BORDER_WIDTH)
         self._icon.setFixedSize(QSize(icon_size, icon_size))
-        layout.addWidget(self._icon, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        h_layout.addWidget(self._icon, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         
-        self._label = QLabel()
+        # Text area widget with manual positioning for title + message
+        self._text_area = QWidget()
+        self._text_area.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        h_layout.addWidget(self._text_area, stretch=1)
+        
+        # Title: fixed 15px from top of the text area
+        self._title_label = QLabel(self._text_area)
+        title_font = QFont("Arial", self.FONT_SIZE)
+        title_font.setBold(True)
+        self._title_label.setFont(title_font)
+        self._title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self._title_label.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        
+        # Message: will be centered in remaining space below title
+        self._label = QLabel(self._text_area)
         self._label.setFont(QFont("Arial", self.FONT_SIZE))
         self._label.setWordWrap(True)
         self._label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self._label.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        layout.addWidget(self._label, stretch=1)
         
         self._apply_style(STYLE_CONFIGS[MessageStyle.NOTICE])
+    
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_text_labels()
+    
+    def _position_text_labels(self):
+        """Position title at fixed top margin, message centered in remaining space."""
+        if not hasattr(self, '_text_area'):
+            return
+        
+        area_w = self._text_area.width()
+        area_h = self._text_area.height()
+        
+        # Title at fixed offset from top
+        title_h = self._title_label.sizeHint().height()
+        self._title_label.setGeometry(0, self.TITLE_TOP_MARGIN, area_w, title_h)
+        
+        # Message centered in the space below the title
+        msg_top = self.TITLE_TOP_MARGIN + title_h
+        remaining_h = area_h - msg_top
+        msg_h = self._label.sizeHint().height()
+        msg_y = msg_top + (remaining_h - msg_h) // 2
+        self._label.setGeometry(0, msg_y, area_w, msg_h)
     
     def _setup_animator(self):
         target_y = self._screen.height() - self._panel_height - self._margin
@@ -159,13 +197,15 @@ class PopupWindow(QWidget):
     
     def _apply_style(self, config: StyleConfig):
         self._container.set_border_color(config.border_color)
-        self._label.setStyleSheet(f"""
+        label_style = f"""
             QLabel {{
                 color: {config.text_color};
                 background-color: transparent;
                 border: none;
             }}
-        """)
+        """
+        self._title_label.setStyleSheet(label_style)
+        self._label.setStyleSheet(label_style)
         self._load_icon(config.icon_name, config.icon_color)
     
     def _load_icon(self, name: str, color: str):
@@ -189,19 +229,32 @@ class PopupWindow(QWidget):
     
     def emit_message(
         self,
-        text: str,
-        style: MessageStyle = MessageStyle.NOTICE,
+        title: str,
+        message: str,
+        message_type: str,
         duration_ms: int = 5000,
         priority: int = 0
     ):
-        """Emit a popup message (thread-safe)."""
-        message = PopupMessage(
+        """
+        Emit a popup message (thread-safe).
+        
+        Args:
+            title: Bold title shown at the top of the popup.
+            message: Body text shown below the title.
+            message_type: Single character for the type of message:
+                'e' = error, 'w' = warning, 'c' = check, 'n' = notice.
+            duration_ms: How long to display the message (optional, default 5000).
+            priority: Message priority for queue ordering (optional, default 0).
+        """
+        style = MESSAGE_TYPE_MAP.get(message_type.lower(), MessageStyle.NOTICE)
+        popup_message = PopupMessage(
             priority=priority,
-            text=text,
+            title=title,
+            text=message,
             style=style,
             duration_ms=duration_ms
         )
-        self._new_message_signal.emit(message)
+        self._new_message_signal.emit(popup_message)
     
     def _on_new_message(self, message: PopupMessage):
         """Handle new message arrival."""
@@ -211,7 +264,7 @@ class PopupWindow(QWidget):
         if self._state == State.IDLE:
             self._show_next(from_queue=False)
         elif self._state == State.DISPLAYING:
-            if self._queue.has_higher_priority_than(self._current.priority):
+            if self._queue.has_higher_priority_than(self._current):
                 self._push_back_current()
     
     def _show_next(self, from_queue: bool = False):
@@ -223,7 +276,9 @@ class PopupWindow(QWidget):
 
         self._current = message
         self._apply_style(message.get_style_config())
+        self._title_label.setText(message.title)
         self._label.setText(message.text)
+        self._position_text_labels()
         self.show()
         
         self._state = State.ANIMATING_IN
@@ -284,7 +339,7 @@ class PopupWindow(QWidget):
     def _check_priority(self):
         """Check if higher priority message arrived."""
         if self._state == State.DISPLAYING and self._current:
-            if self._queue.has_higher_priority_than(self._current.priority):
+            if self._queue.has_higher_priority_than(self._current):
                 self._push_back_current()
     
     def _on_animation_done(self, anim_type: str):        
