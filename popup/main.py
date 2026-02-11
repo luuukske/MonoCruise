@@ -50,19 +50,19 @@ def main():
                     message="Low priority (0)",
                     message_type="n"
                 )
-                time.sleep(0.1)
+                time.sleep(0.5)
                 popup.emit_message(
                     title="Warning",
                     message="Medium priority (5)",
                     message_type="w"
                 )
-                time.sleep(0.1)
+                time.sleep(0.5)
                 popup.emit_message(
                     title="Error",
                     message="High priority (10)",
                     message_type="e"
                 )
-                time.sleep(0.1)
+                time.sleep(0.5)
                 popup.emit_message(
                     title="CRITICAL",
                     message="Should interrupt!",
