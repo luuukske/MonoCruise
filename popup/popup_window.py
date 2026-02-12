@@ -93,7 +93,11 @@ class PopupWindow(QWidget):
         
         self._display_timer: Optional[QTimer] = None
         self._check_timer: Optional[QTimer] = None
+        self._update_timer_label_timer: Optional[QTimer] = None
         self._elapsed: Optional[QElapsedTimer] = None
+        self._is_hovering = False
+        self._last_displayed_seconds = -1
+        self._is_finishing = False  # Track if message is finishing (not pushed back)
         
         self._setup_window()
         self._setup_content()
@@ -124,6 +128,21 @@ class PopupWindow(QWidget):
         
         padding = int(self._screen.height() * 0.01)
         gap = int(self._panel_width * 0.05)
+        
+        # Timer label in top right (added first for lower z-order)
+        self._timer_label = QLabel(self._container)
+        self._timer_label.setFont(QFont("Arial", 10))
+        self._timer_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        self._timer_label.setStyleSheet("""
+            QLabel {
+                color: rgba(100, 100, 100, 200);
+                background-color: transparent;
+                border: none;
+            }
+        """)
+        self._timer_label.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._timer_label.lower()  # Ensure it's on bottom-most z-layer above background
+        self._timer_label.hide()  # Initially hidden
         
         h_layout = QHBoxLayout(self._container)
         h_layout.setContentsMargins(padding, padding, padding, padding)
@@ -160,6 +179,7 @@ class PopupWindow(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._position_text_labels()
+        self._position_timer_label()
     
     def _position_text_labels(self):
         """Position title and message evenly spaced over the available vertical space."""
@@ -187,6 +207,20 @@ class PopupWindow(QWidget):
         # Position message in second section
         msg_y = title_y + title_h + section_padding
         self._label.setGeometry(0, msg_y, area_w, msg_h)
+    
+    def _position_timer_label(self):
+        """Position timer label in top right corner."""
+        if not hasattr(self, '_timer_label'):
+            return
+        
+        padding = int(self._screen.height() * 0.01)
+        timer_w = 40
+        timer_h = 20
+        
+        x = self._container.width() - timer_w - padding
+        y = padding
+        
+        self._timer_label.setGeometry(x, y, timer_w, timer_h)
     
     def _setup_animator(self):
         target_y = self._screen.height() - self._panel_height - self._margin
@@ -226,6 +260,33 @@ class PopupWindow(QWidget):
                 <text x="50" y="65" font-size="50" text-anchor="middle" fill="white">!</text>
             </svg>'''
             self._icon.load(svg.encode("utf-8"))
+    
+    def enterEvent(self, event):
+        """Handle mouse entering the widget."""
+        self._is_hovering = True
+        # Show cross immediately when hovering, regardless of state
+        if self._state == State.DISPLAYING:
+            self._update_timer_label()
+        elif self._state in (State.ANIMATING_IN, State.ANIMATING_OUT):
+            self._timer_label.setText("✕")
+        super().enterEvent(event)
+    
+    def leaveEvent(self, event):
+        """Handle mouse leaving the widget."""
+        self._is_hovering = False
+        self._last_displayed_seconds = -1  # Force update when leaving hover
+        # Restore appropriate timer state
+        if self._state == State.DISPLAYING:
+            self._update_timer_label()
+        elif self._state == State.ANIMATING_OUT:
+            # Only show 0s if message is finishing, not if pushed back
+            if self._is_finishing:
+                self._timer_label.setText("0s")
+            # Otherwise keep the current timer value
+        elif self._state == State.ANIMATING_IN and self._current:
+            total_seconds = int(self._current.remaining_ms / 1000)
+            self._timer_label.setText(f"{total_seconds}s")
+        super().leaveEvent(event)
     
     def mousePressEvent(self, event):
         """Dismiss popup on click."""
@@ -278,6 +339,7 @@ class PopupWindow(QWidget):
         message = self._queue.pop()
         if message is None:
             self._state = State.IDLE
+            self._timer_label.hide()
             return
 
         self._current = message
@@ -285,6 +347,14 @@ class PopupWindow(QWidget):
         self._title_label.setText(message.title)
         self._label.setText(message.text)
         self._position_text_labels()
+        self._timer_label.show()
+        
+        # Show total duration during animation in
+        total_seconds = int(self._current.remaining_ms / 1000)
+        self._timer_label.setText(f"{total_seconds}s")
+        self._last_displayed_seconds = total_seconds
+        self._is_finishing = False  # Reset for new message
+        
         self.show()
         
         self._state = State.ANIMATING_IN
@@ -307,12 +377,19 @@ class PopupWindow(QWidget):
         self._queue.push(self._current)
         
         self._current = None
+        self._is_finishing = False  # Not finishing, being pushed back
         self._state = State.ANIMATING_OUT
         self._animator.scale_out()
     
     def _finish_current(self):
         """Current message display time complete."""
         self._stop_timers()
+        
+        # Show 0s during animation out for finished messages
+        self._timer_label.setText("0s")
+        self._last_displayed_seconds = 0
+        self._is_finishing = True  # Message is finishing, not pushed back
+        
         self._state = State.ANIMATING_OUT
         
         if self._queue.is_empty():
@@ -332,6 +409,12 @@ class PopupWindow(QWidget):
         self._check_timer = QTimer(self)
         self._check_timer.timeout.connect(self._check_priority)
         self._check_timer.start(self.PRIORITY_CHECK_MS)
+        
+        self._update_timer_label_timer = QTimer(self)
+        self._update_timer_label_timer.timeout.connect(self._update_timer_label)
+        self._update_timer_label_timer.start(50)  # Check every 50ms
+        self._last_displayed_seconds = -1  # Reset for new message
+        self._update_timer_label()  # Initial update
     
     def _stop_timers(self):
         if self._display_timer:
@@ -340,7 +423,32 @@ class PopupWindow(QWidget):
         if self._check_timer:
             self._check_timer.stop()
             self._check_timer = None
+        if self._update_timer_label_timer:
+            self._update_timer_label_timer.stop()
+            self._update_timer_label_timer = None
         self._elapsed = None
+    
+    def _update_timer_label(self):
+        """Update the timer label to show remaining time or cross when hovering."""
+        # Only update timer during DISPLAYING state
+        if self._state != State.DISPLAYING:
+            return
+        
+        if self._is_hovering:
+            self._timer_label.setText("✕")
+            self._last_displayed_seconds = -1  # Reset when hovering
+        elif self._current and self._elapsed:
+            elapsed = self._elapsed.elapsed()
+            remaining_ms = max(0, self._current.remaining_ms - elapsed) + 500
+            remaining_seconds = int(remaining_ms / 1000)
+            
+            # Only update if seconds value changed to prevent jumping
+            if remaining_seconds != self._last_displayed_seconds:
+                self._last_displayed_seconds = remaining_seconds
+                self._timer_label.setText(f"{remaining_seconds}s")
+        else:
+            self._timer_label.setText("")
+            self._last_displayed_seconds = -1
     
     def _check_priority(self):
         """Check if higher priority message arrived."""
@@ -348,13 +456,32 @@ class PopupWindow(QWidget):
             if self._queue.has_higher_priority_than(self._current):
                 self._push_back_current()
     
+    def _check_cursor_position(self):
+        """Check if cursor is over the widget and update hover state."""
+        cursor_pos = QCursor.pos()
+        widget_rect = self.geometry()
+        
+        # Check if cursor is within widget bounds
+        is_under_cursor = widget_rect.contains(cursor_pos)
+        
+        if is_under_cursor and not self._is_hovering:
+            self._is_hovering = True
+            self._update_timer_label()
+        elif not is_under_cursor and self._is_hovering:
+            self._is_hovering = False
+            self._last_displayed_seconds = -1
+            self._update_timer_label()
+    
     def _on_animation_done(self, anim_type: str):        
         if anim_type in ("slide_in", "scale_in"):
             self._state = State.DISPLAYING
             self._start_timers()
+            # Check if cursor is already over the popup after animation
+            self._check_cursor_position()
         
         elif anim_type == "scale_out":
             self.hide()
+            self._timer_label.hide()
             self._animator.reset()
             self._current = None
             self._state = State.IDLE
@@ -362,6 +489,7 @@ class PopupWindow(QWidget):
         
         elif anim_type == "slide_out":
             self.hide()
+            self._timer_label.hide()
             self._animator.reset()
             self._current = None
             self._state = State.IDLE
