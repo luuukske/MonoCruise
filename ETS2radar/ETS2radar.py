@@ -26,7 +26,7 @@ REFRESH_INTERVAL: float = 0.1  # only used when running run() loop
 FOV_ANGLE: int = 25  # degrees (half-angle of cone)
 POSITION_SNAP: float = 1.5  # meters: only save every 10 meters
 
-PATH_WISTH_ORIGINAL: float = 2.0
+PATH_WISTH_ORIGINAL: float = 2.5
 
 class VehicleTracker:
     """
@@ -300,12 +300,12 @@ class ETS2Radar:
         """
         Get a Shapely polygon for the vehicle, transformed into ego-space.
         """
-        corners: List[Corner] = vehicle.get_corners()
+        corners = vehicle.get_corners()
         pts: List[Coordinate] = []
 
-        for x, y, z in corners:
-            dx: float = x - px
-            dz: float = z - pz
+        for pos in corners:
+            dx: float = pos.x - px
+            dz: float = pos.z - pz
             dxr, dzr = self.rotate_point(-dx, dz, -yaw_rad)
             pts.append((dxr, dzr))
 
@@ -784,12 +784,10 @@ class ETS2Radar:
             dx, dz = vdata['centroid'].x, vdata['centroid'].y
             overall_closest_distance = distance#-vdata['vehicle'].size.length/2
             for trailer_data in vdata['trailers']:
-                trailer_distance = trailer_data['distance']#-trailer_data['trailer'].size.length/2
+                trailer_distance = trailer_data['distance']-1#-trailer_data['trailer'].size.length/2
                 if trailer_distance < overall_closest_distance:
-                    overall_closest_distance = trailer_distance + 3
+                    overall_closest_distance = trailer_distance
                 
-            distance_amp = max((1/(overall_closest_distance*0.02)) - overall_closest_distance*0.01 + 0.6, 0)
-            
             vid = getattr(v, 'id', id(v))
 
             # Update vehicle world pos history instead of screen pos history
@@ -804,20 +802,20 @@ class ETS2Radar:
             # Use speed/acceleration from vehicle class directly
             vehicle_speed = getattr(v, 'speed', 0)
             acceleration = getattr(v, 'acceleration', 0)
-
+            
             offset_for_score: Optional[float] = None
             angle_for_score: Optional[float] = None
             score_val = self.vehicle_scores.get(vid, 0.0)
             if self.is_in_front_cone(dx, dz):
                 hist = self.vehicle_histories.get(vid, [])
                 if vehicle_speed < 2 and len(hist) == 0:
-                    cx = np.mean([c[0] for c in v.get_corners()])
-                    cz = np.mean([c[2] for c in v.get_corners()])
+                    cx = np.mean([c.x for c in v.get_corners()])
+                    cz = np.mean([c.x for c in v.get_corners()])
                     corners = v.get_corners()
-                    front_center_x = (corners[0][0] + corners[1][0]) / 2
-                    front_center_z = (corners[0][2] + corners[1][2]) / 2
-                    rear_center_x = (corners[2][0] + corners[3][0]) / 2
-                    rear_center_z = (corners[2][2] + corners[3][2]) / 2
+                    front_center_x = (corners[0].x + corners[1].x) / 2
+                    front_center_z = (corners[0].z + corners[1].z) / 2
+                    rear_center_x = (corners[2].x + corners[3].x) / 2
+                    rear_center_z = (corners[2].z + corners[3].z) / 2
                     forward_x = front_center_x - rear_center_x
                     forward_z = front_center_z - rear_center_z
                     forward_length = np.sqrt(forward_x**2 + forward_z**2)
@@ -886,7 +884,7 @@ class ETS2Radar:
                 self.vehicle_scores[vid] = score_val
 
             if self.is_in_front_cone(dx, dz) and score_val > 0:
-                in_lane_vehicles.append((v, overall_closest_distance - 4.5, acceleration))
+                in_lane_vehicles.append((v, overall_closest_distance - 4, acceleration))
 
             # Draw vehicle with ID labels
             veh_scr_x, veh_scr_y = self.world_to_screen(dx, dz, center, scale)
@@ -975,7 +973,7 @@ class ETS2Radar:
             vid = getattr(v, 'id', id(v))
             speed_raw = getattr(v, 'speed', 0)
             speed_kmh = speed_raw * 3.6
-            result.append((v.id, dist, speed_kmh, accel))
+            result.append((vid, dist, speed_kmh, accel))
 
         try:
             if len(filtered_vehicles) > 0 and (len(getattr(filtered_vehicles[0][0], 'trailers', [])) > 0 or getattr(filtered_vehicles[0][0], 'is_trailer', False)):
@@ -1309,44 +1307,15 @@ class ETS2Radar:
                 # Update histories with world coordinates
                 vid = getattr(v, 'id', id(v))
                 poly = self.get_vehicle_polygon(v, px, pz, yaw_rad)
-                cx = np.mean([c[0] for c in v.get_corners()])
-                cz = np.mean([c[2] for c in v.get_corners()])
+                cx = v.position.x
+                cz = v.position.z
                 self.update_vehicle_history(vid, (cx, cz))
                 # Always update speed for all vehicles (store speed value)
                 self.vehicle_speeds[vid] = getattr(v, 'speed', 0)
 
         # Main detection and visualization
         in_lane_vehicles = self.draw_radar(vehicles, px, pz, yaw, ego_steer, speed, data, cc_app, paused)
-        self.start_position_capture()
         return in_lane_vehicles
-
-    def start_position_capture(self):
-        """
-        Start capturing vehicle positions for history.
-        """
-        if self.capturing_positions:
-            return
-        self.capturing_positions = True
-
-        # Start a thread to capture positions every 0.02 seconds
-        def capture_thread():
-            """Thread function that captures positions for high_res vehicles."""
-            while self.capturing_positions:
-                try:
-                    # Call add_position_to_queue for vehicles
-                    for vehicle in self.vehicles:
-                        vehicle.add_position_to_queue()
-                    
-                    # Sleep for 0.005 seconds (200 Hz)
-                    time.sleep(0.005)
-                except Exception as e:
-                    # Continue running even if there's an error
-                    print(f"Error in position capture thread: {e}")
-                    time.sleep(0.02)
-        
-        # Start the thread as a daemon so it stops when main program exits
-        capture_thread_obj = threading.Thread(target=capture_thread, daemon=True)
-        capture_thread_obj.start()
 
 
     def run(self):

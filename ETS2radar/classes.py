@@ -15,10 +15,10 @@ import numpy as np
 location_update_frequency = 0.1  # 10fps
 
 # testing
-from ETS2radar.radar_visualizer import RadarVisualizer
+#from ETS2radar.radar_visualizer import RadarVisualizer
 
-Visualizer = RadarVisualizer()
-threading.Thread(target=Visualizer.start, daemon=True).start()
+#Visualizer = RadarVisualizer()
+#threading.Thread(target=Visualizer.start, daemon=True).start()
 
 SPEED_CALCULATION_WINDOW = 1 # seconds - time window for calculating maxlen of position history
 POSITION_QUEUE_MAXLEN = 20 # maximum number of positions to store in queue for averaging
@@ -80,13 +80,13 @@ import time
 @dataclass
 class FilterConfig: 
     # NEEDS MORE TUNING BASED
-    ema_alpha: float = 0.07  # EMA smoothing factor (0-1, lower = more smoothing)
+    ema_alpha: float = 0.10  # EMA smoothing factor (0-1, lower = more smoothing)
     ema_accel_alpha: float = 0.17  # EMA smoothing when accelerating
     min_samples_for_accel: int = 3  # Minimum samples before calculating acceleration
-    accel_smoothing_alpha: float = 0.16  # Smoothing for acceleration calculation (output)
+    accel_smoothing_alpha: float = 0.25  # Smoothing for acceleration calculation (output)
     
     # Pre-filter settings
-    pre_filter_size: int = 4  # Number of samples to average before main filter
+    pre_filter_size: int = 6  # Number of samples to average before main filter
     
     # Prediction settings
     prediction_weight: float = 0.95  # How much to trust prediction vs pure EMA (0-1)
@@ -161,13 +161,14 @@ class SpeedFilter:
         # Clamp to non-negative
         return max(0.0, predicted)
 
-    def update(self, speed: float, current_time: float = None) -> Tuple[float, float]: 
+    def update(self, speed: float, current_time: float = None, is_tmp: bool = False) -> Tuple[float, float]: 
         """
         Update the filter with a new speed measurement.
         
         Args:
             speed:  Current speed measurement (m/s)
             current_time: Optional timestamp (uses time.time() if not provided)
+            is_tmp: If False, use simplified filtering (only pre-filter and acceleration)
             
         Returns: 
             Tuple of (filtered_speed, filtered_acceleration)
@@ -191,6 +192,20 @@ class SpeedFilter:
         # Calculate time delta
         dt = current_time - self.last_update_time
         self.last_update_time = current_time
+        
+        # Simplified filtering for non-tmp values (more accurate, just needs smoothing)
+        if not is_tmp:
+            # Use only pre-filtered speed (N-sample average) and calculate acceleration
+            self.filtered_speed = pre_filtered_speed
+            self.filtered_speed = max(0.0, self.filtered_speed)  # Clamp to non-negative
+            
+            # Store filtered result with timestamp
+            self.filtered_data.append((current_time, self.filtered_speed))
+            
+            # Calculate acceleration (this updates self.filtered_acceleration)
+            self._calculate_acceleration()
+            
+            return self.filtered_speed, self.filtered_acceleration
         
         # --- PREDICTION STEP ---
         # Predict where we expect the speed to be based on previous trend
@@ -560,10 +575,10 @@ class Vehicle:
             self.speed_filter = vehicle.speed_filter
         else:
             self.speed_filter = SpeedFilter()
-        
+
         time_diff = time.time() - vehicle.time
         
-        if time_diff < location_update_frequency:
+        if time_diff < location_update_frequency and self.is_tmp:
             self.time = vehicle.time
             self.last_location = vehicle.last_location
             self.last_rotation = vehicle.last_rotation
@@ -614,17 +629,12 @@ class Vehicle:
                 self.speed_raw = distance / time_diff
             else:
                 self.speed_raw = 0
-        else:
-            if hasattr(vehicle, 'speed_raw'):
-                self.speed_raw = vehicle.speed_raw
-            else:
-                self.speed_raw = vehicle.speed
 
-        speed, accel = self.speed_filter.update(self.speed_raw, self.time)
+        speed, accel = self.speed_filter.update(self.speed_raw, self.time, self.is_tmp)
         self.speed = speed
         self.acceleration = accel
 
-        Visualizer.push_data(self.id, self.speed, self.acceleration, self.speed_raw, 0.0)
+        #Visualizer.push_data(self.id, self.speed, self.acceleration, self.speed_raw, 0.0)
 
     def is_zero(self):
         return self.position.is_zero() and self.rotation.is_zero()

@@ -109,8 +109,12 @@ class Module():
                 rotation = Quaternion(data[3], data[4], data[5], data[6])
                 size = Size(data[7], data[8], data[9])
                 is_tmp = data[14]
-                speed = data[10] if not is_tmp else 0.0
-                acceleration = data[11] if not is_tmp else 0.0
+                if is_tmp:
+                    speed = 0.0
+                    acceleration = 0.0
+                else:
+                    speed = data[10]
+                    acceleration = data[11]
                 trailer_count = data[12]
                 id = data[13]
                 is_trailer = data[15]

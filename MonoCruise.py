@@ -1651,14 +1651,14 @@ class cc_panel:
     def hide(self):
         """Hide both windows (withdraw)."""
         if self.root1 and self.root2:
-            self.root1.after(0, self.root1.withdraw)
-            self.root2.after(0, self.root2.withdraw)
+            try:
+                self.root1.after(0, self.root1.withdraw)
+                self.root2.after(0, self.root2.withdraw)
+            except:
+                pass
 
     def stop(self):
         """Stop the GUI and close all windows."""
-        time.sleep(1)
-        self.hide()
-        time.sleep(1)
         self.running = False
         
         # Stop the blinking thread if it's running
@@ -1744,8 +1744,6 @@ class cc_panel:
             # Early return if nothing changed
             if not (needs_icon_reload or needs_color_update or needs_text_update):
                 return
-
-            self.update_scaling()  # Ensure scaling is up to date
             
             # Update state variables
             self.cc_mode = cc_mode
@@ -2538,27 +2536,27 @@ from dataclasses import dataclass
 import numpy as np
 
 @dataclass
-class ACCConfig:
+class ACConfig:
     """Configuration parameters for the ACC controller."""
     # Controller gains
-    K_P: float = 0.05  # Proportional gain on gap error
-    K_D: float = 0.35  # Derivative gain on relative speed (speed error)
+    K_P: float = 0.06  # Proportional gain on gap error
+    K_D: float = 0.46  # Derivative gain on relative speed (speed error)
     K_F: float = 1.0   # Feed-forward gain on lead vehicle acceleration
 
     # Time gaps
-    TIME_GAP_FOLLOW: float = 1.3  # Desired time gap in seconds when following
+    TIME_GAP_FOLLOW: float = 1.5  # Desired time gap in seconds when following
     
     # Physical constraints and limits
-    MIN_GAP: float = 4.0          # Minimum allowed gap in meters
-    STOPPING_GAP: float = 3.5     # Desired gap when stopped behind a vehicle
+    MIN_GAP: float = 3.0          # Minimum allowed gap in meters
+    STOPPING_GAP: float = 4.5     # Desired gap when stopped behind a vehicle
     MAX_ACCEL: float = 1.5        # Maximum acceleration in m/s^2
-    MAX_DECEL: float = -6.5         # Maximum deceleration (braking) in m/s^2
+    MAX_DECEL: float = -6.55         # Maximum deceleration (braking) in m/s^2
     EMERGENCY_DECEL: float = -8   # Emergency braking deceleration in m/s^2
-    MIN_TIME_GAP: float = 0.5     # Minimum time gap for stopping scenarios
-    acc_amp: float = 1.04        # Acceleration amplitude scaling factor
+    MIN_TIME_GAP: float = 1.0     # Minimum time gap for stopping scenarios
+    acc_amp: float = 1.00        # Acceleration amplitude scaling factor
 
     # Filtering
-    FILTER_ALPHA: float = 0.3     # Low-pass filter coefficient (lower is smoother)
+    FILTER_ALPHA: float = 0.6     # Low-pass filter coefficient (lower is smoother)
 
 @dataclass
 class LeadVehicleData:
@@ -2574,10 +2572,10 @@ class MonoCruiseACC:
     vehicle acceleration.
     """
 
-    def __init__(self, config: ACCConfig = ACCConfig()):
+    def __init__(self, config: ACConfig = ACConfig()):
         self.config = config
-        self._lead_history = deque(maxlen=5)
-        self._ego_speed_history = deque(maxlen=5)
+        self._lead_history = deque(maxlen=3)
+        self._ego_speed_history = deque(maxlen=3)
         self._filter_state = {'prev_output': 0.0, 'initialized': False}
 
         self.debug_info = {}
@@ -2662,9 +2660,6 @@ class MonoCruiseACC:
         self.debug_info.update({
             "gap_error": gap_error,
             "speed_error": speed_error,
-            "p_term": p_term,
-            "d_term": d_term,
-            "ff_term": ff_term,
             "controller_accel": controller_accel,
             "stopping_decel": stopping_decel,
         })
@@ -2677,13 +2672,13 @@ class MonoCruiseACC:
         """
         # Time-based gap for natural scaling
         time_gap = self.config.MIN_TIME_GAP
-        dynamic_gap = self.config.STOPPING_GAP + max(0.0, ego_speed * time_gap)
+        dynamic_gap = self.config.STOPPING_GAP - (1/(max(0.3, ego_speed)*10))
         
         # Speed-dependent minimum safe distance
         min_safe_distance = max(1.0, ego_speed * 0.2)
         
         # Clamp lead accel to reasonable bounds (-10 to +3 m/s²)
-        lead_accel_clamped = max(-10.0, min(3.0, lead.accel*self.config.acc_amp))
+        lead_accel_clamped = max(-10.0, min(3.0, lead.accel))
         
         # State machine with clear priority
         if lead.speed < 0.5:
@@ -2692,8 +2687,7 @@ class MonoCruiseACC:
             case = "stopped"
             
             if target_stop_pos > min_safe_distance:
-                required_decel = -(ego_speed ** 2) / (2 * max(target_stop_pos, 1e-3))
-                required_decel *= 1.2  # Slightly more aggressive at start to look safer
+                required_decel = -(ego_speed ** 2) / (2 * target_stop_pos)
             else:
                 required_decel = self.config.EMERGENCY_DECEL
         
@@ -2704,7 +2698,7 @@ class MonoCruiseACC:
             case = "decel"
             
             if target_stop_pos > min_safe_distance:
-                required_decel = -(ego_speed ** 2) / (2 * max(target_stop_pos, 1e-3))
+                required_decel = -(ego_speed ** 2) / (2 * target_stop_pos)
             else:
                 required_decel = self.config.EMERGENCY_DECEL
         
@@ -2713,7 +2707,7 @@ class MonoCruiseACC:
             distance_to_target = lead.distance - dynamic_gap
             case = "closing"
             
-            if distance_to_target > min_safe_distance:
+            if lead.distance > min_safe_distance:
                 rel_speed = ego_speed - lead.speed
                 
                 # Kinematic solution: match speeds at target distance
@@ -2725,11 +2719,12 @@ class MonoCruiseACC:
                     # Already matched speeds, just maintain lead accel
                     required_decel = lead_accel_clamped
                 else:
-                    required_decel = lead_accel_clamped - (rel_speed ** 2) / (2 * max(distance_to_target, 1e-3))
+                    required_decel = lead_accel_clamped - (rel_speed ** 2) / (2 * distance_to_target)
             else:
                 required_decel = self.config.EMERGENCY_DECEL
 
         # Clamp to reasonable vehicle limits
+        required_decel = required_decel * 1.1 # Slightly more aggressive at start to look safer
         required_decel = max(self.config.MAX_DECEL, min(0.0, required_decel))
         
         self.debug_info.update({
@@ -2751,7 +2746,6 @@ class MonoCruiseACC:
 
         self.debug_info.update({
             "FF_result": target_accel,
-            "FF_accel_amp": acceleration_amp,
         })
 
         return target_accel
@@ -2785,22 +2779,16 @@ class MonoCruiseACC:
             # --- State Machine ---
             if lead is None:
                 target_accel = self.config.MAX_ACCEL  # Default to max accel (cruise)
-
-                self.debug_info.update({
-                    "ego_speed": ego_speed,
-                    "lead_present": False
-                })
             else:
                 target_accel = self._calculate_accel(lead, ego_speed)
                     
 
                 # for overwriting the engine idle at slow speeds (reduce creep)
-                slow_speed_increase = max( ((1 - ((abs(speed)+0.1) / 5.5) ** 2.22) * (-0.6/(abs(speed)+0.1)+1))/0.715 * 0.08 , 0)
+                slow_speed_increase = max( ((1 - ((abs(speed)+0.1) / 5.5) ** 2.22) * (-0.6/(abs(speed)+0.2)+1))/0.715 * 0.10 , 0)
+                print(slow_speed_increase)
                 target_accel -= slow_speed_increase
 
                 self.debug_info.update({
-                    "ego_speed": ego_speed,
-                    "lead_present": True,
                     "lead_accel": lead.accel,
                     "lead_speed": lead.speed,
                     "lead_distance": lead.distance
@@ -2814,8 +2802,6 @@ class MonoCruiseACC:
                 filtered_accel = 0.0
 
             self.debug_info.update({
-                "target_accel": target_accel,
-                "final_accel_clipped": final_accel,
                 "filtered_accel": filtered_accel,
             })
 
@@ -3188,7 +3174,7 @@ def cc_target_speed_thread_func():
     I = 0.022
     D = 0.072
     max_integral = 0.3 / I
-    max_proportional = 1.7
+    max_proportional = 1.3
 
     prev_time = time.time()-0.1
 
@@ -3220,10 +3206,7 @@ def cc_target_speed_thread_func():
             elif prev_target_speed != target_speed or abs(error) > 2 or (cc_mode.get() == "Speed limiter" and not cc_limiting):
                 cc_locked = False
 
-            print(cc_limiting)
-
             integral_sum = max(-max_integral, min(max_integral, integral_sum))
-            print(f"Integral sum: {integral_sum:.3f}, slope: {(slope * 2 * np.pi):.3f}, speed: {speed:.2f}")
 
             derivative = (av_ds) / dt
 
@@ -3275,8 +3258,9 @@ def cc_target_speed_thread_func():
             prev_slope = slope
             
             if cc_mode.get() == "Cruise control" and acc_enabled.get() and data_history is not None and len(data_history) > 0:
-                acc_val = ACC.update(speed, data_history[0]) * 0.82 + physics_adjustment_ff
-                if False:
+                acc_val = ACC.update(speed, data_history[0]) * 1 + physics_adjustment_ff
+                
+                if True or debug_mode.get():
                     print("\n\n")
                     print("ACC debug info:", end=' ')
                     print(*[f"{k}: {round(v, 2) if isinstance(v, float) else v}" for k, v in ACC.debug_info.items()], sep='\t')
@@ -3285,24 +3269,21 @@ def cc_target_speed_thread_func():
 
             ff_est = alpha * ff_est + (1.0 - alpha) * base_val
 
-            temp_val = base_val + ff_est
-            if temp_val >= 0:
-                temp_val = (temp_val*weight_var)
-            else:
-                temp_val = -(abs(temp_val*1.3)**(1/weight_var))
-
-            temp_val = min(temp_val, acc_val)
-
-            if base_val + ff_est > acc_val:
-                cc_locked = False
+            temp_val = min(base_val + ff_est, acc_val)
 
             cc_gas = (min(max(temp_val, 0), 1) + prev_cc_gas) / 2
             if temp_val > 0:
                 cc_brake = 0.0
             else:
-                cc_brake = min(max((min(abs(temp_val/7), 2)**2.5),0.0), 0.07)
-            if acc_val < 0:
-                cc_brake = max(cc_brake, max((min(abs(acc_val/7), 2)**2.5),0.0))
+                cc_brake = max((min(abs(temp_val/7), 2)**2.5),0.0)
+
+            if temp_val >= 0:
+                temp_val = (temp_val*weight_var)
+            else:
+                temp_val = -(abs(temp_val*1.3)**(1/weight_var))
+
+            if base_val + ff_est > acc_val:
+                cc_locked = False
 
         elif not pauzed:
             cc_locked = False
@@ -3982,7 +3963,7 @@ def main():
                 opdbrakeval += max( ((1 - ((abs(speed)+0.1) / 5.5) ** 2.22) * (-0.6/(abs(speed)+0.1)+1))/0.715 * 0.04 , 0)
             """
 
-            if debug_mode.get() == True:
+            if False:
                 print(f"FINAL OUTPUT: brake={brake_output}, gas={gas_output}\n")
                 print(f"gasvalue: {round(opdgasval,3)} \tbrakevalue: {round(opdbrakeval,3)} \tspeed: {round(speed,3)} \tstopped: {stopped} \tgasval: {round(gasval,3)} \tbrakeval: {round(brakeval,3)} \tdiff: {round(prev_brakeval-brakeval,3)} \tdiff2: {round(prev_speed-speed,3)} \thazards: {data['lightsHazards']} \thazards_var: {hazards_variable_var} \thazards_prompted: {hazards_prompted}\n")
             
@@ -5312,6 +5293,7 @@ try:
     def update_ui_state():
         if exit_event.is_set():
             on_root_close()
+            return
 
         """Update UI state based on device, gasaxis, brakeaxis, and ETS2 connection status"""
         global device, gasaxis, brakeaxis
