@@ -12,9 +12,9 @@ import ctypes
 import threading
 
 from PySide6.QtWidgets import QWidget, QApplication
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, QByteArray
 from PySide6.QtGui import (
-    QPainter, QColor, QFont, QFontMetrics, QPixmap,
+    QPainter, QColor, QFont, QFontMetrics, QPixmap, QImage,
     QPainterPath, QCursor,
 )
 
@@ -110,7 +110,7 @@ class _PanelWidget(QWidget):
     def _on_scale(self, s: float):
         p = self._p
         p._scale_mult = s
-        p._panel_w = int(300 * s)
+        p._panel_w = int(310 * s)
         p._panel_h = int(100 * s)
         p._radius = int(30 * s)
         p._icon_spacing = int(20 * s)
@@ -246,13 +246,24 @@ class _PanelWidget(QWidget):
             fname = None
 
         fm = QFontMetrics(p._font)
-        icon_sz = int(fm.height() * 2)
+        icon_sz = int(fm.height() * 1.8)
 
         if fname:
             path = os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "assets", fname
             )
             pm = QPixmap(path)
+            if pm.isNull():
+                # Fallback: load via file bytes (avoids Qt path issues on Windows
+                # e.g. paths with spaces, OneDrive on-demand files)
+                try:
+                    with open(path, "rb") as f:
+                        data = f.read()
+                    img = QImage()
+                    if img.loadFromData(QByteArray(data)):
+                        pm = QPixmap.fromImage(img)
+                except Exception:
+                    pass
             if pm.isNull():
                 pm = self._placeholder(icon_sz)
             else:
@@ -324,7 +335,7 @@ class _PanelWidget(QWidget):
         # layout metrics
         fm = QFontMetrics(p._font)
         tw = fm.horizontalAdvance(p._text_content)
-        icon_sz = int(fm.height() * 2)
+        icon_sz = int(fm.height() * 1.8)
         right_m = int(20 * sc)
 
         icon_x = w - icon_sz - right_m
@@ -335,8 +346,7 @@ class _PanelWidget(QWidget):
             and not p._blink_running
             and p._acc_locked
         )
-        acc_adj = int(6 * (not p._blink_running and p._acc_enabled) * sc)
-        icon_y = (h - icon_sz) // 2 - 2 - acc_adj
+        icon_y = (h - icon_sz) // 2
 
         text_x = icon_x - p._icon_spacing - tw
         text_y_baseline = (h - fm.height()) // 2 + fm.ascent()
@@ -384,8 +394,10 @@ class _PanelWidget(QWidget):
         center_y = lines_start_rel / 2
         iy = int(center_y - sh / 2) + int((1.5 + 8 * (not p._acc_truck)) * sc)
         ix = (area_sz - sh) // 2
+        # Car icon is shorter than truck; nudge icon and lines up when car
+        car_up = int(4 * sc) if not p._acc_truck else 0
 
-        pa.drawPixmap(int(ax + ix), int(ay + iy), scaled)
+        pa.drawPixmap(int(ax + ix), int(ay + iy - car_up), scaled)
 
         pa.setPen(Qt.PenStyle.NoPen)
         for i in range(n):
@@ -395,7 +407,7 @@ class _PanelWidget(QWidget):
             x1 = ax + area_sz + 2 * (i - n) * sc - 1
             lp = QPainterPath()
             lp.addRoundedRect(
-                float(x0), float(ay + ly + 1),
+                float(x0), float(ay + ly + 1 - car_up),
                 float(x1 - x0), float(lw),
                 lw / 2.0, lw / 2.0,
             )
@@ -449,11 +461,11 @@ class cc_panel:
         x_co: int = 100,
         y_co: int = 100,
         acc_enabled: bool = False,
-        scale_mult: float = 0.5,
+        scale_mult: float = 1,
     ):
         s = scale_mult
         self._scale_mult = s
-        self._panel_w = int(300 * s)
+        self._panel_w = int(310 * s)
         self._panel_h = int(100 * s)
         self._radius = int(30 * s)
         self._icon_spacing = int(20 * s)
@@ -469,7 +481,7 @@ class cc_panel:
         self._AEB_warn_off_time = 0.0
         self._last_AEB_warn_true = 0.0
 
-        self._bg_opacity = 0.6
+        self._bg_opacity = 0.8
         self._text_color: QColor = self._color_for_mode(cc_mode, cc_enabled)
 
         self._blink_running = False
@@ -589,230 +601,84 @@ class cc_panel:
 if __name__ == "__main__":
     qapp = QApplication.instance() or QApplication(sys.argv)
 
-    panel = cc_panel("-- km/h", "Cruise control", False, scale_mult=1)
+    panel = cc_panel("80 km/h", "Cruise control", True, scale_mult=1)
     panel.show()
 
-    # All icon configurations: each triggers a different icon in _load_icon().
-    ICON_CONFIGS = [
-        # 1. Placeholder (unknown/other mode)
-        {
-            "name": "Placeholder (other mode)",
-            "kwargs": {"new_text": "---", "cc_mode": "Other", "cc_enabled": False},
-        },
-        # 2. Cruise control icon only (no ACC)
-        {
-            "name": "Cruise control icon",
-            "kwargs": {
-                "new_text": "80 km/h",
-                "cc_mode": "Cruise control",
-                "cc_enabled": True,
-                "acc_locked": False,
-                "acc_enabled": False,
-            },
-        },
-        # 3. Speed limiter
-        {
-            "name": "Speed limiter icon",
-            "kwargs": {
-                "new_text": "120 km/h",
-                "cc_mode": "Speed limiter",
-                "cc_enabled": True,
-                "acc_locked": False,
-                "acc_enabled": False,
-            },
-        },
-        # 4. Car ACC, 3 lines
-        {
-            "name": "Car ACC, 3 lines",
-            "kwargs": {
-                "new_text": "80 km/h",
-                "cc_mode": "Cruise control",
-                "cc_enabled": True,
-                "acc_locked": True,
-                "acc_truck": False,
-                "acc_enabled": True,
-                "distance_to_lead": 3,
-            },
-        },
-        # 5. Car ACC, 2 lines
-        {
-            "name": "Car ACC, 2 lines",
-            "kwargs": {
-                "new_text": "80 km/h",
-                "cc_mode": "Cruise control",
-                "cc_enabled": True,
-                "acc_locked": True,
-                "acc_truck": False,
-                "acc_enabled": True,
-                "distance_to_lead": 2,
-            },
-        },
-        # 6. Car ACC, 1 line
-        {
-            "name": "Car ACC, 1 line",
-            "kwargs": {
-                "new_text": "80 km/h",
-                "cc_mode": "Cruise control",
-                "cc_enabled": True,
-                "acc_locked": True,
-                "acc_truck": False,
-                "acc_enabled": True,
-                "distance_to_lead": 1,
-            },
-        },
-        # 7. Truck ACC, 3 lines
-        {
-            "name": "Truck ACC, 3 lines",
-            "kwargs": {
-                "new_text": "80 km/h",
-                "cc_mode": "Cruise control",
-                "cc_enabled": True,
-                "acc_locked": True,
-                "acc_truck": True,
-                "acc_enabled": True,
-                "distance_to_lead": 3,
-            },
-        },
-        # 8. Truck ACC, 2 lines
-        {
-            "name": "Truck ACC, 2 lines",
-            "kwargs": {
-                "new_text": "80 km/h",
-                "cc_mode": "Cruise control",
-                "cc_enabled": True,
-                "acc_locked": True,
-                "acc_truck": True,
-                "acc_enabled": True,
-                "distance_to_lead": 2,
-            },
-        },
-        # 9. Truck ACC, 1 line
-        {
-            "name": "Truck ACC, 1 line",
-            "kwargs": {
-                "new_text": "80 km/h",
-                "cc_mode": "Cruise control",
-                "cc_enabled": True,
-                "acc_locked": True,
-                "acc_truck": True,
-                "acc_enabled": True,
-                "distance_to_lead": 1,
-            },
-        },
-        # 10. AEB warning (car icon, red tint + blink)
-        {
-            "name": "AEB warning (car, red)",
-            "kwargs": {
-                "new_text": "80 km/h",
-                "cc_mode": "Cruise control",
-                "cc_enabled": True,
-                "acc_locked": True,
-                "acc_truck": False,
-                "acc_enabled": True,
-                "distance_to_lead": 2,
-                "AEB_warn": True,
-            },
-        },
-        # 11. Speed limiter disabled (grey text, same icon)
-        {
-            "name": "Speed limiter disabled",
-            "kwargs": {
-                "new_text": "120 km/h",
-                "cc_mode": "Speed limiter",
-                "cc_enabled": False,
-                "acc_locked": False,
-                "acc_enabled": False,
-            },
-        },
-    ]
+    MODES = ["Cruise control", "Speed limiter", "Other"]
+    SPEEDS = ["-- km/h", "80 km/h", "120 km/h"]
 
-    def run_tests():
-        print("Icon configuration test (1 s between each).")
-        time.sleep(1)
+    state = {
+        "new_text": "80 km/h",
+        "cc_mode": "Cruise control",
+        "cc_enabled": True,
+        "acc_locked": False,
+        "acc_enabled": False,
+        "acc_truck": False,
+        "distance_to_lead": 3,
+        "AEB_warn": False,
+    }
 
-        for cfg in ICON_CONFIGS:
-            panel.update(**cfg["kwargs"])
-            print(f"  {cfg['name']}")
-            time.sleep(1)
+    def apply():
+        panel.update(**state)
 
-        # Stop AEB so later tests don't keep blinking
-        panel.update(AEB_warn=False)
-        time.sleep(2)
+    def print_help():
+        print("\nKeys (then Enter) – each toggles or cycles one value:")
+        print("  m = cc_mode (cycle)     e = cc_enabled    s = speed text (cycle)")
+        print("  l = acc_locked          a = acc_enabled   t = acc_truck")
+        print("  1/2/3 = distance_to_lead (lines)   b = AEB_warn")
+        print("  h = help   q = quit")
+        print(f"\n  Now: mode={state['cc_mode']!r} enabled={state['cc_enabled']} "
+              f"locked={state['acc_locked']} acc={state['acc_enabled']} truck={state['acc_truck']} "
+              f"lines={state['distance_to_lead']} AEB={state['AEB_warn']} text={state['new_text']!r}\n")
 
-        print("\nBaseline set to defaults.")
-        time.sleep(1)
+    def keyboard_test():
+        print_help()
+        while panel.running:
+            try:
+                line = input("Key: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                break
+            if not line:
+                continue
+            key = line[0]
+            if key == "q":
+                panel.stop()
+                break
+            if key == "h":
+                print_help()
+                continue
+            if key == "m":
+                i = (MODES.index(state["cc_mode"]) + 1) % len(MODES) if state["cc_mode"] in MODES else 0
+                state["cc_mode"] = MODES[i]
+                print(f"  cc_mode = {state['cc_mode']!r}")
+            elif key == "e":
+                state["cc_enabled"] = not state["cc_enabled"]
+                print(f"  cc_enabled = {state['cc_enabled']}")
+            elif key == "s":
+                i = (SPEEDS.index(state["new_text"]) + 1) % len(SPEEDS) if state["new_text"] in SPEEDS else 0
+                state["new_text"] = SPEEDS[i]
+                print(f"  new_text = {state['new_text']!r}")
+            elif key == "l":
+                state["acc_locked"] = not state["acc_locked"]
+                print(f"  acc_locked = {state['acc_locked']}")
+            elif key == "a":
+                state["acc_enabled"] = not state["acc_enabled"]
+                print(f"  acc_enabled = {state['acc_enabled']}")
+            elif key == "t":
+                state["acc_truck"] = not state["acc_truck"]
+                print(f"  acc_truck = {state['acc_truck']}")
+            elif key in "123":
+                state["distance_to_lead"] = int(key)
+                print(f"  distance_to_lead = {state['distance_to_lead']}")
+            elif key == "b":
+                state["AEB_warn"] = not state["AEB_warn"]
+                print(f"  AEB_warn = {state['AEB_warn']}")
+            else:
+                print("  Unknown key. Press h for help.")
+                continue
+            apply()
 
-        flow = [
-            {"acc_locked": True, "cc_enabled": True, "acc_truck": True,
-             "acc_enabled": True, "distance_to_lead": 3},
-            {"distance_to_lead": 2},
-            {"distance_to_lead": 1},
-            {"acc_truck": False, "distance_to_lead": 3, "AEB_warn": True},
-            {"AEB_warn": True},
-            {"AEB_warn": False},
-        ]
-
-        for kw in flow:
-            panel.update(**kw)
-            desc = ", ".join(f"{k}={v!r}" for k, v in kw.items())
-            print(f"Update: {desc}")
-            time.sleep(2)
-
-        rapid_update_test()
-
-    def rapid_update_test():
-        print("\n" + "=" * 60)
-        print("RAPID UPDATE TEST (50 updates/sec)")
-        print("=" * 60 + "\n")
-
-        print("Test 1: AEB_warn=True for 1 s")
-        t0 = time.time()
-        while time.time() - t0 < 1.0:
-            panel.update(
-                new_text="80 km/h", cc_enabled=True,
-                acc_locked=True, acc_enabled=True, AEB_warn=True,
-            )
-            time.sleep(0.02)
-        print(f"  blink_running = {panel.blink_running}")
-
-        aeb_off = time.time()
-        print("Test 2: AEB_warn=False (cooldown)")
-        t0 = time.time()
-        while time.time() - t0 < 1.5:
-            panel.update(
-                new_text="80 km/h", cc_enabled=True,
-                acc_locked=True, acc_enabled=True, AEB_warn=False,
-            )
-            time.sleep(0.02)
-        print(f"  elapsed = {time.time() - aeb_off:.2f} s  blink = {panel.blink_running}")
-
-        print("Test 3: Waiting for cooldown to expire …")
-        t0 = time.time()
-        stopped = None
-        while time.time() - t0 < 1.5:
-            if not panel.blink_running and stopped is None:
-                stopped = time.time() - aeb_off
-                print(f"  stopped at {stopped:.2f} s (expected ~2.0 s)")
-            panel.update(
-                new_text="80 km/h", cc_enabled=True,
-                acc_locked=True, acc_enabled=True, AEB_warn=False,
-            )
-            time.sleep(0.02)
-        if stopped is None and not panel.blink_running:
-            stopped = time.time() - aeb_off
-            print(f"  stopped at {stopped:.2f} s")
-
-        ok = 1.8 <= (stopped or 0) <= 2.5
-        print(f"\nCooldown correct: {ok}")
-        print("=" * 60 + "\n")
-
-    def stop_later():
-        time.sleep(20)
-        print("Stopping from background thread …")
-        panel.stop()
-
-    threading.Thread(target=run_tests, daemon=True).start()
-    threading.Thread(target=stop_later, daemon=True).start()
+    threading.Thread(target=keyboard_test, daemon=True).start()
 
     exit_timer = QTimer()
     exit_timer.timeout.connect(lambda: qapp.quit() if not panel.running else None)
