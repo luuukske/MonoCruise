@@ -374,12 +374,14 @@ class _PanelWidget(QWidget):
                           sc: float, line_color: QColor):
         """Draw the icon scaled down with ACC distance lines underneath."""
         p = self._p
-        n = max(1, min(3, p._distance_to_lead))
+        n = max(1, min(4, p._distance_to_lead))
         lw = int(4 * sc)
         ls = int(3 * sc)
-        lines_h = n * lw + (n - 1) * ls
+        num_lines = 4
+        lines_h_block = num_lines * lw + (num_lines - 1) * ls
+        lines_h_icon = n * lw + (n - 1) * ls
 
-        sh = area_sz - lines_h - ls - int((3 + 7 * (not p._acc_truck)) * sc)
+        sh = area_sz - lines_h_icon - ls - int((3 + 7 * (not p._acc_truck)) * sc)
         if sh % 2 == area_sz % 2:
             sh += 1
         sh = max(1, sh)
@@ -390,28 +392,35 @@ class _PanelWidget(QWidget):
             Qt.TransformationMode.SmoothTransformation,
         )
 
-        lines_start_rel = area_sz - lines_h - 1
-        center_y = lines_start_rel / 2
-        iy = int(center_y - sh / 2) + int((1.5 + 8 * (not p._acc_truck)) * sc)
+        lines_start_rel = area_sz - lines_h_block - 1
+        center_y_icon = (area_sz - lines_h_icon - 1) / 2
+        iy = int(center_y_icon - sh / 2) + int((1.5 + 8 * (not p._acc_truck)) * sc)
         ix = (area_sz - sh) // 2
-        # Car icon is shorter than truck; nudge icon and lines up when car
-        car_up = int(4 * sc) if not p._acc_truck else 0
+        car_up = int(6 * sc) if not p._acc_truck else 0
 
-        pa.drawPixmap(int(ax + ix), int(ay + iy - car_up), scaled)
-
-        pa.setPen(Qt.PenStyle.NoPen)
-        for i in range(n):
+        def draw_line_at(i: int, color: QColor) -> None:
             ly = lines_start_rel + i * (lw + ls)
-            indent = -2 * (i - n) * sc
+            indent = -2 * (i - (num_lines - 1)) * sc
             x0 = ax + indent
-            x1 = ax + area_sz + 2 * (i - n) * sc - 1
+            x1 = ax + area_sz + 2 * (i - (num_lines - 1)) * sc - 1
             lp = QPainterPath()
             lp.addRoundedRect(
                 float(x0), float(ay + ly + 1 - car_up),
                 float(x1 - x0), float(lw),
                 lw / 2.0, lw / 2.0,
             )
-            pa.fillPath(lp, line_color)
+            pa.fillPath(lp, color)
+
+        pa.setPen(Qt.PenStyle.NoPen)
+        # Active = bottom n lines; inactive = top (num_lines - n) lines, 60% opacity per step
+        for i in range(num_lines - n, num_lines):
+            draw_line_at(i, line_color)
+        for i in range(0, num_lines - n):
+            opacity = 0.3 * 0.6 ** (num_lines - n - i)  # first above active 60%, then 36%, 21.6%, ...
+            inactive_color = QColor(line_color)
+            inactive_color.setAlphaF(opacity)
+            draw_line_at(i, inactive_color)
+        pa.drawPixmap(int(ax + ix), int(ay + iy - car_up), scaled)
 
     # -- drag --
 
@@ -601,10 +610,10 @@ class cc_panel:
 if __name__ == "__main__":
     qapp = QApplication.instance() or QApplication(sys.argv)
 
-    panel = cc_panel("80 km/h", "Cruise control", True, scale_mult=1)
+    panel = cc_panel("80 km/h", "Cruise control", True, scale_mult=3)
     panel.show()
 
-    MODES = ["Cruise control", "Speed limiter", "Other"]
+    MODES = ["Cruise control", "Speed limiter"]
     SPEEDS = ["-- km/h", "80 km/h", "120 km/h"]
 
     state = {
@@ -625,7 +634,7 @@ if __name__ == "__main__":
         print("\nKeys (then Enter) – each toggles or cycles one value:")
         print("  m = cc_mode (cycle)     e = cc_enabled    s = speed text (cycle)")
         print("  l = acc_locked          a = acc_enabled   t = acc_truck")
-        print("  1/2/3 = distance_to_lead (lines)   b = AEB_warn")
+        print("  1/2/3/4 = distance_to_lead (lines)   b = AEB_warn")
         print("  h = help   q = quit")
         print(f"\n  Now: mode={state['cc_mode']!r} enabled={state['cc_enabled']} "
               f"locked={state['acc_locked']} acc={state['acc_enabled']} truck={state['acc_truck']} "
@@ -667,7 +676,7 @@ if __name__ == "__main__":
             elif key == "t":
                 state["acc_truck"] = not state["acc_truck"]
                 print(f"  acc_truck = {state['acc_truck']}")
-            elif key in "123":
+            elif key in "1234":
                 state["distance_to_lead"] = int(key)
                 print(f"  distance_to_lead = {state['distance_to_lead']}")
             elif key == "b":
