@@ -15,22 +15,30 @@ from PySide6.QtGui import QTransform, QPainter, QColor
 
 
 class ScalableContainer(QGraphicsView):
-    """A container that can scale its content using graphics transforms."""
+    """A container that can scale its content using graphics transforms.
+    
+    Supports two independent scale factors that are composed together:
+    - base_scale: permanent scale derived from screen resolution (can be > 1.0).
+      The viewport is resized to content_size * base_scale so nothing is clipped.
+    - anim_scale: transient scale used for scale_in / scale_out animations
+      (always centered, typically 0.8..1.0).
+    """
     
     def __init__(self, content_widget: QWidget, parent: QWidget = None):
         super().__init__(parent)
         
         self.setObjectName("ScalableContainer")
         
-        self._original_size = content_widget.size()
-        self._current_scale = 1.0
+        self._content_size = content_widget.size()
+        self._base_scale = 1.0
+        self._anim_scale = 1.0
         
         # Set up the scene
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
         
         # Set scene rect to match content
-        self._scene.setSceneRect(QRectF(0, 0, self._original_size.width(), self._original_size.height()))
+        self._scene.setSceneRect(QRectF(0, 0, self._content_size.width(), self._content_size.height()))
         
         # Add the content widget as a proxy
         self._proxy = QGraphicsProxyWidget()
@@ -57,28 +65,46 @@ class ScalableContainer(QGraphicsView):
         self._scene.setBackgroundBrush(Qt.GlobalColor.transparent)
         
         # Match size to content
-        self.setFixedSize(self._original_size)
+        self.setFixedSize(self._content_size)
     
-    def set_scale(self, scale: float):
-        """Apply scale transform centered on the content."""
-        self._current_scale = scale
-        
-        # Reset and build new transform centered on the middle
+    def _apply_transform(self):
+        """Rebuild the combined transform from base_scale and anim_scale."""
         self.resetTransform()
+        combined = self._base_scale * self._anim_scale
         
-        # Translate to center, scale, translate back
-        cx = self._original_size.width() / 2
-        cy = self._original_size.height() / 2
-        
-        transform = QTransform()
-        transform.translate(cx, cy)
-        transform.scale(scale, scale)
-        transform.translate(-cx, -cy)
+        if self._anim_scale == 1.0:
+            # Pure base scale — scale from top-left origin
+            transform = QTransform()
+            transform.scale(combined, combined)
+        else:
+            # Animation in progress — center the anim_scale on the
+            # *scaled* viewport so the shrink/grow looks centred.
+            vw = self._content_size.width() * self._base_scale
+            vh = self._content_size.height() * self._base_scale
+            cx = vw / 2
+            cy = vh / 2
+            transform = QTransform()
+            transform.translate(cx, cy)
+            transform.scale(combined, combined)
+            transform.translate(-cx / self._base_scale, -cy / self._base_scale)
         
         self.setTransform(transform)
     
-    def get_scale(self) -> float:
-        return self._current_scale
+    def set_base_scale(self, scale: float):
+        """Set the permanent resolution scale. Resizes the viewport accordingly."""
+        self._base_scale = scale
+        w = int(self._content_size.width() * scale)
+        h = int(self._content_size.height() * scale)
+        self.setFixedSize(w, h)
+        self._apply_transform()
+    
+    def set_anim_scale(self, scale: float):
+        """Set the animation scale (centered shrink/grow)."""
+        self._anim_scale = scale
+        self._apply_transform()
+    
+    def get_anim_scale(self) -> float:
+        return self._anim_scale
     
     def get_proxy(self) -> QGraphicsProxyWidget:
         return self._proxy
@@ -151,10 +177,14 @@ class PopupAnimator(QObject):
     
     def _apply_scale(self, scale: float):
         self._current_scale = scale
-        self._scalable.set_scale(scale)
+        self._scalable.set_anim_scale(scale)
     
     # Define as a Property so QPropertyAnimation can use it
     scale = Property(float, _get_scale, _apply_scale)
+    
+    def set_base_scale(self, scale: float):
+        """Set the permanent resolution scale on the scalable container."""
+        self._scalable.set_base_scale(scale)
 
     def _create_scale_animation(self, start: float, end: float, duration: int) -> QPropertyAnimation:
         anim = QPropertyAnimation(self, b"scale")
@@ -224,6 +254,11 @@ class PopupAnimator(QObject):
             self._create_scale_animation(self.SCALE_SMALL, self.SCALE_FULL, self.DURATION_SCALE)
         )
         self._run_animation("scale_in")
+    
+    def update_geometry(self, target_y: int, hidden_y: int):
+        """Update positions after a scale change."""
+        self._target_y = target_y
+        self._hidden_y = hidden_y
     
     def reset(self):
         self._stop_animations()

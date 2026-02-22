@@ -40,6 +40,14 @@ class PopupContainer(QWidget):
         self._border_color = QColor(color)
         self.update()
     
+    def set_border_width(self, width: int):
+        self._border_width = width
+        self.update()
+    
+    def set_border_radius(self, radius: int):
+        self._border_radius = radius
+        self.update()
+    
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -73,19 +81,35 @@ class PopupWindow(QWidget):
     
     _new_message_signal = Signal(object)
     
-    BORDER_WIDTH = 2
-    BORDER_RADIUS = 10
+    # Design constants in pixels (reference: 4K display at 175% DPI scaling)
+    # Reference logical screen height: 2160 / 1.75 ≈ 1234
+    _REF_SCREEN_HEIGHT = 1234
+    
+    # All sizes are defined at 1:1 for the reference screen.
+    # The ScalableContainer graphics transform scales the whole popup uniformly.
+    _DESIGN_PANEL_WIDTH = 440
+    _DESIGN_PANEL_HEIGHT = 100
+    _DESIGN_MARGIN = 18
+    _DESIGN_PADDING = 12
+    _DESIGN_GAP = 22
+    _DESIGN_FONT_SIZE = 13
+    _DESIGN_TIMER_FONT_SIZE = 10
+    _DESIGN_TIMER_W = 40
+    _DESIGN_TIMER_H = 20
+    _DESIGN_BORDER_WIDTH = 2
+    _DESIGN_BORDER_RADIUS = 10
+    
     BACKGROUND_COLOR = "rgba(50, 50, 50, 220)"
-    FONT_SIZE = 13
     PRIORITY_CHECK_MS = 100
     
     def __init__(self):
         super().__init__()
         
         self._screen = QApplication.primaryScreen().availableGeometry()
-        self._panel_width = int(self._screen.width() * 0.20)
-        self._panel_height = int(self._screen.height() * 0.08)
-        self._margin = int(self._screen.height() * 0.015)
+        screen_full = QApplication.primaryScreen().geometry()
+        
+        # Calculate initial scale from screen resolution
+        self._scale = screen_full.height() / self._REF_SCREEN_HEIGHT
         
         self._state = State.IDLE
         self._current: Optional[PopupMessage] = None
@@ -103,7 +127,50 @@ class PopupWindow(QWidget):
         self._setup_content()
         self._setup_animator()
         
+        # Apply initial resolution scale via the animator's transform
+        self._animator.set_base_scale(self._scale)
+        
         self._new_message_signal.connect(self._on_new_message)
+    
+    def _scaled_window_width(self) -> int:
+        return int(self._DESIGN_PANEL_WIDTH * self._scale)
+    
+    def _scaled_window_height(self) -> int:
+        return int(self._DESIGN_PANEL_HEIGHT * self._scale)
+    
+    def _scaled_margin(self) -> int:
+        return int(self._DESIGN_MARGIN * self._scale)
+    
+    def set_scale(self, scale: float):
+        """
+        Set the display scale factor.
+        
+        The initial scale is auto-calculated from screen resolution.
+        Call this to override with a custom value, e.g. from user settings.
+        
+        Uniformly scales the entire message box via the graphics transform —
+        the container stays at design-pixel size, so nothing is clipped.
+        """
+        self._scale = scale
+        
+        sw = self._scaled_window_width()
+        sh = self._scaled_window_height()
+        margin = self._scaled_margin()
+        
+        # Resize the outer window to the scaled dimensions
+        self.setFixedSize(sw, sh)
+        
+        # Reposition on screen
+        x = (self._screen.width() - sw) // 2
+        self.move(x, self.pos().y())
+        
+        # Let the animator's scalable container handle the visual transform
+        self._animator.set_base_scale(scale)
+        
+        # Update target / hidden Y for animations
+        target_y = self._screen.height() - sh - margin
+        hidden_y = self._screen.height()
+        self._animator.update_geometry(target_y, hidden_y)
     
     def _setup_window(self):
         self.setWindowFlags(
@@ -112,9 +179,12 @@ class PopupWindow(QWidget):
             Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedSize(self._panel_width, self._panel_height)
         
-        x = (self._screen.width() - self._panel_width) // 2
+        sw = self._scaled_window_width()
+        sh = self._scaled_window_height()
+        self.setFixedSize(sw, sh)
+        
+        x = (self._screen.width() - sw) // 2
         y = self._screen.height()
         self.move(x, y)
         
@@ -123,19 +193,26 @@ class PopupWindow(QWidget):
         self.setGraphicsEffect(self._opacity)
     
     def _setup_content(self):
-        self._container = PopupContainer()
-        self._container.setFixedSize(self._panel_width, self._panel_height)
+        # Container is always built at design-pixel size.
+        # The ScalableContainer graphics transform handles resolution scaling.
+        pw = self._DESIGN_PANEL_WIDTH
+        ph = self._DESIGN_PANEL_HEIGHT
+        padding = self._DESIGN_PADDING
+        gap = self._DESIGN_GAP
+        bw = self._DESIGN_BORDER_WIDTH
         
-        padding = int(self._screen.height() * 0.01)
-        gap = int(self._panel_width * 0.05)
+        self._container = PopupContainer()
+        self._container.setFixedSize(pw, ph)
+        self._container.set_border_width(bw)
+        self._container.set_border_radius(self._DESIGN_BORDER_RADIUS)
         
         # Timer label in top right (added first for lower z-order)
         self._timer_label = QLabel(self._container)
-        self._timer_label.setFont(QFont("Arial", 10))
+        self._timer_label.setFont(QFont("Arial", self._DESIGN_TIMER_FONT_SIZE))
         self._timer_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
         self._timer_label.setStyleSheet("""
             QLabel {
-                color: rgba(100, 100, 100, 200);
+                color: rgba(100, 100, 100, 220);
                 background-color: transparent;
                 border: none;
             }
@@ -150,7 +227,7 @@ class PopupWindow(QWidget):
         
         self._icon = QSvgWidget()
         self._icon.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        icon_size = self._panel_height - (2 * padding) - (2 * self.BORDER_WIDTH)
+        icon_size = ph - (2 * padding) - (2 * bw)
         self._icon.setFixedSize(QSize(icon_size, icon_size))
         h_layout.addWidget(self._icon, alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         
@@ -159,17 +236,17 @@ class PopupWindow(QWidget):
         self._text_area.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         h_layout.addWidget(self._text_area, stretch=1)
         
-        # Title: fixed 15px from top of the text area
+        # Title label
         self._title_label = QLabel(self._text_area)
-        title_font = QFont("Arial", self.FONT_SIZE)
+        title_font = QFont("Arial", self._DESIGN_FONT_SIZE)
         title_font.setBold(True)
         self._title_label.setFont(title_font)
         self._title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self._title_label.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         
-        # Message: will be centered in remaining space below title
+        # Message label
         self._label = QLabel(self._text_area)
-        self._label.setFont(QFont("Arial", self.FONT_SIZE))
+        self._label.setFont(QFont("Arial", self._DESIGN_FONT_SIZE))
         self._label.setWordWrap(True)
         self._label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self._label.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -213,17 +290,19 @@ class PopupWindow(QWidget):
         if not hasattr(self, '_timer_label'):
             return
         
-        padding = int(self._screen.height() * 0.01)
-        timer_w = 40
-        timer_h = 20
+        padding = self._DESIGN_PADDING
+        tw = self._DESIGN_TIMER_W
+        th = self._DESIGN_TIMER_H
         
-        x = self._container.width() - timer_w - padding
+        x = self._container.width() - tw - padding
         y = padding
         
-        self._timer_label.setGeometry(x, y, timer_w, timer_h)
+        self._timer_label.setGeometry(x, y, tw, th)
     
     def _setup_animator(self):
-        target_y = self._screen.height() - self._panel_height - self._margin
+        sh = self._scaled_window_height()
+        margin = self._scaled_margin()
+        target_y = self._screen.height() - sh - margin
         hidden_y = self._screen.height()
         
         self._animator = PopupAnimator(

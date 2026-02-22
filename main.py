@@ -67,6 +67,7 @@ def main():
     app = QApplication(sys.argv)
 
     popup = PopupWindow()
+    popup.set_scale(1)
     popup_ref = [popup]  # Mutable ref so handler can read it
 
     handler = PopupLoggingHandler(lambda: popup_ref[0] if popup_ref else None)
