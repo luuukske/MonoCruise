@@ -589,12 +589,158 @@ class cc_panel:
 if __name__ == "__main__":
     qapp = QApplication.instance() or QApplication(sys.argv)
 
-    panel = cc_panel("-- km/h", "Cruise control", False, scale_mult=0.5)
+    panel = cc_panel("-- km/h", "Cruise control", False, scale_mult=1)
     panel.show()
 
+    # All icon configurations: each triggers a different icon in _load_icon().
+    ICON_CONFIGS = [
+        # 1. Placeholder (unknown/other mode)
+        {
+            "name": "Placeholder (other mode)",
+            "kwargs": {"new_text": "---", "cc_mode": "Other", "cc_enabled": False},
+        },
+        # 2. Cruise control icon only (no ACC)
+        {
+            "name": "Cruise control icon",
+            "kwargs": {
+                "new_text": "80 km/h",
+                "cc_mode": "Cruise control",
+                "cc_enabled": True,
+                "acc_locked": False,
+                "acc_enabled": False,
+            },
+        },
+        # 3. Speed limiter
+        {
+            "name": "Speed limiter icon",
+            "kwargs": {
+                "new_text": "120 km/h",
+                "cc_mode": "Speed limiter",
+                "cc_enabled": True,
+                "acc_locked": False,
+                "acc_enabled": False,
+            },
+        },
+        # 4. Car ACC, 3 lines
+        {
+            "name": "Car ACC, 3 lines",
+            "kwargs": {
+                "new_text": "80 km/h",
+                "cc_mode": "Cruise control",
+                "cc_enabled": True,
+                "acc_locked": True,
+                "acc_truck": False,
+                "acc_enabled": True,
+                "distance_to_lead": 3,
+            },
+        },
+        # 5. Car ACC, 2 lines
+        {
+            "name": "Car ACC, 2 lines",
+            "kwargs": {
+                "new_text": "80 km/h",
+                "cc_mode": "Cruise control",
+                "cc_enabled": True,
+                "acc_locked": True,
+                "acc_truck": False,
+                "acc_enabled": True,
+                "distance_to_lead": 2,
+            },
+        },
+        # 6. Car ACC, 1 line
+        {
+            "name": "Car ACC, 1 line",
+            "kwargs": {
+                "new_text": "80 km/h",
+                "cc_mode": "Cruise control",
+                "cc_enabled": True,
+                "acc_locked": True,
+                "acc_truck": False,
+                "acc_enabled": True,
+                "distance_to_lead": 1,
+            },
+        },
+        # 7. Truck ACC, 3 lines
+        {
+            "name": "Truck ACC, 3 lines",
+            "kwargs": {
+                "new_text": "80 km/h",
+                "cc_mode": "Cruise control",
+                "cc_enabled": True,
+                "acc_locked": True,
+                "acc_truck": True,
+                "acc_enabled": True,
+                "distance_to_lead": 3,
+            },
+        },
+        # 8. Truck ACC, 2 lines
+        {
+            "name": "Truck ACC, 2 lines",
+            "kwargs": {
+                "new_text": "80 km/h",
+                "cc_mode": "Cruise control",
+                "cc_enabled": True,
+                "acc_locked": True,
+                "acc_truck": True,
+                "acc_enabled": True,
+                "distance_to_lead": 2,
+            },
+        },
+        # 9. Truck ACC, 1 line
+        {
+            "name": "Truck ACC, 1 line",
+            "kwargs": {
+                "new_text": "80 km/h",
+                "cc_mode": "Cruise control",
+                "cc_enabled": True,
+                "acc_locked": True,
+                "acc_truck": True,
+                "acc_enabled": True,
+                "distance_to_lead": 1,
+            },
+        },
+        # 10. AEB warning (car icon, red tint + blink)
+        {
+            "name": "AEB warning (car, red)",
+            "kwargs": {
+                "new_text": "80 km/h",
+                "cc_mode": "Cruise control",
+                "cc_enabled": True,
+                "acc_locked": True,
+                "acc_truck": False,
+                "acc_enabled": True,
+                "distance_to_lead": 2,
+                "AEB_warn": True,
+            },
+        },
+        # 11. Speed limiter disabled (grey text, same icon)
+        {
+            "name": "Speed limiter disabled",
+            "kwargs": {
+                "new_text": "120 km/h",
+                "cc_mode": "Speed limiter",
+                "cc_enabled": False,
+                "acc_locked": False,
+                "acc_enabled": False,
+            },
+        },
+    ]
+
     def run_tests():
-        print("Baseline set to defaults.")
+        print("Icon configuration test (1 s between each).")
+        time.sleep(1)
+
+        for cfg in ICON_CONFIGS:
+            panel.update(**cfg["kwargs"])
+            print(f"  {cfg['name']}")
+            time.sleep(1)
+
+        # Stop AEB so later tests don't keep blinking
+        panel.update(AEB_warn=False)
         time.sleep(2)
+
+        print("\nBaseline set to defaults.")
+        time.sleep(1)
 
         flow = [
             {"acc_locked": True, "cc_enabled": True, "acc_truck": True,
