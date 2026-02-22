@@ -110,7 +110,7 @@ class _PanelWidget(QWidget):
     def _on_scale(self, s: float):
         p = self._p
         p._scale_mult = s
-        p._panel_w = int(310 * s)
+        p._panel_w = int(315 * s)
         p._panel_h = int(100 * s)
         p._radius = int(30 * s)
         p._icon_spacing = int(20 * s)
@@ -218,11 +218,12 @@ class _PanelWidget(QWidget):
     def _load_icon(self) -> QPixmap:
         p = self._p
         is_aeb = p._blink_running or p._AEB_warn
+        dpr = self.devicePixelRatio()
 
         key = (
             p._cc_mode, p._text_content, p._scale_mult,
             is_aeb, p._acc_locked, p._distance_to_lead,
-            p._acc_enabled, p._acc_truck,
+            p._acc_enabled, p._acc_truck, dpr,
         )
         cached = p._icon_cache.get(key)
         if cached is not None:
@@ -247,6 +248,7 @@ class _PanelWidget(QWidget):
 
         fm = QFontMetrics(p._font)
         icon_sz = int(fm.height() * 1.8)
+        phys = int(icon_sz * dpr)
 
         if fname:
             path = os.path.join(
@@ -254,8 +256,6 @@ class _PanelWidget(QWidget):
             )
             pm = QPixmap(path)
             if pm.isNull():
-                # Fallback: load via file bytes (avoids Qt path issues on Windows
-                # e.g. paths with spaces, OneDrive on-demand files)
                 try:
                     with open(path, "rb") as f:
                         data = f.read()
@@ -265,35 +265,37 @@ class _PanelWidget(QWidget):
                 except Exception:
                     pass
             if pm.isNull():
-                pm = self._placeholder(icon_sz)
+                pm = self._placeholder(icon_sz, dpr)
             else:
                 pm = pm.scaled(
-                    icon_sz, icon_sz,
+                    phys, phys,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
+                pm.setDevicePixelRatio(dpr)
         else:
-            pm = self._placeholder(icon_sz)
+            pm = self._placeholder(icon_sz, dpr)
 
         p._icon_cache[key] = pm
         return pm
 
     @staticmethod
-    def _placeholder(sz: int) -> QPixmap:
-        pm = QPixmap(sz, sz)
+    def _placeholder(sz: int, dpr: float = 1.0) -> QPixmap:
+        phys = int(sz * dpr)
+        pm = QPixmap(phys, phys)
         pm.fill(Qt.GlobalColor.transparent)
         pa = QPainter(pm)
         pa.setPen(QColor(255, 255, 255))
-        m = max(2, sz // 8)
-        pa.drawEllipse(m, m, sz - 2 * m, sz - 2 * m)
+        m = max(2, phys // 8)
+        pa.drawEllipse(m, m, phys - 2 * m, phys - 2 * m)
         pa.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, "?")
         pa.end()
+        pm.setDevicePixelRatio(dpr)
         return pm
 
     # -- tinting --
 
     def _tinted(self, pm: QPixmap, color: QColor) -> QPixmap:
-        """Return a copy of *pm* with all opaque pixels recoloured to *color*."""
         if pm is None or pm.isNull():
             return pm
         key = (id(pm), color.name())
@@ -301,6 +303,7 @@ class _PanelWidget(QWidget):
         if hit is not None:
             return hit
         out = QPixmap(pm.size())
+        out.setDevicePixelRatio(pm.devicePixelRatio())
         out.fill(Qt.GlobalColor.transparent)
         pa = QPainter(out)
         pa.drawPixmap(0, 0, pm)
@@ -370,9 +373,8 @@ class _PanelWidget(QWidget):
         pa.end()
 
     def _paint_icon_lines(self, pa: QPainter, icon_pm: QPixmap,
-                          ax: int, ay: int, area_sz: int,
-                          sc: float, line_color: QColor):
-        """Draw the icon scaled down with ACC distance lines underneath."""
+                        ax: int, ay: int, area_sz: int,
+                        sc: float, line_color: QColor):
         p = self._p
         n = max(1, min(4, p._distance_to_lead))
         lw = int(4 * sc)
@@ -386,11 +388,14 @@ class _PanelWidget(QWidget):
             sh += 1
         sh = max(1, sh)
 
+        dpr = self.devicePixelRatio()
+        phys_sh = int(sh * dpr)
         scaled = icon_pm.scaled(
-            sh, sh,
+            phys_sh, phys_sh,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        scaled.setDevicePixelRatio(dpr)
 
         lines_start_rel = area_sz - lines_h_block - 1
         center_y_icon = (area_sz - lines_h_icon - 1) / 2
@@ -412,17 +417,27 @@ class _PanelWidget(QWidget):
             pa.fillPath(lp, color)
 
         pa.setPen(Qt.PenStyle.NoPen)
-        # Active = bottom n lines; inactive = top (num_lines - n) lines, 60% opacity per step
         for i in range(num_lines - n, num_lines):
             draw_line_at(i, line_color)
         for i in range(0, num_lines - n):
-            opacity = 0.3 * 0.6 ** (num_lines - n - i)  # first above active 60%, then 36%, 21.6%, ...
+            opacity = 0.35 * 0.6 ** (num_lines - n - i)
             inactive_color = QColor(line_color)
             inactive_color.setAlphaF(opacity)
             draw_line_at(i, inactive_color)
         pa.drawPixmap(int(ax + ix), int(ay + iy - car_up), scaled)
 
     # -- drag --
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        new_dpr = self.devicePixelRatio()
+        if new_dpr != getattr(self, "_last_dpr", new_dpr):
+            self._last_dpr = new_dpr
+            self._p._icon_cache.clear()
+            self._tint_cache.clear()
+            self._p._current_icon = self._load_icon()
+            self.update()
+        else:
+            self._last_dpr = new_dpr
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -474,7 +489,7 @@ class cc_panel:
     ):
         s = scale_mult
         self._scale_mult = s
-        self._panel_w = int(310 * s)
+        self._panel_w = int(315 * s)
         self._panel_h = int(100 * s)
         self._radius = int(30 * s)
         self._icon_spacing = int(20 * s)
@@ -610,10 +625,10 @@ class cc_panel:
 if __name__ == "__main__":
     qapp = QApplication.instance() or QApplication(sys.argv)
 
-    panel = cc_panel("80 km/h", "Cruise control", True, scale_mult=3)
+    panel = cc_panel("80 km/h", "Cruise control", True, scale_mult=1)
     panel.show()
 
-    MODES = ["Cruise control", "Speed limiter"]
+    MODES = ["Cruise control", "Speed limiter", "Other"]
     SPEEDS = ["-- km/h", "80 km/h", "120 km/h"]
 
     state = {
