@@ -5,10 +5,11 @@ Single translucent window rendered entirely via QPainter.
 Thread-safe: update() can be called from any thread without dropping changes.
 """
 
+import json
+import logging
 import os
 import sys
 import time
-import ctypes
 import threading
 
 from PySide6.QtWidgets import QWidget, QApplication
@@ -23,25 +24,11 @@ CRUISECONTROL_COLOR = "#4876FF"
 DISABLED_COLOR = "#F1F1F1"
 AEB_COLOR = "#FF0000"
 
-_HAS_WINDLL = hasattr(ctypes, "windll")
-
-
-class _POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
+logger = logging.getLogger(__name__)
 
 def _cursor_pos() -> tuple[int, int]:
-    """Screen cursor position, DPI-aware on Windows."""
-    if _HAS_WINDLL:
-        try:
-            pt = _POINT()
-            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-            return pt.x, pt.y
-        except Exception:
-            pass
     pos = QCursor.pos()
     return pos.x(), pos.y()
-
 
 # ---------------------------------------------------------------------------
 # Internal rendering widget – every method runs on the Qt main thread.
@@ -61,9 +48,14 @@ class _PanelWidget(QWidget):
         self._p = panel
         self._drag_offset: tuple[int, int] | None = None
         self._tint_cache: dict[tuple, QPixmap] = {}
+        self._scaled_icon_lines_cache: dict[tuple, QPixmap] = {}
 
         self._blink_timer = QTimer(self)
         self._blink_timer.timeout.connect(self._blink_tick)
+
+        self._acc_lines_hold_timer = QTimer(self)
+        self._acc_lines_hold_timer.setSingleShot(True)
+        self._acc_lines_hold_timer.timeout.connect(self._on_acc_lines_hold_timeout)
 
         self._setup_window()
 
@@ -102,6 +94,7 @@ class _PanelWidget(QWidget):
         self._p.running = False
         self._p._blink_running = False
         self._blink_timer.stop()
+        self._acc_lines_hold_timer.stop()
         self.close()
 
     def _on_move(self, x: int, y: int):
@@ -121,6 +114,7 @@ class _PanelWidget(QWidget):
         self.setFixedSize(p._panel_w, p._panel_h)
         p._icon_cache.clear()
         self._tint_cache.clear()
+        self._scaled_icon_lines_cache.clear()
         p._current_icon = self._load_icon()
         self.update()
 
@@ -157,6 +151,30 @@ class _PanelWidget(QWidget):
             or p._AEB_warn != old["AEB_warn"]
         )
 
+        # ACC lock / lines lifetime tracking
+        if any(k in changes for k in ("acc_locked", "acc_enabled", "distance_to_lead", "acc_truck")) or complete:
+            now = time.time()
+            # When locked and active, keep lines "live" and mirror current ACC settings
+            if p._acc_locked and p._acc_enabled and p._cc_mode == "Cruise control":
+                p._acc_lines_visible_until = 0.0
+                p._last_acc_lines_distance = p._distance_to_lead
+                p._last_acc_lines_truck = p._acc_truck
+                self._acc_lines_hold_timer.stop()
+            # When we just lost lock, freeze the current ACC lines for a short hold time
+            elif old["acc_locked"] and not p._acc_locked:
+                if p._acc_enabled and p._cc_mode == "Cruise control":
+                    p._acc_lines_visible_until = now + p._acc_lines_hold_s
+                    p._last_acc_lines_distance = old["distance_to_lead"]
+                    p._last_acc_lines_truck = old["acc_truck"]
+                    self._acc_lines_hold_timer.start(int(p._acc_lines_hold_s * 1000))
+                else:
+                    p._acc_lines_visible_until = 0.0
+                    self._acc_lines_hold_timer.stop()
+            # If ACC was just disabled, immediately cancel any pending hold
+            elif old["acc_enabled"] and not p._acc_enabled:
+                p._acc_lines_visible_until = 0.0
+                self._acc_lines_hold_timer.stop()
+
         # AEB state transitions
         if "AEB_warn" in changes or complete:
             now = time.time()
@@ -172,12 +190,18 @@ class _PanelWidget(QWidget):
         if needs_icon:
             p._current_icon = self._load_icon()
             self._tint_cache.clear()
+            self._scaled_icon_lines_cache.clear()
 
         if needs_color or needs_icon:
             p._text_color = cc_panel._color_for_mode(p._cc_mode, p._cc_enabled)
 
         self.update()
         self.raise_()
+
+    def _on_acc_lines_hold_timeout(self):
+        """Called when the ACC lines hold period has expired."""
+        self._p._acc_lines_visible_until = 0.0
+        self.update()
 
     # -- AEB blink --
 
@@ -199,6 +223,10 @@ class _PanelWidget(QWidget):
         p = self._p
         p._blink_running = False
         p._hide_icon = False
+        p._icon_cache.clear()
+        self._tint_cache.clear()
+        self._scaled_icon_lines_cache.clear()
+        p._current_icon = self._load_icon()
         self._blink_timer.stop()
         self.update()
 
@@ -221,7 +249,7 @@ class _PanelWidget(QWidget):
         dpr = self.devicePixelRatio()
 
         key = (
-            p._cc_mode, p._text_content, p._scale_mult,
+            p._cc_mode, p._scale_mult,
             is_aeb, p._acc_locked, p._distance_to_lead,
             p._acc_enabled, p._acc_truck, dpr,
         )
@@ -263,8 +291,15 @@ class _PanelWidget(QWidget):
                     if img.loadFromData(QByteArray(data)):
                         pm = QPixmap.fromImage(img)
                 except Exception:
-                    pass
+                    logger.exception(
+                        "cc_panel.main._PanelWidget._load_icon: failed to load asset from data: %s",
+                        path,
+                    )
             if pm.isNull():
+                logger.warning(
+                    "cc_panel.main._PanelWidget._load_icon: using placeholder for missing/invalid asset: %s",
+                    path,
+                )
                 pm = self._placeholder(icon_sz, dpr)
             else:
                 pm = pm.scaled(
@@ -281,17 +316,21 @@ class _PanelWidget(QWidget):
 
     @staticmethod
     def _placeholder(sz: int, dpr: float = 1.0) -> QPixmap:
-        phys = int(sz * dpr)
-        pm = QPixmap(phys, phys)
-        pm.fill(Qt.GlobalColor.transparent)
-        pa = QPainter(pm)
-        pa.setPen(QColor(255, 255, 255))
-        m = max(2, phys // 8)
-        pa.drawEllipse(m, m, phys - 2 * m, phys - 2 * m)
-        pa.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, "?")
-        pa.end()
-        pm.setDevicePixelRatio(dpr)
-        return pm
+        try:
+            phys = int(sz * dpr)
+            pm = QPixmap(phys, phys)
+            pm.fill(Qt.GlobalColor.transparent)
+            pa = QPainter(pm)
+            pa.setPen(QColor(255, 255, 255))
+            m = max(2, phys // 8)
+            pa.drawEllipse(m, m, phys - 2 * m, phys - 2 * m)
+            pa.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, "?")
+            pa.end()
+            pm.setDevicePixelRatio(dpr)
+            return pm
+        except Exception:
+            logger.exception("cc_panel.main._PanelWidget._placeholder: failed to create placeholder pixmap")
+            raise
 
     # -- tinting --
 
@@ -302,16 +341,20 @@ class _PanelWidget(QWidget):
         hit = self._tint_cache.get(key)
         if hit is not None:
             return hit
-        out = QPixmap(pm.size())
-        out.setDevicePixelRatio(pm.devicePixelRatio())
-        out.fill(Qt.GlobalColor.transparent)
-        pa = QPainter(out)
-        pa.drawPixmap(0, 0, pm)
-        pa.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-        pa.fillRect(out.rect(), color)
-        pa.end()
-        self._tint_cache[key] = out
-        return out
+        try:
+            out = QPixmap(pm.size())
+            out.setDevicePixelRatio(pm.devicePixelRatio())
+            out.fill(Qt.GlobalColor.transparent)
+            pa = QPainter(out)
+            pa.drawPixmap(0, 0, pm)
+            pa.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+            pa.fillRect(out.rect(), color)
+            pa.end()
+            self._tint_cache[key] = out
+            return out
+        except Exception:
+            logger.exception("cc_panel.main._PanelWidget._tinted: tint composition failed")
+            raise
 
     # -- painting --
 
@@ -319,7 +362,7 @@ class _PanelWidget(QWidget):
         try:
             self._paint()
         except Exception:
-            pass
+            logger.exception("cc_panel.main._PanelWidget.paintEvent: paint failed")
 
     def _paint(self):
         p = self._p
@@ -342,13 +385,19 @@ class _PanelWidget(QWidget):
         right_m = int(20 * sc)
 
         icon_x = w - icon_sz - right_m
-        show_lines = (
+        now = time.time()
+        base_acc_active = (
             p._acc_enabled
             and p._cc_mode == "Cruise control"
             and not p._AEB_warn
             and not p._blink_running
-            and p._acc_locked
         )
+        hold_active = (
+            getattr(p, "_acc_lines_visible_until", 0.0) > 0.0
+            and now < p._acc_lines_visible_until
+        )
+        acc_locked_now = p._acc_locked
+        show_lines = base_acc_active and (acc_locked_now or hold_active)
         icon_y = (h - icon_sz) // 2
 
         text_x = icon_x - p._icon_spacing - tw
@@ -366,42 +415,55 @@ class _PanelWidget(QWidget):
             tinted = self._tinted(icon, ic)
 
             if show_lines:
-                self._paint_icon_lines(pa, tinted, icon_x, icon_y, icon_sz, sc, ic)
+                # While ACC is locked, show both vehicle and lines. Once lock is lost,
+                # keep the lines for a short time but hide the vehicle above them.
+                if acc_locked_now:
+                    lines_distance = p._distance_to_lead
+                    lines_truck = p._acc_truck
+                    draw_vehicle = True
+                else:
+                    lines_distance = getattr(p, "_last_acc_lines_distance", p._distance_to_lead)
+                    lines_truck = getattr(p, "_last_acc_lines_truck", p._acc_truck)
+                    draw_vehicle = False
+                self._paint_icon_lines(
+                    pa, tinted, icon_x, icon_y, icon_sz, sc, ic,
+                    lines_distance, lines_truck, draw_vehicle
+                )
             else:
                 pa.drawPixmap(int(icon_x), int(icon_y), tinted)
 
         pa.end()
 
-    def _paint_icon_lines(self, pa: QPainter, icon_pm: QPixmap,
-                        ax: int, ay: int, area_sz: int,
-                        sc: float, line_color: QColor):
-        p = self._p
-        n = max(1, min(4, p._distance_to_lead))
+    def _paint_icon_lines(
+        self,
+        pa: QPainter,
+        icon_pm: QPixmap,
+        ax: int,
+        ay: int,
+        area_sz: int,
+        sc: float,
+        line_color: QColor,
+        distance_to_lead: int,
+        acc_truck: bool,
+        draw_vehicle: bool = True,
+    ):
+        n = max(1, min(4, distance_to_lead))
         lw = int(4 * sc)
         ls = int(3 * sc)
         num_lines = 4
         lines_h_block = num_lines * lw + (num_lines - 1) * ls
         lines_h_icon = n * lw + (n - 1) * ls
 
-        sh = area_sz - lines_h_icon - ls - int((3 + 7 * (not p._acc_truck)) * sc)
+        sh = area_sz - lines_h_icon - ls - int((3 + 7 * (not acc_truck)) * sc)
         if sh % 2 == area_sz % 2:
             sh += 1
         sh = max(1, sh)
 
-        dpr = self.devicePixelRatio()
-        phys_sh = int(sh * dpr)
-        scaled = icon_pm.scaled(
-            phys_sh, phys_sh,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        scaled.setDevicePixelRatio(dpr)
-
         lines_start_rel = area_sz - lines_h_block - 1
         center_y_icon = (area_sz - lines_h_icon - 1) / 2
-        iy = int(center_y_icon - sh / 2) + int((1.5 + 8 * (not p._acc_truck)) * sc)
+        iy = int(center_y_icon - sh / 2) + int((1.5 + 8 * (not acc_truck)) * sc)
         ix = (area_sz - sh) // 2
-        car_up = int(6 * sc) if not p._acc_truck else 0
+        car_up = int(6 * sc) if not acc_truck or not draw_vehicle else 0
 
         def draw_line_at(i: int, color: QColor) -> None:
             ly = lines_start_rel + i * (lw + ls)
@@ -424,7 +486,21 @@ class _PanelWidget(QWidget):
             inactive_color = QColor(line_color)
             inactive_color.setAlphaF(opacity)
             draw_line_at(i, inactive_color)
-        pa.drawPixmap(int(ax + ix), int(ay + iy - car_up), scaled)
+
+        if draw_vehicle:
+            dpr = self.devicePixelRatio()
+            cache_key = (id(icon_pm), n, area_sz, dpr, acc_truck, sc)
+            scaled = self._scaled_icon_lines_cache.get(cache_key)
+            if scaled is None:
+                phys_sh = int(sh * dpr)
+                scaled = icon_pm.scaled(
+                    phys_sh, phys_sh,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                scaled.setDevicePixelRatio(dpr)
+                self._scaled_icon_lines_cache[cache_key] = scaled
+            pa.drawPixmap(int(ax + ix), int(ay + iy - car_up), scaled)
 
     # -- drag --
     def moveEvent(self, event):
@@ -434,6 +510,7 @@ class _PanelWidget(QWidget):
             self._last_dpr = new_dpr
             self._p._icon_cache.clear()
             self._tint_cache.clear()
+            self._scaled_icon_lines_cache.clear()
             self._p._current_icon = self._load_icon()
             self.update()
         else:
@@ -453,15 +530,12 @@ class _PanelWidget(QWidget):
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self._drag_offset:
             self._drag_offset = None
-            try:
-                save_variables(
-                    os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 "saves.json"),
-                    panel_x=self.pos().x(),
-                    panel_y=self.pos().y(),
-                )
-            except Exception:
-                pass
+            save_variables(
+                os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "saves.json"),
+                panel_x=self.pos().x(),
+                panel_y=self.pos().y(),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -504,8 +578,11 @@ class cc_panel:
         self._AEB_warn = False
         self._AEB_warn_off_time = 0.0
         self._last_AEB_warn_true = 0.0
+        self._acc_lines_visible_until: float = 0.0
+        self._last_acc_lines_distance: int = self._distance_to_lead
+        self._last_acc_lines_truck: bool = self._acc_truck
 
-        self._bg_opacity = 0.8
+        self._bg_opacity = 0.6
         self._text_color: QColor = self._color_for_mode(cc_mode, cc_enabled)
 
         self._blink_running = False
@@ -513,6 +590,7 @@ class cc_panel:
         self._blinker_t_off_ms = 100
         self._blinker_t_on_ms = 150
         self._time_after_AEB_warn = 2.0
+        self._acc_lines_hold_s = 8.0
 
         self._font = QFont("Arial")
         self._font.setBold(True)
@@ -625,7 +703,7 @@ class cc_panel:
 if __name__ == "__main__":
     qapp = QApplication.instance() or QApplication(sys.argv)
 
-    panel = cc_panel("80 km/h", "Cruise control", True, scale_mult=1)
+    panel = cc_panel("80 km/h", "Cruise control", True, scale_mult=2)
     panel.show()
 
     MODES = ["Cruise control", "Speed limiter", "Other"]
@@ -641,6 +719,12 @@ if __name__ == "__main__":
         "distance_to_lead": 3,
         "AEB_warn": False,
     }
+
+    def update_scaling():
+        time.sleep(3)
+        panel.update_scaling(0.5)
+        time.sleep(3)
+        panel.update_scaling(1)
 
     def apply():
         panel.update(**state)
@@ -703,6 +787,7 @@ if __name__ == "__main__":
             apply()
 
     threading.Thread(target=keyboard_test, daemon=True).start()
+    threading.Thread(target=update_scaling, daemon=True).start()
 
     exit_timer = QTimer()
     exit_timer.timeout.connect(lambda: qapp.quit() if not panel.running else None)
