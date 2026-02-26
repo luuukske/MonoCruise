@@ -435,7 +435,6 @@ class PopupWindow(QWidget):
         self._timer_label.setText(f"{total_seconds}s")
         self._last_displayed_seconds = total_seconds
         self._is_finishing = False  # Reset for new message
-        self._check_cursor_position()
         
         self.show()
         
@@ -497,6 +496,7 @@ class PopupWindow(QWidget):
         self._update_timer_label_timer.start(50)  # Check every 50ms
         self._last_displayed_seconds = -1  # Reset for new message
         self._update_timer_label()  # Initial update
+        self._check_cursor_position()
     
     def _stop_timers(self):
         if self._display_timer:
@@ -578,12 +578,14 @@ class PopupWindow(QWidget):
             self._resume_display_timers()
             self._update_timer_label()
     
-    def _on_animation_done(self, anim_type: str):        
+    def _on_animation_done(self, anim_type: str):
         if anim_type in ("slide_in", "scale_in"):
             self._state = State.DISPLAYING
             self._start_timers()
-            # Check if cursor is already over the popup after animation
-            self._check_cursor_position()
+            # Check if cursor is already over the popup after animation.
+            # Use a singleShot(0) so the check runs after the final
+            # geometry update from the animation has been applied.
+            QTimer.singleShot(0, self._check_cursor_position)
         
         elif anim_type == "scale_out":
             self.hide()
