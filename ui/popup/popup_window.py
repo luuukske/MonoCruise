@@ -10,9 +10,9 @@ from PySide6.QtCore import Qt, QTimer, Signal, QSize, QElapsedTimer, QRectF
 from PySide6.QtGui import QFont, QPainter, QColor, QBrush, QPen, QPainterPath, QCursor
 from PySide6.QtSvgWidgets import QSvgWidget
 
-from popup_animator import PopupAnimator
-from message_queue import MessageQueue
-from message_types import PopupMessage, MessageStyle, StyleConfig, STYLE_CONFIGS, MESSAGE_TYPE_MAP
+from ui.popup.popup_animator import PopupAnimator
+from ui.popup.message_queue import MessageQueue
+from ui.popup.message_types import PopupMessage, MessageStyle, StyleConfig, STYLE_CONFIGS, MESSAGE_TYPE_MAP
 
 
 class State(Enum):

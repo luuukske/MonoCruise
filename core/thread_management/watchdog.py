@@ -66,7 +66,7 @@ class Watchdog(BaseThread):
                 continue
 
             if thread.restart_count >= thread.max_restarts:
-                logger.error(
+                logger.critical(
                     "[%s] exceeded max_restarts=%d — giving up",
                     thread.name, thread.max_restarts,
                 )
@@ -85,7 +85,7 @@ class Watchdog(BaseThread):
 
         factory = self._factories.get(dead.name)
         if factory is None:
-            logger.error(
+            logger.critical(
                 "[%s] no factory registered — cannot restart", dead.name
             )
             dead.healthy = False

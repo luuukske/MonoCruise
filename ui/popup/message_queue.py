@@ -4,7 +4,7 @@ Simple priority message queue.
 import heapq
 import threading
 from typing import Optional
-from message_types import PopupMessage
+from ui.popup.message_types import PopupMessage
 
 
 class MessageQueue:

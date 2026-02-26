@@ -37,7 +37,7 @@ class ThreadData:
 class BaseThread(threading.Thread):
     # ── tunables ────────────────────────────────────────────────────────────
     loop_interval: float = 0.05          # seconds between loop() calls
-    max_restarts:  int   = 5             # restarts allowed before giving up
+    max_restarts:  int   = 2             # restarts allowed before giving up
     stable_after:  int   = 100           # loops without error → stable again
     watched:       bool  = True          # False → watchdog skips this thread
 
@@ -116,8 +116,11 @@ class BaseThread(threading.Thread):
                     self.restart_count = 0
                     self.stable_loops  = 0
             except Exception:
-                log.exception("unhandled exception in loop()")
-                # watchdog will decide whether to restart
+                if self.restart_count >= self.max_restarts:
+                    log.critical("Reached max restarts. Check logs for errors and contact devs.")
+                    self.running = False
+                    break
+                log.exception("Unexpected error in the loop. Restarting...")
                 self.running = False
                 break
 

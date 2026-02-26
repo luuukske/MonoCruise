@@ -14,20 +14,19 @@ from __future__ import annotations
 import logging
 import signal
 import sys
-import time
 
-from core.settings  import Settings
-from core.thread_management.registry  import registry
-from core.thread_management.watchdog  import Watchdog
-from core.thread_management.monitor   import Monitor
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QTimer
 
-# ── Worker imports ────────────────────────────────────────────────────────────
-# from core.telemetry.thread import TelemetryThread
-# from core.ui.thread        import UIThread
-# ---------------------------------------------------------------------------
-# Placeholder workers for demonstration
-# ---------------------------------------------------------------------------
-from core.example_thread.thread import MyThread  # remove once real workers exist
+from core.settings import Settings
+from core.thread_management.registry import registry
+from core.thread_management.watchdog import Watchdog
+from core.thread_management.monitor  import Monitor
+from core.thread_management.popup_log_handler import PopupLogHandler
+
+from core.test_thread.thread import TestThread  # remove once real workers exist
+
+from ui.popup.popup_window import PopupWindow
 
 
 # ---------------------------------------------------------------------------
@@ -38,19 +37,52 @@ def _configure_logging(settings: Settings) -> None:
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
     logging.basicConfig(
         level=level,
-        format="%(asctime)s [%(name)-20s] %(levelname)-8s %(message)s",
+        format="%(asctime)s [%(name)-15s] %(levelname)-8s %(message)s",
         datefmt="%H:%M:%S",
         stream=sys.stdout,
     )
 
 
+def _attach_popup_handler(popup: PopupWindow) -> None:
+    handler = PopupLogHandler(
+        popup=popup,
+        min_level=logging.ERROR,
+        duration_ms=6000,
+        priority=10,
+    )
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logging.getLogger().addHandler(handler)
+
+
 # ---------------------------------------------------------------------------
 # Thread factories
-# For watchdog restarts: factory must be a zero-arg callable → BaseThread.
 # ---------------------------------------------------------------------------
 
-def _make_my_thread() -> MyThread:
-    return MyThread()
+def _factory_for(thread):
+    cls = type(thread)
+    return cls
+
+
+def _make_test_thread() -> TestThread:
+    return TestThread()
+
+
+# ---------------------------------------------------------------------------
+# Shutdown
+# ---------------------------------------------------------------------------
+
+def _stop_all() -> None:
+    log = logging.getLogger("main")
+    for t in reversed(registry.all_threads()):
+        if t.is_alive():
+            log.debug("stopping %s", t.name)
+            t.stop()
+
+    for t in registry.all_threads():
+        if t.is_alive():
+            t.join(timeout=3.0)
+            if t.is_alive():
+                log.warning("%s did not stop cleanly", t.name)
 
 
 # ---------------------------------------------------------------------------
@@ -58,18 +90,26 @@ def _make_my_thread() -> MyThread:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    # QApplication must be created before any Qt objects (including PopupWindow)
+    app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
+
     settings = Settings.load()
     _configure_logging(settings)
     log = logging.getLogger("main")
     log.info("starting — debug=%s", settings.debug)
 
-    # ── Watchdog ─────────────────────────────────────────────────────────────
+    # ── Popup window ──────────────────────────────────────────────────────────
+    popup = PopupWindow()
+    popup.show()
+    _attach_popup_handler(popup)
+
+    # ── Watchdog ──────────────────────────────────────────────────────────────
     watchdog = Watchdog(auto_restart=settings.auto_restart)
 
     # ── Register workers ──────────────────────────────────────────────────────
     workers = [
-        _make_my_thread(),
-        # Add more threads here:
+        _make_test_thread(),
         # TelemetryThread(settings),
         # UIThread(settings),
     ]
@@ -86,7 +126,7 @@ def main() -> None:
         monitor = Monitor(watchdog=watchdog)
         registry.register(monitor)
 
-    # ── Start ─────────────────────────────────────────────────────────────────
+    # ── Start workers ─────────────────────────────────────────────────────────
     for w in workers:
         w.start()
         log.info("started: %s", w.name)
@@ -98,43 +138,34 @@ def main() -> None:
         monitor.start()
         log.info("started: monitor")
 
-    # ── Block ─────────────────────────────────────────────────────────────────
-    def _shutdown(sig: int, _frame) -> None:  # type: ignore[type-arg]
+    # ── Poll thread liveness via QTimer (keeps Qt event loop free) ───────────
+    def _check_threads() -> None:
+        if not any(t.is_alive() for t in registry.all_threads()):
+            log.info("all threads stopped — exiting")
+            _stop_all()
+            app.quit()
+
+    poll_timer = QTimer()
+    poll_timer.setInterval(250)
+    poll_timer.timeout.connect(_check_threads)
+    poll_timer.start()
+
+    # ── Signal handling ───────────────────────────────────────────────────────
+    def _shutdown(sig: int, _frame) -> None:
         log.info("signal %s received — shutting down", signal.Signals(sig).name)
         _stop_all()
+        app.quit()
 
     signal.signal(signal.SIGINT,  _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    try:
-        while any(t.is_alive() for t in registry.all_threads()):
-            time.sleep(0.25)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        _stop_all()
+    # Keep Python's signal handler alive (Qt blocks SIGINT otherwise)
+    sigint_timer = QTimer()
+    sigint_timer.setInterval(200)
+    sigint_timer.timeout.connect(lambda: None)
+    sigint_timer.start()
 
-    log.info("all threads stopped — goodbye")
-
-
-def _factory_for(thread):
-    """Return a zero-arg factory that re-creates the same thread type."""
-    cls = type(thread)
-    return cls  # works when __init__ takes no required args
-
-
-def _stop_all() -> None:
-    log = logging.getLogger("main")
-    for t in reversed(registry.all_threads()):
-        if t.is_alive():
-            log.debug("stopping %s", t.name)
-            t.stop()
-
-    for t in registry.all_threads():
-        if t.is_alive():
-            t.join(timeout=3.0)
-            if t.is_alive():
-                log.warning("%s did not stop cleanly", t.name)
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
