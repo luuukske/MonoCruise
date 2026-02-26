@@ -8,12 +8,11 @@ import sys
 import threading
 import time
 
-# Ensure popup package imports resolve when run from project root
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "popup"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "core", "popup"))
 
 from PySide6.QtWidgets import QApplication
 
-from popup.popup_window import PopupWindow
+from core.popup.popup_window import PopupWindow
 
 
 def _level_to_message_type(level: int) -> str:
