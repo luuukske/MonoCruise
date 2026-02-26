@@ -117,10 +117,10 @@ class BaseThread(threading.Thread):
                     self.stable_loops  = 0
             except Exception:
                 if self.restart_count >= self.max_restarts:
-                    log.critical("Reached max restarts. Check logs for errors and contact devs.")
+                    # log.critical("Reached max restarts. Check logs for errors and contact devs.")
                     self.running = False
                     break
-                log.exception("Unexpected error in the loop. Restarting...")
+                # log.exception("Unexpected error in the loop. Restarting...")
                 self.running = False
                 break
 

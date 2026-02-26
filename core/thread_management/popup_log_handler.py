@@ -48,19 +48,14 @@ class PopupLogHandler(logging.Handler):
             return
         try:
             msg_type = self._LEVEL_TO_TYPE.get(record.levelno, "e")
-            if record.levelno >= logging.ERROR:
-                title = f"{record.name} Error"
-                # Use the log message as description only (no full error/traceback)
-                body = record.getMessage()
-            else:
-                title = f"{record.levelname}  ·  {record.name}"
-                body = self.format(record)
-            self._popup.emit_message(
-                title=title,
-                message=body,
-                message_type=msg_type,
-                duration_ms=self._duration_ms,
-                priority=self._priority,
-            )
+            title = f"{record.name.capitalize()} {record.levelname.capitalize()}"
+            body = record.getMessage()
         except Exception:
             self.handleError(record)
+        self._popup.emit_message(
+            title=title,
+            message=body,
+            message_type=msg_type,
+            duration_ms=self._duration_ms,
+            priority=self._priority,
+        )

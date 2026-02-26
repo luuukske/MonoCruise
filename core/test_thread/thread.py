@@ -43,7 +43,6 @@ class TestThread(BaseThread):
 
         self.i += 1
         if self.i >= 100:
-            time.sleep(10)
             raise Exception("test error")
 
     def teardown(self) -> None:

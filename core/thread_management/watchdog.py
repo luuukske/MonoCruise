@@ -25,6 +25,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("watchdog")
 
+
+def _log_name(name: str) -> str:
+    return (name.replace("_thread", "") + " code").capitalize()
+
+
 HEARTBEAT_TIMEOUT: float = 2.0   # seconds
 POLL_INTERVAL:     float = 0.5   # watchdog check frequency
 
@@ -48,7 +53,7 @@ class Watchdog(BaseThread):
     def loop(self) -> None:
         now = time.monotonic()
         for thread in registry.all_threads():
-            if thread is self or not thread.watched:
+            if thread is self or not thread.watched or not thread.healthy:
                 continue
 
             crashed  = not thread.running and thread.is_alive() is False
@@ -59,7 +64,7 @@ class Watchdog(BaseThread):
                 continue
 
             reason = "crashed" if crashed else f"frozen ({age:.1f}s)"
-            logger.warning("[%s] detected as %s", thread.name, reason)
+            logger.warning("%s has %s", _log_name(thread.name), reason)
 
             if not self._auto_restart:
                 thread.healthy = False
@@ -67,8 +72,8 @@ class Watchdog(BaseThread):
 
             if thread.restart_count >= thread.max_restarts:
                 logger.critical(
-                    "[%s] exceeded max_restarts=%d — giving up",
-                    thread.name, thread.max_restarts,
+                    "repeatedly failed to restart %s. Giving up.",
+                    _log_name(thread.name),
                 )
                 thread.healthy = False
                 continue
@@ -86,7 +91,7 @@ class Watchdog(BaseThread):
         factory = self._factories.get(dead.name)
         if factory is None:
             logger.critical(
-                "[%s] no factory registered — cannot restart", dead.name
+                "could not restart %s: no factory registered", _log_name(dead.name)
             )
             dead.healthy = False
             return
@@ -96,8 +101,8 @@ class Watchdog(BaseThread):
         new_thread.name          = dead.name           # preserve name
 
         logger.info(
-            "[%s] restarting (attempt %d/%d)",
-            new_thread.name, new_thread.restart_count, new_thread.max_restarts,
+            "restarting %s (attempt %d of %d)",
+            _log_name(new_thread.name), new_thread.restart_count, new_thread.max_restarts,
         )
 
         registry.replace(new_thread)
