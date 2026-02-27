@@ -38,7 +38,7 @@ class BaseThread(threading.Thread):
     # ── tunables ────────────────────────────────────────────────────────────
     loop_interval: float = 0.05          # seconds between loop() calls
     max_restarts:  int   = 2             # restarts allowed before giving up
-    stable_after:  int   = 100           # loops without error → stable again
+    stable_after:  int   = 200           # loops without error → stable again
     watched:       bool  = True          # False → watchdog skips this thread
 
     def __init__(self, name: str, *, daemon: bool = True) -> None:
@@ -118,12 +118,7 @@ class BaseThread(threading.Thread):
                         )
                     self.restart_count = 0
                     self.stable_loops  = 0
-            except Exception:
-                log.exception(
-                    "Unexpected error in loop — thread '%s' has stopped (restart %d/%d)",
-                    self.name, self.restart_count + 1, self.max_restarts,
-                    extra={"no_popup": True},
-                )
+            except Exception as e:
                 if self.restart_count >= self.max_restarts:
                     log.critical(
                         "Thread '%s' has crashed %d time(s) and reached its restart limit.",
@@ -135,6 +130,16 @@ class BaseThread(threading.Thread):
                     )
                     self.running = False
                     break
+                else:
+                    log.exception(
+                        "Unexpected error in loop — thread '%s' has stopped (restart %d/%d):\n%s",
+                        self.name, self.restart_count + 1, self.max_restarts, e.__str__(),
+                        extra={"no_popup": True},
+                    )
+                    log.error(
+                        "Thread '%s' crashed.\nRestarting now...",
+                        self.name,
+                    )
                 self.running = False
                 break
 

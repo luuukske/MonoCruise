@@ -43,7 +43,7 @@ class TestThread(BaseThread):
 
         self.i += 1
         if self.i >= 100:
-            raise Exception("test error")
+            time.sleep(100)
 
     def teardown(self) -> None:
         """Runs once after loop exits. Exceptions are suppressed by base."""

@@ -63,26 +63,24 @@ class Watchdog(BaseThread):
             if not (crashed or frozen):
                 continue
 
-            reason = "crashed" if crashed else f"frozen ({age:.1f}s)"
-            logger.warning(
-                "thread '%s' has %s — attempting automatic restart.",
-                thread.name, reason,
-                extra={"no_popup": True},
-            )
-
-            if not self._auto_restart:
-                thread.healthy = False
-                continue
 
             if thread.restart_count >= thread.max_restarts:
-                logger.critical(
-                    "thread '%s' failed to restart after %d attempt(s) — giving up.",
-                    thread.name, thread.restart_count,
-                    extra={"no_popup": True},
+                # logging is handled in base_thread.py
+                thread.healthy = False
+                if not crashed:
+                    logger.error(
+                        "%s froze and couldn't restart.\nrestart MonoCruise or contact a developer.",
+                        _log_name(thread.name),
+                    )
+                continue
+            else:
+                if not crashed:
+                    logger.warning(
+                        "%s has frozen.\nRestarting now...",
+                        _log_name(thread.name),
                 )
-                logger.critical(
-                    "A process could not recover. Restart MonoCruise or contact a developer.",
-                )
+
+            if not self._auto_restart:
                 thread.healthy = False
                 continue
 

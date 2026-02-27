@@ -51,6 +51,21 @@ class PopupLogHandler(logging.Handler):
         self._duration_ms = duration_ms
         self._priority = priority
 
+    def _priority_for(self, record: logging.LogRecord) -> int:
+        """
+        Compute queue priority for a given log record.
+
+        CRITICAL records always use priority 10.
+        ERROR records always use priority 1.
+        All other levels fall back to the handler's base priority.
+        """
+        if record.levelno >= logging.CRITICAL:
+            print("CRITICAL record")
+            return 10
+        if record.levelno >= logging.ERROR:
+            return 1
+        return self._priority
+
     def emit(self, record: logging.LogRecord) -> None:
         if getattr(record, "no_popup", False):
             return
@@ -59,13 +74,15 @@ class PopupLogHandler(logging.Handler):
             thread_name = record.name.replace("_thread", "").capitalize()
             title = f"{thread_name} {self._LEVEL_TO_TITLE.get(record.levelno, 'Error')}"
             body = record.getMessage()
+            priority = self._priority_for(record)
         except Exception:
             self.handleError(record)
+            return
 
         self._popup.emit_message(
             title=title,
             message=body,
             message_type=msg_type,
             duration_ms=self._duration_ms,
-            priority=self._priority,
+            priority=priority,
         )
