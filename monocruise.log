@@ -1,0 +1,76 @@
+14:20:11 [main           ] INFO     starting — debug=True
+14:20:12 [main           ] INFO     started: test_thread
+14:20:12 [main           ] INFO     started: watchdog
+14:20:12 [main           ] INFO     started: monitor
+14:20:18 [test_thread    ] ERROR    Unexpected error in loop — thread 'test_thread' has stopped (restart 1/2)
+Traceback (most recent call last):
+  File "C:\Users\Lukas\OneDrive\Documents\projects\monocruise\core\thread_management\base_thread.py", line 110, in run
+    self.loop()
+    ~~~~~~~~~^^
+  File "C:\Users\Lukas\OneDrive\Documents\projects\monocruise\core\test_thread\thread.py", line 46, in loop
+    raise Exception("test error")
+Exception: test error
+14:20:19 [watchdog       ] WARNING  thread 'test_thread' has crashed — attempting automatic restart.
+14:20:19 [watchdog       ] INFO     Restarting 'Test code' (attempt 1 of 2).
+14:20:25 [test_thread    ] ERROR    Unexpected error in loop — thread 'test_thread' has stopped (restart 2/2)
+Traceback (most recent call last):
+  File "C:\Users\Lukas\OneDrive\Documents\projects\monocruise\core\thread_management\base_thread.py", line 110, in run
+    self.loop()
+    ~~~~~~~~~^^
+  File "C:\Users\Lukas\OneDrive\Documents\projects\monocruise\core\test_thread\thread.py", line 46, in loop
+    raise Exception("test error")
+Exception: test error
+14:20:25 [watchdog       ] WARNING  thread 'test_thread' has crashed — attempting automatic restart.
+14:20:25 [watchdog       ] INFO     Restarting 'Test code' (attempt 2 of 2).
+14:20:31 [test_thread    ] ERROR    Unexpected error in loop — thread 'test_thread' has stopped (restart 3/2)
+Traceback (most recent call last):
+  File "C:\Users\Lukas\OneDrive\Documents\projects\monocruise\core\thread_management\base_thread.py", line 110, in run
+    self.loop()
+    ~~~~~~~~~^^
+  File "C:\Users\Lukas\OneDrive\Documents\projects\monocruise\core\test_thread\thread.py", line 46, in loop
+    raise Exception("test error")
+Exception: test error
+14:20:31 [test_thread    ] CRITICAL Thread 'test_thread' has crashed 2 time(s) and reached its restart limit.
+14:20:31 [test_thread    ] CRITICAL A process keeps crashing. Restart MonoCruise or contact a developer.
+14:20:32 [watchdog       ] WARNING  thread 'test_thread' has crashed — attempting automatic restart.
+14:20:32 [watchdog       ] CRITICAL thread 'test_thread' failed to restart after 2 attempt(s) — giving up.
+14:20:32 [watchdog       ] CRITICAL A process could not recover. Restart MonoCruise or contact a developer.
+14:25:00 [main           ] INFO     starting — debug=True
+14:25:00 [main           ] INFO     started: test_thread
+14:25:00 [main           ] INFO     started: watchdog
+14:25:00 [main           ] INFO     started: monitor
+14:25:06 [test_thread    ] ERROR    Unexpected error in loop — thread 'test_thread' has stopped (restart 1/2)
+Traceback (most recent call last):
+  File "C:\Users\Lukas\OneDrive\Documents\projects\monocruise\core\thread_management\base_thread.py", line 110, in run
+    self.loop()
+    ~~~~~~~~~^^
+  File "C:\Users\Lukas\OneDrive\Documents\projects\monocruise\core\test_thread\thread.py", line 46, in loop
+    raise Exception("test error")
+Exception: test error
+14:25:07 [watchdog       ] WARNING  thread 'test_thread' has crashed — attempting automatic restart.
+14:25:07 [watchdog       ] INFO     Restarting 'Test code' (attempt 1 of 2).
+14:25:13 [test_thread    ] ERROR    Unexpected error in loop — thread 'test_thread' has stopped (restart 2/2)
+Traceback (most recent call last):
+  File "C:\Users\Lukas\OneDrive\Documents\projects\monocruise\core\thread_management\base_thread.py", line 110, in run
+    self.loop()
+    ~~~~~~~~~^^
+  File "C:\Users\Lukas\OneDrive\Documents\projects\monocruise\core\test_thread\thread.py", line 46, in loop
+    raise Exception("test error")
+Exception: test error
+14:25:14 [watchdog       ] WARNING  thread 'test_thread' has crashed — attempting automatic restart.
+14:25:14 [watchdog       ] INFO     Restarting 'Test code' (attempt 2 of 2).
+14:25:20 [test_thread    ] ERROR    Unexpected error in loop — thread 'test_thread' has stopped (restart 3/2)
+Traceback (most recent call last):
+  File "C:\Users\Lukas\OneDrive\Documents\projects\monocruise\core\thread_management\base_thread.py", line 110, in run
+    self.loop()
+    ~~~~~~~~~^^
+  File "C:\Users\Lukas\OneDrive\Documents\projects\monocruise\core\test_thread\thread.py", line 46, in loop
+    raise Exception("test error")
+Exception: test error
+14:25:20 [test_thread    ] CRITICAL Thread 'test_thread' has crashed 2 time(s) and reached its restart limit.
+14:25:20 [test_thread    ] CRITICAL A process keeps crashing. Restart MonoCruise or contact a developer.
+14:25:20 [test_thread    ] CRITICAL POPUP | A process keeps crashing. Restart MonoCruise or contact a developer.
+14:25:20 [watchdog       ] WARNING  thread 'test_thread' has crashed — attempting automatic restart.
+14:25:20 [watchdog       ] CRITICAL thread 'test_thread' failed to restart after 2 attempt(s) — giving up.
+14:25:20 [watchdog       ] CRITICAL A process could not recover. Restart MonoCruise or contact a developer.
+14:25:20 [watchdog       ] CRITICAL POPUP | A process could not recover. Restart MonoCruise or contact a developer.

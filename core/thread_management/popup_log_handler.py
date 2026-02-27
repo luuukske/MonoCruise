@@ -31,6 +31,14 @@ class PopupLogHandler(logging.Handler):
         logging.DEBUG:    "n",
     }
 
+    _LEVEL_TO_TITLE: dict[int, str] = {
+        logging.CRITICAL: "Critical Error",
+        logging.ERROR:    "Error",
+        logging.WARNING:  "Warning",
+        logging.INFO:     "Notice",
+        logging.DEBUG:    "Notice",
+    }
+
     def __init__(
         self,
         popup: "PopupWindow",
@@ -48,10 +56,12 @@ class PopupLogHandler(logging.Handler):
             return
         try:
             msg_type = self._LEVEL_TO_TYPE.get(record.levelno, "e")
-            title = f"{record.name.capitalize()} {record.levelname.capitalize()}"
+            thread_name = record.name.replace("_thread", "").capitalize()
+            title = f"{thread_name} {self._LEVEL_TO_TITLE.get(record.levelno, 'Error')}"
             body = record.getMessage()
         except Exception:
             self.handleError(record)
+
         self._popup.emit_message(
             title=title,
             message=body,

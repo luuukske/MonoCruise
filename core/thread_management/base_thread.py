@@ -95,7 +95,10 @@ class BaseThread(threading.Thread):
         try:
             self.setup()
         except Exception:
-            log.exception("setup() failed — thread will not start")
+            log.exception("setup() failed — thread '%s' will not start", self.name, extra={"no_popup": True})
+            log.critical(
+                "A component failed to start. Restart MonoCruise or contact a developer.",
+            )
             self.running = False
             self.healthy = False
             return
@@ -116,11 +119,22 @@ class BaseThread(threading.Thread):
                     self.restart_count = 0
                     self.stable_loops  = 0
             except Exception:
+                log.exception(
+                    "Unexpected error in loop — thread '%s' has stopped (restart %d/%d)",
+                    self.name, self.restart_count + 1, self.max_restarts,
+                    extra={"no_popup": True},
+                )
                 if self.restart_count >= self.max_restarts:
-                    # log.critical("Reached max restarts. Check logs for errors and contact devs.")
+                    log.critical(
+                        "Thread '%s' has crashed %d time(s) and reached its restart limit.",
+                        self.name, self.restart_count,
+                        extra={"no_popup": True},
+                    )
+                    log.critical(
+                        "A process keeps crashing. Restart MonoCruise or contact a developer.",
+                    )
                     self.running = False
                     break
-                # log.exception("Unexpected error in the loop. Restarting...")
                 self.running = False
                 break
 
@@ -133,7 +147,7 @@ class BaseThread(threading.Thread):
         try:
             self.teardown()
         except Exception:
-            log.exception("teardown() raised (suppressed)")
+            log.exception("teardown() raised in thread '%s' (suppressed)", self.name, extra={"no_popup": True})
 
         self.running = False
         log.debug("exited")

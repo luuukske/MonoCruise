@@ -64,7 +64,11 @@ class Watchdog(BaseThread):
                 continue
 
             reason = "crashed" if crashed else f"frozen ({age:.1f}s)"
-            logger.warning("%s has %s", _log_name(thread.name), reason)
+            logger.warning(
+                "thread '%s' has %s — attempting automatic restart.",
+                thread.name, reason,
+                extra={"no_popup": True},
+            )
 
             if not self._auto_restart:
                 thread.healthy = False
@@ -72,8 +76,12 @@ class Watchdog(BaseThread):
 
             if thread.restart_count >= thread.max_restarts:
                 logger.critical(
-                    "repeatedly failed to restart %s. Giving up.",
-                    _log_name(thread.name),
+                    "thread '%s' failed to restart after %d attempt(s) — giving up.",
+                    thread.name, thread.restart_count,
+                    extra={"no_popup": True},
+                )
+                logger.critical(
+                    "A process could not recover. Restart MonoCruise or contact a developer.",
                 )
                 thread.healthy = False
                 continue
@@ -91,7 +99,12 @@ class Watchdog(BaseThread):
         factory = self._factories.get(dead.name)
         if factory is None:
             logger.critical(
-                "could not restart %s: no factory registered", _log_name(dead.name)
+                "thread '%s' cannot be restarted: no factory registered — this is a bug.",
+                dead.name,
+                extra={"no_popup": True},
+            )
+            logger.critical(
+                "Internal error: component can't restart. Please contact a developer.",
             )
             dead.healthy = False
             return
@@ -101,7 +114,7 @@ class Watchdog(BaseThread):
         new_thread.name          = dead.name           # preserve name
 
         logger.info(
-            "restarting %s (attempt %d of %d)",
+            "Restarting '%s' (attempt %d of %d).",
             _log_name(new_thread.name), new_thread.restart_count, new_thread.max_restarts,
         )
 

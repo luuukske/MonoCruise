@@ -35,12 +35,20 @@ from ui.popup.popup_window import PopupWindow
 
 def _configure_logging(settings: Settings) -> None:
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    fmt     = "%(asctime)s [%(name)-15s] %(levelname)-8s %(message)s"
+    datefmt = "%H:%M:%S"
+
     logging.basicConfig(
         level=level,
-        format="%(asctime)s [%(name)-15s] %(levelname)-8s %(message)s",
-        datefmt="%H:%M:%S",
+        format=fmt,
+        datefmt=datefmt,
         stream=sys.stdout,
     )
+
+    file_handler = logging.FileHandler("monocruise.log", encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+    logging.getLogger().addHandler(file_handler)
 
 
 def _attach_popup_handler(popup: PopupWindow) -> None:
