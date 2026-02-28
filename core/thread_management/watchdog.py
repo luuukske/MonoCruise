@@ -69,10 +69,11 @@ class Watchdog(BaseThread):
                 thread.healthy = False
                 if not crashed:
                     logger.error(
-                        "%s froze and couldn't restart.\nrestart MonoCruise or contact a developer.",
+                        "%s froze and couldn't restart.\nRestart MonoCruise or contact a developer.",
                         _log_name(thread.name),
                         extra={"popup": True},
                     )
+                    thread.stop(force=True)
                 continue
             else:
                 if not crashed:

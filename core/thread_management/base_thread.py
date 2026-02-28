@@ -11,6 +11,8 @@ The watchdog reads `heartbeat_at` and `restart_count` / `stable_loops`.
 
 from __future__ import annotations
 
+import ctypes
+import sys
 import logging
 import threading
 import time
@@ -18,6 +20,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class ThreadForcedStop(BaseException):
+    """Raised in the target thread when stop(force=True) is used; triggers clean exit."""
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -41,11 +48,12 @@ class BaseThread(threading.Thread):
     stable_after:  int   = 200           # loops without error → stable again
     watched:       bool  = True          # False → watchdog skips this thread
 
-    def __init__(self, name: str, *, daemon: bool = True) -> None:
+    def __init__(self, name: str, *, daemon: bool = True, critical_thread: bool = False) -> None:
         super().__init__(name=name, daemon=daemon)
 
         self.data: ThreadData = ThreadData()
         self._lock             = threading.Lock()
+        self.critical_thread   = critical_thread  # will close MonoCruise in case of a critical error
 
         # ── watchdog-visible state (primitives → GIL-safe bare reads) ───────
         self.heartbeat_at:  float = 0.0
@@ -58,8 +66,25 @@ class BaseThread(threading.Thread):
 
     # ── public API ───────────────────────────────────────────────────────────
 
-    def stop(self) -> None:
+    def stop(self, force: bool = False) -> None:
+        """Signal the thread to stop.
+        
+        If force=True, also inject an exception into the
+        thread so it can exit even when stuck inside loop().
+        Prefer self._stop_event.wait(timeout) in loop() for waits that
+        should be interruptible by stop().
+        """
         self._stop_event.set()
+        if force and self.ident is not None and self.is_alive():
+            try:
+                ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                    ctypes.c_ulong(self.ident), ctypes.py_object(ThreadForcedStop)
+                )
+            except (AttributeError, TypeError):
+                logger.debug(
+                    "force stop not available for thread '%s' (PyThreadState_SetAsyncExc failed)",
+                    self.name,
+                )
 
     def snapshot(self) -> dict[str, Any]:
         """Consistent multi-field read (acquire lock once)."""
@@ -119,6 +144,9 @@ class BaseThread(threading.Thread):
                         )
                     self.restart_count = 0
                     self.stable_loops  = 0
+            except ThreadForcedStop:
+                log.debug("force stop received — exiting loop")
+                break
             except Exception as e:
                 if self.restart_count >= self.max_restarts:
                     log.critical(
