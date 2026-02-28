@@ -34,9 +34,11 @@ from ui.popup.popup_window import PopupWindow
 # ---------------------------------------------------------------------------
 
 def _configure_logging(settings: Settings) -> None:
-    fmt     = "%(asctime)s [%(name)-15s] %(levelname)-8s %(message)s"
+    fmt     = "%(asctime)s [%(name)-12s] %(levelname)-8s %(message)s"
     datefmt = "%H:%M:%S"
     formatter = logging.Formatter(fmt, datefmt=datefmt)
+    _fmt = formatter.format
+    formatter.format = lambda r: _fmt(r).replace("\r", " ").replace("\n", " ")
 
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)

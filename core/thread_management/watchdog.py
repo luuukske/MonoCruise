@@ -99,10 +99,10 @@ class Watchdog(BaseThread):
             logger.critical(
                 "thread '%s' cannot be restarted: no factory registered — this is a bug.",
                 dead.name,
-                extra={"no_popup": True},
             )
             logger.critical(
                 "Internal error: component can't restart. Please contact a developer.",
+                extra={"popup": True},
             )
             dead.healthy = False
             return

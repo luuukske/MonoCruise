@@ -95,9 +95,10 @@ class BaseThread(threading.Thread):
         try:
             self.setup()
         except Exception:
-            log.exception("setup() failed — thread '%s' will not start", self.name, extra={"no_popup": True})
+            log.exception("setup() failed — thread '%s' will not start", self.name)
             log.critical(
                 "A component failed to start. Restart MonoCruise or contact a developer.",
+                extra={"popup": True},
             )
             self.running = False
             self.healthy = False
@@ -123,10 +124,10 @@ class BaseThread(threading.Thread):
                     log.critical(
                         "Thread '%s' has crashed %d time(s) and reached its restart limit.",
                         self.name, self.restart_count,
-                        extra={"no_popup": True},
                     )
                     log.critical(
                         "A process keeps crashing. Restart MonoCruise or contact a developer.",
+                        extra={"popup": True},
                     )
                     self.running = False
                     break
@@ -134,11 +135,11 @@ class BaseThread(threading.Thread):
                     log.exception(
                         "Unexpected error in loop — thread '%s' has stopped (restart %d/%d):\n%s",
                         self.name, self.restart_count + 1, self.max_restarts, e.__str__(),
-                        extra={"no_popup": True},
                     )
                     log.error(
                         "Thread '%s' crashed.\nRestarting now...",
                         self.name,
+                        extra={"popup": True},
                     )
                 self.running = False
                 break
@@ -152,7 +153,7 @@ class BaseThread(threading.Thread):
         try:
             self.teardown()
         except Exception:
-            log.exception("teardown() raised in thread '%s' (suppressed)", self.name, extra={"no_popup": True})
+            log.exception("teardown() raised in thread '%s' (suppressed)", self.name)
 
         self.running = False
         log.debug("exited")

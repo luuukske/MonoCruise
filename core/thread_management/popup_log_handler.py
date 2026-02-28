@@ -60,14 +60,13 @@ class PopupLogHandler(logging.Handler):
         All other levels fall back to the handler's base priority.
         """
         if record.levelno >= logging.CRITICAL:
-            print("CRITICAL record")
             return 10
         if record.levelno >= logging.ERROR:
             return 1
         return self._priority
 
     def emit(self, record: logging.LogRecord) -> None:
-        if getattr(record, "no_popup", False):
+        if not getattr(record, "popup", False):
             return
         try:
             msg_type = self._LEVEL_TO_TYPE.get(record.levelno, "e")
