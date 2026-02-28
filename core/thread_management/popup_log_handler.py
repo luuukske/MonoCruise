@@ -66,7 +66,7 @@ class PopupLogHandler(logging.Handler):
         return self._priority
 
     def emit(self, record: logging.LogRecord) -> None:
-        if not getattr(record, "popup", False):
+        if not getattr(record, "popup", True):
             return
         try:
             msg_type = self._LEVEL_TO_TYPE.get(record.levelno, "e")

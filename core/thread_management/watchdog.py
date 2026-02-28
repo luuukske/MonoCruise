@@ -71,6 +71,7 @@ class Watchdog(BaseThread):
                     logger.error(
                         "%s froze and couldn't restart.\nrestart MonoCruise or contact a developer.",
                         _log_name(thread.name),
+                        extra={"popup": True},
                     )
                 continue
             else:
@@ -78,6 +79,7 @@ class Watchdog(BaseThread):
                     logger.warning(
                         "%s has frozen.\nRestarting now...",
                         _log_name(thread.name),
+                        extra={"popup": True},
                 )
 
             if not self._auto_restart:
@@ -113,7 +115,7 @@ class Watchdog(BaseThread):
 
         logger.info(
             "Restarting '%s' (attempt %d of %d).",
-            _log_name(new_thread.name), new_thread.restart_count, new_thread.max_restarts,
+            new_thread.name, new_thread.restart_count, new_thread.max_restarts,
         )
 
         registry.replace(new_thread)
