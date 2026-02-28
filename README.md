@@ -3,8 +3,8 @@
 [![Download MonoCruise](https://img.shields.io/sourceforge/dt/monocruise.svg)](https://sourceforge.net/projects/monocruise/files/latest/download)
 
 > [!WARNING]
-> I am currently working on restructuring the code with better error handling.
-> Current raw code is instable in its current state. please be patient until i rework the architecture
+> I am currently reworking the code architecture with better error handling.
+> Current raw code is instable in its current state. Please be patient until i rework the architecture.
 
 # MonoCruise
 MonoCruise is a third-party software that sits in between ETS2/ATS and your pedals. 
