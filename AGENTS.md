@@ -45,7 +45,7 @@ This document explains how this program is structured and where to look for usag
 - **How threads are wired together**
   - See `main.py`:
     - Creation of worker threads.
-    - Registration with `registry`.
+    - Registration with `registry`. 
     - Registration of restart factories with the `Watchdog`.
     - Optional registration of the `Monitor` in debug mode.
 
@@ -94,8 +94,12 @@ This document explains how this program is structured and where to look for usag
   - Avoid introducing log messages that include personally identifying information or machine‑specific details.
   - Prefer generic wording that does not reveal usernames, hostnames, or full filesystem layouts.
 
-- **Independant threads**
-  - Any error or looping code CAN NOT impact other critical systems. use the example thread code `core/example_thread/thread.py`
-  - Do NOT diviate from the template by removing key methods like `teardown()` or `setup()`
-  - The main thread is dedecated to program critical code. The main thread has to be as stable as possible for both supported OS; Windows and Linux.
+- **Independent threads**
+  - Any error or looping code CAN NOT impact other critical systems. use the example thread code `core/example_thread/thread.py`.
+  - Do NOT diviate from the template by removing key methods like `teardown()` or `setup()`.
+  - The main thread is dedicated to program critical code. The main thread has to be as stable as possible for both supported OS; Windows and Linux.
+  - Always check self.running at the top of loop() and in any inner loop.
 
+- **Testing and validation**
+  - Do not add or update tests when changing thread behaviour that could affect stability or watchdog/monitor behaviour.
+  - Do not disable existing safety checks (watchdog, health checks, restart limits, etc.) to “fix” failing tests or crashes.
