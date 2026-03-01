@@ -11,6 +11,18 @@ Responsibilities:
 
 from __future__ import annotations
 
+import psutil
+
+def is_process_running(name: str) -> bool:
+    for p in psutil.process_iter(['name']):
+        if p.info['name'].lower() == name.lower():
+            return True
+    return False
+
+if is_process_running("MonoCruise.exe"):
+    print("MonoCruise is already running")
+    exit()
+
 import logging
 import signal
 import sys
@@ -27,7 +39,6 @@ from core.thread_management.popup_log_handler import PopupLogHandler
 from core.test_thread.thread import TestThread  # remove once real workers exist
 
 from ui.popup.popup_window import PopupWindow
-
 
 # ---------------------------------------------------------------------------
 # Logging

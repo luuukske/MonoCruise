@@ -44,7 +44,7 @@ class ThreadData:
 class BaseThread(threading.Thread):
     # ── tunables ────────────────────────────────────────────────────────────
     loop_interval: float = 0.05          # seconds between loop() calls
-    max_restarts:  int   = 2             # restarts allowed before giving up
+    max_restarts:  int   = 1             # restarts allowed before giving up
     stable_after:  int   = 200           # loops without error → stable again
     watched:       bool  = True          # False → watchdog skips this thread
 
@@ -68,18 +68,25 @@ class BaseThread(threading.Thread):
 
     def stop(self, force: bool = False) -> None:
         """Signal the thread to stop.
-        
-        If force=True, also inject an exception into the
-        thread so it can exit even when stuck inside loop().
-        Prefer self._stop_event.wait(timeout) in loop() for waits that
-        should be interruptible by stop().
+
+        If force=True, also inject ThreadForcedStop into the thread so it can
+        exit even when stuck inside loop(). The _stop_event wakes any
+        _stop_event.wait() calls; the async exc covers all other blocking points.
         """
         self._stop_event.set()
         if force and self.ident is not None and self.is_alive():
             try:
-                ctypes.pythonapi.PyThreadState_SetAsyncExc(
-                    ctypes.c_ulong(self.ident), ctypes.py_object(ThreadForcedStop)
+                res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                    ctypes.c_ulong(self.ident),
+                    ctypes.py_object(ThreadForcedStop),
                 )
+                if res == 0:
+                    logger.debug("force stop: invalid thread id for '%s'", self.name)
+                elif res > 1:
+                    ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                        ctypes.c_ulong(self.ident), None
+                    )
+                    logger.warning("force stop: PyThreadState_SetAsyncExc hit %d threads, reverted", res)
             except (AttributeError, TypeError):
                 logger.debug(
                     "force stop not available for thread '%s' (PyThreadState_SetAsyncExc failed)",
@@ -116,67 +123,71 @@ class BaseThread(threading.Thread):
         self.running = True
         self._stop_event.clear()
 
-        log.debug("setup")
         try:
-            self.setup()
-        except Exception:
-            log.exception("setup() failed — thread '%s' will not start", self.name)
-            log.critical(
-                "A component failed to start. Restart MonoCruise or contact a developer.",
-                extra={"popup": True},
-            )
-            self.running = False
-            self.healthy = False
-            return
-
-        log.debug("loop starting")
-        while not self._stop_event.is_set():
-            t0 = time.monotonic()
+            log.debug("setup")
             try:
-                self.loop()
-                self.heartbeat_at = time.monotonic()
-                self.stable_loops += 1
-                if self.stable_loops >= self.stable_after:
-                    if self.restart_count > 0:
-                        log.info(
-                            "stable after %d loops — restart quota reset",
-                            self.stable_after,
+                self.setup()
+            except Exception:
+                log.exception("setup() failed — thread '%s' will not start", self.name)
+                log.critical(
+                    "A component failed to start. Restart MonoCruise or contact a developer.",
+                    extra={"popup": True},
+                )
+                self.running = False
+                self.healthy = False
+                return
+
+            log.debug("loop starting")
+            while not self._stop_event.is_set():
+                t0 = time.monotonic()
+                try:
+                    self.loop()
+                    self.heartbeat_at = time.monotonic()
+                    self.stable_loops += 1
+                    if self.stable_loops >= self.stable_after:
+                        if self.restart_count > 0:
+                            log.info(
+                                "stable after %d loops — restart quota reset",
+                                self.stable_after,
+                            )
+                        self.restart_count = 0
+                        self.stable_loops  = 0
+                except ThreadForcedStop:
+                    raise  # don't treat as a crash — propagate to outer handler
+                except Exception as e:
+                    if self.restart_count >= self.max_restarts:
+                        log.critical(
+                            "Thread '%s' has crashed %d time(s) and reached its restart limit.",
+                            self.name, self.restart_count,
+                            extra={"popup": False},
                         )
-                    self.restart_count = 0
-                    self.stable_loops  = 0
-            except ThreadForcedStop:
-                log.debug("force stop received — exiting loop")
-                break
-            except Exception as e:
-                if self.restart_count >= self.max_restarts:
-                    log.critical(
-                        "Thread '%s' has crashed %d time(s) and reached its restart limit.",
-                        self.name, self.restart_count,
-                    )
-                    log.critical(
-                        "A process keeps crashing. Restart MonoCruise or contact a developer.",
-                        extra={"popup": True},
-                    )
+                        log.critical(
+                            "A process keeps crashing. Restart MonoCruise or contact a developer.",
+                            extra={"popup": True},
+                        )
+                        self.running = False
+                        break
+                    else:
+                        log.exception(
+                            "Unexpected error in loop — thread '%s' has stopped (restart %d/%d):\n%s",
+                            self.name, self.restart_count + 1, self.max_restarts, str(e),
+                            extra={"popup": False},
+                        )
+                        log.error(
+                            "Thread '%s' crashed.\nRestarting now...",
+                            self.name,
+                            extra={"popup": True},
+                        )
                     self.running = False
                     break
-                else:
-                    log.exception(
-                        "Unexpected error in loop — thread '%s' has stopped (restart %d/%d):\n%s",
-                        self.name, self.restart_count + 1, self.max_restarts, e.__str__(),
-                    )
-                    log.error(
-                        "Thread '%s' crashed.\nRestarting now...",
-                        self.name,
-                        extra={"popup": True},
-                    )
-                self.running = False
-                break
 
-            elapsed = time.monotonic() - t0
-            wait    = self.loop_interval - elapsed
-            if wait > 0:
-                self._stop_event.wait(wait)
+                elapsed = time.monotonic() - t0
+                wait    = self.loop_interval - elapsed
+                if wait > 0:
+                    self._stop_event.wait(wait)
 
+        except ThreadForcedStop:
+            log.debug("force stop received — exiting")
         log.debug("teardown")
         try:
             self.teardown()

@@ -87,9 +87,9 @@ class PopupWindow(QWidget):
     
     # All sizes are defined at 1:1 for the reference screen.
     # The ScalableContainer graphics transform scales the whole popup uniformly.
-    _DESIGN_PANEL_WIDTH = 440
+    _DESIGN_PANEL_WIDTH = 450
     _DESIGN_PANEL_HEIGHT = 100
-    _DESIGN_MARGIN = 18
+    _DESIGN_MARGIN = 8
     _DESIGN_PADDING = 12
     _DESIGN_GAP = 22
     _DESIGN_FONT_SIZE = 13

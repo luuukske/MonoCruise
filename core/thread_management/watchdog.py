@@ -97,10 +97,22 @@ class Watchdog(BaseThread):
             dead.stop()
             dead.join(timeout=2.0)
 
+        if dead.is_alive():
+            dead.stop(force=True)
+            dead.join(timeout=2.0)
+            if dead.is_alive():
+                logger.critical(
+                    "thread '%s' could not be stopped. \nRestart MonoCruise or contact a developer.",
+                    dead.name,
+                    extra={"popup": True},
+                )
+                dead.healthy = False
+                return
+
         factory = self._factories.get(dead.name)
         if factory is None:
             logger.critical(
-                "thread '%s' cannot be restarted: no factory registered — this is a bug.",
+                "thread '%s' cannot be restarted: no factory registered — this is a MAJOR bug.",
                 dead.name,
             )
             logger.critical(

@@ -22,7 +22,7 @@ class TestThreadData(ThreadData):
 
 class TestThread(BaseThread):
     loop_interval = 0.05
-    max_restarts  = 2
+    max_restarts  = 1
 
     def __init__(self) -> None:
         super().__init__(name="test_thread")
@@ -43,7 +43,10 @@ class TestThread(BaseThread):
 
         self.i += 1
         if self.i >= 100:
-            time.sleep(30)
+            while True:
+                self.i = self.i + 1
+                if self.i >= 100000000000000:
+                    break
 
     def teardown(self) -> None:
         """Runs once after loop exits. Exceptions are suppressed by base."""
