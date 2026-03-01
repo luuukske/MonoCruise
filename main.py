@@ -39,7 +39,8 @@ from core.thread_management.watchdog import Watchdog
 from core.thread_management.monitor  import Monitor
 from core.thread_management.popup_log_handler import PopupLogHandler
 
-from core.test_thread.thread import TestThread  # remove once real workers exist
+from core.test_thread.thread import TestThread
+from core.telemetry_thread.thread import TelemetryThread
 
 from ui.popup.popup_window import PopupWindow
 
@@ -56,7 +57,7 @@ def _configure_logging(settings: Settings) -> None:
     root.setLevel(logging.DEBUG)
 
     stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
+    stream_handler.setLevel(logging.INFO)
     stream_handler.setFormatter(formatter)
 
     file_handler = logging.FileHandler("monocruise.log", encoding="utf-8", mode="w")
@@ -78,12 +79,9 @@ def _attach_popup_handler(popup: PopupWindow) -> None:
 # Thread factories
 
 def _factory_for(thread):
+    """Return a no-arg callable that creates a new instance of the same type (for watchdog restart)."""
     cls = type(thread)
     return cls
-
-
-def _make_test_thread() -> TestThread:
-    return TestThread()
 
 
 # Shutdown
@@ -94,9 +92,11 @@ def _stop_all() -> None:
         if t.is_alive():
             log.debug("stopping %s", t.name)
             t.stop()
+            t.join(timeout=3.0)
 
     for t in registry.all_threads():
         if t.is_alive():
+            t.stop(force=True)
             t.join(timeout=3.0)
             if t.is_alive():
                 log.warning("%s did not stop cleanly", t.name)
@@ -122,11 +122,9 @@ def main() -> None:
     # Watchdog
     watchdog = Watchdog(auto_restart=settings.auto_restart)
 
-    # Register workers
+    # Register workers (instantiate on the spot; _factory_for(worker) gives watchdog the class for restart)
     workers = [
-        _make_test_thread(),
-        # TelemetryThread(settings),
-        # UIThread(settings),
+        TelemetryThread(),
     ]
 
     for w in workers:
@@ -168,6 +166,12 @@ def main() -> None:
     # Signal handling
     def _shutdown(sig: int, _frame) -> None:
         log.info("signal %s received — shutting down", signal.Signals(sig).name)
+        try:
+            telemetry = registry.get_thread("telemetry_thread")
+            with telemetry.data._lock:
+                telemetry.data.request_quit = True
+        except KeyError:
+            pass
         _stop_all()
         app.quit()
 

@@ -1,9 +1,12 @@
 """
 Main popup window with clean queue-based message handling.
 """
+import logging
 import os
-from typing import Optional
+from typing import ClassVar, Optional
 from enum import Enum, auto
+
+logger = logging.getLogger(__name__)
 
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QLabel, QGraphicsOpacityEffect, QApplication
 from PySide6.QtCore import Qt, QTimer, Signal, QSize, QElapsedTimer, QRectF
@@ -72,13 +75,23 @@ class PopupContainer(QWidget):
 class PopupWindow(QWidget):
     """
     Popup notification window with priority queue.
-    
+
     Animation rules:
     - New message (first in queue): slide_in
     - Message from queue (was waiting): scale_in (previous slides out)
     - Higher priority interrupts: current scales out, new slides in
+
+    Thread-safe global access
+    -------------------------
+    After the window is created in main.py, any thread can post a message
+    without holding a direct reference::
+
+        PopupWindow.emit("Title", "Body text", "c")
+
+    Message type codes: 'e' = error, 'w' = warning, 'c' = check, 'n' = notice.
     """
-    
+
+    _instance: ClassVar[Optional["PopupWindow"]] = None
     _new_message_signal = Signal(object)
     
     # Design constants in pixels (reference: 4K display at 175% DPI scaling)
@@ -104,7 +117,8 @@ class PopupWindow(QWidget):
     
     def __init__(self):
         super().__init__()
-        
+        PopupWindow._instance = self
+
         self._screen = QApplication.primaryScreen().availableGeometry()
         screen_full = QApplication.primaryScreen().geometry()
         
@@ -403,7 +417,36 @@ class PopupWindow(QWidget):
             duration_ms=duration_ms
         )
         self._new_message_signal.emit(popup_message)
-    
+
+    @classmethod
+    def emit(
+        cls,
+        title: str,
+        message: str,
+        message_type: str,
+        duration_ms: int = 5000,
+        priority: int = 0,
+    ) -> None:
+        """
+        Post a popup message from any thread (thread-safe).
+
+        Delegates to the singleton instance created in main.py.
+        Logs a warning and returns silently if the window has not been
+        created yet (e.g. during early startup).
+
+        Args:
+            title: Bold title shown at the top of the popup.
+            message: Body text shown below the title.
+            message_type: 'e' = error, 'w' = warning, 'c' = check, 'n' = notice.
+            duration_ms: How long to display the message (default 5000 ms).
+            priority: Queue priority — higher value shown first (default 0).
+        """
+        if cls._instance is None:
+            logger.warning("PopupWindow.emit called before window was created; dropping message: %s", title)
+            return
+        cls._instance.emit_message(title, message, message_type, duration_ms, priority)
+        logger.info(f"PopupWindow.emit: {title}, {message}, {message_type}, {duration_ms}, {priority}")
+
     def _on_new_message(self, message: PopupMessage):
         """Handle new message arrival."""
         

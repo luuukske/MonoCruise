@@ -151,25 +151,25 @@ class Monitor(BaseThread):
                     t.stop()
                 os._exit(0)
             case _:
-                print(f"unknown command: {raw!r} — type 'help'", flush=True)
+                logger.error(f"unknown command: {raw!r} — type 'help'")
 
     def _cmd_stop(self, name: str) -> None:
-        try:
+        try:    
             registry.get_thread(name).stop()
-            print(f"[monitor] stopping '{name}'", flush=True)
+            logger.info(f"stopping '{name}'")
         except KeyError:
-            print(f"[monitor] unknown thread '{name}'", flush=True)
+            logger.error(f"unknown thread '{name}'")
 
     def _cmd_restart(self, name: str) -> None:
         try:
             t = registry.get_thread(name)
         except KeyError:
-            print(f"[monitor] unknown thread '{name}'", flush=True)
+            logger.error(f"unknown thread '{name}'")
             return
 
         factory = self._watchdog._factories.get(name)
         if factory is None:
-            print(f"[monitor] no factory for '{name}'", flush=True)
+            logger.error(f"no factory for '{name}'")
             return
 
         t.stop()
@@ -179,4 +179,4 @@ class Monitor(BaseThread):
         new_t.name          = name
         registry.replace(new_t)
         new_t.start()
-        print(f"[monitor] restarted '{name}'", flush=True)
+        logger.info(f"restarted '{name}'")

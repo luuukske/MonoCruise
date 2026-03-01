@@ -28,6 +28,9 @@ class Settings:
     telemetry_port: int   = 9341
     loop_interval:  float = 0.05
 
+    # Telemetry / ETS2 SDK
+    autostart: bool = False  # If True, quit app when SDK is lost and we were in auto start mode
+
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> "Settings":
         if not path.exists():
