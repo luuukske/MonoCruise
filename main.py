@@ -122,15 +122,15 @@ def main() -> None:
     log = logging.getLogger("main")
     log.info("starting — debug=%s", settings.debug)
 
-    # ── Popup window ──────────────────────────────────────────────────────────
+    # Popup window
     popup = PopupWindow()
     popup.show()
     _attach_popup_handler(popup)
 
-    # ── Watchdog ──────────────────────────────────────────────────────────────
+    # Watchdog
     watchdog = Watchdog(auto_restart=settings.auto_restart)
 
-    # ── Register workers ──────────────────────────────────────────────────────
+    # Register workers
     workers = [
         _make_test_thread(),
         # TelemetryThread(settings),
@@ -143,13 +143,13 @@ def main() -> None:
 
     registry.register(watchdog)
 
-    # ── Monitor (debug only) ──────────────────────────────────────────────────
+    # Monitor (debug only)
     monitor: Monitor | None = None
     if settings.debug:
         monitor = Monitor(watchdog=watchdog)
         registry.register(monitor)
 
-    # ── Start workers ─────────────────────────────────────────────────────────
+    # Start workers
     for w in workers:
         w.start()
         log.info("started: %s", w.name)
@@ -161,7 +161,7 @@ def main() -> None:
         monitor.start()
         log.info("started: monitor")
 
-    # ── Poll thread liveness via QTimer (keeps Qt event loop free) ───────────
+    # Poll thread liveness via QTimer (keeps Qt event loop free)
     def _check_threads() -> None:
         if not any(t.is_alive() for t in registry.all_threads()):
             log.info("all threads stopped — exiting")
@@ -173,7 +173,7 @@ def main() -> None:
     poll_timer.timeout.connect(_check_threads)
     poll_timer.start()
 
-    # ── Signal handling ───────────────────────────────────────────────────────
+    # Signal handling
     def _shutdown(sig: int, _frame) -> None:
         log.info("signal %s received — shutting down", signal.Signals(sig).name)
         _stop_all()

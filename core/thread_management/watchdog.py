@@ -43,12 +43,12 @@ class Watchdog(BaseThread):
         # name → factory callable
         self._factories: dict[str, Callable[[], BaseThread]] = {}
 
-    # ── factory registration ─────────────────────────────────────────────────
+    # factory registration
 
     def register_factory(self, name: str, factory: Callable[[], BaseThread]) -> None:
         self._factories[name] = factory
 
-    # ── loop ─────────────────────────────────────────────────────────────────
+    # loop
 
     def loop(self) -> None:
         now = time.monotonic()
@@ -89,7 +89,7 @@ class Watchdog(BaseThread):
 
             self._restart(thread)
 
-    # ── restart ──────────────────────────────────────────────────────────────
+    # restart
 
     def _restart(self, dead: BaseThread) -> None:
         # Stop cleanly if still somehow alive

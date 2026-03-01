@@ -21,7 +21,7 @@ class Registry:
         self._lock    = threading.RLock()
         self._threads: dict[str, "BaseThread"] = {}
 
-    # ── registration ─────────────────────────────────────────────────────────
+    # registration
 
     def register(self, thread: "BaseThread") -> None:
         with self._lock:
@@ -38,7 +38,7 @@ class Registry:
         with self._lock:
             self._threads[thread.name] = thread
 
-    # ── lookup ───────────────────────────────────────────────────────────────
+    # lookup
 
     def get_thread(self, name: str) -> "BaseThread":
         with self._lock:

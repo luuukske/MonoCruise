@@ -27,9 +27,7 @@ from core.thread_management.registry    import registry
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Typed data container — other threads read fields directly (GIL-safe)
-# ---------------------------------------------------------------------------
 
 @dataclass
 class MyThreadData(ThreadData):
@@ -45,10 +43,6 @@ class MyThreadData(ThreadData):
             return {"value": self.value, "label": self.label}
 
 
-# ---------------------------------------------------------------------------
-# Worker
-# ---------------------------------------------------------------------------
-
 class MyThread(BaseThread):
     loop_interval = 0.50   # seconds — rate-limit your loop here
     max_restarts  = 5
@@ -58,7 +52,7 @@ class MyThread(BaseThread):
         self.data = MyThreadData()
         self._settings = None   # inject via constructor or module import
 
-    # ── lifecycle ─────────────────────────────────────────────────────────────
+    # lifecycle
 
     def setup(self) -> None:
         """Runs once before the loop. Raise to abort startup."""
@@ -70,17 +64,17 @@ class MyThread(BaseThread):
         Do NOT call time.sleep() here — the base class handles pacing.
         Raise any exception to trigger watchdog handling.
         """
-        # --- read from another thread (single primitive field, GIL-safe) ---
+        # read from another thread (single primitive field, GIL-safe) ---
         # other = registry.get_thread("other_thread")
         # speed = other.data.speed   # float → atomic read
 
-        # --- read multiple fields consistently ---
+        # read multiple fields consistently ---
         # snap = other.data.snapshot()
 
-        # --- update own data (single field, GIL-safe) ---
+        # update own data (single field, GIL-safe) ---
         self.data.value += 1.0
 
-        # --- update multiple fields together (use lock) ---
+        # update multiple fields together (use lock) ---
         with self.data._lock:
             self.data.value += 1.0
             self.data.label  = "running"

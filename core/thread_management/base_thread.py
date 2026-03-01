@@ -27,9 +27,7 @@ class ThreadForcedStop(BaseException):
     pass
 
 
-# ---------------------------------------------------------------------------
 # Minimal typed data container every thread exposes
-# ---------------------------------------------------------------------------
 
 @dataclass
 class ThreadData:
@@ -37,12 +35,10 @@ class ThreadData:
     pass
 
 
-# ---------------------------------------------------------------------------
 # BaseThread
-# ---------------------------------------------------------------------------
 
 class BaseThread(threading.Thread):
-    # ── tunables ────────────────────────────────────────────────────────────
+    # tunables
     loop_interval: float = 0.05          # seconds between loop() calls
     max_restarts:  int   = 1             # restarts allowed before giving up
     stable_after:  int   = 200           # loops without error → stable again
@@ -55,7 +51,7 @@ class BaseThread(threading.Thread):
         self._lock             = threading.Lock()
         self.critical_thread   = critical_thread  # will close MonoCruise in case of a critical error
 
-        # ── watchdog-visible state (primitives → GIL-safe bare reads) ───────
+        # watchdog-visible state (primitives → GIL-safe bare reads)
         self.heartbeat_at:  float = 0.0
         self.restart_count: int   = 0
         self.stable_loops:  int   = 0
@@ -64,7 +60,7 @@ class BaseThread(threading.Thread):
 
         self._stop_event = threading.Event()
 
-    # ── public API ───────────────────────────────────────────────────────────
+    # public API
 
     def stop(self, force: bool = False) -> None:
         """Signal the thread to stop.
@@ -105,7 +101,7 @@ class BaseThread(threading.Thread):
                 "healthy":       self.healthy,
             }
 
-    # ── override in subclass ─────────────────────────────────────────────────
+    # override in subclass
 
     def setup(self) -> None:
         """Called once before the loop. Raise to abort startup."""
@@ -116,7 +112,7 @@ class BaseThread(threading.Thread):
     def teardown(self) -> None:
         """Called after loop exits; exceptions are suppressed."""
 
-    # ── internal ─────────────────────────────────────────────────────────────
+    # internal
 
     def run(self) -> None:
         log = logging.getLogger(self.name)

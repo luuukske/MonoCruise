@@ -42,7 +42,7 @@ class Monitor(BaseThread):
         self._input_thread: threading.Thread | None = None
         self._stop_input  = threading.Event()
 
-    # ── lifecycle ─────────────────────────────────────────────────────────────
+    # lifecycle
 
     def setup(self) -> None:
         self._input_thread = threading.Thread(
@@ -59,7 +59,7 @@ class Monitor(BaseThread):
     def teardown(self) -> None:
         self._stop_input.set()
 
-    # ── rendering (on demand) ─────────────────────────────────────────────────
+    # rendering (on demand)
 
     def _print_status(self) -> None:
         header = f"{'NAME':<20} {'ALIVE':<6} {'OK':<4} {'RST':<5} {'HB AGE':>8}"
@@ -78,7 +78,7 @@ class Monitor(BaseThread):
             )
         print(sep, flush=True)
 
-    # ── CLI input ─────────────────────────────────────────────────────────────
+    # CLI input
 
     def _input_loop(self) -> None:
         if os.name == "nt":
@@ -115,8 +115,11 @@ class Monitor(BaseThread):
                     sys.stdout.flush()
                     self._handle_command(buf)
                     buf = ""
-                elif ch == "\x08":  # backspace
-                    buf = buf[:-1]
+                elif ch in ("\x08", "\x7f"):  # backspace (BS or DEL)
+                    if buf:
+                        buf = buf[:-1]
+                        sys.stdout.write("\x08 \x08")  # erase last char on screen
+                        sys.stdout.flush()
                 else:
                     buf += ch
                     sys.stdout.write(ch)
@@ -124,7 +127,7 @@ class Monitor(BaseThread):
             else:
                 self._stop_input.wait(0.05)
 
-    # ── command dispatch ──────────────────────────────────────────────────────
+    # command dispatch
 
     def _handle_command(self, raw: str) -> None:
         parts = raw.strip().split()
