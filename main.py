@@ -14,9 +14,12 @@ from __future__ import annotations
 import psutil
 
 def is_process_running(name: str) -> bool:
-    for p in psutil.process_iter(['name']):
-        if p.info['name'].lower() == name.lower():
-            return True
+    try:
+        for p in psutil.process_iter(['name']):
+            if p.info.get('name', '').lower() == name.lower():
+                return True
+    except (psutil.Error, KeyError):
+        pass
     return False
 
 if is_process_running("MonoCruise.exe"):

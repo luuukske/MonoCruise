@@ -74,14 +74,13 @@ class PopupLogHandler(logging.Handler):
             title = f"{thread_name} {self._LEVEL_TO_TITLE.get(record.levelno, 'Error')}"
             body = record.getMessage()
             priority = self._priority_for(record)
+            
+            self._popup.emit_message(
+                title=title,
+                message=body,
+                message_type=msg_type,
+                duration_ms=self._duration_ms,
+                priority=priority,
+            )
         except Exception:
             self.handleError(record)
-            return
-
-        self._popup.emit_message(
-            title=title,
-            message=body,
-            message_type=msg_type,
-            duration_ms=self._duration_ms,
-            priority=priority,
-        )
