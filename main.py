@@ -43,9 +43,7 @@ from core.test_thread.thread import TestThread  # remove once real workers exist
 
 from ui.popup.popup_window import PopupWindow
 
-# ---------------------------------------------------------------------------
 # Logging
-# ---------------------------------------------------------------------------
 
 def _configure_logging(settings: Settings) -> None:
     fmt     = "%(asctime)s [%(name)-12s] %(levelname)-8s %(message)s"
@@ -77,9 +75,7 @@ def _attach_popup_handler(popup: PopupWindow) -> None:
     logging.getLogger().addHandler(handler)
 
 
-# ---------------------------------------------------------------------------
 # Thread factories
-# ---------------------------------------------------------------------------
 
 def _factory_for(thread):
     cls = type(thread)
@@ -90,9 +86,7 @@ def _make_test_thread() -> TestThread:
     return TestThread()
 
 
-# ---------------------------------------------------------------------------
 # Shutdown
-# ---------------------------------------------------------------------------
 
 def _stop_all() -> None:
     log = logging.getLogger("main")
@@ -108,9 +102,7 @@ def _stop_all() -> None:
                 log.warning("%s did not stop cleanly", t.name)
 
 
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 
 def main() -> None:
     # QApplication must be created before any Qt objects (including PopupWindow)
