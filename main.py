@@ -109,7 +109,8 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
-    settings = Settings.load()
+    settings = Settings()
+    settings.load()
     _configure_logging(settings)
     log = logging.getLogger("main")
     log.info("starting — debug=%s", settings.debug)
