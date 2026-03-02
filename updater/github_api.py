@@ -58,6 +58,7 @@ class GitHubAPI:
     def download_asset(self, url: str, dest: str, progress_callback=None):
         """Download an asset with progress reporting."""
         response = requests.get(url, stream=True, timeout=_REQUEST_TIMEOUT)
+        response.raise_for_status()
         total = int(response.headers.get('content-length', 0))
         downloaded = 0
         
@@ -67,6 +68,9 @@ class GitHubAPI:
                 downloaded += len(chunk)
                 if progress_callback and total > 0:
                     progress_callback(downloaded / total)
+        
+        if total > 0 and downloaded != total:
+            raise IOError(f"Download incomplete: expected {total} bytes, got {downloaded}")
     
     def render_markdown(self, text: str) -> str:
         """Render markdown to HTML using GitHub's API."""

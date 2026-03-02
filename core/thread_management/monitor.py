@@ -149,7 +149,6 @@ class Monitor(BaseThread):
                 logger.info("quit requested via monitor")
                 for t in registry.all_threads():
                     t.stop()
-                os._exit(0)
             case _:
                 logger.error(f"unknown command: {raw!r} — type 'help'")
 

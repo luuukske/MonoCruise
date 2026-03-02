@@ -89,6 +89,8 @@ class Settings:
                 if k in self.__dataclass_fields__ and not k.startswith("_"):
                     setattr(self, k, v)
         current = self._public_fields()
+        if current == self._saved_state:
+            return
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         with CONFIG_PATH.open("w") as fh:
             json.dump(current, fh, indent=2)

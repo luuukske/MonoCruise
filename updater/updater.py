@@ -72,6 +72,9 @@ class UpdateWorker(QThread):
 
     def _extract_update(self, zip_path: str):
         with zipfile.ZipFile(zip_path, 'r') as zf:
+            bad = zf.testzip()
+            if bad is not None:
+                raise ValueError(f"Corrupt entry in update package: {bad}")
             members = [m for m in zf.namelist()
                        if not any(skip in m for skip in self.updater_files)]
             

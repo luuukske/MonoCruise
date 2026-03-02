@@ -72,8 +72,15 @@ class BaseThread(threading.Thread):
         self._stop_event.set()
         if force and self.ident is not None and self.is_alive():
             try:
+                tid = ctypes.c_ulong(self.ident)
+                if tid.value != self.ident:
+                    logger.warning(
+                        "force stop: thread id %d overflows c_ulong for '%s'",
+                        self.ident, self.name,
+                    )
+                    return
                 res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-                    ctypes.c_ulong(self.ident),
+                    tid,
                     ctypes.py_object(ThreadForcedStop),
                 )
                 if res == 0:

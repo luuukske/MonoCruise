@@ -154,6 +154,15 @@ def main() -> None:
 
     # Poll thread liveness via QTimer (keeps Qt event loop free)
     def _check_threads() -> None:
+        try:
+            telemetry = registry.get_thread("telemetry_thread")
+            if telemetry.data.request_quit:
+                log.info("shutdown requested — exiting")
+                _stop_all()
+                app.quit()
+                return
+        except (KeyError, AttributeError):
+            pass
         if not any(t.is_alive() for t in registry.all_threads()):
             log.info("all threads stopped — exiting")
             _stop_all()
