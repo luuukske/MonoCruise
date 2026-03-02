@@ -121,7 +121,7 @@ def main() -> None:
     _attach_popup_handler(popup)
 
     # Watchdog
-    watchdog = Watchdog(auto_restart=settings.auto_restart)
+    watchdog = Watchdog()
 
     # Register workers (instantiate on the spot; _factory_for(worker) gives watchdog the class for restart)
     workers = [

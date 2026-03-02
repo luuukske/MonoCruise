@@ -37,9 +37,8 @@ POLL_INTERVAL:     float = 0.5   # watchdog check frequency
 class Watchdog(BaseThread):
     loop_interval = POLL_INTERVAL
 
-    def __init__(self, auto_restart: bool = True) -> None:
+    def __init__(self) -> None:
         super().__init__(name="watchdog")
-        self._auto_restart = auto_restart
         # name → factory callable
         self._factories: dict[str, Callable[[], BaseThread]] = {}
 
