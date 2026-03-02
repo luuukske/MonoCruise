@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("monitor")
 
-_COL = 54   # table width
+_COL = 56   # table width
 
 
 class Monitor(BaseThread):
@@ -62,19 +62,20 @@ class Monitor(BaseThread):
     # rendering (on demand)
 
     def _print_status(self) -> None:
-        header = f"{'NAME':<20} {'ALIVE':<6} {'OK':<4} {'RST':<5} {'HB AGE':>8}"
+        header = f"{'NAME':<20} {'ALIVE':<6} {'OK':<4} {'RST':<5} {'AVG FPS':>8}"
         sep    = "─" * _COL
         print(sep)
         print(header)
         print(sep)
         for t in registry.all_threads():
             snap = t.snapshot()
+            fps = f"{snap['avg_framerate']:>8.2f}" if snap["avg_framerate"] > 0 else f"{'n/a':>8}"
             print(
                 f"{snap['name']:<20} "
                 f"{'yes' if t.is_alive() else 'no':<6} "
                 f"{'yes' if snap['healthy'] else 'NO':<4} "
                 f"{snap['restart_count']:<5} "
-                f"{snap['heartbeat_age']:>7.2f}s"
+                f"{fps}"
             )
         print(sep, flush=True)
 

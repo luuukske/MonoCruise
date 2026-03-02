@@ -18,7 +18,7 @@ CONFIG_PATH = Path(__file__).parent.parent / "config.json"
 @dataclass
 class Settings:
     # General settings
-    debug: bool = False
+    debug: bool = True
 
     # UI position/appearance
     panel_x: int = None

@@ -53,12 +53,14 @@ class BaseThread(threading.Thread):
 
         # watchdog-visible state (primitives → GIL-safe bare reads)
         self.heartbeat_at:  float = 0.0
+        self.avg_framerate: float = 0.0
         self.restart_count: int   = 0
         self.stable_loops:  int   = 0
         self.running:       bool  = False
         self.healthy:       bool  = True   # set False by watchdog
 
         self._stop_event = threading.Event()
+        self._fps_samples = 0
 
     # public API
 
@@ -104,6 +106,7 @@ class BaseThread(threading.Thread):
                 "restart_count": self.restart_count,
                 "stable_loops":  self.stable_loops,
                 "heartbeat_age": round(time.monotonic() - self.heartbeat_at, 3),
+                "avg_framerate": round(self.avg_framerate, 2),
                 "running":       self.running,
                 "healthy":       self.healthy,
             }
@@ -185,6 +188,13 @@ class BaseThread(threading.Thread):
                     break
 
                 elapsed = time.monotonic() - t0
+                # Use intended pacing for FPS so tiny scheduler overhead does not
+                # permanently bias averages below the configured loop rate.
+                cycle_duration = max(elapsed, self.loop_interval)
+                if cycle_duration > 0:
+                    inst_fps = 1.0 / cycle_duration
+                    self._fps_samples += 1
+                    self.avg_framerate += (inst_fps - self.avg_framerate) / self._fps_samples
                 wait    = self.loop_interval - elapsed
                 if wait > 0:
                     self._stop_event.wait(wait)
