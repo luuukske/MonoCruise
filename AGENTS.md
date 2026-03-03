@@ -86,7 +86,7 @@ MonoCruise is a third-party software that sits in between ETS2/ATS and your peda
 - **Settings**
   - `core/settings.py`:
     - How configuration for MonoCruise is loaded and exposed using only one instance.
-    - If you are just reading or writing values, all you need to know is to just import the Settings function from settings.py, and write `Settings.save(values={"a_valid_value": self.data.a_valid_value})` for saving and `Settings.a_valid_value`. all valid values are found in `config.json` in the root folder.
+    - If you are just reading or writing values, all you need to know is to just import the Settings function from settings.py, and write `Settings.save(values={"a_valid_value": self.data.a_valid_value})` for saving and `Settings.a_valid_value` for reading values. all valid values are found in `config.json` in the root folder.
 
 ### Privacy and safety requirements for agents
 
