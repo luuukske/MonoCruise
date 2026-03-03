@@ -2,6 +2,10 @@
 
 This document explains how this program is structured and where to look for usages and examples when making changes as an AI agent.
 
+**Project details:**
+
+MonoCruise is a third-party software that sits in between ETS2/ATS and your pedals. MonoCruise has a ton of quality of life features, like a better Adaptive Cruise Controll or a One-Pedal Driving system for heavy traffic. every feature (including the ACC) works in TruckersMP and singleplayer ETS2/ATS.
+
 ### High‑level architecture
 
 - **Entry point**
@@ -81,7 +85,8 @@ This document explains how this program is structured and where to look for usag
 
 - **Settings**
   - `core/settings.py`:
-    - How configuration for MonoCruise is loaded and exposed.
+    - How configuration for MonoCruise is loaded and exposed using only one instance.
+    - If you are just reading or writing values, all you need to know is to just import the Settings function from settings.py, and write `Settings.save(values={"a_valid_value": self.data.a_valid_value})` for saving and `Settings.a_valid_value`. all valid values are found in `config.json` in the root folder.
 
 ### Privacy and safety requirements for agents
 
@@ -103,3 +108,6 @@ This document explains how this program is structured and where to look for usag
 - **Testing and validation**
   - Do not add or update tests when changing thread behaviour that could affect stability or watchdog/monitor behaviour.
   - Do not disable existing safety checks (watchdog, health checks, restart limits, etc.) to “fix” failing tests or crashes.
+
+- **Physical safety**
+  - When an error uccurs or certain parts of the code fail, the user must ALWAYS be able to stop the vehicle being controlled in ETS2 or ATS without causing an accident.
