@@ -39,9 +39,9 @@ from core.thread_management.watchdog import Watchdog
 from core.thread_management.monitor  import Monitor
 from core.thread_management.popup_log_handler import PopupLogHandler
 
-from core.test_thread.thread import TestThread
 from core.telemetry_thread.thread import TelemetryThread
 
+from ui.main_window import create_main_window
 from ui.popup.popup_window import PopupWindow
 
 # Logging
@@ -119,6 +119,10 @@ def main() -> None:
     popup = PopupWindow()
     popup.show()
     _attach_popup_handler(popup)
+
+    # Main window (lives on the main thread — no separate thread needed)
+    window = create_main_window(settings, version="v2.0.0")
+    window.window_closed.connect(lambda: (_stop_all(), app.quit()))
 
     # Watchdog
     watchdog = Watchdog()
