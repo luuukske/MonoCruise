@@ -9,16 +9,42 @@ reference imported here.
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 from pathlib     import Path
 
 CONFIG_PATH = Path(__file__).parent.parent / "config.json"
 
 
+class _SingletonMeta(type):
+    _instances: dict[type, object] = {}
+    _lock = threading.Lock()
+
+    def __call__(cls, *args, **kwargs):
+        with cls._lock:
+            if cls not in cls._instances:
+                cls._instances[cls] = super().__call__(*args, **kwargs)
+        return cls._instances[cls]
+
+    def __getattribute__(cls, name):
+        # Forward class-level field access (Settings.some_field) to the singleton instance.
+        if not name.startswith("_"):
+            try:
+                dataclass_fields = super().__getattribute__("__dataclass_fields__")
+                if name in dataclass_fields:
+                    instance = cls()
+                    with instance._state_lock:
+                        return getattr(instance, name)
+            except AttributeError:
+                pass
+        return super().__getattribute__(name)
+
+
 @dataclass
-class Settings:
+class Settings(metaclass=_SingletonMeta):
     # General settings
     debug: bool = True
+    last_game: int = 1 # 1 = ETS2, 2 = ATS
 
     # UI position/appearance
     panel_x: int = None
@@ -33,7 +59,7 @@ class Settings:
     gasaxis: int = None
     brakeaxis: int = None
 
-    # Configuration
+    # Pedal configuration
     gas_exponent_variable: float = None
     brake_exponent_variable: float = None
     weight_adjustment: bool = False
@@ -63,35 +89,47 @@ class Settings:
     long_press_reset: bool = True
 
     _saved_state: dict = field(default_factory=dict, init=False, repr=False, compare=False)
+    _state_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
 
     def _public_fields(self) -> dict:
         return {k: getattr(self, k) for k in self.__dataclass_fields__ if not k.startswith("_")}
 
-    def load(self) -> None:
-        self._saved_state = {}
-        if not CONFIG_PATH.exists():
-            return
-        with CONFIG_PATH.open() as fh:
-            data = json.load(fh)
-        for k, v in data.items():
-            if k in self.__dataclass_fields__ and not k.startswith("_"):
-                setattr(self, k, v)
-                self._saved_state[k] = v
+    @classmethod
+    def instance(cls) -> "Settings":
+        return cls()
 
-    def save(self, values: dict | None = None):
+    @classmethod
+    def load(cls) -> None:
+        self = cls.instance()
+        with self._state_lock:
+            self._saved_state = {}
+            if not CONFIG_PATH.exists():
+                return
+            with CONFIG_PATH.open() as fh:
+                data = json.load(fh)
+            for k, v in data.items():
+                if k in self.__dataclass_fields__ and not k.startswith("_"):
+                    setattr(self, k, v)
+                    self._saved_state[k] = v
+
+    @classmethod
+    def save(cls, values: dict | None = None):
         """Write settings to disk only when values have changed since the last load or save.
 
         If *values* is provided, those fields are applied to the instance before
         the dirty check, allowing a partial update in a single call.
         """
-        if values:
-            for k, v in values.items():
-                if k in self.__dataclass_fields__ and not k.startswith("_"):
-                    setattr(self, k, v)
-        current = self._public_fields()
-        if current == self._saved_state:
+        self = cls.instance()
+        with self._state_lock:
+            if values:
+                for k, v in values.items():
+                    if k in self.__dataclass_fields__ and not k.startswith("_"):
+                        setattr(self, k, v)
+            current = self._public_fields()
+            if current == self._saved_state:
+                return
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with CONFIG_PATH.open("w") as fh:
+                json.dump(current, fh, indent=2)
+            self._saved_state = dict(current)
             return
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with CONFIG_PATH.open("w") as fh:
-            json.dump(current, fh, indent=2)
-        self._saved_state = dict(current)
