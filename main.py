@@ -121,7 +121,7 @@ def main() -> None:
     _attach_popup_handler(popup)
 
     # Main window (lives on the main thread — no separate thread needed)
-    window = create_main_window(settings, version="v2.0.0")
+    window = create_main_window(settings, version="v1.1.0")
     window.window_closed.connect(lambda: (_stop_all(), app.quit()))
 
     # Watchdog
