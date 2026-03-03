@@ -52,7 +52,13 @@ class Watchdog(BaseThread):
     def loop(self) -> None:
         now = time.monotonic()
         for thread in registry.all_threads():
-            if thread is self or not thread.watched or not thread.healthy:
+            if thread is self or not getattr(thread, "watched", False) or not getattr(thread, "healthy", False):
+                continue
+
+            # Defensive compatibility: skip entries that are not restartable workers.
+            restart_count = getattr(thread, "restart_count", None)
+            max_restarts = getattr(thread, "max_restarts", None)
+            if restart_count is None or max_restarts is None:
                 continue
 
             crashed  = not thread.running and thread.is_alive() is False
@@ -63,7 +69,7 @@ class Watchdog(BaseThread):
                 continue
 
 
-            if thread.restart_count >= thread.max_restarts:
+            if restart_count >= max_restarts:
                 # logging is handled in base_thread.py
                 thread.healthy = False
                 if not crashed:
@@ -82,7 +88,7 @@ class Watchdog(BaseThread):
                         extra={"popup": True},
                 )
 
-            if not self._auto_restart:
+            if not getattr(self, "_auto_restart", True):
                 thread.healthy = False
                 continue
 

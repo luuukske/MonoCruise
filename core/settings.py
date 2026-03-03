@@ -130,6 +130,6 @@ class Settings(metaclass=_SingletonMeta):
                 return
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             with CONFIG_PATH.open("w") as fh:
-                json.dump(current, fh, indent=2)
+                json.dump(current, fh, indent=2, sort_keys=True)
             self._saved_state = dict(current)
             return

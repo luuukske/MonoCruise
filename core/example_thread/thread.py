@@ -38,10 +38,6 @@ class MyThreadData(ThreadData):
     # For consistent multi-field reads, expose snapshot():
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
-    def snapshot(self) -> dict:
-        with self._lock:
-            return {"value": self.value, "label": self.label}
-
 
 class MyThread(BaseThread):
     loop_interval = 0.50   # seconds — rate-limit your loop here

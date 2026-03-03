@@ -46,7 +46,7 @@ from ui.popup.popup_window import PopupWindow
 
 # Logging
 
-def _configure_logging(settings: Settings) -> None:
+def _configure_logging() -> None:
     fmt     = "%(asctime)s [%(name)-12s] %(levelname)-8s %(message)s"
     datefmt = "%H:%M:%S"
     formatter = logging.Formatter(fmt, datefmt=datefmt)
@@ -111,7 +111,7 @@ def main() -> None:
 
     settings = Settings()
     settings.load()
-    _configure_logging(settings)
+    _configure_logging()
     log = logging.getLogger("main")
     log.info("starting — debug=%s", settings.debug)
 
@@ -122,6 +122,7 @@ def main() -> None:
 
     # Main window (lives on the main thread — no separate thread needed)
     window = create_main_window(settings, version="v1.1.0")
+    registry.register_object("main_window", window)
     window.window_closed.connect(lambda: (_stop_all(), app.quit()))
 
     # Watchdog
@@ -155,6 +156,8 @@ def main() -> None:
     if monitor:
         monitor.start()
         log.info("started: monitor")
+
+    window.apply_startup_visibility()
 
     # Poll thread liveness via QTimer (keeps Qt event loop free)
     def _check_threads() -> None:
