@@ -4,7 +4,7 @@
 
 > [!WARNING]
 > I am currently reworking the code architecture with better error handling.
-> Current raw code is instable in its current state. Please be patient until i rework the architecture.
+> Current raw code is unstable in its current state. Please be patient until i rework the architecture.
 
 # MonoCruise
 MonoCruise is a third-party software that sits in between ETS2/ATS and your pedals. 
