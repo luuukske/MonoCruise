@@ -32,6 +32,7 @@ def _log_name(name: str) -> str:
 
 HEARTBEAT_TIMEOUT: float = 1.0   # seconds
 POLL_INTERVAL:     float = 0.25   # watchdog check frequency
+LOW_FPS_THRESHOLD: float = 0.70  # warn when actual FPS < this fraction of wanted FPS
 
 
 class Watchdog(BaseThread):
@@ -41,6 +42,8 @@ class Watchdog(BaseThread):
         super().__init__(name="watchdog")
         # name → factory callable
         self._factories: dict[str, Callable[[], BaseThread]] = {}
+        # low FPS popup shown once per program run
+        self._low_fps_popup_shown: bool = False
 
     # factory registration
 
@@ -54,6 +57,20 @@ class Watchdog(BaseThread):
         for thread in registry.all_threads():
             if thread is self or not getattr(thread, "watched", False) or not getattr(thread, "healthy", False):
                 continue
+
+            # Low FPS warning (actual FPS, not averaged): log once per program run
+            if not self._low_fps_popup_shown:
+                interval = getattr(thread, "loop_interval", 0.0)
+                if interval > 0:
+                    wanted_fps = 1.0 / interval
+                    actual_fps = getattr(thread, "inst_fps", 0.0)
+                    threshold_fps = LOW_FPS_THRESHOLD * wanted_fps
+                    if actual_fps > 0 and actual_fps < threshold_fps:
+                        logger.warning(
+                            "One or more threads are running below 70%% of their target FPS.",
+                            extra={"popup": True},
+                        )
+                        self._low_fps_popup_shown = True
 
             # Defensive compatibility: skip entries that are not restartable workers.
             restart_count = getattr(thread, "restart_count", None)

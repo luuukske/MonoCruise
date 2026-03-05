@@ -163,6 +163,7 @@ class BaseThread:
         # watchdog-visible state (primitives → GIL-safe bare reads)
         self.heartbeat_at:  float = 0.0
         self.avg_framerate: float = 0.0
+        self.inst_fps:      float = 0.0   # last loop's actual FPS (1/cycle_duration)
         self.restart_count: int   = 0
         self.stable_loops:  int   = 0
         self.running:       bool  = False
@@ -355,6 +356,7 @@ class BaseThread:
                 cycle_duration = max(elapsed, self.loop_interval)
                 if cycle_duration > 0:
                     inst_fps = 1.0 / cycle_duration
+                    self.inst_fps = inst_fps
                     if self._fps_samples == 0:
                         self.avg_framerate = inst_fps
                     else:

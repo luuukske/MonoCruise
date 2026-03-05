@@ -8,8 +8,8 @@ Responsibilities:
 - Apply gas/brake exponents and write aforward/abackward to the game.
 - Expose toggle_bool() for timed boolean presses (False → True → False).
 - Expose set_bool() for persistent boolean overrides.
-- Expose change_hazards() for verified hazard toggling with auto-retoggle (max 3).
-- Force hazards ON (with a lock) when pedal thread is down or em_stop is True.
+- Expose change_hazards() for verified hazard toggling with retrigger (max 3).
+- Toggle hazards ON on rising edge of pedal-thread-down / em_stop.
 """
 
 import logging
@@ -31,8 +31,7 @@ logger = logging.getLogger(__name__)
 
 BOOL_PRESS_DURATION: float = 0.1
 HAZARD_PRESS_DURATION: float = 0.4
-HAZARD_VERIFY_TIMEOUT: float = 0.1
-EM_STOP_LOCK_DURATION: float = 0.5
+HAZARD_VERIFY_DELAY: float = 0.1
 HAZARD_MAX_RETRIGGERS: int = 3
 
 # ---------------------------------------------------------------------------
@@ -53,48 +52,6 @@ class SendingThreadData(ThreadData):
 
 
 # ---------------------------------------------------------------------------
-# Internal state helpers
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _BoolPress:
-    """One-shot timed press: True for [duration] seconds, then False."""
-    pressing: bool = False
-    release_at: float = 0.0
-
-
-@dataclass
-class _HazardState:
-    """
-    State for the 4-way blinker toggle state machine.
-
-    Sequence per toggle attempt:
-      idle      → telemetry != effective_wanted → start press
-      pressing  → flasher4way=True for hold_duration, then release
-      verifying → flasher4way=False, wait up to HAZARD_VERIFY_TIMEOUT
-                  confirmed → done
-                  timeout   → retrigger (if retrigger_count < HAZARD_MAX_RETRIGGERS)
-
-    user_wanted: target set by change_hazards(). None = hands-off.
-    lock_until:  monotonic time until which hazards are forced ON.
-                 Refreshed every tick while the forcing condition is active;
-                 expires EM_STOP_LOCK_DURATION after the condition clears.
-    hold_duration: how long to hold the toggle press (set per change_hazards call).
-    retrigger_count: number of retrigger attempts so far; resets on new request.
-    """
-
-    user_wanted: bool | None = None
-    hold_duration: float = HAZARD_PRESS_DURATION
-    lock_until: float = 0.0
-    pressing: bool = False
-    press_until: float = 0.0
-    verifying: bool = False
-    verify_until: float = 0.0
-    retrigger_count: int = 0
-
-
-# ---------------------------------------------------------------------------
 # Thread
 # ---------------------------------------------------------------------------
 
@@ -108,14 +65,26 @@ class SendingThread(BaseThread):
         self.data = SendingThreadData()
         self._controller: SCSController | None = None
         self._lock = threading.Lock()
-        # Timed one-shot presses: name → _BoolPress
-        self._bool_presses: dict[str, _BoolPress] = {}
-        # Persistent overrides: name → bool (applied every tick until cleared)
+
+        # toggle_bool state: name → (release_at,)
+        self._bool_presses: dict[str, float] = {}
+
+        # set_bool state: name → value
         self._bool_overrides: dict[str, bool] = {}
-        self._hazard = _HazardState()
+
+        # change_hazards state
+        self._hazard_wanted: bool | None = None
+        self._hazard_duration: float = HAZARD_PRESS_DURATION
+        self._hazard_press_until: float = 0.0
+        self._hazard_verify_until: float = 0.0
+        self._hazard_retriggers: int = 0
+        self._hazard_phase: str = "idle"  # "idle", "pressing", "verifying"
+
+        # Edge detection for force-on
+        self._last_should_force: bool = False
 
     # ------------------------------------------------------------------ #
-    # Public API                                                           #
+    # Public API (called from other threads)                               #
     # ------------------------------------------------------------------ #
 
     def toggle_bool(self, name: str, duration: float = BOOL_PRESS_DURATION) -> None:
@@ -123,21 +92,16 @@ class SendingThread(BaseThread):
         One-shot timed press: set *name* True for *duration* seconds, then False.
 
         Calling again while a press is active extends the release time.
-        Default hold duration: 0.1 s.
         """
         with self._lock:
-            press = self._bool_presses.setdefault(name, _BoolPress())
-            press.pressing = True
-            press.release_at = time.monotonic() + max(duration, 0.0)
+            self._bool_presses[name] = time.monotonic() + max(duration, 0.0)
         logger.debug("toggle_bool: %s for %.3fs", name, duration)
 
     def set_bool(self, name: str, value: bool = True) -> None:
         """
-        Persistently hold *name* at *value* on the controller.
+        Persistently hold *name* at *value* on the controller every tick.
 
-        The override is applied every tick until you call set_bool(name, False)
-        or set_bool(name, True) again.  Use this for inputs that should stay
-        in a fixed state (e.g. horn held, a mode latch).
+        Remains until you call set_bool(name, False).
         """
         with self._lock:
             self._bool_overrides[name] = value
@@ -145,21 +109,17 @@ class SendingThread(BaseThread):
 
     def change_hazards(self, wanted: bool, duration: float = HAZARD_PRESS_DURATION) -> None:
         """
-        Request a 4-way blinker state.
+        Request hazards ON or OFF.
 
-        Compares *wanted* against live telemetry.  If they differ, triggers a
-        toggle press of *duration* seconds (default 0.4 s).  Waits
-        HAZARD_VERIFY_TIMEOUT (0.1 s) for telemetry to confirm; retriggles if
-        not, up to HAZARD_MAX_RETRIGGERS (3) times.  Each retrigger resets the
-        full hold duration.
-
-        Requests made while an em_stop lock is active are queued and honoured
-        once the lock expires.
+        Reads telemetry to check the current state. If different from *wanted*,
+        triggers a toggle press of *duration* seconds. After the press, waits
+        0.1s to verify. If not confirmed, retriggers up to 3 times.
         """
         with self._lock:
-            self._hazard.user_wanted = wanted
-            self._hazard.hold_duration = max(duration, 0.0)
-            self._hazard.retrigger_count = 0
+            self._hazard_wanted = wanted
+            self._hazard_duration = max(duration, 0.0)
+            self._hazard_retriggers = 0
+            self._hazard_phase = "idle"
         logger.debug("change_hazards: wanted=%s duration=%.3fs", wanted, duration)
 
     # ------------------------------------------------------------------ #
@@ -187,7 +147,9 @@ class SendingThread(BaseThread):
         logger.info("initialising SCSController shared-memory interface")
         self._controller = SCSController()
         self._reset_controller(self._controller)
-        self._hazard = _HazardState()
+        self._hazard_phase = "idle"
+        self._hazard_wanted = None
+        self._last_should_force = False
         logger.debug("SCSController initialised")
 
     def loop(self) -> None:
@@ -201,7 +163,7 @@ class SendingThread(BaseThread):
             return
 
         # ------------------------------------------------------------------
-        # Pedal thread state.
+        # Pedal thread state
         # ------------------------------------------------------------------
         pedal_thread = registry.get_thread("main_pedal_thread")
         pedal_alive = pedal_thread is not None and pedal_thread.is_alive()
@@ -215,7 +177,7 @@ class SendingThread(BaseThread):
                 logger.debug("em_stop read failed: %s", e)
 
         # ------------------------------------------------------------------
-        # Telemetry.
+        # Telemetry
         # ------------------------------------------------------------------
         tel_thread = registry.get_thread("telemetry_thread")
         with tel_thread.data._lock:
@@ -225,8 +187,7 @@ class SendingThread(BaseThread):
             speed_ms = tel_thread.data.speed
 
         # ------------------------------------------------------------------
-        # Auto-disable hazards when driving (speed > 12 km/h, gas >= 40%,
-        # brake not pressed) — only when autodisable_hazards is enabled.
+        # Auto-disable hazards when driving
         # ------------------------------------------------------------------
         if Settings.autodisable_hazards and pedal_thread is not None:
             speed_kmh = speed_ms * 3.6
@@ -235,16 +196,25 @@ class SendingThread(BaseThread):
                 brake_pct = pedal_thread.data.brakeval
             if speed_kmh > 12.0 and gas_pct >= 0.40 and brake_pct < 0.05:
                 with self._lock:
-                    self._hazard.user_wanted = False
+                    self._hazard_wanted = False
+                    if self._hazard_phase == "idle":
+                        self._hazard_retriggers = 0
 
         # ------------------------------------------------------------------
-        # Hazard state machine — always runs regardless of SDK/pedal state.
+        # Force hazards ON on rising edge of em_stop / pedal thread down
         # ------------------------------------------------------------------
         should_force = not pedal_alive or em_stop
-        self._tick_hazards(controller, tel_hazards, should_force)
+        if should_force and not self._last_should_force:
+            self.change_hazards(True)
+        self._last_should_force = should_force
 
         # ------------------------------------------------------------------
-        # Persistent bool overrides.
+        # Hazard state machine
+        # ------------------------------------------------------------------
+        self._tick_hazards(controller, tel_hazards)
+
+        # ------------------------------------------------------------------
+        # Persistent bool overrides (always applied)
         # ------------------------------------------------------------------
         self._tick_bool_overrides(controller)
 
@@ -257,7 +227,7 @@ class SendingThread(BaseThread):
             return
 
         # ------------------------------------------------------------------
-        # Pedal inputs.
+        # Pedal inputs
         # ------------------------------------------------------------------
         with pedal_thread.data._lock:
             gas_output = pedal_thread.data.gas_output
@@ -319,7 +289,6 @@ class SendingThread(BaseThread):
     # ------------------------------------------------------------------ #
 
     def _tick_bool_overrides(self, controller: SCSController) -> None:
-        """Apply all persistent set_bool overrides to the controller."""
         with self._lock:
             overrides = dict(self._bool_overrides)
         for name, value in overrides.items():
@@ -329,15 +298,12 @@ class SendingThread(BaseThread):
                 pass
 
     def _tick_bool_presses(self, controller: SCSController) -> None:
-        """Drive one-shot timed toggle_bool presses."""
         now = time.monotonic()
         with self._lock:
             items = list(self._bool_presses.items())
 
-        for name, press in items:
-            if not press.pressing:
-                continue
-            if now < press.release_at:
+        for name, release_at in items:
+            if now < release_at:
                 try:
                     setattr(controller, name, True)
                 except (AttributeError, OSError, TypeError):
@@ -348,110 +314,96 @@ class SendingThread(BaseThread):
                 except (AttributeError, OSError, TypeError):
                     pass
                 with self._lock:
-                    press.pressing = False
+                    self._bool_presses.pop(name, None)
 
-    def _tick_hazards(
-        self,
-        controller: SCSController,
-        tel_hazards: bool,
-        should_force: bool,
-    ) -> None:
+    def _tick_hazards(self, controller: SCSController, tel_hazards: bool) -> None:
         """
-        4-way blinker state machine.
+        Hazard state machine with 3 phases: idle → pressing → verifying.
 
-        should_force=True (em_stop or pedal thread down):
-            Refreshes lock_until each tick; lock expires EM_STOP_LOCK_DURATION
-            after the forcing condition clears.  During the lock effective_wanted
-            is always True regardless of user_wanted.
-
-        Retrigger cap: after HAZARD_MAX_RETRIGGERS failed attempts the state
-        machine gives up and clears user_wanted.
+        - idle: if wanted != telemetry, start pressing.
+        - pressing: hold flasher4way=True for the hold duration, then verify.
+        - verifying: wait 0.1s, check telemetry. If matched → done. If not → retrigger (up to 3).
         """
         now = time.monotonic()
-        state = self._hazard
 
-        if should_force:
-            state.lock_until = now + EM_STOP_LOCK_DURATION
-
-        locked = now < state.lock_until
         with self._lock:
-            user_wanted = state.user_wanted
+            wanted = self._hazard_wanted
 
-        effective_wanted: bool | None = True if locked else user_wanted
-
-        if effective_wanted and not Settings.hazards_variable:
-            effective_wanted = False
-
-        if effective_wanted is None:
+        if wanted is None:
             try:
                 controller.flasher4way = False
             except (AttributeError, OSError, TypeError):
                 pass
             return
 
-        press_flasher = False
+        if wanted and not Settings.hazards_variable:
+            try:
+                controller.flasher4way = False
+            except (AttributeError, OSError, TypeError):
+                pass
+            return
 
-        if state.pressing:
-            if now < state.press_until:
-                press_flasher = True
+        if self._hazard_phase == "idle":
+            if tel_hazards != wanted:
+                # Telemetry doesn't match → start a toggle press
+                logger.debug("hazard: starting press (telemetry=%s, wanted=%s)", tel_hazards, wanted)
+                self._hazard_phase = "pressing"
+                self._hazard_press_until = now + self._hazard_duration
             else:
-                # Trailing edge: release, open verification window.
-                state.pressing = False
-                state.verifying = True
-                state.verify_until = now + HAZARD_VERIFY_TIMEOUT
-                logger.debug(
-                    "hazard press released, verifying for %.2fs (wanted=%s)",
-                    HAZARD_VERIFY_TIMEOUT,
-                    effective_wanted,
-                )
+                # Already in the right state, nothing to do
+                with self._lock:
+                    self._hazard_wanted = None
+                try:
+                    controller.flasher4way = False
+                except (AttributeError, OSError, TypeError):
+                    pass
+                return
 
-        elif state.verifying:
-            if tel_hazards == effective_wanted:
-                logger.debug("hazard confirmed: telemetry=%s", tel_hazards)
-                state.verifying = False
-                state.retrigger_count = 0
-                if not locked:
-                    with self._lock:
-                        state.user_wanted = None
-            elif now >= state.verify_until:
-                if state.retrigger_count >= HAZARD_MAX_RETRIGGERS:
+        if self._hazard_phase == "pressing":
+            if now < self._hazard_press_until:
+                try:
+                    controller.flasher4way = True
+                except (AttributeError, OSError, TypeError):
+                    pass
+            else:
+                # Press done, start verifying
+                try:
+                    controller.flasher4way = False
+                except (AttributeError, OSError, TypeError):
+                    pass
+                self._hazard_phase = "verifying"
+                self._hazard_verify_until = now + HAZARD_VERIFY_DELAY
+                logger.debug("hazard: press released, verifying (wanted=%s)", wanted)
+
+        elif self._hazard_phase == "verifying":
+            try:
+                controller.flasher4way = False
+            except (AttributeError, OSError, TypeError):
+                pass
+
+            if tel_hazards == wanted:
+                # Confirmed
+                logger.debug("hazard: confirmed (telemetry=%s)", tel_hazards)
+                self._hazard_phase = "idle"
+                with self._lock:
+                    self._hazard_wanted = None
+                    self._hazard_retriggers = 0
+            elif now >= self._hazard_verify_until:
+                # Not confirmed after timeout
+                if self._hazard_retriggers >= HAZARD_MAX_RETRIGGERS:
                     logger.warning(
-                        "hazard retrigger limit (%d) reached, giving up (wanted=%s)",
-                        HAZARD_MAX_RETRIGGERS,
-                        effective_wanted,
+                        "hazard: retrigger limit (%d) reached, giving up (wanted=%s)",
+                        HAZARD_MAX_RETRIGGERS, wanted,
                     )
-                    state.verifying = False
-                    state.retrigger_count = 0
-                    if not locked:
-                        with self._lock:
-                            state.user_wanted = None
+                    self._hazard_phase = "idle"
+                    with self._lock:
+                        self._hazard_wanted = None
+                        self._hazard_retriggers = 0
                 else:
-                    state.retrigger_count += 1
+                    self._hazard_retriggers += 1
                     logger.debug(
-                        "hazard verify timeout: telemetry=%s, wanted=%s — retrigger %d/%d",
-                        tel_hazards,
-                        effective_wanted,
-                        state.retrigger_count,
-                        HAZARD_MAX_RETRIGGERS,
+                        "hazard: verify timeout, retrigger %d/%d (telemetry=%s, wanted=%s)",
+                        self._hazard_retriggers, HAZARD_MAX_RETRIGGERS, tel_hazards, wanted,
                     )
-                    state.verifying = False
-                    state.pressing = True
-                    state.press_until = now + state.hold_duration
-                    press_flasher = True
-
-        else:
-            # Idle: start a press if telemetry doesn't match.
-            if tel_hazards != effective_wanted:
-                logger.debug(
-                    "hazard starting press: telemetry=%s, wanted=%s",
-                    tel_hazards,
-                    effective_wanted,
-                )
-                state.pressing = True
-                state.press_until = now + state.hold_duration
-                press_flasher = True
-
-        try:
-            controller.flasher4way = press_flasher
-        except (AttributeError, OSError, TypeError):
-            pass
+                    self._hazard_phase = "pressing"
+                    self._hazard_press_until = now + self._hazard_duration
