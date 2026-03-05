@@ -1,0 +1,140 @@
+"""
+Watchdog — monitors heartbeats and optionally restarts dead threads.
+
+Detection:
+  • thread.running is False  → crashed
+  • heartbeat_age > HEARTBEAT_TIMEOUT → frozen (no loop() tick)
+
+Restart:
+  • Allowed while thread.restart_count < thread.max_restarts
+  • A new instance is created via _factory (callable → BaseThread)
+  • The factory must accept no arguments (use functools.partial if needed)
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from typing import Callable, TYPE_CHECKING
+
+from core.thread_management.base_thread import BaseThread
+from core.thread_management.registry    import registry
+
+if TYPE_CHECKING:
+    pass
+
+logger = logging.getLogger("watchdog")
+
+
+def _log_name(name: str) -> str:
+    return (name.replace("_thread", "") + " code").capitalize()
+
+
+HEARTBEAT_TIMEOUT: float = 1.0   # seconds
+POLL_INTERVAL:     float = 0.25   # watchdog check frequency
+
+
+class Watchdog(BaseThread):
+    loop_interval = POLL_INTERVAL
+
+    def __init__(self) -> None:
+        super().__init__(name="watchdog")
+        # name → factory callable
+        self._factories: dict[str, Callable[[], BaseThread]] = {}
+
+    # factory registration
+
+    def register_factory(self, name: str, factory: Callable[[], BaseThread]) -> None:
+        self._factories[name] = factory
+
+    # loop
+
+    def loop(self) -> None:
+        now = time.monotonic()
+        for thread in registry.all_threads():
+            if thread is self or not getattr(thread, "watched", False) or not getattr(thread, "healthy", False):
+                continue
+
+            # Defensive compatibility: skip entries that are not restartable workers.
+            restart_count = getattr(thread, "restart_count", None)
+            max_restarts = getattr(thread, "max_restarts", None)
+            if restart_count is None or max_restarts is None:
+                continue
+
+            crashed  = not thread.running and thread.is_alive() is False
+            age      = now - thread.heartbeat_at
+            frozen   = thread.heartbeat_at > 0 and age > HEARTBEAT_TIMEOUT
+
+            if not (crashed or frozen):
+                continue
+
+
+            if restart_count >= max_restarts:
+                # logging is handled in base_thread.py
+                thread.healthy = False
+                if not crashed:
+                    logger.error(
+                        "%s froze and couldn't restart.\nRestart MonoCruise or contact a developer.",
+                        _log_name(thread.name),
+                        extra={"popup": True},
+                    )
+                    thread.stop(force=True)
+                continue
+            else:
+                if not crashed:
+                    logger.warning(
+                        "%s has frozen.\nRestarting now...",
+                        _log_name(thread.name),
+                        extra={"popup": True},
+                )
+
+            if not getattr(self, "_auto_restart", True):
+                thread.healthy = False
+                continue
+
+            self._restart(thread)
+
+    # restart
+
+    def _restart(self, dead: BaseThread) -> None:
+        # Stop cleanly if still somehow alive
+        if dead.is_alive():
+            dead.stop()
+            dead.join(timeout=2.0)
+
+        if dead.is_alive():
+            dead.stop(force=True)
+            dead.join(timeout=2.0)
+            if dead.is_alive():
+                logger.critical(
+                    "thread '%s' could not be stopped. \nRestart MonoCruise or contact a developer.",
+                    dead.name,
+                    extra={"popup": True},
+                )
+                dead.healthy = False
+                return
+
+        factory = self._factories.get(dead.name)
+        if factory is None:
+            logger.critical(
+                "thread '%s' cannot be restarted: no factory registered — this is a MAJOR bug.",
+                dead.name,
+            )
+            logger.critical(
+                "Internal error: component can't restart. Please contact a developer.",
+                extra={"popup": True},
+            )
+            dead.healthy = False
+            return
+
+        new_thread               = factory()
+        new_thread.restart_count = dead.restart_count + 1
+        new_thread.name          = dead.name           # preserve name
+
+        logger.info(
+            "Restarting '%s' (attempt %d of %d).",
+            new_thread.name, new_thread.restart_count, new_thread.max_restarts,
+        )
+
+        registry.replace(new_thread)
+        new_thread.start()
