@@ -27,6 +27,7 @@ if is_process_running("MonoCruise.exe"):
     exit()
 
 import logging
+import re
 import signal
 import sys
 
@@ -46,12 +47,43 @@ from core.sending_thread.thread import SendingThread, create_visualization_bar
 from ui.main_window import create_main_window
 from ui.popup.popup_window import PopupWindow
 
+# Path redaction
+# This is to protect user information from being shared online.
+
+_REDACTED_PATH_PLACEHOLDER = "#:/####-redacted-absolute-path-####/"
+# Windows: C:\... or C:/...
+_WIN_PATH_RE = re.compile(r'[A-Za-z]:[\\\/][^\s"\'<>|*?\x00-\x1f]*')
+# Linux: /home/..., /root/..., /opt/..., /usr/..., /var/..., /tmp/..., /etc/..., /mnt/..., /srv/..., /run/...
+_LIN_PATH_RE = re.compile(r'(?<!\w)/(?:home|root|opt|usr|var|tmp|etc|mnt|srv|run)/[^\s"\'<>|*?\x00-\x1f]*')
+
+
+def _shorten_path(match: re.Match) -> str:
+    """Keep only the last two components (parent/filename) and redact the rest."""
+    parts = re.split(r'[/\\]+', match.group(0).rstrip('/\\'))
+    parts = [p for p in parts if p]
+    tail = "/".join(parts[-2:]) if len(parts) >= 2 else parts[-1] if parts else ""
+    return f"{_REDACTED_PATH_PLACEHOLDER}{tail}"
+
+
+def _redact_paths(text: str) -> str:
+    text = _WIN_PATH_RE.sub(_shorten_path, text)
+    text = _LIN_PATH_RE.sub(_shorten_path, text)
+    return text
+
+
+class _RedactingFormatter(logging.Formatter):
+    """Formatter that strips absolute paths from every log line after formatting."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return _redact_paths(super().format(record))
+
+
 # Logging
 
 def _configure_logging() -> None:
     fmt     = "%(asctime)s [%(name)-12s] %(levelname)-8s %(message)s"
     datefmt = "%H:%M:%S"
-    formatter = logging.Formatter(fmt, datefmt=datefmt)
+    formatter = _RedactingFormatter(fmt, datefmt=datefmt)
     _fmt = formatter.format
     formatter.format = lambda r: _fmt(r).replace("\r", " ").replace("\n", " ")
 
