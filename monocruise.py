@@ -41,7 +41,7 @@ from core.thread_management.popup_log_handler import PopupLogHandler
 
 from core.telemetry_thread.thread import TelemetryThread
 from core.main_pedal_thread.thread import MainPedalThread
-from core.sending_thread.thread import SendingThread
+from core.sending_thread.thread import SendingThread, create_visualization_bar
 
 from ui.main_window import create_main_window
 from ui.popup.popup_window import PopupWindow
@@ -162,6 +162,9 @@ def main() -> None:
         log.info("started: monitor")
 
     window.apply_startup_visibility()
+
+    # Pedal visualization bar (shows aforward/abackward + em_stop; lives on main thread)
+    _visualization_bar = create_visualization_bar()
 
     # Poll thread liveness via QTimer (keeps Qt event loop free)
     def _check_threads() -> None:

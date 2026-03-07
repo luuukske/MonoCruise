@@ -122,6 +122,10 @@ Refer back to `core/example_thread/thread.py` whenever you are unsure about the 
   - Avoid introducing log messages that include personally identifying information or machine‑specific details.
   - Prefer generic wording that does not reveal usernames, hostnames, or full filesystem layouts.
 
+- **Logging and resilience**
+  - Use the standard `logging` module for all diagnostic output. Log unexpected behaviour (e.g. exceptions, missing or down threads, invalid state) so that failures are diagnosable; avoid using `print` for errors or warnings. if the user must see these logs, add `, extra={"popup": True}`. if you need to log detailed contexts, make two logs with one being the popup and the other a detailed context of the log (optional).
+  - When a thread reads from the registry or another thread’s data, it must handle missing or down sibling threads gracefully: catch `KeyError` and attribute or lock failures, use safe defaults, log at debug or warning level as appropriate, and continue. A thread must never crash or exit its loop because another thread is missing or has crashed.
+
 - **Independent threads**
   - Any error or looping code CAN NOT impact other critical systems. use the example thread code `core/example_thread/thread.py`.
   - Do NOT diviate from the template by removing key methods like `teardown()` or `setup()`.

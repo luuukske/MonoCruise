@@ -1,3 +1,5 @@
+import logging
+
 from PySide6.QtWidgets import QWidget, QApplication
 from PySide6.QtCore import Qt, QTimer, QRect
 from PySide6.QtGui import QPainter, QColor
@@ -5,17 +7,19 @@ from PySide6.QtGui import QPainter, QColor
 from core.settings import Settings
 from core.thread_management.registry import registry
 
+logger = logging.getLogger(__name__)
+
 _TRANSPARENT = QColor(0, 0, 0, 0)
 _BLUE = QColor("blue")
 _RED = QColor("red")
 
 
-class AnimatedBar(QWidget):
+class VisualizationBar(QWidget):
     def __init__(self):
         super().__init__()
         self.temp_gasval = 0.0
         self.temp_brakeval = 0.0
-        self.bar_width = 5
+        self.bar_width = 3
         self.flicker_state = True
         self.gas_rect = QRect()
         self.brake_rect = QRect()
@@ -67,7 +71,7 @@ class AnimatedBar(QWidget):
             self._animate_inner()
         except Exception as e:
             # Never let a runtime error in the bar crash the main program
-            print(f"[AnimatedBar] animate error: {e}")
+            logger.warning("animate error: %s", e, exc_info=False)
 
     def _animate_inner(self):
         screen = QApplication.primaryScreen()
@@ -90,10 +94,8 @@ class AnimatedBar(QWidget):
         brake_output = 0.0
         em_stop = False
         AEB_warn = False
-        cc_enabled = False
-        cc_locked = False
 
-        # SendingThread — provides aforward / abackward that we visualise
+        # SendingThread — provides aforward / abackward (pedal output to the game)
         try:
             sending_thread = registry.get_thread("sending_thread")
         except KeyError:
@@ -121,26 +123,14 @@ class AnimatedBar(QWidget):
             except Exception:
                 em_stop = False
 
-        # TelemetryThread — CC state (approximation) for extra smoothing
-        try:
-            tel_thread = registry.get_thread("telemetry_thread")
-        except KeyError:
-            tel_thread = None
-
-        if tel_thread is not None and hasattr(tel_thread, "data"):
-            try:
-                with tel_thread.data._lock:
-                    cc_enabled = tel_thread.data.cruise_control_speed > 0.0
-                    cc_locked = cc_enabled
-            except Exception:
-                cc_enabled = False
-                cc_locked = False
-
-        # Future AEB thread could flip this; for now derive from settings
+        # AEB warning (em_stop + setting) for flicker
         try:
             AEB_warn = bool(Settings.AEB_enabled and em_stop)
         except Exception:
             AEB_warn = em_stop
+
+        # ACC/cruise control could increase smoothness here; kept commented out.
+        # average = 20 if (cc_enabled and cc_locked) else 10
 
         close_bar = not bar_active
 
@@ -154,7 +144,7 @@ class AnimatedBar(QWidget):
 
         self.raise_()
 
-        average = 20 if (cc_enabled and cc_locked) else 10
+        average = 10  # fixed; ACC could use higher value for extra smoothing (see comment above)
         self.temp_gasval = (gas_output + self.temp_gasval * average) / (average + 1)
         self.temp_brakeval = (brake_output + self.temp_brakeval * average) / (average + 1)
 

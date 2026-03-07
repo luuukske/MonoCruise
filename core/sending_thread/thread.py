@@ -22,8 +22,17 @@ from core.thread_management.registry import registry
 from core.settings import Settings
 
 from .scscontroller import SCSController
+from .visualization_bar import VisualizationBar
 
 logger = logging.getLogger(__name__)
+
+
+def create_visualization_bar() -> VisualizationBar:
+    """
+    Create and return the pedal visualization bar (gas/brake + em_stop).
+    Must be called from the Qt main thread.
+    """
+    return VisualizationBar()
 
 # ---------------------------------------------------------------------------
 # Timing constants
@@ -145,12 +154,17 @@ class SendingThread(BaseThread):
 
     def setup(self) -> None:
         logger.info("initialising SCSController shared-memory interface")
-        self._controller = SCSController()
-        self._reset_controller(self._controller)
+        try:
+            self._controller = SCSController()
+            self._reset_controller(self._controller)
+        except Exception:
+            logger.exception("SCSController init failed; thread will run with zero output")
+            self._controller = None
         self._hazard_phase = "idle"
         self._hazard_wanted = None
         self._last_should_force = False
-        logger.debug("SCSController initialised")
+        if self._controller is not None:
+            logger.debug("SCSController initialised")
 
     def loop(self) -> None:
         if not self.running:
@@ -162,14 +176,33 @@ class SendingThread(BaseThread):
         if controller is None:
             return
 
+        try:
+            self._loop_body(controller)
+        except Exception:
+            logger.exception("unexpected error in loop; zeroing outputs")
+            try:
+                controller.aforward = 0.0
+                controller.abackward = 0.0
+            except (AttributeError, OSError, TypeError):
+                pass
+            with self.data._lock:
+                self.data.aforward = 0.0
+                self.data.abackward = 0.0
+
+    def _loop_body(self, controller: SCSController) -> None:
         # ------------------------------------------------------------------
-        # Pedal thread state
+        # Pedal thread state (safe lookup: thread may be missing or down)
         # ------------------------------------------------------------------
-        pedal_thread = registry.get_thread("main_pedal_thread")
+        try:
+            pedal_thread = registry.get_thread("main_pedal_thread")
+        except KeyError:
+            pedal_thread = None
+            logger.warning("main sending code limited;\nno pedal thread found")
+
         pedal_alive = pedal_thread is not None and pedal_thread.is_alive()
 
         em_stop = False
-        if pedal_thread is not None:
+        if pedal_thread is not None and pedal_alive:
             try:
                 with pedal_thread.data._lock:
                     em_stop = bool(pedal_thread.data.em_stop)
@@ -177,28 +210,45 @@ class SendingThread(BaseThread):
                 logger.debug("em_stop read failed: %s", e)
 
         # ------------------------------------------------------------------
-        # Telemetry
+        # Telemetry (safe lookup and read: thread may be missing or down)
         # ------------------------------------------------------------------
-        tel_thread = registry.get_thread("telemetry_thread")
-        with tel_thread.data._lock:
-            connected = tel_thread.data.is_connected
-            gear = tel_thread.data.gear_dashboard
-            tel_hazards = bool(tel_thread.data.hazards_active)
-            speed_ms = tel_thread.data.speed
+        connected = False
+        gear = 0
+        tel_hazards = False
+        speed_ms = 0.0
+
+        try:
+            tel_thread = registry.get_thread("telemetry_thread")
+        except KeyError:
+            tel_thread = None
+            logger.warning("sending thread limited;\nno telemetry thread found")
+
+        if tel_thread is not None and tel_thread.is_alive():
+            try:
+                with tel_thread.data._lock:
+                    connected = tel_thread.data.is_connected
+                    gear = tel_thread.data.gear_dashboard
+                    tel_hazards = bool(tel_thread.data.hazards_active)
+                    speed_ms = tel_thread.data.speed
+            except Exception as e:
+                logger.debug("telemetry read failed: %s", e)
 
         # ------------------------------------------------------------------
         # Auto-disable hazards when driving
         # ------------------------------------------------------------------
-        if Settings.autodisable_hazards and pedal_thread is not None:
-            speed_kmh = speed_ms * 3.6
-            with pedal_thread.data._lock:
-                gas_pct = pedal_thread.data.gasval
-                brake_pct = pedal_thread.data.brakeval
-            if speed_kmh > 12.0 and gas_pct >= 0.40 and brake_pct < 0.05:
-                with self._lock:
-                    self._hazard_wanted = False
-                    if self._hazard_phase == "idle":
-                        self._hazard_retriggers = 0
+        if Settings.autodisable_hazards and pedal_thread is not None and pedal_alive:
+            try:
+                speed_kmh = speed_ms * 3.6
+                with pedal_thread.data._lock:
+                    gas_pct = pedal_thread.data.gasval
+                    brake_pct = pedal_thread.data.brakeval
+                if speed_kmh > 12.0 and gas_pct >= 0.40 and brake_pct < 0.05:
+                    with self._lock:
+                        self._hazard_wanted = False
+                        if self._hazard_phase == "idle":
+                            self._hazard_retriggers = 0
+            except Exception as e:
+                logger.debug("autodisable_hazards read failed: %s", e)
 
         # ------------------------------------------------------------------
         # Force hazards ON on rising edge of em_stop / pedal thread down
@@ -221,19 +271,45 @@ class SendingThread(BaseThread):
         if not connected:
             controller.aforward = 0.0
             controller.abackward = 0.0
+            with self.data._lock:
+                self.data.aforward = 0.0
+                self.data.abackward = 0.0
+                self.data.hazards_active = tel_hazards
+                self.data.horn_active = bool(getattr(controller, "horn", False))
+                self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
             return
 
         if not pedal_alive:
+            controller.aforward = 0.0
+            controller.abackward = 0.0
+            with self.data._lock:
+                self.data.aforward = 0.0
+                self.data.abackward = 0.0
+                self.data.hazards_active = tel_hazards
+                self.data.horn_active = bool(getattr(controller, "horn", False))
+                self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
             return
 
         # ------------------------------------------------------------------
         # Pedal inputs
         # ------------------------------------------------------------------
-        with pedal_thread.data._lock:
-            gas_output = pedal_thread.data.gas_output
-            brake_output = pedal_thread.data.brake_output
-            gasval = pedal_thread.data.gasval
-            brakeval = pedal_thread.data.brakeval
+        try:
+            with pedal_thread.data._lock:
+                gas_output = pedal_thread.data.gas_output
+                brake_output = pedal_thread.data.brake_output
+                gasval = pedal_thread.data.gasval
+                brakeval = pedal_thread.data.brakeval
+        except Exception as e:
+            logger.debug("pedal read failed: %s", e)
+            controller.aforward = 0.0
+            controller.abackward = 0.0
+            with self.data._lock:
+                self.data.aforward = 0.0
+                self.data.abackward = 0.0
+                self.data.hazards_active = tel_hazards
+                self.data.horn_active = bool(getattr(controller, "horn", False))
+                self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
+            return
 
         gas_exp = Settings.gas_exponent_variable or 1.0
         brake_exp = Settings.brake_exponent_variable or 1.0
@@ -265,8 +341,8 @@ class SendingThread(BaseThread):
             self.data.aforward = a
             self.data.abackward = b
             self.data.hazards_active = tel_hazards
-            self.data.horn_active = bool(controller.horn)
-            self.data.airhorn_active = bool(controller.airhorn)
+            self.data.horn_active = bool(getattr(controller, "horn", False))
+            self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
 
     def teardown(self) -> None:
         if self._controller is not None:
