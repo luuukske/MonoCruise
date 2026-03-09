@@ -79,6 +79,9 @@ class MonoCruiseWindow(QMainWindow):
         self._settings = settings
         self._version = version
         self._closing = False
+        # Startup visibility is decided lazily once telemetry has produced a
+        # first result; until then the window stays hidden.
+        self._startup_visibility_applied = False
         self._open_on_taskbar = False
 
         # -- Window properties ------------------------------------------------
@@ -274,23 +277,19 @@ class MonoCruiseWindow(QMainWindow):
 
     def apply_startup_visibility(self) -> None:
         """
-        Show or hide the main window at startup:
-        - hide when telemetry is connected and autostart is enabled
-        - otherwise show normally
-        """
-        is_connected = False
-        try:
-            telemetry = registry.get_thread("telemetry_thread")
-            is_connected = bool(getattr(telemetry.data, "is_connected", False))
-        except (KeyError, AttributeError):
-            is_connected = False
+        Initial startup behaviour.
 
-        if self._settings.autostart_variable and is_connected:
-            self.hide()
-            logger.info("Main window hidden on startup (autostart + game connected)")
-        else:
-            self.show()
-            logger.info("Main window shown on startup")
+        The window is created and shown in the taskbar (minimised) so it is
+        fully loaded and ready, but does not steal focus. The actual decision
+        about whether to pop it up on screen is deferred until the telemetry
+        thread has produced a first result. That decision is handled in
+        ``_poll_threads()``.
+        """
+        self.showMinimized()
+        self._startup_visibility_applied = False
+        logger.info(
+            "Main window minimised on startup (waiting for telemetry result)"
+        )
 
     # ==================================================================
     # Thread‑state polling

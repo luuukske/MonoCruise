@@ -85,6 +85,16 @@ class Watchdog(BaseThread):
             if not (crashed or frozen):
                 continue
 
+            # Special case: the telemetry thread can deliberately request a full
+            # application shutdown by setting data.request_quit. In that case we
+            # must NOT auto‑restart it, otherwise the main loop will never see
+            # the quit request (the thread is replaced and the flag is lost).
+            if getattr(thread, "name", "") == "telemetry_thread":
+                data = getattr(thread, "data", None)
+                if getattr(data, "request_quit", False):
+                    thread.healthy = False
+                    continue
+
 
             if restart_count >= max_restarts:
                 # logging is handled in base_thread.py
