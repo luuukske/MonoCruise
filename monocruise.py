@@ -43,6 +43,8 @@ from core.thread_management.popup_log_handler import PopupLogHandler
 from core.telemetry_thread.thread import TelemetryThread
 from core.main_pedal_thread.thread import MainPedalThread
 from core.sending_thread.thread import SendingThread, create_visualization_bar
+from core.aeb.thread import AEBThread
+from core.aeb.debug_window import AEBDebugWindow
 
 from ui.main_window import create_main_window
 from ui.popup.popup_window import PopupWindow
@@ -159,6 +161,10 @@ def main() -> None:
     registry.register_object("main_window", window)
     window.window_closed.connect(lambda: (_stop_all(), app.quit()))
 
+    aeb_debug = AEBDebugWindow()
+    aeb_debug.show()
+    registry.register_object("aeb_debug", aeb_debug)
+
     # Watchdog
     watchdog = Watchdog()
 
@@ -167,6 +173,7 @@ def main() -> None:
         TelemetryThread(),
         MainPedalThread(),
         SendingThread(),
+        AEBThread(),
     ]
 
     for w in workers:

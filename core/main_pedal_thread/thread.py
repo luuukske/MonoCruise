@@ -146,9 +146,9 @@ class MainPedalThread(BaseThread):
                     self.data.device_name = js.get_name()
                 logger.info("connected to pedals")
             else:
-                logger.warning("configured joystick not found — running without pedal input")
+                logger.warning("pedals not found. please reconnect or configure again.", extra={"popup": True})
         else:
-            logger.warning("no joystick configured — running without pedal input")
+            logger.info("no joystick configured — running without pedal input")
 
         self._latency_ts = time.monotonic()
         logger.debug("setup complete")
@@ -181,9 +181,9 @@ class MainPedalThread(BaseThread):
         speed      = tel["speed"]
         gear       = tel["gear"]
         paused     = tel["paused"]
-        slope      = tel["slope"]
-        park_brake = tel["park_brake"]
-        cargo_mass = tel["cargo_mass"]  # kg
+        slope      = tel["rotationY"]
+        park_brake = tel["parkBrake"]
+        cargo_mass = tel["cargoMass"]  # kg
 
         # --- Process pygame events (input + hot-plug) -------------------------
         gasval, brakeval = self._process_pygame_events(speed)
@@ -268,8 +268,6 @@ class MainPedalThread(BaseThread):
                     0,
                 )
 
-        # TODO: AEB / radar — apply AEB overrides to opdbrakeval / opdgasval here
-
         # --- Stopped state transitions ----------------------------------------
         if speed <= 0.1 and speed >= -0.1 and gasval == 0 and gear != 0 and not stopped:
             stopped = True
@@ -288,6 +286,17 @@ class MainPedalThread(BaseThread):
 
         gas_output   = opdgasval
         brake_output = opdbrakeval
+
+        # AEB override — when AEB thread requests emergency brake, apply full brake this tick.
+        try:
+            aeb = registry.get_thread("aeb_thread")
+            if aeb is not None and aeb.is_alive():
+                with aeb.data._lock:
+                    if aeb.data.em_stop_requested:
+                        gas_output = 0.0
+                        brake_output = 1.0
+        except (KeyError, AttributeError):
+            pass
 
         # --- Emergency stop detection -----------------------------------------
         em_stop = self.data.em_stop
@@ -370,9 +379,9 @@ class MainPedalThread(BaseThread):
                 "speed":      tel.data.speed * 3.6,  # m/s → km/h
                 "gear":       tel.data.gear_dashboard,
                 "paused":     tel.data.paused,
-                "slope":      tel.data.slope,
-                "park_brake": tel.data.park_brake,
-                "cargo_mass": tel.data.cargo_mass,
+                "rotationY":  tel.data.rotationY,
+                "parkBrake": tel.data.parkBrake,
+                "cargoMass": tel.data.cargoMass,
             }
 
     def _process_pygame_events(self, speed: float) -> tuple[float, float]:
@@ -461,33 +470,19 @@ class MainPedalThread(BaseThread):
                     self._reconnect_deadline = now + 4
                 else:
                     self._reconnect_attempt += 1
-                    if self._reconnect_attempt > 30:
-                        logger.error("failed to reconnect after 30 attempts — reconfigure please")
-                        with self.data._lock:
-                            self.data.device_lost = True
-                            self.data.device_name = ""
-                        self._device          = None
-                        self._reconnect_state = None
-                    else:
-                        logger.error("Joystick not found.\nPlease reconfigure.", extra={"popup": True})
-                        with self.data._lock:
-                            self.data.device_lost = False  # stop retrying; user must reconfigure
-                            self.data.device_name = ""
-                        self._device          = None
-                        self._reconnect_state = None
+                    # Keep retrying indefinitely; surface a popup periodically so the user
+                    # knows they may need to reconfigure, but do not stop the state machine.
+                    self._reconnect_state    = "attempt_wait"
+                    self._reconnect_deadline = now + 0.2
             except Exception as exc:
                 self._reconnect_attempt += 1
                 logger.warning("reconnect attempt %d failed: %s", self._reconnect_attempt, exc)
-                if self._reconnect_attempt > 30:
-                    logger.error("failed to reconnect after 30 attempts.\nPlease reconfigure.", extra={"popup": True})
-                    with self.data._lock:
-                        self.data.device_lost = True
-                        self.data.device_name = ""
-                    self._device          = None
-                    self._reconnect_state = None
-                else:
-                    self._reconnect_state    = "attempt_wait"
-                    self._reconnect_deadline = now + 0.2
+                # Keep retrying indefinitely on errors as well. Notify the user
+                # occasionally, but do not give up automatically.
+                if self._reconnect_attempt % 30 == 0:
+                    logger.error("failed to reconnect after multiple attempts.\nPlease reconfigure.", extra={"popup": True})
+                self._reconnect_state    = "attempt_wait"
+                self._reconnect_deadline = now + 0.2
             return
 
         if self._reconnect_state == "reinit_wait":
@@ -500,7 +495,7 @@ class MainPedalThread(BaseThread):
                 self._reconnect_js.init()
                 with self.data._lock:
                     self.data.device_lost = False
-                PopupWindow.emit("Pedals reconnected", "Pedals reconnected to pedals", "c", 3000)
+                PopupWindow.emit("Pedals reconnected", "Pedals reconnected to pedals", "c", 2000)
                 # TODO: main window behavior — update connected joystick label
             except Exception as exc:
                 logger.error("reinit failed after reconnect: %s", exc, extra={"popup": True})

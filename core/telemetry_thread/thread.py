@@ -61,21 +61,25 @@ class TelemetryThreadData(ThreadData):
     gear_dashboard: int = 0     # displayed gear on dashboard
 
     # Raw inputs
-    user_throttle: float = 0.0
-    user_brake: float = 0.0
-    user_steer: float = 0.0
+    userThrottle: float = 0.0
+    userBrake: float = 0.0
+    userSteer: float = 0.0
 
     # Game-applied inputs
-    game_throttle: float = 0.0
-    game_brake: float = 0.0
+    gameThrottle: float = 0.0
+    gameBrake: float = 0.0
 
     # Cargo
-    cargo_mass: float = 0.0     # kg
+    cargoMass: float = 0.0     # kg
 
     # Vehicle state
-    park_brake: bool = False
-    slope: float = 0.0          # rotationY — positive = uphill
-    hazards_active: bool = False
+    parkBrake: bool = False
+    rotationY: float = 0.0          # rotationY — positive = uphill
+    hazardsActive: bool = False
+
+    coordinateX: float = 0.0
+    coordinateZ: float = 0.0
+    rotationX: float = 0.0
 
     request_quit: bool = False
 
@@ -90,22 +94,24 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.game_version_minor   = raw.get("telemetry_version_game_minor", 0)
         data.sdk_version          = raw.get("telemetry_plugin_revision", 0)
         data.paused               = raw.get("paused", False)
+        data.coordinateX          = raw.get("coordinateX", 0.0)
+        data.coordinateZ          = raw.get("coordinateZ", 0.0)
+        data.rotationX            = raw.get("rotationX", 0.0)
         data.speed                = raw.get("speed", 0.0)
-        data.cruise_control_speed = raw.get("cruiseControlSpeed", 0.0)
-        data.engine_rpm           = raw.get("engineRpm", 0.0)
-        data.engine_rpm_max       = raw.get("engineRpmMax", 2000.0)
+        data.cruiseControlSpeed = raw.get("cruiseControlSpeed", 0.0)
+        data.engineRpm           = raw.get("engineRpm", 0.0)
+        data.engineRpmMax       = raw.get("engineRpmMax", 2000.0)
         data.gear                 = raw.get("gear", 0)
-        data.gear_dashboard       = raw.get("gearDashboard", 0)
-        data.user_throttle        = raw.get("userThrottle", 0.0)
-        data.user_brake           = raw.get("userBrake", 0.0)
-        data.user_steer           = raw.get("userSteer", 0.0)
-        data.game_throttle        = raw.get("gameThrottle", 0.0)
-        data.game_brake           = raw.get("gameBrake", 0.0)
-        data.hazards_active       = raw.get("lightsHazards", False)
-        data.cargo_mass           = raw.get("cargoMass", 0.0)
-        data.park_brake           = raw.get("parkBrake", False)
-        data.slope                = raw.get("rotationY", 0.0)
-
+        data.gearDashboard       = raw.get("gearDashboard", 0)
+        data.userThrottle        = raw.get("userThrottle", 0.0)
+        data.userBrake           = raw.get("userBrake", 0.0)
+        data.userSteer           = raw.get("userSteer", 0.0)
+        data.gameThrottle        = raw.get("gameThrottle", 0.0)
+        data.gameBrake           = raw.get("gameBrake", 0.0)
+        data.cargoMass           = raw.get("cargoMass", 0.0)
+        data.parkBrake           = raw.get("parkBrake", False)
+        data.rotationY           = raw.get("rotationY", 0.0)
+        data.hazardsActive       = raw.get("lightsHazards", False)
 
 class TelemetryThread(BaseThread):
     loop_interval = 0.02

@@ -52,7 +52,7 @@ HAZARD_MAX_RETRIGGERS: int = 3
 class SendingThreadData(ThreadData):
     aforward: float = 0.0
     abackward: float = 0.0
-    hazards_active: bool = False
+    hazardsActive: bool = False
     horn_active: bool = False
     airhorn_active: bool = False
     _lock: threading.Lock = field(
@@ -202,12 +202,22 @@ class SendingThread(BaseThread):
         pedal_alive = pedal_thread is not None and pedal_thread.is_alive()
 
         em_stop = False
+        aeb_stop = False
         if pedal_thread is not None and pedal_alive:
             try:
                 with pedal_thread.data._lock:
                     em_stop = bool(pedal_thread.data.em_stop)
             except Exception as e:
                 logger.debug("em_stop read failed: %s", e)
+            try:
+                aeb_thread = registry.get_thread("aeb_thread")
+                if aeb_thread is not None and aeb_thread.is_alive():
+                    with aeb_thread.data._lock:
+                        aeb_stop = bool(aeb_thread.data.em_stop_requested)
+            except (KeyError, Exception):
+                pass
+
+            em_stop = em_stop or aeb_stop
 
         # ------------------------------------------------------------------
         # Telemetry (safe lookup and read: thread may be missing or down)
@@ -228,7 +238,7 @@ class SendingThread(BaseThread):
                 with tel_thread.data._lock:
                     connected = tel_thread.data.is_connected
                     gear = tel_thread.data.gear_dashboard
-                    tel_hazards = bool(tel_thread.data.hazards_active)
+                    tel_hazards = bool(tel_thread.data.hazardsActive)
                     speed_ms = tel_thread.data.speed
             except Exception as e:
                 logger.debug("telemetry read failed: %s", e)
@@ -274,7 +284,7 @@ class SendingThread(BaseThread):
             with self.data._lock:
                 self.data.aforward = 0.0
                 self.data.abackward = 0.0
-                self.data.hazards_active = tel_hazards
+                self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
             return
@@ -285,7 +295,7 @@ class SendingThread(BaseThread):
             with self.data._lock:
                 self.data.aforward = 0.0
                 self.data.abackward = 0.0
-                self.data.hazards_active = tel_hazards
+                self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
             return
@@ -306,7 +316,7 @@ class SendingThread(BaseThread):
             with self.data._lock:
                 self.data.aforward = 0.0
                 self.data.abackward = 0.0
-                self.data.hazards_active = tel_hazards
+                self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
             return
@@ -340,7 +350,7 @@ class SendingThread(BaseThread):
         with self.data._lock:
             self.data.aforward = a
             self.data.abackward = b
-            self.data.hazards_active = tel_hazards
+            self.data.hazardsActive = tel_hazards
             self.data.horn_active = bool(getattr(controller, "horn", False))
             self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
 
@@ -355,7 +365,7 @@ class SendingThread(BaseThread):
         with self.data._lock:
             self.data.aforward = 0.0
             self.data.abackward = 0.0
-            self.data.hazards_active = False
+            self.data.hazardsActive = False
             self.data.horn_active = False
             self.data.airhorn_active = False
         logger.debug("teardown complete")
