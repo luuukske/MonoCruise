@@ -1,0 +1,7 @@
+{
+  "plugins": {
+    "tldraw": {
+      "enabled": true
+    }
+  }
+}
