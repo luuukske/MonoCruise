@@ -293,6 +293,8 @@ class ArcPath:
 
         # Curved: sample true concentric arcs so inner = tighter, outer = gentler.
         # Positive curvature → turn left → center to left → inner = left, outer = right.
+        # THIS SHOULD NOT BE CHANGED!
+        # this is a working part of the code and should only be changed if functionality needs to be altered.
         r_inner = max(self.radius - self.half_width, 0.5)
         r_outer = self.radius + self.half_width
         left = []

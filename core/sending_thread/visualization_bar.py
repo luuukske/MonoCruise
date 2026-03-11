@@ -125,9 +125,16 @@ class VisualizationBar(QWidget):
 
         # AEB warning (em_stop + setting) for flicker
         try:
-            AEB_warn = bool(Settings.AEB_enabled and em_stop)
-        except Exception:
-            AEB_warn = em_stop
+            aeb_thread = registry.get_thread("aeb_thread")
+        except KeyError:
+            aeb_thread = None
+
+        if aeb_thread is not None and hasattr(aeb_thread, "data"):
+            try:
+                with aeb_thread.data._lock:
+                    AEB_warn = bool(getattr(aeb_thread.data, "AEB_warn", False))
+            except Exception:
+                AEB_warn = False
 
         # ACC/cruise control could increase smoothness here; kept commented out.
         # average = 20 if (cc_enabled and cc_locked) else 10

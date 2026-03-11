@@ -290,7 +290,7 @@ class MainPedalThread(BaseThread):
         # AEB override — when AEB thread requests emergency brake, apply full brake this tick.
         try:
             aeb = registry.get_thread("aeb_thread")
-            if aeb is not None and aeb.is_alive():
+            if aeb is not None and aeb.is_alive() and gas_output < 0.8:
                 with aeb.data._lock:
                     if aeb.data.AEB_brake:
                         gas_output = 0.0
