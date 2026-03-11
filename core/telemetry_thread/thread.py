@@ -81,6 +81,9 @@ class TelemetryThreadData(ThreadData):
     coordinateZ: float = 0.0
     rotationX: float = 0.0
 
+    # Ego trailer — True when at least one attached trailer with wheels exists.
+    ego_has_trailer: bool = False
+
     request_quit: bool = False
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
@@ -112,6 +115,11 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.parkBrake           = raw.get("parkBrake", False)
         data.rotationY           = raw.get("rotationY", 0.0)
         data.hazardsActive       = raw.get("lightsHazards", False)
+        # A trailer slot is considered present when it has wheels and is attached.
+        data.ego_has_trailer = (
+            raw.get("trailer[0].wheelCount", 0) > 0
+            and raw.get("trailer[0].attached", False)
+        )
 
 class TelemetryThread(BaseThread):
     loop_interval = 0.02

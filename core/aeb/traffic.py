@@ -16,12 +16,15 @@ Yaw conventions used throughout:
       fwd_x = -sin(radians(yaw))
       fwd_z = -cos(radians(yaw))
 
-Path filtering (per-update):
-  predicted = current_pos + speed * forward * dt  (adjusted for angular vel.)
-  filtered  = 0.7 * predicted + 0.3 * actual      (XZ only; Y taken from actual)
+Path filtering (per-update) – three successive smoothing stages:
+  1. Raw-position EMA:  smoothed_actual = α_raw * actual + (1-α_raw) * prev_smoothed
+  2. Prediction blend:  filtered = (1-α_blend) * predicted + α_blend * smoothed_actual
+  3. Path-point EMA:    recorded = α_path * filtered + (1-α_path) * last_path_point
 
-The last 10 filtered positions are kept as a VehiclePathPoint list and used
-for intersection detection.
+The last 10 recorded positions are kept as a VehiclePathPoint list and used
+for intersection detection, and the vehicle's own ``position.x`` /
+``position.z`` are also updated to the recorded values so that debug drawing
+and geometry queries see the smoothed location.
 """
 
 from __future__ import annotations
@@ -41,6 +44,9 @@ _LOCATION_UPDATE_FREQUENCY: float = 0.05  # minimum seconds between path updates
 _MAX_ANGULAR_VELOCITY: float = 90.0       # deg/s – clamp to suppress telemetry noise
 _SEGMENT_EPS: float = 1e-9               # denominator epsilon for segment intersection
 _TIME_EPS: float = 0.05                  # seconds – tolerance when averaging hit times
+_SMOOTHING_FACTOR: float = 0.01          # weight on actual vs predicted in the blend stage
+_RAW_POSITION_ALPHA: float = 0.25        # EMA weight on incoming raw position (lower = smoother)
+_PATH_POINT_ALPHA: float = 0.45          # EMA weight on new filtered point vs previous path point (lower = smoother)
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +104,7 @@ def _predict_position(
     ang_rad = math.radians(angular_velocity_deg_s)
 
     if ang_rad != 0.0:
-        decay_rate = 0.15
+        decay_rate = 0.3
         total_decay = (1.0 - math.exp(-decay_rate * dt)) / decay_rate
         yaw_rad += ang_rad * total_decay
     # else: no angular adjustment needed
@@ -353,6 +359,11 @@ class Vehicle:
         # Filtered path history – at most _MAX_PATH_POINTS entries, oldest first.
         self.path_points: deque[VehiclePathPoint] = deque(maxlen=_MAX_PATH_POINTS)
 
+        # Running EMA state for raw-position smoothing (stage 1).
+        # None until the first update so we can seed from the actual position.
+        self._smooth_pos_x: Optional[float] = None
+        self._smooth_pos_z: Optional[float] = None
+
     # ------------------------------------------------------------------
     # State update
     # ------------------------------------------------------------------
@@ -376,6 +387,8 @@ class Vehicle:
             self.last_rotation = prev.last_rotation
             self.angular_velocity = prev.angular_velocity
             self.path_points = prev.path_points
+            self._smooth_pos_x = prev._smooth_pos_x
+            self._smooth_pos_z = prev._smooth_pos_z
             if abs(self.angular_velocity) > _MAX_ANGULAR_VELOCITY:
                 self.angular_velocity = 0.0
             if self.is_tmp:
@@ -388,6 +401,8 @@ class Vehicle:
         self.last_location = prev.position
         self.last_rotation = prev.rotation
         self.path_points = prev.path_points  # carry forward existing history
+        self._smooth_pos_x = prev._smooth_pos_x
+        self._smooth_pos_z = prev._smooth_pos_z
 
         # Angular velocity from yaw change.
         last_yaw = prev.last_rotation.euler()[1]
@@ -413,22 +428,73 @@ class Vehicle:
         self._record_filtered_point(now, dt)
 
     def _record_filtered_point(self, timestamp: float, dt: float) -> None:
-        """Compute the 70/30 filtered position and push it onto path_points."""
+        """Compute the smoothed position (three stages) and push it onto path_points.
+
+        Stage 1 – raw-position EMA:
+            Reduces high-frequency jitter in the telemetry feed before the
+            position is used in any further calculation.
+
+        Stage 2 – prediction blend:
+            Weights the kinematic prediction against the (now pre-smoothed)
+            actual position.  The prediction dominates so the path stays
+            physically plausible even when telemetry hiccups.
+
+        Stage 3 – path-point EMA:
+            Blends the result against the previously recorded path point so
+            that the visible polyline does not jump between frames.
+        """
         _, yaw_deg, _ = self.rotation.euler()
 
-        # Predicted position: where would the vehicle be if it had moved
-        # smoothly for the last dt seconds from its last known location?
+        # -- Stage 1: EMA on raw telemetry position ---------------------------
+        actual_x = self.position.x
+        actual_z = self.position.z
+
+        if self._smooth_pos_x is None:
+            # Seed from first observation.
+            self._smooth_pos_x = actual_x
+            self._smooth_pos_z = actual_z
+        else:
+            self._smooth_pos_x = (
+                _RAW_POSITION_ALPHA * actual_x
+                + (1.0 - _RAW_POSITION_ALPHA) * self._smooth_pos_x
+            )
+            self._smooth_pos_z = (
+                _RAW_POSITION_ALPHA * actual_z
+                + (1.0 - _RAW_POSITION_ALPHA) * self._smooth_pos_z
+            )
+
+        # -- Stage 2: kinematic prediction blended with smoothed actual -------
         prev_x = self.last_location.x
         prev_z = self.last_location.z
         pred_x, pred_z = _predict_position(
             prev_x, prev_z, self.speed, yaw_deg, self.angular_velocity, dt
         )
 
-        actual_x = self.position.x
-        actual_z = self.position.z
+        filtered_x = (
+            (1.0 - _SMOOTHING_FACTOR) * pred_x
+            + _SMOOTHING_FACTOR * self._smooth_pos_x
+        )
+        filtered_z = (
+            (1.0 - _SMOOTHING_FACTOR) * pred_z
+            + _SMOOTHING_FACTOR * self._smooth_pos_z
+        )
 
-        filtered_x = 0.7 * pred_x + 0.3 * actual_x
-        filtered_z = 0.7 * pred_z + 0.3 * actual_z
+        # -- Stage 3: EMA against the previous path point ---------------------
+        if self.path_points:
+            last = self.path_points[-1]
+            filtered_x = (
+                _PATH_POINT_ALPHA * filtered_x
+                + (1.0 - _PATH_POINT_ALPHA) * last.x
+            )
+            filtered_z = (
+                _PATH_POINT_ALPHA * filtered_z
+                + (1.0 - _PATH_POINT_ALPHA) * last.z
+            )
+
+        # Update the vehicle's live position so that all consumers (debug
+        # window, geometry helpers, etc.) see the smoothed coordinates.
+        self.position.x = filtered_x
+        self.position.z = filtered_z
 
         self.path_points.append(
             VehiclePathPoint(

@@ -47,11 +47,17 @@ _SAFE_CLR = QColor(80, 200, 120)
 _DANGER_CLR = QColor(230, 60, 60)
 _WARN_CLR = QColor(240, 180, 40)
 _SUPPRESSED_CLR = QColor(100, 100, 110)
+_BRAKE_SUPPRESSED_CLR = QColor(255, 140, 40)
 _SAFE_PATH = QColor(80, 200, 120, 80)
 _DANGER_PATH = QColor(230, 60, 60, 100)
 _WARN_PATH = QColor(240, 180, 40, 80)
 _SUPPRESSED_PATH = QColor(100, 100, 110, 60)
+_BRAKE_SUPPRESSED_PATH = QColor(255, 140, 40, 80)
 _TRAILER_CLR = QColor(180, 140, 80)
+_EGO_TRAILER_CLR = QColor(60, 130, 210)
+_HISTORY_ALPHA = 120           # base alpha for the filtered-position trail
+_EGO_TRAILER_HALF_W = 1.25    # metres — standard semi-trailer
+_EGO_TRAILER_HALF_L = 6.8     # metres — 13.6 m box
 _TEXT = QColor(200, 200, 210)
 _HUD_BG = QColor(0, 0, 0, 140)
 
@@ -133,10 +139,14 @@ class AEBDebugWindow(QWidget):
         for v in snap.vehicles:
             is_suppressed = v.get("rear_suppressed", False)
             danger = v["vid"] in snap.colliding_ids
+            brake_suppressed = v["vid"] in snap.braking_suppressed_ids
 
             if is_suppressed:
                 path_clr = _SUPPRESSED_PATH
                 veh_clr = _SUPPRESSED_CLR
+            elif danger and brake_suppressed:
+                path_clr = _BRAKE_SUPPRESSED_PATH
+                veh_clr = _BRAKE_SUPPRESSED_CLR
             elif danger:
                 path_clr = _DANGER_PATH
                 veh_clr = _DANGER_CLR
@@ -144,6 +154,7 @@ class AEBDebugWindow(QWidget):
                 path_clr = _SAFE_PATH
                 veh_clr = _SAFE_CLR
 
+            self._draw_history(p, v.get("history", []), ex, ez, ey, veh_clr)
             self._draw_path(
                 p, v["path"], ex, ez, ey, v["half_w"], path_clr,
             )
@@ -161,6 +172,19 @@ class AEBDebugWindow(QWidget):
                 )
 
         self._draw_path(p, snap.ego_path, ex, ez, ey, snap.ego_half_w, _EGO_PATH)
+
+        if snap.ego_has_trailer:
+            fwd_x = math.sin(ey)
+            fwd_z = math.cos(ey)
+            trailer_reach = snap.ego_half_l + _EGO_TRAILER_HALF_L
+            trailer_x = ex - fwd_x * trailer_reach
+            trailer_z = ez - fwd_z * trailer_reach
+            self._draw_vehicle_ego(
+                p, trailer_x, trailer_z, ey,
+                _EGO_TRAILER_HALF_W, _EGO_TRAILER_HALF_L,
+                ex, ez, ey, _EGO_TRAILER_CLR,
+            )
+
         self._draw_vehicle_ego(
             p, ex, ez, ey, snap.ego_half_w, snap.ego_half_l, ex, ez, ey, _EGO_CLR,
         )
@@ -177,6 +201,36 @@ class AEBDebugWindow(QWidget):
         for d in range(int(_GRID_STEP), 200, int(_GRID_STEP)):
             r = d * PPM
             p.drawEllipse(QPointF(cx, cy), r, r)
+
+    # -- filtered position history trail -----------------------------------
+
+    def _draw_history(
+        self, p: QPainter,
+        history: list[tuple[float, float]],
+        ego_x: float, ego_z: float, ego_yaw: float,
+        color: QColor,
+    ) -> None:
+        """Draw the filtered position trail for a traffic vehicle.
+
+        Each segment fades from *_HISTORY_ALPHA* at the most-recent end to
+        near-zero at the oldest end so the trail visually points toward the
+        current position.
+        """
+        if len(history) < 2:
+            return
+
+        pts = [self._w2s(wx, wz, ego_x, ego_z, ego_yaw) for wx, wz in history]
+        n = len(pts) - 1
+
+        p.setBrush(Qt.NoBrush)
+        for i in range(n):
+            # Newest segment is at the end of the list — make it the brightest.
+            t = (i + 1) / float(n)
+            seg_alpha = int(_HISTORY_ALPHA * t)
+            seg_color = QColor(color)
+            seg_color.setAlpha(max(seg_alpha, 10))
+            p.setPen(QPen(seg_color, 1.5, Qt.SolidLine))
+            p.drawLine(QPointF(*pts[i]), QPointF(*pts[i + 1]))
 
     # -- traffic vehicle ---------------------------------------------------
 
@@ -320,7 +374,7 @@ class AEBDebugWindow(QWidget):
     def _draw_hud(self, p: QPainter, snap) -> None:
         p.setPen(Qt.NoPen)
         p.setBrush(QBrush(_HUD_BG))
-        p.drawRoundedRect(8, 8, 280, 130, 6, 6)
+        p.drawRoundedRect(8, 8, 280, 150, 6, 6)
 
         p.setFont(QFont("Segoe UI", 10))
         p.setPen(QPen(_TEXT))
@@ -332,6 +386,7 @@ class AEBDebugWindow(QWidget):
         nv = len(snap.vehicles)
         nc = len(snap.colliding_ids)
         ns = len(snap.suppressed_ids)
+        nb = len(snap.braking_suppressed_ids)
         p.drawText(16, y, f"Traffic: {nv}   Threats: {nc}   Rear: {ns}")
         y += 20
 
@@ -345,7 +400,8 @@ class AEBDebugWindow(QWidget):
         elif state == AEBState.WARN:
             p.setPen(QPen(_WARN_CLR))
             ttc_str = f"{snap.time_to_collision:.2f}" if snap.time_to_collision < 100 else "\u221E"
-            p.drawText(16, y, f"\u26A0 AEB WARN  TTC: {ttc_str}s")
+            ttb_str = f"{snap.time_to_brake:.2f}" if snap.time_to_brake < 100 else "\u221E"
+            p.drawText(16, y, f"\u26A0 AEB WARN  TTC: {ttc_str}s  TTB: {ttb_str}s")
         else:
             p.setPen(QPen(_SAFE_CLR))
             p.drawText(16, y, "AEB standby")
@@ -361,3 +417,8 @@ class AEBDebugWindow(QWidget):
             p.setPen(QPen(_SUPPRESSED_CLR))
             p.setFont(QFont("Segoe UI", 8))
             p.drawText(16, y, f"{ns} rear-approach vehicle(s) suppressed")
+            y += 16
+        if nb > 0:
+            p.setPen(QPen(_BRAKE_SUPPRESSED_CLR))
+            p.setFont(QFont("Segoe UI", 8))
+            p.drawText(16, y, f"{nb} threat(s): braking would worsen collision")

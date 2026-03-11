@@ -1,5 +1,5 @@
 {
-  "AEB_enabled": false,
+  "AEB_enabled": true,
   "acc_enabled": false,
   "airhorn_variable": true,
   "autodisable_hazards": true,
