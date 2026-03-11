@@ -292,7 +292,7 @@ class MainPedalThread(BaseThread):
             aeb = registry.get_thread("aeb_thread")
             if aeb is not None and aeb.is_alive():
                 with aeb.data._lock:
-                    if aeb.data.em_stop_requested:
+                    if aeb.data.AEB_brake:
                         gas_output = 0.0
                         brake_output = 1.0
         except (KeyError, AttributeError):
