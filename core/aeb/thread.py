@@ -385,7 +385,7 @@ class AEBThread(BaseThread):
         best_hit_x: float = 0.0
         best_hit_z: float = 0.0
         vehicle_dicts: list[dict] = []
-        vehicle_arcs: dict[int, ArcPath] = {}
+        vehicle_arcs: dict[int, list[ArcPath]] = {}
         threat_arcs: list[ArcPath] = []
 
         for v in vehicles:
@@ -402,8 +402,6 @@ class AEBThread(BaseThread):
             v_hw = v.size.width / 2.0
 
             veh_arc = v.get_arc(dynamic_horizon)
-            vehicle_arcs[v.id] = veh_arc
-
             trailer_dicts = []
             trailer_arcs: list[ArcPath] = []
             for tr in v.trailers:
@@ -438,6 +436,9 @@ class AEBThread(BaseThread):
                 "trailers": trailer_dicts,
             }
 
+            # Store all arcs (tractor + trailers) for debug visualisation and collision
+            vehicle_arcs[v.id] = [veh_arc] + trailer_arcs
+
             if not run_collision:
                 vehicle_dicts.append(veh_dict)
                 continue
@@ -462,7 +463,8 @@ class AEBThread(BaseThread):
             veh_fwd_z = -math.cos(v_yaw_rad)
             co_directional = abs(ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z) > 0.7
 
-            # Collect all target arcs for this vehicle (tractor + trailers)
+            # Collision is checked for both the vehicle and each of its trailers:
+            # if the tractor OR any trailer is on ego's path, we trigger AEB.
             all_target_arcs = [veh_arc] + trailer_arcs
 
             for target_arc in all_target_arcs:

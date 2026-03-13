@@ -167,11 +167,13 @@ class AEBDebugWindow(QWidget):
             else:
                 body_clr, corr_clr = _SAFE_CLR, QColor(_SAFE_CLR)
 
-            # Draw arc corridor
-            arc = snap.vehicle_arcs.get(vid)
-            if arc is not None:
+            # Draw arc corridors (tractor + trailers; collision is checked for each)
+            arcs = snap.vehicle_arcs.get(vid)
+            if arcs is not None:
+                arc_list = arcs if isinstance(arcs, list) else [arcs]
                 corr_clr.setAlpha(20)
-                self._draw_arc_corridor(p, arc, ex, ez, ey, corr_clr)
+                for arc in arc_list:
+                    self._draw_arc_corridor(p, arc, ex, ez, ey, corr_clr)
 
             # Draw vehicle box
             self._draw_vehicle_box(
