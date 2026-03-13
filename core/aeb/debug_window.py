@@ -170,7 +170,7 @@ class AEBDebugWindow(QWidget):
             # Draw arc corridor
             arc = snap.vehicle_arcs.get(vid)
             if arc is not None:
-                corr_clr.setAlpha(45)
+                corr_clr.setAlpha(20)
                 self._draw_arc_corridor(p, arc, ex, ez, ey, corr_clr)
 
             # Draw vehicle box

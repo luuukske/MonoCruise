@@ -53,17 +53,19 @@ logger = logging.getLogger(__name__)
 
 _INF: float = 1e9
 
-_FULL_BRAKE_DECEL: float = 12.0
-_MIN_SPEED_MS: float = 0.0 / 3.6 #testing 35.0 / 3.6 is recommended
+_FULL_BRAKE_DECEL: float = 5.0
+_MIN_SPEED_MS: float = 5.0 / 3.6 #testing 35.0 / 3.6 is recommended
 _MAX_RANGE: float = 100.0
 _MAX_RANGE_SQ: float = _MAX_RANGE ** 2
 
-_ARC_HORIZON: float = 3.0
+_MIN_ARC_HORIZON: float = 3.0
+_MAX_ARC_HORIZON: float = 6.0
 _CORRIDOR_MARGIN: float = 0.5
 _COLLISION_SAMPLES: int = 36
 
 _WARN_TTC_THRESHOLD: float = 1.3
 _BRAKE_TTS_THRESHOLD: float = 0.1
+_TIME_TO_BRAKE_BUFFER: float = 0.5
 
 _REAR_DOT_THRESHOLD: float = -0.5
 _OVERTAKE_SPEED_MARGIN: float = 2.0
@@ -71,6 +73,7 @@ _OVERTAKE_SPEED_MARGIN: float = 2.0
 _EVASION_CANDIDATES: int = 13
 _EVASION_MAX_CURVATURE: float = 0.08
 _EVASION_STEER_PENALTY: float = 5.0
+_EVASION_G_THRESHOLD: float = 0.0 * 9.81
 
 _VEHICLE_FORMAT = "ffffffffffffhhbb"
 _TRAILER_FORMAT = "ffffffffff"
@@ -211,6 +214,21 @@ class _TrafficReader:
 
 
 # ---------------------------------------------------------------------------
+# Arc approach check
+# ---------------------------------------------------------------------------
+
+def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1) -> bool:
+    """Return True if arcs a and b are still closing at time t."""
+    ax0, az0 = a.position_at_time(t)
+    bx0, bz0 = b.position_at_time(t)
+    ax1, az1 = a.position_at_time(t + dt)
+    bx1, bz1 = b.position_at_time(t + dt)
+    d0_sq = (ax0 - bx0) ** 2 + (az0 - bz0) ** 2
+    d1_sq = (ax1 - bx1) ** 2 + (az1 - bz1) ** 2
+    return d1_sq < d0_sq
+
+
+# ---------------------------------------------------------------------------
 # Evasive path planner
 # ---------------------------------------------------------------------------
 
@@ -222,17 +240,18 @@ def _plan_evasion(
     current_curvature: float,
     ego_hw: float,
     threats: list[ArcPath],
-    horizon: float = _ARC_HORIZON,
-) -> tuple[float, ArcPath | None]:
+    horizon: float = _MIN_ARC_HORIZON,
+) -> tuple[float, ArcPath | None, bool]:
     """Find optimal evasive curvature.
 
     Uses the BRAKING ego arc for each candidate (since we're in WARN,
     the truck will be decelerating).
 
-    Returns (best_curvature, best_arc_or_None).
+    Returns (best_curvature, best_arc_or_None, evasion_is_clear).
+    ``evasion_is_clear`` is True when the best candidate has no collision.
     """
     if not threats or ego_speed < 1.0:
-        return current_curvature, None
+        return current_curvature, None, False
 
     n = _EVASION_CANDIDATES
     step = 2.0 * _EVASION_MAX_CURVATURE / max(n - 1, 1)
@@ -262,7 +281,8 @@ def _plan_evasion(
             best_kappa = kappa
             best_arc = ego_arc
 
-    return best_kappa, best_arc
+    evasion_is_clear = best_score > (_INF * 0.5)
+    return best_kappa, best_arc, evasion_is_clear
 
 
 # ---------------------------------------------------------------------------
@@ -327,10 +347,13 @@ class AEBThread(BaseThread):
 
         ego_hw: float = 1.25
 
+        t_stop = ego_speed / _FULL_BRAKE_DECEL
+        dynamic_horizon = min(max(_MIN_ARC_HORIZON, t_stop * 2.0), _MAX_ARC_HORIZON)
+
         # Current-speed ego arc (for unbraked TTC / warning display)
         ego_arc = build_arc(
             ego_x, ego_z, ego_yaw_rad, ego_speed,
-            ego_curvature, ego_hw, _ARC_HORIZON,
+            ego_curvature, ego_hw, dynamic_horizon,
         )
 
         run_collision = aeb_active and ego_speed >= _MIN_SPEED_MS
@@ -342,7 +365,7 @@ class AEBThread(BaseThread):
         if run_collision:
             ego_braked_arc = build_arc(
                 ego_x, ego_z, ego_yaw_rad, ego_speed,
-                ego_curvature, ego_hw, _ARC_HORIZON,
+                ego_curvature, ego_hw, dynamic_horizon,
                 decel=_FULL_BRAKE_DECEL,
             )
 
@@ -375,17 +398,27 @@ class AEBThread(BaseThread):
             v_yaw_rad = math.radians(v_yaw_deg)
             v_hw = v.size.width / 2.0
 
-            veh_arc = v.get_arc(_ARC_HORIZON)
+            veh_arc = v.get_arc(dynamic_horizon)
             vehicle_arcs[v.id] = veh_arc
 
             trailer_dicts = []
+            trailer_arcs: list[ArcPath] = []
             for tr in v.trailers:
                 tr_pos = tr.correct_position() if tr.is_tmp else tr.position
-                _, tr_yaw, _ = tr.rotation.euler()
+                _, tr_yaw_deg, _ = tr.rotation.euler()
+                tr_yaw_rad = math.radians(tr_yaw_deg)
+                tr_hw = tr.size.width / 2.0
+
+                tr_arc = build_arc(
+                    tr_pos.x, tr_pos.z, tr_yaw_rad,
+                    v.speed, 0.0, tr_hw, dynamic_horizon,
+                )
+                trailer_arcs.append(tr_arc)
+
                 trailer_dicts.append({
                     "x": tr_pos.x, "z": tr_pos.z,
-                    "yaw": math.radians(tr_yaw),
-                    "half_w": tr.size.width / 2.0,
+                    "yaw": tr_yaw_rad,
+                    "half_w": tr_hw,
                     "length": tr.size.length,
                     "is_tmp": tr.is_tmp,
                 })
@@ -419,43 +452,53 @@ class AEBThread(BaseThread):
                     vehicle_dicts.append(veh_dict)
                     continue
 
-            # 2. PRIMARY collision check: braking ego arc vs vehicle arc
-            #    This is the check that matters for triggering AEB.
-            #    If braking would stop us before the vehicle, no trigger.
-            braked_hit = arc_arc_collision(
-                ego_braked_arc, veh_arc, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
-            )
+            # Only suppress diverging hits for co-directional vehicles
+            # (merging / same-direction traffic). Perpendicular and head-on
+            # crossers must still trigger even if arcs are briefly diverging.
+            veh_fwd_x = -math.sin(v_yaw_rad)
+            veh_fwd_z = -math.cos(v_yaw_rad)
+            co_directional = abs(ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z) > 0.7
 
-            # 3. SECONDARY: unbraked ego arc (for TTC display / warn threshold)
-            unbraked_hit = arc_arc_collision(
-                ego_arc, veh_arc, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
-            )
+            # Collect all target arcs for this vehicle (tractor + trailers)
+            all_target_arcs = [veh_arc] + trailer_arcs
 
-            if braked_hit is not None:
-                # Even under full braking, we'd still collide — real threat
-                braked_ttc = braked_hit[0]
-                colliding_ids.add(v.id)
-                threat_arcs.append(veh_arc)
+            for target_arc in all_target_arcs:
+                # 2. PRIMARY collision check: braking ego arc vs target arc
+                braked_hit = arc_arc_collision(
+                    ego_braked_arc, target_arc, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
+                )
+                if (braked_hit is not None and co_directional
+                        and not _is_approaching(ego_braked_arc, target_arc, braked_hit[0])):
+                    braked_hit = None
 
-                if braked_ttc < best_braked_ttc:
-                    best_braked_ttc = braked_ttc
-                    best_hit_x = braked_hit[1]
-                    best_hit_z = braked_hit[2]
+                # 3. SECONDARY: unbraked ego arc (for TTC display / warn threshold)
+                unbraked_hit = arc_arc_collision(
+                    ego_arc, target_arc, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
+                )
+                if (unbraked_hit is not None and co_directional
+                        and not _is_approaching(ego_arc, target_arc, unbraked_hit[0])):
+                    unbraked_hit = None
 
-            elif unbraked_hit is not None:
-                # We'd collide at current speed but braking avoids it.
-                # Mark as "braking suppressed" — show in debug but don't trigger.
-                braking_suppressed_ids.add(v.id)
-                colliding_ids.add(v.id)  # still show as detected threat in debug
+                if braked_hit is not None:
+                    braked_ttc = braked_hit[0]
+                    colliding_ids.add(v.id)
+                    threat_arcs.append(target_arc)
 
-            # Track unbraked TTC for HUD display
-            if unbraked_hit is not None:
-                if unbraked_hit[0] < best_unbraked_ttc:
-                    best_unbraked_ttc = unbraked_hit[0]
-                    # Use unbraked hit position if no braked hit yet
-                    if best_braked_ttc >= _INF:
-                        best_hit_x = unbraked_hit[1]
-                        best_hit_z = unbraked_hit[2]
+                    if braked_ttc < best_braked_ttc:
+                        best_braked_ttc = braked_ttc
+                        best_hit_x = braked_hit[1]
+                        best_hit_z = braked_hit[2]
+
+                elif unbraked_hit is not None:
+                    braking_suppressed_ids.add(v.id)
+                    colliding_ids.add(v.id)
+
+                if unbraked_hit is not None:
+                    if unbraked_hit[0] < best_unbraked_ttc:
+                        best_unbraked_ttc = unbraked_hit[0]
+                        if best_braked_ttc >= _INF:
+                            best_hit_x = unbraked_hit[1]
+                            best_hit_z = unbraked_hit[2]
 
             vehicle_dicts.append(veh_dict)
 
@@ -480,24 +523,32 @@ class AEBThread(BaseThread):
         time_to_brake = _INF
         evasion_kappa = ego_curvature
         evasion_arc: ArcPath | None = None
+        evasion_viable = False
 
         # Display TTC is the unbraked one (what driver sees approaching)
         display_ttc = min(best_unbraked_ttc, best_braked_ttc)
 
         if run_collision and best_braked_ttc < _INF:
             # We have a real collision even under braking
-            t_stop = ego_speed / _FULL_BRAKE_DECEL
-            time_to_brake = max(best_braked_ttc - t_stop, 0.0)
+            time_to_brake = max(best_braked_ttc - t_stop * _TIME_TO_BRAKE_BUFFER, 0.0)
 
-            if best_braked_ttc < _WARN_TTC_THRESHOLD:
-                new_state = AEBState.WARN
-                evasion_kappa, evasion_arc = _plan_evasion(
-                    ego_x, ego_z, ego_yaw_rad, ego_speed,
-                    ego_curvature, ego_hw, threat_arcs, _ARC_HORIZON,
-                )
+            evasion_kappa, evasion_arc, evasion_is_clear = _plan_evasion(
+                ego_x, ego_z, ego_yaw_rad, ego_speed,
+                ego_curvature, ego_hw, threat_arcs, dynamic_horizon,
+            )
+            if evasion_is_clear:
+                delta_kappa = abs(evasion_kappa - ego_curvature)
+                a_lat = ego_speed ** 2 * delta_kappa
+                evasion_viable = a_lat <= _EVASION_G_THRESHOLD
 
-            if time_to_brake < _BRAKE_TTS_THRESHOLD:
-                new_state = AEBState.BRAKE
+            if not evasion_viable:
+                if best_braked_ttc < _WARN_TTC_THRESHOLD:
+                    new_state = AEBState.WARN
+
+                if time_to_brake < _BRAKE_TTS_THRESHOLD:
+                    new_state = AEBState.BRAKE
+            else:
+                new_state = AEBState.STANDBY
 
         elif run_collision and best_unbraked_ttc < _WARN_TTC_THRESHOLD:
             # Unbraked collision detected but braking would avoid it.

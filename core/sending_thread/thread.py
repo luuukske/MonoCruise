@@ -202,7 +202,7 @@ class SendingThread(BaseThread):
         pedal_alive = pedal_thread is not None and pedal_thread.is_alive()
 
         em_stop = False
-        aeb_stop = False
+        AEB_brake = False
         if pedal_thread is not None and pedal_alive:
             try:
                 with pedal_thread.data._lock:
@@ -213,12 +213,12 @@ class SendingThread(BaseThread):
                 aeb_thread = registry.get_thread("aeb_thread")
                 if aeb_thread is not None and aeb_thread.is_alive():
                     with aeb_thread.data._lock:
-                        aeb_stop = bool(aeb_thread.data.em_stop_requested)
+                        AEB_brake = bool(aeb_thread.data.AEB_brake)
+                        AEB_warn = bool(aeb_thread.data.AEB_warn)
             except (KeyError, Exception):
                 pass
 
-            em_stop = em_stop or aeb_stop
-
+            em_stop = em_stop or AEB_brake
         # ------------------------------------------------------------------
         # Telemetry (safe lookup and read: thread may be missing or down)
         # ------------------------------------------------------------------
