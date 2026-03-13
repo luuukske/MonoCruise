@@ -362,7 +362,7 @@ class BaseThread:
                     else:
                         self.avg_framerate = 0.9 * self.avg_framerate + 0.1 * inst_fps
                     self._fps_samples += 1
-                wait = self.loop_interval - elapsed
+                wait = max(self.loop_interval - elapsed, 0.005)
                 if wait > 0:
                     self._stop_event.wait(wait)
 

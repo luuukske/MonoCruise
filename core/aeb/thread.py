@@ -70,6 +70,9 @@ _TIME_TO_BRAKE_BUFFER: float = 0.5
 _REAR_DOT_THRESHOLD: float = -0.5
 _OVERTAKE_SPEED_MARGIN: float = 2.0
 
+# Collision avoidance (evasive path) — disabled; code kept for possible re-enable.
+_RUN_COLLISION_AVOIDANCE_PATH: bool = False
+
 _EVASION_CANDIDATES: int = 13
 _EVASION_MAX_CURVATURE: float = 0.08
 _EVASION_STEER_PENALTY: float = 5.0
@@ -290,8 +293,8 @@ def _plan_evasion(
 # ---------------------------------------------------------------------------
 
 class AEBThread(BaseThread):
-    loop_interval = 0.033
-    max_restarts = 5
+    loop_interval = 1 / 30 # 30fps
+    max_restarts = 3
 
     def __init__(self) -> None:
         super().__init__(name="aeb_thread")
@@ -532,14 +535,15 @@ class AEBThread(BaseThread):
             # We have a real collision even under braking
             time_to_brake = max(best_braked_ttc - t_stop * _TIME_TO_BRAKE_BUFFER, 0.0)
 
-            evasion_kappa, evasion_arc, evasion_is_clear = _plan_evasion(
-                ego_x, ego_z, ego_yaw_rad, ego_speed,
-                ego_curvature, ego_hw, threat_arcs, dynamic_horizon,
-            )
-            if evasion_is_clear:
-                delta_kappa = abs(evasion_kappa - ego_curvature)
-                a_lat = ego_speed ** 2 * delta_kappa
-                evasion_viable = a_lat <= _EVASION_G_THRESHOLD
+            if _RUN_COLLISION_AVOIDANCE_PATH:
+                evasion_kappa, evasion_arc, evasion_is_clear = _plan_evasion(
+                    ego_x, ego_z, ego_yaw_rad, ego_speed,
+                    ego_curvature, ego_hw, threat_arcs, dynamic_horizon,
+                )
+                if evasion_is_clear:
+                    delta_kappa = abs(evasion_kappa - ego_curvature)
+                    a_lat = ego_speed ** 2 * delta_kappa
+                    evasion_viable = a_lat <= _EVASION_G_THRESHOLD
 
             if not evasion_viable:
                 if best_braked_ttc < _WARN_TTC_THRESHOLD:
