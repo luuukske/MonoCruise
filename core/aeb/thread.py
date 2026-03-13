@@ -3,15 +3,39 @@ AEB Thread — Automatic Emergency Braking with arc-based collision detection
 and evasive path planning.
 
 !! CRITICAL — COLLISION LOGIC NOTE !!
-  The PRIMARY collision check uses the BRAKING ego arc (ego decelerating at
-  full brake decel).  This prevents false triggers on vehicles that are far
-  ahead and would never be reached if ego brakes.  The current-speed ego arc
-  is only used as a secondary check to compute the "unbraked TTC" for the
-  warning threshold.
+  Detection is TTB-based (Time To Brake), NOT TTC-based against the braked arc.
 
-  Previous bug: testing against the current-speed arc caused AEB to trigger
-  on slow/stopped vehicles 60-80m ahead because at current speed the ego
-  would eventually reach them, even though braking would stop well before.
+  TWO arcs are built each loop:
+    ego_arc         — constant speed; detects whether a collision exists on
+                      the current path at all.
+    ego_braked_arc  — full-brake decel; classifies urgency only.
+
+  Per-vehicle logic:
+    1. Check ego_arc vs target.  No hit → skip (nothing in our path).
+    2. Check ego_braked_arc vs target.
+         braked_hit is None     → braking fully avoids.  Compute TTB:
+                                       TTB = max(unbraked_ttc
+                                                 - t_stop × _TIME_TO_BRAKE_BUFFER,
+                                                 0.0)
+                                   Vehicle is marked braking_suppressed
+                                   (visual distinction only).
+         braked_hit is not None → braking is insufficient.  TTB = 0 (brake NOW).
+
+  Decision threshold is best_ttb across all vehicles:
+    TTB < _WARN_TTC_THRESHOLD  → WARN
+    TTB < _BRAKE_TTS_THRESHOLD → BRAKE
+
+  Why not "primary braked arc" (old approach):
+    Old code triggered only when braking could NOT avoid a collision.
+    This silenced every vehicle that braking *would* save from — which
+    is exactly the set that needs the warning.  Stationary vehicles were
+    completely silent until the stopping distance was exhausted, by which
+    point it was already too late.
+
+  _is_approaching filter:
+    Applied only to co-directional MOVING targets on the unbraked arc.
+    Never applied to stationary targets — a parked car in your lane is
+    always a real hit regardless of heading alignment.
 
 Registry name: ``aeb_thread``
 
@@ -293,7 +317,7 @@ def _plan_evasion(
 # ---------------------------------------------------------------------------
 
 class AEBThread(BaseThread):
-    loop_interval = 1 / 30 # 30fps
+    loop_interval = 1 / 60 # 30fps
     max_restarts = 3
 
     def __init__(self) -> None:
@@ -380,8 +404,9 @@ class AEBThread(BaseThread):
         colliding_ids: set[int] = set()
         suppressed_ids: set[int] = set()
         braking_suppressed_ids: set[int] = set()
-        best_braked_ttc: float = _INF    # TTC under braking (primary)
-        best_unbraked_ttc: float = _INF  # TTC at current speed (for warn display)
+        best_ttb: float = _INF           # time-to-brake — primary decision metric
+        best_braked_ttc: float = _INF    # TTC under braking — evasion planner only
+        best_unbraked_ttc: float = _INF  # TTC at current speed — display
         best_hit_x: float = 0.0
         best_hit_z: float = 0.0
         vehicle_dicts: list[dict] = []
@@ -468,42 +493,57 @@ class AEBThread(BaseThread):
             all_target_arcs = [veh_arc] + trailer_arcs
 
             for target_arc in all_target_arcs:
-                # 2. PRIMARY collision check: braking ego arc vs target arc
-                braked_hit = arc_arc_collision(
-                    ego_braked_arc, target_arc, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
-                )
-                if (braked_hit is not None and co_directional
-                        and not _is_approaching(ego_braked_arc, target_arc, braked_hit[0])):
-                    braked_hit = None
-
-                # 3. SECONDARY: unbraked ego arc (for TTC display / warn threshold)
+                # 1. PRIMARY: unbraked arc — is there anything in our path at all?
                 unbraked_hit = arc_arc_collision(
                     ego_arc, target_arc, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
                 )
-                if (unbraked_hit is not None and co_directional
+                # Suppress diverging co-directional hits for MOVING targets only
+                # (e.g. ego just overtook a slower vehicle, arcs briefly overlap
+                # but are separating).  Never suppress stationary targets —
+                # a parked vehicle in the lane is always real regardless of heading.
+                if (unbraked_hit is not None
+                        and co_directional
+                        and target_arc.speed > 0.5
                         and not _is_approaching(ego_arc, target_arc, unbraked_hit[0])):
                     unbraked_hit = None
 
-                if braked_hit is not None:
-                    braked_ttc = braked_hit[0]
-                    colliding_ids.add(v.id)
-                    threat_arcs.append(target_arc)
+                if unbraked_hit is None:
+                    continue  # nothing in our path — skip braked check entirely
 
-                    if braked_ttc < best_braked_ttc:
-                        best_braked_ttc = braked_ttc
-                        best_hit_x = braked_hit[1]
-                        best_hit_z = braked_hit[2]
+                unbraked_ttc = unbraked_hit[0]
+                colliding_ids.add(v.id)
 
-                elif unbraked_hit is not None:
+                if unbraked_ttc < best_unbraked_ttc:
+                    best_unbraked_ttc = unbraked_ttc
+                    best_hit_x = unbraked_hit[1]
+                    best_hit_z = unbraked_hit[2]
+
+                # 2. SECONDARY: braked arc — does braking avoid the collision?
+                braked_hit = arc_arc_collision(
+                    ego_braked_arc, target_arc, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
+                )
+
+                if braked_hit is None:
+                    # Braking fully avoids — compute how long until we MUST brake.
+                    # TTB = time remaining before the braking window closes:
+                    #   unbraked_ttc     — when we hit at current speed
+                    #   t_stop × buffer  — how long braking takes (with margin)
+                    # When TTB reaches 0, delaying further makes a collision
+                    # unavoidable regardless of braking.
+                    ttb = max(unbraked_ttc - t_stop * _TIME_TO_BRAKE_BUFFER, 0.0)
                     braking_suppressed_ids.add(v.id)
-                    colliding_ids.add(v.id)
+                else:
+                    # Braking is insufficient — collision happens even under full
+                    # braking.  TTB = 0: must act now.
+                    ttb = 0.0
+                    threat_arcs.append(target_arc)
+                    if braked_hit[0] < best_braked_ttc:
+                        best_braked_ttc = braked_hit[0]
 
-                if unbraked_hit is not None:
-                    if unbraked_hit[0] < best_unbraked_ttc:
-                        best_unbraked_ttc = unbraked_hit[0]
-                        if best_braked_ttc >= _INF:
-                            best_hit_x = unbraked_hit[1]
-                            best_hit_z = unbraked_hit[2]
+                if ttb < best_ttb:
+                    best_ttb = ttb
+                    best_hit_x = unbraked_hit[1]
+                    best_hit_z = unbraked_hit[2]
 
             vehicle_dicts.append(veh_dict)
 
@@ -513,29 +553,31 @@ class AEBThread(BaseThread):
             self._diag_counter = 0
             if vehicle_dicts:
                 logger.info(
-                    "AEB diag: run=%s spd=%.1f vehs=%d braked_hits=%d "
-                    "brake_supp=%d supp=%d braked_ttc=%.2f unbraked_ttc=%.2f κ=%.4f",
+                    "AEB diag: run=%s spd=%.1f vehs=%d colliding=%d "
+                    "brake_insuff=%d braking_avoids=%d supp=%d "
+                    "ttb=%.2f unbraked_ttc=%.2f braked_ttc=%.2f κ=%.4f",
                     run_collision, ego_speed * 3.6, len(vehicle_dicts),
+                    len(colliding_ids),
                     len(colliding_ids) - len(braking_suppressed_ids),
                     len(braking_suppressed_ids), len(suppressed_ids),
-                    best_braked_ttc if best_braked_ttc < _INF else -1.0,
+                    best_ttb if best_ttb < _INF else -1.0,
                     best_unbraked_ttc if best_unbraked_ttc < _INF else -1.0,
+                    best_braked_ttc if best_braked_ttc < _INF else -1.0,
                     ego_curvature,
                 )
 
-        # AEB decision — based on BRAKED TTC (not unbraked)
+        # AEB decision — based on TTB (time to brake), not raw TTC.
+        # TTB = 0 means the braking window has closed or braking is insufficient.
         new_state = AEBState.STANDBY
         time_to_brake = _INF
         evasion_kappa = ego_curvature
         evasion_arc: ArcPath | None = None
         evasion_viable = False
 
-        # Display TTC is the unbraked one (what driver sees approaching)
-        display_ttc = min(best_unbraked_ttc, best_braked_ttc)
+        display_ttc = best_unbraked_ttc
 
-        if run_collision and best_braked_ttc < _INF:
-            # We have a real collision even under braking
-            time_to_brake = max(best_braked_ttc - t_stop * _TIME_TO_BRAKE_BUFFER, 0.0)
+        if run_collision and best_ttb < _INF:
+            time_to_brake = best_ttb
 
             if _RUN_COLLISION_AVOIDANCE_PATH:
                 evasion_kappa, evasion_arc, evasion_is_clear = _plan_evasion(
@@ -548,19 +590,12 @@ class AEBThread(BaseThread):
                     evasion_viable = a_lat <= _EVASION_G_THRESHOLD
 
             if not evasion_viable:
-                if best_braked_ttc < _WARN_TTC_THRESHOLD:
+                if time_to_brake < _WARN_TTC_THRESHOLD:
                     new_state = AEBState.WARN
-
                 if time_to_brake < _BRAKE_TTS_THRESHOLD:
                     new_state = AEBState.BRAKE
             else:
                 new_state = AEBState.STANDBY
-
-        elif run_collision and best_unbraked_ttc < _WARN_TTC_THRESHOLD:
-            # Unbraked collision detected but braking would avoid it.
-            # Show WARN briefly so driver is aware, but don't escalate to BRAKE.
-            # (The braking_suppressed_ids set handles the visual distinction.)
-            pass  # Stay STANDBY — braking handles it
 
         # Hold escalated state 0.3s
         now_mono = time.monotonic()
