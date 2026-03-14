@@ -317,7 +317,7 @@ def _plan_evasion(
 # ---------------------------------------------------------------------------
 
 class AEBThread(BaseThread):
-    loop_interval = 1 / 60 # 30fps
+    loop_interval = 1 / 30 # 30fps
     max_restarts = 3
 
     def __init__(self) -> None:
@@ -425,15 +425,21 @@ class AEBThread(BaseThread):
             _, v_yaw_deg, _ = v.rotation.euler()
             v_yaw_rad = math.radians(v_yaw_deg)
             v_hw = v.size.width / 2.0
+            # Collision arcs use a 0.2 m narrower corridor (0.1 m per side) to
+            # reduce false positives from width measurement noise.
+            v_hw_coll = max(v_hw - 0.1, 0.3)
 
-            veh_arc = v.get_arc(dynamic_horizon)
+            veh_arc = v.get_arc(dynamic_horizon)  # visual / unbraked
             trailer_dicts = []
             trailer_arcs: list[ArcPath] = []
+            tr_hw_colls: list[float] = []
             for tr in v.trailers:
                 tr_pos = tr.correct_position() if tr.is_tmp else tr.position
                 _, tr_yaw_deg, _ = tr.rotation.euler()
                 tr_yaw_rad = math.radians(tr_yaw_deg)
                 tr_hw = tr.size.width / 2.0
+                tr_hw_coll = max(tr_hw - 0.1, 0.3)
+                tr_hw_colls.append(tr_hw_coll)
 
                 tr_arc = build_arc(
                     tr_pos.x, tr_pos.z, tr_yaw_rad,
@@ -486,11 +492,34 @@ class AEBThread(BaseThread):
             # crossers must still trigger even if arcs are briefly diverging.
             veh_fwd_x = -math.sin(v_yaw_rad)
             veh_fwd_z = -math.cos(v_yaw_rad)
-            co_directional = abs(ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z) > 0.7
+            fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
+            co_directional = abs(fwd_dot) > 0.7
+            # Head-on: both vehicles closing toward each other.  Model the target
+            # as also braking at full decel — realistic since oncoming drivers
+            # react to the same hazard.
+            head_on = fwd_dot < -0.7
+
+            # Build collision arcs: narrowed half-width; braked if head-on.
+            target_decel = _FULL_BRAKE_DECEL if head_on else 0.0
+            veh_arc_coll = v.get_arc(dynamic_horizon, half_width=v_hw_coll,
+                                     decel=target_decel)
+            trailer_arcs_coll: list[ArcPath] = []
+            for idx, tr in enumerate(v.trailers):
+                tr_pos = tr.correct_position() if tr.is_tmp else tr.position
+                _, tr_yaw_deg, _ = tr.rotation.euler()
+                tr_yaw_rad = math.radians(tr_yaw_deg)
+                trailer_arcs_coll.append(build_arc(
+                    tr_pos.x, tr_pos.z, tr_yaw_rad,
+                    v.speed, 0.0, tr_hw_colls[idx], dynamic_horizon,
+                    decel=target_decel,
+                ))
 
             # Collision is checked for both the vehicle and each of its trailers:
             # if the tractor OR any trailer is on ego's path, we trigger AEB.
-            all_target_arcs = [veh_arc] + trailer_arcs
+            # Visual arcs (veh_arc / trailer_arcs) are unbraked and full-width.
+            # Collision arcs (veh_arc_coll / trailer_arcs_coll) use narrowed width
+            # and head-on braking decel.
+            all_target_arcs = [veh_arc_coll] + trailer_arcs_coll
 
             for target_arc in all_target_arcs:
                 # 1. PRIMARY: unbraked arc — is there anything in our path at all?

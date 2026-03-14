@@ -558,7 +558,12 @@ class Vehicle:
             diff = (raw_yaw - self._smooth_yaw + math.pi) % (2.0 * math.pi) - math.pi
             self._smooth_yaw = self._smooth_yaw + _RAW_POSITION_ALPHA * diff
 
-    def get_arc(self, horizon: float = 3.0, half_width: float | None = None) -> ArcPath:
+    def get_arc(
+        self,
+        horizon: float = 3.0,
+        half_width: float | None = None,
+        decel: float = 0.0,
+    ) -> ArcPath:
         # !! USE _smooth_yaw, NOT rotation.euler() !!
         # Raw yaw from rotation.euler() is noisy. Even small frame-to-frame jitter
         # gets amplified across arc length — the arc tip jumps wildly while the
@@ -579,6 +584,7 @@ class Vehicle:
         return build_arc(
             self.position.x, self.position.z, yaw_rad, self.speed,
             curvature, effective_hw, horizon,
+            decel=decel,
         )
 
     def is_zero(self) -> bool:
