@@ -34,7 +34,7 @@ from typing import Optional
 
 _MAX_ANGULAR_VELOCITY: float = 90.0   # deg/s clamp
 _LOCATION_UPDATE_FREQUENCY: float = 0.05
-_RAW_POSITION_ALPHA: float = 0.25
+_RAW_POSITION_ALPHA: float = 0.20
 _MIN_CURVATURE_RADIUS: float = 5.0    # metres — floor for turning radius
 _STRAIGHT_CURVATURE_EPS: float = 1e-6 # curvature below this → straight line
 
@@ -524,6 +524,8 @@ class Vehicle:
         self._smooth_x: Optional[float] = None
         self._smooth_z: Optional[float] = None
         self._smooth_yaw: Optional[float] = None
+        self._raw_x: Optional[float] = None
+        self._raw_z: Optional[float] = None
 
     def update_from_last(self, prev: "Vehicle", t_now: float) -> None:
         dt = t_now - prev.time
@@ -536,6 +538,8 @@ class Vehicle:
             self._smooth_x = prev._smooth_x
             self._smooth_z = prev._smooth_z
             self._smooth_yaw = prev._smooth_yaw
+            self._raw_x = prev._raw_x
+            self._raw_z = prev._raw_z
             if abs(self.angular_velocity) > _MAX_ANGULAR_VELOCITY:
                 self.angular_velocity = 0.0
             if self.is_tmp:
@@ -566,18 +570,22 @@ class Vehicle:
             0.0 if abs(raw_av) > _MAX_ANGULAR_VELOCITY else raw_av
         )
 
-        # TMP speed from position delta — signed: negative = reversing
+        # Capture raw position BEFORE smoothing — used for TMP speed delta
+        raw_x = self.position.x
+        raw_z = self.position.z
+
+        # TMP speed: raw-vs-raw delta so smoothing lag doesn't inflate the reading
         if self.is_tmp:
-            lp = prev.last_location
-            disp_x = self.position.x - lp.x
-            disp_z = self.position.z - lp.z
+            prev_raw_x = prev._raw_x if prev._raw_x is not None else prev.position.x
+            prev_raw_z = prev._raw_z if prev._raw_z is not None else prev.position.z
+            disp_x = raw_x - prev_raw_x
+            disp_z = raw_z - prev_raw_z
             dist = math.sqrt(
                 disp_x ** 2
-                + (self.position.y - lp.y) ** 2
+                + (self.position.y - prev.position.y) ** 2
                 + disp_z ** 2
             )
             if dist > 0.025:
-                # Use XZ displacement dot fwd to detect reversing.
                 _, yaw_deg, _ = self.rotation.euler()
                 yaw_rad = math.radians(yaw_deg)
                 fwd_x = -math.sin(yaw_rad)
@@ -600,18 +608,20 @@ class Vehicle:
                 if (disp_x * fwd_x + disp_z * fwd_z) < 0.0:
                     self.speed = -self.speed
 
+        # Store raw position for next cycle's speed delta
+        self._raw_x = raw_x
+        self._raw_z = raw_z
+
         # Smooth position
-        ax, az = self.position.x, self.position.z
         if self._smooth_x is None:
-            self._smooth_x = ax
-            self._smooth_z = az
+            self._smooth_x = raw_x
+            self._smooth_z = raw_z
         else:
-            self._smooth_x = _RAW_POSITION_ALPHA * ax + (1.0 - _RAW_POSITION_ALPHA) * self._smooth_x
-            self._smooth_z = _RAW_POSITION_ALPHA * az + (1.0 - _RAW_POSITION_ALPHA) * self._smooth_z
+            self._smooth_x = _RAW_POSITION_ALPHA * raw_x + (1.0 - _RAW_POSITION_ALPHA) * self._smooth_x
+            self._smooth_z = _RAW_POSITION_ALPHA * raw_z + (1.0 - _RAW_POSITION_ALPHA) * self._smooth_z
         self.position.x = self._smooth_x
         self.position.z = self._smooth_z
 
-        # ← ADD THIS BLOCK:
         raw_yaw = math.radians(self.rotation.euler()[1])
         if self._smooth_yaw is None:
             self._smooth_yaw = raw_yaw
