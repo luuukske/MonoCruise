@@ -116,6 +116,11 @@ _RISK_CONFIRM_DURATION: float = 0.1
 _REAR_DOT_THRESHOLD: float = -0.5
 _OVERTAKE_SPEED_MARGIN: float = 2.0
 
+# Elevation filter: do not track vehicles below ego (e.g. on road underneath).
+# Uses slope (rotationY, positive = uphill) so vehicles in front on a downhill
+# are not wrongly filtered. Margin per AGENTS.md ±6 m road-level filtering.
+_ELEVATION_MARGIN_M: float = 6.0
+
 # Cross-traffic safe zone: for near-perpendicular targets (90° yaw diff) we expand
 # the collision check by ghost arcs ±padding along the target's heading.  This
 # catches cases where a fast crosser's arc shifts past ego's path between samples,
@@ -331,6 +336,15 @@ def _earliest_hit(
     return best
 
 
+def _world_to_ego_forward(dx: float, dz: float, ego_yaw_rad: float) -> float:
+    """Return ego-space forward component (rz). rz > 0 = in front of ego.
+
+    World→ego: rx, rz = rotate_point(-dx, dz, -ego_yaw_rad).
+    We only need rz = (-dx)*sin(-yaw) + dz*cos(-yaw) = dx*sin(yaw) + dz*cos(yaw).
+    """
+    return dx * math.sin(ego_yaw_rad) + dz * math.cos(ego_yaw_rad)
+
+
 def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1) -> bool:
     """Return True if arcs a and b are still closing at time t."""
     ax0, az0 = a.position_at_time(t)
@@ -427,9 +441,8 @@ class AEBThread(BaseThread):
             return
 
         aeb_active = Settings.AEB_enabled
-        ego_x, ego_z, ego_yaw_norm, ego_speed, steer, paused, ego_has_trailer = (
-            self._read_ego()
-        )
+        (ego_x, ego_z, ego_yaw_norm, ego_speed, steer, paused, ego_has_trailer,
+         ego_y, ego_pitch_deg) = self._read_ego()
 
         if paused and self._last_snapshot is not None:
             with self.data._lock:
@@ -515,12 +528,25 @@ class AEBThread(BaseThread):
         # _risk_first_seen for vehicles that are no longer a threat.
         newly_risky: set[int] = set()
 
+        # Elevation filter: expected Y at vehicle (x,z) using slope so vehicles
+        # in front on a downhill are not filtered. Skip vehicles below that level.
+        ego_pitch_rad = math.radians(ego_pitch_deg)
+
         for v in vehicles:
             vx, vz = v.position.x, v.position.z
             dx = vx - ego_x
             dz = vz - ego_z
             dist_sq = dx * dx + dz * dz
             if dist_sq > _MAX_RANGE_SQ:
+                continue
+
+            # Do not track vehicles below or above ego (e.g. road underneath or
+            # overpass). Use slope so vehicles in front on a slope keep correct expected Y.
+            rz = _world_to_ego_forward(dx, dz, ego_yaw_rad)
+            expected_y = ego_y + rz * math.tan(ego_pitch_rad)
+            if v.position.y < expected_y - _ELEVATION_MARGIN_M:
+                continue
+            if v.position.y > expected_y + _ELEVATION_MARGIN_M:
                 continue
 
             dist = math.sqrt(dist_sq)
@@ -801,11 +827,11 @@ class AEBThread(BaseThread):
             self.data.snapshot = AEBSnapshot()
         logger.debug("AEB teardown complete")
 
-    def _read_ego(self) -> tuple[float, float, float, float, float, bool, bool]:
+    def _read_ego(self) -> tuple[float, float, float, float, float, bool, bool, float, float]:
         try:
             tel = registry.get_thread("telemetry_thread")
             if tel is None or not tel.is_alive():
-                return 0.0, 0.0, 0.0, 0.0, 0.0, False, False
+                return 0.0, 0.0, 0.0, 0.0, 0.0, False, False, 0.0, 0.0
             with tel.data._lock:
                 return (
                     tel.data.coordinateX,
@@ -815,6 +841,8 @@ class AEBThread(BaseThread):
                     float(getattr(tel.data, "userSteer", 0.0)),
                     bool(getattr(tel.data, "paused", False)),
                     bool(getattr(tel.data, "ego_has_trailer", False)),
+                    float(getattr(tel.data, "coordinateY", 0.0)),
+                    float(getattr(tel.data, "rotationY", 0.0)),
                 )
         except (KeyError, AttributeError):
-            return 0.0, 0.0, 0.0, 0.0, 0.0, False, False
+            return 0.0, 0.0, 0.0, 0.0, 0.0, False, False, 0.0, 0.0

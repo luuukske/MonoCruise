@@ -333,7 +333,7 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 - **AI vehicles use asymmetric corner offsets (0.82 / 0.18), not 0.5 / 0.5.**
 - **Always use `_smooth_yaw` for arc construction**, never `rotation.euler()` directly.
 - **Never use `+0.5` yaw offset in `thread.py`.** It was a historical bug — see inline comment.
-- **Y axis is never used in 2D math**, only for ±6 m road-level filtering.
+- **Y axis is never used in 2D math**, only for elevation filtering: vehicles below or above the expected road level (ego Y + slope × forward distance, ±margin) are not tracked; slope (`rotationY`, positive = uphill) avoids filtering vehicles in front on a slope.
 - **AEB forward vector formula is `(-sin, -cos)`.** Do not flip signs or swap to `(sin, cos)`.
 
 ---

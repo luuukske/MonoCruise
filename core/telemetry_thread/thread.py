@@ -78,6 +78,7 @@ class TelemetryThreadData(ThreadData):
     hazardsActive: bool = False
 
     coordinateX: float = 0.0
+    coordinateY: float = 0.0   # elevation (m) — used for road-level filtering
     coordinateZ: float = 0.0
     rotationX: float = 0.0
 
@@ -98,6 +99,7 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.sdk_version          = raw.get("telemetry_plugin_revision", 0)
         data.paused               = raw.get("paused", False)
         data.coordinateX          = raw.get("coordinateX", 0.0)
+        data.coordinateY          = raw.get("coordinateY", 0.0)
         data.coordinateZ          = raw.get("coordinateZ", 0.0)
         data.rotationX            = raw.get("rotationX", 0.0)
         data.speed                = raw.get("speed", 0.0)
