@@ -90,7 +90,7 @@ logger = logging.getLogger(__name__)
 
 _INF: float = 1e9
 
-_FULL_BRAKE_DECEL: float = 8.1
+_FULL_BRAKE_DECEL: float = 7.8
 _MIN_SPEED_MS: float = 5.0 / 3.6 #testing 35.0 / 3.6 is recommended
 _MAX_RANGE: float = 100.0
 _MAX_RANGE_SQ: float = _MAX_RANGE ** 2
@@ -107,8 +107,7 @@ _TIME_TO_BRAKE_BUFFER: float = 0.5
 
 # Stopping-distance buffer: expands the braked-arc collision corridor so ego
 # stops with physical clearance instead of just touching the target.
-_STOP_BUFFER_FIXED: float = 1.5    # metres (baseline gap at rest)
-_STOP_BUFFER_SPEED: float = 0.05   # metres added per m/s of ego speed
+_STOP_BUFFER_FIXED: float = 0.5    # metres (baseline gap at rest)
 
 # A vehicle must be continuously detected as a risk for this many seconds
 # before it contributes to TTB / AEB state.
@@ -404,13 +403,15 @@ class AEBThread(BaseThread):
             ego_curvature = 0.0
 
         ego_hw: float = 1.25
+        ego_half_l: float = 3.0  # cab half-length (m); increases stopping buffer for longer vehicles
 
         t_stop = ego_speed / _FULL_BRAKE_DECEL
         dynamic_horizon = min(max(_MIN_ARC_HORIZON, t_stop * 2.0), _MAX_ARC_HORIZON)
 
         # Speed-proportional stopping buffer: expanded corridor for the braked-arc
         # check so ego comes to a halt with physical clearance, not a kiss.
-        stopping_buffer = _STOP_BUFFER_FIXED + ego_speed * _STOP_BUFFER_SPEED
+        # ego_half_l adds clearance proportional to vehicle length.
+        stopping_buffer = _STOP_BUFFER_FIXED + ego_half_l
 
         # Current-speed ego arc (for unbraked TTC / warning display)
         ego_arc = build_arc(
@@ -715,7 +716,7 @@ class AEBThread(BaseThread):
 
         snap = AEBSnapshot(
             ego_x=ego_x, ego_z=ego_z, ego_yaw=ego_yaw_rad,
-            ego_speed=ego_speed, ego_half_w=ego_hw, ego_half_l=3.0,
+            ego_speed=ego_speed, ego_half_w=ego_hw, ego_half_l=ego_half_l,
             ego_arc=ego_arc, ego_braked_arc=ego_braked_arc,
             ego_has_trailer=ego_has_trailer,
             vehicles=vehicle_dicts, vehicle_arcs=vehicle_arcs,
