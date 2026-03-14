@@ -96,18 +96,18 @@ _MAX_RANGE: float = 100.0
 _MAX_RANGE_SQ: float = _MAX_RANGE ** 2
 
 _MIN_ARC_HORIZON: float = 3.0
-_MAX_ARC_HORIZON: float = 6.0
+_MAX_ARC_HORIZON: float = 4.0
 _CORRIDOR_MARGIN: float = 0.5
 _COLLISION_SAMPLES: int = 36
 
 _WARN_TTC_THRESHOLD: float = 1.3
 _BRAKE_TTS_THRESHOLD: float = 0.1
-_BRAKE_RELEASE_THRESHOLD: float = 0.2   # TTB must exceed this for BRAKE → WARN transition
+_BRAKE_RELEASE_THRESHOLD: float = 0.3   # TTB must exceed this for BRAKE → WARN transition
 _TIME_TO_BRAKE_BUFFER: float = 0.5
 
 # Stopping-distance buffer: expands the braked-arc collision corridor so ego
 # stops with physical clearance instead of just touching the target.
-_STOP_BUFFER_FIXED: float = 1.0    # metres (baseline gap at rest)
+_STOP_BUFFER_FIXED: float = 1.5    # metres (baseline gap at rest)
 _STOP_BUFFER_SPEED: float = 0.05   # metres added per m/s of ego speed
 
 # A vehicle must be continuously detected as a risk for this many seconds
