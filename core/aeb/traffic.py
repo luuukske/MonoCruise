@@ -164,6 +164,9 @@ class ArcPath:
     half_width: float = 1.25
     horizon: float = 3.0
     decel: float = 0.0
+    # Signed target acceleration (m/s²).  Positive = speeding up, negative = braking.
+    # Mutually exclusive with decel: when decel > 0 (ego braking arc), accel is ignored.
+    accel: float = 0.0
 
     # Cached (computed by build())
     is_straight: bool = True
@@ -199,7 +202,7 @@ class ArcPath:
             self.max_sweep = 0.0
             return self
 
-        # Effective travel distance accounting for deceleration
+        # Effective travel distance: priority is decel (ego braking arc), then accel.
         if self.decel > 0.0:
             t_stop = self.speed / self.decel
             if t_stop < self.horizon:
@@ -207,6 +210,18 @@ class ArcPath:
             else:
                 t = self.horizon
                 self.arc_length = self.speed * t - 0.5 * self.decel * t * t
+        elif self.accel < 0.0:
+            # Target is braking: may stop before horizon.
+            t_stop = -self.speed / self.accel  # speed / |decel|
+            if t_stop < self.horizon:
+                self.arc_length = self.speed * t_stop + 0.5 * self.accel * t_stop * t_stop
+            else:
+                t = self.horizon
+                self.arc_length = self.speed * t + 0.5 * self.accel * t * t
+        elif self.accel > 0.0:
+            # Target is accelerating: arc extends further.
+            t = self.horizon
+            self.arc_length = self.speed * t + 0.5 * self.accel * t * t
         else:
             self.arc_length = self.speed * self.horizon
 
@@ -233,12 +248,20 @@ class ArcPath:
         return self
 
     def _dist_at_time(self, t: float) -> float:
-        """Arc-length distance at time t (handles decel clamping)."""
+        """Arc-length distance at time t (handles decel/accel clamping)."""
         if self.decel > 0.0:
             t_stop = self.speed / self.decel
             if t >= t_stop:
                 return self.speed * t_stop - 0.5 * self.decel * t_stop * t_stop
             return self.speed * t - 0.5 * self.decel * t * t
+        elif self.accel < 0.0:
+            # Target braking: clamp at stop.
+            t_stop = -self.speed / self.accel
+            if t >= t_stop:
+                return self.speed * t_stop + 0.5 * self.accel * t_stop * t_stop
+            return self.speed * t + 0.5 * self.accel * t * t
+        elif self.accel > 0.0:
+            return self.speed * t + 0.5 * self.accel * t * t
         return self.speed * t
 
     def position_at_dist(self, dist: float) -> tuple[float, float]:
@@ -328,12 +351,13 @@ def build_arc(
     x: float, z: float, yaw_rad: float, speed: float,
     curvature: float, half_width: float, horizon: float,
     decel: float = 0.0,
+    accel: float = 0.0,
 ) -> ArcPath:
     """Convenience constructor."""
     return ArcPath(
         start_x=x, start_z=z, yaw_rad=yaw_rad, speed=speed,
         curvature=curvature, half_width=half_width, horizon=horizon,
-        decel=decel,
+        decel=decel, accel=accel,
     ).build()
 
 
@@ -361,8 +385,10 @@ def arc_arc_collision(
     corridor_sq = (a.half_width + b.half_width + margin) ** 2
     horizon = min(a.horizon, b.horizon)
 
-    # Fast path: both straight, no deceleration
-    if a.is_straight and b.is_straight and a.decel <= 0 and b.decel <= 0:
+    # Fast path: both straight, no deceleration, no acceleration
+    if (a.is_straight and b.is_straight
+            and a.decel <= 0 and b.decel <= 0
+            and a.accel == 0.0 and b.accel == 0.0):
         return _ray_ray_collision(a, b, corridor_sq, horizon)
 
     # General: time-synchronised sampling
@@ -619,10 +645,17 @@ class Vehicle:
         else:
             curvature = 0.0
         effective_hw = half_width if half_width is not None else self.size.width / 2.0
+
+        # Clamp reported acceleration to physically plausible range.
+        # When decel > 0 (ego braking arc) accel is intentionally 0.
+        clamped_accel = (
+            0.0 if decel > 0.0
+            else max(-6.0, min(4.0, self.acceleration))
+        )
         return build_arc(
             self.position.x, self.position.z, yaw_rad, self.speed,
             curvature, effective_hw, horizon,
-            decel=decel,
+            decel=decel, accel=clamped_accel,
         )
 
     def is_zero(self) -> bool:

@@ -116,6 +116,17 @@ _RISK_CONFIRM_DURATION: float = 0.1
 _REAR_DOT_THRESHOLD: float = -0.5
 _OVERTAKE_SPEED_MARGIN: float = 2.0
 
+# Cross-traffic safe zone: for near-perpendicular targets (90° yaw diff) we expand
+# the collision check by ghost arcs ±padding along the target's heading.  This
+# catches cases where a fast crosser's arc shifts past ego's path between samples,
+# or where a long trailer body occupies the crossing zone slightly before/after the
+# predicted centre.
+#
+# padding = cross_factor * (BASE + SPEED * target_speed_ms)
+#   cross_factor = |sin(yaw_diff)| → 1.0 at 90°, 0.0 at 0°/180°
+_CROSS_SAFE_ZONE_BASE: float = 0.5    # m — minimum padding at any speed
+_CROSS_SAFE_ZONE_SPEED: float = 0.2  # m per m/s of target speed
+
 # Collision avoidance (evasive path) — disabled; code kept for possible re-enable.
 _RUN_COLLISION_AVOIDANCE_PATH: bool = False
 
@@ -270,6 +281,55 @@ class _TrafficReader:
 # ---------------------------------------------------------------------------
 # Arc approach check
 # ---------------------------------------------------------------------------
+
+def _cross_zone_padding(ego_yaw_rad: float, v_yaw_rad: float, v_speed_ms: float) -> float:
+    """Longitudinal safe-zone padding for near-perpendicular targets.
+
+    Returns metres to offset ghost arcs ±along the target's heading.
+    Scales with |sin(yaw_diff)| so it peaks at 90° and vanishes at 0°/180°.
+    """
+    cross_factor = abs(math.sin(ego_yaw_rad - v_yaw_rad))
+    return cross_factor * (_CROSS_SAFE_ZONE_BASE + _CROSS_SAFE_ZONE_SPEED * v_speed_ms)
+
+
+def _apply_cross_zone(arc: ArcPath, padding: float) -> list[ArcPath]:
+    """Return [arc] plus two ghost arcs at ±padding along the target's heading.
+
+    Ghost arcs model the space the vehicle will/has occupied just ahead and
+    just behind its current predicted centre, guarding against timing mismatches
+    that cause perpendicular crossers to slip through the arc-arc sample grid.
+    """
+    if padding < 0.1:
+        return [arc]
+    front = build_arc(
+        arc.start_x + padding * arc.fwd_x,
+        arc.start_z + padding * arc.fwd_z,
+        arc.yaw_rad, arc.speed, arc.curvature, arc.half_width, arc.horizon,
+        decel=arc.decel, accel=arc.accel,
+    )
+    rear = build_arc(
+        arc.start_x - padding * arc.fwd_x,
+        arc.start_z - padding * arc.fwd_z,
+        arc.yaw_rad, arc.speed, arc.curvature, arc.half_width, arc.horizon,
+        decel=arc.decel, accel=arc.accel,
+    )
+    return [arc, front, rear]
+
+
+def _earliest_hit(
+    ego_arc: ArcPath,
+    check_arcs: list[ArcPath],
+    margin: float,
+    n_samples: int,
+) -> tuple[float, float, float] | None:
+    """Return the earliest arc_arc_collision hit across all check_arcs."""
+    best: tuple[float, float, float] | None = None
+    for ca in check_arcs:
+        h = arc_arc_collision(ego_arc, ca, margin, n_samples)
+        if h is not None and (best is None or h[0] < best[0]):
+            best = h
+    return best
+
 
 def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1) -> bool:
     """Return True if arcs a and b are still closing at time t."""
@@ -553,6 +613,11 @@ class AEBThread(BaseThread):
 
             # Build collision arcs: narrowed half-width; braked if head-on.
             target_decel = _FULL_BRAKE_DECEL if head_on else 0.0
+            # Clamp reported acceleration; zeroed when the target is modelled as braking.
+            target_accel = (
+                0.0 if target_decel > 0.0
+                else max(-6.0, min(4.0, v.acceleration))
+            )
             veh_arc_coll = v.get_arc(dynamic_horizon, half_width=v_hw_coll,
                                      decel=target_decel)
             trailer_arcs_coll: list[ArcPath] = []
@@ -564,7 +629,7 @@ class AEBThread(BaseThread):
                 trailer_arcs_coll.append(build_arc(
                     tr_pos.x, tr_pos.z, tr_yaw_rad,
                     v.speed, v_curvature, tr_hw_colls[idx], dynamic_horizon,
-                    decel=target_decel,
+                    decel=target_decel, accel=target_accel,
                 ))
 
             # Collision is checked for both the vehicle and each of its trailers:
@@ -574,10 +639,17 @@ class AEBThread(BaseThread):
             # and head-on braking decel.
             all_target_arcs = [veh_arc_coll] + trailer_arcs_coll
 
-            for target_arc in all_target_arcs:
+            # Cross-traffic safe zone: compute yaw-diff-weighted padding.
+            # Peaks at 90° (perpendicular crossers / trailers), vanishes at 0°/180°.
+            cross_padding = _cross_zone_padding(ego_yaw_rad, v_yaw_rad, abs_v_speed)
+
+            for base_target_arc in all_target_arcs:
+                # Expand each arc into up to 3 check arcs (centre + front/rear ghosts).
+                cross_arcs = _apply_cross_zone(base_target_arc, cross_padding)
+
                 # 1. PRIMARY: unbraked arc — is there anything in our path at all?
-                unbraked_hit = arc_arc_collision(
-                    ego_arc, target_arc, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
+                unbraked_hit = _earliest_hit(
+                    ego_arc, cross_arcs, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
                 )
                 # Suppress diverging co-directional hits for MOVING targets only
                 # (e.g. ego just overtook a slower vehicle, arcs briefly overlap
@@ -585,8 +657,8 @@ class AEBThread(BaseThread):
                 # a parked vehicle in the lane is always real regardless of heading.
                 if (unbraked_hit is not None
                         and co_directional
-                        and target_arc.speed > 0.5
-                        and not _is_approaching(ego_arc, target_arc, unbraked_hit[0])):
+                        and base_target_arc.speed > 0.5
+                        and not _is_approaching(ego_arc, base_target_arc, unbraked_hit[0])):
                     unbraked_hit = None
 
                 if unbraked_hit is None:
@@ -615,8 +687,9 @@ class AEBThread(BaseThread):
                 # 2. SECONDARY: braked arc — does braking avoid the collision?
                 # Use an expanded corridor (+ stopping_buffer) to guarantee ego
                 # stops with clearance rather than just barely touching.
-                braked_hit = arc_arc_collision(
-                    ego_braked_arc, target_arc,
+                # Cross zone applied here too — same geometric miss applies.
+                braked_hit = _earliest_hit(
+                    ego_braked_arc, cross_arcs,
                     _CORRIDOR_MARGIN + stopping_buffer,
                     _COLLISION_SAMPLES,
                 )
@@ -634,7 +707,7 @@ class AEBThread(BaseThread):
                     # Braking is insufficient — collision happens even under full
                     # braking.  TTB = 0: must act now.
                     ttb = 0.0
-                    threat_arcs.append(target_arc)
+                    threat_arcs.append(base_target_arc)
                     if braked_hit[0] < best_braked_ttc:
                         best_braked_ttc = braked_hit[0]
 
@@ -649,6 +722,25 @@ class AEBThread(BaseThread):
         self._risk_first_seen = {
             k: v for k, v in self._risk_first_seen.items() if k in newly_risky
         }
+
+        # Diagnostics
+        self._diag_counter += 1
+        if self._diag_counter >= 60:
+            self._diag_counter = 0
+            if vehicle_dicts:
+                logger.info(
+                    "AEB diag: run=%s spd=%.1f vehs=%d colliding=%d "
+                    "brake_insuff=%d braking_avoids=%d supp=%d "
+                    "ttb=%.2f unbraked_ttc=%.2f braked_ttc=%.2f κ=%.4f",
+                    run_collision, ego_speed * 3.6, len(vehicle_dicts),
+                    len(colliding_ids),
+                    len(colliding_ids) - len(braking_suppressed_ids),
+                    len(braking_suppressed_ids), len(suppressed_ids),
+                    best_ttb if best_ttb < _INF else -1.0,
+                    best_unbraked_ttc if best_unbraked_ttc < _INF else -1.0,
+                    best_braked_ttc if best_braked_ttc < _INF else -1.0,
+                    ego_curvature,
+                )
 
         # AEB decision — based on TTB (time to brake), not raw TTC.
         # TTB = 0 means the braking window has closed or braking is insufficient.
