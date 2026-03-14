@@ -77,7 +77,7 @@ logger = logging.getLogger(__name__)
 
 _INF: float = 1e9
 
-_FULL_BRAKE_DECEL: float = 5.0
+_FULL_BRAKE_DECEL: float = 8
 _MIN_SPEED_MS: float = 5.0 / 3.6 #testing 35.0 / 3.6 is recommended
 _MAX_RANGE: float = 100.0
 _MAX_RANGE_SQ: float = _MAX_RANGE ** 2
@@ -89,7 +89,7 @@ _COLLISION_SAMPLES: int = 36
 
 _WARN_TTC_THRESHOLD: float = 1.3
 _BRAKE_TTS_THRESHOLD: float = 0.1
-_TIME_TO_BRAKE_BUFFER: float = 0.5
+_TIME_TO_BRAKE_BUFFER: float = 1
 
 _REAR_DOT_THRESHOLD: float = -0.5
 _OVERTAKE_SPEED_MARGIN: float = 2.0
