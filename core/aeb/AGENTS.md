@@ -338,4 +338,4 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 
 ---
 
-*Source: `traffic.py`, `thread.py`, `ETS2radar.py`, `classes.py` — LD-tech / MonoCruise — March 2026*
+*Source: `traffic.py`, `thread.py`, `ETS2radar.py`, `classes.py` — LD-Tech / MonoCruise — March 2026*
