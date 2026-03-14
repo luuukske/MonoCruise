@@ -25,6 +25,19 @@ and evasive path planning.
     TTB < _WARN_TTC_THRESHOLD  → WARN
     TTB < _BRAKE_TTS_THRESHOLD → BRAKE
 
+  BRAKE latch: once triggered, AEB_brake stays active until TTB >= _BRAKE_RELEASE_THRESHOLD.
+
+  Risk confirmation: a vehicle only contributes to TTB after it has been
+  continuously detected as a risk for >= _RISK_CONFIRM_DURATION seconds.
+  It is still shown visually (colliding_ids) before confirmation.
+
+  Stopping buffer: the braked-arc collision check uses an expanded corridor
+  (_CORRIDOR_MARGIN + stopping_buffer) where stopping_buffer is speed-dependent.
+  This ensures ego stops with physical clearance rather than just touching.
+
+  Trailer arcs: trailers inherit the tractor's curvature so their predicted
+  path follows the tractor's turn rather than going straight.
+
   Why not "primary braked arc" (old approach):
     Old code triggered only when braking could NOT avoid a collision.
     This silenced every vehicle that braking *would* save from — which
@@ -77,7 +90,7 @@ logger = logging.getLogger(__name__)
 
 _INF: float = 1e9
 
-_FULL_BRAKE_DECEL: float = 8
+_FULL_BRAKE_DECEL: float = 8.1
 _MIN_SPEED_MS: float = 5.0 / 3.6 #testing 35.0 / 3.6 is recommended
 _MAX_RANGE: float = 100.0
 _MAX_RANGE_SQ: float = _MAX_RANGE ** 2
@@ -89,7 +102,17 @@ _COLLISION_SAMPLES: int = 36
 
 _WARN_TTC_THRESHOLD: float = 1.3
 _BRAKE_TTS_THRESHOLD: float = 0.1
-_TIME_TO_BRAKE_BUFFER: float = 1
+_BRAKE_RELEASE_THRESHOLD: float = 0.2   # TTB must exceed this for BRAKE → WARN transition
+_TIME_TO_BRAKE_BUFFER: float = 0.5
+
+# Stopping-distance buffer: expands the braked-arc collision corridor so ego
+# stops with physical clearance instead of just touching the target.
+_STOP_BUFFER_FIXED: float = 1.0    # metres (baseline gap at rest)
+_STOP_BUFFER_SPEED: float = 0.05   # metres added per m/s of ego speed
+
+# A vehicle must be continuously detected as a risk for this many seconds
+# before it contributes to TTB / AEB state.
+_RISK_CONFIRM_DURATION: float = 0.1
 
 _REAR_DOT_THRESHOLD: float = -0.5
 _OVERTAKE_SPEED_MARGIN: float = 2.0
@@ -198,6 +221,10 @@ class _TrafficReader:
         if self._buf is None:
             if not self.open():
                 return None
+        try:
+            self._buf.seek(0)
+        except Exception:
+            return None
         try:
             raw = struct.unpack(_TOTAL_FORMAT, self._buf[:_BUF_SIZE])
         except Exception:
@@ -329,6 +356,9 @@ class AEBThread(BaseThread):
         self._state_hold_until: float = 0.0
         self._last_snapshot: AEBSnapshot | None = None
         self._diag_counter: int = 0
+        # Per-vehicle timestamp of when a risk was first continuously detected.
+        # Cleared when a vehicle is no longer risky for a full loop iteration.
+        self._risk_first_seen: dict[int, float] = {}
 
     def setup(self) -> None:
         self._traffic.open()
@@ -378,6 +408,10 @@ class AEBThread(BaseThread):
         t_stop = ego_speed / _FULL_BRAKE_DECEL
         dynamic_horizon = min(max(_MIN_ARC_HORIZON, t_stop * 2.0), _MAX_ARC_HORIZON)
 
+        # Speed-proportional stopping buffer: expanded corridor for the braked-arc
+        # check so ego comes to a halt with physical clearance, not a kiss.
+        stopping_buffer = _STOP_BUFFER_FIXED + ego_speed * _STOP_BUFFER_SPEED
+
         # Current-speed ego arc (for unbraked TTC / warning display)
         ego_arc = build_arc(
             ego_x, ego_z, ego_yaw_rad, ego_speed,
@@ -402,6 +436,9 @@ class AEBThread(BaseThread):
 
         vehicles = self._traffic.read() or []
 
+        # Monotonic timestamp used for both risk confirmation and state hold.
+        now_mono = time.monotonic()
+
         colliding_ids: set[int] = set()
         suppressed_ids: set[int] = set()
         braking_suppressed_ids: set[int] = set()
@@ -413,6 +450,10 @@ class AEBThread(BaseThread):
         vehicle_dicts: list[dict] = []
         vehicle_arcs: dict[int, list[ArcPath]] = {}
         threat_arcs: list[ArcPath] = []
+
+        # Vehicles that are actively risky this iteration — used to clean up
+        # _risk_first_seen for vehicles that are no longer a threat.
+        newly_risky: set[int] = set()
 
         for v in vehicles:
             vx, vz = v.position.x, v.position.z
@@ -430,6 +471,14 @@ class AEBThread(BaseThread):
             # reduce false positives from width measurement noise.
             v_hw_coll = max(v_hw - 0.1, 0.3)
 
+            # Tractor curvature — trailers inherit this so their arc follows
+            # the turn instead of projecting straight ahead.
+            abs_v_speed = abs(v.speed)
+            if abs_v_speed > 0.5:
+                v_curvature = math.radians(v.angular_velocity) / abs_v_speed
+            else:
+                v_curvature = 0.0
+
             veh_arc = v.get_arc(dynamic_horizon)  # visual / unbraked
             trailer_dicts = []
             trailer_arcs: list[ArcPath] = []
@@ -442,9 +491,10 @@ class AEBThread(BaseThread):
                 tr_hw_coll = max(tr_hw - 0.1, 0.3)
                 tr_hw_colls.append(tr_hw_coll)
 
+                # Use tractor curvature so trailer arc follows the vehicle's turn.
                 tr_arc = build_arc(
                     tr_pos.x, tr_pos.z, tr_yaw_rad,
-                    v.speed, 0.0, tr_hw, dynamic_horizon,
+                    v.speed, v_curvature, tr_hw, dynamic_horizon,
                 )
                 trailer_arcs.append(tr_arc)
 
@@ -509,9 +559,10 @@ class AEBThread(BaseThread):
                 tr_pos = tr.correct_position() if tr.is_tmp else tr.position
                 _, tr_yaw_deg, _ = tr.rotation.euler()
                 tr_yaw_rad = math.radians(tr_yaw_deg)
+                # Trailer collision arcs also use tractor curvature.
                 trailer_arcs_coll.append(build_arc(
                     tr_pos.x, tr_pos.z, tr_yaw_rad,
-                    v.speed, 0.0, tr_hw_colls[idx], dynamic_horizon,
+                    v.speed, v_curvature, tr_hw_colls[idx], dynamic_horizon,
                     decel=target_decel,
                 ))
 
@@ -541,7 +592,19 @@ class AEBThread(BaseThread):
                     continue  # nothing in our path — skip braked check entirely
 
                 unbraked_ttc = unbraked_hit[0]
+
+                # Mark vehicle as colliding (for debug visualisation) regardless
+                # of confirmation — so the debug window always reflects raw detections.
                 colliding_ids.add(v.id)
+
+                # Risk confirmation: only proceed with TTB computation once the
+                # vehicle has been continuously detected as risky for
+                # _RISK_CONFIRM_DURATION seconds.
+                newly_risky.add(v.id)
+                if v.id not in self._risk_first_seen:
+                    self._risk_first_seen[v.id] = now_mono
+                if now_mono - self._risk_first_seen[v.id] < _RISK_CONFIRM_DURATION:
+                    continue  # detected but not yet confirmed — skip TTB
 
                 if unbraked_ttc < best_unbraked_ttc:
                     best_unbraked_ttc = unbraked_ttc
@@ -549,8 +612,12 @@ class AEBThread(BaseThread):
                     best_hit_z = unbraked_hit[2]
 
                 # 2. SECONDARY: braked arc — does braking avoid the collision?
+                # Use an expanded corridor (+ stopping_buffer) to guarantee ego
+                # stops with clearance rather than just barely touching.
                 braked_hit = arc_arc_collision(
-                    ego_braked_arc, target_arc, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
+                    ego_braked_arc, target_arc,
+                    _CORRIDOR_MARGIN + stopping_buffer,
+                    _COLLISION_SAMPLES,
                 )
 
                 if braked_hit is None:
@@ -576,6 +643,11 @@ class AEBThread(BaseThread):
                     best_hit_z = unbraked_hit[2]
 
             vehicle_dicts.append(veh_dict)
+
+        # Clean up confirmation timers for vehicles no longer risky this iteration.
+        self._risk_first_seen = {
+            k: v for k, v in self._risk_first_seen.items() if k in newly_risky
+        }
 
         # Diagnostics
         self._diag_counter += 1
@@ -627,8 +699,13 @@ class AEBThread(BaseThread):
             else:
                 new_state = AEBState.STANDBY
 
+        # BRAKE latch: once BRAKE is active, hold it until TTB clears
+        # _BRAKE_RELEASE_THRESHOLD.  This prevents rapid on/off cycling when a
+        # cut-in vehicle's TTB briefly fluctuates just above _BRAKE_TTS_THRESHOLD.
+        if self._prev_state == AEBState.BRAKE and time_to_brake < _BRAKE_RELEASE_THRESHOLD:
+            new_state = AEBState.BRAKE
+
         # Hold escalated state 0.3s
-        now_mono = time.monotonic()
         if self._prev_state.value > new_state.value:
             if now_mono < self._state_hold_until:
                 new_state = self._prev_state
