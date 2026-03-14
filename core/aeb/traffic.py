@@ -184,6 +184,15 @@ class ArcPath:
         self.fwd_x = -math.sin(self.yaw_rad)
         self.fwd_z = -math.cos(self.yaw_rad)
 
+        # Reversing: vehicle moves opposite to its heading yaw.
+        # Flip fwd so all downstream geometry points the actual direction of travel.
+        # Then normalise self.speed to abs — the direction is now encoded in fwd_x/fwd_z,
+        # so collision velocity vectors (speed * fwd) remain correct with abs speed.
+        if self.speed < -1e-3:
+            self.fwd_x = -self.fwd_x
+            self.fwd_z = -self.fwd_z
+        self.speed = abs(self.speed)
+
         if self.speed < 1e-3:
             self.is_straight = True
             self.arc_length = 0.0
@@ -490,9 +499,8 @@ class Vehicle:
         self._smooth_z: Optional[float] = None
         self._smooth_yaw: Optional[float] = None
 
-    def update_from_last(self, prev: "Vehicle") -> None:
-        now = time.time()
-        dt = now - prev.time
+    def update_from_last(self, prev: "Vehicle", t_now: float) -> None:
+        dt = t_now - prev.time
 
         if dt < _LOCATION_UPDATE_FREQUENCY:
             self.time = prev.time
@@ -507,12 +515,17 @@ class Vehicle:
             if self.is_tmp:
                 self.speed = prev.speed
                 self.acceleration = prev.acceleration
+            else:
+                # Carry forward the signed speed from the last full update.
+                # Without this, the unsigned buffer value overwrites the sign
+                # on every sub-frame pass, causing per-frame direction flicker.
+                self.speed = prev.speed
             if self._smooth_x is not None:
                 self.position.x = self._smooth_x
                 self.position.z = self._smooth_z
             return
 
-        self.time = now
+        self.time = t_now
         self.last_location = prev.position
         self.last_rotation = prev.rotation
         self._smooth_x = prev._smooth_x
@@ -527,15 +540,39 @@ class Vehicle:
             0.0 if abs(raw_av) > _MAX_ANGULAR_VELOCITY else raw_av
         )
 
-        # TMP speed from position delta
+        # TMP speed from position delta — signed: negative = reversing
         if self.is_tmp:
             lp = prev.last_location
+            disp_x = self.position.x - lp.x
+            disp_z = self.position.z - lp.z
             dist = math.sqrt(
-                (self.position.x - lp.x) ** 2
+                disp_x ** 2
                 + (self.position.y - lp.y) ** 2
-                + (self.position.z - lp.z) ** 2
+                + disp_z ** 2
             )
-            self.speed = dist / dt if dist > 0.025 else 0.0
+            if dist > 0.025:
+                # Use XZ displacement dot fwd to detect reversing.
+                _, yaw_deg, _ = self.rotation.euler()
+                yaw_rad = math.radians(yaw_deg)
+                fwd_x = -math.sin(yaw_rad)
+                fwd_z = -math.cos(yaw_rad)
+                direction = 1.0 if (disp_x * fwd_x + disp_z * fwd_z) >= 0.0 else -1.0
+                self.speed = direction * dist / dt
+            else:
+                self.speed = 0.0
+        elif self.speed > 1e-3:
+            # Non-TMP: speed comes unsigned from the shared-memory buffer.
+            # Determine direction via XZ displacement dot forward vector.
+            lp = prev.last_location
+            disp_x = self.position.x - lp.x
+            disp_z = self.position.z - lp.z
+            if disp_x * disp_x + disp_z * disp_z > 0.025 ** 2:
+                _, yaw_deg, _ = self.rotation.euler()
+                yaw_rad = math.radians(yaw_deg)
+                fwd_x = -math.sin(yaw_rad)
+                fwd_z = -math.cos(yaw_rad)
+                if (disp_x * fwd_x + disp_z * fwd_z) < 0.0:
+                    self.speed = -self.speed
 
         # Smooth position
         ax, az = self.position.x, self.position.z
@@ -575,9 +612,10 @@ class Vehicle:
             if self._smooth_yaw is not None
             else math.radians(self.rotation.euler()[1])
         )
-        if self.speed > 0.5:
+        abs_speed = abs(self.speed)
+        if abs_speed > 0.5:
             omega_rad = math.radians(self.angular_velocity)
-            curvature = omega_rad / self.speed
+            curvature = omega_rad / abs_speed
         else:
             curvature = 0.0
         effective_hw = half_width if half_width is not None else self.size.width / 2.0

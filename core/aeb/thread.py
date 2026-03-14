@@ -233,9 +233,10 @@ class _TrafficReader:
                 ))
             data = data[_VEH_STRIDE:]
 
+        t_now = time.time()
         for v in vehicles:
             if v.id in self._last_vehicles:
-                v.update_from_last(self._last_vehicles[v.id])
+                v.update_from_last(self._last_vehicles[v.id], t_now)
         self._last_vehicles = {v.id: v for v in vehicles}
         return vehicles
 
@@ -462,7 +463,7 @@ class AEBThread(BaseThread):
                 "half_w": v_hw,
                 "length": v.size.length,
                 "is_tmp": v.is_tmp,
-                "speed_kmh": v.speed * 3.6,
+                "speed_kmh": abs(v.speed) * 3.6,
                 "rear_suppressed": False,
                 "trailers": trailer_dicts,
             }
@@ -679,7 +680,7 @@ class AEBThread(BaseThread):
                     tel.data.coordinateX,
                     tel.data.coordinateZ,
                     tel.data.rotationX,
-                    abs(tel.data.speed),
+                    tel.data.speed,
                     float(getattr(tel.data, "userSteer", 0.0)),
                     bool(getattr(tel.data, "paused", False)),
                     bool(getattr(tel.data, "ego_has_trailer", False)),
