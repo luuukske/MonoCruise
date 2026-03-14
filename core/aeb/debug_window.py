@@ -187,10 +187,15 @@ class AEBDebugWindow(QWidget):
             spd = v.get("speed_kmh", 0.0)
             self._draw_label(p, sx, sy - 14, f"{spd:.0f}", body_clr)
 
-            # Trailers
+            # Trailers: stored position can be pivot or over-corrected center;
+            # shift forward by half length so the box is drawn at the true visual center.
             for tr in v.get("trailers", []):
+                yaw = tr["yaw"]
+                half_l = tr["length"] / 2.0
+                tr_cx = tr["x"] - half_l * math.sin(yaw)
+                tr_cz = tr["z"] - half_l * math.cos(yaw)
                 self._draw_vehicle_box(
-                    p, tr["x"], tr["z"], tr["yaw"],
+                    p, tr_cx, tr_cz, yaw,
                     tr["half_w"], tr["length"], tr["is_tmp"],
                     ex, ez, ey, _TRAILER_CLR,
                 )

@@ -22,8 +22,8 @@ and evasive path planning.
          braked_hit is not None → braking is insufficient.  TTB = 0 (brake NOW).
 
   Decision threshold is best_ttb across all vehicles:
-    TTB < _WARN_TTC_THRESHOLD  → WARN
-    TTB < _BRAKE_TTS_THRESHOLD → BRAKE
+    TTB < _WARN_TTB_THRESHOLD  → WARN
+    TTB < _BRAKE_TTB_THRESHOLD → BRAKE
 
   BRAKE latch: once triggered, AEB_brake stays active until TTB >= _BRAKE_RELEASE_THRESHOLD.
 
@@ -100,14 +100,14 @@ _MAX_ARC_HORIZON: float = 4.0
 _CORRIDOR_MARGIN: float = 0.5
 _COLLISION_SAMPLES: int = 36
 
-_WARN_TTC_THRESHOLD: float = 1.3
-_BRAKE_TTS_THRESHOLD: float = 0.1
+_WARN_TTB_THRESHOLD: float = 1.3
+_BRAKE_TTB_THRESHOLD: float = 0.1
 _BRAKE_RELEASE_THRESHOLD: float = 0.3   # TTB must exceed this for BRAKE → WARN transition
-_TIME_TO_BRAKE_BUFFER: float = 0.5
+_TIME_TO_BRAKE_BUFFER: float = 0.0
 
 # Stopping-distance buffer: expands the braked-arc collision corridor so ego
 # stops with physical clearance instead of just touching the target.
-_STOP_BUFFER_FIXED: float = 0.5    # metres (baseline gap at rest)
+_STOP_BUFFER_FIXED: float = 0.7    # metres (baseline gap at rest)
 
 # A vehicle must be continuously detected as a risk for this many seconds
 # before it contributes to TTB / AEB state.
@@ -693,16 +693,16 @@ class AEBThread(BaseThread):
                     evasion_viable = a_lat <= _EVASION_G_THRESHOLD
 
             if not evasion_viable:
-                if time_to_brake < _WARN_TTC_THRESHOLD:
+                if time_to_brake < _WARN_TTB_THRESHOLD:
                     new_state = AEBState.WARN
-                if time_to_brake < _BRAKE_TTS_THRESHOLD:
+                if time_to_brake < _BRAKE_TTB_THRESHOLD:
                     new_state = AEBState.BRAKE
             else:
                 new_state = AEBState.STANDBY
 
         # BRAKE latch: once BRAKE is active, hold it until TTB clears
         # _BRAKE_RELEASE_THRESHOLD.  This prevents rapid on/off cycling when a
-        # cut-in vehicle's TTB briefly fluctuates just above _BRAKE_TTS_THRESHOLD.
+        # cut-in vehicle's TTB briefly fluctuates just above _BRAKE_TTB_THRESHOLD.
         if self._prev_state == AEBState.BRAKE and time_to_brake < _BRAKE_RELEASE_THRESHOLD:
             new_state = AEBState.BRAKE
 
