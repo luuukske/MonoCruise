@@ -32,7 +32,7 @@ from typing import Optional
 # Constants
 # ---------------------------------------------------------------------------
 
-_MAX_ANGULAR_VELOCITY: float = 90.0   # deg/s clamp
+_MAX_ANGULAR_VELOCITY: float = 45.0   # deg/s clamp
 _LOCATION_UPDATE_FREQUENCY: float = 0.05
 _RAW_POSITION_ALPHA: float = 0.20
 _MIN_CURVATURE_RADIUS: float = 5.0    # metres — floor for turning radius

@@ -414,7 +414,6 @@ class AEBThread(BaseThread):
         self._prev_state: AEBState = AEBState.STANDBY
         self._state_hold_until: float = 0.0
         self._last_snapshot: AEBSnapshot | None = None
-        self._diag_counter: int = 0
         # Per-vehicle timestamp of when a risk was first continuously detected.
         # Cleared when a vehicle is no longer risky for a full loop iteration.
         self._risk_first_seen: dict[int, float] = {}
@@ -722,25 +721,6 @@ class AEBThread(BaseThread):
         self._risk_first_seen = {
             k: v for k, v in self._risk_first_seen.items() if k in newly_risky
         }
-
-        # Diagnostics
-        self._diag_counter += 1
-        if self._diag_counter >= 60:
-            self._diag_counter = 0
-            if vehicle_dicts:
-                logger.info(
-                    "AEB diag: run=%s spd=%.1f vehs=%d colliding=%d "
-                    "brake_insuff=%d braking_avoids=%d supp=%d "
-                    "ttb=%.2f unbraked_ttc=%.2f braked_ttc=%.2f κ=%.4f",
-                    run_collision, ego_speed * 3.6, len(vehicle_dicts),
-                    len(colliding_ids),
-                    len(colliding_ids) - len(braking_suppressed_ids),
-                    len(braking_suppressed_ids), len(suppressed_ids),
-                    best_ttb if best_ttb < _INF else -1.0,
-                    best_unbraked_ttc if best_unbraked_ttc < _INF else -1.0,
-                    best_braked_ttc if best_braked_ttc < _INF else -1.0,
-                    ego_curvature,
-                )
 
         # AEB decision — based on TTB (time to brake), not raw TTC.
         # TTB = 0 means the braking window has closed or braking is insufficient.
