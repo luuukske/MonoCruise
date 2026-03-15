@@ -40,18 +40,19 @@ _MAX_RANGE: float = 100.0
 _MAX_RANGE_SQ: float = _MAX_RANGE ** 2
 
 _MIN_ARC_HORIZON: float = 3.0
-_MAX_ARC_HORIZON: float = 4.0
+_MAX_ARC_HORIZON: float = 3.5
 _CORRIDOR_MARGIN: float = 0.5
-_COLLISION_SAMPLES: int = 48
+_COLLISION_SAMPLES: int = 36
 
 _WARN_TTB_THRESHOLD: float = 1.3
 _BRAKE_TTB_THRESHOLD: float = 0.2
-_BRAKE_RELEASE_THRESHOLD: float = 0.3
+_BRAKE_RELEASE_THRESHOLD: float = 0.5
 _TIME_TO_BRAKE_BUFFER: float = 0.0
 
-_STOP_BUFFER_FIXED: float = 1.2
+_STOP_BUFFER_FIXED: float = 1.6
 _ARC_START_PCTG: float = 0.2
-_RISK_CONFIRM_DURATION: float = 0.1
+_RISK_CONFIRM_DURATION: float = 0.05
+_RISK_CONFIRM_DURATION_ONCOMING: float = _RISK_CONFIRM_DURATION * 2.0
 
 _REAR_DOT_THRESHOLD: float = -0.5
 _OVERTAKE_SPEED_MARGIN: float = 2.0
@@ -62,6 +63,7 @@ _CROSS_SAFE_ZONE_BASE: float = 0.5
 _CROSS_SAFE_ZONE_SPEED: float = 0.5
 
 _EVASION_G_THRESHOLD: float = 0.1 * 9.81
+_EVASION_G_THRESHOLD_ONCOMING: float = 0.18 * 9.81
 _EVASION_FILTER_MAX_DELTA_KAPPA: float = 0.02
 
 _VEHICLE_FORMAT = "ffffffffffffhhbb"
@@ -84,7 +86,7 @@ class AEBSnapshot:
     ego_z: float = 0.0
     ego_yaw: float = 0.0
     ego_speed: float = 0.0
-    ego_half_w: float = 1.25
+    ego_half_w: float = 1.15
     ego_half_l: float = 3.0
     ego_arc: ArcPath | None = None
     ego_braked_arc: ArcPath | None = None
@@ -652,7 +654,7 @@ class AEBThread(BaseThread):
                 # whether the *oncoming vehicle* could steer around ego instead.
                 elif (head_on and abs_v_speed > 1.0):
                     delta_kappa_t = min(
-                        _EVASION_G_THRESHOLD / (abs_v_speed * abs_v_speed),
+                        _EVASION_G_THRESHOLD_ONCOMING / (abs_v_speed * abs_v_speed),
                         _EVASION_FILTER_MAX_DELTA_KAPPA,
                     )
                     tgt_evasion_left = build_arc(
@@ -681,11 +683,14 @@ class AEBThread(BaseThread):
 
                 colliding_ids.add(v.id)
 
-                # Risk confirmation
+                # Risk confirmation — oncoming vehicles require 2× duration
                 newly_risky.add(v.id)
                 if v.id not in self._risk_first_seen:
                     self._risk_first_seen[v.id] = now_mono
-                if now_mono - self._risk_first_seen[v.id] < _RISK_CONFIRM_DURATION:
+                confirm_duration = (
+                    _RISK_CONFIRM_DURATION_ONCOMING if head_on else _RISK_CONFIRM_DURATION
+                )
+                if now_mono - self._risk_first_seen[v.id] < confirm_duration:
                     continue
 
                 if unbraked_ttc < best_unbraked_ttc:

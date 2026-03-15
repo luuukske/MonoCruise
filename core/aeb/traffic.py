@@ -13,7 +13,7 @@ from typing import Optional
 
 _MAX_ANGULAR_VELOCITY: float = 45.0
 _LOCATION_UPDATE_FREQUENCY: float = 0.05
-_RAW_POSITION_ALPHA: float = 0.20
+_RAW_POSITION_ALPHA: float = 0.27
 _MIN_CURVATURE_RADIUS: float = 5.0
 _STRAIGHT_CURVATURE_EPS: float = 1e-6
 
@@ -124,7 +124,7 @@ class ArcPath:
     yaw_rad: float = 0.0
     speed: float = 0.0
     curvature: float = 0.0
-    half_width: float = 1.25
+    half_width: float = 1.15
     horizon: float = 3.0
     decel: float = 0.0
     accel: float = 0.0
