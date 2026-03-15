@@ -55,8 +55,9 @@ _DANGER_CLR = QColor(240, 55, 55)
 _WARN_CLR = QColor(245, 185, 40)
 _SUPPRESSED_CLR = QColor(100, 100, 115)
 _BRAKE_SUPP_CLR = QColor(255, 140, 40)
-_EVASION_CLR = QColor(140, 80, 255)
-_EVASION_CORRIDOR = QColor(140, 80, 255, 40)
+_EVASION_FILTER_CLR = QColor(0, 200, 200)
+_EVASION_FILTER_CORRIDOR = QColor(0, 200, 200, 25)
+_EVASION_FILTERED_CLR = QColor(0, 200, 200, 140)
 _TRAILER_CLR = QColor(180, 140, 80)
 _EGO_TRAILER_CLR = QColor(55, 130, 215)
 _HIT_CLR = QColor(255, 30, 30)
@@ -157,9 +158,12 @@ class AEBDebugWindow(QWidget):
             is_supp = v.get("rear_suppressed", False)
             is_danger = vid in snap.colliding_ids
             is_brake_supp = vid in snap.braking_suppressed_ids
+            is_evasion_filtered = vid in snap.evasion_filtered_ids
 
             if is_supp:
                 body_clr, corr_clr = _SUPPRESSED_CLR, QColor(_SUPPRESSED_CLR)
+            elif is_evasion_filtered:
+                body_clr, corr_clr = _EVASION_FILTERED_CLR, QColor(_EVASION_FILTERED_CLR)
             elif is_danger and is_brake_supp:
                 body_clr, corr_clr = _BRAKE_SUPP_CLR, QColor(_BRAKE_SUPP_CLR)
             elif is_danger:
@@ -204,11 +208,18 @@ class AEBDebugWindow(QWidget):
         if snap.ego_arc is not None:
             self._draw_arc_corridor(p, snap.ego_arc, ex, ez, ey, _EGO_CORRIDOR)
 
-        # --- Evasion corridor (purple, only in WARN/BRAKE) ----------------
-        if snap.evasion_arc is not None and snap.aeb_state >= AEBState.WARN:
+        # --- Evasion filter corridors (cyan, shown when active) -----------
+        if snap.evasion_left_arc is not None:
             self._draw_arc_corridor(
-                p, snap.evasion_arc, ex, ez, ey, _EVASION_CORRIDOR,
-                edge_color=_EVASION_CLR, edge_width=2.0,
+                p, snap.evasion_left_arc, ex, ez, ey,
+                _EVASION_FILTER_CORRIDOR,
+                edge_color=_EVASION_FILTER_CLR, edge_width=1.0,
+            )
+        if snap.evasion_right_arc is not None:
+            self._draw_arc_corridor(
+                p, snap.evasion_right_arc, ex, ez, ey,
+                _EVASION_FILTER_CORRIDOR,
+                edge_color=_EVASION_FILTER_CLR, edge_width=1.0,
             )
 
         # --- Ego trailer --------------------------------------------------
@@ -518,18 +529,6 @@ class AEBDebugWindow(QWidget):
             p.drawText(QPointF(x, y), f"AEB inactive below {_MIN_SPEED_KMH:.0f} km/h")
             y += 15
 
-        if snap.evasion_arc is not None and snap.aeb_state >= AEBState.WARN:
-            p.setPen(QPen(_EVASION_CLR))
-            kappa = snap.evasion_curvature
-            if abs(kappa) < 1e-5:
-                direction = "STRAIGHT"
-            elif kappa > 0:
-                direction = f"LEFT κ={kappa:.4f}"
-            else:
-                direction = f"RIGHT κ={abs(kappa):.4f}"
-            p.drawText(QPointF(x, y), f"Evasion: {direction}")
-            y += 15
-
         if ns > 0:
             p.setPen(QPen(_SUPPRESSED_CLR))
             p.drawText(QPointF(x, y), f"{ns} rear-approach vehicle(s) suppressed")
@@ -538,6 +537,12 @@ class AEBDebugWindow(QWidget):
         if nb > 0:
             p.setPen(QPen(_BRAKE_SUPP_CLR))
             p.drawText(QPointF(x, y), f"{nb} threat(s): braking would worsen TTC")
+            y += 14
+
+        nef = len(snap.evasion_filtered_ids)
+        if nef > 0:
+            p.setPen(QPen(_EVASION_FILTER_CLR))
+            p.drawText(QPointF(x, y), f"{nef} vehicle(s) evasion-filtered (corner/roadside)")
 
         # --- Legend (bottom-left) -----------------------------------------
         self._draw_legend(p)
@@ -562,7 +567,7 @@ class AEBDebugWindow(QWidget):
             (_WARN_CLR, "Warning"),
             (_BRAKE_SUPP_CLR, "Brake-suppressed"),
             (_SUPPRESSED_CLR, "Rear-suppressed"),
-            (_EVASION_CLR, "Evasion path"),
+            (_EVASION_FILTER_CLR, "Evasion-filtered"),
         ]
         y = ly + 13
         for clr, label in items:

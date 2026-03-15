@@ -57,7 +57,6 @@ Other threads read:
   registry.get_thread("aeb_thread").data.AEB_brake
   registry.get_thread("aeb_thread").data.time_to_brake
   registry.get_thread("aeb_thread").data.em_stop_requested
-  registry.get_thread("aeb_thread").data.evasion_curvature
   registry.get_thread("aeb_thread").data.snapshot
 """
 
@@ -95,8 +94,8 @@ _MIN_SPEED_MS: float = 5.0 / 3.6 #testing 35.0 / 3.6 is recommended
 _MAX_RANGE: float = 100.0
 _MAX_RANGE_SQ: float = _MAX_RANGE ** 2
 
-_MIN_ARC_HORIZON: float = 4.0
-_MAX_ARC_HORIZON: float = 5.0
+_MIN_ARC_HORIZON: float = 3.0
+_MAX_ARC_HORIZON: float = 4.0
 _CORRIDOR_MARGIN: float = 0.5
 _COLLISION_SAMPLES: int = 48
 
@@ -107,7 +106,7 @@ _TIME_TO_BRAKE_BUFFER: float = 0.0
 
 # Stopping-distance buffer: expands the braked-arc collision corridor so ego
 # stops with physical clearance instead of just touching the target.
-_STOP_BUFFER_FIXED: float = 0.7    # metres (baseline gap at rest)
+_STOP_BUFFER_FIXED: float = 1.2    # metres (baseline gap at rest)
 
 # Arc start position along the vehicle body.
 # 0.0 = physical back, 1.0 = physical front.
@@ -125,7 +124,7 @@ _OVERTAKE_SPEED_MARGIN: float = 2.0
 # Elevation filter: do not track vehicles below ego (e.g. on road underneath).
 # Uses slope (rotationY, positive = uphill) so vehicles in front on a downhill
 # are not wrongly filtered. Margin per AGENTS.md ±6 m road-level filtering.
-_ELEVATION_MARGIN_M: float = 6.0
+_ELEVATION_MARGIN_M: float = 5.0
 
 # Cross-traffic safe zone: for near-perpendicular targets (90° yaw diff) we expand
 # the collision check by ghost arcs ±padding along the target's heading.  This
@@ -138,13 +137,12 @@ _ELEVATION_MARGIN_M: float = 6.0
 _CROSS_SAFE_ZONE_BASE: float = 0.5    # m — minimum padding at any speed
 _CROSS_SAFE_ZONE_SPEED: float = 0.3  # m per m/s of target speed
 
-# Collision avoidance (evasive path) — disabled; code kept for possible re-enable.
-_RUN_COLLISION_AVOIDANCE_PATH: bool = False
-
-_EVASION_CANDIDATES: int = 13
-_EVASION_MAX_CURVATURE: float = 0.08
-_EVASION_STEER_PENALTY: float = 5.0
-_EVASION_G_THRESHOLD: float = 0.0 * 9.81
+# Evasion filter: two extra ego arcs offset by ±Δκ check whether a vehicle
+# detected on the main arc could be avoided with a gentle steer (≤ 0.1 g).
+# Δκ = _EVASION_G_THRESHOLD / v².  Clamped to _EVASION_FILTER_MAX_DELTA_KAPPA
+# so the filter paths stay meaningful at low speed.
+_EVASION_G_THRESHOLD: float = 0.1 * 9.81
+_EVASION_FILTER_MAX_DELTA_KAPPA: float = 0.03
 
 _VEHICLE_FORMAT = "ffffffffffffhhbb"
 _TRAILER_FORMAT = "ffffffffff"
@@ -185,6 +183,7 @@ class AEBSnapshot:
     colliding_ids: set = field(default_factory=set)
     suppressed_ids: set = field(default_factory=set)
     braking_suppressed_ids: set = field(default_factory=set)
+    evasion_filtered_ids: set = field(default_factory=set)
 
     aeb_state: AEBState = AEBState.STANDBY
     time_to_collision: float = _INF
@@ -192,8 +191,8 @@ class AEBSnapshot:
     hit_x: float = 0.0
     hit_z: float = 0.0
 
-    evasion_curvature: float = 0.0
-    evasion_arc: ArcPath | None = None
+    evasion_left_arc: ArcPath | None = None
+    evasion_right_arc: ArcPath | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +205,6 @@ class AEBData(ThreadData):
     AEB_brake: bool = False
     time_to_brake: float = _INF
     em_stop_requested: bool = False
-    evasion_curvature: float = 0.0
     snapshot: AEBSnapshot = field(default_factory=AEBSnapshot)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
@@ -363,63 +361,6 @@ def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Evasive path planner
-# ---------------------------------------------------------------------------
-
-def _plan_evasion(
-    ego_x: float,
-    ego_z: float,
-    ego_yaw_rad: float,
-    ego_speed: float,
-    current_curvature: float,
-    ego_hw: float,
-    threats: list[ArcPath],
-    horizon: float = _MIN_ARC_HORIZON,
-) -> tuple[float, ArcPath | None, bool]:
-    """Find optimal evasive curvature.
-
-    Uses the BRAKING ego arc for each candidate (since we're in WARN,
-    the truck will be decelerating).
-
-    Returns (best_curvature, best_arc_or_None, evasion_is_clear).
-    ``evasion_is_clear`` is True when the best candidate has no collision.
-    """
-    if not threats or ego_speed < 1.0:
-        return current_curvature, None, False
-
-    n = _EVASION_CANDIDATES
-    step = 2.0 * _EVASION_MAX_CURVATURE / max(n - 1, 1)
-    candidates = [-_EVASION_MAX_CURVATURE + step * i for i in range(n)]
-    candidates.append(current_curvature)
-
-    best_score: float = -_INF
-    best_kappa: float = current_curvature
-    best_arc: ArcPath | None = None
-
-    for kappa in candidates:
-        ego_arc = build_arc(
-            ego_x, ego_z, ego_yaw_rad, ego_speed,
-            kappa, ego_hw, horizon,
-            decel=_FULL_BRAKE_DECEL,
-        )
-
-        worst_ttc = _INF
-        for ta in threats:
-            result = arc_arc_collision(ego_arc, ta, _CORRIDOR_MARGIN, _COLLISION_SAMPLES)
-            if result is not None and result[0] < worst_ttc:
-                worst_ttc = result[0]
-
-        score = worst_ttc - _EVASION_STEER_PENALTY * abs(kappa - current_curvature)
-        if score > best_score:
-            best_score = score
-            best_kappa = kappa
-            best_arc = ego_arc
-
-    evasion_is_clear = best_score > (_INF * 0.5)
-    return best_kappa, best_arc, evasion_is_clear
-
-
-# ---------------------------------------------------------------------------
 # AEB Thread
 # ---------------------------------------------------------------------------
 
@@ -520,6 +461,28 @@ class AEBThread(BaseThread):
                 decel=_FULL_BRAKE_DECEL,
             )
 
+        # Evasion-filter arcs: two extra ego paths offset by ±Δκ from the
+        # current curvature.  Δκ = _EVASION_G_THRESHOLD / v² so the lateral
+        # acceleration at speed equals the threshold (0.1 g).  A vehicle must
+        # collide with all three ego paths (centre + left + right) to be
+        # considered a genuine in-lane hazard; otherwise it is likely parked on
+        # the shoulder or sitting in a corner and is filtered out.
+        ego_evasion_left: ArcPath | None = None
+        ego_evasion_right: ArcPath | None = None
+        if run_collision and ego_speed > 1.0:
+            delta_kappa = min(
+                _EVASION_G_THRESHOLD / (ego_speed * ego_speed),
+                _EVASION_FILTER_MAX_DELTA_KAPPA,
+            )
+            ego_evasion_left = build_arc(
+                ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
+                ego_curvature + delta_kappa, ego_hw, dynamic_horizon,
+            )
+            ego_evasion_right = build_arc(
+                ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
+                ego_curvature - delta_kappa, ego_hw, dynamic_horizon,
+            )
+
         ego_fwd_x = ego_arc.fwd_x
         ego_fwd_z = ego_arc.fwd_z
 
@@ -531,14 +494,14 @@ class AEBThread(BaseThread):
         colliding_ids: set[int] = set()
         suppressed_ids: set[int] = set()
         braking_suppressed_ids: set[int] = set()
+        evasion_filtered_ids: set[int] = set()
         best_ttb: float = _INF           # time-to-brake — primary decision metric
-        best_braked_ttc: float = _INF    # TTC under braking — evasion planner only
         best_unbraked_ttc: float = _INF  # TTC at current speed — display
+        best_raw_dist: float = _INF      # raw ego→vehicle distance for current lane target
         best_hit_x: float = 0.0
         best_hit_z: float = 0.0
         vehicle_dicts: list[dict] = []
         vehicle_arcs: dict[int, list[ArcPath]] = {}
-        threat_arcs: list[ArcPath] = []
 
         # Vehicles that are actively risky this iteration — used to clean up
         # _risk_first_seen for vehicles that are no longer a threat.
@@ -724,6 +687,28 @@ class AEBThread(BaseThread):
 
                 unbraked_ttc = unbraked_hit[0]
 
+                # Evasion-filter: check if the target also collides with both
+                # offset ego paths.  If it misses either, ego could steer around
+                # it within 0.1 g — likely a parked/corner vehicle, not an
+                # in-lane hazard.  Skip the filter for moving co-directional
+                # targets (they are genuinely in our lane) and for head-on
+                # traffic (evasion is not meaningful when closing head-on).
+                if (ego_evasion_left is not None
+                        and ego_evasion_right is not None
+                        and not head_on
+                        and not (co_directional and base_target_arc.speed > 0.5)):
+                    left_hit = _earliest_hit(
+                        ego_evasion_left, cross_arcs,
+                        _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
+                    )
+                    right_hit = _earliest_hit(
+                        ego_evasion_right, cross_arcs,
+                        _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
+                    )
+                    if left_hit is None or right_hit is None:
+                        evasion_filtered_ids.add(v.id)
+                        continue
+
                 # Mark vehicle as colliding (for debug visualisation) regardless
                 # of confirmation — so the debug window always reflects raw detections.
                 colliding_ids.add(v.id)
@@ -739,6 +724,7 @@ class AEBThread(BaseThread):
 
                 if unbraked_ttc < best_unbraked_ttc:
                     best_unbraked_ttc = unbraked_ttc
+                    best_raw_dist = dist
                     best_hit_x = unbraked_hit[1]
                     best_hit_z = unbraked_hit[2]
 
@@ -765,9 +751,6 @@ class AEBThread(BaseThread):
                     # Braking is insufficient — collision happens even under full
                     # braking.  TTB = 0: must act now.
                     ttb = 0.0
-                    threat_arcs.append(base_target_arc)
-                    if braked_hit[0] < best_braked_ttc:
-                        best_braked_ttc = braked_hit[0]
 
                 if ttb < best_ttb:
                     best_ttb = ttb
@@ -785,32 +768,26 @@ class AEBThread(BaseThread):
         # TTB = 0 means the braking window has closed or braking is insufficient.
         new_state = AEBState.STANDBY
         time_to_brake = _INF
-        evasion_kappa = ego_curvature
-        evasion_arc: ArcPath | None = None
-        evasion_viable = False
 
         display_ttc = best_unbraked_ttc
+
+        # Log the raw distance to the current in-lane vehicle (closest by TTC)
+        # whenever a valid lane target exists. This is intended for debugging
+        # and tuning; it does not affect AEB behaviour.
+        if run_collision and best_unbraked_ttc < _INF and best_raw_dist < _INF:
+            logger.info(
+                "AEB lane vehicle: raw_distance=%.2f m, ttc=%.2f s",
+                best_raw_dist,
+                best_unbraked_ttc,
+            )
 
         if run_collision and best_ttb < _INF:
             time_to_brake = best_ttb
 
-            if _RUN_COLLISION_AVOIDANCE_PATH:
-                evasion_kappa, evasion_arc, evasion_is_clear = _plan_evasion(
-                    ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
-                    ego_curvature, ego_hw, threat_arcs, dynamic_horizon,
-                )
-                if evasion_is_clear:
-                    delta_kappa = abs(evasion_kappa - ego_curvature)
-                    a_lat = ego_speed ** 2 * delta_kappa
-                    evasion_viable = a_lat <= _EVASION_G_THRESHOLD
-
-            if not evasion_viable:
-                if time_to_brake < _WARN_TTB_THRESHOLD:
-                    new_state = AEBState.WARN
-                if time_to_brake < _BRAKE_TTB_THRESHOLD:
-                    new_state = AEBState.BRAKE
-            else:
-                new_state = AEBState.STANDBY
+            if time_to_brake < _WARN_TTB_THRESHOLD:
+                new_state = AEBState.WARN
+            if time_to_brake < _BRAKE_TTB_THRESHOLD:
+                new_state = AEBState.BRAKE
 
         # BRAKE latch: once BRAKE is active, hold it until TTB clears
         # _BRAKE_RELEASE_THRESHOLD.  This prevents rapid on/off cycling when a
@@ -834,10 +811,12 @@ class AEBThread(BaseThread):
             vehicles=vehicle_dicts, vehicle_arcs=vehicle_arcs,
             colliding_ids=colliding_ids, suppressed_ids=suppressed_ids,
             braking_suppressed_ids=braking_suppressed_ids,
+            evasion_filtered_ids=evasion_filtered_ids,
             aeb_state=new_state, time_to_collision=display_ttc,
             time_to_brake=time_to_brake,
             hit_x=best_hit_x, hit_z=best_hit_z,
-            evasion_curvature=evasion_kappa, evasion_arc=evasion_arc,
+            evasion_left_arc=ego_evasion_left,
+            evasion_right_arc=ego_evasion_right,
         )
 
         with self.data._lock:
@@ -845,7 +824,6 @@ class AEBThread(BaseThread):
             self.data.AEB_brake = (new_state == AEBState.BRAKE)
             self.data.time_to_brake = time_to_brake
             self.data.em_stop_requested = (new_state == AEBState.BRAKE)
-            self.data.evasion_curvature = evasion_kappa
             self.data.snapshot = snap
         self._last_snapshot = snap
 
@@ -856,7 +834,6 @@ class AEBThread(BaseThread):
             self.data.AEB_brake = False
             self.data.time_to_brake = _INF
             self.data.em_stop_requested = False
-            self.data.evasion_curvature = 0.0
             self.data.snapshot = AEBSnapshot()
         logger.debug("AEB teardown complete")
 

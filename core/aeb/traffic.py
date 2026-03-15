@@ -612,13 +612,25 @@ class Vehicle:
         self._raw_x = raw_x
         self._raw_z = raw_z
 
-        # Smooth position
+        # Smooth position — prediction-corrected EMA.
+        # Instead of blending raw against prev_smooth (which causes steady-state
+        # lag = ((1-alpha)/alpha) * dt * speed), we blend raw against a kinematic
+        # prediction.  When motion is predictable (constant speed/heading), pred ≈ raw
+        # so the (1-alpha) term contributes near-zero error rather than positional lag.
+        # The alpha weight on raw still absorbs sudden manoeuvres and noise.
         if self._smooth_x is None:
             self._smooth_x = raw_x
             self._smooth_z = raw_z
         else:
-            self._smooth_x = _RAW_POSITION_ALPHA * raw_x + (1.0 - _RAW_POSITION_ALPHA) * self._smooth_x
-            self._smooth_z = _RAW_POSITION_ALPHA * raw_z + (1.0 - _RAW_POSITION_ALPHA) * self._smooth_z
+            _pred_yaw = self._smooth_yaw if self._smooth_yaw is not None else math.radians(self.rotation.euler()[1])
+            _pred_fwd_x = -math.sin(_pred_yaw)
+            _pred_fwd_z = -math.cos(_pred_yaw)
+            _clamped_accel = max(-6.0, min(4.0, self.acceleration))
+            _pred_dist = self.speed * dt + 0.5 * _clamped_accel * dt * dt
+            _pred_x = self._smooth_x + _pred_dist * _pred_fwd_x
+            _pred_z = self._smooth_z + _pred_dist * _pred_fwd_z
+            self._smooth_x = _RAW_POSITION_ALPHA * raw_x + (1.0 - _RAW_POSITION_ALPHA) * _pred_x
+            self._smooth_z = _RAW_POSITION_ALPHA * raw_z + (1.0 - _RAW_POSITION_ALPHA) * _pred_z
         self.position.x = self._smooth_x
         self.position.z = self._smooth_z
 

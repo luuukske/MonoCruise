@@ -171,13 +171,34 @@ corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
 | `speed` | Signed m/s, set in `update_from_last()` | Arc direction, speed display |
 | `angular_velocity` | Degrees/s from rotation delta/dt | Arc curvature via `κ = ω_rad/speed` |
 
-### EMA formulas
+### Position smoothing — prediction-corrected EMA
+
+Pure EMA blends `raw` against `prev_smooth`, producing a steady-state lag of
+`((1 − α) / α) × dt × speed` (≈ 4.4 m at 80 km/h with α = 0.20).
+
+Instead, `prev_smooth` is replaced by a **kinematic prediction** of where the
+vehicle should be this frame:
 
 ```python
-# Position
-smooth_x = 0.20 * raw_x + 0.80 * smooth_x_prev
+pred_dist = speed * dt + 0.5 * clamp(acceleration, -6, 4) * dt²
+pred_x    = smooth_x_prev + pred_dist * (-sin(smooth_yaw))
+pred_z    = smooth_z_prev + pred_dist * (-cos(smooth_yaw))
 
-# Yaw — wrap-safe (handles 0/2π boundary)
+smooth_x  = 0.20 * raw_x + 0.80 * pred_x
+smooth_z  = 0.20 * raw_z + 0.80 * pred_z
+```
+
+When motion is predictable (`pred ≈ raw`), the `0.80` term contributes
+near-zero error rather than lag. The `0.20` on raw still corrects for
+sudden manoeuvres and measurement noise.
+
+`smooth_yaw` (not `rotation.euler()`) is used for the prediction forward vector —
+it is already available from `prev._smooth_yaw` at this point in the update.
+`speed` is already sign-corrected before this block runs.
+
+### Yaw EMA (unchanged) — wrap-safe
+
+```python
 diff       = (raw_yaw - smooth_yaw + math.pi) % (2 * math.pi) - math.pi
 smooth_yaw = smooth_yaw + 0.20 * diff
 ```
@@ -262,12 +283,49 @@ aeb.snapshot          # AEBSnapshot — full debug state
 ### TTB logic summary
 
 1. Check `ego_arc` (constant speed) vs target → no hit = skip
-2. Check `ego_braked_arc` (7.8 m/s² full brake) vs target
+2. Evasion filter: check `ego_evasion_left` and `ego_evasion_right` arcs
+   (±0.1 g curvature offset) vs target → if either misses, vehicle is
+   evasion-filtered (corner/roadside) and skipped. Bypassed for moving
+   co-directional and head-on targets.
+3. Check `ego_braked_arc` (7.8 m/s² full brake) vs target
    - No hit → braking avoids; `TTB = max(unbraked_ttc - t_stop * buffer, 0)`
    - Hit → braking insufficient; `TTB = 0`
-3. State: `TTB < 1.3 s` → WARN; `TTB < 0.1 s` → BRAKE
-4. BRAKE latch: holds until `TTB >= 0.3 s`
-5. Risk confirmation: vehicle must be continuously risky for `0.1 s` before contributing to TTB
+4. State: `TTB < 1.3 s` → WARN; `TTB < 0.1 s` → BRAKE
+5. BRAKE latch: holds until `TTB >= 0.3 s`
+6. Risk confirmation: vehicle must be continuously risky for `0.1 s` before contributing to TTB
+
+### Evasion filter (corner / roadside vehicle suppression)
+
+After the unbraked ego arc detects a collision with a target, two additional
+ego arcs are tested — one offset left and one offset right in curvature:
+
+```python
+delta_kappa = min(_EVASION_G_THRESHOLD / (ego_speed ** 2),
+                  _EVASION_FILTER_MAX_DELTA_KAPPA)
+ego_evasion_left  = build_arc(..., ego_curvature + delta_kappa, ...)
+ego_evasion_right = build_arc(..., ego_curvature - delta_kappa, ...)
+```
+
+- `_EVASION_G_THRESHOLD = 0.1 × 9.81` — the lateral acceleration a gentle
+  steer would produce. `Δκ = a_lat / v²` gives the curvature offset at
+  the current speed.
+- `_EVASION_FILTER_MAX_DELTA_KAPPA = 0.08` — hard clamp so the filter
+  arcs stay meaningful at low speed.
+
+A vehicle must collide with **all three** ego paths (centre + left + right)
+to be considered a genuine in-lane hazard. If it misses either offset path,
+ego could steer around it within 0.1 g — indicating a parked or corner
+vehicle rather than an obstacle truly blocking the lane.
+
+**Bypass conditions** — the filter is skipped for:
+- Moving co-directional targets (`co_directional and speed > 0.5 m/s`) —
+  these are genuinely sharing the lane.
+- Head-on traffic (`fwd_dot < -0.7`) — evasion geometry is not meaningful
+  when closing head-on.
+
+Filtered vehicles are tracked in `evasion_filtered_ids` (debug only) and
+drawn in cyan in the debug window. They do **not** contribute to TTB or
+AEB state.
 
 ---
 
@@ -318,9 +376,10 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
 | TMP speed | `delta(raw_pos) / dt`, signed via forward dot |
 | AI speed sign | `dot(disp, fwd) < 0 → negate speed` |
-| Position EMA | `0.20 * raw + 0.80 * prev` |
+| Position smooth | `0.20 * raw + 0.80 * (prev + speed*dt*fwd + 0.5*accel*dt²*fwd)` |
 | Yaw EMA (wrap-safe) | `smooth += 0.20 * ((raw - smooth + π) % 2π - π)` |
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
+| Evasion filter Δκ | `min(0.1*9.81 / v², 0.08)` |
 
 ---
 
