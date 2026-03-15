@@ -255,7 +255,7 @@ def _build_vehicle_collision_data(
     ego_fwd_z: float,
 ) -> tuple[list[ArcPath], float, list[list[ArcPath]]]:
     """Build all_target_arcs, cross_padding, and list of cross_arcs for a vehicle.
-    Used for main-loop collision and for evasion-vs-other-vehicles checks.
+    Used for main-loop collision checks.
     """
     v_hw = v.size.width / 2.0
     v_hw_coll = max(v_hw - 0.1, 0.3)
@@ -315,25 +315,6 @@ def _build_vehicle_collision_data(
         _apply_cross_zone(bt, cross_padding) for bt in all_target_arcs
     ]
     return (all_target_arcs, cross_padding, cross_arcs_list)
-
-
-def _evasion_path_hits_other_vehicles(
-    evasion_arc: ArcPath,
-    exclude_vid: int,
-    vehicle_collision_data: dict[int, tuple[list[ArcPath], float, list[list[ArcPath]]]],
-    margin: float,
-    n_samples: int,
-) -> bool:
-    """True if the evasion arc collides with any vehicle other than exclude_vid."""
-    for vid, (_, _, cross_arcs_list) in vehicle_collision_data.items():
-        if vid == exclude_vid:
-            continue
-        for cross_arcs in cross_arcs_list:
-            if _earliest_hit(
-                evasion_arc, cross_arcs, margin, n_samples
-            ) is not None:
-                return True
-    return False
 
 
 class AEBThread(BaseThread):
@@ -451,7 +432,7 @@ class AEBThread(BaseThread):
 
         ego_pitch_rad = math.radians(ego_pitch_deg)
 
-        # Precompute per-vehicle collision arcs when run_collision, for evasion-vs-other checks
+        # Precompute per-vehicle collision arcs when run_collision for main-loop collision checks
         vehicle_collision_data: dict[
             int, tuple[list[ArcPath], float, list[list[ArcPath]]]
         ] = {}
@@ -631,21 +612,9 @@ class AEBThread(BaseThread):
                         _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
                     )
                     # Only filter if at least one evasion path misses this target
-                    # and that same path does not hit any other vehicle
-                    left_clear = (
-                        left_hit is None
-                        and not _evasion_path_hits_other_vehicles(
-                            ego_evasion_left, v.id, vehicle_collision_data,
-                            _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
-                        )
-                    )
-                    right_clear = (
-                        right_hit is None
-                        and not _evasion_path_hits_other_vehicles(
-                            ego_evasion_right, v.id, vehicle_collision_data,
-                            _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
-                        )
-                    )
+                    # (evasion paths are checked for collision with this target only)
+                    left_clear = left_hit is None
+                    right_clear = right_hit is None
                     if left_clear or right_clear:
                         evasion_filtered_ids.add(v.id)
                         continue

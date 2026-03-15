@@ -284,9 +284,9 @@ aeb.snapshot          # AEBSnapshot — full debug state
 
 1. Check `ego_arc` (constant speed) vs target → no hit = skip
 2. Evasion filter (non-head-on): check `ego_evasion_left` and `ego_evasion_right` arcs
-   (±0.1 g curvature offset) vs target → if either misses, vehicle is
-   evasion-filtered (corner/roadside) and skipped. Bypassed for moving
-   co-directional and head-on targets.
+   (±0.1 g curvature offset) vs **the current target only** (not other vehicles) → if
+   either misses the target, vehicle is evasion-filtered (corner/roadside) and skipped.
+   Bypassed for moving co-directional and head-on targets.
 2b. Oncoming evasion filter (head-on only): build two curvature-offset arcs for the
    *target* (same ±0.1 g Δκ) and test them against `ego_arc`. If either clears ego,
    the oncoming vehicle can steer around ego and is not a genuine head-on threat.
@@ -318,9 +318,11 @@ ego_evasion_right = build_arc(..., ego_curvature - delta_kappa, ...)
   arcs stay meaningful at low speed.
 
 A vehicle must collide with **all three** ego paths (centre + left + right)
-to be considered a genuine in-lane hazard. If it misses either offset path,
-ego could steer around it within 0.1 g — indicating a parked or corner
-vehicle rather than an obstacle truly blocking the lane.
+to be considered a genuine in-lane hazard. The two offset paths are tested
+for collision with **that target vehicle only** (not with other traffic). If
+either offset path misses the target, ego could steer around it within 0.1 g
+— indicating a parked or corner vehicle rather than an obstacle truly
+blocking the lane.
 
 **Bypass conditions** — the filter is skipped for:
 - Moving co-directional targets (`co_directional and speed > 0.5 m/s`) —
