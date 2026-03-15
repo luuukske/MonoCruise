@@ -1,24 +1,7 @@
 """
 ETS2/ATS traffic vehicle classes with arc-based path prediction.
 
-Coordinate system (ETS2):
-  X = East/West (increases East)
-  Y = Up/Down   (ignored for ground-plane work)
-  Z = North/South (increases South)
-  Ground plane = XZ.
-
-Yaw conventions (DO NOT CHANGE — this has caused backward ego path bugs before):
-  - yaw=0 rad → North (forward = -Z direction)
-  - yaw=π/2 rad → West, yaw=π rad → South, yaw=3π/2 rad → East
-  - Positive yaw = counter-clockwise (CCW) when viewed from above
-  - Forward vector:  fwd_x = -sin(yaw_rad),  fwd_z = -cos(yaw_rad)
-    This formula is FIXED. If the ego path points backward, the bug is in
-    thread.py (rotationX → ego_yaw_rad conversion), NOT here. Never flip
-    the signs or use (sin, cos) — that would break traffic vehicle paths.
-
-Vehicles carry an ArcPath (center, radius, angular span, start angle)
-instead of sampled polylines.  This enables O(1) position lookups and
-fast closed-form arc–arc collision detection.
+Coordinate system and yaw conventions — see ``core/aeb/AGENTS.md`` §1–§3.
 """
 
 from __future__ import annotations
@@ -28,20 +11,12 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-_MAX_ANGULAR_VELOCITY: float = 45.0   # deg/s clamp
+_MAX_ANGULAR_VELOCITY: float = 45.0
 _LOCATION_UPDATE_FREQUENCY: float = 0.05
 _RAW_POSITION_ALPHA: float = 0.20
-_MIN_CURVATURE_RADIUS: float = 5.0    # metres — floor for turning radius
-_STRAIGHT_CURVATURE_EPS: float = 1e-6 # curvature below this → straight line
+_MIN_CURVATURE_RADIUS: float = 5.0
+_STRAIGHT_CURVATURE_EPS: float = 1e-6
 
-
-# ---------------------------------------------------------------------------
-# Core data types
-# ---------------------------------------------------------------------------
 
 class Position:
     __slots__ = ("x", "y", "z")
@@ -73,17 +48,17 @@ class Position:
 
 
 class Quaternion:
-    """ETS2 traffic quaternion — x/y are deliberately swapped."""
+    """ETS2 traffic quaternion — x/y swap is intentional (AGENTS.md §3)."""
     __slots__ = ("w", "x", "y", "z")
 
     def __init__(self, w: float, x: float, y: float, z: float) -> None:
         self.w = w
-        self.x = y   # intentional swap
-        self.y = x   # intentional swap
+        self.x = y
+        self.y = x
         self.z = z
 
     def euler(self) -> tuple[float, float, float]:
-        """Return (pitch, yaw, roll) in degrees."""
+        """(pitch, yaw, roll) in degrees."""
         yaw = math.atan2(
             2.0 * (self.y * self.z + self.w * self.x),
             self.w * self.w - self.x * self.x - self.y * self.y + self.z * self.z,
@@ -128,7 +103,7 @@ class Trailer:
         self.is_tmp = is_tmp
 
     def correct_position(self) -> Position:
-        """Move pivot backward by half the trailer length (TMP trailers)."""
+        """Shift TMP trailer pivot from front coupler to body center."""
         _, yaw_deg, _ = self.rotation.euler()
         yaw_rad = math.radians(yaw_deg)
         return Position(
@@ -141,21 +116,9 @@ class Trailer:
         return self.position.is_zero() and self.rotation.is_zero()
 
 
-# ---------------------------------------------------------------------------
-# Arc path — the core geometry primitive
-# ---------------------------------------------------------------------------
-
 @dataclass(slots=True)
 class ArcPath:
-    """A predicted path as a circular arc (or straight ray).
-
-    For a vehicle at (start_x, start_z) heading yaw_rad with signed curvature κ:
-      - |κ| < ε  → straight line
-      - Else     → circular arc, R = 1/|κ|, center perpendicular to forward
-
-    ``position_at_time(t)`` and ``position_at_dist(d)`` give O(1) lookups.
-    Supports deceleration for braking arcs.
-    """
+    """Predicted path as a circular arc or straight ray.  See AGENTS.md §8."""
     start_x: float = 0.0
     start_z: float = 0.0
     yaw_rad: float = 0.0
@@ -164,11 +127,8 @@ class ArcPath:
     half_width: float = 1.25
     horizon: float = 3.0
     decel: float = 0.0
-    # Signed target acceleration (m/s²).  Positive = speeding up, negative = braking.
-    # Mutually exclusive with decel: when decel > 0 (ego braking arc), accel is ignored.
     accel: float = 0.0
 
-    # Cached (computed by build())
     is_straight: bool = True
     center_x: float = 0.0
     center_z: float = 0.0
@@ -178,19 +138,14 @@ class ArcPath:
     arc_length: float = 0.0
     fwd_x: float = 0.0
     fwd_z: float = -1.0
-    _sign: float = 1.0       # curvature sign for sweep direction
+    _sign: float = 1.0
 
     def build(self) -> "ArcPath":
-        """Compute cached fields from canonical state. Call after setting fields."""
-        # DO NOT CHANGE: Forward vector formula. ETS2 convention: fwd = (-sin, -cos).
-        # If ego path points backward, fix thread.py rotationX→yaw conversion, not this.
+        """Compute cached fields. Call after setting fields."""
         self.fwd_x = -math.sin(self.yaw_rad)
         self.fwd_z = -math.cos(self.yaw_rad)
 
-        # Reversing: vehicle moves opposite to its heading yaw.
-        # Flip fwd so all downstream geometry points the actual direction of travel.
-        # Then normalise self.speed to abs — the direction is now encoded in fwd_x/fwd_z,
-        # so collision velocity vectors (speed * fwd) remain correct with abs speed.
+        # Reversing: flip fwd to actual travel direction, normalise speed to abs.
         if self.speed < -1e-3:
             self.fwd_x = -self.fwd_x
             self.fwd_z = -self.fwd_z
@@ -202,7 +157,6 @@ class ArcPath:
             self.max_sweep = 0.0
             return self
 
-        # Effective travel distance: priority is decel (ego braking arc), then accel.
         if self.decel > 0.0:
             t_stop = self.speed / self.decel
             if t_stop < self.horizon:
@@ -211,15 +165,13 @@ class ArcPath:
                 t = self.horizon
                 self.arc_length = self.speed * t - 0.5 * self.decel * t * t
         elif self.accel < 0.0:
-            # Target is braking: may stop before horizon.
-            t_stop = -self.speed / self.accel  # speed / |decel|
+            t_stop = -self.speed / self.accel
             if t_stop < self.horizon:
                 self.arc_length = self.speed * t_stop + 0.5 * self.accel * t_stop * t_stop
             else:
                 t = self.horizon
                 self.arc_length = self.speed * t + 0.5 * self.accel * t * t
         elif self.accel > 0.0:
-            # Target is accelerating: arc extends further.
             t = self.horizon
             self.arc_length = self.speed * t + 0.5 * self.accel * t * t
         else:
@@ -233,8 +185,6 @@ class ArcPath:
             self.is_straight = False
             self.radius = max(abs(1.0 / self.curvature), _MIN_CURVATURE_RADIUS)
 
-            # Center perpendicular to forward.  Positive κ → turn left (CCW).
-            # DO NOT CHANGE: center offset uses fwd_z and -fwd_x; tied to fwd formula.
             self._sign = 1.0 if self.curvature > 0 else -1.0
             self.center_x = self.start_x + self._sign * self.radius * self.fwd_z
             self.center_z = self.start_z + self._sign * self.radius * (-self.fwd_x)
@@ -248,14 +198,12 @@ class ArcPath:
         return self
 
     def _dist_at_time(self, t: float) -> float:
-        """Arc-length distance at time t (handles decel/accel clamping)."""
         if self.decel > 0.0:
             t_stop = self.speed / self.decel
             if t >= t_stop:
                 return self.speed * t_stop - 0.5 * self.decel * t_stop * t_stop
             return self.speed * t - 0.5 * self.decel * t * t
         elif self.accel < 0.0:
-            # Target braking: clamp at stop.
             t_stop = -self.speed / self.accel
             if t >= t_stop:
                 return self.speed * t_stop + 0.5 * self.accel * t_stop * t_stop
@@ -265,10 +213,8 @@ class ArcPath:
         return self.speed * t
 
     def position_at_dist(self, dist: float) -> tuple[float, float]:
-        """Return (x, z) at a given arc-length distance from start."""
         dist = max(0.0, min(dist, self.arc_length))
         if self.is_straight:
-            # DO NOT CHANGE: start + dist*fwd extends FORWARD. Never use minus.
             return (
                 self.start_x + dist * self.fwd_x,
                 self.start_z + dist * self.fwd_z,
@@ -281,11 +227,9 @@ class ArcPath:
         )
 
     def position_at_time(self, t: float) -> tuple[float, float]:
-        """Return (x, z) at time t seconds from now."""
         return self.position_at_dist(self._dist_at_time(t))
 
     def heading_at_dist(self, dist: float) -> float:
-        """Return heading (radians) at given arc distance."""
         if self.is_straight:
             return self.yaw_rad
         dist = max(0.0, min(dist, self.arc_length))
@@ -293,7 +237,6 @@ class ArcPath:
         return self.yaw_rad + frac * self.max_sweep
 
     def sample_points(self, n: int = 16) -> list[tuple[float, float]]:
-        """Return n evenly-spaced (x, z) samples along the arc for debug."""
         if n < 2 or self.arc_length < 1e-6:
             return [(self.start_x, self.start_z)]
         pts = []
@@ -305,12 +248,10 @@ class ArcPath:
     def sample_corridor(self, n: int = 16) -> tuple[
         list[tuple[float, float]], list[tuple[float, float]]
     ]:
-        """Return (left_edge, right_edge) as n-point polylines for corridor drawing."""
         if n < 2 or self.arc_length < 1e-6:
             return [(self.start_x, self.start_z)], [(self.start_x, self.start_z)]
 
         if self.is_straight:
-            # Straight: offset perpendicular at each point.
             left = []
             right = []
             for i in range(n):
@@ -323,10 +264,6 @@ class ArcPath:
                 right.append((x + rx * self.half_width, z + rz * self.half_width))
             return left, right
 
-        # Curved: sample true concentric arcs so inner = tighter, outer = gentler.
-        # Positive curvature → turn left → center to left → inner = left, outer = right.
-        # THIS SHOULD NOT BE CHANGED!
-        # this is a working part of the code and should only be changed if functionality needs to be altered.
         r_inner = max(self.radius - self.half_width, 0.5)
         r_outer = self.radius + self.half_width
         left = []
@@ -353,7 +290,6 @@ def build_arc(
     decel: float = 0.0,
     accel: float = 0.0,
 ) -> ArcPath:
-    """Convenience constructor."""
     return ArcPath(
         start_x=x, start_z=z, yaw_rad=yaw_rad, speed=speed,
         curvature=curvature, half_width=half_width, horizon=horizon,
@@ -361,47 +297,30 @@ def build_arc(
     ).build()
 
 
-# ---------------------------------------------------------------------------
-# Arc–Arc collision detection
-# ---------------------------------------------------------------------------
-
 def arc_arc_collision(
     a: ArcPath,
     b: ArcPath,
     margin: float = 0.5,
     n_samples: int = 24,
 ) -> Optional[tuple[float, float, float]]:
-    """Find the earliest time two arc corridors collide.
-
-    Returns (time_seconds, hit_x, hit_z) or None.
-
-    Strategy:
-    - Both straight, no decel → closed-form quadratic (O(1)).
-    - Otherwise → O(n) time-synchronised sampling with bisection refinement.
-    """
+    """Earliest corridor collision: ``(time_s, hit_x, hit_z)`` or ``None``."""
     if a.arc_length < 1e-3 and b.arc_length < 1e-3:
-        return None  # both stationary
+        return None
 
     corridor_sq = (a.half_width + b.half_width + margin) ** 2
     horizon = min(a.horizon, b.horizon)
 
-    # Fast path: both straight, no deceleration, no acceleration
     if (a.is_straight and b.is_straight
             and a.decel <= 0 and b.decel <= 0
             and a.accel == 0.0 and b.accel == 0.0):
         return _ray_ray_collision(a, b, corridor_sq, horizon)
 
-    # General: time-synchronised sampling
     return _sampled_collision(a, b, corridor_sq, horizon, n_samples)
 
 
 def _ray_ray_collision(
     a: ArcPath, b: ArcPath, corridor_sq: float, horizon: float,
 ) -> Optional[tuple[float, float, float]]:
-    """Closed-form earliest collision between two straight, constant-speed corridors.
-
-    Solves  ||(ΔP) + t·(ΔV)||² = corridor_sq  →  quadratic in t.
-    """
     dpx = a.start_x - b.start_x
     dpz = a.start_z - b.start_z
     dvx = a.speed * a.fwd_x - b.speed * b.fwd_x
@@ -415,7 +334,7 @@ def _ray_ray_collision(
         return 0.0, (a.start_x + b.start_x) * 0.5, (a.start_z + b.start_z) * 0.5
 
     if abs(A) < 1e-12:
-        return None  # parallel / same speed
+        return None
 
     disc = B * B - 4.0 * A * C
     if disc < 0:
@@ -446,7 +365,6 @@ def _ray_ray_collision(
 def _sampled_collision(
     a: ArcPath, b: ArcPath, corridor_sq: float, horizon: float, n: int,
 ) -> Optional[tuple[float, float, float]]:
-    """Time-synchronised sampling with bisection refinement."""
     best_t: Optional[float] = None
     best_mx = 0.0
     best_mz = 0.0
@@ -458,13 +376,12 @@ def _sampled_collision(
         bx, bz = b.position_at_time(t)
         dsq = (ax - bx) ** 2 + (az - bz) ** 2
         if dsq < corridor_sq:
-            # Bisect between this step and the previous to refine
             lo = max(t - horizon * inv_n, 0.0)
             hi = t
             best_t = t
             best_mx = (ax + bx) * 0.5
             best_mz = (az + bz) * 0.5
-            for _ in range(6):  # ~1/64 of step size precision
+            for _ in range(6):
                 mid = (lo + hi) * 0.5
                 ax2, az2 = a.position_at_time(mid)
                 bx2, bz2 = b.position_at_time(mid)
@@ -475,22 +392,15 @@ def _sampled_collision(
                     best_mz = (az2 + bz2) * 0.5
                 else:
                     lo = mid
-            break  # earliest found
+            break
 
     if best_t is None:
         return None
     return best_t, best_mx, best_mz
 
 
-# ---------------------------------------------------------------------------
-# Vehicle
-# ---------------------------------------------------------------------------
-
 class Vehicle:
-    """A traffic vehicle with arc-based path prediction.
-
-    Maintains the same public interface as the original for compatibility.
-    """
+    """Traffic vehicle with arc-based path prediction."""
 
     def __init__(
         self,
@@ -528,8 +438,10 @@ class Vehicle:
         self._raw_z: Optional[float] = None
 
     def update_from_last(self, prev: "Vehicle", t_now: float) -> None:
+        """Carry forward smoothed state or run a full update.  See AGENTS.md §7."""
         dt = t_now - prev.time
 
+        # Sub-frame pass: carry forward all smoothed state unchanged.
         if dt < _LOCATION_UPDATE_FREQUENCY:
             self.time = prev.time
             self.last_location = prev.last_location
@@ -542,14 +454,9 @@ class Vehicle:
             self._raw_z = prev._raw_z
             if abs(self.angular_velocity) > _MAX_ANGULAR_VELOCITY:
                 self.angular_velocity = 0.0
+            self.speed = prev.speed
             if self.is_tmp:
-                self.speed = prev.speed
                 self.acceleration = prev.acceleration
-            else:
-                # Carry forward the signed speed from the last full update.
-                # Without this, the unsigned buffer value overwrites the sign
-                # on every sub-frame pass, causing per-frame direction flicker.
-                self.speed = prev.speed
             if self._smooth_x is not None:
                 self.position.x = self._smooth_x
                 self.position.z = self._smooth_z
@@ -562,7 +469,6 @@ class Vehicle:
         self._smooth_z = prev._smooth_z
         self._smooth_yaw = prev._smooth_yaw
 
-        # Angular velocity
         last_yaw = prev.last_rotation.euler()[1]
         current_yaw = self.rotation.euler()[1]
         raw_av = (current_yaw - last_yaw) / dt / 2.0
@@ -570,11 +476,9 @@ class Vehicle:
             0.0 if abs(raw_av) > _MAX_ANGULAR_VELOCITY else raw_av
         )
 
-        # Capture raw position BEFORE smoothing — used for TMP speed delta
         raw_x = self.position.x
         raw_z = self.position.z
 
-        # TMP speed: raw-vs-raw delta so smoothing lag doesn't inflate the reading
         if self.is_tmp:
             prev_raw_x = prev._raw_x if prev._raw_x is not None else prev.position.x
             prev_raw_z = prev._raw_z if prev._raw_z is not None else prev.position.z
@@ -595,8 +499,6 @@ class Vehicle:
             else:
                 self.speed = 0.0
         elif self.speed > 1e-3:
-            # Non-TMP: speed comes unsigned from the shared-memory buffer.
-            # Determine direction via XZ displacement dot forward vector.
             lp = prev.last_location
             disp_x = self.position.x - lp.x
             disp_z = self.position.z - lp.z
@@ -608,16 +510,10 @@ class Vehicle:
                 if (disp_x * fwd_x + disp_z * fwd_z) < 0.0:
                     self.speed = -self.speed
 
-        # Store raw position for next cycle's speed delta
         self._raw_x = raw_x
         self._raw_z = raw_z
 
-        # Smooth position — prediction-corrected EMA.
-        # Instead of blending raw against prev_smooth (which causes steady-state
-        # lag = ((1-alpha)/alpha) * dt * speed), we blend raw against a kinematic
-        # prediction.  When motion is predictable (constant speed/heading), pred ≈ raw
-        # so the (1-alpha) term contributes near-zero error rather than positional lag.
-        # The alpha weight on raw still absorbs sudden manoeuvres and noise.
+        # Prediction-corrected position EMA — see AGENTS.md §7
         if self._smooth_x is None:
             self._smooth_x = raw_x
             self._smooth_z = raw_z
@@ -634,12 +530,11 @@ class Vehicle:
         self.position.x = self._smooth_x
         self.position.z = self._smooth_z
 
+        # Wrap-safe yaw EMA
         raw_yaw = math.radians(self.rotation.euler()[1])
         if self._smooth_yaw is None:
             self._smooth_yaw = raw_yaw
         else:
-            # Shortest-path EMA — handles the 0/2π wrap boundary correctly.
-            # Without the modulo wrap, blending across 0/2π would spin the arc 180°.
             diff = (raw_yaw - self._smooth_yaw + math.pi) % (2.0 * math.pi) - math.pi
             self._smooth_yaw = self._smooth_yaw + _RAW_POSITION_ALPHA * diff
 
@@ -650,41 +545,19 @@ class Vehicle:
         decel: float = 0.0,
         arc_start_pctg: float = 1.0,
     ) -> ArcPath:
-        # !! USE _smooth_yaw, NOT rotation.euler() !!
-        # Raw yaw from rotation.euler() is noisy. Even small frame-to-frame jitter
-        # gets amplified across arc length — the arc tip jumps wildly while the
-        # vehicle box looks stable (boxes use position, arcs use position+yaw).
-        # Trailers have no arc which is why they don't show the same jumping.
-        # _smooth_yaw uses the same EMA alpha (_RAW_POSITION_ALPHA) as position.
         yaw_rad = (
             self._smooth_yaw
             if self._smooth_yaw is not None
             else math.radians(self.rotation.euler()[1])
         )
         abs_speed = abs(self.speed)
-        if abs_speed > 0.5:
-            omega_rad = math.radians(self.angular_velocity)
-            curvature = omega_rad / abs_speed
-        else:
-            curvature = 0.0
+        curvature = math.radians(self.angular_velocity) / abs_speed if abs_speed > 0.5 else 0.0
         effective_hw = half_width if half_width is not None else self.size.width / 2.0
-
-        # Clamp reported acceleration to physically plausible range.
-        # When decel > 0 (ego braking arc) accel is intentionally 0.
         clamped_accel = (
             0.0 if decel > 0.0
             else max(-6.0, min(4.0, self.acceleration))
         )
 
-        # Position the arc start along the vehicle body.
-        # arc_start_pctg: 0.0 = physical back, 1.0 = physical front.
-        # For reversing vehicles the leading edge is the physical back, so p is
-        # mirrored (p=1.0 still places the start at the active/leading end).
-        # Pivot ratios (fraction of length behind pivot, per AGENTS.md):
-        #   AI  = 0.82  (asymmetric — 82% of body is behind the pivot)
-        #   TMP = 0.50  (symmetric)
-        # Formula: start = position + (effective_p - back_ratio) * length * fwd
-        # fwd is always physical heading (-sin, -cos); build() handles travel dir.
         is_reversing = self.speed < -1e-3
         effective_p = (1.0 - arc_start_pctg) if is_reversing else arc_start_pctg
         back_ratio = 0.5 if self.is_tmp else 0.82

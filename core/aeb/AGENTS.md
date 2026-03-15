@@ -293,6 +293,7 @@ aeb.snapshot          # AEBSnapshot — full debug state
 4. State: `TTB < 1.3 s` → WARN; `TTB < 0.1 s` → BRAKE
 5. BRAKE latch: holds until `TTB >= 0.3 s`
 6. Risk confirmation: vehicle must be continuously risky for `0.1 s` before contributing to TTB
+7. Head-on targets (`fwd_dot < -0.7`): modelled as also braking at `_FULL_BRAKE_DECEL`
 
 ### Evasion filter (corner / roadside vehicle suppression)
 
@@ -309,7 +310,7 @@ ego_evasion_right = build_arc(..., ego_curvature - delta_kappa, ...)
 - `_EVASION_G_THRESHOLD = 0.1 × 9.81` — the lateral acceleration a gentle
   steer would produce. `Δκ = a_lat / v²` gives the curvature offset at
   the current speed.
-- `_EVASION_FILTER_MAX_DELTA_KAPPA = 0.08` — hard clamp so the filter
+- `_EVASION_FILTER_MAX_DELTA_KAPPA = 0.03` — hard clamp so the filter
   arcs stay meaningful at low speed.
 
 A vehicle must collide with **all three** ego paths (centre + left + right)
@@ -379,7 +380,7 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | Position smooth | `0.20 * raw + 0.80 * (prev + speed*dt*fwd + 0.5*accel*dt²*fwd)` |
 | Yaw EMA (wrap-safe) | `smooth += 0.20 * ((raw - smooth + π) % 2π - π)` |
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
-| Evasion filter Δκ | `min(0.1*9.81 / v², 0.08)` |
+| Evasion filter Δκ | `min(0.1*9.81 / v², 0.03)` |
 
 ---
 

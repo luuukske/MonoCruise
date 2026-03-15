@@ -1,22 +1,4 @@
-"""
-AEB debug visualisation — PySide6 top-down radar view.
-
-Rebuilt to display arc-based corridors, evasion paths, collision markers,
-and per-vehicle speed labels.
-
-Ego-locked: ego is centred, always points up.  World rotates around it.
-
-Coordinate transform:
-    dx = wx - ego_x;  dz = wz - ego_z
-    rx = (-dx)*cos(-yaw) - dz*sin(-yaw)
-    rz = (-dx)*sin(-yaw) + dz*cos(-yaw)
-
-Create from the Qt main thread::
-
-    from core.aeb.debug_window import AEBDebugWindow
-    win = AEBDebugWindow()
-    win.show()
-"""
+"""AEB debug visualisation — PySide6 top-down radar view (ego-locked)."""
 
 from __future__ import annotations
 
@@ -25,8 +7,8 @@ import logging
 
 from PySide6.QtCore import Qt, QTimer, QPointF, QRectF
 from PySide6.QtGui import (
-    QPainter, QColor, QPen, QBrush, QPolygonF, QPainterPath, QFont,
-    QRadialGradient, QLinearGradient, QPaintEvent,
+    QPainter, QColor, QPen, QBrush, QPolygonF, QFont,
+    QRadialGradient, QPaintEvent,
 )
 from PySide6.QtWidgets import QWidget
 
@@ -35,10 +17,6 @@ from .thread import AEBState, AEBSnapshot
 from .traffic import ArcPath
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Visual constants
-# ---------------------------------------------------------------------------
 
 _WIN_W = 700
 _WIN_H = 700
@@ -69,18 +47,13 @@ _EGO_TRAILER_HALF_W = 1.25
 _EGO_TRAILER_HALF_L = 6.8
 
 _REFRESH_MS = 33
-_PPM = 7.0          # pixels per metre
+_PPM = 7.0
 _MIN_SPEED_KMH = 35.0
-_ARC_SAMPLES = 20   # samples for drawing corridors
+_ARC_SAMPLES = 20
 _CORRIDOR_FADE_SEGMENTS = 16
 
 
-# ---------------------------------------------------------------------------
-# Coordinate helpers
-# ---------------------------------------------------------------------------
-
 def _w2e(wx: float, wz: float, ex: float, ez: float, ey: float) -> tuple[float, float]:
-    """World XZ → ego-space.  rx>0 right, rz>0 forward."""
     dx = wx - ex
     dz = wz - ez
     c = math.cos(-ey)
@@ -89,13 +62,8 @@ def _w2e(wx: float, wz: float, ex: float, ez: float, ey: float) -> tuple[float, 
 
 
 def _e2s(rx: float, rz: float, cx: float, cy: float) -> tuple[float, float]:
-    """Ego-space → screen pixels."""
     return cx + rx * _PPM, cy - rz * _PPM
 
-
-# ---------------------------------------------------------------------------
-# Widget
-# ---------------------------------------------------------------------------
 
 class AEBDebugWindow(QWidget):
 
@@ -109,13 +77,10 @@ class AEBDebugWindow(QWidget):
         self._timer.timeout.connect(self.update)
         self._timer.start(_REFRESH_MS)
 
-        # Fonts
         self._font_main = QFont("Segoe UI", 10)
         self._font_small = QFont("Segoe UI", 8)
         self._font_hud_title = QFont("Segoe UI Semibold", 11)
         self._font_label = QFont("Segoe UI", 7)
-
-    # ---- data access -----------------------------------------------------
 
     @staticmethod
     def _fetch() -> AEBSnapshot | None:
@@ -128,11 +93,8 @@ class AEBDebugWindow(QWidget):
         return aeb.data.snapshot
 
     def _ws(self, wx: float, wz: float, ex: float, ez: float, ey: float) -> tuple[float, float]:
-        """World → screen shorthand."""
         rx, rz = _w2e(wx, wz, ex, ez, ey)
         return _e2s(rx, rz, self.width() / 2.0, self.height() / 2.0)
-
-    # ---- main paint ------------------------------------------------------
 
     def paintEvent(self, event: QPaintEvent) -> None:
         snap = self._fetch()
@@ -152,7 +114,6 @@ class AEBDebugWindow(QWidget):
 
         self._draw_grid(p, cx, cy)
 
-        # --- Vehicle corridors + boxes ------------------------------------
         for v in snap.vehicles:
             vid = v["vid"]
             is_supp = v.get("rear_suppressed", False)
@@ -171,7 +132,6 @@ class AEBDebugWindow(QWidget):
             else:
                 body_clr, corr_clr = _SAFE_CLR, QColor(_SAFE_CLR)
 
-            # Draw arc corridors (tractor + trailers; collision is checked for each)
             arcs = snap.vehicle_arcs.get(vid)
             if arcs is not None:
                 arc_list = arcs if isinstance(arcs, list) else [arcs]
@@ -179,20 +139,16 @@ class AEBDebugWindow(QWidget):
                 for arc in arc_list:
                     self._draw_arc_corridor(p, arc, ex, ez, ey, corr_clr)
 
-            # Draw vehicle box
             self._draw_vehicle_box(
                 p, v["x"], v["z"], v["yaw"],
                 v["half_w"], v["length"], v["is_tmp"],
                 ex, ez, ey, body_clr,
             )
 
-            # Speed label
             sx, sy = self._ws(v["x"], v["z"], ex, ez, ey)
             spd = v.get("speed_kmh", 0.0)
             self._draw_label(p, sx, sy - 14, f"{spd:.0f}", body_clr)
 
-            # Trailers: stored position can be pivot or over-corrected center;
-            # shift forward by half length so the box is drawn at the true visual center.
             for tr in v.get("trailers", []):
                 yaw = tr["yaw"]
                 half_l = tr["length"] / 2.0
@@ -204,11 +160,9 @@ class AEBDebugWindow(QWidget):
                     ex, ez, ey, _TRAILER_CLR,
                 )
 
-        # --- Ego corridor -------------------------------------------------
         if snap.ego_arc is not None:
             self._draw_arc_corridor(p, snap.ego_arc, ex, ez, ey, _EGO_CORRIDOR)
 
-        # --- Evasion filter corridors (cyan, shown when active) -----------
         if snap.evasion_left_arc is not None:
             self._draw_arc_corridor(
                 p, snap.evasion_left_arc, ex, ez, ey,
@@ -222,7 +176,6 @@ class AEBDebugWindow(QWidget):
                 edge_color=_EVASION_FILTER_CLR, edge_width=1.0,
             )
 
-        # --- Ego trailer --------------------------------------------------
         if snap.ego_has_trailer:
             fx = -math.sin(ey)
             fz = -math.cos(ey)
@@ -233,56 +186,44 @@ class AEBDebugWindow(QWidget):
                 ex, ez, ey, _EGO_TRAILER_CLR,
             )
 
-        # --- Ego box (drawn last, on top) ---------------------------------
         self._draw_ego_box(
             p, ex, ez, ey, snap.ego_half_w, snap.ego_half_l,
             ex, ez, ey, _EGO_CLR,
         )
 
-        # --- Collision marker ---------------------------------------------
         if snap.aeb_state >= AEBState.WARN and snap.time_to_collision < 100:
             self._draw_hit_marker(p, snap.hit_x, snap.hit_z, ex, ez, ey)
 
-        # --- HUD ----------------------------------------------------------
         self._draw_hud(p, snap)
 
         p.end()
 
-    # ---- grid ------------------------------------------------------------
-
     def _draw_grid(self, p: QPainter, cx: float, cy: float) -> None:
         max_r = max(self.width(), self.height()) / _PPM + _GRID_STEP_MAJOR
 
-        # Minor rings
         p.setPen(QPen(_GRID_MINOR, 0.5, Qt.DotLine))
         p.setBrush(Qt.NoBrush)
         d = _GRID_STEP_MINOR
         while d < max_r:
-            # Skip if it coincides with a major ring
             if abs(d % _GRID_STEP_MAJOR) > 0.01:
                 r = d * _PPM
                 p.drawEllipse(QPointF(cx, cy), r, r)
             d += _GRID_STEP_MINOR
 
-        # Major rings with distance labels
         p.setBrush(Qt.NoBrush)
         d = _GRID_STEP_MAJOR
         while d < max_r:
             r = d * _PPM
             p.setPen(QPen(_GRID_MAJOR, 1, Qt.DotLine))
             p.drawEllipse(QPointF(cx, cy), r, r)
-            # Label
             p.setPen(QPen(QColor(70, 70, 85)))
             p.setFont(self._font_label)
             p.drawText(QPointF(cx + 3, cy - r + 11), f"{d:.0f}m")
             d += _GRID_STEP_MAJOR
 
-        # Cross-hair
         p.setPen(QPen(_GRID_MAJOR, 0.5))
         p.drawLine(QPointF(cx, 0), QPointF(cx, self.height()))
         p.drawLine(QPointF(0, cy), QPointF(self.width(), cy))
-
-    # ---- arc corridor drawing --------------------------------------------
 
     def _draw_arc_corridor(
         self, p: QPainter,
@@ -292,16 +233,13 @@ class AEBDebugWindow(QWidget):
         edge_color: QColor | None = None,
         edge_width: float = 1.0,
     ) -> None:
-        """Draw an arc corridor as a filled polygon with fading edges."""
         left, right = arc.sample_corridor(_ARC_SAMPLES)
         if len(left) < 2:
             return
 
-        # Convert to screen
         s_left = [self._ws(x, z, ex, ez, ey) for x, z in left]
         s_right = [self._ws(x, z, ex, ez, ey) for x, z in right]
 
-        # Build polygon: left forward + right backward
         poly = QPolygonF()
         for sx, sy in s_left:
             poly.append(QPointF(sx, sy))
@@ -312,7 +250,6 @@ class AEBDebugWindow(QWidget):
         p.setBrush(QBrush(fill_color))
         p.drawPolygon(poly)
 
-        # Draw edges with fade
         if edge_color is None:
             ec = QColor(fill_color)
             ec.setAlpha(min(fill_color.alpha() + 60, 200))
@@ -330,8 +267,6 @@ class AEBDebugWindow(QWidget):
             p.setPen(pen)
             p.drawLine(QPointF(*s_left[i]), QPointF(*s_left[i + 1]))
             p.drawLine(QPointF(*s_right[i]), QPointF(*s_right[i + 1]))
-
-    # ---- vehicle box (traffic) -------------------------------------------
 
     def _draw_vehicle_box(
         self, p: QPainter,
@@ -366,7 +301,6 @@ class AEBDebugWindow(QWidget):
         p.setPen(QPen(color, 1.5))
         p.drawPolygon(poly)
 
-        # Direction indicator (small line from center forward)
         cx_w, cz_w = wx, wz
         flen = min(length * 0.4, 4.0)
         tip_x = wx - flen * math.sin(yaw)
@@ -375,8 +309,6 @@ class AEBDebugWindow(QWidget):
         stx, sty = self._ws(tip_x, tip_z, ex, ez, ey)
         p.setPen(QPen(QColor(255, 255, 255, 160), 1.5))
         p.drawLine(QPointF(scx, scy), QPointF(stx, sty))
-
-    # ---- ego box ---------------------------------------------------------
 
     def _draw_ego_box(
         self, p: QPainter,
@@ -408,8 +340,6 @@ class AEBDebugWindow(QWidget):
         p.setPen(QPen(color, 2.0))
         p.drawPolygon(poly)
 
-    # ---- collision hit marker --------------------------------------------
-
     def _draw_hit_marker(
         self, p: QPainter,
         hx: float, hz: float,
@@ -417,7 +347,6 @@ class AEBDebugWindow(QWidget):
     ) -> None:
         sx, sy = self._ws(hx, hz, ex, ez, ey)
 
-        # Pulsing glow
         grad = QRadialGradient(QPointF(sx, sy), 18)
         grad.setColorAt(0.0, QColor(255, 50, 50, 180))
         grad.setColorAt(0.5, QColor(255, 50, 50, 60))
@@ -426,18 +355,14 @@ class AEBDebugWindow(QWidget):
         p.setBrush(QBrush(grad))
         p.drawEllipse(QPointF(sx, sy), 18, 18)
 
-        # Cross
         r = 7
         p.setPen(QPen(_HIT_CLR, 2.5))
         p.drawLine(QPointF(sx - r, sy - r), QPointF(sx + r, sy + r))
         p.drawLine(QPointF(sx - r, sy + r), QPointF(sx + r, sy - r))
 
-        # Inner dot
         p.setPen(Qt.NoPen)
         p.setBrush(QBrush(_HIT_CLR))
         p.drawEllipse(QPointF(sx, sy), 3, 3)
-
-    # ---- text label ------------------------------------------------------
 
     def _draw_label(
         self, p: QPainter, sx: float, sy: float, text: str, color: QColor,
@@ -446,19 +371,15 @@ class AEBDebugWindow(QWidget):
         fm = p.fontMetrics()
         tw = fm.horizontalAdvance(text)
         th = fm.height()
-        # Background pill
         bg = QColor(0, 0, 0, 130)
         rect = QRectF(sx - tw / 2 - 3, sy - th + 2, tw + 6, th + 1)
         p.setPen(Qt.NoPen)
         p.setBrush(QBrush(bg))
         p.drawRoundedRect(rect, 3, 3)
-        # Text
         tc = QColor(color)
         tc.setAlpha(220)
         p.setPen(QPen(tc))
         p.drawText(QPointF(sx - tw / 2, sy), text)
-
-    # ---- HUD overlay -----------------------------------------------------
 
     def _draw_hud(self, p: QPainter, snap: AEBSnapshot) -> None:
         hud_w = 310
@@ -466,7 +387,6 @@ class AEBDebugWindow(QWidget):
         hud_x = 10
         hud_y = 10
 
-        # Background
         p.setPen(QPen(_HUD_BORDER, 1))
         p.setBrush(QBrush(_HUD_BG))
         p.drawRoundedRect(QRectF(hud_x, hud_y, hud_w, hud_h), 8, 8)
@@ -474,7 +394,6 @@ class AEBDebugWindow(QWidget):
         x = hud_x + 14
         y = hud_y + 22
 
-        # Title bar colored by state
         if snap.aeb_state == AEBState.BRAKE:
             title_clr = _DANGER_CLR
             title = "⚠ AEB EMERGENCY BRAKE"
@@ -485,7 +404,6 @@ class AEBDebugWindow(QWidget):
             title_clr = _SAFE_CLR
             title = "✓ AEB STANDBY"
 
-        # State indicator strip
         strip_clr = QColor(title_clr)
         strip_clr.setAlpha(80)
         p.setPen(Qt.NoPen)
@@ -496,7 +414,6 @@ class AEBDebugWindow(QWidget):
         p.setPen(QPen(title_clr))
         p.drawText(QPointF(x, y), title)
 
-        # Metrics
         y += 26
         p.setFont(self._font_main)
         p.setPen(QPen(_TEXT))
@@ -544,10 +461,7 @@ class AEBDebugWindow(QWidget):
             p.setPen(QPen(_EVASION_FILTER_CLR))
             p.drawText(QPointF(x, y), f"{nef} vehicle(s) evasion-filtered (corner/roadside)")
 
-        # --- Legend (bottom-left) -----------------------------------------
         self._draw_legend(p)
-
-    # ---- legend ----------------------------------------------------------
 
     def _draw_legend(self, p: QPainter) -> None:
         lx = 10
