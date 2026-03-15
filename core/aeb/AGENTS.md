@@ -283,10 +283,14 @@ aeb.snapshot          # AEBSnapshot — full debug state
 ### TTB logic summary
 
 1. Check `ego_arc` (constant speed) vs target → no hit = skip
-2. Evasion filter: check `ego_evasion_left` and `ego_evasion_right` arcs
+2. Evasion filter (non-head-on): check `ego_evasion_left` and `ego_evasion_right` arcs
    (±0.1 g curvature offset) vs target → if either misses, vehicle is
    evasion-filtered (corner/roadside) and skipped. Bypassed for moving
    co-directional and head-on targets.
+2b. Oncoming evasion filter (head-on only): build two curvature-offset arcs for the
+   *target* (same ±0.1 g Δκ) and test them against `ego_arc`. If either clears ego,
+   the oncoming vehicle can steer around ego and is not a genuine head-on threat.
+   Skipped when target speed ≤ 1 m/s.
 3. Check `ego_braked_arc` (7.8 m/s² full brake) vs target
    - No hit → braking avoids; `TTB = max(unbraked_ttc - t_stop * buffer, 0)`
    - Hit → braking insufficient; `TTB = 0`
@@ -327,6 +331,37 @@ vehicle rather than an obstacle truly blocking the lane.
 Filtered vehicles are tracked in `evasion_filtered_ids` (debug only) and
 drawn in cyan in the debug window. They do **not** contribute to TTB or
 AEB state.
+
+### Oncoming evasion filter (head-on vehicle suppression)
+
+Mirrors the ego evasion filter, but from the oncoming vehicle's perspective.
+After `ego_arc` detects a head-on hit, two curvature-offset arcs are built
+for the **target** and tested against `ego_arc` only (not the ego evasion arcs):
+
+```python
+delta_kappa_t = min(_EVASION_G_THRESHOLD / (abs_v_speed ** 2),
+                    _EVASION_FILTER_MAX_DELTA_KAPPA)
+tgt_evasion_left  = build_arc(..., target_curvature + delta_kappa_t, ...)
+tgt_evasion_right = build_arc(..., target_curvature - delta_kappa_t, ...)
+```
+
+If either arc clears `ego_arc` the oncoming vehicle has room to steer around
+ego within 0.1 g — it is not a genuine collision course. The vehicle is
+skipped and tracked in `oncoming_evasion_filtered_ids`.
+
+**Conditions:**
+- Only runs for `head_on` targets (`fwd_dot < -0.7`). Mutually exclusive with
+  the ego evasion filter (`if not head_on` vs `elif head_on`).
+- Bypassed when target speed ≤ 1 m/s to avoid Δκ blow-up at near-zero speed.
+- Target arcs inherit the head-on `decel=_FULL_BRAKE_DECEL` already set on
+  `base_target_arc`, so the braking model remains consistent.
+- Checked against `ego_arc` directly — **not** against `ego_evasion_left/right`
+  and **not** against cross arcs. The question is purely whether the oncoming
+  vehicle's path can miss the ego centre path with a gentle steer.
+
+`oncoming_evasion_filtered_ids` is stored in `AEBSnapshot` (debug only) and
+should be drawn in a distinct colour (e.g. orange) to differentiate from
+cyan ego-evasion-filtered vehicles.
 
 ---
 
@@ -381,6 +416,7 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | Yaw EMA (wrap-safe) | `smooth += 0.20 * ((raw - smooth + π) % 2π - π)` |
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
 | Evasion filter Δκ | `min(0.1*9.81 / v², 0.03)` |
+| Oncoming evasion filter Δκ | same formula applied to target speed |
 
 ---
 

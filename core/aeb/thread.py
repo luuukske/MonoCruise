@@ -96,6 +96,7 @@ class AEBSnapshot:
     suppressed_ids: set = field(default_factory=set)
     braking_suppressed_ids: set = field(default_factory=set)
     evasion_filtered_ids: set = field(default_factory=set)
+    oncoming_evasion_filtered_ids: set = field(default_factory=set)
 
     aeb_state: AEBState = AEBState.STANDBY
     time_to_collision: float = _INF
@@ -436,6 +437,7 @@ class AEBThread(BaseThread):
         suppressed_ids: set[int] = set()
         braking_suppressed_ids: set[int] = set()
         evasion_filtered_ids: set[int] = set()
+        oncoming_evasion_filtered_ids: set[int] = set()
         best_ttb: float = _INF
         best_unbraked_ttc: float = _INF
         best_raw_dist: float = _INF
@@ -646,6 +648,37 @@ class AEBThread(BaseThread):
                         evasion_filtered_ids.add(v.id)
                         continue
 
+                # Oncoming evasion filter — mirrors the ego evasion filter but asks
+                # whether the *oncoming vehicle* could steer around ego instead.
+                elif (head_on and abs_v_speed > 1.0):
+                    delta_kappa_t = min(
+                        _EVASION_G_THRESHOLD / (abs_v_speed * abs_v_speed),
+                        _EVASION_FILTER_MAX_DELTA_KAPPA,
+                    )
+                    tgt_evasion_left = build_arc(
+                        base_target_arc.start_x, base_target_arc.start_z,
+                        base_target_arc.yaw_rad, v.speed,
+                        base_target_arc.curvature + delta_kappa_t,
+                        base_target_arc.half_width, base_target_arc.horizon,
+                        decel=base_target_arc.decel,
+                    )
+                    tgt_evasion_right = build_arc(
+                        base_target_arc.start_x, base_target_arc.start_z,
+                        base_target_arc.yaw_rad, v.speed,
+                        base_target_arc.curvature - delta_kappa_t,
+                        base_target_arc.half_width, base_target_arc.horizon,
+                        decel=base_target_arc.decel,
+                    )
+                    left_clears_ego = arc_arc_collision(
+                        ego_arc, tgt_evasion_left, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
+                    ) is None
+                    right_clears_ego = arc_arc_collision(
+                        ego_arc, tgt_evasion_right, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
+                    ) is None
+                    if left_clears_ego or right_clears_ego:
+                        oncoming_evasion_filtered_ids.add(v.id)
+                        continue
+
                 colliding_ids.add(v.id)
 
                 # Risk confirmation
@@ -715,6 +748,7 @@ class AEBThread(BaseThread):
             colliding_ids=colliding_ids, suppressed_ids=suppressed_ids,
             braking_suppressed_ids=braking_suppressed_ids,
             evasion_filtered_ids=evasion_filtered_ids,
+            oncoming_evasion_filtered_ids=oncoming_evasion_filtered_ids,
             aeb_state=new_state, time_to_collision=display_ttc,
             time_to_brake=time_to_brake,
             hit_x=best_hit_x, hit_z=best_hit_z,
