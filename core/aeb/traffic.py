@@ -636,6 +636,7 @@ class Vehicle:
         horizon: float = 3.0,
         half_width: float | None = None,
         decel: float = 0.0,
+        arc_start_pctg: float = 1.0,
     ) -> ArcPath:
         # !! USE _smooth_yaw, NOT rotation.euler() !!
         # Raw yaw from rotation.euler() is noisy. Even small frame-to-frame jitter
@@ -662,8 +663,27 @@ class Vehicle:
             0.0 if decel > 0.0
             else max(-6.0, min(4.0, self.acceleration))
         )
+
+        # Position the arc start along the vehicle body.
+        # arc_start_pctg: 0.0 = physical back, 1.0 = physical front.
+        # For reversing vehicles the leading edge is the physical back, so p is
+        # mirrored (p=1.0 still places the start at the active/leading end).
+        # Pivot ratios (fraction of length behind pivot, per AGENTS.md):
+        #   AI  = 0.82  (asymmetric — 82% of body is behind the pivot)
+        #   TMP = 0.50  (symmetric)
+        # Formula: start = position + (effective_p - back_ratio) * length * fwd
+        # fwd is always physical heading (-sin, -cos); build() handles travel dir.
+        is_reversing = self.speed < -1e-3
+        effective_p = (1.0 - arc_start_pctg) if is_reversing else arc_start_pctg
+        back_ratio = 0.5 if self.is_tmp else 0.82
+        fwd_x = -math.sin(yaw_rad)
+        fwd_z = -math.cos(yaw_rad)
+        body_offset = (effective_p - back_ratio) * self.size.length
+        start_x = self.position.x + body_offset * fwd_x
+        start_z = self.position.z + body_offset * fwd_z
+
         return build_arc(
-            self.position.x, self.position.z, yaw_rad, self.speed,
+            start_x, start_z, yaw_rad, self.speed,
             curvature, effective_hw, horizon,
             decel=decel, accel=clamped_accel,
         )

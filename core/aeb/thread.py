@@ -95,8 +95,8 @@ _MIN_SPEED_MS: float = 5.0 / 3.6 #testing 35.0 / 3.6 is recommended
 _MAX_RANGE: float = 100.0
 _MAX_RANGE_SQ: float = _MAX_RANGE ** 2
 
-_MIN_ARC_HORIZON: float = 3.0
-_MAX_ARC_HORIZON: float = 4.0
+_MIN_ARC_HORIZON: float = 4.0
+_MAX_ARC_HORIZON: float = 5.0
 _CORRIDOR_MARGIN: float = 0.5
 _COLLISION_SAMPLES: int = 36
 
@@ -108,6 +108,12 @@ _TIME_TO_BRAKE_BUFFER: float = 0.0
 # Stopping-distance buffer: expands the braked-arc collision corridor so ego
 # stops with physical clearance instead of just touching the target.
 _STOP_BUFFER_FIXED: float = 0.7    # metres (baseline gap at rest)
+
+# Arc start position along the vehicle body.
+# 0.0 = physical back, 1.0 = physical front.
+# Applies to ego, all traffic vehicles, and trailers.
+# For reversing vehicles p is automatically mirrored so the leading edge is always used.
+_ARC_START_PCTG: float = 0.2
 
 # A vehicle must be continuously detected as a risk for this many seconds
 # before it contributes to TTB / AEB state.
@@ -485,9 +491,19 @@ class AEBThread(BaseThread):
         # ego_half_l adds clearance proportional to vehicle length.
         stopping_buffer = _STOP_BUFFER_FIXED + ego_half_l
 
+        # Shift ego arc start along the vehicle body using _ARC_START_PCTG.
+        # Ego is symmetric (back_ratio = 0.5). AEB only runs above _MIN_SPEED_MS
+        # so no reversing mirror needed.
+        # Formula: start = position + (p - 0.5) * length * fwd
+        _ego_fwd_x = -math.sin(ego_yaw_rad)
+        _ego_fwd_z = -math.cos(ego_yaw_rad)
+        _ego_body_offset = (_ARC_START_PCTG - 0.5) * (2.0 * ego_half_l)
+        ego_front_x = ego_x + _ego_body_offset * _ego_fwd_x
+        ego_front_z = ego_z + _ego_body_offset * _ego_fwd_z
+
         # Current-speed ego arc (for unbraked TTC / warning display)
         ego_arc = build_arc(
-            ego_x, ego_z, ego_yaw_rad, ego_speed,
+            ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
             ego_curvature, ego_hw, dynamic_horizon,
         )
 
@@ -499,7 +515,7 @@ class AEBThread(BaseThread):
         ego_braked_arc: ArcPath | None = None
         if run_collision:
             ego_braked_arc = build_arc(
-                ego_x, ego_z, ego_yaw_rad, ego_speed,
+                ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
                 ego_curvature, ego_hw, dynamic_horizon,
                 decel=_FULL_BRAKE_DECEL,
             )
@@ -565,7 +581,7 @@ class AEBThread(BaseThread):
             else:
                 v_curvature = 0.0
 
-            veh_arc = v.get_arc(dynamic_horizon)  # visual / unbraked
+            veh_arc = v.get_arc(dynamic_horizon, arc_start_pctg=_ARC_START_PCTG)  # visual / unbraked
             trailer_dicts = []
             trailer_arcs: list[ArcPath] = []
             tr_hw_colls: list[float] = []
@@ -578,8 +594,18 @@ class AEBThread(BaseThread):
                 tr_hw_colls.append(tr_hw_coll)
 
                 # Use tractor curvature so trailer arc follows the vehicle's turn.
+                # Trailer positions are always centered (back_ratio = 0.5):
+                #   TMP:     correct_position() shifts to center.
+                #   non-TMP: already centered per AGENTS.md.
+                tr_is_rev = v.speed < -1e-3
+                tr_effective_p = (1.0 - _ARC_START_PCTG) if tr_is_rev else _ARC_START_PCTG
+                tr_fwd_x_l = -math.sin(tr_yaw_rad)
+                tr_fwd_z_l = -math.cos(tr_yaw_rad)
+                tr_body_offset = (tr_effective_p - 0.5) * tr.size.length
                 tr_arc = build_arc(
-                    tr_pos.x, tr_pos.z, tr_yaw_rad,
+                    tr_pos.x + tr_body_offset * tr_fwd_x_l,
+                    tr_pos.z + tr_body_offset * tr_fwd_z_l,
+                    tr_yaw_rad,
                     v.speed, v_curvature, tr_hw, dynamic_horizon,
                 )
                 trailer_arcs.append(tr_arc)
@@ -644,15 +670,22 @@ class AEBThread(BaseThread):
                 else max(-6.0, min(4.0, v.acceleration))
             )
             veh_arc_coll = v.get_arc(dynamic_horizon, half_width=v_hw_coll,
-                                     decel=target_decel)
+                                     decel=target_decel, arc_start_pctg=_ARC_START_PCTG)
             trailer_arcs_coll: list[ArcPath] = []
             for idx, tr in enumerate(v.trailers):
                 tr_pos = tr.correct_position() if tr.is_tmp else tr.position
                 _, tr_yaw_deg, _ = tr.rotation.euler()
                 tr_yaw_rad = math.radians(tr_yaw_deg)
                 # Trailer collision arcs also use tractor curvature.
+                tr_is_rev_c = v.speed < -1e-3
+                tr_effective_p_c = (1.0 - _ARC_START_PCTG) if tr_is_rev_c else _ARC_START_PCTG
+                tr_fwd_x_c = -math.sin(tr_yaw_rad)
+                tr_fwd_z_c = -math.cos(tr_yaw_rad)
+                tr_body_offset_c = (tr_effective_p_c - 0.5) * tr.size.length
                 trailer_arcs_coll.append(build_arc(
-                    tr_pos.x, tr_pos.z, tr_yaw_rad,
+                    tr_pos.x + tr_body_offset_c * tr_fwd_x_c,
+                    tr_pos.z + tr_body_offset_c * tr_fwd_z_c,
+                    tr_yaw_rad,
                     v.speed, v_curvature, tr_hw_colls[idx], dynamic_horizon,
                     decel=target_decel, accel=target_accel,
                 ))
@@ -763,7 +796,7 @@ class AEBThread(BaseThread):
 
             if _RUN_COLLISION_AVOIDANCE_PATH:
                 evasion_kappa, evasion_arc, evasion_is_clear = _plan_evasion(
-                    ego_x, ego_z, ego_yaw_rad, ego_speed,
+                    ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
                     ego_curvature, ego_hw, threat_arcs, dynamic_horizon,
                 )
                 if evasion_is_clear:
