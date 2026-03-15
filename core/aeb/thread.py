@@ -98,7 +98,7 @@ _MAX_RANGE_SQ: float = _MAX_RANGE ** 2
 _MIN_ARC_HORIZON: float = 4.0
 _MAX_ARC_HORIZON: float = 5.0
 _CORRIDOR_MARGIN: float = 0.5
-_COLLISION_SAMPLES: int = 36
+_COLLISION_SAMPLES: int = 48
 
 _WARN_TTB_THRESHOLD: float = 1.3
 _BRAKE_TTB_THRESHOLD: float = 0.1
@@ -136,7 +136,7 @@ _ELEVATION_MARGIN_M: float = 6.0
 # padding = cross_factor * (BASE + SPEED * target_speed_ms)
 #   cross_factor = |sin(yaw_diff)| → 1.0 at 90°, 0.0 at 0°/180°
 _CROSS_SAFE_ZONE_BASE: float = 0.5    # m — minimum padding at any speed
-_CROSS_SAFE_ZONE_SPEED: float = 0.2  # m per m/s of target speed
+_CROSS_SAFE_ZONE_SPEED: float = 0.3  # m per m/s of target speed
 
 # Collision avoidance (evasive path) — disabled; code kept for possible re-enable.
 _RUN_COLLISION_AVOIDANCE_PATH: bool = False
