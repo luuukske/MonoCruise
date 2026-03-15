@@ -45,7 +45,7 @@ _CORRIDOR_MARGIN: float = 0.5
 _COLLISION_SAMPLES: int = 48
 
 _WARN_TTB_THRESHOLD: float = 1.3
-_BRAKE_TTB_THRESHOLD: float = 0.1
+_BRAKE_TTB_THRESHOLD: float = 0.2
 _BRAKE_RELEASE_THRESHOLD: float = 0.3
 _TIME_TO_BRAKE_BUFFER: float = 0.0
 
@@ -59,10 +59,10 @@ _OVERTAKE_SPEED_MARGIN: float = 2.0
 _ELEVATION_MARGIN_M: float = 5.0
 
 _CROSS_SAFE_ZONE_BASE: float = 0.5
-_CROSS_SAFE_ZONE_SPEED: float = 0.3
+_CROSS_SAFE_ZONE_SPEED: float = 0.5
 
 _EVASION_G_THRESHOLD: float = 0.1 * 9.81
-_EVASION_FILTER_MAX_DELTA_KAPPA: float = 0.03
+_EVASION_FILTER_MAX_DELTA_KAPPA: float = 0.02
 
 _VEHICLE_FORMAT = "ffffffffffffhhbb"
 _TRAILER_FORMAT = "ffffffffff"
@@ -244,6 +244,95 @@ def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1) -> bool:
     return d1_sq < d0_sq
 
 
+def _build_vehicle_collision_data(
+    v: Vehicle,
+    dynamic_horizon: float,
+    ego_yaw_rad: float,
+    ego_fwd_x: float,
+    ego_fwd_z: float,
+) -> tuple[list[ArcPath], float, list[list[ArcPath]]]:
+    """Build all_target_arcs, cross_padding, and list of cross_arcs for a vehicle.
+    Used for main-loop collision and for evasion-vs-other-vehicles checks.
+    """
+    v_hw = v.size.width / 2.0
+    v_hw_coll = max(v_hw - 0.1, 0.3)
+    abs_v_speed = abs(v.speed)
+    v_curvature = (
+        math.radians(v.angular_velocity) / abs_v_speed if abs_v_speed > 0.5 else 0.0
+    )
+    _, v_yaw_deg, _ = v.rotation.euler()
+    v_yaw_rad = math.radians(v_yaw_deg)
+    veh_fwd_x = -math.sin(v_yaw_rad)
+    veh_fwd_z = -math.cos(v_yaw_rad)
+    fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
+    head_on = fwd_dot < -0.7
+    target_decel = _FULL_BRAKE_DECEL if head_on else 0.0
+    target_accel = (
+        0.0
+        if target_decel > 0.0
+        else max(-6.0, min(4.0, v.acceleration))
+    )
+    veh_arc_coll = v.get_arc(
+        dynamic_horizon,
+        half_width=v_hw_coll,
+        decel=target_decel,
+        arc_start_pctg=_ARC_START_PCTG,
+    )
+    tr_hw_colls: list[float] = []
+    trailer_arcs_coll: list[ArcPath] = []
+    for tr in v.trailers:
+        tr_hw = tr.size.width / 2.0
+        tr_hw_colls.append(max(tr_hw - 0.1, 0.3))
+        tr_pos = tr.correct_position() if tr.is_tmp else tr.position
+        _, tr_yaw_deg, _ = tr.rotation.euler()
+        tr_yaw_rad = math.radians(tr_yaw_deg)
+        tr_is_rev_c = v.speed < -1e-3
+        tr_effective_p_c = (
+            (1.0 - _ARC_START_PCTG) if tr_is_rev_c else _ARC_START_PCTG
+        )
+        tr_fwd_x_c = -math.sin(tr_yaw_rad)
+        tr_fwd_z_c = -math.cos(tr_yaw_rad)
+        tr_body_offset_c = (tr_effective_p_c - 0.5) * tr.size.length
+        trailer_arcs_coll.append(
+            build_arc(
+                tr_pos.x + tr_body_offset_c * tr_fwd_x_c,
+                tr_pos.z + tr_body_offset_c * tr_fwd_z_c,
+                tr_yaw_rad,
+                v.speed,
+                v_curvature,
+                tr_hw_colls[-1],
+                dynamic_horizon,
+                decel=target_decel,
+                accel=target_accel,
+            )
+        )
+    all_target_arcs = [veh_arc_coll] + trailer_arcs_coll
+    cross_padding = _cross_zone_padding(ego_yaw_rad, v_yaw_rad, abs_v_speed)
+    cross_arcs_list = [
+        _apply_cross_zone(bt, cross_padding) for bt in all_target_arcs
+    ]
+    return (all_target_arcs, cross_padding, cross_arcs_list)
+
+
+def _evasion_path_hits_other_vehicles(
+    evasion_arc: ArcPath,
+    exclude_vid: int,
+    vehicle_collision_data: dict[int, tuple[list[ArcPath], float, list[list[ArcPath]]]],
+    margin: float,
+    n_samples: int,
+) -> bool:
+    """True if the evasion arc collides with any vehicle other than exclude_vid."""
+    for vid, (_, _, cross_arcs_list) in vehicle_collision_data.items():
+        if vid == exclude_vid:
+            continue
+        for cross_arcs in cross_arcs_list:
+            if _earliest_hit(
+                evasion_arc, cross_arcs, margin, n_samples
+            ) is not None:
+                return True
+    return False
+
+
 class AEBThread(BaseThread):
     loop_interval = 1 / 30
     max_restarts = 3
@@ -319,13 +408,22 @@ class AEBThread(BaseThread):
                 _EVASION_G_THRESHOLD / (ego_speed * ego_speed),
                 _EVASION_FILTER_MAX_DELTA_KAPPA,
             )
+            # Snap to center: when path would cross center line, cap curvature at 0
+            # Left path: when ego turns right, left path can cross center → snap to center (curvature 0)
+            left_kappa = ego_curvature + delta_kappa
+            if ego_curvature < 0 and left_kappa < 0:
+                left_kappa = left_kappa/3.0
+            # Right path: when ego turns left, right path can cross center → snap to center (curvature 0)
+            right_kappa = ego_curvature - delta_kappa
+            if ego_curvature > 0 and right_kappa > 0:
+                right_kappa = right_kappa/3.0
             ego_evasion_left = build_arc(
                 ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
-                ego_curvature + delta_kappa, ego_hw, dynamic_horizon,
+                left_kappa, ego_hw, dynamic_horizon,
             )
             ego_evasion_right = build_arc(
                 ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
-                ego_curvature - delta_kappa, ego_hw, dynamic_horizon,
+                right_kappa, ego_hw, dynamic_horizon,
             )
 
         ego_fwd_x = ego_arc.fwd_x
@@ -348,6 +446,27 @@ class AEBThread(BaseThread):
         newly_risky: set[int] = set()
 
         ego_pitch_rad = math.radians(ego_pitch_deg)
+
+        # Precompute per-vehicle collision arcs when run_collision, for evasion-vs-other checks
+        vehicle_collision_data: dict[
+            int, tuple[list[ArcPath], float, list[list[ArcPath]]]
+        ] = {}
+        if run_collision:
+            for v in vehicles:
+                vx, vz = v.position.x, v.position.z
+                dx = vx - ego_x
+                dz = vz - ego_z
+                dist_sq = dx * dx + dz * dz
+                if dist_sq > _MAX_RANGE_SQ:
+                    continue
+                rz = _world_to_ego_forward(dx, dz, ego_yaw_rad)
+                expected_y = ego_y + rz * math.tan(ego_pitch_rad)
+                if abs(v.position.y - expected_y) > _ELEVATION_MARGIN_M:
+                    continue
+                all_t, cross_pad, cross_list = _build_vehicle_collision_data(
+                    v, dynamic_horizon, ego_yaw_rad, ego_fwd_x, ego_fwd_z
+                )
+                vehicle_collision_data[v.id] = (all_t, cross_pad, cross_list)
 
         for v in vehicles:
             vx, vz = v.position.x, v.position.z
@@ -445,33 +564,36 @@ class AEBThread(BaseThread):
             co_directional = abs(fwd_dot) > 0.7
             head_on = fwd_dot < -0.7
 
-            target_decel = _FULL_BRAKE_DECEL if head_on else 0.0
-            target_accel = (
-                0.0 if target_decel > 0.0
-                else max(-6.0, min(4.0, v.acceleration))
-            )
-            veh_arc_coll = v.get_arc(dynamic_horizon, half_width=v_hw_coll,
-                                     decel=target_decel, arc_start_pctg=_ARC_START_PCTG)
-            trailer_arcs_coll: list[ArcPath] = []
-            for idx, tr in enumerate(v.trailers):
-                tr_pos = tr.correct_position() if tr.is_tmp else tr.position
-                _, tr_yaw_deg, _ = tr.rotation.euler()
-                tr_yaw_rad = math.radians(tr_yaw_deg)
-                tr_is_rev_c = v.speed < -1e-3
-                tr_effective_p_c = (1.0 - _ARC_START_PCTG) if tr_is_rev_c else _ARC_START_PCTG
-                tr_fwd_x_c = -math.sin(tr_yaw_rad)
-                tr_fwd_z_c = -math.cos(tr_yaw_rad)
-                tr_body_offset_c = (tr_effective_p_c - 0.5) * tr.size.length
-                trailer_arcs_coll.append(build_arc(
-                    tr_pos.x + tr_body_offset_c * tr_fwd_x_c,
-                    tr_pos.z + tr_body_offset_c * tr_fwd_z_c,
-                    tr_yaw_rad,
-                    v.speed, v_curvature, tr_hw_colls[idx], dynamic_horizon,
-                    decel=target_decel, accel=target_accel,
-                ))
-
-            all_target_arcs = [veh_arc_coll] + trailer_arcs_coll
-            cross_padding = _cross_zone_padding(ego_yaw_rad, v_yaw_rad, abs_v_speed)
+            precomputed = vehicle_collision_data.get(v.id)
+            if precomputed is not None:
+                all_target_arcs, cross_padding, _ = precomputed
+            else:
+                target_decel = _FULL_BRAKE_DECEL if head_on else 0.0
+                target_accel = (
+                    0.0 if target_decel > 0.0
+                    else max(-6.0, min(4.0, v.acceleration))
+                )
+                veh_arc_coll = v.get_arc(dynamic_horizon, half_width=v_hw_coll,
+                                         decel=target_decel, arc_start_pctg=_ARC_START_PCTG)
+                trailer_arcs_coll: list[ArcPath] = []
+                for idx, tr in enumerate(v.trailers):
+                    tr_pos = tr.correct_position() if tr.is_tmp else tr.position
+                    _, tr_yaw_deg, _ = tr.rotation.euler()
+                    tr_yaw_rad = math.radians(tr_yaw_deg)
+                    tr_is_rev_c = v.speed < -1e-3
+                    tr_effective_p_c = (1.0 - _ARC_START_PCTG) if tr_is_rev_c else _ARC_START_PCTG
+                    tr_fwd_x_c = -math.sin(tr_yaw_rad)
+                    tr_fwd_z_c = -math.cos(tr_yaw_rad)
+                    tr_body_offset_c = (tr_effective_p_c - 0.5) * tr.size.length
+                    trailer_arcs_coll.append(build_arc(
+                        tr_pos.x + tr_body_offset_c * tr_fwd_x_c,
+                        tr_pos.z + tr_body_offset_c * tr_fwd_z_c,
+                        tr_yaw_rad,
+                        v.speed, v_curvature, tr_hw_colls[idx], dynamic_horizon,
+                        decel=target_decel, accel=target_accel,
+                    ))
+                all_target_arcs = [veh_arc_coll] + trailer_arcs_coll
+                cross_padding = _cross_zone_padding(ego_yaw_rad, v_yaw_rad, abs_v_speed)
 
             for base_target_arc in all_target_arcs:
                 cross_arcs = _apply_cross_zone(base_target_arc, cross_padding)
@@ -504,7 +626,23 @@ class AEBThread(BaseThread):
                         ego_evasion_right, cross_arcs,
                         _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
                     )
-                    if left_hit is None or right_hit is None:
+                    # Only filter if at least one evasion path misses this target
+                    # and that same path does not hit any other vehicle
+                    left_clear = (
+                        left_hit is None
+                        and not _evasion_path_hits_other_vehicles(
+                            ego_evasion_left, v.id, vehicle_collision_data,
+                            _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
+                        )
+                    )
+                    right_clear = (
+                        right_hit is None
+                        and not _evasion_path_hits_other_vehicles(
+                            ego_evasion_right, v.id, vehicle_collision_data,
+                            _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
+                        )
+                    )
+                    if left_clear or right_clear:
                         evasion_filtered_ids.add(v.id)
                         continue
 
@@ -549,13 +687,6 @@ class AEBThread(BaseThread):
         new_state = AEBState.STANDBY
         time_to_brake = _INF
         display_ttc = best_unbraked_ttc
-
-        if run_collision and best_unbraked_ttc < _INF and best_raw_dist < _INF:
-            logger.info(
-                "AEB lane vehicle: raw_distance=%.2f m, ttc=%.2f s",
-                best_raw_dist,
-                best_unbraked_ttc,
-            )
 
         if run_collision and best_ttb < _INF:
             time_to_brake = best_ttb
