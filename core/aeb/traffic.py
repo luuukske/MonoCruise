@@ -14,6 +14,7 @@ from typing import Optional
 _MAX_ANGULAR_VELOCITY: float = 45.0
 _LOCATION_UPDATE_FREQUENCY: float = 0.05
 _RAW_POSITION_ALPHA: float = 0.27
+_RAW_POSITION_ALPHA_TMP: float = 0.15
 _MIN_CURVATURE_RADIUS: float = 5.0
 _STRAIGHT_CURVATURE_EPS: float = 1e-6
 
@@ -560,8 +561,9 @@ class Vehicle:
             _pred_dist = self.speed * dt + 0.5 * _clamped_accel * dt * dt
             _pred_x = self._smooth_x + _pred_dist * _pred_fwd_x
             _pred_z = self._smooth_z + _pred_dist * _pred_fwd_z
-            self._smooth_x = _RAW_POSITION_ALPHA * raw_x + (1.0 - _RAW_POSITION_ALPHA) * _pred_x
-            self._smooth_z = _RAW_POSITION_ALPHA * raw_z + (1.0 - _RAW_POSITION_ALPHA) * _pred_z
+            _alpha = _RAW_POSITION_ALPHA_TMP if self.is_tmp else _RAW_POSITION_ALPHA
+            self._smooth_x = _alpha * raw_x + (1.0 - _alpha) * _pred_x
+            self._smooth_z = _alpha * raw_z + (1.0 - _alpha) * _pred_z
         self.position.x = self._smooth_x
         self.position.z = self._smooth_z
 
@@ -571,7 +573,8 @@ class Vehicle:
             self._smooth_yaw = raw_yaw
         else:
             diff = (raw_yaw - self._smooth_yaw + math.pi) % (2.0 * math.pi) - math.pi
-            self._smooth_yaw = self._smooth_yaw + _RAW_POSITION_ALPHA * diff
+            _yaw_alpha = _RAW_POSITION_ALPHA_TMP if self.is_tmp else _RAW_POSITION_ALPHA
+            self._smooth_yaw = self._smooth_yaw + _yaw_alpha * diff
 
     def get_arc(
         self,
