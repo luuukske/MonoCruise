@@ -63,11 +63,11 @@ _CROSS_SAFE_ZONE_BASE: float = 0.5
 _CROSS_SAFE_ZONE_SPEED: float = 0.5
 
 _EVASION_G_THRESHOLD: float = 0.1 * 9.81
-_LATERAL_LANE_SEPARATION: float = 3.5
+_LATERAL_LANE_SEPARATION: float = 3.9
 # Minimum target curvature (1/m) to apply the turning-diverge suppression.
 # 0.03 ≈ 33 m radius — tight enough to be a real corner, loose enough to
 # exclude gentle curves that could still converge on ego.
-_TURNING_DIVERGE_CURVATURE: float = 0.01
+_TURNING_DIVERGE_CURVATURE: float = 0.007
 _EVASION_G_THRESHOLD_ONCOMING: float = 0.13 * 9.81
 _EVASION_FILTER_MAX_DELTA_KAPPA: float = 0.02
 
@@ -292,7 +292,7 @@ def _build_vehicle_collision_data(
     for tr in v.trailers:
         tr_hw = tr.size.width / 2.0
         tr_hw_colls.append(max(tr_hw - 0.1, 0.3))
-        tr_pos = tr.correct_position() if tr.is_tmp else tr.position
+        tr_pos = tr.position
         _, tr_yaw_deg, _ = tr.rotation.euler()
         tr_yaw_rad = math.radians(tr_yaw_deg)
         tr_is_rev_c = v.speed < -1e-3
@@ -402,11 +402,11 @@ class AEBThread(BaseThread):
             # Left path: when ego turns right, left path can cross center → snap to center (curvature 0)
             left_kappa = ego_curvature + delta_kappa
             if ego_curvature < 0 and left_kappa < 0:
-                left_kappa = left_kappa/3.0
+                left_kappa = left_kappa/5.0
             # Right path: when ego turns left, right path can cross center → snap to center (curvature 0)
             right_kappa = ego_curvature - delta_kappa
             if ego_curvature > 0 and right_kappa > 0:
-                right_kappa = right_kappa/3.0
+                right_kappa = right_kappa/5.0
             ego_evasion_left = build_arc(
                 ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
                 left_kappa, ego_hw, dynamic_horizon,
@@ -490,7 +490,8 @@ class AEBThread(BaseThread):
             trailer_arcs: list[ArcPath] = []
             tr_hw_colls: list[float] = []
             for tr in v.trailers:
-                tr_pos = tr.correct_position() if tr.is_tmp else tr.position
+                tr_arc_pos = tr.position
+                tr_dict_pos = tr.correct_position() if tr.is_tmp else tr.position
                 _, tr_yaw_deg, _ = tr.rotation.euler()
                 tr_yaw_rad = math.radians(tr_yaw_deg)
                 tr_hw = tr.size.width / 2.0
@@ -503,15 +504,15 @@ class AEBThread(BaseThread):
                 tr_fwd_z_l = -math.cos(tr_yaw_rad)
                 tr_body_offset = (tr_effective_p - 0.5) * tr.size.length
                 tr_arc = build_arc(
-                    tr_pos.x + tr_body_offset * tr_fwd_x_l,
-                    tr_pos.z + tr_body_offset * tr_fwd_z_l,
+                    tr_arc_pos.x + tr_body_offset * tr_fwd_x_l,
+                    tr_arc_pos.z + tr_body_offset * tr_fwd_z_l,
                     tr_yaw_rad,
                     v.speed, v_curvature, tr_hw, dynamic_horizon,
                 )
                 trailer_arcs.append(tr_arc)
 
                 trailer_dicts.append({
-                    "x": tr_pos.x, "z": tr_pos.z,
+                    "x": tr_dict_pos.x, "z": tr_dict_pos.z,
                     "yaw": tr_yaw_rad,
                     "half_w": tr_hw,
                     "length": tr.size.length,
@@ -568,7 +569,7 @@ class AEBThread(BaseThread):
                                          decel=target_decel, arc_start_pctg=_ARC_START_PCTG)
                 trailer_arcs_coll: list[ArcPath] = []
                 for idx, tr in enumerate(v.trailers):
-                    tr_pos = tr.correct_position() if tr.is_tmp else tr.position
+                    tr_pos = tr.position
                     _, tr_yaw_deg, _ = tr.rotation.euler()
                     tr_yaw_rad = math.radians(tr_yaw_deg)
                     tr_is_rev_c = v.speed < -1e-3

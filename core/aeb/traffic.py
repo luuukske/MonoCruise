@@ -15,6 +15,8 @@ _MAX_ANGULAR_VELOCITY: float = 45.0
 _LOCATION_UPDATE_FREQUENCY: float = 0.05
 _RAW_POSITION_ALPHA: float = 0.27
 _RAW_POSITION_ALPHA_TMP: float = 0.15
+_RAW_YAW_ALPHA: float = 0.55
+_RAW_YAW_ALPHA_TMP: float = 0.40
 _MIN_CURVATURE_RADIUS: float = 5.0
 _STRAIGHT_CURVATURE_EPS: float = 1e-6
 
@@ -505,60 +507,39 @@ class Vehicle:
         self._smooth_z = prev._smooth_z
         self._smooth_yaw = prev._smooth_yaw
 
-        last_yaw = prev.last_rotation.euler()[1]
-        current_yaw = self.rotation.euler()[1]
-        raw_av = (current_yaw - last_yaw) / dt / 2.0
-        self.angular_velocity = (
-            0.0 if abs(raw_av) > _MAX_ANGULAR_VELOCITY else raw_av
-        )
-
         raw_x = self.position.x
         raw_z = self.position.z
-
-        if self.is_tmp:
-            prev_raw_x = prev._raw_x if prev._raw_x is not None else prev.position.x
-            prev_raw_z = prev._raw_z if prev._raw_z is not None else prev.position.z
-            disp_x = raw_x - prev_raw_x
-            disp_z = raw_z - prev_raw_z
-            dist = math.sqrt(
-                disp_x ** 2
-                + (self.position.y - prev.position.y) ** 2
-                + disp_z ** 2
-            )
-            if dist > 0.025:
-                _, yaw_deg, _ = self.rotation.euler()
-                yaw_rad = math.radians(yaw_deg)
-                fwd_x = -math.sin(yaw_rad)
-                fwd_z = -math.cos(yaw_rad)
-                direction = 1.0 if (disp_x * fwd_x + disp_z * fwd_z) >= 0.0 else -1.0
-                self.speed = direction * dist / dt
-            else:
-                self.speed = 0.0
-        elif self.speed > 1e-3:
-            lp = prev.last_location
-            disp_x = self.position.x - lp.x
-            disp_z = self.position.z - lp.z
-            if disp_x * disp_x + disp_z * disp_z > 0.025 ** 2:
-                _, yaw_deg, _ = self.rotation.euler()
-                yaw_rad = math.radians(yaw_deg)
-                fwd_x = -math.sin(yaw_rad)
-                fwd_z = -math.cos(yaw_rad)
-                if (disp_x * fwd_x + disp_z * fwd_z) < 0.0:
-                    self.speed = -self.speed
-
         self._raw_x = raw_x
         self._raw_z = raw_z
 
-        # Prediction-corrected position EMA — see AGENTS.md §7
+        # Wrap-safe yaw EMA — runs first so angular_velocity uses smooth derivative
+        raw_yaw = math.radians(self.rotation.euler()[1])
+        if self._smooth_yaw is None:
+            self._smooth_yaw = raw_yaw
+        else:
+            diff = (raw_yaw - self._smooth_yaw + math.pi) % (2.0 * math.pi) - math.pi
+            _yaw_alpha = _RAW_YAW_ALPHA_TMP if self.is_tmp else _RAW_YAW_ALPHA
+            self._smooth_yaw = self._smooth_yaw + _yaw_alpha * diff
+
+        # Angular velocity in deg/s — callers apply math.radians(), so keep degrees here
+        _prev_smooth_yaw_deg = math.degrees(prev._smooth_yaw) if prev._smooth_yaw is not None else prev.rotation.euler()[1]
+        _cur_smooth_yaw_deg = math.degrees(self._smooth_yaw)
+        _yaw_diff_deg = (_cur_smooth_yaw_deg - _prev_smooth_yaw_deg + 180.0) % 360.0 - 180.0
+        raw_av = _yaw_diff_deg / dt
+        self.angular_velocity = 0.0 if abs(raw_av) > _MAX_ANGULAR_VELOCITY else raw_av
+
+        # Prediction-corrected position EMA — uses prev.speed so TMP speed can be
+        # derived from smooth displacement afterwards.  See AGENTS.md §7.
         if self._smooth_x is None:
             self._smooth_x = raw_x
             self._smooth_z = raw_z
         else:
-            _pred_yaw = self._smooth_yaw if self._smooth_yaw is not None else math.radians(self.rotation.euler()[1])
-            _pred_fwd_x = -math.sin(_pred_yaw)
-            _pred_fwd_z = -math.cos(_pred_yaw)
+            _prev_smooth_yaw = prev._smooth_yaw if prev._smooth_yaw is not None else math.radians(prev.rotation.euler()[1])
+            _mid_yaw = _prev_smooth_yaw + 0.5 * math.radians(self.angular_velocity) * dt
+            _pred_fwd_x = -math.sin(_mid_yaw)
+            _pred_fwd_z = -math.cos(_mid_yaw)
             _clamped_accel = max(-6.0, min(4.0, self.acceleration))
-            _pred_dist = self.speed * dt + 0.5 * _clamped_accel * dt * dt
+            _pred_dist = prev.speed * dt + 0.5 * _clamped_accel * dt * dt
             _pred_x = self._smooth_x + _pred_dist * _pred_fwd_x
             _pred_z = self._smooth_z + _pred_dist * _pred_fwd_z
             _alpha = _RAW_POSITION_ALPHA_TMP if self.is_tmp else _RAW_POSITION_ALPHA
@@ -567,14 +548,29 @@ class Vehicle:
         self.position.x = self._smooth_x
         self.position.z = self._smooth_z
 
-        # Wrap-safe yaw EMA
-        raw_yaw = math.radians(self.rotation.euler()[1])
-        if self._smooth_yaw is None:
-            self._smooth_yaw = raw_yaw
-        else:
-            diff = (raw_yaw - self._smooth_yaw + math.pi) % (2.0 * math.pi) - math.pi
-            _yaw_alpha = _RAW_POSITION_ALPHA_TMP if self.is_tmp else _RAW_POSITION_ALPHA
-            self._smooth_yaw = self._smooth_yaw + _yaw_alpha * diff
+        # Speed derived from smoothed positions
+        _prev_smooth_x = prev._smooth_x if prev._smooth_x is not None else prev.position.x
+        _prev_smooth_z = prev._smooth_z if prev._smooth_z is not None else prev.position.z
+        disp_x = self._smooth_x - _prev_smooth_x
+        disp_z = self._smooth_z - _prev_smooth_z
+        fwd_x = -math.sin(self._smooth_yaw)
+        fwd_z = -math.cos(self._smooth_yaw)
+
+        if self.is_tmp:
+            dist = math.sqrt(
+                disp_x ** 2
+                + (self.position.y - prev.position.y) ** 2
+                + disp_z ** 2
+            )
+            if dist > 0.025:
+                direction = 1.0 if (disp_x * fwd_x + disp_z * fwd_z) >= 0.0 else -1.0
+                self.speed = direction * dist / dt
+            else:
+                self.speed = 0.0
+        elif self.speed > 1e-3:
+            if disp_x * disp_x + disp_z * disp_z > 0.025 ** 2:
+                if (disp_x * fwd_x + disp_z * fwd_z) < 0.0:
+                    self.speed = -self.speed
 
     def get_arc(
         self,
