@@ -453,6 +453,10 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 - **Never use `+0.5` yaw offset in `thread.py`.** It was a historical bug — see inline comment.
 - **Y axis is never used in 2D math**, only for elevation filtering: vehicles below or above the expected road level (ego Y + slope × forward distance, ±margin) are not tracked; slope (`rotationY`, positive = uphill) avoids filtering vehicles in front on a slope.
 - **AEB forward vector formula is `(-sin, -cos)`.** Do not flip signs or swap to `(sin, cos)`.
+- **`co_directional` must use `fwd_dot > 0.7`, not `abs(fwd_dot) > 0.7`.** Using `abs` makes perfectly head-on vehicles (`fwd_dot = -1.0`) simultaneously `head_on=True` and `co_directional=True`. The two flags must be mutually exclusive — `co_directional` means same direction, `head_on` means opposite direction.
+- **`_LATERAL_LANE_SEPARATION` must be ≥ 3.5 m.** At 3.0 m, typical ETS2 2-lane roads put the oncoming vehicle's center exactly at the threshold, causing boundary misses on perfectly anti-parallel vehicles (`fwd_dot = -1.0`). The corrected value is `3.5 m`.
+- **`near_head_on` (lateral gap activation) and `head_on` (evasion/decel model) are separate thresholds.** `head_on = fwd_dot < -0.7` governs target decel, evasion filter bypass, and risk confirm duration. `near_head_on = fwd_dot < -0.5` governs only lateral gap activation. Do not unify them — real-world ETS2 turn geometry means oncoming vehicles in a shared curve rarely reach -0.7 during the approach.
+- **`_TURNING_DIVERGE_CURVATURE = 0.01` (≈ 100 m radius).** The original value of 0.03 (≈ 33 m radius) was too strict — typical ETS2 highway bends produce curvatures of 0.015–0.020, which fell below the threshold and left the turning-diverge filter inactive.
 
 ---
 

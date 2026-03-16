@@ -63,12 +63,12 @@ _CROSS_SAFE_ZONE_BASE: float = 0.5
 _CROSS_SAFE_ZONE_SPEED: float = 0.5
 
 _EVASION_G_THRESHOLD: float = 0.1 * 9.81
-_LATERAL_LANE_SEPARATION: float = 3.0
+_LATERAL_LANE_SEPARATION: float = 3.5
 # Minimum target curvature (1/m) to apply the turning-diverge suppression.
 # 0.03 ≈ 33 m radius — tight enough to be a real corner, loose enough to
 # exclude gentle curves that could still converge on ego.
 _TURNING_DIVERGE_CURVATURE: float = 0.01
-_EVASION_G_THRESHOLD_ONCOMING: float = 0.18 * 9.81
+_EVASION_G_THRESHOLD_ONCOMING: float = 0.13 * 9.81
 _EVASION_FILTER_MAX_DELTA_KAPPA: float = 0.02
 
 _VEHICLE_FORMAT = "ffffffffffffhhbb"
@@ -552,7 +552,7 @@ class AEBThread(BaseThread):
             veh_fwd_x = -math.sin(v_yaw_rad)
             veh_fwd_z = -math.cos(v_yaw_rad)
             fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
-            co_directional = abs(fwd_dot) > 0.7
+            co_directional = fwd_dot > 0.7
             head_on = fwd_dot < -0.7
 
             precomputed = vehicle_collision_data.get(v.id)
