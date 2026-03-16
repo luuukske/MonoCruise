@@ -36,7 +36,7 @@ _INF: float = 1e9
 
 _FULL_BRAKE_DECEL: float = 7.8
 _MIN_SPEED_MS: float = 5.0 / 3.6
-_MAX_RANGE: float = 100.0
+_MAX_RANGE: float = 200.0
 _MAX_RANGE_SQ: float = _MAX_RANGE ** 2
 
 _MIN_ARC_HORIZON: float = 3.0
@@ -64,12 +64,23 @@ _CROSS_SAFE_ZONE_SPEED: float = 0.5
 
 _EVASION_G_THRESHOLD: float = 0.1 * 9.81
 _LATERAL_LANE_SEPARATION: float = 3.9
+# fwd_dot threshold for lateral-gap activation — deliberately looser than the
+# head_on threshold (-0.7) to catch oncoming vehicles that never reach -0.7
+# during a shared turn.  Does NOT affect target decel model, evasion filter
+# bypass, or risk confirm duration — those all still use head_on (-0.7).
+_NEAR_HEAD_ON_DOT: float = -0.5
 # Minimum target curvature (1/m) to apply the turning-diverge suppression.
 # 0.03 ≈ 33 m radius — tight enough to be a real corner, loose enough to
 # exclude gentle curves that could still converge on ego.
 _TURNING_DIVERGE_CURVATURE: float = 0.007
 _EVASION_G_THRESHOLD_ONCOMING: float = 0.13 * 9.81
-_EVASION_FILTER_MAX_DELTA_KAPPA: float = 0.02
+_EVASION_FILTER_MAX_DELTA_KAPPA: float = 0.008
+# Lateral offset from ego's forward axis (m) at which an oncoming vehicle is
+# considered to be clearly in its own lane.  Above this, delta_kappa_t is
+# scaled up so the evasion arcs fan wider and are more likely to clear ego.
+# Uses the cross product: lat = dx*ego_fwd_z - dz*ego_fwd_x (signed, left < 0).
+_OPPOSITE_LANE_OFFSET: float = 2.0
+_OPPOSITE_LANE_KAPPA_SCALE: float = 1.5
 
 _VEHICLE_FORMAT = "ffffffffffffhhbb"
 _TRAILER_FORMAT = "ffffffffff"
@@ -556,6 +567,8 @@ class AEBThread(BaseThread):
             co_directional = fwd_dot > 0.7
             head_on = fwd_dot < -0.7
 
+            near_head_on = fwd_dot < _NEAR_HEAD_ON_DOT
+
             precomputed = vehicle_collision_data.get(v.id)
             if precomputed is not None:
                 all_target_arcs, cross_padding, _ = precomputed
@@ -590,7 +603,7 @@ class AEBThread(BaseThread):
             for base_target_arc in all_target_arcs:
                 cross_arcs = _apply_cross_zone(base_target_arc, cross_padding)
 
-                lateral_gap = _LATERAL_LANE_SEPARATION if head_on else 0.0
+                lateral_gap = _LATERAL_LANE_SEPARATION if near_head_on else 0.0
 
                 unbraked_hit = _earliest_hit(
                     ego_arc, cross_arcs, _CORRIDOR_MARGIN, _COLLISION_SAMPLES, lateral_gap,
@@ -652,6 +665,19 @@ class AEBThread(BaseThread):
                         _EVASION_G_THRESHOLD_ONCOMING / (abs_v_speed * abs_v_speed),
                         _EVASION_FILTER_MAX_DELTA_KAPPA,
                     )
+                    # Scale delta_kappa_t when vehicle is clearly in its own lane —
+                    # a vehicle already displaced laterally needs less curvature to
+                    # miss ego, so we give its evasion arcs more room to work with.
+                    # dx/dz are the world-space vector from ego to vehicle, already
+                    # available in this scope.  Cross product gives signed lateral
+                    # offset along ego's right axis; we use abs() since either side
+                    # qualifies — in ETS2 left-hand traffic also exists on some maps.
+                    lateral_offset = abs(dx * ego_fwd_z - dz * ego_fwd_x)
+                    if lateral_offset >= _OPPOSITE_LANE_OFFSET:
+                        delta_kappa_t = min(
+                            delta_kappa_t * _OPPOSITE_LANE_KAPPA_SCALE,
+                            _EVASION_FILTER_MAX_DELTA_KAPPA * _OPPOSITE_LANE_KAPPA_SCALE,
+                        )
                     tgt_evasion_left = build_arc(
                         base_target_arc.start_x, base_target_arc.start_z,
                         base_target_arc.yaw_rad, v.speed,

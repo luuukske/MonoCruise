@@ -369,6 +369,18 @@ If either arc clears `ego_arc` the oncoming vehicle has room to steer around
 ego within 0.1 g — it is not a genuine collision course. The vehicle is
 skipped and tracked in `oncoming_evasion_filtered_ids`.
 
+#### Lateral-offset kappa scaling
+
+When the oncoming vehicle's center is ≥ `_OPPOSITE_LANE_OFFSET (2.0 m)` from
+ego's forward axis (cross product `|dx*ego_fwd_z - dz*ego_fwd_x|`), it is
+clearly in its own lane. In this case `delta_kappa_t` is multiplied by
+`_OPPOSITE_LANE_KAPPA_SCALE (2.5)` before building the evasion arcs — a
+vehicle already displaced laterally needs much less curvature change to miss
+ego, so the wider arcs make the filter more likely to correctly suppress it.
+The scaled value is still capped at `_EVASION_FILTER_MAX_DELTA_KAPPA × scale`
+to prevent degenerate arcs at low speed.  `abs()` is used on the lateral
+offset so the filter works on both left- and right-hand traffic roads.
+
 **Conditions:**
 - Only runs for `head_on` targets (`fwd_dot < -0.7`). Mutually exclusive with
   the ego evasion filter (`if not head_on` vs `elif head_on`).
@@ -437,7 +449,10 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
 | Evasion filter Δκ | `min(0.1*9.81 / v², 0.03)` |
 | Oncoming evasion filter Δκ | same formula applied to target speed |
-| Head-on lateral gap | `_LATERAL_LANE_SEPARATION = 3.0 m` (cross product of hit-point separation vs `a.fwd`) |
+| Head-on lateral gap | `_LATERAL_LANE_SEPARATION = 3.9 m` (cross product of hit-point separation vs `a.fwd`) |
+| Near-head-on threshold | `_NEAR_HEAD_ON_DOT = -0.5` — activates lateral gap; looser than `head_on` (-0.7) to catch shared-turn approach geometry |
+| Opposite-lane offset | `_OPPOSITE_LANE_OFFSET = 2.0 m` — lateral distance from ego axis at which oncoming kappa scale activates |
+| Opposite-lane kappa scale | `_OPPOSITE_LANE_KAPPA_SCALE = 2.5` — multiplier on `delta_kappa_t` for clearly displaced oncoming vehicles |
 | Turning diverge curvature threshold | `_TURNING_DIVERGE_CURVATURE = 0.03 /m` (≈ 33 m radius) |
 
 ---
@@ -455,7 +470,7 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 - **AEB forward vector formula is `(-sin, -cos)`.** Do not flip signs or swap to `(sin, cos)`.
 - **`co_directional` must use `fwd_dot > 0.7`, not `abs(fwd_dot) > 0.7`.** Using `abs` makes perfectly head-on vehicles (`fwd_dot = -1.0`) simultaneously `head_on=True` and `co_directional=True`. The two flags must be mutually exclusive — `co_directional` means same direction, `head_on` means opposite direction.
 - **`_LATERAL_LANE_SEPARATION` must be ≥ 3.5 m.** At 3.0 m, typical ETS2 2-lane roads put the oncoming vehicle's center exactly at the threshold, causing boundary misses on perfectly anti-parallel vehicles (`fwd_dot = -1.0`). The corrected value is `3.5 m`.
-- **`near_head_on` (lateral gap activation) and `head_on` (evasion/decel model) are separate thresholds.** `head_on = fwd_dot < -0.7` governs target decel, evasion filter bypass, and risk confirm duration. `near_head_on = fwd_dot < -0.5` governs only lateral gap activation. Do not unify them — real-world ETS2 turn geometry means oncoming vehicles in a shared curve rarely reach -0.7 during the approach.
+- **`near_head_on` (lateral gap activation) and `head_on` (evasion/decel model) are separate thresholds.** `head_on = fwd_dot < -0.7` governs target decel, evasion filter bypass, and risk confirm duration. `near_head_on = fwd_dot < _NEAR_HEAD_ON_DOT (-0.5)` governs only lateral gap activation. Do not unify them — real-world ETS2 turn geometry means oncoming vehicles in a shared curve rarely reach -0.7 during the approach.
 - **`_TURNING_DIVERGE_CURVATURE = 0.01` (≈ 100 m radius).** The original value of 0.03 (≈ 33 m radius) was too strict — typical ETS2 highway bends produce curvatures of 0.015–0.020, which fell below the threshold and left the turning-diverge filter inactive.
 
 ---
