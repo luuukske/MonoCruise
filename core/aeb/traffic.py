@@ -302,8 +302,16 @@ def arc_arc_collision(
     b: ArcPath,
     margin: float = 0.5,
     n_samples: int = 24,
+    min_lateral_gap: float = 0.0,
 ) -> Optional[tuple[float, float, float]]:
-    """Earliest corridor collision: ``(time_s, hit_x, hit_z)`` or ``None``."""
+    """Earliest corridor collision: ``(time_s, hit_x, hit_z)`` or ``None``.
+
+    ``min_lateral_gap`` — if > 0, a candidate hit is suppressed when the
+    perpendicular distance between the two centerlines (measured along a's
+    instantaneous heading) is >= this value.  Use for head-on turns where
+    arc paths overlap in the forward dimension but the vehicles remain in
+    their own lanes laterally.
+    """
     if a.arc_length < 1e-3 and b.arc_length < 1e-3:
         return None
 
@@ -313,13 +321,14 @@ def arc_arc_collision(
     if (a.is_straight and b.is_straight
             and a.decel <= 0 and b.decel <= 0
             and a.accel == 0.0 and b.accel == 0.0):
-        return _ray_ray_collision(a, b, corridor_sq, horizon)
+        return _ray_ray_collision(a, b, corridor_sq, horizon, min_lateral_gap)
 
-    return _sampled_collision(a, b, corridor_sq, horizon, n_samples)
+    return _sampled_collision(a, b, corridor_sq, horizon, n_samples, min_lateral_gap)
 
 
 def _ray_ray_collision(
     a: ArcPath, b: ArcPath, corridor_sq: float, horizon: float,
+    min_lateral_gap: float = 0.0,
 ) -> Optional[tuple[float, float, float]]:
     dpx = a.start_x - b.start_x
     dpz = a.start_z - b.start_z
@@ -331,6 +340,10 @@ def _ray_ray_collision(
     C = dpx * dpx + dpz * dpz - corridor_sq
 
     if C <= 0:
+        if min_lateral_gap > 0.0:
+            lat = abs(dpz * a.fwd_x - dpx * a.fwd_z)
+            if lat >= min_lateral_gap:
+                return None
         return 0.0, (a.start_x + b.start_x) * 0.5, (a.start_z + b.start_z) * 0.5
 
     if abs(A) < 1e-12:
@@ -359,11 +372,18 @@ def _ray_ray_collision(
     az = a.start_z + t_hit * a.speed * a.fwd_z
     bx = b.start_x + t_hit * b.speed * b.fwd_x
     bz = b.start_z + t_hit * b.speed * b.fwd_z
+
+    if min_lateral_gap > 0.0:
+        lat = abs((bz - az) * a.fwd_x - (bx - ax) * a.fwd_z)
+        if lat >= min_lateral_gap:
+            return None
+
     return t_hit, (ax + bx) * 0.5, (az + bz) * 0.5
 
 
 def _sampled_collision(
     a: ArcPath, b: ArcPath, corridor_sq: float, horizon: float, n: int,
+    min_lateral_gap: float = 0.0,
 ) -> Optional[tuple[float, float, float]]:
     best_t: Optional[float] = None
     best_mx = 0.0
@@ -376,6 +396,13 @@ def _sampled_collision(
         bx, bz = b.position_at_time(t)
         dsq = (ax - bx) ** 2 + (az - bz) ** 2
         if dsq < corridor_sq:
+            if min_lateral_gap > 0.0:
+                h_a = a.heading_at_dist(a._dist_at_time(t))
+                fwd_x_a = -math.sin(h_a)
+                fwd_z_a = -math.cos(h_a)
+                lat = abs((bz - az) * fwd_x_a - (bx - ax) * fwd_z_a)
+                if lat >= min_lateral_gap:
+                    continue
             lo = max(t - horizon * inv_n, 0.0)
             hi = t
             best_t = t
@@ -386,6 +413,14 @@ def _sampled_collision(
                 ax2, az2 = a.position_at_time(mid)
                 bx2, bz2 = b.position_at_time(mid)
                 if (ax2 - bx2) ** 2 + (az2 - bz2) ** 2 < corridor_sq:
+                    if min_lateral_gap > 0.0:
+                        h_a2 = a.heading_at_dist(a._dist_at_time(mid))
+                        fwd_x_a2 = -math.sin(h_a2)
+                        fwd_z_a2 = -math.cos(h_a2)
+                        lat2 = abs((bz2 - az2) * fwd_x_a2 - (bx2 - ax2) * fwd_z_a2)
+                        if lat2 >= min_lateral_gap:
+                            lo = mid
+                            continue
                     hi = mid
                     best_t = mid
                     best_mx = (ax2 + bx2) * 0.5

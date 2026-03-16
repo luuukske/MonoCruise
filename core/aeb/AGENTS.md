@@ -258,12 +258,28 @@ center_z = start_z + sign * radius * (-fwd_x)
 
 ### Collision detection
 
-`arc_arc_collision(a, b, margin, n_samples)` returns `(time_s, hit_x, hit_z)` or `None`.
+`arc_arc_collision(a, b, margin, n_samples, min_lateral_gap=0.0)` returns `(time_s, hit_x, hit_z)` or `None`.
 
 - Both straight, no decel/accel → closed-form quadratic O(1)
 - Otherwise → time-synchronised sampling + 6-step bisection O(n)
 - Corridor threshold = `a.half_width + b.half_width + margin`
 - AEB narrows vehicle half_width by 0.1 m per side to reduce false positives from measurement noise
+
+#### `min_lateral_gap` — head-on turn filter
+
+When `min_lateral_gap > 0`, a candidate hit is suppressed if the perpendicular distance between the two arc centerlines (measured along `a`'s instantaneous heading at the hit point) is ≥ this value. This prevents false positives when ego and an oncoming vehicle both enter a curve — their arcs overlap in the forward dimension, but the vehicles remain in their own lanes laterally.
+
+```python
+# Lateral separation via cross product (2D):
+lat = abs((bz - az) * fwd_x_a - (bx - ax) * fwd_z_a)
+if lat >= min_lateral_gap:
+    suppress hit
+```
+
+- Applied in both `_ray_ray_collision` and `_sampled_collision`
+- In the sampled path, the lateral check runs at each coarse sample **before** entering bisection; during bisection, a failing lateral check advances `lo` rather than breaking, so the refiner keeps searching for a sample where lanes genuinely cross
+- `_LATERAL_LANE_SEPARATION = 3.0 m` — tuning range: 3.0 (narrow roads) to 3.5 (wide roads)
+- AEB passes `lateral_gap = _LATERAL_LANE_SEPARATION if head_on else 0.0` to `_earliest_hit`, so the filter is **only active for head-on vehicles**
 
 ---
 
@@ -283,6 +299,8 @@ aeb.snapshot          # AEBSnapshot — full debug state
 ### TTB logic summary
 
 1. Check `ego_arc` (constant speed) vs target → no hit = skip
+1b. **Diverging co-directional suppression** — if co-directional and `speed > 0.5 m/s` and paths are already diverging at `t_hit` (`_is_approaching` returns False): skip. Prevents false triggers on overtaking or same-direction vehicles pulling away.
+1c. **Turning cross-traffic suppression** — if `not head_on` and `not co_directional` and `speed > 0.5 m/s` and `|target_curvature| > _TURNING_DIVERGE_CURVATURE (0.03/m)` and paths diverging at `t_hit`: skip. Prevents false triggers when a vehicle is turning through an intersection or corner that ego is entering straight. All five conditions must hold — any failure passes through to full collision evaluation.
 2. Evasion filter (non-head-on): check `ego_evasion_left` and `ego_evasion_right` arcs
    (±0.1 g curvature offset) vs **the current target only** (not other vehicles) → if
    either misses the target, vehicle is evasion-filtered (corner/roadside) and skipped.
@@ -419,6 +437,8 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
 | Evasion filter Δκ | `min(0.1*9.81 / v², 0.03)` |
 | Oncoming evasion filter Δκ | same formula applied to target speed |
+| Head-on lateral gap | `_LATERAL_LANE_SEPARATION = 3.0 m` (cross product of hit-point separation vs `a.fwd`) |
+| Turning diverge curvature threshold | `_TURNING_DIVERGE_CURVATURE = 0.03 /m` (≈ 33 m radius) |
 
 ---
 

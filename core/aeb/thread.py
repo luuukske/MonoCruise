@@ -51,7 +51,7 @@ _TIME_TO_BRAKE_BUFFER: float = 0.0
 
 _STOP_BUFFER_FIXED: float = 1.6
 _ARC_START_PCTG: float = 0.2
-_RISK_CONFIRM_DURATION: float = 0.05
+_RISK_CONFIRM_DURATION: float = 0.10
 _RISK_CONFIRM_DURATION_ONCOMING: float = _RISK_CONFIRM_DURATION * 2.0
 
 _REAR_DOT_THRESHOLD: float = -0.5
@@ -63,6 +63,11 @@ _CROSS_SAFE_ZONE_BASE: float = 0.5
 _CROSS_SAFE_ZONE_SPEED: float = 0.5
 
 _EVASION_G_THRESHOLD: float = 0.1 * 9.81
+_LATERAL_LANE_SEPARATION: float = 3.0
+# Minimum target curvature (1/m) to apply the turning-diverge suppression.
+# 0.03 ≈ 33 m radius — tight enough to be a real corner, loose enough to
+# exclude gentle curves that could still converge on ego.
+_TURNING_DIVERGE_CURVATURE: float = 0.01
 _EVASION_G_THRESHOLD_ONCOMING: float = 0.18 * 9.81
 _EVASION_FILTER_MAX_DELTA_KAPPA: float = 0.02
 
@@ -223,10 +228,11 @@ def _earliest_hit(
     check_arcs: list[ArcPath],
     margin: float,
     n_samples: int,
+    min_lateral_gap: float = 0.0,
 ) -> tuple[float, float, float] | None:
     best: tuple[float, float, float] | None = None
     for ca in check_arcs:
-        h = arc_arc_collision(ego_arc, ca, margin, n_samples)
+        h = arc_arc_collision(ego_arc, ca, margin, n_samples, min_lateral_gap)
         if h is not None and (best is None or h[0] < best[0]):
             best = h
     return best
@@ -268,7 +274,7 @@ def _build_vehicle_collision_data(
     veh_fwd_x = -math.sin(v_yaw_rad)
     veh_fwd_z = -math.cos(v_yaw_rad)
     fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
-    head_on = fwd_dot < -0.7
+    head_on = fwd_dot < -0.5
     target_decel = _FULL_BRAKE_DECEL if head_on else 0.0
     target_accel = (
         0.0
@@ -583,13 +589,32 @@ class AEBThread(BaseThread):
             for base_target_arc in all_target_arcs:
                 cross_arcs = _apply_cross_zone(base_target_arc, cross_padding)
 
+                lateral_gap = _LATERAL_LANE_SEPARATION if head_on else 0.0
+
                 unbraked_hit = _earliest_hit(
-                    ego_arc, cross_arcs, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
+                    ego_arc, cross_arcs, _CORRIDOR_MARGIN, _COLLISION_SAMPLES, lateral_gap,
                 )
                 # Suppress diverging co-directional moving targets only
                 if (unbraked_hit is not None
                         and co_directional
                         and base_target_arc.speed > 0.5
+                        and not _is_approaching(ego_arc, base_target_arc, unbraked_hit[0])):
+                    unbraked_hit = None
+
+                # Suppress a tightly-turning cross-traffic vehicle whose arc is
+                # already diverging at the hit point.  Guards are intentionally
+                # strict to avoid masking real threats:
+                #   - not head_on: never suppress an oncoming vehicle
+                #   - not co_directional: original branch already handles that
+                #   - curvature guard: target must be in a real corner, not a
+                #     gentle curve that could still converge
+                #   - speed guard: stationary / near-stationary targets are not
+                #     "turning away" in a meaningful sense
+                if (unbraked_hit is not None
+                        and not head_on
+                        and not co_directional
+                        and base_target_arc.speed > 0.5
+                        and abs(base_target_arc.curvature) > _TURNING_DIVERGE_CURVATURE
                         and not _is_approaching(ego_arc, base_target_arc, unbraked_hit[0])):
                     unbraked_hit = None
 
@@ -672,6 +697,7 @@ class AEBThread(BaseThread):
                     ego_braked_arc, cross_arcs,
                     _CORRIDOR_MARGIN + stopping_buffer,
                     _COLLISION_SAMPLES,
+                    lateral_gap,
                 )
 
                 if braked_hit is None:
@@ -701,6 +727,18 @@ class AEBThread(BaseThread):
                 new_state = AEBState.WARN
             if time_to_brake < _BRAKE_TTB_THRESHOLD:
                 new_state = AEBState.BRAKE
+                for v in vehicles:
+                    if v.id in colliding_ids:
+                        abs_v_spd = abs(v.speed)
+                        v_curv = math.radians(v.angular_velocity) / abs_v_spd if abs_v_spd > 0.5 else 0.0
+                        _, v_yaw_deg, _ = v.rotation.euler()
+                        v_yaw_rad = math.radians(v_yaw_deg)
+                        veh_fwd_x = -math.sin(v_yaw_rad)
+                        veh_fwd_z = -math.cos(v_yaw_rad)
+                        dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
+                        print(f"[AEB DEBUG] vid={v.id} fwd_dot={dot:.3f} head_on={dot < -0.7} "
+                            f"co_dir={abs(dot) > 0.7} curvature={v_curv:.4f} "
+                            f"speed={abs_v_spd:.1f}m/s ttb={best_ttb:.2f}s dist={best_raw_dist:.1f}m")
 
         # BRAKE latch — prevent rapid cycling near threshold
         if self._prev_state == AEBState.BRAKE and time_to_brake < _BRAKE_RELEASE_THRESHOLD:
