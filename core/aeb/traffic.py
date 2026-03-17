@@ -13,12 +13,51 @@ from typing import Optional
 
 _MAX_ANGULAR_VELOCITY: float = 45.0
 _LOCATION_UPDATE_FREQUENCY: float = 0.05
-_RAW_POSITION_ALPHA: float = 0.27
-_RAW_POSITION_ALPHA_TMP: float = 0.15
+
+# Position EMA alpha — speed-dependent: 0.5 at rest → 0.15 at 90 km/h.
+# Curve shape is 1/x (hyperbolic): drops quickly at low speed, flattens at
+# highway speed.  See AGENTS.md §7 and _compute_position_alpha().
+_ALPHA_AT_REST: float = 1.0
+_ALPHA_AT_90_KMH: float = 0.15
+_ALPHA_SPEED_SCALE: float = 90.0 / 3.6   # 25.0 m/s — reference speed
+
+# Precomputed pole of the hyperbola: d = scale × α_90 / (α_rest − α_90).
+# Ensures base(0) = α_rest and base(scale) = α_90 exactly.
+_ALPHA_CURVE_D: float = (
+    _ALPHA_SPEED_SCALE * _ALPHA_AT_90_KMH / (_ALPHA_AT_REST - _ALPHA_AT_90_KMH)
+)
+
+# Rolling noise estimate — EMA of |raw − predicted| residual.
+# Drives the secondary alpha modifier: high residual → trust prediction more.
+_NOISE_EMA_ALPHA: float = 0.15
+_NOISE_REFERENCE_M: float = 1.5          # residual (m) that halves the base alpha
+
 _RAW_YAW_ALPHA: float = 1.0
 _RAW_YAW_ALPHA_TMP: float = 0.50
+
+# TMP lag detection — see AGENTS.md §7 "Lag / freeze detection".
+_LAG_MIN_SPEED_MS: float = 2.0           # m/s  — below this no lag detection runs
+_LAG_DISP_RATIO: float = 0.10           # flag lag if raw disp < 10 % of expected
+_LAG_FREEZE_DURATION: float = 0.3       # s    — freeze window; release after this
+
 _MIN_CURVATURE_RADIUS: float = 5.0
 _STRAIGHT_CURVATURE_EPS: float = 1e-6
+
+
+def _compute_position_alpha(speed_ms: float, noise_est: float) -> float:
+    """Speed-scaled EMA alpha following a 1/x (hyperbolic) curve.
+
+    base = (_ALPHA_AT_REST × _ALPHA_CURVE_D) / (|speed| + _ALPHA_CURVE_D)
+
+    Exact values:  base(0) = _ALPHA_AT_REST (1.0)
+                   base(25 m/s) = _ALPHA_AT_90_KMH (0.15)
+
+    A secondary noise modifier further lowers alpha when the rolling residual
+    |raw − predicted| is large — noisy signal, trust the prediction more.
+    """
+    base = (_ALPHA_AT_REST * _ALPHA_CURVE_D) / (abs(speed_ms) + _ALPHA_CURVE_D)
+    noise_mod = 1.0 / (1.0 + noise_est / _NOISE_REFERENCE_M)
+    return base * noise_mod
 
 
 class Position:
@@ -144,7 +183,8 @@ class ArcPath:
     _sign: float = 1.0
 
     def build(self) -> "ArcPath":
-        """Compute cached fields. Call after setting fields."""
+        """Compute cached fields (fwd, radius, center, arc_length, is_straight) from
+        start, curvature, speed, decel/accel. Call after setting fields."""
         self.fwd_x = -math.sin(self.yaw_rad)
         self.fwd_z = -math.cos(self.yaw_rad)
 
@@ -201,6 +241,7 @@ class ArcPath:
         return self
 
     def _dist_at_time(self, t: float) -> float:
+        """Distance travelled along the path at time t (constant speed, decel, or accel)."""
         if self.decel > 0.0:
             t_stop = self.speed / self.decel
             if t >= t_stop:
@@ -216,6 +257,7 @@ class ArcPath:
         return self.speed * t
 
     def position_at_dist(self, dist: float) -> tuple[float, float]:
+        """(x, z) at distance along the centerline (straight segment or arc)."""
         dist = max(0.0, min(dist, self.arc_length))
         if self.is_straight:
             return (
@@ -230,9 +272,11 @@ class ArcPath:
         )
 
     def position_at_time(self, t: float) -> tuple[float, float]:
+        """(x, z) at time t along the path (via _dist_at_time)."""
         return self.position_at_dist(self._dist_at_time(t))
 
     def heading_at_dist(self, dist: float) -> float:
+        """Heading (yaw_rad) at distance along the path."""
         if self.is_straight:
             return self.yaw_rad
         dist = max(0.0, min(dist, self.arc_length))
@@ -240,6 +284,7 @@ class ArcPath:
         return self.yaw_rad + frac * self.max_sweep
 
     def sample_points(self, n: int = 16) -> list[tuple[float, float]]:
+        """n evenly spaced (x, z) points along the centerline."""
         if n < 2 or self.arc_length < 1e-6:
             return [(self.start_x, self.start_z)]
         pts = []
@@ -251,6 +296,7 @@ class ArcPath:
     def sample_corridor(self, n: int = 16) -> tuple[
         list[tuple[float, float]], list[tuple[float, float]]
     ]:
+        """Left and right boundary point lists for the path corridor (half_width)."""
         if n < 2 or self.arc_length < 1e-6:
             return [(self.start_x, self.start_z)], [(self.start_x, self.start_z)]
 
@@ -293,6 +339,8 @@ def build_arc(
     decel: float = 0.0,
     accel: float = 0.0,
 ) -> ArcPath:
+    """Build and cache an ArcPath from start (x,z), yaw, speed, curvature, half_width,
+    horizon; optional decel/accel. Call this instead of constructing ArcPath directly."""
     return ArcPath(
         start_x=x, start_z=z, yaw_rad=yaw_rad, speed=speed,
         curvature=curvature, half_width=half_width, horizon=horizon,
@@ -307,14 +355,10 @@ def arc_arc_collision(
     n_samples: int = 24,
     min_lateral_gap: float = 0.0,
 ) -> Optional[tuple[float, float, float]]:
-    """Earliest corridor collision: ``(time_s, hit_x, hit_z)`` or ``None``.
-
-    ``min_lateral_gap`` — if > 0, a candidate hit is suppressed when the
-    perpendicular distance between the two centerlines (measured along a's
-    instantaneous heading) is >= this value.  Use for head-on turns where
-    arc paths overlap in the forward dimension but the vehicles remain in
-    their own lanes laterally.
-    """
+    """Earliest time the two arc corridors overlap; uses closed-form ray-ray when
+    both straight and constant speed, else time-sampled + bisection. Returns
+    (time_s, hit_x, hit_z) or None. min_lateral_gap: suppress hit when centerlines
+    stay that far apart (e.g. head-on turns in separate lanes)."""
     if a.arc_length < 1e-3 and b.arc_length < 1e-3:
         return None
 
@@ -333,6 +377,9 @@ def _ray_ray_collision(
     a: ArcPath, b: ArcPath, corridor_sq: float, horizon: float,
     min_lateral_gap: float = 0.0,
 ) -> Optional[tuple[float, float, float]]:
+    """Earliest time two straight rays’ corridors touch: solve quadratic for
+    |a_pos(t) − b_pos(t)|² = corridor_sq; returns (t, hit_x, hit_z) or None.
+    min_lateral_gap suppresses hits when centerlines stay that far apart laterally."""
     dpx = a.start_x - b.start_x
     dpz = a.start_z - b.start_z
     dvx = a.speed * a.fwd_x - b.speed * b.fwd_x
@@ -388,6 +435,9 @@ def _sampled_collision(
     a: ArcPath, b: ArcPath, corridor_sq: float, horizon: float, n: int,
     min_lateral_gap: float = 0.0,
 ) -> Optional[tuple[float, float, float]]:
+    """Earliest corridor overlap for curved or non-constant-speed arcs: sample at n
+    times, then bisect to refine hit time; respects min_lateral_gap. Returns
+    (t, hit_x, hit_z) or None."""
     best_t: Optional[float] = None
     best_mx = 0.0
     best_mz = 0.0
@@ -475,6 +525,19 @@ class Vehicle:
         self._raw_x: Optional[float] = None
         self._raw_z: Optional[float] = None
 
+        # Rolling noise estimate — EMA of |raw − predicted| residual (metres).
+        # Used by _compute_position_alpha to further reduce alpha when position
+        # noise is high, regardless of speed.
+        self._noise_est: float = 0.0
+
+        # TMP lag detection state.
+        # _lag_since: monotonic time when the frozen-position window began.
+        # lag_confirmed: True once the vehicle has been stationary for
+        #   >= _LAG_FREEZE_DURATION s. AEB handles confirmed-stopped vehicles
+        #   naturally via arc collision; no special-case needed in thread.py.
+        self._lag_since: Optional[float] = None
+        self.lag_confirmed: bool = False
+
     def update_from_last(self, prev: "Vehicle", t_now: float) -> None:
         """Carry forward smoothed state or run a full update.  See AGENTS.md §7."""
         dt = t_now - prev.time
@@ -490,6 +553,9 @@ class Vehicle:
             self._smooth_yaw = prev._smooth_yaw
             self._raw_x = prev._raw_x
             self._raw_z = prev._raw_z
+            self._noise_est = prev._noise_est
+            self._lag_since = prev._lag_since
+            self.lag_confirmed = prev.lag_confirmed
             if abs(self.angular_velocity) > _MAX_ANGULAR_VELOCITY:
                 self.angular_velocity = 0.0
             self.speed = prev.speed
@@ -506,11 +572,37 @@ class Vehicle:
         self._smooth_x = prev._smooth_x
         self._smooth_z = prev._smooth_z
         self._smooth_yaw = prev._smooth_yaw
+        self._noise_est = prev._noise_est
+        self._lag_since = prev._lag_since
+        self.lag_confirmed = False  # reset each full frame; may be set below
 
         raw_x = self.position.x
         raw_z = self.position.z
         self._raw_x = raw_x
         self._raw_z = raw_z
+
+        if self.is_tmp and prev._raw_x is not None:
+            _raw_disp_sq = (raw_x - prev._raw_x) ** 2 + (raw_z - prev._raw_z) ** 2
+            _expected_disp = abs(prev.speed) * dt
+            _lag_threshold_sq = (_expected_disp * _LAG_DISP_RATIO) ** 2
+            if abs(prev.speed) > _LAG_MIN_SPEED_MS and _raw_disp_sq < _lag_threshold_sq:
+                if self._lag_since is None:
+                    self._lag_since = t_now
+                _lag_duration = t_now - self._lag_since
+                if _lag_duration < _LAG_FREEZE_DURATION:
+                    self._smooth_x = prev._smooth_x
+                    self._smooth_z = prev._smooth_z
+                    self._smooth_yaw = prev._smooth_yaw
+                    self.angular_velocity = prev.angular_velocity
+                    self.speed = prev.speed
+                    self.acceleration = prev.acceleration
+                    if self._smooth_x is not None:
+                        self.position.x = self._smooth_x
+                        self.position.z = self._smooth_z
+                    return
+                self.lag_confirmed = True
+            else:
+                self._lag_since = None
 
         # Wrap-safe yaw EMA — runs first so angular_velocity uses smooth derivative
         raw_yaw = math.radians(self.rotation.euler()[1])
@@ -528,8 +620,8 @@ class Vehicle:
         raw_av = _yaw_diff_deg / dt
         self.angular_velocity = 0.0 if abs(raw_av) > _MAX_ANGULAR_VELOCITY else raw_av
 
-        # Prediction-corrected position EMA — uses prev.speed so TMP speed can be
-        # derived from smooth displacement afterwards.  See AGENTS.md §7.
+        # Prediction-corrected position EMA with dynamic alpha.
+        # See AGENTS.md §7.
         if self._smooth_x is None:
             self._smooth_x = raw_x
             self._smooth_z = raw_z
@@ -542,9 +634,14 @@ class Vehicle:
             _pred_dist = prev.speed * dt + 0.5 * _clamped_accel * dt * dt
             _pred_x = self._smooth_x + _pred_dist * _pred_fwd_x
             _pred_z = self._smooth_z + _pred_dist * _pred_fwd_z
-            _alpha = _RAW_POSITION_ALPHA_TMP if self.is_tmp else _RAW_POSITION_ALPHA
+            _alpha = _compute_position_alpha(prev.speed, self._noise_est)
             self._smooth_x = _alpha * raw_x + (1.0 - _alpha) * _pred_x
             self._smooth_z = _alpha * raw_z + (1.0 - _alpha) * _pred_z
+            # Update rolling noise — residual BEFORE blending so _alpha doesn't
+            # contaminate the estimate.
+            _residual = math.sqrt((raw_x - _pred_x) ** 2 + (raw_z - _pred_z) ** 2)
+            self._noise_est = (_NOISE_EMA_ALPHA * _residual
+                               + (1.0 - _NOISE_EMA_ALPHA) * self._noise_est)
         self.position.x = self._smooth_x
         self.position.z = self._smooth_z
 
@@ -579,6 +676,7 @@ class Vehicle:
         decel: float = 0.0,
         arc_start_pctg: float = 1.0,
     ) -> ArcPath:
+        """ArcPath for this vehicle from smoothed pose and curvature (angular_velocity/speed)."""
         yaw_rad = (
             self._smooth_yaw
             if self._smooth_yaw is not None

@@ -166,12 +166,12 @@ corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
 
 | Field | Source | Use for |
 |-------|--------|---------|
-| `position.x/z` | EMA alpha=0.20 applied in `update_from_last()` | All rendering, arc start position |
+| `position.x/z` | Dynamic-alpha EMA in `update_from_last()` — alpha = 1.0 at 0 km/h, 0.15 at 90 km/h, further reduced by rolling noise | All rendering, arc start position |
 | `_smooth_yaw` | Wrap-safe EMA of `rotation.euler()[1]` in radians | **Arc curvature. Never use `rotation.euler()` directly for arcs.** |
 | `speed` | Signed m/s, set in `update_from_last()` | Arc direction, speed display |
 | `angular_velocity` | Degrees/s from rotation delta/dt | Arc curvature via `κ = ω_rad/speed` |
 
-### Position smoothing — prediction-corrected EMA
+### Position smoothing — prediction-corrected EMA with dynamic alpha
 
 Pure EMA blends `raw` against `prev_smooth`, producing a steady-state lag of
 `((1 − α) / α) × dt × speed` (≈ 4.4 m at 80 km/h with α = 0.20).
@@ -184,23 +184,58 @@ pred_dist = speed * dt + 0.5 * clamp(acceleration, -6, 4) * dt²
 pred_x    = smooth_x_prev + pred_dist * (-sin(smooth_yaw))
 pred_z    = smooth_z_prev + pred_dist * (-cos(smooth_yaw))
 
-smooth_x  = 0.20 * raw_x + 0.80 * pred_x
-smooth_z  = 0.20 * raw_z + 0.80 * pred_z
+alpha     = _compute_position_alpha(prev.speed, self._noise_est)
+smooth_x  = alpha * raw_x + (1 - alpha) * pred_x
+smooth_z  = alpha * raw_z + (1 - alpha) * pred_z
 ```
 
-When motion is predictable (`pred ≈ raw`), the `0.80` term contributes
-near-zero error rather than lag. The `0.20` on raw still corrects for
-sudden manoeuvres and measurement noise.
+`alpha` follows a **hyperbolic (1/x) curve**: 1.0 at rest → 0.15 at 90 km/h.
+
+```
+base(speed) = (α_rest × d) / (|speed| + d)
+d = scale × α_90 / (α_rest − α_90) = 10.71 m/s
+```
+
+The curve drops steeply at low speeds (noise matters more at short displacement) and flattens toward 0.15 at highway speed (where lag spikes dominate). Floor is always 0.15.
 
 `smooth_yaw` (not `rotation.euler()`) is used for the prediction forward vector —
 it is already available from `prev._smooth_yaw` at this point in the update.
 `speed` is already sign-corrected before this block runs.
 
+### Lag / freeze detection (TMP vehicles only)
+
+TMP vehicles derive speed from raw position delta.  If ETS2 stops sending
+position updates for a vehicle (network lag), the same raw coordinates arrive
+every frame, which would snap the derived speed to 0 and then back — causing
+false speed readings and, worse, false AEB triggers.
+
+**Detection criterion (per full-update frame):**
+
+```python
+raw_disp_sq    = (raw_x - prev._raw_x)² + (raw_z - prev._raw_z)²
+expected_disp  = abs(prev.speed) * dt
+is_lag         = (abs(prev.speed) > _LAG_MIN_SPEED_MS          # was moving
+                  and raw_disp_sq < (expected_disp * _LAG_DISP_RATIO)²)
+                 # raw moved less than 10 % of expected displacement
+```
+
+**Three-state machine:**
+
+| Elapsed since first frozen frame | Action |
+|----------------------------------|--------|
+| 0 – `_LAG_FREEZE_DURATION` (0.3 s) | **Freeze** — hold speed, acceleration, smooth position, and `_noise_est` at last known values; return early. AEB sees the vehicle at its last known position moving at its last known speed. |
+| ≥ 0.3 s | **Release** — set `lag_confirmed = True`, fall through to normal update. Speed falls to 0. AEB detects the stopped obstacle naturally via arc collision. |
+| Raw position moves again | Reset `_lag_since = None`, `lag_confirmed = False`. |
+
+`lag_confirmed` is a public flag on `Vehicle`. `thread.py` does not need to
+read it: once released, the vehicle's speed = 0 and the existing AEB arc
+collision logic handles the stationary obstacle without special-casing.
+
 ### Yaw EMA (unchanged) — wrap-safe
 
 ```python
 diff       = (raw_yaw - smooth_yaw + math.pi) % (2 * math.pi) - math.pi
-smooth_yaw = smooth_yaw + 0.20 * diff
+smooth_yaw = smooth_yaw + yaw_alpha * diff
 ```
 
 ### Speed sign detection
@@ -444,7 +479,9 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
 | TMP speed | `delta(raw_pos) / dt`, signed via forward dot |
 | AI speed sign | `dot(disp, fwd) < 0 → negate speed` |
-| Position smooth | `0.20 * raw + 0.80 * (prev + speed*dt*fwd + 0.5*accel*dt²*fwd)` |
+| Position smooth | `alpha * raw + (1-alpha) * pred`; `alpha = _compute_position_alpha(speed, noise_est)` |
+| Position alpha formula | `max(0.15, (0.5 × d) / (\|speed\| + d) / (1 + noise_est/1.5))`; `d = 10.71 m/s` |
+| Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > 2 m/s` → freeze for 0.3 s, then release |
 | Yaw EMA (wrap-safe) | `smooth += 0.20 * ((raw - smooth + π) % 2π - π)` |
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
 | Evasion filter Δκ | `min(0.1*9.81 / v², 0.03)` |
@@ -471,7 +508,9 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 - **`co_directional` must use `fwd_dot > 0.7`, not `abs(fwd_dot) > 0.7`.** Using `abs` makes perfectly head-on vehicles (`fwd_dot = -1.0`) simultaneously `head_on=True` and `co_directional=True`. The two flags must be mutually exclusive — `co_directional` means same direction, `head_on` means opposite direction.
 - **`_LATERAL_LANE_SEPARATION` must be ≥ 3.5 m.** At 3.0 m, typical ETS2 2-lane roads put the oncoming vehicle's center exactly at the threshold, causing boundary misses on perfectly anti-parallel vehicles (`fwd_dot = -1.0`). The corrected value is `3.5 m`.
 - **`near_head_on` (lateral gap activation) and `head_on` (evasion/decel model) are separate thresholds.** `head_on = fwd_dot < -0.7` governs target decel, evasion filter bypass, and risk confirm duration. `near_head_on = fwd_dot < _NEAR_HEAD_ON_DOT (-0.5)` governs only lateral gap activation. Do not unify them — real-world ETS2 turn geometry means oncoming vehicles in a shared curve rarely reach -0.7 during the approach.
-- **`_TURNING_DIVERGE_CURVATURE = 0.01` (≈ 100 m radius).** The original value of 0.03 (≈ 33 m radius) was too strict — typical ETS2 highway bends produce curvatures of 0.015–0.020, which fell below the threshold and left the turning-diverge filter inactive.
+- **Position alpha follows a hyperbolic (1/x) curve: 0.5 at rest → 0.15 at 90 km/h, noise-modulated.** Never use fixed constants `_RAW_POSITION_ALPHA` or `_RAW_POSITION_ALPHA_TMP` — they have been removed. Call `_compute_position_alpha(prev.speed, self._noise_est)`.
+- **TMP lag freeze holds ALL dynamic state (speed, accel, smooth position, noise_est).** Do not advance the smooth position via prediction during a freeze — that would cause a snap correction when the lag ends.
+- **`lag_confirmed` is set by `traffic.py`, not `thread.py`.** thread.py does not need to check it. A confirmed-stopped vehicle has speed = 0 and is detected as a stationary obstacle by the existing arc collision logic.
 
 ---
 

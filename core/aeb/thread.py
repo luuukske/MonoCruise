@@ -80,7 +80,7 @@ _EVASION_FILTER_MAX_DELTA_KAPPA: float = 0.008
 # scaled up so the evasion arcs fan wider and are more likely to clear ego.
 # Uses the cross product: lat = dx*ego_fwd_z - dz*ego_fwd_x (signed, left < 0).
 _OPPOSITE_LANE_OFFSET: float = 2.0
-_OPPOSITE_LANE_KAPPA_SCALE: float = 1.5
+_OPPOSITE_LANE_KAPPA_SCALE: float = 2.0
 
 _VEHICLE_FORMAT = "ffffffffffffhhbb"
 _TRAILER_FORMAT = "ffffffffff"
