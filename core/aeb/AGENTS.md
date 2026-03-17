@@ -223,7 +223,7 @@ is_lag         = (abs(prev.speed) > _LAG_MIN_SPEED_MS          # was moving
 
 | Elapsed since first frozen frame | Action |
 |----------------------------------|--------|
-| 0 – `_LAG_FREEZE_DURATION` (0.3 s) | **Freeze** — hold speed, acceleration, smooth position, and `_noise_est` at last known values; return early. AEB sees the vehicle at its last known position moving at its last known speed. |
+| 0 – `_LAG_FREEZE_DURATION` (0.3 s) | **Freeze** — hold smooth position and `_noise_est`; decay speed quadratically: `speed = prev_speed × (1 − frac²)` where `frac = elapsed / 0.3`; force `acceleration = 0`; return early. AEB sees the vehicle at its last known position decelerating toward 0. |
 | ≥ 0.3 s | **Release** — set `lag_confirmed = True`, fall through to normal update. Speed falls to 0. AEB detects the stopped obstacle naturally via arc collision. |
 | Raw position moves again | Reset `_lag_since = None`, `lag_confirmed = False`. |
 
@@ -250,6 +250,28 @@ if (disp_x * fwd_x + disp_z * fwd_z) < 0:
 ```
 
 TMP vehicles compute speed from raw position delta / dt, same sign logic.
+
+### Position mismatch (TMP only)
+
+Detects out-of-order packets where the raw position jumps backward along the heading for 1–3 frames.
+
+**Detection:** `dot(raw_disp, prev_smooth_fwd) < -_POS_MISMATCH_BACKWARD_THRESHOLD (-0.3 m)`
+
+**Action:** Increment `_pos_mismatch_frames` counter; hold `_smooth_x/z`; carry `speed` and `acceleration` from prev; return early **after** yaw EMA and angular_velocity have run. Path, arc construction, and all other state are unaffected.
+
+**Cap:** When `_pos_mismatch_frames >= _POS_MISMATCH_MAX_FRAMES (3)`, the flag is cleared and raw position is passed through on frame 4 regardless.
+
+### Crash detection (TMP only)
+
+Evidence accumulator driven by three independent signals. Once evidence holds above threshold for `_CRASH_CONFIRM_DURATION`, `crash_confirmed` is set. Position EMA continues normally; only speed and acceleration are filtered.
+
+| Signal | Evidence added | Threshold |
+|--------|---------------|-----------|
+| Raw yaw rate | +0.35 | > 30 deg/s |
+| Backward raw displacement | +0.30 | dot < -0.3 m |
+| Micro-oscillation | +0.20 | `raw_disp_sq < 0.0225 m²` AND `speed > 1 m/s` |
+
+Evidence decays by `× 0.7` each full frame. `_crash_since` starts when evidence first exceeds `0.75`. After `0.25 s`: `crash_confirmed = True`; speed decelerates at `10 m/s²` toward 0; `acceleration = 0`. AEB handles the stopped obstacle via arc collision.
 
 ### Sub-frame pass (dt < 0.05 s)
 
@@ -481,7 +503,9 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | AI speed sign | `dot(disp, fwd) < 0 → negate speed` |
 | Position smooth | `alpha * raw + (1-alpha) * pred`; `alpha = _compute_position_alpha(speed, noise_est)` |
 | Position alpha formula | `max(0.15, (0.5 × d) / (\|speed\| + d) / (1 + noise_est/1.5))`; `d = 10.71 m/s` |
-| Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > 2 m/s` → freeze for 0.3 s, then release |
+| Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > 2 m/s` → decay speed: `prev_speed × (1 − frac²)`, release after 0.3 s |
+| Pos mismatch | `dot(raw_disp, prev_fwd) < -0.3 m` AND `is_tmp` AND `frames < 3` → hold smooth pos + speed, allow yaw |
+| Crash evidence | decay `× 0.7`/frame; +0.35 raw yaw rate > 30 deg/s; +0.30 backward disp; +0.20 micro-osc; confirm after 0.25 s above 0.75 |
 | Yaw EMA (wrap-safe) | `smooth += 0.20 * ((raw - smooth + π) % 2π - π)` |
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
 | Evasion filter Δκ | `min(0.1*9.81 / v², 0.03)` |
@@ -510,7 +534,12 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 - **`near_head_on` (lateral gap activation) and `head_on` (evasion/decel model) are separate thresholds.** `head_on = fwd_dot < -0.7` governs target decel, evasion filter bypass, and risk confirm duration. `near_head_on = fwd_dot < _NEAR_HEAD_ON_DOT (-0.5)` governs only lateral gap activation. Do not unify them — real-world ETS2 turn geometry means oncoming vehicles in a shared curve rarely reach -0.7 during the approach.
 - **Position alpha follows a hyperbolic (1/x) curve: 0.5 at rest → 0.15 at 90 km/h, noise-modulated.** Never use fixed constants `_RAW_POSITION_ALPHA` or `_RAW_POSITION_ALPHA_TMP` — they have been removed. Call `_compute_position_alpha(prev.speed, self._noise_est)`.
 - **TMP lag freeze holds ALL dynamic state (speed, accel, smooth position, noise_est).** Do not advance the smooth position via prediction during a freeze — that would cause a snap correction when the lag ends.
+- **Lag freeze speed decays quadratically: `prev_speed × (1 − frac²)`.** Never hold speed constant during lag — it keeps AEB informed while smoothly approaching 0.
 - **`lag_confirmed` is set by `traffic.py`, not `thread.py`.** thread.py does not need to check it. A confirmed-stopped vehicle has speed = 0 and is detected as a stationary obstacle by the existing arc collision logic.
+- **Position mismatch (TMP only) runs before lag detection.** It is mutually exclusive with lag: a backward jump is not near-stationary. The `not _skip_position_update` guard on the lag block enforces this.
+- **Position mismatch is capped at `_POS_MISMATCH_MAX_FRAMES (3)`.** Frame 4 always passes raw position through. Without this cap, a genuine crash or prolonged backward event would be silently swallowed.
+- **Crash detection position EMA is never suppressed.** Only `speed` (decelerating at 10 m/s²) and `acceleration` (forced 0) are overridden on `crash_confirmed`. Position stays accurate.
+- **`crash_confirmed` and `lag_confirmed` are both handled in `traffic.py`.** Neither requires special-casing in `thread.py` — both produce `speed = 0` which AEB detects as a stationary obstacle naturally.
 
 ---
 
