@@ -23,7 +23,7 @@ from core.settings import Settings
 
 from .traffic import (
     Position, Quaternion, Size, Trailer, Vehicle,
-    ArcPath, build_arc, arc_arc_collision,
+    ArcPath, build_arc, arc_arc_collision, _accel_to_arc_params,
 )
 
 logger = logging.getLogger(__name__)
@@ -286,16 +286,14 @@ def _build_vehicle_collision_data(
     veh_fwd_z = -math.cos(v_yaw_rad)
     fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
     head_on = fwd_dot < -0.5
-    target_decel = _FULL_BRAKE_DECEL if head_on else 0.0
-    target_accel = (
-        0.0
-        if target_decel > 0.0
-        else max(-6.0, min(4.0, v.acceleration))
-    )
+    target_override_decel = _FULL_BRAKE_DECEL if head_on else 0.0
+    # For trailer arcs built with build_arc() directly. get_arc() calls
+    # _accel_to_arc_params internally so veh_arc_coll only needs override_decel.
+    target_decel, target_accel = _accel_to_arc_params(v.acceleration, target_override_decel)
     veh_arc_coll = v.get_arc(
         dynamic_horizon,
         half_width=v_hw_coll,
-        decel=target_decel,
+        decel=target_override_decel,
         arc_start_pctg=_ARC_START_PCTG,
     )
     tr_hw_colls: list[float] = []
@@ -573,13 +571,10 @@ class AEBThread(BaseThread):
             if precomputed is not None:
                 all_target_arcs, cross_padding, _ = precomputed
             else:
-                target_decel = _FULL_BRAKE_DECEL if head_on else 0.0
-                target_accel = (
-                    0.0 if target_decel > 0.0
-                    else max(-6.0, min(4.0, v.acceleration))
-                )
+                target_override_decel = _FULL_BRAKE_DECEL if head_on else 0.0
+                target_decel, target_accel = _accel_to_arc_params(v.acceleration, target_override_decel)
                 veh_arc_coll = v.get_arc(dynamic_horizon, half_width=v_hw_coll,
-                                         decel=target_decel, arc_start_pctg=_ARC_START_PCTG)
+                                         decel=target_override_decel, arc_start_pctg=_ARC_START_PCTG)
                 trailer_arcs_coll: list[ArcPath] = []
                 for idx, tr in enumerate(v.trailers):
                     tr_pos = tr.position

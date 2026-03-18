@@ -139,7 +139,6 @@ def _stop_all() -> None:
 
 
 # Main
-
 def main() -> None:
     # QApplication must be created before any Qt objects (including PopupWindow)
     app = QApplication(sys.argv)

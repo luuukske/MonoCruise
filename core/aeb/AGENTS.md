@@ -108,7 +108,7 @@ _VEH_STRIDE           = 46  # fields per vehicle slot (16 + 3*10)
 | 8 | size.height | float | metres — unused in 2D |
 | 9 | size.length | float | metres |
 | 10 | speed | float | AI = unsigned from buffer; TMP = sign derived via dot product |
-| 11 | acceleration | float | m/s² — clamped to [-6, +4] in AEB |
+| 11 | acceleration | float | m/s² — converted to arc params via `_accel_to_arc_params()`: braking (< 0) → `decel = min(|accel|, 6.0)`; accelerating (≥ 0) → `accel = min(accel, 4.0)`; head-on override uses `_FULL_BRAKE_DECEL`. Crash-induced backward jump spikes are suppressed by the 6 m/s² cap. |
 | 12 | trailer_count | short | 0–3 |
 | 13 | id | short | Per-frame continuity key |
 | 14 | is_tmp | byte | `1` = TMP multiplayer, `0` = AI |
@@ -301,7 +301,7 @@ If the ego arc points backward, the bug is in `thread.py`'s `rotationX → yaw_r
 | `speed` | `build()` normalises to `abs` and flips `fwd` if originally negative |
 | `curvature` | `κ = ω_rad_s / abs_speed`. Positive = left turn (CCW). |
 | `half_width` | `size.width / 2` by default |
-| `decel` | Ego braking arc only. Mutually exclusive with `accel`. |
+| `decel` | Ego braking arc, head-on target arc, or non-head-on target arc when the vehicle is decelerating. Derived via `_accel_to_arc_params()`. Mutually exclusive with `accel`. |
 | `arc_length` | Accounts for decel/accel to stop |
 | `is_straight` | True if `|κ| < 1e-6` or `speed < 0.001` |
 
@@ -496,6 +496,8 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | Yaw wraparound diff | `min(\|d\|, \|d+360\|, \|d-360\|)` |
 | TMP corner Z | `± length / 2` |
 | AI corner Z | `+length*0.82` (rear), `-length*0.18` (front) |
+| Braking distance | `v² / (2 × decel)` (implicit in `build()` when `t_stop < horizon`) |
+| Arc accel→decel params | `_accel_to_arc_params(accel, override_decel)` → `(decel, accel)` |
 | Quaternion euler yaw | `atan2(2*(y*z + w*x), w²-x²-y²+z²)` degrees |
 | Arc curvature | `κ = omega_rad_s / abs_speed` |
 | Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
@@ -540,6 +542,7 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 - **Position mismatch is capped at `_POS_MISMATCH_MAX_FRAMES (3)`.** Frame 4 always passes raw position through. Without this cap, a genuine crash or prolonged backward event would be silently swallowed.
 - **Crash detection position EMA is never suppressed.** Only `speed` (decelerating at 10 m/s²) and `acceleration` (forced 0) are overridden on `crash_confirmed`. Position stays accurate.
 - **`crash_confirmed` and `lag_confirmed` are both handled in `traffic.py`.** Neither requires special-casing in `thread.py` — both produce `speed = 0` which AEB detects as a stationary obstacle naturally.
+- **Vehicle acceleration is never passed raw to AEB arc logic.** Always use `_accel_to_arc_params(accel, override_decel)`. Negative accel (braking) → `decel = min(|accel|, 6.0)` so arc_length uses the braking distance formula v²/(2d). Crash-induced backward jump artifacts produce large negative spikes that the 6 m/s² cap suppresses. Accelerating vehicles pass `accel = min(accel, 4.0)`. Head-on override (`_FULL_BRAKE_DECEL`) takes priority over both.
 
 ---
 

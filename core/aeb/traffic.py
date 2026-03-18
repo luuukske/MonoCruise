@@ -57,6 +57,22 @@ _MIN_CURVATURE_RADIUS: float = 5.0
 _STRAIGHT_CURVATURE_EPS: float = 1e-6
 
 
+def _accel_to_arc_params(accel: float, override_decel: float = 0.0) -> tuple[float, float]:
+    """Convert raw vehicle acceleration to (decel, accel) for build_arc().
+
+    - override_decel > 0  (e.g. head-on full brake) → (override_decel, 0.0).
+    - accel < 0 (braking) → decel = min(|accel|, 6.0), accel = 0.0.
+      Capped at 6 m/s² so crash-induced backward position jumps (which produce
+      large negative acceleration spikes) are not mistaken for hard braking.
+    - accel >= 0 (accelerating or constant) → decel = 0.0, accel = min(accel, 4.0).
+    """
+    if override_decel > 0.0:
+        return override_decel, 0.0
+    if accel < 0.0:
+        return min(-accel, 6.0), 0.0
+    return 0.0, min(accel, 4.0)
+
+
 def _compute_position_alpha(speed_ms: float, noise_est: float) -> float:
     """Speed-scaled EMA alpha following a 1/x (hyperbolic) curve.
 
@@ -779,7 +795,13 @@ class Vehicle:
         decel: float = 0.0,
         arc_start_pctg: float = 1.0,
     ) -> ArcPath:
-        """ArcPath for this vehicle from smoothed pose and curvature (angular_velocity/speed)."""
+        """ArcPath for this vehicle from smoothed pose and curvature (angular_velocity/speed).
+
+        Braking vehicles (acceleration < 0) are modelled via decel so arc_length uses the
+        braking distance formula v²/(2d) rather than raw negative accel. Crash-induced
+        backward position spikes — which produce large negative acceleration values — are
+        suppressed by the 6 m/s² cap inside _accel_to_arc_params().
+        """
         yaw_rad = (
             self._smooth_yaw
             if self._smooth_yaw is not None
@@ -788,10 +810,7 @@ class Vehicle:
         abs_speed = abs(self.speed)
         curvature = math.radians(self.angular_velocity) / abs_speed if abs_speed > 0.5 else 0.0
         effective_hw = half_width if half_width is not None else self.size.width / 2.0
-        clamped_accel = (
-            0.0 if decel > 0.0
-            else max(-6.0, min(4.0, self.acceleration))
-        )
+        effective_decel, effective_accel = _accel_to_arc_params(self.acceleration, decel)
 
         is_reversing = self.speed < -1e-3
         effective_p = (1.0 - arc_start_pctg) if is_reversing else arc_start_pctg
@@ -805,7 +824,7 @@ class Vehicle:
         return build_arc(
             start_x, start_z, yaw_rad, self.speed,
             curvature, effective_hw, horizon,
-            decel=decel, accel=clamped_accel,
+            decel=effective_decel, accel=effective_accel,
         )
 
     def is_zero(self) -> bool:
