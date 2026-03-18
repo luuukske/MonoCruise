@@ -407,15 +407,8 @@ class AEBThread(BaseThread):
                 _EVASION_G_THRESHOLD / (ego_speed * ego_speed),
                 _EVASION_FILTER_MAX_DELTA_KAPPA,
             )
-            # Snap to center: when path would cross center line, cap curvature at 0
-            # Left path: when ego turns right, left path can cross center → snap to center (curvature 0)
             left_kappa = ego_curvature + delta_kappa
-            if ego_curvature < 0 and left_kappa < 0:
-                left_kappa = left_kappa/5.0
-            # Right path: when ego turns left, right path can cross center → snap to center (curvature 0)
             right_kappa = ego_curvature - delta_kappa
-            if ego_curvature > 0 and right_kappa > 0:
-                right_kappa = right_kappa/5.0
             ego_evasion_left = build_arc(
                 ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
                 left_kappa, ego_hw, dynamic_horizon,
