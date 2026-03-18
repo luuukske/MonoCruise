@@ -42,7 +42,7 @@ _LAG_FREEZE_DURATION: float = 0.3       # s    — freeze window; release after 
 
 # Position mismatch (TMP only) — out-of-order packet rejection.
 # Fires when raw position jumps backward along heading.  Max 3 consecutive frames.
-_POS_MISMATCH_BACKWARD_THRESHOLD: float = 0.3   # m — min backward dot to flag
+_POS_MISMATCH_BACKWARD_THRESHOLD: float = 0.05   # m — min backward dot to flag
 _POS_MISMATCH_MAX_FRAMES: int = 10
 
 # Crash detection (TMP only) — evidence accumulator + confirmation window.

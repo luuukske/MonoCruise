@@ -189,14 +189,12 @@ smooth_x  = alpha * raw_x + (1 - alpha) * pred_x
 smooth_z  = alpha * raw_z + (1 - alpha) * pred_z
 ```
 
-`alpha` follows a **hyperbolic (1/x) curve**: 1.0 at rest → 0.15 at 90 km/h.
+`alpha` follows a **hyperbolic (1/x) curve** implemented in `_compute_position_alpha`:
 
-```
-base(speed) = (α_rest × d) / (|speed| + d)
-d = scale × α_90 / (α_rest − α_90) = 10.71 m/s
-```
+- Base component: 1.0 at rest → 0.15 at 90 km/h, using a pole `d` derived from `_ALPHA_SPEED_SCALE`.
+- Noise modifier: large rolling residuals (`|raw − predicted|`) reduce the effective alpha, making the filter trust prediction more when the input is noisy.
 
-The curve drops steeply at low speeds (noise matters more at short displacement) and flattens toward 0.15 at highway speed (where lag spikes dominate). Floor is always 0.15.
+The curve drops steeply at low speeds (noise matters more at short displacement) and flattens toward ~0.15 at highway speed (where lag spikes dominate). A minimum floor is always enforced so the filter never fully ignores new measurements.
 
 `smooth_yaw` (not `rotation.euler()`) is used for the prediction forward vector —
 it is already available from `prev._smooth_yaw` at this point in the update.
@@ -253,13 +251,13 @@ TMP vehicles compute speed from raw position delta / dt, same sign logic.
 
 ### Position mismatch (TMP only)
 
-Detects out-of-order packets where the raw position jumps backward along the heading for 1–3 frames.
+Detects out-of-order packets where the raw position jumps backward along the heading for a limited number of frames.
 
-**Detection:** `dot(raw_disp, prev_smooth_fwd) < -_POS_MISMATCH_BACKWARD_THRESHOLD (-0.3 m)`
+**Detection:** `dot(raw_disp, prev_smooth_fwd) < -_POS_MISMATCH_BACKWARD_THRESHOLD (-0.05 m)`
 
 **Action:** Increment `_pos_mismatch_frames` counter; hold `_smooth_x/z`; carry `speed` and `acceleration` from prev; return early **after** yaw EMA and angular_velocity have run. Path, arc construction, and all other state are unaffected.
 
-**Cap:** When `_pos_mismatch_frames >= _POS_MISMATCH_MAX_FRAMES (3)`, the flag is cleared and raw position is passed through on frame 4 regardless.
+**Cap:** When `_POS_MISMATCH_MAX_FRAMES` is reached (10 frames), the flag is cleared and raw position is passed through on the next frame regardless.
 
 ### Crash detection (TMP only)
 
@@ -335,7 +333,7 @@ if lat >= min_lateral_gap:
 
 - Applied in both `_ray_ray_collision` and `_sampled_collision`
 - In the sampled path, the lateral check runs at each coarse sample **before** entering bisection; during bisection, a failing lateral check advances `lo` rather than breaking, so the refiner keeps searching for a sample where lanes genuinely cross
-- `_LATERAL_LANE_SEPARATION = 3.0 m` — tuning range: 3.0 (narrow roads) to 3.5 (wide roads)
+- `_LATERAL_LANE_SEPARATION = 3.9 m` — tuned for typical ETS2 2-lane roads so oncoming-centre separation sits safely inside the threshold.
 - AEB passes `lateral_gap = _LATERAL_LANE_SEPARATION if head_on else 0.0` to `_earliest_hit`, so the filter is **only active for head-on vehicles**
 
 ---
@@ -382,15 +380,25 @@ ego arcs are tested — one offset left and one offset right in curvature:
 ```python
 delta_kappa = min(_EVASION_G_THRESHOLD / (ego_speed ** 2),
                   _EVASION_FILTER_MAX_DELTA_KAPPA)
-ego_evasion_left  = build_arc(..., ego_curvature + delta_kappa, ...)
-ego_evasion_right = build_arc(..., ego_curvature - delta_kappa, ...)
+left_kappa  = ego_curvature + delta_kappa
+right_kappa = ego_curvature - delta_kappa
+
+# Snap evasion paths back toward lane centre when they would cross it
+# this is to prevent false activation when turning left into a lane.
+if ego_curvature < 0 and left_kappa < 0:
+    left_kappa /= 5.0
+if ego_curvature > 0 and right_kappa > 0:
+    right_kappa /= 5.0
+
+ego_evasion_left  = build_arc(..., left_kappa,  ...)
+ego_evasion_right = build_arc(..., right_kappa, ...)
 ```
 
 - `_EVASION_G_THRESHOLD = 0.1 × 9.81` — the lateral acceleration a gentle
   steer would produce. `Δκ = a_lat / v²` gives the curvature offset at
   the current speed.
-- `_EVASION_FILTER_MAX_DELTA_KAPPA = 0.03` — hard clamp so the filter
-  arcs stay meaningful at low speed.
+- `_EVASION_FILTER_MAX_DELTA_KAPPA = 0.008` — hard clamp so the filter
+  arcs stay meaningful at low speed and avoid unrealistic curvature.
 
 A vehicle must collide with **all three** ego paths (centre + left + right)
 to be considered a genuine in-lane hazard. The two offset paths are tested
@@ -416,8 +424,16 @@ After `ego_arc` detects a head-on hit, two curvature-offset arcs are built
 for the **target** and tested against `ego_arc` only (not the ego evasion arcs):
 
 ```python
-delta_kappa_t = min(_EVASION_G_THRESHOLD / (abs_v_speed ** 2),
+delta_kappa_t = min(_EVASION_G_THRESHOLD_ONCOMING / (abs_v_speed ** 2),
                     _EVASION_FILTER_MAX_DELTA_KAPPA)
+
+lateral_offset = abs(dx*ego_fwd_z - dz*ego_fwd_x)
+if lateral_offset >= _OPPOSITE_LANE_OFFSET:
+    delta_kappa_t = min(
+        delta_kappa_t * _OPPOSITE_LANE_KAPPA_SCALE,
+        _EVASION_FILTER_MAX_DELTA_KAPPA * _OPPOSITE_LANE_KAPPA_SCALE,
+    )
+
 tgt_evasion_left  = build_arc(..., target_curvature + delta_kappa_t, ...)
 tgt_evasion_right = build_arc(..., target_curvature - delta_kappa_t, ...)
 ```
@@ -484,8 +500,8 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 
 ## 12. Quick Reference — Formulas
 
-| Formula | Code |
-|---------|------|
+| Formula | Code / Notes |
+|---------|-------------|
 | Ego yaw → rad (radar) | `(yaw + 0.5) * 2 * pi` |
 | Ego yaw → rad (AEB) | `yaw_norm * 2 * pi` (no +0.5) |
 | Ego yaw → degrees | `yaw * 360` |
@@ -504,19 +520,19 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | TMP speed | `delta(raw_pos) / dt`, signed via forward dot |
 | AI speed sign | `dot(disp, fwd) < 0 → negate speed` |
 | Position smooth | `alpha * raw + (1-alpha) * pred`; `alpha = _compute_position_alpha(speed, noise_est)` |
-| Position alpha formula | `max(0.15, (0.5 × d) / (\|speed\| + d) / (1 + noise_est/1.5))`; `d = 10.71 m/s` |
+| Position alpha formula | See `_compute_position_alpha(speed_ms, noise_est)` — hyperbolic base (1.0 at rest → 0.15 at 90 km/h) times noise modifier |
 | Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > 2 m/s` → decay speed: `prev_speed × (1 − frac²)`, release after 0.3 s |
-| Pos mismatch | `dot(raw_disp, prev_fwd) < -0.3 m` AND `is_tmp` AND `frames < 3` → hold smooth pos + speed, allow yaw |
+| Pos mismatch | `dot(raw_disp, prev_fwd) < -0.05 m` AND `is_tmp` AND `frames < 10` → hold smooth pos + speed, allow yaw |
 | Crash evidence | decay `× 0.7`/frame; +0.35 raw yaw rate > 30 deg/s; +0.30 backward disp; +0.20 micro-osc; confirm after 0.25 s above 0.75 |
 | Yaw EMA (wrap-safe) | `smooth += 0.20 * ((raw - smooth + π) % 2π - π)` |
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
-| Evasion filter Δκ | `min(0.1*9.81 / v², 0.03)` |
-| Oncoming evasion filter Δκ | same formula applied to target speed |
+| Evasion filter Δκ | `min(0.1*9.81 / v², 0.008)` with additional centreline snap when evasion path would cross lane centre |
+| Oncoming evasion filter Δκ | `min(0.13*9.81 / v², 0.008)` with `_OPPOSITE_LANE_OFFSET` / `_OPPOSITE_LANE_KAPPA_SCALE` scaling |
 | Head-on lateral gap | `_LATERAL_LANE_SEPARATION = 3.9 m` (cross product of hit-point separation vs `a.fwd`) |
 | Near-head-on threshold | `_NEAR_HEAD_ON_DOT = -0.5` — activates lateral gap; looser than `head_on` (-0.7) to catch shared-turn approach geometry |
 | Opposite-lane offset | `_OPPOSITE_LANE_OFFSET = 2.0 m` — lateral distance from ego axis at which oncoming kappa scale activates |
-| Opposite-lane kappa scale | `_OPPOSITE_LANE_KAPPA_SCALE = 2.5` — multiplier on `delta_kappa_t` for clearly displaced oncoming vehicles |
-| Turning diverge curvature threshold | `_TURNING_DIVERGE_CURVATURE = 0.03 /m` (≈ 33 m radius) |
+| Opposite-lane kappa scale | `_OPPOSITE_LANE_KAPPA_SCALE = 2.0` — multiplier on `delta_kappa_t` for clearly displaced oncoming vehicles |
+| Turning diverge curvature threshold | `_TURNING_DIVERGE_CURVATURE = 0.007 /m` (≈ 143 m radius) |
 
 ---
 
@@ -532,14 +548,14 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 - **Y axis is never used in 2D math**, only for elevation filtering: vehicles below or above the expected road level (ego Y + slope × forward distance, ±margin) are not tracked; slope (`rotationY`, positive = uphill) avoids filtering vehicles in front on a slope.
 - **AEB forward vector formula is `(-sin, -cos)`.** Do not flip signs or swap to `(sin, cos)`.
 - **`co_directional` must use `fwd_dot > 0.7`, not `abs(fwd_dot) > 0.7`.** Using `abs` makes perfectly head-on vehicles (`fwd_dot = -1.0`) simultaneously `head_on=True` and `co_directional=True`. The two flags must be mutually exclusive — `co_directional` means same direction, `head_on` means opposite direction.
-- **`_LATERAL_LANE_SEPARATION` must be ≥ 3.5 m.** At 3.0 m, typical ETS2 2-lane roads put the oncoming vehicle's center exactly at the threshold, causing boundary misses on perfectly anti-parallel vehicles (`fwd_dot = -1.0`). The corrected value is `3.5 m`.
+- **`_LATERAL_LANE_SEPARATION` is 3.9 m.** Tuned for typical ETS2 2-lane roads so the oncoming vehicle's center sits safely inside the lateral-gap threshold, avoiding boundary misses on perfectly anti-parallel vehicles (`fwd_dot = -1.0`).
 - **`near_head_on` (lateral gap activation) and `head_on` (evasion/decel model) are separate thresholds.** `head_on = fwd_dot < -0.7` governs target decel, evasion filter bypass, and risk confirm duration. `near_head_on = fwd_dot < _NEAR_HEAD_ON_DOT (-0.5)` governs only lateral gap activation. Do not unify them — real-world ETS2 turn geometry means oncoming vehicles in a shared curve rarely reach -0.7 during the approach.
-- **Position alpha follows a hyperbolic (1/x) curve: 0.5 at rest → 0.15 at 90 km/h, noise-modulated.** Never use fixed constants `_RAW_POSITION_ALPHA` or `_RAW_POSITION_ALPHA_TMP` — they have been removed. Call `_compute_position_alpha(prev.speed, self._noise_est)`.
+- **Position alpha follows a hyperbolic (1/x) curve: 1.0 at rest → 0.15 at 90 km/h, noise-modulated.** Never use fixed constants `_RAW_POSITION_ALPHA` or `_RAW_POSITION_ALPHA_TMP` — they have been removed. Call `_compute_position_alpha(prev.speed, self._noise_est)`.
 - **TMP lag freeze holds ALL dynamic state (speed, accel, smooth position, noise_est).** Do not advance the smooth position via prediction during a freeze — that would cause a snap correction when the lag ends.
 - **Lag freeze speed decays quadratically: `prev_speed × (1 − frac²)`.** Never hold speed constant during lag — it keeps AEB informed while smoothly approaching 0.
 - **`lag_confirmed` is set by `traffic.py`, not `thread.py`.** thread.py does not need to check it. A confirmed-stopped vehicle has speed = 0 and is detected as a stationary obstacle by the existing arc collision logic.
 - **Position mismatch (TMP only) runs before lag detection.** It is mutually exclusive with lag: a backward jump is not near-stationary. The `not _skip_position_update` guard on the lag block enforces this.
-- **Position mismatch is capped at `_POS_MISMATCH_MAX_FRAMES (3)`.** Frame 4 always passes raw position through. Without this cap, a genuine crash or prolonged backward event would be silently swallowed.
+- **Position mismatch is capped at `_POS_MISMATCH_MAX_FRAMES (10)`.** When the cap is reached, the next frame always passes raw position through. Without this cap, a genuine crash or prolonged backward event would be silently swallowed.
 - **Crash detection position EMA is never suppressed.** Only `speed` (decelerating at 10 m/s²) and `acceleration` (forced 0) are overridden on `crash_confirmed`. Position stays accurate.
 - **`crash_confirmed` and `lag_confirmed` are both handled in `traffic.py`.** Neither requires special-casing in `thread.py` — both produce `speed = 0` which AEB detects as a stationary obstacle naturally.
 - **Vehicle acceleration is never passed raw to AEB arc logic.** Always use `_accel_to_arc_params(accel, override_decel)`. Negative accel (braking) → `decel = min(|accel|, 6.0)` so arc_length uses the braking distance formula v²/(2d). Crash-induced backward jump artifacts produce large negative spikes that the 6 m/s² cap suppresses. Accelerating vehicles pass `accel = min(accel, 4.0)`. Head-on override (`_FULL_BRAKE_DECEL`) takes priority over both.
