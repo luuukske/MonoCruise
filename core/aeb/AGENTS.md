@@ -5,10 +5,6 @@
 
 ---
 
-## Agent Commenting Policy
-- Keep code comments short and intent-focused.
-- Move detailed rationale, edge cases, and "why" explanations into this guide (`core/aeb/AGENTS.md`) so the implementation stays readable.
-
 ## 1. Coordinate System
 
 ETS2 uses a right-handed 3D system. Ground plane = **XZ**. Y = elevation (filter only).
@@ -255,13 +251,9 @@ TMP vehicles compute speed from raw position delta / dt, same sign logic.
 
 ### Position mismatch (TMP only)
 
-Detects out-of-order packets where TMP raw position jumps opposite the expected travel direction for a limited number of frames.
+Detects out-of-order packets where the raw position jumps backward along the heading for a limited number of frames.
 
-**Detection:** compare the raw jump against the expected travel-direction forward vector:
-- `expected_fwd = prev_smooth_fwd` when `prev.speed >= -_REVERSE_SPEED_EPS_MS`
-- `expected_fwd = -prev_smooth_fwd` when `prev.speed < -_REVERSE_SPEED_EPS_MS` (TMP reversing aware)
-
-Then: `dot(raw_disp, expected_fwd) < -_POS_MISMATCH_BACKWARD_THRESHOLD (-0.05 m)`
+**Detection:** `dot(raw_disp, prev_smooth_fwd) < -_POS_MISMATCH_BACKWARD_THRESHOLD (-0.05 m)`
 
 **Action:** Increment `_pos_mismatch_frames` counter; hold `_smooth_x/z`; carry `speed` and `acceleration` from prev; return early **after** yaw EMA and angular_velocity have run. Path, arc construction, and all other state are unaffected.
 
@@ -530,7 +522,7 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | Position smooth | `alpha * raw + (1-alpha) * pred`; `alpha = _compute_position_alpha(speed, noise_est)` |
 | Position alpha formula | See `_compute_position_alpha(speed_ms, noise_est)` — hyperbolic base (1.0 at rest → 0.15 at 90 km/h) times noise modifier |
 | Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > 2 m/s` → decay speed: `prev_speed × (1 − frac²)`, release after 0.3 s |
-| Pos mismatch | `dot(raw_disp, expected_fwd) < -0.05 m` AND `is_tmp` AND `frames < 10` (expected_fwd flips when prev_speed < -_REVERSE_SPEED_EPS_MS) → hold smooth pos + speed, allow yaw |
+| Pos mismatch | `dot(raw_disp, prev_fwd) < -0.05 m` AND `is_tmp` AND `frames < 10` → hold smooth pos + speed, allow yaw |
 | Crash evidence | decay `× 0.7`/frame; +0.35 raw yaw rate > 30 deg/s; +0.30 backward disp; +0.20 micro-osc; confirm after 0.25 s above 0.75 |
 | Yaw EMA (wrap-safe) | `smooth += 0.20 * ((raw - smooth + π) % 2π - π)` |
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |

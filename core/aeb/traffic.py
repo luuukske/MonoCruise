@@ -45,10 +45,6 @@ _LAG_FREEZE_DURATION: float = 0.3       # s    — freeze window; release after 
 _POS_MISMATCH_BACKWARD_THRESHOLD: float = 0.05   # m — min backward dot to flag
 _POS_MISMATCH_MAX_FRAMES: int = 10
 
-# Reversing: treat only clearly negative speeds as reversing.
-# Prevent near-zero sign flips (TMP reversing arc geometry).
-_REVERSE_SPEED_EPS_MS: float = 0.20
-
 # Crash detection (TMP only) — evidence accumulator + confirmation window.
 _CRASH_YAW_RATE_THRESHOLD: float = 30.0         # deg/s raw yaw rate → evidence
 _CRASH_MICRO_DISP_SQ: float = 0.15 ** 2        # m² raw disp² — micro-oscillation signal
@@ -222,7 +218,7 @@ class ArcPath:
         self.fwd_z = -math.cos(self.yaw_rad)
 
         # Reversing: flip fwd to actual travel direction, normalise speed to abs.
-        if self.speed < -_REVERSE_SPEED_EPS_MS:
+        if self.speed < -1e-3:
             self.fwd_x = -self.fwd_x
             self.fwd_z = -self.fwd_z
         self.speed = abs(self.speed)
@@ -633,7 +629,8 @@ class Vehicle:
         self._raw_z = raw_z
 
         # --- Type 1: Position mismatch (TMP only, max _POS_MISMATCH_MAX_FRAMES) ---
-        # Reject out-of-order backward travel jumps (reversing-aware for TMP).
+        # Raw position jumped backward along the vehicle's heading — out-of-order packet.
+        # Yaw EMA and angular_velocity still run; position EMA and speed derivation are held.
         _skip_position_update = False
         if (self.is_tmp
                 and prev._smooth_yaw is not None
@@ -642,19 +639,7 @@ class Vehicle:
             _pm_dz = raw_z - prev._raw_z
             _pm_fwd_x = -math.sin(prev._smooth_yaw)
             _pm_fwd_z = -math.cos(prev._smooth_yaw)
-
-            # Reject out-of-order packets by comparing the jump against the
-            # expected travel-direction (TMP reversing aware).
-            if prev.speed < -_REVERSE_SPEED_EPS_MS:
-                _expected_fwd_x = -_pm_fwd_x
-                _expected_fwd_z = -_pm_fwd_z
-            else:
-                # Treat near-zero as forward to avoid sign-flip thrash at rest.
-                _expected_fwd_x = _pm_fwd_x
-                _expected_fwd_z = _pm_fwd_z
-
-            if (_pm_dx * _expected_fwd_x + _pm_dz * _expected_fwd_z
-                    < -_POS_MISMATCH_BACKWARD_THRESHOLD
+            if (_pm_dx * _pm_fwd_x + _pm_dz * _pm_fwd_z < -_POS_MISMATCH_BACKWARD_THRESHOLD
                     and self._pos_mismatch_frames < _POS_MISMATCH_MAX_FRAMES):
                 self._pos_mismatch_frames = prev._pos_mismatch_frames + 1
                 _skip_position_update = True
@@ -810,7 +795,13 @@ class Vehicle:
         decel: float = 0.0,
         arc_start_pctg: float = 1.0,
     ) -> ArcPath:
-        """ArcPath for this vehicle from smoothed pose and curvature."""
+        """ArcPath for this vehicle from smoothed pose and curvature (angular_velocity/speed).
+
+        Braking vehicles (acceleration < 0) are modelled via decel so arc_length uses the
+        braking distance formula v²/(2d) rather than raw negative accel. Crash-induced
+        backward position spikes — which produce large negative acceleration values — are
+        suppressed by the 6 m/s² cap inside _accel_to_arc_params().
+        """
         yaw_rad = (
             self._smooth_yaw
             if self._smooth_yaw is not None
@@ -821,7 +812,7 @@ class Vehicle:
         effective_hw = half_width if half_width is not None else self.size.width / 2.0
         effective_decel, effective_accel = _accel_to_arc_params(self.acceleration, decel)
 
-        is_reversing = self.speed < -_REVERSE_SPEED_EPS_MS
+        is_reversing = self.speed < -1e-3
         effective_p = (1.0 - arc_start_pctg) if is_reversing else arc_start_pctg
         back_ratio = 0.5 if self.is_tmp else 0.82
         fwd_x = -math.sin(yaw_rad)
