@@ -107,8 +107,8 @@ _VEH_STRIDE           = 46  # fields per vehicle slot (16 + 3*10)
 | 7 | size.width | float | metres |
 | 8 | size.height | float | metres — unused in 2D |
 | 9 | size.length | float | metres |
-| 10 | speed | float | AI = use as-is from buffer (may be signed in singleplayer); TMP = magnitude from buffer, sign from displacement dot product |
-| 11 | acceleration | float | m/s² — converted to arc params via `_accel_to_arc_params()`: braking (< 0) → `decel = min(|accel|, 6.0)`; accelerating (≥ 0) → `accel = min(accel, 4.0)`; head-on override uses `_FULL_BRAKE_DECEL`. Crash-induced backward jump spikes are suppressed by the 6 m/s² cap. |
+| 10 | speed | float | AI = use as-is from buffer (may be signed in singleplayer). TMP = derived from raw position delta / dt (sign from forward dot); then smoothed with prediction EMA (see §7). |
+| 11 | acceleration | float | m/s² — AI = buffer as-is. TMP buffer value is **ignored**; `Vehicle.acceleration` is filled from doubly-smoothed kinematic finite-difference (see §7). Arcs use `accel_for_arc()` (= `acceleration`). |
 | 12 | trailer_count | short | 0–3 |
 | 13 | id | short | Per-frame continuity key |
 | 14 | is_tmp | byte | `1` = TMP multiplayer, `0` = AI |
@@ -162,43 +162,55 @@ corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
 
 ## 7. Vehicle State & Smoothing
 
-### Smoothed fields — use these, not raw values
+### Fields — positions raw; TMP speed/accel filtered
 
 | Field | Source | Use for |
 |-------|--------|---------|
-| `position.x/z` | Dynamic-alpha EMA in `update_from_last()` — alpha = 1.0 at 0 km/h, 0.15 at 90 km/h, further reduced by rolling noise | All rendering, arc start position |
-| `_smooth_yaw` | Wrap-safe EMA of `rotation.euler()[1]` in radians | **Arc curvature. Never use `rotation.euler()` directly for arcs.** |
-| `speed` | Signed m/s, set in `update_from_last()` | Arc direction, speed display |
+| `position.x/z` | **Unfiltered** shared-memory world coordinates | Arc start position, rendering, collision geometry |
+| `_smooth_yaw` | Wrap-safe EMA of `rotation.euler()[1]` in radians (`_RAW_YAW_ALPHA = 0.5`, AI and TMP) | **Arc curvature. Never use `rotation.euler()` directly for arcs.** |
+| `speed` | AI = buffer as-is. TMP = raw speed from displacement, then prediction-corrected EMA | Arc direction, TTB |
+| `acceleration` | AI = buffer as-is. TMP = two-stage smooth of `d(raw_speed)/dt` (not buffer field 11) | Arc decel/accel via `_accel_to_arc_params()` |
 | `angular_velocity` | Degrees/s from rotation delta/dt | Arc curvature via `κ = ω_rad/speed` |
 
-### Position smoothing — prediction-corrected EMA with dynamic alpha
+### TMP speed & acceleration — prediction-corrected EMA (adaptive alpha)
 
-Pure EMA blends `raw` against `prev_smooth`, producing a steady-state lag of
-`((1 − α) / α) × dt × speed` (≈ 4.4 m at 80 km/h with α = 0.20).
+Positions are **not** blended — only longitudinal kinematics from noisy TMP updates
+are smoothed so small position jitter does not jerk `speed`/`acceleration`, while
+hard braking (large sustained `raw_accel`) still pulls the estimate quickly.
 
-Instead, `prev_smooth` is replaced by a **kinematic prediction** of where the
-vehicle should be this frame:
+Raw speed each full frame (after yaw EMA):
 
 ```python
-pred_dist = speed * dt + 0.5 * clamp(acceleration, -6, 4) * dt²
-pred_x    = smooth_x_prev + pred_dist * (-sin(smooth_yaw))
-pred_z    = smooth_z_prev + pred_dist * (-cos(smooth_yaw))
-
-alpha     = _compute_position_alpha(prev.speed, self._noise_est)
-smooth_x  = alpha * raw_x + (1 - alpha) * pred_x
-smooth_z  = alpha * raw_z + (1 - alpha) * pred_z
+raw_speed = sign(dot(raw_disp, fwd(smooth_yaw))) * |raw_disp| / dt   # with near-zero gate
+raw_accel = (raw_speed - prev_raw_speed) / dt
 ```
 
-`alpha` follows a **hyperbolic (1/x) curve** implemented in `_compute_position_alpha`:
+Prediction uses the **previous** smoothed acceleration (clamped to the same range
+as arc physics: −6…+4 m/s²) and a capped `dt_pred = min(dt, _MAX_PREDICTION_DT)`:
 
-- Base component: 1.0 at rest → 0.15 at 90 km/h, using a pole `d` derived from `_ALPHA_SPEED_SCALE`.
-- Noise modifier: large rolling residuals (`|raw − predicted|`) reduce the effective alpha, making the filter trust prediction more when the input is noisy.
+```python
+pred_speed = prev.speed + clamp(prev_smoothed_accel, -6, 4) * dt_pred
+alpha      = _compute_adaptive_filter_alpha(abs(prev.speed), self._noise_est)
+speed      = alpha * raw_speed + (1 - alpha) * pred_speed
 
-The curve drops steeply at low speeds (noise matters more at short displacement) and flattens toward ~0.15 at highway speed (where lag spikes dominate). A minimum floor is always enforced so the filter never fully ignores new measurements.
+alpha_a    = min(1, alpha * _TMP_ACCEL_KIN_ALPHA_SCALE)
+accel_kin  = alpha_a * raw_accel + (1 - alpha_a) * pred_smoothed_accel
+accel      = _TMP_ACCEL_OUTPUT_ALPHA * accel_kin
+             + (1 - _TMP_ACCEL_OUTPUT_ALPHA) * prev_smoothed_accel
+```
 
-`smooth_yaw` (not `rotation.euler()`) is used for the prediction forward vector —
-it is already available from `prev._smooth_yaw` at this point in the update.
-`speed` is already sign-corrected before this block runs.
+`_noise_est` is a rolling EMA of `|raw_speed − pred_speed|` (m/s); it scales the
+same **hyperbolic (1/x)** base (0.5 at rest → 0.15 at 90 km/h). Acceleration uses
+a **smaller** measurement gain (`_TMP_ACCEL_KIN_ALPHA_SCALE`) than speed, then a
+**second** low-pass (`_TMP_ACCEL_OUTPUT_ALPHA`) so arcs see stable longitudinal
+decel/accel. TMP prediction uses `prev._smooth_accel` only (never buffer field 11).
+
+Singleplayer (AI) vehicles skip this block entirely: `speed` and `acceleration`
+stay buffer values, positions stay raw.
+
+**Arc / collision** — `Vehicle.accel_for_arc()` is `return self.acceleration`.
+TMP vehicles initialise `acceleration = 0` until the first `update_from_last`;
+`get_arc()` and `thread.py` always use this field for `_accel_to_arc_params`.
 
 ### Lag / freeze detection (TMP vehicles only)
 
@@ -221,7 +233,7 @@ is_lag         = (abs(prev.speed) > _LAG_MIN_SPEED_MS          # was moving
 
 | Elapsed since first frozen frame | Action |
 |----------------------------------|--------|
-| 0 – `_LAG_FREEZE_DURATION` (0.3 s) | **Freeze** — hold smooth position and `_noise_est`; decay speed quadratically: `speed = prev_speed × (1 − frac²)` where `frac = elapsed / 0.3`; force `acceleration = 0`; return early. AEB sees the vehicle at its last known position decelerating toward 0. |
+| 0 – `_LAG_FREEZE_DURATION` (0.3 s) | **Freeze** — hold last position and `_noise_est`; decay speed quadratically: `speed = prev_speed × (1 − frac²)` where `frac = elapsed / 0.3`; force `acceleration = 0`; return early. AEB sees the vehicle at its last known position decelerating toward 0. |
 | ≥ 0.3 s | **Release** — set `lag_confirmed = True`, fall through to normal update. Speed falls to 0. AEB detects the stopped obstacle naturally via arc collision. |
 | Raw position moves again | Reset `_lag_since = None`, `lag_confirmed = False`. |
 
@@ -229,11 +241,11 @@ is_lag         = (abs(prev.speed) > _LAG_MIN_SPEED_MS          # was moving
 read it: once released, the vehicle's speed = 0 and the existing AEB arc
 collision logic handles the stationary obstacle without special-casing.
 
-### Yaw EMA (unchanged) — wrap-safe
+### Yaw EMA — wrap-safe, α = 0.5 (AI and TMP)
 
 ```python
 diff       = (raw_yaw - smooth_yaw + math.pi) % (2 * math.pi) - math.pi
-smooth_yaw = smooth_yaw + yaw_alpha * diff
+smooth_yaw = smooth_yaw + _RAW_YAW_ALPHA * diff   # _RAW_YAW_ALPHA = 0.5
 ```
 
 ### Speed sign detection
@@ -271,7 +283,7 @@ Evidence accumulator driven by three independent signals. Once evidence holds ab
 | Backward raw displacement | +0.30 | dot < -0.3 m |
 | Micro-oscillation | +0.20 | `raw_disp_sq < 0.0225 m²` AND `speed > 1 m/s` |
 
-Evidence decays by `× 0.7` each full frame. `_crash_since` starts when evidence first exceeds `0.75`. After `0.25 s`: `crash_confirmed = True`; speed decelerates at `10 m/s²` toward 0; `acceleration = 0`. AEB handles the stopped obstacle via arc collision.
+Evidence decays by `× 0.7` each full frame. `_crash_since` starts when evidence first exceeds `0.75`. After `0.25 s`: `crash_confirmed = True`; speed decelerates at `10 m/s²` toward 0; `acceleration = 0`. Positions stay raw; AEB handles the stopped obstacle via arc collision.
 
 ### Sub-frame pass (dt < 0.05 s)
 
@@ -279,9 +291,7 @@ Evidence decays by `× 0.7` each full frame. `_crash_since` starts when evidence
 
 ### Game pause
 
-When the game is paused, wall-clock time advances but simulation state (raw positions) does not. On the first frame after unpause, `dt = t_now - prev.time` can be large (e.g. tens of seconds). Using that full `dt` for the kinematic prediction would extrapolate motion and push smoothed positions far ahead of the (unchanged) raw positions.
-
-For this reason, the prediction step uses a capped dt: `dt_pred = min(dt, _MAX_PREDICTION_DT)` only for computing the predicted offset (`_mid_yaw` and `_pred_dist`). Real `dt` is still used for the sub-frame check, angular velocity, and speed derivation so behaviour remains correct.
+When the game is paused, wall-clock time advances but simulation state (raw positions) does not. On the first frame after unpause, `dt = t_now - prev.time` can be large. TMP speed prediction uses `dt_pred = min(dt, _MAX_PREDICTION_DT)` so the predicted-speed branch of the EMA does not extrapolate across a pause. Real `dt` is still used for the sub-frame check, angular velocity, and raw speed from displacement.
 
 ---
 
@@ -525,14 +535,15 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | Quaternion euler yaw | `atan2(2*(y*z + w*x), w²-x²-y²+z²)` degrees |
 | Arc curvature | `κ = omega_rad_s / abs_speed` |
 | Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
-| TMP speed | `delta(raw_pos) / dt`, signed via forward dot |
-| AI speed | `use buffer value as-is (may be signed); do not flip from displacement` |
-| Position smooth | `alpha * raw + (1-alpha) * pred`; `alpha = _compute_position_alpha(speed, noise_est)` |
-| Position alpha formula | See `_compute_position_alpha(speed_ms, noise_est)` — hyperbolic base (1.0 at rest → 0.15 at 90 km/h) times noise modifier |
+| TMP raw speed | `delta(raw_pos) / dt`, signed via forward dot |
+| TMP smooth speed | `pred_speed = prev + clamp(prev_accel,-6,4)*dt_pred`; `speed = α*raw + (1-α)*pred_speed`; `α = _compute_adaptive_filter_alpha(|prev.speed|, noise_est)` |
+| TMP smooth accel | `accel_kin = α_a*raw + (1-α_a)*pred`, `α_a = min(1, α×_TMP_ACCEL_KIN_ALPHA_SCALE)`; `accel = OUT*accel_kin + (1-OUT)*prev`, `OUT = _TMP_ACCEL_OUTPUT_ALPHA`; buffer 11 unused |
+| AI speed / accel | Buffer as-is; no TMP EMA |
+| Positions | No EMA — always raw world coordinates |
 | Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > 2 m/s` → decay speed: `prev_speed × (1 − frac²)`, release after 0.3 s |
 | Pos mismatch | `dot(raw_disp, prev_fwd) < -0.05 m` AND `is_tmp` AND `frames < 10` → hold smooth pos + speed, allow yaw |
 | Crash evidence | decay `× 0.7`/frame; +0.35 raw yaw rate > 30 deg/s; +0.30 backward disp; +0.20 micro-osc; confirm after 0.25 s above 0.75 |
-| Yaw EMA (wrap-safe) | `smooth += 0.20 * ((raw - smooth + π) % 2π - π)` |
+| Yaw EMA (wrap-safe) | `smooth += 0.5 * ((raw - smooth + π) % 2π - π)` |
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
 | Evasion filter Δκ | `min(0.1*9.81 / v², 0.008)` with additional centreline snap when evasion path would cross lane centre |
 | Oncoming evasion filter Δκ | `min(0.13*9.81 / v², 0.008)` with `_OPPOSITE_LANE_OFFSET` / `_OPPOSITE_LANE_KAPPA_SCALE` scaling |
@@ -558,15 +569,16 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 - **`co_directional` must use `fwd_dot > 0.7`, not `abs(fwd_dot) > 0.7`.** Using `abs` makes perfectly head-on vehicles (`fwd_dot = -1.0`) simultaneously `head_on=True` and `co_directional=True`. The two flags must be mutually exclusive — `co_directional` means same direction, `head_on` means opposite direction.
 - **`_LATERAL_LANE_SEPARATION` is 3.9 m.** Tuned for typical ETS2 2-lane roads so the oncoming vehicle's center sits safely inside the lateral-gap threshold, avoiding boundary misses on perfectly anti-parallel vehicles (`fwd_dot = -1.0`).
 - **`near_head_on` (lateral gap activation) and `head_on` (evasion/decel model) are separate thresholds.** `head_on = fwd_dot < -0.7` governs target decel, evasion filter bypass, and risk confirm duration. `near_head_on = fwd_dot < _NEAR_HEAD_ON_DOT (-0.5)` governs only lateral gap activation. Do not unify them — real-world ETS2 turn geometry means oncoming vehicles in a shared curve rarely reach -0.7 during the approach.
-- **Position alpha follows a hyperbolic (1/x) curve: 1.0 at rest → 0.15 at 90 km/h, noise-modulated.** Never use fixed constants `_RAW_POSITION_ALPHA` or `_RAW_POSITION_ALPHA_TMP` — they have been removed. Call `_compute_position_alpha(prev.speed, self._noise_est)`.
-- **TMP lag freeze holds ALL dynamic state (speed, accel, smooth position, noise_est).** Do not advance the smooth position via prediction during a freeze — that would cause a snap correction when the lag ends.
+- **TMP speed/accel EMA uses `_compute_adaptive_filter_alpha(abs(prev.speed), self._noise_est)`** — hyperbolic base **0.5 at rest → 0.15 at 90 km/h**, noise from `|raw_speed − pred_speed|`. Positions are never EMA-filtered.
+- **TMP `acceleration` is kinematic-only** — buffer field 11 is ignored; `accel_for_arc()` reads `self.acceleration` (smoothed). Two-stage accel filter in `traffic.py`.
+- **TMP lag freeze holds position, filtered speed decay, `_noise_est`, and internal EMA state.** Do not advance position during a freeze — that would snap when updates resume.
 - **Lag freeze speed decays quadratically: `prev_speed × (1 − frac²)`.** Never hold speed constant during lag — it keeps AEB informed while smoothly approaching 0.
 - **`lag_confirmed` is set by `traffic.py`, not `thread.py`.** thread.py does not need to check it. A confirmed-stopped vehicle has speed = 0 and is detected as a stationary obstacle by the existing arc collision logic.
 - **Position mismatch (TMP only) runs before lag detection.** It is mutually exclusive with lag: a backward jump is not near-stationary. The `not _skip_position_update` guard on the lag block enforces this.
 - **Position mismatch is capped at `_POS_MISMATCH_MAX_FRAMES (10)`.** When the cap is reached, the next frame always passes raw position through. Without this cap, a genuine crash or prolonged backward event would be silently swallowed.
-- **Crash detection position EMA is never suppressed.** Only `speed` (decelerating at 10 m/s²) and `acceleration` (forced 0) are overridden on `crash_confirmed`. Position stays accurate.
+- **Crash detection does not move positions.** Only `speed` (decelerating at 10 m/s²) and `acceleration` (forced 0) are overridden on `crash_confirmed`.
 - **`crash_confirmed` and `lag_confirmed` are both handled in `traffic.py`.** Neither requires special-casing in `thread.py` — both produce `speed = 0` which AEB detects as a stationary obstacle naturally.
-- **Vehicle acceleration is never passed raw to AEB arc logic.** Always use `_accel_to_arc_params(accel, override_decel)`. Negative accel (braking) → `decel = min(|accel|, 6.0)` so arc_length uses the braking distance formula v²/(2d). Crash-induced backward jump artifacts produce large negative spikes that the 6 m/s² cap suppresses. Accelerating vehicles pass `accel = min(accel, 4.0)`. Head-on override (`_FULL_BRAKE_DECEL`) takes priority over both.
+- **Vehicle longitudinal accel for arcs** — `Vehicle.accel_for_arc()` → `self.acceleration` (TMP = filtered kinematic; AI = buffer). Then `_accel_to_arc_params(accel, override_decel)`. Head-on override (`_FULL_BRAKE_DECEL`) takes priority.
 - **AI (singleplayer) speed is used as-is from the buffer.** Do not derive/flip sign from displacement or turning vehicles can be misclassified as reversing.
 
 ---

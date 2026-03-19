@@ -290,7 +290,7 @@ def _build_vehicle_collision_data(
     target_override_decel = _FULL_BRAKE_DECEL if head_on else 0.0
     # For trailer arcs built with build_arc() directly. get_arc() calls
     # _accel_to_arc_params internally so veh_arc_coll only needs override_decel.
-    target_decel, target_accel = _accel_to_arc_params(v.acceleration, target_override_decel)
+    target_decel, target_accel = _accel_to_arc_params(v.accel_for_arc(), target_override_decel)
     veh_arc_coll = v.get_arc(
         dynamic_horizon,
         half_width=v_hw_coll,
@@ -412,11 +412,11 @@ class AEBThread(BaseThread):
             # Left path: when ego turns right, left path can cross center → snap to center (curvature 0)
             left_kappa = ego_curvature + delta_kappa
             if ego_curvature < 0 and left_kappa < 0:
-                left_kappa = left_kappa/2.0
+                left_kappa = left_kappa/1.5
             # Right path: when ego turns left, right path can cross center → snap to center (curvature 0)
             right_kappa = ego_curvature - delta_kappa
             if ego_curvature > 0 and right_kappa > 0:
-                right_kappa = right_kappa/2.0
+                right_kappa = right_kappa/1.5
             ego_evasion_left = build_arc(
                 ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
                 left_kappa, ego_hw, dynamic_horizon,
@@ -579,7 +579,7 @@ class AEBThread(BaseThread):
                 all_target_arcs, cross_padding, _ = precomputed
             else:
                 target_override_decel = _FULL_BRAKE_DECEL if head_on else 0.0
-                target_decel, target_accel = _accel_to_arc_params(v.acceleration, target_override_decel)
+                target_decel, target_accel = _accel_to_arc_params(v.accel_for_arc(), target_override_decel)
                 veh_arc_coll = v.get_arc(dynamic_horizon, half_width=v_hw_coll,
                                          decel=target_override_decel, arc_start_pctg=_ARC_START_PCTG)
                 trailer_arcs_coll: list[ArcPath] = []

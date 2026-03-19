@@ -14,26 +14,30 @@ from typing import Optional
 _MAX_ANGULAR_VELOCITY: float = 45.0
 _LOCATION_UPDATE_FREQUENCY: float = 0.05
 
-# Position EMA alpha — speed-dependent: 0.5 at rest → 0.15 at 90 km/h.
-# Curve shape is 1/x (hyperbolic): drops quickly at low speed, flattens at
-# highway speed.  See AGENTS.md §7 and _compute_position_alpha().
-_ALPHA_AT_REST: float = 1.0
+# TMP speed/accel EMA alpha — speed-dependent: 0.5 at rest → 0.15 at 90 km/h.
+# Hyperbolic (1/x) base; noise modifier from rolling |raw_speed − pred_speed|.
+# See AGENTS.md §7 and _compute_adaptive_filter_alpha().
+_ALPHA_AT_REST: float = 0.5
 _ALPHA_AT_90_KMH: float = 0.15
 _ALPHA_SPEED_SCALE: float = 90.0 / 3.6   # 25.0 m/s — reference speed
 
 # Precomputed pole of the hyperbola: d = scale × α_90 / (α_rest − α_90).
-# Ensures base(0) = α_rest and base(scale) = α_90 exactly.
 _ALPHA_CURVE_D: float = (
     _ALPHA_SPEED_SCALE * _ALPHA_AT_90_KMH / (_ALPHA_AT_REST - _ALPHA_AT_90_KMH)
 )
 
-# Rolling noise estimate — EMA of |raw − predicted| residual.
-# Drives the secondary alpha modifier: high residual → trust prediction more.
+# Rolling noise estimate — EMA of |raw_speed − pred_speed| (m/s).
 _NOISE_EMA_ALPHA: float = 0.15
-_NOISE_REFERENCE_M: float = 1.5          # residual (m) that halves the base alpha
+_NOISE_REFERENCE_MS: float = 1.5          # residual (m/s) that halves the base alpha
 
-_RAW_YAW_ALPHA: float = 1.0
-_RAW_YAW_ALPHA_TMP: float = 0.50
+# TMP acceleration — extra smoothing on top of speed’s adaptive alpha.
+# Kinematic blend uses alpha_speed × this scale (only for accel, not speed).
+_TMP_ACCEL_KIN_ALPHA_SCALE: float = 0.42
+# Second low-pass: output = OUT * accel_kin + (1−OUT) * prev_smoothed_accel
+_TMP_ACCEL_OUTPUT_ALPHA: float = 0.22
+
+# Yaw EMA (wrap-safe) — AI and TMP (arc curvature).
+_RAW_YAW_ALPHA: float = 0.5
 
 # TMP lag detection — see AGENTS.md §7 "Lag / freeze detection".
 _LAG_MIN_SPEED_MS: float = 2.0           # m/s  — below this no lag detection runs
@@ -42,8 +46,8 @@ _LAG_FREEZE_DURATION: float = 0.3       # s    — freeze window; release after 
 
 # Position mismatch (TMP only) — out-of-order packet rejection.
 # Fires when raw position jumps backward along heading.  Max 3 consecutive frames.
-_POS_MISMATCH_BACKWARD_THRESHOLD: float = 0.05   # m — min backward dot to flag
-_POS_MISMATCH_MAX_FRAMES: int = 10
+_POS_MISMATCH_BACKWARD_THRESHOLD: float = 0.00   # m — min backward dot to flag
+_POS_MISMATCH_MAX_FRAMES: int = 5
 
 # Crash detection (TMP only) — evidence accumulator + confirmation window.
 _CRASH_YAW_RATE_THRESHOLD: float = 30.0         # deg/s raw yaw rate → evidence
@@ -79,19 +83,14 @@ def _accel_to_arc_params(accel: float, override_decel: float = 0.0) -> tuple[flo
     return 0.0, min(accel, 4.0)
 
 
-def _compute_position_alpha(speed_ms: float, noise_est: float) -> float:
-    """Speed-scaled EMA alpha following a 1/x (hyperbolic) curve.
+def _compute_adaptive_filter_alpha(speed_ms: float, noise_est: float) -> float:
+    """EMA alpha for TMP speed/accel filtering — 1/x base in |speed|, noise-modulated.
 
-    base = (_ALPHA_AT_REST × _ALPHA_CURVE_D) / (|speed| + _ALPHA_CURVE_D)
-
-    Exact values:  base(0) = _ALPHA_AT_REST (1.0)
-                   base(25 m/s) = _ALPHA_AT_90_KMH (0.15)
-
-    A secondary noise modifier further lowers alpha when the rolling residual
-    |raw − predicted| is large — noisy signal, trust the prediction more.
+    Base is _ALPHA_AT_REST (0.5) at 0 m/s → _ALPHA_AT_90_KMH (0.15) at 25 m/s.
+    High residual |raw_speed − pred_speed| lowers alpha further.
     """
     base = (_ALPHA_AT_REST * _ALPHA_CURVE_D) / (abs(speed_ms) + _ALPHA_CURVE_D)
-    noise_mod = 1.0 / (1.0 + noise_est / _NOISE_REFERENCE_M)
+    noise_mod = 1.0 / (1.0 + noise_est / _NOISE_REFERENCE_MS)
     return base * noise_mod
 
 
@@ -542,7 +541,9 @@ class Vehicle:
         self.rotation = rotation
         self.size = size
         self.speed = speed
-        self.acceleration = acceleration
+        # TMP: shared-memory acceleration is not used for physics; smoothed value is filled
+        # in update_from_last(). Zero until the first kinematic update avoids buffer spikes.
+        self.acceleration = 0.0 if is_tmp else acceleration
         self.trailer_count = trailer_count
         self.trailers = trailers
         self.id = id
@@ -560,10 +561,13 @@ class Vehicle:
         self._raw_x: Optional[float] = None
         self._raw_z: Optional[float] = None
 
-        # Rolling noise estimate — EMA of |raw − predicted| residual (metres).
-        # Used by _compute_position_alpha to further reduce alpha when position
-        # noise is high, regardless of speed.
+        # TMP only — rolling noise estimate: EMA of |raw_speed − pred_speed| (m/s).
         self._noise_est: float = 0.0
+
+        # TMP only — prediction-corrected EMA state for speed/acceleration.
+        self._smooth_speed: Optional[float] = None
+        self._smooth_accel: Optional[float] = None
+        self._raw_speed: Optional[float] = None
 
         # TMP lag detection state.
         # _lag_since: monotonic time when the frozen-position window began.
@@ -582,6 +586,10 @@ class Vehicle:
         self._crash_evidence: float = 0.0
         self._crash_since: Optional[float] = None   # when evidence first exceeded threshold
         self.crash_confirmed: bool = False
+
+    def accel_for_arc(self) -> float:
+        """Longitudinal acceleration for arc / collision (TMP = filtered kinematic value)."""
+        return self.acceleration
 
     def update_from_last(self, prev: "Vehicle", t_now: float) -> None:
         """Carry forward smoothed state or run a full update.  See AGENTS.md §7."""
@@ -605,6 +613,9 @@ class Vehicle:
             self._crash_evidence = prev._crash_evidence
             self._crash_since = prev._crash_since
             self.crash_confirmed = prev.crash_confirmed
+            self._smooth_speed = prev._smooth_speed
+            self._smooth_accel = prev._smooth_accel
+            self._raw_speed = prev._raw_speed
             if abs(self.angular_velocity) > _MAX_ANGULAR_VELOCITY:
                 self.angular_velocity = 0.0
             self.speed = prev.speed
@@ -628,6 +639,9 @@ class Vehicle:
         self._crash_evidence = prev._crash_evidence
         self._crash_since = prev._crash_since
         self.crash_confirmed = False
+        self._smooth_speed = prev._smooth_speed
+        self._smooth_accel = prev._smooth_accel
+        self._raw_speed = prev._raw_speed
 
         raw_x = self.position.x
         raw_z = self.position.z
@@ -636,7 +650,7 @@ class Vehicle:
 
         # --- Type 1: Position mismatch (TMP only, max _POS_MISMATCH_MAX_FRAMES) ---
         # Raw position jumped backward along the vehicle's heading — out-of-order packet.
-        # Yaw EMA and angular_velocity still run; position EMA and speed derivation are held.
+        # Yaw EMA and angular_velocity still run; position and carried speed/accel are held.
         _skip_position_update = False
         if (self.is_tmp
                 and prev._smooth_yaw is not None
@@ -669,6 +683,7 @@ class Vehicle:
                     self.angular_velocity = prev.angular_velocity
                     self.speed = prev.speed * (1.0 - _lag_frac * _lag_frac)
                     self.acceleration = 0.0
+                    self._smooth_accel = 0.0
                     if self._smooth_x is not None:
                         self.position.x = self._smooth_x
                         self.position.z = self._smooth_z
@@ -683,8 +698,7 @@ class Vehicle:
             self._smooth_yaw = raw_yaw
         else:
             diff = (raw_yaw - self._smooth_yaw + math.pi) % (2.0 * math.pi) - math.pi
-            _yaw_alpha = _RAW_YAW_ALPHA_TMP if self.is_tmp else _RAW_YAW_ALPHA
-            self._smooth_yaw = self._smooth_yaw + _yaw_alpha * diff
+            self._smooth_yaw = self._smooth_yaw + _RAW_YAW_ALPHA * diff
 
         # Angular velocity in deg/s — callers apply math.radians(), so keep degrees here
         _prev_smooth_yaw_deg = math.degrees(prev._smooth_yaw) if prev._smooth_yaw is not None else prev.rotation.euler()[1]
@@ -701,44 +715,25 @@ class Vehicle:
             self.speed = prev.speed
             if self.is_tmp:
                 self.acceleration = prev.acceleration
+                self._smooth_accel = prev._smooth_accel
             return
 
-        # Prediction-corrected position EMA with dynamic alpha.
-        # See AGENTS.md §7. Use capped dt so a long game pause does not cumulate
-        # predicted motion (wall-clock dt can be huge while simulation was frozen).
-        dt_pred = min(dt, _MAX_PREDICTION_DT)
-        if self._smooth_x is None:
-            self._smooth_x = raw_x
-            self._smooth_z = raw_z
-        else:
-            _prev_smooth_yaw = prev._smooth_yaw if prev._smooth_yaw is not None else math.radians(prev.rotation.euler()[1])
-            _mid_yaw = _prev_smooth_yaw + 0.5 * math.radians(self.angular_velocity) * dt_pred
-            _pred_fwd_x = -math.sin(_mid_yaw)
-            _pred_fwd_z = -math.cos(_mid_yaw)
-            _clamped_accel = max(-6.0, min(4.0, self.acceleration))
-            _pred_dist = prev.speed * dt_pred + 0.5 * _clamped_accel * dt_pred * dt_pred
-            _pred_x = self._smooth_x + _pred_dist * _pred_fwd_x
-            _pred_z = self._smooth_z + _pred_dist * _pred_fwd_z
-            _alpha = _compute_position_alpha(prev.speed, self._noise_est)
-            self._smooth_x = _alpha * raw_x + (1.0 - _alpha) * _pred_x
-            self._smooth_z = _alpha * raw_z + (1.0 - _alpha) * _pred_z
-            # Update rolling noise — residual BEFORE blending so _alpha doesn't
-            # contaminate the estimate.
-            _residual = math.sqrt((raw_x - _pred_x) ** 2 + (raw_z - _pred_z) ** 2)
-            self._noise_est = (_NOISE_EMA_ALPHA * _residual
-                               + (1.0 - _NOISE_EMA_ALPHA) * self._noise_est)
-        self.position.x = self._smooth_x
-        self.position.z = self._smooth_z
+        # World position is unfiltered — arcs and debug use true coordinates.
+        self._smooth_x = raw_x
+        self._smooth_z = raw_z
+        self.position.x = raw_x
+        self.position.z = raw_z
 
-        # Speed derived from smoothed positions
-        _prev_smooth_x = prev._smooth_x if prev._smooth_x is not None else prev.position.x
-        _prev_smooth_z = prev._smooth_z if prev._smooth_z is not None else prev.position.z
-        disp_x = self._smooth_x - _prev_smooth_x
-        disp_z = self._smooth_z - _prev_smooth_z
+        dt_pred = min(dt, _MAX_PREDICTION_DT)
         fwd_x = -math.sin(self._smooth_yaw)
         fwd_z = -math.cos(self._smooth_yaw)
 
+        # TMP: raw speed from displacement; smooth speed/accel with prediction EMA (SP: buffer).
         if self.is_tmp:
+            _prx = prev._raw_x if prev._raw_x is not None else prev.position.x
+            _prz = prev._raw_z if prev._raw_z is not None else prev.position.z
+            disp_x = raw_x - _prx
+            disp_z = raw_z - _prz
             dist = math.sqrt(
                 disp_x ** 2
                 + (self.position.y - prev.position.y) ** 2
@@ -746,19 +741,58 @@ class Vehicle:
             )
             if dist > 0.025:
                 direction = 1.0 if (disp_x * fwd_x + disp_z * fwd_z) >= 0.0 else -1.0
-                self.speed = direction * dist / dt
+                raw_speed = direction * dist / dt
             else:
-                self.speed = 0.0
-        # AI (singleplayer): keep buffer speed as-is. The buffer may already
-        # provide signed speed (forward positive, reverse negative); do not
-        # derive or flip sign from displacement (turning vehicles can be
-        # misclassified as reversing when using current heading).
+                raw_speed = 0.0
+
+            if prev._raw_speed is not None and dt > 1e-9:
+                raw_accel = (raw_speed - prev._raw_speed) / dt
+            else:
+                raw_accel = 0.0
+
+            if prev._smooth_speed is None:
+                smooth_speed = raw_speed
+                smooth_accel = raw_accel
+            else:
+                prev_a = prev._smooth_accel if prev._smooth_accel is not None else 0.0
+                clamped_prev_a = max(-6.0, min(4.0, prev_a))
+                pred_speed = prev.speed + clamped_prev_a * dt_pred
+                alpha = _compute_adaptive_filter_alpha(abs(prev.speed), self._noise_est)
+                smooth_speed = alpha * raw_speed + (1.0 - alpha) * pred_speed
+                alpha_a = min(1.0, alpha * _TMP_ACCEL_KIN_ALPHA_SCALE)
+                pred_accel = (
+                    prev._smooth_accel
+                    if prev._smooth_accel is not None
+                    else raw_accel
+                )
+                accel_kin = alpha_a * raw_accel + (1.0 - alpha_a) * pred_accel
+                prev_out = (
+                    prev._smooth_accel
+                    if prev._smooth_accel is not None
+                    else accel_kin
+                )
+                smooth_accel = (
+                    _TMP_ACCEL_OUTPUT_ALPHA * accel_kin
+                    + (1.0 - _TMP_ACCEL_OUTPUT_ALPHA) * prev_out
+                )
+                residual = abs(raw_speed - pred_speed)
+                self._noise_est = (
+                    _NOISE_EMA_ALPHA * residual
+                    + (1.0 - _NOISE_EMA_ALPHA) * self._noise_est
+                )
+
+            self._raw_speed = raw_speed
+            self._smooth_speed = smooth_speed
+            self._smooth_accel = smooth_accel
+            self.speed = smooth_speed
+            self.acceleration = smooth_accel
+        # AI (singleplayer): keep buffer speed and acceleration as-is.
 
         # --- Type 3: Crash detection (TMP only) ---
         # Evidence accumulator driven by three signals: rapid raw yaw change, persistent
         # backward displacement, and micro-oscillation.  Once evidence holds above the
         # threshold for _CRASH_CONFIRM_DURATION, crash_confirmed is set, speed is bled
-        # to zero, and acceleration is forced to 0.  Position EMA remains accurate.
+        # to zero, and acceleration is forced to 0.  Positions stay raw.
         if self.is_tmp and prev._smooth_yaw is not None and prev._raw_x is not None:
             self._crash_evidence = prev._crash_evidence * _CRASH_EVIDENCE_DECAY
 
@@ -795,6 +829,7 @@ class Vehicle:
             if self.crash_confirmed:
                 self.speed = max(0.0, prev.speed - _CRASH_DECEL_RATE * dt)
                 self.acceleration = 0.0
+                self._smooth_accel = 0.0
 
     def get_arc(
         self,
@@ -818,7 +853,7 @@ class Vehicle:
         abs_speed = abs(self.speed)
         curvature = math.radians(self.angular_velocity) / abs_speed if abs_speed > 0.5 else 0.0
         effective_hw = half_width if half_width is not None else self.size.width / 2.0
-        effective_decel, effective_accel = _accel_to_arc_params(self.acceleration, decel)
+        effective_decel, effective_accel = _accel_to_arc_params(self.accel_for_arc(), decel)
 
         is_reversing = self.speed < -1e-3
         effective_p = (1.0 - arc_start_pctg) if is_reversing else arc_start_pctg
