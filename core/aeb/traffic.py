@@ -66,6 +66,49 @@ _STRAIGHT_CURVATURE_EPS: float = 1e-6
 # and make predicted/smoothed positions jump far ahead.
 _MAX_PREDICTION_DT: float = 0.2
 
+# TMP raw speed — fit longitudinal motion over the last N full-frame samples (LS on s ≈ v·τ).
+# Two samples reduce to the legacy single-interval Δs/Δt; more samples damp jitter.
+_TMP_SPEED_HISTORY_LEN: int = 5
+_TMP_SPEED_NEAR_ZERO_CHORD: float = 0.025  # m — same gate as per-frame displacement
+
+
+def _tmp_raw_speed_from_position_history(
+    history: list[tuple[float, float, float]],
+    fwd_x: float,
+    fwd_z: float,
+) -> float | None:
+    """Estimate signed longitudinal speed (m/s) from (t, x, z) samples, oldest first.
+
+    Fits s ≈ v·τ where s = dot(p(τ) − p₀, fwd) and τ = t − t₀.  Uniform spacing is
+    not required.  Returns None if fewer than two samples (caller uses one interval).
+    If the first→last chord is below _TMP_SPEED_NEAR_ZERO_CHORD, returns 0.0.
+    """
+    if len(history) < 2:
+        return None
+    t0, x0, z0 = history[0]
+    tn, xn, zn = history[-1]
+    chord_dx = xn - x0
+    chord_dz = zn - z0
+    chord = math.sqrt(chord_dx * chord_dx + chord_dz * chord_dz)
+    if chord < _TMP_SPEED_NEAR_ZERO_CHORD:
+        return 0.0
+    num = 0.0
+    den = 0.0
+    for t, x, z in history:
+        tau = t - t0
+        if tau <= 1e-9:
+            continue
+        s = (x - x0) * fwd_x + (z - z0) * fwd_z
+        num += tau * s
+        den += tau * tau
+    if den < 1e-12:
+        dt = tn - t0
+        if dt < 1e-9:
+            return 0.0
+        direction = 1.0 if (chord_dx * fwd_x + chord_dz * fwd_z) >= 0.0 else -1.0
+        return direction * chord / dt
+    return num / den
+
 
 def _accel_to_arc_params(accel: float, override_decel: float = 0.0) -> tuple[float, float]:
     """Convert raw vehicle acceleration to (decel, accel) for build_arc().
@@ -568,6 +611,8 @@ class Vehicle:
         self._smooth_speed: Optional[float] = None
         self._smooth_accel: Optional[float] = None
         self._raw_speed: Optional[float] = None
+        # TMP only — (time, x, z) from full updates for multi-sample raw speed (newest last).
+        self._position_history: list[tuple[float, float, float]] = []
 
         # TMP lag detection state.
         # _lag_since: monotonic time when the frozen-position window began.
@@ -616,12 +661,52 @@ class Vehicle:
             self._smooth_speed = prev._smooth_speed
             self._smooth_accel = prev._smooth_accel
             self._raw_speed = prev._raw_speed
+            self._position_history = list(prev._position_history)
             if abs(self.angular_velocity) > _MAX_ANGULAR_VELOCITY:
                 self.angular_velocity = 0.0
             self.speed = prev.speed
             if self.is_tmp:
                 self.acceleration = prev.acceleration
-            if self._smooth_x is not None:
+
+            # TMP: between full updates (dt < threshold), do not freeze speed and pose at
+            # the last full tick — the buffer may have new coordinates while prev.speed
+            # still holds a bad EMA sample. Re-derive speed from (latest raw − prev raw) /
+            # (t_now − prev.time) when movement exceeds the usual gate; always snap pose
+            # to latest raw. Skipped during lag freeze, position mismatch hold, crash.
+            _tmp_sf_ok = (
+                self.is_tmp
+                and prev._raw_x is not None
+                and prev._smooth_yaw is not None
+                and not (
+                    prev._lag_since is not None
+                    and (t_now - prev._lag_since) < _LAG_FREEZE_DURATION
+                )
+                and prev._pos_mismatch_frames == 0
+                and not prev.crash_confirmed
+            )
+            if _tmp_sf_ok:
+                rx = self.position.x
+                rz = self.position.z
+                ry = self.position.y
+                dt_sf = t_now - prev.time
+                ddx = rx - prev._raw_x
+                ddz = rz - prev._raw_z
+                dist = math.sqrt(
+                    ddx * ddx + (ry - prev.position.y) ** 2 + ddz * ddz
+                )
+                if dt_sf > 1e-9 and dist > 0.025:
+                    fwd_x = -math.sin(prev._smooth_yaw)
+                    fwd_z = -math.cos(prev._smooth_yaw)
+                    direction = 1.0 if (ddx * fwd_x + ddz * fwd_z) >= 0.0 else -1.0
+                    self.speed = direction * dist / dt_sf
+                    self._raw_speed = self.speed
+                self._raw_x = rx
+                self._raw_z = rz
+                self._smooth_x = rx
+                self._smooth_z = rz
+                self.position.x = rx
+                self.position.z = rz
+            elif self._smooth_x is not None:
                 self.position.x = self._smooth_x
                 self.position.z = self._smooth_z
             return
@@ -642,6 +727,7 @@ class Vehicle:
         self._smooth_speed = prev._smooth_speed
         self._smooth_accel = prev._smooth_accel
         self._raw_speed = prev._raw_speed
+        self._position_history = list(prev._position_history)
 
         raw_x = self.position.x
         raw_z = self.position.z
@@ -728,22 +814,34 @@ class Vehicle:
         fwd_x = -math.sin(self._smooth_yaw)
         fwd_z = -math.cos(self._smooth_yaw)
 
-        # TMP: raw speed from displacement; smooth speed/accel with prediction EMA (SP: buffer).
+        # TMP: raw speed from last N positions (LS on longitudinal s vs τ); smooth with EMA.
         if self.is_tmp:
-            _prx = prev._raw_x if prev._raw_x is not None else prev.position.x
-            _prz = prev._raw_z if prev._raw_z is not None else prev.position.z
-            disp_x = raw_x - _prx
-            disp_z = raw_z - _prz
-            dist = math.sqrt(
-                disp_x ** 2
-                + (self.position.y - prev.position.y) ** 2
-                + disp_z ** 2
-            )
-            if dist > 0.025:
-                direction = 1.0 if (disp_x * fwd_x + disp_z * fwd_z) >= 0.0 else -1.0
-                raw_speed = direction * dist / dt
+            _hist = list(self._position_history)
+            _hist.append((t_now, raw_x, raw_z))
+            if len(_hist) > _TMP_SPEED_HISTORY_LEN:
+                _hist = _hist[-_TMP_SPEED_HISTORY_LEN:]
+            self._position_history = _hist
+
+            _ls = _tmp_raw_speed_from_position_history(_hist, fwd_x, fwd_z)
+            if _ls is not None:
+                raw_speed = _ls
             else:
-                raw_speed = 0.0
+                _prx = prev._raw_x if prev._raw_x is not None else prev.position.x
+                _prz = prev._raw_z if prev._raw_z is not None else prev.position.z
+                disp_x = raw_x - _prx
+                disp_z = raw_z - _prz
+                dist = math.sqrt(
+                    disp_x ** 2
+                    + (self.position.y - prev.position.y) ** 2
+                    + disp_z ** 2
+                )
+                if dist > 0.025:
+                    direction = (
+                        1.0 if (disp_x * fwd_x + disp_z * fwd_z) >= 0.0 else -1.0
+                    )
+                    raw_speed = direction * dist / dt
+                else:
+                    raw_speed = 0.0
 
             if prev._raw_speed is not None and dt > 1e-9:
                 raw_accel = (raw_speed - prev._raw_speed) / dt

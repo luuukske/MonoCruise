@@ -107,7 +107,7 @@ _VEH_STRIDE           = 46  # fields per vehicle slot (16 + 3*10)
 | 7 | size.width | float | metres |
 | 8 | size.height | float | metres — unused in 2D |
 | 9 | size.length | float | metres |
-| 10 | speed | float | AI = use as-is from buffer (may be signed in singleplayer). TMP = derived from raw position delta / dt (sign from forward dot); then smoothed with prediction EMA (see §7). |
+| 10 | speed | float | AI = use as-is from buffer (may be signed in singleplayer). TMP = LS fit of longitudinal motion over up to 5 full-frame positions, else single-interval Δ/dt; then prediction EMA (see §7). |
 | 11 | acceleration | float | m/s² — AI = buffer as-is. TMP buffer value is **ignored**; `Vehicle.acceleration` is filled from doubly-smoothed kinematic finite-difference (see §7). Arcs use `accel_for_arc()` (= `acceleration`). |
 | 12 | trailer_count | short | 0–3 |
 | 13 | id | short | Per-frame continuity key |
@@ -168,7 +168,7 @@ corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
 |-------|--------|---------|
 | `position.x/z` | **Unfiltered** shared-memory world coordinates | Arc start position, rendering, collision geometry |
 | `_smooth_yaw` | Wrap-safe EMA of `rotation.euler()[1]` in radians (`_RAW_YAW_ALPHA = 0.5`, AI and TMP) | **Arc curvature. Never use `rotation.euler()` directly for arcs.** |
-| `speed` | AI = buffer as-is. TMP = raw speed from displacement, then prediction-corrected EMA | Arc direction, TTB |
+| `speed` | AI = buffer as-is. TMP = raw speed from up to 5 positions (LS on s vs τ along `fwd`), then prediction-corrected EMA | Arc direction, TTB |
 | `acceleration` | AI = buffer as-is. TMP = two-stage smooth of `d(raw_speed)/dt` (not buffer field 11) | Arc decel/accel via `_accel_to_arc_params()` |
 | `angular_velocity` | Degrees/s from rotation delta/dt | Arc curvature via `κ = ω_rad/speed` |
 
@@ -178,10 +178,14 @@ Positions are **not** blended — only longitudinal kinematics from noisy TMP up
 are smoothed so small position jitter does not jerk `speed`/`acceleration`, while
 hard braking (large sustained `raw_accel`) still pulls the estimate quickly.
 
-Raw speed each full frame (after yaw EMA):
+Raw speed each full frame (after yaw EMA): keep the last five `(t, x, z)` from full
+updates (`_position_history`).  With at least two samples, fit `s ≈ v·τ` where
+`s = dot(p − p₀, fwd(smooth_yaw))` and `τ = t − t₀` (least squares: `v = Σ(τ s)/Σ(τ²)`).
+If the first→last chord is below 0.025 m, `raw_speed = 0`.  With only one history
+sample, fall back to the single-interval formula.  Sub-frames still use instantaneous
+`Δraw/dt` and do not push the history.
 
 ```python
-raw_speed = sign(dot(raw_disp, fwd(smooth_yaw))) * |raw_disp| / dt   # with near-zero gate
 raw_accel = (raw_speed - prev_raw_speed) / dt
 ```
 
@@ -254,10 +258,12 @@ smooth_yaw = smooth_yaw + _RAW_YAW_ALPHA * diff   # _RAW_YAW_ALPHA = 0.5
 signed speed (positive = forward, negative = reverse). Do not derive or flip
 sign from displacement — that can make vehicles appear to move backwards.
 
-**TMP (multiplayer):** Speed magnitude is not trusted from the buffer; derive
-from raw position delta / dt and use forward dot product for sign:
+**TMP (multiplayer):** Speed magnitude is not trusted from the buffer; on full
+frames derive it from up to five `(t, x, z)` samples (longitudinal LS along `fwd`),
+with single-interval fallback and the same forward dot for sign on that path.
 
 ```python
+# Fallback when history has one sample only:
 dist = math.sqrt(disp_x**2 + disp_y**2 + disp_z**2)
 direction = 1.0 if (disp_x*fwd_x + disp_z*fwd_z) >= 0.0 else -1.0
 speed = direction * dist / dt
@@ -287,11 +293,19 @@ Evidence decays by `× 0.7` each full frame. `_crash_since` starts when evidence
 
 ### Sub-frame pass (dt < 0.05 s)
 
-`update_from_last()` carries forward all smoothed state unchanged. Speed sign is preserved from the last full update. **Do not re-derive speed sign on sub-frame passes.**
+**AI:** state unchanged; speed/accel from last full update; pose from `_smooth_x/z`.
+
+**TMP:** pose is snapped to the **latest** buffer `position.x/z` every read (not held at
+the last full tick). If `|Δraw| > 0.025 m` over `t_now − prev.time`, **speed** is
+recomputed as `±|Δ|/dt` (same forward dot as full updates) so a single bad EMA speed
+from the prior full tick is not echoed until the next `dt ≥ 0.05 s` sample. Skipped
+during lag freeze (`_lag_since` inside `_LAG_FREEZE_DURATION`), position-mismatch hold
+(`_pos_mismatch_frames > 0`), and `crash_confirmed`. Acceleration is still carried
+from the last full update on sub-frames.
 
 ### Game pause
 
-When the game is paused, wall-clock time advances but simulation state (raw positions) does not. On the first frame after unpause, `dt = t_now - prev.time` can be large. TMP speed prediction uses `dt_pred = min(dt, _MAX_PREDICTION_DT)` so the predicted-speed branch of the EMA does not extrapolate across a pause. Real `dt` is still used for the sub-frame check, angular velocity, and raw speed from displacement.
+When the game is paused, wall-clock time advances but simulation state (raw positions) does not. On the first frame after unpause, `dt = t_now - prev.time` can be large. TMP speed prediction uses `dt_pred = min(dt, _MAX_PREDICTION_DT)` so the predicted-speed branch of the EMA does not extrapolate across a pause. Real `dt` is still used for the sub-frame check, angular velocity, and raw-speed kinematics (multi-sample LS or single-interval fallback).
 
 ---
 
@@ -535,7 +549,7 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | Quaternion euler yaw | `atan2(2*(y*z + w*x), w²-x²-y²+z²)` degrees |
 | Arc curvature | `κ = omega_rad_s / abs_speed` |
 | Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
-| TMP raw speed | `delta(raw_pos) / dt`, signed via forward dot |
+| TMP raw speed | LS on longitudinal `(t,x,z)` history (max 5 full frames): `v = Σ(τ s)/Σ(τ²)`; else `Δraw/dt`, signed via forward dot |
 | TMP smooth speed | `pred_speed = prev + clamp(prev_accel,-6,4)*dt_pred`; `speed = α*raw + (1-α)*pred_speed`; `α = _compute_adaptive_filter_alpha(|prev.speed|, noise_est)` |
 | TMP smooth accel | `accel_kin = α_a*raw + (1-α_a)*pred`, `α_a = min(1, α×_TMP_ACCEL_KIN_ALPHA_SCALE)`; `accel = OUT*accel_kin + (1-OUT)*prev`, `OUT = _TMP_ACCEL_OUTPUT_ALPHA`; buffer 11 unused |
 | AI speed / accel | Buffer as-is; no TMP EMA |
