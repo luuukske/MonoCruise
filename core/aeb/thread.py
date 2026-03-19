@@ -81,6 +81,7 @@ _EVASION_FILTER_MAX_DELTA_KAPPA: float = 0.008
 # Uses the cross product: lat = dx*ego_fwd_z - dz*ego_fwd_x (signed, left < 0).
 _OPPOSITE_LANE_OFFSET: float = 2.0
 _OPPOSITE_LANE_KAPPA_SCALE: float = 2.0
+_CO_DIR_DIVERGE_LOOKAHEAD_S: float = 0.25
 
 _VEHICLE_FORMAT = "ffffffffffffhhbb"
 _TRAILER_FORMAT = "ffffffffff"
@@ -411,11 +412,11 @@ class AEBThread(BaseThread):
             # Left path: when ego turns right, left path can cross center → snap to center (curvature 0)
             left_kappa = ego_curvature + delta_kappa
             if ego_curvature < 0 and left_kappa < 0:
-                left_kappa = left_kappa/5.0
+                left_kappa = left_kappa/2.0
             # Right path: when ego turns left, right path can cross center → snap to center (curvature 0)
             right_kappa = ego_curvature - delta_kappa
             if ego_curvature > 0 and right_kappa > 0:
-                right_kappa = right_kappa/5.0
+                right_kappa = right_kappa/2.0
             ego_evasion_left = build_arc(
                 ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
                 left_kappa, ego_hw, dynamic_horizon,
@@ -567,6 +568,12 @@ class AEBThread(BaseThread):
 
             near_head_on = fwd_dot < _NEAR_HEAD_ON_DOT
 
+            # Lateral separation from ego's forward axis in the ego plane.
+            # Used to decide whether we should even bother trying to "steer around"
+            # co-directional moving vehicles (passing/side-by-side) vs trusting that
+            # an in-lane vehicle cannot be avoided by a gentle 0.1g steer.
+            lateral_offset = abs(dx * ego_fwd_z - dz * ego_fwd_x)
+
             precomputed = vehicle_collision_data.get(v.id)
             if precomputed is not None:
                 all_target_arcs, cross_padding, _ = precomputed
@@ -607,7 +614,12 @@ class AEBThread(BaseThread):
                 if (unbraked_hit is not None
                         and co_directional
                         and base_target_arc.speed > 0.5
-                        and not _is_approaching(ego_arc, base_target_arc, unbraked_hit[0])):
+                        and not _is_approaching(
+                            ego_arc,
+                            base_target_arc,
+                            unbraked_hit[0],
+                            dt=_CO_DIR_DIVERGE_LOOKAHEAD_S,
+                        )):
                     unbraked_hit = None
 
                 # Suppress a tightly-turning cross-traffic vehicle whose arc is
@@ -636,7 +648,12 @@ class AEBThread(BaseThread):
                 if (ego_evasion_left is not None
                         and ego_evasion_right is not None
                         and not head_on
-                        and not (co_directional and base_target_arc.speed > 0.5)):
+                        and not (
+                            co_directional
+                            and base_target_arc.speed > 0.5
+                            and lateral_offset
+                            <= (ego_hw + base_target_arc.half_width + 0.25)
+                        )):
                     left_hit = _earliest_hit(
                         ego_evasion_left, cross_arcs,
                         _CORRIDOR_MARGIN, _COLLISION_SAMPLES,

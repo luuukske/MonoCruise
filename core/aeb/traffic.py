@@ -56,6 +56,12 @@ _CRASH_DECEL_RATE: float = 10.0                 # m/s² speed bleed once confirm
 _MIN_CURVATURE_RADIUS: float = 5.0
 _STRAIGHT_CURVATURE_EPS: float = 1e-6
 
+# Cap dt used for the kinematic prediction step.
+# When the game is paused, wall-clock time advances but simulation state does not,
+# so using the full `dt = t_now - prev.time` after unpause would extrapolate motion
+# and make predicted/smoothed positions jump far ahead.
+_MAX_PREDICTION_DT: float = 0.2
+
 
 def _accel_to_arc_params(accel: float, override_decel: float = 0.0) -> tuple[float, float]:
     """Convert raw vehicle acceleration to (decel, accel) for build_arc().
@@ -698,17 +704,19 @@ class Vehicle:
             return
 
         # Prediction-corrected position EMA with dynamic alpha.
-        # See AGENTS.md §7.
+        # See AGENTS.md §7. Use capped dt so a long game pause does not cumulate
+        # predicted motion (wall-clock dt can be huge while simulation was frozen).
+        dt_pred = min(dt, _MAX_PREDICTION_DT)
         if self._smooth_x is None:
             self._smooth_x = raw_x
             self._smooth_z = raw_z
         else:
             _prev_smooth_yaw = prev._smooth_yaw if prev._smooth_yaw is not None else math.radians(prev.rotation.euler()[1])
-            _mid_yaw = _prev_smooth_yaw + 0.5 * math.radians(self.angular_velocity) * dt
+            _mid_yaw = _prev_smooth_yaw + 0.5 * math.radians(self.angular_velocity) * dt_pred
             _pred_fwd_x = -math.sin(_mid_yaw)
             _pred_fwd_z = -math.cos(_mid_yaw)
             _clamped_accel = max(-6.0, min(4.0, self.acceleration))
-            _pred_dist = prev.speed * dt + 0.5 * _clamped_accel * dt * dt
+            _pred_dist = prev.speed * dt_pred + 0.5 * _clamped_accel * dt_pred * dt_pred
             _pred_x = self._smooth_x + _pred_dist * _pred_fwd_x
             _pred_z = self._smooth_z + _pred_dist * _pred_fwd_z
             _alpha = _compute_position_alpha(prev.speed, self._noise_est)
@@ -741,10 +749,10 @@ class Vehicle:
                 self.speed = direction * dist / dt
             else:
                 self.speed = 0.0
-        elif self.speed > 1e-3:
-            if disp_x * disp_x + disp_z * disp_z > 0.025 ** 2:
-                if (disp_x * fwd_x + disp_z * fwd_z) < 0.0:
-                    self.speed = -self.speed
+        # AI (singleplayer): keep buffer speed as-is. The buffer may already
+        # provide signed speed (forward positive, reverse negative); do not
+        # derive or flip sign from displacement (turning vehicles can be
+        # misclassified as reversing when using current heading).
 
         # --- Type 3: Crash detection (TMP only) ---
         # Evidence accumulator driven by three signals: rapid raw yaw change, persistent

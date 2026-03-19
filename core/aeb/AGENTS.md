@@ -107,7 +107,7 @@ _VEH_STRIDE           = 46  # fields per vehicle slot (16 + 3*10)
 | 7 | size.width | float | metres |
 | 8 | size.height | float | metres — unused in 2D |
 | 9 | size.length | float | metres |
-| 10 | speed | float | AI = unsigned from buffer; TMP = sign derived via dot product |
+| 10 | speed | float | AI = use as-is from buffer (may be signed in singleplayer); TMP = magnitude from buffer, sign from displacement dot product |
 | 11 | acceleration | float | m/s² — converted to arc params via `_accel_to_arc_params()`: braking (< 0) → `decel = min(|accel|, 6.0)`; accelerating (≥ 0) → `accel = min(accel, 4.0)`; head-on override uses `_FULL_BRAKE_DECEL`. Crash-induced backward jump spikes are suppressed by the 6 m/s² cap. |
 | 12 | trailer_count | short | 0–3 |
 | 13 | id | short | Per-frame continuity key |
@@ -238,16 +238,18 @@ smooth_yaw = smooth_yaw + yaw_alpha * diff
 
 ### Speed sign detection
 
-The buffer gives **unsigned** speed for AI vehicles. Sign is derived via forward dot product:
+**AI (singleplayer):** Use buffer speed as-is. The buffer may already provide
+signed speed (positive = forward, negative = reverse). Do not derive or flip
+sign from displacement — that can make vehicles appear to move backwards.
+
+**TMP (multiplayer):** Speed magnitude is not trusted from the buffer; derive
+from raw position delta / dt and use forward dot product for sign:
 
 ```python
-fwd_x = -math.sin(yaw_rad)
-fwd_z = -math.cos(yaw_rad)
-if (disp_x * fwd_x + disp_z * fwd_z) < 0:
-    speed = -speed   # reversing
+dist = math.sqrt(disp_x**2 + disp_y**2 + disp_z**2)
+direction = 1.0 if (disp_x*fwd_x + disp_z*fwd_z) >= 0.0 else -1.0
+speed = direction * dist / dt
 ```
-
-TMP vehicles compute speed from raw position delta / dt, same sign logic.
 
 ### Position mismatch (TMP only)
 
@@ -274,6 +276,12 @@ Evidence decays by `× 0.7` each full frame. `_crash_since` starts when evidence
 ### Sub-frame pass (dt < 0.05 s)
 
 `update_from_last()` carries forward all smoothed state unchanged. Speed sign is preserved from the last full update. **Do not re-derive speed sign on sub-frame passes.**
+
+### Game pause
+
+When the game is paused, wall-clock time advances but simulation state (raw positions) does not. On the first frame after unpause, `dt = t_now - prev.time` can be large (e.g. tens of seconds). Using that full `dt` for the kinematic prediction would extrapolate motion and push smoothed positions far ahead of the (unchanged) raw positions.
+
+For this reason, the prediction step uses a capped dt: `dt_pred = min(dt, _MAX_PREDICTION_DT)` only for computing the predicted offset (`_mid_yaw` and `_pred_dist`). Real `dt` is still used for the sub-frame check, angular velocity, and speed derivation so behaviour remains correct.
 
 ---
 
@@ -518,7 +526,7 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | Arc curvature | `κ = omega_rad_s / abs_speed` |
 | Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
 | TMP speed | `delta(raw_pos) / dt`, signed via forward dot |
-| AI speed sign | `dot(disp, fwd) < 0 → negate speed` |
+| AI speed | `use buffer value as-is (may be signed); do not flip from displacement` |
 | Position smooth | `alpha * raw + (1-alpha) * pred`; `alpha = _compute_position_alpha(speed, noise_est)` |
 | Position alpha formula | See `_compute_position_alpha(speed_ms, noise_est)` — hyperbolic base (1.0 at rest → 0.15 at 90 km/h) times noise modifier |
 | Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > 2 m/s` → decay speed: `prev_speed × (1 − frac²)`, release after 0.3 s |
@@ -559,6 +567,7 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 - **Crash detection position EMA is never suppressed.** Only `speed` (decelerating at 10 m/s²) and `acceleration` (forced 0) are overridden on `crash_confirmed`. Position stays accurate.
 - **`crash_confirmed` and `lag_confirmed` are both handled in `traffic.py`.** Neither requires special-casing in `thread.py` — both produce `speed = 0` which AEB detects as a stationary obstacle naturally.
 - **Vehicle acceleration is never passed raw to AEB arc logic.** Always use `_accel_to_arc_params(accel, override_decel)`. Negative accel (braking) → `decel = min(|accel|, 6.0)` so arc_length uses the braking distance formula v²/(2d). Crash-induced backward jump artifacts produce large negative spikes that the 6 m/s² cap suppresses. Accelerating vehicles pass `accel = min(accel, 4.0)`. Head-on override (`_FULL_BRAKE_DECEL`) takes priority over both.
+- **AI (singleplayer) speed is used as-is from the buffer.** Do not derive/flip sign from displacement or turning vehicles can be misclassified as reversing.
 
 ---
 
