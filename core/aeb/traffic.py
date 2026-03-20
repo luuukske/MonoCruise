@@ -14,11 +14,10 @@ from typing import Optional
 _MAX_ANGULAR_VELOCITY: float = 45.0
 _LOCATION_UPDATE_FREQUENCY: float = 0.05
 
-# TMP speed/accel EMA alpha — speed-dependent: 0.5 at rest → 0.15 at 90 km/h.
-# Hyperbolic (1/x) base; noise modifier from rolling |raw_speed − pred_speed|.
-# See AGENTS.md §7 and _compute_adaptive_filter_alpha().
+# TMP speed EMA — responsive at low |v|, heavier smoothing at high |v|
+# (hyperbolic 0.5 at rest → 0.15 at 90 km/h). See AGENTS.md §7 and _tmp_speed_ema_alpha().
 _ALPHA_AT_REST: float = 0.5
-_ALPHA_AT_90_KMH: float = 0.15
+_ALPHA_AT_90_KMH: float = 0.2
 _ALPHA_SPEED_SCALE: float = 90.0 / 3.6   # 25.0 m/s — reference speed
 
 # Precomputed pole of the hyperbola: d = scale × α_90 / (α_rest − α_90).
@@ -26,15 +25,9 @@ _ALPHA_CURVE_D: float = (
     _ALPHA_SPEED_SCALE * _ALPHA_AT_90_KMH / (_ALPHA_AT_REST - _ALPHA_AT_90_KMH)
 )
 
-# Rolling noise estimate — EMA of |raw_speed − pred_speed| (m/s).
-_NOISE_EMA_ALPHA: float = 0.15
-_NOISE_REFERENCE_MS: float = 1.5          # residual (m/s) that halves the base alpha
-
-# TMP acceleration — extra smoothing on top of speed’s adaptive alpha.
-# Kinematic blend uses alpha_speed × this scale (only for accel, not speed).
-_TMP_ACCEL_KIN_ALPHA_SCALE: float = 0.42
-# Second low-pass: output = OUT * accel_kin + (1−OUT) * prev_smoothed_accel
-_TMP_ACCEL_OUTPUT_ALPHA: float = 0.22
+# Second EMA on TMP acceleration: kinematic (d filtered_speed / dt) → arc value.
+# Lower = smoother response to braking/accel changes.
+_TMP_ACCEL_EMA_ALPHA: float = 0.25
 
 # Yaw EMA (wrap-safe) — AI and TMP (arc curvature).
 _RAW_YAW_ALPHA: float = 0.5
@@ -59,12 +52,6 @@ _CRASH_DECEL_RATE: float = 10.0                 # m/s² speed bleed once confirm
 
 _MIN_CURVATURE_RADIUS: float = 5.0
 _STRAIGHT_CURVATURE_EPS: float = 1e-6
-
-# Cap dt used for the kinematic prediction step.
-# When the game is paused, wall-clock time advances but simulation state does not,
-# so using the full `dt = t_now - prev.time` after unpause would extrapolate motion
-# and make predicted/smoothed positions jump far ahead.
-_MAX_PREDICTION_DT: float = 0.2
 
 # TMP raw speed — fit longitudinal motion over the last N full-frame samples (LS on s ≈ v·τ).
 # Two samples reduce to the legacy single-interval Δs/Δt; more samples damp jitter.
@@ -126,15 +113,12 @@ def _accel_to_arc_params(accel: float, override_decel: float = 0.0) -> tuple[flo
     return 0.0, min(accel, 4.0)
 
 
-def _compute_adaptive_filter_alpha(speed_ms: float, noise_est: float) -> float:
-    """EMA alpha for TMP speed/accel filtering — 1/x base in |speed|, noise-modulated.
+def _tmp_speed_ema_alpha(speed_ms: float) -> float:
+    """Weight on the new raw sample in TMP speed/accel EMA (same α for both).
 
-    Base is _ALPHA_AT_REST (0.5) at 0 m/s → _ALPHA_AT_90_KMH (0.15) at 25 m/s.
-    High residual |raw_speed − pred_speed| lowers alpha further.
+    Decreases with |speed|: 0.5 at rest → 0.15 at 90 km/h (25 m/s).
     """
-    base = (_ALPHA_AT_REST * _ALPHA_CURVE_D) / (abs(speed_ms) + _ALPHA_CURVE_D)
-    noise_mod = 1.0 / (1.0 + noise_est / _NOISE_REFERENCE_MS)
-    return base * noise_mod
+    return (_ALPHA_AT_REST * _ALPHA_CURVE_D) / (abs(speed_ms) + _ALPHA_CURVE_D)
 
 
 class Position:
@@ -604,10 +588,7 @@ class Vehicle:
         self._raw_x: Optional[float] = None
         self._raw_z: Optional[float] = None
 
-        # TMP only — rolling noise estimate: EMA of |raw_speed − pred_speed| (m/s).
-        self._noise_est: float = 0.0
-
-        # TMP only — prediction-corrected EMA state for speed/acceleration.
+        # TMP only — EMA state for speed/acceleration (buffer accel unused on TMP).
         self._smooth_speed: Optional[float] = None
         self._smooth_accel: Optional[float] = None
         self._raw_speed: Optional[float] = None
@@ -665,7 +646,6 @@ class Vehicle:
             self._smooth_yaw = prev._smooth_yaw
             self._raw_x = prev._raw_x
             self._raw_z = prev._raw_z
-            self._noise_est = prev._noise_est
             self._lag_since = prev._lag_since
             self.lag_confirmed = prev.lag_confirmed
             self._pos_mismatch_frames = prev._pos_mismatch_frames
@@ -712,8 +692,8 @@ class Vehicle:
                     fwd_x = -math.sin(prev._smooth_yaw)
                     fwd_z = -math.cos(prev._smooth_yaw)
                     direction = 1.0 if (ddx * fwd_x + ddz * fwd_z) >= 0.0 else -1.0
-                    self.speed = direction * dist / dt_sf
-                    self._raw_speed = self.speed
+                    # Raw kinematics for debug only — keep self.speed at filtered value.
+                    self._raw_speed = direction * dist / dt_sf
                 self._raw_x = rx
                 self._raw_z = rz
                 self._smooth_x = rx
@@ -731,7 +711,6 @@ class Vehicle:
         self._smooth_x = prev._smooth_x
         self._smooth_z = prev._smooth_z
         self._smooth_yaw = prev._smooth_yaw
-        self._noise_est = prev._noise_est
         self._lag_since = prev._lag_since
         self.lag_confirmed = False
         self._pos_mismatch_frames = prev._pos_mismatch_frames
@@ -826,7 +805,6 @@ class Vehicle:
         self.position.x = raw_x
         self.position.z = raw_z
 
-        dt_pred = min(dt, _MAX_PREDICTION_DT)
         fwd_x = -math.sin(self._smooth_yaw)
         fwd_z = -math.cos(self._smooth_yaw)
 
@@ -859,6 +837,7 @@ class Vehicle:
                 else:
                     raw_speed = 0.0
 
+            # Raw-sample jerk (noisy) — only used until we have a filtered speed baseline.
             if prev._raw_speed is not None and dt > 1e-9:
                 raw_accel = (raw_speed - prev._raw_speed) / dt
             else:
@@ -868,31 +847,19 @@ class Vehicle:
                 smooth_speed = raw_speed
                 smooth_accel = raw_accel
             else:
-                prev_a = prev._smooth_accel if prev._smooth_accel is not None else 0.0
-                clamped_prev_a = max(-6.0, min(4.0, prev_a))
-                pred_speed = prev.speed + clamped_prev_a * dt_pred
-                alpha = _compute_adaptive_filter_alpha(abs(prev.speed), self._noise_est)
-                smooth_speed = alpha * raw_speed + (1.0 - alpha) * pred_speed
-                alpha_a = min(1.0, alpha * _TMP_ACCEL_KIN_ALPHA_SCALE)
-                pred_accel = (
-                    prev._smooth_accel
-                    if prev._smooth_accel is not None
-                    else raw_accel
+                alpha = _tmp_speed_ema_alpha(abs(prev.speed))
+                smooth_speed = alpha * raw_speed + (1.0 - alpha) * prev.speed
+                kin_accel = (
+                    (smooth_speed - prev.speed) / dt if dt > 1e-9 else 0.0
                 )
-                accel_kin = alpha_a * raw_accel + (1.0 - alpha_a) * pred_accel
-                prev_out = (
+                prev_sa = (
                     prev._smooth_accel
                     if prev._smooth_accel is not None
-                    else accel_kin
+                    else kin_accel
                 )
                 smooth_accel = (
-                    _TMP_ACCEL_OUTPUT_ALPHA * accel_kin
-                    + (1.0 - _TMP_ACCEL_OUTPUT_ALPHA) * prev_out
-                )
-                residual = abs(raw_speed - pred_speed)
-                self._noise_est = (
-                    _NOISE_EMA_ALPHA * residual
-                    + (1.0 - _NOISE_EMA_ALPHA) * self._noise_est
+                    _TMP_ACCEL_EMA_ALPHA * kin_accel
+                    + (1.0 - _TMP_ACCEL_EMA_ALPHA) * prev_sa
                 )
 
             self._raw_speed = raw_speed

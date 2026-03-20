@@ -30,6 +30,7 @@ class RadarVisualizer:
         self.lock = threading.Lock()
         self.running = False
         self._server_thread = None
+        self.vehicle_timeout = 5.0  # Remove vehicles not updated for 5 seconds
         
         self._setup_routes()
         
@@ -41,6 +42,8 @@ class RadarVisualizer:
         @self.app.route('/track/<int:vehicle_id>', methods=['POST'])
         def track_vehicle(vehicle_id):
             with self.lock:
+                if vehicle_id not in self.available_vehicles:
+                    return jsonify({"status": "error", "message": f"Vehicle {vehicle_id} not available"}), 400
                 self.tracked_vehicle_id = vehicle_id
             return jsonify({"status": "ok", "tracking": vehicle_id})
     
@@ -89,7 +92,7 @@ class RadarVisualizer:
             <div class="control-group">
                 <label>Track Vehicle ID:</label>
                 <input type="number" id="vehicle-id" placeholder="Enter vehicle ID" value="">
-                <button onclick="trackVehicle()">Track</button>
+                <button id="track-btn">Track</button>
                 <span class="status" id="status">No vehicle tracked</span>
             </div>
             <div class="control-group">
@@ -121,6 +124,28 @@ class RadarVisualizer:
     <script>
         const socket = io();
         let currentVehicleId = null;
+        
+        // Connection diagnostics
+        socket.on('connect', () => {
+            console.log('✓ Socket connected');
+        });
+        
+        socket.on('disconnect', () => {
+            console.log('✗ Socket disconnected');
+        });
+        
+        // Attach persistent listener to vehicle list - do this ONCE, early
+        const vehicleListContainer = document.getElementById('vehicle-list');
+        vehicleListContainer.addEventListener('click', (e) => {
+            const vehicleItem = e.target.closest('.vehicle-item');
+            if (!vehicleItem) return;
+            
+            const vehicleId = parseInt(vehicleItem.dataset.vehicleId);
+            console.log('✓ Vehicle clicked:', vehicleId);
+            document.getElementById('vehicle-id').value = vehicleId;
+            trackVehicle();
+        });
+        console.log('Vehicle list listener attached');
         
         const speedCtx = document.getElementById('speedChart').getContext('2d');
         const accelCtx = document.getElementById('accelChart').getContext('2d');
@@ -199,6 +224,14 @@ class RadarVisualizer:
             },
             options: {
                 ...commonOptions,
+                scales: {
+                    ...commonOptions.scales,
+                    y: {
+                        ...commonOptions.scales.y,
+                        beginAtZero: true,
+                        ticks: { color: '#fff' }
+                    }
+                },
                 plugins: {
                     ...commonOptions.plugins,
                     title: {
@@ -211,14 +244,35 @@ class RadarVisualizer:
         });
 
         function trackVehicle() {
-            const id = parseInt(document.getElementById('vehicle-id').value);
-            if (isNaN(id)) return;
+            const inputField = document.getElementById('vehicle-id');
+            const id = parseInt(inputField.value);
             
+            console.log('trackVehicle called. Input value:', inputField.value, 'Parsed ID:', id);
+            
+            if (isNaN(id)) {
+                document.getElementById('status').textContent = '❌ Invalid ID';
+                console.log('ID is NaN, aborting');
+                return;
+            }
+            
+            console.log('Sending fetch for vehicle:', id);
             fetch('/track/' + id, { method: 'POST' })
-                .then(r => r.json())
+                .then(r => {
+                    console.log('Response status:', r.status);
+                    return r.json().then(data => ({ ok: r.ok, status: r.status, ...data }));
+                })
                 .then(data => {
-                    currentVehicleId = id;
-                    document.getElementById('status').textContent = 'Tracking vehicle ' + id;
+                    console.log('Response data:', data);
+                    if (data.ok) {
+                        currentVehicleId = id;
+                        document.getElementById('status').textContent = '✓ Tracking vehicle ' + id;
+                    } else {
+                        document.getElementById('status').textContent = '❌ ' + (data.message || 'Unknown error');
+                    }
+                })
+                .catch(err => {
+                    console.error('Fetch error:', err);
+                    document.getElementById('status').textContent = '❌ Request failed';
                 });
         }
 
@@ -243,11 +297,25 @@ class RadarVisualizer:
         socket.on('vehicles', (vehicles) => {
             const list = document.getElementById('vehicle-list');
             list.innerHTML = vehicles.map(id => 
-                `<div class="vehicle-item ${id === currentVehicleId ? 'active' : ''}" 
-                      onclick="document.getElementById('vehicle-id').value=${id}; trackVehicle();">
+                `<div class="vehicle-item" data-vehicle-id="${id}" 
+                      style="opacity: ${id === currentVehicleId ? '1' : '0.8'}; cursor: pointer;">
                     Vehicle ID: ${id}
                 </div>`
             ).join('');
+        });
+        
+        // Allow Enter key in input field
+        document.getElementById('vehicle-id').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                console.log('Enter pressed');
+                trackVehicle();
+            }
+        });
+        
+        // Track button click
+        document.getElementById('track-btn').addEventListener('click', () => {
+            console.log('Track button clicked');
+            trackVehicle();
         });
     </script>
 </body>
@@ -256,8 +324,21 @@ class RadarVisualizer:
     
     def _emit_data(self):
         """Background thread to emit data to clients"""
+        last_vehicles = None
         while self.running:
             with self.lock:
+                current_time = time.time()
+                
+                # Remove stale vehicles
+                stale_vehicles = [
+                    vid for vid in self.available_vehicles
+                    if current_time - self.vehicle_data[vid]["last_update"] > self.vehicle_timeout
+                ]
+                for vid in stale_vehicles:
+                    self.available_vehicles.discard(vid)
+                    if self.tracked_vehicle_id == vid:
+                        self.tracked_vehicle_id = None
+                
                 if self.tracked_vehicle_id is not None and self.tracked_vehicle_id in self.vehicle_data:
                     data = self.vehicle_data[self.tracked_vehicle_id]
                     self.socketio.emit('update', {
@@ -267,45 +348,12 @@ class RadarVisualizer:
                         'filtered_accel': list(data["filtered_accel"])
                     })
                 
-                self.socketio.emit('vehicles', list(self.available_vehicles))
+                current_vehicles = sorted(list(self.available_vehicles))
+                if current_vehicles != last_vehicles:
+                    self.socketio.emit('vehicles', current_vehicles)
+                    last_vehicles = current_vehicles
             
             time.sleep(0.1)
-    
-    def _calculate_raw_values(self, position_history, previous_speed):
-        """Direct calculation without filtering"""
-        if len(position_history) < 2:
-            return 0.0, 0.0
-        
-        mid = len(position_history) // 2
-        old_half = list(position_history)[:mid]
-        new_half = list(position_history)[mid:]
-        
-        old_time = sum(t for t, _ in old_half) / len(old_half)
-        old_x = sum(p.x for _, p in old_half) / len(old_half)
-        old_y = sum(p.y for _, p in old_half) / len(old_half)
-        old_z = sum(p.z for _, p in old_half) / len(old_half)
-        
-        new_time = sum(t for t, _ in new_half) / len(new_half)
-        new_x = sum(p.x for _, p in new_half) / len(new_half)
-        new_y = sum(p.y for _, p in new_half) / len(new_half)
-        new_z = sum(p.z for _, p in new_half) / len(new_half)
-        
-        time_diff = new_time - old_time
-        if time_diff < 0.01:
-            return 0.0, 0.0
-        
-        distance = math.sqrt(
-            (new_x - old_x) ** 2 +
-            (new_y - old_y) ** 2 +
-            (new_z - old_z) ** 2
-        )
-        
-        if distance > 50:
-            return 0.0, 0.0
-        
-        speed = distance / time_diff
-        accel = (speed - previous_speed) / time_diff
-        return speed, accel
     
     def push_data(self, vehicle_id, speed, acceleration, raw_speed):
         """Push raw vs filtered speed and filtered acceleration for a vehicle."""
