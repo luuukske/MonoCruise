@@ -39,13 +39,13 @@ _MIN_SPEED_MS: float = 5.0 / 3.6
 _MAX_RANGE: float = 200.0
 _MAX_RANGE_SQ: float = _MAX_RANGE ** 2
 
-_MIN_ARC_HORIZON: float = 3.0
-_MAX_ARC_HORIZON: float = 3.5
+_MIN_ARC_HORIZON: float = 2.5
+_MAX_ARC_HORIZON: float = 3.0
 _CORRIDOR_MARGIN: float = 0.5
 _COLLISION_SAMPLES: int = 36
 
 _WARN_TTB_THRESHOLD: float = 1.3
-_BRAKE_TTB_THRESHOLD: float = 0.2
+_BRAKE_TTB_THRESHOLD: float = 0.1
 _BRAKE_RELEASE_THRESHOLD: float = 0.5
 _TIME_TO_BRAKE_BUFFER: float = 0.0
 

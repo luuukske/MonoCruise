@@ -14,20 +14,27 @@ from typing import Optional
 _MAX_ANGULAR_VELOCITY: float = 45.0
 _LOCATION_UPDATE_FREQUENCY: float = 0.05
 
-# TMP speed EMA — responsive at low |v|, heavier smoothing at high |v|
-# (hyperbolic 0.5 at rest → 0.15 at 90 km/h). See AGENTS.md §7 and _tmp_speed_ema_alpha().
-_ALPHA_AT_REST: float = 0.5
-_ALPHA_AT_90_KMH: float = 0.2
-_ALPHA_SPEED_SCALE: float = 90.0 / 3.6   # 25.0 m/s — reference speed
+# TMP speed / accel EMA — same hyperbolic law α(|v|) with different endpoints.
+# Reference speed for “at 90 km/h” is 25 m/s. See AGENTS.md §7.
+_ALPHA_SPEED_SCALE: float = 90.0 / 3.6   # 25.0 m/s
 
-# Precomputed pole of the hyperbola: d = scale × α_90 / (α_rest − α_90).
-_ALPHA_CURVE_D: float = (
-    _ALPHA_SPEED_SCALE * _ALPHA_AT_90_KMH / (_ALPHA_AT_REST - _ALPHA_AT_90_KMH)
+# Speed EMA on raw_speed: 0.5 at rest → 0.15 at 90 km/h.
+_SPEED_EMA_AT_REST: float = 1.0
+_SPEED_EMA_AT_90_KMH: float = 0.2
+_SPEED_EMA_CURVE_D: float = (
+    _ALPHA_SPEED_SCALE
+    * _SPEED_EMA_AT_90_KMH
+    / (_SPEED_EMA_AT_REST - _SPEED_EMA_AT_90_KMH)
 )
 
-# Second EMA on TMP acceleration: kinematic (d filtered_speed / dt) → arc value.
-# Lower = smoother response to braking/accel changes.
-_TMP_ACCEL_EMA_ALPHA: float = 0.25
+# Accel EMA on kinematic (d filtered_speed / dt): 0.5 at rest → 0.2 at 90 km/h.
+_ACCEL_EMA_AT_REST: float = 0.5
+_ACCEL_EMA_AT_90_KMH: float = 0.2
+_ACCEL_EMA_CURVE_D: float = (
+    _ALPHA_SPEED_SCALE
+    * _ACCEL_EMA_AT_90_KMH
+    / (_ACCEL_EMA_AT_REST - _ACCEL_EMA_AT_90_KMH)
+)
 
 # Yaw EMA (wrap-safe) — AI and TMP (arc curvature).
 _RAW_YAW_ALPHA: float = 0.5
@@ -114,11 +121,17 @@ def _accel_to_arc_params(accel: float, override_decel: float = 0.0) -> tuple[flo
 
 
 def _tmp_speed_ema_alpha(speed_ms: float) -> float:
-    """Weight on the new raw sample in TMP speed/accel EMA (same α for both).
+    """Weight on the new raw speed sample. 0.5 at rest → 0.15 at 90 km/h."""
+    return (_SPEED_EMA_AT_REST * _SPEED_EMA_CURVE_D) / (
+        abs(speed_ms) + _SPEED_EMA_CURVE_D
+    )
 
-    Decreases with |speed|: 0.5 at rest → 0.15 at 90 km/h (25 m/s).
-    """
-    return (_ALPHA_AT_REST * _ALPHA_CURVE_D) / (abs(speed_ms) + _ALPHA_CURVE_D)
+
+def _tmp_accel_ema_alpha(speed_ms: float) -> float:
+    """Weight on new kinematic accel in the second TMP EMA. 0.5 at rest → 0.2 at 90 km/h."""
+    return (_ACCEL_EMA_AT_REST * _ACCEL_EMA_CURVE_D) / (
+        abs(speed_ms) + _ACCEL_EMA_CURVE_D
+    )
 
 
 class Position:
@@ -857,10 +870,8 @@ class Vehicle:
                     if prev._smooth_accel is not None
                     else kin_accel
                 )
-                smooth_accel = (
-                    _TMP_ACCEL_EMA_ALPHA * kin_accel
-                    + (1.0 - _TMP_ACCEL_EMA_ALPHA) * prev_sa
-                )
+                beta = _tmp_accel_ema_alpha(abs(prev.speed))
+                smooth_accel = beta * kin_accel + (1.0 - beta) * prev_sa
 
             self._raw_speed = raw_speed
             self._smooth_speed = smooth_speed

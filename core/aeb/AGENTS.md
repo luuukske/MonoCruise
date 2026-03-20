@@ -169,7 +169,7 @@ corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
 | `position.x/z` | **Unfiltered** shared-memory world coordinates | Arc start position, rendering, collision geometry |
 | `_smooth_yaw` | Wrap-safe EMA of `rotation.euler()[1]` in radians (`_RAW_YAW_ALPHA = 0.5`, AI and TMP) | **Arc curvature. Never use `rotation.euler()` directly for arcs.** |
 | `speed` | AI = buffer as-is. TMP = raw speed from position history (LS on s vs τ along `fwd`), then EMA with α = `_tmp_speed_ema_alpha(|prev.speed|)` | Arc direction, TTB |
-| `acceleration` | AI = buffer as-is. TMP = EMA of `(filtered_speed − prev.filtered_speed) / dt` with `_TMP_ACCEL_EMA_ALPHA` (not buffer field 11) | Arc decel/accel via `_accel_to_arc_params()` |
+| `acceleration` | AI = buffer as-is. TMP = EMA of `(filtered_speed − prev.filtered_speed) / dt` with `_tmp_accel_ema_alpha(|prev.speed|)` (not buffer field 11) | Arc decel/accel via `_accel_to_arc_params()` |
 | `angular_velocity` | Degrees/s from rotation delta/dt | Arc curvature via `κ = ω_rad/speed` |
 
 ### TMP speed & acceleration — adaptive EMA (speed-dependent α)
@@ -191,8 +191,8 @@ not push the history.
 alpha      = _tmp_speed_ema_alpha(abs(prev.speed))   # 0.5 at rest → 0.15 at 90 km/h
 speed      = alpha * raw_speed + (1 - alpha) * prev.speed
 kin_accel  = (speed - prev.speed) / dt               # derivative of filtered speed
-accel      = _TMP_ACCEL_EMA_ALPHA * kin_accel \
-             + (1 - _TMP_ACCEL_EMA_ALPHA) * prev_accel
+beta       = _tmp_accel_ema_alpha(abs(prev.speed))   # 0.5 at rest → 0.2 at 90 km/h
+accel      = beta * kin_accel + (1 - beta) * prev_accel
 ```
 
 On the first full frame after spawn, `accel` falls back to
@@ -542,7 +542,7 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | Arc curvature | `κ = omega_rad_s / abs_speed` |
 | Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
 | TMP raw speed | LS on longitudinal `(t,x,z)` history (max 10 full frames): `v = Σ(τ s)/Σ(τ²)`; else `Δraw/dt`, signed via forward dot |
-| TMP smooth speed / accel | `α = _tmp_speed_ema_alpha(|prev.speed|)`; `speed = α*raw_speed + (1-α)*prev.speed`; `kin = (speed−prev.speed)/dt`; `accel = β*kin + (1−β)*prev_accel`, `β = _TMP_ACCEL_EMA_ALPHA`; buffer 11 unused |
+| TMP smooth speed / accel | `α = _tmp_speed_ema_alpha` (0.5→0.15 @ 90 km/h); `speed = α*raw+(1-α)*prev`; `kin=(speed−prev)/dt`; `β = _tmp_accel_ema_alpha` (0.5→0.2 @ 90 km/h); `accel = β*kin+(1−β)*prev_accel`; buffer 11 unused |
 | AI speed / accel | Buffer as-is; no TMP EMA |
 | Positions | No EMA — always raw world coordinates |
 | Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > 2 m/s` → decay speed: `prev_speed × (1 − frac²)`, release after 0.3 s |
@@ -574,7 +574,7 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 - **`co_directional` must use `fwd_dot > 0.7`, not `abs(fwd_dot) > 0.7`.** Using `abs` makes perfectly head-on vehicles (`fwd_dot = -1.0`) simultaneously `head_on=True` and `co_directional=True`. The two flags must be mutually exclusive — `co_directional` means same direction, `head_on` means opposite direction.
 - **`_LATERAL_LANE_SEPARATION` is 3.9 m.** Tuned for typical ETS2 2-lane roads so the oncoming vehicle's center sits safely inside the lateral-gap threshold, avoiding boundary misses on perfectly anti-parallel vehicles (`fwd_dot = -1.0`).
 - **`near_head_on` (lateral gap activation) and `head_on` (evasion/decel model) are separate thresholds.** `head_on = fwd_dot < -0.7` governs target decel, evasion filter bypass, and risk confirm duration. `near_head_on = fwd_dot < _NEAR_HEAD_ON_DOT (-0.5)` governs only lateral gap activation. Do not unify them — real-world ETS2 turn geometry means oncoming vehicles in a shared curve rarely reach -0.7 during the approach.
-- **TMP speed EMA uses `_tmp_speed_ema_alpha(abs(prev.speed))`** — hyperbolic **0.5 at rest → 0.15 at 90 km/h** on raw speed. **`acceleration`** is an EMA of `(speed − prev.speed) / dt` with **`_TMP_ACCEL_EMA_ALPHA`**. World positions are not low-pass filtered.
+- **TMP speed EMA uses `_tmp_speed_ema_alpha(abs(prev.speed))`** — hyperbolic **0.5 at rest → 0.15 at 90 km/h** on raw speed. **`acceleration`** is an EMA of `(speed − prev.speed) / dt` with **`_tmp_accel_ema_alpha`** (**0.5 at rest → 0.2 at 90 km/h**). World positions are not low-pass filtered.
 - **TMP `acceleration` is kinematic-only** — buffer field 11 is ignored; `accel_for_arc()` reads `self.acceleration` (smoothed derivative of filtered TMP speed).
 - **TMP lag freeze holds position, filtered speed decay, and internal EMA state.** Do not advance position during a freeze — that would snap when updates resume.
 - **Lag freeze speed decays quadratically: `prev_speed × (1 − frac²)`.** Never hold speed constant during lag — it keeps AEB informed while smoothly approaching 0.
