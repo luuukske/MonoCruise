@@ -345,10 +345,41 @@ class AEBThread(BaseThread):
         self._state_hold_until: float = 0.0
         self._last_snapshot: AEBSnapshot | None = None
         self._risk_first_seen: dict[int, float] = {}
+        self._radar_visualizer = None
 
     def setup(self) -> None:
         self._traffic.open()
+        if Settings.debug:
+            self._try_start_radar_visualizer()
         logger.debug("AEB setup complete")
+
+    def _try_start_radar_visualizer(self) -> None:
+        """Start the Flask/SocketIO radar visualizer (debug-only)."""
+        if self._radar_visualizer is not None:
+            return
+        try:
+            # Lazy import so missing optional deps (flask/socketio) don't kill AEB.
+            from .radar_visualizer import RadarVisualizer  # type: ignore
+        except Exception as exc:
+            logger.warning("RadarVisualizer import failed: %s", exc)
+            return
+
+        try:
+            visualizer = RadarVisualizer(port=5000)
+        except Exception as exc:
+            logger.warning("RadarVisualizer init failed: %s", exc)
+            return
+
+        self._radar_visualizer = visualizer
+
+        def _run() -> None:
+            try:
+                visualizer.start()
+            except Exception as exc:
+                logger.warning("RadarVisualizer failed to start: %s", exc)
+
+        threading.Thread(target=_run, daemon=True).start()
+        logger.info("RadarVisualizer running on http://127.0.0.1:5000")
 
     def loop(self) -> None:
         if not self.running:
@@ -430,6 +461,11 @@ class AEBThread(BaseThread):
         ego_fwd_z = ego_arc.fwd_z
 
         vehicles = self._traffic.read() or []
+        if self._radar_visualizer is not None:
+            # Push per-vehicle raw/filtered speed and filtered acceleration to the UI.
+            for v in vehicles:
+                f_spd, f_acc, r_spd = v.radar_speed_accel()
+                self._radar_visualizer.push_data(v.id, f_spd, f_acc, r_spd)
         now_mono = time.monotonic()
 
         colliding_ids: set[int] = set()
@@ -817,6 +853,11 @@ class AEBThread(BaseThread):
 
     def teardown(self) -> None:
         self._traffic.close()
+        if self._radar_visualizer is not None:
+            try:
+                self._radar_visualizer.stop()
+            except Exception:
+                pass
         with self.data._lock:
             self.data.AEB_warn = False
             self.data.AEB_brake = False

@@ -68,7 +68,7 @@ _MAX_PREDICTION_DT: float = 0.2
 
 # TMP raw speed — fit longitudinal motion over the last N full-frame samples (LS on s ≈ v·τ).
 # Two samples reduce to the legacy single-interval Δs/Δt; more samples damp jitter.
-_TMP_SPEED_HISTORY_LEN: int = 5
+_TMP_SPEED_HISTORY_LEN: int = 10
 _TMP_SPEED_NEAR_ZERO_CHORD: float = 0.025  # m — same gate as per-frame displacement
 
 
@@ -636,6 +636,20 @@ class Vehicle:
         """Longitudinal acceleration for arc / collision (TMP = filtered kinematic value)."""
         return self.acceleration
 
+    def radar_speed_accel(self) -> tuple[float, float, float]:
+        """(filtered_speed, filtered_accel, raw_speed) for the radar visualizer.
+
+        The visualizer is intended for debugging the TMP kinematic filtering: it shows
+        raw vs filtered speed and the filtered (smoothed) acceleration only.
+        """
+        if self.is_tmp:
+            filtered_speed = self._smooth_speed if self._smooth_speed is not None else self.speed
+            filtered_accel = self._smooth_accel if self._smooth_accel is not None else self.acceleration
+            raw_speed = self._raw_speed if self._raw_speed is not None else self.speed
+            return filtered_speed, filtered_accel, raw_speed
+
+        return self.speed, self.acceleration, self.speed
+
     def update_from_last(self, prev: "Vehicle", t_now: float) -> None:
         """Carry forward smoothed state or run a full update.  See AGENTS.md §7."""
         dt = t_now - prev.time
@@ -770,6 +784,8 @@ class Vehicle:
                     self.speed = prev.speed * (1.0 - _lag_frac * _lag_frac)
                     self.acceleration = 0.0
                     self._smooth_accel = 0.0
+                    self._smooth_speed = self.speed
+                    self._raw_speed = 0.0
                     if self._smooth_x is not None:
                         self.position.x = self._smooth_x
                         self.position.z = self._smooth_z
@@ -926,6 +942,7 @@ class Vehicle:
 
             if self.crash_confirmed:
                 self.speed = max(0.0, prev.speed - _CRASH_DECEL_RATE * dt)
+                self._smooth_speed = self.speed
                 self.acceleration = 0.0
                 self._smooth_accel = 0.0
 
