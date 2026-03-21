@@ -46,7 +46,7 @@ _COLLISION_SAMPLES: int = 36
 
 _WARN_TTB_THRESHOLD: float = 1.3
 _BRAKE_TTB_THRESHOLD: float = 0.2
-_BRAKE_RELEASE_THRESHOLD: float = 0.5
+_BRAKE_RELEASE_THRESHOLD: float = 0.0
 _TIME_TO_BRAKE_BUFFER: float = 0.0
 
 _STOP_BUFFER_FIXED: float = 1.6
@@ -82,6 +82,24 @@ _EVASION_FILTER_MAX_DELTA_KAPPA: float = 0.008
 _OPPOSITE_LANE_OFFSET: float = 2.0
 _OPPOSITE_LANE_KAPPA_SCALE: float = 2.0
 _CO_DIR_DIVERGE_LOOKAHEAD_S: float = 0.25
+
+# Intersection / shared-turn false-positive suppression
+# Fix A — Ghost-arc scaling for near-head-on vehicles clearly in their own lane.
+# cross_zone_padding peaks at sin(angle)≈0.8, producing ±4 m ghost arcs at 10 m/s,
+# which phantom-widen the target corridor and prevent the ego evasion filter from
+# clearing. Only fires when target is laterally displaced into its own lane.
+_NEAR_HEAD_ON_CROSS_SCALE: float = 0.3       # ghost-arc reduction factor
+_NEAR_HEAD_ON_LATERAL_MIN: float = 3.0       # m — minimum lateral offset to activate Fix A
+
+# Fix B — Road-following curvature expansion for oncoming vehicles in shared turns.
+# Expands delta_kappa_t so the oncoming evasion filter tests whether "target follows
+# the same corner road as ego" — not just a tiny ±0.006 1/m perturbation.
+# Still evaluated via arc_arc_collision; not a blind suppression.
+_SHARED_TURN_MAX_KAPPA: float = 0.05         # cap on road-following curvature (R ≥ 20 m)
+
+# Ego position history for future position-based curvature estimation.
+# Stores (monotonic_time, x, z) tuples, newest last.
+_EGO_POSITION_HISTORY_LEN: int = 10
 
 _VEHICLE_FORMAT = "ffffffffffffhhbb"
 _TRAILER_FORMAT = "ffffffffff"
@@ -346,6 +364,11 @@ class AEBThread(BaseThread):
         self._last_snapshot: AEBSnapshot | None = None
         self._risk_first_seen: dict[int, float] = {}
         self._radar_visualizer = None
+        # Ego position history for future position-based curvature estimation.
+        # Stores (monotonic_time, x, z) tuples, newest last. Mirrors the structure
+        # of Vehicle._position_history in traffic.py so both can share the same
+        # circle-fitting logic when _ego_curvature_from_history() is implemented.
+        self._ego_position_history: list[tuple[float, float, float]] = []
 
     def setup(self) -> None:
         self._traffic.open()
@@ -381,6 +404,25 @@ class AEBThread(BaseThread):
         threading.Thread(target=_run, daemon=True).start()
         logger.info("RadarVisualizer running on http://127.0.0.1:5000")
 
+    def _ego_curvature_from_history(self) -> float | None:
+        """Estimate ego curvature (1/m) from recent position history.
+
+        Intended to replace the yaw-rate proxy (steer * speed * 12.0 / speed) with
+        a geometry-based value derived from fitting a circle through the last N ego
+        positions, analogous to Vehicle.curvature_from_history() in traffic.py.
+
+        Returns None until implemented; callers fall back to the yaw-rate model.
+
+        Implementation notes (when ready):
+        - Require >= 3 samples and a minimum arc chord to avoid divide-by-zero.
+        - Use the circumscribed-circle formula on the oldest / middle / newest
+          position triple; average over all valid triples for stability.
+        - Sign: positive = left turn (κ > 0), matching ArcPath convention.
+        - Guard: if all-straight (chord << expected arc length), return 0.0 not None.
+        - Clear history on large position jumps (teleport / reload detection).
+        """
+        return None
+
     def loop(self) -> None:
         if not self.running:
             return
@@ -397,11 +439,23 @@ class AEBThread(BaseThread):
         # NO +0.5 offset — see AGENTS.md §2
         ego_yaw_rad = ego_yaw_norm * 2.0 * math.pi
 
+        # Moved up from vehicle loop — needed for ego position history.
+        now_mono = time.monotonic()
+
+        # --- Ego position history ---
+        self._ego_position_history.append((now_mono, ego_x, ego_z))
+        if len(self._ego_position_history) > _EGO_POSITION_HISTORY_LEN:
+            self._ego_position_history = self._ego_position_history[-_EGO_POSITION_HISTORY_LEN:]
+
+        # Yaw-rate curvature proxy (current) — replaced by history-based value once
+        # _ego_curvature_from_history() is implemented.
         if ego_speed > 0.5:
             yaw_rate_rad_s = math.radians(steer * ego_speed * 12.0)
-            ego_curvature = yaw_rate_rad_s / ego_speed
+            ego_curvature_yaw = yaw_rate_rad_s / ego_speed
         else:
-            ego_curvature = 0.0
+            ego_curvature_yaw = 0.0
+
+        ego_curvature = self._ego_curvature_from_history() or ego_curvature_yaw
 
         ego_hw: float = 1.25
         ego_half_l: float = 3.0
@@ -466,7 +520,6 @@ class AEBThread(BaseThread):
             for v in vehicles:
                 f_spd, f_acc, r_spd = v.radar_speed_accel()
                 self._radar_visualizer.push_data(v.id, f_spd, f_acc, r_spd)
-        now_mono = time.monotonic()
 
         colliding_ids: set[int] = set()
         suppressed_ids: set[int] = set()
@@ -638,8 +691,18 @@ class AEBThread(BaseThread):
                 all_target_arcs = [veh_arc_coll] + trailer_arcs_coll
                 cross_padding = _cross_zone_padding(ego_yaw_rad, v_yaw_rad, abs_v_speed)
 
+            # Fix A — reduce ghost-arc padding for near-head-on vehicles clearly in their
+            # own lane. cross_zone_padding peaks at sin(angle)≈0.8 for near-head-on
+            # geometry, producing ghost arcs ±4 m wide at 10 m/s. This phantom-widens the
+            # target corridor so the ego evasion filter always sees a hit even when the
+            # vehicle is safely displaced into its own lane at an intersection approach.
+            # The scale-down only fires when lateral_offset confirms own-lane placement.
+            effective_cross_padding = cross_padding
+            if near_head_on and lateral_offset >= _NEAR_HEAD_ON_LATERAL_MIN:
+                effective_cross_padding *= _NEAR_HEAD_ON_CROSS_SCALE
+
             for base_target_arc in all_target_arcs:
-                cross_arcs = _apply_cross_zone(base_target_arc, cross_padding)
+                cross_arcs = _apply_cross_zone(base_target_arc, effective_cross_padding)
 
                 lateral_gap = _LATERAL_LANE_SEPARATION if near_head_on else 0.0
 
@@ -651,10 +714,10 @@ class AEBThread(BaseThread):
                         and co_directional
                         and base_target_arc.speed > 0.5
                         and not _is_approaching(
-                            ego_arc,
-                            base_target_arc,
-                            unbraked_hit[0],
-                            dt=_CO_DIR_DIVERGE_LOOKAHEAD_S,
+                        ego_arc,
+                        base_target_arc,
+                        unbraked_hit[0],
+                        dt=_CO_DIR_DIVERGE_LOOKAHEAD_S,
                         )):
                     unbraked_hit = None
 
@@ -685,10 +748,10 @@ class AEBThread(BaseThread):
                         and ego_evasion_right is not None
                         and not head_on
                         and not (
-                            co_directional
-                            and base_target_arc.speed > 0.5
-                            and lateral_offset
-                            <= (ego_hw + base_target_arc.half_width + 0.25)
+                        co_directional
+                        and base_target_arc.speed > 0.5
+                        and lateral_offset
+                        <= (ego_hw + base_target_arc.half_width + 0.25)
                         )):
                     left_hit = _earliest_hit(
                         ego_evasion_left, cross_arcs,
@@ -716,15 +779,25 @@ class AEBThread(BaseThread):
                     # Scale delta_kappa_t when vehicle is clearly in its own lane —
                     # a vehicle already displaced laterally needs less curvature to
                     # miss ego, so we give its evasion arcs more room to work with.
-                    # dx/dz are the world-space vector from ego to vehicle, already
-                    # available in this scope.  Cross product gives signed lateral
-                    # offset along ego's right axis; we use abs() since either side
-                    # qualifies — in ETS2 left-hand traffic also exists on some maps.
-                    lateral_offset = abs(dx * ego_fwd_z - dz * ego_fwd_x)
+                    # lateral_offset is already computed above (same formula).
                     if lateral_offset >= _OPPOSITE_LANE_OFFSET:
                         delta_kappa_t = min(
-                            delta_kappa_t * _OPPOSITE_LANE_KAPPA_SCALE,
-                            _EVASION_FILTER_MAX_DELTA_KAPPA * _OPPOSITE_LANE_KAPPA_SCALE,
+                        delta_kappa_t * _OPPOSITE_LANE_KAPPA_SCALE,
+                        _EVASION_FILTER_MAX_DELTA_KAPPA * _OPPOSITE_LANE_KAPPA_SCALE,
+                        )
+                    # Fix B — shared-turn road-following expansion: when ego is in a real
+                    # corner and the target is clearly in its own lane, expand delta_kappa_t
+                    # to reach ego's curvature magnitude. This lets the evasion filter test
+                    # whether "target follows the same intersection curve" clears ego, rather
+                    # than being limited to a ±0.006 1/m perturbation. Still evaluated via
+                    # arc_arc_collision — not a blind suppression. Only fires when:
+                    #   - target is laterally displaced (own lane confirmed)
+                    #   - ego is in a genuine corner (not a gentle highway curve)
+                    if (lateral_offset >= _OPPOSITE_LANE_OFFSET
+                        and abs(ego_curvature) >= _TURNING_DIVERGE_CURVATURE):
+                        delta_kappa_t = max(
+                        delta_kappa_t,
+                        min(abs(ego_curvature), _SHARED_TURN_MAX_KAPPA),
                         )
                     tgt_evasion_left = build_arc(
                         base_target_arc.start_x, base_target_arc.start_z,

@@ -53,8 +53,8 @@ from ui.popup.popup_window import PopupWindow
 # This is to protect user information from being shared online.
 
 _REDACTED_PATH_PLACEHOLDER = "#:/####-redacted-absolute-path-####/"
-# Windows: C:\... or C:/...
-_WIN_PATH_RE = re.compile(r'[A-Za-z]:[\\\/][^\s"\'<>|*?\x00-\x1f]*')
+# Windows: C:\... or C:/... (exclude :// such as in URLs)
+_WIN_PATH_RE = re.compile(r'[A-Za-z]:(?!//)[\\\/][^\s"\'<>|*?\x00-\x1f]*')
 # Linux: /home/..., /root/..., /opt/..., /usr/..., /var/..., /tmp/..., /etc/..., /mnt/..., /srv/..., /run/...
 _LIN_PATH_RE = re.compile(r'(?<!\w)/(?:home|root|opt|usr|var|tmp|etc|mnt|srv|run)/[^\s"\'<>|*?\x00-\x1f]*')
 

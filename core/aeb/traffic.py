@@ -924,6 +924,27 @@ class Vehicle:
                 self.acceleration = 0.0
                 self._smooth_accel = 0.0
 
+    def curvature_from_history(self) -> float | None:
+        """Estimate curvature (1/m) from recent position history.
+
+        Intended to replace the angular_velocity / speed proxy with a geometry-based
+        value derived from fitting a circumscribed circle through recent (t, x, z)
+        samples in _position_history, analogous to AEBThread._ego_curvature_from_history().
+
+        Returns None until implemented; callers fall back to angular_velocity / speed.
+
+        Implementation notes (when ready):
+        - Require >= 3 samples and a minimum arc chord to avoid divide-by-zero.
+        - Use the circumscribed-circle formula on oldest / middle / newest triple;
+          average over all valid triples for stability.
+        - Sign: derive from cross product of consecutive displacement vectors —
+          positive = left turn (κ > 0), matching ArcPath convention.
+        - Guard: if chord << arc_length estimate (near-straight), return 0.0 not None.
+        - For TMP vehicles _position_history is already maintained; for AI vehicles
+          it is currently empty — populate it in update_from_last() when this lands.
+        """
+        return None
+
     def get_arc(
         self,
         horizon: float = 3.0,
