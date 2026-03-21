@@ -679,6 +679,7 @@ when this is implemented.
 
 ## 14. Critical Rules — Do Not Break
 
+- **No long comments.** Do not write long comments to explain code. edit AGENTS.md if you need to explain something long, otherwise use small one-line comments.
 - **Quaternion x/y swap is intentional.** Never remove it.
 - **`rotationX` in telemetry is yaw.** The name is misleading.
 - **Radar uses `+0.5` offset; AEB does not.** Do not mix them.
