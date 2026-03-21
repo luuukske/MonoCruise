@@ -46,7 +46,7 @@ _COLLISION_SAMPLES: int = 36
 
 _WARN_TTB_THRESHOLD: float = 1.3
 _BRAKE_TTB_THRESHOLD: float = 0.2
-_BRAKE_RELEASE_THRESHOLD: float = 0.0
+_BRAKE_RELEASE_THRESHOLD: float = 0.5
 _TIME_TO_BRAKE_BUFFER: float = 0.0
 
 _STOP_BUFFER_FIXED: float = 1.6
@@ -82,6 +82,10 @@ _EVASION_FILTER_MAX_DELTA_KAPPA: float = 0.008
 _OPPOSITE_LANE_OFFSET: float = 2.0
 _OPPOSITE_LANE_KAPPA_SCALE: float = 2.0
 _CO_DIR_DIVERGE_LOOKAHEAD_S: float = 0.25
+# Fix C — extended lookahead for co-directional same-turn outer-lane suppression.
+# Inner/outer lane arcs overlap before their centerlines cross; 0.25 s is too short
+# to see the divergence. At horizon × this scale the paths have clearly separated.
+_CO_SAME_TURN_LOOKAHEAD_SCALE: float = 0.5
 
 # Intersection / shared-turn false-positive suppression
 # Fix A — Ghost-arc scaling for near-head-on vehicles clearly in their own lane.
@@ -709,17 +713,32 @@ class AEBThread(BaseThread):
                 unbraked_hit = _earliest_hit(
                     ego_arc, cross_arcs, _CORRIDOR_MARGIN, _COLLISION_SAMPLES, lateral_gap,
                 )
-                # Suppress diverging co-directional moving targets only
+                # Suppress diverging co-directional moving targets only.
+                # Fix C — for a co-directional vehicle in the outer lane of the same
+                # corner as ego (same-sign curvature, lateral displacement confirmed,
+                # both in a real corner), the inner/outer arc corridors overlap well
+                # before the centerlines actually cross.  At the standard 0.25 s
+                # lookahead the paths are still converging toward that crossing point,
+                # so the suppression does not fire.  Extending the lookahead to
+                # horizon × _CO_SAME_TURN_LOOKAHEAD_SCALE gives enough time for the
+                # paths to have clearly separated post-crossing.
+                # Guards are intentionally strict:
+                #   - lateral_offset: outer lane confirmed, not lane-sharing
+                #   - both curvatures above threshold: real corner, not straight drift
+                #   - same curvature sign: both turning the same direction
                 if (unbraked_hit is not None
                         and co_directional
-                        and base_target_arc.speed > 0.5
-                        and not _is_approaching(
-                        ego_arc,
-                        base_target_arc,
-                        unbraked_hit[0],
-                        dt=_CO_DIR_DIVERGE_LOOKAHEAD_S,
-                        )):
-                    unbraked_hit = None
+                        and base_target_arc.speed > 0.5):
+                    co_diverge_dt = _CO_DIR_DIVERGE_LOOKAHEAD_S
+                    if (lateral_offset >= _NEAR_HEAD_ON_LATERAL_MIN
+                            and abs(ego_curvature) >= _TURNING_DIVERGE_CURVATURE
+                            and abs(v_curvature) >= _TURNING_DIVERGE_CURVATURE
+                            and ego_curvature * v_curvature > 0):
+                        co_diverge_dt = dynamic_horizon * _CO_SAME_TURN_LOOKAHEAD_SCALE
+                    if not _is_approaching(
+                            ego_arc, base_target_arc,
+                            unbraked_hit[0], dt=co_diverge_dt):
+                        unbraked_hit = None
 
                 # Suppress a tightly-turning cross-traffic vehicle whose arc is
                 # already diverging at the hit point.  Guards are intentionally
