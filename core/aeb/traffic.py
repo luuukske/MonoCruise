@@ -40,14 +40,14 @@ _ACCEL_EMA_CURVE_D: float = (
 _RAW_YAW_ALPHA: float = 0.5
 
 # TMP lag detection — see AGENTS.md §7 "Lag / freeze detection".
-_LAG_MIN_SPEED_MS: float = 2.0           # m/s  — below this no lag detection runs
+_LAG_MIN_SPEED_MS: float = 5.0           # m/s  — below this no lag detection runs
 _LAG_DISP_RATIO: float = 0.10           # flag lag if raw disp < 10 % of expected
 _LAG_FREEZE_DURATION: float = 0.3       # s    — freeze window; release after this
 
 # Position mismatch (TMP only) — out-of-order packet rejection.
 # Fires when raw position jumps backward along heading.  Max 3 consecutive frames.
 _POS_MISMATCH_BACKWARD_THRESHOLD: float = 0.00   # m — min backward dot to flag
-_POS_MISMATCH_MAX_FRAMES: int = 5
+_POS_MISMATCH_MAX_FRAMES: int = 3
 
 # Crash detection (TMP only) — evidence accumulator + confirmation window.
 _CRASH_YAW_RATE_THRESHOLD: float = 30.0         # deg/s raw yaw rate → evidence
