@@ -51,7 +51,7 @@ _TIME_TO_BRAKE_BUFFER: float = 0.0
 
 _STOP_BUFFER_FIXED: float = 1.6
 _ARC_START_PCTG: float = 0.2
-_RISK_CONFIRM_DURATION: float = 0.05
+_RISK_CONFIRM_DURATION: float = 0.00
 _RISK_CONFIRM_DURATION_ONCOMING: float = _RISK_CONFIRM_DURATION * 2.0
 
 _REAR_DOT_THRESHOLD: float = -0.5
@@ -81,6 +81,11 @@ _EVASION_FILTER_MAX_DELTA_KAPPA: float = 0.008
 # Uses the cross product: lat = dx*ego_fwd_z - dz*ego_fwd_x (signed, left < 0).
 _OPPOSITE_LANE_OFFSET: float = 2.0
 _OPPOSITE_LANE_KAPPA_SCALE: float = 2.0
+# For head-on vehicles sharing the same curved road (same-sign curvature), ego's
+# heading axis cuts across the road and compresses the cross-product lateral offset
+# measurement — a vehicle genuinely a full lane away may read as <2.0 m. Use a
+# lower threshold when same-curve geometry is confirmed by v_curvature sign + magnitude.
+_SAME_CURVE_OWN_LANE_LAT: float = 1.0
 _CO_DIR_DIVERGE_LOOKAHEAD_S: float = 0.25
 # Fix C — extended lookahead for co-directional same-turn outer-lane suppression.
 # Inner/outer lane arcs overlap before their centerlines cross; 0.25 s is too short
@@ -713,6 +718,16 @@ class AEBThread(BaseThread):
                 unbraked_hit = _earliest_hit(
                     ego_arc, cross_arcs, _CORRIDOR_MARGIN, _COLLISION_SAMPLES, lateral_gap,
                 )
+
+                if Settings.debug and unbraked_hit is not None:
+                    print(
+                        f"[AEB-PATH] vid={v.id} hit@t={unbraked_hit[0]:.2f}s "
+                        f"fwd_dot={fwd_dot:.3f} co_dir={co_directional} head_on={head_on} "
+                        f"near_ho={near_head_on} lat={lateral_offset:.2f}m "
+                        f"ego_k={ego_curvature:.4f} veh_k={v_curvature:.4f} "
+                        f"dist={dist:.1f}m spd={abs_v_speed:.1f}m/s"
+                    )
+
                 # Suppress diverging co-directional moving targets only.
                 # Fix C — for a co-directional vehicle in the outer lane of the same
                 # corner as ego (same-sign curvature, lateral displacement confirmed,
@@ -730,14 +745,35 @@ class AEBThread(BaseThread):
                         and co_directional
                         and base_target_arc.speed > 0.5):
                     co_diverge_dt = _CO_DIR_DIVERGE_LOOKAHEAD_S
-                    if (lateral_offset >= _NEAR_HEAD_ON_LATERAL_MIN
-                            and abs(ego_curvature) >= _TURNING_DIVERGE_CURVATURE
-                            and abs(v_curvature) >= _TURNING_DIVERGE_CURVATURE
-                            and ego_curvature * v_curvature > 0):
+                    g_lat = lateral_offset >= _NEAR_HEAD_ON_LATERAL_MIN
+                    g_ego_k = abs(ego_curvature) >= _TURNING_DIVERGE_CURVATURE
+                    g_veh_k = abs(v_curvature) >= _TURNING_DIVERGE_CURVATURE
+                    g_sign = ego_curvature * v_curvature > 0
+                    fix_c_active = g_lat and g_ego_k and g_veh_k and g_sign
+                    if fix_c_active:
                         co_diverge_dt = dynamic_horizon * _CO_SAME_TURN_LOOKAHEAD_SCALE
-                    if not _is_approaching(
-                            ego_arc, base_target_arc,
-                            unbraked_hit[0], dt=co_diverge_dt):
+                    approaching_short = _is_approaching(
+                        ego_arc, base_target_arc, unbraked_hit[0],
+                        dt=_CO_DIR_DIVERGE_LOOKAHEAD_S,
+                    )
+                    approaching_ext = _is_approaching(
+                        ego_arc, base_target_arc, unbraked_hit[0],
+                        dt=dynamic_horizon * _CO_SAME_TURN_LOOKAHEAD_SCALE,
+                    )
+                    suppressed = not _is_approaching(
+                        ego_arc, base_target_arc,
+                        unbraked_hit[0], dt=co_diverge_dt)
+                    if Settings.debug:
+                        print(
+                            f"[FIX-C] vid={v.id} fwd_dot={fwd_dot:.3f} "
+                            f"lat={lateral_offset:.2f}m ego_k={ego_curvature:.4f} "
+                            f"veh_k={v_curvature:.4f} sign_ok={g_sign} "
+                            f"g_lat={g_lat} g_ego_k={g_ego_k} g_veh_k={g_veh_k} "
+                            f"fix_c={'YES' if fix_c_active else 'NO'} "
+                            f"appr_short={approaching_short} appr_ext={approaching_ext} "
+                            f"suppressed={suppressed}"
+                        )
+                    if suppressed:
                         unbraked_hit = None
 
                 # Suppress a tightly-turning cross-traffic vehicle whose arc is
@@ -752,10 +788,19 @@ class AEBThread(BaseThread):
                 if (unbraked_hit is not None
                         and not head_on
                         and not co_directional
-                        and base_target_arc.speed > 0.5
-                        and abs(base_target_arc.curvature) > _TURNING_DIVERGE_CURVATURE
-                        and not _is_approaching(ego_arc, base_target_arc, unbraked_hit[0])):
-                    unbraked_hit = None
+                        and base_target_arc.speed > 0.5):
+                    g_veh_k_ct = abs(base_target_arc.curvature) > _TURNING_DIVERGE_CURVATURE
+                    approaching_ct = _is_approaching(ego_arc, base_target_arc, unbraked_hit[0])
+                    suppressed_ct = g_veh_k_ct and not approaching_ct
+                    if Settings.debug:
+                        print(
+                            f"[CROSS-T] vid={v.id} fwd_dot={fwd_dot:.3f} "
+                            f"lat={lateral_offset:.2f}m ego_k={ego_curvature:.4f} "
+                            f"arc_k={base_target_arc.curvature:.4f} g_veh_k={g_veh_k_ct} "
+                            f"approaching={approaching_ct} suppressed={suppressed_ct}"
+                        )
+                    if suppressed_ct:
+                        unbraked_hit = None
 
                 if unbraked_hit is None:
                     continue
@@ -799,38 +844,54 @@ class AEBThread(BaseThread):
                     # a vehicle already displaced laterally needs less curvature to
                     # miss ego, so we give its evasion arcs more room to work with.
                     # lateral_offset is already computed above (same formula).
-                    if lateral_offset >= _OPPOSITE_LANE_OFFSET:
+                    # On tight curves, ego's heading axis compresses the cross-product
+                    # lateral offset. Use a lower threshold when both vehicles are
+                    # clearly on the same curved road (same-sign curvature above
+                    # threshold) — a genuinely in-lane head-on vehicle would be <1 m.
+                    same_curve = (
+                        abs(v_curvature) >= _TURNING_DIVERGE_CURVATURE
+                        and ego_curvature * v_curvature > 0
+                    )
+                    lane_threshold = _SAME_CURVE_OWN_LANE_LAT if same_curve else _OPPOSITE_LANE_OFFSET
+                    own_lane = lateral_offset >= lane_threshold
+                    if own_lane:
                         delta_kappa_t = min(
-                        delta_kappa_t * _OPPOSITE_LANE_KAPPA_SCALE,
-                        _EVASION_FILTER_MAX_DELTA_KAPPA * _OPPOSITE_LANE_KAPPA_SCALE,
+                            delta_kappa_t * _OPPOSITE_LANE_KAPPA_SCALE,
+                            _EVASION_FILTER_MAX_DELTA_KAPPA * _OPPOSITE_LANE_KAPPA_SCALE,
                         )
-                    # Fix B — shared-turn road-following expansion: when ego is in a real
-                    # corner and the target is clearly in its own lane, expand delta_kappa_t
-                    # to reach ego's curvature magnitude. This lets the evasion filter test
-                    # whether "target follows the same intersection curve" clears ego, rather
-                    # than being limited to a ±0.006 1/m perturbation. Still evaluated via
-                    # arc_arc_collision — not a blind suppression. Only fires when:
-                    #   - target is laterally displaced (own lane confirmed)
-                    #   - ego is in a genuine corner (not a gentle highway curve)
-                    if (lateral_offset >= _OPPOSITE_LANE_OFFSET
-                        and abs(ego_curvature) >= _TURNING_DIVERGE_CURVATURE):
-                        delta_kappa_t = max(
-                        delta_kappa_t,
-                        min(abs(ego_curvature), _SHARED_TURN_MAX_KAPPA),
+                    # Fix B — road-following curvature expansion for shared turns.
+                    # Guard: own lane only — ego_k guard removed because the yaw-rate
+                    # proxy underestimates curvature on gentle corners and silently
+                    # blocks Fix B when it's most needed.
+                    fixb_fired = False
+                    if own_lane and abs(ego_curvature) >= _TURNING_DIVERGE_CURVATURE:
+                        new_dk = max(
+                            delta_kappa_t,
+                            min(abs(ego_curvature), _SHARED_TURN_MAX_KAPPA),
                         )
+                        fixb_fired = new_dk > delta_kappa_t
+                        delta_kappa_t = new_dk
+                    # For own-lane vehicles, build evasion arcs without forced braking.
+                    # The head-on decel model (7.8 m/s²) is correct for genuine threats
+                    # but wrong here: we're asking "will this vehicle naturally clear ego
+                    # by following the road" — not "what if both vehicles brake hard."
+                    # A braking evasion arc stops in ~1.3 s right inside ego's curved
+                    # forward path, causing both left_clears and right_clears to be False
+                    # even when the vehicle is 5+ m into its own lane.
+                    evasion_decel = 0.0 if own_lane else base_target_arc.decel
                     tgt_evasion_left = build_arc(
                         base_target_arc.start_x, base_target_arc.start_z,
                         base_target_arc.yaw_rad, v.speed,
                         base_target_arc.curvature + delta_kappa_t,
                         base_target_arc.half_width, base_target_arc.horizon,
-                        decel=base_target_arc.decel,
+                        decel=evasion_decel,
                     )
                     tgt_evasion_right = build_arc(
                         base_target_arc.start_x, base_target_arc.start_z,
                         base_target_arc.yaw_rad, v.speed,
                         base_target_arc.curvature - delta_kappa_t,
                         base_target_arc.half_width, base_target_arc.horizon,
-                        decel=base_target_arc.decel,
+                        decel=evasion_decel,
                     )
                     left_clears_ego = arc_arc_collision(
                         ego_arc, tgt_evasion_left, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
@@ -838,6 +899,18 @@ class AEBThread(BaseThread):
                     right_clears_ego = arc_arc_collision(
                         ego_arc, tgt_evasion_right, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
                     ) is None
+                    if Settings.debug:
+                        print(
+                            f"[ONCO-EVA] vid={v.id} lat={lateral_offset:.2f}m "
+                            f"own_lane={own_lane} same_curve={same_curve} "
+                            f"lane_thr={lane_threshold:.2f}m "
+                            f"arc_k={base_target_arc.curvature:.4f} dk={delta_kappa_t:.4f} "
+                            f"fixb={fixb_fired} ego_k={ego_curvature:.4f} "
+                            f"evasion_decel={evasion_decel:.1f} "
+                            f"left_k={base_target_arc.curvature+delta_kappa_t:.4f} "
+                            f"right_k={base_target_arc.curvature-delta_kappa_t:.4f} "
+                            f"left_clears={left_clears_ego} right_clears={right_clears_ego}"
+                        )
                     if left_clears_ego or right_clears_ego:
                         oncoming_evasion_filtered_ids.add(v.id)
                         continue

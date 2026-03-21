@@ -392,18 +392,14 @@ aeb.snapshot          # AEBSnapshot — full debug state
    either misses the target, vehicle is evasion-filtered (corner/roadside) and skipped.
    Bypassed for moving co-directional and head-on targets. Uses `effective_cross_padding`
    (post Fix A scaling) so ghost arcs are already correctly sized before this runs.
-2b. Oncoming evasion filter (head-on only): build two curvature-offset arcs for the
-   *target* (same ±0.1 g Δκ, scaled by `_OPPOSITE_LANE_KAPPA_SCALE` when laterally
-   displaced) and test them against `ego_arc`. If either clears ego, the oncoming
-   vehicle can steer around ego and is not a genuine head-on threat. Skipped when
-   target speed ≤ 1 m/s. **Fix B** — when ego is in a real corner
-   (`|ego_curvature| >= _TURNING_DIVERGE_CURVATURE`) and the target is in its own lane
-   (`lateral_offset >= _OPPOSITE_LANE_OFFSET`), `delta_kappa_t` is expanded to at least
-   `min(|ego_curvature|, _SHARED_TURN_MAX_KAPPA)`. This lets the filter test whether
-   "target follows the same intersection road as ego" clears ego — not just a ±0.006 1/m
-   perturbation. Still evaluated via `arc_arc_collision`; not a blind suppression.
-   `lateral_offset` is not recomputed inside this branch — it is the same cross-product
-   value computed earlier in the per-vehicle loop.
+2b. Oncoming evasion filter (head-on only): determines `own_lane` using `same_curve`-
+   aware threshold (`_SAME_CURVE_OWN_LANE_LAT = 1.0 m` when both curvatures are
+   same-sign and above `_TURNING_DIVERGE_CURVATURE`, else `_OPPOSITE_LANE_OFFSET =
+   2.0 m`). For `own_lane` vehicles, builds two curvature-offset arcs with
+   `decel=0.0` (vehicle follows road at speed) and scaled `delta_kappa_t`. **Fix B**
+   further expands `delta_kappa_t` toward `ego_curvature` magnitude when `own_lane`.
+   If either arc clears `ego_arc`, vehicle is suppressed. For non-own-lane vehicles
+   uses `base_target_arc.decel` (full brake). Skipped when target speed ≤ 1 m/s.
 3. Check `ego_braked_arc` (7.8 m/s² full brake) vs target
    - No hit → braking avoids; `TTB = max(unbraked_ttc - t_stop * buffer, 0)`
    - Hit → braking insufficient; `TTB = 0`
@@ -478,65 +474,89 @@ AEB state.
 ### Oncoming evasion filter (head-on vehicle suppression)
 
 Mirrors the ego evasion filter, but from the oncoming vehicle's perspective.
-After `ego_arc` detects a head-on hit, two curvature-offset arcs are built
-for the **target** and tested against `ego_arc` only (not the ego evasion arcs):
+After `ego_arc` detects a head-on hit, the filter determines whether the target
+is genuinely in ego's lane or is a same-road vehicle that will naturally clear.
 
 ```python
+# 1. Base delta_kappa_t
 delta_kappa_t = min(_EVASION_G_THRESHOLD_ONCOMING / (abs_v_speed ** 2),
                     _EVASION_FILTER_MAX_DELTA_KAPPA)
 
-# lateral_offset already computed earlier in the per-vehicle loop — not recomputed here
-if lateral_offset >= _OPPOSITE_LANE_OFFSET:
-    delta_kappa_t = min(
-        delta_kappa_t * _OPPOSITE_LANE_KAPPA_SCALE,
-        _EVASION_FILTER_MAX_DELTA_KAPPA * _OPPOSITE_LANE_KAPPA_SCALE,
-    )
+# 2. same_curve: target is on the same curved road as ego
+same_curve = (abs(v_curvature) >= _TURNING_DIVERGE_CURVATURE
+              and ego_curvature * v_curvature > 0)
 
-# Fix B — road-following expansion for shared turns
-if lateral_offset >= _OPPOSITE_LANE_OFFSET and abs(ego_curvature) >= _TURNING_DIVERGE_CURVATURE:
+# 3. own_lane: target is laterally displaced into its own lane
+lane_threshold = _SAME_CURVE_OWN_LANE_LAT if same_curve else _OPPOSITE_LANE_OFFSET
+own_lane = lateral_offset >= lane_threshold
+
+# 4. Lateral scaling
+if own_lane:
+    delta_kappa_t = min(delta_kappa_t * _OPPOSITE_LANE_KAPPA_SCALE,
+                        _EVASION_FILTER_MAX_DELTA_KAPPA * _OPPOSITE_LANE_KAPPA_SCALE)
+
+# 5. Fix B — road-following expansion (own_lane only, no ego_k guard)
+if own_lane and abs(ego_curvature) >= _TURNING_DIVERGE_CURVATURE:
     delta_kappa_t = max(delta_kappa_t, min(abs(ego_curvature), _SHARED_TURN_MAX_KAPPA))
 
-tgt_evasion_left  = build_arc(..., target_curvature + delta_kappa_t, ...)
-tgt_evasion_right = build_arc(..., target_curvature - delta_kappa_t, ...)
+# 6. Evasion arc decel: zero for own-lane vehicles, full brake for in-lane threats
+evasion_decel = 0.0 if own_lane else base_target_arc.decel
+
+tgt_evasion_left  = build_arc(..., target_curvature + delta_kappa_t, ..., decel=evasion_decel)
+tgt_evasion_right = build_arc(..., target_curvature - delta_kappa_t, ..., decel=evasion_decel)
 ```
 
-If either arc clears `ego_arc` the oncoming vehicle has room to steer around
-ego within 0.1 g — it is not a genuine collision course. The vehicle is
-skipped and tracked in `oncoming_evasion_filtered_ids`.
+If either arc clears `ego_arc` the vehicle is skipped and tracked in
+`oncoming_evasion_filtered_ids`.
+
+#### `own_lane` determination and `same_curve` threshold
+
+The standard `_OPPOSITE_LANE_OFFSET (2.0 m)` is too high when both vehicles are
+on the same curve. Ego's heading axis cuts diagonally across the road — the
+cross-product lateral offset `abs(dx*ego_fwd_z - dz*ego_fwd_x)` compresses, and
+a vehicle genuinely a full lane away reads as 1.0–1.5 m. The `same_curve` flag
+detects this geometry: if the target has same-sign curvature as ego above
+`_TURNING_DIVERGE_CURVATURE`, `lane_threshold` drops to `_SAME_CURVE_OWN_LANE_LAT
+(1.0 m)`. A vehicle genuinely cutting into ego's lane on the same curve would be
+< 1 m laterally displaced even accounting for heading-axis compression.
+
+**Safety property of `same_curve`:** a vehicle drifting straight into ego's lane
+has near-zero curvature (fails `abs(v_k) >= _TURNING_DIVERGE_CURVATURE`). A
+vehicle cutting the corner in the wrong direction has opposite-sign curvature
+(fails `ego_k * v_k > 0`). Both remain at the 2.0 m threshold.
+
+#### Evasion arc decel for own-lane vehicles
+
+The head-on `base_target_arc` carries `decel=_FULL_BRAKE_DECEL (7.8 m/s²)`.
+Evasion arcs previously inherited this, stopping the arc in `v/d ≈ 1.3 s` —
+right inside ego's curved forward path — causing both `left_clears` and
+`right_clears` to be False even when the vehicle is multiple metres into its own
+lane. For `own_lane=True`, `evasion_decel=0.0` so the arc runs at full speed
+for the full horizon, correctly modelling "vehicle follows the road through the
+corner without braking."
+
+#### Fix B — road-following curvature expansion
+
+When `delta_kappa_t` is too small to model the target following the intersection
+road, Fix B expands it to `min(|ego_curvature|, _SHARED_TURN_MAX_KAPPA)`.
+
+**ego_k guard removed:** the original guard `|ego_curvature| >= _TURNING_DIVERGE_CURVATURE`
+was dropped. The yaw-rate proxy (`steer * speed * 12.0 / speed`) consistently
+underestimates curvature on gentle corners — Fix B was silently blocked in
+exactly the scenarios where it was most needed. The `own_lane` check is the only
+gate required; Fix B still expands only if `|ego_curvature|` would actually
+increase `delta_kappa_t`.
 
 #### Lateral-offset kappa scaling
 
-When the oncoming vehicle's center is ≥ `_OPPOSITE_LANE_OFFSET (2.0 m)` from
-ego's forward axis (`lateral_offset` — computed once per vehicle via
-`abs(dx*ego_fwd_z - dz*ego_fwd_x)`, not recomputed inside this branch), it is
-clearly in its own lane. In this case `delta_kappa_t` is multiplied by
-`_OPPOSITE_LANE_KAPPA_SCALE (2.0)` — a vehicle already displaced laterally
-needs much less curvature change to miss ego. Capped at
-`_EVASION_FILTER_MAX_DELTA_KAPPA × scale`. `abs()` on the cross product so the
-filter works on both left- and right-hand traffic roads.
-
-#### Fix B — road-following curvature expansion (shared-turn suppression)
-
-When the base `delta_kappa_t` (even after lateral scaling) is too small to
-model the target following the intersection road, the filter fails for oncoming
-vehicles approaching the same turn. Fix B expands `delta_kappa_t` to at least
-`min(|ego_curvature|, _SHARED_TURN_MAX_KAPPA)` when both guards hold:
-
-- `lateral_offset >= _OPPOSITE_LANE_OFFSET` — target is in its own lane
-- `|ego_curvature| >= _TURNING_DIVERGE_CURVATURE` — ego is in a real corner
-
-This lets the filter test "target follows the same curve as ego" rather than
-a ±0.006 1/m perturbation. The result is still evaluated via `arc_arc_collision`
-— if the road-following arc genuinely hits ego (intersection too tight, target
-drifting), the vehicle is not suppressed. `_SHARED_TURN_MAX_KAPPA = 0.05`
-(R ≥ 20 m) caps the expansion to prevent degenerate arcs on hairpins.
+When `own_lane=True`, `delta_kappa_t` is multiplied by `_OPPOSITE_LANE_KAPPA_SCALE
+(2.0)` before Fix B is applied. Capped at `_EVASION_FILTER_MAX_DELTA_KAPPA × scale`.
 
 **Conditions:**
 - Only runs for `head_on` targets (`fwd_dot < -0.7`). Mutually exclusive with
   the ego evasion filter (`if not head_on` vs `elif head_on`).
 - Bypassed when target speed ≤ 1 m/s to avoid Δκ blow-up at near-zero speed.
-- Target arcs inherit the head-on `decel=_FULL_BRAKE_DECEL` already set on
-  `base_target_arc`, so the braking model remains consistent.
+- `evasion_decel` is `0.0` for `own_lane`, `base_target_arc.decel` otherwise.
 - Checked against `ego_arc` directly — **not** against `ego_evasion_left/right`
   and **not** against cross arcs.
 
@@ -603,10 +623,13 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | Yaw EMA (wrap-safe) | `smooth += 0.5 * ((raw - smooth + π) % 2π - π)` |
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
 | Evasion filter Δκ | `min(0.1*9.81 / v², 0.008)` with additional centreline snap when evasion path would cross lane centre |
-| Oncoming evasion filter Δκ | `min(0.13*9.81 / v², 0.008)` with `_OPPOSITE_LANE_OFFSET` / `_OPPOSITE_LANE_KAPPA_SCALE` scaling, then Fix B expansion |
+| Oncoming evasion filter Δκ | `min(0.13*9.81 / v², 0.008)`, scaled by `_OPPOSITE_LANE_KAPPA_SCALE` when `own_lane`, then Fix B expansion |
 | Fix A ghost-arc scale | `_NEAR_HEAD_ON_CROSS_SCALE = 0.3` applied when `near_head_on` and `lateral_offset >= _NEAR_HEAD_ON_LATERAL_MIN (3.0 m)` |
-| Fix B Δκ expansion | `max(delta_kappa_t, min(\|ego_curvature\|, _SHARED_TURN_MAX_KAPPA (0.05)))` when own-lane + real corner |
+| Fix B Δκ expansion | `max(delta_kappa_t, min(\|ego_curvature\|, _SHARED_TURN_MAX_KAPPA (0.05)))` when `own_lane`; no ego_k guard |
 | Fix C co-same-turn lookahead | `dynamic_horizon × _CO_SAME_TURN_LOOKAHEAD_SCALE (0.5)` replaces 0.25 s when `lateral_offset >= 3.0 m`, both `|κ| >= _TURNING_DIVERGE_CURVATURE`, same curvature sign |
+| `own_lane` determination | `lateral_offset >= lane_threshold`; `lane_threshold = _SAME_CURVE_OWN_LANE_LAT (1.0 m)` if `same_curve` else `_OPPOSITE_LANE_OFFSET (2.0 m)` |
+| `same_curve` flag | `abs(v_curvature) >= _TURNING_DIVERGE_CURVATURE and ego_curvature * v_curvature > 0` |
+| Oncoming evasion arc decel | `0.0` when `own_lane` (vehicle follows road at speed); `base_target_arc.decel` otherwise |
 | Head-on lateral gap | `_LATERAL_LANE_SEPARATION = 3.9 m` (cross product of hit-point separation vs `a.fwd`) |
 | Near-head-on threshold | `_NEAR_HEAD_ON_DOT = -0.5` — activates lateral gap; looser than `head_on` (-0.7) to catch shared-turn approach geometry |
 | Opposite-lane offset | `_OPPOSITE_LANE_OFFSET = 2.0 m` — lateral distance from ego axis at which oncoming kappa scale activates |
@@ -682,6 +705,10 @@ when this is implemented.
 - **`lateral_offset` is computed once per vehicle** (`abs(dx*ego_fwd_z - dz*ego_fwd_x)`) and reused throughout the per-vehicle loop, including inside the oncoming evasion filter branch. Do not recompute it inside the `elif head_on` block.
 - **Fix A applies to `effective_cross_padding`, not `cross_padding`.** `cross_padding` (raw value) is preserved. `effective_cross_padding` is the scaled value used by `_apply_cross_zone`. Never scale `cross_padding` in-place — the raw value may be needed by debug output or future code.
 - **Fix B is not a blind suppression.** It expands `delta_kappa_t` so the evasion filter tests a road-following arc. The result must still pass `arc_arc_collision` — if the arc hits ego, the vehicle is not filtered.
+- **Fix B has no ego_k guard.** The original `|ego_curvature| >= _TURNING_DIVERGE_CURVATURE` guard was removed — the yaw-rate proxy underestimates curvature on gentle corners and silently blocked Fix B where it was most needed. The `own_lane` check is the only gate.
+- **Oncoming evasion arc `decel=0.0` for own-lane vehicles.** `base_target_arc.decel` is `_FULL_BRAKE_DECEL` for all head-on targets. Evasion arcs must not inherit this for own-lane vehicles — a braking arc stops in ~1.3 s inside ego's curved path, causing both left and right clears to be False. Own-lane vehicles will follow the road at speed, not brake.
+- **`same_curve` uses `ego_curvature * v_curvature > 0`.** Both must have the same curvature sign and be above `_TURNING_DIVERGE_CURVATURE`. A vehicle drifting across (zero curvature) or cutting the corner wrong (opposite sign) stays at the 2.0 m `_OPPOSITE_LANE_OFFSET` threshold and does not benefit from the reduced `_SAME_CURVE_OWN_LANE_LAT`.
+- **`_SAME_CURVE_OWN_LANE_LAT = 1.0 m` is tight by design.** On a shared curve, the cross-product lateral offset compresses due to heading-axis misalignment — a full-lane-away vehicle reads as 1.0–1.5 m. A vehicle genuinely in ego's lane on the same curve would be < 1 m. Do not raise this without understanding the compression effect.
 - **`_ego_curvature_from_history()` returns `None` (stub).** The `or` fallback in `ego_curvature = self._ego_curvature_from_history() or ego_curvature_yaw` depends on this. When the real implementation is ready, change to `if ... is not None else` — a `0.0` return from a straight-road estimate is falsy and would incorrectly fall back to the yaw-rate proxy.
 - **`Vehicle.curvature_from_history()` returns `None` (stub).** AI vehicles do not yet have `_position_history` populated. Both stubs must be implemented together when position-based curvature lands.
 - **Fix C extends the co-directional diverge lookahead, not the curvature model.** The inner/outer lane arc overlap is a timing artifact — corridors overlap before centerlines cross. The fix is a longer `_is_approaching` dt, not a wider arc. Do not relax the curvature-sign guard — without it, a vehicle genuinely drifting into ego's lane in a corner could be suppressed.
