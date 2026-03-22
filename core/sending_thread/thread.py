@@ -235,7 +235,7 @@ class SendingThread(BaseThread):
                     self._hazard_user_override = True
             if not tel_hazards:
                 self._hazard_user_override = False
-            elif speed_kmh <= 20.0:
+            elif speed_kmh <= 12.0:
                 self._hazard_user_override = False
             self._prev_tel_hazards = tel_hazards
 

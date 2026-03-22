@@ -50,9 +50,9 @@ _POS_MISMATCH_BACKWARD_THRESHOLD: float = 0.00   # m — min backward dot to fla
 _POS_MISMATCH_MAX_FRAMES: int = 5
 
 # Crash detection (TMP only) — angular jerk vs last sample (every read, not only full frames).
-_CRASH_PITCH_JERK: float = 3.0                 # deg/s² pitch angular jerk threshold
-_CRASH_YAW_JERK: float = 10.0                   # deg/s² yaw angular jerk threshold
-_CRASH_ROLL_JERK: float = 3.0                  # deg/s² roll angular jerk threshold
+_CRASH_PITCH_JERK: float = 2.0                  # deg/s² pitch angular jerk threshold
+_CRASH_YAW_JERK: float = 15.0                   # deg/s² yaw angular jerk threshold
+_CRASH_ROLL_JERK: float = 2.0                   # deg/s² roll angular jerk threshold
 _CRASH_CONFIRM_DURATION: float = 0.00           # s jerk must hold before confirming
 
 _MIN_CURVATURE_RADIUS: float = 5.0

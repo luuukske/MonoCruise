@@ -279,9 +279,9 @@ Fires when **both** rotation jerk (any axis) **and** sporadic position change oc
 
 | Axis | Jerk threshold |
 |------|---------------|
-| Pitch | 60 deg/s² |
-| Yaw | 120 deg/s² |
-| Roll | 60 deg/s² |
+| Pitch | 2 deg/s² |
+| Yaw | 15 deg/s² |
+| Roll | 2 deg/s² |
 
 **Sporadic position** — fires on either:
 - Vertical jump: `|ΔY| > 0.08 m`, or
