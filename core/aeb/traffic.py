@@ -973,7 +973,7 @@ class Vehicle:
             uz = -(a2 * (bx - cx) + b2 * (cx - ax) + c2 * (ax - bx)) / D
             R = max(math.sqrt((ax - ux) ** 2 + (az - uz) ** 2), _MIN_CURVATURE_RADIUS)
             cross = (bx - ax) * (cz - bz) - (bz - az) * (cx - bx)
-            total_k += (1.0 if cross > 0.0 else -1.0) / R
+            total_k += (-1.0 if cross > 0.0 else 1.0) / R
             count += 1
 
         return total_k / count if count > 0 else None
