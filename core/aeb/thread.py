@@ -479,9 +479,8 @@ class AEBThread(BaseThread):
 
         _ego_fwd_x = -math.sin(ego_yaw_rad)
         _ego_fwd_z = -math.cos(ego_yaw_rad)
-        _ego_body_offset = (_ARC_START_PCTG - 0.5) * (2.0 * ego_half_l)
-        ego_front_x = ego_x + _ego_body_offset * _ego_fwd_x
-        ego_front_z = ego_z + _ego_body_offset * _ego_fwd_z
+        ego_front_x = ego_x + ego_half_l * _ego_fwd_x
+        ego_front_z = ego_z + ego_half_l * _ego_fwd_z
 
         ego_arc = build_arc(
             ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
