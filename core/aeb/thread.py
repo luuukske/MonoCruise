@@ -91,6 +91,8 @@ _CO_DIR_DIVERGE_LOOKAHEAD_S: float = 0.25
 # Inner/outer lane arcs overlap before their centerlines cross; 0.25 s is too short
 # to see the divergence. At horizon × this scale the paths have clearly separated.
 _CO_SAME_TURN_LOOKAHEAD_SCALE: float = 0.5
+# Sweep-pass suppression — stationary cross-traffic ego turns through.
+_SWEEP_PASS_MAX_TARGET_SPEED: float = 1.0    # m/s
 
 # Intersection / shared-turn false-positive suppression
 # Fix A — Ghost-arc scaling for near-head-on vehicles clearly in their own lane.
@@ -506,11 +508,11 @@ class AEBThread(BaseThread):
             # Left path: when ego turns right, left path can cross center → snap to center (curvature 0)
             left_kappa = ego_curvature + delta_kappa
             if ego_curvature < 0 and left_kappa < 0:
-                left_kappa = left_kappa/1.5
+                left_kappa = left_kappa/1.2
             # Right path: when ego turns left, right path can cross center → snap to center (curvature 0)
             right_kappa = ego_curvature - delta_kappa
             if ego_curvature > 0 and right_kappa > 0:
-                right_kappa = right_kappa/1.5
+                right_kappa = right_kappa/1.2
             ego_evasion_left = build_arc(
                 ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
                 left_kappa, ego_hw, dynamic_horizon,
@@ -719,15 +721,6 @@ class AEBThread(BaseThread):
                     ego_arc, cross_arcs, _CORRIDOR_MARGIN, _COLLISION_SAMPLES, lateral_gap,
                 )
 
-                if Settings.debug and unbraked_hit is not None:
-                    print(
-                        f"[AEB-PATH] vid={v.id} hit@t={unbraked_hit[0]:.2f}s "
-                        f"fwd_dot={fwd_dot:.3f} co_dir={co_directional} head_on={head_on} "
-                        f"near_ho={near_head_on} lat={lateral_offset:.2f}m "
-                        f"ego_k={ego_curvature:.4f} veh_k={v_curvature:.4f} "
-                        f"dist={dist:.1f}m spd={abs_v_speed:.1f}m/s"
-                    )
-
                 # Suppress diverging co-directional moving targets only.
                 # Fix C — for a co-directional vehicle in the outer lane of the same
                 # corner as ego (same-sign curvature, lateral displacement confirmed,
@@ -752,27 +745,9 @@ class AEBThread(BaseThread):
                     fix_c_active = g_lat and g_ego_k and g_veh_k and g_sign
                     if fix_c_active:
                         co_diverge_dt = dynamic_horizon * _CO_SAME_TURN_LOOKAHEAD_SCALE
-                    approaching_short = _is_approaching(
-                        ego_arc, base_target_arc, unbraked_hit[0],
-                        dt=_CO_DIR_DIVERGE_LOOKAHEAD_S,
-                    )
-                    approaching_ext = _is_approaching(
-                        ego_arc, base_target_arc, unbraked_hit[0],
-                        dt=dynamic_horizon * _CO_SAME_TURN_LOOKAHEAD_SCALE,
-                    )
                     suppressed = not _is_approaching(
                         ego_arc, base_target_arc,
                         unbraked_hit[0], dt=co_diverge_dt)
-                    if Settings.debug:
-                        print(
-                            f"[FIX-C] vid={v.id} fwd_dot={fwd_dot:.3f} "
-                            f"lat={lateral_offset:.2f}m ego_k={ego_curvature:.4f} "
-                            f"veh_k={v_curvature:.4f} sign_ok={g_sign} "
-                            f"g_lat={g_lat} g_ego_k={g_ego_k} g_veh_k={g_veh_k} "
-                            f"fix_c={'YES' if fix_c_active else 'NO'} "
-                            f"appr_short={approaching_short} appr_ext={approaching_ext} "
-                            f"suppressed={suppressed}"
-                        )
                     if suppressed:
                         unbraked_hit = None
 
@@ -792,14 +767,21 @@ class AEBThread(BaseThread):
                     g_veh_k_ct = abs(base_target_arc.curvature) > _TURNING_DIVERGE_CURVATURE
                     approaching_ct = _is_approaching(ego_arc, base_target_arc, unbraked_hit[0])
                     suppressed_ct = g_veh_k_ct and not approaching_ct
-                    if Settings.debug:
-                        print(
-                            f"[CROSS-T] vid={v.id} fwd_dot={fwd_dot:.3f} "
-                            f"lat={lateral_offset:.2f}m ego_k={ego_curvature:.4f} "
-                            f"arc_k={base_target_arc.curvature:.4f} g_veh_k={g_veh_k_ct} "
-                            f"approaching={approaching_ct} suppressed={suppressed_ct}"
-                        )
                     if suppressed_ct:
+                        unbraked_hit = None
+
+                # Sweep-pass: stationary cross-traffic ego turns through.
+                # Guards: target near-stationary, ego in a real corner.
+                # At t_hit, ego's heading has rotated past the vehicle — not a real collision.
+                if (unbraked_hit is not None
+                        and abs_v_speed < _SWEEP_PASS_MAX_TARGET_SPEED
+                        and abs(ego_curvature) > _TURNING_DIVERGE_CURVATURE):
+                    _sp_dist = ego_arc._dist_at_time(unbraked_hit[0])
+                    _sp_ex, _sp_ez = ego_arc.position_at_dist(_sp_dist)
+                    _sp_yaw = ego_arc.heading_at_dist(_sp_dist)
+                    _sp_fwd_x = -math.sin(_sp_yaw)
+                    _sp_fwd_z = -math.cos(_sp_yaw)
+                    if (vx - _sp_ex) * _sp_fwd_x + (vz - _sp_ez) * _sp_fwd_z <= 0.0:
                         unbraked_hit = None
 
                 if unbraked_hit is None:
@@ -899,18 +881,6 @@ class AEBThread(BaseThread):
                     right_clears_ego = arc_arc_collision(
                         ego_arc, tgt_evasion_right, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
                     ) is None
-                    if Settings.debug:
-                        print(
-                            f"[ONCO-EVA] vid={v.id} lat={lateral_offset:.2f}m "
-                            f"own_lane={own_lane} same_curve={same_curve} "
-                            f"lane_thr={lane_threshold:.2f}m "
-                            f"arc_k={base_target_arc.curvature:.4f} dk={delta_kappa_t:.4f} "
-                            f"fixb={fixb_fired} ego_k={ego_curvature:.4f} "
-                            f"evasion_decel={evasion_decel:.1f} "
-                            f"left_k={base_target_arc.curvature+delta_kappa_t:.4f} "
-                            f"right_k={base_target_arc.curvature-delta_kappa_t:.4f} "
-                            f"left_clears={left_clears_ego} right_clears={right_clears_ego}"
-                        )
                     if left_clears_ego or right_clears_ego:
                         oncoming_evasion_filtered_ids.add(v.id)
                         continue
@@ -967,18 +937,6 @@ class AEBThread(BaseThread):
                 new_state = AEBState.WARN
             if time_to_brake < _BRAKE_TTB_THRESHOLD:
                 new_state = AEBState.BRAKE
-                for v in vehicles:
-                    if v.id in colliding_ids:
-                        abs_v_spd = abs(v.speed)
-                        v_curv = math.radians(v.angular_velocity) / abs_v_spd if abs_v_spd > 0.5 else 0.0
-                        _, v_yaw_deg, _ = v.rotation.euler()
-                        v_yaw_rad = math.radians(v_yaw_deg)
-                        veh_fwd_x = -math.sin(v_yaw_rad)
-                        veh_fwd_z = -math.cos(v_yaw_rad)
-                        dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
-                        print(f"[AEB DEBUG] vid={v.id} fwd_dot={dot:.3f} head_on={dot < -0.7} "
-                            f"co_dir={abs(dot) > 0.7} curvature={v_curv:.4f} "
-                            f"speed={abs_v_spd:.1f}m/s ttb={best_ttb:.2f}s dist={best_raw_dist:.1f}m")
 
         # BRAKE latch — prevent rapid cycling near threshold
         if self._prev_state == AEBState.BRAKE and time_to_brake < _BRAKE_RELEASE_THRESHOLD:
