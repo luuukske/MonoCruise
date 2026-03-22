@@ -34,18 +34,10 @@ def create_visualization_bar() -> VisualizationBar:
     """
     return VisualizationBar()
 
-# ---------------------------------------------------------------------------
-# Timing constants
-# ---------------------------------------------------------------------------
-
 BOOL_PRESS_DURATION: float = 0.1
 HAZARD_PRESS_DURATION: float = 0.4
 HAZARD_VERIFY_DELAY: float = 0.1
 HAZARD_MAX_RETRIGGERS: int = 3
-
-# ---------------------------------------------------------------------------
-# Thread data
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -60,9 +52,6 @@ class SendingThreadData(ThreadData):
     )
 
 
-# ---------------------------------------------------------------------------
-# Thread
-# ---------------------------------------------------------------------------
 
 
 class SendingThread(BaseThread):
@@ -92,9 +81,9 @@ class SendingThread(BaseThread):
         # Edge detection for force-on
         self._last_should_force: bool = False
 
-    # ------------------------------------------------------------------ #
-    # Public API (called from other threads)                               #
-    # ------------------------------------------------------------------ #
+        # User turned hazards on in-game: block autodisable until speed ≤ 12 km/h or hazards off
+        self._hazard_user_override: bool = False
+        self._prev_tel_hazards: bool = False
 
     def toggle_bool(self, name: str, duration: float = BOOL_PRESS_DURATION) -> None:
         """
@@ -131,10 +120,6 @@ class SendingThread(BaseThread):
             self._hazard_phase = "idle"
         logger.debug("change_hazards: wanted=%s duration=%.3fs", wanted, duration)
 
-    # ------------------------------------------------------------------ #
-    # Lifecycle                                                            #
-    # ------------------------------------------------------------------ #
-
     def _reset_controller(self, controller: SCSController | None) -> None:
         if controller is None:
             return
@@ -163,6 +148,8 @@ class SendingThread(BaseThread):
         self._hazard_phase = "idle"
         self._hazard_wanted = None
         self._last_should_force = False
+        self._hazard_user_override = False
+        self._prev_tel_hazards = False
         if self._controller is not None:
             logger.debug("SCSController initialised")
 
@@ -190,9 +177,6 @@ class SendingThread(BaseThread):
                 self.data.abackward = 0.0
 
     def _loop_body(self, controller: SCSController) -> None:
-        # ------------------------------------------------------------------
-        # Pedal thread state (safe lookup: thread may be missing or down)
-        # ------------------------------------------------------------------
         try:
             pedal_thread = registry.get_thread("main_pedal_thread")
         except KeyError:
@@ -203,6 +187,7 @@ class SendingThread(BaseThread):
 
         em_stop = False
         AEB_brake = False
+        AEB_warn = False
         if pedal_thread is not None and pedal_alive:
             try:
                 with pedal_thread.data._lock:
@@ -219,9 +204,7 @@ class SendingThread(BaseThread):
                 pass
 
             em_stop = em_stop or AEB_brake
-        # ------------------------------------------------------------------
-        # Telemetry (safe lookup and read: thread may be missing or down)
-        # ------------------------------------------------------------------
+
         connected = False
         gear = 0
         tel_hazards = False
@@ -243,16 +226,31 @@ class SendingThread(BaseThread):
             except Exception as e:
                 logger.debug("telemetry read failed: %s", e)
 
-        # ------------------------------------------------------------------
-        # Auto-disable hazards when driving
-        # ------------------------------------------------------------------
+        speed_kmh = speed_ms * 3.6
+        if connected:
+            if tel_hazards and not self._prev_tel_hazards:
+                with self._lock:
+                    wanted_on = self._hazard_wanted is True
+                if not wanted_on:
+                    self._hazard_user_override = True
+            if not tel_hazards:
+                self._hazard_user_override = False
+            elif speed_kmh <= 20.0:
+                self._hazard_user_override = False
+            self._prev_tel_hazards = tel_hazards
+
         if Settings.autodisable_hazards and pedal_thread is not None and pedal_alive:
             try:
-                speed_kmh = speed_ms * 3.6
                 with pedal_thread.data._lock:
                     gas_pct = pedal_thread.data.gasval
                     brake_pct = pedal_thread.data.brakeval
-                if speed_kmh > 12.0 and gas_pct >= 0.40 and brake_pct < 0.05:
+                if (
+                    speed_kmh > 12.0
+                    and gas_pct >= 0.60
+                    and brake_pct < 0.05
+                    and not AEB_warn
+                    and not self._hazard_user_override
+                ):
                     with self._lock:
                         self._hazard_wanted = False
                         if self._hazard_phase == "idle":
@@ -260,22 +258,13 @@ class SendingThread(BaseThread):
             except Exception as e:
                 logger.debug("autodisable_hazards read failed: %s", e)
 
-        # ------------------------------------------------------------------
-        # Force hazards ON on rising edge of em_stop / pedal thread down
-        # ------------------------------------------------------------------
         should_force = not pedal_alive or em_stop
         if should_force and not self._last_should_force:
             self.change_hazards(True)
         self._last_should_force = should_force
 
-        # ------------------------------------------------------------------
-        # Hazard state machine
-        # ------------------------------------------------------------------
         self._tick_hazards(controller, tel_hazards)
 
-        # ------------------------------------------------------------------
-        # Persistent bool overrides (always applied)
-        # ------------------------------------------------------------------
         self._tick_bool_overrides(controller)
 
         if not connected:
@@ -300,9 +289,6 @@ class SendingThread(BaseThread):
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
             return
 
-        # ------------------------------------------------------------------
-        # Pedal inputs
-        # ------------------------------------------------------------------
         try:
             with pedal_thread.data._lock:
                 gas_output = pedal_thread.data.gas_output
@@ -370,9 +356,6 @@ class SendingThread(BaseThread):
             self.data.airhorn_active = False
         logger.debug("teardown complete")
 
-    # ------------------------------------------------------------------ #
-    # Tick helpers                                                         #
-    # ------------------------------------------------------------------ #
 
     def _tick_bool_overrides(self, controller: SCSController) -> None:
         with self._lock:
