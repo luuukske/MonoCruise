@@ -307,7 +307,8 @@ def _build_vehicle_collision_data(
     v_hw = v.size.width / 2.0
     v_hw_coll = max(v_hw - 0.1, 0.3)
     abs_v_speed = abs(v.speed)
-    v_curvature = (
+    _vk = v.curvature_from_history()
+    v_curvature = _vk if _vk is not None else (
         math.radians(v.angular_velocity) / abs_v_speed if abs_v_speed > 0.5 else 0.0
     )
     _, v_yaw_deg, _ = v.rotation.euler()
@@ -508,11 +509,11 @@ class AEBThread(BaseThread):
             # Left path: when ego turns right, left path can cross center → snap to center (curvature 0)
             left_kappa = ego_curvature + delta_kappa
             if ego_curvature < 0 and left_kappa < 0:
-                left_kappa = left_kappa/1.2
+                left_kappa = left_kappa/1.5
             # Right path: when ego turns left, right path can cross center → snap to center (curvature 0)
             right_kappa = ego_curvature - delta_kappa
             if ego_curvature > 0 and right_kappa > 0:
-                right_kappa = right_kappa/1.2
+                right_kappa = right_kappa/1.5
             ego_evasion_left = build_arc(
                 ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
                 left_kappa, ego_hw, dynamic_horizon,
@@ -590,10 +591,10 @@ class AEBThread(BaseThread):
             v_hw_coll = max(v_hw - 0.1, 0.3)
 
             abs_v_speed = abs(v.speed)
-            if abs_v_speed > 0.5:
-                v_curvature = math.radians(v.angular_velocity) / abs_v_speed
-            else:
-                v_curvature = 0.0
+            _vk = v.curvature_from_history()
+            v_curvature = _vk if _vk is not None else (
+                math.radians(v.angular_velocity) / abs_v_speed if abs_v_speed > 0.5 else 0.0
+            )
 
             veh_arc = v.get_arc(dynamic_horizon, arc_start_pctg=_ARC_START_PCTG)
             trailer_dicts = []

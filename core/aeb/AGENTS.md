@@ -639,42 +639,23 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 
 ---
 
-## 13. Position-Based Curvature (Planned)
+## 13. Position-Based Curvature
 
-Both ego and traffic vehicles currently derive curvature from `angular_velocity / speed`
-(yaw-rate proxy). The plan is to replace this with a geometry-based estimate derived
-from fitting a circumscribed circle through recent `(t, x, z)` samples.
+Traffic vehicles derive curvature from a circumscribed circle fit over `_position_history` (`curvature_from_history()`), falling back to `angular_velocity / speed` when fewer than 3 samples are available. Ego still uses the yaw-rate proxy (stub pending).
 
-### Ego — `AEBThread._ego_curvature_from_history()`
+### Traffic vehicles — `Vehicle.curvature_from_history()` ✅
 
-`self._ego_position_history` stores `(monotonic_time, x, z)` tuples, newest last,
-capped at `_EGO_POSITION_HISTORY_LEN = 10`. It is populated every `loop()` call
-before `ego_curvature` is computed. Same structure as `Vehicle._position_history`.
+Averages κ over up to four `(oldest, mid, newest)` triples from `_position_history`. Sign from cross product of consecutive displacement vectors: positive = left turn (κ > 0). Returns `0.0` when near-stationary (chord < 5 cm); `None` when < 3 samples (caller falls back to yaw-rate). `_position_history` is populated for both TMP and AI vehicles during full-frame updates in `update_from_last()`.
 
+Used in `get_arc()` and both `v_curvature` sites in `thread.py`:
 ```python
-ego_curvature = self._ego_curvature_from_history() or ego_curvature_yaw
+_hist_k = self.curvature_from_history()
+curvature = _hist_k if _hist_k is not None else (math.radians(self.angular_velocity) / abs_speed if abs_speed > 0.5 else 0.0)
 ```
 
-The stub returns `None`; callers fall back to the yaw-rate proxy
-(`ego_curvature_yaw`). When implemented, return `0.0` (not `None`) for straight
-roads — the `or` fallback treats `0.0` as falsy. Change to `if ... is not None else`
-before shipping the real implementation.
+### Ego — `AEBThread._ego_curvature_from_history()` (stub)
 
-### Traffic vehicles — `Vehicle.curvature_from_history()`
-
-Stub on `Vehicle`, returns `None`. `_position_history` is already maintained for
-TMP vehicles. AI vehicles will need history population added to `update_from_last()`
-when this is implemented.
-
-### Implementation notes (both stubs)
-
-- Require ≥ 3 samples and a minimum arc chord to avoid divide-by-zero.
-- Use the circumscribed-circle formula on oldest / middle / newest triple;
-  average over all valid triples for stability.
-- Sign: derive from cross product of consecutive displacement vectors —
-  positive = left turn (κ > 0), matching `ArcPath` convention.
-- Guard: chord << arc-length estimate (near-straight) → return `0.0`, not `None`.
-- Clear history on large position jumps (teleport / reload detection).
+Still returns `None`; falls back to yaw-rate proxy. When implemented, change the `or` fallback to `if ... is not None else` — `0.0` is falsy and would incorrectly fall back.
 
 ---
 
@@ -712,7 +693,7 @@ when this is implemented.
 - **`same_curve` uses `ego_curvature * v_curvature > 0`.** Both must have the same curvature sign and be above `_TURNING_DIVERGE_CURVATURE`. A vehicle drifting across (zero curvature) or cutting the corner wrong (opposite sign) stays at the 2.0 m `_OPPOSITE_LANE_OFFSET` threshold and does not benefit from the reduced `_SAME_CURVE_OWN_LANE_LAT`.
 - **`_SAME_CURVE_OWN_LANE_LAT = 1.0 m` is tight by design.** On a shared curve, the cross-product lateral offset compresses due to heading-axis misalignment — a full-lane-away vehicle reads as 1.0–1.5 m. A vehicle genuinely in ego's lane on the same curve would be < 1 m. Do not raise this without understanding the compression effect.
 - **`_ego_curvature_from_history()` returns `None` (stub).** The `or` fallback in `ego_curvature = self._ego_curvature_from_history() or ego_curvature_yaw` depends on this. When the real implementation is ready, change to `if ... is not None else` — a `0.0` return from a straight-road estimate is falsy and would incorrectly fall back to the yaw-rate proxy.
-- **`Vehicle.curvature_from_history()` returns `None` (stub).** AI vehicles do not yet have `_position_history` populated. Both stubs must be implemented together when position-based curvature lands.
+- **`Vehicle.curvature_from_history()` is implemented.** Returns circumscribed-circle curvature from `_position_history`; `None` when < 3 samples (caller falls back to yaw-rate); `0.0` when near-stationary. Both TMP and AI vehicles populate `_position_history` in `update_from_last()`. Used in `get_arc()` and both `v_curvature` sites in `thread.py`.
 - **Fix C extends the co-directional diverge lookahead, not the curvature model.** The inner/outer lane arc overlap is a timing artifact — corridors overlap before centerlines cross. The fix is a longer `_is_approaching` dt, not a wider arc. Do not relax the curvature-sign guard — without it, a vehicle genuinely drifting into ego's lane in a corner could be suppressed.
 - **Sweep-pass suppression targets stationary cross-traffic only** (`abs_v_speed < 1.0 m/s`). It must not fire on moving vehicles — a slow-moving vehicle crossing ego's path is a real threat. The ego curvature guard (`|ego_curvature| > _TURNING_DIVERGE_CURVATURE`) ensures it only fires during a real corner, never on a straight road.
 

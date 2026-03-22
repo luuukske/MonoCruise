@@ -878,7 +878,13 @@ class Vehicle:
             self._smooth_accel = smooth_accel
             self.speed = smooth_speed
             self.acceleration = smooth_accel
-        # AI (singleplayer): keep buffer speed and acceleration as-is.
+        else:
+            # AI: populate position history for curvature_from_history()
+            _ai_hist = list(self._position_history)
+            _ai_hist.append((t_now, raw_x, raw_z))
+            if len(_ai_hist) > _TMP_SPEED_HISTORY_LEN:
+                _ai_hist = _ai_hist[-_TMP_SPEED_HISTORY_LEN:]
+            self._position_history = _ai_hist
 
         # --- Type 3: Crash detection (TMP only) ---
         # Evidence accumulator driven by three signals: rapid raw yaw change, persistent
@@ -925,25 +931,52 @@ class Vehicle:
                 self._smooth_accel = 0.0
 
     def curvature_from_history(self) -> float | None:
-        """Estimate curvature (1/m) from recent position history.
+        """Curvature (1/m) from circumscribed circle fit over _position_history.
 
-        Intended to replace the angular_velocity / speed proxy with a geometry-based
-        value derived from fitting a circumscribed circle through recent (t, x, z)
-        samples in _position_history, analogous to AEBThread._ego_curvature_from_history().
-
-        Returns None until implemented; callers fall back to angular_velocity / speed.
-
-        Implementation notes (when ready):
-        - Require >= 3 samples and a minimum arc chord to avoid divide-by-zero.
-        - Use the circumscribed-circle formula on oldest / middle / newest triple;
-          average over all valid triples for stability.
-        - Sign: derive from cross product of consecutive displacement vectors —
-          positive = left turn (κ > 0), matching ArcPath convention.
-        - Guard: if chord << arc_length estimate (near-straight), return 0.0 not None.
-        - For TMP vehicles _position_history is already maintained; for AI vehicles
-          it is currently empty — populate it in update_from_last() when this lands.
+        Averages over up to four (oldest, mid, newest) triples for stability.
+        Returns None when < 3 samples; 0.0 when near-stationary or near-straight.
+        Falls back to angular_velocity / speed in get_arc() when None.
         """
-        return None
+        hist = self._position_history
+        if len(hist) < 3:
+            return None
+        _, x0, z0 = hist[0]
+        _, xn, zn = hist[-1]
+        if (xn - x0) ** 2 + (zn - z0) ** 2 < 0.05 ** 2:
+            return 0.0
+
+        n = len(hist)
+        candidates = [(0, n // 2, n - 1)]
+        if n >= 5:
+            candidates.append((1, (n - 1) // 2, n - 2))
+        if n >= 7:
+            candidates += [(0, n // 3, n - 1), (0, 2 * n // 3, n - 1)]
+
+        total_k = 0.0
+        count = 0
+        for i, j, k in candidates:
+            _, ax, az = hist[i]
+            _, bx, bz = hist[j]
+            _, cx, cz = hist[k]
+            if (bx - ax) ** 2 + (bz - az) ** 2 < 0.05 ** 2:
+                continue
+            if (cx - bx) ** 2 + (cz - bz) ** 2 < 0.05 ** 2:
+                continue
+            D = 2.0 * (ax * (bz - cz) + bx * (cz - az) + cx * (az - bz))
+            if abs(D) < 1e-6:
+                count += 1  # collinear → κ = 0 contribution
+                continue
+            a2 = ax * ax + az * az
+            b2 = bx * bx + bz * bz
+            c2 = cx * cx + cz * cz
+            ux = (a2 * (bz - cz) + b2 * (cz - az) + c2 * (az - bz)) / D
+            uz = -(a2 * (bx - cx) + b2 * (cx - ax) + c2 * (ax - bx)) / D
+            R = max(math.sqrt((ax - ux) ** 2 + (az - uz) ** 2), _MIN_CURVATURE_RADIUS)
+            cross = (bx - ax) * (cz - bz) - (bz - az) * (cx - bx)
+            total_k += (1.0 if cross > 0.0 else -1.0) / R
+            count += 1
+
+        return total_k / count if count > 0 else None
 
     def get_arc(
         self,
@@ -952,12 +985,11 @@ class Vehicle:
         decel: float = 0.0,
         arc_start_pctg: float = 1.0,
     ) -> ArcPath:
-        """ArcPath for this vehicle from smoothed pose and curvature (angular_velocity/speed).
+        """ArcPath for this vehicle from smoothed pose and curvature.
 
-        Braking vehicles (acceleration < 0) are modelled via decel so arc_length uses the
-        braking distance formula v²/(2d) rather than raw negative accel. Crash-induced
-        backward position spikes — which produce large negative acceleration values — are
-        suppressed by the 6 m/s² cap inside _accel_to_arc_params().
+        Curvature is derived from position history when available (circumscribed
+        circle fit), falling back to angular_velocity / speed. Crash-induced
+        backward position spikes are suppressed by the 6 m/s² cap in _accel_to_arc_params().
         """
         yaw_rad = (
             self._smooth_yaw
@@ -965,7 +997,11 @@ class Vehicle:
             else math.radians(self.rotation.euler()[1])
         )
         abs_speed = abs(self.speed)
-        curvature = math.radians(self.angular_velocity) / abs_speed if abs_speed > 0.5 else 0.0
+        _hist_k = self.curvature_from_history()
+        if _hist_k is not None:
+            curvature = _hist_k
+        else:
+            curvature = math.radians(self.angular_velocity) / abs_speed if abs_speed > 0.5 else 0.0
         effective_hw = half_width if half_width is not None else self.size.width / 2.0
         effective_decel, effective_accel = _accel_to_arc_params(self.accel_for_arc(), decel)
 
