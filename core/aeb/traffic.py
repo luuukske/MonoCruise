@@ -42,20 +42,18 @@ _RAW_YAW_ALPHA: float = 0.5
 # TMP lag detection — see AGENTS.md §7 "Lag / freeze detection".
 _LAG_MIN_SPEED_MS: float = 5.0           # m/s  — below this no lag detection runs
 _LAG_DISP_RATIO: float = 0.10           # flag lag if raw disp < 10 % of expected
-_LAG_FREEZE_DURATION: float = 0.3       # s    — freeze window; release after this
+_LAG_FREEZE_DURATION: float = 0.2       # s    — freeze window; release after this
 
 # Position mismatch (TMP only) — out-of-order packet rejection.
 # Fires when raw position jumps backward along heading.  Max 3 consecutive frames.
 _POS_MISMATCH_BACKWARD_THRESHOLD: float = 0.00   # m — min backward dot to flag
 _POS_MISMATCH_MAX_FRAMES: int = 3
 
-# Crash detection (TMP only) — evidence accumulator + confirmation window.
-_CRASH_YAW_RATE_THRESHOLD: float = 30.0         # deg/s raw yaw rate → evidence
-_CRASH_MICRO_DISP_SQ: float = 0.15 ** 2        # m² raw disp² — micro-oscillation signal
-_CRASH_EVIDENCE_DECAY: float = 0.7              # multiplier per full frame
-_CRASH_EVIDENCE_THRESHOLD: float = 0.75         # evidence level to start confirm timer
-_CRASH_CONFIRM_DURATION: float = 0.25           # s evidence must hold before confirming
-_CRASH_DECEL_RATE: float = 10.0                 # m/s² speed bleed once confirmed
+# Crash detection (TMP only) — angular jerk vs last sample (every read, not only full frames).
+_CRASH_PITCH_JERK: float = 3.0                 # deg/s² pitch angular jerk threshold
+_CRASH_YAW_JERK: float = 10.0                   # deg/s² yaw angular jerk threshold
+_CRASH_ROLL_JERK: float = 3.0                  # deg/s² roll angular jerk threshold
+_CRASH_CONFIRM_DURATION: float = 0.00           # s jerk must hold before confirming
 
 _MIN_CURVATURE_RADIUS: float = 5.0
 _STRAIGHT_CURVATURE_EPS: float = 1e-6
@@ -621,9 +619,11 @@ class Vehicle:
         # Resets to 0 on any clean frame or when the cap is reached.
         self._pos_mismatch_frames: int = 0
 
-        # Crash detection (TMP only) — evidence accumulator + confirm state.
-        self._crash_evidence: float = 0.0
-        self._crash_since: Optional[float] = None   # when evidence first exceeded threshold
+        # Crash detection (TMP only) — per-axis rotation rates and displacement from prev frame.
+        self._prev_pitch_rate: Optional[float] = None
+        self._prev_yaw_rate: Optional[float] = None
+        self._prev_roll_rate: Optional[float] = None
+        self._crash_since: Optional[float] = None
         self.crash_confirmed: bool = False
 
     def accel_for_arc(self) -> float:
@@ -644,6 +644,42 @@ class Vehicle:
 
         return self.speed, self.acceleration, self.speed
 
+    def _tmp_apply_crash_rotation_jerk(self, prev: "Vehicle", t_now: float) -> None:
+        """TMP: detect crash-level rotation jerk on every buffer read (sub-frame and full)."""
+        dt = t_now - prev.time
+        if not self.is_tmp or prev._raw_x is None or dt < 1e-9:
+            return
+
+        def _adiff(a: float, b: float) -> float:
+            return (a - b + 180.0) % 360.0 - 180.0
+
+        pitch_c, yaw_c, roll_c = self.rotation.euler()
+        pitch_p, yaw_p, roll_p = prev.rotation.euler()
+        pitch_rate = _adiff(pitch_c, pitch_p) / dt
+        yaw_rate = _adiff(yaw_c, yaw_p) / dt
+        roll_rate = _adiff(roll_c, roll_p) / dt
+
+        _rot_jerk = False
+        if prev._prev_pitch_rate is not None:
+            if (
+                abs(pitch_rate - prev._prev_pitch_rate) > _CRASH_PITCH_JERK
+                or abs(yaw_rate - prev._prev_yaw_rate) > _CRASH_YAW_JERK
+                or abs(roll_rate - prev._prev_roll_rate) > _CRASH_ROLL_JERK
+            ):
+                _rot_jerk = True
+
+        self._prev_pitch_rate = pitch_rate
+        self._prev_yaw_rate = yaw_rate
+        self._prev_roll_rate = roll_rate
+
+        if _rot_jerk:
+            if self._crash_since is None:
+                self._crash_since = t_now
+            if t_now - self._crash_since >= _CRASH_CONFIRM_DURATION:
+                self.crash_confirmed = True
+        else:
+            self._crash_since = None
+
     def update_from_last(self, prev: "Vehicle", t_now: float) -> None:
         """Carry forward smoothed state or run a full update.  See AGENTS.md §7."""
         dt = t_now - prev.time
@@ -662,7 +698,9 @@ class Vehicle:
             self._lag_since = prev._lag_since
             self.lag_confirmed = prev.lag_confirmed
             self._pos_mismatch_frames = prev._pos_mismatch_frames
-            self._crash_evidence = prev._crash_evidence
+            self._prev_pitch_rate = prev._prev_pitch_rate
+            self._prev_yaw_rate = prev._prev_yaw_rate
+            self._prev_roll_rate = prev._prev_roll_rate
             self._crash_since = prev._crash_since
             self.crash_confirmed = prev.crash_confirmed
             self._smooth_speed = prev._smooth_speed
@@ -675,21 +713,28 @@ class Vehicle:
             if self.is_tmp:
                 self.acceleration = prev.acceleration
 
+            self._tmp_apply_crash_rotation_jerk(prev, t_now)
+
             # TMP: between full updates (dt < threshold), do not freeze speed and pose at
             # the last full tick — the buffer may have new coordinates while prev.speed
             # still holds a bad EMA sample. Re-derive speed from (latest raw − prev raw) /
             # (t_now − prev.time) when movement exceeds the usual gate; always snap pose
-            # to latest raw. Skipped during lag freeze, position mismatch hold, crash.
+            # to latest raw. Skipped during lag freeze and position mismatch hold unless
+            # crash_confirmed, which bypasses both filters to keep position accurate.
             _tmp_sf_ok = (
                 self.is_tmp
                 and prev._raw_x is not None
                 and prev._smooth_yaw is not None
-                and not (
-                    prev._lag_since is not None
-                    and (t_now - prev._lag_since) < _LAG_FREEZE_DURATION
+                and (
+                    self.crash_confirmed
+                    or (
+                        not (
+                            prev._lag_since is not None
+                            and (t_now - prev._lag_since) < _LAG_FREEZE_DURATION
+                        )
+                        and prev._pos_mismatch_frames == 0
+                    )
                 )
-                and prev._pos_mismatch_frames == 0
-                and not prev.crash_confirmed
             )
             if _tmp_sf_ok:
                 rx = self.position.x
@@ -727,7 +772,9 @@ class Vehicle:
         self._lag_since = prev._lag_since
         self.lag_confirmed = False
         self._pos_mismatch_frames = prev._pos_mismatch_frames
-        self._crash_evidence = prev._crash_evidence
+        self._prev_pitch_rate = prev._prev_pitch_rate
+        self._prev_yaw_rate = prev._prev_yaw_rate
+        self._prev_roll_rate = prev._prev_roll_rate
         self._crash_since = prev._crash_since
         self.crash_confirmed = False
         self._smooth_speed = prev._smooth_speed
@@ -740,9 +787,13 @@ class Vehicle:
         self._raw_x = raw_x
         self._raw_z = raw_z
 
+        # --- Type 3: Crash detection (TMP only) — angular jerk; sub-frames call the same helper earlier.
+        self._tmp_apply_crash_rotation_jerk(prev, t_now)
+
         # --- Type 1: Position mismatch (TMP only, max _POS_MISMATCH_MAX_FRAMES) ---
         # Raw position jumped backward along the vehicle's heading — out-of-order packet.
         # Yaw EMA and angular_velocity still run; position and carried speed/accel are held.
+        # Bypassed when crash_confirmed — a crashed vehicle's backward jumps are real.
         _skip_position_update = False
         if (self.is_tmp
                 and prev._smooth_yaw is not None
@@ -752,14 +803,16 @@ class Vehicle:
             _pm_fwd_x = -math.sin(prev._smooth_yaw)
             _pm_fwd_z = -math.cos(prev._smooth_yaw)
             if (_pm_dx * _pm_fwd_x + _pm_dz * _pm_fwd_z < -_POS_MISMATCH_BACKWARD_THRESHOLD
-                    and self._pos_mismatch_frames < _POS_MISMATCH_MAX_FRAMES):
+                    and self._pos_mismatch_frames < _POS_MISMATCH_MAX_FRAMES
+                    and not self.crash_confirmed):
                 self._pos_mismatch_frames = prev._pos_mismatch_frames + 1
                 _skip_position_update = True
             else:
                 self._pos_mismatch_frames = 0
 
         # --- Type 2: TMP lag detection (near-stationary freeze with speed decay) ---
-        if self.is_tmp and prev._raw_x is not None and not _skip_position_update:
+        # Bypassed when crash_confirmed — any movement on a crashed vehicle is real position data.
+        if self.is_tmp and prev._raw_x is not None and not _skip_position_update and not self.crash_confirmed:
             _raw_disp_sq = (raw_x - prev._raw_x) ** 2 + (raw_z - prev._raw_z) ** 2
             _expected_disp = abs(prev.speed) * dt
             _lag_threshold_sq = (_expected_disp * _LAG_DISP_RATIO) ** 2
@@ -885,50 +938,6 @@ class Vehicle:
             if len(_ai_hist) > _TMP_SPEED_HISTORY_LEN:
                 _ai_hist = _ai_hist[-_TMP_SPEED_HISTORY_LEN:]
             self._position_history = _ai_hist
-
-        # --- Type 3: Crash detection (TMP only) ---
-        # Evidence accumulator driven by three signals: rapid raw yaw change, persistent
-        # backward displacement, and micro-oscillation.  Once evidence holds above the
-        # threshold for _CRASH_CONFIRM_DURATION, crash_confirmed is set, speed is bled
-        # to zero, and acceleration is forced to 0.  Positions stay raw.
-        if self.is_tmp and prev._smooth_yaw is not None and prev._raw_x is not None:
-            self._crash_evidence = prev._crash_evidence * _CRASH_EVIDENCE_DECAY
-
-            # Signal 1: rapid raw yaw rate (not from smooth turning)
-            _raw_yaw_deg = math.degrees(raw_yaw)
-            _prev_raw_yaw_deg = prev.rotation.euler()[1]
-            _raw_yaw_rate = abs((_raw_yaw_deg - _prev_raw_yaw_deg + 180.0) % 360.0 - 180.0) / dt
-            if _raw_yaw_rate > _CRASH_YAW_RATE_THRESHOLD:
-                self._crash_evidence += 0.35
-
-            # Signal 2: backward raw displacement
-            _cr_dx = raw_x - prev._raw_x
-            _cr_dz = raw_z - prev._raw_z
-            _cr_fwd_x = -math.sin(prev._smooth_yaw)
-            _cr_fwd_z = -math.cos(prev._smooth_yaw)
-            if _cr_dx * _cr_fwd_x + _cr_dz * _cr_fwd_z < -_POS_MISMATCH_BACKWARD_THRESHOLD:
-                self._crash_evidence += 0.30
-
-            # Signal 3: micro-oscillation — tiny raw displacement despite nonzero speed
-            _cr_disp_sq = _cr_dx * _cr_dx + _cr_dz * _cr_dz
-            if abs(prev.speed) > 1.0 and _cr_disp_sq < _CRASH_MICRO_DISP_SQ:
-                self._crash_evidence += 0.20
-
-            self._crash_evidence = min(1.0, self._crash_evidence)
-
-            if self._crash_evidence >= _CRASH_EVIDENCE_THRESHOLD:
-                if self._crash_since is None:
-                    self._crash_since = t_now
-                if t_now - self._crash_since >= _CRASH_CONFIRM_DURATION:
-                    self.crash_confirmed = True
-            else:
-                self._crash_since = None
-
-            if self.crash_confirmed:
-                self.speed = max(0.0, prev.speed - _CRASH_DECEL_RATE * dt)
-                self._smooth_speed = self.speed
-                self.acceleration = 0.0
-                self._smooth_accel = 0.0
 
     def curvature_from_history(self) -> float | None:
         """Curvature (1/m) from circumscribed circle fit over _position_history.

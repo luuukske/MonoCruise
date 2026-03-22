@@ -273,15 +273,23 @@ Detects out-of-order packets where the raw position jumps backward along the hea
 
 ### Crash detection (TMP only)
 
-Evidence accumulator driven by three independent signals. Once evidence holds above threshold for `_CRASH_CONFIRM_DURATION`, `crash_confirmed` is set. Position EMA continues normally; only speed and acceleration are filtered.
+Fires when **both** rotation jerk (any axis) **and** sporadic position change occur in the same frame window. Runs before position-mismatch and lag early-returns so a crash-induced backward jump is not silently swallowed.
 
-| Signal | Evidence added | Threshold |
-|--------|---------------|-----------|
-| Raw yaw rate | +0.35 | > 30 deg/s |
-| Backward raw displacement | +0.30 | dot < -0.3 m |
-| Micro-oscillation | +0.20 | `raw_disp_sq < 0.0225 m²` AND `speed > 1 m/s` |
+**Rotation jerk** — per-axis rate (deg/s) is computed each full frame from `rotation.euler()` (pitch/yaw/roll). Jerk = change in rate since previous frame. Fires if any axis exceeds its threshold:
 
-Evidence decays by `× 0.7` each full frame. `_crash_since` starts when evidence first exceeds `0.75`. After `0.25 s`: `crash_confirmed = True`; speed decelerates at `10 m/s²` toward 0; `acceleration = 0`. Positions stay raw; AEB handles the stopped obstacle via arc collision.
+| Axis | Jerk threshold |
+|------|---------------|
+| Pitch | 60 deg/s² |
+| Yaw | 120 deg/s² |
+| Roll | 60 deg/s² |
+
+**Sporadic position** — fires on either:
+- Vertical jump: `|ΔY| > 0.08 m`, or
+- XZ direction reversal: `cos(prev_disp, cur_disp) < -0.3` when both displacement magnitudes exceed 0.025 m.
+
+When both signals fire simultaneously: `_crash_since` starts. After `0.10 s`: `crash_confirmed = True`. `_crash_since` resets whenever either signal is absent.
+
+**Effect of `crash_confirmed`:** disables the position-mismatch filter and the lag freeze for that vehicle. Position, speed, and acceleration are derived from raw data as normal. Any displacement — even tiny — passes through unfiltered. Speed and acceleration are **not** overridden; AEB evaluates the vehicle from live kinematics.
 
 ### Sub-frame pass (dt < 0.05 s)
 
@@ -619,7 +627,7 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | Positions | No EMA — always raw world coordinates |
 | Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > 2 m/s` → decay speed: `prev_speed × (1 − frac²)`, release after 0.3 s |
 | Pos mismatch | `dot(raw_disp, prev_fwd) < -0.05 m` AND `is_tmp` AND `frames < 10` → hold smooth pos + speed, allow yaw |
-| Crash evidence | decay `× 0.7`/frame; +0.35 raw yaw rate > 30 deg/s; +0.30 backward disp; +0.20 micro-osc; confirm after 0.25 s above 0.75 |
+| Crash detection | rotation jerk (pitch/yaw/roll deg/s²) AND (|ΔY| > 0.08 m OR XZ dir reversal cos < -0.3); both must fire → confirm after 0.10 s; disables pos-mismatch filter and lag freeze; speed/accel stay raw |
 | Yaw EMA (wrap-safe) | `smooth += 0.5 * ((raw - smooth + π) % 2π - π)` |
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
 | Evasion filter Δκ | `min(0.1*9.81 / v², 0.008)` with additional centreline snap when evasion path would cross lane centre |
@@ -681,7 +689,8 @@ Still returns `None`; falls back to yaw-rate proxy. When implemented, change the
 - **`lag_confirmed` is set by `traffic.py`, not `thread.py`.** thread.py does not need to check it. A confirmed-stopped vehicle has speed = 0 and is detected as a stationary obstacle by the existing arc collision logic.
 - **Position mismatch (TMP only) runs before lag detection.** It is mutually exclusive with lag: a backward jump is not near-stationary. The `not _skip_position_update` guard on the lag block enforces this.
 - **Position mismatch is capped at `_POS_MISMATCH_MAX_FRAMES (10)`.** When the cap is reached, the next frame always passes raw position through. Without this cap, a genuine crash or prolonged backward event would be silently swallowed.
-- **Crash detection does not move positions.** Only `speed` (decelerating at 10 m/s²) and `acceleration` (forced 0) are overridden on `crash_confirmed`.
+- **Crash detection does not override speed or acceleration.** It disables the pos-mismatch filter and lag freeze so raw position data passes through unfiltered. Speed and acceleration are derived from live kinematics as normal.
+- **Crash detection runs before pos-mismatch and lag early-returns.** A crash-induced backward jump must not be silently swallowed by the pos-mismatch filter. Both signals (rotation jerk and sporadic position) must fire simultaneously; `_crash_since` resets whenever either is absent.
 - **`crash_confirmed` and `lag_confirmed` are both handled in `traffic.py`.** Neither requires special-casing in `thread.py` — both produce `speed = 0` which AEB detects as a stationary obstacle naturally.
 - **Vehicle longitudinal accel for arcs** — `Vehicle.accel_for_arc()` → `self.acceleration` (TMP = filtered kinematic; AI = buffer). Then `_accel_to_arc_params(accel, override_decel)`. Head-on override (`_FULL_BRAKE_DECEL`) takes priority.
 - **AI (singleplayer) speed is used as-is from the buffer.** Do not derive/flip sign from displacement or turning vehicles can be misclassified as reversing.
