@@ -635,6 +635,7 @@ yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
 | Opposite-lane offset | `_OPPOSITE_LANE_OFFSET = 2.0 m` — lateral distance from ego axis at which oncoming kappa scale activates |
 | Opposite-lane kappa scale | `_OPPOSITE_LANE_KAPPA_SCALE = 2.0` — multiplier on `delta_kappa_t` for clearly displaced oncoming vehicles |
 | Turning diverge curvature threshold | `_TURNING_DIVERGE_CURVATURE = 0.007 /m` (≈ 143 m radius) |
+| Sweep-pass suppression | stationary target (`abs_v_speed < _SWEEP_PASS_MAX_TARGET_SPEED (1.0 m/s)`) + ego in real corner (`|ego_curvature| > _TURNING_DIVERGE_CURVATURE`); at `t_hit`, compute ego heading and position on arc; suppress if `dot(ego_fwd_at_hit, vehicle_pos − ego_pos_at_hit) <= 0` (vehicle behind ego's heading — arc swept through, not a real collision) |
 
 ---
 
@@ -713,6 +714,7 @@ when this is implemented.
 - **`_ego_curvature_from_history()` returns `None` (stub).** The `or` fallback in `ego_curvature = self._ego_curvature_from_history() or ego_curvature_yaw` depends on this. When the real implementation is ready, change to `if ... is not None else` — a `0.0` return from a straight-road estimate is falsy and would incorrectly fall back to the yaw-rate proxy.
 - **`Vehicle.curvature_from_history()` returns `None` (stub).** AI vehicles do not yet have `_position_history` populated. Both stubs must be implemented together when position-based curvature lands.
 - **Fix C extends the co-directional diverge lookahead, not the curvature model.** The inner/outer lane arc overlap is a timing artifact — corridors overlap before centerlines cross. The fix is a longer `_is_approaching` dt, not a wider arc. Do not relax the curvature-sign guard — without it, a vehicle genuinely drifting into ego's lane in a corner could be suppressed.
+- **Sweep-pass suppression targets stationary cross-traffic only** (`abs_v_speed < 1.0 m/s`). It must not fire on moving vehicles — a slow-moving vehicle crossing ego's path is a real threat. The ego curvature guard (`|ego_curvature| > _TURNING_DIVERGE_CURVATURE`) ensures it only fires during a real corner, never on a straight road.
 
 ---
 
