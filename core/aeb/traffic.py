@@ -20,7 +20,7 @@ _ALPHA_SPEED_SCALE: float = 90.0 / 3.6   # 25.0 m/s
 
 # Speed EMA on raw_speed: 0.5 at rest → 0.15 at 90 km/h.
 _SPEED_EMA_AT_REST: float = 1.0
-_SPEED_EMA_AT_90_KMH: float = 0.2
+_SPEED_EMA_AT_90_KMH: float = 0.25
 _SPEED_EMA_CURVE_D: float = (
     _ALPHA_SPEED_SCALE
     * _SPEED_EMA_AT_90_KMH
@@ -29,7 +29,7 @@ _SPEED_EMA_CURVE_D: float = (
 
 # Accel EMA on kinematic (d filtered_speed / dt): 0.5 at rest → 0.2 at 90 km/h.
 _ACCEL_EMA_AT_REST: float = 0.5
-_ACCEL_EMA_AT_90_KMH: float = 0.2
+_ACCEL_EMA_AT_90_KMH: float = 0.3
 _ACCEL_EMA_CURVE_D: float = (
     _ALPHA_SPEED_SCALE
     * _ACCEL_EMA_AT_90_KMH
