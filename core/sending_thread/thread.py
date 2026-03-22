@@ -9,7 +9,15 @@ Responsibilities:
 - Expose toggle_bool() for timed boolean presses (False → True → False).
 - Expose set_bool() for persistent boolean overrides.
 - Expose change_hazards() for verified hazard toggling with retrigger (max 3).
-- Toggle hazards ON on rising edge of pedal-thread-down / em_stop.
+- Expose start_decel() / stop_decel() for closed-loop deceleration control.
+  Other threads (e.g. ACC) call these via registry.get_thread("sending_thread").
+
+DecelController public API (via SendingThread):
+  sending_thread.start_decel(target_ms2)  — begin closed-loop braking
+  sending_thread.stop_decel()             — cancel immediately
+  sending_thread.data.decel_active        — bool
+  sending_thread.data.decel_brake_output  — float [0..1]
+  sending_thread.data.decel_measured_ms2  — float latest measured decel
 """
 
 import logging
@@ -23,6 +31,7 @@ from core.settings import Settings
 
 from .scscontroller import SCSController
 from .visualization_bar import VisualizationBar
+from .decel_controller import DecelController, TARGET_DEFAULT as DECEL_TARGET_DEFAULT
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +56,12 @@ class SendingThreadData(ThreadData):
     hazardsActive: bool = False
     horn_active: bool = False
     airhorn_active: bool = False
+    decel_active: bool = False
+    decel_brake_output: float = 0.0
+    decel_measured_ms2: float = 0.0
     _lock: threading.Lock = field(
         default_factory=threading.Lock, repr=False, compare=False
     )
-
-
 
 
 class SendingThread(BaseThread):
@@ -64,61 +74,67 @@ class SendingThread(BaseThread):
         self._controller: SCSController | None = None
         self._lock = threading.Lock()
 
-        # toggle_bool state: name → (release_at,)
         self._bool_presses: dict[str, float] = {}
-
-        # set_bool state: name → value
         self._bool_overrides: dict[str, bool] = {}
 
-        # change_hazards state
         self._hazard_wanted: bool | None = None
         self._hazard_duration: float = HAZARD_PRESS_DURATION
         self._hazard_press_until: float = 0.0
         self._hazard_verify_until: float = 0.0
         self._hazard_retriggers: int = 0
-        self._hazard_phase: str = "idle"  # "idle", "pressing", "verifying"
+        self._hazard_phase: str = "idle"
 
-        # Edge detection for force-on
         self._last_should_force: bool = False
-
-        # User turned hazards on in-game: block autodisable until speed ≤ 12 km/h or hazards off
         self._hazard_user_override: bool = False
         self._prev_tel_hazards: bool = False
 
-    def toggle_bool(self, name: str, duration: float = BOOL_PRESS_DURATION) -> None:
-        """
-        One-shot timed press: set *name* True for *duration* seconds, then False.
+        self._decel = DecelController()
+        self._decel_target: float = DECEL_TARGET_DEFAULT
+        self._decel_key_toggle: bool = False
+        self._decel_key_lock = threading.Lock()
+        self._key_listener = None
 
-        Calling again while a press is active extends the release time.
-        """
+    def toggle_bool(self, name: str, duration: float = BOOL_PRESS_DURATION) -> None:
+        """One-shot timed press: set *name* True for *duration* seconds, then False."""
         with self._lock:
             self._bool_presses[name] = time.monotonic() + max(duration, 0.0)
         logger.debug("toggle_bool: %s for %.3fs", name, duration)
 
     def set_bool(self, name: str, value: bool = True) -> None:
-        """
-        Persistently hold *name* at *value* on the controller every tick.
-
-        Remains until you call set_bool(name, False).
-        """
+        """Persistently hold *name* at *value* on the controller every tick."""
         with self._lock:
             self._bool_overrides[name] = value
         logger.debug("set_bool: %s = %s", name, value)
 
     def change_hazards(self, wanted: bool, duration: float = HAZARD_PRESS_DURATION) -> None:
-        """
-        Request hazards ON or OFF.
-
-        Reads telemetry to check the current state. If different from *wanted*,
-        triggers a toggle press of *duration* seconds. After the press, waits
-        0.1s to verify. If not confirmed, retriggers up to 3 times.
-        """
+        """Request hazards ON or OFF with verification and up to 3 retriggers."""
         with self._lock:
             self._hazard_wanted = wanted
             self._hazard_duration = max(duration, 0.0)
             self._hazard_retriggers = 0
             self._hazard_phase = "idle"
         logger.debug("change_hazards: wanted=%s duration=%.3fs", wanted, duration)
+
+    def start_decel(self, target_ms2: float = DECEL_TARGET_DEFAULT) -> None:
+        """
+        Begin closed-loop braking at *target_ms2* (m/s², must be negative).
+        Safe to call from any thread via registry.get_thread("sending_thread").start_decel().
+        """
+        speed = self._read_speed()
+        self._decel_target = target_ms2
+        self._decel.start(speed)
+
+    def stop_decel(self) -> None:
+        """Cancel closed-loop braking immediately."""
+        self._decel.cancel()
+
+    def _read_speed(self) -> float:
+        try:
+            tel = registry.get_thread("telemetry_thread")
+            with tel.data._lock:
+                return float(tel.data.speed)
+        except (KeyError, AttributeError):
+            return 0.0
 
     def _reset_controller(self, controller: SCSController | None) -> None:
         if controller is None:
@@ -150,6 +166,28 @@ class SendingThread(BaseThread):
         self._last_should_force = False
         self._hazard_user_override = False
         self._prev_tel_hazards = False
+
+        try:
+            from pynput import keyboard as kb
+
+            def _on_press(key):
+                try:
+                    if hasattr(key, "char") and key.char in ("u", "U"):
+                        with self._decel_key_lock:
+                            self._decel_key_toggle = True
+                except Exception:
+                    pass
+
+            self._key_listener = kb.Listener(on_press=_on_press)
+            self._key_listener.start()
+            logger.info("decel controller: U key registered for test mode")
+        except Exception:
+            logger.warning(
+                "decel controller: pynput unavailable — U-key test disabled",
+                extra={"popup": True},
+            )
+            self._key_listener = None
+
         if self._controller is not None:
             logger.debug("SCSController initialised")
 
@@ -209,6 +247,7 @@ class SendingThread(BaseThread):
         gear = 0
         tel_hazards = False
         speed_ms = 0.0
+        rotationY = 0.0
 
         try:
             tel_thread = registry.get_thread("telemetry_thread")
@@ -223,6 +262,7 @@ class SendingThread(BaseThread):
                     gear = tel_thread.data.gear_dashboard
                     tel_hazards = bool(tel_thread.data.hazardsActive)
                     speed_ms = tel_thread.data.speed
+                    rotationY = tel_thread.data.rotationY
             except Exception as e:
                 logger.debug("telemetry read failed: %s", e)
 
@@ -264,8 +304,25 @@ class SendingThread(BaseThread):
         self._last_should_force = should_force
 
         self._tick_hazards(controller, tel_hazards)
-
         self._tick_bool_overrides(controller)
+
+        toggle_requested = False
+        with self._decel_key_lock:
+            if self._decel_key_toggle:
+                toggle_requested = True
+                self._decel_key_toggle = False
+
+        if toggle_requested:
+            if not self._decel.active:
+                if connected:
+                    self._decel.start(speed_ms)
+                else:
+                    logger.warning(
+                        "decel test: cannot start — SDK not connected",
+                        extra={"popup": True},
+                    )
+            else:
+                self._decel.cancel()
 
         if not connected:
             controller.aforward = 0.0
@@ -276,6 +333,8 @@ class SendingThread(BaseThread):
                 self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
+                self.data.decel_active = False
+                self.data.decel_brake_output = 0.0
             return
 
         if not pedal_alive:
@@ -287,6 +346,26 @@ class SendingThread(BaseThread):
                 self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
+                self.data.decel_active = False
+                self.data.decel_brake_output = 0.0
+            return
+
+        if self._decel.active:
+            brake_out = self._decel.tick(self._decel_target, self.loop_interval)
+            controller.aforward = 0.0
+            controller.abackward = brake_out
+            self._tick_bool_presses(controller)
+            with self.data._lock:
+                self.data.aforward = 0.0
+                self.data.abackward = brake_out
+                self.data.hazardsActive = tel_hazards
+                self.data.horn_active = bool(getattr(controller, "horn", False))
+                self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
+                self.data.decel_active = self._decel.active
+                self.data.decel_brake_output = brake_out
+                self.data.decel_measured_ms2 = (
+                    self._decel._samples[-1].measured_decel if self._decel._samples else 0.0
+                )
             return
 
         try:
@@ -305,6 +384,8 @@ class SendingThread(BaseThread):
                 self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
+                self.data.decel_active = False
+                self.data.decel_brake_output = 0.0
             return
 
         gas_exp = Settings.gas_exponent_variable or 1.0
@@ -339,8 +420,20 @@ class SendingThread(BaseThread):
             self.data.hazardsActive = tel_hazards
             self.data.horn_active = bool(getattr(controller, "horn", False))
             self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
+            self.data.decel_active = False
+            self.data.decel_brake_output = 0.0
+            self.data.decel_measured_ms2 = 0.0
 
     def teardown(self) -> None:
+        if self._key_listener is not None:
+            try:
+                self._key_listener.stop()
+            except Exception:
+                pass
+            self._key_listener = None
+
+        self._decel.cancel()
+
         if self._controller is not None:
             try:
                 self._reset_controller(self._controller)
@@ -354,8 +447,10 @@ class SendingThread(BaseThread):
             self.data.hazardsActive = False
             self.data.horn_active = False
             self.data.airhorn_active = False
+            self.data.decel_active = False
+            self.data.decel_brake_output = 0.0
+            self.data.decel_measured_ms2 = 0.0
         logger.debug("teardown complete")
-
 
     def _tick_bool_overrides(self, controller: SCSController) -> None:
         with self._lock:
@@ -414,12 +509,10 @@ class SendingThread(BaseThread):
 
         if self._hazard_phase == "idle":
             if tel_hazards != wanted:
-                # Telemetry doesn't match → start a toggle press
                 logger.debug("hazard: starting press (telemetry=%s, wanted=%s)", tel_hazards, wanted)
                 self._hazard_phase = "pressing"
                 self._hazard_press_until = now + self._hazard_duration
             else:
-                # Already in the right state, nothing to do
                 with self._lock:
                     self._hazard_wanted = None
                 try:
@@ -435,7 +528,6 @@ class SendingThread(BaseThread):
                 except (AttributeError, OSError, TypeError):
                     pass
             else:
-                # Press done, start verifying
                 try:
                     controller.flasher4way = False
                 except (AttributeError, OSError, TypeError):
@@ -451,14 +543,12 @@ class SendingThread(BaseThread):
                 pass
 
             if tel_hazards == wanted:
-                # Confirmed
                 logger.debug("hazard: confirmed (telemetry=%s)", tel_hazards)
                 self._hazard_phase = "idle"
                 with self._lock:
                     self._hazard_wanted = None
                     self._hazard_retriggers = 0
             elif now >= self._hazard_verify_until:
-                # Not confirmed after timeout
                 if self._hazard_retriggers >= HAZARD_MAX_RETRIGGERS:
                     logger.warning(
                         "hazard: retrigger limit (%d) reached, giving up (wanted=%s)",

@@ -13,6 +13,7 @@ __pycache__/
 
 # Logs
 *.log
+logs/
 
 # Local configuration (do not commit)
 config.json
