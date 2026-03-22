@@ -47,7 +47,7 @@ _LAG_FREEZE_DURATION: float = 0.2       # s    — freeze window; release after 
 # Position mismatch (TMP only) — out-of-order packet rejection.
 # Fires when raw position jumps backward along heading.  Max 3 consecutive frames.
 _POS_MISMATCH_BACKWARD_THRESHOLD: float = 0.00   # m — min backward dot to flag
-_POS_MISMATCH_MAX_FRAMES: int = 3
+_POS_MISMATCH_MAX_FRAMES: int = 5
 
 # Crash detection (TMP only) — angular jerk vs last sample (every read, not only full frames).
 _CRASH_PITCH_JERK: float = 3.0                 # deg/s² pitch angular jerk threshold
@@ -913,7 +913,7 @@ class Vehicle:
                 smooth_speed = raw_speed
                 smooth_accel = raw_accel
             else:
-                alpha = _tmp_speed_ema_alpha(abs(prev.speed))
+                alpha = _tmp_speed_ema_alpha(abs((prev.speed + raw_speed)/2))
                 smooth_speed = alpha * raw_speed + (1.0 - alpha) * prev.speed
                 kin_accel = (
                     (smooth_speed - prev.speed) / dt if dt > 1e-9 else 0.0
@@ -923,7 +923,7 @@ class Vehicle:
                     if prev._smooth_accel is not None
                     else kin_accel
                 )
-                beta = _tmp_accel_ema_alpha(abs(prev.speed))
+                beta = _tmp_accel_ema_alpha(abs((prev.speed + raw_speed)/2))
                 smooth_accel = beta * kin_accel + (1.0 - beta) * prev_sa
 
             self._raw_speed = raw_speed

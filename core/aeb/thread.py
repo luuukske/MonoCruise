@@ -62,7 +62,7 @@ _ELEVATION_MARGIN_M: float = 5.0
 _CROSS_SAFE_ZONE_BASE: float = 0.5
 _CROSS_SAFE_ZONE_SPEED: float = 0.5
 
-_EVASION_G_THRESHOLD: float = 0.1 * 9.81
+_EVASION_G_THRESHOLD: float = 0.08 * 9.81
 _LATERAL_LANE_SEPARATION: float = 3.9
 # fwd_dot threshold for lateral-gap activation — deliberately looser than the
 # head_on threshold (-0.7) to catch oncoming vehicles that never reach -0.7
@@ -469,7 +469,7 @@ class AEBThread(BaseThread):
 
         ego_curvature = self._ego_curvature_from_history() or ego_curvature_yaw
 
-        ego_hw: float = 1.25
+        ego_hw: float = 1.15
         ego_half_l: float = 3.0
 
         t_stop = ego_speed / _FULL_BRAKE_DECEL
