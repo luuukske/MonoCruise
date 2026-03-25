@@ -124,7 +124,7 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         )
 
 class TelemetryThread(BaseThread):
-    loop_interval = 0.02
+    loop_interval = 0.01
     max_restarts = 2
 
     def __init__(self) -> None:
