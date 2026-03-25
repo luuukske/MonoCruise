@@ -19,6 +19,7 @@ import threading
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 from core.settings import Settings
+from core.accel_to_pedal_mapper import AccelToPedalMapper
 
 from .scscontroller import SCSController
 from .visualization_bar import VisualizationBar
@@ -75,7 +76,7 @@ class SendingThread(BaseThread):
         self._last_should_force: bool = False
         self._hazard_user_override: bool = False
         self._prev_tel_hazards: bool = False
-
+        self._accel_mapper = AccelToPedalMapper()
 
     def toggle_bool(self, name: str, duration: float = BOOL_PRESS_DURATION) -> None:
         """One-shot timed press: set *name* True for *duration* seconds, then False."""
@@ -196,9 +197,6 @@ class SendingThread(BaseThread):
         gear = 0
         tel_hazards = False
         speed_ms = 0.0
-        rotationY = 0.0
-        cargo_mass = 0.0
-        has_trailer = False
 
         try:
             tel_thread = registry.get_thread("telemetry_thread")
@@ -213,11 +211,20 @@ class SendingThread(BaseThread):
                     gear = tel_thread.data.gear_dashboard
                     tel_hazards = bool(tel_thread.data.hazardsActive)
                     speed_ms = tel_thread.data.speed
-                    rotationY = tel_thread.data.rotationY
-                    cargo_mass = float(tel_thread.data.cargoMass)
-                    has_trailer = bool(tel_thread.data.ego_has_trailer)
             except Exception as e:
                 logger.debug("telemetry read failed: %s", e)
+
+        if connected and tel_thread is not None and tel_thread.is_alive():
+            try:
+                with tel_thread.data._lock:
+                    wanted_a = float(tel_thread.data.commanded_accel_ms2)
+                    raw_a = float(tel_thread.data.lv_accelerationX)
+                    mass_kg = float(tel_thread.data.estimated_total_mass_kg)
+                    spd_ms = float(tel_thread.data.speed)
+                    has_t = bool(tel_thread.data.ego_has_trailer)
+                self._accel_mapper.step(wanted_a, raw_a, spd_ms, mass_kg, has_t)
+            except Exception as e:
+                logger.debug("accel_mapper step failed: %s", e)
 
         speed_kmh = speed_ms * 3.6
         if connected:
@@ -366,6 +373,7 @@ class SendingThread(BaseThread):
             self.data.decel_active = False
             self.data.decel_brake_output = 0.0
             self.data.decel_measured_ms2 = 0.0
+        self._accel_mapper.close()
         logger.debug("teardown complete")
 
     def _tick_bool_overrides(self, controller: SCSController) -> None:

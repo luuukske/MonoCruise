@@ -19,9 +19,12 @@ from core.thread_management.registry import registry
 from ui.popup.popup_window import PopupWindow
 
 from core.settings import Settings
+from core.accel_to_pedal_mapper import compute_estimated_mass_kg
 
 
 logger = logging.getLogger(__name__)
+
+_MASS_LOG_INTERVAL_S = 1.0
 
 
 def _window_open_on_taskbar() -> bool:
@@ -69,8 +72,16 @@ class TelemetryThreadData(ThreadData):
     gameThrottle: float = 0.0
     gameBrake: float = 0.0
 
-    # Cargo
+    # Cargo / mass (SCS config_f + truck_f)
     cargoMass: float = 0.0     # kg
+    unitMass: float = 0.0      # kg — tractor/chassis mass from SDK
+    fuel: float = 0.0        # litres (current tank)
+    estimated_total_mass_kg: float = 0.0  # unitMass + cargoMass + fuel mass
+
+    # Longitudinal accel (truck-local); forward axis from SDK
+    lv_accelerationX: float = 0.0  # m/s²
+    # Commanded accel for ACC / cruise (other threads may set; default 0).
+    commanded_accel_ms2: float = 0.0
 
     # Vehicle state
     parkBrake: bool = False
@@ -114,6 +125,14 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.gameThrottle        = raw.get("gameThrottle", 0.0)
         data.gameBrake           = raw.get("gameBrake", 0.0)
         data.cargoMass           = raw.get("cargoMass", 0.0)
+        data.unitMass            = raw.get("unitMass", 0.0)
+        data.fuel                = raw.get("fuel", 0.0)
+        trailer_count = 0
+        for trailer in raw.get("trailer", []):
+            if trailer.get("wheelCount", 0) > 0 and trailer.get("attached", False):
+                trailer_count += 1
+        data.trailer_count = trailer_count
+        data.lv_accelerationX    = raw.get("lv_accelerationX", 0.0)
         data.parkBrake           = raw.get("parkBrake", False)
         data.rotationY           = raw.get("rotationY", 0.0)
         data.hazardsActive       = raw.get("lightsHazards", False)
@@ -121,6 +140,12 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.ego_has_trailer = (
             raw.get("trailer[0].wheelCount", 0) > 0
             and raw.get("trailer[0].attached", False)
+        )
+        data.estimated_total_mass_kg = compute_estimated_mass_kg(
+            data.unitMass,
+            data.cargoMass,
+            data.fuel,
+            trailer_count,
         )
 
 class TelemetryThread(BaseThread):
@@ -134,6 +159,7 @@ class TelemetryThread(BaseThread):
         self._first = True
         self._manual_start = False
         self._telemetry = None
+        self._last_mass_log_mono: float = 0.0
 
     def setup(self) -> None:
         time.sleep(0.2)
@@ -179,6 +205,32 @@ class TelemetryThread(BaseThread):
                 self.data.is_connected = True
             _apply_telemetry(self.data, raw)
             Settings.save(values={"last_game": self.data.game})
+            now_mono = time.monotonic()
+            if now_mono - self._last_mass_log_mono >= _MASS_LOG_INTERVAL_S:
+                self._last_mass_log_mono = now_mono
+                with self.data._lock:
+                    total = self.data.estimated_total_mass_kg
+                    unit = self.data.unitMass
+                    cargo = self.data.cargoMass
+                    fuel_l = self.data.fuel
+                    trailer_count = self.data.trailer_count
+                logger.info(
+                    "mass estimate (tuning test): total_kg=%.0f unit_kg=%.0f cargo_kg=%.0f "
+                    "fuel_L=%.1f trailer_count=%i",
+                    total,
+                    unit,
+                    cargo,
+                    fuel_l,
+                    trailer_count,
+                )
+                """
+                import json
+                try:
+                    trailer_json = json.dumps(raw.get("trailer", []), separators=(',', ':'), ensure_ascii=False)
+                except Exception as e:
+                    trailer_json = f"<invalid json:{e}>"
+                logger.info("trailer raw (JSON):\n%s", trailer_json)
+                """
         except Exception:
             self.sdk_initialized = False
             with self.data._lock:
