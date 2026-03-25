@@ -9,15 +9,6 @@ Responsibilities:
 - Expose toggle_bool() for timed boolean presses (False → True → False).
 - Expose set_bool() for persistent boolean overrides.
 - Expose change_hazards() for verified hazard toggling with retrigger (max 3).
-- Expose start_decel() / stop_decel() for closed-loop deceleration control.
-  Other threads (e.g. ACC) call these via registry.get_thread("sending_thread").
-
-DecelController public API (via SendingThread):
-  sending_thread.start_decel(target_ms2)  — begin closed-loop braking
-  sending_thread.stop_decel()             — cancel immediately
-  sending_thread.data.decel_active        — bool
-  sending_thread.data.decel_brake_output  — float [0..1]
-  sending_thread.data.decel_measured_ms2  — float latest measured decel
 """
 
 import logging
@@ -31,7 +22,6 @@ from core.settings import Settings
 
 from .scscontroller import SCSController
 from .visualization_bar import VisualizationBar
-from .decel_controller import DecelController, TARGET_DEFAULT as DECEL_TARGET_DEFAULT
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +46,6 @@ class SendingThreadData(ThreadData):
     hazardsActive: bool = False
     horn_active: bool = False
     airhorn_active: bool = False
-    decel_active: bool = False
-    decel_brake_output: float = 0.0
     decel_measured_ms2: float = 0.0
     _lock: threading.Lock = field(
         default_factory=threading.Lock, repr=False, compare=False
@@ -88,11 +76,6 @@ class SendingThread(BaseThread):
         self._hazard_user_override: bool = False
         self._prev_tel_hazards: bool = False
 
-        self._decel = DecelController()
-        self._decel_target: float = DECEL_TARGET_DEFAULT
-        self._decel_key_toggle: bool = False
-        self._decel_key_lock = threading.Lock()
-        self._key_listener = None
 
     def toggle_bool(self, name: str, duration: float = BOOL_PRESS_DURATION) -> None:
         """One-shot timed press: set *name* True for *duration* seconds, then False."""
@@ -114,19 +97,6 @@ class SendingThread(BaseThread):
             self._hazard_retriggers = 0
             self._hazard_phase = "idle"
         logger.debug("change_hazards: wanted=%s duration=%.3fs", wanted, duration)
-
-    def start_decel(self, target_ms2: float = DECEL_TARGET_DEFAULT) -> None:
-        """
-        Begin closed-loop braking at *target_ms2* (m/s², must be negative).
-        Safe to call from any thread via registry.get_thread("sending_thread").start_decel().
-        """
-        speed = self._read_speed()
-        self._decel_target = target_ms2
-        self._decel.start(speed)
-
-    def stop_decel(self) -> None:
-        """Cancel closed-loop braking immediately."""
-        self._decel.cancel()
 
     def _read_speed(self) -> float:
         try:
@@ -166,27 +136,6 @@ class SendingThread(BaseThread):
         self._last_should_force = False
         self._hazard_user_override = False
         self._prev_tel_hazards = False
-
-        try:
-            from pynput import keyboard as kb
-
-            def _on_press(key):
-                try:
-                    if hasattr(key, "char") and key.char in ("u", "U"):
-                        with self._decel_key_lock:
-                            self._decel_key_toggle = True
-                except Exception:
-                    pass
-
-            self._key_listener = kb.Listener(on_press=_on_press)
-            self._key_listener.start()
-            logger.info("decel controller: U key registered for test mode")
-        except Exception:
-            logger.warning(
-                "decel controller: pynput unavailable — U-key test disabled",
-                extra={"popup": True},
-            )
-            self._key_listener = None
 
         if self._controller is not None:
             logger.debug("SCSController initialised")
@@ -248,6 +197,8 @@ class SendingThread(BaseThread):
         tel_hazards = False
         speed_ms = 0.0
         rotationY = 0.0
+        cargo_mass = 0.0
+        has_trailer = False
 
         try:
             tel_thread = registry.get_thread("telemetry_thread")
@@ -263,6 +214,8 @@ class SendingThread(BaseThread):
                     tel_hazards = bool(tel_thread.data.hazardsActive)
                     speed_ms = tel_thread.data.speed
                     rotationY = tel_thread.data.rotationY
+                    cargo_mass = float(tel_thread.data.cargoMass)
+                    has_trailer = bool(tel_thread.data.ego_has_trailer)
             except Exception as e:
                 logger.debug("telemetry read failed: %s", e)
 
@@ -306,23 +259,6 @@ class SendingThread(BaseThread):
         self._tick_hazards(controller, tel_hazards)
         self._tick_bool_overrides(controller)
 
-        toggle_requested = False
-        with self._decel_key_lock:
-            if self._decel_key_toggle:
-                toggle_requested = True
-                self._decel_key_toggle = False
-
-        if toggle_requested:
-            if not self._decel.active:
-                if connected:
-                    self._decel.start(speed_ms)
-                else:
-                    logger.warning(
-                        "decel test: cannot start — SDK not connected",
-                        extra={"popup": True},
-                    )
-            else:
-                self._decel.cancel()
 
         if not connected:
             controller.aforward = 0.0
@@ -348,24 +284,6 @@ class SendingThread(BaseThread):
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
                 self.data.decel_active = False
                 self.data.decel_brake_output = 0.0
-            return
-
-        if self._decel.active:
-            brake_out = self._decel.tick(self._decel_target, self.loop_interval)
-            controller.aforward = 0.0
-            controller.abackward = brake_out
-            self._tick_bool_presses(controller)
-            with self.data._lock:
-                self.data.aforward = 0.0
-                self.data.abackward = brake_out
-                self.data.hazardsActive = tel_hazards
-                self.data.horn_active = bool(getattr(controller, "horn", False))
-                self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
-                self.data.decel_active = self._decel.active
-                self.data.decel_brake_output = brake_out
-                self.data.decel_measured_ms2 = (
-                    self._decel._samples[-1].measured_decel if self._decel._samples else 0.0
-                )
             return
 
         try:
@@ -431,8 +349,6 @@ class SendingThread(BaseThread):
             except Exception:
                 pass
             self._key_listener = None
-
-        self._decel.cancel()
 
         if self._controller is not None:
             try:
