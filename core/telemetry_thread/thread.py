@@ -76,6 +76,7 @@ class TelemetryThreadData(ThreadData):
     cargoMass: float = 0.0     # kg
     unitMass: float = 0.0      # kg — tractor/chassis mass from SDK
     fuel: float = 0.0        # litres (current tank)
+    trailer_count: int = 0   # attached trailers with wheels (from SDK list)
     estimated_total_mass_kg: float = 0.0  # unitMass + cargoMass + fuel mass
 
     # Longitudinal accel (truck-local); forward axis from SDK
@@ -104,20 +105,20 @@ class TelemetryThreadData(ThreadData):
 def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
     """Write all telemetry fields under the data lock."""
     with data._lock:
-        data.game                 = raw.get("game", 0)
-        data.game_version_major   = raw.get("telemetry_version_game_major", 0)
-        data.game_version_minor   = raw.get("telemetry_version_game_minor", 0)
-        data.sdk_version          = raw.get("telemetry_plugin_revision", 0)
-        data.paused               = raw.get("paused", False)
-        data.coordinateX          = raw.get("coordinateX", 0.0)
-        data.coordinateY          = raw.get("coordinateY", 0.0)
-        data.coordinateZ          = raw.get("coordinateZ", 0.0)
-        data.rotationX            = raw.get("rotationX", 0.0)
-        data.speed                = raw.get("speed", 0.0)
-        data.cruiseControlSpeed = raw.get("cruiseControlSpeed", 0.0)
+        data.game                = raw.get("game", 0)
+        data.game_version_major  = raw.get("telemetry_version_game_major", 0)
+        data.game_version_minor  = raw.get("telemetry_version_game_minor", 0)
+        data.sdk_version         = raw.get("telemetry_plugin_revision", 0)
+        data.paused              = raw.get("paused", False)
+        data.coordinateX         = raw.get("coordinateX", 0.0)
+        data.coordinateY         = raw.get("coordinateY", 0.0)
+        data.coordinateZ         = raw.get("coordinateZ", 0.0)
+        data.rotationX           = raw.get("rotationX", 0.0)
+        data.speed               = raw.get("speed", 0.0)
+        data.cruiseControlSpeed  = raw.get("cruiseControlSpeed", 0.0)
         data.engineRpm           = raw.get("engineRpm", 0.0)
-        data.engineRpmMax       = raw.get("engineRpmMax", 2000.0)
-        data.gear                 = raw.get("gear", 0)
+        data.engineRpmMax        = raw.get("engineRpmMax", 2000.0)
+        data.gear                = raw.get("gear", 0)
         data.gearDashboard       = raw.get("gearDashboard", 0)
         data.userThrottle        = raw.get("userThrottle", 0.0)
         data.userBrake           = raw.get("userBrake", 0.0)
@@ -125,12 +126,14 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.gameThrottle        = raw.get("gameThrottle", 0.0)
         data.gameBrake           = raw.get("gameBrake", 0.0)
         data.cargoMass           = raw.get("cargoMass", 0.0)
-        data.unitMass            = raw.get("unitMass", 0.0)
+        data.unitMass            = 10000
         data.fuel                = raw.get("fuel", 0.0)
         trailer_count = 0
         for trailer in raw.get("trailer", []):
             if trailer.get("wheelCount", 0) > 0 and trailer.get("attached", False):
                 trailer_count += 1
+            else:
+                break
         data.trailer_count = trailer_count
         data.lv_accelerationX    = raw.get("lv_accelerationX", 0.0)
         data.parkBrake           = raw.get("parkBrake", False)
@@ -145,7 +148,7 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
             data.unitMass,
             data.cargoMass,
             data.fuel,
-            trailer_count,
+            trailer_count=data.trailer_count,
         )
 
 class TelemetryThread(BaseThread):
