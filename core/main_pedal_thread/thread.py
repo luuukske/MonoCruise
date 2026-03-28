@@ -4,7 +4,7 @@ Main Pedal Thread — owns joystick input and computes pedal outputs.
 Responsibilities:
   - Initialize and manage the pygame joystick (connect / disconnect / reconnect).
   - Read raw gas and brake axis values every loop tick.
-  - Apply the One-Pedal-Drive transformation (stub — full OPD logic is a TODO).
+  - Apply the One-Pedal-Drive transformation (disabled while cruise control is commanding).
   - Apply weight-based brake adjustment.
   - Manage the `stopped` hold-brake state and park-brake detection.
   - Detect emergency braking events (sudden pedal slam / crash) and hold
@@ -61,14 +61,69 @@ def _find_joystick(guid_hex: str) -> pygame.joystick.JoystickType | None:
     return None
 
 
-def _onepedaldrive(gasval: float, brakeval: float) -> tuple[float, float]:
-    """
-    Transform raw gas/brake inputs into OPD gas/brake outputs.
+def _opd_interpolate(y_lo: float, y_hi: float, x: float, x_lo: float, x_hi: float) -> float:
+    """Linear map: x in [x_lo, x_hi] → y in [y_lo, y_hi]. Matches legacy interpolate(-1, a, sum, -1, 0)."""
+    if abs(x_hi - x_lo) < 1e-12:
+        return y_hi
+    t = (x - x_lo) / (x_hi - x_lo)
+    return y_lo + t * (y_hi - y_lo)
 
-    # TODO: implement full OPD logic using Settings.offset_variable,
-    #       Settings.opd_mode_variable, and Settings.max_opd_brake_variable.
+
+def _onepedaldrive(
+    gasval: float,
+    brakeval: float,
+    *,
+    apply_opd_mapping: bool = True,
+) -> tuple[float, float]:
     """
-    return gasval, brakeval
+    One-pedal mapping: combined axis → gas/brake, with gas and brake exponents applied
+    (brake curve uses sqrt(Settings.brake_exponent_variable) as in legacy MonoCruise).
+    When *apply_opd_mapping* is False (e.g. cruise commanding), only the two-pedal path
+    and exponents are used — same as legacy opd_mode off.
+    """
+    offset = float(Settings.offset_variable or 0.0)
+    be_full = float(Settings.brake_exponent_variable or 1.0)
+    brake_exponent = be_full**0.5
+    gas_exponent = float(Settings.gas_exponent_variable or 1.0)
+    opd_mode = bool(Settings.opd_mode_variable) and apply_opd_mapping
+    max_opd_brake = max(0.0, float(Settings.max_opd_brake_variable or 0.0))
+
+    val1 = min(max(float(gasval), 0.0), 1.0)
+    val2 = (min(max(float(brakeval), 0.0), 1.0) ** brake_exponent) * -1.0
+    sum_values = val1 + val2
+
+    if opd_mode:
+        if sum_values <= offset:
+            value = (1.0 / (1.0 + offset)) * sum_values - (offset / (1.0 + offset))
+        else:
+            denom = 1.0 - offset
+            if abs(denom) < 1e-9:
+                value = sum_values
+            else:
+                value = (1.0 / denom) * sum_values - (offset / denom)
+    else:
+        value = sum_values
+
+    if abs(brake_exponent) < 1e-12:
+        a = 0.0
+    else:
+        a = -(max_opd_brake ** (1.0 / brake_exponent))
+
+    if opd_mode and offset > 1e-12:
+        if sum_values >= 0.0 and sum_values <= offset:
+            off_exp = offset**brake_exponent
+            if abs(off_exp) > 1e-12:
+                value = (a / off_exp) * ((-sum_values + offset) ** brake_exponent)
+
+    if sum_values < 0.0 and opd_mode:
+        value = _opd_interpolate(-1.0, a, sum_values, -1.0, 0.0)
+
+    gas_out = max(0.0, value)
+    brake_out = -min(min(0.0, value), val2)
+
+    gas_out = gas_out**gas_exponent
+    brake_out = brake_out**brake_exponent
+    return gas_out, brake_out
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +248,15 @@ class MainPedalThread(BaseThread):
         park_brake = tel["parkBrake"]
         cargo_mass = tel["cargoMass"]  # kg
 
+        cruise_commanding = False
+        try:
+            cc = registry.get_thread("cruise_control_thread")
+            if cc is not None and cc.is_alive():
+                with cc.data._lock:
+                    cruise_commanding = bool(cc.data.active)
+        except (KeyError, AttributeError):
+            pass
+
         # --- Process pygame events (input + hot-plug) -------------------------
         gasval, brakeval = self._process_pygame_events(speed)
 
@@ -219,8 +283,10 @@ class MainPedalThread(BaseThread):
             return
 
         # --- One-Pedal-Drive transform ----------------------------------------
-        opdgasval, opdbrakeval = _onepedaldrive(gasval, brakeval)
-        # Cruise blends mapper output in sending_thread (commanded_accel_ms2).
+        # Cruise / ACC commanding: no OPD axis remap; exponents still match legacy two-pedal path.
+        opdgasval, opdbrakeval = _onepedaldrive(
+            gasval, brakeval, apply_opd_mapping=not cruise_commanding
+        )
 
         # --- Weight adjustment ------------------------------------------------
         if Settings.weight_adjustment and cargo_mass > 0:
@@ -263,7 +329,12 @@ class MainPedalThread(BaseThread):
                 )
             else:
                 self._prev_stop = 0
-        elif opdgasval == 0 and Settings.opd_mode_variable and opdbrakeval < 0.3:
+        elif (
+            opdgasval == 0
+            and Settings.opd_mode_variable
+            and not cruise_commanding
+            and opdbrakeval < 0.3
+        ):
             if speed > 0:
                 b = max(opdbrakeval ** 0.8 / 2, 0.3)
                 opdbrakeval = max(
