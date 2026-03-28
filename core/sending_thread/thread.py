@@ -21,6 +21,7 @@ from core.thread_management.registry import registry
 from core.settings import Settings
 from core.accel_to_pedal_mapper import AccelToPedalMapper
 
+from .brake_efficiency import BrakeEfficiencyTracker
 from .scscontroller import SCSController
 from .visualization_bar import VisualizationBar
 
@@ -77,6 +78,7 @@ class SendingThread(BaseThread):
         self._hazard_user_override: bool = False
         self._prev_tel_hazards: bool = False
         self._accel_mapper = AccelToPedalMapper()
+        self._brake_tracker = BrakeEfficiencyTracker()
         self._key_listener = None
 
     def toggle_bool(self, name: str, duration: float = BOOL_PRESS_DURATION) -> None:
@@ -219,24 +221,7 @@ class SendingThread(BaseThread):
             except Exception as e:
                 logger.debug("telemetry read failed: %s", e)
 
-        mapper_gas = 0.0
-        mapper_brake = 0.0
-        if connected and tel_thread is not None and tel_thread.is_alive():
-            try:
-                with tel_thread.data._lock:
-                    wanted_a = float(tel_thread.data.commanded_accel_ms2)
-                    raw_a = float(tel_thread.data.lv_accelerationX)
-                    mass_kg = float(tel_thread.data.estimated_total_mass_kg)
-                    spd_ms = float(tel_thread.data.speed)
-                    has_t = bool(tel_thread.data.ego_has_trailer)
-                targets = self._accel_mapper.step(
-                    wanted_a, raw_a, spd_ms, mass_kg, has_t
-                )
-                mapper_gas = float(targets.gas)
-                mapper_brake = float(targets.brake)
-            except Exception as e:
-                logger.debug("accel_mapper step failed: %s", e)
-
+        # Resolve cruise_active before mapper so tracker can gate on it.
         cruise_active = False
         try:
             cruise_t = registry.get_thread("cruise_control_thread")
@@ -245,6 +230,45 @@ class SendingThread(BaseThread):
                     cruise_active = bool(cruise_t.data.active)
         except (KeyError, AttributeError):
             pass
+
+        mapper_gas = 0.0
+        mapper_brake = 0.0
+        mapper_command_brake = 0.0
+        measured_decel_ms2 = 0.0
+        if connected and tel_thread is not None and tel_thread.is_alive():
+            try:
+                with tel_thread.data._lock:
+                    wanted_a = float(tel_thread.data.commanded_accel_ms2)
+                    raw_a = float(tel_thread.data.lv_accelerationX)
+                    mass_kg = float(tel_thread.data.estimated_total_mass_kg)
+                    spd_ms = float(tel_thread.data.speed)
+                    has_t = bool(tel_thread.data.ego_has_trailer)
+                    slope_rad = float(tel_thread.data.rotationY)
+                    tel_gear = int(tel_thread.data.gear)
+                measured_decel_ms2 = max(0.0, -raw_a)
+                targets = self._accel_mapper.step(
+                    wanted_a,
+                    raw_a,
+                    spd_ms,
+                    mass_kg,
+                    has_t,
+                    gear=tel_gear,
+                    brake_efficiency_ratio=self._brake_tracker.efficiency_ratio,
+                )
+                mapper_gas = float(targets.gas)
+                mapper_brake = float(targets.brake)
+                mapper_command_brake = float(targets.command_brake)
+            except Exception as e:
+                logger.debug("accel_mapper step failed: %s", e)
+                slope_rad = 0.0
+
+            # Update brake efficiency tracker only during cruise-commanded braking.
+            if cruise_active and mapper_command_brake > 0.05:
+                self._brake_tracker.update(
+                    mapper_command_brake, measured_decel_ms2, speed_ms, slope_rad
+                )
+            if cruise_active:
+                self._brake_tracker.check_warnings()
 
         speed_kmh = speed_ms * 3.6
         if connected:
@@ -354,11 +378,10 @@ class SendingThread(BaseThread):
         a = float(complex(a).real)
         b = float(complex(b).real)
 
-        # Cruise / ACC: mapper turns commanded_accel_ms2 into pedals; blend so the user
-        # can always add more gas or brake on top.
+        # Cruise / ACC: mapper gas when active; idle-creep brake from mapper whenever connected.
         if cruise_active:
             a = max(a, mapper_gas)
-            b = max(b, mapper_brake)
+        b = max(b, mapper_brake)
 
         controller.aforward = a
         controller.abackward = b

@@ -6,7 +6,7 @@ user reports and optional CSV samples when Settings.debug is True.
 Reference curve (from legacy cruise logic, adapted):
 - Positive demand → smoothed gas; negative → brake from scaled magnitude ** 2.5.
 - Mass vs a reference mass adjusts the demand (same spirit as main_pedal weight_var).
-- Low-speed gas bias reduces idle creep (slow_speed_increase).
+- Very low speed in gear: light brake cancels idle creep (skipped in neutral or above 5 m/s).
 """
 
 from __future__ import annotations
@@ -47,11 +47,20 @@ def compute_estimated_mass_kg(
     return max(0.0, float(unit_mass_kg)) + cargo_mass_kg + fuel_kg + trailer_mass_kg
 
 
-def slow_speed_gas_add(speed_ms: float) -> float:
-    """Extra gas at very low speed to overcome idle creep (raw pedal space)."""
+# Above this speed (m/s) idle-creep brake is not computed (saves work; curve is ~0 anyway).
+_IDLE_CREEP_SPEED_SKIP_MS: float = 5.0
+
+
+def idle_creep_brake(speed_ms: float, gear: int) -> float:
+    """Light brake at very low speed to cancel idle creep (normalized pedal space)."""
+    if int(gear) == 0:
+        return 0.0
     s = abs(float(speed_ms))
+    if s > _IDLE_CREEP_SPEED_SKIP_MS:
+        return 0.0
     inner = (1.0 - ((s + 0.1) / 5.5) ** 2.22) * (-0.6 / (s + 0.2) + 1.0)
-    return max(inner / 0.715 * 0.10, 0.0)
+    a = max(inner / 0.715 * 0.10, 0.0)
+    return max((a / 7.0) ** 2.5, 0.0)
 
 
 @dataclass
@@ -60,6 +69,7 @@ class PedalTargets:
     brake: float
     weight_var: float
     temp_after_weight: float
+    command_brake: float  # cruise-commanded brake only (excludes idle creep)
 
 
 @dataclass
@@ -142,10 +152,17 @@ class AccelToPedalMapper:
     def reset_smoothing(self) -> None:
         self._prev_cc_gas = 0.0
 
-    def _weight_var(self, total_mass_kg: float, has_trailer: bool) -> float:
-        ref_t = self.reference_mass_kg / 1000.0
+    def _weight_var(
+        self,
+        total_mass_kg: float,
+        has_trailer: bool,
+        ref_mass_kg: float,
+        w_span_tons: float,
+        w_strength: float,
+    ) -> float:
+        ref_t = ref_mass_kg / 1000.0
         cur_t = max(0.0, float(total_mass_kg)) / 1000.0
-        w = self.weight_strength * ((cur_t - ref_t) / max(self.weight_span_tons, 0.1)) + 1.0
+        w = w_strength * ((cur_t - ref_t) / max(w_span_tons, 0.1)) + 1.0
         w = max(0.5, min(2.0, w))
         if has_trailer:
             w = min(2.0, w * 1.02)
@@ -242,16 +259,29 @@ class AccelToPedalMapper:
         total_mass_kg: float,
         has_trailer: bool,
         *,
+        gear: int = 1,
+        brake_efficiency_ratio: float = 1.0,
         log_sample: bool = True,
     ) -> PedalTargets:
         """
-        :param wanted_accel_ms2: longitudinal command from ACC / cruise (future) or 0.
-        :param raw_accel_ms2: measured longitudinal accel (e.g. SDK local axis).
-        :param log_sample: if False, skip CSV and summary accumulation (not used yet).
+        :param wanted_accel_ms2: longitudinal command from ACC / cruise or 0.
+        :param raw_accel_ms2: measured longitudinal accel (SDK local axis).
+        :param gear: SDK gear (0 = neutral); creep brake is not applied in neutral.
+        :param brake_efficiency_ratio: 1.0 = nominal; <1.0 → brake demand scaled up
+            proportionally to compensate for reduced grip (worn tires, snow, etc.).
+        :param log_sample: if False, skip CSV and summary accumulation.
         """
-        weight_var = self._weight_var(total_mass_kg, has_trailer)
-        scale = max(self.accel_scale_ms2, 1e-6)
-        t0 = float(wanted_accel_ms2) / scale
+        # Snapshot Settings each tick for live hot-reload tuning support.
+        ref_mass_kg = float(Settings.mapper_reference_mass_kg)
+        accel_scale = max(float(Settings.mapper_accel_scale_ms2), 1e-6)
+        brake_div = max(float(Settings.mapper_brake_divisor), 1e-6)
+        brake_pow = float(Settings.mapper_brake_power)
+        w_span = max(float(Settings.mapper_weight_span_tons), 0.1)
+        w_strength = float(Settings.mapper_weight_strength)
+        efficiency = max(float(brake_efficiency_ratio), 0.1)
+
+        weight_var = self._weight_var(total_mass_kg, has_trailer, ref_mass_kg, w_span, w_strength)
+        t0 = float(wanted_accel_ms2) / accel_scale
 
         if t0 >= 0.0:
             t = t0 * weight_var
@@ -265,10 +295,13 @@ class AccelToPedalMapper:
             cc_brake = 0.0
         else:
             mag = abs(t)
-            cc_brake = max(min(mag / max(self.brake_divisor, 1e-6), 2.0) ** self.brake_power, 0.0)
+            raw_brake = max(min(mag / brake_div, 2.0) ** brake_pow, 0.0)
+            # Scale brake demand up when efficiency is degraded to maintain target decel.
+            cc_brake = min(1.0, raw_brake / efficiency)
 
-        gas = min(1.0, cc_gas + slow_speed_gas_add(speed_ms))
-        brake = min(1.0, cc_brake)
+        creep = idle_creep_brake(speed_ms, gear)
+        gas = min(1.0, cc_gas)
+        brake = min(1.0, cc_brake + creep)
 
         if log_sample:
             self._summary.add(
@@ -280,6 +313,20 @@ class AccelToPedalMapper:
             )
             self._maybe_emit_summary()
             if Settings.debug:
+                logger.debug(
+                    "accel_mapper tick: wanted=%.3f raw=%.3f speed=%.1f "
+                    "gas=%.3f brake=%.3f weight_var=%.3f t=%.3f "
+                    "efficiency=%.3f mass=%.0f",
+                    wanted_accel_ms2,
+                    raw_accel_ms2,
+                    speed_ms,
+                    gas,
+                    brake,
+                    weight_var,
+                    t,
+                    efficiency,
+                    total_mass_kg,
+                )
                 self._write_csv_row(
                     speed_ms=speed_ms,
                     raw_accel_ms2=raw_accel_ms2,
@@ -296,4 +343,5 @@ class AccelToPedalMapper:
             brake=brake,
             weight_var=weight_var,
             temp_after_weight=t,
+            command_brake=cc_brake,
         )

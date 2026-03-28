@@ -29,13 +29,13 @@ _LONG_PRESS_START_S = 0.5
 _SPEED_MIN_KMH = 30.0
 _SPEED_MAX_KMH = 130.0
 
-# Minimal PI speed loop → m/s² (scaffold tuning)
-_KP = 0.35
-_KI = 0.08
-_KD = 0.15
-_INTEGRAL_CLAMP = 3.0
-_ACCEL_MIN_MS2 = -4.0
-_ACCEL_MAX_MS2 = 1.8
+# Default PID constants — overridden at runtime by Settings.cc_k* / Settings.cc_accel_*
+_KP_DEFAULT = 0.35
+_KI_DEFAULT = 0.08
+_KD_DEFAULT = 0.15
+_INTEGRAL_CLAMP_DEFAULT = 3.0
+_ACCEL_MIN_MS2_DEFAULT = -4.0
+_ACCEL_MAX_MS2_DEFAULT = 1.8
 
 
 @dataclass
@@ -155,7 +155,9 @@ class CruiseControlThread(BaseThread):
                 wanted_accel = self._speed_to_accel(tel, dt)
                 if self._acc_should_cap():
                     wanted_accel = min(wanted_accel, self._acc.accel_cap_ms2())
-                wanted_accel = max(_ACCEL_MIN_MS2, min(_ACCEL_MAX_MS2, wanted_accel))
+                accel_min = float(Settings.cc_accel_min_ms2)
+                accel_max = float(Settings.cc_accel_max_ms2)
+                wanted_accel = max(accel_min, min(accel_max, wanted_accel))
                 commanding = True
             else:
                 self._integral_error = 0.0
@@ -230,10 +232,20 @@ class CruiseControlThread(BaseThread):
     def _clamp_target_kmh(self, v: float) -> float:
         return max(_SPEED_MIN_KMH, min(_SPEED_MAX_KMH, v))
 
-    def _change_target_kmh(self, delta: float) -> None:
+    @staticmethod
+    def _quantize_target_to_step_kmh(v: float, step: int) -> float:
+        """Snap *v* to a multiple of *step* when using coarse increments (5, 10, 20, …)."""
+        s = int(step)
+        if s < 5:
+            return float(v)
+        return float(round(v / s) * s)
+
+    def _change_target_kmh(self, delta: float, *, step: int) -> None:
         if self._target_speed_kmh is None:
             return
-        self._target_speed_kmh = self._clamp_target_kmh(self._target_speed_kmh + delta)
+        raw = self._target_speed_kmh + delta
+        q = self._quantize_target_to_step_kmh(raw, step)
+        self._target_speed_kmh = self._clamp_target_kmh(q)
 
     def _set_target_from_speed_kmh(self, speed_kmh: float) -> None:
         self._target_speed_kmh = self._clamp_target_kmh(round(speed_kmh))
@@ -269,10 +281,10 @@ class CruiseControlThread(BaseThread):
                 self._long_press_dec = True
                 self._time_pressed_dec = now
                 if self._target_speed_kmh is not None:
-                    self._change_target_kmh(-float(long_i))
+                    self._change_target_kmh(-float(long_i), step=long_i)
         elif self._time_pressed_dec is not None:
             if not self._long_press_dec and self._target_speed_kmh is not None:
-                self._change_target_kmh(-float(short_i))
+                self._change_target_kmh(-float(short_i), step=short_i)
             else:
                 self._long_press_dec = False
             self._time_pressed_dec = None
@@ -288,7 +300,7 @@ class CruiseControlThread(BaseThread):
                 self._long_press_inc = True
                 self._time_pressed_inc = now
                 if self._cc_enabled:
-                    self._change_target_kmh(float(long_i))
+                    self._change_target_kmh(float(long_i), step=long_i)
                 elif self._target_speed_kmh is None or speed_kmh > (self._target_speed_kmh or 0):
                     self._set_target_from_speed_kmh(speed_kmh)
                 if not self._cc_enabled:
@@ -297,7 +309,7 @@ class CruiseControlThread(BaseThread):
         elif self._time_pressed_inc is not None:
             if not self._long_press_inc:
                 if self._cc_enabled:
-                    self._change_target_kmh(float(short_i))
+                    self._change_target_kmh(float(short_i), step=short_i)
                 elif self._target_speed_kmh is None or speed_kmh > (self._target_speed_kmh or 0):
                     self._set_target_from_speed_kmh(speed_kmh)
                 if not self._cc_enabled:
@@ -350,16 +362,27 @@ class CruiseControlThread(BaseThread):
         else:
             target_ms = target_kmh / 3.6
 
+        # Read PID gains from Settings each call for live hot-reload tuning.
+        kp = float(Settings.cc_kp)
+        ki = float(Settings.cc_ki)
+        kd = float(Settings.cc_kd)
+        clamp = float(Settings.cc_integral_clamp)
+
         error_ms = target_ms - speed_ms
         self._integral_error += error_ms * dt
-        self._integral_error = max(-_INTEGRAL_CLAMP, min(_INTEGRAL_CLAMP, self._integral_error))
+        self._integral_error = max(-clamp, min(clamp, self._integral_error))
 
         speed_deriv = (speed_ms - self._prev_speed_ms) / dt
         self._prev_speed_ms = speed_ms
 
-        p_term = _KP * error_ms
-        i_term = _KI * self._integral_error
-        d_term = -_KD * speed_deriv
+        p_term = kp * error_ms
+        i_term = ki * self._integral_error
+        d_term = -kd * speed_deriv
+
+        logger.debug(
+            "cc pid: error=%.3f p=%.3f i=%.3f d=%.3f integral=%.3f output=%.3f",
+            error_ms, p_term, i_term, d_term, self._integral_error, p_term + i_term + d_term,
+        )
         return p_term + i_term + d_term
 
     def _publish_telemetry_command(self, wanted_accel_ms2: float) -> None:

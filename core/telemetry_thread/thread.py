@@ -217,15 +217,6 @@ class TelemetryThread(BaseThread):
                     cargo = self.data.cargoMass
                     fuel_l = self.data.fuel
                     trailer_count = self.data.trailer_count
-                logger.info(
-                    "mass estimate (tuning test): total_kg=%.0f unit_kg=%.0f cargo_kg=%.0f "
-                    "fuel_L=%.1f trailer_count=%i",
-                    total,
-                    unit,
-                    cargo,
-                    fuel_l,
-                    trailer_count,
-                )
                 """
                 import json
                 try:
