@@ -244,7 +244,7 @@ class SendingThread(BaseThread):
                     spd_ms = float(tel_thread.data.speed)
                     has_t = bool(tel_thread.data.ego_has_trailer)
                     slope_rad = float(tel_thread.data.rotationY)
-                    tel_gear = int(tel_thread.data.gear)
+                    tel_gear_dashboard = int(tel_thread.data.gear_dashboard)
                 measured_decel_ms2 = max(0.0, -raw_a)
                 targets = self._accel_mapper.step(
                     wanted_a,
@@ -252,7 +252,7 @@ class SendingThread(BaseThread):
                     spd_ms,
                     mass_kg,
                     has_t,
-                    gear=tel_gear,
+                    gear_dashboard=tel_gear_dashboard,
                     brake_efficiency_ratio=self._brake_tracker.efficiency_ratio,
                 )
                 mapper_gas = float(targets.gas)
@@ -364,7 +364,7 @@ class SendingThread(BaseThread):
         b = complex(brake_output).real
 
         try:
-            if gear == 0:
+            if gear != 0:
                 a = float(gasval) ** float(gas_exp)
         except Exception:
             a = float(gasval)
@@ -374,7 +374,7 @@ class SendingThread(BaseThread):
         except Exception:
             b = max(b, max(float(brakeval), 0.0))
 
-        b = b ** 0.91
+        b = b ** 0.91 # from going from 110% braking to 100% braking intensity
         a = float(complex(a).real)
         b = float(complex(b).real)
 

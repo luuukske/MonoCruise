@@ -6,7 +6,9 @@ user reports and optional CSV samples when Settings.debug is True.
 Reference curve (from legacy cruise logic, adapted):
 - Positive demand → smoothed gas; negative → brake from scaled magnitude ** 2.5.
 - Mass vs a reference mass adjusts the demand (same spirit as main_pedal weight_var).
-- Very low speed in gear: light brake cancels idle creep (skipped in neutral or above 5 m/s).
+- Very low speed in gear: light brake cancels idle creep (skipped when dashboard shows
+  neutral, or above 5 m/s). Uses gearDashboard, not SDK gear — the latter can stay
+  non-zero while the dash reads N.
 """
 
 from __future__ import annotations
@@ -51,16 +53,24 @@ def compute_estimated_mass_kg(
 _IDLE_CREEP_SPEED_SKIP_MS: float = 5.0
 
 
-def idle_creep_brake(speed_ms: float, gear: int) -> float:
-    """Light brake at very low speed to cancel idle creep (normalized pedal space)."""
-    if int(gear) == 0:
+def idle_creep_brake(speed_ms: float, gear_dashboard: int) -> float:
+    """
+    Light brake at very low speed to cancel idle creep (normalized pedal space).
+
+    This is mathematically equivalent to:
+        max(((max( ((1 - ((abs(speed)+0.1) / 5.5) ** 2.22) * (-0.6/(abs(speed)+0.2)+1)/0.715 * 0.10 , 0))/7)**2.5, 0)
+    """
+    if int(gear_dashboard) == 0:
         return 0.0
     s = abs(float(speed_ms))
     if s > _IDLE_CREEP_SPEED_SKIP_MS:
         return 0.0
-    inner = (1.0 - ((s + 0.1) / 5.5) ** 2.22) * (-0.6 / (s + 0.2) + 1.0)
-    a = max(inner / 0.715 * 0.10, 0.0)
-    return max((a / 7.0) ** 2.5, 0.0)
+    # Implementation as per provided formula step by step for clarity
+    value = (1.0 - ((s + 0.1) / 5.5) ** 2.22) * (-0.6 / (s + 0.2) + 1.0)
+    num = max(value / 0.715 * 0.10, 0.0)
+    denom = num / 7.0
+    result = max(denom ** 2.5, 0.0)
+    return result
 
 
 @dataclass
@@ -259,14 +269,14 @@ class AccelToPedalMapper:
         total_mass_kg: float,
         has_trailer: bool,
         *,
-        gear: int = 1,
+        gear_dashboard: int = 0,
         brake_efficiency_ratio: float = 1.0,
         log_sample: bool = True,
     ) -> PedalTargets:
         """
         :param wanted_accel_ms2: longitudinal command from ACC / cruise or 0.
         :param raw_accel_ms2: measured longitudinal accel (SDK local axis).
-        :param gear: SDK gear (0 = neutral); creep brake is not applied in neutral.
+        :param gear_dashboard: gearDashboard from telemetry (0 = neutral on dash).
         :param brake_efficiency_ratio: 1.0 = nominal; <1.0 → brake demand scaled up
             proportionally to compensate for reduced grip (worn tires, snow, etc.).
         :param log_sample: if False, skip CSV and summary accumulation.
@@ -299,7 +309,7 @@ class AccelToPedalMapper:
             # Scale brake demand up when efficiency is degraded to maintain target decel.
             cc_brake = min(1.0, raw_brake / efficiency)
 
-        creep = idle_creep_brake(speed_ms, gear)
+        creep = idle_creep_brake(speed_ms, gear_dashboard)
         gas = min(1.0, cc_gas)
         brake = min(1.0, cc_brake + creep)
 
