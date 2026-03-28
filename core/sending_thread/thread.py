@@ -223,11 +223,13 @@ class SendingThread(BaseThread):
 
         # Resolve cruise_active before mapper so tracker can gate on it.
         cruise_active = False
+        cruise_target_kmh: float | None = None
         try:
             cruise_t = registry.get_thread("cruise_control_thread")
             if cruise_t is not None and cruise_t.is_alive():
                 with cruise_t.data._lock:
                     cruise_active = bool(cruise_t.data.active)
+                    cruise_target_kmh = cruise_t.data.target_speed_kmh
         except (KeyError, AttributeError):
             pass
 
@@ -252,6 +254,9 @@ class SendingThread(BaseThread):
                     spd_ms,
                     mass_kg,
                     has_t,
+                    slope_rad=slope_rad,
+                    cruise_commanding=cruise_active,
+                    target_speed_kmh=cruise_target_kmh,
                     gear_dashboard=tel_gear_dashboard,
                     brake_efficiency_ratio=self._brake_tracker.efficiency_ratio,
                 )

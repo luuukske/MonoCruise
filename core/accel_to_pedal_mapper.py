@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -52,6 +53,60 @@ def compute_estimated_mass_kg(
 # Above this speed (m/s) idle-creep brake is not computed (saves work; curve is ~0 anyway).
 _IDLE_CREEP_SPEED_SKIP_MS: float = 5.0
 
+# Legacy CC used a constant m/s term (speed*0/3.6 + 100/3.6) in the slope-force expression.
+_LEGACY_SLOPE_SPEED_MS: float = 100.0 / 3.6
+
+
+def legacy_physics_adjustment_ff(
+    speed_ms: float,
+    slope: float,
+    mass_kg: float,
+    target_speed_kmh: float,
+    dt: float,
+    prev_slope: float,
+    *,
+    rolling_coeff: float,
+    drag_coeff: float,
+    slope_scalar: float,
+    ff_horizon_s: float,
+    ff_gain: float,
+) -> float:
+    """
+    Match legacy cruise ``physics_adjustment`` + slope-rate feed-forward
+    (``physics_adjustment_ff``): rolling + drag + slope force, scaled by
+    ``slow_speed_adjustment``, plus predicted slope change over *ff_horizon_s*.
+    """
+    ts = max(float(target_speed_kmh), 30.0)
+    slow_speed_adjustment = (-(2 ** (-(ts * 0.04) + 0.3)) + 1.0) * 1.3
+
+    mass_eff_kg = (float(mass_kg) - 9000.0) / 3.0 + 9000.0
+    tan_now = math.tan(float(slope) * 2 * math.pi)
+    slope_force = (
+        mass_eff_kg * 9.81 * tan_now * _LEGACY_SLOPE_SPEED_MS * float(slope_scalar)
+    )
+    s = float(speed_ms)
+    physics_adjustment = (
+        float(rolling_coeff) * s
+        + float(drag_coeff) * (s / 3.6) ** 2
+        + slope_force
+    ) * slow_speed_adjustment
+
+    if dt <= 0.0 or not math.isfinite(dt):
+        return physics_adjustment
+
+    slope_derivative = (float(slope) - float(prev_slope)) / dt
+    predicted_slope_change = slope_derivative * float(ff_horizon_s)
+    tan_pred = math.tan((float(slope) + predicted_slope_change) * 2 * math.pi)
+    predicted_slope_force_change = (
+        mass_eff_kg
+        * 9.81
+        * (tan_pred - tan_now)
+        * _LEGACY_SLOPE_SPEED_MS
+        * float(slope_scalar)
+        * slow_speed_adjustment
+    )
+    return physics_adjustment + predicted_slope_force_change * float(ff_gain)
+
 
 def idle_creep_brake(speed_ms: float, gear_dashboard: int) -> float:
     """
@@ -80,6 +135,7 @@ class PedalTargets:
     weight_var: float
     temp_after_weight: float
     command_brake: float  # cruise-commanded brake only (excludes idle creep)
+    physics_adjustment_ff: float = 0.0  # legacy slope / rolling feed-forward (normalized)
 
 
 @dataclass
@@ -144,6 +200,8 @@ class AccelToPedalMapper:
         self.weight_strength = weight_strength
 
         self._prev_cc_gas: float = 0.0
+        self._prev_slope: float = 0.0
+        self._prev_physics_mono: float | None = None
         self._summary = _SummaryStats()
         self._last_summary_mono: float = 0.0
         self._csv_file = None
@@ -161,6 +219,8 @@ class AccelToPedalMapper:
 
     def reset_smoothing(self) -> None:
         self._prev_cc_gas = 0.0
+        self._prev_slope = 0.0
+        self._prev_physics_mono = None
 
     def _weight_var(
         self,
@@ -269,6 +329,9 @@ class AccelToPedalMapper:
         total_mass_kg: float,
         has_trailer: bool,
         *,
+        slope_rad: float = 0.0,
+        cruise_commanding: bool = False,
+        target_speed_kmh: float | None = None,
         gear_dashboard: int = 0,
         brake_efficiency_ratio: float = 1.0,
         log_sample: bool = True,
@@ -276,6 +339,9 @@ class AccelToPedalMapper:
         """
         :param wanted_accel_ms2: longitudinal command from ACC / cruise or 0.
         :param raw_accel_ms2: measured longitudinal accel (SDK local axis).
+        :param slope_rad: telemetry ``rotationY`` (legacy CC used this for grade).
+        :param cruise_commanding: when True, apply legacy ``physics_adjustment_ff`` like old CC.
+        :param target_speed_kmh: cruise target for ``slow_speed_adjustment`` in physics FF.
         :param gear_dashboard: gearDashboard from telemetry (0 = neutral on dash).
         :param brake_efficiency_ratio: 1.0 = nominal; <1.0 → brake demand scaled up
             proportionally to compensate for reduced grip (worn tires, snow, etc.).
@@ -291,12 +357,41 @@ class AccelToPedalMapper:
         efficiency = max(float(brake_efficiency_ratio), 0.1)
 
         weight_var = self._weight_var(total_mass_kg, has_trailer, ref_mass_kg, w_span, w_strength)
+
+        now_mono = time.monotonic()
+        physics_ff = 0.0
+        slope = float(slope_rad)
+        if cruise_commanding and target_speed_kmh is not None:
+            if self._prev_physics_mono is None:
+                dt_ff = 0.1
+            else:
+                dt_ff = max(1e-4, min(now_mono - self._prev_physics_mono, 0.5))
+            self._prev_physics_mono = now_mono
+            physics_ff = legacy_physics_adjustment_ff(
+                speed_ms,
+                slope,
+                total_mass_kg,
+                float(target_speed_kmh),
+                dt_ff,
+                self._prev_slope,
+                rolling_coeff=float(Settings.mapper_physics_rolling_coeff),
+                drag_coeff=float(Settings.mapper_physics_drag_coeff),
+                slope_scalar=float(Settings.mapper_physics_slope_scalar),
+                ff_horizon_s=float(Settings.mapper_physics_ff_horizon_s),
+                ff_gain=float(Settings.mapper_physics_ff_gain),
+            )
+            self._prev_slope = slope
+        else:
+            self._prev_slope = slope
+            self._prev_physics_mono = now_mono
+
         t0 = float(wanted_accel_ms2) / accel_scale
 
+        # Legacy: (PID terms) * weight_var + physics_adjustment_ff — FF is not multiplied by weight_var.
         if t0 >= 0.0:
-            t = t0 * weight_var
+            t = t0 * weight_var + physics_ff
         else:
-            t = -(abs(t0 * 1.3) ** (1.0 / max(weight_var, 1e-6)))
+            t = -(abs(t0 * 1.3) ** (1.0 / max(weight_var, 1e-6))) + physics_ff
 
         cc_gas = (min(max(t, 0.0), 1.0) + self._prev_cc_gas) / 2.0
         self._prev_cc_gas = cc_gas
@@ -325,7 +420,7 @@ class AccelToPedalMapper:
             if Settings.debug:
                 logger.debug(
                     "accel_mapper tick: wanted=%.3f raw=%.3f speed=%.1f "
-                    "gas=%.3f brake=%.3f weight_var=%.3f t=%.3f "
+                    "gas=%.3f brake=%.3f weight_var=%.3f t=%.3f phys_ff=%.4f "
                     "efficiency=%.3f mass=%.0f",
                     wanted_accel_ms2,
                     raw_accel_ms2,
@@ -334,6 +429,7 @@ class AccelToPedalMapper:
                     brake,
                     weight_var,
                     t,
+                    physics_ff,
                     efficiency,
                     total_mass_kg,
                 )
@@ -354,4 +450,5 @@ class AccelToPedalMapper:
             weight_var=weight_var,
             temp_after_weight=t,
             command_brake=cc_brake,
+            physics_adjustment_ff=physics_ff,
         )

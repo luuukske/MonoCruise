@@ -108,6 +108,12 @@ class Settings(metaclass=_SingletonMeta):
     mapper_brake_power: float = 2.5
     mapper_weight_span_tons: float = 12.7
     mapper_weight_strength: float = 0.27
+    # Legacy cruise physics feed-forward (accel_to_pedal_mapper); same defaults as old MonoCruise CC.
+    mapper_physics_rolling_coeff: float = 0.0015
+    mapper_physics_drag_coeff: float = 0.0
+    mapper_physics_slope_scalar: float = 0.00000162
+    mapper_physics_ff_horizon_s: float = 0.6
+    mapper_physics_ff_gain: float = 0.7
 
     # Adaptive brake efficiency
     brake_efficiency_learning: bool = True
