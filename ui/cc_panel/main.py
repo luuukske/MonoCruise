@@ -3,9 +3,12 @@ Cruise control display panel using PySide6.
 
 Single translucent window rendered entirely via QPainter.
 Thread-safe: update() can be called from any thread without dropping changes.
+
+The QWidget must be created and driven from the Qt main thread (QApplication
+owner). A separate Python thread cannot host this window; worker threads
+only push state via cc_panel.update(), which marshals to the GUI via signals.
 """
 
-import json
 import logging
 import os
 import sys
@@ -13,10 +16,19 @@ import time
 import threading
 
 from PySide6.QtWidgets import QWidget, QApplication
+
+from core.settings import Settings
 from PySide6.QtCore import Qt, QTimer, Signal, QByteArray
 from PySide6.QtGui import (
-    QPainter, QColor, QFont, QFontMetrics, QPixmap, QImage,
-    QPainterPath, QCursor,
+    QPainter,
+    QColor,
+    QFont,
+    QFontMetrics,
+    QPixmap,
+    QImage,
+    QPainterPath,
+    QCursor,
+    QGuiApplication,
 )
 
 SPEEDLIMITER_COLOR = "#008B00"
@@ -152,6 +164,8 @@ class _PanelWidget(QWidget):
         )
 
         # ACC lock / lines lifetime tracking
+        # TODO(ACC): when adaptive cruise reads lead vehicle, drive acc_locked,
+        # distance_to_lead, and acc_truck from telemetry / a future ACC thread.
         if any(k in changes for k in ("acc_locked", "acc_enabled", "distance_to_lead", "acc_truck")) or complete:
             now = time.time()
             # When locked and active, keep lines "live" and mirror current ACC settings
@@ -257,6 +271,7 @@ class _PanelWidget(QWidget):
         if cached is not None:
             return cached
 
+        # TODO(ACC): choose car1 vs truck1 from lead vehicle type when ACC is implemented.
         if is_aeb or (
             p._acc_locked and not p._acc_truck
             and p._cc_mode == "Cruise control" and p._acc_enabled
@@ -415,6 +430,7 @@ class _PanelWidget(QWidget):
             tinted = self._tinted(icon, ic)
 
             if show_lines:
+                # TODO(ACC): gap / lead visualization — fed by ACC when implemented.
                 # While ACC is locked, show both vehicle and lines. Once lock is lost,
                 # keep the lines for a short time but hide the vehicle above them.
                 if acc_locked_now:
@@ -530,12 +546,11 @@ class _PanelWidget(QWidget):
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self._drag_offset:
             self._drag_offset = None
-            save_variables(
-                os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "saves.json"),
-                panel_x=self.pos().x(),
-                panel_y=self.pos().y(),
-            )
+            try:
+                pos = self.pos()
+                Settings.save(values={"panel_x": pos.x(), "panel_y": pos.y()})
+            except Exception:
+                logger.exception("cc_panel: failed to persist panel position")
 
 
 # ---------------------------------------------------------------------------
@@ -666,6 +681,34 @@ class cc_panel:
     def show(self):
         """Show the panel and bring it to the front."""
         self._widget._show_sig.emit()
+
+    def ensure_on_screen(self) -> None:
+        """
+        If the frame does not intersect any monitor's work area, move to the
+        primary screen center and persist. Call from the Qt main thread.
+        Fixes invisible panels when config has coordinates from another setup.
+        """
+        w = self._widget
+        screens = QGuiApplication.screens()
+        if not screens:
+            return
+        fg = w.frameGeometry()
+        union = screens[0].availableGeometry()
+        for s in screens[1:]:
+            union = union.united(s.availableGeometry())
+        if union.intersects(fg):
+            return
+        ps = QGuiApplication.primaryScreen()
+        if ps is None:
+            return
+        ag = ps.availableGeometry()
+        x = ag.x() + max(0, (ag.width() - fg.width()) // 2)
+        y = ag.y() + max(0, (ag.height() - fg.height()) // 2)
+        w.move(x, y)
+        try:
+            Settings.save(values={"panel_x": x, "panel_y": y})
+        except Exception:
+            logger.exception("cc_panel: failed to persist clamped position")
 
     def hide(self):
         """Hide the panel (keeps state; use show() to reveal again)."""

@@ -42,6 +42,7 @@ from core.thread_management.popup_log_handler import PopupLogHandler
 
 from core.telemetry_thread.thread import TelemetryThread
 from core.main_pedal_thread.thread import MainPedalThread
+from core.cruise_control_thread.thread import CruiseControlThread
 from core.sending_thread.thread import SendingThread, create_visualization_bar
 from core.aeb.thread import AEBThread
 from core.aeb.debug_window import AEBDebugWindow
@@ -171,6 +172,7 @@ def main() -> None:
     workers = [
         TelemetryThread(),
         MainPedalThread(),
+        CruiseControlThread(),
         SendingThread(),
         AEBThread(),
     ]

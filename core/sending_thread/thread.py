@@ -77,6 +77,7 @@ class SendingThread(BaseThread):
         self._hazard_user_override: bool = False
         self._prev_tel_hazards: bool = False
         self._accel_mapper = AccelToPedalMapper()
+        self._key_listener = None
 
     def toggle_bool(self, name: str, duration: float = BOOL_PRESS_DURATION) -> None:
         """One-shot timed press: set *name* True for *duration* seconds, then False."""
@@ -98,6 +99,10 @@ class SendingThread(BaseThread):
             self._hazard_retriggers = 0
             self._hazard_phase = "idle"
         logger.debug("change_hazards: wanted=%s duration=%.3fs", wanted, duration)
+
+    def reset_accel_mapper_smoothing(self) -> None:
+        """Clear gas smoothing inside AccelToPedalMapper (e.g. when cruise stops commanding)."""
+        self._accel_mapper.reset_smoothing()
 
     def _read_speed(self) -> float:
         try:
@@ -214,6 +219,8 @@ class SendingThread(BaseThread):
             except Exception as e:
                 logger.debug("telemetry read failed: %s", e)
 
+        mapper_gas = 0.0
+        mapper_brake = 0.0
         if connected and tel_thread is not None and tel_thread.is_alive():
             try:
                 with tel_thread.data._lock:
@@ -222,9 +229,22 @@ class SendingThread(BaseThread):
                     mass_kg = float(tel_thread.data.estimated_total_mass_kg)
                     spd_ms = float(tel_thread.data.speed)
                     has_t = bool(tel_thread.data.ego_has_trailer)
-                self._accel_mapper.step(wanted_a, raw_a, spd_ms, mass_kg, has_t)
+                targets = self._accel_mapper.step(
+                    wanted_a, raw_a, spd_ms, mass_kg, has_t
+                )
+                mapper_gas = float(targets.gas)
+                mapper_brake = float(targets.brake)
             except Exception as e:
                 logger.debug("accel_mapper step failed: %s", e)
+
+        cruise_active = False
+        try:
+            cruise_t = registry.get_thread("cruise_control_thread")
+            if cruise_t is not None and cruise_t.is_alive():
+                with cruise_t.data._lock:
+                    cruise_active = bool(cruise_t.data.active)
+        except (KeyError, AttributeError):
+            pass
 
         speed_kmh = speed_ms * 3.6
         if connected:
@@ -333,6 +353,12 @@ class SendingThread(BaseThread):
         b = b ** 0.91
         a = float(complex(a).real)
         b = float(complex(b).real)
+
+        # Cruise / ACC: mapper turns commanded_accel_ms2 into pedals; blend so the user
+        # can always add more gas or brake on top.
+        if cruise_active:
+            a = max(a, mapper_gas)
+            b = max(b, mapper_brake)
 
         controller.aforward = a
         controller.abackward = b

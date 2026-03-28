@@ -13,7 +13,7 @@ Responsibilities:
 Does NOT own:
   - Sending values to the game  → sending_thread (reads ThreadData).
   - Hazard / horn actuation     → sending_thread (reads ThreadData flags).
-  - Cruise control / ACC        → future feature thread.
+  - Cruise control / ACC        → cruise_control_thread reads CC button holds from this data.
   - AEB / radar                 → future feature thread.
   - Live visualization          → future feature thread.
 
@@ -92,6 +92,11 @@ class MainPedalThreadData(ThreadData):
 
     # Device info — UI / sending thread may display this.
     device_name: str = ""
+
+    # Cruise-control buttons (read on the pygame thread only). Hat/keyboard bindings: future.
+    cc_start_held: bool = False
+    cc_inc_held: bool = False
+    cc_dec_held: bool = False
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
@@ -175,6 +180,9 @@ class MainPedalThread(BaseThread):
             with self.data._lock:
                 self.data.gas_output  = 0.0
                 self.data.brake_output = 0.0
+                self.data.cc_start_held = False
+                self.data.cc_inc_held = False
+                self.data.cc_dec_held = False
             # TODO: live visualization — clear frame here
             return
 
@@ -203,13 +211,16 @@ class MainPedalThread(BaseThread):
                 self.data.gas_output  = 0.0
                 self.data.brake_output = 0.15  # slight brake so vehicle slows gently
                 self.data.em_stop     = speed > 0.1
+                self.data.cc_start_held = False
+                self.data.cc_inc_held = False
+                self.data.cc_dec_held = False
             # TODO: hazards/horn actuation on device_lost (handled by sending_thread)
             # TODO: live visualization — clear frame here
             return
 
         # --- One-Pedal-Drive transform ----------------------------------------
         opdgasval, opdbrakeval = _onepedaldrive(gasval, brakeval)
-        # TODO: cruise control — override opdgasval / opdbrakeval here
+        # Cruise blends mapper output in sending_thread (commanded_accel_ms2).
 
         # --- Weight adjustment ------------------------------------------------
         if Settings.weight_adjustment and cargo_mass > 0:
@@ -337,6 +348,8 @@ class MainPedalThread(BaseThread):
                 gas_output   = 0.0
                 brake_output = 0.0
 
+        cc_start_held, cc_inc_held, cc_dec_held = self._read_cc_button_states()
+
         # --- Write outputs ----------------------------------------------------
         with self.data._lock:
             self.data.gasval      = gasval
@@ -345,6 +358,9 @@ class MainPedalThread(BaseThread):
             self.data.brake_output = brake_output
             self.data.stopped     = stopped
             self.data.em_stop     = em_stop
+            self.data.cc_start_held = cc_start_held
+            self.data.cc_inc_held = cc_inc_held
+            self.data.cc_dec_held = cc_dec_held
 
         self._prev_brakeval = brakeval
         self._prev_speed    = speed
@@ -383,6 +399,31 @@ class MainPedalThread(BaseThread):
                 "parkBrake": tel.data.parkBrake,
                 "cargoMass": tel.data.cargoMass,
             }
+
+    def _read_cc_button_states(self) -> tuple[bool, bool, bool]:
+        """Return (cc_start, cc_inc, cc_dec) held states; plain button indices only."""
+        if self._device is None:
+            return False, False, False
+        try:
+            n = self._device.get_numbuttons()
+        except Exception:
+            return False, False, False
+
+        def pressed(spec: object) -> bool:
+            if spec is None or not isinstance(spec, int):
+                return False
+            if spec < 0 or spec >= n:
+                return False
+            try:
+                return bool(self._device.get_button(spec))
+            except Exception:
+                return False
+
+        return (
+            pressed(Settings.cc_start_button),
+            pressed(Settings.cc_inc_button),
+            pressed(Settings.cc_dec_button),
+        )
 
     def _process_pygame_events(self, speed: float) -> tuple[float, float]:
         """Handle all pending pygame events and return the current (gasval, brakeval)."""

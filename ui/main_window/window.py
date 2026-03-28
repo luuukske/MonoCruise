@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.thread_management.registry import registry
+from ui.cc_panel.main import cc_panel as CcPanel
 from ui.main_window.banner import BannerState, BannerWidget
 from ui.main_window.confirmation_overlay import show_confirmation
 from ui.main_window.constants import (
@@ -185,6 +186,12 @@ class MonoCruiseWindow(QMainWindow):
         self._poll_timer.timeout.connect(self._poll_threads)
         self._poll_timer.start()
 
+        # -- Cruise control floater (Qt main thread only; see CcPanel docstring) --
+        self._cc_panel: CcPanel | None = None
+        self._cc_panel_scale_snap: float | None = None
+        self._cc_panel_update_snap: tuple | None = None
+        self._init_cc_panel()
+
         # -- Apply loaded settings to widgets ----------------------------------
         self._settings_panel.apply_settings(self._settings)
 
@@ -300,17 +307,126 @@ class MonoCruiseWindow(QMainWindow):
         Called every 100 ms by QTimer.  Reads data from registered threads
         via the Registry and updates the UI accordingly.
         """
-        # TODO: read from registry to update banner, pedal labels, etc.
-        #
-        # Example:
-        #   from core.thread_management.registry import registry
-        #
-        #   telem = registry.get_thread("telemetry_thread")
-        #   if telem and telem.data.game_connected:
-        #       self.set_banner_state(BannerState.CONNECTED)
-        #   elif telem and not telem.data.game_connected:
-        #       self.set_banner_state(BannerState.LOST)
-        pass
+        try:
+            self._sync_cc_panel()
+        except Exception:
+            logger.exception("main window poll: CC panel sync failed")
+
+    @staticmethod
+    def _cc_scale_mult(raw: object) -> float:
+        """Map settings value (e.g. 1.5 or '150%') to cc_panel scale multiplier."""
+        if raw is None:
+            return 1.0
+        if isinstance(raw, (int, float)):
+            x = float(raw)
+            return max(0.25, min(4.0, x / 100.0 if x > 4.0 else x))
+        s = str(raw).strip()
+        if s.endswith("%"):
+            try:
+                return max(0.25, min(4.0, float(s[:-1].strip()) / 100.0))
+            except ValueError:
+                return 1.0
+        try:
+            x = float(s)
+            return max(0.25, min(4.0, x / 100.0 if x > 4.0 else x))
+        except ValueError:
+            return 1.0
+
+    @staticmethod
+    def _cc_panel_display_mode(raw: str | None) -> str:
+        if raw == "Speed limiter":
+            return "Speed limiter"
+        return "Cruise control"
+
+    def _init_cc_panel(self) -> None:
+        try:
+            scale = self._cc_scale_mult(self._settings.cc_panel_scaling)
+            self._cc_panel_scale_snap = scale
+            px = int(self._settings.panel_x) if self._settings.panel_x is not None else 100
+            py = int(self._settings.panel_y) if self._settings.panel_y is not None else 100
+            mode = self._cc_panel_display_mode(self._settings.cc_mode)
+            self._cc_panel = CcPanel(
+                "-- km/h",
+                cc_mode=mode,
+                cc_enabled=False,
+                x_co=px,
+                y_co=py,
+                acc_enabled=bool(self._settings.acc_enabled),
+                scale_mult=scale,
+            )
+            # Saved panel_x/y may be from another resolution — pull onto a visible desktop.
+            self._cc_panel.ensure_on_screen()
+        except Exception:
+            logger.exception("failed to create cruise control panel")
+            self._cc_panel = None
+
+    def _sync_cc_panel(self) -> None:
+        """Drive CcPanel from registry + Settings (AEB blink, speed limiter colours, etc.)."""
+        if self._cc_panel is None:
+            return
+
+        cruise_enabled = False
+        target_kmh: float | None = None
+        try:
+            cr = registry.get_thread("cruise_control_thread")
+            if cr is not None and cr.is_alive():
+                with cr.data._lock:
+                    cruise_enabled = bool(cr.data.cc_enabled)
+                    t = cr.data.target_speed_kmh
+                    target_kmh = float(t) if t is not None else None
+        except (KeyError, AttributeError):
+            pass
+
+        aeb_warn = False
+        try:
+            aeb = registry.get_thread("aeb_thread")
+            if aeb is not None and aeb.is_alive():
+                with aeb.data._lock:
+                    aeb_warn = bool(aeb.data.AEB_warn)
+        except (KeyError, AttributeError):
+            pass
+
+        s = self._settings
+        with s._state_lock:
+            show_ui = bool(s.show_cc_ui)
+            cc_mode_raw = s.cc_mode
+            scaling_raw = s.cc_panel_scaling
+            acc_on = bool(s.acc_enabled)
+
+        # Show whenever "Show CC UI" is on (including game pause / menu).
+        should_show = show_ui
+
+        new_scale = self._cc_scale_mult(scaling_raw)
+        if self._cc_panel_scale_snap != new_scale:
+            self._cc_panel_scale_snap = new_scale
+            self._cc_panel.update_scaling(new_scale)
+
+        display_mode = self._cc_panel_display_mode(cc_mode_raw)
+        if target_kmh is None:
+            text = "-- km/h"
+        else:
+            text = f"{int(round(target_kmh))} km/h"
+
+        update_snap = (text, display_mode, cruise_enabled, aeb_warn, acc_on)
+        if self._cc_panel_update_snap != update_snap:
+            self._cc_panel_update_snap = update_snap
+            # TODO(ACC): pass acc_locked, distance_to_lead, acc_truck from ACC / radar when available.
+            self._cc_panel.update(
+                new_text=text,
+                cc_mode=display_mode,
+                cc_enabled=cruise_enabled,
+                AEB_warn=aeb_warn,
+                acc_enabled=acc_on,
+                acc_locked=False,
+                distance_to_lead=2,
+                acc_truck=False,
+            )
+
+        if should_show:
+            self._cc_panel.ensure_on_screen()
+            self._cc_panel.show()
+        else:
+            self._cc_panel.hide()
 
     # ==================================================================
     # Overrides
@@ -348,6 +464,12 @@ class MonoCruiseWindow(QMainWindow):
         self._open_on_taskbar = False
 
         self._poll_timer.stop()
+        if self._cc_panel is not None:
+            try:
+                self._cc_panel.stop()
+            except Exception:
+                logger.exception("failed to stop cruise control panel")
+            self._cc_panel = None
         try:
             self._settings.save()
         except Exception:
