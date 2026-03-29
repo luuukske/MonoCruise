@@ -48,7 +48,6 @@ _EGO_TRAILER_HALF_L = 6.8
 
 _REFRESH_MS = 33
 _PPM = 5.5
-_MIN_SPEED_KMH = 35.0
 _ARC_SAMPLES = 20
 _CORRIDOR_FADE_SEGMENTS = 16
 
@@ -440,11 +439,6 @@ class AEBDebugWindow(QWidget):
 
         y += 18
         p.setFont(self._font_small)
-
-        if kmh < _MIN_SPEED_KMH:
-            p.setPen(QPen(QColor(140, 140, 155)))
-            p.drawText(QPointF(x, y), f"AEB inactive below {_MIN_SPEED_KMH:.0f} km/h")
-            y += 15
 
         if ns > 0:
             p.setPen(QPen(_SUPPRESSED_CLR))
