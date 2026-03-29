@@ -50,6 +50,8 @@ class TelemetryThreadData(ThreadData):
 
     # Simulation state
     paused: bool = False
+    # SCS SDK rev 12+: non-zero in multiplayer when game reports time sync (TMP / convoy).
+    multiplayer_time_offset: int = 0
 
     # Truck motion
     speed: float = 0.0          # m/s — convert to km/h: speed * 3.6
@@ -110,6 +112,10 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.game_version_minor  = raw.get("telemetry_version_game_minor", 0)
         data.sdk_version         = raw.get("telemetry_plugin_revision", 0)
         data.paused              = raw.get("paused", False)
+        try:
+            data.multiplayer_time_offset = int(raw.get("multiplayerTimeOffset", 0))
+        except (TypeError, ValueError):
+            data.multiplayer_time_offset = 0
         data.coordinateX         = raw.get("coordinateX", 0.0)
         data.coordinateY         = raw.get("coordinateY", 0.0)
         data.coordinateZ         = raw.get("coordinateZ", 0.0)

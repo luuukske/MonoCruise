@@ -37,9 +37,13 @@ _INF: float = 1e9
 _FULL_BRAKE_DECEL: float = 7.8
 _MAX_RANGE: float = 200.0
 _MAX_RANGE_SQ: float = _MAX_RANGE ** 2
-# TMP-only low-speed false-positive filter (no no-collision zones in singleplayer).
-# One session flag: any slot is TMP iff TruckersMP traffic SDK is active for this read.
-# Near-stationary targets are exempt — stationary obstacles use ~ego speed as |Δv|.
+# Multiplayer-only low-speed false-positive filter (no no-collision zones in SP).
+# Latch once when ≥1 traffic vehicle exists:
+#   - TruckersMP: any traffic slot with is_tmp = 1 (ETS2LA traffic buffer).
+#   - Convoy: SCS telemetry multiplayerTimeOffset (rev 12+) non-zero.
+# Before any vehicles spawn, multiplayerTimeOffset can read as SP — do not latch
+# until traffic is present. Clear latch when telemetry disconnects.
+# Near-stationary targets exempt.
 _LOW_SPEED_FILTER_EGO_SPLIT_KMH: float = 40.0
 _LOW_SPEED_FILTER_REL_HIGH_EGO_KMH: float = 15.0
 _LOW_SPEED_FILTER_REL_LOW_EGO_KMH: float = 40.0
@@ -130,7 +134,7 @@ _VEH_STRIDE = 16 + 3 * 10
 def _collision_threat_relative_speed(
     ref_ego_kmh: float, rel_speed_kmh: float, abs_target_speed_ms: float,
 ) -> bool:
-    """TMP session only — true if target should participate in collision / TTB."""
+    """Multiplayer session only — true if target should participate in collision / TTB."""
     if abs_target_speed_ms >= _LOW_SPEED_FILTER_STATIONARY_MS:
         if ref_ego_kmh > _LOW_SPEED_FILTER_EGO_SPLIT_KMH:
             return rel_speed_kmh > _LOW_SPEED_FILTER_REL_HIGH_EGO_KMH
@@ -401,6 +405,8 @@ class AEBThread(BaseThread):
         self._ego_position_history: list[tuple[float, float, float]] = []
         # Latched ego speed (km/h) for rel-speed filter while warning / braking after warn.
         self._latched_filter_ego_kmh: float | None = None
+        # None until first frame with ≥1 traffic vehicle; then fixed from telemetry for session.
+        self._locked_multiplayer_traffic_session: bool | None = None
 
     def setup(self) -> None:
         self._traffic.open()
@@ -464,6 +470,29 @@ class AEBThread(BaseThread):
                 return float(getattr(pt.data, "brakeval", 0.0)) > _USER_BRAKE_LATCH_THRESHOLD
         except (KeyError, AttributeError):
             return False
+
+    def _update_and_get_multiplayer_traffic_session(self, vehicles: list[Vehicle]) -> bool:
+        """Latched MP flag: combine ETS2LA is_tmp (TMP) + SCS multiplayerTimeOffset (convoy)."""
+        try:
+            tel = registry.get_thread("telemetry_thread")
+            if tel is None or not tel.is_alive():
+                self._locked_multiplayer_traffic_session = None
+                return False
+            with tel.data._lock:
+                if not bool(tel.data.is_connected):
+                    self._locked_multiplayer_traffic_session = None
+                    return False
+                off = int(getattr(tel.data, "multiplayer_time_offset", 0))
+
+            any_tmp = any(getattr(v, "is_tmp", False) for v in vehicles)
+
+            if self._locked_multiplayer_traffic_session is None and vehicles:
+                self._locked_multiplayer_traffic_session = any_tmp or (off != 0)
+            if self._locked_multiplayer_traffic_session is None:
+                return False
+            return self._locked_multiplayer_traffic_session
+        except (KeyError, AttributeError, TypeError, ValueError):
+            return self._locked_multiplayer_traffic_session is True
 
     def loop(self) -> None:
         if not self.running:
@@ -557,9 +586,10 @@ class AEBThread(BaseThread):
         ego_fwd_z = ego_arc.fwd_z
 
         vehicles = self._traffic.read() or []
-        tmp_traffic_session = any(v.is_tmp for v in vehicles)
+        multiplayer_traffic_session = self._update_and_get_multiplayer_traffic_session(
+            vehicles)
         ref_kmh_for_filter = 0.0
-        if tmp_traffic_session:
+        if multiplayer_traffic_session:
             ref_kmh_for_filter = (
                 self._latched_filter_ego_kmh
                 if self._latched_filter_ego_kmh is not None
@@ -603,7 +633,7 @@ class AEBThread(BaseThread):
                 expected_y = ego_y + rz * math.tan(ego_pitch_rad)
                 if abs(v.position.y - expected_y) > _ELEVATION_MARGIN_M:
                     continue
-                if tmp_traffic_session:
+                if multiplayer_traffic_session:
                     _, v_yaw_deg_pc, _ = v.rotation.euler()
                     v_yaw_rad_pc = math.radians(v_yaw_deg_pc)
                     vf_x = -math.sin(v_yaw_rad_pc)
@@ -713,7 +743,7 @@ class AEBThread(BaseThread):
 
             veh_fwd_x = -math.sin(v_yaw_rad)
             veh_fwd_z = -math.cos(v_yaw_rad)
-            if tmp_traffic_session:
+            if multiplayer_traffic_session:
                 dvx = ego_speed * ego_fwd_x - v.speed * veh_fwd_x
                 dvz = ego_speed * ego_fwd_z - v.speed * veh_fwd_z
                 rel_kmh = 3.6 * math.hypot(dvx, dvz)
@@ -1008,7 +1038,7 @@ class AEBThread(BaseThread):
         if new_state != self._prev_state:
             self._state_hold_until = now_mono + 0.3
 
-        if not tmp_traffic_session:
+        if not multiplayer_traffic_session:
             self._latched_filter_ego_kmh = None
         else:
             user_brake = self._read_user_braking()
@@ -1055,6 +1085,7 @@ class AEBThread(BaseThread):
             except Exception:
                 pass
         self._latched_filter_ego_kmh = None
+        self._locked_multiplayer_traffic_session = None
         with self.data._lock:
             self.data.AEB_warn = False
             self.data.AEB_brake = False
