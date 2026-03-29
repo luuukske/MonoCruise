@@ -37,17 +37,10 @@ _INF: float = 1e9
 _FULL_BRAKE_DECEL: float = 7.8
 _MAX_RANGE: float = 200.0
 _MAX_RANGE_SQ: float = _MAX_RANGE ** 2
-# Multiplayer-only low-speed false-positive filter (no no-collision zones in SP).
-# Latch once when ≥1 traffic vehicle exists:
-#   - TruckersMP: any traffic slot with is_tmp = 1 (ETS2LA traffic buffer).
-#   - Convoy: SCS telemetry multiplayerTimeOffset (rev 12+) non-zero.
-# Before any vehicles spawn, multiplayerTimeOffset can read as SP — do not latch
-# until traffic is present. Clear latch when telemetry disconnects.
-# Near-stationary targets exempt.
-_LOW_SPEED_FILTER_EGO_SPLIT_KMH: float = 40.0
-_LOW_SPEED_FILTER_REL_HIGH_EGO_KMH: float = 15.0
-_LOW_SPEED_FILTER_REL_LOW_EGO_KMH: float = 40.0
-_LOW_SPEED_FILTER_STATIONARY_MS: float = 1.0
+# TMP-only: |v_ego − v_target| (km/h) vs latched ref ego speed — see _latched_filter_ego_kmh.
+_TMP_FILTER_EGO_SPLIT_KMH: float = 40.0
+_TMP_FILTER_REL_ABOVE_SPLIT_KMH: float = 15.0
+_TMP_FILTER_REL_AT_OR_BELOW_SPLIT_KMH: float = 40.0
 _USER_BRAKE_LATCH_THRESHOLD: float = 0.12
 
 _MIN_ARC_HORIZON: float = 2.5
@@ -131,15 +124,11 @@ _BUF_SIZE = 6960
 _VEH_STRIDE = 16 + 3 * 10
 
 
-def _collision_threat_relative_speed(
-    ref_ego_kmh: float, rel_speed_kmh: float, abs_target_speed_ms: float,
-) -> bool:
-    """Multiplayer session only — true if target should participate in collision / TTB."""
-    if abs_target_speed_ms >= _LOW_SPEED_FILTER_STATIONARY_MS:
-        if ref_ego_kmh > _LOW_SPEED_FILTER_EGO_SPLIT_KMH:
-            return rel_speed_kmh > _LOW_SPEED_FILTER_REL_HIGH_EGO_KMH
-        return rel_speed_kmh > _LOW_SPEED_FILTER_REL_LOW_EGO_KMH
-    return True
+def _tmp_collision_threat(ref_ego_kmh: float, rel_speed_kmh: float) -> bool:
+    """TMP session only — True if target should participate in arc collision / TTB."""
+    if ref_ego_kmh > _TMP_FILTER_EGO_SPLIT_KMH:
+        return rel_speed_kmh > _TMP_FILTER_REL_ABOVE_SPLIT_KMH
+    return rel_speed_kmh > _TMP_FILTER_REL_AT_OR_BELOW_SPLIT_KMH
 
 
 class AEBState(enum.IntEnum):
@@ -403,10 +392,18 @@ class AEBThread(BaseThread):
         # of Vehicle._position_history in traffic.py so both can share the same
         # circle-fitting logic when _ego_curvature_from_history() is implemented.
         self._ego_position_history: list[tuple[float, float, float]] = []
-        # Latched ego speed (km/h) for rel-speed filter while warning / braking after warn.
+        # Frozen ref ego (km/h) for TMP rel-speed split while WARN/brake-pedal active.
         self._latched_filter_ego_kmh: float | None = None
-        # None until first frame with ≥1 traffic vehicle; then fixed from telemetry for session.
-        self._locked_multiplayer_traffic_session: bool | None = None
+
+    def _read_user_braking(self) -> bool:
+        try:
+            pt = registry.get_thread("main_pedal_thread")
+            if pt is None or not pt.is_alive():
+                return False
+            with pt.data._lock:
+                return float(getattr(pt.data, "brakeval", 0.0)) > _USER_BRAKE_LATCH_THRESHOLD
+        except (KeyError, AttributeError):
+            return False
 
     def setup(self) -> None:
         self._traffic.open()
@@ -460,39 +457,6 @@ class AEBThread(BaseThread):
         - Clear history on large position jumps (teleport / reload detection).
         """
         return None
-
-    def _read_user_braking(self) -> bool:
-        try:
-            pt = registry.get_thread("main_pedal_thread")
-            if pt is None or not pt.is_alive():
-                return False
-            with pt.data._lock:
-                return float(getattr(pt.data, "brakeval", 0.0)) > _USER_BRAKE_LATCH_THRESHOLD
-        except (KeyError, AttributeError):
-            return False
-
-    def _update_and_get_multiplayer_traffic_session(self, vehicles: list[Vehicle]) -> bool:
-        """Latched MP flag: combine ETS2LA is_tmp (TMP) + SCS multiplayerTimeOffset (convoy)."""
-        try:
-            tel = registry.get_thread("telemetry_thread")
-            if tel is None or not tel.is_alive():
-                self._locked_multiplayer_traffic_session = None
-                return False
-            with tel.data._lock:
-                if not bool(tel.data.is_connected):
-                    self._locked_multiplayer_traffic_session = None
-                    return False
-                off = int(getattr(tel.data, "multiplayer_time_offset", 0))
-
-            any_tmp = any(getattr(v, "is_tmp", False) for v in vehicles)
-
-            if self._locked_multiplayer_traffic_session is None and vehicles:
-                self._locked_multiplayer_traffic_session = any_tmp or (off != 0)
-            if self._locked_multiplayer_traffic_session is None:
-                return False
-            return self._locked_multiplayer_traffic_session
-        except (KeyError, AttributeError, TypeError, ValueError):
-            return self._locked_multiplayer_traffic_session is True
 
     def loop(self) -> None:
         if not self.running:
@@ -586,15 +550,13 @@ class AEBThread(BaseThread):
         ego_fwd_z = ego_arc.fwd_z
 
         vehicles = self._traffic.read() or []
-        multiplayer_traffic_session = self._update_and_get_multiplayer_traffic_session(
-            vehicles)
-        ref_kmh_for_filter = 0.0
-        if multiplayer_traffic_session:
-            ref_kmh_for_filter = (
-                self._latched_filter_ego_kmh
-                if self._latched_filter_ego_kmh is not None
-                else ego_speed * 3.6
-            )
+        tmp_traffic_session = any(v.is_tmp for v in vehicles)
+        ego_kmh_now = ego_speed * 3.6
+        ref_kmh_for_filter = (
+            self._latched_filter_ego_kmh
+            if self._latched_filter_ego_kmh is not None
+            else ego_kmh_now
+        )
         if self._radar_visualizer is not None:
             # Push per-vehicle raw/filtered speed and filtered acceleration to the UI.
             for v in vehicles:
@@ -633,17 +595,15 @@ class AEBThread(BaseThread):
                 expected_y = ego_y + rz * math.tan(ego_pitch_rad)
                 if abs(v.position.y - expected_y) > _ELEVATION_MARGIN_M:
                     continue
-                if multiplayer_traffic_session:
+                if tmp_traffic_session:
                     _, v_yaw_deg_pc, _ = v.rotation.euler()
                     v_yaw_rad_pc = math.radians(v_yaw_deg_pc)
                     vf_x = -math.sin(v_yaw_rad_pc)
                     vf_z = -math.cos(v_yaw_rad_pc)
-                    avs_pc = abs(v.speed)
                     dvx_pc = ego_speed * ego_fwd_x - v.speed * vf_x
                     dvz_pc = ego_speed * ego_fwd_z - v.speed * vf_z
                     rel_kmh_pc = 3.6 * math.hypot(dvx_pc, dvz_pc)
-                    if not _collision_threat_relative_speed(
-                            ref_kmh_for_filter, rel_kmh_pc, avs_pc):
+                    if not _tmp_collision_threat(ref_kmh_for_filter, rel_kmh_pc):
                         continue
                 all_t, cross_pad, cross_list = _build_vehicle_collision_data(
                     v, dynamic_horizon, ego_yaw_rad, ego_fwd_x, ego_fwd_z
@@ -743,12 +703,11 @@ class AEBThread(BaseThread):
 
             veh_fwd_x = -math.sin(v_yaw_rad)
             veh_fwd_z = -math.cos(v_yaw_rad)
-            if multiplayer_traffic_session:
+            if tmp_traffic_session:
                 dvx = ego_speed * ego_fwd_x - v.speed * veh_fwd_x
                 dvz = ego_speed * ego_fwd_z - v.speed * veh_fwd_z
                 rel_kmh = 3.6 * math.hypot(dvx, dvz)
-                if not _collision_threat_relative_speed(
-                        ref_kmh_for_filter, rel_kmh, abs_v_speed):
+                if not _tmp_collision_threat(ref_kmh_for_filter, rel_kmh):
                     vehicle_dicts.append(veh_dict)
                     continue
 
@@ -1038,19 +997,16 @@ class AEBThread(BaseThread):
         if new_state != self._prev_state:
             self._state_hold_until = now_mono + 0.3
 
-        if not multiplayer_traffic_session:
-            self._latched_filter_ego_kmh = None
-        else:
-            user_brake = self._read_user_braking()
-            ego_kmh_now = ego_speed * 3.6
-            if new_state < AEBState.WARN and not user_brake:
-                self._latched_filter_ego_kmh = None
-            elif self._latched_filter_ego_kmh is None:
-                if new_state >= AEBState.WARN or (
-                        user_brake and self._prev_state >= AEBState.WARN):
-                    self._latched_filter_ego_kmh = ego_kmh_now
-
         self._prev_state = new_state
+
+        user_brake = self._read_user_braking()
+        if not tmp_traffic_session:
+            self._latched_filter_ego_kmh = None
+        elif new_state < AEBState.WARN and not user_brake:
+            self._latched_filter_ego_kmh = None
+        elif self._latched_filter_ego_kmh is None and (
+                new_state >= AEBState.WARN or user_brake):
+            self._latched_filter_ego_kmh = ego_kmh_now
 
         snap = AEBSnapshot(
             ego_x=ego_x, ego_z=ego_z, ego_yaw=ego_yaw_rad,
@@ -1085,7 +1041,6 @@ class AEBThread(BaseThread):
             except Exception:
                 pass
         self._latched_filter_ego_kmh = None
-        self._locked_multiplayer_traffic_session = None
         with self.data._lock:
             self.data.AEB_warn = False
             self.data.AEB_brake = False

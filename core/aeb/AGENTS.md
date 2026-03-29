@@ -111,7 +111,7 @@ _VEH_STRIDE           = 46  # fields per vehicle slot (16 + 3*10)
 | 11 | acceleration | float | m/s² — AI = buffer as-is. TMP buffer value is **ignored**; `Vehicle.acceleration` is EMA of the time derivative of filtered TMP speed (see §7). Arcs use `accel_for_arc()` (= `acceleration`). |
 | 12 | trailer_count | short | 0–3 |
 | 13 | id | short | Per-frame continuity key |
-| 14 | is_tmp | byte | Buffer flag for TMP-style physics (corner pivot, speed EMA, etc.). For TruckersMP this is the primary indicator of TMP-style vehicles. AEB’s multiplayer-only low-speed filter latches **once** when at least one traffic vehicle exists, treating the session as multiplayer when **either** any `is_tmp` slot is set **or** SCS telemetry `multiplayerTimeOffset` (SDK rev 12+) is non-zero; the latch clears on telemetry disconnect. |
+| 14 | is_tmp | byte | `1` = TMP multiplayer (ETS2LA); `0` = AI. When **any** slot has `is_tmp`, AEB pre-filters by **‖v_ego − v_target‖** (km/h) vs a **reference ego speed** (km/h): ref **&gt; 40** → threat only if rel **&gt; 15**; ref **≤ 40** → threat only if rel **&gt; 40**. Reference is current ego unless **latched**: first frame with `AEBState ≥ WARN` or driver brake &gt; threshold saves `ego_kmh`; latch held until state drops below WARN **and** brake released; cleared when not a TMP session. |
 | 15 | is_trailer | byte | `1` = trailer record, `0` = tractor |
 
 ### Trailer slots (offsets 16, 26, 36)
