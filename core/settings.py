@@ -106,6 +106,12 @@ class Settings(metaclass=_SingletonMeta):
     mapper_accel_scale_ms2: float = 3.5
     mapper_brake_divisor: float = 7.0
     mapper_brake_power: float = 2.5
+    # Brake path: physics linear map + optional v² drag assist + integral trim (see accel_to_pedal_mapper).
+    mapper_brake_full_decel_ms2: float = 7.5
+    mapper_brake_speed_drag_coeff: float = 0.12
+    mapper_brake_speed_ref_ms: float = 27.78
+    mapper_brake_integral_coeff: float = 0.02
+    mapper_brake_integral_clamp: float = 1.5
     mapper_weight_span_tons: float = 12.7
     mapper_weight_strength: float = 0.27
     # Legacy cruise physics feed-forward (accel_to_pedal_mapper); same defaults as old MonoCruise CC.

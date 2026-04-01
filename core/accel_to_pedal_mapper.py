@@ -3,12 +3,13 @@ Maps a commanded longitudinal acceleration (m/s²) to normalized gas / brake
 pedal targets (0–1). Used for ACC / cruise tuning; logs aggregate stats for
 user reports and optional CSV samples when Settings.debug is True.
 
-Reference curve (from legacy cruise logic, adapted):
-- Positive demand → smoothed gas; negative → brake from scaled magnitude ** 2.5.
-- Mass vs a reference mass adjusts the demand (same spirit as main_pedal weight_var).
-- Very low speed in gear: light brake cancels idle creep (skipped when dashboard shows
-  neutral, or above 5 m/s). Uses gearDashboard, not SDK gear — the latter can stay
-  non-zero while the dash reads N.
+- Positive demand → smoothed gas (legacy weight + physics FF when cruise active).
+- Negative demand → brake from a linear m/s² map: net demand vs nominal full-brake
+  decel, minus a tunable v² drag assist, scaled by brake efficiency; optional
+  integral trim on (raw − wanted) longitudinal accel from telemetry.
+- Mass vs a reference mass adjusts the demand (weight_var).
+- Very low speed in gear: light brake cancels idle creep (gearDashboard; skipped in N
+  or above ~5 m/s).
 """
 
 from __future__ import annotations
@@ -52,6 +53,40 @@ def compute_estimated_mass_kg(
 
 # Above this speed (m/s) idle-creep brake is not computed (saves work; curve is ~0 anyway).
 _IDLE_CREEP_SPEED_SKIP_MS: float = 5.0
+
+# Integral leak time constant (s) when not commanding cruise brake demand.
+_BRAKE_I_LEAK_TAU_S: float = 0.35
+
+
+def brake_drag_assist_ms2(speed_ms: float, coeff: float, v_ref_ms: float) -> float:
+    """Equivalent extra decel (m/s²) from speed-dependent drag opposing motion."""
+    if coeff <= 0.0 or not math.isfinite(coeff):
+        return 0.0
+    v_ref = max(float(v_ref_ms), 1e-3)
+    s = abs(float(speed_ms))
+    return float(coeff) * (s / v_ref) ** 2
+
+
+def brake_pedal_from_decel_ms2(
+    a_demand_ms2: float,
+    *,
+    speed_ms: float,
+    speed_drag_coeff: float,
+    speed_ref_ms: float,
+    full_decel_ms2: float,
+    efficiency: float,
+) -> float:
+    """
+    Normalized brake [0,1] from commanded decel magnitude (m/s²), minus drag assist,
+    divided by nominal full-brake decel (times efficiency).
+    """
+    a_d = max(0.0, float(a_demand_ms2))
+    if not math.isfinite(a_d):
+        return 0.0
+    assist = brake_drag_assist_ms2(speed_ms, speed_drag_coeff, speed_ref_ms)
+    a_net = max(0.0, a_d - assist)
+    denom = max(float(full_decel_ms2), 0.5) * max(float(efficiency), 0.1)
+    return max(0.0, min(1.0, a_net / denom))
 
 # Legacy CC used a constant m/s term (speed*0/3.6 + 100/3.6) in the slope-force expression.
 _LEGACY_SLOPE_SPEED_MS: float = 100.0 / 3.6
@@ -202,6 +237,8 @@ class AccelToPedalMapper:
         self._prev_cc_gas: float = 0.0
         self._prev_slope: float = 0.0
         self._prev_physics_mono: float | None = None
+        self._prev_step_mono: float | None = None
+        self._brake_integral: float = 0.0
         self._summary = _SummaryStats()
         self._last_summary_mono: float = 0.0
         self._csv_file = None
@@ -221,6 +258,8 @@ class AccelToPedalMapper:
         self._prev_cc_gas = 0.0
         self._prev_slope = 0.0
         self._prev_physics_mono = None
+        self._prev_step_mono = None
+        self._brake_integral = 0.0
 
     def _weight_var(
         self,
@@ -346,15 +385,24 @@ class AccelToPedalMapper:
         :param brake_efficiency_ratio: 1.0 = nominal; <1.0 → brake demand scaled up
             proportionally to compensate for reduced grip (worn tires, snow, etc.).
         :param log_sample: if False, skip CSV and summary accumulation.
+
+        Brake mapping uses Settings: ``mapper_brake_full_decel_ms2`` (nominal max
+        decel at full pedal), ``mapper_brake_speed_drag_coeff`` and
+        ``mapper_brake_speed_ref_ms`` for v² drag assist, and
+        ``mapper_brake_integral_coeff`` / ``mapper_brake_integral_clamp`` for
+        cruise-only tracking trim on (raw − wanted) accel.
         """
         # Snapshot Settings each tick for live hot-reload tuning support.
         ref_mass_kg = float(Settings.mapper_reference_mass_kg)
         accel_scale = max(float(Settings.mapper_accel_scale_ms2), 1e-6)
-        brake_div = max(float(Settings.mapper_brake_divisor), 1e-6)
-        brake_pow = float(Settings.mapper_brake_power)
         w_span = max(float(Settings.mapper_weight_span_tons), 0.1)
         w_strength = float(Settings.mapper_weight_strength)
         efficiency = max(float(brake_efficiency_ratio), 0.1)
+        full_decel = max(float(Settings.mapper_brake_full_decel_ms2), 0.5)
+        speed_drag = max(0.0, float(Settings.mapper_brake_speed_drag_coeff))
+        speed_ref = max(float(Settings.mapper_brake_speed_ref_ms), 1e-3)
+        ki_brake = float(Settings.mapper_brake_integral_coeff)
+        i_clamp = max(float(Settings.mapper_brake_integral_clamp), 0.0)
 
         weight_var = self._weight_var(total_mass_kg, has_trailer, ref_mass_kg, w_span, w_strength)
 
@@ -396,13 +444,47 @@ class AccelToPedalMapper:
         cc_gas = (min(max(t, 0.0), 1.0) + self._prev_cc_gas) / 2.0
         self._prev_cc_gas = cc_gas
 
+        if self._prev_step_mono is None:
+            dt_step = 0.02
+        else:
+            dt_step = max(1e-4, min(now_mono - self._prev_step_mono, 0.5))
+        self._prev_step_mono = now_mono
+
+        integrate_brake_i = (
+            cruise_commanding
+            and t < 0.0
+            and i_clamp > 0.0
+            and ki_brake != 0.0
+        )
+
         if t > 0.0:
             cc_brake = 0.0
         else:
-            mag = abs(t)
-            raw_brake = max(min(mag / brake_div, 2.0) ** brake_pow, 0.0)
-            # Scale brake demand up when efficiency is degraded to maintain target decel.
-            cc_brake = min(1.0, raw_brake / efficiency)
+            a_demand_ms2 = abs(float(t)) * accel_scale
+            cc_brake = brake_pedal_from_decel_ms2(
+                a_demand_ms2,
+                speed_ms=speed_ms,
+                speed_drag_coeff=speed_drag,
+                speed_ref_ms=speed_ref,
+                full_decel_ms2=full_decel,
+                efficiency=efficiency,
+            )
+            if integrate_brake_i:
+                e_track = float(raw_accel_ms2) - float(wanted_accel_ms2)
+                if not math.isfinite(e_track):
+                    e_track = 0.0
+                self._brake_integral += e_track * dt_step
+                self._brake_integral = max(
+                    -i_clamp, min(i_clamp, self._brake_integral)
+                )
+                cc_brake = max(
+                    0.0,
+                    min(1.0, cc_brake + ki_brake * self._brake_integral),
+                )
+
+        if not integrate_brake_i and i_clamp > 0.0 and ki_brake != 0.0:
+            leak = math.exp(-dt_step / max(_BRAKE_I_LEAK_TAU_S, 1e-3))
+            self._brake_integral *= leak
 
         creep = idle_creep_brake(speed_ms, gear_dashboard)
         gas = min(1.0, cc_gas)
@@ -421,7 +503,7 @@ class AccelToPedalMapper:
                 logger.debug(
                     "accel_mapper tick: wanted=%.3f raw=%.3f speed=%.1f "
                     "gas=%.3f brake=%.3f weight_var=%.3f t=%.3f phys_ff=%.4f "
-                    "efficiency=%.3f mass=%.0f",
+                    "efficiency=%.3f mass=%.0f brake_i=%.4f drag_as=%.3f",
                     wanted_accel_ms2,
                     raw_accel_ms2,
                     speed_ms,
@@ -432,6 +514,8 @@ class AccelToPedalMapper:
                     physics_ff,
                     efficiency,
                     total_mass_kg,
+                    self._brake_integral,
+                    brake_drag_assist_ms2(speed_ms, speed_drag, speed_ref),
                 )
                 self._write_csv_row(
                     speed_ms=speed_ms,

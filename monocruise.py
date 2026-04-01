@@ -34,7 +34,7 @@ import sys
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QTimer
 
-from core.settings import Settings
+from core.settings import Settings, CONFIG_PATH
 from core.thread_management.registry import registry
 from core.thread_management.watchdog import Watchdog
 from core.thread_management.monitor  import Monitor
@@ -150,6 +150,29 @@ def main() -> None:
     _configure_logging()
     log = logging.getLogger("main")
     log.info("starting — debug=%s", settings.debug)
+
+    # Auto-refresh settings in debug mode (lets you edit config.json while running).
+    # Runs on the Qt main thread, so it doesn't block any worker thread loops.
+    if settings.debug:
+        settings_log = logging.getLogger("settings")
+        _settings_last_mtime_ns: int | None = None
+
+        def _refresh_settings() -> None:
+            nonlocal _settings_last_mtime_ns
+            try:
+                mtime_ns = CONFIG_PATH.stat().st_mtime_ns if CONFIG_PATH.exists() else None
+                if mtime_ns is not None and mtime_ns == _settings_last_mtime_ns:
+                    return
+                _settings_last_mtime_ns = mtime_ns
+                Settings.load()
+            except Exception:
+                # Don't ever crash the main loop because of a malformed config during debug tinkering.
+                settings_log.exception("failed to auto-refresh settings")
+
+        settings_timer = QTimer()
+        settings_timer.setInterval(1000)
+        settings_timer.timeout.connect(_refresh_settings)
+        settings_timer.start()
 
     # Popup window
     popup = PopupWindow()

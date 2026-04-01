@@ -1,8 +1,9 @@
 """
 Tracks braking efficiency during cruise control to detect performance degradation.
 
-Compares a rolling EMA of measured max deceleration against a locked baseline.
-efficiency_ratio < 1.0 indicates reduced braking performance (worn tires, snow, etc.).
+Compares a rolling EMA of deceleration-per-unit-brake (m/s² per normalized pedal)
+against a locked baseline. efficiency_ratio < 1.0 indicates reduced braking
+performance (worn tires, snow, etc.).
 
 Only samples when:
   - cruise is commanding brake (caller's responsibility to gate this)
@@ -15,6 +16,7 @@ Only samples when:
 from __future__ import annotations
 
 import logging
+import math
 import time
 
 from core.settings import Settings
@@ -23,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 _MIN_SAMPLE_SPEED_MS: float = 5.0      # ~18 km/h
 _BRAKE_HIGH_THRESHOLD: float = 0.70    # only high-brake samples for baseline/EMA max
+_BRAKE_OUTPUT_FLOOR: float = 0.15      # decel-per-pedal normalization floor
 _MIN_DECEL_MS2: float = 0.5            # filter near-zero decel noise
 _MAX_SLOPE_RAD: float = 0.03           # ~1.7° — skip sloped road to avoid gravity bias
 _BASELINE_REQUIRED: int = 15           # high-brake samples before baseline is locked
@@ -96,23 +99,28 @@ class BrakeEfficiencyTracker:
             return
 
         alpha = max(1e-4, min(1.0, float(Settings.brake_efficiency_alpha)))
+        grip = measured_decel_ms2 / max(
+            float(brake_output), _BRAKE_OUTPUT_FLOOR
+        )
+        if not math.isfinite(grip) or grip <= 0.0:
+            return
 
         if self._ema_max_decel_ms2 <= 0.0:
-            self._ema_max_decel_ms2 = measured_decel_ms2
+            self._ema_max_decel_ms2 = grip
         else:
             self._ema_max_decel_ms2 = (
-                (1.0 - alpha) * self._ema_max_decel_ms2 + alpha * measured_decel_ms2
+                (1.0 - alpha) * self._ema_max_decel_ms2 + alpha * grip
             )
 
         if not self._baseline_locked:
-            self._baseline_samples.append(measured_decel_ms2)
+            self._baseline_samples.append(grip)
             if len(self._baseline_samples) >= _BASELINE_REQUIRED:
                 sorted_samples = sorted(self._baseline_samples)
                 top_half = sorted_samples[_BASELINE_REQUIRED // 2:]
                 self._baseline_max_decel_ms2 = sum(top_half) / len(top_half)
                 self._baseline_locked = True
                 logger.info(
-                    "brake_efficiency: baseline locked at %.2f m/s² (%d samples)",
+                    "brake_efficiency: baseline locked at %.2f m/s² per pedal (%d samples)",
                     self._baseline_max_decel_ms2,
                     len(self._baseline_samples),
                 )
@@ -141,7 +149,7 @@ class BrakeEfficiencyTracker:
                 extra={"popup": True},
             )
             logger.debug(
-                "brake_efficiency: ratio=%.3f ema_max=%.2f m/s² baseline=%.2f m/s² "
+                "brake_efficiency: ratio=%.3f ema_grip=%.2f baseline_grip=%.2f "
                 "warn_threshold=%.2f",
                 self._efficiency_ratio,
                 self._ema_max_decel_ms2,
