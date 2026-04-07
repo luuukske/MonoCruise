@@ -565,8 +565,13 @@ class cc_panel:
 
         self._blink_running = False
         self._hide_icon = False
-        self._blinker_t_off_ms = 100
-        self._blinker_t_on_ms = 150
+        # AEB blink timing: express as whole frames at 60 Hz to avoid
+        # beat-frequency jitter (consistent cadence across cycles).
+        self._blink_fps = 60.0
+        self._blinker_on_frames = 9   # 150ms @ 60 Hz
+        self._blinker_off_frames = 6  # 100ms @ 60 Hz
+        self._blinker_t_on_ms = max(1, int(round(1000.0 * (self._blinker_on_frames / self._blink_fps))))
+        self._blinker_t_off_ms = max(1, int(round(1000.0 * (self._blinker_off_frames / self._blink_fps))))
         self._time_after_AEB_warn = 2.0
 
         self._font = QFont("Arial")
