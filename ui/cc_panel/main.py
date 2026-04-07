@@ -65,10 +65,6 @@ class _PanelWidget(QWidget):
         self._blink_timer = QTimer(self)
         self._blink_timer.timeout.connect(self._blink_tick)
 
-        self._acc_lines_hold_timer = QTimer(self)
-        self._acc_lines_hold_timer.setSingleShot(True)
-        self._acc_lines_hold_timer.timeout.connect(self._on_acc_lines_hold_timeout)
-
         self._setup_window()
 
         self._update_sig.connect(self._on_update)
@@ -106,7 +102,6 @@ class _PanelWidget(QWidget):
         self._p.running = False
         self._p._blink_running = False
         self._blink_timer.stop()
-        self._acc_lines_hold_timer.stop()
         self.close()
 
     def _on_move(self, x: int, y: int):
@@ -163,32 +158,6 @@ class _PanelWidget(QWidget):
             or p._AEB_warn != old["AEB_warn"]
         )
 
-        # ACC lock / lines lifetime tracking
-        # TODO(ACC): when adaptive cruise reads lead vehicle, drive acc_locked,
-        # distance_to_lead, and acc_truck from telemetry / a future ACC thread.
-        if any(k in changes for k in ("acc_locked", "acc_enabled", "distance_to_lead", "acc_truck")) or complete:
-            now = time.time()
-            # When locked and active, keep lines "live" and mirror current ACC settings
-            if p._acc_locked and p._acc_enabled and p._cc_mode == "Cruise control":
-                p._acc_lines_visible_until = 0.0
-                p._last_acc_lines_distance = p._distance_to_lead
-                p._last_acc_lines_truck = p._acc_truck
-                self._acc_lines_hold_timer.stop()
-            # When we just lost lock, freeze the current ACC lines for a short hold time
-            elif old["acc_locked"] and not p._acc_locked:
-                if p._acc_enabled and p._cc_mode == "Cruise control":
-                    p._acc_lines_visible_until = now + p._acc_lines_hold_s
-                    p._last_acc_lines_distance = old["distance_to_lead"]
-                    p._last_acc_lines_truck = old["acc_truck"]
-                    self._acc_lines_hold_timer.start(int(p._acc_lines_hold_s * 1000))
-                else:
-                    p._acc_lines_visible_until = 0.0
-                    self._acc_lines_hold_timer.stop()
-            # If ACC was just disabled, immediately cancel any pending hold
-            elif old["acc_enabled"] and not p._acc_enabled:
-                p._acc_lines_visible_until = 0.0
-                self._acc_lines_hold_timer.stop()
-
         # AEB state transitions
         if "AEB_warn" in changes or complete:
             now = time.time()
@@ -211,11 +180,6 @@ class _PanelWidget(QWidget):
 
         self.update()
         self.raise_()
-
-    def _on_acc_lines_hold_timeout(self):
-        """Called when the ACC lines hold period has expired."""
-        self._p._acc_lines_visible_until = 0.0
-        self.update()
 
     # -- AEB blink --
 
@@ -407,15 +371,10 @@ class _PanelWidget(QWidget):
             and not p._AEB_warn
             and not p._blink_running
         )
-        hold_active = (
-            getattr(p, "_acc_lines_visible_until", 0.0) > 0.0
-            and now < p._acc_lines_visible_until
-        )
         acc_locked_now = p._acc_locked
-        # Show distance lines whenever ACC is enabled (including pre-lock),
-        # and also during the post-lock hold window. Keep them suppressed
-        # during AEB blink/warn for clarity.
-        show_lines = (base_acc_active or hold_active)
+        # Show distance lines whenever ACC is enabled (including pre-lock).
+        # Keep them suppressed during AEB blink/warn for clarity.
+        show_lines = base_acc_active
         icon_y = (h - icon_sz) // 2
         if show_lines and not ( acc_locked_now and p._acc_truck):
             icon_y -= int(4 * sc)
@@ -436,8 +395,8 @@ class _PanelWidget(QWidget):
 
             if show_lines:
                 # TODO(ACC): gap / lead visualization — fed by ACC when implemented.
-                # While ACC is locked, show both vehicle and lines. Once lock is lost,
-                # keep the lines for a short time but hide the vehicle above them.
+                # While ACC is locked, show both vehicle and lines. Otherwise,
+                # show only lines.
                 if acc_locked_now:
                     lines_distance = p._distance_to_lead
                     lines_truck = p._acc_truck
@@ -600,9 +559,6 @@ class cc_panel:
         self._AEB_warn = False
         self._AEB_warn_off_time = 0.0
         self._last_AEB_warn_true = 0.0
-        self._acc_lines_visible_until: float = 0.0
-        self._last_acc_lines_distance: int = self._distance_to_lead
-        self._last_acc_lines_truck: bool = self._acc_truck
 
         self._bg_opacity = 0.6
         self._text_color: QColor = self._color_for_mode(cc_mode, cc_enabled)
@@ -612,7 +568,6 @@ class cc_panel:
         self._blinker_t_off_ms = 100
         self._blinker_t_on_ms = 150
         self._time_after_AEB_warn = 2.0
-        self._acc_lines_hold_s = 8.0
 
         self._font = QFont("Arial")
         self._font.setBold(True)
