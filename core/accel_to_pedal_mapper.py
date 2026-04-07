@@ -4,9 +4,12 @@ pedal targets (0–1). Used for ACC / cruise tuning; logs aggregate stats for
 user reports and optional CSV samples when Settings.debug is True.
 
 - Positive demand → smoothed gas (legacy weight + physics FF when cruise active).
-- Negative demand → brake from a linear m/s² map: net demand vs nominal full-brake
-  decel, minus a tunable v² drag assist, scaled by brake efficiency; optional
-  integral trim on (raw − wanted) longitudinal accel from telemetry.
+- Negative demand → brake matches legacy MonoCruise ``cc_target_speed_thread_func``:
+  normalized command ``temp_val`` (PID/ACC blend × weight + physics FF, **before**
+  the unused asymmetric rewrite) maps to pedal via
+  ``(min(abs(temp_val / divisor), cap) ** power)`` with tunable divisor/power.
+  Optional integral trim on (raw − wanted) longitudinal accel; brake efficiency
+  scales demand when grip is low.
 - Mass vs a reference mass adjusts the demand (weight_var).
 - Very low speed in gear: light brake cancels idle creep (gearDashboard; skipped in N
   or above ~5 m/s).
@@ -77,8 +80,9 @@ def brake_pedal_from_decel_ms2(
     efficiency: float,
 ) -> float:
     """
-    Normalized brake [0,1] from commanded decel magnitude (m/s²), minus drag assist,
-    divided by nominal full-brake decel (times efficiency).
+    Alternate normalized brake [0,1] from commanded decel magnitude (m/s²): drag
+    assist, then linear map vs full-brake decel. Kept for experiments / tooling;
+    the live :meth:`AccelToPedalMapper.step` path uses :func:`legacy_brake_pedal_normalized`.
     """
     a_d = max(0.0, float(a_demand_ms2))
     if not math.isfinite(a_d):
@@ -87,6 +91,31 @@ def brake_pedal_from_decel_ms2(
     a_net = max(0.0, a_d - assist)
     denom = max(float(full_decel_ms2), 0.5) * max(float(efficiency), 0.1)
     return max(0.0, min(1.0, a_net / denom))
+
+
+def legacy_brake_pedal_normalized(
+    abs_normalized_cmd: float,
+    *,
+    divisor: float,
+    power: float,
+    max_ratio: float = 2.0,
+    efficiency: float = 1.0,
+) -> float:
+    """
+    Legacy MonoCruise cruise brake: ``max((min(abs(temp_val/divisor), max_ratio)**power), 0)``
+    then clip to [0, 1]. *abs_normalized_cmd* is ``abs(temp_val)`` in the same normalized
+    units as ``wanted_accel_ms2 / mapper_accel_scale_ms2`` after linear weight + physics.
+    Lower *efficiency* increases pedal demand to compensate for reduced decel per unit pedal.
+    """
+    d = max(float(divisor), 1e-6)
+    cap = max(float(max_ratio), 1e-6)
+    eff = max(float(efficiency), 0.1)
+    a = abs(float(abs_normalized_cmd))
+    if not math.isfinite(a):
+        return 0.0
+    r = min(a / d, cap)
+    raw = r ** float(power)
+    return max(0.0, min(1.0, raw / eff))
 
 # Legacy CC used a constant m/s term (speed*0/3.6 + 100/3.6) in the slope-force expression.
 _LEGACY_SLOPE_SPEED_MS: float = 100.0 / 3.6
@@ -386,11 +415,9 @@ class AccelToPedalMapper:
             proportionally to compensate for reduced grip (worn tires, snow, etc.).
         :param log_sample: if False, skip CSV and summary accumulation.
 
-        Brake mapping uses Settings: ``mapper_brake_full_decel_ms2`` (nominal max
-        decel at full pedal), ``mapper_brake_speed_drag_coeff`` and
-        ``mapper_brake_speed_ref_ms`` for v² drag assist, and
-        ``mapper_brake_integral_coeff`` / ``mapper_brake_integral_clamp`` for
-        cruise-only tracking trim on (raw − wanted) accel.
+        Brake mapping uses ``mapper_brake_divisor`` / ``mapper_brake_power`` (legacy
+        MonoCruise curve). Optional ``mapper_brake_integral_coeff`` /
+        ``mapper_brake_integral_clamp`` add cruise-only tracking trim on (raw − wanted) accel.
         """
         # Snapshot Settings each tick for live hot-reload tuning support.
         ref_mass_kg = float(Settings.mapper_reference_mass_kg)
@@ -398,9 +425,8 @@ class AccelToPedalMapper:
         w_span = max(float(Settings.mapper_weight_span_tons), 0.1)
         w_strength = float(Settings.mapper_weight_strength)
         efficiency = max(float(brake_efficiency_ratio), 0.1)
-        full_decel = max(float(Settings.mapper_brake_full_decel_ms2), 0.5)
-        speed_drag = max(0.0, float(Settings.mapper_brake_speed_drag_coeff))
-        speed_ref = max(float(Settings.mapper_brake_speed_ref_ms), 1e-3)
+        brake_divisor = max(float(Settings.mapper_brake_divisor), 1e-6)
+        brake_power = float(Settings.mapper_brake_power)
         ki_brake = float(Settings.mapper_brake_integral_coeff)
         i_clamp = max(float(Settings.mapper_brake_integral_clamp), 0.0)
 
@@ -435,13 +461,12 @@ class AccelToPedalMapper:
 
         t0 = float(wanted_accel_ms2) / accel_scale
 
-        # Legacy: (PID terms) * weight_var + physics_adjustment_ff — FF is not multiplied by weight_var.
-        if t0 >= 0.0:
-            t = t0 * weight_var + physics_ff
-        else:
-            t = -(abs(t0 * 1.3) ** (1.0 / max(weight_var, 1e-6))) + physics_ff
+        # Same linear blend as legacy ``temp_val`` before gas/brake (MonoCruise applies
+        # ``-(abs(temp_val*1.3)**(1/weight_var))`` only after cc_gas/cc_brake — that
+        # mutation is unused downstream, so pedals must not use the asymmetric form).
+        t_cmd = t0 * weight_var + physics_ff
 
-        cc_gas = (min(max(t, 0.0), 1.0) + self._prev_cc_gas) / 2.0
+        cc_gas = (min(max(t_cmd, 0.0), 1.0) + self._prev_cc_gas) / 2.0
         self._prev_cc_gas = cc_gas
 
         if self._prev_step_mono is None:
@@ -452,21 +477,19 @@ class AccelToPedalMapper:
 
         integrate_brake_i = (
             cruise_commanding
-            and t < 0.0
+            and t_cmd < 0.0
             and i_clamp > 0.0
             and ki_brake != 0.0
         )
 
-        if t > 0.0:
+        if t_cmd > 0.0:
             cc_brake = 0.0
         else:
-            a_demand_ms2 = abs(float(t)) * accel_scale
-            cc_brake = brake_pedal_from_decel_ms2(
-                a_demand_ms2,
-                speed_ms=speed_ms,
-                speed_drag_coeff=speed_drag,
-                speed_ref_ms=speed_ref,
-                full_decel_ms2=full_decel,
+            cc_brake = legacy_brake_pedal_normalized(
+                abs(t_cmd),
+                divisor=brake_divisor,
+                power=brake_power,
+                max_ratio=2.0,
                 efficiency=efficiency,
             )
             if integrate_brake_i:
@@ -502,20 +525,21 @@ class AccelToPedalMapper:
             if Settings.debug:
                 logger.debug(
                     "accel_mapper tick: wanted=%.3f raw=%.3f speed=%.1f "
-                    "gas=%.3f brake=%.3f weight_var=%.3f t=%.3f phys_ff=%.4f "
-                    "efficiency=%.3f mass=%.0f brake_i=%.4f drag_as=%.3f",
+                    "gas=%.3f brake=%.3f weight_var=%.3f t_cmd=%.3f phys_ff=%.4f "
+                    "efficiency=%.3f mass=%.0f brake_i=%.4f brake_div=%.2f pow=%.2f",
                     wanted_accel_ms2,
                     raw_accel_ms2,
                     speed_ms,
                     gas,
                     brake,
                     weight_var,
-                    t,
+                    t_cmd,
                     physics_ff,
                     efficiency,
                     total_mass_kg,
                     self._brake_integral,
-                    brake_drag_assist_ms2(speed_ms, speed_drag, speed_ref),
+                    brake_divisor,
+                    brake_power,
                 )
                 self._write_csv_row(
                     speed_ms=speed_ms,
@@ -532,7 +556,7 @@ class AccelToPedalMapper:
             gas=gas,
             brake=brake,
             weight_var=weight_var,
-            temp_after_weight=t,
+            temp_after_weight=t_cmd,
             command_brake=cc_brake,
             physics_adjustment_ff=physics_ff,
         )

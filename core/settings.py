@@ -106,7 +106,8 @@ class Settings(metaclass=_SingletonMeta):
     mapper_accel_scale_ms2: float = 3.5
     mapper_brake_divisor: float = 7.0
     mapper_brake_power: float = 2.5
-    # Brake path: physics linear map + optional v² drag assist + integral trim (see accel_to_pedal_mapper).
+    # Unused by the default cruise brake curve (legacy power law). Kept for
+    # brake_pedal_from_decel_ms2 / experiments only.
     mapper_brake_full_decel_ms2: float = 7.5
     mapper_brake_speed_drag_coeff: float = 0.12
     mapper_brake_speed_ref_ms: float = 27.78

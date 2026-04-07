@@ -16,8 +16,8 @@ import time
 import threading
 
 from PySide6.QtWidgets import QWidget, QApplication
-
-from core.settings import Settings
+if not __name__ == "__main__":
+    from core.settings import Settings
 from PySide6.QtCore import Qt, QTimer, Signal, QByteArray
 from PySide6.QtGui import (
     QPainter,
@@ -290,7 +290,7 @@ class _PanelWidget(QWidget):
             fname = None
 
         fm = QFontMetrics(p._font)
-        icon_sz = int(fm.height() * 1.8)
+        icon_sz = int(fm.height() * 1.8 * 0.85)
         phys = int(icon_sz * dpr)
 
         if fname:
@@ -396,7 +396,7 @@ class _PanelWidget(QWidget):
         # layout metrics
         fm = QFontMetrics(p._font)
         tw = fm.horizontalAdvance(p._text_content)
-        icon_sz = int(fm.height() * 1.8)
+        icon_sz = int(fm.height() * 1.8 * 0.85)
         right_m = int(20 * sc)
 
         icon_x = w - icon_sz - right_m
@@ -498,7 +498,7 @@ class _PanelWidget(QWidget):
         for i in range(num_lines - n, num_lines):
             draw_line_at(i, line_color)
         for i in range(0, num_lines - n):
-            opacity = 0.35 * 0.6 ** (num_lines - n - i)
+            opacity = 0.30 * 0.6 ** (num_lines - n - i) + 0.1
             inactive_color = QColor(line_color)
             inactive_color.setAlphaF(opacity)
             draw_line_at(i, inactive_color)
