@@ -69,7 +69,11 @@ class _PanelWidget(QWidget):
 
         self._setup_window()
 
-        self._flush_coalesced_sig.connect(self._on_flush_coalesced)
+        # QueuedConnection avoids deadlock when update() runs on the GUI thread
+        # while holding _pending_lock (AutoConnection would run the slot inline).
+        self._flush_coalesced_sig.connect(
+            self._on_flush_coalesced, Qt.ConnectionType.QueuedConnection
+        )
         self._show_sig.connect(self._on_show)
         self._hide_sig.connect(self._on_hide)
         self._stop_sig.connect(self._on_stop)
