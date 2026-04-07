@@ -412,8 +412,13 @@ class _PanelWidget(QWidget):
             and now < p._acc_lines_visible_until
         )
         acc_locked_now = p._acc_locked
-        show_lines = base_acc_active and (acc_locked_now or hold_active)
+        # Show distance lines whenever ACC is enabled (including pre-lock),
+        # and also during the post-lock hold window. Keep them suppressed
+        # during AEB blink/warn for clarity.
+        show_lines = (base_acc_active or hold_active)
         icon_y = (h - icon_sz) // 2
+        if show_lines and not ( acc_locked_now and p._acc_truck):
+            icon_y -= int(4 * sc)
 
         text_x = icon_x - p._icon_spacing - tw
         text_y_baseline = (h - fm.height()) // 2 + fm.ascent()
@@ -438,8 +443,10 @@ class _PanelWidget(QWidget):
                     lines_truck = p._acc_truck
                     draw_vehicle = True
                 else:
-                    lines_distance = getattr(p, "_last_acc_lines_distance", p._distance_to_lead)
-                    lines_truck = getattr(p, "_last_acc_lines_truck", p._acc_truck)
+                    # When awaiting lock (or in hold), keep reflecting the current
+                    # distance setting so user changes are immediately visible.
+                    lines_distance = p._distance_to_lead
+                    lines_truck = p._acc_truck
                     draw_vehicle = False
                 self._paint_icon_lines(
                     pa, tinted, icon_x, icon_y, icon_sz, sc, ic,
@@ -498,7 +505,7 @@ class _PanelWidget(QWidget):
         for i in range(num_lines - n, num_lines):
             draw_line_at(i, line_color)
         for i in range(0, num_lines - n):
-            opacity = 0.30 * 0.6 ** (num_lines - n - i) + 0.1
+            opacity = 0.35 * 0.6 ** (num_lines - n - i) + 0.05
             inactive_color = QColor(line_color)
             inactive_color.setAlphaF(opacity)
             draw_line_at(i, inactive_color)
