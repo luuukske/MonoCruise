@@ -5,7 +5,7 @@ Sending Thread — owns SCSController and pushes inputs to the game.
 
 Responsibilities:
 - Open and manage the SCS shared-memory controller.
-- Apply gas/brake exponents and write aforward/abackward to the game.
+- Apply pedal shaping and adaptive accel-to-pedal mapping, then write aforward/abackward to the game.
 - Expose toggle_bool() for timed boolean presses (False → True → False).
 - Expose set_bool() for persistent boolean overrides.
 - Expose change_hazards() for verified hazard toggling with retrigger (max 3).
@@ -19,8 +19,8 @@ import threading
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 from core.settings import Settings
-from core.accel_to_pedal_mapper import AccelToPedalMapper
 
+from .accel_to_pedals import AccelToPedals
 from .brake_efficiency import BrakeEfficiencyTracker
 from .scscontroller import SCSController
 from .visualization_bar import VisualizationBar
@@ -77,7 +77,7 @@ class SendingThread(BaseThread):
         self._last_should_force: bool = False
         self._hazard_user_override: bool = False
         self._prev_tel_hazards: bool = False
-        self._accel_mapper = AccelToPedalMapper()
+        self._accel_mapper = AccelToPedals()
         self._brake_tracker = BrakeEfficiencyTracker()
         self._key_listener = None
 
@@ -103,7 +103,7 @@ class SendingThread(BaseThread):
         logger.debug("change_hazards: wanted=%s duration=%.3fs", wanted, duration)
 
     def reset_accel_mapper_smoothing(self) -> None:
-        """Clear gas smoothing inside AccelToPedalMapper (e.g. when cruise stops commanding)."""
+        """Clear mapper smoothing/correction when cruise stops commanding."""
         self._accel_mapper.reset_smoothing()
 
     def _read_speed(self) -> float:
@@ -223,13 +223,11 @@ class SendingThread(BaseThread):
 
         # Resolve cruise_active before mapper so tracker can gate on it.
         cruise_active = False
-        cruise_target_kmh: float | None = None
         try:
             cruise_t = registry.get_thread("cruise_control_thread")
             if cruise_t is not None and cruise_t.is_alive():
                 with cruise_t.data._lock:
                     cruise_active = bool(cruise_t.data.active)
-                    cruise_target_kmh = cruise_t.data.target_speed_kmh
         except (KeyError, AttributeError):
             pass
 
@@ -247,6 +245,8 @@ class SendingThread(BaseThread):
                     has_t = bool(tel_thread.data.ego_has_trailer)
                     slope_rad = float(tel_thread.data.rotationY)
                     tel_gear_dashboard = int(tel_thread.data.gear_dashboard)
+                    game_throttle = float(tel_thread.data.gameThrottle)
+                    game_clutch = float(tel_thread.data.gameClutch)
                 measured_decel_ms2 = max(0.0, -raw_a)
                 targets = self._accel_mapper.step(
                     wanted_a,
@@ -256,9 +256,9 @@ class SendingThread(BaseThread):
                     has_t,
                     slope_rad=slope_rad,
                     cruise_commanding=cruise_active,
-                    target_speed_kmh=cruise_target_kmh,
                     gear_dashboard=tel_gear_dashboard,
-                    brake_efficiency_ratio=self._brake_tracker.efficiency_ratio,
+                    game_throttle=game_throttle,
+                    game_clutch=game_clutch,
                 )
                 mapper_gas = float(targets.gas)
                 mapper_brake = float(targets.brake)

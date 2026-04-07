@@ -101,26 +101,13 @@ class Settings(metaclass=_SingletonMeta):
     cc_accel_max_ms2: float = 1.8
     cc_accel_min_ms2: float = -4.0
 
-    # AccelToPedalMapper tuning
-    mapper_reference_mass_kg: float = 20000.0
+    # AccelToPedals tuning. Weight baselines and smoothing constants stay fixed in code.
     mapper_accel_scale_ms2: float = 3.5
-    mapper_brake_divisor: float = 7.0
-    mapper_brake_power: float = 2.5
-    # Unused by the default cruise brake curve (legacy power law). Kept for
-    # brake_pedal_from_decel_ms2 / experiments only.
-    mapper_brake_full_decel_ms2: float = 7.5
-    mapper_brake_speed_drag_coeff: float = 0.12
-    mapper_brake_speed_ref_ms: float = 27.78
-    mapper_brake_integral_coeff: float = 0.02
-    mapper_brake_integral_clamp: float = 1.5
-    mapper_weight_span_tons: float = 12.7
-    mapper_weight_strength: float = 0.27
-    # Legacy cruise physics feed-forward (accel_to_pedal_mapper); same defaults as old MonoCruise CC.
-    mapper_physics_rolling_coeff: float = 0.0015
-    mapper_physics_drag_coeff: float = 0.0
-    mapper_physics_slope_scalar: float = 0.00000162
-    mapper_physics_ff_horizon_s: float = 0.6
-    mapper_physics_ff_gain: float = 0.7
+    mapper_brake_scale_ms2: float = 6.5
+    mapper_brake_exponent: float = 2.5
+    mapper_rolling_resistance: float = 0.0015
+    mapper_integral_coeff: float = 0.40
+    mapper_integral_clamp: float = 0.35
 
     # Adaptive brake efficiency
     brake_efficiency_learning: bool = True

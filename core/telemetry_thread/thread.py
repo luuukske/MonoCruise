@@ -19,7 +19,7 @@ from core.thread_management.registry import registry
 from ui.popup.popup_window import PopupWindow
 
 from core.settings import Settings
-from core.accel_to_pedal_mapper import compute_estimated_mass_kg
+from core.sending_thread.accel_to_pedals import compute_estimated_mass_kg
 
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,7 @@ class TelemetryThreadData(ThreadData):
     # Game-applied inputs
     gameThrottle: float = 0.0
     gameBrake: float = 0.0
+    gameClutch: float = 0.0
 
     # Cargo / mass (SCS config_f + truck_f)
     cargoMass: float = 0.0     # kg
@@ -115,7 +116,7 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.coordinateZ         = raw.get("coordinateZ", 0.0)
         data.rotationX           = raw.get("rotationX", 0.0)
         data.speed               = raw.get("speed", 0.0)
-        data.cruise_control_speed = raw.get("cruiseControlSpeed", 0.0)
+        data.cruise_control_speed= raw.get("cruiseControlSpeed", 0.0)
         data.engine_rpm          = raw.get("engineRpm", 0.0)
         data.engine_rpm_max      = raw.get("engineRpmMax", 2000.0)
         data.gear                = raw.get("gear", 0)
@@ -125,6 +126,7 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.userSteer           = raw.get("userSteer", 0.0)
         data.gameThrottle        = raw.get("gameThrottle", 0.0)
         data.gameBrake           = raw.get("gameBrake", 0.0)
+        data.gameClutch          = raw.get("gameClutch", 0.0)
         data.cargoMass           = raw.get("cargoMass", 0.0)
         data.unitMass            = 10000
         data.fuel                = raw.get("fuel", 0.0)

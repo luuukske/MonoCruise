@@ -46,7 +46,7 @@ DISABLED_COLOR = "#F1F1F1"
 AEB_COLOR = "#FF0000"
 
 # Faded “last locked” vehicle hint when ACC lines show but no target is locked.
-_LAST_LOCKED_VEHICLE_OPACITY = 0.35
+_LAST_LOCKED_VEHICLE_OPACITY = 0.30
 # Logical px: expand vehicle alpha by this radius to cut holes in distance lines (shape outline).
 _LAST_LOCKED_LINE_GAP_PX = 1.5
 

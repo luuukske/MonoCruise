@@ -2,7 +2,7 @@
 Cruise control worker — CC button edge/timing logic and minimal speed→accel loop.
 
 Reads CC button holds from main_pedal_thread, writes commanded_accel_ms2 on
-telemetry_thread for AccelToPedalMapper in sending_thread.
+telemetry_thread for the accel-to-pedals mapper in sending_thread.
 """
 
 from __future__ import annotations
