@@ -27,8 +27,12 @@ This panel is intended for **user-facing safety/status feedback**: it should rem
 
 - **Threading model**
   - The public class `cc_panel` is a **thread-safe facade**.
-  - Worker threads call `cc_panel.update(...)` freely; updates are delivered to the Qt GUI thread via Qt **signals** (`_update_sig`, `_show_sig`, ...).
+  - Worker threads call `cc_panel.update(...)` freely. Each call merges fields into a pending dict under a lock and schedules **at most one** queued flush (`_flush_coalesced_sig` → apply + repaint). Other actions still use dedicated signals (`_show_sig`, `_move_sig`, …).
   - **Important**: the `QWidget` must still be **created and owned by the Qt main thread** (the thread running the `QApplication` event loop). Do not instantiate `cc_panel` inside a worker thread.
+
+- **High-frequency `update()`**
+  - Calling `update()` continuously (e.g. every telemetry tick) is supported: callers only pay a short critical section and dict merge; the GUI thread applies **one combined delta** per burst instead of one queued payload per call.
+  - **Semantics**: last write wins per field among calls that are still pending before the next flush. If any call in a batch used `complete_update=True`, the merged batch carries `_complete_update` until applied.
 
 - **State persistence**
   - The panel is draggable; on mouse release it persists its position via `Settings.save(values={"panel_x": ..., "panel_y": ...})`.
@@ -45,6 +49,7 @@ All methods below are safe to call from any thread **unless noted otherwise**.
   - `update(new_text=None, cc_mode=None, cc_enabled=None, acc_locked=None, distance_to_lead=None, AEB_warn=None, complete_update=False, acc_enabled=None, acc_truck=None)`
   - Only provided fields are changed; omitted fields keep their previous values.
   - `complete_update=True` forces a full recalculation (useful if you changed multiple coupled fields or want to be extra safe after a state resync).
+  - Coalesced: safe to invoke on every loop iteration; pending keys merge until the next GUI flush.
 
 - **Visibility / lifecycle**
   - `show()` / `hide()`

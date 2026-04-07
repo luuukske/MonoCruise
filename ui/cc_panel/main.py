@@ -3,6 +3,8 @@ Cruise control display panel using PySide6.
 
 Single translucent window rendered entirely via QPainter.
 Thread-safe: update() can be called from any thread without dropping changes.
+High-frequency calls coalesce: pending fields merge under a lock and at most
+one queued flush runs per GUI burst, avoiding Qt event-queue overload.
 
 The QWidget must be created and driven from the Qt main thread (QApplication
 owner). A separate Python thread cannot host this window; worker threads
@@ -47,7 +49,7 @@ def _cursor_pos() -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 class _PanelWidget(QWidget):
-    _update_sig = Signal(dict)
+    _flush_coalesced_sig = Signal()
     _show_sig = Signal()
     _hide_sig = Signal()
     _stop_sig = Signal()
@@ -67,7 +69,7 @@ class _PanelWidget(QWidget):
 
         self._setup_window()
 
-        self._update_sig.connect(self._on_update)
+        self._flush_coalesced_sig.connect(self._on_flush_coalesced)
         self._show_sig.connect(self._on_show)
         self._hide_sig.connect(self._on_hide)
         self._stop_sig.connect(self._on_stop)
@@ -128,6 +130,16 @@ class _PanelWidget(QWidget):
     def _on_bg_opacity(self, v: float):
         self._p._bg_opacity = v
         self.update()
+
+    def _on_flush_coalesced(self):
+        """Apply merged pending updates (runs on Qt GUI thread)."""
+        p = self._p
+        with p._pending_lock:
+            merged = p._pending
+            p._pending = {}
+            p._coalesce_armed = False
+        if merged:
+            self._on_update(merged)
 
     def _on_update(self, changes: dict):
         p = self._p
@@ -530,6 +542,10 @@ class cc_panel:
     Create on the Qt main thread.  Every public method is safe to call from
     any thread – state mutations are forwarded to the Qt event loop via
     signals, so no update is ever dropped.
+
+    update() coalesces: rapid calls merge into one pending dict (last write
+    per field wins) and schedule a single queued flush, so the GUI thread is
+    not flooded with one signal per call.
     """
 
     def __init__(
@@ -588,6 +604,10 @@ class cc_panel:
         self._widget = _PanelWidget(self)
         self._current_icon = self._widget._load_icon()
 
+        self._pending: dict = {}
+        self._pending_lock = threading.Lock()
+        self._coalesce_armed = False
+
     # -- properties --
 
     @property
@@ -611,6 +631,10 @@ class cc_panel:
     ):
         """
         Update the display.  Thread-safe, never drops changes.
+
+        Safe to call at high frequency from worker loops: successive calls
+        merge into pending state and coalesce to one GUI flush per event-loop
+        burst (cheap lock + dict update on callers; one repaint batch).
 
         Args:
             new_text: Speed text to display (e.g. "100 km/h").
@@ -642,8 +666,15 @@ class cc_panel:
             d["acc_truck"] = acc_truck
         if complete_update:
             d["_complete_update"] = True
-        if d:
-            self._widget._update_sig.emit(d)
+        if not d:
+            return
+        with self._pending_lock:
+            self._pending.update(d)
+            if d.get("_complete_update"):
+                self._pending["_complete_update"] = True
+            if not self._coalesce_armed:
+                self._coalesce_armed = True
+                self._widget._flush_coalesced_sig.emit()
 
     def show(self):
         """Show the panel and bring it to the front."""
