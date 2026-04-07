@@ -12,10 +12,12 @@ only push state via cc_panel.update(), which marshals to the GUI via signals.
 """
 
 import logging
+import math
 import os
 import sys
 import time
 import threading
+from typing import Callable
 
 from PySide6.QtWidgets import QWidget, QApplication
 if not __name__ == "__main__":
@@ -31,12 +33,22 @@ from PySide6.QtGui import (
     QPainterPath,
     QCursor,
     QGuiApplication,
+    qAlpha,
+    qBlue,
+    qGreen,
+    qRed,
+    qRgba,
 )
 
 SPEEDLIMITER_COLOR = "#008B00"
 CRUISECONTROL_COLOR = "#4876FF"
 DISABLED_COLOR = "#F1F1F1"
 AEB_COLOR = "#FF0000"
+
+# Faded “last locked” vehicle hint when ACC lines show but no target is locked.
+_LAST_LOCKED_VEHICLE_OPACITY = 0.35
+# Logical px: expand vehicle alpha by this radius to cut holes in distance lines (shape outline).
+_LAST_LOCKED_LINE_GAP_PX = 1.5
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +75,13 @@ class _PanelWidget(QWidget):
         self._drag_offset: tuple[int, int] | None = None
         self._tint_cache: dict[tuple, QPixmap] = {}
         self._scaled_icon_lines_cache: dict[tuple, QPixmap] = {}
+        self._ghost_raw_cache: dict[tuple, QPixmap] = {}
+        self._ghost_scaled_cache: dict[tuple, QPixmap] = {}
+        self._ghost_exact_alpha_cache: dict[tuple, QPixmap] = {}
+        self._vehicle_cutout_mask_cache: dict[tuple, QPixmap] = {}
+        # Final ACC line layer (after vehicle cutout); bounded, evict oldest.
+        self._acc_lines_layer_cache: dict[tuple, QPixmap] = {}
+        self._acc_lines_layer_cache_max = 8
 
         self._blink_timer = QTimer(self)
         self._blink_timer.timeout.connect(self._blink_tick)
@@ -128,6 +147,11 @@ class _PanelWidget(QWidget):
         p._icon_cache.clear()
         self._tint_cache.clear()
         self._scaled_icon_lines_cache.clear()
+        self._ghost_raw_cache.clear()
+        self._ghost_scaled_cache.clear()
+        self._ghost_exact_alpha_cache.clear()
+        self._vehicle_cutout_mask_cache.clear()
+        self._acc_lines_layer_cache.clear()
         p._current_icon = self._load_icon()
         self.update()
 
@@ -163,6 +187,9 @@ class _PanelWidget(QWidget):
         for key, val in changes.items():
             setattr(p, f"_{key}", val)
 
+        if p._acc_locked:
+            p._last_locked_acc_truck = bool(p._acc_truck)
+
         needs_icon = complete or any(
             getattr(p, f"_{k}") != old[k]
             for k in ("cc_mode", "AEB_warn", "acc_locked", "acc_enabled", "acc_truck")
@@ -190,6 +217,11 @@ class _PanelWidget(QWidget):
             p._current_icon = self._load_icon()
             self._tint_cache.clear()
             self._scaled_icon_lines_cache.clear()
+            self._ghost_raw_cache.clear()
+            self._ghost_scaled_cache.clear()
+            self._ghost_exact_alpha_cache.clear()
+            self._vehicle_cutout_mask_cache.clear()
+            self._acc_lines_layer_cache.clear()
 
         if needs_color or needs_icon:
             p._text_color = cc_panel._color_for_mode(p._cc_mode, p._cc_enabled)
@@ -220,6 +252,11 @@ class _PanelWidget(QWidget):
         p._icon_cache.clear()
         self._tint_cache.clear()
         self._scaled_icon_lines_cache.clear()
+        self._ghost_raw_cache.clear()
+        self._ghost_scaled_cache.clear()
+        self._ghost_exact_alpha_cache.clear()
+        self._vehicle_cutout_mask_cache.clear()
+        self._acc_lines_layer_cache.clear()
         p._current_icon = self._load_icon()
         self._blink_timer.stop()
         self.update()
@@ -327,6 +364,444 @@ class _PanelWidget(QWidget):
             logger.exception("cc_panel.main._PanelWidget._placeholder: failed to create placeholder pixmap")
             raise
 
+    @staticmethod
+    def _dilate_alpha_channel_sep(src: QImage, radius: int) -> QImage:
+        """Separable max-filter dilation on alpha (fast O(n·r) vs O(n·r²))."""
+        if radius <= 0 or src.isNull():
+            return src
+        w, h = src.width(), src.height()
+        tmp = QImage(w, h, QImage.Format.Format_ARGB32)
+        out = QImage(w, h, QImage.Format.Format_ARGB32)
+        tmp.fill(0)
+        out.fill(0)
+        for y in range(h):
+            for x in range(w):
+                amax = 0
+                for dx in range(-radius, radius + 1):
+                    sx = x + dx
+                    if 0 <= sx < w:
+                        a = src.pixelColor(sx, y).alpha()
+                        if a > amax:
+                            amax = a
+                if amax > 0:
+                    tmp.setPixelColor(x, y, QColor(255, 255, 255, amax))
+        for y in range(h):
+            for x in range(w):
+                amax = 0
+                for dy in range(-radius, radius + 1):
+                    sy = y + dy
+                    if 0 <= sy < h:
+                        a = tmp.pixelColor(x, sy).alpha()
+                        if a > amax:
+                            amax = a
+                if amax > 0:
+                    out.setPixelColor(x, y, QColor(255, 255, 255, amax))
+        return out
+
+    def _load_vehicle_asset_scaled(self, truck: bool, sh: int, dpr: float) -> QPixmap:
+        key = (truck, sh, dpr)
+        hit = self._ghost_raw_cache.get(key)
+        if hit is not None:
+            return hit
+        fname = "truck1.png" if truck else "car1.png"
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "assets", fname
+        )
+        pm = QPixmap(path)
+        if pm.isNull():
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+                img = QImage()
+                if img.loadFromData(QByteArray(data)):
+                    pm = QPixmap.fromImage(img)
+            except Exception:
+                logger.exception(
+                    "cc_panel.main._PanelWidget._load_vehicle_asset_scaled: load failed: %s",
+                    path,
+                )
+        phys = max(1, int(sh * dpr))
+        if pm.isNull():
+            pm = self._placeholder(sh, dpr)
+        else:
+            pm = pm.scaled(
+                phys, phys,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            pm.setDevicePixelRatio(dpr)
+        self._ghost_raw_cache[key] = pm
+        return pm
+
+    def _load_vehicle_asset_scaled_tinted(
+        self,
+        truck: bool,
+        sh: int,
+        dpr: float,
+        line_color: QColor,
+    ) -> QPixmap:
+        tkey = (truck, sh, dpr, line_color.name())
+        hit = self._ghost_scaled_cache.get(tkey)
+        if hit is not None:
+            return hit
+        raw = self._load_vehicle_asset_scaled(truck, sh, dpr)
+        tinted = self._tinted(raw, line_color)
+        if tinted is not None and not tinted.isNull():
+            self._ghost_scaled_cache[tkey] = tinted
+        return tinted if tinted is not None else raw
+
+    def _line_cutout_mask_from_vehicle_pixmap(
+        self,
+        scaled_vehicle_raw: QPixmap,
+        dpr: float,
+        cache_key: tuple,
+        r_phys: int,
+    ) -> QPixmap:
+        """
+        Expanded vehicle alpha from untinted pixmap (stable silhouette).
+        White + alpha for DestinationOut. Draw at (vx - pad_log, vy - pad_log), pad_log = r_phys/dpr.
+        """
+        if scaled_vehicle_raw.isNull():
+            return scaled_vehicle_raw
+        hit = self._vehicle_cutout_mask_cache.get(cache_key + (r_phys,))
+        if hit is not None:
+            return hit
+
+        img = scaled_vehicle_raw.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        if img.isNull():
+            return QPixmap()
+
+        w, h = img.width(), img.height()
+        padded = QImage(w + 2 * r_phys, h + 2 * r_phys, QImage.Format.Format_ARGB32)
+        padded.fill(0)
+        for yy in range(h):
+            for xx in range(w):
+                padded.setPixelColor(xx + r_phys, yy + r_phys, img.pixelColor(xx, yy))
+
+        dil = self._dilate_alpha_channel_sep(padded, r_phys)
+        out = QPixmap.fromImage(dil)
+        out.setDevicePixelRatio(dpr)
+        self._vehicle_cutout_mask_cache[cache_key + (r_phys,)] = out
+        return out
+
+    def _exact_vehicle_alpha_mask(
+        self, scaled_vehicle_raw: QPixmap, dpr: float, cache_pk: tuple
+    ) -> QPixmap:
+        """White with source alpha only — punches lines under the glyph exactly."""
+        hit = self._ghost_exact_alpha_cache.get(cache_pk)
+        if hit is not None:
+            return hit
+        if scaled_vehicle_raw.isNull():
+            return scaled_vehicle_raw
+        img = scaled_vehicle_raw.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        if img.isNull():
+            return QPixmap()
+        w, h = img.width(), img.height()
+        out_img = QImage(w, h, QImage.Format.Format_ARGB32)
+        out_img.fill(0)
+        for yy in range(h):
+            for xx in range(w):
+                a = img.pixelColor(xx, yy).alpha()
+                if a > 0:
+                    out_img.setPixelColor(xx, yy, QColor(255, 255, 255, a))
+        pm = QPixmap.fromImage(out_img)
+        pm.setDevicePixelRatio(dpr)
+        self._ghost_exact_alpha_cache[cache_pk] = pm
+        return pm
+
+    @staticmethod
+    def _stamp_alpha_max(dst: QImage, src: QImage, x0: int, y0: int) -> None:
+        """Merge src alpha into dst (white, A=max) at offset (x0,y0), clipped."""
+        if dst.isNull() or src.isNull():
+            return
+        dw, dh = dst.width(), dst.height()
+        sw, sh = src.width(), src.height()
+        y_start = max(0, -y0)
+        y_end = min(sh, dh - y0)
+        x_start = max(0, -x0)
+        x_end = min(sw, dw - x0)
+        for y in range(y_start, y_end):
+            ly = y0 + y
+            for x in range(x_start, x_end):
+                lx = x0 + x
+                sa = qAlpha(src.pixel(x, y))
+                if sa <= 0:
+                    continue
+                da = qAlpha(dst.pixel(lx, ly))
+                if sa > da:
+                    dst.setPixel(lx, ly, qRgba(255, 255, 255, sa))
+
+    @staticmethod
+    def _cutout_roi(
+        lw_img: int,
+        lh_img: int,
+        vx_px: int,
+        vy_px: int,
+        ex_w: int,
+        ex_h: int,
+        mx_px: int,
+        my_px: int,
+        di_w: int,
+        di_h: int,
+        margin: int = 3,
+    ) -> tuple[int, int, int, int]:
+        """Inclusive pixel bounds to process for vehicle + dilated cutout (+ AA margin)."""
+        if lw_img <= 0 or lh_img <= 0:
+            return 0, 0, 0, 0
+        x0 = min(vx_px, mx_px) - margin
+        y0 = min(vy_px, my_px) - margin
+        x1 = max(vx_px + ex_w, mx_px + di_w) + margin
+        y1 = max(vy_px + ex_h, my_px + di_h) + margin
+        x0 = max(0, x0)
+        y0 = max(0, y0)
+        x1 = min(lw_img - 1, x1)
+        y1 = min(lh_img - 1, y1)
+        if x0 > x1 or y0 > y1:
+            return 0, 0, max(0, lw_img - 1), max(0, lh_img - 1)
+        return x0, y0, x1, y1
+
+    @staticmethod
+    def _multiply_line_alpha_by_mask(
+        lines: QImage,
+        mask: QImage,
+        x0: int,
+        y0: int,
+        x1: int,
+        y1: int,
+    ) -> None:
+        """
+        For each pixel in [x0,x1]×[y0,y1]: lines_alpha *= (255 - mask_alpha) / 255.
+        Uses QRgb + setPixel (faster than pixelColor).
+        """
+        if lines.isNull() or mask.isNull():
+            return
+        w, h = lines.width(), lines.height()
+        if mask.width() != w or mask.height() != h:
+            return
+        x0 = max(0, min(x0, w - 1))
+        y0 = max(0, min(y0, h - 1))
+        x1 = max(x0, min(x1, w - 1))
+        y1 = max(y0, min(y1, h - 1))
+        for y in range(y0, y1 + 1):
+            for x in range(x0, x1 + 1):
+                m = qAlpha(mask.pixel(x, y))
+                if m == 0:
+                    continue
+                p = lines.pixel(x, y)
+                ca = qAlpha(p)
+                if ca <= 0:
+                    continue
+                na = (ca * (255 - m) + 127) // 255
+                if na <= 0:
+                    lines.setPixel(x, y, qRgba(0, 0, 0, 0))
+                else:
+                    nr = (qRed(p) * na + ca // 2) // ca
+                    ng = (qGreen(p) * na + ca // 2) // ca
+                    nb = (qBlue(p) * na + ca // 2) // ca
+                    lines.setPixel(x, y, qRgba(nr, ng, nb, na))
+
+    @staticmethod
+    def _distance_lines_bounds(
+        ax: int,
+        ay: int,
+        area_sz: int,
+        num_lines: int,
+        lw: int,
+        ls: int,
+        sc: float,
+        car_up_lines: int,
+        lines_start_rel: int,
+    ) -> tuple[float, float, float, float]:
+        lmin_x = float("inf")
+        lmax_x = float("-inf")
+        lmin_y = float("inf")
+        lmax_y = float("-inf")
+        for i in range(num_lines):
+            ly = lines_start_rel + i * (lw + ls)
+            indent = -2 * (i - (num_lines - 1)) * sc
+            x0 = ax + indent
+            x1 = ax + area_sz + 2 * (i - (num_lines - 1)) * sc - 1
+            y0 = ay + ly + 1 - car_up_lines
+            y1 = y0 + lw
+            lmin_x = min(lmin_x, x0)
+            lmax_x = max(lmax_x, x1)
+            lmin_y = min(lmin_y, y0)
+            lmax_y = max(lmax_y, y1)
+        return lmin_x, lmax_x, lmin_y, lmax_y
+
+    def _acc_lines_layer_cache_put(self, key: tuple, pm: QPixmap) -> None:
+        c = self._acc_lines_layer_cache
+        if len(c) >= self._acc_lines_layer_cache_max:
+            c.pop(next(iter(c)))
+        c[key] = pm
+
+    def _composite_acc_lines_with_vehicle_cutout(
+        self,
+        pa: QPainter,
+        ax: int,
+        ay: int,
+        area_sz: int,
+        sc: float,
+        line_color: QColor,
+        car_up_lines: int,
+        lines_start_rel: int,
+        n: int,
+        lw: int,
+        ls: int,
+        num_lines: int,
+        vx_i: int,
+        vy_i: int,
+        cutout_shape_pm: QPixmap,
+        mask_cache_pk: tuple,
+        vehicle_draw_pm: QPixmap,
+        vehicle_opacity: float,
+        draw_all_lines: Callable[[QPainter, int], None],
+    ) -> None:
+        """
+        Draw distance lines, subtract alpha under vehicle silhouette + gap, then draw vehicle.
+        cutout_shape_pm supplies alpha (tinted is fine; SourceIn preserves silhouette).
+        """
+        if cutout_shape_pm.isNull() or vehicle_draw_pm.isNull():
+            draw_all_lines(pa, car_up_lines)
+            if not vehicle_draw_pm.isNull():
+                pa.save()
+                pa.setOpacity(vehicle_opacity)
+                pa.drawPixmap(vx_i, vy_i, vehicle_draw_pm)
+                pa.restore()
+            return
+
+        dpr = self.devicePixelRatio()
+        gap = max(1, int(round(_LAST_LOCKED_LINE_GAP_PX * sc)))
+        r_phys = max(1, int(math.ceil(float(gap) * float(dpr))))
+        pad_log = r_phys / float(dpr)
+
+        mx = float(vx_i) - pad_log
+        my = float(vy_i) - pad_log
+        cw = cutout_shape_pm.width()
+        ch = cutout_shape_pm.height()
+        mask_lw = int(math.ceil(cw + 2.0 * pad_log))
+        mask_lh = int(math.ceil(ch + 2.0 * pad_log))
+
+        lmin_x, lmax_x, lmin_y, lmax_y = self._distance_lines_bounds(
+            ax,
+            ay,
+            area_sz,
+            num_lines,
+            lw,
+            ls,
+            sc,
+            car_up_lines,
+            lines_start_rel,
+        )
+        gmin_x = min(lmin_x, mx)
+        gmax_x = max(lmax_x, mx + mask_lw)
+        gmin_y = min(lmin_y, my)
+        gmax_y = max(lmax_y, my + mask_lh)
+
+        origin_x = int(math.floor(gmin_x))
+        origin_y = int(math.floor(gmin_y))
+        layer_w = max(1, int(math.ceil(gmax_x - origin_x)) + 1)
+        layer_h = max(1, int(math.ceil(gmax_y - origin_y)) + 1)
+
+        shape_ck = cutout_shape_pm.cacheKey()
+        layer_key = (
+            origin_x,
+            origin_y,
+            layer_w,
+            layer_h,
+            int(round(dpr * 4096)),
+            ax,
+            ay,
+            area_sz,
+            int(round(sc * 8192)),
+            car_up_lines,
+            lines_start_rel,
+            n,
+            lw,
+            ls,
+            num_lines,
+            line_color.rgba(),
+            vx_i,
+            vy_i,
+            r_phys,
+            shape_ck,
+        )
+        hit_layer = self._acc_lines_layer_cache.get(layer_key)
+        if hit_layer is not None and not hit_layer.isNull():
+            lines_pm = hit_layer
+        else:
+            mask_pm = self._line_cutout_mask_from_vehicle_pixmap(
+                cutout_shape_pm, dpr, mask_cache_pk, r_phys
+            )
+            exact_pm = self._exact_vehicle_alpha_mask(
+                cutout_shape_pm, dpr, mask_cache_pk
+            )
+            lines_pm = QPixmap(
+                max(1, int(layer_w * dpr)),
+                max(1, int(layer_h * dpr)),
+            )
+            lines_pm.fill(Qt.GlobalColor.transparent)
+            lines_pm.setDevicePixelRatio(dpr)
+
+            lp = QPainter(lines_pm)
+            lp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            lp.translate(-origin_x, -origin_y)
+            draw_all_lines(lp, car_up_lines)
+            lp.end()
+
+            layer_img = lines_pm.toImage().convertToFormat(
+                QImage.Format.Format_ARGB32
+            )
+            if not layer_img.isNull():
+                comb = QImage(
+                    layer_img.width(),
+                    layer_img.height(),
+                    QImage.Format.Format_ARGB32,
+                )
+                comb.fill(0)
+                vx_px = int(round((vx_i - origin_x) * dpr))
+                vy_px = int(round((vy_i - origin_y) * dpr))
+                mx_px = vx_px - r_phys
+                my_px = vy_px - r_phys
+                ex_img = exact_pm.toImage().convertToFormat(
+                    QImage.Format.Format_ARGB32
+                )
+                di_img = mask_pm.toImage().convertToFormat(
+                    QImage.Format.Format_ARGB32
+                )
+                ex_ok = not ex_img.isNull()
+                di_ok = not di_img.isNull()
+                if ex_ok:
+                    self._stamp_alpha_max(comb, ex_img, vx_px, vy_px)
+                if di_ok:
+                    self._stamp_alpha_max(comb, di_img, mx_px, my_px)
+                if ex_ok or di_ok:
+                    rx0, ry0, rx1, ry1 = self._cutout_roi(
+                        layer_img.width(),
+                        layer_img.height(),
+                        vx_px,
+                        vy_px,
+                        ex_img.width() if ex_ok else 0,
+                        ex_img.height() if ex_ok else 0,
+                        mx_px,
+                        my_px,
+                        di_img.width() if di_ok else 0,
+                        di_img.height() if di_ok else 0,
+                    )
+                    self._multiply_line_alpha_by_mask(
+                        layer_img, comb, rx0, ry0, rx1, ry1
+                    )
+                lines_pm = QPixmap.fromImage(layer_img)
+                lines_pm.setDevicePixelRatio(dpr)
+                self._acc_lines_layer_cache_put(layer_key, lines_pm)
+
+        pa.drawPixmap(origin_x, origin_y, lines_pm)
+
+        pa.save()
+        pa.setOpacity(vehicle_opacity)
+        pa.drawPixmap(vx_i, vy_i, vehicle_draw_pm)
+        pa.restore()
+
     # -- tinting --
 
     def _tinted(self, pm: QPixmap, color: QColor) -> QPixmap:
@@ -392,7 +867,12 @@ class _PanelWidget(QWidget):
         # Keep them suppressed during AEB blink/warn for clarity.
         show_lines = base_acc_active
         icon_y = (h - icon_sz) // 2
-        if show_lines and not ( acc_locked_now and p._acc_truck):
+        ghost_truck_slot = (
+            show_lines
+            and not acc_locked_now
+            and (p._last_locked_acc_truck is True)
+        )
+        if show_lines and not (acc_locked_now and p._acc_truck) and not ghost_truck_slot:
             icon_y -= int(4 * sc)
 
         text_x = icon_x - p._icon_spacing - tw
@@ -425,7 +905,8 @@ class _PanelWidget(QWidget):
                     draw_vehicle = False
                 self._paint_icon_lines(
                     pa, tinted, icon_x, icon_y, icon_sz, sc, ic,
-                    lines_distance, lines_truck, draw_vehicle
+                    lines_distance, lines_truck, draw_vehicle,
+                    p._last_locked_acc_truck,
                 )
             else:
                 pa.drawPixmap(int(icon_x), int(icon_y), tinted)
@@ -444,6 +925,7 @@ class _PanelWidget(QWidget):
         distance_to_lead: int,
         acc_truck: bool,
         draw_vehicle: bool = True,
+        last_locked_truck: bool | None = None,
     ):
         n = max(1, min(4, distance_to_lead))
         lw = int(4 * sc)
@@ -451,6 +933,13 @@ class _PanelWidget(QWidget):
         num_lines = 4
         lines_h_block = num_lines * lw + (num_lines - 1) * ls
         lines_h_icon = n * lw + (n - 1) * ls
+
+        need_ghost = not draw_vehicle
+        ghost_is_truck = need_ghost and (last_locked_truck is True)
+        if need_ghost:
+            car_up_lines = int(6 * sc) if not ghost_is_truck else 0
+        else:
+            car_up_lines = int(6 * sc) if not acc_truck or not draw_vehicle else 0
 
         sh = area_sz - lines_h_icon - ls - int((3 + 7 * (not acc_truck)) * sc)
         if sh % 2 == area_sz % 2:
@@ -461,31 +950,77 @@ class _PanelWidget(QWidget):
         center_y_icon = (area_sz - lines_h_icon - 1) / 2
         iy = int(center_y_icon - sh / 2) + int((1.5 + 8 * (not acc_truck)) * sc)
         ix = (area_sz - sh) // 2
-        car_up = int(6 * sc) if not acc_truck or not draw_vehicle else 0
 
-        def draw_line_at(i: int, color: QColor) -> None:
+        if need_ghost:
+            sh_v = area_sz - lines_h_icon - ls - int(
+                (3 + 7 * (not ghost_is_truck)) * sc
+            )
+            if sh_v % 2 == area_sz % 2:
+                sh_v += 1
+            sh_v = max(1, sh_v)
+            iy_v = int(center_y_icon - sh_v / 2) + int(
+                (1.5 + 8 * (not ghost_is_truck)) * sc
+            )
+            ix_v = (area_sz - sh_v) // 2
+            car_up_v = int(6 * sc) if not ghost_is_truck else 0
+        else:
+            sh_v = ix_v = iy_v = car_up_v = 0
+
+        def draw_line_at(
+            target_pa: QPainter, car_up_off: int, i: int, color: QColor
+        ) -> None:
             ly = lines_start_rel + i * (lw + ls)
             indent = -2 * (i - (num_lines - 1)) * sc
             x0 = ax + indent
             x1 = ax + area_sz + 2 * (i - (num_lines - 1)) * sc - 1
             lp = QPainterPath()
             lp.addRoundedRect(
-                float(x0), float(ay + ly + 1 - car_up),
+                float(x0), float(ay + ly + 1 - car_up_off),
                 float(x1 - x0), float(lw),
                 lw / 2.0, lw / 2.0,
             )
-            pa.fillPath(lp, color)
+            target_pa.fillPath(lp, color)
 
-        pa.setPen(Qt.PenStyle.NoPen)
-        for i in range(num_lines - n, num_lines):
-            draw_line_at(i, line_color)
-        for i in range(0, num_lines - n):
-            opacity = 0.35 * 0.6 ** (num_lines - n - i) + 0.05
-            inactive_color = QColor(line_color)
-            inactive_color.setAlphaF(opacity)
-            draw_line_at(i, inactive_color)
+        def draw_all_lines(target_pa: QPainter, car_up_off: int) -> None:
+            target_pa.setPen(Qt.PenStyle.NoPen)
+            for i in range(num_lines - n, num_lines):
+                draw_line_at(target_pa, car_up_off, i, line_color)
+            for i in range(0, num_lines - n):
+                opacity = 0.35 * 0.6 ** (num_lines - n - i) + 0.05
+                inactive_color = QColor(line_color)
+                inactive_color.setAlphaF(opacity)
+                draw_line_at(target_pa, car_up_off, i, inactive_color)
 
-        if draw_vehicle:
+        if need_ghost:
+            dpr_g = self.devicePixelRatio()
+            scaled_raw = self._load_vehicle_asset_scaled(ghost_is_truck, sh_v, dpr_g)
+            scaled_v = self._load_vehicle_asset_scaled_tinted(
+                ghost_is_truck, sh_v, dpr_g, line_color
+            )
+            vx_i = int(ax + ix_v)
+            vy_i = int(ay + iy_v - car_up_v)
+            self._composite_acc_lines_with_vehicle_cutout(
+                pa,
+                ax,
+                ay,
+                area_sz,
+                sc,
+                line_color,
+                car_up_lines,
+                lines_start_rel,
+                n,
+                lw,
+                ls,
+                num_lines,
+                vx_i,
+                vy_i,
+                scaled_raw,
+                (ghost_is_truck, sh_v, dpr_g),
+                scaled_v,
+                _LAST_LOCKED_VEHICLE_OPACITY,
+                draw_all_lines,
+            )
+        else:
             dpr = self.devicePixelRatio()
             cache_key = (id(icon_pm), n, area_sz, dpr, acc_truck, sc)
             scaled = self._scaled_icon_lines_cache.get(cache_key)
@@ -498,7 +1033,30 @@ class _PanelWidget(QWidget):
                 )
                 scaled.setDevicePixelRatio(dpr)
                 self._scaled_icon_lines_cache[cache_key] = scaled
-            pa.drawPixmap(int(ax + ix), int(ay + iy - car_up), scaled)
+            car_up_v_draw = int(6 * sc) if not acc_truck else 0
+            vx_i = int(ax + ix)
+            vy_i = int(ay + iy - car_up_v_draw)
+            self._composite_acc_lines_with_vehicle_cutout(
+                pa,
+                ax,
+                ay,
+                area_sz,
+                sc,
+                line_color,
+                car_up_lines,
+                lines_start_rel,
+                n,
+                lw,
+                ls,
+                num_lines,
+                vx_i,
+                vy_i,
+                scaled,
+                ("tracked", n, area_sz, dpr, acc_truck, sc),
+                scaled,
+                1.0,
+                draw_all_lines,
+            )
 
     # -- drag --
     def moveEvent(self, event):
@@ -509,6 +1067,11 @@ class _PanelWidget(QWidget):
             self._p._icon_cache.clear()
             self._tint_cache.clear()
             self._scaled_icon_lines_cache.clear()
+            self._ghost_raw_cache.clear()
+            self._ghost_scaled_cache.clear()
+            self._ghost_exact_alpha_cache.clear()
+            self._vehicle_cutout_mask_cache.clear()
+            self._acc_lines_layer_cache.clear()
             self._p._current_icon = self._load_icon()
             self.update()
         else:
@@ -575,6 +1138,7 @@ class cc_panel:
         self._acc_enabled = acc_enabled
         self._acc_truck = False
         self._acc_locked = False
+        self._last_locked_acc_truck: bool | None = None
         self._distance_to_lead = 2
         self._AEB_warn = False
         self._AEB_warn_off_time = 0.0
