@@ -49,6 +49,22 @@ class SendingThreadData(ThreadData):
     horn_active: bool = False
     airhorn_active: bool = False
     decel_measured_ms2: float = 0.0
+    mapper_commanded_ms2: float = 0.0
+    mapper_control_wanted_ms2: float = 0.0
+    mapper_raw_accel_ms2: float = 0.0
+    mapper_measured_control_ms2: float = 0.0
+    mapper_slope_input_rad: float = 0.0
+    mapper_effective_slope_rad: float = 0.0
+    mapper_wanted_smooth_ms2: float = 0.0
+    mapper_raw_smooth_ms2: float = 0.0
+    mapper_road_load_ms2: float = 0.0
+    mapper_integral: float = 0.0
+    mapper_est_max_accel_ms2: float = 0.0
+    mapper_est_max_brake_ms2: float = 0.0
+    mapper_command_gas: float = 0.0
+    mapper_command_brake: float = 0.0
+    mapper_accel_limited: bool = False
+    mapper_cruise_active: bool = False
     _lock: threading.Lock = field(
         default_factory=threading.Lock, repr=False, compare=False
     )
@@ -234,6 +250,20 @@ class SendingThread(BaseThread):
         mapper_gas = 0.0
         mapper_brake = 0.0
         mapper_command_brake = 0.0
+        mapper_command_gas = 0.0
+        mapper_control_wanted_ms2 = 0.0
+        mapper_wanted_smooth_ms2 = 0.0
+        mapper_raw_smooth_ms2 = 0.0
+        mapper_measured_control_ms2 = 0.0
+        mapper_slope_input_rad = 0.0
+        mapper_effective_slope_rad = 0.0
+        mapper_road_load_ms2 = 0.0
+        mapper_integral = 0.0
+        mapper_est_max_accel_ms2 = 0.0
+        mapper_est_max_brake_ms2 = 0.0
+        mapper_accel_limited = False
+        wanted_a = 0.0
+        raw_a = 0.0
         measured_decel_ms2 = 0.0
         if connected and tel_thread is not None and tel_thread.is_alive():
             try:
@@ -262,7 +292,19 @@ class SendingThread(BaseThread):
                 )
                 mapper_gas = float(targets.gas)
                 mapper_brake = float(targets.brake)
+                mapper_command_gas = float(targets.command_gas)
                 mapper_command_brake = float(targets.command_brake)
+                mapper_control_wanted_ms2 = float(targets.control_wanted_ms2)
+                mapper_measured_control_ms2 = float(targets.measured_control_ms2)
+                mapper_slope_input_rad = float(targets.slope_input_rad)
+                mapper_effective_slope_rad = float(targets.effective_slope_rad)
+                mapper_wanted_smooth_ms2 = float(targets.wanted_smooth)
+                mapper_raw_smooth_ms2 = float(targets.raw_smooth)
+                mapper_road_load_ms2 = float(targets.road_load_ms2)
+                mapper_integral = float(targets.integral_correction)
+                mapper_est_max_accel_ms2 = float(targets.estimated_max_accel_ms2)
+                mapper_est_max_brake_ms2 = float(targets.estimated_max_brake_ms2)
+                mapper_accel_limited = bool(targets.accel_limited)
             except Exception as e:
                 logger.debug("accel_mapper step failed: %s", e)
                 slope_rad = 0.0
@@ -327,6 +369,22 @@ class SendingThread(BaseThread):
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
                 self.data.decel_active = False
                 self.data.decel_brake_output = 0.0
+                self.data.mapper_commanded_ms2 = 0.0
+                self.data.mapper_control_wanted_ms2 = 0.0
+                self.data.mapper_raw_accel_ms2 = 0.0
+                self.data.mapper_measured_control_ms2 = 0.0
+                self.data.mapper_slope_input_rad = 0.0
+                self.data.mapper_effective_slope_rad = 0.0
+                self.data.mapper_wanted_smooth_ms2 = 0.0
+                self.data.mapper_raw_smooth_ms2 = 0.0
+                self.data.mapper_road_load_ms2 = 0.0
+                self.data.mapper_integral = 0.0
+                self.data.mapper_est_max_accel_ms2 = 0.0
+                self.data.mapper_est_max_brake_ms2 = 0.0
+                self.data.mapper_command_gas = 0.0
+                self.data.mapper_command_brake = 0.0
+                self.data.mapper_accel_limited = False
+                self.data.mapper_cruise_active = False
             return
 
         if not pedal_alive:
@@ -340,6 +398,22 @@ class SendingThread(BaseThread):
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
                 self.data.decel_active = False
                 self.data.decel_brake_output = 0.0
+                self.data.mapper_commanded_ms2 = 0.0
+                self.data.mapper_control_wanted_ms2 = 0.0
+                self.data.mapper_raw_accel_ms2 = 0.0
+                self.data.mapper_measured_control_ms2 = 0.0
+                self.data.mapper_slope_input_rad = 0.0
+                self.data.mapper_effective_slope_rad = 0.0
+                self.data.mapper_wanted_smooth_ms2 = 0.0
+                self.data.mapper_raw_smooth_ms2 = 0.0
+                self.data.mapper_road_load_ms2 = 0.0
+                self.data.mapper_integral = 0.0
+                self.data.mapper_est_max_accel_ms2 = 0.0
+                self.data.mapper_est_max_brake_ms2 = 0.0
+                self.data.mapper_command_gas = 0.0
+                self.data.mapper_command_brake = 0.0
+                self.data.mapper_accel_limited = False
+                self.data.mapper_cruise_active = False
             return
 
         try:
@@ -360,6 +434,22 @@ class SendingThread(BaseThread):
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
                 self.data.decel_active = False
                 self.data.decel_brake_output = 0.0
+                self.data.mapper_commanded_ms2 = 0.0
+                self.data.mapper_control_wanted_ms2 = 0.0
+                self.data.mapper_raw_accel_ms2 = 0.0
+                self.data.mapper_measured_control_ms2 = 0.0
+                self.data.mapper_slope_input_rad = 0.0
+                self.data.mapper_effective_slope_rad = 0.0
+                self.data.mapper_wanted_smooth_ms2 = 0.0
+                self.data.mapper_raw_smooth_ms2 = 0.0
+                self.data.mapper_road_load_ms2 = 0.0
+                self.data.mapper_integral = 0.0
+                self.data.mapper_est_max_accel_ms2 = 0.0
+                self.data.mapper_est_max_brake_ms2 = 0.0
+                self.data.mapper_command_gas = 0.0
+                self.data.mapper_command_brake = 0.0
+                self.data.mapper_accel_limited = False
+                self.data.mapper_cruise_active = False
             return
 
         gas_exp = Settings.gas_exponent_variable or 1.0
@@ -401,7 +491,23 @@ class SendingThread(BaseThread):
             self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
             self.data.decel_active = False
             self.data.decel_brake_output = 0.0
-            self.data.decel_measured_ms2 = 0.0
+            self.data.decel_measured_ms2 = measured_decel_ms2
+            self.data.mapper_commanded_ms2 = wanted_a
+            self.data.mapper_control_wanted_ms2 = mapper_control_wanted_ms2
+            self.data.mapper_raw_accel_ms2 = raw_a
+            self.data.mapper_measured_control_ms2 = mapper_measured_control_ms2
+            self.data.mapper_slope_input_rad = mapper_slope_input_rad
+            self.data.mapper_effective_slope_rad = mapper_effective_slope_rad
+            self.data.mapper_wanted_smooth_ms2 = mapper_wanted_smooth_ms2
+            self.data.mapper_raw_smooth_ms2 = mapper_raw_smooth_ms2
+            self.data.mapper_road_load_ms2 = mapper_road_load_ms2
+            self.data.mapper_integral = mapper_integral
+            self.data.mapper_est_max_accel_ms2 = mapper_est_max_accel_ms2
+            self.data.mapper_est_max_brake_ms2 = mapper_est_max_brake_ms2
+            self.data.mapper_command_gas = mapper_command_gas
+            self.data.mapper_command_brake = mapper_command_brake
+            self.data.mapper_accel_limited = mapper_accel_limited
+            self.data.mapper_cruise_active = cruise_active
 
     def teardown(self) -> None:
         if self._key_listener is not None:
@@ -427,6 +533,22 @@ class SendingThread(BaseThread):
             self.data.decel_active = False
             self.data.decel_brake_output = 0.0
             self.data.decel_measured_ms2 = 0.0
+            self.data.mapper_commanded_ms2 = 0.0
+            self.data.mapper_control_wanted_ms2 = 0.0
+            self.data.mapper_raw_accel_ms2 = 0.0
+            self.data.mapper_measured_control_ms2 = 0.0
+            self.data.mapper_slope_input_rad = 0.0
+            self.data.mapper_effective_slope_rad = 0.0
+            self.data.mapper_wanted_smooth_ms2 = 0.0
+            self.data.mapper_raw_smooth_ms2 = 0.0
+            self.data.mapper_road_load_ms2 = 0.0
+            self.data.mapper_integral = 0.0
+            self.data.mapper_est_max_accel_ms2 = 0.0
+            self.data.mapper_est_max_brake_ms2 = 0.0
+            self.data.mapper_command_gas = 0.0
+            self.data.mapper_command_brake = 0.0
+            self.data.mapper_accel_limited = False
+            self.data.mapper_cruise_active = False
         self._accel_mapper.close()
         logger.debug("teardown complete")
 

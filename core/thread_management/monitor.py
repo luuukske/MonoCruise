@@ -41,6 +41,8 @@ class Monitor(BaseThread):
         self._watchdog   = watchdog
         self._input_thread: threading.Thread | None = None
         self._stop_input  = threading.Event()
+        self._mapper_live = False
+        self._last_mapper_print = 0.0
 
     # lifecycle
 
@@ -54,7 +56,8 @@ class Monitor(BaseThread):
         print("[monitor] debug shell active — type 'help' for commands", flush=True)
 
     def loop(self) -> None:
-        pass   # heartbeat only; no auto-render
+        if self._mapper_live:
+            self._print_mapper_status(throttle_s=0.25)
 
     def teardown(self) -> None:
         self._stop_input.set()
@@ -78,6 +81,42 @@ class Monitor(BaseThread):
                 f"{fps}"
             )
         print(sep, flush=True)
+
+    def _print_mapper_status(self, throttle_s: float = 0.0) -> None:
+        import time
+
+        now = time.monotonic()
+        if throttle_s > 0.0 and now - self._last_mapper_print < throttle_s:
+            return
+
+        try:
+            sending = registry.get_thread("sending_thread")
+            with sending.data._lock:
+                line = (
+                    "[mapper] "
+                    f"cc={'on' if sending.data.mapper_cruise_active else 'off'} "
+                    f"lim={'yes' if sending.data.mapper_accel_limited else 'no'} "
+                    f"cmd={sending.data.mapper_commanded_ms2:+.2f} "
+                    f"ctrl={sending.data.mapper_control_wanted_ms2:+.2f} "
+                    f"raw={sending.data.mapper_raw_accel_ms2:+.2f} "
+                    f"measCtrl={sending.data.mapper_measured_control_ms2:+.2f} "
+                    f"slope={sending.data.mapper_slope_input_rad:+.3f} "
+                    f"effSlope={sending.data.mapper_effective_slope_rad:+.3f} "
+                    f"ws={sending.data.mapper_wanted_smooth_ms2:+.2f} "
+                    f"rs={sending.data.mapper_raw_smooth_ms2:+.2f} "
+                    f"load={sending.data.mapper_road_load_ms2:+.2f} "
+                    f"i={sending.data.mapper_integral:+.3f} "
+                    f"estA={sending.data.mapper_est_max_accel_ms2:.2f} "
+                    f"estB={sending.data.mapper_est_max_brake_ms2:.2f} "
+                    f"gas={sending.data.mapper_command_gas:.3f} "
+                    f"brk={sending.data.mapper_command_brake:.3f} "
+                    f"measB={sending.data.decel_measured_ms2:.2f}"
+                )
+        except (KeyError, AttributeError):
+            line = "[mapper] sending_thread unavailable"
+
+        print(line, flush=True)
+        self._last_mapper_print = now
 
     # CLI input
 
@@ -142,6 +181,18 @@ class Monitor(BaseThread):
                 print(__doc__, flush=True)
             case "status":
                 self._print_status()
+            case "mapper":
+                if args and args[0].lower() == "off":
+                    self._mapper_live = False
+                    print("[monitor] mapper live view disabled", flush=True)
+                else:
+                    self._mapper_live = not self._mapper_live
+                    print(
+                        f"[monitor] mapper live view {'enabled' if self._mapper_live else 'disabled'}",
+                        flush=True,
+                    )
+                    if self._mapper_live:
+                        self._print_mapper_status()
             case "stop" if args:
                 self._cmd_stop(args[0])
             case "restart" if args:
