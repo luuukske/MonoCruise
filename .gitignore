@@ -4,6 +4,8 @@ venv/
 
 # Editor settings
 .vscode/
+.cursor/
+.claude/
 
 # Python cache files
 __pycache__/

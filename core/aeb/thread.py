@@ -311,9 +311,12 @@ def _build_vehicle_collision_data(
     ego_yaw_rad: float,
     ego_fwd_x: float,
     ego_fwd_z: float,
-) -> tuple[list[ArcPath], float, list[list[ArcPath]]]:
-    """Build all_target_arcs, cross_padding, and list of cross_arcs for a vehicle.
-    Used for main-loop collision checks.
+) -> tuple[list[ArcPath], float, list[list[ArcPath]],
+           float, float, float, float, float]:
+    """Build collision arcs and derived vehicle geometry for a vehicle.
+
+    Returns (all_target_arcs, cross_padding, cross_arcs_list,
+             v_yaw_rad, abs_v_speed, veh_fwd_x, veh_fwd_z, v_curvature).
     """
     v_hw = v.size.width / 2.0
     v_hw_coll = max(v_hw - 0.1, 0.3)
@@ -371,7 +374,8 @@ def _build_vehicle_collision_data(
     cross_arcs_list = [
         _apply_cross_zone(bt, cross_padding) for bt in all_target_arcs
     ]
-    return (all_target_arcs, cross_padding, cross_arcs_list)
+    return (all_target_arcs, cross_padding, cross_arcs_list,
+            v_yaw_rad, abs_v_speed, veh_fwd_x, veh_fwd_z, v_curvature)
 
 
 class AEBThread(BaseThread):
@@ -579,10 +583,11 @@ class AEBThread(BaseThread):
 
         ego_pitch_rad = math.radians(ego_pitch_deg)
 
-        # Precompute per-vehicle collision arcs when run_collision for main-loop collision checks
-        vehicle_collision_data: dict[
-            int, tuple[list[ArcPath], float, list[list[ArcPath]]]
-        ] = {}
+        # Precompute per-vehicle collision arcs + derived geometry for the main loop.
+        # Stores (all_target_arcs, cross_padding, cross_arcs_list,
+        #         dx, dz, dist_sq,
+        #         v_yaw_rad, abs_v_speed, veh_fwd_x, veh_fwd_z, v_curvature)
+        vehicle_collision_data: dict[int, tuple] = {}
         if run_collision:
             for v in vehicles:
                 vx, vz = v.position.x, v.position.z
@@ -605,36 +610,57 @@ class AEBThread(BaseThread):
                     rel_kmh_pc = 3.6 * math.hypot(dvx_pc, dvz_pc)
                     if not _tmp_collision_threat(ref_kmh_for_filter, rel_kmh_pc):
                         continue
-                all_t, cross_pad, cross_list = _build_vehicle_collision_data(
+                (all_t, cross_pad, cross_list,
+                 pc_yaw, pc_aspd, pc_fx, pc_fz, pc_curv,
+                 ) = _build_vehicle_collision_data(
                     v, dynamic_horizon, ego_yaw_rad, ego_fwd_x, ego_fwd_z
                 )
-                vehicle_collision_data[v.id] = (all_t, cross_pad, cross_list)
+                vehicle_collision_data[v.id] = (
+                    all_t, cross_pad, cross_list,
+                    dx, dz, dist_sq,
+                    pc_yaw, pc_aspd, pc_fx, pc_fz, pc_curv,
+                )
 
         for v in vehicles:
             vx, vz = v.position.x, v.position.z
-            dx = vx - ego_x
-            dz = vz - ego_z
-            dist_sq = dx * dx + dz * dz
-            if dist_sq > _MAX_RANGE_SQ:
-                continue
 
-            # Elevation filter (slope-aware) — see AGENTS.md §13
-            rz = _world_to_ego_forward(dx, dz, ego_yaw_rad)
-            expected_y = ego_y + rz * math.tan(ego_pitch_rad)
-            if abs(v.position.y - expected_y) > _ELEVATION_MARGIN_M:
-                continue
+            # Reuse precomputed data when available (skips range/elevation/TMP checks
+            # and derived value recomputation — already done in the precompute pass).
+            pc = vehicle_collision_data.get(v.id)
+            if pc is not None:
+                (all_target_arcs, cross_padding, precomputed_cross_arcs,
+                 dx, dz, dist_sq,
+                 v_yaw_rad, abs_v_speed, veh_fwd_x, veh_fwd_z, v_curvature) = pc
+                dist = math.sqrt(dist_sq)
+                v_hw = v.size.width / 2.0
+                v_hw_coll = max(v_hw - 0.1, 0.3)
+            else:
+                dx = vx - ego_x
+                dz = vz - ego_z
+                dist_sq = dx * dx + dz * dz
+                if dist_sq > _MAX_RANGE_SQ:
+                    continue
 
-            dist = math.sqrt(dist_sq)
-            _, v_yaw_deg, _ = v.rotation.euler()
-            v_yaw_rad = math.radians(v_yaw_deg)
-            v_hw = v.size.width / 2.0
-            v_hw_coll = max(v_hw - 0.1, 0.3)
+                # Elevation filter (slope-aware) — see AGENTS.md §13
+                rz = _world_to_ego_forward(dx, dz, ego_yaw_rad)
+                expected_y = ego_y + rz * math.tan(ego_pitch_rad)
+                if abs(v.position.y - expected_y) > _ELEVATION_MARGIN_M:
+                    continue
 
-            abs_v_speed = abs(v.speed)
-            _vk = v.curvature_from_history()
-            v_curvature = _vk if _vk is not None else (
-                math.radians(v.angular_velocity) / abs_v_speed if abs_v_speed > 0.5 else 0.0
-            )
+                dist = math.sqrt(dist_sq)
+                _, v_yaw_deg, _ = v.rotation.euler()
+                v_yaw_rad = math.radians(v_yaw_deg)
+                v_hw = v.size.width / 2.0
+                v_hw_coll = max(v_hw - 0.1, 0.3)
+
+                abs_v_speed = abs(v.speed)
+                _vk = v.curvature_from_history()
+                v_curvature = _vk if _vk is not None else (
+                    math.radians(v.angular_velocity) / abs_v_speed if abs_v_speed > 0.5 else 0.0
+                )
+                veh_fwd_x = -math.sin(v_yaw_rad)
+                veh_fwd_z = -math.cos(v_yaw_rad)
+                precomputed_cross_arcs = None
 
             veh_arc = v.get_arc(dynamic_horizon, arc_start_pctg=_ARC_START_PCTG)
             trailer_dicts = []
@@ -688,12 +714,10 @@ class AEBThread(BaseThread):
                 vehicle_dicts.append(veh_dict)
                 continue
 
-            # Rear-approach / overtaker suppression
+            # Rear-approach / overtaker suppression (veh_fwd_x/z already computed)
             to_veh_len = max(dist, 1e-6)
             dot_fwd = (dx * ego_fwd_x + dz * ego_fwd_z) / to_veh_len
             if dot_fwd < _REAR_DOT_THRESHOLD:
-                veh_fwd_x = -math.sin(v_yaw_rad)
-                veh_fwd_z = -math.cos(v_yaw_rad)
                 approach_dot = veh_fwd_x * ego_fwd_x + veh_fwd_z * ego_fwd_z
                 if approach_dot > 0.5 and v.speed > ego_speed + _OVERTAKE_SPEED_MARGIN:
                     veh_dict["rear_suppressed"] = True
@@ -701,9 +725,8 @@ class AEBThread(BaseThread):
                     vehicle_dicts.append(veh_dict)
                     continue
 
-            veh_fwd_x = -math.sin(v_yaw_rad)
-            veh_fwd_z = -math.cos(v_yaw_rad)
-            if tmp_traffic_session:
+            # TMP threat check — skip when precomputed (already passed in precompute phase)
+            if pc is None and tmp_traffic_session:
                 dvx = ego_speed * ego_fwd_x - v.speed * veh_fwd_x
                 dvz = ego_speed * ego_fwd_z - v.speed * veh_fwd_z
                 rel_kmh = 3.6 * math.hypot(dvx, dvz)
@@ -718,15 +741,10 @@ class AEBThread(BaseThread):
             near_head_on = fwd_dot < _NEAR_HEAD_ON_DOT
 
             # Lateral separation from ego's forward axis in the ego plane.
-            # Used to decide whether we should even bother trying to "steer around"
-            # co-directional moving vehicles (passing/side-by-side) vs trusting that
-            # an in-lane vehicle cannot be avoided by a gentle 0.1g steer.
             lateral_offset = abs(dx * ego_fwd_z - dz * ego_fwd_x)
 
-            precomputed = vehicle_collision_data.get(v.id)
-            if precomputed is not None:
-                all_target_arcs, cross_padding, _ = precomputed
-            else:
+            # Get collision arcs — already extracted from precomputed, or build new
+            if pc is None:
                 target_override_decel = _FULL_BRAKE_DECEL if head_on else 0.0
                 target_decel, target_accel = _accel_to_arc_params(v.accel_for_arc(), target_override_decel)
                 veh_arc_coll = v.get_arc(dynamic_horizon, half_width=v_hw_coll,
@@ -758,11 +776,17 @@ class AEBThread(BaseThread):
             # vehicle is safely displaced into its own lane at an intersection approach.
             # The scale-down only fires when lateral_offset confirms own-lane placement.
             effective_cross_padding = cross_padding
+            fix_a_active = False
             if near_head_on and lateral_offset >= _NEAR_HEAD_ON_LATERAL_MIN:
                 effective_cross_padding *= _NEAR_HEAD_ON_CROSS_SCALE
+                fix_a_active = True
 
-            for base_target_arc in all_target_arcs:
-                cross_arcs = _apply_cross_zone(base_target_arc, effective_cross_padding)
+            for arc_idx, base_target_arc in enumerate(all_target_arcs):
+                # Reuse precomputed cross_arcs when Fix A didn't change the padding
+                if precomputed_cross_arcs is not None and not fix_a_active:
+                    cross_arcs = precomputed_cross_arcs[arc_idx]
+                else:
+                    cross_arcs = _apply_cross_zone(base_target_arc, effective_cross_padding)
 
                 lateral_gap = _LATERAL_LANE_SEPARATION if near_head_on else 0.0
 

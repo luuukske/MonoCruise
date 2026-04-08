@@ -163,16 +163,19 @@ class Position:
 
 class Quaternion:
     """ETS2 traffic quaternion — x/y swap is intentional (AGENTS.md §3)."""
-    __slots__ = ("w", "x", "y", "z")
+    __slots__ = ("w", "x", "y", "z", "_euler_cache")
 
     def __init__(self, w: float, x: float, y: float, z: float) -> None:
         self.w = w
         self.x = y
         self.y = x
         self.z = z
+        self._euler_cache: tuple[float, float, float] | None = None
 
     def euler(self) -> tuple[float, float, float]:
-        """(pitch, yaw, roll) in degrees."""
+        """(pitch, yaw, roll) in degrees. Cached — quaternion is immutable after init."""
+        if self._euler_cache is not None:
+            return self._euler_cache
         yaw = math.atan2(
             2.0 * (self.y * self.z + self.w * self.x),
             self.w * self.w - self.x * self.x - self.y * self.y + self.z * self.z,
@@ -184,7 +187,8 @@ class Quaternion:
             2.0 * (self.x * self.y + self.w * self.z),
             self.w * self.w + self.x * self.x - self.y * self.y - self.z * self.z,
         )
-        return math.degrees(pitch), math.degrees(yaw), math.degrees(roll)
+        self._euler_cache = math.degrees(pitch), math.degrees(yaw), math.degrees(roll)
+        return self._euler_cache
 
     def is_zero(self) -> bool:
         return self.w == 0.0 and self.x == 0.0 and self.y == 0.0 and self.z == 0.0
@@ -626,6 +630,9 @@ class Vehicle:
         self._crash_since: Optional[float] = None
         self.crash_confirmed: bool = False
 
+        self._curvature_cache: float | None = None
+        self._curvature_cache_valid: bool = False
+
     def accel_for_arc(self) -> float:
         """Longitudinal acceleration for arc / collision (TMP = filtered kinematic value)."""
         return self.acceleration
@@ -876,13 +883,12 @@ class Vehicle:
 
         # TMP: raw speed from last N positions (LS on longitudinal s vs τ); smooth with EMA.
         if self.is_tmp:
-            _hist = list(self._position_history)
-            _hist.append((t_now, raw_x, raw_z))
-            if len(_hist) > _TMP_SPEED_HISTORY_LEN:
-                _hist = _hist[-_TMP_SPEED_HISTORY_LEN:]
-            self._position_history = _hist
+            # _position_history was already copied from prev (line above); append directly.
+            self._position_history.append((t_now, raw_x, raw_z))
+            if len(self._position_history) > _TMP_SPEED_HISTORY_LEN:
+                self._position_history = self._position_history[-_TMP_SPEED_HISTORY_LEN:]
 
-            _ls = _tmp_raw_speed_from_position_history(_hist, fwd_x, fwd_z)
+            _ls = _tmp_raw_speed_from_position_history(self._position_history, fwd_x, fwd_z)
             if _ls is not None:
                 raw_speed = _ls
             else:
@@ -933,11 +939,10 @@ class Vehicle:
             self.acceleration = smooth_accel
         else:
             # AI: populate position history for curvature_from_history()
-            _ai_hist = list(self._position_history)
-            _ai_hist.append((t_now, raw_x, raw_z))
-            if len(_ai_hist) > _TMP_SPEED_HISTORY_LEN:
-                _ai_hist = _ai_hist[-_TMP_SPEED_HISTORY_LEN:]
-            self._position_history = _ai_hist
+            # _position_history was already copied from prev; append directly.
+            self._position_history.append((t_now, raw_x, raw_z))
+            if len(self._position_history) > _TMP_SPEED_HISTORY_LEN:
+                self._position_history = self._position_history[-_TMP_SPEED_HISTORY_LEN:]
 
     def curvature_from_history(self) -> float | None:
         """Curvature (1/m) from circumscribed circle fit over _position_history.
@@ -945,7 +950,16 @@ class Vehicle:
         Averages over up to four (oldest, mid, newest) triples for stability.
         Returns None when < 3 samples; 0.0 when near-stationary or near-straight.
         Falls back to angular_velocity / speed in get_arc() when None.
+        Cached per frame — _position_history doesn't change within a tick.
         """
+        if self._curvature_cache_valid:
+            return self._curvature_cache
+        result = self._compute_curvature()
+        self._curvature_cache = result
+        self._curvature_cache_valid = True
+        return result
+
+    def _compute_curvature(self) -> float | None:
         hist = self._position_history
         if len(hist) < 3:
             return None
