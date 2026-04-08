@@ -473,7 +473,7 @@ class SendingThread(BaseThread):
         a = float(complex(a).real)
         b = float(complex(b).real)
 
-        # Cruise / ACC: mapper gas when active; idle-creep brake from mapper whenever connected.
+        # Cruise / ACC: mapper gas when active; mapper brake merged whenever connected.
         if cruise_active:
             a = max(a, mapper_gas)
         b = max(b, mapper_brake)

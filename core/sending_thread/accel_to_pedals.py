@@ -94,18 +94,20 @@ def compute_estimated_mass_kg(
 
 
 def idle_creep_brake(speed_ms: float, gear_dashboard: int) -> float:
-    """Light brake at very low speed to cancel idle creep."""
-    if int(gear_dashboard) == 0:
-        return 0.0
-    speed_abs = abs(float(speed_ms))
-    if speed_abs > _IDLE_CREEP_SPEED_SKIP_MS:
-        return 0.0
-
-    value = (
-        1.0 - ((speed_abs + 0.1) / 5.5) ** 2.22
-    ) * (-0.6 / (speed_abs + 0.2) + 1.0)
-    num = max((value / 0.715) * 0.1, 0.0)
-    return max((num / 7.0) ** 2.5, 0.0)
+    """Light brake at very low speed to cancel idle creep. Disabled — to be replaced."""
+    # Constant low-speed brake to offset idle creep / idle power (restore when successor exists).
+    # if int(gear_dashboard) == 0:
+    #     return 0.0
+    # speed_abs = abs(float(speed_ms))
+    # if speed_abs > _IDLE_CREEP_SPEED_SKIP_MS:
+    #     return 0.0
+    #
+    # value = (
+    #     1.0 - ((speed_abs + 0.1) / 5.5) ** 2.22
+    # ) * (-0.6 / (speed_abs + 0.2) + 1.0)
+    # num = max((value / 0.715) * 0.1, 0.0)
+    # return max((num / 7.0) ** 2.5, 0.0)
+    return 0.0
 
 
 @dataclass(slots=True)
