@@ -55,6 +55,15 @@ _GAME_CLUTCH_ACTIVE_THRESHOLD: float = 0.05
 _GAME_THROTTLE_MARGIN: float = 0.10
 _ROAD_LOAD_SPEED_EPSILON_MS: float = 0.2
 
+# Brake: hardware fit is acceleration magnitude vs pedal — y = 11.4596·(1 − e^(−2.4277·x^0.8518)),
+# x = brake pedal [0, 1], y = |accel|. Code applies the inverse: pedal from normalized brake demand.
+_BRAKE_MAP_RATE: float = 2.4277
+_BRAKE_MAP_POWER: float = 0.8518
+
+# Gas: same inverse when _GAS_MAP_RATE > 0 (pedal vs |accel| fit); rate 0 keeps linear until fitted.
+_GAS_MAP_RATE: float = 0.0
+_GAS_MAP_POWER: float = 1.0
+
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
@@ -213,6 +222,33 @@ class AccelToPedals:
     @staticmethod
     def _estimate_alpha(dt: float, tau_s: float) -> float:
         return 1.0 - math.exp(-dt / max(tau_s, 1e-6))
+
+    @staticmethod
+    def _pedal_from_linear_saturating_response(linear: float, rate: float, power: float) -> float:
+        """Pedal position from normalized demand [0, 1] for y/A = 1 − e^(−rate·pedal^power).
+
+        The fit has pedal on the x-axis and |accel| on the y-axis. Demand d maps to the same
+        fraction of full response as at pedal = 1, i.e. d·(1−e^(−rate)) = 1−e^(−rate·pedal^power).
+        ``rate <= 0`` selects linear passthrough.
+        """
+        if linear <= 0.0:
+            return 0.0
+        d = min(1.0, max(0.0, linear))
+        if rate <= 0.0:
+            return d
+        pw = power if power > 0.0 else 1.0
+        one_minus_e = 1.0 - math.exp(-rate)
+        if one_minus_e <= 0.0:
+            return d
+        inner = 1.0 - d * one_minus_e
+        if inner >= 1.0:
+            return 0.0
+        if inner <= 0.0:
+            return 1.0
+        arg = -math.log(inner) / rate
+        if arg <= 0.0:
+            return 0.0
+        return min(1.0, arg ** (1.0 / pw))
 
     @staticmethod
     def _is_accel_control_limited(
@@ -504,10 +540,17 @@ class AccelToPedals:
         if gear_dash == 0 and drive_cmd > 0.0:
             drive_cmd = 0.0
 
-        command_gas = max(0.0, drive_cmd)
+        command_gas = self._pedal_from_linear_saturating_response(
+            max(0.0, drive_cmd),
+            _GAS_MAP_RATE,
+            _GAS_MAP_POWER,
+        )
         command_brake_linear = max(0.0, -drive_cmd)
-        brake_exponent = max(0.1, _finite_or_zero(Settings.mapper_brake_exponent))
-        command_brake = command_brake_linear ** brake_exponent if command_brake_linear > 0.0 else 0.0
+        command_brake = self._pedal_from_linear_saturating_response(
+            command_brake_linear,
+            _BRAKE_MAP_RATE,
+            _BRAKE_MAP_POWER,
+        )
 
         if cruise_commanding:
             if not accel_limited:
