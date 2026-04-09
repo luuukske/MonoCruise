@@ -105,7 +105,6 @@ class Settings(metaclass=_SingletonMeta):
     mapper_accel_scale_ms2: float = 3.5
     mapper_brake_scale_ms2: float = 6.5
     mapper_brake_exponent: float = 2.5
-    mapper_slope_gain: float = 2.0
     mapper_rolling_resistance: float = 0.0015
     mapper_integral_coeff: float = 0.40
     mapper_integral_clamp: float = 0.35

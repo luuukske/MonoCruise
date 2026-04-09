@@ -273,7 +273,7 @@ class SendingThread(BaseThread):
                     mass_kg = float(tel_thread.data.estimated_total_mass_kg)
                     spd_ms = float(tel_thread.data.speed)
                     has_t = bool(tel_thread.data.ego_has_trailer)
-                    slope_rad = float(tel_thread.data.rotationY)
+                    road_pitch_deg = float(tel_thread.data.rotationY)
                     tel_gear_dashboard = int(tel_thread.data.gear_dashboard)
                     game_throttle = float(tel_thread.data.gameThrottle)
                     game_clutch = float(tel_thread.data.gameClutch)
@@ -284,7 +284,7 @@ class SendingThread(BaseThread):
                     spd_ms,
                     mass_kg,
                     has_t,
-                    slope_rad=slope_rad,
+                    road_pitch_deg=road_pitch_deg,
                     cruise_commanding=cruise_active,
                     gear_dashboard=tel_gear_dashboard,
                     game_throttle=game_throttle,
@@ -307,12 +307,14 @@ class SendingThread(BaseThread):
                 mapper_accel_limited = bool(targets.accel_limited)
             except Exception as e:
                 logger.debug("accel_mapper step failed: %s", e)
-                slope_rad = 0.0
+                brake_grade_rad = 0.0
+            else:
+                brake_grade_rad = float(mapper_slope_input_rad)
 
             # Update brake efficiency tracker only during cruise-commanded braking.
             if cruise_active and mapper_command_brake > 0.05:
                 self._brake_tracker.update(
-                    mapper_command_brake, measured_decel_ms2, speed_ms, slope_rad
+                    mapper_command_brake, measured_decel_ms2, speed_ms, brake_grade_rad
                 )
             if cruise_active:
                 self._brake_tracker.check_warnings()

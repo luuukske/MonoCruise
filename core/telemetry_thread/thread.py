@@ -87,7 +87,7 @@ class TelemetryThreadData(ThreadData):
 
     # Vehicle state
     parkBrake: bool = False
-    rotationY: float = 0.0          # rotationY — positive = uphill
+    rotationY: float = 0.0          # pitch deg, positive = uphill (same units as AEB ego_pitch_deg)
     hazardsActive: bool = False
 
     coordinateX: float = 0.0

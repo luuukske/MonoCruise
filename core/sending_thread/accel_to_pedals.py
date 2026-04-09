@@ -54,6 +54,8 @@ _INACCURACY_LOG_COOLDOWN_S: float = 0.75
 _GAME_CLUTCH_ACTIVE_THRESHOLD: float = 0.05
 _GAME_THROTTLE_MARGIN: float = 0.10
 _ROAD_LOAD_SPEED_EPSILON_MS: float = 0.2
+# Same convention as AEB elevation filter: telemetry rotationY is degrees (positive = uphill).
+_MAX_ROAD_GRADE_RAD: float = 0.35  # ~20° — clamp only pathological game values
 
 # Brake: hardware fit is acceleration magnitude vs pedal — y = 11.4596·(1 − e^(−2.4277·x^0.8518)),
 # x = brake pedal [0, 1], y = |accel|. Code applies the inverse: pedal from normalized brake demand.
@@ -116,7 +118,9 @@ class PedalTargets:
     brake: float
     command_gas: float = 0.0
     command_brake: float = 0.0
+    # Road grade from telemetry rotationY: unclamped radians (see AEB ego_pitch_rad).
     slope_input_rad: float = 0.0
+    # Grade radians after clamp, used for sin/cos in road load.
     effective_slope_rad: float = 0.0
     measured_control_ms2: float = 0.0
     road_load_ms2: float = 0.0
@@ -198,20 +202,24 @@ class AccelToPedals:
             return -1.0
         return 1.0
 
+    def _road_grade_from_telemetry_deg(self, pitch_deg: float) -> tuple[float, float]:
+        """rotationY in degrees (AEB convention) → (unclamped_rad, clamped_rad)."""
+        theta = math.radians(_finite_or_zero(pitch_deg))
+        return theta, _clamp(theta, -_MAX_ROAD_GRADE_RAD, _MAX_ROAD_GRADE_RAD)
+
     def _road_load_accel_ms2(
         self,
         speed_ms: float,
         wanted_accel_ms2: float,
-        slope_rad: float,
+        pitch_deg: float,
         gear_dashboard: int,
-    ) -> tuple[float, float]:
+    ) -> tuple[float, float, float]:
         motion_sign = self._motion_sign(speed_ms, wanted_accel_ms2, gear_dashboard)
-        slope_gain = max(0.0, _finite_or_zero(Settings.mapper_slope_gain))
-        effective_slope_rad = _clamp(slope_rad * slope_gain, -0.35, 0.35)
+        grade_unc_rad, grade_rad = self._road_grade_from_telemetry_deg(pitch_deg)
         rolling_coeff = max(0.0, _finite_or_zero(Settings.mapper_rolling_resistance))
-        rolling_accel = motion_sign * rolling_coeff * GRAVITY_MS2 * math.cos(effective_slope_rad)
-        slope_accel = motion_sign * GRAVITY_MS2 * math.sin(effective_slope_rad)
-        return rolling_accel + slope_accel, effective_slope_rad
+        rolling_accel = motion_sign * rolling_coeff * GRAVITY_MS2 * math.cos(grade_rad)
+        slope_accel = motion_sign * GRAVITY_MS2 * math.sin(grade_rad)
+        return rolling_accel + slope_accel, grade_unc_rad, grade_rad
 
     @staticmethod
     def _measured_control_accel_ms2(raw_accel_ms2: float, road_load_ms2: float) -> float:
@@ -309,8 +317,8 @@ class AccelToPedals:
         total_mass_kg: float,
         command_gas: float,
         command_brake: float,
-        slope_rad: float,
-        effective_slope_rad: float,
+        grade_unc_rad: float,
+        grade_rad: float,
         road_load_ms2: float,
         game_throttle: float,
         game_clutch: float,
@@ -340,8 +348,8 @@ class AccelToPedals:
                     f"{self._measured_control_accel_ms2(self._raw_smooth, road_load_ms2):.3f}",
                     f"{command_gas:.3f}",
                     f"{command_brake:.3f}",
-                    f"{slope_rad:.4f}",
-                    f"{effective_slope_rad:.4f}",
+                    f"{grade_unc_rad:.4f}",
+                    f"{grade_rad:.4f}",
                     f"{road_load_ms2:.3f}",
                     f"{(self._estimated_max_accel_ms2 or 0.0):.3f}",
                     f"{(self._estimated_max_brake_ms2 or 0.0):.3f}",
@@ -373,7 +381,7 @@ class AccelToPedals:
         self,
         dt: float,
         speed_ms: float,
-        slope_rad: float,
+        grade_unc_rad: float,
         road_load_ms2: float,
         wanted_ms2: float,
         command_gas: float,
@@ -382,7 +390,7 @@ class AccelToPedals:
         estimate = self._estimated_max_accel_ms2
         if estimate is None:
             return
-        if abs(slope_rad) > _MAX_ESTIMATE_SLOPE_RAD:
+        if abs(grade_unc_rad) > _MAX_ESTIMATE_SLOPE_RAD:
             return
         if speed_ms < _MIN_ACCEL_SAMPLE_SPEED_MS:
             return
@@ -412,7 +420,7 @@ class AccelToPedals:
         self,
         dt: float,
         speed_ms: float,
-        slope_rad: float,
+        grade_unc_rad: float,
         road_load_ms2: float,
         wanted_ms2: float,
         command_brake: float,
@@ -421,7 +429,7 @@ class AccelToPedals:
         estimate = self._estimated_max_brake_ms2
         if estimate is None:
             return
-        if abs(slope_rad) > _MAX_ESTIMATE_SLOPE_RAD:
+        if abs(grade_unc_rad) > _MAX_ESTIMATE_SLOPE_RAD:
             return
         if speed_ms < _MIN_BRAKE_SAMPLE_SPEED_MS:
             return
@@ -456,14 +464,14 @@ class AccelToPedals:
         has_trailer: bool,
         *,
         cruise_commanding: bool = False,
-        slope_rad: float = 0.0,
+        road_pitch_deg: float = 0.0,
         gear_dashboard: int = 0,
         game_throttle: float = 0.0,
         game_clutch: float = 0.0,
     ) -> PedalTargets:
         gear_dash = int(_finite_or_zero(gear_dashboard))
         speed = max(0.0, _finite_or_zero(speed_ms))
-        slope = _finite_or_zero(slope_rad)
+        pitch_deg = _finite_or_zero(road_pitch_deg)
         throttle_applied = _clamp(_finite_or_zero(game_throttle), 0.0, 1.0)
         clutch_applied = _clamp(_finite_or_zero(game_clutch), 0.0, 1.0)
         now = math.nan
@@ -482,8 +490,8 @@ class AccelToPedals:
         raw_alpha = self._estimate_alpha(dt, _RAW_SMOOTHING_TAU_S)
         wanted = _finite_or_zero(wanted_accel_ms2) if cruise_commanding else 0.0
         raw = _finite_or_zero(raw_accel_ms2)
-        road_load_accel, effective_slope = self._road_load_accel_ms2(
-            speed, wanted, slope, gear_dash
+        road_load_accel, grade_unc_rad, grade_rad = self._road_load_accel_ms2(
+            speed, wanted, pitch_deg, gear_dash
         )
 
         self._wanted_smooth = self._ema_step(self._wanted_smooth, wanted, wanted_alpha)
@@ -559,7 +567,7 @@ class AccelToPedals:
                 self._maybe_update_accel_estimate(
                     dt,
                     speed,
-                    slope,
+                    grade_unc_rad,
                     road_load_accel,
                     max(0.0, self._wanted_smooth),
                     command_gas,
@@ -568,7 +576,7 @@ class AccelToPedals:
             self._maybe_update_brake_estimate(
                 dt,
                 speed,
-                slope,
+                grade_unc_rad,
                 road_load_accel,
                 max(0.0, -self._wanted_smooth),
                 command_brake,
@@ -578,7 +586,7 @@ class AccelToPedals:
         if (
             cruise_commanding
             and speed >= _MIN_ACCEL_SAMPLE_SPEED_MS
-            and abs(slope) <= _MAX_ESTIMATE_SLOPE_RAD
+            and abs(grade_unc_rad) <= _MAX_ESTIMATE_SLOPE_RAD
             and command_gas >= _INACCURACY_LOG_COMMAND_THRESHOLD
             and self._wanted_smooth > 0.0
             and (self._wanted_smooth - self._raw_smooth) > _INACCURACY_LOG_THRESHOLD_MS2
@@ -591,8 +599,8 @@ class AccelToPedals:
                 total_mass_kg=_finite_or_zero(total_mass_kg),
                 command_gas=command_gas,
                 command_brake=command_brake,
-                slope_rad=slope,
-                effective_slope_rad=effective_slope,
+                grade_unc_rad=grade_unc_rad,
+                grade_rad=grade_rad,
                 road_load_ms2=road_load_accel,
                 game_throttle=throttle_applied,
                 game_clutch=clutch_applied,
@@ -600,7 +608,7 @@ class AccelToPedals:
         if (
             cruise_commanding
             and speed >= _MIN_BRAKE_SAMPLE_SPEED_MS
-            and abs(slope) <= _MAX_ESTIMATE_SLOPE_RAD
+            and abs(grade_unc_rad) <= _MAX_ESTIMATE_SLOPE_RAD
             and command_brake >= _INACCURACY_LOG_COMMAND_THRESHOLD
             and self._wanted_smooth < 0.0
             and (self._raw_smooth - self._wanted_smooth) > _INACCURACY_LOG_THRESHOLD_MS2
@@ -612,8 +620,8 @@ class AccelToPedals:
                 total_mass_kg=_finite_or_zero(total_mass_kg),
                 command_gas=command_gas,
                 command_brake=command_brake,
-                slope_rad=slope,
-                effective_slope_rad=effective_slope,
+                grade_unc_rad=grade_unc_rad,
+                grade_rad=grade_rad,
                 road_load_ms2=road_load_accel,
                 game_throttle=throttle_applied,
                 game_clutch=clutch_applied,
@@ -625,8 +633,8 @@ class AccelToPedals:
             brake=min(1.0, command_brake + creep),
             command_gas=command_gas,
             command_brake=command_brake,
-            slope_input_rad=slope,
-            effective_slope_rad=effective_slope,
+            slope_input_rad=grade_unc_rad,
+            effective_slope_rad=grade_rad,
             measured_control_ms2=self._measured_control_accel_ms2(
                 self._raw_smooth, road_load_accel
             ),

@@ -87,7 +87,7 @@ MonoCruise is a third-party software that sits in between ETS2/ATS and your peda
   - `core/sending_thread/accel_to_pedals.py`:
     - Maps commanded longitudinal acceleration to gas/brake.
     - Smooths commanded/measured accel, applies the leaky integral correction, includes slope plus rolling-resistance road-load feed-forward, and adapts the estimated full-pedal accel/brake capability.
-    - Hill compensation uses telemetry `rotationY` with a configurable `mapper_slope_gain` before the gravity term, because the raw telemetry slope signal is intentionally small.
+    - Hill compensation uses telemetry `rotationY` as road pitch in degrees (same convention as AEB: `math.radians(rotationY)`), plus gravity along grade and rolling resistance via configurable `mapper_rolling_resistance`.
     - Adaptive accel/brake estimates are learned from load-compensated accel (`raw + road_load`) so slopes do not bias the learned full-pedal capability.
     - Also contains the shared telemetry mass estimate helper used by `telemetry_thread`.
     - Appends concise tuning rows to `accel_to_pedals_tuning.csv` when high-demand accel/brake estimates clearly underperform, including slope and computed road load.
