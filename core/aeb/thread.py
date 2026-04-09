@@ -35,6 +35,8 @@ except ImportError:
     _PYGAME_AVAILABLE = False
 
 _AEB_SOUND_PATH = "core/aeb/aeb_warning.wav"
+# Extra seamless-loop plays after stop_warning() (avoids a single short blip).
+_AEB_WARNING_STOP_EXTRA_REPLAYS = 1
 
 # Constants
 
@@ -396,11 +398,17 @@ class _AEBSoundHandler:
     and the ability to resume during shutdown.
     """
 
-    def __init__(self, sound_file_path: str) -> None:
+    def __init__(
+        self,
+        sound_file_path: str,
+        stop_extra_replays: int = _AEB_WARNING_STOP_EXTRA_REPLAYS,
+    ) -> None:
         self._sound = None
         self._state = _SoundState.STOPPED
         self._sound_thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._stop_extra_replays = max(0, int(stop_extra_replays))
+        self._replays_remaining = 0
 
         if not _PYGAME_AVAILABLE:
             logger.warning("pygame not available — AEB sound disabled")
@@ -411,7 +419,7 @@ class _AEBSoundHandler:
                 pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=256)
                 pygame.mixer.init()
             self._sound = pygame.mixer.Sound(sound_file_path)
-            self._sound.set_volume(0.5)
+            self._sound.set_volume(0.8)
         except Exception as exc:
             logger.warning("AEB sound init failed (%s) — sound disabled", exc)
             self._sound = None
@@ -428,6 +436,7 @@ class _AEBSoundHandler:
                 return
             if self._state == _SoundState.SHUTTING_DOWN:
                 self._state = _SoundState.RUNNING
+                self._replays_remaining = 0
                 logger.debug("AEB sound: shutdown cancelled, resuming loop")
                 return
             self._state = _SoundState.RUNNING
@@ -440,14 +449,19 @@ class _AEBSoundHandler:
     def stop_warning(self) -> None:
         """
         Signal the warning to stop non-blockingly.
-        The current playing sound will finish naturally; no new loop starts.
+        Schedules ``_stop_extra_replays`` more overlapping plays, then stops;
+        the last clip runs to completion.
         """
         if self._sound is None:
             return
         with self._lock:
             if self._state == _SoundState.RUNNING:
                 self._state = _SoundState.SHUTTING_DOWN
-                logger.debug("AEB sound: disabling — current sound will finish")
+                self._replays_remaining = self._stop_extra_replays
+                logger.debug(
+                    "AEB sound: stop requested — %d extra replay(s) then finishing",
+                    self._replays_remaining,
+                )
 
     def _sound_loop_manager(self) -> None:
         sound_length = self._sound.get_length()
@@ -462,8 +476,12 @@ class _AEBSoundHandler:
                 if self._state == _SoundState.RUNNING:
                     last_channel = self._sound.play()
                 elif self._state == _SoundState.SHUTTING_DOWN:
-                    logger.debug("AEB sound: stopping loop — letting current sound finish")
-                    break
+                    if self._replays_remaining > 0:
+                        self._replays_remaining -= 1
+                        last_channel = self._sound.play()
+                    else:
+                        logger.debug("AEB sound: extra replays done — letting current sound finish")
+                        break
 
         if last_channel:
             while last_channel.get_busy():
