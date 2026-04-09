@@ -141,6 +141,7 @@ class AccelToPedals:
         self._estimated_max_accel_ms2: float | None = None
         self._estimated_max_brake_ms2: float | None = None
         self._prev_mono: float | None = None
+        self._prev_error_ms2: float = 0.0
         self._log_file = None
         self._log_writer = None
         self._project_root = Path(__file__).resolve().parents[2]
@@ -162,6 +163,7 @@ class AccelToPedals:
         self._raw_smooth = 0.0
         self._integral_correction = 0.0
         self._prev_mono = None
+        self._prev_error_ms2 = 0.0
 
     def _weight_factor(self, total_mass_kg: float, has_trailer: bool) -> float:
         if not Settings.weight_adjustment:
@@ -529,8 +531,19 @@ class AccelToPedals:
         if not math.isfinite(error_ms2):
             error_ms2 = 0.0
 
+        # Derivative of the output error — used for oscillation damping below.
+        d_error = (error_ms2 - self._prev_error_ms2) / dt
+        self._prev_error_ms2 = error_ms2
+
         integral_coeff = _finite_or_zero(Settings.mapper_integral_coeff)
         integral_clamp = max(0.0, _finite_or_zero(Settings.mapper_integral_clamp))
+        # Nonlinear integral: tanh compresses the integrand so the correction is
+        # highly sensitive near zero error but accumulates more slowly when far off.
+        # For |error| << scale behaviour is indistinguishable from linear;
+        # for |error| >> scale the contribution is capped at ±scale per second.
+        ni_scale = max(_finite_or_zero(Settings.mapper_integral_nonlinear_scale), 0.05)
+        integral_input = math.tanh(error_ms2 / ni_scale) * ni_scale
+
         leak = math.exp(-dt / _INTEGRAL_LEAK_TAU_S)
         accel_limited = cruise_commanding and base_signed > 0.0 and self._is_accel_control_limited(
             base_signed,
@@ -539,14 +552,22 @@ class AccelToPedals:
         )
         self._integral_correction *= leak
         if not accel_limited:
-            self._integral_correction += integral_coeff * error_ms2 * dt
+            self._integral_correction += integral_coeff * integral_input * dt
         self._integral_correction = _clamp(
             self._integral_correction,
             -integral_clamp,
             integral_clamp,
         )
 
-        drive_cmd = _clamp(base_signed - self._integral_correction, -1.0, 1.0)
+        # Derivative correction: opposes rapid error changes to damp oscillations.
+        # Only active while cruise is commanding; clamped to prevent noise spikes.
+        if cruise_commanding:
+            d_coeff = _finite_or_zero(Settings.mapper_derivative_coeff)
+            d_correction = _clamp(d_coeff * d_error, -0.25, 0.25)
+        else:
+            d_correction = 0.0
+
+        drive_cmd = _clamp(base_signed - self._integral_correction - d_correction, -1.0, 1.0)
         if gear_dash == 0 and drive_cmd > 0.0:
             drive_cmd = 0.0
 

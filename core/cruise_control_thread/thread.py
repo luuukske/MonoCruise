@@ -232,20 +232,25 @@ class CruiseControlThread(BaseThread):
     def _clamp_target_kmh(self, v: float) -> float:
         return max(_SPEED_MIN_KMH, min(_SPEED_MAX_KMH, v))
 
-    @staticmethod
-    def _quantize_target_to_step_kmh(v: float, step: int) -> float:
-        """Snap *v* to a multiple of *step* when using coarse increments (5, 10, 20, …)."""
-        s = int(step)
-        if s < 5:
-            return float(v)
-        return float(round(v / s) * s)
-
-    def _change_target_kmh(self, delta: float, *, step: int) -> None:
+    def _change_target_kmh(self, delta: float) -> None:
+        """Adjust set speed like legacy change_target_speed: coarse steps use grid math, fine steps add."""
         if self._target_speed_kmh is None:
             return
-        raw = self._target_speed_kmh + delta
-        q = self._quantize_target_to_step_kmh(raw, step)
-        self._target_speed_kmh = self._clamp_target_kmh(q)
+        inc = int(round(float(delta)))
+        abs_inc = abs(inc)
+        if abs_inc >= 5:
+            ts = int(round(float(self._target_speed_kmh)))
+            if inc > 0:
+                ts = ((ts // abs_inc) + 1) * abs_inc
+            elif ts % abs_inc == 0:
+                ts = ((ts // abs_inc) - 1) * abs_inc
+            else:
+                ts = (ts // abs_inc) * abs_inc
+            self._target_speed_kmh = self._clamp_target_kmh(float(ts))
+        else:
+            self._target_speed_kmh = self._clamp_target_kmh(
+                float(self._target_speed_kmh) + float(delta),
+            )
 
     def _set_target_from_speed_kmh(self, speed_kmh: float) -> None:
         self._target_speed_kmh = self._clamp_target_kmh(round(speed_kmh))
@@ -281,10 +286,10 @@ class CruiseControlThread(BaseThread):
                 self._long_press_dec = True
                 self._time_pressed_dec = now
                 if self._target_speed_kmh is not None:
-                    self._change_target_kmh(-float(long_i), step=long_i)
+                    self._change_target_kmh(-float(long_i))
         elif self._time_pressed_dec is not None:
             if not self._long_press_dec and self._target_speed_kmh is not None:
-                self._change_target_kmh(-float(short_i), step=short_i)
+                self._change_target_kmh(-float(short_i))
             else:
                 self._long_press_dec = False
             self._time_pressed_dec = None
@@ -300,7 +305,7 @@ class CruiseControlThread(BaseThread):
                 self._long_press_inc = True
                 self._time_pressed_inc = now
                 if self._cc_enabled:
-                    self._change_target_kmh(float(long_i), step=long_i)
+                    self._change_target_kmh(float(long_i))
                 elif self._target_speed_kmh is None or speed_kmh > (self._target_speed_kmh or 0):
                     self._set_target_from_speed_kmh(speed_kmh)
                 if not self._cc_enabled:
@@ -309,7 +314,7 @@ class CruiseControlThread(BaseThread):
         elif self._time_pressed_inc is not None:
             if not self._long_press_inc:
                 if self._cc_enabled:
-                    self._change_target_kmh(float(short_i), step=short_i)
+                    self._change_target_kmh(float(short_i))
                 elif self._target_speed_kmh is None or speed_kmh > (self._target_speed_kmh or 0):
                     self._set_target_from_speed_kmh(speed_kmh)
                 if not self._cc_enabled:

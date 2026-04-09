@@ -108,6 +108,8 @@ class Settings(metaclass=_SingletonMeta):
     mapper_rolling_resistance: float = 0.0015
     mapper_integral_coeff: float = 0.40
     mapper_integral_clamp: float = 0.35
+    mapper_integral_nonlinear_scale: float = 0.5  # m/s² — errors << this integrate near-linearly; errors >> this saturate
+    mapper_derivative_coeff: float = 0.04          # damps oscillations by opposing rapid error changes
 
     # Adaptive brake efficiency
     brake_efficiency_learning: bool = True
