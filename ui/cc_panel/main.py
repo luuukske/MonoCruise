@@ -56,9 +56,7 @@ def _cursor_pos() -> tuple[int, int]:
     pos = QCursor.pos()
     return pos.x(), pos.y()
 
-# ---------------------------------------------------------------------------
 # Internal rendering widget – every method runs on the Qt main thread.
-# ---------------------------------------------------------------------------
 
 class _PanelWidget(QWidget):
     _flush_coalesced_sig = Signal()
@@ -1098,9 +1096,7 @@ class _PanelWidget(QWidget):
                 logger.exception("cc_panel: failed to persist panel position")
 
 
-# ---------------------------------------------------------------------------
 # Public API – thin thread-safe facade over _PanelWidget.
-# ---------------------------------------------------------------------------
 
 class cc_panel:
     """
@@ -1305,9 +1301,7 @@ class cc_panel:
         return QColor(CRUISECONTROL_COLOR)
 
 
-# ---------------------------------------------------------------------------
 # Standalone test
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     qapp = QApplication.instance() or QApplication(sys.argv)

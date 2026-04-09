@@ -27,9 +27,7 @@ from PySide6.QtWidgets import (
 from ui.main_window.constants import BG_COLOR, SETTINGS_COLOR
 
 
-# ---------------------------------------------------------------------------
 # Internal helpers
-# ---------------------------------------------------------------------------
 
 def _grid(parent: QWidget) -> QGridLayout:
     layout = parent.layout()
@@ -37,9 +35,7 @@ def _grid(parent: QWidget) -> QGridLayout:
     return layout
 
 
-# ---------------------------------------------------------------------------
 # Label  (mirrors ``new_label``)
-# ---------------------------------------------------------------------------
 
 def new_label(
     parent: QWidget,
@@ -60,9 +56,7 @@ def new_label(
     return lbl
 
 
-# ---------------------------------------------------------------------------
 # Section header  (full‑width, spanning both columns)
-# ---------------------------------------------------------------------------
 
 def new_section_header(parent: QWidget, row: int, text: str) -> QLabel:
     lbl = QLabel(text)
@@ -72,9 +66,7 @@ def new_section_header(parent: QWidget, row: int, text: str) -> QLabel:
     return lbl
 
 
-# ---------------------------------------------------------------------------
 # Subtext / description
-# ---------------------------------------------------------------------------
 
 def new_subtext(
     parent: QWidget,
@@ -93,9 +85,7 @@ def new_subtext(
     return lbl
 
 
-# ---------------------------------------------------------------------------
 # Checkbox  (24×24, no text)
-# ---------------------------------------------------------------------------
 
 def new_checkbutton(
     parent: QWidget,
@@ -117,9 +107,7 @@ def new_checkbutton(
     return cb
 
 
-# ---------------------------------------------------------------------------
 # Entry (QLineEdit) – 50 px wide, 2‑second debounce, min/max validation
-# ---------------------------------------------------------------------------
 
 def new_entry(
     parent: QWidget,
@@ -184,9 +172,7 @@ def new_entry(
     return le
 
 
-# ---------------------------------------------------------------------------
 # Option menu (QComboBox wrapped in a bordered QFrame)
-# ---------------------------------------------------------------------------
 
 def new_optionmenu(
     parent: QWidget,
@@ -223,9 +209,7 @@ def new_optionmenu(
     return combo
 
 
-# ---------------------------------------------------------------------------
 # Clickable label  (emulates the "button detection" click‑to‑assign pattern)
-# ---------------------------------------------------------------------------
 
 class ClickableLabel(QLabel):
     """QLabel that invokes a callback on mouse press."""
@@ -258,9 +242,7 @@ def new_clickable_label(
     return lbl
 
 
-# ---------------------------------------------------------------------------
 # BETA pill badge
-# ---------------------------------------------------------------------------
 
 def new_beta_pill() -> QLabel:
     """Create a free‑standing BETA pill (caller positions it)."""

@@ -258,9 +258,7 @@ class VideoPlayer(QWidget):
 
         self.hide()
 
-    # ------------------------------------------------------------------
     #  Media setup
-    # ------------------------------------------------------------------
 
     def _setup_media(self):
         self.media_player = QMediaPlayer()
@@ -277,9 +275,7 @@ class VideoPlayer(QWidget):
         self.media_player.errorOccurred.connect(self._handle_error)
         self.media_player.mediaStatusChanged.connect(self._media_status_changed)
 
-    # ------------------------------------------------------------------
     #  Sizing
-    # ------------------------------------------------------------------
 
     def _update_size(self):
         height = self.DEFAULT_HEIGHT
@@ -293,9 +289,7 @@ class VideoPlayer(QWidget):
             width - 2 * pad, ctrl_h,
         ))
 
-    # ------------------------------------------------------------------
     #  Frame capture (memory: cap size, store thumbnail at display size)
-    # ------------------------------------------------------------------
 
     def _cap_frame_size(self, image: QImage) -> QImage:
         """Return a copy capped to MAX_FRAME_DIMENSION to limit RAM."""
@@ -340,9 +334,7 @@ class VideoPlayer(QWidget):
             self._thumbnail = self._scaled_for_display(self._current_frame)
         self.update()
 
-    # ------------------------------------------------------------------
     #  Painting
-    # ------------------------------------------------------------------
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -423,9 +415,7 @@ class VideoPlayer(QWidget):
 
         painter.restore()
 
-    # ------------------------------------------------------------------
     #  Fade animations
-    # ------------------------------------------------------------------
 
     def _animate_ctrl_fade(self):
         diff = self._ctrl_target - self._ctrl_opacity
@@ -466,9 +456,7 @@ class VideoPlayer(QWidget):
             self._play_btn_opacity = 0.0
         self._play_btn_fade.start()
 
-    # ------------------------------------------------------------------
     #  Public API
-    # ------------------------------------------------------------------
 
     def load_video(self, url: str):
         """Load a video from *url*. Shows thumbnail + play button once ready."""
@@ -577,9 +565,7 @@ class VideoPlayer(QWidget):
         self.controls.set_duration(0)
         self.hide()
 
-    # ------------------------------------------------------------------
     #  Playback controls
-    # ------------------------------------------------------------------
 
     def _toggle_play(self):
         if self._is_playing:
@@ -603,9 +589,7 @@ class VideoPlayer(QWidget):
         self._is_slider_pressed = False
         self._seek(self.controls.progress_slider.value())
 
-    # ------------------------------------------------------------------
     #  Media-player signal handlers
-    # ------------------------------------------------------------------
 
     def _position_changed(self, position: int):
         if not self._is_slider_pressed:
@@ -678,9 +662,7 @@ class VideoPlayer(QWidget):
     def _handle_error(self, error, error_string: str):
         print(f"Video player error: {error_string}")
 
-    # ------------------------------------------------------------------
     #  Hover / mouse
-    # ------------------------------------------------------------------
 
     def _update_play_btn_hover(self, local_pos):
         """Track play-button hover for visual feedback (event-driven)."""

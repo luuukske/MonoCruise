@@ -35,9 +35,7 @@ class ThreadForcedStop(BaseException):
     pass
 
 
-# ---------------------------------------------------------------------------
 # Minimal typed data container every thread exposes
-# ---------------------------------------------------------------------------
 
 @dataclass
 class ThreadData:
@@ -45,9 +43,7 @@ class ThreadData:
     pass
 
 
-# ---------------------------------------------------------------------------
 # Internal backend wrappers — keep the two thread primitives behind one API
-# ---------------------------------------------------------------------------
 
 class _StdThreadBackend:
     """Wraps ``threading.Thread``."""
@@ -126,9 +122,7 @@ class _QThreadBackend:
         return getattr(self, "_captured_ident", None)
 
 
-# ---------------------------------------------------------------------------
 # BaseThread
-# ---------------------------------------------------------------------------
 
 class BaseThread:
     """
@@ -183,9 +177,7 @@ class BaseThread:
                 name=name, daemon=daemon, target=self._run_lifecycle,
             )
 
-    # ------------------------------------------------------------------
     # threading.Thread-compatible API (delegated to backend)
-    # ------------------------------------------------------------------
 
     def start(self) -> None:
         """Start the thread."""
@@ -204,9 +196,7 @@ class BaseThread:
         """Native thread ID (available after start, needed for force-stop)."""
         return self._ident
 
-    # ------------------------------------------------------------------
     # Public API
-    # ------------------------------------------------------------------
 
     def stop(self, force: bool = False) -> None:
         """Signal the thread to stop.
@@ -257,9 +247,7 @@ class BaseThread:
                 "healthy":       self.healthy,
             }
 
-    # ------------------------------------------------------------------
     # Override in subclass
-    # ------------------------------------------------------------------
 
     def setup(self) -> None:
         """Called once before the loop. Raise to abort startup."""
@@ -270,9 +258,7 @@ class BaseThread:
     def teardown(self) -> None:
         """Called after loop exits; exceptions are suppressed."""
 
-    # ------------------------------------------------------------------
     # Internal lifecycle (runs inside the backend thread)
-    # ------------------------------------------------------------------
 
     def _run_lifecycle(self) -> None:
         """

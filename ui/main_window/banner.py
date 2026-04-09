@@ -50,7 +50,7 @@ class BannerWidget(QFrame):
         super().__init__(parent)
         self.setFixedHeight(32)
 
-        # Layout ---------------------------------------------------------------
+        # Layout
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 0, 10, 0)
 
@@ -62,33 +62,31 @@ class BannerWidget(QFrame):
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._label, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        # State ----------------------------------------------------------------
+        # State
         self._state = BannerState.WAITING
         self._current_color = QColor(WAITING_COLOR)
         self._apply_bg(self._current_color)
 
-        # Dot animation (≈ LoadingDots from the original) ----------------------
+        # Dot animation (≈ LoadingDots from the original)
         self._dot_count = 0
         self._dot_timer = QTimer(self)
         self._dot_timer.setInterval(500)
         self._dot_timer.timeout.connect(self._tick_dots)
         self._dot_timer.start()
 
-        # State polling timer ---------------------------------------------------
+        # State polling timer
         self._state_timer = QTimer(self)
         self._state_timer.setInterval(500)
         self._state_timer.timeout.connect(self._update_state_from_telemetry)
         self._state_timer.start()
 
-        # Colour transition animation -----------------------------------------
+        # Colour transition animation
         self._color_anim = QVariantAnimation(self)
         self._color_anim.setDuration(1000)   # TRANSITION_DURATION = 1 s
         self._color_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
         self._color_anim.valueChanged.connect(self._on_color_tick)
 
-    # ------------------------------------------------------------------
     # Public API
-    # ------------------------------------------------------------------
 
     def set_state(self, state: BannerState) -> None:
         if state == self._state:
@@ -112,9 +110,7 @@ class BannerWidget(QFrame):
     def state(self) -> BannerState:
         return self._state
 
-    # ------------------------------------------------------------------
     # Internal
-    # ------------------------------------------------------------------
 
     def _update_state_from_telemetry(self) -> None:
         """

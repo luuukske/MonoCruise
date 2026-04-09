@@ -86,7 +86,7 @@ class SettingsPanel(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Card — single rounded container for title + scroll + bar -------------
+        # Card — single rounded container for title + scroll + bar
         card = QWidget()
         card.setObjectName("settingsCard")
         card.setStyleSheet(
@@ -98,13 +98,13 @@ class SettingsPanel(QWidget):
         card_lay.setSpacing(4)
         root.addWidget(card, 1)
 
-        # Title ----------------------------------------------------------------
+        # Title
         title = QLabel("Settings")
         title.setObjectName("settingsTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_lay.addWidget(title)
 
-        # Scroll area ----------------------------------------------------------
+        # Scroll area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -128,14 +128,14 @@ class SettingsPanel(QWidget):
         self._row = 0
         self._inner = inner
 
-        # Build each section ---------------------------------------------------
+        # Build each section
         self._build_inputs()
         self._build_program_settings()
         self._build_cruise_control()
         self._build_one_pedal_drive()
         self._build_footer()
 
-        # Bottom button bar (Patreon · YouTube · Hide X) -----------------------
+        # Bottom button bar (Patreon · YouTube · Hide X)
         bar = QHBoxLayout()
         bar.setContentsMargins(2, 2, 2, 2)
         bar.setSpacing(5)
@@ -175,18 +175,14 @@ class SettingsPanel(QWidget):
             self._btn_youtube.hide()
             self._hide_btn.hide()
 
-    # ------------------------------------------------------------------
     # Row counter
-    # ------------------------------------------------------------------
 
     def _r(self, advance: int = 1) -> int:
         r = self._row
         self._row += advance
         return r
 
-    # ==================================================================
     # Section 1 – Inputs
-    # ==================================================================
 
     def _build_inputs(self) -> None:
         s = self._settings
@@ -225,9 +221,7 @@ class SettingsPanel(QWidget):
         # TODO: trigger joystick connection via registry / JoystickThread
         pass
 
-    # ==================================================================
     # Section 2 – Program Settings
-    # ==================================================================
 
     def _build_program_settings(self) -> None:
         s = self._settings
@@ -288,9 +282,7 @@ class SettingsPanel(QWidget):
         self._set("hazards_variable", checked)
         self._set_row_visible(self._hazard_auto_row, checked)
 
-    # ==================================================================
     # Section 3 – Cruise Control
-    # ==================================================================
 
     def _build_cruise_control(self) -> None:
         s = self._settings
@@ -444,7 +436,7 @@ class SettingsPanel(QWidget):
         aeb_lay.addWidget(self.chk_aeb)
         self._grid.addWidget(aeb_widget, r_aeb, 1)
 
-    # -- Cruise helpers -------------------------------------------------------
+    # Cruise helpers
 
     @staticmethod
     def _format_btn(value: Any) -> str:
@@ -551,9 +543,7 @@ class SettingsPanel(QWidget):
         else:
             self._set("AEB_enabled", False)
 
-    # ==================================================================
     # Section 4 – One‑Pedal‑Drive
-    # ==================================================================
 
     def _build_one_pedal_drive(self) -> None:
         s = self._settings
@@ -637,9 +627,7 @@ class SettingsPanel(QWidget):
         for r in range(self._opd_cond_start, self._opd_cond_end):
             self._set_row_visible(r, checked)
 
-    # ==================================================================
     # Section 5 – Footer / Credits
-    # ==================================================================
 
     def _build_footer(self) -> None:
         p = self._inner
@@ -696,9 +684,7 @@ class SettingsPanel(QWidget):
         self._reset_armed = False
         self._reset_btn.setText("reset all settings")
 
-    # ==================================================================
     # Utilities
-    # ==================================================================
 
     def _on_hide_links(self) -> None:
         """Hide the Patreon/YouTube buttons and persist the preference."""
@@ -718,9 +704,7 @@ class SettingsPanel(QWidget):
             if item and item.widget():
                 item.widget().setVisible(visible)
 
-    # ------------------------------------------------------------------
     # Bulk‑load  (called once after config load to sync widgets → values)
-    # ------------------------------------------------------------------
 
     def apply_settings(self, s: "Settings") -> None:
         """Push every settings value into the corresponding widget."""

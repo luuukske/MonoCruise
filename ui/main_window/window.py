@@ -85,7 +85,7 @@ class MonoCruiseWindow(QMainWindow):
         self._startup_visibility_applied = False
         self._open_on_taskbar = False
 
-        # -- Window properties ------------------------------------------------
+        # Window properties
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(WINDOW_WIDTH, WINDOW_HEIGHT)
         self.resize(WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -95,18 +95,18 @@ class MonoCruiseWindow(QMainWindow):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
-        # -- Central widget ---------------------------------------------------
+        # Central widget
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
         root.setContentsMargins(5, 5, 5, 5)
         root.setSpacing(0)
 
-        # -- Banner -----------------------------------------------------------
+        # Banner
         self._banner = BannerWidget()
         root.addWidget(self._banner)
 
-        # -- Body (settings panel + right area) --------------------------------
+        # Body (settings panel + right area)
         body = QWidget()
         body_lay = QHBoxLayout(body)
         body_lay.setContentsMargins(0, 5, 0, 0)
@@ -121,7 +121,7 @@ class MonoCruiseWindow(QMainWindow):
         )
         body_lay.addWidget(self._settings_panel)
 
-        # Right area (gear icon at top‑left, rest is empty space) --------------
+        # Right area (gear icon at top‑left, rest is empty space)
         right = QWidget()
         right.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -148,18 +148,18 @@ class MonoCruiseWindow(QMainWindow):
         body_lay.addWidget(right)
         root.addWidget(body, 1)
 
-        # -- Command bar (bottom strip) ----------------------------------------
+        # Command bar (bottom strip)
         self._cmd_label = QLabel("Starting MonoCruise...")
         self._cmd_label.setObjectName("cmdLabel")
         self._cmd_label.setFixedHeight(22)
         root.addWidget(self._cmd_label)
 
-        # -- Version label (bottom‑right, absolute position) -------------------
+        # Version label (bottom‑right, absolute position)
         self._version_label = QLabel(self._version, central)
         self._version_label.setObjectName("versionLabel")
         self._version_label.adjustSize()
 
-        # -- Settings panel slide animation ------------------------------------
+        # Settings panel slide animation
         self._panel_anim = QPropertyAnimation(
             self._settings_panel, b"maximumWidth"
         )
@@ -180,24 +180,22 @@ class MonoCruiseWindow(QMainWindow):
         self._panel_anim_group.addAnimation(self._panel_fade_anim)
         self._panel_open = True
 
-        # -- Registry polling timer (reads thread state → updates UI) ----------
+        # Registry polling timer (reads thread state → updates UI)
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(100)
         self._poll_timer.timeout.connect(self._poll_threads)
         self._poll_timer.start()
 
-        # -- Cruise control floater (Qt main thread only; see CcPanel docstring) --
+        # Cruise control floater (Qt main thread only; see CcPanel docstring)
         self._cc_panel: CcPanel | None = None
         self._cc_panel_scale_snap: float | None = None
         self._cc_panel_update_snap: tuple | None = None
         self._init_cc_panel()
 
-        # -- Apply loaded settings to widgets ----------------------------------
+        # Apply loaded settings to widgets
         self._settings_panel.apply_settings(self._settings)
 
-    # ==================================================================
     # Properties for external reads
-    # ==================================================================
 
     @property
     def banner_state_name(self) -> str:
@@ -211,9 +209,7 @@ class MonoCruiseWindow(QMainWindow):
     def is_open_on_taskbar(self) -> bool:
         return self._open_on_taskbar
 
-    # ==================================================================
     # Settings panel slide
-    # ==================================================================
 
     def toggle_settings(self, *, force_close: bool = False) -> None:
         target_open = not self._panel_open
@@ -234,9 +230,7 @@ class MonoCruiseWindow(QMainWindow):
         self._panel_open = target_open
         self._panel_anim_group.start()
 
-    # ==================================================================
     # Persistence
-    # ==================================================================
 
     def _save(self) -> None:
         try:
@@ -255,32 +249,24 @@ class MonoCruiseWindow(QMainWindow):
         self._settings_panel.apply_settings(self._settings)
         self.set_cmd("All settings reset to defaults.")
 
-    # ==================================================================
     # Confirmation overlay
-    # ==================================================================
 
     def _show_confirmation(self, title, message, on_confirm, on_cancel=None):
         show_confirmation(
             self.centralWidget(), title, message, on_confirm, on_cancel
         )
 
-    # ==================================================================
     # Command bar
-    # ==================================================================
 
     def set_cmd(self, text: str) -> None:
         self._cmd_label.setText(text)
 
-    # ==================================================================
     # Banner convenience
-    # ==================================================================
 
     def set_banner_state(self, state: BannerState) -> None:
         self._banner.set_state(state)
 
-    # ==================================================================
     # Startup visibility
-    # ==================================================================
 
     def apply_startup_visibility(self) -> None:
         """
@@ -298,9 +284,7 @@ class MonoCruiseWindow(QMainWindow):
             "Main window minimised on startup (waiting for telemetry result)"
         )
 
-    # ==================================================================
     # Thread‑state polling
-    # ==================================================================
 
     def _poll_threads(self) -> None:
         """
@@ -428,9 +412,7 @@ class MonoCruiseWindow(QMainWindow):
         else:
             self._cc_panel.hide()
 
-    # ==================================================================
     # Overrides
-    # ==================================================================
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)

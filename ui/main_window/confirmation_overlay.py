@@ -39,11 +39,11 @@ class ConfirmationOverlay(QWidget):
         self._on_confirm = on_confirm
         self._on_cancel = on_cancel
 
-        # Fill entire parent ---------------------------------------------------
+        # Fill entire parent
         self.setGeometry(parent.rect())
         self.setAutoFillBackground(True)
 
-        # Centred card ---------------------------------------------------------
+        # Centred card
         outer = QVBoxLayout(self)
         outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -82,8 +82,6 @@ class ConfirmationOverlay(QWidget):
         self.show()
         self.raise_()
 
-    # ------------------------------------------------------------------
-
     def _confirm(self) -> None:
         self._on_confirm()
         self._close()
@@ -103,9 +101,7 @@ class ConfirmationOverlay(QWidget):
         super().resizeEvent(event)
 
 
-# ---------------------------------------------------------------------------
 # Convenience function
-# ---------------------------------------------------------------------------
 
 def show_confirmation(
     parent: QWidget,

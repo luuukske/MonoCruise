@@ -37,9 +37,7 @@ from core.settings import Settings
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 def _read_axis(device: pygame.joystick.JoystickType, axis: int, inverted: bool) -> float:
     """Return a normalised [0.0, 1.0] value from a joystick axis."""
@@ -126,9 +124,7 @@ def _onepedaldrive(
     return gas_out, brake_out
 
 
-# ---------------------------------------------------------------------------
 # ThreadData
-# ---------------------------------------------------------------------------
 
 @dataclass
 class MainPedalThreadData(ThreadData):
@@ -156,9 +152,7 @@ class MainPedalThreadData(ThreadData):
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
-# ---------------------------------------------------------------------------
 # Thread
-# ---------------------------------------------------------------------------
 
 class MainPedalThread(BaseThread):
     loop_interval = 1.0 / Settings.polling_rate
@@ -186,9 +180,7 @@ class MainPedalThread(BaseThread):
         self._reconnect_attempt: int = 0
         self._reconnect_js: pygame.joystick.JoystickType | None = None  # held during reinit wait
 
-    # ------------------------------------------------------------------
     # Lifecycle
-    # ------------------------------------------------------------------
 
     def setup(self) -> None:
         pygame.init()
@@ -221,14 +213,14 @@ class MainPedalThread(BaseThread):
         polling_rate = max(Settings.polling_rate, 10)
         self.loop_interval = 1.0 / polling_rate
 
-        # --- Latency tracking (used to scale emergency-brake thresholds) ------
+        # Latency tracking (used to scale emergency-brake thresholds)
         now = time.monotonic()
         latency = now - self._latency_ts
         self._latency_ts = now
         # Multiplier mirrors the old code: scales relative to a 15 ms baseline.
         latency_multiplier = (latency / 0.015) * 2
 
-        # --- Read telemetry ---------------------------------------------------
+        # Read telemetry
         tel = self._get_telemetry()
         if tel is None:
             # SDK not connected; zero outputs and wait.
@@ -257,17 +249,17 @@ class MainPedalThread(BaseThread):
         except (KeyError, AttributeError):
             pass
 
-        # --- Process pygame events (input + hot-plug) -------------------------
+        # Process pygame events (input + hot-plug)
         gasval, brakeval = self._process_pygame_events(speed)
 
-        # --- Advance reconnect state machine (no sleeping) --------------------
+        # Advance reconnect state machine (no sleeping)
         self._tick_reconnect()
 
         # Convenience snapshot for stopping logic below.
         prev_brakeval = self._prev_brakeval
         prev_speed    = self._prev_speed
 
-        # --- Device lost guard ------------------------------------------------
+        # Device lost guard
         if self.data.device_lost:
             with self.data._lock:
                 self.data.gasval      = 0.0
@@ -282,13 +274,13 @@ class MainPedalThread(BaseThread):
             # TODO: live visualization — clear frame here
             return
 
-        # --- One-Pedal-Drive transform ----------------------------------------
+        # One-Pedal-Drive transform
         # Cruise / ACC commanding: no OPD axis remap; exponents still match legacy two-pedal path.
         opdgasval, opdbrakeval = _onepedaldrive(
             gasval, brakeval, apply_opd_mapping=not cruise_commanding
         )
 
-        # --- Weight adjustment ------------------------------------------------
+        # Weight adjustment
         if Settings.weight_adjustment and cargo_mass > 0:
             try:
                 total_weight_tons = (cargo_mass / 1000) + 8.93  # approx truck base weight
@@ -300,7 +292,7 @@ class MainPedalThread(BaseThread):
             weight_var = 1.0
         opdbrakeval = (opdbrakeval ** (1 / weight_var)).real
 
-        # --- Stopping logic ---------------------------------------------------
+        # Stopping logic
         effective_gas = max(gasval, opdgasval)
         offset = Settings.offset_variable
         a = 0.035 - slope / 2
@@ -350,7 +342,7 @@ class MainPedalThread(BaseThread):
                     0,
                 )
 
-        # --- Stopped state transitions ----------------------------------------
+        # Stopped state transitions
         if speed <= 0.1 and speed >= -0.1 and gasval == 0 and gear != 0 and not stopped:
             stopped = True
             self._prev_opdbrakeval = opdbrakeval
@@ -380,7 +372,7 @@ class MainPedalThread(BaseThread):
         except (KeyError, AttributeError):
             pass
 
-        # --- Emergency stop detection -----------------------------------------
+        # Emergency stop detection
         em_stop = self.data.em_stop
 
         sudden_brake_slam = (
@@ -421,7 +413,7 @@ class MainPedalThread(BaseThread):
 
         cc_start_held, cc_inc_held, cc_dec_held = self._read_cc_button_states()
 
-        # --- Write outputs ----------------------------------------------------
+        # Write outputs
         with self.data._lock:
             self.data.gasval      = gasval
             self.data.brakeval    = brakeval
@@ -448,9 +440,7 @@ class MainPedalThread(BaseThread):
             pass
         logger.debug("teardown complete")
 
-    # ------------------------------------------------------------------
     # Private helpers
-    # ------------------------------------------------------------------
 
     def _get_telemetry(self) -> dict | None:
         """Return a lightweight snapshot of the fields we need from telemetry_thread.

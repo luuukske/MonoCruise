@@ -6,17 +6,13 @@ Colour values are taken directly from the original MonoCruise.py source.
 
 from __future__ import annotations
 
-# ---------------------------------------------------------------------------
 # Application metadata
-# ---------------------------------------------------------------------------
 APP_NAME = "MonoCruise"
 WINDOW_WIDTH = 700
 WINDOW_HEIGHT = 500
 SETTINGS_PANEL_WIDTH = 400
 
-# ---------------------------------------------------------------------------
 # Colour palette
-# ---------------------------------------------------------------------------
 BG_COLOR       = "#2B2B2B"
 BG_DARKER      = "#242424"
 SETTINGS_COLOR = "#454545"
@@ -42,27 +38,21 @@ REINSTALL_HOVER       = "#A86200"
 DANGER_BUTTON_COLOR   = "#8B1A1A"
 DANGER_BUTTON_HOVER   = "#A82020"
 
-# ---------------------------------------------------------------------------
 # Border radii  (change individually as desired)
-# ---------------------------------------------------------------------------
 RADIUS_BANNER         = 5   # BannerWidget (top status bar)
 RADIUS_SETTINGS_PANEL = 5   # SettingsPanel slide-in drawer
 RADIUS_SCROLL         = 5   # QScrollArea (settings scroll frame)
 RADIUS_BUTTON         = 5   # All QPushButton (factory standard across type)
 RADIUS_INPUT          = 5   # QLineEdit and QComboBox
 
-# ---------------------------------------------------------------------------
 # Font families
-# ---------------------------------------------------------------------------
 FONT_FAMILY = "Segoe UI"
 FONT_FAMILY_FALLBACK = "Helvetica Neue"
 FONT_SIZE = 13
 MONO_FAMILY = "Courier New"
 MONO_SIZE = 10
 
-# ---------------------------------------------------------------------------
 # Centralised QSS
-# ---------------------------------------------------------------------------
 STYLESHEET = f"""
 /* ── Global ─────────────────────────────────────────────────────────── */
 QWidget {{

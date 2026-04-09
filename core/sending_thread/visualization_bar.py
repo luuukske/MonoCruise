@@ -87,9 +87,7 @@ class VisualizationBar(QWidget):
         except Exception:
             bar_active = False
 
-        # ------------------------------------------------------------------
         # Read live values from worker threads
-        # ------------------------------------------------------------------
         gas_output = 0.0
         brake_output = 0.0
         em_stop = False
