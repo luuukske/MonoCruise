@@ -28,6 +28,14 @@ from .traffic import (
 
 logger = logging.getLogger(__name__)
 
+try:
+    import pygame
+    _PYGAME_AVAILABLE = True
+except ImportError:
+    _PYGAME_AVAILABLE = False
+
+_AEB_SOUND_PATH = "core/aeb/aeb_warning.wav"
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -378,6 +386,105 @@ def _build_vehicle_collision_data(
             v_yaw_rad, abs_v_speed, veh_fwd_x, veh_fwd_z, v_curvature)
 
 
+class _SoundState(enum.IntEnum):
+    STOPPED = 0
+    RUNNING = 1
+    SHUTTING_DOWN = 2
+
+
+class _AEBSoundHandler:
+    """
+    State-managed sound handler for seamless looping, non-blocking stops,
+    and the ability to resume during shutdown.
+    """
+
+    def __init__(self, sound_file_path: str) -> None:
+        self._sound = None
+        self._state = _SoundState.STOPPED
+        self._sound_thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+        if not _PYGAME_AVAILABLE:
+            logger.warning("pygame not available — AEB sound disabled")
+            return
+
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=256)
+                pygame.mixer.init()
+            self._sound = pygame.mixer.Sound(sound_file_path)
+            self._sound.set_volume(0.5)
+        except Exception as exc:
+            logger.warning("AEB sound init failed (%s) — sound disabled", exc)
+            self._sound = None
+
+    def start_warning(self) -> None:
+        """
+        Start the warning sound loop. If shutting down, cancels the shutdown
+        and resumes looping seamlessly.
+        """
+        if self._sound is None:
+            return
+        with self._lock:
+            if self._state == _SoundState.RUNNING:
+                return
+            if self._state == _SoundState.SHUTTING_DOWN:
+                self._state = _SoundState.RUNNING
+                logger.debug("AEB sound: shutdown cancelled, resuming loop")
+                return
+            self._state = _SoundState.RUNNING
+            self._sound_thread = threading.Thread(
+                target=self._sound_loop_manager, daemon=True
+            )
+            self._sound_thread.start()
+            logger.debug("AEB sound: warning loop started")
+
+    def stop_warning(self) -> None:
+        """
+        Signal the warning to stop non-blockingly.
+        The current playing sound will finish naturally; no new loop starts.
+        """
+        if self._sound is None:
+            return
+        with self._lock:
+            if self._state == _SoundState.RUNNING:
+                self._state = _SoundState.SHUTTING_DOWN
+                logger.debug("AEB sound: disabling — current sound will finish")
+
+    def _sound_loop_manager(self) -> None:
+        sound_length = self._sound.get_length()
+        overlap_time = 0.15
+        sleep_duration = max(0.0, sound_length - overlap_time)
+
+        last_channel = self._sound.play()
+
+        while True:
+            time.sleep(sleep_duration)
+            with self._lock:
+                if self._state == _SoundState.RUNNING:
+                    last_channel = self._sound.play()
+                elif self._state == _SoundState.SHUTTING_DOWN:
+                    logger.debug("AEB sound: stopping loop — letting current sound finish")
+                    break
+
+        if last_channel:
+            while last_channel.get_busy():
+                time.sleep(0.01)
+
+        with self._lock:
+            self._state = _SoundState.STOPPED
+        logger.debug("AEB sound: finished playing naturally, thread closing")
+
+    def cleanup(self) -> None:
+        """Block until all sound activity is finished, then quit the mixer."""
+        self.stop_warning()
+        if self._sound_thread and self._sound_thread.is_alive():
+            self._sound_thread.join()
+        if _PYGAME_AVAILABLE and pygame.mixer.get_init():
+            pygame.mixer.quit()
+        logger.debug("AEB sound: cleanup complete")
+
+
 class AEBThread(BaseThread):
     loop_interval = 1 / 30
     max_restarts = 3
@@ -398,6 +505,7 @@ class AEBThread(BaseThread):
         self._ego_position_history: list[tuple[float, float, float]] = []
         # Frozen ref ego (km/h) for TMP rel-speed split while WARN/brake-pedal active.
         self._latched_filter_ego_kmh: float | None = None
+        self._sound_handler = _AEBSoundHandler(_AEB_SOUND_PATH)
 
     def _read_user_braking(self) -> bool:
         try:
@@ -1049,6 +1157,11 @@ class AEBThread(BaseThread):
             evasion_right_arc=ego_evasion_right,
         )
 
+        if new_state >= AEBState.WARN:
+            self._sound_handler.start_warning()
+        else:
+            self._sound_handler.stop_warning()
+
         with self.data._lock:
             self.data.AEB_warn = (new_state >= AEBState.WARN)
             self.data.AEB_brake = (new_state == AEBState.BRAKE)
@@ -1058,6 +1171,7 @@ class AEBThread(BaseThread):
         self._last_snapshot = snap
 
     def teardown(self) -> None:
+        self._sound_handler.cleanup()
         self._traffic.close()
         if self._radar_visualizer is not None:
             try:
