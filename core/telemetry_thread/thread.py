@@ -98,6 +98,9 @@ class TelemetryThreadData(ThreadData):
     # Ego trailer — True when at least one attached trailer with wheels exists.
     ego_has_trailer: bool = False
 
+    # Total wheels in contact with the ground (tractor + all attached trailers).
+    wheels_on_ground: int = 0
+
     request_quit: bool = False
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
@@ -137,6 +140,13 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
             else:
                 break
         data.trailer_count = trailer_count
+        truck_wog = sum(1 for w in raw.get("truckWheelOnGround", []) if w)
+        trailer_wog = 0
+        for trailer in raw.get("trailer", []):
+            if not trailer.get("attached", False):
+                break
+            trailer_wog += sum(1 for w in trailer.get("wheelOnGround", []) if w)
+        data.wheels_on_ground = truck_wog + trailer_wog
         data.lv_accelerationX    = raw.get("lv_accelerationX", 0.0)
         data.parkBrake           = raw.get("parkBrake", False)
         data.rotationY           = raw.get("rotationY", 0.0)

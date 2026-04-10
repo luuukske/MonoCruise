@@ -74,6 +74,7 @@ class BrakeEfficiencyTracker:
         measured_decel_ms2: float,
         speed_ms: float,
         slope_rad: float = 0.0,
+        wheels_on_ground: int = 0,
     ) -> None:
         """
         Feed one braking sample. Call only when cruise is actively commanding brake.
@@ -84,6 +85,9 @@ class BrakeEfficiencyTracker:
             speed_ms: Current vehicle speed (m/s).
             slope_rad: Road slope in radians (positive = uphill). Used to filter
                 sloped roads where gravity contaminates the decel measurement.
+            wheels_on_ground: Total wheels in contact with the ground (tractor +
+                trailers). More wheels means higher expected braking capacity.
+                When 0 or unknown, wheel scaling is skipped.
         """
         if not Settings.brake_efficiency_learning:
             self._efficiency_ratio = 1.0
@@ -99,8 +103,9 @@ class BrakeEfficiencyTracker:
             return
 
         alpha = max(1e-4, min(1.0, float(Settings.brake_efficiency_alpha)))
-        grip = measured_decel_ms2 / max(
-            float(brake_output), _BRAKE_OUTPUT_FLOOR
+        effective_wheels = max(wheels_on_ground, 1) if wheels_on_ground > 0 else 1
+        grip = measured_decel_ms2 / (
+            max(float(brake_output), _BRAKE_OUTPUT_FLOOR) * effective_wheels
         )
         if not math.isfinite(grip) or grip <= 0.0:
             return

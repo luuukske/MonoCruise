@@ -273,6 +273,7 @@ class SendingThread(BaseThread):
                     mass_kg = float(tel_thread.data.estimated_total_mass_kg)
                     spd_ms = float(tel_thread.data.speed)
                     has_t = bool(tel_thread.data.ego_has_trailer)
+                    wheels_on_ground = int(tel_thread.data.wheels_on_ground)
                     road_pitch_deg = float(tel_thread.data.rotationY)
                     tel_gear_dashboard = int(tel_thread.data.gear_dashboard)
                     game_throttle = float(tel_thread.data.gameThrottle)
@@ -314,7 +315,8 @@ class SendingThread(BaseThread):
             # Update brake efficiency tracker only during cruise-commanded braking.
             if cruise_active and mapper_command_brake > 0.05:
                 self._brake_tracker.update(
-                    mapper_command_brake, measured_decel_ms2, speed_ms, brake_grade_rad
+                    mapper_command_brake, measured_decel_ms2, speed_ms, brake_grade_rad,
+                    wheels_on_ground=wheels_on_ground,
                 )
             if cruise_active:
                 self._brake_tracker.check_warnings()
