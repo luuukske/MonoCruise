@@ -567,7 +567,7 @@ class AccelToPedals:
             clutch_applied,
         )
         self._integral_correction *= leak
-        if not accel_limited:
+        if cruise_commanding and not accel_limited:
             self._integral_correction += integral_coeff * integral_input * dt
         self._integral_correction = _clamp(
             self._integral_correction,
