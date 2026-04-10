@@ -141,7 +141,6 @@ class AccelToPedals:
         self._estimated_max_accel_ms2: float | None = None
         self._estimated_max_brake_ms2: float | None = None
         self._prev_mono: float | None = None
-        self._prev_error_ms2: float = 0.0
         self._log_file = None
         self._log_writer = None
         self._project_root = Path(__file__).resolve().parents[2]
@@ -163,7 +162,6 @@ class AccelToPedals:
         self._raw_smooth = 0.0
         self._integral_correction = 0.0
         self._prev_mono = None
-        self._prev_error_ms2 = 0.0
 
     def _weight_factor(self, total_mass_kg: float, has_trailer: bool) -> float:
         if not Settings.weight_adjustment:
@@ -531,10 +529,6 @@ class AccelToPedals:
         if not math.isfinite(error_ms2):
             error_ms2 = 0.0
 
-        # Derivative of the output error — used for oscillation damping below.
-        d_error = (error_ms2 - self._prev_error_ms2) / dt
-        self._prev_error_ms2 = error_ms2
-
         integral_coeff = _finite_or_zero(Settings.mapper_integral_coeff)
         integral_clamp = max(0.0, _finite_or_zero(Settings.mapper_integral_clamp))
         # Nonlinear integral: tanh compresses the integrand so the correction is
@@ -559,15 +553,7 @@ class AccelToPedals:
             integral_clamp,
         )
 
-        # Derivative correction: opposes rapid error changes to damp oscillations.
-        # Only active while cruise is commanding; clamped to prevent noise spikes.
-        if cruise_commanding:
-            d_coeff = _finite_or_zero(Settings.mapper_derivative_coeff)
-            d_correction = _clamp(d_coeff * d_error, -0.25, 0.25)
-        else:
-            d_correction = 0.0
-
-        drive_cmd = _clamp(base_signed - self._integral_correction - d_correction, -1.0, 1.0)
+        drive_cmd = _clamp(base_signed - self._integral_correction, -1.0, 1.0)
         if gear_dash == 0 and drive_cmd > 0.0:
             drive_cmd = 0.0
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field
 from pathlib     import Path
 
 from core.thread_management.registry import registry
@@ -93,23 +93,22 @@ class Settings(metaclass=_SingletonMeta):
     short_increments: int = 5
     long_press_reset: bool = True
 
-    # PID tuning (cruise_control_thread)
-    cc_kp: float = 0.35
-    cc_ki: float = 0.08
-    cc_kd: float = 0.15
+    # PID tuning (cruise_control_thread) — defaults aligned with config.json
+    cc_kp: float = 0.9
+    cc_ki: float = 0.0
+    cc_kd: float = 0.8
     cc_integral_clamp: float = 3.0
-    cc_accel_max_ms2: float = 1.8
-    cc_accel_min_ms2: float = -4.0
+    cc_accel_max_ms2: float = 0.8
+    cc_accel_min_ms2: float = -0.3
 
     # AccelToPedals tuning. Weight baselines and smoothing constants stay fixed in code.
     mapper_accel_scale_ms2: float = 3.5
     mapper_brake_scale_ms2: float = 6.5
     mapper_brake_exponent: float = 2.5
-    mapper_rolling_resistance: float = 0.0015
-    mapper_integral_coeff: float = 0.40
-    mapper_integral_clamp: float = 0.35
-    mapper_integral_nonlinear_scale: float = 0.5  # m/s² — errors << this integrate near-linearly; errors >> this saturate
-    mapper_derivative_coeff: float = 0.04          # damps oscillations by opposing rapid error changes
+    mapper_rolling_resistance: float = 0.07
+    mapper_integral_coeff: float = 1.0
+    mapper_integral_clamp: float = 0.5
+    mapper_integral_nonlinear_scale: float = 0.6  # m/s² — errors << this integrate near-linearly; errors >> this saturate
 
     # Adaptive brake efficiency
     brake_efficiency_learning: bool = True
@@ -132,6 +131,14 @@ class Settings(metaclass=_SingletonMeta):
     def _public_fields(self) -> dict:
         return {k: getattr(self, k) for k in self.__dataclass_fields__ if not k.startswith("_")}
 
+    @staticmethod
+    def _dataclass_field_default(f) -> object:
+        if f.default_factory is not MISSING:
+            return f.default_factory()
+        if f.default is not MISSING:
+            return f.default
+        return None
+
     @classmethod
     def instance(cls) -> "Settings":
         return cls()
@@ -140,17 +147,29 @@ class Settings(metaclass=_SingletonMeta):
     def load(cls) -> None:
         self = cls.instance()
         with self._state_lock:
-            self._saved_state = {}
-            if not CONFIG_PATH.exists():
-                return
-            with CONFIG_PATH.open() as fh:
-                data = json.load(fh)
-            for k, v in data.items():
-                if k in self.__dataclass_fields__ and not k.startswith("_"):
+            file_existed = CONFIG_PATH.exists()
+            data: dict = {}
+            if file_existed:
+                with CONFIG_PATH.open() as fh:
+                    data = json.load(fh)
+
+            public_keys = [k for k in self.__dataclass_fields__ if not k.startswith("_")]
+            missing_from_file = any(k not in data for k in public_keys)
+
+            for k in public_keys:
+                if k in data:
+                    v = data[k]
                     if k in {"short_increments", "long_increments"}:
                         v = self._normalize_increment(v)
                     setattr(self, k, v)
-                    self._saved_state[k] = v
+                else:
+                    f = self.__dataclass_fields__[k]
+                    setattr(self, k, cls._dataclass_field_default(f))
+
+            had_complete_file = file_existed and not missing_from_file
+            self._saved_state = self._public_fields() if had_complete_file else {}
+            if not had_complete_file:
+                cls.save()
 
     @classmethod
     def save(cls, values: dict | None = None):
