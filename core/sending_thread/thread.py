@@ -315,8 +315,12 @@ class SendingThread(BaseThread):
             # Update brake efficiency tracker only during cruise-commanded braking.
             if cruise_active and mapper_command_brake > 0.05:
                 self._brake_tracker.update(
-                    mapper_command_brake, measured_decel_ms2, speed_ms, brake_grade_rad,
+                    mapper_command_brake,
+                    measured_decel_ms2,
+                    speed_ms,
+                    brake_grade_rad,
                     wheels_on_ground=wheels_on_ground,
+                    mass_kg=mass_kg,
                 )
             if cruise_active:
                 self._brake_tracker.check_warnings()

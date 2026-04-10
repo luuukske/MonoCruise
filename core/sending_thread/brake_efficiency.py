@@ -1,9 +1,10 @@
 """
 Tracks braking efficiency during cruise control to detect performance degradation.
 
-Compares a rolling EMA of deceleration-per-unit-brake (m/s² per normalized pedal)
-against a locked baseline. efficiency_ratio < 1.0 indicates reduced braking
-performance (worn tires, snow, etc.).
+Compares a rolling EMA of measured deceleration to the deceleration expected from
+the current brake command, using a nominal full-pedal capability of 11.5 m/s² at
+12 wheels and 17 t (scaled linearly with wheel count and inversely with mass).
+efficiency_ratio < 1.0 indicates reduced braking performance (worn tires, snow, etc.).
 
 Only samples when:
   - cruise is commanding brake (caller's responsibility to gate this)
@@ -31,10 +32,32 @@ _MAX_SLOPE_RAD: float = 0.03           # ~1.7° — skip sloped road to avoid gr
 _BASELINE_REQUIRED: int = 15           # high-brake samples before baseline is locked
 _WARN_COOLDOWN_S: float = 30.0         # minimum seconds between popup warnings
 
+# Nominal full-pedal deceleration on dry grip: scales with contact patch (wheels)
+# and inversely with mass. Reference: 12 wheels, 17 t → 11.5 m/s².
+_REF_NOMINAL_MAX_DECEL_MS2: float = 11.5
+_REF_WHEELS: int = 12
+_REF_MASS_KG: float = 17000.0
+
+
+def nominal_max_brake_decel_ms2(wheels_on_ground: int, mass_kg: float) -> float:
+    """
+    Expected maximum deceleration (m/s²) at brake=1.0 for the given wheel count and mass.
+
+    Unknown wheel count defaults to the reference 12 wheels; unknown/non-positive mass
+    defaults to 17 t so the nominal deceleration is 11.5 m/s².
+    """
+    w = float(wheels_on_ground) if wheels_on_ground > 0 else float(_REF_WHEELS)
+    m = float(mass_kg) if mass_kg > 0.0 else _REF_MASS_KG
+    return _REF_NOMINAL_MAX_DECEL_MS2 * (w / float(_REF_WHEELS)) * (_REF_MASS_KG / m)
+
 
 class BrakeEfficiencyTracker:
     """
     Estimates vehicle braking performance and detects degradation via EMA.
+
+    Each sample contributes measured_decel / (brake * nominal_max_decel), where
+    nominal_max_decel is derived from wheel count and mass (see
+    nominal_max_brake_decel_ms2).
 
     Reads live from Settings:
       - brake_efficiency_learning  — enable/disable the tracker
@@ -75,6 +98,7 @@ class BrakeEfficiencyTracker:
         speed_ms: float,
         slope_rad: float = 0.0,
         wheels_on_ground: int = 0,
+        mass_kg: float = 0.0,
     ) -> None:
         """
         Feed one braking sample. Call only when cruise is actively commanding brake.
@@ -86,8 +110,10 @@ class BrakeEfficiencyTracker:
             slope_rad: Road slope in radians (positive = uphill). Used to filter
                 sloped roads where gravity contaminates the decel measurement.
             wheels_on_ground: Total wheels in contact with the ground (tractor +
-                trailers). More wheels means higher expected braking capacity.
-                When 0 or unknown, wheel scaling is skipped.
+                trailers). More wheels increases the expected max deceleration; 0 uses
+                the reference 12 wheels.
+            mass_kg: Total vehicle mass (kg). Heavier mass lowers expected max
+                deceleration; non-positive values use the reference 17 t.
         """
         if not Settings.brake_efficiency_learning:
             self._efficiency_ratio = 1.0
@@ -103,10 +129,9 @@ class BrakeEfficiencyTracker:
             return
 
         alpha = max(1e-4, min(1.0, float(Settings.brake_efficiency_alpha)))
-        effective_wheels = max(wheels_on_ground, 1) if wheels_on_ground > 0 else 1
-        grip = measured_decel_ms2 / (
-            max(float(brake_output), _BRAKE_OUTPUT_FLOOR) * effective_wheels
-        )
+        nominal_max = nominal_max_brake_decel_ms2(wheels_on_ground, mass_kg)
+        expected_decel = max(float(brake_output), _BRAKE_OUTPUT_FLOOR) * nominal_max
+        grip = measured_decel_ms2 / expected_decel
         if not math.isfinite(grip) or grip <= 0.0:
             return
 
@@ -125,7 +150,7 @@ class BrakeEfficiencyTracker:
                 self._baseline_max_decel_ms2 = sum(top_half) / len(top_half)
                 self._baseline_locked = True
                 logger.info(
-                    "brake_efficiency: baseline locked at %.2f m/s² per pedal (%d samples)",
+                    "brake_efficiency: baseline locked at %.2f× nominal decel (%d samples)",
                     self._baseline_max_decel_ms2,
                     len(self._baseline_samples),
                 )
@@ -154,7 +179,7 @@ class BrakeEfficiencyTracker:
                 extra={"popup": True},
             )
             logger.debug(
-                "brake_efficiency: ratio=%.3f ema_grip=%.2f baseline_grip=%.2f "
+                "brake_efficiency: ratio=%.3f ema_norm=%.2f baseline_norm=%.2f "
                 "warn_threshold=%.2f",
                 self._efficiency_ratio,
                 self._ema_max_decel_ms2,

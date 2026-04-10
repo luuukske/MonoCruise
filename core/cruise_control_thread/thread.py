@@ -31,7 +31,7 @@ _SPEED_MAX_KMH = 130.0
 
 # Default PID constants — overridden at runtime by Settings.cc_k* / Settings.cc_accel_*
 _KP_DEFAULT = 0.35
-_KI_DEFAULT = 0.08
+_KI_DEFAULT = 0.00
 _KD_DEFAULT = 0.15
 _INTEGRAL_CLAMP_DEFAULT = 3.0
 _ACCEL_MIN_MS2_DEFAULT = -2.0

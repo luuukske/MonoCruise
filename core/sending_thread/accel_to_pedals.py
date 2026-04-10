@@ -24,8 +24,8 @@ _WEIGHT_MIN_FACTOR: float = 0.55
 _WEIGHT_MAX_FACTOR: float = 1.85
 _TRAILER_WEIGHT_BIAS: float = 1.02
 
-_WANTED_SMOOTHING_TAU_S: float = 0.10
-_RAW_SMOOTHING_TAU_S: float = 0.20
+_WANTED_SMOOTHING_TAU_S: float = 0.05
+_RAW_SMOOTHING_TAU_S: float = 0.10
 _INTEGRAL_LEAK_TAU_S: float = 8.0
 _INTEGRAL_FAST_LEAK_TAU_S: float = 0.60
 _DERIVATIVE_SMOOTHING_TAU_S: float = 0.12
@@ -92,8 +92,7 @@ def compute_estimated_mass_kg(
 ) -> float:
     """Tractor + cargo + fuel mass from telemetry (kg)."""
     fuel_kg = max(0.0, float(fuel_litres)) * float(fuel_kg_per_liter)
-    trailer_mass_kg = max(0, int(trailer_count)) * 1000.0
-    cargo_mass_kg = 0.0 if int(trailer_count) > 0 else float(cargo_mass_kg)
+    trailer_mass_kg = max(0, int(trailer_count)) * 7000.0
     return max(0.0, float(unit_mass_kg)) + cargo_mass_kg + fuel_kg + trailer_mass_kg
 
 
