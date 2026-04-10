@@ -13,6 +13,12 @@ _TRANSPARENT = QColor(0, 0, 0, 0)
 _BLUE = QColor("blue")
 _RED = QColor("red")
 
+# Delay before re-reading screen geometry after a display change event.
+# Windows display drivers may report a transient incorrect resolution
+# (e.g. FHD fallback) immediately after wake-from-sleep; waiting briefly
+# lets the driver settle to the real geometry.
+_SCREEN_SETTLE_MS = 500
+
 
 class VisualizationBar(QWidget):
     def __init__(self):
@@ -24,6 +30,7 @@ class VisualizationBar(QWidget):
         self.gas_rect = QRect()
         self.brake_rect = QRect()
         self.flicker_color = _TRANSPARENT
+        self._tracked_screen = None
 
         self.setWindowFlags(
             Qt.FramelessWindowHint
@@ -36,11 +43,47 @@ class VisualizationBar(QWidget):
         self.setWindowOpacity(0.8)
 
         self._update_screen_geometry()
+        self._connect_screen_signals()
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._animate)
         self.timer.start(10)
         self.show()
+
+    def _connect_screen_signals(self):
+        """Connect to QApplication screen signals for event-driven geometry updates."""
+        app = QApplication.instance()
+        if app is None:
+            return
+        app.screenAdded.connect(self._schedule_geometry_update)
+        app.screenRemoved.connect(self._schedule_geometry_update)
+        app.primaryScreenChanged.connect(self._on_primary_screen_changed)
+        self._track_primary_screen()
+
+    def _track_primary_screen(self):
+        """Connect geometryChanged on the current primary screen, disconnecting from any previous one."""
+        screen = QApplication.primaryScreen()
+        if self._tracked_screen is not None:
+            try:
+                self._tracked_screen.geometryChanged.disconnect(self._schedule_geometry_update)
+            except RuntimeError:
+                pass  # already disconnected or deleted
+        self._tracked_screen = screen
+        if screen is not None:
+            screen.geometryChanged.connect(self._schedule_geometry_update)
+
+    def _on_primary_screen_changed(self, _screen=None):
+        self._track_primary_screen()
+        self._schedule_geometry_update()
+
+    def _schedule_geometry_update(self, *_args):
+        """Schedule a geometry re-read after a short settling delay.
+
+        The delay gives the Windows display driver time to report the real
+        resolution instead of the transient FHD fallback that can appear
+        immediately after wake-from-sleep.
+        """
+        QTimer.singleShot(_SCREEN_SETTLE_MS, self._update_screen_geometry)
 
     def _update_screen_geometry(self):
         screen = QApplication.primaryScreen()
@@ -74,12 +117,6 @@ class VisualizationBar(QWidget):
             logger.warning("animate error: %s", e, exc_info=False)
 
     def _animate_inner(self):
-        screen = QApplication.primaryScreen()
-        if screen is not None:
-            geo = screen.geometry()
-            if self.screen_width != geo.width() or self.screen_height != geo.height():
-                self._update_screen_geometry()
-
         # Safe read of bar visibility flag from settings
         try:
             # config.json / Settings exposes this as `bar_variable`
