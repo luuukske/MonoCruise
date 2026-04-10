@@ -24,14 +24,16 @@ _WEIGHT_MIN_FACTOR: float = 0.55
 _WEIGHT_MAX_FACTOR: float = 1.85
 _TRAILER_WEIGHT_BIAS: float = 1.02
 
-_WANTED_SMOOTHING_TAU_S: float = 0.05
-_RAW_SMOOTHING_TAU_S: float = 0.10
-_INTEGRAL_LEAK_TAU_S: float = 0.60
+_WANTED_SMOOTHING_TAU_S: float = 0.10
+_RAW_SMOOTHING_TAU_S: float = 0.20
+_INTEGRAL_LEAK_TAU_S: float = 8.0
+_INTEGRAL_FAST_LEAK_TAU_S: float = 0.60
+_DERIVATIVE_SMOOTHING_TAU_S: float = 0.12
 _IDLE_CORRECTION_DECAY_TAU_S: float = 0.12
 
 _ESTIMATE_DROP_TAU_S: float = 0.10
-_ESTIMATE_RISE_TAU_S: float = 1.20
-_MAX_ESTIMATE_SLOPE_RAD: float = 0.03
+_ESTIMATE_RISE_TAU_S: float = 0.60
+_MAX_ESTIMATE_SLOPE_RAD: float = 0.2
 _MIN_SAMPLE_PEDAL: float = 0.35
 _SAMPLE_PEDAL_FLOOR: float = 0.25
 
@@ -138,6 +140,8 @@ class AccelToPedals:
         self._wanted_smooth: float = 0.0
         self._raw_smooth: float = 0.0
         self._integral_correction: float = 0.0
+        self._prev_error_ms2: float = 0.0
+        self._error_deriv_smooth: float = 0.0
         self._estimated_max_accel_ms2: float | None = None
         self._estimated_max_brake_ms2: float | None = None
         self._prev_mono: float | None = None
@@ -161,6 +165,8 @@ class AccelToPedals:
         self._wanted_smooth = 0.0
         self._raw_smooth = 0.0
         self._integral_correction = 0.0
+        self._prev_error_ms2 = 0.0
+        self._error_deriv_smooth = 0.0
         self._prev_mono = None
 
     def _weight_factor(self, total_mass_kg: float, has_trailer: bool) -> float:
@@ -529,6 +535,19 @@ class AccelToPedals:
         if not math.isfinite(error_ms2):
             error_ms2 = 0.0
 
+        deriv_alpha = self._estimate_alpha(dt, _DERIVATIVE_SMOOTHING_TAU_S)
+        if cruise_commanding:
+            error_deriv_raw = (error_ms2 - self._prev_error_ms2) / max(dt, 1e-6)
+            self._prev_error_ms2 = error_ms2
+            self._error_deriv_smooth = self._ema_step(
+                self._error_deriv_smooth, error_deriv_raw, deriv_alpha
+            )
+        else:
+            self._prev_error_ms2 = error_ms2
+            self._error_deriv_smooth = self._ema_step(self._error_deriv_smooth, 0.0, deriv_alpha)
+        deriv_coeff = _finite_or_zero(Settings.mapper_derivative_coeff)
+        derivative_correction = deriv_coeff * self._error_deriv_smooth if cruise_commanding else 0.0
+
         integral_coeff = _finite_or_zero(Settings.mapper_integral_coeff)
         integral_clamp = max(0.0, _finite_or_zero(Settings.mapper_integral_clamp))
         # Nonlinear integral: tanh compresses the integrand so the correction is
@@ -538,7 +557,11 @@ class AccelToPedals:
         ni_scale = max(_finite_or_zero(Settings.mapper_integral_nonlinear_scale), 0.05)
         integral_input = math.tanh(error_ms2 / ni_scale) * ni_scale
 
-        leak = math.exp(-dt / _INTEGRAL_LEAK_TAU_S)
+        sign_mismatch = (self._integral_correction > 0.0 and error_ms2 < 0.0) or (
+            self._integral_correction < 0.0 and error_ms2 > 0.0
+        )
+        leak_tau = _INTEGRAL_FAST_LEAK_TAU_S if sign_mismatch else _INTEGRAL_LEAK_TAU_S
+        leak = math.exp(-dt / leak_tau)
         accel_limited = cruise_commanding and base_signed > 0.0 and self._is_accel_control_limited(
             base_signed,
             throttle_applied,
@@ -553,7 +576,11 @@ class AccelToPedals:
             integral_clamp,
         )
 
-        drive_cmd = _clamp(base_signed - self._integral_correction, -1.0, 1.0)
+        drive_cmd = _clamp(
+            base_signed - self._integral_correction - derivative_correction,
+            -1.0,
+            1.0,
+        )
         if gear_dash == 0 and drive_cmd > 0.0:
             drive_cmd = 0.0
 

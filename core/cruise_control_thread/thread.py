@@ -37,6 +37,10 @@ _INTEGRAL_CLAMP_DEFAULT = 3.0
 _ACCEL_MIN_MS2_DEFAULT = -2.0
 _ACCEL_MAX_MS2_DEFAULT = 2.0
 
+# Low-pass time constant (s) for telemetry speed used only in the PID D-term.
+# Reduces derivative noise from game telemetry; P/I still use instantaneous speed.
+_CC_KD_SPEED_SMOOTH_TAU_S = 0.15
+
 
 @dataclass
 class CruiseControlThreadData(ThreadData):
@@ -70,7 +74,7 @@ class CruiseControlThread(BaseThread):
         self._long_press_start = False
 
         self._integral_error = 0.0
-        self._prev_speed_ms = 0.0
+        self._kd_smooth_speed_ms: float | None = None
         self._prev_loop_mono = time.monotonic()
         self._was_commanding = False
         self._last_target_for_integral: float | None = None
@@ -161,7 +165,7 @@ class CruiseControlThread(BaseThread):
                 commanding = True
             else:
                 self._integral_error = 0.0
-                self._prev_speed_ms = tel["speed_ms"]
+                self._kd_smooth_speed_ms = None
 
             self._publish_telemetry_command(wanted_accel if commanding else 0.0)
             self._publish_data(commanding, wanted_accel if commanding else 0.0)
@@ -377,8 +381,16 @@ class CruiseControlThread(BaseThread):
         self._integral_error += error_ms * dt
         self._integral_error = max(-clamp, min(clamp, self._integral_error))
 
-        speed_deriv = (speed_ms - self._prev_speed_ms) / dt
-        self._prev_speed_ms = speed_ms
+        raw_speed_ms = speed_ms
+        tau = _CC_KD_SPEED_SMOOTH_TAU_S
+        alpha = dt / (tau + dt) if tau > 0.0 else 1.0
+        if self._kd_smooth_speed_ms is None:
+            self._kd_smooth_speed_ms = raw_speed_ms
+            speed_deriv = 0.0
+        else:
+            prev_smooth = self._kd_smooth_speed_ms
+            self._kd_smooth_speed_ms = alpha * raw_speed_ms + (1.0 - alpha) * prev_smooth
+            speed_deriv = (self._kd_smooth_speed_ms - prev_smooth) / dt
 
         p_term = kp * error_ms
         i_term = ki * self._integral_error

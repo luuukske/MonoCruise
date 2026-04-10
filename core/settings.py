@@ -109,6 +109,7 @@ class Settings(metaclass=_SingletonMeta):
     mapper_integral_coeff: float = 1.0
     mapper_integral_clamp: float = 0.5
     mapper_integral_nonlinear_scale: float = 0.6  # m/s² — errors << this integrate near-linearly; errors >> this saturate
+    mapper_derivative_coeff: float = 0.15
 
     # Adaptive brake efficiency
     brake_efficiency_learning: bool = True
