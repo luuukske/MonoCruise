@@ -694,6 +694,7 @@ class AccelToPedals:
             control_wanted = 0.0
         else:
             control_wanted = self._wanted_smooth + road_load_accel
+            # base_signed from raw control_wanted — used only for accel_limited anti-windup gate.
             if control_wanted >= 0.0:
                 base_signed = _clamp(
                     control_wanted / max(self._estimated_max_accel_ms2, 1e-6),
@@ -752,8 +753,26 @@ class AccelToPedals:
             integral_clamp,
         )
 
+        # Integral applied in m/s² space before normalization: a correction of X m/s²
+        # has the same physical effect regardless of which pedal is active.
+        # Derivative stays in normalized space (small magnitude, no cross-zero issue).
+        if cruise_commanding:
+            control_wanted_adj = control_wanted - self._integral_correction
+            if control_wanted_adj >= 0.0:
+                base_signed = _clamp(
+                    control_wanted_adj / max(self._estimated_max_accel_ms2, 1e-6),
+                    0.0,
+                    1.0,
+                )
+            else:
+                base_signed = -_clamp(
+                    (-control_wanted_adj) / max(self._estimated_max_brake_ms2, 1e-6),
+                    0.0,
+                    1.0,
+                )
+
         drive_cmd = _clamp(
-            base_signed - self._integral_correction - derivative_correction,
+            base_signed - derivative_correction,
             -1.0,
             1.0,
         )
