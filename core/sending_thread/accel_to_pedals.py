@@ -97,6 +97,19 @@ def _finite_or_zero(value: object) -> float:
     return result
 
 
+def _weight_factor(total_mass_kg: float, has_trailer: bool) -> float:
+    if not Settings.weight_adjustment:
+        return 1.0
+    current_tons = max(0.0, _finite_or_zero(total_mass_kg)) / 1000.0
+    factor = 1.0 + (
+        ((current_tons - _REFERENCE_MASS_TONS) / _WEIGHT_SPAN_TONS) * _WEIGHT_STRENGTH
+    )
+    factor = _clamp(factor, _WEIGHT_MIN_FACTOR, _WEIGHT_MAX_FACTOR)
+    if has_trailer:
+        factor = min(_WEIGHT_MAX_FACTOR, factor * _TRAILER_WEIGHT_BIAS)
+    return factor
+
+
 def baseline_accel_ms2(total_mass_kg: float, has_trailer: bool) -> float:
     """Expected max acceleration (m/s²) at gas=1.0, adjusted for mass/trailer."""
     base = max(_MIN_ACCEL_ESTIMATE_MS2, _finite_or_zero(Settings.mapper_accel_scale_ms2))
@@ -217,17 +230,7 @@ class AccelToPedals:
         self._prev_mono = None
 
     def _weight_factor(self, total_mass_kg: float, has_trailer: bool) -> float:
-        if not Settings.weight_adjustment:
-            return 1.0
-
-        current_tons = max(0.0, _finite_or_zero(total_mass_kg)) / 1000.0
-        factor = 1.0 + (
-            ((current_tons - _REFERENCE_MASS_TONS) / _WEIGHT_SPAN_TONS) * _WEIGHT_STRENGTH
-        )
-        factor = _clamp(factor, _WEIGHT_MIN_FACTOR, _WEIGHT_MAX_FACTOR)
-        if has_trailer:
-            factor = min(_WEIGHT_MAX_FACTOR, factor * _TRAILER_WEIGHT_BIAS)
-        return factor
+        return _weight_factor(total_mass_kg, has_trailer)
 
     def _baseline_accel_estimate(self, total_mass_kg: float, has_trailer: bool) -> float:
         base = max(_MIN_ACCEL_ESTIMATE_MS2, _finite_or_zero(Settings.mapper_accel_scale_ms2))
