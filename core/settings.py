@@ -118,6 +118,10 @@ class Settings(metaclass=_SingletonMeta):
     brake_efficiency_alpha: float = 0.05
     brake_efficiency_warn_ratio: float = 0.75
 
+    # PedalCapacityTracker — persisted estimates (0 = use baseline on next startup)
+    pedal_capacity_max_brake_ms2: float = 0.0
+    pedal_capacity_max_accel_ms2: float = 0.0
+
     _saved_state: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     _state_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
 

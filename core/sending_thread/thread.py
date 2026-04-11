@@ -21,8 +21,8 @@ from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 from core.settings import Settings
 
-from .accel_to_pedals import AccelToPedals
-from .brake_efficiency import BrakeEfficiencyTracker
+from .accel_to_pedals import AccelToPedals, baseline_accel_ms2, baseline_brake_ms2
+from .pedal_capacity import PedalCapacityTracker
 from .scscontroller import SCSController
 from .visualization_bar import VisualizationBar
 
@@ -97,7 +97,7 @@ class SendingThread(BaseThread):
         self._hazard_user_override: bool = False
         self._prev_tel_hazards: bool = False
         self._accel_mapper = AccelToPedals()
-        self._brake_tracker = BrakeEfficiencyTracker()
+        self._capacity_tracker = PedalCapacityTracker()
         self._key_listener = None
         self._spd_smooth: float | None = None
         self._prev_spd_mono: float | None = None
@@ -165,6 +165,11 @@ class SendingThread(BaseThread):
         self._last_should_force = False
         self._hazard_user_override = False
         self._prev_tel_hazards = False
+
+        self._capacity_tracker.load_persisted(
+            baseline_brake=baseline_brake_ms2(0.0, False),
+            baseline_accel=baseline_accel_ms2(0.0, False),
+        )
 
         if self._controller is not None:
             logger.debug("SCSController initialised")
@@ -272,6 +277,10 @@ class SendingThread(BaseThread):
         wanted_a = 0.0
         raw_a = 0.0
         measured_decel_ms2 = 0.0
+        mass_kg = 0.0
+        has_t = False
+        brake_grade_rad = 0.0
+        game_clutch = 0.0
         if connected and tel_thread is not None and tel_thread.is_alive():
             try:
                 with tel_thread.data._lock:
@@ -306,6 +315,8 @@ class SendingThread(BaseThread):
                     spd_ms,
                     mass_kg,
                     has_t,
+                    max_accel_ms2=self._capacity_tracker.max_accel_ms2,
+                    max_brake_ms2=self._capacity_tracker.max_brake_ms2,
                     road_pitch_deg=road_pitch_deg,
                     cruise_commanding=cruise_active,
                     gear_dashboard=tel_gear_dashboard,
@@ -334,19 +345,6 @@ class SendingThread(BaseThread):
                 brake_grade_rad = 0.0
             else:
                 brake_grade_rad = float(mapper_slope_input_rad)
-
-            # Update brake efficiency tracker only during cruise-commanded braking.
-            if cruise_active and mapper_command_brake > 0.05:
-                self._brake_tracker.update(
-                    mapper_command_brake,
-                    measured_decel_ms2,
-                    speed_ms,
-                    brake_grade_rad,
-                    wheels_on_ground=wheels_on_ground,
-                    mass_kg=mass_kg,
-                )
-            if cruise_active:
-                self._brake_tracker.check_warnings()
 
         speed_kmh = speed_ms * 3.6
         if connected:
@@ -513,6 +511,20 @@ class SendingThread(BaseThread):
 
         controller.aforward = a
         controller.abackward = b
+
+        # Update pedal capacity estimates from actual pedal values sent to the game.
+        _base_brake = baseline_brake_ms2(0.0, False)
+        _base_accel = baseline_accel_ms2(mass_kg, has_t)
+        if b > 0.01:
+            self._capacity_tracker.update_brake(
+                b, measured_decel_ms2, speed_ms, brake_grade_rad, _base_brake,
+                road_load_ms2=mapper_road_load_ms2,
+            )
+        if a > 0.01:
+            self._capacity_tracker.update_accel(
+                a, max(0.0, raw_a), speed_ms, brake_grade_rad, _base_accel, game_clutch,
+                road_load_ms2=mapper_road_load_ms2,
+            )
 
         self._tick_bool_presses(controller)
 

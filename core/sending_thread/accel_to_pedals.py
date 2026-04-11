@@ -612,6 +612,8 @@ class AccelToPedals:
         total_mass_kg: float,
         has_trailer: bool,
         *,
+        max_accel_ms2: float = 0.0,
+        max_brake_ms2: float = 0.0,
         cruise_commanding: bool = False,
         road_pitch_deg: float = 0.0,
         gear_dashboard: int = 0,
@@ -653,6 +655,14 @@ class AccelToPedals:
             self._estimated_max_accel_ms2 = baseline_accel_ms2
         if not self._estimated_max_brake_ms2 or not math.isfinite(self._estimated_max_brake_ms2):
             self._estimated_max_brake_ms2 = baseline_brake_ms2
+
+        # External capacity estimates override internal ones.
+        # Gas: weight-normalize so the mapper scales correctly with current load.
+        # Brake: use as-is — brake capability is independent of vehicle weight.
+        if max_accel_ms2 > 0.0 and math.isfinite(max_accel_ms2):
+            self._estimated_max_accel_ms2 = max_accel_ms2 / max(_weight_factor(total_mass_kg, has_trailer), 1e-6)
+        if max_brake_ms2 > 0.0 and math.isfinite(max_brake_ms2):
+            self._estimated_max_brake_ms2 = max_brake_ms2
 
         if not cruise_commanding:
             decay = math.exp(-dt / _IDLE_CORRECTION_DECAY_TAU_S)
