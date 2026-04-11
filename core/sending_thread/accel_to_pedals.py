@@ -97,6 +97,26 @@ def _finite_or_zero(value: object) -> float:
     return result
 
 
+def baseline_accel_ms2(total_mass_kg: float, has_trailer: bool) -> float:
+    """Expected max acceleration (m/s²) at gas=1.0, adjusted for mass/trailer."""
+    base = max(_MIN_ACCEL_ESTIMATE_MS2, _finite_or_zero(Settings.mapper_accel_scale_ms2))
+    return _clamp(
+        base / max(_weight_factor(total_mass_kg, has_trailer), 1e-6),
+        _MIN_ACCEL_ESTIMATE_MS2,
+        _MAX_ACCEL_ESTIMATE_MS2,
+    )
+
+
+def baseline_brake_ms2(total_mass_kg: float, has_trailer: bool) -> float:
+    """Expected max deceleration (m/s²) at brake=1.0, adjusted for mass/trailer."""
+    base = max(_MIN_BRAKE_ESTIMATE_MS2, _finite_or_zero(Settings.mapper_brake_scale_ms2))
+    return _clamp(
+        base / max(_weight_factor(total_mass_kg, has_trailer), 1e-6),
+        _MIN_BRAKE_ESTIMATE_MS2,
+        _MAX_BRAKE_ESTIMATE_MS2,
+    )
+
+
 def compute_estimated_mass_kg(
     unit_mass_kg: float,
     cargo_mass_kg: float,
