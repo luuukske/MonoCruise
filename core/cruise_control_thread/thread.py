@@ -41,6 +41,10 @@ _ACCEL_MAX_MS2_DEFAULT = 2.0
 # Reduces derivative noise from game telemetry; P/I still use instantaneous speed.
 _CC_KD_SPEED_SMOOTH_TAU_S = 0.15
 
+# EMA time constant (s) for the final commanded acceleration sent to telemetry.
+# Slower than KD smoothing so pedal commands change gradually.
+_CC_OUTPUT_EMA_TAU_S = 0.40
+
 
 @dataclass
 class CruiseControlThreadData(ThreadData):
@@ -80,6 +84,7 @@ class CruiseControlThread(BaseThread):
         self._last_target_for_integral: float | None = None
         self._last_assign_warn_mono: float = 0.0
         self._last_block_msg_mono: float = 0.0
+        self._output_ema_accel_ms2: float | None = None
 
     def setup(self) -> None:
         self._prev_loop_mono = time.monotonic()
@@ -159,6 +164,7 @@ class CruiseControlThread(BaseThread):
                 wanted_accel = self._speed_to_accel(tel, dt)
                 if self._acc_should_cap():
                     wanted_accel = min(wanted_accel, self._acc.accel_cap_ms2())
+                wanted_accel = self._smooth_output_accel_ema(wanted_accel, dt)
                 accel_min = float(Settings.cc_accel_min_ms2)
                 accel_max = float(Settings.cc_accel_max_ms2)
                 wanted_accel = max(accel_min, min(accel_max, wanted_accel))
@@ -166,6 +172,7 @@ class CruiseControlThread(BaseThread):
             else:
                 self._integral_error = 0.0
                 self._kd_smooth_speed_ms = None
+                self._output_ema_accel_ms2 = None
 
             self._publish_telemetry_command(wanted_accel if commanding else 0.0)
             self._publish_data(commanding, wanted_accel if commanding else 0.0)
@@ -401,6 +408,17 @@ class CruiseControlThread(BaseThread):
             error_ms, p_term, i_term, d_term, self._integral_error, p_term + i_term + d_term,
         )
         return p_term + i_term + d_term
+
+    def _smooth_output_accel_ema(self, raw_ms2: float, dt: float) -> float:
+        tau = _CC_OUTPUT_EMA_TAU_S
+        alpha = dt / (tau + dt) if tau > 0.0 else 1.0
+        if self._output_ema_accel_ms2 is None:
+            self._output_ema_accel_ms2 = raw_ms2
+        else:
+            self._output_ema_accel_ms2 = (
+                alpha * raw_ms2 + (1.0 - alpha) * self._output_ema_accel_ms2
+            )
+        return self._output_ema_accel_ms2
 
     def _publish_telemetry_command(self, wanted_accel_ms2: float) -> None:
         if not math.isfinite(wanted_accel_ms2):

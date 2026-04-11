@@ -12,6 +12,7 @@ Responsibilities:
 """
 
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 import threading
@@ -98,6 +99,8 @@ class SendingThread(BaseThread):
         self._accel_mapper = AccelToPedals()
         self._brake_tracker = BrakeEfficiencyTracker()
         self._key_listener = None
+        self._spd_smooth: float | None = None
+        self._prev_spd_mono: float | None = None
 
     def toggle_bool(self, name: str, duration: float = BOOL_PRESS_DURATION) -> None:
         """One-shot timed press: set *name* True for *duration* seconds, then False."""
@@ -273,7 +276,6 @@ class SendingThread(BaseThread):
             try:
                 with tel_thread.data._lock:
                     wanted_a = float(tel_thread.data.commanded_accel_ms2)
-                    raw_a = float(tel_thread.data.lv_accelerationX)
                     mass_kg = float(tel_thread.data.estimated_total_mass_kg)
                     spd_ms = float(tel_thread.data.speed)
                     has_t = bool(tel_thread.data.ego_has_trailer)
@@ -282,6 +284,21 @@ class SendingThread(BaseThread):
                     tel_gear_dashboard = int(tel_thread.data.gear_dashboard)
                     game_throttle = float(tel_thread.data.gameThrottle)
                     game_clutch = float(tel_thread.data.gameClutch)
+                now_spd = time.monotonic()
+                if self._spd_smooth is None:
+                    self._spd_smooth = spd_ms
+                    raw_a = 0.0
+                else:
+                    # Tracking differentiator: acceleration = (speed - smoothed_speed) / tau.
+                    # Differentiating the EMA residual gives a clean longitudinal signal that
+                    # is immune to lateral/centripetal contamination and insensitive to the
+                    # game's discrete physics-tick speed steps.
+                    _TAU = 0.30
+                    raw_a = (spd_ms - self._spd_smooth) / _TAU
+                    dt_spd = now_spd - self._prev_spd_mono if self._prev_spd_mono else 0.02
+                    alpha = 1.0 - math.exp(-max(dt_spd, 1e-4) / _TAU)
+                    self._spd_smooth += alpha * (spd_ms - self._spd_smooth)
+                self._prev_spd_mono = now_spd
                 measured_decel_ms2 = max(0.0, -raw_a)
                 targets = self._accel_mapper.step(
                     wanted_a,
@@ -373,6 +390,8 @@ class SendingThread(BaseThread):
 
 
         if not connected:
+            self._spd_smooth = None
+            self._prev_spd_mono = None
             controller.aforward = 0.0
             controller.abackward = 0.0
             with self.data._lock:
