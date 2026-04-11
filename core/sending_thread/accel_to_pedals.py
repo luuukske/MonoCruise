@@ -68,6 +68,20 @@ _BRAKE_MAP_POWER: float = 0.8518
 _GAS_MAP_RATE: float = 0.0
 _GAS_MAP_POWER: float = 1.0
 
+# Pedal sensitivity learning — slow EMA tracks measured/expected response ratio independently
+# per pedal.  Only sampled on flat roads, adequate speed, and while the standard integral is
+# small (which guards against slope / mass transients polluting the signal).
+_SENSITIVITY_TAU_S: float = 10.0
+_MIN_SENSITIVITY: float = 0.60
+_MAX_SENSITIVITY: float = 1.65
+_SENSITIVITY_SAMPLE_PEDAL: float = 0.25      # min raw pedal to qualify for a sample
+_SENSITIVITY_MIN_EXPECTED_MS2: float = 0.30  # ignore samples where expected response is tiny
+_SENSITIVITY_MAX_INTEGRAL_GUARD: float = 0.15  # skip update when integral is actively correcting
+_SENSITIVITY_SAVE_THRESHOLD: float = 0.04   # save immediately when value drifts this far
+_SENSITIVITY_SAVE_COOLDOWN_S: float = 30.0  # minimum seconds between successive writes
+_SENSITIVITY_STABLE_PERIOD_S: float = 60.0  # seconds between stability snapshots
+_SENSITIVITY_STABLE_DELTA: float = 0.01     # max drift over stable period to count as settled
+
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
@@ -132,6 +146,8 @@ class PedalTargets:
     estimated_max_accel_ms2: float = 0.0
     estimated_max_brake_ms2: float = 0.0
     accel_limited: bool = False
+    accel_sensitivity: float = 1.0
+    brake_sensitivity: float = 1.0
 
 
 class AccelToPedals:
@@ -149,6 +165,18 @@ class AccelToPedals:
         self._project_root = Path(__file__).resolve().parents[2]
         self._last_accel_log_mono: float = 0.0
         self._last_brake_log_mono: float = 0.0
+
+        # Pedal sensitivity — loaded from persisted settings; default 1.0 (neutral).
+        _sa = _finite_or_zero(Settings.mapper_accel_sensitivity)
+        _sb = _finite_or_zero(Settings.mapper_brake_sensitivity)
+        self._accel_sensitivity: float = _sa if _MIN_SENSITIVITY <= _sa <= _MAX_SENSITIVITY else 1.0
+        self._brake_sensitivity: float = _sb if _MIN_SENSITIVITY <= _sb <= _MAX_SENSITIVITY else 1.0
+        self._saved_accel_sensitivity: float = self._accel_sensitivity
+        self._saved_brake_sensitivity: float = self._brake_sensitivity
+        self._last_sensitivity_save_mono: float = 0.0
+        self._sensitivity_stable_check_mono: float | None = None
+        self._sensitivity_stable_snap_accel: float = self._accel_sensitivity
+        self._sensitivity_stable_snap_brake: float = self._brake_sensitivity
 
     def close(self) -> None:
         if self._log_file is None:
@@ -382,6 +410,122 @@ class AccelToPedals:
         alpha = self._estimate_alpha(dt, tau_s)
         return estimate + alpha * (candidate - estimate)
 
+    def _maybe_update_accel_sensitivity(
+        self,
+        dt: float,
+        speed_ms: float,
+        grade_unc_rad: float,
+        road_load_ms2: float,
+        raw_gas: float,
+    ) -> None:
+        """Update accel sensitivity EMA from pre-sensitivity gas pedal vs measured response."""
+        if abs(grade_unc_rad) > _MAX_ESTIMATE_SLOPE_RAD:
+            return
+        if speed_ms < _MIN_ACCEL_SAMPLE_SPEED_MS:
+            return
+        if raw_gas < _SENSITIVITY_SAMPLE_PEDAL:
+            return
+        if self._wanted_smooth < _MIN_ACCEL_SAMPLE_MS2 * 0.5:
+            return
+        if abs(self._integral_correction) > _SENSITIVITY_MAX_INTEGRAL_GUARD:
+            return
+        if self._estimated_max_accel_ms2 is None:
+            return
+        measured_accel = max(
+            0.0, self._measured_control_accel_ms2(self._raw_smooth, road_load_ms2)
+        )
+        expected_accel = raw_gas * self._estimated_max_accel_ms2
+        if expected_accel < _SENSITIVITY_MIN_EXPECTED_MS2:
+            return
+        ratio = _clamp(measured_accel / expected_accel, _MIN_SENSITIVITY, _MAX_SENSITIVITY)
+        alpha = self._estimate_alpha(dt, _SENSITIVITY_TAU_S)
+        self._accel_sensitivity += alpha * (ratio - self._accel_sensitivity)
+        self._accel_sensitivity = _clamp(self._accel_sensitivity, _MIN_SENSITIVITY, _MAX_SENSITIVITY)
+
+    def _maybe_update_brake_sensitivity(
+        self,
+        dt: float,
+        speed_ms: float,
+        grade_unc_rad: float,
+        road_load_ms2: float,
+        raw_brake: float,
+    ) -> None:
+        """Update brake sensitivity EMA from pre-sensitivity brake pedal vs measured response."""
+        if abs(grade_unc_rad) > _MAX_ESTIMATE_SLOPE_RAD:
+            return
+        if speed_ms < _MIN_BRAKE_SAMPLE_SPEED_MS:
+            return
+        if raw_brake < _SENSITIVITY_SAMPLE_PEDAL:
+            return
+        if self._wanted_smooth > -_MIN_BRAKE_SAMPLE_MS2 * 0.5:
+            return
+        if abs(self._integral_correction) > _SENSITIVITY_MAX_INTEGRAL_GUARD:
+            return
+        if self._estimated_max_brake_ms2 is None:
+            return
+        measured_decel = max(
+            0.0, -self._measured_control_accel_ms2(self._raw_smooth, road_load_ms2)
+        )
+        expected_decel = raw_brake * self._estimated_max_brake_ms2
+        if expected_decel < _SENSITIVITY_MIN_EXPECTED_MS2:
+            return
+        ratio = _clamp(measured_decel / expected_decel, _MIN_SENSITIVITY, _MAX_SENSITIVITY)
+        alpha = self._estimate_alpha(dt, _SENSITIVITY_TAU_S)
+        self._brake_sensitivity += alpha * (ratio - self._brake_sensitivity)
+        self._brake_sensitivity = _clamp(self._brake_sensitivity, _MIN_SENSITIVITY, _MAX_SENSITIVITY)
+
+    def _maybe_save_sensitivity(self, now: float) -> None:
+        """Persist sensitivity values to Settings when a large change or stability is detected."""
+        if not math.isfinite(now):
+            return
+        # Bootstrap: record initial snapshot without triggering a save.
+        if self._sensitivity_stable_check_mono is None:
+            self._sensitivity_stable_check_mono = now
+            self._sensitivity_stable_snap_accel = self._accel_sensitivity
+            self._sensitivity_stable_snap_brake = self._brake_sensitivity
+            return
+
+        large_change = (
+            abs(self._accel_sensitivity - self._saved_accel_sensitivity) > _SENSITIVITY_SAVE_THRESHOLD
+            or abs(self._brake_sensitivity - self._saved_brake_sensitivity) > _SENSITIVITY_SAVE_THRESHOLD
+        )
+        stable = False
+        if now - self._sensitivity_stable_check_mono >= _SENSITIVITY_STABLE_PERIOD_S:
+            stable = (
+                abs(self._accel_sensitivity - self._sensitivity_stable_snap_accel)
+                <= _SENSITIVITY_STABLE_DELTA
+                and abs(self._brake_sensitivity - self._sensitivity_stable_snap_brake)
+                <= _SENSITIVITY_STABLE_DELTA
+            )
+            self._sensitivity_stable_snap_accel = self._accel_sensitivity
+            self._sensitivity_stable_snap_brake = self._brake_sensitivity
+            self._sensitivity_stable_check_mono = now
+
+        anything_new = (
+            abs(self._accel_sensitivity - self._saved_accel_sensitivity) > 1e-5
+            or abs(self._brake_sensitivity - self._saved_brake_sensitivity) > 1e-5
+        )
+        if (
+            anything_new
+            and (large_change or stable)
+            and now - self._last_sensitivity_save_mono >= _SENSITIVITY_SAVE_COOLDOWN_S
+        ):
+            try:
+                Settings.save(values={
+                    "mapper_accel_sensitivity": round(self._accel_sensitivity, 4),
+                    "mapper_brake_sensitivity": round(self._brake_sensitivity, 4),
+                })
+            except Exception:
+                logger.debug("pedal sensitivity save failed", exc_info=True)
+            self._saved_accel_sensitivity = self._accel_sensitivity
+            self._saved_brake_sensitivity = self._brake_sensitivity
+            self._last_sensitivity_save_mono = now
+            logger.debug(
+                "pedal sensitivity saved: accel=%.3f brake=%.3f",
+                self._accel_sensitivity,
+                self._brake_sensitivity,
+            )
+
     def _maybe_update_accel_estimate(
         self,
         dt: float,
@@ -583,17 +727,34 @@ class AccelToPedals:
         if gear_dash == 0 and drive_cmd > 0.0:
             drive_cmd = 0.0
 
-        command_gas = self._pedal_from_linear_saturating_response(
+        # Raw pedal demand (before sensitivity correction) — used as the sensitivity error signal.
+        raw_gas = self._pedal_from_linear_saturating_response(
             max(0.0, drive_cmd),
             _GAS_MAP_RATE,
             _GAS_MAP_POWER,
         )
-        command_brake_linear = max(0.0, -drive_cmd)
-        command_brake = self._pedal_from_linear_saturating_response(
-            command_brake_linear,
+        raw_brake = self._pedal_from_linear_saturating_response(
+            max(0.0, -drive_cmd),
             _BRAKE_MAP_RATE,
             _BRAKE_MAP_POWER,
         )
+
+        # Update sensitivity integrals from pre-correction pedal vs measured response.
+        if cruise_commanding:
+            if not accel_limited:
+                self._maybe_update_accel_sensitivity(
+                    dt, speed, grade_unc_rad, road_load_accel, raw_gas
+                )
+            self._maybe_update_brake_sensitivity(
+                dt, speed, grade_unc_rad, road_load_accel, raw_brake
+            )
+        self._maybe_save_sensitivity(now if math.isfinite(now) else 0.0)
+
+        # Apply sensitivity: scale up pedal when response is weaker than modelled,
+        # scale down when stronger.  Capability estimates use the corrected pedal
+        # so they stay consistent with what the game actually receives.
+        command_gas = _clamp(raw_gas / max(self._accel_sensitivity, _MIN_SENSITIVITY), 0.0, 1.0)
+        command_brake = _clamp(raw_brake / max(self._brake_sensitivity, _MIN_SENSITIVITY), 0.0, 1.0)
 
         if cruise_commanding:
             if not accel_limited:
@@ -679,4 +840,6 @@ class AccelToPedals:
             estimated_max_accel_ms2=self._estimated_max_accel_ms2,
             estimated_max_brake_ms2=self._estimated_max_brake_ms2,
             accel_limited=accel_limited,
+            accel_sensitivity=self._accel_sensitivity,
+            brake_sensitivity=self._brake_sensitivity,
         )

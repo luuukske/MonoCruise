@@ -65,6 +65,8 @@ class SendingThreadData(ThreadData):
     mapper_command_brake: float = 0.0
     mapper_accel_limited: bool = False
     mapper_cruise_active: bool = False
+    mapper_accel_sensitivity: float = 1.0
+    mapper_brake_sensitivity: float = 1.0
     _lock: threading.Lock = field(
         default_factory=threading.Lock, repr=False, compare=False
     )
@@ -262,6 +264,8 @@ class SendingThread(BaseThread):
         mapper_est_max_accel_ms2 = 0.0
         mapper_est_max_brake_ms2 = 0.0
         mapper_accel_limited = False
+        mapper_accel_sensitivity = 1.0
+        mapper_brake_sensitivity = 1.0
         wanted_a = 0.0
         raw_a = 0.0
         measured_decel_ms2 = 0.0
@@ -306,6 +310,8 @@ class SendingThread(BaseThread):
                 mapper_est_max_accel_ms2 = float(targets.estimated_max_accel_ms2)
                 mapper_est_max_brake_ms2 = float(targets.estimated_max_brake_ms2)
                 mapper_accel_limited = bool(targets.accel_limited)
+                mapper_accel_sensitivity = float(targets.accel_sensitivity)
+                mapper_brake_sensitivity = float(targets.brake_sensitivity)
             except Exception as e:
                 logger.debug("accel_mapper step failed: %s", e)
                 brake_grade_rad = 0.0
@@ -516,6 +522,8 @@ class SendingThread(BaseThread):
             self.data.mapper_command_brake = mapper_command_brake
             self.data.mapper_accel_limited = mapper_accel_limited
             self.data.mapper_cruise_active = cruise_active
+            self.data.mapper_accel_sensitivity = mapper_accel_sensitivity
+            self.data.mapper_brake_sensitivity = mapper_brake_sensitivity
 
     def teardown(self) -> None:
         if self._key_listener is not None:
