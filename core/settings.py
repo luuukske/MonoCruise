@@ -67,27 +67,27 @@ class Settings(metaclass=_SingletonMeta):
     # Pedal configuration
     gas_exponent_variable: float = None
     brake_exponent_variable: float = None
-    weight_adjustment: bool = False
+    weight_adjustment: bool = True
     polling_rate: int = 100 # fps
 
     # OPD
-    max_opd_brake_variable: float = 0.0
+    max_opd_brake_variable: float = 0.04
     opd_mode_variable: int = 0
-    offset_variable: float = 0.0
+    offset_variable: float = 0.25
 
     # Safety & warnings
     hazards_variable: bool = True
     autodisable_hazards: bool = True
-    horn_variable: bool = False
-    airhorn_variable: bool = False
+    horn_variable: bool = True
+    airhorn_variable: bool = True
     autostart_variable: bool = True
-    AEB_enabled: bool = False
+    AEB_enabled: bool = True
 
     # Cruise/ACC/Custom buttons
     cc_dec_button: object = None
     cc_inc_button: object = None
     cc_start_button: object = None
-    cc_mode: str = "ACC"
+    cc_mode: str = "Cruise control"
     acc_enabled: object = None
     long_increments: int = 1
     short_increments: int = 5
@@ -96,21 +96,21 @@ class Settings(metaclass=_SingletonMeta):
     # PID tuning (cruise_control_thread) — defaults aligned with config.json
     cc_kp: float = 0.9
     cc_ki: float = 0.0
-    cc_kd: float = 0.8
+    cc_kd: float = 0.2
     cc_integral_clamp: float = 3.0
-    cc_accel_max_ms2: float = 0.8
-    cc_accel_min_ms2: float = -0.3
+    cc_accel_max_ms2: float = 1.5
+    cc_accel_min_ms2: float = -1.0
 
     # AccelToPedals tuning. Weight baselines and smoothing constants stay fixed in code.
-    mapper_accel_scale_ms2: float = 3.5
+    mapper_accel_scale_ms2: float = 1.0
     mapper_brake_scale_ms2: float = 6.5
     mapper_brake_exponent: float = 2.5
     mapper_rolling_resistance: float = 0.07
-    mapper_integral_coeff: float = 1.0
-    mapper_integral_clamp: float = 1.5  # m/s² — integral applied in physical space before pedal normalisation
+    mapper_integral_coeff: float = 0.7
+    mapper_integral_clamp: float = 0.9  # m/s² — integral applied in physical space before pedal normalisation
     mapper_integral_nonlinear_scale: float = 0.6  # m/s² — errors << this integrate near-linearly; errors >> this saturate
-    mapper_derivative_coeff: float = 0.15
-    mapper_accel_sensitivity: float = 1.0   # learned gas-pedal response ratio (persisted)
+    mapper_derivative_coeff: float = 0.25
+    mapper_accel_sensitivity: float = 0.9051   # learned gas-pedal response ratio (persisted)
     mapper_brake_sensitivity: float = 1.0   # learned brake-pedal response ratio (persisted)
 
     # Adaptive brake efficiency
@@ -119,8 +119,8 @@ class Settings(metaclass=_SingletonMeta):
     brake_efficiency_warn_ratio: float = 0.75
 
     # PedalCapacityTracker — persisted estimates (0 = use baseline on next startup)
-    pedal_capacity_max_brake_ms2: float = 0.0
-    pedal_capacity_max_accel_ms2: float = 0.0
+    pedal_capacity_max_brake_ms2: float = 4.451
+    pedal_capacity_max_accel_ms2: float = 2.12
 
     _saved_state: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     _state_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
