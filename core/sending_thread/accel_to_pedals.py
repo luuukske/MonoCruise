@@ -28,6 +28,7 @@ _WANTED_SMOOTHING_TAU_S: float = 0.05
 _RAW_SMOOTHING_TAU_S: float = 0.10
 _INTEGRAL_LEAK_TAU_S: float = 8.0
 _INTEGRAL_FAST_LEAK_TAU_S: float = 0.60
+_INTEGRAL_RECOVERY_TAU_S: float = 0.5
 _DERIVATIVE_SMOOTHING_TAU_S: float = 0.12
 _IDLE_CORRECTION_DECAY_TAU_S: float = 0.12
 
@@ -211,6 +212,10 @@ class AccelToPedals:
         self._sensitivity_stable_snap_accel: float = self._accel_sensitivity
         self._sensitivity_stable_snap_brake: float = self._brake_sensitivity
 
+        # Gearshift integral blocking state
+        self._gearshift_start_mono: float | None = None
+        self._integral_block_end_mono: float | None = None
+
     def close(self) -> None:
         if self._log_file is None:
             return
@@ -228,6 +233,8 @@ class AccelToPedals:
         self._prev_error_ms2 = 0.0
         self._error_deriv_smooth = 0.0
         self._prev_mono = None
+        self._gearshift_start_mono = None
+        self._integral_block_end_mono = None
 
     def _weight_factor(self, total_mass_kg: float, has_trailer: bool) -> float:
         return _weight_factor(total_mass_kg, has_trailer)
@@ -744,9 +751,25 @@ class AccelToPedals:
             throttle_applied,
             clutch_applied,
         )
+
+        # Calculate integral update factor: blocked during shift, gradually re-enabled after.
+        integral_update_factor = 1.0
+        now_safe = now if math.isfinite(now) else 0.0
+        if self._integral_block_end_mono is not None:
+            if now_safe < self._integral_block_end_mono:
+                # Still in blocking phase
+                integral_update_factor = 0.0
+            else:
+                # Recovery phase: exponentially fade in from 0 to 1
+                time_since_unblock = now_safe - self._integral_block_end_mono
+                integral_update_factor = 1.0 - math.exp(-time_since_unblock / _INTEGRAL_RECOVERY_TAU_S)
+                if integral_update_factor > 0.99:
+                    # Fully recovered, stop tracking
+                    self._integral_block_end_mono = None
+
         self._integral_correction *= leak
         if cruise_commanding and not accel_limited:
-            self._integral_correction += integral_coeff * integral_input * dt
+            self._integral_correction += integral_coeff * integral_input * integral_update_factor * dt
         self._integral_correction = _clamp(
             self._integral_correction,
             -integral_clamp,
@@ -807,6 +830,18 @@ class AccelToPedals:
         # so they stay consistent with what the game actually receives.
         command_gas = _clamp(raw_gas / max(self._accel_sensitivity, _MIN_SENSITIVITY), 0.0, 1.0)
         command_brake = _clamp(raw_brake / max(self._brake_sensitivity, _MIN_SENSITIVITY), 0.0, 1.0)
+
+        # Detect gearshift and block integral learning to prevent windup from engine
+        # disconnection (clutch disengagement). Gradually re-enable learning after shift.
+        now_safe = now if math.isfinite(now) else 0.0
+        if clutch_applied > 0.05:
+            if self._integral_block_end_mono is None:
+                # Shift just detected, block integral for 0.5s after shift completes
+                self._integral_block_end_mono = now_safe + 0.5
+            self._gearshift_start_mono = now_safe
+        else:
+            # Clutch released
+            self._gearshift_start_mono = None
 
         if cruise_commanding:
             if not accel_limited:
