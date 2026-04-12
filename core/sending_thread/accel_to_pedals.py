@@ -26,7 +26,7 @@ _TRAILER_WEIGHT_BIAS: float = 1.02
 
 _WANTED_SMOOTHING_TAU_S: float = 0.05
 _RAW_SMOOTHING_TAU_S: float = 0.10
-_INTEGRAL_LEAK_TAU_S: float = 8.0
+_INTEGRAL_LEAK_TAU_S: float = 1.0
 _INTEGRAL_FAST_LEAK_TAU_S: float = 0.60
 _INTEGRAL_RECOVERY_TAU_S: float = 0.5
 _DERIVATIVE_SMOOTHING_TAU_S: float = 0.12
@@ -35,10 +35,10 @@ _IDLE_CORRECTION_DECAY_TAU_S: float = 0.12
 _ESTIMATE_DROP_TAU_S: float = 0.10
 _ESTIMATE_RISE_TAU_S: float = 0.60
 _MAX_ESTIMATE_SLOPE_RAD: float = 0.2
-_MIN_SAMPLE_PEDAL: float = 0.35
-_SAMPLE_PEDAL_FLOOR: float = 0.25
+_MIN_SAMPLE_PEDAL: float = 0.10
+_SAMPLE_PEDAL_FLOOR: float = 0.08
 
-_MIN_ACCEL_SAMPLE_MS2: float = 1.2
+_MIN_ACCEL_SAMPLE_MS2: float = 0.05
 _MIN_BRAKE_SAMPLE_MS2: float = 2.2
 _MIN_ACCEL_SAMPLE_SPEED_MS: float = 3.0
 _MIN_BRAKE_SAMPLE_SPEED_MS: float = 5.0
@@ -51,6 +51,37 @@ _MIN_BRAKE_ESTIMATE_MS2: float = 2.0
 _MAX_BRAKE_ESTIMATE_MS2: float = 10.0
 
 _TUNING_LOG_NAME: str = "accel_to_pedals_tuning.csv"
+_DEBUG_LOG_NAME: str = "accel_to_pedals_debug.csv"
+_DEBUG_LOG_HEADER_ROW: list[str] = [
+    "t_s",
+    "utc",
+    "speed_ms",
+    "gear",
+    "gearshift_active",
+    "wanted_ms2",
+    "wanted_smooth",
+    "raw_ms2",
+    "raw_smooth",
+    "error_ms2",
+    "road_load_ms2",
+    "control_wanted_ms2",
+    "integral_correction",
+    "integral_clamped",
+    "integral_factor",
+    "derivative_correction",
+    "drive_cmd",
+    "gas_cmd",
+    "brake_cmd",
+    "game_throttle",
+    "game_clutch",
+    "accel_limited",
+    "est_accel_ms2",
+    "est_brake_ms2",
+    "accel_sensitivity",
+    "brake_sensitivity",
+    "slope_rad",
+]
+_DEBUG_LOG_INTERVAL_S: float = 0.10  # 10 Hz continuous debug log
 _INACCURACY_LOG_THRESHOLD_MS2: float = 0.75
 _INACCURACY_LOG_COMMAND_THRESHOLD: float = 0.45
 _INACCURACY_LOG_COOLDOWN_S: float = 0.75
@@ -75,7 +106,7 @@ _GAS_MAP_POWER: float = 1.0
 _SENSITIVITY_TAU_S: float = 10.0
 _MIN_SENSITIVITY: float = 0.60
 _MAX_SENSITIVITY: float = 1.65
-_SENSITIVITY_SAMPLE_PEDAL: float = 0.25      # min raw pedal to qualify for a sample
+_SENSITIVITY_SAMPLE_PEDAL: float = 0.10      # min raw pedal to qualify for a sample
 _SENSITIVITY_MIN_EXPECTED_MS2: float = 0.30  # ignore samples where expected response is tiny
 _SENSITIVITY_MAX_INTEGRAL_GUARD: float = 0.15  # skip update when integral is actively correcting
 _SENSITIVITY_SAVE_THRESHOLD: float = 0.04   # save immediately when value drifts this far
@@ -190,6 +221,7 @@ class AccelToPedals:
         self._raw_smooth: float = 0.0
         self._integral_correction: float = 0.0
         self._prev_error_ms2: float = 0.0
+        self._prev_raw_smooth: float = 0.0
         self._error_deriv_smooth: float = 0.0
         self._estimated_max_accel_ms2: float | None = None
         self._estimated_max_brake_ms2: float | None = None
@@ -199,6 +231,11 @@ class AccelToPedals:
         self._project_root = Path(__file__).resolve().parents[2]
         self._last_accel_log_mono: float = 0.0
         self._last_brake_log_mono: float = 0.0
+
+        self._debug_log_file = None
+        self._debug_log_writer = None
+        self._last_debug_log_mono: float = 0.0
+        self._debug_log_start_mono: float | None = None
 
         # Pedal sensitivity — loaded from persisted settings; default 1.0 (neutral).
         _sa = _finite_or_zero(Settings.mapper_accel_sensitivity)
@@ -217,20 +254,27 @@ class AccelToPedals:
         self._integral_block_end_mono: float | None = None
 
     def close(self) -> None:
-        if self._log_file is None:
-            return
-        try:
-            self._log_file.close()
-        except OSError:
-            pass
-        self._log_file = None
-        self._log_writer = None
+        if self._log_file is not None:
+            try:
+                self._log_file.close()
+            except OSError:
+                pass
+            self._log_file = None
+            self._log_writer = None
+        if self._debug_log_file is not None:
+            try:
+                self._debug_log_file.close()
+            except OSError:
+                pass
+            self._debug_log_file = None
+            self._debug_log_writer = None
 
     def reset_smoothing(self) -> None:
         self._wanted_smooth = 0.0
         self._raw_smooth = 0.0
         self._integral_correction = 0.0
         self._prev_error_ms2 = 0.0
+        self._prev_raw_smooth = 0.0
         self._error_deriv_smooth = 0.0
         self._prev_mono = None
         self._gearshift_start_mono = None
@@ -423,6 +467,107 @@ class AccelToPedals:
             self._log_file.flush()
         except OSError:
             logger.debug("accel_to_pedals tuning log write failed", exc_info=True)
+
+    def _ensure_debug_log(self) -> None:
+        if self._debug_log_file is not None:
+            return
+        path = self._project_root / _DEBUG_LOG_NAME
+        write_header_on_open = False
+        try:
+            if path.exists():
+                size = path.stat().st_size
+                if size == 0:
+                    write_header_on_open = True
+                elif size > 0:
+                    with path.open("r", encoding="utf-8-sig", newline="") as rf:
+                        first = rf.readline()
+                        tail = rf.read()
+                    if first and not first.lstrip("\ufeff").startswith("t_s,"):
+                        with path.open("w", newline="", encoding="utf-8") as wf:
+                            w = csv.writer(wf)
+                            w.writerow(_DEBUG_LOG_HEADER_ROW)
+                            wf.write(first)
+                            wf.write(tail)
+            else:
+                write_header_on_open = True
+
+            self._debug_log_file = path.open("a", newline="", encoding="utf-8")
+            self._debug_log_writer = csv.writer(self._debug_log_file)
+            if write_header_on_open:
+                self._debug_log_writer.writerow(_DEBUG_LOG_HEADER_ROW)
+                self._debug_log_file.flush()
+        except OSError:
+            self._debug_log_file = None
+            self._debug_log_writer = None
+            logger.debug("accel_to_pedals debug log unavailable", exc_info=True)
+
+    def _log_debug_step(
+        self,
+        *,
+        now: float,
+        speed_ms: float,
+        gear: int,
+        gearshift_active: bool,
+        wanted_ms2: float,
+        raw_ms2: float,
+        error_ms2: float,
+        road_load_ms2: float,
+        control_wanted_ms2: float,
+        integral_correction: float,
+        integral_clamped: bool,
+        integral_factor: float,
+        derivative_correction: float,
+        drive_cmd: float,
+        gas_cmd: float,
+        brake_cmd: float,
+        game_throttle: float,
+        game_clutch: float,
+        accel_limited: bool,
+        slope_rad: float,
+    ) -> None:
+        if now - self._last_debug_log_mono < _DEBUG_LOG_INTERVAL_S:
+            return
+        self._last_debug_log_mono = now
+        if self._debug_log_start_mono is None:
+            self._debug_log_start_mono = now
+        t_s = now - self._debug_log_start_mono
+
+        self._ensure_debug_log()
+        if self._debug_log_writer is None:
+            return
+        try:
+            self._debug_log_writer.writerow([
+                f"{t_s:.3f}",
+                datetime.now(timezone.utc).isoformat(),
+                f"{speed_ms:.2f}",
+                gear,
+                int(gearshift_active),
+                f"{wanted_ms2:.3f}",
+                f"{self._wanted_smooth:.3f}",
+                f"{raw_ms2:.3f}",
+                f"{self._raw_smooth:.3f}",
+                f"{error_ms2:.3f}",
+                f"{road_load_ms2:.3f}",
+                f"{control_wanted_ms2:.3f}",
+                f"{integral_correction:.4f}",
+                int(integral_clamped),
+                f"{integral_factor:.3f}",
+                f"{derivative_correction:.4f}",
+                f"{drive_cmd:.3f}",
+                f"{gas_cmd:.3f}",
+                f"{brake_cmd:.3f}",
+                f"{game_throttle:.3f}",
+                f"{game_clutch:.3f}",
+                int(accel_limited),
+                f"{(self._estimated_max_accel_ms2 or 0.0):.3f}",
+                f"{(self._estimated_max_brake_ms2 or 0.0):.3f}",
+                f"{self._accel_sensitivity:.4f}",
+                f"{self._brake_sensitivity:.4f}",
+                f"{slope_rad:.4f}",
+            ])
+            self._debug_log_file.flush()
+        except OSError:
+            logger.debug("accel_to_pedals debug log write failed", exc_info=True)
 
     def _adapt_estimate(
         self,
@@ -721,13 +866,19 @@ class AccelToPedals:
 
         deriv_alpha = self._estimate_alpha(dt, _DERIVATIVE_SMOOTHING_TAU_S)
         if cruise_commanding:
-            error_deriv_raw = (error_ms2 - self._prev_error_ms2) / max(dt, 1e-6)
+            # Derivative on measurement (raw_smooth only), not on full error.
+            # Differentiating the full error causes derivative kick on setpoint steps:
+            # when wanted_smooth drops quickly, d(error)/dt spikes and drives the
+            # output hard in the wrong direction for several frames.
+            error_deriv_raw = (self._raw_smooth - self._prev_raw_smooth) / max(dt, 1e-6)
             self._prev_error_ms2 = error_ms2
+            self._prev_raw_smooth = self._raw_smooth
             self._error_deriv_smooth = self._ema_step(
                 self._error_deriv_smooth, error_deriv_raw, deriv_alpha
             )
         else:
             self._prev_error_ms2 = error_ms2
+            self._prev_raw_smooth = self._raw_smooth
             self._error_deriv_smooth = self._ema_step(self._error_deriv_smooth, 0.0, deriv_alpha)
         deriv_coeff = _finite_or_zero(Settings.mapper_derivative_coeff)
         derivative_correction = deriv_coeff * self._error_deriv_smooth if cruise_commanding else 0.0
@@ -770,11 +921,13 @@ class AccelToPedals:
         self._integral_correction *= leak
         if cruise_commanding and not accel_limited:
             self._integral_correction += integral_coeff * integral_input * integral_update_factor * dt
+        pre_clamp_integral = self._integral_correction
         self._integral_correction = _clamp(
             self._integral_correction,
             -integral_clamp,
             integral_clamp,
         )
+        integral_clamped = pre_clamp_integral != self._integral_correction
 
         # Integral applied in m/s² space before normalization: a correction of X m/s²
         # has the same physical effect regardless of which pedal is active.
@@ -835,12 +988,11 @@ class AccelToPedals:
         # disconnection (clutch disengagement). Gradually re-enable learning after shift.
         now_safe = now if math.isfinite(now) else 0.0
         if clutch_applied > 0.05:
-            if self._integral_block_end_mono is None:
-                # Shift just detected, block integral for 0.5s after shift completes
-                self._integral_block_end_mono = now_safe + 0.5
+            # Extend block end while clutch is active so it expires 0.5s after release.
+            self._integral_block_end_mono = now_safe + 0.5
             self._gearshift_start_mono = now_safe
         else:
-            # Clutch released
+            # Clutch released — block_end already set; will expire 0.5s from last active frame.
             self._gearshift_start_mono = None
 
         if cruise_commanding:
@@ -906,6 +1058,30 @@ class AccelToPedals:
                 road_load_ms2=road_load_accel,
                 game_throttle=throttle_applied,
                 game_clutch=clutch_applied,
+            )
+
+        if cruise_commanding and math.isfinite(now):
+            self._log_debug_step(
+                now=now,
+                speed_ms=speed,
+                gear=gear_dash,
+                gearshift_active=clutch_applied > _GAME_CLUTCH_ACTIVE_THRESHOLD,
+                wanted_ms2=wanted,
+                raw_ms2=raw,
+                error_ms2=error_ms2,
+                road_load_ms2=road_load_accel,
+                control_wanted_ms2=control_wanted,
+                integral_correction=self._integral_correction,
+                integral_clamped=integral_clamped,
+                integral_factor=integral_update_factor,
+                derivative_correction=derivative_correction,
+                drive_cmd=drive_cmd,
+                gas_cmd=command_gas,
+                brake_cmd=command_brake,
+                game_throttle=throttle_applied,
+                game_clutch=clutch_applied,
+                accel_limited=accel_limited,
+                slope_rad=grade_unc_rad,
             )
 
         creep = idle_creep_brake(speed, gear_dash)

@@ -16,8 +16,9 @@ __pycache__/
 # Logs
 *.log
 logs/
-accel_mapper_debug.csv
-accel_to_pedals_tuning.csv
+
+# CSV exports / debug dumps
+*.csv
 
 # Local configuration (do not commit)
 config.json
