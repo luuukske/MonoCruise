@@ -32,8 +32,9 @@ _INTEGRAL_RECOVERY_TAU_S: float = 0.5
 _DERIVATIVE_SMOOTHING_TAU_S: float = 0.12
 _IDLE_CORRECTION_DECAY_TAU_S: float = 0.12
 
-_ESTIMATE_DROP_TAU_S: float = 0.10
-_ESTIMATE_RISE_TAU_S: float = 0.60
+_ESTIMATE_DROP_TAU_S: float = 0.50
+_ESTIMATE_RISE_TAU_S: float = 1.20
+_DRIVE_CMD_RATE_LIMIT_PER_S: float = 3.0
 _MAX_ESTIMATE_SLOPE_RAD: float = 0.2
 _MIN_SAMPLE_PEDAL: float = 0.10
 _SAMPLE_PEDAL_FLOOR: float = 0.08
@@ -252,6 +253,7 @@ class AccelToPedals:
         # Gearshift integral blocking state
         self._gearshift_start_mono: float | None = None
         self._integral_block_end_mono: float | None = None
+        self._prev_drive_cmd: float | None = None
 
     def close(self) -> None:
         if self._log_file is not None:
@@ -279,6 +281,7 @@ class AccelToPedals:
         self._prev_mono = None
         self._gearshift_start_mono = None
         self._integral_block_end_mono = None
+        self._prev_drive_cmd = None
 
     def _weight_factor(self, total_mass_kg: float, has_trailer: bool) -> float:
         return _weight_factor(total_mass_kg, has_trailer)
@@ -952,6 +955,10 @@ class AccelToPedals:
             -1.0,
             1.0,
         )
+        if self._prev_drive_cmd is not None:
+            max_delta = _DRIVE_CMD_RATE_LIMIT_PER_S * dt
+            drive_cmd = _clamp(drive_cmd, self._prev_drive_cmd - max_delta, self._prev_drive_cmd + max_delta)
+        self._prev_drive_cmd = drive_cmd
         if gear_dash == 0 and drive_cmd > 0.0:
             drive_cmd = 0.0
 
