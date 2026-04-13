@@ -92,7 +92,7 @@ class Monitor(BaseThread):
         try:
             sending = registry.get_thread("sending_thread")
             with sending.data._lock:
-                _ps = {0: "COAST", 1: "GAS", 2: "BRAKE"}.get(
+                _ps = {1: "GAS", 2: "BRAKE"}.get(
                     sending.data.mapper_pedal_state, "?"
                 )
                 line = (

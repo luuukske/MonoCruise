@@ -68,13 +68,10 @@ _BRAKE_MULTIPLIER_SAMPLE_SPEED_MS: float = 5.0
 _BRAKE_MULTIPLIER_MAX_SLOPE_RAD: float = 0.15
 
 # ---------------------------------------------------------------------------
-# Transition zone — dead zone + hysteresis between gas and brake
-# Wide enough that the CC's natural ±0.1 m/s² hunting doesn't trigger
-# transitions. The gas PID handles mild negative wanted by outputting less
-# gas (output clamps at 0) — no brake needed for coasting.
+# Brake activation threshold — brake only engages for real deceleration
+# demands, not CC hunting noise. Gas PID handles coasting by outputting ~0.
 # ---------------------------------------------------------------------------
-_DEAD_ZONE_MS2: float = 0.15
-_HYSTERESIS_MS2: float = 0.05
+_BRAKE_ACTIVATION_MS2: float = 0.2  # wanted must be below -this to engage brake
 
 # ---------------------------------------------------------------------------
 # Road load
@@ -209,12 +206,11 @@ def idle_creep_brake(speed_ms: float, gear_dashboard: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Pedal state for gas/brake transition
+# Pedal state labels (for debug logging only)
 # ---------------------------------------------------------------------------
-_STATE_COAST: int = 0
 _STATE_GAS: int = 1
 _STATE_BRAKE: int = 2
-_STATE_NAMES: dict[int, str] = {_STATE_COAST: "COAST", _STATE_GAS: "GAS", _STATE_BRAKE: "BRAKE"}
+_STATE_NAMES: dict[int, str] = {_STATE_GAS: "GAS", _STATE_BRAKE: "BRAKE"}
 
 
 @dataclass(slots=True)
@@ -242,7 +238,7 @@ class PedalTargets:
     brake_trim_i: float = 0.0
     brake_multiplier: float = 1.0
     gain_scale: float = 1.0
-    pedal_state: int = _STATE_COAST
+    pedal_state: int = _STATE_GAS
 
 
 class AccelToPedals:
@@ -271,9 +267,6 @@ class AccelToPedals:
         # Gearshift state
         self._gearshift_start_mono: float | None = None
         self._integral_block_end_mono: float | None = None
-
-        # Transition state machine
-        self._pedal_state: int = _STATE_COAST
 
         # Debug logging
         self._project_root = Path(__file__).resolve().parents[2]
@@ -306,7 +299,6 @@ class AccelToPedals:
         self._prev_mono = None
         self._gearshift_start_mono = None
         self._integral_block_end_mono = None
-        self._pedal_state = _STATE_COAST
 
     # ------------------------------------------------------------------
     # Helpers — shared
@@ -402,34 +394,6 @@ class AccelToPedals:
             self._integral_block_end_mono = None
             return 1.0
         return factor
-
-    # ------------------------------------------------------------------
-    # Transition state machine
-    # ------------------------------------------------------------------
-
-    def _update_pedal_state(self, wanted_smooth: float) -> int:
-        """Dead zone + hysteresis to prevent gas/brake flicker."""
-        state = self._pedal_state
-        threshold_enter = _DEAD_ZONE_MS2 + _HYSTERESIS_MS2
-
-        if state == _STATE_GAS:
-            if wanted_smooth < -threshold_enter:
-                state = _STATE_BRAKE
-            elif wanted_smooth < -_DEAD_ZONE_MS2:
-                state = _STATE_COAST
-        elif state == _STATE_BRAKE:
-            if wanted_smooth > threshold_enter:
-                state = _STATE_GAS
-            elif wanted_smooth > _DEAD_ZONE_MS2:
-                state = _STATE_COAST
-        else:  # COAST
-            if wanted_smooth > threshold_enter:
-                state = _STATE_GAS
-            elif wanted_smooth < -threshold_enter:
-                state = _STATE_BRAKE
-
-        self._pedal_state = state
-        return state
 
     # ------------------------------------------------------------------
     # Gas path — PID on acceleration error, outputs pedal directly
@@ -789,55 +753,44 @@ class AccelToPedals:
         brake_trim_i = 0.0
 
         if cruise_commanding:
-            # Transition state machine
-            pedal_state = self._update_pedal_state(self._wanted_smooth)
+            # Gas PID runs continuously — output clamped [0,1].
+            # When wanted is slightly negative, PID naturally outputs ~0 gas
+            # (negative P overwhelms FF → clamps at 0). This IS coasting, but
+            # the integral and derivative stay continuous. No transition spike.
+            gas_cmd, gas_p, gas_i, gas_d = self._gas_step(
+                dt, self._wanted_smooth, self._raw_smooth,
+                road_load_accel, gain_scale, shift_factor, gear_dash,
+            )
 
-            if pedal_state == _STATE_GAS:
-                gas_cmd, gas_p, gas_i, gas_d = self._gas_step(
-                    dt, self._wanted_smooth, self._raw_smooth,
-                    road_load_accel, gain_scale, shift_factor, gear_dash,
-                )
-                # Decay brake trim integral when not braking
-                decay = math.exp(-dt / _BRAKE_TRIM_DECAY_TAU_S)
-                self._brake_trim_integral *= decay
-
-            elif pedal_state == _STATE_BRAKE:
+            # Brake only for real deceleration demands — not CC hunting noise.
+            # Gas PID handles mild negatives by outputting 0 (coast).
+            braking = self._wanted_smooth < -_BRAKE_ACTIVATION_MS2
+            if braking:
                 brake_cmd, brake_ff, brake_trim_p, brake_trim_i = self._brake_step(
                     dt, self._wanted_smooth, self._raw_smooth,
                     road_load_accel, shift_factor,
                 )
-                # Preserve gas integral — it holds the learned steady-state pedal.
-                # Nuking it on every gas→brake transition causes oscillation when
-                # re-entering gas (integral gone → no steady-state offset → overshoot).
-                self._prev_gas_cmd = None  # reset rate limiter for clean re-entry
-
-                # Update brake multiplier from measured response
                 self._update_brake_multiplier(
                     dt, speed, grade_unc_rad, road_load_accel,
                     brake_cmd, self._raw_smooth,
                 )
-
-            else:  # COAST
-                # Preserve both integrals during cruise — they hold learned offsets.
-                # Brake trim decays slowly since it's a small correction.
+                # Don't send gas while actively braking
+                gas_cmd = 0.0
+            else:
+                # Decay brake trim integral when not braking
                 decay = math.exp(-dt / _BRAKE_TRIM_DECAY_TAU_S)
                 self._brake_trim_integral *= decay
-                self._prev_gas_cmd = None
+
+            pedal_state = _STATE_BRAKE if braking else _STATE_GAS
 
         else:
             # Not commanding — decay all state
-            self._pedal_state = _STATE_COAST
             gas_decay = math.exp(-dt / _IDLE_CORRECTION_DECAY_TAU_S)
             brake_decay = math.exp(-dt / _BRAKE_TRIM_DECAY_TAU_S)
             self._gas_integral *= gas_decay
             self._brake_trim_integral *= brake_decay
             self._prev_gas_cmd = None
-            pedal_state = _STATE_COAST
-
-        # Cold start: seed gas integral from game throttle on first commanding frame
-        # (done after step so next frame benefits)
-        # This is handled implicitly: integral starts at 0, PID converges quickly.
-        # If needed, could capture game_throttle here.
+            pedal_state = _STATE_GAS
 
         # Update prev_raw_smooth for derivative (always, even when not commanding)
         self._prev_raw_smooth = self._raw_smooth
