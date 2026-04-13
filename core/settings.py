@@ -101,17 +101,11 @@ class Settings(metaclass=_SingletonMeta):
     cc_accel_max_ms2: float = 1.5
     cc_accel_min_ms2: float = -1.0
 
-    # AccelToPedals tuning. Weight baselines and smoothing constants stay fixed in code.
-    mapper_accel_scale_ms2: float = 1.0
-    mapper_brake_scale_ms2: float = 6.5
-    mapper_brake_exponent: float = 2.5
-    mapper_rolling_resistance: float = 0.07
-    mapper_integral_coeff: float = 0.7
-    mapper_integral_clamp: float = 0.9  # m/s² — integral applied in physical space before pedal normalisation
-    mapper_integral_nonlinear_scale: float = 0.6  # m/s² — errors << this integrate near-linearly; errors >> this saturate
-    mapper_derivative_coeff: float = 0.25
-    mapper_accel_sensitivity: float = 0.9051   # learned gas-pedal response ratio (persisted)
-    mapper_brake_sensitivity: float = 1.0   # learned brake-pedal response ratio (persisted)
+    # AccelToPedals tuning — split gas (PID) / brake (feedforward + trim PI) architecture.
+    # Weight baselines and smoothing constants stay fixed in code.
+    mapper_accel_scale_ms2: float = 1.0       # baseline max gas accel for capacity estimate
+    mapper_brake_scale_ms2: float = 6.5       # baseline max brake decel for capacity estimate
+    mapper_rolling_resistance: float = 0.07   # rolling resistance coefficient for road load
 
     # Adaptive brake efficiency
     brake_efficiency_learning: bool = True

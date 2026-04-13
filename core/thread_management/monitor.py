@@ -92,22 +92,25 @@ class Monitor(BaseThread):
         try:
             sending = registry.get_thread("sending_thread")
             with sending.data._lock:
+                _ps = {0: "COAST", 1: "GAS", 2: "BRAKE"}.get(
+                    sending.data.mapper_pedal_state, "?"
+                )
                 line = (
                     "[mapper] "
                     f"cc={'on' if sending.data.mapper_cruise_active else 'off'} "
-                    f"lim={'yes' if sending.data.mapper_accel_limited else 'no'} "
+                    f"st={_ps} "
                     f"cmd={sending.data.mapper_commanded_ms2:+.2f} "
                     f"ctrl={sending.data.mapper_control_wanted_ms2:+.2f} "
                     f"raw={sending.data.mapper_raw_accel_ms2:+.2f} "
-                    f"measCtrl={sending.data.mapper_measured_control_ms2:+.2f} "
-                    f"slope={sending.data.mapper_slope_input_rad:+.3f} "
-                    f"effSlope={sending.data.mapper_effective_slope_rad:+.3f} "
                     f"ws={sending.data.mapper_wanted_smooth_ms2:+.2f} "
                     f"rs={sending.data.mapper_raw_smooth_ms2:+.2f} "
                     f"load={sending.data.mapper_road_load_ms2:+.2f} "
-                    f"i={sending.data.mapper_integral:+.3f} "
-                    f"estA={sending.data.mapper_est_max_accel_ms2:.2f} "
-                    f"estB={sending.data.mapper_est_max_brake_ms2:.2f} "
+                    f"gP={sending.data.mapper_gas_p:+.3f} "
+                    f"gI={sending.data.mapper_gas_i:+.3f} "
+                    f"bFF={sending.data.mapper_brake_ff:.3f} "
+                    f"bTi={sending.data.mapper_brake_trim_i:+.3f} "
+                    f"bMul={sending.data.mapper_brake_multiplier:.2f} "
+                    f"gScl={sending.data.mapper_gain_scale:.2f} "
                     f"gas={sending.data.mapper_command_gas:.3f} "
                     f"brk={sending.data.mapper_command_brake:.3f} "
                     f"measB={sending.data.decel_measured_ms2:.2f}"
