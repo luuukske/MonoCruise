@@ -37,8 +37,8 @@ _IDLE_CORRECTION_DECAY_TAU_S: float = 0.12
 # ---------------------------------------------------------------------------
 # Gas PID defaults (Settings can override Kp/Ki/Kd)
 # ---------------------------------------------------------------------------
-_GAS_KP: float = 0.3
-_GAS_KI: float = 0.15
+_GAS_KP: float = 0.20
+_GAS_KI: float = 0.25
 _GAS_KD: float = 0.0
 _GAS_KI_CLAMP: float = 0.5          # pedal units
 _GAS_DERIVATIVE_TAU_S: float = 0.12  # measurement derivative smoothing
