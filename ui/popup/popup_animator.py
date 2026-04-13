@@ -170,7 +170,7 @@ class PopupAnimator(QObject):
         anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
         return anim
 
-    # === CUSTOM SCALE PROPERTY FOR ANIMATION ===
+    # CUSTOM SCALE PROPERTY FOR ANIMATION
     
     def _get_scale(self) -> float:
         return self._current_scale
@@ -202,7 +202,7 @@ class PopupAnimator(QObject):
         """Move widget to visible position without animation."""
         self._widget.move(self._get_x(), self._target_y)
     
-    # === Public Animation Methods ===
+    # Public Animation Methods
     
     def slide_in(self):
         self._stop_animations()

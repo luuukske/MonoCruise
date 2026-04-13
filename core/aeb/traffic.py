@@ -794,10 +794,10 @@ class Vehicle:
         self._raw_x = raw_x
         self._raw_z = raw_z
 
-        # --- Type 3: Crash detection (TMP only) — angular jerk; sub-frames call the same helper earlier.
+        # Type 3: Crash detection (TMP only) — angular jerk; sub-frames call the same helper earlier.
         self._tmp_apply_crash_rotation_jerk(prev, t_now)
 
-        # --- Type 1: Position mismatch (TMP only, max _POS_MISMATCH_MAX_FRAMES) ---
+        # Type 1: Position mismatch (TMP only, max _POS_MISMATCH_MAX_FRAMES)
         # Raw position jumped backward along the vehicle's heading — out-of-order packet.
         # Yaw EMA and angular_velocity still run; position and carried speed/accel are held.
         # Bypassed when crash_confirmed — a crashed vehicle's backward jumps are real.
@@ -817,7 +817,7 @@ class Vehicle:
             else:
                 self._pos_mismatch_frames = 0
 
-        # --- Type 2: TMP lag detection (near-stationary freeze with speed decay) ---
+        # Type 2: TMP lag detection (near-stationary freeze with speed decay)
         # Bypassed when crash_confirmed — any movement on a crashed vehicle is real position data.
         if self.is_tmp and prev._raw_x is not None and not _skip_position_update and not self.crash_confirmed:
             _raw_disp_sq = (raw_x - prev._raw_x) ** 2 + (raw_z - prev._raw_z) ** 2

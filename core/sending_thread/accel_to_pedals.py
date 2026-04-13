@@ -17,9 +17,7 @@ GRAVITY_MS2: float = 9.81
 
 _IDLE_CREEP_SPEED_SKIP_MS: float = 2.0
 
-# ---------------------------------------------------------------------------
 # Weight / mass helpers
-# ---------------------------------------------------------------------------
 _REFERENCE_MASS_KG: float = 20_000.0
 _WEIGHT_SPAN_TONS: float = 12.7
 _WEIGHT_STRENGTH: float = 0.27
@@ -27,28 +25,22 @@ _WEIGHT_MIN_FACTOR: float = 0.55
 _WEIGHT_MAX_FACTOR: float = 1.85
 _TRAILER_WEIGHT_BIAS: float = 1.02
 
-# ---------------------------------------------------------------------------
 # Smoothing time constants
-# ---------------------------------------------------------------------------
 _WANTED_SMOOTHING_TAU_S: float = 0.05
 _RAW_SMOOTHING_TAU_S: float = 0.10
 _IDLE_CORRECTION_DECAY_TAU_S: float = 0.12
 
-# ---------------------------------------------------------------------------
 # Gas PID defaults (Settings can override Kp/Ki/Kd)
-# ---------------------------------------------------------------------------
 _GAS_KP: float = 0.20
 _GAS_KI: float = 0.25
 _GAS_KD: float = 0.0
 _GAS_KI_CLAMP: float = 0.5          # pedal units
 _GAS_DERIVATIVE_TAU_S: float = 0.12  # measurement derivative smoothing
 
-# ---------------------------------------------------------------------------
 # Brake feedforward curve constants — fitted from collected data
 # y = 11.4596 * (1 - e^(-2.4277 * x^0.8518))
 # where x = brake pedal [0,1], y = |decel| in m/s².
 # Code uses the inverse: pedal from desired deceleration.
-# ---------------------------------------------------------------------------
 _BRAKE_CURVE_AMPLITUDE: float = 11.4596
 _BRAKE_CURVE_RATE: float = 2.4277
 _BRAKE_CURVE_POWER: float = 0.8518
@@ -67,41 +59,29 @@ _BRAKE_MULTIPLIER_SAMPLE_PEDAL: float = 0.08
 _BRAKE_MULTIPLIER_SAMPLE_SPEED_MS: float = 5.0
 _BRAKE_MULTIPLIER_MAX_SLOPE_RAD: float = 0.15
 
-# ---------------------------------------------------------------------------
 # Brake activation threshold — brake only engages for real deceleration
 # demands, not CC hunting noise. Gas PID handles coasting by outputting ~0.
-# ---------------------------------------------------------------------------
-_BRAKE_ACTIVATION_MS2: float = 0.2  # wanted must be below -this to engage brake
+_BRAKE_ACTIVATION_MS2: float = 0.1  # wanted must be below -this to engage brake
 
-# ---------------------------------------------------------------------------
 # Road load
-# ---------------------------------------------------------------------------
 _ROAD_LOAD_SPEED_EPSILON_MS: float = 0.2
 _MAX_ROAD_GRADE_RAD: float = 0.35  # ~20 deg — clamp pathological game values
 
-# ---------------------------------------------------------------------------
 # Gearshift handling
-# ---------------------------------------------------------------------------
 _GAME_CLUTCH_ACTIVE_THRESHOLD: float = 0.05
 _GEARSHIFT_BLOCK_DURATION_S: float = 0.5
 _GEARSHIFT_RECOVERY_TAU_S: float = 0.5
 
-# ---------------------------------------------------------------------------
 # Rate limiting
-# ---------------------------------------------------------------------------
 _GAS_RATE_LIMIT_PER_S: float = 3.0
 
-# ---------------------------------------------------------------------------
 # Capacity estimates (static baselines; capacity tracker can override)
-# ---------------------------------------------------------------------------
 _MIN_ACCEL_ESTIMATE_MS2: float = 0.8
 _MAX_ACCEL_ESTIMATE_MS2: float = 5.0
 _MIN_BRAKE_ESTIMATE_MS2: float = 2.0
 _MAX_BRAKE_ESTIMATE_MS2: float = 10.0
 
-# ---------------------------------------------------------------------------
 # Debug logging
-# ---------------------------------------------------------------------------
 _DEBUG_LOG_NAME: str = "accel_to_pedals_debug.csv"
 _DEBUG_LOG_HEADER_ROW: list[str] = [
     "t_s",
@@ -205,9 +185,7 @@ def idle_creep_brake(speed_ms: float, gear_dashboard: int) -> float:
     return 0.0
 
 
-# ---------------------------------------------------------------------------
 # Pedal state labels (for debug logging only)
-# ---------------------------------------------------------------------------
 _STATE_GAS: int = 1
 _STATE_BRAKE: int = 2
 _STATE_NAMES: dict[int, str] = {_STATE_GAS: "GAS", _STATE_BRAKE: "BRAKE"}
@@ -275,9 +253,7 @@ class AccelToPedals:
         self._last_debug_log_mono: float = 0.0
         self._debug_log_start_mono: float | None = None
 
-    # ------------------------------------------------------------------
     # Lifecycle
-    # ------------------------------------------------------------------
 
     def close(self) -> None:
         if self._debug_log_file is not None:
@@ -300,9 +276,7 @@ class AccelToPedals:
         self._gearshift_start_mono = None
         self._integral_block_end_mono = None
 
-    # ------------------------------------------------------------------
     # Helpers — shared
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _ema_step(current: float, sample: float, alpha: float) -> float:
@@ -345,9 +319,7 @@ class AccelToPedals:
     def _measured_control_accel_ms2(raw_accel_ms2: float, road_load_ms2: float) -> float:
         return raw_accel_ms2 + road_load_ms2
 
-    # ------------------------------------------------------------------
     # Brake feedforward — inverse of the fitted curve
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _brake_pedal_from_decel(decel_ms2: float) -> float:
@@ -370,9 +342,7 @@ class AccelToPedals:
             return 0.0
         return min(1.0, arg ** (1.0 / power))
 
-    # ------------------------------------------------------------------
     # Gearshift detection
-    # ------------------------------------------------------------------
 
     def _gearshift_update_factor(self, now: float, clutch: float) -> float:
         """Returns 0.0 during gearshift block, ramps to 1.0 after recovery."""
@@ -395,9 +365,7 @@ class AccelToPedals:
             return 1.0
         return factor
 
-    # ------------------------------------------------------------------
     # Gas path — PID on acceleration error, outputs pedal directly
-    # ------------------------------------------------------------------
 
     def _gas_step(
         self,
@@ -466,9 +434,7 @@ class AccelToPedals:
 
         return gas_pedal, p_term, i_term, d_term
 
-    # ------------------------------------------------------------------
     # Brake path — feedforward from fitted curve + trim PI
-    # ------------------------------------------------------------------
 
     def _brake_step(
         self,
@@ -479,22 +445,17 @@ class AccelToPedals:
         shift_factor: float,
     ) -> tuple[float, float, float, float]:
         """Returns (brake_pedal, ff_pedal, trim_p, trim_i)."""
-        # Desired deceleration magnitude
-        wanted_decel = abs(wanted_smooth)
-
-        # Road load contribution to braking need:
-        # If road_load_ms2 is negative (downhill helps decel), we need less brake
-        # If positive (uphill resists decel, actually helps slow down), also less brake
-        # Road load is "resistance to forward motion" so positive = helps braking
-        # We subtract it: if gravity is already slowing us, we need less pedal
-        net_decel = max(0.0, wanted_decel - road_load_ms2)
+        # Desired braking effort after compensating physical road load.
+        # Negative road load (downhill) increases required brake effort, while
+        # positive road load (uphill/rolling drag) reduces it.
+        wanted_decel = max(0.0, -(wanted_smooth + road_load_ms2))
 
         # Feedforward from fitted curve (with truck-specific multiplier)
-        ff_pedal = self._brake_pedal_from_decel(net_decel) * self._brake_multiplier
+        ff_pedal = self._brake_pedal_from_decel(wanted_decel) * self._brake_multiplier
 
         # Trim PI: correct small errors from curve inaccuracy / truck variance
         # Error: positive means we're not decelerating enough (need more brake)
-        measured_decel = max(0.0, -raw_smooth)  # raw_smooth is negative when decelerating
+        measured_decel = max(0.0, -(raw_smooth + road_load_ms2))
         brake_error = wanted_decel - measured_decel
 
         trim_p = _BRAKE_KP_TRIM * brake_error * shift_factor
@@ -507,9 +468,7 @@ class AccelToPedals:
         brake_pedal = _clamp(ff_pedal + trim_p + trim_i, 0.0, 1.0)
         return brake_pedal, ff_pedal, trim_p, trim_i
 
-    # ------------------------------------------------------------------
     # Brake multiplier learning
-    # ------------------------------------------------------------------
 
     def _update_brake_multiplier(
         self,
@@ -549,9 +508,7 @@ class AccelToPedals:
             self._brake_multiplier, _BRAKE_MULTIPLIER_MIN, _BRAKE_MULTIPLIER_MAX
         )
 
-    # ------------------------------------------------------------------
     # Debug logging
-    # ------------------------------------------------------------------
 
     def _ensure_debug_log(self) -> None:
         if self._debug_log_file is not None:
@@ -658,9 +615,7 @@ class AccelToPedals:
         except OSError:
             logger.debug("accel_to_pedals debug log write failed", exc_info=True)
 
-    # ------------------------------------------------------------------
     # Main step — called once per frame by sending_thread
-    # ------------------------------------------------------------------
 
     def step(
         self,

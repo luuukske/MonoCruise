@@ -286,7 +286,7 @@ class CruiseControlThread(BaseThread):
 
         all_assigned = self._all_cc_buttons_assigned()
 
-        # --- Decrease ---
+        # Decrease
         if cc_dec and not cc_inc and not cc_start and all_assigned:
             if self._time_pressed_dec is None:
                 self._time_pressed_dec = now
@@ -305,7 +305,7 @@ class CruiseControlThread(BaseThread):
                 self._long_press_dec = False
             self._time_pressed_dec = None
 
-        # --- Increase ---
+        # Increase
         if cc_inc and not cc_dec and not cc_start and all_assigned and not block_inc_start:
             if self._time_pressed_inc is None:
                 self._time_pressed_inc = now
@@ -335,7 +335,7 @@ class CruiseControlThread(BaseThread):
                 self._long_press_inc = False
             self._time_pressed_inc = None
 
-        # --- Start / toggle ---
+        # Start / toggle
         if cc_start and not cc_dec and not cc_inc and all_assigned:
             if self._time_pressed_start is None:
                 self._time_pressed_start = now

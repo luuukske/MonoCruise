@@ -232,7 +232,7 @@ class VideoPlayer(QWidget):
 
         self._update_size()
 
-        # --- Timers ---
+        # Timers
 
         # Delayed control hide
         self._hide_timer = QTimer(self)

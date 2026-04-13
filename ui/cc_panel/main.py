@@ -98,7 +98,7 @@ class _PanelWidget(QWidget):
         self._scale_sig.connect(self._on_scale)
         self._bg_opacity_sig.connect(self._on_bg_opacity)
 
-    # -- window --
+    # window
 
     def _setup_window(self):
         self.setWindowFlags(
@@ -112,7 +112,7 @@ class _PanelWidget(QWidget):
         if p._start_x is not None and p._start_y is not None:
             self.move(p._start_x, p._start_y)
 
-    # -- signal slots --
+    # signal slots
 
     def _on_show(self):
         self.show()
@@ -227,7 +227,7 @@ class _PanelWidget(QWidget):
         self.update()
         self.raise_()
 
-    # -- AEB blink --
+    # AEB blink
 
     def _is_aeb_active(self) -> bool:
         p = self._p
@@ -270,7 +270,7 @@ class _PanelWidget(QWidget):
         )
         self.update()
 
-    # -- icon loading --
+    # icon loading
 
     def _load_icon(self) -> QPixmap:
         p = self._p
@@ -800,7 +800,7 @@ class _PanelWidget(QWidget):
         pa.drawPixmap(vx_i, vy_i, vehicle_draw_pm)
         pa.restore()
 
-    # -- tinting --
+    # tinting
 
     def _tinted(self, pm: QPixmap, color: QColor) -> QPixmap:
         if pm is None or pm.isNull():
@@ -824,7 +824,7 @@ class _PanelWidget(QWidget):
             logger.exception("cc_panel.main._PanelWidget._tinted: tint composition failed")
             raise
 
-    # -- painting --
+    # painting
 
     def paintEvent(self, _event):
         try:
@@ -1056,7 +1056,7 @@ class _PanelWidget(QWidget):
                 draw_all_lines,
             )
 
-    # -- drag --
+    # drag
     def moveEvent(self, event):
         super().moveEvent(event)
         new_dpr = self.devicePixelRatio()
@@ -1172,14 +1172,14 @@ class cc_panel:
         self._pending_lock = threading.Lock()
         self._coalesce_armed = False
 
-    # -- properties --
+    # properties
 
     @property
     def blink_running(self) -> bool:
         """Whether the AEB blink animation is currently active."""
         return self._blink_running
 
-    # -- public thread-safe API --
+    # public thread-safe API
 
     def update(
         self,

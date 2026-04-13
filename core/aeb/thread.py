@@ -605,7 +605,7 @@ class AEBThread(BaseThread):
         # Moved up from vehicle loop — needed for ego position history.
         now_mono = time.monotonic()
 
-        # --- Ego position history ---
+        # Ego position history
         self._ego_position_history.append((now_mono, ego_x, ego_z))
         if len(self._ego_position_history) > _EGO_POSITION_HISTORY_LEN:
             self._ego_position_history = self._ego_position_history[-_EGO_POSITION_HISTORY_LEN:]

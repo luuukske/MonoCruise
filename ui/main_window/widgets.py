@@ -124,7 +124,7 @@ def new_entry(
     le.setFixedWidth(50)
     le.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-    # -- debounce timer (2 s, matching original ``master.after(2000, …)``) --
+    # debounce timer (2 s, matching original ``master.after(2000, …)``)
     _debounce = QTimer()
     _debounce.setSingleShot(True)
     _debounce.setInterval(2000)

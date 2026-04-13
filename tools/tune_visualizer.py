@@ -67,7 +67,7 @@ def update_plots(axes: list[plt.Axes], df: pd.DataFrame) -> None:
 
     t = df["t_s"]
 
-    # -- Panel 1: acceleration signals -----------------------------------------
+    # Panel 1: acceleration signals
     ax = axes[0]
     ax.cla()
     ax.set_title("Acceleration (m/s\u00b2)", fontsize=9)
@@ -84,7 +84,7 @@ def update_plots(axes: list[plt.Axes], df: pd.DataFrame) -> None:
     ax.legend(fontsize=7, loc="upper left", ncol=4)
     ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.2f"))
 
-    # -- Panel 2: Gas PID terms ------------------------------------------------
+    # Panel 2: Gas PID terms
     ax = axes[1]
     ax.cla()
     ax.set_title("Gas PID (pedal units)", fontsize=9)
@@ -101,7 +101,7 @@ def update_plots(axes: list[plt.Axes], df: pd.DataFrame) -> None:
     ax.legend(fontsize=7, loc="upper left", ncol=4)
     ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.3f"))
 
-    # -- Panel 3: Brake feedforward + trim + pedal commands --------------------
+    # Panel 3: Brake feedforward + trim + pedal commands
     ax = axes[2]
     ax.cla()
     ax.set_title("Brake FF + trim / pedal commands", fontsize=9)
@@ -122,7 +122,7 @@ def update_plots(axes: list[plt.Axes], df: pd.DataFrame) -> None:
     _shade_gearshifts(ax, df)
     ax.legend(fontsize=7, loc="upper left", ncol=5)
 
-    # -- Panel 4: speed + gear + gain_scale + brake_multiplier -----------------
+    # Panel 4: speed + gear + gain_scale + brake_multiplier
     ax = axes[3]
     ax.cla()
     ax.set_title("Speed / gear / gain_scale / brake_mult", fontsize=9)
