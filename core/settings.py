@@ -94,11 +94,11 @@ class Settings(metaclass=_SingletonMeta):
     long_press_reset: bool = True
 
     # PID tuning (cruise_control_thread) — defaults aligned with config.json
-    cc_kp: float = 0.9
+    cc_kp: float = 0.5
     cc_ki: float = 0.0
-    cc_kd: float = 0.2
+    cc_kd: float = 0.3
     cc_integral_clamp: float = 3.0
-    cc_accel_max_ms2: float = 1.5
+    cc_accel_max_ms2: float = 1.0
     cc_accel_min_ms2: float = -1.0
 
     # AccelToPedals tuning — split gas (PID) / brake (feedforward + trim PI) architecture.
@@ -113,8 +113,8 @@ class Settings(metaclass=_SingletonMeta):
     brake_efficiency_warn_ratio: float = 0.75
 
     # PedalCapacityTracker — persisted estimates (0 = use baseline on next startup)
-    pedal_capacity_max_brake_ms2: float = 4.451
-    pedal_capacity_max_accel_ms2: float = 2.12
+    pedal_capacity_max_brake_ms2: float = 11.457
+    pedal_capacity_max_accel_ms2: float = 2.124
 
     _saved_state: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     _state_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
