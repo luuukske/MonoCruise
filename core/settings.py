@@ -152,7 +152,8 @@ class Settings(metaclass=_SingletonMeta):
             data: dict = {}
             if file_existed:
                 with CONFIG_PATH.open() as fh:
-                    data = json.load(fh)
+                    raw = json.load(fh)
+                data = raw if isinstance(raw, dict) else {}
 
             public_keys = [k for k in self.__dataclass_fields__ if not k.startswith("_")]
             missing_from_file = any(k not in data for k in public_keys)
@@ -170,14 +171,19 @@ class Settings(metaclass=_SingletonMeta):
             had_complete_file = file_existed and not missing_from_file
             self._saved_state = self._public_fields() if had_complete_file else {}
             if not had_complete_file:
-                cls.save()
+                # Always rewrite disk so config.json contains every public field
+                # (defaults merged in above) and stays in sync with runtime state.
+                cls.save(force=True)
 
     @classmethod
-    def save(cls, values: dict | None = None):
-        """Write settings to disk only when values have changed since the last load or save.
+    def save(cls, values: dict | None = None, *, force: bool = False):
+        """Write settings to disk when values have changed since the last load or save.
 
         If *values* is provided, those fields are applied to the instance before
         the dirty check, allowing a partial update in a single call.
+
+        If *force* is True, always write the full public field set (used after load
+        when the config file was missing keys so defaults are persisted).
         """
         self = cls.instance()
         with self._state_lock:
@@ -186,13 +192,13 @@ class Settings(metaclass=_SingletonMeta):
                     if k in self.__dataclass_fields__ and not k.startswith("_"):
                         setattr(self, k, v)
 
-                    if v == "polling_rate":
+                    if k == "polling_rate":
                         for thread in registry.get_all_threads():
                             if hasattr(thread, "update_polling_rate"):
                                 thread.update_polling_rate()
 
             current = self._public_fields()
-            if current == self._saved_state:
+            if not force and current == self._saved_state:
                 return
             CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
             with CONFIG_PATH.open("w") as fh:
