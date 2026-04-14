@@ -31,11 +31,12 @@ _RAW_SMOOTHING_TAU_S: float = 0.10
 _IDLE_CORRECTION_DECAY_TAU_S: float = 0.12
 
 # Gas PID defaults (Settings can override Kp/Ki/Kd)
-_GAS_KP: float = 0.30
+_GAS_KP: float = 0.25
 _GAS_KI: float = 0.25
-_GAS_KD: float = 0.0
+_GAS_KD: float = 0.00
 _GAS_KI_CLAMP: float = 0.5          # pedal units
 _GAS_DERIVATIVE_TAU_S: float = 0.12  # measurement derivative smoothing
+_GAS_INTEGRAL_BRAKE_DECAY_TAU_S: float = 1.0  # integral leak while braking
 
 # Brake feedforward curve constants — fitted from collected data
 # y = 11.4596 * (1 - e^(-2.4277 * x^0.8518))
@@ -61,7 +62,7 @@ _BRAKE_MULTIPLIER_MAX_SLOPE_RAD: float = 0.15
 
 # Brake activation threshold — brake only engages for real deceleration
 # demands, not CC hunting noise. Gas PID handles coasting by outputting ~0.
-_BRAKE_ACTIVATION_MS2: float = 0.03  # wanted must be below -this to engage brake
+_BRAKE_ACTIVATION_MS2: float = 0.00  # wanted must be below -this to engage brake
 
 # Road load
 _ROAD_LOAD_SPEED_EPSILON_MS: float = 0.2
@@ -394,7 +395,7 @@ class AccelToPedals:
         ff_gravity = 0.0
         if self._estimated_max_accel_ms2 and self._estimated_max_accel_ms2 > 0.1:
             ff_gravity = _clamp(
-                road_load_ms2 / self._estimated_max_accel_ms2,
+                (wanted_smooth + road_load_ms2) / self._estimated_max_accel_ms2,
                 0.0,
                 0.5,
             )
@@ -710,7 +711,7 @@ class AccelToPedals:
         if cruise_commanding:
             # Brake only for real deceleration demands — not CC hunting noise.
             # Gas PID handles mild negatives by outputting 0 (coast).
-            braking = self._wanted_smooth < -_BRAKE_ACTIVATION_MS2
+            braking = control_wanted < -_BRAKE_ACTIVATION_MS2
 
             # Gas PID runs continuously — output clamped [0,1].
             # When wanted is slightly negative, PID naturally outputs ~0 gas
@@ -726,8 +727,8 @@ class AccelToPedals:
                 road_load_accel, gain_scale, shift_factor, gear_dash,
             )
             if braking:
-                self._gas_integral = saved_integral
-                gas_i = saved_integral
+                self._gas_integral = saved_integral * math.exp(-dt / _GAS_INTEGRAL_BRAKE_DECAY_TAU_S)
+                gas_i = self._gas_integral
 
             if braking:
                 brake_cmd, brake_ff, brake_trim_p, brake_trim_i = self._brake_step(
