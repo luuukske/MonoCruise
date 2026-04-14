@@ -33,12 +33,13 @@ _IDLE_CORRECTION_DECAY_TAU_S: float = 0.12
 # Gas PID defaults (Settings can override Kp/Ki/Kd)
 _GAS_KP: float = 0.25
 _GAS_KI: float = 0.25
-_GAS_KD: float = 0.00
+_GAS_KD: float = 0.15
 _GAS_KI_CLAMP: float = 0.5          # pedal units
 _GAS_DERIVATIVE_TAU_S: float = 0.12  # measurement derivative smoothing
 _GAS_INTEGRAL_BRAKE_DECAY_TAU_S: float = 1.0  # integral leak while braking
 
 # Brake feedforward curve constants — fitted from collected data
+# DO NOT CHANGE WITHOUT VALID COLLECTED DATA
 # y = 11.4596 * (1 - e^(-2.4277 * x^0.8518))
 # where x = brake pedal [0,1], y = |decel| in m/s².
 # Code uses the inverse: pedal from desired deceleration.
