@@ -301,7 +301,7 @@ class SendingThread(BaseThread):
                     spd_ms = float(tel_thread.data.speed)
                     has_t = bool(tel_thread.data.ego_has_trailer)
                     wheels_on_ground = int(tel_thread.data.wheels_on_ground)
-                    road_pitch_deg = float(tel_thread.data.rotationY)
+                    road_pitch = float(tel_thread.data.rotationY)
                     tel_gear_dashboard = int(tel_thread.data.gear_dashboard)
                     game_throttle = float(tel_thread.data.gameThrottle)
                     game_clutch = float(tel_thread.data.gameClutch)
@@ -329,7 +329,7 @@ class SendingThread(BaseThread):
                     has_t,
                     max_accel_ms2=self._capacity_tracker.max_accel_ms2,
                     max_brake_ms2=self._capacity_tracker.max_brake_ms2,
-                    road_pitch_deg=road_pitch_deg,
+                    road_pitch=road_pitch,
                     cruise_commanding=cruise_active,
                     gear_dashboard=tel_gear_dashboard,
                     game_throttle=game_throttle,

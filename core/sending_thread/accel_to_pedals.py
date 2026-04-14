@@ -298,19 +298,23 @@ class AccelToPedals:
         return 1.0
 
     @staticmethod
-    def _road_grade_from_deg(pitch_deg: float) -> tuple[float, float]:
-        theta = math.radians(_finite_or_zero(pitch_deg))
+    def _road_grade_from_norm(pitch: float) -> tuple[float, float]:
+        """Convert normalized full circle [0.0, 1.0] to radians."""
+        val = _finite_or_zero(pitch)
+        # Handle wrap-around (e.g., 0.99 is a slight negative angle)
+        val = (val + 0.5) % 1.0 - 0.5
+        theta = val * 2.0 * math.pi
         return theta, _clamp(theta, -_MAX_ROAD_GRADE_RAD, _MAX_ROAD_GRADE_RAD)
 
     def _road_load_accel_ms2(
         self,
         speed_ms: float,
         wanted_accel_ms2: float,
-        pitch_deg: float,
+        pitch: float,
         gear_dashboard: int,
     ) -> tuple[float, float, float]:
         motion_sign = self._motion_sign(speed_ms, wanted_accel_ms2, gear_dashboard)
-        grade_unc_rad, grade_rad = self._road_grade_from_deg(pitch_deg)
+        grade_unc_rad, grade_rad = self._road_grade_from_norm(pitch)
         rolling_coeff = max(0.0, _finite_or_zero(Settings.mapper_rolling_resistance))
         rolling_accel = motion_sign * rolling_coeff * GRAVITY_MS2 * math.cos(grade_rad)
         slope_accel = motion_sign * GRAVITY_MS2 * math.sin(grade_rad)
@@ -625,14 +629,14 @@ class AccelToPedals:
         max_accel_ms2: float = 0.0,
         max_brake_ms2: float = 0.0,
         cruise_commanding: bool = False,
-        road_pitch_deg: float = 0.0,
+        road_pitch: float = 0.0,
         gear_dashboard: int = 0,
         game_throttle: float = 0.0,
         game_clutch: float = 0.0,
     ) -> PedalTargets:
         gear_dash = int(_finite_or_zero(gear_dashboard))
         speed = max(0.0, _finite_or_zero(speed_ms))
-        pitch_deg = _finite_or_zero(road_pitch_deg)
+        pitch = _finite_or_zero(road_pitch)
         throttle_applied = _clamp(_finite_or_zero(game_throttle), 0.0, 1.0)
         clutch_applied = _clamp(_finite_or_zero(game_clutch), 0.0, 1.0)
         now = math.nan
@@ -659,7 +663,7 @@ class AccelToPedals:
 
         # Road load
         road_load_accel, grade_unc_rad, grade_rad = self._road_load_accel_ms2(
-            speed, wanted, pitch_deg, gear_dash
+            speed, wanted, pitch, gear_dash
         )
 
         # Capacity estimates
