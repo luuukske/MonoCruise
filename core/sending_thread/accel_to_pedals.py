@@ -394,11 +394,7 @@ class AccelToPedals:
         # making it react faster and stay closer to zero.
         ff_gravity = 0.0
         if self._estimated_max_accel_ms2 and self._estimated_max_accel_ms2 > 0.1:
-            ff_gravity = _clamp(
-                (wanted_smooth + road_load_ms2) / self._estimated_max_accel_ms2,
-                0.0,
-                0.5,
-            )
+            ff_gravity = (wanted_smooth + road_load_ms2) / self._estimated_max_accel_ms2
 
         # Proportional — zeroed during gearshift
         p_term = kp * error_ms2 * shift_factor
