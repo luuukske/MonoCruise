@@ -111,6 +111,8 @@ class SendingThread(BaseThread):
         self._key_listener = None
         self._spd_smooth: float | None = None
         self._prev_spd_mono: float | None = None
+        self._brake_active: bool = False
+        self._brake_last_active_at: float = 0.0
 
         # Brake-curve refit logger: every 1 s while braking, append
         # (median_decel, median_pedal) to brake_fit_samples.csv. Temporary.
@@ -188,6 +190,8 @@ class SendingThread(BaseThread):
         self._last_should_force = False
         self._hazard_user_override = False
         self._prev_tel_hazards = False
+        self._brake_active = False
+        self._brake_last_active_at = 0.0
 
         self._capacity_tracker.load_persisted(
             baseline_brake=baseline_brake_ms2(0.0, False),
@@ -563,10 +567,26 @@ class SendingThread(BaseThread):
         a = float(complex(a).real)
         b = float(complex(b).real)
 
-        # Cruise / ACC: mapper gas when active; mapper brake merged whenever connected.
+        # Cruise / ACC: mapper gas when active; mapper brake merged whenever connected (for AEB).
         if cruise_active:
             a = max(a, mapper_gas)
         b = max(b, mapper_brake)
+
+        # Brake threshold hysteresis: suppress flicker from rapid OPD/CC transitions.
+        _now = time.monotonic()
+        if b > 0.02:
+            self._brake_active = True
+            self._brake_last_active_at = _now
+        elif self._brake_active:
+            if a >= 0.2:
+                self._brake_active = False
+            elif _now - self._brake_last_active_at >= 0.15 / (a + 0.075):
+                self._brake_active = False
+            b = max(0.0001, b)
+        if not self._brake_active:
+            b = 0.0
+
+        print(self._brake_active)
 
         controller.aforward = a
         controller.abackward = b
