@@ -28,57 +28,42 @@ _TRAILER_WEIGHT_BIAS: float = 1.02
 # Smoothing time constants
 _WANTED_SMOOTHING_TAU_S: float = 0.05
 _RAW_SMOOTHING_TAU_S: float = 0.10
-_IDLE_CORRECTION_DECAY_TAU_S: float = 0.12
 
-# Gas PID defaults (Settings can override Kp/Ki/Kd)
-_GAS_KP: float = 0.25
-_GAS_KI: float = 0.25
-_GAS_KD: float = 0.15
-_GAS_KI_CLAMP: float = 0.5          # pedal units
-_GAS_DERIVATIVE_TAU_S: float = 0.12  # measurement derivative smoothing
-_GAS_INTEGRAL_BRAKE_DECAY_TAU_S: float = 1.0  # integral leak while braking
+# Fast PID (unified effort trim)
+_KP_FAST: float = 0.25
+_KI_FAST: float = 0.25
+_KD_FAST: float = 0.15
+_FAST_I_CLAMP: float = 0.10         # pedal units — intentionally small
+_FAST_OUT_CLAMP: float = 0.30       # total fast PID contribution cap
+_FAST_DERIV_TAU_S: float = 0.12     # measurement derivative smoothing
+
+# Slow integral (road load bias correction in m/s² space)
+_KI_SLOW: float = 0.03
+_SLOW_I_CLAMP_MS2: float = 2.0
 
 # Brake feedforward curve constants — fitted from collected data
 # DO NOT CHANGE WITHOUT VALID COLLECTED DATA
-# y = 11.4596 * (1 - e^(-2.4277 * x^0.8518))
+# y = A * (1 - e^(-rate * x^power))
 # where x = brake pedal [0,1], y = |decel| in m/s².
 # Code uses the inverse: pedal from desired deceleration.
-_BRAKE_CURVE_RATE: float = 3.9742
-_BRAKE_CURVE_POWER: float = 1.3419
-
-# Brake trim PI (small corrections on top of feedforward)
-_BRAKE_KP_TRIM: float = 0.06
-_BRAKE_KI_TRIM: float = 0.18
-_BRAKE_KI_TRIM_CLAMP: float = 0.18     # pedal units
-_BRAKE_TRIM_DECAY_TAU_S: float = 3.0   # integral leak when not braking — keep warm between events
-
-# Brake anticipation — pre-load FF using falling wanted_smooth (rising decel demand).
-# Pure lead on the input; safe because FF self-zeroes when lead contribution is absent.
-_BRAKE_LEAD_TAU_S: float = 0.25        # seconds of look-ahead on wanted derivative
-_BRAKE_LEAD_DERIV_SMOOTH_TAU_S: float = 0.12  # smoothing on d(wanted)/dt
-
-# Slow brake multiplier — single EMA tracking truck-specific curve scaling
-_BRAKE_MULTIPLIER_TAU_S: float = 8.0
-_BRAKE_MULTIPLIER_MIN: float = 0.70
-_BRAKE_MULTIPLIER_MAX: float = 1.40
-_BRAKE_MULTIPLIER_SAMPLE_PEDAL: float = 0.08
-_BRAKE_MULTIPLIER_SAMPLE_SPEED_MS: float = 5.0
-_BRAKE_MULTIPLIER_MAX_SLOPE_RAD: float = 0.15
-
-# Brake activation threshold — brake only engages for real deceleration
-# demands, not CC hunting noise. Gas PID handles coasting by outputting ~0.
-_BRAKE_ACTIVATION_MS2: float = 0.00  # wanted must be below -this to engage brake
+_BRAKE_CURVE_RATE: float = 2.4277
+_BRAKE_CURVE_POWER: float = 0.8518
 
 # Road load
 _ROAD_LOAD_SPEED_EPSILON_MS: float = 0.2
 _MAX_ROAD_GRADE_RAD: float = 0.35  # ~20 deg — clamp pathological game values
+# Aerodynamic drag coefficient fitted from coast-down data.
+# decel_aero = _AERO_DRAG_ACCEL_PER_V2 * v^2  [m/s² per (m/s)²]
+# Fit on ~41 t truck gave ~4.9e-5. Close enough for any mass — slow integral
+# absorbs mass-driven residual.
+_AERO_DRAG_ACCEL_PER_V2: float = 4.9e-5
 
 # Gearshift handling
 _GAME_CLUTCH_ACTIVE_THRESHOLD: float = 0.05
-_GEARSHIFT_BLOCK_DURATION_S: float = 1.0
-_GEARSHIFT_RECOVERY_TAU_S: float = 1.0
+_GEARSHIFT_BLOCK_DURATION_S: float = 0.5
+_GEARSHIFT_RAMP_DURATION_S: float = 1.0
 
-# Rate limiting
+# Rate limiting (gas only)
 _GAS_RATE_LIMIT_PER_S: float = 3.0
 
 # Capacity estimates (static baselines; capacity tracker can override)
@@ -94,7 +79,7 @@ _DEBUG_LOG_HEADER_ROW: list[str] = [
     "utc",
     "speed_ms",
     "gear",
-    "gearshift_active",
+    "gearshift_factor",
     "pedal_state",
     "wanted_ms2",
     "wanted_smooth",
@@ -102,25 +87,24 @@ _DEBUG_LOG_HEADER_ROW: list[str] = [
     "raw_smooth",
     "error_ms2",
     "road_load_ms2",
-    "control_wanted_ms2",
-    # Gas PID
-    "gas_p",
-    "gas_i",
-    "gas_d",
+    "slow_integral_ms2",
+    "effective_road_load_ms2",
+    "ff",
+    "fast_p",
+    "fast_i",
+    "fast_d",
+    "fast_out",
+    "effort",
     "gas_cmd",
-    # Brake feedforward + trim
-    "brake_ff",
-    "brake_trim_p",
-    "brake_trim_i",
     "brake_cmd",
-    "brake_multiplier",
-    # Meta
     "gain_scale",
     "game_throttle",
     "game_clutch",
     "est_accel_ms2",
     "est_brake_ms2",
     "slope_rad",
+    "capacity_used_ms2",
+    "error_pedal",
 ]
 _DEBUG_LOG_INTERVAL_S: float = 0.10  # 10 Hz
 
@@ -191,7 +175,7 @@ def idle_creep_brake(speed_ms: float, gear_dashboard: int) -> float:
     return 0.0
 
 
-# Pedal state labels (for debug logging only)
+# Pedal state labels (for debug logging / telemetry only — derived from effort sign)
 _STATE_GAS: int = 1
 _STATE_BRAKE: int = 2
 _STATE_NAMES: dict[int, str] = {_STATE_GAS: "GAS", _STATE_BRAKE: "BRAKE"}
@@ -213,7 +197,13 @@ class PedalTargets:
     integral_correction: float = 0.0
     estimated_max_accel_ms2: float = 0.0
     estimated_max_brake_ms2: float = 0.0
-    # New diagnostic fields
+    # Diagnostics — field names preserved for external consumers.
+    # Semantic mapping to unified controller:
+    #   gas_p/gas_i/gas_d → fast PID terms (used for gas OR brake, unified)
+    #   brake_ff          → brake-side feedforward pedal magnitude (0 when effort>=0)
+    #   brake_trim_p      → slow_integral in m/s² space (repurposed; no trim P anymore)
+    #   brake_trim_i      → fast integral in pedal units (same as gas_i, kept for compat)
+    #   brake_multiplier  → fixed 1.0 (deprecated; pedal_capacity.py handles this)
     gas_p: float = 0.0
     gas_i: float = 0.0
     gas_d: float = 0.0
@@ -232,29 +222,23 @@ class AccelToPedals:
         self._raw_smooth: float = 0.0
         self._prev_mono: float | None = None
 
-        # Gas PID state
-        self._gas_integral: float = 0.0
+        # Unified fast PID state
+        self._fast_integral: float = 0.0
+        self._fast_deriv_smooth: float = 0.0
         self._prev_raw_smooth: float = 0.0
-        self._gas_deriv_smooth: float = 0.0
         self._prev_gas_cmd: float | None = None
 
-        # Brake trim PI state
-        self._brake_trim_integral: float = 0.0
-
-        # Anticipation: smoothed derivative of wanted_smooth
-        self._prev_wanted_smooth: float = 0.0
-        self._wanted_deriv_smooth: float = 0.0
-
-        # Brake multiplier — slow EMA tracking truck-specific curve scaling
-        self._brake_multiplier: float = 1.0
+        # Slow road load correction integral (m/s² space)
+        self._slow_integral: float = 0.0
 
         # Capacity estimates
         self._estimated_max_accel_ms2: float | None = None
         self._estimated_max_brake_ms2: float | None = None
 
-        # Gearshift state
-        self._gearshift_start_mono: float | None = None
-        self._integral_block_end_mono: float | None = None
+        # Gearshift freeze state
+        self._clutch_active: bool = False
+        self._clutch_release_mono: float = -math.inf
+        self._frozen_raw_smooth: float = 0.0
 
         # Debug logging
         self._project_root = Path(__file__).resolve().parents[2]
@@ -277,16 +261,17 @@ class AccelToPedals:
     def reset_smoothing(self) -> None:
         self._wanted_smooth = 0.0
         self._raw_smooth = 0.0
-        self._gas_integral = 0.0
+        self._fast_integral = 0.0
+        self._fast_deriv_smooth = 0.0
         self._prev_raw_smooth = 0.0
-        self._gas_deriv_smooth = 0.0
         self._prev_gas_cmd = None
-        self._brake_trim_integral = 0.0
+        self._slow_integral = 0.0
         self._prev_mono = None
-        self._gearshift_start_mono = None
-        self._integral_block_end_mono = None
+        self._clutch_active = False
+        self._clutch_release_mono = -math.inf
+        self._frozen_raw_smooth = 0.0
 
-    # Helpers — shared
+    # Helpers
 
     @staticmethod
     def _ema_step(current: float, sample: float, alpha: float) -> float:
@@ -310,7 +295,6 @@ class AccelToPedals:
     def _road_grade_from_norm(pitch: float) -> tuple[float, float]:
         """Convert normalized full circle [0.0, 1.0] to radians."""
         val = _finite_or_zero(pitch)
-        # Handle wrap-around (e.g., 0.99 is a slight negative angle)
         val = (val + 0.5) % 1.0 - 0.5
         theta = val * 2.0 * math.pi
         return theta, _clamp(theta, -_MAX_ROAD_GRADE_RAD, _MAX_ROAD_GRADE_RAD)
@@ -327,7 +311,8 @@ class AccelToPedals:
         rolling_coeff = max(0.0, _finite_or_zero(Settings.mapper_rolling_resistance))
         rolling_accel = motion_sign * rolling_coeff * GRAVITY_MS2 * math.cos(grade_rad)
         slope_accel = motion_sign * GRAVITY_MS2 * math.sin(grade_rad)
-        return rolling_accel + slope_accel, grade_unc_rad, grade_rad
+        aero_accel = motion_sign * _AERO_DRAG_ACCEL_PER_V2 * speed_ms * speed_ms
+        return rolling_accel + slope_accel + aero_accel, grade_unc_rad, grade_rad
 
     @staticmethod
     def _measured_control_accel_ms2(raw_accel_ms2: float, road_load_ms2: float) -> float:
@@ -347,7 +332,6 @@ class AccelToPedals:
             return 0.0
         rate = _BRAKE_CURVE_RATE
         power = _BRAKE_CURVE_POWER
-        # Clamp to curve max
         ratio = min(decel_ms2 / A, 1.0 - 1e-9)
         inner = 1.0 - ratio
         if inner <= 0.0:
@@ -357,176 +341,83 @@ class AccelToPedals:
             return 0.0
         return min(1.0, arg ** (1.0 / power))
 
-    # Gearshift detection
+    # Gearshift freeze/ramp
 
-    def _gearshift_update_factor(self, now: float, clutch: float) -> float:
-        """Returns 0.0 during gearshift block, ramps to 1.0 after recovery."""
+    def _gearshift_factor(self, now: float, clutch: float, raw_smooth_live: float) -> tuple[float, float]:
+        """Update clutch freeze state. Returns (factor, effective_raw_smooth).
+
+        factor: 0.0 during hard block/clutch, ramps 0→1 after release.
+        effective_raw_smooth: frozen value (blended during ramp) to use for error.
+        """
         now_safe = now if math.isfinite(now) else 0.0
-        if clutch > _GAME_CLUTCH_ACTIVE_THRESHOLD:
-            self._integral_block_end_mono = now_safe + _GEARSHIFT_BLOCK_DURATION_S
-            self._gearshift_start_mono = now_safe
-        elif self._gearshift_start_mono is not None:
-            # Clutch released — block_end already set
-            self._gearshift_start_mono = None
+        clutch_pressed = clutch > _GAME_CLUTCH_ACTIVE_THRESHOLD
 
-        if self._integral_block_end_mono is None:
-            return 1.0
-        if now_safe < self._integral_block_end_mono:
-            return 0.0
-        time_since_unblock = now_safe - self._integral_block_end_mono
-        factor = 1.0 - math.exp(-time_since_unblock / _GEARSHIFT_RECOVERY_TAU_S)
-        if factor > 0.99:
-            self._integral_block_end_mono = None
-            return 1.0
-        return factor
+        if clutch_pressed and not self._clutch_active:
+            # Leading edge
+            self._clutch_active = True
+            self._frozen_raw_smooth = raw_smooth_live
+        elif not clutch_pressed and self._clutch_active:
+            # Trailing edge
+            self._clutch_active = False
+            self._clutch_release_mono = now_safe
 
-    # Gas path — PID on acceleration error, outputs pedal directly
+        if clutch_pressed:
+            return 0.0, self._frozen_raw_smooth
 
-    def _gas_step(
+        time_since_release = now_safe - self._clutch_release_mono
+        if time_since_release < _GEARSHIFT_BLOCK_DURATION_S:
+            return 0.0, self._frozen_raw_smooth
+        if time_since_release < _GEARSHIFT_BLOCK_DURATION_S + _GEARSHIFT_RAMP_DURATION_S:
+            t = (time_since_release - _GEARSHIFT_BLOCK_DURATION_S) / _GEARSHIFT_RAMP_DURATION_S
+            blended = self._frozen_raw_smooth + t * (raw_smooth_live - self._frozen_raw_smooth)
+            return t, blended
+        return 1.0, raw_smooth_live
+
+    # Unified fast PID — trim on top of feedforward
+
+    def _fast_pid_step(
         self,
         dt: float,
-        wanted_smooth: float,
-        raw_smooth: float,
-        road_load_ms2: float,
+        error_ms2: float,
+        raw_smooth_eff: float,
         gain_scale: float,
-        shift_factor: float,
-        gear_dash: int,
-    ) -> tuple[float, float, float, float]:
-        """Returns (gas_pedal, p_term, i_term, d_term)."""
-        # Acceleration error
-        error_ms2 = wanted_smooth - raw_smooth
+        factor: float,
+    ) -> tuple[float, float, float, float, float]:
+        """Returns (fast_out, p_pedal, i_pedal, d_pedal, capacity_used_ms2).
 
-        # Effective gains scaled by mass ratio
-        kp = _GAS_KP * gain_scale
-        ki = _GAS_KI * gain_scale
-        kd = _GAS_KD * gain_scale
-        ki_clamp = _GAS_KI_CLAMP
+        Integrator is stored in pedal units directly so sign flips in error_ms2
+        don't cause discontinuous output. Capacity only affects the m/s² → pedal
+        conversion rate, not the stored state.
+        """
+        kp = _KP_FAST * gain_scale
+        ki = _KI_FAST * gain_scale
+        kd = _KD_FAST * gain_scale
 
-        # Gravity feedforward: pedal offset to cancel road load on gas side.
-        # road_load_ms2 is positive when resisting forward motion (uphill/rolling).
-        # This provides the baseline throttle so the integral only handles trim —
-        # making it react faster and stay closer to zero.
-        ff_gravity = 0.0
-        if self._estimated_max_accel_ms2 and self._estimated_max_accel_ms2 > 0.1:
-            ff_gravity = (wanted_smooth + road_load_ms2) / self._estimated_max_accel_ms2
+        # Capacity picked by error sign — determines how much pedal per m/s² of error.
+        if error_ms2 >= 0.0:
+            capacity = self._estimated_max_accel_ms2 or 0.0
+        else:
+            capacity = self._estimated_max_brake_ms2 or 0.0
+        capacity = max(capacity, 0.1)
 
-        # Proportional — zeroed during gearshift
-        p_term = kp * error_ms2 * shift_factor
+        # Convert error to pedal-equivalent ONCE; all PID terms live in pedal space.
+        error_pedal = error_ms2 / capacity
 
-        # Integral — blocked during gearshift
-        self._gas_integral += ki * error_ms2 * shift_factor * dt
-        self._gas_integral = _clamp(self._gas_integral, -ki_clamp, ki_clamp)
-        i_term = self._gas_integral
+        p_pedal = kp * error_pedal * factor
 
-        # Derivative on measurement only (not error) to avoid setpoint kick
-        deriv_alpha = self._ema_alpha(dt, _GAS_DERIVATIVE_TAU_S)
-        deriv_raw = (raw_smooth - self._prev_raw_smooth) / max(dt, 1e-6)
-        self._gas_deriv_smooth = self._ema_step(self._gas_deriv_smooth, deriv_raw, deriv_alpha)
-        # Negate: if accel is increasing (positive deriv), we want less gas
-        d_term = -kd * self._gas_deriv_smooth * shift_factor
+        # Integral in pedal units — no representation shift across sign flips.
+        self._fast_integral += ki * error_pedal * factor * dt
+        self._fast_integral = _clamp(self._fast_integral, -_FAST_I_CLAMP, _FAST_I_CLAMP)
+        i_pedal = self._fast_integral
 
-        # Combine
-        gas_pedal = ff_gravity + p_term + i_term + d_term
-        gas_pedal = _clamp(gas_pedal, 0.0, 1.0)
+        # Derivative on measurement (smoothed), converted to pedal units.
+        deriv_alpha = self._ema_alpha(dt, _FAST_DERIV_TAU_S)
+        deriv_raw = (raw_smooth_eff - self._prev_raw_smooth) / max(dt, 1e-6)
+        self._fast_deriv_smooth = self._ema_step(self._fast_deriv_smooth, deriv_raw, deriv_alpha)
+        d_pedal = -kd * (self._fast_deriv_smooth / capacity) * factor
 
-        # Rate limit
-        if self._prev_gas_cmd is not None:
-            max_delta = _GAS_RATE_LIMIT_PER_S * dt
-            gas_pedal = _clamp(
-                gas_pedal,
-                self._prev_gas_cmd - max_delta,
-                self._prev_gas_cmd + max_delta,
-            )
-        self._prev_gas_cmd = gas_pedal
-
-        # No gas in neutral
-        if gear_dash == 0:
-            gas_pedal = 0.0
-
-        return gas_pedal, p_term, i_term, d_term
-
-    # Brake path — feedforward from fitted curve + trim PI
-
-    def _brake_step(
-        self,
-        dt: float,
-        wanted_smooth: float,
-        raw_smooth: float,
-        road_load_ms2: float,
-        shift_factor: float,
-    ) -> tuple[float, float, float, float]:
-        """Returns (brake_pedal, ff_pedal, trim_p, trim_i)."""
-        # Desired braking effort after compensating physical road load.
-        # Negative road load (downhill) increases required brake effort, while
-        # positive road load (uphill/rolling drag) reduces it.
-        wanted_decel = max(0.0, -(wanted_smooth + road_load_ms2))
-
-        # Anticipatory lead: if wanted_smooth is falling (more decel demand incoming),
-        # add a portion of (-d/dt wanted_smooth) to decel target. Only the negative
-        # direction — never reduces brake demand when wanted is rising.
-        lead_component = max(0.0, -self._wanted_deriv_smooth) * _BRAKE_LEAD_TAU_S
-        effective_decel = wanted_decel + lead_component
-
-        # Feedforward from fitted curve (with truck-specific multiplier)
-        ff_pedal = self._brake_pedal_from_decel(effective_decel) * self._brake_multiplier
-
-        # Trim PI: correct small errors from curve inaccuracy / truck variance
-        # Error: positive means we're not decelerating enough (need more brake)
-        measured_decel = max(0.0, -(raw_smooth + road_load_ms2))
-        brake_error = wanted_decel - measured_decel
-
-        trim_p = _BRAKE_KP_TRIM * brake_error * shift_factor
-        self._brake_trim_integral += _BRAKE_KI_TRIM * brake_error * shift_factor * dt
-        self._brake_trim_integral = _clamp(
-            self._brake_trim_integral, -_BRAKE_KI_TRIM_CLAMP, _BRAKE_KI_TRIM_CLAMP
-        )
-        trim_i = self._brake_trim_integral
-
-        brake_pedal = _clamp(ff_pedal + trim_p + trim_i, 0.0, 1.0)
-        return brake_pedal, ff_pedal, trim_p, trim_i
-
-    # Brake multiplier learning
-
-    def _update_brake_multiplier(
-        self,
-        dt: float,
-        speed_ms: float,
-        grade_unc_rad: float,
-        road_load_ms2: float,
-        brake_pedal: float,
-        raw_smooth: float,
-    ) -> None:
-        """Slowly adapt brake curve multiplier from measured vs expected response."""
-        if speed_ms < _BRAKE_MULTIPLIER_SAMPLE_SPEED_MS:
-            return
-        if brake_pedal < _BRAKE_MULTIPLIER_SAMPLE_PEDAL:
-            return
-        if abs(grade_unc_rad) > _BRAKE_MULTIPLIER_MAX_SLOPE_RAD:
-            return
-
-        # What the curve predicts for this pedal: forward function
-        # y = A * (1 - e^(-rate * x^power))
-        x = _clamp(brake_pedal / max(self._brake_multiplier, 0.01), 0.0, 1.0)
-        amplitude = self._estimated_max_brake_ms2 or 0.0
-        if amplitude <= 0.1:
-            return
-        predicted_decel = amplitude * (
-            1.0 - math.exp(-_BRAKE_CURVE_RATE * (x ** _BRAKE_CURVE_POWER))
-        )
-        if predicted_decel < 0.5:
-            return
-
-        measured_decel = max(0.0, -raw_smooth + road_load_ms2)
-        if measured_decel < 0.3:
-            return
-
-        ratio = measured_decel / predicted_decel
-        ratio = _clamp(ratio, _BRAKE_MULTIPLIER_MIN, _BRAKE_MULTIPLIER_MAX)
-        alpha = self._ema_alpha(dt, _BRAKE_MULTIPLIER_TAU_S)
-        self._brake_multiplier = self._ema_step(self._brake_multiplier, ratio, alpha)
-        self._brake_multiplier = _clamp(
-            self._brake_multiplier, _BRAKE_MULTIPLIER_MIN, _BRAKE_MULTIPLIER_MAX
-        )
+        fast_out = _clamp(p_pedal + i_pedal + d_pedal, -_FAST_OUT_CLAMP, _FAST_OUT_CLAMP)
+        return fast_out, p_pedal, i_pedal, d_pedal, capacity
 
     # Debug logging
 
@@ -569,26 +460,27 @@ class AccelToPedals:
         now: float,
         speed_ms: float,
         gear: int,
-        gearshift_active: bool,
+        gearshift_factor: float,
         pedal_state: int,
         wanted_ms2: float,
         raw_ms2: float,
         error_ms2: float,
         road_load_ms2: float,
-        control_wanted_ms2: float,
-        gas_p: float,
-        gas_i: float,
-        gas_d: float,
+        slow_integral_ms2: float,
+        effective_road_load_ms2: float,
+        ff: float,
+        fast_p: float,
+        fast_i: float,
+        fast_d: float,
+        fast_out: float,
+        effort: float,
         gas_cmd: float,
-        brake_ff: float,
-        brake_trim_p: float,
-        brake_trim_i: float,
         brake_cmd: float,
-        brake_multiplier: float,
         gain_scale: float,
         game_throttle: float,
         game_clutch: float,
         slope_rad: float,
+        capacity_used_ms2: float,
     ) -> None:
         if now - self._last_debug_log_mono < _DEBUG_LOG_INTERVAL_S:
             return
@@ -606,7 +498,7 @@ class AccelToPedals:
                 datetime.now(timezone.utc).isoformat(),
                 f"{speed_ms:.2f}",
                 gear,
-                int(gearshift_active),
+                f"{gearshift_factor:.3f}",
                 _STATE_NAMES.get(pedal_state, "?"),
                 f"{wanted_ms2:.3f}",
                 f"{self._wanted_smooth:.3f}",
@@ -614,22 +506,24 @@ class AccelToPedals:
                 f"{self._raw_smooth:.3f}",
                 f"{error_ms2:.3f}",
                 f"{road_load_ms2:.3f}",
-                f"{control_wanted_ms2:.3f}",
-                f"{gas_p:.4f}",
-                f"{gas_i:.4f}",
-                f"{gas_d:.4f}",
+                f"{slow_integral_ms2:.3f}",
+                f"{effective_road_load_ms2:.3f}",
+                f"{ff:+.4f}",
+                f"{fast_p:+.4f}",
+                f"{fast_i:+.4f}",
+                f"{fast_d:+.4f}",
+                f"{fast_out:+.4f}",
+                f"{effort:+.4f}",
                 f"{gas_cmd:.3f}",
-                f"{brake_ff:.3f}",
-                f"{brake_trim_p:.4f}",
-                f"{brake_trim_i:.4f}",
                 f"{brake_cmd:.3f}",
-                f"{brake_multiplier:.3f}",
                 f"{gain_scale:.3f}",
                 f"{game_throttle:.3f}",
                 f"{game_clutch:.3f}",
                 f"{(self._estimated_max_accel_ms2 or 0.0):.3f}",
                 f"{(self._estimated_max_brake_ms2 or 0.0):.3f}",
                 f"{slope_rad:.4f}",
+                f"{capacity_used_ms2:.3f}",
+                f"{(error_ms2 / max(capacity_used_ms2, 0.1)):+.4f}",
             ])
             self._debug_log_file.flush()
         except OSError:
@@ -671,22 +565,24 @@ class AccelToPedals:
             dt = _clamp(now - self._prev_mono, 1e-4, 0.5)
         self._prev_mono = now if math.isfinite(now) else None
 
-        # Smooth inputs
+        # Smooth wanted (always)
         wanted_alpha = self._ema_alpha(dt, _WANTED_SMOOTHING_TAU_S)
-        raw_alpha = self._ema_alpha(dt, _RAW_SMOOTHING_TAU_S)
         wanted = _finite_or_zero(wanted_accel_ms2) if cruise_commanding else 0.0
         raw = _finite_or_zero(raw_accel_ms2)
-
         self._wanted_smooth = self._ema_step(self._wanted_smooth, wanted, wanted_alpha)
-        self._raw_smooth = self._ema_step(self._raw_smooth, raw, raw_alpha)
 
-        # Smoothed derivative of wanted_smooth (for brake anticipation)
-        deriv_alpha = self._ema_alpha(dt, _BRAKE_LEAD_DERIV_SMOOTH_TAU_S)
-        raw_deriv = (self._wanted_smooth - self._prev_wanted_smooth) / max(dt, 1e-6)
-        self._wanted_deriv_smooth = self._ema_step(
-            self._wanted_deriv_smooth, raw_deriv, deriv_alpha
-        )
-        self._prev_wanted_smooth = self._wanted_smooth
+        # Compute live raw EMA candidate (but do not commit until we know freeze state)
+        raw_alpha = self._ema_alpha(dt, _RAW_SMOOTHING_TAU_S)
+        raw_smooth_live = self._ema_step(self._raw_smooth, raw, raw_alpha)
+
+        # Gearshift freeze: determine factor and effective raw_smooth to use this step
+        factor, raw_smooth_eff = self._gearshift_factor(now, clutch_applied, raw_smooth_live)
+
+        # Commit raw_smooth: frozen/blended during gearshift, live otherwise
+        if factor >= 1.0:
+            self._raw_smooth = raw_smooth_live
+        else:
+            self._raw_smooth = raw_smooth_eff
 
         # Road load
         road_load_accel, grade_unc_rad, grade_rad = self._road_load_accel_ms2(
@@ -713,79 +609,73 @@ class AccelToPedals:
         mass_kg = max(1.0, _finite_or_zero(total_mass_kg))
         gain_scale = _REFERENCE_MASS_KG / mass_kg
 
-        # Gearshift detection
-        shift_factor = self._gearshift_update_factor(now, clutch_applied)
-        gearshift_active = clutch_applied > _GAME_CLUTCH_ACTIVE_THRESHOLD
-
-        # Control wanted (with road load compensation)
-        control_wanted = self._wanted_smooth + road_load_accel if cruise_commanding else 0.0
-
-        # Error for logging
-        error_ms2 = self._raw_smooth - self._wanted_smooth
-        if not math.isfinite(error_ms2):
-            error_ms2 = 0.0
-
-        # Default outputs
+        # Defaults
+        effort = 0.0
+        ff = 0.0
+        fast_out = 0.0
+        fast_p = 0.0
+        fast_i = 0.0
+        fast_d = 0.0
+        capacity_used = 0.0
         gas_cmd = 0.0
         brake_cmd = 0.0
-        gas_p = 0.0
-        gas_i = 0.0
-        gas_d = 0.0
-        brake_ff = 0.0
-        brake_trim_p = 0.0
-        brake_trim_i = 0.0
+        effective_road_load = road_load_accel
 
         if cruise_commanding:
-            # Brake only for real deceleration demands — not CC hunting noise.
-            # Gas PID handles mild negatives by outputting 0 (coast).
-            braking = control_wanted < -_BRAKE_ACTIVATION_MS2
+            error_ms2 = self._wanted_smooth - self._raw_smooth
+            if not math.isfinite(error_ms2):
+                error_ms2 = 0.0
 
-            # Gas PID runs continuously — output clamped [0,1].
-            # When wanted is slightly negative, PID naturally outputs ~0 gas
-            # (negative P overwhelms FF → clamps at 0). This IS coasting, but
-            # the integral and derivative stay continuous. No transition spike.
-            #
-            # Freeze gas integral during braking: gas output is zeroed while
-            # braking, so integrating only accumulates stale negative offset
-            # that suppresses gas for seconds after brake release.
-            saved_integral = self._gas_integral
-            gas_cmd, gas_p, gas_i, gas_d = self._gas_step(
-                dt, self._wanted_smooth, self._raw_smooth,
-                road_load_accel, gain_scale, shift_factor, gear_dash,
+            # Slow integral — m/s² space, frozen during gearshift, no decay
+            self._slow_integral += _KI_SLOW * error_ms2 * factor * dt
+            self._slow_integral = _clamp(
+                self._slow_integral, -_SLOW_I_CLAMP_MS2, _SLOW_I_CLAMP_MS2
             )
-            if braking:
-                self._gas_integral = saved_integral * math.exp(-dt / _GAS_INTEGRAL_BRAKE_DECAY_TAU_S)
-                gas_i = self._gas_integral
+            effective_road_load = road_load_accel + self._slow_integral
 
-            if braking:
-                brake_cmd, brake_ff, brake_trim_p, brake_trim_i = self._brake_step(
-                    dt, self._wanted_smooth, self._raw_smooth,
-                    road_load_accel, shift_factor,
-                )
-                self._update_brake_multiplier(
-                    dt, speed, grade_unc_rad, road_load_accel,
-                    brake_cmd, self._raw_smooth,
-                )
-                # Don't send gas while actively braking
-                gas_cmd = 0.0
+            # Feedforward (stateless)
+            combined = self._wanted_smooth + effective_road_load
+            if combined >= 0.0:
+                max_a = max(self._estimated_max_accel_ms2 or 0.1, 0.1)
+                ff = combined / max_a
             else:
-                # Decay brake trim integral when not braking
-                decay = math.exp(-dt / _BRAKE_TRIM_DECAY_TAU_S)
-                self._brake_trim_integral *= decay
+                decel_needed = -combined
+                ff = -self._brake_pedal_from_decel(decel_needed)
 
-            pedal_state = _STATE_BRAKE if braking else _STATE_GAS
+            # Fast PID
+            fast_out, fast_p, fast_i, fast_d, capacity_used = self._fast_pid_step(
+                dt, error_ms2, self._raw_smooth, gain_scale, factor,
+            )
+
+            effort = _clamp(ff + fast_out, -1.0, 1.0)
+
+            gas_cmd = _clamp(effort, 0.0, 1.0)
+            brake_cmd = _clamp(-effort, 0.0, 1.0)
+
+            # Rate limit on gas only (brake must be immediate)
+            if self._prev_gas_cmd is not None:
+                max_delta = _GAS_RATE_LIMIT_PER_S * dt
+                gas_cmd = _clamp(
+                    gas_cmd,
+                    self._prev_gas_cmd - max_delta,
+                    self._prev_gas_cmd + max_delta,
+                )
+            self._prev_gas_cmd = gas_cmd
+
+            # No gas in neutral
+            if gear_dash == 0:
+                gas_cmd = 0.0
 
         else:
-            # Not commanding — decay all state
-            gas_decay = math.exp(-dt / _IDLE_CORRECTION_DECAY_TAU_S)
-            brake_decay = math.exp(-dt / _BRAKE_TRIM_DECAY_TAU_S)
-            self._gas_integral *= gas_decay
-            self._brake_trim_integral *= brake_decay
+            # Not commanding — hold slow integral, reset fast trim, clear prev gas
+            self._fast_integral = 0.0
+            self._fast_deriv_smooth = 0.0
             self._prev_gas_cmd = None
-            pedal_state = _STATE_GAS
 
-        # Update prev_raw_smooth for derivative (always, even when not commanding)
+        # Update prev_raw_smooth for derivative (always)
         self._prev_raw_smooth = self._raw_smooth
+
+        pedal_state = _STATE_BRAKE if effort < 0.0 else _STATE_GAS
 
         # Debug logging
         if cruise_commanding and math.isfinite(now):
@@ -793,29 +683,33 @@ class AccelToPedals:
                 now=now,
                 speed_ms=speed,
                 gear=gear_dash,
-                gearshift_active=gearshift_active,
+                gearshift_factor=factor,
                 pedal_state=pedal_state,
                 wanted_ms2=wanted,
                 raw_ms2=raw,
-                error_ms2=error_ms2,
+                error_ms2=self._wanted_smooth - self._raw_smooth,
                 road_load_ms2=road_load_accel,
-                control_wanted_ms2=control_wanted,
-                gas_p=gas_p,
-                gas_i=gas_i,
-                gas_d=gas_d,
+                slow_integral_ms2=self._slow_integral,
+                effective_road_load_ms2=effective_road_load,
+                ff=ff,
+                fast_p=fast_p,
+                fast_i=fast_i,
+                fast_d=fast_d,
+                fast_out=fast_out,
+                effort=effort,
                 gas_cmd=gas_cmd,
-                brake_ff=brake_ff,
-                brake_trim_p=brake_trim_p,
-                brake_trim_i=brake_trim_i,
                 brake_cmd=brake_cmd,
-                brake_multiplier=self._brake_multiplier,
                 gain_scale=gain_scale,
                 game_throttle=throttle_applied,
                 game_clutch=clutch_applied,
                 slope_rad=grade_unc_rad,
+                capacity_used_ms2=capacity_used,
             )
 
         creep = idle_creep_brake(speed, gear_dash)
+        # brake_ff diagnostic: magnitude of brake-side feedforward pedal
+        brake_ff_diag = -ff if ff < 0.0 else 0.0
+
         return PedalTargets(
             gas=gas_cmd,
             brake=min(1.0, brake_cmd + creep),
@@ -827,19 +721,19 @@ class AccelToPedals:
                 self._raw_smooth, road_load_accel
             ),
             road_load_ms2=road_load_accel,
-            control_wanted_ms2=control_wanted,
+            control_wanted_ms2=self._wanted_smooth + effective_road_load if cruise_commanding else 0.0,
             wanted_smooth=self._wanted_smooth,
             raw_smooth=self._raw_smooth,
-            integral_correction=self._gas_integral,
+            integral_correction=self._fast_integral,
             estimated_max_accel_ms2=self._estimated_max_accel_ms2,
             estimated_max_brake_ms2=self._estimated_max_brake_ms2,
-            gas_p=gas_p,
-            gas_i=gas_i,
-            gas_d=gas_d,
-            brake_ff=brake_ff,
-            brake_trim_p=brake_trim_p,
-            brake_trim_i=brake_trim_i,
-            brake_multiplier=self._brake_multiplier,
+            gas_p=fast_p,
+            gas_i=fast_i,
+            gas_d=fast_d,
+            brake_ff=brake_ff_diag,
+            brake_trim_p=self._slow_integral,
+            brake_trim_i=fast_i,
+            brake_multiplier=1.0,
             gain_scale=gain_scale,
             pedal_state=pedal_state,
         )

@@ -11,10 +11,13 @@ Responsibilities:
 - Expose change_hazards() for verified hazard toggling with retrigger (max 3).
 """
 
+import csv
 import logging
 import math
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 import threading
 
 from core.thread_management.base_thread import BaseThread, ThreadData
@@ -27,6 +30,29 @@ from .scscontroller import SCSController
 from .visualization_bar import VisualizationBar
 
 logger = logging.getLogger(__name__)
+
+# Coast-down logger — captures raw decel vs speed with pedals fully released,
+# so rolling resistance + aerodynamic drag can be fitted offline.
+_COAST_LOG_NAME: str = "coast_debug.csv"
+_COAST_LOG_INTERVAL_S: float = 0.10  # 10 Hz
+_COAST_LOG_MIN_SPEED_MS: float = 1.0
+_COAST_LOG_HEADER_ROW: list[str] = [
+    "t_s",
+    "utc",
+    "speed_ms",
+    "raw_accel_ms2",
+    "slope_rad",
+    "slope_accel_ms2",
+    "drag_accel_ms2",  # raw_accel - slope_accel — this is what you plot vs speed
+    "gear",
+    "game_clutch",
+    "game_throttle",
+    "game_brake",
+    "mass_kg",
+    "has_trailer",
+    "aforward",
+    "abackward",
+]
 
 
 def create_visualization_bar() -> VisualizationBar:
@@ -109,6 +135,101 @@ class SendingThread(BaseThread):
         self._prev_spd_mono: float | None = None
         self._brake_active: bool = False
         self._brake_last_active_at: float = 0.0
+
+        # Coast-down logger state
+        self._coast_log_file = None
+        self._coast_log_writer = None
+        self._last_coast_log_mono: float = 0.0
+        self._coast_log_start_mono: float | None = None
+        try:
+            self._project_root = Path(__file__).resolve().parents[2]
+        except Exception:
+            self._project_root = Path(".").resolve()
+
+    # Coast-down CSV logger ------------------------------------------------
+
+    def _ensure_coast_log(self) -> None:
+        if self._coast_log_file is not None:
+            return
+        path = self._project_root / _COAST_LOG_NAME
+        write_header = not path.exists() or path.stat().st_size == 0
+        try:
+            self._coast_log_file = path.open("a", newline="", encoding="utf-8")
+            self._coast_log_writer = csv.writer(self._coast_log_file)
+            if write_header:
+                self._coast_log_writer.writerow(_COAST_LOG_HEADER_ROW)
+                self._coast_log_file.flush()
+        except OSError:
+            self._coast_log_file = None
+            self._coast_log_writer = None
+            logger.debug("coast_debug log unavailable", exc_info=True)
+
+    def _log_coast_step(
+        self,
+        *,
+        speed_ms: float,
+        raw_accel_ms2: float,
+        slope_rad: float,
+        gear: int,
+        game_clutch: float,
+        game_throttle: float,
+        game_brake: float,
+        mass_kg: float,
+        has_trailer: bool,
+        aforward: float,
+        abackward: float,
+    ) -> None:
+        if abs(aforward) > 1e-4 or abs(abackward) > 1e-4:
+            return
+        if abs(game_throttle) > 0.02 or abs(game_brake) > 0.02:
+            return
+        if speed_ms < _COAST_LOG_MIN_SPEED_MS:
+            return
+
+        now = time.monotonic()
+        if now - self._last_coast_log_mono < _COAST_LOG_INTERVAL_S:
+            return
+        self._last_coast_log_mono = now
+        if self._coast_log_start_mono is None:
+            self._coast_log_start_mono = now
+        t_s = now - self._coast_log_start_mono
+
+        self._ensure_coast_log()
+        if self._coast_log_writer is None:
+            return
+
+        slope_accel = 9.81 * math.sin(slope_rad)
+        drag_accel = raw_accel_ms2 - slope_accel
+        try:
+            self._coast_log_writer.writerow([
+                f"{t_s:.3f}",
+                datetime.now(timezone.utc).isoformat(),
+                f"{speed_ms:.3f}",
+                f"{raw_accel_ms2:+.4f}",
+                f"{slope_rad:+.5f}",
+                f"{slope_accel:+.4f}",
+                f"{drag_accel:+.4f}",
+                gear,
+                f"{game_clutch:.3f}",
+                f"{game_throttle:.3f}",
+                f"{game_brake:.3f}",
+                f"{mass_kg:.1f}",
+                int(bool(has_trailer)),
+                f"{aforward:.4f}",
+                f"{abackward:.4f}",
+            ])
+            self._coast_log_file.flush()
+        except OSError:
+            logger.debug("coast_debug log write failed", exc_info=True)
+
+    def _close_coast_log(self) -> None:
+        if self._coast_log_file is not None:
+            try:
+                self._coast_log_file.close()
+            except OSError:
+                pass
+            self._coast_log_file = None
+            self._coast_log_writer = None
 
     def toggle_bool(self, name: str, duration: float = BOOL_PRESS_DURATION) -> None:
         """One-shot timed press: set *name* True for *duration* seconds, then False."""
@@ -297,6 +418,10 @@ class SendingThread(BaseThread):
         has_t = False
         brake_grade_rad = 0.0
         game_clutch = 0.0
+        game_throttle = 0.0
+        game_brake = 0.0
+        road_pitch = 0.0
+        tel_gear_dashboard = 0
         if connected and tel_thread is not None and tel_thread.is_alive():
             try:
                 with tel_thread.data._lock:
@@ -309,6 +434,7 @@ class SendingThread(BaseThread):
                     tel_gear_dashboard = int(tel_thread.data.gear_dashboard)
                     game_throttle = float(tel_thread.data.gameThrottle)
                     game_clutch = float(tel_thread.data.gameClutch)
+                    game_brake = float(getattr(tel_thread.data, "gameBrake", 0.0))
                 now_spd = time.monotonic()
                 if self._spd_smooth is None:
                     self._spd_smooth = spd_ms
@@ -557,7 +683,7 @@ class SendingThread(BaseThread):
 
         # Brake threshold hysteresis: suppress flicker from rapid OPD/CC transitions.
         _now = time.monotonic()
-        if b > 0.02:
+        if b > 0.01:
             self._brake_active = True
             self._brake_last_active_at = _now
         elif self._brake_active:
@@ -571,6 +697,21 @@ class SendingThread(BaseThread):
 
         controller.aforward = a
         controller.abackward = b
+
+        # Coast-down sample: only logs when final outputs and driver inputs are zero.
+        self._log_coast_step(
+            speed_ms=speed_ms,
+            raw_accel_ms2=raw_a,
+            slope_rad=brake_grade_rad,
+            gear=tel_gear_dashboard,
+            game_clutch=game_clutch,
+            game_throttle=game_throttle,
+            game_brake=game_brake,
+            mass_kg=mass_kg,
+            has_trailer=has_t,
+            aforward=a,
+            abackward=b,
+        )
 
         # Update pedal capacity estimates from actual pedal values sent to the game.
         _base_brake = baseline_brake_ms2(0.0, False)
@@ -671,6 +812,7 @@ class SendingThread(BaseThread):
             self.data.mapper_gain_scale = 1.0
             self.data.mapper_pedal_state = 0
         self._accel_mapper.close()
+        self._close_coast_log()
         logger.debug("teardown complete")
 
     def _tick_bool_overrides(self, controller: SCSController) -> None:
