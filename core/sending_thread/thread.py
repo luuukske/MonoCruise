@@ -11,14 +11,10 @@ Responsibilities:
 - Expose change_hazards() for verified hazard toggling with retrigger (max 3).
 """
 
-import csv
 import logging
 import math
-import statistics
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
 import threading
 
 from core.thread_management.base_thread import BaseThread, ThreadData
@@ -113,19 +109,6 @@ class SendingThread(BaseThread):
         self._prev_spd_mono: float | None = None
         self._brake_active: bool = False
         self._brake_last_active_at: float = 0.0
-
-        # Brake-curve refit logger: every 1 s while braking, append
-        # (median_decel, median_pedal) to brake_fit_samples.csv. Temporary.
-        self._brake_fit_pedal_samples: list[float] = []
-        self._brake_fit_decel_samples: list[float] = []
-        self._brake_fit_roadload_samples: list[float] = []
-        self._brake_fit_window_start: float = 0.0
-        # Absolute path anchored to project root (same as mapper debug log).
-        self._brake_fit_csv_path: Path = (
-            Path(__file__).resolve().parents[2] / "brake_fit_samples.csv"
-        )
-        self._brake_fit_csv_initialised: bool = False
-        logger.info("brake_fit_logger path: %s", self._brake_fit_csv_path)
 
     def toggle_bool(self, name: str, duration: float = BOOL_PRESS_DURATION) -> None:
         """One-shot timed press: set *name* True for *duration* seconds, then False."""
@@ -586,21 +569,8 @@ class SendingThread(BaseThread):
         if not self._brake_active:
             b = 0.0
 
-        print(self._brake_active)
-
         controller.aforward = a
         controller.abackward = b
-
-        # Temporary brake-curve refit logger. Samples whenever *any* brake
-        # pedal is applied (manual or cruise), so data collection works
-        # even when cruise is off.
-        self._tick_brake_fit_logger(
-            braking_active=(b > 0.00),
-            brake_pedal=b,
-            measured_decel_ms2=measured_decel_ms2,
-            road_load_ms2=mapper_road_load_ms2,
-            speed_ms=speed_ms,
-        )
 
         # Update pedal capacity estimates from actual pedal values sent to the game.
         _base_brake = baseline_brake_ms2(0.0, False)
@@ -651,93 +621,6 @@ class SendingThread(BaseThread):
             self.data.mapper_brake_multiplier = mapper_brake_multiplier
             self.data.mapper_gain_scale = mapper_gain_scale
             self.data.mapper_pedal_state = mapper_pedal_state
-
-    def _tick_brake_fit_logger(
-        self,
-        braking_active: bool,
-        brake_pedal: float,
-        measured_decel_ms2: float,
-        road_load_ms2: float,
-        speed_ms: float,
-    ) -> None:
-        """Temporary logger for refitting the brake curve.
-
-        Every 1 s of active braking, writes one row to brake_fit_samples.csv
-        containing the median brake pedal, the median measured deceleration,
-        and the median brake-only deceleration (measured − road_load).
-
-        Using the median over a 1 s window rejects physics-tick noise and
-        transients; one point per second gives enough coverage to refit the
-        y = A·(1 − exp(−k·xⁿ)) curve afterwards.
-
-        Samples are only collected when:
-          - mapper is in BRAKE state (braking_active=True)
-          - speed ≥ 5 m/s (avoid stop/creep noise)
-          - measured decel > 0 (actually slowing down)
-        """
-        now = time.monotonic()
-
-        if not braking_active or speed_ms < 5.0 or measured_decel_ms2 <= 0.0:
-            # Flush an in-progress window if we had enough samples, then reset.
-            if self._brake_fit_pedal_samples:
-                self._flush_brake_fit_window()
-            self._brake_fit_window_start = now
-            return
-
-        if not self._brake_fit_pedal_samples:
-            self._brake_fit_window_start = now
-
-        self._brake_fit_pedal_samples.append(float(brake_pedal))
-        self._brake_fit_decel_samples.append(float(measured_decel_ms2))
-        self._brake_fit_roadload_samples.append(float(road_load_ms2))
-
-        if now - self._brake_fit_window_start >= 1.0:
-            self._flush_brake_fit_window()
-
-    def _flush_brake_fit_window(self) -> None:
-        """Write one row summarising the current 1 s window, then reset buffers."""
-        try:
-            if len(self._brake_fit_pedal_samples) < 3:
-                return
-
-            median_pedal = statistics.median(self._brake_fit_pedal_samples)
-            median_decel = statistics.median(self._brake_fit_decel_samples)
-            median_road_load = statistics.median(self._brake_fit_roadload_samples)
-            # brake_only = measured decel minus road_load contribution (rolling + slope).
-            # road_load positive resists forward motion, so it *adds* to decel.
-            brake_only_decel = median_decel - median_road_load
-            sample_count = len(self._brake_fit_pedal_samples)
-
-            header = [
-                "utc",
-                "median_brake_pedal",
-                "median_measured_decel_ms2",
-                "median_road_load_ms2",
-                "brake_only_decel_ms2",
-                "sample_count",
-            ]
-
-            new_file = not self._brake_fit_csv_path.exists()
-            with self._brake_fit_csv_path.open("a", newline="", encoding="utf-8") as fh:
-                writer = csv.writer(fh)
-                if new_file or not self._brake_fit_csv_initialised:
-                    writer.writerow(header)
-                    self._brake_fit_csv_initialised = True
-                writer.writerow([
-                    datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-                    f"{median_pedal:.4f}",
-                    f"{median_decel:.4f}",
-                    f"{median_road_load:.4f}",
-                    f"{brake_only_decel:.4f}",
-                    sample_count,
-                ])
-                fh.flush()
-        except Exception as e:
-            logger.warning("brake_fit_logger write failed: %s", e)
-        finally:
-            self._brake_fit_pedal_samples.clear()
-            self._brake_fit_decel_samples.clear()
-            self._brake_fit_roadload_samples.clear()
 
     def teardown(self) -> None:
         if self._key_listener is not None:
