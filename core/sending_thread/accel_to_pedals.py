@@ -43,15 +43,19 @@ _GAS_INTEGRAL_BRAKE_DECAY_TAU_S: float = 1.0  # integral leak while braking
 # y = 11.4596 * (1 - e^(-2.4277 * x^0.8518))
 # where x = brake pedal [0,1], y = |decel| in m/s².
 # Code uses the inverse: pedal from desired deceleration.
-_BRAKE_CURVE_AMPLITUDE: float = 11.4596
-_BRAKE_CURVE_RATE: float = 2.4277
-_BRAKE_CURVE_POWER: float = 0.8518
+_BRAKE_CURVE_RATE: float = 3.9742
+_BRAKE_CURVE_POWER: float = 1.3419
 
 # Brake trim PI (small corrections on top of feedforward)
-_BRAKE_KP_TRIM: float = 0.03
-_BRAKE_KI_TRIM: float = 0.08
-_BRAKE_KI_TRIM_CLAMP: float = 0.12     # pedal units
-_BRAKE_TRIM_DECAY_TAU_S: float = 0.8   # integral leak when not braking
+_BRAKE_KP_TRIM: float = 0.06
+_BRAKE_KI_TRIM: float = 0.18
+_BRAKE_KI_TRIM_CLAMP: float = 0.18     # pedal units
+_BRAKE_TRIM_DECAY_TAU_S: float = 3.0   # integral leak when not braking — keep warm between events
+
+# Brake anticipation — pre-load FF using falling wanted_smooth (rising decel demand).
+# Pure lead on the input; safe because FF self-zeroes when lead contribution is absent.
+_BRAKE_LEAD_TAU_S: float = 0.25        # seconds of look-ahead on wanted derivative
+_BRAKE_LEAD_DERIV_SMOOTH_TAU_S: float = 0.12  # smoothing on d(wanted)/dt
 
 # Slow brake multiplier — single EMA tracking truck-specific curve scaling
 _BRAKE_MULTIPLIER_TAU_S: float = 8.0
@@ -71,8 +75,8 @@ _MAX_ROAD_GRADE_RAD: float = 0.35  # ~20 deg — clamp pathological game values
 
 # Gearshift handling
 _GAME_CLUTCH_ACTIVE_THRESHOLD: float = 0.05
-_GEARSHIFT_BLOCK_DURATION_S: float = 0.5
-_GEARSHIFT_RECOVERY_TAU_S: float = 0.5
+_GEARSHIFT_BLOCK_DURATION_S: float = 1.0
+_GEARSHIFT_RECOVERY_TAU_S: float = 1.0
 
 # Rate limiting
 _GAS_RATE_LIMIT_PER_S: float = 3.0
@@ -237,6 +241,10 @@ class AccelToPedals:
         # Brake trim PI state
         self._brake_trim_integral: float = 0.0
 
+        # Anticipation: smoothed derivative of wanted_smooth
+        self._prev_wanted_smooth: float = 0.0
+        self._wanted_deriv_smooth: float = 0.0
+
         # Brake multiplier — slow EMA tracking truck-specific curve scaling
         self._brake_multiplier: float = 1.0
 
@@ -327,15 +335,16 @@ class AccelToPedals:
 
     # Brake feedforward — inverse of the fitted curve
 
-    @staticmethod
-    def _brake_pedal_from_decel(decel_ms2: float) -> float:
+    def _brake_pedal_from_decel(self, decel_ms2: float) -> float:
         """Inverse of y = A * (1 - e^(-rate * x^power)) -> pedal x from decel y.
 
-        Returns pedal in [0, 1].
+        A = current estimated max brake capacity (m/s²). Returns pedal in [0, 1].
         """
         if decel_ms2 <= 0.0:
             return 0.0
-        A = _BRAKE_CURVE_AMPLITUDE
+        A = self._estimated_max_brake_ms2 or 0.0
+        if A <= 0.1:
+            return 0.0
         rate = _BRAKE_CURVE_RATE
         power = _BRAKE_CURVE_POWER
         # Clamp to curve max
@@ -452,8 +461,14 @@ class AccelToPedals:
         # positive road load (uphill/rolling drag) reduces it.
         wanted_decel = max(0.0, -(wanted_smooth + road_load_ms2))
 
+        # Anticipatory lead: if wanted_smooth is falling (more decel demand incoming),
+        # add a portion of (-d/dt wanted_smooth) to decel target. Only the negative
+        # direction — never reduces brake demand when wanted is rising.
+        lead_component = max(0.0, -self._wanted_deriv_smooth) * _BRAKE_LEAD_TAU_S
+        effective_decel = wanted_decel + lead_component
+
         # Feedforward from fitted curve (with truck-specific multiplier)
-        ff_pedal = self._brake_pedal_from_decel(wanted_decel) * self._brake_multiplier
+        ff_pedal = self._brake_pedal_from_decel(effective_decel) * self._brake_multiplier
 
         # Trim PI: correct small errors from curve inaccuracy / truck variance
         # Error: positive means we're not decelerating enough (need more brake)
@@ -492,7 +507,10 @@ class AccelToPedals:
         # What the curve predicts for this pedal: forward function
         # y = A * (1 - e^(-rate * x^power))
         x = _clamp(brake_pedal / max(self._brake_multiplier, 0.01), 0.0, 1.0)
-        predicted_decel = _BRAKE_CURVE_AMPLITUDE * (
+        amplitude = self._estimated_max_brake_ms2 or 0.0
+        if amplitude <= 0.1:
+            return
+        predicted_decel = amplitude * (
             1.0 - math.exp(-_BRAKE_CURVE_RATE * (x ** _BRAKE_CURVE_POWER))
         )
         if predicted_decel < 0.5:
@@ -661,6 +679,14 @@ class AccelToPedals:
 
         self._wanted_smooth = self._ema_step(self._wanted_smooth, wanted, wanted_alpha)
         self._raw_smooth = self._ema_step(self._raw_smooth, raw, raw_alpha)
+
+        # Smoothed derivative of wanted_smooth (for brake anticipation)
+        deriv_alpha = self._ema_alpha(dt, _BRAKE_LEAD_DERIV_SMOOTH_TAU_S)
+        raw_deriv = (self._wanted_smooth - self._prev_wanted_smooth) / max(dt, 1e-6)
+        self._wanted_deriv_smooth = self._ema_step(
+            self._wanted_deriv_smooth, raw_deriv, deriv_alpha
+        )
+        self._prev_wanted_smooth = self._wanted_smooth
 
         # Road load
         road_load_accel, grade_unc_rad, grade_rad = self._road_load_accel_ms2(
