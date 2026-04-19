@@ -28,6 +28,8 @@ _TRAILER_WEIGHT_BIAS: float = 1.02
 # Smoothing time constants
 _WANTED_SMOOTHING_TAU_S: float = 0.05
 _RAW_SMOOTHING_TAU_S: float = 0.10
+_OUTPUT_SMOOTHING_TAU_S: float = 0.08
+_OUTPUT_SMOOTHING_DELTA_REF_MS2: float = 1.0
 
 # Fast PID (unified trim, m/s² space) — injected into `combined` upstream of the FF
 # mapping. Capacities are pedal-output scalers (FF), not trims: they map combined
@@ -225,6 +227,7 @@ class AccelToPedals:
         # Smoothed signals
         self._wanted_smooth: float = 0.0
         self._raw_smooth: float = 0.0
+        self._output_smooth_ms2: float | None = None
         self._prev_mono: float | None = None
 
         # Unified fast PID state
@@ -266,6 +269,7 @@ class AccelToPedals:
     def reset_smoothing(self) -> None:
         self._wanted_smooth = 0.0
         self._raw_smooth = 0.0
+        self._output_smooth_ms2 = None
         self._fast_integral = 0.0
         self._fast_deriv_smooth = 0.0
         self._prev_raw_smooth = 0.0
@@ -295,6 +299,18 @@ class AccelToPedals:
         if gear_dashboard < 0:
             return -1.0
         return 1.0
+
+    def _adaptive_output_ema_step(self, current: float | None, sample: float, dt: float) -> float:
+        if current is None or not math.isfinite(current):
+            return sample
+        base_alpha = self._ema_alpha(dt, _OUTPUT_SMOOTHING_TAU_S)
+        delta_ratio = _clamp(
+            abs(sample - current) / max(_OUTPUT_SMOOTHING_DELTA_REF_MS2, 1e-6),
+            0.0,
+            1.0,
+        )
+        alpha = base_alpha + (1.0 - base_alpha) * (delta_ratio ** 3)
+        return self._ema_step(current, sample, alpha)
 
     @staticmethod
     def _road_grade_from_norm(pitch: float) -> tuple[float, float]:
@@ -652,6 +668,8 @@ class AccelToPedals:
 
             # Unified mapping: FF + fast trim through the same capacity scaling.
             combined = combined_ff_only + fast_trim_ms2
+            combined = self._adaptive_output_ema_step(self._output_smooth_ms2, combined, dt)
+            self._output_smooth_ms2 = combined
             if combined >= 0.0:
                 max_a = max(self._estimated_max_accel_ms2 or 0.1, 0.1)
                 unclamped_effort = combined / max_a
@@ -702,6 +720,7 @@ class AccelToPedals:
             self._fast_integral = 0.0
             self._fast_deriv_smooth = 0.0
             self._prev_gas_cmd = None
+            self._output_smooth_ms2 = None
 
         # Update prev_raw_smooth for derivative (always)
         self._prev_raw_smooth = self._raw_smooth

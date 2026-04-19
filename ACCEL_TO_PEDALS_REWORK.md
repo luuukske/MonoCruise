@@ -41,6 +41,10 @@ gas   = clamp( effort, 0.0, 1.0)
 brake = clamp(-effort, 0.0, 1.0)
 ```
 
+Before that combined command is converted to pedals, the mapper now runs a final
+adaptive EMA in m/s² space. Small deltas stay more damped, while larger deltas
+raise alpha with a cubic response so strong command moves stay reactive.
+
 The road load is corrected by a slow integral that lives in m/s² space alongside it,
 before any pedal conversion.
 

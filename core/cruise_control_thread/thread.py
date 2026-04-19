@@ -44,6 +44,7 @@ _CC_KD_SPEED_SMOOTH_TAU_S = 0.15
 # EMA time constant (s) for the final commanded acceleration sent to telemetry.
 # Slower than KD smoothing so pedal commands change gradually.
 _CC_OUTPUT_EMA_TAU_S = 0.40
+_CC_TARGET_SPEED_EMA_TAU_S = 0.5
 
 # Gearshift D-term freeze. Mirrors the timings used by the sending_thread mapper
 # (accel_to_pedals._GEARSHIFT_BLOCK_DURATION_S / _RAMP_DURATION_S) so CC and
@@ -93,6 +94,7 @@ class CruiseControlThread(BaseThread):
         self._last_assign_warn_mono: float = 0.0
         self._last_block_msg_mono: float = 0.0
         self._output_ema_accel_ms2: float | None = None
+        self._target_speed_ema_ms: float | None = None
 
         # Clutch/gearshift tracking for D-term freeze
         self._cc_clutch_active: bool = False
@@ -186,6 +188,7 @@ class CruiseControlThread(BaseThread):
                 self._integral_error = 0.0
                 self._kd_smooth_speed_ms = None
                 self._output_ema_accel_ms2 = None
+                self._target_speed_ema_ms = None
 
             self._publish_telemetry_command(wanted_accel if commanding else 0.0)
             self._publish_data(commanding, wanted_accel if commanding else 0.0)
@@ -415,6 +418,7 @@ class CruiseControlThread(BaseThread):
             target_ms = max((target_kmh - 0.1) / 3.6, 0.0)
         else:
             target_ms = target_kmh / 3.6
+        target_ms = self._smooth_target_speed_ema(target_ms, dt)
 
         # Read PID gains from Settings each call for live hot-reload tuning.
         kp = float(Settings.cc_kp)
@@ -472,6 +476,17 @@ class CruiseControlThread(BaseThread):
                 alpha * raw_ms2 + (1.0 - alpha) * self._output_ema_accel_ms2
             )
         return self._output_ema_accel_ms2
+
+    def _smooth_target_speed_ema(self, target_ms: float, dt: float) -> float:
+        tau = _CC_TARGET_SPEED_EMA_TAU_S
+        alpha = dt / (tau + dt) if tau > 0.0 else 1.0
+        if self._target_speed_ema_ms is None:
+            self._target_speed_ema_ms = target_ms
+        else:
+            self._target_speed_ema_ms = (
+                alpha * target_ms + (1.0 - alpha) * self._target_speed_ema_ms
+            )
+        return self._target_speed_ema_ms
 
     def _publish_telemetry_command(self, wanted_accel_ms2: float) -> None:
         if not math.isfinite(wanted_accel_ms2):

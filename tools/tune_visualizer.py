@@ -31,8 +31,10 @@ def _load(path: Path, window_s: float) -> pd.DataFrame:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     if "t_s" not in df.columns or df.empty:
         return df
-    t_max = df["t_s"].max()
-    return df[df["t_s"] >= t_max - window_s].copy()
+    latest_t = df["t_s"].dropna().iloc[-1] if df["t_s"].notna().any() else None
+    if latest_t is None:
+        return df
+    return df[df["t_s"] >= latest_t - window_s].copy()
 
 
 def _gearshift_shapes(df: pd.DataFrame) -> list[dict]:
