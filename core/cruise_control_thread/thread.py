@@ -50,8 +50,8 @@ _CC_OUTPUT_EMA_TAU_S = 0.40
 # mapper release together. Speed stalls while the clutch is in and jumps on
 # re-engage — a raw D-term would spike and send a transient gas/brake command.
 _CC_CLUTCH_ACTIVE_THRESHOLD = 0.05
-_CC_GEARSHIFT_BLOCK_DURATION_S = 0.8
-_CC_GEARSHIFT_RAMP_DURATION_S = 0.5
+_CC_GEARSHIFT_BLOCK_DURATION_S = 0.5
+_CC_GEARSHIFT_RAMP_DURATION_S = 1.0
 
 
 @dataclass

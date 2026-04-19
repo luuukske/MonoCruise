@@ -65,8 +65,8 @@ _AERO_DRAG_ACCEL_PER_V2: float = 4.9e-5
 
 # Gearshift handling
 _GAME_CLUTCH_ACTIVE_THRESHOLD: float = 0.05
-_GEARSHIFT_BLOCK_DURATION_S: float = 0.8
-_GEARSHIFT_RAMP_DURATION_S: float = 0.5
+_GEARSHIFT_BLOCK_DURATION_S: float = 0.5
+_GEARSHIFT_RAMP_DURATION_S: float = 1.0
 
 # Rate limiting (gas only)
 _GAS_RATE_LIMIT_PER_S: float = 3.0
@@ -679,14 +679,6 @@ class AccelToPedals:
 
             # Diagnostic: pedal-units delta contributed by fast trim (post-clamp).
             fast_out = effort - ff
-
-            # Gearshift ramp applied to the FINAL pedal output. During the block
-            # window (factor==0) both gas and brake go to zero; during the ramp
-            # (0<factor<1) the full pedal command is scaled in smoothly. This is
-            # the same semantic the slow/fast integrators already use, extended
-            # to the FF path so the mapper can't pump pedal while the engine is
-            # disengaged even if an upstream consumer keeps commanding.
-            effort *= factor
 
             gas_cmd = _clamp(effort, 0.0, 1.0)
             brake_cmd = _clamp(-effort, 0.0, 1.0)
