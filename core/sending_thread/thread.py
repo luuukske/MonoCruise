@@ -683,7 +683,7 @@ class SendingThread(BaseThread):
 
         # Brake threshold hysteresis: suppress flicker from rapid OPD/CC transitions.
         _now = time.monotonic()
-        if b > 0.01:
+        if b > 0.006:
             self._brake_active = True
             self._brake_last_active_at = _now
         elif self._brake_active:

@@ -45,6 +45,14 @@ _CC_KD_SPEED_SMOOTH_TAU_S = 0.15
 # Slower than KD smoothing so pedal commands change gradually.
 _CC_OUTPUT_EMA_TAU_S = 0.40
 
+# Gearshift D-term freeze. Mirrors the timings used by the sending_thread mapper
+# (accel_to_pedals._GEARSHIFT_BLOCK_DURATION_S / _RAMP_DURATION_S) so CC and
+# mapper release together. Speed stalls while the clutch is in and jumps on
+# re-engage — a raw D-term would spike and send a transient gas/brake command.
+_CC_CLUTCH_ACTIVE_THRESHOLD = 0.05
+_CC_GEARSHIFT_BLOCK_DURATION_S = 0.8
+_CC_GEARSHIFT_RAMP_DURATION_S = 0.5
+
 
 @dataclass
 class CruiseControlThreadData(ThreadData):
@@ -85,6 +93,11 @@ class CruiseControlThread(BaseThread):
         self._last_assign_warn_mono: float = 0.0
         self._last_block_msg_mono: float = 0.0
         self._output_ema_accel_ms2: float | None = None
+
+        # Clutch/gearshift tracking for D-term freeze
+        self._cc_clutch_active: bool = False
+        self._cc_clutch_release_mono: float = -math.inf
+        self._cc_prev_d_factor: float = 1.0
 
     def setup(self) -> None:
         self._prev_loop_mono = time.monotonic()
@@ -218,6 +231,7 @@ class CruiseControlThread(BaseThread):
                     "speed_ms": float(tel.data.speed),
                     "gear_dashboard": int(tel.data.gear_dashboard),
                     "park_brake": bool(tel.data.parkBrake),
+                    "game_clutch": float(tel.data.gameClutch),
                 }
         except Exception:
             return None
@@ -363,6 +377,30 @@ class CruiseControlThread(BaseThread):
                 self._long_press_start = False
             self._time_pressed_start = None
 
+    def _gearshift_d_factor(self, now: float, clutch: float) -> float:
+        """Returns 0.0 while clutched or in post-release block, 0→1 over ramp, 1 otherwise.
+
+        Mirrors sending_thread mapper's gearshift state machine so CC's D-term
+        releases in lockstep with the mapper's integrators.
+        """
+        now_safe = now if math.isfinite(now) else 0.0
+        clutch_pressed = clutch > _CC_CLUTCH_ACTIVE_THRESHOLD
+
+        if clutch_pressed and not self._cc_clutch_active:
+            self._cc_clutch_active = True
+        elif not clutch_pressed and self._cc_clutch_active:
+            self._cc_clutch_active = False
+            self._cc_clutch_release_mono = now_safe
+
+        if clutch_pressed:
+            return 0.0
+        time_since_release = now_safe - self._cc_clutch_release_mono
+        if time_since_release < _CC_GEARSHIFT_BLOCK_DURATION_S:
+            return 0.0
+        if time_since_release < _CC_GEARSHIFT_BLOCK_DURATION_S + _CC_GEARSHIFT_RAMP_DURATION_S:
+            return (time_since_release - _CC_GEARSHIFT_BLOCK_DURATION_S) / _CC_GEARSHIFT_RAMP_DURATION_S
+        return 1.0
+
     def _speed_to_accel(self, tel: dict, dt: float) -> float:
         speed_ms = tel["speed_ms"]
         target_kmh = self._target_speed_kmh
@@ -388,24 +426,39 @@ class CruiseControlThread(BaseThread):
         self._integral_error += error_ms * dt
         self._integral_error = max(-clamp, min(clamp, self._integral_error))
 
+        d_factor = self._gearshift_d_factor(time.monotonic(), float(tel.get("game_clutch", 0.0)))
+
         raw_speed_ms = speed_ms
-        tau = _CC_KD_SPEED_SMOOTH_TAU_S
-        alpha = dt / (tau + dt) if tau > 0.0 else 1.0
-        if self._kd_smooth_speed_ms is None:
-            self._kd_smooth_speed_ms = raw_speed_ms
+        if d_factor <= 0.0:
+            # Freeze the smoothed-speed EMA during clutch + block window. Prevents
+            # it from tracking the stalled-then-jumping speed and producing a
+            # spurious derivative spike on re-engage.
             speed_deriv = 0.0
         else:
-            prev_smooth = self._kd_smooth_speed_ms
-            self._kd_smooth_speed_ms = alpha * raw_speed_ms + (1.0 - alpha) * prev_smooth
-            speed_deriv = (self._kd_smooth_speed_ms - prev_smooth) / dt
+            # Leading edge of the ramp: reseed EMA to current speed so the first
+            # post-block derivative starts at zero instead of comparing against
+            # the stale pre-clutch value.
+            if self._cc_prev_d_factor <= 0.0:
+                self._kd_smooth_speed_ms = raw_speed_ms
+            tau = _CC_KD_SPEED_SMOOTH_TAU_S
+            alpha = dt / (tau + dt) if tau > 0.0 else 1.0
+            if self._kd_smooth_speed_ms is None:
+                self._kd_smooth_speed_ms = raw_speed_ms
+                speed_deriv = 0.0
+            else:
+                prev_smooth = self._kd_smooth_speed_ms
+                self._kd_smooth_speed_ms = alpha * raw_speed_ms + (1.0 - alpha) * prev_smooth
+                speed_deriv = (self._kd_smooth_speed_ms - prev_smooth) / dt
+        self._cc_prev_d_factor = d_factor
 
         p_term = kp * error_ms
         i_term = ki * self._integral_error
-        d_term = -kd * speed_deriv
+        d_term = -kd * speed_deriv * d_factor
 
         logger.debug(
-            "cc pid: error=%.3f p=%.3f i=%.3f d=%.3f integral=%.3f output=%.3f",
-            error_ms, p_term, i_term, d_term, self._integral_error, p_term + i_term + d_term,
+            "cc pid: error=%.3f p=%.3f i=%.3f d=%.3f (df=%.2f) integral=%.3f output=%.3f",
+            error_ms, p_term, i_term, d_term, d_factor, self._integral_error,
+            p_term + i_term + d_term,
         )
         return p_term + i_term + d_term
 

@@ -29,14 +29,15 @@ _TRAILER_WEIGHT_BIAS: float = 1.02
 _WANTED_SMOOTHING_TAU_S: float = 0.05
 _RAW_SMOOTHING_TAU_S: float = 0.10
 
-# Fast PID (unified effort trim) — P/I/D live in m/s² space, divided by capacity at
-# output. This makes the fast contribution automatically small on the brake side
-# (capacity ~10) vs. gas side (capacity <1) → "doesn't interfere at low pedal values".
+# Fast PID (unified trim, m/s² space) — injected into `combined` upstream of the FF
+# mapping. Capacities are pedal-output scalers (FF), not trims: they map combined
+# m/s² → pedal via `combined / max_accel` (gas) or the inverse brake curve.
+# Routing the fast trim through the same FF eliminates the zero-crossing
+# discontinuity that a sign-switched capacity-divide produced.
 _KP_FAST: float = 0.25
 _KI_FAST: float = 0.25
 _KD_FAST: float = 0.15
-_FAST_I_CLAMP_MS2: float = 1.5      # m/s² — pedal clamp still enforced below
-_FAST_OUT_CLAMP: float = 0.30       # total fast PID contribution cap (pedal units)
+_FAST_I_CLAMP_MS2: float = 1.5      # m/s²
 _FAST_DERIV_TAU_S: float = 0.12     # measurement derivative smoothing
 
 # Slow integral (road load bias correction in m/s² space).
@@ -65,7 +66,7 @@ _AERO_DRAG_ACCEL_PER_V2: float = 4.9e-5
 # Gearshift handling
 _GAME_CLUTCH_ACTIVE_THRESHOLD: float = 0.05
 _GEARSHIFT_BLOCK_DURATION_S: float = 0.8
-_GEARSHIFT_RAMP_DURATION_S: float = 1.0
+_GEARSHIFT_RAMP_DURATION_S: float = 0.5
 
 # Rate limiting (gas only)
 _GAS_RATE_LIMIT_PER_S: float = 3.0
@@ -357,14 +358,13 @@ class AccelToPedals:
         clutch_pressed = clutch > _GAME_CLUTCH_ACTIVE_THRESHOLD
 
         if clutch_pressed and not self._clutch_active:
-            # Leading edge — reset fast trim state. A gearshift is a context change
-            # (torque curve / engine braking flip), so stale fast_integral and
-            # fast_deriv_smooth are invalid. Slow integral stays — road load didn't
-            # change across the shift.
+            # Leading edge — freeze: stash raw_smooth so error uses the pre-shift
+            # measurement. fast_integral / fast_deriv_smooth are left untouched;
+            # _fast_pid_step gates all updates on factor>0, so they are frozen
+            # implicitly throughout block + ramp. Testing showed resetting them
+            # at the leading edge causes massive gas spikes post-shift.
             self._clutch_active = True
             self._frozen_raw_smooth = raw_smooth_live
-            self._fast_integral = 0.0
-            self._fast_deriv_smooth = 0.0
         elif not clutch_pressed and self._clutch_active:
             # Trailing edge
             self._clutch_active = False
@@ -391,60 +391,38 @@ class AccelToPedals:
         raw_smooth_eff: float,
         gain_scale: float,
         factor: float,
-    ) -> tuple[float, float, float, float, float]:
-        """Returns (fast_out, p_pedal, i_pedal, d_pedal, capacity_used_ms2).
+    ) -> tuple[float, float, float, float]:
+        """Returns (fast_trim_ms2, p_ms2, i_ms2, d_ms2) — m/s² space.
 
-        P, I, D are computed in m/s² space and divided by capacity at the output so
-        the fast trim is naturally small on whichever side has high capacity (brake).
-        Back-calc anti-windup reassigns the integrator whenever the pedal output
-        clamps — this kills both windup and sign-flip discontinuities (since after
-        a flip the integrator is immediately reconciled with the new capacity).
+        The trim is added to `combined` upstream of the FF. No capacity-divide
+        here — the single FF mapping handles m/s² → pedal uniformly and the
+        zero-crossing is continuous.
+
+        When factor == 0 (gearshift block) all state updates are skipped so
+        fast_integral and fast_deriv_smooth remain frozen across the shift.
         """
+        # Full freeze during gearshift block/ramp: no state evolution, no output.
+        if factor <= 0.0:
+            return 0.0, 0.0, 0.0, 0.0
+
         kp = _KP_FAST * gain_scale
         ki = _KI_FAST * gain_scale
         kd = _KD_FAST * gain_scale
 
-        # Capacity picked by error sign — divides the combined m/s² effort at output.
-        if error_ms2 >= 0.0:
-            capacity = self._estimated_max_accel_ms2 or 0.0
-        else:
-            capacity = self._estimated_max_brake_ms2 or 0.0
-        capacity = max(capacity, 0.1)
-
         p_ms2 = kp * error_ms2 * factor
 
-        # Integrate in m/s² space.
         self._fast_integral += ki * error_ms2 * factor * dt
         self._fast_integral = _clamp(
             self._fast_integral, -_FAST_I_CLAMP_MS2, _FAST_I_CLAMP_MS2
         )
         i_ms2 = self._fast_integral
 
-        # Derivative on measurement (smoothed), m/s³ → m/s² via kd.
         deriv_alpha = self._ema_alpha(dt, _FAST_DERIV_TAU_S)
         deriv_raw = (raw_smooth_eff - self._prev_raw_smooth) / max(dt, 1e-6)
         self._fast_deriv_smooth = self._ema_step(self._fast_deriv_smooth, deriv_raw, deriv_alpha)
         d_ms2 = -kd * self._fast_deriv_smooth * factor
 
-        unclamped_pedal = (p_ms2 + i_ms2 + d_ms2) / capacity
-        fast_out = _clamp(unclamped_pedal, -_FAST_OUT_CLAMP, _FAST_OUT_CLAMP)
-
-        # Back-calc anti-windup: if we hit the pedal clamp, snap integrator so that
-        # p + i + d produces exactly the clamped output. Prevents windup and makes
-        # the integrator self-consistent across capacity flips.
-        if unclamped_pedal != fast_out:
-            desired_sum_ms2 = fast_out * capacity
-            self._fast_integral = _clamp(
-                desired_sum_ms2 - p_ms2 - d_ms2,
-                -_FAST_I_CLAMP_MS2,
-                _FAST_I_CLAMP_MS2,
-            )
-            i_ms2 = self._fast_integral
-
-        p_pedal = p_ms2 / capacity
-        i_pedal = i_ms2 / capacity
-        d_pedal = d_ms2 / capacity
-        return fast_out, p_pedal, i_pedal, d_pedal, capacity
+        return p_ms2 + i_ms2 + d_ms2, p_ms2, i_ms2, d_ms2
 
     # Debug logging
 
@@ -660,21 +638,55 @@ class AccelToPedals:
             )
             effective_road_load = road_load_accel + self._slow_integral
 
-            # Feedforward (stateless)
-            combined = self._wanted_smooth + effective_road_load
-            if combined >= 0.0:
-                max_a = max(self._estimated_max_accel_ms2 or 0.1, 0.1)
-                ff = combined / max_a
-            else:
-                decel_needed = -combined
-                ff = -self._brake_pedal_from_decel(decel_needed)
-
-            # Fast PID
-            fast_out, fast_p, fast_i, fast_d, capacity_used = self._fast_pid_step(
+            # Fast trim in m/s² space (frozen during gearshift)
+            fast_trim_ms2, fast_p, fast_i, fast_d = self._fast_pid_step(
                 dt, error_ms2, self._raw_smooth, gain_scale, factor,
             )
 
-            effort = _clamp(ff + fast_out, -1.0, 1.0)
+            # Pure-FF pedal for diagnostics (what the mapping would give with no trim)
+            combined_ff_only = self._wanted_smooth + effective_road_load
+            if combined_ff_only >= 0.0:
+                ff = combined_ff_only / max(self._estimated_max_accel_ms2 or 0.1, 0.1)
+            else:
+                ff = -self._brake_pedal_from_decel(-combined_ff_only)
+
+            # Unified mapping: FF + fast trim through the same capacity scaling.
+            combined = combined_ff_only + fast_trim_ms2
+            if combined >= 0.0:
+                max_a = max(self._estimated_max_accel_ms2 or 0.1, 0.1)
+                unclamped_effort = combined / max_a
+                capacity_used = max_a
+            else:
+                unclamped_effort = -self._brake_pedal_from_decel(-combined)
+                capacity_used = max(self._estimated_max_brake_ms2 or 0.1, 0.1)
+            effort = _clamp(unclamped_effort, -1.0, 1.0)
+
+            # Back-calc anti-windup: if FF saturates the pedal, snap fast_integral
+            # so (wanted + effective_road_load + p + i + d) sits on the saturation
+            # edge. Integrator stops winding, system snaps back cleanly on recovery.
+            if effort != unclamped_effort and factor > 0.0:
+                if effort >= 1.0:
+                    combined_sat = max(self._estimated_max_accel_ms2 or 0.1, 0.1)
+                else:
+                    combined_sat = -max(self._estimated_max_brake_ms2 or 0.1, 0.1)
+                desired_fast_sum = combined_sat - combined_ff_only
+                self._fast_integral = _clamp(
+                    desired_fast_sum - fast_p - fast_d,
+                    -_FAST_I_CLAMP_MS2,
+                    _FAST_I_CLAMP_MS2,
+                )
+                fast_i = self._fast_integral
+
+            # Diagnostic: pedal-units delta contributed by fast trim (post-clamp).
+            fast_out = effort - ff
+
+            # Gearshift ramp applied to the FINAL pedal output. During the block
+            # window (factor==0) both gas and brake go to zero; during the ramp
+            # (0<factor<1) the full pedal command is scaled in smoothly. This is
+            # the same semantic the slow/fast integrators already use, extended
+            # to the FF path so the mapper can't pump pedal while the engine is
+            # disengaged even if an upstream consumer keeps commanding.
+            effort *= factor
 
             gas_cmd = _clamp(effort, 0.0, 1.0)
             brake_cmd = _clamp(-effort, 0.0, 1.0)
