@@ -30,9 +30,11 @@ def _log_name(name: str) -> str:
     return (name.replace("_thread", "") + " code").capitalize()
 
 
-HEARTBEAT_TIMEOUT: float = 1.0   # seconds
-POLL_INTERVAL:     float = 0.25   # watchdog check frequency
-LOW_FPS_THRESHOLD: float = 0.70  # warn when actual FPS < this fraction of wanted FPS
+HEARTBEAT_TIMEOUT:    float = 1.5   # seconds
+POLL_INTERVAL:        float = 0.25  # watchdog check frequency
+LOW_FPS_THRESHOLD:    float = 0.70  # warn when actual FPS < this fraction of wanted FPS
+LOW_FPS_STREAK_WARN:  int   = 5     # consecutive low-fps polls before warning
+LOW_FPS_WARN_WINDOW:  float = 3.0   # seconds: if >1 thread warned in this window → "some threads"
 
 
 class Watchdog(BaseThread):
@@ -42,8 +44,12 @@ class Watchdog(BaseThread):
         super().__init__(name="watchdog")
         # name → factory callable
         self._factories: dict[str, Callable[[], BaseThread]] = {}
-        # low FPS popup shown once per program run
-        self._low_fps_popup_shown: bool = False
+        # consecutive below-threshold poll counts per thread
+        self._low_fps_streaks:    dict[str, int]   = {}
+        # thread_name → monotonic time when streak threshold was first hit (pending warn)
+        self._low_fps_candidates: dict[str, float] = {}
+        # thread_name → monotonic time when its warning was shown (suppress re-warn)
+        self._low_fps_warned_at:  dict[str, float] = {}
 
     # factory registration
 
@@ -58,19 +64,26 @@ class Watchdog(BaseThread):
             if thread is self or not getattr(thread, "watched", False) or not getattr(thread, "healthy", False):
                 continue
 
-            # Low FPS warning (actual FPS, not averaged): log once per program run
-            if not self._low_fps_popup_shown:
-                interval = getattr(thread, "loop_interval", 0.0)
-                if interval > 0:
-                    wanted_fps = 1.0 / interval
-                    actual_fps = getattr(thread, "inst_fps", 0.0)
-                    threshold_fps = LOW_FPS_THRESHOLD * wanted_fps
-                    if actual_fps > 0 and actual_fps < threshold_fps:
-                        logger.warning(
-                            "One or more threads are running below 70%% of their target FPS.",
-                            extra={"popup": True},
-                        )
-                        self._low_fps_popup_shown = True
+            # Low FPS warning: accumulate streak; once threshold is hit, park the thread
+            # in _low_fps_candidates and wait LOW_FPS_WARN_WINDOW before warning so that
+            # any other slow threads are batched into a single popup.
+            tname    = getattr(thread, "name", "")
+            interval = getattr(thread, "loop_interval", 0.0)
+            if interval > 0:
+                wanted_fps    = 1.0 / interval
+                actual_fps    = getattr(thread, "inst_fps", 0.0)
+                threshold_fps = LOW_FPS_THRESHOLD * wanted_fps
+                if actual_fps > 0 and actual_fps < threshold_fps:
+                    self._low_fps_streaks[tname] = self._low_fps_streaks.get(tname, 0) + 1
+                    if (
+                        self._low_fps_streaks[tname] >= LOW_FPS_STREAK_WARN
+                        and tname not in self._low_fps_warned_at
+                        and tname not in self._low_fps_candidates
+                    ):
+                        self._low_fps_candidates[tname] = now
+                else:
+                    self._low_fps_streaks.pop(tname, None)
+                    self._low_fps_candidates.pop(tname, None)  # recovered before window elapsed
 
             # Defensive compatibility: skip entries that are not restartable workers.
             restart_count = getattr(thread, "restart_count", None)
@@ -120,6 +133,26 @@ class Watchdog(BaseThread):
                 continue
 
             self._restart(thread)
+
+        # Flush pending low-FPS candidates once the collection window has elapsed.
+        if self._low_fps_candidates:
+            oldest = min(self._low_fps_candidates.values())
+            if now - oldest >= LOW_FPS_WARN_WINDOW:
+                pending = list(self._low_fps_candidates.keys())
+                if len(pending) > 1:
+                    logger.warning(
+                        "Some threads are running below 70%% of their target FPS.",
+                        extra={"popup": True},
+                    )
+                else:
+                    logger.warning(
+                        "%s is running below 70%% of its target FPS.",
+                        _log_name(pending[0]),
+                        extra={"popup": True},
+                    )
+                for n in pending:
+                    self._low_fps_warned_at[n] = now
+                self._low_fps_candidates.clear()
 
     # restart
 
