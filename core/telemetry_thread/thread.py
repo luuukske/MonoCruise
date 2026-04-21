@@ -51,9 +51,11 @@ class TelemetryThreadData(ThreadData):
     # Simulation state
     paused: bool = False
 
-    # Truck motion
+    # Truck
     speed: float = 0.0          # m/s — convert to km/h: speed * 3.6
     cruise_control_speed: float = 0.0  # m/s, 0.0 when CC inactive
+    blinkerRight = False
+    blinkerLight = False
 
     # Engine
     engine_rpm: float = 0.0
@@ -119,6 +121,8 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.coordinateZ         = raw.get("coordinateZ", 0.0)
         data.rotationX           = raw.get("rotationX", 0.0)
         data.speed               = raw.get("speed", 0.0)
+        data.blinkerLeft         = raw.get("blinkerLeftActive", False)
+        data.blinkerRight         = raw.get("blinkerRightActive", False)
         data.cruise_control_speed= raw.get("cruiseControlSpeed", 0.0)
         data.engine_rpm          = raw.get("engineRpm", 0.0)
         data.engine_rpm_max      = raw.get("engineRpmMax", 2000.0)
