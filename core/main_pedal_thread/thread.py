@@ -464,27 +464,48 @@ class MainPedalThread(BaseThread):
     def _read_cc_button_states(self) -> tuple[bool, bool, bool]:
         """Return (cc_start, cc_inc, cc_dec) held states; plain button indices only."""
         if self._device is None:
+            logger.debug(
+                "CC button read skipped: device is None "
+                "(start=%s inc=%s dec=%s)",
+                Settings.cc_start_button,
+                Settings.cc_inc_button,
+                Settings.cc_dec_button,
+            )
             return False, False, False
         try:
             n = self._device.get_numbuttons()
         except Exception:
+            logger.debug("CC button read failed: get_numbuttons() raised", exc_info=True)
             return False, False, False
 
         def pressed(spec: object) -> bool:
             if spec is None or not isinstance(spec, int):
                 return False
             if spec < 0 or spec >= n:
+                logger.debug(
+                    "CC button index %s out of range (device has %d buttons)", spec, n
+                )
                 return False
             try:
                 return bool(self._device.get_button(spec))
             except Exception:
                 return False
 
-        return (
+        result = (
             pressed(Settings.cc_start_button),
             pressed(Settings.cc_inc_button),
             pressed(Settings.cc_dec_button),
         )
+        if any(result):
+            logger.debug(
+                "CC buttons held — start=%s inc=%s dec=%s (indices: start=%s inc=%s dec=%s, device=%s)",
+                result[0], result[1], result[2],
+                Settings.cc_start_button,
+                Settings.cc_inc_button,
+                Settings.cc_dec_button,
+                self._device.get_name() if self._device else "None",
+            )
+        return result
 
     def _process_pygame_events(self, speed: float) -> tuple[float, float]:
         """Handle all pending pygame events and return the current (gasval, brakeval)."""

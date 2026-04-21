@@ -157,6 +157,14 @@ class CruiseControlThread(BaseThread):
                                 extra={"popup": True},
                             )
 
+            if any((cc_dec, cc_inc, cc_start)):
+                logger.debug(
+                    "CC button held — start=%s inc=%s dec=%s | "
+                    "connected=%s paused=%s device_lost=%s all_assigned=%s",
+                    cc_start, cc_inc, cc_dec,
+                    connected, paused, device_lost, all_assigned,
+                )
+
             if connected and not paused and not device_lost:
                 if not all_assigned and (cc_dec or cc_inc or cc_start):
                     if now - self._last_assign_warn_mono > 2.0:
@@ -167,6 +175,12 @@ class CruiseControlThread(BaseThread):
                         )
                 elif all_assigned:
                     self._tick_button_fsm(tel, now, cc_dec, cc_inc, cc_start)
+            elif any((cc_dec, cc_inc, cc_start)):
+                logger.debug(
+                    "CC button press ignored — guard blocked "
+                    "(need: connected=%s, not paused=%s, not device_lost=%s)",
+                    connected, not paused, not device_lost,
+                )
 
             if (
                 self._cc_enabled
