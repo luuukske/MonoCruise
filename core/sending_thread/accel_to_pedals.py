@@ -57,6 +57,8 @@ _BRAKE_CURVE_RATE: float = 2.4277
 _BRAKE_CURVE_POWER: float = 0.8518
 
 # Road load
+_ROAD_LOAD_SMOOTH_TAU_S: float = 1.2   # slow EMA for small bumps
+_ROAD_LOAD_DELTA_REF_MS2: float = 0.25  # above this → fast tracking
 _ROAD_LOAD_SPEED_EPSILON_MS: float = 0.2
 _MAX_ROAD_GRADE_RAD: float = 0.35  # clamp pathological game values
 # Aerodynamic drag coefficient fitted from coast-down data.
@@ -243,6 +245,9 @@ class AccelToPedals:
         self._estimated_max_accel_ms2: float | None = None
         self._estimated_max_brake_ms2: float | None = None
 
+        # Road load smoothing
+        self._road_load_smooth: float = 0.0
+
         # Gearshift freeze state
         self._clutch_active: bool = False
         self._clutch_release_mono: float = -math.inf
@@ -276,6 +281,7 @@ class AccelToPedals:
         self._prev_gas_cmd = None
         self._slow_integral = 0.0
         self._prev_mono = None
+        self._road_load_smooth = 0.0
         self._clutch_active = False
         self._clutch_release_mono = -math.inf
         self._frozen_raw_smooth = 0.0
@@ -605,10 +611,18 @@ class AccelToPedals:
         else:
             self._raw_smooth = raw_smooth_eff
 
-        # Road load
-        road_load_accel, grade_unc_rad, grade_rad = self._road_load_accel_ms2(
+        # Road load — adaptive EMA: slow for small bumps, fast for steep hills
+        road_load_raw, grade_unc_rad, grade_rad = self._road_load_accel_ms2(
             speed, wanted, pitch, gear_dash
         )
+        rl_base_alpha = self._ema_alpha(dt, _ROAD_LOAD_SMOOTH_TAU_S)
+        rl_delta_ratio = _clamp(
+            abs(road_load_raw - self._road_load_smooth) / max(_ROAD_LOAD_DELTA_REF_MS2, 1e-6),
+            0.0, 1.0,
+        )
+        rl_alpha = rl_base_alpha + (1.0 - rl_base_alpha) * (rl_delta_ratio ** 2)
+        self._road_load_smooth = self._ema_step(self._road_load_smooth, road_load_raw, rl_alpha)
+        road_load_accel = self._road_load_smooth
 
         # Capacity estimates
         bl_accel = baseline_accel_ms2(total_mass_kg, has_trailer)
