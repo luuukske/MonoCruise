@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QWidget
 
 from core.thread_management.registry import registry
 from .thread import AEBState, AEBSnapshot
-from .traffic import ArcPath
+from core.radar.traffic import ArcPath
 
 logger = logging.getLogger(__name__)
 

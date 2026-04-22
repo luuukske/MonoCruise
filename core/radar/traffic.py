@@ -2,6 +2,8 @@
 ETS2/ATS traffic vehicle classes with arc-based path prediction.
 
 Coordinate system and yaw conventions — see ``core/aeb/AGENTS.md`` §1–§3.
+Shared between AEB and ACC (both consume the same Vehicle instances produced
+by RadarThread).
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ _MAX_ANGULAR_VELOCITY: float = 45.0
 _LOCATION_UPDATE_FREQUENCY: float = 0.05
 
 # TMP speed / accel EMA — same hyperbolic law α(|v|) with different endpoints.
-# Reference speed for “at 90 km/h” is 25 m/s. See AGENTS.md §7.
+# Reference speed for "at 90 km/h" is 25 m/s. See AGENTS.md §7.
 _ALPHA_SPEED_SCALE: float = 90.0 / 3.6   # 25.0 m/s
 
 # Speed EMA on raw_speed: 0.5 at rest → 0.15 at 90 km/h.
@@ -58,8 +60,16 @@ _CRASH_CONFIRM_DURATION: float = 0.00           # s jerk must hold before confir
 _MIN_CURVATURE_RADIUS: float = 5.0
 _STRAIGHT_CURVATURE_EPS: float = 1e-6
 
-# TMP raw speed — fit longitudinal motion over the last N full-frame samples (LS on s ≈ v·τ).
-# Two samples reduce to the legacy single-interval Δs/Δt; more samples damp jitter.
+# Vehicle position history buffer — newest last, length capped at
+# _POSITION_HISTORY_LEN. Shared by:
+#   - TMP raw speed LS fit (uses last _TMP_SPEED_HISTORY_LEN samples internally)
+#   - curvature_from_history() circumscribed-circle fit (uses full buffer)
+#   - ACC trail-arc scoring (needs long history for stable fit).
+#
+# _POSITION_HISTORY_LEN is the buffer size; _TMP_SPEED_HISTORY_LEN is the
+# window the TMP speed LS fit considers. Keeping them separate lets ACC
+# get a ~25-sample trail without over-smoothing TMP speed.
+_POSITION_HISTORY_LEN: int = 25
 _TMP_SPEED_HISTORY_LEN: int = 10
 _TMP_SPEED_NEAR_ZERO_CHORD: float = 0.025  # m — same gate as per-frame displacement
 
@@ -71,14 +81,19 @@ def _tmp_raw_speed_from_position_history(
 ) -> float | None:
     """Estimate signed longitudinal speed (m/s) from (t, x, z) samples, oldest first.
 
-    Fits s ≈ v·τ where s = dot(p(τ) − p₀, fwd) and τ = t − t₀.  Uniform spacing is
-    not required.  Returns None if fewer than two samples (caller uses one interval).
+    Uses only the last _TMP_SPEED_HISTORY_LEN samples so the LS fit window is
+    independent of the total buffer length (which can be longer for curvature
+    / ACC trail arc).
+
+    Fits s ≈ v·τ where s = dot(p(τ) − p₀, fwd) and τ = t − t₀. Uniform spacing is
+    not required. Returns None if fewer than two samples (caller uses one interval).
     If the first→last chord is below _TMP_SPEED_NEAR_ZERO_CHORD, returns 0.0.
     """
     if len(history) < 2:
         return None
-    t0, x0, z0 = history[0]
-    tn, xn, zn = history[-1]
+    window = history[-_TMP_SPEED_HISTORY_LEN:] if len(history) > _TMP_SPEED_HISTORY_LEN else history
+    t0, x0, z0 = window[0]
+    tn, xn, zn = window[-1]
     chord_dx = xn - x0
     chord_dz = zn - z0
     chord = math.sqrt(chord_dx * chord_dx + chord_dz * chord_dz)
@@ -86,7 +101,7 @@ def _tmp_raw_speed_from_position_history(
         return 0.0
     num = 0.0
     den = 0.0
-    for t, x, z in history:
+    for t, x, z in window:
         tau = t - t0
         if tau <= 1e-9:
             continue
@@ -453,7 +468,7 @@ def _ray_ray_collision(
     a: ArcPath, b: ArcPath, corridor_sq: float, horizon: float,
     min_lateral_gap: float = 0.0,
 ) -> Optional[tuple[float, float, float]]:
-    """Earliest time two straight rays’ corridors touch: solve quadratic for
+    """Earliest time two straight rays' corridors touch: solve quadratic for
     |a_pos(t) − b_pos(t)|² = corridor_sq; returns (t, hit_x, hit_z) or None.
     min_lateral_gap suppresses hits when centerlines stay that far apart laterally."""
     dpx = a.start_x - b.start_x
@@ -607,7 +622,8 @@ class Vehicle:
         self._smooth_speed: Optional[float] = None
         self._smooth_accel: Optional[float] = None
         self._raw_speed: Optional[float] = None
-        # TMP only — (time, x, z) from full updates for multi-sample raw speed (newest last).
+        # (time, x, z) per full update — newest last, capped at _POSITION_HISTORY_LEN.
+        # Populated for both TMP and AI; TMP speed LS fit uses a shorter internal window.
         self._position_history: list[tuple[float, float, float]] = []
 
         # TMP lag detection state.
@@ -881,13 +897,14 @@ class Vehicle:
         fwd_x = -math.sin(self._smooth_yaw)
         fwd_z = -math.cos(self._smooth_yaw)
 
+        # Append this frame to the shared position history (both TMP and AI).
+        # _position_history was already copied from prev; append directly.
+        self._position_history.append((t_now, raw_x, raw_z))
+        if len(self._position_history) > _POSITION_HISTORY_LEN:
+            self._position_history = self._position_history[-_POSITION_HISTORY_LEN:]
+
         # TMP: raw speed from last N positions (LS on longitudinal s vs τ); smooth with EMA.
         if self.is_tmp:
-            # _position_history was already copied from prev (line above); append directly.
-            self._position_history.append((t_now, raw_x, raw_z))
-            if len(self._position_history) > _TMP_SPEED_HISTORY_LEN:
-                self._position_history = self._position_history[-_TMP_SPEED_HISTORY_LEN:]
-
             _ls = _tmp_raw_speed_from_position_history(self._position_history, fwd_x, fwd_z)
             if _ls is not None:
                 raw_speed = _ls
@@ -937,12 +954,6 @@ class Vehicle:
             self._smooth_accel = smooth_accel
             self.speed = smooth_speed
             self.acceleration = smooth_accel
-        else:
-            # AI: populate position history for curvature_from_history()
-            # _position_history was already copied from prev; append directly.
-            self._position_history.append((t_now, raw_x, raw_z))
-            if len(self._position_history) > _TMP_SPEED_HISTORY_LEN:
-                self._position_history = self._position_history[-_TMP_SPEED_HISTORY_LEN:]
 
     def curvature_from_history(self) -> float | None:
         """Curvature (1/m) from circumscribed circle fit over _position_history.

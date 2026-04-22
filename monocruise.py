@@ -44,6 +44,7 @@ from core.telemetry_thread.thread import TelemetryThread
 from core.main_pedal_thread.thread import MainPedalThread
 from core.cruise_control_thread.thread import CruiseControlThread
 from core.sending_thread.thread import SendingThread, create_visualization_bar
+from core.radar.thread import RadarThread
 from core.aeb.thread import AEBThread
 from core.aeb.debug_window import AEBDebugWindow
 
@@ -197,6 +198,7 @@ def main() -> None:
         MainPedalThread(),
         CruiseControlThread(),
         SendingThread(),
+        RadarThread(),
         AEBThread(),
     ]
 

@@ -11,8 +11,6 @@ from __future__ import annotations
 import enum
 import logging
 import math
-import struct
-import mmap
 import threading
 import time
 from dataclasses import dataclass, field
@@ -21,8 +19,8 @@ from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 from core.settings import Settings
 
-from .traffic import (
-    Position, Quaternion, Size, Trailer, Vehicle,
+from core.radar.traffic import (
+    Vehicle,
     ArcPath, build_arc, arc_arc_collision, _accel_to_arc_params,
 )
 
@@ -120,18 +118,6 @@ _NEAR_HEAD_ON_LATERAL_MIN: float = 3.0       # m — minimum lateral offset to a
 # Still evaluated via arc_arc_collision; not a blind suppression.
 _SHARED_TURN_MAX_KAPPA: float = 0.05         # cap on road-following curvature (R ≥ 20 m)
 
-# Ego position history for future position-based curvature estimation.
-# Stores (monotonic_time, x, z) tuples, newest last.
-_EGO_POSITION_HISTORY_LEN: int = 10
-
-_VEHICLE_FORMAT = "ffffffffffffhhbb"
-_TRAILER_FORMAT = "ffffffffff"
-_VEHICLE_OBJECT_FORMAT = _VEHICLE_FORMAT + _TRAILER_FORMAT * 3
-_TOTAL_FORMAT = "=" + _VEHICLE_OBJECT_FORMAT * 40
-_BUF_SIZE = 6960
-_VEH_STRIDE = 16 + 3 * 10
-
-
 def _tmp_collision_threat(ref_ego_kmh: float, rel_speed_kmh: float) -> bool:
     """TMP session only — True if target should participate in arc collision / TTB."""
     if ref_ego_kmh > _TMP_FILTER_EGO_SPLIT_KMH:
@@ -183,79 +169,6 @@ class AEBData(ThreadData):
     em_stop_requested: bool = False
     snapshot: AEBSnapshot = field(default_factory=AEBSnapshot)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
-
-
-class _TrafficReader:
-    def __init__(self) -> None:
-        self._buf: mmap.mmap | None = None
-        self._last_vehicles: dict[int, Vehicle] = {}
-
-    def open(self) -> bool:
-        if self._buf is not None:
-            return True
-        try:
-            self._buf = mmap.mmap(0, _BUF_SIZE, r"Local\ETS2LATraffic")
-            logger.info("ETS2LATraffic shared-memory buffer opened")
-            return True
-        except Exception:
-            return False
-
-    def close(self) -> None:
-        if self._buf is not None:
-            try:
-                self._buf.close()
-            except Exception:
-                pass
-            self._buf = None
-
-    def read(self) -> list[Vehicle] | None:
-        if self._buf is None and not self.open():
-            return None
-        try:
-            self._buf.seek(0)
-        except Exception:
-            return None
-        try:
-            raw = struct.unpack(_TOTAL_FORMAT, self._buf[:_BUF_SIZE])
-        except Exception:
-            self._buf = None
-            return None
-
-        vehicles: list[Vehicle] = []
-        data = raw
-        for _ in range(40):
-            position = Position(data[0], data[1], data[2])
-            rotation = Quaternion(data[3], data[4], data[5], data[6])
-            size = Size(data[7], data[8], data[9])
-            speed = data[10]
-            acceleration = data[11]
-            trailer_count = data[12]
-            vid = data[13]
-            is_tmp = bool(data[14])
-            is_trailer = bool(data[15])
-
-            trailers: list[Trailer] = []
-            for j in range(3):
-                off = 16 + j * 10
-                tp = Position(data[off], data[off + 1], data[off + 2])
-                tr = Quaternion(data[off + 3], data[off + 4], data[off + 5], data[off + 6])
-                ts = Size(data[off + 7], data[off + 8], data[off + 9])
-                if not tp.is_zero():
-                    trailers.append(Trailer(tp, tr, ts, is_tmp))
-
-            if not position.is_zero() and not rotation.is_zero():
-                vehicles.append(Vehicle(
-                    position, rotation, size, speed, acceleration,
-                    trailer_count, trailers, vid, is_tmp, is_trailer,
-                ))
-            data = data[_VEH_STRIDE:]
-
-        t_now = time.time()
-        for v in vehicles:
-            if v.id in self._last_vehicles:
-                v.update_from_last(self._last_vehicles[v.id], t_now)
-        self._last_vehicles = {v.id: v for v in vehicles}
-        return vehicles
 
 
 def _cross_zone_padding(ego_yaw_rad: float, v_yaw_rad: float, v_speed_ms: float) -> float:
@@ -508,17 +421,11 @@ class AEBThread(BaseThread):
     def __init__(self) -> None:
         super().__init__(name="aeb_thread")
         self.data = AEBData()
-        self._traffic = _TrafficReader()
         self._prev_state: AEBState = AEBState.STANDBY
         self._state_hold_until: float = 0.0
         self._last_snapshot: AEBSnapshot | None = None
         self._risk_first_seen: dict[int, float] = {}
         self._radar_visualizer = None
-        # Ego position history for future position-based curvature estimation.
-        # Stores (monotonic_time, x, z) tuples, newest last. Mirrors the structure
-        # of Vehicle._position_history in traffic.py so both can share the same
-        # circle-fitting logic when _ego_curvature_from_history() is implemented.
-        self._ego_position_history: list[tuple[float, float, float]] = []
         # Frozen ref ego (km/h) for TMP rel-speed split while WARN/brake-pedal active.
         self._latched_filter_ego_kmh: float | None = None
         self._sound_handler = _AEBSoundHandler(_AEB_SOUND_PATH)
@@ -534,7 +441,6 @@ class AEBThread(BaseThread):
             return False
 
     def setup(self) -> None:
-        self._traffic.open()
         if Settings.debug:
             self._try_start_radar_visualizer()
         logger.debug("AEB setup complete")
@@ -567,58 +473,35 @@ class AEBThread(BaseThread):
         threading.Thread(target=_run, daemon=True).start()
         logger.info("RadarVisualizer running on http://127.0.0.1:5000")
 
-    def _ego_curvature_from_history(self) -> float | None:
-        """Estimate ego curvature (1/m) from recent position history.
-
-        Intended to replace the yaw-rate proxy (steer * speed * 12.0 / speed) with
-        a geometry-based value derived from fitting a circle through the last N ego
-        positions, analogous to Vehicle.curvature_from_history() in traffic.py.
-
-        Returns None until implemented; callers fall back to the yaw-rate model.
-
-        Implementation notes (when ready):
-        - Require >= 3 samples and a minimum arc chord to avoid divide-by-zero.
-        - Use the circumscribed-circle formula on the oldest / middle / newest
-          position triple; average over all valid triples for stability.
-        - Sign: positive = left turn (κ > 0), matching ArcPath convention.
-        - Guard: if all-straight (chord << expected arc length), return 0.0 not None.
-        - Clear history on large position jumps (teleport / reload detection).
-        """
-        return None
-
     def loop(self) -> None:
         if not self.running:
             return
 
         aeb_active = Settings.AEB_enabled
-        (ego_x, ego_z, ego_yaw_norm, ego_speed, steer, paused, ego_has_trailer,
-         ego_y, ego_pitch_deg) = self._read_ego()
+
+        snapshot = self._read_radar_snapshot()
+        if snapshot is None:
+            return
+        (vehicles, ego_x, ego_y, ego_z, ego_yaw_rad, ego_speed, ego_pitch_deg,
+         steer, ego_has_trailer, _ego_curvature_from_history, tmp_traffic_session,
+         paused) = snapshot
 
         if paused and self._last_snapshot is not None:
             with self.data._lock:
                 self.data.snapshot = self._last_snapshot
             return
 
-        # NO +0.5 offset — see AGENTS.md §2
-        ego_yaw_rad = ego_yaw_norm * 2.0 * math.pi
-
-        # Moved up from vehicle loop — needed for ego position history.
         now_mono = time.monotonic()
 
-        # Ego position history
-        self._ego_position_history.append((now_mono, ego_x, ego_z))
-        if len(self._ego_position_history) > _EGO_POSITION_HISTORY_LEN:
-            self._ego_position_history = self._ego_position_history[-_EGO_POSITION_HISTORY_LEN:]
-
-        # Yaw-rate curvature proxy (current) — replaced by history-based value once
-        # _ego_curvature_from_history() is implemented.
+        # AEB ego path — yaw-rate proxy only. Do NOT use the position-history
+        # fit published by RadarThread: AEB's ego arc must not be smoothed or
+        # lagged, and the proxy reacts instantly to steering input. ACC owns
+        # the history-based curvature (see core/radar/AGENTS.md §11).
         if ego_speed > 0.5:
             yaw_rate_rad_s = math.radians(steer * ego_speed * 12.0)
-            ego_curvature_yaw = yaw_rate_rad_s / ego_speed
+            ego_curvature = yaw_rate_rad_s / ego_speed
         else:
-            ego_curvature_yaw = 0.0
-
-        ego_curvature = self._ego_curvature_from_history() or ego_curvature_yaw
+            ego_curvature = 0.0
 
         ego_hw: float = 1.15
         ego_half_l: float = 3.0
@@ -677,8 +560,6 @@ class AEBThread(BaseThread):
         ego_fwd_x = ego_arc.fwd_x
         ego_fwd_z = ego_arc.fwd_z
 
-        vehicles = self._traffic.read() or []
-        tmp_traffic_session = any(v.is_tmp for v in vehicles)
         ego_kmh_now = ego_speed * 3.6
         ref_kmh_for_filter = (
             self._latched_filter_ego_kmh
@@ -1188,7 +1069,6 @@ class AEBThread(BaseThread):
 
     def teardown(self) -> None:
         self._sound_handler.cleanup()
-        self._traffic.close()
         if self._radar_visualizer is not None:
             try:
                 self._radar_visualizer.stop()
@@ -1203,22 +1083,37 @@ class AEBThread(BaseThread):
             self.data.snapshot = AEBSnapshot()
         logger.debug("AEB teardown complete")
 
-    def _read_ego(self) -> tuple[float, float, float, float, float, bool, bool, float, float]:
+    def _read_radar_snapshot(
+        self,
+    ) -> tuple[list[Vehicle], float, float, float, float, float, float, float,
+               bool, float | None, bool, bool] | None:
+        """Read the radar thread's published snapshot under its data lock.
+
+        Returns ``None`` when the radar thread is missing / not alive — AEB
+        then skips the loop rather than fabricating an ego pose.
+        """
         try:
-            tel = registry.get_thread("telemetry_thread")
-            if tel is None or not tel.is_alive():
-                return 0.0, 0.0, 0.0, 0.0, 0.0, False, False, 0.0, 0.0
-            with tel.data._lock:
+            rt = registry.get_thread("radar_thread")
+        except KeyError:
+            return None
+        if rt is None or not rt.is_alive():
+            return None
+        try:
+            with rt.data._lock:
+                vehicles = list(rt.data.vehicles)
                 return (
-                    tel.data.coordinateX,
-                    tel.data.coordinateZ,
-                    tel.data.rotationX,
-                    tel.data.speed,
-                    float(getattr(tel.data, "userSteer", 0.0)),
-                    bool(getattr(tel.data, "paused", False)),
-                    bool(getattr(tel.data, "ego_has_trailer", False)),
-                    float(getattr(tel.data, "coordinateY", 0.0)),
-                    float(getattr(tel.data, "rotationY", 0.0)),
+                    vehicles,
+                    float(rt.data.ego_x),
+                    float(rt.data.ego_y),
+                    float(rt.data.ego_z),
+                    float(rt.data.ego_yaw_rad),
+                    float(rt.data.ego_speed),
+                    float(rt.data.ego_pitch_deg),
+                    float(rt.data.ego_steer),
+                    bool(rt.data.ego_has_trailer),
+                    rt.data.ego_curvature,
+                    bool(rt.data.tmp_session),
+                    bool(rt.data.paused),
                 )
-        except (KeyError, AttributeError):
-            return 0.0, 0.0, 0.0, 0.0, 0.0, False, False, 0.0, 0.0
+        except AttributeError:
+            return None
