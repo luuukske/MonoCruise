@@ -38,6 +38,9 @@ _EVASION_FILTER_CORRIDOR = QColor(0, 200, 200, 25)
 _EVASION_FILTERED_CLR = QColor(0, 200, 200, 140)
 _TRAILER_CLR = QColor(180, 140, 80)
 _EGO_TRAILER_CLR = QColor(55, 130, 215)
+_ACC_LEAD_CLR = QColor(255, 80, 230)           # primary ACC lead — magenta
+_ACC_CANDIDATE_CLR = QColor(180, 110, 220)     # top-3 non-primary
+_ACC_CORRIDOR = QColor(255, 80, 230, 35)
 _HIT_CLR = QColor(255, 30, 30)
 _TEXT = QColor(200, 200, 215)
 _HUD_BG = QColor(0, 0, 0, 160)
@@ -91,12 +94,38 @@ class AEBDebugWindow(QWidget):
             return None
         return aeb.data.snapshot
 
+    @staticmethod
+    def _fetch_acc() -> dict | None:
+        """ACC snapshot: {enabled, lead_id, top_ids, top_leads, dist, rel, score}."""
+        try:
+            acc = registry.get_thread("acc_thread")
+        except KeyError:
+            return None
+        if acc is None or not acc.is_alive():
+            return None
+        try:
+            with acc.data._lock:
+                leads = list(acc.data.leads)
+                top = [(l.vehicle.id, l.score, l.dist_m) for l in leads]
+                return {
+                    "enabled": bool(acc.data.enabled),
+                    "lead_id": int(acc.data.lead_id),
+                    "top_ids": {int(t[0]) for t in top},
+                    "top_leads": top,
+                    "dist": float(acc.data.lead_dist_m),
+                    "rel": float(acc.data.lead_rel_speed_ms),
+                    "score": float(acc.data.lead_score),
+                }
+        except AttributeError:
+            return None
+
     def _ws(self, wx: float, wz: float, ex: float, ez: float, ey: float) -> tuple[float, float]:
         rx, rz = _w2e(wx, wz, ex, ez, ey)
         return _e2s(rx, rz, self.width() / 2.0, self.height() / 2.0)
 
     def paintEvent(self, event: QPaintEvent) -> None:
         snap = self._fetch()
+        acc = self._fetch_acc()
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.fillRect(self.rect(), _BG)
@@ -120,6 +149,9 @@ class AEBDebugWindow(QWidget):
             is_brake_supp = vid in snap.braking_suppressed_ids
             is_evasion_filtered = vid in snap.evasion_filtered_ids
 
+            is_acc_lead = acc is not None and acc["lead_id"] == vid
+            is_acc_top = acc is not None and vid in acc["top_ids"] and not is_acc_lead
+
             if is_supp:
                 body_clr, corr_clr = _SUPPRESSED_CLR, QColor(_SUPPRESSED_CLR)
             elif is_evasion_filtered:
@@ -128,6 +160,10 @@ class AEBDebugWindow(QWidget):
                 body_clr, corr_clr = _BRAKE_SUPP_CLR, QColor(_BRAKE_SUPP_CLR)
             elif is_danger:
                 body_clr, corr_clr = _DANGER_CLR, QColor(_DANGER_CLR)
+            elif is_acc_lead:
+                body_clr, corr_clr = _ACC_LEAD_CLR, QColor(_ACC_LEAD_CLR)
+            elif is_acc_top:
+                body_clr, corr_clr = _ACC_CANDIDATE_CLR, QColor(_ACC_CANDIDATE_CLR)
             else:
                 body_clr, corr_clr = _SAFE_CLR, QColor(_SAFE_CLR)
 
@@ -147,6 +183,12 @@ class AEBDebugWindow(QWidget):
             sx, sy = self._ws(v["x"], v["z"], ex, ez, ey)
             spd = v.get("speed_kmh", 0.0)
             self._draw_label(p, sx, sy - 14, f"{spd:.0f}", body_clr)
+            if acc is not None and (is_acc_lead or is_acc_top):
+                score = next(
+                    (s for (tid, s, _d) in acc["top_leads"] if tid == vid), None
+                )
+                if score is not None:
+                    self._draw_label(p, sx, sy + 14, f"s{score:+.1f}", body_clr)
 
             for tr in v.get("trailers", []):
                 yaw = tr["yaw"]
@@ -194,8 +236,51 @@ class AEBDebugWindow(QWidget):
             self._draw_hit_marker(p, snap.hit_x, snap.hit_z, ex, ez, ey)
 
         self._draw_hud(p, snap)
+        self._draw_acc_hud(p, acc)
 
         p.end()
+
+    def _draw_acc_hud(self, p: QPainter, acc: dict | None) -> None:
+        hud_w = 310
+        hud_h = 78
+        hud_x = 10
+        hud_y = 195  # below main AEB HUD (175+10+10)
+
+        p.setPen(QPen(_HUD_BORDER, 1))
+        p.setBrush(QBrush(_HUD_BG))
+        p.drawRoundedRect(QRectF(hud_x, hud_y, hud_w, hud_h), 8, 8)
+
+        x = hud_x + 14
+        y = hud_y + 20
+
+        if acc is None:
+            p.setFont(self._font_hud_title)
+            p.setPen(QPen(QColor(120, 120, 135)))
+            p.drawText(QPointF(x, y), "ACC thread not running")
+            return
+
+        title_clr = _ACC_LEAD_CLR if acc["enabled"] else QColor(120, 120, 135)
+        p.setFont(self._font_hud_title)
+        p.setPen(QPen(title_clr))
+        state = "ACC tracking" if acc["enabled"] else "ACC disabled"
+        p.drawText(QPointF(x, y), state)
+
+        y += 20
+        p.setFont(self._font_main)
+        p.setPen(QPen(_TEXT))
+        if acc["lead_id"] >= 0:
+            p.drawText(
+                QPointF(x, y),
+                f"Lead #{acc['lead_id']}  d={acc['dist']:.1f} m  "
+                f"rel={acc['rel']*3.6:+.0f} km/h  s={acc['score']:+.1f}",
+            )
+        else:
+            p.drawText(QPointF(x, y), "Lead: —")
+
+        y += 18
+        p.setFont(self._font_small)
+        n_top = len(acc["top_leads"])
+        p.drawText(QPointF(x, y), f"in-lane candidates: {n_top}")
 
     def _draw_grid(self, p: QPainter, cx: float, cy: float) -> None:
         max_r = max(self.width(), self.height()) / _PPM + _GRID_STEP_MAJOR
@@ -459,9 +544,9 @@ class AEBDebugWindow(QWidget):
 
     def _draw_legend(self, p: QPainter) -> None:
         lx = 10
-        ly = self.height() - 110
+        ly = self.height() - 135
         lw = 145
-        lh = 105
+        lh = 130
 
         p.setPen(QPen(_HUD_BORDER, 1))
         p.setBrush(QBrush(_HUD_BG))
@@ -476,6 +561,8 @@ class AEBDebugWindow(QWidget):
             (_BRAKE_SUPP_CLR, "Brake-suppressed"),
             (_SUPPRESSED_CLR, "Rear-suppressed"),
             (_EVASION_FILTER_CLR, "Evasion-filtered"),
+            (_ACC_LEAD_CLR, "ACC lead"),
+            (_ACC_CANDIDATE_CLR, "ACC candidate"),
         ]
         y = ly + 13
         for clr, label in items:

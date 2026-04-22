@@ -46,6 +46,7 @@ from core.cruise_control_thread.thread import CruiseControlThread
 from core.sending_thread.thread import SendingThread, create_visualization_bar
 from core.radar.thread import RadarThread
 from core.aeb.thread import AEBThread
+from core.acc.thread import ACCThread
 from core.aeb.debug_window import AEBDebugWindow
 
 from ui.main_window import create_main_window
@@ -200,6 +201,7 @@ def main() -> None:
         SendingThread(),
         RadarThread(),
         AEBThread(),
+        ACCThread(),
     ]
 
     for w in workers:
