@@ -862,6 +862,30 @@ class AEBThread(BaseThread):
                     if (vx - _sp_ex) * _sp_fwd_x + (vz - _sp_ez) * _sp_fwd_z <= 0.0:
                         unbraked_hit = None
 
+                # Corner-entry stationary oncoming suppression.
+                # At corner entry ego_curvature ≈ 0, so all κ-gated suppressions
+                # fail. A stationary oncoming vehicle's yaw encodes how much the
+                # road curves between ego and the vehicle: the signed yaw difference
+                # from anti-parallel equals the road bend angle, so
+                #   implied_kappa = acos(-fwd_dot) / dist
+                # gives the average curvature of the road ahead. If this exceeds
+                # the corner threshold the vehicle is on an upcoming curve.
+                # lateral_offset guards against a stationary vehicle in *ego's* lane
+                # on the same curve — that vehicle has near-zero lateral displacement
+                # from ego's current heading axis (it's straight ahead, not to the
+                # side), so the gate correctly fails and the threat is preserved.
+                if (unbraked_hit is not None
+                        and abs_v_speed < _SWEEP_PASS_MAX_TARGET_SPEED
+                        and fwd_dot < -0.3
+                        and abs(ego_curvature) < _TURNING_DIVERGE_CURVATURE
+                        and lateral_offset >= _NEAR_HEAD_ON_LATERAL_MIN
+                        and dist > 1.0):
+                    road_bend = math.acos(max(-1.0, min(1.0, -fwd_dot)))
+                    implied_kappa = road_bend / dist
+                    if implied_kappa > _TURNING_DIVERGE_CURVATURE:
+                        oncoming_evasion_filtered_ids.add(v.id)
+                        unbraked_hit = None
+
                 if unbraked_hit is None:
                     continue
 

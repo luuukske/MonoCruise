@@ -313,6 +313,7 @@ prevents false skips on vehicles in front of ego on a slope.
 | Opposite-lane kappa scale | `_OPPOSITE_LANE_KAPPA_SCALE = 2.0` — multiplier on `delta_kappa_t` for clearly displaced oncoming vehicles |
 | Turning diverge curvature threshold | `_TURNING_DIVERGE_CURVATURE = 0.007 /m` (≈ 143 m radius) |
 | Sweep-pass suppression | stationary target (`abs_v_speed < _SWEEP_PASS_MAX_TARGET_SPEED (1.0 m/s)`) + ego in real corner (`|ego_curvature| > _TURNING_DIVERGE_CURVATURE`); at `t_hit`, compute ego heading and position on arc; suppress if `dot(ego_fwd_at_hit, vehicle_pos − ego_pos_at_hit) <= 0` (vehicle behind ego's heading — arc swept through, not a real collision) |
+| Corner-entry stationary suppression | stationary target + `fwd_dot < -0.3` + `|ego_curvature| < _TURNING_DIVERGE_CURVATURE` (corner entry, ego not yet turning) + `lateral_offset >= _NEAR_HEAD_ON_LATERAL_MIN (3.0 m)` + `dist > 1.0 m`; infer road curvature from target yaw: `implied_kappa = acos(-fwd_dot) / dist`; suppress if `implied_kappa > _TURNING_DIVERGE_CURVATURE`. `lateral_offset` gate preserves genuine in-lane threats (straight ahead → near-zero lateral offset → gate fails). Adds to `oncoming_evasion_filtered_ids`. |
 
 ---
 
@@ -332,6 +333,7 @@ prevents false skips on vehicles in front of ego on a slope.
 - **`_SAME_CURVE_OWN_LANE_LAT = 1.0 m` is tight by design.** On a shared curve, the cross-product lateral offset compresses due to heading-axis misalignment. Do not raise this without understanding the compression effect.
 - **Fix C extends the co-directional diverge lookahead, not the curvature model.** The inner/outer lane arc overlap is a timing artifact — corridors overlap before centerlines cross. Do not relax the curvature-sign guard.
 - **Sweep-pass suppression targets stationary cross-traffic only** (`abs_v_speed < 1.0 m/s`). It must not fire on moving vehicles. The ego curvature guard (`|ego_curvature| > _TURNING_DIVERGE_CURVATURE`) ensures it only fires during a real corner.
+- **Corner-entry stationary suppression requires `lateral_offset >= _NEAR_HEAD_ON_LATERAL_MIN`.** This gate is safety-critical: a stationary vehicle blocking ego's own lane on a curve has near-zero lateral displacement from ego's current heading axis. Removing or loosening this gate risks suppressing real in-lane threats.
 
 ---
 
