@@ -72,12 +72,14 @@ _BLINKER_OFFSET_M: float = 4.5
 _BLINKER_SCORE_RESET_KMH: float = 65.0
 
 # Minimum target position history length required before we'd trust a
-# trail-arc fit.  Below this we use the NO_HISTORY baseline (-0.16).
+# trail-arc fit.  Matches legacy ``fit_circle`` / ``draw_fitted_arc``
+# gate of ``len(history) < 5``: below 5 samples the LS circle fit is
+# skipped and the NO_HISTORY baseline (-0.16) is applied.
 # NOTE: the trail-arc LS circle fit itself is not yet implemented —
 # see core/acc/AGENTS.md §3.  Until it lands, offset uses the target's
 # current lateral as the crossing fallback and baseline switches
 # between HIT (got a fwd chord) and NO_HISTORY (not enough samples).
-_MIN_TRAIL_SAMPLES: int = 6
+_MIN_TRAIL_SAMPLES: int = 5
 
 
 @dataclass(slots=True)

@@ -17,7 +17,7 @@ from core.settings import Settings
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 
-from .acc_stub import AdaptiveCruiseControllerStub
+from .acc_controller import AdaptiveCruiseController
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ class CruiseControlThread(BaseThread):
     def __init__(self) -> None:
         super().__init__(name="cruise_control_thread")
         self.data = CruiseControlThreadData()
-        self._acc = AdaptiveCruiseControllerStub()
+        self._acc = AdaptiveCruiseController()
 
         self._cc_enabled = False
         self._target_speed_kmh: float | None = None
@@ -192,7 +192,9 @@ class CruiseControlThread(BaseThread):
             ):
                 wanted_accel = self._speed_to_accel(tel, dt)
                 if self._acc_should_cap():
-                    wanted_accel = min(wanted_accel, self._acc.accel_cap_ms2())
+                    wanted_accel = min(wanted_accel, self._acc.accel_cap_ms2(tel["speed_ms"]))
+                else:
+                    self._acc.reset()
                 wanted_accel = self._smooth_output_accel_ema(wanted_accel, dt)
                 accel_min = float(Settings.cc_accel_min_ms2)
                 accel_max = float(Settings.cc_accel_max_ms2)
@@ -203,6 +205,7 @@ class CruiseControlThread(BaseThread):
                 self._kd_smooth_speed_ms = None
                 self._output_ema_accel_ms2 = None
                 self._target_speed_ema_ms = None
+                self._acc.reset()
 
             self._publish_telemetry_command(wanted_accel if commanding else 0.0)
             self._publish_data(commanding, wanted_accel if commanding else 0.0)

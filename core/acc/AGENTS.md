@@ -69,7 +69,7 @@ semantic departure is dt-scaling so the loop can run at any cadence.
 | offset     | dimensionless | [-1.6, +1.5]    | Gaussian `2^(-(x/σ)²)` on arc-crossing lateral (σ = 2.25 m), × distance_amp,      |
 |            |               |                 | clamped ±1, × outer `1.5·(angle_amp·0.4 + 0.6)`, + baseline.                      |
 | yaw        | dimensionless | [-1.5, 0.0]     | `(2^(-(|Δyaw|/90°)^5) - 1) · 1.5`.                                                |
-| path       | dimensionless | [-4.0, +5.0]    | `exp(-d / 34 m) · slow_amp · (1 - |b²|·0.4)`; `min(·, 5)` in / `-min(·×0.6, 4)` out.|
+| path       | dimensionless | [-4.0, +5.0]    | `1.03^(-d_m) · slow_amp · (1 - b²·0.4)`; `min(·, 5)` in / `-min(·×0.6, 4)` out.     |
 | angle      | —             | 0.0 (reserved)  | Arc-arrival angle in radians. Legacy had it disabled — still is.                  |
 
 ### offset — constants and baselines
@@ -91,14 +91,14 @@ arc-arc hit tests, which we don't want.
 > found its intersection with the ego row, and used that point as the
 > `offset_m` input. Until that lands, `ACCTracker` uses the target's
 > current lateral distance as the fallback and chooses `baseline`
-> from `len(v.position_history)` alone — `HIT` once we have ≥6 samples,
-> `NO_HISTORY` otherwise. `NO_ARC_HIT` is reachable only once the
-> fit is implemented.
+> from `len(v.position_history)` alone — `HIT` once we have ≥5 samples
+> (matches legacy `fit_circle` gate), `NO_HISTORY` otherwise.
+> `NO_ARC_HIT` is reachable only once the fit is implemented.
 
 ### path — slow_speed_amp and blinker reduction
 
     slow_amp          = 1.4 + (kmh / 100) · 4.1
-    blinker_reduction = 1 - |b²| · 0.4     # b = signed blinker scalar
+    blinker_reduction = 1 - b² · 0.4       # b = signed blinker scalar; no clamp
 
 At low speed the corridor effectively fattens because the path decay
 is shallower relative to lane width. During a lane change the squared

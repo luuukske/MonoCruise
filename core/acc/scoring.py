@@ -13,7 +13,7 @@ Components (per frame, before speed/dt scaling):
                then scaled by an outer angle-weighted multiplier and
                added to a baseline increment.
     yaw      — heading mismatch.  `(2^(-(|Δyaw|/90°)^5) - 1) × 1.5`.
-    path     — ego-path intersection.  `1.03^(-d) × slow_amp` with a
+    path     — ego-path intersection.  `1.03^(-d_m) × slow_amp` with a
                blinker amplitude reduction; capped at +5 in-path /
                -4 out-of-path (× 0.6 when out).
     angle    — reserved.  Currently 0.0 (legacy had it disabled too).
@@ -36,8 +36,10 @@ _SCORE_MAX: float = 15.0
 # zero-crossing of ``offset_raw`` sits at |x| ≈ 2.58 m at angle_amp = 1.
 _OFFSET_SIGMA_M: float = 2.25
 
-# Path decay.  exp(-d / 34) ≈ 1.03^(-d) for d in metres (1/ln(1.03) ≈ 33.8).
-PATH_DECAY_M: float = 34.0
+# Path decay base.  Legacy uses ``1.03^(-d)`` with d in metres.
+# Equivalent to ``exp(-d · ln(1.03))``; keep the base explicit so the
+# formula is bit-for-bit identical to the legacy integer-tick maths.
+_PATH_DECAY_BASE: float = 1.03
 
 # Slow-speed path amplifier: ``slow_amp = 1.4 + (kmh / 100) × 4.1``.
 # Reference table in SCORING_REFERENCE §8.3.2.
@@ -69,8 +71,8 @@ _SPEED_MULT_EXP: float = 0.8
 _SPEED_MULT_FLOOR: float = 0.5
 
 # Legacy tick rate.  :func:`accumulate` scales its dt input by this so
-# at 30 Hz the per-frame delta matches the legacy integer-tick maths.
-_LEGACY_RATE_HZ: float = 30.0
+# at 10 Hz the per-frame delta matches the legacy integer-tick maths.
+_LEGACY_RATE_HZ: float = 10.0
 
 
 @dataclass(slots=True)
@@ -141,16 +143,20 @@ def path_component(
 ) -> float:
     """Ego-path intersection score — SCORING_REFERENCE §8.3.2.
 
-    blinker_offset  — signed scalar in [-1, +1] from the blinker decay
-                       curve.  Reduces the path amplitude by up to 40%
-                       during a lane change via ``|b²| × 0.4``.
+    blinker_offset  — signed scalar from the blinker decay curve (the
+                       ACC tracker bounds it to [-1, +1], but legacy
+                       allowed simultaneous left+right up to ±2 for
+                       hazard blinker edge cases).  Reduces the path
+                       amplitude by ``b² × 0.4`` — at |b| > √2.5 the
+                       reduction exceeds 1 and `base` goes negative,
+                       matching legacy behaviour exactly.
     """
     if dist_m < 0.0:
         dist_m = 0.0
-    decay = math.exp(-dist_m / PATH_DECAY_M)           # ≈ 1.03^(-d)
+    decay = math.pow(_PATH_DECAY_BASE, -dist_m)        # legacy 1.03^(-d)
     slow_amp = _SLOW_AMP_BASE + (ego_speed_kmh / _SLOW_AMP_REF_KMH) * _SLOW_AMP_SLOPE
     blinker_sq = blinker_offset * blinker_offset
-    amp = slow_amp * max(0.0, 1.0 - blinker_sq * 0.4)
+    amp = slow_amp * (1.0 - blinker_sq * 0.4)
     base = decay * amp
     if in_path:
         return min(_PATH_IN_CAP, base)
