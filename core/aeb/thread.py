@@ -118,6 +118,13 @@ _NEAR_HEAD_ON_LATERAL_MIN: float = 3.0       # m — minimum lateral offset to a
 # Still evaluated via arc_arc_collision; not a blind suppression.
 _SHARED_TURN_MAX_KAPPA: float = 0.05         # cap on road-following curvature (R ≥ 20 m)
 
+# Fix D — target arc over-rotation suppression.
+# A vehicle turning from a side road into the opposite lane maintains high curvature;
+# the constant-curvature arc keeps rotating past lane alignment into ego's lane.
+# Dampen target curvature when heading rotation over the arc horizon would exceed
+# the angle to anti-parallel road alignment.
+_TURN_COMPLETE_CURVATURE_SCALE: float = 3.0   # divisor applied when overshoot detected
+
 def _tmp_collision_threat(ref_ego_kmh: float, rel_speed_kmh: float) -> bool:
     """TMP session only — True if target should participate in arc collision / TTB."""
     if ref_ego_kmh > _TMP_FILTER_EGO_SPLIT_KMH:
@@ -226,6 +233,42 @@ def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1) -> bool:
     return d1_sq < d0_sq
 
 
+def _dampen_turning_curvature(
+    v_curvature: float,
+    fwd_dot: float,
+    ego_fwd_x: float, ego_fwd_z: float,
+    veh_fwd_x: float, veh_fwd_z: float,
+    abs_v_speed: float,
+    arc_length: float,
+) -> float:
+    """Dampen target curvature when arc would over-rotate past anti-parallel lane alignment.
+
+    Mirrors the ego evasion centerline-snap but on the primary target arc. A vehicle
+    turning from a side road into the opposite lane has high curvature; constant-curvature
+    propagation keeps rotating past the point where the vehicle straightens into its lane,
+    producing a phantom collision in ego's lane.
+
+    Only fires for cross-traffic geometry (fwd_dot in (-0.5, 0.7)) with confirmed rotation
+    toward anti-parallel and a heading change that would exceed the alignment angle.
+    """
+    if (abs(v_curvature) <= _TURNING_DIVERGE_CURVATURE
+            or abs_v_speed <= 0.5
+            or fwd_dot <= -0.5    # already mostly anti-parallel — not mid-turn entry
+            or fwd_dot >= 0.7):   # co-directional — other suppressions handle this
+        return v_curvature
+    theta_max = abs(v_curvature) * arc_length
+    theta_to_anti = math.acos(max(-1.0, min(1.0, -fwd_dot)))
+    if theta_max <= theta_to_anti:
+        return v_curvature
+    # Direction guard: only dampen when rotating TOWARD anti-parallel.
+    # cross(veh_fwd, anti_ego_fwd) > 0 means CW rotation needed (= negative curvature in ETS2).
+    # Rotating toward anti-parallel: cross and curvature have opposite signs.
+    cross = veh_fwd_x * (-ego_fwd_z) - veh_fwd_z * (-ego_fwd_x)
+    if cross * v_curvature >= 0.0:
+        return v_curvature  # rotating away — genuine cross-arc threat
+    return v_curvature / _TURN_COMPLETE_CURVATURE_SCALE
+
+
 def _build_vehicle_collision_data(
     v: Vehicle,
     dynamic_horizon: float,
@@ -253,6 +296,14 @@ def _build_vehicle_collision_data(
     fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
     head_on = fwd_dot < -0.5
     target_override_decel = _FULL_BRAKE_DECEL if head_on else 0.0
+    # Fix D — dampen curvature when constant-curvature arc would over-rotate past
+    # anti-parallel lane alignment. v_curvature is preserved unchanged for same_curve
+    # checks; arc_curvature is used only for arc building.
+    arc_curvature = _dampen_turning_curvature(
+        v_curvature, fwd_dot,
+        ego_fwd_x, ego_fwd_z, veh_fwd_x, veh_fwd_z,
+        abs_v_speed, abs_v_speed * dynamic_horizon,
+    )
     # For trailer arcs built with build_arc() directly. get_arc() calls
     # _accel_to_arc_params internally so veh_arc_coll only needs override_decel.
     target_decel, target_accel = _accel_to_arc_params(v.accel_for_arc(), target_override_decel)
@@ -261,6 +312,7 @@ def _build_vehicle_collision_data(
         half_width=v_hw_coll,
         decel=target_override_decel,
         arc_start_pctg=_ARC_START_PCTG,
+        curvature_override=arc_curvature,
     )
     tr_hw_colls: list[float] = []
     trailer_arcs_coll: list[ArcPath] = []
@@ -283,7 +335,7 @@ def _build_vehicle_collision_data(
                 tr_pos.z + tr_body_offset_c * tr_fwd_z_c,
                 tr_yaw_rad,
                 v.speed,
-                v_curvature,
+                arc_curvature,
                 tr_hw_colls[-1],
                 dynamic_horizon,
                 decel=target_decel,
@@ -752,8 +804,14 @@ class AEBThread(BaseThread):
             if pc is None:
                 target_override_decel = _FULL_BRAKE_DECEL if head_on else 0.0
                 target_decel, target_accel = _accel_to_arc_params(v.accel_for_arc(), target_override_decel)
+                arc_curvature_fb = _dampen_turning_curvature(
+                    v_curvature, fwd_dot,
+                    ego_fwd_x, ego_fwd_z, veh_fwd_x, veh_fwd_z,
+                    abs_v_speed, abs_v_speed * dynamic_horizon,
+                )
                 veh_arc_coll = v.get_arc(dynamic_horizon, half_width=v_hw_coll,
-                                         decel=target_override_decel, arc_start_pctg=_ARC_START_PCTG)
+                                         decel=target_override_decel, arc_start_pctg=_ARC_START_PCTG,
+                                         curvature_override=arc_curvature_fb)
                 trailer_arcs_coll: list[ArcPath] = []
                 for idx, tr in enumerate(v.trailers):
                     tr_pos = tr.position
@@ -768,7 +826,7 @@ class AEBThread(BaseThread):
                         tr_pos.x + tr_body_offset_c * tr_fwd_x_c,
                         tr_pos.z + tr_body_offset_c * tr_fwd_z_c,
                         tr_yaw_rad,
-                        v.speed, v_curvature, tr_hw_colls[idx], dynamic_horizon,
+                        v.speed, arc_curvature_fb, tr_hw_colls[idx], dynamic_horizon,
                         decel=target_decel, accel=target_accel,
                     ))
                 all_target_arcs = [veh_arc_coll] + trailer_arcs_coll

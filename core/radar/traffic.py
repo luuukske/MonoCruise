@@ -1018,6 +1018,7 @@ class Vehicle:
         half_width: float | None = None,
         decel: float = 0.0,
         arc_start_pctg: float = 1.0,
+        curvature_override: float | None = None,
     ) -> ArcPath:
         """ArcPath for this vehicle from smoothed pose and curvature.
 
@@ -1031,11 +1032,14 @@ class Vehicle:
             else math.radians(self.rotation.euler()[1])
         )
         abs_speed = abs(self.speed)
-        _hist_k = self.curvature_from_history()
-        if _hist_k is not None:
-            curvature = _hist_k
+        if curvature_override is not None:
+            curvature = curvature_override
         else:
-            curvature = math.radians(self.angular_velocity) / abs_speed if abs_speed > 0.5 else 0.0
+            _hist_k = self.curvature_from_history()
+            if _hist_k is not None:
+                curvature = _hist_k
+            else:
+                curvature = math.radians(self.angular_velocity) / abs_speed if abs_speed > 0.5 else 0.0
         effective_hw = half_width if half_width is not None else self.size.width / 2.0
         effective_decel, effective_accel = _accel_to_arc_params(self.accel_for_arc(), decel)
 
