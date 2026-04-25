@@ -61,7 +61,7 @@ D_EMERGENCY_M: float = 1.5
 # outside. Close → snappy; far → heavily filtered, kills MP jitter before it
 # reaches the gains.
 TAU_INPUT_NEAR_S: float = 0.08
-TAU_INPUT_FAR_S: float = 0.35
+TAU_INPUT_FAR_S: float = 0.12
 D_INPUT_NEAR_M: float = 20.0
 D_INPUT_FAR_M: float = 80.0
 
@@ -272,14 +272,26 @@ class AdaptiveCruiseController:
         v_close = v_ego - lead.v_lead_ms
         d_eff = max(eff_dist - cfg.min_gap_m, 0.5)
         if v_close > 0.0:
-            a_req = lead.a_lead_ms2 - (v_close * v_close) / (2.0 * d_eff)
+            a_req_close = lead.a_lead_ms2 - (v_close * v_close) / (2.0 * d_eff)
         else:
             # Not closing — kinematic floor disengages (coast with lead).
-            a_req = cfg.max_accel_ms2
+            a_req_close = cfg.max_accel_ms2
 
-        # Conservative combine: the kinematic law only binds when it demands
+        # --- Lead-braking projection floor --------------------------------
+        # When the lead is actively decelerating, project where it will stop
+        # and demand ego stop by that point (minus min_gap). Anticipatory —
+        # fires even at v_close ≈ 0 so brake onset doesn't wait for the gap
+        # to collapse. Mirrors the legacy "decel" stopping branch.
+        if lead.a_lead_ms2 < -0.5 and lead.v_lead_ms > 0.1:
+            lead_stop_dist = -(lead.v_lead_ms * lead.v_lead_ms) / (2.0 * lead.a_lead_ms2)
+            target_stop_pos = max(d_eff + lead_stop_dist, 0.5)
+            a_req_brake = -(v_ego * v_ego) / (2.0 * target_stop_pos)
+        else:
+            a_req_brake = cfg.max_accel_ms2
+
+        # Conservative combine: each kinematic law only binds when it demands
         # more braking than the PID. `min` is continuous, no branch-step.
-        target = min(pid_accel, a_req)
+        target = min(pid_accel, a_req_close, a_req_brake)
 
         return _clamp(target, cfg.max_decel_ms2, cfg.max_accel_ms2)
 

@@ -62,10 +62,63 @@ def create_visualization_bar() -> VisualizationBar:
     """
     return VisualizationBar()
 
+# AEB phased braking
+_AEB_PHASE1_DECEL_FRAC: float = 0.50   # Phase 1: 50 % of max brake capacity
+_AEB_PHASE2_DECEL_FRAC: float = 0.90   # Phase 2: 90 % of max brake capacity
+_AEB_PHASE1_DURATION_S: float = 0.5    # Duration of phase 1 (seconds)
+
 BOOL_PRESS_DURATION: float = 0.1
 HAZARD_PRESS_DURATION: float = 0.4
 HAZARD_VERIFY_DELAY: float = 0.1
 HAZARD_MAX_RETRIGGERS: int = 3
+
+
+class AEBBrakeController:
+    """Two-phase AEB brake sequencer.
+
+    Phase 1 (first ``_AEB_PHASE1_DURATION_S`` seconds): commands
+    ``_AEB_PHASE1_DECEL_FRAC`` × max_brake_ms2.
+    Phase 2 (remaining):   commands ``_AEB_PHASE2_DECEL_FRAC`` × max_brake_ms2.
+
+    Activated on ``AEB_brake`` rising edge; released when both ``AEB_warn``
+    and ``AEB_brake`` clear.  ``max_brake_ms2`` is sampled live every tick so
+    the Phase-2 target uses the freshest capacity estimate, including any
+    refinement that occurred during the gentler Phase-1 application.
+    """
+
+    def __init__(self) -> None:
+        self._phase: int = 0            # 0 = idle, 1 = phase-1, 2 = phase-2
+        self._phase1_start: float = 0.0
+
+    @property
+    def active(self) -> bool:
+        return self._phase > 0
+
+    def update(self, aeb_warn: bool, aeb_brake: bool, now: float) -> bool:
+        """Tick state machine.  Returns True on rising edge (just became active)."""
+        was_active = self._phase > 0
+
+        if not aeb_warn and not aeb_brake:
+            self._phase = 0
+            return False
+
+        if self._phase == 0 and aeb_brake:
+            self._phase = 1
+            self._phase1_start = now
+        elif self._phase == 1:
+            if now - self._phase1_start >= _AEB_PHASE1_DURATION_S:
+                self._phase = 2
+        # phase 2 holds until warn + brake both clear (caught by the guard above)
+
+        return (not was_active) and (self._phase > 0)
+
+    def commanded_decel_ms2(self, max_brake_ms2: float) -> float:
+        """Positive deceleration magnitude to command this tick (m/s²)."""
+        if self._phase == 1:
+            return _AEB_PHASE1_DECEL_FRAC * max_brake_ms2
+        if self._phase == 2:
+            return _AEB_PHASE2_DECEL_FRAC * max_brake_ms2
+        return 0.0
 
 
 @dataclass
@@ -100,6 +153,7 @@ class SendingThreadData(ThreadData):
     mapper_brake_multiplier: float = 1.0
     mapper_gain_scale: float = 1.0
     mapper_pedal_state: int = 0
+    max_brake_ms2: float = 0.0         # live PedalCapacityTracker estimate (m/s²)
     _lock: threading.Lock = field(
         default_factory=threading.Lock, repr=False, compare=False
     )
@@ -130,6 +184,7 @@ class SendingThread(BaseThread):
         self._prev_tel_hazards: bool = False
         self._accel_mapper = AccelToPedals()
         self._capacity_tracker = PedalCapacityTracker()
+        self._aeb_controller = AEBBrakeController()
         self._key_listener = None
         self._spd_smooth: float | None = None
         self._prev_spd_mono: float | None = None
@@ -357,6 +412,13 @@ class SendingThread(BaseThread):
 
             em_stop = em_stop or AEB_brake
 
+        _aeb_now = time.monotonic()
+        _just_entered_aeb = self._aeb_controller.update(AEB_warn, AEB_brake, _aeb_now)
+        if _just_entered_aeb:
+            # Clean PID/smoothing state so the mapper starts fresh on each AEB event.
+            self._accel_mapper.reset_smoothing()
+        _aeb_active = self._aeb_controller.active
+
         connected = False
         gear = 0
         tel_hazards = False
@@ -451,6 +513,13 @@ class SendingThread(BaseThread):
                     self._spd_smooth += alpha * (spd_ms - self._spd_smooth)
                 self._prev_spd_mono = now_spd
                 measured_decel_ms2 = max(0.0, -raw_a)
+                # AEB phased brake override — supersedes cruise commanded accel.
+                # Uses the live capacity estimate so Phase-2 benefits from any
+                # refinement that occurred during the gentler Phase-1 application.
+                if _aeb_active:
+                    wanted_a = -self._aeb_controller.commanded_decel_ms2(
+                        self._capacity_tracker.max_brake_ms2
+                    )
                 targets = self._accel_mapper.step(
                     wanted_a,
                     raw_a,
@@ -460,7 +529,7 @@ class SendingThread(BaseThread):
                     max_accel_ms2=self._capacity_tracker.max_accel_ms2,
                     max_brake_ms2=self._capacity_tracker.max_brake_ms2,
                     road_pitch=road_pitch,
-                    cruise_commanding=cruise_active,
+                    cruise_commanding=cruise_active or _aeb_active,
                     gear_dashboard=tel_gear_dashboard,
                     game_throttle=game_throttle,
                     game_clutch=game_clutch,
@@ -681,6 +750,10 @@ class SendingThread(BaseThread):
             a = max(a, mapper_gas)
         b = max(b, mapper_brake)
 
+        # AEB active — suppress gas completely; brake already merged above.
+        if _aeb_active:
+            a = 0.0
+
         # Brake threshold hysteresis: suppress flicker from rapid OPD/CC transitions.
         _now = time.monotonic()
         if b > 0.006:
@@ -738,6 +811,7 @@ class SendingThread(BaseThread):
             self.data.decel_active = False
             self.data.decel_brake_output = 0.0
             self.data.decel_measured_ms2 = measured_decel_ms2
+            self.data.max_brake_ms2 = self._capacity_tracker.max_brake_ms2
             self.data.mapper_commanded_ms2 = wanted_a
             self.data.mapper_control_wanted_ms2 = mapper_control_wanted_ms2
             self.data.mapper_raw_accel_ms2 = raw_a

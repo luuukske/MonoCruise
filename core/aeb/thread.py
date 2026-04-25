@@ -41,6 +41,10 @@ _AEB_WARNING_STOP_EXTRA_REPLAYS = 1
 _INF: float = 1e9
 
 _FULL_BRAKE_DECEL: float = 7.8
+# Fraction of max brake capacity assumed for ego stopping / TTB calculations.
+# The brake system physically commands only this fraction, reserving headroom
+# so a sudden increase in closing speed can still stop the vehicle.
+_AEB_EGO_DECEL_FRAC: float = 0.9
 _MAX_RANGE: float = 200.0
 _MAX_RANGE_SQ: float = _MAX_RANGE ** 2
 # TMP-only: |v_ego − v_target| (km/h) vs latched ref ego speed — see _latched_filter_ego_kmh.
@@ -492,6 +496,23 @@ class AEBThread(BaseThread):
         except (KeyError, AttributeError):
             return False
 
+    def _read_max_brake_ms2(self) -> float:
+        """Read the live max brake capacity from sending_thread.
+
+        Falls back to ``_FULL_BRAKE_DECEL`` when the sending thread is
+        unavailable or has not yet published a valid estimate.
+        """
+        try:
+            st = registry.get_thread("sending_thread")
+            if st is not None and st.is_alive():
+                with st.data._lock:
+                    v = float(st.data.max_brake_ms2)
+                if v > 1.0:
+                    return v
+        except (KeyError, AttributeError):
+            pass
+        return _FULL_BRAKE_DECEL
+
     def setup(self) -> None:
         if Settings.debug:
             self._try_start_radar_visualizer()
@@ -558,7 +579,14 @@ class AEBThread(BaseThread):
         ego_hw: float = 1.15
         ego_half_l: float = 3.0
 
-        t_stop = ego_speed / _FULL_BRAKE_DECEL
+        # Effective ego decel for TTB calculations: 90 % of the live max brake
+        # capacity so the trigger fires early enough for the phased brake
+        # controller to stop the vehicle even if the threat brakes harder.
+        # _FULL_BRAKE_DECEL is still used for modelling the *target's* braking.
+        _max_brake_live = self._read_max_brake_ms2()
+        effective_decel = _AEB_EGO_DECEL_FRAC * _max_brake_live
+
+        t_stop = ego_speed / effective_decel
         dynamic_horizon = min(max(_MIN_ARC_HORIZON, t_stop * 2.0), _MAX_ARC_HORIZON)
 
         stopping_buffer = _STOP_BUFFER_FIXED + ego_half_l
@@ -581,7 +609,7 @@ class AEBThread(BaseThread):
             ego_braked_arc = build_arc(
                 ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
                 ego_curvature, ego_hw, dynamic_horizon,
-                decel=_FULL_BRAKE_DECEL,
+                decel=effective_decel,
             )
 
         ego_evasion_left: ArcPath | None = None
