@@ -322,6 +322,23 @@ class MonoCruiseWindow(QMainWindow):
             return "Speed limiter"
         return "Cruise control"
 
+    # Truck detection for the CC-panel icon swap. The ACC tracker keeps
+    # `LeadInfo.vehicle` pointing at the trailer record even after the
+    # tractor-kinematics swap, so `is_trailer` alone identifies an
+    # articulated rig. trailer_count and length cover unattached tractors
+    # and long rigid trucks (no trailer, but clearly not a car).
+    _TRUCK_LENGTH_M: float = 6.0
+
+    @classmethod
+    def _classify_lead_as_truck(cls, vehicle) -> bool:
+        if getattr(vehicle, "is_trailer", False):
+            return True
+        if int(getattr(vehicle, "trailer_count", 0) or 0) >= 1:
+            return True
+        size = getattr(vehicle, "size", None)
+        length = float(getattr(size, "length", 0.0) or 0.0) if size is not None else 0.0
+        return length >= cls._TRUCK_LENGTH_M
+
     def _init_cc_panel(self) -> None:
         try:
             scale = self._cc_scale_mult(self._settings.cc_panel_scaling)
@@ -370,12 +387,30 @@ class MonoCruiseWindow(QMainWindow):
         except (KeyError, AttributeError):
             pass
 
+        acc_locked = False
+        acc_truck = False
+        try:
+            acc = registry.get_thread("acc_thread")
+            if acc is not None and acc.is_alive():
+                with acc.data._lock:
+                    has_lead = bool(acc.data.has_lead)
+                    lead_v = acc.data.leads[0].vehicle if (has_lead and acc.data.leads) else None
+                if has_lead and lead_v is not None:
+                    acc_locked = True
+                    acc_truck = self._classify_lead_as_truck(lead_v)
+        except (KeyError, AttributeError):
+            pass
+
         s = self._settings
         with s._state_lock:
             show_ui = bool(s.show_cc_ui)
             cc_mode_raw = s.cc_mode
             scaling_raw = s.cc_panel_scaling
             acc_on = bool(s.acc_enabled)
+            try:
+                gap_level = max(1, min(4, int(s.acc_gap_level)))
+            except (TypeError, ValueError):
+                gap_level = 2
 
         # Show whenever "Show CC UI" is on (including game pause / menu).
         should_show = show_ui
@@ -391,19 +426,21 @@ class MonoCruiseWindow(QMainWindow):
         else:
             text = f"{int(round(target_kmh))} km/h"
 
-        update_snap = (text, display_mode, cruise_enabled, aeb_warn, acc_on)
+        update_snap = (
+            text, display_mode, cruise_enabled, aeb_warn, acc_on,
+            acc_locked, acc_truck, gap_level,
+        )
         if self._cc_panel_update_snap != update_snap:
             self._cc_panel_update_snap = update_snap
-            # TODO(ACC): pass acc_locked, distance_to_lead, acc_truck from ACC / radar when available.
             self._cc_panel.update(
                 new_text=text,
                 cc_mode=display_mode,
                 cc_enabled=cruise_enabled,
                 AEB_warn=aeb_warn,
                 acc_enabled=acc_on,
-                acc_locked=False,
-                distance_to_lead=2,
-                acc_truck=False,
+                acc_locked=acc_locked,
+                distance_to_lead=gap_level,
+                acc_truck=acc_truck,
             )
 
         if should_show:

@@ -132,7 +132,8 @@ Refer back to `core/example_thread/thread.py` whenever you are unsure about the 
   - Prefer generic wording that does not reveal usernames, hostnames, or full filesystem layouts.
 
 - **Logging and resilience**
-  - Use the standard `logging` module for all diagnostic output. Log unexpected behaviour (e.g. exceptions, missing or down threads, invalid state) so that failures are diagnosable; avoid using `print` for errors or warnings. if the user must see these logs, add `, extra={"popup": True}`. if you need to log detailed contexts, make two logs with one being the popup and the other a detailed context of the log (optional).
+  - Use the standard `logging` module for all diagnostic output. Log unexpected behaviour (e.g. exceptions, missing or down threads, invalid state) so that failures are diagnosable; avoid using `print` for errors or warnings.
+  - **`extra={"popup": True}` must be used sparingly.** Only add it when the message is genuinely useful information for the end-user (e.g. "cruise control engaged", "target vehicle lost"). Never add it to error messages, exception traces, debug output, or internal state logs — those belong in the log file only. Overuse causes popup spam; the popup threshold was lowered and this surfaced many inappropriate popups as a regression. If you need to surface a user-facing summary alongside a detailed log, make two separate log calls: one with `extra={"popup": True}` for the short user message, and one without for the full context.
   - When a thread reads from the registry or another thread’s data, it must handle missing or down sibling threads gracefully: catch `KeyError` and attribute or lock failures, use safe defaults, log at debug or warning level as appropriate, and continue. A thread must never crash or exit its loop because another thread is missing or has crashed.
 
 - **Independent threads**

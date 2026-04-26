@@ -35,6 +35,7 @@ import math
 import time
 from dataclasses import dataclass
 
+from core.settings import Settings
 from core.thread_management.registry import registry
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,22 @@ ACC_AMP: float = 1.0  # [1]    — overall FF scalar (legacy tune hook)
 # --- Geometry --------------------------------------------------------------
 MIN_GAP_M: float = 3.0
 T_HEADWAY_S: float = 1.5
+
+# Per-level headway times (seconds). Index 0 unused; levels are 1..4 where 1 is
+# the closest gap and 4 is the farthest. Tune here without touching call sites.
+T_HEADWAY_BY_LEVEL_S: tuple[float, float, float, float, float] = (
+    1.5,  # level 0 — fallback if Settings ever returns something invalid
+    1.0,  # level 1 — closest
+    1.5,  # level 2 — default
+    2.0,  # level 3
+    2.5,  # level 4 — farthest
+)
+
+
+def _headway_for_level(level: int) -> float:
+    if 1 <= level <= 4:
+        return T_HEADWAY_BY_LEVEL_S[level]
+    return T_HEADWAY_BY_LEVEL_S[0]
 
 # --- Envelope --------------------------------------------------------------
 MAX_ACCEL_MS2: float = 1.5
@@ -245,7 +262,14 @@ class AdaptiveCruiseController:
             return cfg.emergency_decel_ms2
 
         # --- Legacy PD + FF ------------------------------------------------
-        desired_gap = cfg.min_gap_m + cfg.t_headway_s * v_ego
+        # Headway time follows the user's gap setting (cc_panel lines 1..4).
+        # Falls back to the configured default if the setting is unreadable.
+        try:
+            level = int(Settings.acc_gap_level)
+        except (TypeError, ValueError):
+            level = 0
+        t_headway_s = _headway_for_level(level) if level else cfg.t_headway_s
+        desired_gap = cfg.min_gap_m + t_headway_s * v_ego
         gap_error = eff_dist - desired_gap             # + too far, − too close
         speed_error = lead.v_lead_ms - v_ego           # + lead pulling away
         actual_time_gap = max(eff_dist / max(v_ego, 0.1), 0.0)

@@ -496,6 +496,23 @@ class AEBThread(BaseThread):
         except (KeyError, AttributeError):
             return False
 
+    def _read_acc_lead_id(self) -> int | None:
+        """Return the current ACC primary lead vehicle id, or None.
+
+        Visualizer-only consumer — never raises so a missing/dead ACC
+        thread cannot impact AEB safety logic.
+        """
+        try:
+            acc = registry.get_thread("acc_thread")
+            if acc is None or not acc.is_alive():
+                return None
+            with acc.data._lock:
+                if not bool(getattr(acc.data, "has_lead", False)):
+                    return None
+                return int(getattr(acc.data, "lead_id", -1))
+        except (KeyError, AttributeError):
+            return None
+
     def _read_max_brake_ms2(self) -> float:
         """Read the live max brake capacity from sending_thread.
 
@@ -647,10 +664,19 @@ class AEBThread(BaseThread):
             else ego_kmh_now
         )
         if self._radar_visualizer is not None:
-            # Push per-vehicle raw/filtered speed and filtered acceleration to the UI.
-            for v in vehicles:
-                f_spd, f_acc, r_spd = v.radar_speed_accel()
-                self._radar_visualizer.push_data(v.id, f_spd, f_acc, r_spd)
+            # Push raw/smoothed speed + smoothed accel for the ACC lead only.
+            lead_id = self._read_acc_lead_id()
+            lead_v = None
+            if lead_id is not None and lead_id >= 0:
+                for v in vehicles:
+                    if v.id == lead_id:
+                        lead_v = v
+                        break
+            if lead_v is not None:
+                f_spd, f_acc, r_spd = lead_v.radar_speed_accel()
+                self._radar_visualizer.push_data(r_spd, f_spd, f_acc)
+            else:
+                self._radar_visualizer.clear()
 
         colliding_ids: set[int] = set()
         suppressed_ids: set[int] = set()

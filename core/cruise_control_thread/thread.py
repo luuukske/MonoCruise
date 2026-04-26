@@ -54,6 +54,24 @@ _CC_CLUTCH_ACTIVE_THRESHOLD = 0.05
 _CC_GEARSHIFT_BLOCK_DURATION_S = 0.5
 _CC_GEARSHIFT_RAMP_DURATION_S = 1.0
 
+# Disarm-on-stop guard. CC only disarms when an *event* (crash or AEB_brake)
+# is followed by the vehicle coming to a stop. A normal stop (e.g., user just
+# braking at a light) does not disarm — CC stays armed and resumes when the
+# user releases the brake. Re-arm happens when speed climbs back above the
+# upper threshold or when the user presses CC start / inc.
+_CC_DISARM_SPEED_MS = 0.3   # ~1.1 km/h
+_CC_REARM_SPEED_MS = 2.8    # ~10 km/h
+# Per-tick speed drop (m/s) interpreted as a crash. Mirrors the threshold used
+# by main_pedal_thread for its crash_detected branch.
+_CC_CRASH_SPEED_DROP_MS = 5.0
+# Window after a triggering event during which a stop will disarm CC. If the
+# vehicle stays moving past this, the event is forgotten.
+_CC_DISARM_PENDING_TIMEOUT_S = 5.0
+
+# Game throttle threshold above which CC bypasses output smoothing on the
+# brake side so it reacts immediately to a user override.
+_CC_GAME_THROTTLE_OVERRIDE = 0.1
+
 
 @dataclass
 class CruiseControlThreadData(ThreadData):
@@ -82,9 +100,13 @@ class CruiseControlThread(BaseThread):
         self._time_pressed_dec: float | None = None
         self._time_pressed_inc: float | None = None
         self._time_pressed_start: float | None = None
+        self._time_pressed_acc_dist_inc: float | None = None
+        self._time_pressed_acc_dist_dec: float | None = None
         self._long_press_dec = False
         self._long_press_inc = False
         self._long_press_start = False
+        self._long_press_acc_dist_inc = False
+        self._long_press_acc_dist_dec = False
 
         self._integral_error = 0.0
         self._kd_smooth_speed_ms: float | None = None
@@ -100,6 +122,16 @@ class CruiseControlThread(BaseThread):
         self._cc_clutch_active: bool = False
         self._cc_clutch_release_mono: float = -math.inf
         self._cc_prev_d_factor: float = 1.0
+
+        # Disarm-on-stop state. True after a braked-to-stop event while CC is
+        # still enabled; suppresses positive accel until re-armed by speed
+        # rising above _CC_REARM_SPEED_MS or by the user pressing CC start/inc.
+        self._cc_disarmed: bool = False
+        # Disarm-trigger tracking. `_cc_disarm_pending_until` is a monotonic
+        # deadline — set when a crash or AEB_brake event is observed; if the
+        # vehicle stops before then, CC disarms.
+        self._cc_disarm_pending_until: float = 0.0
+        self._cc_prev_speed_ms: float | None = None
 
     def setup(self) -> None:
         self._prev_loop_mono = time.monotonic()
@@ -131,31 +163,38 @@ class CruiseControlThread(BaseThread):
             paused = tel["paused"]
             em_stop = pedal["em_stop"]
             device_lost = pedal["device_lost"]
-            brakeval = pedal["brakeval"]
             cc_dec = pedal["cc_dec_held"]
             cc_inc = pedal["cc_inc_held"]
             cc_start = pedal["cc_start_held"]
+            acc_dist_inc = pedal["acc_dist_inc_held"]
+            acc_dist_dec = pedal["acc_dist_dec_held"]
 
             all_assigned = self._all_cc_buttons_assigned()
 
-            if brakeval > 0.1 and self._cc_enabled:
+            # Auto-deactivate when the truck is no longer in a drivable state.
+            # Brake input (joystick or game keyboard) does NOT deactivate CC —
+            # the user can override transiently and CC stays armed.
+            if (
+                self._cc_enabled
+                and connected
+                and Settings.cc_mode == "Cruise control"
+                and (tel["park_brake"] or tel["gear_dashboard"] <= 0)
+            ):
                 self._cc_enabled = False
-                logger.info("Cruise control disabled due to brake input", extra={"popup": True})
+                self._cc_disarmed = False
+                if tel["park_brake"]:
+                    logger.info("Cruise control disabled — parking brake engaged")
+                else:
+                    logger.info("Cruise control disabled — gear neutral or reverse")
 
             if connected and Settings.cc_mode == "Cruise control" and (cc_inc or cc_start):
                 if tel["park_brake"] or tel["gear_dashboard"] <= 0:
                     if now - self._last_block_msg_mono > 2.0:
                         self._last_block_msg_mono = now
                         if tel["park_brake"]:
-                            logger.info(
-                                "Cruise control cannot be used with parking brake engaged",
-                                extra={"popup": True},
-                            )
+                            logger.info("Cruise control cannot be used with parking brake engaged")
                         else:
-                            logger.info(
-                                "Cruise control can only be used in drive",
-                                extra={"popup": True},
-                            )
+                            logger.info("Cruise control can only be used in drive")
 
             if any((cc_dec, cc_inc, cc_start)):
                 logger.debug(
@@ -175,12 +214,45 @@ class CruiseControlThread(BaseThread):
                         )
                 elif all_assigned:
                     self._tick_button_fsm(tel, now, cc_dec, cc_inc, cc_start)
+                self._tick_acc_distance_fsm(now, acc_dist_inc, acc_dist_dec)
             elif any((cc_dec, cc_inc, cc_start)):
                 logger.debug(
                     "CC button press ignored — guard blocked "
                     "(need: connected=%s, not paused=%s, not device_lost=%s)",
                     connected, not paused, not device_lost,
                 )
+
+            # Event-triggered disarm guard. CC stays armed through normal
+            # stops; it only disarms when a *triggering event* (sudden
+            # crash-grade decel, or AEB_brake) is followed by a full stop
+            # within the timeout window.
+            speed_ms = tel["speed_ms"]
+            if self._cc_enabled:
+                aeb_brake = self._read_aeb_brake()
+                crash_event = (
+                    self._cc_prev_speed_ms is not None
+                    and (self._cc_prev_speed_ms - speed_ms) >= _CC_CRASH_SPEED_DROP_MS
+                )
+                if crash_event or aeb_brake:
+                    self._cc_disarm_pending_until = now + _CC_DISARM_PENDING_TIMEOUT_S
+                if (
+                    not self._cc_disarmed
+                    and now < self._cc_disarm_pending_until
+                    and speed_ms < _CC_DISARM_SPEED_MS
+                ):
+                    self._cc_disarmed = True
+                    self._cc_disarm_pending_until = 0.0
+                    logger.info(
+                        "Cruise control disarmed after crash/AEB stop — tap set/+ or drive off to resume",
+                        extra={"popup": True},
+                    )
+                if self._cc_disarmed and speed_ms > _CC_REARM_SPEED_MS:
+                    self._cc_disarmed = False
+                    logger.info("Cruise control re-armed")
+            else:
+                self._cc_disarmed = False
+                self._cc_disarm_pending_until = 0.0
+            self._cc_prev_speed_ms = speed_ms
 
             if (
                 self._cc_enabled
@@ -195,6 +267,18 @@ class CruiseControlThread(BaseThread):
                     wanted_accel = min(wanted_accel, self._acc.accel_cap_ms2(tel["speed_ms"]))
                 else:
                     self._acc.reset()
+                # Disarm-on-stop: never push positive accel while disarmed.
+                if self._cc_disarmed:
+                    wanted_accel = min(wanted_accel, 0.0)
+                # User game-throttle override: when the user is pressing gas
+                # in-game and CC wants to brake, bypass output EMA so the
+                # brake response is immediate instead of softened over ~0.4s.
+                game_throttle = float(tel.get("game_throttle", 0.0))
+                user_overriding = (
+                    game_throttle > _CC_GAME_THROTTLE_OVERRIDE and wanted_accel < 0.0
+                )
+                if user_overriding:
+                    self._output_ema_accel_ms2 = wanted_accel
                 wanted_accel = self._smooth_output_accel_ema(wanted_accel, dt)
                 accel_min = float(Settings.cc_accel_min_ms2)
                 accel_max = float(Settings.cc_accel_max_ms2)
@@ -252,9 +336,23 @@ class CruiseControlThread(BaseThread):
                     "gear_dashboard": int(tel.data.gear_dashboard),
                     "park_brake": bool(tel.data.parkBrake),
                     "game_clutch": float(tel.data.gameClutch),
+                    "game_throttle": float(tel.data.gameThrottle),
                 }
         except Exception:
             return None
+
+    def _read_aeb_brake(self) -> bool:
+        try:
+            aeb = registry.get_thread("aeb_thread")
+        except KeyError:
+            return False
+        try:
+            if not aeb.is_alive():
+                return False
+            with aeb.data._lock:
+                return bool(aeb.data.AEB_brake)
+        except (AttributeError, KeyError):
+            return False
 
     def _snapshot_pedal(self) -> dict | None:
         try:
@@ -266,10 +364,11 @@ class CruiseControlThread(BaseThread):
                 return {
                     "device_lost": bool(pt.data.device_lost),
                     "em_stop": bool(pt.data.em_stop),
-                    "brakeval": float(pt.data.brakeval),
                     "cc_dec_held": bool(pt.data.cc_dec_held),
                     "cc_inc_held": bool(pt.data.cc_inc_held),
                     "cc_start_held": bool(pt.data.cc_start_held),
+                    "acc_dist_inc_held": bool(getattr(pt.data, "acc_dist_inc_held", False)),
+                    "acc_dist_dec_held": bool(getattr(pt.data, "acc_dist_dec_held", False)),
                 }
         except Exception:
             return None
@@ -355,7 +454,8 @@ class CruiseControlThread(BaseThread):
                     self._set_target_from_speed_kmh(speed_kmh)
                 if not self._cc_enabled:
                     self._cc_enabled = True
-                    logger.info("Cruise control enabled", extra={"popup": True})
+                    logger.info("Cruise control enabled")
+                self._cc_disarmed = False
         elif self._time_pressed_inc is not None:
             if not self._long_press_inc:
                 if self._cc_enabled:
@@ -364,7 +464,8 @@ class CruiseControlThread(BaseThread):
                     self._set_target_from_speed_kmh(speed_kmh)
                 if not self._cc_enabled:
                     self._cc_enabled = True
-                    logger.info("Cruise control enabled", extra={"popup": True})
+                    logger.info("Cruise control enabled")
+                self._cc_disarmed = False
             else:
                 self._long_press_inc = False
             self._time_pressed_inc = None
@@ -380,22 +481,135 @@ class CruiseControlThread(BaseThread):
                     self._set_target_from_speed_kmh(speed_kmh)
                     if not self._cc_enabled:
                         self._cc_enabled = True
-                    logger.info("Cruise target reset to current speed", extra={"popup": True})
+                    self._cc_disarmed = False
+                    logger.info("Cruise target reset to current speed")
                 elif not Settings.long_press_reset:
-                    logger.info("Long press to reset is disabled", extra={"popup": True})
+                    logger.info("Long press to reset is disabled")
         elif self._time_pressed_start is not None:
             if not self._long_press_start:
                 if self._cc_enabled:
                     self._cc_enabled = False
-                    logger.info("Cruise control disabled", extra={"popup": True})
+                    logger.info("Cruise control disabled")
                 else:
                     self._cc_enabled = True
-                    logger.info("Cruise control enabled", extra={"popup": True})
+                    self._cc_disarmed = False
+                    logger.info("Cruise control enabled")
                 if self._target_speed_kmh is None:
                     self._set_target_from_speed_kmh(speed_kmh)
             else:
                 self._long_press_start = False
             self._time_pressed_start = None
+
+    def _tick_acc_distance_fsm(self, now: float, inc_held: bool, dec_held: bool) -> None:
+        """Drive the ACC gap level from one or two dedicated buttons.
+
+        Mirrors the cc inc/dec timing: short release = one step, sustained
+        hold = auto-repeat at the same cadence.
+
+        Both bound: inc/dec apply ±1 with hard clamp at [1, 4] (no wrap, so
+        a held button can't run past the ends and "wrap around" unexpectedly).
+        Only one bound: that single button cycles 1→2→3→4→1.
+        Neither bound: warn (rate-limited) when the user presses something
+        that mapped to nothing.
+        """
+        inc_assigned = Settings.acc_dist_inc_button is not None
+        dec_assigned = Settings.acc_dist_dec_button is not None
+
+        if not inc_assigned and not dec_assigned:
+            if (inc_held or dec_held) and now - self._last_assign_warn_mono > 2.0:
+                self._last_assign_warn_mono = now
+                logger.info(
+                    "Please assign the ACC distance button(s) in the settings",
+                    extra={"popup": True},
+                )
+            self._time_pressed_acc_dist_inc = None
+            self._time_pressed_acc_dist_dec = None
+            self._long_press_acc_dist_inc = False
+            self._long_press_acc_dist_dec = False
+            return
+
+        cycle_mode = inc_assigned ^ dec_assigned
+        if cycle_mode:
+            held = inc_held if inc_assigned else dec_held
+
+            def _apply() -> None:
+                self._step_acc_gap_level(+1, wrap=True)
+
+            self._time_pressed_acc_dist_inc, self._long_press_acc_dist_inc = self._tick_dist_button(
+                now, held, self._time_pressed_acc_dist_inc, self._long_press_acc_dist_inc, _apply,
+            )
+            self._time_pressed_acc_dist_dec = None
+            self._long_press_acc_dist_dec = False
+            return
+
+        # Both assigned — clamped step. Suppress when both are held to avoid fights.
+        if inc_held and dec_held:
+            self._time_pressed_acc_dist_inc = None
+            self._time_pressed_acc_dist_dec = None
+            self._long_press_acc_dist_inc = False
+            self._long_press_acc_dist_dec = False
+            return
+
+        self._time_pressed_acc_dist_inc, self._long_press_acc_dist_inc = self._tick_dist_button(
+            now, inc_held, self._time_pressed_acc_dist_inc, self._long_press_acc_dist_inc,
+            lambda: self._step_acc_gap_level(+1, wrap=False),
+        )
+        self._time_pressed_acc_dist_dec, self._long_press_acc_dist_dec = self._tick_dist_button(
+            now, dec_held, self._time_pressed_acc_dist_dec, self._long_press_acc_dist_dec,
+            lambda: self._step_acc_gap_level(-1, wrap=False),
+        )
+
+    @staticmethod
+    def _tick_dist_button(
+        now: float,
+        held: bool,
+        time_pressed: float | None,
+        long_press: bool,
+        apply,
+    ) -> tuple[float | None, bool]:
+        """Generic short/long-press FSM. Returns the new (time_pressed, long_press)."""
+        if held:
+            if time_pressed is None:
+                time_pressed = now
+            held_dt = now - time_pressed
+            if (not long_press and held_dt > _LONG_PRESS_DEC_INC_FIRST_S) or (
+                long_press and held_dt > _LONG_PRESS_DEC_INC_REPEAT_S
+            ):
+                long_press = True
+                time_pressed = now
+                apply()
+            return time_pressed, long_press
+        if time_pressed is not None:
+            if not long_press:
+                apply()
+            else:
+                long_press = False
+            time_pressed = None
+        return time_pressed, long_press
+
+    @staticmethod
+    def _step_acc_gap_level(delta: int, *, wrap: bool) -> None:
+        try:
+            current = int(Settings.acc_gap_level)
+        except (TypeError, ValueError):
+            current = 2
+        current = max(1, min(4, current))
+        new_level = current + int(delta)
+        if wrap:
+            if new_level > 4:
+                new_level = 1
+            elif new_level < 1:
+                new_level = 4
+        else:
+            new_level = max(1, min(4, new_level))
+        if new_level == current:
+            return
+        try:
+            Settings.save(values={"acc_gap_level": new_level})
+        except Exception:
+            logger.exception("failed to persist acc_gap_level")
+            return
+        logger.info("ACC gap set to %d/4", new_level)
 
     def _gearshift_d_factor(self, now: float, clutch: float) -> float:
         """Returns 0.0 while clutched or in post-release block, 0→1 over ramp, 1 otherwise.

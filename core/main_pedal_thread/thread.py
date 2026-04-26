@@ -148,6 +148,8 @@ class MainPedalThreadData(ThreadData):
     cc_start_held: bool = False
     cc_inc_held: bool = False
     cc_dec_held: bool = False
+    acc_dist_inc_held: bool = False
+    acc_dist_dec_held: bool = False
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
@@ -230,6 +232,8 @@ class MainPedalThread(BaseThread):
                 self.data.cc_start_held = False
                 self.data.cc_inc_held = False
                 self.data.cc_dec_held = False
+                self.data.acc_dist_inc_held = False
+                self.data.acc_dist_dec_held = False
             # TODO: live visualization — clear frame here
             return
 
@@ -270,6 +274,8 @@ class MainPedalThread(BaseThread):
                 self.data.cc_start_held = False
                 self.data.cc_inc_held = False
                 self.data.cc_dec_held = False
+                self.data.acc_dist_inc_held = False
+                self.data.acc_dist_dec_held = False
             # TODO: hazards/horn actuation on device_lost (handled by sending_thread)
             # TODO: live visualization — clear frame here
             return
@@ -411,7 +417,13 @@ class MainPedalThread(BaseThread):
                 gas_output   = 0.0
                 brake_output = 0.0
 
-        cc_start_held, cc_inc_held, cc_dec_held = self._read_cc_button_states()
+        (
+            cc_start_held,
+            cc_inc_held,
+            cc_dec_held,
+            acc_dist_inc_held,
+            acc_dist_dec_held,
+        ) = self._read_cc_button_states()
 
         # Write outputs
         with self.data._lock:
@@ -424,6 +436,8 @@ class MainPedalThread(BaseThread):
             self.data.cc_start_held = cc_start_held
             self.data.cc_inc_held = cc_inc_held
             self.data.cc_dec_held = cc_dec_held
+            self.data.acc_dist_inc_held = acc_dist_inc_held
+            self.data.acc_dist_dec_held = acc_dist_dec_held
 
         self._prev_brakeval = brakeval
         self._prev_speed    = speed
@@ -461,22 +475,24 @@ class MainPedalThread(BaseThread):
                 "cargoMass": tel.data.cargoMass,
             }
 
-    def _read_cc_button_states(self) -> tuple[bool, bool, bool]:
-        """Return (cc_start, cc_inc, cc_dec) held states; plain button indices only."""
+    def _read_cc_button_states(self) -> tuple[bool, bool, bool, bool, bool]:
+        """Return (cc_start, cc_inc, cc_dec, acc_dist_inc, acc_dist_dec) held states."""
         if self._device is None:
             logger.debug(
                 "CC button read skipped: device is None "
-                "(start=%s inc=%s dec=%s)",
+                "(start=%s inc=%s dec=%s acc_inc=%s acc_dec=%s)",
                 Settings.cc_start_button,
                 Settings.cc_inc_button,
                 Settings.cc_dec_button,
+                Settings.acc_dist_inc_button,
+                Settings.acc_dist_dec_button,
             )
-            return False, False, False
+            return False, False, False, False, False
         try:
             n = self._device.get_numbuttons()
         except Exception:
             logger.debug("CC button read failed: get_numbuttons() raised", exc_info=True)
-            return False, False, False
+            return False, False, False, False, False
 
         def pressed(spec: object) -> bool:
             if spec is None or not isinstance(spec, int):
@@ -495,14 +511,19 @@ class MainPedalThread(BaseThread):
             pressed(Settings.cc_start_button),
             pressed(Settings.cc_inc_button),
             pressed(Settings.cc_dec_button),
+            pressed(Settings.acc_dist_inc_button),
+            pressed(Settings.acc_dist_dec_button),
         )
         if any(result):
             logger.debug(
-                "CC buttons held — start=%s inc=%s dec=%s (indices: start=%s inc=%s dec=%s, device=%s)",
-                result[0], result[1], result[2],
+                "CC buttons held — start=%s inc=%s dec=%s acc_inc=%s acc_dec=%s "
+                "(indices: start=%s inc=%s dec=%s acc_inc=%s acc_dec=%s, device=%s)",
+                result[0], result[1], result[2], result[3], result[4],
                 Settings.cc_start_button,
                 Settings.cc_inc_button,
                 Settings.cc_dec_button,
+                Settings.acc_dist_inc_button,
+                Settings.acc_dist_dec_button,
                 self._device.get_name() if self._device else "None",
             )
         return result

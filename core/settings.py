@@ -9,14 +9,22 @@ reference imported here.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
+import shutil
+import tempfile
 import threading
+import time
 from dataclasses import MISSING, dataclass, field
 from pathlib     import Path
 
 from core.thread_management.registry import registry
 
 CONFIG_PATH = Path(__file__).parent.parent / "config.json"
+BACKUP_PATH = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".bak")
+
+_log = logging.getLogger("settings")
 
 
 class _SingletonMeta(type):
@@ -87,8 +95,11 @@ class Settings(metaclass=_SingletonMeta):
     cc_dec_button: object = None
     cc_inc_button: object = None
     cc_start_button: object = None
+    acc_dist_inc_button: object = None  # raises gap (toward farthest, level 4)
+    acc_dist_dec_button: object = None  # lowers gap (toward closest, level 1)
     cc_mode: str = "Cruise control"
     acc_enabled: object = None
+    acc_gap_level: int = 2  # 1=closest, 4=farthest. Drives ACC headway and cc_panel lines.
     long_increments: int = 1
     short_increments: int = 5
     long_press_reset: bool = True
@@ -144,18 +155,80 @@ class Settings(metaclass=_SingletonMeta):
     def instance(cls) -> "Settings":
         return cls()
 
+    @staticmethod
+    def _quarantine_corrupt_file(path: Path, reason: str) -> Path | None:
+        """Move a corrupt config out of the way so the user can recover it.
+
+        Returns the quarantine path on success, None on failure. Never deletes
+        data — only renames.
+        """
+        try:
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            dest = path.with_suffix(path.suffix + f".corrupt-{ts}")
+            shutil.move(str(path), str(dest))
+            _log.error("config %s (%s); moved to %s", path.name, reason, dest.name)
+            return dest
+        except Exception:
+            _log.exception("failed to quarantine corrupt config at %s", path)
+            return None
+
+    @classmethod
+    def _try_read_config(cls, path: Path) -> tuple[dict | None, str | None]:
+        """Read and parse a config file. Returns (data, error). data is None on failure."""
+        try:
+            with path.open() as fh:
+                raw = json.load(fh)
+        except FileNotFoundError:
+            return None, "missing"
+        except json.JSONDecodeError as exc:
+            return None, f"invalid JSON ({exc.msg} line {exc.lineno})"
+        except OSError as exc:
+            return None, f"read error ({exc})"
+        if not isinstance(raw, dict):
+            return None, f"top-level JSON is {type(raw).__name__}, expected object"
+        return raw, None
+
     @classmethod
     def load(cls) -> None:
         self = cls.instance()
         with self._state_lock:
-            file_existed = CONFIG_PATH.exists()
-            data: dict = {}
-            if file_existed:
-                with CONFIG_PATH.open() as fh:
-                    raw = json.load(fh)
-                data = raw if isinstance(raw, dict) else {}
-
             public_keys = [k for k in self.__dataclass_fields__ if not k.startswith("_")]
+
+            data: dict | None = None
+            source: str = "defaults"
+            file_was_recoverable = False
+
+            if CONFIG_PATH.exists():
+                data, err = cls._try_read_config(CONFIG_PATH)
+                if data is not None:
+                    source = "config.json"
+                else:
+                    # Primary corrupt — try the backup before quarantining.
+                    _log.error("config.json unreadable: %s", err)
+                    if BACKUP_PATH.exists():
+                        backup_data, backup_err = cls._try_read_config(BACKUP_PATH)
+                        if backup_data is not None:
+                            data = backup_data
+                            source = "config.json.bak"
+                            file_was_recoverable = True
+                            _log.warning("recovered settings from %s", BACKUP_PATH.name)
+                        else:
+                            _log.error("config.json.bak also unreadable: %s", backup_err)
+                    cls._quarantine_corrupt_file(CONFIG_PATH, err or "unreadable")
+            elif BACKUP_PATH.exists():
+                # No primary file at all — last-resort recover from backup.
+                backup_data, backup_err = cls._try_read_config(BACKUP_PATH)
+                if backup_data is not None:
+                    data = backup_data
+                    source = "config.json.bak (primary missing)"
+                    file_was_recoverable = True
+                    _log.warning("config.json missing; recovered from %s", BACKUP_PATH.name)
+                else:
+                    _log.error("config.json missing and backup unreadable: %s", backup_err)
+
+            if data is None:
+                data = {}
+
             missing_from_file = any(k not in data for k in public_keys)
 
             for k in public_keys:
@@ -168,12 +241,75 @@ class Settings(metaclass=_SingletonMeta):
                     f = self.__dataclass_fields__[k]
                     setattr(self, k, cls._dataclass_field_default(f))
 
-            had_complete_file = file_existed and not missing_from_file
+            had_complete_file = (source.startswith("config.json")) and not missing_from_file
             self._saved_state = self._public_fields() if had_complete_file else {}
+
+            _log.info(
+                "settings loaded from %s (missing_keys=%s, recovered=%s)",
+                source, missing_from_file, file_was_recoverable,
+            )
+
             if not had_complete_file:
-                # Always rewrite disk so config.json contains every public field
-                # (defaults merged in above) and stays in sync with runtime state.
+                # Persist merged result so the file gains any new fields. Safe by
+                # construction: existing keys in `data` were preserved above, so
+                # this only ever *adds* defaults for fields the file didn't have.
                 cls.save(force=True)
+
+    @classmethod
+    def _atomic_write(cls, payload: dict) -> None:
+        """Write *payload* to CONFIG_PATH atomically, keeping a .bak of the previous file.
+
+        Sequence:
+          1. Write to a temp file in the same directory.
+          2. fsync the temp file so the bytes hit the disk.
+          3. Copy the existing config.json to config.json.bak (if it exists and parses
+             as a non-empty dict) — this is our last-known-good snapshot.
+          4. os.replace(temp, config.json) — atomic on POSIX and on Windows for same-volume moves.
+
+        Any failure aborts before touching the original file.
+        """
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+        # Step 1+2: write temp file and fsync.
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=CONFIG_PATH.name + ".",
+            suffix=".tmp",
+            dir=str(CONFIG_PATH.parent),
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(payload, fh, indent=2, sort_keys=True)
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:
+                    # fsync isn't critical to correctness; ignore on filesystems that don't support it.
+                    pass
+
+            # Step 3: snapshot the current file as backup *only if* it is itself a valid dict.
+            # Never overwrite a good backup with a corrupt primary.
+            if CONFIG_PATH.exists():
+                snapshot, err = cls._try_read_config(CONFIG_PATH)
+                if snapshot is not None and snapshot:
+                    try:
+                        shutil.copy2(str(CONFIG_PATH), str(BACKUP_PATH))
+                    except OSError:
+                        _log.exception("failed to update %s", BACKUP_PATH.name)
+                elif err:
+                    _log.warning("not refreshing %s — current %s is %s",
+                                 BACKUP_PATH.name, CONFIG_PATH.name, err)
+
+            # Step 4: atomic replace.
+            os.replace(str(tmp_path), str(CONFIG_PATH))
+        except Exception:
+            # Clean up temp file if anything went wrong before replace.
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            raise
 
     @classmethod
     def save(cls, values: dict | None = None, *, force: bool = False):
@@ -184,6 +320,10 @@ class Settings(metaclass=_SingletonMeta):
 
         If *force* is True, always write the full public field set (used after load
         when the config file was missing keys so defaults are persisted).
+
+        Writes are atomic (temp-file + os.replace) and the previous config.json is
+        rotated to config.json.bak before each replace, so a crash mid-write or a
+        bad payload can never leave the user without a recoverable file.
         """
         self = cls.instance()
         with self._state_lock:
@@ -200,8 +340,12 @@ class Settings(metaclass=_SingletonMeta):
             current = self._public_fields()
             if not force and current == self._saved_state:
                 return
-            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with CONFIG_PATH.open("w") as fh:
-                json.dump(current, fh, indent=2, sort_keys=True)
+
+            try:
+                cls._atomic_write(current)
+            except Exception:
+                _log.exception("failed to persist settings; on-disk config left untouched")
+                return
+
             self._saved_state = dict(current)
             return

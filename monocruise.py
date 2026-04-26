@@ -109,7 +109,8 @@ def _configure_logging() -> None:
 
 def _attach_popup_handler(popup: PopupWindow) -> None:
     handler = PopupLogHandler(
-        popup=popup
+        popup=popup,
+        min_level=logging.INFO
     )
     handler.setFormatter(logging.Formatter("%(message)s"))
     logging.getLogger().addHandler(handler)
