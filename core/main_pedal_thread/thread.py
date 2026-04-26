@@ -2,23 +2,35 @@
 Main Pedal Thread — owns joystick input and computes pedal outputs.
 
 Responsibilities:
-  - Initialize and manage the pygame joystick (connect / disconnect / reconnect).
+  - Initialize and manage all required pygame joysticks:
+      * The configured pedal device (critical path — drives brake/gas outputs).
+      * Any additional joystick devices referenced by button bindings.
   - Read raw gas and brake axis values every loop tick.
   - Apply the One-Pedal-Drive transformation (disabled while cruise control is commanding).
   - Apply weight-based brake adjustment.
   - Manage the `stopped` hold-brake state and park-brake detection.
   - Detect emergency braking events (sudden pedal slam / crash) and hold
     full brake until the user releases, exposing `em_stop` for the sending thread.
+  - Resolve button bindings (joystick buttons, hat directions, keyboard keys) and
+    publish cc_*_held booleans for cruise_control_thread to read.
+  - Expose joystick_button_states for input_bindings.resolve_held() callers.
+  - Expose a capture API (start_capture / cancel_capture / consume_capture) for
+    future UI assignment flows.
 
 Does NOT own:
   - Sending values to the game  → sending_thread (reads ThreadData).
   - Hazard / horn actuation     → sending_thread (reads ThreadData flags).
   - Cruise control / ACC        → cruise_control_thread reads CC button holds from this data.
-  - AEB / radar                 → future feature thread.
-  - Live visualization          → future feature thread.
+  - AEB / radar                 → aeb_thread / radar_thread.
+  - Keyboard hook lifecycle     → keyboard_thread.
 
 Other threads read state via:
   registry.get_thread("main_pedal_thread").data.<field>
+
+Hat direction virtual-button encoding (matches legacy MonoCruise):
+  virtual_code = button_count + hat_index * 4 + direction_index
+  direction_index: 0=up  1=right  2=down  3=left
+  pygame hat xy:   (0,1) (1,0)    (0,-1)  (-1,0)
 """
 
 from __future__ import annotations
@@ -34,10 +46,20 @@ from ui.popup.popup_window import PopupWindow
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 from core.settings import Settings
+from core.input_bindings import migrate_binding, keyboard_is_pressed
 
 logger = logging.getLogger(__name__)
 
-# Helpers
+# Hat direction index → pygame hat (x, y) value
+_DIR_IDX_TO_XY: dict[int, tuple[int, int]] = {
+    0: (0,  1),   # up
+    1: (1,  0),   # right
+    2: (0, -1),   # down
+    3: (-1, 0),   # left
+}
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _read_axis(device: pygame.joystick.JoystickType, axis: int, inverted: bool) -> float:
     """Return a normalised [0.0, 1.0] value from a joystick axis."""
@@ -60,7 +82,7 @@ def _find_joystick(guid_hex: str) -> pygame.joystick.JoystickType | None:
 
 
 def _opd_interpolate(y_lo: float, y_hi: float, x: float, x_lo: float, x_hi: float) -> float:
-    """Linear map: x in [x_lo, x_hi] → y in [y_lo, y_hi]. Matches legacy interpolate(-1, a, sum, -1, 0)."""
+    """Linear map: x in [x_lo, x_hi] → y in [y_lo, y_hi]."""
     if abs(x_hi - x_lo) < 1e-12:
         return y_hi
     t = (x - x_lo) / (x_hi - x_lo)
@@ -124,7 +146,7 @@ def _onepedaldrive(
     return gas_out, brake_out
 
 
-# ThreadData
+# ── ThreadData ────────────────────────────────────────────────────────────────
 
 @dataclass
 class MainPedalThreadData(ThreadData):
@@ -137,24 +159,33 @@ class MainPedalThreadData(ThreadData):
     brakeval: float = 0.0
 
     # State flags — sending_thread uses these to decide what to send.
-    device_lost: bool = True    # True until a joystick is successfully opened.
+    device_lost: bool = True    # True until the *pedal* joystick is successfully opened.
     em_stop: bool = False       # Full emergency brake engaged.
     stopped: bool = False       # Vehicle is in hold-brake "stopped" state.
 
     # Device info — UI / sending thread may display this.
     device_name: str = ""
 
-    # Cruise-control buttons (read on the pygame thread only). Hat/keyboard bindings: future.
+    # Cruise-control button held states (all button sources unified here).
     cc_start_held: bool = False
     cc_inc_held: bool = False
     cc_dec_held: bool = False
     acc_dist_inc_held: bool = False
     acc_dist_dec_held: bool = False
 
+    # Full joystick button state snapshot — {device_guid: {virtual_code: bool}}.
+    # Includes hat directions encoded as virtual button indices.
+    # Used by input_bindings.resolve_held() for external callers.
+    joystick_button_states: dict = field(default_factory=dict, repr=False)
+
+    # Capture API (for future UI button-assignment flows).
+    capture_active: bool = False
+    capture_event: object = None  # ("joystick", guid, code) when a joystick input captured
+
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
-# Thread
+# ── Thread ────────────────────────────────────────────────────────────────────
 
 class MainPedalThread(BaseThread):
     loop_interval = 1.0 / Settings.polling_rate
@@ -164,33 +195,50 @@ class MainPedalThread(BaseThread):
         super().__init__(name="main_pedal_thread")
         self.data = MainPedalThreadData()
 
-        # Joystick state (private to this thread).
+        # ── Pedal device (critical path) ──────────────────────────────────────
         self._device: pygame.joystick.JoystickType | None = None
         self._device_instance_id: int | None = None
 
-        # Operational state (private).
+        # Pedal reconnect state machine — non-blocking, advances each loop() tick.
+        # States: None → "initial_wait" → "attempt" → "attempt_wait" → "reinit_wait" → "reinit"
+        self._reconnect_state: str | None = None
+        self._reconnect_deadline: float = 0.0
+        self._reconnect_attempt: int = 0
+        self._reconnect_js: pygame.joystick.JoystickType | None = None
+
+        # ── Button devices (non-critical, any GUID referenced by button bindings) ──
+        # device_guid → Joystick | None (None = not yet found / lost)
+        self._button_devices: dict[str, pygame.joystick.JoystickType | None] = {}
+        # device_guid → instance_id (for JOYDEVICEREMOVED matching)
+        self._button_instance_ids: dict[str, int] = {}
+        # device_guid → is_lost flag
+        self._button_device_lost: dict[str, bool] = {}
+        # device_guid → human-readable name (for popups)
+        self._button_device_names: dict[str, str] = {}
+
+        # ── Joystick state snapshots ──────────────────────────────────────────
+        # {guid: {virtual_code: bool}} — updated every tick by _update_joystick_states
+        self._joystick_states: dict[str, dict[int, bool]] = {}
+        # previous tick's states — used for 0→1 capture detection
+        self._prev_capture_states: dict[str, dict[int, bool]] = {}
+
+        # ── Operational state ─────────────────────────────────────────────────
         self._prev_brakeval: float = 0.0
         self._prev_speed: float = 0.0
         self._prev_opdbrakeval: float = 0.0
-        self._prev_stop: float = 0.0    # monotonic timestamp of stop event start
-        self._latency_ts: float = 0.0   # monotonic timestamp of previous loop tick
+        self._prev_stop: float = 0.0
+        self._latency_ts: float = 0.0
 
-        # Reconnect state machine — advances across normal loop() ticks, no sleeping.
-        # States: None → "initial_wait" → "attempt" → "attempt_wait" → "reinit_wait" → "reinit"
-        self._reconnect_state: str | None = None
-        self._reconnect_deadline: float = 0.0   # monotonic time to leave a wait state
-        self._reconnect_attempt: int = 0
-        self._reconnect_js: pygame.joystick.JoystickType | None = None  # held during reinit wait
-
-    # Lifecycle
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def setup(self) -> None:
         pygame.init()
         pygame.joystick.init()
 
-        guid = Settings.device
-        if guid:
-            js = _find_joystick(guid)
+        # Pedal device (critical).
+        pedal_guid = Settings.device
+        if pedal_guid:
+            js = _find_joystick(pedal_guid)
             if js is not None:
                 js.init()
                 self._device = js
@@ -200,9 +248,15 @@ class MainPedalThread(BaseThread):
                     self.data.device_name = js.get_name()
                 logger.info("connected to pedals")
             else:
-                logger.warning("pedals not found. please reconnect or configure again.", extra={"popup": True})
+                logger.warning(
+                    "pedals not found. please reconnect or configure again.",
+                    extra={"popup": True},
+                )
         else:
             logger.info("no joystick configured — running without pedal input")
+
+        # Button devices (non-critical).
+        self._init_button_devices()
 
         self._latency_ts = time.monotonic()
         logger.debug("setup complete")
@@ -211,21 +265,16 @@ class MainPedalThread(BaseThread):
         if not self.running:
             return
 
-        # Keep loop_interval in sync with the live setting value.
         polling_rate = max(Settings.polling_rate, 10)
         self.loop_interval = 1.0 / polling_rate
 
-        # Latency tracking (used to scale emergency-brake thresholds)
         now = time.monotonic()
         latency = now - self._latency_ts
         self._latency_ts = now
-        # Multiplier mirrors the old code: scales relative to a 15 ms baseline.
         latency_multiplier = (latency / 0.015) * 2
 
-        # Read telemetry
         tel = self._get_telemetry()
         if tel is None:
-            # SDK not connected; zero outputs and wait.
             with self.data._lock:
                 self.data.gas_output  = 0.0
                 self.data.brake_output = 0.0
@@ -234,7 +283,6 @@ class MainPedalThread(BaseThread):
                 self.data.cc_dec_held = False
                 self.data.acc_dist_inc_held = False
                 self.data.acc_dist_dec_held = False
-            # TODO: live visualization — clear frame here
             return
 
         speed      = tel["speed"]
@@ -242,7 +290,7 @@ class MainPedalThread(BaseThread):
         paused     = tel["paused"]
         slope      = tel["rotationY"]
         park_brake = tel["parkBrake"]
-        cargo_mass = tel["cargoMass"]  # kg
+        cargo_mass = tel["cargoMass"]
 
         cruise_commanding = False
         try:
@@ -256,40 +304,43 @@ class MainPedalThread(BaseThread):
         # Process pygame events (input + hot-plug)
         gasval, brakeval = self._process_pygame_events(speed)
 
-        # Advance reconnect state machine (no sleeping)
+        # Advance pedal reconnect state machine.
         self._tick_reconnect()
 
-        # Convenience snapshot for stopping logic below.
+        # Update all joystick button/hat state snapshots (button devices + pedals).
+        # Also handles capture detection and publishes joystick_button_states.
+        self._update_joystick_states()
+
+        # Ensure newly-referenced button device GUIDs are tracked.
+        self._ensure_button_devices()
+
         prev_brakeval = self._prev_brakeval
         prev_speed    = self._prev_speed
 
-        # Device lost guard
+        # Device lost guard (pedals only).
         if self.data.device_lost:
             with self.data._lock:
                 self.data.gasval      = 0.0
                 self.data.brakeval    = 0.0
                 self.data.gas_output  = 0.0
-                self.data.brake_output = 0.15  # slight brake so vehicle slows gently
+                self.data.brake_output = 0.15
                 self.data.em_stop     = speed > 0.1
                 self.data.cc_start_held = False
                 self.data.cc_inc_held = False
                 self.data.cc_dec_held = False
                 self.data.acc_dist_inc_held = False
                 self.data.acc_dist_dec_held = False
-            # TODO: hazards/horn actuation on device_lost (handled by sending_thread)
-            # TODO: live visualization — clear frame here
             return
 
-        # One-Pedal-Drive transform
-        # Cruise / ACC commanding: no OPD axis remap; exponents still match legacy two-pedal path.
+        # One-Pedal-Drive transform.
         opdgasval, opdbrakeval = _onepedaldrive(
             gasval, brakeval, apply_opd_mapping=not cruise_commanding
         )
 
-        # Weight adjustment
+        # Weight adjustment.
         if Settings.weight_adjustment and cargo_mass > 0:
             try:
-                total_weight_tons = (cargo_mass / 1000) + 8.93  # approx truck base weight
+                total_weight_tons = (cargo_mass / 1000) + 8.93
                 weight_var = (0.27 * ((total_weight_tons - 8.93) / 12.7) + 1)
             except Exception:
                 weight_var = 1.0
@@ -298,7 +349,7 @@ class MainPedalThread(BaseThread):
             weight_var = 1.0
         opdbrakeval = (opdbrakeval ** (1 / weight_var)).real
 
-        # Stopping logic
+        # Stopping logic.
         effective_gas = max(gasval, opdgasval)
         offset = Settings.offset_variable
         a = 0.035 - slope / 2
@@ -348,7 +399,7 @@ class MainPedalThread(BaseThread):
                     0,
                 )
 
-        # Stopped state transitions
+        # Stopped state transitions.
         if speed <= 0.1 and speed >= -0.1 and gasval == 0 and gear != 0 and not stopped:
             stopped = True
             self._prev_opdbrakeval = opdbrakeval
@@ -367,7 +418,7 @@ class MainPedalThread(BaseThread):
         gas_output   = opdgasval
         brake_output = opdbrakeval
 
-        # AEB override — when AEB thread requests emergency brake, apply full brake this tick.
+        # AEB override.
         try:
             aeb = registry.get_thread("aeb_thread")
             if aeb is not None and aeb.is_alive() and gas_output < 0.8:
@@ -378,7 +429,7 @@ class MainPedalThread(BaseThread):
         except (KeyError, AttributeError):
             pass
 
-        # Emergency stop detection
+        # Emergency stop detection.
         em_stop = self.data.em_stop
 
         sudden_brake_slam = (
@@ -394,21 +445,18 @@ class MainPedalThread(BaseThread):
             gas_output   = 0.0
             brake_output = 1.0
             if self.data.em_stop is not True:
-                logger.warning("emergency stop triggered (speed=%.1f km/h, brakeval=%.3f)", speed, brakeval)
-            # TODO: hazards/horn actuation — sending_thread reads em_stop flag
+                logger.warning(
+                    "emergency stop triggered (speed=%.1f km/h, brakeval=%.3f)",
+                    speed, brakeval,
+                )
         elif crash_detected and not paused:
             stopped  = True
             gas_output   = 0.0
             brake_output = 1.0
-            # TODO: hazards actuation — sending_thread reads stopped + em_stop flags
 
         if em_stop:
-            # Maintain full brake each tick until the pedal is released.
-            # No inner loop — loop() returns normally every tick so the
-            # base class can update the heartbeat and the watchdog stays happy.
             brake_output = 1.0
             gas_output   = 0.0
-
             still_braking = brakeval > 0.8 or park_brake or (
                 prev_brakeval - brakeval <= -0.03 * latency_multiplier
             )
@@ -425,7 +473,6 @@ class MainPedalThread(BaseThread):
             acc_dist_dec_held,
         ) = self._read_cc_button_states()
 
-        # Write outputs
         with self.data._lock:
             self.data.gasval      = gasval
             self.data.brakeval    = brakeval
@@ -442,8 +489,6 @@ class MainPedalThread(BaseThread):
         self._prev_brakeval = brakeval
         self._prev_speed    = speed
 
-        # TODO: live visualization — update frame here
-
     def teardown(self) -> None:
         try:
             if pygame.joystick.get_init():
@@ -454,11 +499,34 @@ class MainPedalThread(BaseThread):
             pass
         logger.debug("teardown complete")
 
-    # Private helpers
+    # ── Capture API ───────────────────────────────────────────────────────────
+
+    def start_capture(self) -> None:
+        """Enable joystick capture mode — next button/hat press populates capture_event."""
+        with self.data._lock:
+            self.data.capture_active = True
+            self.data.capture_event = None
+
+    def cancel_capture(self) -> None:
+        """Abort capture without saving anything."""
+        with self.data._lock:
+            self.data.capture_active = False
+            self.data.capture_event = None
+
+    def consume_capture(self) -> tuple | None:
+        """Read + clear the captured joystick event. Returns None if nothing captured.
+
+        Returns ("joystick", guid, virtual_code) on success.
+        """
+        with self.data._lock:
+            ev = self.data.capture_event
+            self.data.capture_event = None
+            self.data.capture_active = False
+            return ev
+
+    # ── Private helpers ───────────────────────────────────────────────────────
 
     def _get_telemetry(self) -> dict | None:
-        """Return a lightweight snapshot of the fields we need from telemetry_thread.
-        Returns None when the SDK is not connected."""
         try:
             tel = registry.get_thread("telemetry_thread")
         except KeyError:
@@ -467,7 +535,7 @@ class MainPedalThread(BaseThread):
             if not tel.data.is_connected:
                 return None
             return {
-                "speed":      tel.data.speed * 3.6,  # m/s → km/h
+                "speed":      tel.data.speed * 3.6,
                 "gear":       tel.data.gear_dashboard,
                 "paused":     tel.data.paused,
                 "rotationY":  tel.data.rotationY,
@@ -475,58 +543,181 @@ class MainPedalThread(BaseThread):
                 "cargoMass": tel.data.cargoMass,
             }
 
-    def _read_cc_button_states(self) -> tuple[bool, bool, bool, bool, bool]:
-        """Return (cc_start, cc_inc, cc_dec, acc_dist_inc, acc_dist_dec) held states."""
-        if self._device is None:
-            logger.debug(
-                "CC button read skipped: device is None "
-                "(start=%s inc=%s dec=%s acc_inc=%s acc_dec=%s)",
-                Settings.cc_start_button,
-                Settings.cc_inc_button,
-                Settings.cc_dec_button,
-                Settings.acc_dist_inc_button,
-                Settings.acc_dist_dec_button,
-            )
-            return False, False, False, False, False
-        try:
-            n = self._device.get_numbuttons()
-        except Exception:
-            logger.debug("CC button read failed: get_numbuttons() raised", exc_info=True)
-            return False, False, False, False, False
+    # ── Button device management ──────────────────────────────────────────────
 
-        def pressed(spec: object) -> bool:
-            if spec is None or not isinstance(spec, int):
-                return False
-            if spec < 0 or spec >= n:
-                logger.debug(
-                    "CC button index %s out of range (device has %d buttons)", spec, n
-                )
-                return False
+    def _collect_button_guids(self) -> set[str]:
+        """Return all unique device GUIDs referenced by current joystick button bindings."""
+        guids: set[str] = set()
+        for name in (
+            "cc_start_button", "cc_inc_button", "cc_dec_button",
+            "acc_dist_inc_button", "acc_dist_dec_button",
+        ):
+            raw = getattr(Settings, name)
+            b = migrate_binding(raw)
+            if b and b.get("source") == "joystick":
+                g = b.get("device_guid")
+                if g:
+                    guids.add(g)
+        return guids
+
+    def _init_button_devices(self) -> None:
+        """Find and init button-binding devices not yet tracked. Called at setup."""
+        pedal_guid = Settings.device or ""
+        for guid in self._collect_button_guids():
+            if not guid or guid == pedal_guid:
+                continue  # pedals handled on the critical path
+            if guid in self._button_devices:
+                continue
+            self._try_connect_button_device(guid, popup_on_missing=True)
+
+    def _ensure_button_devices(self) -> None:
+        """During loop: track any GUIDs that appeared since setup (binding reassignment)."""
+        pedal_guid = Settings.device or ""
+        for guid in self._collect_button_guids():
+            if not guid or guid == pedal_guid:
+                continue
+            if guid not in self._button_devices:
+                self._try_connect_button_device(guid, popup_on_missing=True)
+
+    def _try_connect_button_device(self, guid: str, *, popup_on_missing: bool) -> bool:
+        """Try to find and init the button device with this GUID. Returns True on success."""
+        js = _find_joystick(guid)
+        if js is not None:
             try:
-                return bool(self._device.get_button(spec))
+                js.init()
+                self._button_devices[guid] = js
+                self._button_instance_ids[guid] = js.get_instance_id()
+                self._button_device_lost[guid] = False
+                name = js.get_name()
+                self._button_device_names[guid] = name
+                logger.info("connected to button device: %s", name)
+                return True
             except Exception:
-                return False
+                logger.debug("failed to init button device %s", guid, exc_info=True)
 
-        result = (
-            pressed(Settings.cc_start_button),
-            pressed(Settings.cc_inc_button),
-            pressed(Settings.cc_dec_button),
-            pressed(Settings.acc_dist_inc_button),
-            pressed(Settings.acc_dist_dec_button),
-        )
-        if any(result):
-            logger.debug(
-                "CC buttons held — start=%s inc=%s dec=%s acc_inc=%s acc_dec=%s "
-                "(indices: start=%s inc=%s dec=%s acc_inc=%s acc_dec=%s, device=%s)",
-                result[0], result[1], result[2], result[3], result[4],
-                Settings.cc_start_button,
-                Settings.cc_inc_button,
-                Settings.cc_dec_button,
-                Settings.acc_dist_inc_button,
-                Settings.acc_dist_dec_button,
-                self._device.get_name() if self._device else "None",
+        # Device not available.
+        self._button_devices[guid] = None
+        self._button_device_lost[guid] = True
+        if popup_on_missing:
+            name = self._button_device_names.get(guid, guid)
+            logger.warning(
+                "Button device %r not found — reconnect to use cruise control buttons",
+                name,
+                extra={"popup": True},
             )
-        return result
+        return False
+
+    # ── Joystick state snapshot ───────────────────────────────────────────────
+
+    def _update_joystick_states(self) -> None:
+        """Read all tracked joystick button/hat states and publish them.
+
+        Also performs capture-mode 0→1 transition detection.
+        Hat directions are encoded as virtual button indices per the module-level scheme.
+        """
+        new_states: dict[str, dict[int, bool]] = {}
+
+        # Gather all devices: pedals + button-binding devices.
+        pedal_guid = Settings.device or ""
+        all_devices: dict[str, pygame.joystick.JoystickType | None] = {}
+        if pedal_guid:
+            all_devices[pedal_guid] = self._device
+        for guid, js in self._button_devices.items():
+            all_devices.setdefault(guid, js)
+
+        with self.data._lock:
+            capture_active = self.data.capture_active
+
+        for guid, js in all_devices.items():
+            # Determine lost status.
+            if guid == pedal_guid:
+                lost = self.data.device_lost
+            else:
+                lost = self._button_device_lost.get(guid, True)
+
+            if lost or js is None:
+                new_states[guid] = {}
+                continue
+
+            try:
+                button_count = js.get_numbuttons()
+                hat_count    = js.get_numhats()
+                states: dict[int, bool] = {}
+
+                for i in range(button_count):
+                    states[i] = bool(js.get_button(i))
+
+                for hat_idx in range(hat_count):
+                    hat_xy = js.get_hat(hat_idx)
+                    base   = button_count + hat_idx * 4
+                    for dir_idx, xy in _DIR_IDX_TO_XY.items():
+                        states[base + dir_idx] = (hat_xy == xy)
+
+                new_states[guid] = states
+
+                # Capture: detect first 0→1 transition on any tracked device.
+                if capture_active:
+                    prev = self._prev_capture_states.get(guid, {})
+                    for code, held in states.items():
+                        if held and not prev.get(code, False):
+                            with self.data._lock:
+                                if self.data.capture_active and self.data.capture_event is None:
+                                    self.data.capture_event = ("joystick", guid, code)
+                                    self.data.capture_active = False
+                            break
+
+            except Exception:
+                logger.debug("failed to read joystick states for %s", guid, exc_info=True)
+                new_states[guid] = {}
+
+        self._joystick_states = new_states
+        self._prev_capture_states = {k: dict(v) for k, v in new_states.items()}
+
+        with self.data._lock:
+            self.data.joystick_button_states = dict(new_states)
+
+    # ── Button binding resolution ─────────────────────────────────────────────
+
+    def _read_cc_button_states(self) -> tuple[bool, bool, bool, bool, bool]:
+        """Return (cc_start, cc_inc, cc_dec, acc_dist_inc, acc_dist_dec) held states.
+
+        Bindings are resolved against self._joystick_states (joystick/hat) or via
+        keyboard.is_pressed() (keyboard), so results are always current for this tick.
+        """
+        results: list[bool] = []
+        for name in (
+            "cc_start_button", "cc_inc_button", "cc_dec_button",
+            "acc_dist_inc_button", "acc_dist_dec_button",
+        ):
+            raw = getattr(Settings, name)
+            b = migrate_binding(raw)
+            if b is None:
+                results.append(False)
+            elif b.get("source") == "joystick":
+                results.append(self._resolve_joystick_binding(b))
+            elif b.get("source") == "keyboard":
+                results.append(self._resolve_keyboard_binding(b))
+            else:
+                results.append(False)
+        return tuple(results)  # type: ignore[return-value]
+
+    def _resolve_joystick_binding(self, binding: dict) -> bool:
+        """Look up the virtual button code in the current tick's joystick state snapshot."""
+        guid = binding.get("device_guid")
+        code = binding.get("code")
+        if not guid or code is None:
+            return False
+        states = self._joystick_states.get(guid, {})
+        return bool(states.get(code, False))
+
+    def _resolve_keyboard_binding(self, binding: dict) -> bool:
+        """Ask the keyboard library whether this key is currently held."""
+        key = binding.get("code")
+        if not key:
+            return False
+        return keyboard_is_pressed(str(key))
+
+    # ── Pygame event processing ───────────────────────────────────────────────
 
     def _process_pygame_events(self, speed: float) -> tuple[float, float]:
         """Handle all pending pygame events and return the current (gasval, brakeval)."""
@@ -540,21 +731,10 @@ class MainPedalThread(BaseThread):
 
         for event in pygame.event.get():
             if event.type == pygame.JOYDEVICEREMOVED:
-                if event.instance_id == self._device_instance_id:
-                    logger.warning("Pedals disconnected. Please reconnect.", extra={"popup": True})
-                    with self.data._lock:
-                        self.data.device_lost = True
-                        self.data.device_name = ""
-                    self._device = None
-                    # TODO: main window behavior — bring window to front on disconnect
+                self._handle_device_removed(event.instance_id)
 
             elif event.type == pygame.JOYDEVICEADDED:
-                if self.data.device_lost and self._reconnect_state is None:
-                    logger.info("device added — waiting before reconnect attempt")
-                    self._reconnect_state   = "initial_wait"
-                    self._reconnect_deadline = time.monotonic() + 3
-                    self._reconnect_attempt  = 0
-                    self._reconnect_js       = None
+                self._handle_device_added()
 
             elif event.type == pygame.JOYAXISMOTION and self._device is not None:
                 try:
@@ -565,16 +745,77 @@ class MainPedalThread(BaseThread):
 
         return gasval, brakeval
 
+    def _handle_device_removed(self, instance_id: int) -> None:
+        """Handle JOYDEVICEREMOVED for both pedal and button devices."""
+        # Pedal device.
+        if instance_id == self._device_instance_id:
+            logger.warning(
+                "Pedals disconnected. Please reconnect.",
+                extra={"popup": True},
+            )
+            with self.data._lock:
+                self.data.device_lost = True
+                self.data.device_name = ""
+            self._device = None
+            return
+
+        # Button devices.
+        for guid, iid in self._button_instance_ids.items():
+            if iid == instance_id:
+                name = self._button_device_names.get(guid, guid)
+                logger.warning(
+                    "Button device %r disconnected — reconnect to use cruise control buttons",
+                    name,
+                    extra={"popup": True},
+                )
+                self._button_devices[guid] = None
+                self._button_device_lost[guid] = True
+                return
+
+    def _handle_device_added(self) -> None:
+        """Handle JOYDEVICEADDED — attempt reconnect for any lost device."""
+        # Pedal reconnect uses the full non-blocking FSM (to avoid axis drift).
+        if self.data.device_lost and self._reconnect_state is None:
+            logger.info("device added — waiting before pedal reconnect attempt")
+            self._reconnect_state    = "initial_wait"
+            self._reconnect_deadline = time.monotonic() + 3
+            self._reconnect_attempt  = 0
+            self._reconnect_js       = None
+
+        # Button devices reconnect immediately (no axis drift concern).
+        for guid, lost in list(self._button_device_lost.items()):
+            if not lost:
+                continue
+            js = _find_joystick(guid)
+            if js is None:
+                continue
+            try:
+                js.init()
+                self._button_devices[guid] = js
+                self._button_instance_ids[guid] = js.get_instance_id()
+                self._button_device_lost[guid] = False
+                name = js.get_name()
+                self._button_device_names[guid] = name
+                logger.info(
+                    "Button device %r reconnected",
+                    name,
+                    extra={"popup": True},
+                )
+            except Exception:
+                logger.debug("failed to init reconnected button device %s", guid, exc_info=True)
+
+    # ── Pedal reconnect FSM ───────────────────────────────────────────────────
+
     def _tick_reconnect(self) -> None:
         """
-        Advance the reconnect state machine by one tick.  Called every loop()
-        iteration — never sleeps, never blocks, so the heartbeat is always updated.
+        Advance the pedal reconnect state machine by one tick.  Called every loop()
+        iteration — never sleeps, never blocks.
 
         State transitions:
           initial_wait  → (after 3 s)   → attempt
           attempt       → (js found)    → reinit_wait
-                        → (not found)   → attempt_wait  or  None (give up)
-                        → (exception)   → attempt_wait  or  None (give up)
+                        → (not found)   → attempt_wait  (retry indefinitely)
+                        → (exception)   → attempt_wait  (retry indefinitely)
           attempt_wait  → (after 0.2 s) → attempt
           reinit_wait   → (after 4 s)   → reinit
           reinit        →               → None (done)
@@ -608,23 +849,21 @@ class MainPedalThread(BaseThread):
                         self.data.brakeval    = brakeval
                         self.data.gasval      = gasval
                         self.data.device_name = js.get_name()
-                    # quit then wait before re-init to avoid axis drift
                     js.quit()
                     self._reconnect_state    = "reinit_wait"
                     self._reconnect_deadline = now + 4
                 else:
                     self._reconnect_attempt += 1
-                    # Keep retrying indefinitely; surface a popup periodically so the user
-                    # knows they may need to reconfigure, but do not stop the state machine.
                     self._reconnect_state    = "attempt_wait"
                     self._reconnect_deadline = now + 0.2
             except Exception as exc:
                 self._reconnect_attempt += 1
                 logger.warning("reconnect attempt %d failed: %s", self._reconnect_attempt, exc)
-                # Keep retrying indefinitely on errors as well. Notify the user
-                # occasionally, but do not give up automatically.
                 if self._reconnect_attempt % 30 == 0:
-                    logger.error("failed to reconnect after multiple attempts.\nPlease reconfigure.", extra={"popup": True})
+                    logger.error(
+                        "failed to reconnect after multiple attempts.\nPlease reconfigure.",
+                        extra={"popup": True},
+                    )
                 self._reconnect_state    = "attempt_wait"
                 self._reconnect_deadline = now + 0.2
             return
@@ -640,7 +879,6 @@ class MainPedalThread(BaseThread):
                 with self.data._lock:
                     self.data.device_lost = False
                 PopupWindow.emit("Pedals reconnected", "Pedals reconnected to pedals", "c", 2000)
-                # TODO: main window behavior — update connected joystick label
             except Exception as exc:
                 logger.error("reinit failed after reconnect: %s", exc, extra={"popup": True})
                 with self.data._lock:

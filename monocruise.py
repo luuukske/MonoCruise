@@ -42,6 +42,7 @@ from core.thread_management.popup_log_handler import PopupLogHandler
 
 from core.telemetry_thread.thread import TelemetryThread
 from core.main_pedal_thread.thread import MainPedalThread
+from core.keyboard_thread.thread import KeyboardThread
 from core.cruise_control_thread.thread import CruiseControlThread
 from core.sending_thread.thread import SendingThread, create_visualization_bar
 from core.radar.thread import RadarThread
@@ -198,6 +199,7 @@ def main() -> None:
     workers = [
         TelemetryThread(),
         MainPedalThread(),
+        KeyboardThread(),
         CruiseControlThread(),
         SendingThread(),
         RadarThread(),
