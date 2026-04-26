@@ -23,6 +23,21 @@
 
 ---
 
+### Scan: 2026-04-26 — .venv installed packages, safety-cli 3.7.0
+
+| Package | Version | Severity | Advisory | Summary | Fix Available |
+|---------|---------|----------|----------|---------|---------------|
+| pygments | 2.19.2 | MEDIUM | CVE-2026-4539 / SFTY-20260322-35073 | Security flaw in `AdlLexer` — details not fully public yet | ✅ Upgrade to 2.20.0 (available on PyPI) |
+
+**Scope:** 122 .venv installed packages scanned (direct dependencies only noted)
+**Clean direct deps:** dash 4.1.0, flask 3.1.3, flask-socketio 5.6.1, matplotlib 3.10.8, numpy 2.4.2, pandas 3.0.2, plotly 6.7.0, psutil 7.2.2, pygame 2.6.1, pyside6 6.10.2, requests 2.33.1
+
+#### Notes
+- `pygments` MEDIUM (CVE-2026-4539): affects the `AdlLexer` code path. Pygments is a transitive/dev dependency (syntax highlighting), not directly imported by project code. Low exploitability in a desktop app context. Upgrade to 2.20.0 when convenient.
+- All previously flagged vulnerabilities (pillow, mistune, requests, python-dotenv) remain at fixed versions.
+
+---
+
 ### Scan: 2026-04-25 (run 2) — .venv installed packages, OSV database
 
 | Package | Version | Severity | Advisory | Summary | Fix Available |

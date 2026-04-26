@@ -1,31 +1,62 @@
 """
-Adaptive Cruise Controller — gap-control command in m/s² space.
+Adaptive Cruise Controller — IDM-based gap-control command in m/s² space.
 
-Legacy PD + feed-forward law, unchanged in shape and gains — those gains were
-already dimensioned in m/s² (see module notes below). Two targeted changes
-relative to the legacy implementation:
+The previous implementation stacked legacy PD+FF + two kinematic floors via a
+``min`` combine. It oscillated when ego sat near the desired gap (gap-PD pushed
+positive → overshoot lead → swung negative) and the discrete stop branches
+produced step-outputs at handover.
 
-1. **Continuous kinematic stopping floor** replaces the discrete
-   ``lead.speed < 0.5`` branch that produced step-outputs when the lead came
-   to rest. A single kinematic required-accel is evaluated every tick and
-   used as a conservative floor on the PD+FF output. It smoothly degenerates
-   to the classic stop-at-gap curve as ``v_lead → 0``.
-2. **Distance-adaptive input EMA** on ``(dist, v_lead, a_lead)`` damps
-   multiplayer jitter when the lead is far away without lagging the
-   close-range response.
+This rewrite uses the **Intelligent Driver Model** (Treiber/Helbing) as the
+core control law. IDM is a single continuous formula that:
+
+* Smoothly approaches a stationary leader without a separate stop branch —
+  the desired dynamic distance ``s*`` shrinks naturally as ``v → 0``.
+* Cancels exactly at ``v = v_lead`` and ``s = s*`` (no oscillation: free term
+  and braking term balance).
+* Reacts proportionally to closing speed via the ``v·Δv / (2·√(a·b))`` term in
+  ``s*`` — anticipates collisions before they require hard braking.
+* Drifts ego in slowly when the gap is much larger than desired (free-flow
+  term ≈ ``a_max`` minus a tiny braking contribution).
+
+The controller still publishes an **accel cap** (m/s²); ``cruise_control_thread``
+takes ``min(speed_pid_output, accel_cap)`` so the outer speed regulator owns
+set-speed tracking. We therefore use a high constant ``V0`` so IDM's free-flow
+term never artificially throttles ego below the speed PID's request — this
+module's job is purely "what is the maximum safe accel given the lead?".
+
+Safety overlays sit on top of IDM:
+
+* **TTC hard floor** — input noise can push IDM into a feasible-but-unsafe
+  command for a few ticks; a time-to-collision check forces ``MAX_DECEL`` when
+  ``TTC < TTC_HARD_S`` and ego is closing.
+* **Emergency band** — inside ``D_EMERGENCY_M`` of the lead, dump straight to
+  ``EMERGENCY_DECEL_MS2`` and bypass smoothing.
+* **Standstill hold** — at near-zero speed inside the standstill gap, command
+  a small holding decel so ego doesn't creep against torque converter.
+
+Comfort overlay:
+
+* **Jerk limiter** caps ``|da/dt|`` at ``J_MAX_MS3`` (≈ 2.5 m/s³, well below
+  the 2.94 m/s³ comfort threshold from automated-vehicle UX literature). The
+  limiter is bypassed for emergency commands so hard braking reaches the
+  actuator without delay.
+* **Light output EMA** (existing) on top, also emergency-bypassed.
 
 Creep suppression / pedal feedforward / road-load / slope compensation all
 live in ``core/sending_thread/accel_to_pedals.py`` — this module trusts that
 layer completely and never reasons about pedals.
 
-Units note
+References
 ----------
-Legacy ``K_F * lead.accel * acc_amp * acceleration_amp`` is m/s² by
-construction (lead.accel is m/s², rest are scalars). Since the controller
-output is ``closeness_amp * (p + d) + ff`` and the whole thing must be
-m/s², ``K_P`` carries units of 1/s² and ``K_D`` carries units of 1/s. With
-the legacy numbers ``K_P = 0.06`` → ω_n ≈ 0.245 rad/s, ``K_D = 0.46`` →
-damping ratio ≈ 0.94 — near-critically-damped 2nd-order.
+- Treiber, Hennecke, Helbing (2000): "Congested traffic states in empirical
+  observations and microscopic simulations" — original IDM paper.
+- Treiber & Kesting (2025) "Twenty-Five Years of the Intelligent Driver Model"
+  — IDM defaults for trucks: T = 1.7 s, s0 = 2 m, a = 0.3 m/s², b = 2 m/s²,
+  δ = 4. We use slightly punchier ``a_max`` (1.5 m/s²) since the truck is
+  controlled by an outer speed PID and we don't want IDM to be the binding
+  constraint on free-road acceleration.
+- ISO/comfort literature: longitudinal jerk < 2.94 m/s³ acceptable, < 0.5 m/s³
+  imperceptible.
 """
 
 from __future__ import annotations
@@ -41,24 +72,37 @@ from core.thread_management.registry import registry
 logger = logging.getLogger(__name__)
 
 
-# --- Legacy PD + FF gains (already m/s²-correct — do not rescale) -----------
-K_P: float = 0.06     # [1/s²] — gap-error proportional
-K_D: float = 0.46     # [1/s]  — relative-speed derivative
-K_F: float = 1.0      # [1]    — feed-forward on lead accel
-ACC_AMP: float = 1.0  # [1]    — overall FF scalar (legacy tune hook)
+# --- IDM parameters --------------------------------------------------------
+# Free-road acceleration. IDM uses a · [1 − (v/v0)^δ] for the free term; with
+# our high V0 (controller is an accel-cap, not a speed regulator) the bracket
+# stays ≈ 1 at all realistic speeds, so a_max effectively becomes the IDM
+# upper bound on commanded accel before the lead-aware braking term subtracts.
+A_MAX_MS2: float = 1.5
+# Comfortable deceleration. Used in the s* denominator: 2·√(a·b). Larger b →
+# IDM tolerates closer/faster approaches before commanding big decel; smaller
+# b → smoother but earlier braking. 2.0 m/s² matches Treiber's truck default.
+B_COMFORT_MS2: float = 2.0
+# Free-road accel exponent. δ=4 gives the "smooth approach to v0" curve;
+# unused in practice here because V0 ≫ v_ego, but kept for completeness.
+DELTA: float = 4.0
+# High constant. ACC is an accel-cap, not a speed regulator — V0 sits well
+# above any plausible ego speed so the free-flow term ≈ a_max.
+V0_MS: float = 40.0   # 144 km/h
 
-# --- Geometry --------------------------------------------------------------
-MIN_GAP_M: float = 3.0
+# --- Headway / geometry ----------------------------------------------------
+S0_M: float = 3.0
 T_HEADWAY_S: float = 1.5
 
-# Per-level headway times (seconds). Index 0 unused; levels are 1..4 where 1 is
-# the closest gap and 4 is the farthest. Tune here without touching call sites.
+# Per-level headway times (seconds). Index 0 = fallback if Settings ever
+# returns something invalid. 1..4 = closest..farthest. The Sensors-2025 PD
+# stability paper requires h ≥ 2τ where τ is system delay (~0.2 s). All four
+# levels satisfy this comfortably.
 T_HEADWAY_BY_LEVEL_S: tuple[float, float, float, float, float] = (
-    1.5,  # level 0 — fallback if Settings ever returns something invalid
-    1.0,  # level 1 — closest
-    1.5,  # level 2 — default
-    2.0,  # level 3
-    2.5,  # level 4 — farthest
+    1.5,  # 0 — fallback
+    1.0,  # 1 — closest
+    1.5,  # 2 — default
+    2.0,  # 3
+    2.5,  # 4 — farthest
 )
 
 
@@ -67,23 +111,48 @@ def _headway_for_level(level: int) -> float:
         return T_HEADWAY_BY_LEVEL_S[level]
     return T_HEADWAY_BY_LEVEL_S[0]
 
-# --- Envelope --------------------------------------------------------------
+
+# --- Lead acceleration feed-forward ----------------------------------------
+# Mild anticipatory FF on lead.accel. IDM responds to lead-decel through the
+# Δv channel, but FF gives an earlier edge before relative speed has had time
+# to develop. Kept small so it can't overpower the IDM core.
+K_FF: float = 0.3
+# Above this gap multiple (× s*), FF is faded out — we don't need anticipation
+# when there's plenty of room.
+FF_FADE_GAP_MULT: float = 2.0
+
+# --- Safety overlay --------------------------------------------------------
+TTC_HARD_S: float = 1.5            # below this and closing → hard decel
+TTC_MIN_VCLOSE_MS: float = 0.3     # avoid div-by-zero / slow-creep nuisance
+D_EMERGENCY_M: float = 1.5
+EMERGENCY_DECEL_MS2: float = -8.0
 MAX_ACCEL_MS2: float = 1.5
 MAX_DECEL_MS2: float = -6.55
-EMERGENCY_DECEL_MS2: float = -8.0
-D_EMERGENCY_M: float = 1.5
 
-# --- Input EMA (distance-adaptive) ------------------------------------------
+# --- Standstill hold -------------------------------------------------------
+# When ego is essentially stopped and within the standstill gap of a stopped
+# lead, command a small holding decel so the truck doesn't creep against the
+# torque converter / idle.
+STANDSTILL_SPEED_MS: float = 0.4
+STANDSTILL_GAP_SLACK_M: float = 1.0
+STANDSTILL_HOLD_DECEL_MS2: float = -0.6
+
+# --- Comfort overlay -------------------------------------------------------
+# Jerk cap (m/s³). 2.5 sits below the 2.94 m/s³ "unlikely to be acceptable"
+# threshold from automated-vehicle comfort literature and well above the
+# 0.5 m/s³ "imperceptible" floor. Bypassed for emergency commands.
+J_MAX_MS3: float = 2.5
+
+# --- Input EMA (distance-adaptive, retained from legacy) -------------------
 # τ ramps linearly from TAU_NEAR at D_NEAR to TAU_FAR at D_FAR, clamped
 # outside. Close → snappy; far → heavily filtered, kills MP jitter before it
-# reaches the gains.
+# reaches the IDM core.
 TAU_INPUT_NEAR_S: float = 0.08
 TAU_INPUT_FAR_S: float = 0.12
 D_INPUT_NEAR_M: float = 20.0
 D_INPUT_FAR_M: float = 80.0
 
 # --- Output low-pass (legacy α=0.6 ported to framerate-independent τ) ------
-# α=0.6 per 1/30 s sample ↔ τ = −dt/ln(1−α) ≈ 0.036 s
 TAU_OUTPUT_S: float = 0.036
 
 # --- Misc ------------------------------------------------------------------
@@ -94,17 +163,24 @@ NO_LEAD_CEILING_MS2: float = 10.0
 
 @dataclass(slots=True)
 class ACConfig:
-    """Tunable parameters. Defaults match the legacy tune."""
-    k_p: float = K_P
-    k_d: float = K_D
-    k_f: float = K_F
-    acc_amp: float = ACC_AMP
-    min_gap_m: float = MIN_GAP_M
+    """Tunable parameters. Defaults match the IDM truck tune."""
+    a_max_ms2: float = A_MAX_MS2
+    b_comfort_ms2: float = B_COMFORT_MS2
+    delta: float = DELTA
+    v0_ms: float = V0_MS
+    s0_m: float = S0_M
     t_headway_s: float = T_HEADWAY_S
+    k_ff: float = K_FF
+    ff_fade_gap_mult: float = FF_FADE_GAP_MULT
+    ttc_hard_s: float = TTC_HARD_S
+    d_emergency_m: float = D_EMERGENCY_M
+    emergency_decel_ms2: float = EMERGENCY_DECEL_MS2
     max_accel_ms2: float = MAX_ACCEL_MS2
     max_decel_ms2: float = MAX_DECEL_MS2
-    emergency_decel_ms2: float = EMERGENCY_DECEL_MS2
-    d_emergency_m: float = D_EMERGENCY_M
+    standstill_speed_ms: float = STANDSTILL_SPEED_MS
+    standstill_gap_slack_m: float = STANDSTILL_GAP_SLACK_M
+    standstill_hold_decel_ms2: float = STANDSTILL_HOLD_DECEL_MS2
+    j_max_ms3: float = J_MAX_MS3
     tau_input_near_s: float = TAU_INPUT_NEAR_S
     tau_input_far_s: float = TAU_INPUT_FAR_S
     d_input_near_m: float = D_INPUT_NEAR_M
@@ -119,9 +195,8 @@ class _LeadSnapshot:
     v_lead_ms: float
     a_lead_ms2: float
     # Distance from the vehicle's tracked pivot to the physical rear of its
-    # train (cab tail + all attached trailers).  Subtracted from dist_m before
-    # any control calculation so the controller works in actual gap space, not
-    # pivot-to-pivot space.
+    # train (cab tail + all attached trailers). Subtracted from dist_m before
+    # any control calculation so IDM works in actual gap space.
     tail_m: float = 0.0
 
 
@@ -141,11 +216,12 @@ class AdaptiveCruiseController:
         self._lead_speed_ema: float | None = None
         self._lead_accel_ema: float | None = None
 
-        # Output filter state
+        # Output filter & jerk limiter state
         self._output_ema: float | None = None
+        self._prev_cmd_ms2: float | None = None
 
     # -----------------------------------------------------------------------
-    # Public API
+    # Public API — unchanged signature so cruise_control_thread is untouched.
     # -----------------------------------------------------------------------
     def accel_cap_ms2(self, ego_speed_ms: float) -> float:
         now = time.monotonic()
@@ -162,12 +238,15 @@ class AdaptiveCruiseController:
             self._lead_speed_ema = None
             self._lead_accel_ema = None
             self._output_ema = None
+            self._prev_cmd_ms2 = None
             return self.config.no_lead_ceiling_ms2
 
         v_ego = max(0.0, float(ego_speed_ms))
         smooth = self._smooth_lead_inputs(lead, dt)
-        a_raw = self._compute_command(smooth, v_ego)
-        a_filt = self._output_filter(a_raw, dt)
+
+        a_raw, is_emergency = self._compute_command(smooth, v_ego)
+        a_jerk = self._jerk_limit(a_raw, dt, is_emergency)
+        a_filt = self._output_filter(a_jerk, dt, is_emergency)
         return a_filt
 
     def reset(self) -> None:
@@ -176,6 +255,7 @@ class AdaptiveCruiseController:
         self._lead_speed_ema = None
         self._lead_accel_ema = None
         self._output_ema = None
+        self._prev_cmd_ms2 = None
 
     # -----------------------------------------------------------------------
     # Lead acquisition
@@ -199,11 +279,10 @@ class AdaptiveCruiseController:
                 v_lead = float(primary.effective_speed_ms)
                 a_lead = float(primary.effective_accel_ms2)
 
-                # Tail length: pivot → rear of the lead train (held under lock
-                # since vehicle is a shared reference from RadarThread).
-                # AI pivot sits 18 % from front (82 % of cab behind pivot).
-                # TMP pivot is at body centre (50 %).  TMP trailers are separate
-                # vehicle entries and carry no nested trailers list.
+                # Tail length: pivot → rear of the lead train. AI pivot sits
+                # 18 % from front (82 % of cab behind pivot). TMP pivot is at
+                # body centre (50 %). TMP trailers are separate vehicle
+                # entries and carry no nested trailers list.
                 vehicle = primary.vehicle
                 if vehicle.is_tmp:
                     tail_m = 0.5 * float(vehicle.size.length)
@@ -222,7 +301,7 @@ class AdaptiveCruiseController:
         return _LeadSnapshot(dist_m=dist_m, v_lead_ms=v_lead, a_lead_ms2=a_lead, tail_m=tail_m)
 
     # -----------------------------------------------------------------------
-    # Input smoothing — τ scales with distance
+    # Input smoothing — τ scales with distance (retained from legacy)
     # -----------------------------------------------------------------------
     def _smooth_lead_inputs(self, lead: _LeadSnapshot, dt: float) -> _LeadSnapshot:
         cfg = self.config
@@ -244,87 +323,115 @@ class AdaptiveCruiseController:
             dist_m=self._lead_dist_ema,
             v_lead_ms=self._lead_speed_ema,
             a_lead_ms2=self._lead_accel_ema,
-            tail_m=lead.tail_m,  # geometric constant — not smoothed
+            tail_m=lead.tail_m,
         )
 
     # -----------------------------------------------------------------------
-    # Control law — legacy PD+FF with continuous kinematic stopping floor
+    # IDM core + safety overlays
     # -----------------------------------------------------------------------
-    def _compute_command(self, lead: _LeadSnapshot, v_ego: float) -> float:
+    def _compute_command(self, lead: _LeadSnapshot, v_ego: float) -> tuple[float, bool]:
+        """Return (target_accel_ms2, is_emergency).
+
+        The is_emergency flag bypasses jerk and output smoothing downstream so
+        hard-brake commands reach the actuator without lag.
+        """
         cfg = self.config
 
         # Actual gap from ego reference to the physical rear of the lead train.
         # dist_m is pivot-to-pivot; tail_m corrects for cab tail + trailers.
         eff_dist = max(lead.dist_m - lead.tail_m, 0.01)
 
-        # Emergency: inside safety floor, dump straight to hard decel.
+        # --- Emergency band: dump to hard decel ---------------------------
         if eff_dist <= cfg.d_emergency_m:
-            return cfg.emergency_decel_ms2
+            return cfg.emergency_decel_ms2, True
 
-        # --- Legacy PD + FF ------------------------------------------------
-        # Headway time follows the user's gap setting (cc_panel lines 1..4).
-        # Falls back to the configured default if the setting is unreadable.
+        # Closing speed (positive = ego catching up to lead).
+        v_close = v_ego - lead.v_lead_ms
+
+        # --- TTC hard floor -----------------------------------------------
+        # Input EMA can mask a fast-developing closure for ~100 ms; a TTC
+        # check on the smoothed values still flags the hazard early enough to
+        # save the IDM core from inadequate braking authority.
+        if v_close > cfg.standstill_speed_ms:
+            ttc = eff_dist / max(v_close, TTC_MIN_VCLOSE_MS)
+            if ttc < cfg.ttc_hard_s:
+                return cfg.max_decel_ms2, True
+
+        # --- Standstill hold ----------------------------------------------
+        # Ego nearly stopped, lead nearly stopped, gap inside standstill +
+        # slack. Hold a small decel — prevents idle creep without surprising
+        # the user with hard brake.
+        if (
+            v_ego < cfg.standstill_speed_ms
+            and lead.v_lead_ms < cfg.standstill_speed_ms
+            and eff_dist <= cfg.s0_m + cfg.standstill_gap_slack_m
+        ):
+            return cfg.standstill_hold_decel_ms2, False
+
+        # --- IDM core -----------------------------------------------------
+        # Headway time follows the user's gap-level setting.
         try:
             level = int(Settings.acc_gap_level)
         except (TypeError, ValueError):
             level = 0
-        t_headway_s = _headway_for_level(level) if level else cfg.t_headway_s
-        desired_gap = cfg.min_gap_m + t_headway_s * v_ego
-        gap_error = eff_dist - desired_gap             # + too far, − too close
-        speed_error = lead.v_lead_ms - v_ego           # + lead pulling away
-        actual_time_gap = max(eff_dist / max(v_ego, 0.1), 0.0)
+        t_headway = _headway_for_level(level) if level else cfg.t_headway_s
 
-        closeness_amp = pow(0.8, actual_time_gap * 10.0 - 3.0) + 0.6
-        if speed_error < 0.1:
-            closeness_amp = closeness_amp ** 0.8
-        else:
-            closeness_amp = _clamp(closeness_amp, 0.7, 1.2)
+        # Desired dynamic distance s*. The Δv term is one-sided (positive
+        # only): when the lead is pulling away (v_close < 0) it doesn't shrink
+        # s*, it just disappears. Treiber's IDM uses max(0, …) here.
+        sqrt_ab = math.sqrt(max(cfg.a_max_ms2 * cfg.b_comfort_ms2, 1e-6))
+        s_star_dyn = v_ego * t_headway + (v_ego * v_close) / (2.0 * sqrt_ab)
+        s_star = cfg.s0_m + max(0.0, s_star_dyn)
 
-        p_term = cfg.k_p * gap_error
-        d_term = cfg.k_d * speed_error
+        # Free-flow term (≈ 1 in our regime since v0 ≫ v_ego).
+        v_ratio = v_ego / max(cfg.v0_ms, 1e-3)
+        free_term = 1.0 - v_ratio ** cfg.delta
 
-        acceleration_amp = max(-((actual_time_gap / 2.0) ** 3) + 1.0, 0.2)
-        ff_term = cfg.k_f * lead.a_lead_ms2 * cfg.acc_amp * acceleration_amp
+        # Braking interaction term. (s_star / eff_dist)² is the crash-prevention
+        # core: as eff_dist → s_star, the term saturates at 1 and exactly
+        # cancels free_term (a → 0). When eff_dist < s_star, the term grows
+        # quadratically, producing strong but continuous braking.
+        gap_ratio = s_star / max(eff_dist, 1e-3)
+        brake_term = gap_ratio * gap_ratio
 
-        pid_accel = closeness_amp * (p_term + d_term) + ff_term
+        a_idm = cfg.a_max_ms2 * (free_term - brake_term)
 
-        # --- Continuous kinematic stopping floor --------------------------
-        # a_req matches ego speed to lead speed at d_lead = MIN_GAP,
-        # accounting for the lead's own accel. Same formula regardless of
-        # whether the lead is cruising, braking, or stopped — when v_lead=0
-        # it reduces to a_lead − v_ego²/(2·d_eff), the classic stop curve.
-        v_close = v_ego - lead.v_lead_ms
-        d_eff = max(eff_dist - cfg.min_gap_m, 0.5)
-        if v_close > 0.0:
-            a_req_close = lead.a_lead_ms2 - (v_close * v_close) / (2.0 * d_eff)
-        else:
-            # Not closing — kinematic floor disengages (coast with lead).
-            a_req_close = cfg.max_accel_ms2
+        # --- Mild lead-FF (gated by gap) -----------------------------------
+        # Anticipates lead deceleration before Δv has time to develop. Faded
+        # out at large gap multiples where anticipation isn't needed.
+        gap_mult = eff_dist / max(s_star, 1e-3)
+        ff_gate = _clamp((cfg.ff_fade_gap_mult - gap_mult) / max(cfg.ff_fade_gap_mult - 1.0, 1e-3), 0.0, 1.0)
+        a_ff = cfg.k_ff * lead.a_lead_ms2 * ff_gate
 
-        # --- Lead-braking projection floor --------------------------------
-        # When the lead is actively decelerating, project where it will stop
-        # and demand ego stop by that point (minus min_gap). Anticipatory —
-        # fires even at v_close ≈ 0 so brake onset doesn't wait for the gap
-        # to collapse. Mirrors the legacy "decel" stopping branch.
-        if lead.a_lead_ms2 < -0.5 and lead.v_lead_ms > 0.1:
-            lead_stop_dist = -(lead.v_lead_ms * lead.v_lead_ms) / (2.0 * lead.a_lead_ms2)
-            target_stop_pos = max(d_eff + lead_stop_dist, 0.5)
-            a_req_brake = -(v_ego * v_ego) / (2.0 * target_stop_pos)
-        else:
-            a_req_brake = cfg.max_accel_ms2
+        a_target = a_idm + a_ff
+        a_target = _clamp(a_target, cfg.max_decel_ms2, cfg.max_accel_ms2)
 
-        # Conservative combine: each kinematic law only binds when it demands
-        # more braking than the PID. `min` is continuous, no branch-step.
-        target = min(pid_accel, a_req_close, a_req_brake)
+        # An IDM command at MAX_DECEL is treated as emergency for downstream
+        # smoothing — same convention as the legacy controller.
+        is_emergency = a_target <= cfg.max_decel_ms2 + 1e-6
+        return a_target, is_emergency
 
-        return _clamp(target, cfg.max_decel_ms2, cfg.max_accel_ms2)
+    # -----------------------------------------------------------------------
+    # Comfort: jerk limiter — emergency bypasses
+    # -----------------------------------------------------------------------
+    def _jerk_limit(self, a_new: float, dt: float, is_emergency: bool) -> float:
+        if is_emergency or self._prev_cmd_ms2 is None:
+            self._prev_cmd_ms2 = a_new
+            return a_new
+        max_step = self.config.j_max_ms3 * dt
+        delta = a_new - self._prev_cmd_ms2
+        if delta > max_step:
+            a_new = self._prev_cmd_ms2 + max_step
+        elif delta < -max_step:
+            a_new = self._prev_cmd_ms2 - max_step
+        self._prev_cmd_ms2 = a_new
+        return a_new
 
     # -----------------------------------------------------------------------
     # Output low-pass — emergency bypasses
     # -----------------------------------------------------------------------
-    def _output_filter(self, value: float, dt: float) -> float:
-        # Hard-brake bypass so emergency reaches the actuator without lag.
-        if value < self.config.max_decel_ms2 + 1e-6 or value <= self.config.emergency_decel_ms2 + 1e-6:
+    def _output_filter(self, value: float, dt: float, is_emergency: bool) -> float:
+        if is_emergency:
             self._output_ema = value
             return value
         if self._output_ema is None or not math.isfinite(self._output_ema):
