@@ -193,18 +193,18 @@ class CruiseControlThread(BaseThread):
                 self._cc_enabled = False
                 self._cc_disarmed = False
                 if tel["park_brake"]:
-                    logger.info("Cruise control disabled — parking brake engaged")
+                    logger.info("CC disabled — parking brake engaged", extra={"popup": True})
                 else:
-                    logger.info("Cruise control disabled — gear neutral or reverse")
+                    logger.info("CC disabled — gear neutral or reverse", extra={"popup": True})
 
             if connected and Settings.cc_mode == "Cruise control" and (cc_inc or cc_start):
                 if tel["park_brake"] or tel["gear_dashboard"] <= 0:
                     if now - self._last_block_msg_mono > 2.0:
                         self._last_block_msg_mono = now
                         if tel["park_brake"]:
-                            logger.info("Cruise control cannot be used with parking brake engaged")
+                            logger.info("CC cannot be used with parking brake engaged", extra={"popup": True})
                         else:
-                            logger.info("Cruise control can only be used in drive")
+                            logger.info("CC can only be used in drive", extra={"popup": True})
 
             if any((cc_dec, cc_inc, cc_start)):
                 logger.debug(

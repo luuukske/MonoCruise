@@ -92,7 +92,7 @@ DELTA: float = 4.0
 V0_MS: float = 40.0   # 144 km/h
 
 # Standstill gap and default headway.
-S0_M: float = 3.0
+S0_M: float = 4.0
 T_HEADWAY_S: float = 1.5
 
 # Per-level headway times (seconds). Index 0 = fallback if Settings ever
