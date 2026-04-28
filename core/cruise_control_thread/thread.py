@@ -54,17 +54,15 @@ _CC_CLUTCH_ACTIVE_THRESHOLD = 0.05
 _CC_GEARSHIFT_BLOCK_DURATION_S = 0.5
 _CC_GEARSHIFT_RAMP_DURATION_S = 1.0
 
-# Disarm-on-stop guard. CC only disarms when an *event* (crash or AEB_brake)
+# Disable-on-stop guard. CC only disables when an *event* (crash or AEB_brake)
 # is followed by the vehicle coming to a stop. A normal stop (e.g., user just
-# braking at a light) does not disarm — CC stays armed and resumes when the
-# user releases the brake. Re-arm happens when speed climbs back above the
-# upper threshold or when the user presses CC start / inc.
+# braking at a light) does not disable — CC stays armed and resumes when the
+# user releases the brake. Re-enable happens when the user presses CC start/inc.
 _CC_DISARM_SPEED_MS = 0.3   # ~1.1 km/h
-_CC_REARM_SPEED_MS = 2.8    # ~10 km/h
 # Per-tick speed drop (m/s) interpreted as a crash. Mirrors the threshold used
 # by main_pedal_thread for its crash_detected branch.
 _CC_CRASH_SPEED_DROP_MS = 5.0
-# Window after a triggering event during which a stop will disarm CC. If the
+# Window after a triggering event during which a stop will disable CC. If the
 # vehicle stays moving past this, the event is forgotten.
 _CC_DISARM_PENDING_TIMEOUT_S = 5.0
 
@@ -123,9 +121,8 @@ class CruiseControlThread(BaseThread):
         self._cc_clutch_release_mono: float = -math.inf
         self._cc_prev_d_factor: float = 1.0
 
-        # Disarm-on-stop state. True after a braked-to-stop event while CC is
-        # still enabled; suppresses positive accel until re-armed by speed
-        # rising above _CC_REARM_SPEED_MS or by the user pressing CC start/inc.
+        # Disarm-on-stop state. True transiently in button FSM resets; the
+        # disable-on-stop guard sets _cc_enabled=False directly instead.
         self._cc_disarmed: bool = False
         # Disarm-trigger tracking. `_cc_disarm_pending_until` is a monotonic
         # deadline — set when a crash or AEB_brake event is observed; if the
@@ -234,10 +231,9 @@ class CruiseControlThread(BaseThread):
                     connected, not paused, not device_lost,
                 )
 
-            # Event-triggered disarm guard. CC stays armed through normal
-            # stops; it only disarms when a *triggering event* (sudden
-            # crash-grade decel, or AEB_brake) is followed by a full stop
-            # within the timeout window.
+            # Disable-on-stop guard. CC stays enabled through normal stops;
+            # it only disables when a *triggering event* (crash or AEB_brake)
+            # is followed by a full stop within the timeout window.
             speed_ms = tel["speed_ms"]
             if self._cc_enabled:
                 aeb_brake = self._read_aeb_brake()
@@ -248,19 +244,16 @@ class CruiseControlThread(BaseThread):
                 if crash_event or aeb_brake:
                     self._cc_disarm_pending_until = now + _CC_DISARM_PENDING_TIMEOUT_S
                 if (
-                    not self._cc_disarmed
-                    and now < self._cc_disarm_pending_until
+                    now < self._cc_disarm_pending_until
                     and speed_ms < _CC_DISARM_SPEED_MS
                 ):
-                    self._cc_disarmed = True
+                    self._cc_enabled = False
+                    self._cc_disarmed = False
                     self._cc_disarm_pending_until = 0.0
                     logger.info(
-                        "Cruise control disarmed after crash/AEB stop — tap set/+ or drive off to resume",
+                        "Cruise control disabled after crash/AEB stop — tap set/+ to resume",
                         extra={"popup": True},
                     )
-                if self._cc_disarmed and speed_ms > _CC_REARM_SPEED_MS:
-                    self._cc_disarmed = False
-                    logger.info("Cruise control re-armed")
             else:
                 self._cc_disarmed = False
                 self._cc_disarm_pending_until = 0.0
@@ -279,10 +272,7 @@ class CruiseControlThread(BaseThread):
                     wanted_accel = min(wanted_accel, self._acc.accel_cap_ms2(tel["speed_ms"]))
                 else:
                     self._acc.reset()
-                # Disarm-on-stop: never push positive accel while disarmed.
-                if self._cc_disarmed:
-                    wanted_accel = min(wanted_accel, 0.0)
-                # User game-throttle override: when the user is pressing gas
+                        # User game-throttle override: when the user is pressing gas
                 # in-game and CC wants to brake, bypass output EMA so the
                 # brake response is immediate instead of softened over ~0.4s.
                 game_throttle = float(tel.get("game_throttle", 0.0))

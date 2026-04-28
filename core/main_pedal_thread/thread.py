@@ -46,7 +46,7 @@ from ui.popup.popup_window import PopupWindow
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 from core.settings import Settings
-from core.input_bindings import migrate_binding, keyboard_is_pressed
+from core.input_bindings import migrate_binding, keyboard_is_pressed, resolve_held
 
 logger = logging.getLogger(__name__)
 
@@ -689,16 +689,7 @@ class MainPedalThread(BaseThread):
             "cc_start_button", "cc_inc_button", "cc_dec_button",
             "acc_dist_inc_button", "acc_dist_dec_button",
         ):
-            raw = getattr(Settings, name)
-            b = migrate_binding(raw)
-            if b is None:
-                results.append(False)
-            elif b.get("source") == "joystick":
-                results.append(self._resolve_joystick_binding(b))
-            elif b.get("source") == "keyboard":
-                results.append(self._resolve_keyboard_binding(b))
-            else:
-                results.append(False)
+            results.append(resolve_held(getattr(Settings, name)))
         return tuple(results)  # type: ignore[return-value]
 
     def _resolve_joystick_binding(self, binding: dict) -> bool:
