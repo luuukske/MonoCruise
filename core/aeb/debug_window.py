@@ -317,7 +317,7 @@ class AEBDebugWindow(QWidget):
         Shows everything the ACC scorer saw for this id this frame so the
         operator can see *why* a vehicle is or is not being tracked: the
         four components, current accumulated score, in-path flag, lat/dist
-        in the arc frame, and whether arc_arc_collision returned a hit.
+        in the arc frame, and the lateral gate margin.
         """
         if acc is None:
             return
@@ -327,20 +327,16 @@ class AEBDebugWindow(QWidget):
 
         score = comp["score"]
         in_path = comp["in_path"]
-        arc_hit = comp["arc_hit"]
+        lat_margin = comp.get("lat_margin", 0.0)
         seen = comp.get("seen", True)
-        ch = comp.get("corridor_half", acc.get("corridor_half", 0.0))
         lat = comp["lat"]
-        gate_pass = abs(lat) <= ch if ch > 0 else True
 
         score_clr = _SAFE_CLR if score > 0 else (_WARN_CLR if score > -2 else _DANGER_CLR)
         self._draw_label(p, sx, sy + 14, f"s{score:+.1f}", score_clr)
 
         flags = []
         flags.append("IN" if in_path else "out")
-        flags.append("hit" if arc_hit else "miss")
-        if not gate_pass:
-            flags.append(f"lat>{ch:.2f}")
+        flags.append(f"m{lat_margin:+.2f}")   # gate margin: positive = inside
         if not seen:
             flags.append("decay")
         flags_clr = _SAFE_CLR if (in_path and seen) else _WARN_CLR

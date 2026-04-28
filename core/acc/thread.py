@@ -191,7 +191,7 @@ class ACCThread(BaseThread):
                 "baseline": st.last_baseline,
                 "offset_for_score": st.last_offset_for_score,
                 "yaw_diff_deg": st.last_yaw_diff_deg,
-                "arc_hit": st.last_arc_hit,
+                "lat_margin": st.last_lat_margin,
                 "corridor_half": st.last_corridor_half,
                 "seen": st.last_seen_this_frame,
             }

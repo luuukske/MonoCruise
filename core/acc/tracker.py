@@ -33,7 +33,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 
-from core.radar.traffic import Vehicle, arc_arc_collision
+from core.radar.traffic import Vehicle
 
 from .ego_path import build_ego_arc, path_half_width
 from .scoring import (
@@ -100,7 +100,7 @@ class TrackState:
     last_offset_for_score: float = 0.0
     last_yaw_diff_deg: float = 0.0
     last_baseline: float = 0.0
-    last_arc_hit: bool = False
+    last_lat_margin: float = 0.0   # corridor_half + width/2 - |lat|; positive = inside gate
     last_corridor_half: float = 0.0
     last_seen_this_frame: bool = False
 
@@ -324,22 +324,14 @@ class ACCTracker:
             if longi < 0.0 or longi > _MAX_SCORE_RANGE_M:
                 continue
 
-            # In-path test — sample closest approach between ego arc and
-            # target arc.  arc_arc_collision handles curved ego paths
-            # correctly (whereas a straight-line lateral test would fail
-            # on a bend).
-            try:
-                v_arc = v.get_arc(horizon=2.5)
-            except Exception:
-                logger.debug("get_arc failed for id=%d", v.id, exc_info=True)
-                continue
-            hit = arc_arc_collision(
-                ego_arc, v_arc,
-                margin=0.0,
-                n_samples=12,
-                min_lateral_gap=0.0,
-            )
-            in_path = hit is not None and abs(lat) <= corridor_half
+            # In-path test — purely geometric: is the vehicle's arc-frame
+            # lateral within the corridor plus half the vehicle's width?
+            # The previous arc_arc_collision approach used a 2.5 s time
+            # horizon; at low closing speeds the collision time exceeds
+            # that and the function returned None even for vehicles
+            # directly ahead in the same lane.
+            lat_gate = corridor_half + v.size.width / 2.0
+            in_path = abs(lat) <= lat_gate
 
             # Blinker scalar shifts the *scored* lateral offset by up to
             # 4.5 m toward the indicated side (SCORING_REFERENCE §7).
@@ -389,7 +381,7 @@ class ACCTracker:
             st.last_offset_for_score = offset_for_score
             st.last_yaw_diff_deg = yaw_diff_deg
             st.last_baseline = baseline
-            st.last_arc_hit = hit is not None
+            st.last_lat_margin = lat_gate - abs(lat)
             st.last_corridor_half = corridor_half
             st.last_seen_this_frame = True
             seen_ids.add(v.id)
@@ -429,15 +421,12 @@ class ACCTracker:
         ego_fwd_x: float, ego_fwd_z: float,
         ego_speed_ms: float,
     ) -> list[LeadInfo]:
-        ranked: list[tuple[int, TrackState]] = sorted(
-            (
-                (vid, st) for vid, st in self.tracks.items()
-                if st.score > IN_PATH_THRESHOLD and vid in id_to_vehicle
-            ),
-            key=lambda item: item[1].score,
-            reverse=True,
-        )
-        top = ranked[:3]
+        in_path = [
+            (vid, st) for vid, st in self.tracks.items()
+            if st.score > IN_PATH_THRESHOLD and vid in id_to_vehicle
+        ]
+        # Primary sort: closest first. Secondary: score (descending) breaks ties.
+        top = sorted(in_path, key=lambda item: (item[1].dist_m, -item[1].score))[:3]
 
         out: list[LeadInfo] = []
         for vid, st in top:
