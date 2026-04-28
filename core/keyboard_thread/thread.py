@@ -42,7 +42,7 @@ class KeyboardThreadData(ThreadData):
 
 
 class KeyboardThread(BaseThread):
-    loop_interval = 0.05   # 50 ms — just keeps the heartbeat alive
+    loop_interval = 0.2    # 200 ms — heartbeat only; keyboard lib runs its own OS hook
     max_restarts = 3
 
     def __init__(self) -> None:

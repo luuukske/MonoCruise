@@ -11,9 +11,9 @@ Responsibilities:
 
 from __future__ import annotations
 
-import psutil
 
 def is_process_running(name: str) -> bool:
+    import psutil
     try:
         for p in psutil.process_iter(['name']):
             if p.info.get('name', '').lower() == name.lower():
@@ -89,20 +89,29 @@ class _RedactingFormatter(logging.Formatter):
 def _configure_logging() -> None:
     fmt     = "%(asctime)s [%(name)-12s] %(levelname)-8s %(message)s"
     datefmt = "%H:%M:%S"
-    formatter = _RedactingFormatter(fmt, datefmt=datefmt)
-    _fmt = formatter.format
-    formatter.format = lambda r: _fmt(r).replace("\r", " ").replace("\n", " ")
+
+    def _strip_newlines(formatter: logging.Formatter) -> None:
+        _fmt = formatter.format
+        formatter.format = lambda r: _fmt(r).replace("\r", " ").replace("\n", " ")
+
+    # File log is what may be shared — must redact paths.
+    file_formatter = _RedactingFormatter(fmt, datefmt=datefmt)
+    _strip_newlines(file_formatter)
+
+    # Console log stays on the user's machine — skip the regex passes for speed.
+    stream_formatter = logging.Formatter(fmt, datefmt=datefmt)
+    _strip_newlines(stream_formatter)
 
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
 
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setLevel(logging.INFO)
-    stream_handler.setFormatter(formatter)
+    stream_handler.setFormatter(stream_formatter)
 
     file_handler = logging.FileHandler("monocruise.log", encoding="utf-8", mode="w")
     file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(formatter)
+    file_handler.setFormatter(file_formatter)
 
     root.addHandler(stream_handler)
     root.addHandler(file_handler)
