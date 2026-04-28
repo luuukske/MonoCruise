@@ -141,7 +141,19 @@ class CruiseControlThread(BaseThread):
         if not self.running:
             return
 
-        self.loop_interval = 1.0 / max(Settings.polling_rate, 10)
+        # Idle throttle: when telemetry is disconnected, button presses are
+        # ignored (guarded by `connected` below) and no accel command is
+        # published, so full polling_rate is wasted CPU. Drop to 2 Hz.
+        try:
+            tel = registry.get_thread("telemetry_thread")
+            is_connected = tel.is_alive() and bool(tel.data.is_connected)
+        except (KeyError, AttributeError):
+            is_connected = False
+        if is_connected:
+            self.loop_interval = 1.0 / max(Settings.polling_rate, 10)
+        else:
+            self.loop_interval = 0.5
+
         now = time.monotonic()
         dt = max(now - self._prev_loop_mono, 1e-4)
         self._prev_loop_mono = now

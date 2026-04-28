@@ -22,6 +22,7 @@ logs/
 
 # Local configuration (do not commit)
 config.json
+config.json.bak
 
 # OS / misc
 .DS_Store

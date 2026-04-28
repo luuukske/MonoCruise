@@ -168,7 +168,7 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         )
 
 class TelemetryThread(BaseThread):
-    loop_interval = 0.01
+    loop_interval = 0.02   # 50 Hz — game updates ~60 Hz; consumers read at polling_rate
     max_restarts = 2
 
     def __init__(self) -> None:

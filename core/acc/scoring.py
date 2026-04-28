@@ -51,7 +51,7 @@ _SLOW_AMP_REF_KMH: float = 100.0
 # ``-min(base × 0.6, 4.0)``.
 _PATH_IN_CAP: float = 5.0
 _PATH_OUT_CAP: float = 4.0
-_PATH_OUT_GAIN: float = 0.6
+_PATH_OUT_GAIN: float = 0.8
 
 # Yaw component shape.  Kept legacy.
 _YAW_SCALE_DEG: float = 90.0
