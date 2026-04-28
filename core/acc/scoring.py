@@ -30,9 +30,9 @@ from dataclasses import dataclass
 
 # Score clamp — asymmetric so lock is fast and unlock is slow.
 _SCORE_MIN: float = -5.0
-_SCORE_MAX: float = 15.0
+_SCORE_MAX: float = 20.0
 
-# Offset Gaussian width (metres).  σ = 2.25 m matches legacy; the
+# Offset Gaussian width (metres).  σ = 2.25 m legacy; the
 # zero-crossing of ``offset_raw`` sits at |x| ≈ 2.58 m at angle_amp = 1.
 _OFFSET_SIGMA_M: float = 2.25
 
@@ -51,7 +51,7 @@ _SLOW_AMP_REF_KMH: float = 100.0
 # ``-min(base × 0.6, 4.0)``.
 _PATH_IN_CAP: float = 5.0
 _PATH_OUT_CAP: float = 4.0
-_PATH_OUT_GAIN: float = 0.8
+_PATH_OUT_GAIN: float = 0.6
 
 # Yaw component shape.  Kept legacy.
 _YAW_SCALE_DEG: float = 90.0
