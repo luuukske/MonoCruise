@@ -58,6 +58,14 @@ class ACCData(ThreadData):
     # Monotonic time this snapshot corresponds to (= radar t_mono).
     t_mono: float = 0.0
 
+    # Per-vehicle scoring breakdown for the debug window. Keyed by vehicle id.
+    # Each entry: {score, in_path, lat, dist_m, offset, yaw, path, baseline,
+    # offset_for_score, yaw_diff_deg, arc_hit, corridor_half, seen}.
+    debug_components: dict[int, dict] = field(default_factory=dict)
+    debug_blinker: float = 0.0
+    debug_ego_kappa: float = 0.0
+    debug_corridor_half: float = 0.0
+
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
@@ -171,6 +179,24 @@ class ACCThread(BaseThread):
 
     def _publish(self, enabled: bool, leads: list[LeadInfo], t_mono: float) -> None:
         primary = leads[0] if leads else None
+        debug_components = {
+            vid: {
+                "score": st.score,
+                "in_path": st.in_path,
+                "lat": st.last_lat,
+                "dist_m": st.dist_m,
+                "offset": st.last_offset,
+                "yaw": st.last_yaw,
+                "path": st.last_path,
+                "baseline": st.last_baseline,
+                "offset_for_score": st.last_offset_for_score,
+                "yaw_diff_deg": st.last_yaw_diff_deg,
+                "arc_hit": st.last_arc_hit,
+                "corridor_half": st.last_corridor_half,
+                "seen": st.last_seen_this_frame,
+            }
+            for vid, st in self._tracker.tracks.items()
+        }
         with self.data._lock:
             self.data.enabled = enabled
             self.data.leads = leads
@@ -180,3 +206,7 @@ class ACCThread(BaseThread):
             self.data.lead_rel_speed_ms = primary.rel_speed_ms if primary is not None else 0.0
             self.data.lead_score = primary.score if primary is not None else 0.0
             self.data.t_mono = t_mono
+            self.data.debug_components = debug_components
+            self.data.debug_blinker = self._tracker.last_blinker_scalar
+            self.data.debug_ego_kappa = self._tracker.last_ego_kappa_used
+            self.data.debug_corridor_half = self._tracker.last_corridor_half

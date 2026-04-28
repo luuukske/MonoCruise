@@ -16,6 +16,10 @@ Binding formats (stored in config.json / Settings):
                                        dir: 0=up 1=right 2=down 3=left
   {"source": "keyboard",
    "code": str}                     → capitalized key name, e.g. "A", "Space", "F1"
+  {"source": "button_device",
+   "vid_pid": str,                  → "{vendor_id:04x}:{product_id:04x}", e.g. "0483:0001"
+   "device_name": str,              → optional, display only
+   "button_id": int}                → byte_index * 8 + bit_index from raw HID report
 
 Public API
 ----------
@@ -84,6 +88,8 @@ def resolve_held(binding: object) -> bool:
         return _resolve_joystick(b)
     if source == "keyboard":
         return _resolve_keyboard(b)
+    if source == "button_device":
+        return _resolve_button_device(b)
     return False
 
 
@@ -121,3 +127,20 @@ def _resolve_keyboard(binding: dict) -> bool:
     if not key:
         return False
     return keyboard_is_pressed(key)
+
+
+def _resolve_button_device(binding: dict) -> bool:
+    vid_pid = binding.get("vid_pid")
+    button_id = binding.get("button_id")
+    if not vid_pid or button_id is None:
+        return False
+    try:
+        bt = registry.get_thread("button_device_thread")
+        with bt.data._lock:
+            states = bt.data.button_states.get(vid_pid, {})
+        return bool(states.get(button_id, False))
+    except (KeyError, AttributeError):
+        return False
+    except Exception:
+        logger.debug("failed to resolve button_device binding %s/%s", vid_pid, button_id, exc_info=True)
+        return False

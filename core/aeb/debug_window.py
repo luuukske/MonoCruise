@@ -96,7 +96,8 @@ class AEBDebugWindow(QWidget):
 
     @staticmethod
     def _fetch_acc() -> dict | None:
-        """ACC snapshot: {enabled, lead_id, top_ids, top_leads, dist, rel, score}."""
+        """ACC snapshot: {enabled, lead_id, top_ids, top_leads, dist, rel, score,
+        components, blinker, ego_kappa, corridor_half}."""
         try:
             acc = registry.get_thread("acc_thread")
         except KeyError:
@@ -107,6 +108,7 @@ class AEBDebugWindow(QWidget):
             with acc.data._lock:
                 leads = list(acc.data.leads)
                 top = [(l.vehicle.id, l.score, l.dist_m) for l in leads]
+                components = dict(acc.data.debug_components)
                 return {
                     "enabled": bool(acc.data.enabled),
                     "lead_id": int(acc.data.lead_id),
@@ -115,6 +117,10 @@ class AEBDebugWindow(QWidget):
                     "dist": float(acc.data.lead_dist_m),
                     "rel": float(acc.data.lead_rel_speed_ms),
                     "score": float(acc.data.lead_score),
+                    "components": components,
+                    "blinker": float(acc.data.debug_blinker),
+                    "ego_kappa": float(acc.data.debug_ego_kappa),
+                    "corridor_half": float(acc.data.debug_corridor_half),
                 }
         except AttributeError:
             return None
@@ -183,12 +189,7 @@ class AEBDebugWindow(QWidget):
             sx, sy = self._ws(v["x"], v["z"], ex, ez, ey)
             spd = v.get("speed_kmh", 0.0)
             self._draw_label(p, sx, sy - 14, f"{spd:.0f}", body_clr)
-            if acc is not None and (is_acc_lead or is_acc_top):
-                score = next(
-                    (s for (tid, s, _d) in acc["top_leads"] if tid == vid), None
-                )
-                if score is not None:
-                    self._draw_label(p, sx, sy + 14, f"s{score:+.1f}", body_clr)
+            self._draw_acc_components(p, sx, sy, vid, acc, body_clr)
 
             for tr in v.get("trailers", []):
                 yaw = tr["yaw"]
@@ -242,7 +243,7 @@ class AEBDebugWindow(QWidget):
 
     def _draw_acc_hud(self, p: QPainter, acc: dict | None) -> None:
         hud_w = 310
-        hud_h = 78
+        hud_h = 122
         hud_x = 10
         hud_y = 195  # below main AEB HUD (175+10+10)
 
@@ -280,7 +281,88 @@ class AEBDebugWindow(QWidget):
         y += 18
         p.setFont(self._font_small)
         n_top = len(acc["top_leads"])
-        p.drawText(QPointF(x, y), f"in-lane candidates: {n_top}")
+        n_tracked = len(acc.get("components", {}))
+        p.drawText(QPointF(x, y), f"in-lane: {n_top}   scored tracks: {n_tracked}")
+
+        kappa = acc.get("ego_kappa", 0.0)
+        if abs(kappa) > 1e-6:
+            radius = 1.0 / abs(kappa)
+            radius_str = f"{radius:.0f}m"
+        else:
+            radius_str = "∞"
+        ch = acc.get("corridor_half", 0.0)
+        kappa_clr = _WARN_CLR if (abs(kappa) > 1e-6 and 1.0 / abs(kappa) < 400.0) else _TEXT
+        y += 14
+        p.setPen(QPen(kappa_clr))
+        p.drawText(
+            QPointF(x, y),
+            f"ego κ={kappa:+.4f} (R={radius_str})   ½lane={ch:.2f}m",
+        )
+
+        y += 14
+        p.setPen(QPen(_TEXT))
+        p.drawText(QPointF(x, y), f"blinker scalar: {acc.get('blinker', 0.0):+.2f}")
+
+    def _draw_acc_components(
+        self,
+        p: QPainter,
+        sx: float,
+        sy: float,
+        vid: int,
+        acc: dict | None,
+        body_clr: QColor,
+    ) -> None:
+        """Render the per-vehicle scoring breakdown next to the vehicle.
+
+        Shows everything the ACC scorer saw for this id this frame so the
+        operator can see *why* a vehicle is or is not being tracked: the
+        four components, current accumulated score, in-path flag, lat/dist
+        in the arc frame, and whether arc_arc_collision returned a hit.
+        """
+        if acc is None:
+            return
+        comp = acc.get("components", {}).get(vid)
+        if comp is None:
+            return
+
+        score = comp["score"]
+        in_path = comp["in_path"]
+        arc_hit = comp["arc_hit"]
+        seen = comp.get("seen", True)
+        ch = comp.get("corridor_half", acc.get("corridor_half", 0.0))
+        lat = comp["lat"]
+        gate_pass = abs(lat) <= ch if ch > 0 else True
+
+        score_clr = _SAFE_CLR if score > 0 else (_WARN_CLR if score > -2 else _DANGER_CLR)
+        self._draw_label(p, sx, sy + 14, f"s{score:+.1f}", score_clr)
+
+        flags = []
+        flags.append("IN" if in_path else "out")
+        flags.append("hit" if arc_hit else "miss")
+        if not gate_pass:
+            flags.append(f"lat>{ch:.2f}")
+        if not seen:
+            flags.append("decay")
+        flags_clr = _SAFE_CLR if (in_path and seen) else _WARN_CLR
+        self._draw_label(p, sx, sy + 26, " ".join(flags), flags_clr)
+
+        offset = comp["offset"]
+        yaw_c = comp["yaw"]
+        path = comp["path"]
+        comp_clr = _TEXT if seen else _SUPPRESSED_CLR
+        self._draw_label(
+            p, sx, sy + 38,
+            f"o{offset:+.2f} y{yaw_c:+.2f} p{path:+.2f}",
+            comp_clr,
+        )
+
+        ofs = comp["offset_for_score"]
+        yd = comp["yaw_diff_deg"]
+        self._draw_label(
+            p, sx, sy + 50,
+            f"lat={lat:+.2f} ofs={ofs:+.2f} Δyaw={yd:+.0f}°",
+            comp_clr,
+        )
 
     def _draw_grid(self, p: QPainter, cx: float, cy: float) -> None:
         max_r = max(self.width(), self.height()) / _PPM + _GRID_STEP_MAJOR

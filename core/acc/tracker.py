@@ -90,6 +90,20 @@ class TrackState:
     in_path: bool = False
     dist_m: float = 0.0           # last longitudinal distance along ego path.
 
+    # Per-frame scoring breakdown — populated for every scored vehicle each
+    # tick. Consumed by the debug window to surface why a vehicle is or is
+    # not being tracked. Not used by control logic.
+    last_offset: float = 0.0
+    last_yaw: float = 0.0
+    last_path: float = 0.0
+    last_lat: float = 0.0
+    last_offset_for_score: float = 0.0
+    last_yaw_diff_deg: float = 0.0
+    last_baseline: float = 0.0
+    last_arc_hit: bool = False
+    last_corridor_half: float = 0.0
+    last_seen_this_frame: bool = False
+
 
 @dataclass(slots=True)
 class LeadInfo:
@@ -116,6 +130,12 @@ class ACCTracker:
     _last_right_active: float = 0.0
     _prev_left: bool = False
     _prev_right: bool = False
+
+    # Last-frame debug snapshot — populated by `update()` so the debug
+    # window can render the inputs the scorer saw.
+    last_blinker_scalar: float = 0.0
+    last_ego_kappa_used: float = 0.0
+    last_corridor_half: float = 0.0
 
     # ------------------------------------------------------------------
     # Blinker handling
@@ -264,6 +284,13 @@ class ACCTracker:
         )
         corridor_half = path_half_width(ego_steer)
 
+        self.last_blinker_scalar = blinker
+        self.last_ego_kappa_used = ego_arc.curvature
+        self.last_corridor_half = corridor_half
+
+        for st in self.tracks.values():
+            st.last_seen_this_frame = False
+
         seen_ids: set[int] = set()
         id_to_vehicle: dict[int, Vehicle] = {}
 
@@ -355,6 +382,16 @@ class ACCTracker:
             st.last_seen_mono = now_mono
             st.in_path = in_path
             st.dist_m = longi
+            st.last_offset = off
+            st.last_yaw = yaw_c
+            st.last_path = path_c
+            st.last_lat = lat
+            st.last_offset_for_score = offset_for_score
+            st.last_yaw_diff_deg = yaw_diff_deg
+            st.last_baseline = baseline
+            st.last_arc_hit = hit is not None
+            st.last_corridor_half = corridor_half
+            st.last_seen_this_frame = True
             seen_ids.add(v.id)
             id_to_vehicle[v.id] = v
 

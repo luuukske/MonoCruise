@@ -43,6 +43,7 @@ from core.thread_management.popup_log_handler import PopupLogHandler
 from core.telemetry_thread.thread import TelemetryThread
 from core.main_pedal_thread.thread import MainPedalThread
 from core.keyboard_thread.thread import KeyboardThread
+from core.button_device_thread.thread import ButtonDeviceThread
 from core.cruise_control_thread.thread import CruiseControlThread
 from core.sending_thread.thread import SendingThread, create_visualization_bar
 from core.radar.thread import RadarThread
@@ -209,6 +210,7 @@ def main() -> None:
         TelemetryThread(),
         MainPedalThread(),
         KeyboardThread(),
+        ButtonDeviceThread(),
         CruiseControlThread(),
         SendingThread(),
         RadarThread(),
