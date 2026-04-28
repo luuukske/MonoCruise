@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from core.settings import Settings
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
+from ui.popup.popup_window import PopupWindow
 
 from .acc_controller import AdaptiveCruiseController
 
@@ -250,10 +251,11 @@ class CruiseControlThread(BaseThread):
                     self._cc_enabled = False
                     self._cc_disarmed = False
                     self._cc_disarm_pending_until = 0.0
+                
                     logger.info(
-                        "Cruise control disabled after crash/AEB stop — tap set/+ to resume",
-                        extra={"popup": True},
+                        f'{"ACC" if Settings.acc_enabled else "CC"} disabled for safety\ntap set/+ to resume',
                     )
+                    PopupWindow.emit(f'{"ACC" if Settings.acc_enabled else "CC"} disabled', "disabled for safety\ntap set/+ to resume", "w")
             else:
                 self._cc_disarmed = False
                 self._cc_disarm_pending_until = 0.0
