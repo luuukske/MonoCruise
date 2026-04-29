@@ -3,27 +3,43 @@
 [![Download MonoCruise](https://img.shields.io/sourceforge/dt/monocruise.svg)](https://sourceforge.net/projects/monocruise/files/latest/download)
 
 > [!WARNING]
-> I am currently reworking the code architecture with better error handling.
-> Current raw code is unstable in its current state. Please be patient until i rework the architecture.
+> v1.1.0 is a major architecture rewrite and is still being stabilized.
+> Some features may behave differently from v1.0.x. Use with care.
 
 # MonoCruise
-MonoCruise is a third-party software that sits in between ETS2/ATS and your pedals. 
-MonoCruise has a ton of quality of life features, like a better Adaptive Cruise Controll or a One-Pedal Driving system for heavy traffic.
-every feature (including the ACC) works in TruckersMP and singleplayer ETS2/ATS.
+MonoCruise is a third-party software that sits in between ETS2/ATS and your pedals.
+MonoCruise has a ton of quality of life features, like a better Adaptive Cruise Control, Automatic Emergency Braking, or a One-Pedal Driving system for heavy traffic.
+Every feature (including ACC and AEB) works in TruckersMP and singleplayer ETS2/ATS.
 
 ![image_2025-07-02_202137925](https://github.com/user-attachments/assets/0b35aa19-340f-44a9-8e8b-0493c9cd30ca)
 
 ### features
-This also includes quality of life features like:
-- smoother Adaptive Cruise Control (v1.0.1 and above)
-- better Cruise Control
-- One-Pedal driving system
-- live braking and accelerating bar on the bottom of the screen
-- automatically horn when braking hard
-- auto enable hazard lights when braking for traffic
-- auto disable hazards
-- exponential braking and accelerating
-- auto start and stop for non-intrucive UX
+
+**Cruise & speed control**
+- Adaptive Cruise Control (ACC) — holds a safe following distance from the lead vehicle using an intelligent driver model
+- ACC gap level adjustment — 4 gap levels, assignable to buttons
+- Traditional Cruise Control with speed limiter mode
+- Short and long speed increment/decrement buttons (configurable step sizes)
+
+**Safety**
+- Automatic Emergency Braking (AEB) — detects imminent collisions using arc-trajectory geometry and applies a two-phase brake sequence
+- Emergency stop detection — full brake lock on sudden pedal slam or crash
+
+**Pedal & driving feel**
+- One-Pedal Driving system — combined throttle/brake on a single axis
+- Exponential braking and accelerating — configurable non-linear pedal curves
+- Adaptive pedal capacity learning — calibrates to your actual pedal hardware over time
+- Smooth unified pedal output with road-load feedforward and gearshift freeze
+
+**Comfort & automation**
+- Auto start and stop for non-intrusive UX
+- Automatically horn when braking hard
+- Auto enable hazard lights when braking for traffic, auto disable on acceleration
+- Live braking and accelerating bar on the bottom of the screen
+
+**Input**
+- Multi-device button support — joystick buttons, hat directions, and keyboard keys
+- Automatic pedal reconnect — recovers gracefully if your pedals disconnect mid-drive
 ## .exe install
 
 1. Download and run "MonoCruise installer.exe".
@@ -62,22 +78,30 @@ MonoCruise will automatically start together with ETS2. you can disable this in 
 > [!IMPORTANT]
 > The MonoCruise window should remain open if you want to use it
 
-## Adaptive Cruise Control (v1.0.1 and above):
-you can enable the experemental ACC and it will hold a safe distance from the lead vehicle (singleplayer or TruckersMP). you currently cannot change the following distance, but that's comming.
-   
+## Adaptive Cruise Control (v1.1.0 and above):
+Enable the ACC and it will hold a safe following distance from the lead vehicle in singleplayer or TruckersMP. The ACC uses an intelligent driver model (IIDM) to select and track the closest in-lane vehicle, and scores multiple candidates to pick the correct lead. You can adjust the following gap with dedicated buttons (4 levels).
+
 > [!CAUTION]
-> The ACC is EXTREMELY experemental. 
-> The ACC has a tendency to brakecheck, BE MINDFULL WHEN TURNING ON!
+> The ACC is EXTREMELY experimental.
+> The ACC has a tendency to brakecheck. BE MINDFUL WHEN TURNING ON!
+
+## Automatic Emergency Braking (v1.1.0 and above):
+The AEB monitors traffic using arc-based trajectory geometry and applies a staged brake intervention if a collision is imminent. Phase 1 applies ~50% deceleration for 0.5 s as a warning; Phase 2 applies ~90% deceleration if the threat persists. An audible beep plays at the start of each intervention. You can override AEB at any time by pressing the brake pedal yourself.
+
+> [!CAUTION]
+> AEB is EXTREMELY experimental.
+> False positives can occur at intersections and during lane changes. BE MINDFUL WHEN TURNING ON!
 
 ## .py install
 Not supported yet, but you can try it.
 
 ## uses:
-- [ETS2LA plugin](https://gitlab.com/ETS2LA/ets2la_plugin): used for getting ai/MP vehicles data for Adaptive Cruise Control.
-- [Truck_Telemetry](https://github.com/dreagonmon/truck_telemetry): used to get data from the game. 
-- [scscontroller](https://github.com/ETS2LA/scs-sdk-controller/tree/main): used to send commands to the game like braking, gas, hazards, etc..
-- [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter): used as a modern UI for Python.
+- [ETS2LA plugin](https://gitlab.com/ETS2LA/ets2la_plugin): used for getting AI/MP vehicle data for ACC and AEB.
+- [Truck_Telemetry](https://github.com/dreagonmon/truck_telemetry): used to get telemetry data from the game.
+- [scscontroller](https://github.com/ETS2LA/scs-sdk-controller/tree/main): used to send commands to the game like braking, gas, hazards, etc.
+- [PySide6](https://doc.qt.io/qtforpython-6/): used as the UI framework.
 - [pygame](https://github.com/pygame/pygame): used to get pedal values and to play sounds.
+- [Shapely](https://shapely.readthedocs.io/): used for arc-trajectory collision geometry in AEB.
 
 This project is licensed under the MIT License.
 It includes third-party code under the CC0-1.0, MIT, and BSD 3-Clause licenses.
