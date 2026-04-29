@@ -182,15 +182,23 @@ def accumulate(
     dt: float,
     components: ScoreComponents,
     target_speed_ms: float,
+    path_weight: float = 1.0,
 ) -> float:
     """Integrate components into the running score; clamp to [-5, +15].
 
-    Per-frame delta = `total(components) × speed_mult(target) × dt × 30`.
+    Per-frame delta = `weighted_total × speed_mult(target) × dt × 30`.
 
     The ``× 30`` is so dt=1/30 s (legacy tick) produces the unscaled
     legacy increment; higher/lower loop rates scale proportionally.
+    path_weight scales the path component relative to offset/yaw.
     """
-    delta = components.total() * speed_multiplier(target_speed_ms) * dt * _LEGACY_RATE_HZ
+    weighted_total = (
+        components.offset
+        + components.yaw
+        + components.path * path_weight
+        + components.angle
+    )
+    delta = weighted_total * speed_multiplier(target_speed_ms) * dt * _LEGACY_RATE_HZ
     return max(_SCORE_MIN, min(_SCORE_MAX, prev_score + delta))
 
 

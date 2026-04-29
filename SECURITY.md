@@ -56,3 +56,16 @@
 ### Scan: 2026-04-27 — .venv installed packages, safety-cli 3.7.0
 
 Vulnerability check 2026-04-27 — 122 packages scanned. No new vulnerabilities. 2 previously documented issues remain unpatched (pygments MEDIUM, python-dotenv MODERATE) — no fix applied since last scan.
+
+---
+
+### Scan: 2026-04-29 — direct project imports, OSV database
+
+Vulnerability check 2026-04-29 — All direct dependencies clean. 1 previously documented issue persists (pygments LOW, see 2026-04-26 entry). No new vulnerabilities found.
+
+**Scope:** direct imports from project source (PySide6 6.10.1, Flask 3.1.3, flask-cors 6.0.2, pygame 2.6.1, psutil 7.1.3, numpy 2.2.6, pandas 3.0.1, plotly 6.6.0, matplotlib 3.10.8, websockets 13.1) — OSV batch query
+
+#### Notes
+- `python-dotenv` no longer installed in current .venv — previously flagged MODERATE advisory no longer applicable.
+- `pygments` 2.19.2: GHSA-5239-wwwm-4pmq (ReDoS via GUID regex, LOW) — fix available at 2.20.0, unchanged since 2026-04-26 scan.
+- Environment regression detected: current .venv has older versions than 2026-04-27 scan (numpy 2.2.6 vs 2.4.2, psutil 7.1.3 vs 7.2.2, PySide6 6.10.1 vs 6.10.2, pandas 3.0.1 vs 3.0.2, plotly 6.6.0 vs 6.7.0). No security impact — no vulnerabilities in these older versions per OSV.

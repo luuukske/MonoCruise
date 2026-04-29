@@ -665,7 +665,8 @@ class Vehicle:
             raw_speed = self._raw_speed if self._raw_speed is not None else self.speed
             return filtered_speed, filtered_accel, raw_speed
 
-        return self.speed, self.acceleration, self.speed
+        raw_speed = self._raw_speed if self._raw_speed is not None else self.speed
+        return self.speed, self.acceleration, raw_speed
 
     def _tmp_apply_crash_rotation_jerk(self, prev: "Vehicle", t_now: float) -> None:
         """TMP: detect crash-level rotation jerk on every buffer read (sub-frame and full)."""
@@ -733,8 +734,7 @@ class Vehicle:
             if abs(self.angular_velocity) > _MAX_ANGULAR_VELOCITY:
                 self.angular_velocity = 0.0
             self.speed = prev.speed
-            if self.is_tmp:
-                self.acceleration = prev.acceleration
+            self.acceleration = prev.acceleration
 
             self._tmp_apply_crash_rotation_jerk(prev, t_now)
 
@@ -883,9 +883,8 @@ class Vehicle:
                 self.position.x = self._smooth_x
                 self.position.z = self._smooth_z
             self.speed = prev.speed
-            if self.is_tmp:
-                self.acceleration = prev.acceleration
-                self._smooth_accel = prev._smooth_accel
+            self.acceleration = prev.acceleration
+            self._smooth_accel = prev._smooth_accel
             return
 
         # World position is unfiltered — arcs and debug use true coordinates.
@@ -954,6 +953,26 @@ class Vehicle:
             self._smooth_accel = smooth_accel
             self.speed = smooth_speed
             self.acceleration = smooth_accel
+
+        else:
+            # AI (SP): EMA-filter the game-reported speed/accel.
+            raw_speed = self.speed
+            if prev._smooth_speed is None:
+                self._raw_speed = raw_speed
+                self._smooth_speed = raw_speed
+                self._smooth_accel = self.acceleration
+            else:
+                alpha = _tmp_speed_ema_alpha(abs((prev.speed + raw_speed) / 2))
+                smooth_speed = alpha * raw_speed + (1.0 - alpha) * prev.speed
+                kin_accel = (smooth_speed - prev.speed) / dt if dt > 1e-9 else 0.0
+                prev_sa = prev._smooth_accel if prev._smooth_accel is not None else kin_accel
+                beta = _tmp_accel_ema_alpha(abs((prev.speed + raw_speed) / 2))
+                smooth_accel = beta * kin_accel + (1.0 - beta) * prev_sa
+                self._raw_speed = raw_speed
+                self._smooth_speed = smooth_speed
+                self._smooth_accel = smooth_accel
+                self.speed = smooth_speed
+                self.acceleration = smooth_accel
 
     def curvature_from_history(self) -> float | None:
         """Curvature (1/m) from circumscribed circle fit over _position_history.
