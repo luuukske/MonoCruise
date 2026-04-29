@@ -89,7 +89,7 @@ class TelemetryThreadData(ThreadData):
 
     # Vehicle state
     parkBrake: bool = False
-    rotationY: float = 0.0          # pitch deg, positive = uphill (same units as AEB ego_pitch_deg)
+    rotationY: float = 0.0          # pitch normalized [0, 1] full-circle — use _road_grade_from_norm to convert
     hazardsActive: bool = False
 
     coordinateX: float = 0.0

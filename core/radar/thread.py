@@ -132,8 +132,10 @@ class RadarThread(BaseThread):
                 self.data.ego_yaw_rad = ego_yaw_norm * 2.0 * math.pi
                 self.data.ego_speed = ego_speed
                 self.data.ego_steer = ego_steer
-                self.data.ego_pitch_deg = ego_pitch_deg
-                self.data.ego_pitch_rad = math.radians(ego_pitch_deg)
+                _pv = (ego_pitch_deg + 0.5) % 1.0 - 0.5
+                _pr = _pv * 2.0 * math.pi
+                self.data.ego_pitch_deg = math.degrees(_pr)
+                self.data.ego_pitch_rad = _pr
                 self.data.ego_has_trailer = ego_has_trailer
             return
 
@@ -149,7 +151,8 @@ class RadarThread(BaseThread):
         tmp_session = any(v.is_tmp for v in vehicles)
 
         ego_yaw_rad = ego_yaw_norm * 2.0 * math.pi
-        ego_pitch_rad = math.radians(ego_pitch_deg)
+        _pv = (ego_pitch_deg + 0.5) % 1.0 - 0.5
+        ego_pitch_rad = _pv * 2.0 * math.pi
 
         with self.data._lock:
             self.data.vehicles = vehicles
@@ -161,7 +164,7 @@ class RadarThread(BaseThread):
             self.data.ego_yaw_norm = ego_yaw_norm
             self.data.ego_speed = ego_speed
             self.data.ego_steer = ego_steer
-            self.data.ego_pitch_deg = ego_pitch_deg
+            self.data.ego_pitch_deg = math.degrees(ego_pitch_rad)
             self.data.ego_pitch_rad = ego_pitch_rad
             self.data.ego_has_trailer = ego_has_trailer
             self.data.ego_curvature = ego_curvature
