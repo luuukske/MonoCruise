@@ -1,24 +1,30 @@
 """
-Cruise control worker — CC button edge/timing logic and minimal speed→accel loop.
+Cruise control orchestrator thread.
 
-Reads CC button holds from main_pedal_thread, writes commanded_accel_ms2 on
-telemetry_thread for the accel-to-pedals mapper in sending_thread.
+Owns the longitudinal controller stack (ACC + CC children from
+`core/longitudinal/`), the CC button FSM, and arbitration. Each tick:
+
+1. Read telemetry + pedal + AEB state, build a `LongCtx`.
+2. Run the CC button FSM — drives `self._cc_ctrl` enable/target.
+3. Run the ACC distance FSM — drives `Settings.acc_gap_level`.
+4. Step the controllers; arbitrate `min(...)` over active bids.
+5. Publish wanted accel to telemetry for `accel_to_pedals.step()` and to
+   `self.data` for UI consumers.
 """
 
 from __future__ import annotations
 
 import logging
-import math
 import threading
 import time
 from dataclasses import dataclass, field
 
+from core.longitudinal.acc import AdaptiveCruiseController
+from core.longitudinal.base import LongCtx, LongOutput
+from core.longitudinal.cc import CruiseController
 from core.settings import Settings
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
-from ui.popup.popup_window import PopupWindow
-
-from .acc_controller import AdaptiveCruiseController
 
 logger = logging.getLogger(__name__)
 
@@ -27,54 +33,10 @@ _LONG_PRESS_DEC_INC_FIRST_S = 0.3
 _LONG_PRESS_DEC_INC_REPEAT_S = 0.6
 _LONG_PRESS_START_S = 0.5
 
-_SPEED_MIN_KMH = 30.0
-_SPEED_MAX_KMH = 130.0
-
-# Default PID constants — overridden at runtime by Settings.cc_k* / Settings.cc_accel_*
-_KP_DEFAULT = 0.35
-_KI_DEFAULT = 0.00
-_KD_DEFAULT = 0.15
-_INTEGRAL_CLAMP_DEFAULT = 3.0
-_ACCEL_MIN_MS2_DEFAULT = -2.0
-_ACCEL_MAX_MS2_DEFAULT = 2.0
-
-# Low-pass time constant (s) for telemetry speed used only in the PID D-term.
-# Reduces derivative noise from game telemetry; P/I still use instantaneous speed.
-_CC_KD_SPEED_SMOOTH_TAU_S = 0.15
-
-# EMA time constant (s) for the final commanded acceleration sent to telemetry.
-# Slower than KD smoothing so pedal commands change gradually.
-_CC_OUTPUT_EMA_TAU_S = 0.40
-_CC_TARGET_SPEED_EMA_TAU_S = 0.5
-
-# Gearshift D-term freeze. Mirrors the timings used by the sending_thread mapper
-# (accel_to_pedals._GEARSHIFT_BLOCK_DURATION_S / _RAMP_DURATION_S) so CC and
-# mapper release together. Speed stalls while the clutch is in and jumps on
-# re-engage — a raw D-term would spike and send a transient gas/brake command.
-_CC_CLUTCH_ACTIVE_THRESHOLD = 0.05
-_CC_GEARSHIFT_BLOCK_DURATION_S = 0.5
-_CC_GEARSHIFT_RAMP_DURATION_S = 1.0
-
-# Disable-on-stop guard. CC only disables when an *event* (crash or AEB_brake)
-# is followed by the vehicle coming to a stop. A normal stop (e.g., user just
-# braking at a light) does not disable — CC stays armed and resumes when the
-# user releases the brake. Re-enable happens when the user presses CC start/inc.
-_CC_DISARM_SPEED_MS = 0.3   # ~1.1 km/h
-# Per-tick speed drop (m/s) interpreted as a crash. Mirrors the threshold used
-# by main_pedal_thread for its crash_detected branch.
-_CC_CRASH_SPEED_DROP_MS = 5.0
-# Window after a triggering event during which a stop will disable CC. If the
-# vehicle stays moving past this, the event is forgotten.
-_CC_DISARM_PENDING_TIMEOUT_S = 5.0
-
-# Game throttle threshold above which CC bypasses output smoothing on the
-# brake side so it reacts immediately to a user override.
-_CC_GAME_THROTTLE_OVERRIDE = 0.1
-
 
 @dataclass
 class CruiseControlThreadData(ThreadData):
-    """Published state for sending_thread / future UI."""
+    """Published state for sending_thread / UI."""
 
     active: bool = False
     cc_enabled: bool = False
@@ -91,11 +53,12 @@ class CruiseControlThread(BaseThread):
     def __init__(self) -> None:
         super().__init__(name="cruise_control_thread")
         self.data = CruiseControlThreadData()
-        self._acc = AdaptiveCruiseController()
 
-        self._cc_enabled = False
-        self._target_speed_kmh: float | None = None
+        # Longitudinal controllers — children of LongitudinalController.
+        self._cc_ctrl = CruiseController()
+        self._acc_ctrl = AdaptiveCruiseController()
 
+        # Button FSM state — owns press timing only; acts on CC via _cc_ctrl.
         self._time_pressed_dec: float | None = None
         self._time_pressed_inc: float | None = None
         self._time_pressed_start: float | None = None
@@ -107,29 +70,13 @@ class CruiseControlThread(BaseThread):
         self._long_press_acc_dist_inc = False
         self._long_press_acc_dist_dec = False
 
-        self._integral_error = 0.0
-        self._kd_smooth_speed_ms: float | None = None
+        # Loop cadence
         self._prev_loop_mono = time.monotonic()
         self._was_commanding = False
-        self._last_target_for_integral: float | None = None
+
+        # Rate-limited UI messages
         self._last_assign_warn_mono: float = 0.0
         self._last_block_msg_mono: float = 0.0
-        self._output_ema_accel_ms2: float | None = None
-        self._target_speed_ema_ms: float | None = None
-
-        # Clutch/gearshift tracking for D-term freeze
-        self._cc_clutch_active: bool = False
-        self._cc_clutch_release_mono: float = -math.inf
-        self._cc_prev_d_factor: float = 1.0
-
-        # Disarm-on-stop state. True transiently in button FSM resets; the
-        # disable-on-stop guard sets _cc_enabled=False directly instead.
-        self._cc_disarmed: bool = False
-        # Disarm-trigger tracking. `_cc_disarm_pending_until` is a monotonic
-        # deadline — set when a crash or AEB_brake event is observed; if the
-        # vehicle stops before then, CC disarms.
-        self._cc_disarm_pending_until: float = 0.0
-        self._cc_prev_speed_ms: float | None = None
 
     def setup(self) -> None:
         self._prev_loop_mono = time.monotonic()
@@ -139,9 +86,7 @@ class CruiseControlThread(BaseThread):
         if not self.running:
             return
 
-        # Idle throttle: when telemetry is disconnected, button presses are
-        # ignored (guarded by `connected` below) and no accel command is
-        # published, so full polling_rate is wasted CPU. Drop to 2 Hz.
+        # Idle throttle when telemetry disconnected — buttons are gated below.
         try:
             tel = registry.get_thread("telemetry_thread")
             is_connected = tel.is_alive() and bool(tel.data.is_connected)
@@ -159,9 +104,6 @@ class CruiseControlThread(BaseThread):
         tel = self._snapshot_telemetry()
         pedal = self._snapshot_pedal()
 
-        commanding = False
-        wanted_accel = 0.0
-
         try:
             if tel is None or pedal is None:
                 self._publish_telemetry_command(0.0)
@@ -178,25 +120,12 @@ class CruiseControlThread(BaseThread):
             cc_start = pedal["cc_start_held"]
             acc_dist_inc = pedal["acc_dist_inc_held"]
             acc_dist_dec = pedal["acc_dist_dec_held"]
+            aeb_brake = self._read_aeb_brake()
 
             all_assigned = self._all_cc_buttons_assigned()
 
-            # Auto-deactivate when the truck is no longer in a drivable state.
-            # Brake input (joystick or game keyboard) does NOT deactivate CC —
-            # the user can override transiently and CC stays armed.
-            if (
-                self._cc_enabled
-                and connected
-                and Settings.cc_mode == "Cruise control"
-                and (tel["park_brake"] or tel["gear_dashboard"] <= 0)
-            ):
-                self._cc_enabled = False
-                self._cc_disarmed = False
-                if tel["park_brake"]:
-                    logger.info("CC disabled — parking brake engaged", extra={"popup": True})
-                else:
-                    logger.info("CC disabled — gear neutral or reverse", extra={"popup": True})
-
+            # Block-message: warn when user presses inc/start but truck is in
+            # park/neutral/reverse (cruise mode only).
             if connected and Settings.cc_mode == "Cruise control" and (cc_inc or cc_start):
                 if tel["park_brake"] or tel["gear_dashboard"] <= 0:
                     if now - self._last_block_msg_mono > 2.0:
@@ -214,6 +143,7 @@ class CruiseControlThread(BaseThread):
                     connected, paused, device_lost, all_assigned,
                 )
 
+            # Drive CC button FSM and ACC distance FSM.
             if connected and not paused and not device_lost:
                 if not all_assigned and (cc_dec or cc_inc or cc_start):
                     if now - self._last_assign_warn_mono > 2.0:
@@ -232,68 +162,36 @@ class CruiseControlThread(BaseThread):
                     connected, not paused, not device_lost,
                 )
 
-            # Disable-on-stop guard. CC stays enabled through normal stops;
-            # it only disables when a *triggering event* (crash or AEB_brake)
-            # is followed by a full stop within the timeout window.
-            speed_ms = tel["speed_ms"]
-            if self._cc_enabled:
-                aeb_brake = self._read_aeb_brake()
-                crash_event = (
-                    self._cc_prev_speed_ms is not None
-                    and (self._cc_prev_speed_ms - speed_ms) >= _CC_CRASH_SPEED_DROP_MS
-                )
-                if crash_event or aeb_brake:
-                    self._cc_disarm_pending_until = now + _CC_DISARM_PENDING_TIMEOUT_S
-                if (
-                    now < self._cc_disarm_pending_until
-                    and speed_ms < _CC_DISARM_SPEED_MS
-                ):
-                    self._cc_enabled = False
-                    self._cc_disarmed = False
-                    self._cc_disarm_pending_until = 0.0
-                
-                    logger.info(
-                        f'{"ACC" if Settings.acc_enabled else "CC"} disabled for safety\ntap set/+ to resume',
-                    )
-                    PopupWindow.emit(f'{"ACC" if Settings.acc_enabled else "CC"} disabled', "disabled for safety\ntap set/+ to resume", "w")
-            else:
-                self._cc_disarmed = False
-                self._cc_disarm_pending_until = 0.0
-            self._cc_prev_speed_ms = speed_ms
+            # Build context for controllers.
+            ctx = LongCtx(
+                now=now,
+                dt=dt,
+                speed_ms=float(tel["speed_ms"]),
+                gear_dashboard=int(tel["gear_dashboard"]),
+                park_brake=bool(tel["park_brake"]),
+                game_throttle=float(tel["game_throttle"]),
+                game_clutch=float(tel["game_clutch"]),
+                game_brake=0.0,
+                aeb_brake=bool(aeb_brake),
+                connected=bool(connected),
+                paused=bool(paused),
+                em_stop=bool(em_stop),
+                device_lost=bool(device_lost),
+            )
 
-            if (
-                self._cc_enabled
-                and self._target_speed_kmh is not None
-                and connected
-                and not paused
-                and not device_lost
-                and not em_stop
-            ):
-                wanted_accel = self._speed_to_accel(tel, dt)
-                if self._acc_should_cap():
-                    wanted_accel = min(wanted_accel, self._acc.accel_cap_ms2(tel["speed_ms"]))
-                else:
-                    self._acc.reset()
-                        # User game-throttle override: when the user is pressing gas
-                # in-game and CC wants to brake, bypass output EMA so the
-                # brake response is immediate instead of softened over ~0.4s.
-                game_throttle = float(tel.get("game_throttle", 0.0))
-                user_overriding = (
-                    game_throttle > _CC_GAME_THROTTLE_OVERRIDE and wanted_accel < 0.0
-                )
-                if user_overriding:
-                    self._output_ema_accel_ms2 = wanted_accel
-                wanted_accel = self._smooth_output_accel_ema(wanted_accel, dt)
-                accel_min = float(Settings.cc_accel_min_ms2)
-                accel_max = float(Settings.cc_accel_max_ms2)
-                wanted_accel = max(accel_min, min(accel_max, wanted_accel))
-                commanding = True
+            # CC steps unconditionally — it owns its own enable/disarm guards.
+            cc_out = self._cc_ctrl.step(ctx)
+
+            # ACC bids only when CC is active. ACC alone (without a setpoint
+            # source) would have no upper bound, so we keep the legacy gating.
+            if cc_out.active:
+                acc_out = self._acc_ctrl.step(ctx)
             else:
-                self._integral_error = 0.0
-                self._kd_smooth_speed_ms = None
-                self._output_ema_accel_ms2 = None
-                self._target_speed_ema_ms = None
-                self._acc.reset()
+                self._acc_ctrl.reset()
+                acc_out = LongOutput(None, False)
+
+            # Arbitrate: lowest active m/s² bid wins.
+            wanted_accel, commanding = self._arbitrate(cc_out, acc_out)
 
             self._publish_telemetry_command(wanted_accel if commanding else 0.0)
             self._publish_data(commanding, wanted_accel if commanding else 0.0)
@@ -315,8 +213,12 @@ class CruiseControlThread(BaseThread):
         self._request_mapper_reset()
         logger.debug("cruise_control_thread teardown complete")
 
-    def _acc_should_cap(self) -> bool:
-        return bool(Settings.acc_enabled) and Settings.cc_mode == "Cruise control"
+    @staticmethod
+    def _arbitrate(*outs: LongOutput) -> tuple[float, bool]:
+        bids = [o.wanted_ms2 for o in outs if o.active and o.wanted_ms2 is not None]
+        if not bids:
+            return 0.0, False
+        return min(bids), True
 
     @staticmethod
     def _all_cc_buttons_assigned() -> bool:
@@ -377,32 +279,6 @@ class CruiseControlThread(BaseThread):
         except Exception:
             return None
 
-    def _clamp_target_kmh(self, v: float) -> float:
-        return max(_SPEED_MIN_KMH, min(_SPEED_MAX_KMH, v))
-
-    def _change_target_kmh(self, delta: float) -> None:
-        """Adjust set speed like legacy change_target_speed: coarse steps use grid math, fine steps add."""
-        if self._target_speed_kmh is None:
-            return
-        inc = int(round(float(delta)))
-        abs_inc = abs(inc)
-        if abs_inc >= 5:
-            ts = int(round(float(self._target_speed_kmh)))
-            if inc > 0:
-                ts = ((ts // abs_inc) + 1) * abs_inc
-            elif ts % abs_inc == 0:
-                ts = ((ts // abs_inc) - 1) * abs_inc
-            else:
-                ts = (ts // abs_inc) * abs_inc
-            self._target_speed_kmh = self._clamp_target_kmh(float(ts))
-        else:
-            self._target_speed_kmh = self._clamp_target_kmh(
-                float(self._target_speed_kmh) + float(delta),
-            )
-
-    def _set_target_from_speed_kmh(self, speed_kmh: float) -> None:
-        self._target_speed_kmh = self._clamp_target_kmh(round(speed_kmh))
-
     def _tick_button_fsm(
         self,
         tel: dict,
@@ -411,6 +287,7 @@ class CruiseControlThread(BaseThread):
         cc_inc: bool,
         cc_start: bool,
     ) -> None:
+        """CC inc/dec/start press timing → drives `self._cc_ctrl`."""
         speed_kmh = tel["speed_ms"] * 3.6
         short_i = int(Settings.short_increments) if Settings.short_increments is not None else 1
         long_i = int(Settings.long_increments) if Settings.long_increments is not None else 5
@@ -421,10 +298,10 @@ class CruiseControlThread(BaseThread):
             and (tel["park_brake"] or tel["gear_dashboard"] <= 0)
         )
 
-        all_assigned = self._all_cc_buttons_assigned()
+        cc = self._cc_ctrl
 
         # Decrease
-        if cc_dec and not cc_inc and not cc_start and all_assigned:
+        if cc_dec and not cc_inc and not cc_start:
             if self._time_pressed_dec is None:
                 self._time_pressed_dec = now
             dt_dec = now - self._time_pressed_dec
@@ -433,17 +310,17 @@ class CruiseControlThread(BaseThread):
             ):
                 self._long_press_dec = True
                 self._time_pressed_dec = now
-                if self._target_speed_kmh is not None:
-                    self._change_target_kmh(-float(long_i))
+                if cc.target_speed_kmh is not None:
+                    cc.change_target_kmh(-float(long_i))
         elif self._time_pressed_dec is not None:
-            if not self._long_press_dec and self._target_speed_kmh is not None:
-                self._change_target_kmh(-float(short_i))
+            if not self._long_press_dec and cc.target_speed_kmh is not None:
+                cc.change_target_kmh(-float(short_i))
             else:
                 self._long_press_dec = False
             self._time_pressed_dec = None
 
-        # Increase
-        if cc_inc and not cc_dec and not cc_start and all_assigned and not block_inc_start:
+        # Increase (and enable on first press if disabled)
+        if cc_inc and not cc_dec and not cc_start and not block_inc_start:
             if self._time_pressed_inc is None:
                 self._time_pressed_inc = now
             dt_inc = now - self._time_pressed_inc
@@ -452,54 +329,50 @@ class CruiseControlThread(BaseThread):
             ):
                 self._long_press_inc = True
                 self._time_pressed_inc = now
-                if self._cc_enabled:
-                    self._change_target_kmh(float(long_i))
-                elif self._target_speed_kmh is None or speed_kmh > (self._target_speed_kmh or 0):
-                    self._set_target_from_speed_kmh(speed_kmh)
-                if not self._cc_enabled:
-                    self._cc_enabled = True
+                if cc.enabled:
+                    cc.change_target_kmh(float(long_i))
+                elif cc.target_speed_kmh is None or speed_kmh > (cc.target_speed_kmh or 0):
+                    cc.set_target_from_speed_kmh(speed_kmh)
+                if not cc.enabled:
+                    cc.enable()
                     logger.info("Cruise control enabled")
-                self._cc_disarmed = False
         elif self._time_pressed_inc is not None:
             if not self._long_press_inc:
-                if self._cc_enabled:
-                    self._change_target_kmh(float(short_i))
-                elif self._target_speed_kmh is None or speed_kmh > (self._target_speed_kmh or 0):
-                    self._set_target_from_speed_kmh(speed_kmh)
-                if not self._cc_enabled:
-                    self._cc_enabled = True
+                if cc.enabled:
+                    cc.change_target_kmh(float(short_i))
+                elif cc.target_speed_kmh is None or speed_kmh > (cc.target_speed_kmh or 0):
+                    cc.set_target_from_speed_kmh(speed_kmh)
+                if not cc.enabled:
+                    cc.enable()
                     logger.info("Cruise control enabled")
-                self._cc_disarmed = False
             else:
                 self._long_press_inc = False
             self._time_pressed_inc = None
 
         # Start / toggle
-        if cc_start and not cc_dec and not cc_inc and all_assigned:
+        if cc_start and not cc_dec and not cc_inc:
             if self._time_pressed_start is None:
                 self._time_pressed_start = now
             dt_start = now - self._time_pressed_start
             if not self._long_press_start and dt_start > _LONG_PRESS_START_S:
                 self._long_press_start = True
                 if Settings.long_press_reset and not block_inc_start:
-                    self._set_target_from_speed_kmh(speed_kmh)
-                    if not self._cc_enabled:
-                        self._cc_enabled = True
-                    self._cc_disarmed = False
+                    cc.set_target_from_speed_kmh(speed_kmh)
+                    if not cc.enabled:
+                        cc.enable()
                     logger.info("Cruise target reset to current speed")
                 elif not Settings.long_press_reset:
                     logger.info("Long press to reset is disabled")
         elif self._time_pressed_start is not None:
             if not self._long_press_start:
-                if self._cc_enabled:
-                    self._cc_enabled = False
+                if cc.enabled:
+                    cc.disable()
                     logger.info("Cruise control disabled")
                 else:
-                    self._cc_enabled = True
-                    self._cc_disarmed = False
+                    cc.enable()
                     logger.info("Cruise control enabled")
-                if self._target_speed_kmh is None:
-                    self._set_target_from_speed_kmh(speed_kmh)
+                if cc.target_speed_kmh is None:
+                    cc.set_target_from_speed_kmh(speed_kmh)
             else:
                 self._long_press_start = False
             self._time_pressed_start = None
@@ -507,14 +380,9 @@ class CruiseControlThread(BaseThread):
     def _tick_acc_distance_fsm(self, now: float, inc_held: bool, dec_held: bool) -> None:
         """Drive the ACC gap level from one or two dedicated buttons.
 
-        Mirrors the cc inc/dec timing: short release = one step, sustained
-        hold = auto-repeat at the same cadence.
-
-        Both bound: inc/dec apply ±1 with hard clamp at [1, 4] (no wrap, so
-        a held button can't run past the ends and "wrap around" unexpectedly).
+        Both bound: inc/dec apply ±1 with hard clamp at [1, 4].
         Only one bound: that single button cycles 1→2→3→4→1.
-        Neither bound: warn (rate-limited) when the user presses something
-        that mapped to nothing.
+        Neither bound: warn (rate-limited).
         """
         inc_assigned = Settings.acc_dist_inc_button is not None
         dec_assigned = Settings.acc_dist_dec_button is not None
@@ -546,7 +414,7 @@ class CruiseControlThread(BaseThread):
             self._long_press_acc_dist_dec = False
             return
 
-        # Both assigned — clamped step. Suppress when both are held to avoid fights.
+        # Both assigned — clamped step. Suppress when both are held.
         if inc_held and dec_held:
             self._time_pressed_acc_dist_inc = None
             self._time_pressed_acc_dist_dec = None
@@ -571,7 +439,7 @@ class CruiseControlThread(BaseThread):
         long_press: bool,
         apply,
     ) -> tuple[float | None, bool]:
-        """Generic short/long-press FSM. Returns the new (time_pressed, long_press)."""
+        """Generic short/long-press FSM."""
         if held:
             if time_pressed is None:
                 time_pressed = now
@@ -615,117 +483,7 @@ class CruiseControlThread(BaseThread):
             return
         logger.info("ACC gap set to %d/4", new_level)
 
-    def _gearshift_d_factor(self, now: float, clutch: float) -> float:
-        """Returns 0.0 while clutched or in post-release block, 0→1 over ramp, 1 otherwise.
-
-        Mirrors sending_thread mapper's gearshift state machine so CC's D-term
-        releases in lockstep with the mapper's integrators.
-        """
-        now_safe = now if math.isfinite(now) else 0.0
-        clutch_pressed = clutch > _CC_CLUTCH_ACTIVE_THRESHOLD
-
-        if clutch_pressed and not self._cc_clutch_active:
-            self._cc_clutch_active = True
-        elif not clutch_pressed and self._cc_clutch_active:
-            self._cc_clutch_active = False
-            self._cc_clutch_release_mono = now_safe
-
-        if clutch_pressed:
-            return 0.0
-        time_since_release = now_safe - self._cc_clutch_release_mono
-        if time_since_release < _CC_GEARSHIFT_BLOCK_DURATION_S:
-            return 0.0
-        if time_since_release < _CC_GEARSHIFT_BLOCK_DURATION_S + _CC_GEARSHIFT_RAMP_DURATION_S:
-            return (time_since_release - _CC_GEARSHIFT_BLOCK_DURATION_S) / _CC_GEARSHIFT_RAMP_DURATION_S
-        return 1.0
-
-    def _speed_to_accel(self, tel: dict, dt: float) -> float:
-        speed_ms = tel["speed_ms"]
-        target_kmh = self._target_speed_kmh
-        if target_kmh is None:
-            return 0.0
-
-        if self._last_target_for_integral != target_kmh:
-            self._integral_error = 0.0
-            self._last_target_for_integral = target_kmh
-
-        if Settings.cc_mode == "Speed limiter":
-            target_ms = max((target_kmh - 0.1) / 3.6, 0.0)
-        else:
-            target_ms = target_kmh / 3.6
-        target_ms = self._smooth_target_speed_ema(target_ms, dt)
-
-        # Read PID gains from Settings each call for live hot-reload tuning.
-        kp = float(Settings.cc_kp)
-        ki = float(Settings.cc_ki)
-        kd = float(Settings.cc_kd)
-        clamp = float(Settings.cc_integral_clamp)
-
-        error_ms = target_ms - speed_ms
-        self._integral_error += error_ms * dt
-        self._integral_error = max(-clamp, min(clamp, self._integral_error))
-
-        d_factor = self._gearshift_d_factor(time.monotonic(), float(tel.get("game_clutch", 0.0)))
-
-        raw_speed_ms = speed_ms
-        if d_factor <= 0.0:
-            # Freeze the smoothed-speed EMA during clutch + block window. Prevents
-            # it from tracking the stalled-then-jumping speed and producing a
-            # spurious derivative spike on re-engage.
-            speed_deriv = 0.0
-        else:
-            # Leading edge of the ramp: reseed EMA to current speed so the first
-            # post-block derivative starts at zero instead of comparing against
-            # the stale pre-clutch value.
-            if self._cc_prev_d_factor <= 0.0:
-                self._kd_smooth_speed_ms = raw_speed_ms
-            tau = _CC_KD_SPEED_SMOOTH_TAU_S
-            alpha = dt / (tau + dt) if tau > 0.0 else 1.0
-            if self._kd_smooth_speed_ms is None:
-                self._kd_smooth_speed_ms = raw_speed_ms
-                speed_deriv = 0.0
-            else:
-                prev_smooth = self._kd_smooth_speed_ms
-                self._kd_smooth_speed_ms = alpha * raw_speed_ms + (1.0 - alpha) * prev_smooth
-                speed_deriv = (self._kd_smooth_speed_ms - prev_smooth) / dt
-        self._cc_prev_d_factor = d_factor
-
-        p_term = kp * error_ms
-        i_term = ki * self._integral_error
-        d_term = -kd * speed_deriv * d_factor
-
-        logger.debug(
-            "cc pid: error=%.3f p=%.3f i=%.3f d=%.3f (df=%.2f) integral=%.3f output=%.3f",
-            error_ms, p_term, i_term, d_term, d_factor, self._integral_error,
-            p_term + i_term + d_term,
-        )
-        return p_term + i_term + d_term
-
-    def _smooth_output_accel_ema(self, raw_ms2: float, dt: float) -> float:
-        tau = _CC_OUTPUT_EMA_TAU_S
-        alpha = dt / (tau + dt) if tau > 0.0 else 1.0
-        if self._output_ema_accel_ms2 is None:
-            self._output_ema_accel_ms2 = raw_ms2
-        else:
-            self._output_ema_accel_ms2 = (
-                alpha * raw_ms2 + (1.0 - alpha) * self._output_ema_accel_ms2
-            )
-        return self._output_ema_accel_ms2
-
-    def _smooth_target_speed_ema(self, target_ms: float, dt: float) -> float:
-        tau = _CC_TARGET_SPEED_EMA_TAU_S
-        alpha = dt / (tau + dt) if tau > 0.0 else 1.0
-        if self._target_speed_ema_ms is None:
-            self._target_speed_ema_ms = target_ms
-        else:
-            self._target_speed_ema_ms = (
-                alpha * target_ms + (1.0 - alpha) * self._target_speed_ema_ms
-            )
-        return self._target_speed_ema_ms
-
     def _publish_telemetry_command(self, wanted_accel_ms2: float) -> None:
-        if not math.isfinite(wanted_accel_ms2):
-            wanted_accel_ms2 = 0.0
         try:
             tel = registry.get_thread("telemetry_thread")
             with tel.data._lock:
@@ -736,8 +494,8 @@ class CruiseControlThread(BaseThread):
     def _publish_data(self, commanding: bool, wanted_accel_ms2: float) -> None:
         with self.data._lock:
             self.data.active = commanding
-            self.data.cc_enabled = self._cc_enabled
-            self.data.target_speed_kmh = self._target_speed_kmh
+            self.data.cc_enabled = self._cc_ctrl.enabled
+            self.data.target_speed_kmh = self._cc_ctrl.target_speed_kmh
             self.data.wanted_accel_ms2 = wanted_accel_ms2
 
     def _maybe_reset_mapper_on_commanding_end(self, commanding: bool) -> None:

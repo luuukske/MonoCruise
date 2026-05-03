@@ -112,6 +112,10 @@ class Settings(metaclass=_SingletonMeta):
     cc_accel_max_ms2: float = 1.0
     cc_accel_min_ms2: float = -1.0
 
+    # Global speed limiter (always active when set). Limiter caps gas and can
+    # demand brake post-mapping; not user-overridable. None disables the limiter.
+    global_speed_limit_kmh: float | None = None
+
     # AccelToPedals tuning — split gas (PID) / brake (feedforward + trim PI) architecture.
     # Weight baselines and smoothing constants stay fixed in code.
     mapper_accel_scale_ms2: float = 1.0       # baseline max gas accel for capacity estimate
