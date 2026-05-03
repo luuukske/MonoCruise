@@ -69,3 +69,16 @@ Vulnerability check 2026-04-29 — All direct dependencies clean. 1 previously d
 - `python-dotenv` no longer installed in current .venv — previously flagged MODERATE advisory no longer applicable.
 - `pygments` 2.19.2: GHSA-5239-wwwm-4pmq (ReDoS via GUID regex, LOW) — fix available at 2.20.0, unchanged since 2026-04-26 scan.
 - Environment regression detected: current .venv has older versions than 2026-04-27 scan (numpy 2.2.6 vs 2.4.2, psutil 7.1.3 vs 7.2.2, PySide6 6.10.1 vs 6.10.2, pandas 3.0.1 vs 3.0.2, plotly 6.6.0 vs 6.7.0). No security impact — no vulnerabilities in these older versions per OSV.
+
+---
+
+### Scan: 2026-05-03 — .venv installed packages, safety-cli 3.7.0
+
+Vulnerability check 2026-05-03 — 125 packages scanned. No new vulnerabilities. 1 previously documented issue persists (pygments 2.19.2 MEDIUM, CVE-2026-4539 — see 2026-04-26 entry).
+
+**Scope:** 125 .venv installed packages (safety-cli open-source database)
+
+#### Notes
+- `python-dotenv 1.2.1` has been reinstalled since the 2026-04-29 scan (which noted it was absent). Previously flagged MODERATE advisory GHSA-mf9w-mj56-hr94 / CVE-2026-28684 applies again (symlink attack via `set_key()`/`unset_key()`). Project code confirmed not calling those functions; fix available at 1.2.2 when convenient.
+- `pygments 2.19.2` MEDIUM (CVE-2026-4539): unchanged. Fix at 2.20.0.
+- 3 net-new packages vs last scan (122→125): `Authlib 1.7.0`, `joserfc 1.6.4`, `dparse 0.6.4` — none flagged by safety-cli.
