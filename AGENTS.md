@@ -152,3 +152,16 @@ Refer back to `core/example_thread/thread.py` whenever you are unsure about the 
 
 - **Physical safety**
   - When an error uccurs or certain parts of the code fail, the user must ALWAYS be able to stop the vehicle being controlled in ETS2 or ATS without causing an accident.
+
+### Longitudinal control invariants
+
+- **Global speed limiter is a continuous tracker, not an over-limit reactor.**
+  - The `SpeedLimiter` (`core/longitudinal/limiter.py`) PID must run continuously while active, and its mapper output must shape the gas pedal cap continuously — not only when ego is at or above the limit.
+  - The mapper's engagement flag (`mapper_engaged` in `core/sending_thread/thread.py`) and the post-mapping user-gas cap (`a = min(a, mapper_gas)`) must both fire whenever the limiter is active, regardless of whether ego is below, at, or above the limit.
+  - Why: an asymmetric limiter that wakes only on overshoot will overshoot — by the time the PID engages, ego is already past the cap. The continuous tracker tightens the gas cap progressively as ego approaches the limit, smoothly bringing the truck to exactly the limit speed without overshoot.
+  - Do not reintroduce an "only when over the limit" gate (e.g. `if wanted_ms2 < 0: ...` on the limiter, or `if limiter_constraining: ...` on the user-gas cap). This was tried twice; both times it caused overshoot or fight-with-cruise behaviour at the limit boundary.
+
+- **One mapper, one set of integrators.**
+  - There is exactly one `AccelToPedals` instance in the running system. Cruise/ACC and the global limiter both contribute m/s² requests that are `min()`-merged before the mapper runs.
+  - Do not give the limiter (or any other longitudinal child) its own `AccelToPedals` instance. Two parallel mappers diverge in `wanted_smooth` / fast PID / output EMA per-instance state, which broke commander handover at the limit boundary (cruise targets a few km/h below the cap could fail to take over).
+  - If you need a controller-specific intermediate signal, derive it from the single mapper's input (`min(...)` of the m/s² bids) rather than instantiating a second mapper.

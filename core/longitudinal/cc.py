@@ -148,8 +148,9 @@ class CruiseController(LongitudinalController):
         if self._enabled:
             game_brake_excess = ctx.game_brake - ctx.commanded_brake_recent_max
             if (
-                ctx.user_raw_brake > _CC_USER_BRAKE_DISENGAGE
-                or game_brake_excess > _CC_USER_BRAKE_DISENGAGE
+                Settings.cc_mode == "Cruise control"
+                and (ctx.user_raw_brake > _CC_USER_BRAKE_DISENGAGE
+                or game_brake_excess > _CC_USER_BRAKE_DISENGAGE)
             ):
                 self._enabled = False
                 logger.info("CC disabled — brake pressed", extra={"popup": True})
@@ -170,7 +171,7 @@ class CruiseController(LongitudinalController):
         # Disarm-on-stop guard. CC stays armed through normal stops; only
         # disables when a crash or AEB_brake is followed by a full stop within
         # the timeout window.
-        if self._enabled:
+        if self._enabled and Settings.cc_mode == "Cruise control":
             crash_event = (
                 self._cc_prev_speed_ms is not None
                 and (self._cc_prev_speed_ms - ctx.speed_ms) >= _CC_CRASH_SPEED_DROP_MS

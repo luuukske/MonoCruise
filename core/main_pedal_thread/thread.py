@@ -294,10 +294,7 @@ class MainPedalThread(BaseThread):
 
         # Only treat CC as "commanding the pedal" in Cruise control mode.
         # In Speed limiter mode CC just CAPS the user's gas pedal in
-        # sending_thread (`min(user, mapper_gas)`); the user is still the
-        # primary driver, so OPD must stay on — otherwise lifting gas no
-        # longer produces regen brake and the user has no way to slow the
-        # truck without disabling the limiter.
+        # sending_thread (`min(user, mapper_gas)`)
         cruise_commanding = False
         try:
             cc = registry.get_thread("cruise_control_thread")

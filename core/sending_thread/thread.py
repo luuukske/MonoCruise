@@ -188,16 +188,13 @@ class SendingThread(BaseThread):
         self._last_should_force: bool = False
         self._hazard_user_override: bool = False
         self._prev_tel_hazards: bool = False
-        # Shared mapper state — owned here so the limiter's mapper instance
-        # shares learned bias, capacity, and output continuity with the
-        # cruise-side mapper for smooth handover.
+        # Single mapper. Cruise/ACC and limiter both contribute m/s² requests
+        # that are min()-merged before the mapper runs, so there's only one
+        # set of integrators / bias / output continuity. Avoids the per-instance
+        # state drift the dual-mapper design suffered at the limit boundary.
         self._mapper_shared = MapperSharedState()
         self._accel_mapper = AccelToPedals(self._mapper_shared)
-        self._limiter = SpeedLimiter(self._mapper_shared)
-
-        # Commander tracking (from previous tick) — drives selective `learn`.
-        # Values: 'cruise', 'limiter', or None (user/AEB driving).
-        self._prev_commander: str | None = None
+        self._limiter = SpeedLimiter()
         self._capacity_tracker = PedalCapacityTracker()
         self._aeb_controller = AEBBrakeController()
         self._key_listener = None
@@ -548,14 +545,21 @@ class SendingThread(BaseThread):
                     wanted_a = -self._aeb_controller.commanded_decel_ms2(
                         self._capacity_tracker.max_brake_ms2
                     )
-                # Selective learn: cruise mapper learns when it commanded last
-                # tick. When the limiter is off, this defaults to True (legacy
-                # behaviour). When the limiter is on and was commanding last
-                # tick, cruise mapper previews without committing state.
-                if self._limiter.active:
-                    learn_cruise = self._prev_commander != "limiter"
-                else:
-                    learn_cruise = True
+
+                # Limiter contribution — folded in BEFORE the mapper so there's
+                # one set of integrators for the unified m/s² stream.
+                limiter_wanted = self._limiter.step_wanted(spd_ms)
+                limiter_active = limiter_wanted is not None
+                if limiter_active and not _aeb_active:
+                    wanted_a = min(wanted_a, limiter_wanted) if cruise_active else limiter_wanted
+
+                # Mapper engages whenever any controller is bidding, including
+                # the limiter while ego is BELOW the limit. The PID then runs
+                # continuously so the gas pedal cap tightens smoothly as ego
+                # approaches the cap — preventing the overshoot you'd get if
+                # the limiter only woke up after crossing the limit.
+                mapper_engaged = cruise_active or _aeb_active or limiter_active
+
                 targets = self._accel_mapper.step(
                     wanted_a,
                     raw_a,
@@ -565,11 +569,10 @@ class SendingThread(BaseThread):
                     max_accel_ms2=self._capacity_tracker.max_accel_ms2,
                     max_brake_ms2=self._capacity_tracker.max_brake_ms2,
                     road_pitch=road_pitch,
-                    cruise_commanding=cruise_active or _aeb_active,
+                    cruise_commanding=mapper_engaged,
                     gear_dashboard=tel_gear_dashboard,
                     game_throttle=game_throttle,
                     game_clutch=game_clutch,
-                    learn=learn_cruise,
                 )
                 mapper_gas = float(targets.gas)
                 mapper_brake = float(targets.brake)
@@ -782,11 +785,13 @@ class SendingThread(BaseThread):
         a = float(complex(a).real)
         b = float(complex(b).real)
 
-        # Cruise / ACC: mapper gas when active; mapper brake merged whenever connected (for AEB).
-        # cc_mode = "Cruise control": CC drives the pedal → max(user, mapper_gas).
-        # cc_mode = "Speed limiter":  CC caps the user pedal → min(user, mapper_gas)
-        #                              so user pedals through normally and gets
-        #                              capped only when they'd exceed the limit.
+        # User-pedal merge with the mapper's output.
+        #   cc_mode "Cruise control": CC drives the pedal → max(user, mapper_gas).
+        #   cc_mode "Speed limiter":  CC caps the user pedal → min(user, mapper_gas).
+        # When the limiter is the only thing engaging the mapper (cruise off,
+        # over-limit), the mapper output reflects limiter-driven brake/0-gas;
+        # we still want max() so the user's gas pedal is left intact below the
+        # cap, but the explicit cap below ensures the user can't push past it.
         if cruise_active:
             if Settings.cc_mode == "Speed limiter":
                 a = min(a, mapper_gas)
@@ -794,52 +799,19 @@ class SendingThread(BaseThread):
                 a = max(a, mapper_gas)
         b = max(b, mapper_brake)
 
-        # Speed Limiter post-mapping merge — caps gas, can demand brake. Not
-        # overridable by user pedals (it's applied AFTER the user merge).
-        # Selective learn: limiter mapper learns only when it was commander
-        # last tick.
-        learn_limiter = self._prev_commander == "limiter"
-        pre_limiter_a, pre_limiter_b = a, b
-        limiter_constrained = False
-        if self._limiter.active:
-            limiter_gas, limiter_brake = self._limiter.step_pedal(
-                speed_ms=speed_ms,
-                gear_dashboard=tel_gear_dashboard,
-                game_throttle=game_throttle,
-                game_clutch=game_clutch,
-                raw_accel_ms2=raw_a,
-                total_mass_kg=mass_kg,
-                has_trailer=has_t,
-                max_accel_ms2=self._capacity_tracker.max_accel_ms2,
-                max_brake_ms2=self._capacity_tracker.max_brake_ms2,
-                road_pitch=road_pitch,
-                learn=learn_limiter,
-            )
-            if limiter_gas is not None:
-                new_a = min(a, limiter_gas)
-                new_b = max(b, limiter_brake)
-                limiter_constrained = (
-                    new_a < pre_limiter_a - 1e-6 or new_b > pre_limiter_b + 1e-6
-                )
-                a, b = new_a, new_b
-        else:
-            self._limiter.reset()
+        # Limiter cap — applies whenever the limiter is active, not just over
+        # the limit. Below the limit the mapper output reflects the limiter's
+        # PID (positive m/s² → gas pedal that's full when far below the cap
+        # and tightens as ego nears it). Capping user gas to that progressively
+        # tighter pedal means the truck never overshoots the limit. Above the
+        # limit the same code path forces gas to the mapper's brake-or-zero
+        # output regardless of cc_mode.
+        if limiter_active:
+            a = min(a, mapper_gas)
 
         # AEB active — suppress gas completely; brake already merged above.
         if _aeb_active:
             a = 0.0
-
-        # Determine this tick's commander for next tick's `learn` flags.
-        # AEB → no mapper learns. Limiter constraining → limiter learns.
-        # Cruise active and not overridden → cruise learns. Else user driving.
-        if _aeb_active:
-            self._prev_commander = None
-        elif limiter_constrained:
-            self._prev_commander = "limiter"
-        elif cruise_active:
-            self._prev_commander = "cruise"
-        else:
-            self._prev_commander = None
 
         # Brake threshold hysteresis: suppress flicker from rapid OPD/CC transitions.
         _now = time.monotonic()
