@@ -37,6 +37,14 @@ class LongCtx:
     paused: bool
     em_stop: bool
     device_lost: bool
+    # Raw physical brake pedal value (pre-OPD). Distinguishes user-pressed
+    # brake from One Pedal Drive synthesised brake. Defaults to 0.0 so older
+    # callers don't need updating.
+    user_raw_brake: float = 0.0
+    # Maximum brake value sent to the game over the last few ticks. Lets the
+    # CC disengage check tell apart a lagged readback of our own brake command
+    # from the user actually pressing the in-game brake.
+    commanded_brake_recent_max: float = 0.0
 
 
 @dataclass(slots=True)

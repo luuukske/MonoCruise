@@ -163,6 +163,16 @@ class CruiseControlThread(BaseThread):
                 )
 
             # Build context for controllers.
+            # CC needs three brake signals to decide whether to disengage:
+            #   - user_raw_brake: physical pedal pre-OPD (direct user intent).
+            #   - game_brake:     telemetry readback of the in-game brake.
+            #   - commanded_brake_recent_max: max brake we sent in the last
+            #     few ticks (so a lagged readback of our own command doesn't
+            #     look like a user press).
+            user_raw_brake = float(pedal.get("brakeval", 0.0))
+            game_brake_in = float(tel.get("game_brake", 0.0))
+            commanded_recent_max = self._read_recent_commanded_brake_max()
+
             ctx = LongCtx(
                 now=now,
                 dt=dt,
@@ -171,12 +181,14 @@ class CruiseControlThread(BaseThread):
                 park_brake=bool(tel["park_brake"]),
                 game_throttle=float(tel["game_throttle"]),
                 game_clutch=float(tel["game_clutch"]),
-                game_brake=0.0,
+                game_brake=game_brake_in,
                 aeb_brake=bool(aeb_brake),
                 connected=bool(connected),
                 paused=bool(paused),
                 em_stop=bool(em_stop),
                 device_lost=bool(device_lost),
+                user_raw_brake=user_raw_brake,
+                commanded_brake_recent_max=commanded_recent_max,
             )
 
             # CC steps unconditionally — it owns its own enable/disarm guards.
@@ -243,9 +255,32 @@ class CruiseControlThread(BaseThread):
                     "park_brake": bool(tel.data.parkBrake),
                     "game_clutch": float(tel.data.gameClutch),
                     "game_throttle": float(tel.data.gameThrottle),
+                    "game_brake": float(getattr(tel.data, "gameBrake", 0.0)),
                 }
         except Exception:
             return None
+
+    def _read_recent_commanded_brake_max(self) -> float:
+        """Max brake value sent to the game over the last few ticks.
+
+        Used by CC to distinguish a real user in-game brake press (gameBrake
+        far above what we commanded) from a lagged readback of our own brake
+        command (gameBrake matches one of the recent commanded values).
+        """
+        try:
+            st = registry.get_thread("sending_thread")
+        except KeyError:
+            return 0.0
+        try:
+            if not st.is_alive():
+                return 0.0
+            with st.data._lock:
+                recent = tuple(st.data.recent_brake_outputs)
+        except (AttributeError, KeyError):
+            return 0.0
+        if not recent:
+            return 0.0
+        return max(float(x) for x in recent)
 
     def _read_aeb_brake(self) -> bool:
         try:
@@ -275,6 +310,7 @@ class CruiseControlThread(BaseThread):
                     "cc_start_held": bool(pt.data.cc_start_held),
                     "acc_dist_inc_held": bool(getattr(pt.data, "acc_dist_inc_held", False)),
                     "acc_dist_dec_held": bool(getattr(pt.data, "acc_dist_dec_held", False)),
+                    "brakeval": float(getattr(pt.data, "brakeval", 0.0)),
                 }
         except Exception:
             return None

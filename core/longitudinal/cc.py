@@ -43,6 +43,10 @@ _CC_DISARM_PENDING_TIMEOUT_S = 5.0   # arming window after a triggering event
 # Game throttle threshold above which CC bypasses brake-side output EMA
 _CC_GAME_THROTTLE_OVERRIDE = 0.1
 
+# Brake threshold for one-shot CC disengage (classic cruise behaviour:
+# tap the brake → CC turns off, user must re-enable).
+_CC_USER_BRAKE_DISENGAGE = 0.05
+
 
 class CruiseController(LongitudinalController):
     """Set-speed PID with output smoothing, target management, and disarm guard."""
@@ -132,6 +136,23 @@ class CruiseController(LongitudinalController):
             clamped = self._clamp_target_kmh(self._target_kmh)
             if clamped != self._target_kmh:
                 self._target_kmh = clamped
+
+        # User-brake disengage. Two independent triggers:
+        #   1. Raw physical brake pedal (pre-OPD) exceeds threshold — direct
+        #      user intent, ignores One Pedal Drive synthesised brake.
+        #   2. In-game brake readback (gameBrake) exceeds the max brake we
+        #      commanded over the last few ticks by more than the threshold —
+        #      means user pressed the in-game brake (keyboard etc.) on top of
+        #      whatever we sent. Comparing against recent commands tolerates
+        #      the readback lag from the game.
+        if self._enabled:
+            game_brake_excess = ctx.game_brake - ctx.commanded_brake_recent_max
+            if (
+                ctx.user_raw_brake > _CC_USER_BRAKE_DISENGAGE
+                or game_brake_excess > _CC_USER_BRAKE_DISENGAGE
+            ):
+                self._enabled = False
+                logger.info("CC disabled — brake pressed", extra={"popup": True})
 
         # Auto-disable when truck enters a non-drivable state (cruise mode only)
         if (

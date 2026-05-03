@@ -156,6 +156,10 @@ class SendingThreadData(ThreadData):
     mapper_gain_scale: float = 1.0
     mapper_pedal_state: int = 0
     max_brake_ms2: float = 0.0         # live PedalCapacityTracker estimate (m/s²)
+    # Most recent brake values written to the game (last N ticks). Used by
+    # cruise_control_thread to distinguish a user's in-game brake press from
+    # the game echoing back our own command (which lags by a few ticks).
+    recent_brake_outputs: tuple[float, ...] = (0.0, 0.0, 0.0)
     _lock: threading.Lock = field(
         default_factory=threading.Lock, repr=False, compare=False
     )
@@ -201,6 +205,8 @@ class SendingThread(BaseThread):
         self._prev_spd_mono: float | None = None
         self._brake_active: bool = False
         self._brake_last_active_at: float = 0.0
+        # Ring buffer of the last 3 brake outputs sent to the game (oldest first).
+        self._recent_brake_outputs: list[float] = [0.0, 0.0, 0.0]
 
         # Coast-down logger state
         self._coast_log_file = None
@@ -852,6 +858,13 @@ class SendingThread(BaseThread):
         controller.aforward = a
         controller.abackward = b
 
+        # Push the actual brake value sent this tick into the ring buffer so
+        # cruise_control_thread can compare gameBrake (lagged readback) against
+        # recent commands when deciding whether to disengage on user brake.
+        self._recent_brake_outputs.append(b)
+        if len(self._recent_brake_outputs) > 3:
+            self._recent_brake_outputs = self._recent_brake_outputs[-3:]
+
         # Coast-down sample: only logs when final outputs and driver inputs are zero.
         self._log_coast_step(
             speed_ms=speed_ms,
@@ -886,6 +899,7 @@ class SendingThread(BaseThread):
         with self.data._lock:
             self.data.aforward = a
             self.data.abackward = b
+            self.data.recent_brake_outputs = tuple(self._recent_brake_outputs)
             self.data.hazardsActive = tel_hazards
             self.data.horn_active = bool(getattr(controller, "horn", False))
             self.data.airhorn_active = bool(getattr(controller, "airhorn", False))

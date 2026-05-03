@@ -169,9 +169,13 @@ class SpeedLimiter(LongitudinalController):
         self._integral_error = max(-clamp, min(clamp, self._integral_error))
 
         wanted = kp * error_ms + ki * self._integral_error
+        # No upper clamp — when ego is below the cap, the limiter must request
+        # enough positive m/s² that its mapper produces a high enough gas
+        # pedal value not to throttle the user. The post-mapping `min(user,
+        # limiter_gas)` merge in sending_thread then leaves user pedal intact
+        # below the cap. Lower clamp keeps brake authority bounded.
         accel_min = float(Settings.cc_accel_min_ms2)
-        accel_max = float(Settings.cc_accel_max_ms2)
-        return max(accel_min, min(accel_max, wanted))
+        return max(accel_min, wanted)
 
     def _smooth_target_ema(self, target_ms: float, dt: float) -> float:
         tau = _TARGET_SPEED_EMA_TAU_S
