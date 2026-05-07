@@ -29,6 +29,7 @@ DELTA: float = 4.0
 V0_MS: float = 40.0
 
 S0_M: float = 3.0
+EGO_FRONT_OFFSET_M: float = 2.5
 T_HEADWAY_S: float = 1.5
 
 T_HEADWAY_BY_LEVEL_S: tuple[float, float, float, float, float] = (
@@ -88,6 +89,7 @@ class ACConfig:
     delta: float = DELTA
     v0_ms: float = V0_MS
     s0_m: float = S0_M
+    ego_front_offset_m: float = EGO_FRONT_OFFSET_M
     t_headway_s: float = T_HEADWAY_S
     cool_factor_c: float = COOL_FACTOR_C
     ma_max_leads: int = MA_MAX_LEADS
@@ -287,6 +289,7 @@ class AdaptiveCruiseController:
 
             if not (math.isfinite(dist_m) and math.isfinite(v_lead) and math.isfinite(a_lead)):
                 continue
+            dist_m = max(0.0, dist_m - cfg.ego_front_offset_m)
             if dist_m <= 0.0:
                 continue
 

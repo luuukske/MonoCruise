@@ -204,9 +204,6 @@ class SendingThread(BaseThread):
         self._brake_last_active_at: float = 0.0
         # Ring buffer of the last 3 brake outputs sent to the game (oldest first).
         self._recent_brake_outputs: list[float] = [0.0, 0.0, 0.0]
-        # Last mapper gas output — used to decide whether to suppress learning in
-        # Speed limiter mode when user gas < mapper suggestion (one tick delayed).
-        self._prev_mapper_gas: float = 1.0
 
         # Coast-down logger state
         self._coast_log_file = None
@@ -563,17 +560,6 @@ class SendingThread(BaseThread):
                 # the limiter only woke up after crossing the limit.
                 mapper_engaged = cruise_active or _aeb_active or limiter_active
 
-                # In Speed limiter mode the mapper caps the user rather than
-                # driving the pedal. If the user's gas is already below the
-                # mapper's last output (user is more conservative than CC), the
-                # mapper output isn't applied, so learning would corrupt the
-                # slow integral. Suppress learning in that case.
-                # Uses the previous tick's mapper_gas as a one-tick proxy.
-                should_learn = True
-                if cruise_active and Settings.cc_mode == "Speed limiter":
-                    if a < self._prev_mapper_gas:
-                        should_learn = False
-
                 targets = self._accel_mapper.step(
                     wanted_a,
                     raw_a,
@@ -587,10 +573,8 @@ class SendingThread(BaseThread):
                     gear_dashboard=tel_gear_dashboard,
                     game_throttle=game_throttle,
                     game_clutch=game_clutch,
-                    learn=should_learn,
                 )
                 mapper_gas = float(targets.gas)
-                self._prev_mapper_gas = mapper_gas
                 mapper_brake = float(targets.brake)
                 mapper_command_gas = float(targets.command_gas)
                 mapper_command_brake = float(targets.command_brake)
@@ -822,7 +806,12 @@ class SendingThread(BaseThread):
         # tighter pedal means the truck never overshoots the limit. Above the
         # limit the same code path forces gas to the mapper's brake-or-zero
         # output regardless of cc_mode.
-        if limiter_active:
+        #
+        # Exception: in "Cruise control" mode the user's gas always overrides
+        # CC and the limiter. The limiter still shapes the CC's m/s² target
+        # via the pre-mapper min(), so CC itself stays within the cap; the
+        # user can freely push above it.
+        if limiter_active and (Settings.cc_mode == "Speed limiter" or not cruise_active):
             a = min(a, mapper_gas)
 
         # AEB active — suppress gas completely; brake already merged above.
