@@ -23,6 +23,14 @@ from core.radar.traffic import (
     Vehicle,
     ArcPath, build_arc, arc_arc_collision, _accel_to_arc_params,
 )
+from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT
+from core.aeb.lane_frame import project_to_ego_arc, classify, Lane
+from core.aeb.filters import (
+    FilterContext, FilterResult,
+    _build_vehicle_collision_data, _world_to_ego_forward, _cross_zone_padding,
+    _apply_cross_zone, _earliest_hit, _is_approaching, _dampen_turning_curvature,
+    build_pipeline,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +178,8 @@ class AEBSnapshot:
 
     evasion_left_arc: ArcPath | None = None
     evasion_right_arc: ArcPath | None = None
+
+    suppression_reasons: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -482,9 +492,10 @@ class AEBThread(BaseThread):
         self._last_snapshot: AEBSnapshot | None = None
         self._risk_first_seen: dict[int, float] = {}
         self._radar_visualizer = None
-        # Frozen ref ego (km/h) for TMP rel-speed split while WARN/brake-pedal active.
         self._latched_filter_ego_kmh: float | None = None
         self._sound_handler = _AEBSoundHandler(_AEB_SOUND_PATH)
+        self._cal: AEBCalibration = _CAL_DEFAULT
+        self._pipeline = build_pipeline(self._cal)
 
     def _read_user_braking(self) -> bool:
         try:
@@ -568,6 +579,7 @@ class AEBThread(BaseThread):
             return
 
         aeb_active = Settings.AEB_enabled
+        cal = self._cal
 
         snapshot = self._read_radar_snapshot()
         if snapshot is None:
@@ -583,34 +595,27 @@ class AEBThread(BaseThread):
 
         now_mono = time.monotonic()
 
-        # AEB ego path — yaw-rate proxy only. Do NOT use the position-history
-        # fit published by RadarThread: AEB's ego arc must not be smoothed or
-        # lagged, and the proxy reacts instantly to steering input. ACC owns
-        # the history-based curvature (see core/radar/AGENTS.md §11).
+        # Yaw-rate proxy — see AGENTS.md §1. Do NOT use RadarData.ego_curvature.
         if ego_speed > 0.5:
-            yaw_rate_rad_s = math.radians(steer * ego_speed * 12.0)
+            yaw_rate_rad_s = math.radians(steer * ego_speed * cal.yaw_rate_steer_gain)
             ego_curvature = yaw_rate_rad_s / ego_speed
         else:
             ego_curvature = 0.0
 
-        ego_hw: float = 1.15
-        ego_half_l: float = 3.0
+        ego_hw: float = cal.ego_half_width
+        ego_half_l: float = cal.ego_half_length
 
-        # Effective ego decel for TTB calculations: 90 % of the live max brake
-        # capacity so the trigger fires early enough for the phased brake
-        # controller to stop the vehicle even if the threat brakes harder.
-        # _FULL_BRAKE_DECEL is still used for modelling the *target's* braking.
         _max_brake_live = self._read_max_brake_ms2()
-        effective_decel = _AEB_EGO_DECEL_FRAC * _max_brake_live
+        effective_decel = cal.ego_decel_frac * _max_brake_live
 
         t_stop = ego_speed / effective_decel
-        dynamic_horizon = min(max(_MIN_ARC_HORIZON, t_stop * 2.0), _MAX_ARC_HORIZON)
+        dynamic_horizon = min(max(cal.arc_horizon_min, t_stop * 2.0), cal.arc_horizon_max)
 
-        stopping_buffer = _STOP_BUFFER_FIXED + ego_half_l
+        stopping_buffer = cal.stop_buffer + ego_half_l
 
         _ego_fwd_x = -math.sin(ego_yaw_rad)
         _ego_fwd_z = -math.cos(ego_yaw_rad)
-        _ego_body_offset = (_ARC_START_PCTG - 0.5) * (2.0 * ego_half_l)
+        _ego_body_offset = (cal.arc_start_pctg - 0.5) * (2.0 * ego_half_l)
         ego_front_x = ego_x + _ego_body_offset * _ego_fwd_x
         ego_front_z = ego_z + _ego_body_offset * _ego_fwd_z
 
@@ -633,18 +638,15 @@ class AEBThread(BaseThread):
         ego_evasion_right: ArcPath | None = None
         if run_collision and ego_speed > 1.0:
             delta_kappa = min(
-                _EVASION_G_THRESHOLD / (ego_speed * ego_speed),
-                _EVASION_FILTER_MAX_DELTA_KAPPA,
+                cal.evasion_g / (ego_speed * ego_speed),
+                cal.evasion_max_dkappa,
             )
-            # Snap to center: when path would cross center line, cap curvature at 0
-            # Left path: when ego turns right, left path can cross center → snap to center (curvature 0)
             left_kappa = ego_curvature + delta_kappa
             if ego_curvature < 0 and left_kappa < 0:
-                left_kappa = left_kappa/1.5
-            # Right path: when ego turns left, right path can cross center → snap to center (curvature 0)
+                left_kappa = left_kappa / 1.5
             right_kappa = ego_curvature - delta_kappa
             if ego_curvature > 0 and right_kappa > 0:
-                right_kappa = right_kappa/1.5
+                right_kappa = right_kappa / 1.5
             ego_evasion_left = build_arc(
                 ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
                 left_kappa, ego_hw, dynamic_horizon,
@@ -664,7 +666,6 @@ class AEBThread(BaseThread):
             else ego_kmh_now
         )
         if self._radar_visualizer is not None:
-            # Push raw/smoothed speed + smoothed accel for the ACC lead only.
             lead_id = self._read_acc_lead_id()
             lead_v = None
             if lead_id is not None and lead_id >= 0:
@@ -683,9 +684,9 @@ class AEBThread(BaseThread):
         braking_suppressed_ids: set[int] = set()
         evasion_filtered_ids: set[int] = set()
         oncoming_evasion_filtered_ids: set[int] = set()
+        suppression_reasons: dict[int, list[FilterResult]] = {}
         best_ttb: float = _INF
         best_unbraked_ttc: float = _INF
-        best_raw_dist: float = _INF
         best_hit_x: float = 0.0
         best_hit_z: float = 0.0
         vehicle_dicts: list[dict] = []
@@ -694,22 +695,19 @@ class AEBThread(BaseThread):
 
         ego_pitch_rad = math.radians(ego_pitch_deg)
 
-        # Precompute per-vehicle collision arcs + derived geometry for the main loop.
-        # Stores (all_target_arcs, cross_padding, cross_arcs_list,
-        #         dx, dz, dist_sq,
-        #         v_yaw_rad, abs_v_speed, veh_fwd_x, veh_fwd_z, v_curvature)
+        # Precompute per-vehicle collision arcs for vehicles passing range/elevation/TMP.
         vehicle_collision_data: dict[int, tuple] = {}
+        max_range_sq = cal.max_range ** 2
         if run_collision:
             for v in vehicles:
                 vx, vz = v.position.x, v.position.z
                 dx = vx - ego_x
                 dz = vz - ego_z
-                dist_sq = dx * dx + dz * dz
-                if dist_sq > _MAX_RANGE_SQ:
+                if dx * dx + dz * dz > max_range_sq:
                     continue
                 rz = _world_to_ego_forward(dx, dz, ego_yaw_rad)
                 expected_y = ego_y + rz * math.tan(ego_pitch_rad)
-                if abs(v.position.y - expected_y) > _ELEVATION_MARGIN_M:
+                if abs(v.position.y - expected_y) > cal.elevation_margin:
                     continue
                 if tmp_traffic_session:
                     _, v_yaw_deg_pc, _ = v.rotation.euler()
@@ -724,8 +722,9 @@ class AEBThread(BaseThread):
                 (all_t, cross_pad, cross_list,
                  pc_yaw, pc_aspd, pc_fx, pc_fz, pc_curv,
                  ) = _build_vehicle_collision_data(
-                    v, dynamic_horizon, ego_yaw_rad, ego_fwd_x, ego_fwd_z
+                    v, dynamic_horizon, ego_yaw_rad, ego_fwd_x, ego_fwd_z, cal,
                 )
+                dist_sq = dx * dx + dz * dz
                 vehicle_collision_data[v.id] = (
                     all_t, cross_pad, cross_list,
                     dx, dz, dist_sq,
@@ -735,8 +734,6 @@ class AEBThread(BaseThread):
         for v in vehicles:
             vx, vz = v.position.x, v.position.z
 
-            # Reuse precomputed data when available (skips range/elevation/TMP checks
-            # and derived value recomputation — already done in the precompute pass).
             pc = vehicle_collision_data.get(v.id)
             if pc is not None:
                 (all_target_arcs, cross_padding, precomputed_cross_arcs,
@@ -744,26 +741,20 @@ class AEBThread(BaseThread):
                  v_yaw_rad, abs_v_speed, veh_fwd_x, veh_fwd_z, v_curvature) = pc
                 dist = math.sqrt(dist_sq)
                 v_hw = v.size.width / 2.0
-                v_hw_coll = max(v_hw - 0.1, 0.3)
             else:
                 dx = vx - ego_x
                 dz = vz - ego_z
                 dist_sq = dx * dx + dz * dz
-                if dist_sq > _MAX_RANGE_SQ:
+                if dist_sq > max_range_sq:
                     continue
-
-                # Elevation filter (slope-aware) — see AGENTS.md §13
                 rz = _world_to_ego_forward(dx, dz, ego_yaw_rad)
                 expected_y = ego_y + rz * math.tan(ego_pitch_rad)
-                if abs(v.position.y - expected_y) > _ELEVATION_MARGIN_M:
+                if abs(v.position.y - expected_y) > cal.elevation_margin:
                     continue
-
                 dist = math.sqrt(dist_sq)
                 _, v_yaw_deg, _ = v.rotation.euler()
                 v_yaw_rad = math.radians(v_yaw_deg)
                 v_hw = v.size.width / 2.0
-                v_hw_coll = max(v_hw - 0.1, 0.3)
-
                 abs_v_speed = abs(v.speed)
                 _vk = v.curvature_from_history()
                 v_curvature = _vk if _vk is not None else (
@@ -772,22 +763,20 @@ class AEBThread(BaseThread):
                 veh_fwd_x = -math.sin(v_yaw_rad)
                 veh_fwd_z = -math.cos(v_yaw_rad)
                 precomputed_cross_arcs = None
+                all_target_arcs = []
+                cross_padding = 0.0
 
-            veh_arc = v.get_arc(dynamic_horizon, arc_start_pctg=_ARC_START_PCTG)
+            veh_arc = v.get_arc(dynamic_horizon, arc_start_pctg=cal.arc_start_pctg)
             trailer_dicts = []
             trailer_arcs: list[ArcPath] = []
-            tr_hw_colls: list[float] = []
             for tr in v.trailers:
                 tr_arc_pos = tr.position
                 tr_dict_pos = tr.correct_position() if tr.is_tmp else tr.position
                 _, tr_yaw_deg, _ = tr.rotation.euler()
                 tr_yaw_rad = math.radians(tr_yaw_deg)
                 tr_hw = tr.size.width / 2.0
-                tr_hw_coll = max(tr_hw - 0.1, 0.3)
-                tr_hw_colls.append(tr_hw_coll)
-
                 tr_is_rev = v.speed < -1e-3
-                tr_effective_p = (1.0 - _ARC_START_PCTG) if tr_is_rev else _ARC_START_PCTG
+                tr_effective_p = (1.0 - cal.arc_start_pctg) if tr_is_rev else cal.arc_start_pctg
                 tr_fwd_x_l = -math.sin(tr_yaw_rad)
                 tr_fwd_z_l = -math.cos(tr_yaw_rad)
                 tr_body_offset = (tr_effective_p - 0.5) * tr.size.length
@@ -798,7 +787,6 @@ class AEBThread(BaseThread):
                     v.speed, v_curvature, tr_hw, dynamic_horizon,
                 )
                 trailer_arcs.append(tr_arc)
-
                 trailer_dicts.append({
                     "x": tr_dict_pos.x, "z": tr_dict_pos.z,
                     "yaw": tr_yaw_rad,
@@ -825,317 +813,127 @@ class AEBThread(BaseThread):
                 vehicle_dicts.append(veh_dict)
                 continue
 
-            # Rear-approach / overtaker suppression (veh_fwd_x/z already computed)
-            to_veh_len = max(dist, 1e-6)
-            dot_fwd = (dx * ego_fwd_x + dz * ego_fwd_z) / to_veh_len
-            if dot_fwd < _REAR_DOT_THRESHOLD:
-                approach_dot = veh_fwd_x * ego_fwd_x + veh_fwd_z * ego_fwd_z
-                if approach_dot > 0.5 and v.speed > ego_speed + _OVERTAKE_SPEED_MARGIN:
-                    veh_dict["rear_suppressed"] = True
-                    suppressed_ids.add(v.id)
+            # Build FilterContext and run pipeline
+            ctx = FilterContext(
+                v=v,
+                ego_arc=ego_arc,
+                ego_braked_arc=ego_braked_arc,
+                ego_evasion_left=ego_evasion_left,
+                ego_evasion_right=ego_evasion_right,
+                ego_x=ego_x, ego_y=ego_y, ego_z=ego_z,
+                ego_yaw_rad=ego_yaw_rad,
+                ego_speed=ego_speed,
+                ego_pitch_rad=ego_pitch_rad,
+                ego_curvature=ego_curvature,
+                ego_fwd_x=ego_fwd_x,
+                ego_fwd_z=ego_fwd_z,
+                ego_hw=ego_hw,
+                dynamic_horizon=dynamic_horizon,
+                stopping_buffer=stopping_buffer,
+                tmp_traffic_session=tmp_traffic_session,
+                ref_kmh_for_filter=ref_kmh_for_filter,
+                cal=cal,
+                dx=dx, dz=dz,
+                dist_sq=dist_sq, dist=dist,
+                v_yaw_rad=v_yaw_rad,
+                abs_v_speed=abs_v_speed,
+                veh_fwd_x=veh_fwd_x,
+                veh_fwd_z=veh_fwd_z,
+                v_curvature=v_curvature,
+                all_target_arcs=all_target_arcs,
+                precomputed_cross_arcs=precomputed_cross_arcs,
+                cross_padding=cross_padding,
+            )
+
+            suppression_reasons[v.id] = []
+            for stage in self._pipeline:
+                res = stage.apply(ctx)
+                if res.suppressed:
+                    suppression_reasons[v.id].append(res)
+                    reason = res.reason or ""
+                    if reason == "RearOvertakerFilter":
+                        veh_dict["rear_suppressed"] = True
+                        suppressed_ids.add(v.id)
+                    elif reason in ("OppositeLaneFilter", "EgoEvasionFilter"):
+                        if ctx.head_on:
+                            oncoming_evasion_filtered_ids.add(v.id)
+                        else:
+                            evasion_filtered_ids.add(v.id)
+                    elif reason == "CornerEntryStationaryFilter":
+                        oncoming_evasion_filtered_ids.add(v.id)
+                    else:
+                        suppressed_ids.add(v.id)
+                    vehicle_dicts.append(veh_dict)
+                    break
+            else:
+                # No stage suppressed — evaluate collision
+                if not all_target_arcs:
                     vehicle_dicts.append(veh_dict)
                     continue
 
-            # TMP threat check — skip when precomputed (already passed in precompute phase)
-            if pc is None and tmp_traffic_session:
-                dvx = ego_speed * ego_fwd_x - v.speed * veh_fwd_x
-                dvz = ego_speed * ego_fwd_z - v.speed * veh_fwd_z
-                rel_kmh = 3.6 * math.hypot(dvx, dvz)
-                if not _tmp_collision_threat(ref_kmh_for_filter, rel_kmh):
-                    vehicle_dicts.append(veh_dict)
-                    continue
+                fwd_dot = ctx.fwd_dot
+                head_on = ctx.head_on
+                near_head_on = ctx.near_head_on
+                lateral_gap = ctx.lateral_gap
 
-            fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
-            co_directional = fwd_dot > 0.7
-            head_on = fwd_dot < -0.7
-
-            near_head_on = fwd_dot < _NEAR_HEAD_ON_DOT
-
-            # Lateral separation from ego's forward axis in the ego plane.
-            lateral_offset = abs(dx * ego_fwd_z - dz * ego_fwd_x)
-
-            # Get collision arcs — already extracted from precomputed, or build new
-            if pc is None:
-                target_override_decel = _FULL_BRAKE_DECEL if head_on else 0.0
-                target_decel, target_accel = _accel_to_arc_params(v.accel_for_arc(), target_override_decel)
-                arc_curvature_fb = _dampen_turning_curvature(
-                    v_curvature, fwd_dot,
-                    ego_fwd_x, ego_fwd_z, veh_fwd_x, veh_fwd_z,
-                    abs_v_speed, abs_v_speed * dynamic_horizon,
-                )
-                veh_arc_coll = v.get_arc(dynamic_horizon, half_width=v_hw_coll,
-                                         decel=target_override_decel, arc_start_pctg=_ARC_START_PCTG,
-                                         curvature_override=arc_curvature_fb)
-                trailer_arcs_coll: list[ArcPath] = []
-                for idx, tr in enumerate(v.trailers):
-                    tr_pos = tr.position
-                    _, tr_yaw_deg, _ = tr.rotation.euler()
-                    tr_yaw_rad = math.radians(tr_yaw_deg)
-                    tr_is_rev_c = v.speed < -1e-3
-                    tr_effective_p_c = (1.0 - _ARC_START_PCTG) if tr_is_rev_c else _ARC_START_PCTG
-                    tr_fwd_x_c = -math.sin(tr_yaw_rad)
-                    tr_fwd_z_c = -math.cos(tr_yaw_rad)
-                    tr_body_offset_c = (tr_effective_p_c - 0.5) * tr.size.length
-                    trailer_arcs_coll.append(build_arc(
-                        tr_pos.x + tr_body_offset_c * tr_fwd_x_c,
-                        tr_pos.z + tr_body_offset_c * tr_fwd_z_c,
-                        tr_yaw_rad,
-                        v.speed, arc_curvature_fb, tr_hw_colls[idx], dynamic_horizon,
-                        decel=target_decel, accel=target_accel,
-                    ))
-                all_target_arcs = [veh_arc_coll] + trailer_arcs_coll
-                cross_padding = _cross_zone_padding(ego_yaw_rad, v_yaw_rad, abs_v_speed)
-
-            # Fix A — reduce ghost-arc padding for near-head-on vehicles clearly in their
-            # own lane. cross_zone_padding peaks at sin(angle)≈0.8 for near-head-on
-            # geometry, producing ghost arcs ±4 m wide at 10 m/s. This phantom-widens the
-            # target corridor so the ego evasion filter always sees a hit even when the
-            # vehicle is safely displaced into its own lane at an intersection approach.
-            # The scale-down only fires when lateral_offset confirms own-lane placement.
-            effective_cross_padding = cross_padding
-            fix_a_active = False
-            if near_head_on and lateral_offset >= _NEAR_HEAD_ON_LATERAL_MIN:
-                effective_cross_padding *= _NEAR_HEAD_ON_CROSS_SCALE
-                fix_a_active = True
-
-            for arc_idx, base_target_arc in enumerate(all_target_arcs):
-                # Reuse precomputed cross_arcs when Fix A didn't change the padding
-                if precomputed_cross_arcs is not None and not fix_a_active:
-                    cross_arcs = precomputed_cross_arcs[arc_idx]
+                # Re-derive cross_arcs respecting Fix A via lane classification
+                own_lane_for_fix_a = ctx.lane in (Lane.OPPOSITE_OR_OUTER, Lane.OFF_ROAD)
+                fix_a_active = ctx.near_head_on and own_lane_for_fix_a
+                if fix_a_active:
+                    effective_cross_padding = cross_padding * cal.near_head_on_cross_scale
                 else:
-                    cross_arcs = _apply_cross_zone(base_target_arc, effective_cross_padding)
+                    effective_cross_padding = cross_padding
 
-                lateral_gap = _LATERAL_LANE_SEPARATION if near_head_on else 0.0
+                found_hit = False
+                for arc_idx, base_target_arc in enumerate(all_target_arcs):
+                    if fix_a_active or precomputed_cross_arcs is None:
+                        cross_arcs = _apply_cross_zone(base_target_arc, effective_cross_padding)
+                    else:
+                        cross_arcs = precomputed_cross_arcs[arc_idx]
 
-                unbraked_hit = _earliest_hit(
-                    ego_arc, cross_arcs, _CORRIDOR_MARGIN, _COLLISION_SAMPLES, lateral_gap,
-                )
-
-                # Suppress diverging co-directional moving targets only.
-                # Fix C — for a co-directional vehicle in the outer lane of the same
-                # corner as ego (same-sign curvature, lateral displacement confirmed,
-                # both in a real corner), the inner/outer arc corridors overlap well
-                # before the centerlines actually cross.  At the standard 0.25 s
-                # lookahead the paths are still converging toward that crossing point,
-                # so the suppression does not fire.  Extending the lookahead to
-                # horizon × _CO_SAME_TURN_LOOKAHEAD_SCALE gives enough time for the
-                # paths to have clearly separated post-crossing.
-                # Guards are intentionally strict:
-                #   - lateral_offset: outer lane confirmed, not lane-sharing
-                #   - both curvatures above threshold: real corner, not straight drift
-                #   - same curvature sign: both turning the same direction
-                if (unbraked_hit is not None
-                        and co_directional
-                        and base_target_arc.speed > 0.5):
-                    co_diverge_dt = _CO_DIR_DIVERGE_LOOKAHEAD_S
-                    g_lat = lateral_offset >= _NEAR_HEAD_ON_LATERAL_MIN
-                    g_ego_k = abs(ego_curvature) >= _TURNING_DIVERGE_CURVATURE
-                    g_veh_k = abs(v_curvature) >= _TURNING_DIVERGE_CURVATURE
-                    g_sign = ego_curvature * v_curvature > 0
-                    fix_c_active = g_lat and g_ego_k and g_veh_k and g_sign
-                    if fix_c_active:
-                        co_diverge_dt = dynamic_horizon * _CO_SAME_TURN_LOOKAHEAD_SCALE
-                    suppressed = not _is_approaching(
-                        ego_arc, base_target_arc,
-                        unbraked_hit[0], dt=co_diverge_dt)
-                    if suppressed:
-                        unbraked_hit = None
-
-                # Suppress a tightly-turning cross-traffic vehicle whose arc is
-                # already diverging at the hit point.  Guards are intentionally
-                # strict to avoid masking real threats:
-                #   - not head_on: never suppress an oncoming vehicle
-                #   - not co_directional: original branch already handles that
-                #   - curvature guard: target must be in a real corner, not a
-                #     gentle curve that could still converge
-                #   - speed guard: stationary / near-stationary targets are not
-                #     "turning away" in a meaningful sense
-                if (unbraked_hit is not None
-                        and not head_on
-                        and not co_directional
-                        and base_target_arc.speed > 0.5):
-                    g_veh_k_ct = abs(base_target_arc.curvature) > _TURNING_DIVERGE_CURVATURE
-                    approaching_ct = _is_approaching(ego_arc, base_target_arc, unbraked_hit[0])
-                    suppressed_ct = g_veh_k_ct and not approaching_ct
-                    if suppressed_ct:
-                        unbraked_hit = None
-
-                # Sweep-pass: stationary cross-traffic ego turns through.
-                # Guards: target near-stationary, ego in a real corner.
-                # At t_hit, ego's heading has rotated past the vehicle — not a real collision.
-                if (unbraked_hit is not None
-                        and abs_v_speed < _SWEEP_PASS_MAX_TARGET_SPEED
-                        and abs(ego_curvature) > _TURNING_DIVERGE_CURVATURE):
-                    _sp_dist = ego_arc._dist_at_time(unbraked_hit[0])
-                    _sp_ex, _sp_ez = ego_arc.position_at_dist(_sp_dist)
-                    _sp_yaw = ego_arc.heading_at_dist(_sp_dist)
-                    _sp_fwd_x = -math.sin(_sp_yaw)
-                    _sp_fwd_z = -math.cos(_sp_yaw)
-                    if (vx - _sp_ex) * _sp_fwd_x + (vz - _sp_ez) * _sp_fwd_z <= 0.0:
-                        unbraked_hit = None
-
-                # Corner-entry stationary oncoming suppression.
-                # At corner entry ego_curvature ≈ 0, so all κ-gated suppressions
-                # fail. A stationary oncoming vehicle's yaw encodes how much the
-                # road curves between ego and the vehicle: the signed yaw difference
-                # from anti-parallel equals the road bend angle, so
-                #   implied_kappa = acos(-fwd_dot) / dist
-                # gives the average curvature of the road ahead. If this exceeds
-                # the corner threshold the vehicle is on an upcoming curve.
-                # lateral_offset guards against a stationary vehicle in *ego's* lane
-                # on the same curve — that vehicle has near-zero lateral displacement
-                # from ego's current heading axis (it's straight ahead, not to the
-                # side), so the gate correctly fails and the threat is preserved.
-                if (unbraked_hit is not None
-                        and abs_v_speed < _SWEEP_PASS_MAX_TARGET_SPEED
-                        and fwd_dot < -0.3
-                        and abs(ego_curvature) < _TURNING_DIVERGE_CURVATURE
-                        and lateral_offset >= _NEAR_HEAD_ON_LATERAL_MIN
-                        and dist > 1.0):
-                    road_bend = math.acos(max(-1.0, min(1.0, -fwd_dot)))
-                    implied_kappa = road_bend / dist
-                    if implied_kappa > _TURNING_DIVERGE_CURVATURE:
-                        oncoming_evasion_filtered_ids.add(v.id)
-                        unbraked_hit = None
-
-                if unbraked_hit is None:
-                    continue
-
-                unbraked_ttc = unbraked_hit[0]
-
-                # Evasion filter — bypassed for co-directional moving and head-on
-                if (ego_evasion_left is not None
-                        and ego_evasion_right is not None
-                        and not head_on
-                        and not (
-                        co_directional
-                        and base_target_arc.speed > 0.5
-                        and lateral_offset
-                        <= (ego_hw + base_target_arc.half_width + 0.25)
-                        )):
-                    left_hit = _earliest_hit(
-                        ego_evasion_left, cross_arcs,
-                        _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
+                    unbraked_hit = _earliest_hit(
+                        ego_arc, cross_arcs, cal.corridor_margin, cal.collision_samples,
+                        lateral_gap,
                     )
-                    right_hit = _earliest_hit(
-                        ego_evasion_right, cross_arcs,
-                        _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
-                    )
-                    # Only filter if at least one evasion path misses this target
-                    # (evasion paths are checked for collision with this target only)
-                    left_clear = left_hit is None
-                    right_clear = right_hit is None
-                    if left_clear or right_clear:
-                        evasion_filtered_ids.add(v.id)
+                    if unbraked_hit is None:
                         continue
 
-                # Oncoming evasion filter — mirrors the ego evasion filter but asks
-                # whether the *oncoming vehicle* could steer around ego instead.
-                elif (head_on and abs_v_speed > 1.0):
-                    delta_kappa_t = min(
-                        _EVASION_G_THRESHOLD_ONCOMING / (abs_v_speed * abs_v_speed),
-                        _EVASION_FILTER_MAX_DELTA_KAPPA,
+                    unbraked_ttc = unbraked_hit[0]
+                    colliding_ids.add(v.id)
+                    newly_risky.add(v.id)
+                    if v.id not in self._risk_first_seen:
+                        self._risk_first_seen[v.id] = now_mono
+                    confirm_duration = (
+                        cal.risk_confirm_oncoming_s if head_on else cal.risk_confirm_s
                     )
-                    # Scale delta_kappa_t when vehicle is clearly in its own lane —
-                    # a vehicle already displaced laterally needs less curvature to
-                    # miss ego, so we give its evasion arcs more room to work with.
-                    # lateral_offset is already computed above (same formula).
-                    # On tight curves, ego's heading axis compresses the cross-product
-                    # lateral offset. Use a lower threshold when both vehicles are
-                    # clearly on the same curved road (same-sign curvature above
-                    # threshold) — a genuinely in-lane head-on vehicle would be <1 m.
-                    same_curve = (
-                        abs(v_curvature) >= _TURNING_DIVERGE_CURVATURE
-                        and ego_curvature * v_curvature > 0
-                    )
-                    lane_threshold = _SAME_CURVE_OWN_LANE_LAT if same_curve else _OPPOSITE_LANE_OFFSET
-                    own_lane = lateral_offset >= lane_threshold
-                    if own_lane:
-                        delta_kappa_t = min(
-                            delta_kappa_t * _OPPOSITE_LANE_KAPPA_SCALE,
-                            _EVASION_FILTER_MAX_DELTA_KAPPA * _OPPOSITE_LANE_KAPPA_SCALE,
-                        )
-                    # Fix B — road-following curvature expansion for shared turns.
-                    # Guard: own lane only — ego_k guard removed because the yaw-rate
-                    # proxy underestimates curvature on gentle corners and silently
-                    # blocks Fix B when it's most needed.
-                    fixb_fired = False
-                    if own_lane and abs(ego_curvature) >= _TURNING_DIVERGE_CURVATURE:
-                        new_dk = max(
-                            delta_kappa_t,
-                            min(abs(ego_curvature), _SHARED_TURN_MAX_KAPPA),
-                        )
-                        fixb_fired = new_dk > delta_kappa_t
-                        delta_kappa_t = new_dk
-                    # For own-lane vehicles, build evasion arcs without forced braking.
-                    # The head-on decel model (7.8 m/s²) is correct for genuine threats
-                    # but wrong here: we're asking "will this vehicle naturally clear ego
-                    # by following the road" — not "what if both vehicles brake hard."
-                    # A braking evasion arc stops in ~1.3 s right inside ego's curved
-                    # forward path, causing both left_clears and right_clears to be False
-                    # even when the vehicle is 5+ m into its own lane.
-                    evasion_decel = 0.0 if own_lane else base_target_arc.decel
-                    tgt_evasion_left = build_arc(
-                        base_target_arc.start_x, base_target_arc.start_z,
-                        base_target_arc.yaw_rad, v.speed,
-                        base_target_arc.curvature + delta_kappa_t,
-                        base_target_arc.half_width, base_target_arc.horizon,
-                        decel=evasion_decel,
-                    )
-                    tgt_evasion_right = build_arc(
-                        base_target_arc.start_x, base_target_arc.start_z,
-                        base_target_arc.yaw_rad, v.speed,
-                        base_target_arc.curvature - delta_kappa_t,
-                        base_target_arc.half_width, base_target_arc.horizon,
-                        decel=evasion_decel,
-                    )
-                    left_clears_ego = arc_arc_collision(
-                        ego_arc, tgt_evasion_left, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
-                    ) is None
-                    right_clears_ego = arc_arc_collision(
-                        ego_arc, tgt_evasion_right, _CORRIDOR_MARGIN, _COLLISION_SAMPLES,
-                    ) is None
-                    if left_clears_ego or right_clears_ego:
-                        oncoming_evasion_filtered_ids.add(v.id)
+                    if now_mono - self._risk_first_seen[v.id] < confirm_duration:
                         continue
 
-                colliding_ids.add(v.id)
+                    if unbraked_ttc < best_unbraked_ttc:
+                        best_unbraked_ttc = unbraked_ttc
+                        best_hit_x = unbraked_hit[1]
+                        best_hit_z = unbraked_hit[2]
 
-                # Risk confirmation — oncoming vehicles require 2× duration
-                newly_risky.add(v.id)
-                if v.id not in self._risk_first_seen:
-                    self._risk_first_seen[v.id] = now_mono
-                confirm_duration = (
-                    _RISK_CONFIRM_DURATION_ONCOMING if head_on else _RISK_CONFIRM_DURATION
-                )
-                if now_mono - self._risk_first_seen[v.id] < confirm_duration:
-                    continue
+                    braked_hit = _earliest_hit(
+                        ego_braked_arc, cross_arcs,
+                        cal.corridor_margin + stopping_buffer,
+                        cal.collision_samples,
+                        lateral_gap,
+                    )
 
-                if unbraked_ttc < best_unbraked_ttc:
-                    best_unbraked_ttc = unbraked_ttc
-                    best_raw_dist = dist
-                    best_hit_x = unbraked_hit[1]
-                    best_hit_z = unbraked_hit[2]
+                    if braked_hit is None:
+                        ttb = max(unbraked_ttc, 0.0)
+                        braking_suppressed_ids.add(v.id)
+                    else:
+                        ttb = 0.0
 
-                braked_hit = _earliest_hit(
-                    ego_braked_arc, cross_arcs,
-                    _CORRIDOR_MARGIN + stopping_buffer,
-                    _COLLISION_SAMPLES,
-                    lateral_gap,
-                )
+                    if ttb < best_ttb:
+                        best_ttb = ttb
+                        best_hit_x = unbraked_hit[1]
+                        best_hit_z = unbraked_hit[2]
+                    found_hit = True
 
-                if braked_hit is None:
-                    ttb = max(unbraked_ttc - t_stop * _TIME_TO_BRAKE_BUFFER, 0.0)
-                    braking_suppressed_ids.add(v.id)
-                else:
-                    ttb = 0.0
-
-                if ttb < best_ttb:
-                    best_ttb = ttb
-                    best_hit_x = unbraked_hit[1]
-                    best_hit_z = unbraked_hit[2]
-
-            vehicle_dicts.append(veh_dict)
+                vehicle_dicts.append(veh_dict)
 
         self._risk_first_seen = {
             k: v for k, v in self._risk_first_seen.items() if k in newly_risky
@@ -1147,13 +945,13 @@ class AEBThread(BaseThread):
 
         if run_collision and best_ttb < _INF:
             time_to_brake = best_ttb
-            if time_to_brake < _WARN_TTB_THRESHOLD:
+            if time_to_brake < cal.warn_ttb:
                 new_state = AEBState.WARN
-            if time_to_brake < _BRAKE_TTB_THRESHOLD:
+            if time_to_brake < cal.brake_ttb:
                 new_state = AEBState.BRAKE
 
-        # BRAKE latch — prevent rapid cycling near threshold
-        if self._prev_state == AEBState.BRAKE and time_to_brake < _BRAKE_RELEASE_THRESHOLD:
+        # BRAKE latch — hold until TTB >= brake_release_ttb
+        if self._prev_state == AEBState.BRAKE and time_to_brake < cal.brake_release_ttb:
             new_state = AEBState.BRAKE
 
         # Hold escalated state 0.3 s
@@ -1188,6 +986,7 @@ class AEBThread(BaseThread):
             hit_x=best_hit_x, hit_z=best_hit_z,
             evasion_left_arc=ego_evasion_left,
             evasion_right_arc=ego_evasion_right,
+            suppression_reasons=suppression_reasons,
         )
 
         if new_state >= AEBState.WARN:

@@ -1,0 +1,623 @@
+"""Named AEB filter pipeline — one class per suppression stage."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+from core.radar.traffic import (
+    ArcPath, Vehicle,
+    build_arc, arc_arc_collision, _accel_to_arc_params,
+)
+from core.aeb.calibration import AEBCalibration
+from core.aeb.lane_frame import Lane, project_to_ego_arc, classify
+
+if TYPE_CHECKING:
+    pass
+
+
+@dataclass
+class FilterResult:
+    suppressed: bool
+    reason: str | None = None
+
+
+_PASS = FilterResult(suppressed=False)
+
+
+def _pass(reason: str | None = None) -> FilterResult:
+    return FilterResult(suppressed=False, reason=reason)
+
+
+def _suppress(reason: str) -> FilterResult:
+    return FilterResult(suppressed=True, reason=reason)
+
+
+# ---- helpers moved from thread.py ----
+
+def _cross_zone_padding(ego_yaw_rad: float, v_yaw_rad: float, v_speed_ms: float,
+                        cal: AEBCalibration) -> float:
+    cross_factor = abs(math.sin(ego_yaw_rad - v_yaw_rad))
+    return cross_factor * (cal.cross_zone_base + cal.cross_zone_speed * v_speed_ms)
+
+
+def _apply_cross_zone(arc: ArcPath, padding: float) -> list[ArcPath]:
+    if padding < 0.1:
+        return [arc]
+    front = build_arc(
+        arc.start_x + padding * arc.fwd_x,
+        arc.start_z + padding * arc.fwd_z,
+        arc.yaw_rad, arc.speed, arc.curvature, arc.half_width, arc.horizon,
+        decel=arc.decel, accel=arc.accel,
+    )
+    rear = build_arc(
+        arc.start_x - padding * arc.fwd_x,
+        arc.start_z - padding * arc.fwd_z,
+        arc.yaw_rad, arc.speed, arc.curvature, arc.half_width, arc.horizon,
+        decel=arc.decel, accel=arc.accel,
+    )
+    return [arc, front, rear]
+
+
+def _earliest_hit(
+    ego_arc: ArcPath,
+    check_arcs: list[ArcPath],
+    margin: float,
+    n_samples: int,
+    min_lateral_gap: float = 0.0,
+) -> tuple[float, float, float] | None:
+    best: tuple[float, float, float] | None = None
+    for ca in check_arcs:
+        h = arc_arc_collision(ego_arc, ca, margin, n_samples, min_lateral_gap)
+        if h is not None and (best is None or h[0] < best[0]):
+            best = h
+    return best
+
+
+def _world_to_ego_forward(dx: float, dz: float, ego_yaw_rad: float) -> float:
+    return dx * math.sin(ego_yaw_rad) + dz * math.cos(ego_yaw_rad)
+
+
+def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1) -> bool:
+    ax0, az0 = a.position_at_time(t)
+    bx0, bz0 = b.position_at_time(t)
+    ax1, az1 = a.position_at_time(t + dt)
+    bx1, bz1 = b.position_at_time(t + dt)
+    d0_sq = (ax0 - bx0) ** 2 + (az0 - bz0) ** 2
+    d1_sq = (ax1 - bx1) ** 2 + (az1 - bz1) ** 2
+    return d1_sq < d0_sq
+
+
+def _dampen_turning_curvature(
+    v_curvature: float,
+    fwd_dot: float,
+    ego_fwd_x: float, ego_fwd_z: float,
+    veh_fwd_x: float, veh_fwd_z: float,
+    abs_v_speed: float,
+    arc_length: float,
+    cal: AEBCalibration,
+) -> float:
+    if (abs(v_curvature) <= cal.turning_diverge_kappa
+            or abs_v_speed <= 0.5
+            or fwd_dot <= -0.5
+            or fwd_dot >= 0.7):
+        return v_curvature
+    theta_max = abs(v_curvature) * arc_length
+    theta_to_anti = math.acos(max(-1.0, min(1.0, -fwd_dot)))
+    if theta_max <= theta_to_anti:
+        return v_curvature
+    cross = veh_fwd_x * (-ego_fwd_z) - veh_fwd_z * (-ego_fwd_x)
+    if cross * v_curvature >= 0.0:
+        return v_curvature
+    return v_curvature / cal.turn_complete_curvature_scale
+
+
+def _build_vehicle_collision_data(
+    v: Vehicle,
+    dynamic_horizon: float,
+    ego_yaw_rad: float,
+    ego_fwd_x: float,
+    ego_fwd_z: float,
+    cal: AEBCalibration,
+) -> tuple[list[ArcPath], float, list[list[ArcPath]],
+           float, float, float, float, float]:
+    v_hw = v.size.width / 2.0
+    v_hw_coll = max(v_hw - 0.1, 0.3)
+    abs_v_speed = abs(v.speed)
+    _vk = v.curvature_from_history()
+    v_curvature = _vk if _vk is not None else (
+        math.radians(v.angular_velocity) / abs_v_speed if abs_v_speed > 0.5 else 0.0
+    )
+    v_yaw_rad = v._smooth_yaw if v._smooth_yaw is not None else math.radians(v.rotation.euler()[1])
+    veh_fwd_x = -math.sin(v_yaw_rad)
+    veh_fwd_z = -math.cos(v_yaw_rad)
+    fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
+    head_on = fwd_dot < -0.5
+    target_override_decel = cal.full_brake_decel if head_on else 0.0
+    arc_curvature = _dampen_turning_curvature(
+        v_curvature, fwd_dot,
+        ego_fwd_x, ego_fwd_z, veh_fwd_x, veh_fwd_z,
+        abs_v_speed, abs_v_speed * dynamic_horizon,
+        cal,
+    )
+    target_decel, target_accel = _accel_to_arc_params(v.accel_for_arc(), target_override_decel)
+    veh_arc_coll = v.get_arc(
+        dynamic_horizon,
+        half_width=v_hw_coll,
+        decel=target_override_decel,
+        arc_start_pctg=cal.arc_start_pctg,
+        curvature_override=arc_curvature,
+    )
+    tr_hw_colls: list[float] = []
+    trailer_arcs_coll: list[ArcPath] = []
+    for tr in v.trailers:
+        tr_hw = tr.size.width / 2.0
+        tr_hw_colls.append(max(tr_hw - 0.1, 0.3))
+        tr_pos = tr.position
+        _, tr_yaw_deg, _ = tr.rotation.euler()
+        tr_yaw_rad = math.radians(tr_yaw_deg)
+        tr_is_rev_c = v.speed < -1e-3
+        tr_effective_p_c = (1.0 - cal.arc_start_pctg) if tr_is_rev_c else cal.arc_start_pctg
+        tr_fwd_x_c = -math.sin(tr_yaw_rad)
+        tr_fwd_z_c = -math.cos(tr_yaw_rad)
+        tr_body_offset_c = (tr_effective_p_c - 0.5) * tr.size.length
+        trailer_arcs_coll.append(
+            build_arc(
+                tr_pos.x + tr_body_offset_c * tr_fwd_x_c,
+                tr_pos.z + tr_body_offset_c * tr_fwd_z_c,
+                tr_yaw_rad,
+                v.speed,
+                arc_curvature,
+                tr_hw_colls[-1],
+                dynamic_horizon,
+                decel=target_decel,
+                accel=target_accel,
+            )
+        )
+    all_target_arcs = [veh_arc_coll] + trailer_arcs_coll
+    cross_padding = _cross_zone_padding(ego_yaw_rad, v_yaw_rad, abs_v_speed, cal)
+    cross_arcs_list = [
+        _apply_cross_zone(bt, cross_padding) for bt in all_target_arcs
+    ]
+    return (all_target_arcs, cross_padding, cross_arcs_list,
+            v_yaw_rad, abs_v_speed, veh_fwd_x, veh_fwd_z, v_curvature)
+
+
+# ---- FilterContext ----
+
+@dataclass
+class FilterContext:
+    v: Vehicle
+    ego_arc: ArcPath
+    ego_braked_arc: ArcPath | None
+    ego_evasion_left: ArcPath | None
+    ego_evasion_right: ArcPath | None
+    ego_x: float
+    ego_y: float
+    ego_z: float
+    ego_yaw_rad: float
+    ego_speed: float
+    ego_pitch_rad: float
+    ego_curvature: float
+    ego_fwd_x: float
+    ego_fwd_z: float
+    ego_hw: float
+    dynamic_horizon: float
+    stopping_buffer: float
+    tmp_traffic_session: bool
+    ref_kmh_for_filter: float
+    cal: AEBCalibration
+
+    # Fields populated lazily by pipeline stages
+    dx: float = 0.0
+    dz: float = 0.0
+    dist_sq: float = 0.0
+    dist: float = 0.0
+    v_yaw_rad: float = 0.0
+    abs_v_speed: float = 0.0
+    veh_fwd_x: float = 0.0
+    veh_fwd_z: float = 0.0
+    v_curvature: float = 0.0
+    fwd_dot: float = 0.0
+    head_on: bool = False
+    near_head_on: bool = False
+    co_directional: bool = False
+    cross_padding: float = 0.0
+    all_target_arcs: list = field(default_factory=list)
+    precomputed_cross_arcs: list | None = None
+    lane: Lane = Lane.EGO
+
+    # Populated during collision evaluation (set by the pipeline caller)
+    unbraked_hit: tuple | None = None
+    lateral_gap: float = 0.0
+
+
+# ---- Filter stages ----
+
+class RangeFilter:
+    name = "RangeFilter"
+
+    def __init__(self, cal: AEBCalibration) -> None:
+        self._max_range_sq = cal.max_range ** 2
+
+    def apply(self, ctx: FilterContext) -> FilterResult:
+        vx, vz = ctx.v.position.x, ctx.v.position.z
+        ctx.dx = vx - ctx.ego_x
+        ctx.dz = vz - ctx.ego_z
+        ctx.dist_sq = ctx.dx * ctx.dx + ctx.dz * ctx.dz
+        if ctx.dist_sq > self._max_range_sq:
+            return _suppress("RangeFilter")
+        ctx.dist = math.sqrt(ctx.dist_sq)
+        return _PASS
+
+
+class ElevationFilter:
+    name = "ElevationFilter"
+
+    def __init__(self, cal: AEBCalibration | None = None) -> None:
+        pass
+
+    def apply(self, ctx: FilterContext) -> FilterResult:
+        rz = _world_to_ego_forward(ctx.dx, ctx.dz, ctx.ego_yaw_rad)
+        expected_y = ctx.ego_y + rz * math.tan(ctx.ego_pitch_rad)
+        if abs(ctx.v.position.y - expected_y) > ctx.cal.elevation_margin:
+            return _suppress("ElevationFilter")
+        return _PASS
+
+
+def _vehicle_yaw_rad(v: "Vehicle") -> float:
+    if v._smooth_yaw is not None:
+        return v._smooth_yaw
+    _, yaw_deg, _ = v.rotation.euler()
+    return math.radians(yaw_deg)
+
+
+class TmpRelSpeedFilter:
+    name = "TmpRelSpeedFilter"
+
+    def apply(self, ctx: FilterContext) -> FilterResult:
+        if not ctx.tmp_traffic_session:
+            return _PASS
+        v_yaw_rad = _vehicle_yaw_rad(ctx.v)
+        vf_x = -math.sin(v_yaw_rad)
+        vf_z = -math.cos(v_yaw_rad)
+        dvx = ctx.ego_speed * ctx.ego_fwd_x - ctx.v.speed * vf_x
+        dvz = ctx.ego_speed * ctx.ego_fwd_z - ctx.v.speed * vf_z
+        rel_kmh = 3.6 * math.hypot(dvx, dvz)
+        cal = ctx.cal
+        if ctx.ref_kmh_for_filter > cal.tmp_filter_split_kmh:
+            if rel_kmh <= cal.tmp_filter_rel_above_kmh:
+                return _suppress("TmpRelSpeedFilter")
+        else:
+            if rel_kmh <= cal.tmp_filter_rel_below_kmh:
+                return _suppress("TmpRelSpeedFilter")
+        return _PASS
+
+
+class RearOvertakerFilter:
+    name = "RearOvertakerFilter"
+
+    def apply(self, ctx: FilterContext) -> FilterResult:
+        to_veh_len = max(ctx.dist, 1e-6)
+        dot_fwd = (ctx.dx * ctx.ego_fwd_x + ctx.dz * ctx.ego_fwd_z) / to_veh_len
+        if dot_fwd < ctx.cal.rear_dot:
+            v_yaw_rad = _vehicle_yaw_rad(ctx.v)
+            vf_x = -math.sin(v_yaw_rad)
+            vf_z = -math.cos(v_yaw_rad)
+            approach_dot = vf_x * ctx.ego_fwd_x + vf_z * ctx.ego_fwd_z
+            if (approach_dot > 0.5
+                    and ctx.v.speed > ctx.ego_speed + ctx.cal.overtake_speed_margin):
+                return _suppress("RearOvertakerFilter")
+        return _PASS
+
+
+class LaneClassifier:
+    """Sets ctx.lane and populates arc geometry fields; not a suppression stage."""
+    name = "LaneClassifier"
+
+    def __init__(self, cal: AEBCalibration) -> None:
+        self._cal = cal
+
+    def apply(self, ctx: FilterContext) -> FilterResult:
+        cal = self._cal
+        # Populate vehicle geometry fields
+        ctx.v_yaw_rad = _vehicle_yaw_rad(ctx.v)
+        ctx.veh_fwd_x = -math.sin(ctx.v_yaw_rad)
+        ctx.veh_fwd_z = -math.cos(ctx.v_yaw_rad)
+        ctx.abs_v_speed = abs(ctx.v.speed)
+        _vk = ctx.v.curvature_from_history()
+        ctx.v_curvature = _vk if _vk is not None else (
+            math.radians(ctx.v.angular_velocity) / ctx.abs_v_speed
+            if ctx.abs_v_speed > 0.5 else 0.0
+        )
+        ctx.fwd_dot = ctx.ego_fwd_x * ctx.veh_fwd_x + ctx.ego_fwd_z * ctx.veh_fwd_z
+        ctx.head_on = ctx.fwd_dot < cal.head_on_dot
+        ctx.near_head_on = ctx.fwd_dot < cal.near_head_on_dot
+        ctx.co_directional = ctx.fwd_dot > cal.co_directional_dot
+
+        # Lane classification via arc projection
+        _, d_abs = project_to_ego_arc(ctx.ego_arc, ctx.v.position.x, ctx.v.position.z)
+        ctx.lane = classify(d_abs, cal)
+
+        ctx.lateral_gap = cal.lane_separation if ctx.near_head_on else 0.0
+        return _PASS
+
+
+class OppositeLaneFilter:
+    """Suppress oncoming vehicles that are in their own lane (not ego's).
+
+    Collapses Fix A + Fix B + oncoming evasion filter + same_curve heuristic.
+    Uses lane_frame Lane classification instead of cross-product lateral_offset.
+    """
+    name = "OppositeLaneFilter"
+
+    def __init__(self, cal: AEBCalibration) -> None:
+        self._cal = cal
+
+    def apply(self, ctx: FilterContext) -> FilterResult:
+        if not ctx.head_on or ctx.abs_v_speed <= 1.0:
+            return _PASS
+        cal = self._cal
+
+        # Determine own_lane using arc-projected lane instead of cross-product.
+        # OPPOSITE_OR_OUTER = vehicle is in its own lane (or outer), not in ego's lane.
+        own_lane = ctx.lane in (Lane.OPPOSITE_OR_OUTER, Lane.OFF_ROAD)
+
+        if own_lane:
+            # Bodies already physically separated: direct suppress (no evasion arc needed).
+            v_hw_coll = max(ctx.v.size.width / 2.0 - 0.1, 0.3)
+            _, d_abs = project_to_ego_arc(ctx.ego_arc, ctx.v.position.x, ctx.v.position.z)
+            if d_abs >= ctx.ego_hw + v_hw_coll:
+                return _suppress("OppositeLaneFilter")
+
+        for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
+            # Determine effective cross padding (Fix A equivalent)
+            if (ctx.near_head_on and own_lane):
+                effective_padding = ctx.cross_padding * cal.near_head_on_cross_scale
+                cross_arcs = _apply_cross_zone(base_target_arc, effective_padding)
+            else:
+                cross_arcs = (ctx.precomputed_cross_arcs[arc_idx]
+                              if ctx.precomputed_cross_arcs else
+                              _apply_cross_zone(base_target_arc, ctx.cross_padding))
+
+            unbraked_hit = _earliest_hit(
+                ctx.ego_arc, cross_arcs, cal.corridor_margin, cal.collision_samples,
+                ctx.lateral_gap,
+            )
+            if unbraked_hit is None:
+                continue
+
+            # Oncoming evasion filter logic (Fix B equivalent)
+            delta_kappa_t = min(
+                cal.evasion_g_oncoming / (ctx.abs_v_speed * ctx.abs_v_speed),
+                cal.evasion_max_dkappa,
+            )
+            if own_lane:
+                delta_kappa_t = min(
+                    delta_kappa_t * cal.opposite_lane_kappa_scale,
+                    cal.evasion_max_dkappa * cal.opposite_lane_kappa_scale,
+                )
+            # Fix B: road-following expansion
+            if own_lane and abs(ctx.ego_curvature) >= cal.turning_diverge_kappa:
+                delta_kappa_t = max(
+                    delta_kappa_t,
+                    min(abs(ctx.ego_curvature), cal.shared_turn_max_kappa),
+                )
+            evasion_decel = 0.0 if own_lane else base_target_arc.decel
+            tgt_left = build_arc(
+                base_target_arc.start_x, base_target_arc.start_z,
+                base_target_arc.yaw_rad, ctx.v.speed,
+                base_target_arc.curvature + delta_kappa_t,
+                base_target_arc.half_width, base_target_arc.horizon,
+                decel=evasion_decel,
+            )
+            tgt_right = build_arc(
+                base_target_arc.start_x, base_target_arc.start_z,
+                base_target_arc.yaw_rad, ctx.v.speed,
+                base_target_arc.curvature - delta_kappa_t,
+                base_target_arc.half_width, base_target_arc.horizon,
+                decel=evasion_decel,
+            )
+            left_clears = arc_arc_collision(
+                ctx.ego_arc, tgt_left, cal.corridor_margin, cal.collision_samples,
+            ) is None
+            right_clears = arc_arc_collision(
+                ctx.ego_arc, tgt_right, cal.corridor_margin, cal.collision_samples,
+            ) is None
+            if left_clears or right_clears:
+                return _suppress("OppositeLaneFilter")
+        return _PASS
+
+
+class CoDirectionalDivergeFilter:
+    """Suppress co-directional vehicles already diverging from ego (Fix C)."""
+    name = "CoDirectionalDivergeFilter"
+
+    def __init__(self, cal: AEBCalibration) -> None:
+        self._cal = cal
+
+    def apply(self, ctx: FilterContext) -> FilterResult:
+        if not ctx.co_directional:
+            return _PASS
+        cal = self._cal
+        for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
+            if base_target_arc.speed <= 0.5:
+                continue
+            cross_arcs = (ctx.precomputed_cross_arcs[arc_idx]
+                          if ctx.precomputed_cross_arcs else
+                          _apply_cross_zone(base_target_arc, ctx.cross_padding))
+            unbraked_hit = _earliest_hit(
+                ctx.ego_arc, cross_arcs, cal.corridor_margin, cal.collision_samples,
+                ctx.lateral_gap,
+            )
+            if unbraked_hit is None:
+                continue
+
+            # Fix C: outer-lane same-turn extended lookahead
+            co_diverge_dt = cal.co_dir_diverge_lookahead_s
+            g_lat = ctx.lane in (Lane.ADJACENT, Lane.OPPOSITE_OR_OUTER)
+            g_ego_k = abs(ctx.ego_curvature) >= cal.turning_diverge_kappa
+            g_veh_k = abs(ctx.v_curvature) >= cal.turning_diverge_kappa
+            g_sign = ctx.ego_curvature * ctx.v_curvature > 0
+            if g_lat and g_ego_k and g_veh_k and g_sign:
+                co_diverge_dt = ctx.dynamic_horizon * cal.co_same_turn_lookahead_scale
+            if not _is_approaching(ctx.ego_arc, base_target_arc,
+                                   unbraked_hit[0], dt=co_diverge_dt):
+                return _suppress("CoDirectionalDivergeFilter")
+        return _PASS
+
+
+class TurningCrossTrafficFilter:
+    """Suppress cross-traffic whose arc is diverging at the hit point (Fix D absorbed)."""
+    name = "TurningCrossTrafficFilter"
+
+    def __init__(self, cal: AEBCalibration) -> None:
+        self._cal = cal
+
+    def apply(self, ctx: FilterContext) -> FilterResult:
+        if ctx.head_on or ctx.co_directional:
+            return _PASS
+        cal = self._cal
+        for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
+            if base_target_arc.speed <= 0.5:
+                continue
+            cross_arcs = (ctx.precomputed_cross_arcs[arc_idx]
+                          if ctx.precomputed_cross_arcs else
+                          _apply_cross_zone(base_target_arc, ctx.cross_padding))
+            unbraked_hit = _earliest_hit(
+                ctx.ego_arc, cross_arcs, cal.corridor_margin, cal.collision_samples,
+                ctx.lateral_gap,
+            )
+            if unbraked_hit is None:
+                continue
+            g_veh_k = abs(base_target_arc.curvature) > cal.turning_diverge_kappa
+            if g_veh_k and not _is_approaching(ctx.ego_arc, base_target_arc, unbraked_hit[0]):
+                return _suppress("TurningCrossTrafficFilter")
+        return _PASS
+
+
+class SweepPassFilter:
+    """Suppress stationary cross-traffic ego turns through."""
+    name = "SweepPassFilter"
+
+    def __init__(self, cal: AEBCalibration) -> None:
+        self._cal = cal
+
+    def apply(self, ctx: FilterContext) -> FilterResult:
+        cal = self._cal
+        if ctx.abs_v_speed >= cal.sweep_pass_max_target_speed:
+            return _PASS
+        if abs(ctx.ego_curvature) <= cal.turning_diverge_kappa:
+            return _PASS
+
+        vx, vz = ctx.v.position.x, ctx.v.position.z
+        for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
+            cross_arcs = (ctx.precomputed_cross_arcs[arc_idx]
+                          if ctx.precomputed_cross_arcs else
+                          _apply_cross_zone(base_target_arc, ctx.cross_padding))
+            unbraked_hit = _earliest_hit(
+                ctx.ego_arc, cross_arcs, cal.corridor_margin, cal.collision_samples,
+                ctx.lateral_gap,
+            )
+            if unbraked_hit is None:
+                continue
+            sp_dist = ctx.ego_arc._dist_at_time(unbraked_hit[0])
+            sp_ex, sp_ez = ctx.ego_arc.position_at_dist(sp_dist)
+            sp_yaw = ctx.ego_arc.heading_at_dist(sp_dist)
+            sp_fwd_x = -math.sin(sp_yaw)
+            sp_fwd_z = -math.cos(sp_yaw)
+            if (vx - sp_ex) * sp_fwd_x + (vz - sp_ez) * sp_fwd_z <= 0.0:
+                return _suppress("SweepPassFilter")
+        return _PASS
+
+
+class CornerEntryStationaryFilter:
+    """Suppress stationary oncoming vehicles on an upcoming curve at corner entry."""
+    name = "CornerEntryStationaryFilter"
+
+    def __init__(self, cal: AEBCalibration) -> None:
+        self._cal = cal
+
+    def apply(self, ctx: FilterContext) -> FilterResult:
+        cal = self._cal
+        if ctx.abs_v_speed >= cal.sweep_pass_max_target_speed:
+            return _PASS
+        if ctx.fwd_dot >= -0.3:
+            return _PASS
+        if abs(ctx.ego_curvature) >= cal.turning_diverge_kappa:
+            return _PASS
+        # Lane gate: vehicle must be displaced from ego axis (not straight-ahead in ego lane)
+        if ctx.lane == Lane.EGO:
+            return _PASS
+        if ctx.dist <= cal.corner_entry_min_distance:
+            return _PASS
+
+        road_bend = math.acos(max(-1.0, min(1.0, -ctx.fwd_dot)))
+        implied_kappa = road_bend / ctx.dist
+        if implied_kappa > cal.turning_diverge_kappa:
+            return _suppress("CornerEntryStationaryFilter")
+        return _PASS
+
+
+class EgoEvasionFilter:
+    """Suppress vehicles ego could steer around within 0.1 g (non-head-on, non-co-dir moving)."""
+    name = "EgoEvasionFilter"
+
+    def __init__(self, cal: AEBCalibration) -> None:
+        self._cal = cal
+
+    def apply(self, ctx: FilterContext) -> FilterResult:
+        if ctx.head_on:
+            return _PASS
+        if (ctx.co_directional
+                and any(a.speed > 0.5 for a in ctx.all_target_arcs)
+                and ctx.lane == Lane.EGO):
+            return _PASS
+        if ctx.ego_evasion_left is None or ctx.ego_evasion_right is None:
+            return _PASS
+        cal = self._cal
+
+        for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
+            # Use Fix A effective padding for near-head-on own-lane vehicles
+            if ctx.near_head_on and ctx.lane in (Lane.OPPOSITE_OR_OUTER, Lane.OFF_ROAD):
+                effective_padding = ctx.cross_padding * cal.near_head_on_cross_scale
+                cross_arcs = _apply_cross_zone(base_target_arc, effective_padding)
+            else:
+                cross_arcs = (ctx.precomputed_cross_arcs[arc_idx]
+                              if ctx.precomputed_cross_arcs else
+                              _apply_cross_zone(base_target_arc, ctx.cross_padding))
+
+            unbraked_hit = _earliest_hit(
+                ctx.ego_arc, cross_arcs, cal.corridor_margin, cal.collision_samples,
+                ctx.lateral_gap,
+            )
+            if unbraked_hit is None:
+                continue
+
+            left_hit = _earliest_hit(
+                ctx.ego_evasion_left, cross_arcs, 0.0, cal.collision_samples,
+            )
+            right_hit = _earliest_hit(
+                ctx.ego_evasion_right, cross_arcs, 0.0, cal.collision_samples,
+            )
+            if left_hit is None or right_hit is None:
+                return _suppress("EgoEvasionFilter")
+        return _PASS
+
+
+def build_pipeline(cal: AEBCalibration) -> list:
+    """Return the ordered list of filter stage instances."""
+    return [
+        RangeFilter(cal),
+        ElevationFilter(cal),
+        TmpRelSpeedFilter(),
+        RearOvertakerFilter(),
+        LaneClassifier(cal),
+        OppositeLaneFilter(cal),
+        CoDirectionalDivergeFilter(cal),
+        TurningCrossTrafficFilter(cal),
+        SweepPassFilter(cal),
+        CornerEntryStationaryFilter(cal),
+        EgoEvasionFilter(cal),
+    ]
