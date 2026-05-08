@@ -82,7 +82,7 @@ pass, the vehicle enters collision evaluation.
 | `TurningCrossTrafficFilter` | Cross-traffic turning through intersection (Fix D absorbed) |
 | `TmpCrossTrafficFilter` | TMP-only: target whose extrapolated arc lands outside ego lane |
 | `SweepPassFilter` | Stationary cross-traffic ego turns through |
-| `CornerEntryStationaryFilter` | Stationary oncoming at corner entry |
+| `CornerEntryStationaryFilter` | Stationary at corner entry — out-of-lane oncoming/co-dir, or in-lane with arc consistency |
 | `EgoEvasionFilter` | Ego can steer around target within 0.08 g |
 
 Fix labels A/B/C/D are retired — the logic now lives in the named stages above.
@@ -146,6 +146,24 @@ near-head-on angles, which would mask the true sweep destination.
 
 Non-TMP targets bypass entirely — AI vehicles' arcs are deterministic and
 already handled by `OppositeLaneFilter`, `TurningCrossTrafficFilter`, etc.
+
+### `CornerEntryStationaryFilter`
+
+Suppresses stationary targets (`|speed| < sweep_pass_max_target_speed`) at
+corner *entry* (`|ego_curvature| < turning_diverge_kappa`) when their pose
+implies they sit on a curved road continuation rather than blocking ego's
+straight-line path.
+
+- Symmetric road-bend formula: `road_bend = acos(|fwd_dot|)` — folds oncoming
+  (`fwd_dot ≈ -1`) and co-directional (`fwd_dot ≈ +1`) cases into `[0, π/2]`.
+- Implied curvature `road_bend / dist` must exceed `turning_diverge_kappa`.
+- **Mode A** (out-of-lane): vehicle in `OPPOSITE_OR_OUTER`/`OFF_ROAD` → suppress.
+  Covers the original "around the bend" oncoming case, now also co-directional.
+- **Mode B** (in-lane): vehicle in `Lane.EGO` → require geometric consistency
+  with a curved continuation. Yaw-rotation direction must match lateral-offset
+  direction, and `|dist · sin(road_bend / 2) − |lat_signed||` must fall within
+  `corner_entry_lateral_tol`. Catches MP stopped queues whose lead vehicle
+  projects to ego's straight axis but whose pose only makes sense on a curve.
 
 ### `EgoEvasionFilter`
 
@@ -233,6 +251,9 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `opposite_lane_kappa_scale` | 2.0 | Kappa multiplier when target in own lane |
 | `turning_diverge_kappa` | 0.007 /m | Corner threshold for Fix-C/D conditions |
 | `co_same_turn_lookahead_scale` | 0.5 | Extended lookahead fraction of horizon |
+| `corner_entry_min_road_bend` | 0.10 rad | Min ego↔tangent angle for Mode-B suppression |
+| `corner_entry_min_lateral` | 0.4 m | Min |lat_signed| to claim "off ego axis" (Mode B) |
+| `corner_entry_lateral_tol` | 1.5 m | Chord-offset tolerance for arc-consistency check (Mode B) |
 
 ---
 

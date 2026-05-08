@@ -599,7 +599,7 @@ class SweepPassFilter:
 
 
 class CornerEntryStationaryFilter:
-    """Suppress stationary oncoming vehicles on an upcoming curve at corner entry."""
+    """Suppress stationary vehicles whose pose implies a curved road continuation at corner entry."""
     name = "CornerEntryStationaryFilter"
 
     def __init__(self, cal: AEBCalibration) -> None:
@@ -609,21 +609,39 @@ class CornerEntryStationaryFilter:
         cal = self._cal
         if ctx.abs_v_speed >= cal.sweep_pass_max_target_speed:
             return _PASS
-        if ctx.fwd_dot >= -0.3:
-            return _PASS
         if abs(ctx.ego_curvature) >= cal.turning_diverge_kappa:
-            return _PASS
-        # Lane gate: vehicle must be displaced from ego axis (not straight-ahead in ego lane)
-        if ctx.lane == Lane.EGO:
             return _PASS
         if ctx.dist <= cal.corner_entry_min_distance:
             return _PASS
 
-        road_bend = math.acos(max(-1.0, min(1.0, -ctx.fwd_dot)))
+        # Symmetric: abs(fwd_dot) folds oncoming and co-directional into [0, π/2].
+        road_bend = math.acos(max(0.0, min(1.0, abs(ctx.fwd_dot))))
+        if road_bend < cal.corner_entry_min_road_bend:
+            return _PASS
+
         implied_kappa = road_bend / ctx.dist
-        if implied_kappa > cal.turning_diverge_kappa:
+        if implied_kappa <= cal.turning_diverge_kappa:
+            return _PASS
+
+        if ctx.lane != Lane.EGO:
             return _suppress("CornerEntryStationaryFilter")
-        return _PASS
+
+        # In-lane: require geometric consistency with a curved road continuation.
+        lat_signed = -ctx.dx * ctx.ego_fwd_z + ctx.dz * ctx.ego_fwd_x
+        if abs(lat_signed) < cal.corner_entry_min_lateral:
+            return _PASS
+
+        cross = ctx.ego_fwd_x * ctx.veh_fwd_z - ctx.ego_fwd_z * ctx.veh_fwd_x
+        if ctx.fwd_dot < 0.0:
+            cross = -cross
+        if cross * lat_signed <= 0.0:
+            return _PASS
+
+        expected_lat = ctx.dist * math.sin(0.5 * road_bend)
+        if abs(expected_lat - abs(lat_signed)) > cal.corner_entry_lateral_tol:
+            return _PASS
+
+        return _suppress("CornerEntryStationaryFilter")
 
 
 class EgoEvasionFilter:

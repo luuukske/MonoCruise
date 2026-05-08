@@ -58,6 +58,10 @@ class AEBCalibration:
     # Sweep-pass / corner-entry stationary
     sweep_pass_max_target_speed: float = 1.0
     corner_entry_min_distance: float = 1.0
+    # Mode B (in-lane geometric consistency) — MP queue at corner entry
+    corner_entry_min_road_bend: float = 0.10        # rad (~5.7°)
+    corner_entry_min_lateral: float = 0.4           # m
+    corner_entry_lateral_tol: float = 1.5           # m
 
     # TMP rel-speed filter
     tmp_filter_split_kmh: float = 40.0
