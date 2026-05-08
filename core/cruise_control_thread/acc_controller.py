@@ -273,14 +273,14 @@ class AdaptiveCruiseController:
         for lead in raw_leads:
             try:
                 vehicle = lead.vehicle
+                if getattr(vehicle, "is_parked", False):
+                    continue
                 vid = int(vehicle.id)
                 dist_m = float(lead.dist_m)
                 v_lead = float(lead.effective_speed_ms)
                 a_lead = float(lead.effective_accel_ms2)
-                if vehicle.is_tmp:
-                    tail_m = 0.5 * float(vehicle.size.length)
-                else:
-                    tail_m = 0.82 * float(vehicle.size.length)
+                tail_m = 0.5 * float(vehicle.size.length)
+                if not vehicle.is_tmp:
                     for trailer in vehicle.trailers:
                         if not trailer.is_zero():
                             tail_m += float(trailer.size.length)

@@ -593,6 +593,7 @@ class Vehicle:
         id: int,
         is_tmp: bool,
         is_trailer: bool,
+        is_parked: bool = False,
     ) -> None:
         self.position = position
         self.rotation = rotation
@@ -606,6 +607,7 @@ class Vehicle:
         self.id = id
         self.is_tmp = is_tmp
         self.is_trailer = is_trailer
+        self.is_parked = is_parked
 
         self.time: float = time.time()
         self.last_location = Position(0.0, 0.0, 0.0)
@@ -1064,10 +1066,9 @@ class Vehicle:
 
         is_reversing = self.speed < -1e-3
         effective_p = (1.0 - arc_start_pctg) if is_reversing else arc_start_pctg
-        back_ratio = 0.5 if self.is_tmp else 0.82
         fwd_x = -math.sin(yaw_rad)
         fwd_z = -math.cos(yaw_rad)
-        body_offset = (effective_p - back_ratio) * self.size.length
+        body_offset = (effective_p - 0.5) * self.size.length
         start_x = self.position.x + body_offset * fwd_x
         start_z = self.position.z + body_offset * fwd_z
 
@@ -1083,5 +1084,6 @@ class Vehicle:
     def __repr__(self) -> str:
         return (
             f"Vehicle(id={self.id}, pos={self.position}, "
-            f"speed={self.speed:.2f}, is_tmp={self.is_tmp})"
+            f"speed={self.speed:.2f}, is_tmp={self.is_tmp}, "
+            f"is_parked={self.is_parked})"
         )

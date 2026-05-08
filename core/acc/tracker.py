@@ -295,6 +295,9 @@ class ACCTracker:
         id_to_vehicle: dict[int, Vehicle] = {}
 
         for v in vehicles:
+            if getattr(v, "is_parked", False):
+                self.tracks.pop(v.id, None)
+                continue
             if v.id < 0:
                 continue
             # Elevation gate — other road levels.

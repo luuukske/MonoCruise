@@ -192,10 +192,15 @@ class AEBData(ThreadData):
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
-def _cross_zone_padding(ego_yaw_rad: float, v_yaw_rad: float, v_speed_ms: float) -> float:
+def _cross_zone_padding(
+    ego_yaw_rad: float,
+    v_yaw_rad: float,
+    v_speed_ms: float,
+    cal: AEBCalibration = _CAL_DEFAULT,
+) -> float:
     """Perpendicular-target ghost-arc padding (peaks at 90° yaw diff)."""
     cross_factor = abs(math.sin(ego_yaw_rad - v_yaw_rad))
-    return cross_factor * (_CROSS_SAFE_ZONE_BASE + _CROSS_SAFE_ZONE_SPEED * v_speed_ms)
+    return cross_factor * (cal.cross_zone_base + cal.cross_zone_speed * v_speed_ms)
 
 
 def _apply_cross_zone(arc: ArcPath, padding: float) -> list[ArcPath]:
@@ -254,6 +259,7 @@ def _dampen_turning_curvature(
     veh_fwd_x: float, veh_fwd_z: float,
     abs_v_speed: float,
     arc_length: float,
+    cal: AEBCalibration = _CAL_DEFAULT,
 ) -> float:
     """Dampen target curvature when arc would over-rotate past anti-parallel lane alignment.
 
@@ -265,10 +271,10 @@ def _dampen_turning_curvature(
     Only fires for cross-traffic geometry (fwd_dot in (-0.5, 0.7)) with confirmed rotation
     toward anti-parallel and a heading change that would exceed the alignment angle.
     """
-    if (abs(v_curvature) <= _TURNING_DIVERGE_CURVATURE
+    if (abs(v_curvature) <= cal.turning_diverge_kappa
             or abs_v_speed <= 0.5
-            or fwd_dot <= -0.5    # already mostly anti-parallel — not mid-turn entry
-            or fwd_dot >= 0.7):   # co-directional — other suppressions handle this
+            or fwd_dot <= cal.near_head_on_dot
+            or fwd_dot >= cal.co_directional_dot):
         return v_curvature
     theta_max = abs(v_curvature) * arc_length
     theta_to_anti = math.acos(max(-1.0, min(1.0, -fwd_dot)))
@@ -280,7 +286,7 @@ def _dampen_turning_curvature(
     cross = veh_fwd_x * (-ego_fwd_z) - veh_fwd_z * (-ego_fwd_x)
     if cross * v_curvature >= 0.0:
         return v_curvature  # rotating away — genuine cross-arc threat
-    return v_curvature / _TURN_COMPLETE_CURVATURE_SCALE
+    return v_curvature / cal.turn_complete_curvature_scale
 
 
 def _build_vehicle_collision_data(
@@ -289,6 +295,7 @@ def _build_vehicle_collision_data(
     ego_yaw_rad: float,
     ego_fwd_x: float,
     ego_fwd_z: float,
+    cal: AEBCalibration = _CAL_DEFAULT,
 ) -> tuple[list[ArcPath], float, list[list[ArcPath]],
            float, float, float, float, float]:
     """Build collision arcs and derived vehicle geometry for a vehicle.
@@ -303,13 +310,12 @@ def _build_vehicle_collision_data(
     v_curvature = _vk if _vk is not None else (
         math.radians(v.angular_velocity) / abs_v_speed if abs_v_speed > 0.5 else 0.0
     )
-    _, v_yaw_deg, _ = v.rotation.euler()
-    v_yaw_rad = math.radians(v_yaw_deg)
+    v_yaw_rad = v._smooth_yaw if v._smooth_yaw is not None else math.radians(v.rotation.euler()[1])
     veh_fwd_x = -math.sin(v_yaw_rad)
     veh_fwd_z = -math.cos(v_yaw_rad)
     fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
-    head_on = fwd_dot < -0.5
-    target_override_decel = _FULL_BRAKE_DECEL if head_on else 0.0
+    head_on = fwd_dot < cal.near_head_on_dot
+    target_override_decel = cal.full_brake_decel if head_on else 0.0
     # Fix D — dampen curvature when constant-curvature arc would over-rotate past
     # anti-parallel lane alignment. v_curvature is preserved unchanged for same_curve
     # checks; arc_curvature is used only for arc building.
@@ -317,6 +323,7 @@ def _build_vehicle_collision_data(
         v_curvature, fwd_dot,
         ego_fwd_x, ego_fwd_z, veh_fwd_x, veh_fwd_z,
         abs_v_speed, abs_v_speed * dynamic_horizon,
+        cal,
     )
     # For trailer arcs built with build_arc() directly. get_arc() calls
     # _accel_to_arc_params internally so veh_arc_coll only needs override_decel.
@@ -325,7 +332,7 @@ def _build_vehicle_collision_data(
         dynamic_horizon,
         half_width=v_hw_coll,
         decel=target_override_decel,
-        arc_start_pctg=_ARC_START_PCTG,
+        arc_start_pctg=cal.arc_start_pctg,
         curvature_override=arc_curvature,
     )
     tr_hw_colls: list[float] = []
@@ -338,7 +345,7 @@ def _build_vehicle_collision_data(
         tr_yaw_rad = math.radians(tr_yaw_deg)
         tr_is_rev_c = v.speed < -1e-3
         tr_effective_p_c = (
-            (1.0 - _ARC_START_PCTG) if tr_is_rev_c else _ARC_START_PCTG
+            (1.0 - cal.arc_start_pctg) if tr_is_rev_c else cal.arc_start_pctg
         )
         tr_fwd_x_c = -math.sin(tr_yaw_rad)
         tr_fwd_z_c = -math.cos(tr_yaw_rad)
@@ -357,7 +364,7 @@ def _build_vehicle_collision_data(
             )
         )
     all_target_arcs = [veh_arc_coll] + trailer_arcs_coll
-    cross_padding = _cross_zone_padding(ego_yaw_rad, v_yaw_rad, abs_v_speed)
+    cross_padding = _cross_zone_padding(ego_yaw_rad, v_yaw_rad, abs_v_speed, cal)
     cross_arcs_list = [
         _apply_cross_zone(bt, cross_padding) for bt in all_target_arcs
     ]
@@ -771,7 +778,7 @@ class AEBThread(BaseThread):
             trailer_arcs: list[ArcPath] = []
             for tr in v.trailers:
                 tr_arc_pos = tr.position
-                tr_dict_pos = tr.correct_position() if tr.is_tmp else tr.position
+                tr_dict_pos = tr.position
                 _, tr_yaw_deg, _ = tr.rotation.euler()
                 tr_yaw_rad = math.radians(tr_yaw_deg)
                 tr_hw = tr.size.width / 2.0

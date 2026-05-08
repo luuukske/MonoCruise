@@ -193,11 +193,8 @@ class AEBDebugWindow(QWidget):
 
             for tr in v.get("trailers", []):
                 yaw = tr["yaw"]
-                half_l = tr["length"] / 2.0
-                tr_cx = tr["x"] - half_l * math.sin(yaw)
-                tr_cz = tr["z"] - half_l * math.cos(yaw)
                 self._draw_vehicle_box(
-                    p, tr_cx, tr_cz, yaw,
+                    p, tr["x"], tr["z"], yaw,
                     tr["half_w"], tr["length"], tr["is_tmp"],
                     ex, ez, ey, _TRAILER_CLR,
                 )
@@ -437,13 +434,8 @@ class AEBDebugWindow(QWidget):
         ex: float, ez: float, ey: float,
         color: QColor,
     ) -> None:
-        if is_tmp:
-            hl = length / 2.0
-            corners_local = [(-hw, -hl), (hw, -hl), (hw, hl), (-hw, hl)]
-        else:
-            front = length * 0.18
-            back = length * 0.82
-            corners_local = [(-hw, -front), (hw, -front), (hw, back), (-hw, back)]
+        hl = length / 2.0
+        corners_local = [(-hw, -hl), (hw, -hl), (hw, hl), (-hw, hl)]
 
         s = math.sin(-yaw)
         c = math.cos(-yaw)
