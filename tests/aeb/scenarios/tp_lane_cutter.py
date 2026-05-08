@@ -32,7 +32,8 @@ def build() -> list[Frame]:
             z=z_pos,
             yaw_deg=175.0,  # mostly co-directional, slight inward lean
             speed=_EGO_SPEED * 0.9,
-            curvature=-0.01,  # turning left (into ego lane)
+            curvature=-0.01,  # turning left (into ego lane),
+            noise_seed=i,
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
     return frames

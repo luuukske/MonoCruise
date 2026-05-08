@@ -30,6 +30,7 @@ def build() -> list[Frame]:
             yaw_deg=180.0,
             speed=0.0,
             curvature=0.0,
+            noise_seed=i,
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
     return frames

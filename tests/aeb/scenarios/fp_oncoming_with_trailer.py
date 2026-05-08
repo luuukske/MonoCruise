@@ -39,6 +39,7 @@ def build() -> list[Frame]:
             curvature=0.0,
             width=2.5,
             length=6.0,
+            noise_seed=i,
         )
         # Trailer hooked behind tractor: south-facing, tractor length behind pivot
         trailer_z = distance + 6.0 * 0.82 + _TRAILER_LENGTH * 0.5

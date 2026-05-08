@@ -31,6 +31,7 @@ def build() -> list[Frame]:
         target = make_vehicle(
             vid=1, x=5.0, z=target_z,
             yaw_deg=180.0, speed=0.0, curvature=0.0,
+            noise_seed=i,
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
         target_z -= _EGO_SPEED * _DT

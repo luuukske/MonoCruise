@@ -37,6 +37,7 @@ def build() -> list[Frame]:
             curvature=_TGT_KAPPA,
             width=2.5,
             length=6.0,
+            noise_seed=i,
         )
         # Trailer behind tractor along opposite-lane path
         trailer_z = distance + 6.0 * 0.82 + _TRAILER_LENGTH * 0.5

@@ -40,6 +40,7 @@ def build() -> list[Frame]:
             yaw_deg=0.0,
             speed=_TARGET_SPEED,
             curvature=_TGT_KAPPA,
+            noise_seed=i,
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
     return frames

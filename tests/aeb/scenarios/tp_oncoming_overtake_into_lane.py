@@ -40,6 +40,7 @@ def build() -> list[Frame]:
             yaw_deg=yaw_deg,
             speed=_TARGET_SPEED,
             curvature=0.0 if i < 10 else 0.01,
+            noise_seed=i,
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
     return frames

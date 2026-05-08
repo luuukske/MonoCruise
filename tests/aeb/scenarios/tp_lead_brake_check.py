@@ -30,6 +30,7 @@ def build() -> list[Frame]:
             vid=1, x=0.0, z=lead_z,
             yaw_deg=180.0, speed=lead_speed, curvature=0.0,
             acceleration=accel,
+            noise_seed=i,
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
         if i >= _BRAKE_START:

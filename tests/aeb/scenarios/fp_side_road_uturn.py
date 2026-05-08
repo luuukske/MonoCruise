@@ -28,7 +28,8 @@ def build() -> list[Frame]:
             z=50.0,
             yaw_deg=90.0,  # East-facing, turning toward South (toward ego)
             speed=10.0,
-            curvature=-0.1,  # high curvature right turn
+            curvature=-0.1,  # high curvature right turn,
+            noise_seed=i,
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
     return frames

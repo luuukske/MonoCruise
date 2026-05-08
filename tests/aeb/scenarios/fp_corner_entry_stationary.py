@@ -29,6 +29,7 @@ def build() -> list[Frame]:
             yaw_deg=30.0,  # anti-parallel to ego (0=South) tilted 30° → implies road bend
             speed=0.0,
             curvature=0.0,
+            noise_seed=i,
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
     return frames

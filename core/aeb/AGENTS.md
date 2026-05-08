@@ -58,7 +58,7 @@ not the transient-sample count.
 |--------|------|
 | `core/aeb/calibration.py` | Frozen `AEBCalibration` dataclass — all tunable constants. `DEFAULT` singleton used by both `thread.py` and tests. |
 | `core/aeb/lane_frame.py` | `Lane` enum, `project_to_ego_arc()`, `classify()` — arc-projected lane membership, replacing the old cross-product `lateral_offset`. |
-| `core/aeb/filters.py` | Named filter pipeline: 11 stage classes + `FilterContext` + `build_pipeline()`. |
+| `core/aeb/filters.py` | Named filter pipeline: 12 stage classes + `FilterContext` + `build_pipeline()`. |
 | `core/aeb/thread.py` | `AEBThread` — data acquisition, ego-arc construction, pipeline dispatch, TTB/state output. |
 
 ---
@@ -80,6 +80,7 @@ pass, the vehicle enters collision evaluation.
 | `OppositeLaneFilter` | Oncoming vehicles in their own lane (collapses Fix A + Fix B) |
 | `CoDirectionalDivergeFilter` | Co-directional arcs already diverging (Fix C + outer-lane same-turn) |
 | `TurningCrossTrafficFilter` | Cross-traffic turning through intersection (Fix D absorbed) |
+| `TmpCrossTrafficFilter` | TMP-only: target whose extrapolated arc lands outside ego lane |
 | `SweepPassFilter` | Stationary cross-traffic ego turns through |
 | `CornerEntryStationaryFilter` | Stationary oncoming at corner entry |
 | `EgoEvasionFilter` | Ego can steer around target within 0.08 g |
@@ -125,6 +126,26 @@ point (with lookahead `co_dir_diverge_lookahead_s=0.25 s`), suppress.
 Extended lookahead (`dynamic_horizon × co_same_turn_lookahead_scale=0.5`) when
 all four conditions hold: vehicle in outer lane, both curvatures above threshold,
 same curvature sign.
+
+### `TmpCrossTrafficFilter`
+
+TMP-only filter that absorbs MP-data uncertainty for routine intersection
+maneuvers. TMP position/yaw/curvature snapshots are jittered enough that an
+in-progress turn at a side road can briefly project an arc through ego's
+lane even though the actual MP target is sweeping past. For TMP vehicles
+(`v.is_tmp=True`) that aren't co-directional and have non-trivial speed:
+build a non-braked "sweep" arc from the snapshot's `(start, yaw, curvature,
+speed)` over the full horizon and check the endpoint's lane via
+`project_to_ego_arc()`. If the arc terminates in `OPPOSITE_OR_OUTER` or
+`OFF_ROAD`, the target sweeps clear of ego's lane → suppress. If the
+endpoint is in `Lane.EGO`, this is a real continuing threat → fall through.
+
+Uses a freshly-built non-braking arc (rather than `base_target_arc`) because
+the standard arc may be truncated by target-side full-brake modeling at
+near-head-on angles, which would mask the true sweep destination.
+
+Non-TMP targets bypass entirely — AI vehicles' arcs are deterministic and
+already handled by `OppositeLaneFilter`, `TurningCrossTrafficFilter`, etc.
 
 ### `EgoEvasionFilter`
 

@@ -28,6 +28,7 @@ def build() -> list[Frame]:
             yaw_deg=30.0,  # 30° from south = left-turn orientation
             speed=0.0,
             curvature=0.0,
+            noise_seed=i,
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
     return frames

@@ -34,6 +34,7 @@ def build() -> list[Frame]:
             vid=1, x=target_x, z=target_z,
             yaw_deg=180.0, speed=target_speed, curvature=0.0,
             acceleration=accel,
+            noise_seed=i,
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
         if i >= _MERGE_START_FRAME:

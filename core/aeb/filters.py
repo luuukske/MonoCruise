@@ -497,6 +497,72 @@ class TurningCrossTrafficFilter:
         return _PASS
 
 
+class TmpCrossTrafficFilter:
+    """Suppress TMP vehicles whose projected arc terminates outside ego's lane.
+
+    TMP (multiplayer) vehicle data has higher uncertainty than AI vehicles —
+    network jitter, position smoothing, and inconsistent yaw/curvature
+    snapshots produce phantom arc-projection collisions during routine
+    intersection maneuvers (e.g. a TMP vehicle making a side-road right turn
+    appears to cut through ego's lane in the per-frame snapshot).
+
+    A TMP vehicle whose extrapolated arc lands laterally outside ego's lane
+    (OPPOSITE_OR_OUTER or OFF_ROAD) is mid-maneuver and will be clear of
+    ego's path by the time ego arrives. Genuine threats — head-on or
+    co-directional targets continuing into ego's lane — keep their projected
+    arc inside Lane.EGO and pass through this filter to the standard
+    pipeline. Co-directional in-lane vehicles are skipped here so that
+    legitimate same-lane following / overtake handling stays with the
+    dedicated stages.
+
+    Non-TMP targets bypass entirely — AI vehicles follow deterministic
+    traffic rules, so their snapshot-projected arc is reliable.
+    """
+    name = "TmpCrossTrafficFilter"
+
+    def __init__(self, cal: AEBCalibration) -> None:
+        self._cal = cal
+
+    def apply(self, ctx: FilterContext) -> FilterResult:
+        if not ctx.v.is_tmp:
+            return _PASS
+        if ctx.co_directional:
+            return _PASS
+        if ctx.abs_v_speed < 1.0:
+            return _PASS
+        cal = self._cal
+        any_hit = False
+        for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
+            cross_arcs = (ctx.precomputed_cross_arcs[arc_idx]
+                          if ctx.precomputed_cross_arcs else
+                          _apply_cross_zone(base_target_arc, ctx.cross_padding))
+            ghost_hit = _earliest_hit(
+                ctx.ego_arc, cross_arcs, cal.corridor_margin, cal.collision_samples,
+                ctx.lateral_gap,
+            )
+            if ghost_hit is None:
+                continue
+            any_hit = True
+            # Use a non-braking arc to project the full-horizon end position.
+            # The standard base arc may be truncated by target-side brake
+            # modeling for near-head-on targets, masking where the cross-traffic
+            # actually sweeps to.
+            sweep_arc = build_arc(
+                base_target_arc.start_x, base_target_arc.start_z,
+                base_target_arc.yaw_rad, base_target_arc.speed,
+                base_target_arc.curvature, base_target_arc.half_width,
+                base_target_arc.horizon, decel=0.0,
+            )
+            end_x, end_z = sweep_arc.position_at_time(sweep_arc.horizon)
+            _, end_d_abs = project_to_ego_arc(ctx.ego_arc, end_x, end_z)
+            if classify(end_d_abs, cal) == Lane.EGO:
+                # Arc ends inside ego's lane — real threat, do not suppress.
+                return _PASS
+        if any_hit:
+            return _suppress("TmpCrossTrafficFilter")
+        return _PASS
+
+
 class SweepPassFilter:
     """Suppress stationary cross-traffic ego turns through."""
     name = "SweepPassFilter"
@@ -617,6 +683,7 @@ def build_pipeline(cal: AEBCalibration) -> list:
         OppositeLaneFilter(cal),
         CoDirectionalDivergeFilter(cal),
         TurningCrossTrafficFilter(cal),
+        TmpCrossTrafficFilter(cal),
         SweepPassFilter(cal),
         CornerEntryStationaryFilter(cal),
         EgoEvasionFilter(cal),

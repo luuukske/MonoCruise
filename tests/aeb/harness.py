@@ -8,6 +8,7 @@ directly.
 from __future__ import annotations
 
 import math
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,6 +29,16 @@ from core.aeb.thread import AEBState, _INF
 
 _DT = 1.0 / 30.0  # 30 Hz frame interval
 _HISTORY_SEED_FRAMES = 15
+
+# MP-style position-jitter sigma (metres). Real filtered TMP data drifts a
+# few centimetres frame-to-frame; tests opt in by passing `noise_seed=i`.
+_NOISE_SIGMA = 0.05
+
+
+def _noise_offset(vid: int, frame_idx: int) -> tuple[float, float]:
+    """Deterministic small (dx, dz) Gaussian jitter, seeded by (vid, frame)."""
+    rng = random.Random((vid * 1_000_003) ^ (frame_idx * 2_654_435_761))
+    return rng.gauss(0.0, _NOISE_SIGMA), rng.gauss(0.0, _NOISE_SIGMA)
 
 
 @dataclass
@@ -96,13 +107,22 @@ def make_vehicle(
     is_tmp: bool = False,
     acceleration: float = 0.0,
     y: float = 0.0,
+    noise_seed: int | None = None,
 ) -> Vehicle:
     """Construct a synthetic Vehicle seeded for use in filter tests.
 
     Sets _smooth_yaw, _smooth_speed, angular_velocity, and seeds
     _position_history with ≥ 15 backdated samples so curvature_from_history()
     returns a stable value from frame 1 onward.
+
+    `noise_seed` (typically the per-frame loop index) opts the snapshot into
+    deterministic small Gaussian position jitter, mimicking filtered TMP/MP
+    data. Omit it for clean geometric scenarios.
     """
+    if noise_seed is not None:
+        nx, nz = _noise_offset(vid, noise_seed)
+        x = x + nx
+        z = z + nz
     pos = Position(x, y, z)
     rot = _make_quaternion_from_yaw_deg(yaw_deg)
     sz = Size(width, 1.5, length)

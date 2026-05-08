@@ -32,6 +32,7 @@ def build() -> list[Frame]:
             speed=_TMP_SPEED,
             curvature=0.0,
             is_tmp=True,
+            noise_seed=i,
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
 
@@ -64,6 +65,7 @@ def build() -> list[Frame]:
             speed=_TMP_SPEED,
             curvature=-0.04,  # right turn (negative = right in convention)
             is_tmp=True,
+            noise_seed=i,
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
 
