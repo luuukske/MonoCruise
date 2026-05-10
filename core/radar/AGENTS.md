@@ -446,7 +446,7 @@ with rt.data._lock:
     ego_z         = rt.data.ego_z
     ego_yaw_rad   = rt.data.ego_yaw_rad
     ego_speed     = rt.data.ego_speed         # m/s
-    ego_pitch_rad = rt.data.ego_pitch_rad
+    ego_pitch_rad = rt.data.ego_pitch_rad     # inverted from telemetry rotationY
     ego_steer     = rt.data.ego_steer
     ego_has_trailer = rt.data.ego_has_trailer
     ego_curvature = rt.data.ego_curvature     # None → fall back to yaw-rate proxy

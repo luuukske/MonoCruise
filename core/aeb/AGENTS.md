@@ -225,7 +225,8 @@ if abs(v.position.y - expected_y) > cal.elevation_margin:
     continue
 ```
 
-`ego_pitch_rad` uses `rotationY` (positive = uphill).
+`ego_pitch_rad` is the radar-thread pitch snapshot: telemetry `rotationY`
+is inverted before it reaches AEB, so use the published value as-is.
 
 ---
 

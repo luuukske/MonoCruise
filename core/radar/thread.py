@@ -133,7 +133,7 @@ class RadarThread(BaseThread):
                 self.data.ego_speed = ego_speed
                 self.data.ego_steer = ego_steer
                 _pv = (ego_pitch_deg + 0.5) % 1.0 - 0.5
-                _pr = _pv * 2.0 * math.pi
+                _pr = -_pv * 2.0 * math.pi
                 self.data.ego_pitch_deg = math.degrees(_pr)
                 self.data.ego_pitch_rad = _pr
                 self.data.ego_has_trailer = ego_has_trailer
@@ -152,7 +152,7 @@ class RadarThread(BaseThread):
 
         ego_yaw_rad = ego_yaw_norm * 2.0 * math.pi
         _pv = (ego_pitch_deg + 0.5) % 1.0 - 0.5
-        ego_pitch_rad = _pv * 2.0 * math.pi
+        ego_pitch_rad = -_pv * 2.0 * math.pi
 
         with self.data._lock:
             self.data.vehicles = vehicles
