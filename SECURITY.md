@@ -82,3 +82,16 @@ Vulnerability check 2026-05-03 — 125 packages scanned. No new vulnerabilities.
 - `python-dotenv 1.2.1` has been reinstalled since the 2026-04-29 scan (which noted it was absent). Previously flagged MODERATE advisory GHSA-mf9w-mj56-hr94 / CVE-2026-28684 applies again (symlink attack via `set_key()`/`unset_key()`). Project code confirmed not calling those functions; fix available at 1.2.2 when convenient.
 - `pygments 2.19.2` MEDIUM (CVE-2026-4539): unchanged. Fix at 2.20.0.
 - 3 net-new packages vs last scan (122→125): `Authlib 1.7.0`, `joserfc 1.6.4`, `dparse 0.6.4` — none flagged by safety-cli.
+
+---
+
+### Scan: 2026-05-10 — .venv installed packages, safety-cli 3.7.0
+
+Vulnerability check 2026-05-10 — 128 packages scanned. No new vulnerabilities. 2 previously documented issues persist (pygments 2.19.2 MEDIUM, python-dotenv 1.2.1 MODERATE).
+
+**Scope:** 128 .venv installed packages (safety-cli open-source database)
+
+#### Notes
+- `pygments 2.19.2` MEDIUM (CVE-2026-4539 / SFTY-20260322-35073): unchanged since 2026-04-26. Fix available at 2.20.0. Transitive/dev dependency; low exploitability in desktop app context.
+- `python-dotenv 1.2.1` MODERATE (CVE-2026-28684 / GHSA-mf9w-mj56-hr94): unchanged since 2026-04-25. Project code does not call `set_key()`/`unset_key()` — unexploitable in current usage. Fix at 1.2.2.
+- 3 net-new packages vs last scan (125→128): `annotated-doc 0.0.4`, `truck-telemetry 0.0.3`, `safety-schemas 0.0.16` — none flagged.
