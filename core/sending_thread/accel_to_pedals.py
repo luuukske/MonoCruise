@@ -69,8 +69,8 @@ _AERO_DRAG_ACCEL_PER_V2: float = 4.9e-5
 
 # Gearshift handling
 _GAME_CLUTCH_ACTIVE_THRESHOLD: float = 0.05
-_GEARSHIFT_BLOCK_DURATION_S: float = 0.5
-_GEARSHIFT_RAMP_DURATION_S: float = 1.0
+_GEARSHIFT_BLOCK_DURATION_S: float = 0.2
+_GEARSHIFT_RAMP_DURATION_S: float = 0.5
 
 # Rate limiting (gas only)
 _GAS_RATE_LIMIT_PER_S: float = 3.0
