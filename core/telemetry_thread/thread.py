@@ -69,6 +69,7 @@ class TelemetryThreadData(ThreadData):
     userThrottle: float = 0.0
     userBrake: float = 0.0
     userSteer: float = 0.0
+    userClutch: float = 0.0
 
     # Game-applied inputs
     gameThrottle: float = 0.0
@@ -131,6 +132,7 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.userThrottle        = raw.get("userThrottle", 0.0)
         data.userBrake           = raw.get("userBrake", 0.0)
         data.userSteer           = raw.get("userSteer", 0.0)
+        data.userClutch          = raw.get("userClutch", 0.0)
         data.gameThrottle        = raw.get("gameThrottle", 0.0)
         data.gameBrake           = raw.get("gameBrake", 0.0)
         data.gameClutch          = raw.get("gameClutch", 0.0)

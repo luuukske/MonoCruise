@@ -47,8 +47,11 @@ _AEB_WARNING_STOP_EXTRA_REPLAYS = 1
 # Constants
 
 _INF: float = 1e9
+_GRAVITY_MS2: float = 9.81
 
-_FULL_BRAKE_DECEL: float = 7.8
+# Brake-capacity floor used when sending_thread has not yet published an
+# estimate. Slope-corrected per tick before use; never read as a flat ceiling.
+_FULL_BRAKE_DECEL_FALLBACK: float = 7.8
 # Fraction of max brake capacity assumed for ego stopping / TTB calculations.
 # The brake system physically commands only this fraction, reserving headroom
 # so a sudden increase in closing speed can still stop the vehicle.
@@ -188,6 +191,10 @@ class AEBData(ThreadData):
     AEB_brake: bool = False
     time_to_brake: float = _INF
     em_stop_requested: bool = False
+    AEB_target_decel_ms2: float = 0.0
+    AEB_required_decel_ms2: float = 0.0
+    AEB_effective_max_decel_ms2: float = 0.0
+    AEB_realized_decel_ms2: float = 0.0
     snapshot: AEBSnapshot = field(default_factory=AEBSnapshot)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
@@ -503,6 +510,11 @@ class AEBThread(BaseThread):
         self._sound_handler = _AEBSoundHandler(_AEB_SOUND_PATH)
         self._cal: AEBCalibration = _CAL_DEFAULT
         self._pipeline = build_pipeline(self._cal)
+        # Continuous-decel state
+        self._engaged: bool = False
+        self._published_target_ms2: float = 0.0
+        self._last_target_change_mono: float = 0.0
+        self._prev_loop_mono: float | None = None
 
     def _read_user_braking(self) -> bool:
         try:
@@ -546,7 +558,7 @@ class AEBThread(BaseThread):
                     return v
         except (KeyError, AttributeError):
             pass
-        return _FULL_BRAKE_DECEL
+        return _FULL_BRAKE_DECEL_FALLBACK
 
     def setup(self) -> None:
         if Settings.debug:
@@ -696,6 +708,8 @@ class AEBThread(BaseThread):
         best_unbraked_ttc: float = _INF
         best_hit_x: float = 0.0
         best_hit_z: float = 0.0
+        best_closing_distance: float = _INF
+        best_v_closing: float = 0.0
         vehicle_dicts: list[dict] = []
         vehicle_arcs: dict[int, list[ArcPath]] = {}
         newly_risky: set[int] = set()
@@ -938,6 +952,14 @@ class AEBThread(BaseThread):
                         best_ttb = ttb
                         best_hit_x = unbraked_hit[1]
                         best_hit_z = unbraked_hit[2]
+                        best_closing_distance = math.hypot(
+                            unbraked_hit[1] - ego_front_x,
+                            unbraked_hit[2] - ego_front_z,
+                        )
+                        v_target_along_ego = v.speed * (
+                            veh_fwd_x * ego_fwd_x + veh_fwd_z * ego_fwd_z
+                        )
+                        best_v_closing = max(0.0, ego_speed - v_target_along_ego)
                     found_hit = True
 
                 vehicle_dicts.append(veh_dict)
@@ -946,36 +968,103 @@ class AEBThread(BaseThread):
             k: v for k, v in self._risk_first_seen.items() if k in newly_risky
         }
 
-        new_state = AEBState.STANDBY
-        time_to_brake = _INF
+        time_to_brake = best_ttb if (run_collision and best_ttb < _INF) else _INF
         display_ttc = best_unbraked_ttc
 
-        if run_collision and best_ttb < _INF:
-            time_to_brake = best_ttb
-            if time_to_brake < cal.warn_ttb:
-                new_state = AEBState.WARN
-            if time_to_brake < cal.brake_ttb:
-                new_state = AEBState.BRAKE
+        slope_accel = _GRAVITY_MS2 * math.sin(ego_pitch_rad)
+        downhill_offset = max(-slope_accel, 0.0)
+        capacity_estimate = _max_brake_live
+        effective_max_decel = max(
+            0.1, cal.ego_decel_frac * capacity_estimate - downhill_offset,
+        )
 
-        # BRAKE latch — hold until TTB >= brake_release_ttb
-        if self._prev_state == AEBState.BRAKE and time_to_brake < cal.brake_release_ttb:
+        required_decel = 0.0
+        if run_collision and best_closing_distance < _INF and best_v_closing > 0.0:
+            d_remaining = max(best_closing_distance - cal.stop_buffer, 1e-3)
+            required_decel = (best_v_closing * best_v_closing) / (2.0 * d_remaining)
+
+        effective_required = required_decel + downhill_offset
+
+        engage_threshold = cal.aeb_engage_frac * effective_max_decel
+        disarm_threshold = cal.aeb_disarm_frac * effective_max_decel
+        warn_threshold = cal.aeb_warn_frac * effective_max_decel
+
+        if self._engaged:
+            if effective_required < disarm_threshold:
+                self._engaged = False
+        else:
+            if run_collision and effective_required >= engage_threshold:
+                self._engaged = True
+
+        if self._engaged:
+            target_raw = max(0.0, min(effective_required, effective_max_decel))
+        else:
+            target_raw = 0.0
+
+        if self._prev_loop_mono is None:
+            dt_loop = self.loop_interval
+        else:
+            dt_loop = max(1e-3, min(0.5, now_mono - self._prev_loop_mono))
+        self._prev_loop_mono = now_mono
+
+        delta = target_raw - self._published_target_ms2
+        time_since_change = now_mono - self._last_target_change_mono
+        if (abs(delta) < cal.aeb_target_deadband_ms2
+                and time_since_change < cal.aeb_target_refresh_min_s):
+            target_published = self._published_target_ms2
+        else:
+            slew_limit = cal.aeb_target_rate_ms3 * dt_loop
+            step = max(-slew_limit, min(slew_limit, delta))
+            target_published = self._published_target_ms2 + step
+            target_published = max(0.0, target_published)
+            if abs(target_published - self._published_target_ms2) > 1e-6:
+                self._last_target_change_mono = now_mono
+        self._published_target_ms2 = target_published
+
+        warn_by_decel = (
+            run_collision and effective_required >= warn_threshold
+        )
+        warn_by_ttb = (run_collision and time_to_brake < cal.warn_ttb)
+        aeb_warn = bool(warn_by_decel or warn_by_ttb)
+        aeb_brake = bool(self._engaged and target_published > 0.0)
+
+        if aeb_brake:
             new_state = AEBState.BRAKE
+        elif aeb_warn:
+            new_state = AEBState.WARN
+        else:
+            new_state = AEBState.STANDBY
 
-        # Hold escalated state 0.3 s
         if self._prev_state.value > new_state.value and now_mono < self._state_hold_until:
             new_state = self._prev_state
+            if new_state == AEBState.BRAKE:
+                aeb_brake = True
+                aeb_warn = True
+            elif new_state == AEBState.WARN:
+                aeb_warn = True
         if new_state != self._prev_state:
             self._state_hold_until = now_mono + 0.3
 
         self._prev_state = new_state
 
+        realized_decel = 0.0
+        try:
+            st = registry.get_thread("sending_thread")
+            if st is not None and st.is_alive():
+                with st.data._lock:
+                    realized_decel = float(
+                        getattr(st.data, "decel_measured_lead_ms2",
+                                st.data.decel_measured_ms2)
+                    )
+        except (KeyError, AttributeError):
+            pass
+
         user_brake = self._read_user_braking()
         if not tmp_traffic_session:
             self._latched_filter_ego_kmh = None
-        elif new_state < AEBState.WARN and not user_brake:
+        elif not aeb_warn and not user_brake:
             self._latched_filter_ego_kmh = None
-        elif self._latched_filter_ego_kmh is None and (
-                new_state >= AEBState.WARN or user_brake):
+        elif self._latched_filter_ego_kmh is None and (aeb_warn or user_brake):
             self._latched_filter_ego_kmh = ego_kmh_now
 
         snap = AEBSnapshot(
@@ -996,16 +1085,20 @@ class AEBThread(BaseThread):
             suppression_reasons=suppression_reasons,
         )
 
-        if new_state >= AEBState.WARN:
+        if aeb_warn:
             self._sound_handler.start_warning()
         else:
             self._sound_handler.stop_warning()
 
         with self.data._lock:
-            self.data.AEB_warn = (new_state >= AEBState.WARN)
-            self.data.AEB_brake = (new_state == AEBState.BRAKE)
+            self.data.AEB_warn = aeb_warn
+            self.data.AEB_brake = aeb_brake
             self.data.time_to_brake = time_to_brake
-            self.data.em_stop_requested = (new_state == AEBState.BRAKE)
+            self.data.em_stop_requested = aeb_brake
+            self.data.AEB_target_decel_ms2 = target_published
+            self.data.AEB_required_decel_ms2 = effective_required
+            self.data.AEB_effective_max_decel_ms2 = effective_max_decel
+            self.data.AEB_realized_decel_ms2 = realized_decel
             self.data.snapshot = snap
         self._last_snapshot = snap
 
@@ -1017,11 +1110,19 @@ class AEBThread(BaseThread):
             except Exception:
                 pass
         self._latched_filter_ego_kmh = None
+        self._engaged = False
+        self._published_target_ms2 = 0.0
+        self._last_target_change_mono = 0.0
+        self._prev_loop_mono = None
         with self.data._lock:
             self.data.AEB_warn = False
             self.data.AEB_brake = False
             self.data.time_to_brake = _INF
             self.data.em_stop_requested = False
+            self.data.AEB_target_decel_ms2 = 0.0
+            self.data.AEB_required_decel_ms2 = 0.0
+            self.data.AEB_effective_max_decel_ms2 = 0.0
+            self.data.AEB_realized_decel_ms2 = 0.0
             self.data.snapshot = AEBSnapshot()
         logger.debug("AEB teardown complete")
 

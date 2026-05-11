@@ -80,5 +80,14 @@ class AEBCalibration:
     near_head_on_cross_scale: float = 0.3
     near_head_on_lateral_min: float = 3.0
 
+    # Continuous-decel AEB (rate-limit, deadband, slope-aware engagement)
+    aeb_target_deadband_ms2: float = 0.4
+    aeb_target_refresh_min_s: float = 0.20
+    aeb_target_rate_ms3: float = 8.0
+    aeb_engage_frac: float = 0.7
+    aeb_disarm_frac: float = 0.45
+    aeb_warn_frac: float = 0.5
+    brake_actuator_lag_s: float = 0.18
+
 
 DEFAULT = AEBCalibration()

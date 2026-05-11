@@ -631,6 +631,7 @@ class AccelToPedals:
         game_throttle: float = 0.0,
         game_clutch: float = 0.0,
         learn: bool = True,
+        freeze_trim: bool = False,
     ) -> PedalTargets:
         """Compute pedal targets for one tick.
 
@@ -751,10 +752,14 @@ class AccelToPedals:
             )
             effective_road_load = road_load_accel + new_slow_integral
 
-            # Fast trim in m/s² space (frozen during gearshift)
+            # Fast trim in m/s² space (frozen during gearshift; also frozen when
+            # an external commander like AEB owns the brake — passing factor=0
+            # holds both integrator and derivative state at their last values
+            # and zeros the trim output so the two controllers don't fight).
+            effective_factor = 0.0 if freeze_trim else factor
             fast_trim_ms2, fast_p, fast_i, fast_d, new_fast_integral, new_fast_deriv_smooth = (
                 self._fast_pid_compute(
-                    dt, error_ms2, new_raw_smooth, gain_scale, factor,
+                    dt, error_ms2, new_raw_smooth, gain_scale, effective_factor,
                     prev_fast_integral=new_fast_integral,
                     prev_fast_deriv_smooth=new_fast_deriv_smooth,
                     prev_raw_smooth=s.prev_raw_smooth,
@@ -785,7 +790,7 @@ class AccelToPedals:
             # Back-calc anti-windup: if FF saturates the pedal, snap fast_integral
             # so (wanted + effective_road_load + p + i + d) sits on the saturation
             # edge. Integrator stops winding, system snaps back cleanly on recovery.
-            if effort != unclamped_effort and factor > 0.0:
+            if effort != unclamped_effort and effective_factor > 0.0:
                 if effort >= 1.0:
                     combined_sat = max_a_use
                 else:

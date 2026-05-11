@@ -26,6 +26,8 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections import deque
+from typing import Deque
 
 from core.settings import Settings
 
@@ -48,6 +50,15 @@ _SAVE_THRESHOLD: float = 0.1        # save when drift exceeds 10% of saved value
 _SAVE_COOLDOWN_S: float = 30.0      # min seconds between successive writes
 _ESTIMATE_LOWER_BOUND: float = 0.35 # fraction of baseline — hard floor
 _ESTIMATE_UPPER_BOUND: float = 2.0  # fraction of baseline — hard ceiling
+
+# Brake settled-pedal gate — skip learning while the brake pedal is still
+# moving. Brake hydraulics have ~150–250 ms of lag; sampling during the
+# transient drives the EMA below the steady-state truth.
+_BRAKE_SETTLE_WINDOW_S: float = 0.20
+_BRAKE_SETTLE_TOLERANCE: float = 0.03
+_BRAKE_STEP_THRESHOLD: float = 0.05
+_BRAKE_STEP_GUARD_S: float = 0.25
+_BRAKE_PEDAL_HISTORY_LIMIT: int = 64
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -74,6 +85,10 @@ class PedalCapacityTracker:
         self._saved_accel: float = 0.0
         self._last_save_mono: float = 0.0
         self._last_clutch_mono: float = -math.inf
+        self._brake_pedal_history: Deque[tuple[float, float]] = deque(
+            maxlen=_BRAKE_PEDAL_HISTORY_LIMIT
+        )
+        self._last_brake_step_mono: float = -math.inf
 
     @property
     def max_brake_ms2(self) -> float:
@@ -129,11 +144,30 @@ class PedalCapacityTracker:
         if self._max_brake_ms2 <= 0.0:
             self._max_brake_ms2 = baseline_ms2
 
+        now = time.monotonic()
+        history = self._brake_pedal_history
+        if history:
+            prev_pedal = history[-1][1]
+            if abs(brake_output - prev_pedal) >= _BRAKE_STEP_THRESHOLD:
+                self._last_brake_step_mono = now
+        history.append((now, brake_output))
+        cutoff = now - _BRAKE_SETTLE_WINDOW_S
+        while len(history) > 1 and history[0][0] < cutoff:
+            history.popleft()
+
         if speed_ms < _MIN_BRAKE_SPEED_MS:
             return
         if brake_output < _BRAKE_PEDAL_FLOOR:
             return
         if abs(slope_rad) > _MAX_SLOPE_RAD:
+            return
+
+        if now - self._last_brake_step_mono < _BRAKE_STEP_GUARD_S:
+            return
+
+        oldest_in_window = history[0][1]
+        if (history[-1][0] - history[0][0] < _BRAKE_SETTLE_WINDOW_S
+                or abs(brake_output - oldest_in_window) > _BRAKE_SETTLE_TOLERANCE):
             return
 
         corrected_decel = measured_decel_ms2 - road_load_ms2
@@ -154,7 +188,7 @@ class PedalCapacityTracker:
             baseline_ms2 * _ESTIMATE_LOWER_BOUND,
             baseline_ms2 * _ESTIMATE_UPPER_BOUND,
         )
-        self._maybe_save(time.monotonic())
+        self._maybe_save(now)
 
     def update_accel(
         self,

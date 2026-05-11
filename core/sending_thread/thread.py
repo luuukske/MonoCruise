@@ -26,6 +26,8 @@ from core.settings import Settings
 
 from core.longitudinal.limiter import SpeedLimiter
 
+from core.aeb.calibration import DEFAULT as _AEB_CAL
+
 from .accel_to_pedals import AccelToPedals, MapperSharedState, baseline_accel_ms2, baseline_brake_ms2
 from .pedal_capacity import PedalCapacityTracker
 from .scscontroller import SCSController
@@ -64,63 +66,71 @@ def create_visualization_bar() -> VisualizationBar:
     """
     return VisualizationBar()
 
-# AEB phased braking
-_AEB_PHASE1_DECEL_FRAC: float = 0.50   # Phase 1: 50 % of max brake capacity
-_AEB_PHASE2_DECEL_FRAC: float = 0.90   # Phase 2: 90 % of max brake capacity
-_AEB_PHASE1_DURATION_S: float = 0.5    # Duration of phase 1 (seconds)
-
 BOOL_PRESS_DURATION: float = 0.1
 HAZARD_PRESS_DURATION: float = 0.4
 HAZARD_VERIFY_DELAY: float = 0.1
 HAZARD_MAX_RETRIGGERS: int = 3
 
+# Closed-loop decel controller — feedforward via the inverse brake curve plus
+# a small PI on lead-compensated measured decel. Conservative gains; tuned to
+# correct residual model error without fighting the FF.
+_AEB_KP: float = 0.06
+_AEB_KI: float = 0.04
+_AEB_LEAD_CLAMP_MS2: float = 3.0
 
-class AEBBrakeController:
-    """Two-phase AEB brake sequencer.
 
-    Phase 1 (first ``_AEB_PHASE1_DURATION_S`` seconds): commands
-    ``_AEB_PHASE1_DECEL_FRAC`` × max_brake_ms2.
-    Phase 2 (remaining):   commands ``_AEB_PHASE2_DECEL_FRAC`` × max_brake_ms2.
+class AEBDecelController:
+    """Closed-loop decel controller.
 
-    Activated on ``AEB_brake`` rising edge; released when both ``AEB_warn``
-    and ``AEB_brake`` clear.  ``max_brake_ms2`` is sampled live every tick so
-    the Phase-2 target uses the freshest capacity estimate, including any
-    refinement that occurred during the gentler Phase-1 application.
+    Consumes ``AEB_target_decel_ms2`` (already rate-limited and deadbanded by
+    the AEB thread). Active whenever ``AEB_brake`` is true. The bulk of the
+    pedal comes from the inverse brake curve (FF); a small PI corrects the
+    residual error against lead-compensated measured decel. Anti-windup
+    freezes the integrator on pedal saturation.
     """
 
     def __init__(self) -> None:
-        self._phase: int = 0            # 0 = idle, 1 = phase-1, 2 = phase-2
-        self._phase1_start: float = 0.0
+        self._active: bool = False
+        self._integral: float = 0.0
 
     @property
     def active(self) -> bool:
-        return self._phase > 0
+        return self._active
 
-    def update(self, aeb_warn: bool, aeb_brake: bool, now: float) -> bool:
-        """Tick state machine.  Returns True on rising edge (just became active)."""
-        was_active = self._phase > 0
+    def update_active(self, aeb_brake: bool) -> bool:
+        was_active = self._active
+        self._active = aeb_brake
+        if not aeb_brake:
+            self._integral = 0.0
+        return aeb_brake and not was_active
 
-        if not aeb_warn and not aeb_brake:
-            self._phase = 0
-            return False
+    def step(
+        self,
+        target_decel_ms2: float,
+        measured_lead_decel_ms2: float,
+        max_brake_ms2: float,
+        ff_pedal_fn,
+        dt: float,
+    ) -> float:
+        """Compute brake pedal [0, 1] for the current tick."""
+        if not self._active or target_decel_ms2 <= 0.0 or max_brake_ms2 <= 0.1:
+            self._integral = 0.0
+            return 0.0
 
-        if self._phase == 0 and aeb_brake:
-            self._phase = 1
-            self._phase1_start = now
-        elif self._phase == 1:
-            if now - self._phase1_start >= _AEB_PHASE1_DURATION_S:
-                self._phase = 2
-        # phase 2 holds until warn + brake both clear (caught by the guard above)
+        ff_pedal = ff_pedal_fn(target_decel_ms2, max_brake_ms2)
+        error = target_decel_ms2 - measured_lead_decel_ms2
+        p_term = _AEB_KP * error
+        i_candidate = self._integral + _AEB_KI * error * max(dt, 1e-4)
 
-        return (not was_active) and (self._phase > 0)
+        unclamped = ff_pedal + p_term + i_candidate
+        clamped = max(0.0, min(1.0, unclamped))
 
-    def commanded_decel_ms2(self, max_brake_ms2: float) -> float:
-        """Positive deceleration magnitude to command this tick (m/s²)."""
-        if self._phase == 1:
-            return _AEB_PHASE1_DECEL_FRAC * max_brake_ms2
-        if self._phase == 2:
-            return _AEB_PHASE2_DECEL_FRAC * max_brake_ms2
-        return 0.0
+        saturated_pushing = (
+            (clamped >= 1.0 and error > 0.0) or (clamped <= 0.0 and error < 0.0)
+        )
+        if not saturated_pushing:
+            self._integral = i_candidate
+        return clamped
 
 
 @dataclass
@@ -131,6 +141,7 @@ class SendingThreadData(ThreadData):
     horn_active: bool = False
     airhorn_active: bool = False
     decel_measured_ms2: float = 0.0
+    decel_measured_lead_ms2: float = 0.0
     mapper_commanded_ms2: float = 0.0
     mapper_control_wanted_ms2: float = 0.0
     mapper_raw_accel_ms2: float = 0.0
@@ -196,10 +207,12 @@ class SendingThread(BaseThread):
         self._accel_mapper = AccelToPedals(self._mapper_shared)
         self._limiter = SpeedLimiter()
         self._capacity_tracker = PedalCapacityTracker()
-        self._aeb_controller = AEBBrakeController()
+        self._aeb_controller = AEBDecelController()
         self._key_listener = None
         self._spd_smooth: float | None = None
         self._prev_spd_mono: float | None = None
+        self._prev_measured_decel_ms2: float = 0.0
+        self._prev_aeb_loop_mono: float | None = None
         self._brake_active: bool = False
         self._brake_last_active_at: float = 0.0
         # Ring buffer of the last 3 brake outputs sent to the game (oldest first).
@@ -420,6 +433,7 @@ class SendingThread(BaseThread):
         em_stop = False
         AEB_brake = False
         AEB_warn = False
+        AEB_target_decel = 0.0
         if pedal_thread is not None and pedal_alive:
             try:
                 with pedal_thread.data._lock:
@@ -432,15 +446,16 @@ class SendingThread(BaseThread):
                     with aeb_thread.data._lock:
                         AEB_brake = bool(aeb_thread.data.AEB_brake)
                         AEB_warn = bool(aeb_thread.data.AEB_warn)
+                        AEB_target_decel = float(
+                            getattr(aeb_thread.data, "AEB_target_decel_ms2", 0.0)
+                        )
             except (KeyError, Exception):
                 pass
 
             em_stop = em_stop or AEB_brake
 
-        _aeb_now = time.monotonic()
-        _just_entered_aeb = self._aeb_controller.update(AEB_warn, AEB_brake, _aeb_now)
+        _just_entered_aeb = self._aeb_controller.update_active(AEB_brake)
         if _just_entered_aeb:
-            # Clean PID/smoothing state so the mapper starts fresh on each AEB event.
             self._accel_mapper.reset_smoothing()
         _aeb_active = self._aeb_controller.active
 
@@ -501,12 +516,15 @@ class SendingThread(BaseThread):
         wanted_a = 0.0
         raw_a = 0.0
         measured_decel_ms2 = 0.0
+        measured_decel_lead_ms2 = 0.0
+        dt_aeb = self.loop_interval
         mass_kg = 0.0
         has_t = False
         brake_grade_rad = 0.0
         game_clutch = 0.0
         game_throttle = 0.0
         game_brake = 0.0
+        user_clutch = 0.0
         road_pitch = 0.0
         tel_gear_dashboard = 0
         if connected and tel_thread is not None and tel_thread.is_alive():
@@ -522,6 +540,7 @@ class SendingThread(BaseThread):
                     game_throttle = float(tel_thread.data.gameThrottle)
                     game_clutch = float(tel_thread.data.gameClutch)
                     game_brake = float(getattr(tel_thread.data, "gameBrake", 0.0))
+                    user_clutch = float(getattr(tel_thread.data, "userClutch", 0.0))
                 now_spd = time.monotonic()
                 if self._spd_smooth is None:
                     self._spd_smooth = spd_ms
@@ -538,13 +557,22 @@ class SendingThread(BaseThread):
                     self._spd_smooth += alpha * (spd_ms - self._spd_smooth)
                 self._prev_spd_mono = now_spd
                 measured_decel_ms2 = max(0.0, -raw_a)
-                # AEB phased brake override — supersedes cruise commanded accel.
-                # Uses the live capacity estimate so Phase-2 benefits from any
-                # refinement that occurred during the gentler Phase-1 application.
-                if _aeb_active:
-                    wanted_a = -self._aeb_controller.commanded_decel_ms2(
-                        self._capacity_tracker.max_brake_ms2
-                    )
+
+                now_aeb = time.monotonic()
+                if self._prev_aeb_loop_mono is None:
+                    dt_aeb = self.loop_interval
+                else:
+                    dt_aeb = max(1e-3, min(0.5, now_aeb - self._prev_aeb_loop_mono))
+                self._prev_aeb_loop_mono = now_aeb
+                d_decel_dt = (
+                    measured_decel_ms2 - self._prev_measured_decel_ms2
+                ) / max(dt_aeb, 1e-4)
+                lead_term = max(
+                    -_AEB_LEAD_CLAMP_MS2,
+                    min(_AEB_LEAD_CLAMP_MS2, d_decel_dt * _AEB_CAL.brake_actuator_lag_s),
+                )
+                measured_decel_lead_ms2 = max(0.0, measured_decel_ms2 + lead_term)
+                self._prev_measured_decel_ms2 = measured_decel_ms2
 
                 # Limiter contribution — folded in BEFORE the mapper so there's
                 # one set of integrators for the unified m/s² stream.
@@ -573,6 +601,7 @@ class SendingThread(BaseThread):
                     gear_dashboard=tel_gear_dashboard,
                     game_throttle=game_throttle,
                     game_clutch=game_clutch,
+                    freeze_trim=_aeb_active,
                 )
                 mapper_gas = float(targets.gas)
                 mapper_brake = float(targets.brake)
@@ -647,6 +676,8 @@ class SendingThread(BaseThread):
         if not connected:
             self._spd_smooth = None
             self._prev_spd_mono = None
+            self._prev_measured_decel_ms2 = 0.0
+            self._prev_aeb_loop_mono = None
             controller.aforward = 0.0
             controller.abackward = 0.0
             with self.data._lock:
@@ -785,6 +816,13 @@ class SendingThread(BaseThread):
         a = float(complex(a).real)
         b = float(complex(b).real)
 
+        # Manual clutch gate — when the driver physically presses the clutch
+        # (manual transmission), suppress all mapper gas so the user's pedal
+        # commands the truck directly during the shift. Brake commands and AEB
+        # are unaffected. gameClutch is excluded because automatic transmissions
+        # also raise it during their own gear changes.
+        manual_clutch = user_clutch > 0.1
+
         # User-pedal merge with the mapper's output.
         #   cc_mode "Cruise control": CC drives the pedal → max(user, mapper_gas).
         #   cc_mode "Speed limiter":  CC caps the user pedal → min(user, mapper_gas).
@@ -792,11 +830,12 @@ class SendingThread(BaseThread):
         # over-limit), the mapper output reflects limiter-driven brake/0-gas;
         # we still want max() so the user's gas pedal is left intact below the
         # cap, but the explicit cap below ensures the user can't push past it.
-        if cruise_active:
-            if Settings.cc_mode == "Speed limiter":
-                a = min(a, mapper_gas)
-            else:
-                a = max(a, mapper_gas)
+        if not manual_clutch:
+            if cruise_active:
+                if Settings.cc_mode == "Speed limiter":
+                    a = min(a, mapper_gas)
+                else:
+                    a = max(a, mapper_gas)
         b = max(b, mapper_brake)
 
         # Limiter cap — applies whenever the limiter is active, not just over
@@ -811,11 +850,21 @@ class SendingThread(BaseThread):
         # CC and the limiter. The limiter still shapes the CC's m/s² target
         # via the pre-mapper min(), so CC itself stays within the cap; the
         # user can freely push above it.
-        if limiter_active and (Settings.cc_mode == "Speed limiter" or not cruise_active):
+        if not manual_clutch and limiter_active and (Settings.cc_mode == "Speed limiter" or not cruise_active):
             a = min(a, mapper_gas)
 
-        # AEB active — suppress gas completely; brake already merged above.
+        # AEB active — closed-loop decel controller writes the brake pedal
+        # directly from AEB_target_decel_ms2 (FF + small PI on lead-compensated
+        # decel) and gas is suppressed.
         if _aeb_active:
+            aeb_pedal = self._aeb_controller.step(
+                target_decel_ms2=AEB_target_decel,
+                measured_lead_decel_ms2=measured_decel_lead_ms2,
+                max_brake_ms2=max(self._capacity_tracker.max_brake_ms2, 0.1),
+                ff_pedal_fn=self._accel_mapper._brake_pedal_from_decel,
+                dt=dt_aeb,
+            )
+            b = max(b, aeb_pedal)
             a = 0.0
 
         # Brake threshold hysteresis: suppress flicker from rapid OPD/CC transitions.
@@ -862,7 +911,7 @@ class SendingThread(BaseThread):
         _base_accel = baseline_accel_ms2(mass_kg, has_t)
         if b > 0.01:
             self._capacity_tracker.update_brake(
-                b, measured_decel_ms2, speed_ms, brake_grade_rad, _base_brake,
+                b, measured_decel_lead_ms2, speed_ms, brake_grade_rad, _base_brake,
                 road_load_ms2=mapper_road_load_ms2,
             )
         if a > 0.01:
@@ -883,6 +932,7 @@ class SendingThread(BaseThread):
             self.data.decel_active = False
             self.data.decel_brake_output = 0.0
             self.data.decel_measured_ms2 = measured_decel_ms2
+            self.data.decel_measured_lead_ms2 = measured_decel_lead_ms2
             self.data.max_brake_ms2 = self._capacity_tracker.max_brake_ms2
             self.data.mapper_commanded_ms2 = wanted_a
             self.data.mapper_control_wanted_ms2 = mapper_control_wanted_ms2
@@ -933,6 +983,7 @@ class SendingThread(BaseThread):
             self.data.decel_active = False
             self.data.decel_brake_output = 0.0
             self.data.decel_measured_ms2 = 0.0
+            self.data.decel_measured_lead_ms2 = 0.0
             self.data.mapper_commanded_ms2 = 0.0
             self.data.mapper_control_wanted_ms2 = 0.0
             self.data.mapper_raw_accel_ms2 = 0.0
@@ -957,6 +1008,8 @@ class SendingThread(BaseThread):
             self.data.mapper_brake_multiplier = 1.0
             self.data.mapper_gain_scale = 1.0
             self.data.mapper_pedal_state = 0
+        self._prev_measured_decel_ms2 = 0.0
+        self._prev_aeb_loop_mono = None
         self._accel_mapper.close()
         self._close_coast_log()
         logger.debug("teardown complete")

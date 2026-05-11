@@ -195,24 +195,61 @@ Read from other threads (acquire `data._lock` first):
 
 ```python
 aeb = registry.get_thread("aeb_thread").data
-aeb.AEB_warn          # bool — TTB < warn_ttb (1.3 s)
-aeb.AEB_brake         # bool — TTB < brake_ttb (0.2 s)
-aeb.time_to_brake     # float — seconds (1e9 = no threat)
-aeb.em_stop_requested # bool — mirror of AEB_brake
-aeb.snapshot          # AEBSnapshot — full debug state
+aeb.AEB_warn                       # bool — UI/sound cue (warn fraction or TTB)
+aeb.AEB_brake                      # bool — engagement latched and target > 0
+aeb.AEB_target_decel_ms2           # float — rate-limited commanded decel (m/s²)
+aeb.AEB_required_decel_ms2         # float — slope-corrected required decel
+aeb.AEB_effective_max_decel_ms2    # float — slope-corrected capacity ceiling
+aeb.AEB_realized_decel_ms2         # float — lead-compensated measured decel
+aeb.time_to_brake                  # float — seconds (1e9 = no threat)
+aeb.em_stop_requested              # bool — mirror of AEB_brake
+aeb.snapshot                       # AEBSnapshot — full debug state
 ```
 
-### TTB logic summary
+### Continuous-decel logic
 
-1. For each vehicle, run `build_pipeline(cal)`. First `suppressed=True` short-circuits.
-2. If not suppressed: check `ego_arc` vs target arc corridors → no hit = skip.
-3. Check `ego_braked_arc` vs target:
-   - No hit → braking avoids; `TTB = max(unbraked_ttc, 0.0)`
-   - Hit → braking insufficient; `TTB = 0`
-4. State: `TTB < warn_ttb (1.3 s)` → WARN; `TTB < brake_ttb (0.2 s)` → BRAKE
-5. BRAKE latch: holds until `TTB >= brake_release_ttb (0.5 s)`
-6. Risk confirmation: vehicle must be risky for `risk_confirm_s (0.05 s)` (head-on: `risk_confirm_oncoming_s (0.10 s)`)
-7. Head-on targets: modelled as also braking at `full_brake_decel (7.8 m/s²)`
+1. Pipeline runs as before. First `suppressed=True` short-circuits.
+2. For surviving targets: collision check yields TTB plus per-target
+   `closing_distance` and `v_closing` (best by lowest TTB).
+3. Required decel for the worst target:
+   ```
+   d_remaining       = closing_distance - stop_buffer
+   required_decel    = v_closing² / (2 * max(d_remaining, 1e-3))
+   slope_accel       = g · sin(ego_pitch_rad)         # +ve = uphill (radar convention)
+   downhill_offset   = max(−slope_accel, 0)           # gravity stealing brake force
+   effective_max     = ego_decel_frac · capacity_estimate − downhill_offset
+   effective_required= required_decel + downhill_offset
+   ```
+   `capacity_estimate` is read from `sending_thread.data.max_brake_ms2`
+   (PedalCapacityTracker) with a fallback constant.
+4. Engagement hysteresis (slope-aware):
+   - Engage when `effective_required ≥ aeb_engage_frac · effective_max`
+   - Disarm when `effective_required <  aeb_disarm_frac  · effective_max`
+5. Setpoint pipeline:
+   - `target_raw = clamp(effective_required, 0, effective_max)` while engaged
+   - **Deadband + rate-limit**: if `|Δ| < aeb_target_deadband_ms2` and the
+     held value is younger than `aeb_target_refresh_min_s`, hold. Else move
+     toward `target_raw` capped at `aeb_target_rate_ms3 · dt` (m/s² per tick).
+   - The published value is `AEB_target_decel_ms2` consumed by sending_thread.
+6. Flags:
+   - `AEB_warn` rises on `effective_required ≥ aeb_warn_frac · effective_max`
+     OR `time_to_brake < warn_ttb`.
+   - `AEB_brake` is true while engagement is latched and the published target
+     is above zero. Other subsystems (cruise/HMI) gate off this flag.
+7. Hold semantics: warn/brake state holds for 0.3 s after a downgrade to
+   suppress chatter, identical to the old WARN→STANDBY hold.
+8. Head-on targets: modelled as also braking at `full_brake_decel (7.8 m/s²)`
+   inside the collision pipeline (unchanged).
+
+### Closed-loop coupling
+
+`sending_thread` consumes `AEB_target_decel_ms2` via `AEBDecelController`:
+- Feedforward pedal from the inverse brake curve (`_brake_pedal_from_decel`).
+- Small PI on lead-compensated measured decel; integrator freezes on
+  pedal saturation so AEB never fights its own anti-windup.
+- Mapper's fast-PID trim is frozen while `AEB_brake` is true (via
+  `AccelToPedals.step(..., freeze_trim=True)`) so two controllers don't
+  fight on the brake.
 
 ---
 
