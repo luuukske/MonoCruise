@@ -155,13 +155,28 @@ Refer back to `core/example_thread/thread.py` whenever you are unsure about the 
 
 ### Longitudinal control invariants
 
-- **Global speed limiter is a continuous tracker, not an over-limit reactor.**
-  - The `SpeedLimiter` (`core/longitudinal/limiter.py`) PID must run continuously while active, and its mapper output must shape the gas pedal cap continuously — not only when ego is at or above the limit.
-  - The mapper's engagement flag (`mapper_engaged` in `core/sending_thread/thread.py`) and the post-mapping user-gas cap (`a = min(a, mapper_gas)`) must both fire whenever the limiter is active, regardless of whether ego is below, at, or above the limit.
-  - Why: an asymmetric limiter that wakes only on overshoot will overshoot — by the time the PID engages, ego is already past the cap. The continuous tracker tightens the gas cap progressively as ego approaches the limit, smoothly bringing the truck to exactly the limit speed without overshoot.
-  - Do not reintroduce an "only when over the limit" gate (e.g. `if wanted_ms2 < 0: ...` on the limiter, or `if limiter_constraining: ...` on the user-gas cap). This was tried twice; both times it caused overshoot or fight-with-cruise behaviour at the limit boundary.
+- **CC and Limiter are mutually exclusive sibling controllers.**
+  - `Settings.cc_mode` selects which controller steps each tick: `"Cruise control"` → `CruiseController` (+ `AdaptiveCruiseController`); `"Speed limiter"` → `SpeedLimiter`. Both live in `CruiseControlThread`.
+  - The CC FSM (`enable`/`disable`/`set_target_kmh`) drives `_cc_ctrl` in both modes. In limiter mode the CC's enabled state and target are forwarded to the limiter as its cap.
+  - On mode flip, the now-inactive controller's PID state is reset to avoid stale integrators on re-entry.
 
-- **One mapper, one set of integrators.**
-  - There is exactly one `AccelToPedals` instance in the running system. Cruise/ACC and the global limiter both contribute m/s² requests that are `min()`-merged before the mapper runs.
-  - Do not give the limiter (or any other longitudinal child) its own `AccelToPedals` instance. Two parallel mappers diverge in `wanted_smooth` / fast PID / output EMA per-instance state, which broke commander handover at the limit boundary (cruise targets a few km/h below the cap could fail to take over).
-  - If you need a controller-specific intermediate signal, derive it from the single mapper's input (`min(...)` of the m/s² bids) rather than instantiating a second mapper.
+- **Disengage conditions (brake, park, neutral/reverse, disarm-on-stop) are CC-only.**
+  - `CruiseControlThread._handle_cc_disengage_conditions()` is called inside `if mode == "Cruise control"` only. The limiter never sees these events.
+  - This preserves the original always-on limiter behaviour: the limiter remains active through brake presses, gear changes, and crash events.
+
+- **`global_speed_limit_kmh` has a dual role.**
+  - In CC mode: clamps the CC set-speed so the user can never command above this value (even via stale state). `CruiseController._clamp_target_kmh` enforces this every tick.
+  - In limiter mode: activates `SpeedLimiter` unconditionally regardless of CC FSM state. The truck is always capped even without pressing any button. Setting it to `None` deactivates this always-on path.
+
+- **Speed limiter is a continuous tracker, not an over-limit reactor.**
+  - The `SpeedLimiter` (`core/longitudinal/limiter.py`) PID runs every tick while active and returns `LongOutput(wanted, True)` (active=True) unconditionally. The mapper engages and the user-gas cap fires even when ego is below the limit.
+  - Why: a limiter that only wakes on overshoot overshoots — by the time the PID engages, ego is already past the cap. The continuous tracker tightens the gas cap progressively as ego approaches the limit.
+  - Do not reintroduce an "only when over the limit" gate (e.g. `if wanted_ms2 < 0: ...` on the limiter). This was tried twice; both times it caused overshoot or fight-with-cruise behaviour at the limit boundary.
+  - The asymmetric clamp in `SpeedLimiter.step()` bounds only the lower side (`max(accel_min, wanted)`). The upper side is left open so positive bids propagate and the mapper can shape the gas pedal while below the cap.
+
+- **One mapper, one published bid.**
+  - There is exactly one `AccelToPedals` instance in the running system (in `SendingThread`). `CruiseControlThread` publishes a single m/s² bid covering whichever controller is active (CC or limiter). `SendingThread` reads that bid from `telemetry_thread.commanded_accel_ms2` and feeds it straight to the mapper.
+  - Do not give the limiter (or any other longitudinal child) its own `AccelToPedals` instance. Two parallel mappers diverge in `wanted_smooth` / fast PID / output EMA per-instance state, which broke commander handover at the limit boundary.
+
+- **New `limiter_*` settings.**
+  - `limiter_kp`, `limiter_ki`, `limiter_kd`, `limiter_integral_clamp`, `limiter_accel_min_ms2` in `core/settings.py`. Independent of the CC gains so each can be tuned separately. Defaults match the original CC defaults so behaviour is identical until the user tunes them.

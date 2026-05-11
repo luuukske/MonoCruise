@@ -37,6 +37,7 @@ _SCENARIO_MODULES = [
     ("tp_lead_brake_check", "TP"),
     ("tp_wrong_way_driver", "TP"),
     ("tp_perpendicular_cross_traffic", "TP"),
+    ("tp_perpendicular_direct_collision", "TP"),
     ("tp_close_range_lane_cut", "TP"),
     ("fp_far_behind_high_closure", "FP"),
     ("fp_mp_stationary_corner_entry", "FP"),

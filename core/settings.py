@@ -112,8 +112,18 @@ class Settings(metaclass=_SingletonMeta):
     cc_accel_max_ms2: float = 1.0
     cc_accel_min_ms2: float = -1.0
 
-    # Global speed limiter (always active when set). Limiter caps gas and can
-    # demand brake post-mapping; not user-overridable. None disables the limiter.
+    # PID tuning for SpeedLimiter — independent of CC so each can be tuned separately.
+    limiter_kp: float = 0.5
+    limiter_ki: float = 0.0
+    limiter_kd: float = 0.0
+    limiter_integral_clamp: float = 3.0
+    limiter_accel_min_ms2: float = -1.0
+
+    # Global speed limiter target (km/h).
+    # Dual role: (1) clamps the CC set-speed so CC never commands above this value;
+    # (2) when cc_mode is "Speed limiter", activates SpeedLimiter unconditionally
+    # regardless of whether the CC FSM is engaged — the truck is always capped.
+    # None disables both effects.
     global_speed_limit_kmh: float | None = None
 
     # AccelToPedals tuning — split gas (PID) / brake (feedforward + trim PI) architecture.

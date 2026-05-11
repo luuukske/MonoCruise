@@ -1,25 +1,20 @@
 """
-Global speed limiter — always on, never user-overridable, no buttons.
+Speed limiter — LongitudinalController subclass.
 
-PID only — no mapper. The limiter publishes a wanted m/s² request that
-sending_thread folds into `min(cruise_wanted, limiter_wanted)` before
-the single shared mapper runs. This avoids the per-instance state drift
-that two parallel mappers used to suffer at the limit boundary (cruise
-target dropping below the cap could fail to take over because each
-mapper had its own `wanted_smooth` / fast PID state).
+Lifecycle is driven by the orchestrator (CruiseControlThread):
+  enable() / disable() / set_target_kmh(v) / reset()
 
-Activation: when `Settings.global_speed_limit_kmh` is set. None → inactive.
-`step()` returns `None` when inactive; sending_thread skips the merge.
-`is_constraining` is True when the last computed wanted was negative
-(truck at/over the limit) — sending_thread uses this to force the
-post-mapping `min(user, mapper_gas)` user-cap regardless of cc_mode.
+No disengage logic lives here. The orchestrator decides when to enable or
+disable the limiter; this class only runs the PID.
+
+Gains: Settings.limiter_kp/ki/kd/integral_clamp/accel_min_ms2 — independent
+of the CC gains so each controller can be tuned separately.
 """
 
 from __future__ import annotations
 
 import logging
 import math
-import time
 
 from core.settings import Settings
 
@@ -31,99 +26,88 @@ _TARGET_SPEED_EMA_TAU_S = 0.5
 
 
 class SpeedLimiter(LongitudinalController):
-    """Global speed limiter — PID-only m/s² source for the shared mapper."""
+    """Set-speed PID for the speed-limiter mode."""
 
     name = "limiter"
 
     def __init__(self) -> None:
-        # Internal speed-tracking PID state
+        self._enabled: bool = False
+        self._target_kmh: float | None = None
+
         self._integral_error: float = 0.0
-        self._target_speed_ema_ms: float | None = None
+        self._prev_shaped_error: float | None = None
         self._last_target_for_integral: float | None = None
-
-        # Own dt tracking — sending_thread doesn't build a LongCtx for us.
-        self._prev_mono: float | None = None
-
-        # Last computed wanted (for `is_constraining`). 0 = neutral.
-        self._last_wanted_ms2: float = 0.0
+        self._target_speed_ema_ms: float | None = None
 
     @property
     def active(self) -> bool:
-        v = Settings.global_speed_limit_kmh
-        return v is not None and isinstance(v, (int, float)) and math.isfinite(float(v))
+        return self._enabled and self._target_kmh is not None
 
     @property
-    def is_constraining(self) -> bool:
-        """True when the last `step()` wanted negative m/s² (truck at/over limit).
+    def enabled(self) -> bool:
+        return self._enabled
 
-        Sending_thread uses this to force `min(user, mapper_gas)` post-mapping
-        so the user can't push past the cap regardless of cc_mode.
-        """
-        return self.active and self._last_wanted_ms2 < 0.0
+    @property
+    def target_speed_kmh(self) -> float | None:
+        return self._target_kmh
 
-    def step(self, ctx: LongCtx) -> LongOutput:
-        """Return the wanted m/s² request. Used by sending_thread (via
-        `step_wanted`) and by any orchestrator wanting LongOutput semantics.
-        """
-        if not self.active:
-            return LongOutput(None, False)
-        wanted = self._compute_pid_with_dt(ctx.speed_ms, ctx.dt)
-        return LongOutput(wanted, True)
+    def enable(self) -> None:
+        self._enabled = True
 
-    def step_wanted(self, speed_ms: float) -> float | None:
-        """Compute wanted m/s². Tracks dt internally (sending_thread doesn't
-        build a LongCtx). Returns None when inactive.
-        """
-        if not self.active:
-            self._reset_runtime_state()
-            self._prev_mono = None
-            self._last_wanted_ms2 = 0.0
-            return None
+    def disable(self) -> None:
+        self._enabled = False
 
-        now = time.monotonic()
-        if self._prev_mono is None:
-            dt = 0.02
-        else:
-            dt = max(min(now - self._prev_mono, 0.5), 1e-4)
-        self._prev_mono = now
-
-        return self._compute_pid_with_dt(speed_ms, dt)
+    def set_target_kmh(self, v: float) -> None:
+        self._target_kmh = v
 
     def reset(self) -> None:
-        self._reset_runtime_state()
-
-    def _reset_runtime_state(self) -> None:
         self._integral_error = 0.0
-        self._target_speed_ema_ms = None
+        self._prev_shaped_error = None
         self._last_target_for_integral = None
-        self._last_wanted_ms2 = 0.0
+        self._target_speed_ema_ms = None
 
-    def _compute_pid_with_dt(self, speed_ms: float, dt: float) -> float:
-        """P+I controller against the global cap. Positive when below, negative when over."""
-        target_kmh = float(Settings.global_speed_limit_kmh or 0.0)
+    def step(self, ctx: LongCtx) -> LongOutput:
+        if not self.active:
+            self.reset()
+            return LongOutput(None, False)
+
+        target_kmh = float(self._target_kmh)
 
         if self._last_target_for_integral != target_kmh:
             self._integral_error = 0.0
             self._last_target_for_integral = target_kmh
 
         target_ms = target_kmh / 3.6
-        target_ms = self._smooth_target_ema(target_ms, dt)
+        target_ms = self._smooth_target_ema(target_ms, ctx.dt)
 
-        kp = float(Settings.cc_kp)
-        ki = float(Settings.cc_ki)
-        clamp = float(Settings.cc_integral_clamp)
+        kp = float(Settings.limiter_kp)
+        ki = float(Settings.limiter_ki)
+        kd = float(Settings.limiter_kd)
+        clamp = float(Settings.limiter_integral_clamp)
 
-        error_ms = target_ms - speed_ms
-        self._integral_error += error_ms * dt
+        error_ms = target_ms - ctx.speed_ms
+        # Power-shaped error: small errors amplified, large errors compressed.
+        shaped_error = math.copysign(abs(error_ms) ** 0.7, error_ms)
+        self._integral_error += shaped_error * ctx.dt
         self._integral_error = max(-clamp, min(clamp, self._integral_error))
 
-        wanted = kp * error_ms + ki * self._integral_error
-        # No upper clamp — limiter must allow user full gas while below cap.
-        # Lower clamp bounds the limiter's brake authority.
-        accel_min = float(Settings.cc_accel_min_ms2)
+        d_term = kd * (shaped_error - self._prev_shaped_error) / ctx.dt if self._prev_shaped_error is not None else 0.0
+        self._prev_shaped_error = shaped_error
+
+        # Boost kp when overshooting so ego decelerates faster back to the limit.
+        effective_kp = kp * 1.3 if error_ms < 0 else kp
+        wanted = effective_kp * shaped_error + ki * self._integral_error + d_term
+
+        accel_min = float(Settings.limiter_accel_min_ms2)
+        # Asymmetric clamp: only bound the lower side. Positive bids are left
+        # uncapped so the mapper engages and the gas pedal cap tightens smoothly
+        # as ego approaches the limit (continuous-tracker invariant, AGENTS.md).
         wanted = max(accel_min, wanted)
-        self._last_wanted_ms2 = wanted
-        return wanted
+
+        # Return active=True every tick while enabled — continuous-tracker invariant
+        # (AGENTS.md): the PID must run even when below the limit so the gas pedal
+        # cap tightens progressively rather than snapping on at the boundary.
+        return LongOutput(wanted, True)
 
     def _smooth_target_ema(self, target_ms: float, dt: float) -> float:
         tau = _TARGET_SPEED_EMA_TAU_S

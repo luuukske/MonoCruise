@@ -1,20 +1,23 @@
 """
 Cruise control orchestrator thread.
 
-Owns the longitudinal controller stack (ACC + CC children from
-`core/longitudinal/`), the CC button FSM, and arbitration. Each tick:
+Owns the longitudinal controller stack (ACC + CC + SpeedLimiter children from
+`core/longitudinal/`), the CC button FSM, and mode dispatch. Each tick:
 
 1. Read telemetry + pedal + AEB state, build a `LongCtx`.
-2. Run the CC button FSM — drives `self._cc_ctrl` enable/target.
+2. Run the CC button FSM — drives `self._cc_ctrl` enable/target (both modes).
 3. Run the ACC distance FSM — drives `Settings.acc_gap_level`.
-4. Step the controllers; arbitrate `min(...)` over active bids.
-5. Publish wanted accel to telemetry for `accel_to_pedals.step()` and to
+4. Handle mode-flip handover: reset the now-inactive controller's PID state.
+5. CC-only disengage (user brake, park/gear, disarm-on-stop) — limiter excluded.
+6. Dispatch by cc_mode: CC path or Limiter path.
+7. Publish wanted accel to telemetry for `accel_to_pedals.step()` and to
    `self.data` for UI consumers.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -22,11 +25,19 @@ from dataclasses import dataclass, field
 from core.longitudinal.acc import AdaptiveCruiseController
 from core.longitudinal.base import LongCtx, LongOutput
 from core.longitudinal.cc import CruiseController
+from core.longitudinal.limiter import SpeedLimiter
 from core.settings import Settings
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
+from ui.popup.popup_window import PopupWindow
 
 logger = logging.getLogger(__name__)
+
+# CC disengage thresholds (CC-only — limiter is immune to these events)
+_CC_USER_BRAKE_DISENGAGE = 0.05
+_CC_DISARM_SPEED_MS = 0.3
+_CC_CRASH_SPEED_DROP_MS = 5.0
+_CC_DISARM_PENDING_TIMEOUT_S = 5.0
 
 # Button timing (legacy MonoCruise main_cruise_control)
 _LONG_PRESS_DEC_INC_FIRST_S = 0.3
@@ -42,6 +53,7 @@ class CruiseControlThreadData(ThreadData):
     cc_enabled: bool = False
     target_speed_kmh: float | None = None
     wanted_accel_ms2: float = 0.0
+    active_controller: str = "none"  # "cc" | "limiter" | "none"
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
@@ -56,7 +68,15 @@ class CruiseControlThread(BaseThread):
 
         # Longitudinal controllers — children of LongitudinalController.
         self._cc_ctrl = CruiseController()
+        self._limiter_ctrl = SpeedLimiter()
         self._acc_ctrl = AdaptiveCruiseController()
+
+        # Mode tracking for handover reset on mode flip.
+        self._prev_cc_mode: str | None = None
+
+        # Disarm-on-stop state (CC-only — moved from CruiseController).
+        self._cc_disarm_pending_until: float = 0.0
+        self._cc_prev_speed_ms: float | None = None
 
         # Button FSM state — owns press timing only; acts on CC via _cc_ctrl.
         self._time_pressed_dec: float | None = None
@@ -107,7 +127,7 @@ class CruiseControlThread(BaseThread):
         try:
             if tel is None or pedal is None:
                 self._publish_telemetry_command(0.0)
-                self._publish_data(False, 0.0)
+                self._publish_data(False, 0.0, Settings.cc_mode)
                 self._maybe_reset_mapper_on_commanding_end(False)
                 return
 
@@ -125,15 +145,16 @@ class CruiseControlThread(BaseThread):
             all_assigned = self._all_cc_buttons_assigned()
 
             # Block-message: warn when user presses inc/start but truck is in
+            # Block-message: warn when user presses inc/start but truck is in
             # park/neutral/reverse (cruise mode only).
             if connected and Settings.cc_mode == "Cruise control" and (cc_inc or cc_start):
                 if tel["park_brake"] or tel["gear_dashboard"] <= 0:
                     if now - self._last_block_msg_mono > 2.0:
                         self._last_block_msg_mono = now
                         if tel["park_brake"]:
-                            logger.info("CC cannot be used with parking brake engaged", extra={"popup": True})
+                            logger.info("Cannot engage with parking brake on", extra={"popup": True})
                         else:
-                            logger.info("CC can only be used in drive", extra={"popup": True})
+                            logger.info("Can only engage in drive", extra={"popup": True})
 
             if any((cc_dec, cc_inc, cc_start)):
                 logger.debug(
@@ -191,28 +212,57 @@ class CruiseControlThread(BaseThread):
                 commanded_brake_recent_max=commanded_recent_max,
             )
 
-            # CC steps unconditionally — it owns its own enable/disarm guards.
-            cc_out = self._cc_ctrl.step(ctx)
+            mode = Settings.cc_mode
 
-            # ACC bids only when CC is active. ACC alone (without a setpoint
-            # source) would have no upper bound, so we keep the legacy gating.
-            if cc_out.active:
-                acc_out = self._acc_ctrl.step(ctx)
-            else:
+            # Reset the inactive controller's PID state on mode flip to avoid
+            # stale integrator values when switching back.
+            if mode != self._prev_cc_mode:
+                if mode == "Speed limiter":
+                    self._cc_ctrl.reset()
+                    self._acc_ctrl.reset()
+                else:
+                    self._limiter_ctrl.reset()
+                self._prev_cc_mode = mode
+
+            # Disengage conditions apply to CC only — the limiter is immune to
+            # brake presses, gear changes, and crash events (matches original behaviour).
+            if mode == "Cruise control":
+                self._handle_cc_disengage_conditions(ctx)
+
+            # Dispatch by mode.
+            if mode == "Speed limiter":
+                # CC's button-set target wins; global limit is the always-on fallback
+                # when no target has been set via the buttons.
+                if self._cc_ctrl.enabled and self._cc_ctrl.target_speed_kmh is not None:
+                    self._limiter_ctrl.set_target_kmh(self._cc_ctrl.target_speed_kmh)
+                    self._limiter_ctrl.enable()
+                elif Settings.global_speed_limit_kmh is not None:
+                    self._limiter_ctrl.set_target_kmh(float(Settings.global_speed_limit_kmh))
+                    self._limiter_ctrl.enable()
+                else:
+                    self._limiter_ctrl.disable()
+
+                long_out = self._limiter_ctrl.step(ctx)
                 self._acc_ctrl.reset()
                 acc_out = LongOutput(None, False)
+            else:
+                long_out = self._cc_ctrl.step(ctx)
+                if long_out.active:
+                    acc_out = self._acc_ctrl.step(ctx)
+                else:
+                    self._acc_ctrl.reset()
+                    acc_out = LongOutput(None, False)
 
-            # Arbitrate: lowest active m/s² bid wins.
-            wanted_accel, commanding = self._arbitrate(cc_out, acc_out)
+            wanted_accel, commanding = self._arbitrate(long_out, acc_out)
 
             self._publish_telemetry_command(wanted_accel if commanding else 0.0)
-            self._publish_data(commanding, wanted_accel if commanding else 0.0)
+            self._publish_data(commanding, wanted_accel if commanding else 0.0, mode)
             self._maybe_reset_mapper_on_commanding_end(commanding)
 
         except Exception:
             logger.exception("cruise_control_thread loop error; clearing command")
             self._publish_telemetry_command(0.0)
-            self._publish_data(False, 0.0)
+            self._publish_data(False, 0.0, Settings.cc_mode)
             self._maybe_reset_mapper_on_commanding_end(False)
 
     def teardown(self) -> None:
@@ -371,7 +421,8 @@ class CruiseControlThread(BaseThread):
                     cc.set_target_from_speed_kmh(speed_kmh)
                 if not cc.enabled:
                     cc.enable()
-                    logger.info("Cruise control enabled")
+                    _lbl = "Cruise control" if cruise_mode else "Speed limiter"
+                    logger.info(f"{_lbl} enabled")
         elif self._time_pressed_inc is not None:
             if not self._long_press_inc:
                 if cc.enabled:
@@ -380,7 +431,8 @@ class CruiseControlThread(BaseThread):
                     cc.set_target_from_speed_kmh(speed_kmh)
                 if not cc.enabled:
                     cc.enable()
-                    logger.info("Cruise control enabled")
+                    _lbl = "Cruise control" if cruise_mode else "Speed limiter"
+                    logger.info(f"{_lbl} enabled")
             else:
                 self._long_press_inc = False
             self._time_pressed_inc = None
@@ -396,17 +448,19 @@ class CruiseControlThread(BaseThread):
                     cc.set_target_from_speed_kmh(speed_kmh)
                     if not cc.enabled:
                         cc.enable()
-                    logger.info("Cruise target reset to current speed")
+                    _lbl = "Cruise target" if cruise_mode else "Speed limit"
+                    logger.info(f"{_lbl} reset to current speed")
                 elif not Settings.long_press_reset:
                     logger.info("Long press to reset is disabled")
         elif self._time_pressed_start is not None:
             if not self._long_press_start:
+                _lbl = "Cruise control" if cruise_mode else "Speed limiter"
                 if cc.enabled:
                     cc.disable()
-                    logger.info("Cruise control disabled")
+                    logger.info(f"{_lbl} disabled")
                 else:
                     cc.enable()
-                    logger.info("Cruise control enabled")
+                    logger.info(f"{_lbl} enabled")
                 if cc.target_speed_kmh is None:
                     cc.set_target_from_speed_kmh(speed_kmh)
             else:
@@ -527,12 +581,62 @@ class CruiseControlThread(BaseThread):
         except (KeyError, AttributeError):
             pass
 
-    def _publish_data(self, commanding: bool, wanted_accel_ms2: float) -> None:
+    def _publish_data(self, commanding: bool, wanted_accel_ms2: float, mode: str) -> None:
+        if not commanding:
+            active_ctrl = "none"
+        elif mode == "Speed limiter":
+            active_ctrl = "limiter"
+        else:
+            active_ctrl = "cc"
         with self.data._lock:
             self.data.active = commanding
             self.data.cc_enabled = self._cc_ctrl.enabled
             self.data.target_speed_kmh = self._cc_ctrl.target_speed_kmh
             self.data.wanted_accel_ms2 = wanted_accel_ms2
+            self.data.active_controller = active_ctrl
+
+    def _handle_cc_disengage_conditions(self, ctx: LongCtx) -> None:
+        """Disengage CC on user brake, park/gear, or crash-then-stop.
+
+        Never touches self._limiter_ctrl — the limiter is intentionally immune
+        to all of these events (matches the original always-on limiter behaviour).
+        """
+        cc = self._cc_ctrl
+
+        if cc.enabled:
+            game_brake_excess = ctx.game_brake - ctx.commanded_brake_recent_max
+            if (
+                ctx.user_raw_brake > _CC_USER_BRAKE_DISENGAGE
+                or game_brake_excess > _CC_USER_BRAKE_DISENGAGE
+            ):
+                cc.disable()
+                logger.info("CC disabled — brake pressed", extra={"popup": True})
+
+        if cc.enabled and ctx.connected and (ctx.park_brake or ctx.gear_dashboard <= 0):
+            cc.disable()
+            if ctx.park_brake:
+                logger.info("Cannot engage with parking brake on", extra={"popup": True})
+            else:
+                logger.info("Can only engage in drive", extra={"popup": True})
+
+        if cc.enabled:
+            crash_event = (
+                self._cc_prev_speed_ms is not None
+                and (self._cc_prev_speed_ms - ctx.speed_ms) >= _CC_CRASH_SPEED_DROP_MS
+            )
+            if crash_event or ctx.aeb_brake:
+                self._cc_disarm_pending_until = ctx.now + _CC_DISARM_PENDING_TIMEOUT_S
+            if ctx.now < self._cc_disarm_pending_until and ctx.speed_ms < _CC_DISARM_SPEED_MS:
+                cc.disable()
+                self._cc_disarm_pending_until = 0.0
+                label = "ACC" if Settings.acc_enabled else "CC"
+                logger.info(f"{label} disabled for safety\ntap set/+ to resume")
+                PopupWindow.emit(
+                    f"{label} disabled", "disabled for safety\ntap set/+ to resume", "w",
+                )
+        else:
+            self._cc_disarm_pending_until = 0.0
+        self._cc_prev_speed_ms = ctx.speed_ms
 
     def _maybe_reset_mapper_on_commanding_end(self, commanding: bool) -> None:
         if self._was_commanding and not commanding:

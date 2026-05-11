@@ -24,8 +24,6 @@ from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 from core.settings import Settings
 
-from core.longitudinal.limiter import SpeedLimiter
-
 from core.aeb.calibration import DEFAULT as _AEB_CAL
 
 from .accel_to_pedals import AccelToPedals, MapperSharedState, baseline_accel_ms2, baseline_brake_ms2
@@ -199,19 +197,19 @@ class SendingThread(BaseThread):
         self._last_should_force: bool = False
         self._hazard_user_override: bool = False
         self._prev_tel_hazards: bool = False
-        # Single mapper. Cruise/ACC and limiter both contribute m/s² requests
-        # that are min()-merged before the mapper runs, so there's only one
-        # set of integrators / bias / output continuity. Avoids the per-instance
-        # state drift the dual-mapper design suffered at the limit boundary.
+        # Single mapper. CruiseControlThread publishes one m/s² bid covering
+        # both CC and limiter modes. This avoids the per-instance state drift
+        # the dual-mapper design suffered at the limit boundary.
         self._mapper_shared = MapperSharedState()
         self._accel_mapper = AccelToPedals(self._mapper_shared)
-        self._limiter = SpeedLimiter()
         self._capacity_tracker = PedalCapacityTracker()
         self._aeb_controller = AEBDecelController()
         self._key_listener = None
         self._spd_smooth: float | None = None
         self._prev_spd_mono: float | None = None
         self._prev_measured_decel_ms2: float = 0.0
+        self._prev_mapper_gas: float = 0.0
+        self._prev_user_gas: float = 0.0
         self._prev_aeb_loop_mono: float | None = None
         self._brake_active: bool = False
         self._brake_last_active_at: float = 0.0
@@ -574,19 +572,21 @@ class SendingThread(BaseThread):
                 measured_decel_lead_ms2 = max(0.0, measured_decel_ms2 + lead_term)
                 self._prev_measured_decel_ms2 = measured_decel_ms2
 
-                # Limiter contribution — folded in BEFORE the mapper so there's
-                # one set of integrators for the unified m/s² stream.
-                limiter_wanted = self._limiter.step_wanted(spd_ms)
-                limiter_active = limiter_wanted is not None
-                if limiter_active and not _aeb_active:
-                    wanted_a = min(wanted_a, limiter_wanted) if cruise_active else limiter_wanted
+                # Mapper engages whenever the orchestrator (CruiseControlThread) is
+                # bidding. The orchestrator's single bid covers both CC and limiter
+                # modes — there is no separate limiter call here.
+                mapper_engaged = cruise_active or _aeb_active
 
-                # Mapper engages whenever any controller is bidding, including
-                # the limiter while ego is BELOW the limit. The PID then runs
-                # continuously so the gas pedal cap tightens smoothly as ego
-                # approaches the cap — preventing the overshoot you'd get if
-                # the limiter only woke up after crossing the limit.
-                mapper_engaged = cruise_active or _aeb_active or limiter_active
+                # In limiter mode, only learn when the user is pushing above the
+                # cap (user gas > mapper_gas from last tick), meaning the cap is
+                # actively constraining. When the user is within the cap there is
+                # nothing to learn — letting the integrator run would inflate
+                # mapper_gas and loosen the cap just as ego approaches the limit.
+                # One-tick lag is negligible at 60–100 Hz.
+                if Settings.cc_mode == "Speed limiter":
+                    mapper_learn = mapper_engaged and (self._prev_user_gas > self._prev_mapper_gas)
+                else:
+                    mapper_learn = mapper_engaged
 
                 targets = self._accel_mapper.step(
                     wanted_a,
@@ -602,8 +602,10 @@ class SendingThread(BaseThread):
                     game_throttle=game_throttle,
                     game_clutch=game_clutch,
                     freeze_trim=_aeb_active,
+                    learn=mapper_learn,
                 )
                 mapper_gas = float(targets.gas)
+                self._prev_mapper_gas = mapper_gas
                 mapper_brake = float(targets.brake)
                 mapper_command_gas = float(targets.command_gas)
                 mapper_command_brake = float(targets.command_brake)
@@ -830,6 +832,8 @@ class SendingThread(BaseThread):
         # over-limit), the mapper output reflects limiter-driven brake/0-gas;
         # we still want max() so the user's gas pedal is left intact below the
         # cap, but the explicit cap below ensures the user can't push past it.
+        self._prev_user_gas = a
+
         if not manual_clutch:
             if cruise_active:
                 if Settings.cc_mode == "Speed limiter":
@@ -837,21 +841,6 @@ class SendingThread(BaseThread):
                 else:
                     a = max(a, mapper_gas)
         b = max(b, mapper_brake)
-
-        # Limiter cap — applies whenever the limiter is active, not just over
-        # the limit. Below the limit the mapper output reflects the limiter's
-        # PID (positive m/s² → gas pedal that's full when far below the cap
-        # and tightens as ego nears it). Capping user gas to that progressively
-        # tighter pedal means the truck never overshoots the limit. Above the
-        # limit the same code path forces gas to the mapper's brake-or-zero
-        # output regardless of cc_mode.
-        #
-        # Exception: in "Cruise control" mode the user's gas always overrides
-        # CC and the limiter. The limiter still shapes the CC's m/s² target
-        # via the pre-mapper min(), so CC itself stays within the cap; the
-        # user can freely push above it.
-        if not manual_clutch and limiter_active and (Settings.cc_mode == "Speed limiter" or not cruise_active):
-            a = min(a, mapper_gas)
 
         # AEB active — closed-loop decel controller writes the brake pedal
         # directly from AEB_target_decel_ms2 (FF + small PI on lead-compensated

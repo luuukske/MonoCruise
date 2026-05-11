@@ -1,10 +1,12 @@
 """
 Cruise control longitudinal child — owns set-speed PID, output smoothing,
-target management, gearshift D-term freeze, and disarm-on-stop guard.
+target management, and gearshift D-term freeze.
 
 Buttons (enable/disable/inc/dec/start) are driven by the orchestrator
 (`cruise_control_thread`) which calls `enable()`, `disable()`,
-`change_target_kmh()`, etc. The class itself only owns control state.
+`change_target_kmh()`, etc. Disengage conditions (user brake, park/gear,
+disarm-on-stop) are also owned by the orchestrator — this class only
+owns control state.
 """
 
 from __future__ import annotations
@@ -13,7 +15,6 @@ import logging
 import math
 
 from core.settings import Settings
-from ui.popup.popup_window import PopupWindow
 
 from .base import LongCtx, LongitudinalController, LongOutput
 
@@ -35,17 +36,8 @@ _CC_CLUTCH_ACTIVE_THRESHOLD = 0.05
 _CC_GEARSHIFT_BLOCK_DURATION_S = 0.5
 _CC_GEARSHIFT_RAMP_DURATION_S = 1.0
 
-# Disable-on-stop guard (event + stop window)
-_CC_DISARM_SPEED_MS = 0.3            # ~1.1 km/h
-_CC_CRASH_SPEED_DROP_MS = 5.0        # per-tick speed drop
-_CC_DISARM_PENDING_TIMEOUT_S = 5.0   # arming window after a triggering event
-
 # Game throttle threshold above which CC bypasses brake-side output EMA
 _CC_GAME_THROTTLE_OVERRIDE = 0.1
-
-# Brake threshold for one-shot CC disengage (classic cruise behaviour:
-# tap the brake → CC turns off, user must re-enable).
-_CC_USER_BRAKE_DISENGAGE = 0.05
 
 
 class CruiseController(LongitudinalController):
@@ -72,10 +64,6 @@ class CruiseController(LongitudinalController):
         self._cc_clutch_active: bool = False
         self._cc_clutch_release_mono: float = -math.inf
         self._cc_prev_d_factor: float = 1.0
-
-        # Disarm-on-stop tracking
-        self._cc_disarm_pending_until: float = 0.0
-        self._cc_prev_speed_ms: float | None = None
 
     # External state — read by the orchestrator for publishing/UI
 
@@ -136,62 +124,6 @@ class CruiseController(LongitudinalController):
             clamped = self._clamp_target_kmh(self._target_kmh)
             if clamped != self._target_kmh:
                 self._target_kmh = clamped
-
-        # User-brake disengage. Two independent triggers:
-        #   1. Raw physical brake pedal (pre-OPD) exceeds threshold — direct
-        #      user intent, ignores One Pedal Drive synthesised brake.
-        #   2. In-game brake readback (gameBrake) exceeds the max brake we
-        #      commanded over the last few ticks by more than the threshold —
-        #      means user pressed the in-game brake (keyboard etc.) on top of
-        #      whatever we sent. Comparing against recent commands tolerates
-        #      the readback lag from the game.
-        if self._enabled:
-            game_brake_excess = ctx.game_brake - ctx.commanded_brake_recent_max
-            if (
-                Settings.cc_mode == "Cruise control"
-                and (ctx.user_raw_brake > _CC_USER_BRAKE_DISENGAGE
-                or game_brake_excess > _CC_USER_BRAKE_DISENGAGE)
-            ):
-                self._enabled = False
-                logger.info("CC disabled — brake pressed", extra={"popup": True})
-
-        # Auto-disable when truck enters a non-drivable state (cruise mode only)
-        if (
-            self._enabled
-            and ctx.connected
-            and Settings.cc_mode == "Cruise control"
-            and (ctx.park_brake or ctx.gear_dashboard <= 0)
-        ):
-            self._enabled = False
-            if ctx.park_brake:
-                logger.info("CC disabled — parking brake engaged", extra={"popup": True})
-            else:
-                logger.info("CC disabled — gear neutral or reverse", extra={"popup": True})
-
-        # Disarm-on-stop guard. CC stays armed through normal stops; only
-        # disables when a crash or AEB_brake is followed by a full stop within
-        # the timeout window.
-        if self._enabled and Settings.cc_mode == "Cruise control":
-            crash_event = (
-                self._cc_prev_speed_ms is not None
-                and (self._cc_prev_speed_ms - ctx.speed_ms) >= _CC_CRASH_SPEED_DROP_MS
-            )
-            if crash_event or ctx.aeb_brake:
-                self._cc_disarm_pending_until = ctx.now + _CC_DISARM_PENDING_TIMEOUT_S
-            if (
-                ctx.now < self._cc_disarm_pending_until
-                and ctx.speed_ms < _CC_DISARM_SPEED_MS
-            ):
-                self._enabled = False
-                self._cc_disarm_pending_until = 0.0
-                label = "ACC" if Settings.acc_enabled else "CC"
-                logger.info(f"{label} disabled for safety\ntap set/+ to resume")
-                PopupWindow.emit(
-                    f"{label} disabled", "disabled for safety\ntap set/+ to resume", "w",
-                )
-        else:
-            self._cc_disarm_pending_until = 0.0
-        self._cc_prev_speed_ms = ctx.speed_ms
 
         # Inactive — clear runtime smoothing/integrators so handover to active
         # later starts clean. Target and enabled flag are preserved.
