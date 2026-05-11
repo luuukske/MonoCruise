@@ -478,13 +478,16 @@ class SendingThread(BaseThread):
             except Exception as e:
                 logger.debug("telemetry read failed: %s", e)
 
-        # Resolve cruise_active before mapper so tracker can gate on it.
+        # Resolve cruise_active + active_controller before mapper so tracker
+        # can gate on it and the user-pedal merge can pick max vs min.
         cruise_active = False
+        cruise_active_controller = "none"
         try:
             cruise_t = registry.get_thread("cruise_control_thread")
             if cruise_t is not None and cruise_t.is_alive():
                 with cruise_t.data._lock:
                     cruise_active = bool(cruise_t.data.active)
+                    cruise_active_controller = str(cruise_t.data.active_controller)
         except (KeyError, AttributeError):
             pass
 
@@ -577,13 +580,14 @@ class SendingThread(BaseThread):
                 # modes — there is no separate limiter call here.
                 mapper_engaged = cruise_active or _aeb_active
 
-                # In limiter mode, only learn when the user is pushing above the
-                # cap (user gas > mapper_gas from last tick), meaning the cap is
-                # actively constraining. When the user is within the cap there is
-                # nothing to learn — letting the integrator run would inflate
-                # mapper_gas and loosen the cap just as ego approaches the limit.
+                # When the limiter is the active controller (limiter mode, or
+                # cruise mode with CC off and the global cap engaged), only
+                # learn while the user is pushing above the cap (user gas >
+                # mapper_gas from last tick). Within the cap there is nothing
+                # to learn — letting the integrator run would inflate
+                # mapper_gas and loosen the cap as ego approaches the limit.
                 # One-tick lag is negligible at 60–100 Hz.
-                if Settings.cc_mode == "Speed limiter":
+                if cruise_active_controller == "limiter":
                     mapper_learn = mapper_engaged and (self._prev_user_gas > self._prev_mapper_gas)
                 else:
                     mapper_learn = mapper_engaged
@@ -825,18 +829,17 @@ class SendingThread(BaseThread):
         # also raise it during their own gear changes.
         manual_clutch = user_clutch > 0.1
 
-        # User-pedal merge with the mapper's output.
-        #   cc_mode "Cruise control": CC drives the pedal → max(user, mapper_gas).
-        #   cc_mode "Speed limiter":  CC caps the user pedal → min(user, mapper_gas).
-        # When the limiter is the only thing engaging the mapper (cruise off,
-        # over-limit), the mapper output reflects limiter-driven brake/0-gas;
-        # we still want max() so the user's gas pedal is left intact below the
-        # cap, but the explicit cap below ensures the user can't push past it.
+        # User-pedal merge with the mapper's output. Keyed on which
+        # controller is actually bidding (published by CruiseControlThread),
+        # not cc_mode alone — in cruise mode the global limiter can be the
+        # sole bidder when CC is disabled, and it must cap the user pedal.
+        #   active_controller "cc"      → CC drives  → max(user, mapper_gas)
+        #   active_controller "limiter" → cap        → min(user, mapper_gas)
         self._prev_user_gas = a
 
         if not manual_clutch:
             if cruise_active:
-                if Settings.cc_mode == "Speed limiter":
+                if cruise_active_controller == "limiter":
                     a = min(a, mapper_gas)
                 else:
                     a = max(a, mapper_gas)

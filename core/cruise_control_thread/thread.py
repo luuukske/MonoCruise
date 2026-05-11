@@ -215,13 +215,14 @@ class CruiseControlThread(BaseThread):
             mode = Settings.cc_mode
 
             # Reset the inactive controller's PID state on mode flip to avoid
-            # stale integrator values when switching back.
+            # stale integrator values when switching back. Limiter is not
+            # reset on flip — it runs in both modes (always-on cap in cruise
+            # mode when global_speed_limit_kmh is set), and its target-change
+            # branch handles integral reset internally.
             if mode != self._prev_cc_mode:
                 if mode == "Speed limiter":
                     self._cc_ctrl.reset()
                     self._acc_ctrl.reset()
-                else:
-                    self._limiter_ctrl.reset()
                 self._prev_cc_mode = mode
 
             # Disengage conditions apply to CC only — the limiter is immune to
@@ -242,21 +243,37 @@ class CruiseControlThread(BaseThread):
                 else:
                     self._limiter_ctrl.disable()
 
-                long_out = self._limiter_ctrl.step(ctx)
+                limiter_out = self._limiter_ctrl.step(ctx)
+                cc_out = LongOutput(None, False)
                 self._acc_ctrl.reset()
                 acc_out = LongOutput(None, False)
             else:
-                long_out = self._cc_ctrl.step(ctx)
-                if long_out.active:
+                # Global limiter runs in parallel with CC as an always-on cap
+                # whenever global_speed_limit_kmh is set. Target is strictly the
+                # global limit (never CC's target — CC's target is already
+                # clamped to the global limit, so both converge near the cap).
+                # Limiter is immune to CC disengage, so the cap holds when CC
+                # is off — matches the "global limiter always active" rule.
+                if Settings.global_speed_limit_kmh is not None:
+                    self._limiter_ctrl.set_target_kmh(float(Settings.global_speed_limit_kmh))
+                    self._limiter_ctrl.enable()
+                else:
+                    self._limiter_ctrl.disable()
+
+                cc_out = self._cc_ctrl.step(ctx)
+                limiter_out = self._limiter_ctrl.step(ctx)
+                if cc_out.active:
                     acc_out = self._acc_ctrl.step(ctx)
                 else:
                     self._acc_ctrl.reset()
                     acc_out = LongOutput(None, False)
 
-            wanted_accel, commanding = self._arbitrate(long_out, acc_out)
+            wanted_accel, commanding, winner = self._arbitrate_named(
+                ("cc", cc_out), ("limiter", limiter_out), ("acc", acc_out),
+            )
 
             self._publish_telemetry_command(wanted_accel if commanding else 0.0)
-            self._publish_data(commanding, wanted_accel if commanding else 0.0, mode)
+            self._publish_data(commanding, wanted_accel if commanding else 0.0, mode, winner)
             self._maybe_reset_mapper_on_commanding_end(commanding)
 
         except Exception:
@@ -281,6 +298,26 @@ class CruiseControlThread(BaseThread):
         if not bids:
             return 0.0, False
         return min(bids), True
+
+    @staticmethod
+    def _arbitrate_named(*items: tuple[str, LongOutput]) -> tuple[float, bool, str]:
+        """Min-arbitrate and report which side dominates for the user-pedal merge.
+
+        The 'winner' label drives SendingThread's user-pedal merge (max vs
+        min). CC bids — including the ACC follow-distance child — count as
+        'cc' (max merge: CC drives, user override allowed). Only when the
+        limiter is the sole active bidder does the limiter win (min merge:
+        cap user). This keeps the global limiter from interfering with CC
+        feel while still capping user gas when CC is off.
+        """
+        active = [(name, o.wanted_ms2) for name, o in items if o.active and o.wanted_ms2 is not None]
+        if not active:
+            return 0.0, False, "none"
+        cc_side_bids = [v for name, v in active if name in ("cc", "acc")]
+        limiter_bids = [v for name, v in active if name == "limiter"]
+        all_vals = [v for _, v in active]
+        winner = "cc" if cc_side_bids else "limiter"
+        return min(all_vals), True, winner
 
     @staticmethod
     def _all_cc_buttons_assigned() -> bool:
@@ -581,13 +618,19 @@ class CruiseControlThread(BaseThread):
         except (KeyError, AttributeError):
             pass
 
-    def _publish_data(self, commanding: bool, wanted_accel_ms2: float, mode: str) -> None:
+    def _publish_data(
+        self,
+        commanding: bool,
+        wanted_accel_ms2: float,
+        mode: str,
+        winner: str = "none",
+    ) -> None:
         if not commanding:
             active_ctrl = "none"
-        elif mode == "Speed limiter":
-            active_ctrl = "limiter"
         else:
-            active_ctrl = "cc"
+            active_ctrl = winner if winner in ("cc", "limiter") else (
+                "limiter" if mode == "Speed limiter" else "cc"
+            )
         with self.data._lock:
             self.data.active = commanding
             self.data.cc_enabled = self._cc_ctrl.enabled
