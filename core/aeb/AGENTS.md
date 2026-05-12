@@ -92,15 +92,20 @@ else:
     v_curvature = 0.0
 ```
 
-`aeb_yaw_blend = 0.6` weights yaw higher: position is a smoother on the
-yaw signal, not a co-equal source. All four call sites that previously
-read `v.curvature_from_history()` with `angular_velocity` fallback now go
-through this helper:
+`aeb_yaw_blend` (default `0.4`) controls the mix. All vehicle/trailer
+arcs built inside AEB — visualization **and** collision — must share
+this single curvature so tractor and trailer corridors recover from a
+turn together. Call sites that go through the helper:
 
-1. `thread.py::_build_vehicle_collision_data` (precompute)
-2. `thread.py::loop` (per-vehicle else branch)
-3. `filters.py::_build_vehicle_collision_data` (test harness path)
+1. `thread.py::_build_vehicle_collision_data` (precompute path) — collision tractor + trailer
+2. `thread.py::loop` (per-vehicle else branch) — visualization, passing `curvature_override=v_curvature` to `v.get_arc(...)` and directly into `build_arc(...)` for each trailer
+3. `filters.py::_build_vehicle_collision_data` (test harness path) — collision tractor + trailer
 4. `filters.py::LaneClassifier.apply` (per-frame populate)
+
+Never call `v.get_arc()` from AEB without a `curvature_override` — the
+fallback inside `traffic.py::get_arc` uses the full 25-sample
+`curvature_from_history()` fit, which lags exiting a corner and leaves
+the tractor arc curved long after the trailer arc has straightened.
 
 Do not enlarge `aeb_pos_history_len` toward 25 — the responsiveness gain
 is the whole point, and `curvature_from_history()` on the full buffer is

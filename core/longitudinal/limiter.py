@@ -87,7 +87,7 @@ class SpeedLimiter(LongitudinalController):
 
         error_ms = target_ms - ctx.speed_ms
         # Power-shaped error: small errors amplified, large errors compressed.
-        shaped_error = math.copysign(abs(error_ms) ** 0.7, error_ms)
+        shaped_error = math.copysign(abs(error_ms) ** 0.9, error_ms)
         self._integral_error += shaped_error * ctx.dt
         self._integral_error = max(-clamp, min(clamp, self._integral_error))
 

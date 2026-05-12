@@ -831,7 +831,11 @@ class AEBThread(BaseThread):
                 all_target_arcs = []
                 cross_padding = 0.0
 
-            veh_arc = v.get_arc(dynamic_horizon, arc_start_pctg=cal.arc_start_pctg)
+            veh_arc = v.get_arc(
+                dynamic_horizon,
+                arc_start_pctg=cal.arc_start_pctg,
+                curvature_override=v_curvature,
+            )
             trailer_dicts = []
             trailer_arcs: list[ArcPath] = []
             for tr in v.trailers:
