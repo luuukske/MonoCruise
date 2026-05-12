@@ -259,6 +259,7 @@ aeb = registry.get_thread("aeb_thread").data
 aeb.AEB_warn                       # bool — UI/sound cue (warn fraction or TTB)
 aeb.AEB_brake                      # bool — engagement latched and target > 0
 aeb.AEB_target_decel_ms2           # float — rate-limited commanded decel (m/s²)
+aeb.AEB_ff_decel_ms2               # float — always-on additive FF decel (m/s²); 0 when no threat
 aeb.AEB_required_decel_ms2         # float — slope-corrected required decel
 aeb.AEB_effective_max_decel_ms2    # float — slope-corrected capacity ceiling
 aeb.AEB_realized_decel_ms2         # float — lead-compensated measured decel
@@ -284,10 +285,18 @@ aeb.snapshot                       # AEBSnapshot — full debug state
    `capacity_estimate` is read from `sending_thread.data.max_brake_ms2`
    (PedalCapacityTracker) with a fallback constant.
 4. Engagement hysteresis (slope-aware):
-   - Engage when `effective_required ≥ aeb_engage_frac · effective_max`
-   - Disarm when `effective_required <  aeb_disarm_frac  · effective_max`
+   - `brake_ttb_active = (time_to_brake < cal.brake_ttb)` — emergency criterion
+     for path-crossing / arc-cross threats where `v_closing ≈ 0` collapses the
+     `required_decel = v_closing²/2d` formula but the geometry still says full
+     brake can't avoid intersection. Without this, AEB stays in WARN forever in
+     these scenarios.
+   - Engage when `effective_required ≥ aeb_engage_frac · effective_max` **OR**
+     `brake_ttb_active`.
+   - Disarm when `effective_required <  aeb_disarm_frac · effective_max` **AND
+     NOT** `brake_ttb_active`.
 5. Setpoint pipeline:
-   - `target_raw = clamp(effective_required, 0, effective_max)` while engaged
+   - When `brake_ttb_active`: `target_raw = effective_max` (slam — required formula is unreliable).
+   - Otherwise: `target_raw = clamp(effective_required, 0, effective_max)` while engaged.
    - **Deadband + rate-limit**: if `|Δ| < aeb_target_deadband_ms2` and the
      held value is younger than `aeb_target_refresh_min_s`, hold. Else move
      toward `target_raw` capped at `aeb_target_rate_ms3 · dt` (m/s² per tick).
@@ -378,6 +387,8 @@ apart laterally are suppressed at the `arc_arc_collision` level
 - **Fix D (target arc over-rotation damping) applies to `arc_curvature`, not `v_curvature`.** `v_curvature` is the raw measured value used by `same_curve` and `CoDirectionalDivergeFilter`. Only the curvature passed to `build_arc()` is scaled.
 - **`LaneClassifier` must run before `OppositeLaneFilter`, `CoDirectionalDivergeFilter`, and `EgoEvasionFilter`** — those stages read `ctx.lane`, `ctx.fwd_dot`, `ctx.v_curvature` etc. populated by `LaneClassifier`.
 - **TMP trailer-as-vehicles get tractor speed/accel via `_swap_trailer_kinematics`.** Buffer speed for trailer slots is unreliable (often 0). The swap is done on a shallow copy — never mutate the original Vehicle.
+- **AEB pedal authority is two-layered, never binary-gated to zero.** AEB publishes `AEB_ff_decel_ms2` every tick when there is any real threat (`required_decel > 0`); sending_thread converts it to a brake pedal via the inverse FF curve and merges it as `b = max(b, aeb_ff_pedal)`. This is the **sub-engagement assist** layer — it adds force on top of user braking when the system warns but has not yet engaged. When AEB engages (`AEB_brake == True`), main_pedal_thread slams `brake_output = 1.0` (the **engagement slam** layer) — by definition, engagement means the system has decided full braking is warranted, and the inverse FF curve at a modest required-decel would produce a pedal too soft to act on the threat. Both layers are gated only by `gas_output >= 0.8` (full-gas user authority, the only override that can defeat AEB braking). Reason: removing the engagement slam in favour of pure FF made AEB feel silenced on engagement because FF pedal for 3–5 m/s² is only ~0.14–0.34.
+- **Warn suppression while user braking.** `aeb_warn` is suppressed when `brakeval > cal.user_brake_latch` UNLESS `effective_required >= cal.aeb_warn_near_full_frac × effective_max_decel`. The user does not need a redundant alert while addressing the threat — only surface it when AEB itself wants near-full brake.
 
 ---
 

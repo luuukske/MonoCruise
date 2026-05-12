@@ -432,6 +432,7 @@ class SendingThread(BaseThread):
         AEB_brake = False
         AEB_warn = False
         AEB_target_decel = 0.0
+        AEB_ff_decel = 0.0
         if pedal_thread is not None and pedal_alive:
             try:
                 with pedal_thread.data._lock:
@@ -446,6 +447,9 @@ class SendingThread(BaseThread):
                         AEB_warn = bool(aeb_thread.data.AEB_warn)
                         AEB_target_decel = float(
                             getattr(aeb_thread.data, "AEB_target_decel_ms2", 0.0)
+                        )
+                        AEB_ff_decel = float(
+                            getattr(aeb_thread.data, "AEB_ff_decel_ms2", 0.0)
                         )
             except (KeyError, Exception):
                 pass
@@ -844,6 +848,15 @@ class SendingThread(BaseThread):
                 else:
                     a = max(a, mapper_gas)
         b = max(b, mapper_brake)
+
+        # AEB additive FF pedal — always-on whenever AEB sees a real threat,
+        # independent of engagement latch. Dropped on full-gas user override.
+        if AEB_ff_decel > 0.0 and gasval < 0.8:
+            aeb_ff_pedal = self._accel_mapper._brake_pedal_from_decel(
+                AEB_ff_decel,
+                max(self._capacity_tracker.max_brake_ms2, 0.1),
+            )
+            b = max(b, aeb_ff_pedal)
 
         # AEB active — closed-loop decel controller writes the brake pedal
         # directly from AEB_target_decel_ms2 (FF + small PI on lead-compensated

@@ -239,6 +239,7 @@ class AEBData(ThreadData):
     time_to_brake: float = _INF
     em_stop_requested: bool = False
     AEB_target_decel_ms2: float = 0.0
+    AEB_ff_decel_ms2: float = 0.0
     AEB_required_decel_ms2: float = 0.0
     AEB_effective_max_decel_ms2: float = 0.0
     AEB_realized_decel_ms2: float = 0.0
@@ -1037,15 +1038,28 @@ class AEBThread(BaseThread):
         disarm_threshold = cal.aeb_disarm_frac * effective_max_decel
         warn_threshold = cal.aeb_warn_frac * effective_max_decel
 
+        # brake_ttb_active: full-brake ego still intersects target (ttb=0) or
+        # ttb is below the emergency threshold. Handles path-crossing / arc-cross
+        # scenarios where v_closing≈0 collapses required_decel, but the geometry
+        # still says ego is about to hit something.
+        brake_ttb_active = (
+            run_collision and time_to_brake < cal.brake_ttb
+        )
+
         if self._engaged:
-            if effective_required < disarm_threshold:
+            if effective_required < disarm_threshold and not brake_ttb_active:
                 self._engaged = False
         else:
-            if run_collision and effective_required >= engage_threshold:
+            if run_collision and (
+                effective_required >= engage_threshold or brake_ttb_active
+            ):
                 self._engaged = True
 
         if self._engaged:
-            target_raw = max(0.0, min(effective_required, effective_max_decel))
+            if brake_ttb_active:
+                target_raw = effective_max_decel
+            else:
+                target_raw = max(0.0, min(effective_required, effective_max_decel))
         else:
             target_raw = 0.0
 
@@ -1069,11 +1083,30 @@ class AEBThread(BaseThread):
                 self._last_target_change_mono = now_mono
         self._published_target_ms2 = target_published
 
+        if run_collision and effective_max_decel > 0.1:
+            if brake_ttb_active:
+                aeb_ff_decel = effective_max_decel
+            elif effective_required > 0.0:
+                aeb_ff_decel = min(effective_required, effective_max_decel)
+            else:
+                aeb_ff_decel = 0.0
+        else:
+            aeb_ff_decel = 0.0
+
         warn_by_decel = (
             run_collision and effective_required >= warn_threshold
         )
         warn_by_ttb = (run_collision and time_to_brake < cal.warn_ttb)
         aeb_warn = bool(warn_by_decel or warn_by_ttb)
+
+        user_braking_now = self._read_user_braking()
+        near_full_target = (
+            effective_max_decel > 0.1
+            and effective_required >= cal.aeb_warn_near_full_frac * effective_max_decel
+        )
+        if user_braking_now and not near_full_target:
+            aeb_warn = False
+
         aeb_brake = bool(self._engaged and target_published > 0.0)
 
         if aeb_brake:
@@ -1144,6 +1177,7 @@ class AEBThread(BaseThread):
             self.data.time_to_brake = time_to_brake
             self.data.em_stop_requested = aeb_brake
             self.data.AEB_target_decel_ms2 = target_published
+            self.data.AEB_ff_decel_ms2 = aeb_ff_decel
             self.data.AEB_required_decel_ms2 = effective_required
             self.data.AEB_effective_max_decel_ms2 = effective_max_decel
             self.data.AEB_realized_decel_ms2 = realized_decel
@@ -1168,6 +1202,7 @@ class AEBThread(BaseThread):
             self.data.time_to_brake = _INF
             self.data.em_stop_requested = False
             self.data.AEB_target_decel_ms2 = 0.0
+            self.data.AEB_ff_decel_ms2 = 0.0
             self.data.AEB_required_decel_ms2 = 0.0
             self.data.AEB_effective_max_decel_ms2 = 0.0
             self.data.AEB_realized_decel_ms2 = 0.0

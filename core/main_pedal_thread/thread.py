@@ -423,7 +423,11 @@ class MainPedalThread(BaseThread):
         gas_output   = opdgasval
         brake_output = opdbrakeval
 
-        # AEB override.
+        # AEB override — on engagement (AEB_brake), slam brake to 1.0 and zero
+        # gas. The graduated FF additive path in sending_thread handles the
+        # sub-engagement assist band on top of user braking. Engagement, by
+        # definition, means the system has decided full braking is warranted.
+        # Full-gas user authority preserved via the gas_output < 0.8 gate.
         try:
             aeb = registry.get_thread("aeb_thread")
             if aeb is not None and aeb.is_alive() and gas_output < 0.8:

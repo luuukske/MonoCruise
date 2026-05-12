@@ -95,6 +95,7 @@ class AEBCalibration:
     aeb_engage_frac: float = 0.7
     aeb_disarm_frac: float = 0.45
     aeb_warn_frac: float = 0.5
+    aeb_warn_near_full_frac: float = 0.85
     brake_actuator_lag_s: float = 0.18
 
 
