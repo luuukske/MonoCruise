@@ -47,6 +47,9 @@ _FAST_DERIV_TAU_S: float = 0.12     # measurement derivative smoothing
 # fast PID never has to carry bias (which would cause stale state across context flips).
 _KI_SLOW: float = 0.15
 _SLOW_I_CLAMP_MS2: float = 2.0
+# Initial bias: overestimates resistance so the limiter approaches the set speed
+# conservatively on first engagement. The integral corrects this within a few seconds.
+_SLOW_I_INIT_BIAS_MS2: float = -0.4
 
 # Brake feedforward curve constants — fitted from collected data
 # DO NOT CHANGE WITHOUT VALID COLLECTED DATA
@@ -212,7 +215,9 @@ class MapperSharedState:
 
     # Slow road-load bias correction integral (m/s² space).
     # Persists across commander handover so transitions don't lose the learned bias.
-    slow_integral: float = 0.0
+    # Starts at _SLOW_I_INIT_BIAS_MS2 (overestimates resistance) so the limiter
+    # approaches the set speed conservatively; corrects quickly once active.
+    slow_integral: float = _SLOW_I_INIT_BIAS_MS2
 
     # Output m/s² EMA — continuity across handover.
     output_smooth_ms2: float | None = None
@@ -311,7 +316,7 @@ class AccelToPedals:
         s.prev_raw_smooth = 0.0
         s.output_smooth_ms2 = None
         s.prev_gas_cmd = None
-        s.slow_integral = 0.0
+        s.slow_integral = _SLOW_I_INIT_BIAS_MS2
         s.prev_mono = None
         s.road_load_smooth = 0.0
         s.clutch_active = False
