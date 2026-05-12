@@ -50,15 +50,14 @@ class AEBCalibration:
     evasion_max_dkappa: float = 0.008
     yaw_rate_steer_gain: float = 12.0
     overtake_speed_margin: float = 2.0
-    # AEB-local ego path sources — short rolling buffers for measured-rotation
-    # and position-fit curvature.  Both deliberately shorter than ACC's
-    # 25-sample fit so the predicted corridor reacts within a few frames.
-    # Blended as `yaw_blend * yaw_kappa + (1 - yaw_blend) * pos_kappa`; yaw
-    # weighted higher for responsiveness, position included for smoothing.
-    aeb_yaw_history_len: int = 3
-    aeb_yaw_min_dt: float = 0.03
+    # AEB-local target-vehicle path prediction — two sources blended every
+    # frame: a sliced position fit (last `aeb_pos_history_len` samples of the
+    # vehicle's own _position_history, shorter than the full 25-sample fit)
+    # and the per-frame yaw rate from `angular_velocity`.  Combined as
+    # `yaw_blend * yaw_kappa + (1 - yaw_blend) * pos_kappa`; yaw weighted
+    # higher for responsiveness, position included for smoothing.
     aeb_pos_history_len: int = 6
-    aeb_yaw_blend: float = 0.6
+    aeb_yaw_blend: float = 0.4
 
     # Co-directional diverge
     co_dir_diverge_lookahead_s: float = 0.25

@@ -24,13 +24,13 @@ from core.radar.traffic import (
     Vehicle,
     ArcPath, build_arc, arc_arc_collision, _accel_to_arc_params,
 )
-from core.radar.ego_path import ego_curvature_from_history
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT
 from core.aeb.lane_frame import project_to_ego_arc, classify, Lane
 from core.aeb.filters import (
     FilterContext, FilterResult,
     _build_vehicle_collision_data, _world_to_ego_forward, _cross_zone_padding,
     _apply_cross_zone, _earliest_hit, _is_approaching, _dampen_turning_curvature,
+    _vehicle_curvature_blend,
     build_pipeline,
 )
 
@@ -185,29 +185,6 @@ def _swap_trailer_kinematics(vehicles: list[Vehicle]) -> list[Vehicle]:
                 continue
         out.append(v)
     return out
-
-
-def _ego_curvature_from_yaw_history(
-    history: list[tuple[float, float]],
-    speed: float,
-    cal: AEBCalibration,
-) -> float | None:
-    """Measured ego curvature from a short rolling yaw history.
-
-    Uses wrap-safe yaw delta between the oldest and newest samples — separate
-    from ACC's 25-sample circumscribed-circle position fit. Returns ``None``
-    when too few samples, dt below ``cal.aeb_yaw_min_dt``, or speed too low to
-    convert yaw-rate into curvature meaningfully.
-    """
-    if len(history) < 2 or speed < 0.5:
-        return None
-    t_old, yaw_old = history[0]
-    t_new, yaw_new = history[-1]
-    dt = t_new - t_old
-    if dt < cal.aeb_yaw_min_dt:
-        return None
-    diff = (yaw_new - yaw_old + math.pi) % (2.0 * math.pi) - math.pi
-    return (diff / dt) / speed
 
 
 def _tmp_collision_threat(ref_ego_kmh: float, rel_speed_kmh: float) -> bool:
@@ -383,10 +360,7 @@ def _build_vehicle_collision_data(
     v_hw = v.size.width / 2.0
     v_hw_coll = max(v_hw - 0.1, 0.3)
     abs_v_speed = abs(v.speed)
-    _vk = v.curvature_from_history()
-    v_curvature = _vk if _vk is not None else (
-        math.radians(v.angular_velocity) / abs_v_speed if abs_v_speed > 0.5 else 0.0
-    )
+    v_curvature = _vehicle_curvature_blend(v, abs_v_speed, cal)
     v_yaw_rad = v._smooth_yaw if v._smooth_yaw is not None else math.radians(v.rotation.euler()[1])
     veh_fwd_x = -math.sin(v_yaw_rad)
     veh_fwd_z = -math.cos(v_yaw_rad)
@@ -585,11 +559,6 @@ class AEBThread(BaseThread):
         self._published_target_ms2: float = 0.0
         self._last_target_change_mono: float = 0.0
         self._prev_loop_mono: float | None = None
-        # AEB-local ego history for path prediction — yaw (rotation delta) and
-        # position (circumscribed-circle fit).  Separate from radar's 25-sample
-        # ACC fit; blended each frame for a smooth-yet-responsive corridor.
-        self._ego_yaw_history: list[tuple[float, float]] = []
-        self._ego_position_history: list[tuple[float, float, float]] = []
 
     def _read_user_braking(self) -> bool:
         try:
@@ -691,29 +660,10 @@ class AEBThread(BaseThread):
 
         now_mono = time.monotonic()
 
-        self._ego_yaw_history.append((now_mono, ego_yaw_rad))
-        if len(self._ego_yaw_history) > cal.aeb_yaw_history_len:
-            self._ego_yaw_history = self._ego_yaw_history[-cal.aeb_yaw_history_len:]
-        self._ego_position_history.append((now_mono, ego_x, ego_z))
-        if len(self._ego_position_history) > cal.aeb_pos_history_len:
-            self._ego_position_history = self._ego_position_history[-cal.aeb_pos_history_len:]
-
-        # Two-source AEB path prediction — see AGENTS.md §1.  Yaw delta is the
-        # responsive signal; position fit is the smooth one.  Neither reads
-        # RadarData.ego_curvature (ACC's 25-sample fit).
-        yaw_kappa = _ego_curvature_from_yaw_history(
-            self._ego_yaw_history, ego_speed, cal,
-        )
-        pos_kappa = ego_curvature_from_history(self._ego_position_history)
-
-        if yaw_kappa is not None and pos_kappa is not None:
-            ego_curvature = cal.aeb_yaw_blend * yaw_kappa + (1.0 - cal.aeb_yaw_blend) * pos_kappa
-        elif yaw_kappa is not None:
-            ego_curvature = yaw_kappa
-        elif pos_kappa is not None:
-            ego_curvature = pos_kappa
-        elif ego_speed > 0.5:
-            ego_curvature = math.radians(steer * ego_speed * cal.yaw_rate_steer_gain) / ego_speed
+        # Yaw-rate proxy — see AGENTS.md §1. Do NOT use RadarData.ego_curvature.
+        if ego_speed > 0.5:
+            yaw_rate_rad_s = math.radians(steer * ego_speed * cal.yaw_rate_steer_gain)
+            ego_curvature = yaw_rate_rad_s / ego_speed
         else:
             ego_curvature = 0.0
 
@@ -874,10 +824,7 @@ class AEBThread(BaseThread):
                 v_yaw_rad = math.radians(v_yaw_deg)
                 v_hw = v.size.width / 2.0
                 abs_v_speed = abs(v.speed)
-                _vk = v.curvature_from_history()
-                v_curvature = _vk if _vk is not None else (
-                    math.radians(v.angular_velocity) / abs_v_speed if abs_v_speed > 0.5 else 0.0
-                )
+                v_curvature = _vehicle_curvature_blend(v, abs_v_speed, cal)
                 veh_fwd_x = -math.sin(v_yaw_rad)
                 veh_fwd_z = -math.cos(v_yaw_rad)
                 precomputed_cross_arcs = None
@@ -1211,8 +1158,6 @@ class AEBThread(BaseThread):
         self._published_target_ms2 = 0.0
         self._last_target_change_mono = 0.0
         self._prev_loop_mono = None
-        self._ego_yaw_history.clear()
-        self._ego_position_history.clear()
         with self.data._lock:
             self.data.AEB_warn = False
             self.data.AEB_brake = False

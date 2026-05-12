@@ -10,8 +10,29 @@ from core.radar.traffic import (
     ArcPath, Vehicle,
     build_arc, arc_arc_collision, _accel_to_arc_params,
 )
+from core.radar.ego_path import ego_curvature_from_history
 from core.aeb.calibration import AEBCalibration
 from core.aeb.lane_frame import Lane, project_to_ego_arc, classify
+
+
+def _vehicle_curvature_blend(v: Vehicle, abs_v_speed: float, cal: AEBCalibration) -> float:
+    """Blend short position-fit and yaw-rate signals for a target vehicle's path.
+
+    AEB-local two-source path prediction — smooth (position fit on the last
+    ``cal.aeb_pos_history_len`` history samples) blended with responsive
+    (single-frame yaw rate from ``angular_velocity``).  Either side fills in
+    when the other is unavailable.
+    """
+    pos_hist = list(v._position_history)[-cal.aeb_pos_history_len:]
+    pos_kappa = ego_curvature_from_history(pos_hist) if len(pos_hist) >= 3 else None
+    yaw_kappa = math.radians(v.angular_velocity) / abs_v_speed if abs_v_speed > 0.5 else None
+    if pos_kappa is not None and yaw_kappa is not None:
+        return cal.aeb_yaw_blend * yaw_kappa + (1.0 - cal.aeb_yaw_blend) * pos_kappa
+    if pos_kappa is not None:
+        return pos_kappa
+    if yaw_kappa is not None:
+        return yaw_kappa
+    return 0.0
 
 if TYPE_CHECKING:
     pass
@@ -125,10 +146,7 @@ def _build_vehicle_collision_data(
     v_hw = v.size.width / 2.0
     v_hw_coll = max(v_hw - 0.1, 0.3)
     abs_v_speed = abs(v.speed)
-    _vk = v.curvature_from_history()
-    v_curvature = _vk if _vk is not None else (
-        math.radians(v.angular_velocity) / abs_v_speed if abs_v_speed > 0.5 else 0.0
-    )
+    v_curvature = _vehicle_curvature_blend(v, abs_v_speed, cal)
     v_yaw_rad = v._smooth_yaw if v._smooth_yaw is not None else math.radians(v.rotation.euler()[1])
     veh_fwd_x = -math.sin(v_yaw_rad)
     veh_fwd_z = -math.cos(v_yaw_rad)
@@ -326,11 +344,7 @@ class LaneClassifier:
         ctx.veh_fwd_x = -math.sin(ctx.v_yaw_rad)
         ctx.veh_fwd_z = -math.cos(ctx.v_yaw_rad)
         ctx.abs_v_speed = abs(ctx.v.speed)
-        _vk = ctx.v.curvature_from_history()
-        ctx.v_curvature = _vk if _vk is not None else (
-            math.radians(ctx.v.angular_velocity) / ctx.abs_v_speed
-            if ctx.abs_v_speed > 0.5 else 0.0
-        )
+        ctx.v_curvature = _vehicle_curvature_blend(ctx.v, ctx.abs_v_speed, cal)
         ctx.fwd_dot = ctx.ego_fwd_x * ctx.veh_fwd_x + ctx.ego_fwd_z * ctx.veh_fwd_z
         ctx.head_on = ctx.fwd_dot < cal.head_on_dot
         ctx.near_head_on = ctx.fwd_dot < cal.near_head_on_dot
