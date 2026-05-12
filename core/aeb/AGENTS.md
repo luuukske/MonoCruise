@@ -29,26 +29,67 @@ Vehicle instances are shared references — do not mutate them from AEB. All
 smoothing, yaw EMA, position history, and curvature state is produced once
 per frame by the radar thread.
 
-### Ego curvature — yaw-rate proxy only
+### TMP trailer-as-vehicle kinematic swap
 
-AEB **does not** consume `RadarData.ego_curvature` (the position-history
-fit). The ego path must react instantly to steering input; a history-based
-fit lags the truck through a transient steer and either smears the ego
-corridor onto the outgoing lane (false positive after the corner clears)
-or leaves it pointing at the previous lane (false negative into the
-corner). The yaw-rate proxy has zero lag and zero smoothing:
+In TMP sessions, other players' trailers appear as separate top-level radar
+vehicles (`is_tmp=True`, `is_trailer=True`). The shared-memory speed field for
+those slots has no engine telemetry — it commonly reports 0 — and the
+position-history LS fit can also return 0 during transients (small chord,
+stall, fresh spawn). Without correction, AEB sees a "stationary" obstacle
+directly ahead of ego and triggers falsely.
+
+`_swap_trailer_kinematics()` in `thread.py` walks the vehicle list once at the
+top of each loop. For every `is_tmp` + `is_trailer` entry it locates the
+nearest non-trailer TMP vehicle within 30 m (the pulling tractor) and returns
+a shallow copy with `speed` and `acceleration` replaced by the tractor's
+filtered values. The trailer's pose, yaw, curvature, and trailer-flag stay
+its own — only the kinematics it cannot self-measure are inherited. ACC has
+the same swap in `core/acc/tracker.py::_top_leads`.
+
+Only the precompute and main collision iterations consume `vehicles_eff`. The
+radar visualizer still reads the original `vehicles` so raw vs filtered speed
+displays remain meaningful for debugging the source data.
+
+### Ego curvature — two-source AEB-local path
+
+AEB **does not** consume `RadarData.ego_curvature` (the 25-sample
+circumscribed-circle position fit consumed by ACC). The ACC fit is
+smoothed for stable long-horizon scoring; that same smoothing lags the
+truck through transients and either smears the corridor onto the
+outgoing lane (FP after the corner clears) or leaves it pointing at the
+previous lane (FN into the corner).
+
+AEB maintains its **own** short rolling histories and blends two
+signals every frame:
+
+| Signal | Source | Role |
+|--------|--------|------|
+| `yaw_kappa` | wrap-safe yaw delta over `cal.aeb_yaw_history_len = 3` samples, dt-floor `cal.aeb_yaw_min_dt = 0.03 s` | **Responsive** — picks up rotation within ~2 frames |
+| `pos_kappa` | circumscribed-circle fit on `cal.aeb_pos_history_len = 6` ego positions (shared helper `ego_curvature_from_history`) | **Smooth** — damps single-frame yaw noise |
 
 ```python
-if ego_speed > 0.5:
-    yaw_rate_rad_s = math.radians(steer * ego_speed * 12.0)
-    ego_curvature  = yaw_rate_rad_s / ego_speed
+yaw_kappa = _ego_curvature_from_yaw_history(self._ego_yaw_history, ego_speed, cal)
+pos_kappa = ego_curvature_from_history(self._ego_position_history)
+
+if yaw_kappa is not None and pos_kappa is not None:
+    ego_curvature = cal.aeb_yaw_blend * yaw_kappa + (1 - cal.aeb_yaw_blend) * pos_kappa
+elif yaw_kappa is not None:
+    ego_curvature = yaw_kappa
+elif pos_kappa is not None:
+    ego_curvature = pos_kappa
+elif ego_speed > 0.5:
+    ego_curvature = math.radians(steer * ego_speed * cal.yaw_rate_steer_gain) / ego_speed
 else:
-    ego_curvature  = 0.0
+    ego_curvature = 0.0
 ```
 
-`RadarData.ego_curvature` is consumed by ACC, not AEB. Do not add an
-"optional" history fallback to AEB — the reactivity loss is the problem,
-not the transient-sample count.
+`aeb_yaw_blend = 0.6` weights yaw higher: position is a smoother on the
+yaw signal, not a co-equal source. The steer proxy survives only as the
+last-resort bootstrap before either history is populated.
+
+Both AEB histories are independent of ACC's 25-sample one. Do not enlarge
+`aeb_yaw_history_len` or `aeb_pos_history_len` toward ACC parity — the
+reactivity loss is the problem, not the transient-sample count.
 
 ---
 
@@ -306,7 +347,7 @@ apart laterally are suppressed at the `arc_arc_collision` level
 ## 9. Critical Rules — Do Not Break (AEB-specific)
 
 - **AEB is a consumer of `RadarThread`.** Do not open the traffic shared-memory buffer directly and do not mutate `Vehicle` instances.
-- **AEB ego curvature is the yaw-rate proxy, full stop.** Do not read `RadarData.ego_curvature` from AEB.
+- **AEB ego curvature is a blend of AEB-local yaw-delta and AEB-local position-fit curvature (`aeb_yaw_blend` weight on yaw), with the steer proxy as bootstrap fallback.** Do not read `RadarData.ego_curvature` (ACC's 25-sample position fit) from AEB, and do not enlarge `aeb_yaw_history_len` / `aeb_pos_history_len` toward ACC parity.
 - **`co_directional` must use `fwd_dot > 0.7`, not `abs(fwd_dot) > 0.7`.** The two flags must be mutually exclusive with `head_on`.
 - **All tunable constants live in `AEBCalibration`.** Do not introduce new bare numeric literals in `thread.py` or `filters.py`. Add the constant to `calibration.py` first.
 - **`lane_frame.project_to_ego_arc` is the canonical lane primitive.** Do not use cross-product `lateral_offset` for lane classification — it compresses on curved roads. The `max(d_arc, d_straight)` formula in `project_to_ego_arc` is the safety-critical fix.
@@ -315,6 +356,7 @@ apart laterally are suppressed at the `arc_arc_collision` level
 - **Fix B has no ego_k guard.** The `own_lane` check is the only gate; `|ego_curvature|` expands `delta_kappa_t` only if it would actually increase it.
 - **Fix D (target arc over-rotation damping) applies to `arc_curvature`, not `v_curvature`.** `v_curvature` is the raw measured value used by `same_curve` and `CoDirectionalDivergeFilter`. Only the curvature passed to `build_arc()` is scaled.
 - **`LaneClassifier` must run before `OppositeLaneFilter`, `CoDirectionalDivergeFilter`, and `EgoEvasionFilter`** — those stages read `ctx.lane`, `ctx.fwd_dot`, `ctx.v_curvature` etc. populated by `LaneClassifier`.
+- **TMP trailer-as-vehicles get tractor speed/accel via `_swap_trailer_kinematics`.** Buffer speed for trailer slots is unreliable (often 0). The swap is done on a shallow copy — never mutate the original Vehicle.
 
 ---
 

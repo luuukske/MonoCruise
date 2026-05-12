@@ -8,6 +8,7 @@ Registry name: ``aeb_thread``
 
 from __future__ import annotations
 
+import copy
 import enum
 import logging
 import math
@@ -23,6 +24,7 @@ from core.radar.traffic import (
     Vehicle,
     ArcPath, build_arc, arc_arc_collision, _accel_to_arc_params,
 )
+from core.radar.ego_path import ego_curvature_from_history
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT
 from core.aeb.lane_frame import project_to_ego_arc, classify, Lane
 from core.aeb.filters import (
@@ -139,6 +141,74 @@ _SHARED_TURN_MAX_KAPPA: float = 0.05         # cap on road-following curvature (
 # Dampen target curvature when heading rotation over the arc horizon would exceed
 # the angle to anti-parallel road alignment.
 _TURN_COMPLETE_CURVATURE_SCALE: float = 3.0   # divisor applied when overshoot detected
+
+_TRAILER_TRACTOR_RADIUS_M: float = 30.0
+
+
+def _find_tractor_for_trailer(trailer: Vehicle, vehicles: list[Vehicle]) -> Vehicle | None:
+    """Nearest non-trailer TMP vehicle within _TRAILER_TRACTOR_RADIUS_M of the trailer."""
+    best: Vehicle | None = None
+    best_d_sq = _TRAILER_TRACTOR_RADIUS_M * _TRAILER_TRACTOR_RADIUS_M
+    for other in vehicles:
+        if other.id == trailer.id:
+            continue
+        if not other.is_tmp or other.is_trailer:
+            continue
+        dx = other.position.x - trailer.position.x
+        dz = other.position.z - trailer.position.z
+        d_sq = dx * dx + dz * dz
+        if d_sq < best_d_sq:
+            best_d_sq = d_sq
+            best = other
+    return best
+
+
+def _swap_trailer_kinematics(vehicles: list[Vehicle]) -> list[Vehicle]:
+    """Return list where TMP trailer-as-vehicles inherit speed/acceleration from their tractor.
+
+    TMP trailers reported as standalone radar vehicles have unreliable shared-memory
+    speed (often 0 — the trailer slot has no engine telemetry). Position-history LS
+    fit can also return 0 when the chord is small during a stall or right after spawn.
+    AEB collision math then sees a "stationary" obstacle directly ahead and triggers
+    falsely. Mirror ACC's swap: keep the trailer's pose (its own arc geometry is
+    correct) but read kinematics from the nearest TMP tractor within 30 m.
+    """
+    out: list[Vehicle] = []
+    for v in vehicles:
+        if v.is_tmp and v.is_trailer:
+            tractor = _find_tractor_for_trailer(v, vehicles)
+            if tractor is not None:
+                eff = copy.copy(v)
+                eff.speed = tractor.speed
+                eff.acceleration = tractor.acceleration
+                out.append(eff)
+                continue
+        out.append(v)
+    return out
+
+
+def _ego_curvature_from_yaw_history(
+    history: list[tuple[float, float]],
+    speed: float,
+    cal: AEBCalibration,
+) -> float | None:
+    """Measured ego curvature from a short rolling yaw history.
+
+    Uses wrap-safe yaw delta between the oldest and newest samples — separate
+    from ACC's 25-sample circumscribed-circle position fit. Returns ``None``
+    when too few samples, dt below ``cal.aeb_yaw_min_dt``, or speed too low to
+    convert yaw-rate into curvature meaningfully.
+    """
+    if len(history) < 2 or speed < 0.5:
+        return None
+    t_old, yaw_old = history[0]
+    t_new, yaw_new = history[-1]
+    dt = t_new - t_old
+    if dt < cal.aeb_yaw_min_dt:
+        return None
+    diff = (yaw_new - yaw_old + math.pi) % (2.0 * math.pi) - math.pi
+    return (diff / dt) / speed
+
 
 def _tmp_collision_threat(ref_ego_kmh: float, rel_speed_kmh: float) -> bool:
     """TMP session only — True if target should participate in arc collision / TTB."""
@@ -515,6 +585,11 @@ class AEBThread(BaseThread):
         self._published_target_ms2: float = 0.0
         self._last_target_change_mono: float = 0.0
         self._prev_loop_mono: float | None = None
+        # AEB-local ego history for path prediction — yaw (rotation delta) and
+        # position (circumscribed-circle fit).  Separate from radar's 25-sample
+        # ACC fit; blended each frame for a smooth-yet-responsive corridor.
+        self._ego_yaw_history: list[tuple[float, float]] = []
+        self._ego_position_history: list[tuple[float, float, float]] = []
 
     def _read_user_braking(self) -> bool:
         try:
@@ -607,6 +682,8 @@ class AEBThread(BaseThread):
          steer, ego_has_trailer, _ego_curvature_from_history, tmp_traffic_session,
          paused) = snapshot
 
+        vehicles_eff = _swap_trailer_kinematics(vehicles) if tmp_traffic_session else vehicles
+
         if paused and self._last_snapshot is not None:
             with self.data._lock:
                 self.data.snapshot = self._last_snapshot
@@ -614,10 +691,29 @@ class AEBThread(BaseThread):
 
         now_mono = time.monotonic()
 
-        # Yaw-rate proxy — see AGENTS.md §1. Do NOT use RadarData.ego_curvature.
-        if ego_speed > 0.5:
-            yaw_rate_rad_s = math.radians(steer * ego_speed * cal.yaw_rate_steer_gain)
-            ego_curvature = yaw_rate_rad_s / ego_speed
+        self._ego_yaw_history.append((now_mono, ego_yaw_rad))
+        if len(self._ego_yaw_history) > cal.aeb_yaw_history_len:
+            self._ego_yaw_history = self._ego_yaw_history[-cal.aeb_yaw_history_len:]
+        self._ego_position_history.append((now_mono, ego_x, ego_z))
+        if len(self._ego_position_history) > cal.aeb_pos_history_len:
+            self._ego_position_history = self._ego_position_history[-cal.aeb_pos_history_len:]
+
+        # Two-source AEB path prediction — see AGENTS.md §1.  Yaw delta is the
+        # responsive signal; position fit is the smooth one.  Neither reads
+        # RadarData.ego_curvature (ACC's 25-sample fit).
+        yaw_kappa = _ego_curvature_from_yaw_history(
+            self._ego_yaw_history, ego_speed, cal,
+        )
+        pos_kappa = ego_curvature_from_history(self._ego_position_history)
+
+        if yaw_kappa is not None and pos_kappa is not None:
+            ego_curvature = cal.aeb_yaw_blend * yaw_kappa + (1.0 - cal.aeb_yaw_blend) * pos_kappa
+        elif yaw_kappa is not None:
+            ego_curvature = yaw_kappa
+        elif pos_kappa is not None:
+            ego_curvature = pos_kappa
+        elif ego_speed > 0.5:
+            ego_curvature = math.radians(steer * ego_speed * cal.yaw_rate_steer_gain) / ego_speed
         else:
             ego_curvature = 0.0
 
@@ -717,10 +813,11 @@ class AEBThread(BaseThread):
         ego_pitch_rad = math.radians(ego_pitch_deg)
 
         # Precompute per-vehicle collision arcs for vehicles passing range/elevation/TMP.
+        # Use vehicles_eff so TMP trailer-as-vehicles inherit tractor speed/acceleration.
         vehicle_collision_data: dict[int, tuple] = {}
         max_range_sq = cal.max_range ** 2
         if run_collision:
-            for v in vehicles:
+            for v in vehicles_eff:
                 vx, vz = v.position.x, v.position.z
                 dx = vx - ego_x
                 dz = vz - ego_z
@@ -752,7 +849,7 @@ class AEBThread(BaseThread):
                     pc_yaw, pc_aspd, pc_fx, pc_fz, pc_curv,
                 )
 
-        for v in vehicles:
+        for v in vehicles_eff:
             vx, vz = v.position.x, v.position.z
 
             pc = vehicle_collision_data.get(v.id)
@@ -1114,6 +1211,8 @@ class AEBThread(BaseThread):
         self._published_target_ms2 = 0.0
         self._last_target_change_mono = 0.0
         self._prev_loop_mono = None
+        self._ego_yaw_history.clear()
+        self._ego_position_history.clear()
         with self.data._lock:
             self.data.AEB_warn = False
             self.data.AEB_brake = False

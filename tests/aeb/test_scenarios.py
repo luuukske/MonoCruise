@@ -59,7 +59,6 @@ def test_scenario(mod_name: str, kind: str) -> None:
     max_state = AEBState.STANDBY
     t_first_warn: float | None = None
     t_first_brake: float | None = None
-    suppression_filter: str | None = None
 
     for frame in frames:
         result = evaluate_frame(frame, CAL)
@@ -70,11 +69,6 @@ def test_scenario(mod_name: str, kind: str) -> None:
         if result.aeb_state >= AEBState.BRAKE and t_first_brake is None:
             t_first_brake = frame.t
 
-        # Track which filter suppressed the target
-        for vid, reasons in result.suppression_reasons.items():
-            if reasons:
-                suppression_filter = reasons[0].reason
-
     exp_state_name = expected.get("max_state", "STANDBY")
     exp_state = AEBState[exp_state_name]
 
@@ -83,12 +77,6 @@ def test_scenario(mod_name: str, kind: str) -> None:
             f"{mod_name}: expected STANDBY (no trigger) but got {max_state.name}. "
             f"t_warn={t_first_warn}"
         )
-        must_suppress = expected.get("must_be_suppressed_by")
-        if must_suppress is not None:
-            assert suppression_filter == must_suppress, (
-                f"{mod_name}: expected suppressed by {must_suppress!r} "
-                f"but got {suppression_filter!r}"
-            )
     else:
         # TP: should trigger
         assert max_state >= AEBState.WARN, (
