@@ -165,6 +165,9 @@ class SendingThreadData(ThreadData):
     mapper_gain_scale: float = 1.0
     mapper_pedal_state: int = 0
     max_brake_ms2: float = 0.0         # live PedalCapacityTracker estimate (m/s²)
+    # Holding-brake FSM (relocated from main_pedal_thread). Owned here so the
+    # hold floor applies to every brake source — user pedal, mapper, AEB.
+    stopped: bool = False
     # Most recent brake values written to the game (last N ticks). Used by
     # cruise_control_thread to distinguish a user's in-game brake press from
     # the game echoing back our own command (which lags by a few ticks).
@@ -213,6 +216,12 @@ class SendingThread(BaseThread):
         self._prev_aeb_loop_mono: float | None = None
         self._brake_active: bool = False
         self._brake_last_active_at: float = 0.0
+        # Holding-brake FSM state. _prev_brake_snapshot is the merged brake
+        # captured at the False→True edge so the 0.5 s blend ramps from
+        # "merge at the moment we became stopped" up to "merge + hold".
+        self._stopped: bool = False
+        self._prev_brake_snapshot: float = 0.0
+        self._prev_stop_mono: float = 0.0
         # Ring buffer of the last 3 brake outputs sent to the game (oldest first).
         self._recent_brake_outputs: list[float] = [0.0, 0.0, 0.0]
 
@@ -226,7 +235,7 @@ class SendingThread(BaseThread):
         except Exception:
             self._project_root = Path(".").resolve()
 
-    # Coast-down CSV logger ------------------------------------------------
+    # Coast-down CSV logger 
 
     def _ensure_coast_log(self) -> None:
         if self._coast_log_file is not None:
@@ -376,6 +385,9 @@ class SendingThread(BaseThread):
         self._prev_tel_hazards = False
         self._brake_active = False
         self._brake_last_active_at = 0.0
+        self._stopped = False
+        self._prev_brake_snapshot = 0.0
+        self._prev_stop_mono = 0.0
 
         self._capacity_tracker.load_persisted(
             baseline_brake=baseline_brake_ms2(0.0, False),
@@ -465,6 +477,7 @@ class SendingThread(BaseThread):
         gear = 0
         tel_hazards = False
         speed_ms = 0.0
+        park_brake = False
 
         try:
             tel_thread = registry.get_thread("telemetry_thread")
@@ -479,6 +492,7 @@ class SendingThread(BaseThread):
                     gear = tel_thread.data.gear_dashboard
                     tel_hazards = bool(tel_thread.data.hazardsActive)
                     speed_ms = tel_thread.data.speed
+                    park_brake = bool(tel_thread.data.parkBrake)
             except Exception as e:
                 logger.debug("telemetry read failed: %s", e)
 
@@ -688,11 +702,15 @@ class SendingThread(BaseThread):
             self._prev_spd_mono = None
             self._prev_measured_decel_ms2 = 0.0
             self._prev_aeb_loop_mono = None
+            self._stopped = False
+            self._prev_stop_mono = 0.0
+            self._prev_brake_snapshot = 0.0
             controller.aforward = 0.0
             controller.abackward = 0.0
             with self.data._lock:
                 self.data.aforward = 0.0
                 self.data.abackward = 0.0
+                self.data.stopped = False
                 self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
@@ -730,6 +748,7 @@ class SendingThread(BaseThread):
             with self.data._lock:
                 self.data.aforward = 0.0
                 self.data.abackward = 0.0
+                self.data.stopped = self._stopped
                 self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
@@ -761,12 +780,14 @@ class SendingThread(BaseThread):
                 self.data.mapper_pedal_state = 0
             return
 
+        opdgasval = 0.0
         try:
             with pedal_thread.data._lock:
                 gas_output = pedal_thread.data.gas_output
                 brake_output = pedal_thread.data.brake_output
                 gasval = pedal_thread.data.gasval
                 brakeval = pedal_thread.data.brakeval
+                opdgasval = float(getattr(pedal_thread.data, "opdgasval", 0.0))
         except Exception as e:
             logger.debug("pedal read failed: %s", e)
             controller.aforward = 0.0
@@ -774,6 +795,7 @@ class SendingThread(BaseThread):
             with self.data._lock:
                 self.data.aforward = 0.0
                 self.data.abackward = 0.0
+                self.data.stopped = self._stopped
                 self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
@@ -837,8 +859,16 @@ class SendingThread(BaseThread):
         # controller is actually bidding (published by CruiseControlThread),
         # not cc_mode alone — in cruise mode the global limiter can be the
         # sole bidder when CC is disabled, and it must cap the user pedal.
-        #   active_controller "cc"      → CC drives  → max(user, mapper_gas)
+        #   active_controller "cc"      → CC drives  → max(opd_gas, mapper_gas)
         #   active_controller "limiter" → cap        → min(user, mapper_gas)
+        # CC override uses opdgasval (always OPD-mapped, regardless of CC
+        # state) so the driver overrides CC through the same one-pedal feel
+        # they get with CC off: below the OPD offset the gas portion is zero
+        # and CC keeps commanding; above it the driver's intent wins.
+        # Note: the OPD *brake* side (coast-down) is suppressed in
+        # main_pedal_thread when CC is commanding — the truck's brake comes
+        # only from user brake pedal + mapper_brake here, so OPD doesn't
+        # fight CC.
         self._prev_user_gas = a
 
         if not manual_clutch:
@@ -846,8 +876,84 @@ class SendingThread(BaseThread):
                 if cruise_active_controller == "limiter":
                     a = min(a, mapper_gas)
                 else:
-                    a = max(a, mapper_gas)
+                    a = max(opdgasval, mapper_gas)
         b = max(b, mapper_brake)
+
+        # Holding brake — final floor on the merged brake so the truck does
+        # not creep on slopes when any controller (user, mapper, AEB) is
+        # driving. The FSM mirrors the one previously in main_pedal_thread;
+        # transitions are gated by user gas (gasval / opdgasval) so the user
+        # still owns whether to enter/leave the stopped state.
+        offset = Settings.offset_variable or 0.0
+        effective_gas = max(gasval, opdgasval)
+        slope_val = road_pitch
+
+        if self._stopped:
+            hold_add = 0.0
+            if gear > 0 and speed_kmh < 3 and 0 < effective_gas <= (0.7 + offset * 0.7):
+                hold_add = min(
+                    0.03 * (((-round(speed_kmh + 0.8, 1) + 4) ** 5) / (4 ** 5)) + slope_val * 2,
+                    0.3,
+                )
+            elif gear < 0 and speed_kmh > -3 and 0 < effective_gas <= (0.7 + offset * 0.7):
+                hold_add = min(
+                    0.03 * (((round(speed_kmh + 0.8, 1) + 4) ** 5) / (4 ** 5)) - slope_val * 2,
+                    0.3,
+                )
+            elif effective_gas == 0 and gear != 0:
+                hold_add = 0.06
+
+            b_with_hold = b + hold_add
+            delta_time = time.monotonic() - self._prev_stop_mono
+            t_blend = 0.5
+            if self._prev_stop_mono != 0.0 and delta_time < t_blend:
+                b = (
+                    b_with_hold * (delta_time / t_blend)
+                    + self._prev_brake_snapshot * (1.0 - delta_time / t_blend)
+                )
+            else:
+                b = b_with_hold
+                self._prev_stop_mono = 0.0
+
+        prev_stopped = self._stopped
+        if (
+            -0.1 <= speed_kmh <= 0.1
+            and gasval == 0
+            and gear != 0
+            and not self._stopped
+        ):
+            self._stopped = True
+        elif self._stopped and (
+            (speed_kmh >= 4 and gear > 0) or (speed_kmh <= -4 and gear < 0)
+        ):
+            self._stopped = False
+            self._prev_stop_mono = 0.0
+        elif self._stopped and opdgasval > 0.75:
+            self._stopped = False
+            self._prev_stop_mono = 0.0
+        elif (
+            self._stopped
+            and cruise_active
+            and cruise_active_controller == "cc"
+            and mapper_gas > 0.02
+            and not _aeb_active
+        ):
+            # CC has decided to launch (mapper is bidding gas) — release the
+            # hold so its gas command isn't trapped by the brake floor. Without
+            # this, mapper_gas and hold-brake fight at standstill and the truck
+            # never rolls out from behind a lead.
+            self._stopped = False
+            self._prev_stop_mono = 0.0
+        if park_brake and -2 <= speed_kmh <= 2 and not self._stopped:
+            self._stopped = True
+
+        if self._stopped and not prev_stopped:
+            # False→True edge: the hold-brake block did not run this tick (it
+            # is gated on the previous-tick value of _stopped), so b is the
+            # merged brake without any hold addition. Snapshot it so the
+            # 0.5 s blend can ramp from that level up to "merge + hold".
+            self._prev_brake_snapshot = b
+            self._prev_stop_mono = time.monotonic()
 
         # AEB additive FF pedal — always-on whenever AEB sees a real threat,
         # independent of engagement latch. Dropped on full-gas user override.
@@ -930,6 +1036,7 @@ class SendingThread(BaseThread):
         with self.data._lock:
             self.data.aforward = a
             self.data.abackward = b
+            self.data.stopped = self._stopped
             self.data.recent_brake_outputs = tuple(self._recent_brake_outputs)
             self.data.hazardsActive = tel_hazards
             self.data.horn_active = bool(getattr(controller, "horn", False))
@@ -982,6 +1089,7 @@ class SendingThread(BaseThread):
         with self.data._lock:
             self.data.aforward = 0.0
             self.data.abackward = 0.0
+            self.data.stopped = False
             self.data.hazardsActive = False
             self.data.horn_active = False
             self.data.airhorn_active = False

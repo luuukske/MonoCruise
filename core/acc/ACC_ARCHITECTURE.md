@@ -395,7 +395,7 @@ creeps against the torque converter / engine idle.
 ### 12.1 Distance and lead speed — symmetric distance-adaptive EMA
 
 `dist_m` and `v_lead_ms` go through a distance-adaptive EMA — τ ramps
-linearly from 80 ms at 20 m to 120 ms at 80 m. Close range stays snappy;
+linearly from 120 ms at 20 m to 200 ms at 80 m. Close range stays snappy;
 long range is filtered hard to kill TruckersMP packet jitter before it
 reaches the IIDM core. Each chain member maintains its own EMA state
 keyed on `vehicle.id` so a swap of the primary lead does not cause a
@@ -403,21 +403,28 @@ discontinuity on the new lead-of-lead.
 
 ### 12.2 Lead acceleration — asymmetric EMA
 
-`a_lead_ms2` uses an **asymmetric** EMA:
+`a_lead_ms2` uses a **deadbanded asymmetric** EMA:
 
 ```
-τ_brake = 30 ms          # fast: when a_lead is becoming more negative
-τ_relax = 150 ms         # slow: when a_lead is becoming more positive
-τ      = τ_brake if (new_a_lead < prev_a_lead_ema) else τ_relax
+τ_brake = 80 ms          # fast: real negative-going step exceeds deadband
+τ_relax = 350 ms         # slow: relax / coast / sub-deadband noise
+deadband = 0.30 m/s²     # AI tick-to-tick wobble + MP packet jitter floor
+
+Δ = new_a_lead − prev_a_lead_ema
+τ = τ_relax           if |Δ| < deadband   # noise — heaviest filter
+τ = τ_brake           if Δ ≤ −deadband    # real brake event
+τ = τ_relax           otherwise           # real positive change
 ```
 
-Rationale: during a real braking event the truth is changing rapidly in
-the negative direction; we want to follow it within one tick. On the
-positive side (coasting, throttle reapplication, packet jitter), the
-signal is mostly noise and should be filtered hard. Asymmetry costs
-nothing in equilibrium (both directions converge to the same fixed
-point) and preserves CAH reaction time without amplifying jitter into
-the IIDM braking channel.
+Rationale: AI traffic in ETS2/ATS wobbles `a_lead` by ±0.5–1 m/s²
+tick-to-tick as a game-AI artefact, and TruckersMP injects intermittent
+single-frame discontinuities. A pure asymmetric EMA chases every
+negative-going step within one tick, so CAH momentarily demands brake
+on phantom events. The deadband suppresses both noise sources entirely
+by routing sub-floor deltas through the relax constant; only deltas
+that exceed the noise floor in the negative direction trigger the fast
+brake-side τ. Asymmetry still costs nothing in equilibrium and
+preserves CAH reaction time on genuine lead braking.
 
 This is the **only** place in the pipeline where lead acceleration is
 filtered. The TTC and emergency overlays do not consume `a_lead`, IIDM's

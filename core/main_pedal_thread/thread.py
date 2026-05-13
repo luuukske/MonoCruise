@@ -98,8 +98,8 @@ def _onepedaldrive(
     """
     One-pedal mapping: combined axis → gas/brake, with gas and brake exponents applied
     (brake curve uses sqrt(Settings.brake_exponent_variable) as in legacy MonoCruise).
-    When *apply_opd_mapping* is False (e.g. cruise commanding), only the two-pedal path
-    and exponents are used — same as legacy opd_mode off.
+    When *apply_opd_mapping* is False, only the two-pedal path and exponents are
+    used — same as legacy opd_mode off.
     """
     offset = float(Settings.offset_variable or 0.0)
     be_full = float(Settings.brake_exponent_variable or 1.0)
@@ -158,10 +158,13 @@ class MainPedalThreadData(ThreadData):
     gasval: float = 0.0
     brakeval: float = 0.0
 
+    # OPD-transformed gas, published before any AEB override so sending_thread
+    # can drive its stopped-state FSM off the user's true intent.
+    opdgasval: float = 0.0
+
     # State flags — sending_thread uses these to decide what to send.
     device_lost: bool = True    # True until the *pedal* joystick is successfully opened.
     em_stop: bool = False       # Full emergency brake engaged.
-    stopped: bool = False       # Vehicle is in hold-brake "stopped" state.
 
     # Device info — UI / sending thread may display this.
     device_name: str = ""
@@ -225,8 +228,6 @@ class MainPedalThread(BaseThread):
         # ── Operational state ─────────────────────────────────────────────────
         self._prev_brakeval: float = 0.0
         self._prev_speed: float = 0.0
-        self._prev_opdbrakeval: float = 0.0
-        self._prev_stop: float = 0.0
         self._latency_ts: float = 0.0
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -278,6 +279,7 @@ class MainPedalThread(BaseThread):
             with self.data._lock:
                 self.data.gas_output  = 0.0
                 self.data.brake_output = 0.0
+                self.data.opdgasval   = 0.0
                 self.data.cc_start_held = False
                 self.data.cc_inc_held = False
                 self.data.cc_dec_held = False
@@ -329,6 +331,7 @@ class MainPedalThread(BaseThread):
                 self.data.brakeval    = 0.0
                 self.data.gas_output  = 0.0
                 self.data.brake_output = 0.15
+                self.data.opdgasval   = 0.0
                 self.data.em_stop     = speed > 0.1
                 self.data.cc_start_held = False
                 self.data.cc_inc_held = False
@@ -337,10 +340,23 @@ class MainPedalThread(BaseThread):
                 self.data.acc_dist_dec_held = False
             return
 
-        # One-Pedal-Drive transform.
-        opdgasval, opdbrakeval = _onepedaldrive(
-            gasval, brakeval, apply_opd_mapping=not cruise_commanding
+        # opdgasval is always OPD-mapped — it is the user-side input for the
+        # CC override comparison in sending_thread, so the override criterion
+        # matches the same OPD feel the driver gets when CC is off. The brake
+        # side of this call is discarded when CC is commanding; only the
+        # two-pedal output below is sent to the truck in that case.
+        opdgasval, opdbrakeval_full = _onepedaldrive(
+            gasval, brakeval, apply_opd_mapping=True
         )
+        if cruise_commanding:
+            # CC owns the longitudinal command — drop OPD coast-down and shaping
+            # from the output path so the truck doesn't fight CC. User brake
+            # pedal still passes through (two-pedal raw, exponented).
+            _, opdbrakeval = _onepedaldrive(
+                gasval, brakeval, apply_opd_mapping=False
+            )
+        else:
+            opdbrakeval = opdbrakeval_full
 
         # Weight adjustment.
         if Settings.weight_adjustment and cargo_mass > 0:
@@ -354,37 +370,23 @@ class MainPedalThread(BaseThread):
             weight_var = 1.0
         opdbrakeval = (opdbrakeval ** (1 / weight_var)).real
 
-        # Stopping logic.
-        effective_gas = max(gasval, opdgasval)
-        offset = Settings.offset_variable
+        # OPD coast-down brake (user-pedal shaping only). The stopped-state
+        # hold brake and its FSM live in sending_thread so they apply to every
+        # output source (user, mapper, AEB) — `stopped` is read back from there
+        # to preserve the original if/elif gating.
+        sending_stopped = False
+        try:
+            st = registry.get_thread("sending_thread")
+            if st is not None and st.is_alive():
+                with st.data._lock:
+                    sending_stopped = bool(st.data.stopped)
+        except (KeyError, AttributeError):
+            pass
+
         a = 0.035 - slope / 2
-
-        stopped = self.data.stopped
-
-        if stopped:
-            if gear > 0 and speed < 3 and effective_gas <= (0.7 + offset * 0.7) and effective_gas != 0:
-                opdbrakeval += min(
-                    0.03 * (((-round(speed + 0.8, 1) + 4) ** 5) / (4 ** 5)) + slope * 2,
-                    0.3,
-                )
-            elif gear < 0 and speed > -3 and effective_gas <= (0.7 + offset * 0.7) and effective_gas != 0:
-                opdbrakeval += min(
-                    0.03 * (((round(speed + 0.8, 1) + 4) ** 5) / (4 ** 5)) - slope * 2,
-                    0.3,
-                )
-            elif effective_gas == 0 and gear != 0:
-                opdbrakeval += 0.06
-            delta_time = time.monotonic() - self._prev_stop
-            t = 0.5
-            if self._prev_stop != 0 and delta_time < t:
-                opdbrakeval = (
-                    opdbrakeval * (delta_time / t)
-                    + self._prev_opdbrakeval * (1 - delta_time / t)
-                )
-            else:
-                self._prev_stop = 0
-        elif (
-            opdgasval == 0
+        if (
+            not sending_stopped
+            and opdgasval == 0
             and Settings.opd_mode_variable
             and not cruise_commanding
             and opdbrakeval < 0.3
@@ -403,22 +405,6 @@ class MainPedalThread(BaseThread):
                     + a * (1 - (-1 / (b * -speed + 1) + 1)),
                     0,
                 )
-
-        # Stopped state transitions.
-        if speed <= 0.1 and speed >= -0.1 and gasval == 0 and gear != 0 and not stopped:
-            stopped = True
-            self._prev_opdbrakeval = opdbrakeval
-            self._prev_stop = time.monotonic()
-        elif stopped and ((speed >= 4 and gear > 0) or (speed <= -4 and gear < 0)):
-            stopped = False
-            self._prev_stop = 0
-        elif stopped and opdgasval > 0.75:
-            stopped = False
-            self._prev_stop = 0
-        if park_brake and -2 <= speed <= 2 and not stopped:
-            stopped = True
-            self._prev_opdbrakeval = opdbrakeval
-            self._prev_stop = time.monotonic()
 
         gas_output   = opdgasval
         brake_output = opdbrakeval
@@ -448,8 +434,7 @@ class MainPedalThread(BaseThread):
         )
         crash_detected = prev_speed - speed >= 5
 
-        if sudden_brake_slam and not stopped and speed > 10 and not paused:
-            stopped  = True
+        if sudden_brake_slam and speed > 10 and not paused:
             em_stop  = True
             gas_output   = 0.0
             brake_output = 1.0
@@ -459,7 +444,6 @@ class MainPedalThread(BaseThread):
                     speed, brakeval,
                 )
         elif crash_detected and not paused:
-            stopped  = True
             gas_output   = 0.0
             brake_output = 1.0
 
@@ -487,7 +471,7 @@ class MainPedalThread(BaseThread):
             self.data.brakeval    = brakeval
             self.data.gas_output  = gas_output
             self.data.brake_output = brake_output
-            self.data.stopped     = stopped
+            self.data.opdgasval   = opdgasval
             self.data.em_stop     = em_stop
             self.data.cc_start_held = cc_start_held
             self.data.cc_inc_held = cc_inc_held

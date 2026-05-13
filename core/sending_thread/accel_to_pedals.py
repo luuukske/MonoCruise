@@ -50,6 +50,11 @@ _SLOW_I_CLAMP_MS2: float = 2.0
 # Initial bias: overestimates resistance so the limiter approaches the set speed
 # conservatively on first engagement. The integral corrects this within a few seconds.
 _SLOW_I_INIT_BIAS_MS2: float = -0.4
+# Stationary gate: at speeds below this, freeze slow_integral negative
+# accumulation. ACC publishes a -0.6 m/s² standstill hold; raw_smooth is 0
+# (truck not moving), so error stays negative forever and the integrator winds
+# toward -_SLOW_I_CLAMP_MS2, then fights gas-side launch when traffic moves.
+_STATIONARY_SLOW_I_GATE_SPEED_MS: float = 0.5
 
 # Brake feedforward curve constants — fitted from collected data
 # DO NOT CHANGE WITHOUT VALID COLLECTED DATA
@@ -750,9 +755,19 @@ class AccelToPedals:
             if not math.isfinite(error_ms2):
                 error_ms2 = 0.0
 
-            # Slow integral — m/s² space, frozen during gearshift, no decay
+            # Slow integral — m/s² space, frozen during gearshift, no decay.
+            # At standstill while commanding decel the truck cannot produce more
+            # negative raw_accel than 0, so error stays negative forever and the
+            # integrator would wind toward -clamp. Freeze the negative-going
+            # path below the stationary gate; positive errors can still bleed
+            # any existing wound state toward zero.
+            slow_i_gate = (
+                0.0
+                if (speed < _STATIONARY_SLOW_I_GATE_SPEED_MS and error_ms2 < 0.0)
+                else 1.0
+            )
             new_slow_integral = _clamp(
-                new_slow_integral + _KI_SLOW * error_ms2 * factor * dt,
+                new_slow_integral + _KI_SLOW * error_ms2 * factor * dt * slow_i_gate,
                 -_SLOW_I_CLAMP_MS2, _SLOW_I_CLAMP_MS2,
             )
             effective_road_load = road_load_accel + new_slow_integral
@@ -829,9 +844,7 @@ class AccelToPedals:
                 gas_cmd = 0.0
 
         else:
-            # Not commanding — hold slow integral, reset fast trim, clear prev gas
-            new_fast_integral = 0.0
-            new_fast_deriv_smooth = 0.0
+            # Not commanding — hold all integrals so gearshifts don't cause overshoot
             new_prev_gas_cmd = None
             new_output_smooth_ms2 = None
 

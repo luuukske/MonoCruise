@@ -54,20 +54,21 @@ MAX_ACCEL_MS2: float = 1.5
 MAX_DECEL_MS2: float = -6.55
 
 STANDSTILL_SPEED_MS: float = 0.4
-STANDSTILL_GAP_SLACK_M: float = 1.0
+STANDSTILL_GAP_SLACK_M: float = 2.0
 STANDSTILL_HOLD_DECEL_MS2: float = -0.6
 
 J_MAX_MS3: float = 2.5
 
-TAU_INPUT_NEAR_S: float = 0.08
-TAU_INPUT_FAR_S: float = 0.12
+TAU_INPUT_NEAR_S: float = 0.12
+TAU_INPUT_FAR_S: float = 0.20
 D_INPUT_NEAR_M: float = 20.0
 D_INPUT_FAR_M: float = 80.0
 
-TAU_ALEAD_BRAKE_S: float = 0.030
-TAU_ALEAD_RELAX_S: float = 0.150
+TAU_ALEAD_BRAKE_S: float = 0.080
+TAU_ALEAD_RELAX_S: float = 0.350
+A_LEAD_DEADBAND_MS2: float = 0.30
 
-TAU_OUTPUT_S: float = 0.036
+TAU_OUTPUT_S: float = 0.05
 
 DT_FALLBACK_S: float = 1.0 / 30.0
 DT_MAX_S: float = 0.2
@@ -110,6 +111,7 @@ class ACConfig:
     d_input_far_m: float = D_INPUT_FAR_M
     tau_alead_brake_s: float = TAU_ALEAD_BRAKE_S
     tau_alead_relax_s: float = TAU_ALEAD_RELAX_S
+    a_lead_deadband_ms2: float = A_LEAD_DEADBAND_MS2
     tau_output_s: float = TAU_OUTPUT_S
     no_lead_ceiling_ms2: float = NO_LEAD_CEILING_MS2
 
@@ -334,11 +336,16 @@ class AdaptiveCruiseController:
             ema.v_lead_ms = _ema_step(ema.v_lead_ms, raw.v_lead_ms, dt, tau_input)
 
             prev_a = ema.a_lead_ms2
-            tau_a = (
-                cfg.tau_alead_brake_s
-                if (prev_a is None or raw.a_lead_ms2 < prev_a)
-                else cfg.tau_alead_relax_s
-            )
+            if prev_a is None:
+                tau_a = cfg.tau_alead_relax_s
+            else:
+                delta_a = raw.a_lead_ms2 - prev_a
+                if abs(delta_a) < cfg.a_lead_deadband_ms2:
+                    tau_a = cfg.tau_alead_relax_s
+                elif delta_a < 0.0:
+                    tau_a = cfg.tau_alead_brake_s
+                else:
+                    tau_a = cfg.tau_alead_relax_s
             ema.a_lead_ms2 = _ema_step(prev_a, raw.a_lead_ms2, dt, tau_a)
             ema.last_seen_mono = now_mono
 
