@@ -143,44 +143,65 @@ _SHARED_TURN_MAX_KAPPA: float = 0.05         # cap on road-following curvature (
 _TURN_COMPLETE_CURVATURE_SCALE: float = 3.0   # divisor applied when overshoot detected
 
 _TRAILER_TRACTOR_RADIUS_M: float = 30.0
+_TRAILER_SWAP_SPEED_THRESHOLD_MS: float = 0.5
+_TRAILER_TRACTOR_HEADING_DOT: float = 0.9
 
 
 def _find_tractor_for_trailer(trailer: Vehicle, vehicles: list[Vehicle]) -> Vehicle | None:
-    """Nearest non-trailer TMP vehicle within _TRAILER_TRACTOR_RADIUS_M of the trailer."""
+    """Nearest same-heading non-trailer vehicle within _TRAILER_TRACTOR_RADIUS_M.
+
+    Covers both TMP convoy partners (is_tmp=True) and convoy-mode players that
+    appear via the AI traffic slot (is_tmp=False). Heading-similarity gate
+    prevents grabbing a perpendicular AI car as a phantom tractor.
+    """
+    _, tr_yaw_deg, _ = trailer.rotation.euler()
+    tr_yaw = math.radians(tr_yaw_deg)
+    tr_fx = -math.sin(tr_yaw)
+    tr_fz = -math.cos(tr_yaw)
+
     best: Vehicle | None = None
     best_d_sq = _TRAILER_TRACTOR_RADIUS_M * _TRAILER_TRACTOR_RADIUS_M
     for other in vehicles:
         if other.id == trailer.id:
             continue
-        if not other.is_tmp or other.is_trailer:
+        if other.is_trailer:
             continue
         dx = other.position.x - trailer.position.x
         dz = other.position.z - trailer.position.z
         d_sq = dx * dx + dz * dz
-        if d_sq < best_d_sq:
-            best_d_sq = d_sq
-            best = other
+        if d_sq >= best_d_sq:
+            continue
+        _, o_yaw_deg, _ = other.rotation.euler()
+        o_yaw = math.radians(o_yaw_deg)
+        o_fx = -math.sin(o_yaw)
+        o_fz = -math.cos(o_yaw)
+        if tr_fx * o_fx + tr_fz * o_fz < _TRAILER_TRACTOR_HEADING_DOT:
+            continue
+        best_d_sq = d_sq
+        best = other
     return best
 
 
 def _swap_trailer_kinematics(vehicles: list[Vehicle]) -> list[Vehicle]:
-    """Return list where TMP trailer-as-vehicles inherit speed/acceleration from their tractor.
+    """Patch trailer-as-vehicle entries with their tractor's kinematics when their
+    own speed slot is empty.
 
-    TMP trailers reported as standalone radar vehicles have unreliable shared-memory
-    speed (often 0 — the trailer slot has no engine telemetry). Position-history LS
-    fit can also return 0 when the chord is small during a stall or right after spawn.
-    AEB collision math then sees a "stationary" obstacle directly ahead and triggers
-    falsely. Mirror ACC's swap: keep the trailer's pose (its own arc geometry is
-    correct) but read kinematics from the nearest TMP tractor within 30 m.
+    Trailers reported as standalone radar vehicles often have unreliable speed
+    (the slot has no engine telemetry — common for TMP partners and for convoy
+    players who route through the AI traffic slot). AEB collision math then
+    treats them as stationary obstacles directly ahead and false-triggers.
+    Keep the trailer's pose (its own arc geometry is correct) but inherit
+    kinematics from the nearest same-heading non-trailer within 30 m.
     """
     out: list[Vehicle] = []
     for v in vehicles:
-        if v.is_tmp and v.is_trailer:
+        if v.is_trailer and abs(v.speed) < _TRAILER_SWAP_SPEED_THRESHOLD_MS:
             tractor = _find_tractor_for_trailer(v, vehicles)
             if tractor is not None:
                 eff = copy.copy(v)
                 eff.speed = tractor.speed
                 eff.acceleration = tractor.acceleration
+                eff._debug_kinematics_swapped = True
                 out.append(eff)
                 continue
         out.append(v)
@@ -230,6 +251,7 @@ class AEBSnapshot:
     evasion_right_arc: ArcPath | None = None
 
     suppression_reasons: dict = field(default_factory=dict)
+    tmp_traffic_session: bool = False
 
 
 @dataclass
@@ -652,7 +674,7 @@ class AEBThread(BaseThread):
          steer, ego_has_trailer, _ego_curvature_from_history, tmp_traffic_session,
          paused) = snapshot
 
-        vehicles_eff = _swap_trailer_kinematics(vehicles) if tmp_traffic_session else vehicles
+        vehicles_eff = _swap_trailer_kinematics(vehicles)
 
         if paused and self._last_snapshot is not None:
             with self.data._lock:
@@ -863,6 +885,7 @@ class AEBThread(BaseThread):
                     "half_w": tr_hw,
                     "length": tr.size.length,
                     "is_tmp": tr.is_tmp,
+                    "speed_kmh": abs(v.speed) * 3.6,
                 })
 
             veh_dict = {
@@ -872,6 +895,8 @@ class AEBThread(BaseThread):
                 "half_w": v_hw,
                 "length": v.size.length,
                 "is_tmp": v.is_tmp,
+                "is_trailer": getattr(v, "is_trailer", False),
+                "kinematics_swapped": getattr(v, "_debug_kinematics_swapped", False),
                 "speed_kmh": abs(v.speed) * 3.6,
                 "rear_suppressed": False,
                 "trailers": trailer_dicts,
@@ -1164,6 +1189,7 @@ class AEBThread(BaseThread):
             evasion_left_arc=ego_evasion_left,
             evasion_right_arc=ego_evasion_right,
             suppression_reasons=suppression_reasons,
+            tmp_traffic_session=tmp_traffic_session,
         )
 
         if aeb_warn:

@@ -188,7 +188,20 @@ class AEBDebugWindow(QWidget):
 
             sx, sy = self._ws(v["x"], v["z"], ex, ez, ey)
             spd = v.get("speed_kmh", 0.0)
-            self._draw_label(p, sx, sy - 14, f"{spd:.0f}", body_clr)
+            is_trailer_veh = v.get("is_trailer", False)
+            kin_swapped = v.get("kinematics_swapped", False)
+            is_tmp_veh = v.get("is_tmp", False)
+            tag = "TR" if is_trailer_veh else ""
+            tag += ("/TMP" if is_tmp_veh else "/AI") if tag else ("TMP" if is_tmp_veh else "AI")
+            self._draw_label(p, sx, sy - 14, f"{tag} {spd:.0f}", body_clr)
+            if is_trailer_veh:
+                if kin_swapped:
+                    kin_text, kin_clr = "kin:tractor", _SAFE_CLR
+                elif not is_tmp_veh:
+                    kin_text, kin_clr = "kin:raw (not TMP)", _DANGER_CLR
+                else:
+                    kin_text, kin_clr = "kin:raw (no tractor<30m)", _DANGER_CLR
+                self._draw_label(p, sx, sy - 26, kin_text, kin_clr)
             self._draw_acc_components(p, sx, sy, vid, acc, body_clr)
 
             for tr in v.get("trailers", []):
@@ -198,6 +211,9 @@ class AEBDebugWindow(QWidget):
                     tr["half_w"], tr["length"], tr["is_tmp"],
                     ex, ez, ey, _TRAILER_CLR,
                 )
+                trsx, trsy = self._ws(tr["x"], tr["z"], ex, ez, ey)
+                tr_spd = tr.get("speed_kmh", 0.0)
+                self._draw_label(p, trsx, trsy - 14, f"TR {tr_spd:.0f}", _TRAILER_CLR)
 
         if snap.ego_arc is not None:
             self._draw_arc_corridor(p, snap.ego_arc, ex, ez, ey, _EGO_CORRIDOR)
@@ -573,7 +589,9 @@ class AEBDebugWindow(QWidget):
         p.setPen(QPen(_TEXT))
 
         kmh = snap.ego_speed * 3.6
-        p.drawText(QPointF(x, y), f"Speed: {kmh:.0f} km/h")
+        tmp_sess = getattr(snap, "tmp_traffic_session", False)
+        sess_txt = "TMP" if tmp_sess else "SP"
+        p.drawText(QPointF(x, y), f"Speed: {kmh:.0f} km/h   Session: {sess_txt}")
 
         y += 18
         nv = len(snap.vehicles)
