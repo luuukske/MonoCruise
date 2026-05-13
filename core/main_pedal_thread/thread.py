@@ -303,7 +303,11 @@ class MainPedalThread(BaseThread):
             if cc is not None and cc.is_alive():
                 with cc.data._lock:
                     cc_active = bool(cc.data.active)
-                if cc_active and Settings.cc_mode == "Cruise control":
+                    cc_winner = str(cc.data.active_controller)
+                # Only treat the CC controller (or ACC) winning arbitration as
+                # cruise commanding. A limiter-only win (CC button-disabled,
+                # global limit active) must NOT suppress OPD coast-down brake.
+                if cc_active and Settings.cc_mode == "Cruise control" and cc_winner == "cc":
                     cruise_commanding = True
         except (KeyError, AttributeError):
             pass

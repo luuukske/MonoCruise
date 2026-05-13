@@ -304,20 +304,18 @@ class CruiseControlThread(BaseThread):
         """Min-arbitrate and report which side dominates for the user-pedal merge.
 
         The 'winner' label drives SendingThread's user-pedal merge (max vs
-        min). CC bids — including the ACC follow-distance child — count as
-        'cc' (max merge: CC drives, user override allowed). Only when the
-        limiter is the sole active bidder does the limiter win (min merge:
-        cap user). This keeps the global limiter from interfering with CC
-        feel while still capping user gas when CC is off.
+        min). Whichever controller actually owns the minimum bid sets the
+        label: CC / ACC → 'cc' (max merge, user OPD gas may override),
+        limiter → 'limiter' (min merge, hard cap). This ensures the global
+        limiter retains gas-cap authority when its negative bid dominates
+        an active CC, while still letting CC drive when it owns the bid.
         """
         active = [(name, o.wanted_ms2) for name, o in items if o.active and o.wanted_ms2 is not None]
         if not active:
             return 0.0, False, "none"
-        cc_side_bids = [v for name, v in active if name in ("cc", "acc")]
-        limiter_bids = [v for name, v in active if name == "limiter"]
-        all_vals = [v for _, v in active]
-        winner = "cc" if cc_side_bids else "limiter"
-        return min(all_vals), True, winner
+        winning_name, winning_bid = min(active, key=lambda kv: kv[1])
+        winner = "limiter" if winning_name == "limiter" else "cc"
+        return winning_bid, True, winner
 
     @staticmethod
     def _all_cc_buttons_assigned() -> bool:
