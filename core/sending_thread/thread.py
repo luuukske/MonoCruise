@@ -213,6 +213,7 @@ class SendingThread(BaseThread):
         self._prev_measured_decel_ms2: float = 0.0
         self._prev_mapper_gas: float = 0.0
         self._prev_user_gas: float = 0.0
+        self._prev_user_opd_gas: float = 0.0
         self._prev_aeb_loop_mono: float | None = None
         self._brake_active: bool = False
         self._brake_last_active_at: float = 0.0
@@ -598,17 +599,21 @@ class SendingThread(BaseThread):
                 # modes — there is no separate limiter call here.
                 mapper_engaged = cruise_active or _aeb_active
 
-                # When the limiter is the active controller (limiter mode, or
-                # cruise mode with CC off and the global cap engaged), only
-                # learn while the user is pushing above the cap (user gas >
-                # mapper_gas from last tick). Within the cap there is nothing
-                # to learn — letting the integrator run would inflate
-                # mapper_gas and loosen the cap as ego approaches the limit.
+                # Learn-gate by who owned the previous tick:
+                # - Limiter active: only learn when user was pushing above the
+                #   cap (user gas > mapper_gas). Within the cap there's nothing
+                #   to learn — letting the integrator run would inflate mapper_gas
+                #   and loosen the cap as ego approaches the limit.
+                # - CC/ACC active: freeze learning when the user was overriding
+                #   with OPD gas (opdgasval > mapper_gas). Mapper output isn't
+                #   what's reaching the truck during override, so the measured
+                #   accel doesn't reflect the mapper's command — learning from it
+                #   would corrupt the gain/integral state.
                 # One-tick lag is negligible at 60–100 Hz.
                 if cruise_active_controller == "limiter":
                     mapper_learn = mapper_engaged and (self._prev_user_gas > self._prev_mapper_gas)
                 else:
-                    mapper_learn = mapper_engaged
+                    mapper_learn = mapper_engaged and (self._prev_user_opd_gas <= self._prev_mapper_gas)
 
                 targets = self._accel_mapper.step(
                     wanted_a,
@@ -870,14 +875,23 @@ class SendingThread(BaseThread):
         # only from user brake pedal + mapper_brake here, so OPD doesn't
         # fight CC.
         self._prev_user_gas = a
+        self._prev_user_opd_gas = opdgasval
 
+        cc_overridden_by_opd = False
         if not manual_clutch:
             if cruise_active:
                 if cruise_active_controller == "limiter":
                     a = min(a, mapper_gas)
                 else:
+                    cc_overridden_by_opd = opdgasval > mapper_gas
                     a = max(opdgasval, mapper_gas)
-        b = max(b, mapper_brake)
+
+        # Brake merge: when the user is overriding CC/ACC with OPD gas, drop
+        # the mapper's brake bid too — otherwise the truck fights itself with
+        # simultaneous gas and brake. Limiter brake always passes (hard cap,
+        # not overridable). AEB brake is applied below independently.
+        if not cc_overridden_by_opd:
+            b = max(b, mapper_brake)
 
         # Holding brake — final floor on the merged brake so the truck does
         # not creep on slopes when any controller (user, mapper, AEB) is

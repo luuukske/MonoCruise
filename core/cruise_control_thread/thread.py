@@ -34,7 +34,8 @@ from ui.popup.popup_window import PopupWindow
 logger = logging.getLogger(__name__)
 
 # CC disengage thresholds (CC-only — limiter is immune to these events)
-_CC_USER_BRAKE_DISENGAGE = 0.05
+_CC_RAW_BRAKE_DISENGAGE = 0.05
+_CC_GAME_BRAKE_DISENGAGE = 0.2
 _CC_DISARM_SPEED_MS = 0.3
 _CC_CRASH_SPEED_DROP_MS = 5.0
 _CC_DISARM_PENDING_TIMEOUT_S = 5.0
@@ -647,8 +648,8 @@ class CruiseControlThread(BaseThread):
         if cc.enabled:
             game_brake_excess = ctx.game_brake - ctx.commanded_brake_recent_max
             if (
-                ctx.user_raw_brake > _CC_USER_BRAKE_DISENGAGE
-                or game_brake_excess > _CC_USER_BRAKE_DISENGAGE
+                ctx.user_raw_brake > _CC_RAW_BRAKE_DISENGAGE
+                or game_brake_excess > _CC_GAME_BRAKE_DISENGAGE
             ):
                 cc.disable()
                 logger.info("CC disabled — brake pressed", extra={"popup": True})
