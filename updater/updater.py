@@ -21,7 +21,7 @@ from markdown_renderer import GitHubMarkdownRenderer
 from video_player import VideoPlayer
 
 REPO_OWNER = "luuukske"
-REPO_NAME = "test-updater"
+REPO_NAME = "MonoCruise"
 
 # Embedded SVG icons
 SVG_ICONS = {
@@ -39,12 +39,21 @@ class UpdateWorker(QThread):
     error = Signal(str)
     finished_signal = Signal()
 
+    # Paths inside the install dir that must never be overwritten or deleted by
+    # an update. Matched as posix-style path prefixes (relative to install_dir).
+    PRESERVE_PATHS = (
+        'config.json',
+        'config.json.bak',
+        'logs/',
+    )
+    # The updater can't replace itself while running; skip its own files too.
+    UPDATER_FILES = ('updater.exe', 'updater.py')
+
     def __init__(self, api: GitHubAPI, release: dict, install_dir: str):
         super().__init__()
         self.api = api
         self.release = release
         self.install_dir = install_dir
-        self.updater_files = ['updater.exe', 'updater.py']
 
     def run(self):
         try:
@@ -70,19 +79,34 @@ class UpdateWorker(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
+    def _should_skip(self, member: str) -> bool:
+        """Return True if a zip member should not be extracted."""
+        rel = member.replace('\\', '/')
+        rel_lc = rel.lower()
+        # Skip the updater's own files (locked while it runs).
+        for name in self.UPDATER_FILES:
+            if rel_lc == name or rel_lc.endswith('/' + name):
+                return True
+        # Skip anything in the preserve list — never clobber user state.
+        for path in self.PRESERVE_PATHS:
+            if rel_lc == path.lower().rstrip('/'):
+                return True
+            if path.endswith('/') and rel_lc.startswith(path.lower()):
+                return True
+        return False
+
     def _extract_update(self, zip_path: str):
         with zipfile.ZipFile(zip_path, 'r') as zf:
             bad = zf.testzip()
             if bad is not None:
                 raise ValueError(f"Corrupt entry in update package: {bad}")
-            members = [m for m in zf.namelist()
-                       if not any(skip in m for skip in self.updater_files)]
-            
+            members = [m for m in zf.namelist() if not self._should_skip(m)]
+
+            install_real = os.path.realpath(self.install_dir)
             for i, member in enumerate(members):
                 # Guard against Zip Slip: reject entries that escape install_dir
                 target = os.path.realpath(os.path.join(self.install_dir, member))
-                if not target.startswith(os.path.realpath(self.install_dir) + os.sep) \
-                        and target != os.path.realpath(self.install_dir):
+                if not target.startswith(install_real + os.sep) and target != install_real:
                     raise ValueError(f"Blocked malicious zip entry: {member}")
                 zf.extract(member, self.install_dir)
                 self.install_progress.emit((i + 1) / len(members))

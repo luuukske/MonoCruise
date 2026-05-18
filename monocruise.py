@@ -35,6 +35,7 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QTimer
 
 from core.settings import Settings, CONFIG_PATH
+from core.version import __version__
 from core.thread_management.registry import registry
 from core.thread_management.watchdog import Watchdog
 from core.thread_management.monitor  import Monitor
@@ -194,7 +195,7 @@ def main() -> None:
     _attach_popup_handler(popup)
 
     # Main window (lives on the main thread — no separate thread needed)
-    window = create_main_window(settings, version="v1.1.0")
+    window = create_main_window(settings, version=f"v{__version__}")
     registry.register_object("main_window", window)
     window.window_closed.connect(lambda: (_stop_all(), app.quit()))
 
