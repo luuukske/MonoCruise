@@ -54,6 +54,13 @@ _SPEED_ACC_EMA_CURVE_D: float = (
 # Accel-correction term clamp (m/s) — caps how far accel·τ can shift a speed.
 _SPEED_CORR_CLAMP_MS: float = 3.0
 
+# ACC ultra-smooth speed (acc_speed) — only a fraction of the lag correction is
+# applied so the signal stays smooth; under hard lead braking it blends to the
+# responsive speed_corr instead. See AGENTS.md §7.
+_ACC_SPEED_CORR_FACTOR: float = 0.30
+_ACC_DECEL_BLEND_START_MS2: float = -1.5   # accel_ultra here → blend to speed_corr begins
+_ACC_DECEL_BLEND_FULL_MS2: float = -2.5    # accel_ultra here → acc_speed == speed_corr
+
 # Yaw EMA (wrap-safe) — AI and TMP (arc curvature).
 _RAW_YAW_ALPHA: float = 0.20
 
@@ -83,10 +90,11 @@ _STRAIGHT_CURVATURE_EPS: float = 1e-6
 #   - ACC trail-arc scoring (needs long history for stable fit).
 #
 # _POSITION_HISTORY_LEN is the buffer size; _TMP_SPEED_HISTORY_LEN is the
-# window the TMP speed LS fit considers. Keeping them separate lets ACC
-# get a ~25-sample trail without over-smoothing TMP speed.
+# window the TMP speed LS fit considers — ~1.3 s, long enough to average out
+# TMP's ~1 Hz position-reconciliation ripple (see AGENTS.md §7) so the derived
+# speed doesn't oscillate.
 _POSITION_HISTORY_LEN: int = 25
-_TMP_SPEED_HISTORY_LEN: int = 10
+_TMP_SPEED_HISTORY_LEN: int = 20
 _TMP_SPEED_NEAR_ZERO_CHORD: float = 0.025  # m — same gate as per-frame displacement
 
 
@@ -242,14 +250,20 @@ def _smooth_vehicle_kinematics(
         alpha_a = _tmp_acc_speed_ema_alpha(abs(speed_corr))
         speed_acc_ema = alpha_a * speed_corr + (1.0 - alpha_a) * prev_speed_acc_ema
 
-    # ACC correction accel — LS slope of speed_ema over a long (1 s) window.
+    # ACC correction accel — LS slope of speed_ema over a long window.
     # Decoupled from speed_acc_ema (no self-referential lead) and long-windowed,
-    # so accel_ultra carries only the trend: the correction restores the lag
-    # without amplifying the residual wiggle τ_a would otherwise ring on.
+    # so accel_ultra carries only the trend, not the wiggle.
     accel_ultra = _accel_from_speed_history(history, _ACCEL_ULTRA_FIT_WINDOW_S)
     tau_a = dt * (1.0 - alpha_a) / alpha_a if alpha_a > 1e-6 else 0.0
     corr_a = max(-_SPEED_CORR_CLAMP_MS, min(_SPEED_CORR_CLAMP_MS, accel_ultra * tau_a))
-    acc_speed = speed_acc_ema + corr_a
+    # Only a fraction of the lag correction keeps acc_speed smooth; under hard
+    # lead braking blend toward the responsive speed_corr for accuracy.
+    acc_speed_smooth = speed_acc_ema + _ACC_SPEED_CORR_FACTOR * corr_a
+    decel_blend = (_ACC_DECEL_BLEND_START_MS2 - accel_ultra) / (
+        _ACC_DECEL_BLEND_START_MS2 - _ACC_DECEL_BLEND_FULL_MS2
+    )
+    decel_blend = max(0.0, min(1.0, decel_blend))
+    acc_speed = (1.0 - decel_blend) * acc_speed_smooth + decel_blend * speed_corr
 
     return speed_ema, accel, speed_corr, speed_acc_ema, acc_speed, history
 
