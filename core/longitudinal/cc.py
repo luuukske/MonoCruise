@@ -15,6 +15,7 @@ import logging
 import math
 
 from core.settings import Settings
+from core.thread_management.registry import registry
 
 from .base import LongCtx, LongitudinalController, LongOutput
 
@@ -38,6 +39,13 @@ _CC_GEARSHIFT_RAMP_DURATION_S = 1.0
 
 # Game throttle threshold above which CC bypasses brake-side output EMA
 _CC_GAME_THROTTLE_OVERRIDE = 0.1
+
+# Integral leak time constant (s) while the sending_thread hold FSM owns
+# standstill. At rest with the truck pinned, error stays at a constant
+# (target - 0); without a freeze the integral would wind to its clamp and snap
+# back on launch. Leaking lets pre-stop windup bleed out smoothly so the launch
+# starts from a small integral, not a clamped one.
+_HOLD_INTEGRAL_LEAK_TAU_S: float = 2.0
 
 
 class CruiseController(LongitudinalController):
@@ -193,6 +201,30 @@ class CruiseController(LongitudinalController):
             return (time_since_release - _CC_GEARSHIFT_BLOCK_DURATION_S) / _CC_GEARSHIFT_RAMP_DURATION_S
         return 1.0
 
+    @staticmethod
+    def _read_hold_active_safe() -> bool:
+        """Lookup `sending_thread.data.hold_active` defensively.
+
+        AGENTS.md requires sibling-thread reads to handle missing threads, lock
+        failures, and stale state without crashing. Default False so a missing
+        flag never freezes the integral by accident.
+        """
+        try:
+            st = registry.get_thread("sending_thread")
+        except KeyError:
+            return False
+        except Exception:
+            logger.debug("hold_active registry read failed", exc_info=True)
+            return False
+        if st is None:
+            return False
+        try:
+            with st.data._lock:
+                return bool(st.data.hold_active)
+        except Exception:
+            logger.debug("hold_active lock/attr read failed", exc_info=True)
+            return False
+
     def _speed_to_accel(self, ctx: LongCtx) -> float:
         speed_ms = ctx.speed_ms
         target_kmh = self._target_kmh
@@ -215,7 +247,16 @@ class CruiseController(LongitudinalController):
         clamp = float(Settings.cc_integral_clamp)
 
         error_ms = target_ms - speed_ms
-        self._integral_error += error_ms * ctx.dt
+        # Freeze + leak the integral while the sending_thread hold FSM owns
+        # standstill. Without this, error stays at (target - 0) the whole stop
+        # and the integral pins to its clamp, then snaps the truck on release.
+        # Leaking toward 0 with _HOLD_INTEGRAL_LEAK_TAU_S also bleeds any
+        # pre-stop windup so the launch starts from a clean state.
+        if self._read_hold_active_safe():
+            leak = math.exp(-max(ctx.dt, 0.0) / max(_HOLD_INTEGRAL_LEAK_TAU_S, 1e-6))
+            self._integral_error *= leak
+        else:
+            self._integral_error += error_ms * ctx.dt
         self._integral_error = max(-clamp, min(clamp, self._integral_error))
 
         d_factor = self._gearshift_d_factor(ctx.now, ctx.game_clutch)

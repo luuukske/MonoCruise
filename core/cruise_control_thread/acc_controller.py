@@ -389,7 +389,14 @@ class AdaptiveCruiseController:
             and primary_raw.v_lead_ms < cfg.standstill_speed_ms
             and eff_dist_raw <= cfg.s0_m + cfg.standstill_gap_slack_m
         ):
-            return cfg.standstill_hold_decel_ms2, False
+            # Standstill behind a stationary lead: publish 0 m/s² (no command).
+            # The sending_thread HoldController is the single authority for
+            # keeping the truck stationary on any slope; an ACC-side creep-hold
+            # used to fight the FSM's slope-balance brake and prevented smooth
+            # launches. The gating block above still detects the condition so
+            # downstream consumers can treat this as "ACC is in standstill
+            # context" if needed.
+            return 0.0, False
 
         try:
             level = int(Settings.acc_gap_level)

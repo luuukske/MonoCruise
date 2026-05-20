@@ -56,6 +56,11 @@ _SLOW_I_INIT_BIAS_MS2: float = -0.4
 # toward -_SLOW_I_CLAMP_MS2, then fights gas-side launch when traffic moves.
 _STATIONARY_SLOW_I_GATE_SPEED_MS: float = 0.5
 
+# When the hold FSM owns standstill (freeze_slow_i=True), bleed slow_integral
+# toward 0 with this time constant so stale bias from the decel-to-stop doesn't
+# linger and fight the eventual launch.
+_HOLD_SLOW_I_LEAK_TAU_S: float = 10.0
+
 # Brake feedforward curve constants — fitted from collected data
 # DO NOT CHANGE WITHOUT VALID COLLECTED DATA
 # y = A * (1 - e^(-rate * x^power))
@@ -419,6 +424,28 @@ class AccelToPedals:
             return 0.0
         return min(1.0, arg ** (1.0 / power))
 
+    def brake_pedal_from_decel(
+        self,
+        decel_ms2: float,
+        max_brake_ms2_override: float | None = None,
+    ) -> float:
+        """Public wrapper around the inverse brake curve.
+
+        Exposed so the hold controller (and any other consumer that needs the
+        decel→pedal mapping) reuses the same fitted curve instead of duplicating
+        it. Falls back to the baseline brake estimate when capacity hasn't been
+        learned yet.
+        """
+        if max_brake_ms2_override is None and not (
+            self._shared.estimated_max_brake_ms2
+            and math.isfinite(self._shared.estimated_max_brake_ms2)
+        ):
+            max_brake_ms2_override = max(
+                _MIN_BRAKE_ESTIMATE_MS2,
+                _finite_or_zero(Settings.mapper_brake_scale_ms2),
+            )
+        return self._brake_pedal_from_decel(decel_ms2, max_brake_ms2_override)
+
     # Gearshift freeze/ramp
 
     def _gearshift_factor(
@@ -642,6 +669,7 @@ class AccelToPedals:
         game_clutch: float = 0.0,
         learn: bool = True,
         freeze_trim: bool = False,
+        freeze_slow_i: bool = False,
     ) -> PedalTargets:
         """Compute pedal targets for one tick.
 
@@ -650,6 +678,10 @@ class AccelToPedals:
         for preview only. The commanding mapper passes `learn=True` (default)
         and is the only one that updates shared bias/capacity/output trajectory
         and per-instance integrators.
+
+        When `freeze_slow_i=True` (hold FSM owns standstill), the slow integral
+        is frozen both signs and leaks toward 0 with _HOLD_SLOW_I_LEAK_TAU_S so
+        stale negative bias from the decel-to-stop bleeds out before launch.
         """
         s = self._shared
 
@@ -756,20 +788,28 @@ class AccelToPedals:
                 error_ms2 = 0.0
 
             # Slow integral — m/s² space, frozen during gearshift, no decay.
-            # At standstill while commanding decel the truck cannot produce more
-            # negative raw_accel than 0, so error stays negative forever and the
-            # integrator would wind toward -clamp. Freeze the negative-going
-            # path below the stationary gate; positive errors can still bleed
-            # any existing wound state toward zero.
-            slow_i_gate = (
-                0.0
-                if (speed < _STATIONARY_SLOW_I_GATE_SPEED_MS and error_ms2 < 0.0)
-                else 1.0
-            )
-            new_slow_integral = _clamp(
-                new_slow_integral + _KI_SLOW * error_ms2 * factor * dt * slow_i_gate,
-                -_SLOW_I_CLAMP_MS2, _SLOW_I_CLAMP_MS2,
-            )
+            # Two freeze regimes:
+            #   * freeze_slow_i=True (hold FSM owns standstill): freeze both
+            #     signs and leak toward 0 with _HOLD_SLOW_I_LEAK_TAU_S so stale
+            #     bias from the decel-to-stop bleeds out before launch.
+            #   * Otherwise, fall back to the one-sided stationary gate: at
+            #     speeds below _STATIONARY_SLOW_I_GATE_SPEED_MS the negative
+            #     accumulation path is frozen (raw_accel can't go below 0 while
+            #     stationary so error stays negative forever); positive errors
+            #     still bleed wound state toward zero.
+            if freeze_slow_i:
+                leak = math.exp(-dt / max(_HOLD_SLOW_I_LEAK_TAU_S, 1e-6))
+                new_slow_integral = new_slow_integral * leak
+            else:
+                slow_i_gate = (
+                    0.0
+                    if (speed < _STATIONARY_SLOW_I_GATE_SPEED_MS and error_ms2 < 0.0)
+                    else 1.0
+                )
+                new_slow_integral = _clamp(
+                    new_slow_integral + _KI_SLOW * error_ms2 * factor * dt * slow_i_gate,
+                    -_SLOW_I_CLAMP_MS2, _SLOW_I_CLAMP_MS2,
+                )
             effective_road_load = road_load_accel + new_slow_integral
 
             # Fast trim in m/s² space (frozen during gearshift; also frozen when
