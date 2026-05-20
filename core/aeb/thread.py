@@ -771,8 +771,10 @@ class AEBThread(BaseThread):
             if lead_v is not None:
                 if lead_v.time != self._radar_vis_last_vehicle_time:
                     self._radar_vis_last_vehicle_time = lead_v.time
-                    f_spd, f_acc, r_spd = lead_v.radar_speed_accel()
-                    self._radar_visualizer.push_data(r_spd, f_spd, f_acc, is_tracked=is_tracked)
+                    r_spd, c_spd, e_spd, a_spd, f_acc = lead_v.radar_speed_accel()
+                    self._radar_visualizer.push_data(
+                        r_spd, c_spd, e_spd, a_spd, f_acc, is_tracked=is_tracked,
+                    )
             else:
                 self._radar_vis_last_vehicle_time = -1.0
                 self._radar_visualizer.clear()

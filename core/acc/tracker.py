@@ -434,7 +434,7 @@ class ACCTracker:
         out: list[LeadInfo] = []
         for vid, st in top:
             v = id_to_vehicle[vid]
-            eff_speed = v.speed
+            eff_speed = v.acc_speed
             eff_accel = v.acceleration
 
             # Trailer → tractor swap (TMP: if lead is a trailer, promote
@@ -443,7 +443,7 @@ class ACCTracker:
             if v.is_tmp and v.is_trailer:
                 tractor = _find_tractor_for_trailer(v, vehicles)
                 if tractor is not None:
-                    eff_speed = tractor.speed
+                    eff_speed = tractor.acc_speed
                     eff_accel = tractor.acceleration
 
             rel = eff_speed - ego_speed_ms  # signed closing = negative

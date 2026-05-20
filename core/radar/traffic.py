@@ -29,17 +29,33 @@ _SPEED_EMA_CURVE_D: float = (
     / (_SPEED_EMA_AT_REST - _SPEED_EMA_AT_90_KMH)
 )
 
-# Accel EMA on kinematic (d filtered_speed / dt): 0.5 at rest → 0.2 at 90 km/h.
-_ACCEL_EMA_AT_REST: float = 0.5
-_ACCEL_EMA_AT_90_KMH: float = 0.3
-_ACCEL_EMA_CURVE_D: float = (
+# Accel filter — least-squares slope of recent speed_ema samples over a time
+# window (low-noise derivative). _ACCEL_FIT_WINDOW_S feeds the responsive accel
+# (AEB, speed_corr); _ACCEL_ULTRA_FIT_WINDOW_S the ACC speed correction — long so
+# it carries only the trend, not the wiggle. See AGENTS.md §7.
+_ACCEL_FIT_WINDOW_S: float = 0.80
+_ACCEL_ULTRA_FIT_WINDOW_S: float = 3.0
+_ACCEL_EMA_ALPHA: float = 0.40
+# Must hold _ACCEL_ULTRA_FIT_WINDOW_S of full-update samples (~20 Hz) or the LS
+# fit is silently clamped to the buffer length. 120 ≈ 6 s of headroom.
+_SPEED_EMA_HISTORY_LEN: int = 120
+
+# Ultra-smoothed speed for ACC — EMA of the accel-corrected speed, then
+# re-corrected by accel·τ. α is speed-dependent: less smoothing at low speed,
+# more at high speed. 0.35 at rest → 0.08 at 90 km/h.
+_SPEED_ACC_EMA_AT_REST: float = 0.35
+_SPEED_ACC_EMA_AT_90_KMH: float = 0.05
+_SPEED_ACC_EMA_CURVE_D: float = (
     _ALPHA_SPEED_SCALE
-    * _ACCEL_EMA_AT_90_KMH
-    / (_ACCEL_EMA_AT_REST - _ACCEL_EMA_AT_90_KMH)
+    * _SPEED_ACC_EMA_AT_90_KMH
+    / (_SPEED_ACC_EMA_AT_REST - _SPEED_ACC_EMA_AT_90_KMH)
 )
 
+# Accel-correction term clamp (m/s) — caps how far accel·τ can shift a speed.
+_SPEED_CORR_CLAMP_MS: float = 3.0
+
 # Yaw EMA (wrap-safe) — AI and TMP (arc curvature).
-_RAW_YAW_ALPHA: float = 0.5
+_RAW_YAW_ALPHA: float = 0.20
 
 # TMP lag detection — see AGENTS.md §7 "Lag / freeze detection".
 _LAG_MIN_SPEED_MS: float = 5.0           # m/s  — below this no lag detection runs
@@ -140,11 +156,102 @@ def _tmp_speed_ema_alpha(speed_ms: float) -> float:
     )
 
 
-def _tmp_accel_ema_alpha(speed_ms: float) -> float:
-    """Weight on new kinematic accel in the second TMP EMA. 0.5 at rest → 0.2 at 90 km/h."""
-    return (_ACCEL_EMA_AT_REST * _ACCEL_EMA_CURVE_D) / (
-        abs(speed_ms) + _ACCEL_EMA_CURVE_D
+def _tmp_acc_speed_ema_alpha(speed_ms: float) -> float:
+    """Weight on the new sample in the ACC ultra-smooth speed EMA.
+
+    0.35 at rest → 0.08 at 90 km/h — less smoothing slow, more smoothing fast.
+    """
+    return (_SPEED_ACC_EMA_AT_REST * _SPEED_ACC_EMA_CURVE_D) / (
+        abs(speed_ms) + _SPEED_ACC_EMA_CURVE_D
     )
+
+
+def _accel_from_speed_history(
+    history: list[tuple[float, float]],
+    window_s: float,
+) -> float:
+    """Least-squares slope (m/s²) of (t, speed) samples within `window_s`.
+
+    Fits `speed ≈ a·t + b` over samples no older than `window_s`; the slope `a`
+    is a low-noise acceleration estimate. Returns 0.0 with < 2 samples.
+    """
+    if len(history) < 2:
+        return 0.0
+    t_new = history[-1][0]
+    window = [(t, s) for (t, s) in history if t_new - t <= window_s]
+    n = len(window)
+    if n < 2:
+        return 0.0
+    t_mean = sum(t for t, _ in window) / n
+    s_mean = sum(s for _, s in window) / n
+    num = 0.0
+    den = 0.0
+    for t, s in window:
+        dt_c = t - t_mean
+        num += dt_c * (s - s_mean)
+        den += dt_c * dt_c
+    if den < 1e-12:
+        return 0.0
+    return num / den
+
+
+def _smooth_vehicle_kinematics(
+    raw_speed: float,
+    t_now: float,
+    dt: float,
+    prev_speed_ema: float | None,
+    prev_accel: float | None,
+    prev_speed_acc_ema: float | None,
+    prev_speed_ema_history: list[tuple[float, float]] | None,
+) -> tuple[float, float, float, float, float, list[tuple[float, float]]]:
+    """Speed/accel filter chain shared by AI and TMP vehicles. See AGENTS.md §7.
+
+    Returns (speed_ema, accel, speed_corr, speed_acc_ema, acc_speed, speed_ema_history).
+    """
+    # Step 1 — plain EMA of raw speed (no lag compensation).
+    if prev_speed_ema is None:
+        speed_ema = raw_speed
+        alpha_s = 1.0
+    else:
+        alpha_s = _tmp_speed_ema_alpha(abs((prev_speed_ema + raw_speed) * 0.5))
+        speed_ema = alpha_s * raw_speed + (1.0 - alpha_s) * prev_speed_ema
+
+    # Step 2 — accel = LS slope of the speed_ema history (low-noise derivative),
+    # then a light EMA. A windowed least-squares fit averages out the per-sample
+    # noise that a tick-to-tick difference would amplify.
+    history = list(prev_speed_ema_history) if prev_speed_ema_history else []
+    history.append((t_now, speed_ema))
+    if len(history) > _SPEED_EMA_HISTORY_LEN:
+        history = history[-_SPEED_EMA_HISTORY_LEN:]
+    accel_raw = _accel_from_speed_history(history, _ACCEL_FIT_WINDOW_S)
+    if prev_accel is None:
+        accel = accel_raw
+    else:
+        accel = prev_accel + _ACCEL_EMA_ALPHA * (accel_raw - prev_accel)
+
+    # Step 3 — lag-compensated speed. τ is the step-1 EMA's settling time.
+    tau_eff = dt * (1.0 - alpha_s) / alpha_s if alpha_s > 1e-6 else 0.0
+    correction = max(-_SPEED_CORR_CLAMP_MS, min(_SPEED_CORR_CLAMP_MS, accel * tau_eff))
+    speed_corr = speed_ema + correction
+
+    # Step 4 — ACC ultra-smooth speed: EMA of speed_corr with speed-dependent α.
+    if prev_speed_acc_ema is None:
+        speed_acc_ema = speed_corr
+        alpha_a = 1.0
+    else:
+        alpha_a = _tmp_acc_speed_ema_alpha(abs(speed_corr))
+        speed_acc_ema = alpha_a * speed_corr + (1.0 - alpha_a) * prev_speed_acc_ema
+
+    # ACC correction accel — LS slope of speed_ema over a long (1 s) window.
+    # Decoupled from speed_acc_ema (no self-referential lead) and long-windowed,
+    # so accel_ultra carries only the trend: the correction restores the lag
+    # without amplifying the residual wiggle τ_a would otherwise ring on.
+    accel_ultra = _accel_from_speed_history(history, _ACCEL_ULTRA_FIT_WINDOW_S)
+    tau_a = dt * (1.0 - alpha_a) / alpha_a if alpha_a > 1e-6 else 0.0
+    corr_a = max(-_SPEED_CORR_CLAMP_MS, min(_SPEED_CORR_CLAMP_MS, accel_ultra * tau_a))
+    acc_speed = speed_acc_ema + corr_a
+
+    return speed_ema, accel, speed_corr, speed_acc_ema, acc_speed, history
 
 
 class Position:
@@ -599,6 +706,7 @@ class Vehicle:
         self.rotation = rotation
         self.size = size
         self.speed = speed
+        self.acc_speed = speed
         # TMP: shared-memory acceleration is not used for physics; smoothed value is filled
         # in update_from_last(). Zero until the first kinematic update avoids buffer spikes.
         self.acceleration = 0.0 if is_tmp else acceleration
@@ -620,9 +728,12 @@ class Vehicle:
         self._raw_x: Optional[float] = None
         self._raw_z: Optional[float] = None
 
-        # TMP only — EMA state for speed/acceleration (buffer accel unused on TMP).
+        # Speed/accel filter state (AI + TMP) — see AGENTS.md §7.
         self._smooth_speed: Optional[float] = None
         self._smooth_accel: Optional[float] = None
+        self._speed_ema: Optional[float] = None
+        self._speed_acc_ema: Optional[float] = None
+        self._speed_ema_history: list[tuple[float, float]] = []
         self._raw_speed: Optional[float] = None
         # (time, x, z) per full update — newest last, capped at _POSITION_HISTORY_LEN.
         # Populated for both TMP and AI; TMP speed LS fit uses a shorter internal window.
@@ -655,20 +766,16 @@ class Vehicle:
         """Longitudinal acceleration for arc / collision (TMP = filtered kinematic value)."""
         return self.acceleration
 
-    def radar_speed_accel(self) -> tuple[float, float, float]:
-        """(filtered_speed, filtered_accel, raw_speed) for the radar visualizer.
+    def radar_speed_accel(self) -> tuple[float, float, float, float, float]:
+        """(raw_speed, speed_corr, speed_ema, speed_acc, accel) for the visualizer.
 
-        The visualizer is intended for debugging the TMP kinematic filtering: it shows
-        raw vs filtered speed and the filtered (smoothed) acceleration only.
+        speed_corr is the accel-corrected speed (AEB-facing, == self.speed),
+        speed_ema the uncorrected EMA, speed_acc the extra-smoothed speed
+        (ACC-facing, == self.acc_speed). See AGENTS.md §7.
         """
-        if self.is_tmp:
-            filtered_speed = self._smooth_speed if self._smooth_speed is not None else self.speed
-            filtered_accel = self._smooth_accel if self._smooth_accel is not None else self.acceleration
-            raw_speed = self._raw_speed if self._raw_speed is not None else self.speed
-            return filtered_speed, filtered_accel, raw_speed
-
         raw_speed = self._raw_speed if self._raw_speed is not None else self.speed
-        return self.speed, self.acceleration, raw_speed
+        speed_ema = self._speed_ema if self._speed_ema is not None else self.speed
+        return raw_speed, self.speed, speed_ema, self.acc_speed, self.acceleration
 
     def _tmp_apply_crash_rotation_jerk(self, prev: "Vehicle", t_now: float) -> None:
         """TMP: detect crash-level rotation jerk on every buffer read (sub-frame and full)."""
@@ -731,12 +838,16 @@ class Vehicle:
             self.crash_confirmed = prev.crash_confirmed
             self._smooth_speed = prev._smooth_speed
             self._smooth_accel = prev._smooth_accel
+            self._speed_ema = prev._speed_ema
+            self._speed_acc_ema = prev._speed_acc_ema
             self._raw_speed = prev._raw_speed
             self._position_history = list(prev._position_history)
+            self._speed_ema_history = list(prev._speed_ema_history)
             if abs(self.angular_velocity) > _MAX_ANGULAR_VELOCITY:
                 self.angular_velocity = 0.0
             self.speed = prev.speed
             self.acceleration = prev.acceleration
+            self.acc_speed = prev.acc_speed
 
             self._tmp_apply_crash_rotation_jerk(prev, t_now)
 
@@ -804,8 +915,11 @@ class Vehicle:
         self.crash_confirmed = False
         self._smooth_speed = prev._smooth_speed
         self._smooth_accel = prev._smooth_accel
+        self._speed_ema = prev._speed_ema
+        self._speed_acc_ema = prev._speed_acc_ema
         self._raw_speed = prev._raw_speed
         self._position_history = list(prev._position_history)
+        self._speed_ema_history = list(prev._speed_ema_history)
 
         raw_x = self.position.x
         raw_z = self.position.z
@@ -855,6 +969,9 @@ class Vehicle:
                     self.acceleration = 0.0
                     self._smooth_accel = 0.0
                     self._smooth_speed = self.speed
+                    self._speed_ema = self.speed
+                    self._speed_acc_ema = self.speed
+                    self.acc_speed = self.speed
                     self._raw_speed = 0.0
                     if self._smooth_x is not None:
                         self.position.x = self._smooth_x
@@ -886,6 +1003,7 @@ class Vehicle:
                 self.position.z = self._smooth_z
             self.speed = prev.speed
             self.acceleration = prev.acceleration
+            self.acc_speed = prev.acc_speed
             self._smooth_accel = prev._smooth_accel
             return
 
@@ -904,7 +1022,8 @@ class Vehicle:
         if len(self._position_history) > _POSITION_HISTORY_LEN:
             self._position_history = self._position_history[-_POSITION_HISTORY_LEN:]
 
-        # TMP: raw speed from last N positions (LS on longitudinal s vs τ); smooth with EMA.
+        # Raw speed — TMP: LS fit on position history (single-interval fallback);
+        # AI: the game-reported buffer value as-is. The filter chain below is shared.
         if self.is_tmp:
             _ls = _tmp_raw_speed_from_position_history(self._position_history, fwd_x, fwd_z)
             if _ls is not None:
@@ -926,55 +1045,24 @@ class Vehicle:
                     raw_speed = direction * dist / dt
                 else:
                     raw_speed = 0.0
-
-            # Raw-sample jerk (noisy) — only used until we have a filtered speed baseline.
-            if prev._raw_speed is not None and dt > 1e-9:
-                raw_accel = (raw_speed - prev._raw_speed) / dt
-            else:
-                raw_accel = 0.0
-
-            if prev._smooth_speed is None:
-                smooth_speed = raw_speed
-                smooth_accel = raw_accel
-            else:
-                alpha = _tmp_speed_ema_alpha(abs((prev.speed + raw_speed)/2))
-                smooth_speed = alpha * raw_speed + (1.0 - alpha) * prev.speed
-                kin_accel = (
-                    (smooth_speed - prev.speed) / dt if dt > 1e-9 else 0.0
-                )
-                prev_sa = (
-                    prev._smooth_accel
-                    if prev._smooth_accel is not None
-                    else kin_accel
-                )
-                beta = _tmp_accel_ema_alpha(abs((prev.speed + raw_speed)/2))
-                smooth_accel = beta * kin_accel + (1.0 - beta) * prev_sa
-
-            self._raw_speed = raw_speed
-            self._smooth_speed = smooth_speed
-            self._smooth_accel = smooth_accel
-            self.speed = smooth_speed
-            self.acceleration = smooth_accel
-
         else:
-            # AI (SP): EMA-filter the game-reported speed/accel.
             raw_speed = self.speed
-            if prev._smooth_speed is None:
-                self._raw_speed = raw_speed
-                self._smooth_speed = raw_speed
-                self._smooth_accel = self.acceleration
-            else:
-                alpha = _tmp_speed_ema_alpha(abs((prev.speed + raw_speed) / 2))
-                smooth_speed = alpha * raw_speed + (1.0 - alpha) * prev.speed
-                kin_accel = (smooth_speed - prev.speed) / dt if dt > 1e-9 else 0.0
-                prev_sa = prev._smooth_accel if prev._smooth_accel is not None else kin_accel
-                beta = _tmp_accel_ema_alpha(abs((prev.speed + raw_speed) / 2))
-                smooth_accel = beta * kin_accel + (1.0 - beta) * prev_sa
-                self._raw_speed = raw_speed
-                self._smooth_speed = smooth_speed
-                self._smooth_accel = smooth_accel
-                self.speed = smooth_speed
-                self.acceleration = smooth_accel
+
+        (speed_ema, accel, speed_corr, speed_acc_ema, acc_speed,
+         speed_ema_history) = _smooth_vehicle_kinematics(
+            raw_speed, t_now, dt,
+            prev._speed_ema, prev._smooth_accel, prev._speed_acc_ema,
+            prev._speed_ema_history,
+        )
+        self._raw_speed = raw_speed
+        self._speed_ema = speed_ema
+        self._speed_ema_history = speed_ema_history
+        self._smooth_accel = accel
+        self._smooth_speed = speed_corr
+        self._speed_acc_ema = speed_acc_ema
+        self.speed = speed_corr
+        self.acceleration = accel
+        self.acc_speed = acc_speed
 
     def curvature_from_history(self) -> float | None:
         """Curvature (1/m) from circumscribed circle fit over _position_history.

@@ -176,48 +176,60 @@ corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
 
 ## 7. Vehicle State & Smoothing
 
-### Fields — positions raw; TMP speed/accel filtered
+### Fields — positions raw; speed/accel filtered (AI + TMP)
 
 | Field | Source | Use for |
 |-------|--------|---------|
 | `position.x/z` | **Unfiltered** shared-memory world coordinates | Arc start position, rendering, collision geometry |
 | `_smooth_yaw` | Wrap-safe EMA of `rotation.euler()[1]` in radians (`_RAW_YAW_ALPHA = 0.5`, AI and TMP) | **Arc curvature. Never use `rotation.euler()` directly for arcs.** |
-| `speed` | AI = buffer as-is. TMP = raw speed from position history (LS on s vs τ along `fwd`), then EMA with α = `_tmp_speed_ema_alpha(|prev.speed|)` | Arc direction, TTB |
-| `acceleration` | AI = buffer as-is. TMP = EMA of `(filtered_speed − prev.filtered_speed) / dt` with `_tmp_accel_ema_alpha(|prev.speed|)` (not buffer field 11) | Arc decel/accel via `_accel_to_arc_params()` |
+| `speed` | Accel-corrected smoothed speed (`speed_corr`) — see filter chain below. AI + TMP | AEB arc direction, TTB |
+| `acc_speed` | Extra-smoothed speed (`speed_acc`) — plain EMA of `speed`. AI + TMP | ACC following-distance only |
+| `acceleration` | Nonlinear EMA of `d(speed_ema)/dt` — see filter chain below. AI + TMP (buffer field 11 unused) | Arc decel/accel via `_accel_to_arc_params()` |
 | `angular_velocity` | Degrees/s from rotation delta/dt | Arc curvature via `κ = ω_rad/speed` |
 | `_position_history` | `(t, x, z)` tuples appended each full update (AI + TMP); capped at `_POSITION_HISTORY_LEN = 25` | TMP raw-speed LS fit (uses last `_TMP_SPEED_HISTORY_LEN = 10`), `curvature_from_history`, ACC trail arcs |
+| `_speed_ema_history` | `(t, speed_ema)` tuples appended each full update (AI + TMP); capped at `_SPEED_EMA_HISTORY_LEN` | LS-slope fits: `accel` over `_ACCEL_FIT_WINDOW_S`, `accel_ultra` over `_ACCEL_ULTRA_FIT_WINDOW_S` |
 
-### TMP speed & acceleration — adaptive EMA (speed-dependent α)
+### Speed & acceleration — filter chain (AI + TMP)
 
-World `position.x/z` are **not** low-pass filtered. Raw longitudinal speed is derived
-from recent positions (LS fit), then smoothed with a plain EMA so the filtered
-estimate tracks the true speed without a separate prediction path drifting ahead
-or behind.
+World `position.x/z` are **not** low-pass filtered. `update_from_last()` runs the
+same 4-signal chain for AI and TMP (`_smooth_vehicle_kinematics()` in
+`traffic.py`); only the raw-speed source differs:
 
-Raw speed each full frame (after yaw EMA): keep the last `_TMP_SPEED_HISTORY_LEN`
-`(t, x, z)` samples from full updates out of `_position_history`. With at least two
-samples, fit `s ≈ v·τ` where `s = dot(p − p₀, fwd(smooth_yaw))` and `τ = t − t₀`
-(least squares: `v = Σ(τ s)/Σ(τ²)`). If the first→last chord is below 0.025 m,
-`raw_speed = 0`. With only one history sample, fall back to the single-interval
-formula. Sub-frames still use instantaneous `Δraw/dt` for diagnostics only and do
-not push the history.
+- **AI** raw speed = buffer field 10 as-is.
+- **TMP** raw speed = LS fit of longitudinal motion over the last
+  `_TMP_SPEED_HISTORY_LEN` `(t, x, z)` position-history samples — fit `s ≈ v·τ`
+  with `s = dot(p − p₀, fwd(smooth_yaw))`, `τ = t − t₀`, `v = Σ(τ s)/Σ(τ²)`.
+  Chord below 0.025 m → `raw_speed = 0`; one sample → single-interval `Δraw/dt`.
+  Buffer fields 10/11 are never used for TMP physics.
 
 ```python
-alpha      = _tmp_speed_ema_alpha(abs(prev.speed))   # 0.5 at rest → 0.15 at 90 km/h
-speed      = alpha * raw_speed + (1 - alpha) * prev.speed
-kin_accel  = (speed - prev.speed) / dt               # derivative of filtered speed
-beta       = _tmp_accel_ema_alpha(abs(prev.speed))   # 0.5 at rest → 0.2 at 90 km/h
-accel      = beta * kin_accel + (1 - beta) * prev_accel
+# 1. speed_ema  — plain EMA of raw speed (no lag compensation)
+alpha      = _tmp_speed_ema_alpha(|avg(prev_speed_ema, raw_speed)|)   # 1.0 rest → 0.25 @ 90 km/h
+speed_ema  = alpha * raw_speed + (1 - alpha) * prev_speed_ema
+# 2. accel  — LS slope of the speed_ema history over _ACCEL_FIT_WINDOW_S, light EMA
+accel_raw  = least_squares_slope( (t, speed_ema) samples within _ACCEL_FIT_WINDOW_S )
+accel      = prev_accel + _ACCEL_EMA_ALPHA * (accel_raw - prev_accel)
+# 3. speed_corr  — lag-compensated; τ is the step-1 EMA settling time
+speed_corr = speed_ema + clamp(accel * dt*(1-alpha)/alpha, ±_SPEED_CORR_CLAMP_MS)
+# 4. speed_acc  — ACC ultra-smooth: EMA of speed_corr (speed-dependent α), re-corrected
+alpha_a       = _tmp_acc_speed_ema_alpha(|speed_corr|)   # 0.35 rest → 0.08 @ 90 km/h
+speed_acc_ema = alpha_a * speed_corr + (1 - alpha_a) * prev_speed_acc_ema
+accel_ultra   = LS slope of speed_ema history over _ACCEL_ULTRA_FIT_WINDOW_S (1 s)
+speed_acc     = speed_acc_ema + clamp(accel_ultra * dt*(1-alpha_a)/alpha_a, ±_SPEED_CORR_CLAMP_MS)
 ```
 
-On the first full frame after spawn, `accel` falls back to
-`(raw_speed - prev_raw_speed) / dt` until a filtered speed exists.
+Step 4's `accel_ultra·τ` term re-corrects the lag the ultra-smooth EMA would
+otherwise re-introduce, so ACC tracks accel/decel without trailing behind.
+`accel_ultra` is a **1 s** LS slope of `speed_ema` — decoupled from
+`speed_acc_ema` (deriving the correction from its own output is a
+self-referential lead that rings) and long-windowed, so it carries only the
+trend, not the wiggle. `α` is heavier (more smoothing) at high speed, lighter
+at low speed.
 
-`α` decreases with |speed| (more smoothing when fast). TMP never uses buffer
-field 11 for physics.
-
-Singleplayer (AI) vehicles skip this block entirely: `speed` and `acceleration`
-stay buffer values, positions stay raw.
+Exposed as `self.speed = speed_corr` (AEB), `self.acc_speed = speed_acc` (ACC),
+`self.acceleration = accel` (shared); `speed_ema` is the internal `_speed_ema`
+intermediate. On the first full frame after spawn every signal initialises to
+`raw_speed` with `accel = 0`. `α` decreases with |speed| (more smoothing when fast).
 
 **Arc / collision** — `Vehicle.accel_for_arc()` is `return self.acceleration`.
 TMP vehicles initialise `acceleration = 0` until the first `update_from_last`;
@@ -479,8 +491,8 @@ values; consumer threads should treat an unchanged `t_mono` as "no new frame".
 | Arc curvature | `κ = omega_rad_s / abs_speed` |
 | Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
 | TMP raw speed | LS on longitudinal `(t,x,z)` history (max `_TMP_SPEED_HISTORY_LEN` full frames): `v = Σ(τ s)/Σ(τ²)`; else `Δraw/dt`, signed via forward dot |
-| TMP smooth speed / accel | `α = _tmp_speed_ema_alpha` (0.5→0.15 @ 90 km/h); `speed = α*raw+(1-α)*prev`; `kin=(speed−prev)/dt`; `β = _tmp_accel_ema_alpha` (0.5→0.2 @ 90 km/h); `accel = β*kin+(1−β)*prev_accel`; buffer 11 unused |
-| AI speed / accel | Buffer as-is; no TMP EMA |
+| Speed / accel filter (AI + TMP) | 4-signal chain in `_smooth_vehicle_kinematics()`: `speed_ema` (EMA of raw) → `accel` (LS slope of `speed_ema` history over `_ACCEL_FIT_WINDOW_S`, light EMA) → `speed_corr = speed_ema + accel·τ` (`self.speed`) → `speed_acc` (speed-dependent-α EMA of `speed_corr`, re-corrected by `accel_ultra·τ` where `accel_ultra` is a 1 s LS slope of `speed_ema`, `self.acc_speed`) |
+| AI vs TMP raw speed | AI = buffer field 10; TMP = position-history LS fit. Filter chain identical after that |
 | Positions | No EMA — always raw world coordinates |
 | Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > 2 m/s` → decay speed: `prev_speed × (1 − frac²)`, release after 0.3 s |
 | Pos mismatch | `dot(raw_disp, prev_fwd) < -0.05 m` AND `is_tmp` AND `frames < 10` → hold smooth pos + speed, allow yaw |
@@ -501,8 +513,9 @@ values; consumer threads should treat an unchanged `t_mono` as "no new frame".
 - **Always use `_smooth_yaw` for arc construction**, never `rotation.euler()` directly.
 - **Y axis is never used in 2D math**, only for elevation filtering.
 - **Arc forward vector formula is `(-sin, -cos)`.** Do not flip signs or swap to `(sin, cos)`.
-- **TMP speed EMA uses `_tmp_speed_ema_alpha(abs(prev.speed))`** — hyperbolic **0.5 at rest → 0.15 at 90 km/h** on raw speed. **`acceleration`** is an EMA of `(speed − prev.speed) / dt` with **`_tmp_accel_ema_alpha`** (**0.5 at rest → 0.2 at 90 km/h**). World positions are not low-pass filtered.
-- **TMP `acceleration` is kinematic-only** — buffer field 11 is ignored; `accel_for_arc()` reads `self.acceleration` (smoothed derivative of filtered TMP speed).
+- **Speed/accel filtering runs for AI and TMP** via `_smooth_vehicle_kinematics()` — the 4-signal chain `speed_ema → accel → speed_corr → speed_acc`. `self.speed` is the accel-corrected `speed_corr`; `self.acc_speed` is the lag-corrected ultra-smooth `speed_acc` (ACC only); `self.acceleration` is the LS-slope `accel`. World positions are not low-pass filtered.
+- **`acceleration` is kinematic-only** — buffer field 11 is ignored for AI and TMP; `accel_for_arc()` reads `self.acceleration` (least-squares slope of the `speed_ema` history, light-EMA smoothed).
+- **`acc_speed` is ACC-only.** AEB and arc geometry use `self.speed`; never swap them.
 - **TMP lag freeze holds position, filtered speed decay, and internal EMA state.** Do not advance position during a freeze — that would snap when updates resume.
 - **Lag freeze speed decays quadratically: `prev_speed × (1 − frac²)`.** Never hold speed constant during lag — it keeps downstream threads informed while smoothly approaching 0.
 - **`lag_confirmed` is set by `traffic.py`, not by consumer threads.** A confirmed-stopped vehicle has speed = 0 and is detected as a stationary obstacle by the existing arc collision logic.

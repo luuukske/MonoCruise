@@ -21,7 +21,9 @@ class RadarVisualizer:
         self.socketio = SocketIO(self.app, cors_allowed_origins="*", async_mode="threading")
 
         self.raw_speed = deque(maxlen=100)
-        self.filtered_speed = deque(maxlen=100)
+        self.speed_corr = deque(maxlen=100)
+        self.speed_ema = deque(maxlen=100)
+        self.speed_acc = deque(maxlen=100)
         self.filtered_accel = deque(maxlen=100)
         self.timestamps = deque(maxlen=100)
         self.last_update = 0.0
@@ -53,7 +55,7 @@ class RadarVisualizer:
         h1 { text-align: center; color: #4CAF50; }
         .chart-container { background: #2a2a2a; padding: 20px; margin: 20px 0; border-radius: 8px; }
         canvas { max-height: 400px; }
-        .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 20px; }
+        .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 20px; }
         .stat-box { background: #2a2a2a; padding: 15px; border-radius: 5px; text-align: center; }
         .stat-value { font-size: 24px; font-weight: bold; color: #4CAF50; }
         .stat-label { font-size: 12px; color: #aaa; margin-top: 5px; }
@@ -73,8 +75,16 @@ class RadarVisualizer:
                 <div class="stat-label">Raw Speed (m/s)</div>
             </div>
             <div class="stat-box">
-                <div class="stat-value" id="filtered-speed">0.00</div>
-                <div class="stat-label">Smoothed Speed (m/s)</div>
+                <div class="stat-value" id="speed-corr">0.00</div>
+                <div class="stat-label">Corrected — AEB (m/s)</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value" id="speed-ema">0.00</div>
+                <div class="stat-label">EMA — uncorrected (m/s)</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-value" id="speed-acc">0.00</div>
+                <div class="stat-label">Ultra — ACC (m/s)</div>
             </div>
             <div class="stat-box">
                 <div class="stat-value" id="filtered-accel">0.00</div>
@@ -117,7 +127,7 @@ class RadarVisualizer:
                 labels: [],
                 datasets: [
                     {
-                        label: 'Raw Speed',
+                        label: 'Raw',
                         data: [],
                         borderColor: '#ff6b6b',
                         backgroundColor: 'rgba(255, 107, 107, 0.1)',
@@ -125,10 +135,26 @@ class RadarVisualizer:
                         pointRadius: 0
                     },
                     {
-                        label: 'Smoothed Speed',
+                        label: 'Corrected (AEB)',
                         data: [],
                         borderColor: '#4ecdc4',
                         backgroundColor: 'rgba(78, 205, 196, 0.1)',
+                        borderWidth: 2,
+                        pointRadius: 0
+                    },
+                    {
+                        label: 'EMA (uncorrected)',
+                        data: [],
+                        borderColor: '#ff9f43',
+                        backgroundColor: 'rgba(255, 159, 67, 0.1)',
+                        borderWidth: 2,
+                        pointRadius: 0
+                    },
+                    {
+                        label: 'Ultra (ACC)',
+                        data: [],
+                        borderColor: '#a78bfa',
+                        backgroundColor: 'rgba(167, 139, 250, 0.1)',
                         borderWidth: 2,
                         pointRadius: 0
                     }
@@ -179,25 +205,21 @@ class RadarVisualizer:
 
             speedChart.data.labels = data.labels;
             speedChart.data.datasets[0].data = data.raw_speed;
-            speedChart.data.datasets[1].data = data.filtered_speed;
+            speedChart.data.datasets[1].data = data.speed_corr;
+            speedChart.data.datasets[2].data = data.speed_ema;
+            speedChart.data.datasets[3].data = data.speed_acc;
             speedChart.update();
 
             accelChart.data.labels = data.labels;
             accelChart.data.datasets[0].data = data.filtered_accel;
             accelChart.update();
 
-            if (data.raw_speed.length > 0) {
-                document.getElementById('raw-speed').textContent =
-                    data.raw_speed[data.raw_speed.length - 1].toFixed(2);
-                document.getElementById('filtered-speed').textContent =
-                    data.filtered_speed[data.filtered_speed.length - 1].toFixed(2);
-                document.getElementById('filtered-accel').textContent =
-                    data.filtered_accel[data.filtered_accel.length - 1].toFixed(2);
-            } else {
-                document.getElementById('raw-speed').textContent = '0.00';
-                document.getElementById('filtered-speed').textContent = '0.00';
-                document.getElementById('filtered-accel').textContent = '0.00';
-            }
+            const last = (arr) => arr.length > 0 ? arr[arr.length - 1].toFixed(2) : '0.00';
+            document.getElementById('raw-speed').textContent = last(data.raw_speed);
+            document.getElementById('speed-corr').textContent = last(data.speed_corr);
+            document.getElementById('speed-ema').textContent = last(data.speed_ema);
+            document.getElementById('speed-acc').textContent = last(data.speed_acc);
+            document.getElementById('filtered-accel').textContent = last(data.filtered_accel);
         });
     </script>
 </body>
@@ -214,7 +236,9 @@ class RadarVisualizer:
                     'is_tracked': self._is_tracked,
                     'labels': list(self.timestamps),
                     'raw_speed': list(self.raw_speed),
-                    'filtered_speed': list(self.filtered_speed),
+                    'speed_corr': list(self.speed_corr),
+                    'speed_ema': list(self.speed_ema),
+                    'speed_acc': list(self.speed_acc),
                     'filtered_accel': list(self.filtered_accel),
                 }
             try:
@@ -223,13 +247,16 @@ class RadarVisualizer:
                 pass
             time.sleep(0.1)
 
-    def push_data(self, raw_speed, filtered_speed, filtered_accel, is_tracked: bool = True):
-        """Push the vehicle's raw speed, smoothed speed, smoothed accel."""
+    def push_data(self, raw_speed, speed_corr, speed_ema, speed_acc,
+                  filtered_accel, is_tracked: bool = True):
+        """Push raw speed, the 3 smoothed speeds, and the smoothed accel."""
         with self.lock:
             now = time.time()
             self.timestamps.append(now)
             self.raw_speed.append(float(raw_speed))
-            self.filtered_speed.append(float(filtered_speed))
+            self.speed_corr.append(float(speed_corr))
+            self.speed_ema.append(float(speed_ema))
+            self.speed_acc.append(float(speed_acc))
             self.filtered_accel.append(float(filtered_accel))
             self.last_update = now
             self._is_tracked = is_tracked
@@ -239,7 +266,9 @@ class RadarVisualizer:
         with self.lock:
             self.timestamps.clear()
             self.raw_speed.clear()
-            self.filtered_speed.clear()
+            self.speed_corr.clear()
+            self.speed_ema.clear()
+            self.speed_acc.clear()
             self.filtered_accel.clear()
             self.last_update = 0.0
 
