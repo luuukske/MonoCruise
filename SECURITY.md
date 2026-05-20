@@ -95,3 +95,20 @@ Vulnerability check 2026-05-10 — 128 packages scanned. No new vulnerabilities.
 - `pygments 2.19.2` MEDIUM (CVE-2026-4539 / SFTY-20260322-35073): unchanged since 2026-04-26. Fix available at 2.20.0. Transitive/dev dependency; low exploitability in desktop app context.
 - `python-dotenv 1.2.1` MODERATE (CVE-2026-28684 / GHSA-mf9w-mj56-hr94): unchanged since 2026-04-25. Project code does not call `set_key()`/`unset_key()` — unexploitable in current usage. Fix at 1.2.2.
 - 3 net-new packages vs last scan (125→128): `annotated-doc 0.0.4`, `truck-telemetry 0.0.3`, `safety-schemas 0.0.16` — none flagged.
+
+---
+
+### Scan: 2026-05-17 — .venv installed packages, OSV database
+
+| Package | Version | Severity | Advisory | Summary | Fix Available |
+|---------|---------|----------|----------|---------|---------------|
+| urllib3 | 2.6.3 | **HIGH** (7.5) | [GHSA-mf9v-mfxr-j63j](https://github.com/advisories/GHSA-mf9v-mfxr-j63j) / CVE-2026-44432 | Decompression-bomb safeguards bypassed in parts of the streaming API (DoS) | ✅ Upgrade to 2.7.0 |
+| urllib3 | 2.6.3 | MEDIUM (5.3) | [GHSA-qccp-gfcp-xxvc](https://github.com/advisories/GHSA-qccp-gfcp-xxvc) / CVE-2026-44431 | Sensitive headers forwarded across origins in proxied low-level redirects (info disclosure) | ✅ Upgrade to 2.7.0 |
+| Authlib | 1.7.0 | MEDIUM (6.1) | [GHSA-r95x-qfjj-fjj2](https://github.com/advisories/GHSA-r95x-qfjj-fjj2) / CVE-2026-44681 | OIDC Implicit/Hybrid Authorization vulnerable to open redirect | ✅ Upgrade to 1.7.1 |
+
+**Scope:** key .venv packages (direct and transitive), OSV API query
+**Previously documented issues persisting:** pygments 2.19.2 MEDIUM (CVE-2026-4539), python-dotenv 1.2.1 MODERATE (CVE-2026-28684)
+
+#### Notes
+- `urllib3 2.6.3` HIGH/MEDIUM: transitive dependency of `requests` — project source does not import urllib3 directly, and does not use urllib3's streaming API or configure proxies. Practical exploitability is low for a desktop app making non-streaming, non-proxied requests. Upgrade `requests` to pull in urllib3 ≥ 2.7.0.
+- `Authlib 1.7.0` MEDIUM: transitive dependency (pulled in via `safety-cli`); project source does not import or call Authlib directly. Open redirect requires an attacker-controlled redirect_uri in an OIDC flow — unexploitable in current usage. Upgrade to 1.7.1 when convenient.
