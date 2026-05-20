@@ -573,6 +573,7 @@ class AEBThread(BaseThread):
         self._last_snapshot: AEBSnapshot | None = None
         self._risk_first_seen: dict[int, float] = {}
         self._radar_visualizer = None
+        self._radar_vis_last_vehicle_time: float = -1.0
         self._latched_filter_ego_kmh: float | None = None
         self._sound_handler = _AEBSoundHandler(_AEB_SOUND_PATH)
         self._cal: AEBCalibration = _CAL_DEFAULT
@@ -761,10 +762,19 @@ class AEBThread(BaseThread):
                     if v.id == lead_id:
                         lead_v = v
                         break
+            is_tracked = lead_v is not None
+            if lead_v is None and vehicles:
+                lead_v = min(
+                    vehicles,
+                    key=lambda v: (v.position.x - ego_x) ** 2 + (v.position.z - ego_z) ** 2,
+                )
             if lead_v is not None:
-                f_spd, f_acc, r_spd = lead_v.radar_speed_accel()
-                self._radar_visualizer.push_data(r_spd, f_spd, f_acc)
+                if lead_v.time != self._radar_vis_last_vehicle_time:
+                    self._radar_vis_last_vehicle_time = lead_v.time
+                    f_spd, f_acc, r_spd = lead_v.radar_speed_accel()
+                    self._radar_visualizer.push_data(r_spd, f_spd, f_acc, is_tracked=is_tracked)
             else:
+                self._radar_vis_last_vehicle_time = -1.0
                 self._radar_visualizer.clear()
 
         colliding_ids: set[int] = set()

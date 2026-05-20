@@ -1,9 +1,9 @@
 """
 Live visualization server for radar speed/acceleration filtering.
 
-Shows raw vs smoothed speed and smoothed acceleration of the **leading
-vehicle only** (the primary ACC lead). Single stream — no vehicle IDs,
-no selection UI.
+Shows raw vs smoothed speed and smoothed acceleration of the ACC-tracked
+lead vehicle, or the closest radar vehicle when no lead is tracked.
+Single stream — no vehicle IDs, no selection UI.
 """
 
 from flask import Flask, render_template_string
@@ -20,12 +20,13 @@ class RadarVisualizer:
         # Force threaded async mode so we don't require eventlet/gevent.
         self.socketio = SocketIO(self.app, cors_allowed_origins="*", async_mode="threading")
 
-        self.raw_speed = deque(maxlen=200)
-        self.filtered_speed = deque(maxlen=200)
-        self.filtered_accel = deque(maxlen=200)
-        self.timestamps = deque(maxlen=200)
+        self.raw_speed = deque(maxlen=100)
+        self.filtered_speed = deque(maxlen=100)
+        self.filtered_accel = deque(maxlen=100)
+        self.timestamps = deque(maxlen=100)
         self.last_update = 0.0
         self.stale_timeout = 1.0  # seconds before stream is considered idle
+        self._is_tracked = False
 
         self.lock = threading.Lock()
         self.running = False
@@ -64,7 +65,7 @@ class RadarVisualizer:
 <body>
     <div class="container">
         <h1>MonoCruise Lead Vehicle Radar</h1>
-        <div class="status" id="status">Waiting for lead...</div>
+        <div class="status" id="status">Waiting for vehicles...</div>
 
         <div class="stats">
             <div class="stat-box">
@@ -169,10 +170,10 @@ class RadarVisualizer:
         socket.on('update', (data) => {
             const statusEl = document.getElementById('status');
             if (data.active) {
-                statusEl.textContent = 'Tracking lead vehicle';
+                statusEl.textContent = data.is_tracked ? 'Tracking ACC lead' : 'Closest vehicle (no ACC lead)';
                 statusEl.className = 'status active';
             } else {
-                statusEl.textContent = 'No lead vehicle';
+                statusEl.textContent = 'No vehicles';
                 statusEl.className = 'status idle';
             }
 
@@ -210,6 +211,7 @@ class RadarVisualizer:
                 active = (time.time() - self.last_update) < self.stale_timeout and len(self.timestamps) > 0
                 payload = {
                     'active': active,
+                    'is_tracked': self._is_tracked,
                     'labels': list(self.timestamps),
                     'raw_speed': list(self.raw_speed),
                     'filtered_speed': list(self.filtered_speed),
@@ -221,8 +223,8 @@ class RadarVisualizer:
                 pass
             time.sleep(0.1)
 
-    def push_data(self, raw_speed, filtered_speed, filtered_accel):
-        """Push the lead vehicle's raw speed, smoothed speed, smoothed accel."""
+    def push_data(self, raw_speed, filtered_speed, filtered_accel, is_tracked: bool = True):
+        """Push the vehicle's raw speed, smoothed speed, smoothed accel."""
         with self.lock:
             now = time.time()
             self.timestamps.append(now)
@@ -230,6 +232,7 @@ class RadarVisualizer:
             self.filtered_speed.append(float(filtered_speed))
             self.filtered_accel.append(float(filtered_accel))
             self.last_update = now
+            self._is_tracked = is_tracked
 
     def clear(self):
         """Drop buffered samples (call when no lead is present)."""
