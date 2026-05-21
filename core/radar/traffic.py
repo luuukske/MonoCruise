@@ -47,8 +47,8 @@ _SPEED_CORR_CLAMP_MS: float = 3.0
 # _ACC_SPEED_TAU_SLOW_S time constant; the time constant ramps continuously
 # down toward _ACC_SPEED_TAU_FAST_S as the change grows, reaching it at twice
 # the deadband, so real motion is tracked fast. See AGENTS.md §7.
-_ACC_SPEED_DEADBAND_MS: float = 0.5
-_ACC_SPEED_TAU_SLOW_S: float = 1.20
+_ACC_SPEED_DEADBAND_MS: float = 0.7
+_ACC_SPEED_TAU_SLOW_S: float = 2.0
 _ACC_SPEED_TAU_FAST_S: float = 0.08
 
 # Smoothing is speed-scaled: tau is multiplied by speed_factor — 1.0 at
@@ -58,15 +58,31 @@ _ACC_SPEED_TAU_FAST_S: float = 0.08
 _ACC_SPEED_SMOOTH_REF_MS: float = 90.0 / 3.6   # 25 m/s
 _ACC_SPEED_SMOOTH_MIN: float = 0.15
 
-# Leaky integral — the adaptive low-pass alone lags a sustained ramp by
-# rate·tau (a persistent bias during long decel). `integ` accumulates `delta`
-# and adds it back, driving the steady-state lag to ≈ 0. The (1 - ramp) weight
-# gates it off during transients (fast-tau's regime) so a hard brake cannot
-# wind it up; the leak (a slow time constant) bleeds zero-mean cruise noise so
-# it never builds. See AGENTS.md §7.
-_ACC_SPEED_INTEGRAL_GAIN: float = 1.0       # 1/s²  — integration rate
-_ACC_SPEED_INTEGRAL_LEAK_HZ: float = 0.05   # 1/s   — leak rate (≈ 20 s memory)
-_ACC_SPEED_INTEGRAL_CLAMP_MS2: float = 5.0  # m/s²  — anti-windup clamp on integ
+# ...and acceleration-scaled. accel_trend is the de-noised acceleration — the
+# LS slope of speed_ema over _ACC_SPEED_ACCEL_WINDOW_S, where coasting and
+# cruise wobble average to ≈ 0 but a steady ramp registers its true rate.
+# accel_factor multiplies tau — 1.0 while coasting, falling to
+# _ACC_SPEED_ACCEL_FLOOR once |accel_trend| reaches _ACC_SPEED_ACCEL_HI_MS2.
+# Below _ACC_SPEED_ACCEL_LO_MS2 a ramp counts as cruise noise and is ignored,
+# so cruise smoothing is untouched. See AGENTS.md §7.
+_ACC_SPEED_ACCEL_WINDOW_S: float = 1.5
+_ACC_SPEED_ACCEL_LO_MS2: float = 0.3
+_ACC_SPEED_ACCEL_HI_MS2: float = 1.5
+_ACC_SPEED_ACCEL_FLOOR: float = 0.35
+
+# Feed-forward — the low-pass alone lags a steady ramp by accel·tau. acc_speed
+# is predicted one step along the responsive accel before the low-pass corrects
+# the residual, which cancels that lag analytically (no windup, no overshoot).
+# The prediction is gated by ff_gate, a ramp on the de-noised |accel_trend|:
+# zero below _ACC_SPEED_FF_GATE_LO_MS2, full at _ACC_SPEED_FF_GATE_HI_MS2. Both
+# sit just above the cruise-noise floor (|accel_trend| ≈ 0.06 m/s² while
+# coasting) so the prediction is exactly zero while coasting — no cruise noise
+# is fed forward — yet saturates within a fraction of a real ramp. accel is
+# clamped to _ACC_SPEED_FF_ACCEL_CLAMP_MS2 so a crash spike cannot jump
+# acc_speed. See AGENTS.md §7.
+_ACC_SPEED_FF_GATE_LO_MS2: float = 0.12        # m/s²  — feed-forward gate opens
+_ACC_SPEED_FF_GATE_HI_MS2: float = 0.30        # m/s²  — feed-forward gate fully open
+_ACC_SPEED_FF_ACCEL_CLAMP_MS2: float = 6.0     # m/s²  — clamp on the feed-forward accel
 
 # Yaw EMA (wrap-safe) — AI and TMP (arc curvature).
 _RAW_YAW_ALPHA: float = 0.20
@@ -207,12 +223,11 @@ def _smooth_vehicle_kinematics(
     prev_speed_ema: float | None,
     prev_accel: float | None,
     prev_acc_speed: float | None,
-    prev_acc_speed_integ: float,
     prev_speed_ema_history: list[tuple[float, float]] | None,
-) -> tuple[float, float, float, float, float, list[tuple[float, float]]]:
+) -> tuple[float, float, float, float, list[tuple[float, float]]]:
     """Speed/accel filter chain shared by AI and TMP vehicles. See AGENTS.md §7.
 
-    Returns (speed_ema, accel, speed_corr, acc_speed, acc_speed_integ, speed_ema_history).
+    Returns (speed_ema, accel, speed_corr, acc_speed, speed_ema_history).
     """
     # Step 1 — plain EMA of raw speed (no lag compensation).
     if prev_speed_ema is None:
@@ -240,12 +255,12 @@ def _smooth_vehicle_kinematics(
     correction = max(-_SPEED_CORR_CLAMP_MS, min(_SPEED_CORR_CLAMP_MS, accel * tau_eff))
     speed_corr = speed_ema + correction
 
-    # Step 4 — ACC speed: adaptive low-pass on speed_corr + a leaky integral.
-    # tau ramps slow→fast with the per-tick change (transients); integ
-    # accumulates the persistent lag and cancels it. See AGENTS.md §7.
+    # Step 4 — ACC speed: adaptive low-pass on speed_corr with a constant-accel
+    # feed-forward. tau ramps slow→fast with the per-tick change (abrupt jumps)
+    # and is scaled down on a confirmed ramp; the feed-forward predicts along
+    # the de-noised accel so a steady ramp tracks with ≈ 0 lag. See AGENTS.md §7.
     if prev_speed_ema is None or prev_acc_speed is None:
         acc_speed = speed_corr
-        acc_speed_integ = 0.0
     else:
         delta = speed_corr - prev_acc_speed
         ramp = (abs(delta) - _ACC_SPEED_DEADBAND_MS) / _ACC_SPEED_DEADBAND_MS
@@ -253,18 +268,28 @@ def _smooth_vehicle_kinematics(
         # Smoothing scales with speed — full at the reference speed, light at rest.
         speed_factor = _ACC_SPEED_SMOOTH_MIN + (1.0 - _ACC_SPEED_SMOOTH_MIN) * min(
             1.0, abs(speed_corr) / _ACC_SPEED_SMOOTH_REF_MS)
+        # ...and with acceleration — a steady ramp is low-noise, track it closely.
+        accel_trend = _accel_from_speed_history(history, _ACC_SPEED_ACCEL_WINDOW_S)
+        accel_span = _ACC_SPEED_ACCEL_HI_MS2 - _ACC_SPEED_ACCEL_LO_MS2
+        accel_ramp = max(0.0, min(1.0,
+            (abs(accel_trend) - _ACC_SPEED_ACCEL_LO_MS2) / accel_span))
+        accel_factor = 1.0 - (1.0 - _ACC_SPEED_ACCEL_FLOOR) * accel_ramp
         tau = _ACC_SPEED_TAU_SLOW_S + (_ACC_SPEED_TAU_FAST_S - _ACC_SPEED_TAU_SLOW_S) * ramp
-        tau *= speed_factor
+        tau *= speed_factor * accel_factor
         alpha_a = dt / (tau + dt)
-        acc_speed_integ = (
-            prev_acc_speed_integ * (1.0 - _ACC_SPEED_INTEGRAL_LEAK_HZ * dt)
-            + _ACC_SPEED_INTEGRAL_GAIN * (1.0 - ramp) * delta * dt
-        )
-        acc_speed_integ = max(-_ACC_SPEED_INTEGRAL_CLAMP_MS2,
-                              min(_ACC_SPEED_INTEGRAL_CLAMP_MS2, acc_speed_integ))
-        acc_speed = prev_acc_speed + alpha_a * delta + acc_speed_integ * dt
+        # Feed-forward — predict one step along the responsive accel, then
+        # low-pass the residual. Cancels the filter's accel·tau ramp lag with no
+        # windup. ff_gate (a ramp on the de-noised |accel_trend|) holds the
+        # prediction at zero while coasting, so cruise noise is never fed forward.
+        ff_gate = max(0.0, min(1.0,
+            (abs(accel_trend) - _ACC_SPEED_FF_GATE_LO_MS2)
+            / (_ACC_SPEED_FF_GATE_HI_MS2 - _ACC_SPEED_FF_GATE_LO_MS2)))
+        accel_ff = max(-_ACC_SPEED_FF_ACCEL_CLAMP_MS2,
+                       min(_ACC_SPEED_FF_ACCEL_CLAMP_MS2, accel))
+        predicted = prev_acc_speed + accel_ff * dt * ff_gate
+        acc_speed = predicted + alpha_a * (speed_corr - predicted)
 
-    return speed_ema, accel, speed_corr, acc_speed, acc_speed_integ, history
+    return (speed_ema, accel, speed_corr, acc_speed, history)
 
 
 class Position:
@@ -745,7 +770,6 @@ class Vehicle:
         self._smooth_speed: Optional[float] = None
         self._smooth_accel: Optional[float] = None
         self._speed_ema: Optional[float] = None
-        self._acc_speed_integ: float = 0.0
         self._speed_ema_history: list[tuple[float, float]] = []
         self._raw_speed: Optional[float] = None
         # (time, x, z) per full update — newest last, capped at _POSITION_HISTORY_LEN.
@@ -852,7 +876,6 @@ class Vehicle:
             self._smooth_speed = prev._smooth_speed
             self._smooth_accel = prev._smooth_accel
             self._speed_ema = prev._speed_ema
-            self._acc_speed_integ = prev._acc_speed_integ
             self._raw_speed = prev._raw_speed
             self._position_history = list(prev._position_history)
             self._speed_ema_history = list(prev._speed_ema_history)
@@ -929,7 +952,6 @@ class Vehicle:
         self._smooth_speed = prev._smooth_speed
         self._smooth_accel = prev._smooth_accel
         self._speed_ema = prev._speed_ema
-        self._acc_speed_integ = prev._acc_speed_integ
         self._raw_speed = prev._raw_speed
         self._position_history = list(prev._position_history)
         self._speed_ema_history = list(prev._speed_ema_history)
@@ -984,7 +1006,6 @@ class Vehicle:
                     self._smooth_speed = self.speed
                     self._speed_ema = self.speed
                     self.acc_speed = self.speed
-                    self._acc_speed_integ = 0.0
                     self._raw_speed = 0.0
                     if self._smooth_x is not None:
                         self.position.x = self._smooth_x
@@ -1061,18 +1082,17 @@ class Vehicle:
         else:
             raw_speed = self.speed
 
-        (speed_ema, accel, speed_corr, acc_speed, acc_speed_integ,
+        (speed_ema, accel, speed_corr, acc_speed,
          speed_ema_history) = _smooth_vehicle_kinematics(
             raw_speed, t_now, dt,
             prev._speed_ema, prev._smooth_accel, prev.acc_speed,
-            prev._acc_speed_integ, prev._speed_ema_history,
+            prev._speed_ema_history,
         )
         self._raw_speed = raw_speed
         self._speed_ema = speed_ema
         self._speed_ema_history = speed_ema_history
         self._smooth_accel = accel
         self._smooth_speed = speed_corr
-        self._acc_speed_integ = acc_speed_integ
         self.speed = speed_corr
         self.acceleration = accel
         self.acc_speed = acc_speed

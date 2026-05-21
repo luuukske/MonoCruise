@@ -187,7 +187,7 @@ corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
 | `acceleration` | Nonlinear EMA of `d(speed_ema)/dt` — see filter chain below. AI + TMP (buffer field 11 unused) | Arc decel/accel via `_accel_to_arc_params()` |
 | `angular_velocity` | Degrees/s from rotation delta/dt | Arc curvature via `κ = ω_rad/speed` |
 | `_position_history` | `(t, x, z)` tuples appended each full update (AI + TMP); capped at `_POSITION_HISTORY_LEN = 25` | TMP raw-speed LS fit (uses last `_TMP_SPEED_HISTORY_LEN = 20`), `curvature_from_history`, ACC trail arcs |
-| `_speed_ema_history` | `(t, speed_ema)` tuples appended each full update (AI + TMP); capped at `_SPEED_EMA_HISTORY_LEN` | LS-slope fit for `accel` over `_ACCEL_FIT_WINDOW_S` |
+| `_speed_ema_history` | `(t, speed_ema)` tuples appended each full update (AI + TMP); capped at `_SPEED_EMA_HISTORY_LEN` | LS-slope fits: `accel` over `_ACCEL_FIT_WINDOW_S`, `accel_trend` over `_ACC_SPEED_ACCEL_WINDOW_S` |
 
 ### Speed & acceleration — filter chain (AI + TMP)
 
@@ -215,25 +215,29 @@ accel_raw  = least_squares_slope( (t, speed_ema) samples within _ACCEL_FIT_WINDO
 accel      = prev_accel + _ACCEL_EMA_ALPHA * (accel_raw - prev_accel)
 # 3. speed_corr  — lag-compensated; τ is the step-1 EMA settling time
 speed_corr = speed_ema + clamp(accel * dt*(1-alpha)/alpha, ±_SPEED_CORR_CLAMP_MS)
-# 4. acc_speed  — ACC speed: adaptive low-pass on speed_corr + leaky integral
+# 4. acc_speed  — ACC speed: adaptive low-pass on speed_corr + feed-forward
 delta        = speed_corr - prev_acc_speed
 ramp         = clamp((|delta| - _ACC_SPEED_DEADBAND_MS) / _ACC_SPEED_DEADBAND_MS, 0, 1)
 speed_factor = _ACC_SPEED_SMOOTH_MIN + (1 - _ACC_SPEED_SMOOTH_MIN) * min(1, |speed_corr| / _ACC_SPEED_SMOOTH_REF_MS)
-tau          = (_ACC_SPEED_TAU_SLOW_S + (_ACC_SPEED_TAU_FAST_S - _ACC_SPEED_TAU_SLOW_S) * ramp) * speed_factor
+accel_trend  = LS slope of speed_ema history over _ACC_SPEED_ACCEL_WINDOW_S
+accel_ramp   = clamp((|accel_trend| - _ACC_SPEED_ACCEL_LO_MS2) / (_ACC_SPEED_ACCEL_HI_MS2 - _ACC_SPEED_ACCEL_LO_MS2), 0, 1)
+accel_factor = 1 - (1 - _ACC_SPEED_ACCEL_FLOOR) * accel_ramp
+tau          = (_ACC_SPEED_TAU_SLOW_S + (_ACC_SPEED_TAU_FAST_S - _ACC_SPEED_TAU_SLOW_S) * ramp) * speed_factor * accel_factor
 alpha_a      = dt / (tau + dt)
-integ        = prev_integ * (1 - _ACC_SPEED_INTEGRAL_LEAK_HZ*dt) + _ACC_SPEED_INTEGRAL_GAIN*(1 - ramp)*delta*dt
-integ        = clamp(integ, ±_ACC_SPEED_INTEGRAL_CLAMP_MS2)
-acc_speed    = prev_acc_speed + alpha_a * delta + integ * dt
+ff_gate      = clamp((|accel_trend| - _ACC_SPEED_FF_GATE_LO_MS2) / (_ACC_SPEED_FF_GATE_HI_MS2 - _ACC_SPEED_FF_GATE_LO_MS2), 0, 1)
+accel_ff     = clamp(accel, ±_ACC_SPEED_FF_ACCEL_CLAMP_MS2)
+predicted    = prev_acc_speed + accel_ff * dt * ff_gate
+acc_speed    = predicted + alpha_a * (speed_corr - predicted)
 ```
 
 Step 4 makes `acc_speed` both noise-free and responsive — properties a linear
 EMA cannot give at once. The per-tick change `delta = speed_corr -
 prev_acc_speed` sets the filter time constant: a `|delta|` at or below
-`_ACC_SPEED_DEADBAND_MS` (0.5 m/s) uses the long `_ACC_SPEED_TAU_SLOW_S`
-(1.20 s), so sensor noise and TMP packet jitter are filtered out almost
+`_ACC_SPEED_DEADBAND_MS` (0.7 m/s) uses the long `_ACC_SPEED_TAU_SLOW_S`
+(2.0 s), so sensor noise and TMP packet jitter are filtered out almost
 entirely; `tau` then ramps **continuously** down to the fast
 `_ACC_SPEED_TAU_FAST_S` (0.08 s) as `|delta|` grows, reaching it at twice the
-deadband (1.0 m/s). A hard brake (large `delta`) snaps immediately with no
+deadband (1.4 m/s). A hard brake (large `delta`) snaps immediately with no
 special case. Because `tau` is continuous in `|delta|`, there is no
 discontinuity when the input crosses the deadband. The filter runs on
 `speed_corr`, already de-spiked by steps 1–3, so step 4 only suppresses residual
@@ -245,31 +249,47 @@ at `_ACC_SPEED_SMOOTH_REF_MS` (90 km/h) and above and falls linearly to
 low speed `acc_speed` leans on the incoming `speed_corr` instead — both `tau`
 endpoints shrink together, so the deadband behaviour is unchanged, just faster.
 
-The adaptive low-pass alone lags a *sustained* ramp by `rate·tau` — a
-persistent upward bias during a long deceleration that would make ACC
-underestimate the closing rate. The **leaky integral** `integ` removes it.
-`integ` (units m/s², a correction acceleration) accumulates `delta` over time:
-during a sustained decel `delta` holds a persistent sign, so `integ` builds up
-until the `integ·dt` term advances `acc_speed` fast enough to drive `delta` —
-and the lag — to ≈ 0. No derivative of the speed is taken, so no derivative
-noise is fed in; integrating the bounded `delta` is inherently smooth, and a
-~1 Hz cruise wobble is zero-mean and high-frequency so integration attenuates it
-— `integ` stays ≈ 0 at cruising speed. Two guards keep it well-behaved: the
-`(1 - ramp)` weight stops integration during a transient (a hard brake — that is
-the fast-`tau` path's job — so `integ` cannot wind up), and the slow leak
-`_ACC_SPEED_INTEGRAL_LEAK_HZ` bounds any very-low-frequency drift; `integ` is
-also magnitude-clamped (`_ACC_SPEED_INTEGRAL_CLAMP_MS2`). The adaptive `tau` and
-the integral are complementary: `tau` handles sudden changes, the integral
-cancels the steady-state lag of sustained ones.
+`tau` is further **acceleration-scaled**. A vehicle in a steady deceleration or
+acceleration produces little position noise — it does not *need* heavy
+smoothing, and heavy smoothing there only adds lag. So `tau` is multiplied by
+`accel_factor`: 1.0 while coasting, falling to `_ACC_SPEED_ACCEL_FLOOR` once the
+de-noised acceleration `accel_trend` (an LS slope of `speed_ema` over
+`_ACC_SPEED_ACCEL_WINDOW_S`) reaches `_ACC_SPEED_ACCEL_HI_MS2`. Accelerations
+below `_ACC_SPEED_ACCEL_LO_MS2` count as cruise noise and are ignored, so cruise
+smoothing is untouched. `accel_factor` no longer collapses `tau` to zero — the
+feed-forward below carries the accuracy — it just trims smoothing on a ramp
+(which has fewer artifacts) so the residual settles faster.
+
+The adaptive low-pass alone lags a *sustained* ramp by `accel·tau` — a
+persistent bias, and this is the safety-critical part: during a decel
+`acc_speed` reads high, so ACC underestimates the closing rate, a collision
+risk. The **feed-forward** removes it with no windup and no overshoot. Before
+the low-pass corrects toward `speed_corr`, `acc_speed` is advanced one step
+along the responsive `accel`: `predicted = prev_acc_speed + accel·dt·ff_gate`,
+then `acc_speed = predicted + alpha_a·(speed_corr − predicted)`. On a constant
+ramp the prediction matches the true per-tick advance, so the residual the
+low-pass sees — and the steady-state lag — fall to ≈ 0 *regardless* of `tau`.
+When the ramp ends `accel` returns to 0 and the prediction cleanly vanishes;
+there is no integrator state to unwind, hence no trailing overshoot.
+
+The prediction must not inject cruise noise. It is gated by `ff_gate`, a ramp on
+the de-noised `|accel_trend|`: zero below `_ACC_SPEED_FF_GATE_LO_MS2`, full at
+`_ACC_SPEED_FF_GATE_HI_MS2`. While coasting `|accel_trend|` sits at ≈ 0.06 m/s²
+(the LS window averages the ±0.5 m/s 1 Hz wobble out), well below the gate, so
+`ff_gate = 0`, the prediction is exactly zero, and `acc_speed` is a pure
+low-pass. The gate uses the *robust* `accel_trend` (slow but noise-free) to
+decide *whether* a ramp is real; the prediction uses the *fast* `accel` to
+decide *how hard* — so a real ramp is both detected without false-triggering on
+wobble and tracked responsively. `accel` is clamped to
+`_ACC_SPEED_FF_ACCEL_CLAMP_MS2` so a crash spike cannot jump `acc_speed`.
 
 Exposed as `self.speed = speed_corr` (AEB), `self.acc_speed = acc_speed` (ACC),
 `self.acceleration = accel` (shared); `speed_ema` is the internal `_speed_ema`
 intermediate. On the first full frame after spawn every signal initialises to
-`raw_speed` (`acc_speed` to `speed_corr`, `integ` to 0) with `accel = 0`. The
-step-1/3 `α` decreases with |speed| (more smoothing when fast); step 4's `α` is
-set by the adaptive `tau`. Step 4 carries two state values frame to frame:
-`acc_speed` (the output, fed back as `prev_acc_speed`) and `integ` (stored in
-`_acc_speed_integ`, fed back as `prev_integ`).
+`raw_speed` (`acc_speed` to `speed_corr`) with `accel = 0`. The step-1/3 `α`
+decreases with |speed| (more smoothing when fast); step 4's `α` is set by the
+adaptive `tau`. Step 4 carries one state value frame to frame: `acc_speed`, the
+output, fed back as `prev_acc_speed`.
 
 **Arc / collision** — `Vehicle.accel_for_arc()` is `return self.acceleration`.
 TMP vehicles initialise `acceleration = 0` until the first `update_from_last`;
@@ -531,7 +551,7 @@ values; consumer threads should treat an unchanged `t_mono` as "no new frame".
 | Arc curvature | `κ = omega_rad_s / abs_speed` |
 | Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
 | TMP raw speed | LS on longitudinal `(t,x,z)` history (max `_TMP_SPEED_HISTORY_LEN` full frames): `v = Σ(τ s)/Σ(τ²)`; else `Δraw/dt`, signed via forward dot |
-| Speed / accel filter (AI + TMP) | 4-signal chain in `_smooth_vehicle_kinematics()`: `speed_ema` (EMA of raw) → `accel` (LS slope of `speed_ema` history over `_ACCEL_FIT_WINDOW_S`, light EMA) → `speed_corr = speed_ema + accel·τ` (`self.speed`) → `acc_speed` (adaptive low-pass on `speed_corr` — `tau` ramps `_ACC_SPEED_TAU_SLOW_S`→`_ACC_SPEED_TAU_FAST_S` as the per-tick change grows past `_ACC_SPEED_DEADBAND_MS`, and is speed-scaled down toward `_ACC_SPEED_SMOOTH_MIN` at low speed — plus a leaky integral of `delta` that cancels sustained-ramp lag; `self.acc_speed`) |
+| Speed / accel filter (AI + TMP) | 4-signal chain in `_smooth_vehicle_kinematics()`: `speed_ema` (EMA of raw) → `accel` (LS slope of `speed_ema` history over `_ACCEL_FIT_WINDOW_S`, light EMA) → `speed_corr = speed_ema + accel·τ` (`self.speed`) → `acc_speed` (adaptive low-pass on `speed_corr` — `tau` ramps `_ACC_SPEED_TAU_SLOW_S`→`_ACC_SPEED_TAU_FAST_S` as the per-tick change grows past `_ACC_SPEED_DEADBAND_MS`, and is scaled down at low speed and during a steady decel/accel — plus a constant-accel feed-forward, gated by de-noised `accel_trend`, that zeroes the sustained-ramp lag with no windup; `self.acc_speed`) |
 | AI vs TMP raw speed | AI = buffer field 10; TMP = position-history LS fit. Filter chain identical after that |
 | Positions | No EMA — always raw world coordinates |
 | Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > 2 m/s` → decay speed: `prev_speed × (1 − frac²)`, release after 0.3 s |
