@@ -2,18 +2,26 @@
 Watchdog — monitors heartbeats and optionally restarts dead threads.
 
 Detection:
-  • thread.running is False  → crashed
-  • heartbeat_age > HEARTBEAT_TIMEOUT → frozen (no loop() tick)
+  • thread.running is False  → crashed (acted on immediately)
+  • heartbeat_age > HEARTBEAT_TIMEOUT for FREEZE_STREAK_RESTART consecutive
+    polls → frozen. The streak debounce avoids restarting a healthy thread
+    that merely hit a transient lag spike and would recover on its own.
 
 Restart:
   • Allowed while thread.restart_count < thread.max_restarts
   • A new instance is created via _factory (callable → BaseThread)
   • The factory must accept no arguments (use functools.partial if needed)
+  • The replacement is started even when the old thread cannot be stopped: a
+    thread frozen inside a C-level syscall cannot be force-killed (the async
+    exception only fires on Python bytecode), so blocking on it would strand
+    the system with no worker. The old thread is a daemon and self-exits once
+    its syscall returns.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Callable, TYPE_CHECKING
 
@@ -30,8 +38,10 @@ def _log_name(name: str) -> str:
     return (name.replace("_thread", "") + " code").capitalize()
 
 
-HEARTBEAT_TIMEOUT:    float = 1.5   # seconds
-POLL_INTERVAL:        float = 0.25  # watchdog check frequency
+HEARTBEAT_TIMEOUT:     float = 1.5   # seconds
+POLL_INTERVAL:         float = 0.25  # watchdog check frequency
+FREEZE_STREAK_RESTART: int   = 3     # consecutive stale-heartbeat polls before a freeze restart
+STOP_GRACE:            float = 0.2   # seconds: brief join() so a cleanly-stoppable thread can exit
 LOW_FPS_THRESHOLD:    float = 0.70  # warn when actual FPS < this fraction of wanted FPS
 LOW_FPS_STREAK_WARN:  int   = 5     # consecutive low-fps polls before warning
 LOW_FPS_WARN_WINDOW:  float = 3.0   # seconds: if >1 thread warned in this window → "some threads"
@@ -50,6 +60,8 @@ class Watchdog(BaseThread):
         self._low_fps_candidates: dict[str, float] = {}
         # thread_name → monotonic time when its warning was shown (suppress re-warn)
         self._low_fps_warned_at:  dict[str, float] = {}
+        # consecutive stale-heartbeat poll counts per thread (freeze debounce)
+        self._frozen_streaks:     dict[str, int]   = {}
 
     # factory registration
 
@@ -91,9 +103,20 @@ class Watchdog(BaseThread):
             if restart_count is None or max_restarts is None:
                 continue
 
-            crashed  = not thread.running and thread.is_alive() is False
-            age      = now - thread.heartbeat_at
-            frozen   = thread.heartbeat_at > 0 and age > HEARTBEAT_TIMEOUT
+            crashed = not thread.running and thread.is_alive() is False
+            age     = now - thread.heartbeat_at
+            stale   = thread.heartbeat_at > 0 and age > HEARTBEAT_TIMEOUT
+
+            # Debounce transient freezes: a lag spike can stall a loop past
+            # the heartbeat timeout yet recover on its own. Only treat the
+            # thread as genuinely frozen once the heartbeat stays stale for
+            # FREEZE_STREAK_RESTART consecutive polls, so a healthy thread is
+            # not needlessly restarted.
+            if stale and not crashed:
+                self._frozen_streaks[tname] = self._frozen_streaks.get(tname, 0) + 1
+            else:
+                self._frozen_streaks.pop(tname, None)
+            frozen = self._frozen_streaks.get(tname, 0) >= FREEZE_STREAK_RESTART
 
             if not (crashed or frozen):
                 continue
@@ -157,23 +180,6 @@ class Watchdog(BaseThread):
     # restart
 
     def _restart(self, dead: BaseThread) -> None:
-        # Stop cleanly if still somehow alive
-        if dead.is_alive():
-            dead.stop()
-            dead.join(timeout=2.0)
-
-        if dead.is_alive():
-            dead.stop(force=True)
-            dead.join(timeout=2.0)
-            if dead.is_alive():
-                logger.critical(
-                    "thread '%s' could not be stopped. \nRestart MonoCruise or contact a developer.",
-                    dead.name,
-                    extra={"popup": True},
-                )
-                dead.healthy = False
-                return
-
         factory = self._factories.get(dead.name)
         if factory is None:
             logger.critical(
@@ -187,6 +193,38 @@ class Watchdog(BaseThread):
             dead.healthy = False
             return
 
+        # Drive any physical outputs to a safe state before the handover so a
+        # stuck command (e.g. throttle) cannot persist while the thread is
+        # being replaced. Runs fire-and-forget on a throwaway thread: safe_state
+        # may touch blocking I/O and must not stall the watchdog loop.
+        try:
+            threading.Thread(
+                target=dead.safe_state,
+                name=f"{dead.name}-safe-state",
+                daemon=True,
+            ).start()
+        except Exception:
+            logger.exception(
+                "could not launch safe_state for '%s' (suppressed)", dead.name
+            )
+
+        # Signal the old thread to stop, then give it only a brief grace
+        # period. We deliberately do NOT block on it: a thread frozen inside a
+        # C-level syscall cannot be force-killed (PyThreadState_SetAsyncExc
+        # only fires on Python bytecode), and waiting on join() here used to
+        # strand the whole system with no worker at all. The old thread is a
+        # daemon and self-exits via _stop_event once its syscall returns.
+        if dead.is_alive():
+            dead.stop(force=True)
+            dead.join(timeout=STOP_GRACE)
+            if dead.is_alive():
+                logger.warning(
+                    "old '%s' thread did not stop in time; starting its "
+                    "replacement anyway (stale thread is a daemon and will "
+                    "self-exit once unblocked).",
+                    dead.name,
+                )
+
         new_thread               = factory()
         new_thread.restart_count = dead.restart_count + 1
         new_thread.name          = dead.name           # preserve name
@@ -198,3 +236,4 @@ class Watchdog(BaseThread):
 
         registry.replace(new_thread)
         new_thread.start()
+        self._frozen_streaks.pop(dead.name, None)

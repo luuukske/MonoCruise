@@ -258,6 +258,19 @@ class BaseThread:
     def teardown(self) -> None:
         """Called after loop exits; exceptions are suppressed."""
 
+    @staticmethod
+    def safe_state() -> None:
+        """Optional hook: drive external/physical outputs to a safe state.
+
+        Called by the watchdog just before this thread is restarted. Threads
+        that command physical hardware should override this to neutralise any
+        output that may be stuck at a dangerous value. Default is a no-op.
+
+        Runs on a throwaway watchdog-spawned thread, not this thread, so it
+        must not rely on this instance's own (possibly frozen) resources —
+        open fresh handles instead. Must not raise.
+        """
+
     # Internal lifecycle (runs inside the backend thread)
 
     def _run_lifecycle(self) -> None:

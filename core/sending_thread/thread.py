@@ -381,6 +381,30 @@ class SendingThread(BaseThread):
                     pass
         logger.debug("controller outputs reset to defaults")
 
+    @staticmethod
+    def safe_state() -> None:
+        """Release the throttle command during a watchdog restart.
+
+        Opens a fresh SCSController — the frozen thread's own handle may be
+        stuck mid-flush — and zeroes ``aforward`` so a stuck non-zero throttle
+        cannot keep the truck accelerating while the thread is being replaced.
+        The brake command is left untouched: a stuck brake decelerates the
+        truck, which is safe, and the replacement thread re-establishes full
+        control within a few ticks. Never raises.
+        """
+        controller = None
+        try:
+            controller = SCSController()
+            controller.aforward = 0.0
+        except Exception:
+            logger.exception("safe_state: failed to release throttle (suppressed)")
+        finally:
+            if controller is not None:
+                try:
+                    controller.close()
+                except Exception:
+                    pass
+
     def setup(self) -> None:
         logger.info("initialising SCSController shared-memory interface")
         try:
