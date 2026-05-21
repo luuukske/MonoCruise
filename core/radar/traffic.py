@@ -29,37 +29,44 @@ _SPEED_EMA_CURVE_D: float = (
     / (_SPEED_EMA_AT_REST - _SPEED_EMA_AT_90_KMH)
 )
 
-# Accel filter — least-squares slope of recent speed_ema samples over a time
-# window (low-noise derivative). _ACCEL_FIT_WINDOW_S feeds the responsive accel
-# (AEB, speed_corr); _ACCEL_ULTRA_FIT_WINDOW_S the ACC speed correction — long so
-# it carries only the trend, not the wiggle. See AGENTS.md §7.
+# Accel filter — least-squares slope of recent speed_ema samples over
+# _ACCEL_FIT_WINDOW_S (low-noise derivative), then a light EMA. Feeds the
+# responsive accel (AEB, speed_corr). See AGENTS.md §7.
 _ACCEL_FIT_WINDOW_S: float = 0.80
-_ACCEL_ULTRA_FIT_WINDOW_S: float = 3.0
 _ACCEL_EMA_ALPHA: float = 0.40
-# Must hold _ACCEL_ULTRA_FIT_WINDOW_S of full-update samples (~20 Hz) or the LS
-# fit is silently clamped to the buffer length. 120 ≈ 6 s of headroom.
+# Holds (t, speed_ema) samples for the LS slope fits — `accel` over
+# _ACCEL_FIT_WINDOW_S and `accel_trend` over _ACC_SPEED_ACCEL_WINDOW_S.
+# 120 ≈ 6 s of headroom at full-update rate.
 _SPEED_EMA_HISTORY_LEN: int = 120
-
-# Ultra-smoothed speed for ACC — EMA of the accel-corrected speed, then
-# re-corrected by accel·τ. α is speed-dependent: less smoothing at low speed,
-# more at high speed. 0.35 at rest → 0.08 at 90 km/h.
-_SPEED_ACC_EMA_AT_REST: float = 0.35
-_SPEED_ACC_EMA_AT_90_KMH: float = 0.05
-_SPEED_ACC_EMA_CURVE_D: float = (
-    _ALPHA_SPEED_SCALE
-    * _SPEED_ACC_EMA_AT_90_KMH
-    / (_SPEED_ACC_EMA_AT_REST - _SPEED_ACC_EMA_AT_90_KMH)
-)
 
 # Accel-correction term clamp (m/s) — caps how far accel·τ can shift a speed.
 _SPEED_CORR_CLAMP_MS: float = 3.0
 
-# ACC ultra-smooth speed (acc_speed) — only a fraction of the lag correction is
-# applied so the signal stays smooth; under hard lead braking it blends to the
-# responsive speed_corr instead. See AGENTS.md §7.
-_ACC_SPEED_CORR_FACTOR: float = 0.30
-_ACC_DECEL_BLEND_START_MS2: float = -1.5   # accel_ultra here → blend to speed_corr begins
-_ACC_DECEL_BLEND_FULL_MS2: float = -2.5    # accel_ultra here → acc_speed == speed_corr
+# ACC speed (acc_speed) — adaptive filter on speed_corr. A per-tick change
+# below _ACC_SPEED_DEADBAND_MS is treated as noise and filtered with the long
+# _ACC_SPEED_TAU_SLOW_S time constant; the time constant ramps continuously
+# down toward _ACC_SPEED_TAU_FAST_S as the change grows, reaching it at twice
+# the deadband, so real motion is tracked fast. See AGENTS.md §7.
+_ACC_SPEED_DEADBAND_MS: float = 0.5
+_ACC_SPEED_TAU_SLOW_S: float = 1.20
+_ACC_SPEED_TAU_FAST_S: float = 0.08
+
+# Smoothing is speed-scaled: tau is multiplied by speed_factor — 1.0 at
+# _ACC_SPEED_SMOOTH_REF_MS (90 km/h) and above, falling linearly to
+# _ACC_SPEED_SMOOTH_MIN at rest, so at low speed acc_speed leans on the
+# incoming speed_corr instead of smoothing it. See AGENTS.md §7.
+_ACC_SPEED_SMOOTH_REF_MS: float = 90.0 / 3.6   # 25 m/s
+_ACC_SPEED_SMOOTH_MIN: float = 0.15
+
+# Leaky integral — the adaptive low-pass alone lags a sustained ramp by
+# rate·tau (a persistent bias during long decel). `integ` accumulates `delta`
+# and adds it back, driving the steady-state lag to ≈ 0. The (1 - ramp) weight
+# gates it off during transients (fast-tau's regime) so a hard brake cannot
+# wind it up; the leak (a slow time constant) bleeds zero-mean cruise noise so
+# it never builds. See AGENTS.md §7.
+_ACC_SPEED_INTEGRAL_GAIN: float = 1.0       # 1/s²  — integration rate
+_ACC_SPEED_INTEGRAL_LEAK_HZ: float = 0.05   # 1/s   — leak rate (≈ 20 s memory)
+_ACC_SPEED_INTEGRAL_CLAMP_MS2: float = 5.0  # m/s²  — anti-windup clamp on integ
 
 # Yaw EMA (wrap-safe) — AI and TMP (arc curvature).
 _RAW_YAW_ALPHA: float = 0.20
@@ -164,16 +171,6 @@ def _tmp_speed_ema_alpha(speed_ms: float) -> float:
     )
 
 
-def _tmp_acc_speed_ema_alpha(speed_ms: float) -> float:
-    """Weight on the new sample in the ACC ultra-smooth speed EMA.
-
-    0.35 at rest → 0.08 at 90 km/h — less smoothing slow, more smoothing fast.
-    """
-    return (_SPEED_ACC_EMA_AT_REST * _SPEED_ACC_EMA_CURVE_D) / (
-        abs(speed_ms) + _SPEED_ACC_EMA_CURVE_D
-    )
-
-
 def _accel_from_speed_history(
     history: list[tuple[float, float]],
     window_s: float,
@@ -209,12 +206,13 @@ def _smooth_vehicle_kinematics(
     dt: float,
     prev_speed_ema: float | None,
     prev_accel: float | None,
-    prev_speed_acc_ema: float | None,
+    prev_acc_speed: float | None,
+    prev_acc_speed_integ: float,
     prev_speed_ema_history: list[tuple[float, float]] | None,
 ) -> tuple[float, float, float, float, float, list[tuple[float, float]]]:
     """Speed/accel filter chain shared by AI and TMP vehicles. See AGENTS.md §7.
 
-    Returns (speed_ema, accel, speed_corr, speed_acc_ema, acc_speed, speed_ema_history).
+    Returns (speed_ema, accel, speed_corr, acc_speed, acc_speed_integ, speed_ema_history).
     """
     # Step 1 — plain EMA of raw speed (no lag compensation).
     if prev_speed_ema is None:
@@ -242,30 +240,31 @@ def _smooth_vehicle_kinematics(
     correction = max(-_SPEED_CORR_CLAMP_MS, min(_SPEED_CORR_CLAMP_MS, accel * tau_eff))
     speed_corr = speed_ema + correction
 
-    # Step 4 — ACC ultra-smooth speed: EMA of speed_corr with speed-dependent α.
-    if prev_speed_acc_ema is None:
-        speed_acc_ema = speed_corr
-        alpha_a = 1.0
+    # Step 4 — ACC speed: adaptive low-pass on speed_corr + a leaky integral.
+    # tau ramps slow→fast with the per-tick change (transients); integ
+    # accumulates the persistent lag and cancels it. See AGENTS.md §7.
+    if prev_speed_ema is None or prev_acc_speed is None:
+        acc_speed = speed_corr
+        acc_speed_integ = 0.0
     else:
-        alpha_a = _tmp_acc_speed_ema_alpha(abs(speed_corr))
-        speed_acc_ema = alpha_a * speed_corr + (1.0 - alpha_a) * prev_speed_acc_ema
+        delta = speed_corr - prev_acc_speed
+        ramp = (abs(delta) - _ACC_SPEED_DEADBAND_MS) / _ACC_SPEED_DEADBAND_MS
+        ramp = max(0.0, min(1.0, ramp))
+        # Smoothing scales with speed — full at the reference speed, light at rest.
+        speed_factor = _ACC_SPEED_SMOOTH_MIN + (1.0 - _ACC_SPEED_SMOOTH_MIN) * min(
+            1.0, abs(speed_corr) / _ACC_SPEED_SMOOTH_REF_MS)
+        tau = _ACC_SPEED_TAU_SLOW_S + (_ACC_SPEED_TAU_FAST_S - _ACC_SPEED_TAU_SLOW_S) * ramp
+        tau *= speed_factor
+        alpha_a = dt / (tau + dt)
+        acc_speed_integ = (
+            prev_acc_speed_integ * (1.0 - _ACC_SPEED_INTEGRAL_LEAK_HZ * dt)
+            + _ACC_SPEED_INTEGRAL_GAIN * (1.0 - ramp) * delta * dt
+        )
+        acc_speed_integ = max(-_ACC_SPEED_INTEGRAL_CLAMP_MS2,
+                              min(_ACC_SPEED_INTEGRAL_CLAMP_MS2, acc_speed_integ))
+        acc_speed = prev_acc_speed + alpha_a * delta + acc_speed_integ * dt
 
-    # ACC correction accel — LS slope of speed_ema over a long window.
-    # Decoupled from speed_acc_ema (no self-referential lead) and long-windowed,
-    # so accel_ultra carries only the trend, not the wiggle.
-    accel_ultra = _accel_from_speed_history(history, _ACCEL_ULTRA_FIT_WINDOW_S)
-    tau_a = dt * (1.0 - alpha_a) / alpha_a if alpha_a > 1e-6 else 0.0
-    corr_a = max(-_SPEED_CORR_CLAMP_MS, min(_SPEED_CORR_CLAMP_MS, accel_ultra * tau_a))
-    # Only a fraction of the lag correction keeps acc_speed smooth; under hard
-    # lead braking blend toward the responsive speed_corr for accuracy.
-    acc_speed_smooth = speed_acc_ema + _ACC_SPEED_CORR_FACTOR * corr_a
-    decel_blend = (_ACC_DECEL_BLEND_START_MS2 - accel_ultra) / (
-        _ACC_DECEL_BLEND_START_MS2 - _ACC_DECEL_BLEND_FULL_MS2
-    )
-    decel_blend = max(0.0, min(1.0, decel_blend))
-    acc_speed = (1.0 - decel_blend) * acc_speed_smooth + decel_blend * speed_corr
-
-    return speed_ema, accel, speed_corr, speed_acc_ema, acc_speed, history
+    return speed_ema, accel, speed_corr, acc_speed, acc_speed_integ, history
 
 
 class Position:
@@ -746,7 +745,7 @@ class Vehicle:
         self._smooth_speed: Optional[float] = None
         self._smooth_accel: Optional[float] = None
         self._speed_ema: Optional[float] = None
-        self._speed_acc_ema: Optional[float] = None
+        self._acc_speed_integ: float = 0.0
         self._speed_ema_history: list[tuple[float, float]] = []
         self._raw_speed: Optional[float] = None
         # (time, x, z) per full update — newest last, capped at _POSITION_HISTORY_LEN.
@@ -781,10 +780,10 @@ class Vehicle:
         return self.acceleration
 
     def radar_speed_accel(self) -> tuple[float, float, float, float, float]:
-        """(raw_speed, speed_corr, speed_ema, speed_acc, accel) for the visualizer.
+        """(raw_speed, speed_corr, speed_ema, acc_speed, accel) for the visualizer.
 
         speed_corr is the accel-corrected speed (AEB-facing, == self.speed),
-        speed_ema the uncorrected EMA, speed_acc the extra-smoothed speed
+        speed_ema the uncorrected EMA, acc_speed the adaptive-filtered ACC speed
         (ACC-facing, == self.acc_speed). See AGENTS.md §7.
         """
         raw_speed = self._raw_speed if self._raw_speed is not None else self.speed
@@ -853,7 +852,7 @@ class Vehicle:
             self._smooth_speed = prev._smooth_speed
             self._smooth_accel = prev._smooth_accel
             self._speed_ema = prev._speed_ema
-            self._speed_acc_ema = prev._speed_acc_ema
+            self._acc_speed_integ = prev._acc_speed_integ
             self._raw_speed = prev._raw_speed
             self._position_history = list(prev._position_history)
             self._speed_ema_history = list(prev._speed_ema_history)
@@ -930,7 +929,7 @@ class Vehicle:
         self._smooth_speed = prev._smooth_speed
         self._smooth_accel = prev._smooth_accel
         self._speed_ema = prev._speed_ema
-        self._speed_acc_ema = prev._speed_acc_ema
+        self._acc_speed_integ = prev._acc_speed_integ
         self._raw_speed = prev._raw_speed
         self._position_history = list(prev._position_history)
         self._speed_ema_history = list(prev._speed_ema_history)
@@ -984,8 +983,8 @@ class Vehicle:
                     self._smooth_accel = 0.0
                     self._smooth_speed = self.speed
                     self._speed_ema = self.speed
-                    self._speed_acc_ema = self.speed
                     self.acc_speed = self.speed
+                    self._acc_speed_integ = 0.0
                     self._raw_speed = 0.0
                     if self._smooth_x is not None:
                         self.position.x = self._smooth_x
@@ -1062,18 +1061,18 @@ class Vehicle:
         else:
             raw_speed = self.speed
 
-        (speed_ema, accel, speed_corr, speed_acc_ema, acc_speed,
+        (speed_ema, accel, speed_corr, acc_speed, acc_speed_integ,
          speed_ema_history) = _smooth_vehicle_kinematics(
             raw_speed, t_now, dt,
-            prev._speed_ema, prev._smooth_accel, prev._speed_acc_ema,
-            prev._speed_ema_history,
+            prev._speed_ema, prev._smooth_accel, prev.acc_speed,
+            prev._acc_speed_integ, prev._speed_ema_history,
         )
         self._raw_speed = raw_speed
         self._speed_ema = speed_ema
         self._speed_ema_history = speed_ema_history
         self._smooth_accel = accel
         self._smooth_speed = speed_corr
-        self._speed_acc_ema = speed_acc_ema
+        self._acc_speed_integ = acc_speed_integ
         self.speed = speed_corr
         self.acceleration = accel
         self.acc_speed = acc_speed

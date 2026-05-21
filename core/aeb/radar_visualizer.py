@@ -84,7 +84,7 @@ class RadarVisualizer:
             </div>
             <div class="stat-box">
                 <div class="stat-value" id="speed-acc">0.00</div>
-                <div class="stat-label">Ultra — ACC (m/s)</div>
+                <div class="stat-label">ACC speed (m/s)</div>
             </div>
             <div class="stat-box">
                 <div class="stat-value" id="filtered-accel">0.00</div>
@@ -151,7 +151,7 @@ class RadarVisualizer:
                         pointRadius: 0
                     },
                     {
-                        label: 'Ultra (ACC)',
+                        label: 'ACC speed',
                         data: [],
                         borderColor: '#a78bfa',
                         backgroundColor: 'rgba(167, 139, 250, 0.1)',
