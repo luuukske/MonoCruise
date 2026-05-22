@@ -1,0 +1,12 @@
+# Runtime dependencies for MonoCruise.
+# Pin versions here once the project stabilises.
+PySide6
+psutil
+pygame
+shapely
+requests
+
+# Game telemetry / SDK bridges — these may need to be installed from git
+# rather than PyPI; adjust to match your local setup if `pip install` fails.
+truck_telemetry
+scscontroller

@@ -26,3 +26,10 @@ config.json*
 # OS / misc
 .DS_Store
 live_accel_pedals_viz_30s.bat
+
+# PyInstaller / Inno Setup build outputs
+build/
+dist/
+installer/output/
+*.spec.bak
+release_notes.md
