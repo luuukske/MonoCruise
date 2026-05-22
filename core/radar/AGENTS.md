@@ -512,6 +512,7 @@ Registry name: `radar_thread`. Runs at 30 Hz.
 rt = registry.get_thread("radar_thread")
 with rt.data._lock:
     vehicles      = rt.data.vehicles          # list[Vehicle] — shared refs, do not mutate
+    trailer_vehicles = rt.data.trailer_vehicles  # nested trailers wrapped as Vehicles
     tmp_session   = rt.data.tmp_session       # True if any vehicle has is_tmp
     ego_x         = rt.data.ego_x
     ego_y         = rt.data.ego_y
@@ -528,6 +529,22 @@ with rt.data._lock:
 
 When `paused` is True the vehicle list and `t_mono` are held at their last
 values; consumer threads should treat an unchanged `t_mono` as "no new frame".
+
+### Trailer vehicles
+
+`trailer_vehicles` wraps each nested trailer (offsets 16/26/36 — see §5) as a
+standalone `Vehicle` via `traffic.vehicle_from_trailer`. A road train exposes
+only the tractor and first trailer as top-level vehicles; every trailer behind
+the first is a nested `Trailer` on that first trailer, invisible to consumers
+that iterate the vehicle list. The wrapped records get synthetic ids
+(`_TRAILER_VEHICLE_ID_BASE +` parent id + slot) so position history and speed
+smoothing carry forward per-id like any real vehicle. TMP trailer position is
+shifted from the front coupler to the body center (`correct_position()`).
+
+**Consumer policy — `trailer_vehicles` is for ACC only.** ACC scores it
+alongside `vehicles`. AEB must **not** read it: AEB already walks nested
+trailers via `Vehicle.trailers`, so consuming this list there would
+double-count each trailer.
 
 ---
 

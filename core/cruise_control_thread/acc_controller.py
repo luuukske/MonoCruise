@@ -282,7 +282,11 @@ class AdaptiveCruiseController:
                 v_lead = float(lead.effective_speed_ms)
                 a_lead = float(lead.effective_accel_ms2)
                 tail_m = 0.5 * float(vehicle.size.length)
-                if not vehicle.is_tmp:
+                # AI trucks nest their trailers here. In TMP the first trailer
+                # is its own Vehicle, but trailers behind it are nested under
+                # that trailer record — count those so a multi-trailer convoy's
+                # full length is in the gap, not just the lead trailer's.
+                if not vehicle.is_tmp or vehicle.is_trailer:
                     for trailer in vehicle.trailers:
                         if not trailer.is_zero():
                             tail_m += float(trailer.size.length)

@@ -18,7 +18,7 @@ import mmap
 import struct
 import time
 
-from .traffic import Position, Quaternion, Size, Trailer, Vehicle
+from .traffic import Position, Quaternion, Size, Trailer, Vehicle, vehicle_from_trailer
 
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,11 @@ _TOTAL_PARKED_FORMAT = "=" + _PARKED_VEHICLE_FORMAT * 40
 _PARKED_BUF_SIZE = 1720
 _PARKED_STRIDE = 12
 
+# Synthetic-id base for trailer-as-vehicle records (see _build_trailer_vehicles).
+# Far above the int16 id space the traffic buffer uses, so a wrapped trailer can
+# never collide with a real vehicle or parked-vehicle id.
+_TRAILER_VEHICLE_ID_BASE: int = 1_000_000
+
 
 class TrafficReader:
     """Opens ``Local\\ETS2LATraffic`` mmap and reads the vehicle array.
@@ -50,6 +55,7 @@ class TrafficReader:
         self._parked_buf: mmap.mmap | None = None
         self._parked_retry_at: float = 0.0
         self._last_vehicles: dict[int, Vehicle] = {}
+        self._last_trailer_vehicles: dict[int, Vehicle] = {}
 
     def open(self) -> bool:
         if self._buf is not None:
@@ -89,7 +95,14 @@ class TrafficReader:
                 pass
             self._parked_buf = None
 
-    def read(self) -> list[Vehicle] | None:
+    def read(self) -> tuple[list[Vehicle], list[Vehicle]] | None:
+        """Decode one frame.
+
+        Returns ``(vehicles, trailer_vehicles)`` — the top-level radar
+        vehicles and the synthetic trailer-as-vehicle records flattened from
+        nested trailers (see :meth:`_build_trailer_vehicles`). Returns ``None``
+        if the buffer is unavailable or the frame failed to decode.
+        """
         if self._buf is None and not self.open():
             return None
         try:
@@ -122,7 +135,7 @@ class TrafficReader:
                 tr = Quaternion(data[off + 3], data[off + 4], data[off + 5], data[off + 6])
                 ts = Size(data[off + 7], data[off + 8], data[off + 9])
                 if not tp.is_zero():
-                    trailers.append(Trailer(tp, tr, ts, is_tmp))
+                    trailers.append(Trailer(tp, tr, ts, is_tmp, slot=j))
 
             if not position.is_zero() and not rotation.is_zero():
                 vehicles.append(Vehicle(
@@ -138,7 +151,43 @@ class TrafficReader:
             if v.id in self._last_vehicles:
                 v.update_from_last(self._last_vehicles[v.id], t_now)
         self._last_vehicles = {v.id: v for v in vehicles}
-        return vehicles
+
+        trailer_vehicles = self._build_trailer_vehicles(vehicles, t_now)
+        return vehicles, trailer_vehicles
+
+    def _build_trailer_vehicles(
+        self, vehicles: list[Vehicle], t_now: float
+    ) -> list[Vehicle]:
+        """Flatten nested trailers into standalone Vehicles for ACC scoring.
+
+        Only trailers that aren't already top-level radar vehicles are
+        wrapped: AI trucks nest every trailer, and in TMP the first trailer is
+        its own vehicle while trailers behind it are nested on it. The
+        ``not is_tmp or is_trailer`` gate matches the ACC tail-length rule in
+        ``acc_controller._read_chain`` so neither path double-counts.
+
+        Synthetic ids derive from the parent id + buffer slot, so per-id
+        smoothing and position-history carry-forward stay continuous across
+        frames — exactly as for real vehicles.
+        """
+        trailer_vehicles: list[Vehicle] = []
+        for v in vehicles:
+            if v.id < 0:
+                continue
+            if v.is_tmp and not v.is_trailer:
+                continue
+            for tr in v.trailers:
+                if tr.is_zero():
+                    continue
+                sid = _TRAILER_VEHICLE_ID_BASE + int(v.id) * 4 + int(tr.slot)
+                trailer_vehicles.append(vehicle_from_trailer(v, tr, sid))
+
+        for tv in trailer_vehicles:
+            prev = self._last_trailer_vehicles.get(tv.id)
+            if prev is not None:
+                tv.update_from_last(prev, t_now)
+        self._last_trailer_vehicles = {tv.id: tv for tv in trailer_vehicles}
+        return trailer_vehicles
 
     def _read_parked_vehicles(self, existing_ids: set[int]) -> list[Vehicle]:
         if self._parked_buf is None:

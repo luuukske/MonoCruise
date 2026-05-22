@@ -103,6 +103,7 @@ class ACCThread(BaseThread):
             with rt.data._lock:
                 return (
                     list(rt.data.vehicles),
+                    list(rt.data.trailer_vehicles),
                     rt.data.ego_x,
                     rt.data.ego_y,
                     rt.data.ego_z,
@@ -146,7 +147,12 @@ class ACCThread(BaseThread):
             self._publish(enabled, [], self._last_snapshot_t)
             return
 
-        (vehicles, ex, ey, ez, eyaw, espeed, esteer, ekappa, paused, t_radar) = snap
+        (vehicles, trailer_vehicles, ex, ey, ez, eyaw, espeed, esteer,
+         ekappa, paused, t_radar) = snap
+
+        # Nested trailers (road-train trailers behind the first) ride in a
+        # separate radar list; score them alongside top-level vehicles.
+        targets = vehicles + trailer_vehicles
 
         # Paused / stale frame — hold the previous lead list.  Don't advance
         # the tracker so scores don't decay against a frozen frame.
@@ -164,7 +170,7 @@ class ACCThread(BaseThread):
             leads = self._tracker.update(
                 now_mono=t_radar,
                 dt=dt,
-                vehicles=vehicles,
+                vehicles=targets,
                 ego_x=ex, ego_y=ey, ego_z=ez,
                 ego_yaw_rad=eyaw, ego_speed_ms=espeed, ego_steer=esteer,
                 ego_history_kappa=ekappa,

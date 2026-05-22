@@ -371,14 +371,17 @@ class Size:
 
 
 class Trailer:
-    __slots__ = ("position", "rotation", "size", "is_tmp")
+    __slots__ = ("position", "rotation", "size", "is_tmp", "slot")
 
     def __init__(self, position: Position, rotation: Quaternion,
-                 size: Size, is_tmp: bool = False) -> None:
+                 size: Size, is_tmp: bool = False, slot: int = -1) -> None:
         self.position = position
         self.rotation = rotation
         self.size = size
         self.is_tmp = is_tmp
+        # Buffer trailer-slot index (0..2). Stable across frames so the ACC
+        # trailer-as-vehicle wrapper can derive a continuous synthetic id.
+        self.slot = slot
 
     def correct_position(self) -> Position:
         """Shift TMP trailer pivot from front coupler to body center."""
@@ -1208,3 +1211,39 @@ class Vehicle:
             f"speed={self.speed:.2f}, is_tmp={self.is_tmp}, "
             f"is_parked={self.is_parked})"
         )
+
+
+def vehicle_from_trailer(parent: Vehicle, trailer: Trailer, synthetic_id: int) -> Vehicle:
+    """Wrap a nested Trailer record as a standalone Vehicle.
+
+    Road trains expose only the tractor and the first trailer as top-level
+    radar vehicles; every trailer behind the first is a nested Trailer on
+    that first trailer (AI trucks nest all of their trailers the same way).
+    ACC scoring iterates Vehicles, so those nested trailers are invisible to
+    it. Wrapping one as a Vehicle lets the tracker score it and lets
+    RadarThread carry position history forward for it like any other id.
+
+    The wrapped Vehicle gets its own Position (``update_from_last`` mutates
+    position in place); rotation and size are immutable and shared. TMP's raw
+    trailer pivot is the front coupler, so ``correct_position()`` shifts it to
+    the body center — matching the symmetric +/- length/2 pivot the rest of
+    the pipeline assumes for TMP vehicles.
+    """
+    if trailer.is_tmp:
+        position = trailer.correct_position()
+    else:
+        src = trailer.position
+        position = Position(src.x, src.y, src.z)
+    return Vehicle(
+        position=position,
+        rotation=trailer.rotation,
+        size=trailer.size,
+        speed=parent.speed,
+        acceleration=parent.acceleration,
+        trailer_count=0,
+        trailers=[],
+        id=synthetic_id,
+        is_tmp=trailer.is_tmp,
+        is_trailer=True,
+        is_parked=parent.is_parked,
+    )

@@ -347,7 +347,7 @@ class ACCTracker:
             # lateral as a crossing proxy, else NO_HISTORY.  Once the
             # LS circle fit lands this will flip to NO_ARC_HIT when the
             # fitted arc doesn't cross the ego row.
-            history_len = len(getattr(v, "position_history", []) or ())
+            history_len = len(getattr(v, "_position_history", []) or ())
             if history_len < _MIN_TRAIL_SAMPLES:
                 baseline = OFFSET_BASELINE_NO_HISTORY
             else:

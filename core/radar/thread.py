@@ -13,6 +13,7 @@ Readers:
     rt = registry.get_thread("radar_thread")
     with rt.data._lock:
         vehicles     = list(rt.data.vehicles)     # or copy just the ids you need
+        trailer_vehicles = list(rt.data.trailer_vehicles)  # ACC-only — nested trailers
         ego_x        = rt.data.ego_x
         ego_yaw_rad  = rt.data.ego_yaw_rad
         ...
@@ -45,6 +46,10 @@ logger = logging.getLogger(__name__)
 class RadarData(ThreadData):
     # Vehicles — Vehicle instances with per-id smoothing carried forward.
     vehicles: list[Vehicle] = field(default_factory=list)
+    # Nested trailers wrapped as standalone Vehicles (road-train trailers
+    # behind the first). ACC-only — AEB already walks nested trailers via
+    # Vehicle.trailers, so consuming this list there would double-count.
+    trailer_vehicles: list[Vehicle] = field(default_factory=list)
     tmp_session: bool = False
 
     # Ego state (copied from telemetry under telemetry's lock each frame).
@@ -88,6 +93,7 @@ class RadarThread(BaseThread):
         self._ego_position_history.clear()
         with self.data._lock:
             self.data.vehicles = []
+            self.data.trailer_vehicles = []
             self.data.tmp_session = False
         logger.debug("radar teardown complete")
 
@@ -147,7 +153,11 @@ class RadarThread(BaseThread):
 
         ego_curvature = ego_curvature_from_history(self._ego_position_history)
 
-        vehicles = self._traffic.read() or []
+        read_result = self._traffic.read()
+        if read_result is None:
+            vehicles, trailer_vehicles = [], []
+        else:
+            vehicles, trailer_vehicles = read_result
         tmp_session = any(v.is_tmp for v in vehicles)
 
         ego_yaw_rad = ego_yaw_norm * 2.0 * math.pi
@@ -156,6 +166,7 @@ class RadarThread(BaseThread):
 
         with self.data._lock:
             self.data.vehicles = vehicles
+            self.data.trailer_vehicles = trailer_vehicles
             self.data.tmp_session = tmp_session
             self.data.ego_x = ego_x
             self.data.ego_y = ego_y

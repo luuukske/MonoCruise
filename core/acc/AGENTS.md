@@ -140,6 +140,23 @@ pulling tractor's `speed` / `acceleration` into `LeadInfo.effective_*`.
 The vehicle reference itself is unchanged so debug views still show
 the trailer — only the kinematics exposed via `LeadInfo` get swapped.
 
+### Nested trailers (road trains)
+
+Only the tractor and the *first* trailer appear as top-level radar
+vehicles. Every trailer behind the first is a nested `Trailer` on that
+first trailer (AI trucks nest all of theirs the same way), so the
+tracker — which iterates Vehicles — never saw them. On a multi-trailer
+convoy that made the rearmost trailer, the one ego actually closes on,
+invisible to scoring.
+
+`RadarThread` now publishes those nested trailers wrapped as standalone
+`Vehicle`s in `RadarData.trailer_vehicles` (see `core/radar/AGENTS.md`
+§12). `ACCThread` scores them alongside `vehicles` — no tracker change,
+they are just more entries in the list. Each carries its own position
+history and smoothing (synthetic per-id continuity), so it scores and
+locks exactly like a real vehicle, and a wrapped trailer lead still
+goes through the trailer→tractor kinematic swap above.
+
 ---
 
 ## 5. Blinker lateral bias
