@@ -352,13 +352,18 @@ aeb.snapshot                       # AEBSnapshot — full debug state
      while any colliding target has `unbraked_ttc < warn_ttb`. Prevents
      disarm mid-event as ego decelerates and `best_v_closing` collapses
      faster than `d_remaining`.
+   - Latched-distance hold: see "Latched-threat hold" below. Adds a
+     headway-driven engagement hold over targets that have been engaged
+     on previously, independent of current `v_closing`.
    - Engage when `effective_required ≥ aeb_engage_frac · effective_max` **OR**
      `brake_ttb_active`.
    - Disarm when `effective_required <  aeb_disarm_frac · effective_max` **AND
-     NOT** `brake_ttb_active`.
+     NOT** `brake_ttb_active` **AND NOT** `geom_threat_latched` **AND NOT**
+     `latched_distance_threat`.
 5. Setpoint pipeline:
    - When `brake_ttb_active`: `target_raw = effective_max` (slam — required formula is unreliable).
-   - Otherwise: `target_raw = clamp(effective_required, 0, effective_max)` while engaged.
+   - Otherwise: `target_raw = clamp(effective_required, 0, effective_max)` while engaged,
+     then floored at `cal.latched_min_decel_frac · effective_max` when `latched_distance_threat`.
    - **Deadband + rate-limit**: if `|Δ| < aeb_target_deadband_ms2` and the
      held value is younger than `aeb_target_refresh_min_s`, hold. Else move
      toward `target_raw` capped at `aeb_target_rate_ms3 · dt` (m/s² per tick).
@@ -373,6 +378,39 @@ aeb.snapshot                       # AEBSnapshot — full debug state
 8. Head-on targets: modelled as also braking at `full_brake_decel (7.8 m/s²)`
    inside the collision pipeline (unchanged).
 
+### Latched-threat hold
+
+`AEBThread._latched_threat_ids: set[int]` keeps an engaged target attached
+to the pipeline across frames so two effects can hold:
+
+1. **TMP rel-speed pre-filter bypass** — `TmpRelSpeedFilter` (and the
+   matching precompute prefilter in `thread.py::loop`) skip the rel-speed
+   gate for any id in the latched set. Without this, ego matching a TMP
+   convoy partner's speed under braking drops `rel_kmh` below the 15 / 40
+   km/h threshold, the target leaves the pipeline, `colliding_ids` empties
+   and AEB disarms while the gap may still be unsafe.
+2. **Distance-based engagement hold + decel floor** — for every latched id
+   still in `vehicle_collision_data`, compute
+   `headway = max(dist − stop_buffer, 0) / max(ego_speed, 0.5)`. Release
+   the id when it leaves `vehicles_eff`, drops out of `vehicle_collision_data`
+   (range/elevation), or its headway exceeds `cal.latched_release_headway_s`.
+   While any remaining latched id has `headway < cal.latched_min_headway_s`
+   set `latched_distance_threat = True`:
+   - The disarm gate gains `... and not latched_distance_threat`.
+   - `target_raw` is floored at `cal.latched_min_decel_frac · effective_max_decel`
+     so the published decel doesn't decay to zero when
+     `required_decel = v_closing²/2d` collapses on speed-match.
+
+The set is populated every frame after the engagement state machine via
+`self._latched_threat_ids.update(colliding_ids)` while `self._engaged` is
+true. Cleared on `teardown`.
+
+| Knob | Default | Role |
+|------|---------|------|
+| `latched_min_headway_s` | 1.5 s | Headway below which latched-distance hold fires |
+| `latched_release_headway_s` | 2.5 s | Headway above which a latched id is dropped |
+| `latched_min_decel_frac` | 0.7 | Fraction of `effective_max_decel` as the `target_raw` floor under hold |
+
 ### Closed-loop coupling
 
 `sending_thread` consumes `AEB_target_decel_ms2` via `AEBDecelController`:
@@ -382,6 +420,10 @@ aeb.snapshot                       # AEBSnapshot — full debug state
 - Mapper's fast-PID trim is frozen while `AEB_brake` is true (via
   `AccelToPedals.step(..., freeze_trim=True)`) so two controllers don't
   fight on the brake.
+- All three AEB→pedal paths (engagement slam in `main_pedal_thread`, FF
+  additive in `sending_thread`, closed-loop controller in `sending_thread`)
+  are gated by `gas_output / gasval >= 0.8` — full gas pedal is the user
+  override and defeats AEB braking authority across every layer.
 
 ---
 
@@ -449,7 +491,7 @@ apart laterally are suppressed at the `arc_arc_collision` level
 - **Fix D (target arc over-rotation damping) applies to `arc_curvature`, not `v_curvature`.** `v_curvature` is the raw measured value used by `same_curve` and `CoDirectionalDivergeFilter`. Collision and visualization arcs both use the damped `arc_curvature` when building predicted paths.
 - **`LaneClassifier` must run before `OppositeLaneFilter`, `CoDirectionalDivergeFilter`, and `EgoEvasionFilter`** — those stages read `ctx.lane`, `ctx.fwd_dot`, `ctx.v_curvature` etc. populated by `LaneClassifier`.
 - **TMP trailer-as-vehicles get tractor speed/accel via `_swap_trailer_kinematics`.** Buffer speed for trailer slots is unreliable (often 0). The swap is done on a shallow copy — never mutate the original Vehicle.
-- **AEB pedal authority is two-layered, never binary-gated to zero.** AEB publishes `AEB_ff_decel_ms2` every tick when there is any real threat (`required_decel > 0`); sending_thread converts it to a brake pedal via the inverse FF curve and merges it as `b = max(b, aeb_ff_pedal)`. This is the **sub-engagement assist** layer — it adds force on top of user braking when the system warns but has not yet engaged. When AEB engages (`AEB_brake == True`), main_pedal_thread slams `brake_output = 1.0` (the **engagement slam** layer) — by definition, engagement means the system has decided full braking is warranted, and the inverse FF curve at a modest required-decel would produce a pedal too soft to act on the threat. Both layers are gated only by `gas_output >= 0.8` (full-gas user authority, the only override that can defeat AEB braking). Reason: removing the engagement slam in favour of pure FF made AEB feel silenced on engagement because FF pedal for 3–5 m/s² is only ~0.14–0.34.
+- **AEB pedal authority is two-layered, never binary-gated to zero.** AEB publishes `AEB_ff_decel_ms2` every tick when there is any real threat (`required_decel > 0`); sending_thread converts it to a brake pedal via the inverse FF curve and merges it as `b = max(b, aeb_ff_pedal)`. This is the **sub-engagement assist** layer — it adds force on top of user braking when the system warns but has not yet engaged, and is gated on `brakeval > cal.user_brake_latch` so it does not phantom-brake during normal manual cruising when routine lead-following produces a small but non-zero `required_decel`. When AEB engages (`AEB_brake == True`), main_pedal_thread slams `brake_output = 1.0` (the **engagement slam** layer) — by definition, engagement means the system has decided full braking is warranted, and the inverse FF curve at a modest required-decel would produce a pedal too soft to act on the threat. The engagement slam is independent of `brakeval` (it must fire even on a distracted driver). All AEB pedal paths are gated by `gas_output >= 0.8` (full-gas user authority, the only override that can defeat AEB braking). Reason: removing the engagement slam in favour of pure FF made AEB feel silenced on engagement because FF pedal for 3–5 m/s² is only ~0.14–0.34.
 - **Warn suppression while user braking.** `aeb_warn` is suppressed when `brakeval > cal.user_brake_latch` UNLESS `effective_required >= cal.aeb_warn_near_full_frac × effective_max_decel`. The user does not need a redundant alert while addressing the threat — only surface it when AEB itself wants near-full brake.
 
 ---

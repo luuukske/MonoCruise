@@ -966,9 +966,14 @@ class SendingThread(BaseThread):
         )
         b = max(b, hold_out.brake_pedal)
 
-        # AEB additive FF pedal — always-on whenever AEB sees a real threat,
-        # independent of engagement latch. Dropped on full-gas user override.
-        if AEB_ff_decel > 0.0 and gasval < 0.8:
+        # AEB additive FF pedal — sub-engagement assist that boosts active
+        # user braking. Gated on brakeval so it does not phantom-brake during
+        # normal manual cruising behind a slower lead (required_decel from
+        # routine lead-following is non-zero but the driver has not opted into
+        # automatic longitudinal control). Engagement slam path is unaffected
+        # and still fires regardless of brake input.
+        user_braking = brakeval > _AEB_CAL.user_brake_latch
+        if AEB_ff_decel > 0.0 and gasval < 0.8 and user_braking:
             aeb_ff_pedal = self._accel_mapper._brake_pedal_from_decel(
                 AEB_ff_decel,
                 max(self._capacity_tracker.max_brake_ms2, 0.1),
@@ -978,7 +983,13 @@ class SendingThread(BaseThread):
         # AEB active — closed-loop decel controller writes the brake pedal
         # directly from AEB_target_decel_ms2 (FF + small PI on lead-compensated
         # decel) and gas is suppressed.
-        if _aeb_active:
+        #
+        # Gated by `gasval < 0.8` to honor the same full-gas user-authority
+        # rule as the engagement slam in main_pedal_thread and the FF
+        # additive above. Without this gate the closed-loop keeps forcing
+        # brake and zeroing gas regardless of pedal input, leaving the
+        # other two AEB layers' gas overrides meaningless.
+        if _aeb_active and gasval < 0.8:
             aeb_pedal = self._aeb_controller.step(
                 target_decel_ms2=AEB_target_decel,
                 measured_lead_decel_ms2=measured_decel_lead_ms2,
