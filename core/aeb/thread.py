@@ -974,12 +974,14 @@ class AEBThread(BaseThread):
                     if reason == "RearOvertakerFilter":
                         veh_dict["rear_suppressed"] = True
                         suppressed_ids.add(v.id)
-                    elif reason in ("OppositeLaneFilter", "EgoEvasionFilter"):
+                    elif reason in ("OppositeLaneFilter", "EgoEvasionFilter",
+                                    "OppositeLaneFilterMirrored"):
                         if ctx.head_on:
                             oncoming_evasion_filtered_ids.add(v.id)
                         else:
                             evasion_filtered_ids.add(v.id)
-                    elif reason == "CornerEntryStationaryFilter":
+                    elif reason in ("CornerEntryStationaryFilter",
+                                    "CornerEntryStationaryFilterMirrored"):
                         oncoming_evasion_filtered_ids.add(v.id)
                     else:
                         suppressed_ids.add(v.id)

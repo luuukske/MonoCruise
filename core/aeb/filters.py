@@ -444,6 +444,73 @@ class OppositeLaneFilter:
         return _PASS
 
 
+class OppositeLaneFilterMirrored:
+    """Mirror of OppositeLaneFilter Fix B: ego mid-corner, target straight-approaching.
+
+    When ego is in a bend and an oncoming target has low measured curvature
+    (still on the straight approach to the same curve from the other side),
+    the target's predicted arc chords across ego's curved corridor in world
+    frame. ``OppositeLaneFilter`` Fix B expands target evasion arcs by ego's
+    curvature only when the target is already in OPPOSITE_OR_OUTER/OFF_ROAD —
+    but a straight-approaching target projects onto the ego arc as Lane.EGO,
+    so that gate fails and nothing suppresses.
+
+    This stage handles that case: build target evasion arcs offset by
+    ``min(|ego_curvature|, shared_turn_max_kappa)`` (the implied road
+    curvature the target will follow). If either side clears, suppress.
+    """
+    name = "OppositeLaneFilterMirrored"
+
+    def __init__(self, cal: AEBCalibration) -> None:
+        self._cal = cal
+
+    def apply(self, ctx: FilterContext) -> FilterResult:
+        if not ctx.head_on or ctx.abs_v_speed <= 1.0:
+            return _PASS
+        cal = self._cal
+        if abs(ctx.ego_curvature) < cal.turning_diverge_kappa:
+            return _PASS
+        if abs(ctx.v_curvature) >= cal.turning_diverge_kappa:
+            return _PASS
+
+        delta_kappa_t = min(abs(ctx.ego_curvature), cal.shared_turn_max_kappa)
+
+        for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
+            cross_arcs = (ctx.precomputed_cross_arcs[arc_idx]
+                          if ctx.precomputed_cross_arcs else
+                          _apply_cross_zone(base_target_arc, ctx.cross_padding))
+            unbraked_hit = _earliest_hit(
+                ctx.ego_arc, cross_arcs, cal.corridor_margin, cal.collision_samples,
+                ctx.lateral_gap,
+            )
+            if unbraked_hit is None:
+                continue
+
+            tgt_left = build_arc(
+                base_target_arc.start_x, base_target_arc.start_z,
+                base_target_arc.yaw_rad, ctx.v.speed,
+                base_target_arc.curvature + delta_kappa_t,
+                base_target_arc.half_width, base_target_arc.horizon,
+                decel=0.0,
+            )
+            tgt_right = build_arc(
+                base_target_arc.start_x, base_target_arc.start_z,
+                base_target_arc.yaw_rad, ctx.v.speed,
+                base_target_arc.curvature - delta_kappa_t,
+                base_target_arc.half_width, base_target_arc.horizon,
+                decel=0.0,
+            )
+            left_clears = arc_arc_collision(
+                ctx.ego_arc, tgt_left, cal.corridor_margin, cal.collision_samples,
+            ) is None
+            right_clears = arc_arc_collision(
+                ctx.ego_arc, tgt_right, cal.corridor_margin, cal.collision_samples,
+            ) is None
+            if left_clears or right_clears:
+                return _suppress("OppositeLaneFilterMirrored")
+        return _PASS
+
+
 class CoDirectionalDivergeFilter:
     """Suppress co-directional vehicles already diverging from ego (Fix C)."""
     name = "CoDirectionalDivergeFilter"
@@ -658,6 +725,49 @@ class CornerEntryStationaryFilter:
         return _suppress("CornerEntryStationaryFilter")
 
 
+class CornerEntryStationaryFilterMirrored:
+    """Mirror of CornerEntryStationaryFilter: ego mid-corner, target at the entry from the other side.
+
+    Original fires when ego is straight (entering a corner) and a stationary
+    target's pose implies a curved continuation. This stage handles the
+    inverse: ego is already in the bend, and a stationary target sits at the
+    entry of the same curve from the opposite approach. Their pose's road
+    implication is the same curved continuation; they aren't blocking ego's
+    straight-line path.
+
+    Mode A (target out-of-lane via arc-projected classification) only. Mode B
+    in-lane chord-offset geometry doesn't mirror cleanly — when ego is the
+    one on the curve, the target's lateral offset in ego frame collapses
+    toward zero and the ``|lat_signed| >= corner_entry_min_lateral`` precondition
+    cannot be satisfied.
+    """
+    name = "CornerEntryStationaryFilterMirrored"
+
+    def __init__(self, cal: AEBCalibration) -> None:
+        self._cal = cal
+
+    def apply(self, ctx: FilterContext) -> FilterResult:
+        cal = self._cal
+        if ctx.abs_v_speed >= cal.sweep_pass_max_target_speed:
+            return _PASS
+        if abs(ctx.ego_curvature) < cal.turning_diverge_kappa:
+            return _PASS
+        if ctx.dist <= cal.corner_entry_min_distance:
+            return _PASS
+
+        road_bend = math.acos(max(0.0, min(1.0, abs(ctx.fwd_dot))))
+        if road_bend < cal.corner_entry_min_road_bend:
+            return _PASS
+
+        implied_kappa = road_bend / ctx.dist
+        if implied_kappa <= cal.turning_diverge_kappa:
+            return _PASS
+
+        if ctx.lane != Lane.EGO:
+            return _suppress("CornerEntryStationaryFilterMirrored")
+        return _PASS
+
+
 class EgoEvasionFilter:
     """Suppress vehicles ego could steer around within 0.1 g (non-head-on, non-co-dir moving)."""
     name = "EgoEvasionFilter"
@@ -713,10 +823,12 @@ def build_pipeline(cal: AEBCalibration) -> list:
         RearOvertakerFilter(),
         LaneClassifier(cal),
         OppositeLaneFilter(cal),
+        OppositeLaneFilterMirrored(cal),
         CoDirectionalDivergeFilter(cal),
         TurningCrossTrafficFilter(cal),
         TmpCrossTrafficFilter(cal),
         SweepPassFilter(cal),
         CornerEntryStationaryFilter(cal),
+        CornerEntryStationaryFilterMirrored(cal),
         EgoEvasionFilter(cal),
     ]
