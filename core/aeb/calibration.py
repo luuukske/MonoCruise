@@ -56,7 +56,7 @@ class AEBCalibration:
     # and the per-frame yaw rate from `angular_velocity`.  Combined as
     # `yaw_blend * yaw_kappa + (1 - yaw_blend) * pos_kappa`; yaw weighted
     # higher for responsiveness, position included for smoothing.
-    aeb_pos_history_len: int = 6
+    aeb_pos_history_len: int = 10
     aeb_yaw_blend: float = 0.4
 
     # Co-directional diverge

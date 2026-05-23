@@ -92,13 +92,15 @@ else:
     v_curvature = 0.0
 ```
 
-`aeb_yaw_blend` (default `0.4`) controls the mix. All vehicle/trailer
-arcs built inside AEB — visualization **and** collision — must share
-this single curvature so tractor and trailer corridors recover from a
-turn together. Call sites that go through the helper:
+`aeb_yaw_blend` (default `0.4`) controls the mix. This produces
+`v_curvature`, the raw measured curvature used by same-curve and diverge
+filters. Arcs built for prediction use `arc_curvature`, which is `v_curvature`
+after Fix D over-rotation damping when that damping applies. Visualization and
+collision must use the same `arc_curvature` so the debug view matches what AEB
+actually evaluates. Call sites that go through the helper:
 
 1. `thread.py::_build_vehicle_collision_data` (precompute path) — collision tractor + trailer
-2. `thread.py::loop` (per-vehicle else branch) — visualization, passing `curvature_override=v_curvature` to `v.get_arc(...)` and directly into `build_arc(...)` for each trailer
+2. `thread.py::loop` (per-vehicle else branch) — visualization, deriving `arc_curvature` from `_dampen_turning_curvature(...)`, then passing it to `v.get_arc(...)` and trailer `build_arc(...)`
 3. `filters.py::_build_vehicle_collision_data` (test harness path) — collision tractor + trailer
 4. `filters.py::LaneClassifier.apply` (per-frame populate)
 
@@ -384,7 +386,7 @@ apart laterally are suppressed at the `arc_arc_collision` level
 - **`OppositeLaneFilter` body-separation check uses `ego_hw + v_hw_coll`, not corridor width.** The margin (`corridor_margin=0.5 m`) is for probabilistic corridor overlap; body separation uses only actual half-widths.
 - **`EgoEvasionFilter` uses `margin=0.0` for evasion arc checks.** Physical body clearance, not padded corridors. Main collision detection still uses `cal.corridor_margin`.
 - **Fix B has no ego_k guard.** The `own_lane` check is the only gate; `|ego_curvature|` expands `delta_kappa_t` only if it would actually increase it.
-- **Fix D (target arc over-rotation damping) applies to `arc_curvature`, not `v_curvature`.** `v_curvature` is the raw measured value used by `same_curve` and `CoDirectionalDivergeFilter`. Only the curvature passed to `build_arc()` is scaled.
+- **Fix D (target arc over-rotation damping) applies to `arc_curvature`, not `v_curvature`.** `v_curvature` is the raw measured value used by `same_curve` and `CoDirectionalDivergeFilter`. Collision and visualization arcs both use the damped `arc_curvature` when building predicted paths.
 - **`LaneClassifier` must run before `OppositeLaneFilter`, `CoDirectionalDivergeFilter`, and `EgoEvasionFilter`** — those stages read `ctx.lane`, `ctx.fwd_dot`, `ctx.v_curvature` etc. populated by `LaneClassifier`.
 - **TMP trailer-as-vehicles get tractor speed/accel via `_swap_trailer_kinematics`.** Buffer speed for trailer slots is unreliable (often 0). The swap is done on a shallow copy — never mutate the original Vehicle.
 - **AEB pedal authority is two-layered, never binary-gated to zero.** AEB publishes `AEB_ff_decel_ms2` every tick when there is any real threat (`required_decel > 0`); sending_thread converts it to a brake pedal via the inverse FF curve and merges it as `b = max(b, aeb_ff_pedal)`. This is the **sub-engagement assist** layer — it adds force on top of user braking when the system warns but has not yet engaged. When AEB engages (`AEB_brake == True`), main_pedal_thread slams `brake_output = 1.0` (the **engagement slam** layer) — by definition, engagement means the system has decided full braking is warranted, and the inverse FF curve at a modest required-decel would produce a pedal too soft to act on the threat. Both layers are gated only by `gas_output >= 0.8` (full-gas user authority, the only override that can defeat AEB braking). Reason: removing the engagement slam in favour of pure FF made AEB feel silenced on engagement because FF pedal for 3–5 m/s² is only ~0.14–0.34.

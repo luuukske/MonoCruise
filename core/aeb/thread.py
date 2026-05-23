@@ -844,6 +844,9 @@ class AEBThread(BaseThread):
                  v_yaw_rad, abs_v_speed, veh_fwd_x, veh_fwd_z, v_curvature) = pc
                 dist = math.sqrt(dist_sq)
                 v_hw = v.size.width / 2.0
+                arc_curvature = (
+                    all_target_arcs[0].curvature if all_target_arcs else v_curvature
+                )
             else:
                 dx = vx - ego_x
                 dz = vz - ego_z
@@ -855,13 +858,23 @@ class AEBThread(BaseThread):
                 if abs(v.position.y - expected_y) > cal.elevation_margin:
                     continue
                 dist = math.sqrt(dist_sq)
-                _, v_yaw_deg, _ = v.rotation.euler()
-                v_yaw_rad = math.radians(v_yaw_deg)
+                v_yaw_rad = (
+                    v._smooth_yaw
+                    if v._smooth_yaw is not None
+                    else math.radians(v.rotation.euler()[1])
+                )
                 v_hw = v.size.width / 2.0
                 abs_v_speed = abs(v.speed)
                 v_curvature = _vehicle_curvature_blend(v, abs_v_speed, cal)
                 veh_fwd_x = -math.sin(v_yaw_rad)
                 veh_fwd_z = -math.cos(v_yaw_rad)
+                fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
+                arc_curvature = _dampen_turning_curvature(
+                    v_curvature, fwd_dot,
+                    ego_fwd_x, ego_fwd_z, veh_fwd_x, veh_fwd_z,
+                    abs_v_speed, abs_v_speed * dynamic_horizon,
+                    cal,
+                )
                 precomputed_cross_arcs = None
                 all_target_arcs = []
                 cross_padding = 0.0
@@ -869,7 +882,7 @@ class AEBThread(BaseThread):
             veh_arc = v.get_arc(
                 dynamic_horizon,
                 arc_start_pctg=cal.arc_start_pctg,
-                curvature_override=v_curvature,
+                curvature_override=arc_curvature,
             )
             trailer_dicts = []
             trailer_arcs: list[ArcPath] = []
@@ -888,7 +901,7 @@ class AEBThread(BaseThread):
                     tr_arc_pos.x + tr_body_offset * tr_fwd_x_l,
                     tr_arc_pos.z + tr_body_offset * tr_fwd_z_l,
                     tr_yaw_rad,
-                    v.speed, v_curvature, tr_hw, dynamic_horizon,
+                    v.speed, arc_curvature, tr_hw, dynamic_horizon,
                 )
                 trailer_arcs.append(tr_arc)
                 trailer_dicts.append({
