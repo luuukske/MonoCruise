@@ -341,6 +341,11 @@ class FilterContext:
     precomputed_cross_arcs: list | None = None
     lane: Lane = Lane.EGO
 
+    # Set of vehicle ids latched by a prior engagement on this target. Used
+    # to bypass the TMP rel-speed pre-filter so a target does not vanish
+    # from the pipeline as ego brakes and closing speed collapses.
+    latched_threat_ids: set = field(default_factory=set)
+
     # Populated during collision evaluation (set by the pipeline caller)
     unbraked_hit: tuple | None = None
     lateral_gap: float = 0.0
@@ -391,6 +396,10 @@ class TmpRelSpeedFilter:
 
     def apply(self, ctx: FilterContext) -> FilterResult:
         if not ctx.tmp_traffic_session:
+            return _PASS
+        # Latched targets bypass the rel-speed gate so they don't drop out
+        # of the pipeline once ego matches their speed under braking.
+        if ctx.v.id in ctx.latched_threat_ids:
             return _PASS
         v_yaw_rad = _vehicle_yaw_rad(ctx.v)
         vf_x = -math.sin(v_yaw_rad)

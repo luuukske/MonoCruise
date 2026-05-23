@@ -109,5 +109,18 @@ class AEBCalibration:
     aeb_warn_near_full_frac: float = 0.85
     brake_actuator_lag_s: float = 0.18
 
+    # Latched-threat hold: once AEB engages on a target, that target's id is
+    # latched until physical separation grows. Two effects:
+    # 1) TmpRelSpeedFilter is bypassed for latched ids so a TMP target does
+    #    not vanish from the pipeline as ego brakes and rel-speed collapses.
+    # 2) Engagement is held and target_raw floored while any latched target
+    #    is still inside the headway danger zone — the v_closing^2/2d
+    #    required_decel formula collapses when ego matches target speed but
+    #    the gap may still be unsafe.
+    # headway = max(dist - stop_buffer, 0) / max(ego_speed, 0.5)
+    latched_min_headway_s: float = 1.5
+    latched_release_headway_s: float = 2.5
+    latched_min_decel_frac: float = 0.7
+
 
 DEFAULT = AEBCalibration()

@@ -588,6 +588,12 @@ class AEBThread(BaseThread):
         self._published_target_ms2: float = 0.0
         self._last_target_change_mono: float = 0.0
         self._prev_loop_mono: float | None = None
+        # Vehicle ids latched by a confirmed engagement event. Held across
+        # frames so a TMP target that drops below the rel-speed pre-filter
+        # (because ego is now matching its speed) keeps flowing through the
+        # pipeline, and so engagement holds until the gap has actually
+        # re-opened — not just until v_closing^2 collapses to zero.
+        self._latched_threat_ids: set[int] = set()
 
     def _read_user_braking(self) -> bool:
         try:
@@ -817,7 +823,7 @@ class AEBThread(BaseThread):
                 expected_y = ego_y + rz * math.tan(ego_pitch_rad)
                 if abs(v.position.y - expected_y) > cal.elevation_margin:
                     continue
-                if tmp_traffic_session:
+                if tmp_traffic_session and v.id not in self._latched_threat_ids:
                     _, v_yaw_deg_pc, _ = v.rotation.euler()
                     v_yaw_rad_pc = math.radians(v_yaw_deg_pc)
                     vf_x = -math.sin(v_yaw_rad_pc)
@@ -970,6 +976,7 @@ class AEBThread(BaseThread):
                 all_target_arcs=all_target_arcs,
                 precomputed_cross_arcs=precomputed_cross_arcs,
                 cross_padding=cross_padding,
+                latched_threat_ids=self._latched_threat_ids,
             )
 
             suppression_reasons[v.id] = []
@@ -1147,10 +1154,42 @@ class AEBThread(BaseThread):
             and bool(colliding_ids)
         )
 
+        # Distance-based engagement latch over previously-latched targets.
+        # required_decel = v_closing^2/2d collapses to zero when ego matches
+        # target speed, but the physical gap may still be unsafe. Hold while
+        # any latched id has headway < latched_min_headway_s; release the id
+        # once its headway grows past latched_release_headway_s.
+        active_vid_set = {v.id for v in vehicles_eff}
+        ego_v_safe = max(ego_speed, 0.5)
+        latched_headway_min = _INF
+        for vid in list(self._latched_threat_ids):
+            if vid not in active_vid_set:
+                self._latched_threat_ids.discard(vid)
+                continue
+            pc = vehicle_collision_data.get(vid)
+            if pc is None:
+                self._latched_threat_ids.discard(vid)
+                continue
+            dist_vid = math.sqrt(pc[5])
+            gap = max(dist_vid - cal.stop_buffer, 0.0)
+            hw = gap / ego_v_safe
+            if hw > cal.latched_release_headway_s:
+                self._latched_threat_ids.discard(vid)
+                continue
+            if hw < latched_headway_min:
+                latched_headway_min = hw
+
+        latched_distance_threat = (
+            run_collision
+            and bool(self._latched_threat_ids)
+            and latched_headway_min < cal.latched_min_headway_s
+        )
+
         if self._engaged:
             if (effective_required < disarm_threshold
                     and not brake_ttb_active
-                    and not geom_threat_latched):
+                    and not geom_threat_latched
+                    and not latched_distance_threat):
                 self._engaged = False
         else:
             if run_collision and (
@@ -1158,11 +1197,21 @@ class AEBThread(BaseThread):
             ):
                 self._engaged = True
 
+        # Promote every currently-colliding target into the latched set so
+        # subsequent frames keep them in the pipeline and in the hold check.
+        if self._engaged and run_collision and colliding_ids:
+            self._latched_threat_ids.update(colliding_ids)
+
         if self._engaged:
             if brake_ttb_active:
                 target_raw = effective_max_decel
             else:
                 target_raw = max(0.0, min(effective_required, effective_max_decel))
+                if latched_distance_threat:
+                    target_raw = max(
+                        target_raw,
+                        cal.latched_min_decel_frac * effective_max_decel,
+                    )
         else:
             target_raw = 0.0
 
@@ -1300,6 +1349,7 @@ class AEBThread(BaseThread):
         self._published_target_ms2 = 0.0
         self._last_target_change_mono = 0.0
         self._prev_loop_mono = None
+        self._latched_threat_ids.clear()
         self._curvature_blender.prune(set())
         with self.data._lock:
             self.data.AEB_warn = False
