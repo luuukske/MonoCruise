@@ -102,7 +102,39 @@ actually evaluates. Call sites that go through the helper:
 1. `thread.py::_build_vehicle_collision_data` (precompute path) — collision tractor + trailer
 2. `thread.py::loop` (per-vehicle else branch) — visualization, deriving `arc_curvature` from `_dampen_turning_curvature(...)`, then passing it to `v.get_arc(...)` and trailer `build_arc(...)`
 3. `filters.py::_build_vehicle_collision_data` (test harness path) — collision tractor + trailer
-4. `filters.py::LaneClassifier.apply` (per-frame populate)
+
+`LaneClassifier.apply` does **not** recompute `v_curvature` — the upstream
+call sites above populate it on the `FilterContext` once per frame and the
+stage reads it as-is. Recomputing there would double-step the One-Euro state
+(see below).
+
+### One-Euro post-filter on `v_curvature`
+
+The yaw+pos blend is fed through a per-vehicle One-Euro filter
+(`VehicleCurvatureBlender` in `filters.py`) before reaching the pipeline.
+Speed-adaptive low-pass: cutoff = `min_cutoff + beta · |dkappa/dt|`. Quiet
+steady state → heavy smoothing (kills single-frame jitter). Genuine corner
+entry → cutoff jumps with the derivative and the filter approaches
+passthrough within a frame. Reference: Casiez et al., "1€ Filter", CHI 2012.
+
+State lives on `AEBThread._curvature_blender`, keyed by `vehicle.id`. The
+helper is stepped exactly once per vehicle per frame — first call site that
+sees the vehicle (precompute or fallback else branch in the per-vehicle
+loop) advances the filter; `LaneClassifier` reads the cached value from
+`ctx.v_curvature`. The blender is `prune`d at the end of each loop against
+the current `vehicles_eff` id set so disappearing targets release state.
+
+Calibration:
+
+| Knob | Default | Role |
+|------|---------|------|
+| `aeb_kappa_one_euro_min_cutoff` | 1.0 Hz | Smooth-floor cutoff at zero derivative |
+| `aeb_kappa_one_euro_beta` | 200.0 | Slope of cutoff vs `|dkappa/dt|` — higher = snappier transient, lets more noise through |
+| `aeb_kappa_one_euro_d_cutoff` | 1.0 Hz | Low-pass on the derivative estimate (rejects noise-driven cutoff swings) |
+
+When `_vehicle_curvature_blend()` is called without a blender (e.g. test
+paths that don't carry filter state across frames), it returns the raw
+blended value. Production paths in `AEBThread` always pass the blender.
 
 Never call `v.get_arc()` from AEB without a `curvature_override` — the
 fallback inside `traffic.py::get_arc` uses the full 25-sample
@@ -379,7 +411,7 @@ apart laterally are suppressed at the `arc_arc_collision` level
 
 - **AEB is a consumer of `RadarThread`.** Do not open the traffic shared-memory buffer directly and do not mutate `Vehicle` instances.
 - **AEB ego curvature is the yaw-rate proxy, full stop.** Do not read `RadarData.ego_curvature` from AEB.
-- **Target-vehicle curvature is the `_vehicle_curvature_blend` helper** (sliced position fit blended with `angular_velocity`-derived yaw rate, weighted by `cal.aeb_yaw_blend`). Do not call `v.curvature_from_history()` directly from AEB paths and do not enlarge `aeb_pos_history_len` toward 25.
+- **Target-vehicle curvature is the `_vehicle_curvature_blend` helper** (sliced position fit blended with `angular_velocity`-derived yaw rate, weighted by `cal.aeb_yaw_blend`, then One-Euro filtered per-vehicle by `AEBThread._curvature_blender`). Do not call `v.curvature_from_history()` directly from AEB paths and do not enlarge `aeb_pos_history_len` toward 25. The blender must be stepped exactly **once per vehicle per frame** — any new call site must thread the existing `ctx.v_curvature` through rather than re-invoking `_vehicle_curvature_blend(...)` with the production blender.
 - **`co_directional` must use `fwd_dot > 0.7`, not `abs(fwd_dot) > 0.7`.** The two flags must be mutually exclusive with `head_on`.
 - **All tunable constants live in `AEBCalibration`.** Do not introduce new bare numeric literals in `thread.py` or `filters.py`. Add the constant to `calibration.py` first.
 - **`lane_frame.project_to_ego_arc` is the canonical lane primitive.** Do not use cross-product `lateral_offset` for lane classification — it compresses on curved roads. The `max(d_arc, d_straight)` formula in `project_to_ego_arc` is the safety-critical fix.

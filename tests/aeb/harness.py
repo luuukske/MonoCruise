@@ -367,11 +367,24 @@ def evaluate_frame(
 
                 braked_hit = _earliest_hit(
                     ego_braked_arc, cross_arcs,
-                    cal.corridor_margin + stopping_buffer,
+                    cal.corridor_margin,
                     cal.collision_samples,
                     lateral_gap,
                 )
-                ttb = max(unbraked_ttc, 0.0) if braked_hit is None else 0.0
+                v_target_along_ego = v.speed * (
+                    ctx.veh_fwd_x * ego_fwd_x + ctx.veh_fwd_z * ego_fwd_z
+                )
+                closing_unbraked = max(0.0, ego_speed - v_target_along_ego)
+                braking_worsens = False
+                if braked_hit is not None:
+                    t_braked = braked_hit[0]
+                    v_ego_braked = max(0.0, ego_speed - effective_decel * t_braked)
+                    closing_braked = max(0.0, v_ego_braked - v_target_along_ego)
+                    if closing_braked > closing_unbraked + cal.brake_worsens_hysteresis_ms:
+                        braking_worsens = True
+                if braking_worsens:
+                    continue
+                ttb = unbraked_ttc
                 if ttb < best_ttb:
                     best_ttb = ttb
 

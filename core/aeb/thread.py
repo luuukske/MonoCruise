@@ -30,7 +30,7 @@ from core.aeb.filters import (
     FilterContext, FilterResult,
     _build_vehicle_collision_data, _world_to_ego_forward, _cross_zone_padding,
     _apply_cross_zone, _earliest_hit, _is_approaching, _dampen_turning_curvature,
-    _vehicle_curvature_blend,
+    _vehicle_curvature_blend, VehicleCurvatureBlender,
     build_pipeline,
 )
 
@@ -237,7 +237,7 @@ class AEBSnapshot:
     vehicle_arcs: dict = field(default_factory=dict)
     colliding_ids: set = field(default_factory=set)
     suppressed_ids: set = field(default_factory=set)
-    braking_suppressed_ids: set = field(default_factory=set)
+    braking_worsens_ids: set = field(default_factory=set)
     evasion_filtered_ids: set = field(default_factory=set)
     oncoming_evasion_filtered_ids: set = field(default_factory=set)
 
@@ -373,6 +373,8 @@ def _build_vehicle_collision_data(
     ego_fwd_x: float,
     ego_fwd_z: float,
     cal: AEBCalibration = _CAL_DEFAULT,
+    blender: VehicleCurvatureBlender | None = None,
+    now: float | None = None,
 ) -> tuple[list[ArcPath], float, list[list[ArcPath]],
            float, float, float, float, float]:
     """Build collision arcs and derived vehicle geometry for a vehicle.
@@ -383,7 +385,7 @@ def _build_vehicle_collision_data(
     v_hw = v.size.width / 2.0
     v_hw_coll = max(v_hw - 0.1, 0.3)
     abs_v_speed = abs(v.speed)
-    v_curvature = _vehicle_curvature_blend(v, abs_v_speed, cal)
+    v_curvature = _vehicle_curvature_blend(v, abs_v_speed, cal, blender, now)
     v_yaw_rad = v._smooth_yaw if v._smooth_yaw is not None else math.radians(v.rotation.euler()[1])
     veh_fwd_x = -math.sin(v_yaw_rad)
     veh_fwd_z = -math.cos(v_yaw_rad)
@@ -578,6 +580,9 @@ class AEBThread(BaseThread):
         self._sound_handler = _AEBSoundHandler(_AEB_SOUND_PATH)
         self._cal: AEBCalibration = _CAL_DEFAULT
         self._pipeline = build_pipeline(self._cal)
+        # Per-target One-Euro state for blended curvature; stepped once per
+        # vehicle per frame, pruned at the end of the loop.
+        self._curvature_blender = VehicleCurvatureBlender(self._cal)
         # Continuous-decel state
         self._engaged: bool = False
         self._published_target_ms2: float = 0.0
@@ -781,7 +786,7 @@ class AEBThread(BaseThread):
 
         colliding_ids: set[int] = set()
         suppressed_ids: set[int] = set()
-        braking_suppressed_ids: set[int] = set()
+        braking_worsens_ids: set[int] = set()
         evasion_filtered_ids: set[int] = set()
         oncoming_evasion_filtered_ids: set[int] = set()
         suppression_reasons: dict[int, list[FilterResult]] = {}
@@ -826,6 +831,7 @@ class AEBThread(BaseThread):
                  pc_yaw, pc_aspd, pc_fx, pc_fz, pc_curv,
                  ) = _build_vehicle_collision_data(
                     v, dynamic_horizon, ego_yaw_rad, ego_fwd_x, ego_fwd_z, cal,
+                    self._curvature_blender, now_mono,
                 )
                 dist_sq = dx * dx + dz * dz
                 vehicle_collision_data[v.id] = (
@@ -865,7 +871,9 @@ class AEBThread(BaseThread):
                 )
                 v_hw = v.size.width / 2.0
                 abs_v_speed = abs(v.speed)
-                v_curvature = _vehicle_curvature_blend(v, abs_v_speed, cal)
+                v_curvature = _vehicle_curvature_blend(
+                    v, abs_v_speed, cal, self._curvature_blender, now_mono,
+                )
                 veh_fwd_x = -math.sin(v_yaw_rad)
                 veh_fwd_z = -math.cos(v_yaw_rad)
                 fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
@@ -1038,16 +1046,37 @@ class AEBThread(BaseThread):
 
                     braked_hit = _earliest_hit(
                         ego_braked_arc, cross_arcs,
-                        cal.corridor_margin + stopping_buffer,
+                        cal.corridor_margin,
                         cal.collision_samples,
                         lateral_gap,
                     )
 
-                    if braked_hit is None:
-                        ttb = max(unbraked_ttc, 0.0)
-                        braking_suppressed_ids.add(v.id)
-                    else:
-                        ttb = 0.0
+                    v_target_along_ego = v.speed * (
+                        veh_fwd_x * ego_fwd_x + veh_fwd_z * ego_fwd_z
+                    )
+                    closing_unbraked = max(0.0, ego_speed - v_target_along_ego)
+
+                    # Compare closing speeds under braked vs unbraked trajectories.
+                    # Suppress engagement on this target only when braking actually
+                    # raises the impact velocity (rare: cross-traffic scenarios where
+                    # ego coasting would clear before target arrives). Otherwise
+                    # braking is the right action — drive ttb directly off
+                    # unbraked_ttc minus the brake response window so the emergency
+                    # `brake_ttb_active` path fires before impact rather than after.
+                    braking_worsens = False
+                    if braked_hit is not None:
+                        t_braked = braked_hit[0]
+                        v_ego_braked = max(0.0, ego_speed - effective_decel * t_braked)
+                        closing_braked = max(0.0, v_ego_braked - v_target_along_ego)
+                        if closing_braked > closing_unbraked + cal.brake_worsens_hysteresis_ms:
+                            braking_worsens = True
+
+                    if braking_worsens:
+                        braking_worsens_ids.add(v.id)
+                        found_hit = True
+                        continue
+
+                    ttb = unbraked_ttc
 
                     if ttb < best_ttb:
                         best_ttb = ttb
@@ -1057,10 +1086,7 @@ class AEBThread(BaseThread):
                             unbraked_hit[1] - ego_front_x,
                             unbraked_hit[2] - ego_front_z,
                         )
-                        v_target_along_ego = v.speed * (
-                            veh_fwd_x * ego_fwd_x + veh_fwd_z * ego_fwd_z
-                        )
-                        best_v_closing = max(0.0, ego_speed - v_target_along_ego)
+                        best_v_closing = closing_unbraked
                     found_hit = True
 
                 vehicle_dicts.append(veh_dict)
@@ -1068,6 +1094,7 @@ class AEBThread(BaseThread):
         self._risk_first_seen = {
             k: v for k, v in self._risk_first_seen.items() if k in newly_risky
         }
+        self._curvature_blender.prune({v.id for v in vehicles_eff})
 
         time_to_brake = best_ttb if (run_collision and best_ttb < _INF) else _INF
         display_ttc = best_unbraked_ttc
@@ -1090,16 +1117,33 @@ class AEBThread(BaseThread):
         disarm_threshold = cal.aeb_disarm_frac * effective_max_decel
         warn_threshold = cal.aeb_warn_frac * effective_max_decel
 
-        # brake_ttb_active: full-brake ego still intersects target (ttb=0) or
-        # ttb is below the emergency threshold. Handles path-crossing / arc-cross
-        # scenarios where v_closing≈0 collapses required_decel, but the geometry
-        # still says ego is about to hit something.
+        # brake_ttb_active: unbraked geometry says collision is within the
+        # emergency window. The window is `brake_ttb + brake_response_window_s`
+        # to compensate for actuator lag and the rate-limited brake ramp —
+        # without this headroom the slam fires after the pedal has already
+        # needed to be at full. Handles path-crossing / arc-cross scenarios
+        # where v_closing≈0 collapses required_decel, but the geometry still
+        # says ego is about to hit something.
         brake_ttb_active = (
-            run_collision and time_to_brake < cal.brake_ttb
+            run_collision
+            and time_to_brake < cal.brake_ttb + cal.brake_response_window_s
+        )
+
+        # Geometry-driven engagement latch: once engaged, hold engagement while
+        # any confirmed collision target's unbraked_ttc is still within warn
+        # range. As ego brakes and slows, best_v_closing collapses faster than
+        # d_remaining, which would otherwise trip the required_decel disarm
+        # threshold mid-event while the impact is still imminent.
+        geom_threat_latched = (
+            run_collision
+            and best_unbraked_ttc < cal.warn_ttb
+            and bool(colliding_ids)
         )
 
         if self._engaged:
-            if effective_required < disarm_threshold and not brake_ttb_active:
+            if (effective_required < disarm_threshold
+                    and not brake_ttb_active
+                    and not geom_threat_latched):
                 self._engaged = False
         else:
             if run_collision and (
@@ -1207,7 +1251,7 @@ class AEBThread(BaseThread):
             ego_has_trailer=ego_has_trailer,
             vehicles=vehicle_dicts, vehicle_arcs=vehicle_arcs,
             colliding_ids=colliding_ids, suppressed_ids=suppressed_ids,
-            braking_suppressed_ids=braking_suppressed_ids,
+            braking_worsens_ids=braking_worsens_ids,
             evasion_filtered_ids=evasion_filtered_ids,
             oncoming_evasion_filtered_ids=oncoming_evasion_filtered_ids,
             aeb_state=new_state, time_to_collision=display_ttc,
@@ -1249,6 +1293,7 @@ class AEBThread(BaseThread):
         self._published_target_ms2 = 0.0
         self._last_target_change_mono = 0.0
         self._prev_loop_mono = None
+        self._curvature_blender.prune(set())
         with self.data._lock:
             self.data.AEB_warn = False
             self.data.AEB_brake = False

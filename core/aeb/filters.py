@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -15,24 +16,116 @@ from core.aeb.calibration import AEBCalibration
 from core.aeb.lane_frame import Lane, project_to_ego_arc, classify
 
 
-def _vehicle_curvature_blend(v: Vehicle, abs_v_speed: float, cal: AEBCalibration) -> float:
+class OneEuroFilter:
+    """Speed-adaptive low-pass — Casiez et al., "1€ Filter", CHI 2012.
+
+    Cutoff frequency rises with |dx/dt|: heavy smoothing when the signal is
+    quiet, near-passthrough when it changes fast.  Tradeoff knobs are
+    ``min_cutoff`` (smooth-floor) and ``beta`` (how aggressively cutoff
+    follows the derivative).
+    """
+
+    __slots__ = ("min_cutoff", "beta", "d_cutoff",
+                 "_x_prev", "_dx_prev", "_t_prev")
+
+    def __init__(self, min_cutoff: float, beta: float, d_cutoff: float = 1.0) -> None:
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self.d_cutoff = d_cutoff
+        self._x_prev: float | None = None
+        self._dx_prev: float = 0.0
+        self._t_prev: float | None = None
+
+    @staticmethod
+    def _alpha(cutoff: float, dt: float) -> float:
+        tau = 1.0 / (2.0 * math.pi * cutoff)
+        return 1.0 / (1.0 + tau / dt)
+
+    def step(self, x: float, t: float) -> float:
+        if self._x_prev is None or self._t_prev is None:
+            self._x_prev = x
+            self._t_prev = t
+            return x
+        dt = t - self._t_prev
+        if dt <= 0.0:
+            return self._x_prev
+        dx_raw = (x - self._x_prev) / dt
+        a_d = self._alpha(self.d_cutoff, dt)
+        dx_hat = a_d * dx_raw + (1.0 - a_d) * self._dx_prev
+        cutoff = self.min_cutoff + self.beta * abs(dx_hat)
+        a_x = self._alpha(cutoff, dt)
+        x_hat = a_x * x + (1.0 - a_x) * self._x_prev
+        self._x_prev = x_hat
+        self._dx_prev = dx_hat
+        self._t_prev = t
+        return x_hat
+
+
+class VehicleCurvatureBlender:
+    """Per-vehicle One-Euro state for the blended target-curvature signal.
+
+    Owned by the long-lived caller (``AEBThread``).  Each vehicle id gets its
+    own filter so transient-rate adaptation is independent per target.  Stale
+    entries are dropped by :meth:`prune` once per frame to bound memory.
+    """
+
+    def __init__(self, cal: AEBCalibration) -> None:
+        self._cal = cal
+        self._filters: dict[int, OneEuroFilter] = {}
+
+    def _get(self, vid: int) -> OneEuroFilter:
+        f = self._filters.get(vid)
+        if f is None:
+            f = OneEuroFilter(
+                self._cal.aeb_kappa_one_euro_min_cutoff,
+                self._cal.aeb_kappa_one_euro_beta,
+                self._cal.aeb_kappa_one_euro_d_cutoff,
+            )
+            self._filters[vid] = f
+        return f
+
+    def step(self, vid: int, raw_kappa: float, now: float) -> float:
+        return self._get(vid).step(raw_kappa, now)
+
+    def prune(self, active_vids: set[int]) -> None:
+        for vid in list(self._filters.keys()):
+            if vid not in active_vids:
+                del self._filters[vid]
+
+
+def _vehicle_curvature_blend(
+    v: Vehicle,
+    abs_v_speed: float,
+    cal: AEBCalibration,
+    blender: VehicleCurvatureBlender | None = None,
+    now: float | None = None,
+) -> float:
     """Blend short position-fit and yaw-rate signals for a target vehicle's path.
 
     AEB-local two-source path prediction — smooth (position fit on the last
     ``cal.aeb_pos_history_len`` history samples) blended with responsive
     (single-frame yaw rate from ``angular_velocity``).  Either side fills in
     when the other is unavailable.
+
+    When ``blender`` is supplied, the blended value is fed through a
+    per-vehicle One-Euro filter (see :class:`VehicleCurvatureBlender`).  The
+    raw blend is returned when ``blender`` is ``None`` — used by test paths
+    that don't carry filter state across frames.
     """
     pos_hist = list(v._position_history)[-cal.aeb_pos_history_len:]
     pos_kappa = ego_curvature_from_history(pos_hist) if len(pos_hist) >= 3 else None
     yaw_kappa = math.radians(v.angular_velocity) / abs_v_speed if abs_v_speed > 0.5 else None
     if pos_kappa is not None and yaw_kappa is not None:
-        return cal.aeb_yaw_blend * yaw_kappa + (1.0 - cal.aeb_yaw_blend) * pos_kappa
-    if pos_kappa is not None:
-        return pos_kappa
-    if yaw_kappa is not None:
-        return yaw_kappa
-    return 0.0
+        raw = cal.aeb_yaw_blend * yaw_kappa + (1.0 - cal.aeb_yaw_blend) * pos_kappa
+    elif pos_kappa is not None:
+        raw = pos_kappa
+    elif yaw_kappa is not None:
+        raw = yaw_kappa
+    else:
+        return 0.0
+    if blender is None:
+        return raw
+    return blender.step(v.id, raw, now if now is not None else time.monotonic())
 
 if TYPE_CHECKING:
     pass
@@ -141,12 +234,14 @@ def _build_vehicle_collision_data(
     ego_fwd_x: float,
     ego_fwd_z: float,
     cal: AEBCalibration,
+    blender: VehicleCurvatureBlender | None = None,
+    now: float | None = None,
 ) -> tuple[list[ArcPath], float, list[list[ArcPath]],
            float, float, float, float, float]:
     v_hw = v.size.width / 2.0
     v_hw_coll = max(v_hw - 0.1, 0.3)
     abs_v_speed = abs(v.speed)
-    v_curvature = _vehicle_curvature_blend(v, abs_v_speed, cal)
+    v_curvature = _vehicle_curvature_blend(v, abs_v_speed, cal, blender, now)
     v_yaw_rad = v._smooth_yaw if v._smooth_yaw is not None else math.radians(v.rotation.euler()[1])
     veh_fwd_x = -math.sin(v_yaw_rad)
     veh_fwd_z = -math.cos(v_yaw_rad)
@@ -339,12 +434,10 @@ class LaneClassifier:
 
     def apply(self, ctx: FilterContext) -> FilterResult:
         cal = self._cal
-        # Populate vehicle geometry fields
-        ctx.v_yaw_rad = _vehicle_yaw_rad(ctx.v)
-        ctx.veh_fwd_x = -math.sin(ctx.v_yaw_rad)
-        ctx.veh_fwd_z = -math.cos(ctx.v_yaw_rad)
-        ctx.abs_v_speed = abs(ctx.v.speed)
-        ctx.v_curvature = _vehicle_curvature_blend(ctx.v, ctx.abs_v_speed, cal)
+        # Geometry fields (v_yaw_rad, veh_fwd_x/z, abs_v_speed, v_curvature)
+        # are populated upstream by _build_vehicle_collision_data so the
+        # per-vehicle One-Euro blender steps exactly once per frame.  Do not
+        # recompute curvature here — that would double-step the filter.
         ctx.fwd_dot = ctx.ego_fwd_x * ctx.veh_fwd_x + ctx.ego_fwd_z * ctx.veh_fwd_z
         ctx.head_on = ctx.fwd_dot < cal.head_on_dot
         ctx.near_head_on = ctx.fwd_dot < cal.near_head_on_dot

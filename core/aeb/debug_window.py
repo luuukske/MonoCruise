@@ -152,7 +152,7 @@ class AEBDebugWindow(QWidget):
             vid = v["vid"]
             is_supp = v.get("rear_suppressed", False)
             is_danger = vid in snap.colliding_ids
-            is_brake_supp = vid in snap.braking_suppressed_ids
+            is_brake_supp = vid in snap.braking_worsens_ids
             is_evasion_filtered = vid in snap.evasion_filtered_ids
 
             is_acc_lead = acc is not None and acc["lead_id"] == vid
@@ -597,7 +597,7 @@ class AEBDebugWindow(QWidget):
         nv = len(snap.vehicles)
         nc = len(snap.colliding_ids)
         ns = len(snap.suppressed_ids)
-        nb = len(snap.braking_suppressed_ids)
+        nb = len(snap.braking_worsens_ids)
         p.drawText(QPointF(x, y), f"Tracked: {nv}   Threats: {nc}   Suppressed: {ns}")
 
         y += 18

@@ -85,7 +85,7 @@ _ACC_SPEED_FF_GATE_HI_MS2: float = 0.30        # m/s²  — feed-forward gate fu
 _ACC_SPEED_FF_ACCEL_CLAMP_MS2: float = 6.0     # m/s²  — clamp on the feed-forward accel
 
 # Yaw EMA (wrap-safe) — AI and TMP (arc curvature).
-_RAW_YAW_ALPHA: float = 0.40
+_RAW_YAW_ALPHA: float = 0.50
 
 # TMP lag detection — see AGENTS.md §7 "Lag / freeze detection".
 _LAG_MIN_SPEED_MS: float = 5.0           # m/s  — below this no lag detection runs

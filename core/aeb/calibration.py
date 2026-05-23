@@ -16,6 +16,8 @@ class AEBCalibration:
     brake_release_ttb: float = 0.5
     risk_confirm_s: float = 0.05
     risk_confirm_oncoming_s: float = 0.10
+    brake_response_window_s: float = 0.30
+    brake_worsens_hysteresis_ms: float = 0.5
 
     # Geometry / corridor
     ego_half_width: float = 1.15
@@ -57,7 +59,18 @@ class AEBCalibration:
     # `yaw_blend * yaw_kappa + (1 - yaw_blend) * pos_kappa`; yaw weighted
     # higher for responsiveness, position included for smoothing.
     aeb_pos_history_len: int = 10
-    aeb_yaw_blend: float = 0.4
+    aeb_yaw_blend: float = 0.7
+
+    # One-Euro post-filter on the blended target curvature.  Speed-adaptive
+    # low-pass: cutoff rises with |dkappa/dt| so steady-state noise is heavily
+    # smoothed while genuine curvature changes pass through with minimal lag.
+    # Reference: Casiez et al., "1€ Filter", CHI 2012.
+    #   min_cutoff (Hz) — cutoff at zero derivative; sets the smooth-floor.
+    #   beta — slope of cutoff vs |dkappa/dt|; higher = snappier transient.
+    #   d_cutoff (Hz) — low-pass on the derivative estimate itself.
+    aeb_kappa_one_euro_min_cutoff: float = 1.0
+    aeb_kappa_one_euro_beta: float = 200.0
+    aeb_kappa_one_euro_d_cutoff: float = 1.0
 
     # Co-directional diverge
     co_dir_diverge_lookahead_s: float = 0.25
