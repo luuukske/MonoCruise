@@ -139,11 +139,18 @@ class Settings(metaclass=_SingletonMeta):
 
     # PedalCapacityTracker — persisted estimates (0 = use baseline on next startup)
     pedal_capacity_max_brake_ms2: float = 11.457
-    # Global accel scalar — cold-start fallback used until a gear is learned.
+    # Legacy global accel scalar — kept as the cold-start seed source for the
+    # shape-function anchor below before any new sample has been taken.
     pedal_capacity_max_accel_ms2: float = 2.124
-    # Per-gear gas gain map {gear: m/s² at gas=1.0}. JSON object keys are
-    # strings on disk; PedalCapacityTracker converts them to int gears on load.
-    pedal_capacity_accel_gain_by_gear: dict = field(default_factory=dict)
+    # Shape-function anchor gain (m/s² at gas=1.0, mass-normalized, at the
+    # anchor gear). One scalar parameterizes the whole per-gear gain curve
+    # via G(gear) = anchor * ratio^(anchor_gear - gear). See pedal_capacity.py.
+    pedal_capacity_accel_anchor_gain_ms2: float = 0.0
+    # Per-gear-step ratio for the shape function (1.0 = flat, >1.0 = lower
+    # gear has more gain). Learned online via log-space regression — falls
+    # back to a sensible default until enough cross-gear samples accumulate.
+    # 0 = use the in-code default on next startup.
+    pedal_capacity_accel_ratio_step: float = 0.0
 
     _saved_state: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     _state_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)

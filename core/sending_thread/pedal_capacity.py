@@ -11,17 +11,28 @@ Replaces brake_efficiency.py with a simpler, always-on system:
     than overperformance rises it — safety bias for emergency stops.
   - Gravity and rolling resistance are canceled via road_load_ms2 before sampling.
 
-  Gas learning (per-gear)
-  - The gas pedal -> acceleration gain is strongly gear-dependent (low gears
-    multiply engine torque far more), so a separate weighted EMA is kept per
-    transmission gear instead of one speed-mixed scalar.
-  - Skips samples for 0.5 s after the clutch was last pressed and while the
-    gas pedal is still moving (settle gate), so gear-change and launch-ramp
-    transients do not contaminate the per-gear estimate.
-  - Gravity and rolling resistance are canceled via road_load_ms2 before sampling.
+  Gas learning (shape-function: learned anchor + learned ratio)
+  - Pedal -> accel gain is dominated by gearbox ratio, but the real shape
+    isn't perfectly geometric (engine torque curve, splitter/range steps,
+    clutch slip at launch). Two scalars parameterize the whole gear curve:
+        G(gear) = anchor * ratio^(_ANCHOR_GEAR - gear)
+    Both are learned online via log-space linear regression — each sample's
+    residual nudges anchor and ratio toward the best fit, with the ratio's
+    update weighted by the sample's gear distance from the anchor (samples
+    far from the anchor carry more slope information; samples at the anchor
+    only refine the amplitude).
+  - Monotonic by construction (ratio is clamped > 1). One bad low-gear sample
+    cannot invert against well-known top-gear samples.
+  - Skipped after a clutch press (0.5 s), inside the per-gear dwell window
+    after a gear change (the speed differentiator lags real accel through the
+    launch ramp), and while the gas pedal is still moving (settle gate).
+  - Gravity and rolling resistance are canceled via road_load_ms2 before
+    sampling; samples are multiplied by weight_factor so the stored anchor
+    is mass-normalized (load/unload does not force relearn).
 
-  The brake estimate and the per-gear gain map are persisted to settings.json
-  so the next session starts from the last known good values.
+  The brake estimate, the anchor gain, and the learned ratio step are
+  persisted to settings.json so the next session starts from the last known
+  good values.
 """
 
 from __future__ import annotations
@@ -56,21 +67,45 @@ _SAVE_COOLDOWN_S: float = 30.0      # min seconds between successive writes
 _ESTIMATE_LOWER_BOUND: float = 0.35 # fraction of baseline — hard floor
 _ESTIMATE_UPPER_BOUND: float = 2.0  # fraction of baseline — hard ceiling
 
-# Per-gear gas gain learning. The pedal->accel gain is binned by transmission
-# gear because the gearbox ratio is the dominant cause of its speed dependence.
-# Bounds are absolute (m/s² at gas=1.0): low gears legitimately produce far
-# more acceleration per pedal than high gears, so a baseline-relative ceiling
-# would clamp them down and reattach the low-speed overshoot bug.
-_ACCEL_GAIN_MIN_MS2: float = 0.5
-_ACCEL_GAIN_MAX_MS2: float = 8.0
-# Per-gear-step boost when extrapolating a gain for an unlearned gear that
-# sits below all learned gears: lower gears have higher gain, so bias the
-# estimate upward (higher gain -> less pedal -> undershoot, the safe side).
-_ACCEL_GEAR_EXTRAP_BOOST: float = 1.2
+# Shape-function model for per-gear gas gain. Two scalars parameterize the
+# whole curve via
+#     G(gear) = anchor * ratio^(_ANCHOR_GEAR - gear)
+# Both `anchor` and `ratio` are learned online via log-space regression on
+# every accepted sample (see update_accel). The model is monotonic by
+# construction (ratio is clamped > 1), so gear g+1 can never end up with a
+# higher gain than gear g — the inversion that independent per-gear EMAs
+# were prone to.
+_RATIO_INIT: float = 1.27            # default until enough cross-gear samples settle the
+                                     # regression — also the seed multiplier used to
+                                     # project the legacy max_accel scalar to the anchor
+_RATIO_MIN: float = 1.05             # absolute bounds — outside is unphysical for any
+_RATIO_MAX: float = 1.45             # common truck transmission
+_RATIO_BASE_ALPHA: float = 0.02      # log-space ratio learning rate at gas=1.0. Lower
+                                     # than the anchor's because each sample's update
+                                     # is already amplified by its gear distance from
+                                     # the anchor (the regression's leverage term).
+_ANCHOR_GEAR: int = 6                # mid-stack reference gear
+_LEGACY_SEED_GEAR: int = 8           # legacy max_accel_ms2 was mostly learned in top
+                                     # cruise gears; project from here when seeding
+
+# Anchor-gain bounds (m/s² at gas=1.0, weight-normalized, evaluated at
+# _ANCHOR_GEAR). Per-gear values derived from this anchor span a much wider
+# range — the model handles the per-gear shape, the anchor handles amplitude.
+_ACCEL_ANCHOR_MIN_MS2: float = 0.5
+_ACCEL_ANCHOR_MAX_MS2: float = 8.0
+
+# Gear-dwell gate. After a gear change the speed differentiator
+# (sending_thread, τ=0.30 s) still lags real acceleration, and engine torque
+# is settling through clutch engagement — samples taken here bias the gain
+# low. Low gears (1–3) are engaged so briefly per launch that the full
+# dwell would block them from ever sampling, so the gate uses a shorter
+# threshold there.
+_GEAR_DWELL_S: float = 0.30
+_LOW_GEAR_DWELL_S: float = 0.10
+_LOW_GEAR_DWELL_MAX_GEAR: int = 3
 
 # Gas settled-pedal gate — skip learning while the gas pedal is still moving.
-# During a launch ramp the speed differentiator lags real acceleration;
-# sampling mid-transient biases the per-gear EMA.
+# Catches gas hunting during active control, independent of gear changes.
 _GAS_SETTLE_WINDOW_S: float = 0.20
 _GAS_SETTLE_TOLERANCE: float = 0.03
 _GAS_STEP_THRESHOLD: float = 0.05
@@ -94,30 +129,37 @@ def _clamp(value: float, low: float, high: float) -> float:
 class PedalCapacityTracker:
     """
     Estimates vehicle max brake deceleration (single scalar) and gas
-    acceleration gain (one weighted EMA per transmission gear) from samples
-    taken whenever a pedal is applied.
+    acceleration gain (single shape-function anchor; per-gear values derived
+    by geometric projection) from samples taken whenever a pedal is applied.
 
     Gravity and rolling resistance are canceled from each sample using
     road_load_ms2 (= slope_accel + rolling_accel, positive = uphill forward).
 
     Persisted in Settings:
-      pedal_capacity_max_brake_ms2       — brake estimate (0 = use baseline)
-      pedal_capacity_max_accel_ms2       — global accel scalar; cold-start
-                                           fallback before any gear is learned
-      pedal_capacity_accel_gain_by_gear  — {gear: gain} learned per-gear map,
-                                           stored mass-normalized
+      pedal_capacity_max_brake_ms2            — brake estimate (0 = use baseline)
+      pedal_capacity_max_accel_ms2            — legacy scalar; cold-start seed
+                                                source for the anchor
+      pedal_capacity_accel_anchor_gain_ms2    — shape-function anchor (m/s² at
+                                                gas=1.0, mass-normalized, at
+                                                _ANCHOR_GEAR)
+      pedal_capacity_accel_ratio_step         — learned per-gear-step ratio
+                                                (1.0 = flat, >1.0 = lower gear
+                                                has more gain)
     """
 
     def __init__(self) -> None:
         self._max_brake_ms2: float = 0.0   # 0 = not yet initialised
         self._saved_brake: float = 0.0
-        # Per-gear gas gain, mass-normalized (each sample multiplied by
-        # weight_factor before learning, so the map holds only the
-        # load-invariant gear-ratio shape). Only gears that have received at
-        # least one sample appear here.
-        self._accel_gain_by_gear: dict[int, float] = {}
-        self._saved_accel_by_gear: dict[int, float] = {}
-        # Cold-start fallback, used until a gear (or a neighbour) is learned.
+        # Shape-function anchor (m/s² at gas=1.0, mass-normalized, at
+        # _ANCHOR_GEAR). Every gear's gain is derived by geometric
+        # projection — see accel_gain_for_gear / update_accel.
+        self._accel_anchor_gain_ms2: float = 0.0
+        self._saved_accel_anchor: float = 0.0
+        # Learned per-gear-step ratio. Starts at the in-code default; the
+        # regression in update_accel adjusts it as cross-gear samples arrive.
+        self._accel_ratio_step: float = _RATIO_INIT
+        self._saved_accel_ratio: float = _RATIO_INIT
+        # Legacy scalar kept as a fallback before the anchor is seeded.
         self._global_accel_scalar: float = 0.0
         self._last_save_mono: float = 0.0
         self._last_clutch_mono: float = -math.inf
@@ -129,6 +171,9 @@ class PedalCapacityTracker:
             maxlen=_GAS_PEDAL_HISTORY_LIMIT
         )
         self._last_gas_step_mono: float = -math.inf
+        # Gear-change tracking for the dwell gate.
+        self._prev_gear: int = 0
+        self._last_gear_change_mono: float = -math.inf
 
     @property
     def max_brake_ms2(self) -> float:
@@ -143,77 +188,66 @@ class PedalCapacityTracker:
             baseline_accel: Fallback baseline if no persisted value exists (m/s²).
         """
         b = _safe_float(Settings.pedal_capacity_max_brake_ms2)
-        a = _safe_float(Settings.pedal_capacity_max_accel_ms2)
         self._max_brake_ms2 = b if b > 0.0 else baseline_brake
         self._saved_brake = self._max_brake_ms2
-        self._global_accel_scalar = a if a > 0.0 else baseline_accel
 
-        # Per-gear map. JSON object keys are strings on disk — convert to int
-        # gears and drop anything invalid or out of bounds.
-        self._accel_gain_by_gear = {}
-        raw_map = getattr(Settings, "pedal_capacity_accel_gain_by_gear", None)
-        if isinstance(raw_map, dict):
-            for key, value in raw_map.items():
-                try:
-                    gear = int(key)
-                except (TypeError, ValueError):
-                    continue
-                gain = _safe_float(value)
-                if gear > 0 and gain > 0.0:
-                    self._accel_gain_by_gear[gear] = _clamp(
-                        gain, _ACCEL_GAIN_MIN_MS2, _ACCEL_GAIN_MAX_MS2
-                    )
-        self._saved_accel_by_gear = dict(self._accel_gain_by_gear)
+        # Legacy fallback (used only before the anchor is seeded).
+        legacy = _safe_float(Settings.pedal_capacity_max_accel_ms2)
+        self._global_accel_scalar = legacy if legacy > 0.0 else baseline_accel
+
+        # Ratio first (the anchor seed below depends on it). Persisted value
+        # is used when present; otherwise start at the in-code default.
+        ratio = _safe_float(getattr(Settings, "pedal_capacity_accel_ratio_step", 0.0))
+        self._accel_ratio_step = _clamp(
+            ratio if ratio > 1.0 else _RATIO_INIT, _RATIO_MIN, _RATIO_MAX,
+        )
+        self._saved_accel_ratio = self._accel_ratio_step
+
+        # Shape-function anchor. If a persisted anchor is present, use it.
+        # Otherwise seed from the legacy max-accel scalar — that value was
+        # learned mostly during top-gear cruise, so treat it as G(_LEGACY_SEED_GEAR)
+        # and project geometrically to _ANCHOR_GEAR. Result: a sensible shape
+        # across all gears on first launch; the anchor refines from new samples.
+        anchor = _safe_float(getattr(Settings, "pedal_capacity_accel_anchor_gain_ms2", 0.0))
+        if anchor <= 0.0:
+            seed_source = legacy if legacy > 0.0 else baseline_accel
+            anchor = seed_source * (self._accel_ratio_step ** (_LEGACY_SEED_GEAR - _ANCHOR_GEAR))
+        self._accel_anchor_gain_ms2 = _clamp(
+            anchor, _ACCEL_ANCHOR_MIN_MS2, _ACCEL_ANCHOR_MAX_MS2
+        )
+        self._saved_accel_anchor = self._accel_anchor_gain_ms2
         logger.debug(
-            "pedal_capacity loaded: brake=%.2f m/s² accel_gears=%s",
-            self._max_brake_ms2,
-            {g: round(v, 2) for g, v in sorted(self._accel_gain_by_gear.items())},
+            "pedal_capacity loaded: brake=%.2f m/s² accel_anchor=%.2f m/s² (at gear %d) ratio=%.3f",
+            self._max_brake_ms2, self._accel_anchor_gain_ms2, _ANCHOR_GEAR,
+            self._accel_ratio_step,
         )
 
     def accel_gain_for_gear(self, gear: int) -> float:
         """Mass-normalized gas gain for *gear* (m/s² at gas=1.0).
 
-        The value is in the per-gear map's normalized space — the mapper
-        divides it by weight_factor to recover the current-mass gain.
-
-        A learned gear returns its EMA directly. An unlearned gear borrows
-        from its nearest learned neighbours: geometric interpolation when
-        bracketed; the nearest lower gear when above all learned gears (a
-        lower gear has higher gain -> conservative undershoot); an
-        upward-boosted nearest higher gear when below all learned gears (so a
-        low gear is never given a too-low gain, which would overshoot). With
-        nothing learned yet, the persisted global scalar is used.
+        Geometric projection from the learned anchor:
+            G(gear) = anchor * ratio^(_ANCHOR_GEAR - gear)
+        Lower gear = higher gain (more torque to wheels). The mapper divides
+        by weight_factor to recover the current-mass gain. Monotonic by
+        construction — independent per-gear EMAs let brief, noisy low-gear
+        samples invert against well-known top-gear samples; this model can't.
         """
-        fallback = (
-            self._global_accel_scalar
-            if self._global_accel_scalar > 0.0
-            else _ACCEL_GAIN_MIN_MS2
-        )
+        anchor = self._accel_anchor_gain_ms2
+        if anchor <= 0.0:
+            # Fallback before the anchor is seeded (shouldn't happen after
+            # load_persisted, but keep a defensive path).
+            return (
+                self._global_accel_scalar
+                if self._global_accel_scalar > 0.0
+                else _ACCEL_ANCHOR_MIN_MS2
+            )
         try:
             g = int(gear)
         except (TypeError, ValueError):
-            return fallback
+            return anchor
         if g <= 0:
-            return fallback
-
-        gains = self._accel_gain_by_gear
-        if g in gains:
-            return gains[g]
-        if not gains:
-            return fallback
-
-        learned = sorted(gains)
-        lower = max((k for k in learned if k < g), default=None)
-        upper = min((k for k in learned if k > g), default=None)
-        if lower is not None and upper is not None:
-            lo, hi = gains[lower], gains[upper]
-            t = (g - lower) / (upper - lower)
-            value = lo * (hi / lo) ** t
-        elif lower is not None:
-            value = gains[lower]
-        else:
-            value = gains[upper] * (_ACCEL_GEAR_EXTRAP_BOOST ** (upper - g))
-        return _clamp(value, _ACCEL_GAIN_MIN_MS2, _ACCEL_GAIN_MAX_MS2)
+            return anchor
+        return anchor * (self._accel_ratio_step ** (_ANCHOR_GEAR - g))
 
     def update_brake(
         self,
@@ -303,16 +337,20 @@ class PedalCapacityTracker:
         has_trailer: bool,
         road_load_ms2: float = 0.0,
     ) -> None:
-        """Feed one acceleration sample into the per-gear gain map.
+        """Feed one acceleration sample into the shape-function anchor EMA.
 
-        Call whenever any gas pedal is applied regardless of source. The
-        sample is routed to the bin for *gear*; neutral and reverse are
-        skipped. Learning is skipped for 0.5 s after the clutch was last
-        pressed and while the gas pedal is still moving (settle gate).
+        Every sample, regardless of which gear it came from, is projected
+        back to the anchor gear and contributes to the single anchor_gain
+        scalar. The geometric model gives monotonic per-gear gains by
+        construction — brief noisy low-gear samples cannot invert against
+        well-known top-gear samples.
 
-        The gain is stored mass-normalized (sample × weight_factor) so the
-        per-gear map holds only the load-invariant gear-ratio shape and a
-        load/unload does not force a relearn.
+        Skipped when:
+          * within 0.5 s of the last clutch press;
+          * within the per-gear dwell window after the most recent gear
+            change (the speed differentiator τ=0.30 s lags real accel
+            through a launch ramp; sampling too soon biases the anchor low);
+          * gas pedal is still moving (settle gate).
 
         Args:
             gas_output: Actual gas pedal sent to the game [0–1].
@@ -328,6 +366,17 @@ class PedalCapacityTracker:
         """
         now = time.monotonic()
 
+        # Gear-change tracking — unconditional so the dwell timer is correct
+        # even when the prior sample was rejected for another reason.
+        g_now = 0
+        try:
+            g_now = int(gear)
+        except (TypeError, ValueError):
+            pass
+        if g_now != self._prev_gear:
+            self._prev_gear = g_now
+            self._last_gear_change_mono = now
+
         history = self._gas_pedal_history
         if history:
             prev_pedal = history[-1][1]
@@ -337,8 +386,7 @@ class PedalCapacityTracker:
         # Keep the newest sample at or before the window start so the retained
         # history spans the FULL settle window. Popping everything strictly
         # older than cutoff would leave history[0] just *inside* the window,
-        # making the span check below impossible to satisfy (it would reject
-        # every sample).
+        # making the span check below impossible to satisfy.
         cutoff = now - _GAS_SETTLE_WINDOW_S
         while len(history) > 2 and history[1][0] <= cutoff:
             history.popleft()
@@ -348,11 +396,15 @@ class PedalCapacityTracker:
         if now - self._last_clutch_mono < _CLUTCH_GUARD_S:
             return
 
-        try:
-            g = int(gear)
-        except (TypeError, ValueError):
-            return
+        g = g_now
         if g <= 0:
+            return
+
+        # Gear-dwell gate. Low gears (1–3) are engaged so briefly per launch
+        # that a 0.3 s threshold would block them from ever sampling, so the
+        # threshold scales with gear.
+        dwell = _LOW_GEAR_DWELL_S if g <= _LOW_GEAR_DWELL_MAX_GEAR else _GEAR_DWELL_S
+        if now - self._last_gear_change_mono < dwell:
             return
 
         if speed_ms < _MIN_ACCEL_SPEED_MS:
@@ -374,28 +426,59 @@ class PedalCapacityTracker:
         if corrected_accel < _MIN_ACCEL_MS2:
             return
 
+        # Per-pedal gain at current mass, then mass-normalized.
         candidate = corrected_accel / max(gas_output, _ACCEL_PEDAL_FLOOR)
-        # Normalize out the current load: weight_factor scales the sample to a
-        # reference mass so the per-gear EMA learns only the gear-ratio shape.
-        # The mapper divides by weight_factor again at use time.
         candidate *= weight_factor(total_mass_kg, has_trailer)
-        candidate = _clamp(candidate, _ACCEL_GAIN_MIN_MS2, _ACCEL_GAIN_MAX_MS2)
 
-        current = self._accel_gain_by_gear.get(g)
-        if current is None:
-            # Seed a new gear from the best available estimate so it starts
-            # near reality and the EMA only has to refine it.
-            current = self.accel_gain_for_gear(g)
+        # Log-space linear regression on the model
+        #     log(G(g)) = log(anchor) + x · log(ratio),   x = _ANCHOR_GEAR - g
+        # so the residual is log(measured) - (log(anchor) + x · log(ratio)).
+        # Gradient descent on r²/2:
+        #     Δlog(anchor) = lr_α · r
+        #     Δlog(ratio)  = lr_β · x · r
+        # The ratio update naturally weights samples by their leverage |x|
+        # (samples at the anchor gear give zero ratio info; samples far from
+        # it carry most of the slope). Both lrs scale by pedal^3 so weak
+        # inputs barely move the estimate. An underperform safety bias is
+        # preserved: when measured gain is below predicted (the overshoot-
+        # prone direction, also the failure mode the user reports — gear 1/2
+        # undershoot means real low-gear gain is below the projection), both
+        # updates run faster so the model adapts quickly.
+        x = _ANCHOR_GEAR - g
+        log_ratio = math.log(self._accel_ratio_step)
+        log_m = math.log(candidate)
+
+        if self._accel_anchor_gain_ms2 <= 0.0:
+            # First valid sample — seed the anchor from this single sample
+            # using the current ratio. Same as projecting the sample to the
+            # anchor gear via the geometric model.
+            seed = math.exp(log_m - x * log_ratio)
+            self._accel_anchor_gain_ms2 = _clamp(
+                seed, _ACCEL_ANCHOR_MIN_MS2, _ACCEL_ANCHOR_MAX_MS2,
+            )
+            self._maybe_save(now)
+            return
+
+        log_anchor = math.log(self._accel_anchor_gain_ms2)
+        residual = log_m - (log_anchor + x * log_ratio)
 
         weight = gas_output ** _WEIGHT_POWER
-        alpha = _ACCEL_BASE_ALPHA * weight
-        if candidate < current:
-            alpha *= _UNDERPERFORM_MULT
-        alpha = min(alpha, 1.0)
+        lr_anchor = _ACCEL_BASE_ALPHA * weight
+        lr_ratio = _RATIO_BASE_ALPHA * weight
+        if residual < 0.0:
+            lr_anchor *= _UNDERPERFORM_MULT
+            lr_ratio *= _UNDERPERFORM_MULT
+        lr_anchor = min(lr_anchor, 1.0)
+        lr_ratio = min(lr_ratio, 0.5)
 
-        updated = current + alpha * (candidate - current)
-        self._accel_gain_by_gear[g] = _clamp(
-            updated, _ACCEL_GAIN_MIN_MS2, _ACCEL_GAIN_MAX_MS2
+        log_anchor += lr_anchor * residual
+        log_ratio += lr_ratio * x * residual
+
+        self._accel_anchor_gain_ms2 = _clamp(
+            math.exp(log_anchor), _ACCEL_ANCHOR_MIN_MS2, _ACCEL_ANCHOR_MAX_MS2,
+        )
+        self._accel_ratio_step = _clamp(
+            math.exp(log_ratio), _RATIO_MIN, _RATIO_MAX,
         )
         self._maybe_save(now)
 
@@ -403,40 +486,35 @@ class PedalCapacityTracker:
         if now - self._last_save_mono < _SAVE_COOLDOWN_S:
             return
         brake_drift = abs(self._max_brake_ms2 - self._saved_brake) / max(self._saved_brake, 0.01)
-        if brake_drift < _SAVE_THRESHOLD and self._accel_gear_drift() < _SAVE_THRESHOLD:
+        anchor_drift = (
+            abs(self._accel_anchor_gain_ms2 - self._saved_accel_anchor)
+            / max(self._saved_accel_anchor, 0.01)
+        )
+        ratio_drift = (
+            abs(self._accel_ratio_step - self._saved_accel_ratio)
+            / max(self._saved_accel_ratio, 0.01)
+        )
+        if (brake_drift < _SAVE_THRESHOLD
+                and anchor_drift < _SAVE_THRESHOLD
+                and ratio_drift < _SAVE_THRESHOLD):
             return
         try:
             Settings.save(values={
                 "pedal_capacity_max_brake_ms2": round(self._max_brake_ms2, 3),
-                "pedal_capacity_accel_gain_by_gear": {
-                    str(g): round(v, 3)
-                    for g, v in sorted(self._accel_gain_by_gear.items())
-                },
+                "pedal_capacity_accel_anchor_gain_ms2": round(self._accel_anchor_gain_ms2, 3),
+                "pedal_capacity_accel_ratio_step": round(self._accel_ratio_step, 4),
             })
             self._saved_brake = self._max_brake_ms2
-            self._saved_accel_by_gear = dict(self._accel_gain_by_gear)
+            self._saved_accel_anchor = self._accel_anchor_gain_ms2
+            self._saved_accel_ratio = self._accel_ratio_step
             self._last_save_mono = now
             logger.debug(
-                "pedal_capacity saved: brake=%.3f accel_gears=%s",
-                self._max_brake_ms2,
-                {g: round(v, 2) for g, v in sorted(self._accel_gain_by_gear.items())},
+                "pedal_capacity saved: brake=%.3f accel_anchor=%.3f ratio=%.4f",
+                self._max_brake_ms2, self._accel_anchor_gain_ms2,
+                self._accel_ratio_step,
             )
         except Exception:
             logger.debug("pedal_capacity save failed", exc_info=True)
-
-    def _accel_gear_drift(self) -> float:
-        """Max relative drift of any per-gear gain since the last save.
-
-        A newly learned gear (absent from the saved snapshot) counts as full
-        drift so the first sample for a gear always triggers a save.
-        """
-        worst = 0.0
-        for gear, gain in self._accel_gain_by_gear.items():
-            saved = self._saved_accel_by_gear.get(gear)
-            if saved is None:
-                return 1.0
-            worst = max(worst, abs(gain - saved) / max(saved, 0.01))
-        return worst
 
 
 def _safe_float(value: object) -> float:
