@@ -579,6 +579,7 @@ class SendingThread(BaseThread):
         user_clutch = 0.0
         road_pitch = 0.0
         tel_gear_dashboard = 0
+        tel_gear = 0
         if connected and tel_thread is not None and tel_thread.is_alive():
             try:
                 with tel_thread.data._lock:
@@ -589,6 +590,7 @@ class SendingThread(BaseThread):
                     wheels_on_ground = int(tel_thread.data.wheels_on_ground)
                     road_pitch = float(tel_thread.data.rotationY)
                     tel_gear_dashboard = int(tel_thread.data.gear_dashboard)
+                    tel_gear = int(tel_thread.data.gear)
                     game_throttle = float(tel_thread.data.gameThrottle)
                     game_clutch = float(tel_thread.data.gameClutch)
                     game_brake = float(getattr(tel_thread.data, "gameBrake", 0.0))
@@ -662,7 +664,7 @@ class SendingThread(BaseThread):
                     spd_ms,
                     mass_kg,
                     has_t,
-                    max_accel_ms2=self._capacity_tracker.max_accel_ms2,
+                    max_accel_ms2=self._capacity_tracker.accel_gain_for_gear(tel_gear),
                     max_brake_ms2=self._capacity_tracker.max_brake_ms2,
                     road_pitch=road_pitch,
                     cruise_commanding=mapper_engaged,
@@ -1028,7 +1030,6 @@ class SendingThread(BaseThread):
 
         # Update pedal capacity estimates from actual pedal values sent to the game.
         _base_brake = baseline_brake_ms2(0.0, False)
-        _base_accel = baseline_accel_ms2(mass_kg, has_t)
         if b > 0.01:
             self._capacity_tracker.update_brake(
                 b, measured_decel_lead_ms2, speed_ms, brake_grade_rad, _base_brake,
@@ -1036,8 +1037,8 @@ class SendingThread(BaseThread):
             )
         if a > 0.01:
             self._capacity_tracker.update_accel(
-                a, max(0.0, raw_a), speed_ms, brake_grade_rad, _base_accel, game_clutch,
-                road_load_ms2=mapper_road_load_ms2,
+                a, max(0.0, raw_a), speed_ms, brake_grade_rad, game_clutch, tel_gear,
+                mass_kg, has_t, road_load_ms2=mapper_road_load_ms2,
             )
 
         self._tick_bool_presses(controller)

@@ -145,7 +145,7 @@ def _finite_or_zero(value: object) -> float:
     return result
 
 
-def _weight_factor(total_mass_kg: float, has_trailer: bool) -> float:
+def weight_factor(total_mass_kg: float, has_trailer: bool) -> float:
     if not Settings.weight_adjustment:
         return 1.0
     current_tons = max(0.0, _finite_or_zero(total_mass_kg)) / 1000.0
@@ -163,7 +163,7 @@ def baseline_accel_ms2(total_mass_kg: float, has_trailer: bool) -> float:
     """Expected max acceleration (m/s^2) at gas=1.0, adjusted for mass/trailer."""
     base = max(_MIN_ACCEL_ESTIMATE_MS2, _finite_or_zero(Settings.mapper_accel_scale_ms2))
     return _clamp(
-        base / max(_weight_factor(total_mass_kg, has_trailer), 1e-6),
+        base / max(weight_factor(total_mass_kg, has_trailer), 1e-6),
         _MIN_ACCEL_ESTIMATE_MS2,
         _MAX_ACCEL_ESTIMATE_MS2,
     )
@@ -173,7 +173,7 @@ def baseline_brake_ms2(total_mass_kg: float, has_trailer: bool) -> float:
     """Expected max deceleration (m/s^2) at brake=1.0, adjusted for mass/trailer."""
     base = max(_MIN_BRAKE_ESTIMATE_MS2, _finite_or_zero(Settings.mapper_brake_scale_ms2))
     return _clamp(
-        base / max(_weight_factor(total_mass_kg, has_trailer), 1e-6),
+        base / max(weight_factor(total_mass_kg, has_trailer), 1e-6),
         _MIN_BRAKE_ESTIMATE_MS2,
         _MAX_BRAKE_ESTIMATE_MS2,
     )
@@ -752,9 +752,15 @@ class AccelToPedals:
         else:
             new_max_brake = bl_brake
 
+        # The caller passes a per-gear accel gain stored in mass-normalized
+        # form (PedalCapacityTracker multiplies each sample by weight_factor
+        # before learning, so the map holds only the gear-ratio shape).
+        # Dividing by weight_factor here scales it back to the current truck
+        # mass — a load/unload adapts instantly without the per-gear map
+        # needing to relearn.
         if max_accel_ms2 > 0.0 and math.isfinite(max_accel_ms2):
             new_max_accel = max_accel_ms2 / max(
-                _weight_factor(total_mass_kg, has_trailer), 1e-6
+                weight_factor(total_mass_kg, has_trailer), 1e-6
             )
         if max_brake_ms2 > 0.0 and math.isfinite(max_brake_ms2):
             new_max_brake = max_brake_ms2

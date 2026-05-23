@@ -139,7 +139,11 @@ class Settings(metaclass=_SingletonMeta):
 
     # PedalCapacityTracker — persisted estimates (0 = use baseline on next startup)
     pedal_capacity_max_brake_ms2: float = 11.457
+    # Global accel scalar — cold-start fallback used until a gear is learned.
     pedal_capacity_max_accel_ms2: float = 2.124
+    # Per-gear gas gain map {gear: m/s² at gas=1.0}. JSON object keys are
+    # strings on disk; PedalCapacityTracker converts them to int gears on load.
+    pedal_capacity_accel_gain_by_gear: dict = field(default_factory=dict)
 
     _saved_state: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     _state_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)
