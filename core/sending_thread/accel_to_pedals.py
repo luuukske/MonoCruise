@@ -42,6 +42,14 @@ _KD_FAST: float = 0.15
 _FAST_I_CLAMP_MS2: float = 1.5      # m/s²
 _FAST_DERIV_TAU_S: float = 0.12     # measurement derivative smoothing
 
+# Low-gear D-term attenuation. At gear 1-2 the engine has a 300-400 ms response
+# lag and the truck self-surges with no pedal input (clutch engaged, idle creep);
+# differentiating raw_smooth at full Kd amplifies that surge into a pedal limit
+# cycle. Scaling Kd down at low gears damps the inner loop without sacrificing
+# steady-state tracking (FF + slow_integral still carry it).
+_LOW_GEAR_KD_SCALE: float = 0.5
+_LOW_GEAR_KD_MAX_GEAR: int = 2
+
 # Slow integral (road load bias correction in m/s² space).
 # This is the PRIMARY absorber of persistent road-load error. Kept fast enough that
 # fast PID never has to carry bias (which would cause stale state across context flips).
@@ -506,6 +514,7 @@ class AccelToPedals:
         prev_fast_integral: float,
         prev_fast_deriv_smooth: float,
         prev_raw_smooth: float,
+        kd_scale: float = 1.0,
     ) -> tuple[float, float, float, float, float, float]:
         """Pure compute: returns (fast_trim_ms2, p_ms2, i_ms2, d_ms2,
         new_fast_integral, new_fast_deriv_smooth) — m/s² space.
@@ -519,7 +528,7 @@ class AccelToPedals:
 
         kp = _KP_FAST * gain_scale
         ki = _KI_FAST * gain_scale
-        kd = _KD_FAST * gain_scale
+        kd = _KD_FAST * gain_scale * kd_scale
 
         p_ms2 = kp * error_ms2 * factor
 
@@ -823,12 +832,19 @@ class AccelToPedals:
             # holds both integrator and derivative state at their last values
             # and zeros the trim output so the two controllers don't fight).
             effective_factor = 0.0 if freeze_trim else factor
+            # Damp D-term in low gears to break the engine-surge limit cycle.
+            kd_scale = (
+                _LOW_GEAR_KD_SCALE
+                if 1 <= gear_dash <= _LOW_GEAR_KD_MAX_GEAR
+                else 1.0
+            )
             fast_trim_ms2, fast_p, fast_i, fast_d, new_fast_integral, new_fast_deriv_smooth = (
                 self._fast_pid_compute(
                     dt, error_ms2, new_raw_smooth, gain_scale, effective_factor,
                     prev_fast_integral=new_fast_integral,
                     prev_fast_deriv_smooth=new_fast_deriv_smooth,
                     prev_raw_smooth=s.prev_raw_smooth,
+                    kd_scale=kd_scale,
                 )
             )
 
