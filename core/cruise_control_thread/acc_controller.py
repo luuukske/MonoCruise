@@ -72,7 +72,20 @@ TAU_OUTPUT_S: float = 0.05
 
 DT_FALLBACK_S: float = 1.0 / 30.0
 DT_MAX_S: float = 0.2
-NO_LEAD_CEILING_MS2: float = 10.0
+# Pinned to A_MAX_MS2 so _prev_cmd_ms2 stays in the same range as IIDM-
+# commanded values during no-lead intervals. The cap is still permissive
+# downstream — CC's speed PID is the lower bid via min(ACC, CC) — but a
+# lower ceiling keeps the jerk limiter's prev state from drifting far
+# above IIDM's range, which gates how fast brake re-engages on lead
+# reacquisition (a ceiling of 10 took ~5 s to ramp back down to -2 m/s²).
+NO_LEAD_CEILING_MS2: float = A_MAX_MS2
+
+# Lead-loss grace: brief empty-chain windows (vehicle-id flip after a
+# classifier transient at close range, single-tick radar miss, etc.)
+# reuse the last seen chain so a 1-2 ETS2 physics tick (50-100 ms) gap
+# does not slam the output between the IIDM brake command and the no-lead
+# ceiling and back.
+LEAD_LOSS_GRACE_S: float = 0.30
 
 EMA_GC_TTL_S: float = 2.0
 
@@ -216,6 +229,9 @@ class AdaptiveCruiseController:
         self._lead_emas: dict[int, _LeadEMA] = {}
         self._output_ema: float | None = None
         self._prev_cmd_ms2: float | None = None
+        # Lead-loss grace cache — see accel_cap_ms2.
+        self._last_chain_raw: list[_LeadSnapshot] = []
+        self._last_chain_mono: float = -math.inf
 
     def accel_cap_ms2(self, ego_speed_ms: float) -> float:
         now = time.monotonic()
@@ -226,11 +242,35 @@ class AdaptiveCruiseController:
         self._prev_mono = now
 
         chain_raw = self._read_chain()
+
+        # Lead-loss grace. ACC's tracker can drop a lead for 1-2 ETS2 physics
+        # ticks at low speed / close range (vehicle-id flip after a classifier
+        # transient, brief radar miss). Treating each such gap as "no lead"
+        # collapsed the controller's continuous state and slammed wanted_ms2
+        # between the IIDM brake command and the no-lead ceiling — visible
+        # ~3 m/s² step oscillation upstream of the mapper. Reuse the last
+        # good chain for a short grace period so transient gaps are invisible.
+        if chain_raw:
+            self._last_chain_raw = chain_raw
+            self._last_chain_mono = now
+        elif self._last_chain_raw and (now - self._last_chain_mono) < LEAD_LOSS_GRACE_S:
+            chain_raw = self._last_chain_raw
+
         if not chain_raw:
-            self._lead_emas.clear()
-            self._output_ema = None
-            self._prev_cmd_ms2 = None
-            return self.config.no_lead_ceiling_ms2
+            # Truly no lead. Route the ceiling through the SAME jerk + output
+            # pipeline as a real command so _prev_cmd_ms2 and _output_ema
+            # stay continuous across the handover (architecture goal §15:
+            # "continuous IIDM domain across all gap regimes"). Nulling them
+            # here, as the previous code did, bypassed the jerk limit on the
+            # very next tick and produced step changes proportional to the
+            # difference between IIDM's last brake command and the ceiling.
+            # Per-lead EMAs and the cached chain are left in place — _gc_emas
+            # ages out stale ones via EMA_GC_TTL_S, and the cache is reseeded
+            # the moment a real chain returns.
+            self._gc_emas(now)
+            target = self.config.no_lead_ceiling_ms2
+            a_jerk = self._jerk_limit(target, dt, is_emergency=False)
+            return self._output_filter(a_jerk, dt, is_emergency=False)
 
         v_ego = max(0.0, float(ego_speed_ms))
         chain_smooth = self._smooth_chain(chain_raw, dt, now)
@@ -245,6 +285,8 @@ class AdaptiveCruiseController:
         self._lead_emas.clear()
         self._output_ema = None
         self._prev_cmd_ms2 = None
+        self._last_chain_raw = []
+        self._last_chain_mono = -math.inf
 
     def _read_chain(self) -> list[_LeadSnapshot]:
         """Snapshot the in-lane lead chain from acc_thread under its lock.
