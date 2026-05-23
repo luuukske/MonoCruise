@@ -931,7 +931,6 @@ class AEBThread(BaseThread):
                 "is_trailer": getattr(v, "is_trailer", False),
                 "kinematics_swapped": getattr(v, "_debug_kinematics_swapped", False),
                 "speed_kmh": abs(v.speed) * 3.6,
-                "rear_suppressed": False,
                 "trailers": trailer_dicts,
             }
 
@@ -979,17 +978,14 @@ class AEBThread(BaseThread):
                 if res.suppressed:
                     suppression_reasons[v.id].append(res)
                     reason = res.reason or ""
-                    if reason == "RearOvertakerFilter":
-                        veh_dict["rear_suppressed"] = True
-                        suppressed_ids.add(v.id)
-                    elif reason in ("OppositeLaneFilter", "EgoEvasionFilter",
-                                    "OppositeLaneFilterMirrored"):
+                    if reason in ("OppositeLaneFilter", "EgoEvasionFilter",
+                                  "OppositeLaneFilterMirrored"):
                         if ctx.head_on:
                             oncoming_evasion_filtered_ids.add(v.id)
                         else:
                             evasion_filtered_ids.add(v.id)
                     elif reason in ("CornerEntryStationaryFilter",
-                                    "CornerEntryStationaryFilterMirrored"):
+                                  "CornerEntryStationaryFilterMirrored"):
                         oncoming_evasion_filtered_ids.add(v.id)
                     else:
                         suppressed_ids.add(v.id)
@@ -1051,25 +1047,36 @@ class AEBThread(BaseThread):
                         lateral_gap,
                     )
 
-                    v_target_along_ego = v.speed * (
-                        veh_fwd_x * ego_fwd_x + veh_fwd_z * ego_fwd_z
-                    )
-                    closing_unbraked = max(0.0, ego_speed - v_target_along_ego)
+                    # Closing-speed comparison: vector magnitude of the
+                    # relative velocity in world frame, not the axial projection
+                    # onto ego's heading. The vector form correctly captures
+                    # rear-end scenarios where a faster trailing target's
+                    # closing rate INCREASES as ego brakes — the axial form
+                    # clamps to zero and misses this entirely. Subsumes the
+                    # legacy RearOvertakerFilter under one principled mechanism.
+                    v_ego_x = ego_speed * ego_fwd_x
+                    v_ego_z = ego_speed * ego_fwd_z
+                    v_t_x = v.speed * veh_fwd_x
+                    v_t_z = v.speed * veh_fwd_z
+                    closing_unbraked = math.hypot(v_ego_x - v_t_x, v_ego_z - v_t_z)
+                    v_target_along_ego = v_t_x * ego_fwd_x + v_t_z * ego_fwd_z
 
-                    # Compare closing speeds under braked vs unbraked trajectories.
-                    # Suppress engagement on this target only when braking actually
-                    # raises the impact velocity (rare: cross-traffic scenarios where
-                    # ego coasting would clear before target arrives). Otherwise
-                    # braking is the right action — drive ttb directly off
-                    # unbraked_ttc minus the brake response window so the emergency
-                    # `brake_ttb_active` path fires before impact rather than after.
                     braking_worsens = False
                     if braked_hit is not None:
-                        t_braked = braked_hit[0]
-                        v_ego_braked = max(0.0, ego_speed - effective_decel * t_braked)
-                        closing_braked = max(0.0, v_ego_braked - v_target_along_ego)
-                        if closing_braked > closing_unbraked + cal.brake_worsens_hysteresis_ms:
+                        # Target moving faster than ego along ego's heading
+                        # axis means braking can only increase relative impact
+                        # speed — handles imminent rear-ends where t_braked is
+                        # too small for the hysteresis comparison to fire.
+                        if v_target_along_ego > ego_speed:
                             braking_worsens = True
+                        else:
+                            t_braked = braked_hit[0]
+                            v_ego_braked = max(0.0, ego_speed - effective_decel * t_braked)
+                            v_egb_x = v_ego_braked * ego_fwd_x
+                            v_egb_z = v_ego_braked * ego_fwd_z
+                            closing_braked = math.hypot(v_egb_x - v_t_x, v_egb_z - v_t_z)
+                            if closing_braked > closing_unbraked + cal.brake_worsens_hysteresis_ms:
+                                braking_worsens = True
 
                     if braking_worsens:
                         braking_worsens_ids.add(v.id)

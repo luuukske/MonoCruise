@@ -170,7 +170,6 @@ pass, the vehicle enters collision evaluation.
 | `RangeFilter` | Distance gate (`cal.max_range`) |
 | `ElevationFilter` | Slope-aware Y check (`cal.elevation_margin`) |
 | `TmpRelSpeedFilter` | TMP session relative-speed pre-filter |
-| `RearOvertakerFilter` | Behind ego, faster — overtake pass |
 | `LaneClassifier` | Populates `ctx` geometry fields; sets `ctx.lane` via `lane_frame` |
 | `OppositeLaneFilter` | Oncoming vehicles in their own lane (collapses Fix A + Fix B) |
 | `CoDirectionalDivergeFilter` | Co-directional arcs already diverging (Fix C + outer-lane same-turn) |
@@ -181,6 +180,12 @@ pass, the vehicle enters collision evaluation.
 | `EgoEvasionFilter` | Ego can steer around target within 0.08 g |
 
 Fix labels A/B/C/D are retired — the logic now lives in the named stages above.
+
+The legacy `RearOvertakerFilter` was retired in favour of a unified
+"braking worsens" classification in the collision-evaluation step (see §5).
+That check compares closing-speed magnitude under braked vs unbraked
+trajectories and subsumes the rear-overtaker case along with cross-traffic
+scenarios where braking parks ego in a target's path.
 
 ### `LaneClassifier` — canonical lane primitive
 
@@ -305,8 +310,24 @@ aeb.snapshot                       # AEBSnapshot — full debug state
 ### Continuous-decel logic
 
 1. Pipeline runs as before. First `suppressed=True` short-circuits.
-2. For surviving targets: collision check yields TTB plus per-target
-   `closing_distance` and `v_closing` (best by lowest TTB).
+2. For surviving targets: collision check yields `unbraked_hit` and
+   `braked_hit`. Per-target `closing_speed` is the **vector magnitude** of
+   the relative velocity in world frame (`|v_ego_vec − v_target_vec|`), not
+   the axial projection onto ego's heading. The axial form clamps to zero
+   for rear-overtakers and misses the rear-end-worsens case.
+   - `braking_worsens` is set if either:
+     - `v_target_along_ego > ego_speed` (target faster than ego along
+       ego's heading — pure rear-overtaker shortcut; handles imminent
+       collisions where `t_braked` is too small for the comparison below
+       to fire), **or**
+     - `closing_braked > closing_unbraked + brake_worsens_hysteresis_ms`
+       (cross-traffic where braking parks ego in target's path).
+   - Targets flagged `braking_worsens` are added to `braking_worsens_ids`
+     and excluded from `best_ttb` / `best_v_closing`. AEB engagement on
+     these is forbidden.
+   - Non-worsens targets set `ttb = unbraked_ttc` and contribute to
+     `best_ttb`, `best_closing_distance`, `best_v_closing` (all from the
+     lowest-`ttb` target).
 3. Required decel for the worst target:
    ```
    d_remaining       = closing_distance - stop_buffer
@@ -319,11 +340,18 @@ aeb.snapshot                       # AEBSnapshot — full debug state
    `capacity_estimate` is read from `sending_thread.data.max_brake_ms2`
    (PedalCapacityTracker) with a fallback constant.
 4. Engagement hysteresis (slope-aware):
-   - `brake_ttb_active = (time_to_brake < cal.brake_ttb)` — emergency criterion
-     for path-crossing / arc-cross threats where `v_closing ≈ 0` collapses the
-     `required_decel = v_closing²/2d` formula but the geometry still says full
-     brake can't avoid intersection. Without this, AEB stays in WARN forever in
-     these scenarios.
+   - `brake_ttb_active = (time_to_brake < cal.brake_ttb + cal.brake_response_window_s)`
+     — emergency criterion for path-crossing / arc-cross threats where
+     `v_closing ≈ 0` collapses the `required_decel = v_closing²/2d` formula
+     but the geometry still says full brake can't avoid intersection. The
+     `brake_response_window_s` headroom compensates for actuator lag + the
+     rate-limited brake ramp so the slam fires before impact rather than
+     after the pedal has already needed to be at full. Without it, AEB
+     stays in WARN forever in these scenarios.
+   - Geometry-driven engagement latch: once engaged, hold engagement
+     while any colliding target has `unbraked_ttc < warn_ttb`. Prevents
+     disarm mid-event as ego decelerates and `best_v_closing` collapses
+     faster than `d_remaining`.
    - Engage when `effective_required ≥ aeb_engage_frac · effective_max` **OR**
      `brake_ttb_active`.
    - Disarm when `effective_required <  aeb_disarm_frac · effective_max` **AND

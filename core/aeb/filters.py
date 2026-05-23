@@ -408,23 +408,6 @@ class TmpRelSpeedFilter:
         return _PASS
 
 
-class RearOvertakerFilter:
-    name = "RearOvertakerFilter"
-
-    def apply(self, ctx: FilterContext) -> FilterResult:
-        to_veh_len = max(ctx.dist, 1e-6)
-        dot_fwd = (ctx.dx * ctx.ego_fwd_x + ctx.dz * ctx.ego_fwd_z) / to_veh_len
-        if dot_fwd < ctx.cal.rear_dot:
-            v_yaw_rad = _vehicle_yaw_rad(ctx.v)
-            vf_x = -math.sin(v_yaw_rad)
-            vf_z = -math.cos(v_yaw_rad)
-            approach_dot = vf_x * ctx.ego_fwd_x + vf_z * ctx.ego_fwd_z
-            if (approach_dot > 0.5
-                    and ctx.v.speed > ctx.ego_speed + ctx.cal.overtake_speed_margin):
-                return _suppress("RearOvertakerFilter")
-        return _PASS
-
-
 class LaneClassifier:
     """Sets ctx.lane and populates arc geometry fields; not a suppression stage."""
     name = "LaneClassifier"
@@ -913,7 +896,6 @@ def build_pipeline(cal: AEBCalibration) -> list:
         RangeFilter(cal),
         ElevationFilter(cal),
         TmpRelSpeedFilter(),
-        RearOvertakerFilter(),
         LaneClassifier(cal),
         OppositeLaneFilter(cal),
         OppositeLaneFilterMirrored(cal),

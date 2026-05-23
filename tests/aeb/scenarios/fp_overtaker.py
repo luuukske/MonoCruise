@@ -10,7 +10,7 @@ EXPECTED = {
     "max_state": "STANDBY",
     "t_warn_max": None,
     "t_brake_max": None,
-    "must_be_suppressed_by": "RearOvertakerFilter",
+    "must_be_suppressed_by": "BrakingWorsens",
 }
 
 

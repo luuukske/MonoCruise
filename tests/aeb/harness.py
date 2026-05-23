@@ -322,9 +322,7 @@ def evaluate_frame(
             if res.suppressed:
                 suppression_reasons[v.id].append(res)
                 reason = res.reason or ""
-                if reason == "RearOvertakerFilter":
-                    suppressed_ids.add(v.id)
-                elif reason in ("OppositeLaneFilter", "EgoEvasionFilter"):
+                if reason in ("OppositeLaneFilter", "EgoEvasionFilter"):
                     if ctx.head_on:
                         oncoming_evasion_filtered_ids.add(v.id)
                     else:
@@ -371,17 +369,24 @@ def evaluate_frame(
                     cal.collision_samples,
                     lateral_gap,
                 )
-                v_target_along_ego = v.speed * (
-                    ctx.veh_fwd_x * ego_fwd_x + ctx.veh_fwd_z * ego_fwd_z
-                )
-                closing_unbraked = max(0.0, ego_speed - v_target_along_ego)
+                v_ego_x = ego_speed * ego_fwd_x
+                v_ego_z = ego_speed * ego_fwd_z
+                v_t_x = v.speed * ctx.veh_fwd_x
+                v_t_z = v.speed * ctx.veh_fwd_z
+                closing_unbraked = math.hypot(v_ego_x - v_t_x, v_ego_z - v_t_z)
+                v_target_along_ego = v_t_x * ego_fwd_x + v_t_z * ego_fwd_z
                 braking_worsens = False
                 if braked_hit is not None:
-                    t_braked = braked_hit[0]
-                    v_ego_braked = max(0.0, ego_speed - effective_decel * t_braked)
-                    closing_braked = max(0.0, v_ego_braked - v_target_along_ego)
-                    if closing_braked > closing_unbraked + cal.brake_worsens_hysteresis_ms:
+                    if v_target_along_ego > ego_speed:
                         braking_worsens = True
+                    else:
+                        t_braked = braked_hit[0]
+                        v_ego_braked = max(0.0, ego_speed - effective_decel * t_braked)
+                        v_egb_x = v_ego_braked * ego_fwd_x
+                        v_egb_z = v_ego_braked * ego_fwd_z
+                        closing_braked = math.hypot(v_egb_x - v_t_x, v_egb_z - v_t_z)
+                        if closing_braked > closing_unbraked + cal.brake_worsens_hysteresis_ms:
+                            braking_worsens = True
                 if braking_worsens:
                     continue
                 ttb = unbraked_ttc

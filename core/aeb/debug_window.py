@@ -150,7 +150,6 @@ class AEBDebugWindow(QWidget):
 
         for v in snap.vehicles:
             vid = v["vid"]
-            is_supp = v.get("rear_suppressed", False)
             is_danger = vid in snap.colliding_ids
             is_brake_supp = vid in snap.braking_worsens_ids
             is_evasion_filtered = vid in snap.evasion_filtered_ids
@@ -158,9 +157,7 @@ class AEBDebugWindow(QWidget):
             is_acc_lead = acc is not None and acc["lead_id"] == vid
             is_acc_top = acc is not None and vid in acc["top_ids"] and not is_acc_lead
 
-            if is_supp:
-                body_clr, corr_clr = _SUPPRESSED_CLR, QColor(_SUPPRESSED_CLR)
-            elif is_evasion_filtered:
+            if is_evasion_filtered:
                 body_clr, corr_clr = _EVASION_FILTERED_CLR, QColor(_EVASION_FILTERED_CLR)
             elif is_danger and is_brake_supp:
                 body_clr, corr_clr = _BRAKE_SUPP_CLR, QColor(_BRAKE_SUPP_CLR)
@@ -615,7 +612,7 @@ class AEBDebugWindow(QWidget):
 
         if ns > 0:
             p.setPen(QPen(_SUPPRESSED_CLR))
-            p.drawText(QPointF(x, y), f"{ns} rear-approach vehicle(s) suppressed")
+            p.drawText(QPointF(x, y), f"{ns} vehicle(s) filter-suppressed")
             y += 14
 
         if nb > 0:
@@ -646,8 +643,8 @@ class AEBDebugWindow(QWidget):
             (_SAFE_CLR, "Safe vehicle"),
             (_DANGER_CLR, "Threat"),
             (_WARN_CLR, "Warning"),
-            (_BRAKE_SUPP_CLR, "Brake-suppressed"),
-            (_SUPPRESSED_CLR, "Rear-suppressed"),
+            (_BRAKE_SUPP_CLR, "Braking worsens"),
+            (_SUPPRESSED_CLR, "Filter-suppressed"),
             (_EVASION_FILTER_CLR, "Evasion-filtered"),
             (_ACC_LEAD_CLR, "ACC lead"),
             (_ACC_CANDIDATE_CLR, "ACC candidate"),

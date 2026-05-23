@@ -2,8 +2,9 @@
 
 Ego at 80 km/h, vehicle 50 m behind in ego's lane at 144 km/h (overtaking).
 Closing rate 17.8 m/s. Braking ego would worsen the impact, so AEB must
-not trigger — RearOvertakerFilter owns this. Companion to fp_overtaker
-which uses an adjacent lane; this variant puts the closer in ego's lane.
+not trigger — the braking_worsens vector-magnitude check owns this case.
+Companion to fp_overtaker which uses an adjacent lane; this variant puts
+the closer in ego's lane.
 """
 
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
@@ -15,7 +16,7 @@ _N_FRAMES = 90
 
 EXPECTED = {
     "max_state": "STANDBY",
-    "must_be_suppressed_by": "RearOvertakerFilter",
+    "must_be_suppressed_by": "BrakingWorsens",
 }
 
 
