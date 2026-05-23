@@ -74,6 +74,15 @@ _SPEED_MULT_FLOOR: float = 0.5
 # at 10 Hz the per-frame delta matches the legacy integer-tick maths.
 _LEGACY_RATE_HZ: float = 10.0
 
+# Offset weight — boosts lane-offset influence so vehicles in ego's lane
+# are detected even when the ego path arc doesn't geometrically intersect
+# them (e.g. during slight steering, distant lead).  Path/yaw unchanged.
+_OFFSET_WEIGHT: float = 1.5
+
+# Path weight — scales ego-path intersection relative to offset/yaw.
+# Reduced below 1.0 so the path component reacts slower to arc changes.
+_PATH_WEIGHT: float = 0.7
+
 
 @dataclass(slots=True)
 class ScoreComponents:
@@ -182,7 +191,7 @@ def accumulate(
     dt: float,
     components: ScoreComponents,
     target_speed_ms: float,
-    path_weight: float = 1.0,
+    path_weight: float = _PATH_WEIGHT,
 ) -> float:
     """Integrate components into the running score; clamp to [-5, +15].
 
@@ -193,7 +202,7 @@ def accumulate(
     path_weight scales the path component relative to offset/yaw.
     """
     weighted_total = (
-        components.offset
+        components.offset * _OFFSET_WEIGHT
         + components.yaw
         + components.path * path_weight
         + components.angle
