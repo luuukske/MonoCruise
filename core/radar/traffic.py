@@ -1205,6 +1205,38 @@ class Vehicle:
     def is_zero(self) -> bool:
         return self.position.is_zero() and self.rotation.is_zero()
 
+    def get_corners(self) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]]:
+        """World-space footprint corners (front-right, front-left, back-left, back-right).
+
+        TMP uses symmetric ± length/2 about pivot; AI uses asymmetric
+        (-0.18·length front, +0.82·length back) per AGENTS.md §6. Yaw
+        comes from ``_smooth_yaw`` when available.
+        """
+        yaw_rad = (
+            self._smooth_yaw
+            if self._smooth_yaw is not None
+            else math.radians(self.rotation.euler()[1])
+        )
+        fwd_x = -math.sin(yaw_rad)
+        fwd_z = -math.cos(yaw_rad)
+        right_x = -fwd_z
+        right_z = fwd_x
+        if self.is_tmp:
+            front_d = self.size.length * 0.5
+            back_d = self.size.length * 0.5
+        else:
+            front_d = self.size.length * 0.18
+            back_d = self.size.length * 0.82
+        hw = self.size.width * 0.5
+        px = self.position.x
+        pz = self.position.z
+        return (
+            (px + front_d * fwd_x + hw * right_x, pz + front_d * fwd_z + hw * right_z),
+            (px + front_d * fwd_x - hw * right_x, pz + front_d * fwd_z - hw * right_z),
+            (px - back_d * fwd_x - hw * right_x, pz - back_d * fwd_z - hw * right_z),
+            (px - back_d * fwd_x + hw * right_x, pz - back_d * fwd_z + hw * right_z),
+        )
+
     def __repr__(self) -> str:
         return (
             f"Vehicle(id={self.id}, pos={self.position}, "

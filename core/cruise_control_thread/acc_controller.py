@@ -135,7 +135,6 @@ class _LeadSnapshot:
     dist_m: float
     v_lead_ms: float
     a_lead_ms2: float
-    tail_m: float
 
 
 @dataclass(slots=True)
@@ -323,15 +322,6 @@ class AdaptiveCruiseController:
                 dist_m = float(lead.dist_m)
                 v_lead = float(lead.effective_speed_ms)
                 a_lead = float(lead.effective_accel_ms2)
-                tail_m = 0.5 * float(vehicle.size.length)
-                # AI trucks nest their trailers here. In TMP the first trailer
-                # is its own Vehicle, but trailers behind it are nested under
-                # that trailer record — count those so a multi-trailer convoy's
-                # full length is in the gap, not just the lead trailer's.
-                if not vehicle.is_tmp or vehicle.is_trailer:
-                    for trailer in vehicle.trailers:
-                        if not trailer.is_zero():
-                            tail_m += float(trailer.size.length)
             except (AttributeError, TypeError, ValueError):
                 continue
 
@@ -342,7 +332,7 @@ class AdaptiveCruiseController:
                 continue
 
             a_lead = _clamp(a_lead, cfg.emergency_decel_ms2, cfg.max_accel_ms2)
-            snapshots.append(_LeadSnapshot(vid, dist_m, v_lead, a_lead, tail_m))
+            snapshots.append(_LeadSnapshot(vid, dist_m, v_lead, a_lead))
 
         if not snapshots:
             return []
@@ -400,7 +390,6 @@ class AdaptiveCruiseController:
                 dist_m=ema.dist_m,
                 v_lead_ms=ema.v_lead_ms,
                 a_lead_ms2=ema.a_lead_ms2,
-                tail_m=raw.tail_m,
             ))
         return smoothed
 
@@ -419,7 +408,7 @@ class AdaptiveCruiseController:
         cfg = self.config
 
         primary_raw = chain_raw[0]
-        eff_dist_raw = max(primary_raw.dist_m - primary_raw.tail_m, 0.01)
+        eff_dist_raw = max(primary_raw.dist_m, 0.01)
 
         if eff_dist_raw <= cfg.d_emergency_m:
             return cfg.emergency_decel_ms2, True
@@ -452,7 +441,7 @@ class AdaptiveCruiseController:
 
         a_chain = cfg.max_accel_ms2
         for n, lead in enumerate(chain_smooth):
-            eff_dist = max(lead.dist_m - lead.tail_m, 1e-3)
+            eff_dist = max(lead.dist_m, 1e-3)
             a_iidm = _iidm(
                 s=eff_dist,
                 v=v_ego,

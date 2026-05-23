@@ -81,6 +81,25 @@ _BLINKER_SCORE_RESET_KMH: float = 65.0
 # between HIT (got a fwd chord) and NO_HISTORY (not enough samples).
 _MIN_TRAIL_SAMPLES: int = 5
 
+# Tractor locking — TMP trailers arrive as independent top-level Vehicles
+# with no parent link in the buffer; we have to infer which tractor pulls
+# this trailer. Strict gate on acquisition rejects passers; loose gate on
+# cached pairs survives curves and TMP physics transients without churn.
+_TRACTOR_LOCK_LONGI_MIN_M: float = 3.0
+_TRACTOR_LOCK_LONGI_MAX_M: float = 16.0
+_TRACTOR_LOCK_LAT_MAX_M: float = 1.5
+_TRACTOR_LOCK_YAW_MAX_DEG: float = 15.0
+
+_TRACTOR_LOCK_VALID_LONGI_MIN_M: float = 1.0
+_TRACTOR_LOCK_VALID_LONGI_MAX_M: float = 25.0
+_TRACTOR_LOCK_VALID_LAT_MAX_M: float = 4.0
+_TRACTOR_LOCK_VALID_YAW_MAX_DEG: float = 60.0
+
+# Mirrors core/radar/reader.py — wrapped nested trailers carry synthetic
+# ids above this base. They already get filtered speed/accel from their
+# own per-id filter chain, so skip tractor locking for them.
+_TRAILER_VEHICLE_ID_BASE: int = 1_000_000
+
 
 @dataclass(slots=True)
 class TrackState:
@@ -121,6 +140,10 @@ class LeadInfo:
 @dataclass
 class ACCTracker:
     tracks: dict[int, TrackState] = field(default_factory=dict)
+    # Sticky TMP trailer→tractor map. Cleared when the trailer's track
+    # expires (see expired loop in update()) or when its cached tractor
+    # falls out of the loose validation gate.
+    _trailer_to_tractor: dict[int, int] = field(default_factory=dict)
 
     # Blinker scalar state — ``_last_*_active`` is bumped every frame
     # while the blinker is on, so once it releases the cos decay
@@ -316,25 +339,31 @@ class ACCTracker:
                 if fwd_dot < _REAR_DOT_THRESHOLD:
                     continue
 
-            # Scoring-space geometry — project into the ego arc frame so
-            # lateral is measured from the curved centerline, not from
-            # the straight forward vector.  This is the fix for "car
-            # in front on a corner shows huge lateral → never locks".
+            # Scoring-space geometry — project the vehicle center into
+            # the ego arc frame. Used by the scoring components below
+            # (offset / yaw / path); their tuning is calibrated against
+            # center distance.
             longi, lat = self._project_onto_arc(
                 ego_arc, v.position.x, v.position.z, ego_fwd_x, ego_fwd_z,
             )
 
-            if longi < 0.0 or longi > _MAX_SCORE_RANGE_M:
+            # Geometric distance + in-path — project all four footprint
+            # corners. dist_m is the nearest-corner arc distance (first
+            # impingement), in_path fires if any corner is inside the
+            # corridor. This collapses the tractor+trailer rig naturally
+            # via the controller's chain-gap filter and removes the
+            # bounding-circle approximation that misjudges yawed leads.
+            corner_projs = [
+                self._project_onto_arc(ego_arc, cx, cz, ego_fwd_x, ego_fwd_z)
+                for cx, cz in v.get_corners()
+            ]
+            fwd_corners = [(ad, lt) for ad, lt in corner_projs if ad >= 0.0]
+            if not fwd_corners:
                 continue
-
-            # In-path test — purely geometric: is the vehicle's arc-frame
-            # lateral within the corridor plus half the vehicle's width?
-            # The previous arc_arc_collision approach used a 2.5 s time
-            # horizon; at low closing speeds the collision time exceeds
-            # that and the function returned None even for vehicles
-            # directly ahead in the same lane.
-            lat_gate = corridor_half + v.size.width / 2.0
-            in_path = abs(lat) <= lat_gate
+            dist_m = min(ad for ad, _ in fwd_corners)
+            if dist_m > _MAX_SCORE_RANGE_M:
+                continue
+            in_path = any(abs(lt) <= corridor_half for _, lt in corner_projs)
 
             # Blinker scalar shifts the *scored* lateral offset by up to
             # 4.5 m toward the indicated side (SCORING_REFERENCE §7).
@@ -376,7 +405,7 @@ class ACCTracker:
             st.score = accumulate(st.score, dt, comps, v.speed)
             st.last_seen_mono = now_mono
             st.in_path = in_path
-            st.dist_m = longi
+            st.dist_m = dist_m
             st.last_offset = off
             st.last_yaw = yaw_c
             st.last_path = path_c
@@ -384,7 +413,8 @@ class ACCTracker:
             st.last_offset_for_score = offset_for_score
             st.last_yaw_diff_deg = yaw_diff_deg
             st.last_baseline = baseline
-            st.last_lat_margin = lat_gate - abs(lat)
+            # Margin: positive when the nearest corner is inside the corridor.
+            st.last_lat_margin = corridor_half - min(abs(lt) for _, lt in corner_projs)
             st.last_corridor_half = corridor_half
             st.last_seen_this_frame = True
             seen_ids.add(v.id)
@@ -409,6 +439,7 @@ class ACCTracker:
             st.in_path = False
         for vid in expired:
             self.tracks.pop(vid, None)
+            self._trailer_to_tractor.pop(vid, None)
 
         # Rank and swap.
         leads = self._top_leads(id_to_vehicle, vehicles, ego_fwd_x, ego_fwd_z, ego_speed_ms)
@@ -437,11 +468,15 @@ class ACCTracker:
             eff_speed = v.acc_speed
             eff_accel = v.acceleration
 
-            # Trailer → tractor swap (TMP: if lead is a trailer, promote
-            # the pulling tractor's kinematics so gap control reacts to
-            # the actual driven vehicle not the dragged trailer).
-            if v.is_tmp and v.is_trailer:
-                tractor = _find_tractor_for_trailer(v, vehicles)
+            # Trailer → tractor swap (TMP top-level trailers only — wrapped
+            # nested trailers have their own per-id filter chain and use
+            # their own acc_speed). Sticky resolver below: strict gate on
+            # first acquisition, loose gate on cached pairs.
+            if (
+                v.is_tmp and v.is_trailer
+                and v.id < _TRAILER_VEHICLE_ID_BASE
+            ):
+                tractor = self._resolve_tractor(v, vehicles)
                 if tractor is not None:
                     eff_speed = tractor.acc_speed
                     eff_accel = tractor.acceleration
@@ -459,20 +494,84 @@ class ACCTracker:
             )
         return out
 
-
-def _find_tractor_for_trailer(trailer: Vehicle, vehicles: list[Vehicle]) -> Vehicle | None:
-    """Cheap nearest-non-trailer-TMP match within 30 m.  Good enough for gap control."""
-    best: Vehicle | None = None
-    best_d = 30.0 * 30.0
-    for other in vehicles:
-        if other.id == trailer.id:
-            continue
-        if not other.is_tmp or other.is_trailer:
-            continue
+    # ------------------------------------------------------------------
+    # Tractor locking for TMP top-level trailers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _trailer_local_frame(
+        trailer: Vehicle, other: Vehicle,
+    ) -> tuple[float, float, float]:
+        """(longi, lat, yaw_delta_deg) of other in trailer's smoothed heading frame."""
+        trailer_yaw = (
+            trailer._smooth_yaw
+            if trailer._smooth_yaw is not None
+            else math.radians(trailer.rotation.euler()[1])
+        )
+        fwd_x = -math.sin(trailer_yaw)
+        fwd_z = -math.cos(trailer_yaw)
         dx = other.position.x - trailer.position.x
         dz = other.position.z - trailer.position.z
-        d = dx * dx + dz * dz
-        if d < best_d:
-            best_d = d
-            best = other
-    return best
+        longi = dx * fwd_x + dz * fwd_z
+        lat = dx * (-fwd_z) + dz * fwd_x
+        other_yaw = (
+            other._smooth_yaw
+            if other._smooth_yaw is not None
+            else math.radians(other.rotation.euler()[1])
+        )
+        yaw_delta = math.degrees(
+            (other_yaw - trailer_yaw + math.pi) % (2.0 * math.pi) - math.pi
+        )
+        return longi, lat, yaw_delta
+
+    @staticmethod
+    def _passes_strict_gate(longi: float, lat: float, yaw_delta_deg: float) -> bool:
+        return (
+            _TRACTOR_LOCK_LONGI_MIN_M <= longi <= _TRACTOR_LOCK_LONGI_MAX_M
+            and abs(lat) <= _TRACTOR_LOCK_LAT_MAX_M
+            and abs(yaw_delta_deg) <= _TRACTOR_LOCK_YAW_MAX_DEG
+        )
+
+    @staticmethod
+    def _passes_loose_gate(longi: float, lat: float, yaw_delta_deg: float) -> bool:
+        return (
+            _TRACTOR_LOCK_VALID_LONGI_MIN_M <= longi <= _TRACTOR_LOCK_VALID_LONGI_MAX_M
+            and abs(lat) <= _TRACTOR_LOCK_VALID_LAT_MAX_M
+            and abs(yaw_delta_deg) <= _TRACTOR_LOCK_VALID_YAW_MAX_DEG
+        )
+
+    def _resolve_tractor(
+        self, trailer: Vehicle, vehicles: list[Vehicle],
+    ) -> Vehicle | None:
+        """Return the locked tractor for ``trailer`` (TMP top-level only).
+
+        Cached pair revalidated through the loose gate; new acquisitions
+        must pass the strict gate. Among candidates passing strict,
+        ``lock_cost`` prefers laterally-centered, near-typical coupling
+        distance, yaw-aligned matches.
+        """
+        cached_id = self._trailer_to_tractor.get(trailer.id)
+        if cached_id is not None:
+            cached = next((o for o in vehicles if o.id == cached_id), None)
+            if cached is not None and cached.is_tmp and not cached.is_trailer:
+                longi, lat, yaw_delta = self._trailer_local_frame(trailer, cached)
+                if self._passes_loose_gate(longi, lat, yaw_delta):
+                    return cached
+            self._trailer_to_tractor.pop(trailer.id, None)
+
+        best: Vehicle | None = None
+        best_cost = math.inf
+        for other in vehicles:
+            if other.id == trailer.id:
+                continue
+            if not other.is_tmp or other.is_trailer:
+                continue
+            longi, lat, yaw_delta = self._trailer_local_frame(trailer, other)
+            if not self._passes_strict_gate(longi, lat, yaw_delta):
+                continue
+            cost = abs(lat) + 0.05 * abs(longi - 10.0) + 0.2 * abs(yaw_delta)
+            if cost < best_cost:
+                best_cost = cost
+                best = other
+        if best is not None:
+            self._trailer_to_tractor[trailer.id] = best.id
+        return best
