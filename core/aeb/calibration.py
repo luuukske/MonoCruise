@@ -108,6 +108,8 @@ class AEBCalibration:
     aeb_warn_frac: float = 0.5
     aeb_warn_near_full_frac: float = 0.85
     brake_actuator_lag_s: float = 0.18
+    # New engagements only fire when |ego_speed| is above this threshold.
+    aeb_min_engage_speed_kmh: float = 5.0
 
     # Latched-threat hold: once AEB engages on a target, that target's id is
     # latched until physical separation grows. Two effects:

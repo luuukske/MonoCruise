@@ -1192,9 +1192,12 @@ class AEBThread(BaseThread):
                     and not latched_distance_threat):
                 self._engaged = False
         else:
-            if run_collision and (
-                effective_required >= engage_threshold or brake_ttb_active
-            ):
+            # New engagements are gated by |ego_speed| — below the threshold
+            # the truck is essentially crawling, the user has authority
+            ego_kmh_abs = abs(ego_speed) * 3.6
+            if (run_collision
+                    and ego_kmh_abs >= cal.aeb_min_engage_speed_kmh
+                    and (effective_required >= engage_threshold or brake_ttb_active)):
                 self._engaged = True
 
         # Promote every currently-colliding target into the latched set so
