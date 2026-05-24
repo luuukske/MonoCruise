@@ -1,3 +1,4 @@
 -r requirements.txt
 pytest
 pyinstaller
+pygments>=2.20.0
