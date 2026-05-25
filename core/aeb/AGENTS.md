@@ -131,6 +131,7 @@ Calibration:
 | `aeb_kappa_one_euro_min_cutoff` | 1.0 Hz | Smooth-floor cutoff at zero derivative |
 | `aeb_kappa_one_euro_beta` | 200.0 | Slope of cutoff vs `|dkappa/dt|` — higher = snappier transient, lets more noise through |
 | `aeb_kappa_one_euro_d_cutoff` | 1.0 Hz | Low-pass on the derivative estimate (rejects noise-driven cutoff swings) |
+| `aeb_kappa_one_euro_beta_turn_scale` | 30.0 | Progressive beta attenuation with `\|kappa\|`: `beta_eff = beta / (1 + scale * \|x_prev\|)`. Counters in-turn cutoff inflation from magnitude-scaling noise (yaw_rate/v amplification, pos-fit numerical sensitivity). 0 disables |
 
 When `_vehicle_curvature_blend()` is called without a blender (e.g. test
 paths that don't carry filter state across frames), it returns the raw

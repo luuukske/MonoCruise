@@ -56,7 +56,7 @@ class AEBCalibration:
     # and the per-frame yaw rate from `angular_velocity`.  Combined as
     # `yaw_blend * yaw_kappa + (1 - yaw_blend) * pos_kappa`; yaw weighted
     # higher for responsiveness, position included for smoothing.
-    aeb_pos_history_len: int = 7
+    aeb_pos_history_len: int = 10
     aeb_yaw_blend: float = 0.7
 
     # One-Euro post-filter on the blended target curvature.  Speed-adaptive
@@ -66,9 +66,15 @@ class AEBCalibration:
     #   min_cutoff (Hz) — cutoff at zero derivative; sets the smooth-floor.
     #   beta — slope of cutoff vs |dkappa/dt|; higher = snappier transient.
     #   d_cutoff (Hz) — low-pass on the derivative estimate itself.
+    #   beta_turn_scale — progressive beta reduction with curvature magnitude:
+    #     beta_eff = beta / (1 + beta_turn_scale * |x_prev|).  Counters the
+    #     in-turn cutoff inflation caused by noise on |dkappa/dt|, which
+    #     scales with |kappa| from yaw_rate/v amplification and pos-fit
+    #     numerical sensitivity.  0 disables.
     aeb_kappa_one_euro_min_cutoff: float = 1.0
     aeb_kappa_one_euro_beta: float = 100.0
-    aeb_kappa_one_euro_d_cutoff: float = 1.0
+    aeb_kappa_one_euro_d_cutoff: float = 0.3
+    aeb_kappa_one_euro_beta_turn_scale: float = 20.0
 
     # Co-directional diverge
     co_dir_diverge_lookahead_s: float = 0.25

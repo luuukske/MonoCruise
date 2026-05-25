@@ -23,15 +23,22 @@ class OneEuroFilter:
     quiet, near-passthrough when it changes fast.  Tradeoff knobs are
     ``min_cutoff`` (smooth-floor) and ``beta`` (how aggressively cutoff
     follows the derivative).
+
+    ``beta_scale`` adds a magnitude-dependent attenuation of beta:
+    ``beta_eff = beta / (1 + beta_scale * |x_prev|)``.  Useful when input
+    noise scales with signal magnitude (e.g. yaw_rate/v amplification on
+    curvature signals in turns).  Zero disables the scaling.
     """
 
-    __slots__ = ("min_cutoff", "beta", "d_cutoff",
+    __slots__ = ("min_cutoff", "beta", "d_cutoff", "beta_scale",
                  "_x_prev", "_dx_prev", "_t_prev")
 
-    def __init__(self, min_cutoff: float, beta: float, d_cutoff: float = 1.0) -> None:
+    def __init__(self, min_cutoff: float, beta: float, d_cutoff: float = 1.0,
+                 beta_scale: float = 0.0) -> None:
         self.min_cutoff = min_cutoff
         self.beta = beta
         self.d_cutoff = d_cutoff
+        self.beta_scale = beta_scale
         self._x_prev: float | None = None
         self._dx_prev: float = 0.0
         self._t_prev: float | None = None
@@ -52,7 +59,8 @@ class OneEuroFilter:
         dx_raw = (x - self._x_prev) / dt
         a_d = self._alpha(self.d_cutoff, dt)
         dx_hat = a_d * dx_raw + (1.0 - a_d) * self._dx_prev
-        cutoff = self.min_cutoff + self.beta * abs(dx_hat)
+        beta_eff = self.beta / (1.0 + self.beta_scale * abs(self._x_prev))
+        cutoff = self.min_cutoff + beta_eff * abs(dx_hat)
         a_x = self._alpha(cutoff, dt)
         x_hat = a_x * x + (1.0 - a_x) * self._x_prev
         self._x_prev = x_hat
@@ -80,6 +88,7 @@ class VehicleCurvatureBlender:
                 self._cal.aeb_kappa_one_euro_min_cutoff,
                 self._cal.aeb_kappa_one_euro_beta,
                 self._cal.aeb_kappa_one_euro_d_cutoff,
+                self._cal.aeb_kappa_one_euro_beta_turn_scale,
             )
             self._filters[vid] = f
         return f
