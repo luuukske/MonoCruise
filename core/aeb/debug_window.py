@@ -45,6 +45,10 @@ _HIT_CLR = QColor(255, 30, 30)
 _TEXT = QColor(200, 200, 215)
 _HUD_BG = QColor(0, 0, 0, 160)
 _HUD_BORDER = QColor(60, 60, 70)
+_TRAIL_ARC_CLR = QColor(130, 130, 200, 90)   # faint dashed line behind each vehicle
+_TRAIL_CROSS_CLR = QColor(255, 200, 80, 180) # ego-row crossing marker
+_TRAIL_ARC_HALF_SPAN_M = 50.0
+_TRAIL_ARC_SAMPLES = 32
 
 _EGO_TRAILER_HALF_W = 1.25
 _EGO_TRAILER_HALF_L = 6.8
@@ -147,6 +151,12 @@ class AEBDebugWindow(QWidget):
         cx, cy = self.width() / 2.0, self.height() / 2.0
 
         self._draw_grid(p, cx, cy)
+
+        # First pass — fitted trail arcs behind all vehicles, so labels
+        # and bodies always sit on top of the dashed line.
+        if acc is not None:
+            for v in snap.vehicles:
+                self._draw_trail_arc(p, v["vid"], acc, ex, ez, ey)
 
         for v in snap.vehicles:
             vid = v["vid"]
@@ -370,6 +380,28 @@ class AEBDebugWindow(QWidget):
             comp_clr,
         )
 
+        od = comp.get("offset_delta", 0.0)
+        sd = comp.get("score_delta", 0.0)
+        amp = comp.get("arc_angle_amp", 1.0)
+        bl = comp.get("baseline", 0.0)
+        # HIT=0.0, NO_ARC_HIT=-0.40, NO_HISTORY=-0.16 — discriminate.
+        if abs(bl) < 0.05:
+            bl_tag = "HIT"
+            bl_clr = _SAFE_CLR
+        elif abs(bl + 0.40) < 0.05:
+            bl_tag = "NO_ARC"
+            bl_clr = _WARN_CLR
+        else:
+            bl_tag = "NO_HIST"
+            bl_clr = _SUPPRESSED_CLR
+        od_clr = _SAFE_CLR if od > 0 else (_DANGER_CLR if od < 0 else _TEXT)
+        self._draw_label(
+            p, sx, sy + 62,
+            f"Δo{od:+.3f} Δs{sd:+.3f} amp{amp:.2f}",
+            od_clr,
+        )
+        self._draw_label(p, sx, sy + 74, bl_tag, bl_clr)
+
     def _draw_grid(self, p: QPainter, cx: float, cy: float) -> None:
         max_r = max(self.width(), self.height()) / _PPM + _GRID_STEP_MAJOR
 
@@ -530,6 +562,63 @@ class AEBDebugWindow(QWidget):
         p.setPen(Qt.NoPen)
         p.setBrush(QBrush(_HIT_CLR))
         p.drawEllipse(QPointF(sx, sy), 3, 3)
+
+    def _draw_trail_arc(
+        self, p: QPainter, vid: int, acc: dict,
+        ex: float, ez: float, ey: float,
+    ) -> None:
+        """Faint dashed line tracing this vehicle's fitted trail arc.
+
+        Spans roughly ±``_TRAIL_ARC_HALF_SPAN_M`` of arc length around
+        the target so the operator can see what the scorer thinks the
+        target's path is.  If the arc crosses the ego row, a small
+        marker is drawn at the crossing point.
+        """
+        comp = acc.get("components", {}).get(vid)
+        if comp is None or not comp.get("trail_valid", False):
+            return
+
+        pen = QPen(_TRAIL_ARC_CLR, 1.0, Qt.DashLine)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+
+        if comp.get("trail_is_straight", False):
+            px = comp["trail_point_x"]
+            pz = comp["trail_point_z"]
+            dx_ = comp["trail_dir_x"]
+            dz_ = comp["trail_dir_z"]
+            span = _TRAIL_ARC_HALF_SPAN_M
+            ax, ay = self._ws(px - span * dx_, pz - span * dz_, ex, ez, ey)
+            bx, by = self._ws(px + span * dx_, pz + span * dz_, ex, ez, ey)
+            p.drawLine(QPointF(ax, ay), QPointF(bx, by))
+        else:
+            cx = comp["trail_cx"]
+            cz = comp["trail_cz"]
+            R = comp["trail_R"]
+            px = comp["trail_point_x"]
+            pz = comp["trail_point_z"]
+            if R < 1e-3:
+                return
+            target_ang = math.atan2(pz - cz, px - cx)
+            half_sweep = min(_TRAIL_ARC_HALF_SPAN_M / R, math.pi)
+            poly = QPolygonF()
+            n = _TRAIL_ARC_SAMPLES
+            for i in range(n):
+                frac = i / (n - 1)
+                ang = target_ang + (frac - 0.5) * 2.0 * half_sweep
+                wx = cx + R * math.cos(ang)
+                wz = cz + R * math.sin(ang)
+                ssx, ssy = self._ws(wx, wz, ex, ez, ey)
+                poly.append(QPointF(ssx, ssy))
+            p.drawPolyline(poly)
+
+        if comp.get("trail_crossing_valid", False):
+            cwx = comp["trail_crossing_x"]
+            cwz = comp["trail_crossing_z"]
+            mx, my = self._ws(cwx, cwz, ex, ez, ey)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(_TRAIL_CROSS_CLR))
+            p.drawEllipse(QPointF(mx, my), 3.0, 3.0)
 
     def _draw_label(
         self, p: QPainter, sx: float, sy: float, text: str, color: QColor,

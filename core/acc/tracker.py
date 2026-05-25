@@ -38,15 +38,19 @@ from core.radar.traffic import Vehicle
 from .ego_path import build_ego_arc, path_half_width
 from .scoring import (
     IN_PATH_THRESHOLD,
+    LEGACY_RATE_HZ,
     OFFSET_BASELINE_HIT,
     OFFSET_BASELINE_NO_ARC_HIT,
     OFFSET_BASELINE_NO_HISTORY,
+    OFFSET_WEIGHT,
     ScoreComponents,
     accumulate,
     offset_component,
     path_component,
+    speed_multiplier,
     yaw_component,
 )
+from .trail_arc import angle_amp_from, crossing_offset_and_angle, fit_trail
 
 
 logger = logging.getLogger(__name__)
@@ -55,7 +59,12 @@ logger = logging.getLogger(__name__)
 # Filter bounds — vehicles outside these are never scored.
 _MAX_SCORE_RANGE_M: float = 150.0      # longitudinal cut-off.
 _REAR_DOT_THRESHOLD: float = -0.2      # rear half cone: fwd-dot below → skip.
-_ELEVATION_DIFF_M: float = 5.0         # |Δy| above this → different road level.
+# Pitch-aware elevation margin.  Same value AEB uses
+# (``AEBCalibration.elevation_margin = 5.0``); the gate checks |v.y −
+# expected_y| where expected_y is ego_y projected forward along the
+# road surface using ego pitch — so leads on hills are accepted but
+# bridges / underpasses still get rejected.
+_ELEVATION_MARGIN_M: float = 5.0
 
 # Missing-target decay — same rate as out-of-path per frame so we don't
 # pile artificial penalties onto a briefly occluded car.
@@ -70,16 +79,6 @@ _BLINKER_OFFSET_M: float = 4.5
 # Highway lane change reset — zero all scores on blinker rising edge
 # above this ego speed so a new lead can lock cleanly on the new side.
 _BLINKER_SCORE_RESET_KMH: float = 65.0
-
-# Minimum target position history length required before we'd trust a
-# trail-arc fit.  Matches legacy ``fit_circle`` / ``draw_fitted_arc``
-# gate of ``len(history) < 5``: below 5 samples the LS circle fit is
-# skipped and the NO_HISTORY baseline (-0.16) is applied.
-# NOTE: the trail-arc LS circle fit itself is not yet implemented —
-# see core/acc/AGENTS.md §3.  Until it lands, offset uses the target's
-# current lateral as the crossing fallback and baseline switches
-# between HIT (got a fwd chord) and NO_HISTORY (not enough samples).
-_MIN_TRAIL_SAMPLES: int = 5
 
 # Tractor locking — TMP trailers arrive as independent top-level Vehicles
 # with no parent link in the buffer; we have to infer which tractor pulls
@@ -119,9 +118,28 @@ class TrackState:
     last_offset_for_score: float = 0.0
     last_yaw_diff_deg: float = 0.0
     last_baseline: float = 0.0
-    last_lat_margin: float = 0.0   # corridor_half + width/2 - |lat|; positive = inside gate
+    last_arc_angle_amp: float = 1.0   # 2^(-(arc_angle/0.06)²) from the fit
+    last_offset_delta: float = 0.0    # per-frame score contribution from offset alone
+    last_score_delta: float = 0.0     # per-frame total Δscore (all components)
+    last_lat_margin: float = 0.0      # corridor_half + width/2 - |lat|; positive = inside gate
     last_corridor_half: float = 0.0
     last_seen_this_frame: bool = False
+    # Trail-arc fit + crossing — populated each frame so the debug
+    # window can render the arc behind the vehicle.  None whenever the
+    # fit / crossing failed (NO_HISTORY / NO_ARC_HIT).
+    last_trail_is_straight: bool = False
+    last_trail_cx: float = 0.0
+    last_trail_cz: float = 0.0
+    last_trail_R: float = 0.0
+    last_trail_sign: float = 1.0
+    last_trail_dir_x: float = 1.0
+    last_trail_dir_z: float = 0.0
+    last_trail_point_x: float = 0.0
+    last_trail_point_z: float = 0.0
+    last_trail_valid: bool = False
+    last_trail_crossing_x: float = 0.0
+    last_trail_crossing_z: float = 0.0
+    last_trail_crossing_valid: bool = False
 
 
 @dataclass(slots=True)
@@ -289,7 +307,8 @@ class ACCTracker:
         dt: float,
         vehicles: list[Vehicle],
         ego_x: float, ego_y: float, ego_z: float,
-        ego_yaw_rad: float, ego_speed_ms: float, ego_steer: float,
+        ego_yaw_rad: float, ego_pitch_rad: float,
+        ego_speed_ms: float, ego_steer: float,
         ego_history_kappa: float | None,
         blinker_left: bool, blinker_right: bool,
     ) -> list[LeadInfo]:
@@ -300,6 +319,12 @@ class ACCTracker:
         ego_fwd_x = -math.sin(ego_yaw_rad)
         ego_fwd_z = -math.cos(ego_yaw_rad)
         ego_kmh = ego_speed_ms * 3.6
+        # Pitch-projected forward axis for the elevation gate: matches
+        # core/aeb/filters.py:ElevationFilter so ACC and AEB agree on
+        # which road surface each candidate belongs to.
+        ego_yaw_sin = math.sin(ego_yaw_rad)
+        ego_yaw_cos = math.cos(ego_yaw_rad)
+        ego_pitch_tan = math.tan(ego_pitch_rad)
 
         ego_arc = build_ego_arc(
             ego_x, ego_z, ego_yaw_rad, ego_speed_ms,
@@ -323,8 +348,17 @@ class ACCTracker:
                 continue
             if v.id < 0:
                 continue
-            # Elevation gate — other road levels.
-            if abs(v.position.y - ego_y) > _ELEVATION_DIFF_M:
+            # Pitch-projected elevation gate — matches AEB's
+            # ElevationFilter. ``rz`` is the AEB-convention forward
+            # distance from ego (dx·sin + dz·cos), so on an incline
+            # ``expected_y`` slides along the road surface as the
+            # target moves ahead, instead of being pinned to ego's
+            # current altitude.
+            _dx = v.position.x - ego_x
+            _dz = v.position.z - ego_z
+            rz_ele = _dx * ego_yaw_sin + _dz * ego_yaw_cos
+            expected_y = ego_y + rz_ele * ego_pitch_tan
+            if abs(v.position.y - expected_y) > _ELEVATION_MARGIN_M:
                 continue
 
             # Rear cone gate runs on the *instantaneous* ego frame so a
@@ -365,30 +399,58 @@ class ACCTracker:
                 continue
             in_path = any(abs(lt) <= corridor_half for _, lt in corner_projs)
 
+            # Trail-arc fit: project the target's smoothed path onto the
+            # line through ego perpendicular to ego heading.  Three
+            # baseline buckets, matching SCORING_REFERENCE §8.1:
+            #   HIT          fit + crossing → arc-crossing lateral and
+            #                tangent-angle amp from the fit.
+            #   NO_ARC_HIT   fit exists but doesn't reach the ego row →
+            #                -0.40 baseline, fall back to current lateral.
+            #   NO_HISTORY   too few samples / chord / curvature → -0.16
+            #                baseline, current lateral, full angle amp.
+            v_yaw_rad = (
+                v._smooth_yaw
+                if v._smooth_yaw is not None
+                else math.radians(v.rotation.euler()[1])
+            )
+            trail = fit_trail(
+                getattr(v, "_position_history", []) or [],
+                v_yaw_rad,
+            )
+            crossing: tuple[float, float] | None = None
+            if trail is None:
+                arc_offset = lat
+                arc_angle_amp = 1.0
+                baseline = OFFSET_BASELINE_NO_HISTORY
+            else:
+                cx_cz_ang = crossing_offset_and_angle(
+                    trail, ego_x, ego_z, ego_fwd_x, ego_fwd_z,
+                )
+                if cx_cz_ang is None:
+                    arc_offset = lat
+                    arc_angle_amp = 1.0
+                    baseline = OFFSET_BASELINE_NO_ARC_HIT
+                else:
+                    arc_offset, arc_angle_rad = cx_cz_ang
+                    arc_angle_amp = angle_amp_from(arc_angle_rad)
+                    baseline = OFFSET_BASELINE_HIT
+                    # World-space crossing point for debug rendering.
+                    right_x = -ego_fwd_z
+                    right_z = ego_fwd_x
+                    crossing = (
+                        ego_x + arc_offset * right_x,
+                        ego_z + arc_offset * right_z,
+                    )
+
             # Blinker scalar shifts the *scored* lateral offset by up to
             # 4.5 m toward the indicated side (SCORING_REFERENCE §7).
             # Targets in the adjacent lane thus score near 0 offset
             # during the signalled manoeuvre.
-            offset_for_score = lat - blinker * _BLINKER_OFFSET_M
+            offset_for_score = arc_offset - blinker * _BLINKER_OFFSET_M
 
-            # Baseline selection — trail-arc fitting not yet implemented,
-            # so: HIT if we have enough samples to trust the current
-            # lateral as a crossing proxy, else NO_HISTORY.  Once the
-            # LS circle fit lands this will flip to NO_ARC_HIT when the
-            # fitted arc doesn't cross the ego row.
-            history_len = len(getattr(v, "_position_history", []) or ())
-            if history_len < _MIN_TRAIL_SAMPLES:
-                baseline = OFFSET_BASELINE_NO_HISTORY
-            else:
-                baseline = OFFSET_BASELINE_HIT
-
-            # Components.
             off = offset_component(
-                offset_for_score, longi, angle_amp=1.0, baseline=baseline,
-            )
-            # Heading mismatch via smoothed yaw when available.
-            v_yaw_rad = v._smooth_yaw if v._smooth_yaw is not None else math.radians(
-                v.rotation.euler()[1]
+                offset_for_score, longi,
+                angle_amp=arc_angle_amp, baseline=baseline,
             )
             yaw_diff_deg = math.degrees(
                 (v_yaw_rad - ego_yaw_rad + math.pi) % (2.0 * math.pi) - math.pi
@@ -402,7 +464,13 @@ class ACCTracker:
                 st = TrackState()
                 self.tracks[v.id] = st
             # Legacy §9 uses the **target's** speed, not ego's.
+            prev_score = st.score
             st.score = accumulate(st.score, dt, comps, v.speed)
+            spd_mult = speed_multiplier(v.speed)
+            st.last_score_delta = st.score - prev_score
+            st.last_offset_delta = (
+                off * OFFSET_WEIGHT * spd_mult * dt * LEGACY_RATE_HZ
+            )
             st.last_seen_mono = now_mono
             st.in_path = in_path
             st.dist_m = dist_m
@@ -413,6 +481,26 @@ class ACCTracker:
             st.last_offset_for_score = offset_for_score
             st.last_yaw_diff_deg = yaw_diff_deg
             st.last_baseline = baseline
+            st.last_arc_angle_amp = arc_angle_amp
+            if trail is not None:
+                st.last_trail_valid = True
+                st.last_trail_is_straight = trail.is_straight
+                st.last_trail_cx = trail.center_x
+                st.last_trail_cz = trail.center_z
+                st.last_trail_R = trail.radius
+                st.last_trail_sign = trail.sign
+                st.last_trail_dir_x = trail.dir_x
+                st.last_trail_dir_z = trail.dir_z
+                st.last_trail_point_x = trail.point_x
+                st.last_trail_point_z = trail.point_z
+            else:
+                st.last_trail_valid = False
+            if crossing is not None:
+                st.last_trail_crossing_x = crossing[0]
+                st.last_trail_crossing_z = crossing[1]
+                st.last_trail_crossing_valid = True
+            else:
+                st.last_trail_crossing_valid = False
             # Margin: positive when the nearest corner is inside the corridor.
             st.last_lat_margin = corridor_half - min(abs(lt) for _, lt in corner_projs)
             st.last_corridor_half = corridor_half

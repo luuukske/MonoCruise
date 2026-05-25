@@ -108,6 +108,7 @@ class ACCThread(BaseThread):
                     rt.data.ego_y,
                     rt.data.ego_z,
                     rt.data.ego_yaw_rad,
+                    rt.data.ego_pitch_rad,
                     rt.data.ego_speed,
                     rt.data.ego_steer,
                     rt.data.ego_curvature,
@@ -147,7 +148,7 @@ class ACCThread(BaseThread):
             self._publish(enabled, [], self._last_snapshot_t)
             return
 
-        (vehicles, trailer_vehicles, ex, ey, ez, eyaw, espeed, esteer,
+        (vehicles, trailer_vehicles, ex, ey, ez, eyaw, epitch, espeed, esteer,
          ekappa, paused, t_radar) = snap
 
         # Nested trailers (road-train trailers behind the first) ride in a
@@ -172,7 +173,8 @@ class ACCThread(BaseThread):
                 dt=dt,
                 vehicles=targets,
                 ego_x=ex, ego_y=ey, ego_z=ez,
-                ego_yaw_rad=eyaw, ego_speed_ms=espeed, ego_steer=esteer,
+                ego_yaw_rad=eyaw, ego_pitch_rad=epitch,
+                ego_speed_ms=espeed, ego_steer=esteer,
                 ego_history_kappa=ekappa,
                 blinker_left=bl_left, blinker_right=bl_right,
             )
@@ -197,6 +199,22 @@ class ACCThread(BaseThread):
                 "baseline": st.last_baseline,
                 "offset_for_score": st.last_offset_for_score,
                 "yaw_diff_deg": st.last_yaw_diff_deg,
+                "arc_angle_amp": st.last_arc_angle_amp,
+                "offset_delta": st.last_offset_delta,
+                "score_delta": st.last_score_delta,
+                "trail_valid": st.last_trail_valid,
+                "trail_is_straight": st.last_trail_is_straight,
+                "trail_cx": st.last_trail_cx,
+                "trail_cz": st.last_trail_cz,
+                "trail_R": st.last_trail_R,
+                "trail_sign": st.last_trail_sign,
+                "trail_dir_x": st.last_trail_dir_x,
+                "trail_dir_z": st.last_trail_dir_z,
+                "trail_point_x": st.last_trail_point_x,
+                "trail_point_z": st.last_trail_point_z,
+                "trail_crossing_valid": st.last_trail_crossing_valid,
+                "trail_crossing_x": st.last_trail_crossing_x,
+                "trail_crossing_z": st.last_trail_crossing_z,
                 "lat_margin": st.last_lat_margin,
                 "corridor_half": st.last_corridor_half,
                 "seen": st.last_seen_this_frame,

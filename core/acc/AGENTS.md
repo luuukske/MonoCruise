@@ -86,14 +86,44 @@ scored lateral — `offset_for_score = lat - blinker · 4.5 m` — not as
 an ego-arc translation. Shifting the arc geometrically would distort
 arc-arc hit tests, which we don't want.
 
-> **Gap — trail-arc fitting is not yet implemented.** The legacy
-> scorer fit a least-squares circle to each target's position history,
-> found its intersection with the ego row, and used that point as the
-> `offset_m` input. Until that lands, `ACCTracker` uses the target's
-> current lateral distance as the fallback and chooses `baseline`
-> from `len(v.position_history)` alone — `HIT` once we have ≥5 samples
-> (matches legacy `fit_circle` gate), `NO_HISTORY` otherwise.
-> `NO_ARC_HIT` is reachable only once the fit is implemented.
+### Trail-arc fit (`core/acc/trail_arc.py`)
+
+Each target's `_position_history` is downsampled (≥ 1 m AND ≥ 0.05 s
+between kept samples) and then **LS algebraic circle-fit** in place.
+Centre + radius come from the positions alone — no smoothed-yaw
+input — so yaw jitter no longer translates into crossing-lateral
+jitter. A max-perpendicular-from-chord straightness pre-check
+prevents position noise from being fit as a tight curve. The fitted
+circle is intersected with the **ego row** (line through ego
+perpendicular to ego heading); the crossing point gives `offset_m`,
+and the tangent direction there gives `arc_angle` which feeds
+`angle_amp = 2^(-(arc_angle / 0.06)²)`.
+
+The downsampling lives inside this module — radar's
+`_position_history`, `Vehicle.curvature_from_history`, the TMP raw-
+speed LS fit, and AEB consumers all see the dense raw buffer
+unchanged. Only ACC's per-target trail consumes the gated subset.
+
+Three buckets drive baseline selection:
+
+| Bucket       | Trigger                                                       | Baseline | offset_m fallback | angle_amp |
+|--------------|---------------------------------------------------------------|----------|--------------------|-----------|
+| `HIT`        | fit + arc intersects ego row                                  | 0.0      | crossing lateral   | from arc  |
+| `NO_ARC_HIT` | fit but no intersection (target's circle too tight, off-side) | −0.40    | current lateral    | 1.0       |
+| `NO_HISTORY` | fewer than 5 samples / chord < 0.5 m / curvature_from_history None | −0.16 | current lateral | 1.0       |
+
+Constants live in `core/acc/trail_arc.py`:
+`_HISTORY_MIN_DIST_M = 1.0`, `_HISTORY_MIN_DT_S = 0.05` (per-fit
+downsample), `_MIN_FIT_SAMPLES = 5`, `_MIN_PATH_LEN_M = 0.5`,
+`_STRAIGHT_KAPPA_MAX = 1/2000` (below this κ the LS-fitted circle is
+collapsed back to a straight line), `_MIN_SAGITTA_RATIO = 0.5` (the
+observed perpendicular sagitta has to be ≥ 50 % of what the LS
+radius would imply, otherwise the curve was fitted to noise),
+`_ANGLE_AMP_SIGMA = 0.06` rad. Sweep direction (`sign`) is recovered
+from the actual history (cross-product of prev-to-centre and
+target-to-centre vectors), so it follows `ArcPath._sign` without
+needing kappa to be signed up front: +1 ⇒ left turn ⇒ CW sweep
+around the centre, per `max_sweep = -sign · arc_length / radius`.
 
 ### path — slow_speed_amp and blinker reduction
 
