@@ -67,7 +67,7 @@ class AEBCalibration:
     #   beta — slope of cutoff vs |dkappa/dt|; higher = snappier transient.
     #   d_cutoff (Hz) — low-pass on the derivative estimate itself.
     aeb_kappa_one_euro_min_cutoff: float = 1.0
-    aeb_kappa_one_euro_beta: float = 200.0
+    aeb_kappa_one_euro_beta: float = 100.0
     aeb_kappa_one_euro_d_cutoff: float = 1.0
 
     # Co-directional diverge
