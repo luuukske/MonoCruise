@@ -153,7 +153,7 @@ class RadarThread(BaseThread):
 
         ego_curvature = ego_curvature_from_history(self._ego_position_history)
 
-        read_result = self._traffic.read()
+        read_result = self._traffic.read(ego_x, ego_y, ego_z, ego_speed)
         if read_result is None:
             vehicles, trailer_vehicles = [], []
         else:

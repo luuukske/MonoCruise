@@ -95,8 +95,18 @@ class TrafficReader:
                 pass
             self._parked_buf = None
 
-    def read(self) -> tuple[list[Vehicle], list[Vehicle]] | None:
+    def read(
+        self,
+        ego_x: float,
+        ego_y: float,
+        ego_z: float,
+        ego_speed: float,
+    ) -> tuple[list[Vehicle], list[Vehicle]] | None:
         """Decode one frame.
+
+        ``ego_x/y/z`` and ``ego_speed`` are forwarded to
+        :meth:`Vehicle.update_from_last` for the TTC-scaled lag freeze
+        (see ``core/radar/AGENTS.md`` §7).
 
         Returns ``(vehicles, trailer_vehicles)`` — the top-level radar
         vehicles and the synthetic trailer-as-vehicle records flattened from
@@ -149,14 +159,24 @@ class TrafficReader:
         t_now = time.time()
         for v in vehicles:
             if v.id in self._last_vehicles:
-                v.update_from_last(self._last_vehicles[v.id], t_now)
+                v.update_from_last(
+                    self._last_vehicles[v.id], t_now, ego_x, ego_y, ego_z, ego_speed,
+                )
         self._last_vehicles = {v.id: v for v in vehicles}
 
-        trailer_vehicles = self._build_trailer_vehicles(vehicles, t_now)
+        trailer_vehicles = self._build_trailer_vehicles(
+            vehicles, t_now, ego_x, ego_y, ego_z, ego_speed,
+        )
         return vehicles, trailer_vehicles
 
     def _build_trailer_vehicles(
-        self, vehicles: list[Vehicle], t_now: float
+        self,
+        vehicles: list[Vehicle],
+        t_now: float,
+        ego_x: float,
+        ego_y: float,
+        ego_z: float,
+        ego_speed: float,
     ) -> list[Vehicle]:
         """Flatten nested trailers into standalone Vehicles for ACC scoring.
 
@@ -185,7 +205,7 @@ class TrafficReader:
         for tv in trailer_vehicles:
             prev = self._last_trailer_vehicles.get(tv.id)
             if prev is not None:
-                tv.update_from_last(prev, t_now)
+                tv.update_from_last(prev, t_now, ego_x, ego_y, ego_z, ego_speed)
         self._last_trailer_vehicles = {tv.id: tv for tv in trailer_vehicles}
         return trailer_vehicles
 

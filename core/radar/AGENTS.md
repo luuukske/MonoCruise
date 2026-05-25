@@ -312,12 +312,29 @@ is_lag         = (abs(prev.speed) > _LAG_MIN_SPEED_MS          # was moving
                  # raw moved less than 10 % of expected displacement
 ```
 
+**Freeze duration is TTC-scaled** so a close vehicle's real stop is not masked
+by the filter (a 0.5 s freeze on a vehicle 1 s ahead would rear-end ego). Let
+`gap_3d = |vehicle_pos − ego_pos|` and
+`ttc = gap_3d / max(ego_speed, _LAG_FREEZE_EGO_SPEED_FLOOR)` (1.0 m/s floor),
+then:
+
+```python
+if ttc <= _LAG_FREEZE_TTC_LO:   freeze_dur = 0.0                 # 0.3 s → no freeze
+if ttc >= _LAG_FREEZE_TTC_HI:   freeze_dur = _LAG_FREEZE_DUR_MAX # 4.0 s → 0.5 s
+else: freeze_dur = K · ln(ttc / _LAG_FREEZE_TTC_LO)              # K = max/ln(hi/lo)
+```
+
+Sample points: 0.3 s → 0.00 s, 0.5 s → 0.10 s, 1.0 s → 0.23 s, 2.0 s → 0.37 s,
+4.0 s → 0.50 s. `ego_x/y/z` and `ego_speed` are passed into
+`Vehicle.update_from_last()` from `TrafficReader.read()`.
+
 **Three-state machine:**
 
 | Elapsed since first frozen frame | Action |
 |----------------------------------|--------|
-| 0 – `_LAG_FREEZE_DURATION` (0.3 s) | **Freeze** — hold last position; decay speed quadratically: `speed = prev_speed × (1 − frac²)` where `frac = elapsed / 0.3`; force `acceleration = 0`; return early. AEB sees the vehicle at its last known position decelerating toward 0. |
-| ≥ 0.3 s | **Release** — set `lag_confirmed = True`, fall through to normal update. Speed falls to 0. AEB detects the stopped obstacle naturally via arc collision. |
+| `freeze_dur == 0` (TTC ≤ 0.3 s)  | **No freeze** — reset `_lag_since`, fall through. A real stop close to ego is treated as real immediately. |
+| 0 – `freeze_dur` | **Freeze** — hold last position; decay speed quadratically: `speed = prev_speed × (1 − frac²)` where `frac = elapsed / freeze_dur`; force `acceleration = 0`; return early. AEB sees the vehicle at its last known position decelerating toward 0. |
+| ≥ `freeze_dur` | **Release** — set `lag_confirmed = True`, fall through to normal update. Speed falls to 0. AEB detects the stopped obstacle naturally via arc collision. |
 | Raw position moves again | Reset `_lag_since = None`, `lag_confirmed = False`. |
 
 `lag_confirmed` is a public flag on `Vehicle`. Consumer threads do not need

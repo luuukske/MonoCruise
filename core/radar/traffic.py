@@ -90,7 +90,19 @@ _RAW_YAW_ALPHA: float = 0.50
 # TMP lag detection — see AGENTS.md §7 "Lag / freeze detection".
 _LAG_MIN_SPEED_MS: float = 5.0           # m/s  — below this no lag detection runs
 _LAG_DISP_RATIO: float = 0.10           # flag lag if raw disp < 10 % of expected
-_LAG_FREEZE_DURATION: float = 0.2       # s    — freeze window; release after this
+
+# Freeze duration scales logarithmically with time-to-vehicle (TTC) so a close
+# real stop is not masked by the filter. TTC = 3D distance to ego / ego_speed,
+# with ego_speed floored at _LAG_FREEZE_EGO_SPEED_FLOOR. Curve: 0 s at TTC ≤
+# _LAG_FREEZE_TTC_LO, _LAG_FREEZE_DUR_MAX at TTC ≥ _LAG_FREEZE_TTC_HI,
+# dur = K · ln(ttc / lo) between (K chosen so dur(hi) = max).
+_LAG_FREEZE_TTC_LO: float = 0.3                  # s    — freeze = 0 at/below this TTC
+_LAG_FREEZE_TTC_HI: float = 4.0                  # s    — freeze = max at/above this TTC
+_LAG_FREEZE_DUR_MAX: float = 0.5                 # s    — freeze cap (release after this)
+_LAG_FREEZE_EGO_SPEED_FLOOR: float = 1.0         # m/s  — TTC denom floor
+_LAG_FREEZE_LOG_K: float = _LAG_FREEZE_DUR_MAX / math.log(
+    _LAG_FREEZE_TTC_HI / _LAG_FREEZE_TTC_LO
+)
 
 # Position mismatch (TMP only) — out-of-order packet rejection.
 # Fires when raw position jumps backward along heading.  Max 3 consecutive frames.
@@ -119,6 +131,21 @@ _STRAIGHT_CURVATURE_EPS: float = 1e-6
 _POSITION_HISTORY_LEN: int = 25
 _TMP_SPEED_HISTORY_LEN: int = 20
 _TMP_SPEED_NEAR_ZERO_CHORD: float = 0.025  # m — same gate as per-frame displacement
+
+
+def _lag_freeze_duration(gap_3d: float, ego_speed: float) -> float:
+    """Logarithmic TTC-scaled freeze window. See AGENTS.md §7 "Lag / freeze detection".
+
+    TTC = gap_3d / max(ego_speed, _LAG_FREEZE_EGO_SPEED_FLOOR). Returns 0 s below
+    _LAG_FREEZE_TTC_LO, _LAG_FREEZE_DUR_MAX above _LAG_FREEZE_TTC_HI, and
+    K · ln(ttc / lo) between, so a close vehicle's real stop is not masked.
+    """
+    ttc = gap_3d / max(ego_speed, _LAG_FREEZE_EGO_SPEED_FLOOR)
+    if ttc <= _LAG_FREEZE_TTC_LO:
+        return 0.0
+    if ttc >= _LAG_FREEZE_TTC_HI:
+        return _LAG_FREEZE_DUR_MAX
+    return _LAG_FREEZE_LOG_K * math.log(ttc / _LAG_FREEZE_TTC_LO)
 
 
 def _tmp_raw_speed_from_position_history(
@@ -853,8 +880,20 @@ class Vehicle:
         else:
             self._crash_since = None
 
-    def update_from_last(self, prev: "Vehicle", t_now: float) -> None:
-        """Carry forward smoothed state or run a full update.  See AGENTS.md §7."""
+    def update_from_last(
+        self,
+        prev: "Vehicle",
+        t_now: float,
+        ego_x: float,
+        ego_y: float,
+        ego_z: float,
+        ego_speed: float,
+    ) -> None:
+        """Carry forward smoothed state or run a full update.  See AGENTS.md §7.
+
+        ``ego_x/y/z`` and ``ego_speed`` feed the TTC-scaled lag freeze
+        (see AGENTS.md §7 "Lag / freeze detection").
+        """
         dt = t_now - prev.time
 
         # Sub-frame pass: carry forward all smoothed state unchanged.
@@ -997,8 +1036,18 @@ class Vehicle:
                 if self._lag_since is None:
                     self._lag_since = t_now
                 _lag_duration = t_now - self._lag_since
-                if _lag_duration < _LAG_FREEZE_DURATION:
-                    _lag_frac = _lag_duration / _LAG_FREEZE_DURATION
+                _gap_3d = math.sqrt(
+                    (raw_x - ego_x) ** 2
+                    + (self.position.y - ego_y) ** 2
+                    + (raw_z - ego_z) ** 2
+                )
+                _freeze_dur = _lag_freeze_duration(_gap_3d, ego_speed)
+                if _freeze_dur <= 0.0:
+                    # Too close to ego — a real stop must not be masked. Drop the
+                    # freeze entirely and let the normal update run.
+                    self._lag_since = None
+                elif _lag_duration < _freeze_dur:
+                    _lag_frac = _lag_duration / _freeze_dur
                     self._smooth_x = prev._smooth_x
                     self._smooth_z = prev._smooth_z
                     self._smooth_yaw = prev._smooth_yaw
@@ -1014,7 +1063,8 @@ class Vehicle:
                         self.position.x = self._smooth_x
                         self.position.z = self._smooth_z
                     return
-                self.lag_confirmed = True
+                else:
+                    self.lag_confirmed = True
             else:
                 self._lag_since = None
 
