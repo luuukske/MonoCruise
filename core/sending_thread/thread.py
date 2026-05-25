@@ -580,6 +580,7 @@ class SendingThread(BaseThread):
         road_pitch = 0.0
         tel_gear_dashboard = 0
         tel_gear = 0
+        engine_rpm = 0.0
         if connected and tel_thread is not None and tel_thread.is_alive():
             try:
                 with tel_thread.data._lock:
@@ -591,6 +592,7 @@ class SendingThread(BaseThread):
                     road_pitch = float(tel_thread.data.rotationY)
                     tel_gear_dashboard = int(tel_thread.data.gear_dashboard)
                     tel_gear = int(tel_thread.data.gear)
+                    engine_rpm = float(getattr(tel_thread.data, "engine_rpm", 0.0))
                     game_throttle = float(tel_thread.data.gameThrottle)
                     game_clutch = float(tel_thread.data.gameClutch)
                     game_brake = float(getattr(tel_thread.data, "gameBrake", 0.0))
@@ -963,6 +965,7 @@ class SendingThread(BaseThread):
             park_brake=park_brake,
             aeb_active=_aeb_active,
             dt=dt_aeb,
+            game_clutch=game_clutch,
         )
         b = max(b, hold_out.brake_pedal)
 
@@ -1013,6 +1016,19 @@ class SendingThread(BaseThread):
             b = max(0.0001, b)
         if not self._brake_active:
             b = 0.0
+
+        # Brake-light bump: when the truck is stationary in gear with the
+        # engine running, guarantee a sub-perceptible pedal value so the in-
+        # game brake lights stay on. Applied AFTER the hysteresis above so it
+        # is not zeroed by the inactive-brake gate. Below any real braking
+        # threshold; only signals intent to other drivers.
+        if (
+            abs(speed_kmh) < 0.5
+            and gear != 0
+            and engine_rpm > 100.0
+            and b < 0.001
+        ):
+            b = 0.001
 
         controller.aforward = a
         controller.abackward = b
