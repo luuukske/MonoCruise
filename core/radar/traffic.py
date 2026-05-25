@@ -809,7 +809,7 @@ class Vehicle:
         # TMP lag detection state.
         # _lag_since: monotonic time when the frozen-position window began.
         # lag_confirmed: True once the vehicle has been stationary for
-        #   >= _LAG_FREEZE_DURATION s. AEB handles confirmed-stopped vehicles
+        #   >= the TTC-scaled freeze_dur. AEB handles confirmed-stopped vehicles
         #   naturally via arc collision; no special-case needed in thread.py.
         self._lag_since: Optional[float] = None
         self.lag_confirmed: bool = False
@@ -935,19 +935,24 @@ class Vehicle:
             # (t_now − prev.time) when movement exceeds the usual gate; always snap pose
             # to latest raw. Skipped during lag freeze and position mismatch hold unless
             # crash_confirmed, which bypasses both filters to keep position accurate.
+            # Lag freeze still active if elapsed < TTC-scaled freeze_dur (recomputed
+            # here so the sub-frame uses the same window as the last full update).
+            _sf_lag_active = False
+            if prev._lag_since is not None and prev._raw_x is not None:
+                _sf_gap_3d = math.sqrt(
+                    (prev._raw_x - ego_x) ** 2
+                    + (prev.position.y - ego_y) ** 2
+                    + (prev._raw_z - ego_z) ** 2
+                )
+                _sf_freeze_dur = _lag_freeze_duration(_sf_gap_3d, ego_speed)
+                _sf_lag_active = (t_now - prev._lag_since) < _sf_freeze_dur
             _tmp_sf_ok = (
                 self.is_tmp
                 and prev._raw_x is not None
                 and prev._smooth_yaw is not None
                 and (
                     self.crash_confirmed
-                    or (
-                        not (
-                            prev._lag_since is not None
-                            and (t_now - prev._lag_since) < _LAG_FREEZE_DURATION
-                        )
-                        and prev._pos_mismatch_frames == 0
-                    )
+                    or (not _sf_lag_active and prev._pos_mismatch_frames == 0)
                 )
             )
             if _tmp_sf_ok:

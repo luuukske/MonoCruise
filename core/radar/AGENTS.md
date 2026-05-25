@@ -403,7 +403,7 @@ When both signals fire simultaneously: `_crash_since` starts. After `0.10 s`: `c
 the last full tick). If `|Δraw| > 0.025 m` over `t_now − prev.time`, **`_raw_speed`** is
 recomputed as `±|Δ|/dt` (same forward dot as full updates) for diagnostics; **`speed`**
 stays the last full-tick filtered value until the next `dt ≥ 0.05 s` update. Skipped
-during lag freeze (`_lag_since` inside `_LAG_FREEZE_DURATION`), position-mismatch hold
+during lag freeze (`_lag_since` inside the TTC-scaled freeze window), position-mismatch hold
 (`_pos_mismatch_frames > 0`), and `crash_confirmed`. Acceleration is still carried
 from the last full update on sub-frames.
 
