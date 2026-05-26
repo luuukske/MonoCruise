@@ -63,11 +63,14 @@ _LEAD_BRIGHTNESS = 0.95
 _LEAD_OPACITY = 0.74
 _LEAD_SHIFT_PX_BASE = 5.0
 _LEAD_GAP_PX_BASE = 0.0
-_LEAD_MASK_BLUR_BASE = 5.0
+_LEAD_MASK_BLUR_BASE = 0.0 # 5 prior testing phase. testing mask clipping.
 _LEAD_MASK_PAD_BASE = 2.0
 _LEAD_ANIM_FORWARD_MS = 750
-_LEAD_ANIM_RETRACT_MS = 500
+_LEAD_ANIM_RETRACT_MS = 2000
 _LEAD_TICK_MS = 16
+
+_VEHICLE_ANIM_MS = 3500
+_VEHICLE_TICK_MS = 16
 
 # Sentinel for update(lead_vehicle_speed=...): distinguishes "not provided" from None ("no lead").
 _LEAD_UNSET = object()
@@ -139,6 +142,23 @@ class _PanelWidget(QWidget):
         self._lead_eraser_cache: dict[tuple, QPixmap] = {}
         self._lead_eraser_cache_max = 16
 
+        # Set-speed text rasterized to a pixmap so the slide animation can
+        # blit it at a fractional offset (sub-pixel). Drawing text directly
+        # at QPointF still snaps the glyph baseline to integer pixels on
+        # Windows, which produces visible staircasing during the slide.
+        # Blit must use drawPixmap(QRectF, pm, QRectF) — the point overload
+        # fast-paths to an integer blit and discards the fractional offset.
+        self._set_text_pm_cache: dict[tuple, QPixmap] = {}
+        self._set_text_pm_cache_max = 16
+        # Lead-speed text rasterized for the same reason as set-speed.
+        self._lead_text_pm_cache: dict[tuple, QPixmap] = {}
+        self._lead_text_pm_cache_max = 16
+
+        self._vehicle_anim_timer = QTimer(self)
+        self._vehicle_anim_timer.timeout.connect(self._vehicle_anim_tick)
+        # Reused offscreen buffer for lines+cutout composite (avoids per-frame alloc).
+        self._lines_composite_buf: QPixmap | None = None
+
         self._setup_window()
 
         # QueuedConnection avoids deadlock when update() runs on the GUI thread
@@ -195,6 +215,10 @@ class _PanelWidget(QWidget):
         f = QFont("Arial")
         f.setBold(True)
         f.setPixelSize(max(1, int(40 * s)))
+        # PreferNoHinting lets QPainter.drawText(QPointF, ...) actually use the
+        # fractional baseline. With default hinting Qt snaps glyph origins to
+        # the integer pixel grid and the lead-speed slide visibly staircases.
+        f.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
         p._font = f
         self.setFixedSize(p._panel_w, p._panel_h)
         p._icon_cache.clear()
@@ -207,6 +231,12 @@ class _PanelWidget(QWidget):
         self._acc_lines_layer_cache.clear()
         self._lead_eraser_cache.clear()
         self._lead_buf = None
+        self._lines_composite_buf = None
+        self._set_text_pm_cache.clear()
+        self._lead_text_pm_cache.clear()
+        p._vehicle_anim_layout_key = ()
+        p._vehicle_visual_y = None
+        p._vehicle_visual_sh = None
         p._current_icon = self._load_icon()
         self.update()
 
@@ -256,7 +286,7 @@ class _PanelWidget(QWidget):
         needs_icon = complete or any(
             getattr(p, f"_{k}") != old[k]
             for k in ("cc_mode", "AEB_warn", "acc_locked", "acc_enabled", "acc_truck")
-        ) or (p._acc_locked and p._distance_to_lead != old["distance_to_lead"])
+        )
 
         needs_color = (
             complete
@@ -349,7 +379,7 @@ class _PanelWidget(QWidget):
 
         key = (
             p._cc_mode, p._scale_mult,
-            is_aeb, p._acc_locked, p._distance_to_lead,
+            is_aeb, p._acc_locked,
             p._acc_enabled, p._acc_truck, dpr,
         )
         cached = p._icon_cache.get(key)
@@ -717,8 +747,12 @@ class _PanelWidget(QWidget):
         lw: int,
         ls: int,
         num_lines: int,
-        vx_i: int,
-        vy_i: int,
+        vx: float,
+        vy: float,
+        target_vy: float,
+        target_sh: float,
+        sh_visual: float,
+        sh_max: float,
         cutout_shape_pm: QPixmap,
         mask_cache_pk: tuple,
         vehicle_draw_pm: QPixmap,
@@ -726,15 +760,30 @@ class _PanelWidget(QWidget):
         draw_all_lines: Callable[[QPainter, int], None],
     ) -> None:
         """
-        Draw distance lines, subtract alpha under vehicle silhouette + gap, then draw vehicle.
-        cutout_shape_pm supplies alpha (tinted is fine; SourceIn preserves silhouette).
+        Draw distance lines with a sub-pixel vehicle cutout, then draw the vehicle.
+
+        Lines are cached per-n (position-independent). The cutout is applied
+        every frame via QPainter DestinationOut onto an offscreen buffer so the
+        sub-pixel vehicle position punches through the lines correctly without
+        a CPU pixel walk. DestinationOut must be on the offscreen buffer, not
+        the main painter, to avoid punching through the panel background.
+
+        cutout_shape_pm and vehicle_draw_pm are pre-rendered at sh_max. Each
+        frame they are drawn scaled to sh_visual via SmoothPixmapTransform so
+        Qt's bilinear filter handles sub-pixel size changes. The bounding box
+        is computed from sh_max (worst-case) so the offscreen buffer never
+        needs to grow during an animation and the lines cache key stays stable.
+
+        target_vy / target_sh are the settled (non-animated) values; vy /
+        sh_visual are the actual animated draw values.
         """
         if cutout_shape_pm.isNull() or vehicle_draw_pm.isNull():
             draw_all_lines(pa, car_up_lines)
             if not vehicle_draw_pm.isNull():
                 pa.save()
                 pa.setOpacity(vehicle_opacity)
-                pa.drawPixmap(vx_i, vy_i, vehicle_draw_pm)
+                pa.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                pa.drawPixmap(QPointF(vx, vy), vehicle_draw_pm)
                 pa.restore()
             return
 
@@ -743,12 +792,12 @@ class _PanelWidget(QWidget):
         r_phys = max(1, int(math.ceil(float(gap) * float(dpr))))
         pad_log = r_phys / float(dpr)
 
-        mx = float(vx_i) - pad_log
-        my = float(vy_i) - pad_log
-        cw = cutout_shape_pm.width()
-        ch = cutout_shape_pm.height()
-        mask_lw = int(math.ceil(cw + 2.0 * pad_log))
-        mask_lh = int(math.ceil(ch + 2.0 * pad_log))
+        # Mask dimensions at max size (physical pixels of the pixmap).
+        cw_max = cutout_shape_pm.width()
+        ch_max = cutout_shape_pm.height()
+        # Logical dimensions of the dilated mask at max size.
+        mask_lw_max = cw_max / dpr + 2.0 * pad_log
+        mask_lh_max = ch_max / dpr + 2.0 * pad_log
 
         lmin_x, lmax_x, lmin_y, lmax_y = self._distance_lines_bounds(
             ax,
@@ -761,18 +810,35 @@ class _PanelWidget(QWidget):
             car_up_lines,
             lines_start_rel,
         )
-        gmin_x = min(lmin_x, mx)
-        gmax_x = max(lmax_x, mx + mask_lw)
-        gmin_y = min(lmin_y, my)
-        gmax_y = max(lmax_y, my + mask_lh)
+        # Logical dimensions of the vehicle pixmap at max size.
+        w_max = cw_max / dpr
+        h_max = ch_max / dpr
+
+        # vx is the left edge of the vehicle at max sh, so the horizontal centre
+        # is fixed at vx + w_max/2. The dilated mask at max size is centred on
+        # the same point, so its left edge = centre - mask_lw_max/2.
+        vc_x_fixed = vx + w_max / 2.0
+
+        # Use target_vy / sh_max for bounding box so the lines cache key and
+        # buffer size stay stable during animation. target_vy is the top-left
+        # at target_sh; the centre-y at max size = target_vy + h_max/2.
+        vc_y_target = target_vy + h_max / 2.0
+
+        tmx = vc_x_fixed - mask_lw_max / 2.0
+        tmy = vc_y_target - mask_lh_max / 2.0
+        gmin_x = min(lmin_x, tmx)
+        gmax_x = max(lmax_x, tmx + mask_lw_max)
+        gmin_y = min(lmin_y, tmy)
+        gmax_y = max(lmax_y, tmy + mask_lh_max)
 
         origin_x = int(math.floor(gmin_x))
         origin_y = int(math.floor(gmin_y))
         layer_w = max(1, int(math.ceil(gmax_x - origin_x)) + 1)
         layer_h = max(1, int(math.ceil(gmax_y - origin_y)) + 1)
 
-        shape_ck = cutout_shape_pm.cacheKey()
-        layer_key = (
+        # Cache the lines-only layer (no cutout — cutout is applied per-frame
+        # so the vehicle can move and resize without invalidating this cache).
+        lines_layer_key = (
             origin_x,
             origin_y,
             layer_w,
@@ -789,85 +855,84 @@ class _PanelWidget(QWidget):
             ls,
             num_lines,
             line_color.rgba(),
-            vx_i,
-            vy_i,
-            r_phys,
-            shape_ck,
         )
-        hit_layer = self._acc_lines_layer_cache.get(layer_key)
-        if hit_layer is not None and not hit_layer.isNull():
-            lines_pm = hit_layer
+        hit_lines = self._acc_lines_layer_cache.get(lines_layer_key)
+        if hit_lines is not None and not hit_lines.isNull():
+            lines_only_pm = hit_lines
         else:
-            mask_pm = self._line_cutout_mask_from_vehicle_pixmap(
-                cutout_shape_pm, dpr, mask_cache_pk, r_phys
-            )
-            exact_pm = self._exact_vehicle_alpha_mask(
-                cutout_shape_pm, dpr, mask_cache_pk
-            )
-            lines_pm = QPixmap(
+            lines_only_pm = QPixmap(
                 max(1, int(layer_w * dpr)),
                 max(1, int(layer_h * dpr)),
             )
-            lines_pm.fill(Qt.GlobalColor.transparent)
-            lines_pm.setDevicePixelRatio(dpr)
-
-            lp = QPainter(lines_pm)
+            lines_only_pm.fill(Qt.GlobalColor.transparent)
+            lines_only_pm.setDevicePixelRatio(dpr)
+            lp = QPainter(lines_only_pm)
             lp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             lp.translate(-origin_x, -origin_y)
             draw_all_lines(lp, car_up_lines)
             lp.end()
+            self._acc_lines_layer_cache_put(lines_layer_key, lines_only_pm)
 
-            layer_img = lines_pm.toImage().convertToFormat(
-                QImage.Format.Format_ARGB32
-            )
-            if not layer_img.isNull():
-                comb = QImage(
-                    layer_img.width(),
-                    layer_img.height(),
-                    QImage.Format.Format_ARGB32,
-                )
-                comb.fill(0)
-                vx_px = int(round((vx_i - origin_x) * dpr))
-                vy_px = int(round((vy_i - origin_y) * dpr))
-                mx_px = vx_px - r_phys
-                my_px = vy_px - r_phys
-                ex_img = exact_pm.toImage().convertToFormat(
-                    QImage.Format.Format_ARGB32
-                )
-                di_img = mask_pm.toImage().convertToFormat(
-                    QImage.Format.Format_ARGB32
-                )
-                ex_ok = not ex_img.isNull()
-                di_ok = not di_img.isNull()
-                if ex_ok:
-                    self._stamp_alpha_max(comb, ex_img, vx_px, vy_px)
-                if di_ok:
-                    self._stamp_alpha_max(comb, di_img, mx_px, my_px)
-                if ex_ok or di_ok:
-                    rx0, ry0, rx1, ry1 = self._cutout_roi(
-                        layer_img.width(),
-                        layer_img.height(),
-                        vx_px,
-                        vy_px,
-                        ex_img.width() if ex_ok else 0,
-                        ex_img.height() if ex_ok else 0,
-                        mx_px,
-                        my_px,
-                        di_img.width() if di_ok else 0,
-                        di_img.height() if di_ok else 0,
-                    )
-                    self._multiply_line_alpha_by_mask(
-                        layer_img, comb, rx0, ry0, rx1, ry1
-                    )
-                lines_pm = QPixmap.fromImage(layer_img)
-                lines_pm.setDevicePixelRatio(dpr)
-                self._acc_lines_layer_cache_put(layer_key, lines_pm)
+        mask_pm = self._line_cutout_mask_from_vehicle_pixmap(
+            cutout_shape_pm, dpr, mask_cache_pk, r_phys
+        )
+        exact_pm = self._exact_vehicle_alpha_mask(
+            cutout_shape_pm, dpr, mask_cache_pk
+        )
 
-        pa.drawPixmap(origin_x, origin_y, lines_pm)
+        # Scale factor: how much smaller than max-sh the vehicle is drawn this frame.
+        scale = sh_visual / sh_max if sh_max > 0 else 1.0
+
+        w_visual = w_max * scale
+        h_visual = h_max * scale
+
+        # vc_x is the fixed horizontal centre (vx = left edge at max-sh, so centre
+        # is always vx + w_max/2 regardless of visual sh). vc_y is the animated
+        # vertical centre (vy is top-left at visual sh, which glides).
+        vc_x = vc_x_fixed
+        vc_y = vy + h_visual / 2.0
+
+        # Dilated mask logical dimensions at visual scale.
+        m_w = mask_lw_max * scale
+        m_h = mask_lh_max * scale
+        mx = vc_x - m_w / 2.0
+        my = vc_y - m_h / 2.0
+
+        # Vehicle draw rect (exact mask = same bounds as vehicle).
+        ex_w = w_visual
+        ex_h = h_visual
+        ex_x = vc_x - ex_w / 2.0
+        ex_y = vc_y - ex_h / 2.0
+
+        buf = self._ensure_lines_composite_buf(layer_w, layer_h, dpr)
+        buf.fill(Qt.GlobalColor.transparent)
+
+        bp = QPainter(buf)
+        try:
+            bp.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            bp.drawPixmap(0, 0, lines_only_pm)
+            bp.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+            if not mask_pm.isNull():
+                # Source rect is in pixmap device pixels, not logical — Qt's
+                # drawPixmap ignores devicePixelRatio for the source rectangle.
+                src_mask_rect = QRectF(0.0, 0.0, float(mask_pm.width()), float(mask_pm.height()))
+                dst_mask_rect = QRectF(mx - origin_x, my - origin_y, m_w, m_h)
+                bp.drawPixmap(dst_mask_rect, mask_pm, src_mask_rect)
+            if not exact_pm.isNull():
+                src_exact_rect = QRectF(0.0, 0.0, float(exact_pm.width()), float(exact_pm.height()))
+                dst_exact_rect = QRectF(ex_x - origin_x, ex_y - origin_y, ex_w, ex_h)
+                bp.drawPixmap(dst_exact_rect, exact_pm, src_exact_rect)
+        finally:
+            bp.end()
+
+        pa.drawPixmap(origin_x, origin_y, buf)
 
         pa.save()
         pa.setOpacity(vehicle_opacity)
-        pa.drawPixmap(vx_i, vy_i, vehicle_draw_pm)
+        pa.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        src_veh_rect = QRectF(0.0, 0.0, float(vehicle_draw_pm.width()), float(vehicle_draw_pm.height()))
+        dst_veh_rect = QRectF(ex_x, ex_y, ex_w, ex_h)
+        pa.drawPixmap(dst_veh_rect, vehicle_draw_pm, src_veh_rect)
         pa.restore()
 
     # lead vehicle speed indicator
@@ -924,6 +989,77 @@ class _PanelWidget(QWidget):
         if p._lead_visual == p._lead_anim_target:
             self._lead_anim_timer.stop()
         self.update()
+
+    def _start_vehicle_anim(self, target_y: float, target_sh: float) -> None:
+        """Start a new vehicle position+size animation segment from current visuals.
+
+        Reads _vehicle_visual_y and _vehicle_visual_sh (not _anim_target_*) as
+        starts so mid-flight distance changes glide from where the vehicle
+        visually IS, not from the previous settled position.
+
+        If either field is None (first paint), both fields snap and no timer fires.
+        """
+        p = self._p
+        cur_y = p._vehicle_visual_y
+        cur_sh = p._vehicle_visual_sh
+        if cur_y is None or cur_sh is None:
+            p._vehicle_visual_y = target_y
+            p._vehicle_anim_target_y = target_y
+            p._vehicle_visual_sh = target_sh
+            p._vehicle_anim_target_sh = target_sh
+            self._vehicle_anim_timer.stop()
+            return
+        p._vehicle_anim_start_y = cur_y
+        p._vehicle_anim_target_y = target_y
+        p._vehicle_anim_start_sh = cur_sh
+        p._vehicle_anim_target_sh = target_sh
+        p._vehicle_anim_t0 = time.monotonic()
+        p._vehicle_anim_dur_s = _VEHICLE_ANIM_MS / 1000.0
+        p._vehicle_anim_easing = _ease_out_cubic
+        if p._vehicle_anim_dur_s <= 0.0 or (cur_y == target_y and cur_sh == target_sh):
+            p._vehicle_visual_y = target_y
+            p._vehicle_visual_sh = target_sh
+            self._vehicle_anim_timer.stop()
+            return
+        if not self._vehicle_anim_timer.isActive():
+            self._vehicle_anim_timer.start(_VEHICLE_TICK_MS)
+
+    def _vehicle_anim_tick(self) -> None:
+        p = self._p
+        if p._vehicle_anim_dur_s <= 0.0:
+            p._vehicle_visual_y = p._vehicle_anim_target_y
+            p._vehicle_visual_sh = p._vehicle_anim_target_sh
+        else:
+            t = (time.monotonic() - p._vehicle_anim_t0) / p._vehicle_anim_dur_s
+            if t >= 1.0:
+                p._vehicle_visual_y = p._vehicle_anim_target_y
+                p._vehicle_visual_sh = p._vehicle_anim_target_sh
+            else:
+                eased = p._vehicle_anim_easing(t)
+                p._vehicle_visual_y = (
+                    p._vehicle_anim_start_y
+                    + (p._vehicle_anim_target_y - p._vehicle_anim_start_y) * eased
+                )
+                p._vehicle_visual_sh = (
+                    p._vehicle_anim_start_sh
+                    + (p._vehicle_anim_target_sh - p._vehicle_anim_start_sh) * eased
+                )
+        if (
+            p._vehicle_visual_y == p._vehicle_anim_target_y
+            and p._vehicle_visual_sh == p._vehicle_anim_target_sh
+        ):
+            self._vehicle_anim_timer.stop()
+        self.update()
+
+    def _ensure_lines_composite_buf(self, w: int, h: int, dpr: float) -> QPixmap:
+        tw = max(1, int(w * dpr))
+        th = max(1, int(h * dpr))
+        buf = self._lines_composite_buf
+        if buf is None or buf.width() < tw or buf.height() < th:
+            buf = QPixmap(tw, th)
+            buf.setDevicePixelRatio(dpr)
+            self._lines_composite_buf = buf
+        return buf
 
     @staticmethod
     def _dimmed_color(base: QColor, brightness: float) -> QColor:
@@ -1012,6 +1148,119 @@ class _PanelWidget(QWidget):
         self._lead_eraser_cache[key] = pm
         return pm
 
+    def _set_text_pixmap(
+        self, text: str, color: QColor, font: QFont, fm: QFontMetrics
+    ) -> QPixmap:
+        """Rasterize the set-speed text into a pixmap so it can be blitted
+        at a fractional offset during the lead-speed slide animation.
+
+        Qt's text renderer snaps glyph baselines to integer device pixels on
+        Windows even with PreferNoHinting + TextAntialiasing, so
+        ``drawText(QPointF, ...)`` staircases under a fractional y. Drawing
+        the text once into a pixmap and translating that pixmap with
+        ``SmoothPixmapTransform`` yields a true sub-pixel slide.
+        """
+        try:
+            dpr = float(self.devicePixelRatioF() or 1.0)
+        except Exception:
+            dpr = 1.0
+        tw = fm.horizontalAdvance(text)
+        th = fm.height()
+        # rgba() encodes color+alpha. Pixel size + dpr re-key on rescale.
+        key = (text, int(color.rgba()), font.pixelSize(),
+               int(round(dpr * 100)), tw, th)
+        hit = self._set_text_pm_cache.get(key)
+        if hit is not None:
+            return hit
+        # +2px padding so antialiased edges don't get clipped.
+        px_w = max(1, int(tw * dpr) + 2)
+        px_h = max(1, int(th * dpr) + 2)
+        pm = QPixmap(px_w, px_h)
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        tp = QPainter(pm)
+        try:
+            tp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            tp.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            tp.setFont(font)
+            tp.setPen(color)
+            tp.drawText(QPointF(0.0, float(fm.ascent())), text)
+        finally:
+            tp.end()
+        if len(self._set_text_pm_cache) >= self._set_text_pm_cache_max:
+            # Pop oldest insertion to bound memory (dicts preserve order).
+            self._set_text_pm_cache.pop(next(iter(self._set_text_pm_cache)))
+        self._set_text_pm_cache[key] = pm
+        return pm
+
+    def _lead_text_pixmap(
+        self, text: str, color: QColor, font: QFont, fm: QFontMetrics
+    ) -> QPixmap:
+        """Rasterize lead-speed text to a pixmap. Same rationale as
+        ``_set_text_pixmap``: blitting the pixmap via the scaling drawPixmap
+        overload honors fractional offsets, drawText does not.
+        """
+        try:
+            dpr = float(self.devicePixelRatioF() or 1.0)
+        except Exception:
+            dpr = 1.0
+        tw = fm.horizontalAdvance(text)
+        th = fm.height()
+        key = (text, int(color.rgba()), font.pixelSize(),
+               int(round(dpr * 100)), tw, th)
+        hit = self._lead_text_pm_cache.get(key)
+        if hit is not None:
+            return hit
+        px_w = max(1, int(tw * dpr) + 2)
+        px_h = max(1, int(th * dpr) + 2)
+        pm = QPixmap(px_w, px_h)
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        tp = QPainter(pm)
+        try:
+            tp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            tp.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            tp.setFont(font)
+            tp.setPen(color)
+            tp.drawText(QPointF(0.0, float(fm.ascent())), text)
+        finally:
+            tp.end()
+        if len(self._lead_text_pm_cache) >= self._lead_text_pm_cache_max:
+            self._lead_text_pm_cache.pop(next(iter(self._lead_text_pm_cache)))
+        self._lead_text_pm_cache[key] = pm
+        return pm
+
+    @staticmethod
+    def _draw_pixmap_subpixel(pa: QPainter, pm: QPixmap, x: float, y: float) -> None:
+        """Draw ``pm`` at fractional ``(x, y)`` with sub-pixel precision.
+
+        Qt's raster engine (default on Windows) routes drawPixmap through an
+        integer-aligned blit fast-path whenever the active transform type is
+        ``TxTranslate`` or lower, flooring fractional coordinates. This
+        includes the QPointF and QRectF overloads when dst-size equals
+        src-size — ``SmoothPixmapTransform`` is only consulted on the bilinear
+        path. Applying a sub-perceptual scale (1 + 1e-4) bumps the transform
+        type to ``TxScale`` so the bilinear path takes over and the fractional
+        translate is preserved by resampling. Size delta ≈ 0.01%, invisible.
+        """
+        if pm.isNull():
+            return
+        dpr = pm.devicePixelRatio() or 1.0
+        log_w = pm.width() / dpr
+        log_h = pm.height() / dpr
+        pa.save()
+        try:
+            pa.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            pa.translate(x, y)
+            pa.scale(1.0001, 1.0001)
+            pa.drawPixmap(
+                QRectF(0.0, 0.0, log_w, log_h),
+                pm,
+                QRectF(0.0, 0.0, float(pm.width()), float(pm.height())),
+            )
+        finally:
+            pa.restore()
+
     def _ensure_lead_buf(self, w: int, h: int, dpr: float) -> QPixmap:
         tw = max(1, int(w * dpr))
         th = max(1, int(h * dpr))
@@ -1076,17 +1325,22 @@ class _PanelWidget(QWidget):
         buf = self._ensure_lead_buf(w, h, dpr)
         buf.fill(Qt.GlobalColor.transparent)
 
+        lead_pm = self._lead_text_pixmap(lead_text, lead_color, lead_font, fm_lead)
+        lead_top_y = lead_baseline_y - fm_lead.ascent()
+
         bp = QPainter(buf)
         try:
             bp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             bp.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
             bp.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            bp.setFont(lead_font)
-            bp.setPen(lead_color)
             bp.setOpacity(lead_alpha)
-            # QPointF (not int x,y) so glyph positions sub-pixel along the slide —
-            # int rounding here produces a 1-px jitter every few frames.
-            bp.drawText(QPointF(lead_x, lead_baseline_y), lead_text)
+            # Pre-rasterized pixmap + sub-pixel helper: drawText snaps glyph
+            # origins to integer device px on Windows, defeating sub-pixel
+            # placement, and the raster engine's integer-aligned blit path
+            # floors fractional drawPixmap dsts even on the QRectF overload
+            # when dst-size == src-size. _draw_pixmap_subpixel forces the
+            # bilinear path so the fractional translate is preserved.
+            self._draw_pixmap_subpixel(bp, lead_pm, lead_x, lead_top_y)
 
             # Mask strength fades to 0 as lead reaches full extension: at visual=1
             # the lead glyph bottom touches set's top and the feather ring would
@@ -1142,6 +1396,10 @@ class _PanelWidget(QWidget):
         p = self._p
         pa = QPainter(self)
         pa.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Required (alongside font's PreferNoHinting) so the set-speed text
+        # animates sub-pixel without staircasing during the lead-speed slide.
+        pa.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        pa.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
         w, h = p._panel_w, p._panel_h
         sc = p._scale_mult
@@ -1187,10 +1445,12 @@ class _PanelWidget(QWidget):
         set_y_shift = _LEAD_SHIFT_PX_BASE * sc * p._lead_visual
         text_y_baseline = text_y_baseline_default + set_y_shift
 
-        # text
-        pa.setFont(p._font)
-        pa.setPen(p._text_color)
-        pa.drawText(QPointF(text_x, text_y_baseline), p._text_content)
+        # text — rasterize to a pixmap and blit at fractional offset so the
+        # slide animation is truly sub-pixel. See _draw_pixmap_subpixel for why
+        # a direct drawPixmap (QPointF or QRectF same-size) floors the offset.
+        text_pm = self._set_text_pixmap(p._text_content, p._text_color, p._font, fm)
+        text_top_y = text_y_baseline - fm.ascent()
+        self._draw_pixmap_subpixel(pa, text_pm, text_x, text_top_y)
 
         # lead vehicle speed (above set, soft-masked under set text)
         set_text_top_y = text_y_baseline - fm.ascent()
@@ -1230,6 +1490,15 @@ class _PanelWidget(QWidget):
 
         pa.end()
 
+    @staticmethod
+    def _compute_sh(area_sz: int, n: int, lw: int, ls: int, sc: float, truck: bool) -> int:
+        """Logical sprite height/width for vehicle at distance slot n (1=closest/largest)."""
+        lines_h_icon = n * lw + (n - 1) * ls
+        sh = area_sz - lines_h_icon - ls - int((3 + 7 * (not truck)) * sc)
+        if sh % 2 == area_sz % 2:
+            sh += 1
+        return max(1, sh)
+
     def _paint_icon_lines(
         self,
         pa: QPainter,
@@ -1258,10 +1527,7 @@ class _PanelWidget(QWidget):
         else:
             car_up_lines = int(6 * sc) if not acc_truck or not draw_vehicle else 0
 
-        sh = area_sz - lines_h_icon - ls - int((3 + 7 * (not acc_truck)) * sc)
-        if sh % 2 == area_sz % 2:
-            sh += 1
-        sh = max(1, sh)
+        sh = self._compute_sh(area_sz, n, lw, ls, sc, acc_truck)
 
         lines_start_rel = area_sz - lines_h_block - 1
         center_y_icon = (area_sz - lines_h_icon - 1) / 2
@@ -1269,12 +1535,7 @@ class _PanelWidget(QWidget):
         ix = (area_sz - sh) // 2
 
         if need_ghost:
-            sh_v = area_sz - lines_h_icon - ls - int(
-                (3 + 7 * (not ghost_is_truck)) * sc
-            )
-            if sh_v % 2 == area_sz % 2:
-                sh_v += 1
-            sh_v = max(1, sh_v)
+            sh_v = self._compute_sh(area_sz, n, lw, ls, sc, ghost_is_truck)
             iy_v = int(center_y_icon - sh_v / 2) + int(
                 (1.5 + 8 * (not ghost_is_truck)) * sc
             )
@@ -1310,12 +1571,31 @@ class _PanelWidget(QWidget):
 
         if need_ghost:
             dpr_g = self.devicePixelRatio()
-            scaled_raw = self._load_vehicle_asset_scaled(ghost_is_truck, sh_v, dpr_g)
-            scaled_v = self._load_vehicle_asset_scaled_tinted(
-                ghost_is_truck, sh_v, dpr_g, line_color
+            # Pre-render at max sh (n=1 gives largest sprite) for smooth scale-down.
+            sh_max = self._compute_sh(area_sz, 1, lw, ls, sc, ghost_is_truck)
+            scaled_raw_max = self._load_vehicle_asset_scaled(ghost_is_truck, sh_max, dpr_g)
+            scaled_v_max = self._load_vehicle_asset_scaled_tinted(
+                ghost_is_truck, sh_max, dpr_g, line_color
             )
-            vx_i = int(ax + ix_v)
-            vy_i = int(ay + iy_v - car_up_v)
+            target_sh = float(sh_v)
+            # vx is the left edge of the sprite at max sh so the horizontal
+            # centre (vx + sh_max/2) stays fixed while size animates.
+            ix_v_max = (area_sz - sh_max) // 2
+            vx = float(ax + ix_v_max)
+            target_vy = float(ay + iy_v - car_up_v)
+            layout_key = ("ghost", ghost_is_truck, dpr_g)
+            p = self._p
+            if p._vehicle_anim_layout_key != layout_key:
+                p._vehicle_anim_layout_key = layout_key
+                p._vehicle_visual_y = target_vy
+                p._vehicle_anim_target_y = target_vy
+                p._vehicle_visual_sh = target_sh
+                p._vehicle_anim_target_sh = target_sh
+                self._vehicle_anim_timer.stop()
+            elif target_vy != p._vehicle_anim_target_y or target_sh != p._vehicle_anim_target_sh:
+                self._start_vehicle_anim(target_vy, target_sh)
+            vy = p._vehicle_visual_y if p._vehicle_visual_y is not None else target_vy
+            sh_visual = p._vehicle_visual_sh if p._vehicle_visual_sh is not None else target_sh
             self._composite_acc_lines_with_vehicle_cutout(
                 pa,
                 ax,
@@ -1329,30 +1609,53 @@ class _PanelWidget(QWidget):
                 lw,
                 ls,
                 num_lines,
-                vx_i,
-                vy_i,
-                scaled_raw,
-                (ghost_is_truck, sh_v, dpr_g),
-                scaled_v,
+                vx,
+                vy,
+                target_vy,
+                target_sh,
+                sh_visual,
+                float(sh_max),
+                scaled_raw_max,
+                (ghost_is_truck, sh_max, dpr_g),
+                scaled_v_max,
                 _LAST_LOCKED_VEHICLE_OPACITY,
                 draw_all_lines,
             )
         else:
             dpr = self.devicePixelRatio()
-            cache_key = (id(icon_pm), n, area_sz, dpr, acc_truck, sc)
-            scaled = self._scaled_icon_lines_cache.get(cache_key)
-            if scaled is None:
-                phys_sh = int(sh * dpr)
-                scaled = icon_pm.scaled(
-                    phys_sh, phys_sh,
+            # Pre-render at max sh (n=1 gives largest sprite) for smooth scale-down.
+            sh_max = self._compute_sh(area_sz, 1, lw, ls, sc, acc_truck)
+            cache_key = (id(icon_pm), area_sz, dpr, acc_truck, sc)
+            scaled_max = self._scaled_icon_lines_cache.get(cache_key)
+            if scaled_max is None:
+                phys_sh_max = int(sh_max * dpr)
+                scaled_max = icon_pm.scaled(
+                    phys_sh_max, phys_sh_max,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
-                scaled.setDevicePixelRatio(dpr)
-                self._scaled_icon_lines_cache[cache_key] = scaled
+                scaled_max.setDevicePixelRatio(dpr)
+                self._scaled_icon_lines_cache[cache_key] = scaled_max
+            target_sh = float(sh)
             car_up_v_draw = int(6 * sc) if not acc_truck else 0
-            vx_i = int(ax + ix)
-            vy_i = int(ay + iy - car_up_v_draw)
+            # vx is the left edge of the sprite at max sh so the horizontal
+            # centre (vx + sh_max/2) stays fixed while size animates.
+            ix_max = (area_sz - sh_max) // 2
+            vx = float(ax + ix_max)
+            target_vy = float(ay + iy - car_up_v_draw)
+            layout_key = ("tracked", acc_truck, dpr)
+            p = self._p
+            if p._vehicle_anim_layout_key != layout_key:
+                p._vehicle_anim_layout_key = layout_key
+                p._vehicle_visual_y = target_vy
+                p._vehicle_anim_target_y = target_vy
+                p._vehicle_visual_sh = target_sh
+                p._vehicle_anim_target_sh = target_sh
+                self._vehicle_anim_timer.stop()
+            elif target_vy != p._vehicle_anim_target_y or target_sh != p._vehicle_anim_target_sh:
+                self._start_vehicle_anim(target_vy, target_sh)
+            vy = p._vehicle_visual_y if p._vehicle_visual_y is not None else target_vy
+            sh_visual = p._vehicle_visual_sh if p._vehicle_visual_sh is not None else target_sh
             self._composite_acc_lines_with_vehicle_cutout(
                 pa,
                 ax,
@@ -1366,11 +1669,15 @@ class _PanelWidget(QWidget):
                 lw,
                 ls,
                 num_lines,
-                vx_i,
-                vy_i,
-                scaled,
-                ("tracked", n, area_sz, dpr, acc_truck, sc),
-                scaled,
+                vx,
+                vy,
+                target_vy,
+                target_sh,
+                sh_visual,
+                float(sh_max),
+                scaled_max,
+                ("tracked", sh_max, dpr, acc_truck, sc),
+                scaled_max,
                 1.0,
                 draw_all_lines,
             )
@@ -1391,6 +1698,10 @@ class _PanelWidget(QWidget):
             self._acc_lines_layer_cache.clear()
             self._lead_eraser_cache.clear()
             self._lead_buf = None
+            self._lines_composite_buf = None
+            self._p._vehicle_anim_layout_key = ()
+            self._p._vehicle_visual_y = None
+            self._p._vehicle_visual_sh = None
             self._p._current_icon = self._load_icon()
             self.update()
         else:
@@ -1478,6 +1789,9 @@ class cc_panel:
         self._font = QFont("Arial")
         self._font.setBold(True)
         self._font.setPixelSize(max(1, int(40 * s)))
+        # See update_scaling: PreferNoHinting is required so QPointF baselines
+        # are honored sub-pixel during the lead-speed slide animation.
+        self._font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
 
         self._icon_cache: dict[tuple, QPixmap] = {}
         self._current_icon: QPixmap | None = None
@@ -1494,6 +1808,21 @@ class cc_panel:
         self._lead_anim_t0 = 0.0
         self._lead_anim_dur_s = 0.0
         self._lead_anim_easing = _ease_out_cubic
+
+        # Vehicle vertical position + size animation state.
+        # None = uninitialised; snap to target on first paint instead of animating.
+        self._vehicle_visual_y: float | None = None
+        self._vehicle_anim_start_y: float = 0.0
+        self._vehicle_anim_target_y: float = 0.0
+        self._vehicle_visual_sh: float | None = None
+        self._vehicle_anim_start_sh: float = 0.0
+        self._vehicle_anim_target_sh: float = 0.0
+        self._vehicle_anim_t0: float = 0.0
+        self._vehicle_anim_dur_s: float = 0.0
+        self._vehicle_anim_easing = _ease_out_cubic
+        # Tracks sprite identity (truck-ness, ghost-ness, dpr) so that
+        # sprite swaps snap instead of animating across mismatched glyphs.
+        self._vehicle_anim_layout_key: tuple = ()
 
         self._start_x = x_co
         self._start_y = y_co
