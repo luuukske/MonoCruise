@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import (
@@ -48,6 +49,8 @@ from ui.main_window.constants import (
     WINDOW_WIDTH,
 )
 from ui.main_window.settings_panel import SettingsPanel
+
+_CC_LEAD_SPEED_MIN_INTERVAL_S = 0.5
 
 if TYPE_CHECKING:
     from core.settings import Settings
@@ -190,6 +193,11 @@ class MonoCruiseWindow(QMainWindow):
         self._cc_panel: CcPanel | None = None
         self._cc_panel_scale_snap: float | None = None
         self._cc_panel_update_snap: tuple | None = None
+        # Lead speed throttle: only push a new int km/h every _CC_LEAD_SPEED_MIN_INTERVAL_S
+        # so rapid telemetry jitter doesn't flicker the displayed value faster
+        # than a human can read it. None pass-through is immediate (retract).
+        self._cc_lead_speed_emit_val: int | None = None
+        self._cc_lead_speed_emit_ts: float = 0.0
         self._init_cc_panel()
 
         # Apply loaded settings to widgets
@@ -389,17 +397,37 @@ class MonoCruiseWindow(QMainWindow):
 
         acc_locked = False
         acc_truck = False
+        lead_speed_kmh: int | None = None
         try:
             acc = registry.get_thread("acc_thread")
             if acc is not None and acc.is_alive():
                 with acc.data._lock:
                     has_lead = bool(acc.data.has_lead)
-                    lead_v = acc.data.leads[0].vehicle if (has_lead and acc.data.leads) else None
-                if has_lead and lead_v is not None:
+                    primary = acc.data.leads[0] if (has_lead and acc.data.leads) else None
+                if primary is not None:
                     acc_locked = True
-                    acc_truck = self._classify_lead_as_truck(lead_v)
+                    acc_truck = self._classify_lead_as_truck(primary.vehicle)
+                    # Quantize the lead's smoothed absolute speed to int km/h so
+                    # the snap below only fires panel updates when the displayed
+                    # value would actually change (panel renders to int anyway).
+                    lead_speed_kmh = int(round(primary.effective_speed_ms * 3.6))
         except (KeyError, AttributeError):
             pass
+
+        # Throttle lead-speed pass-through so rapid changes don't flicker the
+        # text faster than a human can read. Pass-through is immediate when
+        # the lead first appears (last emit was None) or when retracting (new
+        # value is None); only value-to-value changes are rate-limited.
+        now_mono = time.monotonic()
+        last_val = self._cc_lead_speed_emit_val
+        if lead_speed_kmh is None or last_val is None:
+            emit_now = True
+        else:
+            emit_now = (now_mono - self._cc_lead_speed_emit_ts) >= _CC_LEAD_SPEED_MIN_INTERVAL_S
+        if emit_now:
+            self._cc_lead_speed_emit_val = lead_speed_kmh
+            self._cc_lead_speed_emit_ts = now_mono
+        lead_speed_kmh = self._cc_lead_speed_emit_val
 
         s = self._settings
         with s._state_lock:
@@ -428,7 +456,7 @@ class MonoCruiseWindow(QMainWindow):
 
         update_snap = (
             text, display_mode, cruise_enabled, aeb_warn, acc_on,
-            acc_locked, acc_truck, gap_level,
+            acc_locked, acc_truck, gap_level, lead_speed_kmh,
         )
         if self._cc_panel_update_snap != update_snap:
             self._cc_panel_update_snap = update_snap
@@ -441,6 +469,7 @@ class MonoCruiseWindow(QMainWindow):
                 acc_locked=acc_locked,
                 distance_to_lead=gap_level,
                 acc_truck=acc_truck,
+                lead_vehicle_speed=lead_speed_kmh,
             )
 
         if should_show:

@@ -22,7 +22,7 @@ from typing import Callable
 from PySide6.QtWidgets import QWidget, QApplication
 if not __name__ == "__main__":
     from core.settings import Settings
-from PySide6.QtCore import Qt, QTimer, Signal, QByteArray
+from PySide6.QtCore import Qt, QTimer, Signal, QByteArray, QRectF, QPointF
 from PySide6.QtGui import (
     QPainter,
     QColor,
@@ -33,6 +33,8 @@ from PySide6.QtGui import (
     QPainterPath,
     QCursor,
     QGuiApplication,
+    QLinearGradient,
+    QRadialGradient,
     qAlpha,
     qBlue,
     qGreen,
@@ -49,6 +51,52 @@ AEB_COLOR = "#FF0000"
 _LAST_LOCKED_VEHICLE_OPACITY = 0.30
 # Logical px: expand vehicle alpha by this radius to cut holes in distance lines (shape outline).
 _LAST_LOCKED_LINE_GAP_PX = 1.5
+
+# Lead-vehicle speed indicator (rendered above set speed when ACC tracks a lead).
+# Values tuned in ui/cc_panel/prototype_lead_speed.html.
+_LEAD_FONT_RATIO = 0.5
+# Brightness near 1 keeps the lead in the same hue family as set speed; the
+# differentiation comes from _LEAD_OPACITY (≈ previous_brightness /
+# current_brightness = 0.7 / 0.95) so on a dark backdrop the perceived colour
+# matches the earlier rgb-darkened render.
+_LEAD_BRIGHTNESS = 0.95
+_LEAD_OPACITY = 0.74
+_LEAD_SHIFT_PX_BASE = 5.0
+_LEAD_GAP_PX_BASE = 0.0
+_LEAD_MASK_BLUR_BASE = 5.0
+_LEAD_MASK_PAD_BASE = 2.0
+_LEAD_ANIM_FORWARD_MS = 750
+_LEAD_ANIM_RETRACT_MS = 500
+_LEAD_TICK_MS = 16
+
+# Sentinel for update(lead_vehicle_speed=...): distinguishes "not provided" from None ("no lead").
+_LEAD_UNSET = object()
+
+
+def _smoothstep(t: float) -> float:
+    """Hermite smoothstep: zero derivative at t=0 and t=1.
+
+    Used as a pre-warp on the base easing so the animation always has a
+    flat-velocity ramp-up and ramp-down at the endpoints, regardless of the
+    base curve's slope at the boundaries (eg. easeOut has finite velocity at
+    t=0 which produced a visible jerk leaving the "no lead" position).
+    """
+    if t <= 0.0:
+        return 0.0
+    if t >= 1.0:
+        return 1.0
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _ease_out_cubic(t: float) -> float:
+    t = _smoothstep(t)
+    return 1.0 - (1.0 - t) ** 3
+
+
+def _ease_out_quad(t: float) -> float:
+    t = _smoothstep(t)
+    return 1.0 - (1.0 - t) ** 2
+
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +131,13 @@ class _PanelWidget(QWidget):
 
         self._blink_timer = QTimer(self)
         self._blink_timer.timeout.connect(self._blink_tick)
+
+        self._lead_anim_timer = QTimer(self)
+        self._lead_anim_timer.timeout.connect(self._lead_anim_tick)
+        # Reused per-frame buffer for lead text + soft-mask composite (avoids alloc churn).
+        self._lead_buf: QPixmap | None = None
+        self._lead_eraser_cache: dict[tuple, QPixmap] = {}
+        self._lead_eraser_cache_max = 16
 
         self._setup_window()
 
@@ -150,6 +205,8 @@ class _PanelWidget(QWidget):
         self._ghost_exact_alpha_cache.clear()
         self._vehicle_cutout_mask_cache.clear()
         self._acc_lines_layer_cache.clear()
+        self._lead_eraser_cache.clear()
+        self._lead_buf = None
         p._current_icon = self._load_icon()
         self.update()
 
@@ -181,6 +238,14 @@ class _PanelWidget(QWidget):
             "distance_to_lead": p._distance_to_lead,
             "text_content": p._text_content,
         }
+
+        # Lead speed: keep last non-None value so the retract animation can still
+        # render the text while it fades behind set speed.
+        if "lead_vehicle_speed" in changes:
+            lead_val = changes.pop("lead_vehicle_speed")
+            p._lead_vehicle_speed = lead_val
+            if lead_val is not None:
+                p._lead_displayed_speed = lead_val
 
         for key, val in changes.items():
             setattr(p, f"_{key}", val)
@@ -223,6 +288,11 @@ class _PanelWidget(QWidget):
 
         if needs_color or needs_icon:
             p._text_color = cc_panel._color_for_mode(p._cc_mode, p._cc_enabled)
+
+        # Drive lead-visible animation from current state.
+        new_lead_target = 1.0 if self._should_show_lead() else 0.0
+        if new_lead_target != p._lead_anim_target:
+            self._start_lead_anim(new_lead_target)
 
         self.update()
         self.raise_()
@@ -800,6 +870,242 @@ class _PanelWidget(QWidget):
         pa.drawPixmap(vx_i, vy_i, vehicle_draw_pm)
         pa.restore()
 
+    # lead vehicle speed indicator
+
+    def _should_show_lead(self) -> bool:
+        p = self._p
+        # Visibility tracks the reported lead speed, not lock state: the caller
+        # signals "no lead" by passing lead_vehicle_speed=None. Tying it to
+        # acc_locked makes the indicator vanish on transient unlocks even while
+        # a fresh speed is still being reported.
+        return (
+            p._acc_enabled
+            and p._cc_mode == "Cruise control"
+            and p._lead_vehicle_speed is not None
+            and not p._AEB_warn
+            and not p._blink_running
+        )
+
+    def _start_lead_anim(self, target: float):
+        """Start a new lead-visible animation segment from current visual to target.
+
+        Each segment locks its easing + duration at start so target changes
+        mid-flight never produce a position jump (animation lerps from current
+        _lead_visual under the new curve/duration).
+        """
+        p = self._p
+        p._lead_anim_start = p._lead_visual
+        p._lead_anim_target = float(target)
+        p._lead_anim_t0 = time.monotonic()
+        if p._lead_anim_target > p._lead_anim_start:
+            p._lead_anim_dur_s = _LEAD_ANIM_FORWARD_MS / 1000.0
+            p._lead_anim_easing = _ease_out_cubic
+        else:
+            p._lead_anim_dur_s = _LEAD_ANIM_RETRACT_MS / 1000.0
+            p._lead_anim_easing = _ease_out_quad
+        if p._lead_anim_dur_s <= 0.0:
+            p._lead_visual = p._lead_anim_target
+            self._lead_anim_timer.stop()
+            return
+        if not self._lead_anim_timer.isActive():
+            self._lead_anim_timer.start(_LEAD_TICK_MS)
+
+    def _lead_anim_tick(self):
+        p = self._p
+        if p._lead_anim_dur_s <= 0.0:
+            p._lead_visual = p._lead_anim_target
+        else:
+            t = (time.monotonic() - p._lead_anim_t0) / p._lead_anim_dur_s
+            if t >= 1.0:
+                p._lead_visual = p._lead_anim_target
+            else:
+                eased = p._lead_anim_easing(t)
+                p._lead_visual = p._lead_anim_start + (p._lead_anim_target - p._lead_anim_start) * eased
+        if p._lead_visual == p._lead_anim_target:
+            self._lead_anim_timer.stop()
+        self.update()
+
+    @staticmethod
+    def _dimmed_color(base: QColor, brightness: float) -> QColor:
+        b = max(0.0, min(1.0, brightness))
+        return QColor(
+            max(0, min(255, int(round(base.red() * b)))),
+            max(0, min(255, int(round(base.green() * b)))),
+            max(0, min(255, int(round(base.blue() * b)))),
+        )
+
+    @staticmethod
+    def _format_lead_text(speed: float) -> str:
+        return f"{int(round(speed))} km/h"
+
+    def _make_feathered_rect_pixmap(
+        self, inner_w: int, inner_h: int, blur_r: int, dpr: float
+    ) -> QPixmap:
+        """White rect, inner inner_w x inner_h fully opaque, outer ring of width
+        blur_r linearly feathered to transparent. Returns pixmap of total size
+        (inner_w + 2*blur_r) x (inner_h + 2*blur_r) in logical px."""
+        inner_w = max(1, int(inner_w))
+        inner_h = max(1, int(inner_h))
+        blur_r = max(0, int(blur_r))
+        total_w = inner_w + 2 * blur_r
+        total_h = inner_h + 2 * blur_r
+        pm = QPixmap(int(total_w * dpr), int(total_h * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        pa = QPainter(pm)
+        pa.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pa.setPen(Qt.PenStyle.NoPen)
+        opaque = QColor(255, 255, 255, 255)
+        clear = QColor(255, 255, 255, 0)
+
+        if blur_r == 0:
+            pa.setBrush(opaque)
+            pa.drawRect(QRectF(0.0, 0.0, float(total_w), float(total_h)))
+            pa.end()
+            return pm
+
+        pa.setBrush(opaque)
+        pa.drawRect(QRectF(float(blur_r), float(blur_r), float(inner_w), float(inner_h)))
+
+        g = QLinearGradient(0.0, 0.0, 0.0, float(blur_r))
+        g.setColorAt(0.0, clear); g.setColorAt(1.0, opaque)
+        pa.fillRect(QRectF(float(blur_r), 0.0, float(inner_w), float(blur_r)), g)
+
+        g = QLinearGradient(0.0, float(blur_r + inner_h), 0.0, float(blur_r + inner_h + blur_r))
+        g.setColorAt(0.0, opaque); g.setColorAt(1.0, clear)
+        pa.fillRect(QRectF(float(blur_r), float(blur_r + inner_h), float(inner_w), float(blur_r)), g)
+
+        g = QLinearGradient(0.0, 0.0, float(blur_r), 0.0)
+        g.setColorAt(0.0, clear); g.setColorAt(1.0, opaque)
+        pa.fillRect(QRectF(0.0, float(blur_r), float(blur_r), float(inner_h)), g)
+
+        g = QLinearGradient(float(blur_r + inner_w), 0.0, float(blur_r + inner_w + blur_r), 0.0)
+        g.setColorAt(0.0, opaque); g.setColorAt(1.0, clear)
+        pa.fillRect(QRectF(float(blur_r + inner_w), float(blur_r), float(blur_r), float(inner_h)), g)
+
+        corners = (
+            (blur_r,             blur_r,             0,                  0),
+            (blur_r + inner_w,   blur_r,             blur_r + inner_w,   0),
+            (blur_r,             blur_r + inner_h,   0,                  blur_r + inner_h),
+            (blur_r + inner_w,   blur_r + inner_h,   blur_r + inner_w,   blur_r + inner_h),
+        )
+        for cx, cy, fx, fy in corners:
+            rg = QRadialGradient(float(cx), float(cy), float(blur_r))
+            rg.setColorAt(0.0, opaque); rg.setColorAt(1.0, clear)
+            pa.fillRect(QRectF(float(fx), float(fy), float(blur_r), float(blur_r)), rg)
+
+        pa.end()
+        return pm
+
+    def _get_lead_eraser(
+        self, set_w: int, set_h: int, pad_px: int, blur_px: int, dpr: float
+    ) -> QPixmap:
+        key = (set_w, set_h, pad_px, blur_px, dpr)
+        hit = self._lead_eraser_cache.get(key)
+        if hit is not None:
+            return hit
+        pm = self._make_feathered_rect_pixmap(
+            set_w + 2 * pad_px, set_h + 2 * pad_px, blur_px, dpr
+        )
+        if len(self._lead_eraser_cache) >= self._lead_eraser_cache_max:
+            self._lead_eraser_cache.pop(next(iter(self._lead_eraser_cache)))
+        self._lead_eraser_cache[key] = pm
+        return pm
+
+    def _ensure_lead_buf(self, w: int, h: int, dpr: float) -> QPixmap:
+        tw = max(1, int(w * dpr))
+        th = max(1, int(h * dpr))
+        buf = self._lead_buf
+        if buf is None or buf.width() != tw or buf.height() != th:
+            buf = QPixmap(tw, th)
+            buf.setDevicePixelRatio(dpr)
+            self._lead_buf = buf
+        return buf
+
+    def _paint_lead(
+        self,
+        pa: QPainter,
+        w: int,
+        h: int,
+        sc: float,
+        set_x: float,
+        set_top_y: float,
+        set_w: int,
+        set_h: int,
+        set_baseline_default_y: float,
+    ) -> None:
+        p = self._p
+        visual = p._lead_visual
+        if visual <= 0.001:
+            return
+        if p._lead_displayed_speed is None:
+            return
+
+        set_font_px = p._font.pixelSize()
+        lead_font_px = max(1, int(round(set_font_px * _LEAD_FONT_RATIO)))
+        lead_font = QFont(p._font)
+        lead_font.setPixelSize(lead_font_px)
+        fm_lead = QFontMetrics(lead_font)
+        lead_text = self._format_lead_text(p._lead_displayed_speed)
+        lead_w_px = fm_lead.horizontalAdvance(lead_text)
+        lead_descent = fm_lead.descent()
+
+        # Right-anchor: lead's right edge aligns with set text's right edge.
+        set_right = set_x + set_w
+        lead_anchor_x = set_right - lead_w_px
+        lead_hidden_x = lead_anchor_x  # no horizontal travel
+
+        gap_px = _LEAD_GAP_PX_BASE * sc
+        lead_anchor_baseline_y = set_top_y - gap_px - lead_descent
+        lead_hidden_baseline_y = float(set_baseline_default_y)
+
+        lead_x = lead_hidden_x + (lead_anchor_x - lead_hidden_x) * visual
+        lead_baseline_y = lead_hidden_baseline_y + (lead_anchor_baseline_y - lead_hidden_baseline_y) * visual
+
+        # Fade-in late: alpha stays 0 until visual passes 0.5, then ramps up.
+        # Caps at _LEAD_OPACITY so the lead reads as a dimmer variant of the
+        # set-speed colour on dark backdrops (brightness stays high; the lead
+        # gets its visual differentiation from being semi-transparent).
+        lead_alpha = max(0.0, (visual - 0.5) / 0.5) * _LEAD_OPACITY
+        if lead_alpha <= 0.001:
+            return
+
+        lead_color = self._dimmed_color(p._text_color, _LEAD_BRIGHTNESS)
+
+        dpr = self.devicePixelRatio()
+        buf = self._ensure_lead_buf(w, h, dpr)
+        buf.fill(Qt.GlobalColor.transparent)
+
+        bp = QPainter(buf)
+        try:
+            bp.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            bp.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            bp.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+            bp.setFont(lead_font)
+            bp.setPen(lead_color)
+            bp.setOpacity(lead_alpha)
+            # QPointF (not int x,y) so glyph positions sub-pixel along the slide —
+            # int rounding here produces a 1-px jitter every few frames.
+            bp.drawText(QPointF(lead_x, lead_baseline_y), lead_text)
+
+            # Mask strength fades to 0 as lead reaches full extension: at visual=1
+            # the lead glyph bottom touches set's top and the feather ring would
+            # otherwise eat into the lead's descender region.
+            mask_strength = max(0.0, 1.0 - visual)
+            if mask_strength > 0.001:
+                pad_px = max(0, int(round(_LEAD_MASK_PAD_BASE * sc)))
+                blur_px = max(0, int(round(_LEAD_MASK_BLUR_BASE * sc)))
+                eraser_pm = self._get_lead_eraser(set_w, set_h, pad_px, blur_px, dpr)
+                erase_x = set_x - pad_px - blur_px
+                erase_y = set_top_y - pad_px - blur_px
+                bp.setOpacity(mask_strength)
+                bp.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+                bp.drawPixmap(QPointF(erase_x, erase_y), eraser_pm)
+        finally:
+            bp.end()
+
+        pa.drawPixmap(0, 0, buf)
+
     # tinting
 
     def _tinted(self, pm: QPixmap, color: QColor) -> QPixmap:
@@ -873,13 +1179,26 @@ class _PanelWidget(QWidget):
         if show_lines and not (acc_locked_now and p._acc_truck) and not ghost_truck_slot:
             icon_y -= int(4 * sc)
 
-        text_x = icon_x - p._icon_spacing - tw
-        text_y_baseline = (h - fm.height()) // 2 + fm.ascent()
+        text_x = float(icon_x - p._icon_spacing - tw)
+        text_y_baseline_default = float((h - fm.height()) // 2 + fm.ascent())
+        # Set speed slides down to make room for lead-vehicle speed above.
+        # Kept as float (QPointF) so the slide doesn't snap to integer pixels —
+        # rounding mid-animation produces visible stair-stepping.
+        set_y_shift = _LEAD_SHIFT_PX_BASE * sc * p._lead_visual
+        text_y_baseline = text_y_baseline_default + set_y_shift
 
         # text
         pa.setFont(p._font)
         pa.setPen(p._text_color)
-        pa.drawText(int(text_x), int(text_y_baseline), p._text_content)
+        pa.drawText(QPointF(text_x, text_y_baseline), p._text_content)
+
+        # lead vehicle speed (above set, soft-masked under set text)
+        set_text_top_y = text_y_baseline - fm.ascent()
+        self._paint_lead(
+            pa, w, h, sc,
+            text_x, set_text_top_y, int(tw), int(fm.height()),
+            text_y_baseline_default,
+        )
 
         # icon
         icon = p._current_icon
@@ -1070,6 +1389,8 @@ class _PanelWidget(QWidget):
             self._ghost_exact_alpha_cache.clear()
             self._vehicle_cutout_mask_cache.clear()
             self._acc_lines_layer_cache.clear()
+            self._lead_eraser_cache.clear()
+            self._lead_buf = None
             self._p._current_icon = self._load_icon()
             self.update()
         else:
@@ -1161,6 +1482,19 @@ class cc_panel:
         self._icon_cache: dict[tuple, QPixmap] = {}
         self._current_icon: QPixmap | None = None
 
+        # Lead vehicle speed indicator state.
+        # _lead_vehicle_speed: latest from caller (None = no lead detected).
+        # _lead_displayed_speed: last non-None value, kept during retract so the
+        # disappearing text still renders.
+        self._lead_vehicle_speed: float | None = None
+        self._lead_displayed_speed: float | None = None
+        self._lead_visual = 0.0
+        self._lead_anim_start = 0.0
+        self._lead_anim_target = 0.0
+        self._lead_anim_t0 = 0.0
+        self._lead_anim_dur_s = 0.0
+        self._lead_anim_easing = _ease_out_cubic
+
         self._start_x = x_co
         self._start_y = y_co
         self.running = True
@@ -1192,6 +1526,7 @@ class cc_panel:
         complete_update: bool = False,
         acc_enabled: bool | None = None,
         acc_truck: bool | None = None,
+        lead_vehicle_speed=_LEAD_UNSET,
     ):
         """
         Update the display.  Thread-safe, never drops changes.
@@ -1210,6 +1545,11 @@ class cc_panel:
             complete_update: Force a full repaint / recalculation.
             acc_enabled: Whether ACC is enabled.
             acc_truck: Whether a truck is being tracked.
+            lead_vehicle_speed: Smoothed lead-vehicle speed (km/h) to render
+                above set speed. Pass ``None`` when no lead is detected (the
+                indicator retracts behind the set speed). Omit to leave
+                unchanged. Only shown while ACC is enabled, locked, in
+                Cruise-control mode, and not during AEB.
         """
         d: dict = {}
         if new_text is not None:
@@ -1228,6 +1568,8 @@ class cc_panel:
             d["acc_enabled"] = acc_enabled
         if acc_truck is not None:
             d["acc_truck"] = acc_truck
+        if lead_vehicle_speed is not _LEAD_UNSET:
+            d["lead_vehicle_speed"] = lead_vehicle_speed
         if complete_update:
             d["_complete_update"] = True
         if not d:
@@ -1321,7 +1663,10 @@ if __name__ == "__main__":
         "acc_truck": False,
         "distance_to_lead": 3,
         "AEB_warn": False,
+        "lead_vehicle_speed": None,
     }
+
+    LEAD_SPEEDS = [None, 110.0]
 
     def update_scaling():
         time.sleep(3)
@@ -1337,10 +1682,12 @@ if __name__ == "__main__":
         print("  m = cc_mode (cycle)     e = cc_enabled    s = speed text (cycle)")
         print("  l = acc_locked          a = acc_enabled   t = acc_truck")
         print("  1/2/3/4 = distance_to_lead (lines)   b = AEB_warn")
+        print("  v = lead_vehicle_speed (cycle: None/60/80/96/110)")
         print("  h = help   q = quit")
         print(f"\n  Now: mode={state['cc_mode']!r} enabled={state['cc_enabled']} "
               f"locked={state['acc_locked']} acc={state['acc_enabled']} truck={state['acc_truck']} "
-              f"lines={state['distance_to_lead']} AEB={state['AEB_warn']} text={state['new_text']!r}\n")
+              f"lines={state['distance_to_lead']} AEB={state['AEB_warn']} text={state['new_text']!r} "
+              f"lead={state['lead_vehicle_speed']!r}\n")
 
     def keyboard_test():
         print_help()
@@ -1384,6 +1731,11 @@ if __name__ == "__main__":
             elif key == "b":
                 state["AEB_warn"] = not state["AEB_warn"]
                 print(f"  AEB_warn = {state['AEB_warn']}")
+            elif key == "v":
+                i = (LEAD_SPEEDS.index(state["lead_vehicle_speed"]) + 1) % len(LEAD_SPEEDS) \
+                    if state["lead_vehicle_speed"] in LEAD_SPEEDS else 0
+                state["lead_vehicle_speed"] = LEAD_SPEEDS[i]
+                print(f"  lead_vehicle_speed = {state['lead_vehicle_speed']!r}")
             else:
                 print("  Unknown key. Press h for help.")
                 continue

@@ -1,0 +1,678 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>cc_panel — lead speed animation prototype</title>
+<style>
+  :root {
+    --bg: #111418;
+    --panel: #0a0c10;
+    --fg: #e8e8e8;
+    --muted: #8a93a0;
+    --accent: #4876FF;
+    --border: #1f2630;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); font: 13px/1.4 system-ui, sans-serif; }
+  .wrap { display: grid; grid-template-columns: minmax(380px, 1fr) 360px; gap: 20px; padding: 20px; min-height: 100vh; }
+  .stage { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; border: 1px solid var(--border); border-radius: 8px; padding: 24px; background: var(--panel); }
+  .stage-bg-toggle { position: absolute; }
+  .panel-canvas { display: block; image-rendering: auto; background: #1c1f24; border-radius: 4px; }
+  .panel-canvas.light { background: #d8dde3; }
+  .stage-scroll { width: 100%; overflow: auto; display: flex; justify-content: center; padding: 8px; }
+  .controls { display: flex; flex-direction: column; gap: 14px; border: 1px solid var(--border); border-radius: 8px; padding: 16px; background: var(--panel); overflow-y: auto; max-height: calc(100vh - 40px); }
+  .controls h2 { margin: 0 0 4px; font-size: 14px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .row { display: grid; grid-template-columns: 130px 1fr 56px; align-items: center; gap: 8px; }
+  .row label { color: var(--muted); }
+  .row input[type="range"] { width: 100%; }
+  .row .val { text-align: right; font-variant-numeric: tabular-nums; color: var(--fg); }
+  select, input[type="text"], button { background: #161a20; color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; font: inherit; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+  button:hover { filter: brightness(1.15); }
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .toggles { display: flex; flex-direction: column; gap: 6px; }
+  .toggle { display: flex; align-items: center; gap: 8px; }
+  .legend { color: var(--muted); font-size: 11px; line-height: 1.5; }
+  .hr { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
+  .graph { background: #14171c; border: 1px solid var(--border); border-radius: 4px; }
+  code { background: #161a20; padding: 1px 5px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="stage">
+    <div class="stage-scroll">
+      <canvas id="panel" class="panel-canvas" width="630" height="200"></canvas>
+    </div>
+    <div class="legend" id="status">progress: 0.000 · target: 0 · running: false</div>
+    <canvas id="graph" class="graph" width="600" height="120"></canvas>
+    <div class="legend">easing curve preview (x = time, y = output)</div>
+  </div>
+
+  <div class="controls">
+    <h2>Lead speed</h2>
+    <div class="btn-row">
+      <button class="primary" id="toggleLead">Toggle lead present</button>
+      <button id="reset">Reset (no lead)</button>
+    </div>
+    <div class="row">
+      <label>Lead value</label>
+      <input type="text" id="leadValue" value="96 km/h" />
+      <span></span>
+    </div>
+    <div class="row">
+      <label>Set value</label>
+      <input type="text" id="setValue" value="111 km/h" />
+      <span></span>
+    </div>
+
+    <hr class="hr" />
+    <h2>Animation</h2>
+    <div class="row">
+      <label>Duration (ms)</label>
+      <input type="range" id="duration" min="50" max="1200" step="10" value="750" />
+      <span class="val" id="durationV">750</span>
+    </div>
+    <div class="row">
+      <label>Easing</label>
+      <select id="easing">
+        <option value="linear">linear</option>
+        <option value="easeInQuad">easeInQuad</option>
+        <option value="easeOutQuad">easeOutQuad</option>
+        <option value="easeInOutQuad">easeInOutQuad</option>
+        <option value="easeInCubic">easeInCubic</option>
+        <option value="easeOutCubic" selected>easeOutCubic</option>
+        <option value="easeInOutCubic">easeInOutCubic</option>
+        <option value="easeOutQuart">easeOutQuart</option>
+        <option value="easeInOutQuart">easeInOutQuart</option>
+        <option value="easeOutExpo">easeOutExpo</option>
+        <option value="easeInOutExpo">easeInOutExpo</option>
+        <option value="easeOutBack">easeOutBack</option>
+        <option value="easeInOutBack">easeInOutBack</option>
+        <option value="easeOutElastic">easeOutElastic</option>
+      </select>
+      <span></span>
+    </div>
+    <div class="row">
+      <label>Asymmetric</label>
+      <span class="toggle"><input type="checkbox" id="asymmetric" checked /> use different easing when retracting</span>
+      <span></span>
+    </div>
+    <div class="row" id="retractEasingRow">
+      <label>Retract easing</label>
+      <select id="retractEasing">
+        <option value="linear">linear</option>
+        <option value="easeInQuad">easeInQuad</option>
+        <option value="easeOutQuad" selected>easeOutQuad</option>
+        <option value="easeInOutQuad">easeInOutQuad</option>
+        <option value="easeInCubic">easeInCubic</option>
+        <option value="easeInOutCubic">easeInOutCubic</option>
+        <option value="easeInOutQuart">easeInOutQuart</option>
+      </select>
+      <span></span>
+    </div>
+    <div class="row" id="retractDurationRow">
+      <label>Retract dur (ms)</label>
+      <input type="range" id="retractDuration" min="50" max="1200" step="10" value="500" />
+      <span class="val" id="retractDurationV">500</span>
+    </div>
+
+    <hr class="hr" />
+    <h2>Layout</h2>
+    <div class="row">
+      <label>Scale</label>
+      <input type="range" id="scale" min="1" max="3" step="0.1" value="2" />
+      <span class="val" id="scaleV">2.0</span>
+    </div>
+    <div class="row">
+      <label>Set shift (px@1x)</label>
+      <input type="range" id="shift" min="4" max="30" step="0.5" value="5" />
+      <span class="val" id="shiftV">5</span>
+    </div>
+    <div class="row">
+      <label>Lead font ratio</label>
+      <input type="range" id="leadRatio" min="0.3" max="0.85" step="0.01" value="0.5" />
+      <span class="val" id="leadRatioV">0.5</span>
+    </div>
+    <div class="row">
+      <label>Lead brightness</label>
+      <input type="range" id="leadBrightness" min="0.3" max="1.0" step="0.01" value="0.7" />
+      <span class="val" id="leadBrightnessV">0.70</span>
+    </div>
+    <div class="row">
+      <label>Lead gap (px@1x)</label>
+      <input type="range" id="leadGap" min="-6" max="12" step="0.5" value="0" />
+      <span class="val" id="leadGapV">0</span>
+    </div>
+    <div class="row">
+      <label>Lead anchor</label>
+      <select id="leadAnchor">
+        <option value="right" selected>right (aligns with set right edge)</option>
+        <option value="center">center (aligns with set center)</option>
+        <option value="left">left (aligns with set left edge)</option>
+      </select>
+      <span></span>
+    </div>
+    <div class="row">
+      <label>Lead alpha curve</label>
+      <select id="alphaMode">
+        <option value="solid">solid (mask handles fade)</option>
+        <option value="linear">linear with progress</option>
+        <option value="late" selected>fade-in late (progress&gt;0.5)</option>
+      </select>
+      <span></span>
+    </div>
+    <div class="row">
+      <label>Mask mode</label>
+      <select id="clipMode">
+        <option value="softMask" selected>soft eraser (blurred rect over set text)</option>
+        <option value="setTop">hard clip to set-text top edge</option>
+        <option value="setRect">hard clip to full set-text rect</option>
+        <option value="none">no mask (debug overlap)</option>
+      </select>
+      <span></span>
+    </div>
+    <div class="row">
+      <label>Mask blur (px@1x)</label>
+      <input type="range" id="maskBlur" min="0" max="20" step="0.5" value="5" />
+      <span class="val" id="maskBlurV">5</span>
+    </div>
+    <div class="row">
+      <label>Mask pad (px@1x)</label>
+      <input type="range" id="maskPad" min="-6" max="14" step="0.5" value="2" />
+      <span class="val" id="maskPadV">2</span>
+    </div>
+
+    <hr class="hr" />
+    <h2>Debug</h2>
+    <div class="toggles">
+      <label class="toggle"><input type="checkbox" id="showGuides" /> show baselines &amp; rects</label>
+      <label class="toggle"><input type="checkbox" id="lightBg" /> light backdrop</label>
+      <label class="toggle"><input type="checkbox" id="slowMo" /> slow-mo (10x)</label>
+    </div>
+
+    <hr class="hr" />
+    <div class="legend">
+      Panel mimics <code>cc_panel</code> at scale 1 = 315×100. Canvas is rendered at 2x for clarity.<br>
+      Toggle the lead state and tweak parameters live. Graph shows the easing curve being used for the *current* direction.
+    </div>
+  </div>
+</div>
+
+<script>
+// ----- Easing functions -----
+const EASE = {
+  linear:        t => t,
+  easeInQuad:    t => t*t,
+  easeOutQuad:   t => 1 - (1-t)*(1-t),
+  easeInOutQuad: t => t < .5 ? 2*t*t : 1 - Math.pow(-2*t+2, 2)/2,
+  easeInCubic:   t => t*t*t,
+  easeOutCubic:  t => 1 - Math.pow(1-t, 3),
+  easeInOutCubic:t => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t+2, 3)/2,
+  easeOutQuart:  t => 1 - Math.pow(1-t, 4),
+  easeInOutQuart:t => t < .5 ? 8*t*t*t*t : 1 - Math.pow(-2*t+2, 4)/2,
+  easeOutExpo:   t => t === 1 ? 1 : 1 - Math.pow(2, -10*t),
+  easeInOutExpo: t => t===0?0:t===1?1:t<.5?Math.pow(2,20*t-10)/2:(2-Math.pow(2,-20*t+10))/2,
+  easeOutBack:   t => { const c1=1.70158, c3=c1+1; return 1 + c3*Math.pow(t-1,3) + c1*Math.pow(t-1,2); },
+  easeInOutBack: t => { const c1=1.70158, c2=c1*1.525; return t<.5 ? (Math.pow(2*t,2)*((c2+1)*2*t - c2))/2 : (Math.pow(2*t-2,2)*((c2+1)*(t*2-2)+c2)+2)/2; },
+  easeOutElastic:t => { const c4 = (2*Math.PI)/3; return t===0?0:t===1?1: Math.pow(2,-10*t)*Math.sin((t*10-0.75)*c4)+1; },
+};
+
+// ----- State -----
+const state = {
+  // animation
+  progress: 0,
+  target: 0,            // 0 = lead hidden, 1 = lead visible
+  lastTs: null,
+  running: false,
+  // params (live-bound from controls)
+  durationMs: 750,
+  retractDurationMs: 500,
+  easing: 'easeOutCubic',
+  retractEasing: 'easeOutQuad',
+  asymmetric: true,
+  scale: 2,
+  shift: 5,
+  leadRatio: 0.5,
+  leadGap: 0,
+  leadBrightness: 0.7,
+  alphaMode: 'late',
+  clipMode: 'softMask',
+  leadAnchor: 'right',
+  maskBlur: 5,
+  maskPad: 2,
+  showGuides: false,
+  lightBg: false,
+  slowMo: false,
+  leadValue: '96 km/h',
+  setValue: '111 km/h',
+};
+
+// ----- Controls wiring -----
+function bindRange(id, key, parse = parseFloat, fmt = v => v.toFixed(0)) {
+  const el = document.getElementById(id);
+  const v = document.getElementById(id + 'V');
+  el.addEventListener('input', () => {
+    state[key] = parse(el.value);
+    if (v) v.textContent = fmt(state[key]);
+    requestRender();
+  });
+  state[key] = parse(el.value);
+  if (v) v.textContent = fmt(state[key]);
+}
+function bindSelect(id, key) {
+  const el = document.getElementById(id);
+  el.addEventListener('change', () => { state[key] = el.value; requestRender(); });
+  state[key] = el.value;
+}
+function bindCheck(id, key, onChange) {
+  const el = document.getElementById(id);
+  el.addEventListener('change', () => { state[key] = el.checked; if (onChange) onChange(); requestRender(); });
+  state[key] = el.checked;
+  if (onChange) onChange();
+}
+function bindText(id, key) {
+  const el = document.getElementById(id);
+  el.addEventListener('input', () => { state[key] = el.value; requestRender(); });
+  state[key] = el.value;
+}
+
+bindRange('duration', 'durationMs', parseFloat, v => v.toFixed(0));
+bindRange('retractDuration', 'retractDurationMs', parseFloat, v => v.toFixed(0));
+bindRange('scale', 'scale', parseFloat, v => v.toFixed(1));
+bindRange('shift', 'shift', parseFloat, v => v.toFixed(1));
+bindRange('leadRatio', 'leadRatio', parseFloat, v => v.toFixed(2));
+bindRange('leadBrightness', 'leadBrightness', parseFloat, v => v.toFixed(2));
+bindRange('leadGap', 'leadGap', parseFloat, v => v.toFixed(1));
+bindRange('maskBlur', 'maskBlur', parseFloat, v => v.toFixed(1));
+bindRange('maskPad', 'maskPad', parseFloat, v => v.toFixed(1));
+bindSelect('easing', 'easing');
+bindSelect('retractEasing', 'retractEasing');
+bindSelect('alphaMode', 'alphaMode');
+bindSelect('clipMode', 'clipMode');
+bindSelect('leadAnchor', 'leadAnchor');
+bindCheck('asymmetric', 'asymmetric', () => {
+  const show = state.asymmetric ? '' : 'none';
+  document.getElementById('retractEasingRow').style.display = show;
+  document.getElementById('retractDurationRow').style.display = show;
+});
+bindCheck('showGuides', 'showGuides');
+bindCheck('lightBg', 'lightBg', () => {
+  document.getElementById('panel').classList.toggle('light', state.lightBg);
+});
+bindCheck('slowMo', 'slowMo');
+bindText('leadValue', 'leadValue');
+bindText('setValue', 'setValue');
+
+document.getElementById('toggleLead').addEventListener('click', () => {
+  state.target = state.target > 0.5 ? 0 : 1;
+  state.lastTs = null;
+  state.running = true;
+  tick();
+});
+document.getElementById('reset').addEventListener('click', () => {
+  state.target = 0;
+  state.progress = 0;
+  state.running = false;
+  requestRender();
+});
+
+// ----- Animation tick -----
+function currentDuration() {
+  if (state.asymmetric && state.target < state.progress) return state.retractDurationMs;
+  return state.durationMs;
+}
+function currentEasing() {
+  if (state.asymmetric && state.target < state.progress) return state.retractEasing;
+  return state.easing;
+}
+
+let rafId = null;
+function tick(ts) {
+  if (state.lastTs == null) state.lastTs = ts || performance.now();
+  const now = ts || performance.now();
+  let dt = (now - state.lastTs) / 1000; // seconds
+  state.lastTs = now;
+  if (state.slowMo) dt /= 10;
+
+  const dur = currentDuration() / 1000;
+  const dir = Math.sign(state.target - state.progress);
+  if (dir !== 0 && dur > 0) {
+    const step = dt / dur;
+    state.progress += dir * step;
+    if ((dir > 0 && state.progress >= state.target) || (dir < 0 && state.progress <= state.target)) {
+      state.progress = state.target;
+      state.running = false;
+    } else {
+      state.running = true;
+    }
+  } else {
+    state.running = false;
+  }
+
+  render();
+
+  if (state.running) {
+    rafId = requestAnimationFrame(tick);
+  } else {
+    rafId = null;
+    state.lastTs = null;
+  }
+}
+
+function requestRender() {
+  if (!state.running) render();
+}
+
+// ----- Rendering -----
+const canvas = document.getElementById('panel');
+const ctx = canvas.getContext('2d');
+const graph = document.getElementById('graph');
+const gctx = graph.getContext('2d');
+const statusEl = document.getElementById('status');
+
+// canvas display = 2x logical pixels of the panel for clarity
+const CANVAS_PX_PER_LOGICAL = 2;
+
+function logicalPanelSize() {
+  const s = state.scale;
+  return { w: 315 * s, h: 100 * s };
+}
+
+function resizeCanvasIfNeeded() {
+  const { w, h } = logicalPanelSize();
+  const cw = Math.round(w * CANVAS_PX_PER_LOGICAL);
+  const ch = Math.round(h * CANVAS_PX_PER_LOGICAL);
+  if (canvas.width !== cw || canvas.height !== ch) {
+    canvas.width = cw;
+    canvas.height = ch;
+  }
+  // CSS display = logical panel size so it matches PySide6 on-screen 1:1.
+  const cssW = `${Math.round(w)}px`;
+  const cssH = `${Math.round(h)}px`;
+  if (canvas.style.width !== cssW) canvas.style.width = cssW;
+  if (canvas.style.height !== cssH) canvas.style.height = cssH;
+}
+
+// Offscreen canvas reused across frames for lead-text soft masking.
+const offCanvas = document.createElement('canvas');
+const offCtx = offCanvas.getContext('2d');
+
+// Base CC color (mirrors CRUISECONTROL_COLOR = #4876FF in cc_panel).
+const BASE_RGB = { r: 0x48, g: 0x76, b: 0xFF };
+function leadColor() {
+  const b = clamp01(state.leadBrightness);
+  const r = Math.round(BASE_RGB.r * b);
+  const g = Math.round(BASE_RGB.g * b);
+  const bl = Math.round(BASE_RGB.b * b);
+  return `rgb(${r},${g},${bl})`;
+}
+
+function drawLeadWithSoftMask(args) {
+  const {
+    w, h, dpr, sc,
+    leadText, leadFontPx, fontFamily,
+    leadBaseX, leadBaselineY, leadAlpha,
+    setBaseX, setTopY, setBotY, setW, setH,
+  } = args;
+
+  // Make offscreen match main backing store size.
+  const cw = Math.round(w * dpr);
+  const ch = Math.round(h * dpr);
+  if (offCanvas.width !== cw || offCanvas.height !== ch) {
+    offCanvas.width = cw;
+    offCanvas.height = ch;
+  }
+  offCtx.setTransform(1, 0, 0, 1, 0, 0);
+  offCtx.clearRect(0, 0, cw, ch);
+  offCtx.scale(dpr, dpr);
+
+  // 1. Paint lead glyphs.
+  offCtx.globalCompositeOperation = 'source-over';
+  offCtx.globalAlpha = leadAlpha;
+  offCtx.fillStyle = leadColor();
+  offCtx.font = `bold ${leadFontPx}px ${fontFamily}`;
+  offCtx.textBaseline = 'alphabetic';
+  offCtx.fillText(leadText, leadBaseX, leadBaselineY);
+
+  // 2. Erase a soft-edged rect that covers the set-text bounding box.
+  //    destination-out with filter:blur produces a feathered eraser.
+  const pad = state.maskPad * sc;
+  const blur = state.maskBlur * sc;
+  offCtx.globalAlpha = 1;
+  offCtx.globalCompositeOperation = 'destination-out';
+  offCtx.filter = blur > 0 ? `blur(${blur}px)` : 'none';
+  offCtx.fillStyle = '#000';
+  offCtx.fillRect(setBaseX - pad, setTopY - pad, setW + 2 * pad, setH + 2 * pad);
+  offCtx.filter = 'none';
+  offCtx.globalCompositeOperation = 'source-over';
+
+  // 3. Composite onto main canvas (main is already scaled by dpr).
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(offCanvas, 0, 0);
+  ctx.restore();
+}
+
+function render() {
+  resizeCanvasIfNeeded();
+  const { w, h } = logicalPanelSize();
+  const sc = state.scale;
+  const dpr = CANVAS_PX_PER_LOGICAL;
+
+  ctx.save();
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+
+  // background (rounded rect, semi-transparent black like the panel)
+  const radius = 30 * sc;
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  roundedRect(ctx, 0, 0, w, h, radius);
+  ctx.fill();
+
+  // text metrics
+  const setFontPx = Math.max(1, Math.round(40 * sc));
+  const leadFontPx = Math.max(1, Math.round(setFontPx * state.leadRatio));
+  const fontFamily = 'Arial, sans-serif';
+  ctx.font = `bold ${setFontPx}px ${fontFamily}`;
+  const setMetrics = textMetrics(ctx, state.setValue, setFontPx);
+  ctx.font = `bold ${leadFontPx}px ${fontFamily}`;
+  const leadMetrics = textMetrics(ctx, state.leadValue, leadFontPx);
+
+  // layout (mirrors cc_panel)
+  const rightM = 20 * sc;
+  const iconSpacing = 20 * sc;
+  // approximate icon area (the real panel reserves icon to the right);
+  // emulate with a placeholder box so layout matches.
+  const iconSz = Math.round(setMetrics.heightApprox * 1.8 * 0.85);
+  const iconX = w - iconSz - rightM;
+  const iconY = (h - iconSz) / 2;
+
+  // baseline x = right-aligned to (iconX - iconSpacing)
+  const rightEdge = iconX - iconSpacing;
+  const setBaseX = rightEdge - setMetrics.width;
+  const setCenterX = setBaseX + setMetrics.width / 2;
+
+  // y placement
+  const easeFn = EASE[currentEasing()] || EASE.linear;
+  // map progress to a *visual* eased value (so the curve only shapes the spatial path)
+  const p = clamp01(state.progress);
+  const eased = easeFn(p);
+
+  const shiftPx = state.shift * sc;
+  // set speed baseline shifts DOWN as lead appears
+  const setBaselineDefaultY = Math.floor((h - setMetrics.heightApprox) / 2) + setMetrics.ascent;
+  const setBaselineY = setBaselineDefaultY + shiftPx * eased;
+  const setTopY = setBaselineY - setMetrics.ascent;
+  const setBotY = setBaselineY + setMetrics.descent;
+
+  // ----- lead position: lerp from center-behind-set (p=0) to chosen anchor above (p=1) -----
+  // anchor x (visible state)
+  let leadAnchorX; // text origin (left edge of glyphs) when visible
+  if (state.leadAnchor === 'right') {
+    leadAnchorX = rightEdge - leadMetrics.width;
+  } else if (state.leadAnchor === 'left') {
+    leadAnchorX = setBaseX;
+  } else {
+    // center
+    leadAnchorX = setCenterX - leadMetrics.width / 2;
+  }
+  // hidden-state x = same as anchor (no horizontal travel; lead only retracts vertically)
+  const leadHiddenX = leadAnchorX;
+
+  // anchor y (visible) = above set top edge with configurable gap; baseline coord
+  const leadGapPx = state.leadGap * sc;
+  const leadAnchorBaselineY = setTopY - leadGapPx - leadMetrics.descent;
+  // hidden y = sitting on set text baseline (so glyphs overlap and mask hides them)
+  const leadHiddenBaselineY = setBaselineDefaultY;
+
+  const leadBaseX = leadHiddenX + (leadAnchorX - leadHiddenX) * eased;
+  const leadBaselineY = leadHiddenBaselineY + (leadAnchorBaselineY - leadHiddenBaselineY) * eased;
+  const leadTopY = leadBaselineY - leadMetrics.ascent;
+
+  // ----- alpha from progress (mask handles the spatial dissolve; alpha is extra) -----
+  let leadAlpha = 1;
+  if (state.alphaMode === 'linear') leadAlpha = eased;
+  else if (state.alphaMode === 'late') leadAlpha = Math.max(0, (eased - 0.5) / 0.5);
+
+  // ----- draw lead text (with chosen mask strategy) -----
+  if (leadAlpha > 0.001) {
+    if (state.clipMode === 'softMask') {
+      drawLeadWithSoftMask({
+        w, h, dpr, sc,
+        leadText: state.leadValue, leadFontPx, fontFamily,
+        leadBaseX, leadBaselineY, leadAlpha,
+        setBaseX, setTopY, setBotY, setW: setMetrics.width, setH: setMetrics.heightApprox,
+      });
+    } else {
+      ctx.save();
+      if (state.clipMode === 'setTop') {
+        ctx.beginPath();
+        ctx.rect(0, 0, w, setTopY);
+        ctx.clip();
+      } else if (state.clipMode === 'setRect') {
+        ctx.beginPath();
+        ctx.rect(0, 0, w, h);
+        ctx.rect(setBaseX - 2, setTopY - 2, setMetrics.width + 4, setMetrics.heightApprox + 4);
+        ctx.clip('evenodd');
+      }
+      ctx.globalAlpha = leadAlpha;
+      ctx.fillStyle = leadColor();
+      ctx.font = `bold ${leadFontPx}px ${fontFamily}`;
+      ctx.textBaseline = 'alphabetic';
+      ctx.fillText(state.leadValue, leadBaseX, leadBaselineY);
+      ctx.restore();
+    }
+  }
+
+  // ----- draw set speed -----
+  ctx.fillStyle = '#4876FF';
+  ctx.font = `bold ${setFontPx}px ${fontFamily}`;
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(state.setValue, setBaseX, setBaselineY);
+
+  // ----- icon placeholder (so right side feels real) -----
+  ctx.save();
+  ctx.fillStyle = 'rgba(72,118,255,0.35)';
+  roundedRect(ctx, iconX, iconY, iconSz, iconSz, 6);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(72,118,255,0.9)';
+  ctx.font = `bold ${Math.round(iconSz*0.5)}px ${fontFamily}`;
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.fillText('icon', iconX + iconSz/2, iconY + iconSz/2);
+  ctx.textAlign = 'start';
+  ctx.restore();
+
+  // ----- guides -----
+  if (state.showGuides) {
+    ctx.save();
+    ctx.lineWidth = 1;
+    // set text rect
+    ctx.strokeStyle = 'rgba(255,80,80,0.9)';
+    ctx.strokeRect(setBaseX, setTopY, setMetrics.width, setMetrics.heightApprox);
+    // lead text rect
+    ctx.strokeStyle = 'rgba(80,220,120,0.9)';
+    ctx.strokeRect(leadBaseX, leadTopY, leadMetrics.width, leadMetrics.heightApprox);
+    // set baseline default Y
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.setLineDash([4,3]);
+    ctx.beginPath();
+    ctx.moveTo(0, setBaselineDefaultY); ctx.lineTo(w, setBaselineDefaultY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  ctx.restore();
+
+  // status & graph
+  statusEl.textContent =
+    `progress: ${state.progress.toFixed(3)} · eased: ${eased.toFixed(3)} · ` +
+    `target: ${state.target} · dur(active): ${currentDuration()}ms · ease(active): ${currentEasing()} · running: ${state.running}`;
+
+  drawGraph(easeFn, eased);
+}
+
+function drawGraph(easeFn, currentEased) {
+  const w = graph.width, h = graph.height;
+  gctx.clearRect(0, 0, w, h);
+  // grid
+  gctx.strokeStyle = '#222831';
+  gctx.lineWidth = 1;
+  for (let i = 0; i <= 10; i++) {
+    const x = (i/10)*w;
+    gctx.beginPath(); gctx.moveTo(x, 0); gctx.lineTo(x, h); gctx.stroke();
+    const y = (i/10)*h;
+    gctx.beginPath(); gctx.moveTo(0, y); gctx.lineTo(w, y); gctx.stroke();
+  }
+  // curve
+  gctx.strokeStyle = '#4876FF';
+  gctx.lineWidth = 2;
+  gctx.beginPath();
+  for (let i = 0; i <= w; i++) {
+    const t = i/w;
+    const y = h - clamp01(easeFn(t)) * h;
+    if (i === 0) gctx.moveTo(i, y); else gctx.lineTo(i, y);
+  }
+  gctx.stroke();
+  // current progress marker
+  const px = clamp01(state.progress) * w;
+  const py = h - clamp01(currentEased) * h;
+  gctx.fillStyle = '#ffcc40';
+  gctx.beginPath(); gctx.arc(px, py, 4, 0, Math.PI*2); gctx.fill();
+}
+
+// ----- helpers -----
+function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+function roundedRect(c, x, y, w, h, r) {
+  r = Math.min(r, w/2, h/2);
+  c.beginPath();
+  c.moveTo(x+r, y);
+  c.arcTo(x+w, y,   x+w, y+h, r);
+  c.arcTo(x+w, y+h, x,   y+h, r);
+  c.arcTo(x,   y+h, x,   y,   r);
+  c.arcTo(x,   y,   x+w, y,   r);
+  c.closePath();
+}
+function textMetrics(ctx, text, fontPx) {
+  const m = ctx.measureText(text);
+  // Derive vertical metrics from known font px (Arial-ish), avoiding
+  // browser-dependent actualBoundingBox* (which can return 0 → NaN cascades).
+  const ascent  = fontPx * 0.78;
+  const descent = fontPx * 0.22;
+  return {
+    width: (isFinite(m.width) && m.width > 0) ? m.width : (text.length * fontPx * 0.55),
+    ascent,
+    descent,
+    heightApprox: ascent + descent,
+  };
+}
+
+// initial paint
+requestRender();
+</script>
+</body>
+</html>
