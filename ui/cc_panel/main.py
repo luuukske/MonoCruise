@@ -19,7 +19,13 @@ import time
 import threading
 from typing import Callable
 
-from PySide6.QtWidgets import QWidget, QApplication
+from PySide6.QtWidgets import (
+    QWidget,
+    QApplication,
+    QGraphicsScene,
+    QGraphicsRectItem,
+    QGraphicsBlurEffect,
+)
 if not __name__ == "__main__":
     from core.settings import Settings
 from PySide6.QtCore import Qt, QTimer, Signal, QByteArray, QRectF, QPointF
@@ -60,16 +66,16 @@ _LEAD_FONT_RATIO = 0.5
 # current_brightness = 0.7 / 0.95) so on a dark backdrop the perceived colour
 # matches the earlier rgb-darkened render.
 _LEAD_BRIGHTNESS = 0.95
-_LEAD_OPACITY = 0.74
+_LEAD_OPACITY = 0.75
 _LEAD_SHIFT_PX_BASE = 5.0
 _LEAD_GAP_PX_BASE = 0.0
-_LEAD_MASK_BLUR_BASE = 0.0 # 5 prior testing phase. testing mask clipping.
+_LEAD_MASK_BLUR_BASE = 13.0
 _LEAD_MASK_PAD_BASE = 2.0
 _LEAD_ANIM_FORWARD_MS = 750
 _LEAD_ANIM_RETRACT_MS = 2000
 _LEAD_TICK_MS = 16
 
-_VEHICLE_ANIM_MS = 3500
+_VEHICLE_ANIM_MS = 350
 _VEHICLE_TICK_MS = 16
 
 # Sentinel for update(lead_vehicle_speed=...): distinguishes "not provided" from None ("no lead").
@@ -947,8 +953,6 @@ class _PanelWidget(QWidget):
             p._acc_enabled
             and p._cc_mode == "Cruise control"
             and p._lead_vehicle_speed is not None
-            and not p._AEB_warn
-            and not p._blink_running
         )
 
     def _start_lead_anim(self, target: float):
@@ -1077,60 +1081,85 @@ class _PanelWidget(QWidget):
     def _make_feathered_rect_pixmap(
         self, inner_w: int, inner_h: int, blur_r: int, dpr: float
     ) -> QPixmap:
-        """White rect, inner inner_w x inner_h fully opaque, outer ring of width
-        blur_r linearly feathered to transparent. Returns pixmap of total size
-        (inner_w + 2*blur_r) x (inner_h + 2*blur_r) in logical px."""
+        """White solid rect of size ``inner_w x inner_h`` with a true Gaussian
+        blur of radius ``blur_r`` applied — matches the prototype's canvas
+        ``filter:blur(Npx)`` semantics.
+
+        The previous implementation built a linear-gradient feather ring around
+        a fully opaque alpha=1 plateau. Inside the plateau the eraser stayed
+        at full strength right up to the edge, so at full lead extension the
+        eraser hard-erased descender pixels overlapping the plateau and faded
+        out very sharply over the linear ring — visible "clipping" artifact.
+
+        Gaussian blur of a filled rect has a smooth rolloff inward AND outward
+        from each edge (alpha=0.5 at the geometric edge, ramping symmetrically
+        via the gaussian CDF), which is what the prototype shows and what the
+        user wants.
+
+        Returns a pixmap sized ``(inner_w + 2*margin) x (inner_h + 2*margin)``
+        in logical px, where ``margin = 2*blur_r`` provides enough room for
+        the outward gaussian tail.
+        """
         inner_w = max(1, int(inner_w))
         inner_h = max(1, int(inner_h))
         blur_r = max(0, int(blur_r))
-        total_w = inner_w + 2 * blur_r
-        total_h = inner_h + 2 * blur_r
+
+        if blur_r == 0:
+            # No blur → simple solid rect, no margin needed.
+            pm = QPixmap(int(inner_w * dpr), int(inner_h * dpr))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.GlobalColor.transparent)
+            pa = QPainter(pm)
+            try:
+                pa.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                pa.setPen(Qt.PenStyle.NoPen)
+                pa.setBrush(QColor(255, 255, 255, 255))
+                pa.drawRect(QRectF(0.0, 0.0, float(inner_w), float(inner_h)))
+            finally:
+                pa.end()
+            return pm
+
+        # 2*blur_r margin leaves ~2σ of room for the outward gaussian tail
+        # (QGraphicsBlurEffect's QualityHint uses sigma ~= blur_r, so the
+        # tail is effectively zero past 2σ).
+        margin = max(blur_r * 2, 1)
+        total_w = inner_w + 2 * margin
+        total_h = inner_h + 2 * margin
+
         pm = QPixmap(int(total_w * dpr), int(total_h * dpr))
         pm.setDevicePixelRatio(dpr)
         pm.fill(Qt.GlobalColor.transparent)
-        pa = QPainter(pm)
-        pa.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        pa.setPen(Qt.PenStyle.NoPen)
-        opaque = QColor(255, 255, 255, 255)
-        clear = QColor(255, 255, 255, 0)
 
-        if blur_r == 0:
-            pa.setBrush(opaque)
-            pa.drawRect(QRectF(0.0, 0.0, float(total_w), float(total_h)))
-            pa.end()
-            return pm
+        # QGraphicsBlurEffect renders through a scene. Quality hint forces a
+        # real (separable) gaussian rather than a fast-but-blocky box blur.
+        scene = QGraphicsScene()
+        try:
+            item = QGraphicsRectItem(0.0, 0.0, float(inner_w), float(inner_h))
+            item.setBrush(QColor(255, 255, 255, 255))
+            item.setPen(Qt.PenStyle.NoPen)
+            item.setPos(float(margin), float(margin))
+            blur = QGraphicsBlurEffect()
+            blur.setBlurRadius(float(blur_r))
+            blur.setBlurHints(QGraphicsBlurEffect.BlurHint.QualityHint)
+            item.setGraphicsEffect(blur)
+            scene.addItem(item)
 
-        pa.setBrush(opaque)
-        pa.drawRect(QRectF(float(blur_r), float(blur_r), float(inner_w), float(inner_h)))
+            pa = QPainter(pm)
+            try:
+                pa.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                pa.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                # Render the scene in its own coords (no scaling) into the
+                # pixmap. devicePixelRatio on the pixmap handles HiDPI.
+                target = QRectF(0.0, 0.0, float(total_w), float(total_h))
+                source = QRectF(0.0, 0.0, float(total_w), float(total_h))
+                scene.render(pa, target, source)
+            finally:
+                pa.end()
+        finally:
+            # Drop scene/item references so Qt can collect them; effect is
+            # owned by the item so it goes with it.
+            scene.clear()
 
-        g = QLinearGradient(0.0, 0.0, 0.0, float(blur_r))
-        g.setColorAt(0.0, clear); g.setColorAt(1.0, opaque)
-        pa.fillRect(QRectF(float(blur_r), 0.0, float(inner_w), float(blur_r)), g)
-
-        g = QLinearGradient(0.0, float(blur_r + inner_h), 0.0, float(blur_r + inner_h + blur_r))
-        g.setColorAt(0.0, opaque); g.setColorAt(1.0, clear)
-        pa.fillRect(QRectF(float(blur_r), float(blur_r + inner_h), float(inner_w), float(blur_r)), g)
-
-        g = QLinearGradient(0.0, 0.0, float(blur_r), 0.0)
-        g.setColorAt(0.0, clear); g.setColorAt(1.0, opaque)
-        pa.fillRect(QRectF(0.0, float(blur_r), float(blur_r), float(inner_h)), g)
-
-        g = QLinearGradient(float(blur_r + inner_w), 0.0, float(blur_r + inner_w + blur_r), 0.0)
-        g.setColorAt(0.0, opaque); g.setColorAt(1.0, clear)
-        pa.fillRect(QRectF(float(blur_r + inner_w), float(blur_r), float(blur_r), float(inner_h)), g)
-
-        corners = (
-            (blur_r,             blur_r,             0,                  0),
-            (blur_r + inner_w,   blur_r,             blur_r + inner_w,   0),
-            (blur_r,             blur_r + inner_h,   0,                  blur_r + inner_h),
-            (blur_r + inner_w,   blur_r + inner_h,   blur_r + inner_w,   blur_r + inner_h),
-        )
-        for cx, cy, fx, fy in corners:
-            rg = QRadialGradient(float(cx), float(cy), float(blur_r))
-            rg.setColorAt(0.0, opaque); rg.setColorAt(1.0, clear)
-            pa.fillRect(QRectF(float(fx), float(fy), float(blur_r), float(blur_r)), rg)
-
-        pa.end()
         return pm
 
     def _get_lead_eraser(
@@ -1342,19 +1371,28 @@ class _PanelWidget(QWidget):
             # bilinear path so the fractional translate is preserved.
             self._draw_pixmap_subpixel(bp, lead_pm, lead_x, lead_top_y)
 
-            # Mask strength fades to 0 as lead reaches full extension: at visual=1
-            # the lead glyph bottom touches set's top and the feather ring would
-            # otherwise eat into the lead's descender region.
-            mask_strength = max(0.0, 1.0 - visual)
-            if mask_strength > 0.001:
-                pad_px = max(0, int(round(_LEAD_MASK_PAD_BASE * sc)))
-                blur_px = max(0, int(round(_LEAD_MASK_BLUR_BASE * sc)))
-                eraser_pm = self._get_lead_eraser(set_w, set_h, pad_px, blur_px, dpr)
-                erase_x = set_x - pad_px - blur_px
-                erase_y = set_top_y - pad_px - blur_px
-                bp.setOpacity(mask_strength)
-                bp.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
-                bp.drawPixmap(QPointF(erase_x, erase_y), eraser_pm)
+            # Soft eraser: always run at full opacity. Matches the prototype
+            # (``filter: blur(Npx); fillRect(...)``). Previously this used
+            # ``bp.setOpacity(1.0 - visual)`` to hide the upper-feather lobe
+            # eating lead descenders at full extension, but setOpacity on a
+            # DestinationOut composition *attenuates* the erase — lead bled
+            # through at intermediate visual. The follow-up workaround
+            # (skipping the eraser at visual>=1) was a fallback, not a
+            # root-cause fix; the underlying issue was that the eraser
+            # pixmap used a linear-feather ring around a hard alpha=1
+            # plateau, which hard-erases at the edge. _make_feathered_rect_pixmap
+            # now produces a true gaussian-blurred rect, matching the
+            # prototype's smoother falloff. Margin is 2*blur_r inside the
+            # eraser pixmap (gaussian needs room for its outward tail).
+            pad_px = max(0, int(round(_LEAD_MASK_PAD_BASE * sc)))
+            blur_px = max(0, int(round(_LEAD_MASK_BLUR_BASE * sc)))
+            eraser_pm = self._get_lead_eraser(set_w, set_h, pad_px, blur_px, dpr)
+            eraser_margin = 2 * blur_px if blur_px > 0 else 0
+            erase_x = set_x - pad_px - eraser_margin
+            erase_y = set_top_y - pad_px - eraser_margin
+            bp.setOpacity(1.0)
+            bp.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
+            bp.drawPixmap(QPointF(erase_x, erase_y), eraser_pm)
         finally:
             bp.end()
 
