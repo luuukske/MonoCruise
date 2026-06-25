@@ -1,5 +1,5 @@
-"""
-Keyboard Thread — lifecycle wrapper for the `keyboard` library.
+﻿"""
+Keyboard Thread: lifecycle wrapper for the `keyboard` library.
 
 Provides:
   - Global keyboard state accessible via keyboard.is_pressed() from any thread.
@@ -18,7 +18,7 @@ import threading
 from dataclasses import dataclass, field
 
 from core.thread_management.base_thread import BaseThread, ThreadData
-from core.thread_management.registry import registry  # noqa: F401 — keep for watchdog compat
+from core.thread_management.registry import registry  # noqa: F401: keep for watchdog compat
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ try:
     _kb = _kb_module
     _keyboard_available = True
 except Exception:
-    logger.warning("keyboard library not importable — keyboard button bindings disabled")
+    logger.warning("keyboard library not importable: keyboard button bindings disabled")
 
 
 @dataclass
@@ -42,7 +42,7 @@ class KeyboardThreadData(ThreadData):
 
 
 class KeyboardThread(BaseThread):
-    loop_interval = 0.2    # 200 ms — heartbeat only; keyboard lib runs its own OS hook
+    loop_interval = 0.2    # 200 ms: heartbeat only; keyboard lib runs its own OS hook
     max_restarts = 3
 
     def __init__(self) -> None:
@@ -55,7 +55,7 @@ class KeyboardThread(BaseThread):
             with self.data._lock:
                 self.data.is_available = False
             logger.warning(
-                "keyboard library unavailable — keyboard button bindings will not work"
+                "keyboard library unavailable: keyboard button bindings will not work"
             )
             return
 
@@ -85,7 +85,7 @@ class KeyboardThread(BaseThread):
     # --- Capture API (called from UI thread when user clicks "assign button") ---
 
     def start_capture(self) -> None:
-        """Enable capture mode — next key press populates data.capture_event."""
+        """Enable capture mode: next key press populates data.capture_event."""
         if not _keyboard_available:
             return
         with self.data._lock:
@@ -146,3 +146,4 @@ class KeyboardThread(BaseThread):
             except Exception:
                 pass
         self._capture_hook = None
+

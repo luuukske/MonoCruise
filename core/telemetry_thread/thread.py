@@ -1,10 +1,10 @@
-"""
-Telemetry thread — checks ETS2 SDK connection and exposes sdkActive state + game data.
+﻿"""
+Telemetry thread: checks ETS2 SDK connection and exposes sdkActive state + game data.
 
 Other threads read:
-  registry.get_thread("telemetry_thread").data.is_connected     — SDK active
-  registry.get_thread("telemetry_thread").data.manual_start     — user started app before game
-  registry.get_thread("telemetry_thread").data.request_quit     — thread requests app shutdown
+  registry.get_thread("telemetry_thread").data.is_connected    : SDK active
+  registry.get_thread("telemetry_thread").data.manual_start    : user started app before game
+  registry.get_thread("telemetry_thread").data.request_quit    : thread requests app shutdown
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ class TelemetryThreadData(ThreadData):
     paused: bool = False
 
     # Truck
-    speed: float = 0.0          # m/s — convert to km/h: speed * 3.6
+    speed: float = 0.0          # m/s: convert to km/h: speed * 3.6
     cruise_control_speed: float = 0.0  # m/s, 0.0 when CC inactive
     blinkerRight = False
     blinkerLight = False
@@ -78,7 +78,7 @@ class TelemetryThreadData(ThreadData):
 
     # Cargo / mass (SCS config_f + truck_f)
     cargoMass: float = 0.0     # kg
-    unitMass: float = 0.0      # kg — tractor/chassis mass from SDK
+    unitMass: float = 0.0      # kg: tractor/chassis mass from SDK
     fuel: float = 0.0        # litres (current tank)
     trailer_count: int = 0   # attached trailers with wheels (from SDK list)
     estimated_total_mass_kg: float = 0.0  # unitMass + cargoMass + fuel mass
@@ -90,15 +90,15 @@ class TelemetryThreadData(ThreadData):
 
     # Vehicle state
     parkBrake: bool = False
-    rotationY: float = 0.0          # pitch normalized [0, 1] full-circle — use _road_grade_from_norm to convert
+    rotationY: float = 0.0          # pitch normalized [0, 1] full-circle: use _road_grade_from_norm to convert
     hazardsActive: bool = False
 
     coordinateX: float = 0.0
-    coordinateY: float = 0.0   # elevation (m) — used for road-level filtering
+    coordinateY: float = 0.0   # elevation (m): used for road-level filtering
     coordinateZ: float = 0.0
     rotationX: float = 0.0
 
-    # Ego trailer — True when at least one attached trailer with wheels exists.
+    # Ego trailer: True when at least one attached trailer with wheels exists.
     ego_has_trailer: bool = False
 
     # Total wheels in contact with the ground (tractor + all attached trailers).
@@ -170,7 +170,7 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         )
 
 class TelemetryThread(BaseThread):
-    loop_interval = 0.02   # 50 Hz — game updates ~60 Hz; consumers read at polling_rate
+    loop_interval = 0.02   # 50 Hz: game updates ~60 Hz; consumers read at polling_rate
     max_restarts = 2
 
     def __init__(self) -> None:
@@ -271,3 +271,4 @@ class TelemetryThread(BaseThread):
 
     def teardown(self) -> None:
         logger.debug("teardown complete")
+

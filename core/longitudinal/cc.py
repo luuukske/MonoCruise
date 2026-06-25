@@ -1,11 +1,11 @@
-"""
-Cruise control longitudinal child — owns set-speed PID, output smoothing,
+﻿"""
+Cruise control longitudinal child: owns set-speed PID, output smoothing,
 target management, and gearshift D-term freeze.
 
 Buttons (enable/disable/inc/dec/start) are driven by the orchestrator
 (`cruise_control_thread`) which calls `enable()`, `disable()`,
 `change_target_kmh()`, etc. Disengage conditions (user brake, park/gear,
-disarm-on-stop) are also owned by the orchestrator — this class only
+disarm-on-stop) are also owned by the orchestrator: this class only
 owns control state.
 """
 
@@ -32,7 +32,7 @@ _CC_KD_SPEED_SMOOTH_TAU_S = 0.15
 _CC_OUTPUT_EMA_TAU_S = 0.40
 _CC_TARGET_SPEED_EMA_TAU_S = 0.5
 
-# Gearshift D-term freeze — mirrors mapper's gearshift state machine
+# Gearshift D-term freeze: mirrors mapper's gearshift state machine
 _CC_CLUTCH_ACTIVE_THRESHOLD = 0.05
 _CC_GEARSHIFT_BLOCK_DURATION_S = 0.5
 _CC_GEARSHIFT_RAMP_DURATION_S = 1.0
@@ -73,7 +73,7 @@ class CruiseController(LongitudinalController):
         self._cc_clutch_release_mono: float = -math.inf
         self._cc_prev_d_factor: float = 1.0
 
-    # External state — read by the orchestrator for publishing/UI
+    # External state: read by the orchestrator for publishing/UI
 
     @property
     def active(self) -> bool:
@@ -88,7 +88,7 @@ class CruiseController(LongitudinalController):
     def target_speed_kmh(self) -> float | None:
         return self._target_kmh
 
-    # Lifecycle controls — driven by the orchestrator's button FSM
+    # Lifecycle controls: driven by the orchestrator's button FSM
 
     def enable(self) -> None:
         self._enabled = True
@@ -133,7 +133,7 @@ class CruiseController(LongitudinalController):
             if clamped != self._target_kmh:
                 self._target_kmh = clamped
 
-        # Inactive — clear runtime smoothing/integrators so handover to active
+        # Inactive: clear runtime smoothing/integrators so handover to active
         # later starts clean. Target and enabled flag are preserved.
         if not self.active:
             self._reset_runtime_state()
@@ -262,7 +262,7 @@ class CruiseController(LongitudinalController):
         d_factor = self._gearshift_d_factor(ctx.now, ctx.game_clutch)
 
         if d_factor <= 0.0:
-            # Freeze D-term during clutch + block window — prevents spurious
+            # Freeze D-term during clutch + block window: prevents spurious
             # derivative spike from stalled-then-jumping speed on re-engage.
             speed_deriv = 0.0
         else:
@@ -308,3 +308,4 @@ class CruiseController(LongitudinalController):
                 alpha * target_ms + (1.0 - alpha) * self._target_speed_ema_ms
             )
         return self._target_speed_ema_ms
+

@@ -1,6 +1,6 @@
-"""TP: faster vehicle alongside ego cuts in then decelerates.
+﻿"""TP: faster vehicle alongside ego cuts in then decelerates.
 
-Ego at 80 km/h. Vehicle starts at (x=3.5, z=4) — adjacent lane, slightly ahead
+Ego at 80 km/h. Vehicle starts at (x=3.5, z=4): adjacent lane, slightly ahead
 (alongside, not far ahead). Vehicle initially at 90 km/h, then decelerates at
 4 m/s² after merge begins (frame 10) and drifts left at 1.5 m/s. Once the
 vehicle drops below ego speed while in ego's lane, ego must brake.
@@ -44,3 +44,4 @@ def build() -> list[Frame]:
         if target_z < 1.0:
             break
     return frames
+

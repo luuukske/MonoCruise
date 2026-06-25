@@ -1,4 +1,4 @@
-"""
+﻿"""
 Shared-memory traffic reader for the ETS2LA traffic plugin.
 
 Opens ``Local\\ETS2LATraffic`` mmap and decodes up to 40 vehicle slots per
@@ -24,7 +24,7 @@ from .traffic import Position, Quaternion, Size, Trailer, Vehicle, vehicle_from_
 logger = logging.getLogger(__name__)
 
 
-# Shared-memory layout — mirrors the ETS2LA traffic plugin struct.
+# Shared-memory layout: mirrors the ETS2LA traffic plugin struct.
 _VEHICLE_FORMAT = "ffffffffffffhhbb"
 _TRAILER_FORMAT = "ffffffffff"
 _VEHICLE_OBJECT_FORMAT = _VEHICLE_FORMAT + _TRAILER_FORMAT * 3
@@ -108,7 +108,7 @@ class TrafficReader:
         :meth:`Vehicle.update_from_last` for the TTC-scaled lag freeze
         (see ``core/radar/AGENTS.md`` §7).
 
-        Returns ``(vehicles, trailer_vehicles)`` — the top-level radar
+        Returns ``(vehicles, trailer_vehicles)``: the top-level radar
         vehicles and the synthetic trailer-as-vehicle records flattened from
         nested trailers (see :meth:`_build_trailer_vehicles`). Returns ``None``
         if the buffer is unavailable or the frame failed to decode.
@@ -188,7 +188,7 @@ class TrafficReader:
 
         Synthetic ids derive from the parent id + buffer slot, so per-id
         smoothing and position-history carry-forward stay continuous across
-        frames — exactly as for real vehicles.
+        frames: exactly as for real vehicles.
         """
         trailer_vehicles: list[Vehicle] = []
         for v in vehicles:
@@ -249,3 +249,4 @@ class TrafficReader:
             data = data[_PARKED_STRIDE:]
 
         return vehicles
+

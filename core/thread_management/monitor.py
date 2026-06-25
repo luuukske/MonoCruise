@@ -1,16 +1,16 @@
-"""
-Monitor — interactive CLI control panel.
+﻿"""
+Monitor: interactive CLI control panel.
 
 Only active when settings.debug is True.
 The table is never auto-printed; call `status` whenever you want a snapshot.
 Logging output is never interrupted or overwritten.
 
 Commands:
-  status            — print thread table once
-  stop <name>       — stop a thread
-  restart <name>    — stop + restart a thread via watchdog factory
-  quit              — stop all threads and exit
-  help              — show this list
+  status           : print thread table once
+  stop <name>      : stop a thread
+  restart <name>   : stop + restart a thread via watchdog factory
+  quit             : stop all threads and exit
+  help             : show this list
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ class Monitor(BaseThread):
             daemon=True,
         )
         self._input_thread.start()
-        print("[monitor] debug shell active — type 'help' for commands", flush=True)
+        print("[monitor] debug shell active: type 'help' for commands", flush=True)
 
     def loop(self) -> None:
         if self._mapper_live:
@@ -205,7 +205,7 @@ class Monitor(BaseThread):
                 for t in registry.all_threads():
                     t.stop()
             case _:
-                logger.error(f"unknown command: {raw!r} — type 'help'")
+                logger.error(f"unknown command: {raw!r}: type 'help'")
 
     def _cmd_stop(self, name: str) -> None:
         try:    
@@ -234,3 +234,4 @@ class Monitor(BaseThread):
         registry.replace(new_t)
         new_t.start()
         logger.info(f"restarted '{name}'")
+

@@ -1,5 +1,5 @@
-"""
-BaseThread — inherit this for every worker thread.
+﻿"""
+BaseThread: inherit this for every worker thread.
 
 Lifecycle:
     setup()   → called once before the loop starts
@@ -10,7 +10,7 @@ The watchdog reads `heartbeat_at` and `restart_count` / `stable_loops`.
 
 Threading backend:
     By default, uses ``threading.Thread``.  Pass ``use_qthread=True`` to
-    use ``QThread`` instead — required for any thread that creates Qt
+    use ``QThread`` instead: required for any thread that creates Qt
     objects with timers/signals (e.g. the UI thread).
 
     The lifecycle, watchdog integration, heartbeat, restart logic, and
@@ -43,7 +43,7 @@ class ThreadData:
     pass
 
 
-# Internal backend wrappers — keep the two thread primitives behind one API
+# Internal backend wrappers: keep the two thread primitives behind one API
 
 class _StdThreadBackend:
     """Wraps ``threading.Thread``."""
@@ -71,7 +71,7 @@ class _QThreadBackend:
     """
     Wraps ``PySide6.QtCore.QThread``.
 
-    The QThread is used purely as a thread host — we override its ``run()``
+    The QThread is used purely as a thread host: we override its ``run()``
     to call the provided ``target`` callable, exactly like threading.Thread.
     This means Qt's event-loop integration (timers, signals across threads)
     works correctly, while all lifecycle logic stays in BaseThread.
@@ -87,7 +87,7 @@ class _QThreadBackend:
                 self._fn = fn
                 self.setObjectName(thread_name)
 
-            def run(self) -> None:       # noqa: D401 — Qt override
+            def run(self) -> None:       # noqa: D401: Qt override
                 self._fn()
 
         self._qthread = _Worker(target, name)
@@ -116,7 +116,7 @@ class _QThreadBackend:
         ``QThread.currentThread()`` inside the running thread would give us
         this directly, but we need it from *outside*.  We grab it during
         ``run()`` by having BaseThread stash ``threading.current_thread().ident``
-        — see ``BaseThread._run_lifecycle``.
+       : see ``BaseThread._run_lifecycle``.
         """
         # Populated by BaseThread._run_lifecycle at the start of run()
         return getattr(self, "_captured_ident", None)
@@ -128,13 +128,13 @@ class BaseThread:
     """
     Base class for all MonoCruise worker threads.
 
-    Not a subclass of ``threading.Thread`` — instead it *owns* an internal
+    Not a subclass of ``threading.Thread``: instead it *owns* an internal
     thread backend (_StdThreadBackend or _QThreadBackend) and delegates
     start/join/is_alive to it.  The full lifecycle (setup → loop → teardown)
     runs inside ``_run_lifecycle`` which the backend calls as its target.
     """
 
-    # tunables — override in subclass
+    # tunables: override in subclass
     loop_interval: float = 0.05          # seconds between loop() calls
     max_restarts:  int   = 1             # restarts allowed before giving up
     stable_after:  int   = 500           # loops without error → stable again
@@ -294,7 +294,7 @@ class BaseThread:
                 self.setup()
             except Exception:
                 log.exception(
-                    "setup() failed — thread '%s' will not start", self.name
+                    "setup() failed: thread '%s' will not start", self.name
                 )
                 log.critical(
                     "A component failed to start. Restart MonoCruise or contact a developer.",
@@ -314,7 +314,7 @@ class BaseThread:
                     if self.stable_loops >= self.stable_after:
                         if self.restart_count > 0:
                             log.info(
-                                "stable after %d loops — restart quota reset",
+                                "stable after %d loops: restart quota reset",
                                 self.stable_after,
                             )
                         self.restart_count = 0
@@ -336,7 +336,7 @@ class BaseThread:
                         break
                     else:
                         log.exception(
-                            "Unexpected error in loop — thread '%s' has stopped (restart %d/%d):\n%s",
+                            "Unexpected error in loop: thread '%s' has stopped (restart %d/%d):\n%s",
                             self.name,
                             self.restart_count + 1,
                             self.max_restarts,
@@ -366,7 +366,7 @@ class BaseThread:
                     self._stop_event.wait(wait)
 
         except ThreadForcedStop:
-            log.debug("force stop received — exiting")
+            log.debug("force stop received: exiting")
 
         log.debug("teardown")
         try:

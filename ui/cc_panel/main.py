@@ -1,4 +1,4 @@
-"""
+﻿"""
 Cruise control display panel using PySide6.
 
 Single translucent window rendered entirely via QPainter.
@@ -152,7 +152,7 @@ class _PanelWidget(QWidget):
         # blit it at a fractional offset (sub-pixel). Drawing text directly
         # at QPointF still snaps the glyph baseline to integer pixels on
         # Windows, which produces visible staircasing during the slide.
-        # Blit must use drawPixmap(QRectF, pm, QRectF) — the point overload
+        # Blit must use drawPixmap(QRectF, pm, QRectF): the point overload
         # fast-paths to an integer blit and discards the fractional offset.
         self._set_text_pm_cache: dict[tuple, QPixmap] = {}
         self._set_text_pm_cache_max = 16
@@ -591,7 +591,7 @@ class _PanelWidget(QWidget):
     def _exact_vehicle_alpha_mask(
         self, scaled_vehicle_raw: QPixmap, dpr: float, cache_pk: tuple
     ) -> QPixmap:
-        """White with source alpha only — punches lines under the glyph exactly."""
+        """White with source alpha only: punches lines under the glyph exactly."""
         hit = self._ghost_exact_alpha_cache.get(cache_pk)
         if hit is not None:
             return hit
@@ -842,7 +842,7 @@ class _PanelWidget(QWidget):
         layer_w = max(1, int(math.ceil(gmax_x - origin_x)) + 1)
         layer_h = max(1, int(math.ceil(gmax_y - origin_y)) + 1)
 
-        # Cache the lines-only layer (no cutout — cutout is applied per-frame
+        # Cache the lines-only layer (no cutout: cutout is applied per-frame
         # so the vehicle can move and resize without invalidating this cache).
         lines_layer_key = (
             origin_x,
@@ -919,7 +919,7 @@ class _PanelWidget(QWidget):
             bp.drawPixmap(0, 0, lines_only_pm)
             bp.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationOut)
             if not mask_pm.isNull():
-                # Source rect is in pixmap device pixels, not logical — Qt's
+                # Source rect is in pixmap device pixels, not logical: Qt's
                 # drawPixmap ignores devicePixelRatio for the source rectangle.
                 src_mask_rect = QRectF(0.0, 0.0, float(mask_pm.width()), float(mask_pm.height()))
                 dst_mask_rect = QRectF(mx - origin_x, my - origin_y, m_w, m_h)
@@ -1082,14 +1082,14 @@ class _PanelWidget(QWidget):
         self, inner_w: int, inner_h: int, blur_r: int, dpr: float
     ) -> QPixmap:
         """White solid rect of size ``inner_w x inner_h`` with a true Gaussian
-        blur of radius ``blur_r`` applied — matches the prototype's canvas
+        blur of radius ``blur_r`` applied: matches the prototype's canvas
         ``filter:blur(Npx)`` semantics.
 
         The previous implementation built a linear-gradient feather ring around
         a fully opaque alpha=1 plateau. Inside the plateau the eraser stayed
         at full strength right up to the edge, so at full lead extension the
         eraser hard-erased descender pixels overlapping the plateau and faded
-        out very sharply over the linear ring — visible "clipping" artifact.
+        out very sharply over the linear ring: visible "clipping" artifact.
 
         Gaussian blur of a filled rect has a smooth rolloff inward AND outward
         from each edge (alpha=0.5 at the geometric edge, ramping symmetrically
@@ -1267,7 +1267,7 @@ class _PanelWidget(QWidget):
         integer-aligned blit fast-path whenever the active transform type is
         ``TxTranslate`` or lower, flooring fractional coordinates. This
         includes the QPointF and QRectF overloads when dst-size equals
-        src-size — ``SmoothPixmapTransform`` is only consulted on the bilinear
+        src-size: ``SmoothPixmapTransform`` is only consulted on the bilinear
         path. Applying a sub-perceptual scale (1 + 1e-4) bumps the transform
         type to ``TxScale`` so the bilinear path takes over and the fractional
         translate is preserved by resampling. Size delta ≈ 0.01%, invisible.
@@ -1375,7 +1375,7 @@ class _PanelWidget(QWidget):
             # (``filter: blur(Npx); fillRect(...)``). Previously this used
             # ``bp.setOpacity(1.0 - visual)`` to hide the upper-feather lobe
             # eating lead descenders at full extension, but setOpacity on a
-            # DestinationOut composition *attenuates* the erase — lead bled
+            # DestinationOut composition *attenuates* the erase: lead bled
             # through at intermediate visual. The follow-up workaround
             # (skipping the eraser at visual>=1) was a fallback, not a
             # root-cause fix; the underlying issue was that the eraser
@@ -1483,7 +1483,7 @@ class _PanelWidget(QWidget):
         set_y_shift = _LEAD_SHIFT_PX_BASE * sc * p._lead_visual
         text_y_baseline = text_y_baseline_default + set_y_shift
 
-        # text — rasterize to a pixmap and blit at fractional offset so the
+        # text: rasterize to a pixmap and blit at fractional offset so the
         # slide animation is truly sub-pixel. See _draw_pixmap_subpixel for why
         # a direct drawPixmap (QPointF or QRectF same-size) floors the offset.
         text_pm = self._set_text_pixmap(p._text_content, p._text_color, p._font, fm)
@@ -1505,7 +1505,7 @@ class _PanelWidget(QWidget):
             tinted = self._tinted(icon, ic)
 
             if show_lines:
-                # TODO(ACC): gap / lead visualization — fed by ACC when implemented.
+                # TODO(ACC): gap / lead visualization: fed by ACC when implemented.
                 # While ACC is locked, show both vehicle and lines. Otherwise,
                 # show only lines.
                 if acc_locked_now:
@@ -2116,3 +2116,4 @@ if __name__ == "__main__":
     exit_timer.start(100)
 
     sys.exit(qapp.exec())
+

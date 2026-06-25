@@ -1,5 +1,5 @@
-"""
-Registry — central directory of named components.
+﻿"""
+Registry: central directory of named components.
 
 Rules:
   • Thread access: registry.get_thread("telemetry").data.speed
@@ -85,3 +85,4 @@ class Registry:
 
 # Module-level singleton
 registry = Registry()
+

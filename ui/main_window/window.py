@@ -1,4 +1,4 @@
-"""
+﻿"""
 MonoCruise – Main application window.
 
 Assembles banner, settings panel, gear button, command bar, and version
@@ -363,7 +363,7 @@ class MonoCruiseWindow(QMainWindow):
                 acc_enabled=bool(self._settings.acc_enabled),
                 scale_mult=scale,
             )
-            # Saved panel_x/y may be from another resolution — pull onto a visible desktop.
+            # Saved panel_x/y may be from another resolution: pull onto a visible desktop.
             self._cc_panel.ensure_on_screen()
         except Exception:
             logger.exception("failed to create cruise control panel")
@@ -504,7 +504,7 @@ class MonoCruiseWindow(QMainWindow):
             self._open_on_taskbar = self.isVisible() and not self.isMinimized()
 
     def closeEvent(self, event) -> None:
-        """Handle window close — save settings, stop polling, signal shutdown."""
+        """Handle window close: save settings, stop polling, signal shutdown."""
         if self._closing:
             event.accept()
             return
@@ -523,6 +523,6 @@ class MonoCruiseWindow(QMainWindow):
         except Exception:
             logger.exception("Failed to save settings on close")
 
-        logger.info("Window closeEvent — emitting window_closed signal")
+        logger.info("Window closeEvent: emitting window_closed signal")
         self.window_closed.emit()
         event.accept()

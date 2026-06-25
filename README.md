@@ -1,4 +1,4 @@
-<a href="https://sourceforge.net/p/monocruise/"><img alt="Download MonoCruise" src="https://sourceforge.net/sflogo.php?type=18&amp;group_id=3904914" width=150></a>
+﻿<a href="https://sourceforge.net/p/monocruise/"><img alt="Download MonoCruise" src="https://sourceforge.net/sflogo.php?type=18&amp;group_id=3904914" width=150></a>
 [![Download MonoCruise](https://img.shields.io/sourceforge/dw/monocruise.svg)](https://sourceforge.net/projects/monocruise/files/latest/download)
 [![Download MonoCruise](https://img.shields.io/sourceforge/dt/monocruise.svg)](https://sourceforge.net/projects/monocruise/files/latest/download)
 
@@ -16,19 +16,19 @@ Every feature (including ACC and AEB) works in TruckersMP and singleplayer ETS2/
 ### features
 
 **Cruise & speed control**
-- Adaptive Cruise Control (ACC) — holds a safe following distance from the lead vehicle using an intelligent driver model
-- ACC gap level adjustment — 4 gap levels, assignable to buttons
+- Adaptive Cruise Control (ACC): holds a safe following distance from the lead vehicle using an intelligent driver model
+- ACC gap level adjustment: 4 gap levels, assignable to buttons
 - Traditional Cruise Control with speed limiter mode
 - Short and long speed increment/decrement buttons (configurable step sizes)
 
 **Safety**
-- Automatic Emergency Braking (AEB) — detects imminent collisions using arc-trajectory geometry and applies a two-phase brake sequence
-- Emergency stop detection — full brake lock on sudden pedal slam or crash
+- Automatic Emergency Braking (AEB): detects imminent collisions using arc-trajectory geometry and applies a two-phase brake sequence
+- Emergency stop detection: full brake lock on sudden pedal slam or crash
 
 **Pedal & driving feel**
-- One-Pedal Driving system — combined throttle/brake on a single axis
-- Exponential braking and accelerating — configurable non-linear pedal curves
-- Adaptive pedal capacity learning — calibrates to your actual pedal hardware over time
+- One-Pedal Driving system: combined throttle/brake on a single axis
+- Exponential braking and accelerating: configurable non-linear pedal curves
+- Adaptive pedal capacity learning: calibrates to your actual pedal hardware over time
 - Smooth unified pedal output with road-load feedforward and gearshift freeze
 
 **Comfort & automation**
@@ -38,8 +38,8 @@ Every feature (including ACC and AEB) works in TruckersMP and singleplayer ETS2/
 - Live braking and accelerating bar on the bottom of the screen
 
 **Input**
-- Multi-device button support — joystick buttons, hat directions, and keyboard keys
-- Automatic pedal reconnect — recovers gracefully if your pedals disconnect mid-drive
+- Multi-device button support: joystick buttons, hat directions, and keyboard keys
+- Automatic pedal reconnect: recovers gracefully if your pedals disconnect mid-drive
 ## .exe install
 
 1. Download and run "MonoCruise installer.exe".
@@ -107,4 +107,5 @@ This project is licensed under the MIT License.
 It includes third-party code under the CC0-1.0, MIT, and BSD 3-Clause licenses.
 
 See [MonoCruise/THIRD_PARTY_LICENSES/](https://github.com/luuukske/MonoCruise/tree/main/THIRD_PARTY_LICENSES) for details.
+
 

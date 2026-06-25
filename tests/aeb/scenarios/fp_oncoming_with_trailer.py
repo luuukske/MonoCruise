@@ -1,4 +1,4 @@
-"""FP: oncoming truck + 1 trailer in opposite lane, straight road.
+﻿"""FP: oncoming truck + 1 trailer in opposite lane, straight road.
 
 Ego at 80 km/h, oncoming combination at 80 km/h. Trailer length 13 m.
 Tractor and trailer both remain in opposite lane. OppositeLaneFilter suppresses.
@@ -16,7 +16,7 @@ EXPECTED = {"max_state": "STANDBY"}
 
 
 def _make_trailer_quat(yaw_deg: float) -> Quaternion:
-    """Identity quaternion — _smooth_yaw handles arc direction."""
+    """Identity quaternion: _smooth_yaw handles arc direction."""
     return Quaternion(1.0, 0.0, 0.0, 0.0)
 
 
@@ -53,3 +53,4 @@ def build() -> list[Frame]:
         tractor.trailer_count = 1
         frames.append(Frame(ego=ego, vehicles=[tractor], t=t))
     return frames
+

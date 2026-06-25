@@ -1,5 +1,5 @@
-"""
-ACC trail-arc fit — target arc projected onto the ego row.
+﻿"""
+ACC trail-arc fit: target arc projected onto the ego row.
 
 Closes the gap documented in ``core/acc/AGENTS.md §3``. For each target,
 the scorer asks: *"where would this vehicle's path cross the line
@@ -20,13 +20,13 @@ This module owns its own sampling and curvature pipeline so the radar /
 TMP-speed / AEB code paths can keep their dense ``_position_history``
 buffers untouched.  We downsample the raw buffer ourselves
 (``_HISTORY_MIN_DIST_M = 1.0``, ``_HISTORY_MIN_DT_S = 0.05``) and fit
-an algebraic least-squares circle directly to the kept points — the
+an algebraic least-squares circle directly to the kept points: the
 centre, radius, and direction-of-travel sign all come from the
 positions, not from the smoothed yaw.  That removes the yaw-jitter
 sensitivity the previous "kappa from radar + centre from yaw" version
 suffered at low speeds.
 
-Two failure modes — both surfaced to the caller as the legacy baseline
+Two failure modes: both surfaced to the caller as the legacy baseline
 buckets (`HIT` / `NO_ARC_HIT` / `NO_HISTORY`) from ``scoring``:
 
     fit_trail returns None
@@ -58,7 +58,7 @@ _HISTORY_MIN_DT_S: float = 0.05
 # average out a noisy sample without collapsing.
 _MIN_FIT_SAMPLES: int = 5
 
-# Reject near-stationary tracks — sub-half-metre total chord across
+# Reject near-stationary tracks: sub-half-metre total chord across
 # the downsampled window is well under the per-sample distance gate
 # and would only happen if the buffer hasn't filled up yet.
 _MIN_PATH_LEN_M: float = 0.5
@@ -152,7 +152,7 @@ def _ls_circle_fit(
     **The data is centred around its mean before fitting.** In TMP
     world coordinates can sit in the 10⁵ range, which makes the raw
     normal equations operate on entries of order 10¹⁰–10²⁰ and the
-    3 × 3 determinant collapses numerically — the recovered radius
+    3 × 3 determinant collapses numerically: the recovered radius
     blows up to 10⁵+ regardless of the actual curvature, which is
     exactly the "always straight" symptom on a real map.  Centring
     decouples the (A, B) sub-system from C and keeps every entry of
@@ -208,7 +208,7 @@ def fit_trail(
 
     ``target_yaw_rad_fallback`` is only consulted when the downsampled
     history collapses to two samples too close together to define a
-    direction — in that degenerate case the smoothed yaw is used so
+    direction: in that degenerate case the smoothed yaw is used so
     the caller still gets a (best-effort) straight TrailFit instead of
     a hard ``None``.
     """
@@ -241,7 +241,7 @@ def fit_trail(
         long_ux = -math.sin(target_yaw_rad_fallback)
         long_uz = -math.cos(target_yaw_rad_fallback)
 
-    # Trailing chord — direction the target is heading right now.  This
+    # Trailing chord: direction the target is heading right now.  This
     # is what we want for the freshest tangent on a curve.  Falls back
     # to the long chord (and then to smoothed yaw) only if the last
     # two kept samples coincide.
@@ -272,7 +272,7 @@ def fit_trail(
     # Goodness-of-fit: compare observed max perpendicular against the
     # sagitta the LS radius implies for the first→last chord.  If the
     # data doesn't actually deviate from the chord enough to back up
-    # the radius, the LS is fitting noise — collapse to straight.
+    # the radius, the LS is fitting noise: collapse to straight.
     perp_x = -long_uz
     perp_z = long_ux
     max_perp = 0.0
@@ -381,7 +381,7 @@ def crossing_offset_and_angle(
 
 
 def angle_amp_from(arc_angle_rad: float) -> float:
-    """``2^(-(arc_angle/0.06)²)`` — legacy SCORING_REFERENCE §8.1.
+    """``2^(-(arc_angle/0.06)²)``: legacy SCORING_REFERENCE §8.1.
 
     Sharp cutoff: at ≈3.4° (= σ) amp = 0.5; at ≈7° amp = 1/16.
     Perpendicular / oncoming arcs collapse to near zero.
@@ -396,3 +396,4 @@ MIN_PATH_LEN_M = _MIN_PATH_LEN_M
 ANGLE_AMP_SIGMA = _ANGLE_AMP_SIGMA
 HISTORY_MIN_DIST_M = _HISTORY_MIN_DIST_M
 HISTORY_MIN_DT_S = _HISTORY_MIN_DT_S
+

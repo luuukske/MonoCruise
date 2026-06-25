@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import os
 import re
 import tempfile
@@ -87,7 +87,7 @@ class UpdateWorker(QThread):
         for name in self.UPDATER_FILES:
             if rel_lc == name or rel_lc.endswith('/' + name):
                 return True
-        # Skip anything in the preserve list — never clobber user state.
+        # Skip anything in the preserve list: never clobber user state.
         for path in self.PRESERVE_PATHS:
             if rel_lc == path.lower().rstrip('/'):
                 return True
@@ -479,7 +479,7 @@ class SelectorPanel(QWidget):
         renderer = GitHubMarkdownRenderer()
         html_content = renderer.render(markdown_text)
         
-        # Load video if found — create player lazily, destroy when not needed
+        # Load video if found: create player lazily, destroy when not needed
         video_url = renderer.get_video_url()
         if video_url:
             player = self.details.ensure_video_player()

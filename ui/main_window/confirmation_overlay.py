@@ -1,7 +1,7 @@
-"""
+﻿"""
 MonoCruise – In‑window modal confirmation overlay.
 
-Non‑blocking — uses signals/slots, never ``QDialog.exec()``.
+Non‑blocking: uses signals/slots, never ``QDialog.exec()``.
 
 Signature::
 

@@ -1,5 +1,5 @@
-"""
-Settings — plain typed dataclass, loaded once in main.py.
+﻿"""
+Settings: plain typed dataclass, loaded once in main.py.
 
 No thread reads the config file itself; all threads receive the same
 `settings` instance (read-only) via constructor injection or a module-level
@@ -104,7 +104,7 @@ class Settings(metaclass=_SingletonMeta):
     short_increments: int = 5
     long_press_reset: bool = True
 
-    # PID tuning (cruise_control_thread) — defaults aligned with config.json
+    # PID tuning (cruise_control_thread): defaults aligned with config.json
     cc_kp: float = 0.5
     cc_ki: float = 0.0
     cc_kd: float = 0.3
@@ -112,7 +112,7 @@ class Settings(metaclass=_SingletonMeta):
     cc_accel_max_ms2: float = 1.0
     cc_accel_min_ms2: float = -1.0
 
-    # PID tuning for SpeedLimiter — independent of CC so each can be tuned separately.
+    # PID tuning for SpeedLimiter: independent of CC so each can be tuned separately.
     limiter_kp: float = 0.5
     limiter_ki: float = 0.0
     limiter_kd: float = 0.0
@@ -122,11 +122,11 @@ class Settings(metaclass=_SingletonMeta):
     # Global speed limiter target (km/h).
     # Dual role: (1) clamps the CC set-speed so CC never commands above this value;
     # (2) when cc_mode is "Speed limiter", activates SpeedLimiter unconditionally
-    # regardless of whether the CC FSM is engaged — the truck is always capped.
+    # regardless of whether the CC FSM is engaged: the truck is always capped.
     # None disables both effects.
     global_speed_limit_kmh: float | None = None
 
-    # AccelToPedals tuning — split gas (PID) / brake (feedforward + trim PI) architecture.
+    # AccelToPedals tuning: split gas (PID) / brake (feedforward + trim PI) architecture.
     # Weight baselines and smoothing constants stay fixed in code.
     mapper_accel_scale_ms2: float = 1.0       # baseline max gas accel for capacity estimate
     mapper_brake_scale_ms2: float = 6.5       # baseline max brake decel for capacity estimate
@@ -137,9 +137,9 @@ class Settings(metaclass=_SingletonMeta):
     brake_efficiency_alpha: float = 0.05
     brake_efficiency_warn_ratio: float = 0.75
 
-    # PedalCapacityTracker — persisted estimates (0 = use baseline on next startup)
+    # PedalCapacityTracker: persisted estimates (0 = use baseline on next startup)
     pedal_capacity_max_brake_ms2: float = 11.457
-    # Legacy global accel scalar — kept as the cold-start seed source for the
+    # Legacy global accel scalar: kept as the cold-start seed source for the
     # shape-function anchor below before any new sample has been taken.
     pedal_capacity_max_accel_ms2: float = 2.124
     # Shape-function anchor gain (m/s² at gas=1.0, mass-normalized, at the
@@ -147,7 +147,7 @@ class Settings(metaclass=_SingletonMeta):
     # via G(gear) = anchor * ratio^(anchor_gear - gear). See pedal_capacity.py.
     pedal_capacity_accel_anchor_gain_ms2: float = 0.0
     # Per-gear-step ratio for the shape function (1.0 = flat, >1.0 = lower
-    # gear has more gain). Learned online via log-space regression — falls
+    # gear has more gain). Learned online via log-space regression: falls
     # back to a sensible default until enough cross-gear samples accumulate.
     # 0 = use the in-code default on next startup.
     pedal_capacity_accel_ratio_step: float = 0.0
@@ -185,7 +185,7 @@ class Settings(metaclass=_SingletonMeta):
         """Move a corrupt config out of the way so the user can recover it.
 
         Returns the quarantine path on success, None on failure. Never deletes
-        data — only renames.
+        data: only renames.
         """
         try:
             ts = time.strftime("%Y%m%d-%H%M%S")
@@ -228,7 +228,7 @@ class Settings(metaclass=_SingletonMeta):
                 if data is not None:
                     source = "config.json"
                 else:
-                    # Primary corrupt — try the backup before quarantining.
+                    # Primary corrupt: try the backup before quarantining.
                     _log.error("config.json unreadable: %s", err)
                     if BACKUP_PATH.exists():
                         backup_data, backup_err = cls._try_read_config(BACKUP_PATH)
@@ -241,7 +241,7 @@ class Settings(metaclass=_SingletonMeta):
                             _log.error("config.json.bak also unreadable: %s", backup_err)
                     cls._quarantine_corrupt_file(CONFIG_PATH, err or "unreadable")
             elif BACKUP_PATH.exists():
-                # No primary file at all — last-resort recover from backup.
+                # No primary file at all: last-resort recover from backup.
                 backup_data, backup_err = cls._try_read_config(BACKUP_PATH)
                 if backup_data is not None:
                     data = backup_data
@@ -288,8 +288,8 @@ class Settings(metaclass=_SingletonMeta):
           1. Write to a temp file in the same directory.
           2. fsync the temp file so the bytes hit the disk.
           3. Copy the existing config.json to config.json.bak (if it exists and parses
-             as a non-empty dict) — this is our last-known-good snapshot.
-          4. os.replace(temp, config.json) — atomic on POSIX and on Windows for same-volume moves.
+             as a non-empty dict): this is our last-known-good snapshot.
+          4. os.replace(temp, config.json): atomic on POSIX and on Windows for same-volume moves.
 
         Any failure aborts before touching the original file.
         """
@@ -322,7 +322,7 @@ class Settings(metaclass=_SingletonMeta):
                     except OSError:
                         _log.exception("failed to update %s", BACKUP_PATH.name)
                 elif err:
-                    _log.warning("not refreshing %s — current %s is %s",
+                    _log.warning("not refreshing %s: current %s is %s",
                                  BACKUP_PATH.name, CONFIG_PATH.name, err)
 
             # Step 4: atomic replace.
@@ -374,3 +374,4 @@ class Settings(metaclass=_SingletonMeta):
 
             self._saved_state = dict(current)
             return
+

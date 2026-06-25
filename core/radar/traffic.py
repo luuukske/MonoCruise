@@ -1,7 +1,7 @@
-"""
+﻿"""
 ETS2/ATS traffic vehicle classes with arc-based path prediction.
 
-Coordinate system and yaw conventions — see ``core/aeb/AGENTS.md`` §1–§3.
+Coordinate system and yaw conventions: see ``core/aeb/AGENTS.md`` §1–§3.
 Shared between AEB and ACC (both consume the same Vehicle instances produced
 by RadarThread).
 """
@@ -16,7 +16,7 @@ from typing import Optional
 _MAX_ANGULAR_VELOCITY: float = 45.0
 _LOCATION_UPDATE_FREQUENCY: float = 0.05
 
-# TMP speed / accel EMA — same hyperbolic law α(|v|) with different endpoints.
+# TMP speed / accel EMA: same hyperbolic law α(|v|) with different endpoints.
 # Reference speed for "at 90 km/h" is 25 m/s. See AGENTS.md §7.
 _ALPHA_SPEED_SCALE: float = 90.0 / 3.6   # 25.0 m/s
 
@@ -29,20 +29,20 @@ _SPEED_EMA_CURVE_D: float = (
     / (_SPEED_EMA_AT_REST - _SPEED_EMA_AT_90_KMH)
 )
 
-# Accel filter — least-squares slope of recent speed_ema samples over
+# Accel filter: least-squares slope of recent speed_ema samples over
 # _ACCEL_FIT_WINDOW_S (low-noise derivative), then a light EMA. Feeds the
 # responsive accel (AEB, speed_corr). See AGENTS.md §7.
 _ACCEL_FIT_WINDOW_S: float = 0.80
 _ACCEL_EMA_ALPHA: float = 0.40
-# Holds (t, speed_ema) samples for the LS slope fits — `accel` over
+# Holds (t, speed_ema) samples for the LS slope fits: `accel` over
 # _ACCEL_FIT_WINDOW_S and `accel_trend` over _ACC_SPEED_ACCEL_WINDOW_S.
 # 120 ≈ 6 s of headroom at full-update rate.
 _SPEED_EMA_HISTORY_LEN: int = 120
 
-# Accel-correction term clamp (m/s) — caps how far accel·τ can shift a speed.
+# Accel-correction term clamp (m/s): caps how far accel·τ can shift a speed.
 _SPEED_CORR_CLAMP_MS: float = 3.0
 
-# ACC speed (acc_speed) — adaptive filter on speed_corr. A per-tick change
+# ACC speed (acc_speed): adaptive filter on speed_corr. A per-tick change
 # below _ACC_SPEED_DEADBAND_MS is treated as noise and filtered with the long
 # _ACC_SPEED_TAU_SLOW_S time constant; the time constant ramps continuously
 # down toward _ACC_SPEED_TAU_FAST_S as the change grows, reaching it at twice
@@ -51,17 +51,17 @@ _ACC_SPEED_DEADBAND_MS: float = 0.7
 _ACC_SPEED_TAU_SLOW_S: float = 2.0
 _ACC_SPEED_TAU_FAST_S: float = 0.08
 
-# Smoothing is speed-scaled: tau is multiplied by speed_factor — 1.0 at
+# Smoothing is speed-scaled: tau is multiplied by speed_factor: 1.0 at
 # _ACC_SPEED_SMOOTH_REF_MS (90 km/h) and above, falling linearly to
 # _ACC_SPEED_SMOOTH_MIN at rest, so at low speed acc_speed leans on the
 # incoming speed_corr instead of smoothing it. See AGENTS.md §7.
 _ACC_SPEED_SMOOTH_REF_MS: float = 90.0 / 3.6   # 25 m/s
 _ACC_SPEED_SMOOTH_MIN: float = 0.15
 
-# ...and acceleration-scaled. accel_trend is the de-noised acceleration — the
+# ...and acceleration-scaled. accel_trend is the de-noised acceleration: the
 # LS slope of speed_ema over _ACC_SPEED_ACCEL_WINDOW_S, where coasting and
 # cruise wobble average to ≈ 0 but a steady ramp registers its true rate.
-# accel_factor multiplies tau — 1.0 while coasting, falling to
+# accel_factor multiplies tau: 1.0 while coasting, falling to
 # _ACC_SPEED_ACCEL_FLOOR once |accel_trend| reaches _ACC_SPEED_ACCEL_HI_MS2.
 # Below _ACC_SPEED_ACCEL_LO_MS2 a ramp counts as cruise noise and is ignored,
 # so cruise smoothing is untouched. See AGENTS.md §7.
@@ -70,25 +70,25 @@ _ACC_SPEED_ACCEL_LO_MS2: float = 0.3
 _ACC_SPEED_ACCEL_HI_MS2: float = 1.5
 _ACC_SPEED_ACCEL_FLOOR: float = 0.35
 
-# Feed-forward — the low-pass alone lags a steady ramp by accel·tau. acc_speed
+# Feed-forward: the low-pass alone lags a steady ramp by accel·tau. acc_speed
 # is predicted one step along the responsive accel before the low-pass corrects
 # the residual, which cancels that lag analytically (no windup, no overshoot).
 # The prediction is gated by ff_gate, a ramp on the de-noised |accel_trend|:
 # zero below _ACC_SPEED_FF_GATE_LO_MS2, full at _ACC_SPEED_FF_GATE_HI_MS2. Both
 # sit just above the cruise-noise floor (|accel_trend| ≈ 0.06 m/s² while
-# coasting) so the prediction is exactly zero while coasting — no cruise noise
-# is fed forward — yet saturates within a fraction of a real ramp. accel is
+# coasting) so the prediction is exactly zero while coasting: no cruise noise
+# is fed forward: yet saturates within a fraction of a real ramp. accel is
 # clamped to _ACC_SPEED_FF_ACCEL_CLAMP_MS2 so a crash spike cannot jump
 # acc_speed. See AGENTS.md §7.
-_ACC_SPEED_FF_GATE_LO_MS2: float = 0.12        # m/s²  — feed-forward gate opens
-_ACC_SPEED_FF_GATE_HI_MS2: float = 0.30        # m/s²  — feed-forward gate fully open
-_ACC_SPEED_FF_ACCEL_CLAMP_MS2: float = 6.0     # m/s²  — clamp on the feed-forward accel
+_ACC_SPEED_FF_GATE_LO_MS2: float = 0.12        # m/s² : feed-forward gate opens
+_ACC_SPEED_FF_GATE_HI_MS2: float = 0.30        # m/s² : feed-forward gate fully open
+_ACC_SPEED_FF_ACCEL_CLAMP_MS2: float = 6.0     # m/s² : clamp on the feed-forward accel
 
-# Yaw EMA (wrap-safe) — AI and TMP (arc curvature).
+# Yaw EMA (wrap-safe): AI and TMP (arc curvature).
 _RAW_YAW_ALPHA: float = 0.50
 
-# TMP lag detection — see AGENTS.md §7 "Lag / freeze detection".
-_LAG_MIN_SPEED_MS: float = 5.0           # m/s  — below this no lag detection runs
+# TMP lag detection: see AGENTS.md §7 "Lag / freeze detection".
+_LAG_MIN_SPEED_MS: float = 5.0           # m/s : below this no lag detection runs
 _LAG_DISP_RATIO: float = 0.10           # flag lag if raw disp < 10 % of expected
 
 # Freeze duration scales logarithmically with time-to-vehicle (TTC) so a close
@@ -96,20 +96,20 @@ _LAG_DISP_RATIO: float = 0.10           # flag lag if raw disp < 10 % of expecte
 # with ego_speed floored at _LAG_FREEZE_EGO_SPEED_FLOOR. Curve: 0 s at TTC ≤
 # _LAG_FREEZE_TTC_LO, _LAG_FREEZE_DUR_MAX at TTC ≥ _LAG_FREEZE_TTC_HI,
 # dur = K · ln(ttc / lo) between (K chosen so dur(hi) = max).
-_LAG_FREEZE_TTC_LO: float = 0.3                  # s    — freeze = 0 at/below this TTC
-_LAG_FREEZE_TTC_HI: float = 4.0                  # s    — freeze = max at/above this TTC
-_LAG_FREEZE_DUR_MAX: float = 0.5                 # s    — freeze cap (release after this)
-_LAG_FREEZE_EGO_SPEED_FLOOR: float = 1.0         # m/s  — TTC denom floor
+_LAG_FREEZE_TTC_LO: float = 0.3                  # s   : freeze = 0 at/below this TTC
+_LAG_FREEZE_TTC_HI: float = 4.0                  # s   : freeze = max at/above this TTC
+_LAG_FREEZE_DUR_MAX: float = 0.5                 # s   : freeze cap (release after this)
+_LAG_FREEZE_EGO_SPEED_FLOOR: float = 1.0         # m/s : TTC denom floor
 _LAG_FREEZE_LOG_K: float = _LAG_FREEZE_DUR_MAX / math.log(
     _LAG_FREEZE_TTC_HI / _LAG_FREEZE_TTC_LO
 )
 
-# Position mismatch (TMP only) — out-of-order packet rejection.
+# Position mismatch (TMP only): out-of-order packet rejection.
 # Fires when raw position jumps backward along heading.  Max 3 consecutive frames.
-_POS_MISMATCH_BACKWARD_THRESHOLD: float = 0.00   # m — min backward dot to flag
+_POS_MISMATCH_BACKWARD_THRESHOLD: float = 0.00   # m: min backward dot to flag
 _POS_MISMATCH_MAX_FRAMES: int = 5
 
-# Crash detection (TMP only) — angular jerk vs last sample (every read, not only full frames).
+# Crash detection (TMP only): angular jerk vs last sample (every read, not only full frames).
 _CRASH_PITCH_JERK: float = 2.0                  # deg/s² pitch angular jerk threshold
 _CRASH_YAW_JERK: float = 15.0                   # deg/s² yaw angular jerk threshold
 _CRASH_ROLL_JERK: float = 2.0                   # deg/s² roll angular jerk threshold
@@ -118,19 +118,19 @@ _CRASH_CONFIRM_DURATION: float = 0.00           # s jerk must hold before confir
 _MIN_CURVATURE_RADIUS: float = 5.0
 _STRAIGHT_CURVATURE_EPS: float = 1e-6
 
-# Vehicle position history buffer — newest last, length capped at
+# Vehicle position history buffer: newest last, length capped at
 # _POSITION_HISTORY_LEN. Shared by:
 #   - TMP raw speed LS fit (uses last _TMP_SPEED_HISTORY_LEN samples internally)
 #   - curvature_from_history() circumscribed-circle fit (uses full buffer)
 #   - ACC trail-arc scoring (needs long history for stable fit).
 #
 # _POSITION_HISTORY_LEN is the buffer size; _TMP_SPEED_HISTORY_LEN is the
-# window the TMP speed LS fit considers — ~1.3 s, long enough to average out
+# window the TMP speed LS fit considers: ~1.3 s, long enough to average out
 # TMP's ~1 Hz position-reconciliation ripple (see AGENTS.md §7) so the derived
 # speed doesn't oscillate.
 _POSITION_HISTORY_LEN: int = 25
 _TMP_SPEED_HISTORY_LEN: int = 20
-_TMP_SPEED_NEAR_ZERO_CHORD: float = 0.025  # m — same gate as per-frame displacement
+_TMP_SPEED_NEAR_ZERO_CHORD: float = 0.025  # m: same gate as per-frame displacement
 
 
 def _lag_freeze_duration(gap_3d: float, ego_speed: float) -> float:
@@ -256,7 +256,7 @@ def _smooth_vehicle_kinematics(
 
     Returns (speed_ema, accel, speed_corr, acc_speed, speed_ema_history).
     """
-    # Step 1 — plain EMA of raw speed (no lag compensation).
+    # Step 1: plain EMA of raw speed (no lag compensation).
     if prev_speed_ema is None:
         speed_ema = raw_speed
         alpha_s = 1.0
@@ -264,7 +264,7 @@ def _smooth_vehicle_kinematics(
         alpha_s = _tmp_speed_ema_alpha(abs((prev_speed_ema + raw_speed) * 0.5))
         speed_ema = alpha_s * raw_speed + (1.0 - alpha_s) * prev_speed_ema
 
-    # Step 2 — accel = LS slope of the speed_ema history (low-noise derivative),
+    # Step 2: accel = LS slope of the speed_ema history (low-noise derivative),
     # then a light EMA. A windowed least-squares fit averages out the per-sample
     # noise that a tick-to-tick difference would amplify.
     history = list(prev_speed_ema_history) if prev_speed_ema_history else []
@@ -277,12 +277,12 @@ def _smooth_vehicle_kinematics(
     else:
         accel = prev_accel + _ACCEL_EMA_ALPHA * (accel_raw - prev_accel)
 
-    # Step 3 — lag-compensated speed. τ is the step-1 EMA's settling time.
+    # Step 3: lag-compensated speed. τ is the step-1 EMA's settling time.
     tau_eff = dt * (1.0 - alpha_s) / alpha_s if alpha_s > 1e-6 else 0.0
     correction = max(-_SPEED_CORR_CLAMP_MS, min(_SPEED_CORR_CLAMP_MS, accel * tau_eff))
     speed_corr = speed_ema + correction
 
-    # Step 4 — ACC speed: adaptive low-pass on speed_corr with a constant-accel
+    # Step 4: ACC speed: adaptive low-pass on speed_corr with a constant-accel
     # feed-forward. tau ramps slow→fast with the per-tick change (abrupt jumps)
     # and is scaled down on a confirmed ramp; the feed-forward predicts along
     # the de-noised accel so a steady ramp tracks with ≈ 0 lag. See AGENTS.md §7.
@@ -292,10 +292,10 @@ def _smooth_vehicle_kinematics(
         delta = speed_corr - prev_acc_speed
         ramp = (abs(delta) - _ACC_SPEED_DEADBAND_MS) / _ACC_SPEED_DEADBAND_MS
         ramp = max(0.0, min(1.0, ramp))
-        # Smoothing scales with speed — full at the reference speed, light at rest.
+        # Smoothing scales with speed: full at the reference speed, light at rest.
         speed_factor = _ACC_SPEED_SMOOTH_MIN + (1.0 - _ACC_SPEED_SMOOTH_MIN) * min(
             1.0, abs(speed_corr) / _ACC_SPEED_SMOOTH_REF_MS)
-        # ...and with acceleration — a steady ramp is low-noise, track it closely.
+        # ...and with acceleration: a steady ramp is low-noise, track it closely.
         accel_trend = _accel_from_speed_history(history, _ACC_SPEED_ACCEL_WINDOW_S)
         accel_span = _ACC_SPEED_ACCEL_HI_MS2 - _ACC_SPEED_ACCEL_LO_MS2
         accel_ramp = max(0.0, min(1.0,
@@ -304,7 +304,7 @@ def _smooth_vehicle_kinematics(
         tau = _ACC_SPEED_TAU_SLOW_S + (_ACC_SPEED_TAU_FAST_S - _ACC_SPEED_TAU_SLOW_S) * ramp
         tau *= speed_factor * accel_factor
         alpha_a = dt / (tau + dt)
-        # Feed-forward — predict one step along the responsive accel, then
+        # Feed-forward: predict one step along the responsive accel, then
         # low-pass the residual. Cancels the filter's accel·tau ramp lag with no
         # windup. ff_gate (a ramp on the de-noised |accel_trend|) holds the
         # prediction at zero while coasting, so cruise noise is never fed forward.
@@ -349,7 +349,7 @@ class Position:
 
 
 class Quaternion:
-    """ETS2 traffic quaternion — x/y swap is intentional (AGENTS.md §3)."""
+    """ETS2 traffic quaternion: x/y swap is intentional (AGENTS.md §3)."""
     __slots__ = ("w", "x", "y", "z", "_euler_cache")
 
     def __init__(self, w: float, x: float, y: float, z: float) -> None:
@@ -360,7 +360,7 @@ class Quaternion:
         self._euler_cache: tuple[float, float, float] | None = None
 
     def euler(self) -> tuple[float, float, float]:
-        """(pitch, yaw, roll) in degrees. Cached — quaternion is immutable after init."""
+        """(pitch, yaw, roll) in degrees. Cached: quaternion is immutable after init."""
         if self._euler_cache is not None:
             return self._euler_cache
         yaw = math.atan2(
@@ -796,13 +796,13 @@ class Vehicle:
         self._raw_x: Optional[float] = None
         self._raw_z: Optional[float] = None
 
-        # Speed/accel filter state (AI + TMP) — see AGENTS.md §7.
+        # Speed/accel filter state (AI + TMP): see AGENTS.md §7.
         self._smooth_speed: Optional[float] = None
         self._smooth_accel: Optional[float] = None
         self._speed_ema: Optional[float] = None
         self._speed_ema_history: list[tuple[float, float]] = []
         self._raw_speed: Optional[float] = None
-        # (time, x, z) per full update — newest last, capped at _POSITION_HISTORY_LEN.
+        # (time, x, z) per full update: newest last, capped at _POSITION_HISTORY_LEN.
         # Populated for both TMP and AI; TMP speed LS fit uses a shorter internal window.
         self._position_history: list[tuple[float, float, float]] = []
 
@@ -814,12 +814,12 @@ class Vehicle:
         self._lag_since: Optional[float] = None
         self.lag_confirmed: bool = False
 
-        # Position mismatch (TMP only) — consecutive frame counter.
+        # Position mismatch (TMP only): consecutive frame counter.
         # Counts how many frames in a row the raw position jumped backward.
         # Resets to 0 on any clean frame or when the cap is reached.
         self._pos_mismatch_frames: int = 0
 
-        # Crash detection (TMP only) — per-axis rotation rates and displacement from prev frame.
+        # Crash detection (TMP only): per-axis rotation rates and displacement from prev frame.
         self._prev_pitch_rate: Optional[float] = None
         self._prev_yaw_rate: Optional[float] = None
         self._prev_roll_rate: Optional[float] = None
@@ -930,7 +930,7 @@ class Vehicle:
             self._tmp_apply_crash_rotation_jerk(prev, t_now)
 
             # TMP: between full updates (dt < threshold), do not freeze speed and pose at
-            # the last full tick — the buffer may have new coordinates while prev.speed
+            # the last full tick: the buffer may have new coordinates while prev.speed
             # still holds a bad EMA sample. Re-derive speed from (latest raw − prev raw) /
             # (t_now − prev.time) when movement exceeds the usual gate; always snap pose
             # to latest raw. Skipped during lag freeze and position mismatch hold unless
@@ -969,7 +969,7 @@ class Vehicle:
                     fwd_x = -math.sin(prev._smooth_yaw)
                     fwd_z = -math.cos(prev._smooth_yaw)
                     direction = 1.0 if (ddx * fwd_x + ddz * fwd_z) >= 0.0 else -1.0
-                    # Raw kinematics for debug only — keep self.speed at filtered value.
+                    # Raw kinematics for debug only: keep self.speed at filtered value.
                     self._raw_speed = direction * dist / dt_sf
                 self._raw_x = rx
                 self._raw_z = rz
@@ -1008,13 +1008,13 @@ class Vehicle:
         self._raw_x = raw_x
         self._raw_z = raw_z
 
-        # Type 3: Crash detection (TMP only) — angular jerk; sub-frames call the same helper earlier.
+        # Type 3: Crash detection (TMP only): angular jerk; sub-frames call the same helper earlier.
         self._tmp_apply_crash_rotation_jerk(prev, t_now)
 
         # Type 1: Position mismatch (TMP only, max _POS_MISMATCH_MAX_FRAMES)
-        # Raw position jumped backward along the vehicle's heading — out-of-order packet.
+        # Raw position jumped backward along the vehicle's heading: out-of-order packet.
         # Yaw EMA and angular_velocity still run; position and carried speed/accel are held.
-        # Bypassed when crash_confirmed — a crashed vehicle's backward jumps are real.
+        # Bypassed when crash_confirmed: a crashed vehicle's backward jumps are real.
         _skip_position_update = False
         if (self.is_tmp
                 and prev._smooth_yaw is not None
@@ -1032,7 +1032,7 @@ class Vehicle:
                 self._pos_mismatch_frames = 0
 
         # Type 2: TMP lag detection (near-stationary freeze with speed decay)
-        # Bypassed when crash_confirmed — any movement on a crashed vehicle is real position data.
+        # Bypassed when crash_confirmed: any movement on a crashed vehicle is real position data.
         if self.is_tmp and prev._raw_x is not None and not _skip_position_update and not self.crash_confirmed:
             _raw_disp_sq = (raw_x - prev._raw_x) ** 2 + (raw_z - prev._raw_z) ** 2
             _expected_disp = abs(prev.speed) * dt
@@ -1048,7 +1048,7 @@ class Vehicle:
                 )
                 _freeze_dur = _lag_freeze_duration(_gap_3d, ego_speed)
                 if _freeze_dur <= 0.0:
-                    # Too close to ego — a real stop must not be masked. Drop the
+                    # Too close to ego: a real stop must not be masked. Drop the
                     # freeze entirely and let the normal update run.
                     self._lag_since = None
                 elif _lag_duration < _freeze_dur:
@@ -1073,7 +1073,7 @@ class Vehicle:
             else:
                 self._lag_since = None
 
-        # Wrap-safe yaw EMA — runs first so angular_velocity uses smooth derivative
+        # Wrap-safe yaw EMA: runs first so angular_velocity uses smooth derivative
         raw_yaw = math.radians(self.rotation.euler()[1])
         if self._smooth_yaw is None:
             self._smooth_yaw = raw_yaw
@@ -1081,7 +1081,7 @@ class Vehicle:
             diff = (raw_yaw - self._smooth_yaw + math.pi) % (2.0 * math.pi) - math.pi
             self._smooth_yaw = self._smooth_yaw + _RAW_YAW_ALPHA * diff
 
-        # Angular velocity in deg/s — callers apply math.radians(), so keep degrees here
+        # Angular velocity in deg/s: callers apply math.radians(), so keep degrees here
         _prev_smooth_yaw_deg = math.degrees(prev._smooth_yaw) if prev._smooth_yaw is not None else prev.rotation.euler()[1]
         _cur_smooth_yaw_deg = math.degrees(self._smooth_yaw)
         _yaw_diff_deg = (_cur_smooth_yaw_deg - _prev_smooth_yaw_deg + 180.0) % 360.0 - 180.0
@@ -1099,7 +1099,7 @@ class Vehicle:
             self._smooth_accel = prev._smooth_accel
             return
 
-        # World position is unfiltered — arcs and debug use true coordinates.
+        # World position is unfiltered: arcs and debug use true coordinates.
         self._smooth_x = raw_x
         self._smooth_z = raw_z
         self.position.x = raw_x
@@ -1114,7 +1114,7 @@ class Vehicle:
         if len(self._position_history) > _POSITION_HISTORY_LEN:
             self._position_history = self._position_history[-_POSITION_HISTORY_LEN:]
 
-        # Raw speed — TMP: LS fit on position history (single-interval fallback);
+        # Raw speed: TMP: LS fit on position history (single-interval fallback);
         # AI: the game-reported buffer value as-is. The filter chain below is shared.
         if self.is_tmp:
             _ls = _tmp_raw_speed_from_position_history(self._position_history, fwd_x, fwd_z)
@@ -1161,7 +1161,7 @@ class Vehicle:
         Averages over up to four (oldest, mid, newest) triples for stability.
         Returns None when < 3 samples; 0.0 when near-stationary or near-straight.
         Falls back to angular_velocity / speed in get_arc() when None.
-        Cached per frame — _position_history doesn't change within a tick.
+        Cached per frame: _position_history doesn't change within a tick.
         """
         if self._curvature_cache_valid:
             return self._curvature_cache
@@ -1313,7 +1313,7 @@ def vehicle_from_trailer(parent: Vehicle, trailer: Trailer, synthetic_id: int) -
     The wrapped Vehicle gets its own Position (``update_from_last`` mutates
     position in place); rotation and size are immutable and shared. TMP's raw
     trailer pivot is the front coupler, so ``correct_position()`` shifts it to
-    the body center — matching the symmetric +/- length/2 pivot the rest of
+    the body center: matching the symmetric +/- length/2 pivot the rest of
     the pipeline assumes for TMP vehicles.
     """
     if trailer.is_tmp:
@@ -1334,3 +1334,4 @@ def vehicle_from_trailer(parent: Vehicle, trailer: Trailer, synthetic_id: int) -
         is_trailer=True,
         is_parked=parent.is_parked,
     )
+

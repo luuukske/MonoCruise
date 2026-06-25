@@ -1,4 +1,4 @@
-; Inno Setup script for the MonoCruise bootstrap installer.
+﻿; Inno Setup script for the MonoCruise bootstrap installer.
 ;
 ; The CI workflow compiles this with:
 ;     iscc /DMyAppVersion=X.Y.Z installer\MonoCruise.iss
@@ -10,7 +10,7 @@
 ; Output: installer\output\MonoCruise installer.exe
 ;
 ; Files NOT listed in [Files] are never touched by the installer or
-; uninstaller — that is how config.json and logs\ survive upgrades.
+; uninstaller: that is how config.json and logs\ survive upgrades.
 
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0-dev"
@@ -41,7 +41,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
 [Files]
-; Main application — PyInstaller one-folder output.
+; Main application: PyInstaller one-folder output.
 Source: "..\dist\MonoCruise\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 ; Auto-updater lives in the same install dir so updater.py:install_dir resolves correctly.
 Source: "..\dist\updater\*";     DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
@@ -59,3 +59,4 @@ Filename: "{app}\MonoCruise.exe"; Description: "Launch MonoCruise"; Flags: nowai
 ; Only remove things the installer placed. config.json and logs\ are left
 ; behind on uninstall so the user can keep their settings/history.
 Type: filesandordirs; Name: "{app}\_internal"
+

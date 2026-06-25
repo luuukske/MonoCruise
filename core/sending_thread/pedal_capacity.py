@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tracks estimated maximum brake deceleration and gas acceleration.
 
 Replaces brake_efficiency.py with a simpler, always-on system:
@@ -8,7 +8,7 @@ Replaces brake_efficiency.py with a simpler, always-on system:
   - Each sample is weighted by brake_output² so light braking has tiny influence
     while heavy braking drives the estimate strongly.
   - Underperformance (measured decel < expected) drops the estimate 3× faster
-    than overperformance rises it — safety bias for emergency stops.
+    than overperformance rises it: safety bias for emergency stops.
   - Gravity and rolling resistance are canceled via road_load_ms2 before sampling.
 
   Gas learning (shape-function: learned anchor + learned ratio)
@@ -16,7 +16,7 @@ Replaces brake_efficiency.py with a simpler, always-on system:
     isn't perfectly geometric (engine torque curve, splitter/range steps,
     clutch slip at launch). Two scalars parameterize the whole gear curve:
         G(gear) = anchor * ratio^(_ANCHOR_GEAR - gear)
-    Both are learned online via log-space linear regression — each sample's
+    Both are learned online via log-space linear regression: each sample's
     residual nudges anchor and ratio toward the best fit, with the ratio's
     update weighted by the sample's gear distance from the anchor (samples
     far from the anchor carry more slope information; samples at the anchor
@@ -55,8 +55,8 @@ _BRAKE_PEDAL_FLOOR: float = 0.05    # skip samples below this pedal level
 _ACCEL_PEDAL_FLOOR: float = 0.05
 _MIN_DECEL_MS2: float = 0.3         # ignore near-zero decel (coasting / noise)
 _MIN_ACCEL_MS2: float = 0.2         # ignore near-zero accel
-_MAX_SLOPE_RAD: float = 0.15        # ~8.6° — skip extreme slopes (sensor uncertainty)
-_WEIGHT_POWER: float = 3.0          # alpha ∝ pedal^4 — small inputs almost ignored, full pedal dominates
+_MAX_SLOPE_RAD: float = 0.15        # ~8.6°: skip extreme slopes (sensor uncertainty)
+_WEIGHT_POWER: float = 3.0          # alpha ∝ pedal^4: small inputs almost ignored, full pedal dominates
 _BRAKE_BASE_ALPHA: float = 0.15     # EMA alpha at full brake pedal, no underperformance
 _ACCEL_BASE_ALPHA: float = 0.08     # EMA alpha at full gas pedal, no underperformance
 _UNDERPERFORM_MULT: float = 2.0     # drop estimate this much faster when below expectation
@@ -64,8 +64,8 @@ _CLUTCH_GUARD_S: float = 0.5        # seconds after clutch to skip gas learning
 _CLUTCH_ACTIVE_THRESHOLD: float = 0.05
 _SAVE_THRESHOLD: float = 0.1        # save when drift exceeds 10% of saved value
 _SAVE_COOLDOWN_S: float = 30.0      # min seconds between successive writes
-_ESTIMATE_LOWER_BOUND: float = 0.35 # fraction of baseline — hard floor
-_ESTIMATE_UPPER_BOUND: float = 2.0  # fraction of baseline — hard ceiling
+_ESTIMATE_LOWER_BOUND: float = 0.35 # fraction of baseline: hard floor
+_ESTIMATE_UPPER_BOUND: float = 2.0  # fraction of baseline: hard ceiling
 
 # Shape-function model for per-gear gas gain. Two scalars parameterize the
 # whole curve via
@@ -73,12 +73,12 @@ _ESTIMATE_UPPER_BOUND: float = 2.0  # fraction of baseline — hard ceiling
 # Both `anchor` and `ratio` are learned online via log-space regression on
 # every accepted sample (see update_accel). The model is monotonic by
 # construction (ratio is clamped > 1), so gear g+1 can never end up with a
-# higher gain than gear g — the inversion that independent per-gear EMAs
+# higher gain than gear g: the inversion that independent per-gear EMAs
 # were prone to.
 _RATIO_INIT: float = 1.27            # default until enough cross-gear samples settle the
-                                     # regression — also the seed multiplier used to
+                                     # regression: also the seed multiplier used to
                                      # project the legacy max_accel scalar to the anchor
-_RATIO_MIN: float = 1.05             # absolute bounds — outside is unphysical for any
+_RATIO_MIN: float = 1.05             # absolute bounds: outside is unphysical for any
 _RATIO_MAX: float = 1.45             # common truck transmission
 _RATIO_BASE_ALPHA: float = 0.02      # log-space ratio learning rate at gas=1.0. Lower
                                      # than the anchor's because each sample's update
@@ -90,13 +90,13 @@ _LEGACY_SEED_GEAR: int = 8           # legacy max_accel_ms2 was mostly learned i
 
 # Anchor-gain bounds (m/s² at gas=1.0, weight-normalized, evaluated at
 # _ANCHOR_GEAR). Per-gear values derived from this anchor span a much wider
-# range — the model handles the per-gear shape, the anchor handles amplitude.
+# range: the model handles the per-gear shape, the anchor handles amplitude.
 _ACCEL_ANCHOR_MIN_MS2: float = 0.5
 _ACCEL_ANCHOR_MAX_MS2: float = 8.0
 
 # Gear-dwell gate. After a gear change the speed differentiator
 # (sending_thread, τ=0.30 s) still lags real acceleration, and engine torque
-# is settling through clutch engagement — samples taken here bias the gain
+# is settling through clutch engagement: samples taken here bias the gain
 # low. Low gears (1–3) are engaged so briefly per launch that the full
 # dwell would block them from ever sampling, so the gate uses a shorter
 # threshold there.
@@ -104,7 +104,7 @@ _GEAR_DWELL_S: float = 0.30
 _LOW_GEAR_DWELL_S: float = 0.10
 _LOW_GEAR_DWELL_MAX_GEAR: int = 3
 
-# Gas settled-pedal gate — skip learning while the gas pedal is still moving.
+# Gas settled-pedal gate: skip learning while the gas pedal is still moving.
 # Catches gas hunting during active control, independent of gear changes.
 _GAS_SETTLE_WINDOW_S: float = 0.20
 _GAS_SETTLE_TOLERANCE: float = 0.03
@@ -112,7 +112,7 @@ _GAS_STEP_THRESHOLD: float = 0.05
 _GAS_STEP_GUARD_S: float = 0.25
 _GAS_PEDAL_HISTORY_LIMIT: int = 64
 
-# Brake settled-pedal gate — skip learning while the brake pedal is still
+# Brake settled-pedal gate: skip learning while the brake pedal is still
 # moving. Brake hydraulics have ~150–250 ms of lag; sampling during the
 # transient drives the EMA below the steady-state truth.
 _BRAKE_SETTLE_WINDOW_S: float = 0.20
@@ -136,13 +136,13 @@ class PedalCapacityTracker:
     road_load_ms2 (= slope_accel + rolling_accel, positive = uphill forward).
 
     Persisted in Settings:
-      pedal_capacity_max_brake_ms2            — brake estimate (0 = use baseline)
-      pedal_capacity_max_accel_ms2            — legacy scalar; cold-start seed
+      pedal_capacity_max_brake_ms2           : brake estimate (0 = use baseline)
+      pedal_capacity_max_accel_ms2           : legacy scalar; cold-start seed
                                                 source for the anchor
-      pedal_capacity_accel_anchor_gain_ms2    — shape-function anchor (m/s² at
+      pedal_capacity_accel_anchor_gain_ms2   : shape-function anchor (m/s² at
                                                 gas=1.0, mass-normalized, at
                                                 _ANCHOR_GEAR)
-      pedal_capacity_accel_ratio_step         — learned per-gear-step ratio
+      pedal_capacity_accel_ratio_step        : learned per-gear-step ratio
                                                 (1.0 = flat, >1.0 = lower gear
                                                 has more gain)
     """
@@ -152,7 +152,7 @@ class PedalCapacityTracker:
         self._saved_brake: float = 0.0
         # Shape-function anchor (m/s² at gas=1.0, mass-normalized, at
         # _ANCHOR_GEAR). Every gear's gain is derived by geometric
-        # projection — see accel_gain_for_gear / update_accel.
+        # projection: see accel_gain_for_gear / update_accel.
         self._accel_anchor_gain_ms2: float = 0.0
         self._saved_accel_anchor: float = 0.0
         # Learned per-gear-step ratio. Starts at the in-code default; the
@@ -204,7 +204,7 @@ class PedalCapacityTracker:
         self._saved_accel_ratio = self._accel_ratio_step
 
         # Shape-function anchor. If a persisted anchor is present, use it.
-        # Otherwise seed from the legacy max-accel scalar — that value was
+        # Otherwise seed from the legacy max-accel scalar: that value was
         # learned mostly during top-gear cruise, so treat it as G(_LEGACY_SEED_GEAR)
         # and project geometrically to _ANCHOR_GEAR. Result: a sensible shape
         # across all gears on first launch; the anchor refines from new samples.
@@ -229,7 +229,7 @@ class PedalCapacityTracker:
             G(gear) = anchor * ratio^(_ANCHOR_GEAR - gear)
         Lower gear = higher gain (more torque to wheels). The mapper divides
         by weight_factor to recover the current-mass gain. Monotonic by
-        construction — independent per-gear EMAs let brief, noisy low-gear
+        construction: independent per-gear EMAs let brief, noisy low-gear
         samples invert against well-known top-gear samples; this model can't.
         """
         anchor = self._accel_anchor_gain_ms2
@@ -266,7 +266,7 @@ class PedalCapacityTracker:
             brake_output: Actual brake pedal sent to the game [0–1].
             measured_decel_ms2: Positive measured deceleration (m/s²).
             speed_ms: Current speed (m/s).
-            slope_rad: Road pitch (rad, positive = uphill) — used only for slope filter.
+            slope_rad: Road pitch (rad, positive = uphill): used only for slope filter.
             baseline_ms2: Baseline max decel for clamping bounds.
             road_load_ms2: slope_accel + rolling_accel (positive = uphill forward).
                            Subtracted from measured_decel to isolate pure brake force.
@@ -342,7 +342,7 @@ class PedalCapacityTracker:
         Every sample, regardless of which gear it came from, is projected
         back to the anchor gear and contributes to the single anchor_gain
         scalar. The geometric model gives monotonic per-gear gains by
-        construction — brief noisy low-gear samples cannot invert against
+        construction: brief noisy low-gear samples cannot invert against
         well-known top-gear samples.
 
         Skipped when:
@@ -356,7 +356,7 @@ class PedalCapacityTracker:
             gas_output: Actual gas pedal sent to the game [0–1].
             measured_accel_ms2: Positive measured acceleration (m/s²).
             speed_ms: Current speed (m/s).
-            slope_rad: Road pitch (rad, positive = uphill) — used only for slope filter.
+            slope_rad: Road pitch (rad, positive = uphill): used only for slope filter.
             game_clutch: Current clutch position [0–1].
             gear: Current transmission gear (negative = reverse, 0 = neutral).
             total_mass_kg: Current truck + cargo + fuel mass (kg).
@@ -366,7 +366,7 @@ class PedalCapacityTracker:
         """
         now = time.monotonic()
 
-        # Gear-change tracking — unconditional so the dwell timer is correct
+        # Gear-change tracking: unconditional so the dwell timer is correct
         # even when the prior sample was rejected for another reason.
         g_now = 0
         try:
@@ -441,7 +441,7 @@ class PedalCapacityTracker:
         # it carry most of the slope). Both lrs scale by pedal^3 so weak
         # inputs barely move the estimate. An underperform safety bias is
         # preserved: when measured gain is below predicted (the overshoot-
-        # prone direction, also the failure mode the user reports — gear 1/2
+        # prone direction, also the failure mode the user reports: gear 1/2
         # undershoot means real low-gear gain is below the projection), both
         # updates run faster so the model adapts quickly.
         x = _ANCHOR_GEAR - g
@@ -449,7 +449,7 @@ class PedalCapacityTracker:
         log_m = math.log(candidate)
 
         if self._accel_anchor_gain_ms2 <= 0.0:
-            # First valid sample — seed the anchor from this single sample
+            # First valid sample: seed the anchor from this single sample
             # using the current ratio. Same as projecting the sample to the
             # anchor gear via the geometric model.
             seed = math.exp(log_m - x * log_ratio)
@@ -523,3 +523,4 @@ def _safe_float(value: object) -> float:
         return result if math.isfinite(result) else 0.0
     except (TypeError, ValueError):
         return 0.0
+

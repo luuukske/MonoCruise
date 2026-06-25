@@ -1,4 +1,4 @@
-"""FP: TMP vehicle from side road (east-bound) turns right into south-bound lane.
+﻿"""FP: TMP vehicle from side road (east-bound) turns right into south-bound lane.
 
 Ego heads north at 50 km/h. TMP vehicle approaches from west, heading east,
 then curves right (south) into opposite lane. Position history warm-up: 10
@@ -36,7 +36,7 @@ def build() -> list[Frame]:
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
 
-    # Phase 2: curvature transition — TMP turns right (south, into opposite lane)
+    # Phase 2: curvature transition: TMP turns right (south, into opposite lane)
     # Right turn for east-facing vehicle means increasing curvature toward south
     # curvature > 0 = left (CCW), so right turn = negative curvature
     for i in range(30):
@@ -70,3 +70,4 @@ def build() -> list[Frame]:
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
 
     return frames
+

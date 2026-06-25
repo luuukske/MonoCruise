@@ -1,5 +1,5 @@
-"""
-ACC longitudinal child — wraps the IIDM+CAH following-distance controller
+﻿"""
+ACC longitudinal child: wraps the IIDM+CAH following-distance controller
 from `core/cruise_control_thread/acc_controller.py`.
 
 The inner controller publishes an upper bound on commanded longitudinal
@@ -28,7 +28,7 @@ class AdaptiveCruiseController(LongitudinalController):
     @property
     def active(self) -> bool:
         # ACC is "armed" whenever the user enabled it and we're in cruise mode.
-        # Whether it actually constrains accel depends on lead presence — the
+        # Whether it actually constrains accel depends on lead presence: the
         # inner controller returns its no-lead ceiling when no lead is in path,
         # which the orchestrator will lose to CC's lower request via min().
         return bool(Settings.acc_enabled) and Settings.cc_mode == "Cruise control"
@@ -42,3 +42,4 @@ class AdaptiveCruiseController(LongitudinalController):
 
     def reset(self) -> None:
         self._inner.reset()
+

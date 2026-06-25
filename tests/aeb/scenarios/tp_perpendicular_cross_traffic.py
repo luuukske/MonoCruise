@@ -1,6 +1,6 @@
-"""TP: vehicle crossing ego path perpendicularly at 50 km/h (T-bone).
+﻿"""TP: vehicle crossing ego path perpendicularly at 50 km/h (T-bone).
 
-Zero curvature — straight-line cross. TurningCrossTrafficFilter only suppresses
+Zero curvature: straight-line cross. TurningCrossTrafficFilter only suppresses
 tightly-curving targets; curvature=0 passes through to collision eval.
 Ego at 70 km/h straight. EXPECTED: BRAKE.
 """
@@ -32,8 +32,9 @@ def build() -> list[Frame]:
             z=20.0,
             yaw_deg=270.0,  # east-facing (cross traffic)
             speed=_TARGET_SPEED,
-            curvature=0.0,  # straight — TurningCrossTrafficFilter won't suppress,
+            curvature=0.0,  # straight: TurningCrossTrafficFilter won't suppress,
             noise_seed=i,
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
     return frames
+

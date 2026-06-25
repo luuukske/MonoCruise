@@ -1,7 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """
-HoldController — single authority for keeping the vehicle stationary, with
+HoldController: single authority for keeping the vehicle stationary, with
 closed-loop rollback prevention.
 
 The primary purpose of this controller is to PREVENT ROLLBACK on hills. A pure
@@ -16,7 +16,7 @@ Architecture:
 - In every "hold" state (STOPPING, HOLDING, LAUNCHING) two brake terms run:
     1. Slope-balance feedforward via the mapper's inverse brake curve.
     2. A rollback integrator that grows the brake whenever the truck is moving
-       against the intended direction — pure outer-loop correction for any
+       against the intended direction: pure outer-loop correction for any
        residual error in the feedforward or pedal calibration. It only ever
        adds brake; it never reduces below the feedforward.
 - The feedforward is applied as soon as STOPPING engages (not gated by the
@@ -57,7 +57,7 @@ _HOLD_ROLLING_EXIT_SPEED_KMH: float = 1.0    # forward-gear speed needed to sett
 _HOLD_DEFINITELY_ROLLING_KMH: float = 5.0
 
 # Slope-balance pedal
-_HOLD_SAFETY_MARGIN_MS2: float = 0.3         # extra decel beyond slope balance (was 0.15 — bumped for rollback margin)
+_HOLD_SAFETY_MARGIN_MS2: float = 0.3         # extra decel beyond slope balance (was 0.15: bumped for rollback margin)
 _HOLD_MAX_PEDAL: float = 0.7                 # clamp hold pedal
 _MAX_ROAD_GRADE_RAD: float = 0.35            # matches mapper clamp
 # Guaranteed minimum brake pedal while STOPPING/HOLDING so the truck has a
@@ -73,7 +73,7 @@ _HOLD_STATIONARY_MIN_PEDAL: float = 0.025
 # Pitch smoothing
 _HOLD_PITCH_EMA_TAU_S: float = 0.5
 
-# Rollback integrator — closed-loop term on top of slope-FF.
+# Rollback integrator: closed-loop term on top of slope-FF.
 # `rollback_v` is the speed (m/s) moving against gear intent (or any motion in
 # neutral). The integrator adds extra decel proportional to the time-integral
 # of rollback_v above a small deadband. It is the safety net for any error in
@@ -90,13 +90,13 @@ _HOLD_PARK_BRAKE_DEBOUNCE_S: float = 0.2
 # Clutch fully-released threshold for STOPPING → HOLDING capture. On a hill,
 # committing to HOLDING while the (game) clutch is still partially engaged
 # causes the truck to creep forward off the brake once the hold floor takes
-# over — the residual clutch torque overpowers the small hold-brake. Waiting
+# over: the residual clutch torque overpowers the small hold-brake. Waiting
 # for full clutch release ensures the truck is genuinely coasting before we
 # hand over to the FSM brake floor. Matches the mapper's gearshift gate
 # (_GAME_CLUTCH_ACTIVE_THRESHOLD = 0.05).
 _HOLD_CLUTCH_RELEASED_THRESHOLD: float = 0.05
 
-# Manual-launch shortcuts (driver intent obvious — skip ramp)
+# Manual-launch shortcuts (driver intent obvious: skip ramp)
 _HOLD_MANUAL_OPD_OVERRIDE: float = 0.75
 _HOLD_MANUAL_GAS_OVERRIDE: float = 0.7       # added on top of `offset`
 
@@ -238,7 +238,7 @@ class HoldController:
                 _HOLD_ROLLBACK_GROW_GAIN_MS2_PER_MS * rollback_v * dt
             )
         else:
-            # No rollback this tick — slowly bleed the integrator so a stale
+            # No rollback this tick: slowly bleed the integrator so a stale
             # surface (mud→pavement) doesn't keep over-braking forever.
             leak = math.exp(-dt / max(_HOLD_ROLLBACK_LEAK_TAU_S, 1e-6))
             self._rollback_decel_ms2 *= leak
@@ -258,7 +258,7 @@ class HoldController:
         Two terms:
           1. Slope-balance feedforward (scaled by `1 - launch_ease` during a
              launch ramp so gas can take over smoothly).
-          2. Rollback integrator (NOT scaled by `launch_ease` — if the truck
+          2. Rollback integrator (NOT scaled by `launch_ease`: if the truck
              starts rolling backward mid-ramp, we want full authority to brake
              regardless of how far the ramp has progressed).
         Pedal floor is computed in m/s² space, then mapped through the same
@@ -280,7 +280,7 @@ class HoldController:
                 logger.debug("hold brake_pedal_from_decel failed", exc_info=True)
                 pedal = 0.0
 
-        # Guaranteed stationary pedal floor — gives the brake a perceptible
+        # Guaranteed stationary pedal floor: gives the brake a perceptible
         # bite while held even on perfectly flat ground (where slope FF +
         # safety margin alone produces a sub-perceptible pedal value). Scales
         # with the launch ramp so it does not fight the LAUNCHING release.
@@ -388,7 +388,7 @@ class HoldController:
             self._launch_t = 0.0
             self._release_dwell_acc_s = 0.0
 
-        # State transitions — STOPPING is engaged eagerly (no dwell) so the
+        # State transitions: STOPPING is engaged eagerly (no dwell) so the
         # slope FF and rollback integrator start defending the truck as soon
         # as it dips below the capture speed with decel intent.
         if self._state == STATE_ROLLING:
@@ -418,7 +418,7 @@ class HoldController:
                 and game_clutch < _HOLD_CLUTCH_RELEASED_THRESHOLD
             ):
                 # Truck is essentially stopped AND the game clutch has fully
-                # released — transition into HOLDING. The clutch gate matters
+                # released: transition into HOLDING. The clutch gate matters
                 # on slopes: handing over to the hold floor while the clutch
                 # is still partially engaged lets residual driveline torque
                 # creep the truck off the brake when the user lets go.
@@ -431,7 +431,7 @@ class HoldController:
         if self._state == STATE_HOLDING:
             manual = self._manual_launch_intent(gasval, opdgasval, offset)
             if manual:
-                # Driver explicitly asked to launch — start the ramp at the
+                # Driver explicitly asked to launch: start the ramp at the
                 # fully-released end; the rollback integrator will still
                 # immediately catch any backward motion.
                 self._state = STATE_LAUNCHING
@@ -450,10 +450,10 @@ class HoldController:
         if self._state == STATE_LAUNCHING:
             manual = self._manual_launch_intent(gasval, opdgasval, offset)
             if manual:
-                # Driver still pressing — pin `t` at the fully-released end.
+                # Driver still pressing: pin `t` at the fully-released end.
                 self._launch_t = _HOLD_LAUNCH_RAMP_S
             elif self._rollback_decel_ms2 >= _HOLD_ROLLBACK_ABORT_LAUNCH_MS2:
-                # Significant rollback while trying to launch — gas is NOT
+                # Significant rollback while trying to launch: gas is NOT
                 # enough to overcome the down-slope force. Push `t` back to 0
                 # over the ramp interval so the brake returns smoothly.
                 self._launch_t = max(self._launch_t - dt, 0.0)
@@ -463,7 +463,7 @@ class HoldController:
                 self._launch_t = max(self._launch_t - dt, 0.0)
 
             # Settle to ROLLING as soon as the truck is moving in the intended
-            # direction with no active rollback — the launch is genuinely
+            # direction with no active rollback: the launch is genuinely
             # underway. Snap `launch_t` to `ramp_s` on exit so the brake floor
             # collapses cleanly (cosine ease at t=ramp_s is 1.0 → FF*0 = 0).
             #
@@ -475,7 +475,7 @@ class HoldController:
             # hit 0 before reaching `ramp_s`. The truck would then re-enter
             # HOLDING at cruise speed and brake would be pinned at the
             # slope-balance pedal indefinitely, with CC fighting it with gas
-            # — the "constantly-pressed brake at 20 km/h on hilly road"
+            #: the "constantly-pressed brake at 20 km/h on hilly road"
             # symptom users reported.
             rolling_speed_ok = (
                 (forward_intent and speed_kmh > _HOLD_ROLLING_EXIT_SPEED_KMH)
@@ -497,7 +497,7 @@ class HoldController:
                 self._release_dwell_acc_s = 0.0
                 self._launch_t = 0.0
 
-        # Closed-loop rollback integrator update — runs in every hold state.
+        # Closed-loop rollback integrator update: runs in every hold state.
         # In LAUNCHING the integrator is what aborts an unsafe ramp; in
         # STOPPING / HOLDING it backs up any error in the slope FF.
         active_hold = self._state in (STATE_STOPPING, STATE_HOLDING, STATE_LAUNCHING)
@@ -515,7 +515,7 @@ class HoldController:
             ease = 0.5 * (1.0 - math.cos(math.pi * t_norm))
             brake_pedal = self._hold_pedal(pitch_rad, gear, speed_kmh, ease)
         else:
-            # ROLLING — keep integrator at zero for next entry.
+            # ROLLING: keep integrator at zero for next entry.
             self._rollback_decel_ms2 = 0.0
 
         return HoldOutput(
@@ -527,3 +527,4 @@ class HoldController:
             rollback_v_ms=rollback_v,
             active=active_hold,
         )
+

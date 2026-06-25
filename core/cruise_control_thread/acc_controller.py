@@ -1,5 +1,5 @@
-"""
-Adaptive Cruise Controller — IIDM core + CAH overlay, blended via the
+﻿"""
+Adaptive Cruise Controller: IIDM core + CAH overlay, blended via the
 Kesting/Treiber/Helbing 2010 ACC model, with multi-vehicle anticipation.
 
 See ``core/acc/ACC_ARCHITECTURE.md`` for the design rationale and formulas.
@@ -74,7 +74,7 @@ DT_FALLBACK_S: float = 1.0 / 30.0
 DT_MAX_S: float = 0.2
 # Pinned to A_MAX_MS2 so _prev_cmd_ms2 stays in the same range as IIDM-
 # commanded values during no-lead intervals. The cap is still permissive
-# downstream — CC's speed PID is the lower bid via min(ACC, CC) — but a
+# downstream: CC's speed PID is the lower bid via min(ACC, CC): but a
 # lower ceiling keeps the jerk limiter's prev state from drifting far
 # above IIDM's range, which gates how fast brake re-engages on lead
 # reacquisition (a ceiling of 10 took ~5 s to ramp back down to -2 m/s²).
@@ -228,7 +228,7 @@ class AdaptiveCruiseController:
         self._lead_emas: dict[int, _LeadEMA] = {}
         self._output_ema: float | None = None
         self._prev_cmd_ms2: float | None = None
-        # Lead-loss grace cache — see accel_cap_ms2.
+        # Lead-loss grace cache: see accel_cap_ms2.
         self._last_chain_raw: list[_LeadSnapshot] = []
         self._last_chain_mono: float = -math.inf
 
@@ -246,7 +246,7 @@ class AdaptiveCruiseController:
         # ticks at low speed / close range (vehicle-id flip after a classifier
         # transient, brief radar miss). Treating each such gap as "no lead"
         # collapsed the controller's continuous state and slammed wanted_ms2
-        # between the IIDM brake command and the no-lead ceiling — visible
+        # between the IIDM brake command and the no-lead ceiling: visible
         # ~3 m/s² step oscillation upstream of the mapper. Reuse the last
         # good chain for a short grace period so transient gaps are invisible.
         if chain_raw:
@@ -263,7 +263,7 @@ class AdaptiveCruiseController:
             # here, as the previous code did, bypassed the jerk limit on the
             # very next tick and produced step changes proportional to the
             # difference between IIDM's last brake command and the ceiling.
-            # Per-lead EMAs and the cached chain are left in place — _gc_emas
+            # Per-lead EMAs and the cached chain are left in place: _gc_emas
             # ages out stale ones via EMA_GC_TTL_S, and the cache is reseeded
             # the moment a real chain returns.
             self._gc_emas(now)
@@ -495,3 +495,4 @@ class AdaptiveCruiseController:
         alpha = 1.0 - math.exp(-dt / max(self.config.tau_output_s, 1e-6))
         self._output_ema = self._output_ema + alpha * (value - self._output_ema)
         return self._output_ema
+

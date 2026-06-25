@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tracks braking efficiency during cruise control to detect performance degradation.
 
 Compares a rolling EMA of measured deceleration to the deceleration expected from
@@ -28,7 +28,7 @@ _MIN_SAMPLE_SPEED_MS: float = 5.0      # ~18 km/h
 _BRAKE_HIGH_THRESHOLD: float = 0.70    # only high-brake samples for baseline/EMA max
 _BRAKE_OUTPUT_FLOOR: float = 0.15      # decel-per-pedal normalization floor
 _MIN_DECEL_MS2: float = 0.5            # filter near-zero decel noise
-_MAX_SLOPE_RAD: float = 0.03           # ~1.7° — skip sloped road to avoid gravity bias
+_MAX_SLOPE_RAD: float = 0.03           # ~1.7°: skip sloped road to avoid gravity bias
 _BASELINE_REQUIRED: int = 15           # high-brake samples before baseline is locked
 _WARN_COOLDOWN_S: float = 30.0         # minimum seconds between popup warnings
 
@@ -60,9 +60,9 @@ class BrakeEfficiencyTracker:
     nominal_max_brake_decel_ms2).
 
     Reads live from Settings:
-      - brake_efficiency_learning  — enable/disable the tracker
-      - brake_efficiency_alpha     — EMA smoothing factor (0.0–1.0)
-      - brake_efficiency_warn_ratio — ratio below which to emit a popup warning
+      - brake_efficiency_learning : enable/disable the tracker
+      - brake_efficiency_alpha    : EMA smoothing factor (0.0–1.0)
+      - brake_efficiency_warn_ratio: ratio below which to emit a popup warning
     """
 
     def __init__(self) -> None:
@@ -186,3 +186,4 @@ class BrakeEfficiencyTracker:
                 self._baseline_max_decel_ms2,
                 warn_ratio,
             )
+

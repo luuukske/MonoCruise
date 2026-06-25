@@ -1,4 +1,4 @@
-"""TP: head-on vehicle drifted into ego lane (zero lateral offset)."""
+﻿"""TP: head-on vehicle drifted into ego lane (zero lateral offset)."""
 
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 
@@ -23,7 +23,7 @@ def build() -> list[Frame]:
         if distance < 3.0:
             break
         ego = EgoState(x=0.0, y=0.0, z=0.0, yaw_norm=0.5, speed=_EGO_SPEED)
-        # Head-on: facing South (yaw_deg=0) at 0 lateral offset — in ego lane
+        # Head-on: facing South (yaw_deg=0) at 0 lateral offset: in ego lane
         target = make_vehicle(
             vid=1,
             x=0.0,
@@ -35,3 +35,4 @@ def build() -> list[Frame]:
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
     return frames
+

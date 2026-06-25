@@ -1,10 +1,10 @@
-"""FP: co-directional vehicle in outer lane of same-turn corner, ego overtaking."""
+﻿"""FP: co-directional vehicle in outer lane of same-turn corner, ego overtaking."""
 
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 import math
 
 _EGO_SPEED = 60.0 / 3.6   # 60 km/h
-_TARGET_SPEED = 40.0 / 3.6  # 40 km/h — slower, ego overtakes
+_TARGET_SPEED = 40.0 / 3.6  # 40 km/h: slower, ego overtakes
 _N_FRAMES = 90
 _EGO_KAPPA = 0.015  # R≈67m left turn
 _TGT_KAPPA = 0.010  # same turn, slightly wider radius
@@ -44,3 +44,4 @@ def build() -> list[Frame]:
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
     return frames
+

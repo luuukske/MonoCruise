@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 
 from PySide6.QtWidgets import QWidget, QApplication
 from PySide6.QtCore import Qt, QTimer, QRect
@@ -130,7 +130,7 @@ class VisualizationBar(QWidget):
         em_stop = False
         AEB_warn = False
 
-        # SendingThread — provides aforward / abackward (pedal output to the game)
+        # SendingThread: provides aforward / abackward (pedal output to the game)
         try:
             sending_thread = registry.get_thread("sending_thread")
         except KeyError:
@@ -145,7 +145,7 @@ class VisualizationBar(QWidget):
                 gas_output = 0.0
                 brake_output = 0.0
 
-        # MainPedalThread — em_stop flag for emergency flashing
+        # MainPedalThread: em_stop flag for emergency flashing
         try:
             pedal_thread = registry.get_thread("main_pedal_thread")
         except KeyError:
@@ -213,3 +213,4 @@ class VisualizationBar(QWidget):
             self.timer.setInterval(10)
 
         self.update()
+

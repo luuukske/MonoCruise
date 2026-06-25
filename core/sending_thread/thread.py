@@ -1,7 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """
-Sending Thread — owns SCSController and pushes inputs to the game.
+Sending Thread: owns SCSController and pushes inputs to the game.
 
 Responsibilities:
 - Open and manage the SCS shared-memory controller.
@@ -40,7 +40,7 @@ from .visualization_bar import VisualizationBar
 
 logger = logging.getLogger(__name__)
 
-# Coast-down logger — captures raw decel vs speed with pedals fully released,
+# Coast-down logger: captures raw decel vs speed with pedals fully released,
 # so rolling resistance + aerodynamic drag can be fitted offline.
 _COAST_LOG_NAME: str = "coast_debug.csv"
 _COAST_LOG_INTERVAL_S: float = 0.10  # 10 Hz
@@ -52,7 +52,7 @@ _COAST_LOG_HEADER_ROW: list[str] = [
     "raw_accel_ms2",
     "slope_rad",
     "slope_accel_ms2",
-    "drag_accel_ms2",  # raw_accel - slope_accel — this is what you plot vs speed
+    "drag_accel_ms2",  # raw_accel - slope_accel: this is what you plot vs speed
     "gear",
     "game_clutch",
     "game_throttle",
@@ -76,7 +76,7 @@ HAZARD_PRESS_DURATION: float = 0.4
 HAZARD_VERIFY_DELAY: float = 0.1
 HAZARD_MAX_RETRIGGERS: int = 3
 
-# Closed-loop decel controller — feedforward via the inverse brake curve plus
+# Closed-loop decel controller: feedforward via the inverse brake curve plus
 # a small PI on lead-compensated measured decel. Conservative gains; tuned to
 # correct residual model error without fighting the FF.
 _AEB_KP: float = 0.06
@@ -173,7 +173,7 @@ class SendingThreadData(ThreadData):
     mapper_pedal_state: int = 0
     max_brake_ms2: float = 0.0         # live PedalCapacityTracker estimate (m/s²)
     # Hold FSM (single authority for "we want zero motion"). Replaces the old
-    # `stopped` bool — `hold_active` is the new equivalent flag (true in
+    # `stopped` bool: `hold_active` is the new equivalent flag (true in
     # STOPPING/HOLDING/LAUNCHING); `hold_state` exposes the full state name for
     # diagnostics / CSV tuning. `stopped` is kept for compatibility with
     # consumers that haven't migrated yet.
@@ -385,8 +385,8 @@ class SendingThread(BaseThread):
     def safe_state() -> None:
         """Release the throttle command during a watchdog restart.
 
-        Opens a fresh SCSController — the frozen thread's own handle may be
-        stuck mid-flush — and zeroes ``aforward`` so a stuck non-zero throttle
+        Opens a fresh SCSController: the frozen thread's own handle may be
+        stuck mid-flush: and zeroes ``aforward`` so a stuck non-zero throttle
         cannot keep the truck accelerating while the thread is being replaced.
         The brake command is left untouched: a stuck brake decelerates the
         truck, which is safe, and the replacement thread re-establishes full
@@ -632,18 +632,18 @@ class SendingThread(BaseThread):
 
                 # Mapper engages whenever the orchestrator (CruiseControlThread) is
                 # bidding. The orchestrator's single bid covers both CC and limiter
-                # modes — there is no separate limiter call here.
+                # modes: there is no separate limiter call here.
                 mapper_engaged = cruise_active or _aeb_active
 
                 # Learn-gate by who owned the previous tick:
                 # - Limiter active: only learn when user was pushing above the
                 #   cap (user gas > mapper_gas). Within the cap there's nothing
-                #   to learn — letting the integrator run would inflate mapper_gas
+                #   to learn: letting the integrator run would inflate mapper_gas
                 #   and loosen the cap as ego approaches the limit.
                 # - CC/ACC active: freeze learning when the user was overriding
                 #   with OPD gas (opdgasval > mapper_gas). Mapper output isn't
                 #   what's reaching the truck during override, so the measured
-                #   accel doesn't reflect the mapper's command — learning from it
+                #   accel doesn't reflect the mapper's command: learning from it
                 #   would corrupt the gain/integral state.
                 # One-tick lag is negligible at 60–100 Hz.
                 if cruise_active_controller == "limiter":
@@ -652,7 +652,7 @@ class SendingThread(BaseThread):
                     mapper_learn = mapper_engaged and (self._prev_user_opd_gas <= self._prev_mapper_gas)
 
                 # Freeze the mapper's slow integral when the hold FSM owns
-                # standstill — based on the FSM's state from the previous tick
+                # standstill: based on the FSM's state from the previous tick
                 # (1-tick lag, negligible at >=60 Hz). Prevents the slow-I from
                 # winding negative against the persistent zero-raw-accel at
                 # rest and then fighting the eventual launch.
@@ -907,7 +907,7 @@ class SendingThread(BaseThread):
         a = float(complex(a).real)
         b = float(complex(b).real)
 
-        # Manual clutch gate — when the driver physically presses the clutch
+        # Manual clutch gate: when the driver physically presses the clutch
         # (manual transmission), suppress all mapper gas so the user's pedal
         # commands the truck directly during the shift. Brake commands and AEB
         # are unaffected. gameClutch is excluded because automatic transmissions
@@ -916,7 +916,7 @@ class SendingThread(BaseThread):
 
         # User-pedal merge with the mapper's output. Keyed on which
         # controller is actually bidding (published by CruiseControlThread),
-        # not cc_mode alone — in cruise mode the global limiter can be the
+        # not cc_mode alone: in cruise mode the global limiter can be the
         # sole bidder when CC is disabled, and it must cap the user pedal.
         #   active_controller "cc"      → CC drives  → max(opd_gas, mapper_gas)
         #   active_controller "limiter" → cap        → min(user, mapper_gas)
@@ -925,7 +925,7 @@ class SendingThread(BaseThread):
         # they get with CC off: below the OPD offset the gas portion is zero
         # and CC keeps commanding; above it the driver's intent wins.
         # Note: the OPD *brake* side (coast-down) is suppressed in
-        # main_pedal_thread when CC is commanding — the truck's brake comes
+        # main_pedal_thread when CC is commanding: the truck's brake comes
         # only from user brake pedal + mapper_brake here, so OPD doesn't
         # fight CC.
         self._prev_user_gas = a
@@ -941,13 +941,13 @@ class SendingThread(BaseThread):
                     a = max(opdgasval, mapper_gas)
 
         # Brake merge: when the user is overriding CC/ACC with OPD gas, drop
-        # the mapper's brake bid too — otherwise the truck fights itself with
+        # the mapper's brake bid too: otherwise the truck fights itself with
         # simultaneous gas and brake. Limiter brake always passes (hard cap,
         # not overridable). AEB brake is applied below independently.
         if not cc_overridden_by_opd:
             b = max(b, mapper_brake)
 
-        # Hold FSM — single authority for keeping the truck stationary. The
+        # Hold FSM: single authority for keeping the truck stationary. The
         # mapper's brake bid is left in `b` (user-confirmed choice: mapper
         # brake passes through and the FSM brake is a floor on top, so the
         # mapper's road-load FF and the FSM's slope-balance agree when both
@@ -969,7 +969,7 @@ class SendingThread(BaseThread):
         )
         b = max(b, hold_out.brake_pedal)
 
-        # AEB additive FF pedal — sub-engagement assist that boosts active
+        # AEB additive FF pedal: sub-engagement assist that boosts active
         # user braking. Gated on brakeval so it does not phantom-brake during
         # normal manual cruising behind a slower lead (required_decel from
         # routine lead-following is non-zero but the driver has not opted into
@@ -983,7 +983,7 @@ class SendingThread(BaseThread):
             )
             b = max(b, aeb_ff_pedal)
 
-        # AEB active — closed-loop decel controller writes the brake pedal
+        # AEB active: closed-loop decel controller writes the brake pedal
         # directly from AEB_target_decel_ms2 (FF + small PI on lead-compensated
         # decel) and gas is suppressed.
         #
@@ -1286,3 +1286,4 @@ class SendingThread(BaseThread):
                     )
                     self._hazard_phase = "pressing"
                     self._hazard_press_until = now + self._hazard_duration
+

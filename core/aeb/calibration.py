@@ -1,4 +1,4 @@
-"""AEB calibration — single source of truth for all tunable constants."""
+﻿"""AEB calibration: single source of truth for all tunable constants."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ class AEBCalibration:
     evasion_g_oncoming: float = 0.13 * 9.81
     evasion_max_dkappa: float = 0.008
     yaw_rate_steer_gain: float = 12.0
-    # AEB-local target-vehicle path prediction — two sources blended every
+    # AEB-local target-vehicle path prediction: two sources blended every
     # frame: a sliced position fit (last `aeb_pos_history_len` samples of the
     # vehicle's own _position_history, shorter than the full 25-sample fit)
     # and the per-frame yaw rate from `angular_velocity`.  Combined as
@@ -63,10 +63,10 @@ class AEBCalibration:
     # low-pass: cutoff rises with |dkappa/dt| so steady-state noise is heavily
     # smoothed while genuine curvature changes pass through with minimal lag.
     # Reference: Casiez et al., "1€ Filter", CHI 2012.
-    #   min_cutoff (Hz) — cutoff at zero derivative; sets the smooth-floor.
-    #   beta — slope of cutoff vs |dkappa/dt|; higher = snappier transient.
-    #   d_cutoff (Hz) — low-pass on the derivative estimate itself.
-    #   beta_turn_scale — progressive beta reduction with curvature magnitude:
+    #   min_cutoff (Hz): cutoff at zero derivative; sets the smooth-floor.
+    #   beta: slope of cutoff vs |dkappa/dt|; higher = snappier transient.
+    #   d_cutoff (Hz): low-pass on the derivative estimate itself.
+    #   beta_turn_scale: progressive beta reduction with curvature magnitude:
     #     beta_eff = beta / (1 + beta_turn_scale * |x_prev|).  Counters the
     #     in-turn cutoff inflation caused by noise on |dkappa/dt|, which
     #     scales with |kappa| from yaw_rate/v amplification and pos-fit
@@ -83,7 +83,7 @@ class AEBCalibration:
     # Sweep-pass / corner-entry stationary
     sweep_pass_max_target_speed: float = 1.0
     corner_entry_min_distance: float = 1.0
-    # Mode B (in-lane geometric consistency) — MP queue at corner entry
+    # Mode B (in-lane geometric consistency): MP queue at corner entry
     corner_entry_min_road_bend: float = 0.10        # rad (~5.7°)
     corner_entry_min_lateral: float = 0.4           # m
     corner_entry_lateral_tol: float = 1.5           # m
@@ -94,14 +94,14 @@ class AEBCalibration:
     tmp_filter_rel_below_kmh: float = 50.0
     user_brake_latch: float = 0.12
 
-    # Cross-zone (ghost-arc) padding — legacy, kept for behaviour parity
+    # Cross-zone (ghost-arc) padding: legacy, kept for behaviour parity
     cross_zone_base: float = 2.0
     cross_zone_speed: float = 0.3
 
     # Oncoming evasion kappa scaling
     opposite_lane_kappa_scale: float = 2.0
 
-    # Fix A — near-head-on ghost-arc reduction
+    # Fix A: near-head-on ghost-arc reduction
     near_head_on_cross_scale: float = 0.3
     near_head_on_lateral_min: float = 3.0
 
@@ -122,7 +122,7 @@ class AEBCalibration:
     # 1) TmpRelSpeedFilter is bypassed for latched ids so a TMP target does
     #    not vanish from the pipeline as ego brakes and rel-speed collapses.
     # 2) Engagement is held and target_raw floored while any latched target
-    #    is still inside the headway danger zone — the v_closing^2/2d
+    #    is still inside the headway danger zone: the v_closing^2/2d
     #    required_decel formula collapses when ego matches target speed but
     #    the gap may still be unsafe.
     # headway = max(dist - stop_buffer, 0) / max(ego_speed, 0.5)
@@ -132,3 +132,4 @@ class AEBCalibration:
 
 
 DEFAULT = AEBCalibration()
+

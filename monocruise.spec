@@ -1,8 +1,8 @@
-# PyInstaller spec for the MonoCruise main application.
+﻿# PyInstaller spec for the MonoCruise main application.
 # Build with:  pyinstaller monocruise.spec
 #
 # This produces dist/MonoCruise/MonoCruise.exe alongside its support files
-# (one-folder mode — startup is significantly faster than one-file for a
+# (one-folder mode: startup is significantly faster than one-file for a
 # PySide6 app).
 
 from PyInstaller.utils.hooks import collect_data_files
@@ -60,3 +60,4 @@ coll = COLLECT(
     upx_exclude=[],
     name='MonoCruise',
 )
+

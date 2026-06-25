@@ -1,4 +1,4 @@
-"""
+﻿"""
 Main popup window with clean queue-based message handling.
 """
 import logging
@@ -439,7 +439,7 @@ class PopupWindow(QWidget):
             message: Body text shown below the title.
             message_type: 'e' = error, 'w' = warning, 'c' = check, 'n' = notice.
             duration_ms: How long to display the message (default 5000 ms).
-            priority: Queue priority — higher value shown first (default 0).
+            priority: Queue priority: higher value shown first (default 0).
         """
         if cls._instance is None:
             logger.warning("PopupWindow.emit called before window was created; dropping message: %s", title)

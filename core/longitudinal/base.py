@@ -1,5 +1,5 @@
-"""
-Longitudinal controller stack — parent class + shared types.
+﻿"""
+Longitudinal controller stack: parent class + shared types.
 
 Three children inherit:
 - AdaptiveCruiseController  (following distance)
@@ -72,10 +72,10 @@ class LongitudinalController:
 
     @property
     def active(self) -> bool:
-        """Is this controller currently bidding? Default False — children override."""
+        """Is this controller currently bidding? Default False: children override."""
         return False
 
-    # Shared math helpers — lifted from the cruise control PID and mapper.
+    # Shared math helpers: lifted from the cruise control PID and mapper.
 
     @staticmethod
     def _ema_step(current: float, sample: float, alpha: float) -> float:
@@ -86,3 +86,4 @@ class LongitudinalController:
         if tau_s <= 0.0:
             return 1.0
         return 1.0 - math.exp(-dt / max(tau_s, 1e-6))
+

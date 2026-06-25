@@ -1,9 +1,9 @@
-"""
-Main Pedal Thread — owns joystick input and computes pedal outputs.
+﻿"""
+Main Pedal Thread: owns joystick input and computes pedal outputs.
 
 Responsibilities:
   - Initialize and manage all required pygame joysticks:
-      * The configured pedal device (critical path — drives brake/gas outputs).
+      * The configured pedal device (critical path: drives brake/gas outputs).
       * Any additional joystick devices referenced by button bindings.
   - Read raw gas and brake axis values every loop tick.
   - Apply the One-Pedal-Drive transformation (disabled while cruise control is commanding).
@@ -99,7 +99,7 @@ def _onepedaldrive(
     One-pedal mapping: combined axis → gas/brake, with gas and brake exponents applied
     (brake curve uses sqrt(Settings.brake_exponent_variable) as in legacy MonoCruise).
     When *apply_opd_mapping* is False, only the two-pedal path and exponents are
-    used — same as legacy opd_mode off.
+    used: same as legacy opd_mode off.
     """
     offset = float(Settings.offset_variable or 0.0)
     be_full = float(Settings.brake_exponent_variable or 1.0)
@@ -150,11 +150,11 @@ def _onepedaldrive(
 
 @dataclass
 class MainPedalThreadData(ThreadData):
-    # Computed outputs — sending_thread reads these every tick.
+    # Computed outputs: sending_thread reads these every tick.
     gas_output: float = 0.0
     brake_output: float = 0.0
 
-    # Raw pedal values — other threads may read for display or CC logic.
+    # Raw pedal values: other threads may read for display or CC logic.
     gasval: float = 0.0
     brakeval: float = 0.0
 
@@ -162,11 +162,11 @@ class MainPedalThreadData(ThreadData):
     # can drive its stopped-state FSM off the user's true intent.
     opdgasval: float = 0.0
 
-    # State flags — sending_thread uses these to decide what to send.
+    # State flags: sending_thread uses these to decide what to send.
     device_lost: bool = True    # True until the *pedal* joystick is successfully opened.
     em_stop: bool = False       # Full emergency brake engaged.
 
-    # Device info — UI / sending thread may display this.
+    # Device info: UI / sending thread may display this.
     device_name: str = ""
 
     # Cruise-control button held states (all button sources unified here).
@@ -176,7 +176,7 @@ class MainPedalThreadData(ThreadData):
     acc_dist_inc_held: bool = False
     acc_dist_dec_held: bool = False
 
-    # Full joystick button state snapshot — {device_guid: {virtual_code: bool}}.
+    # Full joystick button state snapshot: {device_guid: {virtual_code: bool}}.
     # Includes hat directions encoded as virtual button indices.
     # Used by input_bindings.resolve_held() for external callers.
     joystick_button_states: dict = field(default_factory=dict, repr=False)
@@ -202,7 +202,7 @@ class MainPedalThread(BaseThread):
         self._device: pygame.joystick.JoystickType | None = None
         self._device_instance_id: int | None = None
 
-        # Pedal reconnect state machine — non-blocking, advances each loop() tick.
+        # Pedal reconnect state machine: non-blocking, advances each loop() tick.
         # States: None → "initial_wait" → "attempt" → "attempt_wait" → "reinit_wait" → "reinit"
         self._reconnect_state: str | None = None
         self._reconnect_deadline: float = 0.0
@@ -220,9 +220,9 @@ class MainPedalThread(BaseThread):
         self._button_device_names: dict[str, str] = {}
 
         # ── Joystick state snapshots ──────────────────────────────────────────
-        # {guid: {virtual_code: bool}} — updated every tick by _update_joystick_states
+        # {guid: {virtual_code: bool}}: updated every tick by _update_joystick_states
         self._joystick_states: dict[str, dict[int, bool]] = {}
-        # previous tick's states — used for 0→1 capture detection
+        # previous tick's states: used for 0→1 capture detection
         self._prev_capture_states: dict[str, dict[int, bool]] = {}
 
         # ── Operational state ─────────────────────────────────────────────────
@@ -254,7 +254,7 @@ class MainPedalThread(BaseThread):
                     extra={"popup": True},
                 )
         else:
-            logger.info("no joystick configured — running without pedal input")
+            logger.info("no joystick configured: running without pedal input")
 
         # Button devices (non-critical).
         self._init_button_devices()
@@ -344,7 +344,7 @@ class MainPedalThread(BaseThread):
                 self.data.acc_dist_dec_held = False
             return
 
-        # opdgasval is always OPD-mapped — it is the user-side input for the
+        # opdgasval is always OPD-mapped: it is the user-side input for the
         # CC override comparison in sending_thread, so the override criterion
         # matches the same OPD feel the driver gets when CC is off. The brake
         # side of this call is discarded when CC is commanding; only the
@@ -353,7 +353,7 @@ class MainPedalThread(BaseThread):
             gasval, brakeval, apply_opd_mapping=True
         )
         if cruise_commanding:
-            # CC owns the longitudinal command — drop OPD coast-down and shaping
+            # CC owns the longitudinal command: drop OPD coast-down and shaping
             # from the output path so the truck doesn't fight CC. User brake
             # pedal still passes through (two-pedal raw, exponented).
             _, opdbrakeval = _onepedaldrive(
@@ -376,7 +376,7 @@ class MainPedalThread(BaseThread):
 
         # OPD coast-down brake (user-pedal shaping only). The stopped-state
         # hold brake and its FSM live in sending_thread so they apply to every
-        # output source (user, mapper, AEB) — `stopped` is read back from there
+        # output source (user, mapper, AEB): `stopped` is read back from there
         # to preserve the original if/elif gating.
         sending_stopped = False
         try:
@@ -413,7 +413,7 @@ class MainPedalThread(BaseThread):
         gas_output   = opdgasval
         brake_output = opdbrakeval
 
-        # AEB override — on engagement (AEB_brake), slam brake to 1.0 and zero
+        # AEB override: on engagement (AEB_brake), slam brake to 1.0 and zero
         # gas. The graduated FF additive path in sending_thread handles the
         # sub-engagement assist band on top of user braking. Engagement, by
         # definition, means the system has decided full braking is warranted.
@@ -499,7 +499,7 @@ class MainPedalThread(BaseThread):
     # ── Capture API ───────────────────────────────────────────────────────────
 
     def start_capture(self) -> None:
-        """Enable joystick capture mode — next button/hat press populates capture_event."""
+        """Enable joystick capture mode: next button/hat press populates capture_event."""
         with self.data._lock:
             self.data.capture_active = True
             self.data.capture_event = None
@@ -598,7 +598,7 @@ class MainPedalThread(BaseThread):
         if popup_on_missing:
             name = self._button_device_names.get(guid, guid)
             logger.warning(
-                "Button device %r not found — reconnect to use cruise control buttons",
+                "Button device %r not found: reconnect to use cruise control buttons",
                 name,
                 extra={"popup": True},
             )
@@ -752,7 +752,7 @@ class MainPedalThread(BaseThread):
             if iid == instance_id:
                 name = self._button_device_names.get(guid, guid)
                 logger.warning(
-                    "Button device %r disconnected — reconnect to use cruise control buttons",
+                    "Button device %r disconnected: reconnect to use cruise control buttons",
                     name,
                     extra={"popup": True},
                 )
@@ -761,10 +761,10 @@ class MainPedalThread(BaseThread):
                 return
 
     def _handle_device_added(self) -> None:
-        """Handle JOYDEVICEADDED — attempt reconnect for any lost device."""
+        """Handle JOYDEVICEADDED: attempt reconnect for any lost device."""
         # Pedal reconnect uses the full non-blocking FSM (to avoid axis drift).
         if self.data.device_lost and self._reconnect_state is None:
-            logger.info("device added — waiting before pedal reconnect attempt")
+            logger.info("device added: waiting before pedal reconnect attempt")
             self._reconnect_state    = "initial_wait"
             self._reconnect_deadline = time.monotonic() + 3
             self._reconnect_attempt  = 0
@@ -797,7 +797,7 @@ class MainPedalThread(BaseThread):
     def _tick_reconnect(self) -> None:
         """
         Advance the pedal reconnect state machine by one tick.  Called every loop()
-        iteration — never sleeps, never blocks.
+        iteration: never sleeps, never blocks.
 
         State transitions:
           initial_wait  → (after 3 s)   → attempt
@@ -875,3 +875,4 @@ class MainPedalThread(BaseThread):
                 self._device = None
             self._reconnect_js    = None
             self._reconnect_state = None
+

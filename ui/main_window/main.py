@@ -1,5 +1,5 @@
-"""
-UI entry point — creates and returns the MonoCruiseWindow.
+﻿"""
+UI entry point: creates and returns the MonoCruiseWindow.
 
 This is NOT a thread.  The main window lives on the main thread alongside
 the QApplication event loop, exactly like PopupWindow.  Qt requires all

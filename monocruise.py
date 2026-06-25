@@ -1,5 +1,5 @@
-"""
-main.py — application entry point.
+﻿"""
+main.py: application entry point.
 
 Responsibilities:
   1. Load settings (once).
@@ -96,11 +96,11 @@ def _configure_logging() -> None:
         _fmt = formatter.format
         formatter.format = lambda r: _fmt(r).replace("\r", " ").replace("\n", " ")
 
-    # File log is what may be shared — must redact paths.
+    # File log is what may be shared: must redact paths.
     file_formatter = _RedactingFormatter(fmt, datefmt=datefmt)
     _strip_newlines(file_formatter)
 
-    # Console log stays on the user's machine — skip the regex passes for speed.
+    # Console log stays on the user's machine: skip the regex passes for speed.
     stream_formatter = logging.Formatter(fmt, datefmt=datefmt)
     _strip_newlines(stream_formatter)
 
@@ -164,7 +164,7 @@ def main() -> None:
     settings.load()
     _configure_logging()
     log = logging.getLogger("main")
-    log.info("starting — debug=%s", settings.debug)
+    log.info("starting: debug=%s", settings.debug)
 
     # Auto-refresh settings in debug mode (lets you edit config.json while running).
     # Runs on the Qt main thread, so it doesn't block any worker thread loops.
@@ -194,7 +194,7 @@ def main() -> None:
     popup.show()
     _attach_popup_handler(popup)
 
-    # Main window (lives on the main thread — no separate thread needed)
+    # Main window (lives on the main thread: no separate thread needed)
     window = create_main_window(settings, version=f"v{__version__}")
     registry.register_object("main_window", window)
     window.window_closed.connect(lambda: (_stop_all(), app.quit()))
@@ -253,14 +253,14 @@ def main() -> None:
         try:
             telemetry = registry.get_thread("telemetry_thread")
             if telemetry.data.request_quit:
-                log.info("shutdown requested — exiting")
+                log.info("shutdown requested: exiting")
                 _stop_all()
                 app.quit()
                 return
         except (KeyError, AttributeError):
             pass
         if not any(t.is_alive() for t in registry.all_threads()):
-            log.info("all threads stopped — exiting")
+            log.info("all threads stopped: exiting")
             _stop_all()
             app.quit()
 
@@ -271,7 +271,7 @@ def main() -> None:
 
     # Signal handling
     def _shutdown(sig: int, _frame) -> None:
-        log.info("signal %s received — shutting down", signal.Signals(sig).name)
+        log.info("signal %s received: shutting down", signal.Signals(sig).name)
         try:
             telemetry = registry.get_thread("telemetry_thread")
             with telemetry.data._lock:

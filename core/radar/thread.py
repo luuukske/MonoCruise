@@ -1,5 +1,5 @@
-"""
-Radar thread — central traffic + ego snapshot producer.
+﻿"""
+Radar thread: central traffic + ego snapshot producer.
 
 Reads the ETS2LA shared-memory traffic buffer and ego state from the
 telemetry thread every loop (30 Hz) and publishes a coherent ``RadarData``
@@ -13,12 +13,12 @@ Readers:
     rt = registry.get_thread("radar_thread")
     with rt.data._lock:
         vehicles     = list(rt.data.vehicles)     # or copy just the ids you need
-        trailer_vehicles = list(rt.data.trailer_vehicles)  # ACC-only — nested trailers
+        trailer_vehicles = list(rt.data.trailer_vehicles)  # ACC-only: nested trailers
         ego_x        = rt.data.ego_x
         ego_yaw_rad  = rt.data.ego_yaw_rad
         ...
 
-Vehicle instances are shared references — do not mutate them from consumer
+Vehicle instances are shared references: do not mutate them from consumer
 threads.  The reader rebuilds the list every frame, and per-id smoothing
 state is carried forward via ``Vehicle.update_from_last``.
 """
@@ -44,10 +44,10 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RadarData(ThreadData):
-    # Vehicles — Vehicle instances with per-id smoothing carried forward.
+    # Vehicles: Vehicle instances with per-id smoothing carried forward.
     vehicles: list[Vehicle] = field(default_factory=list)
     # Nested trailers wrapped as standalone Vehicles (road-train trailers
-    # behind the first). ACC-only — AEB already walks nested trailers via
+    # behind the first). ACC-only: AEB already walks nested trailers via
     # Vehicle.trailers, so consuming this list there would double-count.
     trailer_vehicles: list[Vehicle] = field(default_factory=list)
     tmp_session: bool = False
@@ -56,7 +56,7 @@ class RadarData(ThreadData):
     ego_x: float = 0.0
     ego_y: float = 0.0
     ego_z: float = 0.0
-    ego_yaw_rad: float = 0.0       # rotationX * 2π — see aeb AGENTS.md §2
+    ego_yaw_rad: float = 0.0       # rotationX * 2π: see aeb AGENTS.md §2
     ego_yaw_norm: float = 0.0      # raw rotationX (0..1)
     ego_speed: float = 0.0         # m/s
     ego_pitch_deg: float = 0.0
@@ -181,3 +181,4 @@ class RadarThread(BaseThread):
             self.data.ego_curvature = ego_curvature
             self.data.paused = False
             self.data.t_mono = now_mono
+

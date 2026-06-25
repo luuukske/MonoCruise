@@ -1,9 +1,9 @@
-# AGENTS.md — AEB (Automatic Emergency Braking)
+﻿# AGENTS.md: AEB (Automatic Emergency Braking)
 
 > AEB-specific reference. Shared fundamentals (coordinate system, rotation,
 > world→ego transforms, the shared-memory buffer, Vehicle state/smoothing,
 > ArcPath geometry, position-based curvature) live in
-> `core/radar/AGENTS.md` — read that first.
+> `core/radar/AGENTS.md`: read that first.
 
 ---
 
@@ -25,7 +25,7 @@ with rt.data._lock:
     paused        = rt.data.paused
 ```
 
-Vehicle instances are shared references — do not mutate them from AEB. All
+Vehicle instances are shared references: do not mutate them from AEB. All
 smoothing, yaw EMA, position history, and curvature state is produced once
 per frame by the radar thread.
 
@@ -33,7 +33,7 @@ per frame by the radar thread.
 
 In TMP sessions, other players' trailers appear as separate top-level radar
 vehicles (`is_tmp=True`, `is_trailer=True`). The shared-memory speed field for
-those slots has no engine telemetry — it commonly reports 0 — and the
+those slots has no engine telemetry: it commonly reports 0: and the
 position-history LS fit can also return 0 during transients (small chord,
 stall, fresh spawn). Without correction, AEB sees a "stationary" obstacle
 directly ahead of ego and triggers falsely.
@@ -43,14 +43,14 @@ top of each loop. For every `is_tmp` + `is_trailer` entry it locates the
 nearest non-trailer TMP vehicle within 30 m (the pulling tractor) and returns
 a shallow copy with `speed` and `acceleration` replaced by the tractor's
 filtered values. The trailer's pose, yaw, curvature, and trailer-flag stay
-its own — only the kinematics it cannot self-measure are inherited. ACC has
+its own: only the kinematics it cannot self-measure are inherited. ACC has
 the same swap in `core/acc/tracker.py::_top_leads`.
 
 Only the precompute and main collision iterations consume `vehicles_eff`. The
 radar visualizer still reads the original `vehicles` so raw vs filtered speed
 displays remain meaningful for debugging the source data.
 
-### Ego curvature — yaw-rate proxy only
+### Ego curvature: yaw-rate proxy only
 
 AEB **does not** consume `RadarData.ego_curvature` (the position-history
 fit). The ego path must react instantly to steering input; a history-based
@@ -68,18 +68,18 @@ else:
 ```
 
 `RadarData.ego_curvature` is consumed by ACC, not AEB. Do not add an
-"optional" history fallback to AEB — the reactivity loss is the problem,
+"optional" history fallback to AEB: the reactivity loss is the problem,
 not the transient-sample count.
 
-### Target-vehicle curvature — two-source blend
+### Target-vehicle curvature: two-source blend
 
 Per-target arc curvature is computed by `_vehicle_curvature_blend()` in
 `filters.py`. AEB-local two-source path prediction combines:
 
 | Signal | Source | Role |
 |--------|--------|------|
-| `pos_kappa` | `ego_curvature_from_history` on the last `cal.aeb_pos_history_len = 6` samples of `v._position_history` (shorter than the full 25-sample fit used elsewhere) | **Smooth** — damps single-frame yaw noise |
-| `yaw_kappa` | `radians(v.angular_velocity) / abs_v_speed` — per-frame yaw rate already maintained by the radar thread | **Responsive** — single-frame rotation signal |
+| `pos_kappa` | `ego_curvature_from_history` on the last `cal.aeb_pos_history_len = 6` samples of `v._position_history` (shorter than the full 25-sample fit used elsewhere) | **Smooth**: damps single-frame yaw noise |
+| `yaw_kappa` | `radians(v.angular_velocity) / abs_v_speed`: per-frame yaw rate already maintained by the radar thread | **Responsive**: single-frame rotation signal |
 
 ```python
 if pos_kappa is not None and yaw_kappa is not None:
@@ -99,11 +99,11 @@ after Fix D over-rotation damping when that damping applies. Visualization and
 collision must use the same `arc_curvature` so the debug view matches what AEB
 actually evaluates. Call sites that go through the helper:
 
-1. `thread.py::_build_vehicle_collision_data` (precompute path) — collision tractor + trailer
-2. `thread.py::loop` (per-vehicle else branch) — visualization, deriving `arc_curvature` from `_dampen_turning_curvature(...)`, then passing it to `v.get_arc(...)` and trailer `build_arc(...)`
-3. `filters.py::_build_vehicle_collision_data` (test harness path) — collision tractor + trailer
+1. `thread.py::_build_vehicle_collision_data` (precompute path): collision tractor + trailer
+2. `thread.py::loop` (per-vehicle else branch): visualization, deriving `arc_curvature` from `_dampen_turning_curvature(...)`, then passing it to `v.get_arc(...)` and trailer `build_arc(...)`
+3. `filters.py::_build_vehicle_collision_data` (test harness path): collision tractor + trailer
 
-`LaneClassifier.apply` does **not** recompute `v_curvature` — the upstream
+`LaneClassifier.apply` does **not** recompute `v_curvature`: the upstream
 call sites above populate it on the `FilterContext` once per frame and the
 stage reads it as-is. Recomputing there would double-step the One-Euro state
 (see below).
@@ -118,7 +118,7 @@ entry → cutoff jumps with the derivative and the filter approaches
 passthrough within a frame. Reference: Casiez et al., "1€ Filter", CHI 2012.
 
 State lives on `AEBThread._curvature_blender`, keyed by `vehicle.id`. The
-helper is stepped exactly once per vehicle per frame — first call site that
+helper is stepped exactly once per vehicle per frame: first call site that
 sees the vehicle (precompute or fallback else branch in the per-vehicle
 loop) advances the filter; `LaneClassifier` reads the cached value from
 `ctx.v_curvature`. The blender is `prune`d at the end of each loop against
@@ -129,7 +129,7 @@ Calibration:
 | Knob | Default | Role |
 |------|---------|------|
 | `aeb_kappa_one_euro_min_cutoff` | 1.0 Hz | Smooth-floor cutoff at zero derivative |
-| `aeb_kappa_one_euro_beta` | 200.0 | Slope of cutoff vs `|dkappa/dt|` — higher = snappier transient, lets more noise through |
+| `aeb_kappa_one_euro_beta` | 200.0 | Slope of cutoff vs `|dkappa/dt|`: higher = snappier transient, lets more noise through |
 | `aeb_kappa_one_euro_d_cutoff` | 1.0 Hz | Low-pass on the derivative estimate (rejects noise-driven cutoff swings) |
 | `aeb_kappa_one_euro_beta_turn_scale` | 30.0 | Progressive beta attenuation with `\|kappa\|`: `beta_eff = beta / (1 + scale * \|x_prev\|)`. Counters in-turn cutoff inflation from magnitude-scaling noise (yaw_rate/v amplification, pos-fit numerical sensitivity). 0 disables |
 
@@ -137,12 +137,12 @@ When `_vehicle_curvature_blend()` is called without a blender (e.g. test
 paths that don't carry filter state across frames), it returns the raw
 blended value. Production paths in `AEBThread` always pass the blender.
 
-Never call `v.get_arc()` from AEB without a `curvature_override` — the
+Never call `v.get_arc()` from AEB without a `curvature_override`: the
 fallback inside `traffic.py::get_arc` uses the full 25-sample
 `curvature_from_history()` fit, which lags exiting a corner and leaves
 the tractor arc curved long after the trailer arc has straightened.
 
-Do not enlarge `aeb_pos_history_len` toward 25 — the responsiveness gain
+Do not enlarge `aeb_pos_history_len` toward 25: the responsiveness gain
 is the whole point, and `curvature_from_history()` on the full buffer is
 what ACC uses.
 
@@ -152,10 +152,10 @@ what ACC uses.
 
 | Module | Role |
 |--------|------|
-| `core/aeb/calibration.py` | Frozen `AEBCalibration` dataclass — all tunable constants. `DEFAULT` singleton used by both `thread.py` and tests. |
-| `core/aeb/lane_frame.py` | `Lane` enum, `project_to_ego_arc()`, `classify()` — arc-projected lane membership, replacing the old cross-product `lateral_offset`. |
+| `core/aeb/calibration.py` | Frozen `AEBCalibration` dataclass: all tunable constants. `DEFAULT` singleton used by both `thread.py` and tests. |
+| `core/aeb/lane_frame.py` | `Lane` enum, `project_to_ego_arc()`, `classify()`: arc-projected lane membership, replacing the old cross-product `lateral_offset`. |
 | `core/aeb/filters.py` | Named filter pipeline: 12 stage classes + `FilterContext` + `build_pipeline()`. |
-| `core/aeb/thread.py` | `AEBThread` — data acquisition, ego-arc construction, pipeline dispatch, TTB/state output. |
+| `core/aeb/thread.py` | `AEBThread`: data acquisition, ego-arc construction, pipeline dispatch, TTB/state output. |
 
 ---
 
@@ -177,10 +177,10 @@ pass, the vehicle enters collision evaluation.
 | `TurningCrossTrafficFilter` | Cross-traffic turning through intersection (Fix D absorbed) |
 | `TmpCrossTrafficFilter` | TMP-only: target whose extrapolated arc lands outside ego lane |
 | `SweepPassFilter` | Stationary cross-traffic ego turns through |
-| `CornerEntryStationaryFilter` | Stationary at corner entry — out-of-lane oncoming/co-dir, or in-lane with arc consistency |
+| `CornerEntryStationaryFilter` | Stationary at corner entry: out-of-lane oncoming/co-dir, or in-lane with arc consistency |
 | `EgoEvasionFilter` | Ego can steer around target within 0.08 g |
 
-Fix labels A/B/C/D are retired — the logic now lives in the named stages above.
+Fix labels A/B/C/D are retired: the logic now lives in the named stages above.
 
 The legacy `RearOvertakerFilter` was retired in favour of a unified
 "braking worsens" classification in the collision-evaluation step (see §5).
@@ -188,7 +188,7 @@ That check compares closing-speed magnitude under braked vs unbraked
 trajectories and subsumes the rear-overtaker case along with cross-traffic
 scenarios where braking parks ego in a target's path.
 
-### `LaneClassifier` — canonical lane primitive
+### `LaneClassifier`: canonical lane primitive
 
 `LaneClassifier` is the first stage to populate all geometry fields. It uses
 `project_to_ego_arc()` from `core/aeb/lane_frame.py` to compute the arc-projected
@@ -201,7 +201,7 @@ Lane thresholds (`cal.lane_half_width=1.95 m`, `cal.lane_separation=3.9 m`):
 | d_abs | Lane |
 |-------|------|
 | ≤ 1.95 m | `EGO` |
-| 1.95–1.95 m | `ADJACENT` (empty range — no ADJACENT in practice) |
+| 1.95–1.95 m | `ADJACENT` (empty range: no ADJACENT in practice) |
 | 1.95–7.8 m | `OPPOSITE_OR_OUTER` |
 | > 7.8 m | `OFF_ROAD` |
 
@@ -211,7 +211,7 @@ Applies only to `head_on` vehicles (`fwd_dot < cal.head_on_dot=-0.7`).
 
 1. Lane check: `own_lane = ctx.lane in (OPPOSITE_OR_OUTER, OFF_ROAD)`
 2. Body-separation fast path: if `own_lane` and `d_abs >= ego_hw + v_hw_coll`, the
-   vehicles already have physical body clearance — suppress directly.
+   vehicles already have physical body clearance: suppress directly.
 3. Evasion arc test: for each target arc, build two curvature-offset arcs
    (`base_curvature ± delta_kappa_t`, `decel=0`). If either clears `ego_arc`, suppress.
    - `delta_kappa_t = min(evasion_g_oncoming / v², evasion_max_dkappa)`, scaled by
@@ -245,7 +245,7 @@ Uses a freshly-built non-braking arc (rather than `base_target_arc`) because
 the standard arc may be truncated by target-side full-brake modeling at
 near-head-on angles, which would mask the true sweep destination.
 
-Non-TMP targets bypass entirely — AI vehicles' arcs are deterministic and
+Non-TMP targets bypass entirely: AI vehicles' arcs are deterministic and
 already handled by `OppositeLaneFilter`, `TurningCrossTrafficFilter`, etc.
 
 ### `CornerEntryStationaryFilter`
@@ -255,7 +255,7 @@ corner *entry* (`|ego_curvature| < turning_diverge_kappa`) when their pose
 implies they sit on a curved road continuation rather than blocking ego's
 straight-line path.
 
-- Symmetric road-bend formula: `road_bend = acos(|fwd_dot|)` — folds oncoming
+- Symmetric road-bend formula: `road_bend = acos(|fwd_dot|)`: folds oncoming
   (`fwd_dot ≈ -1`) and co-directional (`fwd_dot ≈ +1`) cases into `[0, π/2]`.
 - Implied curvature `road_bend / dist` must exceed `turning_diverge_kappa`.
 - **Mode A** (out-of-lane): vehicle in `OPPOSITE_OR_OUTER`/`OFF_ROAD` → suppress.
@@ -296,16 +296,16 @@ Read from other threads (acquire `data._lock` first):
 
 ```python
 aeb = registry.get_thread("aeb_thread").data
-aeb.AEB_warn                       # bool — UI/sound cue (warn fraction or TTB)
-aeb.AEB_brake                      # bool — engagement latched and target > 0
-aeb.AEB_target_decel_ms2           # float — rate-limited commanded decel (m/s²)
-aeb.AEB_ff_decel_ms2               # float — always-on additive FF decel (m/s²); 0 when no threat
-aeb.AEB_required_decel_ms2         # float — slope-corrected required decel
-aeb.AEB_effective_max_decel_ms2    # float — slope-corrected capacity ceiling
-aeb.AEB_realized_decel_ms2         # float — lead-compensated measured decel
-aeb.time_to_brake                  # float — seconds (1e9 = no threat)
-aeb.em_stop_requested              # bool — mirror of AEB_brake
-aeb.snapshot                       # AEBSnapshot — full debug state
+aeb.AEB_warn                       # bool: UI/sound cue (warn fraction or TTB)
+aeb.AEB_brake                      # bool: engagement latched and target > 0
+aeb.AEB_target_decel_ms2           # float: rate-limited commanded decel (m/s²)
+aeb.AEB_ff_decel_ms2               # float: always-on additive FF decel (m/s²); 0 when no threat
+aeb.AEB_required_decel_ms2         # float: slope-corrected required decel
+aeb.AEB_effective_max_decel_ms2    # float: slope-corrected capacity ceiling
+aeb.AEB_realized_decel_ms2         # float: lead-compensated measured decel
+aeb.time_to_brake                  # float: seconds (1e9 = no threat)
+aeb.em_stop_requested              # bool: mirror of AEB_brake
+aeb.snapshot                       # AEBSnapshot: full debug state
 ```
 
 ### Continuous-decel logic
@@ -318,7 +318,7 @@ aeb.snapshot                       # AEBSnapshot — full debug state
    for rear-overtakers and misses the rear-end-worsens case.
    - `braking_worsens` is set if either:
      - `v_target_along_ego > ego_speed` (target faster than ego along
-       ego's heading — pure rear-overtaker shortcut; handles imminent
+       ego's heading: pure rear-overtaker shortcut; handles imminent
        collisions where `t_braked` is too small for the comparison below
        to fire), **or**
      - `closing_braked > closing_unbraked + brake_worsens_hysteresis_ms`
@@ -342,7 +342,7 @@ aeb.snapshot                       # AEBSnapshot — full debug state
    (PedalCapacityTracker) with a fallback constant.
 4. Engagement hysteresis (slope-aware):
    - `brake_ttb_active = (time_to_brake < cal.brake_ttb + cal.brake_response_window_s)`
-     — emergency criterion for path-crossing / arc-cross threats where
+    : emergency criterion for path-crossing / arc-cross threats where
      `v_closing ≈ 0` collapses the `required_decel = v_closing²/2d` formula
      but the geometry still says full brake can't avoid intersection. The
      `brake_response_window_s` headroom compensates for actuator lag + the
@@ -362,7 +362,7 @@ aeb.snapshot                       # AEBSnapshot — full debug state
      NOT** `brake_ttb_active` **AND NOT** `geom_threat_latched` **AND NOT**
      `latched_distance_threat`.
 5. Setpoint pipeline:
-   - When `brake_ttb_active`: `target_raw = effective_max` (slam — required formula is unreliable).
+   - When `brake_ttb_active`: `target_raw = effective_max` (slam: required formula is unreliable).
    - Otherwise: `target_raw = clamp(effective_required, 0, effective_max)` while engaged,
      then floored at `cal.latched_min_decel_frac · effective_max` when `latched_distance_threat`.
    - **Deadband + rate-limit**: if `|Δ| < aeb_target_deadband_ms2` and the
@@ -384,13 +384,13 @@ aeb.snapshot                       # AEBSnapshot — full debug state
 `AEBThread._latched_threat_ids: set[int]` keeps an engaged target attached
 to the pipeline across frames so two effects can hold:
 
-1. **TMP rel-speed pre-filter bypass** — `TmpRelSpeedFilter` (and the
+1. **TMP rel-speed pre-filter bypass**: `TmpRelSpeedFilter` (and the
    matching precompute prefilter in `thread.py::loop`) skip the rel-speed
    gate for any id in the latched set. Without this, ego matching a TMP
    convoy partner's speed under braking drops `rel_kmh` below the 15 / 40
    km/h threshold, the target leaves the pipeline, `colliding_ids` empties
    and AEB disarms while the gap may still be unsafe.
-2. **Distance-based engagement hold + decel floor** — for every latched id
+2. **Distance-based engagement hold + decel floor**: for every latched id
    still in `vehicle_collision_data`, compute
    `headway = max(dist − stop_buffer, 0) / max(ego_speed, 0.5)`. Release
    the id when it leaves `vehicles_eff`, drops out of `vehicle_collision_data`
@@ -423,7 +423,7 @@ true. Cleared on `teardown`.
   fight on the brake.
 - All three AEB→pedal paths (engagement slam in `main_pedal_thread`, FF
   additive in `sending_thread`, closed-loop controller in `sending_thread`)
-  are gated by `gas_output / gasval >= 0.8` — full gas pedal is the user
+  are gated by `gas_output / gasval >= 0.8`: full gas pedal is the user
   override and defeats AEB braking authority across every layer.
 
 ---
@@ -442,7 +442,7 @@ is inverted before it reaches AEB, so use the published value as-is.
 
 ---
 
-## 7. Quick Reference — calibration constants
+## 7. Quick Reference: calibration constants
 
 All constants live in `AEBCalibration` (frozen dataclass, `core/aeb/calibration.py`).
 `DEFAULT = AEBCalibration()` is the production singleton. Tests can pass a modified
@@ -472,28 +472,28 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 
 ## 8. Head-on lateral-gap activation
 
-`cal.lane_separation = 3.9 m` — oncoming vehicles whose centerlines are this far
+`cal.lane_separation = 3.9 m`: oncoming vehicles whose centerlines are this far
 apart laterally are suppressed at the `arc_arc_collision` level
 (`min_lateral_gap`). Passed only for `near_head_on` vehicles (`fwd_dot < -0.5`).
 
 ---
 
-## 9. Critical Rules — Do Not Break (AEB-specific)
+## 9. Critical Rules: Do Not Break (AEB-specific)
 
 - **AEB is a consumer of `RadarThread`.** Do not open the traffic shared-memory buffer directly and do not mutate `Vehicle` instances.
 - **AEB ego curvature is the yaw-rate proxy, full stop.** Do not read `RadarData.ego_curvature` from AEB.
-- **Target-vehicle curvature is the `_vehicle_curvature_blend` helper** (sliced position fit blended with `angular_velocity`-derived yaw rate, weighted by `cal.aeb_yaw_blend`, then One-Euro filtered per-vehicle by `AEBThread._curvature_blender`). Do not call `v.curvature_from_history()` directly from AEB paths and do not enlarge `aeb_pos_history_len` toward 25. The blender must be stepped exactly **once per vehicle per frame** — any new call site must thread the existing `ctx.v_curvature` through rather than re-invoking `_vehicle_curvature_blend(...)` with the production blender.
+- **Target-vehicle curvature is the `_vehicle_curvature_blend` helper** (sliced position fit blended with `angular_velocity`-derived yaw rate, weighted by `cal.aeb_yaw_blend`, then One-Euro filtered per-vehicle by `AEBThread._curvature_blender`). Do not call `v.curvature_from_history()` directly from AEB paths and do not enlarge `aeb_pos_history_len` toward 25. The blender must be stepped exactly **once per vehicle per frame**: any new call site must thread the existing `ctx.v_curvature` through rather than re-invoking `_vehicle_curvature_blend(...)` with the production blender.
 - **`co_directional` must use `fwd_dot > 0.7`, not `abs(fwd_dot) > 0.7`.** The two flags must be mutually exclusive with `head_on`.
 - **All tunable constants live in `AEBCalibration`.** Do not introduce new bare numeric literals in `thread.py` or `filters.py`. Add the constant to `calibration.py` first.
-- **`lane_frame.project_to_ego_arc` is the canonical lane primitive.** Do not use cross-product `lateral_offset` for lane classification — it compresses on curved roads. The `max(d_arc, d_straight)` formula in `project_to_ego_arc` is the safety-critical fix.
+- **`lane_frame.project_to_ego_arc` is the canonical lane primitive.** Do not use cross-product `lateral_offset` for lane classification: it compresses on curved roads. The `max(d_arc, d_straight)` formula in `project_to_ego_arc` is the safety-critical fix.
 - **`OppositeLaneFilter` body-separation check uses `ego_hw + v_hw_coll`, not corridor width.** The margin (`corridor_margin=0.5 m`) is for probabilistic corridor overlap; body separation uses only actual half-widths.
 - **`EgoEvasionFilter` uses `margin=0.0` for evasion arc checks.** Physical body clearance, not padded corridors. Main collision detection still uses `cal.corridor_margin`.
 - **Fix B has no ego_k guard.** The `own_lane` check is the only gate; `|ego_curvature|` expands `delta_kappa_t` only if it would actually increase it.
 - **Fix D (target arc over-rotation damping) applies to `arc_curvature`, not `v_curvature`.** `v_curvature` is the raw measured value used by `same_curve` and `CoDirectionalDivergeFilter`. Collision and visualization arcs both use the damped `arc_curvature` when building predicted paths.
-- **`LaneClassifier` must run before `OppositeLaneFilter`, `CoDirectionalDivergeFilter`, and `EgoEvasionFilter`** — those stages read `ctx.lane`, `ctx.fwd_dot`, `ctx.v_curvature` etc. populated by `LaneClassifier`.
-- **TMP trailer-as-vehicles get tractor speed/accel via `_swap_trailer_kinematics`.** Buffer speed for trailer slots is unreliable (often 0). The swap is done on a shallow copy — never mutate the original Vehicle.
-- **AEB pedal authority is two-layered, never binary-gated to zero.** AEB publishes `AEB_ff_decel_ms2` every tick when there is any real threat (`required_decel > 0`); sending_thread converts it to a brake pedal via the inverse FF curve and merges it as `b = max(b, aeb_ff_pedal)`. This is the **sub-engagement assist** layer — it adds force on top of user braking when the system warns but has not yet engaged, and is gated on `brakeval > cal.user_brake_latch` so it does not phantom-brake during normal manual cruising when routine lead-following produces a small but non-zero `required_decel`. When AEB engages (`AEB_brake == True`), main_pedal_thread slams `brake_output = 1.0` (the **engagement slam** layer) — by definition, engagement means the system has decided full braking is warranted, and the inverse FF curve at a modest required-decel would produce a pedal too soft to act on the threat. The engagement slam is independent of `brakeval` (it must fire even on a distracted driver). All AEB pedal paths are gated by `gas_output >= 0.8` (full-gas user authority, the only override that can defeat AEB braking). Reason: removing the engagement slam in favour of pure FF made AEB feel silenced on engagement because FF pedal for 3–5 m/s² is only ~0.14–0.34.
-- **Warn suppression while user braking.** `aeb_warn` is suppressed when `brakeval > cal.user_brake_latch` UNLESS `effective_required >= cal.aeb_warn_near_full_frac × effective_max_decel`. The user does not need a redundant alert while addressing the threat — only surface it when AEB itself wants near-full brake.
+- **`LaneClassifier` must run before `OppositeLaneFilter`, `CoDirectionalDivergeFilter`, and `EgoEvasionFilter`**: those stages read `ctx.lane`, `ctx.fwd_dot`, `ctx.v_curvature` etc. populated by `LaneClassifier`.
+- **TMP trailer-as-vehicles get tractor speed/accel via `_swap_trailer_kinematics`.** Buffer speed for trailer slots is unreliable (often 0). The swap is done on a shallow copy: never mutate the original Vehicle.
+- **AEB pedal authority is two-layered, never binary-gated to zero.** AEB publishes `AEB_ff_decel_ms2` every tick when there is any real threat (`required_decel > 0`); sending_thread converts it to a brake pedal via the inverse FF curve and merges it as `b = max(b, aeb_ff_pedal)`. This is the **sub-engagement assist** layer: it adds force on top of user braking when the system warns but has not yet engaged, and is gated on `brakeval > cal.user_brake_latch` so it does not phantom-brake during normal manual cruising when routine lead-following produces a small but non-zero `required_decel`. When AEB engages (`AEB_brake == True`), main_pedal_thread slams `brake_output = 1.0` (the **engagement slam** layer): by definition, engagement means the system has decided full braking is warranted, and the inverse FF curve at a modest required-decel would produce a pedal too soft to act on the threat. The engagement slam is independent of `brakeval` (it must fire even on a distracted driver). All AEB pedal paths are gated by `gas_output >= 0.8` (full-gas user authority, the only override that can defeat AEB braking). Reason: removing the engagement slam in favour of pure FF made AEB feel silenced on engagement because FF pedal for 3–5 m/s² is only ~0.14–0.34.
+- **Warn suppression while user braking.** `aeb_warn` is suppressed when `brakeval > cal.user_brake_latch` UNLESS `effective_required >= cal.aeb_warn_near_full_frac × effective_max_decel`. The user does not need a redundant alert while addressing the threat: only surface it when AEB itself wants near-full brake.
 
 ---
 
@@ -531,4 +531,5 @@ Do **not** include `speed` in the inverse formula.
 ---
 
 *Source: `core/aeb/thread.py`, `core/aeb/filters.py`, `core/aeb/calibration.py`,
-`core/aeb/lane_frame.py`, `core/radar/*` — LD-Tech / MonoCruise.*
+`core/aeb/lane_frame.py`, `core/radar/*`: LD-Tech / MonoCruise.*
+

@@ -1,5 +1,5 @@
-"""
-TEMPLATE THREAD — copy this directory and rename it for your worker.
+﻿"""
+TEMPLATE THREAD: copy this directory and rename it for your worker.
 
 Convention:
   core/<feature_name>/thread.py   ← worker lives here
@@ -27,7 +27,7 @@ from core.thread_management.registry    import registry
 logger = logging.getLogger(__name__)
 
 
-# Typed data container — other threads read fields directly (GIL-safe)
+# Typed data container: other threads read fields directly (GIL-safe)
 
 @dataclass
 class MyThreadData(ThreadData):
@@ -40,7 +40,7 @@ class MyThreadData(ThreadData):
 
 
 class MyThread(BaseThread):
-    loop_interval = 0.50   # seconds — rate-limit your loop here
+    loop_interval = 0.50   # seconds: rate-limit your loop here
     max_restarts  = 5
 
     def __init__(self) -> None:
@@ -57,7 +57,7 @@ class MyThread(BaseThread):
     def loop(self) -> None:
         """
         Main work unit. Called every `loop_interval` seconds.
-        Do NOT call time.sleep() here — the base class handles pacing.
+        Do NOT call time.sleep() here: the base class handles pacing.
         Raise any exception to trigger watchdog handling.
         """
         # read from another thread (single primitive field, GIL-safe) ---
@@ -78,3 +78,4 @@ class MyThread(BaseThread):
     def teardown(self) -> None:
         """Runs once after loop exits. Exceptions are suppressed by base."""
         logger.debug("teardown complete")
+

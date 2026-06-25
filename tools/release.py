@@ -1,4 +1,4 @@
-"""Release helper for MonoCruise.
+﻿"""Release helper for MonoCruise.
 
 Two subcommands:
 
@@ -14,7 +14,7 @@ Two subcommands:
         Prints the CHANGELOG section for X.Y.Z to stdout (used by CI to build
         the GitHub release body).
 
-The bump command refuses to run if the [Unreleased] block is empty — i.e. you
+The bump command refuses to run if the [Unreleased] block is empty: i.e. you
 must have at least one line of changelog entries below the [Unreleased] heading
 before publishing a release.
 """
@@ -130,7 +130,7 @@ def cmd_bump(args: argparse.Namespace) -> None:
     else:
         new_version = _bump(current, args.level)
     if new_version == current:
-        raise SystemExit(f"new version equals current ({current}) — nothing to bump")
+        raise SystemExit(f"new version equals current ({current}): nothing to bump")
 
     if not _unreleased_has_content():
         raise SystemExit(
@@ -184,3 +184,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

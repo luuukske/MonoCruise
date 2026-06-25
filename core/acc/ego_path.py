@@ -1,11 +1,11 @@
-"""
-ACC ego path prediction — blended curvature + dynamic half-width.
+﻿"""
+ACC ego path prediction: blended curvature + dynamic half-width.
 
 The ego corridor used for scoring is an arc built from:
 
     curvature   = blend( steer-derived κ, history-derived κ, by speed )
     half_width  = LANE_BASE/2 + sin(|steer·1.5|·π/2) · LANE_FLARE
-    horizon     = small fixed window — scoring cares about the next
+    horizon     = small fixed window: scoring cares about the next
                   few metres, not AEB's full collision horizon.
 
 Why blend?  At very low speeds the position-history fit collapses to
@@ -47,7 +47,7 @@ _BLEND_LOW_KMH: float = 15.0
 _BLEND_HIGH_KMH: float = 30.0
 
 # Weight given to the history fit once we are above _BLEND_HIGH_KMH.
-# The legacy logic favoured steering (~30 %) because it leads — this
+# The legacy logic favoured steering (~30 %) because it leads: this
 # keeps that asymmetry.
 _HISTORY_WEIGHT_HIGH: float = 0.70
 
@@ -70,9 +70,9 @@ def blend_curvature(
 ) -> float:
     """Combine steer-derived κ and history-derived κ by ego speed.
 
-    steer            — telemetry userSteer, signed, roughly [-1, 1].
-    history_kappa    — RadarData.ego_curvature (1/m) or None.
-    ego_speed_ms     — current ego speed (m/s).
+    steer           : telemetry userSteer, signed, roughly [-1, 1].
+    history_kappa   : RadarData.ego_curvature (1/m) or None.
+    ego_speed_ms    : current ego speed (m/s).
     """
     steer_kappa = steer * _STEER_KAPPA_GAIN
     if history_kappa is None:
@@ -106,7 +106,7 @@ def build_ego_arc(
 ) -> ArcPath:
     """Ego corridor arc used for in-path scoring.
 
-    Blinker bias is **not** applied to the arc geometry — legacy
+    Blinker bias is **not** applied to the arc geometry: legacy
     scoring subtracts ``blinker·4.5`` from the scored lateral offset
     directly (see ``core/acc/scoring.py`` and SCORING_REFERENCE §8.1).
     Shifting the arc would also distort arc-arc hit tests, which is
@@ -120,3 +120,4 @@ def build_ego_arc(
         max(abs(ego_speed_ms), 0.1),   # never let speed==0 collapse the arc
         kappa, half_w, _HORIZON_S,
     )
+

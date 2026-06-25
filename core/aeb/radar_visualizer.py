@@ -1,9 +1,9 @@
-"""
+﻿"""
 Live visualization server for radar speed/acceleration filtering.
 
 Shows raw vs smoothed speed and smoothed acceleration of the ACC-tracked
 lead vehicle, or the closest radar vehicle when no lead is tracked.
-Single stream — no vehicle IDs, no selection UI.
+Single stream: no vehicle IDs, no selection UI.
 """
 
 from flask import Flask, render_template_string
@@ -76,11 +76,11 @@ class RadarVisualizer:
             </div>
             <div class="stat-box">
                 <div class="stat-value" id="speed-corr">0.00</div>
-                <div class="stat-label">Corrected — AEB (m/s)</div>
+                <div class="stat-label">Corrected: AEB (m/s)</div>
             </div>
             <div class="stat-box">
                 <div class="stat-value" id="speed-ema">0.00</div>
-                <div class="stat-label">EMA — uncorrected (m/s)</div>
+                <div class="stat-label">EMA: uncorrected (m/s)</div>
             </div>
             <div class="stat-box">
                 <div class="stat-value" id="speed-acc">0.00</div>
@@ -305,3 +305,4 @@ class RadarVisualizer:
 if __name__ == "__main__":
     visualizer = RadarVisualizer(port=5000)
     visualizer.start()
+

@@ -1,5 +1,5 @@
-"""
-Speed limiter — LongitudinalController subclass.
+﻿"""
+Speed limiter: LongitudinalController subclass.
 
 Lifecycle is driven by the orchestrator (CruiseControlThread):
   enable() / disable() / set_target_kmh(v) / reset()
@@ -7,7 +7,7 @@ Lifecycle is driven by the orchestrator (CruiseControlThread):
 No disengage logic lives here. The orchestrator decides when to enable or
 disable the limiter; this class only runs the PID.
 
-Gains: Settings.limiter_kp/ki/kd/integral_clamp/accel_min_ms2 — independent
+Gains: Settings.limiter_kp/ki/kd/integral_clamp/accel_min_ms2: independent
 of the CC gains so each controller can be tuned separately.
 """
 
@@ -104,7 +104,7 @@ class SpeedLimiter(LongitudinalController):
         # as ego approaches the limit (continuous-tracker invariant, AGENTS.md).
         wanted = max(accel_min, wanted)
 
-        # Return active=True every tick while enabled — continuous-tracker invariant
+        # Return active=True every tick while enabled: continuous-tracker invariant
         # (AGENTS.md): the PID must run even when below the limit so the gas pedal
         # cap tightens progressively rather than snapping on at the boundary.
         return LongOutput(wanted, True)
@@ -119,3 +119,4 @@ class SpeedLimiter(LongitudinalController):
                 alpha * target_ms + (1.0 - alpha) * self._target_speed_ema_ms
             )
         return self._target_speed_ema_ms
+

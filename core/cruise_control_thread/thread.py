@@ -1,14 +1,14 @@
-"""
+﻿"""
 Cruise control orchestrator thread.
 
 Owns the longitudinal controller stack (ACC + CC + SpeedLimiter children from
 `core/longitudinal/`), the CC button FSM, and mode dispatch. Each tick:
 
 1. Read telemetry + pedal + AEB state, build a `LongCtx`.
-2. Run the CC button FSM — drives `self._cc_ctrl` enable/target (both modes).
-3. Run the ACC distance FSM — drives `Settings.acc_gap_level`.
+2. Run the CC button FSM: drives `self._cc_ctrl` enable/target (both modes).
+3. Run the ACC distance FSM: drives `Settings.acc_gap_level`.
 4. Handle mode-flip handover: reset the now-inactive controller's PID state.
-5. CC-only disengage (user brake, park/gear, disarm-on-stop) — limiter excluded.
+5. CC-only disengage (user brake, park/gear, disarm-on-stop): limiter excluded.
 6. Dispatch by cc_mode: CC path or Limiter path.
 7. Publish wanted accel to telemetry for `accel_to_pedals.step()` and to
    `self.data` for UI consumers.
@@ -33,7 +33,7 @@ from ui.popup.popup_window import PopupWindow
 
 logger = logging.getLogger(__name__)
 
-# CC disengage thresholds (CC-only — limiter is immune to these events)
+# CC disengage thresholds (CC-only: limiter is immune to these events)
 _CC_RAW_BRAKE_DISENGAGE = 0.05
 _CC_GAME_BRAKE_DISENGAGE = 0.2
 _CC_DISARM_SPEED_MS = 0.3
@@ -67,7 +67,7 @@ class CruiseControlThread(BaseThread):
         super().__init__(name="cruise_control_thread")
         self.data = CruiseControlThreadData()
 
-        # Longitudinal controllers — children of LongitudinalController.
+        # Longitudinal controllers: children of LongitudinalController.
         self._cc_ctrl = CruiseController()
         self._limiter_ctrl = SpeedLimiter()
         self._acc_ctrl = AdaptiveCruiseController()
@@ -75,11 +75,11 @@ class CruiseControlThread(BaseThread):
         # Mode tracking for handover reset on mode flip.
         self._prev_cc_mode: str | None = None
 
-        # Disarm-on-stop state (CC-only — moved from CruiseController).
+        # Disarm-on-stop state (CC-only: moved from CruiseController).
         self._cc_disarm_pending_until: float = 0.0
         self._cc_prev_speed_ms: float | None = None
 
-        # Button FSM state — owns press timing only; acts on CC via _cc_ctrl.
+        # Button FSM state: owns press timing only; acts on CC via _cc_ctrl.
         self._time_pressed_dec: float | None = None
         self._time_pressed_inc: float | None = None
         self._time_pressed_start: float | None = None
@@ -107,7 +107,7 @@ class CruiseControlThread(BaseThread):
         if not self.running:
             return
 
-        # Idle throttle when telemetry disconnected — buttons are gated below.
+        # Idle throttle when telemetry disconnected: buttons are gated below.
         try:
             tel = registry.get_thread("telemetry_thread")
             is_connected = tel.is_alive() and bool(tel.data.is_connected)
@@ -159,7 +159,7 @@ class CruiseControlThread(BaseThread):
 
             if any((cc_dec, cc_inc, cc_start)):
                 logger.debug(
-                    "CC button held — start=%s inc=%s dec=%s | "
+                    "CC button held: start=%s inc=%s dec=%s | "
                     "connected=%s paused=%s device_lost=%s all_assigned=%s",
                     cc_start, cc_inc, cc_dec,
                     connected, paused, device_lost, all_assigned,
@@ -179,7 +179,7 @@ class CruiseControlThread(BaseThread):
                 self._tick_acc_distance_fsm(now, acc_dist_inc, acc_dist_dec)
             elif any((cc_dec, cc_inc, cc_start)):
                 logger.debug(
-                    "CC button press ignored — guard blocked "
+                    "CC button press ignored: guard blocked "
                     "(need: connected=%s, not paused=%s, not device_lost=%s)",
                     connected, not paused, not device_lost,
                 )
@@ -217,7 +217,7 @@ class CruiseControlThread(BaseThread):
 
             # Reset the inactive controller's PID state on mode flip to avoid
             # stale integrator values when switching back. Limiter is not
-            # reset on flip — it runs in both modes (always-on cap in cruise
+            # reset on flip: it runs in both modes (always-on cap in cruise
             # mode when global_speed_limit_kmh is set), and its target-change
             # branch handles integral reset internally.
             if mode != self._prev_cc_mode:
@@ -226,7 +226,7 @@ class CruiseControlThread(BaseThread):
                     self._acc_ctrl.reset()
                 self._prev_cc_mode = mode
 
-            # Disengage conditions apply to CC only — the limiter is immune to
+            # Disengage conditions apply to CC only: the limiter is immune to
             # brake presses, gear changes, and crash events (matches original behaviour).
             if mode == "Cruise control":
                 self._handle_cc_disengage_conditions(ctx)
@@ -251,10 +251,10 @@ class CruiseControlThread(BaseThread):
             else:
                 # Global limiter runs in parallel with CC as an always-on cap
                 # whenever global_speed_limit_kmh is set. Target is strictly the
-                # global limit (never CC's target — CC's target is already
+                # global limit (never CC's target: CC's target is already
                 # clamped to the global limit, so both converge near the cap).
                 # Limiter is immune to CC disengage, so the cap holds when CC
-                # is off — matches the "global limiter always active" rule.
+                # is off: matches the "global limiter always active" rule.
                 if Settings.global_speed_limit_kmh is not None:
                     self._limiter_ctrl.set_target_kmh(float(Settings.global_speed_limit_kmh))
                     self._limiter_ctrl.enable()
@@ -540,7 +540,7 @@ class CruiseControlThread(BaseThread):
             self._long_press_acc_dist_dec = False
             return
 
-        # Both assigned — clamped step. Suppress when both are held.
+        # Both assigned: clamped step. Suppress when both are held.
         if inc_held and dec_held:
             self._time_pressed_acc_dist_inc = None
             self._time_pressed_acc_dist_dec = None
@@ -640,7 +640,7 @@ class CruiseControlThread(BaseThread):
     def _handle_cc_disengage_conditions(self, ctx: LongCtx) -> None:
         """Disengage CC on user brake, park/gear, or crash-then-stop.
 
-        Never touches self._limiter_ctrl — the limiter is intentionally immune
+        Never touches self._limiter_ctrl: the limiter is intentionally immune
         to all of these events (matches the original always-on limiter behaviour).
         """
         cc = self._cc_ctrl
@@ -652,7 +652,7 @@ class CruiseControlThread(BaseThread):
                 or game_brake_excess > _CC_GAME_BRAKE_DISENGAGE
             ):
                 cc.disable()
-                logger.info("CC disabled — brake pressed", extra={"popup": True})
+                logger.info("CC disabled: brake pressed", extra={"popup": True})
 
         if cc.enabled and ctx.connected and (ctx.park_brake or ctx.gear_dashboard <= 0):
             cc.disable()
@@ -695,3 +695,4 @@ class CruiseControlThread(BaseThread):
                 st.reset_accel_mapper_smoothing()
         except Exception:
             logger.debug("reset_accel_mapper_smoothing failed", exc_info=True)
+

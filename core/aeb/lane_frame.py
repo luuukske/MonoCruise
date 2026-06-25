@@ -1,4 +1,4 @@
-"""Arc-projected lane membership — replaces cross-product lateral_offset."""
+﻿"""Arc-projected lane membership: replaces cross-product lateral_offset."""
 
 from __future__ import annotations
 
@@ -59,3 +59,4 @@ def classify(d_abs: float, cal: AEBCalibration) -> Lane:
     if d_abs < 2.0 * cal.lane_separation:
         return Lane.OPPOSITE_OR_OUTER
     return Lane.OFF_ROAD
+

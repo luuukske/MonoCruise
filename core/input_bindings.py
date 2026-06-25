@@ -1,4 +1,4 @@
-"""
+﻿"""
 Input binding resolution.
 
 Converts a raw binding value (from Settings) into a live held/not-held bool.
@@ -23,9 +23,9 @@ Binding formats (stored in config.json / Settings):
 
 Public API
 ----------
-migrate_binding(raw)   — upgrade legacy int/str to dict; pass-through for dict/None
-resolve_held(binding)  — True if the described input is currently held
-keyboard_is_pressed(key) — safe wrapper around keyboard.is_pressed()
+migrate_binding(raw)  : upgrade legacy int/str to dict; pass-through for dict/None
+resolve_held(binding) : True if the described input is currently held
+keyboard_is_pressed(key): safe wrapper around keyboard.is_pressed()
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ def resolve_held(binding: object) -> bool:
 
     Joystick state is read from main_pedal_thread.data.joystick_button_states.
     Keyboard state is read via keyboard.is_pressed().
-    Returns False on any error — safe default.
+    Returns False on any error: safe default.
     """
     b = migrate_binding(binding)
     if b is None:
@@ -144,3 +144,4 @@ def _resolve_button_device(binding: dict) -> bool:
     except Exception:
         logger.debug("failed to resolve button_device binding %s/%s", vid_pid, button_id, exc_info=True)
         return False
+

@@ -1,4 +1,4 @@
-# AGENTS.md — MonoCruise Radar (shared fundamentals)
+﻿# AGENTS.md: MonoCruise Radar (shared fundamentals)
 
 > Authoritative reference for **coordinate system, rotation, world→ego
 > transforms, the shared-memory traffic buffer, Vehicle state/smoothing,
@@ -6,7 +6,7 @@
 > consumes ETS2 telemetry, traffic, or predicted paths.
 >
 > AEB- and ACC-specific logic live in `core/aeb/AGENTS.md` and
-> `core/acc/AGENTS.md` respectively — both of them build on the concepts
+> `core/acc/AGENTS.md` respectively: both of them build on the concepts
 > defined here.
 
 ---
@@ -18,7 +18,7 @@ ETS2 uses a right-handed 3D system. Ground plane = **XZ**. Y = elevation (filter
 | Axis | Meaning | Increases toward |
 |------|---------|-----------------|
 | X | Lateral | East (right) |
-| Y | Elevation | Up — **never used in 2D math** |
+| Y | Elevation | Up: **never used in 2D math** |
 | Z | Longitudinal | South (forward at default orientation) |
 
 Telemetry keys: `coordinateX`, `coordinateY`, `coordinateZ`.
@@ -27,21 +27,21 @@ Telemetry keys: `coordinateX`, `coordinateY`, `coordinateZ`.
 
 ## 2. Ego Truck Yaw (`rotationX`)
 
-- Telemetry key is `rotationX` — this is **yaw**, not pitch. The name is wrong.
+- Telemetry key is `rotationX`: this is **yaw**, not pitch. The name is wrong.
 - Range: `0.0–1.0` (normalised full circle). `0.0 = South`, `0.25 = West`, `0.5 = North`, `0.75 = East`.
 - Direction: counter-clockwise when increasing.
 
-### Conversion — pick the right one
+### Conversion: pick the right one
 
 ```python
-# Radar / top-down view (ETS2radar.py) — +0.5 aligns 0 to North (screen-up)
+# Radar / top-down view (ETS2radar.py): +0.5 aligns 0 to North (screen-up)
 yaw_rad = (yaw_norm + 0.5) * 2 * math.pi
 
-# AEB / ACC / arc geometry — NO +0.5 offset
+# AEB / ACC / arc geometry: NO +0.5 offset
 ego_yaw_rad = yaw_norm * 2.0 * math.pi
 ```
 
-> **WARNING — do not mix these up.**
+> **WARNING: do not mix these up.**
 > Adding `+0.5` in the arc-geometry context rotates the ego forward
 > vector 180°, reversing the ego arc. The forward vector
 > `fwd = (-sin, -cos)` already points North at `yaw=0` without the offset.
@@ -59,7 +59,7 @@ under the data lock; consumers should prefer `ego_yaw_rad`.
 class Quaternion:
     def __init__(self, w, x, y, z):
         self.w = w
-        self.x = y   # intentional swap — compensates for ETS2 internal axis ordering
+        self.x = y   # intentional swap: compensates for ETS2 internal axis ordering
         self.y = x   # intentional swap
         self.z = z
 ```
@@ -95,7 +95,7 @@ Both sign flips are mandatory:
 
 ## 5. Shared Memory Buffer (`Local\ETS2LATraffic`)
 
-Defined in `core/radar/reader.py`; consumed by `RadarThread` only — AEB
+Defined in `core/radar/reader.py`; consumed by `RadarThread` only: AEB
 and ACC receive ready-made ``Vehicle`` instances from radar data.
 
 ```python
@@ -112,20 +112,20 @@ _VEH_STRIDE            = 46  # fields per vehicle slot (16 + 3*10)
 | Idx | Field | Type | Notes |
 |-----|-------|------|-------|
 | 0 | position.x | float | World X |
-| 1 | position.y | float | Elevation — never used in 2D |
+| 1 | position.y | float | Elevation: never used in 2D |
 | 2 | position.z | float | World Z |
 | 3 | rotation.w | float | Quaternion W |
 | 4 | rotation.x (input) | float | Stored as `self.y` after axis swap |
 | 5 | rotation.y (input) | float | Stored as `self.x` after axis swap |
 | 6 | rotation.z | float | Quaternion Z |
 | 7 | size.width | float | metres |
-| 8 | size.height | float | metres — unused in 2D |
+| 8 | size.height | float | metres: unused in 2D |
 | 9 | size.length | float | metres |
 | 10 | speed | float | AI = use as-is from buffer (may be signed in singleplayer). TMP = LS fit of longitudinal motion over up to `_TMP_SPEED_HISTORY_LEN` position-history samples, else single-interval Δ/dt; then speed-dependent EMA of raw speed (see §7). |
-| 11 | acceleration | float | m/s² — AI = buffer as-is. TMP buffer value is **ignored**; `Vehicle.acceleration` is EMA of the time derivative of filtered TMP speed (see §7). Arcs use `accel_for_arc()` (= `acceleration`). |
+| 11 | acceleration | float | m/s²: AI = buffer as-is. TMP buffer value is **ignored**; `Vehicle.acceleration` is EMA of the time derivative of filtered TMP speed (see §7). Arcs use `accel_for_arc()` (= `acceleration`). |
 | 12 | trailer_count | short | 0–3 |
 | 13 | id | short | Per-frame continuity key |
-| 14 | is_tmp | byte | `1` = TMP multiplayer (ETS2LA); `0` = AI. Consumer threads may apply TMP-specific filters (e.g. AEB's rel-speed split — see `core/aeb/AGENTS.md`). |
+| 14 | is_tmp | byte | `1` = TMP multiplayer (ETS2LA); `0` = AI. Consumer threads may apply TMP-specific filters (e.g. AEB's rel-speed split: see `core/aeb/AGENTS.md`). |
 | 15 | is_trailer | byte | `1` = trailer record, `0` = tractor |
 
 ### Trailer slots (offsets 16, 26, 36)
@@ -133,20 +133,20 @@ _VEH_STRIDE            = 46  # fields per vehicle slot (16 + 3*10)
 Each trailer = 10 floats: `position.x/y/z`, `rotation.w/x/y/z`, `size.width/height/length`.
 A slot is valid if `position` is non-zero.
 
-**TMP trailer pivot fix** — TMP pivot is at the front coupler, not center. `correct_position()` shifts it backward:
+**TMP trailer pivot fix**: TMP pivot is at the front coupler, not center. `correct_position()` shifts it backward:
 
 ```python
 offset_x = (length / 2) * math.sin(yaw_rad)
 offset_z = (length / 2) * math.cos(yaw_rad)
 ```
 
-Non-TMP trailer positions are already centered — use `tr.position` directly.
+Non-TMP trailer positions are already centered: use `tr.position` directly.
 
 ---
 
 ## 6. Vehicle Corner Geometry
 
-### TMP (multiplayer) — symmetric
+### TMP (multiplayer): symmetric
 
 ```python
 back_z  = position.z + length / 2
@@ -155,7 +155,7 @@ left_x  = position.x - width  / 2
 right_x = position.x + width  / 2
 ```
 
-### AI (non-TMP) — asymmetric pivot correction
+### AI (non-TMP): asymmetric pivot correction
 
 ```python
 back_z  = position.z + length * 0.82   # 82% behind pivot
@@ -169,27 +169,27 @@ front_z = position.z - length * 0.18   # 18% in front of pivot
 ```python
 pitch, yaw, roll = vehicle.rotation.euler()
 corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
-# roll=0 intentional — top-down view ignores banking
+# roll=0 intentional: top-down view ignores banking
 ```
 
 ---
 
 ## 7. Vehicle State & Smoothing
 
-### Fields — positions raw; speed/accel filtered (AI + TMP)
+### Fields: positions raw; speed/accel filtered (AI + TMP)
 
 | Field | Source | Use for |
 |-------|--------|---------|
 | `position.x/z` | **Unfiltered** shared-memory world coordinates | Arc start position, rendering, collision geometry |
 | `_smooth_yaw` | Wrap-safe EMA of `rotation.euler()[1]` in radians (`_RAW_YAW_ALPHA = 0.5`, AI and TMP) | **Arc curvature. Never use `rotation.euler()` directly for arcs.** |
-| `speed` | Accel-corrected smoothed speed (`speed_corr`) — see filter chain below. AI + TMP | AEB arc direction, TTB |
-| `acc_speed` | ACC speed — adaptive filter on `speed_corr`: sub-deadband per-tick changes get a long time constant, larger changes a short one (filter chain below). AI + TMP | ACC following-distance only |
-| `acceleration` | Nonlinear EMA of `d(speed_ema)/dt` — see filter chain below. AI + TMP (buffer field 11 unused) | Arc decel/accel via `_accel_to_arc_params()` |
+| `speed` | Accel-corrected smoothed speed (`speed_corr`): see filter chain below. AI + TMP | AEB arc direction, TTB |
+| `acc_speed` | ACC speed: adaptive filter on `speed_corr`: sub-deadband per-tick changes get a long time constant, larger changes a short one (filter chain below). AI + TMP | ACC following-distance only |
+| `acceleration` | Nonlinear EMA of `d(speed_ema)/dt`: see filter chain below. AI + TMP (buffer field 11 unused) | Arc decel/accel via `_accel_to_arc_params()` |
 | `angular_velocity` | Degrees/s from rotation delta/dt | Arc curvature via `κ = ω_rad/speed` |
 | `_position_history` | `(t, x, z)` tuples appended each full update (AI + TMP); capped at `_POSITION_HISTORY_LEN = 25` | TMP raw-speed LS fit (uses last `_TMP_SPEED_HISTORY_LEN = 20`), `curvature_from_history`, ACC trail arcs |
 | `_speed_ema_history` | `(t, speed_ema)` tuples appended each full update (AI + TMP); capped at `_SPEED_EMA_HISTORY_LEN` | LS-slope fits: `accel` over `_ACCEL_FIT_WINDOW_S`, `accel_trend` over `_ACC_SPEED_ACCEL_WINDOW_S` |
 
-### Speed & acceleration — filter chain (AI + TMP)
+### Speed & acceleration: filter chain (AI + TMP)
 
 World `position.x/z` are **not** low-pass filtered. `update_from_last()` runs the
 same 4-signal chain for AI and TMP (`_smooth_vehicle_kinematics()` in
@@ -197,7 +197,7 @@ same 4-signal chain for AI and TMP (`_smooth_vehicle_kinematics()` in
 
 - **AI** raw speed = buffer field 10 as-is.
 - **TMP** raw speed = LS fit of longitudinal motion over the last
-  `_TMP_SPEED_HISTORY_LEN` `(t, x, z)` position-history samples — fit `s ≈ v·τ`
+  `_TMP_SPEED_HISTORY_LEN` `(t, x, z)` position-history samples: fit `s ≈ v·τ`
   with `s = dot(p − p₀, fwd(smooth_yaw))`, `τ = t − t₀`, `v = Σ(τ s)/Σ(τ²)`.
   Chord below 0.025 m → `raw_speed = 0`; one sample → single-interval `Δraw/dt`.
   The window is deliberately ~1.3 s long: TMP transmits remote-vehicle position
@@ -207,15 +207,15 @@ same 4-signal chain for AI and TMP (`_smooth_vehicle_kinematics()` in
   oscillate. Buffer fields 10/11 are never used for TMP physics.
 
 ```python
-# 1. speed_ema  — plain EMA of raw speed (no lag compensation)
+# 1. speed_ema : plain EMA of raw speed (no lag compensation)
 alpha      = _tmp_speed_ema_alpha(|avg(prev_speed_ema, raw_speed)|)   # 1.0 rest → 0.25 @ 90 km/h
 speed_ema  = alpha * raw_speed + (1 - alpha) * prev_speed_ema
-# 2. accel  — LS slope of the speed_ema history over _ACCEL_FIT_WINDOW_S, light EMA
+# 2. accel : LS slope of the speed_ema history over _ACCEL_FIT_WINDOW_S, light EMA
 accel_raw  = least_squares_slope( (t, speed_ema) samples within _ACCEL_FIT_WINDOW_S )
 accel      = prev_accel + _ACCEL_EMA_ALPHA * (accel_raw - prev_accel)
-# 3. speed_corr  — lag-compensated; τ is the step-1 EMA settling time
+# 3. speed_corr : lag-compensated; τ is the step-1 EMA settling time
 speed_corr = speed_ema + clamp(accel * dt*(1-alpha)/alpha, ±_SPEED_CORR_CLAMP_MS)
-# 4. acc_speed  — ACC speed: adaptive low-pass on speed_corr + feed-forward
+# 4. acc_speed : ACC speed: adaptive low-pass on speed_corr + feed-forward
 delta        = speed_corr - prev_acc_speed
 ramp         = clamp((|delta| - _ACC_SPEED_DEADBAND_MS) / _ACC_SPEED_DEADBAND_MS, 0, 1)
 speed_factor = _ACC_SPEED_SMOOTH_MIN + (1 - _ACC_SPEED_SMOOTH_MIN) * min(1, |speed_corr| / _ACC_SPEED_SMOOTH_REF_MS)
@@ -230,7 +230,7 @@ predicted    = prev_acc_speed + accel_ff * dt * ff_gate
 acc_speed    = predicted + alpha_a * (speed_corr - predicted)
 ```
 
-Step 4 makes `acc_speed` both noise-free and responsive — properties a linear
+Step 4 makes `acc_speed` both noise-free and responsive: properties a linear
 EMA cannot give at once. The per-tick change `delta = speed_corr -
 prev_acc_speed` sets the filter time constant: a `|delta|` at or below
 `_ACC_SPEED_DEADBAND_MS` (0.7 m/s) uses the long `_ACC_SPEED_TAU_SLOW_S`
@@ -246,21 +246,21 @@ wobble, not raw spikes.
 `tau` is also **speed-scaled**: it is multiplied by `speed_factor`, which is 1.0
 at `_ACC_SPEED_SMOOTH_REF_MS` (90 km/h) and above and falls linearly to
 `_ACC_SPEED_SMOOTH_MIN` at rest. Smoothing matters mainly at cruising speed; at
-low speed `acc_speed` leans on the incoming `speed_corr` instead — both `tau`
+low speed `acc_speed` leans on the incoming `speed_corr` instead: both `tau`
 endpoints shrink together, so the deadband behaviour is unchanged, just faster.
 
 `tau` is further **acceleration-scaled**. A vehicle in a steady deceleration or
-acceleration produces little position noise — it does not *need* heavy
+acceleration produces little position noise: it does not *need* heavy
 smoothing, and heavy smoothing there only adds lag. So `tau` is multiplied by
 `accel_factor`: 1.0 while coasting, falling to `_ACC_SPEED_ACCEL_FLOOR` once the
 de-noised acceleration `accel_trend` (an LS slope of `speed_ema` over
 `_ACC_SPEED_ACCEL_WINDOW_S`) reaches `_ACC_SPEED_ACCEL_HI_MS2`. Accelerations
 below `_ACC_SPEED_ACCEL_LO_MS2` count as cruise noise and are ignored, so cruise
-smoothing is untouched. `accel_factor` no longer collapses `tau` to zero — the
-feed-forward below carries the accuracy — it just trims smoothing on a ramp
+smoothing is untouched. `accel_factor` no longer collapses `tau` to zero: the
+feed-forward below carries the accuracy: it just trims smoothing on a ramp
 (which has fewer artifacts) so the residual settles faster.
 
-The adaptive low-pass alone lags a *sustained* ramp by `accel·tau` — a
+The adaptive low-pass alone lags a *sustained* ramp by `accel·tau`: a
 persistent bias, and this is the safety-critical part: during a decel
 `acc_speed` reads high, so ACC underestimates the closing rate, a collision
 risk. The **feed-forward** removes it with no windup and no overshoot. Before
@@ -268,7 +268,7 @@ the low-pass corrects toward `speed_corr`, `acc_speed` is advanced one step
 along the responsive `accel`: `predicted = prev_acc_speed + accel·dt·ff_gate`,
 then `acc_speed = predicted + alpha_a·(speed_corr − predicted)`. On a constant
 ramp the prediction matches the true per-tick advance, so the residual the
-low-pass sees — and the steady-state lag — fall to ≈ 0 *regardless* of `tau`.
+low-pass sees: and the steady-state lag: fall to ≈ 0 *regardless* of `tau`.
 When the ramp ends `accel` returns to 0 and the prediction cleanly vanishes;
 there is no integrator state to unwind, hence no trailing overshoot.
 
@@ -279,7 +279,7 @@ the de-noised `|accel_trend|`: zero below `_ACC_SPEED_FF_GATE_LO_MS2`, full at
 `ff_gate = 0`, the prediction is exactly zero, and `acc_speed` is a pure
 low-pass. The gate uses the *robust* `accel_trend` (slow but noise-free) to
 decide *whether* a ramp is real; the prediction uses the *fast* `accel` to
-decide *how hard* — so a real ramp is both detected without false-triggering on
+decide *how hard*: so a real ramp is both detected without false-triggering on
 wobble and tracked responsively. `accel` is clamped to
 `_ACC_SPEED_FF_ACCEL_CLAMP_MS2` so a crash spike cannot jump `acc_speed`.
 
@@ -291,7 +291,7 @@ decreases with |speed| (more smoothing when fast); step 4's `α` is set by the
 adaptive `tau`. Step 4 carries one state value frame to frame: `acc_speed`, the
 output, fed back as `prev_acc_speed`.
 
-**Arc / collision** — `Vehicle.accel_for_arc()` is `return self.acceleration`.
+**Arc / collision**: `Vehicle.accel_for_arc()` is `return self.acceleration`.
 TMP vehicles initialise `acceleration = 0` until the first `update_from_last`;
 `get_arc()` and all arc callers use this field for `_accel_to_arc_params`.
 
@@ -299,7 +299,7 @@ TMP vehicles initialise `acceleration = 0` until the first `update_from_last`;
 
 TMP vehicles derive speed from raw position delta.  If ETS2 stops sending
 position updates for a vehicle (network lag), the same raw coordinates arrive
-every frame, which would snap the derived speed to 0 and then back — causing
+every frame, which would snap the derived speed to 0 and then back: causing
 false speed readings and, worse, false AEB triggers.
 
 **Detection criterion (per full-update frame):**
@@ -332,16 +332,16 @@ Sample points: 0.3 s → 0.00 s, 0.5 s → 0.10 s, 1.0 s → 0.23 s, 2.0 s → 0
 
 | Elapsed since first frozen frame | Action |
 |----------------------------------|--------|
-| `freeze_dur == 0` (TTC ≤ 0.3 s)  | **No freeze** — reset `_lag_since`, fall through. A real stop close to ego is treated as real immediately. |
-| 0 – `freeze_dur` | **Freeze** — hold last position; decay speed quadratically: `speed = prev_speed × (1 − frac²)` where `frac = elapsed / freeze_dur`; force `acceleration = 0`; return early. AEB sees the vehicle at its last known position decelerating toward 0. |
-| ≥ `freeze_dur` | **Release** — set `lag_confirmed = True`, fall through to normal update. Speed falls to 0. AEB detects the stopped obstacle naturally via arc collision. |
+| `freeze_dur == 0` (TTC ≤ 0.3 s)  | **No freeze**: reset `_lag_since`, fall through. A real stop close to ego is treated as real immediately. |
+| 0 – `freeze_dur` | **Freeze**: hold last position; decay speed quadratically: `speed = prev_speed × (1 − frac²)` where `frac = elapsed / freeze_dur`; force `acceleration = 0`; return early. AEB sees the vehicle at its last known position decelerating toward 0. |
+| ≥ `freeze_dur` | **Release**: set `lag_confirmed = True`, fall through to normal update. Speed falls to 0. AEB detects the stopped obstacle naturally via arc collision. |
 | Raw position moves again | Reset `_lag_since = None`, `lag_confirmed = False`. |
 
 `lag_confirmed` is a public flag on `Vehicle`. Consumer threads do not need
 to read it: once released, the vehicle's speed = 0 and the existing AEB arc
 collision logic handles the stationary obstacle without special-casing.
 
-### Yaw EMA — wrap-safe, α = 0.5 (AI and TMP)
+### Yaw EMA: wrap-safe, α = 0.5 (AI and TMP)
 
 ```python
 diff       = (raw_yaw - smooth_yaw + math.pi) % (2 * math.pi) - math.pi
@@ -352,7 +352,7 @@ smooth_yaw = smooth_yaw + _RAW_YAW_ALPHA * diff   # _RAW_YAW_ALPHA = 0.5
 
 **AI (singleplayer):** Use buffer speed as-is. The buffer may already provide
 signed speed (positive = forward, negative = reverse). Do not derive or flip
-sign from displacement — that can make vehicles appear to move backwards.
+sign from displacement: that can make vehicles appear to move backwards.
 
 **TMP (multiplayer):** Speed magnitude is not trusted from the buffer; on full
 frames derive it from up to twenty `(t, x, z)` samples (longitudinal LS along `fwd`),
@@ -379,7 +379,7 @@ Detects out-of-order packets where the raw position jumps backward along the hea
 
 Fires when **both** rotation jerk (any axis) **and** sporadic position change occur in the same frame window. Runs before position-mismatch and lag early-returns so a crash-induced backward jump is not silently swallowed.
 
-**Rotation jerk** — per-axis rate (deg/s) is computed each full frame from `rotation.euler()` (pitch/yaw/roll). Jerk = change in rate since previous frame. Fires if any axis exceeds its threshold:
+**Rotation jerk**: per-axis rate (deg/s) is computed each full frame from `rotation.euler()` (pitch/yaw/roll). Jerk = change in rate since previous frame. Fires if any axis exceeds its threshold:
 
 | Axis | Jerk threshold |
 |------|---------------|
@@ -387,13 +387,13 @@ Fires when **both** rotation jerk (any axis) **and** sporadic position change oc
 | Yaw | 15 deg/s² |
 | Roll | 2 deg/s² |
 
-**Sporadic position** — fires on either:
+**Sporadic position**: fires on either:
 - Vertical jump: `|ΔY| > 0.08 m`, or
 - XZ direction reversal: `cos(prev_disp, cur_disp) < -0.3` when both displacement magnitudes exceed 0.025 m.
 
 When both signals fire simultaneously: `_crash_since` starts. After `0.10 s`: `crash_confirmed = True`. `_crash_since` resets whenever either signal is absent.
 
-**Effect of `crash_confirmed`:** disables the position-mismatch filter and the lag freeze for that vehicle. Position, speed, and acceleration are derived from raw data as normal. Any displacement — even tiny — passes through unfiltered. Speed and acceleration are **not** overridden; AEB evaluates the vehicle from live kinematics.
+**Effect of `crash_confirmed`:** disables the position-mismatch filter and the lag freeze for that vehicle. Position, speed, and acceleration are derived from raw data as normal. Any displacement: even tiny: passes through unfiltered. Speed and acceleration are **not** overridden; AEB evaluates the vehicle from live kinematics.
 
 ### Sub-frame pass (dt < 0.05 s)
 
@@ -417,7 +417,7 @@ When the game is paused, wall-clock time advances but simulation state (raw posi
 
 Each vehicle carries an `ArcPath` (circular arc or straight ray). Enables O(1) position lookups.
 
-### Forward vector — FIXED, do not change
+### Forward vector: FIXED, do not change
 
 ```python
 fwd_x = -math.sin(yaw_rad)
@@ -431,7 +431,7 @@ If the ego arc points backward, the bug is in the `rotationX → yaw_rad` conver
 | Field | Description |
 |-------|-------------|
 | `start_x / start_z` | From smoothed `position` |
-| `yaw_rad` | From `_smooth_yaw` — never from `rotation.euler()` directly |
+| `yaw_rad` | From `_smooth_yaw`: never from `rotation.euler()` directly |
 | `speed` | `build()` normalises to `abs` and flips `fwd` if originally negative |
 | `curvature` | `κ = ω_rad_s / abs_speed`. Positive = left turn (CCW). |
 | `half_width` | `size.width / 2` by default |
@@ -456,9 +456,9 @@ center_z = start_z + sign * radius * (-fwd_x)
 - Corridor threshold = `a.half_width + b.half_width + margin`
 - AEB narrows vehicle half_width by 0.1 m per side to reduce false positives from measurement noise
 
-#### `min_lateral_gap` — head-on turn filter
+#### `min_lateral_gap`: head-on turn filter
 
-When `min_lateral_gap > 0`, a candidate hit is suppressed if the perpendicular distance between the two arc centerlines (measured along `a`'s instantaneous heading at the hit point) is ≥ this value. This prevents false positives when ego and an oncoming vehicle both enter a curve — their arcs overlap in the forward dimension, but the vehicles remain in their own lanes laterally. AEB owns the activation policy; see `core/aeb/AGENTS.md`.
+When `min_lateral_gap > 0`, a candidate hit is suppressed if the perpendicular distance between the two arc centerlines (measured along `a`'s instantaneous heading at the hit point) is ≥ this value. This prevents false positives when ego and an oncoming vehicle both enter a curve: their arcs overlap in the forward dimension, but the vehicles remain in their own lanes laterally. AEB owns the activation policy; see `core/aeb/AGENTS.md`.
 
 ```python
 # Lateral separation via cross product (2D):
@@ -484,7 +484,7 @@ x_new = position.x - speed * math.sin(yaw_rad)
 z_new = position.z - speed * math.cos(yaw_rad)
 ```
 
-Negative signs are required — without them, `yaw=0` (South) points the wrong way.
+Negative signs are required: without them, `yaw=0` (South) points the wrong way.
 
 ---
 
@@ -506,14 +506,14 @@ Traffic vehicles derive curvature from a circumscribed circle fit over `_positio
 
 Ego uses the same math in `core/radar/ego_path.py::ego_curvature_from_history`, fed by `RadarThread._ego_position_history`. `RadarThread` publishes the result as `RadarData.ego_curvature` (may be `None`).
 
-**Consumer policy — the history fit is for ACC only.**
+**Consumer policy: the history fit is for ACC only.**
 
 - **ACC** uses `RadarData.ego_curvature` for in-path scoring. The
   smoothed, geometry-based value matches the smoothing applied to target
   vehicles, so scoring stays consistent across long horizons.
 - **AEB** does **not** read `RadarData.ego_curvature`. It computes the
   yaw-rate proxy `steer * speed * 12.0 / speed` inline every frame. The
-  ego arc must react instantly to driver input — a history-based fit
+  ego arc must react instantly to driver input: a history-based fit
   lags the truck through transients and produces corridor-misalignment
   false positives / negatives during and after corners.
 
@@ -528,7 +528,7 @@ Registry name: `radar_thread`. Runs at 30 Hz.
 ```python
 rt = registry.get_thread("radar_thread")
 with rt.data._lock:
-    vehicles      = rt.data.vehicles          # list[Vehicle] — shared refs, do not mutate
+    vehicles      = rt.data.vehicles          # list[Vehicle]: shared refs, do not mutate
     trailer_vehicles = rt.data.trailer_vehicles  # nested trailers wrapped as Vehicles
     tmp_session   = rt.data.tmp_session       # True if any vehicle has is_tmp
     ego_x         = rt.data.ego_x
@@ -549,7 +549,7 @@ values; consumer threads should treat an unchanged `t_mono` as "no new frame".
 
 ### Trailer vehicles
 
-`trailer_vehicles` wraps each nested trailer (offsets 16/26/36 — see §5) as a
+`trailer_vehicles` wraps each nested trailer (offsets 16/26/36: see §5) as a
 standalone `Vehicle` via `traffic.vehicle_from_trailer`. A road train exposes
 only the tractor and first trailer as top-level vehicles; every trailer behind
 the first is a nested `Trailer` on that first trailer, invisible to consumers
@@ -558,14 +558,14 @@ that iterate the vehicle list. The wrapped records get synthetic ids
 smoothing carry forward per-id like any real vehicle. TMP trailer position is
 shifted from the front coupler to the body center (`correct_position()`).
 
-**Consumer policy — `trailer_vehicles` is for ACC only.** ACC scores it
+**Consumer policy: `trailer_vehicles` is for ACC only.** ACC scores it
 alongside `vehicles`. AEB must **not** read it: AEB already walks nested
 trailers via `Vehicle.trailers`, so consuming this list there would
 double-count each trailer.
 
 ---
 
-## 13. Quick Reference — Formulas (shared)
+## 13. Quick Reference: Formulas (shared)
 
 | Formula | Code / Notes |
 |---------|-------------|
@@ -585,9 +585,9 @@ double-count each trailer.
 | Arc curvature | `κ = omega_rad_s / abs_speed` |
 | Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
 | TMP raw speed | LS on longitudinal `(t,x,z)` history (max `_TMP_SPEED_HISTORY_LEN` full frames): `v = Σ(τ s)/Σ(τ²)`; else `Δraw/dt`, signed via forward dot |
-| Speed / accel filter (AI + TMP) | 4-signal chain in `_smooth_vehicle_kinematics()`: `speed_ema` (EMA of raw) → `accel` (LS slope of `speed_ema` history over `_ACCEL_FIT_WINDOW_S`, light EMA) → `speed_corr = speed_ema + accel·τ` (`self.speed`) → `acc_speed` (adaptive low-pass on `speed_corr` — `tau` ramps `_ACC_SPEED_TAU_SLOW_S`→`_ACC_SPEED_TAU_FAST_S` as the per-tick change grows past `_ACC_SPEED_DEADBAND_MS`, and is scaled down at low speed and during a steady decel/accel — plus a constant-accel feed-forward, gated by de-noised `accel_trend`, that zeroes the sustained-ramp lag with no windup; `self.acc_speed`) |
+| Speed / accel filter (AI + TMP) | 4-signal chain in `_smooth_vehicle_kinematics()`: `speed_ema` (EMA of raw) → `accel` (LS slope of `speed_ema` history over `_ACCEL_FIT_WINDOW_S`, light EMA) → `speed_corr = speed_ema + accel·τ` (`self.speed`) → `acc_speed` (adaptive low-pass on `speed_corr`: `tau` ramps `_ACC_SPEED_TAU_SLOW_S`→`_ACC_SPEED_TAU_FAST_S` as the per-tick change grows past `_ACC_SPEED_DEADBAND_MS`, and is scaled down at low speed and during a steady decel/accel: plus a constant-accel feed-forward, gated by de-noised `accel_trend`, that zeroes the sustained-ramp lag with no windup; `self.acc_speed`) |
 | AI vs TMP raw speed | AI = buffer field 10; TMP = position-history LS fit. Filter chain identical after that |
-| Positions | No EMA — always raw world coordinates |
+| Positions | No EMA: always raw world coordinates |
 | Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > 2 m/s` → decay speed: `prev_speed × (1 − frac²)`, release after 0.3 s |
 | Pos mismatch | `dot(raw_disp, prev_fwd) < -0.05 m` AND `is_tmp` AND `frames < 10` → hold smooth pos + speed, allow yaw |
 | Crash detection | rotation jerk (pitch/yaw/roll deg/s²) AND (\|ΔY\| > 0.08 m OR XZ dir reversal cos < -0.3); both must fire → confirm after 0.10 s; disables pos-mismatch filter and lag freeze; speed/accel stay raw |
@@ -596,7 +596,7 @@ double-count each trailer.
 
 ---
 
-## 14. Critical Rules — Do Not Break
+## 14. Critical Rules: Do Not Break
 
 - **No long comments.** Do not write long comments to explain code. Edit AGENTS.md if you need to explain something long, otherwise use small one-line comments.
 - **Quaternion x/y swap is intentional.** Never remove it.
@@ -607,21 +607,22 @@ double-count each trailer.
 - **Always use `_smooth_yaw` for arc construction**, never `rotation.euler()` directly.
 - **Y axis is never used in 2D math**, only for elevation filtering.
 - **Arc forward vector formula is `(-sin, -cos)`.** Do not flip signs or swap to `(sin, cos)`.
-- **Speed/accel filtering runs for AI and TMP** via `_smooth_vehicle_kinematics()` — the 4-signal chain `speed_ema → accel → speed_corr → acc_speed`. `self.speed` is the accel-corrected `speed_corr`; `self.acc_speed` is the adaptive-filtered ACC speed (ACC only); `self.acceleration` is the LS-slope `accel`. World positions are not low-pass filtered.
-- **`acceleration` is kinematic-only** — buffer field 11 is ignored for AI and TMP; `accel_for_arc()` reads `self.acceleration` (least-squares slope of the `speed_ema` history, light-EMA smoothed).
+- **Speed/accel filtering runs for AI and TMP** via `_smooth_vehicle_kinematics()`: the 4-signal chain `speed_ema → accel → speed_corr → acc_speed`. `self.speed` is the accel-corrected `speed_corr`; `self.acc_speed` is the adaptive-filtered ACC speed (ACC only); `self.acceleration` is the LS-slope `accel`. World positions are not low-pass filtered.
+- **`acceleration` is kinematic-only**: buffer field 11 is ignored for AI and TMP; `accel_for_arc()` reads `self.acceleration` (least-squares slope of the `speed_ema` history, light-EMA smoothed).
 - **`acc_speed` is ACC-only.** AEB and arc geometry use `self.speed`; never swap them.
-- **TMP lag freeze holds position, filtered speed decay, and internal EMA state.** Do not advance position during a freeze — that would snap when updates resume.
-- **Lag freeze speed decays quadratically: `prev_speed × (1 − frac²)`.** Never hold speed constant during lag — it keeps downstream threads informed while smoothly approaching 0.
+- **TMP lag freeze holds position, filtered speed decay, and internal EMA state.** Do not advance position during a freeze: that would snap when updates resume.
+- **Lag freeze speed decays quadratically: `prev_speed × (1 − frac²)`.** Never hold speed constant during lag: it keeps downstream threads informed while smoothly approaching 0.
 - **`lag_confirmed` is set by `traffic.py`, not by consumer threads.** A confirmed-stopped vehicle has speed = 0 and is detected as a stationary obstacle by the existing arc collision logic.
 - **Position mismatch (TMP only) runs before lag detection.** It is mutually exclusive with lag: a backward jump is not near-stationary. The `not _skip_position_update` guard on the lag block enforces this.
 - **Position mismatch is capped at `_POS_MISMATCH_MAX_FRAMES (10)`.** When the cap is reached, the next frame always passes raw position through. Without this cap, a genuine crash or prolonged backward event would be silently swallowed.
 - **Crash detection does not override speed or acceleration.** It disables the pos-mismatch filter and lag freeze so raw position data passes through unfiltered.
 - **Crash detection runs before pos-mismatch and lag early-returns.** Both signals (rotation jerk and sporadic position) must fire simultaneously; `_crash_since` resets whenever either is absent.
-- **Vehicle longitudinal accel for arcs** — `Vehicle.accel_for_arc()` → `self.acceleration` (TMP = filtered kinematic; AI = buffer). Then `_accel_to_arc_params(accel, override_decel)`.
+- **Vehicle longitudinal accel for arcs**: `Vehicle.accel_for_arc()` → `self.acceleration` (TMP = filtered kinematic; AI = buffer). Then `_accel_to_arc_params(accel, override_decel)`.
 - **AI (singleplayer) speed is used as-is from the buffer.** Do not derive/flip sign from displacement or turning vehicles can be misclassified as reversing.
 - **`Vehicle.curvature_from_history()` is the curvature source.** Returns circumscribed-circle curvature from `_position_history`; `None` when < 3 samples (caller falls back to yaw-rate); `0.0` when near-stationary. Both TMP and AI vehicles populate `_position_history` in `update_from_last()`.
 - **Consumer threads must not open the traffic shared-memory buffer.** Read vehicles from `registry.get_thread("radar_thread").data.vehicles` under the data lock. Mutating Vehicle instances from consumer threads corrupts the per-id smoothing state carried forward by the reader.
 
 ---
 
-*Source: `core/radar/traffic.py`, `core/radar/reader.py`, `core/radar/thread.py`, `core/radar/ego_path.py` — LD-Tech / MonoCruise.*
+*Source: `core/radar/traffic.py`, `core/radar/reader.py`, `core/radar/thread.py`, `core/radar/ego_path.py`: LD-Tech / MonoCruise.*
+

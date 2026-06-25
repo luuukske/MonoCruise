@@ -1,7 +1,7 @@
-"""
-AEB Thread — Automatic Emergency Braking with arc-based collision detection.
+﻿"""
+AEB Thread: Automatic Emergency Braking with arc-based collision detection.
 
-TTB-based detection — see ``core/aeb/AGENTS.md`` §9 for full logic description.
+TTB-based detection: see ``core/aeb/AGENTS.md`` §9 for full logic description.
 
 Registry name: ``aeb_thread``
 """
@@ -60,7 +60,7 @@ _FULL_BRAKE_DECEL_FALLBACK: float = 7.8
 _AEB_EGO_DECEL_FRAC: float = 0.9
 _MAX_RANGE: float = 200.0
 _MAX_RANGE_SQ: float = _MAX_RANGE ** 2
-# TMP-only: |v_ego − v_target| (km/h) vs latched ref ego speed — see _latched_filter_ego_kmh.
+# TMP-only: |v_ego − v_target| (km/h) vs latched ref ego speed: see _latched_filter_ego_kmh.
 _TMP_FILTER_EGO_SPLIT_KMH: float = 40.0
 _TMP_FILTER_REL_ABOVE_SPLIT_KMH: float = 15.0
 _TMP_FILTER_REL_AT_OR_BELOW_SPLIT_KMH: float = 40.0
@@ -91,13 +91,13 @@ _CROSS_SAFE_ZONE_SPEED: float = 0.3
 
 _EVASION_G_THRESHOLD: float = 0.08 * 9.81
 _LATERAL_LANE_SEPARATION: float = 3.9
-# fwd_dot threshold for lateral-gap activation — deliberately looser than the
+# fwd_dot threshold for lateral-gap activation: deliberately looser than the
 # head_on threshold (-0.7) to catch oncoming vehicles that never reach -0.7
 # during a shared turn.  Does NOT affect target decel model, evasion filter
-# bypass, or risk confirm duration — those all still use head_on (-0.7).
+# bypass, or risk confirm duration: those all still use head_on (-0.7).
 _NEAR_HEAD_ON_DOT: float = -0.5
 # Minimum target curvature (1/m) to apply the turning-diverge suppression.
-# 0.03 ≈ 33 m radius — tight enough to be a real corner, loose enough to
+# 0.03 ≈ 33 m radius: tight enough to be a real corner, loose enough to
 # exclude gentle curves that could still converge on ego.
 _TURNING_DIVERGE_CURVATURE: float = 0.007
 _EVASION_G_THRESHOLD_ONCOMING: float = 0.13 * 9.81
@@ -110,32 +110,32 @@ _OPPOSITE_LANE_OFFSET: float = 2.0
 _OPPOSITE_LANE_KAPPA_SCALE: float = 2.0
 # For head-on vehicles sharing the same curved road (same-sign curvature), ego's
 # heading axis cuts across the road and compresses the cross-product lateral offset
-# measurement — a vehicle genuinely a full lane away may read as <2.0 m. Use a
+# measurement: a vehicle genuinely a full lane away may read as <2.0 m. Use a
 # lower threshold when same-curve geometry is confirmed by v_curvature sign + magnitude.
 _SAME_CURVE_OWN_LANE_LAT: float = 1.0
 _CO_DIR_DIVERGE_LOOKAHEAD_S: float = 0.25
-# Fix C — extended lookahead for co-directional same-turn outer-lane suppression.
+# Fix C: extended lookahead for co-directional same-turn outer-lane suppression.
 # Inner/outer lane arcs overlap before their centerlines cross; 0.25 s is too short
 # to see the divergence. At horizon × this scale the paths have clearly separated.
 _CO_SAME_TURN_LOOKAHEAD_SCALE: float = 0.5
-# Sweep-pass suppression — stationary cross-traffic ego turns through.
+# Sweep-pass suppression: stationary cross-traffic ego turns through.
 _SWEEP_PASS_MAX_TARGET_SPEED: float = 1.0    # m/s
 
 # Intersection / shared-turn false-positive suppression
-# Fix A — Ghost-arc scaling for near-head-on vehicles clearly in their own lane.
+# Fix A: Ghost-arc scaling for near-head-on vehicles clearly in their own lane.
 # cross_zone_padding peaks at sin(angle)≈0.8, producing ±4 m ghost arcs at 10 m/s,
 # which phantom-widen the target corridor and prevent the ego evasion filter from
 # clearing. Only fires when target is laterally displaced into its own lane.
 _NEAR_HEAD_ON_CROSS_SCALE: float = 0.3       # ghost-arc reduction factor
-_NEAR_HEAD_ON_LATERAL_MIN: float = 3.0       # m — minimum lateral offset to activate Fix A
+_NEAR_HEAD_ON_LATERAL_MIN: float = 3.0       # m: minimum lateral offset to activate Fix A
 
-# Fix B — Road-following curvature expansion for oncoming vehicles in shared turns.
+# Fix B: Road-following curvature expansion for oncoming vehicles in shared turns.
 # Expands delta_kappa_t so the oncoming evasion filter tests whether "target follows
-# the same corner road as ego" — not just a tiny ±0.006 1/m perturbation.
+# the same corner road as ego": not just a tiny ±0.006 1/m perturbation.
 # Still evaluated via arc_arc_collision; not a blind suppression.
 _SHARED_TURN_MAX_KAPPA: float = 0.05         # cap on road-following curvature (R ≥ 20 m)
 
-# Fix D — target arc over-rotation suppression.
+# Fix D: target arc over-rotation suppression.
 # A vehicle turning from a side road into the opposite lane maintains high curvature;
 # the constant-curvature arc keeps rotating past lane alignment into ego's lane.
 # Dampen target curvature when heading rotation over the arc horizon would exceed
@@ -187,7 +187,7 @@ def _swap_trailer_kinematics(vehicles: list[Vehicle]) -> list[Vehicle]:
     own speed slot is empty.
 
     Trailers reported as standalone radar vehicles often have unreliable speed
-    (the slot has no engine telemetry — common for TMP partners and for convoy
+    (the slot has no engine telemetry: common for TMP partners and for convoy
     players who route through the AI traffic slot). AEB collision math then
     treats them as stationary obstacles directly ahead and false-triggers.
     Keep the trailer's pose (its own arc geometry is correct) but inherit
@@ -209,7 +209,7 @@ def _swap_trailer_kinematics(vehicles: list[Vehicle]) -> list[Vehicle]:
 
 
 def _tmp_collision_threat(ref_ego_kmh: float, rel_speed_kmh: float) -> bool:
-    """TMP session only — True if target should participate in arc collision / TTB."""
+    """TMP session only: True if target should participate in arc collision / TTB."""
     if ref_ego_kmh > _TMP_FILTER_EGO_SPLIT_KMH:
         return rel_speed_kmh > _TMP_FILTER_REL_ABOVE_SPLIT_KMH
     return rel_speed_kmh > _TMP_FILTER_REL_AT_OR_BELOW_SPLIT_KMH
@@ -362,7 +362,7 @@ def _dampen_turning_curvature(
     # Rotating toward anti-parallel: cross and curvature have opposite signs.
     cross = veh_fwd_x * (-ego_fwd_z) - veh_fwd_z * (-ego_fwd_x)
     if cross * v_curvature >= 0.0:
-        return v_curvature  # rotating away — genuine cross-arc threat
+        return v_curvature  # rotating away: genuine cross-arc threat
     return v_curvature / cal.turn_complete_curvature_scale
 
 
@@ -392,7 +392,7 @@ def _build_vehicle_collision_data(
     fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
     head_on = fwd_dot < cal.near_head_on_dot
     target_override_decel = cal.full_brake_decel if head_on else 0.0
-    # Fix D — dampen curvature when constant-curvature arc would over-rotate past
+    # Fix D: dampen curvature when constant-curvature arc would over-rotate past
     # anti-parallel lane alignment. v_curvature is preserved unchanged for same_curve
     # checks; arc_curvature is used only for arc building.
     arc_curvature = _dampen_turning_curvature(
@@ -473,7 +473,7 @@ class _AEBSoundHandler:
         self._replays_remaining = 0
 
         if not _PYGAME_AVAILABLE:
-            logger.warning("pygame not available — AEB sound disabled")
+            logger.warning("pygame not available: AEB sound disabled")
             return
 
         try:
@@ -483,7 +483,7 @@ class _AEBSoundHandler:
             self._sound = pygame.mixer.Sound(sound_file_path)
             self._sound.set_volume(0.8)
         except Exception as exc:
-            logger.warning("AEB sound init failed (%s) — sound disabled", exc)
+            logger.warning("AEB sound init failed (%s): sound disabled", exc)
             self._sound = None
 
     def start_warning(self) -> None:
@@ -521,7 +521,7 @@ class _AEBSoundHandler:
                 self._state = _SoundState.SHUTTING_DOWN
                 self._replays_remaining = self._stop_extra_replays
                 logger.debug(
-                    "AEB sound: stop requested — %d extra replay(s) then finishing",
+                    "AEB sound: stop requested: %d extra replay(s) then finishing",
                     self._replays_remaining,
                 )
 
@@ -542,7 +542,7 @@ class _AEBSoundHandler:
                         self._replays_remaining -= 1
                         last_channel = self._sound.play()
                     else:
-                        logger.debug("AEB sound: extra replays done — letting current sound finish")
+                        logger.debug("AEB sound: extra replays done: letting current sound finish")
                         break
 
         if last_channel:
@@ -592,7 +592,7 @@ class AEBThread(BaseThread):
         # frames so a TMP target that drops below the rel-speed pre-filter
         # (because ego is now matching its speed) keeps flowing through the
         # pipeline, and so engagement holds until the gap has actually
-        # re-opened — not just until v_closing^2 collapses to zero.
+        # re-opened: not just until v_closing^2 collapses to zero.
         self._latched_threat_ids: set[int] = set()
 
     def _read_user_braking(self) -> bool:
@@ -608,7 +608,7 @@ class AEBThread(BaseThread):
     def _read_acc_lead_id(self) -> int | None:
         """Return the current ACC primary lead vehicle id, or None.
 
-        Visualizer-only consumer — never raises so a missing/dead ACC
+        Visualizer-only consumer: never raises so a missing/dead ACC
         thread cannot impact AEB safety logic.
         """
         try:
@@ -695,7 +695,7 @@ class AEBThread(BaseThread):
 
         now_mono = time.monotonic()
 
-        # Yaw-rate proxy — see AGENTS.md §1. Do NOT use RadarData.ego_curvature.
+        # Yaw-rate proxy: see AGENTS.md §1. Do NOT use RadarData.ego_curvature.
         if ego_speed > 0.5:
             yaw_rate_rad_s = math.radians(steer * ego_speed * cal.yaw_rate_steer_gain)
             ego_curvature = yaw_rate_rad_s / ego_speed
@@ -999,7 +999,7 @@ class AEBThread(BaseThread):
                     vehicle_dicts.append(veh_dict)
                     break
             else:
-                # No stage suppressed — evaluate collision
+                # No stage suppressed: evaluate collision
                 if not all_target_arcs:
                     vehicle_dicts.append(veh_dict)
                     continue
@@ -1058,7 +1058,7 @@ class AEBThread(BaseThread):
                     # relative velocity in world frame, not the axial projection
                     # onto ego's heading. The vector form correctly captures
                     # rear-end scenarios where a faster trailing target's
-                    # closing rate INCREASES as ego brakes — the axial form
+                    # closing rate INCREASES as ego brakes: the axial form
                     # clamps to zero and misses this entirely. Subsumes the
                     # legacy RearOvertakerFilter under one principled mechanism.
                     v_ego_x = ego_speed * ego_fwd_x
@@ -1072,7 +1072,7 @@ class AEBThread(BaseThread):
                     if braked_hit is not None:
                         # Target moving faster than ego along ego's heading
                         # axis means braking can only increase relative impact
-                        # speed — handles imminent rear-ends where t_braked is
+                        # speed: handles imminent rear-ends where t_braked is
                         # too small for the hysteresis comparison to fire.
                         if v_target_along_ego > ego_speed:
                             braking_worsens = True
@@ -1192,7 +1192,7 @@ class AEBThread(BaseThread):
                     and not latched_distance_threat):
                 self._engaged = False
         else:
-            # New engagements are gated by |ego_speed| — below the threshold
+            # New engagements are gated by |ego_speed|: below the threshold
             # the truck is essentially crawling, the user has authority
             ego_kmh_abs = abs(ego_speed) * 3.6
             if (run_collision
@@ -1373,7 +1373,7 @@ class AEBThread(BaseThread):
                bool, float | None, bool, bool] | None:
         """Read the radar thread's published snapshot under its data lock.
 
-        Returns ``None`` when the radar thread is missing / not alive — AEB
+        Returns ``None`` when the radar thread is missing / not alive: AEB
         then skips the loop rather than fabricating an ego pose.
         """
         try:
@@ -1401,3 +1401,4 @@ class AEBThread(BaseThread):
                 )
         except AttributeError:
             return None
+

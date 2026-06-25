@@ -1,4 +1,4 @@
-"""
+﻿"""
 MonoCruise – Settings panel (left‑side drawer).
 
 All five sections:  Inputs · Program Settings · Cruise Control ·
@@ -86,7 +86,7 @@ class SettingsPanel(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Card — single rounded container for title + scroll + bar
+        # Card: single rounded container for title + scroll + bar
         card = QWidget()
         card.setObjectName("settingsCard")
         card.setStyleSheet(
@@ -108,7 +108,7 @@ class SettingsPanel(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # No separate border/radius — the card is the visual container
+        # No separate border/radius: the card is the visual container
         scroll.setStyleSheet(
             "QScrollArea { border: none; border-radius: 0px; background-color: transparent; }"
         )

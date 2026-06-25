@@ -1,4 +1,4 @@
-"""Named AEB filter pipeline — one class per suppression stage."""
+﻿"""Named AEB filter pipeline: one class per suppression stage."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from core.aeb.lane_frame import Lane, project_to_ego_arc, classify
 
 
 class OneEuroFilter:
-    """Speed-adaptive low-pass — Casiez et al., "1€ Filter", CHI 2012.
+    """Speed-adaptive low-pass: Casiez et al., "1€ Filter", CHI 2012.
 
     Cutoff frequency rises with |dx/dt|: heavy smoothing when the signal is
     quiet, near-passthrough when it changes fast.  Tradeoff knobs are
@@ -111,14 +111,14 @@ def _vehicle_curvature_blend(
 ) -> float:
     """Blend short position-fit and yaw-rate signals for a target vehicle's path.
 
-    AEB-local two-source path prediction — smooth (position fit on the last
+    AEB-local two-source path prediction: smooth (position fit on the last
     ``cal.aeb_pos_history_len`` history samples) blended with responsive
     (single-frame yaw rate from ``angular_velocity``).  Either side fills in
     when the other is unavailable.
 
     When ``blender`` is supplied, the blended value is fed through a
     per-vehicle One-Euro filter (see :class:`VehicleCurvatureBlender`).  The
-    raw blend is returned when ``blender`` is ``None`` — used by test paths
+    raw blend is returned when ``blender`` is ``None``: used by test paths
     that don't carry filter state across frames.
     """
     pos_hist = list(v._position_history)[-cal.aeb_pos_history_len:]
@@ -438,7 +438,7 @@ class LaneClassifier:
         # Geometry fields (v_yaw_rad, veh_fwd_x/z, abs_v_speed, v_curvature)
         # are populated upstream by _build_vehicle_collision_data so the
         # per-vehicle One-Euro blender steps exactly once per frame.  Do not
-        # recompute curvature here — that would double-step the filter.
+        # recompute curvature here: that would double-step the filter.
         ctx.fwd_dot = ctx.ego_fwd_x * ctx.veh_fwd_x + ctx.ego_fwd_z * ctx.veh_fwd_z
         ctx.head_on = ctx.fwd_dot < cal.head_on_dot
         ctx.near_head_on = ctx.fwd_dot < cal.near_head_on_dot
@@ -683,14 +683,14 @@ class TmpCrossTrafficFilter:
 
     A TMP vehicle whose extrapolated arc lands laterally outside ego's lane
     (OPPOSITE_OR_OUTER or OFF_ROAD) is mid-maneuver and will be clear of
-    ego's path by the time ego arrives. Genuine threats — head-on or
-    co-directional targets continuing into ego's lane — keep their projected
+    ego's path by the time ego arrives. Genuine threats: head-on or
+    co-directional targets continuing into ego's lane: keep their projected
     arc inside Lane.EGO and pass through this filter to the standard
     pipeline. Co-directional in-lane vehicles are skipped here so that
     legitimate same-lane following / overtake handling stays with the
     dedicated stages.
 
-    Non-TMP targets bypass entirely — AI vehicles follow deterministic
+    Non-TMP targets bypass entirely: AI vehicles follow deterministic
     traffic rules, so their snapshot-projected arc is reliable.
     """
     name = "TmpCrossTrafficFilter"
@@ -731,7 +731,7 @@ class TmpCrossTrafficFilter:
             end_x, end_z = sweep_arc.position_at_time(sweep_arc.horizon)
             _, end_d_abs = project_to_ego_arc(ctx.ego_arc, end_x, end_z)
             if classify(end_d_abs, cal) == Lane.EGO:
-                # Arc ends inside ego's lane — real threat, do not suppress.
+                # Arc ends inside ego's lane: real threat, do not suppress.
                 return _PASS
         if any_hit:
             return _suppress("TmpCrossTrafficFilter")
@@ -830,7 +830,7 @@ class CornerEntryStationaryFilterMirrored:
     straight-line path.
 
     Mode A (target out-of-lane via arc-projected classification) only. Mode B
-    in-lane chord-offset geometry doesn't mirror cleanly — when ego is the
+    in-lane chord-offset geometry doesn't mirror cleanly: when ego is the
     one on the curve, the target's lateral offset in ego frame collapses
     toward zero and the ``|lat_signed| >= corner_entry_min_lateral`` precondition
     cannot be satisfied.
@@ -925,3 +925,4 @@ def build_pipeline(cal: AEBCalibration) -> list:
         CornerEntryStationaryFilterMirrored(cal),
         EgoEvasionFilter(cal),
     ]
+

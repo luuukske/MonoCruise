@@ -1,4 +1,4 @@
-"""TP: wrong-way driver directly in ego lane (x≈0), head-on at 80 km/h each.
+﻿"""TP: wrong-way driver directly in ego lane (x≈0), head-on at 80 km/h each.
 
 OppositeLaneFilter must NOT suppress because the vehicle is in ego's lane (EGO).
 EXPECTED: BRAKE.
@@ -24,7 +24,7 @@ def build() -> list[Frame]:
         ego = EgoState(x=0.0, y=0.0, z=0.0, yaw_norm=0.5, speed=_EGO_SPEED)
         target = make_vehicle(
             vid=1,
-            x=0.0,  # directly in ego lane — zero lateral offset
+            x=0.0,  # directly in ego lane: zero lateral offset
             z=distance,
             yaw_deg=0.0,  # south-facing = head-on
             speed=_TARGET_SPEED,
@@ -33,3 +33,4 @@ def build() -> list[Frame]:
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
     return frames
+

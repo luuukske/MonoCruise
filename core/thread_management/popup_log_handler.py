@@ -1,5 +1,5 @@
-"""
-popup_log_handler.py — logging.Handler that routes ERROR+ records to PopupWindow.
+﻿"""
+popup_log_handler.py: logging.Handler that routes ERROR+ records to PopupWindow.
 """
 
 from __future__ import annotations
@@ -116,3 +116,4 @@ class PopupLogHandler(logging.Handler):
             )
         except Exception:
             self.handleError(record)
+

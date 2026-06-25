@@ -1,5 +1,5 @@
-"""
-Watchdog — monitors heartbeats and optionally restarts dead threads.
+﻿"""
+Watchdog: monitors heartbeats and optionally restarts dead threads.
 
 Detection:
   • thread.running is False  → crashed (acted on immediately)
@@ -183,7 +183,7 @@ class Watchdog(BaseThread):
         factory = self._factories.get(dead.name)
         if factory is None:
             logger.critical(
-                "thread '%s' cannot be restarted: no factory registered — this is a MAJOR bug.",
+                "thread '%s' cannot be restarted: no factory registered: this is a MAJOR bug.",
                 dead.name,
             )
             logger.critical(
@@ -237,3 +237,4 @@ class Watchdog(BaseThread):
         registry.replace(new_thread)
         new_thread.start()
         self._frozen_streaks.pop(dead.name, None)
+

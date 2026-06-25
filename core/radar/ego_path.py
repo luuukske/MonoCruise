@@ -1,5 +1,5 @@
-"""
-Shared ego path helpers — curvature from position history.
+﻿"""
+Shared ego path helpers: curvature from position history.
 
 Used by RadarThread to publish a geometry-based ego curvature alongside ego
 state. Mirrors ``Vehicle._compute_curvature`` in ``traffic.py`` so ego and
@@ -7,9 +7,9 @@ target curvatures are derived from the same circumscribed-circle math over
 equivalent-length position histories (``_POSITION_HISTORY_LEN``).
 
 Callers:
-    - AEB — uses ``ego_curvature_from_history(...)`` in place of the yaw-rate
+    - AEB: uses ``ego_curvature_from_history(...)`` in place of the yaw-rate
       proxy ``steer * speed * 12.0 / speed`` when a valid fit is available.
-    - ACC — same curvature feeds the path-arc scoring so in-path target
+    - ACC: same curvature feeds the path-arc scoring so in-path target
       selection matches AEB's predicted corridor.
 """
 
@@ -79,3 +79,4 @@ def ego_curvature_from_history(
     if count == 0:
         return None
     return total_k / count
+

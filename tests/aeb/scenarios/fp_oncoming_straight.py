@@ -1,6 +1,6 @@
-"""FP: oncoming vehicle in opposite lane, straight road.
+﻿"""FP: oncoming vehicle in opposite lane, straight road.
 
-Vehicle at x=2.5m — in OPPOSITE_OR_OUTER lane (d_abs=2.5 > lane_half_width=1.95).
+Vehicle at x=2.5m: in OPPOSITE_OR_OUTER lane (d_abs=2.5 > lane_half_width=1.95).
 Arc corridors overlap geometrically (2.5 < ego_hw+target_hw+margin=2.9m), so AEB
 would trigger without OppositeLaneFilter. With it, the oncoming evasion logic
 (Fix B) lets the vehicle follow the road and clear ego's arc.
@@ -30,7 +30,7 @@ def build() -> list[Frame]:
             break
         ego = EgoState(x=0.0, y=0.0, z=0.0, yaw_norm=0.5, speed=_EGO_SPEED)
         # x=2.5m → d_abs=2.5 > 1.95 → OPPOSITE_OR_OUTER lane.
-        # Arc corridor overlap since 2.5 < 1.15+1.25+0.5=2.9 — geometrically collides.
+        # Arc corridor overlap since 2.5 < 1.15+1.25+0.5=2.9: geometrically collides.
         target = make_vehicle(
             vid=1,
             x=2.5,
@@ -42,3 +42,4 @@ def build() -> list[Frame]:
         )
         frames.append(Frame(ego=ego, vehicles=[target], t=t))
     return frames
+

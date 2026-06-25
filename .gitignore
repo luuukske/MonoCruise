@@ -27,6 +27,9 @@ config.json*
 .DS_Store
 live_accel_pedals_viz_30s.bat
 
+# personal documentation for MonoCruise
+docs/
+
 # PyInstaller / Inno Setup build outputs
 build/
 dist/

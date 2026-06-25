@@ -1,4 +1,4 @@
-# `accel_to_pedals.py` — Architecture Rework Plan
+﻿# `accel_to_pedals.py`: Architecture Rework Plan
 
 ## Goal
 
@@ -16,7 +16,7 @@ no oscillation, and no integral state blowup across transitions.
 - Gas and brake are controlled by two completely separate controllers with their own
   integrals. Switching between them requires freezing/decaying state on both sides,
   which causes suppression artifacts (throttle delayed after brake release, etc.).
-- The gas integral is frozen during braking and resumes stale — this suppresses
+- The gas integral is frozen during braking and resumes stale: this suppresses
   throttle for seconds after brake release.
 - The brake trim integral decays when not braking, so it has to re-learn every
   braking event.
@@ -24,7 +24,7 @@ no oscillation, and no integral state blowup across transitions.
   perfectly accurate. Neither controller has a clean way to absorb the persistent
   bias from this inaccuracy.
 - The brake multiplier EMA (slow curve scaling) was trying to solve the same problem
-  as `pedal_capacity.py` — it is now redundant and should be removed.
+  as `pedal_capacity.py`: it is now redundant and should be removed.
 
 ---
 
@@ -99,8 +99,8 @@ there is a sustained tracking error.
 
 Suggested starting constants:
 ```python
-KI_SLOW          = 0.03   # m/s² per (m/s²·s) — tune up if too slow to learn
-SLOW_I_CLAMP_MS2 = 2.0    # ±2 m/s² — covers realistic road load errors
+KI_SLOW          = 0.03   # m/s² per (m/s²·s): tune up if too slow to learn
+SLOW_I_CLAMP_MS2 = 2.0    # ±2 m/s²: covers realistic road load errors
 ```
 
 ---
@@ -114,10 +114,10 @@ to achieve the wanted acceleration purely from known physics + learned capacity.
 combined = wanted_smooth + effective_road_load
 
 if combined >= 0.0:
-    # Gas side — linear
+    # Gas side: linear
     ff = combined / max(max_accel_ms2, 0.1)
 else:
-    # Brake side — inverse of fitted curve (existing _brake_pedal_from_decel)
+    # Brake side: inverse of fitted curve (existing _brake_pedal_from_decel)
     decel_needed = -combined   # positive
     ff = -_brake_pedal_from_decel(decel_needed)
 ```
@@ -125,14 +125,14 @@ else:
 `_brake_pedal_from_decel` is **unchanged** from the current implementation. The brake
 curve constants `_BRAKE_CURVE_RATE` and `_BRAKE_CURVE_POWER` are unchanged.
 
-The conditional here is pure math, not a persistent mode — it has no state.
+The conditional here is pure math, not a persistent mode: it has no state.
 
 ---
 
 ### 5. Fast PID
 
 Handles transient tracking error on top of the feedforward. Small integral clamp
-means it cannot wind up — it is a trim, not the primary controller.
+means it cannot wind up: it is a trim, not the primary controller.
 
 Derivative is on **measurement only** (not on the error setpoint), to avoid spikes
 when `wanted_smooth` steps.
@@ -143,7 +143,7 @@ error_ms2 = wanted_smooth - raw_smooth
 # Proportional
 fast_p = KP_FAST * error_ms2
 
-# Integral (small clamp — trim only)
+# Integral (small clamp: trim only)
 fast_integral += KI_FAST * error_ms2 * dt
 fast_integral  = clamp(fast_integral, -FAST_I_CLAMP, FAST_I_CLAMP)
 
@@ -166,7 +166,7 @@ Suggested starting constants:
 KP_FAST        = 0.25
 KI_FAST        = 0.25
 KD_FAST        = 0.15
-FAST_I_CLAMP   = 0.10   # pedal units — intentionally small
+FAST_I_CLAMP   = 0.10   # pedal units: intentionally small
 FAST_OUT_CLAMP = 0.30   # total fast PID contribution cap
 ```
 
@@ -218,12 +218,12 @@ RAMP_DURATION_S    = 1.0
 clutch_pressed = clutch_applied > CLUTCH_THRESHOLD
 
 if clutch_pressed and not _clutch_active:
-    # Leading edge — start freeze
+    # Leading edge: start freeze
     _clutch_active     = True
     _frozen_raw_smooth = raw_smooth  # snapshot current value
 
 elif not clutch_pressed and _clutch_active:
-    # Trailing edge — start block countdown
+    # Trailing edge: start block countdown
     _clutch_active       = False
     _clutch_release_mono = now
 
@@ -247,8 +247,8 @@ When `gearshift_factor < 1.0`:
 
 - **Skip the `raw_smooth` EMA update** entirely. Use `_frozen_raw_smooth` as the
   effective `raw_smooth` for all error computations.
-- **Freeze `fast_integral`** — do not accumulate during the block.
-- **Freeze `slow_integral`** — do not accumulate during the block.
+- **Freeze `fast_integral`**: do not accumulate during the block.
+- **Freeze `slow_integral`**: do not accumulate during the block.
 - During the ramp: interpolate between `_frozen_raw_smooth` and the live EMA value
   using `gearshift_factor` as the blend weight.
 
@@ -259,14 +259,14 @@ or derivative state.
 
 ## What to remove
 
-The following are deleted entirely — no replacement needed:
+The following are deleted entirely: no replacement needed:
 
 | Removed | Reason |
 |---|---|
 | `_brake_multiplier`, `_BRAKE_MULTIPLIER_*`, `_update_brake_multiplier()` | Replaced by `pedal_capacity.py` |
 | `_BRAKE_LEAD_TAU_S`, `_BRAKE_LEAD_DERIV_SMOOTH_TAU_S` | Dropped (causes more problems than it solves) |
 | `_wanted_deriv_smooth`, `_prev_wanted_smooth` | Only used for brake lead |
-| `_BRAKE_ACTIVATION_MS2` | No longer a threshold — effort sign drives brake |
+| `_BRAKE_ACTIVATION_MS2` | No longer a threshold: effort sign drives brake |
 | `_BRAKE_TRIM_DECAY_TAU_S`, `_BRAKE_KP_TRIM`, `_BRAKE_KI_TRIM`, `_BRAKE_KI_TRIM_CLAMP` | Separate brake trim PI removed |
 | `_brake_step()` | Replaced by unified controller |
 | `_gas_step()` | Replaced by unified fast PID |
@@ -283,9 +283,9 @@ The following are deleted entirely — no replacement needed:
 
 | Kept | Notes |
 |---|---|
-| `_brake_pedal_from_decel()` | Brake curve inverse — unchanged |
-| `_BRAKE_CURVE_RATE`, `_BRAKE_CURVE_POWER` | Fitted constants — do not change |
-| `_road_load_accel_ms2()`, `_road_grade_from_norm()` | Road physics — unchanged |
+| `_brake_pedal_from_decel()` | Brake curve inverse: unchanged |
+| `_BRAKE_CURVE_RATE`, `_BRAKE_CURVE_POWER` | Fitted constants: do not change |
+| `_road_load_accel_ms2()`, `_road_grade_from_norm()` | Road physics: unchanged |
 | `_ema_step()`, `_ema_alpha()`, `_motion_sign()` | Utility helpers |
 | `baseline_accel_ms2()`, `baseline_brake_ms2()` | Capacity baseline helpers |
 | `_WANTED_SMOOTHING_TAU_S`, `_RAW_SMOOTHING_TAU_S` | Input smoothing unchanged |
@@ -329,4 +329,5 @@ _frozen_raw_smooth:    float = 0.0
    - Combine → effort → gas/brake.
 5. Remove all deleted methods and constants.
 6. Update debug log fields to match new internals.
-7. Tune constants on a test drive — start with the suggested values above.
+7. Tune constants on a test drive: start with the suggested values above.
+

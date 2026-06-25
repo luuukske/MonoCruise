@@ -1,4 +1,4 @@
-"""Plot coast-down raw decel vs speed. Ignores slope (noisy on hilly roads).
+﻿"""Plot coast-down raw decel vs speed. Ignores slope (noisy on hilly roads).
 
 Expects coast_debug.csv in project root.
 Output: coast_plot.png next to the CSV.
@@ -73,7 +73,7 @@ def main() -> None:
 
     ax.set_xlabel("speed (m/s)")
     ax.set_ylabel("deceleration (m/s²)  [positive = slowing down]")
-    ax.set_title("Coast-down decel vs speed  (slope ignored — hilly road)")
+    ax.set_title("Coast-down decel vs speed  (slope ignored: hilly road)")
     ax.axhline(0.0, color="gray", lw=0.5)
     ax.grid(alpha=0.3)
     ax.legend(loc="best")
@@ -85,3 +85,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

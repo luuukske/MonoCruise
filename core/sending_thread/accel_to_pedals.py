@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import csv
 import logging
@@ -31,7 +31,7 @@ _RAW_SMOOTHING_TAU_S: float = 0.10
 _OUTPUT_SMOOTHING_TAU_S: float = 0.08
 _OUTPUT_SMOOTHING_DELTA_REF_MS2: float = 1.0
 
-# Fast PID (unified trim, m/s² space) — injected into `combined` upstream of the FF
+# Fast PID (unified trim, m/s² space): injected into `combined` upstream of the FF
 # mapping. Capacities are pedal-output scalers (FF), not trims: they map combined
 # m/s² → pedal via `combined / max_accel` (gas) or the inverse brake curve.
 # Routing the fast trim through the same FF eliminates the zero-crossing
@@ -69,7 +69,7 @@ _STATIONARY_SLOW_I_GATE_SPEED_MS: float = 0.5
 # linger and fight the eventual launch.
 _HOLD_SLOW_I_LEAK_TAU_S: float = 10.0
 
-# Brake feedforward curve constants — fitted from collected data
+# Brake feedforward curve constants: fitted from collected data
 # DO NOT CHANGE WITHOUT VALID COLLECTED DATA
 # y = A * (1 - e^(-rate * x^power))
 # where x = brake pedal [0,1], y = |decel| in m/s².
@@ -84,7 +84,7 @@ _ROAD_LOAD_SPEED_EPSILON_MS: float = 0.2
 _MAX_ROAD_GRADE_RAD: float = 0.35  # clamp pathological game values
 # Aerodynamic drag coefficient fitted from coast-down data.
 # decel_aero = _AERO_DRAG_ACCEL_PER_V2 * v^2  [m/s² per (m/s)²]
-# Fit on ~41 t truck gave ~4.9e-5. Close enough for any mass — slow integral
+# Fit on ~41 t truck gave ~4.9e-5. Close enough for any mass: slow integral
 # absorbs mass-driven residual.
 _AERO_DRAG_ACCEL_PER_V2: float = 4.9e-5
 
@@ -201,11 +201,11 @@ def compute_estimated_mass_kg(
 
 
 def idle_creep_brake(speed_ms: float, gear_dashboard: int) -> float:
-    """Light brake at very low speed to cancel idle creep. Disabled — to be replaced."""
+    """Light brake at very low speed to cancel idle creep. Disabled: to be replaced."""
     return 0.0
 
 
-# Pedal state labels (for debug logging / telemetry only — derived from effort sign)
+# Pedal state labels (for debug logging / telemetry only: derived from effort sign)
 _STATE_GAS: int = 1
 _STATE_BRAKE: int = 2
 _STATE_NAMES: dict[int, str] = {_STATE_GAS: "GAS", _STATE_BRAKE: "BRAKE"}
@@ -218,7 +218,7 @@ class MapperSharedState:
     Allows two mappers (e.g. a cruise-side and a limiter-side) to hand over
     pedal control without losing learned bias, capacity, or output continuity.
     Bookkeeping (raw_smooth, road_load_smooth, capacity, gearshift) is
-    physics/truck-level — always advanced. Learning (slow_integral,
+    physics/truck-level: always advanced. Learning (slow_integral,
     output_smooth_ms2, prev_gas_cmd) is gated on the caller's `learn` flag.
     """
     # Time
@@ -237,10 +237,10 @@ class MapperSharedState:
     # approaches the set speed conservatively; corrects quickly once active.
     slow_integral: float = _SLOW_I_INIT_BIAS_MS2
 
-    # Output m/s² EMA — continuity across handover.
+    # Output m/s² EMA: continuity across handover.
     output_smooth_ms2: float | None = None
 
-    # Gas rate-limit memory — continuity across handover.
+    # Gas rate-limit memory: continuity across handover.
     prev_gas_cmd: float | None = None
 
     # Capacity estimates (single source of truth, fed in from PedalCapacityTracker).
@@ -269,7 +269,7 @@ class PedalTargets:
     integral_correction: float = 0.0
     estimated_max_accel_ms2: float = 0.0
     estimated_max_brake_ms2: float = 0.0
-    # Diagnostics — field names preserved for external consumers.
+    # Diagnostics: field names preserved for external consumers.
     # Semantic mapping to unified controller:
     #   gas_p/gas_i/gas_d → fast PID terms (used for gas OR brake, unified)
     #   brake_ff          → brake-side feedforward pedal magnitude (0 when effort>=0)
@@ -289,7 +289,7 @@ class PedalTargets:
 
 class AccelToPedals:
     def __init__(self, shared: MapperSharedState | None = None) -> None:
-        # Shared state — owned externally when multiple mappers must share
+        # Shared state: owned externally when multiple mappers must share
         # learned bias/capacity/output continuity. When None, this instance
         # owns its own (single-mapper case, behavior unchanged).
         self._shared: MapperSharedState = shared if shared is not None else MapperSharedState()
@@ -400,7 +400,7 @@ class AccelToPedals:
     def _measured_control_accel_ms2(raw_accel_ms2: float, road_load_ms2: float) -> float:
         return raw_accel_ms2 + road_load_ms2
 
-    # Brake feedforward — inverse of the fitted curve
+    # Brake feedforward: inverse of the fitted curve
 
     def _brake_pedal_from_decel(
         self,
@@ -478,7 +478,7 @@ class AccelToPedals:
 
         if learn:
             if clutch_pressed and not s.clutch_active:
-                # Leading edge — freeze: stash raw_smooth so error uses the pre-shift
+                # Leading edge: freeze: stash raw_smooth so error uses the pre-shift
                 # measurement. fast_integral / fast_deriv_smooth are left untouched;
                 # _fast_pid_step gates all updates on factor>0, so they are frozen
                 # implicitly throughout block + ramp. Testing showed resetting them
@@ -502,7 +502,7 @@ class AccelToPedals:
             return t, blended
         return 1.0, raw_smooth_live
 
-    # Unified fast PID — trim on top of feedforward
+    # Unified fast PID: trim on top of feedforward
 
     def _fast_pid_compute(
         self,
@@ -517,7 +517,7 @@ class AccelToPedals:
         kd_scale: float = 1.0,
     ) -> tuple[float, float, float, float, float, float]:
         """Pure compute: returns (fast_trim_ms2, p_ms2, i_ms2, d_ms2,
-        new_fast_integral, new_fast_deriv_smooth) — m/s² space.
+        new_fast_integral, new_fast_deriv_smooth): m/s² space.
 
         Caller decides whether to commit the new integrator/derivative state.
         When factor == 0 (gearshift block) integrators stay frozen at their
@@ -659,7 +659,7 @@ class AccelToPedals:
         except OSError:
             logger.debug("accel_to_pedals debug log write failed", exc_info=True)
 
-    # Main step — called once per frame by sending_thread
+    # Main step: called once per frame by sending_thread
 
     def step(
         self,
@@ -683,7 +683,7 @@ class AccelToPedals:
         """Compute pedal targets for one tick.
 
         When `learn=False`, the function computes its output from current state
-        without committing any state changes — used by non-commanding mappers
+        without committing any state changes: used by non-commanding mappers
         for preview only. The commanding mapper passes `learn=True` (default)
         and is the only one that updates shared bias/capacity/output trajectory
         and per-instance integrators.
@@ -724,7 +724,7 @@ class AccelToPedals:
         raw_alpha = self._ema_alpha(dt, _RAW_SMOOTHING_TAU_S)
         raw_smooth_live = self._ema_step(s.raw_smooth, raw, raw_alpha)
 
-        # Gearshift — edges committed only on learn=True
+        # Gearshift: edges committed only on learn=True
         factor, raw_smooth_eff = self._gearshift_factor(
             now, clutch_applied, raw_smooth_live, learn=learn,
         )
@@ -735,7 +735,7 @@ class AccelToPedals:
         else:
             new_raw_smooth = raw_smooth_eff
 
-        # Road load — adaptive EMA: slow for small bumps, fast for steep hills
+        # Road load: adaptive EMA: slow for small bumps, fast for steep hills
         road_load_raw, grade_unc_rad, grade_rad = self._road_load_accel_ms2(
             speed, wanted, pitch, gear_dash
         )
@@ -765,7 +765,7 @@ class AccelToPedals:
         # form (PedalCapacityTracker multiplies each sample by weight_factor
         # before learning, so the map holds only the gear-ratio shape).
         # Dividing by weight_factor here scales it back to the current truck
-        # mass — a load/unload adapts instantly without the per-gear map
+        # mass: a load/unload adapts instantly without the per-gear map
         # needing to relearn.
         if max_accel_ms2 > 0.0 and math.isfinite(max_accel_ms2):
             new_max_accel = max_accel_ms2 / max(
@@ -790,7 +790,7 @@ class AccelToPedals:
         brake_cmd = 0.0
         effective_road_load = road_load_accel
 
-        # Local copies of stateful quantities — start from current, mutate locally
+        # Local copies of stateful quantities: start from current, mutate locally
         new_slow_integral = s.slow_integral
         new_fast_integral = self._fast_integral
         new_fast_deriv_smooth = self._fast_deriv_smooth
@@ -802,7 +802,7 @@ class AccelToPedals:
             if not math.isfinite(error_ms2):
                 error_ms2 = 0.0
 
-            # Slow integral — m/s² space, frozen during gearshift, no decay.
+            # Slow integral: m/s² space, frozen during gearshift, no decay.
             # Two freeze regimes:
             #   * freeze_slow_i=True (hold FSM owns standstill): freeze both
             #     signs and leak toward 0 with _HOLD_SLOW_I_LEAK_TAU_S so stale
@@ -828,7 +828,7 @@ class AccelToPedals:
             effective_road_load = road_load_accel + new_slow_integral
 
             # Fast trim in m/s² space (frozen during gearshift; also frozen when
-            # an external commander like AEB owns the brake — passing factor=0
+            # an external commander like AEB owns the brake: passing factor=0
             # holds both integrator and derivative state at their last values
             # and zeros the trim output so the two controllers don't fight).
             effective_factor = 0.0 if freeze_trim else factor
@@ -906,24 +906,24 @@ class AccelToPedals:
                 gas_cmd = 0.0
 
         else:
-            # Not commanding — hold all integrals so gearshifts don't cause overshoot
+            # Not commanding: hold all integrals so gearshifts don't cause overshoot
             new_prev_gas_cmd = None
             new_output_smooth_ms2 = None
 
         pedal_state = _STATE_BRAKE if effort < 0.0 else _STATE_GAS
 
         # === Commit gating ===
-        # Per-instance signal smoothing always commits — these are this
+        # Per-instance signal smoothing always commits: these are this
         # controller's view of the world, not "learning". Keeping them
         # current prevents stale-preview output when this mapper isn't the
         # commander (which would make commander handover sticky).
-        # Capacity is sourced externally and idempotent — always commit.
+        # Capacity is sourced externally and idempotent: always commit.
         self._wanted_smooth = new_wanted_smooth
         self._fast_deriv_smooth = new_fast_deriv_smooth
         s.estimated_max_accel_ms2 = new_max_accel
         s.estimated_max_brake_ms2 = new_max_brake
 
-        # Learning + shared physics — only the commanding mapper writes back.
+        # Learning + shared physics: only the commanding mapper writes back.
         # Non-commanding (learn=False) leaves these untouched so its preview
         # doesn't drift the integrators or output trajectory.
         if learn:
@@ -936,7 +936,7 @@ class AccelToPedals:
             s.output_smooth_ms2 = new_output_smooth_ms2
             s.prev_gas_cmd = new_prev_gas_cmd
 
-        # Debug logging — only the commanding mapper logs
+        # Debug logging: only the commanding mapper logs
         if learn and cruise_commanding and math.isfinite(now):
             self._log_debug_step(
                 now=now,
@@ -1000,3 +1000,4 @@ class AccelToPedals:
             gain_scale=gain_scale,
             pedal_state=pedal_state,
         )
+

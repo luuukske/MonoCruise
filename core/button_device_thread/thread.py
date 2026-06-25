@@ -1,5 +1,5 @@
-"""
-Button Device Thread — polls HID button devices for button states.
+﻿"""
+Button Device Thread: polls HID button devices for button states.
 
 Devices are identified by a "vid_pid" string ("{vendor_id:04x}:{product_id:04x}").
 Button IDs encode raw HID report position: button_id = byte_index * 8 + bit_index,
@@ -34,7 +34,7 @@ try:
     _hid = _hid_module
     _hid_available = True
 except Exception:
-    logger.warning("hid library not importable — button device bindings disabled")
+    logger.warning("hid library not importable: button device bindings disabled")
 
 
 _RECONNECT_INTERVAL = 2.0  # seconds between reconnect attempts for a lost device
@@ -53,13 +53,13 @@ def _parse_vid_pid(vid_pid: str) -> tuple[int, int] | None:
 
 @dataclass
 class ButtonDeviceThreadData(ThreadData):
-    # {vid_pid: {button_id: bool}} — updated every loop tick
+    # {vid_pid: {button_id: bool}}: updated every loop tick
     button_states: Dict[str, Dict[int, bool]] = field(default_factory=dict, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
 class ButtonDeviceThread(BaseThread):
-    loop_interval = 0.05  # 20 Hz — non-blocking HID reads
+    loop_interval = 0.05  # 20 Hz: non-blocking HID reads
     max_restarts = 3
 
     def __init__(self) -> None:
@@ -67,7 +67,7 @@ class ButtonDeviceThread(BaseThread):
         self.data = ButtonDeviceThreadData()
         # vid_pid → hid.device | None  (None = not yet connected / lost)
         self._devices: dict[str, object] = {}
-        # vid_pid → last raw HID report (list[int]) — retained between ticks
+        # vid_pid → last raw HID report (list[int]): retained between ticks
         self._last_reports: dict[str, list[int]] = {}
         # vid_pid → human-readable name (for logging/popup)
         self._device_names: dict[str, str] = {}
@@ -78,7 +78,7 @@ class ButtonDeviceThread(BaseThread):
 
     def setup(self) -> None:
         if not _hid_available:
-            logger.warning("hid library unavailable — button device bindings will not work")
+            logger.warning("hid library unavailable: button device bindings will not work")
             return
         self._connect_tracked_devices()
         logger.debug("button_device_thread setup complete")
@@ -201,3 +201,4 @@ class ButtonDeviceThread(BaseThread):
             self._devices[vid_pid] = None
             logger.debug("button device %s not available", vid_pid, exc_info=True)
             return False
+

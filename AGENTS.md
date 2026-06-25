@@ -1,4 +1,4 @@
-## Monocruise – Agent Guide
+﻿## Monocruise – Agent Guide
 
 This document explains how this program is structured and where to look for usages and examples when making changes as an AI agent.
 
@@ -133,7 +133,7 @@ Refer back to `core/example_thread/thread.py` whenever you are unsure about the 
 
 - **Logging and resilience**
   - Use the standard `logging` module for all diagnostic output. Log unexpected behaviour (e.g. exceptions, missing or down threads, invalid state) so that failures are diagnosable; avoid using `print` for errors or warnings.
-  - **`extra={"popup": True}` must be used sparingly.** Only add it when the message is genuinely useful information for the end-user (e.g. "cruise control engaged", "target vehicle lost"). Never add it to error messages, exception traces, debug output, or internal state logs — those belong in the log file only. Overuse causes popup spam; the popup threshold was lowered and this surfaced many inappropriate popups as a regression. If you need to surface a user-facing summary alongside a detailed log, make two separate log calls: one with `extra={"popup": True}` for the short user message, and one without for the full context.
+  - **`extra={"popup": True}` must be used sparingly.** Only add it when the message is genuinely useful information for the end-user (e.g. "cruise control engaged", "target vehicle lost"). Never add it to error messages, exception traces, debug output, or internal state logs: those belong in the log file only. Overuse causes popup spam; the popup threshold was lowered and this surfaced many inappropriate popups as a regression. If you need to surface a user-facing summary alongside a detailed log, make two separate log calls: one with `extra={"popup": True}` for the short user message, and one without for the full context.
   - When a thread reads from the registry or another thread’s data, it must handle missing or down sibling threads gracefully: catch `KeyError` and attribute or lock failures, use safe defaults, log at debug or warning level as appropriate, and continue. A thread must never crash or exit its loop because another thread is missing or has crashed.
 
 - **Independent threads**
@@ -170,7 +170,7 @@ Refer back to `core/example_thread/thread.py` whenever you are unsure about the 
 
 - **Speed limiter is a continuous tracker, not an over-limit reactor.**
   - The `SpeedLimiter` (`core/longitudinal/limiter.py`) PID runs every tick while active and returns `LongOutput(wanted, True)` (active=True) unconditionally. The mapper engages and the user-gas cap fires even when ego is below the limit.
-  - Why: a limiter that only wakes on overshoot overshoots — by the time the PID engages, ego is already past the cap. The continuous tracker tightens the gas cap progressively as ego approaches the limit.
+  - Why: a limiter that only wakes on overshoot overshoots: by the time the PID engages, ego is already past the cap. The continuous tracker tightens the gas cap progressively as ego approaches the limit.
   - Do not reintroduce an "only when over the limit" gate (e.g. `if wanted_ms2 < 0: ...` on the limiter). This was tried twice; both times it caused overshoot or fight-with-cruise behaviour at the limit boundary.
   - The asymmetric clamp in `SpeedLimiter.step()` bounds only the lower side (`max(accel_min, wanted)`). The upper side is left open so positive bids propagate and the mapper can shape the gas pedal while below the cap.
 
@@ -180,3 +180,4 @@ Refer back to `core/example_thread/thread.py` whenever you are unsure about the 
 
 - **New `limiter_*` settings.**
   - `limiter_kp`, `limiter_ki`, `limiter_kd`, `limiter_integral_clamp`, `limiter_accel_min_ms2` in `core/settings.py`. Independent of the CC gains so each can be tuned separately. Defaults match the original CC defaults so behaviour is identical until the user tunes them.
+

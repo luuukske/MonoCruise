@@ -1,4 +1,4 @@
-"""
+﻿"""
 Test thread for debugging purposes and error popup testing.
 """
 
@@ -37,7 +37,7 @@ class TestThread(BaseThread):
     def loop(self) -> None:
         """
         Main work unit. Called every `loop_interval` seconds.
-        Do NOT call time.sleep() here — the base class handles pacing.
+        Do NOT call time.sleep() here: the base class handles pacing.
         Raise any exception to trigger watchdog handling.
         """
 
@@ -51,3 +51,4 @@ class TestThread(BaseThread):
     def teardown(self) -> None:
         """Runs once after loop exits. Exceptions are suppressed by base."""
         logger.debug("teardown complete")
+

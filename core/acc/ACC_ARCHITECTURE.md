@@ -1,4 +1,4 @@
-# ACC Gap-Control Architecture
+﻿# ACC Gap-Control Architecture
 
 This document describes the gap-control law in
 `core/cruise_control_thread/acc_controller.py`. ACC consumes the in-lane lead
@@ -9,19 +9,19 @@ module is a *cap*, not a speed regulator.
 
 ---
 
-## 1. Design goal — smooth, stable, and safe
+## 1. Design goal: smooth, stable, and safe
 
 The controller is **not** trying to imitate a human driver. It is trying to
 be:
 
-* **Smooth in equilibrium** — when ego is locked at the desired gap and
+* **Smooth in equilibrium**: when ego is locked at the desired gap and
   speed, the command sits at zero with no micro-corrections.
-* **String-stable in traffic** — disturbances must attenuate as they travel
+* **String-stable in traffic**: disturbances must attenuate as they travel
   upstream. Any amplification creates the familiar stop-and-go waves known as
   phantom traffic.
-* **Reactive when necessary** — genuine lead braking events must trigger an
+* **Reactive when necessary**: genuine lead braking events must trigger an
   immediate response, but only to the degree required for safety.
-* **Predictive beyond the immediate lead** — ACC can also observe vehicles
+* **Predictive beyond the immediate lead**: ACC can also observe vehicles
   ahead of the current lead, allowing earlier and gentler responses to forming
   slowdowns.
 
@@ -39,7 +39,7 @@ string stability, and anticipatory behavior.
 
 ---
 
-## 2. Control philosophy — equilibrium first, intervention second
+## 2. Control philosophy: equilibrium first, intervention second
 
 The core is the **Improved IDM (IIDM)**, with a **Constant-Acceleration
 Heuristic (CAH)** overlay blended in via the **ACC model** of Kesting,
@@ -48,11 +48,11 @@ Treiber & Helbing (2010).
 This combination is chosen specifically because it supports three often
 competing goals simultaneously:
 
-1. **Stable equilibrium** — once the desired gap is reached, acceleration
+1. **Stable equilibrium**: once the desired gap is reached, acceleration
    naturally converges to zero without oscillation.
-2. **Minimal disturbance propagation** — small speed changes in upstream
+2. **Minimal disturbance propagation**: small speed changes in upstream
    traffic are absorbed rather than amplified.
-3. **Safety under rapid transients** — sudden lead braking still produces a
+3. **Safety under rapid transients**: sudden lead braking still produces a
    decisive response.
 
 IIDM serves as the default operating mode because it produces smooth,
@@ -157,16 +157,16 @@ which prevents a disturbance from ever developing into a larger traffic wave.
 
 ---
 
-## 8. Control law — IIDM, CAH, and the ACC blend
+## 8. Control law: IIDM, CAH, and the ACC blend
 
 The control law is built from three components, applied in order:
 
-1. **Improved IDM (IIDM)** — primary continuous control law. Smooth in
+1. **Improved IDM (IIDM)**: primary continuous control law. Smooth in
    equilibrium, monotone in `s`, no free-term recovery overshoot.
-2. **Constant-Acceleration Heuristic (CAH)** — kinematic safety floor.
+2. **Constant-Acceleration Heuristic (CAH)**: kinematic safety floor.
    Provides correct authority when the lead is decelerating and ego's
    relative speed is small (the case classical IDM under-reacts to).
-3. **ACC blend** — combines the two via a smooth `tanh` transition with
+3. **ACC blend**: combines the two via a smooth `tanh` transition with
    cool factor `c`, so CAH only takes over when IIDM is unsafe.
 
 ### 8.1 IIDM core
@@ -196,10 +196,10 @@ IIDM piecewise (Treiber & Kesting 2013, ch. 11.3.4):
 ```
 z = s*(v, Δv) / s
 
-if z ≥ 1:                  # gap closer than desired — pure braking branch
+if z ≥ 1:                  # gap closer than desired: pure braking branch
     a_iidm = a_max · (1 − z²)
 
-else:                      # gap at or beyond desired — bounded approach to a_free
+else:                      # gap at or beyond desired: bounded approach to a_free
     a_iidm = a_free · (1 − z^(2 · a_max / max(a_free, ε)))
 ```
 
@@ -220,7 +220,7 @@ IIDM caps growth at `a_free` and enforces C¹ continuity at `z = 1`.
 CAH is the closed-form maximum ego accel that avoids collision under the
 assumption that both vehicles hold their current acceleration until stop.
 It does not depend on `Δv` and therefore does not require the closing
-speed to develop before responding — the failure mode classical IDM
+speed to develop before responding: the failure mode classical IDM
 exhibits when "lead brakes hard and ego is matching the deceleration".
 
 Cap lead's accel by ego's authority so CAH cannot demand more than the
@@ -252,13 +252,13 @@ tuned scalar.
 
 ### 8.3 ACC blend
 
-CAH alone is too aggressive in steady state — it commits to the worst
+CAH alone is too aggressive in steady state: it commits to the worst
 case every tick. The ACC model (Kesting et al. 2010) blends IIDM with
 CAH only when CAH demands more braking than IIDM:
 
 ```
 if a_iidm ≥ a_cah:
-    a_acc = a_iidm                               # IIDM passthrough — comfort regime
+    a_acc = a_iidm                               # IIDM passthrough: comfort regime
 
 else:
     a_acc = (1 − c) · a_iidm
@@ -267,7 +267,7 @@ else:
 
 with cool factor `c = 0.99` (Kesting et al recommend `c ∈ [0.95, 0.99]`)
 and `b = b_comfort`. The `tanh` makes the blend C¹. In equilibrium the
-first branch holds and CAH contributes nothing — no comfort cost.
+first branch holds and CAH contributes nothing: no comfort cost.
 
 ---
 
@@ -288,7 +288,7 @@ Per tick, under `acc.data._lock`:
 4. Cap the chain at `MA_MAX_LEADS = 3`.
 
 Vehicles that are not strictly ahead of the previous chain member by at
-least `s0_m + 1.0 m` are dropped — they are either lateral noise or
+least `s0_m + 1.0 m` are dropped: they are either lateral noise or
 ghost duplicates from the radar pipeline.
 
 ### 9.2 Per-lead control evaluation
@@ -333,7 +333,7 @@ the immediate lead has even started reacting.
 
 The TTC, emergency, and standstill overlays in §10 are evaluated against
 chain index 0 only. Anticipation is for *smoothing*, not for tripping
-emergency action — a hazard two cars away that the immediate lead has
+emergency action: a hazard two cars away that the immediate lead has
 not yet reacted to is not yet an emergency for ego.
 
 ---
@@ -364,21 +364,21 @@ creeps against the torque converter / engine idle.
   ACCThread.data.leads[0..2]
         │
         ▼
-  _read_chain        — sort by dist, sanity filter, lock-scoped copy
+  _read_chain       : sort by dist, sanity filter, lock-scoped copy
         │
         ▼
-  _smooth_inputs     — distance-adaptive EMA on (s, v_lead);
+  _smooth_inputs    : distance-adaptive EMA on (s, v_lead);
                        asymmetric EMA on a_lead (fast on brake, slow on relax)
         │
         ▼
-  _compute_command   — emergency band, TTC floor, standstill hold,
+  _compute_command  : emergency band, TTC floor, standstill hold,
                        per-lead IIDM/CAH/ACC blend, weighted-min over chain
         │
         ▼
-  _jerk_limit        — |da/dt| ≤ 2.5 m/s³, bypassed on emergency
+  _jerk_limit       : |da/dt| ≤ 2.5 m/s³, bypassed on emergency
         │
         ▼
-  _output_filter     — light EMA (τ ≈ 36 ms), bypassed on emergency
+  _output_filter    : light EMA (τ ≈ 36 ms), bypassed on emergency
         │
         ▼
   cruise_control_thread.loop:
@@ -392,16 +392,16 @@ creeps against the torque converter / engine idle.
 
 ## 12. Inputs and smoothing
 
-### 12.1 Distance and lead speed — symmetric distance-adaptive EMA
+### 12.1 Distance and lead speed: symmetric distance-adaptive EMA
 
-`dist_m` and `v_lead_ms` go through a distance-adaptive EMA — τ ramps
+`dist_m` and `v_lead_ms` go through a distance-adaptive EMA: τ ramps
 linearly from 120 ms at 20 m to 200 ms at 80 m. Close range stays snappy;
 long range is filtered hard to kill TruckersMP packet jitter before it
 reaches the IIDM core. Each chain member maintains its own EMA state
 keyed on `vehicle.id` so a swap of the primary lead does not cause a
 discontinuity on the new lead-of-lead.
 
-### 12.2 Lead acceleration — asymmetric EMA
+### 12.2 Lead acceleration: asymmetric EMA
 
 `a_lead_ms2` uses a **deadbanded asymmetric** EMA:
 
@@ -411,7 +411,7 @@ discontinuity on the new lead-of-lead.
 deadband = 0.30 m/s²     # AI tick-to-tick wobble + MP packet jitter floor
 
 Δ = new_a_lead − prev_a_lead_ema
-τ = τ_relax           if |Δ| < deadband   # noise — heaviest filter
+τ = τ_relax           if |Δ| < deadband   # noise: heaviest filter
 τ = τ_brake           if Δ ≤ −deadband    # real brake event
 τ = τ_relax           otherwise           # real positive change
 ```
@@ -440,7 +440,7 @@ game physics can spike absurdly on spawn / teleport.
 ### 12.4 Tail correction
 
 `tail_m` (pivot-to-rear of the lead train: cab tail + trailers; TMP
-pivot mid-body, AI pivot 18 % from front) is **not** smoothed — it is
+pivot mid-body, AI pivot 18 % from front) is **not** smoothed: it is
 constant per lead vehicle. `eff_dist = lead.dist_m − tail_m`.
 
 ---
@@ -454,13 +454,13 @@ constant per lead vehicle. `eff_dist = lead.dist_m − tail_m`.
 
 The jerk cap is the dominant smoothness shaper between the control law
 (already smooth in `a` by §8) and the actuator. It is **not** bypassed
-by sub-emergency CAH commands — only by the explicit safety overlays in
+by sub-emergency CAH commands: only by the explicit safety overlays in
 §10. Moderate CAH-driven braking events therefore stay jerk-limited and
 feel firm rather than sharp.
 
 ---
 
-## 14. String stability — quantitative
+## 14. String stability: quantitative
 
 For a constant time-headway controller, the textbook PD-equivalent
 condition (Yamamura et al. 2025) is
@@ -476,7 +476,7 @@ with τ ≈ system delay. In linearisation, IIDM with truck parameters and
 `T ≥ 1.0 s` satisfies this comfortably. The ACC blend with `c → 1`
 inherits string stability from IIDM in equilibrium (where `a_iidm ≥
 a_cah` holds and CAH is dormant) and only departs from it during
-transient under-braking — precisely the regime where giving up some
+transient under-braking: precisely the regime where giving up some
 smoothness for safety is correct.
 
 User-facing gap level (`Settings.acc_gap_level`) maps to four headway
@@ -484,10 +484,10 @@ values, all ≥ 1.0 s:
 
 | Level | Headway T | Effective behaviour |
 |---|---|---|
-| 1 | 1.0 s | Closest — at the string-stability boundary; reactive |
-| 2 | 1.5 s | Default — comfortable, stable |
+| 1 | 1.0 s | Closest: at the string-stability boundary; reactive |
+| 2 | 1.5 s | Default: comfortable, stable |
 | 3 | 2.0 s | Relaxed |
-| 4 | 2.5 s | Farthest — very stable, large equilibrium gap |
+| 4 | 2.5 s | Farthest: very stable, large equilibrium gap |
 
 Headways below 1.0 s are deliberately not exposed.
 
@@ -546,7 +546,7 @@ class AdaptiveCruiseController:
 ```
 
 `cruise_control_thread.py` is untouched. The chain is read internally
-from `acc_thread.data.leads` under its lock — no signature change.
+from `acc_thread.data.leads` under its lock: no signature change.
 
 ---
 
@@ -554,18 +554,18 @@ from `acc_thread.data.leads` under its lock — no signature change.
 
 - Treiber, M., Hennecke, A., Helbing, D. (2000). *Congested traffic
   states in empirical observations and microscopic simulations.*
-  Physical Review E 62, 1805. — Original IDM.
+  Physical Review E 62, 1805.: Original IDM.
 - Treiber, M., Hennecke, A., Helbing, D. (2006). *Delays, inaccuracies
   and anticipation in microscopic traffic models.* Physica A 360,
-  71–88. — Multi-anticipative IDM.
+  71–88.: Multi-anticipative IDM.
 - Kesting, A., Treiber, M., Helbing, D. (2010). *Enhanced Intelligent
   Driver Model to access the impact of driving strategies on traffic
-  capacity.* Phil. Trans. R. Soc. A 368, 4585–4605. — IIDM, CAH, ACC
+  capacity.* Phil. Trans. R. Soc. A 368, 4585–4605.: IIDM, CAH, ACC
   blend, cool factor.
 - Treiber, M., Kesting, A. (2013). *Traffic Flow Dynamics.* Springer,
   ch. 11 (IIDM) and ch. 15 (string stability).
 - Treiber, M., Kesting, A. (2025). *Twenty-Five Years of the Intelligent
-  Driver Model.* arXiv:2506.05909. — Truck defaults and review of
+  Driver Model.* arXiv:2506.05909.: Truck defaults and review of
   variants.
 - Schakel, W., van Arem, B., Netten, B. (2010). *Effects of cooperative
   adaptive cruise control on traffic flow stability.* IEEE ITSC. —
@@ -577,6 +577,7 @@ from `acc_thread.data.leads` under its lock — no signature change.
   Guidelines for PD Controllers in ACC Systems.* Sensors 25(11), 3518.
 - Sugiyama, Y. et al. (2008). *Traffic jams without bottlenecks —
   experimental evidence for the physical mechanism of the formation of
-  a jam.* New J. Phys. 10, 033001. — Empirical phantom-jam baseline.
+  a jam.* New J. Phys. 10, 033001.: Empirical phantom-jam baseline.
 - Vahidi, A., Eskandarian, A. (2003). *Research advances in intelligent
   collision avoidance and adaptive cruise control.* IEEE TITS 4(3).
+

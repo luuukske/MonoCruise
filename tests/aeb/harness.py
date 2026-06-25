@@ -1,4 +1,4 @@
-"""Scenario builder and frame evaluator for AEB unit tests.
+﻿"""Scenario builder and frame evaluator for AEB unit tests.
 
 No radar thread, no shared memory. Builds synthetic Vehicle instances with
 seeded position history and runs the filter pipeline + collision evaluator
@@ -89,7 +89,7 @@ def _make_quaternion_from_yaw_deg(yaw_deg: float) -> Quaternion:
     #   yaw = atan2(2*(self.y*self.z + self.w*self.x), w²-x²-y²+z²)
     # For pure yaw (rotation around z axis in stored coords):
     # self.y = sin(yaw/2), self.z = 0, self.w = cos(yaw/2), self.x = 0 gives:
-    #   yaw = atan2(2*(sin/2 * 0 + cos/2 * 0), ...) = 0 — wrong.
+    #   yaw = atan2(2*(sin/2 * 0 + cos/2 * 0), ...) = 0: wrong.
     # The simplest approach: use angular_velocity and _smooth_yaw directly.
     # Return identity and set _smooth_yaw separately in ScenarioBuilder.
     return Quaternion(1.0, 0.0, 0.0, 0.0)
@@ -431,3 +431,4 @@ def build_scenario_frames(
                 vehicles.append(v)
         frames.append(Frame(ego=ego, vehicles=vehicles, t=t))
     return frames
+

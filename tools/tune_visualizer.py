@@ -1,4 +1,4 @@
-"""Live tuning visualizer for accel_to_pedals_debug.csv.
+﻿"""Live tuning visualizer for accel_to_pedals_debug.csv.
 
 Run from the project root:
     .venv/Scripts/python tools/tune_visualizer.py
@@ -69,7 +69,7 @@ def _build_figure(df: pd.DataFrame) -> go.Figure:
 
     fig = go.Figure()
 
-    # Panel 1 — Acceleration
+    # Panel 1: Acceleration
     traces_p1 = []
     if "wanted_smooth" in df.columns:
         traces_p1.append(go.Scatter(x=t, y=df["wanted_smooth"], name="wanted_smooth",
@@ -84,7 +84,7 @@ def _build_figure(df: pd.DataFrame) -> go.Figure:
         traces_p1.append(go.Scatter(x=t, y=df["road_load_ms2"], name="road_load",
                                     line=dict(color="gray", width=0.7, dash="dash"), opacity=0.6, yaxis="y1"))
 
-    # Panel 2 — Gas PID
+    # Panel 2: Gas PID
     traces_p2 = []
     if "gas_p" in df.columns:
         traces_p2.append(go.Scatter(x=t, y=df["gas_p"], name="P",
@@ -99,7 +99,7 @@ def _build_figure(df: pd.DataFrame) -> go.Figure:
         traces_p2.append(go.Scatter(x=t, y=df["gas_cmd"], name="gas_cmd",
                                     line=dict(color="black", width=1.4, dash="dash"), yaxis="y2"))
 
-    # Panel 3 — Brake / pedal commands
+    # Panel 3: Brake / pedal commands
     traces_p3 = []
     if "brake_ff" in df.columns:
         traces_p3.append(go.Scatter(x=t, y=df["brake_ff"], name="brake FF",
@@ -121,7 +121,7 @@ def _build_figure(df: pd.DataFrame) -> go.Figure:
                                     fill="tozeroy", fillcolor="rgba(255,153,51,0.2)",
                                     line=dict(color="rgba(255,153,51,0.4)", width=0.5), yaxis="y3"))
 
-    # Panel 4 — Speed / gear / scales
+    # Panel 4: Speed / gear / scales
     traces_p4 = []
     if "speed_ms" in df.columns:
         traces_p4.append(go.Scatter(x=t, y=df["speed_ms"], name="speed (m/s)",
@@ -203,3 +203,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

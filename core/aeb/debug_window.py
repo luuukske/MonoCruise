@@ -1,4 +1,4 @@
-"""AEB debug visualisation — PySide6 top-down radar view (ego-locked)."""
+﻿"""AEB debug visualisation: PySide6 top-down radar view (ego-locked)."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ _EVASION_FILTER_CORRIDOR = QColor(0, 200, 200, 25)
 _EVASION_FILTERED_CLR = QColor(0, 200, 200, 140)
 _TRAILER_CLR = QColor(180, 140, 80)
 _EGO_TRAILER_CLR = QColor(55, 130, 215)
-_ACC_LEAD_CLR = QColor(255, 80, 230)           # primary ACC lead — magenta
+_ACC_LEAD_CLR = QColor(255, 80, 230)           # primary ACC lead: magenta
 _ACC_CANDIDATE_CLR = QColor(180, 110, 220)     # top-3 non-primary
 _ACC_CORRIDOR = QColor(255, 80, 230, 35)
 _HIT_CLR = QColor(255, 30, 30)
@@ -152,7 +152,7 @@ class AEBDebugWindow(QWidget):
 
         self._draw_grid(p, cx, cy)
 
-        # First pass — fitted trail arcs behind all vehicles, so labels
+        # First pass: fitted trail arcs behind all vehicles, so labels
         # and bodies always sit on top of the dashed line.
         if acc is not None:
             for v in snap.vehicles:
@@ -384,7 +384,7 @@ class AEBDebugWindow(QWidget):
         sd = comp.get("score_delta", 0.0)
         amp = comp.get("arc_angle_amp", 1.0)
         bl = comp.get("baseline", 0.0)
-        # HIT=0.0, NO_ARC_HIT=-0.40, NO_HISTORY=-0.16 — discriminate.
+        # HIT=0.0, NO_ARC_HIT=-0.40, NO_HISTORY=-0.16: discriminate.
         if abs(bl) < 0.05:
             bl_tag = "HIT"
             bl_clr = _SAFE_CLR
@@ -694,7 +694,7 @@ class AEBDebugWindow(QWidget):
             p.drawText(QPointF(x, y), f"TTC: {ttc}s    TTB: {ttb}s")
         else:
             p.setPen(QPen(QColor(120, 120, 135)))
-            p.drawText(QPointF(x, y), "TTC: —    TTB: —")
+            p.drawText(QPointF(x, y), "TTC::    TTB: —")
 
         y += 18
         p.setFont(self._font_small)
@@ -746,3 +746,4 @@ class AEBDebugWindow(QWidget):
             p.setPen(QPen(_TEXT))
             p.drawText(QPointF(lx + 22, y + 2), label)
             y += 13
+

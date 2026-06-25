@@ -1,4 +1,4 @@
-"""
+﻿"""
 animations for popup widgets using PySide6.
 """
 
@@ -73,11 +73,11 @@ class ScalableContainer(QGraphicsView):
         combined = self._base_scale * self._anim_scale
         
         if self._anim_scale == 1.0:
-            # Pure base scale — scale from top-left origin
+            # Pure base scale: scale from top-left origin
             transform = QTransform()
             transform.scale(combined, combined)
         else:
-            # Animation in progress — center the anim_scale on the
+            # Animation in progress: center the anim_scale on the
             # *scaled* viewport so the shrink/grow looks centred.
             vw = self._content_size.width() * self._base_scale
             vh = self._content_size.height() * self._base_scale

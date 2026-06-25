@@ -1,4 +1,4 @@
-name: build-and-release
+﻿name: build-and-release
 
 # Tag push (vX.Y.Z) publishes a real release.
 # workflow_dispatch lets you produce a build artifact without publishing —
@@ -61,7 +61,7 @@ jobs:
         run: pyinstaller --noconfirm updater/updater.spec
 
       # ----------------------------------------------------------------------
-      # Code signing — plumbing left here for when a certificate is available.
+      # Code signing: plumbing left here for when a certificate is available.
       # To enable:
       #   1. Add GitHub Secrets: WINDOWS_CERT_BASE64, WINDOWS_CERT_PASSWORD
       #   2. Uncomment this step.
@@ -146,3 +146,4 @@ jobs:
           files: artifacts/*
           prerelease: ${{ contains(steps.version.outputs.tag, '-') }}
           draft: false
+

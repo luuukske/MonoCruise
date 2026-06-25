@@ -1,10 +1,10 @@
-"""
-ACC thread — in-lane vehicle tracker.
+﻿"""
+ACC thread: in-lane vehicle tracker.
 
 Consumes ``RadarData`` + blinkers, scores every vehicle per-frame, and
 publishes the top-ranked in-lane leads on ``self.data``.  The actual
 longitudinal control law lives in ``cruise_control_thread`` (to be
-written) — this module's only job is to answer **"which vehicles are in
+written): this module's only job is to answer **"which vehicles are in
 ego's lane, and how confidently"**.
 
 Readers:
@@ -90,7 +90,7 @@ class ACCThread(BaseThread):
         logger.debug("acc teardown complete")
 
     # ------------------------------------------------------------------
-    # Snapshot helpers — never hold someone else's lock across our work.
+    # Snapshot helpers: never hold someone else's lock across our work.
     # ------------------------------------------------------------------
     def _read_radar(self) -> tuple | None:
         try:
@@ -155,7 +155,7 @@ class ACCThread(BaseThread):
         # separate radar list; score them alongside top-level vehicles.
         targets = vehicles + trailer_vehicles
 
-        # Paused / stale frame — hold the previous lead list.  Don't advance
+        # Paused / stale frame: hold the previous lead list.  Don't advance
         # the tracker so scores don't decay against a frozen frame.
         if paused or t_radar <= self._last_snapshot_t:
             self._publish(enabled, self.data.leads, self._last_snapshot_t)
@@ -234,3 +234,4 @@ class ACCThread(BaseThread):
             self.data.debug_blinker = self._tracker.last_blinker_scalar
             self.data.debug_ego_kappa = self._tracker.last_ego_kappa_used
             self.data.debug_corridor_half = self._tracker.last_corridor_half
+
