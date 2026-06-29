@@ -57,6 +57,10 @@ class Settings(metaclass=_SingletonMeta):
     debug: bool = True
     last_game: int = 1 # 1 = ETS2, 2 = ATS
 
+    # Update channel: "stable" (default) or "preview" (opt into prereleases).
+    # The updater reads this from config.json to decide which releases to offer.
+    update_channel: str = "stable"
+
     # UI position/appearance
     panel_x: int = None
     panel_y: int = None
@@ -165,6 +169,13 @@ class Settings(metaclass=_SingletonMeta):
                 return int(match.group(0))
         return 1
 
+    @staticmethod
+    def _normalize_channel(value: object) -> str:
+        if isinstance(value, str) and value.lower() in {"stable", "preview"}:
+            return value.lower()
+        _log.warning("invalid update_channel %r; falling back to 'stable'", value)
+        return "stable"
+
     def _public_fields(self) -> dict:
         return {k: getattr(self, k) for k in self.__dataclass_fields__ if not k.startswith("_")}
 
@@ -261,6 +272,8 @@ class Settings(metaclass=_SingletonMeta):
                     v = data[k]
                     if k in {"short_increments", "long_increments"}:
                         v = self._normalize_increment(v)
+                    elif k == "update_channel":
+                        v = self._normalize_channel(v)
                     setattr(self, k, v)
                 else:
                     f = self.__dataclass_fields__[k]

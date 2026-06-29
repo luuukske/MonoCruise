@@ -1,3 +1,6 @@
+import os
+import tempfile
+
 # Background colors
 BG_MAIN = "#2b2b2b"           # Main dark grey background
 BG_SECTION = "#1e1e1e"        # Darker section background
@@ -26,6 +29,45 @@ TEXT_SECONDARY = "#b0b0b0"
 
 # Font
 FONT_FAMILY = "Inter, Sans-serif"
+
+
+def _combo_arrow_rule() -> str:
+    """Render a down-arrow chevron to a temp PNG and return its stylesheet rule.
+
+    Qt stylesheets can't draw CSS-triangle borders (a ``border-top`` trick
+    renders as a solid block, not a triangle), so we rasterise an SVG chevron
+    to a PNG and point ``image:`` at it. Returns "" on failure, in which case
+    the combo just shows no custom arrow.
+    """
+    try:
+        from PySide6.QtSvg import QSvgRenderer
+        from PySide6.QtGui import QImage, QPainter
+        from PySide6.QtCore import QByteArray
+
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="16">'
+            f'<path d="M5 5.5 L12 12 L19 5.5" fill="none" stroke="{TEXT_SECONDARY}" '
+            'stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+        )
+        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        img = QImage(24, 16, QImage.Format.Format_ARGB32)
+        img.fill(0)
+        painter = QPainter(img)
+        renderer.render(painter)
+        painter.end()
+        path = os.path.join(tempfile.gettempdir(), "mc_combo_arrow.png")
+        if not img.save(path, "PNG"):
+            return ""
+        url = path.replace("\\", "/")
+        return (
+            f'QComboBox::down-arrow {{ image: url("{url}"); '
+            'width: 12px; height: 8px; margin-right: 10px; }'
+        )
+    except Exception:
+        return ""
+
+
+_ARROW_RULE = _combo_arrow_rule()
 
 STYLESHEET = f"""
     * {{
@@ -60,7 +102,9 @@ STYLESHEET = f"""
         subcontrol-origin: padding;
         subcontrol-position: center right;
     }}
-    
+
+    {_ARROW_RULE}
+
     QComboBox QAbstractItemView {{
         background-color: {BG_SECTION};
         color: {TEXT_PRIMARY};

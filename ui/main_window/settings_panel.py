@@ -278,6 +278,19 @@ class SettingsPanel(QWidget):
             callback=lambda v: self._set("bar_variable", v),
         )
 
+        new_label(p, self._r(0), 0, "Update channel:")
+        self.opt_channel = new_optionmenu(
+            p, self._r(), 1,
+            values=["Stable", "Preview"],
+            default=s.update_channel.capitalize(),
+            callback=lambda v: self._set("update_channel", v.lower()),
+        )
+        new_subtext(
+            p, self._r(), 0,
+            "Preview builds are released earlier and may contain bugs.",
+            col_span=2,
+        )
+
     def _on_hazards_toggled(self, checked: bool) -> None:
         self._set("hazards_variable", checked)
         self._set_row_visible(self._hazard_auto_row, checked)
@@ -723,6 +736,7 @@ class SettingsPanel(QWidget):
         self.chk_horn.setChecked(s.horn_variable)
         self.chk_airhorn.setChecked(s.airhorn_variable)
         self.chk_live_bar.setChecked(s.bar_variable)
+        self.opt_channel.setCurrentText(s.update_channel.capitalize())
 
         # Cruise control
         self._update_seg_style(s.cc_mode)

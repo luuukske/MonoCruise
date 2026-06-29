@@ -7,7 +7,15 @@ Two subcommands:
         to "[X.Y.Z] - YYYY-MM-DD", inserts a fresh empty [Unreleased] block above
         it, commits both files, tags vX.Y.Z, and pushes commit + tag.
 
-    python tools/release.py bump --set X.Y.Z
+    python tools/release.py bump {major|minor|patch} --pre LABEL
+        Pre-release. Bumps the base, then tags X.Y.Z-LABEL.1 (prerelease).
+        Omit the level to advance the pre-release counter on the current base
+        (1.1.0 -> 1.1.0-beta.1 -> 1.1.0-beta.2). A plain level bump on a
+        pre-release finalizes it: drops the suffix, keeps the base
+        (1.1.0-beta.3 + patch -> 1.1.0). CI marks any tag containing '-' as a
+        GitHub prerelease, so -LABEL.N builds land on the preview channel.
+
+    python tools/release.py bump --set X.Y.Z[-LABEL.N]
         Same as above but with an explicit version.
 
     python tools/release.py notes X.Y.Z
@@ -31,8 +39,16 @@ ROOT = Path(__file__).resolve().parent.parent
 VERSION_FILE = ROOT / "core" / "version.py"
 CHANGELOG = ROOT / "CHANGELOG.md"
 
-_VERSION_RE = re.compile(r'^__version__\s*=\s*"(?P<v>\d+\.\d+\.\d+)"\s*$', re.M)
-_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# A version is MAJOR.MINOR.PATCH with an optional pre-release suffix -LABEL.N
+# (e.g. 1.1.0, 1.1.0-beta.1, 1.2.0-rc.3). The suffix is what distinguishes a
+# preview/beta build from a stable one; release.py must read and write both.
+_VERSION_RE = re.compile(
+    r'^__version__\s*=\s*"(?P<v>\d+\.\d+\.\d+(?:-[A-Za-z]+\.\d+)?)"\s*$', re.M
+)
+_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[A-Za-z]+\.\d+)?$")
+_PRE_RE = re.compile(
+    r"^(?P<base>\d+\.\d+\.\d+)(?:-(?P<label>[A-Za-z]+)\.(?P<num>\d+))?$"
+)
 
 
 def _read_version() -> str:
@@ -48,8 +64,21 @@ def _write_version(new_version: str) -> None:
     VERSION_FILE.write_text(new_text, encoding="utf-8")
 
 
-def _bump(current: str, level: str) -> str:
-    major, minor, patch = (int(p) for p in current.split("."))
+def _parse_version(v: str) -> tuple[str, str | None, int | None]:
+    """Split a version into (base, pre_label, pre_num).
+
+    "1.1.0"        -> ("1.1.0", None, None)
+    "1.1.0-beta.2" -> ("1.1.0", "beta", 2)
+    """
+    m = _PRE_RE.match(v)
+    if not m:
+        raise SystemExit(f"unparseable version: {v!r}")
+    num = m.group("num")
+    return m.group("base"), m.group("label"), (int(num) if num is not None else None)
+
+
+def _bump_base(base: str, level: str) -> str:
+    major, minor, patch = (int(p) for p in base.split("."))
     if level == "major":
         return f"{major + 1}.0.0"
     if level == "minor":
@@ -57,6 +86,41 @@ def _bump(current: str, level: str) -> str:
     if level == "patch":
         return f"{major}.{minor}.{patch + 1}"
     raise SystemExit(f"unknown bump level: {level}")
+
+
+def _bump(current: str, level: str | None = None, pre: str | None = None) -> str:
+    """Compute the next version.
+
+    Rules:
+      - `--pre LABEL` with a level   : bump the base, then start the pre chain at
+                                       .1   (1.1.0 + minor --pre beta -> 1.2.0-beta.1)
+      - `--pre LABEL` without a level: pre-release of the *current* base. Same
+                                       label increments the counter; a new label
+                                       resets it to .1
+                                       (1.1.0 -> 1.1.0-beta.1 -> 1.1.0-beta.2;
+                                        1.1.0-beta.2 + --pre rc -> 1.1.0-rc.1)
+      - a level on a pre-release     : finalize. Drop the suffix and keep the base
+                                       the pre chain was building toward
+                                       (1.1.0-beta.3 + patch -> 1.1.0, NOT 1.1.1)
+      - a level on a stable version  : ordinary semver bump.
+    """
+    base, label, num = _parse_version(current)
+
+    if pre is not None:
+        if level is not None:
+            base = _bump_base(base, level)
+            return f"{base}-{pre}.1"
+        if label == pre:
+            return f"{base}-{pre}.{(num or 0) + 1}"
+        return f"{base}-{pre}.1"
+
+    if label is not None:
+        # Finalizing a pre-release: the suffix drops, the base stays.
+        return base
+
+    if level is None:
+        raise SystemExit("nothing to bump: pass a level (major|minor|patch) or --pre")
+    return _bump_base(base, level)
 
 
 def _split_changelog(text: str) -> list[tuple[str, str]]:
@@ -125,10 +189,12 @@ def cmd_bump(args: argparse.Namespace) -> None:
     current = _read_version()
     if args.set:
         if not _SEMVER_RE.match(args.set):
-            raise SystemExit(f"--set must be MAJOR.MINOR.PATCH, got {args.set!r}")
+            raise SystemExit(
+                f"--set must be MAJOR.MINOR.PATCH[-LABEL.N], got {args.set!r}"
+            )
         new_version = args.set
     else:
-        new_version = _bump(current, args.level)
+        new_version = _bump(current, args.level, args.pre)
     if new_version == current:
         raise SystemExit(f"new version equals current ({current}): nothing to bump")
 
@@ -168,7 +234,11 @@ def main() -> None:
 
     bump = sub.add_parser("bump", help="bump version, commit, tag, push")
     bump.add_argument("level", nargs="?", choices=["major", "minor", "patch"])
-    bump.add_argument("--set", dest="set", help="explicit MAJOR.MINOR.PATCH")
+    bump.add_argument("--set", dest="set", help="explicit MAJOR.MINOR.PATCH[-LABEL.N]")
+    bump.add_argument(
+        "--pre", dest="pre", metavar="LABEL",
+        help="pre-release label, e.g. 'beta' or 'rc' (produces -LABEL.N)",
+    )
     bump.add_argument("--dry-run", action="store_true", help="skip git operations")
     bump.set_defaults(func=cmd_bump)
 
@@ -177,8 +247,8 @@ def main() -> None:
     notes.set_defaults(func=cmd_notes)
 
     args = parser.parse_args()
-    if args.command == "bump" and not args.set and not args.level:
-        parser.error("bump requires either a level (major|minor|patch) or --set")
+    if args.command == "bump" and not args.set and not args.level and not args.pre:
+        parser.error("bump requires a level (major|minor|patch), --pre, or --set")
     args.func(args)
 
 

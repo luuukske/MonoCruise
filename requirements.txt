@@ -6,6 +6,7 @@ pygame
 shapely
 requests>=2.33.0
 urllib3>=2.7.0
+packaging  # PEP 440 version comparison in the updater (stable vs preview)
 
 # Game telemetry / SDK bridges: these may need to be installed from git
 # rather than PyPI; adjust to match your local setup if `pip install` fails.

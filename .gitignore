@@ -23,6 +23,9 @@ logs/
 # Local configuration (do not commit)
 config.json*
 
+# Runtime version marker written by the app for the updater
+installed_version.txt
+
 # OS / misc
 .DS_Store
 live_accel_pedals_viz_30s.bat

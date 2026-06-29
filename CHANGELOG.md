@@ -12,12 +12,11 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
-## [1.1.0-beta.1] - 2025-07-02
-
 A ground-up rewrite focused on **stability** and **performance**, with a more reliable take on every existing feature: plus a built-in updater and on-screen notifications.
 
 ### Added
 - **In-app updater**: installs new releases from GitHub without reinstalling; your config and logs are kept.
+- **Stable / Preview update channels**: pick your channel in settings — Preview builds are released earlier and may contain bugs.
 - **On-screen notifications**: always-on-top popups for updates, errors, and onboarding tips.
 - **Lead-vehicle speed readout**: the lead truck's speed now shows on the CC panel above your set speed.
 - **ETS2 v1.60 support.**

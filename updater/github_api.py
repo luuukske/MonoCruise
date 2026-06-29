@@ -47,6 +47,26 @@ class GitHubAPI:
                 return release
         # If no stable release, return latest prerelease
         return releases[0] if releases else None
+
+    def get_releases_for_channel(self, channel: str) -> list[dict]:
+        """Releases visible on an update channel, newest first.
+
+        'preview' sees everything (prereleases + stable); 'stable' sees only
+        non-prerelease builds. Selection is by each release's `prerelease`
+        flag, which CI sets reliably from the tag suffix (a '-' in the tag).
+        This deliberately does NOT filter on target_commitish: for releases
+        created against a pre-existing tag GitHub reports the default branch
+        there, so branch-based filtering is unreliable.
+        """
+        releases = self.get_releases()
+        if channel == "preview":
+            return list(releases)
+        return [r for r in releases if not r.get('prerelease', False)]
+
+    def get_latest_release_for_channel(self, channel: str) -> Optional[dict]:
+        """Newest release available on the given channel, or None."""
+        releases = self.get_releases_for_channel(channel)
+        return releases[0] if releases else None
     
     def get_release_asset_url(self, release: dict, asset_name_contains: str = "Update") -> Optional[str]:
         """Get download URL for an asset in a release."""

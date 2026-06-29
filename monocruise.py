@@ -128,6 +128,24 @@ def _attach_popup_handler(popup: PopupWindow) -> None:
     logging.getLogger().addHandler(handler)
 
 
+# Version marker
+
+def _write_version_marker() -> None:
+    """Record the running version so the standalone updater can read it.
+
+    The updater is a separate exe and can't import this app's modules, so it
+    reads this plain-text marker from the install dir to tell stable from
+    preview builds. Best-effort: a failure here (e.g. a read-only directory)
+    must never affect startup.
+    """
+    try:
+        (CONFIG_PATH.parent / "installed_version.txt").write_text(
+            __version__, encoding="utf-8"
+        )
+    except Exception:
+        logging.getLogger("main").debug("could not write version marker", exc_info=True)
+
+
 # Thread factories
 
 def _factory_for(thread):
@@ -165,6 +183,7 @@ def main() -> None:
     _configure_logging()
     log = logging.getLogger("main")
     log.info("starting: debug=%s", settings.debug)
+    _write_version_marker()
 
     # Auto-refresh settings in debug mode (lets you edit config.json while running).
     # Runs on the Qt main thread, so it doesn't block any worker thread loops.

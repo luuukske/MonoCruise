@@ -1,5 +1,6 @@
 ﻿import sys
 import os
+import json
 import re
 import tempfile
 import zipfile
@@ -14,14 +15,64 @@ from PySide6.QtGui import QPixmap, QFontDatabase, QPainter, QCursor
 from styles import (
     STYLESHEET, BG_SECTION, BG_SECTION_BORDER, COLOR_INACTIVE, 
     COLOR_ACTIVE, COLOR_PRERELEASE, TEXT_SECONDARY,
-    BLUE_BUTTON_STYLE, UPDATE_BUTTON_STYLE, RELEASE_TITLE_STYLE, PRERELEASE_BADGE_STYLE
+    UPDATE_BUTTON_STYLE, RELEASE_TITLE_STYLE, PRERELEASE_BADGE_STYLE
 )
+from packaging.version import Version, InvalidVersion
+
 from github_api import GitHubAPI
 from markdown_renderer import GitHubMarkdownRenderer
 from video_player import VideoPlayer
 
 REPO_OWNER = "luuukske"
 REPO_NAME = "MonoCruise"
+
+# The updater is a separate exe that can't import the app's modules, so it reads
+# install-dir state (channel + installed version) from plain files written by the
+# running app: config.json (settings) and installed_version.txt (version marker).
+DEFAULT_CHANNEL = "stable"
+
+
+def install_dir() -> str:
+    """Directory the updater (and the app it updates) live in."""
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def read_channel(directory: str) -> str:
+    """Read the user's update channel from config.json. Defaults to 'stable'."""
+    try:
+        with open(os.path.join(directory, "config.json"), encoding="utf-8") as fh:
+            value = json.load(fh).get("update_channel")
+        if isinstance(value, str) and value.lower() in {"stable", "preview"}:
+            return value.lower()
+    except (OSError, ValueError):
+        pass
+    return DEFAULT_CHANNEL
+
+
+def installed_version_text(directory: str) -> str:
+    """Raw installed-version string as written by the app, or '' if unknown."""
+    try:
+        with open(os.path.join(directory, "installed_version.txt"), encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def installed_version(directory: str) -> Version | None:
+    """Parsed installed version for comparison, or None if missing/unparseable."""
+    try:
+        return Version(installed_version_text(directory))
+    except (InvalidVersion, ValueError):
+        return None
+
+
+def release_version(release: dict) -> Version | None:
+    """Parse a release's tag (e.g. 'v1.1.0-beta.1') into a Version, or None."""
+    tag = (release or {}).get("tag_name", "")
+    try:
+        return Version(tag[1:] if tag.startswith("v") else tag)
+    except (InvalidVersion, ValueError):
+        return None
 
 # Embedded SVG icons
 SVG_ICONS = {
@@ -285,21 +336,27 @@ class SelectorSection(QFrame):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
         
-        self.branch_combo = QComboBox()
-        self.branch_combo.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        layout.addWidget(self.branch_combo)
-        
-        self.latest_btn = QPushButton("Select Latest")
-        self.latest_btn.setObjectName("blueButton")
-        self.latest_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.latest_btn.setStyleSheet(BLUE_BUTTON_STYLE)
-        layout.addWidget(self.latest_btn)
-        
+        self.channel_combo = QComboBox()
+        self.channel_combo.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.channel_combo.addItems(["Stable", "Preview"])
+        layout.addWidget(self.channel_combo)
+
         layout.addStretch()
-        
+
+        self.installed_label = QLabel("")
+        self.installed_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        self.installed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.installed_label)
+
+        layout.addStretch()
+
         self.version_combo = QComboBox()
         self.version_combo.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.version_combo.setMinimumWidth(200)
+        # Grow to fit the longest tag so pre-release names aren't elided ("v1.1.0-b...").
+        self.version_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToContents
+        )
         layout.addWidget(self.version_combo)
 
 
@@ -414,53 +471,57 @@ class SelectorPanel(QWidget):
         self.api = api
         self.releases = []
         self.current_release = None
-        
+
+        self.install_dir = install_dir()
+        self.channel = read_channel(self.install_dir)
+        self.installed_version = installed_version(self.install_dir)
+        self.installed_version_text = installed_version_text(self.install_dir)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)  # Gap shows window background
         
         # Selector section (top)
         self.selector = SelectorSection()
-        self.selector.branch_combo.currentTextChanged.connect(self._on_branch_changed)
-        self.selector.latest_btn.clicked.connect(self._select_latest)
+        self.selector.installed_label.setText(self._installed_text())
+        self.selector.channel_combo.setCurrentText(self.channel.capitalize())
+        self.selector.channel_combo.currentTextChanged.connect(self._on_channel_changed)
         self.selector.version_combo.currentIndexChanged.connect(self._on_version_changed)
         layout.addWidget(self.selector)
-        
+
         # Details section (bottom)
         self.details = DetailsSection()
         layout.addWidget(self.details, stretch=1)
-        
+
         # Expose for external access
         self.update_btn = self.details.update_btn
-        
-        self._load_branches()
-    
-    def _load_branches(self):
-        branches = self.api.get_branches()
-        self.selector.branch_combo.clear()
-        
-        branch_names = [b['name'] for b in branches]
-        
-        for default in ['main', 'master']:
-            if default in branch_names:
-                branch_names.remove(default)
-                branch_names.insert(0, default)
-                break
-        
-        self.selector.branch_combo.addItems(branch_names)
-    
-    def _on_branch_changed(self, branch: str):
-        if not branch:
+
+        self._load_channel(self.channel)
+
+    def _installed_text(self) -> str:
+        if not self.installed_version_text:
+            return "Installed: unknown"
+        return f"Installed: v{self.installed_version_text}"
+
+    def _load_channel(self, channel: str):
+        """Populate the version list with the releases visible on *channel*."""
+        if not channel:
             return
+        self.channel = channel.lower()
         self.api.invalidate_cache()
-        self.releases = self.api.get_releases_for_branch(branch)
+        self.releases = self.api.get_releases_for_channel(self.channel)
         self.selector.version_combo.clear()
-        
+
         for release in self.releases:
             tag = release['tag_name']
             if release.get('prerelease'):
                 tag += " (pre-release)"
             self.selector.version_combo.addItem(tag, release)
+
+        self._select_latest()
+
+    def _on_channel_changed(self, channel: str):
+        self._load_channel(channel)
     
     def _on_version_changed(self, index: int):
         if index < 0 or index >= len(self.releases):
@@ -504,13 +565,28 @@ class SelectorPanel(QWidget):
             self.details.prerelease_badge.show()
         else:
             self.details.prerelease_badge.hide()
-        
-        self.details.update_btn.setEnabled(True)
-    
+
+        self._apply_install_state()
+
+    def _apply_install_state(self):
+        """Reflect the installed version on the update button.
+
+        If the selected release is already the installed version there is
+        nothing to do; otherwise it can be installed (newer = upgrade, older =
+        downgrade). When the installed version is unknown, always allow it.
+        """
+        selected = release_version(self.current_release)
+        is_installed = (
+            self.installed_version is not None
+            and selected is not None
+            and selected == self.installed_version
+        )
+        self.details.update_btn.setEnabled(not is_installed)
+        self.details.update_btn.setText("Up to date" if is_installed else "Update")
+
     def _select_latest(self):
-        branch = self.selector.branch_combo.currentText()
-        latest = self.api.get_latest_release_for_branch(branch)
-        
+        latest = self.api.get_latest_release_for_channel(self.channel)
+
         if latest:
             for i in range(self.selector.version_combo.count()):
                 if self.selector.version_combo.itemData(i)['id'] == latest['id']:
