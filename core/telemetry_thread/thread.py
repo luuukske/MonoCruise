@@ -131,7 +131,7 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.gear_dashboard      = raw.get("gearDashboard", 0)
         data.userThrottle        = raw.get("userThrottle", 0.0)
         data.userBrake           = raw.get("userBrake", 0.0)
-        data.userSteer           = raw.get("userSteer", 0.0)
+        data.userSteer           = raw.get("gameSteer", 0.0) # use game values for ETS2LA compatibility for example
         data.userClutch          = raw.get("userClutch", 0.0)
         data.gameThrottle        = raw.get("gameThrottle", 0.0)
         data.gameBrake           = raw.get("gameBrake", 0.0)
