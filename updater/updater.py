@@ -2,11 +2,14 @@
 import os
 import json
 import re
+import shutil
+import subprocess
 import tempfile
 import zipfile
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QLabel, QPushButton, QFrame, QScrollArea, QSpacerItem, QSizePolicy
+    QLabel, QPushButton, QFrame, QScrollArea, QSpacerItem, QSizePolicy,
+    QMessageBox
 )
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtCore import Qt, QThread, Signal, QByteArray
@@ -71,25 +74,49 @@ REPO_OWNER = "luuukske"
 REPO_NAME = "MonoCruise"
 
 # The updater is a separate exe that can't import the app's modules, so it reads
-# install-dir state (channel + installed version) from plain files written by the
+# install-root state (channel + installed version) from plain files written by the
 # running app: config.json (settings) and installed_version.txt (version marker).
 DEFAULT_CHANNEL = "stable"
 
+# Self-update layout, all directly under the install root:
+#   updater/          the updater's own exe + support files (this program)
+#   updater_pending/  new updater files staged by an update, swapped in at the
+#                     NEXT updater launch (sentinel written last marks it complete)
+#   updater_old/      previous updater files parked by a swap; locked while that
+#                     process ran, deleted at the launch after
+#   update_staging.tmp/  scratch dir an update extracts into before any live
+#                     file is touched
+# The running updater can't overwrite its own exe/DLLs, but Windows does allow
+# *renaming* open files — the swap is pure renames, done in-process at startup.
+# Deliberately no helper script or watcher process: an unsigned exe spawning a
+# script that rewrites exes is a classic antivirus false-positive pattern.
+PENDING_DIR = 'updater_pending'
+OLD_DIR = 'updater_old'
+STAGING_DIR = 'update_staging.tmp'
+PENDING_SENTINEL = '.complete'
 
-def install_dir() -> str:
-    """Directory the updater (and the app it updates) live in."""
+
+def updater_dir() -> str:
+    """Directory the updater itself lives in.
+
+    Frozen (PyInstaller), __file__ points inside the bundle's _internal dir,
+    so use the exe path: {install root}/updater.
+    """
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def read_channel(directory: str) -> str:
-    """Read the user's update channel from config.json. Defaults to 'stable'.
+def install_root() -> str:
+    """The install root: MonoCruise.exe, config.json and updater/ live here."""
+    return os.path.dirname(updater_dir())
 
-    config.json lives in the install root (the updater dir's parent), so look
-    there rather than in the updater's own directory.
-    """
+
+def read_channel(root: str) -> str:
+    """Read the user's update channel from config.json in the install root.
+    Defaults to 'stable'."""
     try:
-        path = os.path.join(os.path.dirname(directory), "config.json")
-        with open(path, encoding="utf-8") as fh:
+        with open(os.path.join(root, "config.json"), encoding="utf-8") as fh:
             value = json.load(fh).get("update_channel")
         if isinstance(value, str) and value.lower() in {"stable", "preview"}:
             return value.lower()
@@ -98,26 +125,80 @@ def read_channel(directory: str) -> str:
     return DEFAULT_CHANNEL
 
 
-def installed_version_text(directory: str) -> str:
-    """Raw installed-version string as written by the app, or '' if unknown.
-
-    The app writes the marker to the install root (config.json's directory),
-    which is the updater dir's parent, so look there.
-    """
+def installed_version_text(root: str) -> str:
+    """Raw installed-version string as written by the app to the install root,
+    or '' if unknown."""
     try:
-        path = os.path.join(os.path.dirname(directory), "installed_version.txt")
+        path = os.path.join(root, "installed_version.txt")
         with open(path, encoding="utf-8") as fh:
             return fh.read().strip()
     except OSError:
         return ""
 
 
-def installed_version(directory: str) -> Version | None:
+def installed_version(root: str) -> Version | None:
     """Parsed installed version for comparison, or None if missing/unparseable."""
     try:
-        return Version(installed_version_text(directory))
+        return Version(installed_version_text(root))
     except (InvalidVersion, ValueError):
         return None
+
+
+def _move_tree(src: str, dst: str) -> None:
+    """Move every file under src into dst via per-file renames.
+
+    A directory rename fails while any file inside it is open, but renaming
+    the individual files succeeds even for a running exe or loaded DLLs —
+    that's what makes the self-update swap possible.
+    """
+    for dirpath, _dirnames, filenames in os.walk(src):
+        rel = os.path.relpath(dirpath, src)
+        target_dir = dst if rel == os.curdir else os.path.join(dst, rel)
+        os.makedirs(target_dir, exist_ok=True)
+        for name in filenames:
+            os.replace(os.path.join(dirpath, name), os.path.join(target_dir, name))
+
+
+def apply_pending_self_update() -> None:
+    """Swap in updater files staged by a previous run. Call before Qt starts."""
+    if not getattr(sys, 'frozen', False):
+        return  # dev runs from source: nothing to swap
+    _apply_pending_self_update(updater_dir(), install_root())
+
+
+def _apply_pending_self_update(udir: str, root: str) -> None:
+    """Testable core of the startup swap. Must never raise: whatever happens
+    to the pending files, the updater has to stay launchable.
+
+    The swap only affects files on disk; the current process keeps running the
+    already-loaded old code and the new updater takes effect next launch.
+    """
+    # Leftovers from previous runs: updater_old was locked by the process that
+    # created it, and a staging dir means an update crashed mid-extract.
+    shutil.rmtree(os.path.join(root, OLD_DIR), ignore_errors=True)
+    shutil.rmtree(os.path.join(root, STAGING_DIR), ignore_errors=True)
+
+    pending = os.path.join(root, PENDING_DIR)
+    old = os.path.join(root, OLD_DIR)
+    if not os.path.isdir(pending):
+        return
+    sentinel = os.path.join(pending, PENDING_SENTINEL)
+    if not os.path.isfile(sentinel):
+        # Staging never completed; discard it. The update can simply be re-run.
+        shutil.rmtree(pending, ignore_errors=True)
+        return
+    try:
+        os.remove(sentinel)
+        _move_tree(udir, old)      # park current files (renames work while running)
+        _move_tree(pending, udir)  # staged files in
+        shutil.rmtree(pending, ignore_errors=True)
+    except OSError:
+        # Roll back whatever moved out. os.replace restores over any half-moved
+        # new files, so this converges on the intact old updater.
+        try:
+            _move_tree(old, udir)
+        except OSError:
+            pass
 
 
 def release_version(release: dict) -> Version | None:
@@ -144,21 +225,24 @@ class UpdateWorker(QThread):
     error = Signal(str)
     finished_signal = Signal()
 
-    # Paths inside the install dir that must never be overwritten or deleted by
-    # an update. Matched as posix-style path prefixes (relative to install_dir).
+    # Paths inside the install root that must never be overwritten or deleted by
+    # an update. Matched as posix-style path prefixes (relative to install root).
     PRESERVE_PATHS = (
         'config.json',
         'config.json.bak',
         'logs/',
     )
-    # The updater can't replace itself while running; skip its own files too.
+    # Root-level updater files from the old flat zip layout: can't be replaced
+    # while the updater runs, and there's no pending-swap path for them. Current
+    # zips ship the updater under updater/ instead, which is staged to
+    # updater_pending/ by _move_into_place.
     UPDATER_FILES = ('updater.exe', 'updater.py')
 
-    def __init__(self, api: GitHubAPI, release: dict, install_dir: str):
+    def __init__(self, api: GitHubAPI, release: dict, install_root: str):
         super().__init__()
         self.api = api
         self.release = release
-        self.install_dir = install_dir
+        self.install_root = install_root
 
     def run(self):
         try:
@@ -168,16 +252,24 @@ class UpdateWorker(QThread):
                 return
 
             self.stage_changed.emit('download')
-            temp_zip = os.path.join(tempfile.gettempdir(), 'update.zip')
-            self.api.download_asset(
-                asset_url, temp_zip,
-                progress_callback=lambda p: self.download_progress.emit(p)
-            )
+            # Unique temp name: a second updater instance or a stale leftover
+            # must never share the download file.
+            fd, temp_zip = tempfile.mkstemp(prefix='MonoCruise-update-', suffix='.zip')
+            os.close(fd)
+            try:
+                self.api.download_asset(
+                    asset_url, temp_zip,
+                    progress_callback=lambda p: self.download_progress.emit(p)
+                )
 
-            self.stage_changed.emit('install')
-            self._extract_update(temp_zip)
+                self.stage_changed.emit('install')
+                self._install_update(temp_zip)
+            finally:
+                try:
+                    os.remove(temp_zip)
+                except OSError:
+                    pass
 
-            os.remove(temp_zip)
             self.stage_changed.emit('finished')
             self.finished_signal.emit()
 
@@ -188,10 +280,10 @@ class UpdateWorker(QThread):
         """Return True if a zip member should not be extracted."""
         rel = member.replace('\\', '/')
         rel_lc = rel.lower()
-        # Skip the updater's own files (locked while it runs).
-        for name in self.UPDATER_FILES:
-            if rel_lc == name or rel_lc.endswith('/' + name):
-                return True
+        # Root-level only: updater/updater.exe from the current zip layout must
+        # go through the pending-swap path, not be skipped.
+        if rel_lc in self.UPDATER_FILES:
+            return True
         # Skip anything in the preserve list: never clobber user state.
         for path in self.PRESERVE_PATHS:
             if rel_lc == path.lower().rstrip('/'):
@@ -200,21 +292,77 @@ class UpdateWorker(QThread):
                 return True
         return False
 
-    def _extract_update(self, zip_path: str):
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            bad = zf.testzip()
-            if bad is not None:
-                raise ValueError(f"Corrupt entry in update package: {bad}")
-            members = [m for m in zf.namelist() if not self._should_skip(m)]
+    def _install_update(self, zip_path: str):
+        """Extract to a staging dir inside the install root, validate, then
+        move files into place.
 
-            install_real = os.path.realpath(self.install_dir)
-            for i, member in enumerate(members):
-                # Guard against Zip Slip: reject entries that escape install_dir
-                target = os.path.realpath(os.path.join(self.install_dir, member))
-                if not target.startswith(install_real + os.sep) and target != install_real:
-                    raise ValueError(f"Blocked malicious zip entry: {member}")
-                zf.extract(member, self.install_dir)
-                self.install_progress.emit((i + 1) / len(members))
+        Staging first means a corrupt archive, a full disk or an unwritable
+        install dir is caught before a single live file is touched; the move
+        phase that follows is same-volume renames only — the fastest and least
+        interruptible part. Staging inside the install root (not %TEMP%)
+        guarantees the renames stay on one volume.
+        """
+        staging = os.path.join(self.install_root, STAGING_DIR)
+        shutil.rmtree(staging, ignore_errors=True)
+        os.makedirs(staging)
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                bad = zf.testzip()
+                if bad is not None:
+                    raise ValueError(f"Corrupt entry in update package: {bad}")
+                members = [m for m in zf.namelist() if not self._should_skip(m)]
+
+                # Guard against Zip Slip before extracting anything.
+                staging_real = os.path.realpath(staging)
+                for member in members:
+                    target = os.path.realpath(os.path.join(staging, member))
+                    if not target.startswith(staging_real + os.sep) and target != staging_real:
+                        raise ValueError(f"Blocked malicious zip entry: {member}")
+
+                for i, member in enumerate(members):
+                    zf.extract(member, staging)
+                    self.install_progress.emit((i + 1) / len(members))
+
+            if not os.path.isfile(os.path.join(staging, 'MonoCruise.exe')):
+                raise ValueError("Update package is missing MonoCruise.exe")
+            self._ensure_app_not_running()
+            self._move_into_place(staging)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def _ensure_app_not_running(self):
+        """A running MonoCruise.exe locks the files about to be replaced.
+        Failing here, before any file has moved, beats failing halfway through.
+        """
+        exe = os.path.join(self.install_root, 'MonoCruise.exe')
+        if not os.path.exists(exe):
+            return
+        try:
+            with open(exe, 'r+b'):
+                pass
+        except PermissionError:
+            raise RuntimeError("Close MonoCruise before updating") from None
+
+    def _move_into_place(self, staging: str):
+        """Move validated staged files into the install tree.
+
+        The zip's updater/ subtree goes to updater_pending/ (the running
+        updater can't replace its own files; the next launch swaps them in —
+        see _apply_pending_self_update). Everything else renames straight into
+        the install root. Pending is staged first so the app-file loop below
+        never touches the live updater/ dir.
+        """
+        pending = os.path.join(self.install_root, PENDING_DIR)
+        staged_updater = os.path.join(staging, 'updater')
+        if os.path.isdir(staged_updater):
+            shutil.rmtree(pending, ignore_errors=True)
+            _move_tree(staged_updater, pending)
+            shutil.rmtree(staged_updater, ignore_errors=True)
+            # Sentinel written last: a partial pending dir (crash mid-move) is
+            # discarded at the next launch instead of being swapped in.
+            with open(os.path.join(pending, PENDING_SENTINEL), 'w', encoding="utf-8") as fh:
+                fh.write('')
+        _move_tree(staging, self.install_root)
 
 
 class ProgressLine(QWidget):
@@ -520,10 +668,10 @@ class SelectorPanel(QWidget):
         self.releases = []
         self.current_release = None
 
-        self.install_dir = install_dir()
-        self.channel = read_channel(self.install_dir)
-        self.installed_version = installed_version(self.install_dir)
-        self.installed_version_text = installed_version_text(self.install_dir)
+        self.install_root = install_root()
+        self.channel = read_channel(self.install_root)
+        self.installed_version = installed_version(self.install_root)
+        self.installed_version_text = installed_version_text(self.install_root)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -601,8 +749,8 @@ class SelectorPanel(QWidget):
         if body_match:
             body_content = body_match.group(1)
             if style_match:
-                styles = style_match.group(1)
-                body_content = f'<style>{styles}</style>{body_content}'
+                css = style_match.group(1)
+                body_content = f'<style>{css}</style>{body_content}'
             self.details.release_body.setText(body_content)
         else:
             self.details.release_body.setText(html_content)
@@ -678,13 +826,11 @@ class UpdaterWindow(QMainWindow):
         
         self.progress_panel.reset()
         self.selector_panel.update_btn.setEnabled(False)
-        
-        install_dir = os.path.dirname(os.path.abspath(__file__))
-        
+
         self.worker = UpdateWorker(
             self.api,
             self.selector_panel.current_release,
-            install_dir
+            install_root()
         )
         self.worker.download_progress.connect(self.progress_panel.set_download_progress)
         self.worker.install_progress.connect(self.progress_panel.set_install_progress)
@@ -700,7 +846,23 @@ class UpdaterWindow(QMainWindow):
     def _on_update_finished(self):
         self.selector_panel.update_btn.setEnabled(True)
         self._cleanup_worker()
-    
+        self._launch_app()
+
+    def _launch_app(self):
+        """Auto-start the freshly installed app. Must run only after the
+        install's file moves: once running, MonoCruise locks its files again."""
+        exe = os.path.join(install_root(), 'MonoCruise.exe')
+        if os.path.isfile(exe):
+            subprocess.Popen([exe], cwd=install_root())
+
+    def closeEvent(self, event):
+        # Killing the worker mid-move can leave a half-updated install; refuse
+        # to close while an update is running.
+        if self.worker is not None and self.worker.isRunning():
+            event.ignore()
+            return
+        super().closeEvent(event)
+
     def _on_error(self, message: str):
         self.selector_panel.update_btn.setEnabled(True)
         self.selector_panel.details.release_title.setText(f"Error: {message}")
@@ -716,13 +878,44 @@ class UpdaterWindow(QMainWindow):
             self.worker = None
 
 
+_INSTANCE_MUTEX = None
+
+
+def _other_instance_running() -> bool:
+    """True if another updater instance already holds the single-instance mutex.
+
+    Two concurrent updaters installing into the same directory would corrupt
+    each other (shared staging dir, competing file moves, double self-swap).
+    """
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        global _INSTANCE_MUTEX  # keep the handle alive for the process lifetime
+        _INSTANCE_MUTEX = kernel32.CreateMutexW(None, False, "MonoCruiseUpdaterSingleInstance")
+        return kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
+    except Exception:
+        return False  # non-Windows dev run: no guard needed
+
+
 def main():
+    duplicate = _other_instance_running()
+    if not duplicate:
+        # Finish a self-update staged by the previous run. Must happen before
+        # QApplication: Qt lazy-loads plugin DLLs from the updater dir, and
+        # loading them mid-session from a half-swapped tree could mix versions.
+        apply_pending_self_update()
+
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
-    
+
+    if duplicate:
+        QMessageBox.warning(None, "MonoCruise Updater",
+                            "The MonoCruise updater is already running.")
+        sys.exit(0)
+
     window = UpdaterWindow()
     window.show()
-    
+
     sys.exit(app.exec())
 
 

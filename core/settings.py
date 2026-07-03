@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -21,7 +22,13 @@ from pathlib     import Path
 
 from core.thread_management.registry import registry
 
-CONFIG_PATH = Path(__file__).parent.parent / "config.json"
+# Frozen (PyInstaller): __file__ resolves inside the bundle's _internal dir,
+# but config.json must live next to MonoCruise.exe in the install root, where
+# the standalone updater expects to find it (see updater/updater.py).
+if getattr(sys, "frozen", False):
+    CONFIG_PATH = Path(sys.executable).resolve().parent / "config.json"
+else:
+    CONFIG_PATH = Path(__file__).parent.parent / "config.json"
 BACKUP_PATH = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".bak")
 
 _log = logging.getLogger("settings")

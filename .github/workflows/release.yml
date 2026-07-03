@@ -82,13 +82,16 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          # Stage the install dir layout (main app + updater alongside it) and
-          # zip it. The updater extracts this on top of the install dir; it
-          # skips config.json and logs/ itself (see updater.py PRESERVE_PATHS).
+          # Stage the install dir layout and zip it. The updater installs this
+          # on top of the install root; it skips config.json and logs/ itself
+          # (see updater.py PRESERVE_PATHS). The updater lives in its own
+          # updater/ subdir with its own _internal so its files never collide
+          # with the app's and can be swapped by the self-update.
           $stage = "stage-update"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item -Recurse -Force dist/MonoCruise/* $stage/
-          Copy-Item -Recurse -Force dist/updater/*    $stage/
+          New-Item -ItemType Directory -Force -Path $stage/updater | Out-Null
+          Copy-Item -Recurse -Force dist/updater/*    $stage/updater/
           $zipName = "Update-${{ steps.version.outputs.tag }}.zip"
           Compress-Archive -Path "$stage/*" -DestinationPath "artifacts/$zipName" -CompressionLevel Optimal
           "update_zip=artifacts/$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append

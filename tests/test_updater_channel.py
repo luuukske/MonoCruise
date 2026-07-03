@@ -53,40 +53,34 @@ def test_latest_stable_none_when_only_prereleases():
 
 
 def test_read_channel(tmp_path):
-    # The app writes config.json to the install root; the updater lives in a
-    # subdir and reads one level up. Pass the subdir, write files to the root.
-    root = tmp_path
-    updater_dir = root / "updater"
-    updater_dir.mkdir()
-    directory = str(updater_dir)
+    # The app writes config.json to the install root; the updater reads it
+    # from there directly.
+    root = str(tmp_path)
 
-    assert mc.read_channel(directory) == "stable"  # no config -> default
+    assert mc.read_channel(root) == "stable"  # no config -> default
 
-    (root / "config.json").write_text(json.dumps({"update_channel": "preview"}))
-    assert mc.read_channel(directory) == "preview"
+    (tmp_path / "config.json").write_text(json.dumps({"update_channel": "preview"}))
+    assert mc.read_channel(root) == "preview"
 
-    (root / "config.json").write_text(json.dumps({"update_channel": "Preview"}))
-    assert mc.read_channel(directory) == "preview"  # case-insensitive
+    (tmp_path / "config.json").write_text(json.dumps({"update_channel": "Preview"}))
+    assert mc.read_channel(root) == "preview"  # case-insensitive
 
-    (root / "config.json").write_text(json.dumps({"update_channel": "nightly"}))
-    assert mc.read_channel(directory) == "stable"  # invalid -> default
+    (tmp_path / "config.json").write_text(json.dumps({"update_channel": "nightly"}))
+    assert mc.read_channel(root) == "stable"  # invalid -> default
 
-    (root / "config.json").write_text("not valid json")
-    assert mc.read_channel(directory) == "stable"  # unreadable -> default
+    (tmp_path / "config.json").write_text("not valid json")
+    assert mc.read_channel(root) == "stable"  # unreadable -> default
 
 
 def test_installed_version(tmp_path):
-    root = tmp_path
-    updater_dir = root / "updater"
-    updater_dir.mkdir()
-    directory = str(updater_dir)
+    root = str(tmp_path)
 
-    assert mc.installed_version(directory) is None
-    assert mc.installed_version_text(directory) == ""
+    assert mc.installed_version(root) is None
+    assert mc.installed_version_text(root) == ""
 
-    (root / "installed_version.txt").write_text("1.1.0-preview.1", encoding="utf-8")
-    assert mc.installed_version(directory) == Version("1.1.0-preview.1")
-    assert mc.installed_version_text(directory) == "1.1.0-preview.1"
+    (tmp_path / "installed_version.txt").write_text("1.1.0-preview.1", encoding="utf-8")
+    assert mc.installed_version(root) == Version("1.1.0-preview.1")
+    assert mc.installed_version_text(root) == "1.1.0-preview.1"
 
 
 def test_release_version_parsing():
