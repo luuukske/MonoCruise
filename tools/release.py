@@ -10,10 +10,10 @@ Two subcommands:
     python tools/release.py bump {major|minor|patch} --pre LABEL
         Pre-release. Bumps the base, then tags X.Y.Z-LABEL.1 (prerelease).
         Omit the level to advance the pre-release counter on the current base
-        (1.1.0 -> 1.1.0-beta.1 -> 1.1.0-beta.2). A plain level bump on a
+        (1.1.0 -> 1.1.0-preview.1 -> 1.1.0-preview.2). A plain level bump on a
         pre-release finalizes it: drops the suffix, keeps the base
-        (1.1.0-beta.3 + patch -> 1.1.0). CI marks any tag containing '-' as a
-        GitHub prerelease, so -LABEL.N builds land on the preview channel.
+        (1.1.0-preview.3 + patch -> 1.1.0). CI marks any tag containing '-' as
+        a GitHub prerelease, so -LABEL.N builds land on the preview channel.
 
     python tools/release.py bump --set X.Y.Z[-LABEL.N]
         Same as above but with an explicit version.
@@ -40,8 +40,8 @@ VERSION_FILE = ROOT / "core" / "version.py"
 CHANGELOG = ROOT / "CHANGELOG.md"
 
 # A version is MAJOR.MINOR.PATCH with an optional pre-release suffix -LABEL.N
-# (e.g. 1.1.0, 1.1.0-beta.1, 1.2.0-rc.3). The suffix is what distinguishes a
-# preview/beta build from a stable one; release.py must read and write both.
+# (e.g. 1.1.0, 1.1.0-preview.1, 1.2.0-rc.3). The suffix is what distinguishes
+# a preview build from a stable one; release.py must read and write both.
 _VERSION_RE = re.compile(
     r'^__version__\s*=\s*"(?P<v>\d+\.\d+\.\d+(?:-[A-Za-z]+\.\d+)?)"\s*$', re.M
 )
@@ -67,8 +67,8 @@ def _write_version(new_version: str) -> None:
 def _parse_version(v: str) -> tuple[str, str | None, int | None]:
     """Split a version into (base, pre_label, pre_num).
 
-    "1.1.0"        -> ("1.1.0", None, None)
-    "1.1.0-beta.2" -> ("1.1.0", "beta", 2)
+    "1.1.0"           -> ("1.1.0", None, None)
+    "1.1.0-preview.2" -> ("1.1.0", "preview", 2)
     """
     m = _PRE_RE.match(v)
     if not m:
@@ -92,16 +92,17 @@ def _bump(current: str, level: str | None = None, pre: str | None = None) -> str
     """Compute the next version.
 
     Rules:
-      - `--pre LABEL` with a level   : bump the base, then start the pre chain at
-                                       .1   (1.1.0 + minor --pre beta -> 1.2.0-beta.1)
+      - `--pre LABEL` with a level   : bump the base, then start the pre chain
+                                       at .1 (1.1.0 + minor --pre preview ->
+                                       1.2.0-preview.1)
       - `--pre LABEL` without a level: pre-release of the *current* base. Same
                                        label increments the counter; a new label
                                        resets it to .1
-                                       (1.1.0 -> 1.1.0-beta.1 -> 1.1.0-beta.2;
-                                        1.1.0-beta.2 + --pre rc -> 1.1.0-rc.1)
+                                       (1.1.0 -> 1.1.0-preview.1 -> 1.1.0-preview.2;
+                                        1.1.0-preview.2 + --pre rc -> 1.1.0-rc.1)
       - a level on a pre-release     : finalize. Drop the suffix and keep the base
                                        the pre chain was building toward
-                                       (1.1.0-beta.3 + patch -> 1.1.0, NOT 1.1.1)
+                                       (1.1.0-preview.3 + patch -> 1.1.0, NOT 1.1.1)
       - a level on a stable version  : ordinary semver bump.
     """
     base, label, num = _parse_version(current)
@@ -237,7 +238,7 @@ def main() -> None:
     bump.add_argument("--set", dest="set", help="explicit MAJOR.MINOR.PATCH[-LABEL.N]")
     bump.add_argument(
         "--pre", dest="pre", metavar="LABEL",
-        help="pre-release label, e.g. 'beta' or 'rc' (produces -LABEL.N)",
+        help="pre-release label, e.g. 'preview' or 'rc' (produces -LABEL.N)",
     )
     bump.add_argument("--dry-run", action="store_true", help="skip git operations")
     bump.set_defaults(func=cmd_bump)

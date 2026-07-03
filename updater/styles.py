@@ -30,6 +30,77 @@ TEXT_SECONDARY = "#b0b0b0"
 # Font
 FONT_FAMILY = "Inter, Sans-serif"
 
+# Ordered font fallback list for widgets we paint ourselves (QPainter.drawText
+# ignores CSS-style comma lists, so it needs an explicit QFont.setFamilies list).
+# Inter is not installed/bundled, so it resolves to the first available fallback.
+FONT_FALLBACKS = ["Inter", "Segoe UI", "sans-serif"]
+
+# Custom animated channel/version dropdown.
+#
+# The dropdown is a fully custom-painted widget
+# (styles.py QComboBox rules do not apply to it) because QSS cannot reproduce
+# box-shadow, transitions, transform/rotate or an animated border-radius.
+
+# Palette (monochrome, no accent colour)
+DROPDOWN_FIELD_BG = "#242424"       # field + popup background
+DROPDOWN_BORDER = "#3a3a3a"         # 1px border
+DROPDOWN_BORDER_HOVER = "#555555"   # field border on hover (#555)
+DROPDOWN_DIVIDER = "#383838"        # inset divider under the field
+DROPDOWN_TEXT = "#e8e8e8"           # field + row text
+DROPDOWN_CHEVRON = "#8a8a8a"        # chevron stroke
+DROPDOWN_SELECTION_BAR = "#d8d8d8"  # 3x15 selection marker bar
+DROPDOWN_ROW_HOVER_RGBA = (255, 255, 255, 13)  # rgba(255,255,255,.05) -> a=round(.05*255)=13
+DROPDOWN_SHADOW_RGBA = (0, 0, 0, 115)          # box-shadow rgba(0,0,0,.45) -> a=round(.45*255)=115
+
+# Box model (logical px, matching the CSS)
+DROPDOWN_RADIUS = 8                 # field/popup corner radius
+DROPDOWN_ROW_RADIUS = 6             # row hover/selection radius
+DROPDOWN_ROW_MARGIN_Y = 3           # vertical inset of the highlight box within
+                                    # each row -> a 2x gap between adjacent boxes
+                                    # (row pitch/text position unchanged)
+DROPDOWN_BORDER_W = 1
+DROPDOWN_FIELD_PAD_X = 13           # field padding: 9px 13px
+DROPDOWN_FIELD_PAD_Y = 9
+DROPDOWN_FIELD_GAP = 10             # gap between text and chevron
+DROPDOWN_CHEVRON_SIZE = 14          # svg 14x14 (viewBox 24, stroke-width 2.5)
+DROPDOWN_CHEVRON_STROKE = 2.5
+DROPDOWN_POPUP_PAD = 5              # popup padding when open
+DROPDOWN_DIVIDER_INSET = 8          # divider margin: 0 8px 6px
+DROPDOWN_DIVIDER_GAP = 6
+DROPDOWN_ROW_PAD_X = 10             # row padding: 9px 10px
+DROPDOWN_ROW_PAD_Y = 9
+DROPDOWN_BAR_W = 3                  # selection bar 3x15, radius 2
+DROPDOWN_BAR_H = 15
+DROPDOWN_BAR_RADIUS = 2
+DROPDOWN_BAR_GAP = 10               # gap between bar and text
+DROPDOWN_FONT_PX = 14               # font: 500 14px/1 Inter
+DROPDOWN_FONT_WEIGHT = 500          # QFont.Weight.Medium
+
+# Field/popup min widths (reference: version 190, channel 120)
+DROPDOWN_MIN_WIDTH_VERSION = 190
+DROPDOWN_MIN_WIDTH_CHANNEL = 120
+
+# Open-height length limit: the popup shows at most this many rows, longer lists
+# scroll. A thin thumb appears on the right edge when the list overflows.
+DROPDOWN_MAX_VISIBLE_ROWS = 6
+DROPDOWN_SCROLLBAR_W = 3
+DROPDOWN_SCROLLBAR_MARGIN = 3       # inset from the card's right/top/bottom edges
+DROPDOWN_SCROLLBAR_GAP = 2         # clearance between the highlight box and the thumb
+DROPDOWN_SCROLLBAR_RGBA = (255, 255, 255, 46)
+
+# Animation (reference data-props defaults: dur=250ms, stagger=40ms)
+DROPDOWN_DURATION_MS = 250
+DROPDOWN_STAGGER_MS = 30
+DROPDOWN_CASCADE_DELAY_MS = 100     # rows wait this long before sliding in, so the
+                                    # slide is visible after the popup has expanded
+DROPDOWN_OPACITY_MS = 175           # round(dur * 0.7)
+DROPDOWN_SLIDE_PX = 4               # popup translateY(-4px) -> translateY(0)
+DROPDOWN_ROW_OFFSET_PX = 7          # row translateY(-7px) on enter
+# Easing: field/popup/chevron use cubic-bezier(.22,1,.36,1); rows + opacity use
+# the CSS default "ease" = cubic-bezier(.25,.1,.25,1).
+DROPDOWN_EASE_SNAP = (0.22, 1.0, 0.36, 1.0)
+DROPDOWN_EASE_STD = (0.25, 0.1, 0.25, 1.0)
+
 
 def _combo_arrow_rule() -> str:
     """Render a down-arrow chevron to a temp PNG and return its stylesheet rule.

@@ -54,14 +54,12 @@ def fixed_today(monkeypatch):
         ("1.1.0", "patch", None, "1.1.1"),
         ("1.1.0", "minor", None, "1.2.0"),
         ("1.9.4", "major", None, "2.0.0"),
-        ("1.1.0", None, "beta", "1.1.0-beta.1"),
-        ("1.1.0-beta.1", None, "beta", "1.1.0-beta.2"),
-        ("1.1.0-beta.3", "patch", None, "1.1.0"),      # finalize -> drop suffix
-        ("1.1.0-beta.3", "minor", None, "1.1.0"),      # any level finalizes
-        ("1.1.0-beta.1", None, "rc", "1.1.0-rc.1"),    # label change resets counter
-        ("1.2.0-preview.3", "patch", None, "1.2.0"),
+        ("1.1.0", None, "preview", "1.1.0-preview.1"),
+        ("1.1.0-preview.1", None, "preview", "1.1.0-preview.2"),
+        ("1.1.0-preview.3", "patch", None, "1.1.0"),   # finalize -> drop suffix
+        ("1.1.0-preview.3", "minor", None, "1.1.0"),   # any level finalizes
+        ("1.1.0-preview.1", None, "rc", "1.1.0-rc.1"), # label change resets counter
         ("1.1.0", "minor", "preview", "1.2.0-preview.1"),
-        ("1.2.0-preview.1", None, "preview", "1.2.0-preview.2"),
     ],
 )
 def test_bump(current, level, pre, expected):
@@ -69,8 +67,8 @@ def test_bump(current, level, pre, expected):
 
 
 def test_read_version_handles_pre_release_suffix(repo):
-    repo.version_file.write_text(VERSION_TMPL.format(v="1.1.0-beta.2"), encoding="utf-8")
-    assert release._read_version() == "1.1.0-beta.2"
+    repo.version_file.write_text(VERSION_TMPL.format(v="1.1.0-preview.2"), encoding="utf-8")
+    assert release._read_version() == "1.1.0-preview.2"
 
 
 def test_unreleased_empty(repo):
@@ -98,13 +96,13 @@ def test_extract_section_missing(repo):
 
 def test_promote_unreleased(repo, fixed_today):
     write_changelog(repo.changelog, unreleased_body="\n### Added\n- thing one\n")
-    release._promote_unreleased("1.1.0-beta.1")
+    release._promote_unreleased("1.1.0-preview.1")
     text = repo.changelog.read_text(encoding="utf-8")
     assert "## [Unreleased]" in text
-    assert "## [1.1.0-beta.1] - 2026-06-26" in text
+    assert "## [1.1.0-preview.1] - 2026-06-26" in text
     assert "thing one" in text
     # Fresh [Unreleased] sits above the newly promoted section.
-    assert text.index("## [Unreleased]") < text.index("## [1.1.0-beta.1]")
+    assert text.index("## [Unreleased]") < text.index("## [1.1.0-preview.1]")
 
 
 def test_cmd_bump_refuses_empty_unreleased(repo):
@@ -116,10 +114,10 @@ def test_cmd_bump_refuses_empty_unreleased(repo):
 def test_cmd_bump_pre_dry_run(repo, fixed_today, monkeypatch):
     write_changelog(repo.changelog, unreleased_body="\n### Added\n- new\n")
     monkeypatch.setattr(release, "_run", lambda *a: pytest.fail("git must not run in dry-run"))
-    args = argparse.Namespace(set=None, level=None, pre="beta", dry_run=True)
+    args = argparse.Namespace(set=None, level=None, pre="preview", dry_run=True)
     release.cmd_bump(args)
-    assert release._read_version() == "1.1.0-beta.1"
-    assert "## [1.1.0-beta.1] - 2026-06-26" in repo.changelog.read_text(encoding="utf-8")
+    assert release._read_version() == "1.1.0-preview.1"
+    assert "## [1.1.0-preview.1] - 2026-06-26" in repo.changelog.read_text(encoding="utf-8")
 
 
 def test_cmd_notes(repo, capsys):

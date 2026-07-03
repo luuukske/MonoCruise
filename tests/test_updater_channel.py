@@ -21,8 +21,8 @@ import github_api  # noqa: E402
 mc = load_updater()
 
 RELEASES = [
-    {"id": 5, "tag_name": "v1.1.0-beta.2", "prerelease": True},
-    {"id": 4, "tag_name": "v1.1.0-beta.1", "prerelease": True},
+    {"id": 5, "tag_name": "v1.1.0-preview.2", "prerelease": True},
+    {"id": 4, "tag_name": "v1.1.0-preview.1", "prerelease": True},
     {"id": 3, "tag_name": "v1.0.4", "prerelease": False},
     {"id": 2, "tag_name": "v1.0.3", "prerelease": False},
 ]
@@ -34,58 +34,72 @@ def make_api(releases):
     return api
 
 
-def test_preview_sees_everything_stable_only_stable():
+def test_preview_only_prereleases_stable_only_stable():
     api = make_api(RELEASES)
-    assert [r["id"] for r in api.get_releases_for_channel("preview")] == [5, 4, 3, 2]
+    assert [r["id"] for r in api.get_releases_for_channel("preview")] == [5, 4]
     assert [r["id"] for r in api.get_releases_for_channel("stable")] == [3, 2]
 
 
 def test_latest_per_channel():
     api = make_api(RELEASES)
-    assert api.get_latest_release_for_channel("preview")["tag_name"] == "v1.1.0-beta.2"
+    assert api.get_latest_release_for_channel("preview")["tag_name"] == "v1.1.0-preview.2"
     assert api.get_latest_release_for_channel("stable")["tag_name"] == "v1.0.4"
 
 
 def test_latest_stable_none_when_only_prereleases():
     api = make_api([RELEASES[0], RELEASES[1]])  # both prerelease
     assert api.get_latest_release_for_channel("stable") is None
-    assert api.get_latest_release_for_channel("preview")["tag_name"] == "v1.1.0-beta.2"
+    assert api.get_latest_release_for_channel("preview")["tag_name"] == "v1.1.0-preview.2"
 
 
 def test_read_channel(tmp_path):
-    assert mc.read_channel(str(tmp_path)) == "stable"  # no config -> default
+    # The app writes config.json to the install root; the updater lives in a
+    # subdir and reads one level up. Pass the subdir, write files to the root.
+    root = tmp_path
+    updater_dir = root / "updater"
+    updater_dir.mkdir()
+    directory = str(updater_dir)
 
-    (tmp_path / "config.json").write_text(json.dumps({"update_channel": "preview"}))
-    assert mc.read_channel(str(tmp_path)) == "preview"
+    assert mc.read_channel(directory) == "stable"  # no config -> default
 
-    (tmp_path / "config.json").write_text(json.dumps({"update_channel": "Preview"}))
-    assert mc.read_channel(str(tmp_path)) == "preview"  # case-insensitive
+    (root / "config.json").write_text(json.dumps({"update_channel": "preview"}))
+    assert mc.read_channel(directory) == "preview"
 
-    (tmp_path / "config.json").write_text(json.dumps({"update_channel": "nightly"}))
-    assert mc.read_channel(str(tmp_path)) == "stable"  # invalid -> default
+    (root / "config.json").write_text(json.dumps({"update_channel": "Preview"}))
+    assert mc.read_channel(directory) == "preview"  # case-insensitive
 
-    (tmp_path / "config.json").write_text("not valid json")
-    assert mc.read_channel(str(tmp_path)) == "stable"  # unreadable -> default
+    (root / "config.json").write_text(json.dumps({"update_channel": "nightly"}))
+    assert mc.read_channel(directory) == "stable"  # invalid -> default
+
+    (root / "config.json").write_text("not valid json")
+    assert mc.read_channel(directory) == "stable"  # unreadable -> default
 
 
 def test_installed_version(tmp_path):
-    assert mc.installed_version(str(tmp_path)) is None
-    assert mc.installed_version_text(str(tmp_path)) == ""
+    root = tmp_path
+    updater_dir = root / "updater"
+    updater_dir.mkdir()
+    directory = str(updater_dir)
 
-    (tmp_path / "installed_version.txt").write_text("1.1.0-beta.1", encoding="utf-8")
-    assert mc.installed_version(str(tmp_path)) == Version("1.1.0-beta.1")
-    assert mc.installed_version_text(str(tmp_path)) == "1.1.0-beta.1"
+    assert mc.installed_version(directory) is None
+    assert mc.installed_version_text(directory) == ""
+
+    (root / "installed_version.txt").write_text("1.1.0-preview.1", encoding="utf-8")
+    assert mc.installed_version(directory) == Version("1.1.0-preview.1")
+    assert mc.installed_version_text(directory) == "1.1.0-preview.1"
 
 
 def test_release_version_parsing():
-    assert mc.release_version({"tag_name": "v1.1.0-beta.1"}) == Version("1.1.0-beta.1")
+    assert mc.release_version({"tag_name": "v1.1.0-preview.1"}) == Version("1.1.0-preview.1")
     assert mc.release_version({"tag_name": "1.0.4"}) == Version("1.0.4")
     assert mc.release_version({"tag_name": "garbage"}) is None
     assert mc.release_version({}) is None
 
 
 def test_prerelease_orders_below_final():
-    # PEP 440: a beta of 1.1.0 is older than 1.1.0 final, so a stable 1.1.0
-    # is correctly offered as an upgrade to a preview user on 1.1.0-beta.1.
-    assert Version("1.1.0-beta.1") < Version("1.1.0")
-    assert Version("1.1.0-beta.1") < Version("1.1.0-beta.2")
+    # PEP 440: a preview of 1.1.0 is older than 1.1.0 final, so a stable 1.1.0
+    # is correctly offered as an upgrade to a preview user on 1.1.0-preview.1.
+    # (packaging normalizes the "preview" label to "rc"; ordering still holds.)
+    assert Version("1.1.0-preview.1") < Version("1.1.0")
+    assert Version("1.1.0-preview.1") < Version("1.1.0-preview.2")
+    assert Version("1.1.0-preview.1") == Version("1.1.0rc1")

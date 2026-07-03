@@ -6,7 +6,7 @@ import tempfile
 import zipfile
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QLabel, QComboBox, QPushButton, QFrame, QScrollArea, QSpacerItem, QSizePolicy
+    QLabel, QPushButton, QFrame, QScrollArea, QSpacerItem, QSizePolicy
 )
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtCore import Qt, QThread, Signal, QByteArray
@@ -22,6 +22,7 @@ from packaging.version import Version, InvalidVersion
 
 from github_api import GitHubAPI
 from video_player import VideoPlayer
+from dropdown import Dropdown
 
 # The shared markdown renderer lives at the repo root (bundled into the updater
 # exe via updater.spec). Put the repo root on sys.path so `import shared` works
@@ -81,9 +82,14 @@ def install_dir() -> str:
 
 
 def read_channel(directory: str) -> str:
-    """Read the user's update channel from config.json. Defaults to 'stable'."""
+    """Read the user's update channel from config.json. Defaults to 'stable'.
+
+    config.json lives in the install root (the updater dir's parent), so look
+    there rather than in the updater's own directory.
+    """
     try:
-        with open(os.path.join(directory, "config.json"), encoding="utf-8") as fh:
+        path = os.path.join(os.path.dirname(directory), "config.json")
+        with open(path, encoding="utf-8") as fh:
             value = json.load(fh).get("update_channel")
         if isinstance(value, str) and value.lower() in {"stable", "preview"}:
             return value.lower()
@@ -93,9 +99,14 @@ def read_channel(directory: str) -> str:
 
 
 def installed_version_text(directory: str) -> str:
-    """Raw installed-version string as written by the app, or '' if unknown."""
+    """Raw installed-version string as written by the app, or '' if unknown.
+
+    The app writes the marker to the install root (config.json's directory),
+    which is the updater dir's parent, so look there.
+    """
     try:
-        with open(os.path.join(directory, "installed_version.txt"), encoding="utf-8") as fh:
+        path = os.path.join(os.path.dirname(directory), "installed_version.txt")
+        with open(path, encoding="utf-8") as fh:
             return fh.read().strip()
     except OSError:
         return ""
@@ -110,7 +121,7 @@ def installed_version(directory: str) -> Version | None:
 
 
 def release_version(release: dict) -> Version | None:
-    """Parse a release's tag (e.g. 'v1.1.0-beta.1') into a Version, or None."""
+    """Parse a release's tag (e.g. 'v1.1.0-preview.1') into a Version, or None."""
     tag = (release or {}).get("tag_name", "")
     try:
         return Version(tag[1:] if tag.startswith("v") else tag)
@@ -379,8 +390,7 @@ class SelectorSection(QFrame):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
         
-        self.channel_combo = QComboBox()
-        self.channel_combo.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.channel_combo = Dropdown(styles.DROPDOWN_MIN_WIDTH_CHANNEL)
         self.channel_combo.addItems(["Stable", "Preview"])
         layout.addWidget(self.channel_combo)
 
@@ -393,13 +403,8 @@ class SelectorSection(QFrame):
 
         layout.addStretch()
 
-        self.version_combo = QComboBox()
-        self.version_combo.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self.version_combo.setMinimumWidth(200)
-        # Grow to fit the longest tag so pre-release names aren't elided ("v1.1.0-b...").
-        self.version_combo.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToContents
-        )
+        # Grows to fit the longest tag so pre-release names aren't elided.
+        self.version_combo = Dropdown(styles.DROPDOWN_MIN_WIDTH_VERSION)
         layout.addWidget(self.version_combo)
 
 
@@ -557,8 +562,6 @@ class SelectorPanel(QWidget):
 
         for release in self.releases:
             tag = release['tag_name']
-            if release.get('prerelease'):
-                tag += " (pre-release)"
             self.selector.version_combo.addItem(tag, release)
 
         self._select_latest()

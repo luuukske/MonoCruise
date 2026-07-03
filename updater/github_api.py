@@ -51,7 +51,7 @@ class GitHubAPI:
     def get_releases_for_channel(self, channel: str) -> list[dict]:
         """Releases visible on an update channel, newest first.
 
-        'preview' sees everything (prereleases + stable); 'stable' sees only
+        'preview' sees only pre-release builds; 'stable' sees only
         non-prerelease builds. Selection is by each release's `prerelease`
         flag, which CI sets reliably from the tag suffix (a '-' in the tag).
         This deliberately does NOT filter on target_commitish: for releases
@@ -60,7 +60,7 @@ class GitHubAPI:
         """
         releases = self.get_releases()
         if channel == "preview":
-            return list(releases)
+            return [r for r in releases if r.get('prerelease', False)]
         return [r for r in releases if not r.get('prerelease', False)]
 
     def get_latest_release_for_channel(self, channel: str) -> Optional[dict]:
