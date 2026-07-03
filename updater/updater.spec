@@ -11,10 +11,16 @@ datas = collect_data_files('PySide6')
 
 a = Analysis(
     ['updater/updater.py'],
-    pathex=['updater'],
+    # Repo root ('.') is on the path so the shared UI library (shared/) is found
+    # and bundled; the updater imports it via `from shared import ...`.
+    pathex=['updater', '.'],
     binaries=[],
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=[
+        'shared',
+        'shared.theme',
+        'shared.markdown_renderer',
+    ],
     hookspath=[],
     runtime_hooks=[],
     excludes=[],

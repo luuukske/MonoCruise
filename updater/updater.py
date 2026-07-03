@@ -12,16 +12,59 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtCore import Qt, QThread, Signal, QByteArray
 from PySide6.QtGui import QPixmap, QFontDatabase, QPainter, QCursor
 
+import styles
 from styles import (
-    STYLESHEET, BG_SECTION, BG_SECTION_BORDER, COLOR_INACTIVE, 
+    STYLESHEET, BG_SECTION, BG_SECTION_BORDER, COLOR_INACTIVE,
     COLOR_ACTIVE, COLOR_PRERELEASE, TEXT_SECONDARY,
     UPDATE_BUTTON_STYLE, RELEASE_TITLE_STYLE, PRERELEASE_BADGE_STYLE
 )
 from packaging.version import Version, InvalidVersion
 
 from github_api import GitHubAPI
-from markdown_renderer import GitHubMarkdownRenderer
 from video_player import VideoPlayer
+
+# The shared markdown renderer lives at the repo root (bundled into the updater
+# exe via updater.spec). Put the repo root on sys.path so `import shared` works
+# both when running from source and from the frozen build.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+try:
+    from shared import GitHubMarkdownRenderer, Theme
+    _SHARED_OK = True
+except Exception:  # pragma: no cover - defensive: keep the updater usable
+    _SHARED_OK = False
+    Theme = None
+
+    class GitHubMarkdownRenderer:  # minimal fallback if shared can't load
+        def __init__(self, *_a, **_k):
+            self.video_url = None
+
+        def render(self, markdown_text: str) -> str:
+            import html as _html
+            return f"<pre>{_html.escape(markdown_text or '')}</pre>"
+
+        def get_video_url(self):
+            return None
+
+
+def _shared_theme():
+    """Build the shared Theme (markdown colours) from the updater's styles palette."""
+    if not _SHARED_OK:
+        return None
+    return Theme(
+        md_text_primary=styles.TEXT_PRIMARY,
+        md_text_secondary=styles.TEXT_SECONDARY,
+        md_section_border=styles.BG_SECTION_BORDER,
+        md_font_family=styles.FONT_FAMILY,
+        md_color_note=styles.COLOR_NOTE,
+        md_color_tip=styles.COLOR_TIP,
+        md_color_important=styles.COLOR_IMPORTANT,
+        md_color_warning=styles.COLOR_WARNING,
+        md_color_caution=styles.COLOR_CAUTION,
+        md_color_quote=styles.COLOR_QUOTE,
+    )
+
+
+THEME = _shared_theme()
 
 REPO_OWNER = "luuukske"
 REPO_NAME = "MonoCruise"
@@ -537,7 +580,7 @@ class SelectorPanel(QWidget):
         
         # Render markdown to HTML
         markdown_text = self.current_release.get('body', 'No description')
-        renderer = GitHubMarkdownRenderer()
+        renderer = GitHubMarkdownRenderer(THEME)
         html_content = renderer.render(markdown_text)
         
         # Load video if found: create player lazily, destroy when not needed

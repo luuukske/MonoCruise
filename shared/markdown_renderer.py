@@ -2,20 +2,23 @@
 Offline GitHub-flavored Markdown to HTML converter for PySide6.
 Supports GitHub alerts (NOTE, TIP, IMPORTANT, WARNING, CAUTION),
 code blocks, links, images, lists, and basic formatting.
+
+Palette is injected via a shared ``Theme`` (see ``shared.theme``) rather than
+imported from a specific app/updater styles module, so both the main app and
+the standalone updater can use it. Rendering logic is unchanged from the
+original updater renderer; only the colour source differs.
 """
 
 import re
 import html
 import base64
-from styles import (
-    COLOR_NOTE, COLOR_TIP, COLOR_IMPORTANT, COLOR_WARNING, COLOR_CAUTION,
-    TEXT_PRIMARY, TEXT_SECONDARY, BG_SECTION_BORDER, FONT_FAMILY, COLOR_QUOTE
-)
+
+from shared.theme import Theme
 
 
 class GitHubMarkdownRenderer:
     """Converts GitHub-flavored Markdown to HTML for QTextBrowser."""
-    
+
     SVG_ICONS = {
         'NOTE': '''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="ALERT_COLOR" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-info-icon lucide-info"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>''',
         'TIP': '''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="ALERT_COLOR" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-lightbulb-icon lucide-lightbulb"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/></svg>''',
@@ -23,81 +26,83 @@ class GitHubMarkdownRenderer:
         'WARNING': '''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="ALERT_COLOR" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-triangle-alert-icon lucide-triangle-alert"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>''',
         'CAUTION': '''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="ALERT_COLOR" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-octagon-alert-icon lucide-octagon-alert"><path d="M12 16h.01"/><path d="M12 8v4"/><path d="M15.312 2a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586l-4.688-4.688A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2z"/></svg>''',
     }
-    
-    ALERT_TYPES = {
-        'NOTE': {'color': COLOR_NOTE, 'icon': 'ℹ️'},
-        'TIP': {'color': COLOR_TIP, 'icon': '💡'},
-        'IMPORTANT': {'color': COLOR_IMPORTANT, 'icon': '❗'},
-        'WARNING': {'color': COLOR_WARNING, 'icon': '⚠️'},
-        'CAUTION': {'color': COLOR_CAUTION, 'icon': '🛑'},
-    }
-    
-    def __init__(self):
+
+    def __init__(self, theme: Theme | None = None):
+        self.theme = theme or Theme()
         self.video_url = None
-    
+        # Alert colours depend on the injected theme, so build the map per instance.
+        t = self.theme
+        self.ALERT_TYPES = {
+            'NOTE': {'color': t.md_color_note, 'icon': 'ℹ️'},
+            'TIP': {'color': t.md_color_tip, 'icon': '💡'},
+            'IMPORTANT': {'color': t.md_color_important, 'icon': '❗'},
+            'WARNING': {'color': t.md_color_warning, 'icon': '⚠️'},
+            'CAUTION': {'color': t.md_color_caution, 'icon': '🛑'},
+        }
+
     def render(self, markdown_text: str) -> str:
         """Convert markdown to HTML and extract video URL."""
         self.video_url = None
-        
+
         if not markdown_text:
             return ""
-        
+
         # Extract and remove the first video link from the top
         markdown_text = self._extract_and_remove_video(markdown_text)
         html_content = self._process_markdown(markdown_text)
-        
+
         return self._wrap_html(html_content)
-    
+
     def get_video_url(self) -> str | None:
         """Return the extracted video URL, or None."""
         return self.video_url
-    
+
     def _extract_and_remove_video(self, text: str) -> str:
         """Extract the first .mp4 video link from the top and remove it."""
         lines = text.split('\n')
         new_lines = []
         video_found = False
-        
+
         for i, line in enumerate(lines):
             if video_found:
                 new_lines.append(line)
                 continue
-            
+
             stripped = line.strip()
-            
+
             # Skip empty lines at the top before finding video
             if not stripped and not new_lines:
                 new_lines.append(line)
                 continue
-            
+
             # Check for markdown link format: [text](url.mp4)
             md_link_match = re.match(r'^\[([^\]]*)\]\((https?://[^\s)]+\.mp4(?:\?[^\s)]*)?)\)\s*$', stripped, re.IGNORECASE)
             if md_link_match:
                 self.video_url = md_link_match.group(2)
                 video_found = True
                 continue
-            
+
             # Check for bare URL format: https://...mp4
             bare_url_match = re.match(r'^(https?://[^\s<>\[\]()]+\.mp4(?:\?[^\s<>\[\]()]*)?)\s*$', stripped, re.IGNORECASE)
             if bare_url_match:
                 self.video_url = bare_url_match.group(1)
                 video_found = True
                 continue
-            
+
             # If we hit non-empty, non-video content, stop looking
             if stripped:
                 video_found = True  # Stop looking for video
-            
+
             new_lines.append(line)
-        
+
         return '\n'.join(new_lines)
-    
+
     def _process_markdown(self, text: str) -> str:
         """Process markdown text to HTML."""
         # Filter out SourceForge badge lines
-        text = re.sub(r'^\s*\[!\[.*?\]\(https://a\.fsdn\.com/.*?\)\]\(https://sourceforge\.net/.*?\)\s*$', 
+        text = re.sub(r'^\s*\[!\[.*?\]\(https://a\.fsdn\.com/.*?\)\]\(https://sourceforge\.net/.*?\)\s*$',
                     '', text, flags=re.MULTILINE)
-        
+
         lines = text.split('\n')
         result = []
         i = 0
@@ -114,10 +119,10 @@ class GitHubMarkdownRenderer:
         in_quote = False
         quote_content = []
         last_was_header = False
-        
+
         while i < len(lines):
             line = lines[i]
-            
+
             if line.strip().startswith('```'):
                 if in_code_block:
                     result.append(self._render_code_block('\n'.join(code_block_content), code_language))
@@ -130,30 +135,30 @@ class GitHubMarkdownRenderer:
                     code_language = line.strip()[3:].strip()
                 i += 1
                 continue
-            
+
             if in_code_block:
                 code_block_content.append(line)
                 i += 1
                 continue
-            
+
             alert_match = re.match(r'^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]', line)
             if alert_match:
                 if in_quote:
                     result.append(self._render_quote('\n'.join(quote_content)))
                     quote_content = []
                     in_quote = False
-                
+
                 if in_list:
                     alert_indent = list_indent_level + 1
                 else:
                     alert_indent = 0
-                
+
                 alert_type = alert_match.group(1)
                 in_alert = True
                 alert_content = []
                 i += 1
                 continue
-            
+
             if in_alert:
                 if line.startswith('>'):
                     content = line[1:].strip() if len(line) > 1 else ""
@@ -162,7 +167,7 @@ class GitHubMarkdownRenderer:
                     continue
                 else:
                     alert_html = self._render_alert(alert_type, '\n'.join(alert_content))
-                    
+
                     if in_list and alert_indent > 0:
                         if list_items:
                             prev = list_items[-1]
@@ -175,13 +180,13 @@ class GitHubMarkdownRenderer:
                             result.append(alert_html)
                     else:
                         result.append(alert_html)
-                    
+
                     in_alert = False
                     alert_type = ""
                     alert_content = []
                     alert_indent = 0
                     last_was_header = False
-            
+
             if line.startswith('>') and not alert_match:
                 if not in_quote:
                     in_quote = True
@@ -193,14 +198,14 @@ class GitHubMarkdownRenderer:
                 result.append(self._render_quote('\n'.join(quote_content)))
                 quote_content = []
                 in_quote = False
-            
+
             list_match = re.match(r'^(\s*)[-*+]\s+(.+)$', line)
             ordered_match = re.match(r'^(\s*)\d+\.\s+(.+)$', line)
-            
+
             if list_match or ordered_match:
                 if not in_list:
                     in_list = True
-                
+
                 if list_match:
                     indent_level = len(list_match.group(1)) // 2
                     content = list_match.group(2)
@@ -209,7 +214,7 @@ class GitHubMarkdownRenderer:
                     indent_level = len(ordered_match.group(1)) // 2
                     content = ordered_match.group(2)
                     list_items.append(('ol', indent_level, content))
-                
+
                 list_indent_level = indent_level
                 i += 1
                 continue
@@ -238,7 +243,7 @@ class GitHubMarkdownRenderer:
                 list_items = []
                 in_list = False
                 list_indent_level = 0
-            
+
             header_match = re.match(r'^[-\s]*(#{1,6})\s+(.+)$', line)
             if header_match:
                 level = len(header_match.group(1))
@@ -247,13 +252,13 @@ class GitHubMarkdownRenderer:
                 last_was_header = True
                 i += 1
                 continue
-            
+
             if re.match(r'^[-*_]{3,}\s*$', line):
                 result.append('<hr>')
                 last_was_header = False
                 i += 1
                 continue
-            
+
             if line.strip() == "":
                 if last_was_header:
                     last_was_header = False
@@ -261,23 +266,23 @@ class GitHubMarkdownRenderer:
                     result.append("<p></p>")
                 i += 1
                 continue
-            
+
             processed = self._process_inline(line)
             result.append(f'<p>{processed}</p>')
             last_was_header = False
             i += 1
-        
+
         if in_list:
             result.append(self._render_list(list_items))
-        
+
         if in_alert:
             result.append(self._render_alert(alert_type, '\n'.join(alert_content)))
-        
+
         if in_quote:
             result.append(self._render_quote('\n'.join(quote_content)))
-        
+
         return '\n'.join(result)
-    
+
     def _process_inline(self, text: str) -> str:
         """Process inline markdown elements."""
         text = html.escape(text)
@@ -289,9 +294,9 @@ class GitHubMarkdownRenderer:
         text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
         text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', r'<a href="\2">[Image: \1]</a>', text)
         text = re.sub(r'(?<!href=")(https?://[^\s<>"]+)', r'<a href="\1">\1</a>', text)
-        
+
         return text
-    
+
     def _render_quote(self, content: str) -> str:
         """Render a standard blockquote with grey left border."""
         processed_content = self._process_inline(content).replace('\n', '<br>')
@@ -309,15 +314,15 @@ class GitHubMarkdownRenderer:
         config = self.ALERT_TYPES.get(alert_type, self.ALERT_TYPES['NOTE'])
         alert_color = config['color']
         alert_title = alert_type.capitalize()
-        
+
         svg_template = self.SVG_ICONS.get(alert_type, '')
         svg_icon = svg_template.replace('ALERT_COLOR', alert_color)
-        
+
         svg_encoded = base64.b64encode(svg_icon.encode('utf-8')).decode('utf-8')
         svg_data_uri = f'data:image/svg+xml;base64,{svg_encoded}'
-        
+
         processed_content = self._process_inline(content)
-        
+
         return f'''
         <table cellpadding="0" cellspacing="0" class="alert alert-{alert_type.lower()}">
             <tr>
@@ -334,19 +339,19 @@ class GitHubMarkdownRenderer:
             </tr>
         </table>
         '''
-    
+
     def _render_code_block(self, code: str, language: str = "") -> str:
         """Render a code block."""
         escaped_code = html.escape(code)
         lang_label = f'<span class="code-lang">{language}</span><br>' if language else ''
-        
+
         return f'''
         <div class="code-block">
             {lang_label}
             <pre>{escaped_code}</pre>
         </div>
         '''
-    
+
     def _render_list(self, items: list) -> str:
         if not items:
             return ""
@@ -404,7 +409,7 @@ class GitHubMarkdownRenderer:
             close_list()
 
         return "\n".join(html_out)
-    
+
     def _hex_to_rgb(self, hex_color: str) -> str:
         """Convert hex color to RGB string for rgba()."""
         hex_color = hex_color.lstrip('#')
@@ -412,9 +417,20 @@ class GitHubMarkdownRenderer:
         g = int(hex_color[2:4], 16)
         b = int(hex_color[4:6], 16)
         return f"{r}, {g}, {b}"
-    
+
     def _wrap_html(self, content: str) -> str:
         """Wrap content in HTML document structure with GitHub-style CSS."""
+        t = self.theme
+        TEXT_PRIMARY = t.md_text_primary
+        TEXT_SECONDARY = t.md_text_secondary
+        BG_SECTION_BORDER = t.md_section_border
+        FONT_FAMILY = t.md_font_family
+        COLOR_NOTE = t.md_color_note
+        COLOR_TIP = t.md_color_tip
+        COLOR_IMPORTANT = t.md_color_important
+        COLOR_WARNING = t.md_color_warning
+        COLOR_CAUTION = t.md_color_caution
+        COLOR_QUOTE = t.md_color_quote
         return f'''
         <!DOCTYPE html>
         <html>

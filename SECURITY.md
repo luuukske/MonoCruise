@@ -1,10 +1,10 @@
 ﻿# Security Advisories
 
-## Last Scan: 2026-06-21
+## Last Scan: 2026-06-30
 
 **Scope:** PySide6 6.10.1, psutil 7.1.3, pygame 2.6.1, requests 2.34.2, urllib3 2.7.0, pygments 2.20.0, shapely 2.1.2, pytest 9.0.3, pyinstaller 6.18.0, truck-telemetry 0.0.3, pillow 12.0.0
 
-**2 active vulnerabilities**: pillow was downgraded to 12.0.0, re-exposing two previously resolved HIGH CVEs. Upgrade pillow ≥ 12.2.0. urllib3 and pygments are now clean.
+**4 active vulnerabilities**: pillow 12.0.0 remains unupgraded — 2 prior HIGH CVEs persist, plus 2 newly discovered CVEs (1 MEDIUM, 1 LOW skipped per policy). All resolved by upgrading pillow ≥ 12.2.0.
 
 ## Current Vulnerabilities
 
@@ -12,6 +12,7 @@
 |------------|---------|-----------|----------|----------|---------|---------------|
 | 2026-06-21 | pillow | 12.0.0 | **HIGH** (8.9) | [GHSA-cfh3-3jmp-rvhc](https://github.com/advisories/GHSA-cfh3-3jmp-rvhc) / CVE-2026-25990 | Out-of-bounds write when loading crafted PSD images (affects ≥ 10.3.0, < 12.1.1) | Yes: upgrade to ≥ 12.1.1 |
 | 2026-06-21 | pillow | 12.0.0 | **HIGH** (8.7) | [GHSA-whj4-6x5x-4v2j](https://github.com/advisories/GHSA-whj4-6x5x-4v2j) / CVE-2026-40192 | FITS GZIP decompression bomb: unbounded memory consumption (affects ≥ 10.3.0, < 12.2.0) | Yes: upgrade to ≥ 12.2.0 |
+| 2026-06-30 | pillow | 12.0.0 | MEDIUM (5.1) | [GHSA-wjx4-4jcj-g98j](https://github.com/advisories/GHSA-wjx4-4jcj-g98j) / CVE-2026-42308 | Integer overflow in font glyph position tracking during text rendering (affects < 12.2.0) | Yes: upgrade to ≥ 12.2.0 |
 
 ## Resolved Vulnerabilities
 
