@@ -53,6 +53,28 @@ class GitHubMarkdownRenderer:
 
         return self._wrap_html(html_content)
 
+    def render_blocks(self, markdown_text: str) -> list[str]:
+        """Like render(), but returns each top-level block (paragraph, list
+        item, heading, alert, ...) separately instead of one joined document --
+        lets a caller animate the changelog in one block at a time. Lists are
+        split into one block per top-level item so each line animates on its
+        own; <ol> numbering is carried across blocks via the start attribute."""
+        self.video_url = None
+
+        if not markdown_text:
+            return []
+
+        markdown_text = self._extract_and_remove_video(markdown_text)
+        return self._process_markdown_blocks(markdown_text, split_lists=True)
+
+    def style_css(self) -> str:
+        """The <style> tag render()/render_blocks() content relies on, for a
+        caller that renders each block into its own QLabel/QTextDocument.
+        Body padding is horizontal-only: each block is its own document, so
+        vertical padding would stack between every pair of labels instead of
+        appearing once around the whole changelog like render() has it."""
+        return self._style_tag(body_padding="0px 8px")
+
     def get_video_url(self) -> str | None:
         """Return the extracted video URL, or None."""
         return self.video_url
@@ -99,6 +121,15 @@ class GitHubMarkdownRenderer:
 
     def _process_markdown(self, text: str) -> str:
         """Process markdown text to HTML."""
+        return '\n'.join(self._process_markdown_blocks(text))
+
+    def _process_markdown_blocks(self, text: str, split_lists: bool = False) -> list[str]:
+        """Process markdown text into a list of top-level HTML blocks (one
+        per paragraph/heading/list/alert/etc.), in source order.
+
+        With split_lists, each top-level list item (plus its nested children)
+        becomes its own block; otherwise a whole list is one block, keeping
+        render() output identical to what it always produced."""
         # Filter out SourceForge badge lines
         text = re.sub(r'^\s*\[!\[.*?\]\(https://a\.fsdn\.com/.*?\)\]\(https://sourceforge\.net/.*?\)\s*$',
                     '', text, flags=re.MULTILINE)
@@ -219,7 +250,8 @@ class GitHubMarkdownRenderer:
                 i += 1
                 continue
             elif in_list and line.strip() == "":
-                result.append(self._render_list(list_items))
+                result.extend(self._render_list_blocks(list_items) if split_lists
+                              else [self._render_list(list_items)])
                 list_items = []
                 in_list = False
                 list_indent_level = 0
@@ -239,7 +271,8 @@ class GitHubMarkdownRenderer:
                     i += 1
                     continue
 
-                result.append(self._render_list(list_items))
+                result.extend(self._render_list_blocks(list_items) if split_lists
+                              else [self._render_list(list_items)])
                 list_items = []
                 in_list = False
                 list_indent_level = 0
@@ -273,7 +306,8 @@ class GitHubMarkdownRenderer:
             i += 1
 
         if in_list:
-            result.append(self._render_list(list_items))
+            result.extend(self._render_list_blocks(list_items) if split_lists
+                          else [self._render_list(list_items)])
 
         if in_alert:
             result.append(self._render_alert(alert_type, '\n'.join(alert_content)))
@@ -281,7 +315,7 @@ class GitHubMarkdownRenderer:
         if in_quote:
             result.append(self._render_quote('\n'.join(quote_content)))
 
-        return '\n'.join(result)
+        return result
 
     def _process_inline(self, text: str) -> str:
         """Process inline markdown elements."""
@@ -352,7 +386,34 @@ class GitHubMarkdownRenderer:
         </div>
         '''
 
-    def _render_list(self, items: list) -> str:
+    def _render_list_blocks(self, items: list) -> list[str]:
+        """Split one markdown list into one HTML block per top-level item,
+        each carrying its nested children. Ordered lists keep counting across
+        blocks through the <ol start=...> attribute (honoured by Qt rich text
+        since QTextListFormat gained a start property in Qt 6)."""
+        blocks = []
+        group = []
+        group_start = 1
+        ol_run = 0  # consecutive top-level ordered items so far
+
+        def flush():
+            if group:
+                blocks.append(self._render_list(group, start=group_start))
+                group.clear()
+
+        for tag, indent, content in items:
+            if indent == 0 or not group:
+                flush()
+                if indent == 0 and tag == 'ol':
+                    ol_run += 1
+                elif indent == 0:
+                    ol_run = 0  # a top-level bullet breaks the numbering run
+                group_start = max(1, ol_run)
+            group.append((tag, indent, content))
+        flush()
+        return blocks
+
+    def _render_list(self, items: list, start: int = 1) -> str:
         if not items:
             return ""
 
@@ -362,6 +423,8 @@ class GitHubMarkdownRenderer:
         def open_list(tag, indent):
             if tag == 'ul' and indent > 0:
                 html_out.append(f'<{tag} class="nested-list">')
+            elif tag == 'ol' and indent == 0 and start > 1:
+                html_out.append(f'<ol start="{start}">')
             else:
                 html_out.append(f'<{tag}>')
             stack.append(tag)
@@ -420,6 +483,24 @@ class GitHubMarkdownRenderer:
 
     def _wrap_html(self, content: str) -> str:
         """Wrap content in HTML document structure with GitHub-style CSS."""
+        return f'''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            {self._style_tag()}
+        </head>
+        <body>
+            <div class="container">
+                {content}
+            </div>
+        </body>
+        </html>
+        '''
+
+    def _style_tag(self, body_padding: str = "8px") -> str:
+        """The GitHub-style CSS shared by render() and render_blocks(); each
+        block from render_blocks() needs its own copy since every QLabel is
+        an independent rich-text document."""
         t = self.theme
         TEXT_PRIMARY = t.md_text_primary
         TEXT_SECONDARY = t.md_text_secondary
@@ -432,9 +513,6 @@ class GitHubMarkdownRenderer:
         COLOR_CAUTION = t.md_color_caution
         COLOR_QUOTE = t.md_color_quote
         return f'''
-        <!DOCTYPE html>
-        <html>
-        <head>
             <style>
                 * {{
                     max-width: 100%;
@@ -448,7 +526,7 @@ class GitHubMarkdownRenderer:
                     font-size: 14px;
                     line-height: 1.6;
                     margin: 0;
-                    padding: 8px;
+                    padding: {body_padding};
                     overflow-wrap: break-word;
                     word-break: break-word;
                 }}
@@ -585,11 +663,4 @@ class GitHubMarkdownRenderer:
                     color: {TEXT_SECONDARY};
                 }}
             </style>
-        </head>
-        <body>
-            <div class="container">
-                {content}
-            </div>
-        </body>
-        </html>
         '''

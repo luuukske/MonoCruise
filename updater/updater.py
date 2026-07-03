@@ -2,7 +2,6 @@
 import os
 import json
 import math
-import re
 import shutil
 import subprocess
 import tempfile
@@ -10,10 +9,13 @@ import zipfile
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QPushButton, QFrame, QScrollArea, QSpacerItem, QSizePolicy,
-    QMessageBox, QStackedWidget
+    QMessageBox, QStackedWidget, QGraphicsEffect
 )
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtCore import Qt, QThread, Signal, QByteArray, QTimer, QElapsedTimer
+from PySide6.QtCore import (
+    Qt, QThread, Signal, QByteArray, QTimer, QElapsedTimer, QPoint, QPointF,
+    Property, QPropertyAnimation, QEasingCurve,
+)
 from PySide6.QtGui import QPixmap, QFontDatabase, QPainter, QCursor
 
 import styles
@@ -26,7 +28,7 @@ from packaging.version import Version, InvalidVersion
 
 from github_api import GitHubAPI
 from video_player import VideoPlayer
-from dropdown import Dropdown
+from dropdown import Dropdown, EASE_STD
 
 # The shared markdown renderer lives at the repo root (bundled into the updater
 # exe via updater.spec). Put the repo root on sys.path so `import shared` works
@@ -46,6 +48,13 @@ except Exception:  # pragma: no cover - defensive: keep the updater usable
         def render(self, markdown_text: str) -> str:
             import html as _html
             return f"<pre>{_html.escape(markdown_text or '')}</pre>"
+
+        def render_blocks(self, markdown_text: str) -> list[str]:
+            rendered = self.render(markdown_text)
+            return [rendered] if rendered else []
+
+        def style_css(self) -> str:
+            return ""
 
         def get_video_url(self):
             return None
@@ -631,6 +640,137 @@ class SelectorSection(QFrame):
         layout.addWidget(self.version_combo)
 
 
+class _BlockEffect(QGraphicsEffect):
+    """Fade + slide-down-from-above for one changelog block, as a paint-time
+    graphics effect.
+
+    Animating at paint time (instead of e.g. animating margins) keeps every
+    label's geometry fixed for the whole cascade: the scroll-area layout never
+    reflows mid-animation, so the content height stays stable (no jitter when
+    scrolled to the bottom) and there is no snap when the animation lands.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._progress = 0.0
+
+    def set_progress(self, value: float):
+        if value != self._progress:
+            self._progress = value
+            self.update()
+
+    def boundingRectFor(self, rect):
+        # While sliding, the block paints up to ROW_OFFSET_PX above its rest
+        # position; the effect's bounds must cover that band.
+        return rect.adjusted(0, -styles.CHANGELOG_ROW_OFFSET_PX, 0, 0)
+
+    def draw(self, painter):
+        if self._progress >= 1.0:
+            self.drawSource(painter)  # at rest: skip the pixmap round-trip
+            return
+        if self._progress <= 0.0:
+            return
+        offset = QPoint()  # filled in by sourcePixmap
+        pixmap = self.sourcePixmap(
+            Qt.CoordinateSystem.LogicalCoordinates, offset,
+            QGraphicsEffect.PixmapPadMode.NoPad,
+        )
+        if pixmap.isNull():
+            return
+        dy = -styles.CHANGELOG_ROW_OFFSET_PX * (1.0 - self._progress)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.setOpacity(self._progress)
+        painter.drawPixmap(QPointF(offset.x(), offset.y() + dy), pixmap)
+        painter.restore()
+
+
+class ChangelogCascade(QWidget):
+    """Stacks the release notes as one QLabel per markdown block (heading/
+    paragraph/list item/alert/...) and, on a version change, cascades them in
+    with the same fade + slide stagger as the Dropdown's rows.
+
+    A single ``cascade`` clock drives every row's progress (mirroring
+    ``_PopupCard.cascade`` in dropdown.py) instead of one animation per row.
+    Blank-line spacer blocks are laid out but hold no stagger slot, so the
+    visible lines cascade back to back like the dropdown's rows do.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
+        self._rows: list[tuple[_BlockEffect, int]] = []  # (effect, stagger slot)
+        self._cascade = 0.0
+        self._anim = QPropertyAnimation(self, b"cascade", self)
+        self._anim.setEasingCurve(QEasingCurve(QEasingCurve.Type.Linear))
+
+    def _get_cascade(self) -> float:
+        return self._cascade
+
+    def _set_cascade(self, v: float):
+        self._cascade = v
+        self._apply_cascade()
+
+    cascade = Property(float, _get_cascade, _set_cascade)
+
+    def _apply_cascade(self):
+        dur = styles.CHANGELOG_DURATION_MS
+        for effect, slot in self._rows:
+            local = self._cascade - slot * styles.CHANGELOG_STAGGER_MS
+            t = 0.0 if local <= 0 else (1.0 if local >= dur else local / dur)
+            effect.set_progress(EASE_STD.valueForProgress(t))
+
+    def set_blocks(self, style_tag: str, blocks: list[str], animate: bool):
+        """Replace the shown blocks. Cascades them in only when *animate* is
+        set -- callers pass False when the version selection hasn't actually
+        changed, so re-rendering the same release doesn't replay the intro."""
+        self._anim.stop()
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            if item.widget():
+                item.widget().hide()  # gone this frame, not at deleteLater time
+                item.widget().deleteLater()
+        self._rows = []
+
+        slots = 0
+        for block_html in blocks:
+            label = QLabel()
+            label.setWordWrap(True)
+            label.setAlignment(Qt.AlignmentFlag.AlignTop)
+            label.setTextFormat(Qt.TextFormat.RichText)
+            label.setOpenExternalLinks(True)
+            label.setStyleSheet(f"""
+                QLabel {{
+                    color: {TEXT_SECONDARY};
+                    font-family: Inter, Sans-serif;
+                    font-size: 14px;
+                    line-height: 1.6;
+                }}
+            """)
+            label.setText(style_tag + block_html)
+            self._layout.addWidget(label)
+            if block_html.strip() == '<p></p>':
+                continue  # blank-line spacer: static, no stagger slot
+            effect = _BlockEffect(label)
+            effect.set_progress(1.0)
+            label.setGraphicsEffect(effect)
+            self._rows.append((effect, slots))
+            slots += 1
+
+        if not animate or not self._rows:
+            return  # effects already at rest (progress 1.0)
+
+        total = styles.CHANGELOG_STAGGER_MS * (slots - 1) + styles.CHANGELOG_DURATION_MS
+        self._cascade = 0.0
+        self._apply_cascade()  # progress 0 everywhere before the first paint
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(float(total))
+        self._anim.setDuration(total)
+        self._anim.start()
+
+
 class DetailsSection(QFrame):
     """Bottom section: Release details and update button."""
     
@@ -669,9 +809,9 @@ class DetailsSection(QFrame):
         layout.addLayout(title_row)
         
         # Scroll area for video player and release body
-        scroll = QScrollArea()
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidgetResizable(True)
+        self.scroll = QScrollArea()
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setWidgetResizable(True)
         
         # Container widget for scroll content
         scroll_content = QWidget()
@@ -687,31 +827,19 @@ class DetailsSection(QFrame):
         
         self.scroll_layout.addLayout(self.video_container)
         
-        # Release body (supports HTML for markdown rendering)
-        self.release_body = QLabel()
-        self.release_body.setWordWrap(True)
-        self.release_body.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.release_body.setTextFormat(Qt.TextFormat.RichText)
-        self.release_body.setOpenExternalLinks(True)
-        self.release_body.setStyleSheet(f"""
-            QLabel {{
-                color: {TEXT_SECONDARY};
-                font-family: Inter, Sans-serif;
-                font-size: 14px;
-                line-height: 1.6;
-            }}
-        """)
+        # Release body: one animated block per changelog line/section.
+        self.release_body = ChangelogCascade()
         self.scroll_layout.addWidget(self.release_body)
         
         self.scroll_layout.addStretch()
         
-        scroll.setWidget(scroll_content)
+        self.scroll.setWidget(scroll_content)
 
         # Stack: page 0 = release notes, 1 = loading splash, 2 = no connection.
         # Splash pages sit where the notes normally render, content centered.
         self.stack = QStackedWidget()
         self.stack.setStyleSheet(f"background-color: {BG_SECTION};")
-        self.stack.addWidget(scroll)
+        self.stack.addWidget(self.scroll)
         self.stack.addWidget(self._build_loading_page())
         self.stack.addWidget(self._build_offline_page())
         layout.addWidget(self.stack, stretch=1)
@@ -784,6 +912,7 @@ class SelectorPanel(QWidget):
         self.api = api
         self.releases = []
         self.current_release = None
+        self._last_version_key = None  # last tag_name shown, for cascade-on-change
 
         self.install_root = install_root()
         self.channel = read_channel(self.install_root)
@@ -922,11 +1051,12 @@ class SelectorPanel(QWidget):
             self.current_release['name'] or self.current_release['tag_name']
         )
         
-        # Render markdown to HTML
+        # Render markdown to one HTML block per changelog line/section
         markdown_text = self.current_release.get('body', 'No description')
         renderer = GitHubMarkdownRenderer(THEME)
-        html_content = renderer.render(markdown_text)
-        
+        blocks = renderer.render_blocks(markdown_text)
+        style_tag = renderer.style_css()
+
         # Load video if found: create player lazily, destroy when not needed
         video_url = renderer.get_video_url()
         if video_url:
@@ -934,20 +1064,18 @@ class SelectorPanel(QWidget):
             player.load_video(video_url)
         else:
             self.details.destroy_video_player()
-        
-        # Extract body content for QLabel
-        body_match = re.search(r'<body[^>]*>(.*?)</body>', html_content, re.DOTALL)
-        style_match = re.search(r'<style[^>]*>(.*?)</style>', html_content, re.DOTALL)
-        
-        if body_match:
-            body_content = body_match.group(1)
-            if style_match:
-                css = style_match.group(1)
-                body_content = f'<style>{css}</style>{body_content}'
-            self.details.release_body.setText(body_content)
-        else:
-            self.details.release_body.setText(html_content)
-        
+
+        # Cascade the changelog in only when the selected version actually
+        # changed (not on a redundant re-render of the same release). A new
+        # version starts reading from the top, so drop any old scroll offset
+        # before the new (differently sized) content lands.
+        version_key = self.current_release.get('tag_name')
+        animate = version_key != self._last_version_key
+        self._last_version_key = version_key
+        if animate:
+            self.details.scroll.verticalScrollBar().setValue(0)
+        self.details.release_body.set_blocks(style_tag, blocks, animate)
+
         if self.current_release.get('prerelease'):
             self.details.prerelease_badge.show()
         else:

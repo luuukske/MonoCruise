@@ -114,6 +114,15 @@ DROPDOWN_ROW_OFFSET_PX = 7          # row translateY(-7px) on enter
 DROPDOWN_EASE_SNAP = (0.22, 1.0, 0.36, 1.0)
 DROPDOWN_EASE_STD = (0.25, 0.1, 0.25, 1.0)
 
+# Changelog cascade: each release-notes block (paragraph/heading/list/alert)
+# fades + slides in like the dropdown's rows (styles.EASE_STD from
+# dropdown.py), on every version change. Faster than the dropdown's timings:
+# changelogs have far more rows than a dropdown, so the same stagger would
+# drag the intro out and get in the way of reading.
+CHANGELOG_STAGGER_MS = 15
+CHANGELOG_DURATION_MS = 250
+CHANGELOG_ROW_OFFSET_PX = DROPDOWN_ROW_OFFSET_PX
+
 
 def _combo_arrow_rule() -> str:
     """Render a down-arrow chevron to a temp PNG and return its stylesheet rule.
