@@ -20,6 +20,7 @@ a = Analysis(
         'shared',
         'shared.theme',
         'shared.markdown_renderer',
+        'shared.dropdown',
     ],
     hookspath=[],
     runtime_hooks=[],

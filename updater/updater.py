@@ -28,14 +28,15 @@ from packaging.version import Version, InvalidVersion
 
 from github_api import GitHubAPI
 from video_player import VideoPlayer
-from dropdown import Dropdown, EASE_STD
 
-# The shared markdown renderer lives at the repo root (bundled into the updater
-# exe via updater.spec). Put the repo root on sys.path so `import shared` works
-# both when running from source and from the frozen build.
+# The shared UI library (markdown renderer + dropdown) lives at the repo root
+# (bundled into the updater exe via updater.spec). Put the repo root on
+# sys.path so `import shared` works both when running from source and from the
+# frozen build.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from shared import GitHubMarkdownRenderer, Theme
+    from shared.dropdown import Dropdown, EASE_STD
     _SHARED_OK = True
 except Exception:  # pragma: no cover - defensive: keep the updater usable
     _SHARED_OK = False
@@ -58,6 +59,18 @@ except Exception:  # pragma: no cover - defensive: keep the updater usable
 
         def get_video_url(self):
             return None
+
+    from PySide6.QtWidgets import QComboBox
+
+    class Dropdown(QComboBox):  # plain combo if the shared widget can't load
+        def __init__(self, min_width: int, parent=None):
+            super().__init__(parent)
+            self.setMinimumWidth(min_width)
+
+    # CSS "ease", same control points the shared dropdown builds EASE_STD from.
+    EASE_STD = QEasingCurve(QEasingCurve.Type.BezierSpline)
+    EASE_STD.addCubicBezierSegment(QPointF(0.25, 0.1), QPointF(0.25, 1.0),
+                                   QPointF(1.0, 1.0))
 
 
 def _shared_theme():

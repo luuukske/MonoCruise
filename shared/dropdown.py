@@ -1,4 +1,4 @@
-"""Custom animated channel/version dropdown for the MonoCruise updater.
+"""Custom animated dropdown, shared between the MonoCruise app and the updater.
 
 This is a pixel-faithful port of the reference HTML/CSS/JS dropdown
 ("MonoCruise Dropdown.dc.html"). It is a fully custom-painted widget rather
@@ -18,10 +18,15 @@ Behaviour (mirrors the reference):
 - Selection is marked by a 3x15 bar at the row's left edge (no checkmark).
 - Dismisses on an outside click; closes if the owning window moves/resizes.
 
-``Dropdown`` exposes the subset of the ``QComboBox`` API the updater uses
+``Dropdown`` exposes the subset of the ``QComboBox`` API MonoCruise uses
 (addItem/addItems/clear/count/itemData/currentText/currentIndex/setCurrentIndex
 /setCurrentText + currentTextChanged/currentIndexChanged) so it is a drop-in
 replacement.
+
+The DROPDOWN_* constants below are the widget's own design (ported from the
+reference file), not app theming, so they live here rather than in a per-app
+styles module -- every app gets the identical control. Only the minimum field
+width is caller-supplied.
 """
 
 from __future__ import annotations
@@ -35,7 +40,66 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget, QGraphicsDropShadowEffect, QApplication
 
-import styles as S
+# Ordered font fallback list (QPainter.drawText ignores CSS-style comma lists,
+# so it needs an explicit QFont.setFamilies list). Inter is not
+# installed/bundled, so it resolves to the first available fallback.
+FONT_FALLBACKS = ["Inter", "Segoe UI", "sans-serif"]
+
+# Palette (monochrome, no accent colour)
+DROPDOWN_FIELD_BG = "#242424"       # field + popup background
+DROPDOWN_BORDER = "#3a3a3a"         # 1px border
+DROPDOWN_BORDER_HOVER = "#555555"   # field border on hover (#555)
+DROPDOWN_DIVIDER = "#383838"        # inset divider under the field
+DROPDOWN_TEXT = "#e8e8e8"           # field + row text
+DROPDOWN_CHEVRON = "#8a8a8a"        # chevron stroke
+DROPDOWN_SELECTION_BAR = "#d8d8d8"  # 3x15 selection marker bar
+DROPDOWN_ROW_HOVER_RGBA = (255, 255, 255, 13)  # rgba(255,255,255,.05) -> a=round(.05*255)=13
+DROPDOWN_SHADOW_RGBA = (0, 0, 0, 115)          # box-shadow rgba(0,0,0,.45) -> a=round(.45*255)=115
+
+# Box model (logical px, matching the CSS)
+DROPDOWN_RADIUS = 8                 # field/popup corner radius
+DROPDOWN_ROW_RADIUS = 6             # row hover/selection radius
+DROPDOWN_ROW_MARGIN_Y = 3           # vertical inset of the highlight box within
+                                    # each row -> a 2x gap between adjacent boxes
+                                    # (row pitch/text position unchanged)
+DROPDOWN_BORDER_W = 1
+DROPDOWN_FIELD_PAD_X = 13           # field padding: 9px 13px
+DROPDOWN_FIELD_PAD_Y = 9
+DROPDOWN_FIELD_GAP = 10             # gap between text and chevron
+DROPDOWN_CHEVRON_SIZE = 14          # svg 14x14 (viewBox 24, stroke-width 2.5)
+DROPDOWN_CHEVRON_STROKE = 2.5
+DROPDOWN_POPUP_PAD = 5              # popup padding when open
+DROPDOWN_DIVIDER_INSET = 8          # divider margin: 0 8px 6px
+DROPDOWN_DIVIDER_GAP = 6
+DROPDOWN_ROW_PAD_X = 10             # row padding: 9px 10px
+DROPDOWN_ROW_PAD_Y = 9
+DROPDOWN_BAR_W = 3                  # selection bar 3x15, radius 2
+DROPDOWN_BAR_H = 15
+DROPDOWN_BAR_RADIUS = 2
+DROPDOWN_BAR_GAP = 10               # gap between bar and text
+DROPDOWN_FONT_PX = 14               # font: 500 14px/1 Inter
+DROPDOWN_FONT_WEIGHT = 500          # QFont.Weight.Medium
+
+# Open-height length limit: the popup shows at most this many rows, longer lists
+# scroll. A thin thumb appears on the right edge when the list overflows.
+DROPDOWN_MAX_VISIBLE_ROWS = 6
+DROPDOWN_SCROLLBAR_W = 3
+DROPDOWN_SCROLLBAR_MARGIN = 3       # inset from the card's right/top/bottom edges
+DROPDOWN_SCROLLBAR_GAP = 2          # clearance between the highlight box and the thumb
+DROPDOWN_SCROLLBAR_RGBA = (255, 255, 255, 46)
+
+# Animation (reference data-props defaults: dur=250ms, stagger=40ms)
+DROPDOWN_DURATION_MS = 250
+DROPDOWN_STAGGER_MS = 30
+DROPDOWN_CASCADE_DELAY_MS = 100     # rows wait this long before sliding in, so the
+                                    # slide is visible after the popup has expanded
+DROPDOWN_OPACITY_MS = 175           # round(dur * 0.7)
+DROPDOWN_SLIDE_PX = 4               # popup translateY(-4px) -> translateY(0)
+DROPDOWN_ROW_OFFSET_PX = 7          # row translateY(-7px) on enter
+# Easing: field/popup/chevron use cubic-bezier(.22,1,.36,1); rows + opacity use
+# the CSS default "ease" = cubic-bezier(.25,.1,.25,1).
+DROPDOWN_EASE_SNAP = (0.22, 1.0, 0.36, 1.0)
+DROPDOWN_EASE_STD = (0.25, 0.1, 0.25, 1.0)
 
 
 def _curve(points) -> QEasingCurve:
@@ -50,15 +114,15 @@ def _curve(points) -> QEasingCurve:
     return c
 
 
-EASE_SNAP = _curve(S.DROPDOWN_EASE_SNAP)   # cubic-bezier(.22,1,.36,1)
-EASE_STD = _curve(S.DROPDOWN_EASE_STD)     # CSS "ease"
+EASE_SNAP = _curve(DROPDOWN_EASE_SNAP)   # cubic-bezier(.22,1,.36,1)
+EASE_STD = _curve(DROPDOWN_EASE_STD)     # CSS "ease"
 
 
 def dropdown_font() -> QFont:
     """Field/row font: 500 weight, 14px, Inter with system fallback."""
     f = QFont()
-    f.setFamilies(S.FONT_FALLBACKS)
-    f.setPixelSize(S.DROPDOWN_FONT_PX)
+    f.setFamilies(FONT_FALLBACKS)
+    f.setPixelSize(DROPDOWN_FONT_PX)
     f.setWeight(QFont.Weight.Medium)  # 500
     f.setStyleStrategy(QFont.StyleStrategy.PreferMatch)
     return f
@@ -145,13 +209,13 @@ class _PopupCard(QWidget):
         self._full_h = 0.0      # actual (possibly screen-clamped) open height
         self._scroll = 0.0      # row scroll offset when clamped
         self._reveal = 0.0
-        self._slide = -float(S.DROPDOWN_SLIDE_PX)
+        self._slide = -float(DROPDOWN_SLIDE_PX)
         self._cascade = 0.0
         self._alpha = 1.0  # whole-popup fade (content + shadow)
         self._anchor = 0             # rows above this index don't cascade (static)
 
         color = QColor(0, 0, 0)
-        color.setAlpha(S.DROPDOWN_SHADOW_RGBA[3])
+        color.setAlpha(DROPDOWN_SHADOW_RGBA[3])
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setOffset(0, 16)          # box-shadow: 0 16px ...
         shadow.setBlurRadius(30)         # ... 30px
@@ -164,11 +228,11 @@ class _PopupCard(QWidget):
         # Use the nominal 14px line box (CSS line-height:1), like the field does,
         # not QFontMetricsF.height() -- that keeps rows at the reference's 33px
         # and integer-aligned so the bottom border stays crisp.
-        return 2 * S.DROPDOWN_ROW_PAD_Y + max(S.DROPDOWN_FONT_PX, S.DROPDOWN_BAR_H)
+        return 2 * DROPDOWN_ROW_PAD_Y + max(DROPDOWN_FONT_PX, DROPDOWN_BAR_H)
 
     def _content_top(self) -> float:
         # popup padding + divider line + divider bottom margin
-        return S.DROPDOWN_POPUP_PAD + S.DROPDOWN_BORDER_W + S.DROPDOWN_DIVIDER_GAP
+        return DROPDOWN_POPUP_PAD + DROPDOWN_BORDER_W + DROPDOWN_DIVIDER_GAP
 
     def _rows_origin(self) -> float:
         # Origin of the row rects. Each highlight box is inset ROW_MARGIN_Y within
@@ -177,10 +241,10 @@ class _PopupCard(QWidget):
         # margins. Shifting the origin up by the inset (and trimming the bottom pad
         # by the same below) cancels that, so the box block's outer spacing matches
         # the left/right padding -- only the gaps *between* rows remain.
-        return self._content_top() - S.DROPDOWN_ROW_MARGIN_Y
+        return self._content_top() - DROPDOWN_ROW_MARGIN_Y
 
     def _bottom_pad(self) -> float:
-        return S.DROPDOWN_POPUP_PAD - S.DROPDOWN_ROW_MARGIN_Y
+        return DROPDOWN_POPUP_PAD - DROPDOWN_ROW_MARGIN_Y
 
     def _field_rect_local(self) -> QRectF:
         # The field this popup drops from sits directly above the card's content
@@ -206,7 +270,7 @@ class _PopupCard(QWidget):
         # thumb. When the list fits within the limit, behaviour matches the
         # reference (no scroll).
         min_h = self._rows_origin() + self.row_height() + self._bottom_pad()
-        row_cap = (self._rows_origin() + S.DROPDOWN_MAX_VISIBLE_ROWS * self.row_height()
+        row_cap = (self._rows_origin() + DROPDOWN_MAX_VISIBLE_ROWS * self.row_height()
                    + self._bottom_pad())
         limit = row_cap if cap <= 0 else min(cap, row_cap)
         self._full_h = max(min_h, min(self._natural_h, limit))
@@ -252,9 +316,9 @@ class _PopupCard(QWidget):
         # Only rows from the anchor down cascade; count from there so the clock
         # still runs long enough for every animating row to reach full opacity.
         n = len(self._items)
-        return (S.DROPDOWN_CASCADE_DELAY_MS
-                + max(0, n - 1 - self._anchor) * S.DROPDOWN_STAGGER_MS
-                + S.DROPDOWN_DURATION_MS)
+        return (DROPDOWN_CASCADE_DELAY_MS
+                + max(0, n - 1 - self._anchor) * DROPDOWN_STAGGER_MS
+                + DROPDOWN_DURATION_MS)
 
     # -- animatable properties ---------------------------------------------
     def _get_reveal(self) -> float:
@@ -357,28 +421,28 @@ class _PopupCard(QWidget):
         oy = _SHADOW_HALO + self._slide
         w = self._card_w
         h = self._reveal
-        radius = S.DROPDOWN_RADIUS
+        radius = DROPDOWN_RADIUS
         br = min(radius, h / 2.0)
 
         # Card background: top corners square (fused with the field), bottom
         # rounded. Inset by half the border on every side so the full 1px stroke
         # lands inside the widget and the bottom edge stays as crisp as the sides.
-        hb = S.DROPDOWN_BORDER_W / 2.0
+        hb = DROPDOWN_BORDER_W / 2.0
         outer = QRectF(ox + hb, oy + hb, w - 2 * hb, h - 2 * hb)
         path = _rounded_path(outer, 0, 0, br, br)
 
         p.save()
         p.setClipPath(path)
-        p.fillRect(QRectF(ox, oy, w, h), QColor(S.DROPDOWN_FIELD_BG))
+        p.fillRect(QRectF(ox, oy, w, h), QColor(DROPDOWN_FIELD_BG))
 
         # Inset divider (1px, #383838, 8px left/right inset), just under the top.
-        dy = oy + S.DROPDOWN_POPUP_PAD
+        dy = oy + DROPDOWN_POPUP_PAD
         p.setPen(Qt.PenStyle.NoPen)
         p.fillRect(
-            QRectF(ox + S.DROPDOWN_POPUP_PAD + S.DROPDOWN_DIVIDER_INSET, dy,
-                   w - 2 * (S.DROPDOWN_POPUP_PAD + S.DROPDOWN_DIVIDER_INSET),
-                   S.DROPDOWN_BORDER_W),
-            QColor(S.DROPDOWN_DIVIDER),
+            QRectF(ox + DROPDOWN_POPUP_PAD + DROPDOWN_DIVIDER_INSET, dy,
+                   w - 2 * (DROPDOWN_POPUP_PAD + DROPDOWN_DIVIDER_INSET),
+                   DROPDOWN_BORDER_W),
+            QColor(DROPDOWN_DIVIDER),
         )
 
         self._paint_rows(p, ox, oy)
@@ -388,22 +452,22 @@ class _PopupCard(QWidget):
         # Border: 1px #3a3a3a, left/bottom/right only (no top edge -> fuses with
         # the field, matching CSS border-top:none).
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(QColor(S.DROPDOWN_BORDER), S.DROPDOWN_BORDER_W))
+        p.setPen(QPen(QColor(DROPDOWN_BORDER), DROPDOWN_BORDER_W))
         p.drawPath(_open_border_path(outer, br))
         p.end()
 
     def _paint_rows(self, p: QPainter, ox: float, oy: float):
         rh = self.row_height()
-        pad = S.DROPDOWN_POPUP_PAD
+        pad = DROPDOWN_POPUP_PAD
         top = oy + self._rows_origin() - self._scroll
         row_w = self._card_w - 2 * pad
         # When the scrollbar is visible, pull the highlight boxes in on the right
         # so they clear the thumb instead of sliding under it. (Left-aligned text
         # is unaffected.)
         if self._scroll_max() > 0:
-            row_w = (self._card_w - S.DROPDOWN_SCROLLBAR_MARGIN - S.DROPDOWN_SCROLLBAR_W
-                     - S.DROPDOWN_SCROLLBAR_GAP - pad)
-        dur = S.DROPDOWN_DURATION_MS
+            row_w = (self._card_w - DROPDOWN_SCROLLBAR_MARGIN - DROPDOWN_SCROLLBAR_W
+                     - DROPDOWN_SCROLLBAR_GAP - pad)
+        dur = DROPDOWN_DURATION_MS
         p.setFont(self._font)
 
         # Clip rows to their viewport so scrolled content never overlaps the
@@ -421,11 +485,11 @@ class _PopupCard(QWidget):
             if ai < 0:
                 prog = 1.0
             else:
-                local = self._cascade - S.DROPDOWN_CASCADE_DELAY_MS - ai * S.DROPDOWN_STAGGER_MS
+                local = self._cascade - DROPDOWN_CASCADE_DELAY_MS - ai * DROPDOWN_STAGGER_MS
                 t = 0.0 if local <= 0 else (1.0 if local >= dur else local / dur)
                 prog = EASE_STD.valueForProgress(t)
             row_op = prog
-            row_dy = -S.DROPDOWN_ROW_OFFSET_PX * (1.0 - prog)
+            row_dy = -DROPDOWN_ROW_OFFSET_PX * (1.0 - prog)
             if row_op <= 0.01:
                 continue
 
@@ -436,29 +500,29 @@ class _PopupCard(QWidget):
             # Highlight box is inset vertically by ROW_MARGIN_Y top and bottom so
             # a symmetric gap opens between adjacent boxes; the row pitch (rh) and
             # text/bar positions are untouched, only the painted box shrinks.
-            my = S.DROPDOWN_ROW_MARGIN_Y
+            my = DROPDOWN_ROW_MARGIN_Y
             hl_rect = QRectF(ox + pad, ry + my, row_w, rh - 2 * my)
             selected = (i == self._selected)
             if selected or i == self._hover:
-                hov = QColor(*S.DROPDOWN_ROW_HOVER_RGBA)
+                hov = QColor(*DROPDOWN_ROW_HOVER_RGBA)
                 rp = QPainterPath()
-                rp.addRoundedRect(hl_rect, S.DROPDOWN_ROW_RADIUS, S.DROPDOWN_ROW_RADIUS)
+                rp.addRoundedRect(hl_rect, DROPDOWN_ROW_RADIUS, DROPDOWN_ROW_RADIUS)
                 p.fillPath(rp, hov)
 
             # Selection bar (3x15, radius 2) at the row's left padding.
-            bar_x = ox + pad + S.DROPDOWN_ROW_PAD_X
-            bar_y = ry + (rh - S.DROPDOWN_BAR_H) / 2.0
+            bar_x = ox + pad + DROPDOWN_ROW_PAD_X
+            bar_y = ry + (rh - DROPDOWN_BAR_H) / 2.0
             if selected:
                 bp = QPainterPath()
                 bp.addRoundedRect(
-                    QRectF(bar_x, bar_y, S.DROPDOWN_BAR_W, S.DROPDOWN_BAR_H),
-                    S.DROPDOWN_BAR_RADIUS, S.DROPDOWN_BAR_RADIUS,
+                    QRectF(bar_x, bar_y, DROPDOWN_BAR_W, DROPDOWN_BAR_H),
+                    DROPDOWN_BAR_RADIUS, DROPDOWN_BAR_RADIUS,
                 )
-                p.fillPath(bp, QColor(S.DROPDOWN_SELECTION_BAR))
+                p.fillPath(bp, QColor(DROPDOWN_SELECTION_BAR))
 
             # Row text.
-            text_x = bar_x + S.DROPDOWN_BAR_W + S.DROPDOWN_BAR_GAP
-            p.setPen(QColor(S.DROPDOWN_TEXT))
+            text_x = bar_x + DROPDOWN_BAR_W + DROPDOWN_BAR_GAP
+            p.setPen(QColor(DROPDOWN_TEXT))
             p.drawText(QRectF(text_x, ry, row_w, rh),
                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
             p.restore()
@@ -471,8 +535,8 @@ class _PopupCard(QWidget):
         content_h = self._natural_h - self._rows_origin() - self._bottom_pad()
         if smax <= 0 or content_h <= 0:
             return
-        inset = S.DROPDOWN_SCROLLBAR_MARGIN
-        sb_w = S.DROPDOWN_SCROLLBAR_W
+        inset = DROPDOWN_SCROLLBAR_MARGIN
+        sb_w = DROPDOWN_SCROLLBAR_W
         vp_top = oy + self._rows_origin()
         vp_h = self._full_h - self._rows_origin() - self._bottom_pad()
         track_top = vp_top + inset
@@ -486,7 +550,7 @@ class _PopupCard(QWidget):
         p.setOpacity(self._alpha)
         tp = QPainterPath()
         tp.addRoundedRect(QRectF(sb_x, thumb_y, sb_w, thumb_h), sb_w / 2.0, sb_w / 2.0)
-        p.fillPath(tp, QColor(*S.DROPDOWN_SCROLLBAR_RGBA))
+        p.fillPath(tp, QColor(*DROPDOWN_SCROLLBAR_RGBA))
         p.restore()
 
 
@@ -612,16 +676,16 @@ class Dropdown(QWidget):
     # -- sizing -------------------------------------------------------------
     def _field_height(self) -> int:
         # padding 9px top/bottom + 14px line box (font: .../1) + 1px top/bottom border.
-        content = max(S.DROPDOWN_FONT_PX, S.DROPDOWN_CHEVRON_SIZE)
-        return int(round(2 * S.DROPDOWN_FIELD_PAD_Y + content + 2 * S.DROPDOWN_BORDER_W))
+        content = max(DROPDOWN_FONT_PX, DROPDOWN_CHEVRON_SIZE)
+        return int(round(2 * DROPDOWN_FIELD_PAD_Y + content + 2 * DROPDOWN_BORDER_W))
 
     def _widest_text(self) -> float:
         widths = [self._fm.horizontalAdvance(t) for t, _ in self._items]
         return max(widths) if widths else 0.0
 
     def _field_width(self) -> int:
-        need = (2 * S.DROPDOWN_BORDER_W + 2 * S.DROPDOWN_FIELD_PAD_X
-                + self._widest_text() + S.DROPDOWN_FIELD_GAP + S.DROPDOWN_CHEVRON_SIZE)
+        need = (2 * DROPDOWN_BORDER_W + 2 * DROPDOWN_FIELD_PAD_X
+                + self._widest_text() + DROPDOWN_FIELD_GAP + DROPDOWN_CHEVRON_SIZE)
         return int(round(max(self._min_width, need)))
 
     def _apply_width(self):
@@ -668,11 +732,11 @@ class Dropdown(QWidget):
         self._card.show()
         self._card.raise_()
 
-        self._configure(self._anim_field, 1.0, S.DROPDOWN_DURATION_MS, EASE_SNAP)
+        self._configure(self._anim_field, 1.0, DROPDOWN_DURATION_MS, EASE_SNAP)
         self._configure(self._anim_reveal, self._card.full_height(),
-                        S.DROPDOWN_DURATION_MS, EASE_SNAP)
-        self._configure(self._anim_slide, 0.0, S.DROPDOWN_DURATION_MS, EASE_SNAP)
-        self._configure(self._anim_opacity, 1.0, S.DROPDOWN_OPACITY_MS, EASE_STD)
+                        DROPDOWN_DURATION_MS, EASE_SNAP)
+        self._configure(self._anim_slide, 0.0, DROPDOWN_DURATION_MS, EASE_SNAP)
+        self._configure(self._anim_opacity, 1.0, DROPDOWN_OPACITY_MS, EASE_STD)
         self._configure(self._anim_cascade, self._card.cascade_total(),
                         self._card.cascade_total(), QEasingCurve(QEasingCurve.Type.Linear))
         self._state = self._OPEN
@@ -683,11 +747,11 @@ class Dropdown(QWidget):
             return
         self._state = self._CLOSING
         self._anim_cascade.stop()  # rows stay put on close (no re-stagger)
-        self._configure(self._anim_field, 0.0, S.DROPDOWN_DURATION_MS, EASE_SNAP)
-        self._configure(self._anim_reveal, 0.0, S.DROPDOWN_DURATION_MS, EASE_SNAP)
-        self._configure(self._anim_slide, -float(S.DROPDOWN_SLIDE_PX),
-                        S.DROPDOWN_DURATION_MS, EASE_SNAP)
-        self._configure(self._anim_opacity, 0.0, S.DROPDOWN_OPACITY_MS, EASE_STD)
+        self._configure(self._anim_field, 0.0, DROPDOWN_DURATION_MS, EASE_SNAP)
+        self._configure(self._anim_reveal, 0.0, DROPDOWN_DURATION_MS, EASE_SNAP)
+        self._configure(self._anim_slide, -float(DROPDOWN_SLIDE_PX),
+                        DROPDOWN_DURATION_MS, EASE_SNAP)
+        self._configure(self._anim_opacity, 0.0, DROPDOWN_OPACITY_MS, EASE_STD)
         self._install_filter(False)
 
     def _on_reveal_finished(self):
@@ -777,34 +841,34 @@ class Dropdown(QWidget):
         op = self._open_progress
         w = float(self.width())
         h = float(self.height())
-        hb = S.DROPDOWN_BORDER_W / 2.0
+        hb = DROPDOWN_BORDER_W / 2.0
         rect = QRectF(hb, hb, w - 2 * hb, h - 2 * hb)
-        top_r = S.DROPDOWN_RADIUS
-        bot_r = S.DROPDOWN_RADIUS * (1.0 - op)  # bottom corners square as it opens
+        top_r = DROPDOWN_RADIUS
+        bot_r = DROPDOWN_RADIUS * (1.0 - op)  # bottom corners square as it opens
         path = _rounded_path(rect, top_r, top_r, bot_r, bot_r)
 
         # Background.
-        p.fillPath(path, QColor(S.DROPDOWN_FIELD_BG))
+        p.fillPath(path, QColor(DROPDOWN_FIELD_BG))
 
         # Border. On hover: #555; otherwise #3a3a3a.
-        border = QColor(S.DROPDOWN_BORDER_HOVER if self._hover else S.DROPDOWN_BORDER)
+        border = QColor(DROPDOWN_BORDER_HOVER if self._hover else DROPDOWN_BORDER)
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(border, S.DROPDOWN_BORDER_W))
+        p.setPen(QPen(border, DROPDOWN_BORDER_W))
         p.drawPath(path)
         # Bottom border fades to the background as it opens so the seam with the
         # popup disappears (CSS: border-bottom-color -> #242424).
         if op > 0:
-            seam = _lerp_color(border, QColor(S.DROPDOWN_FIELD_BG), op)
-            p.setPen(QPen(seam, S.DROPDOWN_BORDER_W))
+            seam = _lerp_color(border, QColor(DROPDOWN_FIELD_BG), op)
+            p.setPen(QPen(seam, DROPDOWN_BORDER_W))
             p.drawLine(QPointF(bot_r + hb, h - hb), QPointF(w - bot_r - hb, h - hb))
 
         # Field text.
         p.setFont(self._font)
-        p.setPen(QColor(S.DROPDOWN_TEXT))
+        p.setPen(QColor(DROPDOWN_TEXT))
         text_rect = QRectF(
-            S.DROPDOWN_BORDER_W + S.DROPDOWN_FIELD_PAD_X, 0,
-            w - 2 * (S.DROPDOWN_BORDER_W + S.DROPDOWN_FIELD_PAD_X)
-            - S.DROPDOWN_FIELD_GAP - S.DROPDOWN_CHEVRON_SIZE,
+            DROPDOWN_BORDER_W + DROPDOWN_FIELD_PAD_X, 0,
+            w - 2 * (DROPDOWN_BORDER_W + DROPDOWN_FIELD_PAD_X)
+            - DROPDOWN_FIELD_GAP - DROPDOWN_CHEVRON_SIZE,
             h,
         )
         p.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
@@ -814,15 +878,15 @@ class Dropdown(QWidget):
         p.end()
 
     def _paint_chevron(self, p: QPainter, w: float, h: float, op: float):
-        size = S.DROPDOWN_CHEVRON_SIZE
-        cx = w - S.DROPDOWN_BORDER_W - S.DROPDOWN_FIELD_PAD_X - size / 2.0
+        size = DROPDOWN_CHEVRON_SIZE
+        cx = w - DROPDOWN_BORDER_W - DROPDOWN_FIELD_PAD_X - size / 2.0
         cy = h / 2.0
         p.save()
         p.translate(cx, cy)
         p.rotate(180.0 * op)
         p.scale(size / 24.0, size / 24.0)   # svg viewBox is 24x24
         p.translate(-12, -12)
-        pen = QPen(QColor(S.DROPDOWN_CHEVRON), S.DROPDOWN_CHEVRON_STROKE)
+        pen = QPen(QColor(DROPDOWN_CHEVRON), DROPDOWN_CHEVRON_STROKE)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         path = QPainterPath()

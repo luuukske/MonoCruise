@@ -9,4 +9,8 @@ the standalone updater exe. Keep this package free of any imports from ``ui`` or
 from shared.theme import Theme
 from shared.markdown_renderer import GitHubMarkdownRenderer
 
+# The animated dropdown widget is NOT re-exported here: importing it pulls in
+# PySide6.QtWidgets, which non-GUI consumers of this package shouldn't pay for.
+# Use `from shared.dropdown import Dropdown` directly.
+
 __all__ = ["Theme", "GitHubMarkdownRenderer"]
