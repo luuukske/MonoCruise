@@ -5,6 +5,11 @@ from typing import Optional
 
 _REQUEST_TIMEOUT = 15  # seconds
 
+
+class GitHubAPIError(Exception):
+    """GitHub could not be reached or returned an error response."""
+
+
 class GitHubAPI:
     def __init__(self, owner: str, repo: str):
         self.owner = owner
@@ -20,14 +25,22 @@ class GitHubAPI:
         return []
     
     def get_releases(self) -> list[dict]:
-        """Fetch all releases including pre-releases."""
+        """Fetch all releases including pre-releases.
+
+        Raises GitHubAPIError when GitHub is unreachable (no internet) or
+        answers with a non-200 status (rate limit, outage) — callers must be
+        able to distinguish "no releases" from "couldn't ask".
+        """
         if self._releases_cache is not None:
             return self._releases_cache
-        response = requests.get(f"{self.base_url}/releases", timeout=_REQUEST_TIMEOUT)
-        if response.status_code == 200:
-            self._releases_cache = response.json()
-            return self._releases_cache
-        return []
+        try:
+            response = requests.get(f"{self.base_url}/releases", timeout=_REQUEST_TIMEOUT)
+        except requests.RequestException as e:
+            raise GitHubAPIError(f"Cannot reach GitHub: {e}") from e
+        if response.status_code != 200:
+            raise GitHubAPIError(f"GitHub returned HTTP {response.status_code}")
+        self._releases_cache = response.json()
+        return self._releases_cache
     
     def invalidate_cache(self):
         """Clear cached releases so the next call fetches fresh data."""

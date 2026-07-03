@@ -80,6 +80,19 @@ DROPDOWN_FONT_WEIGHT = 500          # QFont.Weight.Medium
 DROPDOWN_MIN_WIDTH_VERSION = 190
 DROPDOWN_MIN_WIDTH_CHANNEL = 120
 
+# Splash screens shown centered in the release-notes area: an indeterminate
+# sweep bar while the release list is fetched from GitHub, and a no-connection
+# notice when GitHub is unreachable.
+SPLASH_BAR_WIDTH = 180
+SPLASH_BAR_HEIGHT = 6
+SPLASH_BAR_SEGMENT = 0.35     # sweep segment width as a fraction of the bar
+SPLASH_BAR_PERIOD_MS = 1400   # one full left-right-left sweep
+SPLASH_BAR_FRAME_MS = 30      # repaint interval while the bar is visible
+SPLASH_ICON_SIZE = 48
+SPLASH_SPACING = 12
+SPLASH_TITLE_STYLE = f"color: {TEXT_PRIMARY}; font-size: 16px; font-weight: bold;"
+SPLASH_SUBTITLE_STYLE = f"color: {TEXT_SECONDARY}; font-size: 13px;"
+
 # Open-height length limit: the popup shows at most this many rows, longer lists
 # scroll. A thin thumb appears on the right edge when the list overflows.
 DROPDOWN_MAX_VISIBLE_ROWS = 6

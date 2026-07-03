@@ -90,6 +90,26 @@ def test_release_version_parsing():
     assert mc.release_version({}) is None
 
 
+def test_get_releases_raises_when_offline(monkeypatch):
+    def boom(*_a, **_k):
+        raise github_api.requests.ConnectionError("no internet")
+
+    monkeypatch.setattr(github_api.requests, "get", boom)
+    api = github_api.GitHubAPI("luuukske", "MonoCruise")
+    with pytest.raises(github_api.GitHubAPIError):
+        api.get_releases()
+
+
+def test_get_releases_raises_on_http_error(monkeypatch):
+    class Resp:
+        status_code = 403  # rate-limited
+
+    monkeypatch.setattr(github_api.requests, "get", lambda *_a, **_k: Resp())
+    api = github_api.GitHubAPI("luuukske", "MonoCruise")
+    with pytest.raises(github_api.GitHubAPIError):
+        api.get_releases()
+
+
 def test_prerelease_orders_below_final():
     # PEP 440: a preview of 1.1.0 is older than 1.1.0 final, so a stable 1.1.0
     # is correctly offered as an upgrade to a preview user on 1.1.0-preview.1.

@@ -1,6 +1,7 @@
 ﻿import sys
 import os
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -9,10 +10,10 @@ import zipfile
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QPushButton, QFrame, QScrollArea, QSpacerItem, QSizePolicy,
-    QMessageBox
+    QMessageBox, QStackedWidget
 )
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtCore import Qt, QThread, Signal, QByteArray
+from PySide6.QtCore import Qt, QThread, Signal, QByteArray, QTimer, QElapsedTimer
 from PySide6.QtGui import QPixmap, QFontDatabase, QPainter, QCursor
 
 import styles
@@ -213,7 +214,8 @@ def release_version(release: dict) -> Version | None:
 SVG_ICONS = { # credits to https://lucide.dev/
     'download': '''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 13v8l-4-4"/><path d="m12 21 4-4"/><path d="M4.393 15.269A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.436 8.284"/></svg>''',
     'install': '''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>''',
-    'check': '''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>'''
+    'check': '''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>''',
+    'wifi-off': '''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-wifi-off-icon lucide-wifi-off"><path d="M12 20h.01"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/><path d="M5 12.859a10 10 0 0 1 5.17-2.69"/><path d="M19 12.859a10 10 0 0 0-2.007-1.523"/><path d="M2 8.82a15 15 0 0 1 4.177-2.643"/><path d="M22 8.82a15 15 0 0 0-11.288-3.764"/><path d="m2 2 20 20"/></svg>'''
 }
 
 
@@ -365,6 +367,31 @@ class UpdateWorker(QThread):
         _move_tree(staging, self.install_root)
 
 
+# How long the no-connection splash waits before silently retrying the fetch.
+OFFLINE_RETRY_MS = 10_000
+
+
+class ReleaseFetchWorker(QThread):
+    """Fetch the release list off the UI thread so the loading splash can
+    animate while GitHub is queried."""
+    loaded = Signal(list, object)  # releases, latest release (dict | None)
+    failed = Signal(str)
+
+    def __init__(self, api: GitHubAPI, channel: str):
+        super().__init__()
+        self.api = api
+        self.channel = channel
+
+    def run(self):
+        try:
+            releases = self.api.get_releases_for_channel(self.channel)
+            latest = self.api.get_latest_release_for_channel(self.channel)
+        except Exception as e:
+            self.failed.emit(str(e))
+            return
+        self.loaded.emit(releases, latest)
+
+
 class ProgressLine(QWidget):
     """Vertical progress line with rounded corners - fills top to bottom."""
     
@@ -467,6 +494,54 @@ class IconWidget(QLabel):
         self._progress = max(0.0, min(1.0, progress))
         if self._active:
             self._render_icon()
+
+
+class LoadingBar(QWidget):
+    """Indeterminate horizontal bar: a rounded segment sweeps left-right-left.
+
+    The repaint timer only runs while the widget is visible, so a hidden
+    splash page costs nothing.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(styles.SPLASH_BAR_WIDTH, styles.SPLASH_BAR_HEIGHT)
+        self._clock = QElapsedTimer()
+        self._timer = QTimer(self)
+        self._timer.setInterval(styles.SPLASH_BAR_FRAME_MS)
+        self._timer.timeout.connect(self.update)
+
+    def showEvent(self, event):
+        self._clock.start()
+        self._timer.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, event):
+        from PySide6.QtGui import QBrush, QColor, QPainterPath
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w, h = self.width(), self.height()
+        radius = h / 2
+        track = QPainterPath()
+        track.addRoundedRect(0, 0, w, h, radius, radius)
+        painter.fillPath(track, QBrush(QColor(COLOR_INACTIVE)))
+
+        # Cosine-eased sweep position: 0 -> 1 -> 0 over one period.
+        period = styles.SPLASH_BAR_PERIOD_MS
+        t = (self._clock.elapsed() % period) / period
+        pos = 0.5 - 0.5 * math.cos(2 * math.pi * t)
+        seg_w = w * styles.SPLASH_BAR_SEGMENT
+        painter.setClipPath(track)
+        segment = QPainterPath()
+        segment.addRoundedRect(pos * (w - seg_w), 0, seg_w, h, radius, radius)
+        painter.fillPath(segment, QBrush(QColor(COLOR_ACTIVE)))
+        painter.end()
 
 
 class ProgressPanel(QFrame):
@@ -631,8 +706,50 @@ class DetailsSection(QFrame):
         self.scroll_layout.addStretch()
         
         scroll.setWidget(scroll_content)
-        layout.addWidget(scroll, stretch=1)
 
+        # Stack: page 0 = release notes, 1 = loading splash, 2 = no connection.
+        # Splash pages sit where the notes normally render, content centered.
+        self.stack = QStackedWidget()
+        self.stack.setStyleSheet(f"background-color: {BG_SECTION};")
+        self.stack.addWidget(scroll)
+        self.stack.addWidget(self._build_loading_page())
+        self.stack.addWidget(self._build_offline_page())
+        layout.addWidget(self.stack, stretch=1)
+
+    def _build_splash_page(self, widgets: list[QWidget]) -> QWidget:
+        """A page with its widgets centered both ways in the notes area."""
+        page = QWidget()
+        page.setStyleSheet(f"background-color: {BG_SECTION};")
+        v = QVBoxLayout(page)
+        v.setSpacing(styles.SPLASH_SPACING)
+        v.addStretch()
+        for widget in widgets:
+            v.addWidget(widget, alignment=Qt.AlignmentFlag.AlignHCenter)
+        v.addStretch()
+        return page
+
+    def _build_loading_page(self) -> QWidget:
+        self.loading_bar = LoadingBar()
+        label = QLabel("Loading releases…")
+        label.setStyleSheet(styles.SPLASH_SUBTITLE_STYLE)
+        return self._build_splash_page([self.loading_bar, label])
+
+    def _build_offline_page(self) -> QWidget:
+        icon = IconWidget('wifi-off', styles.SPLASH_ICON_SIZE)
+        title = QLabel("No internet connection")
+        title.setStyleSheet(styles.SPLASH_TITLE_STYLE)
+        subtitle = QLabel("Can't reach GitHub — retrying automatically")
+        subtitle.setStyleSheet(styles.SPLASH_SUBTITLE_STYLE)
+        return self._build_splash_page([icon, title, subtitle])
+
+    def show_content(self):
+        self.stack.setCurrentIndex(0)
+
+    def show_loading(self):
+        self.stack.setCurrentIndex(1)
+
+    def show_offline(self):
+        self.stack.setCurrentIndex(2)
 
     def ensure_video_player(self):
         """Create the VideoPlayer lazily when a video URL is found."""
@@ -692,6 +809,13 @@ class SelectorPanel(QWidget):
         # Expose for external access
         self.update_btn = self.details.update_btn
 
+        self._fetch_worker = None
+        self._pending_fetch = False  # a channel change arrived mid-fetch
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.setInterval(OFFLINE_RETRY_MS)
+        self._retry_timer.timeout.connect(self._retry_fetch)
+
         self._load_channel(self.channel)
 
     def _installed_text(self) -> str:
@@ -700,23 +824,92 @@ class SelectorPanel(QWidget):
         return f"Installed: v{self.installed_version_text}"
 
     def _load_channel(self, channel: str):
-        """Populate the version list with the releases visible on *channel*."""
+        """Fetch the releases visible on *channel* in the background and show
+        the loading splash meanwhile."""
         if not channel:
             return
         self.channel = channel.lower()
-        self.api.invalidate_cache()
-        self.releases = self.api.get_releases_for_channel(self.channel)
+        self._start_fetch(silent=False)
+
+    def _retry_fetch(self):
+        # Silent: keep the no-connection splash up instead of flashing the
+        # loader for every automatic retry.
+        self._start_fetch(silent=True)
+
+    def _start_fetch(self, silent: bool):
+        self._retry_timer.stop()
+        if self._fetch_worker is not None and self._fetch_worker.isRunning():
+            # A fetch is in flight (e.g. rapid channel switching); remember to
+            # refetch for the current channel once it lands.
+            self._pending_fetch = True
+            return
+        self._pending_fetch = False
+
+        self.releases = []
         self.selector.version_combo.clear()
+        self.details.release_title.setText("Select a version")
+        self.details.prerelease_badge.hide()
+        if not silent:
+            self.details.show_loading()
 
-        for release in self.releases:
-            tag = release['tag_name']
-            self.selector.version_combo.addItem(tag, release)
+        self.api.invalidate_cache()
+        worker = ReleaseFetchWorker(self.api, self.channel)
+        worker.loaded.connect(lambda releases, latest, w=worker: self._on_fetch_loaded(w, releases, latest))
+        worker.failed.connect(lambda _msg, w=worker: self._on_fetch_failed(w))
+        self._fetch_worker = worker
+        worker.start()
 
-        self._select_latest()
+    def _cleanup_fetch_worker(self, worker: ReleaseFetchWorker):
+        worker.wait()
+        worker.deleteLater()
+        if self._fetch_worker is worker:
+            self._fetch_worker = None
+
+    def _resume_pending_fetch(self) -> bool:
+        """Restart the fetch for the current channel if one was queued while
+        the finished worker ran; its results are stale either way."""
+        if not self._pending_fetch:
+            return False
+        self._start_fetch(silent=False)
+        return True
+
+    def _on_fetch_loaded(self, worker: ReleaseFetchWorker, releases: list, latest):
+        self._cleanup_fetch_worker(worker)
+        if self._resume_pending_fetch() or worker.channel != self.channel:
+            return
+        self.releases = releases
+        for release in releases:
+            self.selector.version_combo.addItem(release['tag_name'], release)
+        self.details.show_content()
+        self._select_latest(latest)
+
+    def _on_fetch_failed(self, worker: ReleaseFetchWorker):
+        self._cleanup_fetch_worker(worker)
+        if self._resume_pending_fetch() or worker.channel != self.channel:
+            return
+        self.details.show_offline()
+        self._retry_timer.start()
+
+    def orphan_fetch_worker(self):
+        """Detach a still-running fetch so the window can close immediately.
+        Returns the worker (for the caller to wait() on after the UI is gone)
+        or None. A blocking wait here would freeze the close for up to the
+        15s request timeout."""
+        self._retry_timer.stop()
+        worker = self._fetch_worker
+        self._fetch_worker = None
+        if worker is not None and worker.isRunning():
+            try:
+                worker.loaded.disconnect()
+                worker.failed.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            return worker
+        return None
 
     def _on_channel_changed(self, channel: str):
         self._load_channel(channel)
-    
+
     def _on_version_changed(self, index: int):
         if index < 0 or index >= len(self.releases):
             self.current_release = None
@@ -778,9 +971,7 @@ class SelectorPanel(QWidget):
         self.details.update_btn.setEnabled(not is_installed)
         self.details.update_btn.setText("Up to date" if is_installed else "Update")
 
-    def _select_latest(self):
-        latest = self.api.get_latest_release_for_channel(self.channel)
-
+    def _select_latest(self, latest):
         if latest:
             for i in range(self.selector.version_combo.count()):
                 if self.selector.version_combo.itemData(i)['id'] == latest['id']:
@@ -861,6 +1052,9 @@ class UpdaterWindow(QMainWindow):
         if self.worker is not None and self.worker.isRunning():
             event.ignore()
             return
+        # A release-list fetch is harmless to abandon, but its QThread must
+        # outlive the event loop; main() waits on it after exec() returns.
+        self.orphan_fetch = self.selector_panel.orphan_fetch_worker()
         super().closeEvent(event)
 
     def _on_error(self, message: str):
@@ -914,9 +1108,15 @@ def main():
         sys.exit(0)
 
     window = UpdaterWindow()
+    window.orphan_fetch = None
     window.show()
 
-    sys.exit(app.exec())
+    code = app.exec()
+    # Window is gone; joining an abandoned fetch thread here is invisible to
+    # the user and avoids destroying a running QThread at interpreter exit.
+    if window.orphan_fetch is not None:
+        window.orphan_fetch.wait()
+    sys.exit(code)
 
 
 if __name__ == "__main__":
