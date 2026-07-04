@@ -3,7 +3,6 @@
 PySide6
 psutil
 pygame
-shapely
 requests>=2.33.0
 urllib3>=2.7.0
 packaging  # PEP 440 version comparison in the updater (stable vs preview)
