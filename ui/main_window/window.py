@@ -227,6 +227,8 @@ class MonoCruiseWindow(QMainWindow):
             return
 
         self._panel_anim_group.stop()
+        if not target_open:
+            self._settings_panel.cancel_configuring()
         start = self._settings_panel.maximumWidth()
         end = SETTINGS_PANEL_WIDTH if target_open else 0
         self._panel_anim.setStartValue(start)

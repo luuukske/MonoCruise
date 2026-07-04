@@ -9,6 +9,7 @@ Reads and writes the shared ``core.settings.Settings`` instance directly.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import webbrowser
@@ -17,7 +18,6 @@ from typing import TYPE_CHECKING, Any, Callable
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QCheckBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -29,19 +29,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.input_bindings import binding_display_name, migrate_binding, resolve_held
+from core.thread_management.registry import registry
 from ui.main_window.constants import (
-    BG_COLOR,
-    HEADER_BG,
     RADIUS_SETTINGS_PANEL,
-    SETTINGS_COLOR,
     SETTINGS_PANEL_WIDTH,
-    WAITING_COLOR,
 )
 from ui.main_window.widgets import (
-    ClickableLabel,
+    BindButton,
+    CheckBox,
     new_beta_pill,
     new_checkbutton,
-    new_clickable_label,
     new_entry,
     new_label,
     new_optionmenu,
@@ -52,6 +50,19 @@ from ui.main_window.widgets import (
 if TYPE_CHECKING:
     from core.settings import Settings
     from ui.main_window.window import MonoCruiseWindow
+
+logger = logging.getLogger(__name__)
+
+# Settings fields that hold input bindings. The first three have configure
+# buttons in the panel; the ACC gap fields are included so duplicate-steal
+# checks cover every binding.
+_BIND_KEYS = (
+    "cc_start_button", "cc_inc_button", "cc_dec_button",
+    "acc_dist_inc_button", "acc_dist_dec_button",
+)
+
+_BIND_BUTTON_SIZE = (150, 30)
+_BIND_POLL_MS = 100
 
 # Resolve project‑root path for assets (gear.png, patreon.png, youtube.png
 # live at the project root in the original repo).
@@ -77,10 +88,24 @@ class SettingsPanel(QWidget):
         self._on_reset = on_reset
         self._reset_armed = False
 
+        # Button-binding capture state
+        self._bind_buttons: dict[str, BindButton] = {}
+        self._configuring_key: str | None = None
+        self._kb_capture_started = False
+        self._unassign_armed = False
+        # Keys whose freshly captured input is still held: blue "pressed"
+        # highlight stays off until the input is released once.
+        self._glow_suppress: set[str] = set()
+
         self.setMaximumWidth(SETTINGS_PANEL_WIDTH)
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        self.setStyleSheet("background-color: transparent;")
+        # Scope to this widget only. A selector-less stylesheet acts as
+        # `* { ... }` for the whole subtree and would override every
+        # background rule from the window stylesheet (buttons, inputs,
+        # section headers) inside the panel.
+        self.setObjectName("settingsPanel")
+        self.setStyleSheet("QWidget#settingsPanel { background-color: transparent; }")
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -112,11 +137,13 @@ class SettingsPanel(QWidget):
         scroll.setStyleSheet(
             "QScrollArea { border: none; border-radius: 0px; background-color: transparent; }"
         )
-        # Smooth scrolling (replicates yscrollincrement=3)
-        scroll.verticalScrollBar().setSingleStep(3)
+        # Smooth scrolling (replicates yscrollincrement=20)
+        scroll.verticalScrollBar().setSingleStep(20)
 
         inner = QWidget()
-        inner.setStyleSheet("background-color: transparent;")
+        inner.setObjectName("settingsInner")
+        # Scoped for the same reason as the panel stylesheet above.
+        inner.setStyleSheet("QWidget#settingsInner { background-color: transparent; }")
         self._grid = QGridLayout(inner)
         self._grid.setContentsMargins(10, 8, 10, 10)
         self._grid.setSpacing(4)
@@ -175,6 +202,12 @@ class SettingsPanel(QWidget):
             self._btn_youtube.hide()
             self._hide_btn.hide()
 
+        # Poll capture results and pressed-state highlights.
+        self._bind_timer = QTimer(self)
+        self._bind_timer.setInterval(_BIND_POLL_MS)
+        self._bind_timer.timeout.connect(self._poll_bindings)
+        self._bind_timer.start()
+
     # Row counter
 
     def _r(self, advance: int = 1) -> int:
@@ -209,7 +242,6 @@ class SettingsPanel(QWidget):
         )
 
         self.btn_connect = QPushButton("Connect to pedals")
-        self.btn_connect.setStyleSheet(f"background-color: {WAITING_COLOR};")
         self.btn_connect.clicked.connect(self._on_connect_pedals)
         self._grid.addWidget(self.btn_connect, self._r(), 0, 1, 2)
 
@@ -283,13 +315,20 @@ class SettingsPanel(QWidget):
             p, self._r(), 1,
             values=["Stable", "Preview"],
             default=s.update_channel.capitalize(),
-            callback=lambda v: self._set("update_channel", v.lower()),
+            callback=self._on_update_channel_changed,
         )
+        r_preview = self._r()
         new_subtext(
-            p, self._r(), 0,
+            p, r_preview, 0,
             "Preview builds are released earlier and may contain bugs.",
             col_span=2,
         )
+        self._preview_channel_row = r_preview
+        self._set_row_visible(r_preview, s.update_channel.lower() == "preview")
+
+    def _on_update_channel_changed(self, value: str) -> None:
+        self._set("update_channel", value.lower())
+        self._set_row_visible(self._preview_channel_row, value.lower() == "preview")
 
     def _on_hazards_toggled(self, checked: bool) -> None:
         self._set("hazards_variable", checked)
@@ -315,56 +354,65 @@ class SettingsPanel(QWidget):
         # Segmented button pair
         r_mode = self._row - 1  # reuse same row
         seg_frame = QFrame()
-        seg_frame.setStyleSheet(
-            f"QFrame {{ border: 1.5px solid {SETTINGS_COLOR}; "
-            f"border-radius: 7px; background-color: {BG_COLOR}; }}"
-        )
+        seg_frame.setObjectName("segFrame")
         seg_lay = QHBoxLayout(seg_frame)
-        seg_lay.setContentsMargins(0, 0, 0, 0)
-        seg_lay.setSpacing(0)
+        seg_lay.setContentsMargins(2, 2, 2, 2)
+        seg_lay.setSpacing(2)
 
         self._seg_cc = QPushButton("Cruise control")
         self._seg_sl = QPushButton("Speed limiter")
-        for btn in (self._seg_cc, self._seg_sl):
-            btn.setStyleSheet("border-radius: 0px; padding: 5px 12px;")
+        for btn, mode in ((self._seg_cc, "cc"), (self._seg_sl, "limiter")):
+            btn.setObjectName("segButton")
+            btn.setProperty("segMode", mode)
+            btn.setFixedHeight(22)
+        # 22px pills + 2px inset + 2px frame border = 30px, same as the
+        # bind buttons.
+        seg_frame.setFixedHeight(30)
         self._seg_cc.clicked.connect(lambda: self._set_cruise_mode("Cruise control"))
         self._seg_sl.clicked.connect(lambda: self._set_cruise_mode("Speed limiter"))
         seg_lay.addWidget(self._seg_cc)
         seg_lay.addWidget(self._seg_sl)
         self._grid.addWidget(
             seg_frame, self._r(), 0, 1, 2,
-            Qt.AlignmentFlag.AlignRight,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
         )
         self._update_seg_style(s.cc_mode)
 
-        # Button detection rows
-        new_label(p, self._r(0), 0, "Enable/Disable button:")
-        self.lbl_enable_btn = new_clickable_label(
+        # Global speed limiter (empty → None disables both CC clamp and
+        # always-on limiter — see AGENTS.md global_speed_limit_kmh).
+        new_label(p, self._r(0), 0, "Global speed limiter:")
+        self.ent_global_limit = new_entry(
             p, self._r(), 1,
-            self._format_btn(s.cc_start_button),
-            callback=self._detect_enable_btn,
+            value=s.global_speed_limit_kmh, value_type=int,
+            minimum=60, maximum=130, optional=True,
+            suffix="km/h",
+            callback=lambda v: self._set("global_speed_limit_kmh", v),
         )
+        new_subtext(
+            p, self._r(), 0,
+            "Empty to disable.",
+            col_span=2,
+        )
+
+        # Button configure rows
+        new_label(p, self._r(0), 0, "Enable/Disable button:")
+        self._add_bind_button(self._r(), "cc_start_button")
 
         new_label(p, self._r(0), 0, "Increase button:")
-        self.lbl_increase_btn = new_clickable_label(
-            p, self._r(), 1,
-            self._format_btn(s.cc_inc_button),
-            callback=self._detect_increase_btn,
-        )
+        self._add_bind_button(self._r(), "cc_inc_button")
 
         new_label(p, self._r(0), 0, "Decrease button:")
-        self.lbl_decrease_btn = new_clickable_label(
-            p, self._r(), 1,
-            self._format_btn(s.cc_dec_button),
-            callback=self._detect_decrease_btn,
-        )
+        self._add_bind_button(self._r(), "cc_dec_button")
 
-        # Unassign button
-        unassign_btn = QPushButton("Unassign")
-        unassign_btn.setFixedWidth(150)
-        unassign_btn.clicked.connect(self._unassign_buttons)
+        # Unassign button: arms unassign mode, or clears the binding
+        # currently being configured.
+        self._unassign_btn = QPushButton("Unassign")
+        self._unassign_btn.setObjectName("unassignButton")
+        self._unassign_btn.setFixedSize(*_BIND_BUTTON_SIZE)
+        self._unassign_btn.setProperty("armed", False)
+        self._unassign_btn.clicked.connect(self._on_unassign_clicked)
         self._grid.addWidget(
-            unassign_btn, self._r(), 0, 1, 2,
+            self._unassign_btn, self._r(), 0, 1, 2,
             Qt.AlignmentFlag.AlignRight,
         )
 
@@ -417,14 +465,15 @@ class SettingsPanel(QWidget):
         r_acc = self._r()
         new_label(p, r_acc, 0, "Adaptive Cruise Control:")
         acc_widget = QWidget()
-        acc_widget.setStyleSheet("background: transparent;")
+        acc_widget.setObjectName("transparentRow")
+        acc_widget.setStyleSheet("QWidget#transparentRow { background: transparent; }")
         acc_lay = QHBoxLayout(acc_widget)
         acc_lay.setContentsMargins(0, 0, 0, 0)
         acc_lay.setSpacing(4)
         acc_pill = new_beta_pill()
         acc_lay.addStretch()
         acc_lay.addWidget(acc_pill)
-        self.chk_acc = QCheckBox()
+        self.chk_acc = CheckBox()
         self.chk_acc.setFixedSize(24, 24)
         self.chk_acc.setChecked(bool(s.acc_enabled))
         self.chk_acc.toggled.connect(self._on_acc_toggled)
@@ -435,14 +484,15 @@ class SettingsPanel(QWidget):
         r_aeb = self._r()
         new_label(p, r_aeb, 0, "Emergency Braking:")
         aeb_widget = QWidget()
-        aeb_widget.setStyleSheet("background: transparent;")
+        aeb_widget.setObjectName("transparentRow")
+        aeb_widget.setStyleSheet("QWidget#transparentRow { background: transparent; }")
         aeb_lay = QHBoxLayout(aeb_widget)
         aeb_lay.setContentsMargins(0, 0, 0, 0)
         aeb_lay.setSpacing(4)
         aeb_pill = new_beta_pill()
         aeb_lay.addStretch()
         aeb_lay.addWidget(aeb_pill)
-        self.chk_aeb = QCheckBox()
+        self.chk_aeb = CheckBox()
         self.chk_aeb.setFixedSize(24, 24)
         self.chk_aeb.setChecked(s.AEB_enabled)
         self.chk_aeb.toggled.connect(self._on_aeb_toggled)
@@ -450,12 +500,6 @@ class SettingsPanel(QWidget):
         self._grid.addWidget(aeb_widget, r_aeb, 1)
 
     # Cruise helpers
-
-    @staticmethod
-    def _format_btn(value: Any) -> str:
-        if value is None or value == "":
-            return "Click to assign"
-        return str(value)
 
     def _speed_unit(self) -> str:
         # ATS uses mph, ETS2 uses km/h.
@@ -481,41 +525,278 @@ class SettingsPanel(QWidget):
         self._update_seg_style(mode)
 
     def _update_seg_style(self, mode: str) -> None:
-        if mode == "Cruise control" or mode == "ACC":
-            self._seg_cc.setStyleSheet(
-                f"background-color: {WAITING_COLOR}; border-radius: 0px; padding: 5px 12px;"
-            )
-            self._seg_sl.setStyleSheet(
-                f"background-color: {SETTINGS_COLOR}; border-radius: 0px; padding: 5px 12px;"
-            )
-        else:
-            self._seg_cc.setStyleSheet(
-                f"background-color: {SETTINGS_COLOR}; border-radius: 0px; padding: 5px 12px;"
-            )
-            self._seg_sl.setStyleSheet(
-                f"background-color: {WAITING_COLOR}; border-radius: 0px; padding: 5px 12px;"
-            )
+        cc_active = mode in ("Cruise control", "ACC")
+        for btn, active in ((self._seg_cc, cc_active), (self._seg_sl, not cc_active)):
+            btn.setProperty("active", active)
+            style = btn.style()
+            style.unpolish(btn)
+            style.polish(btn)
+            btn.update()
 
-    def _detect_enable_btn(self) -> None:
-        # TODO: enter button‑detection mode for enable/disable
-        pass
+    # Button binding: widgets
 
-    def _detect_increase_btn(self) -> None:
-        # TODO: enter button‑detection mode for increase
-        pass
+    def _add_bind_button(self, row: int, key: str) -> BindButton:
+        btn = BindButton()
+        btn.setFixedSize(*_BIND_BUTTON_SIZE)
+        btn.clicked.connect(lambda _=False, k=key: self._on_bind_clicked(k))
+        self._grid.addWidget(
+            btn, row, 1,
+            alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self._bind_buttons[key] = btn
+        self._refresh_bind_button(key)
+        return btn
 
-    def _detect_decrease_btn(self) -> None:
-        # TODO: enter button‑detection mode for decrease
-        pass
+    def _refresh_bind_button(self, key: str) -> None:
+        btn = self._bind_buttons[key]
+        raw = getattr(self._settings, key)
+        b = migrate_binding(raw)
+        btn.set_binding_text(binding_display_name(raw), is_none=b is None)
+        btn.setToolTip(str(b.get("device_name") or "") if b else "")
 
-    def _unassign_buttons(self) -> None:
-        self._settings.cc_start_button = None
-        self._settings.cc_inc_button = None
-        self._settings.cc_dec_button = None
-        self.lbl_enable_btn.setText("Click to assign")
-        self.lbl_increase_btn.setText("Click to assign")
-        self.lbl_decrease_btn.setText("Click to assign")
-        self._on_save()
+    def _set_cmd_hint(self, text: str) -> None:
+        set_cmd = getattr(self.window(), "set_cmd", None)
+        if callable(set_cmd):
+            set_cmd(text)
+
+    # Button binding: click handling
+
+    def _on_bind_clicked(self, key: str) -> None:
+        if self._unassign_armed:
+            self._disarm_unassign()
+            self._clear_binding(key)
+            return
+        if self._configuring_key == key:
+            self._stop_configuring()
+            self._set_cmd_hint("Assignment cancelled.")
+            return
+        self._start_configuring(key)
+
+    def _on_unassign_clicked(self) -> None:
+        if self._configuring_key is not None:
+            key = self._configuring_key
+            self._stop_configuring()
+            self._clear_binding(key)
+            return
+        if self._unassign_armed:
+            self._disarm_unassign()
+            self._set_cmd_hint("Unassign cancelled.")
+            return
+        self._unassign_armed = True
+        self._set_unassign_armed_style(True)
+        self._set_cmd_hint("Click a configure button to unassign it.")
+
+    def _disarm_unassign(self) -> None:
+        self._unassign_armed = False
+        self._set_unassign_armed_style(False)
+
+    def _set_unassign_armed_style(self, armed: bool) -> None:
+        self._unassign_btn.setProperty("armed", armed)
+        style = self._unassign_btn.style()
+        style.unpolish(self._unassign_btn)
+        style.polish(self._unassign_btn)
+        self._unassign_btn.update()
+
+    def _clear_binding(self, key: str) -> None:
+        self._set(key, None)
+        self._glow_suppress.discard(key)
+        self._refresh_bind_button(key)
+        self._set_cmd_hint("Button unassigned.")
+
+    # Button binding: capture lifecycle
+
+    def _start_configuring(self, key: str) -> None:
+        if self._configuring_key is not None:
+            self._stop_configuring()
+        self._configuring_key = key
+        self._kb_capture_started = False
+
+        for name in ("main_pedal_thread", "button_device_thread"):
+            t = self._get_thread(name)
+            if t is not None:
+                try:
+                    t.start_capture()
+                except Exception:
+                    logger.debug("failed to start capture on %s", name, exc_info=True)
+
+        kb = self._get_thread("keyboard_thread")
+        if kb is not None:
+            try:
+                kb.start_capture()
+                with kb.data._lock:
+                    self._kb_capture_started = bool(kb.data.capture_active)
+            except Exception:
+                logger.debug("failed to start keyboard capture", exc_info=True)
+
+        self._bind_buttons[key].set_configuring(True)
+        self._set_cmd_hint(
+            "Press a button, hat direction or key to assign. "
+            "Esc or click again to cancel."
+        )
+
+    def _stop_configuring(self) -> None:
+        key = self._configuring_key
+        self._configuring_key = None
+        self._kb_capture_started = False
+        for name in ("main_pedal_thread", "keyboard_thread", "button_device_thread"):
+            t = self._get_thread(name)
+            if t is not None:
+                try:
+                    t.cancel_capture()
+                except Exception:
+                    logger.debug("failed to cancel capture on %s", name, exc_info=True)
+        if key is not None and key in self._bind_buttons:
+            self._bind_buttons[key].set_configuring(False)
+
+    def cancel_configuring(self) -> None:
+        """Abort any active capture / armed unassign (e.g. drawer closed)."""
+        if self._configuring_key is not None:
+            self._stop_configuring()
+            self._set_cmd_hint("Assignment cancelled.")
+        if self._unassign_armed:
+            self._disarm_unassign()
+
+    # Button binding: polling (QTimer, main thread)
+
+    def _poll_bindings(self) -> None:
+        try:
+            if self._configuring_key is not None:
+                self._poll_capture()
+            self._poll_held_glow()
+        except Exception:
+            logger.debug("binding poll failed", exc_info=True)
+
+    def _poll_capture(self) -> None:
+        key = self._configuring_key
+        binding: dict | None = None
+
+        pt = self._get_thread("main_pedal_thread")
+        if pt is not None:
+            with pt.data._lock:
+                ev = pt.data.capture_event
+            if ev is not None:
+                ev = pt.consume_capture()
+            if isinstance(ev, tuple) and len(ev) >= 3 and ev[0] == "joystick":
+                _, guid, code = ev[:3]
+                label = ev[3] if len(ev) > 3 else f"button {code}"
+                device_name = ev[4] if len(ev) > 4 else ""
+                binding = {
+                    "source": "joystick",
+                    "device_guid": guid,
+                    "device_name": device_name,
+                    "label": label,
+                    "code": code,
+                }
+
+        if binding is None:
+            bt = self._get_thread("button_device_thread")
+            if bt is not None:
+                with bt.data._lock:
+                    ev = bt.data.capture_event
+                if ev is not None:
+                    ev = bt.consume_capture()
+                if isinstance(ev, tuple) and len(ev) >= 3 and ev[0] == "button_device":
+                    _, vid_pid, button_id = ev[:3]
+                    label = ev[3] if len(ev) > 3 else f"button {button_id}"
+                    device_name = ev[4] if len(ev) > 4 else ""
+                    binding = {
+                        "source": "button_device",
+                        "vid_pid": vid_pid,
+                        "device_name": device_name,
+                        "label": label,
+                        "button_id": button_id,
+                    }
+
+        if binding is None:
+            kb = self._get_thread("keyboard_thread")
+            if kb is not None:
+                with kb.data._lock:
+                    ev = kb.data.capture_event
+                    kb_active = kb.data.capture_active
+                if ev is not None:
+                    key_name = kb.consume_capture()
+                    if key_name:
+                        binding = {"source": "keyboard", "code": key_name}
+                elif self._kb_capture_started and not kb_active:
+                    # Esc pressed: keyboard hook cleared its capture flag.
+                    self._stop_configuring()
+                    self._set_cmd_hint("Assignment cancelled.")
+                    return
+
+        if binding is not None and key is not None:
+            self._finish_capture(key, binding)
+
+    def _finish_capture(self, key: str, binding: dict) -> None:
+        self._stop_configuring()
+        self._steal_duplicates(binding, except_key=key)
+        self._set(key, binding)
+        # Keep the blue highlight off, and CC actions suppressed, until the
+        # freshly assigned input is physically released.
+        self._glow_suppress.add(key)
+        pt = self._get_thread("main_pedal_thread")
+        if pt is not None:
+            try:
+                pt.set_capture_guard(binding)
+            except Exception:
+                logger.debug("failed to set capture guard", exc_info=True)
+        self._refresh_bind_button(key)
+        self._set_cmd_hint(f"Assigned {binding_display_name(binding)}.")
+
+    def _steal_duplicates(self, binding: dict, *, except_key: str) -> None:
+        """Move the input if it was bound to another action: one input, one action."""
+        sig = self._binding_signature(binding)
+        if sig is None:
+            return
+        for other in _BIND_KEYS:
+            if other == except_key:
+                continue
+            if self._binding_signature(migrate_binding(getattr(self._settings, other))) == sig:
+                setattr(self._settings, other, None)
+                logger.info("binding moved: %s unassigned", other)
+                if other in self._bind_buttons:
+                    self._refresh_bind_button(other)
+
+    @staticmethod
+    def _binding_signature(b: dict | None) -> tuple | None:
+        if not b:
+            return None
+        source = b.get("source")
+        if source == "joystick":
+            return (source, b.get("device_guid"), b.get("code"))
+        if source == "keyboard":
+            return (source, b.get("code"))
+        if source == "button_device":
+            return (source, b.get("vid_pid"), b.get("button_id"))
+        return None
+
+    def _poll_held_glow(self) -> None:
+        # Skip while the drawer is collapsed or the window is hidden.
+        if not self.isVisible() or self.width() < 10:
+            return
+        for key, btn in self._bind_buttons.items():
+            if key == self._configuring_key:
+                continue
+            raw = getattr(self._settings, key)
+            if migrate_binding(raw) is None:
+                btn.set_held(False)
+                continue
+            held = resolve_held(raw)
+            if key in self._glow_suppress:
+                if held:
+                    btn.set_held(False)
+                    continue
+                self._glow_suppress.discard(key)
+            btn.set_held(held)
+
+    @staticmethod
+    def _get_thread(name: str):
+        try:
+            return registry.get_thread(name)
+        except KeyError:
+            return None
+        except Exception:
+            logger.debug("registry lookup failed for %s", name, exc_info=True)
+            return None
 
     def _on_acc_toggled(self, checked: bool) -> None:
         if checked:
@@ -737,12 +1018,21 @@ class SettingsPanel(QWidget):
         self.chk_airhorn.setChecked(s.airhorn_variable)
         self.chk_live_bar.setChecked(s.bar_variable)
         self.opt_channel.setCurrentText(s.update_channel.capitalize())
+        self._set_row_visible(
+            self._preview_channel_row,
+            s.update_channel.lower() == "preview",
+        )
 
         # Cruise control
         self._update_seg_style(s.cc_mode)
-        self.lbl_enable_btn.setText(self._format_btn(s.cc_start_button))
-        self.lbl_increase_btn.setText(self._format_btn(s.cc_inc_button))
-        self.lbl_decrease_btn.setText(self._format_btn(s.cc_dec_button))
+        self.ent_global_limit.setText(
+            "" if s.global_speed_limit_kmh is None else str(s.global_speed_limit_kmh)
+        )
+        if self._configuring_key is not None:
+            self._stop_configuring()
+        self._glow_suppress.clear()
+        for key in self._bind_buttons:
+            self._refresh_bind_button(key)
         # Keep persisted values numeric; add units only in UI display.
         self.opt_short.blockSignals(True)
         self.opt_long.blockSignals(True)

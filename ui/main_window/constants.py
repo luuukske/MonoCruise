@@ -29,6 +29,8 @@ BUTTON_HOVER   = "#333366"
 DANGER_TEXT    = "#8b0000"
 DISABLED_COLOR = "#F1F1F1"
 KEY_ON_COLOR   = "#1f53FF"
+BIND_HOVER_BG  = "#404040"   # bind button infill on hover (clearly brighter than BG_COLOR)
+BIND_CONFIG_BORDER = "#3FB950"  # green border while listening for a new binding
 SPEEDLIMITER_COLOR  = "#008B00"
 CRUISECONTROL_COLOR = "#4876FF"
 
@@ -43,7 +45,7 @@ RADIUS_BANNER         = 5   # BannerWidget (top status bar)
 RADIUS_SETTINGS_PANEL = 5   # SettingsPanel slide-in drawer
 RADIUS_SCROLL         = 5   # QScrollArea (settings scroll frame)
 RADIUS_BUTTON         = 5   # All QPushButton (factory standard across type)
-RADIUS_INPUT          = 5   # QLineEdit and QComboBox
+RADIUS_INPUT          = 5   # input fields: entries, dropdowns, bind buttons, mode switch
 
 # Font families
 FONT_FAMILY = "Segoe UI"
@@ -77,6 +79,7 @@ QLabel#sectionHeader {{
     font-weight: bold;
     padding: 6px 8px;
     border-radius: 5px;
+    qproperty-alignment: AlignCenter;
 }}
 
 QLabel#cmdLabel {{
@@ -100,7 +103,7 @@ QLabel#pillBeta {{
     font-size: 11px;
     font-weight: bold;
     padding: 1px 5px;
-    border-radius: 15px;
+    border-radius: 7px;
 }}
 
 QLabel#settingsTitle {{
@@ -191,6 +194,47 @@ QPushButton#reinstallButton:hover {{
     background-color: {REINSTALL_HOVER};
 }}
 
+/* Button-binding configure buttons (settings panel).
+   State order matters: later rules win, so held overrides hover. */
+QPushButton#bindButton {{
+    background-color: {BG_COLOR};
+    color: {TEXT_COLOR};
+    border: 2px solid {SETTINGS_COLOR};
+    border-radius: {RADIUS_INPUT}px;
+    padding: 3px 8px;
+    font-size: {FONT_SIZE}px;
+}}
+/* Hover is driven by an explicit property from enter/leave events (see
+   BindButton), which forces a repolish and works regardless of how the
+   panel is composited; the :hover selector is kept as backup. */
+QPushButton#bindButton:hover,
+QPushButton#bindButton[bindHover="true"] {{
+    background-color: {BIND_HOVER_BG};
+}}
+QPushButton#bindButton[bindNone="true"] {{
+    color: {SUBTEXT_COLOR};
+}}
+QPushButton#bindButton[bindState="configuring"] {{
+    border-color: {BIND_CONFIG_BORDER};
+}}
+QPushButton#bindButton[bindState="held"] {{
+    border-color: {KEY_ON_COLOR};
+}}
+
+/* Unassign: standard primary-blue action button; red only while armed. */
+QPushButton#unassignButton {{
+    background-color: {WAITING_COLOR};
+}}
+QPushButton#unassignButton:hover {{
+    background-color: {BUTTON_HOVER};
+}}
+QPushButton#unassignButton[armed="true"] {{
+    background-color: {DANGER_BUTTON_COLOR};
+}}
+QPushButton#unassignButton[armed="true"]:hover {{
+    background-color: {DANGER_BUTTON_HOVER};
+}}
+
 QCheckBox {{
     spacing: 0px;
     background-color: transparent;
@@ -212,52 +256,42 @@ QCheckBox::indicator:hover {{
 QLineEdit {{
     background-color: {BG_COLOR};
     color: {TEXT_COLOR};
-    border: 1.5px solid {SETTINGS_COLOR};
+    border: 2px solid {SETTINGS_COLOR};
     border-radius: {RADIUS_INPUT}px;
     padding: 3px 6px;
     font-size: {FONT_SIZE}px;
     selection-background-color: {WAITING_COLOR};
 }}
+QLineEdit:hover {{
+    border-color: {WAITING_COLOR};
+}}
 QLineEdit:focus {{
     border-color: {WAITING_COLOR};
 }}
 
-QComboBox {{
-    background-color: {BG_COLOR};
-    color: {TEXT_COLOR};
-    border: 1.5px solid {SETTINGS_COLOR};
+/* Segmented mode switch: input-style track with the active option as a
+   rounded pill inset inside it; the inactive option is flat text. */
+QFrame#segFrame {{
+    border: 2px solid {SETTINGS_COLOR};
     border-radius: {RADIUS_INPUT}px;
-    padding: 3px 8px;
-    min-width: 80px;
-    font-size: {FONT_SIZE}px;
-}}
-QComboBox:hover {{
-    border-color: {WAITING_COLOR};
-}}
-QComboBox::drop-down {{
-    border: none; width: 20px;
-}}
-QComboBox::down-arrow {{
-    image: none;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid {TEXT_COLOR};
-    margin-right: 6px;
-}}
-QComboBox QAbstractItemView {{
     background-color: {BG_COLOR};
-    color: {TEXT_COLOR};
-    selection-background-color: {WAITING_COLOR};
-    border: 1px solid {SETTINGS_COLOR};
-    outline: 0;
 }}
-
-QPushButton#segActive {{
-    border-radius: 0px; padding: 5px 12px;
+QPushButton#segButton {{
+    background-color: transparent;
+    border-radius: 3px;
+    padding: 0px 12px;
 }}
-QPushButton#segInactive {{
-    background-color: {SETTINGS_COLOR};
-    border-radius: 0px; padding: 5px 12px;
+QPushButton#segButton:hover {{
+    background-color: rgba(255, 255, 255, 5%);
+}}
+QPushButton#segButton[active="true"],
+QPushButton#segButton[active="true"]:hover {{
+    background-color: {WAITING_COLOR};
+}}
+/* Speed limiter uses its MonoCruise mode colour when active. */
+QPushButton#segButton[active="true"][segMode="limiter"],
+QPushButton#segButton[active="true"][segMode="limiter"]:hover {{
+    background-color: {SPEEDLIMITER_COLOR};
 }}
 
 QScrollArea {{
@@ -266,7 +300,7 @@ QScrollArea {{
     background-color: transparent;
 }}
 QScrollBar:vertical {{
-    background-color: {BG_COLOR}; width: 8px; margin: 0;
+    background-color: {"#333333"}; width: 8px; margin: 0;
 }}
 QScrollBar::handle:vertical {{
     background-color: {SETTINGS_COLOR};

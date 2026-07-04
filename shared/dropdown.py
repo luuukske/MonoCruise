@@ -25,8 +25,11 @@ replacement.
 
 The DROPDOWN_* constants below are the widget's own design (ported from the
 reference file), not app theming, so they live here rather than in a per-app
-styles module -- every app gets the identical control. Only the minimum field
-width is caller-supplied.
+styles module -- every app gets the identical control. Caller-supplied: the
+minimum field width, and optionally the theming overrides ``field_bg``,
+``border_w``, ``border_color``, ``border_hover``, ``radius``, ``text_color``,
+``font_px`` and ``pad_y``; each defaults to the reference design value used
+by the updater when omitted.
 """
 
 from __future__ import annotations
@@ -118,11 +121,11 @@ EASE_SNAP = _curve(DROPDOWN_EASE_SNAP)   # cubic-bezier(.22,1,.36,1)
 EASE_STD = _curve(DROPDOWN_EASE_STD)     # CSS "ease"
 
 
-def dropdown_font() -> QFont:
-    """Field/row font: 500 weight, 14px, Inter with system fallback."""
+def dropdown_font(px: int = DROPDOWN_FONT_PX) -> QFont:
+    """Field/row font: 500 weight, Inter with system fallback (14px default)."""
     f = QFont()
     f.setFamilies(FONT_FALLBACKS)
-    f.setPixelSize(DROPDOWN_FONT_PX)
+    f.setPixelSize(px)
     f.setWeight(QFont.Weight.Medium)  # 500
     f.setStyleStrategy(QFont.StyleStrategy.PreferMatch)
     return f
@@ -184,6 +187,25 @@ def _open_border_path(rect: QRectF, br: float) -> QPainterPath:
 _SHADOW_HALO = 48
 
 
+class _SeamClippedShadow(QGraphicsDropShadowEffect):
+    """Drop shadow that never paints above the popup's content top.
+
+    The blur otherwise bleeds a few px upward over the field's bottom edge
+    and reads as a dark seam line. In the CSS reference the field element is
+    stacked above the popup's box-shadow so the bleed is covered; here the
+    field widget is *below* the popup card, so the bleed is clipped instead.
+    """
+
+    def draw(self, painter) -> None:
+        painter.save()
+        # Logical widget coords: content top sits at y == _SHADOW_HALO.
+        r = self.boundingRect()
+        painter.setClipRect(QRectF(r.x(), _SHADOW_HALO,
+                                   r.width(), r.height() - _SHADOW_HALO))
+        super().draw(painter)
+        painter.restore()
+
+
 class _PopupCard(QWidget):
     """The visible popup card: background, border, inset divider and rows.
 
@@ -195,10 +217,20 @@ class _PopupCard(QWidget):
 
     activated = Signal(int)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, field_bg: QColor | str | None = None,
+                 border_w: float | None = None,
+                 border_color: QColor | str | None = None,
+                 radius: float | None = None,
+                 text_color: QColor | str | None = None,
+                 font_px: int | None = None):
         super().__init__(parent)
+        self._field_bg = QColor(field_bg) if field_bg is not None else QColor(DROPDOWN_FIELD_BG)
+        self._border_w = float(border_w) if border_w is not None else float(DROPDOWN_BORDER_W)
+        self._border_color = QColor(border_color) if border_color is not None else QColor(DROPDOWN_BORDER)
+        self._radius = float(radius) if radius is not None else float(DROPDOWN_RADIUS)
+        self._text_color = QColor(text_color) if text_color is not None else QColor(DROPDOWN_TEXT)
         self.setMouseTracking(True)
-        self._font = dropdown_font()
+        self._font = dropdown_font(font_px if font_px is not None else DROPDOWN_FONT_PX)
         self._fm = QFontMetricsF(self._font)
         self._items: list[str] = []
         self._selected = -1
@@ -216,7 +248,7 @@ class _PopupCard(QWidget):
 
         color = QColor(0, 0, 0)
         color.setAlpha(DROPDOWN_SHADOW_RGBA[3])
-        shadow = QGraphicsDropShadowEffect(self)
+        shadow = _SeamClippedShadow(self)
         shadow.setOffset(0, 16)          # box-shadow: 0 16px ...
         shadow.setBlurRadius(30)         # ... 30px
         shadow.setColor(color)           # rgba(0,0,0,.45)
@@ -421,19 +453,20 @@ class _PopupCard(QWidget):
         oy = _SHADOW_HALO + self._slide
         w = self._card_w
         h = self._reveal
-        radius = DROPDOWN_RADIUS
-        br = min(radius, h / 2.0)
+        br = min(self._radius, h / 2.0)
 
         # Card background: top corners square (fused with the field), bottom
-        # rounded. Inset by half the border on every side so the full 1px stroke
-        # lands inside the widget and the bottom edge stays as crisp as the sides.
-        hb = DROPDOWN_BORDER_W / 2.0
-        outer = QRectF(ox + hb, oy + hb, w - 2 * hb, h - 2 * hb)
+        # rounded. Inset by half the border left/right/bottom so the full
+        # stroke lands inside the widget; the top edge is flush with the
+        # content origin so the 1px field-overlap row is painted opaque (an
+        # exposed gap there lets the drop shadow tint the seam).
+        hb = self._border_w / 2.0
+        outer = QRectF(ox + hb, oy, w - 2 * hb, h - hb)
         path = _rounded_path(outer, 0, 0, br, br)
 
         p.save()
         p.setClipPath(path)
-        p.fillRect(QRectF(ox, oy, w, h), QColor(DROPDOWN_FIELD_BG))
+        p.fillRect(QRectF(ox, oy, w, h), self._field_bg)
 
         # Inset divider (1px, #383838, 8px left/right inset), just under the top.
         dy = oy + DROPDOWN_POPUP_PAD
@@ -449,10 +482,10 @@ class _PopupCard(QWidget):
         self._paint_scrollbar(p, ox, oy)
         p.restore()
 
-        # Border: 1px #3a3a3a, left/bottom/right only (no top edge -> fuses with
-        # the field, matching CSS border-top:none).
+        # Border: left/bottom/right only (no top edge -> fuses with the
+        # field, matching CSS border-top:none).
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(QColor(DROPDOWN_BORDER), DROPDOWN_BORDER_W))
+        p.setPen(QPen(self._border_color, self._border_w))
         p.drawPath(_open_border_path(outer, br))
         p.end()
 
@@ -522,7 +555,7 @@ class _PopupCard(QWidget):
 
             # Row text.
             text_x = bar_x + DROPDOWN_BAR_W + DROPDOWN_BAR_GAP
-            p.setPen(QColor(DROPDOWN_TEXT))
+            p.setPen(self._text_color)
             p.drawText(QRectF(text_x, ry, row_w, rh),
                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
             p.restore()
@@ -563,16 +596,32 @@ class Dropdown(QWidget):
     # State machine for robust rapid open/close.
     _CLOSED, _OPENING, _OPEN, _CLOSING = range(4)
 
-    def __init__(self, min_width: int, parent=None):
+    def __init__(self, min_width: int, parent=None, *,
+                 field_bg: QColor | str | None = None,
+                 border_w: float | None = None,
+                 border_color: QColor | str | None = None,
+                 border_hover: QColor | str | None = None,
+                 radius: float | None = None,
+                 text_color: QColor | str | None = None,
+                 font_px: int | None = None,
+                 pad_y: float | None = None):
         super().__init__(parent)
         self._min_width = min_width
+        self._field_bg = QColor(field_bg) if field_bg is not None else QColor(DROPDOWN_FIELD_BG)
+        self._border_w = float(border_w) if border_w is not None else float(DROPDOWN_BORDER_W)
+        self._border_color = QColor(border_color) if border_color is not None else QColor(DROPDOWN_BORDER)
+        self._border_hover = QColor(border_hover) if border_hover is not None else QColor(DROPDOWN_BORDER_HOVER)
+        self._radius = float(radius) if radius is not None else float(DROPDOWN_RADIUS)
+        self._text_color = QColor(text_color) if text_color is not None else QColor(DROPDOWN_TEXT)
+        self._font_px = int(font_px) if font_px is not None else DROPDOWN_FONT_PX
+        self._pad_y = float(pad_y) if pad_y is not None else float(DROPDOWN_FIELD_PAD_Y)
         self._items: list[tuple[str, object]] = []  # (text, userData)
         self._index = -1
         self._hover = False
         self._open_progress = 0.0  # 0 closed .. 1 open (field corners/chevron)
         self._state = self._CLOSED
 
-        self._font = dropdown_font()
+        self._font = dropdown_font(self._font_px)
         self._fm = QFontMetricsF(self._font)
         self.setFont(self._font)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -585,8 +634,16 @@ class Dropdown(QWidget):
         # one device-pixel ratio, so the popup aligns to the field exactly even
         # on fractional-DPI (4K) displays -- a separate top-level can only be
         # positioned in integer logical px and lands ~1 device px off. It is
-        # reparented to the window lazily in open() (the window isn't known yet).
-        self._card = _PopupCard(None)
+        # reparented to the window lazily in open() (the window isn't known
+        # yet); until then it is parented to the field itself (hidden, so never
+        # clipped) so Qt owns it -- an unparented card outlives QApplication at
+        # interpreter shutdown and crashes.
+        self._card = _PopupCard(self, field_bg=self._field_bg,
+                                border_w=self._border_w,
+                                border_color=self._border_color,
+                                radius=self._radius,
+                                text_color=self._text_color,
+                                font_px=self._font_px)
         self._card.hide()
         self._card.activated.connect(self._on_row_activated)
 
@@ -675,16 +732,16 @@ class Dropdown(QWidget):
 
     # -- sizing -------------------------------------------------------------
     def _field_height(self) -> int:
-        # padding 9px top/bottom + 14px line box (font: .../1) + 1px top/bottom border.
-        content = max(DROPDOWN_FONT_PX, DROPDOWN_CHEVRON_SIZE)
-        return int(round(2 * DROPDOWN_FIELD_PAD_Y + content + 2 * DROPDOWN_BORDER_W))
+        # vertical padding + line box (font: .../1) + top/bottom border.
+        content = max(self._font_px, DROPDOWN_CHEVRON_SIZE)
+        return int(round(2 * self._pad_y + content + 2 * self._border_w))
 
     def _widest_text(self) -> float:
         widths = [self._fm.horizontalAdvance(t) for t, _ in self._items]
         return max(widths) if widths else 0.0
 
     def _field_width(self) -> int:
-        need = (2 * DROPDOWN_BORDER_W + 2 * DROPDOWN_FIELD_PAD_X
+        need = (2 * self._border_w + 2 * DROPDOWN_FIELD_PAD_X
                 + self._widest_text() + DROPDOWN_FIELD_GAP + DROPDOWN_CHEVRON_SIZE)
         return int(round(max(self._min_width, need)))
 
@@ -841,33 +898,33 @@ class Dropdown(QWidget):
         op = self._open_progress
         w = float(self.width())
         h = float(self.height())
-        hb = DROPDOWN_BORDER_W / 2.0
+        hb = self._border_w / 2.0
         rect = QRectF(hb, hb, w - 2 * hb, h - 2 * hb)
-        top_r = DROPDOWN_RADIUS
-        bot_r = DROPDOWN_RADIUS * (1.0 - op)  # bottom corners square as it opens
+        top_r = self._radius
+        bot_r = self._radius * (1.0 - op)  # bottom corners square as it opens
         path = _rounded_path(rect, top_r, top_r, bot_r, bot_r)
 
         # Background.
-        p.fillPath(path, QColor(DROPDOWN_FIELD_BG))
+        p.fillPath(path, self._field_bg)
 
-        # Border. On hover: #555; otherwise #3a3a3a.
-        border = QColor(DROPDOWN_BORDER_HOVER if self._hover else DROPDOWN_BORDER)
+        # Border, with its hover variant.
+        border = self._border_hover if self._hover else self._border_color
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(border, DROPDOWN_BORDER_W))
+        p.setPen(QPen(border, self._border_w))
         p.drawPath(path)
         # Bottom border fades to the background as it opens so the seam with the
-        # popup disappears (CSS: border-bottom-color -> #242424).
+        # popup disappears (CSS: border-bottom-color -> field background).
         if op > 0:
-            seam = _lerp_color(border, QColor(DROPDOWN_FIELD_BG), op)
-            p.setPen(QPen(seam, DROPDOWN_BORDER_W))
+            seam = _lerp_color(border, self._field_bg, op)
+            p.setPen(QPen(seam, self._border_w))
             p.drawLine(QPointF(bot_r + hb, h - hb), QPointF(w - bot_r - hb, h - hb))
 
         # Field text.
         p.setFont(self._font)
-        p.setPen(QColor(DROPDOWN_TEXT))
+        p.setPen(self._text_color)
         text_rect = QRectF(
-            DROPDOWN_BORDER_W + DROPDOWN_FIELD_PAD_X, 0,
-            w - 2 * (DROPDOWN_BORDER_W + DROPDOWN_FIELD_PAD_X)
+            self._border_w + DROPDOWN_FIELD_PAD_X, 0,
+            w - 2 * (self._border_w + DROPDOWN_FIELD_PAD_X)
             - DROPDOWN_FIELD_GAP - DROPDOWN_CHEVRON_SIZE,
             h,
         )
@@ -879,7 +936,7 @@ class Dropdown(QWidget):
 
     def _paint_chevron(self, p: QPainter, w: float, h: float, op: float):
         size = DROPDOWN_CHEVRON_SIZE
-        cx = w - DROPDOWN_BORDER_W - DROPDOWN_FIELD_PAD_X - size / 2.0
+        cx = w - self._border_w - DROPDOWN_FIELD_PAD_X - size / 2.0
         cy = h / 2.0
         p.save()
         p.translate(cx, cy)

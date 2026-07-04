@@ -19,6 +19,7 @@ A ground-up rewrite focused on **stability** and **performance**, with a more re
 - **Stable / Preview update channels**: pick your channel in settings — Preview builds are released earlier and may contain bugs.
 - **On-screen notifications**: always-on-top popups for updates, errors, and onboarding tips.
 - **Lead-vehicle speed readout**: the lead truck's speed now shows on the CC panel above your set speed.
+- **Multi-device button assignment**: cruise-control buttons can be assigned to any joystick button, hat direction, keyboard key, or USB button device (e.g. a button stalk) — click a configure button in settings and press the input. Assigned buttons light up while pressed, and an Unassign button clears a single binding.
 - **ETS2 v1.60 support.**
 
 ### Changed
