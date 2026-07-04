@@ -51,6 +51,7 @@ from ui.main_window.widgets import (
     new_spacer,
     new_subtext,
 )
+from ui.popup.popup_window import PopupWindow
 
 if TYPE_CHECKING:
     from core.settings import Settings
@@ -1080,27 +1081,44 @@ class SettingsPanel(QWidget):
     def _do_reinstall_sdk(self) -> None:
         from core.sdk_installer import GameApplyResult, start_reinstall
 
-        # Runs on the SDK worker thread, so report only through the popup
-        # logger (thread-safe); never touch widgets from here.
+        # Runs on the SDK worker thread. PopupWindow.emit is thread-safe (it
+        # marshals onto the GUI thread), so the outcome is surfaced with a
+        # styled check / warning popup straight from here.
         def _on_done(results: list["GameApplyResult"]) -> None:
             if not results:
-                logger.warning(
-                    "SDK reinstall: no ETS2/ATS installation found", extra={"popup": True}
+                PopupWindow.emit(
+                    "SDK reinstall",
+                    "No ETS2 or ATS installation was found.",
+                    "w",
+                    duration_ms=7000,
                 )
                 return
             failed = [r for r in results if not r.success]
             if failed:
                 games = ", ".join(r.game_type.upper() for r in failed)
-                logger.warning("SDK reinstall failed for %s", games, extra={"popup": True})
+                PopupWindow.emit(
+                    "SDK reinstall failed",
+                    f"Could not reinstall the SDK for {games}. See the log for details.",
+                    "w",
+                    duration_ms=7000,
+                )
             else:
                 games = ", ".join(r.game_type.upper() for r in results)
-                logger.info("SDK reinstalled for %s", games, extra={"popup": True})
+                PopupWindow.emit(
+                    "SDK reinstalled",
+                    f"All plugins were reinstalled for {games}.",
+                    "c",
+                    duration_ms=6000,
+                )
 
         self._set_cmd_hint("Reinstalling SDK...")
         try:
             start_reinstall(_on_done)
         except Exception:
             logger.exception("failed to start SDK reinstall")
+            PopupWindow.emit(
+                "SDK reinstall failed", "Could not start the reinstall.", "w", duration_ms=7000
+            )
 
     def _on_reset_click(self) -> None:
         if self._reset_armed:
