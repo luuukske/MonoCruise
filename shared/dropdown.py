@@ -182,6 +182,31 @@ def _open_border_path(rect: QRectF, br: float) -> QPainterPath:
     return p
 
 
+def _field_border_path(rect: QRectF, top_r: float, bot_r: float) -> QPainterPath:
+    """Field border without the bottom segment: from the bottom-left corner up
+    and over the top to the bottom-right corner. The bottom segment is painted
+    separately in its faded colour — stroking it here too and overpainting
+    would leave antialiasing fringes at fractional-DPR pixel edges."""
+    x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
+    m = min(w, h) / 2.0
+    top_r, bot_r = (max(0.0, min(r, m)) for r in (top_r, bot_r))
+    p = QPainterPath()
+    p.moveTo(x + bot_r, y + h)
+    if bot_r:
+        p.arcTo(x, y + h - 2 * bot_r, 2 * bot_r, 2 * bot_r, 270, -90)
+    p.lineTo(x, y + top_r)
+    if top_r:
+        p.arcTo(x, y, 2 * top_r, 2 * top_r, 180, -90)
+        p.lineTo(x + w - top_r, y)
+        p.arcTo(x + w - 2 * top_r, y, 2 * top_r, 2 * top_r, 90, -90)
+    else:
+        p.lineTo(x + w, y)
+    p.lineTo(x + w, y + h - bot_r)
+    if bot_r:
+        p.arcTo(x + w - 2 * bot_r, y + h - 2 * bot_r, 2 * bot_r, 2 * bot_r, 0, -90)
+    return p
+
+
 # Shadow halo (transparent margin) around the popup card so the drop shadow has
 # room to render inside the top-level popup window.
 _SHADOW_HALO = 48
@@ -907,17 +932,25 @@ class Dropdown(QWidget):
         # Background.
         p.fillPath(path, self._field_bg)
 
-        # Border, with its hover variant.
+        # Border, with its hover variant. While open the bottom segment fades
+        # to the background so the seam with the popup disappears (CSS:
+        # border-bottom-color -> field background). The faded segment is
+        # painted once in its final colour — overdrawing an antialiased stroke
+        # leaves fringes of the old colour at fractional-DPR pixel edges (a
+        # hairline at 175% scaling) — and the sides/top are stroked after it
+        # so the side borders keep their full width where the two cross.
         border = self._border_hover if self._hover else self._border_color
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(border, self._border_w))
-        p.drawPath(path)
-        # Bottom border fades to the background as it opens so the seam with the
-        # popup disappears (CSS: border-bottom-color -> field background).
         if op > 0:
-            seam = _lerp_color(border, self._field_bg, op)
-            p.setPen(QPen(seam, self._border_w))
+            seam_pen = QPen(_lerp_color(border, self._field_bg, op), self._border_w)
+            seam_pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+            p.setPen(seam_pen)
             p.drawLine(QPointF(bot_r + hb, h - hb), QPointF(w - bot_r - hb, h - hb))
+            p.setPen(QPen(border, self._border_w))
+            p.drawPath(_field_border_path(rect, top_r, bot_r))
+        else:
+            p.setPen(QPen(border, self._border_w))
+            p.drawPath(path)
 
         # Field text.
         p.setFont(self._font)
