@@ -65,7 +65,7 @@ _BIND_KEYS = (
 )
 
 _BIND_BUTTON_SIZE = (150, 30)
-_BIND_POLL_MS = 100
+_BIND_POLL_MS = 33.333
 
 # Extra breathing room under the Unassign button, before the next setting.
 _UNASSIGN_GAP = 10

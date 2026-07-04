@@ -47,7 +47,7 @@ _CAPTURE_WARMUP_S = 0.5
 _CAPTURE_MAX_SCAN_DEVICES = 16
 # A candidate bit must stay set this many consecutive ticks (~150 ms at 20 Hz)
 # before it is accepted: transient axis/jitter bits never hold that long.
-_CAPTURE_CONFIRM_TICKS = 3
+_CAPTURE_CONFIRM_TICKS = 1
 # Generic-desktop usages that must never be scanned: mice/keyboards are system
 # input, and joysticks/gamepads/multi-axis controllers are handled by pygame
 # on the joystick capture path: their raw HID reports are mostly axis bits
