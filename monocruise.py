@@ -185,6 +185,26 @@ def main() -> None:
     log.info("starting: debug=%s", settings.debug)
     _write_version_marker()
 
+    # SDK DLL check (backend only). Runs on a daemon thread so a possible
+    # GitHub round-trip never blocks boot; when the DLLs are already installed
+    # it stays fully offline. The user-facing popup is wired by the front-end
+    # later - for now the outcome is only logged.
+    from core.sdk_installer import SdkCheckResult, start_boot_check
+
+    def _on_sdk_result(result: SdkCheckResult) -> None:
+        if not result.found_games:
+            log.info("SDK check: no ETS2/ATS installation found")
+        elif result.needs_action:
+            games = ", ".join(g.game_type.upper() for g in result.games_needing_action)
+            log.info("SDK check: install/update needed for %s", games)
+        else:
+            log.info("SDK check: SDK DLLs present and up to date")
+
+    try:
+        start_boot_check(_on_sdk_result)
+    except Exception:
+        log.debug("could not start SDK boot check", exc_info=True)
+
     # Auto-refresh settings in debug mode (lets you edit config.json while running).
     # Runs on the Qt main thread, so it doesn't block any worker thread loops.
     if settings.debug:

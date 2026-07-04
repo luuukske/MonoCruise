@@ -26,6 +26,10 @@ config.json*
 # Runtime version marker written by the app for the updater
 installed_version.txt
 
+# SDK installer runtime state + downloaded-DLL cache
+sdk_state.json
+sdk_cache/
+
 # OS / misc
 .DS_Store
 live_accel_pedals_viz_30s.bat
