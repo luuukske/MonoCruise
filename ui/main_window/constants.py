@@ -14,7 +14,6 @@ SETTINGS_PANEL_WIDTH = 400
 
 # Colour palette
 BG_COLOR       = "#2B2B2B"
-BG_DARKER      = "#242424"
 SETTINGS_COLOR = "#454545"
 WAITING_COLOR  = "#1f538d"
 CONNECTED_COLOR = "#304230"
@@ -47,6 +46,13 @@ RADIUS_SCROLL         = 5   # QScrollArea (settings scroll frame)
 RADIUS_BUTTON         = 5   # All QPushButton (factory standard across type)
 RADIUS_INPUT          = 5   # input fields: entries, dropdowns, bind buttons, mode switch
 
+# Settings row height (px) for all controls
+FIELD_ROW_HEIGHT = 25
+
+# Subtext gap above (layout) and below (QLabel margin) each field's subtext.
+SUBTEXT_GAP_TOP = 0
+SUBTEXT_GAP_BOTTOM = 4
+
 # Font families
 FONT_FAMILY = "Segoe UI"
 FONT_FAMILY_FALLBACK = "Helvetica Neue"
@@ -72,6 +78,7 @@ QLabel {{
 QLabel#subtext {{
     color: {SUBTEXT_COLOR};
     font-size: 11px;
+    margin-bottom: {SUBTEXT_GAP_BOTTOM}px;
 }}
 
 QLabel#sectionHeader {{
@@ -240,9 +247,9 @@ QCheckBox {{
     background-color: transparent;
 }}
 QCheckBox::indicator {{
-    width: 20px; height: 20px;
+    width: 14px; height: 14px;
     border: 2px solid {SETTINGS_COLOR};
-    border-radius: 5px;
+    border-radius: 4px;
     background-color: {BG_COLOR};
 }}
 QCheckBox::indicator:checked {{

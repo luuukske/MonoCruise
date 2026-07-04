@@ -32,8 +32,10 @@ from PySide6.QtWidgets import (
 from core.input_bindings import binding_display_name, migrate_binding, resolve_held
 from core.thread_management.registry import registry
 from ui.main_window.constants import (
+    FIELD_ROW_HEIGHT,
     RADIUS_SETTINGS_PANEL,
     SETTINGS_PANEL_WIDTH,
+    SUBTEXT_GAP_TOP,
 )
 from ui.main_window.widgets import (
     BindButton,
@@ -44,6 +46,7 @@ from ui.main_window.widgets import (
     new_label,
     new_optionmenu,
     new_section_header,
+    new_spacer,
     new_subtext,
 )
 
@@ -63,6 +66,9 @@ _BIND_KEYS = (
 
 _BIND_BUTTON_SIZE = (150, 30)
 _BIND_POLL_MS = 100
+
+# Extra breathing room under the Unassign button, before the next setting.
+_UNASSIGN_GAP = 10
 
 # Resolve project‑root path for assets (gear.png, patreon.png, youtube.png
 # live at the project root in the original repo).
@@ -87,6 +93,9 @@ class SettingsPanel(QWidget):
         self._show_confirm = show_confirm
         self._on_reset = on_reset
         self._reset_armed = False
+        # Row min-heights stashed while a conditional row is hidden (see
+        # _set_row_visible).
+        self._hidden_row_heights: dict[int, int] = {}
 
         # Button-binding capture state
         self._bind_buttons: dict[str, BindButton] = {}
@@ -146,7 +155,9 @@ class SettingsPanel(QWidget):
         inner.setStyleSheet("QWidget#settingsInner { background-color: transparent; }")
         self._grid = QGridLayout(inner)
         self._grid.setContentsMargins(10, 8, 10, 10)
-        self._grid.setSpacing(4)
+        # Small vertical spacing for rows—so subtext stays visually tied to its setting
+        self._grid.setHorizontalSpacing(4)
+        self._grid.setVerticalSpacing(4)
         self._grid.setColumnStretch(0, 1)
         self._grid.setColumnMinimumWidth(1, 120)
         scroll.setWidget(inner)
@@ -215,6 +226,53 @@ class SettingsPanel(QWidget):
         self._row += advance
         return r
 
+    def _spacer(self, height: int) -> None:
+        """Insert an invisible full-width row to open up vertical breathing
+        room beyond the grid's tight base spacing (see __init__)."""
+        new_spacer(self._inner, self._r(), height)
+
+    def _field_with_subtext(
+        self,
+        label_text: str,
+        build_field: Callable[[QWidget, int, int], Any],
+        subtext_text: str,
+    ) -> tuple[Any, QLabel, int]:
+        """One outer grid row containing a label+field pair with its
+        description tucked tightly underneath, independent of the outer
+        grid's row-to-row spacing -- which governs gaps to unrelated
+        settings and is otherwise too wide for subtext to read as attached
+        to the field above it. The gap above the subtext is SUBTEXT_GAP_TOP
+        (below); the gap below it, before the next setting, is
+        SUBTEXT_GAP_BOTTOM (QLabel#subtext's margin-bottom in the
+        stylesheet) -- tune each independently.
+
+        Returns (field, subtext_label, row). Most callers only need
+        *field*; *subtext_label* is for fields whose subtext toggles
+        on its own (e.g. update channel), and *row* for fields whose whole
+        row toggles together (see _set_row_visible).
+        """
+        container = QWidget()
+        # Scoped ID selector -- a selector-less stylesheet acts as `* { ... }`
+        # for the whole subtree and would override the window stylesheet's
+        # `QLineEdit`/Dropdown background rules for the field nested inside
+        # (see the identical note on settingsPanel's stylesheet above).
+        container.setObjectName("fieldWithSubtext")
+        container.setStyleSheet("QWidget#fieldWithSubtext { background: transparent; }")
+        inner = QGridLayout(container)
+        inner.setContentsMargins(0, 0, 0, 0)
+        inner.setHorizontalSpacing(4)
+        inner.setVerticalSpacing(SUBTEXT_GAP_TOP)
+        inner.setColumnStretch(0, 1)
+        inner.setColumnMinimumWidth(1, 120)
+
+        new_label(container, 0, 0, label_text)
+        field = build_field(container, 0, 1)
+        subtext = new_subtext(container, 1, 0, subtext_text, col_span=2)
+
+        row = self._r()
+        self._grid.addWidget(container, row, 0, 1, 2)
+        return field, subtext, row
+
     # Section 1 – Inputs
 
     def _build_inputs(self) -> None:
@@ -267,14 +325,16 @@ class SettingsPanel(QWidget):
             callback=lambda v: self._set("autostart_variable", v),
         )
 
-        new_label(p, self._r(0), 0, "Target polling rate (Hz):")
-        self.ent_polling = new_entry(
-            p, self._r(), 1,
-            value=s.polling_rate, value_type=int,
-            minimum=10, maximum=100,
-            callback=lambda v: self._set("polling_rate", v),
+        self.ent_polling, _, _ = self._field_with_subtext(
+            "Target polling rate (Hz):",
+            lambda c, r, col: new_entry(
+                c, r, col,
+                value=s.polling_rate, value_type=int,
+                minimum=10, maximum=100,
+                callback=lambda v: self._set("polling_rate", v),
+            ),
+            "How often inputs are read per second (10–100).",
         )
-        new_subtext(p, self._r(), 0, "How often inputs are read per second (10–100).", col_span=2)
 
         new_label(p, self._r(0), 0, "Hazards:")
         self.chk_hazards = new_checkbutton(
@@ -310,25 +370,23 @@ class SettingsPanel(QWidget):
             callback=lambda v: self._set("bar_variable", v),
         )
 
-        new_label(p, self._r(0), 0, "Update channel:")
-        self.opt_channel = new_optionmenu(
-            p, self._r(), 1,
-            values=["Stable", "Preview"],
-            default=s.update_channel.capitalize(),
-            callback=self._on_update_channel_changed,
-        )
-        r_preview = self._r()
-        new_subtext(
-            p, r_preview, 0,
+        self.opt_channel, self._preview_subtext, _ = self._field_with_subtext(
+            "Update channel:",
+            lambda c, r, col: new_optionmenu(
+                c, r, col,
+                values=["Stable", "Preview"],
+                default=s.update_channel.capitalize(),
+                callback=self._on_update_channel_changed,
+            ),
             "Preview builds are released earlier and may contain bugs.",
-            col_span=2,
         )
-        self._preview_channel_row = r_preview
-        self._set_row_visible(r_preview, s.update_channel.lower() == "preview")
+        # Only the subtext toggles here -- the dropdown itself always stays
+        # visible, unlike the whole-row conditionals (see _set_row_visible).
+        self._preview_subtext.setVisible(s.update_channel.lower() == "preview")
 
     def _on_update_channel_changed(self, value: str) -> None:
         self._set("update_channel", value.lower())
-        self._set_row_visible(self._preview_channel_row, value.lower() == "preview")
+        self._preview_subtext.setVisible(value.lower() == "preview")
 
     def _on_hazards_toggled(self, checked: bool) -> None:
         self._set("hazards_variable", checked)
@@ -340,19 +398,14 @@ class SettingsPanel(QWidget):
         s = self._settings
         p = self._inner
 
-        # Spacer
-        spacer = QWidget()
-        spacer.setFixedHeight(8)
-        spacer.setStyleSheet("background: transparent;")
-        self._grid.addWidget(spacer, self._r(), 0, 1, 2)
-
+        self._spacer(8)
         new_section_header(p, self._r(), "Cruise Control")
 
         # Mode label row
-        new_label(p, self._r(0), 0, "Mode:")
+        r_mode = self._r(0)
+        new_label(p, r_mode, 0, "Mode:")
 
         # Segmented button pair
-        r_mode = self._row - 1  # reuse same row
         seg_frame = QFrame()
         seg_frame.setObjectName("segFrame")
         seg_lay = QHBoxLayout(seg_frame)
@@ -373,25 +426,25 @@ class SettingsPanel(QWidget):
         seg_lay.addWidget(self._seg_cc)
         seg_lay.addWidget(self._seg_sl)
         self._grid.addWidget(
-            seg_frame, self._r(), 0, 1, 2,
+            seg_frame, r_mode, 0, 1, 2,
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
         )
+        self._grid.setRowMinimumHeight(r_mode, FIELD_ROW_HEIGHT)
+        self._row += 1  # advance past the shared label/segmented-control row
         self._update_seg_style(s.cc_mode)
 
         # Global speed limiter (empty → None disables both CC clamp and
         # always-on limiter — see AGENTS.md global_speed_limit_kmh).
-        new_label(p, self._r(0), 0, "Global speed limiter:")
-        self.ent_global_limit = new_entry(
-            p, self._r(), 1,
-            value=s.global_speed_limit_kmh, value_type=int,
-            minimum=60, maximum=130, optional=True,
-            suffix="km/h",
-            callback=lambda v: self._set("global_speed_limit_kmh", v),
-        )
-        new_subtext(
-            p, self._r(), 0,
+        self.ent_global_limit, _, _ = self._field_with_subtext(
+            "Global speed limiter:",
+            lambda c, r, col: new_entry(
+                c, r, col,
+                value=s.global_speed_limit_kmh, value_type=int,
+                minimum=60, maximum=130, optional=True,
+                suffix="km/h",
+                callback=lambda v: self._set("global_speed_limit_kmh", v),
+            ),
             "Empty to disable.",
-            col_span=2,
         )
 
         # Button configure rows
@@ -415,6 +468,7 @@ class SettingsPanel(QWidget):
             self._unassign_btn, self._r(), 0, 1, 2,
             Qt.AlignmentFlag.AlignRight,
         )
+        self._spacer(_UNASSIGN_GAP)
 
         # Increments
         new_label(p, self._r(0), 0, "Short press increments:")
@@ -441,15 +495,13 @@ class SettingsPanel(QWidget):
             callback=lambda v: self._set("long_press_reset", v),
         )
 
-        new_label(p, self._r(0), 0, "Show set speed on screen:")
-        self.chk_show_speed = new_checkbutton(
-            p, self._r(), 1, s.show_cc_ui,
-            callback=lambda v: self._set("show_cc_ui", v),
-        )
-        new_subtext(
-            p, self._r(), 0,
+        self.chk_show_speed, _, _ = self._field_with_subtext(
+            "Show set speed on screen:",
+            lambda c, r, col: new_checkbutton(
+                c, r, col, s.show_cc_ui,
+                callback=lambda v: self._set("show_cc_ui", v),
+            ),
             "just drag it across the screen to move",
-            col_span=2,
         )
 
         # CC UI scaling
@@ -479,6 +531,7 @@ class SettingsPanel(QWidget):
         self.chk_acc.toggled.connect(self._on_acc_toggled)
         acc_lay.addWidget(self.chk_acc)
         self._grid.addWidget(acc_widget, r_acc, 1)
+        self._grid.setRowMinimumHeight(r_acc, FIELD_ROW_HEIGHT)
 
         # AEB (BETA)
         r_aeb = self._r()
@@ -498,6 +551,7 @@ class SettingsPanel(QWidget):
         self.chk_aeb.toggled.connect(self._on_aeb_toggled)
         aeb_lay.addWidget(self.chk_aeb)
         self._grid.addWidget(aeb_widget, r_aeb, 1)
+        self._grid.setRowMinimumHeight(r_aeb, FIELD_ROW_HEIGHT)
 
     # Cruise helpers
 
@@ -543,6 +597,7 @@ class SettingsPanel(QWidget):
             btn, row, 1,
             alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
         )
+        self._grid.setRowMinimumHeight(row, FIELD_ROW_HEIGHT)
         self._bind_buttons[key] = btn
         self._refresh_bind_button(key)
         return btn
@@ -843,11 +898,7 @@ class SettingsPanel(QWidget):
         s = self._settings
         p = self._inner
 
-        spacer = QWidget()
-        spacer.setFixedHeight(8)
-        spacer.setStyleSheet("background: transparent;")
-        self._grid.addWidget(spacer, self._r(), 0, 1, 2)
-
+        self._spacer(8)
         new_section_header(p, self._r(), "One-Pedal-Drive")
 
         new_label(p, self._r(0), 0, "One Pedal Drive mode:")
@@ -859,32 +910,26 @@ class SettingsPanel(QWidget):
         # Conditional rows (visible only when OPD is on) ---
         self._opd_cond_start = self._row
 
-        r_off = self._r()
-        new_label(p, r_off, 0, "  Offset:")
-        self.ent_offset = new_entry(
-            p, r_off, 1,
-            value=s.offset_variable, value_type=float,
-            minimum=0.0, maximum=0.5,
-            callback=lambda v: self._set("offset_variable", v),
-        )
-        new_subtext(
-            p, self._r(), 0,
+        self.ent_offset, _, _ = self._field_with_subtext(
+            "  Offset:",
+            lambda c, r, col: new_entry(
+                c, r, col,
+                value=s.offset_variable, value_type=float,
+                minimum=0.0, maximum=0.5,
+                callback=lambda v: self._set("offset_variable", v),
+            ),
             "The amount you have to press the gas to not be braking or accelerating",
-            col_span=2,
         )
 
-        r_mb = self._r()
-        new_label(p, r_mb, 0, "  Max OPD brake:")
-        self.ent_max_brake = new_entry(
-            p, r_mb, 1,
-            value=s.max_opd_brake_variable, value_type=float,
-            minimum=0.0, maximum=0.5,
-            callback=lambda v: self._set("max_opd_brake_variable", v),
-        )
-        new_subtext(
-            p, self._r(), 0,
+        self.ent_max_brake, _, _ = self._field_with_subtext(
+            "  Max OPD brake:",
+            lambda c, r, col: new_entry(
+                c, r, col,
+                value=s.max_opd_brake_variable, value_type=float,
+                minimum=0.0, maximum=0.5,
+                callback=lambda v: self._set("max_opd_brake_variable", v),
+            ),
             "The amount of braking when not touching the pedals",
-            col_span=2,
         )
 
         self._opd_cond_end = self._row
@@ -926,10 +971,7 @@ class SettingsPanel(QWidget):
     def _build_footer(self) -> None:
         p = self._inner
 
-        spacer = QWidget()
-        spacer.setFixedHeight(8)
-        spacer.setStyleSheet("background: transparent;")
-        self._grid.addWidget(spacer, self._r(), 0, 1, 2)
+        self._spacer(8)
 
         cred_header = QLabel("Implemented libraries:")
         cred_header.setObjectName("creditLabel")
@@ -952,13 +994,24 @@ class SettingsPanel(QWidget):
         btn_sdk.clicked.connect(self._reinstall_sdk)
         self._grid.addWidget(btn_sdk, self._r(), 0, 1, 2)
 
-        # Reset all settings
+        # Reset all settings -- button + subtext share one container so the
+        # subtext hugs the button, same as _field_with_subtext (no label
+        # column needed here, so it's built directly rather than through it).
+        reset_container = QWidget()
+        reset_container.setObjectName("resetContainer")
+        reset_container.setStyleSheet("QWidget#resetContainer { background: transparent; }")
+        reset_grid = QGridLayout(reset_container)
+        reset_grid.setContentsMargins(0, 0, 0, 0)
+        reset_grid.setVerticalSpacing(SUBTEXT_GAP_TOP)
+
         self._reset_btn = QPushButton("reset all settings")
         self._reset_btn.setObjectName("dangerButton")
         self._reset_btn.clicked.connect(self._on_reset_click)
-        self._grid.addWidget(self._reset_btn, self._r(), 0, 1, 2)
+        reset_grid.addWidget(self._reset_btn, 0, 0, 1, 2)
 
-        new_subtext(p, self._r(), 0, "this requires a program restart", col_span=2)
+        new_subtext(reset_container, 1, 0, "this requires a program restart", col_span=2)
+
+        self._grid.addWidget(reset_container, self._r(), 0, 1, 2)
 
     def _reinstall_sdk(self) -> None:
         # TODO: reinstall ETS2 telemetry SDK files
@@ -997,6 +1050,17 @@ class SettingsPanel(QWidget):
             item = self._grid.itemAtPosition(row, col)
             if item and item.widget():
                 item.widget().setVisible(visible)
+        # A hidden row's widgets are invisible, but setRowMinimumHeight (used
+        # to give field rows a uniform height) still reserves that space
+        # unless cleared, leaving a blank gap. Stash the row's real minimum
+        # while hidden and restore it on show; a row that was never hidden
+        # isn't in the map, so showing it again is a no-op.
+        if visible:
+            if row in self._hidden_row_heights:
+                self._grid.setRowMinimumHeight(row, self._hidden_row_heights.pop(row))
+        else:
+            self._hidden_row_heights.setdefault(row, self._grid.rowMinimumHeight(row))
+            self._grid.setRowMinimumHeight(row, 0)
 
     # Bulk‑load  (called once after config load to sync widgets → values)
 
@@ -1018,10 +1082,7 @@ class SettingsPanel(QWidget):
         self.chk_airhorn.setChecked(s.airhorn_variable)
         self.chk_live_bar.setChecked(s.bar_variable)
         self.opt_channel.setCurrentText(s.update_channel.capitalize())
-        self._set_row_visible(
-            self._preview_channel_row,
-            s.update_channel.lower() == "preview",
-        )
+        self._preview_subtext.setVisible(s.update_channel.lower() == "preview")
 
         # Cruise control
         self._update_seg_style(s.cc_mode)

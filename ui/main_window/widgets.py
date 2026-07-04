@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 from shared.dropdown import Dropdown
 from ui.main_window.constants import (
     BG_COLOR,
+    FIELD_ROW_HEIGHT,
     FONT_SIZE,
     RADIUS_INPUT,
     SETTINGS_COLOR,
@@ -76,6 +77,22 @@ def new_section_header(parent: QWidget, row: int, text: str) -> QLabel:
     return lbl
 
 
+# Vertical spacer  (invisible fixed-height row, full‑width by default)
+
+def new_spacer(
+    parent: QWidget,
+    row: int,
+    height: int,
+    *,
+    col_span: int = 2,
+) -> QWidget:
+    spacer = QWidget()
+    spacer.setFixedHeight(height)
+    spacer.setStyleSheet("background: transparent;")
+    _grid(parent).addWidget(spacer, row, 0, 1, col_span)
+    return spacer
+
+
 # Subtext / description
 
 def new_subtext(
@@ -95,7 +112,7 @@ def new_subtext(
     return lbl
 
 
-# Checkbox  (24×24, no text)
+# Checkbox  (18×18, no text)
 
 class CheckBox(QCheckBox):
     """QCheckBox that paints a checkmark glyph when checked.
@@ -138,14 +155,16 @@ def new_checkbutton(
     callback: Callable[..., Any] | None = None,
 ) -> QCheckBox:
     cb = CheckBox()
-    cb.setFixedSize(24, 24)
+    cb.setFixedSize(18, 18)
     cb.setChecked(checked)
     if callback:
         cb.toggled.connect(callback)
-    _grid(parent).addWidget(
+    grid = _grid(parent)
+    grid.addWidget(
         cb, row, col,
         alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
     )
+    grid.setRowMinimumHeight(row, FIELD_ROW_HEIGHT)
     return cb
 
 
@@ -224,6 +243,7 @@ def new_entry(
     le.keyPressEvent = _key_override  # type: ignore[assignment]
 
     align = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+    grid = _grid(parent)
     if suffix:
         wrapper = QWidget()
         wrapper.setObjectName("transparentRow")
@@ -236,9 +256,10 @@ def new_entry(
         unit_lbl = QLabel(suffix)
         unit_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         lay.addWidget(unit_lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
-        _grid(parent).addWidget(wrapper, row, col, alignment=align)
+        grid.addWidget(wrapper, row, col, alignment=align)
     else:
-        _grid(parent).addWidget(le, row, col, alignment=align)
+        grid.addWidget(le, row, col, alignment=align)
+    grid.setRowMinimumHeight(row, FIELD_ROW_HEIGHT)
     return le
 
 
@@ -272,10 +293,12 @@ def new_optionmenu(
     if callback:
         combo.currentTextChanged.connect(callback)
 
-    _grid(parent).addWidget(
+    grid = _grid(parent)
+    grid.addWidget(
         combo, row, col,
         alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
     )
+    grid.setRowMinimumHeight(row, FIELD_ROW_HEIGHT)
     return combo
 
 
