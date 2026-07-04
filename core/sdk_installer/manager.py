@@ -253,6 +253,45 @@ class SdkManager:
             self._mark_checked()
         return result
 
+    def locate_games(self) -> list[GameSdkState]:
+        """Every ETS2 / ATS install as a state object, without consulting the
+        repository (per-file up-to-date flags are left optimistic). Used to
+        drive a forced reinstall where the current file state does not matter.
+        """
+        states: list[GameSdkState] = []
+        for game_type in GAME_TYPES:
+            for game_path in find_game_installations(game_type):
+                plugins = get_plugins_dir(game_path)
+                files = [
+                    ManagedFileState(name, (plugins / name).exists(), True)
+                    for name in self.tracked_files
+                ]
+                states.append(
+                    GameSdkState(
+                        game_type=game_type,
+                        game_path=game_path,
+                        plugins_dir=plugins,
+                        running=is_game_running(game_type),
+                        files=files,
+                    )
+                )
+        return states
+
+    def reinstall_all(
+        self,
+        *,
+        close_running: bool = True,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> list[GameApplyResult]:
+        """Force a fresh download and overwrite of every managed file for every
+        detected install. Returns one result per game (empty if none found)."""
+        return self.apply(
+            self.locate_games(),
+            close_running=close_running,
+            on_progress=on_progress,
+            force_all=True,
+        )
+
     # Installation
 
     def _ensure_cached(self, remote: RemoteFile) -> Path:
@@ -269,6 +308,7 @@ class SdkManager:
         *,
         close_running: bool = False,
         on_progress: Callable[[str], None] | None = None,
+        force_all: bool = False,
     ) -> list[GameApplyResult]:
         """Install missing / outdated files into the given installations.
 
@@ -276,6 +316,10 @@ class SdkManager:
         it into every game's plugin folder. If a game is running it is skipped
         unless ``close_running`` is True, in which case it is closed first
         (the caller must have obtained the user's consent).
+
+        With ``force_all`` every managed file the repository publishes is
+        (re)downloaded and overwritten regardless of the file's current state -
+        used by the "reinstall SDK" action.
         """
         try:
             remote_files = self.source.list_files()
@@ -302,7 +346,7 @@ class SdkManager:
                     results.append(result)
                     continue
 
-            wanted = self._files_to_install(game, remote_files)
+            wanted = self._files_to_install(game, remote_files, force_all=force_all)
             for name in wanted:
                 remote = remote_files.get(name)
                 if remote is None:
@@ -324,10 +368,17 @@ class SdkManager:
         return results
 
     def _files_to_install(
-        self, game: GameSdkState, remote_files: dict[str, RemoteFile]
+        self,
+        game: GameSdkState,
+        remote_files: dict[str, RemoteFile],
+        *,
+        force_all: bool = False,
     ) -> list[str]:
         """Filenames to (re)install for one game: stale/missing tracked files,
-        plus any courtesy file that is absent or differs from the source."""
+        plus any courtesy file that is absent or differs from the source. With
+        ``force_all``, every published managed file is returned."""
+        if force_all:
+            return [n for n in (*self.tracked_files, *COURTESY_FILES) if n in remote_files]
         wanted = [f.name for f in game.files if not f.installed or not f.up_to_date]
         for name in COURTESY_FILES:
             remote = remote_files.get(name)
@@ -391,5 +442,33 @@ def start_boot_check(
             log.exception("SDK boot-check callback failed")
 
     thread = threading.Thread(target=_run, name="sdk_boot_check", daemon=True)
+    thread.start()
+    return thread
+
+
+def start_reinstall(
+    on_result: Callable[[list[GameApplyResult]], None],
+    *,
+    close_running: bool = True,
+) -> threading.Thread:
+    """Force-reinstall every managed file on a daemon thread, then hand the
+    per-game results back. Keeps the download / file I/O off the caller's
+    thread; ``on_result`` runs on the worker thread, so a Qt caller must marshal
+    any UI work (or use the thread-safe logging popup). On failure ``on_result``
+    receives an empty list.
+    """
+
+    def _run() -> None:
+        try:
+            results = get_manager().reinstall_all(close_running=close_running)
+        except Exception:
+            log.exception("SDK reinstall failed")
+            results = []
+        try:
+            on_result(results)
+        except Exception:
+            log.exception("SDK reinstall callback failed")
+
+    thread = threading.Thread(target=_run, name="sdk_reinstall", daemon=True)
     thread.start()
     return thread

@@ -1068,8 +1068,39 @@ class SettingsPanel(QWidget):
         self._grid.addWidget(reset_container, self._r(), 0, 1, 2)
 
     def _reinstall_sdk(self) -> None:
-        # TODO: reinstall ETS2 telemetry SDK files
-        pass
+        """Confirm, then force a fresh re-download of every SDK DLL."""
+        self._show_confirm(
+            "Reinstall SDK?",
+            "This re-downloads and reinstalls every plugin DLL for all detected "
+            "ETS2/ATS installations. Any running game will be closed.\n\n"
+            "Continue?",
+            on_confirm=self._do_reinstall_sdk,
+        )
+
+    def _do_reinstall_sdk(self) -> None:
+        from core.sdk_installer import GameApplyResult, start_reinstall
+
+        # Runs on the SDK worker thread, so report only through the popup
+        # logger (thread-safe); never touch widgets from here.
+        def _on_done(results: list["GameApplyResult"]) -> None:
+            if not results:
+                logger.warning(
+                    "SDK reinstall: no ETS2/ATS installation found", extra={"popup": True}
+                )
+                return
+            failed = [r for r in results if not r.success]
+            if failed:
+                games = ", ".join(r.game_type.upper() for r in failed)
+                logger.warning("SDK reinstall failed for %s", games, extra={"popup": True})
+            else:
+                games = ", ".join(r.game_type.upper() for r in results)
+                logger.info("SDK reinstalled for %s", games, extra={"popup": True})
+
+        self._set_cmd_hint("Reinstalling SDK...")
+        try:
+            start_reinstall(_on_done)
+        except Exception:
+            logger.exception("failed to start SDK reinstall")
 
     def _on_reset_click(self) -> None:
         if self._reset_armed:
