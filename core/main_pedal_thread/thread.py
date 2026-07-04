@@ -14,8 +14,8 @@ Responsibilities:
   - Resolve button bindings (joystick buttons, hat directions, keyboard keys) and
     publish cc_*_held booleans for cruise_control_thread to read.
   - Expose joystick_button_states for input_bindings.resolve_held() callers.
-  - Expose a capture API (start_capture / cancel_capture / consume_capture) for
-    future UI assignment flows.
+  - Expose a capture API (start_capture / cancel_capture / consume_capture /
+    set_capture_guard) for the settings-panel button assignment flow.
 
 Does NOT own:
   - Sending values to the game  → sending_thread (reads ThreadData).
@@ -46,7 +46,7 @@ from ui.popup.popup_window import PopupWindow
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 from core.settings import Settings
-from core.input_bindings import migrate_binding, keyboard_is_pressed, resolve_held
+from core.input_bindings import binding_state, migrate_binding, keyboard_is_pressed, resolve_held
 
 logger = logging.getLogger(__name__)
 
@@ -181,9 +181,14 @@ class MainPedalThreadData(ThreadData):
     # Used by input_bindings.resolve_held() for external callers.
     joystick_button_states: dict = field(default_factory=dict, repr=False)
 
-    # Capture API (for future UI button-assignment flows).
+    # Capture API (used by the settings panel button-assignment flow).
     capture_active: bool = False
-    capture_event: object = None  # ("joystick", guid, code) when a joystick input captured
+    # ("joystick", guid, code, label, device_name) when a joystick input captured
+    capture_event: object = None
+    # Binding dict set by the UI right after a capture is consumed: CC button
+    # holds stay suppressed until this input is physically released, so
+    # assigning a button can never immediately trigger its action.
+    capture_guard: object = None
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
@@ -224,6 +229,15 @@ class MainPedalThread(BaseThread):
         self._joystick_states: dict[str, dict[int, bool]] = {}
         # previous tick's states: used for 0→1 capture detection
         self._prev_capture_states: dict[str, dict[int, bool]] = {}
+
+        # ── Capture scan (thread-owned) ───────────────────────────────────────
+        # While capture is active, every connected joystick is watched, not
+        # just tracked ones, so a first-time device can be assigned.
+        self._capture_scan_devices: dict[str, pygame.joystick.JoystickType] = {}
+        self._capture_scan_count: int = -1
+        # Guard safety timeout: clear a stuck capture_guard (e.g. bound to a
+        # device that never reports) so CC buttons cannot stay dead forever.
+        self._capture_guard_ts: float = 0.0
 
         # ── Operational state ─────────────────────────────────────────────────
         self._prev_brakeval: float = 0.0
@@ -318,12 +332,14 @@ class MainPedalThread(BaseThread):
         # Advance pedal reconnect state machine.
         self._tick_reconnect()
 
+        # Ensure newly-referenced button device GUIDs are tracked BEFORE the
+        # state snapshot, so a freshly saved binding resolves on the same tick
+        # and the capture guard stays alive until the input is truly released.
+        self._ensure_button_devices()
+
         # Update all joystick button/hat state snapshots (button devices + pedals).
         # Also handles capture detection and publishes joystick_button_states.
         self._update_joystick_states()
-
-        # Ensure newly-referenced button device GUIDs are tracked.
-        self._ensure_button_devices()
 
         prev_brakeval = self._prev_brakeval
         prev_speed    = self._prev_speed
@@ -513,13 +529,54 @@ class MainPedalThread(BaseThread):
     def consume_capture(self) -> tuple | None:
         """Read + clear the captured joystick event. Returns None if nothing captured.
 
-        Returns ("joystick", guid, virtual_code) on success.
+        Returns ("joystick", guid, virtual_code, label, device_name) on success.
         """
         with self.data._lock:
             ev = self.data.capture_event
             self.data.capture_event = None
             self.data.capture_active = False
             return ev
+
+    def set_capture_guard(self, binding: object) -> None:
+        """Suppress CC button holds until *binding* is physically released.
+
+        Called by the UI right after saving a freshly captured binding.
+        """
+        self._capture_guard_ts = time.monotonic()
+        with self.data._lock:
+            self.data.capture_guard = binding
+
+    _CAPTURE_GUARD_TIMEOUT_S = 10.0
+
+    def _sync_capture_scan_devices(self, capture_active: bool) -> None:
+        """Enumerate every connected joystick while capture is active.
+
+        Tracked devices only cover the pedals and devices already referenced
+        by a binding; without this scan a first-time device could never be
+        assigned. Re-enumerates when the device count changes (hot-plug),
+        clears when capture ends.
+        """
+        if not capture_active:
+            if self._capture_scan_devices:
+                self._capture_scan_devices = {}
+                self._capture_scan_count = -1
+            return
+        try:
+            count = pygame.joystick.get_count()
+        except Exception:
+            return
+        if count == self._capture_scan_count:
+            return
+        self._capture_scan_count = count
+        devices: dict[str, pygame.joystick.JoystickType] = {}
+        for i in range(count):
+            try:
+                js = pygame.joystick.Joystick(i)
+                js.init()
+                devices[js.get_guid()] = js
+            except Exception:
+                logger.debug("capture scan: skipping joystick %d", i, exc_info=True)
+        self._capture_scan_devices = devices
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
@@ -614,21 +671,29 @@ class MainPedalThread(BaseThread):
         """
         new_states: dict[str, dict[int, bool]] = {}
 
-        # Gather all devices: pedals + button-binding devices.
+        with self.data._lock:
+            capture_active = self.data.capture_active
+
+        self._sync_capture_scan_devices(capture_active)
+
+        # Gather all devices: pedals + button-binding devices (+ every
+        # connected joystick while capture is active).
         pedal_guid = Settings.device or ""
         all_devices: dict[str, pygame.joystick.JoystickType | None] = {}
         if pedal_guid:
             all_devices[pedal_guid] = self._device
         for guid, js in self._button_devices.items():
             all_devices.setdefault(guid, js)
-
-        with self.data._lock:
-            capture_active = self.data.capture_active
+        if capture_active:
+            for guid, js in self._capture_scan_devices.items():
+                all_devices.setdefault(guid, js)
 
         for guid, js in all_devices.items():
             # Determine lost status.
             if guid == pedal_guid:
                 lost = self.data.device_lost
+            elif guid in self._capture_scan_devices:
+                lost = False  # present by construction: just enumerated
             else:
                 lost = self._button_device_lost.get(guid, True)
 
@@ -653,13 +718,32 @@ class MainPedalThread(BaseThread):
                 new_states[guid] = states
 
                 # Capture: detect first 0→1 transition on any tracked device.
-                if capture_active:
-                    prev = self._prev_capture_states.get(guid, {})
+                # A device with no previous snapshot (just added by the
+                # capture scan) only seeds its baseline this tick: otherwise
+                # an always-on button bit would fire the instant the scan
+                # starts.
+                prev = self._prev_capture_states.get(guid)
+                if capture_active and prev is not None:
                     for code, held in states.items():
                         if held and not prev.get(code, False):
+                            if code < button_count:
+                                label = f"button {code}"
+                            else:
+                                hat_idx, dir_idx = divmod(code - button_count, 4)
+                                dir_name = ("up", "right", "down", "left")[dir_idx]
+                                label = (
+                                    f"hat {dir_name}" if hat_idx == 0
+                                    else f"hat {hat_idx} {dir_name}"
+                                )
+                            try:
+                                device_name = js.get_name()
+                            except Exception:
+                                device_name = ""
                             with self.data._lock:
                                 if self.data.capture_active and self.data.capture_event is None:
-                                    self.data.capture_event = ("joystick", guid, code)
+                                    self.data.capture_event = (
+                                        "joystick", guid, code, label, device_name
+                                    )
                                     self.data.capture_active = False
                             break
 
@@ -680,7 +764,29 @@ class MainPedalThread(BaseThread):
 
         Bindings are resolved against self._joystick_states (joystick/hat) or via
         keyboard.is_pressed() (keyboard), so results are always current for this tick.
+
+        While the UI is capturing a new binding, and until a freshly captured
+        input is physically released (capture_guard), all holds read False so
+        assigning a button never triggers a CC action mid-configuration.
         """
+        with self.data._lock:
+            capture_active = self.data.capture_active
+            guard = self.data.capture_guard
+        if capture_active:
+            return (False, False, False, False, False)
+        if guard is not None:
+            expired = (
+                time.monotonic() - self._capture_guard_ts
+                > self._CAPTURE_GUARD_TIMEOUT_S
+            )
+            # binding_state None means the source device hasn't reported yet
+            # (e.g. just tracked): keep suppressing rather than clearing on a
+            # device that may still be reporting the input as held.
+            if not expired and binding_state(guard) is not False:
+                return (False, False, False, False, False)
+            with self.data._lock:
+                self.data.capture_guard = None
+
         results: list[bool] = []
         for name in (
             "cc_start_button", "cc_inc_button", "cc_dec_button",

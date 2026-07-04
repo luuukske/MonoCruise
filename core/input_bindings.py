@@ -10,6 +10,7 @@ Binding formats (stored in config.json / Settings):
   {"source": "joystick",
    "device_guid": str,
    "device_name": str,              → optional, display only
+   "label": str,                    → optional, display only (e.g. "button 7", "hat up")
    "code": int}                     → button index if code < button_count,
                                        or virtual hat index using the encoding:
                                        hat_virtual = button_count + hat_idx*4 + dir
@@ -19,13 +20,17 @@ Binding formats (stored in config.json / Settings):
   {"source": "button_device",
    "vid_pid": str,                  → "{vendor_id:04x}:{product_id:04x}", e.g. "0483:0001"
    "device_name": str,              → optional, display only
+   "label": str,                    → optional, display only
    "button_id": int}                → byte_index * 8 + bit_index from raw HID report
 
 Public API
 ----------
 migrate_binding(raw)  : upgrade legacy int/str to dict; pass-through for dict/None
 resolve_held(binding) : True if the described input is currently held
+binding_state(binding): tri-state resolve: True/False, or None when the
+                        source device has not reported any state yet
 keyboard_is_pressed(key): safe wrapper around keyboard.is_pressed()
+binding_display_name(raw): short human-readable name for UI display
 """
 
 from __future__ import annotations
@@ -91,6 +96,77 @@ def resolve_held(binding: object) -> bool:
     if source == "button_device":
         return _resolve_button_device(b)
     return False
+
+
+def binding_state(binding: object) -> bool | None:
+    """Tri-state version of resolve_held.
+
+    Returns True/False when the source device has published state for this
+    input, and None when it hasn't (device not tracked yet, no report seen,
+    keyboard lib unavailable). The capture guard uses None to keep a freshly
+    assigned binding suppressed until its device actually reports a release,
+    instead of clearing on a not-yet-connected device.
+    """
+    b = migrate_binding(binding)
+    if b is None:
+        return False
+    source = b.get("source")
+    try:
+        if source == "joystick":
+            guid = b.get("device_guid")
+            code = b.get("code")
+            if not guid or code is None:
+                return False
+            pt = registry.get_thread("main_pedal_thread")
+            with pt.data._lock:
+                states = pt.data.joystick_button_states.get(guid)
+            if not states:
+                return None
+            return bool(states.get(code, False))
+        if source == "keyboard":
+            key = b.get("code")
+            if not key:
+                return False
+            if not _keyboard_available or _kb is None:
+                return None
+            return bool(_kb.is_pressed(key))
+        if source == "button_device":
+            vid_pid = b.get("vid_pid")
+            button_id = b.get("button_id")
+            if not vid_pid or button_id is None:
+                return False
+            bt = registry.get_thread("button_device_thread")
+            with bt.data._lock:
+                states = bt.data.button_states.get(vid_pid)
+            if not states:
+                return None
+            return bool(states.get(button_id, False))
+    except Exception:
+        return None
+    return False
+
+
+def binding_display_name(raw: object) -> str:
+    """Short human-readable name for a binding, for UI display.
+
+    Prefers the stored "label" (written at capture time, when the device's
+    button/hat layout was known); falls back to a generic name derived from
+    the code. Returns "None" for unassigned.
+    """
+    b = migrate_binding(raw)
+    if b is None:
+        return "None"
+    label = b.get("label")
+    if label:
+        return str(label)
+    source = b.get("source")
+    if source == "joystick":
+        return f"button {b.get('code')}"
+    if source == "keyboard":
+        return str(b.get("code") or "None")
+    if source == "button_device":
+        return f"button {b.get('button_id')}"
+    return "None"
 
 
 def keyboard_is_pressed(key: str) -> bool:
