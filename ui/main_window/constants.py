@@ -201,6 +201,13 @@ QPushButton#reinstallButton:hover {{
     background-color: {REINSTALL_HOVER};
 }}
 
+/* Update button next to the "Settings" title; opens the standalone updater.
+   Primary-blue styling inherited from QPushButton; padding dropped since the
+   inner icon+label layout owns it. */
+QPushButton#updateButton {{
+    padding: 0px;
+}}
+
 /* Button-binding configure buttons (settings panel).
    State order matters: later rules win, so held overrides hover. */
 QPushButton#bindButton {{

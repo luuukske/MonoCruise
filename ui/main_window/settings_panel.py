@@ -12,10 +12,12 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
+import sys
 import webbrowser
 from typing import TYPE_CHECKING, Any, Callable
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -132,11 +134,63 @@ class SettingsPanel(QWidget):
         card_lay.setSpacing(4)
         root.addWidget(card, 1)
 
-        # Title
-        title = QLabel("Settings")
+        # Title row: "Settings" centred across the full container, with an
+        # update button anchored near the right edge that opens the standalone
+        # updater exe.
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(0)
+
+        # Parented now so it inherits STYLESHEET before its styled height is
+        # read below (an unparented label measures at its unstyled height).
+        title = QLabel("Settings", self)
         title.setObjectName("settingsTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        card_lay.addWidget(title)
+
+        self._btn_update = QPushButton()
+        self._btn_update.setObjectName("updateButton")
+        self._btn_update.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_update.setToolTip("Check for updates")
+        # Manual icon+label layout: QPushButton's icon/text gap isn't QSS-
+        # settable. Labels ignore mouse events so clicks reach the button.
+        btn_lay = QHBoxLayout(self._btn_update)
+        btn_lay.setContentsMargins(8, 5, 8, 5)
+        btn_lay.setSpacing(4)
+        icon_lbl = QLabel()
+        icon_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        update_icon = os.path.join(_PROJECT_ROOT, "ui/main_window/assets/cloud-download.svg")
+        if os.path.exists(update_icon):
+            icon_lbl.setPixmap(QIcon(update_icon).pixmap(QSize(16, 16)))
+        text_lbl = QLabel("Update")
+        text_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        text_lbl.setStyleSheet("color: white; background: transparent; font-size: 12px;")
+        btn_lay.addWidget(icon_lbl)
+        btn_lay.addWidget(text_lbl)
+        self._btn_update.clicked.connect(self._launch_updater)
+
+        # A QPushButton ignores its child layout when sizing, so pin it.
+        title.ensurePolished()
+        text_lbl.ensurePolished()
+        self._btn_update.ensurePolished()
+        self._btn_update.setFixedSize(btn_lay.sizeHint())
+
+        # Right margin = whitespace above the button; a left spacer mirrors
+        # button width + margin so "Settings" stays centred in the card.
+        right_margin = max(
+            0,
+            (title.sizeHint().height() - self._btn_update.height()) // 2,
+        )
+        left_spacer = QWidget()
+        left_spacer.setStyleSheet("background: transparent;")
+        left_spacer.setFixedWidth(self._btn_update.width() + right_margin)
+
+        header.addWidget(left_spacer)
+        header.addStretch(1)
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(self._btn_update)
+        header.addSpacing(right_margin)
+        card_lay.addLayout(header)
 
         # Scroll area
         scroll = QScrollArea()
@@ -1039,6 +1093,31 @@ class SettingsPanel(QWidget):
         self._btn_youtube.hide()
         self._hide_btn.hide()
         self._set("hide_button_action", True)
+
+    def _launch_updater(self) -> None:
+        """Open the standalone updater exe.
+
+        The updater is a separate program installed at
+        ``<install root>/updater/updater.exe`` (frozen builds); the install
+        root is the directory holding MonoCruise.exe. In a dev tree the exe
+        isn't built, so fall back to running the updater source module with the
+        current interpreter. Best-effort: never let a failure crash the panel.
+        """
+        if getattr(sys, "frozen", False):
+            install_root = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            install_root = _PROJECT_ROOT
+        exe = os.path.join(install_root, "updater", "updater.exe")
+        script = os.path.join(install_root, "updater", "updater.py")
+        try:
+            if os.path.exists(exe):
+                subprocess.Popen([exe], cwd=install_root)
+            elif os.path.exists(script):
+                subprocess.Popen([sys.executable, script], cwd=install_root)
+            else:
+                logger.warning("updater not found at %s", exe)
+        except Exception:
+            logger.exception("failed to launch updater")
 
     def _set(self, key: str, value: Any) -> None:
         """Update a settings field and persist."""
