@@ -38,6 +38,7 @@ live_accel_pedals_viz_30s.bat
 docs/
 
 # PyInstaller / Inno Setup build outputs
+*.exe
 build/
 dist/
 installer/output/
