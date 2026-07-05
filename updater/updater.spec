@@ -3,11 +3,39 @@
 #
 # Produces dist/updater/updater.exe.
 
-from PyInstaller.utils.hooks import collect_data_files
-
 block_cipher = None
 
-datas = collect_data_files('PySide6')
+# PySide6 plugins/translations for the imported Qt modules (QtWidgets, QtSvg,
+# QtMultimedia for the release-notes video player) come from PyInstaller's
+# stock PySide6 hooks. Do NOT add collect_data_files('PySide6'): it copies
+# the entire PySide6 package (WebEngine/Chromium, QML, all translations —
+# ~600 MB) into the bundle.
+datas = []
+
+# Heavy Qt stacks the updater never touches.
+QT_EXCLUDES = [
+    'PySide6.QtWebEngineCore',
+    'PySide6.QtWebEngineWidgets',
+    'PySide6.QtWebEngineQuick',
+    'PySide6.QtWebChannel',
+    'PySide6.QtQml',
+    'PySide6.QtQuick',
+    'PySide6.QtQuick3D',
+    'PySide6.QtQuickWidgets',
+    'PySide6.QtPdf',
+    'PySide6.QtPdfWidgets',
+    'PySide6.QtCharts',
+    'PySide6.QtDataVisualization',
+    'PySide6.Qt3DCore',
+    'PySide6.Qt3DRender',
+    'PySide6.QtLocation',
+    'PySide6.QtPositioning',
+    'PySide6.QtBluetooth',
+    'PySide6.QtSensors',
+    'PySide6.QtSerialPort',
+    'PySide6.QtTest',
+    'PySide6.QtDesigner',
+]
 
 # PyInstaller 6 resolves relative spec paths against the spec file's
 # directory, not the invocation cwd ('updater/updater.py' stopped resolving).
@@ -30,7 +58,7 @@ a = Analysis(
     ],
     hookspath=[],
     runtime_hooks=[],
-    excludes=[],
+    excludes=QT_EXCLUDES,
     cipher=block_cipher,
 )
 

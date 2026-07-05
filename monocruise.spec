@@ -5,12 +5,15 @@
 # (one-folder mode: startup is significantly faster than one-file for a
 # PySide6 app).
 
-from PyInstaller.utils.hooks import collect_data_files
-
 block_cipher = None
 
 # Bundle every asset directory that ships with the app. Add new ones here
 # when you introduce another directory of icons/sounds/etc.
+#
+# PySide6 plugins/translations for the Qt modules the app imports are pulled
+# in by PyInstaller's stock PySide6 hooks. Do NOT add
+# collect_data_files('PySide6') here: it copies the entire PySide6 package
+# (WebEngine/Chromium, QML, all translations — ~600 MB) into the bundle.
 datas = [
     ('ui/main_window/assets', 'ui/main_window/assets'),
     ('ui/popup/icons',          'ui/popup/icons'),
@@ -18,9 +21,33 @@ datas = [
     ('core/aeb/AEB_warning.wav','core/aeb'),
 ]
 
-# PySide6 ships translations / Qt plugins that PyInstaller's stock hook
-# misses occasionally; the hook below pulls in everything it knows about.
-datas += collect_data_files('PySide6')
+# The app only uses QtCore/QtGui/QtWidgets/QtSvgWidgets; keep the heavy Qt
+# stacks out even if some transitive import mentions them.
+QT_EXCLUDES = [
+    'PySide6.QtWebEngineCore',
+    'PySide6.QtWebEngineWidgets',
+    'PySide6.QtWebEngineQuick',
+    'PySide6.QtWebChannel',
+    'PySide6.QtQml',
+    'PySide6.QtQuick',
+    'PySide6.QtQuick3D',
+    'PySide6.QtQuickWidgets',
+    'PySide6.QtMultimedia',
+    'PySide6.QtMultimediaWidgets',
+    'PySide6.QtPdf',
+    'PySide6.QtPdfWidgets',
+    'PySide6.QtCharts',
+    'PySide6.QtDataVisualization',
+    'PySide6.Qt3DCore',
+    'PySide6.Qt3DRender',
+    'PySide6.QtLocation',
+    'PySide6.QtPositioning',
+    'PySide6.QtBluetooth',
+    'PySide6.QtSensors',
+    'PySide6.QtSerialPort',
+    'PySide6.QtTest',
+    'PySide6.QtDesigner',
+]
 
 a = Analysis(
     ['monocruise.py'],
@@ -30,7 +57,7 @@ a = Analysis(
     hiddenimports=[],
     hookspath=[],
     runtime_hooks=[],
-    excludes=[],
+    excludes=QT_EXCLUDES,
     cipher=block_cipher,
 )
 

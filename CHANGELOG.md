@@ -32,6 +32,7 @@ A ground-up rewrite focused on **stability** and **performance**, with a more re
 - **Self-tuning pedals**: gas/brake output now calibrates to your hardware over time (with per-gear learning), plus road-load/hill feedforward and a gearshift hold for smoother, more consistent control.
 - **Automatic SDK installer**: automatically fetches the latest SDK for the latest ETS2/ATS version.
 - **Thread-safe settings & logging**: settings save atomically with no global variables (faster and race-free), and errors can still surface via popup even after a worker thread crashes.
+- **Much smaller downloads**: the installer and update packages no longer bundle unused Qt components (roughly 75% smaller).
 
 ### Fixed
 - **Hazard flickering** during AEB braking.
