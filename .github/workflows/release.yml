@@ -1,0 +1,157 @@
+﻿name: build-and-release
+
+# Tag push (vX.Y.Z) publishes a real release.
+# workflow_dispatch lets you produce a build artifact without publishing —
+# pass publish=true to publish anyway (uses core/version.py as the version).
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish a GitHub release (uses core/version.py)?'
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write  # needed by softprops/action-gh-release to create the release
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            ver="${GITHUB_REF#refs/tags/v}"
+            tag="${GITHUB_REF#refs/tags/}"
+            kind="tag"
+          else
+            ver=$(python -c "from core.version import __version__; print(__version__)")
+            sha="${GITHUB_SHA::7}"
+            tag="v${ver}-dev.${sha}"
+            kind="dispatch"
+          fi
+          echo "version=${ver}"  >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}"      >> "$GITHUB_OUTPUT"
+          echo "kind=${kind}"    >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Build MonoCruise.exe
+        run: pyinstaller --noconfirm monocruise.spec
+
+      - name: Build updater.exe
+        run: pyinstaller --noconfirm updater/updater.spec
+
+      # Background game checker. Installer-only: deliberately NOT packaged
+      # into Update.zip (see checker/README.md).
+      - name: Build MonoCruiseChecker.exe
+        run: pyinstaller --noconfirm checker/checker.spec
+
+      # ----------------------------------------------------------------------
+      # Code signing: plumbing left here for when a certificate is available.
+      # To enable:
+      #   1. Add GitHub Secrets: WINDOWS_CERT_BASE64, WINDOWS_CERT_PASSWORD
+      #   2. Uncomment this step.
+      # ----------------------------------------------------------------------
+      # - name: Sign executables
+      #   shell: pwsh
+      #   env:
+      #     CERT_B64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+      #     CERT_PW:  ${{ secrets.WINDOWS_CERT_PASSWORD }}
+      #   run: |
+      #     [IO.File]::WriteAllBytes("cert.pfx",[Convert]::FromBase64String($env:CERT_B64))
+      #     $signtool = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe"
+      #     & $signtool sign /f cert.pfx /p $env:CERT_PW /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+      #         "dist/MonoCruise/MonoCruise.exe" "dist/updater/updater.exe" "dist/MonoCruiseChecker/MonoCruiseChecker.exe"
+      #     Remove-Item cert.pfx
+
+      - name: Package Update.zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          # Stage the install dir layout and zip it. The updater installs this
+          # on top of the install root; it skips config.json and logs/ itself
+          # (see updater.py PRESERVE_PATHS). The updater lives in its own
+          # updater/ subdir with its own _internal so its files never collide
+          # with the app's and can be swapped by the self-update.
+          $stage = "stage-update"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -Recurse -Force dist/MonoCruise/* $stage/
+          New-Item -ItemType Directory -Force -Path $stage/updater | Out-Null
+          Copy-Item -Recurse -Force dist/updater/*    $stage/updater/
+          $zipName = "Update-${{ steps.version.outputs.tag }}.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath "artifacts/$zipName" -CompressionLevel Optimal
+          "update_zip=artifacts/$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        id: package
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc "/DMyAppVersion=${{ steps.version.outputs.version }}" installer\MonoCruise.iss
+          Copy-Item "installer\output\MonoCruise installer.exe" "artifacts\MonoCruise installer.exe"
+
+      # ----------------------------------------------------------------------
+      # Sign the installer too (same prerequisites as above):
+      # ----------------------------------------------------------------------
+      # - name: Sign installer
+      #   shell: pwsh
+      #   env:
+      #     CERT_B64: ${{ secrets.WINDOWS_CERT_BASE64 }}
+      #     CERT_PW:  ${{ secrets.WINDOWS_CERT_PASSWORD }}
+      #   run: |
+      #     [IO.File]::WriteAllBytes("cert.pfx",[Convert]::FromBase64String($env:CERT_B64))
+      #     $signtool = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe"
+      #     & $signtool sign /f cert.pfx /p $env:CERT_PW /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+      #         "artifacts/MonoCruise installer.exe"
+      #     Remove-Item cert.pfx
+
+      - name: Extract release notes
+        shell: bash
+        run: |
+          if [[ "${{ steps.version.outputs.kind }}" == "tag" ]]; then
+            python tools/release.py notes "${{ steps.version.outputs.version }}" > release_notes.md
+          else
+            # Dispatch builds use the [Unreleased] section. Empty file is fine
+            # if there's nothing there yet.
+            python tools/release.py notes Unreleased > release_notes.md || echo "" > release_notes.md
+          fi
+          echo "--- release notes ---"
+          cat release_notes.md
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: monocruise-${{ steps.version.outputs.tag }}
+          path: artifacts/*
+          retention-days: 14
+
+      - name: Create GitHub release
+        if: steps.version.outputs.kind == 'tag' || github.event.inputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: MonoCruise ${{ steps.version.outputs.tag }}
+          body_path: release_notes.md
+          files: artifacts/*
+          prerelease: ${{ contains(steps.version.outputs.tag, '-') }}
+          draft: false
+
