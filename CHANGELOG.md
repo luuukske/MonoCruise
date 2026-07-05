@@ -21,6 +21,7 @@ A ground-up rewrite focused on **stability** and **performance**, with a more re
 - **Lead-vehicle speed readout**: the lead truck's speed now shows on the CC panel above your set speed.
 - **Multi-device button assignment**: cruise-control buttons can be assigned to any joystick button, hat direction, keyboard key, or USB button device (e.g. a button stalk) — click a configure button in settings and press the input. Assigned buttons light up while pressed, and an Unassign button clears a single binding.
 - **ETS2 v1.60 support.**
+- **Rewritten auto-start checker**: the optional background helper that starts MonoCruise when ETS2/ATS launches was rebuilt from scratch to be transparent and antivirus-friendly — game detection via the telemetry shared-memory block (no process scanning, no `tasklist`), startup registration moved into the installer as a consent checkbox (the app never writes registry keys), a plain-language behaviour log next to the exe, and a proper version resource. See `checker/README.md`.
 
 ### Changed
 - **Keeps running when something breaks**: rewritten to one independent thread per subsystem, with a watchdog that detects a crashed or frozen part and restarts it automatically.
@@ -38,6 +39,8 @@ A ground-up rewrite focused on **stability** and **performance**, with a more re
 - **One-Pedal braking** under speed-limiter mode.
 - **Hazards** sometimes not switching off on acceleration.
 - **Popup crash** on early `getattr()` calls.
+- **Single-instance check**: MonoCruise now uses a named mutex instead of a process-name scan (which matched the app's own process in packaged builds); a second copy exits cleanly.
+- **Release builds on PyInstaller 6**: the updater spec's script path stopped resolving under PyInstaller 6's spec-relative path rule.
 
 **Known issues**
 - ACC gap level can't be changed while actively following a lead vehicle: runtime adjustment is coming in a future update.

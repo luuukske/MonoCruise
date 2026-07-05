@@ -1079,7 +1079,11 @@ class SettingsPanel(QWidget):
         )
 
     def _do_reinstall_sdk(self) -> None:
-        from core.sdk_installer import GameApplyResult, start_reinstall
+        from core.sdk_installer import (
+            SUPPORTED_GAME_VERSION,
+            GameApplyResult,
+            start_reinstall,
+        )
 
         # Runs on the SDK worker thread. PopupWindow.emit is thread-safe (it
         # marshals onto the GUI thread), so the outcome is surfaced with a
@@ -1089,8 +1093,18 @@ class SettingsPanel(QWidget):
                 PopupWindow.emit(
                     "SDK reinstall",
                     "No ETS2 or ATS installation was found.",
-                    "w",
-                    duration_ms=7000,
+                    "n",
+                    duration_ms=5000,
+                )
+                return
+            unsupported = [r for r in results if r.unsupported]
+            if unsupported:
+                games = ", ".join(r.game_type.upper() for r in unsupported)
+                PopupWindow.emit(
+                    "Unsupported game version",
+                    f"{games} {SUPPORTED_GAME_VERSION} is not supported yet.",
+                    "e",
+                    duration_ms=8000,
                 )
                 return
             failed = [r for r in results if not r.success]
@@ -1108,7 +1122,7 @@ class SettingsPanel(QWidget):
                     "SDK reinstalled",
                     f"All plugins were reinstalled for {games}.",
                     "c",
-                    duration_ms=6000,
+                    duration_ms=5000,
                 )
 
         self._set_cmd_hint("Reinstalling SDK...")
@@ -1117,7 +1131,7 @@ class SettingsPanel(QWidget):
         except Exception:
             logger.exception("failed to start SDK reinstall")
             PopupWindow.emit(
-                "SDK reinstall failed", "Could not start the reinstall.", "w", duration_ms=7000
+                "SDK reinstall failed", "Could not start the reinstall.", "e", duration_ms=10000
             )
 
     def _on_reset_click(self) -> None:

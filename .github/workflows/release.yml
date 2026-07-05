@@ -60,6 +60,11 @@ jobs:
       - name: Build updater.exe
         run: pyinstaller --noconfirm updater/updater.spec
 
+      # Background game checker. Installer-only: deliberately NOT packaged
+      # into Update.zip (see checker/README.md).
+      - name: Build MonoCruiseChecker.exe
+        run: pyinstaller --noconfirm checker/checker.spec
+
       # ----------------------------------------------------------------------
       # Code signing: plumbing left here for when a certificate is available.
       # To enable:
@@ -75,7 +80,7 @@ jobs:
       #     [IO.File]::WriteAllBytes("cert.pfx",[Convert]::FromBase64String($env:CERT_B64))
       #     $signtool = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe"
       #     & $signtool sign /f cert.pfx /p $env:CERT_PW /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
-      #         "dist/MonoCruise/MonoCruise.exe" "dist/updater/updater.exe"
+      #         "dist/MonoCruise/MonoCruise.exe" "dist/updater/updater.exe" "dist/MonoCruiseChecker/MonoCruiseChecker.exe"
       #     Remove-Item cert.pfx
 
       - name: Package Update.zip

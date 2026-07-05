@@ -45,7 +45,13 @@ from .game_paths import (
     is_game_running,
     is_steam_installed,
 )
-from .remote import RemoteFile, SdkSource, SdkSourceError, git_blob_sha_of
+from .remote import (
+    RemoteFile,
+    SdkSource,
+    SdkSourceError,
+    SdkVersionUnsupported,
+    git_blob_sha_of,
+)
 
 log = logging.getLogger("sdk")
 
@@ -115,6 +121,9 @@ class SdkCheckResult:
     consulted_remote: bool
     remote_error: str | None
     games: list[GameSdkState] = field(default_factory=list)
+    # True when the repository has no SDK folder for supported_version yet
+    # (the games are installed but that game version is not supported).
+    version_unsupported: bool = False
 
     @property
     def found_games(self) -> bool:
@@ -136,6 +145,8 @@ class GameApplyResult:
     installed: list[str] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)
     skipped_running: bool = False
+    # True when the target game version has no SDK folder in the repository yet.
+    unsupported: bool = False
 
     @property
     def success(self) -> bool:
@@ -213,9 +224,14 @@ class SdkManager:
 
         remote_files: dict[str, RemoteFile] | None = None
         remote_error: str | None = None
+        version_unsupported = False
         if consult:
             try:
                 remote_files = self.source.list_files()
+            except SdkVersionUnsupported as exc:
+                version_unsupported = True
+                remote_error = str(exc)
+                log.warning("SDK version %s is not supported yet: %s", self.version, exc)
             except SdkSourceError as exc:
                 remote_error = str(exc)
                 log.warning("SDK check could not reach the ETS2LA source: %s", exc)
@@ -245,6 +261,7 @@ class SdkManager:
             consulted_remote=remote_files is not None,
             remote_error=remote_error,
             games=games,
+            version_unsupported=version_unsupported,
         )
 
         # Nothing to do and we actually looked: record the version so a forced
@@ -323,6 +340,14 @@ class SdkManager:
         """
         try:
             remote_files = self.source.list_files()
+        except SdkVersionUnsupported as exc:
+            log.warning("cannot install SDK, version %s unsupported: %s", self.version, exc)
+            return [
+                GameApplyResult(
+                    g.game_type, g.game_path, errors=[("version", str(exc))], unsupported=True
+                )
+                for g in games
+            ]
         except SdkSourceError as exc:
             log.error("cannot install SDK, source unreachable: %s", exc)
             return [

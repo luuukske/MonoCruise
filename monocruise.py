@@ -11,25 +11,37 @@ Responsibilities:
 
 from __future__ import annotations
 
+import sys
 
-def is_process_running(name: str) -> bool:
-    import psutil
-    try:
-        for p in psutil.process_iter(['name']):
-            if p.info.get('name', '').lower() == name.lower():
-                return True
-    except (psutil.Error, KeyError):
-        pass
-    return False
+_INSTANCE_MUTEX = None
 
-if is_process_running("MonoCruise.exe"):
+
+def _acquire_single_instance() -> bool:
+    """Windows single-instance guard via a named mutex.
+
+    A process-name scan cannot be used here: it matches this very process in
+    a frozen build, so MonoCruise.exe would always see "itself already
+    running" and exit. The mutex does double duty: the background checker
+    (checker/ets2_checker.py) opens it to see whether MonoCruise is already
+    open without enumerating processes. The OS releases it when the process
+    dies, however it dies.
+    """
+    global _INSTANCE_MUTEX
+    if sys.platform != "win32":
+        return True
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    _INSTANCE_MUTEX = kernel32.CreateMutexW(None, False, "MonoCruiseSingleInstance")
+    return kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
+
+
+if not _acquire_single_instance():
     print("MonoCruise is already running")
-    exit()
+    raise SystemExit(0)
 
 import logging
 import re
 import signal
-import sys
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QTimer
@@ -185,26 +197,6 @@ def main() -> None:
     log.info("starting: debug=%s", settings.debug)
     _write_version_marker()
 
-    # SDK DLL check (backend only). Runs on a daemon thread so a possible
-    # GitHub round-trip never blocks boot; when the DLLs are already installed
-    # it stays fully offline. The user-facing popup is wired by the front-end
-    # later - for now the outcome is only logged.
-    from core.sdk_installer import SdkCheckResult, start_boot_check
-
-    def _on_sdk_result(result: SdkCheckResult) -> None:
-        if not result.found_games:
-            log.info("SDK check: no ETS2/ATS installation found")
-        elif result.needs_action:
-            games = ", ".join(g.game_type.upper() for g in result.games_needing_action)
-            log.info("SDK check: install/update needed for %s", games)
-        else:
-            log.info("SDK check: SDK DLLs present and up to date")
-
-    try:
-        start_boot_check(_on_sdk_result)
-    except Exception:
-        log.debug("could not start SDK boot check", exc_info=True)
-
     # Auto-refresh settings in debug mode (lets you edit config.json while running).
     # Runs on the Qt main thread, so it doesn't block any worker thread loops.
     if settings.debug:
@@ -232,6 +224,35 @@ def main() -> None:
     popup = PopupWindow()
     popup.show()
     _attach_popup_handler(popup)
+
+    # SDK DLL check (backend). Runs on a daemon thread so a possible GitHub
+    # round-trip never blocks boot; when the DLLs are already installed it stays
+    # fully offline. Started after the popup exists so it can surface an error.
+    # The install/update prompt itself is wired by the front-end later.
+    from core.sdk_installer import SdkCheckResult, start_boot_check
+
+    def _on_sdk_result(result: SdkCheckResult) -> None:
+        if not result.found_games:
+            log.info("SDK check: no ETS2/ATS installation found")
+        elif result.version_unsupported:
+            games = ", ".join(g.game_type.upper() for g in result.games)
+            log.warning("SDK check: version %s is not supported yet", result.supported_version)
+            PopupWindow.emit(
+                "Unsupported game version",
+                f"{games} {result.supported_version} is not supported yet.",
+                "e",
+                duration_ms=8000,
+            )
+        elif result.needs_action:
+            games = ", ".join(g.game_type.upper() for g in result.games_needing_action)
+            log.info("SDK check: install/update needed for %s", games)
+        else:
+            log.info("SDK check: SDK DLLs present and up to date")
+
+    try:
+        start_boot_check(_on_sdk_result)
+    except Exception:
+        log.debug("could not start SDK boot check", exc_info=True)
 
     # Main window (lives on the main thread: no separate thread needed)
     window = create_main_window(settings, version=f"v{__version__}")

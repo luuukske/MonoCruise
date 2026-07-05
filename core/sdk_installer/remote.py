@@ -42,6 +42,10 @@ class SdkSourceError(Exception):
     """The SDK source could not be reached or returned unexpected data."""
 
 
+class SdkVersionUnsupported(SdkSourceError):
+    """The requested game version has no SDK folder in the repository yet."""
+
+
 def git_blob_sha(data: bytes) -> str:
     """git-blob SHA-1 of ``data`` (matches the ``sha`` GitHub reports)."""
     header = f"blob {len(data)}\0".encode()
@@ -100,6 +104,12 @@ class SdkSource:
         except requests.RequestException as exc:
             raise SdkSourceError(f"cannot reach GitHub: {exc}") from exc
 
+        # A missing version folder is a 404 - distinct from an outage or rate
+        # limit, so callers can tell "not supported yet" from "couldn't ask".
+        if response.status_code == 404:
+            raise SdkVersionUnsupported(
+                f"SDK version {self.version} is not published in the repository"
+            )
         if response.status_code != 200:
             raise SdkSourceError(
                 f"GitHub returned HTTP {response.status_code} for SDK version {self.version}"
@@ -111,7 +121,7 @@ class SdkSource:
             raise SdkSourceError("GitHub returned an unreadable response") from exc
 
         if not isinstance(entries, list):
-            raise SdkSourceError(f"SDK version {self.version} not found in the repository")
+            raise SdkVersionUnsupported(f"SDK version {self.version} not found in the repository")
 
         listing: dict[str, RemoteFile] = {}
         for entry in entries:

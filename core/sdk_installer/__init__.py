@@ -35,7 +35,7 @@ from .manager import (
     start_boot_check,
     start_reinstall,
 )
-from .remote import SdkSource, SdkSourceError
+from .remote import SdkSource, SdkSourceError, SdkVersionUnsupported
 
 __all__ = [
     "GAME_TYPES",
@@ -59,4 +59,5 @@ __all__ = [
     "start_reinstall",
     "SdkSource",
     "SdkSourceError",
+    "SdkVersionUnsupported",
 ]
