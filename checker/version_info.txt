@@ -20,7 +20,7 @@ VSVersionInfo(
         StringTable(
           '040904B0',
           [
-            StringStruct('CompanyName', 'luuukske'),
+            StringStruct('CompanyName', 'LD-Tech'),
             StringStruct('FileDescription', 'MonoCruise game checker - starts MonoCruise when ETS2/ATS is running'),
             StringStruct('FileVersion', '1.0.0'),
             StringStruct('InternalName', 'MonoCruiseChecker'),

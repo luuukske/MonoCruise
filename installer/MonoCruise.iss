@@ -20,7 +20,7 @@
 [Setup]
 AppName=MonoCruise
 AppVersion={#MyAppVersion}
-AppPublisher=luuukske
+AppPublisher=LD-Tech
 AppPublisherURL=https://github.com/luuukske/MonoCruise
 ; Per-user install ({autopf} resolves to {localappdata}\Programs in lowest
 ; mode). The app writes config.json/installed_version.txt and the updater
