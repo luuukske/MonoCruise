@@ -20,8 +20,9 @@ A ground-up rewrite focused on **stability** and **performance**, with a more re
 - **On-screen notifications**: always-on-top popups for updates, errors, and onboarding tips.
 - **Lead-vehicle speed readout**: the lead truck's speed now shows on the CC panel above your set speed.
 - **Multi-device button assignment**: cruise-control buttons can be assigned to any joystick button, hat direction, keyboard key, or USB button device (e.g. a button stalk) — click a configure button in settings and press the input. Assigned buttons light up while pressed, and an Unassign button clears a single binding.
-- **ETS2 v1.60 support.**
-- **Rewritten auto-start checker**: the optional background helper that starts MonoCruise when ETS2/ATS launches was rebuilt from scratch to be transparent and antivirus-friendly — game detection via the telemetry shared-memory block (no process scanning, no `tasklist`), startup registration moved into the installer as a consent checkbox (the app never writes registry keys), a plain-language behaviour log next to the exe, and a proper version resource. See `checker/README.md`.
+- **ETS2 v1.60 support** (thanks to the automatic SDK fetcher).
+- **Rewritten auto-start checker**: now simpler and antivirus-friendly — uses telemetry for game detection (no process or registry scanning), with installer-based startup opt-in and a plain-language log. Details in `checker/README.md`.
+- **Global speed limiter**: a highly accurate global limiter so your truck never exceeds that set speed (useful for Trucky, for example).
 
 ### Changed
 - **Keeps running when something breaks**: rewritten to one independent thread per subsystem, with a watchdog that detects a crashed or frozen part and restarts it automatically.
@@ -29,6 +30,7 @@ A ground-up rewrite focused on **stability** and **performance**, with a more re
 - **More reliable ACC**: reworked lead-vehicle selection (arc-based in-lane scoring) sharply reduces the brake-checking the old ACC was prone to, and now accounts for road-trains (trailers-of-trailers).
 - **Reworked AEB**: arc-trajectory geometry with staged braking (warning brake, then full brake) in place of the old straight-line check.
 - **Self-tuning pedals**: gas/brake output now calibrates to your hardware over time (with per-gear learning), plus road-load/hill feedforward and a gearshift hold for smoother, more consistent control.
+- **Automatic SDK installer**: automatically fetches the latest SDK for the latest ETS2/ATS version.
 - **Thread-safe settings & logging**: settings save atomically with no global variables (faster and race-free), and errors can still surface via popup even after a worker thread crashes.
 
 ### Fixed
