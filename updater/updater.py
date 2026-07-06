@@ -5,6 +5,7 @@ import math
 import shutil
 import subprocess
 import tempfile
+import time
 import zipfile
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -16,7 +17,7 @@ from PySide6.QtCore import (
     Qt, QThread, Signal, QByteArray, QTimer, QElapsedTimer, QPoint, QPointF,
     Property, QPropertyAnimation, QEasingCurve,
 )
-from PySide6.QtGui import QPixmap, QFontDatabase, QPainter, QCursor
+from PySide6.QtGui import QPixmap, QFontDatabase, QPainter, QCursor, QIcon
 
 import styles
 from styles import (
@@ -354,18 +355,65 @@ class UpdateWorker(QThread):
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
+    # How long to wait for MonoCruise to finish its graceful shutdown after the
+    # close request. The app joins each worker thread with a 3 s timeout, so a
+    # clean exit can legitimately take several seconds.
+    APP_CLOSE_TIMEOUT_S = 15.0
+
     def _ensure_app_not_running(self):
         """A running MonoCruise.exe locks the files about to be replaced.
-        Failing here, before any file has moved, beats failing halfway through.
+
+        First ask the app to close itself (see _request_app_close) — its normal
+        shutdown path saves settings and neutralises pedal outputs. Only fail if
+        it is still running after the timeout (or is an older version that does
+        not listen for the request). Failing here, before any file has moved,
+        beats failing halfway through.
         """
         exe = os.path.join(self.install_root, 'MonoCruise.exe')
         if not os.path.exists(exe):
             return
+        if not self._exe_locked(exe):
+            return
+        self._request_app_close()
+        deadline = time.monotonic() + self.APP_CLOSE_TIMEOUT_S
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            if not self._exe_locked(exe):
+                return
+        raise RuntimeError("Close MonoCruise before updating")
+
+    @staticmethod
+    def _exe_locked(exe: str) -> bool:
         try:
             with open(exe, 'r+b'):
-                pass
+                return False
         except PermissionError:
-            raise RuntimeError("Close MonoCruise before updating") from None
+            return True
+
+    @staticmethod
+    def _request_app_close() -> None:
+        """Signal the named event MonoCruise polls for a graceful shutdown.
+
+        The app (monocruise.py) creates the event at boot and closes its main
+        window when it is signalled — the same code path as the user clicking
+        the X, so settings are saved and outputs released. A missing event
+        (app not running, or a pre-1.1.0-preview.2 version without the
+        listener) is not an error; the lock wait above simply times out.
+        """
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            kernel32.OpenEventW.restype = ctypes.c_void_p
+            kernel32.OpenEventW.argtypes = (ctypes.c_uint, ctypes.c_int, ctypes.c_wchar_p)
+            kernel32.SetEvent.argtypes = (ctypes.c_void_p,)
+            kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+            EVENT_MODIFY_STATE = 0x0002
+            handle = kernel32.OpenEventW(EVENT_MODIFY_STATE, False, "MonoCruiseShutdownRequest")
+            if handle:
+                kernel32.SetEvent(handle)
+                kernel32.CloseHandle(handle)
+        except Exception:
+            pass  # non-Windows dev run, or no permission: the wait times out
 
     def _move_into_place(self, staging: str):
         """Move validated staged files into the install tree.
@@ -471,13 +519,17 @@ class IconWidget(QLabel):
         self.icon_size = size
         self.setFixedSize(size, size)
         self._active = False
+        self._error = False
         self._progress = 0.0
         self._render_icon()
-    
+
     def _render_icon(self):
         """Render SVG with current color applied."""
-        
-        color = COLOR_ACTIVE if self._active else COLOR_INACTIVE
+
+        if self._error:
+            color = styles.COLOR_ERROR
+        else:
+            color = COLOR_ACTIVE if self._active else COLOR_INACTIVE
         
         # Replace currentColor with actual color
         svg_colored = self.svg_content.replace('currentColor', color)
@@ -510,7 +562,13 @@ class IconWidget(QLabel):
     def set_active(self, active: bool):
         self._active = active
         self._render_icon()
-    
+
+    def set_error(self, error: bool):
+        """Render the icon in the error colour (used for the failed stage)."""
+        if error != self._error:
+            self._error = error
+            self._render_icon()
+
     def set_progress(self, progress: float):
         """Set progress value (0.0 to 1.0) to make icon dynamic."""
         self._progress = max(0.0, min(1.0, progress))
@@ -600,26 +658,35 @@ class ProgressPanel(QFrame):
         layout.addLayout(v_container)
     
     def set_download_progress(self, progress: float):
+        self._current_icon = self.download_icon
         self.download_icon.set_active(True)
         # Apply subtle easing (progress^1.6) to make it appear faster
         eased_progress = progress ** 0.83
         self.line_download_to_install.set_progress(eased_progress)
-    
+
     def set_install_progress(self, progress: float):
+        self._current_icon = self.install_icon
         self.line_download_to_install.set_complete()
         self.install_icon.set_active(True)
         self.install_icon.set_progress(progress)
         self.line_install_to_finished.set_progress(progress)
-    
+
     def set_finished(self):
+        self._current_icon = self.finished_icon
         self.line_install_to_finished.set_complete()
         self.finished_icon.set_active(True)
-    
+
+    def set_error(self):
+        """Colour the stage that was running when the update failed red."""
+        icon = getattr(self, '_current_icon', None) or self.download_icon
+        icon.set_error(True)
+
     def reset(self):
-        self.download_icon.set_active(False)
-        self.install_icon.set_active(False)
+        self._current_icon = None
+        for icon in (self.download_icon, self.install_icon, self.finished_icon):
+            icon.set_error(False)
+            icon.set_active(False)
         self.install_icon.set_progress(0)
-        self.finished_icon.set_active(False)
         self.line_download_to_install.set_progress(0)
         self.line_install_to_finished.set_progress(0)
 
@@ -1201,6 +1268,7 @@ class UpdaterWindow(QMainWindow):
     def _on_error(self, message: str):
         self.selector_panel.update_btn.setEnabled(True)
         self.selector_panel.details.release_title.setText(f"Error: {message}")
+        self.progress_panel.set_error()
         self._cleanup_worker()
     
     def _cleanup_worker(self):
@@ -1232,6 +1300,15 @@ def _other_instance_running() -> bool:
         return False  # non-Windows dev run: no guard needed
 
 
+def _window_icon_path() -> str | None:
+    """icon.ico: bundled into _internal when frozen, at the repo root in dev."""
+    if getattr(sys, 'frozen', False):
+        candidate = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icon.ico')
+    else:
+        candidate = os.path.join(install_root(), 'icon.ico')
+    return candidate if os.path.isfile(candidate) else None
+
+
 def main():
     duplicate = _other_instance_running()
     if not duplicate:
@@ -1242,6 +1319,9 @@ def main():
 
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
+    icon_path = _window_icon_path()
+    if icon_path:
+        app.setWindowIcon(QIcon(icon_path))
 
     if duplicate:
         QMessageBox.warning(None, "MonoCruise Updater",

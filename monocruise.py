@@ -39,6 +39,40 @@ if not _acquire_single_instance():
     print("MonoCruise is already running")
     raise SystemExit(0)
 
+
+_SHUTDOWN_EVENT = None
+
+
+def _create_shutdown_event():
+    """Create the named event the standalone updater signals to ask for a
+    graceful shutdown (see updater/updater.py:_request_app_close).
+
+    Auto-reset: a 0-timeout wait in the poll timer both checks and clears it.
+    Returns the handle, or None off-Windows / on failure (the updater then
+    falls back to its "close MonoCruise before updating" error).
+    """
+    global _SHUTDOWN_EVENT
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateEventW.restype = ctypes.c_void_p
+        _SHUTDOWN_EVENT = kernel32.CreateEventW(None, False, False, "MonoCruiseShutdownRequest")
+        return _SHUTDOWN_EVENT
+    except Exception:
+        return None
+
+
+def _shutdown_requested(handle) -> bool:
+    """True when the updater has signalled the shutdown event (clears it)."""
+    if not handle:
+        return False
+    import ctypes
+    kernel32 = ctypes.windll.kernel32
+    kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint)
+    return kernel32.WaitForSingleObject(handle, 0) == 0  # WAIT_OBJECT_0
+
 import logging
 import re
 import signal
@@ -344,8 +378,17 @@ def main() -> None:
     # Pedal visualization bar (shows aforward/abackward + em_stop; lives on main thread)
     _visualization_bar = create_visualization_bar()
 
+    # Named event the updater signals to request a clean exit before it
+    # replaces files. Routed through window.close() so the shutdown is the
+    # same as clicking the X: settings saved, outputs released.
+    shutdown_event = _create_shutdown_event()
+
     # Poll thread liveness via QTimer (keeps Qt event loop free)
     def _check_threads() -> None:
+        if _shutdown_requested(shutdown_event):
+            log.info("shutdown requested by updater: closing")
+            window.close()
+            return
         try:
             telemetry = registry.get_thread("telemetry_thread")
             if telemetry.data.request_quit:

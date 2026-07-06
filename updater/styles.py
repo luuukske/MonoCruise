@@ -14,6 +14,7 @@ COLOR_BUTTON_BLUE_HOVER = "#1976d2"
 COLOR_BUTTON_UPDATE = "#4caf50"
 COLOR_BUTTON_UPDATE_HOVER = "#388e3c"
 COLOR_PRERELEASE = "#f44336"  # Red for pre-release badge
+COLOR_ERROR = "#f44336"       # Red for the failed progress stage
 
 # Alert colors (GitHub-style)
 COLOR_NOTE = "#0969da"        # Blue for NOTE alerts

@@ -5,12 +5,19 @@
 
 block_cipher = None
 
+# PyInstaller 6 resolves relative spec paths against the spec file's
+# directory, not the invocation cwd ('updater/updater.py' stopped resolving).
+# SPECPATH (provided by PyInstaller) makes the intent explicit either way.
+import os
+_REPO_ROOT = os.path.dirname(SPECPATH)
+
 # PySide6 plugins/translations for the imported Qt modules (QtWidgets, QtSvg,
 # QtMultimedia for the release-notes video player) come from PyInstaller's
 # stock PySide6 hooks. Do NOT add collect_data_files('PySide6'): it copies
 # the entire PySide6 package (WebEngine/Chromium, QML, all translations —
 # ~600 MB) into the bundle.
-datas = []
+# icon.ico: window/taskbar icon, loaded at runtime (see _window_icon_path).
+datas = [(os.path.join(_REPO_ROOT, 'icon.ico'), '.')]
 
 # Heavy Qt stacks the updater never touches.
 QT_EXCLUDES = [
@@ -36,12 +43,6 @@ QT_EXCLUDES = [
     'PySide6.QtTest',
     'PySide6.QtDesigner',
 ]
-
-# PyInstaller 6 resolves relative spec paths against the spec file's
-# directory, not the invocation cwd ('updater/updater.py' stopped resolving).
-# SPECPATH (provided by PyInstaller) makes the intent explicit either way.
-import os
-_REPO_ROOT = os.path.dirname(SPECPATH)
 
 a = Analysis(
     [os.path.join(SPECPATH, 'updater.py')],

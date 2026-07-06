@@ -12,6 +12,15 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+### Added
+- **Updater closes MonoCruise for you**: clicking Update while MonoCruise is running now asks the app to shut down cleanly (settings saved, pedals released) instead of showing an error. If it will not close within 15 seconds, the old "Close MonoCruise before updating" message still appears.
+
+### Changed
+- **Failed updates show in red**: when an update fails, the stage it failed on (download/install) turns red in the updater's progress column.
+
+### Fixed
+- **Updater window icon**: the updater now shows the MonoCruise icon in its title bar and on the taskbar instead of the default icon.
+
 ## [1.1.0-preview.1] - 2026-07-06
 
 A ground-up rewrite focused on **stability** and **performance**, with a more reliable take on every existing feature: plus a built-in updater and on-screen notifications.
