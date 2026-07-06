@@ -12,6 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+## [1.1.0-preview.2] - 2026-07-06
 ### Added
 - **Updater closes MonoCruise for you**: clicking Update while MonoCruise is running now asks the app to shut down cleanly (settings saved, pedals released) instead of showing an error. If it will not close within 15 seconds, the old "Close MonoCruise before updating" message still appears.
 
