@@ -158,6 +158,40 @@ def _write_version_marker() -> None:
         logging.getLogger("main").debug("could not write version marker", exc_info=True)
 
 
+def _read_version_marker() -> str:
+    """Return the version recorded on the previous run, or "" if unavailable.
+
+    Read *before* _write_version_marker() overwrites it, so boot can tell
+    whether the running version changed since last launch (an update, downgrade,
+    or fresh install).
+    """
+    try:
+        return (CONFIG_PATH.parent / "installed_version.txt").read_text(
+            encoding="utf-8"
+        ).strip()
+    except Exception:
+        return ""
+
+
+def _sync_channel_to_build(settings: Settings, previous_version: str) -> None:
+    """On a version change, match the update channel to the running build.
+
+    Only fires when the recorded previous version differs from the running one:
+    between updates the user's manual channel choice is left untouched. A build
+    whose version carries the "preview" tag tracks the preview channel; any other
+    build tracks stable, so the updater keeps offering matching releases.
+    """
+    if previous_version == __version__:
+        return
+    desired = "preview" if "preview" in __version__.lower() else "stable"
+    if settings.update_channel != desired:
+        logging.getLogger("main").info(
+            "version changed %s -> %s; matching update_channel to %s build",
+            previous_version or "(none)", __version__, desired,
+        )
+        Settings.save(values={"update_channel": desired})
+
+
 # Thread factories
 
 def _factory_for(thread):
@@ -195,7 +229,9 @@ def main() -> None:
     _configure_logging()
     log = logging.getLogger("main")
     log.info("starting: debug=%s", settings.debug)
+    previous_version = _read_version_marker()
     _write_version_marker()
+    _sync_channel_to_build(settings, previous_version)
 
     # Auto-refresh settings in debug mode (lets you edit config.json while running).
     # Runs on the Qt main thread, so it doesn't block any worker thread loops.
