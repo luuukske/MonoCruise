@@ -49,4 +49,4 @@ A ground-up rewrite focused on **stability** and **performance**, with a more re
 
 **Known issues**
 - ACC gap level can't be changed while actively following a lead vehicle: runtime adjustment is coming in a future update.
-- AEB is experimental and can false-trigger in corners and during lane changes. **Use with care**.
+- AEB is experimental and can false-trigger in corners and during lane changes, so it is **disabled by default** — enable it in settings. **Use with care**.
