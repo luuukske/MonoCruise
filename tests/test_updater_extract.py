@@ -150,54 +150,88 @@ def test_should_skip_rules(tmp_path):
     assert w._should_skip("MonoCruise.exe") is False
 
 
+# The swap itself is applied by MonoCruise (shared/updater_swap.py), not by
+# the updater: a running updater cannot rename its own tree.
+from shared import updater_swap as swap
+
+
+def _not_running() -> bool:
+    return False
+
+
 def _make_updater_tree(root, marker: str):
-    udir = root / "updater"
+    udir = root / swap.UPDATER_DIR
     (udir / "_internal").mkdir(parents=True)
     (udir / "updater.exe").write_text(marker, encoding="utf-8")
     (udir / "_internal" / "lib.dll").write_text(marker, encoding="utf-8")
     return udir
 
 
-def test_self_update_swap_applies_complete_pending(tmp_path):
+def test_swap_constants_match_updater():
+    # The updater stages into these paths; the app swaps them. A rename on
+    # either side silently breaks self-updates.
+    assert mc.PENDING_DIR == swap.PENDING_DIR
+    assert mc.OLD_DIR == swap.OLD_DIR
+    assert mc.PENDING_SENTINEL == swap.PENDING_SENTINEL
+
+
+def test_swap_applies_complete_pending(tmp_path):
     udir = _make_updater_tree(tmp_path, "old")
-    pending = tmp_path / mc.PENDING_DIR
+    pending = tmp_path / swap.PENDING_DIR
     (pending / "_internal").mkdir(parents=True)
     (pending / "updater.exe").write_text("new", encoding="utf-8")
     (pending / "_internal" / "lib.dll").write_text("new", encoding="utf-8")
-    (pending / mc.PENDING_SENTINEL).write_text("", encoding="utf-8")
+    (pending / swap.PENDING_SENTINEL).write_text("", encoding="utf-8")
 
-    mc._apply_pending_self_update(str(udir), str(tmp_path))
+    assert swap.apply_pending_updater_swap(str(tmp_path), running_check=_not_running) is True
 
     assert (udir / "updater.exe").read_text(encoding="utf-8") == "new"
     assert (udir / "_internal" / "lib.dll").read_text(encoding="utf-8") == "new"
-    assert not (udir / mc.PENDING_SENTINEL).exists()
+    assert not (udir / swap.PENDING_SENTINEL).exists()
     assert not pending.exists()
+    assert not (tmp_path / swap.OLD_DIR).exists()
 
 
-def test_self_update_discards_incomplete_pending(tmp_path):
+def test_swap_discards_incomplete_pending(tmp_path):
     udir = _make_updater_tree(tmp_path, "old")
-    pending = tmp_path / mc.PENDING_DIR
+    pending = tmp_path / swap.PENDING_DIR
     pending.mkdir()
     (pending / "updater.exe").write_text("half", encoding="utf-8")
     # No sentinel: the stage never completed and must not be swapped in.
 
-    mc._apply_pending_self_update(str(udir), str(tmp_path))
+    assert swap.apply_pending_updater_swap(str(tmp_path), running_check=_not_running) is False
 
     assert (udir / "updater.exe").read_text(encoding="utf-8") == "old"
     assert not pending.exists()
 
 
-def test_self_update_cleans_previous_leftovers(tmp_path):
+def test_swap_skipped_while_updater_runs(tmp_path):
+    udir = _make_updater_tree(tmp_path, "old")
+    pending = tmp_path / swap.PENDING_DIR
+    pending.mkdir()
+    (pending / "updater.exe").write_text("new", encoding="utf-8")
+    (pending / swap.PENDING_SENTINEL).write_text("", encoding="utf-8")
+
+    assert swap.apply_pending_updater_swap(str(tmp_path), running_check=lambda: True) is False
+
+    # Untouched and fully retryable: sentinel still in place.
+    assert (udir / "updater.exe").read_text(encoding="utf-8") == "old"
+    assert (pending / swap.PENDING_SENTINEL).exists()
+
+
+def test_swap_cleans_stale_old_dir(tmp_path):
     udir = _make_updater_tree(tmp_path, "current")
-    old = tmp_path / mc.OLD_DIR
+    old = tmp_path / swap.OLD_DIR
     old.mkdir()
     (old / "updater.exe").write_text("stale", encoding="utf-8")
-    staging = tmp_path / mc.STAGING_DIR
-    staging.mkdir()
-    (staging / "junk.bin").write_text("junk", encoding="utf-8")
 
-    mc._apply_pending_self_update(str(udir), str(tmp_path))
+    assert swap.apply_pending_updater_swap(str(tmp_path), running_check=_not_running) is False
 
     assert not old.exists()
-    assert not staging.exists()
     assert (udir / "updater.exe").read_text(encoding="utf-8") == "current"
+
+
+def test_pending_swap_staged(tmp_path):
+    assert swap.pending_swap_staged(str(tmp_path)) is False
+    (tmp_path / swap.PENDING_DIR).mkdir()
+    assert swap.pending_swap_staged(str(tmp_path)) is True

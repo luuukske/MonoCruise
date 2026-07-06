@@ -385,12 +385,22 @@ def main() -> None:
     # same as clicking the X: settings saved, outputs released.
     shutdown_event = _create_shutdown_event()
 
+    # Updater self-update: the updater only STAGES its new files
+    # (updater_pending/); a running updater cannot rename its own tree (see
+    # shared/updater_swap.py). This app applies the swap as soon as the
+    # updater has exited — polled below, so it also catches an updater that
+    # closes while MonoCruise is already running.
+    from shared.updater_swap import apply_pending_updater_swap, pending_swap_staged
+    swap_root = str(CONFIG_PATH.parent)
+
     # Poll thread liveness via QTimer (keeps Qt event loop free)
     def _check_threads() -> None:
         if _shutdown_requested(shutdown_event):
             log.info("shutdown requested by updater: closing")
             window.close()
             return
+        if pending_swap_staged(swap_root):
+            apply_pending_updater_swap(swap_root)
         try:
             telemetry = registry.get_thread("telemetry_thread")
             if telemetry.data.request_quit:

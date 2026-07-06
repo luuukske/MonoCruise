@@ -104,16 +104,19 @@ DEFAULT_CHANNEL = "stable"
 
 # Self-update layout, all directly under the install root:
 #   updater/          the updater's own exe + support files (this program)
-#   updater_pending/  new updater files staged by an update, swapped in at the
-#                     NEXT updater launch (sentinel written last marks it complete)
-#   updater_old/      previous updater files parked by a swap; locked while that
-#                     process ran, deleted at the launch after
+#   updater_pending/  new updater files staged by an update (sentinel written
+#                     last marks the stage complete)
+#   updater_old/      previous updater files parked by a swap
 #   update_staging.tmp/  scratch dir an update extracts into before any live
 #                     file is touched
-# The running updater can't overwrite its own exe/DLLs, but Windows does allow
-# *renaming* open files — the swap is pure renames, done in-process at startup.
-# Deliberately no helper script or watcher process: an unsigned exe spawning a
-# script that rewrites exes is a classic antivirus false-positive pattern.
+# This program only STAGES its own update (updater_pending/); the swap into
+# place is applied by MonoCruise once the updater has exited — see
+# shared/updater_swap.py for why it cannot happen in-process (zipimport holds
+# base_library.zip without FILE_SHARE_DELETE, blocking the rename while the
+# updater runs). Deliberately no helper script or watcher process: an unsigned
+# exe spawning a script that rewrites exes is a classic antivirus
+# false-positive pattern.
+# Names must match shared/updater_swap.py (tests assert this).
 PENDING_DIR = 'updater_pending'
 OLD_DIR = 'updater_old'
 STAGING_DIR = 'update_staging.tmp'
@@ -183,46 +186,12 @@ def _move_tree(src: str, dst: str) -> None:
             os.replace(os.path.join(dirpath, name), os.path.join(target_dir, name))
 
 
-def apply_pending_self_update() -> None:
-    """Swap in updater files staged by a previous run. Call before Qt starts."""
+def clean_stale_staging() -> None:
+    """Remove a leftover extract dir from an update that crashed mid-install.
+    The pending/old dirs are owned by the app-side swap; not touched here."""
     if not getattr(sys, 'frozen', False):
-        return  # dev runs from source: nothing to swap
-    _apply_pending_self_update(updater_dir(), install_root())
-
-
-def _apply_pending_self_update(udir: str, root: str) -> None:
-    """Testable core of the startup swap. Must never raise: whatever happens
-    to the pending files, the updater has to stay launchable.
-
-    The swap only affects files on disk; the current process keeps running the
-    already-loaded old code and the new updater takes effect next launch.
-    """
-    # Leftovers from previous runs: updater_old was locked by the process that
-    # created it, and a staging dir means an update crashed mid-extract.
-    shutil.rmtree(os.path.join(root, OLD_DIR), ignore_errors=True)
-    shutil.rmtree(os.path.join(root, STAGING_DIR), ignore_errors=True)
-
-    pending = os.path.join(root, PENDING_DIR)
-    old = os.path.join(root, OLD_DIR)
-    if not os.path.isdir(pending):
         return
-    sentinel = os.path.join(pending, PENDING_SENTINEL)
-    if not os.path.isfile(sentinel):
-        # Staging never completed; discard it. The update can simply be re-run.
-        shutil.rmtree(pending, ignore_errors=True)
-        return
-    try:
-        os.remove(sentinel)
-        _move_tree(udir, old)      # park current files (renames work while running)
-        _move_tree(pending, udir)  # staged files in
-        shutil.rmtree(pending, ignore_errors=True)
-    except OSError:
-        # Roll back whatever moved out. os.replace restores over any half-moved
-        # new files, so this converges on the intact old updater.
-        try:
-            _move_tree(old, udir)
-        except OSError:
-            pass
+    shutil.rmtree(os.path.join(install_root(), STAGING_DIR), ignore_errors=True)
 
 
 def release_version(release: dict) -> Version | None:
@@ -439,6 +408,10 @@ class UpdateWorker(QThread):
 
 # How long the no-connection splash waits before silently retrying the fetch.
 OFFLINE_RETRY_MS = 10_000
+
+# How long the completed progress column stays on screen before the updater
+# starts MonoCruise and closes itself.
+FINISH_LINGER_MS = 2_000
 
 
 class ReleaseFetchWorker(QThread):
@@ -1243,9 +1216,21 @@ class UpdaterWindow(QMainWindow):
             self.progress_panel.set_finished()
     
     def _on_update_finished(self):
-        self.selector_panel.update_btn.setEnabled(True)
+        # Deliberately leave the Update button disabled: the window is about
+        # to hand off to the app and close.
         self._cleanup_worker()
+        QTimer.singleShot(FINISH_LINGER_MS, self._handoff)
+
+    def _handoff(self):
+        """Start the freshly installed app, then close.
+
+        Closing right away means the updater is gone before anyone launches
+        it again, so the next launch starts by applying the pending
+        self-update (updater_pending/) and relaunching as the new version —
+        see _relaunch_self.
+        """
         self._launch_app()
+        self.close()
 
     def _launch_app(self):
         """Auto-start the freshly installed app. Must run only after the
@@ -1293,6 +1278,10 @@ def _other_instance_running() -> bool:
     try:
         import ctypes
         kernel32 = ctypes.windll.kernel32
+        # HANDLE is pointer-sized; the ctypes default int return would
+        # truncate it on 64-bit and _relaunch_self closes this handle later.
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
         global _INSTANCE_MUTEX  # keep the handle alive for the process lifetime
         _INSTANCE_MUTEX = kernel32.CreateMutexW(None, False, "MonoCruiseUpdaterSingleInstance")
         return kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
@@ -1312,10 +1301,7 @@ def _window_icon_path() -> str | None:
 def main():
     duplicate = _other_instance_running()
     if not duplicate:
-        # Finish a self-update staged by the previous run. Must happen before
-        # QApplication: Qt lazy-loads plugin DLLs from the updater dir, and
-        # loading them mid-session from a half-swapped tree could mix versions.
-        apply_pending_self_update()
+        clean_stale_staging()
 
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
