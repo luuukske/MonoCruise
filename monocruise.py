@@ -329,9 +329,11 @@ def main() -> None:
     registry.register_object("main_window", window)
     window.window_closed.connect(lambda: (_stop_all(), app.quit()))
 
-    aeb_debug = AEBDebugWindow()
-    aeb_debug.show()
-    registry.register_object("aeb_debug", aeb_debug)
+    # AEB debug view: developer tooling, only shown in debug mode.
+    if settings.debug:
+        aeb_debug = AEBDebugWindow()
+        aeb_debug.show()
+        registry.register_object("aeb_debug", aeb_debug)
 
     # Watchdog
     watchdog = Watchdog()

@@ -20,6 +20,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ### Fixed
 - **Updater window icon**: the updater now shows the MonoCruise icon in its title bar and on the taskbar instead of the default icon.
+- **AEB debug view no longer opens on every start**: the developer radar view now only appears in debug mode.
 
 ## [1.1.0-preview.1] - 2026-07-06
 
