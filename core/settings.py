@@ -100,7 +100,7 @@ class Settings(metaclass=_SingletonMeta):
     horn_variable: bool = True
     airhorn_variable: bool = True
     autostart_variable: bool = True
-    AEB_enabled: bool = True
+    AEB_enabled: bool = False
 
     # Cruise/ACC/Custom buttons
     cc_dec_button: object = None

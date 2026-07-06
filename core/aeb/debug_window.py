@@ -18,7 +18,7 @@ from core.radar.traffic import ArcPath
 
 logger = logging.getLogger(__name__)
 
-_WIN_W = 700
+_WIN_W = 1200
 _WIN_H = 700
 _BG = QColor(15, 15, 20)
 _GRID_MAJOR = QColor(40, 40, 50)
@@ -68,7 +68,8 @@ def _w2e(wx: float, wz: float, ex: float, ez: float, ey: float) -> tuple[float, 
 
 
 def _e2s(rx: float, rz: float, cx: float, cy: float) -> tuple[float, float]:
-    return cx + rx * _PPM, cy - rz * _PPM
+    # Negated so ego forward points up on screen.
+    return cx - rx * _PPM, cy + rz * _PPM
 
 
 class AEBDebugWindow(QWidget):
@@ -131,7 +132,7 @@ class AEBDebugWindow(QWidget):
 
     def _ws(self, wx: float, wz: float, ex: float, ez: float, ey: float) -> tuple[float, float]:
         rx, rz = _w2e(wx, wz, ex, ez, ey)
-        return _e2s(rx, rz, self.width() / 2.0, self.height() / 2.0)
+        return _e2s(rx, rz, self.width() / 2.0, self.height() * 0.75)
 
     def paintEvent(self, event: QPaintEvent) -> None:
         snap = self._fetch()
@@ -148,7 +149,7 @@ class AEBDebugWindow(QWidget):
             return
 
         ex, ez, ey = snap.ego_x, snap.ego_z, snap.ego_yaw
-        cx, cy = self.width() / 2.0, self.height() / 2.0
+        cx, cy = self.width() / 2.0, self.height() * 0.75
 
         self._draw_grid(p, cx, cy)
 
