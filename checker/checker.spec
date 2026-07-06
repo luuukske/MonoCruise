@@ -10,6 +10,8 @@
 #
 # Paths are relative to this spec file's directory (PyInstaller 6 behaviour).
 
+import os
+
 a = Analysis(
     ['ets2_checker.py'],
     pathex=[],
@@ -34,7 +36,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
-    icon=None,
+    icon=os.path.join(SPECPATH, '..', 'icon.ico'),
     version='version_info.txt',
 )
 

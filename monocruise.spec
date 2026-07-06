@@ -19,6 +19,8 @@ datas = [
     ('ui/popup/icons',          'ui/popup/icons'),
     ('ui/cc_panel/assets',      'ui/cc_panel/assets'),
     ('core/aeb/AEB_warning.wav','core/aeb'),
+    # Window icon: window.py resolves _PROJECT_ROOT to _internal when frozen.
+    ('icon.ico',                '.'),
 ]
 
 # The app only uses QtCore/QtGui/QtWidgets/QtSvgWidgets; keep the heavy Qt
@@ -74,7 +76,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
-    icon=None,
+    icon='icon.ico',
 )
 
 coll = COLLECT(

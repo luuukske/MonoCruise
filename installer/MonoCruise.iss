@@ -34,6 +34,7 @@ OutputBaseFilename=MonoCruise installer
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\icon.ico
 ArchitecturesInstallIn64BitMode=x64
 PrivilegesRequired=lowest
 UninstallDisplayIcon={app}\MonoCruise.exe

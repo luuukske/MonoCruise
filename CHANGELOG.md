@@ -12,6 +12,8 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+## [1.1.0-preview.1] - 2026-07-06
+
 A ground-up rewrite focused on **stability** and **performance**, with a more reliable take on every existing feature: plus a built-in updater and on-screen notifications.
 
 ### Added
