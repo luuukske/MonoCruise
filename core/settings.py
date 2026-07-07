@@ -61,7 +61,7 @@ class _SingletonMeta(type):
 @dataclass
 class Settings(metaclass=_SingletonMeta):
     # General settings
-    debug: bool = True
+    debug: bool = False
     last_game: int = 1 # 1 = ETS2, 2 = ATS
 
     # Update channel: "stable" (default) or "preview" (opt into prereleases).
@@ -87,7 +87,7 @@ class Settings(metaclass=_SingletonMeta):
     gas_exponent_variable: float = None
     brake_exponent_variable: float = None
     weight_adjustment: bool = True
-    polling_rate: int = 100 # fps
+    polling_rate: int = 100
 
     # OPD
     max_opd_brake_variable: float = 0.04
