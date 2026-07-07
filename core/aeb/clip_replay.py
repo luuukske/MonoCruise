@@ -147,11 +147,13 @@ def _build_snapshot(ego, vehicles: list[Vehicle], live: LiveAEB,
     )
 
 
-def replay_clip(clip: Clip) -> list[ReviewFrame]:
-    """Decode + smooth the radar stream and build one ReviewFrame per AEB tick."""
-    if not clip.aeb_ticks and not clip.radar_frames:
-        return []
+def decode_radar_stream(clip: Clip):
+    """Decode + smooth every radar frame in t_mono order (shared by replay + eval).
 
+    Returns ``(veh_by_t, ego_by_t, frame_t)``: smoothed Vehicle lists and ego
+    telemetry keyed by radar frame ``t_mono``, plus the sorted timestamps. One
+    ``TrafficReader`` carries per-id smoothing forward exactly as live radar.
+    """
     reader = TrafficReader()
     frames = sorted(clip.radar_frames, key=lambda f: f.t_mono)
     veh_by_t: dict[float, list[Vehicle]] = {}
@@ -162,23 +164,33 @@ def replay_clip(clip: Clip) -> list[ReviewFrame]:
             f.t_wall,
         )
         veh_by_t[f.t_mono] = list(res[0]) if res is not None else []
-
-    frame_t = sorted(veh_by_t)
     ego_by_t = {f.t_mono: f.ego for f in frames}
+    return veh_by_t, ego_by_t, sorted(veh_by_t)
 
-    def nearest_frame_t(t: float) -> float | None:
-        if t in veh_by_t:
-            return t
-        if not frame_t:
-            return None
-        return min(frame_t, key=lambda ft: abs(ft - t))
+
+def nearest_frame_t(frame_t: list[float], t: float) -> float | None:
+    """Frame timestamp closest to ``t`` (exact match preferred)."""
+    if not frame_t:
+        return None
+    if t in frame_t:
+        return t
+    return min(frame_t, key=lambda ft: abs(ft - t))
+
+
+def replay_clip(clip: Clip) -> list[ReviewFrame]:
+    """Decode + smooth the radar stream and build one ReviewFrame per AEB tick."""
+    if not clip.aeb_ticks and not clip.radar_frames:
+        return []
+
+    veh_by_t, ego_by_t, frame_t = decode_radar_stream(clip)
+    frames = sorted(clip.radar_frames, key=lambda f: f.t_mono)
 
     t_candidates = [f.t_mono for f in frames] + [tk.t_mono for tk in clip.aeb_ticks]
     t0 = min(t_candidates) if t_candidates else 0.0
 
     out: list[ReviewFrame] = []
     for tk in sorted(clip.aeb_ticks, key=lambda x: x.t_mono):
-        ft = nearest_frame_t(tk.radar_t_mono)
+        ft = nearest_frame_t(frame_t, tk.radar_t_mono)
         vehicles = veh_by_t.get(ft, []) if ft is not None else []
         ego = ego_by_t.get(ft) if ft is not None else None
         if ego is None and frames:

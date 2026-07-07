@@ -598,6 +598,12 @@ class AEBThread(BaseThread):
         # pipeline, and so engagement holds until the gap has actually
         # re-opened: not just until v_closing^2 collapses to zero.
         self._latched_threat_ids: set[int] = set()
+        # Replay seams (headless clip eval). Default to live behaviour: the
+        # loop's single clock read and the enable flag. The clip-eval driver
+        # overrides these plus the three read-seam methods and the sound handler
+        # to re-run the pipeline deterministically over recorded frames.
+        self._now = time.monotonic
+        self._aeb_active_fn = None
 
     def _read_user_braking(self) -> bool:
         try:
@@ -775,7 +781,10 @@ class AEBThread(BaseThread):
         if not self.running:
             return
 
-        aeb_active = Settings.AEB_enabled
+        aeb_active = (
+            self._aeb_active_fn() if self._aeb_active_fn is not None
+            else Settings.AEB_enabled
+        )
         cal = self._cal
 
         snapshot = self._read_radar_snapshot()
@@ -792,7 +801,7 @@ class AEBThread(BaseThread):
                 self.data.snapshot = self._last_snapshot
             return
 
-        now_mono = time.monotonic()
+        now_mono = self._now()
 
         # Yaw-rate proxy: see AGENTS.md §1. Do NOT use RadarData.ego_curvature.
         if ego_speed > 0.5:

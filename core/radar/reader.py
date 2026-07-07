@@ -232,6 +232,14 @@ class TrafficReader:
                 )
             except Exception:
                 pass
+        # Anchor freshly-seen vehicles to the recorded clock. A Vehicle is
+        # constructed with time.time() (the replay wall clock); feeding the
+        # recorded t_wall next frame would make dt negative and pin the vehicle
+        # to the sub-frame path forever, so it never smooths. The live reader is
+        # unaffected: there construction time and t_now share the real clock.
+        for v in vehicles:
+            if v.id not in self._last_vehicles:
+                v.time = t_wall
         return self._smooth_and_build(vehicles, t_wall, ego_x, ego_y, ego_z, ego_speed)
 
     def _build_trailer_vehicles(
