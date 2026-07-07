@@ -74,15 +74,29 @@ def _e2s(rx: float, rz: float, cx: float, cy: float) -> tuple[float, float]:
 
 class AEBDebugWindow(QWidget):
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        snapshot_provider=None,
+        acc_provider=None,
+        auto_refresh: bool = True,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("AEB Debug Radar")
         self.setMinimumSize(500, 500)
         self.resize(_WIN_W, _WIN_H)
 
+        # Snapshot source seam: the in-app window polls the registry; the
+        # repo-only review tool injects replayed snapshots from a clip instead.
+        # ACC overlay is None in replay.
+        self._snapshot_provider = snapshot_provider or self._fetch
+        self._acc_provider = acc_provider or self._fetch_acc
+
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.update)
-        self._timer.start(_REFRESH_MS)
+        if auto_refresh:
+            self._timer.start(_REFRESH_MS)
 
         self._font_main = QFont("Segoe UI", 10)
         self._font_small = QFont("Segoe UI", 8)
@@ -135,8 +149,8 @@ class AEBDebugWindow(QWidget):
         return _e2s(rx, rz, self.width() / 2.0, self.height() * 0.75)
 
     def paintEvent(self, event: QPaintEvent) -> None:
-        snap = self._fetch()
-        acc = self._fetch_acc()
+        snap = self._snapshot_provider()
+        acc = self._acc_provider()
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.fillRect(self.rect(), _BG)

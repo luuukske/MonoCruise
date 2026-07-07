@@ -56,6 +56,13 @@ class TrafficReader:
         self._parked_retry_at: float = 0.0
         self._last_vehicles: dict[int, Vehicle] = {}
         self._last_trailer_vehicles: dict[int, Vehicle] = {}
+        # AEB clip capture (debug only): when capture_raw is set, read() stashes
+        # the exact decoded byte slices so the recorder gets the bytes radar
+        # consumed with no second mmap read (see core/aeb/AGENTS.md capture plan).
+        self.capture_raw: bool = False
+        self.last_traffic_bytes: bytes | None = None
+        self.last_parked_bytes: bytes | None = None
+        self.last_t_wall: float = 0.0
 
     def open(self) -> bool:
         if self._buf is not None:
@@ -113,6 +120,8 @@ class TrafficReader:
         nested trailers (see :meth:`_build_trailer_vehicles`). Returns ``None``
         if the buffer is unavailable or the frame failed to decode.
         """
+        self.last_traffic_bytes = None
+        self.last_parked_bytes = None
         if self._buf is None and not self.open():
             return None
         try:
@@ -120,11 +129,29 @@ class TrafficReader:
         except Exception:
             return None
         try:
-            raw = struct.unpack(_TOTAL_FORMAT, self._buf[:_BUF_SIZE])
+            slice_bytes = self._buf[:_BUF_SIZE]
+            raw = struct.unpack(_TOTAL_FORMAT, slice_bytes)
         except Exception:
             self._buf = None
             return None
+        if self.capture_raw:
+            self.last_traffic_bytes = bytes(slice_bytes)
 
+        vehicles = self._build_vehicles_from_raw(raw)
+        vehicles.extend(self._read_parked_vehicles({int(v.id) for v in vehicles}))
+
+        t_now = time.time()
+        self.last_t_wall = t_now
+        return self._smooth_and_build(vehicles, t_now, ego_x, ego_y, ego_z, ego_speed)
+
+    @staticmethod
+    def _build_vehicles_from_raw(raw: tuple) -> list[Vehicle]:
+        """Construct unsmoothed Vehicles from an unpacked traffic buffer.
+
+        Single source of truth for the 40-slot decode: the live ``read`` and the
+        headless ``replay_frame`` both go through here so a format change can
+        never drift between them.
+        """
         vehicles: list[Vehicle] = []
         data = raw
         for _ in range(40):
@@ -153,21 +180,59 @@ class TrafficReader:
                     trailer_count, trailers, vid, is_tmp, is_trailer,
                 ))
             data = data[_VEH_STRIDE:]
+        return vehicles
 
-        vehicles.extend(self._read_parked_vehicles({int(v.id) for v in vehicles}))
+    def _smooth_and_build(
+        self, vehicles: list[Vehicle], t_now: float,
+        ego_x: float, ego_y: float, ego_z: float, ego_speed: float,
+    ) -> tuple[list[Vehicle], list[Vehicle]]:
+        """Carry per-id smoothing forward and flatten trailers.
 
-        t_now = time.time()
+        Shared tail of ``read`` and ``replay_frame``: applies
+        ``update_from_last`` against the reader's ``_last_vehicles`` state using
+        the supplied clock, then builds the trailer-as-vehicle list.
+        """
         for v in vehicles:
             if v.id in self._last_vehicles:
                 v.update_from_last(
                     self._last_vehicles[v.id], t_now, ego_x, ego_y, ego_z, ego_speed,
                 )
         self._last_vehicles = {v.id: v for v in vehicles}
-
         trailer_vehicles = self._build_trailer_vehicles(
             vehicles, t_now, ego_x, ego_y, ego_z, ego_speed,
         )
         return vehicles, trailer_vehicles
+
+    def replay_frame(
+        self,
+        traffic_bytes: bytes | None,
+        parked_bytes: bytes | None,
+        ego_x: float, ego_y: float, ego_z: float, ego_speed: float,
+        t_wall: float,
+    ) -> tuple[list[Vehicle], list[Vehicle]] | None:
+        """Decode + smooth one captured frame headlessly (no mmap, injected clock).
+
+        Feeds the recorded byte slices and ``t_wall`` through the exact same
+        construction + ``update_from_last`` path as the live ``read`` so a
+        captured clip reproduces the real radar smoothing (see the AEB capture
+        plan). ``None`` traffic bytes (a paused frame) returns ``None``.
+        """
+        if traffic_bytes is None:
+            return None
+        try:
+            raw = struct.unpack(_TOTAL_FORMAT, traffic_bytes)
+        except Exception:
+            return None
+        vehicles = self._build_vehicles_from_raw(raw)
+        if parked_bytes is not None:
+            try:
+                praw = struct.unpack(_TOTAL_PARKED_FORMAT, parked_bytes)
+                vehicles.extend(
+                    self._build_parked_from_raw(praw, {int(v.id) for v in vehicles})
+                )
+            except Exception:
+                pass
+        return self._smooth_and_build(vehicles, t_wall, ego_x, ego_y, ego_z, ego_speed)
 
     def _build_trailer_vehicles(
         self,
@@ -216,12 +281,23 @@ class TrafficReader:
                 return []
         try:
             self._parked_buf.seek(0)
-            raw = struct.unpack(_TOTAL_PARKED_FORMAT, self._parked_buf[:_PARKED_BUF_SIZE])
+            parked_slice = self._parked_buf[:_PARKED_BUF_SIZE]
+            raw = struct.unpack(_TOTAL_PARKED_FORMAT, parked_slice)
         except Exception:
             self._parked_buf = None
             self._parked_retry_at = time.monotonic() + 1.0
             return []
+        if self.capture_raw:
+            self.last_parked_bytes = bytes(parked_slice)
 
+        return self._build_parked_from_raw(raw, existing_ids)
+
+    @staticmethod
+    def _build_parked_from_raw(raw: tuple, existing_ids: set[int]) -> list[Vehicle]:
+        """Construct parked Vehicles from an unpacked parked buffer.
+
+        Shared by the live ``_read_parked_vehicles`` and headless ``replay_frame``.
+        """
         vehicles: list[Vehicle] = []
         seen_ids: set[int] = set()
         data = raw

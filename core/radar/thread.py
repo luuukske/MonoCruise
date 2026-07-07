@@ -38,6 +38,9 @@ from .ego_path import EGO_POSITION_HISTORY_LEN, ego_curvature_from_history
 from .reader import TrafficReader
 from .traffic import Vehicle
 
+from core.aeb.capture import get_recorder
+from core.aeb.clip_schema import EgoTelemetry, RadarFrameRecord
+
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +121,31 @@ class RadarThread(BaseThread):
         except (KeyError, AttributeError):
             return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False, False, 0.0
 
+    def _capture_frame(
+        self, recorder, now_mono: float, t_wall: float,
+        ego_x: float, ego_y: float, ego_z: float, ego_yaw_norm: float,
+        ego_speed: float, ego_steer: float, ego_pitch_raw: float,
+        ego_has_trailer: bool, paused: bool,
+        traffic_buf: bytes | None, parked_buf: bytes | None,
+    ) -> None:
+        """Push one radar frame to the clip recorder (debug capture, guarded).
+
+        Never raises into the radar loop: a capture fault must not touch the
+        safety path.
+        """
+        try:
+            ego = EgoTelemetry(
+                coordinateX=ego_x, coordinateY=ego_y, coordinateZ=ego_z,
+                rotationX=ego_yaw_norm, rotationY=ego_pitch_raw, speed=ego_speed,
+                userSteer=ego_steer, paused=paused, ego_has_trailer=ego_has_trailer,
+            )
+            recorder.push_radar_frame(RadarFrameRecord(
+                t_wall=t_wall, t_mono=now_mono, ego=ego,
+                traffic_buf=traffic_buf, parked_buf=parked_buf,
+            ))
+        except Exception:
+            logger.debug("radar clip capture failed", exc_info=True)
+
     def loop(self) -> None:
         if not self.running:
             return
@@ -143,6 +171,13 @@ class RadarThread(BaseThread):
                 self.data.ego_pitch_deg = math.degrees(_pr)
                 self.data.ego_pitch_rad = _pr
                 self.data.ego_has_trailer = ego_has_trailer
+            capture = get_recorder()
+            if capture is not None:
+                self._capture_frame(
+                    capture, time.monotonic(), time.time(),
+                    ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
+                    ego_pitch_deg, ego_has_trailer, True, None, None,
+                )
             return
 
         now_mono = time.monotonic()
@@ -153,6 +188,8 @@ class RadarThread(BaseThread):
 
         ego_curvature = ego_curvature_from_history(self._ego_position_history)
 
+        capture = get_recorder()
+        self._traffic.capture_raw = capture is not None
         read_result = self._traffic.read(ego_x, ego_y, ego_z, ego_speed)
         if read_result is None:
             vehicles, trailer_vehicles = [], []
@@ -181,4 +218,12 @@ class RadarThread(BaseThread):
             self.data.ego_curvature = ego_curvature
             self.data.paused = False
             self.data.t_mono = now_mono
+
+        if capture is not None:
+            self._capture_frame(
+                capture, now_mono, self._traffic.last_t_wall,
+                ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
+                ego_pitch_deg, ego_has_trailer, False,
+                self._traffic.last_traffic_bytes, self._traffic.last_parked_bytes,
+            )
 

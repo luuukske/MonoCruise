@@ -26,6 +26,8 @@ from core.radar.traffic import (
 )
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT
 from core.aeb.lane_frame import project_to_ego_arc, classify, Lane
+from core.aeb.capture import get_recorder
+from core.aeb.clip_schema import AEBTickRecord, AEBWarmState, ConsumedContext, LiveAEB
 from core.aeb.filters import (
     FilterContext, FilterResult,
     _build_vehicle_collision_data, _world_to_ego_forward, _cross_zone_padding,
@@ -572,6 +574,8 @@ class AEBThread(BaseThread):
         self.data = AEBData()
         self._prev_state: AEBState = AEBState.STANDBY
         self._state_hold_until: float = 0.0
+        # Separate edge tracker for clip-capture triggers (debug only).
+        self._capture_prev_state: AEBState = AEBState.STANDBY
         self._last_snapshot: AEBSnapshot | None = None
         self._risk_first_seen: dict[int, float] = {}
         self._radar_visualizer = None
@@ -639,6 +643,101 @@ class AEBThread(BaseThread):
             pass
         return _FULL_BRAKE_DECEL_FALLBACK
 
+    def _read_pedals_for_capture(self) -> tuple[float, float]:
+        """(brakeval, gasval) floats for the clip's consumed context. Never raises."""
+        try:
+            pt = registry.get_thread("main_pedal_thread")
+            if pt is None or not pt.is_alive():
+                return 0.0, 0.0
+            with pt.data._lock:
+                return (
+                    float(getattr(pt.data, "brakeval", 0.0)),
+                    float(getattr(pt.data, "gasval", 0.0)),
+                )
+        except (KeyError, AttributeError):
+            return 0.0, 0.0
+
+    def _build_warm_state(self) -> AEBWarmState:
+        """Snapshot the discrete engagement state for the clip window start (plan 5)."""
+        warn_hold = None
+        brake_hold = None
+        if self._prev_state == AEBState.BRAKE:
+            brake_hold = self._state_hold_until
+        elif self._prev_state == AEBState.WARN:
+            warn_hold = self._state_hold_until
+        return AEBWarmState(
+            engaged=bool(self._engaged),
+            latched_threat_ids=sorted(self._latched_threat_ids),
+            latched_filter_ego_kmh=self._latched_filter_ego_kmh,
+            warn_hold_until_mono=warn_hold,
+            brake_hold_until_mono=brake_hold,
+            target_decel_ms2=float(self._published_target_ms2),
+        )
+
+    def _capture_aeb_tick(
+        self, now_mono: float, radar_t_mono: float, aeb_active: bool,
+        snap: "AEBSnapshot", max_brake_ms2: float, required_decel: float,
+        effective_max_decel: float, target_published: float, ff_decel: float,
+        aeb_warn: bool, aeb_brake: bool, new_state: "AEBState",
+        tmp_traffic_session: bool,
+    ) -> None:
+        """Record one AEB tick + fire the engagement trigger (debug capture, guarded).
+
+        Never raises into the AEB loop: capture must not touch the safety path.
+        """
+        recorder = get_recorder()
+        if recorder is None:
+            return
+        try:
+            brakeval, gasval = self._read_pedals_for_capture()
+            reasons = {
+                str(vid): [r.reason for r in results if getattr(r, "reason", None)]
+                for vid, results in snap.suppression_reasons.items()
+                if results
+            }
+            tick = AEBTickRecord(
+                t_mono=now_mono,
+                radar_t_mono=radar_t_mono,
+                consumed=ConsumedContext(
+                    max_brake_ms2=float(max_brake_ms2),
+                    brakeval=brakeval,
+                    gasval=gasval,
+                    aeb_enabled=bool(aeb_active),
+                ),
+                live_aeb=LiveAEB(
+                    aeb_warn=bool(aeb_warn),
+                    aeb_brake=bool(aeb_brake),
+                    engaged=bool(self._engaged),
+                    target_decel_ms2=float(target_published),
+                    ff_decel_ms2=float(ff_decel),
+                    required_decel_ms2=float(required_decel),
+                    effective_max_decel_ms2=float(effective_max_decel),
+                    time_to_brake=float(snap.time_to_brake),
+                    time_to_collision=float(snap.time_to_collision),
+                    colliding_ids=sorted(snap.colliding_ids),
+                    suppressed_ids=sorted(snap.suppressed_ids),
+                    braking_worsens_ids=sorted(snap.braking_worsens_ids),
+                    suppression_reasons=reasons,
+                ),
+            )
+            recorder.push_aeb_tick(tick, self._build_warm_state())
+
+            # Auto trigger on WARN/BRAKE entry; a WARN to BRAKE escalation re-fires
+            # so brake_reached is tagged (folds into the same clip window, plan 3.1).
+            prev = self._capture_prev_state
+            entered = new_state != AEBState.STANDBY and prev == AEBState.STANDBY
+            escalated = new_state == AEBState.BRAKE and prev == AEBState.WARN
+            if entered or escalated:
+                recorder.trigger(
+                    "auto_engagement",
+                    session_kind="TMP" if tmp_traffic_session else "SP",
+                    brake_reached=(new_state == AEBState.BRAKE),
+                    calibration=self._cal,
+                )
+            self._capture_prev_state = new_state
+        except Exception:
+            logger.debug("AEB clip capture failed", exc_info=True)
+
     def setup(self) -> None:
         if Settings.debug:
             self._try_start_radar_visualizer()
@@ -684,7 +783,7 @@ class AEBThread(BaseThread):
             return
         (vehicles, ego_x, ego_y, ego_z, ego_yaw_rad, ego_speed, ego_pitch_deg,
          steer, ego_has_trailer, _ego_curvature_from_history, tmp_traffic_session,
-         paused) = snapshot
+         paused, radar_t_mono) = snapshot
 
         vehicles_eff = _swap_trailer_kinematics(vehicles)
 
@@ -1340,6 +1439,13 @@ class AEBThread(BaseThread):
             self.data.snapshot = snap
         self._last_snapshot = snap
 
+        self._capture_aeb_tick(
+            now_mono, radar_t_mono, aeb_active, snap,
+            _max_brake_live, effective_required, effective_max_decel,
+            target_published, aeb_ff_decel, aeb_warn, aeb_brake, new_state,
+            tmp_traffic_session,
+        )
+
     def teardown(self) -> None:
         self._sound_handler.cleanup()
         if self._radar_visualizer is not None:
@@ -1353,6 +1459,7 @@ class AEBThread(BaseThread):
         self._last_target_change_mono = 0.0
         self._prev_loop_mono = None
         self._latched_threat_ids.clear()
+        self._capture_prev_state = AEBState.STANDBY
         self._curvature_blender.prune(set())
         with self.data._lock:
             self.data.AEB_warn = False
@@ -1370,7 +1477,7 @@ class AEBThread(BaseThread):
     def _read_radar_snapshot(
         self,
     ) -> tuple[list[Vehicle], float, float, float, float, float, float, float,
-               bool, float | None, bool, bool] | None:
+               bool, float | None, bool, bool, float] | None:
         """Read the radar thread's published snapshot under its data lock.
 
         Returns ``None`` when the radar thread is missing / not alive: AEB
@@ -1398,6 +1505,7 @@ class AEBThread(BaseThread):
                     rt.data.ego_curvature,
                     bool(rt.data.tmp_session),
                     bool(rt.data.paused),
+                    float(rt.data.t_mono),
                 )
         except AttributeError:
             return None
