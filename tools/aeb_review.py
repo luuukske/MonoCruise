@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from core.aeb.clip_replay import ReviewFrame, replay_clip
 from core.aeb.clip_schema import Label
+from core.aeb.clip_score import class_window_warning
 from core.aeb.clip_store import ClipStore
 from core.aeb.debug_window import AEBDebugWindow
 
@@ -206,7 +207,12 @@ class ReviewWindow(QMainWindow):
         right.addWidget(QLabel("Class"))
         self._class = QComboBox()
         self._class.addItems(_CLASSES)
+        self._class.currentTextChanged.connect(lambda _t: self._sync_label_widgets())
         right.addWidget(self._class)
+        self._warn_lbl = QLabel("")
+        self._warn_lbl.setWordWrap(True)
+        self._warn_lbl.setStyleSheet("color:#e0a020;")
+        right.addWidget(self._warn_lbl)
 
         right.addWidget(QLabel("Severity (1-5)"))
         self._severity = QSpinBox()
@@ -333,6 +339,8 @@ class ReviewWindow(QMainWindow):
             self._window_lbl.setText(f"{self._window[0]:.2f} .. {self._window[1]:.2f} s")
         self._target_lbl.setText("none" if self._target_vid is None else f"#{self._target_vid}")
         self._strip.set_window(self._window)
+        warn = class_window_warning(self._class.currentText(), self._window is not None)
+        self._warn_lbl.setText(f"⚠ {warn}" if warn else "")
 
     def _win_start(self) -> None:
         t = self._cur_t()

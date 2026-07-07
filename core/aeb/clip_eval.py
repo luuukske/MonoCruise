@@ -243,17 +243,19 @@ class Outcome:
     verdict: str                      # see below
 
 
-def outcome_under(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT) -> Outcome:
+def outcome_under(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
+                  burn_in_s: float = 0.0) -> Outcome:
     """Classify a calibration's run against the clip's human label.
 
-    Verdicts:
+    Ticks before ``burn_in_s`` are ignored (continuous-state convergence noise,
+    plan 5/10). Verdicts:
       must-not-trigger window (None): ``false_positive`` if it brakes, else
       ``true_negative``. should-trigger window: ``false_negative`` if it never
       brakes, ``late`` if it only brakes after the window ends, else
       ``true_positive``. ``unlabeled`` when the clip has no label.
     """
     lbl = clip.metadata.label
-    evs = run_headless(clip, cal=cal)
+    evs = [e for e in run_headless(clip, cal=cal) if e.t_rel >= burn_in_s]
     braked = [e for e in evs if e.aeb_brake]
     bw = (braked[0].t_rel, braked[-1].t_rel) if braked else None
     peak = max((e.target_decel_ms2 for e in evs), default=0.0)
