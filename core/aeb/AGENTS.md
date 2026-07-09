@@ -228,6 +228,24 @@ Extended lookahead (`dynamic_horizon × co_same_turn_lookahead_scale=0.5`) when
 all four conditions hold: vehicle in outer lane, both curvatures above threshold,
 same curvature sign.
 
+**Pass-through dip check (in-lane only).** The `_is_approaching` endpoint
+comparison alone inverts for fast closers: the hit time is the corridor
+contact moment (center distance ≈ `ego_hw + v_hw_coll + margin` ≈ 2.44 m by
+construction), so above `2 × contact / dt` ≈ 20 m/s (~70 km/h) of closing
+speed the `t + dt` sample lies beyond the target, center distance grows
+again, and a lead about to be rear-ended reads as "diverging" (FN clip
+fbc397b3: 97 km/h ego suppressed a 20 km/h in-lane lead until impact). Fix:
+`_is_approaching` samples `cal.diverge_dip_samples` points across the
+window; when `dip_active` and any sample's center distance drops below the
+sum of the body half-widths (no corridor margin), the extrapolated bodies
+overlap and the pair counts as approaching regardless of the endpoints.
+`dip_active` is `ctx.lane == Lane.EGO` at both call sites (this stage and
+`TurningCrossTrafficFilter`): for out-of-lane targets an extrapolated body
+overlap is usually a constant-curvature artifact (e.g. overtaking a slower
+outer-lane vehicle in a shared turn: `fp_co_directional_outer_lane`), which
+is exactly what the filter exists to suppress. Regression scenario:
+`tp_fast_closing_lead` (80 km/h closing, in-lane).
+
 ### `TmpCrossTrafficFilter`
 
 TMP-only filter that absorbs MP-data uncertainty for routine intersection
@@ -489,6 +507,7 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `opposite_lane_kappa_scale` | 2.0 | Kappa multiplier when target in own lane |
 | `turning_diverge_kappa` | 0.007 /m | Corner threshold for Fix-C/D conditions |
 | `co_same_turn_lookahead_scale` | 0.5 | Extended lookahead fraction of horizon |
+| `diverge_dip_samples` | 8 | `_is_approaching` window samples for the in-lane pass-through dip check |
 | `corner_entry_min_road_bend` | 0.10 rad | Min ego↔tangent angle for Mode-B suppression |
 | `corner_entry_min_lateral` | 0.4 m | Min |lat_signed| to claim "off ego axis" (Mode B) |
 | `corner_entry_lateral_tol` | 1.5 m | Chord-offset tolerance for arc-consistency check (Mode B) |

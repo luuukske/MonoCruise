@@ -79,6 +79,13 @@ class AEBCalibration:
     # Co-directional diverge
     co_dir_diverge_lookahead_s: float = 0.25
     co_same_turn_lookahead_scale: float = 0.5
+    # Samples across the _is_approaching lookahead window used to detect a
+    # pass-through dip: any sample where center distance drops below the sum
+    # of the two body half-widths means the extrapolated bodies overlap, so
+    # the pair is approaching no matter what the window endpoints say. Only
+    # active for targets in Lane.EGO (out-of-lane arc crossings are usually
+    # extrapolation artifacts this filter exists to suppress).
+    diverge_dip_samples: int = 8
 
     # Sweep-pass / corner-entry stationary
     sweep_pass_max_target_speed: float = 1.0

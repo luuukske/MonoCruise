@@ -202,14 +202,38 @@ def _world_to_ego_forward(dx: float, dz: float, ego_yaw_rad: float) -> float:
     return dx * math.sin(ego_yaw_rad) + dz * math.cos(ego_yaw_rad)
 
 
-def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1) -> bool:
+def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1,
+                    dip_samples: int = 1, dip_active: bool = False) -> bool:
+    """True when the two paths still converge across the window [t, t+dt].
+
+    Endpoint comparison alone misreads a fast pass-through: t is the corridor
+    contact time, so above ~2*(contact distance)/dt of closing speed the t+dt
+    sample lies beyond the target and center distance grows again, which reads
+    as "diverging" exactly when the collision is most certain. With
+    dip_active, any window sample dipping below body contact (sum of half
+    widths, no corridor margin) is a predicted body overlap and counts as
+    approaching, regardless of the endpoint comparison.
+
+    Callers gate dip_active on the target being in Lane.EGO: for an in-lane
+    target a predicted body overlap is a real rear-end/crossing course, while
+    for an out-of-lane target the same overlap is usually a constant-curvature
+    extrapolation artifact (e.g. overtaking a slower outer-lane vehicle in a
+    shared turn: both arcs cross even though the real vehicles hold their
+    lanes), which is exactly what this filter exists to suppress.
+    """
     ax0, az0 = a.position_at_time(t)
     bx0, bz0 = b.position_at_time(t)
-    ax1, az1 = a.position_at_time(t + dt)
-    bx1, bz1 = b.position_at_time(t + dt)
     d0_sq = (ax0 - bx0) ** 2 + (az0 - bz0) ** 2
-    d1_sq = (ax1 - bx1) ** 2 + (az1 - bz1) ** 2
-    return d1_sq < d0_sq
+    contact_sq = (a.half_width + b.half_width) ** 2
+    di_sq = d0_sq
+    for i in range(1, dip_samples + 1):
+        ti = t + dt * i / dip_samples
+        axi, azi = a.position_at_time(ti)
+        bxi, bzi = b.position_at_time(ti)
+        di_sq = (axi - bxi) ** 2 + (azi - bzi) ** 2
+        if dip_active and di_sq < contact_sq:
+            return True
+    return di_sq < d0_sq
 
 
 def _dampen_turning_curvature(
@@ -638,7 +662,9 @@ class CoDirectionalDivergeFilter:
             if g_lat and g_ego_k and g_veh_k and g_sign:
                 co_diverge_dt = ctx.dynamic_horizon * cal.co_same_turn_lookahead_scale
             if not _is_approaching(ctx.ego_arc, base_target_arc,
-                                   unbraked_hit[0], dt=co_diverge_dt):
+                                   unbraked_hit[0], dt=co_diverge_dt,
+                                   dip_samples=cal.diverge_dip_samples,
+                                   dip_active=ctx.lane == Lane.EGO):
                 return _suppress("CoDirectionalDivergeFilter")
         return _PASS
 
@@ -667,7 +693,9 @@ class TurningCrossTrafficFilter:
             if unbraked_hit is None:
                 continue
             g_veh_k = abs(base_target_arc.curvature) > cal.turning_diverge_kappa
-            if g_veh_k and not _is_approaching(ctx.ego_arc, base_target_arc, unbraked_hit[0]):
+            if g_veh_k and not _is_approaching(ctx.ego_arc, base_target_arc, unbraked_hit[0],
+                                               dip_samples=cal.diverge_dip_samples,
+                                               dip_active=ctx.lane == Lane.EGO):
                 return _suppress("TurningCrossTrafficFilter")
         return _PASS
 

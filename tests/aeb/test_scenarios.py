@@ -41,6 +41,7 @@ _SCENARIO_MODULES = [
     ("tp_close_range_lane_cut", "TP"),
     ("fp_far_behind_high_closure", "FP"),
     ("fp_mp_stationary_corner_entry", "FP"),
+    ("tp_fast_closing_lead", "TP"),
 ]
 
 
