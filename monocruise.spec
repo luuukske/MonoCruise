@@ -56,7 +56,9 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=datas,
-    hiddenimports=[],
+    # PIL is imported lazily in core/aeb/screenshot.py (debug clip thumbnails);
+    # list the modules explicitly so the frozen build bundles them.
+    hiddenimports=['PIL.ImageGrab', 'PIL.JpegImagePlugin'],
     hookspath=[],
     runtime_hooks=[],
     excludes=QT_EXCLUDES,

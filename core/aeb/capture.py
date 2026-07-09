@@ -64,14 +64,26 @@ def _init_locked() -> None:
         enabled = False
     if not enabled:
         return
+    provider = None
+    try:
+        from core.settings import Settings
+
+        if bool(getattr(Settings, "aeb_capture_screenshots", True)):
+            from core.aeb.screenshot import grab_thumbnail
+
+            provider = grab_thumbnail
+    except Exception:
+        logger.debug("could not set up AEB screenshot provider", exc_info=True)
+
     try:
         store = ClipStore()
         writer = AsyncClipWriter(store, notify=_notify_saved)
         writer.start()
         _writer = writer
-        _recorder = AEBClipRecorder(writer, enabled=True)
+        _recorder = AEBClipRecorder(writer, enabled=True, screenshot_provider=provider)
         atexit.register(_shutdown)
-        logger.info("AEB clip recorder active (debug mode)")
+        logger.info("AEB clip recorder active (debug mode, screenshots=%s)",
+                    provider is not None)
     except Exception:
         logger.exception("failed to start AEB clip recorder; capture disabled")
         _recorder = None

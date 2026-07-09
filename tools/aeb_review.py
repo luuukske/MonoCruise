@@ -21,8 +21,10 @@ _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _repo not in sys.path:
     sys.path.insert(0, _repo)
 
+import base64
+
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QBrush
+from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout,
     QLabel, QListWidget, QListWidgetItem, QMainWindow, QPlainTextEdit,
@@ -35,7 +37,7 @@ from core.aeb.clip_score import class_window_warning
 from core.aeb.clip_store import ClipStore
 from core.aeb.debug_window import AEBDebugWindow
 
-_CLASSES = ["tp", "good_intervention", "fp", "fn", "ignore"]
+_CLASSES = ["tp", "good_intervention", "fp", "fn", "tn", "ignore"]
 
 
 class SceneWidget(AEBDebugWindow):
@@ -200,8 +202,26 @@ class ReviewWindow(QMainWindow):
         center.addLayout(transport)
         row.addLayout(center, 1)
 
-        # Right: annotation
+        # Right: clip identity + annotation
         right = QVBoxLayout()
+        self._clip_name_lbl = QLabel("(no clip selected)")
+        self._clip_name_lbl.setStyleSheet("font-weight:bold;")
+        self._clip_name_lbl.setWordWrap(True)
+        self._clip_name_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        right.addWidget(self._clip_name_lbl)
+        self._clip_meta_lbl = QLabel("")
+        self._clip_meta_lbl.setStyleSheet("color:#999;")
+        self._clip_meta_lbl.setWordWrap(True)
+        right.addWidget(self._clip_meta_lbl)
+
+        # Context screenshot grabbed at the trigger moment (above the labeling).
+        self._thumb_lbl = QLabel("(no screenshot)")
+        self._thumb_lbl.setMinimumHeight(150)
+        self._thumb_lbl.setAlignment(Qt.AlignCenter)
+        self._thumb_lbl.setStyleSheet("background:#111; color:#666; border:1px solid #333;")
+        right.addWidget(self._thumb_lbl)
+        right.addWidget(_hline())
+
         right.addWidget(QLabel("<b>Label</b>"))
 
         right.addWidget(QLabel("Class"))
@@ -283,7 +303,8 @@ class ReviewWindow(QMainWindow):
             trig = meta.trigger_source if meta else "?"
             badge = f"● {cls}" if tagged else "○ untagged"
             kb = info.size_bytes // 1024
-            item = QListWidgetItem(f"{badge}\n{trig}  {kb} KB  {info.name[:22]}")
+            cid = meta.clip_id[:8] if meta else "????????"
+            item = QListWidgetItem(f"{cid}   {badge}\n{trig}  {kb} KB")
             item.setData(Qt.UserRole, str(info.path))
             self._list.addItem(item)
             shown += 1
@@ -302,12 +323,34 @@ class ReviewWindow(QMainWindow):
             return
         self._path = path
         self._clip = clip
+        m = clip.metadata
+        self._clip_name_lbl.setText(m.clip_id)
+        self._clip_meta_lbl.setText(
+            f"{m.trigger_source} · {m.session_kind} · {m.captured_at}\n"
+            f"{m.frame_count} frames / {m.tick_count} ticks · v{m.client_version}"
+        )
+        self._set_thumbnail(m.thumbnail_jpeg)
         self._frames = replay_clip(clip)
         self._idx = 0
         dur = self._frames[-1].t_rel if self._frames else 1.0
         self._strip.set_frames(self._frames, dur)
         self._load_label_into_form(clip)
         self._refresh()
+
+    def _set_thumbnail(self, b64: str | None) -> None:
+        self._thumb_lbl.setPixmap(QPixmap())
+        if not b64:
+            self._thumb_lbl.setText("(no screenshot)")
+            return
+        pix = QPixmap()
+        if not pix.loadFromData(base64.b64decode(b64), "JPEG"):
+            self._thumb_lbl.setText("(thumbnail decode failed)")
+            return
+        w = max(self._thumb_lbl.width(), 200)
+        self._thumb_lbl.setText("")
+        self._thumb_lbl.setPixmap(
+            pix.scaled(w, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
 
     # Label form
 

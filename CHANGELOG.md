@@ -12,11 +12,14 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+### Added
+- **AEB clipping**: (only for testers in debug mode) this saves AEB clips to `%LocalAppData%/MonoCruise`. used to further tune the AEB on real world False Positives or False Negatives. keep in mind this does take a single screenshot when AEB triggers for additional context. clips should be send to me manually (no uploading is allowed in the MonoCruise repo).
+
 ### Changed
 - **Updater hands off after installing**: once an update completes, the updater shows the finished state for a moment, starts MonoCruise and closes itself.
 
 ### Fixed
-- **Updater self-updates now actually apply**: the updater's own new version used to be staged but never swapped in — a file the running updater keeps open blocks the swap, and the staged update was silently discarded afterwards. MonoCruise now applies the staged updater files once the updater has closed. This also removes the broken in-place swap that could leave an old updater unable to reach GitHub.
+- **Updater self-updates now actually apply**: the updater's own new version used to be staged but never swapped in. A file the running updater keeps open blocks the swap, and the staged update was silently discarded afterwards. MonoCruise now applies the staged updater files once the updater has closed. This also removes the broken in-place swap that could leave an old updater unable to reach GitHub.
 
 ## [1.1.0-preview.2] - 2026-07-06
 ### Added

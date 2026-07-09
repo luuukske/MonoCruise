@@ -337,6 +337,9 @@ class ClipMetadata:
     tick_count: int = 0
     aeb_warm_state: AEBWarmState = field(default_factory=AEBWarmState)
     client_id: str | None = None      # attached at submission, not capture
+    # Downscaled JPEG (base64) of the game screen at the trigger moment, for
+    # human context while tagging. Embedded in the clip so it travels on share.
+    thumbnail_jpeg: str | None = None
     label: Label | None = None
 
     @classmethod
@@ -371,6 +374,7 @@ class ClipMetadata:
             "tick_count": self.tick_count,
             "aeb_warm_state": self.aeb_warm_state.to_json(),
             "client_id": self.client_id,
+            "thumbnail_jpeg": self.thumbnail_jpeg,
             "label": self.label.to_json() if self.label is not None else None,
         }
 
@@ -396,6 +400,7 @@ class ClipMetadata:
             tick_count=int(d.get("tick_count", 0)),
             aeb_warm_state=AEBWarmState.from_json(d.get("aeb_warm_state", {})),
             client_id=d.get("client_id"),
+            thumbnail_jpeg=d.get("thumbnail_jpeg"),
             label=Label.from_json(label_raw) if label_raw else None,
         )
 

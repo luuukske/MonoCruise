@@ -36,8 +36,8 @@ from core.aeb.clip_schema import Clip, ClipMetadata, Label
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MAX_CLIPS: int = 100
-_DEFAULT_MAX_BYTES: int = 200 * 1024 * 1024
+_DEFAULT_MAX_CLIPS: int = 300
+_DEFAULT_MAX_BYTES: int = 500 * 1024 * 1024
 _CLIP_SUFFIX: str = ".json.gz"
 _TMP_SUFFIX: str = ".tmp"
 

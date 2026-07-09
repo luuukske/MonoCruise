@@ -101,6 +101,8 @@ class Settings(metaclass=_SingletonMeta):
     airhorn_variable: bool = True
     autostart_variable: bool = True
     AEB_enabled: bool = False
+    # Debug AEB clip capture: grab a screen thumbnail per clip for tagging context.
+    aeb_capture_screenshots: bool = True
 
     # Cruise/ACC/Custom buttons
     cc_dec_button: object = None

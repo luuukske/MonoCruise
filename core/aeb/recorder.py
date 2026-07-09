@@ -34,6 +34,7 @@ from core.aeb.clip_schema import (
     AEBWarmState,
     Clip,
     ClipMetadata,
+    Label,
     RadarFrameRecord,
 )
 from core.aeb.clip_store import AsyncClipWriter
@@ -49,6 +50,27 @@ TRIGGER_PRIORITY: dict[str, int] = {
     "shadow_near": 1,
     "random": 0,
 }
+
+# Background / boundary-negative sources: the system correctly stayed silent.
+# These are auto-tagged as true negatives (must-not-trigger) so they seed the
+# negative corpus without manual review, are throttled far harder than real
+# events (``tn_cooldown_s``), and skip the context thumbnail (a screenshot adds
+# nothing to "nothing happened here" and would cost a grab on every sample).
+_TN_SOURCES: frozenset[str] = frozenset({"shadow_near", "random"})
+
+
+def _auto_label_for(source: str) -> Label | None:
+    """Auto-tag for a background/negative source, or None for a real event.
+
+    A human can still open the clip in the review tool and override the class.
+    """
+    if source in _TN_SOURCES:
+        return Label(
+            class_="tn",
+            should_trigger=None,
+            notes=f"auto-tagged true negative ({source})",
+        )
+    return None
 
 
 def calibration_fingerprint(cal: object) -> tuple[str, dict]:
@@ -97,6 +119,8 @@ class _Pending:
     session_kind: str = "SP"
     calibration_id: str = ""
     calibration: dict = field(default_factory=dict)
+    thumbnail: str | None = None
+    thumb_thread: object = None
 
 
 @dataclass
@@ -120,15 +144,23 @@ class AEBClipRecorder:
         post_s: float = 3.0,
         burn_in_s: float = 2.0,
         cooldown_s: float = 5.0,
+        tn_cooldown_s: float = 120.0,
         ring_margin_s: float = 1.0,
         enabled: bool = True,
+        screenshot_provider=None,
     ) -> None:
         self._writer = writer
         self.pre_s = pre_s
         self.post_s = post_s
         self.burn_in_s = burn_in_s
         self.cooldown_s = cooldown_s
+        # Background/negative captures are throttled on their own long timer so a
+        # steady stream of them can never crowd out real events (they share the
+        # store's rotation cap). One boundary negative per this many stream-seconds.
+        self.tn_cooldown_s = tn_cooldown_s
         self.enabled = enabled
+        # Optional () -> base64 JPEG | None, grabbed off-thread at trigger time.
+        self._screenshot_provider = screenshot_provider
 
         span = pre_s + post_s + ring_margin_s
         self._radar_ring = _TimestampRing(span)
@@ -137,6 +169,7 @@ class AEBClipRecorder:
         self._lock = threading.Lock()
         self._pending: _Pending | None = None
         self._cooldown_until: float = float("-inf")
+        self._tn_cooldown_until: float = float("-inf")
         self._last_t: float = 0.0
 
     def push_radar_frame(self, frame: RadarFrameRecord) -> None:
@@ -195,6 +228,8 @@ class AEBClipRecorder:
                 return "folded"
             if source != "manual" and t < self._cooldown_until:
                 return "ignored"
+            if source in _TN_SOURCES and t < self._tn_cooldown_until:
+                return "ignored"
             cid, cfields = calibration_fingerprint(calibration)
             self._pending = _Pending(
                 trigger_t=t,
@@ -205,7 +240,26 @@ class AEBClipRecorder:
                 calibration_id=cid,
                 calibration=cfields,
             )
+            # No thumbnail for background negatives (see _TN_SOURCES).
+            if source not in _TN_SOURCES:
+                self._start_thumbnail_grab(self._pending)
             return "started"
+
+    def _start_thumbnail_grab(self, pending: _Pending) -> None:
+        """Grab the screen thumbnail off-thread so the 30 Hz loop never blocks."""
+        provider = self._screenshot_provider
+        if provider is None:
+            return
+
+        def _run() -> None:
+            try:
+                pending.thumbnail = provider()
+            except Exception:
+                logger.debug("AEB thumbnail provider failed", exc_info=True)
+
+        th = threading.Thread(target=_run, name="aeb_thumbnail", daemon=True)
+        pending.thumb_thread = th
+        th.start()
 
     def _fold_locked(self, source: str, brake_reached: bool) -> None:
         p = self._pending
@@ -232,10 +286,19 @@ class AEBClipRecorder:
 
         self._pending = None
         self._cooldown_until = newest_t + self.cooldown_s
+        # Throttle the next background negative off the winning source, so a
+        # capture that folded up into a real event does not spend the TN budget.
+        if p.source in _TN_SOURCES:
+            self._tn_cooldown_until = newest_t + self.tn_cooldown_s
         return _Bundle(p, radar_frames, aeb_ticks, warm_state)
 
     def _emit(self, bundle: _Bundle) -> None:
         p = bundle.pending
+        if p.thumb_thread is not None:
+            try:
+                p.thumb_thread.join(timeout=1.0)
+            except Exception:
+                pass
         meta = ClipMetadata.create(
             trigger_source=p.source,
             also_triggered=list(p.also_triggered),
@@ -249,6 +312,8 @@ class AEBClipRecorder:
             frame_count=len(bundle.radar_frames),
             tick_count=len(bundle.aeb_ticks),
             aeb_warm_state=bundle.warm_state,
+            thumbnail_jpeg=p.thumbnail,
+            label=_auto_label_for(p.source),
         )
         clip = Clip(metadata=meta, radar_frames=bundle.radar_frames, aeb_ticks=bundle.aeb_ticks)
         self._writer.submit(clip)
@@ -265,3 +330,4 @@ class AEBClipRecorder:
             self._pending = None
             self._last_t = 0.0
             self._cooldown_until = float("-inf")
+            self._tn_cooldown_until = float("-inf")

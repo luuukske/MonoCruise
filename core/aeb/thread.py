@@ -148,6 +148,16 @@ _TRAILER_TRACTOR_RADIUS_M: float = 30.0
 _TRAILER_SWAP_SPEED_THRESHOLD_MS: float = 0.5
 _TRAILER_TRACTOR_HEADING_DOT: float = 0.9
 
+# Boundary-negative (TN) sampler thresholds (debug clip capture only, plan
+# trigger ``shadow_near``). Occasionally save a clip where AEB correctly stayed
+# silent while a real candidate was in play, so a future model learns the
+# negatives it must not fire on. These are capture-sampling policy and are
+# deliberately NOT in AEBCalibration: they change no braking behaviour and must
+# never perturb the calibration fingerprint that keys the clip corpus. The
+# rate-limit lives in the recorder (its ``tn_cooldown_s``).
+_SHADOW_TTC_S: float = 3.0            # pipeline-surviving target within this unbraked TTC
+_SHADOW_MIN_SPEED_MS: float = 2.0     # only sample while actually moving
+
 
 def _find_tractor_for_trailer(trailer: Vehicle, vehicles: list[Vehicle]) -> Vehicle | None:
     """Nearest same-heading non-trailer vehicle within _TRAILER_TRACTOR_RADIUS_M.
@@ -740,6 +750,29 @@ class AEBThread(BaseThread):
                     brake_reached=(new_state == AEBState.BRAKE),
                     calibration=self._cal,
                 )
+
+            # Boundary-negative sampler: AEB stayed silent this tick but a real
+            # candidate was in play (a filter rejected one, or a surviving target
+            # closed to within a sub-warn TTC). The recorder throttles these hard
+            # and auto-tags them true negatives; fired every qualifying tick, it
+            # simply lands one clip per cooldown while such traffic is around.
+            if (aeb_active
+                    and new_state == AEBState.STANDBY
+                    and not self._engaged
+                    and snap.ego_speed > _SHADOW_MIN_SPEED_MS):
+                filtered = bool(
+                    snap.suppressed_ids
+                    or snap.evasion_filtered_ids
+                    or snap.oncoming_evasion_filtered_ids
+                )
+                near_miss = snap.time_to_collision < _SHADOW_TTC_S
+                if filtered or near_miss:
+                    recorder.trigger(
+                        "shadow_near",
+                        session_kind="TMP" if tmp_traffic_session else "SP",
+                        calibration=self._cal,
+                    )
+
             self._capture_prev_state = new_state
         except Exception:
             logger.debug("AEB clip capture failed", exc_info=True)
