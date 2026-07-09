@@ -12,6 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+## [1.1.0-preview.3] - 2026-07-09
 ### Added
 
 - **AEB clip capture** (debug mode only): when AEB triggers, MonoCruise saves a short replay clip plus a screenshot thumbnail to `%LocalAppData%/MonoCruise/`. Intended for testers to report false positives or missed detections. Send clips manually (no automatic upload). You'll get an on-screen notification when a clip is saved.
