@@ -3,8 +3,8 @@
 PySide6
 psutil
 pygame
-Pillow  # AEB debug clip capture: screen thumbnail (ImageGrab + JPEG encode)
-requests>=2.33.0
+Pillow>=12.2.0  # AEB debug clip capture: screen thumbnail (ImageGrab + JPEG encode)
+requests>=2.34.2
 urllib3>=2.7.0
 packaging  # PEP 440 version comparison in the updater (stable vs preview)
 

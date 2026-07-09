@@ -13,22 +13,31 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ## [Unreleased]
 
 ### Added
-- **AEB clipping**: (only for testers in debug mode) this saves AEB clips to `%LocalAppData%/MonoCruise`. used to further tune the AEB on real world False Positives or False Negatives. keep in mind this does take a single screenshot when AEB triggers for additional context. clips should be send to me manually (no uploading is allowed in the MonoCruise repo).
+
+- **AEB clip capture** (debug mode only): when AEB triggers, MonoCruise saves a short replay clip plus a screenshot thumbnail to `%LocalAppData%/MonoCruise/`. Intended for testers to report false positives or missed detections. Send clips manually (no automatic upload). You'll get an on-screen notification when a clip is saved.
 
 ### Changed
+
+- **Debug mode off by default**: developer tools (AEB radar view, clip capture) now require enabling debug in settings. Preview builds previously had this on.
 - **Updater hands off after installing**: once an update completes, the updater shows the finished state for a moment, starts MonoCruise and closes itself.
 
 ### Fixed
+
+- **AEB false triggers in corners**: cross-traffic that sweeps clear at intersections no longer fools the threat filter, and AEB won't engage when the target's movement already shows it will pass beside you. (thanks to eary AEB clips captured by me)
 - **Updater self-updates now actually apply**: the updater's own new version used to be staged but never swapped in. A file the running updater keeps open blocks the swap, and the staged update was silently discarded afterwards. MonoCruise now applies the staged updater files once the updater has closed. This also removes the broken in-place swap that could leave an old updater unable to reach GitHub.
 
 ## [1.1.0-preview.2] - 2026-07-06
+
 ### Added
+
 - **Updater closes MonoCruise for you**: clicking Update while MonoCruise is running now asks the app to shut down cleanly (settings saved, pedals released) instead of showing an error. If it will not close within 15 seconds, the old "Close MonoCruise before updating" message still appears.
 
 ### Changed
+
 - **Failed updates show in red**: when an update fails, the stage it failed on (download/install) turns red in the updater's progress column.
 
 ### Fixed
+
 - **Updater window icon**: the updater now shows the MonoCruise icon in its title bar and on the taskbar instead of the default icon.
 - **AEB debug view no longer opens on every start**: the developer radar view now only appears in debug mode.
 
@@ -37,6 +46,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 A ground-up rewrite focused on **stability** and **performance**, with a more reliable take on every existing feature: plus a built-in updater and on-screen notifications.
 
 ### Added
+
 - **In-app updater**: installs new releases from GitHub without reinstalling; your config and logs are kept.
 - **Stable / Preview update channels**: pick your channel in settings — Preview builds are released earlier and may contain bugs.
 - **On-screen notifications**: always-on-top popups for updates, errors, and onboarding tips.
@@ -47,6 +57,7 @@ A ground-up rewrite focused on **stability** and **performance**, with a more re
 - **Global speed limiter**: a highly accurate global limiter so your truck never exceeds that set speed (useful for Trucky, for example).
 
 ### Changed
+
 - **Keeps running when something breaks**: rewritten to one independent thread per subsystem, with a watchdog that detects a crashed or frozen part and restarts it automatically.
 - **Faster, smoother UI**: switched from CustomTkinter to GPU-accelerated PySide6, lowering CPU usage and clearing a class of visual bugs.
 - **More reliable ACC**: reworked lead-vehicle selection (arc-based in-lane scoring) sharply reduces the brake-checking the old ACC was prone to, and now accounts for road-trains (trailers-of-trailers).
@@ -57,6 +68,7 @@ A ground-up rewrite focused on **stability** and **performance**, with a more re
 - **Much smaller downloads**: the installer and update packages no longer bundle unused Qt components (roughly 75% smaller).
 
 ### Fixed
+
 - **Hazard flickering** during AEB braking.
 - **CC vs. brake conflicts**: game braking now reliably disengages CC, and CC / limiter / user-pedal priority no longer fight each other.
 - **CC panel on every display**: scale changes apply live (no restart), and the panel stays put on 4K and across mixed-DPI monitors.
@@ -68,5 +80,7 @@ A ground-up rewrite focused on **stability** and **performance**, with a more re
 - **Release builds on PyInstaller 6**: the updater spec's script path stopped resolving under PyInstaller 6's spec-relative path rule.
 
 **Known issues**
+
 - ACC gap level can't be changed while actively following a lead vehicle: runtime adjustment is coming in a future update.
 - AEB is experimental and can false-trigger in corners and during lane changes, so it is **disabled by default** — enable it in settings. **Use with care**.
+
