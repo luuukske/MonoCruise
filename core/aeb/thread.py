@@ -157,6 +157,20 @@ _TRAILER_TRACTOR_HEADING_DOT: float = 0.9
 # never perturb the calibration fingerprint that keys the clip corpus. The
 # rate-limit lives in the recorder (its ``tn_cooldown_s``).
 _SHADOW_MIN_SPEED_MS: float = 2.0     # only sample while actually moving
+_SHADOW_MAX_RANGE_M: float = 80.0     # ignore filtered radar slots beyond this
+# Spatial/geometry filters worth auto-tagging as TN; excludes rel-speed / elevation
+# gates that can fire on distant or non-threatening slots while the road looks empty.
+_SHADOW_TN_FILTER_REASONS: frozenset[str] = frozenset({
+    "OppositeLaneFilter",
+    "OppositeLaneFilterMirrored",
+    "EgoEvasionFilter",
+    "CornerEntryStationaryFilter",
+    "CornerEntryStationaryFilterMirrored",
+    "CoDirectionalDivergeFilter",
+    "TurningCrossTrafficFilter",
+    "TmpCrossTrafficFilter",
+    "SweepPassFilter",
+})
 
 
 def _find_tractor_for_trailer(trailer: Vehicle, vehicles: list[Vehicle]) -> Vehicle | None:
@@ -267,6 +281,33 @@ class AEBSnapshot:
 
     suppression_reasons: dict = field(default_factory=dict)
     tmp_traffic_session: bool = False
+
+
+def _should_sample_shadow_tn(snap: AEBSnapshot) -> bool:
+    """True when a nearby vehicle was rejected by a spatial AEB filter stage."""
+    filtered_ids = (
+        snap.suppressed_ids
+        | snap.evasion_filtered_ids
+        | snap.oncoming_evasion_filtered_ids
+    )
+    if not filtered_ids:
+        return False
+
+    veh_by_id = {v["vid"]: v for v in snap.vehicles if "vid" in v}
+    max_r_sq = _SHADOW_MAX_RANGE_M * _SHADOW_MAX_RANGE_M
+
+    for vid in filtered_ids:
+        reasons = snap.suppression_reasons.get(vid, [])
+        if not any(r.reason in _SHADOW_TN_FILTER_REASONS for r in reasons):
+            continue
+        veh = veh_by_id.get(vid)
+        if veh is None:
+            continue
+        dx = float(veh["x"]) - snap.ego_x
+        dz = float(veh["z"]) - snap.ego_z
+        if dx * dx + dz * dz <= max_r_sq:
+            return True
+    return False
 
 
 @dataclass
@@ -815,18 +856,13 @@ class AEBThread(BaseThread):
             if (aeb_active
                     and new_state == AEBState.STANDBY
                     and not self._engaged
-                    and snap.ego_speed > _SHADOW_MIN_SPEED_MS):
-                filtered = bool(
-                    snap.suppressed_ids
-                    or snap.evasion_filtered_ids
-                    or snap.oncoming_evasion_filtered_ids
+                    and snap.ego_speed > _SHADOW_MIN_SPEED_MS
+                    and _should_sample_shadow_tn(snap)):
+                recorder.trigger(
+                    "shadow_near",
+                    session_kind="TMP" if tmp_traffic_session else "SP",
+                    calibration=self._cal,
                 )
-                if filtered:
-                    recorder.trigger(
-                        "shadow_near",
-                        session_kind="TMP" if tmp_traffic_session else "SP",
-                        calibration=self._cal,
-                    )
 
             self._capture_prev_state = new_state
         except Exception:

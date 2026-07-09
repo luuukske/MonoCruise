@@ -5,18 +5,39 @@ Two layers:
   auto-tagged true negatives, throttled on their own long timer, and skip the
   context thumbnail; real events keep their unlabelled, thumbnailed behaviour.
 - thread condition: ``_capture_aeb_tick`` requests a ``shadow_near`` capture
-  when AEB stayed silent while a filter rejected a candidate, and stays quiet
-  otherwise.
+  when AEB stayed silent while a nearby vehicle was rejected by a spatial
+  filter, and stays quiet otherwise.
 """
 
 from __future__ import annotations
 
 import core.aeb.thread as aeb_thread
 from core.aeb.calibration import DEFAULT as CAL
+from core.aeb.filters import FilterResult
 from core.aeb.thread import AEBSnapshot, AEBState, AEBThread, _INF
 
 from tests.aeb.test_clip_capture import _StubWriter, _drive
 from core.aeb.recorder import AEBClipRecorder
+
+
+def _veh(vid: int, x: float = 30.0, z: float = 0.0) -> dict:
+    return {"vid": vid, "x": x, "z": z}
+
+
+def _tn_snap(**kw) -> AEBSnapshot:
+    """Snapshot with a nearby vehicle suppressed by a spatial filter."""
+    defaults = dict(
+        ego_speed=20.0,
+        time_to_collision=_INF,
+        aeb_state=AEBState.STANDBY,
+        suppressed_ids={5},
+        vehicles=[_veh(5, x=30.0, z=0.0)],
+        suppression_reasons={
+            5: [FilterResult(suppressed=True, reason="SweepPassFilter")],
+        },
+    )
+    defaults.update(kw)
+    return AEBSnapshot(**defaults)
 
 
 def _finalize(rec: AEBClipRecorder, t0: float, t1: float) -> None:
@@ -145,10 +166,36 @@ def _tick(thread: AEBThread, snap: AEBSnapshot, new_state: AEBState) -> _Recorde
 def test_thread_fires_shadow_on_filtered_candidate_while_silent():
     t = AEBThread()
     t._engaged = False
-    snap = AEBSnapshot(ego_speed=20.0, time_to_collision=_INF,
-                       suppressed_ids={5}, aeb_state=AEBState.STANDBY)
-    spy = _tick(t, snap, AEBState.STANDBY)
+    spy = _tick(t, _tn_snap(), AEBState.STANDBY)
     assert "shadow_near" in spy.triggers
+
+
+def test_thread_no_shadow_on_distant_filtered_vehicle():
+    t = AEBThread()
+    t._engaged = False
+    snap = _tn_snap(vehicles=[_veh(5, x=150.0, z=0.0)])
+    spy = _tick(t, snap, AEBState.STANDBY)
+    assert spy.triggers == []
+
+
+def test_thread_no_shadow_on_non_spatial_filter_only():
+    t = AEBThread()
+    t._engaged = False
+    snap = _tn_snap(
+        suppression_reasons={
+            5: [FilterResult(suppressed=True, reason="TmpRelSpeedFilter")],
+        },
+    )
+    spy = _tick(t, snap, AEBState.STANDBY)
+    assert spy.triggers == []
+
+
+def test_thread_no_shadow_when_filtered_id_missing_from_vehicles():
+    t = AEBThread()
+    t._engaged = False
+    snap = _tn_snap(vehicles=[])
+    spy = _tick(t, snap, AEBState.STANDBY)
+    assert spy.triggers == []
 
 
 def test_thread_no_shadow_on_near_miss_without_filter():
@@ -172,8 +219,7 @@ def test_thread_no_shadow_when_nothing_in_play():
 def test_thread_no_shadow_while_crawling():
     t = AEBThread()
     t._engaged = False
-    snap = AEBSnapshot(ego_speed=0.5, time_to_collision=1.0,
-                       suppressed_ids={5}, aeb_state=AEBState.STANDBY)
+    snap = _tn_snap(ego_speed=0.5, time_to_collision=1.0)
     spy = _tick(t, snap, AEBState.STANDBY)
     assert spy.triggers == []
 
@@ -183,8 +229,7 @@ def test_thread_no_shadow_when_warning():
     t = AEBThread()
     t._engaged = False
     t._capture_prev_state = AEBState.STANDBY
-    snap = AEBSnapshot(ego_speed=20.0, time_to_collision=1.0,
-                       suppressed_ids={5}, aeb_state=AEBState.WARN)
+    snap = _tn_snap(time_to_collision=1.0, aeb_state=AEBState.WARN)
     spy = _tick(t, snap, AEBState.WARN)
     assert "shadow_near" not in spy.triggers
     assert "auto_engagement" in spy.triggers
