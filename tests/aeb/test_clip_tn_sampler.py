@@ -5,7 +5,7 @@ Two layers:
   auto-tagged true negatives, throttled on their own long timer, and skip the
   context thumbnail; real events keep their unlabelled, thumbnailed behaviour.
 - thread condition: ``_capture_aeb_tick`` requests a ``shadow_near`` capture
-  when AEB stayed silent while a real candidate was in play, and stays quiet
+  when AEB stayed silent while a filter rejected a candidate, and stays quiet
   otherwise.
 """
 
@@ -151,13 +151,13 @@ def test_thread_fires_shadow_on_filtered_candidate_while_silent():
     assert "shadow_near" in spy.triggers
 
 
-def test_thread_fires_shadow_on_near_miss_while_silent():
+def test_thread_no_shadow_on_near_miss_without_filter():
     t = AEBThread()
     t._engaged = False
     snap = AEBSnapshot(ego_speed=20.0, time_to_collision=2.0,
                        aeb_state=AEBState.STANDBY)
     spy = _tick(t, snap, AEBState.STANDBY)
-    assert "shadow_near" in spy.triggers
+    assert spy.triggers == []
 
 
 def test_thread_no_shadow_when_nothing_in_play():
