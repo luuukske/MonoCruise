@@ -14,6 +14,7 @@ import logging
 import math
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 from core.thread_management.base_thread import BaseThread, ThreadData
@@ -252,6 +253,9 @@ class AEBSnapshot:
     braking_worsens_ids: set = field(default_factory=set)
     evasion_filtered_ids: set = field(default_factory=set)
     oncoming_evasion_filtered_ids: set = field(default_factory=set)
+    # Targets whose measured LOS drift vetoed engagement entry this tick
+    # (debug/eval visibility; they still warn and still show as colliding).
+    los_vetoed_ids: set = field(default_factory=set)
 
     aeb_state: AEBState = AEBState.STANDBY
     time_to_collision: float = _INF
@@ -339,6 +343,56 @@ def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1) -> bool:
     d0_sq = (ax0 - bx0) ** 2 + (az0 - bz0) ** 2
     d1_sq = (ax1 - bx1) ** 2 + (az1 - bz1) ** 2
     return d1_sq < d0_sq
+
+
+def _los_predicted_miss(
+    track, now_mono: float, cal: AEBCalibration,
+) -> float | None:
+    """CBDR predicted miss distance from a target's recent measured track.
+
+    Least-squares slopes of world-frame line-of-sight bearing and range over
+    the veto window give d_miss = |omega_los| * R^2 / |v_rel|: the closest
+    approach the *measurements* predict under constant relative velocity,
+    independent of any arc extrapolation. A genuine collision course holds
+    constant bearing (omega ~ 0, d_miss ~ 0); passing traffic drifts.
+
+    Returns None when the track is too short or barely closing: callers must
+    treat None as "cannot judge" and fail open (no veto).
+    """
+    cutoff = now_mono - cal.los_veto_window_s
+    ts: list[float] = []
+    rng: list[float] = []
+    brg: list[float] = []
+    for t_s, vx, vz, ex, ez in track:
+        if t_s < cutoff:
+            continue
+        dx = vx - ex
+        dz = vz - ez
+        ts.append(t_s)
+        rng.append(math.hypot(dx, dz))
+        b = math.atan2(dz, dx)
+        if brg:
+            prev = brg[-1]
+            while b - prev > math.pi:
+                b -= 2.0 * math.pi
+            while b - prev < -math.pi:
+                b += 2.0 * math.pi
+        brg.append(b)
+    if len(ts) < cal.los_veto_min_samples:
+        return None
+    t_mean = sum(ts) / len(ts)
+    denom = sum((t_s - t_mean) ** 2 for t_s in ts)
+    if denom < 1e-9:
+        return None
+    r_mean = sum(rng) / len(rng)
+    b_mean = sum(brg) / len(brg)
+    r_dot = sum((t_s - t_mean) * (r - r_mean) for t_s, r in zip(ts, rng)) / denom
+    omega = sum((t_s - t_mean) * (b - b_mean) for t_s, b in zip(ts, brg)) / denom
+    r_now = rng[-1]
+    v_rel = math.hypot(r_dot, r_now * omega)
+    if v_rel < 0.5:
+        return None
+    return abs(omega) * r_now * r_now / v_rel
 
 
 def _dampen_turning_curvature(
@@ -597,6 +651,10 @@ class AEBThread(BaseThread):
         # Per-target One-Euro state for blended curvature; stepped once per
         # vehicle per frame, pruned at the end of the loop.
         self._curvature_blender = VehicleCurvatureBlender(self._cal)
+        # Per-target measured world track (t, vx, vz, ego_x, ego_z) for the
+        # line-of-sight-rate engagement veto; time-trimmed on append and
+        # pruned against active ids each loop.
+        self._los_tracks: dict[int, deque] = {}
         # Continuous-decel state
         self._engaged: bool = False
         self._published_target_ms2: float = 0.0
@@ -943,6 +1001,15 @@ class AEBThread(BaseThread):
         best_hit_z: float = 0.0
         best_closing_distance: float = _INF
         best_v_closing: float = 0.0
+        # Engagement-eligible aggregates: same chain minus LOS-vetoed targets.
+        # Only the engagement-entry decision reads these; warn / display /
+        # disarm / holds keep the full aggregates so a veto can never silence
+        # an active event or the warning.
+        best_ttb_engage: float = _INF
+        best_closing_distance_engage: float = _INF
+        best_v_closing_engage: float = 0.0
+        los_vetoed_ids: set[int] = set()
+        los_veto_memo: dict[int, bool] = {}
         vehicle_dicts: list[dict] = []
         vehicle_arcs: dict[int, list[ArcPath]] = {}
         newly_risky: set[int] = set()
@@ -989,6 +1056,16 @@ class AEBThread(BaseThread):
 
         for v in vehicles_eff:
             vx, vz = v.position.x, v.position.z
+
+            # Feed the LOS track regardless of pipeline outcome so veto
+            # evidence exists before a target ever produces a hit.
+            trk = self._los_tracks.get(v.id)
+            if trk is None:
+                trk = self._los_tracks[v.id] = deque()
+            trk.append((now_mono, vx, vz, ego_x, ego_z))
+            los_cutoff = now_mono - cal.los_veto_window_s
+            while trk and trk[0][0] < los_cutoff:
+                trk.popleft()
 
             pc = vehicle_collision_data.get(v.id)
             if pc is not None:
@@ -1242,6 +1319,28 @@ class AEBThread(BaseThread):
                             unbraked_hit[2] - ego_front_z,
                         )
                         best_v_closing = closing_unbraked
+
+                    # LOS-rate veto (engagement entry only): once per vehicle
+                    # per frame, memoized across its arcs.
+                    vetoed = los_veto_memo.get(v.id)
+                    if vetoed is None:
+                        vetoed = False
+                        if cal.los_veto_enabled and dist >= cal.los_veto_min_range_m:
+                            d_miss = _los_predicted_miss(
+                                self._los_tracks.get(v.id, ()), now_mono, cal,
+                            )
+                            vetoed = (d_miss is not None
+                                      and d_miss > cal.los_veto_miss_dist_m)
+                        los_veto_memo[v.id] = vetoed
+                        if vetoed:
+                            los_vetoed_ids.add(v.id)
+                    if not vetoed and ttb < best_ttb_engage:
+                        best_ttb_engage = ttb
+                        best_closing_distance_engage = math.hypot(
+                            unbraked_hit[1] - ego_front_x,
+                            unbraked_hit[2] - ego_front_z,
+                        )
+                        best_v_closing_engage = closing_unbraked
                     found_hit = True
 
                 vehicle_dicts.append(veh_dict)
@@ -1249,7 +1348,11 @@ class AEBThread(BaseThread):
         self._risk_first_seen = {
             k: v for k, v in self._risk_first_seen.items() if k in newly_risky
         }
-        self._curvature_blender.prune({v.id for v in vehicles_eff})
+        _active_vids = {v.id for v in vehicles_eff}
+        self._curvature_blender.prune(_active_vids)
+        for vid in list(self._los_tracks.keys()):
+            if vid not in _active_vids:
+                del self._los_tracks[vid]
 
         time_to_brake = best_ttb if (run_collision and best_ttb < _INF) else _INF
         display_ttc = best_unbraked_ttc
@@ -1326,6 +1429,22 @@ class AEBThread(BaseThread):
             and latched_headway_min < cal.latched_min_headway_s
         )
 
+        # Engagement entry evaluates only LOS-eligible targets. When no veto
+        # fired this frame these equal the full aggregates and behaviour is
+        # identical to the unvetoed pipeline.
+        required_decel_engage = 0.0
+        if (run_collision and best_closing_distance_engage < _INF
+                and best_v_closing_engage > 0.0):
+            d_remaining_e = max(best_closing_distance_engage - cal.stop_buffer, 1e-3)
+            required_decel_engage = (
+                (best_v_closing_engage * best_v_closing_engage) / (2.0 * d_remaining_e)
+            )
+        effective_required_engage = required_decel_engage + downhill_offset
+        brake_ttb_engage_active = (
+            run_collision
+            and best_ttb_engage < cal.brake_ttb + cal.brake_response_window_s
+        )
+
         if self._engaged:
             if (effective_required < disarm_threshold
                     and not brake_ttb_active
@@ -1338,7 +1457,8 @@ class AEBThread(BaseThread):
             ego_kmh_abs = abs(ego_speed) * 3.6
             if (run_collision
                     and ego_kmh_abs >= cal.aeb_min_engage_speed_kmh
-                    and (effective_required >= engage_threshold or brake_ttb_active)):
+                    and (effective_required_engage >= engage_threshold
+                         or brake_ttb_engage_active)):
                 self._engaged = True
 
         # Promote every currently-colliding target into the latched set so
@@ -1454,6 +1574,7 @@ class AEBThread(BaseThread):
             braking_worsens_ids=braking_worsens_ids,
             evasion_filtered_ids=evasion_filtered_ids,
             oncoming_evasion_filtered_ids=oncoming_evasion_filtered_ids,
+            los_vetoed_ids=los_vetoed_ids,
             aeb_state=new_state, time_to_collision=display_ttc,
             time_to_brake=time_to_brake,
             hit_x=best_hit_x, hit_z=best_hit_z,
@@ -1503,6 +1624,7 @@ class AEBThread(BaseThread):
         self._latched_threat_ids.clear()
         self._capture_prev_state = AEBState.STANDBY
         self._curvature_blender.prune(set())
+        self._los_tracks.clear()
         with self.data._lock:
             self.data.AEB_warn = False
             self.data.AEB_brake = False

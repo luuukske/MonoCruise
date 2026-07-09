@@ -241,9 +241,13 @@ speed)` over the full horizon and check the endpoint's lane via
 `OFF_ROAD`, the target sweeps clear of ego's lane → suppress. If the
 endpoint is in `Lane.EGO`, this is a real continuing threat → fall through.
 
-Uses a freshly-built non-braking arc (rather than `base_target_arc`) because
-the standard arc may be truncated by target-side full-brake modeling at
-near-head-on angles, which would mask the true sweep destination.
+Uses a freshly-built non-braking arc from the **undamped** `ctx.v_curvature`
+(rather than `base_target_arc`) for two reasons: the standard arc may be
+truncated by target-side full-brake modeling at near-head-on angles, and its
+Fix D over-rotation damping straightens the arc of a target genuinely
+sweeping through a corner. Either one parks the projected endpoint inside
+ego's lane and masks the true sweep destination, so the filter never
+suppresses and the corner cross-traffic becomes a phantom brake.
 
 Non-TMP targets bypass entirely: AI vehicles' arcs are deterministic and
 already handled by `OppositeLaneFilter`, `TurningCrossTrafficFilter`, etc.
@@ -378,6 +382,27 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    suppress chatter, identical to the old WARN→STANDBY hold.
 8. Head-on targets: modelled as also braking at `full_brake_decel (7.8 m/s²)`
    inside the collision pipeline (unchanged).
+
+### LOS-rate engagement veto (CBDR)
+
+New engagements evaluate a second, engagement-only aggregate chain that
+excludes targets vetoed by measured line-of-sight drift. A genuine collision
+course holds near-constant world-frame bearing while range shrinks (constant
+bearing, decreasing range); corner cross-traffic whose extrapolated arc
+phantom-intersects ego's corridor drifts its bearing consistently instead.
+Per target, `_los_predicted_miss()` fits bearing/range slopes over the last
+`los_veto_window_s` of raw positions (`AEBThread._los_tracks`, fed every
+frame for every tracked vehicle, pruned with the blender) and estimates
+`d_miss = |omega_los| * R^2 / |v_rel|`.
+
+Veto fires only when the track has `los_veto_min_samples`, the target is
+beyond `los_veto_min_range_m`, and `d_miss > los_veto_miss_dist_m`
+(corpus separation: genuine engagement edges 0.05-4.4 m, corner phantoms
+6.8-12.3 m). Scope is strictly engagement *entry*: warn, disarm, geometry
+latch, and distance holds all keep the full aggregates, so a wrong veto
+costs latency on one target, never silence, and close-in turning threats
+are protected by the range floor. Vetoed ids are published in
+`snapshot.los_vetoed_ids`.
 
 ### Latched-threat hold
 

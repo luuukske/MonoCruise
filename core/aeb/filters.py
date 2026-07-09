@@ -718,14 +718,16 @@ class TmpCrossTrafficFilter:
             if ghost_hit is None:
                 continue
             any_hit = True
-            # Use a non-braking arc to project the full-horizon end position.
-            # The standard base arc may be truncated by target-side brake
-            # modeling for near-head-on targets, masking where the cross-traffic
-            # actually sweeps to.
+            # Use a non-braking arc built from the undamped measured curvature
+            # to project the full-horizon end position. The standard base arc
+            # may be truncated by target-side brake modeling for near-head-on
+            # targets, and its Fix D damping straightens the arc of a target
+            # genuinely sweeping through a corner: both park the endpoint in
+            # ego's lane and mask where the cross-traffic actually sweeps to.
             sweep_arc = build_arc(
                 base_target_arc.start_x, base_target_arc.start_z,
                 base_target_arc.yaw_rad, base_target_arc.speed,
-                base_target_arc.curvature, base_target_arc.half_width,
+                ctx.v_curvature, base_target_arc.half_width,
                 base_target_arc.horizon, decel=0.0,
             )
             end_x, end_z = sweep_arc.position_at_time(sweep_arc.horizon)

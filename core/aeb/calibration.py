@@ -117,6 +117,28 @@ class AEBCalibration:
     # New engagements only fire when |ego_speed| is above this threshold.
     aeb_min_engage_speed_kmh: float = 5.0
 
+    # Line-of-sight-rate (CBDR) veto on new engagements. A genuine collision
+    # course holds a near-constant world-frame bearing while range shrinks
+    # (constant bearing, decreasing range). Corner cross-traffic whose
+    # extrapolated arc phantom-intersects ego's corridor shows a large,
+    # consistent bearing drift instead: the measurements already say it will
+    # pass clear. Predicted miss distance ~ |omega_los| * R^2 / |v_rel| over
+    # the trailing window. The veto only blocks a target from *entering*
+    # engagement: WARN, holds, and an already-engaged event are untouched, so
+    # a wrong veto costs latency on one target, never silence.
+    #   window_s / min_samples: track evidence required before the veto may
+    #     fire; targets with a shorter track fail open (engage as today).
+    #   min_range_m: no veto inside this range: close-in turning threats
+    #     (e.g. a left-turner entering ego's lane) legitimately carry high
+    #     bearing drift right up until they commit.
+    #   miss_dist_m: veto when predicted miss exceeds this. Corpus separation:
+    #     genuine engagements measure 0.05-4.4 m, corner phantoms 6.8-12.3 m.
+    los_veto_enabled: bool = True
+    los_veto_window_s: float = 0.6
+    los_veto_min_samples: int = 12
+    los_veto_min_range_m: float = 30.0
+    los_veto_miss_dist_m: float = 6.0
+
     # Latched-threat hold: once AEB engages on a target, that target's id is
     # latched until physical separation grows. Two effects:
     # 1) TmpRelSpeedFilter is bypassed for latched ids so a TMP target does
