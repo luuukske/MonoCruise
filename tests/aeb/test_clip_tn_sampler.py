@@ -5,8 +5,8 @@ Two layers:
   auto-tagged true negatives, throttled on their own long timer, and skip the
   context thumbnail; real events keep their unlabelled, thumbnailed behaviour.
 - thread condition: ``_capture_aeb_tick`` requests a ``shadow_near`` capture
-  when AEB stayed silent while a nearby vehicle was rejected by a spatial
-  filter, and stays quiet otherwise.
+  when AEB stayed silent while a nearby filtered vehicle lies inside ego's
+  predicted corridor, and stays quiet otherwise.
 """
 
 from __future__ import annotations
@@ -15,29 +15,40 @@ import core.aeb.thread as aeb_thread
 from core.aeb.calibration import DEFAULT as CAL
 from core.aeb.filters import FilterResult
 from core.aeb.thread import AEBSnapshot, AEBState, AEBThread, _INF
+from core.radar.traffic import build_arc
 
 from tests.aeb.test_clip_capture import _StubWriter, _drive
 from core.aeb.recorder import AEBClipRecorder
 
 
-def _veh(vid: int, x: float = 30.0, z: float = 0.0) -> dict:
-    return {"vid": vid, "x": x, "z": z}
+def _veh(vid: int, x: float = 0.0, z: float = -30.0, half_w: float = 1.15) -> dict:
+    return {"vid": vid, "x": x, "z": z, "half_w": half_w}
 
 
 def _tn_snap(**kw) -> AEBSnapshot:
-    """Snapshot with a nearby vehicle suppressed by a spatial filter."""
+    """Snapshot with a filtered vehicle ahead inside ego's corridor."""
     defaults = dict(
+        ego_x=0.0,
+        ego_z=0.0,
+        ego_yaw=0.0,
         ego_speed=20.0,
+        ego_half_w=1.15,
         time_to_collision=_INF,
         aeb_state=AEBState.STANDBY,
         suppressed_ids={5},
-        vehicles=[_veh(5, x=30.0, z=0.0)],
+        vehicles=[_veh(5)],
         suppression_reasons={
             5: [FilterResult(suppressed=True, reason="SweepPassFilter")],
         },
     )
-    defaults.update(kw)
-    return AEBSnapshot(**defaults)
+    merged = {**defaults, **kw}
+    if merged.get("ego_arc") is None:
+        merged["ego_arc"] = build_arc(
+            merged["ego_x"], merged["ego_z"], merged["ego_yaw"],
+            max(float(merged["ego_speed"]), 2.0), 0.0,
+            float(merged["ego_half_w"]), 10.0,
+        )
+    return AEBSnapshot(**merged)
 
 
 def _finalize(rec: AEBClipRecorder, t0: float, t1: float) -> None:
@@ -173,7 +184,15 @@ def test_thread_fires_shadow_on_filtered_candidate_while_silent():
 def test_thread_no_shadow_on_distant_filtered_vehicle():
     t = AEBThread()
     t._engaged = False
-    snap = _tn_snap(vehicles=[_veh(5, x=150.0, z=0.0)])
+    snap = _tn_snap(vehicles=[_veh(5, x=0.0, z=-150.0)])
+    spy = _tick(t, snap, AEBState.STANDBY)
+    assert spy.triggers == []
+
+
+def test_thread_no_shadow_when_filtered_vehicle_outside_ego_corridor():
+    t = AEBThread()
+    t._engaged = False
+    snap = _tn_snap(vehicles=[_veh(5, x=20.0, z=-30.0)])
     spy = _tick(t, snap, AEBState.STANDBY)
     assert spy.triggers == []
 

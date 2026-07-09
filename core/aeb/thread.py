@@ -283,6 +283,20 @@ class AEBSnapshot:
     tmp_traffic_session: bool = False
 
 
+def _vehicle_in_ego_trajectory(
+    snap: AEBSnapshot, x: float, z: float, v_hw: float,
+) -> bool:
+    """True when (x, z) lies ahead inside ego's predicted corridor."""
+    arc = snap.ego_arc
+    if arc is None:
+        return False
+    s, d_abs = project_to_ego_arc(arc, x, z)
+    if s < 0.0 or s > arc.arc_length:
+        return False
+    corridor = arc.half_width + v_hw + _CAL_DEFAULT.corridor_margin
+    return d_abs <= corridor
+
+
 def _should_sample_shadow_tn(snap: AEBSnapshot) -> bool:
     """True when a nearby vehicle was rejected by a spatial AEB filter stage."""
     filtered_ids = (
@@ -303,9 +317,14 @@ def _should_sample_shadow_tn(snap: AEBSnapshot) -> bool:
         veh = veh_by_id.get(vid)
         if veh is None:
             continue
-        dx = float(veh["x"]) - snap.ego_x
-        dz = float(veh["z"]) - snap.ego_z
-        if dx * dx + dz * dz <= max_r_sq:
+        x = float(veh["x"])
+        z = float(veh["z"])
+        v_hw = float(veh.get("half_w", 0.0))
+        dx = x - snap.ego_x
+        dz = z - snap.ego_z
+        if dx * dx + dz * dz > max_r_sq:
+            continue
+        if _vehicle_in_ego_trajectory(snap, x, z, v_hw):
             return True
     return False
 
