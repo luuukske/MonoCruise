@@ -86,10 +86,12 @@ def test_replay_clip_builds_snapshots_from_recorded_decision():
     frames = replay_clip(_build_replayable_clip())
     assert len(frames) == 6
 
-    # Every tick reconstructs a scene with the decoded vehicle and an ego arc.
+    # Every tick reconstructs a scene with the decoded vehicle, an ego arc, and
+    # a predicted arc per vehicle (the review tool draws both trajectories).
     for f in frames:
         assert f.snapshot.ego_arc is not None
         assert any(v["vid"] == 7 for v in f.snapshot.vehicles)
+        assert f.snapshot.vehicle_arcs[7]
 
     # State mapping comes from the recorded live_aeb.
     assert frames[0].snapshot.aeb_state == AEBState.STANDBY

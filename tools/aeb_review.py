@@ -22,6 +22,7 @@ if _repo not in sys.path:
     sys.path.insert(0, _repo)
 
 import base64
+from dataclasses import replace
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QPixmap
@@ -46,13 +47,24 @@ class SceneWidget(AEBDebugWindow):
     vehicle_picked = Signal(int)
 
     def __init__(self) -> None:
-        super().__init__(snapshot_provider=lambda: self._snap,
+        super().__init__(snapshot_provider=lambda: self._provide(),
                          acc_provider=lambda: None, auto_refresh=False)
         self._snap = None
         self.pick_mode = False
+        self.show_vehicle_paths = True
+
+    def _provide(self):
+        """Snapshot as drawn: vehicle corridors stripped when the toggle is off."""
+        if self._snap is None or self.show_vehicle_paths:
+            return self._snap
+        return replace(self._snap, vehicle_arcs={})
 
     def set_snapshot(self, snap) -> None:
         self._snap = snap
+        self.update()
+
+    def set_vehicle_paths(self, on: bool) -> None:
+        self.show_vehicle_paths = bool(on)
         self.update()
 
     def mousePressEvent(self, event) -> None:
@@ -196,6 +208,11 @@ class ReviewWindow(QMainWindow):
         transport.addWidget(self._play_btn)
         self._time_lbl = QLabel("t=0.00s")
         transport.addWidget(self._time_lbl)
+        transport.addSpacing(12)
+        self._veh_paths = QCheckBox("Vehicle paths")
+        self._veh_paths.setChecked(True)
+        self._veh_paths.toggled.connect(self._scene.set_vehicle_paths)
+        transport.addWidget(self._veh_paths)
         transport.addStretch(1)
         self._decision_lbl = QLabel("")
         transport.addWidget(self._decision_lbl)

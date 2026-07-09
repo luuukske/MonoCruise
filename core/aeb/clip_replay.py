@@ -8,8 +8,9 @@ that the existing ``AEBDebugWindow`` renderer can draw.
 The AEB *decision* (threat / suppressed ids, warn / brake state, TTC / TTB) comes
 from the recorded ``live_aeb`` parity oracle, not a re-run of the pipeline: this
 shows exactly what the program decided, which is what the tagger judges.
-Predicted per-vehicle arcs are not stored in a clip, so vehicle corridors are
-omitted; the ego corridor is rebuilt from ego geometry.
+Predicted arcs are not stored in a clip, so both the ego corridor and the
+per-vehicle corridors are rebuilt from the replayed poses using the same
+curvature blend, One-Euro state, and Fix D damping the live thread applies.
 """
 
 from __future__ import annotations
@@ -19,9 +20,13 @@ from dataclasses import dataclass, field
 
 from core.aeb.calibration import DEFAULT as _CAL
 from core.aeb.clip_schema import Clip, ConsumedContext, LiveAEB
-from core.aeb.thread import AEBSnapshot, AEBState, _INF
+from core.aeb.filters import VehicleCurvatureBlender, _vehicle_curvature_blend
+from core.aeb.thread import (
+    AEBSnapshot, AEBState, _INF, _dampen_turning_curvature,
+    _swap_trailer_kinematics,
+)
 from core.radar.reader import TrafficReader
-from core.radar.traffic import Vehicle, build_arc
+from core.radar.traffic import ArcPath, Vehicle, build_arc
 
 # Suppression stages the debug window colours as "evasion filtered" (cyan)
 # rather than hard-suppressed (grey); mirrors the classification in thread.py.
@@ -75,14 +80,61 @@ def _vehicle_dict(v: Vehicle) -> dict:
         "length": v.size.length,
         "is_tmp": v.is_tmp,
         "is_trailer": getattr(v, "is_trailer", False),
-        "kinematics_swapped": False,
+        "kinematics_swapped": getattr(v, "_debug_kinematics_swapped", False),
         "speed_kmh": abs(v.speed) * 3.6,
         "trailers": trailers,
     }
 
 
+def _arc_curvature(v: Vehicle, ego_fwd_x: float, ego_fwd_z: float,
+                   horizon: float, blender: VehicleCurvatureBlender,
+                   now: float) -> float:
+    """Curvature the live thread would build this vehicle's arc from.
+
+    Steps the One-Euro blender exactly once per vehicle per tick, matching
+    ``AEBThread.loop``: any second call here would double-advance the filter.
+    """
+    abs_v_speed = abs(v.speed)
+    v_curvature = _vehicle_curvature_blend(v, abs_v_speed, _CAL, blender, now)
+    v_yaw = _veh_yaw(v)
+    veh_fwd_x = -math.sin(v_yaw)
+    veh_fwd_z = -math.cos(v_yaw)
+    fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
+    return _dampen_turning_curvature(
+        v_curvature, fwd_dot,
+        ego_fwd_x, ego_fwd_z, veh_fwd_x, veh_fwd_z,
+        abs_v_speed, abs_v_speed * horizon, _CAL,
+    )
+
+
+def _vehicle_arc_list(v: Vehicle, arc_curvature: float,
+                      horizon: float) -> list[ArcPath]:
+    """Tractor arc plus one arc per trailer, as ``AEBSnapshot.vehicle_arcs`` holds."""
+    arcs = [v.get_arc(
+        horizon,
+        arc_start_pctg=_CAL.arc_start_pctg,
+        curvature_override=arc_curvature,
+    )]
+    is_reversing = v.speed < -1e-3
+    effective_p = (1.0 - _CAL.arc_start_pctg) if is_reversing else _CAL.arc_start_pctg
+    for tr in v.trailers:
+        _, tr_yaw_deg, _ = tr.rotation.euler()
+        tr_yaw = math.radians(tr_yaw_deg)
+        tr_fwd_x = -math.sin(tr_yaw)
+        tr_fwd_z = -math.cos(tr_yaw)
+        body_offset = (effective_p - 0.5) * tr.size.length
+        arcs.append(build_arc(
+            tr.position.x + body_offset * tr_fwd_x,
+            tr.position.z + body_offset * tr_fwd_z,
+            tr_yaw, v.speed, arc_curvature,
+            tr.size.width / 2.0, horizon,
+        ))
+    return arcs
+
+
 def _build_snapshot(ego, vehicles: list[Vehicle], live: LiveAEB,
-                    consumed: ConsumedContext) -> AEBSnapshot:
+                    consumed: ConsumedContext,
+                    blender: VehicleCurvatureBlender, now: float) -> AEBSnapshot:
     ego_x = ego.coordinateX
     ego_z = ego.coordinateZ
     ego_yaw = ego.rotationX * 2.0 * math.pi
@@ -102,6 +154,14 @@ def _build_snapshot(ego, vehicles: list[Vehicle], live: LiveAEB,
         ego_x + body_offset * fwd_x, ego_z + body_offset * fwd_z,
         ego_yaw, ego_speed, curv, ego_hw, horizon,
     )
+
+    vehicle_arcs = {
+        v.id: _vehicle_arc_list(
+            v, _arc_curvature(v, fwd_x, fwd_z, horizon, blender, now), horizon,
+        )
+        for v in vehicles
+    }
+    blender.prune({v.id for v in vehicles})
 
     colliding = {int(i) for i in live.colliding_ids}
     suppressed = {int(i) for i in live.suppressed_ids}
@@ -133,7 +193,7 @@ def _build_snapshot(ego, vehicles: list[Vehicle], live: LiveAEB,
         ego_arc=ego_arc, ego_braked_arc=None,
         ego_has_trailer=bool(ego.ego_has_trailer),
         vehicles=[_vehicle_dict(v) for v in vehicles],
-        vehicle_arcs={},
+        vehicle_arcs=vehicle_arcs,
         colliding_ids=colliding, suppressed_ids=suppressed,
         braking_worsens_ids=worsens,
         evasion_filtered_ids=evasion,
@@ -188,6 +248,10 @@ def replay_clip(clip: Clip) -> list[ReviewFrame]:
     t_candidates = [f.t_mono for f in frames] + [tk.t_mono for tk in clip.aeb_ticks]
     t0 = min(t_candidates) if t_candidates else 0.0
 
+    # One blender for the whole clip: its One-Euro state must carry tick to tick
+    # the way it does across live AEB loops, or the drawn arcs are unsmoothed.
+    blender = VehicleCurvatureBlender(_CAL)
+
     out: list[ReviewFrame] = []
     for tk in sorted(clip.aeb_ticks, key=lambda x: x.t_mono):
         ft = nearest_frame_t(frame_t, tk.radar_t_mono)
@@ -197,7 +261,10 @@ def replay_clip(clip: Clip) -> list[ReviewFrame]:
             ego = frames[0].ego
         if ego is None:
             continue
-        snap = _build_snapshot(ego, vehicles, tk.live_aeb, tk.consumed)
+        vehicles_eff = _swap_trailer_kinematics(vehicles)
+        snap = _build_snapshot(
+            ego, vehicles_eff, tk.live_aeb, tk.consumed, blender, tk.t_mono,
+        )
         out.append(ReviewFrame(tk.t_mono - t0, tk.t_mono, snap, tk.live_aeb, tk.consumed))
     return out
 
