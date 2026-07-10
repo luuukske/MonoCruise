@@ -12,6 +12,14 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+## [1.1.0-preview.4] - 2026-07-11
+### Fixed
+- **AEB corner filtering**: filtering for AEB improved **MASIVELY** using clips gathered from AEB clipper (testers only), mostly focusing on corners, but general improvements can be seen.
+- **AEB improved brake capacity**: improved the stability of the brake capacity estimation for correct AEB triggering. this prevents late reaction from the AEB system previously seen in one of the clips.
+- **Highway slow queue FN**: fixed a (really really bad) bug in the AEB filtering causing slow moving traffic to be ignored when above certain high speed. also found thanks to the clipping.
+- AEB clipping irregularities
+- **OPD known issues**: reverted to legacy code. sending_thread caps opdgasval now, not just raw gas input. opd offset actually effects the gas output now. hard to get moving at slow speeds.
+
 ## [1.1.0-preview.3] - 2026-07-09
 ### Added
 
