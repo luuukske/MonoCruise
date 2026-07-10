@@ -116,33 +116,22 @@ def _onepedaldrive(
         if sum_values <= offset:
             value = (1.0 / (1.0 + offset)) * sum_values - (offset / (1.0 + offset))
         else:
-            denom = 1.0 - offset
-            if abs(denom) < 1e-9:
-                value = sum_values
-            else:
-                value = (1.0 / denom) * sum_values - (offset / denom)
+            value = (1.0 / (1.0 - offset)) * sum_values - (offset / (1.0 - offset))
     else:
         value = sum_values
 
-    if abs(brake_exponent) < 1e-12:
-        a = 0.0
-    else:
-        a = -(max_opd_brake ** (1.0 / brake_exponent))
+    a = -(max_opd_brake ** (1.0 / brake_exponent))
 
-    if opd_mode and offset > 1e-12:
-        if sum_values >= 0.0 and sum_values <= offset:
-            off_exp = offset**brake_exponent
-            if abs(off_exp) > 1e-12:
-                value = (a / off_exp) * ((-sum_values + offset) ** brake_exponent)
-
+    if sum_values >= 0.0 and sum_values <= offset and opd_mode:
+        value = (a / (offset ** brake_exponent)) * ((-sum_values + offset) ** brake_exponent)
     if sum_values < 0.0 and opd_mode:
         value = _opd_interpolate(-1.0, a, sum_values, -1.0, 0.0)
 
     gas_out = max(0.0, value)
-    brake_out = -min(min(0.0, value), val2)
+    brake_out = min(min(0.0, value), val2) * -1.0
 
-    gas_out = gas_out**gas_exponent
-    brake_out = brake_out**brake_exponent
+    gas_out = gas_out ** gas_exponent
+    brake_out = brake_out ** brake_exponent
     return gas_out, brake_out
 
 

@@ -886,17 +886,12 @@ class SendingThread(BaseThread):
                 self.data.mapper_pedal_state = 0
             return
 
-        gas_exp = Settings.gas_exponent_variable or 1.0
         brake_exp = Settings.brake_exponent_variable or 1.0
 
-        a = complex(gas_output).real
+        # Use OPD-mapped gas from main_pedal_thread (gas_output / opdgasval).
+        # Raw gasval bypasses the offset deadband and must not drive the merge.
+        a = float(complex(gas_output).real)
         b = complex(brake_output).real
-
-        try:
-            if gear != 0:
-                a = float(gasval) ** float(gas_exp)
-        except Exception:
-            a = float(gasval)
 
         try:
             b = max(b, max(float(brakeval), 0.0) ** float(brake_exp))
@@ -919,7 +914,7 @@ class SendingThread(BaseThread):
         # not cc_mode alone: in cruise mode the global limiter can be the
         # sole bidder when CC is disabled, and it must cap the user pedal.
         #   active_controller "cc"      → CC drives  → max(opd_gas, mapper_gas)
-        #   active_controller "limiter" → cap        → min(user, mapper_gas)
+        #   active_controller "limiter" → cap        → min(opd_gas, mapper_gas)
         # CC override uses opdgasval (always OPD-mapped, regardless of CC
         # state) so the driver overrides CC through the same one-pedal feel
         # they get with CC off: below the OPD offset the gas portion is zero
@@ -935,7 +930,7 @@ class SendingThread(BaseThread):
         if not manual_clutch:
             if cruise_active:
                 if cruise_active_controller == "limiter":
-                    a = min(a, mapper_gas)
+                    a = min(opdgasval, mapper_gas)
                 else:
                     cc_overridden_by_opd = opdgasval > mapper_gas
                     a = max(opdgasval, mapper_gas)
