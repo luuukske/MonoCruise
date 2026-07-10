@@ -65,7 +65,21 @@ _CLUTCH_ACTIVE_THRESHOLD: float = 0.05
 _SAVE_THRESHOLD: float = 0.1        # save when drift exceeds 10% of saved value
 _SAVE_COOLDOWN_S: float = 30.0      # min seconds between successive writes
 _ESTIMATE_LOWER_BOUND: float = 0.35 # fraction of baseline: hard floor
-_ESTIMATE_UPPER_BOUND: float = 2.0  # fraction of baseline: hard ceiling
+# Hard ceiling as a fraction of the mass-adjusted baseline. The old 2.0 allowed
+# estimates near 16-18 m/s2 (over 1.6 g), which no truck foot brake can do.
+# AEB divides required decel by this estimate to decide engagement, so an
+# inflated value silently disables emergency braking (crash clips ddc0cdf7 /
+# 0fe85c88, 2026-07-10). 1.3 leaves headroom for an unloaded truck
+# outperforming the loaded baseline without letting contamination compound.
+_ESTIMATE_UPPER_BOUND: float = 1.3  # fraction of baseline: hard ceiling
+# Reject any single brake sample implying more than this fraction of baseline.
+# candidate = decel / pedal extrapolates to full pedal; when the measured decel
+# includes retarder or engine brake (no telemetry field exposes them), a light
+# steady pedal yields a candidate far above what the foot brake can deliver.
+# Such samples are contaminated, not information: drop them instead of
+# averaging them in. Slightly above the ceiling so legitimate samples near the
+# clamp still register.
+_BRAKE_CANDIDATE_MAX_FRACTION: float = 1.35
 
 # Shape-function model for per-gear gas gain. Two scalars parameterize the
 # whole curve via
@@ -113,9 +127,12 @@ _GAS_STEP_GUARD_S: float = 0.25
 _GAS_PEDAL_HISTORY_LIMIT: int = 64
 
 # Brake settled-pedal gate: skip learning while the brake pedal is still
-# moving. Brake hydraulics have ~150–250 ms of lag; sampling during the
-# transient drives the EMA below the steady-state truth.
-_BRAKE_SETTLE_WINDOW_S: float = 0.20
+# moving. Brake hydraulics have ~150-250 ms of lag and the speed
+# differentiator (tau=0.30 s) lags real decel further, so samples taken
+# before both converge are biased in either direction. Longer than the gas
+# window because brake samples feed AEB's engagement denominator: a
+# contaminated sample here is costlier than a lost one.
+_BRAKE_SETTLE_WINDOW_S: float = 0.50
 _BRAKE_SETTLE_TOLERANCE: float = 0.03
 _BRAKE_STEP_THRESHOLD: float = 0.05
 _BRAKE_STEP_GUARD_S: float = 0.25
@@ -188,7 +205,14 @@ class PedalCapacityTracker:
             baseline_accel: Fallback baseline if no persisted value exists (m/s²).
         """
         b = _safe_float(Settings.pedal_capacity_max_brake_ms2)
-        self._max_brake_ms2 = b if b > 0.0 else baseline_brake
+        # Clamp the persisted value to the same bounds update_brake enforces:
+        # a config poisoned by pre-guard contamination self-heals at startup
+        # instead of carrying an unphysical estimate into AEB for a session.
+        self._max_brake_ms2 = _clamp(
+            b if b > 0.0 else baseline_brake,
+            baseline_brake * _ESTIMATE_LOWER_BOUND,
+            baseline_brake * _ESTIMATE_UPPER_BOUND,
+        )
         self._saved_brake = self._max_brake_ms2
 
         # Legacy fallback (used only before the anchor is seeded).
@@ -310,6 +334,8 @@ class PedalCapacityTracker:
             return
 
         candidate = corrected_decel / max(brake_output, _BRAKE_PEDAL_FLOOR)
+        if candidate > baseline_ms2 * _BRAKE_CANDIDATE_MAX_FRACTION:
+            return
 
         weight = brake_output ** _WEIGHT_POWER
         alpha = _BRAKE_BASE_ALPHA * weight

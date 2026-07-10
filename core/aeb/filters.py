@@ -379,6 +379,14 @@ class FilterContext:
     # from the pipeline as ego brakes and closing speed collapses.
     latched_threat_ids: set = field(default_factory=set)
 
+    # Ids flagged by the follow-threat tracker (AEBThread): co-directional
+    # in-lane targets with sustained closing range AND sustained own
+    # deceleration. Bypass TmpRelSpeedFilter and are exempt from
+    # EgoEvasionFilter / CoDirectionalDivergeFilter suppression: single-frame
+    # jitter must not eject a lead that behavior says is genuinely braking
+    # in ego's path (crash clips ddc0cdf7 / 0fe85c88, 2026-07-10).
+    follow_threat_ids: set = field(default_factory=set)
+
     # Populated during collision evaluation (set by the pipeline caller)
     unbraked_hit: tuple | None = None
     lateral_gap: float = 0.0
@@ -433,6 +441,11 @@ class TmpRelSpeedFilter:
         # Latched targets bypass the rel-speed gate so they don't drop out
         # of the pipeline once ego matches their speed under braking.
         if ctx.v.id in ctx.latched_threat_ids:
+            return _PASS
+        # Follow-threat targets bypass too: sustained closing + sustained own
+        # deceleration is realistic follow-traffic behavior, which the
+        # rel-speed floor (a no-collision-zone guard) must not silence.
+        if ctx.v.id in ctx.follow_threat_ids:
             return _PASS
         v_yaw_rad = _vehicle_yaw_rad(ctx.v)
         vf_x = -math.sin(v_yaw_rad)
@@ -638,6 +651,11 @@ class CoDirectionalDivergeFilter:
 
     def apply(self, ctx: FilterContext) -> FilterResult:
         if not ctx.co_directional:
+            return _PASS
+        # Follow-threat targets are exempt: the diverge check reads arc
+        # extrapolation, and a jitter frame can call a genuinely braking
+        # in-lane lead "diverging" moments before contact.
+        if ctx.v.id in ctx.follow_threat_ids:
             return _PASS
         cal = self._cal
         for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
@@ -905,6 +923,12 @@ class EgoEvasionFilter:
         if (ctx.co_directional
                 and any(a.speed > 0.5 for a in ctx.all_target_arcs)
                 and ctx.lane == Lane.EGO):
+            return _PASS
+        # Follow-threat targets are exempt: the in-lane bypass above can lose
+        # them to a single jittered lane/heading frame, and "ego could steer
+        # around it" is never a safe call against a lead that behavior says
+        # is braking in ego's path.
+        if ctx.v.id in ctx.follow_threat_ids:
             return _PASS
         if ctx.ego_evasion_left is None or ctx.ego_evasion_right is None:
             return _PASS

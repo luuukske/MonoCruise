@@ -178,6 +178,39 @@ class AEBCalibration:
     los_veto_min_range_m: float = 30.0
     los_veto_miss_dist_m: float = 6.0
 
+    # Follow-threat flag: behavioral detection of genuine follow traffic.
+    # Two-part test:
+    # 1) Kinematic qualification: a co-directional target sustains BOTH a
+    #    closing range AND its own deceleration over the trailing window.
+    #    Earning it starts a hold (follow_threat_hold_s), so a lead that
+    #    releases its brake right before contact keeps qualifying
+    #    (0fe85c88's lead let off at ~1 s to contact).
+    # 2) Geometric gate, evaluated per frame while the hold is active: the
+    #    target is in Lane.EGO OR laterally converging on ego's corridor
+    #    (arc-projected d_abs shrinking). The OR matters: a braking cut-in
+    #    does its hard decel while still out of lane (0fe85c88: decel ended
+    #    at d_abs 2.2 m, Lane.EGO only from 1.8 m), so lane-AND-decel never
+    #    overlaps in time. An adjacent-lane vehicle braking parallel to ego
+    #    fails the gate (not in lane, not converging).
+    # No-collision-zone clip-through and TMP pose jitter cannot sustain the
+    # kinematic signals, so the flag separates a real slowing lead from the
+    # phantom class the TMP rel-speed filter exists to suppress. Flagged ids:
+    # 1) bypass TmpRelSpeedFilter (pipeline stage and precompute prefilter),
+    #    so a braking lead cannot vanish below the rel-speed floor;
+    # 2) are exempt from EgoEvasionFilter and CoDirectionalDivergeFilter
+    #    suppression, whose jitter misfires ejected the 0fe85c88 crash target
+    #    at 11 m, two ticks before the TTB slam would have fired;
+    # 3) get follow-track decel fed into collision arcs so a braking lead does
+    #    not clip through ego on a constant-speed projection (ddc0cdf7).
+    follow_threat_window_s: float = 0.6
+    follow_threat_min_span_s: float = 0.45
+    follow_threat_min_samples: int = 8
+    follow_threat_min_decel_ms2: float = 1.5
+    follow_threat_min_closing_ms: float = 0.5
+    follow_threat_min_lat_converge_ms: float = 0.3
+    follow_threat_hold_s: float = 2.0
+    follow_threat_max_range_m: float = 80.0
+
     # Latched-threat hold: once AEB engages on a target, that target's id is
     # latched until physical separation grows. Two effects:
     # 1) TmpRelSpeedFilter is bypassed for latched ids so a TMP target does

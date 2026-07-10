@@ -497,6 +497,44 @@ def _dampen_turning_curvature(
     return v_curvature / cal.turn_complete_curvature_scale
 
 
+def _ls_slope(samples, idx: int) -> float:
+    """Least-squares slope (units/s) of samples[i][idx] against samples[i][0].
+
+    Robust to per-tick jitter where an endpoint difference is not; TMP range
+    and speed snapshots jitter several units tick to tick.
+    """
+    n = len(samples)
+    if n < 2:
+        return 0.0
+    t_mean = sum(s[0] for s in samples) / n
+    v_mean = sum(s[idx] for s in samples) / n
+    num = 0.0
+    den = 0.0
+    for s in samples:
+        dt = s[0] - t_mean
+        num += dt * (s[idx] - v_mean)
+        den += dt * dt
+    return num / den if den > 1e-9 else 0.0
+
+
+def _follow_threat_arc_decel(
+    vehicle_id: int,
+    follow_tracks: dict[int, deque],
+    follow_threat_ids: set[int],
+    cal: AEBCalibration,
+) -> float | None:
+    """Estimated lead braking decel for follow-threat collision arcs."""
+    if vehicle_id not in follow_threat_ids:
+        return None
+    trk = follow_tracks.get(vehicle_id)
+    if not trk or len(trk) < 2:
+        return None
+    own_decel = -_ls_slope(trk, 2)
+    if own_decel < cal.follow_threat_min_decel_ms2:
+        return None
+    return own_decel
+
+
 def _build_vehicle_collision_data(
     v: Vehicle,
     dynamic_horizon: float,
@@ -506,6 +544,7 @@ def _build_vehicle_collision_data(
     cal: AEBCalibration = _CAL_DEFAULT,
     blender: VehicleCurvatureBlender | None = None,
     now: float | None = None,
+    follow_decel_ms2: float | None = None,
 ) -> tuple[list[ArcPath], float, list[list[ArcPath]],
            float, float, float, float, float]:
     """Build collision arcs and derived vehicle geometry for a vehicle.
@@ -523,6 +562,9 @@ def _build_vehicle_collision_data(
     fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
     head_on = fwd_dot < cal.near_head_on_dot
     target_override_decel = cal.full_brake_decel if head_on else 0.0
+    arc_decel = target_override_decel
+    if follow_decel_ms2 is not None and follow_decel_ms2 > 0.0:
+        arc_decel = max(arc_decel, follow_decel_ms2)
     # Fix D: dampen curvature when constant-curvature arc would over-rotate past
     # anti-parallel lane alignment. v_curvature is preserved unchanged for same_curve
     # checks; arc_curvature is used only for arc building.
@@ -533,12 +575,12 @@ def _build_vehicle_collision_data(
         cal,
     )
     # For trailer arcs built with build_arc() directly. get_arc() calls
-    # _accel_to_arc_params internally so veh_arc_coll only needs override_decel.
-    target_decel, target_accel = _accel_to_arc_params(v.accel_for_arc(), target_override_decel)
+    # _accel_to_arc_params internally so veh_arc_coll only needs arc_decel.
+    target_decel, target_accel = _accel_to_arc_params(v.accel_for_arc(), arc_decel)
     veh_arc_coll = v.get_arc(
         dynamic_horizon,
         half_width=v_hw_coll,
-        decel=target_override_decel,
+        decel=arc_decel,
         arc_start_pctg=cal.arc_start_pctg,
         curvature_override=arc_curvature,
     )
@@ -721,6 +763,15 @@ class AEBThread(BaseThread):
         # line-of-sight-rate engagement veto; time-trimmed on append and
         # pruned against active ids each loop.
         self._los_tracks: dict[int, deque] = {}
+        # Follow-threat tracker: per-target (t, dist, abs_speed, d_abs)
+        # history plus a hold-until timestamp for ids that pass kinematic
+        # qualification (sustained closing + own decel, co-directional).
+        # The active set is rebuilt each frame by _update_follow_threats
+        # (hold + geometric gate) and read by the pipeline (TmpRelSpeedFilter
+        # bypass, evasion/diverge exemption) and the precompute prefilter.
+        self._follow_tracks: dict[int, deque] = {}
+        self._follow_hold_until: dict[int, float] = {}
+        self._follow_threat_ids: set[int] = set()
         # Continuous-decel state
         self._engaged: bool = False
         # Monotonic time when the current uninterrupted engagement
@@ -755,6 +806,68 @@ class AEBThread(BaseThread):
                 return float(getattr(pt.data, "brakeval", 0.0)) > _USER_BRAKE_LATCH_THRESHOLD
         except (KeyError, AttributeError):
             return False
+
+    def _update_follow_threats(
+        self,
+        vehicles_eff: list,
+        ego_arc,
+        ego_x: float,
+        ego_z: float,
+        ego_fwd_x: float,
+        ego_fwd_z: float,
+        now_mono: float,
+        cal: AEBCalibration,
+    ) -> None:
+        """Rebuild the follow-threat flag set from per-target behavior tracks.
+
+        Two-part test (see ``AEBCalibration`` follow_threat_* comments):
+        1) Kinematic qualification — co-directional target sustains closing
+           range and own deceleration over the trailing window; starts a hold.
+        2) Geometric gate — while the hold is active, the target must be in
+           Lane.EGO or laterally converging (arc-projected d_abs shrinking).
+        """
+        active: set[int] = set()
+        for v in vehicles_eff:
+            dx = v.position.x - ego_x
+            dz = v.position.z - ego_z
+            dist = math.hypot(dx, dz)
+            if dist > cal.follow_threat_max_range_m:
+                continue
+            _, d_abs = project_to_ego_arc(
+                ego_arc, v.position.x, v.position.z,
+            )
+            trk = self._follow_tracks.get(v.id)
+            if trk is None:
+                trk = self._follow_tracks[v.id] = deque()
+            trk.append((now_mono, dist, abs(v.speed), d_abs))
+            cutoff = now_mono - cal.follow_threat_window_s
+            while trk and trk[0][0] < cutoff:
+                trk.popleft()
+            if (len(trk) >= cal.follow_threat_min_samples
+                    and trk[-1][0] - trk[0][0] >= cal.follow_threat_min_span_s):
+                v_yaw = (
+                    v._smooth_yaw
+                    if v._smooth_yaw is not None
+                    else math.radians(v.rotation.euler()[1])
+                )
+                fwd_dot = (ego_fwd_x * -math.sin(v_yaw)
+                           + ego_fwd_z * -math.cos(v_yaw))
+                if fwd_dot >= cal.co_directional_dot:
+                    closing = -_ls_slope(trk, 1)
+                    own_decel = -_ls_slope(trk, 2)
+                    if (closing >= cal.follow_threat_min_closing_ms
+                            and own_decel >= cal.follow_threat_min_decel_ms2):
+                        self._follow_hold_until[v.id] = (
+                            now_mono + cal.follow_threat_hold_s
+                        )
+            hold = self._follow_hold_until.get(v.id)
+            if hold is not None and hold > now_mono:
+                in_ego = classify(d_abs, cal) == Lane.EGO
+                lat_converge = -_ls_slope(trk, 3)
+                if (in_ego
+                        or lat_converge >= cal.follow_threat_min_lat_converge_ms):
+                    active.add(v.id)
+        self._follow_threat_ids = active
 
     def _read_acc_lead_id(self) -> int | None:
         """Return the current ACC primary lead vehicle id, or None.
@@ -1106,6 +1219,15 @@ class AEBThread(BaseThread):
 
         ego_pitch_rad = math.radians(ego_pitch_deg)
 
+        # Follow-threat flags must be current before the precompute prefilter
+        # below reads them: a braking lead can cross under the rel-speed floor
+        # on the same frame it needs the bypass.
+        if run_collision:
+            self._update_follow_threats(
+                vehicles_eff, ego_arc, ego_x, ego_z,
+                ego_fwd_x, ego_fwd_z, now_mono, cal,
+            )
+
         # Precompute per-vehicle collision arcs for vehicles passing range/elevation/TMP.
         # Use vehicles_eff so TMP trailer-as-vehicles inherit tractor speed/acceleration.
         vehicle_collision_data: dict[int, tuple] = {}
@@ -1121,7 +1243,9 @@ class AEBThread(BaseThread):
                 expected_y = ego_y + rz * math.tan(ego_pitch_rad)
                 if abs(v.position.y - expected_y) > cal.elevation_margin:
                     continue
-                if tmp_traffic_session and v.id not in self._latched_threat_ids:
+                if (tmp_traffic_session
+                        and v.id not in self._latched_threat_ids
+                        and v.id not in self._follow_threat_ids):
                     _, v_yaw_deg_pc, _ = v.rotation.euler()
                     v_yaw_rad_pc = math.radians(v_yaw_deg_pc)
                     vf_x = -math.sin(v_yaw_rad_pc)
@@ -1131,11 +1255,15 @@ class AEBThread(BaseThread):
                     rel_kmh_pc = 3.6 * math.hypot(dvx_pc, dvz_pc)
                     if not _tmp_collision_threat(ref_kmh_for_filter, rel_kmh_pc):
                         continue
+                follow_decel = _follow_threat_arc_decel(
+                    v.id, self._follow_tracks, self._follow_threat_ids, cal,
+                )
                 (all_t, cross_pad, cross_list,
                  pc_yaw, pc_aspd, pc_fx, pc_fz, pc_curv,
                  ) = _build_vehicle_collision_data(
                     v, dynamic_horizon, ego_yaw_rad, ego_fwd_x, ego_fwd_z, cal,
                     self._curvature_blender, now_mono,
+                    follow_decel_ms2=follow_decel,
                 )
                 dist_sq = dx * dx + dz * dz
                 vehicle_collision_data[v.id] = (
@@ -1285,6 +1413,7 @@ class AEBThread(BaseThread):
                 precomputed_cross_arcs=precomputed_cross_arcs,
                 cross_padding=cross_padding,
                 latched_threat_ids=self._latched_threat_ids,
+                follow_threat_ids=self._follow_threat_ids,
             )
 
             suppression_reasons[v.id] = []
@@ -1409,9 +1538,26 @@ class AEBThread(BaseThread):
                         best_ttb = ttb
                         best_hit_x = unbraked_hit[1]
                         best_hit_z = unbraked_hit[2]
-                        best_closing_distance = math.hypot(
-                            unbraked_hit[1] - ego_front_x,
-                            unbraked_hit[2] - ego_front_z,
+                        # Distance for required_decel = v_rel^2 / 2d: take the
+                        # tighter of two frames, since neither is right for
+                        # every geometry.
+                        # - Relative gap (v_rel * ttc): correct for
+                        #   co-directional leads. The world-frame hit distance
+                        #   is ego's TRAVEL (~v_ego * ttc); pairing that with
+                        #   v_rel underestimates required by ~v_rel/v_ego for
+                        #   a moving lead (crash clip 0fe85c88 read 32% of max
+                        #   at a 100%-of-capacity rear-end).
+                        # - Ego travel to the hit point: tighter for crossing
+                        #   or oncoming arcs where v_rel > v_ego; switching
+                        #   those to the relative gap drops genuine crossing
+                        #   TPs 898e3a46 / f64d2a6b below the engage ratio.
+                        # For stationary targets both forms agree.
+                        best_closing_distance = min(
+                            closing_unbraked * unbraked_ttc,
+                            math.hypot(
+                                unbraked_hit[1] - ego_front_x,
+                                unbraked_hit[2] - ego_front_z,
+                            ),
                         )
                         best_v_closing = closing_unbraked
 
@@ -1431,9 +1577,14 @@ class AEBThread(BaseThread):
                             los_vetoed_ids.add(v.id)
                     if not vetoed and ttb < best_ttb_engage:
                         best_ttb_engage = ttb
-                        best_closing_distance_engage = math.hypot(
-                            unbraked_hit[1] - ego_front_x,
-                            unbraked_hit[2] - ego_front_z,
+                        # Same tighter-of-two-frames distance as
+                        # best_closing_distance above.
+                        best_closing_distance_engage = min(
+                            closing_unbraked * unbraked_ttc,
+                            math.hypot(
+                                unbraked_hit[1] - ego_front_x,
+                                unbraked_hit[2] - ego_front_z,
+                            ),
                         )
                         best_v_closing_engage = closing_unbraked
                     found_hit = True
@@ -1448,6 +1599,10 @@ class AEBThread(BaseThread):
         for vid in list(self._los_tracks.keys()):
             if vid not in _active_vids:
                 del self._los_tracks[vid]
+        for vid in list(self._follow_tracks.keys()):
+            if vid not in _active_vids:
+                del self._follow_tracks[vid]
+                self._follow_hold_until.pop(vid, None)
 
         time_to_brake = best_ttb if (run_collision and best_ttb < _INF) else _INF
         display_ttc = best_unbraked_ttc
@@ -1778,6 +1933,9 @@ class AEBThread(BaseThread):
         self._last_target_change_mono = 0.0
         self._prev_loop_mono = None
         self._latched_threat_ids.clear()
+        self._follow_tracks.clear()
+        self._follow_hold_until.clear()
+        self._follow_threat_ids = set()
         self._capture_prev_state = AEBState.STANDBY
         self._prev_ego_speed_capture_ms = None
         self._curvature_blender.prune(set())
