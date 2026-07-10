@@ -716,6 +716,10 @@ class AEBThread(BaseThread):
         self._los_tracks: dict[int, deque] = {}
         # Continuous-decel state
         self._engaged: bool = False
+        # Monotonic time when the current uninterrupted engagement
+        # qualification streak began; None when not qualifying or engaged.
+        # Backs the aeb_engage_confirm_s tier of the entry certainty gate.
+        self._engage_qual_since: float | None = None
         self._published_target_ms2: float = 0.0
         self._last_target_change_mono: float = 0.0
         self._prev_loop_mono: float | None = None
@@ -1060,6 +1064,12 @@ class AEBThread(BaseThread):
         best_ttb_engage: float = _INF
         best_closing_distance_engage: float = _INF
         best_v_closing_engage: float = 0.0
+        # Colliding targets with certain geometry (Lane.EGO, aligned heading):
+        # these skip the confirm wait at engagement entry. nearcertain covers
+        # targets in-lane OR aligned (one classification step from certain):
+        # they get the short confirm window instead of the oblique one.
+        certain_geom_ids: set[int] = set()
+        nearcertain_geom_ids: set[int] = set()
         los_vetoed_ids: set[int] = set()
         los_veto_memo: dict[int, bool] = {}
         vehicle_dicts: list[dict] = []
@@ -1303,6 +1313,11 @@ class AEBThread(BaseThread):
 
                     unbraked_ttc = unbraked_hit[0]
                     colliding_ids.add(v.id)
+                    aligned = abs(ctx.fwd_dot) >= cal.aeb_certain_fwd_dot
+                    if ctx.lane == Lane.EGO and aligned:
+                        certain_geom_ids.add(v.id)
+                    if ctx.lane == Lane.EGO or aligned:
+                        nearcertain_geom_ids.add(v.id)
                     newly_risky.add(v.id)
                     if v.id not in self._risk_first_seen:
                         self._risk_first_seen[v.id] = now_mono
@@ -1503,15 +1518,46 @@ class AEBThread(BaseThread):
                     and not geom_threat_latched
                     and not latched_distance_threat):
                 self._engaged = False
+            self._engage_qual_since = None
         else:
             # New engagements are gated by |ego_speed|: below the threshold
             # the truck is essentially crawling, the user has authority
             ego_kmh_abs = abs(ego_speed) * 3.6
-            if (run_collision
-                    and ego_kmh_abs >= cal.aeb_min_engage_speed_kmh
-                    and (effective_required_engage >= engage_threshold
-                         or brake_ttb_engage_active)):
-                self._engaged = True
+            qualified = (run_collision
+                         and ego_kmh_abs >= cal.aeb_min_engage_speed_kmh
+                         and (effective_required_engage >= engage_threshold
+                              or brake_ttb_engage_active))
+            if qualified:
+                if self._engage_qual_since is None:
+                    self._engage_qual_since = now_mono
+                # Certainty tiers that engage without the confirm wait:
+                # imminent (full brake barely avoids), certain geometry
+                # (aligned in-lane target, engage-eligible), or continuity
+                # with a previously latched threat. Everything else: crossing
+                # arcs, oblique sweeps: must sustain qualification, which
+                # single-tick extrapolation phantoms never do.
+                certain = (
+                    brake_ttb_engage_active
+                    or any(vid in certain_geom_ids and vid not in los_vetoed_ids
+                           for vid in colliding_ids)
+                    or any(vid in self._latched_threat_ids
+                           for vid in colliding_ids)
+                )
+                # Confirm window graded by geometry: near-certain targets
+                # (in-lane or aligned) get the short window; oblique
+                # out-of-lane crossers, the extrapolation-fragile class,
+                # must sustain qualification longer.
+                confirm_window = (
+                    cal.aeb_engage_confirm_s
+                    if any(vid in nearcertain_geom_ids for vid in colliding_ids)
+                    else cal.aeb_engage_confirm_oblique_s
+                )
+                confirmed = (now_mono - self._engage_qual_since
+                             >= confirm_window)
+                if certain or confirmed:
+                    self._engaged = True
+            else:
+                self._engage_qual_since = None
 
         # Promote every currently-colliding target into the latched set so
         # subsequent frames keep them in the pipeline and in the hold check.
@@ -1670,6 +1716,7 @@ class AEBThread(BaseThread):
                 pass
         self._latched_filter_ego_kmh = None
         self._engaged = False
+        self._engage_qual_since = None
         self._published_target_ms2 = 0.0
         self._last_target_change_mono = 0.0
         self._prev_loop_mono = None

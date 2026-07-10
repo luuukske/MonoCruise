@@ -379,7 +379,35 @@ aeb.snapshot                       # AEBSnapshot: full debug state
      headway-driven engagement hold over targets that have been engaged
      on previously, independent of current `v_closing`.
    - Engage when `effective_required ≥ aeb_engage_frac · effective_max` **OR**
-     `brake_ttb_active`.
+     `brake_ttb_active`, subject to the tiered entry certainty gate below.
+   - **Tiered entry certainty gate**: a new engagement additionally requires
+     one of: (a) `brake_ttb_engage_active` (imminent, full brake barely
+     avoids: instant), (b) certain geometry: a colliding, non-LOS-vetoed
+     target in `Lane.EGO` with `|fwd_dot| ≥ aeb_certain_fwd_dot` (aligned
+     in-lane traffic: rear-end or wrong-way, whose collision prediction
+     barely depends on arc extrapolation: instant), (c) continuity: a
+     colliding target already in `_latched_threat_ids` (instant), or (d)
+     qualification sustained for a geometry-graded confirm window (tracked
+     by `AEBThread._engage_qual_since`, reset when qualification lapses or
+     while engaged): `aeb_engage_confirm_s` when any qualifying colliding
+     target is **near-certain** (in `Lane.EGO`, or aligned `|fwd_dot| ≥
+     aeb_certain_fwd_dot` in any lane: one classification step from
+     certain), else `aeb_engage_confirm_oblique_s` for **oblique
+     out-of-lane** threats, the extrapolation-fragile class (corner
+     sweeps, mutual-turn passes) whose corpus phantoms qualify ≤ ~0.15 s.
+     Known trade at 0.20 s: a genuine perpendicular crosser whose
+     qualification sustains ~0.16 s (clip ffd29f9e) loses the brake: warn
+     still fires and the TTB slam net catches a materializing threat, but
+     the phantom and genuine distributions touch at ~0.16 s, so the window
+     cannot separate them perfectly. Rationale: corpus analysis showed phantom engagements
+     from extrapolation-fragile crossing arcs qualify for 1-2 ticks and
+     vanish, while genuine threats sustain qualification 3-30 ticks; and
+     the dominant genuine classes (in-lane aligned) skip the wait entirely,
+     so the confirm window costs real rear-end/head-on events zero latency.
+     Required-decel magnitude is NOT a certainty signal: crossing-arc
+     phantoms enter at ~200% of max (collapsed d_remaining) while genuine
+     rear-ends enter at 70-100%. Warn and the FF-assist layer are untouched
+     by this gate.
    - Disarm when `effective_required <  aeb_disarm_frac · effective_max` **AND
      NOT** `brake_ttb_active` **AND NOT** `geom_threat_latched` **AND NOT**
      `latched_distance_threat`.
@@ -508,6 +536,9 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `turning_diverge_kappa` | 0.007 /m | Corner threshold for Fix-C/D conditions |
 | `co_same_turn_lookahead_scale` | 0.5 | Extended lookahead fraction of horizon |
 | `diverge_dip_samples` | 8 | `_is_approaching` window samples for the in-lane pass-through dip check |
+| `aeb_engage_confirm_s` | 0.06 s | Sustained-qualification wait for near-certain engagement entries (3rd tick at 30 Hz) |
+| `aeb_engage_confirm_oblique_s` | 0.20 s | Sustained-qualification wait for oblique out-of-lane entries (extrapolation-fragile class) |
+| `aeb_certain_fwd_dot` | 0.95 | `\|fwd_dot\|` above which an in-lane colliding target is "certain" and skips the confirm wait |
 | `corner_entry_min_road_bend` | 0.10 rad | Min ego↔tangent angle for Mode-B suppression |
 | `corner_entry_min_lateral` | 0.4 m | Min |lat_signed| to claim "off ego axis" (Mode B) |
 | `corner_entry_lateral_tol` | 1.5 m | Chord-offset tolerance for arc-consistency check (Mode B) |

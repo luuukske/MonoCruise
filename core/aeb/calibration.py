@@ -123,6 +123,28 @@ class AEBCalibration:
     brake_actuator_lag_s: float = 0.18
     # New engagements only fire when |ego_speed| is above this threshold.
     aeb_min_engage_speed_kmh: float = 5.0
+    # Tiered engagement-entry certainty gate. A new engagement on the
+    # required-decel path must either be geometrically certain (a colliding
+    # target in Lane.EGO whose |fwd_dot| >= aeb_certain_fwd_dot: aligned
+    # in-lane traffic, i.e. rear-end or wrong-way, whose collision prediction
+    # barely depends on arc extrapolation), continue a previously latched
+    # threat, or sustain qualification for a confirm window graded by how
+    # uncertain the threat geometry is:
+    #   - near-certain (target in Lane.EGO, or aligned |fwd_dot| >=
+    #     aeb_certain_fwd_dot in any lane): aeb_engage_confirm_s. One lane
+    #     classification or jitter step away from certain.
+    #   - oblique out-of-lane (everything else): aeb_engage_confirm_oblique_s.
+    #     Constant-curvature extrapolation is at its most fragile for these
+    #     (corner sweeps, mutual-turn passes), and corpus phantoms in this
+    #     class qualify for <= ~0.15 s while genuine crossing threats sustain
+    #     qualification far longer AND fall into the brake-TTB slam net
+    #     (< 0.5 s) as the geometry actually materializes.
+    # The brake-TTB slam path is exempt from all confirm windows: geometry
+    # says now or never. 0.06 s fires on the 3rd consecutive qualifying tick
+    # at 30 Hz, matching the corpus validation.
+    aeb_engage_confirm_s: float = 0.06
+    aeb_engage_confirm_oblique_s: float = 0.20
+    aeb_certain_fwd_dot: float = 0.95
 
     # Line-of-sight-rate (CBDR) veto on new engagements. A genuine collision
     # course holds a near-constant world-frame bearing while range shrinks
