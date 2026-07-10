@@ -1,12 +1,15 @@
-"""Tests for the boundary-negative (TN) clip sampler.
+"""Tests for boundary-negative (TN) and crash clip capture samplers.
 
-Two layers:
+Three layers:
 - recorder policy: background sources (``shadow_near`` / ``random``) are
   auto-tagged true negatives, throttled on their own long timer, and skip the
-  context thumbnail; real events keep their unlabelled, thumbnailed behaviour.
-- thread condition: ``_capture_aeb_tick`` requests a ``shadow_near`` capture
+  context thumbnail; real events (``auto_engagement``, ``auto_crash``, ``manual``)
+  keep their unlabelled, thumbnailed behaviour.
+- thread TN condition: ``_capture_aeb_tick`` requests a ``shadow_near`` capture
   when AEB stayed silent while a nearby filtered vehicle lies inside ego's
-  predicted corridor, and stays quiet otherwise.
+  predicted corridor, and stays quiet otherwise (including while user braking).
+- thread crash condition: ``_capture_aeb_tick`` requests an ``auto_crash``
+  capture on a sudden ego speed drop above the minimum speed floor.
 """
 
 from __future__ import annotations
@@ -79,7 +82,7 @@ def test_random_auto_tagged_true_negative():
 
 
 def test_real_events_are_not_auto_tagged():
-    for source in ("auto_engagement", "manual"):
+    for source in ("auto_engagement", "auto_crash", "manual"):
         writer = _StubWriter()
         rec = AEBClipRecorder(writer, pre_s=2.0, post_s=1.0)
         _drive(rec, 0.0, 3.0)
@@ -124,6 +127,30 @@ def test_tn_cooldown_throttles_shadow_near_only():
     # Past the TN cooldown window: background sampling resumes.
     _drive(rec, 5.4 + 1 / 30, 16.0)
     assert rec.trigger("shadow_near", calibration=CAL) == "started"
+
+
+def test_auto_crash_keeps_thumbnail():
+    writer = _StubWriter()
+    rec = AEBClipRecorder(writer, pre_s=2.0, post_s=1.0,
+                         screenshot_provider=lambda: "THUMB64")
+    _drive(rec, 0.0, 3.0)
+    rec.trigger("auto_crash", calibration=CAL)
+    _drive(rec, 3.0 + 1 / 30, 4.2)
+    assert writer.clips[0].metadata.thumbnail_jpeg == "THUMB64"
+
+
+def test_auto_crash_wins_priority_over_engagement_when_folded():
+    writer = _StubWriter()
+    rec = AEBClipRecorder(writer, pre_s=2.0, post_s=1.0)
+    _drive(rec, 0.0, 3.0)
+    assert rec.trigger("auto_engagement", calibration=CAL) == "started"
+    assert rec.trigger("auto_crash", calibration=CAL) == "folded"
+    _drive(rec, 3.0 + 1 / 30, 4.2)
+
+    m = writer.clips[0].metadata
+    assert m.trigger_source == "auto_crash"
+    assert "auto_engagement" in m.also_triggered
+    assert m.label is None
 
 
 def test_shadow_near_folding_up_drops_the_tn_label():
@@ -179,6 +206,44 @@ def test_thread_fires_shadow_on_filtered_candidate_while_silent():
     t._engaged = False
     spy = _tick(t, _tn_snap(), AEBState.STANDBY)
     assert "shadow_near" in spy.triggers
+
+
+def test_thread_no_shadow_while_user_braking():
+    t = AEBThread()
+    t._engaged = False
+    t._read_pedals_for_capture = lambda: (0.5, 0.0)
+    spy = _tick(t, _tn_snap(), AEBState.STANDBY)
+    assert "shadow_near" not in spy.triggers
+
+
+def test_thread_fires_auto_crash_on_speed_drop():
+    t = AEBThread()
+    t._prev_ego_speed_capture_ms = 50.0 / 3.6
+    snap = _tn_snap(ego_speed=(50.0 - 6.0) / 3.6)
+    spy = _tick(t, snap, AEBState.STANDBY)
+    assert "auto_crash" in spy.triggers
+
+
+def test_thread_no_auto_crash_on_gentle_decel():
+    t = AEBThread()
+    t._prev_ego_speed_capture_ms = 50.0 / 3.6
+    snap = _tn_snap(ego_speed=(50.0 - 2.0) / 3.6)
+    spy = _tick(t, snap, AEBState.STANDBY)
+    assert "auto_crash" not in spy.triggers
+
+
+def test_thread_no_auto_crash_below_min_speed():
+    t = AEBThread()
+    t._prev_ego_speed_capture_ms = 35.0 / 3.6
+    snap = _tn_snap(ego_speed=5.0 / 3.6)
+    spy = _tick(t, snap, AEBState.STANDBY)
+    assert "auto_crash" not in spy.triggers
+
+
+def test_thread_no_auto_crash_without_prior_tick():
+    t = AEBThread()
+    spy = _tick(t, _tn_snap(ego_speed=20.0), AEBState.STANDBY)
+    assert "auto_crash" not in spy.triggers
 
 
 def test_thread_no_shadow_on_distant_filtered_vehicle():

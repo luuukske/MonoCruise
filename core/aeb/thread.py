@@ -172,6 +172,12 @@ _SHADOW_TN_FILTER_REASONS: frozenset[str] = frozenset({
     "SweepPassFilter",
 })
 
+# Crash clip capture (debug only, trigger ``auto_crash``). Same speed-drop
+# criterion as main_pedal_thread emergency detection; capture-only policy, not
+# in AEBCalibration.
+_CRASH_MIN_SPEED_KMH: float = 40.0
+_CRASH_SPEED_DROP_KMH: float = 5.0
+
 
 def _find_tractor_for_trailer(trailer: Vehicle, vehicles: list[Vehicle]) -> Vehicle | None:
     """Nearest same-heading non-trailer vehicle within _TRAILER_TRACTOR_RADIUS_M.
@@ -699,6 +705,7 @@ class AEBThread(BaseThread):
         self._state_hold_until: float = 0.0
         # Separate edge tracker for clip-capture triggers (debug only).
         self._capture_prev_state: AEBState = AEBState.STANDBY
+        self._prev_ego_speed_capture_ms: float | None = None
         self._last_snapshot: AEBSnapshot | None = None
         self._risk_first_seen: dict[int, float] = {}
         self._radar_visualizer = None
@@ -879,9 +886,12 @@ class AEBThread(BaseThread):
             # rejected a real candidate. The recorder throttles these hard and
             # auto-tags them true negatives; fired every qualifying tick, it
             # simply lands one clip per cooldown while such traffic is around.
+            # Skip while the user is braking: filtered convoy traffic during a
+            # manual stop is junk TN data (mirrors warn suppression policy).
             if (aeb_active
                     and new_state == AEBState.STANDBY
                     and not self._engaged
+                    and brakeval <= _USER_BRAKE_LATCH_THRESHOLD
                     and snap.ego_speed > _SHADOW_MIN_SPEED_MS
                     and _should_sample_shadow_tn(snap)):
                 recorder.trigger(
@@ -889,6 +899,21 @@ class AEBThread(BaseThread):
                     session_kind="TMP" if tmp_traffic_session else "SP",
                     calibration=self._cal,
                 )
+
+            # Crash capture: sudden ego speed drop while above the minimum
+            # speed floor (debug clip corpus only; leaves labels untagged).
+            prev_capture_ms = self._prev_ego_speed_capture_ms
+            if (aeb_active
+                    and prev_capture_ms is not None
+                    and prev_capture_ms * 3.6 >= _CRASH_MIN_SPEED_KMH
+                    and (prev_capture_ms - snap.ego_speed) * 3.6
+                    >= _CRASH_SPEED_DROP_KMH):
+                recorder.trigger(
+                    "auto_crash",
+                    session_kind="TMP" if tmp_traffic_session else "SP",
+                    calibration=self._cal,
+                )
+            self._prev_ego_speed_capture_ms = snap.ego_speed
 
             self._capture_prev_state = new_state
         except Exception:
@@ -1754,6 +1779,7 @@ class AEBThread(BaseThread):
         self._prev_loop_mono = None
         self._latched_threat_ids.clear()
         self._capture_prev_state = AEBState.STANDBY
+        self._prev_ego_speed_capture_ms = None
         self._curvature_blender.prune(set())
         self._los_tracks.clear()
         with self.data._lock:
