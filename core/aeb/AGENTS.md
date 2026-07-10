@@ -421,7 +421,17 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    - The published value is `AEB_target_decel_ms2` consumed by sending_thread.
 6. Flags:
    - `AEB_warn` rises on `effective_required ≥ aeb_warn_frac · effective_max`
-     OR `time_to_brake < warn_ttb`.
+     OR `time_to_brake < warn_ttb`, gated by warn persistence: certain /
+     near-certain geometry, imminent TTB, latched threats, and active
+     engagement warn instantly, while oblique out-of-lane threats must
+     sustain the raw warn condition for `aeb_warn_confirm_oblique_s`
+     (tracked by `AEBThread._warn_qual_since`; the streak follows the raw
+     condition, so the user-braking display suppression never resets it).
+     Because warn qualification is strictly looser than engage
+     qualification and `aeb_warn_confirm_oblique_s ≤
+     aeb_engage_confirm_oblique_s − 0.1`, an oblique engagement is always
+     preceded by ≥ 0.1 s of warning: the driver's gas-override reaction
+     window.
    - `AEB_brake` is true while engagement is latched and the published target
      is above zero. Other subsystems (cruise/HMI) gate off this flag.
 7. Hold semantics: warn/brake state holds for 0.3 s after a downgrade to
@@ -538,6 +548,7 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `diverge_dip_samples` | 8 | `_is_approaching` window samples for the in-lane pass-through dip check |
 | `aeb_engage_confirm_s` | 0.06 s | Sustained-qualification wait for near-certain engagement entries (3rd tick at 30 Hz) |
 | `aeb_engage_confirm_oblique_s` | 0.20 s | Sustained-qualification wait for oblique out-of-lane entries (extrapolation-fragile class) |
+| `aeb_warn_confirm_oblique_s` | 0.10 s | Warn persistence for oblique out-of-lane threats; keeps ≥ 0.1 s warn lead ahead of an oblique engagement |
 | `aeb_certain_fwd_dot` | 0.95 | `\|fwd_dot\|` above which an in-lane colliding target is "certain" and skips the confirm wait |
 | `corner_entry_min_road_bend` | 0.10 rad | Min ego↔tangent angle for Mode-B suppression |
 | `corner_entry_min_lateral` | 0.4 m | Min |lat_signed| to claim "off ego axis" (Mode B) |

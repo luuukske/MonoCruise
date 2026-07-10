@@ -145,6 +145,16 @@ class AEBCalibration:
     aeb_engage_confirm_s: float = 0.06
     aeb_engage_confirm_oblique_s: float = 0.20
     aeb_certain_fwd_dot: float = 0.95
+    # Warn persistence for oblique out-of-lane threats: the warn condition
+    # must hold this long before the warning surfaces. Filters the transient
+    # phantom beeps from the same extrapolation-fragile class the engagement
+    # confirm targets. Must stay <= aeb_engage_confirm_oblique_s - 0.1 so an
+    # oblique engagement is always preceded by >= 0.1 s of audible warning:
+    # the driver's gas-override reaction window. Near-certain/certain
+    # geometry, imminent TTB, latched threats, and active engagement warn
+    # instantly (their engage windows are 0-0.06 s, so any warn delay would
+    # put the brake before the beep).
+    aeb_warn_confirm_oblique_s: float = 0.10
 
     # Line-of-sight-rate (CBDR) veto on new engagements. A genuine collision
     # course holds a near-constant world-frame bearing while range shrinks

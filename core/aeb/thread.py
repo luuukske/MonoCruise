@@ -720,6 +720,9 @@ class AEBThread(BaseThread):
         # qualification streak began; None when not qualifying or engaged.
         # Backs the aeb_engage_confirm_s tier of the entry certainty gate.
         self._engage_qual_since: float | None = None
+        # Same for the raw warn condition; backs the oblique warn
+        # persistence gate (aeb_warn_confirm_oblique_s).
+        self._warn_qual_since: float | None = None
         self._published_target_ms2: float = 0.0
         self._last_target_change_mono: float = 0.0
         self._prev_loop_mono: float | None = None
@@ -1611,7 +1614,35 @@ class AEBThread(BaseThread):
             run_collision and effective_required >= warn_threshold
         )
         warn_by_ttb = (run_collision and time_to_brake < cal.warn_ttb)
-        aeb_warn = bool(warn_by_decel or warn_by_ttb)
+        warn_raw = bool(warn_by_decel or warn_by_ttb)
+
+        # Warn persistence gate: mirrors the engagement certainty tiers.
+        # Certain/near-certain geometry, imminent TTB, latched threats, and
+        # active engagement warn instantly; oblique out-of-lane threats must
+        # sustain the warn condition for aeb_warn_confirm_oblique_s, which
+        # filters the transient phantom beeps of that class while keeping
+        # >= 0.1 s of warning ahead of an oblique engagement (whose confirm
+        # is aeb_engage_confirm_oblique_s; warn qualification is strictly
+        # looser than engage qualification, so the streak starts no later).
+        # The streak tracks the raw threat condition so the user-braking
+        # display suppression below never resets it.
+        if warn_raw:
+            if self._warn_qual_since is None:
+                self._warn_qual_since = now_mono
+            warn_instant = (
+                self._engaged
+                or brake_ttb_active
+                or any(vid in nearcertain_geom_ids for vid in colliding_ids)
+                or any(vid in self._latched_threat_ids for vid in colliding_ids)
+            )
+            aeb_warn = (
+                warn_instant
+                or (now_mono - self._warn_qual_since
+                    >= cal.aeb_warn_confirm_oblique_s)
+            )
+        else:
+            self._warn_qual_since = None
+            aeb_warn = False
 
         user_braking_now = self._read_user_braking()
         near_full_target = (
@@ -1717,6 +1748,7 @@ class AEBThread(BaseThread):
         self._latched_filter_ego_kmh = None
         self._engaged = False
         self._engage_qual_since = None
+        self._warn_qual_since = None
         self._published_target_ms2 = 0.0
         self._last_target_change_mono = 0.0
         self._prev_loop_mono = None
