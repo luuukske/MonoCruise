@@ -184,6 +184,10 @@ class SendingThreadData(ThreadData):
     # cruise_control_thread to distinguish a user's in-game brake press from
     # the game echoing back our own command (which lags by a few ticks).
     recent_brake_outputs: tuple[float, ...] = (0.0, 0.0, 0.0)
+    # True when the user's OPD gas exceeded the mapper's gas this tick while
+    # CC/ACC were bidding. cruise_control_thread latches on this to hand
+    # gas-cap authority to the global limiter for the duration of the override.
+    user_gas_overriding_cc: bool = False
     _lock: threading.Lock = field(
         default_factory=threading.Lock, repr=False, compare=False
     )
@@ -767,6 +771,7 @@ class SendingThread(BaseThread):
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
                 self.data.decel_active = False
                 self.data.decel_brake_output = 0.0
+                self.data.user_gas_overriding_cc = False
                 self.data.mapper_commanded_ms2 = 0.0
                 self.data.mapper_control_wanted_ms2 = 0.0
                 self.data.mapper_raw_accel_ms2 = 0.0
@@ -809,6 +814,7 @@ class SendingThread(BaseThread):
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
                 self.data.decel_active = False
                 self.data.decel_brake_output = 0.0
+                self.data.user_gas_overriding_cc = False
                 self.data.mapper_commanded_ms2 = 0.0
                 self.data.mapper_control_wanted_ms2 = 0.0
                 self.data.mapper_raw_accel_ms2 = 0.0
@@ -860,6 +866,7 @@ class SendingThread(BaseThread):
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
                 self.data.decel_active = False
                 self.data.decel_brake_output = 0.0
+                self.data.user_gas_overriding_cc = False
                 self.data.mapper_commanded_ms2 = 0.0
                 self.data.mapper_control_wanted_ms2 = 0.0
                 self.data.mapper_raw_accel_ms2 = 0.0
@@ -912,9 +919,10 @@ class SendingThread(BaseThread):
         # User-pedal merge with the mapper's output. Keyed on which
         # controller is actually bidding (published by CruiseControlThread),
         # not cc_mode alone: in cruise mode the global limiter can be the
-        # sole bidder when CC is disabled, and it must cap the user pedal.
-        #   active_controller "cc"      → CC drives  → max(opd_gas, mapper_gas)
-        #   active_controller "limiter" → cap        → min(opd_gas, mapper_gas)
+        # sole bidder when CC is disabled or user-overridden, and it must
+        # cap the user pedal.
+        #   active_controller "cc"      → CC/ACC bidding      → max(opd_gas, mapper_gas)
+        #   active_controller "limiter" → limiter sole bidder → min(opd_gas, mapper_gas)
         # CC override uses opdgasval (always OPD-mapped, regardless of CC
         # state) so the driver overrides CC through the same one-pedal feel
         # they get with CC off: below the OPD offset the gas portion is zero
@@ -1108,6 +1116,7 @@ class SendingThread(BaseThread):
             self.data.mapper_brake_multiplier = mapper_brake_multiplier
             self.data.mapper_gain_scale = mapper_gain_scale
             self.data.mapper_pedal_state = mapper_pedal_state
+            self.data.user_gas_overriding_cc = cc_overridden_by_opd
 
     def teardown(self) -> None:
         if self._key_listener is not None:

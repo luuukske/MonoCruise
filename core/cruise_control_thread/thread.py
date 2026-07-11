@@ -40,6 +40,13 @@ _CC_DISARM_SPEED_MS = 0.3
 _CC_CRASH_SPEED_DROP_MS = 5.0
 _CC_DISARM_PENDING_TIMEOUT_S = 5.0
 
+# User OPD-gas override of CC (cruise mode): while latched, CC/ACC bids are
+# excluded so the global limiter is the sole bidder and caps the user pedal.
+# Exit when the user lifts off (OPD gas below the release threshold) or ego
+# falls this margin below the CC target (CC's own demand exceeds the user's).
+_CC_OVERRIDE_GAS_RELEASE = 0.02
+_CC_OVERRIDE_SPEED_MARGIN_KMH = 2.0
+
 # Button timing (legacy MonoCruise main_cruise_control)
 _LONG_PRESS_DEC_INC_FIRST_S = 0.3
 _LONG_PRESS_DEC_INC_REPEAT_S = 0.6
@@ -78,6 +85,9 @@ class CruiseControlThread(BaseThread):
         # Disarm-on-stop state (CC-only: moved from CruiseController).
         self._cc_disarm_pending_until: float = 0.0
         self._cc_prev_speed_ms: float | None = None
+
+        # User OPD-gas override latch (cruise mode, limiter active only).
+        self._cc_user_override: bool = False
 
         # Button FSM state: owns press timing only; acts on CC via _cc_ctrl.
         self._time_pressed_dec: float | None = None
@@ -233,6 +243,7 @@ class CruiseControlThread(BaseThread):
 
             # Dispatch by mode.
             if mode == "Speed limiter":
+                self._cc_user_override = False
                 # CC's button-set target wins; global limit is the always-on fallback
                 # when no target has been set via the buttons.
                 if self._cc_ctrl.enabled and self._cc_ctrl.target_speed_kmh is not None:
@@ -261,7 +272,20 @@ class CruiseControlThread(BaseThread):
                 else:
                     self._limiter_ctrl.disable()
 
-                cc_out = self._cc_ctrl.step(ctx)
+                # User OPD-gas override: while the user's gas exceeds CC's,
+                # CC's bid is moot (its brake is suppressed by the merge) and
+                # must not own the arbitration min, otherwise the limiter
+                # never gains gas-cap authority and the user can drive past
+                # the global limit. Exclude CC/ACC so the limiter is the sole
+                # bidder: sending_thread then min-merges the user pedal
+                # against the limiter-tracked gas cap.
+                self._update_cc_override_latch(ctx, pedal)
+
+                if self._cc_user_override:
+                    self._cc_ctrl.reset()
+                    cc_out = LongOutput(None, False)
+                else:
+                    cc_out = self._cc_ctrl.step(ctx)
                 limiter_out = self._limiter_ctrl.step(ctx)
                 if cc_out.active:
                     acc_out = self._acc_ctrl.step(ctx)
@@ -305,17 +329,24 @@ class CruiseControlThread(BaseThread):
         """Min-arbitrate and report which side dominates for the user-pedal merge.
 
         The 'winner' label drives SendingThread's user-pedal merge (max vs
-        min). Whichever controller actually owns the minimum bid sets the
-        label: CC / ACC → 'cc' (max merge, user OPD gas may override),
-        limiter → 'limiter' (min merge, hard cap). This ensures the global
-        limiter retains gas-cap authority when its negative bid dominates
-        an active CC, while still letting CC drive when it owns the bid.
+        min): 'cc' → max merge (CC/ACC drive, user OPD gas may add), 'limiter'
+        → min merge (pure cap, user pedal capped).
+
+        Label rule: 'cc' whenever CC or ACC is bidding, even when the
+        limiter's bid owns the min. The published bid is still the min, so a
+        binding limiter cap governs the mapper while CC keeps drive authority
+        in the merge. Labeling those ticks 'limiter' flips the merge to
+        min(user, mapper) and zeroes CC's gas with the foot off the pedal,
+        which jitters whenever the bids cross (set speed == global limit).
+        'limiter' is reported only when the limiter is the sole bidder
+        (CC disabled, or user override excluded CC for the tick).
         """
         active = [(name, o.wanted_ms2) for name, o in items if o.active and o.wanted_ms2 is not None]
         if not active:
             return 0.0, False, "none"
-        winning_name, winning_bid = min(active, key=lambda kv: kv[1])
-        winner = "limiter" if winning_name == "limiter" else "cc"
+        winning_bid = min(bid for _, bid in active)
+        cc_side_bidding = any(name != "limiter" for name, _ in active)
+        winner = "cc" if cc_side_bidding else "limiter"
         return winning_bid, True, winner
 
     @staticmethod
@@ -397,6 +428,7 @@ class CruiseControlThread(BaseThread):
                     "acc_dist_inc_held": bool(getattr(pt.data, "acc_dist_inc_held", False)),
                     "acc_dist_dec_held": bool(getattr(pt.data, "acc_dist_dec_held", False)),
                     "brakeval": float(getattr(pt.data, "brakeval", 0.0)),
+                    "opdgasval": float(getattr(pt.data, "opdgasval", 0.0)),
                 }
         except Exception:
             return None
@@ -679,6 +711,54 @@ class CruiseControlThread(BaseThread):
         else:
             self._cc_disarm_pending_until = 0.0
         self._cc_prev_speed_ms = ctx.speed_ms
+
+    def _update_cc_override_latch(self, ctx: LongCtx, pedal: dict) -> None:
+        """Latch/unlatch the user OPD-gas override of CC (cruise mode only).
+
+        Entry: sending_thread saw the user's OPD gas exceed the mapper's gas
+        on the previous tick while CC/ACC were bidding, and ego is not far
+        below the CC target (below it, CC's own gas demand exceeds the
+        user's, so max-merge already gives the right output and there is no
+        cap to enforce). Exit: user lifts off the OPD gas region, or ego
+        falls the margin below the CC target so CC's demand wins again.
+        Requires both CC and the limiter to be active; otherwise cleared.
+        """
+        if not (self._cc_ctrl.active and self._limiter_ctrl.active):
+            self._cc_user_override = False
+            return
+
+        opd_gas = float(pedal.get("opdgasval", 0.0))
+        target_kmh = self._cc_ctrl.target_speed_kmh
+        speed_kmh = ctx.speed_ms * 3.6
+        below_target = (
+            target_kmh is not None
+            and speed_kmh < float(target_kmh) - _CC_OVERRIDE_SPEED_MARGIN_KMH
+        )
+
+        if self._cc_user_override:
+            if opd_gas <= _CC_OVERRIDE_GAS_RELEASE or target_kmh is None or below_target:
+                self._cc_user_override = False
+        elif (
+            opd_gas > _CC_OVERRIDE_GAS_RELEASE
+            and not below_target
+            and self._read_user_gas_override_flag()
+        ):
+            self._cc_user_override = True
+
+    @staticmethod
+    def _read_user_gas_override_flag() -> bool:
+        """sending_thread's user-OPD-gas-over-CC flag from the previous tick."""
+        try:
+            st = registry.get_thread("sending_thread")
+        except KeyError:
+            return False
+        try:
+            if not st.is_alive():
+                return False
+            with st.data._lock:
+                return bool(getattr(st.data, "user_gas_overriding_cc", False))
+        except (AttributeError, KeyError):
+            return False
 
     def _maybe_reset_mapper_on_commanding_end(self, commanding: bool) -> None:
         if self._was_commanding and not commanding:
