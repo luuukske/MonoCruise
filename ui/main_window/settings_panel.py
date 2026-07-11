@@ -109,6 +109,9 @@ class SettingsPanel(QWidget):
         # highlight stays off until the input is released once.
         self._glow_suppress: set[str] = set()
 
+        # Pedal configuration ("Connect to pedals") state
+        self._pedal_configuring = False
+
         self.setMaximumWidth(SETTINGS_PANEL_WIDTH)
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
@@ -344,17 +347,19 @@ class SettingsPanel(QWidget):
 
         new_label(p, self._r(0), 0, "Gas axis:")
         self.lbl_gas = new_label(
-            p, self._r(), 1, str(s.gasaxis) if s.gasaxis else "—",
+            p, self._r(), 1, str(s.gasaxis) if s.gasaxis is not None else "—",
             alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
         )
 
         new_label(p, self._r(0), 0, "Brake axis:")
         self.lbl_brake = new_label(
-            p, self._r(), 1, str(s.brakeaxis) if s.brakeaxis else "—",
+            p, self._r(), 1, str(s.brakeaxis) if s.brakeaxis is not None else "—",
             alignment=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
         )
 
-        self.btn_connect = QPushButton("Connect to pedals")
+        self.btn_connect = QPushButton(
+            "Reconnect to pedals" if s.device else "Connect to pedals"
+        )
         self.btn_connect.clicked.connect(self._on_connect_pedals)
         self._grid.addWidget(self.btn_connect, self._r(), 0, 1, 2)
 
@@ -362,9 +367,112 @@ class SettingsPanel(QWidget):
         self.lbl_conn_error.setObjectName("errorLabel")
         self._grid.addWidget(self.lbl_conn_error, self._r(), 0, 1, 2)
 
+    # Pedal configuration ("Connect to pedals") flow
+
     def _on_connect_pedals(self) -> None:
-        # TODO: trigger joystick connection via registry / JoystickThread
-        pass
+        if self._pedal_configuring:
+            self._stop_pedal_config()
+            self._set_cmd_hint("Pedal configuration cancelled.")
+            return
+
+        pt = self._get_thread("main_pedal_thread")
+        if pt is None or not pt.is_alive() or not hasattr(pt, "start_pedal_config"):
+            self.lbl_conn_error.setText("Pedal input is not running.")
+            return
+
+        # One capture flow at a time: a pedal tap must never race a button
+        # assignment.
+        if self._configuring_key is not None:
+            self._stop_configuring()
+        if self._unassign_armed:
+            self._disarm_unassign()
+
+        try:
+            pt.start_pedal_config()
+        except Exception:
+            logger.debug("failed to start pedal config", exc_info=True)
+            self.lbl_conn_error.setText("Could not start pedal configuration.")
+            return
+
+        self._pedal_configuring = True
+        self.lbl_conn_error.setText("")
+        self.btn_connect.setText("Tap the brake pedal  (click to cancel)")
+        self._set_cmd_hint("Tap the brake pedal.")
+
+    def _stop_pedal_config(self) -> None:
+        """Cancel any active pedal configuration and restore the button."""
+        self._pedal_configuring = False
+        pt = self._get_thread("main_pedal_thread")
+        if pt is not None:
+            try:
+                pt.cancel_pedal_config()
+            except Exception:
+                logger.debug("failed to cancel pedal config", exc_info=True)
+        self._refresh_pedal_widgets()
+
+    def _poll_pedal_config(self) -> None:
+        pt = self._get_thread("main_pedal_thread")
+        if pt is None:
+            self._stop_pedal_config()
+            return
+
+        with pt.data._lock:
+            active = pt.data.pedal_config_active
+            stage = pt.data.pedal_config_stage
+            has_result = pt.data.pedal_config_result is not None
+
+        if has_result:
+            res = pt.consume_pedal_config()
+            self._pedal_configuring = False
+            self._refresh_pedal_widgets()
+            self.lbl_conn_error.setText("")
+            name = (res or {}).get("device_name") or "pedals"
+            self._set_cmd_hint(f"Pedals connected: {name}.")
+            return
+
+        if not active:
+            # Cancelled or restarted underneath us (e.g. watchdog restart).
+            self._stop_pedal_config()
+            self._set_cmd_hint("Pedal configuration cancelled.")
+            return
+
+        text = (
+            "Tap the gas pedal  (click to cancel)"
+            if stage == "gas"
+            else "Tap the brake pedal  (click to cancel)"
+        )
+        if self.btn_connect.text() != text:
+            self.btn_connect.setText(text)
+            if stage == "gas":
+                self._set_cmd_hint("Brake axis saved. Tap the gas pedal.")
+
+    def _poll_pedal_status(self) -> None:
+        """Keep the 'Connected pedals' label in sync with the pedal thread."""
+        if not self.isVisible() or self.width() < 10:
+            return
+        name = ""
+        pt = self._get_thread("main_pedal_thread")
+        if pt is not None:
+            try:
+                with pt.data._lock:
+                    if not pt.data.device_lost:
+                        name = pt.data.device_name or ""
+            except AttributeError:
+                pass
+        if len(name) > 20:
+            name = name[:20] + "..."
+        text = name if name else "None connected"
+        if self.lbl_pedals.text() != text:
+            self.lbl_pedals.setText(text)
+
+    def _refresh_pedal_widgets(self) -> None:
+        """Sync the axis labels and connect-button text with settings."""
+        s = self._settings
+        self.lbl_gas.setText(str(s.gasaxis) if s.gasaxis is not None else "—")
+        self.lbl_brake.setText(str(s.brakeaxis) if s.brakeaxis is not None else "—")
+        self.btn_connect.setText(
+            "Reconnect to pedals" if s.device else "Connect to pedals"
+        )
 
     # Section 2 – Program Settings
 
@@ -718,6 +826,9 @@ class SettingsPanel(QWidget):
     def _start_configuring(self, key: str) -> None:
         if self._configuring_key is not None:
             self._stop_configuring()
+        # One capture flow at a time (see _on_connect_pedals).
+        if self._pedal_configuring:
+            self._stop_pedal_config()
         self._configuring_key = key
         self._kb_capture_started = False
 
@@ -765,6 +876,9 @@ class SettingsPanel(QWidget):
             self._set_cmd_hint("Assignment cancelled.")
         if self._unassign_armed:
             self._disarm_unassign()
+        if self._pedal_configuring:
+            self._stop_pedal_config()
+            self._set_cmd_hint("Pedal configuration cancelled.")
 
     # Button binding: polling (QTimer, main thread)
 
@@ -772,7 +886,10 @@ class SettingsPanel(QWidget):
         try:
             if self._configuring_key is not None:
                 self._poll_capture()
+            if self._pedal_configuring:
+                self._poll_pedal_config()
             self._poll_held_glow()
+            self._poll_pedal_status()
         except Exception:
             logger.debug("binding poll failed", exc_info=True)
 
@@ -1211,8 +1328,9 @@ class SettingsPanel(QWidget):
         self._settings = s
 
         # Inputs
-        self.lbl_gas.setText(str(s.gasaxis) if s.gasaxis else "—")
-        self.lbl_brake.setText(str(s.brakeaxis) if s.brakeaxis else "—")
+        if self._pedal_configuring:
+            self._stop_pedal_config()
+        self._refresh_pedal_widgets()
 
         # Program settings
         self.chk_autostart.setChecked(s.autostart_variable)

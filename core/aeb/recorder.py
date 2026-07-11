@@ -144,7 +144,7 @@ class AEBClipRecorder:
         post_s: float = 3.0,
         burn_in_s: float = 2.0,
         cooldown_s: float = 5.0,
-        tn_cooldown_s: float = 120.0,
+        tn_cooldown_s: float = 600.0,
         ring_margin_s: float = 1.0,
         enabled: bool = True,
         screenshot_provider=None,
@@ -156,7 +156,8 @@ class AEBClipRecorder:
         self.cooldown_s = cooldown_s
         # Background/negative captures are throttled on their own long timer so a
         # steady stream of them can never crowd out real events (they share the
-        # store's rotation cap). One boundary negative per this many stream-seconds.
+        # store's rotation cap). One boundary negative at most per this many
+        # stream-seconds while qualifying traffic persists.
         self.tn_cooldown_s = tn_cooldown_s
         self.enabled = enabled
         # Optional () -> base64 JPEG | None, grabbed off-thread at trigger time.

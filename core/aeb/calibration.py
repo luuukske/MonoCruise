@@ -116,11 +116,11 @@ class AEBCalibration:
     aeb_target_deadband_ms2: float = 0.4
     aeb_target_refresh_min_s: float = 0.20
     aeb_target_rate_ms3: float = 8.0
-    aeb_engage_frac: float = 0.7
+    aeb_engage_frac: float = 0.8
     aeb_disarm_frac: float = 0.45
     aeb_warn_frac: float = 0.5
     aeb_warn_near_full_frac: float = 0.85
-    brake_actuator_lag_s: float = 0.18
+    brake_actuator_lag_s: float = 0.10
     # New engagements only fire when |ego_speed| is above this threshold.
     aeb_min_engage_speed_kmh: float = 5.0
     # Tiered engagement-entry certainty gate. A new engagement on the

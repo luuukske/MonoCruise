@@ -16,6 +16,9 @@ Responsibilities:
   - Expose joystick_button_states for input_bindings.resolve_held() callers.
   - Expose a capture API (start_capture / cancel_capture / consume_capture /
     set_capture_guard) for the settings-panel button assignment flow.
+  - Expose a pedal configuration API (start_pedal_config / cancel_pedal_config /
+    consume_pedal_config) for the settings-panel "Connect to pedals" flow:
+    tap brake, tap gas, axes and inversion are detected and saved.
 
 Does NOT own:
   - Sending values to the game  → sending_thread (reads ThreadData).
@@ -179,6 +182,13 @@ class MainPedalThreadData(ThreadData):
     # assigning a button can never immediately trigger its action.
     capture_guard: object = None
 
+    # Pedal configuration flow (settings-panel "Connect to pedals").
+    pedal_config_active: bool = False
+    pedal_config_stage: str = ""    # "brake" or "gas" while active
+    # dict(device_guid, device_name, gasaxis, brakeaxis, gas_inverted,
+    # brake_inverted) once the flow finishes; consumed by the UI.
+    pedal_config_result: object = None
+
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
@@ -227,6 +237,17 @@ class MainPedalThread(BaseThread):
         # Guard safety timeout: clear a stuck capture_guard (e.g. bound to a
         # device that never reports) so CC buttons cannot stay dead forever.
         self._capture_guard_ts: float = 0.0
+
+        # Pedal configuration flow (thread-owned):
+        # guid → joystick for every connected device while config is active.
+        self._pconf_devices: dict[str, pygame.joystick.JoystickType] = {}
+        self._pconf_count: int = -1
+        # guid → {axis: resting value}, captured when a device is first seen.
+        self._pconf_baselines: dict[str, dict[int, float]] = {}
+        # Brake capture result, held until the gas axis is captured too.
+        self._pconf_device_guid: str | None = None
+        self._pconf_brake_axis: int | None = None
+        self._pconf_brake_inverted: bool = False
 
         # ── Operational state ─────────────────────────────────────────────────
         self._prev_brakeval: float = 0.0
@@ -278,6 +299,32 @@ class MainPedalThread(BaseThread):
         latency_multiplier = (latency / 0.015) * 2
 
         tel = self._get_telemetry()
+
+        # Pedal configuration flow: runs before the telemetry gate so pedals
+        # can be configured with the game closed. Outputs stay neutral for the
+        # whole flow; the user deliberately started it from the settings panel.
+        if self.data.pedal_config_active:
+            # Keep pumping SDL so get_axis() stays live and hot-plug
+            # bookkeeping (device added/removed) keeps working.
+            self._process_pygame_events(0.0)
+            self._tick_pedal_config()
+            if tel is not None:
+                self._prev_speed = tel["speed"]
+            self._prev_brakeval = 0.0
+            with self.data._lock:
+                self.data.gasval      = 0.0
+                self.data.brakeval    = 0.0
+                self.data.gas_output  = 0.0
+                self.data.brake_output = 0.0
+                self.data.opdgasval   = 0.0
+                self.data.em_stop     = False
+                self.data.cc_start_held = False
+                self.data.cc_inc_held = False
+                self.data.cc_dec_held = False
+                self.data.acc_dist_inc_held = False
+                self.data.acc_dist_dec_held = False
+            return
+
         if tel is None:
             with self.data._lock:
                 self.data.gas_output  = 0.0
@@ -566,6 +613,198 @@ class MainPedalThread(BaseThread):
             except Exception:
                 logger.debug("capture scan: skipping joystick %d", i, exc_info=True)
         self._capture_scan_devices = devices
+
+    # ── Pedal configuration API ───────────────────────────────────────────────
+
+    # Minimum axis movement from the resting baseline that counts as a tap.
+    _PCONF_TAP_THRESHOLD = 0.3
+
+    def start_pedal_config(self) -> None:
+        """Begin the tap-brake-then-gas pedal configuration flow."""
+        # Reset internals BEFORE raising the active flag: the loop tick only
+        # touches them once it sees pedal_config_active.
+        self._pconf_devices = {}
+        self._pconf_count = -1
+        self._pconf_baselines = {}
+        self._pconf_device_guid = None
+        self._pconf_brake_axis = None
+        self._pconf_brake_inverted = False
+        # Configuration supersedes any in-flight pedal reconnect attempt.
+        self._reconnect_state = None
+        self._reconnect_js = None
+        with self.data._lock:
+            self.data.pedal_config_active = True
+            self.data.pedal_config_stage = "brake"
+            self.data.pedal_config_result = None
+        logger.info("pedal config started: waiting for brake tap")
+
+    def cancel_pedal_config(self) -> None:
+        """Abort pedal configuration without saving anything."""
+        with self.data._lock:
+            was_active = self.data.pedal_config_active
+            self.data.pedal_config_active = False
+            self.data.pedal_config_stage = ""
+            self.data.pedal_config_result = None
+        self._pconf_devices = {}
+        self._pconf_count = -1
+        self._pconf_baselines = {}
+        if was_active:
+            logger.info("pedal config cancelled")
+
+    def consume_pedal_config(self) -> dict | None:
+        """Read + clear the finished pedal configuration result.
+
+        Returns None if the flow hasn't finished. The settings values are
+        already saved by the thread when the result appears; the UI only
+        needs this for display.
+        """
+        with self.data._lock:
+            res = self.data.pedal_config_result
+            self.data.pedal_config_result = None
+            return res
+
+    def _tick_pedal_config(self) -> None:
+        """Advance the pedal configuration flow by one tick (never blocks).
+
+        Stage "brake": watch every axis on every connected joystick; the first
+        axis moved more than _PCONF_TAP_THRESHOLD from its resting baseline
+        becomes the brake axis and locks the pedal device.
+        Stage "gas": same detection, restricted to the locked device; the
+        first axis other than the brake axis wins and finishes the flow.
+
+        Inversion matches _read_axis: not-inverted means pressing drives the
+        raw value up toward +1, so movement below the baseline is inverted.
+        """
+        self._sync_pconf_devices()
+
+        with self.data._lock:
+            stage = self.data.pedal_config_stage
+
+        hit = self._pconf_detect_tap(stage)
+        if hit is None:
+            return
+        guid, axis, inverted = hit
+
+        if stage == "brake":
+            self._pconf_device_guid = guid
+            self._pconf_brake_axis = axis
+            self._pconf_brake_inverted = inverted
+            logger.info("pedal config: brake axis %d (inverted=%s)", axis, inverted)
+            with self.data._lock:
+                self.data.pedal_config_stage = "gas"
+        elif stage == "gas":
+            self._finish_pedal_config(guid, axis, inverted)
+
+    def _sync_pconf_devices(self) -> None:
+        """Enumerate connected joysticks and capture resting axis baselines.
+
+        Re-enumerates when the device count changes (hot-plug). Baselines of
+        already-seen devices are kept so a replug or an unrelated hot-plug
+        can't re-baseline a pedal the user is holding. The virtual vJoy
+        output device is never a pedal source and is skipped.
+        """
+        try:
+            count = pygame.joystick.get_count()
+        except Exception:
+            return
+        if count == self._pconf_count:
+            return
+        self._pconf_count = count
+        devices: dict[str, pygame.joystick.JoystickType] = {}
+        for i in range(count):
+            try:
+                js = pygame.joystick.Joystick(i)
+                if js.get_name() == "vJoy Device":
+                    continue
+                js.init()
+                devices[js.get_guid()] = js
+            except Exception:
+                logger.debug("pedal config: skipping joystick %d", i, exc_info=True)
+        self._pconf_devices = devices
+        for guid, js in devices.items():
+            if guid in self._pconf_baselines:
+                continue
+            try:
+                self._pconf_baselines[guid] = {
+                    a: js.get_axis(a) for a in range(js.get_numaxes())
+                }
+            except Exception:
+                logger.debug(
+                    "pedal config: baseline capture failed for a device", exc_info=True
+                )
+
+    def _pconf_detect_tap(self, stage: str) -> tuple[str, int, bool] | None:
+        """Return (guid, axis, inverted) for the first axis moved past the tap
+        threshold, or None. In the gas stage only the locked pedal device is
+        watched and the brake axis is skipped."""
+        for guid, js in self._pconf_devices.items():
+            if stage == "gas" and guid != self._pconf_device_guid:
+                continue
+            baselines = self._pconf_baselines.get(guid)
+            if not baselines:
+                continue
+            try:
+                for axis, baseline in baselines.items():
+                    if stage == "gas" and axis == self._pconf_brake_axis:
+                        continue
+                    delta = js.get_axis(axis) - baseline
+                    if abs(delta) > self._PCONF_TAP_THRESHOLD:
+                        return guid, axis, delta < 0
+            except Exception:
+                logger.debug("pedal config: axis read failed", exc_info=True)
+        return None
+
+    def _finish_pedal_config(self, guid: str, gas_axis: int, gas_inverted: bool) -> None:
+        """Persist the detected configuration and adopt the device immediately."""
+        brake_axis = self._pconf_brake_axis
+        brake_inverted = self._pconf_brake_inverted
+        js = self._pconf_devices.get(guid)
+
+        Settings.save(values={
+            "device": guid,
+            "gasaxis": gas_axis,
+            "brakeaxis": brake_axis,
+            "gas_inverted": gas_inverted,
+            "brake_inverted": brake_inverted,
+        })
+
+        device_name = ""
+        if js is not None:
+            try:
+                device_name = js.get_name()
+            except Exception:
+                pass
+            self._device = js
+            try:
+                self._device_instance_id = js.get_instance_id()
+            except Exception:
+                self._device_instance_id = None
+        self._reconnect_state = None
+        self._reconnect_js = None
+
+        logger.info(
+            "pedal config: gas axis %d (inverted=%s); pedals connected",
+            gas_axis, gas_inverted,
+        )
+
+        result = {
+            "device_guid": guid,
+            "device_name": device_name,
+            "gasaxis": gas_axis,
+            "brakeaxis": brake_axis,
+            "gas_inverted": gas_inverted,
+            "brake_inverted": brake_inverted,
+        }
+        with self.data._lock:
+            self.data.device_lost = js is None
+            self.data.device_name = device_name
+            self.data.pedal_config_active = False
+            self.data.pedal_config_stage = "done"
+            self.data.pedal_config_result = result
+
+        self._pconf_devices = {}
+        self._pconf_count = -1
+        self._pconf_baselines = {}
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
