@@ -1625,6 +1625,13 @@ class AEBThread(BaseThread):
         disarm_threshold = cal.aeb_disarm_frac * effective_max_decel
         warn_threshold = cal.aeb_warn_frac * effective_max_decel
 
+        ego_kmh_abs = abs(ego_speed) * 3.6
+        aeb_speed_ok = ego_kmh_abs >= cal.aeb_min_engage_speed_kmh
+        # Warn/FF and new engagements require ego above the speed floor so
+        # cross-traffic driving into a stopped truck does not trigger AEB.
+        # An event already latched while moving may continue to completion.
+        aeb_outputs_ok = aeb_speed_ok or self._engaged
+
         # brake_ttb_active: unbraked geometry says collision is within the
         # emergency window. The window is `brake_ttb + brake_response_window_s`
         # to compensate for actuator lag and the rate-limited brake ramp —
@@ -1705,9 +1712,8 @@ class AEBThread(BaseThread):
         else:
             # New engagements are gated by |ego_speed|: below the threshold
             # the truck is essentially crawling, the user has authority
-            ego_kmh_abs = abs(ego_speed) * 3.6
             qualified = (run_collision
-                         and ego_kmh_abs >= cal.aeb_min_engage_speed_kmh
+                         and aeb_speed_ok
                          and (effective_required_engage >= engage_threshold
                               or brake_ttb_engage_active))
             if qualified:
@@ -1780,7 +1786,7 @@ class AEBThread(BaseThread):
                 self._last_target_change_mono = now_mono
         self._published_target_ms2 = target_published
 
-        if run_collision and effective_max_decel > 0.1:
+        if run_collision and effective_max_decel > 0.1 and aeb_outputs_ok:
             if brake_ttb_active:
                 aeb_ff_decel = effective_max_decel
             elif effective_required > 0.0:
@@ -1791,9 +1797,11 @@ class AEBThread(BaseThread):
             aeb_ff_decel = 0.0
 
         warn_by_decel = (
-            run_collision and effective_required >= warn_threshold
+            run_collision and aeb_outputs_ok and effective_required >= warn_threshold
         )
-        warn_by_ttb = (run_collision and time_to_brake < cal.warn_ttb)
+        warn_by_ttb = (
+            run_collision and aeb_outputs_ok and time_to_brake < cal.warn_ttb
+        )
         warn_raw = bool(warn_by_decel or warn_by_ttb)
 
         # Warn persistence gate: mirrors the engagement certainty tiers.

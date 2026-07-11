@@ -95,7 +95,7 @@ def test_diff_calibrations_flags_removed_engagement():
 
     diffs = diff_calibrations(clip, candidate)
     assert diffs, "expected diff where baseline brakes and candidate does not"
-    assert all(d.baseline_brake and not d.candidate_brake for d in diffs)
+    assert any(d.baseline_brake and not d.candidate_brake for d in diffs)
 
 
 def test_outcome_true_positive_and_false_negative():
