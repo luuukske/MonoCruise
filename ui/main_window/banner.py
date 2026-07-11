@@ -114,9 +114,9 @@ class BannerWidget(QFrame):
 
     def _update_state_from_telemetry(self) -> None:
         """
-        Auto-update banner state from TelemetryThread.
+        Auto-update banner state from TelemetryThread and MainPedalThread.
 
-        Logic (with device_lost temporarily hard-coded to False):
+        Logic:
 
             if ets2_detected.is_set() and device_lost == False:
                 current_mode = "running"  -> CONNECTED
@@ -125,7 +125,7 @@ class BannerWidget(QFrame):
             else:
                 current_mode = "waiting"  -> WAITING
         """
-        device_lost = False  # TODO: wire real device-lost detection.
+        device_lost = self._pedals_lost()
 
         try:
             telemetry_thread = registry.get_thread("telemetry_thread")
@@ -143,6 +143,23 @@ class BannerWidget(QFrame):
             self.set_state(BannerState.LOST)
         else:
             self.set_state(BannerState.WAITING)
+
+    def _pedals_lost(self) -> bool:
+        """
+        True when configured pedals are currently disconnected.
+
+        device_lost defaults to True in MainPedalThreadData and never clears
+        when no pedal device is configured, so an unconfigured install must
+        read as "not lost" (banner stays WAITING/CONNECTED).
+        """
+        if not getattr(Settings, "device", None):
+            return False
+        try:
+            pedal_thread = registry.get_thread("main_pedal_thread")
+            with pedal_thread.data._lock:
+                return bool(pedal_thread.data.device_lost)
+        except (KeyError, AttributeError):
+            return False
 
     def _tick_dots(self) -> None:
         if self._state != BannerState.WAITING:

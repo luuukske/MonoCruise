@@ -326,6 +326,11 @@ class MainPedalThread(BaseThread):
             return
 
         if tel is None:
+            # Game closed: still pump SDL events and tick the reconnect FSM so
+            # pedal hot-plug (device_lost) stays accurate for the UI. Axis
+            # values are discarded; outputs below stay neutral.
+            self._process_pygame_events(0.0)
+            self._tick_reconnect()
             with self.data._lock:
                 self.data.gas_output  = 0.0
                 self.data.brake_output = 0.0
