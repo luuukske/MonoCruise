@@ -525,6 +525,14 @@ Sign convention: positive = left turn (κ > 0), matching `ArcPath`.
 
 Registry name: `radar_thread`. Runs at 30 Hz.
 
+**Vehicle cap**: each frame (traffic + parked combined) is culled to the
+`_MAX_TRACKED_VEHICLES` (24) vehicles nearest ego in
+`reader.py::_smooth_and_build`, before the smoothing chain runs. The cull
+must keep the *nearest* vehicles so threats stay tracked; never cap by
+buffer slot order. Culled vehicles lose their per-id smoothing state and
+re-enter via the normal fresh-spawn init. Live `read` and headless
+`replay_frame` share the cull, so captured clips reproduce it.
+
 ```python
 rt = registry.get_thread("radar_thread")
 with rt.data._lock:

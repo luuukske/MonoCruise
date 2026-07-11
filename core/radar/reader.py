@@ -6,6 +6,11 @@ frame.  Each frame is converted into a list of ``Vehicle`` instances with
 per-id continuity (speed smoothing, yaw EMA, position history) preserved
 across reads by calling ``update_from_last``.
 
+Traffic and parked vehicles combined are culled to the
+``_MAX_TRACKED_VEHICLES`` nearest to ego before smoothing, so per-vehicle
+CPU cost in radar/AEB/ACC (and debug rendering) stays bounded in dense
+traffic.
+
 This module is consumed by ``RadarThread``; AEB and ACC both receive the
 resulting ``Vehicle`` list from the radar data snapshot rather than opening
 the shared-memory buffer themselves.
@@ -41,6 +46,12 @@ _PARKED_STRIDE = 12
 # Far above the int16 id space the traffic buffer uses, so a wrapped trailer can
 # never collide with a real vehicle or parked-vehicle id.
 _TRAILER_VEHICLE_ID_BASE: int = 1_000_000
+
+# Max vehicles kept per frame (traffic + parked combined). When over the cap,
+# the nearest to ego are kept and the rest are culled before the smoothing
+# chain runs. Culled vehicles lose their per-id smoothing state and re-enter
+# via the normal fresh-spawn init if they come back into range.
+_MAX_TRACKED_VEHICLES: int = 24
 
 
 class TrafficReader:
@@ -186,12 +197,20 @@ class TrafficReader:
         self, vehicles: list[Vehicle], t_now: float,
         ego_x: float, ego_y: float, ego_z: float, ego_speed: float,
     ) -> tuple[list[Vehicle], list[Vehicle]]:
-        """Carry per-id smoothing forward and flatten trailers.
+        """Cull to the nearest ``_MAX_TRACKED_VEHICLES``, then smooth and flatten.
 
-        Shared tail of ``read`` and ``replay_frame``: applies
+        Shared tail of ``read`` and ``replay_frame``: culls the frame to the
+        vehicles nearest ego (so live and replay stay identical), applies
         ``update_from_last`` against the reader's ``_last_vehicles`` state using
         the supplied clock, then builds the trailer-as-vehicle list.
         """
+        if len(vehicles) > _MAX_TRACKED_VEHICLES:
+            vehicles.sort(
+                key=lambda v: (v.position.x - ego_x) ** 2
+                + (v.position.y - ego_y) ** 2
+                + (v.position.z - ego_z) ** 2
+            )
+            vehicles = vehicles[:_MAX_TRACKED_VEHICLES]
         for v in vehicles:
             if v.id in self._last_vehicles:
                 v.update_from_last(

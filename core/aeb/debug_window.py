@@ -167,11 +167,23 @@ class AEBDebugWindow(QWidget):
 
         self._draw_grid(p, cx, cy)
 
+        # Paint-cost cap: the nearest half of the vehicles get full
+        # annotations (corridor, trail arc, labels, ACC breakdown); the
+        # farthest half get body boxes only. Threats and the ACC lead are
+        # always fully annotated. Dense traffic otherwise saturates the GUI
+        # thread and starves every other window's timers.
+        by_dist = sorted(
+            snap.vehicles,
+            key=lambda v: (v["x"] - ex) ** 2 + (v["z"] - ez) ** 2,
+        )
+        detailed_ids = {v["vid"] for v in by_dist[: (len(by_dist) + 1) // 2]}
+
         # First pass: fitted trail arcs behind all vehicles, so labels
         # and bodies always sit on top of the dashed line.
         if acc is not None:
             for v in snap.vehicles:
-                self._draw_trail_arc(p, v["vid"], acc, ex, ez, ey)
+                if v["vid"] in detailed_ids or v["vid"] == acc["lead_id"]:
+                    self._draw_trail_arc(p, v["vid"], acc, ex, ez, ey)
 
         for v in snap.vehicles:
             vid = v["vid"]
@@ -181,6 +193,8 @@ class AEBDebugWindow(QWidget):
 
             is_acc_lead = acc is not None and acc["lead_id"] == vid
             is_acc_top = acc is not None and vid in acc["top_ids"] and not is_acc_lead
+
+            detailed = vid in detailed_ids or is_danger or is_acc_lead
 
             if is_evasion_filtered:
                 body_clr, corr_clr = _EVASION_FILTERED_CLR, QColor(_EVASION_FILTERED_CLR)
@@ -196,7 +210,7 @@ class AEBDebugWindow(QWidget):
                 body_clr, corr_clr = _SAFE_CLR, QColor(_SAFE_CLR)
 
             arcs = snap.vehicle_arcs.get(vid)
-            if arcs is not None:
+            if arcs is not None and detailed:
                 arc_list = arcs if isinstance(arcs, list) else [arcs]
                 corr_clr.setAlpha(20)
                 for arc in arc_list:
@@ -208,23 +222,24 @@ class AEBDebugWindow(QWidget):
                 ex, ez, ey, body_clr,
             )
 
-            sx, sy = self._ws(v["x"], v["z"], ex, ez, ey)
-            spd = v.get("speed_kmh", 0.0)
-            is_trailer_veh = v.get("is_trailer", False)
-            kin_swapped = v.get("kinematics_swapped", False)
-            is_tmp_veh = v.get("is_tmp", False)
-            tag = "TR" if is_trailer_veh else ""
-            tag += ("/TMP" if is_tmp_veh else "/AI") if tag else ("TMP" if is_tmp_veh else "AI")
-            self._draw_label(p, sx, sy - 14, f"{tag} {spd:.0f}", body_clr)
-            if is_trailer_veh:
-                if kin_swapped:
-                    kin_text, kin_clr = "kin:tractor", _SAFE_CLR
-                elif not is_tmp_veh:
-                    kin_text, kin_clr = "kin:raw (not TMP)", _DANGER_CLR
-                else:
-                    kin_text, kin_clr = "kin:raw (no tractor<30m)", _DANGER_CLR
-                self._draw_label(p, sx, sy - 26, kin_text, kin_clr)
-            self._draw_acc_components(p, sx, sy, vid, acc, body_clr)
+            if detailed:
+                sx, sy = self._ws(v["x"], v["z"], ex, ez, ey)
+                spd = v.get("speed_kmh", 0.0)
+                is_trailer_veh = v.get("is_trailer", False)
+                kin_swapped = v.get("kinematics_swapped", False)
+                is_tmp_veh = v.get("is_tmp", False)
+                tag = "TR" if is_trailer_veh else ""
+                tag += ("/TMP" if is_tmp_veh else "/AI") if tag else ("TMP" if is_tmp_veh else "AI")
+                self._draw_label(p, sx, sy - 14, f"{tag} {spd:.0f}", body_clr)
+                if is_trailer_veh:
+                    if kin_swapped:
+                        kin_text, kin_clr = "kin:tractor", _SAFE_CLR
+                    elif not is_tmp_veh:
+                        kin_text, kin_clr = "kin:raw (not TMP)", _DANGER_CLR
+                    else:
+                        kin_text, kin_clr = "kin:raw (no tractor<30m)", _DANGER_CLR
+                    self._draw_label(p, sx, sy - 26, kin_text, kin_clr)
+                self._draw_acc_components(p, sx, sy, vid, acc, body_clr)
 
             for tr in v.get("trailers", []):
                 yaw = tr["yaw"]
@@ -233,9 +248,10 @@ class AEBDebugWindow(QWidget):
                     tr["half_w"], tr["length"], tr["is_tmp"],
                     ex, ez, ey, _TRAILER_CLR,
                 )
-                trsx, trsy = self._ws(tr["x"], tr["z"], ex, ez, ey)
-                tr_spd = tr.get("speed_kmh", 0.0)
-                self._draw_label(p, trsx, trsy - 14, f"TR {tr_spd:.0f}", _TRAILER_CLR)
+                if detailed:
+                    trsx, trsy = self._ws(tr["x"], tr["z"], ex, ez, ey)
+                    tr_spd = tr.get("speed_kmh", 0.0)
+                    self._draw_label(p, trsx, trsy - 14, f"TR {tr_spd:.0f}", _TRAILER_CLR)
 
         if snap.ego_arc is not None:
             self._draw_arc_corridor(p, snap.ego_arc, ex, ez, ey, _EGO_CORRIDOR)
