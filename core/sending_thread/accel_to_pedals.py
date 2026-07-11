@@ -88,10 +88,28 @@ _MAX_ROAD_GRADE_RAD: float = 0.35  # clamp pathological game values
 # absorbs mass-driven residual.
 _AERO_DRAG_ACCEL_PER_V2: float = 4.9e-5
 
-# Gearshift handling
+# Gearshift handling. While the clutch is open (plus a short block after
+# release) the measured-accel path is frozen and all trim state is held; the
+# frozen measurement then blends back to live over the ramp. Trim OUTPUT is
+# never gated: only accumulation is, so the pedal command stays continuous
+# through the whole shift (zeroing the output and snapping it back is what
+# used to jolt the gas at every shift).
 _GAME_CLUTCH_ACTIVE_THRESHOLD: float = 0.05
 _GEARSHIFT_BLOCK_DURATION_S: float = 0.2
 _GEARSHIFT_RAMP_DURATION_S: float = 0.5
+
+# Gas-capacity glide across gearshifts. The per-gear capacity from
+# PedalCapacityTracker steps ~27% at every shift and passes through the anchor
+# value while telemetry gear reads neutral mid-shift; dividing the FF by it
+# directly steps the gas pedal at each of those moments. Near full power that
+# step ping-pongs the game's transmission (downshift -> gas cut -> upshift ->
+# gas floor -> kickdown...). Instead the capacity used for the gas mapping is
+# frozen while the driveline is open, then glides to the new gear's value:
+# slowly when capacity rises (downshift: bleed gas off gently so the box
+# isn't provoked into upshifting right back), fast when capacity falls
+# (upshift: gas must come back quickly or the truck sags).
+_CAPACITY_GLIDE_RISE_TAU_S: float = 1.0
+_CAPACITY_GLIDE_FALL_TAU_S: float = 0.3
 
 # Rate limiting (gas only)
 _GAS_RATE_LIMIT_PER_S: float = 3.0
@@ -217,15 +235,21 @@ class MapperSharedState:
 
     Allows two mappers (e.g. a cruise-side and a limiter-side) to hand over
     pedal control without losing learned bias, capacity, or output continuity.
-    Bookkeeping (raw_smooth, road_load_smooth, capacity, gearshift) is
-    physics/truck-level: always advanced. Learning (slow_integral,
-    output_smooth_ms2, prev_gas_cmd) is gated on the caller's `learn` flag.
+    Capacity estimates are idempotent and committed every tick; everything
+    else (measurement EMAs, road load, slow integral, gearshift snapshot,
+    output trajectory) is committed only by the mapper called with learn=True
+    so a non-commanding preview can't drift the shared state.
     """
     # Time
     prev_mono: float | None = None
 
-    # Measured-accel EMA + derivative source (physics, controller-agnostic)
+    # Effective measured-accel EMA: frozen/blended across gearshifts.
+    # This is what error computations and external consumers see.
     raw_smooth: float = 0.0
+    # Always-live measured-accel EMA (never frozen): gearshift snapshot
+    # source, blend target after the shift, and D-term derivative source.
+    raw_smooth_live: float = 0.0
+    # Previous live EMA value: D-term derivative source.
     prev_raw_smooth: float = 0.0
 
     # Road load EMA (physics)
@@ -242,6 +266,11 @@ class MapperSharedState:
 
     # Gas rate-limit memory: continuity across handover.
     prev_gas_cmd: float | None = None
+
+    # Gas-capacity glide state (m/s² at gas=1.0): the capacity actually used
+    # for the gas mapping, chasing the per-gear estimate with asymmetric taus
+    # so the pedal glides across gear changes instead of stepping.
+    accel_capacity_glide_ms2: float | None = None
 
     # Capacity estimates (single source of truth, fed in from PedalCapacityTracker).
     estimated_max_accel_ms2: float | None = None
@@ -331,9 +360,11 @@ class AccelToPedals:
         # Shared
         s = self._shared
         s.raw_smooth = 0.0
+        s.raw_smooth_live = 0.0
         s.prev_raw_smooth = 0.0
         s.output_smooth_ms2 = None
         s.prev_gas_cmd = None
+        s.accel_capacity_glide_ms2 = None
         s.slow_integral = _SLOW_I_INIT_BIAS_MS2
         s.prev_mono = None
         s.road_load_smooth = 0.0
@@ -463,14 +494,22 @@ class AccelToPedals:
         raw_smooth_live: float,
         learn: bool,
     ) -> tuple[float, float]:
-        """Update clutch freeze state. Returns (factor, effective_raw_smooth).
+        """Track clutch state. Returns (factor, effective_raw_smooth).
 
-        factor: 0.0 during hard block/clutch, ramps 0→1 after release.
-        effective_raw_smooth: frozen value (blended during ramp) to use for error.
+        factor: 0.0 while the clutch is open and through the post-release
+        block, then ramps linearly to 1.0. It gates trim/slow-I accumulation
+        and the capacity glide only; trim OUTPUT is never gated (see
+        _fast_pid_compute), so the pedal command stays continuous across the
+        whole shift.
+
+        effective_raw_smooth: the pre-shift snapshot during clutch+block (the
+        accel dip while the driveline is open is not tracking error), blended
+        toward the live EMA over the ramp, fully live after it.
 
         Gearshift state lives in shared state (truck-level, controller-agnostic).
         Edges are only committed when learn=True so non-commanding mappers don't
-        clobber the shared snapshot.
+        clobber the shared snapshot; a non-committing caller that sees the clutch
+        pressed without an armed snapshot falls back to the live value.
         """
         s = self._shared
         now_safe = now if math.isfinite(now) else 0.0
@@ -478,11 +517,9 @@ class AccelToPedals:
 
         if learn:
             if clutch_pressed and not s.clutch_active:
-                # Leading edge: freeze: stash raw_smooth so error uses the pre-shift
-                # measurement. fast_integral / fast_deriv_smooth are left untouched;
-                # _fast_pid_step gates all updates on factor>0, so they are frozen
-                # implicitly throughout block + ramp. Testing showed resetting them
-                # at the leading edge causes massive gas spikes post-shift.
+                # Leading edge: snapshot the live measurement so error keeps
+                # using the pre-shift value. Trim state is held, not reset:
+                # resetting at the edge tested as massive gas spikes post-shift.
                 s.clutch_active = True
                 s.frozen_raw_smooth = raw_smooth_live
             elif not clutch_pressed and s.clutch_active:
@@ -491,6 +528,10 @@ class AccelToPedals:
                 s.clutch_release_mono = now_safe
 
         if clutch_pressed:
+            if not s.clutch_active:
+                # Preview-only caller mid-clutch, snapshot never armed: the
+                # stored frozen value is stale, use live instead.
+                return 0.0, raw_smooth_live
             return 0.0, s.frozen_raw_smooth
 
         time_since_release = now_safe - s.clutch_release_mono
@@ -508,40 +549,56 @@ class AccelToPedals:
         self,
         dt: float,
         error_ms2: float,
-        new_raw_smooth: float,
+        raw_live: float,
+        prev_raw_live: float,
         gain_scale: float,
         factor: float,
+        active: bool,
         prev_fast_integral: float,
         prev_fast_deriv_smooth: float,
-        prev_raw_smooth: float,
         kd_scale: float = 1.0,
     ) -> tuple[float, float, float, float, float, float]:
         """Pure compute: returns (fast_trim_ms2, p_ms2, i_ms2, d_ms2,
         new_fast_integral, new_fast_deriv_smooth): m/s² space.
 
         Caller decides whether to commit the new integrator/derivative state.
-        When factor == 0 (gearshift block) integrators stay frozen at their
-        previous values (no evolution, no output).
+
+        Gearshift continuity: the trim output is never gated by `factor`.
+        P stays continuous because the upstream error is computed against the
+        frozen/blended measurement; I always outputs its (held) state, with
+        accumulation scaled by factor; D holds its last smoothed derivative
+        until the ramp completes (factor >= 1), then resumes from the live
+        EMA. Nothing steps when a shift starts or ends. The old behavior of
+        zeroing the output at factor 0 and restoring it at ramp start snapped
+        the whole trim (up to the I clamp) out of and back into the pedal at
+        every shift, which is what jolted the gas and fed the shift-hunt
+        oscillation near full power.
+
+        `active=False` (an external commander such as AEB owns the pedals)
+        keeps the old semantics: trim output zeroed, all state held, so the
+        two controllers don't fight.
         """
-        if factor <= 0.0:
+        if not active:
             return 0.0, 0.0, 0.0, 0.0, prev_fast_integral, prev_fast_deriv_smooth
 
         kp = _KP_FAST * gain_scale
         ki = _KI_FAST * gain_scale
         kd = _KD_FAST * gain_scale * kd_scale
 
-        p_ms2 = kp * error_ms2 * factor
+        p_ms2 = kp * error_ms2
 
-        new_fast_integral = prev_fast_integral + ki * error_ms2 * factor * dt
         new_fast_integral = _clamp(
-            new_fast_integral, -_FAST_I_CLAMP_MS2, _FAST_I_CLAMP_MS2
+            prev_fast_integral + ki * error_ms2 * factor * dt,
+            -_FAST_I_CLAMP_MS2, _FAST_I_CLAMP_MS2,
         )
         i_ms2 = new_fast_integral
 
-        deriv_alpha = self._ema_alpha(dt, _FAST_DERIV_TAU_S)
-        deriv_raw = (new_raw_smooth - prev_raw_smooth) / max(dt, 1e-6)
-        new_deriv_smooth = self._ema_step(prev_fast_deriv_smooth, deriv_raw, deriv_alpha)
-        d_ms2 = -kd * new_deriv_smooth * factor
+        new_deriv_smooth = prev_fast_deriv_smooth
+        if factor >= 1.0:
+            deriv_alpha = self._ema_alpha(dt, _FAST_DERIV_TAU_S)
+            deriv_raw = (raw_live - prev_raw_live) / max(dt, 1e-6)
+            new_deriv_smooth = self._ema_step(prev_fast_deriv_smooth, deriv_raw, deriv_alpha)
+        d_ms2 = -kd * new_deriv_smooth
 
         return p_ms2 + i_ms2 + d_ms2, p_ms2, i_ms2, d_ms2, new_fast_integral, new_deriv_smooth
 
@@ -720,20 +777,17 @@ class AccelToPedals:
         raw = _finite_or_zero(raw_accel_ms2)
         new_wanted_smooth = self._ema_step(self._wanted_smooth, wanted, wanted_alpha)
 
-        # Live raw EMA candidate (shared)
+        # Live raw EMA (shared, never frozen): physics truth. The gearshift
+        # logic snapshots and blends from this; the effective value it returns
+        # (frozen during clutch+block, blended over the ramp, live otherwise)
+        # is what drives error computations and external reporting.
         raw_alpha = self._ema_alpha(dt, _RAW_SMOOTHING_TAU_S)
-        raw_smooth_live = self._ema_step(s.raw_smooth, raw, raw_alpha)
+        new_raw_smooth_live = self._ema_step(s.raw_smooth_live, raw, raw_alpha)
 
         # Gearshift: edges committed only on learn=True
-        factor, raw_smooth_eff = self._gearshift_factor(
-            now, clutch_applied, raw_smooth_live, learn=learn,
+        factor, new_raw_smooth = self._gearshift_factor(
+            now, clutch_applied, new_raw_smooth_live, learn=learn,
         )
-
-        # Effective raw_smooth this tick: frozen/blended during gearshift, live otherwise
-        if factor >= 1.0:
-            new_raw_smooth = raw_smooth_live
-        else:
-            new_raw_smooth = raw_smooth_eff
 
         # Road load: adaptive EMA: slow for small bumps, fast for steep hills
         road_load_raw, grade_unc_rad, grade_rad = self._road_load_accel_ms2(
@@ -796,6 +850,7 @@ class AccelToPedals:
         new_fast_deriv_smooth = self._fast_deriv_smooth
         new_output_smooth_ms2 = s.output_smooth_ms2
         new_prev_gas_cmd = s.prev_gas_cmd
+        new_accel_capacity_glide = s.accel_capacity_glide_ms2
 
         if cruise_commanding:
             error_ms2 = new_wanted_smooth - new_raw_smooth
@@ -827,11 +882,10 @@ class AccelToPedals:
                 )
             effective_road_load = road_load_accel + new_slow_integral
 
-            # Fast trim in m/s² space (frozen during gearshift; also frozen when
-            # an external commander like AEB owns the brake: passing factor=0
-            # holds both integrator and derivative state at their last values
-            # and zeros the trim output so the two controllers don't fight).
-            effective_factor = 0.0 if freeze_trim else factor
+            # Fast trim in m/s² space. Output stays continuous through
+            # gearshifts (factor gates accumulation only); active=False (an
+            # external commander like AEB owns the brake) zeroes the trim and
+            # holds all state so the two controllers don't fight.
             # Damp D-term in low gears to break the engine-surge limit cycle.
             kd_scale = (
                 _LOW_GEAR_KD_SCALE
@@ -840,18 +894,45 @@ class AccelToPedals:
             )
             fast_trim_ms2, fast_p, fast_i, fast_d, new_fast_integral, new_fast_deriv_smooth = (
                 self._fast_pid_compute(
-                    dt, error_ms2, new_raw_smooth, gain_scale, effective_factor,
+                    dt,
+                    error_ms2,
+                    raw_live=new_raw_smooth_live,
+                    prev_raw_live=s.prev_raw_smooth,
+                    gain_scale=gain_scale,
+                    factor=factor,
+                    active=not freeze_trim,
                     prev_fast_integral=new_fast_integral,
                     prev_fast_deriv_smooth=new_fast_deriv_smooth,
-                    prev_raw_smooth=s.prev_raw_smooth,
                     kd_scale=kd_scale,
                 )
             )
 
+            # Gas capacity glide: frozen while the driveline is open (also
+            # bridges the anchor-value spike while telemetry gear reads
+            # neutral), then chases the per-gear estimate with asymmetric
+            # taus. See the constant block for the full rationale.
+            cap_target = max(new_max_accel or 0.1, 0.1)
+            if (
+                new_accel_capacity_glide is None
+                or not math.isfinite(new_accel_capacity_glide)
+            ):
+                new_accel_capacity_glide = cap_target
+            elif factor > 0.0:
+                glide_tau = (
+                    _CAPACITY_GLIDE_RISE_TAU_S
+                    if cap_target > new_accel_capacity_glide
+                    else _CAPACITY_GLIDE_FALL_TAU_S
+                )
+                new_accel_capacity_glide = self._ema_step(
+                    new_accel_capacity_glide,
+                    cap_target,
+                    self._ema_alpha(dt, glide_tau),
+                )
+            max_a_use = max(new_accel_capacity_glide, 0.1)
+            max_b_use = max(new_max_brake or 0.1, 0.1)
+
             # Pure-FF pedal for diagnostics (what the mapping would give with no trim)
             combined_ff_only = new_wanted_smooth + effective_road_load
-            max_a_use = max(new_max_accel or 0.1, 0.1)
-            max_b_use = max(new_max_brake or 0.1, 0.1)
             if combined_ff_only >= 0.0:
                 ff = combined_ff_only / max_a_use
             else:
@@ -872,7 +953,7 @@ class AccelToPedals:
             # Back-calc anti-windup: if FF saturates the pedal, snap fast_integral
             # so (wanted + effective_road_load + p + i + d) sits on the saturation
             # edge. Integrator stops winding, system snaps back cleanly on recovery.
-            if effort != unclamped_effort and effective_factor > 0.0:
+            if effort != unclamped_effort and not freeze_trim and factor > 0.0:
                 if effort >= 1.0:
                     combined_sat = max_a_use
                 else:
@@ -901,14 +982,17 @@ class AccelToPedals:
                 )
             new_prev_gas_cmd = gas_cmd
 
-            # No gas in neutral
+            # No gas in neutral. prev_gas_cmd keeps the pre-cut trajectory so
+            # gas returns to it immediately once a gear is engaged.
             if gear_dash == 0:
                 gas_cmd = 0.0
 
         else:
-            # Not commanding: hold all integrals so gearshifts don't cause overshoot
+            # Not commanding: drop output-trajectory state; integrals hold so
+            # re-engagement doesn't overshoot
             new_prev_gas_cmd = None
             new_output_smooth_ms2 = None
+            new_accel_capacity_glide = None
 
         pedal_state = _STATE_BRAKE if effort < 0.0 else _STATE_GAS
 
@@ -930,11 +1014,13 @@ class AccelToPedals:
             self._fast_integral = new_fast_integral
             s.prev_mono = new_prev_mono
             s.raw_smooth = new_raw_smooth
-            s.prev_raw_smooth = new_raw_smooth
+            s.raw_smooth_live = new_raw_smooth_live
+            s.prev_raw_smooth = new_raw_smooth_live
             s.road_load_smooth = new_road_load_smooth
             s.slow_integral = new_slow_integral
             s.output_smooth_ms2 = new_output_smooth_ms2
             s.prev_gas_cmd = new_prev_gas_cmd
+            s.accel_capacity_glide_ms2 = new_accel_capacity_glide
 
         # Debug logging: only the commanding mapper logs
         if learn and cruise_commanding and math.isfinite(now):
