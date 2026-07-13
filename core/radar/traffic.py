@@ -20,7 +20,7 @@ _LOCATION_UPDATE_FREQUENCY: float = 0.05
 # Reference speed for "at 90 km/h" is 25 m/s. See AGENTS.md §7.
 _ALPHA_SPEED_SCALE: float = 90.0 / 3.6   # 25.0 m/s
 
-# Speed EMA on raw_speed: 0.5 at rest → 0.15 at 90 km/h.
+# Speed EMA on raw_speed: 1.0 at rest → 0.25 at 90 km/h.
 _SPEED_EMA_AT_REST: float = 1.0
 _SPEED_EMA_AT_90_KMH: float = 0.25
 _SPEED_EMA_CURVE_D: float = (
@@ -32,8 +32,8 @@ _SPEED_EMA_CURVE_D: float = (
 # Accel filter: least-squares slope of recent speed_ema samples over
 # _ACCEL_FIT_WINDOW_S (low-noise derivative), then a light EMA. Feeds the
 # responsive accel (AEB, speed_corr). See AGENTS.md §7.
-_ACCEL_FIT_WINDOW_S: float = 0.80
-_ACCEL_EMA_ALPHA: float = 0.40
+_ACCEL_FIT_WINDOW_S: float = 0.70
+_ACCEL_EMA_ALPHA: float = 0.45
 # Holds (t, speed_ema) samples for the LS slope fits: `accel` over
 # _ACCEL_FIT_WINDOW_S and `accel_trend` over _ACC_SPEED_ACCEL_WINDOW_S.
 # 120 ≈ 6 s of headroom at full-update rate.
@@ -83,6 +83,14 @@ _ACC_SPEED_ACCEL_FLOOR: float = 0.35
 _ACC_SPEED_FF_GATE_LO_MS2: float = 0.12        # m/s² : feed-forward gate opens
 _ACC_SPEED_FF_GATE_HI_MS2: float = 0.30        # m/s² : feed-forward gate fully open
 _ACC_SPEED_FF_ACCEL_CLAMP_MS2: float = 6.0     # m/s² : clamp on the feed-forward accel
+
+# Standstill latch on acc_speed: once the filtered speed settles near zero with
+# no real de-noised ramp, acc_speed is clamped to exactly 0 and held until
+# speed_corr exceeds the release threshold for consecutive full frames. Kills
+# residual crash-bounce wobble around zero at standstill. See AGENTS.md §7.
+_ACC_SPEED_STANDSTILL_ENTER_MS: float = 0.3    # m/s : |acc_speed| below this can latch
+_ACC_SPEED_STANDSTILL_RELEASE_MS: float = 0.6  # m/s : |speed_corr| above this releases
+_ACC_SPEED_STANDSTILL_RELEASE_S: float = 0.5   # s : sustained time above release speed
 
 # Yaw EMA (wrap-safe): AI and TMP (arc curvature).
 _RAW_YAW_ALPHA: float = 0.50
@@ -208,7 +216,7 @@ def _accel_to_arc_params(accel: float, override_decel: float = 0.0) -> tuple[flo
 
 
 def _tmp_speed_ema_alpha(speed_ms: float) -> float:
-    """Weight on the new raw speed sample. 0.5 at rest → 0.15 at 90 km/h."""
+    """Weight on the new raw speed sample. 1.0 at rest → 0.25 at 90 km/h."""
     return (_SPEED_EMA_AT_REST * _SPEED_EMA_CURVE_D) / (
         abs(speed_ms) + _SPEED_EMA_CURVE_D
     )
@@ -251,10 +259,13 @@ def _smooth_vehicle_kinematics(
     prev_accel: float | None,
     prev_acc_speed: float | None,
     prev_speed_ema_history: list[tuple[float, float]] | None,
-) -> tuple[float, float, float, float, list[tuple[float, float]]]:
+    prev_acc_standstill: bool = False,
+    prev_acc_release_s: float = 0.0,
+) -> tuple[float, float, float, float, list[tuple[float, float]], bool, float]:
     """Speed/accel filter chain shared by AI and TMP vehicles. See AGENTS.md §7.
 
-    Returns (speed_ema, accel, speed_corr, acc_speed, speed_ema_history).
+    Returns (speed_ema, accel, speed_corr, acc_speed, speed_ema_history,
+    acc_standstill, acc_release_s).
     """
     # Step 1: plain EMA of raw speed (no lag compensation).
     if prev_speed_ema is None:
@@ -286,8 +297,11 @@ def _smooth_vehicle_kinematics(
     # feed-forward. tau ramps slow→fast with the per-tick change (abrupt jumps)
     # and is scaled down on a confirmed ramp; the feed-forward predicts along
     # the de-noised accel so a steady ramp tracks with ≈ 0 lag. See AGENTS.md §7.
+    acc_standstill = prev_acc_standstill
+    acc_release_s = 0.0
     if prev_speed_ema is None or prev_acc_speed is None:
         acc_speed = speed_corr
+        acc_standstill = False
     else:
         delta = speed_corr - prev_acc_speed
         ramp = (abs(delta) - _ACC_SPEED_DEADBAND_MS) / _ACC_SPEED_DEADBAND_MS
@@ -297,6 +311,11 @@ def _smooth_vehicle_kinematics(
             1.0, abs(speed_corr) / _ACC_SPEED_SMOOTH_REF_MS)
         # ...and with acceleration: a steady ramp is low-noise, track it closely.
         accel_trend = _accel_from_speed_history(history, _ACC_SPEED_ACCEL_WINDOW_S)
+        # Fast tau opens only when the residual points the same way as the
+        # de-noised trend: a big residual disagreeing with the trend is bounce
+        # or a packet snap, not motion, and stays on the slow tau.
+        if abs(accel_trend) <= _ACC_SPEED_FF_GATE_LO_MS2 or accel_trend * delta <= 0.0:
+            ramp = 0.0
         accel_span = _ACC_SPEED_ACCEL_HI_MS2 - _ACC_SPEED_ACCEL_LO_MS2
         accel_ramp = max(0.0, min(1.0,
             (abs(accel_trend) - _ACC_SPEED_ACCEL_LO_MS2) / accel_span))
@@ -316,7 +335,22 @@ def _smooth_vehicle_kinematics(
         predicted = prev_acc_speed + accel_ff * dt * ff_gate
         acc_speed = predicted + alpha_a * (speed_corr - predicted)
 
-    return (speed_ema, accel, speed_corr, acc_speed, history)
+        # Standstill latch: clamp acc_speed to 0 once it settles near zero with
+        # no real ramp; release on sustained speed_corr (hysteresis, see AGENTS.md §7).
+        if acc_standstill:
+            if abs(speed_corr) > _ACC_SPEED_STANDSTILL_RELEASE_MS:
+                acc_release_s = prev_acc_release_s + dt
+            if acc_release_s >= _ACC_SPEED_STANDSTILL_RELEASE_S:
+                acc_standstill = False
+            else:
+                acc_speed = 0.0
+        elif (abs(acc_speed) < _ACC_SPEED_STANDSTILL_ENTER_MS
+                and abs(accel_trend) < _ACC_SPEED_ACCEL_LO_MS2):
+            acc_standstill = True
+            acc_speed = 0.0
+
+    return (speed_ema, accel, speed_corr, acc_speed, history,
+            acc_standstill, acc_release_s)
 
 
 class Position:
@@ -802,6 +836,9 @@ class Vehicle:
         self._speed_ema: Optional[float] = None
         self._speed_ema_history: list[tuple[float, float]] = []
         self._raw_speed: Optional[float] = None
+        # acc_speed standstill latch (hysteresis state): see AGENTS.md §7.
+        self._acc_standstill: bool = False
+        self._acc_release_s: float = 0.0
         # (time, x, z) per full update: newest last, capped at _POSITION_HISTORY_LEN.
         # Populated for both TMP and AI; TMP speed LS fit uses a shorter internal window.
         self._position_history: list[tuple[float, float, float]] = []
@@ -921,6 +958,8 @@ class Vehicle:
             self._raw_speed = prev._raw_speed
             self._position_history = list(prev._position_history)
             self._speed_ema_history = list(prev._speed_ema_history)
+            self._acc_standstill = prev._acc_standstill
+            self._acc_release_s = prev._acc_release_s
             if abs(self.angular_velocity) > _MAX_ANGULAR_VELOCITY:
                 self.angular_velocity = 0.0
             self.speed = prev.speed
@@ -1002,6 +1041,8 @@ class Vehicle:
         self._raw_speed = prev._raw_speed
         self._position_history = list(prev._position_history)
         self._speed_ema_history = list(prev._speed_ema_history)
+        self._acc_standstill = prev._acc_standstill
+        self._acc_release_s = prev._acc_release_s
 
         raw_x = self.position.x
         raw_z = self.position.z
@@ -1141,10 +1182,11 @@ class Vehicle:
             raw_speed = self.speed
 
         (speed_ema, accel, speed_corr, acc_speed,
-         speed_ema_history) = _smooth_vehicle_kinematics(
+         speed_ema_history, acc_standstill, acc_release_s) = _smooth_vehicle_kinematics(
             raw_speed, t_now, dt,
             prev._speed_ema, prev._smooth_accel, prev.acc_speed,
             prev._speed_ema_history,
+            prev._acc_standstill, prev._acc_release_s,
         )
         self._raw_speed = raw_speed
         self._speed_ema = speed_ema
@@ -1154,6 +1196,8 @@ class Vehicle:
         self.speed = speed_corr
         self.acceleration = accel
         self.acc_speed = acc_speed
+        self._acc_standstill = acc_standstill
+        self._acc_release_s = acc_release_s
 
     def curvature_from_history(self) -> float | None:
         """Curvature (1/m) from circumscribed circle fit over _position_history.

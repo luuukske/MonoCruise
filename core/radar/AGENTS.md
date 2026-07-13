@@ -183,7 +183,7 @@ corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
 | `position.x/z` | **Unfiltered** shared-memory world coordinates | Arc start position, rendering, collision geometry |
 | `_smooth_yaw` | Wrap-safe EMA of `rotation.euler()[1]` in radians (`_RAW_YAW_ALPHA = 0.5`, AI and TMP) | **Arc curvature. Never use `rotation.euler()` directly for arcs.** |
 | `speed` | Accel-corrected smoothed speed (`speed_corr`): see filter chain below. AI + TMP | AEB arc direction, TTB |
-| `acc_speed` | ACC speed: adaptive filter on `speed_corr`: sub-deadband per-tick changes get a long time constant, larger changes a short one (filter chain below). AI + TMP | ACC following-distance only |
+| `acc_speed` | ACC speed: adaptive filter on `speed_corr`: sub-deadband per-tick changes get a long time constant, larger changes a short one when they agree with the de-noised trend; standstill latch clamps to exactly 0 near rest (filter chain below). AI + TMP | ACC following-distance only |
 | `acceleration` | Nonlinear EMA of `d(speed_ema)/dt`: see filter chain below. AI + TMP (buffer field 11 unused) | Arc decel/accel via `_accel_to_arc_params()` |
 | `angular_velocity` | Degrees/s from rotation delta/dt | Arc curvature via `κ = ω_rad/speed` |
 | `_position_history` | `(t, x, z)` tuples appended each full update (AI + TMP); capped at `_POSITION_HISTORY_LEN = 25` | TMP raw-speed LS fit (uses last `_TMP_SPEED_HISTORY_LEN = 20`), `curvature_from_history`, ACC trail arcs |
@@ -220,6 +220,7 @@ delta        = speed_corr - prev_acc_speed
 ramp         = clamp((|delta| - _ACC_SPEED_DEADBAND_MS) / _ACC_SPEED_DEADBAND_MS, 0, 1)
 speed_factor = _ACC_SPEED_SMOOTH_MIN + (1 - _ACC_SPEED_SMOOTH_MIN) * min(1, |speed_corr| / _ACC_SPEED_SMOOTH_REF_MS)
 accel_trend  = LS slope of speed_ema history over _ACC_SPEED_ACCEL_WINDOW_S
+if |accel_trend| ≤ _ACC_SPEED_FF_GATE_LO_MS2 or accel_trend·delta ≤ 0: ramp = 0   # trend-agreement gate
 accel_ramp   = clamp((|accel_trend| - _ACC_SPEED_ACCEL_LO_MS2) / (_ACC_SPEED_ACCEL_HI_MS2 - _ACC_SPEED_ACCEL_LO_MS2), 0, 1)
 accel_factor = 1 - (1 - _ACC_SPEED_ACCEL_FLOOR) * accel_ramp
 tau          = (_ACC_SPEED_TAU_SLOW_S + (_ACC_SPEED_TAU_FAST_S - _ACC_SPEED_TAU_SLOW_S) * ramp) * speed_factor * accel_factor
@@ -228,6 +229,9 @@ ff_gate      = clamp((|accel_trend| - _ACC_SPEED_FF_GATE_LO_MS2) / (_ACC_SPEED_F
 accel_ff     = clamp(accel, ±_ACC_SPEED_FF_ACCEL_CLAMP_MS2)
 predicted    = prev_acc_speed + accel_ff * dt * ff_gate
 acc_speed    = predicted + alpha_a * (speed_corr - predicted)
+# standstill latch: |acc_speed| < _ACC_SPEED_STANDSTILL_ENTER_MS with no real
+# trend → acc_speed = 0, latched; released after |speed_corr| >
+# _ACC_SPEED_STANDSTILL_RELEASE_MS sustained _ACC_SPEED_STANDSTILL_RELEASE_S
 ```
 
 Step 4 makes `acc_speed` both noise-free and responsive: properties a linear
@@ -237,11 +241,34 @@ prev_acc_speed` sets the filter time constant: a `|delta|` at or below
 (2.0 s), so sensor noise and TMP packet jitter are filtered out almost
 entirely; `tau` then ramps **continuously** down to the fast
 `_ACC_SPEED_TAU_FAST_S` (0.08 s) as `|delta|` grows, reaching it at twice the
-deadband (1.4 m/s). A hard brake (large `delta`) snaps immediately with no
-special case. Because `tau` is continuous in `|delta|`, there is no
+deadband (1.4 m/s). Because `tau` is continuous in `|delta|`, there is no
 discontinuity when the input crosses the deadband. The filter runs on
 `speed_corr`, already de-spiked by steps 1–3, so step 4 only suppresses residual
 wobble, not raw spikes.
+
+The fast-tau ramp is **trend-gated**: it opens only when `delta` points the
+same way as the de-noised `accel_trend` and `|accel_trend| >
+_ACC_SPEED_FF_GATE_LO_MS2`. A crash-bounce oscillation (a vehicle rocking to a
+standstill after a collision) produces large residuals whose direction
+disagrees with the near-zero trend half the time, so it stays on the slow tau
+instead of passing through; a genuine hard brake raises `|accel_trend|` past
+the gate within ~0.2 s and both the fast tau and the feed-forward open
+together (same threshold family). The worst-case cost vs an ungated ramp is
+~0.2 s of extra `acc_speed` settling at the onset of an instant slam, during
+which AEB's `speed` is unaffected.
+
+**Standstill latch**: once `|acc_speed| < _ACC_SPEED_STANDSTILL_ENTER_MS`
+(0.3 m/s) with `|accel_trend| < _ACC_SPEED_ACCEL_LO_MS2` (no real ramp),
+`acc_speed` is clamped to exactly 0 and latched (`Vehicle._acc_standstill`).
+Release requires `|speed_corr| > _ACC_SPEED_STANDSTILL_RELEASE_MS` (0.6 m/s)
+sustained for `_ACC_SPEED_STANDSTILL_RELEASE_S` (0.5 s) of full frames
+(`Vehicle._acc_release_s`; any frame back below the threshold resets the
+timer). The sustain window is what keeps a bounce latched: a ±1 m/s 1 Hz
+crash-rock exceeds 0.6 m/s for only ~0.3 s per half-cycle, so it never
+releases, while a launching lead crosses 0.6 m/s and stays above it. A
+crashed vehicle wobbling around zero thus presents a clean `v_lead = 0` to
+the IIDM/CAH controller; a genuine launch releases ~0.5 s after crossing
+0.6 m/s and is then tracked by the trend-agreeing fast path.
 
 `tau` is also **speed-scaled**: it is multiplied by `speed_factor`, which is 1.0
 at `_ACC_SPEED_SMOOTH_REF_MS` (90 km/h) and above and falls linearly to
@@ -288,8 +315,9 @@ Exposed as `self.speed = speed_corr` (AEB), `self.acc_speed = acc_speed` (ACC),
 intermediate. On the first full frame after spawn every signal initialises to
 `raw_speed` (`acc_speed` to `speed_corr`) with `accel = 0`. The step-1/3 `α`
 decreases with |speed| (more smoothing when fast); step 4's `α` is set by the
-adaptive `tau`. Step 4 carries one state value frame to frame: `acc_speed`, the
-output, fed back as `prev_acc_speed`.
+adaptive `tau`. Step 4 carries three state values frame to frame: `acc_speed`
+(the output, fed back as `prev_acc_speed`), the standstill latch
+`_acc_standstill`, and the release timer `_acc_release_s`.
 
 **Arc / collision**: `Vehicle.accel_for_arc()` is `return self.acceleration`.
 TMP vehicles initialise `acceleration = 0` until the first `update_from_last`;
@@ -593,7 +621,7 @@ double-count each trailer.
 | Arc curvature | `κ = omega_rad_s / abs_speed` |
 | Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
 | TMP raw speed | LS on longitudinal `(t,x,z)` history (max `_TMP_SPEED_HISTORY_LEN` full frames): `v = Σ(τ s)/Σ(τ²)`; else `Δraw/dt`, signed via forward dot |
-| Speed / accel filter (AI + TMP) | 4-signal chain in `_smooth_vehicle_kinematics()`: `speed_ema` (EMA of raw) → `accel` (LS slope of `speed_ema` history over `_ACCEL_FIT_WINDOW_S`, light EMA) → `speed_corr = speed_ema + accel·τ` (`self.speed`) → `acc_speed` (adaptive low-pass on `speed_corr`: `tau` ramps `_ACC_SPEED_TAU_SLOW_S`→`_ACC_SPEED_TAU_FAST_S` as the per-tick change grows past `_ACC_SPEED_DEADBAND_MS`, and is scaled down at low speed and during a steady decel/accel: plus a constant-accel feed-forward, gated by de-noised `accel_trend`, that zeroes the sustained-ramp lag with no windup; `self.acc_speed`) |
+| Speed / accel filter (AI + TMP) | 4-signal chain in `_smooth_vehicle_kinematics()`: `speed_ema` (EMA of raw) → `accel` (LS slope of `speed_ema` history over `_ACCEL_FIT_WINDOW_S`, light EMA) → `speed_corr = speed_ema + accel·τ` (`self.speed`) → `acc_speed` (adaptive low-pass on `speed_corr`: `tau` ramps `_ACC_SPEED_TAU_SLOW_S`→`_ACC_SPEED_TAU_FAST_S` as the per-tick change grows past `_ACC_SPEED_DEADBAND_MS` **and agrees with the de-noised trend**, and is scaled down at low speed and during a steady decel/accel: plus a constant-accel feed-forward, gated by de-noised `accel_trend`, that zeroes the sustained-ramp lag with no windup; standstill latch clamps to 0 near rest with hysteresis release; `self.acc_speed`) |
 | AI vs TMP raw speed | AI = buffer field 10; TMP = position-history LS fit. Filter chain identical after that |
 | Positions | No EMA: always raw world coordinates |
 | Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > 2 m/s` → decay speed: `prev_speed × (1 − frac²)`, release after 0.3 s |
