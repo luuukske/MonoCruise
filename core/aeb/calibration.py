@@ -223,6 +223,14 @@ class AEBCalibration:
     latched_min_headway_s: float = 1.5
     latched_release_headway_s: float = 2.5
     latched_min_decel_frac: float = 0.7
+    # Scope release: a latched id must stay "in scope" (forward of ego inside
+    # the EGO lane band, or still predicted-colliding) to keep its latch.
+    # Out-of-scope ids release after this grace period. The hold exists for
+    # the speed-matched in-lane lead; a target ego has passed, is beside, or
+    # that swept clear must not keep the brake on via raw distance alone.
+    # Grace absorbs lane-classification flicker (curve transients, One-Euro
+    # settling) without letting a cleared target hold engagement.
+    latched_scope_release_s: float = 0.5
 
 
 DEFAULT = AEBCalibration()

@@ -475,7 +475,8 @@ to the pipeline across frames so two effects can hold:
    still in `vehicle_collision_data`, compute
    `headway = max(dist − stop_buffer, 0) / max(ego_speed, 0.5)`. Release
    the id when it leaves `vehicles_eff`, drops out of `vehicle_collision_data`
-   (range/elevation), or its headway exceeds `cal.latched_release_headway_s`.
+   (range/elevation), its headway exceeds `cal.latched_release_headway_s`,
+   or it falls out of **scope** (below).
    While any remaining latched id has `headway < cal.latched_min_headway_s`
    set `latched_distance_threat = True`:
    - The disarm gate gains `... and not latched_distance_threat`.
@@ -483,15 +484,33 @@ to the pipeline across frames so two effects can hold:
      so the published decel doesn't decay to zero when
      `required_decel = v_closing²/2d` collapses on speed-match.
 
+**Scope release.** The hold exists for one scenario: a forward, in-lane lead
+that ego has speed-matched (so it no longer registers as colliding while the
+gap is still unsafe). Headway alone is euclidean and direction-blind: without
+a geometry re-check, a target ego has evaded around, is driving beside, or a
+crosser that swept clear keeps the brake floored at 70 % of max until it is
+~1.5 s of *distance* away in any direction. Per frame, each latched id is
+checked via `project_to_ego_arc(ego_arc, …)`: it is **in scope** when it is
+still in `colliding_ids`, or when `s > 0` (forward of ego along the arc) and
+`d_abs ≤ cal.lane_half_width` (EGO lane band). In-scope ids refresh
+`AEBThread._latched_scope_ok_mono[vid]`; ids out of scope longer than
+`cal.latched_scope_release_s` lose the latch. The grace absorbs
+lane-classification flicker (curve transients, One-Euro settling) without
+letting a cleared target hold engagement. Scope stamps travel with the clip
+warm state (`AEBWarmState.latched_scope_ok_mono`); clips recorded before the
+field default to grace-starts-at-window-start.
+
 The set is populated every frame after the engagement state machine via
 `self._latched_threat_ids.update(colliding_ids)` while `self._engaged` is
-true. Cleared on `teardown`.
+true (newly latched ids get their scope stamp at promotion). Cleared on
+`teardown`.
 
 | Knob | Default | Role |
 |------|---------|------|
 | `latched_min_headway_s` | 1.5 s | Headway below which latched-distance hold fires |
 | `latched_release_headway_s` | 2.5 s | Headway above which a latched id is dropped |
 | `latched_min_decel_frac` | 0.7 | Fraction of `effective_max_decel` as the `target_raw` floor under hold |
+| `latched_scope_release_s` | 0.5 s | Grace before an out-of-scope (not colliding, not forward-in-lane) latched id is dropped |
 
 ### Closed-loop coupling
 

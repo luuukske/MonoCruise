@@ -790,6 +790,11 @@ class AEBThread(BaseThread):
         # pipeline, and so engagement holds until the gap has actually
         # re-opened: not just until v_closing^2 collapses to zero.
         self._latched_threat_ids: set[int] = set()
+        # Per latched id: last monotonic time the target was still in scope
+        # (forward of ego inside the EGO lane band, or predicted-colliding).
+        # Ids out of scope longer than cal.latched_scope_release_s lose the
+        # latch so distance alone cannot hold the brake on a cleared target.
+        self._latched_scope_ok_mono: dict[int, float] = {}
         # Replay seams (headless clip eval). Default to live behaviour: the
         # loop's single clock read and the enable flag. The clip-eval driver
         # overrides these plus the three read-seam methods and the sound handler
@@ -928,6 +933,7 @@ class AEBThread(BaseThread):
         return AEBWarmState(
             engaged=bool(self._engaged),
             latched_threat_ids=sorted(self._latched_threat_ids),
+            latched_scope_ok_mono=dict(self._latched_scope_ok_mono),
             latched_filter_ego_kmh=self._latched_filter_ego_kmh,
             warn_hold_until_mono=warn_hold,
             brake_hold_until_mono=brake_hold,
@@ -1666,16 +1672,41 @@ class AEBThread(BaseThread):
         for vid in list(self._latched_threat_ids):
             if vid not in active_vid_set:
                 self._latched_threat_ids.discard(vid)
+                self._latched_scope_ok_mono.pop(vid, None)
                 continue
             pc = vehicle_collision_data.get(vid)
             if pc is None:
                 self._latched_threat_ids.discard(vid)
+                self._latched_scope_ok_mono.pop(vid, None)
                 continue
+            # Scope check: the hold exists for a forward, in-lane lead (or a
+            # target still predicted-colliding). A latched id that is neither
+            # (ego passed it, it sits beside ego, or it swept clear of the
+            # lane) releases after latched_scope_release_s so raw euclidean
+            # distance alone cannot keep the brake on.
+            s_along, d_abs = project_to_ego_arc(
+                ego_arc, ego_x + pc[3], ego_z + pc[4],
+            )
+            in_scope = (
+                vid in colliding_ids
+                or (s_along > 0.0 and d_abs <= cal.lane_half_width)
+            )
+            if in_scope:
+                self._latched_scope_ok_mono[vid] = now_mono
+            else:
+                last_ok = self._latched_scope_ok_mono.get(vid)
+                if last_ok is None:
+                    self._latched_scope_ok_mono[vid] = last_ok = now_mono
+                if now_mono - last_ok > cal.latched_scope_release_s:
+                    self._latched_threat_ids.discard(vid)
+                    self._latched_scope_ok_mono.pop(vid, None)
+                    continue
             dist_vid = math.sqrt(pc[5])
             gap = max(dist_vid - cal.stop_buffer, 0.0)
             hw = gap / ego_v_safe
             if hw > cal.latched_release_headway_s:
                 self._latched_threat_ids.discard(vid)
+                self._latched_scope_ok_mono.pop(vid, None)
                 continue
             if hw < latched_headway_min:
                 latched_headway_min = hw
@@ -1750,8 +1781,11 @@ class AEBThread(BaseThread):
 
         # Promote every currently-colliding target into the latched set so
         # subsequent frames keep them in the pipeline and in the hold check.
+        # Newly latched ids start their scope grace at promotion time.
         if self._engaged and run_collision and colliding_ids:
             self._latched_threat_ids.update(colliding_ids)
+            for vid in colliding_ids:
+                self._latched_scope_ok_mono.setdefault(vid, now_mono)
 
         if self._engaged:
             if brake_ttb_active:
@@ -1941,6 +1975,7 @@ class AEBThread(BaseThread):
         self._last_target_change_mono = 0.0
         self._prev_loop_mono = None
         self._latched_threat_ids.clear()
+        self._latched_scope_ok_mono.clear()
         self._follow_tracks.clear()
         self._follow_hold_until.clear()
         self._follow_threat_ids = set()
