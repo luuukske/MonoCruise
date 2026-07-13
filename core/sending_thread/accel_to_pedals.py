@@ -15,8 +15,6 @@ logger = logging.getLogger(__name__)
 FUEL_KG_PER_LITER: float = 0.832
 GRAVITY_MS2: float = 9.81
 
-_IDLE_CREEP_SPEED_SKIP_MS: float = 2.0
-
 # Weight / mass helpers
 _REFERENCE_MASS_KG: float = 20_000.0
 _WEIGHT_SPAN_TONS: float = 12.7
@@ -87,6 +85,22 @@ _MAX_ROAD_GRADE_RAD: float = 0.35  # clamp pathological game values
 # Fit on ~41 t truck gave ~4.9e-5. Close enough for any mass: slow integral
 # absorbs mass-driven residual.
 _AERO_DRAG_ACCEL_PER_V2: float = 4.9e-5
+
+# Idle-creep feedforward. With the driveline closed the idle governor
+# drives the truck forward through gear 1 (the game's automatic only
+# declutches near standstill), so the brake FF must overcome a real
+# forward force during the final approach or ACC stalls on a creep
+# plateau instead of stopping. Injected clutch is ignored by the game's
+# transmission automation, so this is compensated in control space.
+# Fitted from quasi-steady low-speed braking samples (speed constant, so
+# creep = brake decel + road load exactly): saturated below the knee,
+# linear to zero at the idle-match speed. Stored mass-normalized to the
+# 20 t reference and scaled by gain_scale at runtime (creep is a fixed
+# force, so accel scales with 1/mass).
+# DO NOT CHANGE WITHOUT VALID COLLECTED DATA
+_CREEP_MAX_REF_MS2: float = 2.343   # m/s² at 20 t, below the knee
+_CREEP_KNEE_SPEED_MS: float = 0.55  # governor saturation below this
+_CREEP_ZERO_SPEED_MS: float = 2.54  # idle-match speed: creep reaches 0
 
 # Gearshift handling. While the clutch is open (plus a short block after
 # release) the measured-accel path is frozen and all trim state is held; the
@@ -218,9 +232,30 @@ def compute_estimated_mass_kg(
     return max(0.0, float(unit_mass_kg)) + cargo_mass_kg + fuel_kg + trailer_mass_kg
 
 
-def idle_creep_brake(speed_ms: float, gear_dashboard: int) -> float:
-    """Light brake at very low speed to cancel idle creep. Disabled: to be replaced."""
-    return 0.0
+def creep_accel_ms2(
+    speed_ms: float,
+    gear_dashboard: int,
+    game_clutch: float,
+    gain_scale: float,
+) -> float:
+    """Idle-creep forward accel (m/s²) with the driveline closed.
+
+    Gear-1 forward only: the only regime the fit covers (the automatic
+    holds gear 1 across the whole creep band). Scaled by clutch closure so
+    the term phases out when the game declutches near standstill or slips
+    the clutch through a shift or launch.
+    """
+    if gear_dashboard != 1:
+        return 0.0
+    v = max(0.0, _finite_or_zero(speed_ms))
+    if v >= _CREEP_ZERO_SPEED_MS:
+        return 0.0
+    if v <= _CREEP_KNEE_SPEED_MS:
+        shape = 1.0
+    else:
+        shape = (_CREEP_ZERO_SPEED_MS - v) / (_CREEP_ZERO_SPEED_MS - _CREEP_KNEE_SPEED_MS)
+    clutch_closed = _clamp(1.0 - _finite_or_zero(game_clutch), 0.0, 1.0)
+    return _CREEP_MAX_REF_MS2 * shape * clutch_closed * max(_finite_or_zero(gain_scale), 0.0)
 
 
 # Pedal state labels (for debug logging / telemetry only: derived from effort sign)
@@ -314,6 +349,9 @@ class PedalTargets:
     brake_multiplier: float = 1.0
     gain_scale: float = 1.0
     pedal_state: int = _STATE_GAS
+    # Idle-creep FF term (m/s², >= 0). Reported even when not commanding so
+    # the capacity tracker can subtract it from manual-driving gas samples.
+    creep_ms2: float = 0.0
 
 
 class AccelToPedals:
@@ -832,6 +870,11 @@ class AccelToPedals:
         mass_kg = max(1.0, _finite_or_zero(total_mass_kg))
         gain_scale = _REFERENCE_MASS_KG / mass_kg
 
+        # Idle-creep FF term: forward accel the engine provides for free in
+        # the creep band. Computed unconditionally (also reported when not
+        # commanding) so capacity learning can subtract it from gas samples.
+        creep_ms2 = creep_accel_ms2(speed, gear_dash, clutch_applied, gain_scale)
+
         # Defaults
         effort = 0.0
         ff = 0.0
@@ -880,7 +923,9 @@ class AccelToPedals:
                     new_slow_integral + _KI_SLOW * error_ms2 * factor * dt * slow_i_gate,
                     -_SLOW_I_CLAMP_MS2, _SLOW_I_CLAMP_MS2,
                 )
-            effective_road_load = road_load_accel + new_slow_integral
+            # Creep subtracts from the effective road load: the brake FF must
+            # overcome it and the gas FF must not double-provide it.
+            effective_road_load = road_load_accel + new_slow_integral - creep_ms2
 
             # Fast trim in m/s² space. Output stays continuous through
             # gearshifts (factor gates accumulation only); active=False (an
@@ -1055,13 +1100,12 @@ class AccelToPedals:
                 est_brake_ms2=new_max_brake or 0.0,
             )
 
-        creep = idle_creep_brake(speed, gear_dash)
         # brake_ff diagnostic: magnitude of brake-side feedforward pedal
         brake_ff_diag = -ff if ff < 0.0 else 0.0
 
         return PedalTargets(
             gas=gas_cmd,
-            brake=min(1.0, brake_cmd + creep),
+            brake=brake_cmd,
             command_gas=gas_cmd,
             command_brake=brake_cmd,
             slope_input_rad=grade_unc_rad,
@@ -1085,5 +1129,6 @@ class AccelToPedals:
             brake_multiplier=1.0,
             gain_scale=gain_scale,
             pedal_state=pedal_state,
+            creep_ms2=creep_ms2,
         )
 

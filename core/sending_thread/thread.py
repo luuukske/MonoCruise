@@ -569,6 +569,7 @@ class SendingThread(BaseThread):
         mapper_brake_multiplier = 1.0
         mapper_gain_scale = 1.0
         mapper_pedal_state = 0
+        mapper_creep_ms2 = 0.0
         wanted_a = 0.0
         raw_a = 0.0
         measured_decel_ms2 = 0.0
@@ -705,6 +706,7 @@ class SendingThread(BaseThread):
                 mapper_brake_multiplier = float(targets.brake_multiplier)
                 mapper_gain_scale = float(targets.gain_scale)
                 mapper_pedal_state = int(targets.pedal_state)
+                mapper_creep_ms2 = float(targets.creep_ms2)
             except Exception as e:
                 logger.debug("accel_mapper step failed: %s", e)
                 brake_grade_rad = 0.0
@@ -1066,9 +1068,12 @@ class SendingThread(BaseThread):
                 road_load_ms2=mapper_road_load_ms2,
             )
         if a > 0.01:
+            # Creep subtracted so gear-1 samples learn the throttle-commanded
+            # gain only; leaving it in double-counts against the mapper's
+            # creep FF (which already provides that accel for free).
             self._capacity_tracker.update_accel(
                 a, max(0.0, raw_a), speed_ms, brake_grade_rad, game_clutch, tel_gear,
-                mass_kg, has_t, road_load_ms2=mapper_road_load_ms2,
+                mass_kg, has_t, road_load_ms2=mapper_road_load_ms2 - mapper_creep_ms2,
             )
 
         self._tick_bool_presses(controller)
