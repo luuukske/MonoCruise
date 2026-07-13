@@ -128,17 +128,18 @@ _STRAIGHT_CURVATURE_EPS: float = 1e-6
 
 # Vehicle position history buffer: newest last, length capped at
 # _POSITION_HISTORY_LEN. Shared by:
-#   - TMP raw speed LS fit (uses last _TMP_SPEED_HISTORY_LEN samples internally)
+#   - raw speed LS fit (uses last _RAW_SPEED_HISTORY_LEN samples internally)
 #   - curvature_from_history() circumscribed-circle fit (uses full buffer)
 #   - ACC trail-arc scoring (needs long history for stable fit).
 #
-# _POSITION_HISTORY_LEN is the buffer size; _TMP_SPEED_HISTORY_LEN is the
-# window the TMP speed LS fit considers: ~1.3 s, long enough to average out
+# _POSITION_HISTORY_LEN is the buffer size; _RAW_SPEED_HISTORY_LEN is the
+# window the speed LS fit considers: ~1.3 s, long enough to average out
 # TMP's ~1 Hz position-reconciliation ripple (see AGENTS.md §7) so the derived
-# speed doesn't oscillate.
+# speed doesn't oscillate. AI uses the same fit; sign comes from the buffer.
 _POSITION_HISTORY_LEN: int = 25
-_TMP_SPEED_HISTORY_LEN: int = 20
-_TMP_SPEED_NEAR_ZERO_CHORD: float = 0.025  # m: same gate as per-frame displacement
+_RAW_SPEED_HISTORY_LEN: int = 20
+_RAW_SPEED_NEAR_ZERO_CHORD: float = 0.025  # m: same gate as per-frame displacement
+_BUFFER_SIGN_SPEED_MS: float = 0.05        # m/s: below this, trust LS sign on AI
 
 
 def _lag_freeze_duration(gap_3d: float, ego_speed: float) -> float:
@@ -156,30 +157,30 @@ def _lag_freeze_duration(gap_3d: float, ego_speed: float) -> float:
     return _LAG_FREEZE_LOG_K * math.log(ttc / _LAG_FREEZE_TTC_LO)
 
 
-def _tmp_raw_speed_from_position_history(
+def _raw_speed_from_position_history(
     history: list[tuple[float, float, float]],
     fwd_x: float,
     fwd_z: float,
 ) -> float | None:
     """Estimate signed longitudinal speed (m/s) from (t, x, z) samples, oldest first.
 
-    Uses only the last _TMP_SPEED_HISTORY_LEN samples so the LS fit window is
+    Uses only the last _RAW_SPEED_HISTORY_LEN samples so the LS fit window is
     independent of the total buffer length (which can be longer for curvature
     / ACC trail arc).
 
     Fits s ≈ v·τ where s = dot(p(τ) − p₀, fwd) and τ = t − t₀. Uniform spacing is
     not required. Returns None if fewer than two samples (caller uses one interval).
-    If the first→last chord is below _TMP_SPEED_NEAR_ZERO_CHORD, returns 0.0.
+    If the first→last chord is below _RAW_SPEED_NEAR_ZERO_CHORD, returns 0.0.
     """
     if len(history) < 2:
         return None
-    window = history[-_TMP_SPEED_HISTORY_LEN:] if len(history) > _TMP_SPEED_HISTORY_LEN else history
+    window = history[-_RAW_SPEED_HISTORY_LEN:] if len(history) > _RAW_SPEED_HISTORY_LEN else history
     t0, x0, z0 = window[0]
     tn, xn, zn = window[-1]
     chord_dx = xn - x0
     chord_dz = zn - z0
     chord = math.sqrt(chord_dx * chord_dx + chord_dz * chord_dz)
-    if chord < _TMP_SPEED_NEAR_ZERO_CHORD:
+    if chord < _RAW_SPEED_NEAR_ZERO_CHORD:
         return 0.0
     num = 0.0
     den = 0.0
@@ -197,6 +198,46 @@ def _tmp_raw_speed_from_position_history(
         direction = 1.0 if (chord_dx * fwd_x + chord_dz * fwd_z) >= 0.0 else -1.0
         return direction * chord / dt
     return num / den
+
+
+def _raw_speed_from_kinematics(
+    buffer_speed: float,
+    position_history: list[tuple[float, float, float]],
+    fwd_x: float,
+    fwd_z: float,
+    prev_raw_x: float,
+    prev_raw_z: float,
+    prev_y: float,
+    raw_x: float,
+    raw_z: float,
+    raw_y: float,
+    dt: float,
+    preserve_buffer_sign: bool,
+) -> float:
+    """Longitudinal raw speed (m/s) feeding the shared filter chain.
+
+    TMP: LS fit on position history (single-interval fallback); sign from fit.
+    SP/AI: same fit when history allows; sign from buffer when |buffer| is
+    above _BUFFER_SIGN_SPEED_MS so turning vehicles are not misclassified as
+    reversing (see AGENTS.md §7 "Speed sign detection").
+    """
+    _ls = _raw_speed_from_position_history(position_history, fwd_x, fwd_z)
+    if _ls is not None:
+        if preserve_buffer_sign and abs(buffer_speed) > _BUFFER_SIGN_SPEED_MS:
+            return math.copysign(abs(_ls), buffer_speed)
+        return _ls
+    disp_x = raw_x - prev_raw_x
+    disp_z = raw_z - prev_raw_z
+    dist = math.sqrt(
+        disp_x * disp_x + (raw_y - prev_y) ** 2 + disp_z * disp_z
+    )
+    if dist > _RAW_SPEED_NEAR_ZERO_CHORD and dt > 1e-9:
+        direction = 1.0 if (disp_x * fwd_x + disp_z * fwd_z) >= 0.0 else -1.0
+        derived = direction * dist / dt
+        if preserve_buffer_sign and abs(buffer_speed) > _BUFFER_SIGN_SPEED_MS:
+            return math.copysign(abs(derived), buffer_speed)
+        return derived
+    return 0.0
 
 
 def _accel_to_arc_params(accel: float, override_decel: float = 0.0) -> tuple[float, float]:
@@ -809,9 +850,9 @@ class Vehicle:
         self.size = size
         self.speed = speed
         self.acc_speed = speed
-        # TMP: shared-memory acceleration is not used for physics; smoothed value is filled
-        # in update_from_last(). Zero until the first kinematic update avoids buffer spikes.
-        self.acceleration = 0.0 if is_tmp else acceleration
+        # Shared-memory acceleration is not used for physics; kinematic value is
+        # filled in update_from_last(). Zero until the first update avoids spikes.
+        self.acceleration = 0.0
         self.trailer_count = trailer_count
         self.trailers = trailers
         self.id = id
@@ -840,7 +881,7 @@ class Vehicle:
         self._acc_standstill: bool = False
         self._acc_release_s: float = 0.0
         # (time, x, z) per full update: newest last, capped at _POSITION_HISTORY_LEN.
-        # Populated for both TMP and AI; TMP speed LS fit uses a shorter internal window.
+        # Populated for both TMP and AI; speed LS fit uses a shorter internal window.
         self._position_history: list[tuple[float, float, float]] = []
 
         # TMP lag detection state.
@@ -867,7 +908,7 @@ class Vehicle:
         self._curvature_cache_valid: bool = False
 
     def accel_for_arc(self) -> float:
-        """Longitudinal acceleration for arc / collision (TMP = filtered kinematic value)."""
+        """Longitudinal acceleration for arc / collision (kinematic filter output)."""
         return self.acceleration
 
     def radar_speed_accel(self) -> tuple[float, float, float, float, float]:
@@ -968,16 +1009,14 @@ class Vehicle:
 
             self._tmp_apply_crash_rotation_jerk(prev, t_now)
 
-            # TMP: between full updates (dt < threshold), do not freeze speed and pose at
-            # the last full tick: the buffer may have new coordinates while prev.speed
-            # still holds a bad EMA sample. Re-derive speed from (latest raw − prev raw) /
-            # (t_now − prev.time) when movement exceeds the usual gate; always snap pose
-            # to latest raw. Skipped during lag freeze and position mismatch hold unless
-            # crash_confirmed, which bypasses both filters to keep position accurate.
-            # Lag freeze still active if elapsed < TTC-scaled freeze_dur (recomputed
-            # here so the sub-frame uses the same window as the last full update).
+            # Between full updates (dt < threshold), snap pose to the latest buffer
+            # coordinates so arcs track sub-frame motion. Re-derive _raw_speed for
+            # debug when movement exceeds the usual gate; filtered speed/accel stay
+            # at the last full-tick values until dt ≥ _LOCATION_UPDATE_FREQUENCY.
+            # TMP only: skip during lag freeze and position-mismatch hold unless
+            # crash_confirmed bypasses both.
             _sf_lag_active = False
-            if prev._lag_since is not None and prev._raw_x is not None:
+            if self.is_tmp and prev._lag_since is not None and prev._raw_x is not None:
                 _sf_gap_3d = math.sqrt(
                     (prev._raw_x - ego_x) ** 2
                     + (prev.position.y - ego_y) ** 2
@@ -985,16 +1024,14 @@ class Vehicle:
                 )
                 _sf_freeze_dur = _lag_freeze_duration(_sf_gap_3d, ego_speed)
                 _sf_lag_active = (t_now - prev._lag_since) < _sf_freeze_dur
-            _tmp_sf_ok = (
-                self.is_tmp
-                and prev._raw_x is not None
+            _sf_snap_ok = (
+                prev._raw_x is not None
                 and prev._smooth_yaw is not None
-                and (
-                    self.crash_confirmed
-                    or (not _sf_lag_active and prev._pos_mismatch_frames == 0)
-                )
             )
-            if _tmp_sf_ok:
+            if self.is_tmp and not self.crash_confirmed:
+                if _sf_lag_active or prev._pos_mismatch_frames > 0:
+                    _sf_snap_ok = False
+            if _sf_snap_ok:
                 rx = self.position.x
                 rz = self.position.z
                 ry = self.position.y
@@ -1004,7 +1041,7 @@ class Vehicle:
                 dist = math.sqrt(
                     ddx * ddx + (ry - prev.position.y) ** 2 + ddz * ddz
                 )
-                if dt_sf > 1e-9 and dist > 0.025:
+                if dt_sf > 1e-9 and dist > _RAW_SPEED_NEAR_ZERO_CHORD:
                     fwd_x = -math.sin(prev._smooth_yaw)
                     fwd_z = -math.cos(prev._smooth_yaw)
                     direction = 1.0 if (ddx * fwd_x + ddz * fwd_z) >= 0.0 else -1.0
@@ -1155,31 +1192,25 @@ class Vehicle:
         if len(self._position_history) > _POSITION_HISTORY_LEN:
             self._position_history = self._position_history[-_POSITION_HISTORY_LEN:]
 
-        # Raw speed: TMP: LS fit on position history (single-interval fallback);
-        # AI: the game-reported buffer value as-is. The filter chain below is shared.
-        if self.is_tmp:
-            _ls = _tmp_raw_speed_from_position_history(self._position_history, fwd_x, fwd_z)
-            if _ls is not None:
-                raw_speed = _ls
-            else:
-                _prx = prev._raw_x if prev._raw_x is not None else prev.position.x
-                _prz = prev._raw_z if prev._raw_z is not None else prev.position.z
-                disp_x = raw_x - _prx
-                disp_z = raw_z - _prz
-                dist = math.sqrt(
-                    disp_x ** 2
-                    + (self.position.y - prev.position.y) ** 2
-                    + disp_z ** 2
-                )
-                if dist > 0.025:
-                    direction = (
-                        1.0 if (disp_x * fwd_x + disp_z * fwd_z) >= 0.0 else -1.0
-                    )
-                    raw_speed = direction * dist / dt
-                else:
-                    raw_speed = 0.0
-        else:
-            raw_speed = self.speed
+        # Raw speed: position-history LS fit (single-interval fallback). SP/AI keeps
+        # buffer sign when moving; TMP takes sign from the fit. Filter chain below
+        # is shared (see AGENTS.md §7).
+        _prx = prev._raw_x if prev._raw_x is not None else prev.position.x
+        _prz = prev._raw_z if prev._raw_z is not None else prev.position.z
+        raw_speed = _raw_speed_from_kinematics(
+            self.speed,
+            self._position_history,
+            fwd_x,
+            fwd_z,
+            _prx,
+            _prz,
+            prev.position.y,
+            raw_x,
+            raw_z,
+            self.position.y,
+            dt,
+            preserve_buffer_sign=not self.is_tmp,
+        )
 
         (speed_ema, accel, speed_corr, acc_speed,
          speed_ema_history, acc_standstill, acc_release_s) = _smooth_vehicle_kinematics(
