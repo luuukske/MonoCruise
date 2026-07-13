@@ -221,11 +221,14 @@ ramp         = clamp((|delta| - _ACC_SPEED_DEADBAND_MS) / _ACC_SPEED_DEADBAND_MS
 speed_factor = _ACC_SPEED_SMOOTH_MIN + (1 - _ACC_SPEED_SMOOTH_MIN) * min(1, |speed_corr| / _ACC_SPEED_SMOOTH_REF_MS)
 accel_trend  = LS slope of speed_ema history over _ACC_SPEED_ACCEL_WINDOW_S
 if |accel_trend| ≤ _ACC_SPEED_FF_GATE_LO_MS2 or accel_trend·delta ≤ 0: ramp = 0   # trend-agreement gate
-accel_ramp   = clamp((|accel_trend| - _ACC_SPEED_ACCEL_LO_MS2) / (_ACC_SPEED_ACCEL_HI_MS2 - _ACC_SPEED_ACCEL_LO_MS2), 0, 1)
+accel_long   = LS slope of speed_ema history over _ACC_SPEED_CONSIST_WINDOW_S
+consistency  = 0 if accel_trend·accel_long ≤ 0 else max(min(1, |accel_long|/|accel_trend|),
+               clamp((|accel_long| - _ACC_SPEED_CONSIST_MAG_LO_MS2) / (MAG_HI - MAG_LO), 0, 1))
+accel_ramp   = clamp((|accel_trend| - _ACC_SPEED_ACCEL_LO_MS2) / (_ACC_SPEED_ACCEL_HI_MS2 - _ACC_SPEED_ACCEL_LO_MS2), 0, 1) · consistency
 accel_factor = 1 - (1 - _ACC_SPEED_ACCEL_FLOOR) * accel_ramp
 tau          = (_ACC_SPEED_TAU_SLOW_S + (_ACC_SPEED_TAU_FAST_S - _ACC_SPEED_TAU_SLOW_S) * ramp) * speed_factor * accel_factor
 alpha_a      = dt / (tau + dt)
-ff_gate      = clamp((|accel_trend| - _ACC_SPEED_FF_GATE_LO_MS2) / (_ACC_SPEED_FF_GATE_HI_MS2 - _ACC_SPEED_FF_GATE_LO_MS2), 0, 1)
+ff_gate      = clamp((|accel_trend| - _ACC_SPEED_FF_GATE_LO_MS2) / (_ACC_SPEED_FF_GATE_HI_MS2 - _ACC_SPEED_FF_GATE_LO_MS2), 0, 1) · consistency
 accel_ff     = clamp(accel, ±_ACC_SPEED_FF_ACCEL_CLAMP_MS2)
 predicted    = prev_acc_speed + accel_ff * dt * ff_gate
 acc_speed    = predicted + alpha_a * (speed_corr - predicted)
@@ -256,6 +259,27 @@ the gate within ~0.2 s and both the fast tau and the feed-forward open
 together (same threshold family). The worst-case cost vs an ungated ramp is
 ~0.2 s of extra `acc_speed` settling at the onset of an instant slam, during
 which AEB's `speed` is unaffected.
+
+The feed-forward and the tau-reduction are further scaled by **trend
+consistency**. TMP convoy reconciliation wobbles remote speed in slow
+drift-and-snap cycles (~2-4 s); each drift phase reads as a genuine ramp on
+the 1.5 s `accel_trend` window, and before this factor the feed-forward
+integrated the wobble straight into `acc_speed` (~0.8× pass-through on long
+constant-speed convoy drives). A real ramp accumulates net speed change on a
+longer horizon; a zero-mean wobble does not, so `accel_long` (LS slope over
+`_ACC_SPEED_CONSIST_WINDOW_S` = 4 s) separates them. `consistency` is the
+larger of the slope ratio `|accel_long|/|accel_trend|` and a magnitude ramp
+on `|accel_long|` (`_ACC_SPEED_CONSIST_MAG_LO/HI_MS2`, 0.4→1.0): the ratio
+converges slowly on a fresh brake because the long window still holds
+pre-brake cruise, but any real brake pushes `|accel_long|` past the magnitude
+ramp within ~1-1.5 s, while a wobble never sustains it (sawtooth `accel_long`
+stays ≤ ~0.2 m/s²). Zero on sign mismatch. Measured effect: sawtooth
+pass-through drops to ~0.24×; a hard (-6 m/s²) lead brake reads ~1 m/s
+optimistic for ~1 s before the magnitude term restores the feed-forward and
+lag returns to ≈ 0 by 2 s. The fast-tau residual gate is deliberately NOT
+consistency-scaled: it is the onset-tracking safety path, and the lead's
+braking is still reported to ACC instantly through `acceleration` (CAH input),
+which none of these gates touch.
 
 **Standstill latch**: once `|acc_speed| < _ACC_SPEED_STANDSTILL_ENTER_MS`
 (0.3 m/s) with `|accel_trend| < _ACC_SPEED_ACCEL_LO_MS2` (no real ramp),

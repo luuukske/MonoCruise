@@ -84,6 +84,23 @@ _ACC_SPEED_FF_GATE_LO_MS2: float = 0.12        # m/s² : feed-forward gate opens
 _ACC_SPEED_FF_GATE_HI_MS2: float = 0.30        # m/s² : feed-forward gate fully open
 _ACC_SPEED_FF_ACCEL_CLAMP_MS2: float = 6.0     # m/s² : clamp on the feed-forward accel
 
+# Trend consistency: TMP convoy reconciliation wobbles speed in slow
+# drift-and-snap cycles (~2-4 s). Each drift phase reads as a genuine ramp on
+# the 1.5 s accel_trend window and used to open the feed-forward, which then
+# integrated the wobble straight into acc_speed. A real ramp accumulates net
+# speed change on a longer horizon; a wobble does not, so the LS slope over
+# _ACC_SPEED_CONSIST_WINDOW_S stays near zero. consistency = the larger of
+# the slope ratio |accel_long| / |accel_trend| and a magnitude ramp on
+# |accel_long| (_ACC_SPEED_CONSIST_MAG_LO/HI): the ratio converges slowly on
+# a fresh brake because the long window still holds pre-brake cruise, but any
+# real brake pushes |accel_long| past the magnitude ramp within ~1-1.5 s
+# while a zero-mean wobble never sustains it. 0 on sign mismatch, clamped to
+# 1; scales ff_gate and accel_ramp. The fast-tau residual gate stays on the
+# short trend so hard-brake onset tracking is not delayed. See AGENTS.md §7.
+_ACC_SPEED_CONSIST_WINDOW_S: float = 4.0
+_ACC_SPEED_CONSIST_MAG_LO_MS2: float = 0.4     # m/s² : |accel_long| where magnitude term starts
+_ACC_SPEED_CONSIST_MAG_HI_MS2: float = 1.0     # m/s² : |accel_long| granting full consistency
+
 # Standstill latch on acc_speed: once the filtered speed settles near zero with
 # no real de-noised ramp, acc_speed is clamped to exactly 0 and held until
 # speed_corr exceeds the release threshold for consecutive full frames. Kills
@@ -357,9 +374,20 @@ def _smooth_vehicle_kinematics(
         # or a packet snap, not motion, and stays on the slow tau.
         if abs(accel_trend) <= _ACC_SPEED_FF_GATE_LO_MS2 or accel_trend * delta <= 0.0:
             ramp = 0.0
+        # Trend consistency: a real ramp sustains its slope on the long window,
+        # convoy drift-and-snap wobble does not. Scales ff and tau reduction only.
+        accel_long = _accel_from_speed_history(history, _ACC_SPEED_CONSIST_WINDOW_S)
+        if accel_trend * accel_long <= 0.0:
+            consistency = 0.0
+        else:
+            ratio = min(1.0, abs(accel_long) / max(abs(accel_trend), 1e-6))
+            mag_span = _ACC_SPEED_CONSIST_MAG_HI_MS2 - _ACC_SPEED_CONSIST_MAG_LO_MS2
+            mag = max(0.0, min(1.0,
+                (abs(accel_long) - _ACC_SPEED_CONSIST_MAG_LO_MS2) / mag_span))
+            consistency = max(ratio, mag)
         accel_span = _ACC_SPEED_ACCEL_HI_MS2 - _ACC_SPEED_ACCEL_LO_MS2
         accel_ramp = max(0.0, min(1.0,
-            (abs(accel_trend) - _ACC_SPEED_ACCEL_LO_MS2) / accel_span))
+            (abs(accel_trend) - _ACC_SPEED_ACCEL_LO_MS2) / accel_span)) * consistency
         accel_factor = 1.0 - (1.0 - _ACC_SPEED_ACCEL_FLOOR) * accel_ramp
         tau = _ACC_SPEED_TAU_SLOW_S + (_ACC_SPEED_TAU_FAST_S - _ACC_SPEED_TAU_SLOW_S) * ramp
         tau *= speed_factor * accel_factor
@@ -370,7 +398,7 @@ def _smooth_vehicle_kinematics(
         # prediction at zero while coasting, so cruise noise is never fed forward.
         ff_gate = max(0.0, min(1.0,
             (abs(accel_trend) - _ACC_SPEED_FF_GATE_LO_MS2)
-            / (_ACC_SPEED_FF_GATE_HI_MS2 - _ACC_SPEED_FF_GATE_LO_MS2)))
+            / (_ACC_SPEED_FF_GATE_HI_MS2 - _ACC_SPEED_FF_GATE_LO_MS2))) * consistency
         accel_ff = max(-_ACC_SPEED_FF_ACCEL_CLAMP_MS2,
                        min(_ACC_SPEED_FF_ACCEL_CLAMP_MS2, accel))
         predicted = prev_acc_speed + accel_ff * dt * ff_gate

@@ -101,6 +101,22 @@ def test_launch_releases_latch_and_tracks():
     assert end_acc > 0.5 * end_corr
 
 
+def test_convoy_sawtooth_attenuated_at_cruise():
+    # TMP reconciliation shape: slow drift down, snap back up, zero mean.
+    # Each drift phase looks like a real ramp on the short trend window; the
+    # consistency factor must keep the feed-forward shut so acc_speed stays flat.
+    period = 3.0
+    n = int(24.0 / DT)
+    trace = [22.0 + 0.8 * (1.0 - 2.0 * ((i * DT % period) / period)) for i in range(n)]
+    out = _run_chain(trace)
+    tail = out[-int(10.0 / DT):]
+    corr_dev = max(abs(corr - 22.0) for corr, _, _, _ in tail)
+    acc_dev = max(abs(acc - 22.0) for _, acc, _, _ in tail)
+    # Without the consistency factor this rode at ~0.8x of the input wobble.
+    assert acc_dev < 0.30
+    assert acc_dev < 0.4 * corr_dev
+
+
 def test_cruise_ripple_still_attenuated():
     n = int(6.0 / DT)
     trace = [25.0 + 0.5 * math.sin(2.0 * math.pi * 1.0 * i * DT) for i in range(n)]
