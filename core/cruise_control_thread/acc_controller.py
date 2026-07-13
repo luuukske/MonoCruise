@@ -33,11 +33,11 @@ EGO_FRONT_OFFSET_M: float = 2.5
 T_HEADWAY_S: float = 1.5
 
 T_HEADWAY_BY_LEVEL_S: tuple[float, float, float, float, float] = (
+    1.1,
+    0.7,
+    1.1,
     1.5,
-    1.0,
-    1.5,
-    2.0,
-    2.5,
+    2.2,
 )
 
 COOL_FACTOR_C: float = 0.99
