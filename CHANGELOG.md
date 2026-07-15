@@ -11,13 +11,18 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Added
+- **Pedals lost banner**: banner now shows your pedals disconnected, just like v1.0.4.
 ### Fixed
 - **Connect pedals actually work**: wired up the connect button to be more reliable and actually work.
-- **AEB passing false warns**: capsule bodies + ego-arc steering wiggle were beeping on adjacent-lane overtakes and passes; parallel-margin scaling, rear-overtaker filter suppress, and braking-worsens for cleared rear overtakers kill the class-A/B phantoms (clips f0b2ace6 etc.).
+- **AEB general improvements**: capsule bodies + ego-arc steering wiggle were beeping on adjacent-lane overtakes and passes; parallel-margin scaling, rear-overtaker filter suppress, and braking-worsens for cleared rear overtakers kill the class-A/B phantoms (clips f0b2ace6 etc.).
+- **ACC oscilate at full throttle**: ACC would be switching between 95% throttle and 100% caused by the downshifting.
 ### Changed
+- **ACC follow distance**: made the distance more realistic. the original values were placeholders.
 - **AEB less sensitive**: changed back the AEB brake latch from 70% max brake to 80% max brake.
+- **ACC smoother in SP**: SP now uses the same filtering from TMP as it showed so much success, i wanted to move the two systems together. only crash detection and lag detection stays for TMP only.
 - **Less AEB shadow_near**: changed the shadow near to only clip about 6/h.
-- **limiters more responsive**: limiters react faster to speed changes and hold their speed more accuratly. 
+- **Limiters more responsive**: limiters react faster to speed changes and hold their speed more accuratly. 
 
 ## [1.1.0-preview.4] - 2026-07-11
 ### Fixed
