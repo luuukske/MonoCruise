@@ -44,6 +44,7 @@ _SCENARIO_MODULES = [
     ("tp_fast_closing_lead", "TP"),
     ("tp_fast_perpendicular_crosser", "TP"),
     ("tp_tmp_perpendicular_crosser", "TP"),
+    ("tp_trailer_in_lane_shared_curve", "TP"),
 ]
 
 

@@ -222,11 +222,30 @@ Applies only to `head_on` vehicles (`fwd_dot < cal.head_on_dot=-0.7`).
 ### `CoDirectionalDivergeFilter`
 
 Applies only to `co_directional` vehicles (`fwd_dot > cal.co_directional_dot=0.7`).
-For each arc with `speed > 0.5 m/s`: if `_is_approaching` returns False at the hit
-point (with lookahead `co_dir_diverge_lookahead_s=0.25 s`), suppress.
+For each arc with `speed > 0.5 m/s` evaluate `_is_approaching` at the hit point
+(lookahead `co_dir_diverge_lookahead_s=0.25 s`). **Suppress only when every
+colliding body of the rig diverges** (the first approaching arc passes the rig):
+a tractor pulling into the outer lane genuinely diverges, but if its trailer is
+still closing in ego's lane the rig is a real rear-end course, and vetoing on the
+cab arc (evaluated first) would drop the approaching trailer with it (crash clip
+434f0401).
 Extended lookahead (`dynamic_horizon × co_same_turn_lookahead_scale=0.5`) when
 all four conditions hold: vehicle in outer lane, both curvatures above threshold,
 same curvature sign.
+
+**Trailer-in-lane rescue.** The lane primitive (`ctx.lane`) keys off the tractor
+reference point only, so a long trailer swung across ego's lane while its tractor
+rides the outer lane of a shared curve reads as EGO-lane-clear: the extended
+lookahead then extrapolates the whole rig away as "diverging" and suppresses a
+genuine rear-end until the cab crosses into ego's lane at contact (crash clip
+434f0401). `_any_body_in_ego_lane` samples each arc's rigid body capsule
+centreline (rear→front) at `t=0`; when any body is physically inside
+`lane_half_width`, the same-turn extended lookahead is dropped and the in-lane
+dip check is armed. The centreline (no body half-width) is used so a
+corridor-grazing outer-lane body is not miscounted as in-lane
+(`fp_co_directional_outer_lane` stays suppressed). Regression scenario:
+`tp_trailer_in_lane_shared_curve`. The same primitive gates the equivalent
+tractor-based lane checks in `OutOfLaneParallelFilter` and `EgoEvasionFilter`.
 
 **Pass-through dip check (in-lane only).** The `_is_approaching` endpoint
 comparison alone inverts for fast closers: the hit time is the corridor
@@ -239,12 +258,13 @@ fbc397b3: 97 km/h ego suppressed a 20 km/h in-lane lead until impact). Fix:
 window; when `dip_active` and any sample's center distance drops below the
 sum of the body half-widths (no corridor margin), the extrapolated bodies
 overlap and the pair counts as approaching regardless of the endpoints.
-`dip_active` is `ctx.lane == Lane.EGO` at both call sites (this stage and
-`TurningCrossTrafficFilter`): for out-of-lane targets an extrapolated body
-overlap is usually a constant-curvature artifact (e.g. overtaking a slower
-outer-lane vehicle in a shared turn: `fp_co_directional_outer_lane`), which
-is exactly what the filter exists to suppress. Regression scenario:
-`tp_fast_closing_lead` (80 km/h closing, in-lane).
+`dip_active` is `ctx.lane == Lane.EGO` in `TurningCrossTrafficFilter`, and
+`ctx.lane == Lane.EGO or in_lane_body` in this stage (see the trailer-in-lane
+rescue above): for out-of-lane targets with no body in ego's lane an
+extrapolated body overlap is usually a constant-curvature artifact (e.g.
+overtaking a slower outer-lane vehicle in a shared turn:
+`fp_co_directional_outer_lane`), which is exactly what the filter exists to
+suppress. Regression scenario: `tp_fast_closing_lead` (80 km/h closing, in-lane).
 
 ### `TmpCrossTrafficFilter`
 

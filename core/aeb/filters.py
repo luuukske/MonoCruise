@@ -228,6 +228,39 @@ def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1,
     return di_sq < d0_sq
 
 
+# Fractions along the rigid body capsule (rear -> front) sampled by
+# _any_body_in_ego_lane. Five points bracket a long trailer whose rear corner
+# sits in ego's lane while its reference centre rides the outer lane.
+_BODY_LANE_SAMPLES = (0.0, 0.25, 0.5, 0.75, 1.0)
+
+
+def _any_body_in_ego_lane(
+    ego_arc: ArcPath, target_arcs: list[ArcPath], lane_half_width: float,
+) -> bool:
+    """True if any target body's centreline currently lies within ego's lane.
+
+    Samples each target arc's rigid body capsule at t=0 (rear through front
+    reference points) and projects to the ego arc. A long trailer swung into
+    ego's lane registers via its rear sample even while the tractor reference
+    rides the outer lane of a shared curve (crash clip 434f0401); an
+    adjacent-lane overtake body, whose centreline stays beyond
+    ``lane_half_width``, does not. The centreline (no body half-width) is used
+    so a corridor-grazing outer-lane body is not miscounted as in-lane.
+    """
+    for arc in target_arcs:
+        fx, fz = arc.fwd_x, arc.fwd_z
+        back = -arc.back_len
+        span = arc.fwd_len + arc.back_len
+        for frac in _BODY_LANE_SAMPLES:
+            s = back + span * frac
+            px = arc.start_x + s * fx
+            pz = arc.start_z + s * fz
+            _, d_abs = project_to_ego_arc(ego_arc, px, pz)
+            if d_abs <= lane_half_width:
+                return True
+    return False
+
+
 def _dampen_turning_curvature(
     v_curvature: float,
     fwd_dot: float,
@@ -661,6 +694,22 @@ class CoDirectionalDivergeFilter:
         if ctx.v.id in ctx.follow_threat_ids:
             return _PASS
         cal = self._cal
+        # A rig with any body (tractor or trailer) physically in ego's lane now
+        # is a real rear-end course, not a constant-curvature extrapolation
+        # artifact. The lane primitive keys off the tractor reference point only,
+        # so a long trailer swung into ego's lane while its tractor rides the
+        # outer lane of a shared curve reads as EGO-lane-clear and the outer-lane
+        # same-turn extended lookahead extrapolates the whole rig away as
+        # "diverging" (crash clip 434f0401). Drop the extended lookahead and arm
+        # the in-lane dip rescue for such a target.
+        in_lane_body = _any_body_in_ego_lane(
+            ctx.ego_arc, ctx.all_target_arcs, cal.lane_half_width)
+        # Suppress only when every colliding body of the rig is diverging: a
+        # tractor pulling into the outer lane genuinely diverges, but if its
+        # trailer is still closing in ego's lane the rig is a real rear-end
+        # course. Vetoing on the first diverging arc (the cab, evaluated first)
+        # would drop the approaching trailer with it (crash clip 434f0401).
+        any_hit = False
         for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
             if base_target_arc.speed <= 0.5:
                 continue
@@ -673,6 +722,7 @@ class CoDirectionalDivergeFilter:
             )
             if unbraked_hit is None:
                 continue
+            any_hit = True
 
             # Fix C: outer-lane same-turn extended lookahead
             co_diverge_dt = cal.co_dir_diverge_lookahead_s
@@ -680,13 +730,15 @@ class CoDirectionalDivergeFilter:
             g_ego_k = abs(ctx.ego_curvature) >= cal.turning_diverge_kappa
             g_veh_k = abs(ctx.v_curvature) >= cal.turning_diverge_kappa
             g_sign = ctx.ego_curvature * ctx.v_curvature > 0
-            if g_lat and g_ego_k and g_veh_k and g_sign:
+            if g_lat and g_ego_k and g_veh_k and g_sign and not in_lane_body:
                 co_diverge_dt = ctx.dynamic_horizon * cal.co_same_turn_lookahead_scale
-            if not _is_approaching(ctx.ego_arc, base_target_arc,
-                                   unbraked_hit[0], dt=co_diverge_dt,
-                                   dip_samples=cal.diverge_dip_samples,
-                                   dip_active=ctx.lane == Lane.EGO):
-                return _suppress("CoDirectionalDivergeFilter")
+            if _is_approaching(ctx.ego_arc, base_target_arc,
+                               unbraked_hit[0], dt=co_diverge_dt,
+                               dip_samples=cal.diverge_dip_samples,
+                               dip_active=ctx.lane == Lane.EGO or in_lane_body):
+                return _PASS
+        if any_hit:
+            return _suppress("CoDirectionalDivergeFilter")
         return _PASS
 
 
@@ -868,6 +920,12 @@ class OutOfLaneParallelFilter:
             return _PASS
         if ctx.lane == Lane.EGO:
             return _PASS
+        # A trailer swung into ego's lane while its tractor reference rides the
+        # outer lane keeps the tractor-based lane out of EGO and its trailer
+        # centre-trajectory scan out of lane, yet its rear body sits in ego's
+        # path (crash clip 434f0401). The body-length in-lane test catches it.
+        if _any_body_in_ego_lane(ctx.ego_arc, ctx.all_target_arcs, cal.lane_half_width):
+            return _PASS
         # Predicted center must stay out of ego's lane across the horizon.
         n = max(1, cal.out_of_lane_scan_samples)
         for base_target_arc in ctx.all_target_arcs:
@@ -1015,9 +1073,16 @@ class EgoEvasionFilter:
     def apply(self, ctx: FilterContext) -> FilterResult:
         if ctx.head_on:
             return _PASS
+        cal = self._cal
+        # In-lane co-directional moving target: a rear-end lead, never a
+        # "driver steers around it" call. The tractor-based lane misses a rig
+        # whose trailer is swung into ego's lane while the cab rides the outer
+        # lane (crash clip 434f0401), so also bypass on the body-length test.
         if (ctx.co_directional
                 and any(a.speed > 0.5 for a in ctx.all_target_arcs)
-                and ctx.lane == Lane.EGO):
+                and (ctx.lane == Lane.EGO
+                     or _any_body_in_ego_lane(
+                         ctx.ego_arc, ctx.all_target_arcs, cal.lane_half_width))):
             return _PASS
         # Follow-threat targets are exempt: the in-lane bypass above can lose
         # them to a single jittered lane/heading frame, and "ego could steer
@@ -1027,7 +1092,6 @@ class EgoEvasionFilter:
             return _PASS
         if ctx.ego_evasion_left is None or ctx.ego_evasion_right is None:
             return _PASS
-        cal = self._cal
 
         for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
             # Use Fix A effective padding for near-head-on own-lane vehicles
