@@ -75,6 +75,16 @@ class TrafficReader:
         self.last_parked_bytes: bytes | None = None
         self.last_t_wall: float = 0.0
 
+    def clear_kinematics_state(self) -> None:
+        """Drop per-id smoothing so the next frame re-anchors on a new clock.
+
+        Used when radar switches between wall time and SCS ``simulatedTime``:
+        carrying ``Vehicle.time`` across domains makes ``dt`` huge/negative and
+        pins vehicles on the sub-frame path.
+        """
+        self._last_vehicles.clear()
+        self._last_trailer_vehicles.clear()
+
     def open(self) -> bool:
         if self._buf is not None:
             if self._parked_buf is None:
@@ -119,12 +129,18 @@ class TrafficReader:
         ego_y: float,
         ego_z: float,
         ego_speed: float,
+        t_now: float | None = None,
     ) -> tuple[list[Vehicle], list[Vehicle]] | None:
         """Decode one frame.
 
         ``ego_x/y/z`` and ``ego_speed`` are forwarded to
         :meth:`Vehicle.update_from_last` for the TTC-scaled lag freeze
         (see ``core/radar/AGENTS.md`` §7).
+
+        ``t_now`` is the kinematics clock (seconds) passed to
+        ``update_from_last``. Live radar supplies SCS ``simulatedTime`` so
+        pause/hitch gaps do not inflate ``dt``. When omitted, falls back to
+        ``time.time()`` (tests / callers without a sim clock).
 
         Returns ``(vehicles, trailer_vehicles)``: the top-level radar
         vehicles and the synthetic trailer-as-vehicle records flattened from
@@ -151,9 +167,9 @@ class TrafficReader:
         vehicles = self._build_vehicles_from_raw(raw)
         vehicles.extend(self._read_parked_vehicles({int(v.id) for v in vehicles}))
 
-        t_now = time.time()
-        self.last_t_wall = t_now
-        return self._smooth_and_build(vehicles, t_now, ego_x, ego_y, ego_z, ego_speed)
+        self.last_t_wall = time.time()
+        kin_t = self.last_t_wall if t_now is None else float(t_now)
+        return self._smooth_and_build(vehicles, kin_t, ego_x, ego_y, ego_z, ego_speed)
 
     @staticmethod
     def _build_vehicles_from_raw(raw: tuple) -> list[Vehicle]:
@@ -216,6 +232,11 @@ class TrafficReader:
                 v.update_from_last(
                     self._last_vehicles[v.id], t_now, ego_x, ego_y, ego_z, ego_speed,
                 )
+            else:
+                # Anchor to the kinematics clock (sim or wall). Construction
+                # defaults to time.time(); a mismatched domain would make the
+                # next dt huge/negative and pin the vehicle on the sub-frame path.
+                v.time = t_now
         self._last_vehicles = {v.id: v for v in vehicles}
         trailer_vehicles = self._build_trailer_vehicles(
             vehicles, t_now, ego_x, ego_y, ego_z, ego_speed,
@@ -254,8 +275,9 @@ class TrafficReader:
         # Anchor freshly-seen vehicles to the recorded clock. A Vehicle is
         # constructed with time.time() (the replay wall clock); feeding the
         # recorded t_wall next frame would make dt negative and pin the vehicle
-        # to the sub-frame path forever, so it never smooths. The live reader is
-        # unaffected: there construction time and t_now share the real clock.
+        # to the sub-frame path forever, so it never smooths. Live radar passes
+        # SCS simulatedTime via read(t_now=...); _smooth_and_build anchors new
+        # ids the same way.
         for v in vehicles:
             if v.id not in self._last_vehicles:
                 v.time = t_wall
@@ -298,6 +320,8 @@ class TrafficReader:
             prev = self._last_trailer_vehicles.get(tv.id)
             if prev is not None:
                 tv.update_from_last(prev, t_now, ego_x, ego_y, ego_z, ego_speed)
+            else:
+                tv.time = t_now
         self._last_trailer_vehicles = {tv.id: tv for tv in trailer_vehicles}
         return trailer_vehicles
 

@@ -459,9 +459,23 @@ during lag freeze (`_lag_since` inside the TTC-scaled freeze window), position-m
 (`_pos_mismatch_frames > 0`), and `crash_confirmed`. Acceleration is still carried
 from the last full update on sub-frames.
 
-### Game pause
+### Simulation clock (pause / hitch)
 
-When the game is paused, wall-clock time advances but simulation state (raw positions) does not. On the first frame after unpause, `dt = t_now - prev.time` can be large; TMP `kin_accel` uses that `dt` while position history still constrains `raw_speed`, then the accel EMA softens the step. The TMP speed EMA blends the new raw sample with the previous filtered speed (no separate prediction step).
+Vehicle kinematics use SCS **`simulatedTime`** (µs → seconds) as `Vehicle.time` /
+`update_from_last` `t_now`, not `time.time()`. Telemetry exposes it as
+`TelemetryThreadData.simulated_time_us`. While the game is paused or hitching,
+`simulatedTime` does not advance, so `dt ≈ 0` and the existing sub-frame path
+holds filtered speeds. Radar still calls `TrafficReader.read` during pause so
+TMP poses that keep flowing can snap under that hold; `RadarData.t_mono` is
+**not** bumped, so AEB/ACC treat the frame as stale. On unpause, the next sim
+step is a normal frame `dt` (not the wall-clock pause duration), which is what
+previously collapsed TMP/AI speeds toward 0 via `Δpos / huge_wall_dt`. If
+`simulated_time_us == 0` (SDK not ready), radar falls back to wall time and
+keeps the old pause hold (no traffic refresh). Switching between wall and sim
+domains clears `TrafficReader` per-id state and ego path history so
+`Vehicle.time` is never carried across incompatible clocks.
+
+Clip replay keeps using recorded `t_wall` deltas as its kinematics clock.
 
 ---
 
@@ -608,8 +622,10 @@ with rt.data._lock:
     t_mono        = rt.data.t_mono            # snapshot time (monotonic)
 ```
 
-When `paused` is True the vehicle list and `t_mono` are held at their last
-values; consumer threads should treat an unchanged `t_mono` as "no new frame".
+When `paused` is True, `t_mono` is held so consumers treat the frame as
+stale. Vehicle kinematics still refresh on the SCS simulated clock (`dt≈0`
+while sim time is frozen) so TMP poses stay warm; filtered speeds are held
+by the sub-frame path. See §7 "Simulation clock".
 
 ### Trailer vehicles
 

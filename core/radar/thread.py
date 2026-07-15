@@ -72,6 +72,7 @@ class RadarData(ThreadData):
     ego_curvature: float | None = None
 
     # Monotonic time when snapshot was published.
+    # Held (not bumped) while paused so AEB/ACC treat the frame as stale.
     t_mono: float = 0.0
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
@@ -86,6 +87,9 @@ class RadarThread(BaseThread):
         self.data = RadarData()
         self._traffic = TrafficReader()
         self._ego_position_history: list[tuple[float, float, float]] = []
+        self._last_ego_hist_t: float = 0.0
+        # None until the first frame; then True when using SCS simulatedTime.
+        self._kin_use_sim: bool | None = None
 
     def setup(self) -> None:
         self._traffic.open()
@@ -94,18 +98,29 @@ class RadarThread(BaseThread):
     def teardown(self) -> None:
         self._traffic.close()
         self._ego_position_history.clear()
+        self._last_ego_hist_t = 0.0
+        self._kin_use_sim = None
         with self.data._lock:
             self.data.vehicles = []
             self.data.trailer_vehicles = []
             self.data.tmp_session = False
         logger.debug("radar teardown complete")
 
-    def _read_ego(self) -> tuple[float, float, float, float, float, float, bool, bool, float]:
-        """(x, y, z, yaw_norm, speed, steer, paused, ego_has_trailer, pitch_deg)."""
+    def _reset_kinematics_clock(self) -> None:
+        """Re-anchor after wall↔sim clock domain changes."""
+        self._traffic.clear_kinematics_state()
+        self._ego_position_history.clear()
+        self._last_ego_hist_t = 0.0
+        logger.debug("radar kinematics clock domain reset")
+
+    def _read_ego(self) -> tuple[
+        float, float, float, float, float, float, bool, bool, float, int,
+    ]:
+        """(x, y, z, yaw_norm, speed, steer, paused, ego_has_trailer, pitch_deg, simulated_time_us)."""
         try:
             tel = registry.get_thread("telemetry_thread")
             if tel is None or not tel.is_alive():
-                return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False, False, 0.0
+                return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False, False, 0.0, 0
             with tel.data._lock:
                 return (
                     float(getattr(tel.data, "coordinateX", 0.0)),
@@ -117,9 +132,17 @@ class RadarThread(BaseThread):
                     bool(getattr(tel.data, "paused", False)),
                     bool(getattr(tel.data, "ego_has_trailer", False)),
                     float(getattr(tel.data, "rotationY", 0.0)),
+                    int(getattr(tel.data, "simulated_time_us", 0) or 0),
                 )
         except (KeyError, AttributeError):
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False, False, 0.0
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False, False, 0.0, 0
+
+    @staticmethod
+    def _kinematics_t(simulated_time_us: int) -> float:
+        """Seconds on the SCS simulated clock, or wall time if unavailable."""
+        if simulated_time_us > 0:
+            return simulated_time_us / 1_000_000.0
+        return time.time()
 
     def _capture_frame(
         self, recorder, now_mono: float, t_wall: float,
@@ -146,65 +169,34 @@ class RadarThread(BaseThread):
         except Exception:
             logger.debug("radar clip capture failed", exc_info=True)
 
-    def loop(self) -> None:
-        if not self.running:
-            return
-
-        (ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
-         paused, ego_has_trailer, ego_pitch_deg) = self._read_ego()
-
-        # Paused → hold the previous snapshot; downstream threads treat an
-        # unchanged t_mono as "no new frame".  Vehicle list is left as-is so
-        # stale references don't flicker, matching AEB's paused-path behaviour.
-        if paused:
-            with self.data._lock:
-                self.data.paused = True
-                self.data.ego_x = ego_x
-                self.data.ego_y = ego_y
-                self.data.ego_z = ego_z
-                self.data.ego_yaw_norm = ego_yaw_norm
-                self.data.ego_yaw_rad = ego_yaw_norm * 2.0 * math.pi
-                self.data.ego_speed = ego_speed
-                self.data.ego_steer = ego_steer
-                _pv = (ego_pitch_deg + 0.5) % 1.0 - 0.5
-                _pr = -_pv * 2.0 * math.pi
-                self.data.ego_pitch_deg = math.degrees(_pr)
-                self.data.ego_pitch_rad = _pr
-                self.data.ego_has_trailer = ego_has_trailer
-            capture = get_recorder()
-            if capture is not None:
-                self._capture_frame(
-                    capture, time.monotonic(), time.time(),
-                    ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
-                    ego_pitch_deg, ego_has_trailer, True, None, None,
-                )
-            return
-
-        now_mono = time.monotonic()
-
-        self._ego_position_history.append((now_mono, ego_x, ego_z))
-        if len(self._ego_position_history) > EGO_POSITION_HISTORY_LEN:
-            self._ego_position_history = self._ego_position_history[-EGO_POSITION_HISTORY_LEN:]
-
-        ego_curvature = ego_curvature_from_history(self._ego_position_history)
-
-        capture = get_recorder()
-        self._traffic.capture_raw = capture is not None
-        read_result = self._traffic.read(ego_x, ego_y, ego_z, ego_speed)
-        if read_result is None:
-            vehicles, trailer_vehicles = [], []
-        else:
-            vehicles, trailer_vehicles = read_result
-        tmp_session = any(v.is_tmp for v in vehicles)
-
+    def _publish_ego_fields(
+        self,
+        ego_x: float,
+        ego_y: float,
+        ego_z: float,
+        ego_yaw_norm: float,
+        ego_speed: float,
+        ego_steer: float,
+        ego_has_trailer: bool,
+        ego_pitch_deg: float,
+        paused: bool,
+        *,
+        vehicles: list[Vehicle] | None = None,
+        trailer_vehicles: list[Vehicle] | None = None,
+        tmp_session: bool | None = None,
+        ego_curvature: float | None = None,
+        bump_t_mono: bool = False,
+    ) -> None:
         ego_yaw_rad = ego_yaw_norm * 2.0 * math.pi
         _pv = (ego_pitch_deg + 0.5) % 1.0 - 0.5
         ego_pitch_rad = -_pv * 2.0 * math.pi
-
         with self.data._lock:
-            self.data.vehicles = vehicles
-            self.data.trailer_vehicles = trailer_vehicles
-            self.data.tmp_session = tmp_session
+            if vehicles is not None:
+                self.data.vehicles = vehicles
+            if trailer_vehicles is not None:
+                self.data.trailer_vehicles = trailer_vehicles
+            if tmp_session is not None:
+                self.data.tmp_session = tmp_session
             self.data.ego_x = ego_x
             self.data.ego_y = ego_y
             self.data.ego_z = ego_z
@@ -215,11 +207,106 @@ class RadarThread(BaseThread):
             self.data.ego_pitch_deg = math.degrees(ego_pitch_rad)
             self.data.ego_pitch_rad = ego_pitch_rad
             self.data.ego_has_trailer = ego_has_trailer
-            self.data.ego_curvature = ego_curvature
-            self.data.paused = False
-            self.data.t_mono = now_mono
+            # Only overwrite curvature on a published (unpaused) frame.
+            if bump_t_mono:
+                self.data.ego_curvature = ego_curvature
+            self.data.paused = paused
+            if bump_t_mono:
+                self.data.t_mono = time.monotonic()
 
+    def _read_traffic(
+        self,
+        ego_x: float,
+        ego_y: float,
+        ego_z: float,
+        ego_speed: float,
+        t_kin: float,
+    ) -> tuple[list[Vehicle], list[Vehicle]] | None:
+        capture = get_recorder()
+        self._traffic.capture_raw = capture is not None
+        return self._traffic.read(
+            ego_x, ego_y, ego_z, ego_speed, t_now=t_kin,
+        )
+
+    def loop(self) -> None:
+        if not self.running:
+            return
+
+        (ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
+         paused, ego_has_trailer, ego_pitch_deg, simulated_time_us) = self._read_ego()
+        t_kin = self._kinematics_t(simulated_time_us)
+        use_sim = simulated_time_us > 0
+        # Wall↔sim switch without a reset leaves Vehicle.time in the old domain
+        # and produces huge/negative dt (stuck sub-frame path).
+        if self._kin_use_sim is not None and self._kin_use_sim != use_sim:
+            self._reset_kinematics_clock()
+        self._kin_use_sim = use_sim
+
+        # Paused: keep refreshing vehicle kinematics on the sim clock (dt≈0
+        # while simulatedTime is frozen) so TMP poses that keep flowing stay
+        # warm and the first unpause frame does not see a wall-clock pause gap.
+        # Do not bump t_mono: AEB/ACC treat an unchanged stamp as "no new frame".
+        if paused:
+            traffic = (
+                self._read_traffic(ego_x, ego_y, ego_z, ego_speed, t_kin)
+                if use_sim else None
+            )
+            if traffic is not None:
+                vehicles, trailer_vehicles = traffic
+                self._publish_ego_fields(
+                    ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
+                    ego_has_trailer, ego_pitch_deg, True,
+                    vehicles=vehicles,
+                    trailer_vehicles=trailer_vehicles,
+                    tmp_session=any(v.is_tmp for v in vehicles),
+                    bump_t_mono=False,
+                )
+            else:
+                self._publish_ego_fields(
+                    ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
+                    ego_has_trailer, ego_pitch_deg, True,
+                    bump_t_mono=False,
+                )
+            capture = get_recorder()
+            if capture is not None:
+                self._capture_frame(
+                    capture, time.monotonic(), time.time(),
+                    ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
+                    ego_pitch_deg, ego_has_trailer, True, None, None,
+                )
+            return
+
+        # Ego path history: advance only when the kinematics clock moves so a
+        # hitch (frozen simulatedTime) does not stretch curvature samples.
+        if t_kin > self._last_ego_hist_t:
+            self._ego_position_history.append((t_kin, ego_x, ego_z))
+            self._last_ego_hist_t = t_kin
+            if len(self._ego_position_history) > EGO_POSITION_HISTORY_LEN:
+                self._ego_position_history = self._ego_position_history[-EGO_POSITION_HISTORY_LEN:]
+
+        ego_curvature = ego_curvature_from_history(self._ego_position_history)
+
+        traffic = self._read_traffic(ego_x, ego_y, ego_z, ego_speed, t_kin)
+        if traffic is None:
+            vehicles, trailer_vehicles = [], []
+        else:
+            vehicles, trailer_vehicles = traffic
+        tmp_session = any(v.is_tmp for v in vehicles)
+
+        self._publish_ego_fields(
+            ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
+            ego_has_trailer, ego_pitch_deg, False,
+            vehicles=vehicles,
+            trailer_vehicles=trailer_vehicles,
+            tmp_session=tmp_session,
+            ego_curvature=ego_curvature,
+            bump_t_mono=True,
+        )
+
+        capture = get_recorder()
         if capture is not None:
+            with self.data._lock:
+                now_mono = self.data.t_mono
             self._capture_frame(
                 capture, now_mono, self._traffic.last_t_wall,
                 ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,

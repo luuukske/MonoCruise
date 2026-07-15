@@ -1059,6 +1059,8 @@ class Vehicle:
         self.is_trailer = is_trailer
         self.is_parked = is_parked
 
+        # Kinematics clock for update_from_last (seconds). Live radar overwrites
+        # with SCS simulatedTime/1e6 so pause/hitch gaps are not wall-clock dt.
         self.time: float = time.time()
         self.last_location = Position(0.0, 0.0, 0.0)
         self.last_rotation = Quaternion(0.0, 0.0, 0.0, 0.0)

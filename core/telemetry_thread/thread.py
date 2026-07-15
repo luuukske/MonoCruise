@@ -50,6 +50,10 @@ class TelemetryThreadData(ThreadData):
 
     # Simulation state
     paused: bool = False
+    # SCS frame simulated timestamp (microseconds). Freezes while paused /
+    # hitching; used by radar vehicle kinematics as the integration clock.
+    # 0 when the SDK has not published a value yet.
+    simulated_time_us: int = 0
 
     # Truck
     speed: float = 0.0          # m/s: convert to km/h: speed * 3.6
@@ -117,6 +121,7 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.game_version_minor  = raw.get("telemetry_version_game_minor", 0)
         data.sdk_version         = raw.get("telemetry_plugin_revision", 0)
         data.paused              = raw.get("paused", False)
+        data.simulated_time_us   = int(raw.get("simulatedTime", 0) or 0)
         data.coordinateX         = raw.get("coordinateX", 0.0)
         data.coordinateY         = raw.get("coordinateY", 0.0)
         data.coordinateZ         = raw.get("coordinateZ", 0.0)
