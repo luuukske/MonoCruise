@@ -550,6 +550,16 @@ class ArcPath:
     fwd_len: float = 0.0
     back_len: float = 0.0
 
+    # Corridor-margin scale applied when this body meets another capsule at a
+    # near-parallel heading (see _sampled_collision). The margin exists to
+    # absorb the time-sampling risk of crossing paths sweeping through contact
+    # between samples; near-parallel bodies hold their separation across many
+    # samples, so the full margin only manufactures side-graze hits on
+    # adjacent-lane traffic. A collision pair uses the smaller scale of its two
+    # arcs. 1.0 (default) keeps the full margin for every consumer that does
+    # not set it; AEB ego arcs set cal.capsule_parallel_margin_scale.
+    parallel_margin_scale: float = 1.0
+
     is_straight: bool = True
     center_x: float = 0.0
     center_z: float = 0.0
@@ -721,15 +731,19 @@ def build_arc(
     accel: float = 0.0,
     fwd_len: float = 0.0,
     back_len: float = 0.0,
+    parallel_margin_scale: float = 1.0,
 ) -> ArcPath:
     """Build and cache an ArcPath from start (x,z), yaw, speed, curvature, half_width,
     horizon; optional decel/accel. Call this instead of constructing ArcPath directly.
     fwd_len/back_len give the body extents ahead of/behind the reference for a
-    capsule collision body; 0.0 (default) keeps point/disc behavior."""
+    capsule collision body; 0.0 (default) keeps point/disc behavior.
+    parallel_margin_scale < 1.0 shrinks the corridor margin for near-parallel
+    capsule contacts (see ArcPath field comment)."""
     return ArcPath(
         start_x=x, start_z=z, yaw_rad=yaw_rad, speed=speed,
         curvature=curvature, half_width=half_width, horizon=horizon,
         decel=decel, accel=accel, fwd_len=fwd_len, back_len=back_len,
+        parallel_margin_scale=parallel_margin_scale,
     ).build()
 
 
@@ -770,7 +784,10 @@ def arc_arc_collision(
             and a.accel == 0.0 and b.accel == 0.0):
         return _ray_ray_collision(a, b, corridor_sq, horizon, min_lateral_gap)
 
-    return _sampled_collision(a, b, corridor_sq, horizon, n_samples, min_lateral_gap)
+    return _sampled_collision(
+        a, b, corridor_sq, horizon, n_samples, min_lateral_gap,
+        hw_sum=a.half_width + b.half_width, margin=margin,
+    )
 
 
 def _seg_seg_dist_sq_mid(
@@ -912,17 +929,28 @@ def _ray_ray_collision(
 def _sampled_collision(
     a: ArcPath, b: ArcPath, corridor_sq: float, horizon: float, n: int,
     min_lateral_gap: float = 0.0,
+    hw_sum: float = 0.0, margin: float = 0.0,
 ) -> Optional[tuple[float, float, float]]:
     """Earliest corridor overlap for curved, non-constant-speed, or capsule-body
     arcs: sample at n times, then bisect to refine hit time; respects
     min_lateral_gap. When either arc carries body extents (fwd_len/back_len) the
     overlap test is segment-to-segment (the swept body), not point-to-point.
-    Returns (t, hit_x, hit_z) or None. hit is the contact-point midpoint for
-    capsule pairs, the reference midpoint for point pairs."""
+    For capsule pairs where either arc sets parallel_margin_scale < 1, the
+    corridor margin shrinks toward margin * scale as the two headings approach
+    parallel (per sample): the margin's job is absorbing crossing paths that
+    sweep through contact between time samples, and near-parallel bodies hold
+    their separation, so the full margin only manufactures side-graze hits on
+    adjacent-lane traffic. hw_sum/margin carry the corridor_sq components for
+    that scaling. Returns (t, hit_x, hit_z) or None. hit is the contact-point
+    midpoint for capsule pairs, the reference midpoint for point pairs."""
     has_body = a._has_body or b._has_body
     need_lat = min_lateral_gap > 0.0
+    pms = (a.parallel_margin_scale
+           if a.parallel_margin_scale < b.parallel_margin_scale
+           else b.parallel_margin_scale)
+    scale_margin = has_body and pms < 1.0 and margin > 0.0
 
-    def _probe(t: float) -> tuple[float, float, float, float]:
+    def _probe(t: float) -> tuple[float, float, float, float, float]:
         if has_body:
             da = a._dist_at_time(t)
             ax, az = a.position_at_dist(da)
@@ -945,7 +973,15 @@ def _sampled_collision(
             dsq, mx, mz = _seg_seg_dist_sq_mid(a0x, a0z, a1x, a1z,
                                                b0x, b0z, b1x, b1z)
             lat = abs((bz - az) * afx - (bx - ax) * afz) if need_lat else 0.0
-            return dsq, mx, mz, lat
+            if scale_margin:
+                cosd = afx * bfx + afz * bfz
+                if cosd < 0.0:
+                    cosd = -cosd
+                sind_sq = 1.0 - cosd * cosd
+                sind = math.sqrt(sind_sq) if sind_sq > 0.0 else 0.0
+                thr = hw_sum + margin * (pms + (1.0 - pms) * sind)
+                return dsq, mx, mz, lat, thr * thr
+            return dsq, mx, mz, lat, corridor_sq
         ax, az = a.position_at_time(t)
         bx, bz = b.position_at_time(t)
         dsq = (ax - bx) ** 2 + (az - bz) ** 2
@@ -956,7 +992,7 @@ def _sampled_collision(
             lat = abs((bz - az) * fwd_x_a - (bx - ax) * fwd_z_a)
         else:
             lat = 0.0
-        return dsq, (ax + bx) * 0.5, (az + bz) * 0.5, lat
+        return dsq, (ax + bx) * 0.5, (az + bz) * 0.5, lat, corridor_sq
 
     best_t: Optional[float] = None
     best_mx = 0.0
@@ -965,8 +1001,8 @@ def _sampled_collision(
     inv_n = 1.0 / n
     for i in range(n + 1):
         t = horizon * i * inv_n
-        dsq, mx, mz, lat = _probe(t)
-        if dsq < corridor_sq:
+        dsq, mx, mz, lat, thr_sq = _probe(t)
+        if dsq < thr_sq:
             if need_lat and lat >= min_lateral_gap:
                 continue
             lo = max(t - horizon * inv_n, 0.0)
@@ -976,8 +1012,8 @@ def _sampled_collision(
             best_mz = mz
             for _ in range(6):
                 mid = (lo + hi) * 0.5
-                dsq2, mx2, mz2, lat2 = _probe(mid)
-                if dsq2 < corridor_sq and not (need_lat and lat2 >= min_lateral_gap):
+                dsq2, mx2, mz2, lat2, thr2_sq = _probe(mid)
+                if dsq2 < thr2_sq and not (need_lat and lat2 >= min_lateral_gap):
                     hi = mid
                     best_t = mid
                     best_mx = mx2

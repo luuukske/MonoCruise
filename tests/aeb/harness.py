@@ -221,11 +221,13 @@ def evaluate_frame(
         ego_front_x, ego_front_z, ego_yaw_rad_val, ego_speed,
         ego_curvature, ego_hw, dynamic_horizon,
         fwd_len=ego_cap_fwd, back_len=ego_cap_back,
+        parallel_margin_scale=cal.capsule_parallel_margin_scale,
     )
     ego_braked_arc = build_arc(
         ego_front_x, ego_front_z, ego_yaw_rad_val, ego_speed,
         ego_curvature, ego_hw, dynamic_horizon, decel=effective_decel,
         fwd_len=ego_cap_fwd, back_len=ego_cap_back,
+        parallel_margin_scale=cal.capsule_parallel_margin_scale,
     )
 
     ego_evasion_left = ego_evasion_right = None

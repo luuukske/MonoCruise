@@ -175,6 +175,7 @@ pass, the vehicle enters collision evaluation.
 | `OppositeLaneFilter` | Oncoming vehicles in their own lane (collapses Fix A + Fix B) |
 | `CoDirectionalDivergeFilter` | Co-directional arcs already diverging (Fix C + outer-lane same-turn) |
 | `TurningCrossTrafficFilter` | Cross-traffic turning through intersection (Fix D absorbed) |
+| `OutOfLaneParallelFilter` | Capsule lane-keeping adjacent / roadside traffic; also rear overtakers |
 | `TmpCrossTrafficFilter` | TMP-only: straight snapshot uses centre closest-approach (T-bone vs body-graze), turning snapshot uses full-horizon endpoint lane |
 | `SweepPassFilter` | Stationary cross-traffic ego turns through |
 | `CornerEntryStationaryFilter` | Stationary at corner entry: out-of-lane oncoming/co-dir, or in-lane with arc consistency |
@@ -265,6 +266,27 @@ extrapolated body overlap is usually a constant-curvature artifact (e.g.
 overtaking a slower outer-lane vehicle in a shared turn:
 `fp_co_directional_outer_lane`), which is exactly what the filter exists to
 suppress. Regression scenario: `tp_fast_closing_lead` (80 km/h closing, in-lane).
+
+### `OutOfLaneParallelFilter`
+
+Suppresses co-directional / stationary traffic whose body stays out of ego's
+lane: the capsule collision body registers a grazing corridor overlap for a
+long vehicle driving or parked alongside ego that the point model mostly
+missed. A target whose centre never enters ego's lane over the horizon
+(arc-projected offset stays above `lane_half_width`) is lane-keeping adjacent
+traffic or a roadside object, not a collision course. Head-on own-lane
+oncoming is handled by `OppositeLaneFilter`; follow / latched threats and any
+body sample already in the EGO band (trailer swung into path, clip 434f0401)
+are exempt.
+
+**Rear-overtaker early suppress.** Faster co-directional traffic approaching
+from behind in another lane (`v·ego_fwd > ego_speed` and `dx·ego_fwd < 0`) is
+suppressed *before* the predicted-centre scan. That scan is circular: it
+projects onto the same bent ego arc that manufactures the phantom capsule
+hit, so it leaks exactly on the wiggle ticks that create the FP (passing
+clips f0b2ace6 / 02642609). A genuine cut-in brings its body into the EGO
+band and is not suppressed here; braking_worsens covers the same class if
+anything still reaches collision eval.
 
 ### `TmpCrossTrafficFilter`
 
@@ -387,12 +409,18 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    the axial projection onto ego's heading. The axial form clamps to zero
    for rear-overtakers and misses the rear-end-worsens case.
    - `braking_worsens` is set if either:
-     - `v_target_along_ego > ego_speed` (target faster than ego along
-       ego's heading: pure rear-overtaker shortcut; handles imminent
-       collisions where `t_braked` is too small for the comparison below
-       to fire), **or**
-     - `closing_braked > closing_unbraked + brake_worsens_hysteresis_ms`
-       (cross-traffic where braking parks ego in target's path).
+     - `braked_hit is not None` and (`v_target_along_ego > ego_speed`
+       — pure rear-overtaker shortcut for imminent collisions where
+       `t_braked` is too small for the comparison below — **or**
+       `closing_braked > closing_unbraked + brake_worsens_hysteresis_ms`
+       — cross-traffic where braking parks ego in target's path), **or**
+     - `braked_hit is None` and `v_target_along_ego > ego_speed` and the
+       target is behind ego (`dx·ego_fwd < 0`): full braking clears a
+       rear-overtaker entirely, but feeding its closing speed into
+       required_decel still reads an adjacent-lane pass as a frontal
+       threat (passing FP clips f0b2ace6 / 02642609). Scoped behind ego
+       so a faster crosser ahead, where braking *is* the avoidance, still
+       contributes.
    - Targets flagged `braking_worsens` are added to `braking_worsens_ids`
      and excluded from `best_ttb` / `best_v_closing`. AEB engagement on
      these is forbidden.
@@ -623,6 +651,9 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `warn_ttb` | 1.3 s | WARN threshold |
 | `brake_ttb` | 0.2 s | BRAKE threshold |
 | `ego_half_width` | 1.15 m | Ego arc corridor half-width |
+| `ego_half_length` | 3.0 m | Ego capsule half-length (body extents via `capsule_extents`) |
+| `corridor_margin` | 0.5 m | Corridor padding for crossing-path sample uncertainty |
+| `capsule_parallel_margin_scale` | 0.3 | Near-parallel capsule contacts use `margin * scale` blended by heading sine toward full margin at perpendicular; kills adjacent-lane side-graze FPs (ab524f87 / 29bf31b8). 1.0 disables |
 | `lane_half_width` | 1.95 m | EGO lane boundary |
 | `lane_separation` | 3.9 m | Road lane pitch |
 | `head_on_dot` | -0.7 | `head_on` flag threshold |

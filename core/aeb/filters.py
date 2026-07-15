@@ -926,6 +926,15 @@ class OutOfLaneParallelFilter:
         # path (crash clip 434f0401). The body-length in-lane test catches it.
         if _any_body_in_ego_lane(ctx.ego_arc, ctx.all_target_arcs, cal.lane_half_width):
             return _PASS
+        # Rear overtaker: faster co-dir traffic from behind in another lane.
+        # Capsule + ego-arc wiggle manufactures corridor hits on these; braking
+        # cannot help (see braking_worsens). Suppress before the predicted-
+        # center scan, which leaks on the same bent ego arc that creates the
+        # phantom (passing FP clips f0b2ace6 / 02642609).
+        if (ctx.co_directional and not stationary
+                and (ctx.v.speed * ctx.fwd_dot) > ctx.ego_speed
+                and ctx.dx * ctx.ego_fwd_x + ctx.dz * ctx.ego_fwd_z < 0.0):
+            return _suppress("OutOfLaneParallelFilter")
         # Predicted center must stay out of ego's lane across the horizon.
         n = max(1, cal.out_of_lane_scan_samples)
         for base_target_arc in ctx.all_target_arcs:

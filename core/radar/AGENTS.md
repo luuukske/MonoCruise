@@ -487,6 +487,8 @@ If the ego arc points backward, the bug is in the `rotationX → yaw_rad` conver
 | `speed` | `build()` normalises to `abs` and flips `fwd` if originally negative |
 | `curvature` | `κ = ω_rad_s / abs_speed`. Positive = left turn (CCW). |
 | `half_width` | `size.width / 2` by default |
+| `fwd_len` / `back_len` | Capsule body extents ahead of / behind the reference (0 = point/disc). Set by AEB via `capsule_extents` |
+| `parallel_margin_scale` | Scales corridor margin for near-parallel capsule contacts (1.0 = full margin). AEB ego arcs set `cal.capsule_parallel_margin_scale` |
 | `decel` | Ego braking arc, head-on target arc, or non-head-on target arc when the vehicle is decelerating. Derived via `_accel_to_arc_params()`. Mutually exclusive with `accel`. |
 | `arc_length` | Accounts for decel/accel to stop |
 | `is_straight` | True if `|κ| < 1e-6` or `speed < 0.001` |
@@ -503,9 +505,11 @@ center_z = start_z + sign * radius * (-fwd_x)
 
 `arc_arc_collision(a, b, margin, n_samples, min_lateral_gap=0.0)` returns `(time_s, hit_x, hit_z)` or `None`.
 
-- Both straight, no decel/accel → closed-form quadratic O(1)
+- Both straight, no decel/accel, no body extents → closed-form quadratic O(1)
 - Otherwise → time-synchronised sampling + 6-step bisection O(n)
+- With `fwd_len`/`back_len` set, overlap is segment-to-segment (swept body), not point-to-point
 - Corridor threshold = `a.half_width + b.half_width + margin`
+- When either arc sets `parallel_margin_scale < 1`, the effective margin per sample blends `margin * scale` (parallel headings) to `margin` (perpendicular) by `sin(|heading_diff|)`. Near-parallel bodies hold their separation across samples, so the full margin only manufactures side-graze hits on adjacent-lane traffic
 - AEB narrows vehicle half_width by 0.1 m per side to reduce false positives from measurement noise
 
 #### `min_lateral_gap`: head-on turn filter

@@ -1145,6 +1145,7 @@ class AEBThread(BaseThread):
             ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
             ego_curvature, ego_hw, dynamic_horizon,
             fwd_len=ego_cap_fwd, back_len=ego_cap_back,
+            parallel_margin_scale=cal.capsule_parallel_margin_scale,
         )
 
         run_collision = aeb_active
@@ -1156,6 +1157,7 @@ class AEBThread(BaseThread):
                 ego_curvature, ego_hw, dynamic_horizon,
                 decel=effective_decel,
                 fwd_len=ego_cap_fwd, back_len=ego_cap_back,
+                parallel_margin_scale=cal.capsule_parallel_margin_scale,
             )
 
         ego_evasion_left: ArcPath | None = None
@@ -1563,6 +1565,20 @@ class AEBThread(BaseThread):
                             closing_braked = math.hypot(v_egb_x - v_t_x, v_egb_z - v_t_z)
                             if closing_braked > closing_unbraked + cal.brake_worsens_hysteresis_ms:
                                 braking_worsens = True
+                    elif (v_target_along_ego > ego_speed
+                            and dx * ego_fwd_x + dz * ego_fwd_z < 0.0):
+                        # Rear overtaker whose collision full braking AVOIDS
+                        # entirely (no braked hit). Braking is still never the
+                        # right response to faster traffic approaching from
+                        # behind: the unbraked hit exists only while ego holds
+                        # speed, and feeding the overtaker's closing speed into
+                        # required_decel reads a routine adjacent-lane pass as a
+                        # frontal threat (passing FP clips f0b2ace6 / 02642609:
+                        # phantom warn and engagement while being overtaken).
+                        # Scoped to targets behind ego so a faster crosser
+                        # ahead, where braking IS the avoidance, keeps
+                        # contributing to the decel aggregates.
+                        braking_worsens = True
 
                     if braking_worsens:
                         braking_worsens_ids.add(v.id)

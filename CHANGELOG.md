@@ -13,6 +13,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ## [Unreleased]
 ### Fixed
 - **Connect pedals actually work**: wired up the connect button to be more reliable and actually work.
+- **AEB passing false warns**: capsule bodies + ego-arc steering wiggle were beeping on adjacent-lane overtakes and passes; parallel-margin scaling, rear-overtaker filter suppress, and braking-worsens for cleared rear overtakers kill the class-A/B phantoms (clips f0b2ace6 etc.).
 ### Changed
 - **AEB less sensitive**: changed back the AEB brake latch from 70% max brake to 80% max brake.
 - **Less AEB shadow_near**: changed the shadow near to only clip about 6/h.

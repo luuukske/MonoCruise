@@ -23,6 +23,15 @@ class AEBCalibration:
     ego_half_width: float = 1.15
     ego_half_length: float = 3.0
     corridor_margin: float = 0.5
+    # Corridor-margin scale for near-parallel capsule body contacts (set on
+    # the ego collision arcs, consumed by traffic.py::_sampled_collision).
+    # The margin absorbs crossing paths sweeping through contact between time
+    # samples; two near-parallel long bodies hold their separation across
+    # samples, so the full 0.5 m there only manufactures side-graze hits on
+    # adjacent-lane passing traffic (FP clips ab524f87 / 29bf31b8). Effective
+    # margin blends margin*scale (parallel) to margin (perpendicular) by the
+    # sine of the heading difference. 1.0 disables.
+    capsule_parallel_margin_scale: float = 0.3
     stop_buffer: float = 1.6
     elevation_margin: float = 5.0
     max_range: float = 200.0
