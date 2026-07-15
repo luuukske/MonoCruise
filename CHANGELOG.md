@@ -16,6 +16,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ### Changed
 - **AEB less sensitive**: changed back the AEB brake latch from 70% max brake to 80% max brake.
 - **Less AEB shadow_near**: changed the shadow near to only clip about 6/h.
+- **limiters more responsive**: limiters react faster to speed changes and hold their speed more accuratly. 
 
 ## [1.1.0-preview.4] - 2026-07-11
 ### Fixed

@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 _TARGET_SPEED_EMA_TAU_S = 0.5
 
+# Overshoot kp boost: multiplier reached once overshoot exceeds the blend band.
+_OVERSHOOT_BOOST = 1.5
+_OVERSHOOT_BOOST_BAND_MS = 0.3
+
 
 class SpeedLimiter(LongitudinalController):
     """Set-speed PID for the speed-limiter mode."""
@@ -95,7 +99,11 @@ class SpeedLimiter(LongitudinalController):
         self._prev_shaped_error = shaped_error
 
         # Boost kp when overshooting so ego decelerates faster back to the limit.
-        effective_kp = kp * 1.3 if error_ms < 0 else kp
+        # Blended over the first 0.3 m/s of overshoot rather than a hard step at
+        # zero error: a gain discontinuity there combines with speed noise and
+        # the power-shaped error (infinite slope at 0) to chatter the gas cap.
+        overshoot_frac = min(1.0, max(0.0, -error_ms) / _OVERSHOOT_BOOST_BAND_MS)
+        effective_kp = kp * (1.0 + (_OVERSHOOT_BOOST - 1.0) * overshoot_frac)
         wanted = effective_kp * shaped_error + ki * self._integral_error + d_term
 
         accel_min = float(Settings.limiter_accel_min_ms2)
