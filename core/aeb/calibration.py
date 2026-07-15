@@ -101,9 +101,37 @@ class AEBCalibration:
     tmp_filter_rel_below_kmh: float = 50.0
     user_brake_latch: float = 0.12
 
-    # Cross-zone (ghost-arc) padding: legacy, kept for behaviour parity
+    # TmpCrossTrafficFilter genuine-crosser threshold. That filter suppresses
+    # TMP cross-traffic whose jittered snapshot arc phantom-intersects ego's
+    # lane. For a STRAIGHT snapshot (trustworthy motion) it separates a genuine
+    # T-bone from a body-graze clear by the closest approach of the two
+    # reference centers over the horizon: a real collision course brings the
+    # centers together (~0 m), while a long vehicle merely grazing ego's
+    # corridor as it sweeps clear keeps its center metres away (the endpoint the
+    # old full-horizon test measured was even further, so it wrongly suppressed
+    # a dead-center straight crosser at every range: corpus FN clip ffd29f9e).
+    # Suppress a straight crosser only when this center miss stays above the
+    # threshold; pass (brake) when the centers genuinely meet. Turning snapshots
+    # keep the endpoint-lane test, which handles the mid-turn jitter phantom.
+    tmp_cross_center_hit_dist: float = 2.5
+
+    # Cross-zone (ghost-arc) padding: retired. The ArcPath capsule body extents
+    # (traffic.py) cover vehicle length directly; the ghost comb is gone
+    # (_apply_cross_zone returns [arc]). These are unused, kept only so any
+    # external reference to the field names does not break.
     cross_zone_base: float = 2.0
     cross_zone_speed: float = 0.3
+
+    # Out-of-lane parallel/roadside suppression. The capsule collision body
+    # registers a grazing corridor overlap for a long vehicle driving or parked
+    # alongside ego (co-directional or stationary), where the point model only
+    # saw a fleeting reference-point crossing. A target whose center never
+    # enters ego's lane (arc-projected offset stays above lane_half_width) over
+    # the horizon is lane-keeping adjacent traffic, not a collision course: a
+    # genuine cut-in or crossing brings its center into Lane.EGO and is not
+    # suppressed. out_of_lane_scan_samples sets how many points along the
+    # target arc are lane-tested.
+    out_of_lane_scan_samples: int = 10
 
     # Oncoming evasion kappa scaling
     opposite_lane_kappa_scale: float = 2.0
@@ -155,6 +183,23 @@ class AEBCalibration:
     # instantly (their engage windows are 0-0.06 s, so any warn delay would
     # put the brake before the beep).
     aeb_warn_confirm_oblique_s: float = 0.10
+
+    # Lapse tolerance shared by the three confirm streaks (per-target risk,
+    # engagement qualification, warn persistence). Each streak is an
+    # occupancy window (OccupancyConfirm in confirm.py) rather than a
+    # hard-reset timer: the confirm window must elapse AND the qualified
+    # fraction over that trailing window must reach aeb_confirm_occupancy
+    # before it fires. A run of more than aeb_confirm_max_gap_frames
+    # consecutive unqualified frames drops the streak. Together these tolerate
+    # isolated 1-2 frame detection dropouts (the 36-sample collision grid
+    # flicker, TMP jitter walking the predicted course across coverage edges)
+    # inside an otherwise-solid streak, while still rejecting a signal that is
+    # mostly absent: sparse 1-tick blips never reach the occupancy threshold
+    # and a long gap resets the streak. Applied identically to all three so
+    # the oblique warn-precedes-engage ordering survives flicker (warn
+    # qualifies on a superset of engage frames and has the shorter window).
+    aeb_confirm_occupancy: float = 0.6
+    aeb_confirm_max_gap_frames: int = 2
 
     # Line-of-sight-rate (CBDR) veto on new engagements. A genuine collision
     # course holds a near-constant world-frame bearing while range shrinks

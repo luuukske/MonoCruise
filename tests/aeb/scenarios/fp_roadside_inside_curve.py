@@ -17,7 +17,7 @@ _N_FRAMES = 40
 
 EXPECTED = {
     "max_state": "STANDBY",
-    "must_be_suppressed_by": "EgoEvasionFilter",
+    "must_be_suppressed_by": "OutOfLaneParallelFilter",
 }
 
 

@@ -41,6 +41,7 @@ _SCENARIOS = [
     ("tp_wrong_way_driver", "TP"),
     ("tp_perpendicular_cross_traffic", "TP"),
     ("tp_close_range_lane_cut", "TP"),
+    ("tp_fast_perpendicular_crosser", "TP"),
     ("fp_far_behind_high_closure", "FP"),
 ]
 

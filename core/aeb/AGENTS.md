@@ -175,7 +175,7 @@ pass, the vehicle enters collision evaluation.
 | `OppositeLaneFilter` | Oncoming vehicles in their own lane (collapses Fix A + Fix B) |
 | `CoDirectionalDivergeFilter` | Co-directional arcs already diverging (Fix C + outer-lane same-turn) |
 | `TurningCrossTrafficFilter` | Cross-traffic turning through intersection (Fix D absorbed) |
-| `TmpCrossTrafficFilter` | TMP-only: target whose extrapolated arc lands outside ego lane |
+| `TmpCrossTrafficFilter` | TMP-only: straight snapshot uses centre closest-approach (T-bone vs body-graze), turning snapshot uses full-horizon endpoint lane |
 | `SweepPassFilter` | Stationary cross-traffic ego turns through |
 | `CornerEntryStationaryFilter` | Stationary at corner entry: out-of-lane oncoming/co-dir, or in-lane with arc consistency |
 | `EgoEvasionFilter` | Ego can steer around target within 0.08 g |
@@ -250,22 +250,50 @@ is exactly what the filter exists to suppress. Regression scenario:
 
 TMP-only filter that absorbs MP-data uncertainty for routine intersection
 maneuvers. TMP position/yaw/curvature snapshots are jittered enough that an
-in-progress turn at a side road can briefly project an arc through ego's
-lane even though the actual MP target is sweeping past. For TMP vehicles
-(`v.is_tmp=True`) that aren't co-directional and have non-trivial speed:
-build a non-braked "sweep" arc from the snapshot's `(start, yaw, curvature,
-speed)` over the full horizon and check the endpoint's lane via
-`project_to_ego_arc()`. If the arc terminates in `OPPOSITE_OR_OUTER` or
-`OFF_ROAD`, the target sweeps clear of ego's lane → suppress. If the
-endpoint is in `Lane.EGO`, this is a real continuing threat → fall through.
+in-progress turn at a side road can briefly project an arc through ego's lane
+even though the actual MP target is sweeping past. Applies to TMP vehicles
+(`v.is_tmp=True`) that aren't co-directional and have non-trivial speed. For
+each target arc with a collision hit, build a non-braked "sweep" arc from the
+snapshot's `(start, yaw, curvature, speed)`, then branch on how trustworthy
+the snapshot's motion is (`ctx.v_curvature`):
+
+- **Straight snapshot** (`|v_curvature| < turning_diverge_kappa`): the motion
+  is trustworthy, so decide on the geometry directly. Take the closest approach
+  of the two reference **centres** over the horizon (ego arc vs sweep arc). If
+  they genuinely meet (`d_min <= cal.tmp_cross_center_hit_dist`) it is a real
+  T-bone → **pass** (brake). If the centres miss (the collision is only the
+  target's long body grazing ego's corridor as it sweeps clear) → **suppress**.
+- **Turning snapshot** (`|v_curvature| >= turning_diverge_kappa`): the jittered
+  curvature makes the predicted centre path unreliable, so keep the full-horizon
+  endpoint-lane test. Endpoint in `OPPOSITE_OR_OUTER` / `OFF_ROAD` → the target
+  sweeps clear → **suppress**; endpoint in `Lane.EGO` → real continuing threat →
+  **pass**.
+
+The split fixes a false negative in the old design, which used the endpoint
+test for **all** TMP cross-traffic. The endpoint answers "where does the target
+*end up* at the 3 s horizon", not "does it occupy ego's lane *when ego
+arrives*". A genuine straight perpendicular crosser on a dead-center collision
+course always ends tens of metres past ego's lane at the endpoint, so it was
+suppressed at every range (no warn, no brake in TMP sessions until the crosser's
+measured speed dropped: corpus FN clip ffd29f9e). The centre-miss test answers
+the correct question for the trustworthy straight case: a real collision brings
+the reference centres to ~0 m, a body-only graze keeps them metres apart. The
+turning branch is unchanged and still suppresses the mid-turn jitter phantom
+(regression `fp_tmp_side_road_right_turn` phase 2, `fp_cross_traffic_completing_turn`).
+
+No imminence / TTB floor is used: the turning phantom persists to `hit ≈ 0`
+(the jittered vehicle sweeps through ego's lane right up to closest approach),
+so any positive "never suppress below this hit time" floor would leak that
+regression. A turning TMP target that is genuinely on a collision course and
+close-in relies on the engagement-certainty gate + TTB slam net downstream, not
+this stage.
 
 Uses a freshly-built non-braking arc from the **undamped** `ctx.v_curvature`
-(rather than `base_target_arc`) for two reasons: the standard arc may be
+(rather than `base_target_arc`) in both branches: the standard arc may be
 truncated by target-side full-brake modeling at near-head-on angles, and its
-Fix D over-rotation damping straightens the arc of a target genuinely
-sweeping through a corner. Either one parks the projected endpoint inside
-ego's lane and masks the true sweep destination, so the filter never
-suppresses and the corner cross-traffic becomes a phantom brake.
+Fix D over-rotation damping straightens the arc of a target genuinely sweeping
+through a corner. Either one distorts the projected centre path and endpoint and
+masks where the cross-traffic actually sweeps to.
 
 Non-TMP targets bypass entirely: AI vehicles' arcs are deterministic and
 already handled by `OppositeLaneFilter`, `TurningCrossTrafficFilter`, etc.
@@ -388,13 +416,25 @@ aeb.snapshot                       # AEBSnapshot: full debug state
      barely depends on arc extrapolation: instant), (c) continuity: a
      colliding target already in `_latched_threat_ids` (instant), or (d)
      qualification sustained for a geometry-graded confirm window (tracked
-     by `AEBThread._engage_qual_since`, reset when qualification lapses or
-     while engaged): `aeb_engage_confirm_s` when any qualifying colliding
+     by `AEBThread._engage_confirm`, an `OccupancyConfirm`; reset while
+     engaged): `aeb_engage_confirm_s` when any qualifying colliding
      target is **near-certain** (in `Lane.EGO`, or aligned `|fwd_dot| ≥
      aeb_certain_fwd_dot` in any lane: one classification step from
      certain), else `aeb_engage_confirm_oblique_s` for **oblique
      out-of-lane** threats, the extrapolation-fragile class (corner
      sweeps, mutual-turn passes) whose corpus phantoms qualify ≤ ~0.15 s.
+     **Lapse tolerance (occupancy window).** The confirm window is not a
+     hard-reset timer. `OccupancyConfirm` (`core/aeb/confirm.py`) tracks the
+     per-frame qualification over a trailing window and fires when the
+     window has elapsed AND the qualified fraction reaches
+     `aeb_confirm_occupancy`, dropping the streak only after more than
+     `aeb_confirm_max_gap_frames` consecutive unqualified frames. This
+     absorbs the per-frame detection flicker (the 36-sample collision time
+     grid, TMP jitter walking the predicted course across coverage edges)
+     that used to restart the whole window on a single missed frame, without
+     letting sparse 1-tick blips accumulate: they never reach the occupancy
+     threshold and a long gap resets. The instant paths (a)/(b)/(c) and the
+     reset-while-engaged behaviour are unchanged.
      Known trade at 0.20 s: a genuine perpendicular crosser whose
      qualification sustains ~0.16 s (clip ffd29f9e) loses the brake: warn
      still fires and the TTB slam net catches a materializing threat, but
@@ -408,6 +448,13 @@ aeb.snapshot                       # AEBSnapshot: full debug state
      phantoms enter at ~200% of max (collapsed d_remaining) while genuine
      rear-ends enter at 70-100%. Warn and the FF-assist layer are untouched
      by this gate.
+   - **Per-target risk confirm** shares the same `OccupancyConfirm`
+     mechanism (`AEBThread._risk_confirm`, keyed by vehicle id). A colliding
+     target must sustain qualification for `risk_confirm_s`
+     (`risk_confirm_oncoming_s` for head-on) before it contributes to the
+     aggregates; an id survives up to `aeb_confirm_max_gap_frames` missed
+     frames before being dropped, so a single collision-grid dropout no
+     longer restarts its clock or evicts it from the tracking dict.
    - Disarm when `effective_required <  aeb_disarm_frac · effective_max` **AND
      NOT** `brake_ttb_active` **AND NOT** `geom_threat_latched` **AND NOT**
      `latched_distance_threat`.
@@ -424,14 +471,16 @@ aeb.snapshot                       # AEBSnapshot: full debug state
      OR `time_to_brake < warn_ttb`, gated by warn persistence: certain /
      near-certain geometry, imminent TTB, latched threats, and active
      engagement warn instantly, while oblique out-of-lane threats must
-     sustain the raw warn condition for `aeb_warn_confirm_oblique_s`
-     (tracked by `AEBThread._warn_qual_since`; the streak follows the raw
-     condition, so the user-braking display suppression never resets it).
-     Because warn qualification is strictly looser than engage
-     qualification and `aeb_warn_confirm_oblique_s ≤
-     aeb_engage_confirm_oblique_s − 0.1`, an oblique engagement is always
-     preceded by ≥ 0.1 s of warning: the driver's gas-override reaction
-     window.
+     sustain the raw warn condition for the `aeb_warn_confirm_oblique_s`
+     occupancy window (tracked by `AEBThread._warn_confirm`, an
+     `OccupancyConfirm` observed every frame; the streak follows the raw
+     condition, so the user-braking display suppression never resets it, and
+     an isolated 1-2 frame dropout does not restart the window). Because warn
+     qualifies on a superset of the engage-qualified frames, uses the same
+     `aeb_confirm_occupancy` / `aeb_confirm_max_gap_frames`, and
+     `aeb_warn_confirm_oblique_s ≤ aeb_engage_confirm_oblique_s − 0.1`, the
+     warn streak confirms at least 0.1 s before an oblique engagement even
+     through flicker: the driver's gas-override reaction window is preserved.
    - `AEB_brake` is true while engagement is latched and the published target
      is above zero. Other subsystems (cruise/HMI) gate off this flag.
 7. Hold semantics: warn/brake state holds for 0.3 s after a downgrade to
@@ -562,12 +611,15 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `evasion_g_oncoming` | 0.13×9.81 | Oncoming evasion lateral accel |
 | `evasion_max_dkappa` | 0.008 /m | Max curvature offset for evasion arcs |
 | `opposite_lane_kappa_scale` | 2.0 | Kappa multiplier when target in own lane |
-| `turning_diverge_kappa` | 0.007 /m | Corner threshold for Fix-C/D conditions |
+| `turning_diverge_kappa` | 0.007 /m | Corner threshold for Fix-C/D conditions; also the straight/turning split in `TmpCrossTrafficFilter` |
+| `tmp_cross_center_hit_dist` | 2.5 m | `TmpCrossTrafficFilter` straight-snapshot genuine-crosser threshold: centre closest-approach at/below this is a real T-bone (pass), above is a body-graze clear (suppress) |
 | `co_same_turn_lookahead_scale` | 0.5 | Extended lookahead fraction of horizon |
 | `diverge_dip_samples` | 8 | `_is_approaching` window samples for the in-lane pass-through dip check |
 | `aeb_engage_confirm_s` | 0.06 s | Sustained-qualification wait for near-certain engagement entries (3rd tick at 30 Hz) |
 | `aeb_engage_confirm_oblique_s` | 0.20 s | Sustained-qualification wait for oblique out-of-lane entries (extrapolation-fragile class) |
 | `aeb_warn_confirm_oblique_s` | 0.10 s | Warn persistence for oblique out-of-lane threats; keeps ≥ 0.1 s warn lead ahead of an oblique engagement |
+| `aeb_confirm_occupancy` | 0.6 | Min qualified fraction over the trailing confirm window for the three `OccupancyConfirm` streaks (risk / engage / warn) to fire |
+| `aeb_confirm_max_gap_frames` | 2 | Max consecutive unqualified frames tolerated before a confirm streak drops; absorbs isolated collision-grid / TMP-jitter dropouts |
 | `aeb_certain_fwd_dot` | 0.95 | `\|fwd_dot\|` above which an in-lane colliding target is "certain" and skips the confirm wait |
 | `corner_entry_min_road_bend` | 0.10 rad | Min ego↔tangent angle for Mode-B suppression |
 | `corner_entry_min_lateral` | 0.4 m | Min |lat_signed| to claim "off ego axis" (Mode B) |

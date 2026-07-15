@@ -16,6 +16,7 @@ from typing import Any
 from core.radar.traffic import (
     Vehicle, Position, Quaternion, Size, Trailer,
     ArcPath, build_arc, arc_arc_collision, _accel_to_arc_params,
+    capsule_extents,
 )
 from core.aeb.calibration import AEBCalibration, DEFAULT as CAL_DEFAULT
 from core.aeb.filters import (
@@ -214,14 +215,17 @@ def evaluate_frame(
     body_offset = (cal.arc_start_pctg - 0.5) * (2.0 * ego_half_l)
     ego_front_x = ego.x + body_offset * fwd_x
     ego_front_z = ego.z + body_offset * fwd_z
+    ego_cap_fwd, ego_cap_back = capsule_extents(ego_half_l, ego_half_l, body_offset)
 
     ego_arc = build_arc(
         ego_front_x, ego_front_z, ego_yaw_rad_val, ego_speed,
         ego_curvature, ego_hw, dynamic_horizon,
+        fwd_len=ego_cap_fwd, back_len=ego_cap_back,
     )
     ego_braked_arc = build_arc(
         ego_front_x, ego_front_z, ego_yaw_rad_val, ego_speed,
         ego_curvature, ego_hw, dynamic_horizon, decel=effective_decel,
+        fwd_len=ego_cap_fwd, back_len=ego_cap_back,
     )
 
     ego_evasion_left = ego_evasion_right = None
@@ -238,10 +242,12 @@ def evaluate_frame(
         ego_evasion_left = build_arc(
             ego_front_x, ego_front_z, ego_yaw_rad_val, ego_speed,
             left_kappa, ego_hw, dynamic_horizon,
+            fwd_len=ego_cap_fwd, back_len=ego_cap_back,
         )
         ego_evasion_right = build_arc(
             ego_front_x, ego_front_z, ego_yaw_rad_val, ego_speed,
             right_kappa, ego_hw, dynamic_horizon,
+            fwd_len=ego_cap_fwd, back_len=ego_cap_back,
         )
 
     ego_fwd_x = ego_arc.fwd_x

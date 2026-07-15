@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from core.radar.traffic import (
     ArcPath, Vehicle,
     build_arc, arc_arc_collision, _accel_to_arc_params,
+    capsule_extents, pair_body_dist_sq,
 )
 from core.radar.ego_path import ego_curvature_from_history
 from core.aeb.calibration import AEBCalibration
@@ -166,21 +167,10 @@ def _cross_zone_padding(ego_yaw_rad: float, v_yaw_rad: float, v_speed_ms: float,
 
 
 def _apply_cross_zone(arc: ArcPath, padding: float) -> list[ArcPath]:
-    if padding < 0.1:
-        return [arc]
-    front = build_arc(
-        arc.start_x + padding * arc.fwd_x,
-        arc.start_z + padding * arc.fwd_z,
-        arc.yaw_rad, arc.speed, arc.curvature, arc.half_width, arc.horizon,
-        decel=arc.decel, accel=arc.accel,
-    )
-    rear = build_arc(
-        arc.start_x - padding * arc.fwd_x,
-        arc.start_z - padding * arc.fwd_z,
-        arc.yaw_rad, arc.speed, arc.curvature, arc.half_width, arc.horizon,
-        decel=arc.decel, accel=arc.accel,
-    )
-    return [arc, front, rear]
+    """Return [arc]. Legacy ghost-arc comb subsumed by ArcPath capsule body
+    extents (see traffic.py::_sampled_collision). Kept as a pass-through so the
+    padding plumbing retires without editing every call site."""
+    return [arc]
 
 
 def _earliest_hit(
@@ -220,17 +210,19 @@ def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1,
     extrapolation artifact (e.g. overtaking a slower outer-lane vehicle in a
     shared turn: both arcs cross even though the real vehicles hold their
     lanes), which is exactly what this filter exists to suppress.
+
+    Distances are body-to-body (capsule segment distance) when the arcs carry
+    body extents, matching the collision test: measuring reference-point
+    distance instead reads a passing/overtaking body as still "approaching"
+    because the capsule contact time is when the near bodies touch, long before
+    the reference points reach closest approach.
     """
-    ax0, az0 = a.position_at_time(t)
-    bx0, bz0 = b.position_at_time(t)
-    d0_sq = (ax0 - bx0) ** 2 + (az0 - bz0) ** 2
+    d0_sq = pair_body_dist_sq(a, b, t)
     contact_sq = (a.half_width + b.half_width) ** 2
     di_sq = d0_sq
     for i in range(1, dip_samples + 1):
         ti = t + dt * i / dip_samples
-        axi, azi = a.position_at_time(ti)
-        bxi, bzi = b.position_at_time(ti)
-        di_sq = (axi - bxi) ** 2 + (azi - bzi) ** 2
+        di_sq = pair_body_dist_sq(a, b, ti)
         if dip_active and di_sq < contact_sq:
             return True
     return di_sq < d0_sq
@@ -294,6 +286,7 @@ def _build_vehicle_collision_data(
         decel=target_override_decel,
         arc_start_pctg=cal.arc_start_pctg,
         curvature_override=arc_curvature,
+        body_capsule=True,
     )
     tr_hw_colls: list[float] = []
     trailer_arcs_coll: list[ArcPath] = []
@@ -308,6 +301,10 @@ def _build_vehicle_collision_data(
         tr_fwd_x_c = -math.sin(tr_yaw_rad)
         tr_fwd_z_c = -math.cos(tr_yaw_rad)
         tr_body_offset_c = (tr_effective_p_c - 0.5) * tr.size.length
+        tr_half_l_c = tr.size.length * 0.5
+        tr_cap_fwd_c, tr_cap_back_c = capsule_extents(
+            tr_half_l_c, tr_half_l_c, tr_body_offset_c,
+        )
         trailer_arcs_coll.append(
             build_arc(
                 tr_pos.x + tr_body_offset_c * tr_fwd_x_c,
@@ -319,6 +316,8 @@ def _build_vehicle_collision_data(
                 dynamic_horizon,
                 decel=target_decel,
                 accel=target_accel,
+                fwd_len=tr_cap_fwd_c,
+                back_len=tr_cap_back_c,
             )
         )
     all_target_arcs = [veh_arc_coll] + trailer_arcs_coll
@@ -556,6 +555,7 @@ class OppositeLaneFilter:
                 base_target_arc.curvature + delta_kappa_t,
                 base_target_arc.half_width, base_target_arc.horizon,
                 decel=evasion_decel,
+                fwd_len=base_target_arc.fwd_len, back_len=base_target_arc.back_len,
             )
             tgt_right = build_arc(
                 base_target_arc.start_x, base_target_arc.start_z,
@@ -563,6 +563,7 @@ class OppositeLaneFilter:
                 base_target_arc.curvature - delta_kappa_t,
                 base_target_arc.half_width, base_target_arc.horizon,
                 decel=evasion_decel,
+                fwd_len=base_target_arc.fwd_len, back_len=base_target_arc.back_len,
             )
             left_clears = arc_arc_collision(
                 ctx.ego_arc, tgt_left, cal.corridor_margin, cal.collision_samples,
@@ -623,6 +624,7 @@ class OppositeLaneFilterMirrored:
                 base_target_arc.curvature + delta_kappa_t,
                 base_target_arc.half_width, base_target_arc.horizon,
                 decel=0.0,
+                fwd_len=base_target_arc.fwd_len, back_len=base_target_arc.back_len,
             )
             tgt_right = build_arc(
                 base_target_arc.start_x, base_target_arc.start_z,
@@ -630,6 +632,7 @@ class OppositeLaneFilterMirrored:
                 base_target_arc.curvature - delta_kappa_t,
                 base_target_arc.half_width, base_target_arc.horizon,
                 decel=0.0,
+                fwd_len=base_target_arc.fwd_len, back_len=base_target_arc.back_len,
             )
             left_clears = arc_arc_collision(
                 ctx.ego_arc, tgt_left, cal.corridor_margin, cal.collision_samples,
@@ -719,25 +722,53 @@ class TurningCrossTrafficFilter:
 
 
 class TmpCrossTrafficFilter:
-    """Suppress TMP vehicles whose projected arc terminates outside ego's lane.
+    """Suppress TMP cross-traffic whose jittered snapshot arc only grazes ego's lane.
 
-    TMP (multiplayer) vehicle data has higher uncertainty than AI vehicles —
+    TMP (multiplayer) vehicle data has higher uncertainty than AI vehicles:
     network jitter, position smoothing, and inconsistent yaw/curvature
-    snapshots produce phantom arc-projection collisions during routine
-    intersection maneuvers (e.g. a TMP vehicle making a side-road right turn
-    appears to cut through ego's lane in the per-frame snapshot).
+    snapshots project a target's arc through ego's lane during routine
+    intersection maneuvers even though the actual MP target sweeps past. The
+    canonical phantom is mid-turn (e.g. a TMP vehicle making a side-road right
+    turn appears to cut through ego's lane in the per-frame snapshot), but a
+    straight snapshot can also produce a body-graze hit: a long vehicle crossing
+    ahead clips ego's corridor with its 10 m tail while its centre passes metres
+    clear. The old filter answered "where does the target END UP at the 3 s
+    horizon" (suppress unless the endpoint lands in Lane.EGO), which suppressed
+    the mid-turn phantom AND the straight grazer, but also suppressed a genuine
+    straight perpendicular crosser on a dead-center collision course at every
+    range (its endpoint always lands tens of metres past ego's lane: corpus FN
+    clip ffd29f9e). The question is "does the target occupy ego's lane WHEN ego
+    arrives", not "where does it end up".
 
-    A TMP vehicle whose extrapolated arc lands laterally outside ego's lane
-    (OPPOSITE_OR_OUTER or OFF_ROAD) is mid-maneuver and will be clear of
-    ego's path by the time ego arrives. Genuine threats: head-on or
-    co-directional targets continuing into ego's lane: keep their projected
-    arc inside Lane.EGO and pass through this filter to the standard
-    pipeline. Co-directional in-lane vehicles are skipped here so that
-    legitimate same-lane following / overtake handling stays with the
-    dedicated stages.
+    Split by trust in the snapshot's motion (`ctx.v_curvature`):
 
-    Non-TMP targets bypass entirely: AI vehicles follow deterministic
-    traffic rules, so their snapshot-projected arc is reliable.
+    - Straight snapshot (`|v_curvature| < turning_diverge_kappa`): the motion is
+      trustworthy, so decide on the geometry directly. Take the closest approach
+      of the two reference centres over the horizon (ego arc vs the non-braked
+      sweep arc). If they genuinely meet
+      (`d_min <= cal.tmp_cross_center_hit_dist`) it is a real T-bone: pass
+      (brake). If the centres miss (the hit is only the long body grazing as it
+      clears): suppress.
+    - Turning snapshot (`|v_curvature| >= turning_diverge_kappa`): the jittered
+      curvature makes the predicted centre path unreliable, so keep the
+      full-horizon endpoint-lane test. If the sweep arc ends in OPPOSITE_OR_OUTER
+      / OFF_ROAD the target sweeps clear: suppress. If it ends in Lane.EGO it is
+      a real continuing threat: pass.
+
+    Applies to TMP vehicles (`v.is_tmp=True`) that are not co-directional and
+    have non-trivial speed. Co-directional in-lane vehicles are skipped so that
+    legitimate same-lane following / overtake handling stays with the dedicated
+    stages.
+
+    Uses a freshly-built non-braking arc from the undamped `ctx.v_curvature`
+    (rather than `base_target_arc`) for both branches: the standard arc may be
+    truncated by target-side full-brake modeling at near-head-on angles, and its
+    Fix D over-rotation damping straightens the arc of a target genuinely
+    sweeping through a corner. Either one distorts the projected centre path and
+    endpoint and masks where the cross-traffic actually sweeps to.
+
+    Non-TMP targets bypass entirely: AI vehicles follow deterministic traffic
+    rules, so their snapshot-projected arc is reliable.
     """
     name = "TmpCrossTrafficFilter"
 
@@ -752,6 +783,7 @@ class TmpCrossTrafficFilter:
         if ctx.abs_v_speed < 1.0:
             return _PASS
         cal = self._cal
+        straight = abs(ctx.v_curvature) < cal.turning_diverge_kappa
         any_hit = False
         for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
             cross_arcs = (ctx.precomputed_cross_arcs[arc_idx]
@@ -764,26 +796,89 @@ class TmpCrossTrafficFilter:
             if ghost_hit is None:
                 continue
             any_hit = True
-            # Use a non-braking arc built from the undamped measured curvature
-            # to project the full-horizon end position. The standard base arc
-            # may be truncated by target-side brake modeling for near-head-on
-            # targets, and its Fix D damping straightens the arc of a target
-            # genuinely sweeping through a corner: both park the endpoint in
-            # ego's lane and mask where the cross-traffic actually sweeps to.
             sweep_arc = build_arc(
                 base_target_arc.start_x, base_target_arc.start_z,
                 base_target_arc.yaw_rad, base_target_arc.speed,
                 ctx.v_curvature, base_target_arc.half_width,
                 base_target_arc.horizon, decel=0.0,
             )
-            end_x, end_z = sweep_arc.position_at_time(sweep_arc.horizon)
-            _, end_d_abs = project_to_ego_arc(ctx.ego_arc, end_x, end_z)
-            if classify(end_d_abs, cal) == Lane.EGO:
-                # Arc ends inside ego's lane: real threat, do not suppress.
-                return _PASS
+            if straight:
+                # Trustworthy straight snapshot: a genuine collision brings the
+                # two reference centres together; a body-only graze (long tail
+                # sweeping clear) keeps them apart. Pass the real T-bone, let
+                # the grazer fall through to suppression below.
+                if self._center_min_dist(ctx.ego_arc, sweep_arc) <= cal.tmp_cross_center_hit_dist:
+                    return _PASS
+            else:
+                # Jitter-prone turning snapshot: the endpoint-lane heuristic
+                # decides whether the swept arc clears ego's lane.
+                end_x, end_z = sweep_arc.position_at_time(sweep_arc.horizon)
+                _, end_d_abs = project_to_ego_arc(ctx.ego_arc, end_x, end_z)
+                if classify(end_d_abs, cal) == Lane.EGO:
+                    return _PASS
         if any_hit:
             return _suppress("TmpCrossTrafficFilter")
         return _PASS
+
+    def _center_min_dist(self, ego_arc: ArcPath, target_arc: ArcPath) -> float:
+        """Closest approach of the two reference centres over the shared horizon."""
+        horizon = min(ego_arc.horizon, target_arc.horizon)
+        n = self._cal.collision_samples
+        best = float("inf")
+        for k in range(n + 1):
+            t = horizon * k / n
+            ex, ez = ego_arc.position_at_time(t)
+            tx, tz = target_arc.position_at_time(t)
+            d = math.hypot(ex - tx, ez - tz)
+            if d < best:
+                best = d
+        return best
+
+
+class OutOfLaneParallelFilter:
+    """Suppress co-directional / stationary traffic that stays in its own lane.
+
+    The ArcPath capsule collision body registers a grazing corridor overlap for
+    a long vehicle driving or parked alongside ego, because the two long bodies
+    are within the corridor sum (body half-widths + margin) laterally over the
+    whole overlap. The point model only saw a fleeting reference-point crossing
+    at closest approach, which the diverge / evasion stages suppressed on timing
+    that the capsule contact time no longer matches.
+
+    A target whose center never enters ego's lane over the horizon
+    (arc-projected offset stays above ``lane_half_width``) is lane-keeping
+    adjacent traffic or a roadside object ego passes, not a collision course.
+    A genuine cut-in or crossing brings its center into ``Lane.EGO`` and is not
+    suppressed here; head-on own-lane oncoming is handled by
+    ``OppositeLaneFilter``; follow / latched threats are exempt.
+    """
+    name = "OutOfLaneParallelFilter"
+
+    def __init__(self, cal: AEBCalibration) -> None:
+        self._cal = cal
+
+    def apply(self, ctx: FilterContext) -> FilterResult:
+        if ctx.head_on:
+            return _PASS
+        cal = self._cal
+        stationary = ctx.abs_v_speed < cal.sweep_pass_max_target_speed
+        if not (ctx.co_directional or stationary):
+            return _PASS
+        if ctx.v.id in ctx.follow_threat_ids or ctx.v.id in ctx.latched_threat_ids:
+            return _PASS
+        if ctx.lane == Lane.EGO:
+            return _PASS
+        # Predicted center must stay out of ego's lane across the horizon.
+        n = max(1, cal.out_of_lane_scan_samples)
+        for base_target_arc in ctx.all_target_arcs:
+            horizon = base_target_arc.horizon
+            for k in range(n + 1):
+                t = horizon * k / n
+                px, pz = base_target_arc.position_at_time(t)
+                _, d_abs = project_to_ego_arc(ctx.ego_arc, px, pz)
+                if d_abs <= cal.lane_half_width:
+                    return _PASS
+        return _suppress("OutOfLaneParallelFilter")
 
 
 class SweepPassFilter:
@@ -973,6 +1068,7 @@ def build_pipeline(cal: AEBCalibration) -> list:
         OppositeLaneFilterMirrored(cal),
         CoDirectionalDivergeFilter(cal),
         TurningCrossTrafficFilter(cal),
+        OutOfLaneParallelFilter(cal),
         TmpCrossTrafficFilter(cal),
         SweepPassFilter(cal),
         CornerEntryStationaryFilter(cal),

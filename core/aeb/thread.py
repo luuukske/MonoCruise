@@ -24,8 +24,10 @@ from core.settings import Settings
 from core.radar.traffic import (
     Vehicle,
     ArcPath, build_arc, arc_arc_collision, _accel_to_arc_params,
+    capsule_extents,
 )
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT
+from core.aeb.confirm import OccupancyConfirm
 from core.aeb.lane_frame import project_to_ego_arc, classify, Lane
 from core.aeb.capture import get_recorder
 from core.aeb.clip_schema import AEBTickRecord, AEBWarmState, ConsumedContext, LiveAEB
@@ -362,22 +364,12 @@ def _cross_zone_padding(
 
 
 def _apply_cross_zone(arc: ArcPath, padding: float) -> list[ArcPath]:
-    """Return [arc] plus two ghost arcs at ±padding along the target heading."""
-    if padding < 0.1:
-        return [arc]
-    front = build_arc(
-        arc.start_x + padding * arc.fwd_x,
-        arc.start_z + padding * arc.fwd_z,
-        arc.yaw_rad, arc.speed, arc.curvature, arc.half_width, arc.horizon,
-        decel=arc.decel, accel=arc.accel,
-    )
-    rear = build_arc(
-        arc.start_x - padding * arc.fwd_x,
-        arc.start_z - padding * arc.fwd_z,
-        arc.yaw_rad, arc.speed, arc.curvature, arc.half_width, arc.horizon,
-        decel=arc.decel, accel=arc.accel,
-    )
-    return [arc, front, rear]
+    """Return [arc]. The legacy ghost-arc comb (extra arcs shifted +/-padding
+    along the target heading to fake body-length coverage) is subsumed by the
+    ArcPath capsule body extents, which cover the real body without the
+    speed-scaled spacing that opened coverage holes. Kept as a pass-through so
+    the padding plumbing can be retired without touching every call site."""
+    return [arc]
 
 
 def _earliest_hit(
@@ -583,6 +575,7 @@ def _build_vehicle_collision_data(
         decel=arc_decel,
         arc_start_pctg=cal.arc_start_pctg,
         curvature_override=arc_curvature,
+        body_capsule=True,
     )
     tr_hw_colls: list[float] = []
     trailer_arcs_coll: list[ArcPath] = []
@@ -599,6 +592,10 @@ def _build_vehicle_collision_data(
         tr_fwd_x_c = -math.sin(tr_yaw_rad)
         tr_fwd_z_c = -math.cos(tr_yaw_rad)
         tr_body_offset_c = (tr_effective_p_c - 0.5) * tr.size.length
+        tr_half_l_c = tr.size.length * 0.5
+        tr_cap_fwd_c, tr_cap_back_c = capsule_extents(
+            tr_half_l_c, tr_half_l_c, tr_body_offset_c,
+        )
         trailer_arcs_coll.append(
             build_arc(
                 tr_pos.x + tr_body_offset_c * tr_fwd_x_c,
@@ -610,6 +607,8 @@ def _build_vehicle_collision_data(
                 dynamic_horizon,
                 decel=target_decel,
                 accel=target_accel,
+                fwd_len=tr_cap_fwd_c,
+                back_len=tr_cap_back_c,
             )
         )
     all_target_arcs = [veh_arc_coll] + trailer_arcs_coll
@@ -749,7 +748,11 @@ class AEBThread(BaseThread):
         self._capture_prev_state: AEBState = AEBState.STANDBY
         self._prev_ego_speed_capture_ms: float | None = None
         self._last_snapshot: AEBSnapshot | None = None
-        self._risk_first_seen: dict[int, float] = {}
+        # Per-target risk confirm streaks (OccupancyConfirm). A colliding
+        # target must sustain qualification for its confirm window before it
+        # contributes to the aggregates; an isolated 1-2 frame collision-grid
+        # dropout no longer restarts its clock or drops it from the dict.
+        self._risk_confirm: dict[int, OccupancyConfirm] = {}
         self._radar_visualizer = None
         self._radar_vis_last_vehicle_time: float = -1.0
         self._latched_filter_ego_kmh: float | None = None
@@ -774,13 +777,24 @@ class AEBThread(BaseThread):
         self._follow_threat_ids: set[int] = set()
         # Continuous-decel state
         self._engaged: bool = False
-        # Monotonic time when the current uninterrupted engagement
-        # qualification streak began; None when not qualifying or engaged.
-        # Backs the aeb_engage_confirm_s tier of the entry certainty gate.
-        self._engage_qual_since: float | None = None
-        # Same for the raw warn condition; backs the oblique warn
-        # persistence gate (aeb_warn_confirm_oblique_s).
-        self._warn_qual_since: float | None = None
+        # Engagement qualification streak, occupancy-windowed (lapse-tolerant
+        # replacement for the old hard-reset timer). window_s is re-set each
+        # frame to the geometry-graded confirm window (near-certain vs
+        # oblique). Reset while engaged, per the entry certainty gate.
+        self._engage_confirm = OccupancyConfirm(
+            self._cal.aeb_confirm_occupancy,
+            self._cal.aeb_confirm_max_gap_frames,
+            self._cal.aeb_engage_confirm_oblique_s,
+        )
+        # Raw warn-condition persistence streak, same mechanism. Fixed window
+        # aeb_warn_confirm_oblique_s. Warn qualifies on a superset of the
+        # engage frames and has the shorter window, so warn always confirms
+        # >= 0.1 s ahead of an oblique engagement even through flicker.
+        self._warn_confirm = OccupancyConfirm(
+            self._cal.aeb_confirm_occupancy,
+            self._cal.aeb_confirm_max_gap_frames,
+            self._cal.aeb_warn_confirm_oblique_s,
+        )
         self._published_target_ms2: float = 0.0
         self._last_target_change_mono: float = 0.0
         self._prev_loop_mono: float | None = None
@@ -1120,10 +1134,17 @@ class AEBThread(BaseThread):
         _ego_body_offset = (cal.arc_start_pctg - 0.5) * (2.0 * ego_half_l)
         ego_front_x = ego_x + _ego_body_offset * _ego_fwd_x
         ego_front_z = ego_z + _ego_body_offset * _ego_fwd_z
+        # Ego body centered on ego_x with half-length ego_half_l; the arc
+        # reference sits _ego_body_offset behind center, so the capsule extents
+        # are asymmetric about the reference (front reaches farther than rear).
+        ego_cap_fwd, ego_cap_back = capsule_extents(
+            ego_half_l, ego_half_l, _ego_body_offset,
+        )
 
         ego_arc = build_arc(
             ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
             ego_curvature, ego_hw, dynamic_horizon,
+            fwd_len=ego_cap_fwd, back_len=ego_cap_back,
         )
 
         run_collision = aeb_active
@@ -1134,6 +1155,7 @@ class AEBThread(BaseThread):
                 ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
                 ego_curvature, ego_hw, dynamic_horizon,
                 decel=effective_decel,
+                fwd_len=ego_cap_fwd, back_len=ego_cap_back,
             )
 
         ego_evasion_left: ArcPath | None = None
@@ -1152,10 +1174,12 @@ class AEBThread(BaseThread):
             ego_evasion_left = build_arc(
                 ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
                 left_kappa, ego_hw, dynamic_horizon,
+                fwd_len=ego_cap_fwd, back_len=ego_cap_back,
             )
             ego_evasion_right = build_arc(
                 ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
                 right_kappa, ego_hw, dynamic_horizon,
+                fwd_len=ego_cap_fwd, back_len=ego_cap_back,
             )
 
         ego_fwd_x = ego_arc.fwd_x
@@ -1482,12 +1506,19 @@ class AEBThread(BaseThread):
                     if ctx.lane == Lane.EGO or aligned:
                         nearcertain_geom_ids.add(v.id)
                     newly_risky.add(v.id)
-                    if v.id not in self._risk_first_seen:
-                        self._risk_first_seen[v.id] = now_mono
-                    confirm_duration = (
+                    rc = self._risk_confirm.get(v.id)
+                    if rc is None:
+                        rc = OccupancyConfirm(
+                            cal.aeb_confirm_occupancy,
+                            cal.aeb_confirm_max_gap_frames,
+                            cal.risk_confirm_s,
+                        )
+                        self._risk_confirm[v.id] = rc
+                    rc.window_s = (
                         cal.risk_confirm_oncoming_s if head_on else cal.risk_confirm_s
                     )
-                    if now_mono - self._risk_first_seen[v.id] < confirm_duration:
+                    rc.observe(now_mono, True)
+                    if not rc.confirmed(now_mono):
                         continue
 
                     if unbraked_ttc < best_unbraked_ttc:
@@ -1597,9 +1628,13 @@ class AEBThread(BaseThread):
 
                 vehicle_dicts.append(veh_dict)
 
-        self._risk_first_seen = {
-            k: v for k, v in self._risk_first_seen.items() if k in newly_risky
-        }
+        for vid in list(self._risk_confirm.keys()):
+            if vid in newly_risky:
+                continue
+            rc = self._risk_confirm[vid]
+            rc.observe(now_mono, False)
+            if not rc.tracking:
+                del self._risk_confirm[vid]
         _active_vids = {v.id for v in vehicles_eff}
         self._curvature_blender.prune(_active_vids)
         for vid in list(self._los_tracks.keys()):
@@ -1739,7 +1774,7 @@ class AEBThread(BaseThread):
                     and not geom_threat_latched
                     and not latched_distance_threat):
                 self._engaged = False
-            self._engage_qual_since = None
+            self._engage_confirm.reset()
         else:
             # New engagements are gated by |ego_speed|: below the threshold
             # the truck is essentially crawling, the user has authority
@@ -1747,9 +1782,20 @@ class AEBThread(BaseThread):
                          and aeb_speed_ok
                          and (effective_required_engage >= engage_threshold
                               or brake_ttb_engage_active))
+            # Confirm window graded by geometry: near-certain targets
+            # (in-lane or aligned) get the short window; oblique out-of-lane
+            # crossers, the extrapolation-fragile class, must sustain
+            # qualification longer. Set every frame (qualified or not) so the
+            # occupancy streak trims and confirms against the current window,
+            # then feed this frame's qualification into it. An isolated 1-2
+            # frame dropout no longer restarts the window (lapse tolerance).
+            self._engage_confirm.window_s = (
+                cal.aeb_engage_confirm_s
+                if any(vid in nearcertain_geom_ids for vid in colliding_ids)
+                else cal.aeb_engage_confirm_oblique_s
+            )
+            self._engage_confirm.observe(now_mono, qualified)
             if qualified:
-                if self._engage_qual_since is None:
-                    self._engage_qual_since = now_mono
                 # Certainty tiers that engage without the confirm wait:
                 # imminent (full brake barely avoids), certain geometry
                 # (aligned in-lane target, engage-eligible), or continuity
@@ -1763,21 +1809,8 @@ class AEBThread(BaseThread):
                     or any(vid in self._latched_threat_ids
                            for vid in colliding_ids)
                 )
-                # Confirm window graded by geometry: near-certain targets
-                # (in-lane or aligned) get the short window; oblique
-                # out-of-lane crossers, the extrapolation-fragile class,
-                # must sustain qualification longer.
-                confirm_window = (
-                    cal.aeb_engage_confirm_s
-                    if any(vid in nearcertain_geom_ids for vid in colliding_ids)
-                    else cal.aeb_engage_confirm_oblique_s
-                )
-                confirmed = (now_mono - self._engage_qual_since
-                             >= confirm_window)
-                if certain or confirmed:
+                if certain or self._engage_confirm.confirmed(now_mono):
                     self._engaged = True
-            else:
-                self._engage_qual_since = None
 
         # Promote every currently-colliding target into the latched set so
         # subsequent frames keep them in the pipeline and in the hold check.
@@ -1841,29 +1874,25 @@ class AEBThread(BaseThread):
         # Warn persistence gate: mirrors the engagement certainty tiers.
         # Certain/near-certain geometry, imminent TTB, latched threats, and
         # active engagement warn instantly; oblique out-of-lane threats must
-        # sustain the warn condition for aeb_warn_confirm_oblique_s, which
-        # filters the transient phantom beeps of that class while keeping
-        # >= 0.1 s of warning ahead of an oblique engagement (whose confirm
-        # is aeb_engage_confirm_oblique_s; warn qualification is strictly
-        # looser than engage qualification, so the streak starts no later).
-        # The streak tracks the raw threat condition so the user-braking
-        # display suppression below never resets it.
+        # sustain the warn condition for the occupancy window
+        # aeb_warn_confirm_oblique_s, which filters the transient phantom
+        # beeps of that class while keeping >= 0.1 s of warning ahead of an
+        # oblique engagement (whose confirm is aeb_engage_confirm_oblique_s;
+        # warn qualifies on a superset of the engage frames and has the
+        # shorter window, so its streak confirms first even through flicker).
+        # The streak tracks the raw threat condition every frame so the
+        # user-braking display suppression below never resets it, and an
+        # isolated 1-2 frame dropout does not restart the window.
+        self._warn_confirm.observe(now_mono, warn_raw)
         if warn_raw:
-            if self._warn_qual_since is None:
-                self._warn_qual_since = now_mono
             warn_instant = (
                 self._engaged
                 or brake_ttb_active
                 or any(vid in nearcertain_geom_ids for vid in colliding_ids)
                 or any(vid in self._latched_threat_ids for vid in colliding_ids)
             )
-            aeb_warn = (
-                warn_instant
-                or (now_mono - self._warn_qual_since
-                    >= cal.aeb_warn_confirm_oblique_s)
-            )
+            aeb_warn = warn_instant or self._warn_confirm.confirmed(now_mono)
         else:
-            self._warn_qual_since = None
             aeb_warn = False
 
         user_braking_now = self._read_user_braking()
@@ -1969,8 +1998,9 @@ class AEBThread(BaseThread):
                 pass
         self._latched_filter_ego_kmh = None
         self._engaged = False
-        self._engage_qual_since = None
-        self._warn_qual_since = None
+        self._engage_confirm.reset()
+        self._warn_confirm.reset()
+        self._risk_confirm.clear()
         self._published_target_ms2 = 0.0
         self._last_target_change_mono = 0.0
         self._prev_loop_mono = None

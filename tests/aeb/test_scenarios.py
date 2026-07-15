@@ -42,6 +42,8 @@ _SCENARIO_MODULES = [
     ("fp_far_behind_high_closure", "FP"),
     ("fp_mp_stationary_corner_entry", "FP"),
     ("tp_fast_closing_lead", "TP"),
+    ("tp_fast_perpendicular_crosser", "TP"),
+    ("tp_tmp_perpendicular_crosser", "TP"),
 ]
 
 

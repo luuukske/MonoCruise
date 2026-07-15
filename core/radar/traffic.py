@@ -540,6 +540,16 @@ class ArcPath:
     decel: float = 0.0
     accel: float = 0.0
 
+    # Capsule body extents along the heading, measured from the arc reference
+    # point (start). fwd_len reaches toward the body front, back_len toward the
+    # body rear. Both default 0.0, which collapses the capsule to the reference
+    # point and preserves the legacy point/disc collision behavior for every
+    # consumer that does not set them (ACC, rendering). Set by AEB build sites
+    # so the collision test covers the whole vehicle body, not just its width.
+    # See core/radar/AGENTS.md 8.
+    fwd_len: float = 0.0
+    back_len: float = 0.0
+
     is_straight: bool = True
     center_x: float = 0.0
     center_z: float = 0.0
@@ -550,10 +560,12 @@ class ArcPath:
     fwd_x: float = 0.0
     fwd_z: float = -1.0
     _sign: float = 1.0
+    _has_body: bool = False
 
     def build(self) -> "ArcPath":
         """Compute cached fields (fwd, radius, center, arc_length, is_straight) from
         start, curvature, speed, decel/accel. Call after setting fields."""
+        self._has_body = self.fwd_len > 1e-9 or self.back_len > 1e-9
         self.fwd_x = -math.sin(self.yaw_rad)
         self.fwd_z = -math.cos(self.yaw_rad)
 
@@ -707,14 +719,30 @@ def build_arc(
     curvature: float, half_width: float, horizon: float,
     decel: float = 0.0,
     accel: float = 0.0,
+    fwd_len: float = 0.0,
+    back_len: float = 0.0,
 ) -> ArcPath:
     """Build and cache an ArcPath from start (x,z), yaw, speed, curvature, half_width,
-    horizon; optional decel/accel. Call this instead of constructing ArcPath directly."""
+    horizon; optional decel/accel. Call this instead of constructing ArcPath directly.
+    fwd_len/back_len give the body extents ahead of/behind the reference for a
+    capsule collision body; 0.0 (default) keeps point/disc behavior."""
     return ArcPath(
         start_x=x, start_z=z, yaw_rad=yaw_rad, speed=speed,
         curvature=curvature, half_width=half_width, horizon=horizon,
-        decel=decel, accel=accel,
+        decel=decel, accel=accel, fwd_len=fwd_len, back_len=back_len,
     ).build()
+
+
+def capsule_extents(
+    front_d: float, back_d: float, body_offset: float,
+) -> tuple[float, float]:
+    """Body capsule extents (fwd_len, back_len) measured from the arc reference.
+
+    front_d/back_d are the body front/rear distances from the pivot; body_offset
+    is the reference's signed offset from the pivot along the heading. Result is
+    clamped non-negative for the rare reverse-pivot case. Used by the ego and
+    trailer build sites so the reference-offset asymmetry is handled uniformly."""
+    return max(front_d - body_offset, 0.0), max(back_d + body_offset, 0.0)
 
 
 def arc_arc_collision(
@@ -734,12 +762,93 @@ def arc_arc_collision(
     corridor_sq = (a.half_width + b.half_width + margin) ** 2
     horizon = min(a.horizon, b.horizon)
 
+    # Capsule bodies (nonzero fwd_len/back_len) test segment overlap, not point
+    # overlap, so the closed-form ray-ray path (point-only) does not apply.
     if (a.is_straight and b.is_straight
+            and not a._has_body and not b._has_body
             and a.decel <= 0 and b.decel <= 0
             and a.accel == 0.0 and b.accel == 0.0):
         return _ray_ray_collision(a, b, corridor_sq, horizon, min_lateral_gap)
 
     return _sampled_collision(a, b, corridor_sq, horizon, n_samples, min_lateral_gap)
+
+
+def _seg_seg_dist_sq_mid(
+    ax0: float, az0: float, ax1: float, az1: float,
+    bx0: float, bz0: float, bx1: float, bz1: float,
+) -> tuple[float, float, float]:
+    """Squared distance between segments A(a0->a1), B(b0->b1) and the midpoint
+    of the closest-point pair. Degenerate segments (a point) are handled by the
+    point-to-segment projections. No allocations beyond the returned tuple."""
+    ux = ax1 - ax0
+    uz = az1 - az0
+    vx = bx1 - bx0
+    vz = bz1 - bz0
+    wx = ax0 - bx0
+    wz = az0 - bz0
+    a = ux * ux + uz * uz
+    b = ux * vx + uz * vz
+    c = vx * vx + vz * vz
+    d = ux * wx + uz * wz
+    e = vx * wx + vz * wz
+    den = a * c - b * b
+    if a <= 1e-12 and c <= 1e-12:
+        sc = 0.0
+        tc = 0.0
+    elif a <= 1e-12:
+        sc = 0.0
+        tc = min(1.0, max(0.0, e / c))
+    elif c <= 1e-12:
+        tc = 0.0
+        sc = min(1.0, max(0.0, -d / a))
+    else:
+        if den > 1e-12:
+            sc = (b * e - c * d) / den
+            sc = 0.0 if sc < 0.0 else (1.0 if sc > 1.0 else sc)
+        else:
+            sc = 0.0
+        tc = (b * sc + e) / c
+        if tc < 0.0:
+            tc = 0.0
+            sc = min(1.0, max(0.0, -d / a))
+        elif tc > 1.0:
+            tc = 1.0
+            sc = min(1.0, max(0.0, (b - d) / a))
+    cpax = ax0 + sc * ux
+    cpaz = az0 + sc * uz
+    cpbx = bx0 + tc * vx
+    cpbz = bz0 + tc * vz
+    dxx = cpax - cpbx
+    dzz = cpaz - cpbz
+    return dxx * dxx + dzz * dzz, (cpax + cpbx) * 0.5, (cpaz + cpbz) * 0.5
+
+
+def pair_body_dist_sq(a: ArcPath, b: ArcPath, t: float) -> float:
+    """Squared distance between the two arc bodies at time t: capsule
+    segment-to-segment when either arc carries body extents, else point-to-point
+    of the reference positions. Used by the diverge/approaching predicates so
+    they measure the same body geometry the collision test uses."""
+    if a._has_body or b._has_body:
+        da = a._dist_at_time(t)
+        ax, az = a.position_at_dist(da)
+        ha = a.heading_at_dist(da)
+        afx = -math.sin(ha)
+        afz = -math.cos(ha)
+        db = b._dist_at_time(t)
+        bx, bz = b.position_at_dist(db)
+        hb = b.heading_at_dist(db)
+        bfx = -math.sin(hb)
+        bfz = -math.cos(hb)
+        dsq, _, _ = _seg_seg_dist_sq_mid(
+            ax + a.fwd_len * afx, az + a.fwd_len * afz,
+            ax - a.back_len * afx, az - a.back_len * afz,
+            bx + b.fwd_len * bfx, bz + b.fwd_len * bfz,
+            bx - b.back_len * bfx, bz - b.back_len * bfz,
+        )
+        return dsq
+    ax, az = a.position_at_time(t)
+    bx, bz = b.position_at_time(t)
+    return (ax - bx) ** 2 + (az - bz) ** 2
 
 
 def _ray_ray_collision(
@@ -804,9 +913,51 @@ def _sampled_collision(
     a: ArcPath, b: ArcPath, corridor_sq: float, horizon: float, n: int,
     min_lateral_gap: float = 0.0,
 ) -> Optional[tuple[float, float, float]]:
-    """Earliest corridor overlap for curved or non-constant-speed arcs: sample at n
-    times, then bisect to refine hit time; respects min_lateral_gap. Returns
-    (t, hit_x, hit_z) or None."""
+    """Earliest corridor overlap for curved, non-constant-speed, or capsule-body
+    arcs: sample at n times, then bisect to refine hit time; respects
+    min_lateral_gap. When either arc carries body extents (fwd_len/back_len) the
+    overlap test is segment-to-segment (the swept body), not point-to-point.
+    Returns (t, hit_x, hit_z) or None. hit is the contact-point midpoint for
+    capsule pairs, the reference midpoint for point pairs."""
+    has_body = a._has_body or b._has_body
+    need_lat = min_lateral_gap > 0.0
+
+    def _probe(t: float) -> tuple[float, float, float, float]:
+        if has_body:
+            da = a._dist_at_time(t)
+            ax, az = a.position_at_dist(da)
+            ha = a.heading_at_dist(da)
+            afx = -math.sin(ha)
+            afz = -math.cos(ha)
+            a0x = ax + a.fwd_len * afx
+            a0z = az + a.fwd_len * afz
+            a1x = ax - a.back_len * afx
+            a1z = az - a.back_len * afz
+            db = b._dist_at_time(t)
+            bx, bz = b.position_at_dist(db)
+            hb = b.heading_at_dist(db)
+            bfx = -math.sin(hb)
+            bfz = -math.cos(hb)
+            b0x = bx + b.fwd_len * bfx
+            b0z = bz + b.fwd_len * bfz
+            b1x = bx - b.back_len * bfx
+            b1z = bz - b.back_len * bfz
+            dsq, mx, mz = _seg_seg_dist_sq_mid(a0x, a0z, a1x, a1z,
+                                               b0x, b0z, b1x, b1z)
+            lat = abs((bz - az) * afx - (bx - ax) * afz) if need_lat else 0.0
+            return dsq, mx, mz, lat
+        ax, az = a.position_at_time(t)
+        bx, bz = b.position_at_time(t)
+        dsq = (ax - bx) ** 2 + (az - bz) ** 2
+        if need_lat:
+            h_a = a.heading_at_dist(a._dist_at_time(t))
+            fwd_x_a = -math.sin(h_a)
+            fwd_z_a = -math.cos(h_a)
+            lat = abs((bz - az) * fwd_x_a - (bx - ax) * fwd_z_a)
+        else:
+            lat = 0.0
+        return dsq, (ax + bx) * 0.5, (az + bz) * 0.5, lat
+
     best_t: Optional[float] = None
     best_mx = 0.0
     best_mz = 0.0
@@ -814,39 +965,23 @@ def _sampled_collision(
     inv_n = 1.0 / n
     for i in range(n + 1):
         t = horizon * i * inv_n
-        ax, az = a.position_at_time(t)
-        bx, bz = b.position_at_time(t)
-        dsq = (ax - bx) ** 2 + (az - bz) ** 2
+        dsq, mx, mz, lat = _probe(t)
         if dsq < corridor_sq:
-            if min_lateral_gap > 0.0:
-                h_a = a.heading_at_dist(a._dist_at_time(t))
-                fwd_x_a = -math.sin(h_a)
-                fwd_z_a = -math.cos(h_a)
-                lat = abs((bz - az) * fwd_x_a - (bx - ax) * fwd_z_a)
-                if lat >= min_lateral_gap:
-                    continue
+            if need_lat and lat >= min_lateral_gap:
+                continue
             lo = max(t - horizon * inv_n, 0.0)
             hi = t
             best_t = t
-            best_mx = (ax + bx) * 0.5
-            best_mz = (az + bz) * 0.5
+            best_mx = mx
+            best_mz = mz
             for _ in range(6):
                 mid = (lo + hi) * 0.5
-                ax2, az2 = a.position_at_time(mid)
-                bx2, bz2 = b.position_at_time(mid)
-                if (ax2 - bx2) ** 2 + (az2 - bz2) ** 2 < corridor_sq:
-                    if min_lateral_gap > 0.0:
-                        h_a2 = a.heading_at_dist(a._dist_at_time(mid))
-                        fwd_x_a2 = -math.sin(h_a2)
-                        fwd_z_a2 = -math.cos(h_a2)
-                        lat2 = abs((bz2 - az2) * fwd_x_a2 - (bx2 - ax2) * fwd_z_a2)
-                        if lat2 >= min_lateral_gap:
-                            lo = mid
-                            continue
+                dsq2, mx2, mz2, lat2 = _probe(mid)
+                if dsq2 < corridor_sq and not (need_lat and lat2 >= min_lateral_gap):
                     hi = mid
                     best_t = mid
-                    best_mx = (ax2 + bx2) * 0.5
-                    best_mz = (az2 + bz2) * 0.5
+                    best_mx = mx2
+                    best_mz = mz2
                 else:
                     lo = mid
             break
@@ -1322,12 +1457,20 @@ class Vehicle:
         decel: float = 0.0,
         arc_start_pctg: float = 1.0,
         curvature_override: float | None = None,
+        body_capsule: bool = False,
     ) -> ArcPath:
         """ArcPath for this vehicle from smoothed pose and curvature.
 
         Curvature is derived from position history when available (circumscribed
         circle fit), falling back to angular_velocity / speed. Crash-induced
         backward position spikes are suppressed by the 6 m/s² cap in _accel_to_arc_params().
+
+        body_capsule=True gives the arc body extents (fwd_len/back_len) so the
+        collision test covers the whole vehicle length. Extents are measured
+        from the arc reference to the body front/rear using the same AI/TMP
+        pivot convention as get_corners, so they stay correct despite the
+        arc_start_pctg reference offset. Default False keeps point/disc behavior
+        for non-AEB consumers.
         """
         yaw_rad = (
             self._smooth_yaw
@@ -1354,10 +1497,23 @@ class Vehicle:
         start_x = self.position.x + body_offset * fwd_x
         start_z = self.position.z + body_offset * fwd_z
 
+        cap_fwd_len = 0.0
+        cap_back_len = 0.0
+        if body_capsule:
+            if self.is_tmp:
+                front_d = self.size.length * 0.5
+                back_d = self.size.length * 0.5
+            else:
+                front_d = self.size.length * 0.18
+                back_d = self.size.length * 0.82
+            cap_fwd_len = max(front_d - body_offset, 0.0)
+            cap_back_len = max(back_d + body_offset, 0.0)
+
         return build_arc(
             start_x, start_z, yaw_rad, self.speed,
             curvature, effective_hw, horizon,
             decel=effective_decel, accel=effective_accel,
+            fwd_len=cap_fwd_len, back_len=cap_back_len,
         )
 
     def is_zero(self) -> bool:
