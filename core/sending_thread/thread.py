@@ -231,9 +231,19 @@ class SendingThread(BaseThread):
         self._spd_smooth: float | None = None
         self._prev_spd_mono: float | None = None
         self._prev_measured_decel_ms2: float = 0.0
-        self._prev_mapper_gas: float = 0.0
-        self._prev_user_gas: float = 0.0
-        self._prev_user_opd_gas: float = 0.0
+        # True when the mapper's gas bid won the user-pedal merge on the
+        # previous tick (min in limiter mode, max in CC mode, ties to the
+        # mapper). False on clutch/idle/AEB and on disconnect/pedal loss, so
+        # an unknown or user-driven pedal freezes learning.
+        self._prev_mapper_owned_gas: bool = False
+        # Mapper reported an unsatisfiable gas-side FF on the previous tick
+        # (headroom cap bid, not a trackable setpoint).
+        self._prev_mapper_ff_saturated: bool = False
+        # Final gas value sent to the game last tick: bumpless re-seat source
+        # for commander handovers.
+        self._prev_applied_gas: float = 0.0
+        # Last tick's active_controller string, to detect commander handover.
+        self._prev_active_controller: str = "none"
         self._prev_aeb_loop_mono: float | None = None
         self._brake_active: bool = False
         self._brake_last_active_at: float = 0.0
@@ -640,21 +650,46 @@ class SendingThread(BaseThread):
                 # modes: there is no separate limiter call here.
                 mapper_engaged = cruise_active or _aeb_active
 
-                # Learn-gate by who owned the previous tick:
-                # - Limiter active: only learn when user was pushing above the
-                #   cap (user gas > mapper_gas). Within the cap there's nothing
-                #   to learn: letting the integrator run would inflate mapper_gas
-                #   and loosen the cap as ego approaches the limit.
-                # - CC/ACC active: freeze learning when the user was overriding
-                #   with OPD gas (opdgasval > mapper_gas). Mapper output isn't
-                #   what's reaching the truck during override, so the measured
-                #   accel doesn't reflect the mapper's command: learning from it
-                #   would corrupt the gain/integral state.
-                # One-tick lag is negligible at 60–100 Hz.
-                if cruise_active_controller == "limiter":
-                    mapper_learn = mapper_engaged and (self._prev_user_gas > self._prev_mapper_gas)
-                else:
-                    mapper_learn = mapper_engaged and (self._prev_user_opd_gas <= self._prev_mapper_gas)
+                # Learn gate, integrators only. Output trajectory and the
+                # mapper's physics view commit every tick inside step(), so
+                # learn=False freezes adaptation without staling the mapper.
+                # Learn when the mapper's bid won the previous tick's pedal
+                # merge (its command is what the truck followed), except:
+                # - AEB active: AEB owns the pedals.
+                # - Limiter with a saturated FF: the headroom bid (allow max
+                #   accel below the limit) is not a tracking setpoint, and
+                #   learning toward it slams the anti-windup back-calc into
+                #   the fast-I clamp. A governing limiter (holding ego at the
+                #   limit, gas or brake side) has a sane FF and does learn.
+                mapper_learn = (
+                    mapper_engaged
+                    and not _aeb_active
+                    and self._prev_mapper_owned_gas
+                    and not (
+                        cruise_active_controller == "limiter"
+                        and self._prev_mapper_ff_saturated
+                    )
+                )
+
+                # Commander handover (cc <-> limiter <-> none): one-shot
+                # bumpless re-seat. Wanted EMA seeds to the new bid instead
+                # of slewing across the commanders' unrelated setpoints. The
+                # gas anchor re-seat is directional: an incoming limiter cap
+                # starts at the pedal the game actually received (no dip
+                # inheriting CC's low gas mid-override), while an incoming
+                # tracking commander starts fresh at its own output (anchor
+                # to the user's abandoned pedal forces a rate-limited
+                # throttle surge the controller never commanded).
+                # The handover tick itself never learns: the saturation flag
+                # lags one tick and the snapped wanted may already saturate.
+                if cruise_active_controller != self._prev_active_controller:
+                    self._accel_mapper.handover_reseed(
+                        self._prev_applied_gas
+                        if cruise_active_controller == "limiter"
+                        else None
+                    )
+                    mapper_learn = False
+                self._prev_active_controller = cruise_active_controller
 
                 # Freeze the mapper's slow integral when the hold FSM owns
                 # standstill: based on the FSM's state from the previous tick
@@ -681,9 +716,9 @@ class SendingThread(BaseThread):
                     freeze_trim=_aeb_active,
                     learn=mapper_learn,
                     freeze_slow_i=hold_freeze_slow_i,
+                    cap_mode=(cruise_active_controller == "limiter"),
                 )
                 mapper_gas = float(targets.gas)
-                self._prev_mapper_gas = mapper_gas
                 mapper_brake = float(targets.brake)
                 mapper_command_gas = float(targets.command_gas)
                 mapper_command_brake = float(targets.command_brake)
@@ -707,6 +742,7 @@ class SendingThread(BaseThread):
                 mapper_gain_scale = float(targets.gain_scale)
                 mapper_pedal_state = int(targets.pedal_state)
                 mapper_creep_ms2 = float(targets.creep_ms2)
+                self._prev_mapper_ff_saturated = bool(targets.ff_saturated)
             except Exception as e:
                 logger.debug("accel_mapper step failed: %s", e)
                 brake_grade_rad = 0.0
@@ -759,6 +795,8 @@ class SendingThread(BaseThread):
             self._prev_spd_mono = None
             self._prev_measured_decel_ms2 = 0.0
             self._prev_aeb_loop_mono = None
+            self._prev_mapper_owned_gas = False
+            self._prev_applied_gas = 0.0
             self._hold.reset()
             controller.aforward = 0.0
             controller.abackward = 0.0
@@ -801,6 +839,8 @@ class SendingThread(BaseThread):
             return
 
         if not pedal_alive:
+            self._prev_mapper_owned_gas = False
+            self._prev_applied_gas = 0.0
             controller.aforward = 0.0
             controller.abackward = 0.0
             with self.data._lock:
@@ -853,6 +893,8 @@ class SendingThread(BaseThread):
                 opdgasval = float(getattr(pedal_thread.data, "opdgasval", 0.0))
         except Exception as e:
             logger.debug("pedal read failed: %s", e)
+            self._prev_mapper_owned_gas = False
+            self._prev_applied_gas = 0.0
             controller.aforward = 0.0
             controller.abackward = 0.0
             with self.data._lock:
@@ -933,16 +975,25 @@ class SendingThread(BaseThread):
         # main_pedal_thread when CC is commanding: the truck's brake comes
         # only from user brake pedal + mapper_brake here, so OPD doesn't
         # fight CC.
-        self._prev_user_gas = a
-        self._prev_user_opd_gas = opdgasval
+        # The one comparison all gas arbitration keys on: is the user's OPD
+        # pedal higher than the mapper's gas bid? The mapper owns the merged
+        # pedal when its bid wins its mode's merge (min for the limiter cap,
+        # max for CC/ACC); ties resolve to the mapper in both, so a foot-off
+        # 0.0 tie under a braking mapper still learns. The poisonous rail tie
+        # (floored pedal against a saturated headroom cap) is excluded by the
+        # ff_saturated learn gate, not here.
+        pedals_higher = opdgasval > mapper_gas
 
         cc_overridden_by_opd = False
+        mapper_owned_gas = False
         if not manual_clutch:
             if cruise_active:
                 if cruise_active_controller == "limiter":
+                    mapper_owned_gas = opdgasval >= mapper_gas
                     a = min(opdgasval, mapper_gas)
                 else:
-                    cc_overridden_by_opd = opdgasval > mapper_gas
+                    cc_overridden_by_opd = pedals_higher
+                    mapper_owned_gas = not pedals_higher
                     a = max(opdgasval, mapper_gas)
 
         # Brake merge: when the user is overriding CC/ACC with OPD gas, drop
@@ -1007,6 +1058,10 @@ class SendingThread(BaseThread):
             )
             b = max(b, aeb_pedal)
             a = 0.0
+
+        # Bookkeeping for next tick's learn gate and handover re-seat.
+        self._prev_mapper_owned_gas = mapper_owned_gas and not _aeb_active
+        self._prev_applied_gas = a
 
         # Brake threshold hysteresis: suppress flicker from rapid OPD/CC transitions.
         _now = time.monotonic()

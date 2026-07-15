@@ -270,10 +270,12 @@ class MapperSharedState:
 
     Allows two mappers (e.g. a cruise-side and a limiter-side) to hand over
     pedal control without losing learned bias, capacity, or output continuity.
-    Capacity estimates are idempotent and committed every tick; everything
-    else (measurement EMAs, road load, slow integral, gearshift snapshot,
-    output trajectory) is committed only by the mapper called with learn=True
-    so a non-commanding preview can't drift the shared state.
+    Everything except the integrators is committed every tick: measurement
+    EMAs, road load, gearshift snapshot, and output trajectory are the
+    mapper's live view of the truck and its own pedal continuity, not
+    learning. Only the slow integral (and the per-instance fast integral)
+    is gated on learn=True so adaptation freezes while someone else (user
+    pedal, AEB) drives the truck.
     """
     # Time
     prev_mono: float | None = None
@@ -352,6 +354,11 @@ class PedalTargets:
     # Idle-creep FF term (m/s², >= 0). Reported even when not commanding so
     # the capacity tracker can subtract it from manual-driving gas samples.
     creep_ms2: float = 0.0
+    # True when the pure-FF gas pedal alone saturates: the commanded accel
+    # exceeds the truck's capability, so the bid is a headroom cap (allow
+    # max), not a trackable setpoint. Learn gate uses it to keep the limiter
+    # from adapting integrators toward an unsatisfiable command.
+    ff_saturated: bool = False
 
 
 class AccelToPedals:
@@ -367,6 +374,10 @@ class AccelToPedals:
         # Per-instance fast PID state (this controller's tracking error trim)
         self._fast_integral: float = 0.0
         self._fast_deriv_smooth: float = 0.0
+
+        # One-shot: commander handover re-seeds the wanted EMA on the next
+        # step instead of slewing across two commanders' unrelated setpoints.
+        self._pending_wanted_snap: bool = False
 
         # Debug logging
         self._project_root = Path(__file__).resolve().parents[2]
@@ -409,6 +420,33 @@ class AccelToPedals:
         s.clutch_active = False
         s.clutch_release_mono = -math.inf
         s.frozen_raw_smooth = 0.0
+
+    def handover_reseed(self, applied_gas: float | None) -> None:
+        """Commander handover (cc <-> limiter <-> none): one-shot bumpless
+        re-seat.
+
+        The wanted EMA seeds directly with the next step's bid: a handover
+        is a setpoint replacement, not a trajectory, and slewing across the
+        gap (sole-limiter headroom bid ~10 m/s2 above a CC bid) saturates
+        the pedal and lets the anti-windup back-calc snap the fast integral
+        to its clamp.
+
+        The gas rate-limit anchor re-seats per the incoming commander:
+        - applied_gas set (limiter taking over): the cap starts at the pedal
+          the game actually received, so it neither dips a user override
+          (inheriting CC's low gas) nor has to travel down from a stale
+          open-cap value before it can bind.
+        - applied_gas None (tracking commander taking over): the anchor
+          clears so CC steps straight to its own output. Anchoring it to the
+          user's abandoned pedal forces the symmetric rate limiter to walk
+          the throttle down from that value: a ~0.3 s surge the controller
+          never commanded (release of a gas override must feel like a
+          natural lift-off, not a decaying pulse)."""
+        self._pending_wanted_snap = True
+        if applied_gas is None:
+            self._shared.prev_gas_cmd = None
+        else:
+            self._shared.prev_gas_cmd = _clamp(_finite_or_zero(applied_gas), 0.0, 1.0)
 
     # Helpers
 
@@ -774,18 +812,29 @@ class AccelToPedals:
         learn: bool = True,
         freeze_trim: bool = False,
         freeze_slow_i: bool = False,
+        cap_mode: bool = False,
     ) -> PedalTargets:
         """Compute pedal targets for one tick.
 
-        When `learn=False`, the function computes its output from current state
-        without committing any state changes: used by non-commanding mappers
-        for preview only. The commanding mapper passes `learn=True` (default)
-        and is the only one that updates shared bias/capacity/output trajectory
-        and per-instance integrators.
+        `learn` gates the integrators only (fast trim I, slow integral):
+        `learn=False` freezes adaptation while the mapper's command is not
+        what drives the truck (user pedal above the mapper's gas, sole-
+        limiter headroom bidding, AEB). Signal smoothing, dt bookkeeping,
+        gearshift tracking, and the output trajectory commit every tick so
+        the mapper's view of the world and its pedal continuity stay live
+        through learn=False stretches (a frozen cap would otherwise pin the
+        user's pedal under the min-merge, and stale dt/EMAs would spike on
+        resume).
 
         When `freeze_slow_i=True` (hold FSM owns standstill), the slow integral
         is frozen both signs and leaks toward 0 with _HOLD_SLOW_I_LEAK_TAU_S so
         stale negative bias from the decel-to-stop bleeds out before launch.
+
+        `cap_mode=True` (sole-limiter: the output is a pedal cap, not a
+        tracking command): the anti-windup back-calc is skipped. A railed cap
+        is an OPEN cap (headroom), not tracking saturation; the back-calc is
+        a one-tick snap that a lagged learn flag cannot intercept, and it
+        dumps the saturation overhang straight into the fast integral.
         """
         s = self._shared
 
@@ -813,7 +862,11 @@ class AccelToPedals:
         wanted_alpha = self._ema_alpha(dt, _WANTED_SMOOTHING_TAU_S)
         wanted = _finite_or_zero(wanted_accel_ms2) if cruise_commanding else 0.0
         raw = _finite_or_zero(raw_accel_ms2)
-        new_wanted_smooth = self._ema_step(self._wanted_smooth, wanted, wanted_alpha)
+        if self._pending_wanted_snap:
+            new_wanted_smooth = wanted
+            self._pending_wanted_snap = False
+        else:
+            new_wanted_smooth = self._ema_step(self._wanted_smooth, wanted, wanted_alpha)
 
         # Live raw EMA (shared, never frozen): physics truth. The gearshift
         # logic snapshots and blends from this; the effective value it returns
@@ -822,9 +875,11 @@ class AccelToPedals:
         raw_alpha = self._ema_alpha(dt, _RAW_SMOOTHING_TAU_S)
         new_raw_smooth_live = self._ema_step(s.raw_smooth_live, raw, raw_alpha)
 
-        # Gearshift: edges committed only on learn=True
+        # Gearshift: truck-level physics tracking, edges always committed
+        # (single mapper owns the shared state; clutch edges during a
+        # learn=False stretch must still arm the snapshot).
         factor, new_raw_smooth = self._gearshift_factor(
-            now, clutch_applied, new_raw_smooth_live, learn=learn,
+            now, clutch_applied, new_raw_smooth_live, learn=True,
         )
 
         # Road load: adaptive EMA: slow for small bumps, fast for steep hills
@@ -878,6 +933,7 @@ class AccelToPedals:
         # Defaults
         effort = 0.0
         ff = 0.0
+        ff_saturated = False
         fast_out = 0.0
         fast_p = 0.0
         fast_i = 0.0
@@ -982,6 +1038,11 @@ class AccelToPedals:
                 ff = combined_ff_only / max_a_use
             else:
                 ff = -self._brake_pedal_from_decel(-combined_ff_only, max_b_use)
+            # Gas-side FF saturation = unsatisfiable bid (headroom cap).
+            # Widened below once total effort is known: a railed pedal is an
+            # open cap even when FF alone sits just under 1.0 (the P-term on
+            # a large error can carry it over the rail).
+            ff_saturated = combined_ff_only > max_a_use
 
             # Unified mapping: FF + fast trim through the same capacity scaling.
             combined = combined_ff_only + fast_trim_ms2
@@ -994,11 +1055,21 @@ class AccelToPedals:
                 unclamped_effort = -self._brake_pedal_from_decel(-combined, max_b_use)
                 capacity_used = max_b_use
             effort = _clamp(unclamped_effort, -1.0, 1.0)
+            ff_saturated = ff_saturated or effort >= 1.0
 
             # Back-calc anti-windup: if FF saturates the pedal, snap fast_integral
             # so (wanted + effective_road_load + p + i + d) sits on the saturation
             # edge. Integrator stops winding, system snaps back cleanly on recovery.
-            if effort != unclamped_effort and not freeze_trim and factor > 0.0:
+            # Skipped on the gas rail in cap_mode: a railed cap is an open
+            # cap (headroom bid), and the one-tick snap would poison the
+            # fast integral with error the mapper's command never caused.
+            # The limiter's brake side is genuine tracking and keeps it.
+            if (
+                effort != unclamped_effort
+                and not freeze_trim
+                and not (cap_mode and effort >= 1.0)
+                and factor > 0.0
+            ):
                 if effort >= 1.0:
                     combined_sat = max_a_use
                 else:
@@ -1042,30 +1113,31 @@ class AccelToPedals:
         pedal_state = _STATE_BRAKE if effort < 0.0 else _STATE_GAS
 
         # === Commit gating ===
-        # Per-instance signal smoothing always commits: these are this
-        # controller's view of the world, not "learning". Keeping them
-        # current prevents stale-preview output when this mapper isn't the
-        # commander (which would make commander handover sticky).
+        # Physics view + output trajectory always commit: signal smoothing,
+        # dt bookkeeping, road load, and the rate-limit/EMA output state are
+        # the mapper's live view of the truck and its own pedal continuity,
+        # not learning. Committing them through learn=False stretches keeps
+        # the cap able to ramp during a user override and prevents stale-dt
+        # spikes and raw-smooth jumps when learning resumes.
         # Capacity is sourced externally and idempotent: always commit.
         self._wanted_smooth = new_wanted_smooth
         self._fast_deriv_smooth = new_fast_deriv_smooth
         s.estimated_max_accel_ms2 = new_max_accel
         s.estimated_max_brake_ms2 = new_max_brake
+        s.prev_mono = new_prev_mono
+        s.raw_smooth = new_raw_smooth
+        s.raw_smooth_live = new_raw_smooth_live
+        s.prev_raw_smooth = new_raw_smooth_live
+        s.road_load_smooth = new_road_load_smooth
+        s.output_smooth_ms2 = new_output_smooth_ms2
+        s.prev_gas_cmd = new_prev_gas_cmd
+        s.accel_capacity_glide_ms2 = new_accel_capacity_glide
 
-        # Learning + shared physics: only the commanding mapper writes back.
-        # Non-commanding (learn=False) leaves these untouched so its preview
-        # doesn't drift the integrators or output trajectory.
+        # Learning: integrator state only. learn=False freezes adaptation
+        # (accumulation and anti-windup snaps) while someone else drives.
         if learn:
             self._fast_integral = new_fast_integral
-            s.prev_mono = new_prev_mono
-            s.raw_smooth = new_raw_smooth
-            s.raw_smooth_live = new_raw_smooth_live
-            s.prev_raw_smooth = new_raw_smooth_live
-            s.road_load_smooth = new_road_load_smooth
             s.slow_integral = new_slow_integral
-            s.output_smooth_ms2 = new_output_smooth_ms2
-            s.prev_gas_cmd = new_prev_gas_cmd
-            s.accel_capacity_glide_ms2 = new_accel_capacity_glide
 
         # Debug logging: only the commanding mapper logs
         if learn and cruise_commanding and math.isfinite(now):
@@ -1130,5 +1202,6 @@ class AccelToPedals:
             gain_scale=gain_scale,
             pedal_state=pedal_state,
             creep_ms2=creep_ms2,
+            ff_saturated=ff_saturated,
         )
 
