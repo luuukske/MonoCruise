@@ -28,14 +28,14 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout,
-    QLabel, QListWidget, QListWidgetItem, QMainWindow, QPlainTextEdit,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QPlainTextEdit,
     QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from core.aeb.clip_replay import ReviewFrame, replay_clip
-from core.aeb.clip_schema import Label
+from core.aeb.clip_schema import ClipMetadata, Label
 from core.aeb.clip_score import class_window_warning
-from core.aeb.clip_store import ClipStore
+from core.aeb.clip_store import ClipInfo, ClipStore
 from core.aeb.debug_window import AEBDebugWindow
 
 _CLASSES = ["tp", "good_intervention", "fp", "fn", "tn", "ignore"]
@@ -160,11 +160,17 @@ class ReviewWindow(QMainWindow):
         self._target_vid: int | None = None
         self._window: tuple[float, float] | None = None
 
+        # Directory scan, cached across reloads. peek_metadata is decoded once
+        # per clip and reused (keyed on mtime+size) so filtering / searching /
+        # re-selecting never re-reads the store.
+        self._entries: list[tuple[ClipInfo, ClipMetadata | None]] = []
+        self._meta_cache: dict[str, tuple[float, int, ClipMetadata | None]] = {}
+
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance)
 
         self._build_ui()
-        self._reload_list()
+        self._refresh_clips()
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -173,14 +179,30 @@ class ReviewWindow(QMainWindow):
 
         # Left: clip list
         left = QVBoxLayout()
-        self._untagged_only = QCheckBox("Untagged only")
-        self._untagged_only.stateChanged.connect(self._reload_list)
+        header = QHBoxLayout()
+        header.addWidget(QLabel("Clips"))
+        header.addStretch(1)
+        self._refresh_btn = QPushButton("Refresh")
+        self._refresh_btn.setFixedWidth(70)
+        self._refresh_btn.clicked.connect(self._refresh_clips)
+        header.addWidget(self._refresh_btn)
+        left.addLayout(header)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("search id / trigger / notes")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._apply_filter)
+        left.addWidget(self._search)
+
+        self._class_filter = QComboBox()
+        self._class_filter.addItems(["all", "untagged", "tagged"] + _CLASSES)
+        self._class_filter.currentTextChanged.connect(lambda _t: self._apply_filter())
+        left.addWidget(self._class_filter)
+
         self._list = QListWidget()
         self._list.currentItemChanged.connect(self._on_select)
-        self._count_lbl = QLabel("")
-        left.addWidget(QLabel("Clips"))
-        left.addWidget(self._untagged_only)
         left.addWidget(self._list, 1)
+        self._count_lbl = QLabel("")
         left.addWidget(self._count_lbl)
         lw = QWidget()
         lw.setLayout(left)
@@ -305,28 +327,60 @@ class ReviewWindow(QMainWindow):
 
     # Clip list
 
-    def _reload_list(self) -> None:
+    def _refresh_clips(self) -> None:
+        """Rescan the store for new/changed clips, then re-render the list."""
+        self._rescan()
+        self._apply_filter()
+
+    def _rescan(self) -> None:
+        """Scan the store, decoding metadata only for new or changed clips.
+
+        Cached entries are reused whenever the file's mtime and size are
+        unchanged, so a manual refresh only pays for clips that actually
+        appeared or were relabelled.
+        """
+        infos = self._store.list_clips()
+        live: set[str] = set()
+        entries: list[tuple[ClipInfo, ClipMetadata | None]] = []
+        for info in infos:
+            key = str(info.path)
+            live.add(key)
+            cached = self._meta_cache.get(key)
+            if cached is not None and cached[0] == info.mtime and cached[1] == info.size_bytes:
+                meta = cached[2]
+            else:
+                meta = self._store.peek_metadata(info.path)
+                self._meta_cache[key] = (info.mtime, info.size_bytes, meta)
+            entries.append((info, meta))
+        for stale in [k for k in self._meta_cache if k not in live]:
+            del self._meta_cache[stale]
+        self._entries = entries
+
+    def _apply_filter(self) -> None:
+        """Render the cached scan through the current search + class filter."""
+        search = self._search.text().strip().lower()
+        cls_filter = self._class_filter.currentText()
         self._list.blockSignals(True)
         self._list.clear()
-        clips = self._store.list_clips()
-        untagged_only = self._untagged_only.isChecked()
         shown = 0
-        for info in clips:
-            meta = self._store.peek_metadata(info.path)
-            tagged = meta is not None and meta.label is not None
-            if untagged_only and tagged:
+        for info, meta in self._entries:
+            if not _entry_visible(meta, search, cls_filter):
                 continue
-            cls = meta.label.class_ if tagged else None
-            trig = meta.trigger_source if meta else "?"
-            badge = f"● {cls}" if tagged else "○ untagged"
-            kb = info.size_bytes // 1024
-            cid = meta.clip_id[:8] if meta else "????????"
-            item = QListWidgetItem(f"{cid}   {badge}\n{trig}  {kb} KB")
-            item.setData(Qt.UserRole, str(info.path))
-            self._list.addItem(item)
+            self._list.addItem(_clip_item(info, meta))
             shown += 1
-        self._count_lbl.setText(f"{shown} shown / {len(clips)} total")
+        self._count_lbl.setText(f"{shown} shown / {len(self._entries)} total")
+        self._reselect(self._path)
         self._list.blockSignals(False)
+
+    def _reselect(self, path) -> None:
+        """Restore the selection to *path* after a rebuild, if still visible."""
+        if not path:
+            return
+        target = str(path)
+        for i in range(self._list.count()):
+            if self._list.item(i).data(Qt.UserRole) == target:
+                self._list.setCurrentRow(i)
+                return
 
     def _on_select(self, current, _prev) -> None:
         if current is None:
@@ -443,10 +497,10 @@ class ReviewWindow(QMainWindow):
         ok = self._store.write_label(self._path, lbl)
         self._status.setText("saved" if ok else "save failed")
         if ok:
-            row = self._list.currentRow()
-            self._reload_list()
-            if 0 <= row < self._list.count():
-                self._list.setCurrentRow(row)
+            # Label write rewrote the file: drop its cache entry so the rescan
+            # re-decodes just this clip (badge, filter state) and keeps it selected.
+            self._meta_cache.pop(str(self._path), None)
+            self._refresh_clips()
 
     # Transport
 
@@ -507,6 +561,41 @@ class ReviewWindow(QMainWindow):
             f"recorded: {state}  target={la.target_decel_ms2:.1f}  ttc={_fmt(la.time_to_collision)}"
             f"  |  truth: {truth}"
         )
+
+
+def _entry_visible(meta: ClipMetadata | None, search: str, cls_filter: str) -> bool:
+    """Whether a scanned clip passes the class filter and search text."""
+    label = meta.label if meta is not None else None
+    cls = label.class_ if label is not None else None
+    if cls_filter == "untagged" and cls is not None:
+        return False
+    if cls_filter == "tagged" and cls is None:
+        return False
+    if cls_filter not in ("all", "untagged", "tagged") and cls != cls_filter:
+        return False
+    if search:
+        hay = " ".join(part for part in (
+            (meta.clip_id if meta else ""),
+            (meta.trigger_source if meta else ""),
+            (cls or ""),
+            (label.notes if label is not None else ""),
+        ) if part).lower()
+        if search not in hay:
+            return False
+    return True
+
+
+def _clip_item(info: ClipInfo, meta: ClipMetadata | None) -> QListWidgetItem:
+    """One list row: clip id, tag badge, trigger source, and size."""
+    tagged = meta is not None and meta.label is not None
+    cls = meta.label.class_ if tagged else None
+    trig = meta.trigger_source if meta else "?"
+    badge = f"● {cls}" if tagged else "○ untagged"
+    kb = info.size_bytes // 1024
+    cid = meta.clip_id[:8] if meta else "????????"
+    item = QListWidgetItem(f"{cid}   {badge}\n{trig}  {kb} KB")
+    item.setData(Qt.UserRole, str(info.path))
+    return item
 
 
 def _hline() -> QFrame:

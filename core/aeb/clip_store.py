@@ -28,6 +28,7 @@ import queue
 import re
 import tempfile
 import threading
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -63,6 +64,37 @@ def serialize_clip(clip: Clip) -> bytes:
 def deserialize_clip(blob: bytes) -> Clip:
     """Gzipped JSON bytes -> Clip."""
     return Clip.from_json_dict(json.loads(gzip.decompress(blob).decode("utf-8")))
+
+
+# Stream keys are serialized after every metadata field (see Clip.to_json_dict),
+# so the first occurrence marks the end of the metadata prefix. The quotes on
+# both sides rule out a collision with an escaped (\") occurrence inside a note.
+_STREAM_MARKER: bytes = b'"radar_frames"'
+_PEEK_CHUNK: int = 65536
+
+
+def deserialize_metadata(blob: bytes) -> ClipMetadata:
+    """Decode only a clip's metadata dict, stopping before the raw streams.
+
+    Incrementally gunzips just far enough to reach the ``radar_frames`` key,
+    then parses the metadata prefix on its own. This skips decompressing the
+    base64 radar/tick streams (the bulk of a clip), which makes a full-store
+    scan roughly an order of magnitude cheaper than decoding every clip.
+    """
+    dobj = zlib.decompressobj(16 + zlib.MAX_WBITS)  # 16 => gzip framing
+    out = bytearray()
+    scanned = 0
+    for i in range(0, len(blob), _PEEK_CHUNK):
+        out += dobj.decompress(blob[i:i + _PEEK_CHUNK])
+        idx = out.find(_STREAM_MARKER, max(0, scanned - len(_STREAM_MARKER)))
+        if idx != -1:
+            head = bytes(out[:idx]).rstrip()
+            if head.endswith(b","):
+                head = head[:-1]
+            return ClipMetadata.from_json(json.loads(head + b"}"))
+        scanned = len(out)
+    # No stream key found: the whole payload is metadata (e.g. an empty clip).
+    return ClipMetadata.from_json(json.loads(bytes(out)))
 
 
 @dataclass
@@ -158,12 +190,22 @@ class ClipStore:
             return False
 
     def peek_metadata(self, path: Path) -> ClipMetadata | None:
-        """Decode only a clip's metadata (skips base64-decoding the streams).
+        """Decode only a clip's metadata (skips decompressing the streams).
 
         Cheap enough to scan the whole store for a list view / tagged badge.
+        Uses the partial-decompress fast path and falls back to a full decode
+        if the prefix ever fails to parse, so it is never worse than a full read.
         """
         try:
             blob = Path(path).read_bytes()
+        except OSError:
+            logger.exception("failed to read AEB clip %s", Path(path).name)
+            return None
+        try:
+            return deserialize_metadata(blob)
+        except Exception:
+            pass
+        try:
             top = json.loads(gzip.decompress(blob).decode("utf-8"))
             return ClipMetadata.from_json(top)
         except Exception:
