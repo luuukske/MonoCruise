@@ -463,19 +463,20 @@ from the last full update on sub-frames.
 
 Vehicle kinematics use SCS **`simulatedTime`** (µs → seconds) as `Vehicle.time` /
 `update_from_last` `t_now`, not `time.time()`. Telemetry exposes it as
-`TelemetryThreadData.simulated_time_us`. While the game is paused or hitching,
-`simulatedTime` does not advance, so `dt ≈ 0` and the existing sub-frame path
-holds filtered speeds. Radar still calls `TrafficReader.read` during pause so
-TMP poses that keep flowing can snap under that hold; `RadarData.t_mono` is
-**not** bumped, so AEB/ACC treat the frame as stale. On unpause, the next sim
-step is a normal frame `dt` (not the wall-clock pause duration), which is what
-previously collapsed TMP/AI speeds toward 0 via `Δpos / huge_wall_dt`. If
-`simulated_time_us == 0` (SDK not ready), radar falls back to wall time and
-keeps the old pause hold (no traffic refresh). Switching between wall and sim
-domains clears `TrafficReader` per-id state and ego path history so
-`Vehicle.time` is never carried across incompatible clocks.
+`TelemetryThreadData.simulated_time_us`. While paused, radar does **not** call
+`TrafficReader.read`: frozen positions plus a still-ticking sim clock would
+pull every derived speed toward 0. `RadarData.t_mono` is also held so AEB/ACC
+treat the frame as stale. On unpause, radar force-reanchors the reader
+(filtered speeds held, position / speed-EMA histories velocity-seeded) so the
+LS raw-speed fit cannot span the gap — even when `simulatedTime` did not jump.
+`TrafficReader` also re-bases when successive presented `t_now` values jump by
+more than `_READER_CLOCK_GAP_S` (0.5 s) or go backwards. Switching between wall
+and sim domains clears per-id state and ego path history.
+`update_from_last` must not treat large `Vehicle` dt as a pause: sub-frames
+freeze `Vehicle.time`, so dt since the last full update is not a pause signal.
 
-Clip replay keeps using recorded `t_wall` deltas as its kinematics clock.
+If `simulated_time_us == 0` (SDK not ready), radar falls back to wall time.
+Clip replay uses recorded `t_wall` and the same pause-skip + reanchor path.
 
 ---
 
@@ -623,9 +624,11 @@ with rt.data._lock:
 ```
 
 When `paused` is True, `t_mono` is held so consumers treat the frame as
-stale. Vehicle kinematics still refresh on the SCS simulated clock (`dt≈0`
-while sim time is frozen) so TMP poses stay warm; filtered speeds are held
-by the sub-frame path. See §7 "Simulation clock".
+stale. Vehicle kinematics are **not** advanced while paused (frozen world
+positions plus a still-ticking simulated clock would pull every speed toward
+0). On unpause the traffic reader force-reanchors: filtered speeds are held
+and position histories are velocity-seeded so the LS raw-speed fit does not
+span the gap. See §7 "Simulation clock".
 
 ### Trailer vehicles
 

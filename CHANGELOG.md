@@ -15,6 +15,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **Pedals lost banner**: banner now shows your pedals disconnected, just like v1.0.4.
 ### Fixed
 - **Connect pedals actually work**: wired up the connect button to be more reliable and actually work.
+- **AEB/ACC speeds after pause**: vehicle speeds collapsed to ~0 on unpause (and similar hitches) because kinematics used wall-clock time across the gap; radar now integrates on the game's simulatedTime and holds filters while sim time is frozen.
 - **AEB general improvements**: capsule bodies + ego-arc steering wiggle were beeping on adjacent-lane overtakes and passes; parallel-margin scaling, rear-overtaker filter suppress, and braking-worsens for cleared rear overtakers kill the class-A/B phantoms (clips f0b2ace6 etc.).
 - **ACC oscilate at full throttle**: ACC would be switching between 95% throttle and 100% caused by the downshifting.
 ### Changed

@@ -15,6 +15,12 @@ from typing import Optional
 
 _MAX_ANGULAR_VELOCITY: float = 45.0
 _LOCATION_UPDATE_FREQUENCY: float = 0.05
+# Gap between successive TrafficReader clocks that means a real pause/hitch
+# (no intermediate frames). Must NOT be applied to Vehicle.update_from_last dt:
+# sub-frames freeze Vehicle.time, so dt since last *full* update can exceed
+# this during normal slow radar without a pause — that path was freezing
+# speeds at a stale fraction of truth. See AGENTS.md §7.
+_READER_CLOCK_GAP_S: float = 0.50
 
 # TMP speed / accel EMA: same hyperbolic law α(|v|) with different endpoints.
 # Reference speed for "at 90 km/h" is 25 m/s. See AGENTS.md §7.
@@ -1159,6 +1165,70 @@ class Vehicle:
         else:
             self._crash_since = None
 
+    def _hold_across_clock_discontinuity(self, prev: "Vehicle", t_now: float) -> None:
+        """Re-base after a pause/hitch gap without integrating across it.
+
+        Holds filtered speed/accel, snaps pose to the latest buffer coordinates,
+        and restarts position / speed-EMA histories at ``t_now`` so the LS raw
+        speed fit cannot span the gap (which would read Δpos/huge_τ ≈ 0).
+        """
+        self.time = t_now
+        self.last_location = prev.last_location
+        self.last_rotation = prev.last_rotation
+        self.angular_velocity = prev.angular_velocity
+        if abs(self.angular_velocity) > _MAX_ANGULAR_VELOCITY:
+            self.angular_velocity = 0.0
+
+        raw_x = self.position.x
+        raw_z = self.position.z
+        self._raw_x = raw_x
+        self._raw_z = raw_z
+        self._smooth_x = raw_x
+        self._smooth_z = raw_z
+        self._smooth_yaw = prev._smooth_yaw
+        if self._smooth_yaw is None:
+            self._smooth_yaw = math.radians(self.rotation.euler()[1])
+
+        self._lag_since = None
+        self.lag_confirmed = False
+        self._pos_mismatch_frames = 0
+        self._prev_pitch_rate = prev._prev_pitch_rate
+        self._prev_yaw_rate = prev._prev_yaw_rate
+        self._prev_roll_rate = prev._prev_roll_rate
+        self._crash_since = None
+        self.crash_confirmed = False
+
+        self._smooth_speed = prev._smooth_speed
+        self._smooth_accel = prev._smooth_accel
+        self._speed_ema = prev._speed_ema
+        self._raw_speed = prev._raw_speed
+        self.speed = prev.speed
+        self.acceleration = prev.acceleration
+        self.acc_speed = prev.acc_speed
+        self._acc_standstill = prev._acc_standstill
+        self._acc_release_s = prev._acc_release_s
+
+        # Fresh histories on the new clock, seeded so the next LS raw-speed fit
+        # returns ~held speed instead of a 1-sample cold start or a catch-up spike.
+        dt_seed = _LOCATION_UPDATE_FREQUENCY
+        yaw = self._smooth_yaw if self._smooth_yaw is not None else 0.0
+        held_speed = float(prev.speed)
+        fwd_x = -math.sin(yaw)
+        fwd_z = -math.cos(yaw)
+        back_x = raw_x - held_speed * fwd_x * dt_seed
+        back_z = raw_z - held_speed * fwd_z * dt_seed
+        self._position_history = [
+            (t_now - dt_seed, back_x, back_z),
+            (t_now, raw_x, raw_z),
+        ]
+        if prev._speed_ema is not None:
+            self._speed_ema_history = [
+                (t_now - dt_seed, prev._speed_ema),
+                (t_now, prev._speed_ema),
+            ]
+        else:
+            self._speed_ema_history = []
+
     def update_from_last(
         self,
         prev: "Vehicle",
@@ -1174,6 +1244,11 @@ class Vehicle:
         (see AGENTS.md §7 "Lag / freeze detection").
         """
         dt = t_now - prev.time
+
+        # Clock went backwards (domain glitch): re-base without integrating.
+        if dt < 0.0:
+            self._hold_across_clock_discontinuity(prev, t_now)
+            return
 
         # Sub-frame pass: carry forward all smoothed state unchanged.
         if dt < _LOCATION_UPDATE_FREQUENCY:
@@ -1233,21 +1308,11 @@ class Vehicle:
                 if _sf_lag_active or prev._pos_mismatch_frames > 0:
                     _sf_snap_ok = False
             if _sf_snap_ok:
+                # Snap pose to the latest buffer coords; do not recompute
+                # _raw_speed here (Δpos/dt_sf spikes after pause re-anchors and
+                # is unused by the filter chain until the next full update).
                 rx = self.position.x
                 rz = self.position.z
-                ry = self.position.y
-                dt_sf = t_now - prev.time
-                ddx = rx - prev._raw_x
-                ddz = rz - prev._raw_z
-                dist = math.sqrt(
-                    ddx * ddx + (ry - prev.position.y) ** 2 + ddz * ddz
-                )
-                if dt_sf > 1e-9 and dist > _RAW_SPEED_NEAR_ZERO_CHORD:
-                    fwd_x = -math.sin(prev._smooth_yaw)
-                    fwd_z = -math.cos(prev._smooth_yaw)
-                    direction = 1.0 if (ddx * fwd_x + ddz * fwd_z) >= 0.0 else -1.0
-                    # Raw kinematics for debug only: keep self.speed at filtered value.
-                    self._raw_speed = direction * dist / dt_sf
                 self._raw_x = rx
                 self._raw_z = rz
                 self._smooth_x = rx

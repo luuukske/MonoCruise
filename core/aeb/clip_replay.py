@@ -213,17 +213,31 @@ def decode_radar_stream(clip: Clip):
     Returns ``(veh_by_t, ego_by_t, frame_t)``: smoothed Vehicle lists and ego
     telemetry keyed by radar frame ``t_mono``, plus the sorted timestamps. One
     ``TrafficReader`` carries per-id smoothing forward exactly as live radar.
+
+    Paused / missing-traffic frames keep the previous vehicle list (and do not
+    advance the reader clock). The next active frame sees a reader-level clock
+    gap and re-bases via ``_hold_across_clock_discontinuity``.
     """
     reader = TrafficReader()
     frames = sorted(clip.radar_frames, key=lambda f: f.t_mono)
     veh_by_t: dict[float, list[Vehicle]] = {}
+    last_vehs: list[Vehicle] = []
+    was_paused = False
     for f in frames:
+        if f.traffic_buf is None or f.ego.paused:
+            was_paused = True
+            veh_by_t[f.t_mono] = list(last_vehs)
+            continue
+        if was_paused:
+            was_paused = False
+            reader.request_reanchor()
         res = reader.replay_frame(
             f.traffic_buf, f.parked_buf,
             f.ego.coordinateX, f.ego.coordinateY, f.ego.coordinateZ, f.ego.speed,
             f.t_wall,
         )
-        veh_by_t[f.t_mono] = list(res[0]) if res is not None else []
+        last_vehs = list(res[0]) if res is not None else []
+        veh_by_t[f.t_mono] = last_vehs
     ego_by_t = {f.t_mono: f.ego for f in frames}
     return veh_by_t, ego_by_t, sorted(veh_by_t)
 

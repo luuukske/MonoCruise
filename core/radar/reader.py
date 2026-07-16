@@ -23,7 +23,15 @@ import mmap
 import struct
 import time
 
-from .traffic import Position, Quaternion, Size, Trailer, Vehicle, vehicle_from_trailer
+from .traffic import (
+    Position,
+    Quaternion,
+    Size,
+    Trailer,
+    Vehicle,
+    vehicle_from_trailer,
+    _READER_CLOCK_GAP_S,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -74,6 +82,10 @@ class TrafficReader:
         self.last_traffic_bytes: bytes | None = None
         self.last_parked_bytes: bytes | None = None
         self.last_t_wall: float = 0.0
+        # Last kinematics clock passed to _smooth_and_build (reader-level gap).
+        self._last_kin_t: float | None = None
+        # Set by radar on pause→unpause when the sim clock may not have jumped.
+        self._pending_reanchor: bool = False
 
     def clear_kinematics_state(self) -> None:
         """Drop per-id smoothing so the next frame re-anchors on a new clock.
@@ -84,6 +96,12 @@ class TrafficReader:
         """
         self._last_vehicles.clear()
         self._last_trailer_vehicles.clear()
+        self._last_kin_t = None
+        self._pending_reanchor = False
+
+    def request_reanchor(self) -> None:
+        """Force a discontinuity hold on the next ``read`` / ``replay_frame``."""
+        self._pending_reanchor = True
 
     def open(self) -> bool:
         if self._buf is not None:
@@ -227,11 +245,27 @@ class TrafficReader:
                 + (v.position.z - ego_z) ** 2
             )
             vehicles = vehicles[:_MAX_TRACKED_VEHICLES]
+
+        # Reader-level gap (pause / hitch with no intermediate frames). Do not
+        # use Vehicle.time here: sub-frames freeze it, so dt since last full
+        # update is not a pause detector. Radar also sets _pending_reanchor on
+        # pause→unpause when simulatedTime may not have jumped.
+        reanchor = self._pending_reanchor
+        self._pending_reanchor = False
+        if self._last_kin_t is not None:
+            gap = t_now - self._last_kin_t
+            reanchor = reanchor or gap > _READER_CLOCK_GAP_S or gap < 0.0
+        self._last_kin_t = t_now
+
         for v in vehicles:
             if v.id in self._last_vehicles:
-                v.update_from_last(
-                    self._last_vehicles[v.id], t_now, ego_x, ego_y, ego_z, ego_speed,
-                )
+                prev = self._last_vehicles[v.id]
+                if reanchor:
+                    v._hold_across_clock_discontinuity(prev, t_now)
+                else:
+                    v.update_from_last(
+                        prev, t_now, ego_x, ego_y, ego_z, ego_speed,
+                    )
             else:
                 # Anchor to the kinematics clock (sim or wall). Construction
                 # defaults to time.time(); a mismatched domain would make the
@@ -239,7 +273,7 @@ class TrafficReader:
                 v.time = t_now
         self._last_vehicles = {v.id: v for v in vehicles}
         trailer_vehicles = self._build_trailer_vehicles(
-            vehicles, t_now, ego_x, ego_y, ego_z, ego_speed,
+            vehicles, t_now, ego_x, ego_y, ego_z, ego_speed, reanchor=reanchor,
         )
         return vehicles, trailer_vehicles
 
@@ -291,6 +325,8 @@ class TrafficReader:
         ego_y: float,
         ego_z: float,
         ego_speed: float,
+        *,
+        reanchor: bool = False,
     ) -> list[Vehicle]:
         """Flatten nested trailers into standalone Vehicles for ACC scoring.
 
@@ -319,7 +355,10 @@ class TrafficReader:
         for tv in trailer_vehicles:
             prev = self._last_trailer_vehicles.get(tv.id)
             if prev is not None:
-                tv.update_from_last(prev, t_now, ego_x, ego_y, ego_z, ego_speed)
+                if reanchor:
+                    tv._hold_across_clock_discontinuity(prev, t_now)
+                else:
+                    tv.update_from_last(prev, t_now, ego_x, ego_y, ego_z, ego_speed)
             else:
                 tv.time = t_now
         self._last_trailer_vehicles = {tv.id: tv for tv in trailer_vehicles}

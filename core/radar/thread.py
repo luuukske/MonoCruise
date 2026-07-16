@@ -90,6 +90,7 @@ class RadarThread(BaseThread):
         self._last_ego_hist_t: float = 0.0
         # None until the first frame; then True when using SCS simulatedTime.
         self._kin_use_sim: bool | None = None
+        self._was_paused: bool = False
 
     def setup(self) -> None:
         self._traffic.open()
@@ -100,6 +101,7 @@ class RadarThread(BaseThread):
         self._ego_position_history.clear()
         self._last_ego_hist_t = 0.0
         self._kin_use_sim = None
+        self._was_paused = False
         with self.data._lock:
             self.data.vehicles = []
             self.data.trailer_vehicles = []
@@ -242,31 +244,18 @@ class RadarThread(BaseThread):
             self._reset_kinematics_clock()
         self._kin_use_sim = use_sim
 
-        # Paused: keep refreshing vehicle kinematics on the sim clock (dt≈0
-        # while simulatedTime is frozen) so TMP poses that keep flowing stay
-        # warm and the first unpause frame does not see a wall-clock pause gap.
+        # Paused: do NOT advance vehicle kinematics. If simulatedTime keeps
+        # ticking while positions are frozen, integrating here pulls every
+        # speed toward 0. Hold the last vehicle list; on unpause force a
+        # reader re-anchor so history does not span the gap.
         # Do not bump t_mono: AEB/ACC treat an unchanged stamp as "no new frame".
         if paused:
-            traffic = (
-                self._read_traffic(ego_x, ego_y, ego_z, ego_speed, t_kin)
-                if use_sim else None
+            self._was_paused = True
+            self._publish_ego_fields(
+                ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
+                ego_has_trailer, ego_pitch_deg, True,
+                bump_t_mono=False,
             )
-            if traffic is not None:
-                vehicles, trailer_vehicles = traffic
-                self._publish_ego_fields(
-                    ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
-                    ego_has_trailer, ego_pitch_deg, True,
-                    vehicles=vehicles,
-                    trailer_vehicles=trailer_vehicles,
-                    tmp_session=any(v.is_tmp for v in vehicles),
-                    bump_t_mono=False,
-                )
-            else:
-                self._publish_ego_fields(
-                    ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
-                    ego_has_trailer, ego_pitch_deg, True,
-                    bump_t_mono=False,
-                )
             capture = get_recorder()
             if capture is not None:
                 self._capture_frame(
@@ -275,6 +264,10 @@ class RadarThread(BaseThread):
                     ego_pitch_deg, ego_has_trailer, True, None, None,
                 )
             return
+
+        if self._was_paused:
+            self._was_paused = False
+            self._traffic.request_reanchor()
 
         # Ego path history: advance only when the kinematics clock moves so a
         # hitch (frozen simulatedTime) does not stretch curvature samples.
