@@ -32,6 +32,9 @@ bump also needs the GitHub CLI (gh) installed and logged in. A GitHub release
 is permanently credited to whoever created it, so the draft is created here,
 under your own account, rather than in CI under github-actions[bot]. Install it
 from https://cli.github.com and run 'gh auth login'.
+
+Nothing is written, committed, tagged, or pushed until you confirm the plan
+(or pass --yes). Use --dry-run to print the plan and exit.
 """
 from __future__ import annotations
 
@@ -57,6 +60,18 @@ _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[A-Za-z]+\.\d+)?$")
 _PRE_RE = re.compile(
     r"^(?P<base>\d+\.\d+\.\d+)(?:-(?P<label>[A-Za-z]+)\.(?P<num>\d+))?$"
 )
+
+_EPILOG = """\
+examples:
+  python tools/release.py bump patch                  # 1.1.0 -> 1.1.1
+  python tools/release.py bump minor --pre preview    # 1.1.0 -> 1.2.0-preview.1
+  python tools/release.py bump --pre preview          # 1.1.0-preview.1 -> 1.1.0-preview.2
+  python tools/release.py bump patch                  # 1.1.0-preview.3 -> 1.1.0  (finalize)
+  python tools/release.py bump --set 1.2.0-rc.1
+  python tools/release.py bump minor --dry-run        # print plan, change nothing
+  python tools/release.py bump patch --yes            # skip confirmation prompt
+  python tools/release.py notes 1.1.0
+"""
 
 
 def _read_version() -> str:
@@ -130,30 +145,6 @@ def _bump(current: str, level: str | None = None, pre: str | None = None) -> str
     if level is None:
         raise SystemExit("nothing to bump: pass a level (major|minor|patch) or --pre")
     return _bump_base(base, level)
-
-
-def _split_changelog(text: str) -> list[tuple[str, str]]:
-    """Return list of (heading_line, body) for each ## section, in order."""
-    parts: list[tuple[str, str]] = []
-    current_head: str | None = None
-    current_body: list[str] = []
-    head_pos: int | None = None
-    for line in text.splitlines(keepends=True):
-        if line.startswith("## "):
-            if current_head is not None:
-                parts.append((current_head, "".join(current_body)))
-            current_head = line
-            current_body = []
-            head_pos = len(parts)
-        else:
-            if current_head is None:
-                # preamble: hold onto it as a sentinel entry
-                parts.append(("", line)) if head_pos is None else None
-            else:
-                current_body.append(line)
-    if current_head is not None:
-        parts.append((current_head, "".join(current_body)))
-    return parts
 
 
 def _extract_section(version: str) -> str | None:
@@ -245,6 +236,63 @@ def _create_draft(tag: str, version: str) -> None:
         notes_file.unlink(missing_ok=True)
 
 
+def _confirm(prompt: str) -> bool:
+    try:
+        answer = input(f"{prompt} [y/N] ").strip().lower()
+    except EOFError:
+        return False
+    return answer in {"y", "yes"}
+
+
+def _print_plan(
+    *,
+    current: str,
+    new_version: str,
+    dry_run: bool,
+) -> None:
+    today = _dt.date.today().isoformat()
+    tag = f"v{new_version}"
+    is_prerelease = "-" in new_version
+    notes = (_extract_section("Unreleased") or "").strip()
+    version_rel = VERSION_FILE.relative_to(ROOT).as_posix()
+    changelog_rel = CHANGELOG.relative_to(ROOT).as_posix()
+
+    print()
+    print("Release plan")
+    print("============")
+    print(f"  Version       : {current}  ->  {new_version}")
+    print(f"  Tag           : {tag}")
+    print(f"  Channel       : {'prerelease (preview)' if is_prerelease else 'stable'}")
+    print(f"  Date          : {today}")
+    print()
+    print("Files that will be updated:")
+    print(f"  - {version_rel}   (__version__ = \"{new_version}\")")
+    print(f"  - {changelog_rel}  ([Unreleased] -> [{new_version}] - {today})")
+    print()
+    print("Changelog notes (become the GitHub release body):")
+    if notes:
+        for line in notes.splitlines():
+            print(f"  {line}")
+    else:
+        print("  (empty)")
+    print()
+    if dry_run:
+        print("Git / GitHub (skipped in --dry-run):")
+    else:
+        print("Git / GitHub actions:")
+    print(f"  - git add {version_rel} {changelog_rel}")
+    print(f"  - git commit -m \"Release {tag}\"")
+    print(f"  - git tag -a {tag} -m \"Release {tag}\"")
+    print("  - git push")
+    print(f"  - git push origin {tag}")
+    prerelease_flag = " --prerelease" if is_prerelease else ""
+    print(
+        f"  - gh release create {tag} --draft --verify-tag"
+        f" --title \"MonoCruise {tag}\"{prerelease_flag}"
+    )
+    print()
+
+
 def cmd_bump(args: argparse.Namespace) -> None:
     current = _read_version()
     if args.set:
@@ -267,16 +315,26 @@ def cmd_bump(args: argparse.Namespace) -> None:
     if not args.dry_run:
         _check_gh()
 
-    print(f"bumping {current} -> {new_version}")
+    _print_plan(current=current, new_version=new_version, dry_run=args.dry_run)
+
+    if args.dry_run:
+        print("Dry-run only — nothing was changed or created.")
+        return
+
+    if not args.yes and not _confirm("Proceed with this release?"):
+        raise SystemExit("Aborted. Nothing was changed or created.")
+
+    print()
+    print(f"Bumping {current} -> {new_version}")
     _write_version(new_version)
     _promote_unreleased(new_version)
 
-    if args.dry_run:
-        print("dry-run: skipping git commit/tag/push and release draft")
-        return
-
     tag = f"v{new_version}"
-    _run("git", "add", str(VERSION_FILE.relative_to(ROOT)), str(CHANGELOG.relative_to(ROOT)))
+    _run(
+        "git", "add",
+        str(VERSION_FILE.relative_to(ROOT)),
+        str(CHANGELOG.relative_to(ROOT)),
+    )
     _run("git", "commit", "-m", f"Release {tag}")
     _run("git", "tag", "-a", tag, "-m", f"Release {tag}")
     _run("git", "push")
@@ -294,29 +352,71 @@ def cmd_notes(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MonoCruise release helper")
+    parser = argparse.ArgumentParser(
+        description="MonoCruise release helper: bump, tag, push, and draft a GitHub release.",
+        epilog=_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    bump = sub.add_parser("bump", help="bump version, commit, tag, push")
-    bump.add_argument("level", nargs="?", choices=["major", "minor", "patch"])
-    bump.add_argument("--set", dest="set", help="explicit MAJOR.MINOR.PATCH[-LABEL.N]")
+    bump = sub.add_parser(
+        "bump",
+        help="bump version, update changelog, commit, tag, push, draft release",
+        description=(
+            "Compute the next version, show a full plan, then (after confirmation) "
+            "update version + changelog, commit, tag, push, and create a draft "
+            "GitHub release. Nothing is written until you confirm."
+        ),
+        epilog=_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     bump.add_argument(
-        "--pre", dest="pre", metavar="LABEL",
+        "level",
+        nargs="?",
+        choices=["major", "minor", "patch"],
+        help="semver level to bump (omit with --pre to advance a pre-release, "
+             "or with --set for an explicit version)",
+    )
+    bump.add_argument(
+        "--set",
+        dest="set",
+        metavar="VERSION",
+        help="set an explicit version MAJOR.MINOR.PATCH[-LABEL.N]",
+    )
+    bump.add_argument(
+        "--pre",
+        dest="pre",
+        metavar="LABEL",
         help="pre-release label, e.g. 'preview' or 'rc' (produces -LABEL.N)",
     )
-    bump.add_argument("--dry-run", action="store_true", help="skip git operations")
+    bump.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print the release plan and exit without changing or creating anything",
+    )
+    bump.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        help="skip the confirmation prompt (still refuses an empty [Unreleased])",
+    )
     bump.set_defaults(func=cmd_bump)
 
-    notes = sub.add_parser("notes", help="print CHANGELOG section for a version")
-    notes.add_argument("version", help="MAJOR.MINOR.PATCH (no leading v)")
+    notes = sub.add_parser(
+        "notes",
+        help="print the CHANGELOG section for a version",
+        description="Print the CHANGELOG.md body for a given version to stdout.",
+    )
+    notes.add_argument(
+        "version",
+        help="version to look up, MAJOR.MINOR.PATCH[-LABEL.N] (no leading v)",
+    )
     notes.set_defaults(func=cmd_notes)
 
     args = parser.parse_args()
     if args.command == "bump" and not args.set and not args.level and not args.pre:
-        parser.error("bump requires a level (major|minor|patch), --pre, or --set")
+        bump.error("bump requires a level (major|minor|patch), --pre, or --set")
     args.func(args)
 
 
 if __name__ == "__main__":
     main()
-
