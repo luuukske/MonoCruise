@@ -1,8 +1,14 @@
 ﻿name: build-and-release
 
-# Tag push (vX.Y.Z) publishes a real release.
-# workflow_dispatch lets you produce a build artifact without publishing —
+# Tag push (vX.Y.Z) publishes a real release. tools/release.py bump has already
+# created that release as a draft, authored by the contributor who ran it, so
+# this workflow only attaches artifacts and un-drafts it. That is what keeps the
+# release credited to a person instead of github-actions[bot]: a release author
+# is fixed at creation and cannot be reassigned later.
+#
+# workflow_dispatch lets you produce a build artifact without publishing:
 # pass publish=true to publish anyway (uses core/version.py as the version).
+# Dispatch builds have no contributor draft, so they are authored by the bot.
 on:
   push:
     tags:
@@ -15,7 +21,7 @@ on:
         default: 'false'
 
 permissions:
-  contents: write  # needed by softprops/action-gh-release to create the release
+  contents: write  # needed to upload assets to a release and to publish it
 
 jobs:
   build:
@@ -124,16 +130,15 @@ jobs:
       #         "artifacts/MonoCruise installer.exe"
       #     Remove-Item cert.pfx
 
+      # Only dispatch builds need notes here. Tag builds carry the notes that
+      # release.py put on the draft when it created it.
       - name: Extract release notes
+        if: steps.version.outputs.kind == 'dispatch'
         shell: bash
         run: |
-          if [[ "${{ steps.version.outputs.kind }}" == "tag" ]]; then
-            python tools/release.py notes "${{ steps.version.outputs.version }}" > release_notes.md
-          else
-            # Dispatch builds use the [Unreleased] section. Empty file is fine
-            # if there's nothing there yet.
-            python tools/release.py notes Unreleased > release_notes.md || echo "" > release_notes.md
-          fi
+          # Dispatch builds use the [Unreleased] section. Empty file is fine
+          # if there's nothing there yet.
+          python tools/release.py notes Unreleased > release_notes.md || echo "" > release_notes.md
           echo "--- release notes ---"
           cat release_notes.md
 
@@ -144,8 +149,31 @@ jobs:
           path: artifacts/*
           retention-days: 14
 
-      - name: Create GitHub release
-        if: steps.version.outputs.kind == 'tag' || github.event.inputs.publish == 'true'
+      # The draft already exists, made by tools/release.py under the
+      # contributor's own account. Title, notes and the prerelease flag came
+      # with it, so all that is left is the artifacts and the publish.
+      - name: Publish release
+        if: steps.version.outputs.kind == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          if ! gh release view "$tag" > /dev/null 2>&1; then
+            echo "::error::No release found for $tag."
+            echo "Tags are expected to come from 'python tools/release.py bump',"
+            echo "which drafts the release under the contributor's own account."
+            echo "Publishing here instead would credit it to github-actions[bot],"
+            echo "so this fails rather than doing that silently."
+            exit 1
+          fi
+          gh release upload "$tag" artifacts/* --clobber
+          gh release edit "$tag" --draft=false
+
+      # Dispatch builds are bot-authored by design: nobody drafted them, and a
+      # dev build credited to CI is honest.
+      - name: Create dev release
+        if: steps.version.outputs.kind == 'dispatch' && github.event.inputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}

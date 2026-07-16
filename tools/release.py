@@ -5,7 +5,9 @@ Two subcommands:
     python tools/release.py bump {major|minor|patch}
         Bumps core/version.py, rewrites the [Unreleased] heading in CHANGELOG.md
         to "[X.Y.Z] - YYYY-MM-DD", inserts a fresh empty [Unreleased] block above
-        it, commits both files, tags vX.Y.Z, and pushes commit + tag.
+        it, commits both files, tags vX.Y.Z, pushes commit + tag, and creates a
+        draft GitHub release for the tag. CI then attaches the build artifacts
+        and publishes the draft.
 
     python tools/release.py bump {major|minor|patch} --pre LABEL
         Pre-release. Bumps the base, then tags X.Y.Z-LABEL.1 (prerelease).
@@ -25,12 +27,18 @@ Two subcommands:
 The bump command refuses to run if the [Unreleased] block is empty: i.e. you
 must have at least one line of changelog entries below the [Unreleased] heading
 before publishing a release.
+
+bump also needs the GitHub CLI (gh) installed and logged in. A GitHub release
+is permanently credited to whoever created it, so the draft is created here,
+under your own account, rather than in CI under github-actions[bot]. Install it
+from https://cli.github.com and run 'gh auth login'.
 """
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -186,6 +194,57 @@ def _run(*cmd: str) -> None:
     subprocess.run(cmd, check=True, cwd=ROOT)
 
 
+def _check_gh() -> None:
+    """Fail before anything is written or pushed if gh is unusable.
+
+    Ordering matters: once the tag is pushed, CI starts a build that expects a
+    draft to exist. Discovering a missing gh at that point would leave a tag
+    with no release behind it, so the check runs first.
+    """
+    if shutil.which("gh") is None:
+        raise SystemExit(
+            "gh (GitHub CLI) not found, but bump needs it to create the release "
+            "draft under your own account.\n"
+            "Install from https://cli.github.com, then run: gh auth login"
+        )
+    result = subprocess.run(
+        ["gh", "auth", "status"], cwd=ROOT, capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise SystemExit("gh is installed but not logged in. Run: gh auth login")
+
+
+def _create_draft(tag: str, version: str) -> None:
+    """Create the GitHub release for `tag` as a draft, authored by the caller.
+
+    A release's author is fixed at creation and cannot be changed afterwards.
+    Creating it here, with the contributor's gh credentials, is the whole
+    reason this step exists: CI can then attach artifacts and publish without
+    the release being credited to github-actions[bot].
+
+    The draft is invisible to the updater until CI un-drafts it, which keeps
+    users from seeing a release with no Update.zip attached yet.
+    """
+    notes = _extract_section(version) or ""
+    notes_file = ROOT / ".release-notes.md"
+    notes_file.write_text(notes.rstrip() + "\n", encoding="utf-8")
+    cmd = [
+        "gh", "release", "create", tag,
+        "--draft",
+        "--verify-tag",
+        "--title", f"MonoCruise {tag}",
+        "--notes-file", str(notes_file),
+    ]
+    # Same rule CI used to apply: any version carrying a -LABEL.N suffix is a
+    # prerelease, which is what puts it on the preview channel.
+    if "-" in version:
+        cmd.append("--prerelease")
+    try:
+        _run(*cmd)
+    finally:
+        notes_file.unlink(missing_ok=True)
+
+
 def cmd_bump(args: argparse.Namespace) -> None:
     current = _read_version()
     if args.set:
@@ -205,12 +264,15 @@ def cmd_bump(args: argparse.Namespace) -> None:
             "Add changelog entries before bumping."
         )
 
+    if not args.dry_run:
+        _check_gh()
+
     print(f"bumping {current} -> {new_version}")
     _write_version(new_version)
     _promote_unreleased(new_version)
 
     if args.dry_run:
-        print("dry-run: skipping git commit/tag/push")
+        print("dry-run: skipping git commit/tag/push and release draft")
         return
 
     tag = f"v{new_version}"
@@ -219,7 +281,9 @@ def cmd_bump(args: argparse.Namespace) -> None:
     _run("git", "tag", "-a", tag, "-m", f"Release {tag}")
     _run("git", "push")
     _run("git", "push", "origin", tag)
-    print(f"\nPushed {tag}. CI will build and publish the release.")
+    _create_draft(tag, new_version)
+    print(f"\nPushed {tag} and drafted its release.")
+    print("CI will attach the build artifacts and publish it under your name.")
 
 
 def cmd_notes(args: argparse.Namespace) -> None:
