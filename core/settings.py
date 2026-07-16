@@ -68,6 +68,18 @@ class Settings(metaclass=_SingletonMeta):
     # The updater reads this from config.json to decide which releases to offer.
     update_channel: str = "stable"
 
+    # Update notifications.
+    # notify_for_updates: when True (default) a NOTICE popup fires at boot the
+    # moment an update is found (see core/update_check). When False, no popup;
+    # the banner + update-button tint still signal a pending update.
+    notify_for_updates: bool = True
+    # Boot update-check cache (not user knobs): last_update_check gates the 30h
+    # network throttle; latest_known_version is the newest release tag seen on
+    # the active channel, so the banner/button can show a pending update on
+    # throttled boots with no network. Both are written by core/update_check.
+    last_update_check: float = 0.0
+    latest_known_version: str = ""
+
     # UI position/appearance
     panel_x: int = None
     panel_y: int = None

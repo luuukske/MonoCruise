@@ -18,6 +18,11 @@ SETTINGS_COLOR = "#454545"
 WAITING_COLOR  = "#1f538d"
 CONNECTED_COLOR = "#304230"
 LOST_COLOR     = "#FF0000"
+# Update-ready accents. Banner amber (distinct from waiting-blue and the
+# red LOST/error state); the settings update-button icon and label are tinted
+# green when a newer build is waiting.
+UPDATE_COLOR   = "#3FB950"
+UPDATE_TINT    = "#52DC63"
 HEADER_BG      = "#454545"
 CMD_COLOR      = "#808080"
 CMD_BG_COLOR   = "#202020"

@@ -324,6 +324,38 @@ def main() -> None:
     except Exception:
         log.debug("could not start SDK boot check", exc_info=True)
 
+    # Update check (backend). Same non-blocking daemon pattern as the SDK check
+    # so the (possible) GitHub round-trip never touches boot time. The banner +
+    # update-button tint derive from the cached result on the main thread (see
+    # core.update_check.update_is_pending, polled by the window); this callback
+    # only handles the opt-in popup.
+    #
+    # This callback never closes the app or launches the updater. Note for the
+    # planned auto-close feature (a checker-launched MonoCruise closing itself on
+    # game exit): it must stay open when an update is ready so the update signals
+    # remain visible for the user to act on. Gate that future close on
+    # `not update_is_pending()`. See core/update_check/__init__.py.
+    from core.update_check import UpdateCheckResult, start_update_check
+
+    def _on_update_result(result: UpdateCheckResult) -> None:
+        if not result.update_available:
+            return
+        if not result.fresh:
+            return  # cached/throttled: banner + tint already reflect it, no re-nag
+        if not getattr(settings, "notify_for_updates", True):
+            return  # user opted out of popups; banner + tint still signal it
+        PopupWindow.emit(
+            "Update available",
+            f"MonoCruise {result.latest_version} is ready. Open settings to update.",
+            "n",
+            duration_ms=8000,
+        )
+
+    try:
+        start_update_check(_on_update_result)
+    except Exception:
+        log.debug("could not start update check", exc_info=True)
+
     # Main window (lives on the main thread: no separate thread needed)
     window = create_main_window(settings, version=f"v{__version__}")
     registry.register_object("main_window", window)

@@ -38,6 +38,7 @@ from ui.main_window.constants import (
     RADIUS_SETTINGS_PANEL,
     SETTINGS_PANEL_WIDTH,
     SUBTEXT_GAP_TOP,
+    UPDATE_TINT,
 )
 from ui.main_window.widgets import (
     BindButton,
@@ -165,9 +166,15 @@ class SettingsPanel(QWidget):
         update_icon = os.path.join(_PROJECT_ROOT, "ui/main_window/assets/cloud-download.svg")
         if os.path.exists(update_icon):
             icon_lbl.setPixmap(QIcon(update_icon).pixmap(QSize(16, 16)))
+        # Kept so set_update_available() can re-tint the icon red when a newer
+        # build is waiting (a passive signal alongside the opt-in popup).
+        self._update_icon_lbl = icon_lbl
+        self._update_available = False
         text_lbl = QLabel("Update")
         text_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         text_lbl.setStyleSheet("color: white; background: transparent; font-size: 12px;")
+        # Kept so set_update_available() can green-tint the label alongside the icon.
+        self._update_text_lbl = text_lbl
         btn_lay.addWidget(icon_lbl)
         btn_lay.addWidget(text_lbl)
         self._btn_update.clicked.connect(self._launch_updater)
@@ -531,6 +538,12 @@ class SettingsPanel(QWidget):
         self.chk_live_bar = new_checkbutton(
             p, self._r(), 1, s.bar_variable,
             callback=lambda v: self._set("bar_variable", v),
+        )
+
+        new_label(p, self._r(0), 0, "Notify for updates:")
+        self.chk_notify_updates = new_checkbutton(
+            p, self._r(), 1, s.notify_for_updates,
+            callback=lambda v: self._set("notify_for_updates", v),
         )
 
         self.opt_channel, self._preview_subtext, _ = self._field_with_subtext(
@@ -1299,6 +1312,46 @@ class SettingsPanel(QWidget):
         except Exception:
             logger.exception("failed to launch updater")
 
+    def set_update_available(self, available: bool) -> None:
+        """Green-tint the update-button icon + label (and update its tooltip)
+        when a newer build is available, signalling the update without a popup.
+        Driven by the window poll from the cached update check; idempotent, no
+        network."""
+        if self._update_available == available:
+            return
+        self._update_available = available
+        self._render_update_icon(UPDATE_TINT if available else None)
+        self._update_text_lbl.setStyleSheet(
+            f"color: {UPDATE_TINT if available else 'white'}; "
+            "background: transparent; font-size: 12px;"
+        )
+        self._btn_update.setToolTip(
+            "Update available" if available else "Check for updates"
+        )
+
+    def _render_update_icon(self, color: str | None) -> None:
+        """Repaint the update-button icon. color=None keeps the asset's own
+        white stroke; a hex string re-tints the stroke (red when pending)."""
+        from PySide6.QtCore import QByteArray
+        from PySide6.QtGui import QPainter, QPixmap
+        from PySide6.QtSvg import QSvgRenderer
+
+        path = os.path.join(_PROJECT_ROOT, "ui/main_window/assets/cloud-download.svg")
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                svg = fh.read()
+        except OSError:
+            return
+        if color:
+            svg = svg.replace('stroke="#ffffff"', f'stroke="{color}"')
+        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        pix = QPixmap(QSize(16, 16))
+        pix.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pix)
+        renderer.render(painter)
+        painter.end()
+        self._update_icon_lbl.setPixmap(pix)
+
     def _set(self, key: str, value: Any) -> None:
         """Update a settings field and persist."""
         setattr(self._settings, key, value)
@@ -1341,6 +1394,7 @@ class SettingsPanel(QWidget):
         self.chk_horn.setChecked(s.horn_variable)
         self.chk_airhorn.setChecked(s.airhorn_variable)
         self.chk_live_bar.setChecked(s.bar_variable)
+        self.chk_notify_updates.setChecked(s.notify_for_updates)
         self.opt_channel.setCurrentText(s.update_channel.capitalize())
         self._preview_subtext.setVisible(s.update_channel.lower() == "preview")
 

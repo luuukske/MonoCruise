@@ -13,6 +13,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ## [Unreleased]
 ### Added
 - **Pedals lost banner**: banner now shows your pedals disconnected, just like v1.0.4.
+- **Update available popup**: a popup to notify the user of an update. this can be turned off in the setting.
 ### Fixed
 - **Connect pedals actually work**: wired up the connect button to be more reliable and actually work.
 - **AEB/ACC speeds after pause**: vehicle speeds collapsed to ~0 on unpause (and similar hitches) because kinematics used wall-clock time across the gap; radar now integrates on the game's simulatedTime and holds filters while sim time is frozen.

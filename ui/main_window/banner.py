@@ -24,6 +24,7 @@ from ui.main_window.constants import (
     LOST_COLOR,
     RADIUS_BANNER,
     TEXT_COLOR,
+    UPDATE_COLOR,
     WAITING_COLOR,
 )
 
@@ -49,6 +50,12 @@ class BannerWidget(QFrame):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFixedHeight(32)
+
+        # Set before the first _state_text() call below (used while building the
+        # label). When set, the idle WAITING presentation is replaced by an
+        # "update available" prompt (text + amber accent); Connected/Lost are
+        # unaffected so live connection status always wins while driving.
+        self._update_ready = False
 
         # Layout
         layout = QHBoxLayout(self)
@@ -96,7 +103,7 @@ class BannerWidget(QFrame):
         if self._state != BannerState.WAITING:
             self._dot_count = 0
             self._label.setText(self._state_text(self._state))
-        target = QColor(self._STATE_COLORS[state])
+        target = QColor(self._color_for(state))
         self._color_anim.stop()
         self._color_anim.setStartValue(QColor(self._current_color))
         self._color_anim.setEndValue(target)
@@ -105,6 +112,36 @@ class BannerWidget(QFrame):
     def set_text(self, text: str) -> None:
         """Override the default state‑based text (e.g. 'finish setup in settings')."""
         self._label.setText(text)
+
+    def set_update_ready(self, ready: bool) -> None:
+        """Flag that a newer build is available.
+
+        While the banner is WAITING this swaps 'Waiting for ...' for an 'Update
+        available' prompt and shifts the accent colour. Connected/Lost states
+        are untouched: live connection status wins while the user is driving.
+        Idempotent, so the window can call it every poll tick.
+        """
+        if ready == self._update_ready:
+            return
+        self._update_ready = ready
+        if self._state != BannerState.WAITING:
+            return
+        # Re-apply the WAITING presentation with the new text + accent, even
+        # though the state itself did not change.
+        self._dot_count = 0
+        self._label.setText(self._state_text(BannerState.WAITING))
+        target = QColor(self._color_for(BannerState.WAITING))
+        self._color_anim.stop()
+        self._color_anim.setStartValue(QColor(self._current_color))
+        self._color_anim.setEndValue(target)
+        self._color_anim.start()
+
+    def _color_for(self, state: BannerState) -> str:
+        """Accent colour for *state*; WAITING shows the update accent when an
+        update is pending."""
+        if state == BannerState.WAITING and self._update_ready:
+            return UPDATE_COLOR
+        return self._STATE_COLORS[state]
 
     @property
     def state(self) -> BannerState:
@@ -165,6 +202,10 @@ class BannerWidget(QFrame):
         if self._state != BannerState.WAITING:
             self._label.setText(self._state_text(self._state))
             return
+        if self._update_ready:
+            # Update prompt is a static call to action, not a waiting animation.
+            self._label.setText(self._state_text(self._state))
+            return
         self._dot_count = (self._dot_count % 3) + 1
         base = self._state_text(self._state)
         self._label.setText(base + "." * self._dot_count)
@@ -174,6 +215,8 @@ class BannerWidget(QFrame):
 
     def _state_text(self, state: BannerState) -> str:
         if state == BannerState.WAITING:
+            if self._update_ready:
+                return "Update available, open settings"
             return f"Waiting for {self._game_name()}"
         if state == BannerState.CONNECTED:
             return f"Connected to {self._game_name()}"

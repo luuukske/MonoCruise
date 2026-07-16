@@ -306,6 +306,24 @@ class MonoCruiseWindow(QMainWindow):
         except Exception:
             logger.exception("main window poll: CC panel sync failed")
 
+        try:
+            self._sync_update_indicator()
+        except Exception:
+            logger.exception("main window poll: update indicator sync failed")
+
+    def _sync_update_indicator(self) -> None:
+        """Reflect a pending update on the banner + settings update button.
+
+        Both derive from the cached boot-check result (core.update_check), so
+        this is a cheap main-thread read with no network. Idempotent: the
+        widgets no-op when the state is unchanged.
+        """
+        from core.update_check import update_is_pending
+
+        pending = update_is_pending()
+        self._banner.set_update_ready(pending)
+        self._settings_panel.set_update_available(pending)
+
     @staticmethod
     def _cc_scale_mult(raw: object) -> float:
         """Map settings value (e.g. 1.5 or '150%') to cc_panel scale multiplier."""
