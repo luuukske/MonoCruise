@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.0-preview.5] - 2026-07-16
 ### Added
 - **Pedals lost banner**: banner now shows your pedals disconnected, just like v1.0.4.
 - **Update available popup**: a popup to notify the user of an update. this can be turned off in the setting.
