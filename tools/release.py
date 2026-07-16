@@ -61,6 +61,18 @@ _PRE_RE = re.compile(
     r"^(?P<base>\d+\.\d+\.\d+)(?:-(?P<label>[A-Za-z]+)\.(?P<num>\d+))?$"
 )
 
+# Default install locations, checked only to tell "gh is missing" apart from
+# "gh is here but this shell's PATH predates it". Never used to invoke gh: a
+# bump that only works from one machine's install path would be worse than one
+# that tells you to restart your terminal.
+_GH_INSTALL_PATHS = (
+    r"C:\Program Files\GitHub CLI\gh.exe",
+    r"C:\Program Files (x86)\GitHub CLI\gh.exe",
+    "/usr/bin/gh",
+    "/usr/local/bin/gh",
+    "/opt/homebrew/bin/gh",
+)
+
 _EPILOG = """\
 examples:
   python tools/release.py bump patch                  # 1.1.0 -> 1.1.1
@@ -193,10 +205,21 @@ def _check_gh() -> None:
     with no release behind it, so the check runs first.
     """
     if shutil.which("gh") is None:
-        raise SystemExit(
-            "gh (GitHub CLI) not found, but bump needs it to create the release "
-            "draft under your own account.\n"
+        hint = (
             "Install from https://cli.github.com, then run: gh auth login"
+        )
+        # An installed gh that is missing from PATH almost always means the
+        # shell predates the install and is still holding the old PATH. Saying
+        # "not found, go install it" would send you chasing the wrong problem.
+        if any(Path(p).exists() for p in _GH_INSTALL_PATHS):
+            hint = (
+                "It is installed, but not on this shell's PATH. The installer "
+                "updates PATH for new processes only, so restart your terminal "
+                "(or IDE) and run this again."
+            )
+        raise SystemExit(
+            "gh (GitHub CLI) not found, but bump needs it to create the "
+            f"release draft under your own account.\n{hint}"
         )
     result = subprocess.run(
         ["gh", "auth", "status"], cwd=ROOT, capture_output=True, text=True
