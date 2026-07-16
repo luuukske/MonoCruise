@@ -12,6 +12,10 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+## [1.1.0-preview.6] - 2026-07-16
+### Changed
+- **Release workflow**: creator of the version now correctly mentioned on the release instead of `github-actions[bot]` and added minor changes to release script. this is basically a test run.
+
 ## [1.1.0-preview.5] - 2026-07-16
 ### Added
 - **Pedals lost banner**: banner now shows your pedals disconnected, just like v1.0.4.
