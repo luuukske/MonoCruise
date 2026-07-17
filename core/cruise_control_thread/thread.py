@@ -247,6 +247,12 @@ class CruiseControlThread(BaseThread):
                 # CC's button-set target wins; global limit is the always-on fallback
                 # when no target has been set via the buttons.
                 if self._cc_ctrl.enabled and self._cc_ctrl.target_speed_kmh is not None:
+                    # Re-apply the target clamp every tick: CC.step() owns the
+                    # per-tick re-clamp in cruise mode but never runs here, so
+                    # without this a global limit tightened mid-session leaves
+                    # a stale higher button target capping the truck above the
+                    # new global limit.
+                    self._cc_ctrl.set_target_kmh(self._cc_ctrl.target_speed_kmh)
                     self._limiter_ctrl.set_target_kmh(self._cc_ctrl.target_speed_kmh)
                     self._limiter_ctrl.enable()
                 elif Settings.global_speed_limit_kmh is not None:
@@ -716,11 +722,17 @@ class CruiseControlThread(BaseThread):
         """Latch/unlatch the user OPD-gas override of CC (cruise mode only).
 
         Entry: sending_thread saw the user's OPD gas exceed the mapper's gas
-        on the previous tick while CC/ACC were bidding, and ego is not far
-        below the CC target (below it, CC's own gas demand exceeds the
-        user's, so max-merge already gives the right output and there is no
-        cap to enforce). Exit: user lifts off the OPD gas region, or ego
-        falls the margin below the CC target so CC's demand wins again.
+        on the previous tick (CC/ACC bidding, or the sole-bidder limiter cap
+        binding), and ego is not far below the CC target (below it, CC's own
+        gas demand exceeds the user's, so max-merge already gives the right
+        output and there is no cap to enforce). Including the limiter-cap
+        case lets the latch engage on the very tick CC/ACC is enabled at a
+        binding global-limit cap: the winner label then never round-trips
+        "limiter" -> "cc" -> "limiter", which used to leak one tick of
+        uncapped user pedal and re-seat the gas cap at the user's full pedal
+        (throttle surge past the limit on ACC engage at max speed).
+        Exit: user lifts off the OPD gas region, or ego falls the margin
+        below the CC target so CC's demand wins again.
         Requires both CC and the limiter to be active; otherwise cleared.
         """
         if not (self._cc_ctrl.active and self._limiter_ctrl.active):
@@ -741,13 +753,13 @@ class CruiseControlThread(BaseThread):
         elif (
             opd_gas > _CC_OVERRIDE_GAS_RELEASE
             and not below_target
-            and self._read_user_gas_override_flag()
+            and self._read_user_gas_above_mapper_flag()
         ):
             self._cc_user_override = True
 
     @staticmethod
-    def _read_user_gas_override_flag() -> bool:
-        """sending_thread's user-OPD-gas-over-CC flag from the previous tick."""
+    def _read_user_gas_above_mapper_flag() -> bool:
+        """sending_thread's user-OPD-gas-above-mapper flag from the previous tick."""
         try:
             st = registry.get_thread("sending_thread")
         except KeyError:
@@ -756,7 +768,7 @@ class CruiseControlThread(BaseThread):
             if not st.is_alive():
                 return False
             with st.data._lock:
-                return bool(getattr(st.data, "user_gas_overriding_cc", False))
+                return bool(getattr(st.data, "user_gas_above_mapper", False))
         except (AttributeError, KeyError):
             return False
 
