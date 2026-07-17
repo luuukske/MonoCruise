@@ -275,66 +275,154 @@ first branch holds and CAH contributes nothing: no comfort cost.
 
 `ACCThread` already publishes the top-3 in-lane leads by score (see
 `core/acc/AGENTS.md §6`). The controller treats them as a longitudinal
-chain and applies a multi-anticipative extension:
+chain. The command is composed as
+
+```
+a_cmd = a_base  +  EMA(delta_anticipation, tau = ant_tau_s)
+```
+
+where `a_base` is the IIDM/CAH/ACC blend on the immediate lead alone
+(§8, after the confidence blend of §9.5) and `delta_anticipation` is a
+smoothly weighted adjustment from the leads beyond it. Everything that
+can change chain membership (lane entry/exit, score flicker, id flips)
+passes through continuous weights plus the delta EMA, so membership
+changes never step the output.
 
 ### 9.1 Chain construction
 
 Per tick, under `acc.data._lock`:
 
 1. Copy `leads[:]` (shallow).
-2. Filter to `dist_m > 0` and `effective_speed_ms` finite.
+2. Filter to `dist_m > 0` and `effective_speed_ms` finite; carry each
+   lead's tracker `score`.
 3. Sort ascending by `dist_m`. Index 0 is the immediate lead, indices
    1+ are anticipated leads.
 4. Cap the chain at `MA_MAX_LEADS = 3`.
 
 Vehicles that are not strictly ahead of the previous chain member by at
-least `s0_m + 1.0 m` are dropped: they are either lateral noise or
-ghost duplicates from the radar pipeline.
+least `ma_min_chain_gap_m` are dropped: they are either lateral noise
+or ghost duplicates from the radar pipeline.
 
-### 9.2 Per-lead control evaluation
+### 9.2 Coupling weights
 
-For each chain member `n ∈ {0, 1, 2}`, the IIDM/CAH/ACC blend from §8 is
-evaluated treating that vehicle as if it were the immediate lead. The
-gap input is the **direct** gap to that vehicle (sum of intermediate
-vehicle lengths and gaps is implicit in `dist_m`).
-
-This produces three candidate caps `a_acc^{(0)}, a_acc^{(1)}, a_acc^{(2)}`.
-
-### 9.3 Combining the chain
-
-The final cap is a **weighted minimum**:
+Each anticipated lead `n ≥ 1` gets a weight built from three factors:
 
 ```
-w_0 = 1.0
-w_n = w_anticipation^n          # geometric decay; default w_anticipation = 0.5
+gap_time_n = (dist_n − dist_{n−1}) / max(v_{n−1}, ant_time_ref_floor_ms)
+pair_n     = cos-ramp(gap_time_n): 1 at ≤ ant_gap_full_s (1.0 s),
+                                    0 at ≥ ant_gap_zero_s (3.0 s)
+conf_n     = smoothed score confidence of vehicle n (§9.5)
 
-a_eff^{(n)} = a_acc^{(n)}  +  (1 − w_n) · a_max     # soften further-out leads
-
-a_chain = min over n of a_eff^{(n)}
+W_n = moving_gate · conf_0 · Π_{k=1..n} (pair_k · conf_k)
 ```
 
-The softening term `(1 − w_n) · a_max` is added to anticipated leads so
-they only bind the cap when their command is *meaningfully tighter* than
-the immediate lead's. With `w = 0.5`:
+Pairwise time gaps propagate **multiplicatively**: one large gap
+anywhere in the chain removes everything beyond it, while a tightly
+packed platoon anticipates strongly even when it starts far from ego.
+A vehicle more than 3 s ahead of its follower is invisible by
+construction. `moving_gate` is the stationary-lead failsafe (§9.6).
 
-* `n = 0`: no softening, immediate lead always binds at full authority.
-* `n = 1`: lead-of-lead must demand ≥ 0.5·a_max more braking than the
-  immediate lead before it changes the output.
-* `n = 2`: third-ahead must demand ≥ 0.75·a_max more braking before it
-  binds.
+### 9.3 Decel side: weighted per-lead demand + virtual lead
 
-This produces the **early, gentle response to forming slowdowns**
-described in §3 without making anticipated leads dominate the command in
-normal driving. A lead-of-lead that is only mildly slowing has no effect;
-a lead-of-lead that is hammering the brakes pulls the cap down before
-the immediate lead has even started reacting.
+Two mechanisms, combined by minimum:
 
-### 9.4 Safety overlays still use the immediate lead
+1. **Per-lead direct gap.** Each anticipated lead is run through the
+   full §8 law at its direct gap; its *extra* braking demand over the
+   immediate-lead command is scaled by its weight:
+
+   ```
+   dec_n = W_n · min(0, a_acc^{(n)} − a_base)
+   ```
+
+   At `W = 1` the vehicle binds fully, at `W = 0` it contributes
+   nothing, smooth in between. This handles geometry: a slow vehicle
+   at a short direct gap.
+
+2. **Virtual lead.** The immediate lead's near-future state is
+   predicted from the weighted upstream differentials:
+
+   ```
+   v_virt = v_0 + ant_kv · Σ W_n (v_n − v_{n−1})
+   a_virt = a_0 + ant_ka · Σ W_n (a_n − a_{n−1})
+   ```
+
+   and the §8 law re-run on the immediate gap with `(v_virt, a_virt)`.
+   Its negative delta joins the decel side. This reacts to upstream
+   *braking events* long before the per-lead direct gap does (the ACC
+   blend ignores CAH in the comfort regime, so a distant decelerating
+   vehicle barely registers through mechanism 1).
+
+```
+delta_dec = min(min over n of dec_n, min(0, a_virt_cmd − a_base))
+```
+
+### 9.4 Accel side: bounded, gated lift
+
+The positive part of the virtual-lead delta becomes the lift:
+
+```
+lift = clamp(a_virt_cmd − a_base, 0, ant_lift_max_ms2)      # 0.5 m/s²
+```
+
+gated by two safety conditions:
+
+* **TTC gate** on the raw immediate lead: zero lift below
+  `ant_lift_ttc_min_s` (4 s) TTC, full above `ant_lift_ttc_full_s`
+  (6 s), cosine ramp between. No lift while genuinely closing.
+* **Decel-priority fade**: lift fades to zero as `delta_dec` grows past
+  `ant_lift_fade_ms2`, so the two sides never fight.
+
+`delta_anticipation = delta_dec + lift`, then EMA (`ant_tau_s = 0.4 s`)
+before being added to `a_base`. Ego eases off the brake, or picks up
+throttle slightly earlier, when the pack ahead of the lead accelerates;
+it can never gain more than 0.5 m/s² over the immediate-lead law.
+
+### 9.5 Confidence and the immediate-lead blend
+
+Tracker score maps to confidence via a ramp: 0 at `ant_score_min` (1),
+1 at `ant_score_full` (5). Confidence is EMA-filtered per vehicle,
+asymmetrically: fast up (`ant_conf_tau_up_s = 0.1 s`) so a genuine
+cut-in gains authority almost immediately, slow down
+(`ant_conf_tau_down_s = 0.8 s`) so a score flickering around the
+in-path threshold ratchets toward its recent high instead of
+squarewaving the command.
+
+The immediate lead itself is confidence-blended: with `conf_0 < 1`,
+
+```
+a_base = conf_0 · a_lead0  +  (1 − conf_0) · a_next
+```
+
+where `a_next` is the law on chain[1] (or the no-lead ceiling). A
+marginal vehicle drifting on the lane edge fades into authority instead
+of snapping in and out. Safety overlays (§10) always run on the raw
+chain[0] regardless of score.
+
+**Primary ghost hold**: when chain[0] flips to a farther vehicle
+because the previous primary left the published list, the old primary's
+cached kinematics keep a decaying min-only grip on `a_base` for
+`primary_ghost_hold_s` (0.8 s). A ghost can only hold brake briefly,
+never raise the cap.
+
+### 9.6 Stationary-lead failsafe
+
+Anticipation (both directions) is disabled when the immediate lead is
+not moving: `moving_gate` ramps from 0 at raw
+`v_lead ≤ ant_lead_moving_min_ms` (0.75 m/s) to 1 at
+`ant_lead_moving_full_ms` (1.5 m/s). Traffic beyond a stopped vehicle
+predicts nothing about when it will move; ego must handle the stopped
+lead on its own merits.
+
+### 9.7 Safety overlays still use the immediate lead
 
 The TTC, emergency, and standstill overlays in §10 are evaluated against
-chain index 0 only. Anticipation is for *smoothing*, not for tripping
-emergency action: a hazard two cars away that the immediate lead has
-not yet reacted to is not yet an emergency for ego.
+chain index 0 only, on raw data. Anticipation is for *smoothing*, not
+for tripping emergency action. Every overlay, and the at-clamp state
+(immediate-lead law at `max_decel`), zeroes the anticipation EMA so the
+controller restarts from the pure immediate-lead law on exit. The
+anticipation delta is additive on top of `a_base`, so a hazard the
+immediate lead poses is never masked: `delta_dec` only tightens, and
+lift is bounded, TTC-gated, and disabled at the decel clamp.
 
 ---
 
@@ -372,7 +460,8 @@ creeps against the torque converter / engine idle.
         │
         ▼
   _compute_command  : emergency band, TTC floor, standstill hold,
-                       per-lead IIDM/CAH/ACC blend, weighted-min over chain
+                       immediate-lead IIDM/CAH/ACC blend + confidence
+                       blend + ghost hold, anticipation delta (EMA)
         │
         ▼
   _jerk_limit       : |da/dt| ≤ 2.5 m/s³, bypassed on emergency
@@ -502,7 +591,11 @@ classical implementation suffered from:
 |---|---|
 | Free-term recovery overshoot (classical IDM) | IIDM piecewise form caps the upper branch at `a_free` |
 | Soft response when lead matches ego decel | CAH overlay, blended via cool-factor model |
-| Late, sharp brake on slowdowns ahead of lead | Multi-vehicle anticipation chain (§9) |
+| Late, sharp brake on slowdowns ahead of lead | Weighted per-lead demand + virtual-lead prediction (§9.3) |
+| Chain membership snapping (lane entry/exit) | Continuous coupling weights + anticipation delta EMA (§9.2) |
+| Marginal in-lane vehicle flapping the command | Score-confidence blend + asymmetric conf EMA + ghost hold (§9.5) |
+| Over-braking into a dissolving slowdown | Bounded, TTC-gated accel-side lift (§9.4) |
+| Anticipating past a stopped lead | Stationary-lead failsafe (§9.6) |
 | Jitter-driven micro-oscillation in equilibrium | symmetric EMA on `s, v_lead`; jerk limiter |
 | Brake-event lag from filtering | asymmetric EMA on `a_lead`; TTC + emergency on raw |
 | Double-counting of lead accel | legacy `K_FF · a_lead` term removed (CAH supersedes) |
@@ -520,7 +613,14 @@ All defaults live in module-level constants and are replicated on
 a_max_ms2, b_comfort_ms2, delta, v0_ms,
 s0_m, t_headway_s,
 cool_factor_c,
-ma_max_leads, ma_weight_decay, ma_min_chain_gap_m,
+ma_max_leads, ma_min_chain_gap_m,
+ant_gap_full_s, ant_gap_zero_s, ant_time_ref_floor_ms,
+ant_score_min, ant_score_full,
+ant_conf_tau_up_s, ant_conf_tau_down_s, primary_ghost_hold_s,
+ant_kv, ant_ka,
+ant_lift_max_ms2, ant_lift_ttc_min_s, ant_lift_ttc_full_s,
+ant_lift_fade_ms2, ant_tau_s,
+ant_lead_moving_min_ms, ant_lead_moving_full_ms,
 ttc_hard_s, d_emergency_m, emergency_decel_ms2,
 max_accel_ms2, max_decel_ms2,
 standstill_speed_ms, standstill_gap_slack_m, standstill_hold_decel_ms2,

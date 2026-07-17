@@ -43,8 +43,61 @@ T_HEADWAY_BY_LEVEL_S: tuple[float, float, float, float, float] = (
 COOL_FACTOR_C: float = 0.99
 
 MA_MAX_LEADS: int = 3
-MA_WEIGHT_DECAY: float = 0.5
 MA_MIN_CHAIN_GAP_M: float = 4.0
+
+# Multi-vehicle anticipation coupling. Each anticipated lead's influence
+# is weighted by the pairwise time gap to the vehicle behind it in the
+# chain: full coupling at <= ANT_GAP_FULL_S, zero at >= ANT_GAP_ZERO_S
+# (cosine ramp between). Weights propagate multiplicatively down the
+# chain, so one large gap anywhere removes everything beyond it, while a
+# tightly packed platoon anticipates strongly.
+ANT_GAP_FULL_S: float = 1.0
+ANT_GAP_ZERO_S: float = 3.0
+# Pair time gaps are normalised by the follower's speed, floored so
+# slow-moving packed traffic keeps a finite gap time.
+ANT_TIME_REF_FLOOR_MS: float = 5.0
+# In-lane tracker score confidence ramp: zero at or below SCORE_MIN
+# (scores hovering near the in-path threshold are tracker noise), full
+# at SCORE_FULL. Scores ramp from 0 on lane entry, so a cutting-in
+# vehicle fades in instead of snapping. Applied to anticipated leads
+# and, via the immediate-lead confidence blend, to chain[0] itself.
+ANT_SCORE_MIN: float = 1.0
+ANT_SCORE_FULL: float = 5.0
+# Per-vehicle confidence is EMA-filtered asymmetrically: fast upward so
+# a genuine cut-in gains authority almost immediately, slow downward so
+# a score flickering around the in-path threshold ratchets toward its
+# recent high instead of squarewaving the command.
+ANT_CONF_TAU_UP_S: float = 0.10
+ANT_CONF_TAU_DOWN_S: float = 0.80
+# When the immediate lead vanishes from the chain (lane-edge drift, id
+# flip) while a farther vehicle takes its slot, its braking demand fades
+# out over this hold instead of dropping in one tick. Min-only: a ghost
+# can only hold brake briefly, never lift the cap.
+PRIMARY_GHOST_HOLD_S: float = 0.8
+# Virtual-lead prediction: fraction of the weighted upstream speed /
+# accel differentials applied to the immediate lead's state for the
+# accel-side (lift) evaluation.
+ANT_KV: float = 0.4
+ANT_KA: float = 0.5
+# Accel-side anticipation may raise the command at most this far above
+# the immediate-lead law, and only while the raw TTC to the immediate
+# lead is comfortable (cosine ramp from zero lift at TTC_MIN to full
+# lift at TTC_FULL).
+ANT_LIFT_MAX_MS2: float = 0.5
+ANT_LIFT_TTC_MIN_S: float = 4.0
+ANT_LIFT_TTC_FULL_S: float = 6.0
+# When decel anticipation is binding, accel-side lift fades out over
+# this many m/s^2 of decel delta so the two sides never fight.
+ANT_LIFT_FADE_MS2: float = 0.3
+# The total anticipation delta is EMA-filtered so chain membership
+# changes (vehicle entering / leaving ego's lane) never step the output.
+ANT_TAU_S: float = 0.4
+# Stationary-lead failsafe: anticipation is fully disabled when the
+# immediate lead's raw speed is below MOVING_MIN, fully enabled above
+# MOVING_FULL, linear ramp between. A stopped lead must be treated on
+# its own merits regardless of what traffic beyond it is doing.
+ANT_LEAD_MOVING_MIN_MS: float = 0.75
+ANT_LEAD_MOVING_FULL_MS: float = 1.5
 
 TTC_HARD_S: float = 1.5
 TTC_MIN_VCLOSE_MS: float = 0.3
@@ -107,8 +160,24 @@ class ACConfig:
     t_headway_s: float = T_HEADWAY_S
     cool_factor_c: float = COOL_FACTOR_C
     ma_max_leads: int = MA_MAX_LEADS
-    ma_weight_decay: float = MA_WEIGHT_DECAY
     ma_min_chain_gap_m: float = MA_MIN_CHAIN_GAP_M
+    ant_gap_full_s: float = ANT_GAP_FULL_S
+    ant_gap_zero_s: float = ANT_GAP_ZERO_S
+    ant_time_ref_floor_ms: float = ANT_TIME_REF_FLOOR_MS
+    ant_score_min: float = ANT_SCORE_MIN
+    ant_score_full: float = ANT_SCORE_FULL
+    ant_conf_tau_up_s: float = ANT_CONF_TAU_UP_S
+    ant_conf_tau_down_s: float = ANT_CONF_TAU_DOWN_S
+    primary_ghost_hold_s: float = PRIMARY_GHOST_HOLD_S
+    ant_kv: float = ANT_KV
+    ant_ka: float = ANT_KA
+    ant_lift_max_ms2: float = ANT_LIFT_MAX_MS2
+    ant_lift_ttc_min_s: float = ANT_LIFT_TTC_MIN_S
+    ant_lift_ttc_full_s: float = ANT_LIFT_TTC_FULL_S
+    ant_lift_fade_ms2: float = ANT_LIFT_FADE_MS2
+    ant_tau_s: float = ANT_TAU_S
+    ant_lead_moving_min_ms: float = ANT_LEAD_MOVING_MIN_MS
+    ant_lead_moving_full_ms: float = ANT_LEAD_MOVING_FULL_MS
     ttc_hard_s: float = TTC_HARD_S
     d_emergency_m: float = D_EMERGENCY_M
     emergency_decel_ms2: float = EMERGENCY_DECEL_MS2
@@ -135,6 +204,8 @@ class _LeadSnapshot:
     dist_m: float
     v_lead_ms: float
     a_lead_ms2: float
+    score: float = 0.0
+    conf: float = 1.0
 
 
 @dataclass(slots=True)
@@ -142,6 +213,7 @@ class _LeadEMA:
     dist_m: float | None = None
     v_lead_ms: float | None = None
     a_lead_ms2: float | None = None
+    conf: float | None = None
     last_seen_mono: float = 0.0
 
 
@@ -154,6 +226,16 @@ def _ema_step(prev: float | None, new: float, dt: float, tau: float) -> float:
         return new
     alpha = 1.0 - math.exp(-dt / max(tau, 1e-6))
     return prev + alpha * (new - prev)
+
+
+def _fade(x: float, full: float, zero: float) -> float:
+    """C1 cosine ramp: 1.0 at x <= full, 0.0 at x >= zero."""
+    if x <= full:
+        return 1.0
+    if x >= zero:
+        return 0.0
+    t = (x - full) / max(zero - full, 1e-6)
+    return 0.5 * (1.0 + math.cos(math.pi * t))
 
 
 def _iidm(
@@ -228,6 +310,13 @@ class AdaptiveCruiseController:
         self._lead_emas: dict[int, _LeadEMA] = {}
         self._output_ema: float | None = None
         self._prev_cmd_ms2: float | None = None
+        # Filtered multi-vehicle anticipation delta (m/s^2, added to the
+        # immediate-lead command). EMA state so chain membership changes
+        # fade instead of stepping.
+        self._ant_delta_ms2: float = 0.0
+        # Immediate-lead identity tracking for the ghost hold.
+        self._prev_primary_vid: int | None = None
+        self._ghost_vid: int | None = None
         # Lead-loss grace cache: see accel_cap_ms2.
         self._last_chain_raw: list[_LeadSnapshot] = []
         self._last_chain_mono: float = -math.inf
@@ -267,6 +356,7 @@ class AdaptiveCruiseController:
             # ages out stale ones via EMA_GC_TTL_S, and the cache is reseeded
             # the moment a real chain returns.
             self._gc_emas(now)
+            self._ant_delta_ms2 = 0.0
             target = self.config.no_lead_ceiling_ms2
             a_jerk = self._jerk_limit(target, dt, is_emergency=False)
             return self._output_filter(a_jerk, dt, is_emergency=False)
@@ -275,7 +365,7 @@ class AdaptiveCruiseController:
         chain_smooth = self._smooth_chain(chain_raw, dt, now)
         self._gc_emas(now)
 
-        a_raw, is_emergency = self._compute_command(chain_raw, chain_smooth, v_ego)
+        a_raw, is_emergency = self._compute_command(chain_raw, chain_smooth, v_ego, dt)
         a_jerk = self._jerk_limit(a_raw, dt, is_emergency)
         return self._output_filter(a_jerk, dt, is_emergency)
 
@@ -284,6 +374,9 @@ class AdaptiveCruiseController:
         self._lead_emas.clear()
         self._output_ema = None
         self._prev_cmd_ms2 = None
+        self._ant_delta_ms2 = 0.0
+        self._prev_primary_vid = None
+        self._ghost_vid = None
         self._last_chain_raw = []
         self._last_chain_mono = -math.inf
 
@@ -322,17 +415,20 @@ class AdaptiveCruiseController:
                 dist_m = float(lead.dist_m)
                 v_lead = float(lead.effective_speed_ms)
                 a_lead = float(lead.effective_accel_ms2)
+                score = float(getattr(lead, "score", 0.0))
             except (AttributeError, TypeError, ValueError):
                 continue
 
             if not (math.isfinite(dist_m) and math.isfinite(v_lead) and math.isfinite(a_lead)):
                 continue
+            if not math.isfinite(score):
+                score = 0.0
             dist_m = max(0.0, dist_m - cfg.ego_front_offset_m)
             if dist_m <= 0.0:
                 continue
 
             a_lead = _clamp(a_lead, cfg.emergency_decel_ms2, cfg.max_accel_ms2)
-            snapshots.append(_LeadSnapshot(vid, dist_m, v_lead, a_lead))
+            snapshots.append(_LeadSnapshot(vid, dist_m, v_lead, a_lead, score))
 
         if not snapshots:
             return []
@@ -383,6 +479,13 @@ class AdaptiveCruiseController:
                 else:
                     tau_a = cfg.tau_alead_relax_s
             ema.a_lead_ms2 = _ema_step(prev_a, raw.a_lead_ms2, dt, tau_a)
+
+            conf_target = self._score_conf(raw.score)
+            if ema.conf is None or conf_target >= ema.conf:
+                tau_c = cfg.ant_conf_tau_up_s
+            else:
+                tau_c = cfg.ant_conf_tau_down_s
+            ema.conf = _ema_step(ema.conf, conf_target, dt, tau_c)
             ema.last_seen_mono = now_mono
 
             smoothed.append(_LeadSnapshot(
@@ -390,6 +493,8 @@ class AdaptiveCruiseController:
                 dist_m=ema.dist_m,
                 v_lead_ms=ema.v_lead_ms,
                 a_lead_ms2=ema.a_lead_ms2,
+                score=raw.score,
+                conf=ema.conf,
             ))
         return smoothed
 
@@ -404,6 +509,7 @@ class AdaptiveCruiseController:
         chain_raw: list[_LeadSnapshot],
         chain_smooth: list[_LeadSnapshot],
         v_ego: float,
+        dt: float,
     ) -> tuple[float, bool]:
         cfg = self.config
 
@@ -411,12 +517,16 @@ class AdaptiveCruiseController:
         eff_dist_raw = max(primary_raw.dist_m, 0.01)
 
         if eff_dist_raw <= cfg.d_emergency_m:
+            # Safety overlays reset anticipation: on exit the controller
+            # restarts from the pure immediate-lead law.
+            self._ant_delta_ms2 = 0.0
             return cfg.emergency_decel_ms2, True
 
         v_close_raw = v_ego - primary_raw.v_lead_ms
         if v_close_raw > cfg.standstill_speed_ms:
             ttc = eff_dist_raw / max(v_close_raw, TTC_MIN_VCLOSE_MS)
             if ttc < cfg.ttc_hard_s:
+                self._ant_delta_ms2 = 0.0
                 return cfg.max_decel_ms2, True
 
         if (
@@ -431,6 +541,7 @@ class AdaptiveCruiseController:
             # launches. The gating block above still detects the condition so
             # downstream consumers can treat this as "ACC is in standstill
             # context" if needed.
+            self._ant_delta_ms2 = 0.0
             return 0.0, False
 
         try:
@@ -439,38 +550,250 @@ class AdaptiveCruiseController:
             level = 0
         t_headway = _headway_for_level(level) if level else cfg.t_headway_s
 
-        a_chain = cfg.max_accel_ms2
-        for n, lead in enumerate(chain_smooth):
-            eff_dist = max(lead.dist_m, 1e-3)
-            a_iidm = _iidm(
-                s=eff_dist,
-                v=v_ego,
-                v_lead=lead.v_lead_ms,
-                a_max=cfg.a_max_ms2,
-                b_comfort=cfg.b_comfort_ms2,
-                s0=cfg.s0_m,
-                t_headway=t_headway,
-                v0=cfg.v0_ms,
-                delta=cfg.delta,
-            )
-            a_cah_val = _cah(
-                s=eff_dist,
-                v=v_ego,
-                v_lead=lead.v_lead_ms,
-                a_lead=lead.a_lead_ms2,
-                a_max=cfg.a_max_ms2,
-            )
-            a_acc = _acc_blend(a_iidm, a_cah_val, cfg.b_comfort_ms2, cfg.cool_factor_c)
-            a_acc = _clamp(a_acc, cfg.max_decel_ms2, cfg.max_accel_ms2)
+        primary = chain_smooth[0]
+        a_base = self._lead_law(
+            primary.dist_m, v_ego, primary.v_lead_ms, primary.a_lead_ms2, t_headway,
+        )
+        a_base = _clamp(a_base, cfg.max_decel_ms2, cfg.max_accel_ms2)
 
-            w_n = cfg.ma_weight_decay ** n
-            a_eff = a_acc + (1.0 - w_n) * cfg.a_max_ms2
-            if a_eff < a_chain:
-                a_chain = a_eff
+        # Immediate-lead confidence blend: a marginal chain[0] (tracker
+        # score hovering near the in-path threshold, vehicle drifting on
+        # the lane edge) fades in against the command we would hold
+        # without it, instead of grabbing full authority the tick it
+        # appears and dropping it the tick it leaves. Safety overlays
+        # above already ran on the raw chain[0] regardless of score.
+        conf0 = primary.conf
+        if conf0 < 1.0:
+            if len(chain_smooth) > 1:
+                nxt = chain_smooth[1]
+                a_alt = self._lead_law(
+                    nxt.dist_m, v_ego, nxt.v_lead_ms, nxt.a_lead_ms2, t_headway,
+                )
+                a_alt = _clamp(a_alt, cfg.max_decel_ms2, cfg.max_accel_ms2)
+            else:
+                a_alt = cfg.no_lead_ceiling_ms2
+            a_base = conf0 * a_base + (1.0 - conf0) * a_alt
 
-        a_chain = _clamp(a_chain, cfg.max_decel_ms2, cfg.max_accel_ms2)
-        is_emergency = a_chain <= cfg.max_decel_ms2 + 1e-6
-        return a_chain, is_emergency
+        a_base = self._apply_primary_ghost(chain_smooth, v_ego, a_base, t_headway)
+
+        if a_base <= cfg.max_decel_ms2 + 1e-6:
+            # At-clamp hard overlay: the immediate lead alone demands full
+            # braking authority. Anticipation must never soften this.
+            self._ant_delta_ms2 = 0.0
+            return a_base, True
+
+        delta_target = self._anticipation_delta(
+            chain_raw, chain_smooth, v_ego, a_base, t_headway,
+        )
+        self._ant_delta_ms2 = _ema_step(
+            self._ant_delta_ms2, delta_target, dt, cfg.ant_tau_s,
+        )
+
+        a_cmd = _clamp(a_base + self._ant_delta_ms2, cfg.max_decel_ms2, cfg.max_accel_ms2)
+        is_emergency = a_cmd <= cfg.max_decel_ms2 + 1e-6
+        return a_cmd, is_emergency
+
+    def _score_conf(self, score: float) -> float:
+        cfg = self.config
+        span = max(cfg.ant_score_full - cfg.ant_score_min, 1e-6)
+        return _clamp((score - cfg.ant_score_min) / span, 0.0, 1.0)
+
+    def _apply_primary_ghost(
+        self,
+        chain_smooth: list[_LeadSnapshot],
+        v_ego: float,
+        a_base: float,
+        t_headway: float,
+    ) -> float:
+        """Fade out a vanished immediate lead instead of dropping it in one tick.
+
+        When chain[0] flips to a farther vehicle because the previous
+        primary left the published list (lane-edge drift, id flip), its
+        cached kinematics keep a decaying, min-only grip on the command
+        for primary_ghost_hold_s. A ghost can only hold brake, never
+        raise the cap; reappearance in the chain clears it.
+        """
+        cfg = self.config
+        now = self._prev_mono if self._prev_mono is not None else 0.0
+        primary_vid = chain_smooth[0].vid
+        chain_vids = {lead.vid for lead in chain_smooth}
+
+        prev_vid = self._prev_primary_vid
+        if prev_vid is not None and prev_vid != primary_vid:
+            ema = self._lead_emas.get(prev_vid)
+            if (
+                prev_vid not in chain_vids
+                and ema is not None
+                and ema.dist_m is not None
+                and ema.dist_m < chain_smooth[0].dist_m
+            ):
+                self._ghost_vid = prev_vid
+        self._prev_primary_vid = primary_vid
+
+        if self._ghost_vid is None:
+            return a_base
+        if self._ghost_vid in chain_vids:
+            self._ghost_vid = None
+            return a_base
+        ema = self._lead_emas.get(self._ghost_vid)
+        if ema is None or ema.dist_m is None or ema.conf is None:
+            self._ghost_vid = None
+            return a_base
+        age = now - ema.last_seen_mono
+        fade = _fade(age, 0.0, cfg.primary_ghost_hold_s)
+        if fade <= 0.0 or age > cfg.primary_ghost_hold_s:
+            self._ghost_vid = None
+            return a_base
+
+        a_ghost = self._lead_law(
+            ema.dist_m, v_ego, ema.v_lead_ms, ema.a_lead_ms2, t_headway,
+        )
+        a_ghost = _clamp(a_ghost, cfg.max_decel_ms2, cfg.max_accel_ms2)
+        w = ema.conf * fade
+        return a_base + w * min(0.0, a_ghost - a_base)
+
+    def _lead_law(
+        self,
+        dist_m: float,
+        v_ego: float,
+        v_lead: float,
+        a_lead: float,
+        t_headway: float,
+    ) -> float:
+        """IIDM + CAH + ACC blend for one lead at its direct gap."""
+        cfg = self.config
+        eff_dist = max(dist_m, 1e-3)
+        a_iidm = _iidm(
+            s=eff_dist,
+            v=v_ego,
+            v_lead=v_lead,
+            a_max=cfg.a_max_ms2,
+            b_comfort=cfg.b_comfort_ms2,
+            s0=cfg.s0_m,
+            t_headway=t_headway,
+            v0=cfg.v0_ms,
+            delta=cfg.delta,
+        )
+        a_cah_val = _cah(
+            s=eff_dist,
+            v=v_ego,
+            v_lead=v_lead,
+            a_lead=a_lead,
+            a_max=cfg.a_max_ms2,
+        )
+        return _acc_blend(a_iidm, a_cah_val, cfg.b_comfort_ms2, cfg.cool_factor_c)
+
+    def _anticipation_delta(
+        self,
+        chain_raw: list[_LeadSnapshot],
+        chain_smooth: list[_LeadSnapshot],
+        v_ego: float,
+        a_base: float,
+        t_headway: float,
+    ) -> float:
+        """Unfiltered anticipation adjustment (m/s^2) from leads beyond the first.
+
+        Negative values brake earlier / gentler than the immediate-lead law
+        (unbounded, still clamped by max_decel downstream); positive values
+        may lift the command by at most ant_lift_max_ms2 and only while the
+        raw TTC to the immediate lead is comfortable.
+        """
+        cfg = self.config
+        if len(chain_smooth) < 2:
+            return 0.0
+
+        # Stationary-lead failsafe on the RAW immediate lead speed: traffic
+        # beyond a stopped vehicle predicts nothing about when it will move.
+        moving_gate = _clamp(
+            (chain_raw[0].v_lead_ms - cfg.ant_lead_moving_min_ms)
+            / max(cfg.ant_lead_moving_full_ms - cfg.ant_lead_moving_min_ms, 1e-6),
+            0.0,
+            1.0,
+        )
+        if moving_gate <= 0.0:
+            return 0.0
+
+        # Coupling weights: pairwise time-gap ramp x tracker-score
+        # confidence, propagated multiplicatively down the chain. The
+        # immediate lead's own confidence gates the whole chain: a shaky
+        # chain[0] makes every prediction built on it shaky too.
+        weights: list[float] = []
+        w_run = moving_gate * chain_smooth[0].conf
+        for n in range(1, len(chain_smooth)):
+            prev = chain_smooth[n - 1]
+            cur = chain_smooth[n]
+            v_ref = max(prev.v_lead_ms, cfg.ant_time_ref_floor_ms)
+            gap_s = max(cur.dist_m - prev.dist_m, 0.0) / v_ref
+            w_pair = _fade(gap_s, cfg.ant_gap_full_s, cfg.ant_gap_zero_s)
+            w_run *= w_pair * cur.conf
+            if w_run < 1e-4:
+                w_run = 0.0
+            weights.append(w_run)
+
+        if not any(weights):
+            return 0.0
+
+        # Decel side: each anticipated lead is evaluated at its direct gap
+        # with the full law; its extra braking demand relative to the
+        # immediate-lead command is scaled by its coupling weight. At w=1 it
+        # binds fully, at w=0 it contributes nothing, smooth in between.
+        a_dec_delta = 0.0
+        for n, w in enumerate(weights, start=1):
+            if w <= 0.0:
+                continue
+            lead = chain_smooth[n]
+            a_n = self._lead_law(
+                lead.dist_m, v_ego, lead.v_lead_ms, lead.a_lead_ms2, t_headway,
+            )
+            a_n = _clamp(a_n, cfg.max_decel_ms2, cfg.max_accel_ms2)
+            contrib = w * min(0.0, a_n - a_base)
+            if contrib < a_dec_delta:
+                a_dec_delta = contrib
+
+        # Virtual lead: predict the immediate lead's near-future state from
+        # the weighted upstream speed / accel differentials and re-run the
+        # law on the immediate gap. The negative part joins the decel side
+        # (it reacts to upstream slowdowns long before the per-lead direct
+        # gap does); the positive part becomes the bounded, gated lift.
+        dv_up = 0.0
+        da_up = 0.0
+        for n, w in enumerate(weights, start=1):
+            if w <= 0.0:
+                continue
+            prev = chain_smooth[n - 1]
+            cur = chain_smooth[n]
+            dv_up += w * (cur.v_lead_ms - prev.v_lead_ms)
+            da_up += w * (cur.a_lead_ms2 - prev.a_lead_ms2)
+
+        primary = chain_smooth[0]
+        v_virt = max(0.0, primary.v_lead_ms + cfg.ant_kv * dv_up)
+        a_virt = _clamp(
+            primary.a_lead_ms2 + cfg.ant_ka * da_up,
+            cfg.emergency_decel_ms2,
+            cfg.max_accel_ms2,
+        )
+        a_virt_cmd = self._lead_law(primary.dist_m, v_ego, v_virt, a_virt, t_headway)
+        a_virt_cmd = _clamp(a_virt_cmd, cfg.max_decel_ms2, cfg.max_accel_ms2)
+        virt_delta = a_virt_cmd - a_base
+        if virt_delta < a_dec_delta:
+            a_dec_delta = virt_delta
+        lift = _clamp(virt_delta, 0.0, cfg.ant_lift_max_ms2)
+
+        if lift > 0.0:
+            # Kinematic gate on RAW immediate-lead data: no lift while
+            # actually closing on the lead with an uncomfortable TTC.
+            pr = chain_raw[0]
+            v_close = v_ego - pr.v_lead_ms
+            if v_close > TTC_MIN_VCLOSE_MS:
+                ttc = max(pr.dist_m, 0.01) / v_close
+                lift *= 1.0 - _fade(ttc, cfg.ant_lift_ttc_min_s, cfg.ant_lift_ttc_full_s)
+            # Fade lift out when decel anticipation is binding so the two
+            # sides never fight.
+            lift *= _clamp(
+                1.0 + a_dec_delta / max(cfg.ant_lift_fade_ms2, 1e-6), 0.0, 1.0,
+            )
+
+        return a_dec_delta + lift
 
     def _jerk_limit(self, a_new: float, dt: float, is_emergency: bool) -> float:
         if is_emergency or self._prev_cmd_ms2 is None:
