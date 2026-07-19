@@ -207,7 +207,6 @@ def evaluate_frame(
 
     t_stop = ego_speed / effective_decel if effective_decel > 0 else 0.0
     dynamic_horizon = min(max(cal.arc_horizon_min, t_stop * 2.0), cal.arc_horizon_max)
-    stopping_buffer = cal.stop_buffer + ego_half_l
 
     ego_yaw_rad_val = ego_yaw_rad
     fwd_x = -math.sin(ego_yaw_rad_val)
@@ -308,7 +307,6 @@ def evaluate_frame(
             ego_fwd_z=ego_fwd_z,
             ego_hw=ego_hw,
             dynamic_horizon=dynamic_horizon,
-            stopping_buffer=stopping_buffer,
             tmp_traffic_session=False,
             ref_kmh_for_filter=ego_speed * 3.6,
             cal=cal,

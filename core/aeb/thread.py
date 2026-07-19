@@ -59,27 +59,11 @@ _GRAVITY_MS2: float = 9.81
 # Brake-capacity floor used when sending_thread has not yet published an
 # estimate. Slope-corrected per tick before use; never read as a flat ceiling.
 _FULL_BRAKE_DECEL_FALLBACK: float = 7.8
-# Fraction of max brake capacity assumed for ego stopping / TTB calculations.
-# The brake system physically commands only this fraction, reserving headroom
-# so a sudden increase in closing speed can still stop the vehicle.
-_AEB_EGO_DECEL_FRAC: float = 0.9
-_MAX_RANGE: float = 200.0
-_MAX_RANGE_SQ: float = _MAX_RANGE ** 2
 # TMP-only: |v_ego − v_target| (km/h) vs latched ref ego speed: see _latched_filter_ego_kmh.
 _TMP_FILTER_EGO_SPLIT_KMH: float = 40.0
 _TMP_FILTER_REL_ABOVE_SPLIT_KMH: float = 15.0
 _TMP_FILTER_REL_AT_OR_BELOW_SPLIT_KMH: float = 40.0
 _USER_BRAKE_LATCH_THRESHOLD: float = 0.12
-
-_MIN_ARC_HORIZON: float = 2.5
-_MAX_ARC_HORIZON: float = 3.0
-_CORRIDOR_MARGIN: float = 0.5
-_COLLISION_SAMPLES: int = 36
-
-_WARN_TTB_THRESHOLD: float = 1.3
-_BRAKE_TTB_THRESHOLD: float = 0.2
-_BRAKE_RELEASE_THRESHOLD: float = 0.5
-_TIME_TO_BRAKE_BUFFER: float = 0.0
 
 _STOP_BUFFER_FIXED: float = 1.6
 _ARC_START_PCTG: float = 0.2
@@ -1231,8 +1215,6 @@ class AEBThread(BaseThread):
         t_stop = ego_speed / effective_decel
         dynamic_horizon = min(max(cal.arc_horizon_min, t_stop * 2.0), cal.arc_horizon_max)
 
-        stopping_buffer = cal.stop_buffer + ego_half_l
-
         _ego_fwd_x = -math.sin(ego_yaw_rad)
         _ego_fwd_z = -math.cos(ego_yaw_rad)
         _ego_body_offset = (cal.arc_start_pctg - 0.5) * (2.0 * ego_half_l)
@@ -1542,7 +1524,6 @@ class AEBThread(BaseThread):
                 ego_fwd_z=ego_fwd_z,
                 ego_hw=ego_hw,
                 dynamic_horizon=dynamic_horizon,
-                stopping_buffer=stopping_buffer,
                 tmp_traffic_session=tmp_traffic_session,
                 ref_kmh_for_filter=ref_kmh_for_filter,
                 cal=cal,
@@ -1828,14 +1809,9 @@ class AEBThread(BaseThread):
             and time_to_brake < cal.brake_ttb + cal.brake_response_window_s
         )
 
-        # Geometry-driven engagement latch: once engaged, hold engagement
-        # while any confirmed collision target's unbraked_ttc is inside
-        # disarm_hold_ttc_s. A working brake pushes effective_required under
-        # the disarm threshold and headway over the distance latch BY
-        # CONSTRUCTION (required ~ v^2, headway = d/v), so a narrower hold
-        # window releases mid-stop and the event pumps (clip 29c8e7e0:
-        # release at ~30 km/h closing, coast, re-engage at 7 m). Entry is
-        # untouched; this only keeps an active event alive.
+        # Hold an active event while a colliding target's ttc is inside
+        # disarm_hold_ttc_s: a working brake trips the plain disarm mid-stop
+        # and the event pumps (see AGENTS.md engagement hysteresis).
         geom_threat_latched = (
             run_collision
             and best_unbraked_ttc < cal.disarm_hold_ttc_s

@@ -382,7 +382,6 @@ class FilterContext:
     ego_fwd_z: float
     ego_hw: float
     dynamic_horizon: float
-    stopping_buffer: float
     tmp_traffic_session: bool
     ref_kmh_for_filter: float
     cal: AEBCalibration

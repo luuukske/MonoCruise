@@ -56,7 +56,7 @@ _ACCEL_PEDAL_FLOOR: float = 0.05
 _MIN_DECEL_MS2: float = 0.3         # ignore near-zero decel (coasting / noise)
 _MIN_ACCEL_MS2: float = 0.2         # ignore near-zero accel
 _MAX_SLOPE_RAD: float = 0.15        # ~8.6°: skip extreme slopes (sensor uncertainty)
-_WEIGHT_POWER: float = 3.0          # alpha ∝ pedal^4: small inputs almost ignored, full pedal dominates
+_WEIGHT_POWER: float = 3.0          # alpha scaled by pedal^3: full pedal dominates
 _ACCEL_BASE_ALPHA: float = 0.08     # EMA alpha at full gas pedal, no underperformance
 _UNDERPERFORM_MULT: float = 2.0     # drop estimate this much faster when below expectation
 _CLUTCH_GUARD_S: float = 0.5        # seconds after clutch to skip gas learning
@@ -79,15 +79,11 @@ _ESTIMATE_UPPER_BOUND: float = 1.3  # fraction of baseline: hard ceiling
 # averaging them in. Slightly above the ceiling so legitimate samples near the
 # clamp still register.
 _BRAKE_CANDIDATE_MAX_FRACTION: float = 1.35
-# Two-speed brake learning. Game brake force is progressive in pedal
-# position, so candidate = decel / pedal from a gentle press reads far below
-# true full-pedal capacity; routine light braking dragged the estimate
-# 9 -> 4 m/s2 between sessions while the truck measurably pulled 10-12
-# (clips 1b277e63 / fa70013c, 2026-07-19), and AEB divides by the estimate,
-# so an under-read fires emergency braking at 2-3x the needed distance.
-# Normal driving therefore drifts the estimate SLOWLY (soft presses still
-# count, but a stretch of abnormal braking cannot poison it), while AEB
-# events (deep, honest presses) re-teach it fast.
+# Two-speed brake learning: game brake force is progressive in pedal, so
+# decel/pedal from gentle presses under-reads full-pedal capacity and
+# routine driving dragged the estimate 9 -> 4 m/s2 (truck measured 10-12;
+# clips 1b277e63 / fa70013c). Normal driving drifts the estimate slowly;
+# AEB events (deep, honest presses) re-teach it fast.
 _BRAKE_ALPHA_NORMAL: float = 0.02   # EMA alpha at full pedal, normal driving
 _BRAKE_ALPHA_AEB: float = 0.15      # EMA alpha at full pedal during AEB braking
 
