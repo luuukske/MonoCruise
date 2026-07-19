@@ -83,7 +83,7 @@ ANT_KA: float = 0.5
 # the immediate-lead law, and only while the raw TTC to the immediate
 # lead is comfortable (cosine ramp from zero lift at TTC_MIN to full
 # lift at TTC_FULL).
-ANT_LIFT_MAX_MS2: float = 0.5
+ANT_LIFT_MAX_MS2: float = 1.0
 ANT_LIFT_TTC_MIN_S: float = 4.0
 ANT_LIFT_TTC_FULL_S: float = 6.0
 # When decel anticipation is binding, accel-side lift fades out over
