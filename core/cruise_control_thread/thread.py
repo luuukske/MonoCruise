@@ -159,7 +159,9 @@ class CruiseControlThread(BaseThread):
             # Block-message: warn when user presses inc/start but truck is in
             # park/neutral/reverse (cruise mode only).
             if connected and Settings.cc_mode == "Cruise control" and (cc_inc or cc_start):
-                if tel["park_brake"] or tel["gear_dashboard"] <= 0:
+                if self._park_or_gear_blocks_cc(
+                    tel["park_brake"], tel["gear_dashboard"]
+                ):
                     if now - self._last_block_msg_mono > 2.0:
                         self._last_block_msg_mono = now
                         if tel["park_brake"]:
@@ -405,6 +407,31 @@ class CruiseControlThread(BaseThread):
             return 0.0
         return max(float(x) for x in recent)
 
+    def _read_auto_neutral_holding(self) -> bool:
+        """True while sending_thread's auto-neutral holds the gearbox in
+        neutral. That commanded neutral is exempt from the "can only engage
+        in drive" gates so CC/ACC survive (and can be engaged during) an
+        auto-neutral stop; resuming then bids accel, which flips the
+        auto-neutral gas intent and shifts back to drive.
+        """
+        try:
+            st = registry.get_thread("sending_thread")
+        except KeyError:
+            return False
+        try:
+            if not st.is_alive():
+                return False
+            with st.data._lock:
+                return bool(getattr(st.data, "auto_neutral_holding", False))
+        except (AttributeError, KeyError):
+            return False
+
+    def _park_or_gear_blocks_cc(self, park_brake: bool, gear_dashboard: int) -> bool:
+        """Park brake, reverse, or a neutral NOT commanded by auto-neutral."""
+        if park_brake or gear_dashboard < 0:
+            return True
+        return gear_dashboard == 0 and not self._read_auto_neutral_holding()
+
     def _read_aeb_brake(self) -> bool:
         try:
             aeb = registry.get_thread("aeb_thread")
@@ -455,7 +482,9 @@ class CruiseControlThread(BaseThread):
         cruise_mode = Settings.cc_mode == "Cruise control"
         block_inc_start = (
             cruise_mode
-            and (tel["park_brake"] or tel["gear_dashboard"] <= 0)
+            and self._park_or_gear_blocks_cc(
+                tel["park_brake"], tel["gear_dashboard"]
+            )
         )
 
         cc = self._cc_ctrl
@@ -692,7 +721,11 @@ class CruiseControlThread(BaseThread):
                 cc.disable()
                 logger.info("CC disabled: brake pressed", extra={"popup": True})
 
-        if cc.enabled and ctx.connected and (ctx.park_brake or ctx.gear_dashboard <= 0):
+        if (
+            cc.enabled
+            and ctx.connected
+            and self._park_or_gear_blocks_cc(ctx.park_brake, ctx.gear_dashboard)
+        ):
             cc.disable()
             if ctx.park_brake:
                 logger.info("Cannot engage with parking brake on", extra={"popup": True})

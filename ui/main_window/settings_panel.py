@@ -1148,7 +1148,7 @@ class SettingsPanel(QWidget):
                 c, r, col, s.auto_neutral,
                 callback=lambda v: self._set("auto_neutral", v),
             ),
-            "Shift to neutral when braking to a standstill below 5 km/h (removes idle creep); pressing the gas shifts back to drive instantly",
+            "Shift to neutral below 5 km/h whenever the brake is on and the gas is off (removes idle creep); pressing the gas shifts back to drive instantly",
         )
 
         # Apply conditional visibility

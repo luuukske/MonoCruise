@@ -102,35 +102,39 @@ _CREEP_COMP_FULL_AT_PEDAL: float = 0.04
 # instead of it vanishing in one step exactly at the offset.
 _CREEP_COMP_GAS_FADE_FRAC: float = 0.5
 
-# Auto neutral (Settings.auto_neutral, default off). At very low speed with
-# a clear stopping-intent brake command, shift the transmission to neutral
-# so gear-1 idle creep is removed at the source; shift straight back to
-# drive on any gas intent. The creep compensation above still covers every
-# in-gear moment (mapper_creep_ms2 reads zero in neutral), so the two
-# mechanisms hand over cleanly. Shifts are verified against telemetry gear
-# and re-pressed a bounded number of times if the game ignored them.
-_AUTONEUTRAL_MAX_SPEED_KMH: float = 5.0     # engage only below (creep force extreme)
-# RAW physical brake axis implying "the driver expects a full standstill".
-# The processed brake output is useless as an intent signal here: OPD
-# coast-down shaping crushes moderate presses at low speed, and the creep
-# compensation means light pedals already stop the truck, so a threshold on
-# the processed value effectively never fires in manual driving.
-_AUTONEUTRAL_BRAKEVAL_MIN: float = 0.35
-# Sustained standstill trigger: once the hold FSM has been HOLDING this long
-# (any commander, manual included), the truck is unambiguously stopped and
-# neutral both matches driver expectation and stops idle creep from pushing
-# the truck off the small hold floor. The dwell keeps momentary docking
-# pauses from shifting.
-_AUTONEUTRAL_HOLDING_DWELL_S: float = 1.0
-_AUTONEUTRAL_ACC_BRAKE_MIN: float = 0.25    # mapper brake bid implying an ACC stop
-_AUTONEUTRAL_GAS_ON: float = 0.02           # merged gas above this: back to drive
+# Auto neutral (Settings.auto_neutral, default off). Below 5 km/h, whenever
+# the brake is on and the gas is off, shift to neutral so gear-1 idle creep
+# is removed at the source; any user gas (or an ACC launch bid) shifts
+# straight back to drive. Brake-on is the user pedal (OPD/two-pedal) OR an
+# ACC/CC stop (tracking decel / standstill publish). Mapper/merged gas must
+# not look like the user pressed gas. The creep compensation still covers
+# every in-gear moment (mapper_creep_ms2 reads zero in neutral). Shifts are
+# verified against telemetry gear and re-pressed a bounded number of times
+# if ignored.
+_AUTONEUTRAL_MAX_SPEED_KMH: float = 7.0
+# Pedal deadbands. Any brake-side OPD output or physical brake above this is
+# "brake pressed"; any OPD-mapped gas above this is "gas pressed".
+_AUTONEUTRAL_BRAKE_ON: float = 0.01
+_AUTONEUTRAL_GAS_ON: float = 0.02
+# ACC/CC is "braking" for auto-neutral when the tracking bid is at least
+# this negative (gentle gap-matching decel still counts). Standstill uses
+# the separate speed gate below: ACC publishes 0 m/s2 at a stop, which
+# would miss a pure "wanted < 0" check.
+_AUTONEUTRAL_ACC_DECEL_MS2: float = -0.05
+# Below this speed, a non-positive tracking bid counts as ACC/CC holding
+# the stop (ACC's standstill publish is exactly 0 m/s2).
+_AUTONEUTRAL_ACC_STANDSTILL_KMH: float = 2.0
 _AUTONEUTRAL_WANTED_ACCEL_ON_MS2: float = 0.25  # CC/ACC launch bid: back to drive
 _AUTONEUTRAL_ROLLING_EXIT_KMH: float = 6.0  # rolling this fast in neutral: back to drive
 _AUTONEUTRAL_COOLDOWN_S: float = 0.8        # min gap between neutral engagements
 _AUTONEUTRAL_PRESS_S: float = 0.15          # gear button press duration
 _AUTONEUTRAL_VERIFY_S: float = 0.7          # telemetry gear must confirm within this
 _AUTONEUTRAL_MAX_RETRIES: int = 2
-_AUTONEUTRAL_DRIVE_WINDOW_S: float = 1.5    # re-press window for the drive shift
+# Re-press window for the drive shift. Generous: leaving neutral is the
+# safety-critical direction (a truck stuck in neutral ignores gas), so the
+# FSM alternates the drive selector with a sequential shift-up (which leaves
+# neutral in every transmission mode) for this long before warning.
+_AUTONEUTRAL_DRIVE_WINDOW_S: float = 4.0
 # After the game refuses a neutral shift (retries exhausted), stop trying for
 # this long instead of hammering the input, and warn the user once per
 # session so a missing in-game binding is diagnosable.
@@ -233,6 +237,10 @@ class SendingThreadData(ThreadData):
     stopped: bool = False
     hold_active: bool = False
     hold_state: str = "ROLLING"
+    # True while auto-neutral has commanded (and expects) a neutral gearbox.
+    # cruise_control_thread reads this to exempt the shift from its
+    # "can only engage in drive" disengage/engage gates.
+    auto_neutral_holding: bool = False
     # Most recent brake values written to the game (last N ticks). Used by
     # cruise_control_thread to distinguish a user's in-game brake press from
     # the game echoing back our own command (which lags by a few ticks).
@@ -314,9 +322,9 @@ class SendingThread(BaseThread):
         self._autoneutral_last_engage_mono: float = 0.0
         self._autoneutral_retries: int = 0
         self._autoneutral_drive_until: float = 0.0
-        self._autoneutral_holding_s: float = 0.0
         self._autoneutral_lockout_until: float = 0.0
         self._autoneutral_warned: bool = False
+        self._autoneutral_drive_presses: int = 0
 
         # Coast-down logger state
         self._coast_log_file = None
@@ -444,47 +452,74 @@ class SendingThread(BaseThread):
         enabled: bool,
         gear: int,
         speed_kmh: float,
-        merged_gas: float,
-        wanted_accel_ms2: float,
+        user_gas: float,
+        pedal_brake: float,
         brakeval: float,
+        wanted_accel_ms2: float,
         mapper_brake: float,
-        cruise_active: bool,
+        cc_tracking: bool,
         manual_clutch: bool,
         aeb_active: bool,
+        paused: bool,
         dt: float,
     ) -> None:
         """Advance the auto-neutral shift logic by one tick.
 
-        Engages neutral only below _AUTONEUTRAL_MAX_SPEED_KMH with clear
-        stopping intent: a firm RAW brake pedal press (the driver expects a
-        full standstill), a sustained hold FSM HOLDING state (the truck is
-        genuinely stopped, manual or cruise), or an ACC stop (mapper braking
-        hard at crawl speed). Returns to drive immediately on any gas
-        intent, when the truck is somehow rolling in neutral, or when the
-        setting is turned off mid-hold. A driver-initiated reverse shift
-        abandons the feature without touching gears. If the game refuses the
-        neutral shift (no binding / unsupported transmission), warns once
-        per session and locks out for _AUTONEUTRAL_FAIL_LOCKOUT_S.
+        Rule (below _AUTONEUTRAL_MAX_SPEED_KMH): if the brake is on and the
+        gas is off, shift to neutral. Brake-on is the user pedal (OPD
+        brake-side or physical brake) OR an ACC/CC stop (tracking
+        commander decelerating / holding standstill — ACC publishes 0 m/s2
+        at a stop and suppresses OPD coast, so the user-pedal path alone
+        never sees it). Mapper/merged gas must not look like the user
+        pressed gas. Returns to drive on any user gas, an ACC launch bid,
+        rolling out of band, or when the setting is turned off. A driver
+        reverse shift abandons without touching gears. If the game refuses
+        a shift, warns once per session and locks out for
+        _AUTONEUTRAL_FAIL_LOCKOUT_S.
+
+        `wanted_accel_ms2` must be the TRACKING-commander bid only (caller
+        zeroes the limiter's headroom cap). `cc_tracking` is True only when
+        active_controller == "cc" so limiter-only ticks cannot look like an
+        ACC standstill.
         """
         now = time.monotonic()
-        gas_intent = (
-            merged_gas > _AUTONEUTRAL_GAS_ON
-            or wanted_accel_ms2 > _AUTONEUTRAL_WANTED_ACCEL_ON_MS2
-        )
 
-        # Sustained-standstill dwell: accumulates while the hold FSM (from
-        # the previous tick) is capturing AND the truck is essentially
-        # stationary, resets otherwise. STOPPING must count alongside
-        # HOLDING: at an in-gear standstill the game's stall-prevention
-        # declutch keeps gameClutch high, so the FSM's clutch-release gate
-        # parks it in STOPPING and HOLDING alone would never accumulate.
-        if (
-            self._hold.state in (STATE_STOPPING, STATE_HOLDING)
-            and abs(speed_kmh) < 0.5
-        ):
-            self._autoneutral_holding_s += max(dt, 0.0)
-        else:
-            self._autoneutral_holding_s = 0.0
+        # Game paused (menus, map): shifts cannot be processed, so freeze the
+        # whole FSM. Deadlines slide forward by dt so verify/retry windows do
+        # not expire against a wall the game never saw (which fired the
+        # "shift not accepted" popup on unpause), and nothing is pressed.
+        if paused:
+            slide = max(dt, 0.0)
+            self._autoneutral_last_press_mono += slide
+            self._autoneutral_last_engage_mono += slide
+            if self._autoneutral_drive_until > 0.0:
+                self._autoneutral_drive_until += slide
+            if self._autoneutral_lockout_until > 0.0:
+                self._autoneutral_lockout_until += slide
+            return
+
+        # User pedals only. Mapper/merged gas is not "gas pressed".
+        gas_pressed = user_gas > _AUTONEUTRAL_GAS_ON
+        # ACC/CC stop: OPD coast is suppressed while cruise commands, and at
+        # standstill ACC publishes 0 m/s2 so mapper_brake drops to 0. Treat
+        # tracking-commander decel, any mapper brake, or a non-positive bid
+        # while essentially stopped as brake-on. Limiter-only is excluded
+        # via cc_tracking (its wanted is zeroed by the caller anyway).
+        acc_stopping = cc_tracking and (
+            mapper_brake > _AUTONEUTRAL_BRAKE_ON
+            or wanted_accel_ms2 <= _AUTONEUTRAL_ACC_DECEL_MS2
+            or (
+                wanted_accel_ms2 <= 0.0
+                and abs(speed_kmh) < _AUTONEUTRAL_ACC_STANDSTILL_KMH
+            )
+        )
+        brake_pressed = (
+            pedal_brake > _AUTONEUTRAL_BRAKE_ON
+            or brakeval > _AUTONEUTRAL_BRAKE_ON
+            or acc_stopping
+        )
+        # ACC/CC commanding a launch must leave neutral even with foot off.
+        launch_intent = wanted_accel_ms2 > _AUTONEUTRAL_WANTED_ACCEL_ON_MS2
 
         if self._autoneutral_neutral:
             if gear < 0:
@@ -494,7 +529,8 @@ class SendingThread(BaseThread):
                 return
             if (
                 not enabled
-                or gas_intent
+                or gas_pressed
+                or launch_intent
                 or abs(speed_kmh) > _AUTONEUTRAL_ROLLING_EXIT_KMH
             ):
                 self.toggle_bool("geardrive", _AUTONEUTRAL_PRESS_S)
@@ -502,9 +538,11 @@ class SendingThread(BaseThread):
                 self._autoneutral_retries = 0
                 self._autoneutral_last_press_mono = now
                 self._autoneutral_drive_until = now + _AUTONEUTRAL_DRIVE_WINDOW_S
+                self._autoneutral_drive_presses = 0
                 logger.debug(
-                    "auto-neutral: back to drive (gas=%.3f wanted=%.2f v=%.1f km/h)",
-                    merged_gas, wanted_accel_ms2, speed_kmh,
+                    "auto-neutral: back to drive (user_gas=%.3f wanted=%.2f "
+                    "v=%.1f km/h)",
+                    user_gas, wanted_accel_ms2, speed_kmh,
                 )
                 return
             # Verify the neutral shift took; re-press a bounded number of
@@ -535,15 +573,25 @@ class SendingThread(BaseThread):
         # Drive re-press window after leaving neutral: if the game dropped
         # the drive shift the truck would rev in neutral on gas, so keep
         # pressing until a forward gear confirms or the window closes.
+        # Presses alternate the drive selector with a sequential shift-up:
+        # which input the game honours depends on the transmission mode, and
+        # shift-up from neutral engages first/Drive in every mode.
         if self._autoneutral_drive_until > 0.0 and gear == 0:
             if now < self._autoneutral_drive_until:
                 if now - self._autoneutral_last_press_mono >= _AUTONEUTRAL_VERIFY_S:
                     self._autoneutral_last_press_mono = now
-                    self.toggle_bool("geardrive", _AUTONEUTRAL_PRESS_S)
+                    self._autoneutral_drive_presses += 1
+                    name = (
+                        "gearup"
+                        if self._autoneutral_drive_presses % 2
+                        else "geardrive"
+                    )
+                    self.toggle_bool(name, _AUTONEUTRAL_PRESS_S)
                 return
             # Window closed with the box still in neutral: warn and pause
             # instead of silently leaving the truck out of gear.
             self._autoneutral_drive_until = 0.0
+            self._autoneutral_drive_presses = 0
             self._autoneutral_lockout_until = now + _AUTONEUTRAL_FAIL_LOCKOUT_S
             if not self._autoneutral_warned:
                 self._autoneutral_warned = True
@@ -555,20 +603,17 @@ class SendingThread(BaseThread):
             return
         if gear != 0:
             self._autoneutral_drive_until = 0.0
+            self._autoneutral_drive_presses = 0
 
-        stopping_intent = (
-            brakeval >= _AUTONEUTRAL_BRAKEVAL_MIN
-            or self._autoneutral_holding_s >= _AUTONEUTRAL_HOLDING_DWELL_S
-            or (cruise_active and mapper_brake >= _AUTONEUTRAL_ACC_BRAKE_MIN)
-        )
         if (
             enabled
             and not manual_clutch
             and not aeb_active
-            and not gas_intent
+            and brake_pressed
+            and not gas_pressed
+            and not launch_intent
             and gear >= 1
             and -0.5 < speed_kmh < _AUTONEUTRAL_MAX_SPEED_KMH
-            and stopping_intent
             and now >= self._autoneutral_lockout_until
             and now - self._autoneutral_last_engage_mono >= _AUTONEUTRAL_COOLDOWN_S
         ):
@@ -578,9 +623,11 @@ class SendingThread(BaseThread):
             self._autoneutral_last_press_mono = now
             self._autoneutral_last_engage_mono = now
             logger.debug(
-                "auto-neutral: shifting to neutral (v=%.1f km/h brakeval=%.2f "
-                "hold_s=%.2f mapper_b=%.2f)",
-                speed_kmh, brakeval, self._autoneutral_holding_s, mapper_brake,
+                "auto-neutral: shifting to neutral (v=%.1f km/h "
+                "pedal_b=%.2f brakeval=%.2f mapper_b=%.2f wanted=%.2f "
+                "acc_stop=%s)",
+                speed_kmh, pedal_brake, brakeval, mapper_brake,
+                wanted_accel_ms2, acc_stopping,
             )
 
     def _read_speed(self) -> float:
@@ -745,6 +792,7 @@ class SendingThread(BaseThread):
             tel_thread = None
             logger.warning("sending thread limited;\nno telemetry thread found")
 
+        tel_paused = False
         if tel_thread is not None and tel_thread.is_alive():
             try:
                 with tel_thread.data._lock:
@@ -753,6 +801,7 @@ class SendingThread(BaseThread):
                     tel_hazards = bool(tel_thread.data.hazardsActive)
                     speed_ms = tel_thread.data.speed
                     park_brake = bool(tel_thread.data.parkBrake)
+                    tel_paused = bool(getattr(tel_thread.data, "paused", False))
             except Exception as e:
                 logger.debug("telemetry read failed: %s", e)
 
@@ -1015,7 +1064,6 @@ class SendingThread(BaseThread):
             self._autoneutral_neutral = False
             self._autoneutral_retries = 0
             self._autoneutral_drive_until = 0.0
-            self._autoneutral_holding_s = 0.0
             controller.aforward = 0.0
             controller.abackward = 0.0
             with self.data._lock:
@@ -1024,6 +1072,7 @@ class SendingThread(BaseThread):
                 self.data.stopped = False
                 self.data.hold_active = False
                 self.data.hold_state = STATE_ROLLING
+                self.data.auto_neutral_holding = False
                 self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
@@ -1069,6 +1118,9 @@ class SendingThread(BaseThread):
                     STATE_STOPPING, STATE_HOLDING, STATE_LAUNCHING
                 )
                 self.data.hold_state = self._hold.state
+                # Reflect the true internal state: a transient pedal glitch
+                # must not read as "neutral released" to cruise_control.
+                self.data.auto_neutral_holding = self._autoneutral_neutral
                 self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
@@ -1123,6 +1175,9 @@ class SendingThread(BaseThread):
                     STATE_STOPPING, STATE_HOLDING, STATE_LAUNCHING
                 )
                 self.data.hold_state = self._hold.state
+                # Reflect the true internal state: a transient pedal glitch
+                # must not read as "neutral released" to cruise_control.
+                self.data.auto_neutral_holding = self._autoneutral_neutral
                 self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
@@ -1184,6 +1239,8 @@ class SendingThread(BaseThread):
         # commanding a near-full pedal. In OPD mode the compensation fades
         # over the top of the coast band so approaching the coast point
         # releases the compensated brake progressively.
+        # Auto-neutral keys on this pre-comp pedal (OPD/two-pedal brake-on).
+        pedal_brake = b
         if mapper_creep_ms2 > 0.0 and b > 1e-4:
             cap = self._capacity_tracker.max_brake_ms2
             if cap > 1.0:
@@ -1255,6 +1312,15 @@ class SendingThread(BaseThread):
         if not cc_overridden_by_opd:
             b = max(b, mapper_brake)
 
+        # Commanded accel scoped to TRACKING commanders (CC/ACC) only. The
+        # limiter's sole-bidder wanted_a is a positive headroom cap during
+        # ordinary manual driving (allow accel up to the limit), not a
+        # launch/decel intent; feeding it to the hold FSM blocked STOPPING
+        # capture on every manual stop, and feeding it to auto-neutral's
+        # gas_intent blocked every manual engage path. The mapper still
+        # receives the raw bid: the cap is exactly what it must track.
+        tracking_wanted_a = wanted_a if cruise_active_controller == "cc" else 0.0
+
         # Auto neutral: decided before the hold FSM so its flag can inform
         # the FSM's capture gate on this same tick (a neutral truck must
         # still get a hold floor).
@@ -1262,13 +1328,15 @@ class SendingThread(BaseThread):
             enabled=bool(Settings.auto_neutral),
             gear=gear,
             speed_kmh=speed_kmh,
-            merged_gas=a,
-            wanted_accel_ms2=wanted_a,
+            user_gas=opdgasval,
+            pedal_brake=pedal_brake,
             brakeval=max(float(brakeval), 0.0),
+            wanted_accel_ms2=tracking_wanted_a,
             mapper_brake=mapper_brake,
-            cruise_active=cruise_active,
+            cc_tracking=(cruise_active_controller == "cc"),
             manual_clutch=manual_clutch,
             aeb_active=_aeb_active,
+            paused=tel_paused,
             dt=dt_aeb,
         )
 
@@ -1283,7 +1351,7 @@ class SendingThread(BaseThread):
             speed_kmh=speed_kmh,
             gear=gear,
             pitch_norm=road_pitch,
-            commanded_accel_ms2=wanted_a,
+            commanded_accel_ms2=tracking_wanted_a,
             gasval=gasval,
             opdgasval=opdgasval,
             offset=offset,
@@ -1414,6 +1482,7 @@ class SendingThread(BaseThread):
             self.data.stopped = hold_out.active
             self.data.hold_active = hold_out.active
             self.data.hold_state = hold_out.state
+            self.data.auto_neutral_holding = self._autoneutral_neutral
             self.data.recent_brake_outputs = tuple(self._recent_brake_outputs)
             self.data.hazardsActive = tel_hazards
             self.data.horn_active = bool(getattr(controller, "horn", False))
@@ -1475,6 +1544,7 @@ class SendingThread(BaseThread):
             self.data.stopped = False
             self.data.hold_active = False
             self.data.hold_state = STATE_ROLLING
+            self.data.auto_neutral_holding = False
             self.data.hazardsActive = False
             self.data.horn_active = False
             self.data.airhorn_active = False

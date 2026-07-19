@@ -5,23 +5,23 @@ All notable changes to MonoCruise are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Sections under each release: `Added`, `Changed`, `Fixed`, `Removed`, `Security`.
+Sections under each release (in order): `Security`, `Added`, `Changed`, `Fixed`, `Removed`.
 
 The `[Unreleased]` block accumulates changes between releases. `tools/release.py bump`
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
-### Fixed
-- **AEB braking for air behind AI traffic**: the collision model placed every AI vehicle's body asymmetrically around its position, extending it ~1/3 of its length past the real rear bumper (~1.6 m on cars, ~4 m on trucks). AEB braked for that phantom, felt as a constant "invisible wall" behind SP traffic. Bodies are now symmetric, matching where vehicles actually are (validated against the AEB debug radar and live standoff measurements).
-- **AEB brake pumping**: one approach could engage, release mid-stop while still closing, and re-engage up to 3 times. Braking itself pushed the internal "required decel" under the release threshold. An active event now holds until the threat actually resolves (target clears, pulls away, or you stop): one continuous brake per event.
-- **Brake capacity estimate rotting**: the learned max-brake estimate drifted from ~9 down to ~4 m/s2 during normal driving (gentle presses extrapolate badly on the game's progressive brake curve), making AEB believe the truck brakes 3x worse than it does and fire at 2-3x the needed distance. Normal driving now only drifts the estimate slowly; AEB braking events (deep, honest presses) re-teach it fast.
+### Added
+- **Auto-neutral at stops** (opt-in): shifts to neutral below 5 km/h whenever the brake is on and the gas is off; off by default in settings.
 ### Changed
 - **AEB brakes at the last moment**: engagement threshold raised to 85% of usable capacity, standoff buffer reduced 1.6 m -> 0.2 m, and the speed-proportional response margin cut 0.45 s -> 0.10 s (physical actuator lag). AEB now waits for the last-point envelope instead of braking seconds early; the clip corpus keeps arbitrating WHICH targets are threats, not when to brake.
 - **ACC follows AI vehicles at the true gap**: lead distance came from the same asymmetric bodies, so ACC held ~1.5-4 m more real gap than commanded behind AI traffic. Same gap setting now means the same physical gap.
 - **Smoother low-speed braking**: creep compensation on the user brake path, proportional brake-hold release, and OPD pedal-cliff smoothing near standstill.
 - **Speed limiter fixes**: stale-target re-clamp and no more surge when engaging at the cap.
-### Added
-- **Auto-neutral at stops** (opt-in): shifts to neutral when held at a standstill; off by default in settings.
+### Fixed
+- **AEB braking for air behind AI traffic**: the collision model placed every AI vehicle's body asymmetrically around its position, extending it 1/3 of its length past the real rear bumper (~1.6 m on cars, ~4 m on trucks). AEB braked for that phantom, felt as a constant "invisible wall" behind SP traffic. Bodies are now symmetric, matching where vehicles actually are (validated against the AEB debug radar and live standoff measurements).
+- **AEB brake pumping**: one approach could engage, release mid-stop while still closing, and re-engage up to 3 times. Braking itself pushed the internal "required decel" under the release threshold. An active event now holds until the threat actually resolves (target clears, pulls away, or you stop): one continuous brake per event.
+- **Brake capacity estimate rotting**: the learned max-brake estimate drifted from ~9 down to ~4 m/s2 during normal driving (gentle presses extrapolate badly on the game's progressive brake curve), making AEB believe the truck brakes 3x worse than it does and fire at 2-3x the needed distance. Normal driving now only drifts the estimate slowly; AEB braking events (deep, honest presses) re-teach it fast.
 
 ## [1.1.0-preview.6] - 2026-07-16
 ### Changed
