@@ -28,7 +28,7 @@ B_COMFORT_MS2: float = 2.0
 DELTA: float = 4.0
 V0_MS: float = 40.0
 
-S0_M: float = 3.0
+S0_M: float = 5.0
 EGO_FRONT_OFFSET_M: float = 2.5
 T_HEADWAY_S: float = 1.5
 
