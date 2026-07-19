@@ -552,7 +552,10 @@ class ArcPath:
     # point and preserves the legacy point/disc collision behavior for every
     # consumer that does not set them (ACC, rendering). Set by AEB build sites
     # so the collision test covers the whole vehicle body, not just its width.
-    # See core/radar/AGENTS.md 8.
+    # Collision uses the derived _cap_fwd/_cap_back (extents minus half_width)
+    # so the capsule's rounded end cap lands ON the bumper, not half_width past
+    # it; raw fwd_len/back_len remain the physical body ends for centreline
+    # sampling (_any_body_in_ego_lane). See core/radar/AGENTS.md 8.
     fwd_len: float = 0.0
     back_len: float = 0.0
 
@@ -577,11 +580,22 @@ class ArcPath:
     fwd_z: float = -1.0
     _sign: float = 1.0
     _has_body: bool = False
+    _cap_fwd: float = 0.0
+    _cap_back: float = 0.0
 
     def build(self) -> "ArcPath":
         """Compute cached fields (fwd, radius, center, arc_length, is_straight) from
         start, curvature, speed, decel/accel. Call after setting fields."""
         self._has_body = self.fwd_len > 1e-9 or self.back_len > 1e-9
+        # Collision segment extents: the capsule test adds half_width radially
+        # in EVERY direction around the segment, so a segment reaching the
+        # bumper would extend the body half_width past each end lengthwise
+        # (~1.15 m ego + ~1.25 m target of phantom length). Retract each end by
+        # half_width so the rounded cap's tip coincides with the body end; the
+        # side faces stay exact and only the rectangle corners round off, which
+        # the corridor margin absorbs.
+        self._cap_fwd = max(self.fwd_len - self.half_width, 0.0)
+        self._cap_back = max(self.back_len - self.half_width, 0.0)
         self.fwd_x = -math.sin(self.yaw_rad)
         self.fwd_z = -math.cos(self.yaw_rad)
 
@@ -863,10 +877,10 @@ def pair_body_dist_sq(a: ArcPath, b: ArcPath, t: float) -> float:
         bfx = -math.sin(hb)
         bfz = -math.cos(hb)
         dsq, _, _ = _seg_seg_dist_sq_mid(
-            ax + a.fwd_len * afx, az + a.fwd_len * afz,
-            ax - a.back_len * afx, az - a.back_len * afz,
-            bx + b.fwd_len * bfx, bz + b.fwd_len * bfz,
-            bx - b.back_len * bfx, bz - b.back_len * bfz,
+            ax + a._cap_fwd * afx, az + a._cap_fwd * afz,
+            ax - a._cap_back * afx, az - a._cap_back * afz,
+            bx + b._cap_fwd * bfx, bz + b._cap_fwd * bfz,
+            bx - b._cap_back * bfx, bz - b._cap_back * bfz,
         )
         return dsq
     ax, az = a.position_at_time(t)
@@ -963,19 +977,19 @@ def _sampled_collision(
             ha = a.heading_at_dist(da)
             afx = -math.sin(ha)
             afz = -math.cos(ha)
-            a0x = ax + a.fwd_len * afx
-            a0z = az + a.fwd_len * afz
-            a1x = ax - a.back_len * afx
-            a1z = az - a.back_len * afz
+            a0x = ax + a._cap_fwd * afx
+            a0z = az + a._cap_fwd * afz
+            a1x = ax - a._cap_back * afx
+            a1z = az - a._cap_back * afz
             db = b._dist_at_time(t)
             bx, bz = b.position_at_dist(db)
             hb = b.heading_at_dist(db)
             bfx = -math.sin(hb)
             bfz = -math.cos(hb)
-            b0x = bx + b.fwd_len * bfx
-            b0z = bz + b.fwd_len * bfz
-            b1x = bx - b.back_len * bfx
-            b1z = bz - b.back_len * bfz
+            b0x = bx + b._cap_fwd * bfx
+            b0z = bz + b._cap_fwd * bfz
+            b1x = bx - b._cap_back * bfx
+            b1z = bz - b._cap_back * bfz
             dsq, mx, mz = _seg_seg_dist_sq_mid(a0x, a0z, a1x, a1z,
                                                b0x, b0z, b1x, b1z)
             lat = abs((bz - az) * afx - (bx - ax) * afz) if need_lat else 0.0
@@ -1603,12 +1617,9 @@ class Vehicle:
         cap_fwd_len = 0.0
         cap_back_len = 0.0
         if body_capsule:
-            if self.is_tmp:
-                front_d = self.size.length * 0.5
-                back_d = self.size.length * 0.5
-            else:
-                front_d = self.size.length * 0.18
-                back_d = self.size.length * 0.82
+            # Symmetric +/- length/2 for AI and TMP alike (AGENTS.md §6).
+            front_d = self.size.length * 0.5
+            back_d = self.size.length * 0.5
             cap_fwd_len = max(front_d - body_offset, 0.0)
             cap_back_len = max(back_d + body_offset, 0.0)
 
@@ -1625,9 +1636,8 @@ class Vehicle:
     def get_corners(self) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]]:
         """World-space footprint corners (front-right, front-left, back-left, back-right).
 
-        TMP uses symmetric ± length/2 about pivot; AI uses asymmetric
-        (-0.18·length front, +0.82·length back) per AGENTS.md §6. Yaw
-        comes from ``_smooth_yaw`` when available.
+        Symmetric ± length/2 about the pivot for AI and TMP alike (AGENTS.md
+        §6). Yaw comes from ``_smooth_yaw`` when available.
         """
         yaw_rad = (
             self._smooth_yaw
@@ -1638,12 +1648,8 @@ class Vehicle:
         fwd_z = -math.cos(yaw_rad)
         right_x = -fwd_z
         right_z = fwd_x
-        if self.is_tmp:
-            front_d = self.size.length * 0.5
-            back_d = self.size.length * 0.5
-        else:
-            front_d = self.size.length * 0.18
-            back_d = self.size.length * 0.82
+        front_d = self.size.length * 0.5
+        back_d = self.size.length * 0.5
         hw = self.size.width * 0.5
         px = self.position.x
         pz = self.position.z

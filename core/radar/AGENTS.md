@@ -146,7 +146,7 @@ Non-TMP trailer positions are already centered: use `tr.position` directly.
 
 ## 6. Vehicle Corner Geometry
 
-### TMP (multiplayer): symmetric
+### AI and TMP alike: symmetric about the pivot
 
 ```python
 back_z  = position.z + length / 2
@@ -155,14 +155,16 @@ left_x  = position.x - width  / 2
 right_x = position.x + width  / 2
 ```
 
-### AI (non-TMP): asymmetric pivot correction
-
-```python
-back_z  = position.z + length * 0.82   # 82% behind pivot
-front_z = position.z - length * 0.18   # 18% in front of pivot
-```
-
-> Using `0.5/0.5` shifts all AI polygons ~1–2 m forward from their true positions.
+> History (2026-07-19): AI bodies used an asymmetric `0.82/0.18` split for a
+> long time, claimed here as a "pivot correction". It was wrong: the AEB debug
+> window always drew symmetric boxes, Lukas ground-truthed THAT display to
+> ~0.1 m in-game, and dual-convention standoff measurements on live AEB-stop
+> clips (fa1525e6, 2a32b9b8) matched only the symmetric model. The asymmetric
+> split extended every AI collision body `0.32·length` past its real rear:
+> a constant phantom (~1.6 m cars, ~3.9 m for a 12 m tractor) that made AEB
+> brake for air behind AI traffic. Do not reintroduce asymmetric offsets
+> without new standoff measurements of the same kind. (TMP trailer
+> front-coupler correction in §5 is a separate, still-valid fix.)
 
 ### Corner rotation
 
@@ -502,7 +504,7 @@ If the ego arc points backward, the bug is in the `rotationX → yaw_rad` conver
 | `speed` | `build()` normalises to `abs` and flips `fwd` if originally negative |
 | `curvature` | `κ = ω_rad_s / abs_speed`. Positive = left turn (CCW). |
 | `half_width` | `size.width / 2` by default |
-| `fwd_len` / `back_len` | Capsule body extents ahead of / behind the reference (0 = point/disc). Set by AEB via `capsule_extents` |
+| `fwd_len` / `back_len` | Capsule body extents ahead of / behind the reference (0 = point/disc). Set by AEB via `capsule_extents`. Collision uses the derived `_cap_fwd`/`_cap_back` (extents minus `half_width`, clamped ≥ 0) so the capsule's rounded end cap lands ON the body end instead of `half_width` past it; the raw fields stay the physical body ends for centreline sampling (`_any_body_in_ego_lane`) |
 | `parallel_margin_scale` | Scales corridor margin for near-parallel capsule contacts (1.0 = full margin). AEB ego arcs set `cal.capsule_parallel_margin_scale` |
 | `decel` | Ego braking arc, head-on target arc, or non-head-on target arc when the vehicle is decelerating. Derived via `_accel_to_arc_params()`. Mutually exclusive with `accel`. |
 | `arc_length` | Accounts for decel/accel to stop |
@@ -524,6 +526,7 @@ center_z = start_z + sign * radius * (-fwd_x)
 - Otherwise → time-synchronised sampling + 6-step bisection O(n)
 - With `fwd_len`/`back_len` set, overlap is segment-to-segment (swept body), not point-to-point
 - Corridor threshold = `a.half_width + b.half_width + margin`
+- The half_width radius applies isotropically around the segment, so segments are the `_cap_fwd`/`_cap_back` extents (body ends minus `half_width`). Full-length segments would extend each body `half_width` past its bumpers (~2.4 m of phantom length between two trucks): AEB fired a constant ~3 m early on close approaches. Side faces stay exact; only the rectangle corners round off, which the corridor margin absorbs
 - When either arc sets `parallel_margin_scale < 1`, the effective margin per sample blends `margin * scale` (parallel headings) to `margin` (perpendicular) by `sin(|heading_diff|)`. Near-parallel bodies hold their separation across samples, so the full margin only manufactures side-graze hits on adjacent-lane traffic
 - AEB narrows vehicle half_width by 0.1 m per side to reduce false positives from measurement noise
 
@@ -660,8 +663,7 @@ double-count each trailer.
 | Forward vector | `fwd_x = -sin(yaw); fwd_z = -cos(yaw)` |
 | Future position | `x -= speed*sin(yaw); z -= speed*cos(yaw)` |
 | Yaw wraparound diff | `min(\|d\|, \|d+360\|, \|d-360\|)` |
-| TMP corner Z | `± length / 2` |
-| AI corner Z | `+length*0.82` (rear), `-length*0.18` (front) |
+| Corner Z (AI and TMP) | `± length / 2` about the pivot |
 | Braking distance | `v² / (2 × decel)` (implicit in `build()` when `t_stop < horizon`) |
 | Arc accel→decel params | `_accel_to_arc_params(accel, override_decel)` → `(decel, accel)` |
 | Quaternion euler yaw | `atan2(2*(y*z + w*x), w²-x²-y²+z²)` degrees |
@@ -686,7 +688,7 @@ double-count each trailer.
 - **`rotationX` in telemetry is yaw.** The name is misleading.
 - **Radar render uses `+0.5` offset; arc-geometry threads do not.** Do not mix them.
 - **`-dx` and `-yaw_rad` in ego-space transform are both required.**
-- **AI vehicles use asymmetric corner offsets (0.82 / 0.18), not 0.5 / 0.5.**
+- **All vehicle bodies are symmetric `± length/2` about the pivot (AI and TMP).** The historical asymmetric 0.82/0.18 AI offsets were a `0.32·length` rear phantom (see §6 history); do not reintroduce them.
 - **Always use `_smooth_yaw` for arc construction**, never `rotation.euler()` directly.
 - **Y axis is never used in 2D math**, only for elevation filtering.
 - **Arc forward vector formula is `(-sin, -cos)`.** Do not flip signs or swap to `(sin, cos)`.
