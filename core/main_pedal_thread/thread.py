@@ -175,6 +175,10 @@ class MainPedalThreadData(ThreadData):
 
     # Capture API (used by the settings panel button-assignment flow).
     capture_active: bool = False
+    # True after this thread has published all-joystick states for an active
+    # capture. button_device_thread waits on this before opening its HID scan
+    # so pygame-owned devices are excluded from raw HID.
+    joystick_capture_ready: bool = False
     # ("joystick", guid, code, label, device_name) when a joystick input captured
     capture_event: object = None
     # Binding dict set by the UI right after a capture is consumed: CC button
@@ -557,12 +561,14 @@ class MainPedalThread(BaseThread):
         with self.data._lock:
             self.data.capture_active = True
             self.data.capture_event = None
+            self.data.joystick_capture_ready = False
 
     def cancel_capture(self) -> None:
         """Abort capture without saving anything."""
         with self.data._lock:
             self.data.capture_active = False
             self.data.capture_event = None
+            self.data.joystick_capture_ready = False
 
     def consume_capture(self) -> tuple | None:
         """Read + clear the captured joystick event. Returns None if nothing captured.
@@ -573,6 +579,7 @@ class MainPedalThread(BaseThread):
             ev = self.data.capture_event
             self.data.capture_event = None
             self.data.capture_active = False
+            self.data.joystick_capture_ready = False
             return ev
 
     def set_capture_guard(self, binding: object) -> None:
@@ -975,6 +982,7 @@ class MainPedalThread(BaseThread):
                                         "joystick", guid, code, label, device_name
                                     )
                                     self.data.capture_active = False
+                                    self.data.joystick_capture_ready = False
                             break
 
             except Exception:
@@ -986,6 +994,12 @@ class MainPedalThread(BaseThread):
 
         with self.data._lock:
             self.data.joystick_button_states = dict(new_states)
+            if capture_active and self.data.capture_active:
+                # All pygame joysticks are now in joystick_button_states;
+                # HID capture can exclude them by vid:pid.
+                self.data.joystick_capture_ready = True
+            elif not self.data.capture_active:
+                self.data.joystick_capture_ready = False
 
     # ── Button binding resolution ─────────────────────────────────────────────
 

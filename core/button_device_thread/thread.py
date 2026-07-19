@@ -43,16 +43,16 @@ _RECONNECT_INTERVAL = 2.0  # seconds between reconnect attempts for a lost devic
 # Capture: raw HID reports mix button bits with axis/counter bits that change
 # on their own. During the warm-up window every changing bit is marked noisy
 # and excluded, so only a deliberate press after warm-up can be captured.
-_CAPTURE_WARMUP_S = 0.5
+_CAPTURE_WARMUP_S = 0
 _CAPTURE_MAX_SCAN_DEVICES = 16
 # A candidate bit must stay set this many consecutive ticks (~150 ms at 20 Hz)
 # before it is accepted: transient axis/jitter bits never hold that long.
 _CAPTURE_CONFIRM_TICKS = 1
-# Generic-desktop usages that must never be scanned: mice/keyboards are system
-# input, and joysticks/gamepads/multi-axis controllers are handled by pygame
-# on the joystick capture path: their raw HID reports are mostly axis bits
-# (this is how a steering wheel produced the false "button 304" capture).
-_SKIP_GENERIC_USAGES = {0x02, 0x04, 0x05, 0x06, 0x07, 0x08}
+# Generic-desktop usages that must never be scanned: mice/keyboards/keypads
+# are system input. Joystick/gamepad/multi-axis devices are not skipped here;
+# anything pygame actually exposes is excluded via _pygame_joystick_vid_pids()
+# so pygame-invisible stalks (e.g. MOZA) still reach the HID capture path.
+_SKIP_GENERIC_USAGES = {0x02, 0x06, 0x07}
 
 
 def _parse_vid_pid(vid_pid: str) -> tuple[int, int] | None:
@@ -215,6 +215,10 @@ class ButtonDeviceThread(BaseThread):
             return
 
         if not self._capture_opened:
+            if not self._pygame_capture_ready():
+                # Pedal thread has not published the all-joysticks set yet;
+                # opening now would raw-scan pygame-owned devices (e.g. wheel).
+                return
             self._capture_opened = True
             self._capture_started_ts = time.monotonic()
             self._capture_prev_bits = {}
@@ -303,11 +307,12 @@ class ButtonDeviceThread(BaseThread):
     def _open_capture_scan(self) -> None:
         """Open every enumerable HID device not already tracked.
 
-        Skipped: system mice/keyboards and joystick-class devices (generic
-        desktop usages), plus anything pygame currently exposes as a joystick.
-        Those are captured on the joystick path; their raw HID reports are
-        dominated by axis bits that would false-trigger this scan. Devices
-        that refuse to open are silently ignored.
+        Skipped: system mice/keyboards/keypads, plus anything pygame currently
+        exposes as a joystick (excluded by vid:pid). Pygame-owned devices are
+        captured on the joystick path; their raw HID reports are dominated by
+        axis bits that would false-trigger this scan. Joystick-class devices
+        that pygame does not enumerate (e.g. MOZA stalks) are included.
+        Devices that refuse to open are silently ignored.
         """
         if not _hid_available or _hid is None:
             return
@@ -335,10 +340,13 @@ class ButtonDeviceThread(BaseThread):
                 continue
             if vid_pid in joystick_vid_pids:
                 continue
+            path = info.get("path")
+            if not path:
+                continue
             seen.add(vid_pid)
             try:
                 device = _hid.device()
-                device.open(vendor_id, product_id)
+                device.open_path(path)
                 device.set_nonblocking(True)
                 self._capture_scan[vid_pid] = device
                 self._capture_scan_names[vid_pid] = (
@@ -347,6 +355,19 @@ class ButtonDeviceThread(BaseThread):
             except Exception:
                 continue
         logger.debug("capture scan opened %d HID devices", len(self._capture_scan))
+
+    @staticmethod
+    def _pygame_capture_ready() -> bool:
+        """True once main_pedal_thread has published all-joystick capture states.
+
+        If the pedal thread is missing, proceed without exclusion (empty set).
+        """
+        try:
+            pt = registry.get_thread("main_pedal_thread")
+            with pt.data._lock:
+                return bool(pt.data.joystick_capture_ready)
+        except Exception:
+            return True
 
     @staticmethod
     def _pygame_joystick_vid_pids() -> set[str]:
@@ -438,11 +459,36 @@ class ButtonDeviceThread(BaseThread):
             return False
 
         vendor_id, product_id = parsed
+        if not _hid_available or _hid is None:
+            self._devices[vid_pid] = None
+            return False
+
+        path = None
+        product_name = None
+        try:
+            for info in _hid.enumerate(vendor_id, product_id):
+                usage_page = info.get("usage_page") or 0
+                usage = info.get("usage") or 0
+                if usage_page == 0x01 and usage in _SKIP_GENERIC_USAGES:
+                    continue
+                cand = info.get("path")
+                if not cand:
+                    continue
+                path = cand
+                product_name = info.get("product_string")
+                break
+        except Exception:
+            logger.debug("hid enumerate failed for %s", vid_pid, exc_info=True)
+
         try:
             device = _hid.device()
-            device.open(vendor_id, product_id)
+            if path is not None:
+                device.open_path(path)
+            else:
+                # No filtered collection found; last resort (single-collection devices).
+                device.open(vendor_id, product_id)
             device.set_nonblocking(True)
-            name = device.get_product_string() or vid_pid
+            name = product_name or device.get_product_string() or vid_pid
             self._devices[vid_pid] = device
             self._device_names[vid_pid] = name
             logger.info("connected to button device: %s (%s)", name, vid_pid)
