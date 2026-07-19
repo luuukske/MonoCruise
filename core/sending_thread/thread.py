@@ -125,7 +125,7 @@ _AUTONEUTRAL_ACC_DECEL_MS2: float = -0.05
 # the stop (ACC's standstill publish is exactly 0 m/s2).
 _AUTONEUTRAL_ACC_STANDSTILL_KMH: float = 2.0
 _AUTONEUTRAL_WANTED_ACCEL_ON_MS2: float = 0.25  # CC/ACC launch bid: back to drive
-_AUTONEUTRAL_ROLLING_EXIT_KMH: float = 6.0  # rolling this fast in neutral: back to drive
+_AUTONEUTRAL_ROLLING_EXIT_KMH: float = 8.0  # must sit above MAX_SPEED or engage exits immediately
 _AUTONEUTRAL_COOLDOWN_S: float = 0.8        # min gap between neutral engagements
 _AUTONEUTRAL_PRESS_S: float = 0.15          # gear button press duration
 _AUTONEUTRAL_VERIFY_S: float = 0.7          # telemetry gear must confirm within this
@@ -139,6 +139,16 @@ _AUTONEUTRAL_DRIVE_WINDOW_S: float = 4.0
 # this long instead of hammering the input, and warn the user once per
 # session so a missing in-game binding is diagnosable.
 _AUTONEUTRAL_FAIL_LOCKOUT_S: float = 30.0
+
+# Soft creep-cancel brake while D/R is engaged. Opt-in via OPD or
+# auto-neutral only (two-pedal traditionalists keep stock creep).
+# Uses the mapper's creep_ms2 through the same inverse brake curve as the
+# manual creep-comp path: 100% cancel when OPD is on the brake side, faded
+# toward zero as OPD gas rises (same 0.02..0.30 band as the hold release).
+# Clutch fade lives in creep_ms2 itself (1 - max(user, game) clutch).
+# Does NOT shift to neutral in reverse (that killed reverse lights / beeper).
+_GEAR_ENGAGE_GAS_FADE_START: float = 0.02
+_GEAR_ENGAGE_GAS_FADE_FULL: float = 0.30
 
 
 class AEBDecelController:
@@ -630,6 +640,62 @@ class SendingThread(BaseThread):
                 wanted_accel_ms2, acc_stopping,
             )
 
+    def _tick_gear_engage_cushion(
+        self,
+        *,
+        enabled: bool,
+        gear: int,
+        pedal_brake: float,
+        opdgasval: float,
+        mapper_creep_ms2: float,
+    ) -> float:
+        """Mapper creep-cancel brake while D/R is engaged (OPD / auto-neutral).
+
+        Maps ``mapper_creep_ms2`` through the inverse brake curve (same as the
+        manual creep-comp path). ``mapper_creep_ms2`` already includes clutch
+        fade (1 - max(user, game) clutch: half clutch → half cancel). Scale:
+          - OPD brake side (``pedal_brake``): 100% of that clutch-scaled cancel
+          - otherwise: fade 100%→0% as ``opdgasval`` rises through the hold
+            release band, so gas progressively re-admits creep for launch
+        Returns a pedal in [0, 1] to max into the output brake.
+        """
+        if not enabled:
+            return 0.0
+        if gear == 0:
+            return 0.0
+        if mapper_creep_ms2 <= 1e-4:
+            return 0.0
+
+        cap = float(self._capacity_tracker.max_brake_ms2)
+        if cap <= 1.0:
+            return 0.0
+
+        full_pedal = self._accel_mapper.brake_pedal_from_decel(
+            mapper_creep_ms2, cap
+        )
+        if full_pedal <= 1e-4:
+            return 0.0
+
+        # OPD (or two-pedal) braking: keep full creep removal.
+        if pedal_brake > _AUTONEUTRAL_BRAKE_ON:
+            scale = 1.0
+        else:
+            # Progressive release with OPD-mapped gas.
+            span = _GEAR_ENGAGE_GAS_FADE_FULL - _GEAR_ENGAGE_GAS_FADE_START
+            if span <= 1e-9:
+                gas_frac = 1.0 if opdgasval > _GEAR_ENGAGE_GAS_FADE_START else 0.0
+            else:
+                gas_frac = min(
+                    max(
+                        (float(opdgasval) - _GEAR_ENGAGE_GAS_FADE_START) / span,
+                        0.0,
+                    ),
+                    1.0,
+                )
+            scale = 1.0 - gas_frac
+
+        return full_pedal * scale
+
     def _read_speed(self) -> float:
         try:
             tel = registry.get_thread("telemetry_thread")
@@ -974,7 +1040,10 @@ class SendingThread(BaseThread):
                     cruise_commanding=mapper_engaged,
                     gear_dashboard=tel_gear_dashboard,
                     game_throttle=game_throttle,
-                    game_clutch=game_clutch,
+                    # Stronger of user vs game clutch: creep cancel and
+                    # gearshift freeze must fade when either opens the
+                    # driveline (0.5 clutch → 0.5 creep, 1.0 → none).
+                    game_clutch=max(game_clutch, user_clutch),
                     freeze_trim=_aeb_active,
                     learn=mapper_learn,
                     freeze_slow_i=hold_freeze_slow_i,
@@ -1362,6 +1431,18 @@ class SendingThread(BaseThread):
             auto_neutral_active=self._autoneutral_neutral,
         )
         b = max(b, hold_out.brake_pedal)
+
+        # Mapper creep-cancel cushion (OPD or auto-neutral only). Full cancel
+        # on OPD brake, faded out with OPD gas so launch re-admits creep.
+        cushion = self._tick_gear_engage_cushion(
+            enabled=bool(Settings.opd_mode_variable) or bool(Settings.auto_neutral),
+            gear=gear,
+            pedal_brake=pedal_brake,
+            opdgasval=opdgasval,
+            mapper_creep_ms2=mapper_creep_ms2,
+        )
+        if cushion > 0.0:
+            b = max(b, cushion)
 
         # AEB additive FF pedal: sub-engagement assist that boosts active
         # user braking. Gated on brakeval so it does not phantom-brake during

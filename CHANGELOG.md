@@ -12,7 +12,8 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Added
-- **Auto-neutral at stops** (opt-in): shifts to neutral below 5 km/h whenever the brake is on and the gas is off; off by default in settings.
+- **Auto-neutral at stops** (opt-in): shifts to neutral at low speed whenever the brake is on and the gas is off; off by default in settings.
+- **Gear-engage creep cushion** (OPD or auto-neutral only): mapper creep cancel while D/R is closed; 100% on OPD brake, faded out with OPD gas so launch is smooth without killing reverse lights.
 ### Changed
 - **AEB brakes at the last moment**: engagement threshold raised to 85% of usable capacity, standoff buffer reduced 1.6 m -> 0.2 m, and the speed-proportional response margin cut 0.45 s -> 0.10 s (physical actuator lag). AEB now waits for the last-point envelope instead of braking seconds early; the clip corpus keeps arbitrating WHICH targets are threats, not when to brake.
 - **ACC follows AI vehicles at the true gap**: lead distance came from the same asymmetric bodies, so ACC held ~1.5-4 m more real gap than commanded behind AI traffic. Same gap setting now means the same physical gap.
