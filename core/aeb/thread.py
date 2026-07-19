@@ -392,6 +392,110 @@ def _world_to_ego_forward(dx: float, dz: float, ego_yaw_rad: float) -> float:
     return dx * math.sin(ego_yaw_rad) + dz * math.cos(ego_yaw_rad)
 
 
+def _response_dist(v: float, cal) -> float:
+    """Distance lost to brake response lag at speed v. Deliberately uncapped
+    and un-tiered: both a distance cap and threat-age tau tiering were
+    corpus-scanned and rejected (see the notes in calibration.py)."""
+    return abs(v) * cal.stop_buffer_response_s
+
+
+def _codir_required_cap(
+    target_arc: ArcPath,
+    fwd_dot: float,
+    unbraked_ttc: float,
+    ego_travel: float,
+    v_closing: float,
+    ego_speed: float,
+    cal,
+) -> float:
+    """Physically consistent required decel for a co-directional lead, used
+    as a cap (min) on the relative-frame value.
+
+    The relative frame's closing_distance = v_closing * ttc compresses far
+    below the real gap when the hit time embeds the lead's own predicted
+    deceleration (clip 4423fa27: 2 m/s closing over a 6.4 m real gap read as
+    2.8 m, required 7-22 m/s2 where ~3 was true). The true car-following
+    requirement is the larger of the two binding phases:
+
+    - moving phase (catches the lead mid-braking): match the lead's decel
+      plus shed the closing speed over the actual gap:
+      a_t + v_closing^2 / (2 * gap)
+    - stopped phase (lead has stopped): full stop behind its stop point:
+      v_ego^2 / (2 * (gap + v_t^2 / (2 * a_t)))
+
+    Taking the max keeps a hard-braking lead (0fe85c88) fully covered, and a
+    noise-level lead decel cannot dilute the moving-phase term. gap is
+    estimated as ego_travel minus the lead's travel-to-hit. _INF when not
+    co-directional, so crossing / oncoming behavior is untouched."""
+    if fwd_dot < cal.co_directional_dot:
+        return _INF
+    abs_ego = abs(ego_speed)
+    gap_est = max(ego_travel - target_arc._dist_at_time(unbraked_ttc), 0.0)
+    a_t = target_arc.decel if target_arc.decel > 1e-3 else 0.0
+    d_move = max(
+        gap_est - cal.stop_buffer - _response_dist(v_closing, cal),
+        1e-3,
+    )
+    r_move = a_t + (v_closing * v_closing) / (2.0 * d_move)
+    r_stop = 0.0
+    if a_t > 0.0 and target_arc.speed > 1e-3:
+        s_stop = (target_arc.speed * target_arc.speed) / (2.0 * a_t)
+        d_stop = max(
+            gap_est + s_stop - cal.stop_buffer - _response_dist(abs_ego, cal),
+            1e-3,
+        )
+        r_stop = (abs_ego * abs_ego) / (2.0 * d_stop)
+    return max(r_move, r_stop)
+
+
+def _required_decel_two_frame(
+    closing_distance: float,
+    v_closing: float,
+    ego_travel: float,
+    ego_speed: float,
+    cal,
+    codir_cap: float = _INF,
+) -> float:
+    """Required decel from the tighter-of-two-frames distance, with an
+    ego-frame fallback when the relative frame degenerates and a
+    co-directional stopping-lead cap.
+
+    Relative frame: v_closing over closing_distance. It degenerates when
+    v_closing * ttc undershoots stop_buffer at near-zero closing speed, which
+    happens when the predicted hit only exists because the target is expected
+    to decelerate (ego creeping behind a slowing lead, clip 5a6050f5: 0.67 m/s
+    closing, 7.9 m real gap, old clamp exploded required to ~235 m/s2 and
+    engaged on certain geometry: braking for air). Pairing the instantaneous
+    closing speed with a contact driven by the target's future braking is not
+    physical.
+
+    Fallback: a braking actuator can never do better than stopping ego before
+    the contact point, so the consistent (ego_speed, ego_travel) frame bounds
+    what braking can be asked to do. A genuinely imminent contact is owned by
+    the TTB slam path, which bypasses this formula entirely.
+
+    codir_cap: the physically consistent co-directional car-following
+    requirement from _codir_required_cap. The relative frame compresses
+    v_closing * ttc far below the real gap when the hit time embeds the
+    lead's own predicted deceleration and over-triggers at mild closing
+    speeds (clip 4423fa27). The cap only ever lowers required (min) and is
+    _INF for non-co-directional contacts so crossing / oncoming behavior is
+    untouched."""
+    d_rel = (
+        closing_distance - cal.stop_buffer - _response_dist(v_closing, cal)
+    )
+    abs_ego = abs(ego_speed)
+    if d_rel > 1e-3:
+        required = (v_closing * v_closing) / (2.0 * d_rel)
+    else:
+        d_ego = max(
+            ego_travel - cal.stop_buffer - _response_dist(abs_ego, cal),
+            1e-3,
+        )
+        required = (abs_ego * abs_ego) / (2.0 * d_ego)
+    return min(required, codir_cap)
+
+
 def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1) -> bool:
     ax0, az0 = a.position_at_time(t)
     bx0, bz0 = b.position_at_time(t)
@@ -1230,6 +1334,8 @@ class AEBThread(BaseThread):
         best_hit_z: float = 0.0
         best_closing_distance: float = _INF
         best_v_closing: float = 0.0
+        best_ego_travel: float = _INF
+        best_codir_cap: float = _INF
         # Engagement-eligible aggregates: same chain minus LOS-vetoed targets.
         # Only the engagement-entry decision reads these; warn / display /
         # disarm / holds keep the full aggregates so a veto can never silence
@@ -1237,6 +1343,12 @@ class AEBThread(BaseThread):
         best_ttb_engage: float = _INF
         best_closing_distance_engage: float = _INF
         best_v_closing_engage: float = 0.0
+        best_ego_travel_engage: float = _INF
+        best_codir_cap_engage: float = _INF
+        # Distance from the ego arc reference to ego's own contact surface
+        # (capsule tip + radius): subtracted from the reference-to-hit-point
+        # distance to get ego's drivable travel before contact.
+        ego_front_to_surface = ego_cap_fwd + ego_hw
         # Colliding targets with certain geometry (Lane.EGO, aligned heading):
         # these skip the confirm wait at engagement entry. nearcertain covers
         # targets in-lane OR aligned (one classification step from certain):
@@ -1605,14 +1717,19 @@ class AEBThread(BaseThread):
                         #   those to the relative gap drops genuine crossing
                         #   TPs 898e3a46 / f64d2a6b below the engage ratio.
                         # For stationary targets both forms agree.
+                        hit_dist = math.hypot(
+                            unbraked_hit[1] - ego_front_x,
+                            unbraked_hit[2] - ego_front_z,
+                        )
                         best_closing_distance = min(
-                            closing_unbraked * unbraked_ttc,
-                            math.hypot(
-                                unbraked_hit[1] - ego_front_x,
-                                unbraked_hit[2] - ego_front_z,
-                            ),
+                            closing_unbraked * unbraked_ttc, hit_dist,
                         )
                         best_v_closing = closing_unbraked
+                        best_ego_travel = max(hit_dist - ego_front_to_surface, 0.0)
+                        best_codir_cap = _codir_required_cap(
+                            base_target_arc, fwd_dot, unbraked_ttc,
+                            best_ego_travel, closing_unbraked, ego_speed, cal,
+                        )
 
                     # LOS-rate veto (engagement entry only): once per vehicle
                     # per frame, memoized across its arcs.
@@ -1632,14 +1749,22 @@ class AEBThread(BaseThread):
                         best_ttb_engage = ttb
                         # Same tighter-of-two-frames distance as
                         # best_closing_distance above.
+                        hit_dist_e = math.hypot(
+                            unbraked_hit[1] - ego_front_x,
+                            unbraked_hit[2] - ego_front_z,
+                        )
                         best_closing_distance_engage = min(
-                            closing_unbraked * unbraked_ttc,
-                            math.hypot(
-                                unbraked_hit[1] - ego_front_x,
-                                unbraked_hit[2] - ego_front_z,
-                            ),
+                            closing_unbraked * unbraked_ttc, hit_dist_e,
                         )
                         best_v_closing_engage = closing_unbraked
+                        best_ego_travel_engage = max(
+                            hit_dist_e - ego_front_to_surface, 0.0,
+                        )
+                        best_codir_cap_engage = _codir_required_cap(
+                            base_target_arc, fwd_dot, unbraked_ttc,
+                            best_ego_travel_engage, closing_unbraked,
+                            ego_speed, cal,
+                        )
                     found_hit = True
 
                 vehicle_dicts.append(veh_dict)
@@ -1673,8 +1798,10 @@ class AEBThread(BaseThread):
 
         required_decel = 0.0
         if run_collision and best_closing_distance < _INF and best_v_closing > 0.0:
-            d_remaining = max(best_closing_distance - cal.stop_buffer, 1e-3)
-            required_decel = (best_v_closing * best_v_closing) / (2.0 * d_remaining)
+            required_decel = _required_decel_two_frame(
+                best_closing_distance, best_v_closing, best_ego_travel,
+                ego_speed, cal, best_codir_cap,
+            )
 
         effective_required = required_decel + downhill_offset
 
@@ -1701,14 +1828,17 @@ class AEBThread(BaseThread):
             and time_to_brake < cal.brake_ttb + cal.brake_response_window_s
         )
 
-        # Geometry-driven engagement latch: once engaged, hold engagement while
-        # any confirmed collision target's unbraked_ttc is still within warn
-        # range. As ego brakes and slows, best_v_closing collapses faster than
-        # d_remaining, which would otherwise trip the required_decel disarm
-        # threshold mid-event while the impact is still imminent.
+        # Geometry-driven engagement latch: once engaged, hold engagement
+        # while any confirmed collision target's unbraked_ttc is inside
+        # disarm_hold_ttc_s. A working brake pushes effective_required under
+        # the disarm threshold and headway over the distance latch BY
+        # CONSTRUCTION (required ~ v^2, headway = d/v), so a narrower hold
+        # window releases mid-stop and the event pumps (clip 29c8e7e0:
+        # release at ~30 km/h closing, coast, re-engage at 7 m). Entry is
+        # untouched; this only keeps an active event alive.
         geom_threat_latched = (
             run_collision
-            and best_unbraked_ttc < cal.warn_ttb
+            and best_unbraked_ttc < cal.disarm_hold_ttc_s
             and bool(colliding_ids)
         )
 
@@ -1774,9 +1904,10 @@ class AEBThread(BaseThread):
         required_decel_engage = 0.0
         if (run_collision and best_closing_distance_engage < _INF
                 and best_v_closing_engage > 0.0):
-            d_remaining_e = max(best_closing_distance_engage - cal.stop_buffer, 1e-3)
-            required_decel_engage = (
-                (best_v_closing_engage * best_v_closing_engage) / (2.0 * d_remaining_e)
+            required_decel_engage = _required_decel_two_frame(
+                best_closing_distance_engage, best_v_closing_engage,
+                best_ego_travel_engage, ego_speed, cal,
+                best_codir_cap_engage,
             )
         effective_required_engage = required_decel_engage + downhill_offset
         brake_ttb_engage_active = (

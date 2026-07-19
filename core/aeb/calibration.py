@@ -32,7 +32,32 @@ class AEBCalibration:
     # margin blends margin*scale (parallel) to margin (perpendicular) by the
     # sine of the heading difference. 1.0 disables.
     capsule_parallel_margin_scale: float = 0.3
-    stop_buffer: float = 1.6
+    stop_buffer: float = 0.2
+    # Response-lag distance in the required-decel gap: while the commanded
+    # decel materializes, ego closes v_closing * this many seconds before
+    # braking takes hold, so that distance is not available for stopping.
+    # 0.10 = physical actuator lag. Deliberately NOT the corpus optimum
+    # (~0.45): the corpus should_trigger windows were drawn around the old
+    # early-braking behavior, so timing verdicts encode that bias; Lukas's
+    # 2026-07-19 decision is that the corpus arbitrates target FILTERING,
+    # not trigger timing, and AEB should brake at the last-point envelope.
+    stop_buffer_response_s: float = 0.10
+    # NOTE: capping the response-lag distance (min(v * tau, cap_m)) was
+    # evaluated against live FP clips 3f1107ce / 535eb432 / 4423fa27 and
+    # rejected: even a 1.5 m cap moved those triggers by only ~0.1-0.2 s
+    # (they are dominated by base physics + stop_buffer, not this term)
+    # while the corpus total collapsed from +26.7 to +87..+106 with watch-TP
+    # regressions. Do not reintroduce without a new corpus scan.
+    # NOTE: threat-age tiering of tau (reduced response term once a target
+    # has been colliding continuously ~1 s) was implemented and corpus-scanned
+    # 2026-07-19: REJECTED. Colliding-streak age has no dynamic range as a
+    # novelty signal: every threat's age at trigger is capped by the ~3 s arc
+    # horizon, so crash clips 2212fc6e / 7ba5c9fa lost their trigger windows
+    # (total +35 -> +74) while the long-visible stationary approaches it was
+    # meant to soften gained little. Raising aeb_engage_frac to 0.9 was
+    # rejected in the same scan (+133, deletes entire brakes on genuine
+    # stationary-obstacle runs bce9dfcc / b9686b33). Do not reintroduce
+    # either without a new discriminator and corpus scan.
     elevation_margin: float = 5.0
     max_range: float = 200.0
     arc_start_pctg: float = 0.2
@@ -153,8 +178,21 @@ class AEBCalibration:
     aeb_target_deadband_ms2: float = 0.4
     aeb_target_refresh_min_s: float = 0.20
     aeb_target_rate_ms3: float = 8.0
-    aeb_engage_frac: float = 0.8
+    # 0.85 from the 2026-07-19 scan: beats 0.8 on corpus total (+32.7 vs
+    # +37.1) and engages ~0.1-0.2 s later on live stationary-obstacle runs.
+    # 0.9 deletes entire brake events on genuine obstacle clips
+    # (bce9dfcc / b9686b33): rejected.
+    aeb_engage_frac: float = 0.85
     aeb_disarm_frac: float = 0.45
+    # Disarm hold: while engaged, a still-colliding target whose unbraked TTC
+    # is inside this window keeps the engagement alive even when the working
+    # brake has pushed effective_required under the disarm threshold. Braking
+    # success lowers required ~v^2 and raises headway = d/v BY CONSTRUCTION,
+    # so the plain disarm always trips mid-stop on a stationary target and
+    # the event pumps (release at ~30 km/h, coast, re-engage at 7 m: clip
+    # 29c8e7e0). Releases when the target clears laterally, accelerates away
+    # (ttc grows), or ego stops (no closing -> ttc INF).
+    disarm_hold_ttc_s: float = 3.0
     aeb_warn_frac: float = 0.5
     aeb_warn_near_full_frac: float = 0.85
     brake_actuator_lag_s: float = 0.10

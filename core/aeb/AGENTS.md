@@ -249,12 +249,13 @@ corridor-grazing outer-lane body is not miscounted as in-lane
 tractor-based lane checks in `OutOfLaneParallelFilter` and `EgoEvasionFilter`.
 
 **Pass-through dip check (in-lane only).** The `_is_approaching` endpoint
-comparison alone inverts for fast closers: the hit time is the corridor
-contact moment (center distance ≈ `ego_hw + v_hw_coll + margin` ≈ 2.44 m by
-construction), so above `2 × contact / dt` ≈ 20 m/s (~70 km/h) of closing
-speed the `t + dt` sample lies beyond the target, center distance grows
-again, and a lead about to be rear-ended reads as "diverging" (FN clip
-fbc397b3: 97 km/h ego suppressed a 20 km/h in-lane lead until impact). Fix:
+comparison alone inverts for fast closers: the hit time is the capsule
+contact moment (bumper gap ≈ the effective corridor margin since the
+cap-alignment fix), so a modest closing speed already carries the `t + dt`
+sample beyond the target, center distance grows again, and a lead about to
+be rear-ended reads as "diverging" (FN clip fbc397b3: 97 km/h ego suppressed
+a 20 km/h in-lane lead until impact, back when the padded contact distance
+still put the inversion near ~70 km/h closing). Fix:
 `_is_approaching` samples `cal.diverge_dip_samples` points across the
 window; when `dip_active` and any sample's center distance drops below the
 sum of the body half-widths (no corridor margin), the extrapolated bodies
@@ -429,8 +430,16 @@ aeb.snapshot                       # AEBSnapshot: full debug state
      lowest-`ttb` target).
 3. Required decel for the worst target:
    ```
-   d_remaining       = closing_distance - stop_buffer
-   required_decel    = v_closing² / (2 * max(d_remaining, 1e-3))
+   d_rel             = closing_distance - stop_buffer - v_closing * stop_buffer_response_s
+   required_decel    = v_closing² / (2 * d_rel)              # while d_rel > 0
+   # d_rel <= 0 fallback (_required_decel_two_frame): the relative frame
+   # degenerates when v_closing * ttc undershoots stop_buffer at near-zero
+   # closing speed (hit exists only via the target's predicted decel: ego
+   # creeping behind a slowing lead, clip 5a6050f5). Braking can never do
+   # better than stopping ego before the contact point, so switch to the
+   # consistent ego frame; imminent contacts are owned by the TTB slam.
+   required_decel    = ego_speed² / (2 * max(ego_travel_to_hit - stop_buffer
+                                             - ego_speed * stop_buffer_response_s, 1e-3))
    slope_accel       = g · sin(ego_pitch_rad)         # +ve = uphill (radar convention)
    downhill_offset   = max(−slope_accel, 0)           # gravity stealing brake force
    effective_max     = ego_decel_frac · capacity_estimate − downhill_offset
@@ -448,9 +457,14 @@ aeb.snapshot                       # AEBSnapshot: full debug state
      after the pedal has already needed to be at full. Without it, AEB
      stays in WARN forever in these scenarios.
    - Geometry-driven engagement latch: once engaged, hold engagement
-     while any colliding target has `unbraked_ttc < warn_ttb`. Prevents
-     disarm mid-event as ego decelerates and `best_v_closing` collapses
-     faster than `d_remaining`.
+     while any colliding target has `unbraked_ttc < disarm_hold_ttc_s`.
+     A working brake pushes `effective_required` under the disarm
+     threshold and headway over the distance latch by construction
+     (`required ~ v²`, `headway = d/v`), so a narrow hold window releases
+     mid-stop and the event pumps: release at ~30 km/h closing, coast,
+     re-engage at 7 m (clip 29c8e7e0). The hold releases when the target
+     clears laterally (not colliding), accelerates away (ttc grows), or
+     ego stops (no closing → ttc ∞). Entry is untouched.
    - Latched-distance hold: see "Latched-threat hold" below. Adds a
      headway-driven engagement hold over targets that have been engaged
      on previously, independent of current `v_closing`.
@@ -651,8 +665,10 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `warn_ttb` | 1.3 s | WARN threshold |
 | `brake_ttb` | 0.2 s | BRAKE threshold |
 | `ego_half_width` | 1.15 m | Ego arc corridor half-width |
-| `ego_half_length` | 3.0 m | Ego capsule half-length (body extents via `capsule_extents`) |
+| `ego_half_length` | 3.0 m | Ego capsule half-length (body extents via `capsule_extents`; collision segments are cap-aligned: extents minus half_width, see radar AGENTS.md §8) |
 | `corridor_margin` | 0.5 m | Corridor padding for crossing-path sample uncertainty |
+| `stop_buffer_response_s` | 0.45 s | Speed-proportional response-lag distance (`v_closing * this`) subtracted from the required-decel gap. Value from corpus scan (183 clips). A distance cap and threat-age tiering were both scanned and REJECTED (notes in calibration.py) |
+| `disarm_hold_ttc_s` | 3.0 s | Geometry latch window while engaged: hold the event while any colliding target's unbraked ttc is inside it (anti-pumping; was `warn_ttb`) |
 | `capsule_parallel_margin_scale` | 0.3 | Near-parallel capsule contacts use `margin * scale` blended by heading sine toward full margin at perpendicular; kills adjacent-lane side-graze FPs (ab524f87 / 29bf31b8). 1.0 disables |
 | `lane_half_width` | 1.95 m | EGO lane boundary |
 | `lane_separation` | 3.9 m | Road lane pitch |
