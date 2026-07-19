@@ -100,6 +100,11 @@ class Settings(metaclass=_SingletonMeta):
     brake_exponent_variable: float = None
     weight_adjustment: bool = True
     polling_rate: int = 100
+    # Auto neutral: at very low speed with clear stopping intent, shift the
+    # transmission to neutral so gear-1 idle creep is removed at the source
+    # (instead of brake-compensated), and shift straight back to drive on any
+    # gas intent. Applies to manual braking and ACC stops. Default off.
+    auto_neutral: bool = False
 
     # OPD
     max_opd_brake_variable: float = 0.04

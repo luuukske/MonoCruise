@@ -561,6 +561,39 @@ class AccelToPedals:
             )
         return self._brake_pedal_from_decel(decel_ms2, max_brake_ms2_override)
 
+    def brake_decel_from_pedal(
+        self,
+        pedal: float,
+        max_brake_ms2_override: float | None = None,
+    ) -> float:
+        """Forward brake curve: decel (m/s²) the game produces at *pedal*.
+
+        Evaluates y = A * (1 - e^(-rate * x^power)), the exact inverse of
+        `brake_pedal_from_decel`, with the same baseline fallback when
+        capacity hasn't been learned yet. Lets sending_thread re-express a
+        user brake pedal in decel space for the idle-creep compensation.
+        """
+        x = _clamp(_finite_or_zero(pedal), 0.0, 1.0)
+        if x <= 0.0:
+            return 0.0
+        if max_brake_ms2_override is not None:
+            A = max_brake_ms2_override
+        elif (
+            self._shared.estimated_max_brake_ms2
+            and math.isfinite(self._shared.estimated_max_brake_ms2)
+        ):
+            A = self._shared.estimated_max_brake_ms2
+        else:
+            A = max(
+                _MIN_BRAKE_ESTIMATE_MS2,
+                _finite_or_zero(Settings.mapper_brake_scale_ms2),
+            )
+        if A <= 0.1:
+            return 0.0
+        return A * (
+            1.0 - math.exp(-_BRAKE_CURVE_RATE * x ** _BRAKE_CURVE_POWER)
+        )
+
     # Gearshift freeze/ramp
 
     def _gearshift_factor(

@@ -444,6 +444,11 @@ class MainPedalThread(BaseThread):
         except (KeyError, AttributeError):
             pass
 
+        # The shaping fades back out between 0.2 and 0.3 opdbrakeval instead
+        # of the old hard `< 0.3` gate, which stepped the output by roughly 2x
+        # at the boundary at low speed (felt as a sudden bite when pressing
+        # through it). At or below 0.2 and at or above 0.3 the output is
+        # identical to the old curve.
         a = 0.035 - slope / 2
         if (
             not sending_stopped
@@ -451,21 +456,13 @@ class MainPedalThread(BaseThread):
             and Settings.opd_mode_variable
             and not cruise_commanding
             and opdbrakeval < 0.3
+            and speed != 0
         ):
-            if speed > 0:
-                b = max(opdbrakeval ** 0.8 / 2, 0.3)
-                opdbrakeval = max(
-                    opdbrakeval * ((-1 / (b * speed + 1)) + 1)
-                    + a * (1 - (-1 / (b * speed + 1) + 1)),
-                    0,
-                )
-            elif speed < 0:
-                b = max(opdbrakeval ** 0.8 / 2, 0.3)
-                opdbrakeval = max(
-                    opdbrakeval * ((-1 / (b * -speed + 1)) + 1)
-                    + a * (1 - (-1 / (b * -speed + 1) + 1)),
-                    0,
-                )
+            bcoef = max(opdbrakeval ** 0.8 / 2, 0.3)
+            factor = (-1 / (bcoef * abs(speed) + 1)) + 1
+            shaped = max(opdbrakeval * factor + a * (1 - factor), 0)
+            w = min(max((0.3 - opdbrakeval) / 0.1, 0.0), 1.0)
+            opdbrakeval = shaped * w + opdbrakeval * (1 - w)
 
         gas_output   = opdgasval
         brake_output = opdbrakeval

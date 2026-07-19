@@ -100,6 +100,20 @@ _HOLD_CLUTCH_RELEASED_THRESHOLD: float = 0.05
 _HOLD_MANUAL_OPD_OVERRIDE: float = 0.75
 _HOLD_MANUAL_GAS_OVERRIDE: float = 0.7       # added on top of `offset`
 
+# Proportional manual release. During manual driving `commanded_accel_ms2`
+# is pinned at 0 (no CC bid), so gas taps must drive the release directly.
+# `opdgasval` (OPD-mapped gas, zero below the OPD offset) maps linearly from
+# _START to _FULL onto a 0..1 release fraction: the hold brake floor eases
+# out in proportion to how far the pedal is past the coast point instead of
+# toggling at a single threshold, and eases back in when the pedal retreats.
+# STOPPING scales its floor by the fraction and exits to ROLLING at full
+# release; HOLDING enters LAUNCHING as soon as the fraction is nonzero and
+# the launch ramp then chases the fraction as a target. The near-full manual
+# override above still skips the ramp entirely. The rollback integrator is
+# never scaled, so a hill still aborts any partial release that slips.
+_HOLD_GAS_RELEASE_START: float = 0.02
+_HOLD_GAS_RELEASE_FULL: float = 0.30
+
 STATE_ROLLING: str = "ROLLING"
 STATE_STOPPING: str = "STOPPING"
 STATE_HOLDING: str = "HOLDING"
@@ -310,6 +324,14 @@ class HoldController:
             return True
         return False
 
+    @staticmethod
+    def _gas_release_fraction(opdgasval: float) -> float:
+        """Proportional release fraction [0, 1] from the OPD-mapped gas."""
+        span = _HOLD_GAS_RELEASE_FULL - _HOLD_GAS_RELEASE_START
+        if span <= 1e-9:
+            return 1.0 if opdgasval > _HOLD_GAS_RELEASE_START else 0.0
+        return _clamp((opdgasval - _HOLD_GAS_RELEASE_START) / span, 0.0, 1.0)
+
     def update(
         self,
         *,
@@ -324,6 +346,7 @@ class HoldController:
         aeb_active: bool,
         dt: float,
         game_clutch: float = 0.0,
+        auto_neutral_active: bool = False,
     ) -> HoldOutput:
         """Advance the FSM by one tick and produce a brake floor.
 
@@ -334,6 +357,10 @@ class HoldController:
         HOLDING capture waits for it to fall below
         `_HOLD_CLUTCH_RELEASED_THRESHOLD` so residual driveline torque does
         not creep the truck off the hold floor on a slope.
+        `auto_neutral_active` means sending_thread has commanded neutral for
+        its auto-neutral feature: gear reads 0 but the FSM must still treat
+        the stop as intentional (capture below the threshold and hold), or a
+        neutral truck would never get a hold floor and could roll on a hill.
         """
         dt = max(0.0, _finite_or_zero(dt))
         speed_kmh = _finite_or_zero(speed_kmh)
@@ -346,6 +373,7 @@ class HoldController:
 
         pitch_rad = self._smooth_pitch(pitch_norm, dt)
         rollback_v = self._rollback_velocity_ms(speed_kmh, gear)
+        gas_release = self._gas_release_fraction(opdgasval)
 
         park_held = self._park_brake_debounced(bool(park_brake), dt)
 
@@ -394,16 +422,24 @@ class HoldController:
         if self._state == STATE_ROLLING:
             below_capture = abs(speed_kmh) < _HOLD_CAPTURE_SPEED_KMH
             decel_intent = commanded_accel_ms2 <= 0.0
-            if below_capture and decel_intent and (forward_intent or reverse_intent):
+            if below_capture and decel_intent and (
+                forward_intent or reverse_intent or auto_neutral_active
+            ):
                 self._state = STATE_STOPPING
 
         if self._state == STATE_STOPPING:
-            # Re-emerge to ROLLING if upstream commands meaningful accel before
-            # we settle, OR if the truck has gained too much speed in the
-            # intended direction (false trigger). Hysteresis: exit threshold is
-            # 1.5x the capture threshold.
-            if commanded_accel_ms2 > _HOLD_RELEASE_ACCEL_MS2:
-                # Skip dwell entirely if upstream is asking for gas already —
+            # Re-emerge to ROLLING if upstream commands meaningful accel (or
+            # the driver's gas reaches full release) before we settle, OR if
+            # the truck has gained too much speed in the intended direction
+            # (false trigger). Hysteresis: exit threshold is 1.5x the capture
+            # threshold. Partial gas does not exit: it scales the STOPPING
+            # floor continuously via `gas_release` in the pedal computation
+            # below, so the brake fades with the pedal instead of toggling.
+            if (
+                commanded_accel_ms2 > _HOLD_RELEASE_ACCEL_MS2
+                or gas_release >= 1.0
+            ):
+                # Skip dwell entirely if gas is already being asked for:
                 # straight to ROLLING (and reset rollback integrator).
                 self._state = STATE_ROLLING
                 self._rollback_decel_ms2 = 0.0
@@ -437,6 +473,15 @@ class HoldController:
                 self._state = STATE_LAUNCHING
                 self._launch_t = _HOLD_LAUNCH_RAMP_S
                 self._release_dwell_acc_s = 0.0
+            elif gas_release > 0.0:
+                # Gentle manual launch: past the coast point but not flooring
+                # it. Start the ramp at the held end; the ramp then chases
+                # the gas-proportional target in the LAUNCHING block, so the
+                # floor eases out with the pedal instead of snapping. The
+                # rollback integrator stays armed the whole way.
+                self._state = STATE_LAUNCHING
+                self._launch_t = 0.0
+                self._release_dwell_acc_s = 0.0
             else:
                 if commanded_accel_ms2 > _HOLD_RELEASE_ACCEL_MS2:
                     self._release_dwell_acc_s += dt
@@ -460,7 +505,15 @@ class HoldController:
             elif commanded_accel_ms2 >= _HOLD_RELEASE_ACCEL_MS2:
                 self._launch_t = min(self._launch_t + dt, _HOLD_LAUNCH_RAMP_S)
             else:
-                self._launch_t = max(self._launch_t - dt, 0.0)
+                # Chase the gas-proportional target at the ramp rate: partial
+                # gas gives a partial, stable release; easing off walks the
+                # floor back in; zero gas retreats to 0 and drops the state
+                # back to HOLDING below.
+                target_t = gas_release * _HOLD_LAUNCH_RAMP_S
+                if self._launch_t < target_t:
+                    self._launch_t = min(self._launch_t + dt, target_t)
+                else:
+                    self._launch_t = max(self._launch_t - dt, target_t)
 
             # Settle to ROLLING as soon as the truck is moving in the intended
             # direction with no active rollback: the launch is genuinely
@@ -509,7 +562,13 @@ class HoldController:
         ease = 0.0
         brake_pedal = 0.0
         if self._state in (STATE_STOPPING, STATE_HOLDING):
-            brake_pedal = self._hold_pedal(pitch_rad, gear, speed_kmh, 0.0)
+            # STOPPING scales its floor with the gas-proportional release so
+            # feathering gas while still rolling fades the brake instead of
+            # toggling it. HOLDING with nonzero gas transitioned to LAUNCHING
+            # above, so its ease is always 0 here.
+            if self._state == STATE_STOPPING:
+                ease = gas_release
+            brake_pedal = self._hold_pedal(pitch_rad, gear, speed_kmh, ease)
         elif self._state == STATE_LAUNCHING:
             t_norm = _clamp(self._launch_t / max(_HOLD_LAUNCH_RAMP_S, 1e-6), 0.0, 1.0)
             ease = 0.5 * (1.0 - math.cos(math.pi * t_norm))

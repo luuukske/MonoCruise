@@ -1142,6 +1142,15 @@ class SettingsPanel(QWidget):
             callback=lambda v: self._set("weight_adjustment", v),
         )
 
+        self.chk_auto_neutral, _, _ = self._field_with_subtext(
+            "Auto neutral at stops:",
+            lambda c, r, col: new_checkbutton(
+                c, r, col, s.auto_neutral,
+                callback=lambda v: self._set("auto_neutral", v),
+            ),
+            "Shift to neutral when braking to a standstill below 5 km/h (removes idle creep); pressing the gas shifts back to drive instantly",
+        )
+
         # Apply conditional visibility
         for r in range(self._opd_cond_start, self._opd_cond_end):
             self._set_row_visible(r, bool(s.opd_mode_variable))
@@ -1441,6 +1450,7 @@ class SettingsPanel(QWidget):
         self.ent_gas_exp.setText(str(s.gas_exponent_variable if s.gas_exponent_variable else 2.0))
         self.ent_brake_exp.setText(str(s.brake_exponent_variable if s.brake_exponent_variable else 2.0))
         self.chk_weight_adj.setChecked(s.weight_adjustment)
+        self.chk_auto_neutral.setChecked(s.auto_neutral)
 
         for r in range(self._opd_cond_start, self._opd_cond_end):
             self._set_row_visible(r, bool(s.opd_mode_variable))
