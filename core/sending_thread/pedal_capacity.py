@@ -57,7 +57,6 @@ _MIN_DECEL_MS2: float = 0.3         # ignore near-zero decel (coasting / noise)
 _MIN_ACCEL_MS2: float = 0.2         # ignore near-zero accel
 _MAX_SLOPE_RAD: float = 0.15        # ~8.6°: skip extreme slopes (sensor uncertainty)
 _WEIGHT_POWER: float = 3.0          # alpha ∝ pedal^4: small inputs almost ignored, full pedal dominates
-_BRAKE_BASE_ALPHA: float = 0.15     # EMA alpha at full brake pedal, no underperformance
 _ACCEL_BASE_ALPHA: float = 0.08     # EMA alpha at full gas pedal, no underperformance
 _UNDERPERFORM_MULT: float = 2.0     # drop estimate this much faster when below expectation
 _CLUTCH_GUARD_S: float = 0.5        # seconds after clutch to skip gas learning
@@ -80,6 +79,17 @@ _ESTIMATE_UPPER_BOUND: float = 1.3  # fraction of baseline: hard ceiling
 # averaging them in. Slightly above the ceiling so legitimate samples near the
 # clamp still register.
 _BRAKE_CANDIDATE_MAX_FRACTION: float = 1.35
+# Two-speed brake learning. Game brake force is progressive in pedal
+# position, so candidate = decel / pedal from a gentle press reads far below
+# true full-pedal capacity; routine light braking dragged the estimate
+# 9 -> 4 m/s2 between sessions while the truck measurably pulled 10-12
+# (clips 1b277e63 / fa70013c, 2026-07-19), and AEB divides by the estimate,
+# so an under-read fires emergency braking at 2-3x the needed distance.
+# Normal driving therefore drifts the estimate SLOWLY (soft presses still
+# count, but a stretch of abnormal braking cannot poison it), while AEB
+# events (deep, honest presses) re-teach it fast.
+_BRAKE_ALPHA_NORMAL: float = 0.02   # EMA alpha at full pedal, normal driving
+_BRAKE_ALPHA_AEB: float = 0.15      # EMA alpha at full pedal during AEB braking
 
 # Shape-function model for per-gear gas gain. Two scalars parameterize the
 # whole curve via
@@ -281,6 +291,7 @@ class PedalCapacityTracker:
         slope_rad: float,
         baseline_ms2: float,
         road_load_ms2: float = 0.0,
+        aeb_active: bool = False,
     ) -> None:
         """Feed one braking sample.
 
@@ -294,6 +305,8 @@ class PedalCapacityTracker:
             baseline_ms2: Baseline max decel for clamping bounds.
             road_load_ms2: slope_accel + rolling_accel (positive = uphill forward).
                            Subtracted from measured_decel to isolate pure brake force.
+            aeb_active: True while AEB commands the brake: enables the fast
+                        learning alpha (see the two-speed note above).
         """
         if self._max_brake_ms2 <= 0.0:
             self._max_brake_ms2 = baseline_ms2
@@ -338,7 +351,8 @@ class PedalCapacityTracker:
             return
 
         weight = brake_output ** _WEIGHT_POWER
-        alpha = _BRAKE_BASE_ALPHA * weight
+        base = _BRAKE_ALPHA_AEB if aeb_active else _BRAKE_ALPHA_NORMAL
+        alpha = base * weight
         if candidate < self._max_brake_ms2:
             alpha *= _UNDERPERFORM_MULT
         alpha = min(alpha, 1.0)

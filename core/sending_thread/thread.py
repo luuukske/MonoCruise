@@ -83,6 +83,59 @@ _AEB_KP: float = 0.06
 _AEB_KI: float = 0.04
 _AEB_LEAD_CLAMP_MS2: float = 3.0
 
+# Idle-creep compensation for the user brake path. In gear 1 below the creep
+# idle-match speed the game's idle governor pushes the truck forward (up to
+# ~2.3 m/s² at 20 t). The mapper's brake FF already cancels it when CC/ACC is
+# commanding, but a manual brake press had to overcome it raw, so stopping in
+# gear 1 needed a far harder press than gear 2. The user pedal is re-expressed
+# in decel space, the live creep estimate added, and the sum mapped back
+# through the inverse brake curve so the same pedal gives the same net decel
+# in every gear. Ramped in over the first few % of pedal so a fully released
+# brake still creeps (docking manoeuvres) with no step at the touch point;
+# full compensation is reached below the OPD coast-down brake level, so
+# one-pedal coast in the creep band glides to a stop instead of fighting
+# the idle governor.
+_CREEP_COMP_FULL_AT_PEDAL: float = 0.04
+# In OPD mode the compensation additionally fades with pedal position over
+# the last fraction of the coast band before the coast point, so pressing
+# toward the coast point releases the compensated brake progressively
+# instead of it vanishing in one step exactly at the offset.
+_CREEP_COMP_GAS_FADE_FRAC: float = 0.5
+
+# Auto neutral (Settings.auto_neutral, default off). At very low speed with
+# a clear stopping-intent brake command, shift the transmission to neutral
+# so gear-1 idle creep is removed at the source; shift straight back to
+# drive on any gas intent. The creep compensation above still covers every
+# in-gear moment (mapper_creep_ms2 reads zero in neutral), so the two
+# mechanisms hand over cleanly. Shifts are verified against telemetry gear
+# and re-pressed a bounded number of times if the game ignored them.
+_AUTONEUTRAL_MAX_SPEED_KMH: float = 5.0     # engage only below (creep force extreme)
+# RAW physical brake axis implying "the driver expects a full standstill".
+# The processed brake output is useless as an intent signal here: OPD
+# coast-down shaping crushes moderate presses at low speed, and the creep
+# compensation means light pedals already stop the truck, so a threshold on
+# the processed value effectively never fires in manual driving.
+_AUTONEUTRAL_BRAKEVAL_MIN: float = 0.35
+# Sustained standstill trigger: once the hold FSM has been HOLDING this long
+# (any commander, manual included), the truck is unambiguously stopped and
+# neutral both matches driver expectation and stops idle creep from pushing
+# the truck off the small hold floor. The dwell keeps momentary docking
+# pauses from shifting.
+_AUTONEUTRAL_HOLDING_DWELL_S: float = 1.0
+_AUTONEUTRAL_ACC_BRAKE_MIN: float = 0.25    # mapper brake bid implying an ACC stop
+_AUTONEUTRAL_GAS_ON: float = 0.02           # merged gas above this: back to drive
+_AUTONEUTRAL_WANTED_ACCEL_ON_MS2: float = 0.25  # CC/ACC launch bid: back to drive
+_AUTONEUTRAL_ROLLING_EXIT_KMH: float = 6.0  # rolling this fast in neutral: back to drive
+_AUTONEUTRAL_COOLDOWN_S: float = 0.8        # min gap between neutral engagements
+_AUTONEUTRAL_PRESS_S: float = 0.15          # gear button press duration
+_AUTONEUTRAL_VERIFY_S: float = 0.7          # telemetry gear must confirm within this
+_AUTONEUTRAL_MAX_RETRIES: int = 2
+_AUTONEUTRAL_DRIVE_WINDOW_S: float = 1.5    # re-press window for the drive shift
+# After the game refuses a neutral shift (retries exhausted), stop trying for
+# this long instead of hammering the input, and warn the user once per
+# session so a missing in-game binding is diagnosable.
+_AUTONEUTRAL_FAIL_LOCKOUT_S: float = 30.0
+
 
 class AEBDecelController:
     """Closed-loop decel controller.
@@ -253,6 +306,17 @@ class SendingThread(BaseThread):
         self._brake_last_active_at: float = 0.0
         # Ring buffer of the last 3 brake outputs sent to the game (oldest first).
         self._recent_brake_outputs: list[float] = [0.0, 0.0, 0.0]
+        # Auto-neutral state: True while neutral has been commanded and the
+        # transmission is expected to be (or become) neutral. Press
+        # verification retries against telemetry gear are bounded.
+        self._autoneutral_neutral: bool = False
+        self._autoneutral_last_press_mono: float = 0.0
+        self._autoneutral_last_engage_mono: float = 0.0
+        self._autoneutral_retries: int = 0
+        self._autoneutral_drive_until: float = 0.0
+        self._autoneutral_holding_s: float = 0.0
+        self._autoneutral_lockout_until: float = 0.0
+        self._autoneutral_warned: bool = False
 
         # Coast-down logger state
         self._coast_log_file = None
@@ -373,6 +437,151 @@ class SendingThread(BaseThread):
     def reset_accel_mapper_smoothing(self) -> None:
         """Clear mapper smoothing/correction when cruise stops commanding."""
         self._accel_mapper.reset_smoothing()
+
+    def _tick_auto_neutral(
+        self,
+        *,
+        enabled: bool,
+        gear: int,
+        speed_kmh: float,
+        merged_gas: float,
+        wanted_accel_ms2: float,
+        brakeval: float,
+        mapper_brake: float,
+        cruise_active: bool,
+        manual_clutch: bool,
+        aeb_active: bool,
+        dt: float,
+    ) -> None:
+        """Advance the auto-neutral shift logic by one tick.
+
+        Engages neutral only below _AUTONEUTRAL_MAX_SPEED_KMH with clear
+        stopping intent: a firm RAW brake pedal press (the driver expects a
+        full standstill), a sustained hold FSM HOLDING state (the truck is
+        genuinely stopped, manual or cruise), or an ACC stop (mapper braking
+        hard at crawl speed). Returns to drive immediately on any gas
+        intent, when the truck is somehow rolling in neutral, or when the
+        setting is turned off mid-hold. A driver-initiated reverse shift
+        abandons the feature without touching gears. If the game refuses the
+        neutral shift (no binding / unsupported transmission), warns once
+        per session and locks out for _AUTONEUTRAL_FAIL_LOCKOUT_S.
+        """
+        now = time.monotonic()
+        gas_intent = (
+            merged_gas > _AUTONEUTRAL_GAS_ON
+            or wanted_accel_ms2 > _AUTONEUTRAL_WANTED_ACCEL_ON_MS2
+        )
+
+        # Sustained-standstill dwell: accumulates while the hold FSM (from
+        # the previous tick) is capturing AND the truck is essentially
+        # stationary, resets otherwise. STOPPING must count alongside
+        # HOLDING: at an in-gear standstill the game's stall-prevention
+        # declutch keeps gameClutch high, so the FSM's clutch-release gate
+        # parks it in STOPPING and HOLDING alone would never accumulate.
+        if (
+            self._hold.state in (STATE_STOPPING, STATE_HOLDING)
+            and abs(speed_kmh) < 0.5
+        ):
+            self._autoneutral_holding_s += max(dt, 0.0)
+        else:
+            self._autoneutral_holding_s = 0.0
+
+        if self._autoneutral_neutral:
+            if gear < 0:
+                self._autoneutral_neutral = False
+                self._autoneutral_retries = 0
+                logger.debug("auto-neutral: driver shifted to reverse, abandoning")
+                return
+            if (
+                not enabled
+                or gas_intent
+                or abs(speed_kmh) > _AUTONEUTRAL_ROLLING_EXIT_KMH
+            ):
+                self.toggle_bool("geardrive", _AUTONEUTRAL_PRESS_S)
+                self._autoneutral_neutral = False
+                self._autoneutral_retries = 0
+                self._autoneutral_last_press_mono = now
+                self._autoneutral_drive_until = now + _AUTONEUTRAL_DRIVE_WINDOW_S
+                logger.debug(
+                    "auto-neutral: back to drive (gas=%.3f wanted=%.2f v=%.1f km/h)",
+                    merged_gas, wanted_accel_ms2, speed_kmh,
+                )
+                return
+            # Verify the neutral shift took; re-press a bounded number of
+            # times if telemetry still reports a forward gear.
+            if (
+                gear >= 1
+                and now - self._autoneutral_last_press_mono >= _AUTONEUTRAL_VERIFY_S
+            ):
+                if self._autoneutral_retries >= _AUTONEUTRAL_MAX_RETRIES:
+                    self._autoneutral_neutral = False
+                    self._autoneutral_retries = 0
+                    self._autoneutral_lockout_until = (
+                        now + _AUTONEUTRAL_FAIL_LOCKOUT_S
+                    )
+                    if not self._autoneutral_warned:
+                        self._autoneutral_warned = True
+                        logger.warning(
+                            "Auto neutral: the game did not accept the "
+                            "neutral shift; feature paused",
+                            extra={"popup": True},
+                        )
+                else:
+                    self._autoneutral_retries += 1
+                    self._autoneutral_last_press_mono = now
+                    self.toggle_bool("gear0", _AUTONEUTRAL_PRESS_S)
+            return
+
+        # Drive re-press window after leaving neutral: if the game dropped
+        # the drive shift the truck would rev in neutral on gas, so keep
+        # pressing until a forward gear confirms or the window closes.
+        if self._autoneutral_drive_until > 0.0 and gear == 0:
+            if now < self._autoneutral_drive_until:
+                if now - self._autoneutral_last_press_mono >= _AUTONEUTRAL_VERIFY_S:
+                    self._autoneutral_last_press_mono = now
+                    self.toggle_bool("geardrive", _AUTONEUTRAL_PRESS_S)
+                return
+            # Window closed with the box still in neutral: warn and pause
+            # instead of silently leaving the truck out of gear.
+            self._autoneutral_drive_until = 0.0
+            self._autoneutral_lockout_until = now + _AUTONEUTRAL_FAIL_LOCKOUT_S
+            if not self._autoneutral_warned:
+                self._autoneutral_warned = True
+                logger.warning(
+                    "Auto neutral: the game did not accept the drive shift; "
+                    "shift back manually. Feature paused",
+                    extra={"popup": True},
+                )
+            return
+        if gear != 0:
+            self._autoneutral_drive_until = 0.0
+
+        stopping_intent = (
+            brakeval >= _AUTONEUTRAL_BRAKEVAL_MIN
+            or self._autoneutral_holding_s >= _AUTONEUTRAL_HOLDING_DWELL_S
+            or (cruise_active and mapper_brake >= _AUTONEUTRAL_ACC_BRAKE_MIN)
+        )
+        if (
+            enabled
+            and not manual_clutch
+            and not aeb_active
+            and not gas_intent
+            and gear >= 1
+            and -0.5 < speed_kmh < _AUTONEUTRAL_MAX_SPEED_KMH
+            and stopping_intent
+            and now >= self._autoneutral_lockout_until
+            and now - self._autoneutral_last_engage_mono >= _AUTONEUTRAL_COOLDOWN_S
+        ):
+            self.toggle_bool("gear0", _AUTONEUTRAL_PRESS_S)
+            self._autoneutral_neutral = True
+            self._autoneutral_retries = 0
+            self._autoneutral_last_press_mono = now
+            self._autoneutral_last_engage_mono = now
+            logger.debug(
+                "auto-neutral: shifting to neutral (v=%.1f km/h brakeval=%.2f "
+                "hold_s=%.2f mapper_b=%.2f)",
+                speed_kmh, brakeval, self._autoneutral_holding_s, mapper_brake,
+            )
 
     def _read_speed(self) -> float:
         try:
@@ -802,6 +1011,11 @@ class SendingThread(BaseThread):
             self._prev_mapper_owned_gas = False
             self._prev_applied_gas = 0.0
             self._hold.reset()
+            # Game gone: any commanded neutral state is stale.
+            self._autoneutral_neutral = False
+            self._autoneutral_retries = 0
+            self._autoneutral_drive_until = 0.0
+            self._autoneutral_holding_s = 0.0
             controller.aforward = 0.0
             controller.abackward = 0.0
             with self.data._lock:
@@ -957,6 +1171,40 @@ class SendingThread(BaseThread):
         a = float(complex(a).real)
         b = float(complex(b).real)
 
+        # Idle-creep compensation (user pedal only). mapper_creep_ms2 is the
+        # mapper's live gear-1 creep estimate: zero outside the creep band,
+        # in other gears, in neutral, and once the game declutches near
+        # standstill, so the term self-limits and hands off to the hold FSM
+        # at the stop (and is inherently inactive while auto-neutral holds
+        # the transmission open). Applied BEFORE the mapper merge: the
+        # mapper's own brake bid already compensates internally (creep
+        # subtracted from effective road load in its FF), so compensating
+        # after the merge would double-count. The capacity guard skips the
+        # remap when the brake estimate is nonsensical rather than
+        # commanding a near-full pedal. In OPD mode the compensation fades
+        # over the top of the coast band so approaching the coast point
+        # releases the compensated brake progressively.
+        if mapper_creep_ms2 > 0.0 and b > 1e-4:
+            cap = self._capacity_tracker.max_brake_ms2
+            if cap > 1.0:
+                comp_scale = min(b / _CREEP_COMP_FULL_AT_PEDAL, 1.0)
+                if Settings.opd_mode_variable:
+                    offset = float(Settings.offset_variable or 0.0)
+                    if offset > 1e-6:
+                        opd_sum = min(max(float(gasval), 0.0), 1.0) - (
+                            min(max(float(brakeval), 0.0), 1.0)
+                            ** (float(brake_exp) ** 0.5)
+                        )
+                        fade_span = max(offset * _CREEP_COMP_GAS_FADE_FRAC, 1e-6)
+                        comp_scale *= min(
+                            max((offset - opd_sum) / fade_span, 0.0), 1.0
+                        )
+                user_decel = self._accel_mapper.brake_decel_from_pedal(b, cap)
+                b_comp = self._accel_mapper.brake_pedal_from_decel(
+                    user_decel + mapper_creep_ms2, cap
+                )
+                b += (max(b_comp, b) - b) * comp_scale
+
         # Manual clutch gate: when the driver physically presses the clutch
         # (manual transmission), suppress all mapper gas so the user's pedal
         # commands the truck directly during the shift. Brake commands and AEB
@@ -1007,6 +1255,23 @@ class SendingThread(BaseThread):
         if not cc_overridden_by_opd:
             b = max(b, mapper_brake)
 
+        # Auto neutral: decided before the hold FSM so its flag can inform
+        # the FSM's capture gate on this same tick (a neutral truck must
+        # still get a hold floor).
+        self._tick_auto_neutral(
+            enabled=bool(Settings.auto_neutral),
+            gear=gear,
+            speed_kmh=speed_kmh,
+            merged_gas=a,
+            wanted_accel_ms2=wanted_a,
+            brakeval=max(float(brakeval), 0.0),
+            mapper_brake=mapper_brake,
+            cruise_active=cruise_active,
+            manual_clutch=manual_clutch,
+            aeb_active=_aeb_active,
+            dt=dt_aeb,
+        )
+
         # Hold FSM: single authority for keeping the truck stationary. The
         # mapper's brake bid is left in `b` (user-confirmed choice: mapper
         # brake passes through and the FSM brake is a floor on top, so the
@@ -1026,6 +1291,7 @@ class SendingThread(BaseThread):
             aeb_active=_aeb_active,
             dt=dt_aeb,
             game_clutch=game_clutch,
+            auto_neutral_active=self._autoneutral_neutral,
         )
         b = max(b, hold_out.brake_pedal)
 
@@ -1125,6 +1391,7 @@ class SendingThread(BaseThread):
             self._capacity_tracker.update_brake(
                 b, measured_decel_lead_ms2, speed_ms, brake_grade_rad, _base_brake,
                 road_load_ms2=mapper_road_load_ms2,
+                aeb_active=_aeb_active,
             )
         if a > 0.01:
             # Creep subtracted so gear-1 samples learn the throttle-commanded

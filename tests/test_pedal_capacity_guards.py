@@ -37,10 +37,11 @@ def _fresh() -> pc.PedalCapacityTracker:
     return t
 
 
-def _feed(t, clk, pedal, decel, ticks=60, dt=0.033, speed=20.0):
+def _feed(t, clk, pedal, decel, ticks=60, dt=0.033, speed=20.0, aeb=False):
     for _ in range(ticks):
         clk.t += dt
-        t.update_brake(pedal, decel, speed, 0.0, BASE, road_load_ms2=0.0)
+        t.update_brake(pedal, decel, speed, 0.0, BASE, road_load_ms2=0.0,
+                       aeb_active=aeb)
 
 
 def test_contaminated_sample_rejected(clock):
@@ -54,6 +55,28 @@ def test_legit_strong_brake_still_learns(clock):
     t = _fresh()
     _feed(t, clock, pedal=0.9, decel=8.5)   # candidate = 9.44 m/s2
     assert BASE < t.max_brake_ms2 <= 9.45
+
+
+def test_gentle_press_drifts_estimate_slowly(clock):
+    """Soft presses still teach, but slowly: a 2 s gentle stop must barely
+    move the estimate (candidate 4.0 vs BASE 8.74), so a stretch of abnormal
+    braking cannot poison it (estimate fell 9 -> 4 m/s2 in routine driving,
+    2026-07-19)."""
+    t = _fresh()
+    _feed(t, clock, pedal=0.3, decel=1.2, ticks=60)   # candidate = 4.0
+    assert t.max_brake_ms2 == pytest.approx(BASE, rel=0.04)
+    assert t.max_brake_ms2 < BASE  # direction still correct
+
+
+def test_aeb_braking_learns_fast(clock):
+    """The same underperforming stream during an AEB event re-teaches the
+    estimate quickly (deep, honest presses)."""
+    slow = _fresh()
+    fast = _fresh()
+    _feed(slow, clock, pedal=1.0, decel=4.0, ticks=60, aeb=False)
+    _feed(fast, clock, pedal=1.0, decel=4.0, ticks=60, aeb=True)
+    assert fast.max_brake_ms2 < slow.max_brake_ms2
+    assert fast.max_brake_ms2 == pytest.approx(4.0, rel=0.15)
 
 
 def test_estimate_ceiling(clock):
