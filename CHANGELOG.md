@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.0-preview.7] - 2026-07-20
 ### Added
 - **Auto-neutral at stops** (opt-in): shifts to neutral at low speed whenever the brake is on and the gas is off; off by default in settings.
 - **Gear-engage creep cushion** (OPD or auto-neutral only): mapper creep cancel while D/R is closed; 100% on OPD brake, faded out with OPD gas so launch is smooth without killing reverse lights.
