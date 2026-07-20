@@ -149,7 +149,7 @@ class Settings(metaclass=_SingletonMeta):
     # PID tuning for SpeedLimiter: independent of CC so each can be tuned separately.
     limiter_kp: float = 1.3
     limiter_ki: float = 0.0
-    limiter_kd: float = 0.2
+    limiter_kd: float = 0.23
     limiter_integral_clamp: float = 3.0
     limiter_accel_min_ms2: float = -1.0
 
