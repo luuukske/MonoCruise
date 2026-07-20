@@ -493,7 +493,6 @@ class IconWidget(QLabel):
         self.setFixedSize(size, size)
         self._active = False
         self._error = False
-        self._progress = 0.0
         self._render_icon()
 
     def _render_icon(self):
@@ -521,12 +520,6 @@ class IconWidget(QLabel):
         
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # Apply opacity based on progress if active
-        if self._active and self._progress > 0:
-            opacity = 0.5 + (self._progress * 0.5)  # Range from 0.5 to 1.0
-            painter.setOpacity(opacity)
-        
         renderer.render(painter)
         painter.end()
         
@@ -540,12 +533,6 @@ class IconWidget(QLabel):
         """Render the icon in the error colour (used for the failed stage)."""
         if error != self._error:
             self._error = error
-            self._render_icon()
-
-    def set_progress(self, progress: float):
-        """Set progress value (0.0 to 1.0) to make icon dynamic."""
-        self._progress = max(0.0, min(1.0, progress))
-        if self._active:
             self._render_icon()
 
 
@@ -641,7 +628,6 @@ class ProgressPanel(QFrame):
         self._current_icon = self.install_icon
         self.line_download_to_install.set_complete()
         self.install_icon.set_active(True)
-        self.install_icon.set_progress(progress)
         self.line_install_to_finished.set_progress(progress)
 
     def set_finished(self):
@@ -659,7 +645,6 @@ class ProgressPanel(QFrame):
         for icon in (self.download_icon, self.install_icon, self.finished_icon):
             icon.set_error(False)
             icon.set_active(False)
-        self.install_icon.set_progress(0)
         self.line_download_to_install.set_progress(0)
         self.line_install_to_finished.set_progress(0)
 

@@ -15,6 +15,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ### Fixed
 - **Live pedal bar drops on pause**: pausing the game nulled the CC bid and looked like a disengage on the visualization bar. Pedal outputs are held while paused, and the mapper is no longer hard-reset on that edge.
 - **AEB warn beeps while ACC brakes**: warn suppression only looked at the driver's physical pedal, so ACC follow-braking still triggered the warn sound/UI. Suppression now also treats the program end brake while CC/ACC is commanding.
+- **Updater install icon brightens with progress**: stage icons no longer fade in with install percent; progress stays on the connecting lines only.
 
 ## [1.1.0-preview.7] - 2026-07-20
 ### Added
