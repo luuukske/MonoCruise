@@ -307,7 +307,7 @@ class CruiseControlThread(BaseThread):
 
             self._publish_telemetry_command(wanted_accel if commanding else 0.0)
             self._publish_data(commanding, wanted_accel if commanding else 0.0, mode, winner)
-            self._maybe_reset_mapper_on_commanding_end(commanding)
+            self._maybe_reset_mapper_on_commanding_end(commanding, paused=bool(paused))
 
         except Exception:
             logger.exception("cruise_control_thread loop error; clearing command")
@@ -805,7 +805,14 @@ class CruiseControlThread(BaseThread):
         except (AttributeError, KeyError):
             return False
 
-    def _maybe_reset_mapper_on_commanding_end(self, commanding: bool) -> None:
+    def _maybe_reset_mapper_on_commanding_end(
+        self, commanding: bool, *, paused: bool = False
+    ) -> None:
+        # Pause gates the CC bid without a real disengage. Keep mapper state
+        # and _was_commanding so unpause resumes cleanly and a later real end
+        # still triggers the reset.
+        if paused:
+            return
         if self._was_commanding and not commanding:
             self._request_mapper_reset()
         self._was_commanding = commanding

@@ -12,6 +12,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+### Fixed
+- **Live pedal bar drops on pause**: pausing the game nulled the CC bid and looked like a disengage on the visualization bar. Pedal outputs are held while paused, and the mapper is no longer hard-reset on that edge.
+
 ## [1.1.0-preview.7] - 2026-07-20
 ### Added
 - **Auto-neutral at stops** (opt-in): shifts to neutral at low speed whenever the brake is on and the gas is off; off by default in settings.

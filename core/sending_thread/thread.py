@@ -341,6 +341,10 @@ class SendingThread(BaseThread):
         self._coast_log_writer = None
         self._last_coast_log_mono: float = 0.0
         self._coast_log_start_mono: float | None = None
+        # Last live pedal outputs held across game pause so the viz bar (and
+        # SCS write) do not drop when CC nulls its bid in the menu/map.
+        self._pause_held_aforward: float = 0.0
+        self._pause_held_abackward: float = 0.0
         try:
             self._project_root = Path(__file__).resolve().parents[2]
         except Exception:
@@ -924,7 +928,7 @@ class SendingThread(BaseThread):
         tel_gear_dashboard = 0
         tel_gear = 0
         engine_rpm = 0.0
-        if connected and tel_thread is not None and tel_thread.is_alive():
+        if connected and tel_thread is not None and tel_thread.is_alive() and not tel_paused:
             try:
                 with tel_thread.data._lock:
                     wanted_a = float(tel_thread.data.commanded_accel_ms2)
@@ -1133,6 +1137,8 @@ class SendingThread(BaseThread):
             self._autoneutral_neutral = False
             self._autoneutral_retries = 0
             self._autoneutral_drive_until = 0.0
+            self._pause_held_aforward = 0.0
+            self._pause_held_abackward = 0.0
             controller.aforward = 0.0
             controller.abackward = 0.0
             with self.data._lock:
@@ -1177,6 +1183,8 @@ class SendingThread(BaseThread):
         if not pedal_alive:
             self._prev_mapper_owned_gas = False
             self._prev_applied_gas = 0.0
+            self._pause_held_aforward = 0.0
+            self._pause_held_abackward = 0.0
             controller.aforward = 0.0
             controller.abackward = 0.0
             with self.data._lock:
@@ -1222,6 +1230,24 @@ class SendingThread(BaseThread):
                 self.data.mapper_pedal_state = 0
             return
 
+        if tel_paused:
+            # Game paused (menu/map): freeze last pedal outputs so the live
+            # visualization bar does not drop with the nulled CC bid. Mapper,
+            # hold FSM, and capacity learning are left untouched above; cruise
+            # also skips mapper reset on this edge.
+            a = self._pause_held_aforward
+            b = self._pause_held_abackward
+            controller.aforward = a
+            controller.abackward = b
+            self._tick_bool_presses(controller)
+            with self.data._lock:
+                self.data.aforward = a
+                self.data.abackward = b
+                self.data.hazardsActive = tel_hazards
+                self.data.horn_active = bool(getattr(controller, "horn", False))
+                self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
+            return
+
         opdgasval = 0.0
         try:
             with pedal_thread.data._lock:
@@ -1234,6 +1260,8 @@ class SendingThread(BaseThread):
             logger.debug("pedal read failed: %s", e)
             self._prev_mapper_owned_gas = False
             self._prev_applied_gas = 0.0
+            self._pause_held_aforward = 0.0
+            self._pause_held_abackward = 0.0
             controller.aforward = 0.0
             controller.abackward = 0.0
             with self.data._lock:
@@ -1511,6 +1539,8 @@ class SendingThread(BaseThread):
 
         controller.aforward = a
         controller.abackward = b
+        self._pause_held_aforward = a
+        self._pause_held_abackward = b
 
         # Push the actual brake value sent this tick into the ring buffer so
         # cruise_control_thread can compare gameBrake (lagged readback) against
@@ -1657,6 +1687,8 @@ class SendingThread(BaseThread):
             self.data.mapper_brake_multiplier = 1.0
             self.data.mapper_gain_scale = 1.0
             self.data.mapper_pedal_state = 0
+        self._pause_held_aforward = 0.0
+        self._pause_held_abackward = 0.0
         self._prev_measured_decel_ms2 = 0.0
         self._prev_aeb_loop_mono = None
         self._accel_mapper.close()
