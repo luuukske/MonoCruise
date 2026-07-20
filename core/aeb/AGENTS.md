@@ -377,7 +377,8 @@ When **any** slot in the frame has `is_tmp`, AEB pre-filters targets by
 - ref **≤ 40 km/h** → threat only if rel **> 40 km/h**
 
 Reference is current ego speed unless **latched**: the first frame with
-`AEBState ≥ WARN` or driver brake > `user_brake_latch` saves `ego_kmh`;
+`AEBState ≥ WARN` or addressing brake (`_read_user_braking`: driver pedal or
+CC/ACC program end brake) saves `ego_kmh`;
 latch held until state drops below WARN **and** brake released; cleared when
 the session is no longer TMP.
 
@@ -717,7 +718,7 @@ apart laterally are suppressed at the `arc_arc_collision` level
 - **`LaneClassifier` must run before `OppositeLaneFilter`, `CoDirectionalDivergeFilter`, and `EgoEvasionFilter`**: those stages read `ctx.lane`, `ctx.fwd_dot`, `ctx.v_curvature` etc. populated by `LaneClassifier`.
 - **TMP trailer-as-vehicles get tractor speed/accel via `_swap_trailer_kinematics`.** Buffer speed for trailer slots is unreliable (often 0). The swap is done on a shallow copy: never mutate the original Vehicle.
 - **AEB pedal authority is two-layered, never binary-gated to zero.** AEB publishes `AEB_ff_decel_ms2` every tick when there is any real threat (`required_decel > 0`); sending_thread converts it to a brake pedal via the inverse FF curve and merges it as `b = max(b, aeb_ff_pedal)`. This is the **sub-engagement assist** layer: it adds force on top of user braking when the system warns but has not yet engaged, and is gated on `brakeval > cal.user_brake_latch` so it does not phantom-brake during normal manual cruising when routine lead-following produces a small but non-zero `required_decel`. When AEB engages (`AEB_brake == True`), main_pedal_thread slams `brake_output = 1.0` (the **engagement slam** layer): by definition, engagement means the system has decided full braking is warranted, and the inverse FF curve at a modest required-decel would produce a pedal too soft to act on the threat. The engagement slam is independent of `brakeval` (it must fire even on a distracted driver). All AEB pedal paths are gated by `gas_output >= 0.8` (full-gas user authority, the only override that can defeat AEB braking). Reason: removing the engagement slam in favour of pure FF made AEB feel silenced on engagement because FF pedal for 3–5 m/s² is only ~0.14–0.34.
-- **Warn suppression while user braking.** `aeb_warn` is suppressed when `brakeval > cal.user_brake_latch` UNLESS `effective_required >= cal.aeb_warn_near_full_frac × effective_max_decel`. The user does not need a redundant alert while addressing the threat: only surface it when AEB itself wants near-full brake.
+- **Warn suppression while already braking.** `aeb_warn` is suppressed when `_read_user_braking()` is true UNLESS `effective_required >= cal.aeb_warn_near_full_frac × effective_max_decel`. That helper is true for the driver's physical `brakeval > latch`, and also for the final program brake (`sending_thread.abackward > latch`) while CC/ACC is commanding. AEB's own slam/FF must not count (would silence the warn during engagement). The driver / ACC already addressing the threat does not need a redundant alert: only surface it when AEB itself wants near-full brake.
 
 ---
 

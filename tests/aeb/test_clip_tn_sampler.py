@@ -211,7 +211,7 @@ def test_thread_fires_shadow_on_filtered_candidate_while_silent():
 def test_thread_no_shadow_while_user_braking():
     t = AEBThread()
     t._engaged = False
-    t._read_pedals_for_capture = lambda: (0.5, 0.0)
+    t._read_user_braking = lambda: True
     spy = _tick(t, _tn_snap(), AEBState.STANDBY)
     assert "shadow_near" not in spy.triggers
 

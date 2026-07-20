@@ -905,12 +905,42 @@ class AEBThread(BaseThread):
         self._aeb_active_fn = None
 
     def _read_user_braking(self) -> bool:
+        """True when braking already addresses the threat (suppress redundant warn).
+
+        Counts the driver's physical pedal, and the final program brake
+        (``sending_thread.abackward``) while CC/ACC is commanding. AEB's own
+        slam/FF must not count: that would silence the warn during engagement.
+        """
         try:
             pt = registry.get_thread("main_pedal_thread")
-            if pt is None or not pt.is_alive():
+            if pt is not None and pt.is_alive():
+                with pt.data._lock:
+                    if (
+                        float(getattr(pt.data, "brakeval", 0.0))
+                        > _USER_BRAKE_LATCH_THRESHOLD
+                    ):
+                        return True
+        except (KeyError, AttributeError):
+            pass
+
+        # Program end brake from CC/ACC follow, not from AEB itself.
+        if self._engaged:
+            return False
+        try:
+            cruise = registry.get_thread("cruise_control_thread")
+            if cruise is None or not cruise.is_alive():
                 return False
-            with pt.data._lock:
-                return float(getattr(pt.data, "brakeval", 0.0)) > _USER_BRAKE_LATCH_THRESHOLD
+            with cruise.data._lock:
+                if not bool(cruise.data.active):
+                    return False
+            st = registry.get_thread("sending_thread")
+            if st is None or not st.is_alive():
+                return False
+            with st.data._lock:
+                return (
+                    float(getattr(st.data, "abackward", 0.0))
+                    > _USER_BRAKE_LATCH_THRESHOLD
+                )
         except (KeyError, AttributeError):
             return False
 
@@ -1107,12 +1137,13 @@ class AEBThread(BaseThread):
             # rejected a real candidate. The recorder throttles these hard and
             # auto-tags them true negatives; fired every qualifying tick, it
             # simply lands one clip per cooldown while such traffic is around.
-            # Skip while the user is braking: filtered convoy traffic during a
-            # manual stop is junk TN data (mirrors warn suppression policy).
+            # Skip while the threat is already being braked (user or CC/ACC):
+            # filtered convoy traffic during a stop is junk TN data (mirrors
+            # warn suppression policy).
             if (aeb_active
                     and new_state == AEBState.STANDBY
                     and not self._engaged
-                    and brakeval <= _USER_BRAKE_LATCH_THRESHOLD
+                    and not self._read_user_braking()
                     and snap.ego_speed > _SHADOW_MIN_SPEED_MS
                     and _should_sample_shadow_tn(snap)):
                 recorder.trigger(
