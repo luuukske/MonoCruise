@@ -18,6 +18,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **Game plugin auto-install**: MonoCruise now auto-downloads and installs the control plugin (`scs_sdk_controller.dll`) or any managed SDK DLL at startup if missing or outdated, and notifies the user. No more silent failures; both auto-install and Reinstall SDK popups now remind to restart the game so the new plugin loads.
 
 ### Fixed
+- **Creep cushion pinned weak trucks at launch**: the anti-creep brake faded too high into the gas pedal and faded in pedal space against a concave brake curve, so low-power engines could not out-torque the residual brake at standstill. The fade now scales the creep decel target directly, completes by 12% gas, and follows the merged applied gas so ACC launches release the cushion too.
 - **Live pedal bar drops on pause**: pausing the game nulled the CC bid and looked like a disengage on the visualization bar. Pedal outputs are held while paused, and the mapper is no longer hard-reset on that edge.
 - **AEB warn beeps while ACC brakes**: warn suppression only looked at the driver's physical pedal, so ACC follow-braking still triggered the warn sound/UI. Suppression now also treats the program end brake while CC/ACC is commanding.
 - **Updater install icon brightens with progress**: stage icons no longer fade in with install percent; progress stays on the connecting lines only.

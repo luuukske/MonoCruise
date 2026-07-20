@@ -143,12 +143,19 @@ _AUTONEUTRAL_FAIL_LOCKOUT_S: float = 30.0
 # Soft creep-cancel brake while D/R is engaged. Opt-in via OPD or
 # auto-neutral only (two-pedal traditionalists keep stock creep).
 # Uses the mapper's creep_ms2 through the same inverse brake curve as the
-# manual creep-comp path: 100% cancel when OPD is on the brake side, faded
-# toward zero as OPD gas rises (same 0.02..0.30 band as the hold release).
+# manual creep-comp path: 100% cancel when the user is on the brake side,
+# faded toward zero as applied gas rises through the band below. The fade
+# scales the creep DECEL target before the inverse curve, not the returned
+# pedal: the brake curve is concave, so a pedal-space fade gives back decel
+# slower than the driver gains thrust authority (50% pedal keeps ~60% of
+# the decel). The band ends low in the gas region: any gas past the coast
+# point is a thrust request, and holding residual brake deeper into the
+# pedal pinned weak engines at standstill (brakes clamp with static
+# authority at ~0 speed, so the truck never leaves the max-creep shape).
 # Clutch fade lives in creep_ms2 itself (1 - max(user, game) clutch).
 # Does NOT shift to neutral in reverse (that killed reverse lights / beeper).
 _GEAR_ENGAGE_GAS_FADE_START: float = 0.02
-_GEAR_ENGAGE_GAS_FADE_FULL: float = 0.30
+_GEAR_ENGAGE_GAS_FADE_FULL: float = 0.12
 
 
 class AEBDecelController:
@@ -650,18 +657,26 @@ class SendingThread(BaseThread):
         enabled: bool,
         gear: int,
         pedal_brake: float,
-        opdgasval: float,
+        applied_gas: float,
         mapper_creep_ms2: float,
     ) -> float:
         """Mapper creep-cancel brake while D/R is engaged (OPD / auto-neutral).
 
-        Maps ``mapper_creep_ms2`` through the inverse brake curve (same as the
-        manual creep-comp path). ``mapper_creep_ms2`` already includes clutch
-        fade (1 - max(user, game) clutch: half clutch → half cancel). Scale:
-          - OPD brake side (``pedal_brake``): 100% of that clutch-scaled cancel
-          - otherwise: fade 100%→0% as ``opdgasval`` rises through the hold
-            release band, so gas progressively re-admits creep for launch
-        Returns a pedal in [0, 1] to max into the output brake.
+        Maps the faded creep decel through the inverse brake curve (same as
+        the manual creep-comp path). ``mapper_creep_ms2`` already includes
+        clutch fade (1 - max(user, game) clutch: half clutch → half cancel).
+        Scale:
+          - user brake side (``pedal_brake``): 100% of that clutch-scaled
+            cancel
+          - otherwise: fade 100%→0% as ``applied_gas`` rises through the
+            fade band, so gas progressively re-admits creep for launch.
+            ``applied_gas`` is the merged pedal actually sent to the game,
+            so a mapper/ACC launch releases the cushion the same way a user
+            launch does (opdgasval alone left ACC fighting the full cushion
+            through the creep band).
+        The fade scales the decel target, not the returned pedal (concave
+        curve: see the fade-band constants). Returns a pedal in [0, 1] to
+        max into the output brake.
         """
         if not enabled:
             return 0.0
@@ -674,31 +689,29 @@ class SendingThread(BaseThread):
         if cap <= 1.0:
             return 0.0
 
-        full_pedal = self._accel_mapper.brake_pedal_from_decel(
-            mapper_creep_ms2, cap
-        )
-        if full_pedal <= 1e-4:
-            return 0.0
-
-        # OPD (or two-pedal) braking: keep full creep removal.
+        # User braking (OPD brake side or two-pedal): keep full creep removal.
         if pedal_brake > _AUTONEUTRAL_BRAKE_ON:
             scale = 1.0
         else:
-            # Progressive release with OPD-mapped gas.
+            # Progressive release with applied gas.
             span = _GEAR_ENGAGE_GAS_FADE_FULL - _GEAR_ENGAGE_GAS_FADE_START
             if span <= 1e-9:
-                gas_frac = 1.0 if opdgasval > _GEAR_ENGAGE_GAS_FADE_START else 0.0
+                gas_frac = 1.0 if applied_gas > _GEAR_ENGAGE_GAS_FADE_START else 0.0
             else:
                 gas_frac = min(
                     max(
-                        (float(opdgasval) - _GEAR_ENGAGE_GAS_FADE_START) / span,
+                        (float(applied_gas) - _GEAR_ENGAGE_GAS_FADE_START) / span,
                         0.0,
                     ),
                     1.0,
                 )
             scale = 1.0 - gas_frac
+        if scale <= 0.0:
+            return 0.0
 
-        return full_pedal * scale
+        return self._accel_mapper.brake_pedal_from_decel(
+            mapper_creep_ms2 * scale, cap
+        )
 
     def _read_speed(self) -> float:
         try:
@@ -1461,12 +1474,13 @@ class SendingThread(BaseThread):
         b = max(b, hold_out.brake_pedal)
 
         # Mapper creep-cancel cushion (OPD or auto-neutral only). Full cancel
-        # on OPD brake, faded out with OPD gas so launch re-admits creep.
+        # on user brake, faded out with the merged applied gas so any launch
+        # (user pedal or mapper/ACC bid) re-admits creep.
         cushion = self._tick_gear_engage_cushion(
             enabled=bool(Settings.opd_mode_variable) or bool(Settings.auto_neutral),
             gear=gear,
             pedal_brake=pedal_brake,
-            opdgasval=opdgasval,
+            applied_gas=a,
             mapper_creep_ms2=mapper_creep_ms2,
         )
         if cushion > 0.0:
