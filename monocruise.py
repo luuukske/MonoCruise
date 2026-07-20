@@ -76,6 +76,7 @@ def _shutdown_requested(handle) -> bool:
 import logging
 import re
 import signal
+import time
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QTimer
@@ -330,11 +331,9 @@ def main() -> None:
     # core.update_check.update_is_pending, polled by the window); this callback
     # only handles the opt-in popup.
     #
-    # This callback never closes the app or launches the updater. Note for the
-    # planned auto-close feature (a checker-launched MonoCruise closing itself on
-    # game exit): it must stay open when an update is ready so the update signals
-    # remain visible for the user to act on. Gate that future close on
-    # `not update_is_pending()`. See core/update_check/__init__.py.
+    # Auto-close (game disconnect while minimized) skips quit while an update
+    # is pending so banner / tint / popup stay visible. See
+    # core/update_check/__init__.py and _check_threads below.
     from core.update_check import UpdateCheckResult, start_update_check
 
     def _on_update_result(result: UpdateCheckResult) -> None:
@@ -360,6 +359,14 @@ def main() -> None:
     window = create_main_window(settings, version=f"v{__version__}")
     registry.register_object("main_window", window)
     window.window_closed.connect(lambda: (_stop_all(), app.quit()))
+    # Minimized taskbar presence as early as possible (before workers start),
+    # so a checker-launched session does not flash a normal window. Final
+    # restore-vs-stay-minimized decision waits for telemetry in the window poll.
+    window.apply_startup_visibility()
+
+    # Pedal visualization bar (shows aforward/abackward + em_stop; lives on main thread)
+    _visualization_bar = create_visualization_bar()
+    registry.register_object("visualization_bar", _visualization_bar)
 
     # AEB debug view: developer tooling, only shown in debug mode.
     if settings.debug:
@@ -407,11 +414,6 @@ def main() -> None:
         monitor.start()
         log.info("started: monitor")
 
-    window.apply_startup_visibility()
-
-    # Pedal visualization bar (shows aforward/abackward + em_stop; lives on main thread)
-    _visualization_bar = create_visualization_bar()
-
     # Named event the updater signals to request a clean exit before it
     # replaces files. Routed through window.close() so the shutdown is the
     # same as clicking the X: settings saved, outputs released.
@@ -423,10 +425,27 @@ def main() -> None:
     # updater has exited — polled below, so it also catches an updater that
     # closes while MonoCruise is already running.
     from shared.updater_swap import apply_pending_updater_swap, pending_swap_staged
+    from core.update_check import update_is_pending
     swap_root = str(CONFIG_PATH.parent)
+
+    # Auto-close waits for the live viz bar to decay to center before quitting.
+    # Timestamp of first seeing request_quit; None when no quit is pending.
+    _quit_requested_at: float | None = None
+    _QUIT_VIZ_TIMEOUT_S = 3.0
+
+    def _visualization_settled() -> bool:
+        try:
+            bar = registry.get("visualization_bar")
+        except KeyError:
+            return True
+        try:
+            return bool(bar.is_settled_at_center())
+        except Exception:
+            return True
 
     # Poll thread liveness via QTimer (keeps Qt event loop free)
     def _check_threads() -> None:
+        nonlocal _quit_requested_at
         if _shutdown_requested(shutdown_event):
             log.info("shutdown requested by updater: closing")
             window.close()
@@ -436,10 +455,36 @@ def main() -> None:
         try:
             telemetry = registry.get_thread("telemetry_thread")
             if telemetry.data.request_quit:
-                log.info("shutdown requested: exiting")
+                # Keep open when the user has restored the window, or when an
+                # update prompt must stay visible.
+                if getattr(window, "is_open_on_taskbar", False):
+                    log.info("auto-close cancelled: window is open")
+                    telemetry.stay_open_after_disconnect()
+                    _quit_requested_at = None
+                    return
+                if update_is_pending():
+                    log.info("auto-close cancelled: update pending; showing window")
+                    telemetry.stay_open_after_disconnect()
+                    _quit_requested_at = None
+                    # Surface banner / update tint so the user can act on it.
+                    window.show_normally()
+                    return
+                now = time.monotonic()
+                if _quit_requested_at is None:
+                    _quit_requested_at = now
+                    log.info("auto-close: waiting for live visualization to settle")
+                settled = _visualization_settled()
+                timed_out = (now - _quit_requested_at) >= _QUIT_VIZ_TIMEOUT_S
+                if not settled and not timed_out:
+                    return
+                if timed_out and not settled:
+                    log.info("auto-close: visualization settle timed out; exiting")
+                else:
+                    log.info("shutdown requested: exiting")
                 _stop_all()
                 app.quit()
                 return
+            _quit_requested_at = None
         except (KeyError, AttributeError):
             pass
         if not any(t.is_alive() for t in registry.all_threads()):

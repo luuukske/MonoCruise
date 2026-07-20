@@ -25,6 +25,36 @@ from core.sending_thread.accel_to_pedals import compute_estimated_mass_kg
 logger = logging.getLogger(__name__)
 
 _MASS_LOG_INTERVAL_S = 1.0
+# Same mapping the background checker opens (checker/ets2_checker.py).
+_TELEMETRY_SHM_NAME = "Local\\SCSTelemetry"
+
+
+def sdk_shm_active() -> bool | None:
+    """Cheap game-presence probe via the SCS telemetry shared-memory block.
+
+    Returns:
+      True  – mapping exists and the SDK-active flag is set (game running)
+      False – mapping missing (game not running / plugin not loaded)
+      None  – probe unavailable (non-Windows, unexpected OS error)
+
+    Used for fast startup visibility before ``truck_telemetry`` finishes init.
+    Does not create the mapping (create=False).
+    """
+    try:
+        from multiprocessing.shared_memory import SharedMemory
+
+        shm = SharedMemory(name=_TELEMETRY_SHM_NAME, create=False)
+    except FileNotFoundError:
+        return False
+    except (ValueError, OSError):
+        return False
+    except Exception:
+        logger.debug("sdk_shm_active probe failed", exc_info=True)
+        return None
+    try:
+        return bool(shm.buf[0])
+    finally:
+        shm.close()
 
 
 def _window_open_on_taskbar() -> bool:
@@ -263,16 +293,25 @@ class TelemetryThread(BaseThread):
                 and not self._manual_start
                 and not _window_open_on_taskbar()
             ):
-                logger.info("shutting down")
-                with self.data._lock:
-                    self.data.request_quit = True
-                self._stop_event.set()
-                return
+                # Request quit but keep this thread alive so the main loop can
+                # wait for the live viz bar to run down, then shut everything
+                # down. Stopping here would race the watchdog / lose the flag.
+                if not self.data.request_quit:
+                    logger.info("game disconnected: requesting auto-close")
+                    with self.data._lock:
+                        self.data.request_quit = True
             elif not self._manual_start:
                 self._manual_start = True
                 with self.data._lock:
                     self.data.manual_start = True
         self._first = False
+
+    def stay_open_after_disconnect(self) -> None:
+        """Cancel a pending auto-close and treat this as a manual session."""
+        self._manual_start = True
+        with self.data._lock:
+            self.data.manual_start = True
+            self.data.request_quit = False
 
     def teardown(self) -> None:
         logger.debug("teardown complete")

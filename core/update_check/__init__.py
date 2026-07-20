@@ -24,19 +24,17 @@ Two surfaces, driven separately:
   :func:`update_is_pending`, so they reflect a pending update on every boot,
   including throttled ones, with zero network cost.
 
-Interaction with the planned auto-close feature
-------------------------------------------------
-"Auto-close" is a SEPARATE, deliberately-unbuilt feature: when MonoCruise was
-launched by the background checker, it will close itself once the game exits, so
-a checker-started session cleans up instead of lingering after play.
+Interaction with auto-close
+---------------------------
+When MonoCruise was started with the game already connected (typically via the
+background checker) and the main window is still minimized, it closes itself
+after the game disconnects — once the live visualization bar has run down to
+center. See ``monocruise.py`` ``_check_threads`` and ``TelemetryThread``.
 
-That feature must NOT close the app when an update is ready. Keep MonoCruise
-open so the update signals (banner / update-button tint / popup) stay visible
-and the user can act on them; a checker-started session that auto-closed on game
-exit would take the update prompt down with it before the user ever saw it.
-
-The gate for that future feature is :func:`update_is_pending`: skip the
-auto-close while it returns True. This module never closes the window itself.
+Auto-close must NOT quit while an update is ready. Keep MonoCruise open so the
+update signals (banner / update-button tint / popup) stay visible and the user
+can act on them. The gate is :func:`update_is_pending`: skip the auto-close
+while it returns True. This module never closes the window itself.
 """
 
 from __future__ import annotations

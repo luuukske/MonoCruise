@@ -109,6 +109,17 @@ class VisualizationBar(QWidget):
                 painter.fillRect(self.brake_rect, _RED)
         painter.end()
 
+    def is_settled_at_center(self) -> bool:
+        """True when the live bar has decayed to the screen center (idle).
+
+        Used by auto-close: wait for the rundown animation before quitting so
+        the bar does not vanish mid-extension. Hidden / disabled bars count as
+        settled immediately.
+        """
+        if not self.isVisible() or not self.timer.isActive():
+            return True
+        return max(self.temp_gasval, self.temp_brakeval) < 0.0005
+
     def _animate(self):
         try:
             self._animate_inner()

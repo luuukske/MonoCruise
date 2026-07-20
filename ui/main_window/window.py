@@ -282,14 +282,23 @@ class MonoCruiseWindow(QMainWindow):
         """
         Initial startup behaviour.
 
-        The window is created and shown in the taskbar (minimised) so it is
-        fully loaded and ready, but does not steal focus. The actual decision
-        about whether to pop it up on screen is deferred until the telemetry
-        thread has produced a first result. That decision is handled in
-        ``_poll_threads()``.
+        Always lands in the taskbar first (minimised) so a game-session launch
+        never steals focus. If the SCS telemetry shared-memory block is absent,
+        show normally immediately (manual / no-game launch). Otherwise wait for
+        telemetry's first result in ``_poll_threads()`` before deciding — the
+        mapping can exist briefly while ``truck_telemetry`` is not yet usable.
         """
+        from core.telemetry_thread.thread import sdk_shm_active
+
         self.showMinimized()
         self._startup_visibility_applied = False
+
+        if sdk_shm_active() is False:
+            self.show_normally()
+            self._startup_visibility_applied = True
+            logger.info("Main window shown on startup (no game SDK mapping)")
+            return
+
         logger.info(
             "Main window minimised on startup (waiting for telemetry result)"
         )
@@ -302,6 +311,11 @@ class MonoCruiseWindow(QMainWindow):
         via the Registry and updates the UI accordingly.
         """
         try:
+            self._apply_deferred_startup_visibility()
+        except Exception:
+            logger.exception("main window poll: startup visibility failed")
+
+        try:
             self._sync_cc_panel()
         except Exception:
             logger.exception("main window poll: CC panel sync failed")
@@ -310,6 +324,48 @@ class MonoCruiseWindow(QMainWindow):
             self._sync_update_indicator()
         except Exception:
             logger.exception("main window poll: update indicator sync failed")
+
+    def _apply_deferred_startup_visibility(self) -> None:
+        """Restore the window once telemetry's first result is known.
+
+        Startup always begins minimized (taskbar present, no focus steal).
+        After telemetry setup/first loop:
+          - game connected → stay minimized
+          - no game (manual_start) → show normally
+        """
+        if self._startup_visibility_applied:
+            return
+        try:
+            telemetry = registry.get_thread("telemetry_thread")
+        except KeyError:
+            return
+        try:
+            with telemetry.data._lock:
+                connected = bool(telemetry.data.is_connected)
+                manual = bool(telemetry.data.manual_start)
+        except Exception:
+            return
+        if not connected and not manual:
+            return  # telemetry has not produced a first result yet
+
+        self._startup_visibility_applied = True
+        if connected:
+            # Keep the minimized taskbar presence from apply_startup_visibility.
+            if not self.isMinimized():
+                self.showMinimized()
+            logger.info("startup: game connected, keeping window minimized")
+            return
+
+        self.show_normally()
+        logger.info("startup: no game, showing window normally")
+
+    def show_normally(self) -> None:
+        """Restore from minimized and bring the window to the foreground."""
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._open_on_taskbar = True
 
     def _sync_update_indicator(self) -> None:
         """Reflect a pending update on the banner + settings update button.
@@ -512,7 +568,9 @@ class MonoCruiseWindow(QMainWindow):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        self._open_on_taskbar = True
+        # showMinimized() also fires showEvent; only "open on taskbar" when
+        # the window is actually visible and not minimized.
+        self._open_on_taskbar = self.isVisible() and not self.isMinimized()
 
     def hideEvent(self, event) -> None:
         super().hideEvent(event)

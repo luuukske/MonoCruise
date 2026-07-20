@@ -12,6 +12,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+### Added
+- **Autostart / auto-close**: no-game launches open the window normally and stay open after disconnect. Game-session launches (checker or game already running) start minimized ASAP; on disconnect the live pedal bar runs down to center, then MonoCruise quits unless the window was restored. Auto-close is skipped while an update is pending so the update prompt stays visible.
+
 ### Fixed
 - **Live pedal bar drops on pause**: pausing the game nulled the CC bid and looked like a disengage on the visualization bar. Pedal outputs are held while paused, and the mapper is no longer hard-reset on that edge.
 - **AEB warn beeps while ACC brakes**: warn suppression only looked at the driver's physical pedal, so ACC follow-braking still triggered the warn sound/UI. Suppression now also treats the program end brake while CC/ACC is commanding.
