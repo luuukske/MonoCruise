@@ -63,3 +63,11 @@ is exactly the shape heuristic scanners dislike. Mitigations kept deliberately:
 `check_sdk()` / `start_boot_check(cb)` for detection; `SdkManager.apply(games,
 close_running=..., on_progress=...)` to install once the user agrees. See
 `__init__.py` for the exported names.
+
+`apply(..., allow_running_missing=True)` is the boot auto-install mode: a
+running game is not skipped, but only files it never loaded (absent on disk)
+are written, so a live game is never touched in place. A present-but-outdated
+DLL it holds loaded is returned in `GameApplyResult.deferred_running` for a
+later close + reinstall. The startup path (`monocruise.py`) uses this to install
+a missing plugin automatically and notify the user; replacing a loaded DLL still
+goes through the consent-gated "reinstall SDK" action (`close_running=True`).

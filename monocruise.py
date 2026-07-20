@@ -299,8 +299,72 @@ def main() -> None:
     # SDK DLL check (backend). Runs on a daemon thread so a possible GitHub
     # round-trip never blocks boot; when the DLLs are already installed it stays
     # fully offline. Started after the popup exists so it can surface an error.
-    # The install/update prompt itself is wired by the front-end later.
+    # When something is missing / outdated the DLLs are installed automatically
+    # (see _auto_install_sdk) and the user is notified.
     from core.sdk_installer import SdkCheckResult, start_boot_check
+
+    def _auto_install_sdk(result: SdkCheckResult) -> None:
+        """Install the missing / outdated SDK DLLs the boot check flagged.
+
+        Runs on the boot-check daemon thread. A running game is never closed
+        here (the user did not ask to): a file the game never loaded (absent on
+        disk) is still installed so its next start picks it up, while a
+        present-but-outdated DLL it holds loaded is deferred to the settings
+        "reinstall SDK" action. The outcome is surfaced as a popup.
+        """
+        from core.sdk_installer import get_manager
+
+        try:
+            results = get_manager().apply(
+                result.games_needing_action,
+                close_running=False,
+                allow_running_missing=True,
+            )
+        except Exception:
+            log.exception("SDK auto-install failed")
+            PopupWindow.emit(
+                "Game plugin",
+                "MonoCruise could not install the game plugin. Open settings "
+                "and use Reinstall SDK.",
+                "w",
+                duration_ms=9000,
+            )
+            return
+
+        installed = [r for r in results if r.installed and not r.errors]
+        deferred = [r for r in results if r.deferred_running and not r.errors]
+        failed = [r for r in results if r.errors]
+
+        if installed:
+            games = ", ".join(r.game_type.upper() for r in installed)
+            log.info("SDK auto-install: installed the plugin for %s", games)
+            PopupWindow.emit(
+                "Game plugin installed",
+                f"MonoCruise installed the game plugin for {games}. Restart the "
+                f"game to activate pedal control.",
+                "c",
+                duration_ms=9000,
+            )
+        if deferred:
+            games = ", ".join(r.game_type.upper() for r in deferred)
+            log.info("SDK auto-install: update deferred, %s is running", games)
+            PopupWindow.emit(
+                "Game plugin update pending",
+                f"{games} is running an outdated plugin. Close the game, then use "
+                f"Reinstall SDK in settings to finish updating.",
+                "n",
+                duration_ms=9000,
+            )
+        if failed:
+            games = ", ".join(r.game_type.upper() for r in failed)
+            log.warning("SDK auto-install failed for %s", games)
+            PopupWindow.emit(
+                "Game plugin install failed",
+                f"MonoCruise could not install the game plugin for {games}. Open "
+                f"settings and use Reinstall SDK.",
+                "w",
+                duration_ms=9000,
+            )
 
     def _on_sdk_result(result: SdkCheckResult) -> None:
         if not result.found_games:
@@ -316,7 +380,8 @@ def main() -> None:
             )
         elif result.needs_action:
             games = ", ".join(g.game_type.upper() for g in result.games_needing_action)
-            log.info("SDK check: install/update needed for %s", games)
+            log.info("SDK check: install/update needed for %s; installing", games)
+            _auto_install_sdk(result)
         else:
             log.info("SDK check: SDK DLLs present and up to date")
 

@@ -145,12 +145,20 @@ class GameApplyResult:
     installed: list[str] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)
     skipped_running: bool = False
+    # Files left unwritten because the running game holds them loaded (present
+    # but outdated) and we were told not to close it. Replacing them needs the
+    # game closed. Distinct from skipped_running, which skips the whole game.
+    deferred_running: list[str] = field(default_factory=list)
     # True when the target game version has no SDK folder in the repository yet.
     unsupported: bool = False
 
     @property
     def success(self) -> bool:
-        return not self.errors and not self.skipped_running
+        return (
+            not self.errors
+            and not self.skipped_running
+            and not self.deferred_running
+        )
 
 
 class SdkManager:
@@ -326,6 +334,7 @@ class SdkManager:
         close_running: bool = False,
         on_progress: Callable[[str], None] | None = None,
         force_all: bool = False,
+        allow_running_missing: bool = False,
     ) -> list[GameApplyResult]:
         """Install missing / outdated files into the given installations.
 
@@ -337,6 +346,14 @@ class SdkManager:
         With ``force_all`` every managed file the repository publishes is
         (re)downloaded and overwritten regardless of the file's current state -
         used by the "reinstall SDK" action.
+
+        With ``allow_running_missing`` a running game is not skipped: files
+        that are absent on disk are still installed (the game never loaded them,
+        so there is no lock, and they take effect on its next start), while
+        present-but-outdated files it holds loaded are recorded in
+        ``deferred_running`` rather than overwritten. Lets a boot-time
+        auto-install stage the plugin without closing a live game. Ignored when
+        ``close_running`` is True.
         """
         try:
             remote_files = self.source.list_files()
@@ -359,19 +376,34 @@ class SdkManager:
         for game in games:
             result = GameApplyResult(game.game_type, game.game_path)
 
+            restrict_to_missing = False
             if is_game_running(game.game_type):
-                if not close_running:
+                if close_running:
+                    if on_progress:
+                        on_progress(f"Closing {game.game_type.upper()}...")
+                    if not close_game(game.game_type):
+                        result.errors.append((game.game_type, "could not close the running game"))
+                        results.append(result)
+                        continue
+                elif allow_running_missing:
+                    restrict_to_missing = True
+                else:
                     result.skipped_running = True
-                    results.append(result)
-                    continue
-                if on_progress:
-                    on_progress(f"Closing {game.game_type.upper()}...")
-                if not close_game(game.game_type):
-                    result.errors.append((game.game_type, "could not close the running game"))
                     results.append(result)
                     continue
 
             wanted = self._files_to_install(game, remote_files, force_all=force_all)
+            if restrict_to_missing:
+                # A present DLL the game already loaded is memory-mapped and
+                # cannot be replaced now, so defer it for a close + reinstall.
+                # Everything else (an absent DLL, the version marker, the
+                # courtesy file) is not locked and is written normally: it
+                # takes effect on the next game start.
+                result.deferred_running = [
+                    n for n in wanted
+                    if n.endswith(".dll") and (game.plugins_dir / n).exists()
+                ]
+                wanted = [n for n in wanted if n not in result.deferred_running]
             for name in wanted:
                 remote = remote_files.get(name)
                 if remote is None:

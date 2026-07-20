@@ -1259,9 +1259,10 @@ class SettingsPanel(QWidget):
                 games = ", ".join(r.game_type.upper() for r in results)
                 PopupWindow.emit(
                     "SDK reinstalled",
-                    f"All plugins were reinstalled for {games}.",
+                    f"All plugins were reinstalled for {games}. Restart the game "
+                    f"to apply.",
                     "c",
-                    duration_ms=5000,
+                    duration_ms=7000,
                 )
 
         self._set_cmd_hint("Reinstalling SDK...")

@@ -13,7 +13,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ## [Unreleased]
 
 ### Added
-- **Autostart / auto-close**: no-game launches open the window normally and stay open after disconnect. Game-session launches (checker or game already running) start minimized ASAP; on disconnect the live pedal bar runs down to center, then MonoCruise quits unless the window was restored. Auto-close is skipped while an update is pending so the update prompt stays visible.
+- **Autostart / auto-close**: If no game is running, the window opens as usual and stays after disconnect. If a game is detected, launch is minimized and MonoCruise auto-quits after disconnect (unless the window was restored). Auto-close is paused if an update is pending so the update popup stays.
+
+- **Game plugin auto-install**: MonoCruise now auto-downloads and installs the control plugin (`scs_sdk_controller.dll`) or any managed SDK DLL at startup if missing or outdated, and notifies the user. No more silent failures; both auto-install and Reinstall SDK popups now remind to restart the game so the new plugin loads.
 
 ### Fixed
 - **Live pedal bar drops on pause**: pausing the game nulled the CC bid and looked like a disengage on the visualization bar. Pedal outputs are held while paused, and the mapper is no longer hard-reset on that edge.
