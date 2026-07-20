@@ -15,11 +15,13 @@ without another network call.
 
 Two surfaces, driven separately:
 
-* Popup (opt-in): fires only when ``Settings.notify_for_updates`` is True AND
-  this was a fresh (non-throttled) check that found a newer build. See the
-  callback in ``monocruise.py``. Throttled to once per ``THROTTLE_SECONDS`` so
-  relaunches (the background checker can start MonoCruise once per game session)
-  don't re-nag.
+* Popup (opt-in): fires when ``Settings.notify_for_updates`` is True, a newer
+  build is known (fresh or cached), and the user hasn't already been shown the
+  popup within ``THROTTLE_SECONDS``. See :func:`popup_throttled` /
+  :func:`mark_popup_shown` and the callback in ``monocruise.py``. Gating on the
+  last popup rather than the last check means a boot that found an update but
+  didn't show it (opted out at the time, etc.) doesn't push the next prompt
+  back by a full throttle window.
 * Banner + update-button tint (always): derived on the Qt main thread from
   :func:`update_is_pending`, so they reflect a pending update on every boot,
   including throttled ones, with zero network cost.
@@ -129,6 +131,28 @@ def update_is_pending() -> bool:
     except Exception:
         log.debug("update_is_pending failed", exc_info=True)
         return False
+
+
+def popup_throttled() -> bool:
+    """True when the user was already shown the update popup within THROTTLE_SECONDS.
+
+    Gated on ``Settings.last_update_popup`` (when the popup last actually
+    reached the user), not on ``last_update_check`` (when the network was last
+    hit). A boot that finds an update but skips the popup, e.g. notifications
+    were off at the time, must not push the next real prompt back by a full
+    throttle window.
+    """
+    from core.settings import Settings
+
+    last = float(getattr(Settings, "last_update_popup", 0.0) or 0.0)
+    return (time.time() - last) < THROTTLE_SECONDS
+
+
+def mark_popup_shown() -> None:
+    """Record that the update popup was just shown, for :func:`popup_throttled`."""
+    from core.settings import Settings
+
+    Settings.save(values={"last_update_popup": time.time()})
 
 
 def _run_check(on_result: Callable[[UpdateCheckResult], None]) -> None:

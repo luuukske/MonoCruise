@@ -76,9 +76,13 @@ class Settings(metaclass=_SingletonMeta):
     # Boot update-check cache (not user knobs): last_update_check gates the 30h
     # network throttle; latest_known_version is the newest release tag seen on
     # the active channel, so the banner/button can show a pending update on
-    # throttled boots with no network. Both are written by core/update_check.
+    # throttled boots with no network. last_update_popup gates re-nagging
+    # separately: it is the last time the popup actually reached the user, so a
+    # boot that found an update but skipped the popup (opted out, etc.) doesn't
+    # suppress the next one. All three are written by core/update_check.
     last_update_check: float = 0.0
     latest_known_version: str = ""
+    last_update_popup: float = 0.0
 
     # UI position/appearance
     panel_x: int = None

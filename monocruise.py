@@ -334,15 +334,16 @@ def main() -> None:
     # Auto-close (game disconnect while minimized) skips quit while an update
     # is pending so banner / tint / popup stay visible. See
     # core/update_check/__init__.py and _check_threads below.
-    from core.update_check import UpdateCheckResult, start_update_check
+    from core.update_check import UpdateCheckResult, mark_popup_shown, popup_throttled, start_update_check
 
     def _on_update_result(result: UpdateCheckResult) -> None:
         if not result.update_available:
             return
-        if not result.fresh:
-            return  # cached/throttled: banner + tint already reflect it, no re-nag
         if not getattr(settings, "notify_for_updates", True):
             return  # user opted out of popups; banner + tint still signal it
+        if popup_throttled():
+            return  # already prompted recently; banner + tint still signal it
+        mark_popup_shown()
         PopupWindow.emit(
             "Update available",
             f"MonoCruise {result.latest_version} is ready. Open settings to update.",
