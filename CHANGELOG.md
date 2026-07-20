@@ -13,14 +13,14 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ## [Unreleased]
 
 ### Added
-- **Autostart / auto-close**: If no game is running, the window opens as usual and stays after disconnect. If a game is detected, launch is minimized and MonoCruise auto-quits after disconnect (unless the window was restored). Auto-close is paused if an update is pending so the update popup stays.
-
-- **Game plugin auto-install**: MonoCruise now auto-downloads and installs the control plugin (`scs_sdk_controller.dll`) or any managed SDK DLL at startup if missing or outdated, and notifies the user. No more silent failures; both auto-install and Reinstall SDK popups now remind to restart the game so the new plugin loads.
+- **Autostart / auto-close**: starting with a game already running opens MonoCruise minimized and auto-quits it after the game closes; without a game everything behaves as before.
+- **Game plugin auto-install**: a missing or outdated game plugin is now installed automatically at startup, with a reminder to restart the game.
 
 ### Fixed
-- **Creep cushion pinned weak trucks at launch**: the anti-creep brake faded too high into the gas pedal and faded in pedal space against a concave brake curve, so low-power engines could not out-torque the residual brake at standstill. The fade now scales the creep decel target directly, completes by 12% gas, and follows the merged applied gas so ACC launches release the cushion too.
-- **Live pedal bar drops on pause**: pausing the game nulled the CC bid and looked like a disengage on the visualization bar. Pedal outputs are held while paused, and the mapper is no longer hard-reset on that edge.
-- **AEB warn beeps while ACC brakes**: warn suppression only looked at the driver's physical pedal, so ACC follow-braking still triggered the warn sound/UI. Suppression now also treats the program end brake while CC/ACC is commanding.
+- **Hill starts blocked on steep grades**: a small rollback made the hill-hold keep braking against the gas. It now releases as soon as the truck stops rolling back.
+- **Anti-creep too strong at launch**: weak engines couldn't overcome the creep-cancel brake; it now releases much earlier on the gas pedal.
+- **Live pedal bar drops on pause**: pausing the game no longer makes the pedal bar look like cruise control disengaged.
+- **AEB warn beeps while ACC brakes**: ACC follow-braking no longer triggers the AEB warning sound.
 - **Updater install icon brightens with progress**: stage icons no longer fade in with install percent; progress stays on the connecting lines only.
 - **Limiter brake lights fade**: Releasing brake with speed limiter active now keeps the smooth timeout fade, instead of instantly cutting lights if still on the gas.
 - **Update popup delay fixed**: spacing now tracks when the popup is actually shown, not just when update checks occur.
