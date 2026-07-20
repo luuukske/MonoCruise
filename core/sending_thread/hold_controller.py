@@ -22,9 +22,15 @@ Architecture:
 - The feedforward is applied as soon as STOPPING engages (not gated by the
   capture dwell), so the brake catches rollback as the truck crosses zero.
 - LAUNCHING ramps the feedforward to zero, but the rollback integrator stays
-  fully active and any significant rollback during the ramp aborts it (`t` is
-  pushed back toward 0). This is what the user requested: the truck only
-  drives off once gas is genuinely able to overcome the down-slope force.
+  fully active and ACTIVE rollback during the ramp retreats it (`t` is pushed
+  back toward 0). The retreat is gated on rollback happening now (within a
+  short window), not on the integrator's stored level: the integrator sizes
+  the brake, it does not veto the driver. Vetoing on the stored level
+  livelocked steep-hill launches (one abort left the integrator above the
+  threshold for seconds of leak time, during which no amount of gas below the
+  manual override could restart the ramp). The truck still only drives off
+  once gas genuinely overcomes the down-slope force: while it slips, the ramp
+  retreats and the integrator grows.
 - An idle/creep-thrust hook (`_idle_creep_offset_ms2`) returns 0.0 in v1; a
   later plan replaces the body without rewiring callers.
 
@@ -77,12 +83,22 @@ _HOLD_PITCH_EMA_TAU_S: float = 0.5
 # `rollback_v` is the speed (m/s) moving against gear intent (or any motion in
 # neutral). The integrator adds extra decel proportional to the time-integral
 # of rollback_v above a small deadband. It is the safety net for any error in
-# the slope FF or brake calibration.
+# the slope FF or brake calibration. It sizes the brake only: launch-ramp
+# retreat and the ROLLING exit key on ACTIVE rollback (within the window
+# below), never on the integrator's stored level, so an old slip cannot veto
+# a driver who is pressing gas with the truck no longer moving backward.
 _HOLD_ROLLBACK_DEADBAND_MS: float = 0.02     # 0.02 m/s ≈ 0.072 km/h: sensor-noise floor
 _HOLD_ROLLBACK_GROW_GAIN_MS2_PER_MS: float = 8.0  # m/s² of decel added per (m/s · s) of rollback
 _HOLD_ROLLBACK_MAX_MS2: float = 6.0          # hard ceiling on extra decel from rollback integrator
-_HOLD_ROLLBACK_LEAK_TAU_S: float = 8.0       # slow bleed when no rollback detected (prevents stale growth)
-_HOLD_ROLLBACK_ABORT_LAUNCH_MS2: float = 0.3  # integrator above this aborts an in-progress launch ramp
+_HOLD_ROLLBACK_LEAK_TAU_S: float = 8.0       # slow bleed while held with no rollback (prevents stale growth)
+# Fast drain once the truck is confirmed moving in the gear-intent direction:
+# the anti-rollback debt is paid, and the 8 s tau left a phantom brake
+# fighting the engine for many seconds after a steep-hill slip.
+_HOLD_ROLLBACK_FAST_LEAK_TAU_S: float = 1.0
+# Rollback within this window of now counts as "active": retreats the launch
+# ramp and blocks the ROLLING exit. Sized to outlast one telemetry hiccup but
+# clear quickly once the brake has actually caught the slip.
+_HOLD_ROLLBACK_ACTIVE_WINDOW_S: float = 0.25
 
 # Park brake debounce (gear changes can flicker parkBrake briefly)
 _HOLD_PARK_BRAKE_DEBOUNCE_S: float = 0.2
@@ -99,6 +115,10 @@ _HOLD_CLUTCH_RELEASED_THRESHOLD: float = 0.05
 # Manual-launch shortcuts (driver intent obvious: skip ramp)
 _HOLD_MANUAL_OPD_OVERRIDE: float = 0.75
 _HOLD_MANUAL_GAS_OVERRIDE: float = 0.7       # added on top of `offset`
+# `offset + _HOLD_MANUAL_GAS_OVERRIDE` can exceed 1.0 (offset 0.4 gives 1.1),
+# which made the raw-gas escape hatch unreachable; cap keeps a near-floored
+# pedal always counting as manual launch intent.
+_HOLD_MANUAL_GAS_FLOOR_MAX: float = 0.95
 
 # Proportional manual release. During manual driving `commanded_accel_ms2`
 # is pinned at 0 (no CC bid), so gas taps must drive the release directly.
@@ -173,6 +193,7 @@ class HoldController:
         self._pitch_seeded: bool = False
         self._park_brake_high_s: float = 0.0  # debounce accumulator
         self._rollback_decel_ms2: float = 0.0  # closed-loop integrator (extra decel beyond slope FF)
+        self._since_rollback_s: float = 3600.0  # time since rollback_v was last nonzero
         self._brake_pedal_from_decel = brake_pedal_from_decel
 
     @property
@@ -188,6 +209,7 @@ class HoldController:
         self._pitch_seeded = False
         self._park_brake_high_s = 0.0
         self._rollback_decel_ms2 = 0.0
+        self._since_rollback_s = 3600.0
 
     @staticmethod
     def _idle_creep_offset_ms2(pitch_rad: float, gear: int, speed_kmh: float) -> float:
@@ -238,12 +260,16 @@ class HoldController:
         rollback_v: float,
         dt: float,
         active_hold: bool,
+        making_progress: bool,
     ) -> None:
-        """Grow integrator on rollback, slowly leak when held but not rolling.
+        """Grow integrator on rollback, leak when held but not rolling back.
 
         Only runs while in a hold state (STOPPING/HOLDING/LAUNCHING). When
         ROLLING the integrator is held at its last value (reset on ROLLING
         entry) so it doesn't keep accumulating during normal driving.
+        `making_progress` (moving in the gear-intent direction) switches to
+        the fast leak: the debt is paid, and keeping the phantom brake on the
+        slow tau fought the engine for seconds after a steep-hill slip.
         """
         if not active_hold:
             return
@@ -252,9 +278,14 @@ class HoldController:
                 _HOLD_ROLLBACK_GROW_GAIN_MS2_PER_MS * rollback_v * dt
             )
         else:
-            # No rollback this tick: slowly bleed the integrator so a stale
-            # surface (mud→pavement) doesn't keep over-braking forever.
-            leak = math.exp(-dt / max(_HOLD_ROLLBACK_LEAK_TAU_S, 1e-6))
+            # No rollback this tick: bleed the integrator so a stale surface
+            # (mud→pavement) doesn't keep over-braking forever.
+            tau = (
+                _HOLD_ROLLBACK_FAST_LEAK_TAU_S
+                if making_progress
+                else _HOLD_ROLLBACK_LEAK_TAU_S
+            )
+            leak = math.exp(-dt / max(tau, 1e-6))
             self._rollback_decel_ms2 *= leak
         self._rollback_decel_ms2 = _clamp(
             self._rollback_decel_ms2, 0.0, _HOLD_ROLLBACK_MAX_MS2
@@ -319,7 +350,9 @@ class HoldController:
     ) -> bool:
         if opdgasval >= _HOLD_MANUAL_OPD_OVERRIDE:
             return True
-        gas_floor = offset + _HOLD_MANUAL_GAS_OVERRIDE
+        gas_floor = min(
+            offset + _HOLD_MANUAL_GAS_OVERRIDE, _HOLD_MANUAL_GAS_FLOOR_MAX
+        )
         if max(gasval, opdgasval) > gas_floor:
             return True
         return False
@@ -375,10 +408,27 @@ class HoldController:
         rollback_v = self._rollback_velocity_ms(speed_kmh, gear)
         gas_release = self._gas_release_fraction(opdgasval)
 
+        # Active-rollback window: the ramp retreat and the ROLLING exit key on
+        # this, not on the integrator's stored level (the integrator sizes the
+        # brake; it must not veto a driver whose truck has stopped slipping).
+        if rollback_v > 0.0:
+            self._since_rollback_s = 0.0
+        else:
+            self._since_rollback_s = min(self._since_rollback_s + dt, 3600.0)
+        rollback_active = self._since_rollback_s < _HOLD_ROLLBACK_ACTIVE_WINDOW_S
+
         park_held = self._park_brake_debounced(bool(park_brake), dt)
 
         forward_intent = gear > 0
         reverse_intent = gear < 0
+
+        # Confirmed motion in the gear-intent direction (above the rollback
+        # noise floor): drives the integrator's fast leak.
+        speed_ms = speed_kmh / 3.6
+        making_progress = (
+            (forward_intent and speed_ms > _HOLD_ROLLBACK_DEADBAND_MS)
+            or (reverse_intent and speed_ms < -_HOLD_ROLLBACK_DEADBAND_MS)
+        )
 
         # Safety-net exit: if the truck is unambiguously moving in the gear
         # intent direction above _HOLD_DEFINITELY_ROLLING_KMH, force ROLLING
@@ -497,10 +547,13 @@ class HoldController:
             if manual:
                 # Driver still pressing: pin `t` at the fully-released end.
                 self._launch_t = _HOLD_LAUNCH_RAMP_S
-            elif self._rollback_decel_ms2 >= _HOLD_ROLLBACK_ABORT_LAUNCH_MS2:
-                # Significant rollback while trying to launch: gas is NOT
-                # enough to overcome the down-slope force. Push `t` back to 0
-                # over the ramp interval so the brake returns smoothly.
+            elif rollback_active:
+                # Truck is slipping backward right now: gas is NOT enough to
+                # overcome the down-slope force. Push `t` back to 0 over the
+                # ramp interval so the brake returns smoothly. Gated on
+                # active rollback only: once the brake catches the slip, the
+                # driver's gas restarts the ramp instead of waiting out the
+                # integrator's leak (which livelocked steep-hill launches).
                 self._launch_t = max(self._launch_t - dt, 0.0)
             elif commanded_accel_ms2 >= _HOLD_RELEASE_ACCEL_MS2:
                 self._launch_t = min(self._launch_t + dt, _HOLD_LAUNCH_RAMP_S)
@@ -534,10 +587,7 @@ class HoldController:
                 (forward_intent and speed_kmh > _HOLD_ROLLING_EXIT_SPEED_KMH)
                 or (reverse_intent and speed_kmh < -_HOLD_ROLLING_EXIT_SPEED_KMH)
             )
-            if (
-                rolling_speed_ok
-                and self._rollback_decel_ms2 < _HOLD_ROLLBACK_ABORT_LAUNCH_MS2
-            ):
+            if rolling_speed_ok and not rollback_active:
                 self._state = STATE_ROLLING
                 self._launch_t = 0.0
                 self._rollback_decel_ms2 = 0.0
@@ -554,7 +604,7 @@ class HoldController:
         # In LAUNCHING the integrator is what aborts an unsafe ramp; in
         # STOPPING / HOLDING it backs up any error in the slope FF.
         active_hold = self._state in (STATE_STOPPING, STATE_HOLDING, STATE_LAUNCHING)
-        self._update_rollback_integrator(rollback_v, dt, active_hold)
+        self._update_rollback_integrator(rollback_v, dt, active_hold, making_progress)
 
         # Compute brake floor for the current state. STOPPING, HOLDING and
         # LAUNCHING all share the same combined FF + integrator math; only the
