@@ -20,6 +20,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **AEB warn beeps while ACC brakes**: warn suppression only looked at the driver's physical pedal, so ACC follow-braking still triggered the warn sound/UI. Suppression now also treats the program end brake while CC/ACC is commanding.
 - **Updater install icon brightens with progress**: stage icons no longer fade in with install percent; progress stays on the connecting lines only.
 - **Limiter brake lights fade**: Releasing brake with speed limiter active now keeps the smooth timeout fade, instead of instantly cutting lights if still on the gas.
+- **Update popup delay fixed**: spacing now tracks when the popup is actually shown, not just when update checks occur.
 
 ## [1.1.0-preview.7] - 2026-07-20
 ### Added
