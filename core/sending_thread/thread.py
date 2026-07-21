@@ -1528,6 +1528,8 @@ class SendingThread(BaseThread):
         # `a` is the final gas command sent to the game, after all controller
         # arbitration and limiter caps, so brake-light release follows actual
         # game gas rather than the raw user pedal.
+        
+        # human made: DO NOT TOUCH (AI sucks at this idk why, it wants to change everything here)
         _now = time.monotonic()
         if b > 0.006:
             self._brake_active = True
@@ -1540,6 +1542,7 @@ class SendingThread(BaseThread):
             b = max(0.0001, b)
         if not self._brake_active:
             b = 0.0
+        # end human made
 
         # Brake-light bump: when the truck is stationary in gear with the
         # engine running, guarantee a sub-perceptible pedal value so the in-
