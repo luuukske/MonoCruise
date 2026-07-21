@@ -1525,23 +1525,17 @@ class SendingThread(BaseThread):
         self._prev_applied_gas = a
 
         # Brake threshold hysteresis: suppress flicker from rapid OPD/CC transitions.
-        # The a>=0.2 immediate clear is "user stomped gas after braking". Under a
-        # sole-bidder limiter, program `a` stays high via min(user, cap) while the
-        # driver is still on the gas — that must not skip the smooth light fade
-        # when they only released the brake. Timeout then uses foot-off pacing
-        # (release_gas=0) so a high limited gas does not also shrink the hold.
+        # `a` is the final gas command sent to the game, after all controller
+        # arbitration and limiter caps, so brake-light release follows actual
+        # game gas rather than the raw user pedal.
         _now = time.monotonic()
-        limiter_gas_cap = (
-            cruise_active and cruise_active_controller == "limiter"
-        )
         if b > 0.006:
             self._brake_active = True
             self._brake_last_active_at = _now
         elif self._brake_active:
-            release_gas = 0.0 if limiter_gas_cap else a
-            if a >= 0.2 and not limiter_gas_cap:
+            if a >= 0.2:
                 self._brake_active = False
-            elif _now - self._brake_last_active_at >= 0.15 / (release_gas + 0.075):
+            elif _now - self._brake_last_active_at >= 0.15 / (a + 0.075):
                 self._brake_active = False
             b = max(0.0001, b)
         if not self._brake_active:
