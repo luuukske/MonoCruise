@@ -187,3 +187,32 @@ Refer back to `core/example_thread/thread.py` whenever you are unsure about the 
 - **New `limiter_*` settings.**
   - `limiter_kp`, `limiter_ki`, `limiter_kd`, `limiter_integral_clamp`, `limiter_accel_min_ms2` in `core/settings.py`. Independent of the CC gains so each can be tuned separately. Defaults match the original CC defaults so behaviour is identical until the user tunes them.
 
+---
+
+### Workflow and communication conventions
+
+- **Keep responses and commit messages terse.** Drop filler, pleasantries, and unneeded articles/words while keeping technical precision (referred to internally as "Caveman Lite" style). Applies to chat responses and to git commit messages alike.
+- **Never use an em dash ("—") in code or code-adjacent text**: comments, docstrings, strings, commit messages, log messages. Use a comma, a colon, or start a new sentence instead.
+- **Do not commit immediately after writing code.** Implement the change, then wait for the user to test it and explicitly confirm it works before running `git commit`.
+- **No decorative divider comments.** Do not write banner-style separators like `# --- Section ---` or `# ====` in source files. Section structure should come from function/class boundaries; a short prose lead-in comment is fine (for example: `# Headway time follows the user's gap-level setting.`). Module docstrings may use markdown headings since they render as documentation; source-code comments may not.
+
+### Changelog conventions
+
+- `CHANGELOG.md` entries are user-facing, not developer-facing. Format: a bold title naming the symptom or feature as the user experiences it, then one short sentence (two at most, only if genuinely needed) describing what they noticed and what changed. No internal constant names, thresholds, taus, or control-theory jargon. Releases `1.1.0-preview.1` through `.5` are the style reference for length and tone.
+- Example of the right size: "**Anti-creep too strong at launch**: weak engines couldn't overcome the creep-cancel brake; it now releases much earlier on the gas pedal."
+
+### Reputation and community-trust guardrails
+
+MonoCruise's community signed up for offline operation and no data collection. Changes that touch that trust need a higher bar than ordinary code review.
+
+- **Hard stop, needs maintainer sign-off before implementation:** selling, sharing, or monetizing user data, hardware stats, telemetry, or usage info; adding telemetry, phone-home behavior, or logging beyond the stated offline / no-data stance; license changes or paywalling previously free functionality; reusing third-party or copyrighted mod assets; anything else that directly contradicts the offline-operation / no-data-collection / privacy stance the community expects. If a change falls into this category, state the specific risk and who would object, then stop and get explicit approval from the maintainer before writing implementation code. Discussion and planning can continue; implementation cannot.
+- **Flag, don't block:** monetization presentation (donation prompts, placement, frequency, wording); public-facing comms (Discord, README, release notes, replies to critics) that read as defensive, dismissive, condescending, or that overcommit on features or timelines; any change the community could plausibly read as values drift even if it technically isn't one. Raise this during planning, not only at commit time.
+- **Feature merit check:** before writing implementation code for a new user-facing feature or UX change, give an honest verdict: ship / ship with changes / don't ship, plus the strongest case against it from the driver's seat (distraction while driving, visual clutter, config burden, surprising behavior, whether any trucker actually asked for this). Confidence or enthusiasm in the request is not evidence the feature is good. Skip this only for bug fixes, refactors, perf work, or internal tooling.
+
+### Packaging and antivirus false positives
+
+MonoCruise ships unsigned (no code-signing certificate) and will remain unsigned until there is monetization to justify one. Unsigned binaries already draw more antivirus scrutiny.
+
+- When touching the updater, installer, or release/build pipeline, prefer conventional, well-documented approaches: standard HTTPS downloads, standard file replacement. Avoid patterns that read as malware to AV heuristics: packing/UPX, self-modifying or self-updating executable tricks, process/memory-injection-like behavior.
+- If a risky-looking pattern is genuinely necessary, flag it explicitly rather than shipping it silently.
+

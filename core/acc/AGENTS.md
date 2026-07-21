@@ -4,6 +4,9 @@
 > geometry, and the RadarThread snapshot shape are documented in
 > `core/radar/AGENTS.md`: **read that first.** This file only covers
 > what differs from the shared radar layer.
+>
+> Repo-wide workflow, style, and reputation conventions live in the
+> top-level `AGENTS.md`: read that too.
 
 ---
 

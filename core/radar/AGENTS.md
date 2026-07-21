@@ -8,6 +8,9 @@
 > AEB- and ACC-specific logic live in `core/aeb/AGENTS.md` and
 > `core/acc/AGENTS.md` respectively: both of them build on the concepts
 > defined here.
+>
+> Repo-wide workflow, style, and reputation conventions live in the
+> top-level `AGENTS.md`: read that too.
 
 ---
 

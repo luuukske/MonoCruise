@@ -4,6 +4,9 @@
 > world→ego transforms, the shared-memory buffer, Vehicle state/smoothing,
 > ArcPath geometry, position-based curvature) live in
 > `core/radar/AGENTS.md`: read that first.
+>
+> Repo-wide workflow, style, and reputation conventions live in the
+> top-level `AGENTS.md`: read that too.
 
 ---
 
