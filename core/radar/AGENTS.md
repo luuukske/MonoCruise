@@ -211,6 +211,28 @@ same 4-signal chain for AI and TMP (`_smooth_vehicle_kinematics()` in
   2–3 ripple cycles averages that jitter out so the derived speed does not
   oscillate. Buffer fields 10/11 are never used for TMP physics.
 
+**Hard-brake transient (AI + TMP):** the long position window remains the
+default, but it takes about a second to forget pre-brake motion after a lead
+stops. A second LS estimate over the latest 5 full-update samples is selected
+after two frames consistently show at least 2 m/s² deceleration, at least
+0.4 m/s speed loss, non-increasing interval speeds, and no near-zero interval.
+The last condition prevents a constant-speed packet stall from qualifying as a
+brake. Once selected, the short estimate stays active through standstill and a
+subsequent launch; it returns to the long estimate after both agree within
+0.3 m/s for 3 moving frames. At standstill it does not release, which prevents
+stale long-window samples from raising the speed again.
+
+Confirmed short-window deceleration also floors `acceleration` to the measured
+negative rate before `speed_corr` is calculated. AEB therefore receives both
+the responsive speed and braking trend. Normal cruise, ACC filtering, and the
+long-window TMP ripple rejection are unchanged.
+
+Position mismatch holds active state without advancing it and clears an
+unconfirmed entry. Sub-frames copy state unchanged. Lag-freeze early returns
+and clock re-anchors reset it; a culled/disappeared id loses it with the
+`Vehicle` instance. TMP lag freeze still runs first and owns the output while
+active.
+
 ```python
 # 1. speed_ema : plain EMA of raw speed (no lag compensation)
 alpha      = _tmp_speed_ema_alpha(|avg(prev_speed_ema, raw_speed)|)   # 1.0 rest → 0.25 @ 90 km/h
@@ -673,7 +695,7 @@ double-count each trailer.
 | Arc curvature | `κ = omega_rad_s / abs_speed` |
 | Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
 | TMP raw speed | LS on longitudinal `(t,x,z)` history (max `_TMP_SPEED_HISTORY_LEN` full frames): `v = Σ(τ s)/Σ(τ²)`; else `Δraw/dt`, signed via forward dot |
-| Speed / accel filter (AI + TMP) | 4-signal chain in `_smooth_vehicle_kinematics()`: `speed_ema` (EMA of raw) → `accel` (LS slope of `speed_ema` history over `_ACCEL_FIT_WINDOW_S`, light EMA) → `speed_corr = speed_ema + accel·τ` (`self.speed`) → `acc_speed` (adaptive low-pass on `speed_corr`: `tau` ramps `_ACC_SPEED_TAU_SLOW_S`→`_ACC_SPEED_TAU_FAST_S` as the per-tick change grows past `_ACC_SPEED_DEADBAND_MS` **and agrees with the de-noised trend**, and is scaled down at low speed and during a steady decel/accel: plus a constant-accel feed-forward, gated by de-noised `accel_trend`, that zeroes the sustained-ramp lag with no windup; standstill latch clamps to 0 near rest with hysteresis release; `self.acc_speed`) |
+| Speed / accel filter (AI + TMP) | Long-window position LS raw speed by default; confirmed hard braking temporarily selects a 5-sample LS suffix and its measured decel. Then `_smooth_vehicle_kinematics()` runs `speed_ema` (EMA of raw) → `accel` (LS slope with confirmed short-window brake floor) → `speed_corr = speed_ema + accel·τ` (`self.speed`) → `acc_speed` (adaptive low-pass on `speed_corr`: `tau` ramps `_ACC_SPEED_TAU_SLOW_S`→`_ACC_SPEED_TAU_FAST_S` as the per-tick change grows past `_ACC_SPEED_DEADBAND_MS` **and agrees with the de-noised trend**, and is scaled down at low speed and during a steady decel/accel: plus a constant-accel feed-forward, gated by de-noised `accel_trend`, that zeroes sustained-ramp lag with no windup; standstill latch clamps to 0 near rest with hysteresis release; `self.acc_speed`) |
 | AI vs TMP raw speed | AI = buffer field 10; TMP = position-history LS fit. Filter chain identical after that |
 | Positions | No EMA: always raw world coordinates |
 | Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > 2 m/s` → decay speed: `prev_speed × (1 − frac²)`, release after 0.3 s |
@@ -696,6 +718,8 @@ double-count each trailer.
 - **Y axis is never used in 2D math**, only for elevation filtering.
 - **Arc forward vector formula is `(-sin, -cos)`.** Do not flip signs or swap to `(sin, cos)`.
 - **Speed/accel filtering runs for AI and TMP** via `_smooth_vehicle_kinematics()`: the 4-signal chain `speed_ema → accel → speed_corr → acc_speed`. `self.speed` is the accel-corrected `speed_corr`; `self.acc_speed` is the adaptive-filtered ACC speed (ACC only); `self.acceleration` is the LS-slope `accel`. World positions are not low-pass filtered.
+- **Hard-brake raw-speed mode requires a measured deceleration ramp.** Never activate the short position window from a zero-displacement sample alone: below `_LAG_MIN_SPEED_MS`, a TMP packet stall is not owned by lag freeze and would look like a stopped obstacle.
+- **Lag freeze owns kinematics before hard-brake selection.** A freeze resets hard-brake transient state; the short estimator must not bypass or advance during the freeze early return.
 - **`acceleration` is kinematic-only**: buffer field 11 is ignored for AI and TMP; `accel_for_arc()` reads `self.acceleration` (least-squares slope of the `speed_ema` history, light-EMA smoothed).
 - **`acc_speed` is ACC-only.** AEB and arc geometry use `self.speed`; never swap them.
 - **TMP lag freeze holds position, filtered speed decay, and internal EMA state.** Do not advance position during a freeze: that would snap when updates resume.

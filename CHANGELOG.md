@@ -17,6 +17,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **Game plugin auto-install**: a missing or outdated game plugin is now installed automatically at startup, with a reminder to restart the game.
 
 ### Fixed
+- **AEB slow to recognize a stopped lead**: hard-braking traffic now switches to a responsive speed estimate, while steady driving keeps the existing smooth filtering.
 - **AEB taps skewed learned brake strength**: short brake pulses taught from mid-transient readings, throwing off AEB timing. Learning now waits for braking to stabilize; hard AEB stops still teach it fast.
 - **Hill starts blocked on steep grades**: a small rollback made the hill-hold keep braking against the gas. It now releases as soon as the truck stops rolling back.
 - **Anti-creep too strong at launch**: weak engines couldn't overcome the creep-cancel brake; it now releases much earlier on the gas pedal.

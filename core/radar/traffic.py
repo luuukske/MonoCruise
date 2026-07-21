@@ -164,6 +164,18 @@ _RAW_SPEED_HISTORY_LEN: int = 20
 _RAW_SPEED_NEAR_ZERO_CHORD: float = 0.025  # m: same gate as per-frame displacement
 _BUFFER_SIGN_SPEED_MS: float = 0.05        # m/s: below this, trust LS sign on AI
 
+# A hard-braking target temporarily uses a short position-fit window so the
+# long cruise window cannot keep reporting motion after the target has stopped.
+_RAW_BRAKE_SHORT_HISTORY_LEN: int = 5
+_RAW_BRAKE_CONFIRM_FRAMES: int = 2
+_RAW_BRAKE_MIN_DECEL_MS2: float = 2.0
+_RAW_BRAKE_MIN_SPEED_LOSS_MS: float = 0.4
+_RAW_BRAKE_MIN_INTERVAL_SPEED_MS: float = 0.25
+_RAW_BRAKE_MONOTONIC_TOL_MS: float = 0.15
+_RAW_BRAKE_CONVERGENCE_MS: float = 0.3
+_RAW_BRAKE_RELEASE_FRAMES: int = 3
+_RAW_BRAKE_STANDSTILL_SPEED_MS: float = 0.1
+
 
 def _lag_freeze_duration(gap_3d: float, ego_speed: float) -> float:
     """Logarithmic TTC-scaled freeze window. See AGENTS.md §7 "Lag / freeze detection".
@@ -221,6 +233,50 @@ def _raw_speed_from_position_history(
         direction = 1.0 if (chord_dx * fwd_x + chord_dz * fwd_z) >= 0.0 else -1.0
         return direction * chord / dt
     return num / den
+
+
+def _hard_brake_decel_from_position_history(
+    history: list[tuple[float, float, float]],
+    fwd_x: float,
+    fwd_z: float,
+) -> float | None:
+    """Return confirmed short-window deceleration magnitude, else None."""
+    if len(history) < _RAW_BRAKE_SHORT_HISTORY_LEN:
+        return None
+    window = history[-_RAW_BRAKE_SHORT_HISTORY_LEN:]
+    intervals: list[tuple[float, float]] = []
+    for (t0, x0, z0), (t1, x1, z1) in zip(window, window[1:]):
+        dt = t1 - t0
+        if dt <= 1e-9:
+            return None
+        speed = ((x1 - x0) * fwd_x + (z1 - z0) * fwd_z) / dt
+        intervals.append(((t0 + t1) * 0.5, speed))
+
+    direction = 1.0 if sum(speed for _, speed in intervals) >= 0.0 else -1.0
+    magnitudes = [speed * direction for _, speed in intervals]
+    if any(speed < _RAW_BRAKE_MIN_INTERVAL_SPEED_MS for speed in magnitudes):
+        return None
+    if any(
+        later > earlier + _RAW_BRAKE_MONOTONIC_TOL_MS
+        for earlier, later in zip(magnitudes, magnitudes[1:])
+    ):
+        return None
+
+    early_speed = 0.5 * (magnitudes[0] + magnitudes[1])
+    late_speed = 0.5 * (magnitudes[-2] + magnitudes[-1])
+    speed_loss = early_speed - late_speed
+    early_t = 0.5 * (intervals[0][0] + intervals[1][0])
+    late_t = 0.5 * (intervals[-2][0] + intervals[-1][0])
+    span = late_t - early_t
+    if span <= 1e-9:
+        return None
+    decel = speed_loss / span
+    if (
+        speed_loss < _RAW_BRAKE_MIN_SPEED_LOSS_MS
+        or decel < _RAW_BRAKE_MIN_DECEL_MS2
+    ):
+        return None
+    return decel
 
 
 def _raw_speed_from_kinematics(
@@ -325,6 +381,7 @@ def _smooth_vehicle_kinematics(
     prev_speed_ema_history: list[tuple[float, float]] | None,
     prev_acc_standstill: bool = False,
     prev_acc_release_s: float = 0.0,
+    responsive_brake_decel: float = 0.0,
 ) -> tuple[float, float, float, float, list[tuple[float, float]], bool, float]:
     """Speed/accel filter chain shared by AI and TMP vehicles. See AGENTS.md §7.
 
@@ -351,6 +408,8 @@ def _smooth_vehicle_kinematics(
         accel = accel_raw
     else:
         accel = prev_accel + _ACCEL_EMA_ALPHA * (accel_raw - prev_accel)
+    if responsive_brake_decel > 0.0:
+        accel = min(accel, -responsive_brake_decel)
 
     # Step 3: lag-compensated speed. τ is the step-1 EMA's settling time.
     tau_eff = dt * (1.0 - alpha_s) / alpha_s if alpha_s > 1e-6 else 0.0
@@ -1098,6 +1157,9 @@ class Vehicle:
         self._speed_ema: Optional[float] = None
         self._speed_ema_history: list[tuple[float, float]] = []
         self._raw_speed: Optional[float] = None
+        self._raw_brake_confirm_frames: int = 0
+        self._raw_brake_active: bool = False
+        self._raw_brake_converged_frames: int = 0
         # acc_speed standstill latch (hysteresis state): see AGENTS.md §7.
         self._acc_standstill: bool = False
         self._acc_release_s: float = 0.0
@@ -1142,6 +1204,58 @@ class Vehicle:
         raw_speed = self._raw_speed if self._raw_speed is not None else self.speed
         speed_ema = self._speed_ema if self._speed_ema is not None else self.speed
         return raw_speed, self.speed, speed_ema, self.acc_speed, self.acceleration
+
+    def _reset_raw_brake_transient(self) -> None:
+        self._raw_brake_confirm_frames = 0
+        self._raw_brake_active = False
+        self._raw_brake_converged_frames = 0
+
+    def _select_raw_speed(
+        self,
+        long_speed: float,
+        buffer_speed: float,
+        fwd_x: float,
+        fwd_z: float,
+    ) -> float:
+        """Select the short position fit only during a confirmed hard brake."""
+        if self.is_trailer:
+            self._reset_raw_brake_transient()
+            return long_speed
+        short_history = self._position_history[-_RAW_BRAKE_SHORT_HISTORY_LEN:]
+        short_speed = _raw_speed_from_position_history(short_history, fwd_x, fwd_z)
+        if short_speed is None:
+            self._raw_brake_confirm_frames = 0
+            return long_speed
+        if not self.is_tmp and abs(buffer_speed) > _BUFFER_SIGN_SPEED_MS:
+            short_speed = math.copysign(abs(short_speed), buffer_speed)
+
+        recent_decel = _hard_brake_decel_from_position_history(
+            self._position_history, fwd_x, fwd_z,
+        )
+        qualifies = recent_decel is not None
+        if not self._raw_brake_active:
+            if qualifies:
+                self._raw_brake_confirm_frames += 1
+            else:
+                self._raw_brake_confirm_frames = 0
+            if self._raw_brake_confirm_frames >= _RAW_BRAKE_CONFIRM_FRAMES:
+                self._raw_brake_active = True
+                self._raw_brake_converged_frames = 0
+
+        if not self._raw_brake_active:
+            return long_speed
+
+        if (
+            abs(short_speed) > _RAW_BRAKE_STANDSTILL_SPEED_MS
+            and abs(short_speed - long_speed) <= _RAW_BRAKE_CONVERGENCE_MS
+        ):
+            self._raw_brake_converged_frames += 1
+        else:
+            self._raw_brake_converged_frames = 0
+        if self._raw_brake_converged_frames >= _RAW_BRAKE_RELEASE_FRAMES:
+            self._reset_raw_brake_transient()
+            return long_speed
+        return short_speed
 
     def _tmp_apply_crash_rotation_jerk(self, prev: "Vehicle", t_now: float) -> None:
         """TMP: detect crash-level rotation jerk on every buffer read (sub-frame and full)."""
@@ -1216,6 +1330,7 @@ class Vehicle:
         self._smooth_accel = prev._smooth_accel
         self._speed_ema = prev._speed_ema
         self._raw_speed = prev._raw_speed
+        self._reset_raw_brake_transient()
         self.speed = prev.speed
         self.acceleration = prev.acceleration
         self.acc_speed = prev.acc_speed
@@ -1287,6 +1402,9 @@ class Vehicle:
             self._smooth_accel = prev._smooth_accel
             self._speed_ema = prev._speed_ema
             self._raw_speed = prev._raw_speed
+            self._raw_brake_confirm_frames = prev._raw_brake_confirm_frames
+            self._raw_brake_active = prev._raw_brake_active
+            self._raw_brake_converged_frames = prev._raw_brake_converged_frames
             self._position_history = list(prev._position_history)
             self._speed_ema_history = list(prev._speed_ema_history)
             self._acc_standstill = prev._acc_standstill
@@ -1356,6 +1474,9 @@ class Vehicle:
         self._smooth_accel = prev._smooth_accel
         self._speed_ema = prev._speed_ema
         self._raw_speed = prev._raw_speed
+        self._raw_brake_confirm_frames = prev._raw_brake_confirm_frames
+        self._raw_brake_active = prev._raw_brake_active
+        self._raw_brake_converged_frames = prev._raw_brake_converged_frames
         self._position_history = list(prev._position_history)
         self._speed_ema_history = list(prev._speed_ema_history)
         self._acc_standstill = prev._acc_standstill
@@ -1410,6 +1531,7 @@ class Vehicle:
                     # freeze entirely and let the normal update run.
                     self._lag_since = None
                 elif _lag_duration < _freeze_dur:
+                    self._reset_raw_brake_transient()
                     _lag_frac = _lag_duration / _freeze_dur
                     self._smooth_x = prev._smooth_x
                     self._smooth_z = prev._smooth_z
@@ -1427,6 +1549,7 @@ class Vehicle:
                         self.position.z = self._smooth_z
                     return
                 else:
+                    self._reset_raw_brake_transient()
                     self.lag_confirmed = True
             else:
                 self._lag_since = None
@@ -1448,6 +1571,7 @@ class Vehicle:
 
         # Position mismatch: hold smooth position and carry speed; yaw already updated above.
         if _skip_position_update:
+            self._raw_brake_confirm_frames = 0
             if self._smooth_x is not None:
                 self.position.x = self._smooth_x
                 self.position.z = self._smooth_z
@@ -1491,6 +1615,18 @@ class Vehicle:
             dt,
             preserve_buffer_sign=not self.is_tmp,
         )
+        raw_speed = self._select_raw_speed(
+            raw_speed, self.speed, fwd_x, fwd_z,
+        )
+        responsive_brake_decel = 0.0
+        if self._raw_brake_active:
+            recent_decel = _hard_brake_decel_from_position_history(
+                self._position_history, fwd_x, fwd_z,
+            )
+            if recent_decel is not None:
+                responsive_brake_decel = min(
+                    recent_decel, _ACC_SPEED_FF_ACCEL_CLAMP_MS2,
+                )
 
         (speed_ema, accel, speed_corr, acc_speed,
          speed_ema_history, acc_standstill, acc_release_s) = _smooth_vehicle_kinematics(
@@ -1498,6 +1634,7 @@ class Vehicle:
             prev._speed_ema, prev._smooth_accel, prev.acc_speed,
             prev._speed_ema_history,
             prev._acc_standstill, prev._acc_release_s,
+            responsive_brake_decel,
         )
         self._raw_speed = raw_speed
         self._speed_ema = speed_ema
