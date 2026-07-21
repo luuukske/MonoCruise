@@ -408,11 +408,18 @@ class CruiseControlThread(BaseThread):
         return max(float(x) for x in recent)
 
     def _read_auto_neutral_holding(self) -> bool:
-        """True while sending_thread's auto-neutral holds the gearbox in
-        neutral. That commanded neutral is exempt from the "can only engage
-        in drive" gates so CC/ACC survive (and can be engaged during) an
-        auto-neutral stop; resuming then bids accel, which flips the
-        auto-neutral gas intent and shifts back to drive.
+        """True while sending_thread's auto-neutral owns the gearbox.
+
+        That commanded neutral is exempt from the "can only engage in drive"
+        gates so CC/ACC survive (and can be engaged during) an auto-neutral
+        stop; resuming then bids accel, which flips the auto-neutral gas
+        intent and shifts back to drive.
+
+        The flag deliberately stays set across that shift back, until
+        telemetry reports a forward gear (plus a short grace). Reading it as
+        "currently in neutral" is wrong and was the original bug: the drive
+        press takes hundreds of ms to reach `gear_dashboard`, so this gate
+        saw a bare gear 0 and disengaged ACC on every launch from a stop.
         """
         try:
             st = registry.get_thread("sending_thread")

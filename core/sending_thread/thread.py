@@ -135,6 +135,12 @@ _AUTONEUTRAL_MAX_RETRIES: int = 2
 # FSM alternates the drive selector with a sequential shift-up (which leaves
 # neutral in every transmission mode) for this long before warning.
 _AUTONEUTRAL_DRIVE_WINDOW_S: float = 4.0
+# Grace on the published "auto-neutral owns the gearbox" flag after the game
+# confirms drive. cruise_control_thread snapshots telemetry near the top of
+# its tick and evaluates its gear gate further down, so the tick that first
+# reads a forward gear can still hold a gear-0 snapshot while the flag has
+# already dropped. Without the grace that one tick disengages CC.
+_AUTONEUTRAL_FLAG_LINGER_S: float = 0.3
 # After the game refuses a neutral shift (retries exhausted), stop trying for
 # this long instead of hammering the input, and warn the user once per
 # session so a missing in-game binding is diagnosable.
@@ -254,9 +260,14 @@ class SendingThreadData(ThreadData):
     stopped: bool = False
     hold_active: bool = False
     hold_state: str = "ROLLING"
-    # True while auto-neutral has commanded (and expects) a neutral gearbox.
-    # cruise_control_thread reads this to exempt the shift from its
-    # "can only engage in drive" disengage/engage gates.
+    # True while auto-neutral owns the gearbox: it has commanded neutral, or
+    # it has commanded drive and the game has not confirmed a forward gear
+    # yet. cruise_control_thread reads this to exempt the shift from its
+    # "can only engage in drive" disengage/engage gates. It must cover the
+    # exit shift as well as the hold: telemetry keeps reporting gear 0 for
+    # the length of the button press plus the game's shift, so a flag that
+    # cleared the moment drive was commanded would disengage CC on every
+    # ACC launch out of an auto-neutral stop.
     auto_neutral_holding: bool = False
     # Most recent brake values written to the game (last N ticks). Used by
     # cruise_control_thread to distinguish a user's in-game brake press from
@@ -339,6 +350,7 @@ class SendingThread(BaseThread):
         self._autoneutral_last_engage_mono: float = 0.0
         self._autoneutral_retries: int = 0
         self._autoneutral_drive_until: float = 0.0
+        self._autoneutral_flag_linger_until: float = 0.0
         self._autoneutral_lockout_until: float = 0.0
         self._autoneutral_warned: bool = False
         self._autoneutral_drive_presses: int = 0
@@ -467,6 +479,19 @@ class SendingThread(BaseThread):
         """Clear mapper smoothing/correction when cruise stops commanding."""
         self._accel_mapper.reset_smoothing()
 
+    def _auto_neutral_owns_gearbox(self) -> bool:
+        """Value published as `auto_neutral_holding`. See that field's note.
+
+        True while neutral is commanded, while the drive shift out of it is
+        still unconfirmed, and for a short grace after the confirming gear
+        arrives. Pure: the linger deadline is armed by the FSM, not here.
+        """
+        return (
+            self._autoneutral_neutral
+            or self._autoneutral_drive_until > 0.0
+            or time.monotonic() < self._autoneutral_flag_linger_until
+        )
+
     def _tick_auto_neutral(
         self,
         *,
@@ -515,6 +540,8 @@ class SendingThread(BaseThread):
             self._autoneutral_last_engage_mono += slide
             if self._autoneutral_drive_until > 0.0:
                 self._autoneutral_drive_until += slide
+            if self._autoneutral_flag_linger_until > 0.0:
+                self._autoneutral_flag_linger_until += slide
             if self._autoneutral_lockout_until > 0.0:
                 self._autoneutral_lockout_until += slide
             return
@@ -623,6 +650,13 @@ class SendingThread(BaseThread):
                 )
             return
         if gear != 0:
+            if self._autoneutral_drive_until > 0.0:
+                # Drive confirmed. Arm the flag grace so the cruise thread
+                # cannot evaluate its gear gate against a stale gear-0
+                # telemetry snapshot on the very tick the flag drops.
+                self._autoneutral_flag_linger_until = (
+                    now + _AUTONEUTRAL_FLAG_LINGER_S
+                )
             self._autoneutral_drive_until = 0.0
             self._autoneutral_drive_presses = 0
 
@@ -1150,6 +1184,7 @@ class SendingThread(BaseThread):
             self._autoneutral_neutral = False
             self._autoneutral_retries = 0
             self._autoneutral_drive_until = 0.0
+            self._autoneutral_flag_linger_until = 0.0
             self._pause_held_aforward = 0.0
             self._pause_held_abackward = 0.0
             controller.aforward = 0.0
@@ -1210,7 +1245,7 @@ class SendingThread(BaseThread):
                 self.data.hold_state = self._hold.state
                 # Reflect the true internal state: a transient pedal glitch
                 # must not read as "neutral released" to cruise_control.
-                self.data.auto_neutral_holding = self._autoneutral_neutral
+                self.data.auto_neutral_holding = self._auto_neutral_owns_gearbox()
                 self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
@@ -1287,7 +1322,7 @@ class SendingThread(BaseThread):
                 self.data.hold_state = self._hold.state
                 # Reflect the true internal state: a transient pedal glitch
                 # must not read as "neutral released" to cruise_control.
-                self.data.auto_neutral_holding = self._autoneutral_neutral
+                self.data.auto_neutral_holding = self._auto_neutral_owns_gearbox()
                 self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
@@ -1621,7 +1656,7 @@ class SendingThread(BaseThread):
             self.data.stopped = hold_out.active
             self.data.hold_active = hold_out.active
             self.data.hold_state = hold_out.state
-            self.data.auto_neutral_holding = self._autoneutral_neutral
+            self.data.auto_neutral_holding = self._auto_neutral_owns_gearbox()
             self.data.recent_brake_outputs = tuple(self._recent_brake_outputs)
             self.data.hazardsActive = tel_hazards
             self.data.horn_active = bool(getattr(controller, "horn", False))
