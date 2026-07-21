@@ -1529,15 +1529,15 @@ class SendingThread(BaseThread):
         # arbitration and limiter caps, so brake-light release follows actual
         # game gas rather than the raw user pedal.
         
-        # human made: DO NOT TOUCH (AI sucks at this idk why, it wants to change everything here)
+        # human made: DO NOT TOUCH
         _now = time.monotonic()
-        if b > 0.006:
+        if b > 0.006: # brake threshold
             self._brake_active = True
             self._brake_last_active_at = _now
-        elif self._brake_active:
+        elif self._brake_active: # brake latching
             if a >= 0.2:
                 self._brake_active = False
-            elif _now - self._brake_last_active_at >= 0.15 / (a + 0.075):
+            elif _now - self._brake_last_active_at >= 0.15 / (a + 0.075): # more gas = faster brake release
                 self._brake_active = False
             b = max(0.0001, b)
         if not self._brake_active:
