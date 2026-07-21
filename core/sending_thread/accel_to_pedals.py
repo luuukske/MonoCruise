@@ -222,6 +222,21 @@ def baseline_brake_ms2(total_mass_kg: float, has_trailer: bool) -> float:
     )
 
 
+def brake_curve_fraction(pedal: float) -> float:
+    """Fraction of max brake capacity the game delivers at *pedal* [0-1].
+
+    The fitted game curve is y = A * (1 - e^(-rate * x^power)); this returns
+    the A-independent factor. Capacity learning divides a measured decel by
+    this instead of by the raw pedal: the linear ratio decel/pedal over-reads
+    the asymptote A below ~0.9 pedal (+48% at half pedal) and under-reads
+    ~9% at full pedal, so partial-pedal samples biased the learned estimate.
+    """
+    x = _clamp(_finite_or_zero(pedal), 0.0, 1.0)
+    if x <= 0.0:
+        return 0.0
+    return 1.0 - math.exp(-_BRAKE_CURVE_RATE * x ** _BRAKE_CURVE_POWER)
+
+
 def compute_estimated_mass_kg(
     unit_mass_kg: float,
     cargo_mass_kg: float,
@@ -603,9 +618,7 @@ class AccelToPedals:
             )
         if A <= 0.1:
             return 0.0
-        return A * (
-            1.0 - math.exp(-_BRAKE_CURVE_RATE * x ** _BRAKE_CURVE_POWER)
-        )
+        return A * brake_curve_fraction(x)
 
     # Gearshift freeze/ramp
 

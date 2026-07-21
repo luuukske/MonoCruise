@@ -4,10 +4,22 @@ Tracks estimated maximum brake deceleration and gas acceleration.
 Replaces brake_efficiency.py with a simpler, always-on system:
 
   Brake learning
-  - Samples whenever any brake pedal is applied (user, cruise, or any future source).
-  - Each sample is weighted by brake_output² so light braking has tiny influence
+  - update_brake is fed EVERY tick, pedal applied or not, so its settle
+    histories see the true pedal/decel timelines including release gaps.
+  - A sample is accepted only when BOTH the (smoothed) pedal and the measured
+    decel have been flat for their settle windows. The decel signal trails
+    the pedal through the game's brake actuator lag plus the speed
+    differentiator's tau, so mid-transient ratios are systematically wrong:
+    short brake taps contribute nothing; sustained presses teach from the
+    settled phase only. Sustained AEB braking (deep, settled) is the best
+    capacity data available and re-teaches the estimate fast.
+  - The candidate inverts the fitted brake curve (decel / curve_fraction)
+    instead of assuming decel scales linearly with pedal, and uses
+    window-mean pedal and decel so zero-mean ripple averages out instead of
+    being rectified by the asymmetric alpha below.
+  - Each sample is weighted by pedal³ so light braking has tiny influence
     while heavy braking drives the estimate strongly.
-  - Underperformance (measured decel < expected) drops the estimate 3× faster
+  - Underperformance (measured decel < expected) drops the estimate 2× faster
     than overperformance rises it: safety bias for emergency stops.
   - Gravity and rolling resistance are canceled via road_load_ms2 before sampling.
 
@@ -45,7 +57,7 @@ from typing import Deque
 
 from core.settings import Settings
 
-from .accel_to_pedals import weight_factor
+from .accel_to_pedals import brake_curve_fraction, weight_factor
 
 logger = logging.getLogger(__name__)
 
@@ -72,18 +84,20 @@ _ESTIMATE_LOWER_BOUND: float = 0.35 # fraction of baseline: hard floor
 # outperforming the loaded baseline without letting contamination compound.
 _ESTIMATE_UPPER_BOUND: float = 1.3  # fraction of baseline: hard ceiling
 # Reject any single brake sample implying more than this fraction of baseline.
-# candidate = decel / pedal extrapolates to full pedal; when the measured decel
-# includes retarder or engine brake (no telemetry field exposes them), a light
-# steady pedal yields a candidate far above what the foot brake can deliver.
-# Such samples are contaminated, not information: drop them instead of
-# averaging them in. Slightly above the ceiling so legitimate samples near the
-# clamp still register.
+# The candidate inverts the fitted brake curve to the full-pedal asymptote;
+# when the measured decel includes retarder or engine brake (no telemetry
+# field exposes them), a steady partial pedal yields a candidate far above
+# what the foot brake can deliver. Such samples are contaminated, not
+# information: drop them instead of averaging them in. Slightly above the
+# ceiling so legitimate samples near the clamp still register.
 _BRAKE_CANDIDATE_MAX_FRACTION: float = 1.35
-# Two-speed brake learning: game brake force is progressive in pedal, so
-# decel/pedal from gentle presses under-reads full-pedal capacity and
-# routine driving dragged the estimate 9 -> 4 m/s2 (truck measured 10-12;
-# clips 1b277e63 / fa70013c). Normal driving drifts the estimate slowly;
-# AEB events (deep, honest presses) re-teach it fast.
+# Two-speed brake learning. Routine presses are shallow (pedal³ weight) and
+# short, so normal driving drifts the estimate slowly. AEB braking that
+# passes the settle gates below (deep pedal, decel fully flat) is the
+# highest-quality capacity data available and re-teaches the estimate fast.
+# The fast alpha is only safe BECAUSE of the decel settle gate: before it
+# existed, short AEB taps (which end before their decel ever settles)
+# slammed the estimate to mid-transient decel/pedal ratios within ~100 ms.
 _BRAKE_ALPHA_NORMAL: float = 0.02   # EMA alpha at full pedal, normal driving
 _BRAKE_ALPHA_AEB: float = 0.15      # EMA alpha at full pedal during AEB braking
 
@@ -138,11 +152,35 @@ _GAS_PEDAL_HISTORY_LIMIT: int = 64
 # before both converge are biased in either direction. Longer than the gas
 # window because brake samples feed AEB's engagement denominator: a
 # contaminated sample here is costlier than a lost one.
+# The gate runs on a short EMA of the pedal, not the raw value: the AEB
+# closed loop dithers its pedal every tick (its P term reacts to
+# differentiator ripple), and gating on the raw pedal would reject exactly
+# the steady heavy AEB braking that is the best capacity data there is. The
+# EMA keeps real ramps, taps, and dips visible (the decel signal trails the
+# pedal by far more than this tau) while flattening per-tick dither.
+# The tolerance bounds the excursion over the WHOLE window (max - min), not
+# endpoint vs endpoint: an endpoint check passes V-shaped dips whose decel
+# response is still in flight when the pedal endpoints match again.
 _BRAKE_SETTLE_WINDOW_S: float = 0.50
-_BRAKE_SETTLE_TOLERANCE: float = 0.03
+_BRAKE_SETTLE_TOLERANCE: float = 0.05
 _BRAKE_STEP_THRESHOLD: float = 0.05
 _BRAKE_STEP_GUARD_S: float = 0.25
 _BRAKE_PEDAL_HISTORY_LIMIT: int = 64
+_BRAKE_PEDAL_SMOOTH_TAU_S: float = 0.10
+
+# Decel settled gate: the decel signal trails the pedal through the game's
+# brake actuator lag and the speed differentiator (tau=0.30 s in
+# sending_thread), ~1 s end to end, so a steady pedal alone is not enough:
+# learning also waits until the measured decel itself has been flat for this
+# window. This is the gate that makes short AEB brake taps contribute
+# nothing: a tap ends before its decel ever settles, and its mid-transient
+# decel/pedal ratios used to slam the estimate at the fast AEB alpha.
+# Tolerance is relative with an absolute floor: the differentiated telemetry
+# carries a ripple roughly proportional to the decel itself.
+_DECEL_SETTLE_WINDOW_S: float = 0.40
+_DECEL_SETTLE_ABS_MS2: float = 0.5
+_DECEL_SETTLE_FRAC: float = 0.12
+_DECEL_HISTORY_LIMIT: int = 64
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -190,6 +228,11 @@ class PedalCapacityTracker:
             maxlen=_BRAKE_PEDAL_HISTORY_LIMIT
         )
         self._last_brake_step_mono: float = -math.inf
+        self._brake_pedal_smooth: float | None = None
+        self._last_brake_call_mono: float | None = None
+        self._decel_history: Deque[tuple[float, float]] = deque(
+            maxlen=_DECEL_HISTORY_LIMIT
+        )
         self._gas_pedal_history: Deque[tuple[float, float]] = deque(
             maxlen=_GAS_PEDAL_HISTORY_LIMIT
         )
@@ -289,16 +332,24 @@ class PedalCapacityTracker:
         road_load_ms2: float = 0.0,
         aeb_active: bool = False,
     ) -> None:
-        """Feed one braking sample.
+        """Feed one braking tick.
 
-        Call whenever any brake pedal is applied regardless of source.
+        Call EVERY tick regardless of pedal state: the settle histories must
+        see releases and gaps, or a new press could inherit a stale "settled"
+        window from the previous one.
 
         Args:
             brake_output: Actual brake pedal sent to the game [0–1].
-            measured_decel_ms2: Positive measured deceleration (m/s²).
+            measured_decel_ms2: Positive measured deceleration (m/s²). Use
+                the plain filtered signal, NOT the lead-compensated variant:
+                the lead term is a tick-derivative that amplifies telemetry
+                cadence ripple, which the asymmetric alpha below would
+                rectify into downward drift.
             speed_ms: Current speed (m/s).
             slope_rad: Road pitch (rad, positive = uphill): used only for slope filter.
-            baseline_ms2: Baseline max decel for clamping bounds.
+            baseline_ms2: Baseline max decel for clamping bounds. Pass the
+                current-mass/trailer baseline so the plausibility guards
+                track the truck actually being driven.
             road_load_ms2: slope_accel + rolling_accel (positive = uphill forward).
                            Subtracted from measured_decel to isolate pure brake force.
             aeb_active: True while AEB commands the brake: enables the fast
@@ -308,12 +359,32 @@ class PedalCapacityTracker:
             self._max_brake_ms2 = baseline_ms2
 
         now = time.monotonic()
+
+        # Smoothed pedal for gating and the ratio (see the settle-gate note
+        # on _BRAKE_PEDAL_SMOOTH_TAU_S). After a call gap (thread stall,
+        # game disconnect) the EMA state and both settle histories describe
+        # a timeline that no longer exists: re-seed and restart them, or a
+        # surviving pre-gap entry could fake a full settled window.
+        last = self._last_brake_call_mono
+        self._last_brake_call_mono = now
+        smooth = self._brake_pedal_smooth
+        if smooth is None or last is None or now - last > _BRAKE_SETTLE_WINDOW_S:
+            smooth = brake_output
+            self._brake_pedal_history.clear()
+            self._decel_history.clear()
+        else:
+            a_s = 1.0 - math.exp(
+                -max(now - last, 1e-4) / _BRAKE_PEDAL_SMOOTH_TAU_S
+            )
+            smooth += a_s * (brake_output - smooth)
+        self._brake_pedal_smooth = smooth
+
         history = self._brake_pedal_history
         if history:
             prev_pedal = history[-1][1]
-            if abs(brake_output - prev_pedal) >= _BRAKE_STEP_THRESHOLD:
+            if abs(smooth - prev_pedal) >= _BRAKE_STEP_THRESHOLD:
                 self._last_brake_step_mono = now
-        history.append((now, brake_output))
+        history.append((now, smooth))
         # Keep the newest sample at or before the window start so the retained
         # history spans the FULL settle window. Popping everything strictly
         # older than cutoff would leave history[0] just *inside* the window,
@@ -323,9 +394,16 @@ class PedalCapacityTracker:
         while len(history) > 2 and history[1][0] <= cutoff:
             history.popleft()
 
+        corrected_decel = measured_decel_ms2 - road_load_ms2
+        d_hist = self._decel_history
+        d_hist.append((now, corrected_decel))
+        d_cutoff = now - _DECEL_SETTLE_WINDOW_S
+        while len(d_hist) > 2 and d_hist[1][0] <= d_cutoff:
+            d_hist.popleft()
+
         if speed_ms < _MIN_BRAKE_SPEED_MS:
             return
-        if brake_output < _BRAKE_PEDAL_FLOOR:
+        if smooth < _BRAKE_PEDAL_FLOOR:
             return
         if abs(slope_rad) > _MAX_SLOPE_RAD:
             return
@@ -333,20 +411,41 @@ class PedalCapacityTracker:
         if now - self._last_brake_step_mono < _BRAKE_STEP_GUARD_S:
             return
 
-        oldest_in_window = history[0][1]
+        pedal_values = [p for _, p in history]
         if (history[-1][0] - history[0][0] < _BRAKE_SETTLE_WINDOW_S
-                or abs(brake_output - oldest_in_window) > _BRAKE_SETTLE_TOLERANCE):
+                or max(pedal_values) - min(pedal_values) > _BRAKE_SETTLE_TOLERANCE):
             return
 
-        corrected_decel = measured_decel_ms2 - road_load_ms2
-        if corrected_decel < _MIN_DECEL_MS2:
+        # Decel settled: the ratio below is only meaningful once the measured
+        # decel has stopped moving (see _DECEL_SETTLE_WINDOW_S). This is what
+        # keeps short AEB taps out of the estimate.
+        if d_hist[-1][0] - d_hist[0][0] < _DECEL_SETTLE_WINDOW_S:
+            return
+        decel_values = [d for _, d in d_hist]
+        d_max = max(decel_values)
+        if d_max - min(decel_values) > max(
+            _DECEL_SETTLE_ABS_MS2, _DECEL_SETTLE_FRAC * d_max
+        ):
             return
 
-        candidate = corrected_decel / max(brake_output, _BRAKE_PEDAL_FLOOR)
+        mean_decel = sum(decel_values) / len(decel_values)
+        if mean_decel < _MIN_DECEL_MS2:
+            return
+
+        # Window means on both sides: zero-mean dither and telemetry ripple
+        # cancel instead of feeding the asymmetric alpha. The candidate
+        # inverts the fitted brake curve: at partial pedal the game delivers
+        # a larger share of capacity than the pedal fraction, so the naive
+        # decel/pedal ratio over-reads the asymptote below ~0.9 pedal and
+        # under-reads ~9% at full pedal.
+        mean_pedal = max(
+            sum(pedal_values) / len(pedal_values), _BRAKE_PEDAL_FLOOR
+        )
+        candidate = mean_decel / brake_curve_fraction(mean_pedal)
         if candidate > baseline_ms2 * _BRAKE_CANDIDATE_MAX_FRACTION:
             return
 
-        weight = brake_output ** _WEIGHT_POWER
+        weight = mean_pedal ** _WEIGHT_POWER
         base = _BRAKE_ALPHA_AEB if aeb_active else _BRAKE_ALPHA_NORMAL
         alpha = base * weight
         if candidate < self._max_brake_ms2:

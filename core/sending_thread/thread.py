@@ -1588,13 +1588,21 @@ class SendingThread(BaseThread):
         )
 
         # Update pedal capacity estimates from actual pedal values sent to the game.
-        _base_brake = baseline_brake_ms2(0.0, False)
-        if b > 0.01:
-            self._capacity_tracker.update_brake(
-                b, measured_decel_lead_ms2, speed_ms, brake_grade_rad, _base_brake,
-                road_load_ms2=mapper_road_load_ms2,
-                aeb_active=_aeb_active,
-            )
+        # Brake learning runs every tick, not just while braking, so the
+        # tracker's settle histories see releases and gaps: a new press must
+        # never inherit a stale "settled" window from the previous one. It
+        # gets the plain filtered decel (the lead-compensated variant exists
+        # for the AEB controller's phase margin; its derivative term
+        # amplifies telemetry cadence ripple, which the tracker's asymmetric
+        # alpha would rectify into downward drift) and a mass-aware baseline
+        # so the plausibility guards track the truck actually being driven.
+        _base_brake = baseline_brake_ms2(mass_kg, has_t)
+        self._capacity_tracker.update_brake(
+            max(float(b), 0.0), measured_decel_ms2, speed_ms, brake_grade_rad,
+            _base_brake,
+            road_load_ms2=mapper_road_load_ms2,
+            aeb_active=_aeb_active,
+        )
         if a > 0.01:
             # Creep subtracted so gear-1 samples learn the throttle-commanded
             # gain only; leaving it in double-counts against the mapper's
