@@ -5,13 +5,14 @@ All notable changes to MonoCruise are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Sections under each release (in order): `Security`, `Added`, `Changed`, `Fixed`, `Removed`.
+Sections under each release (in order): `Security`, `Added`, `Changed`, `Fixed`, `Removed`, `Known`.
 
 The `[Unreleased]` block accumulates changes between releases. `tools/release.py bump`
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+## [1.1.0-preview.8] - 2026-07-21
 ### Added
 - **Autostart / auto-close**: starting with a game already running opens MonoCruise minimized and auto-quits it after the game closes; without a game everything behaves as before.
 - **Game plugin auto-install**: a missing or outdated game plugin is now installed automatically at startup, with a reminder to restart the game.
@@ -26,6 +27,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **Updater install icon brightens with progress**: stage icons no longer fade in with install percent; progress stays on the connecting lines only.
 - **Limiter brake lights fade**: Releasing brake with speed limiter active now keeps the smooth timeout fade, instead of instantly cutting lights if still on the gas.
 - **Update popup delay fixed**: spacing now tracks when the popup is actually shown, not just when update checks occur.
+
+### Known
+- **ACC disengages at standstill**: when using auto-neutral, ACC disengages when starting again. this will be fixed in preview.9.
 
 ## [1.1.0-preview.7] - 2026-07-20
 ### Added
