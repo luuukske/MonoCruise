@@ -21,6 +21,7 @@ from pathlib import Path
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 from core.settings import Settings
+from ui.popup.popup_window import PopupWindow
 
 from core.radar.traffic import (
     Vehicle,
@@ -164,6 +165,10 @@ _SHADOW_TN_FILTER_REASONS: frozenset[str] = frozenset({
 # in AEBCalibration.
 _CRASH_MIN_SPEED_KMH: float = 40.0
 _CRASH_SPEED_DROP_KMH: float = 5.0
+
+# Sustained-brake popup: fires once per continuous AEB_brake span, after it
+# has held this long, so a single-frame flicker never pops up a notice.
+_BRAKE_POPUP_MIN_DURATION_S: float = 0.5
 
 
 def _find_tractor_for_trailer(trailer: Vehicle, vehicles: list[Vehicle]) -> Vehicle | None:
@@ -836,6 +841,9 @@ class AEBThread(BaseThread):
         self.data = AEBData()
         self._prev_state: AEBState = AEBState.STANDBY
         self._state_hold_until: float = 0.0
+        # Sustained AEB_brake span tracking, for the intervention popup.
+        self._brake_span_start_mono: float | None = None
+        self._brake_popup_fired: bool = False
         # Separate edge tracker for clip-capture triggers (debug only).
         self._capture_prev_state: AEBState = AEBState.STANDBY
         self._prev_ego_speed_capture_ms: float | None = None
@@ -2095,6 +2103,21 @@ class AEBThread(BaseThread):
 
         self._prev_state = new_state
 
+        if aeb_brake:
+            if self._brake_span_start_mono is None:
+                self._brake_span_start_mono = now_mono
+            elif (not self._brake_popup_fired
+                    and now_mono - self._brake_span_start_mono >= _BRAKE_POPUP_MIN_DURATION_S):
+                PopupWindow.emit(
+                    "AEB intervention",
+                    "Automatic Emergency Braking intervention",
+                    "w",
+                )
+                self._brake_popup_fired = True
+        else:
+            self._brake_span_start_mono = None
+            self._brake_popup_fired = False
+
         realized_decel = 0.0
         try:
             st = registry.get_thread("sending_thread")
@@ -2182,6 +2205,8 @@ class AEBThread(BaseThread):
         self._follow_threat_ids = set()
         self._capture_prev_state = AEBState.STANDBY
         self._prev_ego_speed_capture_ms = None
+        self._brake_span_start_mono = None
+        self._brake_popup_fired = False
         self._curvature_blender.prune(set())
         self._los_tracks.clear()
         with self.data._lock:
