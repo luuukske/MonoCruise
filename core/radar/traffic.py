@@ -371,22 +371,20 @@ def _accel_from_speed_history(
     return num / den
 
 
-def _smooth_vehicle_kinematics(
+def _speed_corr_chain(
     raw_speed: float,
     t_now: float,
     dt: float,
     prev_speed_ema: float | None,
     prev_accel: float | None,
-    prev_acc_speed: float | None,
     prev_speed_ema_history: list[tuple[float, float]] | None,
-    prev_acc_standstill: bool = False,
-    prev_acc_release_s: float = 0.0,
     responsive_brake_decel: float = 0.0,
-) -> tuple[float, float, float, float, list[tuple[float, float]], bool, float]:
-    """Speed/accel filter chain shared by AI and TMP vehicles. See AGENTS.md §7.
+) -> tuple[float, float, float, list[tuple[float, float]]]:
+    """Steps 1-3 of the filter chain. See AGENTS.md §7.
 
-    Returns (speed_ema, accel, speed_corr, acc_speed, speed_ema_history,
-    acc_standstill, acc_release_s).
+    Returns (speed_ema, accel, speed_corr, speed_ema_history). Run once per
+    consumer: AEB reads the hard-brake-selected raw speed, ACC reads the long
+    position window (see ``_smooth_vehicle_kinematics``).
     """
     # Step 1: plain EMA of raw speed (no lag compensation).
     if prev_speed_ema is None:
@@ -415,7 +413,20 @@ def _smooth_vehicle_kinematics(
     tau_eff = dt * (1.0 - alpha_s) / alpha_s if alpha_s > 1e-6 else 0.0
     correction = max(-_SPEED_CORR_CLAMP_MS, min(_SPEED_CORR_CLAMP_MS, accel * tau_eff))
     speed_corr = speed_ema + correction
+    return speed_ema, accel, speed_corr, history
 
+
+def _acc_speed_step(
+    speed_corr: float,
+    history: list[tuple[float, float]],
+    accel: float,
+    dt: float,
+    prev_speed_ema: float | None,
+    prev_acc_speed: float | None,
+    prev_acc_standstill: bool,
+    prev_acc_release_s: float,
+) -> tuple[float, bool, float]:
+    """Step 4 of the filter chain. Returns (acc_speed, standstill, release_s)."""
     # Step 4: ACC speed: adaptive low-pass on speed_corr with a constant-accel
     # feed-forward. tau ramps slow→fast with the per-tick change (abrupt jumps)
     # and is scaled down on a confirmed ramp; the feed-forward predicts along
@@ -483,7 +494,72 @@ def _smooth_vehicle_kinematics(
             acc_standstill = True
             acc_speed = 0.0
 
-    return (speed_ema, accel, speed_corr, acc_speed, history,
+    return acc_speed, acc_standstill, acc_release_s
+
+
+def _smooth_vehicle_kinematics(
+    raw_speed: float,
+    acc_raw_speed: float,
+    t_now: float,
+    dt: float,
+    prev_speed_ema: float | None,
+    prev_accel: float | None,
+    prev_speed_ema_history: list[tuple[float, float]] | None,
+    prev_acc_speed_ema: float | None,
+    prev_acc_accel: float | None,
+    prev_acc_speed_ema_history: list[tuple[float, float]] | None,
+    prev_acc_speed: float | None,
+    prev_acc_standstill: bool = False,
+    prev_acc_release_s: float = 0.0,
+    responsive_brake_decel: float = 0.0,
+) -> tuple[float, float, float, list[tuple[float, float]],
+           float, float, list[tuple[float, float]], float, bool, float]:
+    """Speed/accel filter chain shared by AI and TMP vehicles. See AGENTS.md §7.
+
+    Two chains, one per consumer. AEB's ``speed`` / ``acceleration`` run on
+    ``raw_speed``, which is the hard-brake-selected estimate: the short position
+    window when a brake is confirmed. ACC's ``acc_speed`` / ``acc_accel`` run on
+    ``acc_raw_speed``, the long window only.
+
+    The split exists because the short window is an AEB responsiveness device
+    that ACC never needed. On TMP it latches on packet stalls and then stays
+    selected a median of 1.83 s past the end of the stall (corpus measurement),
+    which ACC read as a sustained lead brake and answered with a hard brake of
+    its own. Filtering the stall out is not possible: a stall and a real brake
+    are the same observable until the speed either returns or does not. Keeping
+    the short window off the ACC path removes the exposure instead, and costs
+    AEB nothing.
+
+    Callers pass ``acc_raw_speed == raw_speed`` when ``crash_confirmed``, so a
+    crashed vehicle reaches ACC through the same unfiltered path as AEB.
+
+    Returns (speed_ema, accel, speed_corr, speed_ema_history,
+    acc_speed_ema, acc_accel, acc_speed_ema_history, acc_speed,
+    acc_standstill, acc_release_s).
+    """
+    speed_ema, accel, speed_corr, history = _speed_corr_chain(
+        raw_speed, t_now, dt,
+        prev_speed_ema, prev_accel, prev_speed_ema_history,
+        responsive_brake_decel,
+    )
+
+    # Always run the ACC chain on its own state. It cannot be aliased to the AEB
+    # chain on frames where the two raw speeds happen to agree: the chains carry
+    # separate EMA and history state, so they stay diverged for a window after
+    # any brake transient even once the inputs match again.
+    acc_ema, acc_accel, acc_corr, acc_history = _speed_corr_chain(
+        acc_raw_speed, t_now, dt,
+        prev_acc_speed_ema, prev_acc_accel, prev_acc_speed_ema_history,
+    )
+
+    acc_speed, acc_standstill, acc_release_s = _acc_speed_step(
+        acc_corr, acc_history, acc_accel, dt,
+        prev_acc_speed_ema, prev_acc_speed,
+        prev_acc_standstill, prev_acc_release_s,
+    )
+
+    return (speed_ema, accel, speed_corr, history,
+            acc_ema, acc_accel, acc_history, acc_speed,
             acc_standstill, acc_release_s)
 
 
@@ -1131,6 +1207,8 @@ class Vehicle:
         # Shared-memory acceleration is not used for physics; kinematic value is
         # filled in update_from_last(). Zero until the first update avoids spikes.
         self.acceleration = 0.0
+        # ACC-side acceleration: long-window chain, no hard-brake floor.
+        self.acc_accel = 0.0
         self.trailer_count = trailer_count
         self.trailers = trailers
         self.id = id
@@ -1160,6 +1238,10 @@ class Vehicle:
         self._raw_brake_confirm_frames: int = 0
         self._raw_brake_active: bool = False
         self._raw_brake_converged_frames: int = 0
+        # Parallel steps 1-3 state for the ACC chain (long window only).
+        self._acc_speed_ema: Optional[float] = None
+        self._acc_smooth_accel: Optional[float] = None
+        self._acc_speed_ema_history: list[tuple[float, float]] = []
         # acc_speed standstill latch (hysteresis state): see AGENTS.md §7.
         self._acc_standstill: bool = False
         self._acc_release_s: float = 0.0
@@ -1329,11 +1411,14 @@ class Vehicle:
         self._smooth_speed = prev._smooth_speed
         self._smooth_accel = prev._smooth_accel
         self._speed_ema = prev._speed_ema
+        self._acc_speed_ema = prev._acc_speed_ema
+        self._acc_smooth_accel = prev._acc_smooth_accel
         self._raw_speed = prev._raw_speed
         self._reset_raw_brake_transient()
         self.speed = prev.speed
         self.acceleration = prev.acceleration
         self.acc_speed = prev.acc_speed
+        self.acc_accel = prev.acc_accel
         self._acc_standstill = prev._acc_standstill
         self._acc_release_s = prev._acc_release_s
 
@@ -1357,6 +1442,13 @@ class Vehicle:
             ]
         else:
             self._speed_ema_history = []
+        if prev._acc_speed_ema is not None:
+            self._acc_speed_ema_history = [
+                (t_now - dt_seed, prev._acc_speed_ema),
+                (t_now, prev._acc_speed_ema),
+            ]
+        else:
+            self._acc_speed_ema_history = []
 
     def update_from_last(
         self,
@@ -1401,12 +1493,15 @@ class Vehicle:
             self._smooth_speed = prev._smooth_speed
             self._smooth_accel = prev._smooth_accel
             self._speed_ema = prev._speed_ema
+            self._acc_speed_ema = prev._acc_speed_ema
+            self._acc_smooth_accel = prev._acc_smooth_accel
             self._raw_speed = prev._raw_speed
             self._raw_brake_confirm_frames = prev._raw_brake_confirm_frames
             self._raw_brake_active = prev._raw_brake_active
             self._raw_brake_converged_frames = prev._raw_brake_converged_frames
             self._position_history = list(prev._position_history)
             self._speed_ema_history = list(prev._speed_ema_history)
+            self._acc_speed_ema_history = list(prev._acc_speed_ema_history)
             self._acc_standstill = prev._acc_standstill
             self._acc_release_s = prev._acc_release_s
             if abs(self.angular_velocity) > _MAX_ANGULAR_VELOCITY:
@@ -1414,6 +1509,7 @@ class Vehicle:
             self.speed = prev.speed
             self.acceleration = prev.acceleration
             self.acc_speed = prev.acc_speed
+            self.acc_accel = prev.acc_accel
 
             self._tmp_apply_crash_rotation_jerk(prev, t_now)
 
@@ -1473,12 +1569,15 @@ class Vehicle:
         self._smooth_speed = prev._smooth_speed
         self._smooth_accel = prev._smooth_accel
         self._speed_ema = prev._speed_ema
+        self._acc_speed_ema = prev._acc_speed_ema
+        self._acc_smooth_accel = prev._acc_smooth_accel
         self._raw_speed = prev._raw_speed
         self._raw_brake_confirm_frames = prev._raw_brake_confirm_frames
         self._raw_brake_active = prev._raw_brake_active
         self._raw_brake_converged_frames = prev._raw_brake_converged_frames
         self._position_history = list(prev._position_history)
         self._speed_ema_history = list(prev._speed_ema_history)
+        self._acc_speed_ema_history = list(prev._acc_speed_ema_history)
         self._acc_standstill = prev._acc_standstill
         self._acc_release_s = prev._acc_release_s
 
@@ -1542,7 +1641,10 @@ class Vehicle:
                     self._smooth_accel = 0.0
                     self._smooth_speed = self.speed
                     self._speed_ema = self.speed
+                    self._acc_speed_ema = self.speed
+                    self._acc_smooth_accel = 0.0
                     self.acc_speed = self.speed
+                    self.acc_accel = 0.0
                     self._raw_speed = 0.0
                     if self._smooth_x is not None:
                         self.position.x = self._smooth_x
@@ -1578,7 +1680,9 @@ class Vehicle:
             self.speed = prev.speed
             self.acceleration = prev.acceleration
             self.acc_speed = prev.acc_speed
+            self.acc_accel = prev.acc_accel
             self._smooth_accel = prev._smooth_accel
+            self._acc_smooth_accel = prev._acc_smooth_accel
             return
 
         # World position is unfiltered: arcs and debug use true coordinates.
@@ -1615,9 +1719,14 @@ class Vehicle:
             dt,
             preserve_buffer_sign=not self.is_tmp,
         )
+        # ACC reads the long window; AEB reads whatever the brake transient
+        # selects. On a confirmed crash both read the same unfiltered estimate so
+        # nothing extra sits between a crashed vehicle and either consumer.
+        long_raw_speed = raw_speed
         raw_speed = self._select_raw_speed(
             raw_speed, self.speed, fwd_x, fwd_z,
         )
+        acc_raw_speed = raw_speed if self.crash_confirmed else long_raw_speed
         responsive_brake_decel = 0.0
         if self._raw_brake_active:
             recent_decel = _hard_brake_decel_from_position_history(
@@ -1628,11 +1737,13 @@ class Vehicle:
                     recent_decel, _ACC_SPEED_FF_ACCEL_CLAMP_MS2,
                 )
 
-        (speed_ema, accel, speed_corr, acc_speed,
-         speed_ema_history, acc_standstill, acc_release_s) = _smooth_vehicle_kinematics(
-            raw_speed, t_now, dt,
-            prev._speed_ema, prev._smooth_accel, prev.acc_speed,
-            prev._speed_ema_history,
+        (speed_ema, accel, speed_corr, speed_ema_history,
+         acc_speed_ema, acc_accel, acc_speed_ema_history, acc_speed,
+         acc_standstill, acc_release_s) = _smooth_vehicle_kinematics(
+            raw_speed, acc_raw_speed, t_now, dt,
+            prev._speed_ema, prev._smooth_accel, prev._speed_ema_history,
+            prev._acc_speed_ema, prev._acc_smooth_accel,
+            prev._acc_speed_ema_history, prev.acc_speed,
             prev._acc_standstill, prev._acc_release_s,
             responsive_brake_decel,
         )
@@ -1643,7 +1754,11 @@ class Vehicle:
         self._smooth_speed = speed_corr
         self.speed = speed_corr
         self.acceleration = accel
+        self._acc_speed_ema = acc_speed_ema
+        self._acc_speed_ema_history = acc_speed_ema_history
+        self._acc_smooth_accel = acc_accel
         self.acc_speed = acc_speed
+        self.acc_accel = acc_accel
         self._acc_standstill = acc_standstill
         self._acc_release_s = acc_release_s
 

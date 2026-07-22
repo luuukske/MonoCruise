@@ -15,23 +15,63 @@ from core.radar.traffic import _smooth_vehicle_kinematics
 DT = 0.05  # full-update cadence (s)
 
 
-def _run_chain(raw_speeds: list[float], dt: float = DT):
-    """Run the chain over a raw-speed trace, carrying state like update_from_last."""
+def _run_chain(raw_speeds: list[float], dt: float = DT,
+               acc_raw_speeds: list[float] | None = None):
+    """Run the chain over a raw-speed trace, carrying state like update_from_last.
+
+    ``acc_raw_speeds`` feeds the ACC chain separately; it defaults to the same
+    trace, which is what update_from_last passes whenever no hard-brake window
+    is selected and on a confirmed crash.
+    """
     t = 100.0
     speed_ema = accel = acc_speed = None
-    history = None
+    acc_ema = acc_accel = None
+    history = acc_history = None
     standstill = False
     release_s = 0.0
     out = []
-    for raw in raw_speeds:
-        (speed_ema, accel, speed_corr, acc_speed, history,
+    acc_trace = acc_raw_speeds if acc_raw_speeds is not None else raw_speeds
+    for raw, acc_raw in zip(raw_speeds, acc_trace):
+        (speed_ema, accel, speed_corr, history,
+         acc_ema, acc_accel, acc_history, acc_speed,
          standstill, release_s) = _smooth_vehicle_kinematics(
-            raw, t, dt, speed_ema, accel, acc_speed, history,
+            raw, acc_raw, t, dt,
+            speed_ema, accel, history,
+            acc_ema, acc_accel, acc_history, acc_speed,
             standstill, release_s,
         )
         out.append((speed_corr, acc_speed, accel, standstill))
         t += dt
     return out
+
+
+def test_acc_chain_ignores_the_aeb_hard_brake_window():
+    """acc_speed follows its own raw trace, not the brake-selected one.
+
+    This is the point of the split: on TMP the short window latches on packet
+    stalls and stays selected long after the stall ended, and ACC used to read
+    that as a sustained lead brake. See core/radar/AGENTS.md §7.
+    """
+    cruise = [12.0] * int(3.0 / DT)
+    # AEB path sees a stall dip and recovery; ACC path sees steady cruise.
+    aeb = cruise + [3.0] * int(0.3 / DT) + [12.0] * int(2.0 / DT)
+    acc = [12.0] * len(aeb)
+
+    out = _run_chain(aeb, acc_raw_speeds=acc)
+    speed_corr = [s for s, _, _, _ in out]
+    acc_speed = [a for _, a, _, _ in out]
+
+    dip_from = int(3.0 / DT)
+    assert min(speed_corr[dip_from:]) < 9.0        # AEB saw the dip
+    assert min(acc_speed[dip_from:]) > 11.0        # ACC did not
+
+
+def test_acc_chain_still_tracks_a_real_lead_brake():
+    """The split must not make ACC blind: a brake on both inputs still lands."""
+    trace = [12.0] * int(3.0 / DT) + _ramp(12.0, -4.0, 2.0)
+    out = _run_chain(trace)
+    acc_speed = [a for _, a, _, _ in out]
+    assert acc_speed[-1] < 6.0
 
 
 def _bounce(amp: float, freq_hz: float, dur_s: float, dt: float = DT) -> list[float]:

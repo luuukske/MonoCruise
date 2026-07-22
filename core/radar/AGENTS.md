@@ -188,8 +188,9 @@ corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
 | `position.x/z` | **Unfiltered** shared-memory world coordinates | Arc start position, rendering, collision geometry |
 | `_smooth_yaw` | Wrap-safe EMA of `rotation.euler()[1]` in radians (`_RAW_YAW_ALPHA = 0.5`, AI and TMP) | **Arc curvature. Never use `rotation.euler()` directly for arcs.** |
 | `speed` | Accel-corrected smoothed speed (`speed_corr`): see filter chain below. AI + TMP | AEB arc direction, TTB |
-| `acc_speed` | ACC speed: adaptive filter on `speed_corr`: sub-deadband per-tick changes get a long time constant, larger changes a short one when they agree with the de-noised trend; standstill latch clamps to exactly 0 near rest (filter chain below). AI + TMP | ACC following-distance only |
-| `acceleration` | Nonlinear EMA of `d(speed_ema)/dt`: see filter chain below. AI + TMP (buffer field 11 unused) | Arc decel/accel via `_accel_to_arc_params()` |
+| `acc_speed` | ACC speed: adaptive filter on `speed_corr`: sub-deadband per-tick changes get a long time constant, larger changes a short one when they agree with the de-noised trend; standstill latch clamps to exactly 0 near rest (filter chain below). Runs on the **ACC chain** (long position window only). AI + TMP | ACC following-distance only |
+| `acceleration` | Nonlinear EMA of `d(speed_ema)/dt`: see filter chain below. Runs on the **AEB chain**, so it carries the hard-brake floor. AI + TMP (buffer field 11 unused) | Arc decel/accel via `_accel_to_arc_params()` |
+| `acc_accel` | Same derivation on the **ACC chain**: long window, no hard-brake floor. AI + TMP | ACC `a_lead` (CAH) only |
 | `angular_velocity` | Degrees/s from rotation delta/dt | Arc curvature via `κ = ω_rad/speed` |
 | `_position_history` | `(t, x, z)` tuples appended each full update (AI + TMP); capped at `_POSITION_HISTORY_LEN = 25` | TMP raw-speed LS fit (uses last `_TMP_SPEED_HISTORY_LEN = 20`), `curvature_from_history`, ACC trail arcs |
 | `_speed_ema_history` | `(t, speed_ema)` tuples appended each full update (AI + TMP); capped at `_SPEED_EMA_HISTORY_LEN` | LS-slope fits: `accel` over `_ACCEL_FIT_WINDOW_S`, `accel_trend` over `_ACC_SPEED_ACCEL_WINDOW_S` |
@@ -226,6 +227,35 @@ Confirmed short-window deceleration also floors `acceleration` to the measured
 negative rate before `speed_corr` is calculated. AEB therefore receives both
 the responsive speed and braking trend. Normal cruise, ACC filtering, and the
 long-window TMP ripple rejection are unchanged.
+
+### Two chains: AEB reads the short window, ACC never does
+
+`_smooth_vehicle_kinematics()` runs steps 1-3 **twice**, once per consumer, and
+step 4 on the ACC chain only:
+
+| Chain | Raw input | Outputs | State |
+|-------|-----------|---------|-------|
+| AEB | hard-brake-selected raw speed (short window when a brake is confirmed), plus the `responsive_brake_decel` floor | `speed`, `acceleration` | `_speed_ema`, `_smooth_accel`, `_speed_ema_history` |
+| ACC | long position window only, no floor | `acc_speed`, `acc_accel` | `_acc_speed_ema`, `_acc_smooth_accel`, `_acc_speed_ema_history` |
+
+The short window is an AEB responsiveness device and ACC never needed it. On TMP
+it latches on packet stalls and then stays selected a **median of 1.83 s (p90
+4.91 s) past the end of a stall that itself lasted 0.27 s**, a 6.6x overhang
+that ACC read as a sustained lead brake and answered with a hard brake of its
+own. Filtering the stall out is not possible: a stall and a real brake are the
+same observable until the speed either returns or does not, and TMP buffer
+fields 10/11 are identically zero so there is no second signal. Keeping the
+short window off the ACC path removes the exposure instead. Measured on the TMP
+clip corpus: phantom `a_lead` peak p50 2.98 -> 0.32 m/s², harmful stall events
+548 -> 431, AEB clip-corpus score unchanged at +347.28.
+
+The two chains are **never aliased**, even on frames where both raw speeds
+agree: they carry separate EMA and history state and stay diverged for a window
+after any brake transient.
+
+**Crash bypass**: when `crash_confirmed`, the caller passes the AEB raw speed to
+both chains, so a crashed vehicle reaches ACC through the same unfiltered
+estimate as AEB with nothing extra in between.
 
 Position mismatch holds active state without advancing it and clears an
 unconfirmed entry. Sub-frames copy state unchanged. Lag-freeze early returns
@@ -361,9 +391,9 @@ decide *how hard*: so a real ramp is both detected without false-triggering on
 wobble and tracked responsively. `accel` is clamped to
 `_ACC_SPEED_FF_ACCEL_CLAMP_MS2` so a crash spike cannot jump `acc_speed`.
 
-Exposed as `self.speed = speed_corr` (AEB), `self.acc_speed = acc_speed` (ACC),
-`self.acceleration = accel` (shared); `speed_ema` is the internal `_speed_ema`
-intermediate. On the first full frame after spawn every signal initialises to
+Exposed as `self.speed = speed_corr` and `self.acceleration = accel` (AEB
+chain), `self.acc_speed = acc_speed` and `self.acc_accel = acc_accel` (ACC
+chain); `speed_ema` is the internal `_speed_ema` intermediate. On the first full frame after spawn every signal initialises to
 `raw_speed` (`acc_speed` to `speed_corr`) with `accel = 0`. The step-1/3 `α`
 decreases with |speed| (more smoothing when fast); step 4's `α` is set by the
 adaptive `tau`. Step 4 carries three state values frame to frame: `acc_speed`
@@ -448,15 +478,17 @@ speed = direction * dist / dt
 
 Detects out-of-order packets where the raw position jumps backward along the heading for a limited number of frames.
 
-**Detection:** `dot(raw_disp, prev_smooth_fwd) < -_POS_MISMATCH_BACKWARD_THRESHOLD (-0.05 m)`
+**Detection:** `dot(raw_disp, prev_smooth_fwd) < -_POS_MISMATCH_BACKWARD_THRESHOLD`, which is **0.00 m**: any backward component at all flags the frame.
 
-**Action:** Increment `_pos_mismatch_frames` counter; hold `_smooth_x/z`; carry `speed` and `acceleration` from prev; return early **after** yaw EMA and angular_velocity have run. Path, arc construction, and all other state are unaffected.
+**Action:** Increment `_pos_mismatch_frames` counter; hold `_smooth_x/z`; carry `speed`, `acceleration`, `acc_speed` and `acc_accel` from prev; return early **after** yaw EMA and angular_velocity have run. Path, arc construction, and all other state are unaffected.
 
-**Cap:** When `_POS_MISMATCH_MAX_FRAMES` is reached (10 frames), the flag is cleared and raw position is passed through on the next frame regardless.
+**Cap:** When `_POS_MISMATCH_MAX_FRAMES` is reached (**5** frames), the counter resets and raw position is passed through on the next frame regardless.
 
 ### Crash detection (TMP only)
 
-Fires when **both** rotation jerk (any axis) **and** sporadic position change occur in the same frame window. Runs before position-mismatch and lag early-returns so a crash-induced backward jump is not silently swallowed.
+Fires on **rotation jerk alone** (any axis). There is no position gate in the code. Runs before position-mismatch and lag early-returns so a crash-induced backward jump is not silently swallowed.
+
+Note this is sensitive by design and it over-fires on TMP packet stalls: a stalled vehicle's rotation freezes and snaps with the position. Measured on the clip corpus, `crash_confirmed` is set on 9.7% of moving TMP frames and 59.7% of moving TMP vehicles see it at least once, and it is 3-5x more likely on a stalled frame (21%) than a normal one (4%). That is tolerated because the flag's only effect is to stop filtering, and since the ACC/AEB chain split above, a spurious crash flag no longer routes stall poison into ACC.
 
 **Rotation jerk**: per-axis rate (deg/s) is computed each full frame from `rotation.euler()` (pitch/yaw/roll). Jerk = change in rate since previous frame. Fires if any axis exceeds its threshold:
 
@@ -470,9 +502,9 @@ Fires when **both** rotation jerk (any axis) **and** sporadic position change oc
 - Vertical jump: `|ΔY| > 0.08 m`, or
 - XZ direction reversal: `cos(prev_disp, cur_disp) < -0.3` when both displacement magnitudes exceed 0.025 m.
 
-When both signals fire simultaneously: `_crash_since` starts. After `0.10 s`: `crash_confirmed = True`. `_crash_since` resets whenever either signal is absent.
+On a jerk frame `_crash_since` starts. `_CRASH_CONFIRM_DURATION` is **0.00 s**, so a single frame confirms. `_crash_since` resets on any frame without jerk.
 
-**Effect of `crash_confirmed`:** disables the position-mismatch filter and the lag freeze for that vehicle. Position, speed, and acceleration are derived from raw data as normal. Any displacement: even tiny: passes through unfiltered. Speed and acceleration are **not** overridden; AEB evaluates the vehicle from live kinematics.
+**Effect of `crash_confirmed`:** disables the position-mismatch filter and the lag freeze for that vehicle, and pins the ACC chain's raw input to the AEB one. Position, speed, and acceleration are derived from raw data as normal. Any displacement: even tiny: passes through unfiltered. Speed and acceleration are **not** overridden; AEB evaluates the vehicle from live kinematics.
 
 ### Sub-frame pass (dt < 0.05 s)
 

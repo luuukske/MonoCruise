@@ -177,6 +177,38 @@ def test_subframe_copies_transient_and_reanchor_resets_it():
     assert reanchored._raw_brake_confirm_frames == 0
 
 
+def test_confirmed_crash_feeds_acc_the_same_estimate_as_aeb(monkeypatch):
+    """A confirmed crash must not leave ACC on the long window.
+
+    The split routes ACC to the long position window, but a crashed vehicle has
+    to reach both consumers through the same unfiltered estimate, so the crash
+    bypass pins the ACC input back to the AEB one.
+    """
+    from core.radar import traffic as traffic_mod
+
+    prev, t_now, z = _seed_cruise(12.0)
+
+    def _force_crash(self, prev_v, t):
+        self.crash_confirmed = True
+
+    monkeypatch.setattr(
+        traffic_mod.Vehicle, "_tmp_apply_crash_rotation_jerk", _force_crash,
+    )
+
+    true_speed = 12.0
+    for _ in range(int(0.8 / DT)):
+        next_speed = max(0.0, true_speed - 8.0 * DT)
+        z -= 0.5 * (true_speed + next_speed) * DT
+        t_now += DT
+        prev = _step(prev, t_now, z, next_speed)
+        true_speed = next_speed
+
+    assert prev.crash_confirmed is True
+    # Both consumers see the crash decelerating, neither is held back.
+    assert prev.acceleration < -2.0
+    assert prev.acc_accel < -2.0
+
+
 def test_trailer_does_not_select_its_local_transient():
     prev, t_now, z = _seed_cruise(4.0)
     prev.is_trailer = True

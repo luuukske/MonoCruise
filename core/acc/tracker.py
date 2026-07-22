@@ -554,7 +554,7 @@ class ACCTracker:
         for vid, st in top:
             v = id_to_vehicle[vid]
             eff_speed = v.acc_speed
-            eff_accel = v.acceleration
+            eff_accel = v.acc_accel
 
             # Trailer → tractor swap (TMP top-level trailers only: wrapped
             # nested trailers have their own per-id filter chain and use
@@ -567,7 +567,7 @@ class ACCTracker:
                 tractor = self._resolve_tractor(v, vehicles)
                 if tractor is not None:
                     eff_speed = tractor.acc_speed
-                    eff_accel = tractor.acceleration
+                    eff_accel = tractor.acc_accel
 
             rel = eff_speed - ego_speed_ms  # signed closing = negative
             out.append(
