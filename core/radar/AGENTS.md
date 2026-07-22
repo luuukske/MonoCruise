@@ -253,6 +253,24 @@ The two chains are **never aliased**, even on frames where both raw speeds
 agree: they carry separate EMA and history state and stay diverged for a window
 after any brake transient.
 
+**Hard-decel following gap**: sitting on the long window makes ACC read a real
+lead brake ~1 m/s optimistic, so it follows closer than intended on a hard stop.
+Switching ACC onto the short window during a sustained brake was tried and
+rejected in testing: it recovers the gap but the following stops feeling smooth.
+Do not retry that shape.
+
+What worked instead was retuning step 4, whose slow tau was long enough that the
+feed-forward ran near open loop. `_ACC_SPEED_TAU_SLOW_S` 2.0 -> 1.6 and
+`_ACC_SPEED_ACCEL_FLOOR` 0.35 -> 0.15: gap conceded per hard decel 5.37 -> 4.24 m
+with stall poison and worst-frame jerk unchanged, AEB corpus bit-identical.
+
+The binding constraint is `test_convoy_sawtooth_attenuated_at_cruise`. Note that
+a corpus-wide "steady-following deviation" statistic **disagreed** with it and
+made the change look like a free win; trust the targeted synthetic test. The
+sawtooth cost is carried almost entirely by the tau, not the floor, so the floor
+is taken in full: tau 2.0 -> 0.1997, 1.6 -> 0.2462, 1.4 -> 0.2775, 1.2 -> 0.3158
+(over the 0.30 bound). 1.6 keeps real margin; 1.4 buys 0.05 m for half of it.
+
 **Crash bypass**: when `crash_confirmed`, the caller passes the AEB raw speed to
 both chains, so a crashed vehicle reaches ACC through the same unfiltered
 estimate as AEB with nothing extra in between.
@@ -298,7 +316,7 @@ Step 4 makes `acc_speed` both noise-free and responsive: properties a linear
 EMA cannot give at once. The per-tick change `delta = speed_corr -
 prev_acc_speed` sets the filter time constant: a `|delta|` at or below
 `_ACC_SPEED_DEADBAND_MS` (0.7 m/s) uses the long `_ACC_SPEED_TAU_SLOW_S`
-(2.0 s), so sensor noise and TMP packet jitter are filtered out almost
+(1.6 s), so sensor noise and TMP packet jitter are filtered out almost
 entirely; `tau` then ramps **continuously** down to the fast
 `_ACC_SPEED_TAU_FAST_S` (0.08 s) as `|delta|` grows, reaching it at twice the
 deadband (1.4 m/s). Because `tau` is continuous in `|delta|`, there is no
@@ -360,7 +378,7 @@ endpoints shrink together, so the deadband behaviour is unchanged, just faster.
 `tau` is further **acceleration-scaled**. A vehicle in a steady deceleration or
 acceleration produces little position noise: it does not *need* heavy
 smoothing, and heavy smoothing there only adds lag. So `tau` is multiplied by
-`accel_factor`: 1.0 while coasting, falling to `_ACC_SPEED_ACCEL_FLOOR` once the
+`accel_factor`: 1.0 while coasting, falling to `_ACC_SPEED_ACCEL_FLOOR` (0.15) once the
 de-noised acceleration `accel_trend` (an LS slope of `speed_ema` over
 `_ACC_SPEED_ACCEL_WINDOW_S`) reaches `_ACC_SPEED_ACCEL_HI_MS2`. Accelerations
 below `_ACC_SPEED_ACCEL_LO_MS2` count as cruise noise and are ignored, so cruise

@@ -11,6 +11,11 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Changed
+- **ACC speed filtering smoothed out (TMP)**: ACC now reads its own filter chain instead of sharing one with AEB, so AEB's hard-brake responsiveness no longer leaks jitter into ACC's throttle/brake behavior. AEB's crash and lag detection are unaffected.
+
+### Fixed
+- **ACC hugs the leading vehicle on hard braking**: a side effect of the smoothing above, follow gap on a hard stop was tighter than intended. ACC now backs off sooner while staying just as smooth.
 
 ## [1.1.0-preview.8] - 2026-07-21
 ### Added

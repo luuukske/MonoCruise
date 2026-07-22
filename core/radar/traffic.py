@@ -53,8 +53,25 @@ _SPEED_CORR_CLAMP_MS: float = 3.0
 # _ACC_SPEED_TAU_SLOW_S time constant; the time constant ramps continuously
 # down toward _ACC_SPEED_TAU_FAST_S as the change grows, reaching it at twice
 # the deadband, so real motion is tracked fast. See AGENTS.md §7.
+#
+# TAU_SLOW was 2.0 s. At that length alpha_a is small enough that the step-4
+# feed-forward dominates and acc_speed runs near open loop, which lagged a real
+# lead brake and made ACC follow too close on a hard stop. Shortening it lets
+# the low-pass correction rein the prediction back in. Measured on the TMP
+# corpus, together with the ACCEL_FLOOR change below: gap conceded per hard
+# decel 5.37 -> 4.24 m, with stall poison and worst-frame jerk unchanged.
+#
+# The binding constraint is convoy sawtooth pass-through, guarded by
+# test_convoy_sawtooth_attenuated_at_cruise (bound 0.30 m/s on a 0.8 m/s input
+# wobble). That cost is carried almost entirely by TAU_SLOW: ACCEL_FLOOR barely
+# registers on it (1.6/0.35 -> 0.2462, 1.6/0.25 -> 0.2463), so the floor is
+# taken in full and the tau is bought only down to where margin remains.
+# 2.0 -> 0.1997, 1.6 -> 0.2462, 1.4 -> 0.2775, 1.2 -> 0.3158 (fails).
+# 1.4 buys only 0.05 m more gap for half the remaining margin, so 1.6 it is.
+#
+# Both constants are step-4 only, so AEB is untouched by construction.
 _ACC_SPEED_DEADBAND_MS: float = 0.7
-_ACC_SPEED_TAU_SLOW_S: float = 2.0
+_ACC_SPEED_TAU_SLOW_S: float = 1.6
 _ACC_SPEED_TAU_FAST_S: float = 0.08
 
 # Smoothing is speed-scaled: tau is multiplied by speed_factor: 1.0 at
@@ -74,7 +91,7 @@ _ACC_SPEED_SMOOTH_MIN: float = 0.15
 _ACC_SPEED_ACCEL_WINDOW_S: float = 1.5
 _ACC_SPEED_ACCEL_LO_MS2: float = 0.3
 _ACC_SPEED_ACCEL_HI_MS2: float = 1.5
-_ACC_SPEED_ACCEL_FLOOR: float = 0.35
+_ACC_SPEED_ACCEL_FLOOR: float = 0.15
 
 # Feed-forward: the low-pass alone lags a steady ramp by accel·tau. acc_speed
 # is predicted one step along the responsive accel before the low-pass corrects
