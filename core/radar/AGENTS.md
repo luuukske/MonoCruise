@@ -439,6 +439,16 @@ is_lag         = (abs(prev.speed) > _LAG_MIN_SPEED_MS          # was moving
                  # raw moved less than 10 % of expected displacement
 ```
 
+**Entry rotation gate**: entry (not continuation) additionally requires the
+rotation stream to not be clearly live: the max per-axis rotation delta from
+the previous frame, as a rate, must stay under `_LAG_ROT_LIVE_DEG_S` (2 deg/s).
+A packet stall freezes the whole pose (corpus: p99 of genuine lag-entry
+rotation rates ≈ 1.6 deg/s), while a physically crashing / stopping vehicle
+keeps rotating at 10+ deg/s. This is the discriminator between "packets
+stopped coming" (freeze it) and "vehicle stopped moving" (fall through so AEB
+sees the stop raw). An established freeze window is not bounced by mid-stall
+rotation flicker.
+
 **Freeze duration is TTC-scaled** so a close vehicle's real stop is not masked
 by the filter (a 0.5 s freeze on a vehicle 1 s ahead would rear-end ego). Let
 `gap_3d = |vehicle_pos − ego_pos|` and
@@ -502,27 +512,67 @@ Detects out-of-order packets where the raw position jumps backward along the hea
 
 **Cap:** When `_POS_MISMATCH_MAX_FRAMES` is reached (**5** frames), the counter resets and raw position is passed through on the next frame regardless.
 
-### Crash detection (TMP only)
+### Crash detection (TMP only, full frames only)
 
-Fires on **rotation jerk alone** (any axis). There is no position gate in the code. Runs before position-mismatch and lag early-returns so a crash-induced backward jump is not silently swallowed.
+A crash confirms when a **rotation-jerk frame coincides with a kinematic
+anomaly** on live data. Runs before position-mismatch and lag early-returns so
+a crash-induced backward jump is not silently swallowed. Sub-frames carry the
+latched flag but never evaluate (their tiny dt amplifies quantization noise
+into phantom rates).
 
-Note this is sensitive by design and it over-fires on TMP packet stalls: a stalled vehicle's rotation freezes and snaps with the position. Measured on the clip corpus, `crash_confirmed` is set on 9.7% of moving TMP frames and 59.7% of moving TMP vehicles see it at least once, and it is 3-5x more likely on a stalled frame (21%) than a normal one (4%). That is tolerated because the flag's only effect is to stop filtering, and since the ACC/AEB chain split above, a spurious crash flag no longer routes stall poison into ACC.
+**Stall immunity**: rotation rates are computed between *live* frames only. A
+frozen frame (position and rotation byte-identical to prev: a packet stall)
+holds the rate baseline, so the stall's entry rate-drop reads as nothing and
+its exit snap is averaged over the whole stall span: a clean resume shows
+≈ the pre-stall rate and produces no jerk. Only a vehicle that actually
+crashed *during* the stall resumes with a genuinely different average rate.
 
-**Rotation jerk**: per-axis rate (deg/s) is computed each full frame from `rotation.euler()` (pitch/yaw/roll). Jerk = change in rate since previous frame. Fires if any axis exceeds its threshold:
+**Rotation jerk**: per-axis rate (deg/s) from `rotation.euler()`
+(pitch/yaw/roll) over the span since the last live frame. Jerk = change in
+rate since the previous live pair. Thresholds sit above normal TMP rotation
+noise (pitch/roll deltas of several deg/s, yaw to ~25 on curves) and below
+measured crash rotation (pitch 19+, roll 60+, yaw 100+ on clip 397148fd):
 
 | Axis | Jerk threshold |
 |------|---------------|
-| Pitch | 2 deg/s² |
-| Yaw | 15 deg/s² |
-| Roll | 2 deg/s² |
+| Pitch | 12 deg/s |
+| Yaw | 40 deg/s |
+| Roll | 20 deg/s |
 
-**Sporadic position**: fires on either:
-- Vertical jump: `|ΔY| > 0.08 m`, or
-- XZ direction reversal: `cos(prev_disp, cur_disp) < -0.3` when both displacement magnitudes exceed 0.025 m.
+**Kinematic anomaly** (same frame, any of):
+- Vertical jerk: `|ΔY - prev ΔY| > 0.08 m` (a jerk, not a slope, so a steady
+  grade never qualifies),
+- XZ direction reversal: `cos(prev_disp, cur_disp) < -0.3` when both
+  displacement magnitudes exceed 0.025 m,
+- Displacement collapse: displacement summed over the last TWO live frames
+  under 50 % of `|prev.speed| × Σdt` while `|prev.speed| > 3 m/s`. Two frames
+  because TMP's ~1 Hz position-reconciliation ripple dips single-frame ratios
+  to ~0.3-0.5 while its 2-frame sum stays ≈ 1.0; a physical stop keeps
+  consecutive frames collapsed (a 1-frame 50 % collapse implies ~0.5·v/dt
+  m/s² of decel, far beyond braking).
 
-On a jerk frame `_crash_since` starts. `_CRASH_CONFIRM_DURATION` is **0.00 s**, so a single frame confirms. `_crash_since` resets on any frame without jerk.
+**Latch**: a qualifying frame sets `_crash_hold_until = t + _CRASH_HOLD_S`
+(2.0 s); `crash_confirmed` stays true until the hold expires and refreshes on
+every qualifying frame. Consumers see a stable event flag, not per-frame
+flicker.
 
-**Effect of `crash_confirmed`:** disables the position-mismatch filter and the lag freeze for that vehicle, and pins the ACC chain's raw input to the AEB one. Position, speed, and acceleration are derived from raw data as normal. Any displacement: even tiny: passes through unfiltered. Speed and acceleration are **not** overridden; AEB evaluates the vehicle from live kinematics.
+Measured on the clip corpus (300 clips): `crash_confirmed` on **0.8 %** of
+moving TMP frames (was 9.7 % with the old jerk-only detector), **2.3 %** of
+moving TMP vehicles ever flagged (was 59.7 %). On crash clip 397148fd the flag
+holds continuously on the crashing road train from impact (t = 7.14) through
+ego's collision window with zero flicker, and fires on no pre-crash frame.
+
+**Effect of `crash_confirmed`:** disables the position-mismatch filter and the
+lag freeze for that vehicle, and pins the ACC chain's raw input to the AEB
+one. Position, speed, and acceleration are derived from raw data as normal.
+Any displacement: even tiny: passes through unfiltered. Speed and acceleration
+are **not** overridden; AEB evaluates the vehicle from live kinematics. In
+`core/aeb/thread.py` the flag additionally (a) bypasses the LOS-rate
+engagement veto (a crashed target's track violates the veto's
+constant-velocity assumption, and the tractor point can predict a miss while
+its trailer blocks the lane: crash clip 397148fd) and (b) grants the
+near-certain confirm window at engagement entry (a spun wreck's lane / heading
+classification is unreliable).
 
 ### Sub-frame pass (dt < 0.05 s)
 
@@ -750,7 +800,7 @@ double-count each trailer.
 | Positions | No EMA: always raw world coordinates |
 | Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > 2 m/s` → decay speed: `prev_speed × (1 − frac²)`, release after 0.3 s |
 | Pos mismatch | `dot(raw_disp, prev_fwd) < -0.05 m` AND `is_tmp` AND `frames < 10` → hold smooth pos + speed, allow yaw |
-| Crash detection | rotation jerk (pitch/yaw/roll deg/s²) AND (\|ΔY\| > 0.08 m OR XZ dir reversal cos < -0.3); both must fire → confirm after 0.10 s; disables pos-mismatch filter and lag freeze; speed/accel stay raw |
+| Crash detection | live-frame rotation jerk (pitch 12 / yaw 40 / roll 20 deg/s) AND kinematic anomaly (vertical jerk > 0.08 m OR XZ reversal cos < -0.3 OR 2-frame disp collapse < 50 %); confirm latches 2.0 s; disables pos-mismatch filter and lag freeze; speed/accel stay raw |
 | Yaw EMA (wrap-safe) | `smooth += 0.5 * ((raw - smooth + π) % 2π - π)` |
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
 
@@ -778,7 +828,9 @@ double-count each trailer.
 - **Position mismatch (TMP only) runs before lag detection.** It is mutually exclusive with lag: a backward jump is not near-stationary. The `not _skip_position_update` guard on the lag block enforces this.
 - **Position mismatch is capped at `_POS_MISMATCH_MAX_FRAMES (10)`.** When the cap is reached, the next frame always passes raw position through. Without this cap, a genuine crash or prolonged backward event would be silently swallowed.
 - **Crash detection does not override speed or acceleration.** It disables the pos-mismatch filter and lag freeze so raw position data passes through unfiltered.
-- **Crash detection runs before pos-mismatch and lag early-returns.** Both signals (rotation jerk and sporadic position) must fire simultaneously; `_crash_since` resets whenever either is absent.
+- **Crash detection runs before pos-mismatch and lag early-returns.** Both signals (rotation jerk and a kinematic anomaly) must fire on the same live frame; the confirmation then latches for `_CRASH_HOLD_S` so consumers never see per-frame flicker.
+- **Crash rotation rates span packet stalls.** A frozen (byte-identical) frame must not advance the rate baseline: the stall-exit snap has to read as its average rate, or every stall resume fires a phantom crash (the pre-fix detector flagged 59.7 % of TMP vehicles).
+- **Lag entry requires a non-live rotation stream** (`_LAG_ROT_LIVE_DEG_S`): a frozen position with crash-scale rotation is a physical stop and must reach AEB raw, not decay behind the freeze.
 - **Vehicle longitudinal accel for arcs**: `Vehicle.accel_for_arc()` → `self.acceleration` (TMP = filtered kinematic; AI = buffer). Then `_accel_to_arc_params(accel, override_decel)`.
 - **AI (singleplayer) speed is used as-is from the buffer.** Do not derive/flip sign from displacement or turning vehicles can be misclassified as reversing.
 - **`Vehicle.curvature_from_history()` is the curvature source.** Returns circumscribed-circle curvature from `_position_history`; `None` when < 3 samples (caller falls back to yaw-rate); `0.0` when near-stationary. Both TMP and AI vehicles populate `_position_history` in `update_from_last()`.

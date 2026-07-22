@@ -1629,7 +1629,12 @@ class AEBThread(BaseThread):
                     aligned = abs(ctx.fwd_dot) >= cal.aeb_certain_fwd_dot
                     if ctx.lane == Lane.EGO and aligned:
                         certain_geom_ids.add(v.id)
-                    if ctx.lane == Lane.EGO or aligned:
+                    # A crash-confirmed wreck gets the short confirm window:
+                    # its spun pose makes the lane / heading classification
+                    # unreliable, and it is exactly the target that must not
+                    # wait out the oblique window (crash clip 397148fd).
+                    if (ctx.lane == Lane.EGO or aligned
+                            or getattr(v, "crash_confirmed", False)):
                         nearcertain_geom_ids.add(v.id)
                     newly_risky.add(v.id)
                     rc = self._risk_confirm.get(v.id)
@@ -1748,7 +1753,15 @@ class AEBThread(BaseThread):
                     vetoed = los_veto_memo.get(v.id)
                     if vetoed is None:
                         vetoed = False
-                        if cal.los_veto_enabled and dist >= cal.los_veto_min_range_m:
+                        # Never veto a crash-confirmed target: its track
+                        # violates the constant-velocity assumption (the fit
+                        # window still carries pre-crash momentum), and the
+                        # tractor point can predict a miss while its trailer
+                        # blocks the lane (crash clip 397148fd: veto held the
+                        # engagement 0.75 s past the last stopping point).
+                        if (cal.los_veto_enabled
+                                and dist >= cal.los_veto_min_range_m
+                                and not getattr(v, "crash_confirmed", False)):
                             d_miss = _los_predicted_miss(
                                 self._los_tracks.get(v.id, ()), now_mono, cal,
                             )

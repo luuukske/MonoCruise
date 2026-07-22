@@ -16,6 +16,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ### Fixed
 - **ACC hugs the leading vehicle on hard braking**: a side effect of the smoothing above, follow gap on a hard stop was tighter than intended. ACC now backs off sooner while staying just as smooth.
+- **AEB braked late for crashed traffic (TMP)**: a vehicle crashing ahead could be mistaken for network lag, and network lag for a crash, delaying the emergency brake by up to a second. Crash and lag are now told apart reliably and a confirmed crash gets AEB's fastest response.
 
 ## [1.1.0-preview.8] - 2026-07-21
 ### Added

@@ -249,6 +249,11 @@ class AEBCalibration:
     #     bearing drift right up until they commit.
     #   miss_dist_m: veto when predicted miss exceeds this. Corpus separation:
     #     genuine engagements measure 0.05-4.4 m, corner phantoms 6.8-12.3 m.
+    # Crash-confirmed targets are never vetoed: their track violates the
+    # constant-velocity assumption (the window carries pre-crash momentum) and
+    # the tractor point can predict a miss while a trailer blocks the lane
+    # (crash clip 397148fd: the veto held engagement 0.75 s past the last
+    # stopping point).
     los_veto_enabled: bool = True
     los_veto_window_s: float = 0.6
     los_veto_min_samples: int = 12

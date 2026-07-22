@@ -138,6 +138,13 @@ _RAW_YAW_ALPHA: float = 0.50
 # TMP lag detection: see AGENTS.md §7 "Lag / freeze detection".
 _LAG_MIN_SPEED_MS: float = 5.0           # m/s : below this no lag detection runs
 _LAG_DISP_RATIO: float = 0.10           # flag lag if raw disp < 10 % of expected
+# Entry is blocked while the rotation stream is clearly live: a packet stall
+# freezes the whole pose (rotation byte-identical or near-frozen), while a
+# physically stopping (crashed) vehicle keeps rotating at crash scale. This
+# separates "packets stopped coming" (freeze it) from "vehicle stopped moving"
+# (show the stop to AEB immediately). Threshold is a rate so it is frame-rate
+# independent; stall-window jitter measures < ~1 deg/s, crash rotation 10+.
+_LAG_ROT_LIVE_DEG_S: float = 2.0         # deg/s: rotation at/above this blocks entry
 
 # Freeze duration scales logarithmically with time-to-vehicle (TTC) so a close
 # real stop is not masked by the filter. TTC = 3D distance to ego / ego_speed,
@@ -157,11 +164,34 @@ _LAG_FREEZE_LOG_K: float = _LAG_FREEZE_DUR_MAX / math.log(
 _POS_MISMATCH_BACKWARD_THRESHOLD: float = 0.00   # m: min backward dot to flag
 _POS_MISMATCH_MAX_FRAMES: int = 5
 
-# Crash detection (TMP only): angular jerk vs last sample (every read, not only full frames).
-_CRASH_PITCH_JERK: float = 2.0                  # deg/s² pitch angular jerk threshold
-_CRASH_YAW_JERK: float = 15.0                   # deg/s² yaw angular jerk threshold
-_CRASH_ROLL_JERK: float = 2.0                   # deg/s² roll angular jerk threshold
-_CRASH_CONFIRM_DURATION: float = 0.00           # s jerk must hold before confirming
+# Crash detection (TMP only, full frames only). A crash confirms when a
+# rotation-jerk frame coincides with a kinematic anomaly on live data:
+# XZ direction reversal, vertical jump, or single-frame displacement collapse.
+# Rotation rates are computed between live frames only and span frozen
+# (packet-stall) intervals, so a stall's entry rate-drop and exit snap read as
+# their true average rate instead of a one-frame jerk. A confirmed crash
+# latches crash_confirmed for _CRASH_HOLD_S past the last qualifying frame so
+# consumers (filter bypasses, the AEB LOS-veto bypass) see a stable event flag
+# rather than per-frame flicker.
+# Jerk thresholds sit above normal TMP rotation noise (pitch/roll rate deltas
+# of several deg/s frame to frame, yaw to ~25 on curves) and below measured
+# crash rotation (pitch 19+, roll 60+, yaw 100+ on clip 397148fd).
+_CRASH_PITCH_JERK: float = 12.0                 # deg/s pitch rate delta threshold
+_CRASH_YAW_JERK: float = 40.0                   # deg/s yaw rate delta threshold
+_CRASH_ROLL_JERK: float = 20.0                  # deg/s roll rate delta threshold
+_CRASH_HOLD_S: float = 2.0                      # s latch past the last qualifying frame
+_CRASH_FROZEN_EPS: float = 1e-6                 # deg / m: byte-identical frame detection
+# Vertical corroboration is a jerk (|Δy - prev Δy|), not a slope, so a steady
+# grade (Δy up to ~0.14 m/frame at highway speed) never qualifies.
+_CRASH_VERTICAL_JERK_M: float = 0.08            # m per-frame Δy change
+_CRASH_REVERSAL_COS: float = -0.3               # cos(prev disp, cur disp) below this
+_CRASH_REVERSAL_MIN_DISP_M: float = 0.025       # m both displacements must exceed
+# Displacement collapse is measured over the last TWO live frames so TMP's
+# ~1 Hz position-reconciliation ripple (alternating short / long frames whose
+# single-frame ratio dips to ~0.3-0.5 of filtered speed) averages out to ~1.0,
+# while a physical stop keeps consecutive frames collapsed.
+_CRASH_DISP_COLLAPSE_RATIO: float = 0.5         # 2-frame disp under this frac of expected
+_CRASH_DISP_COLLAPSE_MIN_SPEED_MS: float = 3.0  # m/s prev speed for collapse check
 
 _MIN_CURVATURE_RADIUS: float = 5.0
 _STRAIGHT_CURVATURE_EPS: float = 1e-6
@@ -1279,11 +1309,19 @@ class Vehicle:
         # Resets to 0 on any clean frame or when the cap is reached.
         self._pos_mismatch_frames: int = 0
 
-        # Crash detection (TMP only): per-axis rotation rates and displacement from prev frame.
+        # Crash detection (TMP only, full frames only): live-frame rotation
+        # rates, live-frame pose baseline (spans packet stalls), previous live
+        # displacement for the reversal check, and the confirmation latch.
         self._prev_pitch_rate: Optional[float] = None
         self._prev_yaw_rate: Optional[float] = None
         self._prev_roll_rate: Optional[float] = None
-        self._crash_since: Optional[float] = None
+        self._last_live_rot: Optional[tuple[float, float, float]] = None
+        self._last_live_rot_time: Optional[float] = None
+        self._prev_disp_x: Optional[float] = None
+        self._prev_disp_z: Optional[float] = None
+        self._prev_disp_dt: Optional[float] = None
+        self._prev_disp_y: Optional[float] = None
+        self._crash_hold_until: float = -1.0
         self.crash_confirmed: bool = False
 
         self._curvature_cache: float | None = None
@@ -1357,7 +1395,30 @@ class Vehicle:
         return short_speed
 
     def _tmp_apply_crash_rotation_jerk(self, prev: "Vehicle", t_now: float) -> None:
-        """TMP: detect crash-level rotation jerk on every buffer read (sub-frame and full)."""
+        """TMP full frames: corroborated rotation-jerk crash detection with latch.
+
+        Rotation rates are computed between live frames only. A frozen frame
+        (position and rotation byte-identical to prev: a packet stall) does not
+        advance the rate baseline, so the stall's entry rate-drop and its exit
+        snap are averaged over the whole stall span instead of read as a
+        one-frame jerk. A jerk frame confirms a crash only when the same frame
+        shows a kinematic anomaly on live data: XZ direction reversal,
+        vertical jump, or single-frame displacement collapse. Confirmation
+        latches ``crash_confirmed`` until ``_CRASH_HOLD_S`` past the last
+        qualifying frame.
+        """
+        self._prev_pitch_rate = prev._prev_pitch_rate
+        self._prev_yaw_rate = prev._prev_yaw_rate
+        self._prev_roll_rate = prev._prev_roll_rate
+        self._last_live_rot = prev._last_live_rot
+        self._last_live_rot_time = prev._last_live_rot_time
+        self._prev_disp_x = prev._prev_disp_x
+        self._prev_disp_z = prev._prev_disp_z
+        self._prev_disp_dt = prev._prev_disp_dt
+        self._prev_disp_y = prev._prev_disp_y
+        self._crash_hold_until = prev._crash_hold_until
+        self.crash_confirmed = t_now < self._crash_hold_until
+
         dt = t_now - prev.time
         if not self.is_tmp or prev._raw_x is None or dt < 1e-9:
             return
@@ -1365,32 +1426,78 @@ class Vehicle:
         def _adiff(a: float, b: float) -> float:
             return (a - b + 180.0) % 360.0 - 180.0
 
-        pitch_c, yaw_c, roll_c = self.rotation.euler()
-        pitch_p, yaw_p, roll_p = prev.rotation.euler()
-        pitch_rate = _adiff(pitch_c, pitch_p) / dt
-        yaw_rate = _adiff(yaw_c, yaw_p) / dt
-        roll_rate = _adiff(roll_c, roll_p) / dt
+        dx = self.position.x - prev._raw_x
+        dz = self.position.z - prev._raw_z
+        dy = self.position.y - prev.position.y
+        cur = self.rotation.euler()
+        prev_rot = prev.rotation.euler()
+        rot_delta_prev = max(abs(_adiff(c, p)) for c, p in zip(cur, prev_rot))
+
+        if self._last_live_rot is None:
+            self._last_live_rot = cur
+            self._last_live_rot_time = t_now
+            self._prev_disp_x = dx
+            self._prev_disp_z = dz
+            self._prev_disp_dt = dt
+            self._prev_disp_y = dy
+            return
+
+        if (abs(dx) < _CRASH_FROZEN_EPS and abs(dz) < _CRASH_FROZEN_EPS
+                and rot_delta_prev < _CRASH_FROZEN_EPS):
+            # Stalled packet stream: hold the live baselines untouched.
+            return
+
+        span = t_now - self._last_live_rot_time
+        if span < 1e-9:
+            return
+        base = self._last_live_rot
+        pitch_rate = _adiff(cur[0], base[0]) / span
+        yaw_rate = _adiff(cur[1], base[1]) / span
+        roll_rate = _adiff(cur[2], base[2]) / span
 
         _rot_jerk = False
-        if prev._prev_pitch_rate is not None:
+        if self._prev_pitch_rate is not None:
             if (
-                abs(pitch_rate - prev._prev_pitch_rate) > _CRASH_PITCH_JERK
-                or abs(yaw_rate - prev._prev_yaw_rate) > _CRASH_YAW_JERK
-                or abs(roll_rate - prev._prev_roll_rate) > _CRASH_ROLL_JERK
+                abs(pitch_rate - self._prev_pitch_rate) > _CRASH_PITCH_JERK
+                or abs(yaw_rate - self._prev_yaw_rate) > _CRASH_YAW_JERK
+                or abs(roll_rate - self._prev_roll_rate) > _CRASH_ROLL_JERK
             ):
                 _rot_jerk = True
+
+        if _rot_jerk:
+            _anomaly = (self._prev_disp_y is not None
+                        and abs(dy - self._prev_disp_y) > _CRASH_VERTICAL_JERK_M)
+            if not _anomaly and self._prev_disp_x is not None:
+                _cur_mag = math.hypot(dx, dz)
+                _prev_mag = math.hypot(self._prev_disp_x, self._prev_disp_z)
+                if (_cur_mag > _CRASH_REVERSAL_MIN_DISP_M
+                        and _prev_mag > _CRASH_REVERSAL_MIN_DISP_M):
+                    _cos = ((dx * self._prev_disp_x + dz * self._prev_disp_z)
+                            / (_cur_mag * _prev_mag))
+                    if _cos < _CRASH_REVERSAL_COS:
+                        _anomaly = True
+            if (not _anomaly
+                    and self._prev_disp_x is not None
+                    and self._prev_disp_dt is not None
+                    and abs(prev.speed) > _CRASH_DISP_COLLAPSE_MIN_SPEED_MS):
+                _disp2 = (math.hypot(dx, dz)
+                          + math.hypot(self._prev_disp_x, self._prev_disp_z))
+                _expected2 = abs(prev.speed) * (dt + self._prev_disp_dt)
+                if _disp2 < _expected2 * _CRASH_DISP_COLLAPSE_RATIO:
+                    _anomaly = True
+            if _anomaly:
+                self._crash_hold_until = t_now + _CRASH_HOLD_S
+                self.crash_confirmed = True
 
         self._prev_pitch_rate = pitch_rate
         self._prev_yaw_rate = yaw_rate
         self._prev_roll_rate = roll_rate
-
-        if _rot_jerk:
-            if self._crash_since is None:
-                self._crash_since = t_now
-            if t_now - self._crash_since >= _CRASH_CONFIRM_DURATION:
-                self.crash_confirmed = True
-        else:
-            self._crash_since = None
+        self._last_live_rot = cur
+        self._last_live_rot_time = t_now
+        self._prev_disp_x = dx
+        self._prev_disp_z = dz
+        self._prev_disp_dt = dt
+        self._prev_disp_y = dy
 
     def _hold_across_clock_discontinuity(self, prev: "Vehicle", t_now: float) -> None:
         """Re-base after a pause/hitch gap without integrating across it.
@@ -1419,10 +1526,18 @@ class Vehicle:
         self._lag_since = None
         self.lag_confirmed = False
         self._pos_mismatch_frames = 0
-        self._prev_pitch_rate = prev._prev_pitch_rate
-        self._prev_yaw_rate = prev._prev_yaw_rate
-        self._prev_roll_rate = prev._prev_roll_rate
-        self._crash_since = None
+        # Crash detection restarts on the new clock: rates and pose baseline
+        # cannot span the discontinuity, and the latch resets with them.
+        self._prev_pitch_rate = None
+        self._prev_yaw_rate = None
+        self._prev_roll_rate = None
+        self._last_live_rot = None
+        self._last_live_rot_time = None
+        self._prev_disp_x = None
+        self._prev_disp_z = None
+        self._prev_disp_dt = None
+        self._prev_disp_y = None
+        self._crash_hold_until = -1.0
         self.crash_confirmed = False
 
         self._smooth_speed = prev._smooth_speed
@@ -1505,8 +1620,14 @@ class Vehicle:
             self._prev_pitch_rate = prev._prev_pitch_rate
             self._prev_yaw_rate = prev._prev_yaw_rate
             self._prev_roll_rate = prev._prev_roll_rate
-            self._crash_since = prev._crash_since
-            self.crash_confirmed = prev.crash_confirmed
+            self._last_live_rot = prev._last_live_rot
+            self._last_live_rot_time = prev._last_live_rot_time
+            self._prev_disp_x = prev._prev_disp_x
+            self._prev_disp_z = prev._prev_disp_z
+            self._prev_disp_dt = prev._prev_disp_dt
+            self._prev_disp_y = prev._prev_disp_y
+            self._crash_hold_until = prev._crash_hold_until
+            self.crash_confirmed = t_now < prev._crash_hold_until
             self._smooth_speed = prev._smooth_speed
             self._smooth_accel = prev._smooth_accel
             self._speed_ema = prev._speed_ema
@@ -1527,8 +1648,6 @@ class Vehicle:
             self.acceleration = prev.acceleration
             self.acc_speed = prev.acc_speed
             self.acc_accel = prev.acc_accel
-
-            self._tmp_apply_crash_rotation_jerk(prev, t_now)
 
             # Between full updates (dt < threshold), snap pose to the latest buffer
             # coordinates so arcs track sub-frame motion. Re-derive _raw_speed for
@@ -1578,11 +1697,8 @@ class Vehicle:
         self._lag_since = prev._lag_since
         self.lag_confirmed = False
         self._pos_mismatch_frames = prev._pos_mismatch_frames
-        self._prev_pitch_rate = prev._prev_pitch_rate
-        self._prev_yaw_rate = prev._prev_yaw_rate
-        self._prev_roll_rate = prev._prev_roll_rate
-        self._crash_since = prev._crash_since
-        self.crash_confirmed = False
+        # Crash state (rates, baselines, latch) is carried and re-evaluated by
+        # _tmp_apply_crash_rotation_jerk below.
         self._smooth_speed = prev._smooth_speed
         self._smooth_accel = prev._smooth_accel
         self._speed_ema = prev._speed_ema
@@ -1603,7 +1719,8 @@ class Vehicle:
         self._raw_x = raw_x
         self._raw_z = raw_z
 
-        # Type 3: Crash detection (TMP only): angular jerk; sub-frames call the same helper earlier.
+        # Type 3: Crash detection (TMP only, full frames only): corroborated
+        # rotation jerk with a hold latch; sub-frames carry the latched flag.
         self._tmp_apply_crash_rotation_jerk(prev, t_now)
 
         # Type 1: Position mismatch (TMP only, max _POS_MISMATCH_MAX_FRAMES)
@@ -1632,7 +1749,22 @@ class Vehicle:
             _raw_disp_sq = (raw_x - prev._raw_x) ** 2 + (raw_z - prev._raw_z) ** 2
             _expected_disp = abs(prev.speed) * dt
             _lag_threshold_sq = (_expected_disp * _LAG_DISP_RATIO) ** 2
-            if abs(prev.speed) > _LAG_MIN_SPEED_MS and _raw_disp_sq < _lag_threshold_sq:
+            _lag_rot_ok = True
+            if prev._lag_since is None:
+                # Entry gate only (an established freeze window is not bounced
+                # by mid-stall rotation flicker): a frozen position with a
+                # clearly live rotation stream is a physical stop, not a
+                # packet stall. Fall through so AEB sees the stop raw.
+                _pe_lag = prev.rotation.euler()
+                _ce_lag = self.rotation.euler()
+                _rot_delta_lag = max(
+                    abs((_c - _p + 180.0) % 360.0 - 180.0)
+                    for _c, _p in zip(_ce_lag, _pe_lag)
+                )
+                _lag_rot_ok = _rot_delta_lag / dt < _LAG_ROT_LIVE_DEG_S
+            if (abs(prev.speed) > _LAG_MIN_SPEED_MS
+                    and _raw_disp_sq < _lag_threshold_sq
+                    and _lag_rot_ok):
                 if self._lag_since is None:
                     self._lag_since = t_now
                 _lag_duration = t_now - self._lag_since
