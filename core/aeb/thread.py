@@ -16,6 +16,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
@@ -47,7 +48,7 @@ try:
 except ImportError:
     _PYGAME_AVAILABLE = False
 
-_AEB_SOUND_PATH = "core/aeb/aeb_warning.wav"
+_AEB_SOUND_PATH = str(Path(__file__).resolve().parent / "AEB_warning.wav")
 # Extra seamless-loop plays after stop_warning() (avoids a single short blip).
 _AEB_WARNING_STOP_EXTRA_REPLAYS = 1
 
@@ -743,7 +744,10 @@ class _AEBSoundHandler:
             self._sound = pygame.mixer.Sound(sound_file_path)
             self._sound.set_volume(0.8)
         except Exception as exc:
-            logger.warning("AEB sound init failed (%s): sound disabled", exc)
+            logger.error(
+                "AEB sound init failed for %s (%s): sound disabled",
+                sound_file_path, exc,
+            )
             self._sound = None
 
     def start_warning(self) -> None:
