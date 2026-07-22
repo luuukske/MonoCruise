@@ -287,7 +287,7 @@ class MainPedalThread(BaseThread):
         # Button devices (non-critical).
         self._init_button_devices()
 
-        self._latency_ts = time.monotonic()
+        self._latency_ts = time.perf_counter()
         logger.debug("setup complete")
 
     def loop(self) -> None:
@@ -297,8 +297,14 @@ class MainPedalThread(BaseThread):
         polling_rate = max(Settings.polling_rate, 10)
         self.loop_interval = 1.0 / polling_rate
 
-        now = time.monotonic()
-        latency = now - self._latency_ts
+        # perf_counter, not monotonic: on Windows time.monotonic() is
+        # GetTickCount64 with a 15.6 ms resolution, so above ~64 Hz polling two
+        # consecutive loops read the same tick and latency came out 0.0. That
+        # made the brake-rise threshold below collapse to -0.0 and fire the
+        # emergency stop with the pedal untouched. Clamped as well, so a stalled
+        # or duplicated tick can never produce a degenerate threshold.
+        now = time.perf_counter()
+        latency = min(max(now - self._latency_ts, 0.001), 0.1)
         self._latency_ts = now
         latency_multiplier = (latency / 0.015) * 2
 
@@ -489,8 +495,12 @@ class MainPedalThread(BaseThread):
         # Emergency stop detection.
         em_stop = self.data.em_stop
 
+        # A slam needs the pedal to actually be moving down: the `> 0.0` guard
+        # keeps a resting pedal out of the rate test no matter what the timing
+        # looks like.
+        brake_rise = brakeval - prev_brakeval
         sudden_brake_slam = (
-            prev_brakeval - brakeval <= -0.07 * latency_multiplier
+            (brake_rise > 0.05 and brake_rise >= 0.07 * latency_multiplier)
             or brakeval >= 0.8
             or park_brake
         )
@@ -513,7 +523,7 @@ class MainPedalThread(BaseThread):
             brake_output = 1.0
             gas_output   = 0.0
             still_braking = brakeval > 0.8 or park_brake or (
-                prev_brakeval - brakeval <= -0.03 * latency_multiplier
+                brake_rise > 0.05 and brake_rise >= 0.03 * latency_multiplier
             )
             if not still_braking and not self.data.device_lost:
                 em_stop      = False
