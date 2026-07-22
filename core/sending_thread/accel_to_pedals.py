@@ -52,7 +52,22 @@ _LOW_GEAR_KD_MAX_GEAR: int = 2
 # This is the PRIMARY absorber of persistent road-load error. Kept fast enough that
 # fast PID never has to carry bias (which would cause stale state across context flips).
 _KI_SLOW: float = 0.15
-_SLOW_I_CLAMP_MS2: float = 2.0
+# Measured road-load error is around 0.5 m/s2, so +-1.0 is double the headroom
+# the correction actually needs. The old +-2.0 mostly bounded windup, not bias.
+_SLOW_I_CLAMP_MS2: float = 1.0
+# Anti-windup. A railed pedal has no authority left, so tracking error that
+# persists there is not road-load bias and integrating it is pure windup. A
+# loaded truck rails the gas for minutes at a time on climbs, which wound the
+# integral to its clamp; the mapper then kept feeding gas for tens of seconds
+# after the commander asked for decel, because the wound bias sits inside the
+# effective road load the feedforward has to overcome before it reaches the
+# brake side. Same role the fast integral's back-calc plays in `step`.
+_SLOW_I_SAT_EFFORT: float = 0.95
+# Unwinding runs faster than winding: bias written in during a saturated climb
+# must be sheddable in seconds when the road flips, not tens of seconds. Only
+# applies while the error opposes the stored bias, and it drops out at the zero
+# crossing, so it cannot drive the integral past zero.
+_KI_SLOW_UNWIND_MULT: float = 3.0
 # Initial bias: overestimates resistance so the limiter approaches the set speed
 # conservatively on first engagement. The integral corrects this within a few seconds.
 _SLOW_I_INIT_BIAS_MS2: float = -0.4
@@ -332,6 +347,13 @@ class MapperSharedState:
     # Gas rate-limit memory: continuity across handover.
     prev_gas_cmd: float | None = None
 
+    # Signed effort committed on the previous tick (pedal units, gas positive).
+    # Slow-integral anti-windup reads it: the integral must not keep
+    # accumulating toward a pedal that is already railed. Lagged by one tick
+    # because the effort is only known after the integral has been folded into
+    # the effective road load.
+    prev_effort: float = 0.0
+
     # Gas-capacity glide state (m/s² at gas=1.0): the capacity actually used
     # for the gas mapping, chasing the per-gear estimate with asymmetric taus
     # so the pedal glides across gear changes instead of stepping.
@@ -441,6 +463,7 @@ class AccelToPedals:
         s.prev_raw_smooth = 0.0
         s.output_smooth_ms2 = None
         s.prev_gas_cmd = None
+        s.prev_effort = 0.0
         s.accel_capacity_glide_ms2 = None
         s.slow_integral = _SLOW_I_INIT_BIAS_MS2
         s.prev_mono = None
@@ -888,6 +911,8 @@ class AccelToPedals:
         When `freeze_slow_i=True` (hold FSM owns standstill), the slow integral
         is frozen both signs and leaks toward 0 with _HOLD_SLOW_I_LEAK_TAU_S so
         stale negative bias from the decel-to-stop bleeds out before launch.
+        Outside that, it carries its own anti-windup (frozen against a railed
+        pedal) and unwinds at _KI_SLOW_UNWIND_MULT times the winding rate.
 
         `cap_mode=True` (sole-limiter: the output is a pedal cap, not a
         tracking command): the anti-windup back-calc is skipped. A railed cap
@@ -1017,15 +1042,17 @@ class AccelToPedals:
                 error_ms2 = 0.0
 
             # Slow integral: m/s² space, frozen during gearshift, no decay.
-            # Two freeze regimes:
+            # Freeze regimes:
             #   * freeze_slow_i=True (hold FSM owns standstill): freeze both
             #     signs and leak toward 0 with _HOLD_SLOW_I_LEAK_TAU_S so stale
             #     bias from the decel-to-stop bleeds out before launch.
-            #   * Otherwise, fall back to the one-sided stationary gate: at
-            #     speeds below _STATIONARY_SLOW_I_GATE_SPEED_MS the negative
-            #     accumulation path is frozen (raw_accel can't go below 0 while
-            #     stationary so error stays negative forever); positive errors
-            #     still bleed wound state toward zero.
+            #   * Otherwise, the one-sided stationary gate: at speeds below
+            #     _STATIONARY_SLOW_I_GATE_SPEED_MS the negative accumulation
+            #     path is frozen (raw_accel can't go below 0 while stationary so
+            #     error stays negative forever); positive errors still bleed
+            #     wound state toward zero.
+            #   * Plus anti-windup against a railed pedal, and a boosted gain
+            #     while unwinding (see the constants for both).
             if freeze_slow_i:
                 leak = math.exp(-dt / max(_HOLD_SLOW_I_LEAK_TAU_S, 1e-6))
                 new_slow_integral = new_slow_integral * leak
@@ -1035,8 +1062,23 @@ class AccelToPedals:
                     if (speed < _STATIONARY_SLOW_I_GATE_SPEED_MS and error_ms2 < 0.0)
                     else 1.0
                 )
+                # Anti-windup: the previous tick's pedal was railed, so error
+                # pushing further that way cannot be answered with more command.
+                # Winding on it only delays the eventual recovery.
+                if (
+                    (s.prev_effort >= _SLOW_I_SAT_EFFORT and error_ms2 > 0.0)
+                    or (s.prev_effort <= -_SLOW_I_SAT_EFFORT and error_ms2 < 0.0)
+                ):
+                    slow_i_gate = 0.0
+                # Asymmetric rate: error opposing the stored bias sheds it at
+                # the boosted gain, error reinforcing it accumulates at the base
+                # gain. The sign test goes false as soon as the integral crosses
+                # zero, so the boost cannot keep driving it out the far side.
+                ki_slow = _KI_SLOW
+                if new_slow_integral * error_ms2 < 0.0:
+                    ki_slow *= _KI_SLOW_UNWIND_MULT
                 new_slow_integral = _clamp(
-                    new_slow_integral + _KI_SLOW * error_ms2 * factor * dt * slow_i_gate,
+                    new_slow_integral + ki_slow * error_ms2 * factor * dt * slow_i_gate,
                     -_SLOW_I_CLAMP_MS2, _SLOW_I_CLAMP_MS2,
                 )
             # Creep subtracts from the effective road load: the brake FF must
@@ -1191,6 +1233,7 @@ class AccelToPedals:
         s.road_load_smooth = new_road_load_smooth
         s.output_smooth_ms2 = new_output_smooth_ms2
         s.prev_gas_cmd = new_prev_gas_cmd
+        s.prev_effort = effort
         s.accel_capacity_glide_ms2 = new_accel_capacity_glide
 
         # Learning: integrator state only. learn=False freezes adaptation
