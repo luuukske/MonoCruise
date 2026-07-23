@@ -1106,10 +1106,10 @@ class AEBThread(BaseThread):
             )
             left_kappa = ego_curvature + delta_kappa
             if ego_curvature < 0 and left_kappa < 0:
-                left_kappa = left_kappa / 1.5
+                left_kappa = left_kappa / 1.3
             right_kappa = ego_curvature - delta_kappa
             if ego_curvature > 0 and right_kappa > 0:
-                right_kappa = right_kappa / 1.5
+                right_kappa = right_kappa / 1.3
             ego_evasion_left = build_arc(
                 ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
                 left_kappa, ego_hw, dynamic_horizon,
