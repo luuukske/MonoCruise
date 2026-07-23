@@ -889,25 +889,31 @@ class CornerEntryStationaryFilterMirrored:
 
 
 class EgoEvasionFilter:
-    """Suppress vehicles ego could steer around within 0.1 g (non-head-on, non-co-dir moving)."""
+    """Suppress vehicles ego could steer around within 0.1 g (see README bypasses)."""
     name = "EgoEvasionFilter"
 
     def __init__(self, cal: AEBCalibration) -> None:
         self._cal = cal
 
     def apply(self, ctx: FilterContext) -> FilterResult:
-        if ctx.head_on:
-            return _PASS
         cal = self._cal
-        # In-lane co-dir moving: rear-end; bypass if body in ego lane (trailer swing).
-        if (ctx.co_directional
-                and any(a.speed > 0.5 for a in ctx.all_target_arcs)
-                and (ctx.lane == Lane.EGO
-                     or _any_body_in_ego_lane(
-                         ctx.ego_arc, ctx.all_target_arcs, cal.lane_half_width))):
+        target_moving = any(a.speed > 0.5 for a in ctx.all_target_arcs)
+        # Moving oncoming belongs to OppositeLaneFilter; a stationary target
+        # facing ego is a parked obstacle, so it runs the check (README).
+        if ctx.head_on and target_moving:
             return _PASS
-        # follow_threat_ids exempt: behavior says braking lead in path (README).
-        if ctx.v.id in ctx.follow_threat_ids:
+        # Co-dir moving with a body in ego lane but tractor out of lane (trailer
+        # swing): rear-end, bypass. Lane.EGO targets always run the evasion check.
+        if (ctx.lane != Lane.EGO
+                and ctx.co_directional
+                and target_moving
+                and _any_body_in_ego_lane(
+                    ctx.ego_arc, ctx.all_target_arcs, cal.lane_half_width)):
+            return _PASS
+        # follow_threat exempt only inside the aggressive TMP band, where the
+        # latch rescues real low-speed dangers (README follow-threat flag).
+        if (ctx.v.id in ctx.follow_threat_ids
+                and ctx.ref_kmh_for_filter <= cal.tmp_filter_split_kmh):
             return _PASS
         if ctx.ego_evasion_left is None or ctx.ego_evasion_right is None:
             return _PASS

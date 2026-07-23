@@ -181,7 +181,7 @@ pass, the vehicle enters collision evaluation.
 | `TmpCrossTrafficFilter` | TMP-only: straight snapshot uses centre closest-approach (T-bone vs body-graze), turning snapshot uses full-horizon endpoint lane |
 | `SweepPassFilter` | Stationary cross-traffic ego turns through |
 | `CornerEntryStationaryFilter` | Stationary at corner entry: out-of-lane oncoming/co-dir, or in-lane with arc consistency |
-| `EgoEvasionFilter` | Ego can steer around target within 0.08 g |
+| `EgoEvasionFilter` | Ego can steer around target within 0.08 g (runs for `Lane.EGO` too) |
 
 Fix labels A/B/C/D are retired: the logic now lives in the named stages above.
 
@@ -365,8 +365,25 @@ straight-line path.
 
 After all previous stages pass, checks if ego could steer around the target
 within `evasion_g=0.08 g`. Uses `margin=0.0` for evasion arc checks (physical
-body clearance, not padded corridor). Bypassed for head-on targets and moving
-co-directional in-lane vehicles.
+body clearance, not padded corridor).
+
+**`ctx.lane == Lane.EGO` never bypasses this stage.** Lane-EGO classification
+is not evidence of danger: stationary shoulder vehicles and passing traffic on
+wide or curved roads land in the EGO bucket routinely, and a target a 0.08 g
+steer clears is not a threat whatever bucket it sits in. Geometry decides.
+The three remaining bypasses are narrow:
+
+| Bypass | Condition | Why |
+|--------|-----------|-----|
+| Head-on | `head_on` **and** target moving | Oncoming traffic belongs to `OppositeLaneFilter`, which runs its own evasion arcs at `evasion_g_oncoming`. A *stationary* target facing ego is a parked obstacle, not oncoming, so it runs the check. |
+| Trailer swing | out-of-lane co-directional mover with a body inside `lane_half_width` | Genuine rear-end course; crash clip 434f0401 must never be evasion-suppressed. This is the one place the trailer-in-lane rescue is deliberately *stronger* than `Lane.EGO`. |
+| Follow-threat | `v.id in follow_threat_ids` **and** `ref_kmh_for_filter <= tmp_filter_split_kmh` | Inside the low-speed TMP band `TmpRelSpeedFilter` drops targets unless relative speed exceeds `tmp_filter_rel_below_kmh`, which discards real low-speed dangers; the behavioral latch is the fallback there. Above the split the latch is ACC-shaped lead tracking, which does not establish danger, so it no longer shields a target. |
+
+Corpus note: making `Lane.EGO` run the check costs clip `55848211` (fn, sev 4)
+a TP → LATE and ~26 cost on the labelled corpus as of this change. Accepted
+deliberately: the FP class it targets (shoulder and passing vehicles bucketed
+as `Lane.EGO`) is not yet labelled, so the corpus cannot currently price the
+upside. Re-check this trade once those clips are in.
 
 ---
 
@@ -635,9 +652,18 @@ While the hold is active, the target must be in `Lane.EGO` **or** arc-projected
 before its centre enters ego lane.
 
 Flagged ids bypass `TmpRelSpeedFilter`, are exempt from
-`EgoEvasionFilter` and `CoDirectionalDivergeFilter`, and get follow-track decel
+`CoDirectionalDivergeFilter`, are exempt from `EgoEvasionFilter` **only while
+`ref_kmh_for_filter <= tmp_filter_split_kmh`**, and get follow-track decel
 on collision arcs so a braking lead does not clip through on constant-speed
 projection. Implemented in `AEBThread._update_follow_threats`.
+
+The speed gate on the evasion exemption is deliberate. The flag is a
+lead-following signal of the same shape ACC uses, and following something is
+not evidence that it is dangerous, so above the split it must not be able to
+wave a target past a geometric filter. Below the split it stays unconditional
+because `TmpRelSpeedFilter` is at its most aggressive there
+(`rel > tmp_filter_rel_below_kmh` to survive) and would otherwise discard real
+low-speed dangers.
 
 | Knob | Default | Role |
 |------|---------|------|
