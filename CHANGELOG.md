@@ -15,6 +15,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ### Added
 - **AEB intervention popup**: a warning popup now confirms when Automatic Emergency Braking holds long enough to count as a real intervention, not a flicker.
 
+### Changed
+- **internal docs reorganized into README.md and AGENTS.md files**: the internal docs were scattered across the codebase, making it difficult to find the information i needed. they have been organized into README.md and AGENTS.md files to make it easier to find the information i need.
+
 ### Fixed
 - **Loaded truck slow to come back down to the set speed**: after a long climb the truck could sit above the set speed or the speed limit for tens of seconds with the throttle still feeding in. It now drops the throttle right away and brakes when it needs to.
 - **Speed limiter slow to pull back a big overshoot**: cresting a hill or running downhill could leave the truck over the limit for several seconds. The limiter now brakes progressively harder the further over it is, while easing off if the truck is already slowing on its own so it never piles on unexpected braking.
