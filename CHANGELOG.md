@@ -12,6 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+## [1.1.0-preview.11] - 2026-07-24
 ### Changed
 - **Prevent duplicate popups**: duplicate popups are now prevented by checking the dedup_key of the popup message.
 
