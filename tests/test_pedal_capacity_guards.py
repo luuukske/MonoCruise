@@ -35,6 +35,7 @@ def _no_settings_io(monkeypatch):
         pedal_capacity_max_accel_ms2 = 0.0
         pedal_capacity_accel_anchor_gain_ms2 = 0.0
         pedal_capacity_accel_ratio_step = 0.0
+        mapper_brake_scale_ms2 = 6.5
 
         @staticmethod
         def save(values=None):
@@ -49,10 +50,10 @@ def _fresh() -> pc.PedalCapacityTracker:
     return t
 
 
-def _feed(t, clk, pedal, decel, ticks=60, dt=DT, speed=SPEED, aeb=False):
+def _feed(t, clk, pedal, decel, ticks=60, dt=DT, speed=SPEED, aeb=False, baseline=BASE):
     for _ in range(ticks):
         clk.t += dt
-        t.update_brake(pedal, decel, speed, 0.0, BASE, road_load_ms2=0.0,
+        t.update_brake(pedal, decel, speed, 0.0, baseline, road_load_ms2=0.0,
                        aeb_active=aeb)
 
 
@@ -190,9 +191,23 @@ def test_settle_window_blocks_early_samples(clock):
 
 def test_estimate_ceiling(clock):
     t = _fresh()
+    ceiling = pc._brake_estimate_ceiling_ms2(BASE)
     _feed(t, clock, pedal=1.0, decel=10.5, ticks=600)
-    assert t.max_brake_ms2 <= BASE * pc._ESTIMATE_UPPER_BOUND + 1e-6
+    assert t.max_brake_ms2 <= ceiling + 1e-6
     assert t.max_brake_ms2 >= 11.0   # actually learned to the ceiling
+
+
+def test_high_pedal_recovers_past_mass_ceiling(clock):
+    """Loaded mass baseline used to cap/reject honest ~9.5 full-brake samples.
+    Temporary nominal ceiling must let settled high pedal relearn upward."""
+    t = _fresh()
+    t._max_brake_ms2 = 4.353
+    heavy_base = 5.0
+    old_cap = heavy_base * pc._ESTIMATE_UPPER_BOUND
+    _feed(t, clock, pedal=1.0, decel=9.5, ticks=120, aeb=True, baseline=heavy_base)
+    expected = 9.5 / brake_curve_fraction(1.0)
+    assert t.max_brake_ms2 > old_cap
+    assert t.max_brake_ms2 == pytest.approx(expected, rel=0.05)
 
 
 def test_load_persisted_clamps_poisoned_value(monkeypatch):
@@ -201,11 +216,12 @@ def test_load_persisted_clamps_poisoned_value(monkeypatch):
         pedal_capacity_max_accel_ms2 = 2.0
         pedal_capacity_accel_anchor_gain_ms2 = 0.0
         pedal_capacity_accel_ratio_step = 0.0
+        mapper_brake_scale_ms2 = 6.5
 
     monkeypatch.setattr(pc, "Settings", _FakeSettings)
     t = pc.PedalCapacityTracker()
     t.load_persisted(BASE, 2.0)
-    assert t.max_brake_ms2 <= BASE * pc._ESTIMATE_UPPER_BOUND + 1e-6
+    assert t.max_brake_ms2 <= pc._brake_estimate_ceiling_ms2(BASE) + 1e-6
 
     _FakeSettings.pedal_capacity_max_brake_ms2 = 0.0
     t2 = pc.PedalCapacityTracker()

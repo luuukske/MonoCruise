@@ -21,6 +21,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **AEB brake help arrived too late when you braked gently**: the extra braking force AEB adds on top of yours only switched on once you were already braking hard enough not to need it. It now fades in smoothly from a light dab, so gentle braking into a hazard gets help instead of nothing.
 - **Speed limiter fighting ACC at the limit**: with the global limit on, ACC holding right at the cap could get brake stabs from the limiter's overshoot protection over tiny speed drifts. Overshoot protection now stays out until you are properly over the limit, so ACC has room to work.
 
+### Known
+- **Brake capacity vs vehicle weight**: after a loaded job the learned max brake can stay low (about right for ~28 t cargo, far too low once empty), so AEB times stops as if the truck still brakes weakly. Ceiling policy was loosened so hard settled braking can raise it again; that is only a workaround. The mass-adjusted brake baseline underneath is still wrong and needs a real fix.
+
 ## [1.1.0-preview.10] - 2026-07-23
 ### Added
 - **AEB intervention popup**: a warning popup now confirms when Automatic Emergency Braking holds long enough to count as a real intervention, not a flicker.

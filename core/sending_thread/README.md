@@ -24,8 +24,12 @@ Always-on brake decel and gas gain learning (replaces legacy brake efficiency tr
 **Brake**: `update_brake` every tick; accept samples only when pedal and decel settle.
 Candidate inverts the fitted brake curve; pedal³ weighting; underperformance drops estimate
 2× faster than overperformance rises. Road load canceled before sampling. Fast EMA during
-deep settled AEB braking. Hard bounds on estimate (`_ESTIMATE_UPPER_BOUND` protects AEB
-engagement from inflated decel). Reject contaminated candidates above `_BRAKE_CANDIDATE_MAX_FRACTION`.
+deep settled AEB braking. Estimate ceiling is `max(mass_baseline * _ESTIMATE_UPPER_BOUND,
+nominal_scale * _BRAKE_CEILING_NOMINAL_MULT)` (temporary: mass-adjusted brake baseline
+under-predicts real capability and blocked empty-truck relearn after a loaded session).
+TODO: root-cause the mass-adjusted brake baseline, then drop the nominal ceiling path.
+Partial-pedal candidates still reject above `_BRAKE_CANDIDATE_MAX_FRACTION` of mass baseline;
+settled high pedal may use the same nominal ceiling.
 
 **Gas**: shape model `G(gear) = anchor * ratio^(_ANCHOR_GEAR - gear)` learned in log-space;
 monotonic ratio clamp. Skipped after clutch, gear dwell, or moving pedal. Persisted to

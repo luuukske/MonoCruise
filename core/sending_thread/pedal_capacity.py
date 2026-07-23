@@ -29,10 +29,14 @@ _CLUTCH_ACTIVE_THRESHOLD: float = 0.05
 _SAVE_THRESHOLD: float = 0.1        # save when drift exceeds 10% of saved value
 _SAVE_COOLDOWN_S: float = 30.0      # min seconds between successive writes
 _ESTIMATE_LOWER_BOUND: float = 0.35 # fraction of baseline: hard floor
-# Hard ceiling as a fraction of the mass-adjusted baseline. The old 2.0 allowed
-_ESTIMATE_UPPER_BOUND: float = 1.3  # fraction of baseline: hard ceiling
-# Reject any single brake sample implying more than this fraction of baseline.
+_ESTIMATE_UPPER_BOUND: float = 1.3  # fraction of mass-adjusted baseline
+# Reject partial-pedal extrapolations above this fraction of mass baseline.
 _BRAKE_CANDIDATE_MAX_FRACTION: float = 1.35
+# Temporary recovery ceiling vs mapper_brake_scale_ms2 (mass baseline under-
+# predicts). TODO: root-cause inaccurate mass-adjusted brake baseline; retighten.
+_BRAKE_CEILING_NOMINAL_MULT: float = 1.8
+_BRAKE_HIGH_PEDAL_FOR_LOOSE_CAP: float = 0.85
+_BRAKE_ESTIMATE_ABS_MAX_MS2: float = 20.0
 # Two-speed brake learning. Routine presses are shallow (pedal³ weight) and
 _BRAKE_ALPHA_NORMAL: float = 0.02   # EMA alpha at full pedal, normal driving
 _BRAKE_ALPHA_AEB: float = 0.15      # EMA alpha at full pedal during AEB braking
@@ -85,6 +89,29 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
+def _nominal_brake_scale_ms2() -> float:
+    raw = _safe_float(getattr(Settings, "mapper_brake_scale_ms2", 0.0))
+    return raw if raw > 0.0 else 6.5
+
+
+def _brake_estimate_ceiling_ms2(baseline_ms2: float) -> float:
+    """Upper clamp for learned max brake. See README: temporary nominal path."""
+    nominal_cap = _nominal_brake_scale_ms2() * _BRAKE_CEILING_NOMINAL_MULT
+    return min(
+        _BRAKE_ESTIMATE_ABS_MAX_MS2,
+        max(baseline_ms2 * _ESTIMATE_UPPER_BOUND, nominal_cap),
+    )
+
+
+def _brake_candidate_cap_ms2(baseline_ms2: float, mean_pedal: float) -> float:
+    """Reject cap for one sample. High pedal may exceed mass baseline (temp)."""
+    strict = baseline_ms2 * _BRAKE_CANDIDATE_MAX_FRACTION
+    if mean_pedal < _BRAKE_HIGH_PEDAL_FOR_LOOSE_CAP:
+        return strict
+    nominal_cap = _nominal_brake_scale_ms2() * _BRAKE_CEILING_NOMINAL_MULT
+    return min(_BRAKE_ESTIMATE_ABS_MAX_MS2, max(strict, nominal_cap))
+
+
 class PedalCapacityTracker:
     """Estimates vehicle max brake deceleration (single scalar) and gas See `core/sending_thread/README.md`."""
 
@@ -131,7 +158,7 @@ class PedalCapacityTracker:
         self._max_brake_ms2 = _clamp(
             b if b > 0.0 else baseline_brake,
             baseline_brake * _ESTIMATE_LOWER_BOUND,
-            baseline_brake * _ESTIMATE_UPPER_BOUND,
+            _brake_estimate_ceiling_ms2(baseline_brake),
         )
         self._saved_brake = self._max_brake_ms2
 
@@ -264,7 +291,7 @@ class PedalCapacityTracker:
             sum(pedal_values) / len(pedal_values), _BRAKE_PEDAL_FLOOR
         )
         candidate = mean_decel / brake_curve_fraction(mean_pedal)
-        if candidate > baseline_ms2 * _BRAKE_CANDIDATE_MAX_FRACTION:
+        if candidate > _brake_candidate_cap_ms2(baseline_ms2, mean_pedal):
             return
 
         weight = mean_pedal ** _WEIGHT_POWER
@@ -278,7 +305,7 @@ class PedalCapacityTracker:
         self._max_brake_ms2 = _clamp(
             self._max_brake_ms2,
             baseline_ms2 * _ESTIMATE_LOWER_BOUND,
-            baseline_ms2 * _ESTIMATE_UPPER_BOUND,
+            _brake_estimate_ceiling_ms2(baseline_ms2),
         )
         self._maybe_save(now)
 
