@@ -12,6 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+## [1.1.0-preview.10] - 2026-07-23
 ### Added
 - **AEB intervention popup**: a warning popup now confirms when Automatic Emergency Braking holds long enough to count as a real intervention, not a flicker.
 
