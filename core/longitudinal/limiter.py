@@ -17,10 +17,18 @@ _TARGET_SPEED_EMA_TAU_S = 0.5
 _OVERSHOOT_BOOST = 2.0
 _OVERSHOOT_BOOST_BAND_MS = 0.3
 
-# Overshoot recovery envelope.
+# Overshoot protection.
 _OVERSHOOT_CUBIC_K = 0.25
 
-# Engagement gate. The envelope exists for a standing overshoot the mapper is
+# Deadband before overshoot protection bids at all, in m/s (0.15 m/s is ~0.5 km/h).
+# Leaves ACC room to sit at the cap without the protection floor winning the
+# arbitration min() on every small drift over the limit. Not a gate on the
+# limiter bid itself: the continuous tracker still runs every tick (AGENTS.md).
+_OVERSHOOT_DEADBAND_MS = 0.15
+
+# Engagement gate: overshoot protection is for a standing overshoot the mapper
+# is failing to clear, not one already coming down.
+# See `core/longitudinal/README.md`.
 _OVERSHOOT_CLEAR_S = 1.0
 _CUBIC_ENGAGE_TAU_S = 0.35
 _CUBIC_LEAK_TAU_S = 0.25
@@ -44,10 +52,11 @@ class SpeedLimiter(LongitudinalController):
         self._last_target_for_integral: float | None = None
         self._target_speed_ema_ms: float | None = None
 
-        # Overshoot-envelope gate state.
+        # Overshoot-protection gate state.
         # See `core/longitudinal/README.md`.
         self._accel_track_smooth_ms: float | None = None
-        # Envelope engagement scalar in [0, 1], separately smoothed so the cubic
+        # Protection engagement scalar in [0, 1], separately smoothed so the
+        # cubic builds slowly and leaks fast.
         # See `core/longitudinal/README.md`.
         self._cubic_engage: float = 0.0
 
@@ -129,15 +138,22 @@ class SpeedLimiter(LongitudinalController):
         dt = max(float(ctx.dt), 1e-4)
         accel_meas = self._update_accel_track(float(ctx.speed_ms), dt)
 
-        cubic_ms2 = min(abs(accel_min), _OVERSHOOT_CUBIC_K * overshoot_ms ** 3) if overshoot_ms > 0.0 else 0.0
+        # Cubic runs off the excess past the deadband, so protection still enters
+        # with zero slope at its own boundary rather than stepping in.
+        excess_ms = overshoot_ms - _OVERSHOOT_DEADBAND_MS
 
-        if overshoot_ms <= 0.0:
-            # Below the limit: no envelope, and let any built-up scale drain so
-            # a fresh overshoot starts from zero rather than a stale value.
+        if excess_ms <= 0.0:
+            # Inside the deadband or below the limit: no protection bid, and let
+            # any built-up scale drain so a fresh overshoot starts from zero
+            # rather than a stale value.
             self._cubic_engage += (dt / (_CUBIC_LEAK_TAU_S + dt)) * (0.0 - self._cubic_engage)
             return accel_min
 
+        cubic_ms2 = min(abs(accel_min), _OVERSHOOT_CUBIC_K * excess_ms ** 3)
+
         # Decel that would clear the current overshoot within the target window.
+        # Measured against the full overshoot, not the excess: the recovery
+        # target is the limit itself, the deadband only holds the bid off.
         required_decel = overshoot_ms / _OVERSHOOT_CLEAR_S
         decel_meas = max(0.0, -accel_meas)
         # External decel = whatever ego is shedding BEYOND what the limiter floor

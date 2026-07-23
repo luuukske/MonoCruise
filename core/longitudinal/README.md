@@ -38,18 +38,26 @@ Lifecycle via orchestrator; no disengage logic here. Gains: `Settings.limiter_*`
 PID runs every tick while enabled; returns `LongOutput(wanted, True)` even below the cap
 so the mapper tightens the gas pedal progressively (see `AGENTS.md`).
 
-### Overshoot recovery envelope
+### Overshoot protection
 
 The kp term already bids strong decel for small overshoots; recovery time is mostly set
 by the **floor** clamp, not gain above it. `_overshoot_floor` adds a cubic extra decel
-term (`_OVERSHOOT_CUBIC_K * overshoot_ms³`), capped at `|accel_min|`, so the envelope
+term (`_OVERSHOOT_CUBIC_K * excess_ms³`), capped at `|accel_min|`, so overshoot protection
 at most doubles the user-tuned floor.
 
-- Cubic: negligible at the limit boundary, meaningful only for real overshoot.
-- **Engagement gate**: cubic scales by shortfall vs external decel only. The envelope's
-  own commanded decel is subtracted before comparing measured decel to the clear-window
-  requirement (`overshoot_ms / _OVERSHOOT_CLEAR_S`). Prevents self-defeating leak when
-  the envelope is doing the braking.
+- **Deadband** (`_OVERSHOOT_DEADBAND_MS`, 0.15 m/s ≈ 0.5 km/h): protection contributes
+  nothing until ego is past the limit by more than the deadband, so ACC can sit at the
+  cap without the protection floor winning the orchestrator `min()` on every small drift.
+  The cubic runs off `overshoot_ms - deadband`, keeping zero slope at the engagement
+  boundary. This is not the forbidden "only when over the limit" gate on the limiter bid:
+  the continuous tracker still runs and bids every tick, only the extra floor is deadbanded.
+- Cubic: negligible at the engagement boundary, meaningful only for real overshoot.
+  Saturates at the doubled floor around 1.75 m/s (~6.3 km/h) over.
+- **Engagement gate**: cubic scales by shortfall vs external decel only, measured against
+  the **full** overshoot (`overshoot_ms / _OVERSHOOT_CLEAR_S`) since the recovery target is
+  the limit itself, not the deadband edge. The protection's own commanded decel is
+  subtracted before comparing measured decel to that requirement. Prevents self-defeating
+  leak when the protection is doing the braking.
 - Asymmetric engage/leak taus (`_CUBIC_ENGAGE_TAU_S`, `_CUBIC_LEAK_TAU_S`): bias toward
   not stacking brake when the mapper or driver is already slowing ego.
 - kp boost when overshooting: blended over `_OVERSHOOT_BOOST_BAND_MS` to avoid chatter at zero error.
