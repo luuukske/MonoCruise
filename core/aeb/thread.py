@@ -122,8 +122,10 @@ _CRASH_MIN_SPEED_KMH: float = 40.0
 _CRASH_SPEED_DROP_KMH: float = 5.0
 
 # Sustained-brake popup: fires once per continuous AEB_brake span, after it
-# has held this long, so a single-frame flicker never pops up a notice.
+# has held this long, so a single-frame flicker never pops up a notice, and
+# only once ego_speed shows the brake actually stopped the truck.
 _BRAKE_POPUP_MIN_DURATION_S: float = 0.5
+_BRAKE_POPUP_STOPPED_SPEED_MS: float = 0.3
 
 
 def _find_tractor_for_trailer(trailer: Vehicle, vehicles: list[Vehicle]) -> Vehicle | None:
@@ -1818,7 +1820,8 @@ class AEBThread(BaseThread):
             if self._brake_span_start_mono is None:
                 self._brake_span_start_mono = now_mono
             elif (not self._brake_popup_fired
-                    and now_mono - self._brake_span_start_mono >= _BRAKE_POPUP_MIN_DURATION_S):
+                    and now_mono - self._brake_span_start_mono >= _BRAKE_POPUP_MIN_DURATION_S
+                    and abs(ego_speed) <= _BRAKE_POPUP_STOPPED_SPEED_MS):
                 PopupWindow.emit(
                     "AEB intervention",
                     "Automatic Emergency Braking intervention",
