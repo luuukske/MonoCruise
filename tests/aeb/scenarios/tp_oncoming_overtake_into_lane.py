@@ -1,10 +1,6 @@
-﻿"""TP: oncoming vehicle crosses centerline into ego lane.
-
-Starts in opposite lane (x=3.5), yaw=0 (south-facing). Over ~0.4 s (~12 frames)
-it yaws inward and lateral position moves to x=0: directly in ego's lane.
-Sustained crossing, not a single-frame jitter. EXPECTED: BRAKE.
-"""
-
+"""TP: oncoming vehicle crosses centerline into ego lane. Starts in opposite lane (x=3.5), yaw=0
+(south-facing). Over ~0.4 s (~12 frames) it yaws inward and lateral position moves to x=0:
+directly in ego's lane. Sustained crossing, not a single-frame jitter. EXPECTED: BRAKE."""
 import math
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 

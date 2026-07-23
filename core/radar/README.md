@@ -1,16 +1,15 @@
-﻿# AGENTS.md: MonoCruise Radar (shared fundamentals)
+﻿# MonoCruise Radar (shared fundamentals)
 
 > Authoritative reference for **coordinate system, rotation, world→ego
 > transforms, the shared-memory traffic buffer, Vehicle state/smoothing,
 > and ArcPath geometry**. Read this before touching any code that
 > consumes ETS2 telemetry, traffic, or predicted paths.
 >
-> AEB- and ACC-specific logic live in `core/aeb/AGENTS.md` and
-> `core/acc/AGENTS.md` respectively: both of them build on the concepts
+> AEB- and ACC-specific logic live in `core/aeb/README.md` and
+> `core/acc/README.md` respectively: both of them build on the concepts
 > defined here.
 >
-> Repo-wide workflow, style, and reputation conventions live in the
-> top-level `AGENTS.md`: read that too.
+> Agent workflow and do-not-break rules: top-level `AGENTS.md`.
 
 ---
 
@@ -128,7 +127,7 @@ _VEH_STRIDE            = 46  # fields per vehicle slot (16 + 3*10)
 | 11 | acceleration | float | m/s²: AI = buffer as-is. TMP buffer value is **ignored**; `Vehicle.acceleration` is EMA of the time derivative of filtered TMP speed (see §7). Arcs use `accel_for_arc()` (= `acceleration`). |
 | 12 | trailer_count | short | 0–3 |
 | 13 | id | short | Per-frame continuity key |
-| 14 | is_tmp | byte | `1` = TMP multiplayer (ETS2LA); `0` = AI. Consumer threads may apply TMP-specific filters (e.g. AEB's rel-speed split: see `core/aeb/AGENTS.md`). |
+| 14 | is_tmp | byte | `1` = TMP multiplayer (ETS2LA); `0` = AI. Consumer threads may apply TMP-specific filters (e.g. AEB's rel-speed split: see `core/aeb/README.md`). |
 | 15 | is_trailer | byte | `1` = trailer record, `0` = tractor |
 
 ### Trailer slots (offsets 16, 26, 36)
@@ -657,7 +656,7 @@ center_z = start_z + sign * radius * (-fwd_x)
 
 #### `min_lateral_gap`: head-on turn filter
 
-When `min_lateral_gap > 0`, a candidate hit is suppressed if the perpendicular distance between the two arc centerlines (measured along `a`'s instantaneous heading at the hit point) is ≥ this value. This prevents false positives when ego and an oncoming vehicle both enter a curve: their arcs overlap in the forward dimension, but the vehicles remain in their own lanes laterally. AEB owns the activation policy; see `core/aeb/AGENTS.md`.
+When `min_lateral_gap > 0`, a candidate hit is suppressed if the perpendicular distance between the two arc centerlines (measured along `a`'s instantaneous heading at the hit point) is ≥ this value. This prevents false positives when ego and an oncoming vehicle both enter a curve: their arcs overlap in the forward dimension, but the vehicles remain in their own lanes laterally. AEB owns the activation policy; see `core/aeb/README.md`.
 
 ```python
 # Lateral separation via cross product (2D):
@@ -808,7 +807,9 @@ double-count each trailer.
 
 ## 14. Critical Rules: Do Not Break
 
-- **No long comments.** Do not write long comments to explain code. Edit AGENTS.md if you need to explain something long, otherwise use small one-line comments.
+Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep that in sync if you change them). Prefer short glanceable comments in code; put long explanation here.
+
+- **No long comments.** Do not write long comments to explain code. Edit this README if you need to explain something long, otherwise use small one-line comments.
 - **Quaternion x/y swap is intentional.** Never remove it.
 - **`rotationX` in telemetry is yaw.** The name is misleading.
 - **Radar render uses `+0.5` offset; arc-geometry threads do not.** Do not mix them.

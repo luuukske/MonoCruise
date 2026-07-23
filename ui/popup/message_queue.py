@@ -1,6 +1,4 @@
-"""
-Simple priority message queue.
-"""
+"""Simple priority message queue."""
 import heapq
 import threading
 from typing import Optional
@@ -8,10 +6,7 @@ from ui.popup.message_types import PopupMessage
 
 
 class MessageQueue:
-    """
-    Thread-safe priority queue for popup messages.
-    Messages are ordered by priority (high to low), then by timestamp (FIFO).
-    """
+    """Thread-safe priority heap: higher priority first, then FIFO by timestamp."""
     
     def __init__(self):
         self._heap: list[PopupMessage] = []

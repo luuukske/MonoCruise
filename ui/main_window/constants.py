@@ -1,8 +1,4 @@
-"""
-MonoCruise – Design tokens, QSS stylesheet, and UI constants.
-
-Colour values are taken directly from the original MonoCruise.py source.
-"""
+"""Design tokens, QSS, and UI constants (colours from original MonoCruise.py)."""
 
 from __future__ import annotations
 
@@ -18,9 +14,7 @@ SETTINGS_COLOR = "#454545"
 WAITING_COLOR  = "#1f538d"
 CONNECTED_COLOR = "#304230"
 LOST_COLOR     = "#FF0000"
-# Update-ready accents. Banner amber (distinct from waiting-blue and the
-# red LOST/error state); the settings update-button icon and label are tinted
-# green when a newer build is waiting.
+# Update-ready banner amber; settings update control uses UPDATE_TINT green.
 UPDATE_COLOR   = "#3FB950"
 UPDATE_TINT    = "#52DC63"
 HEADER_BG      = "#454545"

@@ -1,10 +1,4 @@
-﻿"""
-Live visualization server for radar speed/acceleration filtering.
-
-Shows raw vs smoothed speed and smoothed acceleration of the ACC-tracked
-lead vehicle, or the closest radar vehicle when no lead is tracked.
-Single stream: no vehicle IDs, no selection UI.
-"""
+"""Flask/SocketIO live chart of lead (or nearest) vehicle speed/accel filtering."""
 
 from flask import Flask, render_template_string
 from flask_socketio import SocketIO

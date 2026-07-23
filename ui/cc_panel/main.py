@@ -1,15 +1,4 @@
-﻿"""
-Cruise control display panel using PySide6.
-
-Single translucent window rendered entirely via QPainter.
-Thread-safe: update() can be called from any thread without dropping changes.
-High-frequency calls coalesce: pending fields merge under a lock and at most
-one queued flush runs per GUI burst, avoiding Qt event-queue overload.
-
-The QWidget must be created and driven from the Qt main thread (QApplication
-owner). A separate Python thread cannot host this window; worker threads
-only push state via cc_panel.update(), which marshals to the GUI via signals.
-"""
+"""Cruise control panel (PySide6 QPainter). Thread-safe facade; see ui/cc_panel/README.md."""
 
 import logging
 import math
@@ -61,10 +50,7 @@ _LAST_LOCKED_LINE_GAP_PX = 1.5
 # Lead-vehicle speed indicator (rendered above set speed when ACC tracks a lead).
 # Values tuned in ui/cc_panel/prototype_lead_speed.html.
 _LEAD_FONT_RATIO = 0.5
-# Brightness near 1 keeps the lead in the same hue family as set speed; the
-# differentiation comes from _LEAD_OPACITY (≈ previous_brightness /
-# current_brightness = 0.7 / 0.95) so on a dark backdrop the perceived colour
-# matches the earlier rgb-darkened render.
+# _LEAD_BRIGHTNESS keeps hue; perceived dimming is mostly _LEAD_OPACITY on dark backdrops.
 _LEAD_BRIGHTNESS = 0.95
 _LEAD_OPACITY = 0.75
 _LEAD_SHIFT_PX_BASE = 5.0
@@ -83,13 +69,7 @@ _LEAD_UNSET = object()
 
 
 def _smoothstep(t: float) -> float:
-    """Hermite smoothstep: zero derivative at t=0 and t=1.
-
-    Used as a pre-warp on the base easing so the animation always has a
-    flat-velocity ramp-up and ramp-down at the endpoints, regardless of the
-    base curve's slope at the boundaries (eg. easeOut has finite velocity at
-    t=0 which produced a visible jerk leaving the "no lead" position).
-    """
+    """Hermite smoothstep (flat ends); pre-warps lead/vehicle easing curves."""
     if t <= 0.0:
         return 0.0
     if t >= 1.0:
@@ -148,12 +128,7 @@ class _PanelWidget(QWidget):
         self._lead_eraser_cache: dict[tuple, QPixmap] = {}
         self._lead_eraser_cache_max = 16
 
-        # Set-speed text rasterized to a pixmap so the slide animation can
-        # blit it at a fractional offset (sub-pixel). Drawing text directly
-        # at QPointF still snaps the glyph baseline to integer pixels on
-        # Windows, which produces visible staircasing during the slide.
-        # Blit must use drawPixmap(QRectF, pm, QRectF): the point overload
-        # fast-paths to an integer blit and discards the fractional offset.
+        # Set-speed pixmap for sub-pixel slide; use drawPixmap(QRectF,...) not integer overload.
         self._set_text_pm_cache: dict[tuple, QPixmap] = {}
         self._set_text_pm_cache_max = 16
         # Lead-speed text rasterized for the same reason as set-speed.
@@ -221,9 +196,7 @@ class _PanelWidget(QWidget):
         f = QFont("Arial")
         f.setBold(True)
         f.setPixelSize(max(1, int(40 * s)))
-        # PreferNoHinting lets QPainter.drawText(QPointF, ...) actually use the
-        # fractional baseline. With default hinting Qt snaps glyph origins to
-        # the integer pixel grid and the lead-speed slide visibly staircases.
+        # PreferNoHinting so QPointF text slide is not snapped to the pixel grid.
         f.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
         p._font = f
         self.setFixedSize(p._panel_w, p._panel_h)
@@ -561,10 +534,8 @@ class _PanelWidget(QWidget):
         cache_key: tuple,
         r_phys: int,
     ) -> QPixmap:
-        """
-        Expanded vehicle alpha from untinted pixmap (stable silhouette).
-        White + alpha for DestinationOut. Draw at (vx - pad_log, vy - pad_log), pad_log = r_phys/dpr.
-        """
+        """Expanded vehicle alpha for DestinationOut cutout; draw at (vx - pad_log, vy - pad_log).
+        Expanded vehicle alpha for DestinationOut cutout; draw at (vx - pad_log, vy - pad_log)."""
         if scaled_vehicle_raw.isNull():
             return scaled_vehicle_raw
         hit = self._vehicle_cutout_mask_cache.get(cache_key + (r_phys,))
@@ -673,10 +644,7 @@ class _PanelWidget(QWidget):
         x1: int,
         y1: int,
     ) -> None:
-        """
-        For each pixel in [x0,x1]×[y0,y1]: lines_alpha *= (255 - mask_alpha) / 255.
-        Uses QRgb + setPixel (faster than pixelColor).
-        """
+        """Multiply lines alpha by (255 - mask_alpha) in ROI; QRgb fast path."""
         if lines.isNull() or mask.isNull():
             return
         w, h = lines.width(), lines.height()
@@ -765,24 +733,7 @@ class _PanelWidget(QWidget):
         vehicle_opacity: float,
         draw_all_lines: Callable[[QPainter, int], None],
     ) -> None:
-        """
-        Draw distance lines with a sub-pixel vehicle cutout, then draw the vehicle.
-
-        Lines are cached per-n (position-independent). The cutout is applied
-        every frame via QPainter DestinationOut onto an offscreen buffer so the
-        sub-pixel vehicle position punches through the lines correctly without
-        a CPU pixel walk. DestinationOut must be on the offscreen buffer, not
-        the main painter, to avoid punching through the panel background.
-
-        cutout_shape_pm and vehicle_draw_pm are pre-rendered at sh_max. Each
-        frame they are drawn scaled to sh_visual via SmoothPixmapTransform so
-        Qt's bilinear filter handles sub-pixel size changes. The bounding box
-        is computed from sh_max (worst-case) so the offscreen buffer never
-        needs to grow during an animation and the lines cache key stays stable.
-
-        target_vy / target_sh are the settled (non-animated) values; vy /
-        sh_visual are the actual animated draw values.
-        """
+        """Cached lines, per-frame DestinationOut cutout, vehicle draw (ui/cc_panel/README.md)."""
         if cutout_shape_pm.isNull() or vehicle_draw_pm.isNull():
             draw_all_lines(pa, car_up_lines)
             if not vehicle_draw_pm.isNull():
@@ -820,14 +771,10 @@ class _PanelWidget(QWidget):
         w_max = cw_max / dpr
         h_max = ch_max / dpr
 
-        # vx is the left edge of the vehicle at max sh, so the horizontal centre
-        # is fixed at vx + w_max/2. The dilated mask at max size is centred on
-        # the same point, so its left edge = centre - mask_lw_max/2.
+        # Fixed horizontal centre at max vehicle size; mask left edge from vc_x_fixed.
         vc_x_fixed = vx + w_max / 2.0
 
-        # Use target_vy / sh_max for bounding box so the lines cache key and
-        # buffer size stay stable during animation. target_vy is the top-left
-        # at target_sh; the centre-y at max size = target_vy + h_max/2.
+        # Lines layer bbox from target_vy at max sh so cache key stays stable during animation.
         vc_y_target = target_vy + h_max / 2.0
 
         tmx = vc_x_fixed - mask_lw_max / 2.0
@@ -892,9 +839,7 @@ class _PanelWidget(QWidget):
         w_visual = w_max * scale
         h_visual = h_max * scale
 
-        # vc_x is the fixed horizontal centre (vx = left edge at max-sh, so centre
-        # is always vx + w_max/2 regardless of visual sh). vc_y is the animated
-        # vertical centre (vy is top-left at visual sh, which glides).
+        # vc_x fixed at max-sh centre; vc_y follows animated top-left vy.
         vc_x = vc_x_fixed
         vc_y = vy + h_visual / 2.0
 
@@ -945,10 +890,7 @@ class _PanelWidget(QWidget):
 
     def _should_show_lead(self) -> bool:
         p = self._p
-        # Visibility tracks the reported lead speed, not lock state: the caller
-        # signals "no lead" by passing lead_vehicle_speed=None. Tying it to
-        # acc_locked makes the indicator vanish on transient unlocks even while
-        # a fresh speed is still being reported.
+        # Show lead when lead_vehicle_speed is set (not acc_locked); None means no lead.
         return (
             p._acc_enabled
             and p._cc_mode == "Cruise control"
@@ -956,12 +898,9 @@ class _PanelWidget(QWidget):
         )
 
     def _start_lead_anim(self, target: float):
-        """Start a new lead-visible animation segment from current visual to target.
-
-        Each segment locks its easing + duration at start so target changes
-        mid-flight never produce a position jump (animation lerps from current
-        _lead_visual under the new curve/duration).
-        """
+        """Start a new lead-visible animation segment from current visual to target. Each segment
+        locks its easing + duration at start so target changes mid-flight never produce a position
+        jump (animation lerps from current _lead_visual under the new curve/duration)."""
         p = self._p
         p._lead_anim_start = p._lead_visual
         p._lead_anim_target = float(target)
@@ -995,14 +934,7 @@ class _PanelWidget(QWidget):
         self.update()
 
     def _start_vehicle_anim(self, target_y: float, target_sh: float) -> None:
-        """Start a new vehicle position+size animation segment from current visuals.
-
-        Reads _vehicle_visual_y and _vehicle_visual_sh (not _anim_target_*) as
-        starts so mid-flight distance changes glide from where the vehicle
-        visually IS, not from the previous settled position.
-
-        If either field is None (first paint), both fields snap and no timer fires.
-        """
+        """Glide vehicle y/sh from current visuals; first paint snaps without timer."""
         p = self._p
         cur_y = p._vehicle_visual_y
         cur_sh = p._vehicle_visual_sh
@@ -1081,25 +1013,7 @@ class _PanelWidget(QWidget):
     def _make_feathered_rect_pixmap(
         self, inner_w: int, inner_h: int, blur_r: int, dpr: float
     ) -> QPixmap:
-        """White solid rect of size ``inner_w x inner_h`` with a true Gaussian
-        blur of radius ``blur_r`` applied: matches the prototype's canvas
-        ``filter:blur(Npx)`` semantics.
-
-        The previous implementation built a linear-gradient feather ring around
-        a fully opaque alpha=1 plateau. Inside the plateau the eraser stayed
-        at full strength right up to the edge, so at full lead extension the
-        eraser hard-erased descender pixels overlapping the plateau and faded
-        out very sharply over the linear ring: visible "clipping" artifact.
-
-        Gaussian blur of a filled rect has a smooth rolloff inward AND outward
-        from each edge (alpha=0.5 at the geometric edge, ramping symmetrically
-        via the gaussian CDF), which is what the prototype shows and what the
-        user wants.
-
-        Returns a pixmap sized ``(inner_w + 2*margin) x (inner_h + 2*margin)``
-        in logical px, where ``margin = 2*blur_r`` provides enough room for
-        the outward gaussian tail.
-        """
+        """Gaussian-blurred white rect eraser; size inner + 2*margin (margin=2*blur_r)."""
         inner_w = max(1, int(inner_w))
         inner_h = max(1, int(inner_h))
         blur_r = max(0, int(blur_r))
@@ -1119,9 +1033,7 @@ class _PanelWidget(QWidget):
                 pa.end()
             return pm
 
-        # 2*blur_r margin leaves ~2σ of room for the outward gaussian tail
-        # (QGraphicsBlurEffect's QualityHint uses sigma ~= blur_r, so the
-        # tail is effectively zero past 2σ).
+        # 2*blur_r margin for gaussian tail (~2 sigma at QualityHint sigma ~= blur_r).
         margin = max(blur_r * 2, 1)
         total_w = inner_w + 2 * margin
         total_h = inner_h + 2 * margin
@@ -1180,15 +1092,7 @@ class _PanelWidget(QWidget):
     def _set_text_pixmap(
         self, text: str, color: QColor, font: QFont, fm: QFontMetrics
     ) -> QPixmap:
-        """Rasterize the set-speed text into a pixmap so it can be blitted
-        at a fractional offset during the lead-speed slide animation.
-
-        Qt's text renderer snaps glyph baselines to integer device pixels on
-        Windows even with PreferNoHinting + TextAntialiasing, so
-        ``drawText(QPointF, ...)`` staircases under a fractional y. Drawing
-        the text once into a pixmap and translating that pixmap with
-        ``SmoothPixmapTransform`` yields a true sub-pixel slide.
-        """
+        """Raster set-speed text for fractional pixmap blit (avoids Windows baseline snap)."""
         try:
             dpr = float(self.devicePixelRatioF() or 1.0)
         except Exception:
@@ -1225,10 +1129,7 @@ class _PanelWidget(QWidget):
     def _lead_text_pixmap(
         self, text: str, color: QColor, font: QFont, fm: QFontMetrics
     ) -> QPixmap:
-        """Rasterize lead-speed text to a pixmap. Same rationale as
-        ``_set_text_pixmap``: blitting the pixmap via the scaling drawPixmap
-        overload honors fractional offsets, drawText does not.
-        """
+        """Rasterize lead-speed text to a pixmap. Same rationale as ``_set_text_pixmap``:..."""
         try:
             dpr = float(self.devicePixelRatioF() or 1.0)
         except Exception:
@@ -1261,17 +1162,7 @@ class _PanelWidget(QWidget):
 
     @staticmethod
     def _draw_pixmap_subpixel(pa: QPainter, pm: QPixmap, x: float, y: float) -> None:
-        """Draw ``pm`` at fractional ``(x, y)`` with sub-pixel precision.
-
-        Qt's raster engine (default on Windows) routes drawPixmap through an
-        integer-aligned blit fast-path whenever the active transform type is
-        ``TxTranslate`` or lower, flooring fractional coordinates. This
-        includes the QPointF and QRectF overloads when dst-size equals
-        src-size: ``SmoothPixmapTransform`` is only consulted on the bilinear
-        path. Applying a sub-perceptual scale (1 + 1e-4) bumps the transform
-        type to ``TxScale`` so the bilinear path takes over and the fractional
-        translate is preserved by resampling. Size delta ≈ 0.01%, invisible.
-        """
+        """Draw ``pm`` at fractional ``(x, y)`` with sub-pixel precision. Qt's raster engine..."""
         if pm.isNull():
             return
         dpr = pm.devicePixelRatio() or 1.0
@@ -1340,10 +1231,7 @@ class _PanelWidget(QWidget):
         lead_x = lead_hidden_x + (lead_anchor_x - lead_hidden_x) * visual
         lead_baseline_y = lead_hidden_baseline_y + (lead_anchor_baseline_y - lead_hidden_baseline_y) * visual
 
-        # Fade-in late: alpha stays 0 until visual passes 0.5, then ramps up.
-        # Caps at _LEAD_OPACITY so the lead reads as a dimmer variant of the
-        # set-speed colour on dark backdrops (brightness stays high; the lead
-        # gets its visual differentiation from being semi-transparent).
+        # Lead alpha ramps after visual>0.5; capped at _LEAD_OPACITY (dimmer than set speed).
         lead_alpha = max(0.0, (visual - 0.5) / 0.5) * _LEAD_OPACITY
         if lead_alpha <= 0.001:
             return
@@ -1363,27 +1251,10 @@ class _PanelWidget(QWidget):
             bp.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
             bp.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             bp.setOpacity(lead_alpha)
-            # Pre-rasterized pixmap + sub-pixel helper: drawText snaps glyph
-            # origins to integer device px on Windows, defeating sub-pixel
-            # placement, and the raster engine's integer-aligned blit path
-            # floors fractional drawPixmap dsts even on the QRectF overload
-            # when dst-size == src-size. _draw_pixmap_subpixel forces the
-            # bilinear path so the fractional translate is preserved.
+            # Pre-rasterized lead text; _draw_pixmap_subpixel keeps fractional translate.
             self._draw_pixmap_subpixel(bp, lead_pm, lead_x, lead_top_y)
 
-            # Soft eraser: always run at full opacity. Matches the prototype
-            # (``filter: blur(Npx); fillRect(...)``). Previously this used
-            # ``bp.setOpacity(1.0 - visual)`` to hide the upper-feather lobe
-            # eating lead descenders at full extension, but setOpacity on a
-            # DestinationOut composition *attenuates* the erase: lead bled
-            # through at intermediate visual. The follow-up workaround
-            # (skipping the eraser at visual>=1) was a fallback, not a
-            # root-cause fix; the underlying issue was that the eraser
-            # pixmap used a linear-feather ring around a hard alpha=1
-            # plateau, which hard-erases at the edge. _make_feathered_rect_pixmap
-            # now produces a true gaussian-blurred rect, matching the
-            # prototype's smoother falloff. Margin is 2*blur_r inside the
-            # eraser pixmap (gaussian needs room for its outward tail).
+            # Gaussian soft eraser at full opacity (prototype blur+fillRect); see cc_panel README.
             pad_px = max(0, int(round(_LEAD_MASK_PAD_BASE * sc)))
             blur_px = max(0, int(round(_LEAD_MASK_BLUR_BASE * sc)))
             eraser_pm = self._get_lead_eraser(set_w, set_h, pad_px, blur_px, dpr)
@@ -1477,15 +1348,11 @@ class _PanelWidget(QWidget):
 
         text_x = float(icon_x - p._icon_spacing - tw)
         text_y_baseline_default = float((h - fm.height()) // 2 + fm.ascent())
-        # Set speed slides down to make room for lead-vehicle speed above.
-        # Kept as float (QPointF) so the slide doesn't snap to integer pixels —
-        # rounding mid-animation produces visible stair-stepping.
+        # Set speed slides down for lead speed above; float baseline avoids mid-animation snap.
         set_y_shift = _LEAD_SHIFT_PX_BASE * sc * p._lead_visual
         text_y_baseline = text_y_baseline_default + set_y_shift
 
-        # text: rasterize to a pixmap and blit at fractional offset so the
-        # slide animation is truly sub-pixel. See _draw_pixmap_subpixel for why
-        # a direct drawPixmap (QPointF or QRectF same-size) floors the offset.
+        # Set-speed pixmap blit for sub-pixel slide (_draw_pixmap_subpixel).
         text_pm = self._set_text_pixmap(p._text_content, p._text_color, p._font, fm)
         text_top_y = text_y_baseline - fm.ascent()
         self._draw_pixmap_subpixel(pa, text_pm, text_x, text_top_y)
@@ -1505,9 +1372,7 @@ class _PanelWidget(QWidget):
             tinted = self._tinted(icon, ic)
 
             if show_lines:
-                # TODO(ACC): gap / lead visualization: fed by ACC when implemented.
-                # While ACC is locked, show both vehicle and lines. Otherwise,
-                # show only lines.
+                # TODO(ACC): gap/lead viz from ACC; locked shows vehicle+lines.
                 if acc_locked_now:
                     lines_distance = p._distance_to_lead
                     lines_truck = p._acc_truck
@@ -1769,17 +1634,7 @@ class _PanelWidget(QWidget):
 # Public API – thin thread-safe facade over _PanelWidget.
 
 class cc_panel:
-    """
-    Thread-safe cruise control display panel (PySide6).
-
-    Create on the Qt main thread.  Every public method is safe to call from
-    any thread – state mutations are forwarded to the Qt event loop via
-    signals, so no update is ever dropped.
-
-    update() coalesces: rapid calls merge into one pending dict (last write
-    per field wins) and schedule a single queued flush, so the GUI thread is
-    not flooded with one signal per call.
-    """
+    """Thread-safe cruise control display panel (PySide6). Create on the Qt main thread...."""
 
     def __init__(
         self,
@@ -1834,10 +1689,7 @@ class cc_panel:
         self._icon_cache: dict[tuple, QPixmap] = {}
         self._current_icon: QPixmap | None = None
 
-        # Lead vehicle speed indicator state.
-        # _lead_vehicle_speed: latest from caller (None = no lead detected).
-        # _lead_displayed_speed: last non-None value, kept during retract so the
-        # disappearing text still renders.
+        # Lead speed: latest in _lead_vehicle_speed; _lead_displayed_speed kept during retract.
         self._lead_vehicle_speed: float | None = None
         self._lead_displayed_speed: float | None = None
         self._lead_visual = 0.0
@@ -1895,29 +1747,7 @@ class cc_panel:
         acc_truck: bool | None = None,
         lead_vehicle_speed=_LEAD_UNSET,
     ):
-        """
-        Update the display.  Thread-safe, never drops changes.
-
-        Safe to call at high frequency from worker loops: successive calls
-        merge into pending state and coalesce to one GUI flush per event-loop
-        burst (cheap lock + dict update on callers; one repaint batch).
-
-        Args:
-            new_text: Speed text to display (e.g. "100 km/h").
-            cc_mode: "Speed limiter" or "Cruise control".
-            cc_enabled: Whether CC is enabled.
-            acc_locked: Whether ACC has locked onto a vehicle.
-            distance_to_lead: Distance lines (1-3) shown under the icon.
-            AEB_warn: Whether AEB warning is active (triggers blinking).
-            complete_update: Force a full repaint / recalculation.
-            acc_enabled: Whether ACC is enabled.
-            acc_truck: Whether a truck is being tracked.
-            lead_vehicle_speed: Smoothed lead-vehicle speed (km/h) to render
-                above set speed. Pass ``None`` when no lead is detected (the
-                indicator retracts behind the set speed). Omit to leave
-                unchanged. Only shown while ACC is enabled, locked, in
-                Cruise-control mode, and not during AEB.
-        """
+        """Update the display. Thread-safe, never drops changes. Safe to call at high..."""
         d: dict = {}
         if new_text is not None:
             d["text_content"] = new_text
@@ -1954,11 +1784,7 @@ class cc_panel:
         self._widget._show_sig.emit()
 
     def ensure_on_screen(self) -> None:
-        """
-        If the frame does not intersect any monitor's work area, move to the
-        primary screen center and persist. Call from the Qt main thread.
-        Fixes invisible panels when config has coordinates from another setup.
-        """
+        """If the frame does not intersect any monitor's work area, move to the primary..."""
         w = self._widget
         screens = QGuiApplication.screens()
         if not screens:

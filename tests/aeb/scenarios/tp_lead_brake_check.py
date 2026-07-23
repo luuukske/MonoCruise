@@ -1,10 +1,6 @@
-"""TP: lead vehicle hard-brakes from 90 km/h to 30 km/h at 8 m/s².
-
-Co-directional lead in ego lane, initial gap 25 m. Lead z is updated using
-the *relative* speed (lead - ego), so the gap actually closes when ego is
-faster than lead. Standard rear-end TP.
-"""
-
+"""TP: lead vehicle hard-brakes from 90 km/h to 30 km/h at 8 m/s². Co-directional lead in ego lane,
+initial gap 25 m. Lead z is updated using the *relative* speed (lead - ego), so the gap actually
+closes when ego is faster than lead. Standard rear-end TP."""
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 
 _EGO_SPEED = 90.0 / 3.6

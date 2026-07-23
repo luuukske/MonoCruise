@@ -1,6 +1,4 @@
-﻿"""
-Test thread for debugging purposes and error popup testing.
-"""
+"""Debug worker for error popup and watchdog testing."""
 
 from __future__ import annotations
 
@@ -35,11 +33,7 @@ class TestThread(BaseThread):
         logger.debug("setup complete")
 
     def loop(self) -> None:
-        """
-        Main work unit. Called every `loop_interval` seconds.
-        Do NOT call time.sleep() here: the base class handles pacing.
-        Raise any exception to trigger watchdog handling.
-        """
+        """Loop body; no time.sleep (BaseThread paces)."""
 
         self.i += 1
         if self.i >= 100:

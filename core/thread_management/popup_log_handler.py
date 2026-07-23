@@ -1,6 +1,4 @@
-﻿"""
-popup_log_handler.py: logging.Handler that routes ERROR+ records to PopupWindow.
-"""
+"""Logging handler: records with extra popup=True go to PopupWindow."""
 
 from __future__ import annotations
 
@@ -12,16 +10,7 @@ if TYPE_CHECKING:
 
 
 class PopupLogHandler(logging.Handler):
-    """
-    Attach to any logger to forward records at or above `min_level`
-    to a PopupWindow via emit_message().
-
-    Level → message_type mapping:
-        CRITICAL / ERROR  → 'e'  (error style)
-        WARNING           → 'w'  (warning style)
-        INFO              → 'n'  (notice style)
-        DEBUG             → 'n'  (notice style)
-    """
+    """Forwards popup-flagged log records to PopupWindow.emit_message()."""
 
     _LEVEL_TO_TYPE: dict[int, str] = {
         logging.CRITICAL: "e",
@@ -41,22 +30,13 @@ class PopupLogHandler(logging.Handler):
 
     @staticmethod
     def _friendly_source_name(logger_name: str) -> str:
-        """
-        Derive a short, human-friendly source name from a logger name.
-
-        Examples:
-            "core.telemetry_thread.thread"      → "Telemetry"
-            "telemetry_thread"                  → "Telemetry"
-            "core.thread_management.watchdog"   → "Watchdog"
-            "main"                              → "Main"
-        """
+        """Short title source from logger name (e.g. core.telemetry_thread.thread -> Telemetry)."""
         base = logger_name
 
         # Prefer the most specific part of a dotted path.
         if "." in logger_name:
             parts = logger_name.split(".")
-            # If the module path ends with ".thread", take the segment before it
-            # (e.g. "core.telemetry_thread.thread" → "telemetry_thread").
+            # Paths ending in .thread: use the segment before "thread".
             if len(parts) >= 2 and parts[-1] == "thread":
                 base = parts[-2]
             else:
@@ -84,13 +64,7 @@ class PopupLogHandler(logging.Handler):
         self._priority = priority
 
     def _priority_for(self, record: logging.LogRecord) -> int:
-        """
-        Compute queue priority for a given log record.
-
-        CRITICAL records always use priority 10.
-        ERROR records always use priority 1.
-        All other levels fall back to the handler's base priority.
-        """
+        """CRITICAL=10, ERROR=1, else handler base priority."""
         if record.levelno >= logging.CRITICAL:
             return 10
         if record.levelno >= logging.ERROR:

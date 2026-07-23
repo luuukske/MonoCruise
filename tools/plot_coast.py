@@ -1,8 +1,4 @@
-﻿"""Plot coast-down raw decel vs speed. Ignores slope (noisy on hilly roads).
-
-Expects coast_debug.csv in project root.
-Output: coast_plot.png next to the CSV.
-"""
+"""Plot coast_debug.csv decel vs speed (slope ignored). Writes coast_plot.png beside the CSV."""
 from __future__ import annotations
 
 import csv

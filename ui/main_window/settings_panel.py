@@ -1,12 +1,6 @@
-﻿"""
-MonoCruise – Settings panel (left‑side drawer).
-
-All five sections:  Inputs · Program Settings · Cruise Control ·
-One‑Pedal‑Drive · Footer/Credits.
-
-Reads and writes the shared ``core.settings.Settings`` instance directly.
-"""
-
+"""MonoCruise – Settings panel (left‑side drawer). All five sections: Inputs · Program Settings ·
+Cruise Control · One‑Pedal‑Drive · Footer/Credits. Reads and writes the shared
+``core.settings.Settings`` instance directly."""
 from __future__ import annotations
 
 import logging
@@ -60,9 +54,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Settings fields that hold input bindings. The first three have configure
-# buttons in the panel; the ACC gap fields are included so duplicate-steal
-# checks cover every binding.
+# Binding keys (panel buttons + ACC gap keys for duplicate-steal checks).
 _BIND_KEYS = (
     "cc_start_button", "cc_inc_button", "cc_dec_button",
     "acc_dist_inc_button", "acc_dist_dec_button",
@@ -116,10 +108,7 @@ class SettingsPanel(QWidget):
         self.setMaximumWidth(SETTINGS_PANEL_WIDTH)
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        # Scope to this widget only. A selector-less stylesheet acts as
-        # `* { ... }` for the whole subtree and would override every
-        # background rule from the window stylesheet (buttons, inputs,
-        # section headers) inside the panel.
+        # #settingsPanel scope only (bare * would override window QSS backgrounds).
         self.setObjectName("settingsPanel")
         self.setStyleSheet("QWidget#settingsPanel { background-color: transparent; }")
 
@@ -139,9 +128,7 @@ class SettingsPanel(QWidget):
         card_lay.setSpacing(4)
         root.addWidget(card, 1)
 
-        # Title row: "Settings" centred across the full container, with an
-        # update button anchored near the right edge that opens the standalone
-        # updater exe.
+        # Title row: centred "Settings" plus updater shortcut button on the right.
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(0)
@@ -220,7 +207,7 @@ class SettingsPanel(QWidget):
         inner.setStyleSheet("QWidget#settingsInner { background-color: transparent; }")
         self._grid = QGridLayout(inner)
         self._grid.setContentsMargins(10, 8, 10, 10)
-        # Small vertical spacing for rows—so subtext stays visually tied to its setting
+        # Small vertical spacing for rows so subtext stays tied to its setting.
         self._grid.setHorizontalSpacing(4)
         self._grid.setVerticalSpacing(4)
         self._grid.setColumnStretch(0, 1)
@@ -302,25 +289,9 @@ class SettingsPanel(QWidget):
         build_field: Callable[[QWidget, int, int], Any],
         subtext_text: str,
     ) -> tuple[Any, QLabel, int]:
-        """One outer grid row containing a label+field pair with its
-        description tucked tightly underneath, independent of the outer
-        grid's row-to-row spacing -- which governs gaps to unrelated
-        settings and is otherwise too wide for subtext to read as attached
-        to the field above it. The gap above the subtext is SUBTEXT_GAP_TOP
-        (below); the gap below it, before the next setting, is
-        SUBTEXT_GAP_BOTTOM (QLabel#subtext's margin-bottom in the
-        stylesheet) -- tune each independently.
-
-        Returns (field, subtext_label, row). Most callers only need
-        *field*; *subtext_label* is for fields whose subtext toggles
-        on its own (e.g. update channel), and *row* for fields whose whole
-        row toggles together (see _set_row_visible).
-        """
+        """Label+field row with tight subtext; returns (field, subtext_label, row)."""
         container = QWidget()
-        # Scoped ID selector -- a selector-less stylesheet acts as `* { ... }`
-        # for the whole subtree and would override the window stylesheet's
-        # `QLineEdit`/Dropdown background rules for the field nested inside
-        # (see the identical note on settingsPanel's stylesheet above).
+        # Scoped #fieldWithSubtext stylesheet (bare * would override nested field backgrounds).
         container.setObjectName("fieldWithSubtext")
         container.setStyleSheet("QWidget#fieldWithSubtext { background: transparent; }")
         inner = QGridLayout(container)
@@ -610,7 +581,7 @@ class SettingsPanel(QWidget):
         self._update_seg_style(s.cc_mode)
 
         # Global speed limiter (empty → None disables both CC clamp and
-        # always-on limiter — see AGENTS.md global_speed_limit_kmh).
+        # always-on limiter: see AGENTS.md global_speed_limit_kmh).
         self.ent_global_limit, _, _ = self._field_with_subtext(
             "Global speed limiter:",
             lambda c, r, col: new_entry(
@@ -1188,9 +1159,7 @@ class SettingsPanel(QWidget):
         btn_sdk.clicked.connect(self._reinstall_sdk)
         self._grid.addWidget(btn_sdk, self._r(), 0, 1, 2)
 
-        # Reset all settings -- button + subtext share one container so the
-        # subtext hugs the button, same as _field_with_subtext (no label
-        # column needed here, so it's built directly rather than through it).
+        # Reset row: button + subtext in one container (same tight spacing as _field_with_subtext).
         reset_container = QWidget()
         reset_container.setObjectName("resetContainer")
         reset_container.setStyleSheet("QWidget#resetContainer { background: transparent; }")
@@ -1224,9 +1193,7 @@ class SettingsPanel(QWidget):
             start_reinstall,
         )
 
-        # Runs on the SDK worker thread. PopupWindow.emit is thread-safe (it
-        # marshals onto the GUI thread), so the outcome is surfaced with a
-        # styled check / warning popup straight from here.
+        # SDK worker callback; PopupWindow.emit is thread-safe onto the GUI thread.
         def _on_done(results: list["GameApplyResult"]) -> None:
             if not results:
                 PopupWindow.emit(
@@ -1298,14 +1265,7 @@ class SettingsPanel(QWidget):
         self._set("hide_button_action", True)
 
     def _launch_updater(self) -> None:
-        """Open the standalone updater exe.
-
-        The updater is a separate program installed at
-        ``<install root>/updater/updater.exe`` (frozen builds); the install
-        root is the directory holding MonoCruise.exe. In a dev tree the exe
-        isn't built, so fall back to running the updater source module with the
-        current interpreter. Best-effort: never let a failure crash the panel.
-        """
+        """Launch updater.exe beside install root, or updater.py in dev (best-effort)."""
         if getattr(sys, "frozen", False):
             install_root = os.path.dirname(os.path.abspath(sys.executable))
         else:
@@ -1323,10 +1283,9 @@ class SettingsPanel(QWidget):
             logger.exception("failed to launch updater")
 
     def set_update_available(self, available: bool) -> None:
-        """Green-tint the update-button icon + label (and update its tooltip)
-        when a newer build is available, signalling the update without a popup.
-        Driven by the window poll from the cached update check; idempotent, no
-        network."""
+        """Green-tint the update-button icon + label (and update its tooltip) when a newer build is
+        available, signalling the update without a popup. Driven by the window poll from the
+        cached update check; idempotent, no         network."""
         if self._update_available == available:
             return
         self._update_available = available
@@ -1372,11 +1331,7 @@ class SettingsPanel(QWidget):
             item = self._grid.itemAtPosition(row, col)
             if item and item.widget():
                 item.widget().setVisible(visible)
-        # A hidden row's widgets are invisible, but setRowMinimumHeight (used
-        # to give field rows a uniform height) still reserves that space
-        # unless cleared, leaving a blank gap. Stash the row's real minimum
-        # while hidden and restore it on show; a row that was never hidden
-        # isn't in the map, so showing it again is a no-op.
+        # Clear row minimum height when hidden so setRowMinimumHeight does not leave a blank gap.
         if visible:
             if row in self._hidden_row_heights:
                 self._grid.setRowMinimumHeight(row, self._hidden_row_heights.pop(row))

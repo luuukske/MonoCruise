@@ -1,4 +1,4 @@
-﻿"""AEB calibration: single source of truth for all tunable constants."""
+"""AEB calibration: single source of truth for all tunable constants."""
 
 from __future__ import annotations
 
@@ -23,30 +23,12 @@ class AEBCalibration:
     ego_half_width: float = 1.15
     ego_half_length: float = 3.0
     corridor_margin: float = 0.5
-    # Corridor-margin scale for near-parallel capsule body contacts (set on
-    # the ego collision arcs, consumed by traffic.py::_sampled_collision).
-    # The margin absorbs crossing paths sweeping through contact between time
-    # samples; two near-parallel long bodies hold their separation across
-    # samples, so the full 0.5 m there only manufactures side-graze hits on
-    # adjacent-lane passing traffic (FP clips ab524f87 / 29bf31b8). Effective
-    # margin blends margin*scale (parallel) to margin (perpendicular) by the
-    # sine of the heading difference. 1.0 disables.
+    # Near-parallel capsule contacts: margin * scale at parallel; see core/aeb/README.md.
     capsule_parallel_margin_scale: float = 0.3
     stop_buffer: float = 0.2
-    # Response-lag distance in the required-decel gap: while the commanded
-    # decel materializes, ego closes v_closing * this many seconds before
-    # braking takes hold, so that distance is not available for stopping.
-    # 0.10 = physical actuator lag. Deliberately NOT the corpus optimum
-    # (~0.45): the corpus should_trigger windows were drawn around the old
-    # early-braking behavior, so timing verdicts encode that bias; Lukas's
-    # 2026-07-19 decision is that the corpus arbitrates target FILTERING,
-    # not trigger timing, and AEB should brake at the last-point envelope.
+    # Response-lag gap term (v_closing * this); last-point envelope, not corpus timing optimum.
     stop_buffer_response_s: float = 0.10
-    # Scanned and rejected 2026-07-19 (do not reintroduce without new data):
-    # a distance cap on the response term, threat-age tau tiering (colliding
-    # age is capped by the arc horizon: no dynamic range), and engage 0.9
-    # (deletes whole brake events on genuine obstacle clips bce9dfcc /
-    # b9686b33).
+    # Rejected 2026-07-19: response distance cap, threat-age tiering, engage 0.9 (README §7).
     elevation_margin: float = 5.0
     max_range: float = 200.0
     arc_start_pctg: float = 0.2
@@ -73,27 +55,11 @@ class AEBCalibration:
     evasion_g_oncoming: float = 0.13 * 9.81
     evasion_max_dkappa: float = 0.008
     yaw_rate_steer_gain: float = 12.0
-    # AEB-local target-vehicle path prediction: two sources blended every
-    # frame: a sliced position fit (last `aeb_pos_history_len` samples of the
-    # vehicle's own _position_history, shorter than the full 25-sample fit)
-    # and the per-frame yaw rate from `angular_velocity`.  Combined as
-    # `yaw_blend * yaw_kappa + (1 - yaw_blend) * pos_kappa`; yaw weighted
-    # higher for responsiveness, position included for smoothing.
+    # Target path: pos slice + yaw rate blend; see core/aeb/README.md (target curvature).
     aeb_pos_history_len: int = 10
     aeb_yaw_blend: float = 0.7
 
-    # One-Euro post-filter on the blended target curvature.  Speed-adaptive
-    # low-pass: cutoff rises with |dkappa/dt| so steady-state noise is heavily
-    # smoothed while genuine curvature changes pass through with minimal lag.
-    # Reference: Casiez et al., "1€ Filter", CHI 2012.
-    #   min_cutoff (Hz): cutoff at zero derivative; sets the smooth-floor.
-    #   beta: slope of cutoff vs |dkappa/dt|; higher = snappier transient.
-    #   d_cutoff (Hz): low-pass on the derivative estimate itself.
-    #   beta_turn_scale: progressive beta reduction with curvature magnitude:
-    #     beta_eff = beta / (1 + beta_turn_scale * |x_prev|).  Counters the
-    #     in-turn cutoff inflation caused by noise on |dkappa/dt|, which
-    #     scales with |kappa| from yaw_rate/v amplification and pos-fit
-    #     numerical sensitivity.  0 disables.
+    # One-Euro on blended kappa; knobs in README §7 and target-curvature section.
     aeb_kappa_one_euro_min_cutoff: float = 1.0
     aeb_kappa_one_euro_beta: float = 100.0
     aeb_kappa_one_euro_d_cutoff: float = 0.3
@@ -102,12 +68,7 @@ class AEBCalibration:
     # Co-directional diverge
     co_dir_diverge_lookahead_s: float = 0.25
     co_same_turn_lookahead_scale: float = 0.5
-    # Samples across the _is_approaching lookahead window used to detect a
-    # pass-through dip: any sample where center distance drops below the sum
-    # of the two body half-widths means the extrapolated bodies overlap, so
-    # the pair is approaching no matter what the window endpoints say. Only
-    # active for targets in Lane.EGO (out-of-lane arc crossings are usually
-    # extrapolation artifacts this filter exists to suppress).
+    # In-lane pass-through dip samples in _is_approaching; CoDirectionalDivergeFilter (README).
     diverge_dip_samples: int = 8
 
     # Sweep-pass / corner-entry stationary
@@ -124,36 +85,14 @@ class AEBCalibration:
     tmp_filter_rel_below_kmh: float = 50.0
     user_brake_latch: float = 0.12
 
-    # TmpCrossTrafficFilter genuine-crosser threshold. That filter suppresses
-    # TMP cross-traffic whose jittered snapshot arc phantom-intersects ego's
-    # lane. For a STRAIGHT snapshot (trustworthy motion) it separates a genuine
-    # T-bone from a body-graze clear by the closest approach of the two
-    # reference centers over the horizon: a real collision course brings the
-    # centers together (~0 m), while a long vehicle merely grazing ego's
-    # corridor as it sweeps clear keeps its center metres away (the endpoint the
-    # old full-horizon test measured was even further, so it wrongly suppressed
-    # a dead-center straight crosser at every range: corpus FN clip ffd29f9e).
-    # Suppress a straight crosser only when this center miss stays above the
-    # threshold; pass (brake) when the centers genuinely meet. Turning snapshots
-    # keep the endpoint-lane test, which handles the mid-turn jitter phantom.
+    # TmpCrossTrafficFilter straight-snapshot center hit threshold (README TmpCrossTrafficFilter).
     tmp_cross_center_hit_dist: float = 2.5
 
-    # Cross-zone (ghost-arc) padding: retired. The ArcPath capsule body extents
-    # (traffic.py) cover vehicle length directly; the ghost comb is gone
-    # (_apply_cross_zone returns [arc]). These are unused, kept only so any
-    # external reference to the field names does not break.
+    # Retired ghost-arc padding fields; kept for name compatibility only.
     cross_zone_base: float = 2.0
     cross_zone_speed: float = 0.3
 
-    # Out-of-lane parallel/roadside suppression. The capsule collision body
-    # registers a grazing corridor overlap for a long vehicle driving or parked
-    # alongside ego (co-directional or stationary), where the point model only
-    # saw a fleeting reference-point crossing. A target whose center never
-    # enters ego's lane (arc-projected offset stays above lane_half_width) over
-    # the horizon is lane-keeping adjacent traffic, not a collision course: a
-    # genuine cut-in or crossing brings its center into Lane.EGO and is not
-    # suppressed. out_of_lane_scan_samples sets how many points along the
-    # target arc are lane-tested.
+    # OutOfLaneParallelFilter horizon lane scan count; see README OutOfLaneParallelFilter.
     out_of_lane_scan_samples: int = 10
 
     # Oncoming evasion kappa scaling
@@ -167,123 +106,35 @@ class AEBCalibration:
     aeb_target_deadband_ms2: float = 0.4
     aeb_target_refresh_min_s: float = 0.20
     aeb_target_rate_ms3: float = 8.0
-    # 0.85 from the 2026-07-19 scan: beats 0.8 on corpus total (+32.7 vs
-    # +37.1) and engages ~0.1-0.2 s later on live stationary-obstacle runs.
-    # 0.9 deletes entire brake events on genuine obstacle clips
-    # (bce9dfcc / b9686b33): rejected.
+    # aeb_engage_frac 0.85 from 2026-07-19 scan; 0.9 rejected (README §7 rejected tunings).
     aeb_engage_frac: float = 0.85
     aeb_disarm_frac: float = 0.45
-    # Disarm hold: while engaged, a still-colliding target with unbraked TTC
-    # inside this window keeps the event alive. A working brake trips the
-    # plain disarm mid-stop by construction and the event pumps (clip
-    # 29c8e7e0); releases on lateral clear, target pulling away, or ego stop.
+    # Geometry latch while colliding unbraked ttc inside window (anti-pumping; README).
     disarm_hold_ttc_s: float = 3.0
     aeb_warn_frac: float = 0.5
     aeb_warn_near_full_frac: float = 0.85
     brake_actuator_lag_s: float = 0.10
     # New engagements only fire when |ego_speed| is above this threshold.
     aeb_min_engage_speed_kmh: float = 5.0
-    # Tiered engagement-entry certainty gate. A new engagement on the
-    # required-decel path must either be geometrically certain (a colliding
-    # target in Lane.EGO whose |fwd_dot| >= aeb_certain_fwd_dot: aligned
-    # in-lane traffic, i.e. rear-end or wrong-way, whose collision prediction
-    # barely depends on arc extrapolation), continue a previously latched
-    # threat, or sustain qualification for a confirm window graded by how
-    # uncertain the threat geometry is:
-    #   - near-certain (target in Lane.EGO, or aligned |fwd_dot| >=
-    #     aeb_certain_fwd_dot in any lane): aeb_engage_confirm_s. One lane
-    #     classification or jitter step away from certain.
-    #   - oblique out-of-lane (everything else): aeb_engage_confirm_oblique_s.
-    #     Constant-curvature extrapolation is at its most fragile for these
-    #     (corner sweeps, mutual-turn passes), and corpus phantoms in this
-    #     class qualify for <= ~0.15 s while genuine crossing threats sustain
-    #     qualification far longer AND fall into the brake-TTB slam net
-    #     (< 0.5 s) as the geometry actually materializes.
-    # The brake-TTB slam path is exempt from all confirm windows: geometry
-    # says now or never. 0.06 s fires on the 3rd consecutive qualifying tick
-    # at 30 Hz, matching the corpus validation.
+    # Tiered engage confirm windows; brake-TTB slam exempt (README continuous-decel).
     aeb_engage_confirm_s: float = 0.06
     aeb_engage_confirm_oblique_s: float = 0.20
     aeb_certain_fwd_dot: float = 0.95
-    # Warn persistence for oblique out-of-lane threats: the warn condition
-    # must hold this long before the warning surfaces. Filters the transient
-    # phantom beeps from the same extrapolation-fragile class the engagement
-    # confirm targets. Must stay <= aeb_engage_confirm_oblique_s - 0.1 so an
-    # oblique engagement is always preceded by >= 0.1 s of audible warning:
-    # the driver's gas-override reaction window. Near-certain/certain
-    # geometry, imminent TTB, latched threats, and active engagement warn
-    # instantly (their engage windows are 0-0.06 s, so any warn delay would
-    # put the brake before the beep).
+    # Oblique warn must lead oblique engage by >= 0.1 s (README warn persistence).
     aeb_warn_confirm_oblique_s: float = 0.10
 
-    # Lapse tolerance shared by the three confirm streaks (per-target risk,
-    # engagement qualification, warn persistence). Each streak is an
-    # occupancy window (OccupancyConfirm in confirm.py) rather than a
-    # hard-reset timer: the confirm window must elapse AND the qualified
-    # fraction over that trailing window must reach aeb_confirm_occupancy
-    # before it fires. A run of more than aeb_confirm_max_gap_frames
-    # consecutive unqualified frames drops the streak. Together these tolerate
-    # isolated 1-2 frame detection dropouts (the 36-sample collision grid
-    # flicker, TMP jitter walking the predicted course across coverage edges)
-    # inside an otherwise-solid streak, while still rejecting a signal that is
-    # mostly absent: sparse 1-tick blips never reach the occupancy threshold
-    # and a long gap resets the streak. Applied identically to all three so
-    # the oblique warn-precedes-engage ordering survives flicker (warn
-    # qualifies on a superset of engage frames and has the shorter window).
+    # OccupancyConfirm lapse tolerance; shared by risk/engage/warn (README).
     aeb_confirm_occupancy: float = 0.6
     aeb_confirm_max_gap_frames: int = 2
 
-    # Line-of-sight-rate (CBDR) veto on new engagements. A genuine collision
-    # course holds a near-constant world-frame bearing while range shrinks
-    # (constant bearing, decreasing range). Corner cross-traffic whose
-    # extrapolated arc phantom-intersects ego's corridor shows a large,
-    # consistent bearing drift instead: the measurements already say it will
-    # pass clear. Predicted miss distance ~ |omega_los| * R^2 / |v_rel| over
-    # the trailing window. The veto only blocks a target from *entering*
-    # engagement: WARN, holds, and an already-engaged event are untouched, so
-    # a wrong veto costs latency on one target, never silence.
-    #   window_s / min_samples: track evidence required before the veto may
-    #     fire; targets with a shorter track fail open (engage as today).
-    #   min_range_m: no veto inside this range: close-in turning threats
-    #     (e.g. a left-turner entering ego's lane) legitimately carry high
-    #     bearing drift right up until they commit.
-    #   miss_dist_m: veto when predicted miss exceeds this. Corpus separation:
-    #     genuine engagements measure 0.05-4.4 m, corner phantoms 6.8-12.3 m.
-    # Crash-confirmed targets are never vetoed: their track violates the
-    # constant-velocity assumption (the window carries pre-crash momentum) and
-    # the tractor point can predict a miss while a trailer blocks the lane
-    # (crash clip 397148fd: the veto held engagement 0.75 s past the last
-    # stopping point).
+    # CBDR LOS veto on engagement entry only; crash-confirmed ids exempt (README LOS veto).
     los_veto_enabled: bool = True
     los_veto_window_s: float = 0.6
     los_veto_min_samples: int = 12
     los_veto_min_range_m: float = 30.0
     los_veto_miss_dist_m: float = 6.0
 
-    # Follow-threat flag: behavioral detection of genuine follow traffic.
-    # Two-part test:
-    # 1) Kinematic qualification: a co-directional target sustains BOTH a
-    #    closing range AND its own deceleration over the trailing window.
-    #    Earning it starts a hold (follow_threat_hold_s), so a lead that
-    #    releases its brake right before contact keeps qualifying
-    #    (0fe85c88's lead let off at ~1 s to contact).
-    # 2) Geometric gate, evaluated per frame while the hold is active: the
-    #    target is in Lane.EGO OR laterally converging on ego's corridor
-    #    (arc-projected d_abs shrinking). The OR matters: a braking cut-in
-    #    does its hard decel while still out of lane (0fe85c88: decel ended
-    #    at d_abs 2.2 m, Lane.EGO only from 1.8 m), so lane-AND-decel never
-    #    overlaps in time. An adjacent-lane vehicle braking parallel to ego
-    #    fails the gate (not in lane, not converging).
-    # No-collision-zone clip-through and TMP pose jitter cannot sustain the
-    # kinematic signals, so the flag separates a real slowing lead from the
-    # phantom class the TMP rel-speed filter exists to suppress. Flagged ids:
-    # 1) bypass TmpRelSpeedFilter (pipeline stage and precompute prefilter),
-    #    so a braking lead cannot vanish below the rel-speed floor;
-    # 2) are exempt from EgoEvasionFilter and CoDirectionalDivergeFilter
-    #    suppression, whose jitter misfires ejected the 0fe85c88 crash target
-    #    at 11 m, two ticks before the TTB slam would have fired;
-    # 3) get follow-track decel fed into collision arcs so a braking lead does
-    #    not clip through ego on a constant-speed projection (ddc0cdf7).
+    # Follow-threat: kinematic hold + lane/converge gate; README follow-threat section.
     follow_threat_window_s: float = 0.6
     follow_threat_min_span_s: float = 0.45
     follow_threat_min_samples: int = 8
@@ -293,25 +144,10 @@ class AEBCalibration:
     follow_threat_hold_s: float = 2.0
     follow_threat_max_range_m: float = 80.0
 
-    # Latched-threat hold: once AEB engages on a target, that target's id is
-    # latched until physical separation grows. Two effects:
-    # 1) TmpRelSpeedFilter is bypassed for latched ids so a TMP target does
-    #    not vanish from the pipeline as ego brakes and rel-speed collapses.
-    # 2) Engagement is held and target_raw floored while any latched target
-    #    is still inside the headway danger zone: the v_closing^2/2d
-    #    required_decel formula collapses when ego matches target speed but
-    #    the gap may still be unsafe.
-    # headway = max(dist - stop_buffer, 0) / max(ego_speed, 0.5)
+    # Latched-threat TMP bypass + headway hold; scope release grace (README latched-threat).
     latched_min_headway_s: float = 1.5
     latched_release_headway_s: float = 2.5
     latched_min_decel_frac: float = 0.7
-    # Scope release: a latched id must stay "in scope" (forward of ego inside
-    # the EGO lane band, or still predicted-colliding) to keep its latch.
-    # Out-of-scope ids release after this grace period. The hold exists for
-    # the speed-matched in-lane lead; a target ego has passed, is beside, or
-    # that swept clear must not keep the brake on via raw distance alone.
-    # Grace absorbs lane-classification flicker (curve transients, One-Euro
-    # settling) without letting a cleared target hold engagement.
     latched_scope_release_s: float = 0.5
 
 

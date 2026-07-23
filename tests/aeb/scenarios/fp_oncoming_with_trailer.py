@@ -1,9 +1,6 @@
-﻿"""FP: oncoming truck + 1 trailer in opposite lane, straight road.
-
-Ego at 80 km/h, oncoming combination at 80 km/h. Trailer length 13 m.
-Tractor and trailer both remain in opposite lane. OppositeLaneFilter suppresses.
-"""
-
+"""FP: oncoming truck + 1 trailer in opposite lane, straight road. Ego at 80 km/h, oncoming
+combination at 80 km/h. Trailer length 13 m. Tractor and trailer both remain in opposite lane.
+OppositeLaneFilter suppresses."""
 import math
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 from core.radar.traffic import Trailer, Position, Quaternion, Size

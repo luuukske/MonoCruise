@@ -1,10 +1,4 @@
-﻿"""
-Settings: plain typed dataclass, loaded once in main.py.
-
-No thread reads the config file itself; all threads receive the same
-`settings` instance (read-only) via constructor injection or a module-level
-reference imported here.
-"""
+"""Settings singleton: Settings.load in main; read/write via Settings.x and Settings.save()."""
 
 from __future__ import annotations
 
@@ -22,9 +16,7 @@ from pathlib     import Path
 
 from core.thread_management.registry import registry
 
-# Frozen (PyInstaller): __file__ resolves inside the bundle's _internal dir,
-# but config.json must live next to MonoCruise.exe in the install root, where
-# the standalone updater expects to find it (see updater/updater.py).
+# Frozen build: config.json lives next to the exe (updater expects that path).
 if getattr(sys, "frozen", False):
     CONFIG_PATH = Path(sys.executable).resolve().parent / "config.json"
 else:
@@ -68,18 +60,9 @@ class Settings(metaclass=_SingletonMeta):
     # The updater reads this from config.json to decide which releases to offer.
     update_channel: str = "stable"
 
-    # Update notifications.
-    # notify_for_updates: when True (default) a NOTICE popup fires at boot the
-    # moment an update is found (see core/update_check). When False, no popup;
-    # the banner + update-button tint still signal a pending update.
+    # notify_for_updates: boot popup when update found; banner/tint always (update_check).
     notify_for_updates: bool = True
-    # Boot update-check cache (not user knobs): last_update_check gates the 30h
-    # network throttle; latest_known_version is the newest release tag seen on
-    # the active channel, so the banner/button can show a pending update on
-    # throttled boots with no network. last_update_popup gates re-nagging
-    # separately: it is the last time the popup actually reached the user, so a
-    # boot that found an update but skipped the popup (opted out, etc.) doesn't
-    # suppress the next one. All three are written by core/update_check.
+    # Written by update_check: throttle, cached latest tag, last popup time.
     last_update_check: float = 0.0
     latest_known_version: str = ""
     last_update_popup: float = 0.0
@@ -104,10 +87,7 @@ class Settings(metaclass=_SingletonMeta):
     brake_exponent_variable: float = None
     weight_adjustment: bool = True
     polling_rate: int = 100
-    # Auto neutral: at very low speed with clear stopping intent, shift the
-    # transmission to neutral so gear-1 idle creep is removed at the source
-    # (instead of brake-compensated), and shift straight back to drive on any
-    # gas intent. Applies to manual braking and ACC stops. Default off.
+    # Shift to neutral at crawl when stopping; back to drive on gas (manual + ACC).
     auto_neutral: bool = False
 
     # OPD
@@ -153,11 +133,7 @@ class Settings(metaclass=_SingletonMeta):
     limiter_integral_clamp: float = 3.0
     limiter_accel_min_ms2: float = -1.0
 
-    # Global speed limiter target (km/h).
-    # Dual role: (1) clamps the CC set-speed so CC never commands above this value;
-    # (2) when cc_mode is "Speed limiter", activates SpeedLimiter unconditionally
-    # regardless of whether the CC FSM is engaged: the truck is always capped.
-    # None disables both effects.
+    # CC set-speed clamp and always-on limiter cap (Speed limiter mode); None disables.
     global_speed_limit_kmh: float | None = None
 
     # AccelToPedals tuning: split gas (PID) / brake (feedforward + trim PI) architecture.
@@ -176,14 +152,9 @@ class Settings(metaclass=_SingletonMeta):
     # Legacy global accel scalar: kept as the cold-start seed source for the
     # shape-function anchor below before any new sample has been taken.
     pedal_capacity_max_accel_ms2: float = 2.124
-    # Shape-function anchor gain (m/s² at gas=1.0, mass-normalized, at the
-    # anchor gear). One scalar parameterizes the whole per-gear gain curve
-    # via G(gear) = anchor * ratio^(anchor_gear - gear). See pedal_capacity.py.
+    # Shape-function anchor gain at anchor gear (see pedal_capacity.py).
     pedal_capacity_accel_anchor_gain_ms2: float = 0.0
-    # Per-gear-step ratio for the shape function (1.0 = flat, >1.0 = lower
-    # gear has more gain). Learned online via log-space regression: falls
-    # back to a sensible default until enough cross-gear samples accumulate.
-    # 0 = use the in-code default on next startup.
+    # Per-gear ratio step for accel shape (0 = in-code default on startup).
     pedal_capacity_accel_ratio_step: float = 0.0
 
     _saved_state: dict = field(default_factory=dict, init=False, repr=False, compare=False)
@@ -223,11 +194,7 @@ class Settings(metaclass=_SingletonMeta):
 
     @staticmethod
     def _quarantine_corrupt_file(path: Path, reason: str) -> Path | None:
-        """Move a corrupt config out of the way so the user can recover it.
-
-        Returns the quarantine path on success, None on failure. Never deletes
-        data: only renames.
-        """
+        """Rename corrupt config to *.corrupt-<timestamp>; never delete."""
         try:
             ts = time.strftime("%Y%m%d-%H%M%S")
             dest = path.with_suffix(path.suffix + f".corrupt-{ts}")
@@ -318,24 +285,12 @@ class Settings(metaclass=_SingletonMeta):
             )
 
             if not had_complete_file:
-                # Persist merged result so the file gains any new fields. Safe by
-                # construction: existing keys in `data` were preserved above, so
-                # this only ever *adds* defaults for fields the file didn't have.
+                # Persist merged defaults when the file was incomplete or recovered.
                 cls.save(force=True)
 
     @classmethod
     def _atomic_write(cls, payload: dict) -> None:
-        """Write *payload* to CONFIG_PATH atomically, keeping a .bak of the previous file.
-
-        Sequence:
-          1. Write to a temp file in the same directory.
-          2. fsync the temp file so the bytes hit the disk.
-          3. Copy the existing config.json to config.json.bak (if it exists and parses
-             as a non-empty dict): this is our last-known-good snapshot.
-          4. os.replace(temp, config.json): atomic on POSIX and on Windows for same-volume moves.
-
-        Any failure aborts before touching the original file.
-        """
+        """Atomic temp write + fsync, refresh .bak if primary parses, then os.replace."""
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
         # Step 1+2: write temp file and fsync.
@@ -352,7 +307,7 @@ class Settings(metaclass=_SingletonMeta):
                 try:
                     os.fsync(fh.fileno())
                 except OSError:
-                    # fsync isn't critical to correctness; ignore on filesystems that don't support it.
+                    # fsync optional; ignore if the filesystem rejects it.
                     pass
 
             # Step 3: snapshot the current file as backup *only if* it is itself a valid dict.
@@ -381,18 +336,7 @@ class Settings(metaclass=_SingletonMeta):
 
     @classmethod
     def save(cls, values: dict | None = None, *, force: bool = False):
-        """Write settings to disk when values have changed since the last load or save.
-
-        If *values* is provided, those fields are applied to the instance before
-        the dirty check, allowing a partial update in a single call.
-
-        If *force* is True, always write the full public field set (used after load
-        when the config file was missing keys so defaults are persisted).
-
-        Writes are atomic (temp-file + os.replace) and the previous config.json is
-        rotated to config.json.bak before each replace, so a crash mid-write or a
-        bad payload can never leave the user without a recoverable file.
-        """
+        """Persist public fields when dirty; optional partial values; force after load merge."""
         self = cls.instance()
         with self._state_lock:
             if values:

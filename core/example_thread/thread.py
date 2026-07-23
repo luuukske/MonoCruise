@@ -1,4 +1,4 @@
-﻿"""
+"""
 TEMPLATE THREAD: copy this directory and rename it for your worker.
 
 Convention:
@@ -60,17 +60,17 @@ class MyThread(BaseThread):
         Do NOT call time.sleep() here: the base class handles pacing.
         Raise any exception to trigger watchdog handling.
         """
-        # read from another thread (single primitive field, GIL-safe) ---
+        # read from another thread (single primitive field, GIL-safe)
         # other = registry.get_thread("other_thread")
         # speed = other.data.speed   # float → atomic read
 
-        # read multiple fields consistently ---
+        # read multiple fields consistently
         # snap = other.data.snapshot()
 
-        # update own data (single field, GIL-safe) ---
+        # update own data (single field, GIL-safe)
         self.data.value += 1.0
 
-        # update multiple fields together (use lock) ---
+        # update multiple fields together (use lock)
         with self.data._lock:
             self.data.value += 1.0
             self.data.label  = "running"

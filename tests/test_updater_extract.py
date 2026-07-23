@@ -1,11 +1,4 @@
-"""Unit tests for the updater's install/preserve/skip and self-update logic.
-
-This is the highest-risk surface: a bug here can wipe a user's config, write
-outside the install dir, or brick the updater. Covers preserve-on-install,
-the skip rules, the zip-slip guard, staging of the updater's own files to
-updater_pending/, and the startup swap that applies them.
-"""
-
+"""Updater install/preserve/skip and self-update tests (zip-slip, updater_pending swap)."""
 from __future__ import annotations
 
 import zipfile

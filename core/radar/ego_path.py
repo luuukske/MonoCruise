@@ -1,17 +1,4 @@
-﻿"""
-Shared ego path helpers: curvature from position history.
-
-Used by RadarThread to publish a geometry-based ego curvature alongside ego
-state. Mirrors ``Vehicle._compute_curvature`` in ``traffic.py`` so ego and
-target curvatures are derived from the same circumscribed-circle math over
-equivalent-length position histories (``_POSITION_HISTORY_LEN``).
-
-Callers:
-    - AEB: uses ``ego_curvature_from_history(...)`` in place of the yaw-rate
-      proxy ``steer * speed * 12.0 / speed`` when a valid fit is available.
-    - ACC: same curvature feeds the path-arc scoring so in-path target
-      selection matches AEB's predicted corridor.
-"""
+"""Ego curvature (1/m) from position history. See core/radar/README.md §11."""
 
 from __future__ import annotations
 
@@ -30,12 +17,7 @@ _MIN_TOTAL_CHORD: float = 0.05
 def ego_curvature_from_history(
     history: list[tuple[float, float, float]],
 ) -> float | None:
-    """Curvature (1/m) via circumscribed-circle fit on (t, x, z) samples.
-
-    Signed: positive = left turn (κ > 0), matching ArcPath convention.
-    Returns None if < 3 samples; 0.0 when near-stationary or near-collinear.
-    Callers fall back to the yaw-rate proxy when this returns None.
-    """
+    """κ (1/m) from history; None if too few samples. See core/radar/README.md §11."""
     if len(history) < 3:
         return None
 

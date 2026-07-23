@@ -1,13 +1,4 @@
-﻿"""
-ACC longitudinal child: wraps the IIDM+CAH following-distance controller
-from `core/cruise_control_thread/acc_controller.py`.
-
-The inner controller publishes an upper bound on commanded longitudinal
-accel (m/s²) from the lead chain. This child surfaces it as a `LongOutput`
-so the orchestrator can arbitrate `min(ACC, CC, …)`.
-
-Goal: smooth following distance. No set-speed PID lives here.
-"""
+"""ACC following-distance cap wrapper. See core/cruise_control_thread/README.md."""
 
 from __future__ import annotations
 
@@ -28,9 +19,7 @@ class AdaptiveCruiseController(LongitudinalController):
     @property
     def active(self) -> bool:
         # ACC is "armed" whenever the user enabled it and we're in cruise mode.
-        # Whether it actually constrains accel depends on lead presence: the
-        # inner controller returns its no-lead ceiling when no lead is in path,
-        # which the orchestrator will lose to CC's lower request via min().
+        # See `core/longitudinal/README.md`.
         return bool(Settings.acc_enabled) and Settings.cc_mode == "Cruise control"
 
     def step(self, ctx: LongCtx) -> LongOutput:

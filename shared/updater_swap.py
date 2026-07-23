@@ -1,24 +1,5 @@
-"""Applies a staged updater self-update (updater_pending/ -> updater/).
-
-Stdlib only: imported by MonoCruise at boot, keep it Qt-free.
-
-Why this lives in the APP and not the updater: a running one-folder
-PyInstaller program holds an open handle to its own _internal/base_library.zip
-without FILE_SHARE_DELETE (zipimport), so that file cannot be renamed while
-the process lives, by any process. The updater therefore can never finish its
-own swap in-process; MonoCruise applies it once the updater has exited
-(single-instance mutex free). Verified empirically: of the updater's ~240
-files, base_library.zip is the one rename that fails while it runs.
-
-Layout, all directly under the install root (see updater/updater.py, which
-stages these; the directory names must match on both sides):
-
-  updater/          the updater program
-  updater_pending/  new updater files staged by an update; a sentinel file
-                    written last marks the stage complete
-  updater_old/      previous updater files parked by a swap
-"""
-
+"""Apply staged updater self-update (updater_pending/ -> updater/). Stdlib only, Qt-free; see
+updater/README.md."""
 from __future__ import annotations
 
 import logging
@@ -66,29 +47,14 @@ def _move_tree(src: str, dst: str) -> None:
 
 
 def pending_swap_staged(root: str) -> bool:
-    """True when a completed updater update is waiting to be swapped in.
-
-    Cheap enough for a poll loop: one isdir when nothing is staged.
-    """
+    """True when a completed updater_pending swap is ready (cheap isdir check)."""
     pending = os.path.join(root, PENDING_DIR)
     return os.path.isdir(pending)
 
 
 def apply_pending_updater_swap(root: str, *, running_check=updater_running) -> bool:
-    """Swap staged updater files into place. Returns True when applied.
-
-    Call only while the updater is not running; rechecked here via its mutex.
-    Never raises. Failure order is chosen so the stage stays retryable:
-
-      1. park updater/ -> updater_old/   (fails => rollback, sentinel intact,
-                                          the swap is retried later)
-      2. remove the sentinel             (so it does not land in updater/)
-      3. move updater_pending/ -> updater/
-      4. delete leftovers
-
-    A crash after step 2 leaves a sentinel-less pending dir, which is
-    discarded here on the next attempt (the update can simply be re-run).
-    """
+    """Swap updater_pending into updater/ when updater is not running. Never raises; see
+    updater/README.md."""
     pending = os.path.join(root, PENDING_DIR)
     udir = os.path.join(root, UPDATER_DIR)
     old = os.path.join(root, OLD_DIR)

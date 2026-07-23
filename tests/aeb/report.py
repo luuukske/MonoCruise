@@ -1,7 +1,4 @@
-"""Standalone AEB scenario report runner.
-
-Usage: python -m tests.aeb.report
-"""
+"""Standalone AEB scenario report runner. Usage: python -m tests.aeb.report"""
 
 from __future__ import annotations
 

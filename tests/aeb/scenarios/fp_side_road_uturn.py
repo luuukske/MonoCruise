@@ -19,9 +19,7 @@ def build() -> list[Frame]:
     for i in range(_N_FRAMES):
         t = i * _DT
         ego = EgoState(x=0.0, y=0.0, z=0.0, yaw_norm=0.5, speed=_EGO_SPEED)
-        # Cross-traffic vehicle at intersection 50m ahead, turning with high curvature
-        # Vehicle is 10m to the side, heading ~90° (East → yaw≈270 in ETS2 convention)
-        # kappa = 0.1 → R=10m tight turn; Fix D should dampen arc_curvature
+        # Side-road U-turn at intersection; high kappa, Fix D dampens arc_curvature.
         target = make_vehicle(
             vid=1,
             x=10.0,

@@ -1,6 +1,4 @@
-"""
-Message type definitions and data structures.
-"""
+"""Message type definitions and data structures."""
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional
@@ -8,12 +6,8 @@ import time
 
 
 class MessageStyle(Enum):
-    """
-    Defines the visual style of a popup message.
-    
-    Value is the type rank (higher = more important).
-    Order: ERROR > WARNING > CHECK > NOTICE.
-    """
+    """Defines the visual style of a popup message. Value is the type rank (higher = more
+    important).     Order: ERROR > WARNING > CHECK > NOTICE."""
     ERROR = 4
     WARNING = 3
     CHECK = 2
@@ -68,14 +62,7 @@ STYLE_CONFIGS: dict[MessageStyle, StyleConfig] = {
 
 @dataclass
 class PopupMessage:
-    """
-    Represents a popup message.
-    
-    Ordering:
-    1. Message type rank (error > warning > check > notice)
-    2. Priority within the same type (higher first)
-    3. Timestamp (earlier first)
-    """
+    """Represents a popup message. Ordering: 1. Message type rank (error > warning > check >..."""
     priority: int
     title: str
     text: str

@@ -1,26 +1,6 @@
-﻿"""
-ACC in-lane scoring: four pure components accumulated per vehicle id.
+"""ACC in-lane score components and per-id accumulation (meter-native).
 
-Follows SCORING_REFERENCE.md (legacy ETS2radar) faithfully.  Constants
-are kept as named variables so the derivation is legible; the only
-semantic departure is an optional ``dt`` multiplier in :func:`accumulate`
-so the loop can run at any cadence (scaled to the legacy 30 Hz tick
-rate).  See ``core/acc/AGENTS.md`` for the full mapping.
-
-Components (per frame, before speed/dt scaling):
-    offset  : arc-crossing lateral offset from ego centerline.  Gaussian
-               with σ = 2.25 m, distance-amplified, clamped to [-1, +1],
-               then scaled by an outer angle-weighted multiplier and
-               added to a baseline increment.
-    yaw     : heading mismatch.  `(2^(-(|Δyaw|/90°)^5) - 1) × 1.5`.
-    path    : ego-path intersection.  `1.03^(-d_m) × slow_amp` with a
-               blinker amplitude reduction; capped at +5 in-path /
-               -4 out-of-path (× 0.6 when out).
-    angle   : reserved.  Currently 0.0 (legacy had it disabled too).
-
-Accumulation uses the legacy `[-5, +15]` clamp × target-speed multiplier:
-    ``score += total × max((|v_target|/90 m/s)^0.8, 0.5) × dt × 30``
-"""
+Formulas, baselines, and dt scaling: ``core/acc/README.md`` §3."""
 
 from __future__ import annotations
 
@@ -36,9 +16,7 @@ _SCORE_MAX: float = 20.0
 # zero-crossing of ``offset_raw`` sits at |x| ≈ 2.58 m at angle_amp = 1.
 _OFFSET_SIGMA_M: float = 2.25
 
-# Path decay base.  Legacy uses ``1.03^(-d)`` with d in metres.
-# Equivalent to ``exp(-d · ln(1.03))``; keep the base explicit so the
-# formula is bit-for-bit identical to the legacy integer-tick maths.
+# Path decay base 1.03^(-d m); kept explicit for legacy bit-identical maths.
 _PATH_DECAY_BASE: float = 1.03
 
 # Slow-speed path amplifier: ``slow_amp = 1.4 + (kmh / 100) × 4.1``.
@@ -63,9 +41,7 @@ OFFSET_BASELINE_HIT: float = 0.0
 OFFSET_BASELINE_NO_ARC_HIT: float = -0.40
 OFFSET_BASELINE_NO_HISTORY: float = -0.16
 
-# Speed multiplier denominator: **90 m/s** (legacy).  NOT 25 m/s (90 km/h).
-# Effective floor 0.5 applies at every realistic road speed; anything
-# >60 m/s lifts it linearly.
+# Target-speed multiplier ref 90 m/s (legacy), floor 0.5 (README §3).
 _SPEED_MULT_REF_MS: float = 90.0
 _SPEED_MULT_EXP: float = 0.8
 _SPEED_MULT_FLOOR: float = 0.5
@@ -74,9 +50,7 @@ _SPEED_MULT_FLOOR: float = 0.5
 # at 10 Hz the per-frame delta matches the legacy integer-tick maths.
 _LEGACY_RATE_HZ: float = 10.0
 
-# Offset weight: boosts lane-offset influence so vehicles in ego's lane
-# are detected even when the ego path arc doesn't geometrically intersect
-# them (e.g. during slight steering, distant lead).  Path/yaw unchanged.
+# Boost offset vs path when arc intersection misses a real in-lane lead.
 _OFFSET_WEIGHT: float = 1.5
 
 # Path weight: scales ego-path intersection relative to offset/yaw.
@@ -97,12 +71,7 @@ class ScoreComponents:
 
 
 def _distance_amp(dist_m: float) -> float:
-    """Offset distance amplifier from SCORING_REFERENCE §8.1.
-
-    ``distance_amp = [2^(-d/100) + 8/(d+3) - 1] / 3 + 1``
-
-    Values: 5m→1.32, 10m→1.18, 30m→1.02, 50m→0.94, 100m→0.86, 150m→0.80.
-    """
+    """Legacy offset distance amp; see README §3 offset table."""
     d = max(dist_m, 0.0)
     return (math.pow(2.0, -d / 100.0) + 8.0 / (d + 3.0) - 1.0) / 3.0 + 1.0
 
@@ -113,17 +82,7 @@ def offset_component(
     angle_amp: float = 1.0,
     baseline: float = OFFSET_BASELINE_HIT,
 ) -> float:
-    """Offset score: SCORING_REFERENCE §8.1.
-
-    offset_m : arc-crossing lateral from ego centerline *after* blinker
-                 bias has been subtracted by the caller (``offset - blinker·4.5``).
-    dist_m   : longitudinal distance to scoring closest-approach point.
-    angle_amp: `2^(-(normalized_arc_angle / 0.06)²)` from trail arc fit;
-                 pass 1.0 when a trail arc fit isn't available.
-    baseline : per-frame baseline: 0.0 on normal arc hit, -0.40 when
-                 an arc was fit but didn't cross ego row, -0.16 when
-                 history was too short to fit.
-    """
+    """Gaussian offset on blinker-adjusted lateral; baselines from trail-arc fit (README §3)."""
     x = offset_m / _OFFSET_SIGMA_M
     gauss = math.exp(-(x * x) * math.log(2.0))         # 2^(-(x/σ)²)
     raw = gauss * 2.5 * angle_amp - 1.0
@@ -133,10 +92,7 @@ def offset_component(
 
 
 def yaw_component(yaw_diff_deg: float) -> float:
-    """Heading-mismatch penalty: `(2^(-(d/90)^5) - 1) × 1.5`.
-
-    Near 0° → ~0.  Past ±90° → ≈ -1.5.  Symmetric.
-    """
+    """Heading mismatch penalty (legacy yaw term; README §3)."""
     d = abs(yaw_diff_deg)
     if d > 4.0 * _YAW_SCALE_DEG:
         return -_YAW_GAIN
@@ -150,16 +106,7 @@ def path_component(
     in_path: bool,
     blinker_offset: float = 0.0,
 ) -> float:
-    """Ego-path intersection score: SCORING_REFERENCE §8.3.2.
-
-    blinker_offset : signed scalar from the blinker decay curve (the
-                       ACC tracker bounds it to [-1, +1], but legacy
-                       allowed simultaneous left+right up to ±2 for
-                       hazard blinker edge cases).  Reduces the path
-                       amplitude by ``b² × 0.4``: at |b| > √2.5 the
-                       reduction exceeds 1 and `base` goes negative,
-                       matching legacy behaviour exactly.
-    """
+    """Path decay × slow_amp × blinker reduction; in/out caps (README §3)."""
     if dist_m < 0.0:
         dist_m = 0.0
     decay = math.pow(_PATH_DECAY_BASE, -dist_m)        # legacy 1.03^(-d)
@@ -173,12 +120,7 @@ def path_component(
 
 
 def speed_multiplier(target_speed_ms: float) -> float:
-    """Per-frame score delta multiplier: SCORING_REFERENCE §9.
-
-    Legacy `max((|v_target|/90 m/s)^0.8, 0.5)`.  The 0.5 floor applies
-    at all realistic road speeds; above ~60 m/s (216 km/h) it lifts.
-    Input is the **target vehicle's** speed, not ego's.
-    """
+    """Target-speed score multiplier (not ego); README §3 accumulation."""
     v = abs(target_speed_ms)
     if v <= 0.0:
         return _SPEED_MULT_FLOOR
@@ -193,14 +135,7 @@ def accumulate(
     target_speed_ms: float,
     path_weight: float = _PATH_WEIGHT,
 ) -> float:
-    """Integrate components into the running score; clamp to [-5, +15].
-
-    Per-frame delta = `weighted_total × speed_mult(target) × dt × 30`.
-
-    The ``× 30`` is so dt=1/30 s (legacy tick) produces the unscaled
-    legacy increment; higher/lower loop rates scale proportionally.
-    path_weight scales the path component relative to offset/yaw.
-    """
+    """Integrate weighted components; clamp and scale by target speed × dt (README §3)."""
     weighted_total = (
         components.offset * _OFFSET_WEIGHT
         + components.yaw

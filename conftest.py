@@ -1,4 +1,4 @@
-﻿"""Root conftest: adds repo root to sys.path so core.* imports resolve."""
+"""Root conftest: adds repo root to sys.path so core.* imports resolve."""
 import sys
 import os
 

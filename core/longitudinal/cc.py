@@ -1,13 +1,4 @@
-﻿"""
-Cruise control longitudinal child: owns set-speed PID, output smoothing,
-target management, and gearshift D-term freeze.
-
-Buttons (enable/disable/inc/dec/start) are driven by the orchestrator
-(`cruise_control_thread`) which calls `enable()`, `disable()`,
-`change_target_kmh()`, etc. Disengage conditions (user brake, park/gear,
-disarm-on-stop) are also owned by the orchestrator: this class only
-owns control state.
-"""
+"""Set-speed PID child. See core/longitudinal/README.md."""
 
 from __future__ import annotations
 
@@ -41,10 +32,6 @@ _CC_GEARSHIFT_RAMP_DURATION_S = 1.0
 _CC_GAME_THROTTLE_OVERRIDE = 0.1
 
 # Integral leak time constant (s) while the sending_thread hold FSM owns
-# standstill. At rest with the truck pinned, error stays at a constant
-# (target - 0); without a freeze the integral would wind to its clamp and snap
-# back on launch. Leaking lets pre-stop windup bleed out smoothly so the launch
-# starts from a small integral, not a clamped one.
 _HOLD_INTEGRAL_LEAK_TAU_S: float = 2.0
 
 
@@ -126,8 +113,7 @@ class CruiseController(LongitudinalController):
 
     def step(self, ctx: LongCtx) -> LongOutput:
         # Re-clamp target each tick so a tightened global limit drags the
-        # active CC target down with it (user can never command above the
-        # global speed limit, even via stale state).
+        # See `core/longitudinal/README.md`.
         if self._target_kmh is not None:
             clamped = self._clamp_target_kmh(self._target_kmh)
             if clamped != self._target_kmh:
@@ -178,11 +164,7 @@ class CruiseController(LongitudinalController):
         return max(_SPEED_MIN_KMH, min(upper, v))
 
     def _gearshift_d_factor(self, now: float, clutch: float) -> float:
-        """0.0 while clutched or in post-release block, 0→1 over ramp, 1 otherwise.
-
-        Mirrors `accel_to_pedals` mapper's gearshift state machine so the
-        D-term releases in lockstep with the mapper's integrators.
-        """
+        """0.0 while clutched or in post-release block, 0→1 over ramp, 1 otherwise. See `core/longitudinal/README.md`."""
         now_safe = now if math.isfinite(now) else 0.0
         clutch_pressed = clutch > _CC_CLUTCH_ACTIVE_THRESHOLD
 
@@ -203,12 +185,7 @@ class CruiseController(LongitudinalController):
 
     @staticmethod
     def _read_hold_active_safe() -> bool:
-        """Lookup `sending_thread.data.hold_active` defensively.
-
-        AGENTS.md requires sibling-thread reads to handle missing threads, lock
-        failures, and stale state without crashing. Default False so a missing
-        flag never freezes the integral by accident.
-        """
+        """Lookup `sending_thread.data.hold_active` defensively. See `core/longitudinal/README.md`."""
         try:
             st = registry.get_thread("sending_thread")
         except KeyError:
@@ -236,8 +213,7 @@ class CruiseController(LongitudinalController):
             self._last_target_for_integral = target_kmh
 
         # In Speed-limiter mode, CC's m/s² output caps the user pedal in
-        # sending_thread (`min(user, cc_mapper)`) instead of driving the
-        # setpoint, so no target offset is needed here.
+        # See `core/longitudinal/README.md`.
         target_ms = target_kmh / 3.6
         target_ms = self._smooth_target_speed_ema(target_ms, ctx.dt)
 
@@ -248,10 +224,7 @@ class CruiseController(LongitudinalController):
 
         error_ms = target_ms - speed_ms
         # Freeze + leak the integral while the sending_thread hold FSM owns
-        # standstill. Without this, error stays at (target - 0) the whole stop
-        # and the integral pins to its clamp, then snaps the truck on release.
-        # Leaking toward 0 with _HOLD_INTEGRAL_LEAK_TAU_S also bleeds any
-        # pre-stop windup so the launch starts from a clean state.
+        # See `core/longitudinal/README.md`.
         if self._read_hold_active_safe():
             leak = math.exp(-max(ctx.dt, 0.0) / max(_HOLD_INTEGRAL_LEAK_TAU_S, 1e-6))
             self._integral_error *= leak

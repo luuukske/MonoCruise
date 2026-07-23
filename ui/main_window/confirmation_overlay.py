@@ -1,13 +1,6 @@
-﻿"""
-MonoCruise – In‑window modal confirmation overlay.
-
-Non‑blocking: uses signals/slots, never ``QDialog.exec()``.
-
-Signature::
-
-    show_confirmation(parent, title, message, on_confirm, on_cancel=None)
-"""
-
+"""MonoCruise – In‑window modal confirmation overlay. Non‑blocking: uses signals/slots, never
+``QDialog.exec()``. Signature:: show_confirmation(parent, title, message, on_confirm,
+on_cancel=None)"""
 from __future__ import annotations
 
 from typing import Callable

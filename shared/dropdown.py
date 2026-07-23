@@ -1,37 +1,5 @@
-"""Custom animated dropdown, shared between the MonoCruise app and the updater.
-
-This is a pixel-faithful port of the reference HTML/CSS/JS dropdown
-("MonoCruise Dropdown.dc.html"). It is a fully custom-painted widget rather
-than a styled ``QComboBox`` because Qt Style Sheets cannot reproduce the
-reference's box-shadow, CSS transitions, ``transform: rotate`` chevron or the
-animated field ``border-radius``. Everything is drawn in ``paintEvent`` and
-animated with ``QPropertyAnimation`` so it renders identically under the native
-Windows style and Fusion.
-
-Behaviour (mirrors the reference):
-- Field with the current value + a chevron that rotates 180 deg on open.
-- Popup extends *down* from the field, sharing its background so the two fuse
-  into one rounded rectangle (field bottom corners square when open).
-- On open: height + opacity grow together and rows cascade in with a per-row
-  stagger. On close: a clean roll-up (rows do NOT re-stagger; the clip hides
-  them). Chevron and corners animate in sync.
-- Selection is marked by a 3x15 bar at the row's left edge (no checkmark).
-- Dismisses on an outside click; closes if the owning window moves/resizes.
-
-``Dropdown`` exposes the subset of the ``QComboBox`` API MonoCruise uses
-(addItem/addItems/clear/count/itemData/currentText/currentIndex/setCurrentIndex
-/setCurrentText + currentTextChanged/currentIndexChanged) so it is a drop-in
-replacement.
-
-The DROPDOWN_* constants below are the widget's own design (ported from the
-reference file), not app theming, so they live here rather than in a per-app
-styles module -- every app gets the identical control. Caller-supplied: the
-minimum field width, and optionally the theming overrides ``field_bg``,
-``border_w``, ``border_color``, ``border_hover``, ``radius``, ``text_color``,
-``font_px`` and ``pad_y``; each defaults to the reference design value used
-by the updater when omitted.
-"""
-
+"""Custom animated dropdown (app + updater). Port of MonoCruise Dropdown.dc.html; see
+shared/README.md."""
 from __future__ import annotations
 
 from PySide6.QtCore import (
@@ -43,9 +11,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget, QGraphicsDropShadowEffect, QApplication
 
-# Ordered font fallback list (QPainter.drawText ignores CSS-style comma lists,
-# so it needs an explicit QFont.setFamilies list). Inter is not
-# installed/bundled, so it resolves to the first available fallback.
+# QFont.setFamilies list (QPainter ignores CSS comma stacks); Inter may fall back.
 FONT_FALLBACKS = ["Inter", "Segoe UI", "sans-serif"]
 
 # Palette (monochrome, no accent colour)
@@ -106,11 +72,9 @@ DROPDOWN_EASE_STD = (0.25, 0.1, 0.25, 1.0)
 
 
 def _curve(points) -> QEasingCurve:
-    """Build a QEasingCurve from CSS cubic-bezier control points (x1,y1,x2,y2).
-
-    The spline implicitly starts at (0,0) and must end at (1,1); the two control
-    points are passed as absolute [0,1] points, exactly like CSS cubic-bezier.
-    """
+    """Build a QEasingCurve from CSS cubic-bezier control points (x1,y1,x2,y2). The spline
+    implicitly starts at (0,0) and must end at (1,1); the two control     points are passed as
+    absolute [0,1] points, exactly like CSS cubic-bezier."""
     c = QEasingCurve(QEasingCurve.Type.BezierSpline)
     x1, y1, x2, y2 = points
     c.addCubicBezierSegment(QPointF(x1, y1), QPointF(x2, y2), QPointF(1.0, 1.0))
@@ -165,9 +129,9 @@ def _rounded_path(rect: QRectF, tl: float, tr: float, br: float, bl: float) -> Q
 
 
 def _open_border_path(rect: QRectF, br: float) -> QPainterPath:
-    """Border outline with square top corners and NO top edge, so the popup
-    fuses with the field (CSS ``border-top: none``). Traversed top-right -> down
-    the right edge -> across the bottom (rounded) -> up the left edge."""
+    """Border outline with square top corners and NO top edge, so the popup fuses with the field
+    (CSS ``border-top: none``). Traversed top-right -> down     the right edge -> across the
+    bottom (rounded) -> up the left edge."""
     x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
     br = max(0.0, min(br, min(w, h) / 2.0))
     p = QPainterPath()
@@ -183,10 +147,10 @@ def _open_border_path(rect: QRectF, br: float) -> QPainterPath:
 
 
 def _field_border_path(rect: QRectF, top_r: float, bot_r: float) -> QPainterPath:
-    """Field border without the bottom segment: from the bottom-left corner up
-    and over the top to the bottom-right corner. The bottom segment is painted
-    separately in its faded colour — stroking it here too and overpainting
-    would leave antialiasing fringes at fractional-DPR pixel edges."""
+    """Field border without the bottom segment (bottom-left up and over the top to bottom-right).
+
+    Bottom segment is painted separately in its faded colour; stroking here would leave AA fringes.
+    """
     x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
     m = min(w, h) / 2.0
     top_r, bot_r = (max(0.0, min(r, m)) for r in (top_r, bot_r))
@@ -207,19 +171,12 @@ def _field_border_path(rect: QRectF, top_r: float, bot_r: float) -> QPainterPath
     return p
 
 
-# Shadow halo (transparent margin) around the popup card so the drop shadow has
-# room to render inside the top-level popup window.
+# Transparent margin so the drop shadow fits inside the popup window.
 _SHADOW_HALO = 48
 
 
 class _SeamClippedShadow(QGraphicsDropShadowEffect):
-    """Drop shadow that never paints above the popup's content top.
-
-    The blur otherwise bleeds a few px upward over the field's bottom edge
-    and reads as a dark seam line. In the CSS reference the field element is
-    stacked above the popup's box-shadow so the bleed is covered; here the
-    field widget is *below* the popup card, so the bleed is clipped instead.
-    """
+    """Shadow clipped below content top; avoids a dark seam over the field (shared/README.md)."""
 
     def draw(self, painter) -> None:
         painter.save()
@@ -232,13 +189,7 @@ class _SeamClippedShadow(QGraphicsDropShadowEffect):
 
 
 class _PopupCard(QWidget):
-    """The visible popup card: background, border, inset divider and rows.
-
-    Painted at an internal (halo, halo) offset so the drop shadow (installed on
-    this widget) has transparent room on every side. All motion is driven by the
-    animatable ``reveal`` (clip height), ``slide`` (translateY) and ``cascade``
-    (row stagger clock) properties.
-    """
+    """Popup card paint and reveal/slide/cascade motion. See shared/README.md."""
 
     activated = Signal(int)
 
@@ -281,10 +232,7 @@ class _PopupCard(QWidget):
 
     # -- geometry -----------------------------------------------------------
     def row_height(self) -> float:
-        # Match the reference's row box: padding + max(line box, selection bar).
-        # Use the nominal 14px line box (CSS line-height:1), like the field does,
-        # not QFontMetricsF.height() -- that keeps rows at the reference's 33px
-        # and integer-aligned so the bottom border stays crisp.
+        # Row height: 2*pad + max(14px line box, bar); matches reference 33px rows.
         return 2 * DROPDOWN_ROW_PAD_Y + max(DROPDOWN_FONT_PX, DROPDOWN_BAR_H)
 
     def _content_top(self) -> float:
@@ -292,22 +240,14 @@ class _PopupCard(QWidget):
         return DROPDOWN_POPUP_PAD + DROPDOWN_BORDER_W + DROPDOWN_DIVIDER_GAP
 
     def _rows_origin(self) -> float:
-        # Origin of the row rects. Each highlight box is inset ROW_MARGIN_Y within
-        # its rh-tall row to open the inter-row gap; that inset would also push the
-        # first box down and the last box up, inflating the section's top/bottom
-        # margins. Shifting the origin up by the inset (and trimming the bottom pad
-        # by the same below) cancels that, so the box block's outer spacing matches
-        # the left/right padding -- only the gaps *between* rows remain.
+        # Row origin; ROW_MARGIN_Y inset cancels first/last pad (gaps between rows only).
         return self._content_top() - DROPDOWN_ROW_MARGIN_Y
 
     def _bottom_pad(self) -> float:
         return DROPDOWN_POPUP_PAD - DROPDOWN_ROW_MARGIN_Y
 
     def _field_rect_local(self) -> QRectF:
-        # The field this popup drops from sits directly above the card's content
-        # origin (content top-left == field bottom-left). The card's transparent
-        # shadow halo overlaps the whole field, so expose that band to keep the
-        # field's hand cursor when hovered while the popup is open.
+        # Field band above content top (shadow halo overlaps field for hand cursor).
         return QRectF(_SHADOW_HALO, _SHADOW_HALO - self._field_h,
                       self._card_w, self._field_h)
 
@@ -321,31 +261,20 @@ class _PopupCard(QWidget):
         self._field_h = field_h
         self._natural_h = (self._rows_origin() + len(items) * self.row_height()
                            + self._bottom_pad())
-        # Clamp the open height to the shortest of: the natural height, the
-        # length limit (DROPDOWN_MAX_VISIBLE_ROWS), and the window cap (so a long
-        # list never runs off screen). Overflow becomes wheel-scrollable with a
-        # thumb. When the list fits within the limit, behaviour matches the
-        # reference (no scroll).
+        # Open height: min(natural, row cap, window cap); overflow scrolls with thumb.
         min_h = self._rows_origin() + self.row_height() + self._bottom_pad()
         row_cap = (self._rows_origin() + DROPDOWN_MAX_VISIBLE_ROWS * self.row_height()
                    + self._bottom_pad())
         limit = row_cap if cap <= 0 else min(cap, row_cap)
         self._full_h = max(min_h, min(self._natural_h, limit))
-        # When the list overflows, open scrolled so the selected row is centred in
-        # the viewport (clamped to the scroll range) instead of always starting at
-        # the top -- the current version is visible immediately.
+        # When overflow, scroll open so selected row is centred in the viewport.
         smax = self._scroll_max()
         if smax > 0 and 0 <= selected < len(items):
             rh = self.row_height()
             vp_h = self._full_h - self._rows_origin() - self._bottom_pad()
             target = selected * rh + rh / 2.0 - vp_h / 2.0
             self._scroll = max(0.0, min(smax, target))
-        # Cascade anchor: the first on-screen row. A scrolled-open list cascades
-        # only its visible window; rows scrolled off the top render static, so a
-        # mid/end-of-list open doesn't wait for them to tick through. Derived from
-        # the scroll offset and row height (which follow the max visible length),
-        # so nothing is hard-coded -- it adapts if the length limit changes. A
-        # top-of-list open has scroll == 0, so anchor 0: identical to before.
+        # _anchor = first visible row; rows above skip cascade when scrolled open.
         self._anchor = int(self._scroll // self.row_height())
         self.setFixedSize(int(round(card_w + 2 * _SHADOW_HALO)),
                           int(round(self._full_h + 2 * _SHADOW_HALO)))
@@ -442,10 +371,7 @@ class _PopupCard(QWidget):
         if idx != self._hover:
             self._hover = idx
             self.update()
-        # Show the clickable hand cursor over a row OR the field the card's halo
-        # overlaps (so the field keeps its cursor while open); arrow otherwise
-        # (divider / padding / empty halo). Set every move: crossing between the
-        # field and the empty halo doesn't change the hovered row.
+        # Hand cursor on row or overlapping field band; arrow elsewhere.
         over_field = self._field_h > 0 and self._field_rect_local().contains(pos)
         self.setCursor(Qt.CursorShape.PointingHandCursor if (idx >= 0 or over_field)
                        else Qt.CursorShape.ArrowCursor)
@@ -480,11 +406,7 @@ class _PopupCard(QWidget):
         h = self._reveal
         br = min(self._radius, h / 2.0)
 
-        # Card background: top corners square (fused with the field), bottom
-        # rounded. Inset by half the border left/right/bottom so the full
-        # stroke lands inside the widget; the top edge is flush with the
-        # content origin so the 1px field-overlap row is painted opaque (an
-        # exposed gap there lets the drop shadow tint the seam).
+        # Fused top (square corners), rounded bottom; top row opaque to hide shadow seam.
         hb = self._border_w / 2.0
         outer = QRectF(ox + hb, oy, w - 2 * hb, h - hb)
         path = _rounded_path(outer, 0, 0, br, br)
@@ -519,9 +441,7 @@ class _PopupCard(QWidget):
         pad = DROPDOWN_POPUP_PAD
         top = oy + self._rows_origin() - self._scroll
         row_w = self._card_w - 2 * pad
-        # When the scrollbar is visible, pull the highlight boxes in on the right
-        # so they clear the thumb instead of sliding under it. (Left-aligned text
-        # is unaffected.)
+        # Shrink row highlight width when scrollbar visible (clear the thumb).
         if self._scroll_max() > 0:
             row_w = (self._card_w - DROPDOWN_SCROLLBAR_MARGIN - DROPDOWN_SCROLLBAR_W
                      - DROPDOWN_SCROLLBAR_GAP - pad)
@@ -536,9 +456,7 @@ class _PopupCard(QWidget):
                           Qt.ClipOperation.IntersectClip)
 
         for i, text in enumerate(self._items):
-            # Rows above the anchor render static (no slide) so a mid/end open
-            # doesn't wait for them. From the anchor down it's the same cascade as
-            # before: row (i-anchor) starts at that many staggers past the delay.
+            # Rows before anchor static; from anchor down use normal stagger cascade.
             ai = i - self._anchor
             if ai < 0:
                 prog = 1.0
@@ -555,9 +473,7 @@ class _PopupCard(QWidget):
             p.save()
             p.setOpacity(row_op * self._alpha)
 
-            # Highlight box is inset vertically by ROW_MARGIN_Y top and bottom so
-            # a symmetric gap opens between adjacent boxes; the row pitch (rh) and
-            # text/bar positions are untouched, only the painted box shrinks.
+            # Highlight inset by ROW_MARGIN_Y (inter-row gap; row pitch unchanged).
             my = DROPDOWN_ROW_MARGIN_Y
             hl_rect = QRectF(ox + pad, ry + my, row_w, rh - 2 * my)
             selected = (i == self._selected)
@@ -586,9 +502,7 @@ class _PopupCard(QWidget):
             p.restore()
 
     def _paint_scrollbar(self, p: QPainter, ox: float, oy: float):
-        # Thin rounded thumb on the right edge, shown only when the list overflows
-        # the length limit. Sized to the visible/total ratio and positioned by the
-        # current scroll offset; inset from the edges so it clears the corners.
+        # Thin overflow thumb on the right; size and position follow scroll ratio.
         smax = self._scroll_max()
         content_h = self._natural_h - self._rows_origin() - self._bottom_pad()
         if smax <= 0 or content_h <= 0:
@@ -654,15 +568,7 @@ class Dropdown(QWidget):
         self.setFixedHeight(self._field_height())
         self._apply_width()
 
-        # The popup is a child overlay of the field's TOP-LEVEL WINDOW (not a
-        # separate top-level). Sharing one window means one coordinate space and
-        # one device-pixel ratio, so the popup aligns to the field exactly even
-        # on fractional-DPI (4K) displays -- a separate top-level can only be
-        # positioned in integer logical px and lands ~1 device px off. It is
-        # reparented to the window lazily in open() (the window isn't known
-        # yet); until then it is parented to the field itself (hidden, so never
-        # clipped) so Qt owns it -- an unparented card outlives QApplication at
-        # interpreter shutdown and crashes.
+        # Popup child of field top-level window (shared DPR); hidden on field until window exists.
         self._card = _PopupCard(self, field_bg=self._field_bg,
                                 border_w=self._border_w,
                                 border_color=self._border_color,
@@ -842,11 +748,7 @@ class Dropdown(QWidget):
             self._card.hide()
 
     def _reposition(self):
-        # Card content is painted at (_SHADOW_HALO, _SHADOW_HALO) inside the card
-        # widget. Place the card so that content top-left lands on the field's
-        # bottom-left (rect().bottomLeft() is the last row -> a 1px overlap) in
-        # the shared window coordinate space, so it aligns to the exact device
-        # pixel at any DPI.
+        # Map field bottom-left to card content origin (_SHADOW_HALO offset).
         win = self.window()
         if self._card.parent() is not win:
             self._card.setParent(win)
@@ -932,13 +834,8 @@ class Dropdown(QWidget):
         # Background.
         p.fillPath(path, self._field_bg)
 
-        # Border, with its hover variant. While open the bottom segment fades
-        # to the background so the seam with the popup disappears (CSS:
-        # border-bottom-color -> field background). The faded segment is
-        # painted once in its final colour — overdrawing an antialiased stroke
-        # leaves fringes of the old colour at fractional-DPR pixel edges (a
-        # hairline at 175% scaling) — and the sides/top are stroked after it
-        # so the side borders keep their full width where the two cross.
+        # Border (hover when hovered). Open: fade bottom segment to field bg to hide popup seam.
+        # Paint that segment once in final colour; sides/top stroke after for full-width corners.
         border = self._border_hover if self._hover else self._border_color
         p.setBrush(Qt.BrushStyle.NoBrush)
         if op > 0:

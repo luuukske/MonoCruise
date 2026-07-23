@@ -1,37 +1,4 @@
-﻿"""
-Input binding resolution.
-
-Converts a raw binding value (from Settings) into a live held/not-held bool.
-
-Binding formats (stored in config.json / Settings):
-  null / None                       → unassigned → always False
-  int       (legacy)                → joystick button on the configured pedal device
-  str       (legacy)                → keyboard key (capitalized name, e.g. "A")
-  {"source": "joystick",
-   "device_guid": str,
-   "device_name": str,              → optional, display only
-   "label": str,                    → optional, display only (e.g. "button 7", "hat up")
-   "code": int}                     → button index if code < button_count,
-                                       or virtual hat index using the encoding:
-                                       hat_virtual = button_count + hat_idx*4 + dir
-                                       dir: 0=up 1=right 2=down 3=left
-  {"source": "keyboard",
-   "code": str}                     → capitalized key name, e.g. "A", "Space", "F1"
-  {"source": "button_device",
-   "vid_pid": str,                  → "{vendor_id:04x}:{product_id:04x}", e.g. "0483:0001"
-   "device_name": str,              → optional, display only
-   "label": str,                    → optional, display only
-   "button_id": int}                → byte_index * 8 + bit_index from raw HID report
-
-Public API
-----------
-migrate_binding(raw)  : upgrade legacy int/str to dict; pass-through for dict/None
-resolve_held(binding) : True if the described input is currently held
-binding_state(binding): tri-state resolve: True/False, or None when the
-                        source device has not reported any state yet
-keyboard_is_pressed(key): safe wrapper around keyboard.is_pressed()
-binding_display_name(raw): short human-readable name for UI display
-"""
+"""Resolve Settings bindings to held state. Formats: see INPUT_BINDINGS.md."""
 
 from __future__ import annotations
 
@@ -53,11 +20,7 @@ except Exception:
 
 
 def migrate_binding(raw: object) -> dict | None:
-    """Upgrade a legacy bare-int or bare-str binding to the structured dict format.
-
-    Called at read time so legacy configs continue working without any migration step.
-    dict bindings with a "source" key are returned unchanged.
-    """
+    """Legacy int/str to structured dict; dict with source unchanged."""
     if raw is None:
         return None
     if isinstance(raw, dict) and "source" in raw:
@@ -79,12 +42,7 @@ def migrate_binding(raw: object) -> dict | None:
 
 
 def resolve_held(binding: object) -> bool:
-    """Return True if the described input is currently held.
-
-    Joystick state is read from main_pedal_thread.data.joystick_button_states.
-    Keyboard state is read via keyboard.is_pressed().
-    Returns False on any error: safe default.
-    """
+    """True if binding is held; False on error or unassigned."""
     b = migrate_binding(binding)
     if b is None:
         return False
@@ -99,14 +57,7 @@ def resolve_held(binding: object) -> bool:
 
 
 def binding_state(binding: object) -> bool | None:
-    """Tri-state version of resolve_held.
-
-    Returns True/False when the source device has published state for this
-    input, and None when it hasn't (device not tracked yet, no report seen,
-    keyboard lib unavailable). The capture guard uses None to keep a freshly
-    assigned binding suppressed until its device actually reports a release,
-    instead of clearing on a not-yet-connected device.
-    """
+    """Like resolve_held but None until the source device has published state."""
     b = migrate_binding(binding)
     if b is None:
         return False
@@ -147,12 +98,7 @@ def binding_state(binding: object) -> bool | None:
 
 
 def binding_display_name(raw: object) -> str:
-    """Short human-readable name for a binding, for UI display.
-
-    Prefers the stored "label" (written at capture time, when the device's
-    button/hat layout was known); falls back to a generic name derived from
-    the code. Returns "None" for unassigned.
-    """
+    """Display label for UI; prefers stored label."""
     b = migrate_binding(raw)
     if b is None:
         return "None"

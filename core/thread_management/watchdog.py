@@ -1,22 +1,4 @@
-﻿"""
-Watchdog: monitors heartbeats and optionally restarts dead threads.
-
-Detection:
-  • thread.running is False  → crashed (acted on immediately)
-  • heartbeat_age > HEARTBEAT_TIMEOUT for FREEZE_STREAK_RESTART consecutive
-    polls → frozen. The streak debounce avoids restarting a healthy thread
-    that merely hit a transient lag spike and would recover on its own.
-
-Restart:
-  • Allowed while thread.restart_count < thread.max_restarts
-  • A new instance is created via _factory (callable → BaseThread)
-  • The factory must accept no arguments (use functools.partial if needed)
-  • The replacement is started even when the old thread cannot be stopped: a
-    thread frozen inside a C-level syscall cannot be force-killed (the async
-    exception only fires on Python bytecode), so blocking on it would strand
-    the system with no worker. The old thread is a daemon and self-exits once
-    its syscall returns.
-"""
+"""Heartbeat watchdog: restart crashed/frozen workers via registered factories. See AGENTS.md."""
 
 from __future__ import annotations
 
@@ -76,9 +58,7 @@ class Watchdog(BaseThread):
             if thread is self or not getattr(thread, "watched", False) or not getattr(thread, "healthy", False):
                 continue
 
-            # Low FPS warning: accumulate streak; once threshold is hit, park the thread
-            # in _low_fps_candidates and wait LOW_FPS_WARN_WINDOW before warning so that
-            # any other slow threads are batched into a single popup.
+            # Batch low-FPS popup after LOW_FPS_WARN_WINDOW.
             tname    = getattr(thread, "name", "")
             interval = getattr(thread, "loop_interval", 0.0)
             if interval > 0:
@@ -107,11 +87,7 @@ class Watchdog(BaseThread):
             age     = now - thread.heartbeat_at
             stale   = thread.heartbeat_at > 0 and age > HEARTBEAT_TIMEOUT
 
-            # Debounce transient freezes: a lag spike can stall a loop past
-            # the heartbeat timeout yet recover on its own. Only treat the
-            # thread as genuinely frozen once the heartbeat stays stale for
-            # FREEZE_STREAK_RESTART consecutive polls, so a healthy thread is
-            # not needlessly restarted.
+            # Heartbeat stale for FREEZE_STREAK_RESTART polls before restart.
             if stale and not crashed:
                 self._frozen_streaks[tname] = self._frozen_streaks.get(tname, 0) + 1
             else:
@@ -121,10 +97,7 @@ class Watchdog(BaseThread):
             if not (crashed or frozen):
                 continue
 
-            # Special case: the telemetry thread can deliberately request a full
-            # application shutdown by setting data.request_quit. In that case we
-            # must NOT auto‑restart it, otherwise the main loop will never see
-            # the quit request (the thread is replaced and the flag is lost).
+            # telemetry_thread with request_quit: do not restart (main handles shutdown).
             if getattr(thread, "name", "") == "telemetry_thread":
                 data = getattr(thread, "data", None)
                 if getattr(data, "request_quit", False):
@@ -193,10 +166,7 @@ class Watchdog(BaseThread):
             dead.healthy = False
             return
 
-        # Drive any physical outputs to a safe state before the handover so a
-        # stuck command (e.g. throttle) cannot persist while the thread is
-        # being replaced. Runs fire-and-forget on a throwaway thread: safe_state
-        # may touch blocking I/O and must not stall the watchdog loop.
+        # safe_state on a throwaway thread before swap (may block on I/O).
         try:
             threading.Thread(
                 target=dead.safe_state,
@@ -208,12 +178,7 @@ class Watchdog(BaseThread):
                 "could not launch safe_state for '%s' (suppressed)", dead.name
             )
 
-        # Signal the old thread to stop, then give it only a brief grace
-        # period. We deliberately do NOT block on it: a thread frozen inside a
-        # C-level syscall cannot be force-killed (PyThreadState_SetAsyncExc
-        # only fires on Python bytecode), and waiting on join() here used to
-        # strand the whole system with no worker at all. The old thread is a
-        # daemon and self-exits via _stop_event once its syscall returns.
+        # Brief stop grace only; do not join a syscall-frozen thread indefinitely.
         if dead.is_alive():
             dead.stop(force=True)
             dead.join(timeout=STOP_GRACE)

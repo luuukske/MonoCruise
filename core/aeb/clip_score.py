@@ -1,19 +1,4 @@
-"""Severity-weighted scoring of a calibration over labelled clips (plan 10).
-
-Each labelled clip is replayed under a candidate calibration; the outcome vs its
-human label becomes a cost. Costs sum to one objective that puts safety first and
-comfort second, so a calibration can be compared by a single number (lower is
-better). This is the scalar a tuner would minimise over ``AEBCalibration``.
-
-Two weight scales keep safety dominant while comfort still moves the number:
-- FN (missed should-trigger) and late engagement pay the heavy SAFETY scale.
-- FP (braked when it must not) pays the light COMFORT scale, graded by how hard
-  and how long it braked.
-- TP / good_intervention earn a reward graded by window overlap and, if given,
-  closeness to the desired peak decel.
-- True negatives (correctly silent) are free. ``ignore`` and unlabelled clips are
-  excluded.
-"""
+"""Corpus objective over labelled clip replays: safety-weighted FN/late, comfort FP, TP reward."""
 
 from __future__ import annotations
 
@@ -52,12 +37,7 @@ class CorpusScore:
 
 
 def class_window_warning(class_: str, has_window: bool) -> str | None:
-    """Consistency rule shared by scoring and the review tool.
-
-    Scoring treats the should-trigger window as ground truth (null =
-    must-not-trigger), so a class that contradicts its window silently distorts
-    the corpus objective. Returns a human message, or None when consistent.
-    """
+    """Label class vs should-trigger window consistency; None if OK."""
     if class_ == "ignore":
         return None
     if class_ == "fp" and has_window:

@@ -1,11 +1,4 @@
-"""FP: TMP adjacent-lane vehicle with one-frame 1.5 m lateral jump toward ego.
-
-Ego at 80 km/h, TMP at 60 km/h (ego closes). TMP at x=3.5, z=12 normally
-(adjacent lane, no hit because closing arcs miss laterally). At frame 15 the
-TMP raw position jumps to x=2.0 (1.5 m toward ego), bringing it into ego's
-corridor; pipeline must suppress via EgoEvasionFilter (ego could steer left).
-"""
-
+"""FP: TMP adjacent lane with one-frame lateral jump; EgoEvasionFilter suppresses."""
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 
 _EGO_SPEED = 80.0 / 3.6

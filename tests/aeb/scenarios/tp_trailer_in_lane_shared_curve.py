@@ -1,15 +1,4 @@
-"""TP: slow truck+trailer ahead, tractor in outer lane of a shared curve, its
-trailer swung across ego's lane; ego overtaking at 100 km/h (crash clip 434f0401).
-
-The tractor reference point rides the outer/adjacent lane (d_abs > lane_half_width)
-and its heading is angled, so the lane primitive never classes the rig as EGO and
-the co-directional suppression stages (CoDirectionalDivergeFilter same-turn
-extended lookahead, OutOfLaneParallelFilter, EgoEvasionFilter) all read the rig as
-outer-lane traffic diverging away in the shared turn. The 13.9 m trailer's rear
-body, however, sits squarely in ego's lane the whole approach: the ego rear-ends
-it. The body-length in-lane test must keep this rig in the pipeline.
-"""
-
+"""TP: trailer body in ego lane on shared curve (clip 434f0401); tractor stays outer lane."""
 import math
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 from core.radar.traffic import Trailer, Position, Quaternion, Size
@@ -21,10 +10,7 @@ _TGT_KAPPA = 0.009           # same sign -> same-turn gate
 _TRAILER_LENGTH = 13.9
 _N_FRAMES = 40
 
-# The rig's trailer is in ego's lane from the first frame, so a correct
-# pipeline warns almost immediately. The pre-fix pipeline suppresses the rig
-# until its tractor reference finally crosses into ego's lane (~1.0 s, near
-# contact), so the tight t_warn_max is what discriminates the fix.
+# Trailer in lane frame 0; pre-fix waited for cab ref (t_warn_max catches fix).
 EXPECTED = {
     "max_state": "WARN",
     "t_warn_max": 0.5,
@@ -38,9 +24,7 @@ def build() -> list[Frame]:
     frames = []
     for i in range(_N_FRAMES):
         t = i * _DT
-        # Cab sweeps from ~26 m ahead down toward ego; it rides the outer lane
-        # (d_abs > lane_half_width) and drifts toward the lane edge as the rig
-        # straightens out, never entering ego's lane by its reference point.
+        # Cab in outer lane by reference; trailer body still in ego lane.
         z_cab = 26.0 - closing * t
         if z_cab < 11.0:
             break

@@ -1,11 +1,4 @@
-"""TP: lead at 20 km/h, ego at 100 km/h, closing at 80 km/h (clip fbc397b3).
-
-Above ~70 km/h closing speed the pre-fix _is_approaching endpoint comparison
-sampled past the corridor-contact hit, read the interpenetrating arcs as
-"diverging", and CoDirectionalDivergeFilter suppressed the lead until impact.
-The in-lane pass-through dip check must keep this target in the pipeline.
-"""
-
+"""TP: fast-closing in-lane lead (clip fbc397b3); CoDirectional pass-through dip check."""
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 
 _EGO_SPEED = 100.0 / 3.6

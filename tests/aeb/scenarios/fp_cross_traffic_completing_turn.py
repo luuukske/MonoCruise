@@ -1,10 +1,4 @@
-"""FP: vehicle completing left turn from west road into south-bound opposite lane.
-
-Vehicle was heading west on a perpendicular road; now in final arc of a left
-turn depositing it into the opposite lane (south-bound, x≈3.5). End of arc
-transiently crosses ego's predicted forward path. OppositeLaneFilter suppresses.
-"""
-
+"""FP: cross traffic completing left turn into opposite lane; OppositeLaneFilter suppresses."""
 import math
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 
@@ -25,9 +19,7 @@ def build() -> list[Frame]:
         yaw_deg = 90.0 * (1.0 - frac)  # 90→0 (west to south)
         x_pos = 8.0 - frac * 4.5  # comes from east toward opposite lane (x≈3.5)
         z_pos = 5.0 + _TARGET_SPEED * t * 0.3  # moves slightly forward
-        # Track authored under the pre-2026-07-19 asymmetric pivot; shift the
-        # pivot back along heading so the symmetric body keeps the same
-        # world-space sweep (body clears ego's path, per scenario intent).
+        # Pivot shift: symmetric body keeps same world sweep as pre-2026-07-19 asymmetric pivot.
         yaw_rad = math.radians(yaw_deg)
         x_pos += 0.32 * 10.0 * math.sin(yaw_rad)
         z_pos += 0.32 * 10.0 * math.cos(yaw_rad)

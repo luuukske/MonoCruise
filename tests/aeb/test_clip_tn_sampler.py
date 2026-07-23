@@ -1,17 +1,4 @@
-"""Tests for boundary-negative (TN) and crash clip capture samplers.
-
-Three layers:
-- recorder policy: background sources (``shadow_near`` / ``random``) are
-  auto-tagged true negatives, throttled on their own long timer, and skip the
-  context thumbnail; real events (``auto_engagement``, ``auto_crash``, ``manual``)
-  keep their unlabelled, thumbnailed behaviour.
-- thread TN condition: ``_capture_aeb_tick`` requests a ``shadow_near`` capture
-  when AEB stayed silent while a nearby filtered vehicle lies inside ego's
-  predicted corridor, and stays quiet otherwise (including while user braking).
-- thread crash condition: ``_capture_aeb_tick`` requests an ``auto_crash``
-  capture on a sudden ego speed drop above the minimum speed floor.
-"""
-
+"""TN and crash clip capture sampler tests (recorder policy, shadow_near, auto_crash)."""
 from __future__ import annotations
 
 import core.aeb.thread as aeb_thread

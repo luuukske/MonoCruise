@@ -14,9 +14,7 @@ EXPECTED = {
 
 
 def build() -> list[Frame]:
-    # Left-curving road continuation: R≈60 m, curve starts at z=10.
-    # Vehicle 1 sits in Lane.EGO (the critical MP-queue case);
-    # vehicles 2-3 are progressively deeper into the curve.
+    # MP queue on left curve: v1 Lane.EGO at s=10; v2/v3 deeper in curve.
     frames = []
     for i in range(_N_FRAMES):
         t = i * _DT

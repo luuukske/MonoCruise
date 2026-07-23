@@ -1,18 +1,4 @@
-﻿"""
-Cruise control orchestrator thread.
-
-Owns the longitudinal controller stack (ACC + CC + SpeedLimiter children from
-`core/longitudinal/`), the CC button FSM, and mode dispatch. Each tick:
-
-1. Read telemetry + pedal + AEB state, build a `LongCtx`.
-2. Run the CC button FSM: drives `self._cc_ctrl` enable/target (both modes).
-3. Run the ACC distance FSM: drives `Settings.acc_gap_level`.
-4. Handle mode-flip handover: reset the now-inactive controller's PID state.
-5. CC-only disengage (user brake, park/gear, disarm-on-stop): limiter excluded.
-6. Dispatch by cc_mode: CC path or Limiter path.
-7. Publish wanted accel to telemetry for `accel_to_pedals.step()` and to
-   `self.data` for UI consumers.
-"""
+"""Longitudinal orchestrator + CC button FSM. See core/cruise_control_thread/README.md."""
 
 from __future__ import annotations
 
@@ -41,9 +27,6 @@ _CC_CRASH_SPEED_DROP_MS = 5.0
 _CC_DISARM_PENDING_TIMEOUT_S = 5.0
 
 # User OPD-gas override of CC (cruise mode): while latched, CC/ACC bids are
-# excluded so the global limiter is the sole bidder and caps the user pedal.
-# Exit when the user lifts off (OPD gas below the release threshold) or ego
-# falls this margin below the CC target (CC's own demand exceeds the user's).
 _CC_OVERRIDE_GAS_RELEASE = 0.02
 _CC_OVERRIDE_SPEED_MARGIN_KMH = 2.0
 
@@ -156,8 +139,6 @@ class CruiseControlThread(BaseThread):
             all_assigned = self._all_cc_buttons_assigned()
 
             # Block-message: warn when user presses inc/start but truck is in
-            # Block-message: warn when user presses inc/start but truck is in
-            # park/neutral/reverse (cruise mode only).
             if connected and Settings.cc_mode == "Cruise control" and (cc_inc or cc_start):
                 if self._park_or_gear_blocks_cc(
                     tel["park_brake"], tel["gear_dashboard"]
@@ -197,12 +178,6 @@ class CruiseControlThread(BaseThread):
                 )
 
             # Build context for controllers.
-            # CC needs three brake signals to decide whether to disengage:
-            #   - user_raw_brake: physical pedal pre-OPD (direct user intent).
-            #   - game_brake:     telemetry readback of the in-game brake.
-            #   - commanded_brake_recent_max: max brake we sent in the last
-            #     few ticks (so a lagged readback of our own command doesn't
-            #     look like a user press).
             user_raw_brake = float(pedal.get("brakeval", 0.0))
             game_brake_in = float(tel.get("game_brake", 0.0))
             commanded_recent_max = self._read_recent_commanded_brake_max()
@@ -228,10 +203,6 @@ class CruiseControlThread(BaseThread):
             mode = Settings.cc_mode
 
             # Reset the inactive controller's PID state on mode flip to avoid
-            # stale integrator values when switching back. Limiter is not
-            # reset on flip: it runs in both modes (always-on cap in cruise
-            # mode when global_speed_limit_kmh is set), and its target-change
-            # branch handles integral reset internally.
             if mode != self._prev_cc_mode:
                 if mode == "Speed limiter":
                     self._cc_ctrl.reset()
@@ -250,10 +221,6 @@ class CruiseControlThread(BaseThread):
                 # when no target has been set via the buttons.
                 if self._cc_ctrl.enabled and self._cc_ctrl.target_speed_kmh is not None:
                     # Re-apply the target clamp every tick: CC.step() owns the
-                    # per-tick re-clamp in cruise mode but never runs here, so
-                    # without this a global limit tightened mid-session leaves
-                    # a stale higher button target capping the truck above the
-                    # new global limit.
                     self._cc_ctrl.set_target_kmh(self._cc_ctrl.target_speed_kmh)
                     self._limiter_ctrl.set_target_kmh(self._cc_ctrl.target_speed_kmh)
                     self._limiter_ctrl.enable()
@@ -269,11 +236,6 @@ class CruiseControlThread(BaseThread):
                 acc_out = LongOutput(None, False)
             else:
                 # Global limiter runs in parallel with CC as an always-on cap
-                # whenever global_speed_limit_kmh is set. Target is strictly the
-                # global limit (never CC's target: CC's target is already
-                # clamped to the global limit, so both converge near the cap).
-                # Limiter is immune to CC disengage, so the cap holds when CC
-                # is off: matches the "global limiter always active" rule.
                 if Settings.global_speed_limit_kmh is not None:
                     self._limiter_ctrl.set_target_kmh(float(Settings.global_speed_limit_kmh))
                     self._limiter_ctrl.enable()
@@ -281,12 +243,6 @@ class CruiseControlThread(BaseThread):
                     self._limiter_ctrl.disable()
 
                 # User OPD-gas override: while the user's gas exceeds CC's,
-                # CC's bid is moot (its brake is suppressed by the merge) and
-                # must not own the arbitration min, otherwise the limiter
-                # never gains gas-cap authority and the user can drive past
-                # the global limit. Exclude CC/ACC so the limiter is the sole
-                # bidder: sending_thread then min-merges the user pedal
-                # against the limiter-tracked gas cap.
                 self._update_cc_override_latch(ctx, pedal)
 
                 if self._cc_user_override:
@@ -334,21 +290,7 @@ class CruiseControlThread(BaseThread):
 
     @staticmethod
     def _arbitrate_named(*items: tuple[str, LongOutput]) -> tuple[float, bool, str]:
-        """Min-arbitrate and report which side dominates for the user-pedal merge.
-
-        The 'winner' label drives SendingThread's user-pedal merge (max vs
-        min): 'cc' → max merge (CC/ACC drive, user OPD gas may add), 'limiter'
-        → min merge (pure cap, user pedal capped).
-
-        Label rule: 'cc' whenever CC or ACC is bidding, even when the
-        limiter's bid owns the min. The published bid is still the min, so a
-        binding limiter cap governs the mapper while CC keeps drive authority
-        in the merge. Labeling those ticks 'limiter' flips the merge to
-        min(user, mapper) and zeroes CC's gas with the foot off the pedal,
-        which jitters whenever the bids cross (set speed == global limit).
-        'limiter' is reported only when the limiter is the sole bidder
-        (CC disabled, or user override excluded CC for the tick).
-        """
+        """Min-arbitrate and report which side dominates for the user-pedal merge. See `core/cruise_control_thread/README.md`."""
         active = [(name, o.wanted_ms2) for name, o in items if o.active and o.wanted_ms2 is not None]
         if not active:
             return 0.0, False, "none"
@@ -386,12 +328,7 @@ class CruiseControlThread(BaseThread):
             return None
 
     def _read_recent_commanded_brake_max(self) -> float:
-        """Max brake value sent to the game over the last few ticks.
-
-        Used by CC to distinguish a real user in-game brake press (gameBrake
-        far above what we commanded) from a lagged readback of our own brake
-        command (gameBrake matches one of the recent commanded values).
-        """
+        """Max brake value sent to the game over the last few ticks. See `core/cruise_control_thread/README.md`."""
         try:
             st = registry.get_thread("sending_thread")
         except KeyError:
@@ -408,19 +345,7 @@ class CruiseControlThread(BaseThread):
         return max(float(x) for x in recent)
 
     def _read_auto_neutral_holding(self) -> bool:
-        """True while sending_thread's auto-neutral owns the gearbox.
-
-        That commanded neutral is exempt from the "can only engage in drive"
-        gates so CC/ACC survive (and can be engaged during) an auto-neutral
-        stop; resuming then bids accel, which flips the auto-neutral gas
-        intent and shifts back to drive.
-
-        The flag deliberately stays set across that shift back, until
-        telemetry reports a forward gear (plus a short grace). Reading it as
-        "currently in neutral" is wrong and was the original bug: the drive
-        press takes hundreds of ms to reach `gear_dashboard`, so this gate
-        saw a bare gear 0 and disengaged ACC on every launch from a stop.
-        """
+        """True while sending_thread's auto-neutral owns the gearbox. See `core/cruise_control_thread/README.md`."""
         try:
             st = registry.get_thread("sending_thread")
         except KeyError:
@@ -578,12 +503,7 @@ class CruiseControlThread(BaseThread):
             self._time_pressed_start = None
 
     def _tick_acc_distance_fsm(self, now: float, inc_held: bool, dec_held: bool) -> None:
-        """Drive the ACC gap level from one or two dedicated buttons.
-
-        Both bound: inc/dec apply ±1 with hard clamp at [1, 4].
-        Only one bound: that single button cycles 1→2→3→4→1.
-        Neither bound: warn (rate-limited).
-        """
+        """Drive the ACC gap level from one or two dedicated buttons. See `core/cruise_control_thread/README.md`."""
         inc_assigned = Settings.acc_dist_inc_button is not None
         dec_assigned = Settings.acc_dist_dec_button is not None
 
@@ -712,11 +632,7 @@ class CruiseControlThread(BaseThread):
             self.data.active_controller = active_ctrl
 
     def _handle_cc_disengage_conditions(self, ctx: LongCtx) -> None:
-        """Disengage CC on user brake, park/gear, or crash-then-stop.
-
-        Never touches self._limiter_ctrl: the limiter is intentionally immune
-        to all of these events (matches the original always-on limiter behaviour).
-        """
+        """Disengage CC on user brake, park/gear, or crash-then-stop. See `core/cruise_control_thread/README.md`."""
         cc = self._cc_ctrl
 
         if cc.enabled:
@@ -759,22 +675,7 @@ class CruiseControlThread(BaseThread):
         self._cc_prev_speed_ms = ctx.speed_ms
 
     def _update_cc_override_latch(self, ctx: LongCtx, pedal: dict) -> None:
-        """Latch/unlatch the user OPD-gas override of CC (cruise mode only).
-
-        Entry: sending_thread saw the user's OPD gas exceed the mapper's gas
-        on the previous tick (CC/ACC bidding, or the sole-bidder limiter cap
-        binding), and ego is not far below the CC target (below it, CC's own
-        gas demand exceeds the user's, so max-merge already gives the right
-        output and there is no cap to enforce). Including the limiter-cap
-        case lets the latch engage on the very tick CC/ACC is enabled at a
-        binding global-limit cap: the winner label then never round-trips
-        "limiter" -> "cc" -> "limiter", which used to leak one tick of
-        uncapped user pedal and re-seat the gas cap at the user's full pedal
-        (throttle surge past the limit on ACC engage at max speed).
-        Exit: user lifts off the OPD gas region, or ego falls the margin
-        below the CC target so CC's demand wins again.
-        Requires both CC and the limiter to be active; otherwise cleared.
-        """
+        """Latch/unlatch the user OPD-gas override of CC (cruise mode only). See `core/cruise_control_thread/README.md`."""
         if not (self._cc_ctrl.active and self._limiter_ctrl.active):
             self._cc_user_override = False
             return
@@ -816,8 +717,6 @@ class CruiseControlThread(BaseThread):
         self, commanding: bool, *, paused: bool = False
     ) -> None:
         # Pause gates the CC bid without a real disengage. Keep mapper state
-        # and _was_commanding so unpause resumes cleanly and a later real end
-        # still triggers the reset.
         if paused:
             return
         if self._was_commanding and not commanding:

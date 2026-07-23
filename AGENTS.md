@@ -6,6 +6,25 @@ This document explains how this program is structured and where to look for usag
 
 MonoCruise is a third-party software that sits in between ETS2/ATS and your pedals. MonoCruise has a ton of quality of life features, like a better Adaptive Cruise Controll or a One-Pedal Driving system for heavy traffic. every feature (including the ACC) works in TruckersMP and singleplayer ETS2/ATS.
 
+### Module docs (human-facing)
+
+Long domain / tuning / coordinate docs live in module `README.md` files, not here:
+
+- `core/radar/README.md`: coordinates, traffic buffer, Vehicle smoothing, ArcPath
+- `core/aeb/README.md`: AEB pipeline, filters, engagement, calibration
+- `core/acc/README.md`: in-lane tracker, scoring, blinker bias
+- `core/sending_thread/README.md`: mapper, pedal capacity, hold, brake efficiency
+- `core/longitudinal/README.md`: CC/limiter/ACC children
+- `core/cruise_control_thread/README.md`: orchestrator and ACC anticipation
+- `core/main_pedal_thread/README.md`: joystick, OPD, capture APIs
+- `core/sdk_installer/README.md`, `core/update_check/README.md`, `updater/README.md`, `shared/README.md`
+
+Do-not-break rules for radar/AEB/ACC are summarized under **Domain invariants** below; full rationale stays in the module README.
+
+### Comment budget
+
+Root `AGENTS.md` is present, so inline comments/docstrings that act as comments are capped at **2 consecutive lines** (absolute max **3** only when truly necessary). Put durable explanation in the nearest module `README.md` (human) or this file (agent-only). No decorative `# ---` / `# ====` dividers. No em dash in comments, docstrings, commit-adjacent text, or log strings.
+
 ### High‑level architecture
 
 - **Entry point**
@@ -152,6 +171,14 @@ Refer back to `core/example_thread/thread.py` whenever you are unsure about the 
 
 - **Physical safety**
   - When an error uccurs or certain parts of the code fail, the user must ALWAYS be able to stop the vehicle being controlled in ETS2 or ATS without causing an accident.
+
+### Domain invariants (radar / AEB / ACC)
+
+Do not reintroduce these without reading the linked README section first:
+
+- **Radar** (`core/radar/README.md` §14): quaternion x/y swap intentional; `rotationX` is yaw; radar render uses `+0.5` yaw offset, arc geometry does not; bodies are symmetric `± length/2`; use `_smooth_yaw` for arcs; `acc_speed` is ACC-only; consumers must not open the traffic shared-memory buffer or mutate `Vehicle` instances.
+- **AEB** (`core/aeb/README.md` §9): yaw-rate ego curvature only (never `RadarData.ego_curvature`); target κ via `_vehicle_curvature_blend` stepped once per vehicle per frame; all tunables in `AEBCalibration`; `lane_frame.project_to_ego_arc` is the lane primitive; TMP trailer kinematics via shallow-copy swap; two-layer pedal authority (FF assist + engagement slam), gas ≥ 0.8 is the only AEB override.
+- **ACC** (`core/acc/README.md` §8): never mutate `Vehicle`; history-fit ego curvature (not AEB's yaw-rate proxy); no control law in this module (cruise owns accel); scoring stays meter-native.
 
 ### Longitudinal control invariants
 

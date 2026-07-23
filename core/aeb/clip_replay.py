@@ -1,17 +1,4 @@
-"""Reconstruct renderable AEB scenes from a captured clip.
-
-Replays the raw radar byte streams through the real ``TrafficReader`` smoothing
-to recover ``Vehicle`` poses per frame, then merges each AEB tick with the radar
-snapshot it consumed (by ``radar_t_mono``) and builds an ``AEBSnapshot`` per tick
-that the existing ``AEBDebugWindow`` renderer can draw.
-
-The AEB *decision* (threat / suppressed ids, warn / brake state, TTC / TTB) comes
-from the recorded ``live_aeb`` parity oracle, not a re-run of the pipeline: this
-shows exactly what the program decided, which is what the tagger judges.
-Predicted arcs are not stored in a clip, so both the ego corridor and the
-per-vehicle corridors are rebuilt from the replayed poses using the same
-curvature blend, One-Euro state, and Fix D damping the live thread applies.
-"""
+"""Clip review: replay radar poses, live_aeb decisions, rebuilt arcs."""
 
 from __future__ import annotations
 
@@ -89,11 +76,7 @@ def _vehicle_dict(v: Vehicle) -> dict:
 def _arc_curvature(v: Vehicle, ego_fwd_x: float, ego_fwd_z: float,
                    horizon: float, blender: VehicleCurvatureBlender,
                    now: float) -> float:
-    """Curvature the live thread would build this vehicle's arc from.
-
-    Steps the One-Euro blender exactly once per vehicle per tick, matching
-    ``AEBThread.loop``: any second call here would double-advance the filter.
-    """
+    """Replay arc curvature; One-Euro stepped once per vehicle per tick."""
     abs_v_speed = abs(v.speed)
     v_curvature = _vehicle_curvature_blend(v, abs_v_speed, _CAL, blender, now)
     v_yaw = _veh_yaw(v)
@@ -208,16 +191,7 @@ def _build_snapshot(ego, vehicles: list[Vehicle], live: LiveAEB,
 
 
 def decode_radar_stream(clip: Clip):
-    """Decode + smooth every radar frame in t_mono order (shared by replay + eval).
-
-    Returns ``(veh_by_t, ego_by_t, frame_t)``: smoothed Vehicle lists and ego
-    telemetry keyed by radar frame ``t_mono``, plus the sorted timestamps. One
-    ``TrafficReader`` carries per-id smoothing forward exactly as live radar.
-
-    Paused / missing-traffic frames keep the previous vehicle list (and do not
-    advance the reader clock). The next active frame sees a reader-level clock
-    gap and re-bases via ``_hold_across_clock_discontinuity``.
-    """
+    """TrafficReader-smoothed vehicles per radar frame; (veh_by_t, ego_by_t, frame_t)."""
     reader = TrafficReader()
     frames = sorted(clip.radar_frames, key=lambda f: f.t_mono)
     veh_by_t: dict[float, list[Vehicle]] = {}

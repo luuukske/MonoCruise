@@ -1,9 +1,6 @@
-"""FP: slow oncoming TMP vehicle at 10 km/h, ego at 70 km/h, near intersection.
-
-Rel speed = (70+10)/3.6 = 22 m/s = 80 km/h (above TMP rel-speed threshold),
-but geometry places it in opposite lane (x=3.5). OppositeLaneFilter suppresses.
-"""
-
+"""FP: slow oncoming TMP vehicle at 10 km/h, ego at 70 km/h, near intersection. Rel speed =
+(70+10)/3.6 = 22 m/s = 80 km/h (above TMP rel-speed threshold), but geometry places it in
+opposite lane (x=3.5). OppositeLaneFilter suppresses."""
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 
 _EGO_SPEED = 70.0 / 3.6

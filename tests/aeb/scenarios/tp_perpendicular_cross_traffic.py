@@ -1,10 +1,6 @@
-﻿"""TP: vehicle crossing ego path perpendicularly at 50 km/h (T-bone).
-
-Zero curvature: straight-line cross. TurningCrossTrafficFilter only suppresses
-tightly-curving targets; curvature=0 passes through to collision eval.
-Ego at 70 km/h straight. EXPECTED: BRAKE.
-"""
-
+"""TP: vehicle crossing ego path perpendicularly at 50 km/h (T-bone). Zero curvature: straight-line
+cross. TurningCrossTrafficFilter only suppresses tightly-curving targets; curvature=0 passes
+through to collision eval. Ego at 70 km/h straight. EXPECTED: BRAKE."""
 import math
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 

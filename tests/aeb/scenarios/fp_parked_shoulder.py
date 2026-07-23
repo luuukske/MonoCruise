@@ -18,10 +18,7 @@ def build() -> list[Frame]:
     for i in range(_N_FRAMES):
         t = i * _DT
         ego = EgoState(x=0.0, y=0.0, z=0.0, yaw_norm=0.5, speed=_EGO_SPEED)
-        # Parked car on right shoulder: x=2.2m (right), at z=40m ahead.
-        # x=2.2 < corridor width (2.9m) so arc corridors overlap.
-        # Ego can steer left to avoid (evasion left arc clears), so
-        # EgoEvasionFilter suppresses it.
+        # Shoulder overlap at x=2.2; ego can steer left, EgoEvasionFilter suppresses.
         distance = 40.0 - _EGO_SPEED * t * 0.3
         if distance < 5.0:
             break

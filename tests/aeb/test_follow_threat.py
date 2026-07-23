@@ -1,12 +1,4 @@
-"""Follow-threat flag: behavioral detection of a genuinely braking in-lane lead.
-
-The flag requires BOTH sustained closing range and sustained target
-deceleration while co-directional in Lane.EGO (see AEBCalibration
-follow_threat_*). These tests drive _update_follow_threats directly over
-synthetic multi-frame histories; the single-frame scenario harness cannot
-exercise a temporal tracker.
-"""
-
+"""Follow-threat temporal tests via _update_follow_threats (not single-frame harness)."""
 from __future__ import annotations
 
 import math

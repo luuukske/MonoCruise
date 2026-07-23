@@ -1,12 +1,4 @@
-"""
-MonoCruise – Reusable widget factory functions.
-
-Every factory inserts its widget into the *parent*'s QGridLayout at the
-specified (row, col) and returns the widget reference.  The factories mirror
-the original ``new_label``, ``new_checkbutton``, ``new_entry``,
-``new_optionmenu`` helpers from MonoCruise.py.
-"""
-
+"""MonoCruise widget factories for the settings grid (labels, fields, toggles)."""
 from __future__ import annotations
 
 from typing import Any, Callable, Sequence
@@ -115,11 +107,9 @@ def new_subtext(
 # Checkbox  (18×18, no text)
 
 class CheckBox(QCheckBox):
-    """QCheckBox that paints a checkmark glyph when checked.
-
-    QSS styles the indicator box (border, fill) but cannot draw a vector
-    checkmark without an image asset, so the glyph is painted on top here.
-    """
+    """QCheckBox that paints a checkmark glyph when checked. QSS styles the indicator box (border,
+    fill) but cannot draw a vector     checkmark without an image asset, so the glyph is painted
+    on top here."""
 
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
@@ -305,15 +295,8 @@ def new_optionmenu(
 # Button-binding configure button
 
 class BindButton(QPushButton):
-    """Click-to-assign binding button for the settings panel.
-
-    Visual states are driven by dynamic QSS properties (see the
-    ``QPushButton#bindButton`` rules in constants.STYLESHEET):
-
-    - idle: input-field infill, 2px border; "None" in dark gray when unassigned
-    - configuring: green border while listening for the next input
-    - held: blue infill while the assigned input is physically pressed
-    """
+    """Click-to-assign binding button for the settings panel. Visual states are driven by dynamic QSS properties (see the ``QPushButton#bindButton`` rules in constants.STYLESHEET): - idle: input-field infill, 2px border; "None" in dark gray when unassigned
+    - configuring: green border while listening for the next input - held: blue infill while the assigned input is physically pressed"""
 
     _CONFIGURING_TEXT = "listening..."
 
@@ -330,9 +313,7 @@ class BindButton(QPushButton):
         self.setProperty("bindHover", False)
         self.setText(self._binding_text)
 
-    # Hover is tracked explicitly via a dynamic property: the forced
-    # repolish makes the hover restyle deterministic regardless of how the
-    # ancestor chain is styled or composited.
+    # bindHover property + repolish for deterministic hover styling.
     def enterEvent(self, event) -> None:
         super().enterEvent(event)
         self._hovered = True

@@ -1,17 +1,4 @@
-﻿"""
-Monitor: interactive CLI control panel.
-
-Only active when settings.debug is True.
-The table is never auto-printed; call `status` whenever you want a snapshot.
-Logging output is never interrupted or overwritten.
-
-Commands:
-  status           : print thread table once
-  stop <name>      : stop a thread
-  restart <name>   : stop + restart a thread via watchdog factory
-  quit             : stop all threads and exit
-  help             : show this list
-"""
+"""Debug CLI (status/stop/restart/quit). Active when settings.debug. See AGENTS.md."""
 
 from __future__ import annotations
 

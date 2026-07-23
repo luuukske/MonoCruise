@@ -1,10 +1,4 @@
-﻿"""
-ETS2/ATS traffic vehicle classes with arc-based path prediction.
-
-Coordinate system and yaw conventions: see ``core/aeb/AGENTS.md`` §1–§3.
-Shared between AEB and ACC (both consume the same Vehicle instances produced
-by RadarThread).
-"""
+"""Traffic Vehicle smoothing and ArcPath geometry. See core/radar/README.md."""
 
 from __future__ import annotations
 
@@ -15,15 +9,11 @@ from typing import Optional
 
 _MAX_ANGULAR_VELOCITY: float = 45.0
 _LOCATION_UPDATE_FREQUENCY: float = 0.05
-# Gap between successive TrafficReader clocks that means a real pause/hitch
-# (no intermediate frames). Must NOT be applied to Vehicle.update_from_last dt:
-# sub-frames freeze Vehicle.time, so dt since last *full* update can exceed
-# this during normal slow radar without a pause — that path was freezing
-# speeds at a stale fraction of truth. See AGENTS.md §7.
+# Reader kinematics clock gap (pause/hitch). See core/radar/README.md §7.
 _READER_CLOCK_GAP_S: float = 0.50
 
 # TMP speed / accel EMA: same hyperbolic law α(|v|) with different endpoints.
-# Reference speed for "at 90 km/h" is 25 m/s. See AGENTS.md §7.
+# Reference speed for "at 90 km/h" is 25 m/s. See core/radar/README.md §7.
 _ALPHA_SPEED_SCALE: float = 90.0 / 3.6   # 25.0 m/s
 
 # Speed EMA on raw_speed: 1.0 at rest → 0.25 at 90 km/h.
@@ -35,99 +25,41 @@ _SPEED_EMA_CURVE_D: float = (
     / (_SPEED_EMA_AT_REST - _SPEED_EMA_AT_90_KMH)
 )
 
-# Accel filter: least-squares slope of recent speed_ema samples over
-# _ACCEL_FIT_WINDOW_S (low-noise derivative), then a light EMA. Feeds the
-# responsive accel (AEB, speed_corr). See AGENTS.md §7.
+# Accel: LS slope of speed_ema history, then light EMA. See core/radar/README.md §7.
 _ACCEL_FIT_WINDOW_S: float = 0.70
 _ACCEL_EMA_ALPHA: float = 0.45
-# Holds (t, speed_ema) samples for the LS slope fits: `accel` over
-# _ACCEL_FIT_WINDOW_S and `accel_trend` over _ACC_SPEED_ACCEL_WINDOW_S.
-# 120 ≈ 6 s of headroom at full-update rate.
+# acc_speed step-4 tunables. See core/radar/README.md §7.
 _SPEED_EMA_HISTORY_LEN: int = 120
 
 # Accel-correction term clamp (m/s): caps how far accel·τ can shift a speed.
 _SPEED_CORR_CLAMP_MS: float = 3.0
 
-# ACC speed (acc_speed): adaptive filter on speed_corr. A per-tick change
-# below _ACC_SPEED_DEADBAND_MS is treated as noise and filtered with the long
-# _ACC_SPEED_TAU_SLOW_S time constant; the time constant ramps continuously
-# down toward _ACC_SPEED_TAU_FAST_S as the change grows, reaching it at twice
-# the deadband, so real motion is tracked fast. See AGENTS.md §7.
-#
-# TAU_SLOW was 2.0 s. At that length alpha_a is small enough that the step-4
-# feed-forward dominates and acc_speed runs near open loop, which lagged a real
-# lead brake and made ACC follow too close on a hard stop. Shortening it lets
-# the low-pass correction rein the prediction back in. Measured on the TMP
-# corpus, together with the ACCEL_FLOOR change below: gap conceded per hard
-# decel 5.37 -> 4.24 m, with stall poison and worst-frame jerk unchanged.
-#
-# The binding constraint is convoy sawtooth pass-through, guarded by
-# test_convoy_sawtooth_attenuated_at_cruise (bound 0.30 m/s on a 0.8 m/s input
-# wobble). That cost is carried almost entirely by TAU_SLOW: ACCEL_FLOOR barely
-# registers on it (1.6/0.35 -> 0.2462, 1.6/0.25 -> 0.2463), so the floor is
-# taken in full and the tau is bought only down to where margin remains.
-# 2.0 -> 0.1997, 1.6 -> 0.2462, 1.4 -> 0.2775, 1.2 -> 0.3158 (fails).
-# 1.4 buys only 0.05 m more gap for half the remaining margin, so 1.6 it is.
-#
-# Both constants are step-4 only, so AEB is untouched by construction.
+# acc_speed step-4 tunables. See core/radar/README.md §7.
 _ACC_SPEED_DEADBAND_MS: float = 0.7
 _ACC_SPEED_TAU_SLOW_S: float = 1.6
 _ACC_SPEED_TAU_FAST_S: float = 0.08
 
-# Smoothing is speed-scaled: tau is multiplied by speed_factor: 1.0 at
-# _ACC_SPEED_SMOOTH_REF_MS (90 km/h) and above, falling linearly to
-# _ACC_SPEED_SMOOTH_MIN at rest, so at low speed acc_speed leans on the
-# incoming speed_corr instead of smoothing it. See AGENTS.md §7.
+# acc_speed step-4 tunables. See core/radar/README.md §7.
 _ACC_SPEED_SMOOTH_REF_MS: float = 90.0 / 3.6   # 25 m/s
 _ACC_SPEED_SMOOTH_MIN: float = 0.15
 
-# ...and acceleration-scaled. accel_trend is the de-noised acceleration: the
-# LS slope of speed_ema over _ACC_SPEED_ACCEL_WINDOW_S, where coasting and
-# cruise wobble average to ≈ 0 but a steady ramp registers its true rate.
-# accel_factor multiplies tau: 1.0 while coasting, falling to
-# _ACC_SPEED_ACCEL_FLOOR once |accel_trend| reaches _ACC_SPEED_ACCEL_HI_MS2.
-# Below _ACC_SPEED_ACCEL_LO_MS2 a ramp counts as cruise noise and is ignored,
-# so cruise smoothing is untouched. See AGENTS.md §7.
+# acc_speed step-4 tunables. See core/radar/README.md §7.
 _ACC_SPEED_ACCEL_WINDOW_S: float = 1.5
 _ACC_SPEED_ACCEL_LO_MS2: float = 0.3
 _ACC_SPEED_ACCEL_HI_MS2: float = 1.5
 _ACC_SPEED_ACCEL_FLOOR: float = 0.15
 
-# Feed-forward: the low-pass alone lags a steady ramp by accel·tau. acc_speed
-# is predicted one step along the responsive accel before the low-pass corrects
-# the residual, which cancels that lag analytically (no windup, no overshoot).
-# The prediction is gated by ff_gate, a ramp on the de-noised |accel_trend|:
-# zero below _ACC_SPEED_FF_GATE_LO_MS2, full at _ACC_SPEED_FF_GATE_HI_MS2. Both
-# sit just above the cruise-noise floor (|accel_trend| ≈ 0.06 m/s² while
-# coasting) so the prediction is exactly zero while coasting: no cruise noise
-# is fed forward: yet saturates within a fraction of a real ramp. accel is
-# clamped to _ACC_SPEED_FF_ACCEL_CLAMP_MS2 so a crash spike cannot jump
-# acc_speed. See AGENTS.md §7.
+# acc_speed step-4 tunables. See core/radar/README.md §7.
 _ACC_SPEED_FF_GATE_LO_MS2: float = 0.12        # m/s² : feed-forward gate opens
 _ACC_SPEED_FF_GATE_HI_MS2: float = 0.30        # m/s² : feed-forward gate fully open
 _ACC_SPEED_FF_ACCEL_CLAMP_MS2: float = 6.0     # m/s² : clamp on the feed-forward accel
 
-# Trend consistency: TMP convoy reconciliation wobbles speed in slow
-# drift-and-snap cycles (~2-4 s). Each drift phase reads as a genuine ramp on
-# the 1.5 s accel_trend window and used to open the feed-forward, which then
-# integrated the wobble straight into acc_speed. A real ramp accumulates net
-# speed change on a longer horizon; a wobble does not, so the LS slope over
-# _ACC_SPEED_CONSIST_WINDOW_S stays near zero. consistency = the larger of
-# the slope ratio |accel_long| / |accel_trend| and a magnitude ramp on
-# |accel_long| (_ACC_SPEED_CONSIST_MAG_LO/HI): the ratio converges slowly on
-# a fresh brake because the long window still holds pre-brake cruise, but any
-# real brake pushes |accel_long| past the magnitude ramp within ~1-1.5 s
-# while a zero-mean wobble never sustains it. 0 on sign mismatch, clamped to
-# 1; scales ff_gate and accel_ramp. The fast-tau residual gate stays on the
-# short trend so hard-brake onset tracking is not delayed. See AGENTS.md §7.
+# acc_speed step-4 tunables. See core/radar/README.md §7.
 _ACC_SPEED_CONSIST_WINDOW_S: float = 4.0
 _ACC_SPEED_CONSIST_MAG_LO_MS2: float = 0.4     # m/s² : |accel_long| where magnitude term starts
 _ACC_SPEED_CONSIST_MAG_HI_MS2: float = 1.0     # m/s² : |accel_long| granting full consistency
 
-# Standstill latch on acc_speed: once the filtered speed settles near zero with
-# no real de-noised ramp, acc_speed is clamped to exactly 0 and held until
-# speed_corr exceeds the release threshold for consecutive full frames. Kills
-# residual crash-bounce wobble around zero at standstill. See AGENTS.md §7.
+# acc_speed step-4 tunables. See core/radar/README.md §7.
 _ACC_SPEED_STANDSTILL_ENTER_MS: float = 0.3    # m/s : |acc_speed| below this can latch
 _ACC_SPEED_STANDSTILL_RELEASE_MS: float = 0.6  # m/s : |speed_corr| above this releases
 _ACC_SPEED_STANDSTILL_RELEASE_S: float = 0.5   # s : sustained time above release speed
@@ -135,22 +67,13 @@ _ACC_SPEED_STANDSTILL_RELEASE_S: float = 0.5   # s : sustained time above releas
 # Yaw EMA (wrap-safe): AI and TMP (arc curvature).
 _RAW_YAW_ALPHA: float = 0.50
 
-# TMP lag detection: see AGENTS.md §7 "Lag / freeze detection".
+# TMP lag detection: see core/radar/README.md §7 "Lag / freeze detection".
 _LAG_MIN_SPEED_MS: float = 5.0           # m/s : below this no lag detection runs
 _LAG_DISP_RATIO: float = 0.10           # flag lag if raw disp < 10 % of expected
-# Entry is blocked while the rotation stream is clearly live: a packet stall
-# freezes the whole pose (rotation byte-identical or near-frozen), while a
-# physically stopping (crashed) vehicle keeps rotating at crash scale. This
-# separates "packets stopped coming" (freeze it) from "vehicle stopped moving"
-# (show the stop to AEB immediately). Threshold is a rate so it is frame-rate
-# independent; stall-window jitter measures < ~1 deg/s, crash rotation 10+.
+# Lag entry blocked when rotation looks live (not a stall). See core/radar/README.md §7.
 _LAG_ROT_LIVE_DEG_S: float = 2.0         # deg/s: rotation at/above this blocks entry
 
-# Freeze duration scales logarithmically with time-to-vehicle (TTC) so a close
-# real stop is not masked by the filter. TTC = 3D distance to ego / ego_speed,
-# with ego_speed floored at _LAG_FREEZE_EGO_SPEED_FLOOR. Curve: 0 s at TTC ≤
-# _LAG_FREEZE_TTC_LO, _LAG_FREEZE_DUR_MAX at TTC ≥ _LAG_FREEZE_TTC_HI,
-# dur = K · ln(ttc / lo) between (K chosen so dur(hi) = max).
+# TMP lag/freeze tunables. See core/radar/README.md §7.
 _LAG_FREEZE_TTC_LO: float = 0.3                  # s   : freeze = 0 at/below this TTC
 _LAG_FREEZE_TTC_HI: float = 4.0                  # s   : freeze = max at/above this TTC
 _LAG_FREEZE_DUR_MAX: float = 0.5                 # s   : freeze cap (release after this)
@@ -164,18 +87,7 @@ _LAG_FREEZE_LOG_K: float = _LAG_FREEZE_DUR_MAX / math.log(
 _POS_MISMATCH_BACKWARD_THRESHOLD: float = 0.00   # m: min backward dot to flag
 _POS_MISMATCH_MAX_FRAMES: int = 5
 
-# Crash detection (TMP only, full frames only). A crash confirms when a
-# rotation-jerk frame coincides with a kinematic anomaly on live data:
-# XZ direction reversal, vertical jump, or single-frame displacement collapse.
-# Rotation rates are computed between live frames only and span frozen
-# (packet-stall) intervals, so a stall's entry rate-drop and exit snap read as
-# their true average rate instead of a one-frame jerk. A confirmed crash
-# latches crash_confirmed for _CRASH_HOLD_S past the last qualifying frame so
-# consumers (filter bypasses, the AEB LOS-veto bypass) see a stable event flag
-# rather than per-frame flicker.
-# Jerk thresholds sit above normal TMP rotation noise (pitch/roll rate deltas
-# of several deg/s frame to frame, yaw to ~25 on curves) and below measured
-# crash rotation (pitch 19+, roll 60+, yaw 100+ on clip 397148fd).
+# TMP crash detection tunables. See core/radar/README.md §7.
 _CRASH_PITCH_JERK: float = 12.0                 # deg/s pitch rate delta threshold
 _CRASH_YAW_JERK: float = 40.0                   # deg/s yaw rate delta threshold
 _CRASH_ROLL_JERK: float = 20.0                  # deg/s roll rate delta threshold
@@ -186,26 +98,14 @@ _CRASH_FROZEN_EPS: float = 1e-6                 # deg / m: byte-identical frame 
 _CRASH_VERTICAL_JERK_M: float = 0.08            # m per-frame Δy change
 _CRASH_REVERSAL_COS: float = -0.3               # cos(prev disp, cur disp) below this
 _CRASH_REVERSAL_MIN_DISP_M: float = 0.025       # m both displacements must exceed
-# Displacement collapse is measured over the last TWO live frames so TMP's
-# ~1 Hz position-reconciliation ripple (alternating short / long frames whose
-# single-frame ratio dips to ~0.3-0.5 of filtered speed) averages out to ~1.0,
-# while a physical stop keeps consecutive frames collapsed.
+# Crash disp-collapse uses two live frames (TMP ripple). See core/radar/README.md §7.
 _CRASH_DISP_COLLAPSE_RATIO: float = 0.5         # 2-frame disp under this frac of expected
 _CRASH_DISP_COLLAPSE_MIN_SPEED_MS: float = 3.0  # m/s prev speed for collapse check
 
 _MIN_CURVATURE_RADIUS: float = 5.0
 _STRAIGHT_CURVATURE_EPS: float = 1e-6
 
-# Vehicle position history buffer: newest last, length capped at
-# _POSITION_HISTORY_LEN. Shared by:
-#   - raw speed LS fit (uses last _RAW_SPEED_HISTORY_LEN samples internally)
-#   - curvature_from_history() circumscribed-circle fit (uses full buffer)
-#   - ACC trail-arc scoring (needs long history for stable fit).
-#
-# _POSITION_HISTORY_LEN is the buffer size; _RAW_SPEED_HISTORY_LEN is the
-# window the speed LS fit considers: ~1.3 s, long enough to average out
-# TMP's ~1 Hz position-reconciliation ripple (see AGENTS.md §7) so the derived
-# speed doesn't oscillate. AI uses the same fit; sign comes from the buffer.
+# Position history buffer (speed LS, curvature, ACC). See core/radar/README.md §7.
 _POSITION_HISTORY_LEN: int = 25
 _RAW_SPEED_HISTORY_LEN: int = 20
 _RAW_SPEED_NEAR_ZERO_CHORD: float = 0.025  # m: same gate as per-frame displacement
@@ -225,12 +125,7 @@ _RAW_BRAKE_STANDSTILL_SPEED_MS: float = 0.1
 
 
 def _lag_freeze_duration(gap_3d: float, ego_speed: float) -> float:
-    """Logarithmic TTC-scaled freeze window. See AGENTS.md §7 "Lag / freeze detection".
-
-    TTC = gap_3d / max(ego_speed, _LAG_FREEZE_EGO_SPEED_FLOOR). Returns 0 s below
-    _LAG_FREEZE_TTC_LO, _LAG_FREEZE_DUR_MAX above _LAG_FREEZE_TTC_HI, and
-    K · ln(ttc / lo) between, so a close vehicle's real stop is not masked.
-    """
+    """TTC-scaled lag freeze duration (seconds). See core/radar/README.md §7."""
     ttc = gap_3d / max(ego_speed, _LAG_FREEZE_EGO_SPEED_FLOOR)
     if ttc <= _LAG_FREEZE_TTC_LO:
         return 0.0
@@ -244,16 +139,7 @@ def _raw_speed_from_position_history(
     fwd_x: float,
     fwd_z: float,
 ) -> float | None:
-    """Estimate signed longitudinal speed (m/s) from (t, x, z) samples, oldest first.
-
-    Uses only the last _RAW_SPEED_HISTORY_LEN samples so the LS fit window is
-    independent of the total buffer length (which can be longer for curvature
-    / ACC trail arc).
-
-    Fits s ≈ v·τ where s = dot(p(τ) − p₀, fwd) and τ = t − t₀. Uniform spacing is
-    not required. Returns None if fewer than two samples (caller uses one interval).
-    If the first→last chord is below _RAW_SPEED_NEAR_ZERO_CHORD, returns 0.0.
-    """
+    """Signed m/s from (t,x,z) LS fit over _RAW_SPEED_HISTORY_LEN samples."""
     if len(history) < 2:
         return None
     window = history[-_RAW_SPEED_HISTORY_LEN:] if len(history) > _RAW_SPEED_HISTORY_LEN else history
@@ -340,13 +226,7 @@ def _raw_speed_from_kinematics(
     dt: float,
     preserve_buffer_sign: bool,
 ) -> float:
-    """Longitudinal raw speed (m/s) feeding the shared filter chain.
-
-    TMP: LS fit on position history (single-interval fallback); sign from fit.
-    SP/AI: same fit when history allows; sign from buffer when |buffer| is
-    above _BUFFER_SIGN_SPEED_MS so turning vehicles are not misclassified as
-    reversing (see AGENTS.md §7 "Speed sign detection").
-    """
+    """Raw m/s into the filter chain (AI/TMP sign rules). See core/radar/README.md §7."""
     _ls = _raw_speed_from_position_history(position_history, fwd_x, fwd_z)
     if _ls is not None:
         if preserve_buffer_sign and abs(buffer_speed) > _BUFFER_SIGN_SPEED_MS:
@@ -367,14 +247,7 @@ def _raw_speed_from_kinematics(
 
 
 def _accel_to_arc_params(accel: float, override_decel: float = 0.0) -> tuple[float, float]:
-    """Convert raw vehicle acceleration to (decel, accel) for build_arc().
-
-    - override_decel > 0  (e.g. head-on full brake) → (override_decel, 0.0).
-    - accel < 0 (braking) → decel = min(|accel|, 6.0), accel = 0.0.
-      Capped at 6 m/s² so crash-induced backward position jumps (which produce
-      large negative acceleration spikes) are not mistaken for hard braking.
-    - accel >= 0 (accelerating or constant) → decel = 0.0, accel = min(accel, 4.0).
-    """
+    """Map kinematic accel to ArcPath (decel, accel) with caps."""
     if override_decel > 0.0:
         return override_decel, 0.0
     if accel < 0.0:
@@ -393,11 +266,7 @@ def _accel_from_speed_history(
     history: list[tuple[float, float]],
     window_s: float,
 ) -> float:
-    """Least-squares slope (m/s²) of (t, speed) samples within `window_s`.
-
-    Fits `speed ≈ a·t + b` over samples no older than `window_s`; the slope `a`
-    is a low-noise acceleration estimate. Returns 0.0 with < 2 samples.
-    """
+    """LS slope m/s² of speed samples within ``window_s``."""
     if len(history) < 2:
         return 0.0
     t_new = history[-1][0]
@@ -427,12 +296,7 @@ def _speed_corr_chain(
     prev_speed_ema_history: list[tuple[float, float]] | None,
     responsive_brake_decel: float = 0.0,
 ) -> tuple[float, float, float, list[tuple[float, float]]]:
-    """Steps 1-3 of the filter chain. See AGENTS.md §7.
-
-    Returns (speed_ema, accel, speed_corr, speed_ema_history). Run once per
-    consumer: AEB reads the hard-brake-selected raw speed, ACC reads the long
-    position window (see ``_smooth_vehicle_kinematics``).
-    """
+    """Filter steps 1-3: speed_ema, accel, speed_corr. See core/radar/README.md §7."""
     # Step 1: plain EMA of raw speed (no lag compensation).
     if prev_speed_ema is None:
         speed_ema = raw_speed
@@ -441,9 +305,7 @@ def _speed_corr_chain(
         alpha_s = _tmp_speed_ema_alpha(abs((prev_speed_ema + raw_speed) * 0.5))
         speed_ema = alpha_s * raw_speed + (1.0 - alpha_s) * prev_speed_ema
 
-    # Step 2: accel = LS slope of the speed_ema history (low-noise derivative),
-    # then a light EMA. A windowed least-squares fit averages out the per-sample
-    # noise that a tick-to-tick difference would amplify.
+    # Filter chain step (shared kinematics). See core/radar/README.md §7.
     history = list(prev_speed_ema_history) if prev_speed_ema_history else []
     history.append((t_now, speed_ema))
     if len(history) > _SPEED_EMA_HISTORY_LEN:
@@ -474,10 +336,7 @@ def _acc_speed_step(
     prev_acc_release_s: float,
 ) -> tuple[float, bool, float]:
     """Step 4 of the filter chain. Returns (acc_speed, standstill, release_s)."""
-    # Step 4: ACC speed: adaptive low-pass on speed_corr with a constant-accel
-    # feed-forward. tau ramps slow→fast with the per-tick change (abrupt jumps)
-    # and is scaled down on a confirmed ramp; the feed-forward predicts along
-    # the de-noised accel so a steady ramp tracks with ≈ 0 lag. See AGENTS.md §7.
+    # acc_speed step-4 tunables. See core/radar/README.md §7.
     acc_standstill = prev_acc_standstill
     acc_release_s = 0.0
     if prev_speed_ema is None or prev_acc_speed is None:
@@ -492,9 +351,7 @@ def _acc_speed_step(
             1.0, abs(speed_corr) / _ACC_SPEED_SMOOTH_REF_MS)
         # ...and with acceleration: a steady ramp is low-noise, track it closely.
         accel_trend = _accel_from_speed_history(history, _ACC_SPEED_ACCEL_WINDOW_S)
-        # Fast tau opens only when the residual points the same way as the
-        # de-noised trend: a big residual disagreeing with the trend is bounce
-        # or a packet snap, not motion, and stays on the slow tau.
+        # Fast tau only when residual agrees with trend. See core/radar/README.md §7.
         if abs(accel_trend) <= _ACC_SPEED_FF_GATE_LO_MS2 or accel_trend * delta <= 0.0:
             ramp = 0.0
         # Trend consistency: a real ramp sustains its slope on the long window,
@@ -515,10 +372,7 @@ def _acc_speed_step(
         tau = _ACC_SPEED_TAU_SLOW_S + (_ACC_SPEED_TAU_FAST_S - _ACC_SPEED_TAU_SLOW_S) * ramp
         tau *= speed_factor * accel_factor
         alpha_a = dt / (tau + dt)
-        # Feed-forward: predict one step along the responsive accel, then
-        # low-pass the residual. Cancels the filter's accel·tau ramp lag with no
-        # windup. ff_gate (a ramp on the de-noised |accel_trend|) holds the
-        # prediction at zero while coasting, so cruise noise is never fed forward.
+        # acc_speed step-4 tunables. See core/radar/README.md §7.
         ff_gate = max(0.0, min(1.0,
             (abs(accel_trend) - _ACC_SPEED_FF_GATE_LO_MS2)
             / (_ACC_SPEED_FF_GATE_HI_MS2 - _ACC_SPEED_FF_GATE_LO_MS2))) * consistency
@@ -528,7 +382,7 @@ def _acc_speed_step(
         acc_speed = predicted + alpha_a * (speed_corr - predicted)
 
         # Standstill latch: clamp acc_speed to 0 once it settles near zero with
-        # no real ramp; release on sustained speed_corr (hysteresis, see AGENTS.md §7).
+        # no real ramp; release on sustained speed_corr (hysteresis, see core/radar/README.md §7).
         if acc_standstill:
             if abs(speed_corr) > _ACC_SPEED_STANDSTILL_RELEASE_MS:
                 acc_release_s = prev_acc_release_s + dt
@@ -561,39 +415,14 @@ def _smooth_vehicle_kinematics(
     responsive_brake_decel: float = 0.0,
 ) -> tuple[float, float, float, list[tuple[float, float]],
            float, float, list[tuple[float, float]], float, bool, float]:
-    """Speed/accel filter chain shared by AI and TMP vehicles. See AGENTS.md §7.
-
-    Two chains, one per consumer. AEB's ``speed`` / ``acceleration`` run on
-    ``raw_speed``, which is the hard-brake-selected estimate: the short position
-    window when a brake is confirmed. ACC's ``acc_speed`` / ``acc_accel`` run on
-    ``acc_raw_speed``, the long window only.
-
-    The split exists because the short window is an AEB responsiveness device
-    that ACC never needed. On TMP it latches on packet stalls and then stays
-    selected a median of 1.83 s past the end of the stall (corpus measurement),
-    which ACC read as a sustained lead brake and answered with a hard brake of
-    its own. Filtering the stall out is not possible: a stall and a real brake
-    are the same observable until the speed either returns or does not. Keeping
-    the short window off the ACC path removes the exposure instead, and costs
-    AEB nothing.
-
-    Callers pass ``acc_raw_speed == raw_speed`` when ``crash_confirmed``, so a
-    crashed vehicle reaches ACC through the same unfiltered path as AEB.
-
-    Returns (speed_ema, accel, speed_corr, speed_ema_history,
-    acc_speed_ema, acc_accel, acc_speed_ema_history, acc_speed,
-    acc_standstill, acc_release_s).
-    """
+    """Dual AEB/ACC kinematics chains from raw speeds. See core/radar/README.md §7."""
     speed_ema, accel, speed_corr, history = _speed_corr_chain(
         raw_speed, t_now, dt,
         prev_speed_ema, prev_accel, prev_speed_ema_history,
         responsive_brake_decel,
     )
 
-    # Always run the ACC chain on its own state. It cannot be aliased to the AEB
-    # chain on frames where the two raw speeds happen to agree: the chains carry
-    # separate EMA and history state, so they stay diverged for a window after
-    # any brake transient even once the inputs match again.
+    # Separate AEB vs ACC filter state. See core/radar/README.md §7.
     acc_ema, acc_accel, acc_corr, acc_history = _speed_corr_chain(
         acc_raw_speed, t_now, dt,
         prev_acc_speed_ema, prev_acc_accel, prev_acc_speed_ema_history,
@@ -640,7 +469,7 @@ class Position:
 
 
 class Quaternion:
-    """ETS2 traffic quaternion: x/y swap is intentional (AGENTS.md §3)."""
+    """ETS2 traffic quaternion: x/y swap is intentional (core/radar/README.md §3)."""
     __slots__ = ("w", "x", "y", "z", "_euler_cache")
 
     def __init__(self, w: float, x: float, y: float, z: float) -> None:
@@ -717,7 +546,7 @@ class Trailer:
 
 @dataclass(slots=True)
 class ArcPath:
-    """Predicted path as a circular arc or straight ray.  See AGENTS.md §8."""
+    """Predicted path as a circular arc or straight ray.  See core/radar/README.md §8."""
     start_x: float = 0.0
     start_z: float = 0.0
     yaw_rad: float = 0.0
@@ -728,27 +557,11 @@ class ArcPath:
     decel: float = 0.0
     accel: float = 0.0
 
-    # Capsule body extents along the heading, measured from the arc reference
-    # point (start). fwd_len reaches toward the body front, back_len toward the
-    # body rear. Both default 0.0, which collapses the capsule to the reference
-    # point and preserves the legacy point/disc collision behavior for every
-    # consumer that does not set them (ACC, rendering). Set by AEB build sites
-    # so the collision test covers the whole vehicle body, not just its width.
-    # Collision uses the derived _cap_fwd/_cap_back (extents minus half_width)
-    # so the capsule's rounded end cap lands ON the bumper, not half_width past
-    # it; raw fwd_len/back_len remain the physical body ends for centreline
-    # sampling (_any_body_in_ego_lane). See core/radar/AGENTS.md 8.
+    # ArcPath capsule collision fields. See core/radar/README.md §8.
     fwd_len: float = 0.0
     back_len: float = 0.0
 
-    # Corridor-margin scale applied when this body meets another capsule at a
-    # near-parallel heading (see _sampled_collision). The margin exists to
-    # absorb the time-sampling risk of crossing paths sweeping through contact
-    # between samples; near-parallel bodies hold their separation across many
-    # samples, so the full margin only manufactures side-graze hits on
-    # adjacent-lane traffic. A collision pair uses the smaller scale of its two
-    # arcs. 1.0 (default) keeps the full margin for every consumer that does
-    # not set it; AEB ego arcs set cal.capsule_parallel_margin_scale.
+    # ArcPath capsule collision fields. See core/radar/README.md §8.
     parallel_margin_scale: float = 1.0
 
     is_straight: bool = True
@@ -766,16 +579,9 @@ class ArcPath:
     _cap_back: float = 0.0
 
     def build(self) -> "ArcPath":
-        """Compute cached fields (fwd, radius, center, arc_length, is_straight) from
-        start, curvature, speed, decel/accel. Call after setting fields."""
+        """Fill ArcPath derived fields; call after assigning inputs."""
         self._has_body = self.fwd_len > 1e-9 or self.back_len > 1e-9
-        # Collision segment extents: the capsule test adds half_width radially
-        # in EVERY direction around the segment, so a segment reaching the
-        # bumper would extend the body half_width past each end lengthwise
-        # (~1.15 m ego + ~1.25 m target of phantom length). Retract each end by
-        # half_width so the rounded cap's tip coincides with the body end; the
-        # side faces stay exact and only the rectangle corners round off, which
-        # the corridor margin absorbs.
+        # ArcPath capsule collision fields. See core/radar/README.md §8.
         self._cap_fwd = max(self.fwd_len - self.half_width, 0.0)
         self._cap_back = max(self.back_len - self.half_width, 0.0)
         self.fwd_x = -math.sin(self.yaw_rad)
@@ -935,12 +741,7 @@ def build_arc(
     back_len: float = 0.0,
     parallel_margin_scale: float = 1.0,
 ) -> ArcPath:
-    """Build and cache an ArcPath from start (x,z), yaw, speed, curvature, half_width,
-    horizon; optional decel/accel. Call this instead of constructing ArcPath directly.
-    fwd_len/back_len give the body extents ahead of/behind the reference for a
-    capsule collision body; 0.0 (default) keeps point/disc behavior.
-    parallel_margin_scale < 1.0 shrinks the corridor margin for near-parallel
-    capsule contacts (see ArcPath field comment)."""
+    """Build an ArcPath (prefer over raw ArcPath()). See core/radar/README.md §8."""
     return ArcPath(
         start_x=x, start_z=z, yaw_rad=yaw_rad, speed=speed,
         curvature=curvature, half_width=half_width, horizon=horizon,
@@ -952,12 +753,7 @@ def build_arc(
 def capsule_extents(
     front_d: float, back_d: float, body_offset: float,
 ) -> tuple[float, float]:
-    """Body capsule extents (fwd_len, back_len) measured from the arc reference.
-
-    front_d/back_d are the body front/rear distances from the pivot; body_offset
-    is the reference's signed offset from the pivot along the heading. Result is
-    clamped non-negative for the rare reverse-pivot case. Used by the ego and
-    trailer build sites so the reference-offset asymmetry is handled uniformly."""
+    """Capsule fwd_len/back_len from pivot distances and arc reference offset."""
     return max(front_d - body_offset, 0.0), max(back_d + body_offset, 0.0)
 
 
@@ -968,10 +764,7 @@ def arc_arc_collision(
     n_samples: int = 24,
     min_lateral_gap: float = 0.0,
 ) -> Optional[tuple[float, float, float]]:
-    """Earliest time the two arc corridors overlap; uses closed-form ray-ray when
-    both straight and constant speed, else time-sampled + bisection. Returns
-    (time_s, hit_x, hit_z) or None. min_lateral_gap: suppress hit when centerlines
-    stay that far apart (e.g. head-on turns in separate lanes)."""
+    """Earliest arc corridor overlap time, or None. See core/radar/README.md §8."""
     if a.arc_length < 1e-3 and b.arc_length < 1e-3:
         return None
 
@@ -996,9 +789,7 @@ def _seg_seg_dist_sq_mid(
     ax0: float, az0: float, ax1: float, az1: float,
     bx0: float, bz0: float, bx1: float, bz1: float,
 ) -> tuple[float, float, float]:
-    """Squared distance between segments A(a0->a1), B(b0->b1) and the midpoint
-    of the closest-point pair. Degenerate segments (a point) are handled by the
-    point-to-segment projections. No allocations beyond the returned tuple."""
+    """Segment-segment distance squared and closest-pair midpoint."""
     ux = ax1 - ax0
     uz = az1 - az0
     vx = bx1 - bx0
@@ -1043,10 +834,7 @@ def _seg_seg_dist_sq_mid(
 
 
 def pair_body_dist_sq(a: ArcPath, b: ArcPath, t: float) -> float:
-    """Squared distance between the two arc bodies at time t: capsule
-    segment-to-segment when either arc carries body extents, else point-to-point
-    of the reference positions. Used by the diverge/approaching predicates so
-    they measure the same body geometry the collision test uses."""
+    """Body distance squared at time t (capsule or point)."""
     if a._has_body or b._has_body:
         da = a._dist_at_time(t)
         ax, az = a.position_at_dist(da)
@@ -1074,9 +862,7 @@ def _ray_ray_collision(
     a: ArcPath, b: ArcPath, corridor_sq: float, horizon: float,
     min_lateral_gap: float = 0.0,
 ) -> Optional[tuple[float, float, float]]:
-    """Earliest time two straight rays' corridors touch: solve quadratic for
-    |a_pos(t) − b_pos(t)|² = corridor_sq; returns (t, hit_x, hit_z) or None.
-    min_lateral_gap suppresses hits when centerlines stay that far apart laterally."""
+    """Straight ray-ray corridor hit time. See core/radar/README.md §8."""
     dpx = a.start_x - b.start_x
     dpz = a.start_z - b.start_z
     dvx = a.speed * a.fwd_x - b.speed * b.fwd_x
@@ -1133,18 +919,7 @@ def _sampled_collision(
     min_lateral_gap: float = 0.0,
     hw_sum: float = 0.0, margin: float = 0.0,
 ) -> Optional[tuple[float, float, float]]:
-    """Earliest corridor overlap for curved, non-constant-speed, or capsule-body
-    arcs: sample at n times, then bisect to refine hit time; respects
-    min_lateral_gap. When either arc carries body extents (fwd_len/back_len) the
-    overlap test is segment-to-segment (the swept body), not point-to-point.
-    For capsule pairs where either arc sets parallel_margin_scale < 1, the
-    corridor margin shrinks toward margin * scale as the two headings approach
-    parallel (per sample): the margin's job is absorbing crossing paths that
-    sweep through contact between time samples, and near-parallel bodies hold
-    their separation, so the full margin only manufactures side-graze hits on
-    adjacent-lane traffic. hw_sum/margin carry the corridor_sq components for
-    that scaling. Returns (t, hit_x, hit_z) or None. hit is the contact-point
-    midpoint for capsule pairs, the reference midpoint for point pairs."""
+    """Sampled + bisected arc collision (curves, capsules). See core/radar/README.md §8."""
     has_body = a._has_body or b._has_body
     need_lat = min_lateral_gap > 0.0
     pms = (a.parallel_margin_scale
@@ -1276,7 +1051,7 @@ class Vehicle:
         self._raw_x: Optional[float] = None
         self._raw_z: Optional[float] = None
 
-        # Speed/accel filter state (AI + TMP): see AGENTS.md §7.
+        # Speed/accel filter state (AI + TMP): see core/radar/README.md §7.
         self._smooth_speed: Optional[float] = None
         self._smooth_accel: Optional[float] = None
         self._speed_ema: Optional[float] = None
@@ -1289,29 +1064,21 @@ class Vehicle:
         self._acc_speed_ema: Optional[float] = None
         self._acc_smooth_accel: Optional[float] = None
         self._acc_speed_ema_history: list[tuple[float, float]] = []
-        # acc_speed standstill latch (hysteresis state): see AGENTS.md §7.
+        # acc_speed standstill latch (hysteresis state): see core/radar/README.md §7.
         self._acc_standstill: bool = False
         self._acc_release_s: float = 0.0
         # (time, x, z) per full update: newest last, capped at _POSITION_HISTORY_LEN.
         # Populated for both TMP and AI; speed LS fit uses a shorter internal window.
         self._position_history: list[tuple[float, float, float]] = []
 
-        # TMP lag detection state.
-        # _lag_since: monotonic time when the frozen-position window began.
-        # lag_confirmed: True once the vehicle has been stationary for
-        #   >= the TTC-scaled freeze_dur. AEB handles confirmed-stopped vehicles
-        #   naturally via arc collision; no special-case needed in thread.py.
+        # TMP lag/freeze tunables. See core/radar/README.md §7.
         self._lag_since: Optional[float] = None
         self.lag_confirmed: bool = False
 
-        # Position mismatch (TMP only): consecutive frame counter.
-        # Counts how many frames in a row the raw position jumped backward.
-        # Resets to 0 on any clean frame or when the cap is reached.
+        # TMP position mismatch (out-of-order packets). See core/radar/README.md §7.
         self._pos_mismatch_frames: int = 0
 
-        # Crash detection (TMP only, full frames only): live-frame rotation
-        # rates, live-frame pose baseline (spans packet stalls), previous live
-        # displacement for the reversal check, and the confirmation latch.
+        # TMP crash detection tunables. See core/radar/README.md §7.
         self._prev_pitch_rate: Optional[float] = None
         self._prev_yaw_rate: Optional[float] = None
         self._prev_roll_rate: Optional[float] = None
@@ -1332,12 +1099,7 @@ class Vehicle:
         return self.acceleration
 
     def radar_speed_accel(self) -> tuple[float, float, float, float, float]:
-        """(raw_speed, speed_corr, speed_ema, acc_speed, accel) for the visualizer.
-
-        speed_corr is the accel-corrected speed (AEB-facing, == self.speed),
-        speed_ema the uncorrected EMA, acc_speed the adaptive-filtered ACC speed
-        (ACC-facing, == self.acc_speed). See AGENTS.md §7.
-        """
+        """Debug tuple of internal speed/accel signals. See core/radar/README.md §7."""
         raw_speed = self._raw_speed if self._raw_speed is not None else self.speed
         speed_ema = self._speed_ema if self._speed_ema is not None else self.speed
         return raw_speed, self.speed, speed_ema, self.acc_speed, self.acceleration
@@ -1395,18 +1157,7 @@ class Vehicle:
         return short_speed
 
     def _tmp_apply_crash_rotation_jerk(self, prev: "Vehicle", t_now: float) -> None:
-        """TMP full frames: corroborated rotation-jerk crash detection with latch.
-
-        Rotation rates are computed between live frames only. A frozen frame
-        (position and rotation byte-identical to prev: a packet stall) does not
-        advance the rate baseline, so the stall's entry rate-drop and its exit
-        snap are averaged over the whole stall span instead of read as a
-        one-frame jerk. A jerk frame confirms a crash only when the same frame
-        shows a kinematic anomaly on live data: XZ direction reversal,
-        vertical jump, or single-frame displacement collapse. Confirmation
-        latches ``crash_confirmed`` until ``_CRASH_HOLD_S`` past the last
-        qualifying frame.
-        """
+        """TMP crash detect + latch on live frames. See core/radar/README.md §7."""
         self._prev_pitch_rate = prev._prev_pitch_rate
         self._prev_yaw_rate = prev._prev_yaw_rate
         self._prev_roll_rate = prev._prev_roll_rate
@@ -1500,12 +1251,7 @@ class Vehicle:
         self._prev_disp_y = dy
 
     def _hold_across_clock_discontinuity(self, prev: "Vehicle", t_now: float) -> None:
-        """Re-base after a pause/hitch gap without integrating across it.
-
-        Holds filtered speed/accel, snaps pose to the latest buffer coordinates,
-        and restarts position / speed-EMA histories at ``t_now`` so the LS raw
-        speed fit cannot span the gap (which would read Δpos/huge_τ ≈ 0).
-        """
+        """Hold kinematics across reader clock discontinuity. See core/radar/README.md §7."""
         self.time = t_now
         self.last_location = prev.last_location
         self.last_rotation = prev.last_rotation
@@ -1591,11 +1337,7 @@ class Vehicle:
         ego_z: float,
         ego_speed: float,
     ) -> None:
-        """Carry forward smoothed state or run a full update.  See AGENTS.md §7.
-
-        ``ego_x/y/z`` and ``ego_speed`` feed the TTC-scaled lag freeze
-        (see AGENTS.md §7 "Lag / freeze detection").
-        """
+        """Per-frame smoothing; ego pose feeds TMP lag freeze. See core/radar/README.md §7."""
         dt = t_now - prev.time
 
         # Clock went backwards (domain glitch): re-base without integrating.
@@ -1649,12 +1391,7 @@ class Vehicle:
             self.acc_speed = prev.acc_speed
             self.acc_accel = prev.acc_accel
 
-            # Between full updates (dt < threshold), snap pose to the latest buffer
-            # coordinates so arcs track sub-frame motion. Re-derive _raw_speed for
-            # debug when movement exceeds the usual gate; filtered speed/accel stay
-            # at the last full-tick values until dt ≥ _LOCATION_UPDATE_FREQUENCY.
-            # TMP only: skip during lag freeze and position-mismatch hold unless
-            # crash_confirmed bypasses both.
+            # TMP lag/freeze tunables. See core/radar/README.md §7.
             _sf_lag_active = False
             if self.is_tmp and prev._lag_since is not None and prev._raw_x is not None:
                 _sf_gap_3d = math.sqrt(
@@ -1672,9 +1409,7 @@ class Vehicle:
                 if _sf_lag_active or prev._pos_mismatch_frames > 0:
                     _sf_snap_ok = False
             if _sf_snap_ok:
-                # Snap pose to the latest buffer coords; do not recompute
-                # _raw_speed here (Δpos/dt_sf spikes after pause re-anchors and
-                # is unused by the filter chain until the next full update).
+                # TMP sub-frame pose snap rules. See core/radar/README.md §7.
                 rx = self.position.x
                 rz = self.position.z
                 self._raw_x = rx
@@ -1723,10 +1458,7 @@ class Vehicle:
         # rotation jerk with a hold latch; sub-frames carry the latched flag.
         self._tmp_apply_crash_rotation_jerk(prev, t_now)
 
-        # Type 1: Position mismatch (TMP only, max _POS_MISMATCH_MAX_FRAMES)
-        # Raw position jumped backward along the vehicle's heading: out-of-order packet.
-        # Yaw EMA and angular_velocity still run; position and carried speed/accel are held.
-        # Bypassed when crash_confirmed: a crashed vehicle's backward jumps are real.
+        # TMP crash detection tunables. See core/radar/README.md §7.
         _skip_position_update = False
         if (self.is_tmp
                 and prev._smooth_yaw is not None
@@ -1751,10 +1483,7 @@ class Vehicle:
             _lag_threshold_sq = (_expected_disp * _LAG_DISP_RATIO) ** 2
             _lag_rot_ok = True
             if prev._lag_since is None:
-                # Entry gate only (an established freeze window is not bounced
-                # by mid-stall rotation flicker): a frozen position with a
-                # clearly live rotation stream is a physical stop, not a
-                # packet stall. Fall through so AEB sees the stop raw.
+                # Lag entry needs non-live rotation. See core/radar/README.md §7.
                 _pe_lag = prev.rotation.euler()
                 _ce_lag = self.rotation.euler()
                 _rot_delta_lag = max(
@@ -1849,9 +1578,7 @@ class Vehicle:
         if len(self._position_history) > _POSITION_HISTORY_LEN:
             self._position_history = self._position_history[-_POSITION_HISTORY_LEN:]
 
-        # Raw speed: position-history LS fit (single-interval fallback). SP/AI keeps
-        # buffer sign when moving; TMP takes sign from the fit. Filter chain below
-        # is shared (see AGENTS.md §7).
+        # Raw speed: TMP from position LS; AI keeps buffer sign. See core/radar/README.md §7.
         _prx = prev._raw_x if prev._raw_x is not None else prev.position.x
         _prz = prev._raw_z if prev._raw_z is not None else prev.position.z
         raw_speed = _raw_speed_from_kinematics(
@@ -1868,9 +1595,7 @@ class Vehicle:
             dt,
             preserve_buffer_sign=not self.is_tmp,
         )
-        # ACC reads the long window; AEB reads whatever the brake transient
-        # selects. On a confirmed crash both read the same unfiltered estimate so
-        # nothing extra sits between a crashed vehicle and either consumer.
+        # ACC: long window; AEB: hard-brake short window. See core/radar/README.md §7.
         long_raw_speed = raw_speed
         raw_speed = self._select_raw_speed(
             raw_speed, self.speed, fwd_x, fwd_z,
@@ -1912,13 +1637,7 @@ class Vehicle:
         self._acc_release_s = acc_release_s
 
     def curvature_from_history(self) -> float | None:
-        """Curvature (1/m) from circumscribed circle fit over _position_history.
-
-        Averages over up to four (oldest, mid, newest) triples for stability.
-        Returns None when < 3 samples; 0.0 when near-stationary or near-straight.
-        Falls back to angular_velocity / speed in get_arc() when None.
-        Cached per frame: _position_history doesn't change within a tick.
-        """
+        """κ (1/m) from position history; cached per tick. See core/radar/README.md §11."""
         if self._curvature_cache_valid:
             return self._curvature_cache
         result = self._compute_curvature()
@@ -1977,19 +1696,7 @@ class Vehicle:
         curvature_override: float | None = None,
         body_capsule: bool = False,
     ) -> ArcPath:
-        """ArcPath for this vehicle from smoothed pose and curvature.
-
-        Curvature is derived from position history when available (circumscribed
-        circle fit), falling back to angular_velocity / speed. Crash-induced
-        backward position spikes are suppressed by the 6 m/s² cap in _accel_to_arc_params().
-
-        body_capsule=True gives the arc body extents (fwd_len/back_len) so the
-        collision test covers the whole vehicle length. Extents are measured
-        from the arc reference to the body front/rear using the same AI/TMP
-        pivot convention as get_corners, so they stay correct despite the
-        arc_start_pctg reference offset. Default False keeps point/disc behavior
-        for non-AEB consumers.
-        """
+        """Vehicle ArcPath; optional ``body_capsule`` for AEB. See core/radar/README.md §8."""
         yaw_rad = (
             self._smooth_yaw
             if self._smooth_yaw is not None
@@ -2018,7 +1725,7 @@ class Vehicle:
         cap_fwd_len = 0.0
         cap_back_len = 0.0
         if body_capsule:
-            # Symmetric +/- length/2 for AI and TMP alike (AGENTS.md §6).
+            # Symmetric +/- length/2 for AI and TMP alike (core/radar/README.md §6).
             front_d = self.size.length * 0.5
             back_d = self.size.length * 0.5
             cap_fwd_len = max(front_d - body_offset, 0.0)
@@ -2035,11 +1742,7 @@ class Vehicle:
         return self.position.is_zero() and self.rotation.is_zero()
 
     def get_corners(self) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]]:
-        """World-space footprint corners (front-right, front-left, back-left, back-right).
-
-        Symmetric ± length/2 about the pivot for AI and TMP alike (AGENTS.md
-        §6). Yaw comes from ``_smooth_yaw`` when available.
-        """
+        """World corners; symmetric ± length/2 (core/radar/README.md §6)."""
         yaw_rad = (
             self._smooth_yaw
             if self._smooth_yaw is not None
@@ -2070,21 +1773,7 @@ class Vehicle:
 
 
 def vehicle_from_trailer(parent: Vehicle, trailer: Trailer, synthetic_id: int) -> Vehicle:
-    """Wrap a nested Trailer record as a standalone Vehicle.
-
-    Road trains expose only the tractor and the first trailer as top-level
-    radar vehicles; every trailer behind the first is a nested Trailer on
-    that first trailer (AI trucks nest all of their trailers the same way).
-    ACC scoring iterates Vehicles, so those nested trailers are invisible to
-    it. Wrapping one as a Vehicle lets the tracker score it and lets
-    RadarThread carry position history forward for it like any other id.
-
-    The wrapped Vehicle gets its own Position (``update_from_last`` mutates
-    position in place); rotation and size are immutable and shared. TMP's raw
-    trailer pivot is the front coupler, so ``correct_position()`` shifts it to
-    the body center: matching the symmetric +/- length/2 pivot the rest of
-    the pipeline assumes for TMP vehicles.
-    """
+    """Nested trailer as ACC-scored Vehicle (synthetic id). See core/radar/README.md §12."""
     if trailer.is_tmp:
         position = trailer.correct_position()
     else:

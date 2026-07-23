@@ -1,4 +1,4 @@
-﻿"""Named AEB filter pipeline: one class per suppression stage."""
+"""Named AEB filter pipeline: one class per suppression stage."""
 
 from __future__ import annotations
 
@@ -18,18 +18,7 @@ from core.aeb.lane_frame import Lane, project_to_ego_arc, classify
 
 
 class OneEuroFilter:
-    """Speed-adaptive low-pass: Casiez et al., "1€ Filter", CHI 2012.
-
-    Cutoff frequency rises with |dx/dt|: heavy smoothing when the signal is
-    quiet, near-passthrough when it changes fast.  Tradeoff knobs are
-    ``min_cutoff`` (smooth-floor) and ``beta`` (how aggressively cutoff
-    follows the derivative).
-
-    ``beta_scale`` adds a magnitude-dependent attenuation of beta:
-    ``beta_eff = beta / (1 + beta_scale * |x_prev|)``.  Useful when input
-    noise scales with signal magnitude (e.g. yaw_rate/v amplification on
-    curvature signals in turns).  Zero disables the scaling.
-    """
+    """Speed-adaptive 1€ low-pass; see core/aeb/README.md (One-Euro on v_curvature)."""
 
     __slots__ = ("min_cutoff", "beta", "d_cutoff", "beta_scale",
                  "_x_prev", "_dx_prev", "_t_prev")
@@ -71,12 +60,7 @@ class OneEuroFilter:
 
 
 class VehicleCurvatureBlender:
-    """Per-vehicle One-Euro state for the blended target-curvature signal.
-
-    Owned by the long-lived caller (``AEBThread``).  Each vehicle id gets its
-    own filter so transient-rate adaptation is independent per target.  Stale
-    entries are dropped by :meth:`prune` once per frame to bound memory.
-    """
+    """Per-vehicle One-Euro on blended kappa; prune stale ids each frame."""
 
     def __init__(self, cal: AEBCalibration) -> None:
         self._cal = cal
@@ -110,18 +94,7 @@ def _vehicle_curvature_blend(
     blender: VehicleCurvatureBlender | None = None,
     now: float | None = None,
 ) -> float:
-    """Blend short position-fit and yaw-rate signals for a target vehicle's path.
-
-    AEB-local two-source path prediction: smooth (position fit on the last
-    ``cal.aeb_pos_history_len`` history samples) blended with responsive
-    (single-frame yaw rate from ``angular_velocity``).  Either side fills in
-    when the other is unavailable.
-
-    When ``blender`` is supplied, the blended value is fed through a
-    per-vehicle One-Euro filter (see :class:`VehicleCurvatureBlender`).  The
-    raw blend is returned when ``blender`` is ``None``: used by test paths
-    that don't carry filter state across frames.
-    """
+    """Target kappa: pos slice + yaw rate blend; optional One-Euro (README target curvature)."""
     pos_hist = list(v._position_history)[-cal.aeb_pos_history_len:]
     pos_kappa = ego_curvature_from_history(pos_hist) if len(pos_hist) >= 3 else None
     yaw_kappa = math.radians(v.angular_velocity) / abs_v_speed if abs_v_speed > 0.5 else None
@@ -194,29 +167,7 @@ def _world_to_ego_forward(dx: float, dz: float, ego_yaw_rad: float) -> float:
 
 def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1,
                     dip_samples: int = 1, dip_active: bool = False) -> bool:
-    """True when the two paths still converge across the window [t, t+dt].
-
-    Endpoint comparison alone misreads a fast pass-through: t is the corridor
-    contact time, so above ~2*(contact distance)/dt of closing speed the t+dt
-    sample lies beyond the target and center distance grows again, which reads
-    as "diverging" exactly when the collision is most certain. With
-    dip_active, any window sample dipping below body contact (sum of half
-    widths, no corridor margin) is a predicted body overlap and counts as
-    approaching, regardless of the endpoint comparison.
-
-    Callers gate dip_active on the target being in Lane.EGO: for an in-lane
-    target a predicted body overlap is a real rear-end/crossing course, while
-    for an out-of-lane target the same overlap is usually a constant-curvature
-    extrapolation artifact (e.g. overtaking a slower outer-lane vehicle in a
-    shared turn: both arcs cross even though the real vehicles hold their
-    lanes), which is exactly what this filter exists to suppress.
-
-    Distances are body-to-body (capsule segment distance) when the arcs carry
-    body extents, matching the collision test: measuring reference-point
-    distance instead reads a passing/overtaking body as still "approaching"
-    because the capsule contact time is when the near bodies touch, long before
-    the reference points reach closest approach.
-    """
+    """Convergence across [t, t+dt]; optional in-lane body-overlap dip (README dip check)."""
     d0_sq = pair_body_dist_sq(a, b, t)
     contact_sq = (a.half_width + b.half_width) ** 2
     di_sq = d0_sq
@@ -237,16 +188,7 @@ _BODY_LANE_SAMPLES = (0.0, 0.25, 0.5, 0.75, 1.0)
 def _any_body_in_ego_lane(
     ego_arc: ArcPath, target_arcs: list[ArcPath], lane_half_width: float,
 ) -> bool:
-    """True if any target body's centreline currently lies within ego's lane.
-
-    Samples each target arc's rigid body capsule at t=0 (rear through front
-    reference points) and projects to the ego arc. A long trailer swung into
-    ego's lane registers via its rear sample even while the tractor reference
-    rides the outer lane of a shared curve (crash clip 434f0401); an
-    adjacent-lane overtake body, whose centreline stays beyond
-    ``lane_half_width``, does not. The centreline (no body half-width) is used
-    so a corridor-grazing outer-lane body is not miscounted as in-lane.
-    """
+    """Any target body centreline sample in ego lane at t=0 (trailer-in-lane rescue)."""
     for arc in target_arcs:
         fx, fz = arc.fwd_x, arc.fwd_z
         back = -arc.back_len
@@ -405,17 +347,10 @@ class FilterContext:
     precomputed_cross_arcs: list | None = None
     lane: Lane = Lane.EGO
 
-    # Set of vehicle ids latched by a prior engagement on this target. Used
-    # to bypass the TMP rel-speed pre-filter so a target does not vanish
-    # from the pipeline as ego brakes and closing speed collapses.
+    # Latched ids bypass TMP rel-speed prefilter (README latched-threat).
     latched_threat_ids: set = field(default_factory=set)
 
-    # Ids flagged by the follow-threat tracker (AEBThread): co-directional
-    # in-lane targets with sustained closing range AND sustained own
-    # deceleration. Bypass TmpRelSpeedFilter and are exempt from
-    # EgoEvasionFilter / CoDirectionalDivergeFilter suppression: single-frame
-    # jitter must not eject a lead that behavior says is genuinely braking
-    # in ego's path (crash clips ddc0cdf7 / 0fe85c88, 2026-07-10).
+    # follow_threat_ids: behavioral slowing lead (README follow-threat).
     follow_threat_ids: set = field(default_factory=set)
 
     # Populated during collision evaluation (set by the pipeline caller)
@@ -503,10 +438,7 @@ class LaneClassifier:
 
     def apply(self, ctx: FilterContext) -> FilterResult:
         cal = self._cal
-        # Geometry fields (v_yaw_rad, veh_fwd_x/z, abs_v_speed, v_curvature)
-        # are populated upstream by _build_vehicle_collision_data so the
-        # per-vehicle One-Euro blender steps exactly once per frame.  Do not
-        # recompute curvature here: that would double-step the filter.
+        # ctx geometry from upstream; do not re-blend kappa (double-steps One-Euro).
         ctx.fwd_dot = ctx.ego_fwd_x * ctx.veh_fwd_x + ctx.ego_fwd_z * ctx.veh_fwd_z
         ctx.head_on = ctx.fwd_dot < cal.head_on_dot
         ctx.near_head_on = ctx.fwd_dot < cal.near_head_on_dot
@@ -521,11 +453,7 @@ class LaneClassifier:
 
 
 class OppositeLaneFilter:
-    """Suppress oncoming vehicles that are in their own lane (not ego's).
-
-    Collapses Fix A + Fix B + oncoming evasion filter + same_curve heuristic.
-    Uses lane_frame Lane classification instead of cross-product lateral_offset.
-    """
+    """Oncoming in own lane: body separation or evasion arcs (README OppositeLaneFilter)."""
     name = "OppositeLaneFilter"
 
     def __init__(self, cal: AEBCalibration) -> None:
@@ -609,20 +537,7 @@ class OppositeLaneFilter:
 
 
 class OppositeLaneFilterMirrored:
-    """Mirror of OppositeLaneFilter Fix B: ego mid-corner, target straight-approaching.
-
-    When ego is in a bend and an oncoming target has low measured curvature
-    (still on the straight approach to the same curve from the other side),
-    the target's predicted arc chords across ego's curved corridor in world
-    frame. ``OppositeLaneFilter`` Fix B expands target evasion arcs by ego's
-    curvature only when the target is already in OPPOSITE_OR_OUTER/OFF_ROAD —
-    but a straight-approaching target projects onto the ego arc as Lane.EGO,
-    so that gate fails and nothing suppresses.
-
-    This stage handles that case: build target evasion arcs offset by
-    ``min(|ego_curvature|, shared_turn_max_kappa)`` (the implied road
-    curvature the target will follow). If either side clears, suppress.
-    """
+    """Ego mid-corner, oncoming straight approach: Fix B evasion when lane reads EGO."""
     name = "OppositeLaneFilterMirrored"
 
     def __init__(self, cal: AEBCalibration) -> None:
@@ -693,21 +608,10 @@ class CoDirectionalDivergeFilter:
         if ctx.v.id in ctx.follow_threat_ids:
             return _PASS
         cal = self._cal
-        # A rig with any body (tractor or trailer) physically in ego's lane now
-        # is a real rear-end course, not a constant-curvature extrapolation
-        # artifact. The lane primitive keys off the tractor reference point only,
-        # so a long trailer swung into ego's lane while its tractor rides the
-        # outer lane of a shared curve reads as EGO-lane-clear and the outer-lane
-        # same-turn extended lookahead extrapolates the whole rig away as
-        # "diverging" (crash clip 434f0401). Drop the extended lookahead and arm
-        # the in-lane dip rescue for such a target.
+        # Trailer-in-lane rescue: drop extended same-turn lookahead (README).
         in_lane_body = _any_body_in_ego_lane(
             ctx.ego_arc, ctx.all_target_arcs, cal.lane_half_width)
-        # Suppress only when every colliding body of the rig is diverging: a
-        # tractor pulling into the outer lane genuinely diverges, but if its
-        # trailer is still closing in ego's lane the rig is a real rear-end
-        # course. Vetoing on the first diverging arc (the cab, evaluated first)
-        # would drop the approaching trailer with it (crash clip 434f0401).
+        # Suppress only when every rig body diverges (trailer may still close).
         any_hit = False
         for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
             if base_target_arc.speed <= 0.5:
@@ -773,54 +677,7 @@ class TurningCrossTrafficFilter:
 
 
 class TmpCrossTrafficFilter:
-    """Suppress TMP cross-traffic whose jittered snapshot arc only grazes ego's lane.
-
-    TMP (multiplayer) vehicle data has higher uncertainty than AI vehicles:
-    network jitter, position smoothing, and inconsistent yaw/curvature
-    snapshots project a target's arc through ego's lane during routine
-    intersection maneuvers even though the actual MP target sweeps past. The
-    canonical phantom is mid-turn (e.g. a TMP vehicle making a side-road right
-    turn appears to cut through ego's lane in the per-frame snapshot), but a
-    straight snapshot can also produce a body-graze hit: a long vehicle crossing
-    ahead clips ego's corridor with its 10 m tail while its centre passes metres
-    clear. The old filter answered "where does the target END UP at the 3 s
-    horizon" (suppress unless the endpoint lands in Lane.EGO), which suppressed
-    the mid-turn phantom AND the straight grazer, but also suppressed a genuine
-    straight perpendicular crosser on a dead-center collision course at every
-    range (its endpoint always lands tens of metres past ego's lane: corpus FN
-    clip ffd29f9e). The question is "does the target occupy ego's lane WHEN ego
-    arrives", not "where does it end up".
-
-    Split by trust in the snapshot's motion (`ctx.v_curvature`):
-
-    - Straight snapshot (`|v_curvature| < turning_diverge_kappa`): the motion is
-      trustworthy, so decide on the geometry directly. Take the closest approach
-      of the two reference centres over the horizon (ego arc vs the non-braked
-      sweep arc). If they genuinely meet
-      (`d_min <= cal.tmp_cross_center_hit_dist`) it is a real T-bone: pass
-      (brake). If the centres miss (the hit is only the long body grazing as it
-      clears): suppress.
-    - Turning snapshot (`|v_curvature| >= turning_diverge_kappa`): the jittered
-      curvature makes the predicted centre path unreliable, so keep the
-      full-horizon endpoint-lane test. If the sweep arc ends in OPPOSITE_OR_OUTER
-      / OFF_ROAD the target sweeps clear: suppress. If it ends in Lane.EGO it is
-      a real continuing threat: pass.
-
-    Applies to TMP vehicles (`v.is_tmp=True`) that are not co-directional and
-    have non-trivial speed. Co-directional in-lane vehicles are skipped so that
-    legitimate same-lane following / overtake handling stays with the dedicated
-    stages.
-
-    Uses a freshly-built non-braking arc from the undamped `ctx.v_curvature`
-    (rather than `base_target_arc`) for both branches: the standard arc may be
-    truncated by target-side full-brake modeling at near-head-on angles, and its
-    Fix D over-rotation damping straightens the arc of a target genuinely
-    sweeping through a corner. Either one distorts the projected centre path and
-    endpoint and masks where the cross-traffic actually sweeps to.
-
-    Non-TMP targets bypass entirely: AI vehicles follow deterministic traffic
-    rules, so their snapshot-projected arc is reliable.
-    """
+    """TMP cross-traffic phantom suppression; straight center-miss vs turning endpoint. README."""
     name = "TmpCrossTrafficFilter"
 
     def __init__(self, cal: AEBCalibration) -> None:
@@ -854,10 +711,7 @@ class TmpCrossTrafficFilter:
                 base_target_arc.horizon, decel=0.0,
             )
             if straight:
-                # Trustworthy straight snapshot: a genuine collision brings the
-                # two reference centres together; a body-only graze (long tail
-                # sweeping clear) keeps them apart. Pass the real T-bone, let
-                # the grazer fall through to suppression below.
+                # Straight TMP cross: centre meet = T-bone; centre miss = graze suppress.
                 if self._center_min_dist(ctx.ego_arc, sweep_arc) <= cal.tmp_cross_center_hit_dist:
                     return _PASS
             else:
@@ -887,22 +741,7 @@ class TmpCrossTrafficFilter:
 
 
 class OutOfLaneParallelFilter:
-    """Suppress co-directional / stationary traffic that stays in its own lane.
-
-    The ArcPath capsule collision body registers a grazing corridor overlap for
-    a long vehicle driving or parked alongside ego, because the two long bodies
-    are within the corridor sum (body half-widths + margin) laterally over the
-    whole overlap. The point model only saw a fleeting reference-point crossing
-    at closest approach, which the diverge / evasion stages suppressed on timing
-    that the capsule contact time no longer matches.
-
-    A target whose center never enters ego's lane over the horizon
-    (arc-projected offset stays above ``lane_half_width``) is lane-keeping
-    adjacent traffic or a roadside object ego passes, not a collision course.
-    A genuine cut-in or crossing brings its center into ``Lane.EGO`` and is not
-    suppressed here; head-on own-lane oncoming is handled by
-    ``OppositeLaneFilter``; follow / latched threats are exempt.
-    """
+    """Adjacent/roadside traffic whose centre never enters ego lane over horizon (README)."""
     name = "OutOfLaneParallelFilter"
 
     def __init__(self, cal: AEBCalibration) -> None:
@@ -919,17 +758,9 @@ class OutOfLaneParallelFilter:
             return _PASS
         if ctx.lane == Lane.EGO:
             return _PASS
-        # A trailer swung into ego's lane while its tractor reference rides the
-        # outer lane keeps the tractor-based lane out of EGO and its trailer
-        # centre-trajectory scan out of lane, yet its rear body sits in ego's
-        # path (crash clip 434f0401). The body-length in-lane test catches it.
         if _any_body_in_ego_lane(ctx.ego_arc, ctx.all_target_arcs, cal.lane_half_width):
             return _PASS
-        # Rear overtaker: faster co-dir traffic from behind in another lane.
-        # Capsule + ego-arc wiggle manufactures corridor hits on these; braking
-        # cannot help (see braking_worsens). Suppress before the predicted-
-        # center scan, which leaks on the same bent ego arc that creates the
-        # phantom (passing FP clips f0b2ace6 / 02642609).
+        # Rear overtaker early suppress before centre scan (README OutOfLaneParallelFilter).
         if (ctx.co_directional and not stationary
                 and (ctx.v.speed * ctx.fwd_dot) > ctx.ego_speed
                 and ctx.dx * ctx.ego_fwd_x + ctx.dz * ctx.ego_fwd_z < 0.0):
@@ -1029,21 +860,7 @@ class CornerEntryStationaryFilter:
 
 
 class CornerEntryStationaryFilterMirrored:
-    """Mirror of CornerEntryStationaryFilter: ego mid-corner, target at the entry from the other side.
-
-    Original fires when ego is straight (entering a corner) and a stationary
-    target's pose implies a curved continuation. This stage handles the
-    inverse: ego is already in the bend, and a stationary target sits at the
-    entry of the same curve from the opposite approach. Their pose's road
-    implication is the same curved continuation; they aren't blocking ego's
-    straight-line path.
-
-    Mode A (target out-of-lane via arc-projected classification) only. Mode B
-    in-lane chord-offset geometry doesn't mirror cleanly: when ego is the
-    one on the curve, the target's lateral offset in ego frame collapses
-    toward zero and the ``|lat_signed| >= corner_entry_min_lateral`` precondition
-    cannot be satisfied.
-    """
+    """Ego mid-corner: stationary target at opposite curve entry (Mode A only; README)."""
     name = "CornerEntryStationaryFilterMirrored"
 
     def __init__(self, cal: AEBCalibration) -> None:
@@ -1082,20 +899,14 @@ class EgoEvasionFilter:
         if ctx.head_on:
             return _PASS
         cal = self._cal
-        # In-lane co-directional moving target: a rear-end lead, never a
-        # "driver steers around it" call. The tractor-based lane misses a rig
-        # whose trailer is swung into ego's lane while the cab rides the outer
-        # lane (crash clip 434f0401), so also bypass on the body-length test.
+        # In-lane co-dir moving: rear-end; bypass if body in ego lane (trailer swing).
         if (ctx.co_directional
                 and any(a.speed > 0.5 for a in ctx.all_target_arcs)
                 and (ctx.lane == Lane.EGO
                      or _any_body_in_ego_lane(
                          ctx.ego_arc, ctx.all_target_arcs, cal.lane_half_width))):
             return _PASS
-        # Follow-threat targets are exempt: the in-lane bypass above can lose
-        # them to a single jittered lane/heading frame, and "ego could steer
-        # around it" is never a safe call against a lead that behavior says
-        # is braking in ego's path.
+        # follow_threat_ids exempt: behavior says braking lead in path (README).
         if ctx.v.id in ctx.follow_threat_ids:
             return _PASS
         if ctx.ego_evasion_left is None or ctx.ego_evasion_right is None:

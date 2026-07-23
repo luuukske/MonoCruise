@@ -1,9 +1,4 @@
-"""
-Video player widget using PySide6 Multimedia with QVideoSink.
-Renders frames manually for rounded corners and transparent background.
-Shows thumbnail with big play button when paused or not started.
-"""
-
+"""Video player widget using PySide6 Multimedia with QVideoSink. Renders frames manually for..."""
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QPushButton, QSlider, QLabel
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink, QVideoFrame
 from PySide6.QtCore import Qt, QUrl, QTimer, Signal, QRect, QRectF, QPoint
@@ -176,14 +171,7 @@ class _ControlBar(QWidget):
 
 
 class VideoPlayer(QWidget):
-    """
-    Video player with rounded corners and transparent surroundings.
-
-    Uses QVideoSink to capture frames and paint them manually, enabling
-    rounded-corner clipping and a transparent widget background. When
-    paused or not yet started the last frame is shown as a thumbnail
-    with a large centered play button overlay.
-    """
+    """QVideoSink frame paint with rounded clip and play overlay when paused."""
 
     DEFAULT_HEIGHT = 300
     DEFAULT_ASPECT_RATIO = 16 / 9
@@ -632,8 +620,7 @@ class VideoPlayer(QWidget):
             self._check_video_size()
 
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            # Loop back to the start using the cached first frame —
-            # no play needed so there's no audio blip or frame flicker.
+            # Loop from cached first frame at end (avoids audio blip / flicker).
             self._has_started = False
             self._is_playing = False
             self._play_btn_opacity = 1.0

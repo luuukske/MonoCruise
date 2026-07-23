@@ -1,14 +1,4 @@
-﻿"""
-Adaptive Cruise Controller: IIDM core + CAH overlay, blended via the
-Kesting/Treiber/Helbing 2010 ACC model, with multi-vehicle anticipation.
-
-See ``core/acc/ACC_ARCHITECTURE.md`` for the design rationale and formulas.
-This module implements that document.
-
-The controller publishes an upper bound on commanded longitudinal accel
-(m/s²); ``cruise_control_thread`` takes ``min(speed_pid_output, accel_cap)``
-so the outer speed regulator owns set-speed tracking.
-"""
+"""IIDM+CAH accel cap. See core/acc/ACC_ARCHITECTURE.md and core/cruise_control_thread/README.md."""
 
 from __future__ import annotations
 
@@ -46,43 +36,23 @@ MA_MAX_LEADS: int = 3
 MA_MIN_CHAIN_GAP_M: float = 4.0
 
 # Multi-vehicle anticipation coupling. Each anticipated lead's influence
-# is weighted by the pairwise time gap to the vehicle behind it in the
-# chain: full coupling at <= ANT_GAP_FULL_S, zero at >= ANT_GAP_ZERO_S
-# (cosine ramp between). Weights propagate multiplicatively down the
-# chain, so one large gap anywhere removes everything beyond it, while a
-# tightly packed platoon anticipates strongly.
 ANT_GAP_FULL_S: float = 1.0
 ANT_GAP_ZERO_S: float = 3.0
 # Pair time gaps are normalised by the follower's speed, floored so
 # slow-moving packed traffic keeps a finite gap time.
 ANT_TIME_REF_FLOOR_MS: float = 5.0
 # In-lane tracker score confidence ramp: zero at or below SCORE_MIN
-# (scores hovering near the in-path threshold are tracker noise), full
-# at SCORE_FULL. Scores ramp from 0 on lane entry, so a cutting-in
-# vehicle fades in instead of snapping. Applied to anticipated leads
-# and, via the immediate-lead confidence blend, to chain[0] itself.
 ANT_SCORE_MIN: float = 1.0
 ANT_SCORE_FULL: float = 5.0
 # Per-vehicle confidence is EMA-filtered asymmetrically: fast upward so
-# a genuine cut-in gains authority almost immediately, slow downward so
-# a score flickering around the in-path threshold ratchets toward its
-# recent high instead of squarewaving the command.
 ANT_CONF_TAU_UP_S: float = 0.10
 ANT_CONF_TAU_DOWN_S: float = 0.80
 # When the immediate lead vanishes from the chain (lane-edge drift, id
-# flip) while a farther vehicle takes its slot, its braking demand fades
-# out over this hold instead of dropping in one tick. Min-only: a ghost
-# can only hold brake briefly, never lift the cap.
 PRIMARY_GHOST_HOLD_S: float = 0.8
 # Virtual-lead prediction: fraction of the weighted upstream speed /
-# accel differentials applied to the immediate lead's state for the
-# accel-side (lift) evaluation.
 ANT_KV: float = 0.4
 ANT_KA: float = 0.5
 # Accel-side anticipation may raise the command at most this far above
-# the immediate-lead law, and only while the raw TTC to the immediate
-# lead is comfortable (cosine ramp from zero lift at TTC_MIN to full
-# lift at TTC_FULL).
 ANT_LIFT_MAX_MS2: float = 1.0
 ANT_LIFT_TTC_MIN_S: float = 4.0
 ANT_LIFT_TTC_FULL_S: float = 6.0
@@ -93,9 +63,6 @@ ANT_LIFT_FADE_MS2: float = 0.3
 # changes (vehicle entering / leaving ego's lane) never step the output.
 ANT_TAU_S: float = 0.4
 # Stationary-lead failsafe: anticipation is fully disabled when the
-# immediate lead's raw speed is below MOVING_MIN, fully enabled above
-# MOVING_FULL, linear ramp between. A stopped lead must be treated on
-# its own merits regardless of what traffic beyond it is doing.
 ANT_LEAD_MOVING_MIN_MS: float = 0.75
 ANT_LEAD_MOVING_FULL_MS: float = 1.5
 
@@ -126,18 +93,9 @@ TAU_OUTPUT_S: float = 0.05
 DT_FALLBACK_S: float = 1.0 / 30.0
 DT_MAX_S: float = 0.2
 # Pinned to A_MAX_MS2 so _prev_cmd_ms2 stays in the same range as IIDM-
-# commanded values during no-lead intervals. The cap is still permissive
-# downstream: CC's speed PID is the lower bid via min(ACC, CC): but a
-# lower ceiling keeps the jerk limiter's prev state from drifting far
-# above IIDM's range, which gates how fast brake re-engages on lead
-# reacquisition (a ceiling of 10 took ~5 s to ramp back down to -2 m/s²).
 NO_LEAD_CEILING_MS2: float = A_MAX_MS2
 
 # Lead-loss grace: brief empty-chain windows (vehicle-id flip after a
-# classifier transient at close range, single-tick radar miss, etc.)
-# reuse the last seen chain so a 1-2 ETS2 physics tick (50-100 ms) gap
-# does not slam the output between the IIDM brake command and the no-lead
-# ceiling and back.
 LEAD_LOSS_GRACE_S: float = 0.30
 
 EMA_GC_TTL_S: float = 2.0
@@ -311,8 +269,6 @@ class AdaptiveCruiseController:
         self._output_ema: float | None = None
         self._prev_cmd_ms2: float | None = None
         # Filtered multi-vehicle anticipation delta (m/s^2, added to the
-        # immediate-lead command). EMA state so chain membership changes
-        # fade instead of stepping.
         self._ant_delta_ms2: float = 0.0
         # Immediate-lead identity tracking for the ghost hold.
         self._prev_primary_vid: int | None = None
@@ -332,12 +288,6 @@ class AdaptiveCruiseController:
         chain_raw = self._read_chain()
 
         # Lead-loss grace. ACC's tracker can drop a lead for 1-2 ETS2 physics
-        # ticks at low speed / close range (vehicle-id flip after a classifier
-        # transient, brief radar miss). Treating each such gap as "no lead"
-        # collapsed the controller's continuous state and slammed wanted_ms2
-        # between the IIDM brake command and the no-lead ceiling: visible
-        # ~3 m/s² step oscillation upstream of the mapper. Reuse the last
-        # good chain for a short grace period so transient gaps are invisible.
         if chain_raw:
             self._last_chain_raw = chain_raw
             self._last_chain_mono = now
@@ -346,15 +296,6 @@ class AdaptiveCruiseController:
 
         if not chain_raw:
             # Truly no lead. Route the ceiling through the SAME jerk + output
-            # pipeline as a real command so _prev_cmd_ms2 and _output_ema
-            # stay continuous across the handover (architecture goal §15:
-            # "continuous IIDM domain across all gap regimes"). Nulling them
-            # here, as the previous code did, bypassed the jerk limit on the
-            # very next tick and produced step changes proportional to the
-            # difference between IIDM's last brake command and the ceiling.
-            # Per-lead EMAs and the cached chain are left in place: _gc_emas
-            # ages out stale ones via EMA_GC_TTL_S, and the cache is reseeded
-            # the moment a real chain returns.
             self._gc_emas(now)
             self._ant_delta_ms2 = 0.0
             target = self.config.no_lead_ceiling_ms2
@@ -381,11 +322,7 @@ class AdaptiveCruiseController:
         self._last_chain_mono = -math.inf
 
     def _read_chain(self) -> list[_LeadSnapshot]:
-        """Snapshot the in-lane lead chain from acc_thread under its lock.
-
-        Returns leads sorted by ascending distance, capped at ma_max_leads,
-        with chain spacing sanity filter applied.
-        """
+        """Snapshot the in-lane lead chain from acc_thread under its lock. See `core/cruise_control_thread/README.md`."""
         cfg = self.config
         try:
             acc = registry.get_thread("acc_thread")
@@ -535,12 +472,6 @@ class AdaptiveCruiseController:
             and eff_dist_raw <= cfg.s0_m + cfg.standstill_gap_slack_m
         ):
             # Standstill behind a stationary lead: publish 0 m/s² (no command).
-            # The sending_thread HoldController is the single authority for
-            # keeping the truck stationary on any slope; an ACC-side creep-hold
-            # used to fight the FSM's slope-balance brake and prevented smooth
-            # launches. The gating block above still detects the condition so
-            # downstream consumers can treat this as "ACC is in standstill
-            # context" if needed.
             self._ant_delta_ms2 = 0.0
             return 0.0, False
 
@@ -557,11 +488,6 @@ class AdaptiveCruiseController:
         a_base = _clamp(a_base, cfg.max_decel_ms2, cfg.max_accel_ms2)
 
         # Immediate-lead confidence blend: a marginal chain[0] (tracker
-        # score hovering near the in-path threshold, vehicle drifting on
-        # the lane edge) fades in against the command we would hold
-        # without it, instead of grabbing full authority the tick it
-        # appears and dropping it the tick it leaves. Safety overlays
-        # above already ran on the raw chain[0] regardless of score.
         conf0 = primary.conf
         if conf0 < 1.0:
             if len(chain_smooth) > 1:
@@ -605,14 +531,7 @@ class AdaptiveCruiseController:
         a_base: float,
         t_headway: float,
     ) -> float:
-        """Fade out a vanished immediate lead instead of dropping it in one tick.
-
-        When chain[0] flips to a farther vehicle because the previous
-        primary left the published list (lane-edge drift, id flip), its
-        cached kinematics keep a decaying, min-only grip on the command
-        for primary_ghost_hold_s. A ghost can only hold brake, never
-        raise the cap; reappearance in the chain clears it.
-        """
+        """Fade out a vanished immediate lead instead of dropping it in one tick. See `core/cruise_control_thread/README.md`."""
         cfg = self.config
         now = self._prev_mono if self._prev_mono is not None else 0.0
         primary_vid = chain_smooth[0].vid
@@ -691,13 +610,7 @@ class AdaptiveCruiseController:
         a_base: float,
         t_headway: float,
     ) -> float:
-        """Unfiltered anticipation adjustment (m/s^2) from leads beyond the first.
-
-        Negative values brake earlier / gentler than the immediate-lead law
-        (unbounded, still clamped by max_decel downstream); positive values
-        may lift the command by at most ant_lift_max_ms2 and only while the
-        raw TTC to the immediate lead is comfortable.
-        """
+        """Unfiltered anticipation adjustment (m/s^2) from leads beyond the first. See `core/cruise_control_thread/README.md`."""
         cfg = self.config
         if len(chain_smooth) < 2:
             return 0.0
@@ -714,9 +627,6 @@ class AdaptiveCruiseController:
             return 0.0
 
         # Coupling weights: pairwise time-gap ramp x tracker-score
-        # confidence, propagated multiplicatively down the chain. The
-        # immediate lead's own confidence gates the whole chain: a shaky
-        # chain[0] makes every prediction built on it shaky too.
         weights: list[float] = []
         w_run = moving_gate * chain_smooth[0].conf
         for n in range(1, len(chain_smooth)):
@@ -734,9 +644,6 @@ class AdaptiveCruiseController:
             return 0.0
 
         # Decel side: each anticipated lead is evaluated at its direct gap
-        # with the full law; its extra braking demand relative to the
-        # immediate-lead command is scaled by its coupling weight. At w=1 it
-        # binds fully, at w=0 it contributes nothing, smooth in between.
         a_dec_delta = 0.0
         for n, w in enumerate(weights, start=1):
             if w <= 0.0:
@@ -751,10 +658,6 @@ class AdaptiveCruiseController:
                 a_dec_delta = contrib
 
         # Virtual lead: predict the immediate lead's near-future state from
-        # the weighted upstream speed / accel differentials and re-run the
-        # law on the immediate gap. The negative part joins the decel side
-        # (it reacts to upstream slowdowns long before the per-lead direct
-        # gap does); the positive part becomes the bounded, gated lift.
         dv_up = 0.0
         da_up = 0.0
         for n, w in enumerate(weights, start=1):

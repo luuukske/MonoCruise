@@ -106,12 +106,7 @@ def monocruise_running() -> bool:
 
 
 def game_running() -> bool:
-    """True while the game runs with the telemetry SDK plugin active.
-
-    Opens the existing mapping read-only (create=False never creates one), so
-    the check cannot disturb the game or other telemetry readers. When the
-    game is closed the mapping does not exist and the open raises.
-    """
+    """True while game runs with telemetry SDK active (read-only SHM open, create=False)."""
     try:
         shm = SharedMemory(name=TELEMETRY_SHM_NAME, create=False)
     except (FileNotFoundError, ValueError, OSError):

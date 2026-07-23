@@ -1,20 +1,4 @@
-﻿"""
-Shared-memory traffic reader for the ETS2LA traffic plugin.
-
-Opens ``Local\\ETS2LATraffic`` mmap and decodes up to 40 vehicle slots per
-frame.  Each frame is converted into a list of ``Vehicle`` instances with
-per-id continuity (speed smoothing, yaw EMA, position history) preserved
-across reads by calling ``update_from_last``.
-
-Traffic and parked vehicles combined are culled to the
-``_MAX_TRACKED_VEHICLES`` nearest to ego before smoothing, so per-vehicle
-CPU cost in radar/AEB/ACC (and debug rendering) stays bounded in dense
-traffic.
-
-This module is consumed by ``RadarThread``; AEB and ACC both receive the
-resulting ``Vehicle`` list from the radar data snapshot rather than opening
-the shared-memory buffer themselves.
-"""
+"""ETS2LA traffic/parked shared-memory reader for RadarThread. See core/radar/README.md §5."""
 
 from __future__ import annotations
 
@@ -50,24 +34,15 @@ _TOTAL_PARKED_FORMAT = "=" + _PARKED_VEHICLE_FORMAT * 40
 _PARKED_BUF_SIZE = 1720
 _PARKED_STRIDE = 12
 
-# Synthetic-id base for trailer-as-vehicle records (see _build_trailer_vehicles).
-# Far above the int16 id space the traffic buffer uses, so a wrapped trailer can
-# never collide with a real vehicle or parked-vehicle id.
+# Synthetic id base for trailer-as-vehicle records. See core/radar/README.md §12.
 _TRAILER_VEHICLE_ID_BASE: int = 1_000_000
 
-# Max vehicles kept per frame (traffic + parked combined). When over the cap,
-# the nearest to ego are kept and the rest are culled before the smoothing
-# chain runs. Culled vehicles lose their per-id smoothing state and re-enter
-# via the normal fresh-spawn init if they come back into range.
+# Cap tracked vehicles per frame (nearest to ego). See core/radar/README.md §12.
 _MAX_TRACKED_VEHICLES: int = 24
 
 
 class TrafficReader:
-    """Opens ``Local\\ETS2LATraffic`` mmap and reads the vehicle array.
-
-    Reader keeps a ``_last_vehicles`` map so ``Vehicle.update_from_last`` can
-    carry smoothed speed / yaw / position history forward across frames.
-    """
+    """Traffic mmap reader; per-id state via ``update_from_last``. See core/radar/README.md §5."""
 
     def __init__(self) -> None:
         self._buf: mmap.mmap | None = None
@@ -75,9 +50,7 @@ class TrafficReader:
         self._parked_retry_at: float = 0.0
         self._last_vehicles: dict[int, Vehicle] = {}
         self._last_trailer_vehicles: dict[int, Vehicle] = {}
-        # AEB clip capture (debug only): when capture_raw is set, read() stashes
-        # the exact decoded byte slices so the recorder gets the bytes radar
-        # consumed with no second mmap read (see core/aeb/AGENTS.md capture plan).
+        # Debug: when capture_raw, read() stashes raw mmap bytes for AEB clips.
         self.capture_raw: bool = False
         self.last_traffic_bytes: bytes | None = None
         self.last_parked_bytes: bytes | None = None
@@ -88,12 +61,7 @@ class TrafficReader:
         self._pending_reanchor: bool = False
 
     def clear_kinematics_state(self) -> None:
-        """Drop per-id smoothing so the next frame re-anchors on a new clock.
-
-        Used when radar switches between wall time and SCS ``simulatedTime``:
-        carrying ``Vehicle.time`` across domains makes ``dt`` huge/negative and
-        pins vehicles on the sub-frame path.
-        """
+        """Clear per-id smoothing after clock domain change. See core/radar/README.md §7."""
         self._last_vehicles.clear()
         self._last_trailer_vehicles.clear()
         self._last_kin_t = None
@@ -149,22 +117,7 @@ class TrafficReader:
         ego_speed: float,
         t_now: float | None = None,
     ) -> tuple[list[Vehicle], list[Vehicle]] | None:
-        """Decode one frame.
-
-        ``ego_x/y/z`` and ``ego_speed`` are forwarded to
-        :meth:`Vehicle.update_from_last` for the TTC-scaled lag freeze
-        (see ``core/radar/AGENTS.md`` §7).
-
-        ``t_now`` is the kinematics clock (seconds) passed to
-        ``update_from_last``. Live radar supplies SCS ``simulatedTime`` so
-        pause/hitch gaps do not inflate ``dt``. When omitted, falls back to
-        ``time.time()`` (tests / callers without a sim clock).
-
-        Returns ``(vehicles, trailer_vehicles)``: the top-level radar
-        vehicles and the synthetic trailer-as-vehicle records flattened from
-        nested trailers (see :meth:`_build_trailer_vehicles`). Returns ``None``
-        if the buffer is unavailable or the frame failed to decode.
-        """
+        """Decode one frame; ``t_now`` is kinematics seconds. See core/radar/README.md §7."""
         self.last_traffic_bytes = None
         self.last_parked_bytes = None
         if self._buf is None and not self.open():
@@ -191,12 +144,7 @@ class TrafficReader:
 
     @staticmethod
     def _build_vehicles_from_raw(raw: tuple) -> list[Vehicle]:
-        """Construct unsmoothed Vehicles from an unpacked traffic buffer.
-
-        Single source of truth for the 40-slot decode: the live ``read`` and the
-        headless ``replay_frame`` both go through here so a format change can
-        never drift between them.
-        """
+        """40-slot traffic decode (live ``read`` and ``replay_frame``)."""
         vehicles: list[Vehicle] = []
         data = raw
         for _ in range(40):
@@ -231,13 +179,7 @@ class TrafficReader:
         self, vehicles: list[Vehicle], t_now: float,
         ego_x: float, ego_y: float, ego_z: float, ego_speed: float,
     ) -> tuple[list[Vehicle], list[Vehicle]]:
-        """Cull to the nearest ``_MAX_TRACKED_VEHICLES``, then smooth and flatten.
-
-        Shared tail of ``read`` and ``replay_frame``: culls the frame to the
-        vehicles nearest ego (so live and replay stay identical), applies
-        ``update_from_last`` against the reader's ``_last_vehicles`` state using
-        the supplied clock, then builds the trailer-as-vehicle list.
-        """
+        """Cull, smooth, build trailer vehicles. See core/radar/README.md §12."""
         if len(vehicles) > _MAX_TRACKED_VEHICLES:
             vehicles.sort(
                 key=lambda v: (v.position.x - ego_x) ** 2
@@ -246,10 +188,7 @@ class TrafficReader:
             )
             vehicles = vehicles[:_MAX_TRACKED_VEHICLES]
 
-        # Reader-level gap (pause / hitch with no intermediate frames). Do not
-        # use Vehicle.time here: sub-frames freeze it, so dt since last full
-        # update is not a pause detector. Radar also sets _pending_reanchor on
-        # pause→unpause when simulatedTime may not have jumped.
+        # TMP sub-frame pose snap rules. See core/radar/README.md §7.
         reanchor = self._pending_reanchor
         self._pending_reanchor = False
         if self._last_kin_t is not None:
@@ -267,9 +206,7 @@ class TrafficReader:
                         prev, t_now, ego_x, ego_y, ego_z, ego_speed,
                     )
             else:
-                # Anchor to the kinematics clock (sim or wall). Construction
-                # defaults to time.time(); a mismatched domain would make the
-                # next dt huge/negative and pin the vehicle on the sub-frame path.
+                # TMP sub-frame pose snap rules. See core/radar/README.md §7.
                 v.time = t_now
         self._last_vehicles = {v.id: v for v in vehicles}
         trailer_vehicles = self._build_trailer_vehicles(
@@ -284,13 +221,7 @@ class TrafficReader:
         ego_x: float, ego_y: float, ego_z: float, ego_speed: float,
         t_wall: float,
     ) -> tuple[list[Vehicle], list[Vehicle]] | None:
-        """Decode + smooth one captured frame headlessly (no mmap, injected clock).
-
-        Feeds the recorded byte slices and ``t_wall`` through the exact same
-        construction + ``update_from_last`` path as the live ``read`` so a
-        captured clip reproduces the real radar smoothing (see the AEB capture
-        plan). ``None`` traffic bytes (a paused frame) returns ``None``.
-        """
+        """Headless clip replay through the same path as ``read``."""
         if traffic_bytes is None:
             return None
         try:
@@ -306,12 +237,7 @@ class TrafficReader:
                 )
             except Exception:
                 pass
-        # Anchor freshly-seen vehicles to the recorded clock. A Vehicle is
-        # constructed with time.time() (the replay wall clock); feeding the
-        # recorded t_wall next frame would make dt negative and pin the vehicle
-        # to the sub-frame path forever, so it never smooths. Live radar passes
-        # SCS simulatedTime via read(t_now=...); _smooth_and_build anchors new
-        # ids the same way.
+        # TMP sub-frame pose snap rules. See core/radar/README.md §7.
         for v in vehicles:
             if v.id not in self._last_vehicles:
                 v.time = t_wall
@@ -328,18 +254,7 @@ class TrafficReader:
         *,
         reanchor: bool = False,
     ) -> list[Vehicle]:
-        """Flatten nested trailers into standalone Vehicles for ACC scoring.
-
-        Only trailers that aren't already top-level radar vehicles are
-        wrapped: AI trucks nest every trailer, and in TMP the first trailer is
-        its own vehicle while trailers behind it are nested on it. The
-        ``not is_tmp or is_trailer`` gate matches the ACC tail-length rule in
-        ``acc_controller._read_chain`` so neither path double-counts.
-
-        Synthetic ids derive from the parent id + buffer slot, so per-id
-        smoothing and position-history carry-forward stay continuous across
-        frames: exactly as for real vehicles.
-        """
+        """Nested trailers as ACC Vehicles (not AEB). See core/radar/README.md §12."""
         trailer_vehicles: list[Vehicle] = []
         for v in vehicles:
             if v.id < 0:
@@ -384,10 +299,7 @@ class TrafficReader:
 
     @staticmethod
     def _build_parked_from_raw(raw: tuple, existing_ids: set[int]) -> list[Vehicle]:
-        """Construct parked Vehicles from an unpacked parked buffer.
-
-        Shared by the live ``_read_parked_vehicles`` and headless ``replay_frame``.
-        """
+        """Parked-buffer decode (live and replay)."""
         vehicles: list[Vehicle] = []
         seen_ids: set[int] = set()
         data = raw

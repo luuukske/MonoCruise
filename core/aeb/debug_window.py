@@ -1,4 +1,4 @@
-﻿"""AEB debug visualisation: PySide6 top-down radar view (ego-locked)."""
+"""AEB debug visualisation: PySide6 top-down radar view (ego-locked)."""
 
 from __future__ import annotations
 
@@ -87,9 +87,7 @@ class AEBDebugWindow(QWidget):
         self.setMinimumSize(500, 500)
         self.resize(_WIN_W, _WIN_H)
 
-        # Snapshot source seam: the in-app window polls the registry; the
-        # repo-only review tool injects replayed snapshots from a clip instead.
-        # ACC overlay is None in replay.
+        # Snapshot seam: registry poll vs clip replay inject; ACC overlay None in replay.
         self._snapshot_provider = snapshot_provider or self._fetch
         self._acc_provider = acc_provider or self._fetch_acc
 
@@ -115,8 +113,7 @@ class AEBDebugWindow(QWidget):
 
     @staticmethod
     def _fetch_acc() -> dict | None:
-        """ACC snapshot: {enabled, lead_id, top_ids, top_leads, dist, rel, score,
-        components, blinker, ego_kappa, corridor_half}."""
+        """ACC overlay fields for debug draw (enabled, lead, components, corridor)."""
         try:
             acc = registry.get_thread("acc_thread")
         except KeyError:
@@ -167,11 +164,7 @@ class AEBDebugWindow(QWidget):
 
         self._draw_grid(p, cx, cy)
 
-        # Paint-cost cap: the nearest half of the vehicles get full
-        # annotations (corridor, trail arc, labels, ACC breakdown); the
-        # farthest half get body boxes only. Threats and the ACC lead are
-        # always fully annotated. Dense traffic otherwise saturates the GUI
-        # thread and starves every other window's timers.
+        # Nearest half of vehicles get full annotations; threats and ACC lead always full.
         by_dist = sorted(
             snap.vehicles,
             key=lambda v: (v["x"] - ex) ** 2 + (v["z"] - ez) ** 2,
@@ -363,13 +356,7 @@ class AEBDebugWindow(QWidget):
         acc: dict | None,
         body_clr: QColor,
     ) -> None:
-        """Render the per-vehicle scoring breakdown next to the vehicle.
-
-        Shows everything the ACC scorer saw for this id this frame so the
-        operator can see *why* a vehicle is or is not being tracked: the
-        four components, current accumulated score, in-path flag, lat/dist
-        in the arc frame, and the lateral gate margin.
-        """
+        """Per-vehicle ACC score components beside the vehicle (debug overlay)."""
         if acc is None:
             return
         comp = acc.get("components", {}).get(vid)
@@ -598,13 +585,7 @@ class AEBDebugWindow(QWidget):
         self, p: QPainter, vid: int, acc: dict,
         ex: float, ez: float, ey: float,
     ) -> None:
-        """Faint dashed line tracing this vehicle's fitted trail arc.
-
-        Spans roughly ±``_TRAIL_ARC_HALF_SPAN_M`` of arc length around
-        the target so the operator can see what the scorer thinks the
-        target's path is.  If the arc crosses the ego row, a small
-        marker is drawn at the crossing point.
-        """
+        """Faint dashed ACC trail arc around the target (+ crossing marker if any)."""
         comp = acc.get("components", {}).get(vid)
         if comp is None or not comp.get("trail_valid", False):
             return

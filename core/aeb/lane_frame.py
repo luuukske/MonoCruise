@@ -1,4 +1,4 @@
-﻿"""Arc-projected lane membership: replaces cross-product lateral_offset."""
+"""Arc-projected lane membership: replaces cross-product lateral_offset."""
 
 from __future__ import annotations
 
@@ -17,15 +17,7 @@ class Lane(enum.IntEnum):
 
 
 def project_to_ego_arc(ego_arc: ArcPath, x: float, z: float) -> tuple[float, float]:
-    """Return (s, d_abs): arc-length-along-path and absolute lateral offset.
-
-    Straight ego_arc → linear projection onto heading axis.
-    Curved ego_arc → angular projection; d = |radius - r_to_point|.
-
-    For curved arcs, d_abs is the maximum of the arc-circle offset and the
-    straight-line lateral offset from the ego heading.  This prevents a tight
-    ego curve from projecting an opposite-lane vehicle into the EGO bucket.
-    """
+    """Return (s, d_abs). Curved arcs use max(d_arc, d_straight); see core/aeb/README.md."""
     dx = x - ego_arc.start_x
     dz = z - ego_arc.start_z
     s_straight = dx * ego_arc.fwd_x + dz * ego_arc.fwd_z

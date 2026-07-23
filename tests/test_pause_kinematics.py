@@ -69,7 +69,7 @@ def test_reader_clock_gap_holds_speed_and_resets_history():
 
 
 def test_slow_full_update_dt_does_not_false_reanchor():
-    """dt since last full update can exceed 0.2s without a reader gap — still track."""
+    """dt since last full update can exceed 0.2s without a reader gap; still track."""
     reader = TrafficReader()
     # Seed one vehicle via two close frames, then a 0.25s step (old false trigger).
     v0 = _vehicle(0.0, 0.0, 20.0, vid=7)

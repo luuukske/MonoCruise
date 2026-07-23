@@ -1,41 +1,4 @@
-﻿"""Release helper for MonoCruise.
-
-Two subcommands:
-
-    python tools/release.py bump {major|minor|patch}
-        Bumps core/version.py, rewrites the [Unreleased] heading in CHANGELOG.md
-        to "[X.Y.Z] - YYYY-MM-DD", inserts a fresh empty [Unreleased] block above
-        it, commits both files, tags vX.Y.Z, pushes commit + tag, and creates a
-        draft GitHub release for the tag. CI then attaches the build artifacts
-        and publishes the draft.
-
-    python tools/release.py bump {major|minor|patch} --pre LABEL
-        Pre-release. Bumps the base, then tags X.Y.Z-LABEL.1 (prerelease).
-        Omit the level to advance the pre-release counter on the current base
-        (1.1.0 -> 1.1.0-preview.1 -> 1.1.0-preview.2). A plain level bump on a
-        pre-release finalizes it: drops the suffix, keeps the base
-        (1.1.0-preview.3 + patch -> 1.1.0). CI marks any tag containing '-' as
-        a GitHub prerelease, so -LABEL.N builds land on the preview channel.
-
-    python tools/release.py bump --set X.Y.Z[-LABEL.N]
-        Same as above but with an explicit version.
-
-    python tools/release.py notes X.Y.Z
-        Prints the CHANGELOG section for X.Y.Z to stdout (used by CI to build
-        the GitHub release body).
-
-The bump command refuses to run if the [Unreleased] block is empty: i.e. you
-must have at least one line of changelog entries below the [Unreleased] heading
-before publishing a release.
-
-bump also needs the GitHub CLI (gh) installed and logged in. A GitHub release
-is permanently credited to whoever created it, so the draft is created here,
-under your own account, rather than in CI under github-actions[bot]. Install it
-from https://cli.github.com and run 'gh auth login'.
-
-Nothing is written, committed, tagged, or pushed until you confirm the plan
-(or pass --yes). Use --dry-run to print the plan and exit.
-"""
+"""MonoCruise release helper (bump | notes). Needs gh CLI and nonempty [Unreleased] changelog."""
 from __future__ import annotations
 
 import argparse
@@ -50,9 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 VERSION_FILE = ROOT / "core" / "version.py"
 CHANGELOG = ROOT / "CHANGELOG.md"
 
-# A version is MAJOR.MINOR.PATCH with an optional pre-release suffix -LABEL.N
-# (e.g. 1.1.0, 1.1.0-preview.1, 1.2.0-rc.3). The suffix is what distinguishes
-# a preview build from a stable one; release.py must read and write both.
+# Semver MAJOR.MINOR.PATCH plus optional -LABEL.N pre-release (e.g. 1.1.0-preview.1).
 _VERSION_RE = re.compile(
     r'^__version__\s*=\s*"(?P<v>\d+\.\d+\.\d+(?:-[A-Za-z]+\.\d+)?)"\s*$', re.M
 )
@@ -61,10 +22,7 @@ _PRE_RE = re.compile(
     r"^(?P<base>\d+\.\d+\.\d+)(?:-(?P<label>[A-Za-z]+)\.(?P<num>\d+))?$"
 )
 
-# Default install locations, checked only to tell "gh is missing" apart from
-# "gh is here but this shell's PATH predates it". Never used to invoke gh: a
-# bump that only works from one machine's install path would be worse than one
-# that tells you to restart your terminal.
+# gh install paths: detect PATH stale after install (never invoke gh by these paths).
 _GH_INSTALL_PATHS = (
     r"C:\Program Files\GitHub CLI\gh.exe",
     r"C:\Program Files (x86)\GitHub CLI\gh.exe",
@@ -100,11 +58,8 @@ def _write_version(new_version: str) -> None:
 
 
 def _parse_version(v: str) -> tuple[str, str | None, int | None]:
-    """Split a version into (base, pre_label, pre_num).
-
-    "1.1.0"           -> ("1.1.0", None, None)
-    "1.1.0-preview.2" -> ("1.1.0", "preview", 2)
-    """
+    """Split a version into (base, pre_label, pre_num). "1.1.0" -> ("1.1.0", None, None)
+    "1.1.0-preview.2" -> ("1.1.0", "preview", 2)"""
     m = _PRE_RE.match(v)
     if not m:
         raise SystemExit(f"unparseable version: {v!r}")
@@ -124,22 +79,7 @@ def _bump_base(base: str, level: str) -> str:
 
 
 def _bump(current: str, level: str | None = None, pre: str | None = None) -> str:
-    """Compute the next version.
-
-    Rules:
-      - `--pre LABEL` with a level   : bump the base, then start the pre chain
-                                       at .1 (1.1.0 + minor --pre preview ->
-                                       1.2.0-preview.1)
-      - `--pre LABEL` without a level: pre-release of the *current* base. Same
-                                       label increments the counter; a new label
-                                       resets it to .1
-                                       (1.1.0 -> 1.1.0-preview.1 -> 1.1.0-preview.2;
-                                        1.1.0-preview.2 + --pre rc -> 1.1.0-rc.1)
-      - a level on a pre-release     : finalize. Drop the suffix and keep the base
-                                       the pre chain was building toward
-                                       (1.1.0-preview.3 + patch -> 1.1.0, NOT 1.1.1)
-      - a level on a stable version  : ordinary semver bump.
-    """
+    """Next semver from current version, optional bump level, and --pre label. See bump --help."""
     base, label, num = _parse_version(current)
 
     if pre is not None:
@@ -198,19 +138,14 @@ def _run(*cmd: str) -> None:
 
 
 def _check_gh() -> None:
-    """Fail before anything is written or pushed if gh is unusable.
-
-    Ordering matters: once the tag is pushed, CI starts a build that expects a
-    draft to exist. Discovering a missing gh at that point would leave a tag
-    with no release behind it, so the check runs first.
-    """
+    """Fail before anything is written or pushed if gh is unusable. Ordering matters: once the tag
+    is pushed, CI starts a build that expects a draft to exist. Discovering a missing gh at that
+    point would leave a tag with no release behind it, so the check runs first."""
     if shutil.which("gh") is None:
         hint = (
             "Install from https://cli.github.com, then run: gh auth login"
         )
-        # An installed gh that is missing from PATH almost always means the
-        # shell predates the install and is still holding the old PATH. Saying
-        # "not found, go install it" would send you chasing the wrong problem.
+        # gh on disk but not PATH: shell started before install updated PATH.
         if any(Path(p).exists() for p in _GH_INSTALL_PATHS):
             hint = (
                 "It is installed, but not on this shell's PATH. The installer "
@@ -229,16 +164,7 @@ def _check_gh() -> None:
 
 
 def _create_draft(tag: str, version: str) -> None:
-    """Create the GitHub release for `tag` as a draft, authored by the caller.
-
-    A release's author is fixed at creation and cannot be changed afterwards.
-    Creating it here, with the contributor's gh credentials, is the whole
-    reason this step exists: CI can then attach artifacts and publish without
-    the release being credited to github-actions[bot].
-
-    The draft is invisible to the updater until CI un-drafts it, which keeps
-    users from seeing a release with no Update.zip attached yet.
-    """
+    """Draft GitHub release under caller gh account (CI attaches artifacts and publishes)."""
     notes = _extract_section(version) or ""
     notes_file = ROOT / ".release-notes.md"
     notes_file.write_text(notes.rstrip() + "\n", encoding="utf-8")
@@ -341,7 +267,7 @@ def cmd_bump(args: argparse.Namespace) -> None:
     _print_plan(current=current, new_version=new_version, dry_run=args.dry_run)
 
     if args.dry_run:
-        print("Dry-run only — nothing was changed or created.")
+        print("Dry-run only: nothing was changed or created.")
         return
 
     if not args.yes and not _confirm("Proceed with this release?"):

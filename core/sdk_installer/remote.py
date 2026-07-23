@@ -1,21 +1,4 @@
-"""Read the ETS2LA SDK files straight from their public GitHub repository.
-
-The SDKs are published per game version at
-``Assets/SDKs/<version>/Windows`` in https://github.com/ETS2LA/ETS2LA
-(fetching them client-side is explicitly permitted by the maintainers and the
-repository license).
-
-Two-step, deliberately AV-friendly flow:
-
-  * :meth:`SdkSource.list_files` makes a single JSON request to the GitHub
-    contents API and returns each file's git-blob SHA. Comparing that SHA to a
-    locally installed file tells us whether an update exists without ever
-    downloading a binary.
-  * :meth:`SdkSource.download` only runs once we have decided a file is missing
-    or stale. It streams the file over HTTPS from ``raw.githubusercontent.com``,
-    re-computes the git-blob SHA and refuses to write anything whose SHA does
-    not match what the API reported.
-"""
+"""ETS2LA SDK over GitHub (list + SHA-verified download). See README.md AV section."""
 
 from __future__ import annotations
 
@@ -86,12 +69,7 @@ class SdkSource:
         return {"User-Agent": _USER_AGENT, "Accept": accept}
 
     def list_files(self, *, refresh: bool = False) -> dict[str, RemoteFile]:
-        """Map of ``filename -> RemoteFile`` for the version folder.
-
-        One GitHub API call, cached for the lifetime of this object. Raises
-        :class:`SdkSourceError` on any network/HTTP/parse failure so callers can
-        tell "no update needed" apart from "couldn't ask".
-        """
+        """Remote file listing (one API call, cached). Raises SdkSourceError on failure."""
         if self._listing is not None and not refresh:
             return self._listing
 
@@ -138,12 +116,7 @@ class SdkSource:
         return listing
 
     def download(self, remote: RemoteFile, dest: Path) -> None:
-        """Download ``remote`` to ``dest``, verifying the git-blob SHA.
-
-        Writes to a temporary sibling file and only moves it into place after
-        the SHA matches, so a partial or tampered download never lands at
-        ``dest``. Raises :class:`SdkSourceError` on failure.
-        """
+        """Download to dest via temp file; git-blob SHA must match remote."""
         try:
             response = requests.get(
                 remote.download_url,

@@ -1,10 +1,4 @@
-"""Unit tests for tools/release.py (version bumping + CHANGELOG promotion).
-
-The release helper reads/writes module-level VERSION_FILE and CHANGELOG paths.
-Tests point those at synthetic files in a tmp_path so nothing real is touched,
-and use the --dry-run codepath / a stubbed _run so no git operations fire.
-"""
-
+"""Unit tests for tools/release.py bump and CHANGELOG promotion (tmp_path, dry-run)."""
 from __future__ import annotations
 
 import argparse

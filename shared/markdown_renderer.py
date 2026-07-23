@@ -1,14 +1,4 @@
-"""
-Offline GitHub-flavored Markdown to HTML converter for PySide6.
-Supports GitHub alerts (NOTE, TIP, IMPORTANT, WARNING, CAUTION),
-code blocks, links, images, lists, and basic formatting.
-
-Palette is injected via a shared ``Theme`` (see ``shared.theme``) rather than
-imported from a specific app/updater styles module, so both the main app and
-the standalone updater can use it. Rendering logic is unchanged from the
-original updater renderer; only the colour source differs.
-"""
-
+"""GFM markdown to HTML for PySide6; palette from injected Theme. See shared/README.md."""
 import re
 import html
 import base64
@@ -54,11 +44,7 @@ class GitHubMarkdownRenderer:
         return self._wrap_html(html_content)
 
     def render_blocks(self, markdown_text: str) -> list[str]:
-        """Like render(), but returns each top-level block (paragraph, list
-        item, heading, alert, ...) separately instead of one joined document --
-        lets a caller animate the changelog in one block at a time. Lists are
-        split into one block per top-level item so each line animates on its
-        own; <ol> numbering is carried across blocks via the start attribute."""
+        """Like render(), but one HTML block per top-level element (split_lists for animation)."""
         self.video_url = None
 
         if not markdown_text:
@@ -68,11 +54,8 @@ class GitHubMarkdownRenderer:
         return self._process_markdown_blocks(markdown_text, split_lists=True)
 
     def style_css(self) -> str:
-        """The <style> tag render()/render_blocks() content relies on, for a
-        caller that renders each block into its own QLabel/QTextDocument.
-        Body padding is horizontal-only: each block is its own document, so
-        vertical padding would stack between every pair of labels instead of
-        appearing once around the whole changelog like render() has it."""
+        """The <style> tag render()/render_blocks() content relies on, for a caller that renders each block into its own QLabel/QTextDocument. Body padding is horizontal-only: each block is its own document, so
+        vertical padding would stack between every pair of labels instead of appearing once around the whole changelog like render() has it."""
         return self._style_tag(body_padding="0px 8px")
 
     def get_video_url(self) -> str | None:
@@ -124,12 +107,7 @@ class GitHubMarkdownRenderer:
         return '\n'.join(self._process_markdown_blocks(text))
 
     def _process_markdown_blocks(self, text: str, split_lists: bool = False) -> list[str]:
-        """Process markdown text into a list of top-level HTML blocks (one
-        per paragraph/heading/list/alert/etc.), in source order.
-
-        With split_lists, each top-level list item (plus its nested children)
-        becomes its own block; otherwise a whole list is one block, keeping
-        render() output identical to what it always produced."""
+        """Markdown to ordered HTML blocks; split_lists splits list items for animation."""
         # Filter out SourceForge badge lines
         text = re.sub(r'^\s*\[!\[.*?\]\(https://a\.fsdn\.com/.*?\)\]\(https://sourceforge\.net/.*?\)\s*$',
                     '', text, flags=re.MULTILINE)
@@ -387,10 +365,9 @@ class GitHubMarkdownRenderer:
         '''
 
     def _render_list_blocks(self, items: list) -> list[str]:
-        """Split one markdown list into one HTML block per top-level item,
-        each carrying its nested children. Ordered lists keep counting across
-        blocks through the <ol start=...> attribute (honoured by Qt rich text
-        since QTextListFormat gained a start property in Qt 6)."""
+        """Split one markdown list into one HTML block per top-level item, each carrying its nested
+        children. Ordered lists keep counting across blocks through the <ol start=...> attribute
+        (honoured by Qt rich text since QTextListFormat gained a start property in Qt 6)."""
         blocks = []
         group = []
         group_start = 1
@@ -498,9 +475,9 @@ class GitHubMarkdownRenderer:
         '''
 
     def _style_tag(self, body_padding: str = "8px") -> str:
-        """The GitHub-style CSS shared by render() and render_blocks(); each
-        block from render_blocks() needs its own copy since every QLabel is
-        an independent rich-text document."""
+        """The GitHub-style CSS shared by render() and render_blocks(); each block from
+        render_blocks() needs its own copy since every QLabel is         an independent rich-text
+        document."""
         t = self.theme
         TEXT_PRIMARY = t.md_text_primary
         TEXT_SECONDARY = t.md_text_secondary

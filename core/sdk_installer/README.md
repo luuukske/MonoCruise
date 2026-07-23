@@ -58,7 +58,11 @@ is exactly the shape heuristic scanners dislike. Mitigations kept deliberately:
 - No process injection, no obfuscation, no executing downloaded content, no
   deleting files we did not create.
 
-## Public API
+## Game paths (`game_paths.py`)
+
+Windows-only install discovery (registry, Steam libraries, common paths). Non-Windows
+imports succeed but return no games.
+
 
 `check_sdk()` / `start_boot_check(cb)` for detection; `SdkManager.apply(games,
 close_running=..., on_progress=...)` to install once the user agrees. See

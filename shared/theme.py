@@ -1,14 +1,4 @@
-"""
-Shared visual theme for MonoCruise shared factories.
-
-A single ``Theme`` dataclass carries the colours/fonts the shared renderer needs
-so it never imports a specific app/updater palette module. Each caller builds a
-``Theme`` from its own constants and injects it.
-
-The defaults reproduce the updater's markdown palette, so a bare ``Theme()`` is a
-sensible standalone fallback.
-"""
-
+"""Injected colours/fonts for shared markdown UI. Defaults match updater; see shared/README.md."""
 from __future__ import annotations
 
 from dataclasses import dataclass

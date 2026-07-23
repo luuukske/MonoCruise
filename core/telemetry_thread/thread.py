@@ -1,4 +1,4 @@
-﻿"""
+"""
 Telemetry thread: checks ETS2 SDK connection and exposes sdkActive state + game data.
 
 Other threads read:
@@ -30,16 +30,7 @@ _TELEMETRY_SHM_NAME = "Local\\SCSTelemetry"
 
 
 def sdk_shm_active() -> bool | None:
-    """Cheap game-presence probe via the SCS telemetry shared-memory block.
-
-    Returns:
-      True  – mapping exists and the SDK-active flag is set (game running)
-      False – mapping missing (game not running / plugin not loaded)
-      None  – probe unavailable (non-Windows, unexpected OS error)
-
-    Used for fast startup visibility before ``truck_telemetry`` finishes init.
-    Does not create the mapping (create=False).
-    """
+    """True/False/None: SDK-active flag in SCS telemetry shared memory (Windows)."""
     try:
         from multiprocessing.shared_memory import SharedMemory
 
@@ -80,9 +71,7 @@ class TelemetryThreadData(ThreadData):
 
     # Simulation state
     paused: bool = False
-    # SCS frame simulated timestamp (microseconds). Freezes while paused /
-    # hitching; used by radar vehicle kinematics as the integration clock.
-    # 0 when the SDK has not published a value yet.
+    # SCS simulatedTime (us); radar integration clock; 0 until SDK publishes.
     simulated_time_us: int = 0
 
     # Truck
@@ -270,14 +259,7 @@ class TelemetryThread(BaseThread):
                     cargo = self.data.cargoMass
                     fuel_l = self.data.fuel
                     trailer_count = self.data.trailer_count
-                """
-                import json
-                try:
-                    trailer_json = json.dumps(raw.get("trailer", []), separators=(',', ':'), ensure_ascii=False)
-                except Exception as e:
-                    trailer_json = f"<invalid json:{e}>"
-                logger.info("trailer raw (JSON):\n%s", trailer_json)
-                """
+                # Disabled: trailer JSON debug logging.
         except Exception:
             self.sdk_initialized = False
             with self.data._lock:
@@ -293,9 +275,7 @@ class TelemetryThread(BaseThread):
                 and not self._manual_start
                 and not _window_open_on_taskbar()
             ):
-                # Request quit but keep this thread alive so the main loop can
-                # wait for the live viz bar to run down, then shut everything
-                # down. Stopping here would race the watchdog / lose the flag.
+                # Set request_quit; main loop waits for viz settle before exit.
                 if not self.data.request_quit:
                     logger.info("game disconnected: requesting auto-close")
                     with self.data._lock:

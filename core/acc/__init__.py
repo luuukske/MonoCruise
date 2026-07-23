@@ -1,2 +1,2 @@
-﻿"""Adaptive Cruise Control: meter-native tracking + gap-based accel cap."""
+"""Adaptive Cruise Control: meter-native tracking + gap-based accel cap."""
 

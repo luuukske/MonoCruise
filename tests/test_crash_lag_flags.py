@@ -1,11 +1,4 @@
-"""Crash / lag flag discrimination (TMP vehicles).
-
-A packet stall (network lag) freezes the whole pose and must never read as a
-crash: not on stall entry, not on the resume snap. A physical crash keeps a
-live data stream with violent content (rotation jerk plus a kinematic
-anomaly) and must never be masked by the lag freeze. See radar AGENTS.md §7.
-"""
-
+"""Crash vs lag flag discrimination on TMP vehicles. See core/radar/README.md §7."""
 from __future__ import annotations
 
 import math

@@ -1,16 +1,4 @@
-﻿"""
-Button Device Thread: polls HID button devices for button states.
-
-Devices are identified by a "vid_pid" string ("{vendor_id:04x}:{product_id:04x}").
-Button IDs encode raw HID report position: button_id = byte_index * 8 + bit_index,
-matching the layout used by devices like the MOZA Multi-function Stalk.
-
-Binding format (stored in config.json / Settings):
-  {"source": "button_device",
-   "vid_pid": "0483:0001",      ← "{vendor_id:04x}:{product_id:04x}"
-   "device_name": str,          ← display only
-   "button_id": int}            ← byte_index * 8 + bit_index
-"""
+"""HID button devices (vid_pid, byte*8+bit). Binding format: INPUT_BINDINGS.md."""
 
 from __future__ import annotations
 
@@ -40,18 +28,13 @@ except Exception:
 
 _RECONNECT_INTERVAL = 2.0  # seconds between reconnect attempts for a lost device
 
-# Capture: raw HID reports mix button bits with axis/counter bits that change
-# on their own. During the warm-up window every changing bit is marked noisy
-# and excluded, so only a deliberate press after warm-up can be captured.
+# Capture warm-up marks noisy bits; confirm ticks filter jitter.
 _CAPTURE_WARMUP_S = 0
 _CAPTURE_MAX_SCAN_DEVICES = 16
 # A candidate bit must stay set this many consecutive ticks (~150 ms at 20 Hz)
 # before it is accepted: transient axis/jitter bits never hold that long.
 _CAPTURE_CONFIRM_TICKS = 1
-# Generic-desktop usages that must never be scanned: mice/keyboards/keypads
-# are system input. Joystick/gamepad/multi-axis devices are not skipped here;
-# anything pygame actually exposes is excluded via _pygame_joystick_vid_pids()
-# so pygame-invisible stalks (e.g. MOZA) still reach the HID capture path.
+# Skip generic mouse/keyboard usages; pygame joysticks excluded by vid:pid.
 _SKIP_GENERIC_USAGES = {0x02, 0x06, 0x07}
 
 
@@ -194,17 +177,14 @@ class ButtonDeviceThread(BaseThread):
             self.data.capture_event = None
 
     def consume_capture(self) -> tuple | None:
-        """Read + clear the captured event. Returns None if nothing captured.
-
-        Returns ("button_device", vid_pid, button_id, label, device_name).
-        """
+        """Pop capture_event tuple or None; clears capture state."""
         with self.data._lock:
             ev = self.data.capture_event
             self.data.capture_event = None
             self.data.capture_active = False
             return ev
 
-    # ── Capture internals (loop thread only) ──────────────────────────────────
+    # Capture internals (loop thread only)
 
     def _tick_capture(self, tracked_states: dict[str, dict[int, bool]]) -> None:
         with self.data._lock:
@@ -283,9 +263,7 @@ class ButtonDeviceThread(BaseThread):
         for vid_pid, bits in merged.items():
             prev = self._capture_prev_bits.get(vid_pid)
             if prev is None:
-                # First sighting is the baseline; detection starts next tick.
-                # Devices that only report on change therefore need a release
-                # + second press if their very first report was the press.
+                # Baseline first report; change-only devices need a second press.
                 self._capture_prev_bits[vid_pid] = dict(bits)
                 continue
 
@@ -305,15 +283,7 @@ class ButtonDeviceThread(BaseThread):
             self._capture_prev_bits[vid_pid] = dict(bits)
 
     def _open_capture_scan(self) -> None:
-        """Open every enumerable HID device not already tracked.
-
-        Skipped: system mice/keyboards/keypads, plus anything pygame currently
-        exposes as a joystick (excluded by vid:pid). Pygame-owned devices are
-        captured on the joystick path; their raw HID reports are dominated by
-        axis bits that would false-trigger this scan. Joystick-class devices
-        that pygame does not enumerate (e.g. MOZA stalks) are included.
-        Devices that refuse to open are silently ignored.
-        """
+        """Open non-tracked HID devices; skip generic inputs and pygame joysticks."""
         if not _hid_available or _hid is None:
             return
         try:
@@ -358,10 +328,7 @@ class ButtonDeviceThread(BaseThread):
 
     @staticmethod
     def _pygame_capture_ready() -> bool:
-        """True once main_pedal_thread has published all-joystick capture states.
-
-        If the pedal thread is missing, proceed without exclusion (empty set).
-        """
+        """True when main_pedal_thread published joystick_capture_ready."""
         try:
             pt = registry.get_thread("main_pedal_thread")
             with pt.data._lock:
@@ -371,13 +338,7 @@ class ButtonDeviceThread(BaseThread):
 
     @staticmethod
     def _pygame_joystick_vid_pids() -> set[str]:
-        """vid:pid of every joystick pygame currently sees.
-
-        Parsed from the SDL GUIDs published by main_pedal_thread (bytes 4-5 =
-        vendor little-endian, bytes 8-9 = product little-endian). During
-        capture the pedal thread publishes state for ALL connected joysticks,
-        so this covers devices with no binding yet.
-        """
+        """vid:pid set from SDL GUIDs on main_pedal_thread (all connected joysticks)."""
         out: set[str] = set()
         try:
             pt = registry.get_thread("main_pedal_thread")

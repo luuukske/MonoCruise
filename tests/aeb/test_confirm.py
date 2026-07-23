@@ -1,14 +1,4 @@
-"""Unit tests for OccupancyConfirm: the lapse-tolerant confirm streak that
-backs the three AEB engagement/warn windows (risk, engage, warn).
-
-The bug these guard: the old hard-reset streaks restarted their whole confirm
-clock (or dropped a per-target id) on a single unqualified frame, so per-frame
-detection flicker turned one solid threat into repeated full restarts. These
-tests pin the two design constraints:
-  (a) tolerate isolated 1-2 frame dropouts inside an otherwise-solid streak,
-  (b) still reject a signal that is mostly absent.
-"""
-
+"""OccupancyConfirm lapse-tolerant streak tests (risk / engage / warn windows)."""
 from __future__ import annotations
 
 from core.aeb.confirm import OccupancyConfirm
@@ -49,9 +39,7 @@ def test_solid_streak_confirms_after_window_elapses():
 
 
 def test_single_dropout_does_not_restart_window():
-    # A solid streak with one missed frame in the middle still confirms on
-    # schedule. The hard-reset predecessor would have restarted the 0.20 s
-    # clock at the dropout and delayed the brake by ~0.10 s.
+    # One missed frame mid-streak must not restart the confirm window (hard-reset regression).
     window = 0.20
     pattern = [True, True, True, False, True, True, True, True, True]
     frame = _first_confirm_frame(pattern, window)
@@ -85,9 +73,7 @@ def test_long_gap_drops_streak():
 
 
 def test_sparse_blips_never_confirm():
-    # qualify / miss / miss forever: gap_run maxes at 2 (never resets) but the
-    # qualified fraction is ~1/3, below aeb_confirm_occupancy. Must never fire
-    # no matter how long it runs.
+    # Sparse qualify pattern stays below aeb_confirm_occupancy; must never confirm.
     window = 0.20
     pattern = ([True, False, False] * 20)
     assert _first_confirm_frame(pattern, window) is None
@@ -104,10 +90,7 @@ def test_reset_clears_state():
 
 
 def test_warn_confirms_before_oblique_engage_on_shared_stream():
-    # Invariant: oblique warn must precede oblique engagement by >= 0.1 s.
-    # Warn qualifies on a superset of the engage frames; the worst case for
-    # the ordering is an identical stream. Even then, the shorter warn window
-    # confirms at least 0.1 s earlier.
+    # Oblique warn window must confirm at least 0.1 s before oblique engage on same stream.
     stream = [True] * 12
     warn_frame = _first_confirm_frame(stream, CAL.aeb_warn_confirm_oblique_s)
     engage_frame = _first_confirm_frame(stream, CAL.aeb_engage_confirm_oblique_s)
@@ -123,10 +106,7 @@ def test_calibration_preserves_warn_lead_invariant():
 
 
 def test_window_can_shrink_and_confirm_earlier():
-    # The engage gate re-sets window_s each frame (near-certain vs oblique).
-    # A streak that has been observed for 0.10 s under the oblique window is
-    # not yet confirmed, but flipping to the shorter near-certain window
-    # confirms it immediately.
+    # Shorter near-certain engage window can confirm immediately after oblique streak built.
     oc = _new(CAL.aeb_engage_confirm_oblique_s)
     for i in range(4):  # ~0.10 s of qualification
         oc.observe(i * _DT, True)

@@ -1,27 +1,6 @@
-﻿"""
-ACC thread: in-lane vehicle tracker.
+"""ACC thread: scores traffic and publishes in-lane leads on ``ACCData``.
 
-Consumes ``RadarData`` + blinkers, scores every vehicle per-frame, and
-publishes the top-ranked in-lane leads on ``self.data``.  The actual
-longitudinal control law lives in ``cruise_control_thread`` (to be
-written): this module's only job is to answer **"which vehicles are in
-ego's lane, and how confidently"**.
-
-Readers:
-
-    acc = registry.get_thread("acc_thread")
-    with acc.data._lock:
-        leads = list(acc.data.leads)      # LeadInfo snapshot, top-3
-        has_lead = acc.data.has_lead
-        t = acc.data.t_mono
-
-``LeadInfo.vehicle`` is a shared reference to the Vehicle instance in
-the current RadarData snapshot.  Treat as read-only (RadarThread
-carries smoothing state forward via ``update_from_last`` and a mutation
-here corrupts AEB).
-
-Registry name: ``acc_thread``.
-"""
+Tracker only (no control law). Integration and ``LeadInfo``: ``core/acc/README.md`` §6–7."""
 
 from __future__ import annotations
 
@@ -58,9 +37,7 @@ class ACCData(ThreadData):
     # Monotonic time this snapshot corresponds to (= radar t_mono).
     t_mono: float = 0.0
 
-    # Per-vehicle scoring breakdown for the debug window. Keyed by vehicle id.
-    # Each entry: {score, in_path, lat, dist_m, offset, yaw, path, baseline,
-    # offset_for_score, yaw_diff_deg, arc_hit, corridor_half, seen}.
+    # Debug-window scoring breakdown keyed by vehicle id (see README §6).
     debug_components: dict[int, dict] = field(default_factory=dict)
     debug_blinker: float = 0.0
     debug_ego_kappa: float = 0.0
@@ -89,9 +66,6 @@ class ACCThread(BaseThread):
             self.data.leads = []
         logger.debug("acc teardown complete")
 
-    # ------------------------------------------------------------------
-    # Snapshot helpers: never hold someone else's lock across our work.
-    # ------------------------------------------------------------------
     def _read_radar(self) -> tuple | None:
         try:
             rt = registry.get_thread("radar_thread")
@@ -134,9 +108,6 @@ class ACCThread(BaseThread):
         except AttributeError:
             return False, False
 
-    # ------------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------------
     def loop(self) -> None:
         if not self.running:
             return

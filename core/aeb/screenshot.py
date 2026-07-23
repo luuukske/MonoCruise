@@ -1,10 +1,4 @@
-"""Grab a small JPEG thumbnail of the game screen for AEB clip context.
-
-Used only inside debug-mode capture (see core/aeb/capture.py). The grab is
-best-effort and never raises: if Pillow or a display is unavailable it returns
-None and the clip simply carries no thumbnail. Encoding is split from grabbing
-so it can be unit-tested without a display.
-"""
+"""Best-effort game JPEG thumbnail for debug AEB clips (core/aeb/capture.py). Never raises."""
 
 from __future__ import annotations
 

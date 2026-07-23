@@ -130,3 +130,10 @@ panel.update(AEB_warn=False)  # blink may continue briefly (cooldown)
 - **Don’t block the GUI thread**
   - Keep updates small; do heavy work in worker threads and only publish the final UI state through `update()`.
 
+## ACC distance lines and vehicle cutout
+
+Lines are cached per distance setting. Vehicle cutout uses DestinationOut on an offscreen buffer each frame; pixmaps at max scale, drawn at animated scale. Bbox from settled targets keeps cache keys stable.
+
+## Lead speed indicator
+
+Text rasterized for fractional blit; Gaussian eraser matches HTML prototype. Visibility follows lead_vehicle_speed is not None, not ACC lock.

@@ -1,10 +1,6 @@
-"""FP: ego pose jumps 1.5 m laterally for one frame, snaps back.
-
-Ego at 80 km/h, AI vehicle at 60 km/h in adjacent lane (x=3.5, z=12). Ego
-normally at x=0; at frame 10 ego jumps to x=1.5, bringing the relative
-geometry into ego's corridor. Pipeline must suppress via EgoEvasionFilter.
-"""
-
+"""FP: ego pose jumps 1.5 m laterally for one frame, snaps back. Ego at 80 km/h, AI vehicle at 60
+km/h in adjacent lane (x=3.5, z=12). Ego normally at x=0; at frame 10 ego jumps to x=1.5,
+bringing the relative geometry into ego's corridor. Pipeline must suppress via EgoEvasionFilter."""
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 
 _EGO_SPEED = 80.0 / 3.6

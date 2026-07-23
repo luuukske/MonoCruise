@@ -1,20 +1,4 @@
-"""Regression: crash clip 397148fd (road-train pileup, TMP).
-
-A truck (vid 440, two trailers) crashes ahead of ego and stops from 19.8 m/s
-in ~1.1 s; ego hits its rear trailer at t=9.19 in the recording. The recorded
-AEB braked at t=8.96, 0.96 s after the labeled last stopping point, because:
-
-- the LOS engagement veto's constant-velocity fit still carried pre-crash
-  momentum and measured the tractor point (which ego WOULD have missed while
-  the trailer blocked the lane), vetoing engagement until the tractor crossed
-  the veto's 30 m range floor, and
-- nothing in the engagement path consulted the crash flag.
-
-With corroborated + latched crash detection and the crash-aware LOS bypass,
-the replayed brake must start at the should-trigger window start, not a
-second into it. Runs only where the local clip store has the clip.
-"""
-
+"""Regression: crash clip 397148fd (TMP road-train). Replay must brake at should-trigger start."""
 from __future__ import annotations
 
 import os
@@ -59,9 +43,7 @@ def test_crash_flag_latched_on_target_through_impact(clip):
         if v is not None:
             flag_by_t[ft - t0] = v.crash_confirmed
             lag_by_t[ft - t0] = v._lag_since is not None
-    # Crash happens at ~7.14; ego impact at ~9.19. The flag must hold through
-    # the whole window with no flicker, and the wreck must never be frozen by
-    # the lag filter.
+    # Crash flag must stay latched through window; wreck not frozen by lag filter.
     window = [t for t in flag_by_t if 7.3 <= t <= 9.2]
     assert window, "vehicle 440 missing from replay"
     assert all(flag_by_t[t] for t in window)
@@ -78,7 +60,5 @@ def test_replayed_brake_starts_at_window_start(clip):
     assert out.verdict == "true_positive"
     assert out.brake_window is not None
     from_t = float(lbl.should_trigger["from_t"])
-    # Recorded (broken) behaviour braked at from_t + 0.96. Require the fixed
-    # pipeline to start within 0.15 s of the window start (first full tick
-    # after the labeled last stopping point).
+    # Fixed pipeline must brake within 0.15 s of labeled should-trigger window start.
     assert out.brake_window[0] <= from_t + 0.15

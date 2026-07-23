@@ -1,27 +1,4 @@
-﻿"""
-Radar thread: central traffic + ego snapshot producer.
-
-Reads the ETS2LA shared-memory traffic buffer and ego state from the
-telemetry thread every loop (30 Hz) and publishes a coherent ``RadarData``
-snapshot.  AEB and ACC both consume this data instead of opening the
-traffic buffer themselves, so Vehicle smoothing / yaw EMA / position
-history / curvature state is computed once per frame and shared.
-
-Registry name: ``radar_thread``.
-
-Readers:
-    rt = registry.get_thread("radar_thread")
-    with rt.data._lock:
-        vehicles     = list(rt.data.vehicles)     # or copy just the ids you need
-        trailer_vehicles = list(rt.data.trailer_vehicles)  # ACC-only: nested trailers
-        ego_x        = rt.data.ego_x
-        ego_yaw_rad  = rt.data.ego_yaw_rad
-        ...
-
-Vehicle instances are shared references: do not mutate them from consumer
-threads.  The reader rebuilds the list every frame, and per-id smoothing
-state is carried forward via ``Vehicle.update_from_last``.
-"""
+"""Radar thread: traffic + ego snapshot (``radar_thread``). See core/radar/README.md §12."""
 
 from __future__ import annotations
 
@@ -49,9 +26,7 @@ logger = logging.getLogger(__name__)
 class RadarData(ThreadData):
     # Vehicles: Vehicle instances with per-id smoothing carried forward.
     vehicles: list[Vehicle] = field(default_factory=list)
-    # Nested trailers wrapped as standalone Vehicles (road-train trailers
-    # behind the first). ACC-only: AEB already walks nested trailers via
-    # Vehicle.trailers, so consuming this list there would double-count.
+    # Nested trailers as Vehicles for ACC scoring only. See core/radar/README.md §12.
     trailer_vehicles: list[Vehicle] = field(default_factory=list)
     tmp_session: bool = False
 
@@ -59,7 +34,7 @@ class RadarData(ThreadData):
     ego_x: float = 0.0
     ego_y: float = 0.0
     ego_z: float = 0.0
-    ego_yaw_rad: float = 0.0       # rotationX * 2π: see aeb AGENTS.md §2
+    ego_yaw_rad: float = 0.0       # rotationX * 2π: see aeb README.md §2
     ego_yaw_norm: float = 0.0      # raw rotationX (0..1)
     ego_speed: float = 0.0         # m/s
     ego_pitch_deg: float = 0.0
@@ -118,7 +93,7 @@ class RadarThread(BaseThread):
     def _read_ego(self) -> tuple[
         float, float, float, float, float, float, bool, bool, float, int,
     ]:
-        """(x, y, z, yaw_norm, speed, steer, paused, ego_has_trailer, pitch_deg, simulated_time_us)."""
+        """Ego tuple: pose, speed, steer, pause, trailer, pitch_deg, sim time."""
         try:
             tel = registry.get_thread("telemetry_thread")
             if tel is None or not tel.is_alive():
@@ -153,11 +128,7 @@ class RadarThread(BaseThread):
         ego_has_trailer: bool, paused: bool,
         traffic_buf: bytes | None, parked_buf: bytes | None,
     ) -> None:
-        """Push one radar frame to the clip recorder (debug capture, guarded).
-
-        Never raises into the radar loop: a capture fault must not touch the
-        safety path.
-        """
+        """Debug clip capture; never raises into the radar loop."""
         try:
             ego = EgoTelemetry(
                 coordinateX=ego_x, coordinateY=ego_y, coordinateZ=ego_z,
@@ -244,11 +215,7 @@ class RadarThread(BaseThread):
             self._reset_kinematics_clock()
         self._kin_use_sim = use_sim
 
-        # Paused: do NOT advance vehicle kinematics. If simulatedTime keeps
-        # ticking while positions are frozen, integrating here pulls every
-        # speed toward 0. Hold the last vehicle list; on unpause force a
-        # reader re-anchor so history does not span the gap.
-        # Do not bump t_mono: AEB/ACC treat an unchanged stamp as "no new frame".
+        # Pause / wall vs sim clock handling. See core/radar/README.md §7.
         if paused:
             self._was_paused = True
             self._publish_ego_fields(

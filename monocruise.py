@@ -17,15 +17,7 @@ _INSTANCE_MUTEX = None
 
 
 def _acquire_single_instance() -> bool:
-    """Windows single-instance guard via a named mutex.
-
-    A process-name scan cannot be used here: it matches this very process in
-    a frozen build, so MonoCruise.exe would always see "itself already
-    running" and exit. The mutex does double duty: the background checker
-    (checker/ets2_checker.py) opens it to see whether MonoCruise is already
-    open without enumerating processes. The OS releases it when the process
-    dies, however it dies.
-    """
+    """Windows named mutex; also used by checker to detect a running instance."""
     global _INSTANCE_MUTEX
     if sys.platform != "win32":
         return True
@@ -44,13 +36,7 @@ _SHUTDOWN_EVENT = None
 
 
 def _create_shutdown_event():
-    """Create the named event the standalone updater signals to ask for a
-    graceful shutdown (see updater/updater.py:_request_app_close).
-
-    Auto-reset: a 0-timeout wait in the poll timer both checks and clears it.
-    Returns the handle, or None off-Windows / on failure (the updater then
-    falls back to its "close MonoCruise before updating" error).
-    """
+    """Named auto-reset event for updater-requested shutdown (Windows)."""
     global _SHUTDOWN_EVENT
     if sys.platform != "win32":
         return None
@@ -108,7 +94,7 @@ from ui.popup.popup_window import PopupWindow
 _REDACTED_PATH_PLACEHOLDER = "#:/####-redacted-absolute-path-####/"
 # Windows: C:\... or C:/... (exclude :// such as in URLs)
 _WIN_PATH_RE = re.compile(r'[A-Za-z]:(?!//)[\\\/][^\s"\'<>|*?\x00-\x1f]*')
-# Linux: /home/..., /root/..., /opt/..., /usr/..., /var/..., /tmp/..., /etc/..., /mnt/..., /srv/..., /run/...
+# Linux install roots: /home, /root, /opt, /usr, /var, /tmp, /etc, /mnt, /srv, /run.
 _LIN_PATH_RE = re.compile(r'(?<!\w)/(?:home|root|opt|usr|var|tmp|etc|mnt|srv|run)/[^\s"\'<>|*?\x00-\x1f]*')
 
 
@@ -178,13 +164,7 @@ def _attach_popup_handler(popup: PopupWindow) -> None:
 # Version marker
 
 def _write_version_marker() -> None:
-    """Record the running version so the standalone updater can read it.
-
-    The updater is a separate exe and can't import this app's modules, so it
-    reads this plain-text marker from the install dir to tell stable from
-    preview builds. Best-effort: a failure here (e.g. a read-only directory)
-    must never affect startup.
-    """
+    """Plain-text installed_version.txt for the standalone updater (best-effort)."""
     try:
         (CONFIG_PATH.parent / "installed_version.txt").write_text(
             __version__, encoding="utf-8"
@@ -194,12 +174,7 @@ def _write_version_marker() -> None:
 
 
 def _read_version_marker() -> str:
-    """Return the version recorded on the previous run, or "" if unavailable.
-
-    Read *before* _write_version_marker() overwrites it, so boot can tell
-    whether the running version changed since last launch (an update, downgrade,
-    or fresh install).
-    """
+    """Previous-run version from marker (read before _write_version_marker)."""
     try:
         return (CONFIG_PATH.parent / "installed_version.txt").read_text(
             encoding="utf-8"
@@ -209,13 +184,7 @@ def _read_version_marker() -> str:
 
 
 def _sync_channel_to_build(settings: Settings, previous_version: str) -> None:
-    """On a version change, match the update channel to the running build.
-
-    Only fires when the recorded previous version differs from the running one:
-    between updates the user's manual channel choice is left untouched. A build
-    whose version carries the "preview" tag tracks the preview channel; any other
-    build tracks stable, so the updater keeps offering matching releases.
-    """
+    """After a version change, set update_channel to match stable vs preview build."""
     if previous_version == __version__:
         return
     desired = "preview" if "preview" in __version__.lower() else "stable"
@@ -283,7 +252,7 @@ def main() -> None:
                 _settings_last_mtime_ns = mtime_ns
                 Settings.load()
             except Exception:
-                # Don't ever crash the main loop because of a malformed config during debug tinkering.
+                # Malformed debug config must not crash the main loop.
                 settings_log.exception("failed to auto-refresh settings")
 
         settings_timer = QTimer()
@@ -296,22 +265,11 @@ def main() -> None:
     popup.show()
     _attach_popup_handler(popup)
 
-    # SDK DLL check (backend). Runs on a daemon thread so a possible GitHub
-    # round-trip never blocks boot; when the DLLs are already installed it stays
-    # fully offline. Started after the popup exists so it can surface an error.
-    # When something is missing / outdated the DLLs are installed automatically
-    # (see _auto_install_sdk) and the user is notified.
+    # SDK boot check on a daemon thread; auto-install via _auto_install_sdk when needed.
     from core.sdk_installer import SdkCheckResult, start_boot_check
 
     def _auto_install_sdk(result: SdkCheckResult) -> None:
-        """Install the missing / outdated SDK DLLs the boot check flagged.
-
-        Runs on the boot-check daemon thread. A running game is never closed
-        here (the user did not ask to): a file the game never loaded (absent on
-        disk) is still installed so its next start picks it up, while a
-        present-but-outdated DLL it holds loaded is deferred to the settings
-        "reinstall SDK" action. The outcome is surfaced as a popup.
-        """
+        """Boot-thread SDK apply; never closes game; defers loaded outdated DLLs."""
         from core.sdk_installer import get_manager
 
         try:
@@ -390,15 +348,7 @@ def main() -> None:
     except Exception:
         log.debug("could not start SDK boot check", exc_info=True)
 
-    # Update check (backend). Same non-blocking daemon pattern as the SDK check
-    # so the (possible) GitHub round-trip never touches boot time. The banner +
-    # update-button tint derive from the cached result on the main thread (see
-    # core.update_check.update_is_pending, polled by the window); this callback
-    # only handles the opt-in popup.
-    #
-    # Auto-close (game disconnect while minimized) skips quit while an update
-    # is pending so banner / tint / popup stay visible. See
-    # core/update_check/__init__.py and _check_threads below.
+    # Update check daemon; popup here, banner/tint via update_is_pending (see update_check README).
     from core.update_check import UpdateCheckResult, mark_popup_shown, popup_throttled, start_update_check
 
     def _on_update_result(result: UpdateCheckResult) -> None:
@@ -425,9 +375,7 @@ def main() -> None:
     window = create_main_window(settings, version=f"v{__version__}")
     registry.register_object("main_window", window)
     window.window_closed.connect(lambda: (_stop_all(), app.quit()))
-    # Minimized taskbar presence as early as possible (before workers start),
-    # so a checker-launched session does not flash a normal window. Final
-    # restore-vs-stay-minimized decision waits for telemetry in the window poll.
+    # Early minimized taskbar presence (checker launches); final visibility from telemetry poll.
     window.apply_startup_visibility()
 
     # Pedal visualization bar (shows aforward/abackward + em_stop; lives on main thread)
@@ -443,7 +391,7 @@ def main() -> None:
     # Watchdog
     watchdog = Watchdog()
 
-    # Register workers (instantiate on the spot; _factory_for(worker) gives watchdog the class for restart)
+    # Register workers; watchdog restart uses _factory_for(worker).
     workers = [
         TelemetryThread(),
         MainPedalThread(),
@@ -480,16 +428,10 @@ def main() -> None:
         monitor.start()
         log.info("started: monitor")
 
-    # Named event the updater signals to request a clean exit before it
-    # replaces files. Routed through window.close() so the shutdown is the
-    # same as clicking the X: settings saved, outputs released.
+    # Updater shutdown event; window.close() for same path as the title-bar X.
     shutdown_event = _create_shutdown_event()
 
-    # Updater self-update: the updater only STAGES its new files
-    # (updater_pending/); a running updater cannot rename its own tree (see
-    # shared/updater_swap.py). This app applies the swap as soon as the
-    # updater has exited — polled below, so it also catches an updater that
-    # closes while MonoCruise is already running.
+    # Apply updater_pending swap after updater exits (shared/updater_swap.py).
     from shared.updater_swap import apply_pending_updater_swap, pending_swap_staged
     from core.update_check import update_is_pending
     swap_root = str(CONFIG_PATH.parent)

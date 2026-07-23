@@ -1,10 +1,4 @@
-﻿"""
-AEB Thread: Automatic Emergency Braking with arc-based collision detection.
-
-TTB-based detection: see ``core/aeb/AGENTS.md`` §9 for full logic description.
-
-Registry name: ``aeb_thread``
-"""
+"""AEB thread: arc collision, filter pipeline, continuous decel. Registry: aeb_thread. See core/aeb/README.md."""
 
 from __future__ import annotations
 
@@ -82,72 +76,35 @@ _CROSS_SAFE_ZONE_SPEED: float = 0.3
 
 _EVASION_G_THRESHOLD: float = 0.08 * 9.81
 _LATERAL_LANE_SEPARATION: float = 3.9
-# fwd_dot threshold for lateral-gap activation: deliberately looser than the
-# head_on threshold (-0.7) to catch oncoming vehicles that never reach -0.7
-# during a shared turn.  Does NOT affect target decel model, evasion filter
-# bypass, or risk confirm duration: those all still use head_on (-0.7).
+# fwd_dot for lateral-gap activation; looser than head_on (-0.7). See README head-on lateral-gap.
 _NEAR_HEAD_ON_DOT: float = -0.5
-# Minimum target curvature (1/m) to apply the turning-diverge suppression.
-# 0.03 ≈ 33 m radius: tight enough to be a real corner, loose enough to
-# exclude gentle curves that could still converge on ego.
 _TURNING_DIVERGE_CURVATURE: float = 0.007
 _EVASION_G_THRESHOLD_ONCOMING: float = 0.13 * 9.81
 _EVASION_FILTER_MAX_DELTA_KAPPA: float = 0.008
-# Lateral offset from ego's forward axis (m) at which an oncoming vehicle is
-# considered to be clearly in its own lane.  Above this, delta_kappa_t is
-# scaled up so the evasion arcs fan wider and are more likely to clear ego.
-# Uses the cross product: lat = dx*ego_fwd_z - dz*ego_fwd_x (signed, left < 0).
+# Oncoming own-lane lateral offset scales evasion delta_kappa (cross product lat).
 _OPPOSITE_LANE_OFFSET: float = 2.0
 _OPPOSITE_LANE_KAPPA_SCALE: float = 2.0
-# For head-on vehicles sharing the same curved road (same-sign curvature), ego's
-# heading axis cuts across the road and compresses the cross-product lateral offset
-# measurement: a vehicle genuinely a full lane away may read as <2.0 m. Use a
-# lower threshold when same-curve geometry is confirmed by v_curvature sign + magnitude.
+# Same-curve shared road compresses cross-product lat; lower own-lane threshold then.
 _SAME_CURVE_OWN_LANE_LAT: float = 1.0
 _CO_DIR_DIVERGE_LOOKAHEAD_S: float = 0.25
-# Fix C: extended lookahead for co-directional same-turn outer-lane suppression.
-# Inner/outer lane arcs overlap before their centerlines cross; 0.25 s is too short
-# to see the divergence. At horizon × this scale the paths have clearly separated.
+# Co-dir same-turn extended lookahead fraction (README CoDirectionalDivergeFilter).
 _CO_SAME_TURN_LOOKAHEAD_SCALE: float = 0.5
 # Sweep-pass suppression: stationary cross-traffic ego turns through.
 _SWEEP_PASS_MAX_TARGET_SPEED: float = 1.0    # m/s
 
-# Intersection / shared-turn false-positive suppression
-# Fix A: Ghost-arc scaling for near-head-on vehicles clearly in their own lane.
-# cross_zone_padding peaks at sin(angle)≈0.8, producing ±4 m ghost arcs at 10 m/s,
-# which phantom-widen the target corridor and prevent the ego evasion filter from
-# clearing. Only fires when target is laterally displaced into its own lane.
-_NEAR_HEAD_ON_CROSS_SCALE: float = 0.3       # ghost-arc reduction factor
-_NEAR_HEAD_ON_LATERAL_MIN: float = 3.0       # m: minimum lateral offset to activate Fix A
-
-# Fix B: Road-following curvature expansion for oncoming vehicles in shared turns.
-# Expands delta_kappa_t so the oncoming evasion filter tests whether "target follows
-# the same corner road as ego": not just a tiny ±0.006 1/m perturbation.
-# Still evaluated via arc_arc_collision; not a blind suppression.
-_SHARED_TURN_MAX_KAPPA: float = 0.05         # cap on road-following curvature (R ≥ 20 m)
-
-# Fix D: target arc over-rotation suppression.
-# A vehicle turning from a side road into the opposite lane maintains high curvature;
-# the constant-curvature arc keeps rotating past lane alignment into ego's lane.
-# Dampen target curvature when heading rotation over the arc horizon would exceed
-# the angle to anti-parallel road alignment.
-_TURN_COMPLETE_CURVATURE_SCALE: float = 3.0   # divisor applied when overshoot detected
+# Legacy module-level mirrors of cal fields (loop uses AEBCalibration); kept for local refs.
+_NEAR_HEAD_ON_CROSS_SCALE: float = 0.3
+_NEAR_HEAD_ON_LATERAL_MIN: float = 3.0
+_SHARED_TURN_MAX_KAPPA: float = 0.05
+_TURN_COMPLETE_CURVATURE_SCALE: float = 3.0
 
 _TRAILER_TRACTOR_RADIUS_M: float = 30.0
 _TRAILER_SWAP_SPEED_THRESHOLD_MS: float = 0.5
 _TRAILER_TRACTOR_HEADING_DOT: float = 0.9
 
-# Boundary-negative (TN) sampler thresholds (debug clip capture only, plan
-# trigger ``shadow_near``). Occasionally save a clip where AEB correctly stayed
-# silent while a filter rejected a real candidate, so a future model learns the
-# negatives it must not fire on. These are capture-sampling policy and are
-# deliberately NOT in AEBCalibration: they change no braking behaviour and must
-# never perturb the calibration fingerprint that keys the clip corpus. The
-# rate-limit lives in the recorder (its ``tn_cooldown_s``).
-_SHADOW_MIN_SPEED_MS: float = 2.0     # only sample while actually moving
-_SHADOW_MAX_RANGE_M: float = 80.0     # ignore filtered radar slots beyond this
-# Spatial/geometry filters worth auto-tagging as TN; excludes rel-speed / elevation
-# gates that can fire on distant or non-threatening slots while the road looks empty.
+# Debug shadow_near TN sampler; not in AEBCalibration (recorder rate-limits).
+_SHADOW_MIN_SPEED_MS: float = 2.0
+_SHADOW_MAX_RANGE_M: float = 80.0
 _SHADOW_TN_FILTER_REASONS: frozenset[str] = frozenset({
     "OppositeLaneFilter",
     "OppositeLaneFilterMirrored",
@@ -160,9 +117,7 @@ _SHADOW_TN_FILTER_REASONS: frozenset[str] = frozenset({
     "SweepPassFilter",
 })
 
-# Crash clip capture (debug only, trigger ``auto_crash``). Same speed-drop
-# criterion as main_pedal_thread emergency detection; capture-only policy, not
-# in AEBCalibration.
+# Debug auto_crash capture (main_pedal speed-drop mirror); not in cal.
 _CRASH_MIN_SPEED_KMH: float = 40.0
 _CRASH_SPEED_DROP_KMH: float = 5.0
 
@@ -172,12 +127,7 @@ _BRAKE_POPUP_MIN_DURATION_S: float = 0.5
 
 
 def _find_tractor_for_trailer(trailer: Vehicle, vehicles: list[Vehicle]) -> Vehicle | None:
-    """Nearest same-heading non-trailer vehicle within _TRAILER_TRACTOR_RADIUS_M.
-
-    Covers both TMP convoy partners (is_tmp=True) and convoy-mode players that
-    appear via the AI traffic slot (is_tmp=False). Heading-similarity gate
-    prevents grabbing a perpendicular AI car as a phantom tractor.
-    """
+    """Nearest same-heading non-trailer within radius; TMP and convoy AI slots."""
     _, tr_yaw_deg, _ = trailer.rotation.euler()
     tr_yaw = math.radians(tr_yaw_deg)
     tr_fx = -math.sin(tr_yaw)
@@ -207,16 +157,7 @@ def _find_tractor_for_trailer(trailer: Vehicle, vehicles: list[Vehicle]) -> Vehi
 
 
 def _swap_trailer_kinematics(vehicles: list[Vehicle]) -> list[Vehicle]:
-    """Patch trailer-as-vehicle entries with their tractor's kinematics when their
-    own speed slot is empty.
-
-    Trailers reported as standalone radar vehicles often have unreliable speed
-    (the slot has no engine telemetry: common for TMP partners and for convoy
-    players who route through the AI traffic slot). AEB collision math then
-    treats them as stationary obstacles directly ahead and false-triggers.
-    Keep the trailer's pose (its own arc geometry is correct) but inherit
-    kinematics from the nearest same-heading non-trailer within 30 m.
-    """
+    """Shallow-copy trailer kinematics from nearest tractor; see README TMP trailer swap."""
     out: list[Vehicle] = []
     for v in vehicles:
         if v.is_trailer and abs(v.speed) < _TRAILER_SWAP_SPEED_THRESHOLD_MS:
@@ -354,11 +295,7 @@ def _cross_zone_padding(
 
 
 def _apply_cross_zone(arc: ArcPath, padding: float) -> list[ArcPath]:
-    """Return [arc]. The legacy ghost-arc comb (extra arcs shifted +/-padding
-    along the target heading to fake body-length coverage) is subsumed by the
-    ArcPath capsule body extents, which cover the real body without the
-    speed-scaled spacing that opened coverage holes. Kept as a pass-through so
-    the padding plumbing can be retired without touching every call site."""
+    """Ghost-arc comb retired; capsule extents cover body (pass-through for call sites)."""
     return [arc]
 
 
@@ -383,9 +320,7 @@ def _world_to_ego_forward(dx: float, dz: float, ego_yaw_rad: float) -> float:
 
 
 def _response_dist(v: float, cal) -> float:
-    """Distance lost to brake response lag at speed v. Deliberately uncapped
-    and un-tiered: both a distance cap and threat-age tau tiering were
-    corpus-scanned and rejected (see the notes in calibration.py)."""
+    """Uncapped v * stop_buffer_response_s; rejected cap/tiering in README §7."""
     return abs(v) * cal.stop_buffer_response_s
 
 
@@ -398,25 +333,7 @@ def _codir_required_cap(
     ego_speed: float,
     cal,
 ) -> float:
-    """Physically consistent required decel for a co-directional lead, used
-    as a cap (min) on the relative-frame value.
-
-    The relative frame's closing_distance = v_closing * ttc compresses far
-    below the real gap when the hit time embeds the lead's own predicted
-    deceleration (clip 4423fa27: 2 m/s closing over a 6.4 m real gap read as
-    2.8 m, required 7-22 m/s2 where ~3 was true). The true car-following
-    requirement is the larger of the two binding phases:
-
-    - moving phase (catches the lead mid-braking): match the lead's decel
-      plus shed the closing speed over the actual gap:
-      a_t + v_closing^2 / (2 * gap)
-    - stopped phase (lead has stopped): full stop behind its stop point:
-      v_ego^2 / (2 * (gap + v_t^2 / (2 * a_t)))
-
-    Taking the max keeps a hard-braking lead (0fe85c88) fully covered, and a
-    noise-level lead decel cannot dilute the moving-phase term. gap is
-    estimated as ego_travel minus the lead's travel-to-hit. _INF when not
-    co-directional, so crossing / oncoming behavior is untouched."""
+    """Co-directional required decel cap (moving vs stopped lead); min with relative frame."""
     if fwd_dot < cal.co_directional_dot:
         return _INF
     abs_ego = abs(ego_speed)
@@ -446,31 +363,7 @@ def _required_decel_two_frame(
     cal,
     codir_cap: float = _INF,
 ) -> float:
-    """Required decel from the tighter-of-two-frames distance, with an
-    ego-frame fallback when the relative frame degenerates and a
-    co-directional stopping-lead cap.
-
-    Relative frame: v_closing over closing_distance. It degenerates when
-    v_closing * ttc undershoots stop_buffer at near-zero closing speed, which
-    happens when the predicted hit only exists because the target is expected
-    to decelerate (ego creeping behind a slowing lead, clip 5a6050f5: 0.67 m/s
-    closing, 7.9 m real gap, old clamp exploded required to ~235 m/s2 and
-    engaged on certain geometry: braking for air). Pairing the instantaneous
-    closing speed with a contact driven by the target's future braking is not
-    physical.
-
-    Fallback: a braking actuator can never do better than stopping ego before
-    the contact point, so the consistent (ego_speed, ego_travel) frame bounds
-    what braking can be asked to do. A genuinely imminent contact is owned by
-    the TTB slam path, which bypasses this formula entirely.
-
-    codir_cap: the physically consistent co-directional car-following
-    requirement from _codir_required_cap. The relative frame compresses
-    v_closing * ttc far below the real gap when the hit time embeds the
-    lead's own predicted deceleration and over-triggers at mild closing
-    speeds (clip 4423fa27). The cap only ever lowers required (min) and is
-    _INF for non-co-directional contacts so crossing / oncoming behavior is
-    untouched."""
+    """Required decel: relative frame or ego fallback; optional co-dir cap (README continuous-decel)."""
     d_rel = (
         closing_distance - cal.stop_buffer - _response_dist(v_closing, cal)
     )
@@ -499,17 +392,7 @@ def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1) -> bool:
 def _los_predicted_miss(
     track, now_mono: float, cal: AEBCalibration,
 ) -> float | None:
-    """CBDR predicted miss distance from a target's recent measured track.
-
-    Least-squares slopes of world-frame line-of-sight bearing and range over
-    the veto window give d_miss = |omega_los| * R^2 / |v_rel|: the closest
-    approach the *measurements* predict under constant relative velocity,
-    independent of any arc extrapolation. A genuine collision course holds
-    constant bearing (omega ~ 0, d_miss ~ 0); passing traffic drifts.
-
-    Returns None when the track is too short or barely closing: callers must
-    treat None as "cannot judge" and fail open (no veto).
-    """
+    """CBDR miss distance from LOS track; None fails open (README LOS veto)."""
     cutoff = now_mono - cal.los_veto_window_s
     ts: list[float] = []
     rng: list[float] = []
@@ -555,16 +438,7 @@ def _dampen_turning_curvature(
     arc_length: float,
     cal: AEBCalibration = _CAL_DEFAULT,
 ) -> float:
-    """Dampen target curvature when arc would over-rotate past anti-parallel lane alignment.
-
-    Mirrors the ego evasion centerline-snap but on the primary target arc. A vehicle
-    turning from a side road into the opposite lane has high curvature; constant-curvature
-    propagation keeps rotating past the point where the vehicle straightens into its lane,
-    producing a phantom collision in ego's lane.
-
-    Only fires for cross-traffic geometry (fwd_dot in (-0.5, 0.7)) with confirmed rotation
-    toward anti-parallel and a heading change that would exceed the alignment angle.
-    """
+    """Fix D: dampen arc_curvature when constant-curvature would over-rotate past alignment."""
     if (abs(v_curvature) <= cal.turning_diverge_kappa
             or abs_v_speed <= 0.5
             or fwd_dot <= cal.near_head_on_dot
@@ -574,9 +448,7 @@ def _dampen_turning_curvature(
     theta_to_anti = math.acos(max(-1.0, min(1.0, -fwd_dot)))
     if theta_max <= theta_to_anti:
         return v_curvature
-    # Direction guard: only dampen when rotating TOWARD anti-parallel.
-    # cross(veh_fwd, anti_ego_fwd) > 0 means CW rotation needed (= negative curvature in ETS2).
-    # Rotating toward anti-parallel: cross and curvature have opposite signs.
+    # Fix D direction guard: dampen only when rotating toward anti-parallel.
     cross = veh_fwd_x * (-ego_fwd_z) - veh_fwd_z * (-ego_fwd_x)
     if cross * v_curvature >= 0.0:
         return v_curvature  # rotating away: genuine cross-arc threat
@@ -584,11 +456,7 @@ def _dampen_turning_curvature(
 
 
 def _ls_slope(samples, idx: int) -> float:
-    """Least-squares slope (units/s) of samples[i][idx] against samples[i][0].
-
-    Robust to per-tick jitter where an endpoint difference is not; TMP range
-    and speed snapshots jitter several units tick to tick.
-    """
+    """LS slope of samples[i][idx] vs time; robust to TMP jitter."""
     n = len(samples)
     if n < 2:
         return 0.0
@@ -633,11 +501,7 @@ def _build_vehicle_collision_data(
     follow_decel_ms2: float | None = None,
 ) -> tuple[list[ArcPath], float, list[list[ArcPath]],
            float, float, float, float, float]:
-    """Build collision arcs and derived vehicle geometry for a vehicle.
-
-    Returns (all_target_arcs, cross_padding, cross_arcs_list,
-             v_yaw_rad, abs_v_speed, veh_fwd_x, veh_fwd_z, v_curvature).
-    """
+    """Collision arcs + geometry tuple for one vehicle (filters harness + thread)."""
     v_hw = v.size.width / 2.0
     v_hw_coll = max(v_hw - 0.1, 0.3)
     abs_v_speed = abs(v.speed)
@@ -651,9 +515,7 @@ def _build_vehicle_collision_data(
     arc_decel = target_override_decel
     if follow_decel_ms2 is not None and follow_decel_ms2 > 0.0:
         arc_decel = max(arc_decel, follow_decel_ms2)
-    # Fix D: dampen curvature when constant-curvature arc would over-rotate past
-    # anti-parallel lane alignment. v_curvature is preserved unchanged for same_curve
-    # checks; arc_curvature is used only for arc building.
+    # Fix D on arc_curvature only; v_curvature unchanged for filters.
     arc_curvature = _dampen_turning_curvature(
         v_curvature, fwd_dot,
         ego_fwd_x, ego_fwd_z, veh_fwd_x, veh_fwd_z,
@@ -721,10 +583,7 @@ class _SoundState(enum.IntEnum):
 
 
 class _AEBSoundHandler:
-    """
-    State-managed sound handler for seamless looping, non-blocking stops,
-    and the ability to resume during shutdown.
-    """
+    """Pygame AEB warning loop with non-blocking stop and extra replay tail."""
 
     def __init__(
         self,
@@ -756,10 +615,7 @@ class _AEBSoundHandler:
             self._sound = None
 
     def start_warning(self) -> None:
-        """
-        Start the warning sound loop. If shutting down, cancels the shutdown
-        and resumes looping seamlessly.
-        """
+        """Start loop; cancels in-flight shutdown and resumes."""
         if self._sound is None:
             return
         with self._lock:
@@ -778,11 +634,7 @@ class _AEBSoundHandler:
             logger.debug("AEB sound: warning loop started")
 
     def stop_warning(self) -> None:
-        """
-        Signal the warning to stop non-blockingly.
-        Schedules ``_stop_extra_replays`` more overlapping plays, then stops;
-        the last clip runs to completion.
-        """
+        """Schedule extra replays then finish current clip (non-blocking)."""
         if self._sound is None:
             return
         with self._lock:
@@ -848,10 +700,7 @@ class AEBThread(BaseThread):
         self._capture_prev_state: AEBState = AEBState.STANDBY
         self._prev_ego_speed_capture_ms: float | None = None
         self._last_snapshot: AEBSnapshot | None = None
-        # Per-target risk confirm streaks (OccupancyConfirm). A colliding
-        # target must sustain qualification for its confirm window before it
-        # contributes to the aggregates; an isolated 1-2 frame collision-grid
-        # dropout no longer restarts its clock or drops it from the dict.
+        # Per-target OccupancyConfirm for risk aggregates (README confirm windows).
         self._risk_confirm: dict[int, OccupancyConfirm] = {}
         self._radar_visualizer = None
         self._radar_vis_last_vehicle_time: float = -1.0
@@ -859,37 +708,23 @@ class AEBThread(BaseThread):
         self._sound_handler = _AEBSoundHandler(_AEB_SOUND_PATH)
         self._cal: AEBCalibration = _CAL_DEFAULT
         self._pipeline = build_pipeline(self._cal)
-        # Per-target One-Euro state for blended curvature; stepped once per
-        # vehicle per frame, pruned at the end of the loop.
+        # One-Euro per target kappa; stepped once per vehicle per frame (README).
         self._curvature_blender = VehicleCurvatureBlender(self._cal)
-        # Per-target measured world track (t, vx, vz, ego_x, ego_z) for the
-        # line-of-sight-rate engagement veto; time-trimmed on append and
-        # pruned against active ids each loop.
+        # LOS tracks for engagement-entry CBDR veto (README LOS veto).
         self._los_tracks: dict[int, deque] = {}
-        # Follow-threat tracker: per-target (t, dist, abs_speed, d_abs)
-        # history plus a hold-until timestamp for ids that pass kinematic
-        # qualification (sustained closing + own decel, co-directional).
-        # The active set is rebuilt each frame by _update_follow_threats
-        # (hold + geometric gate) and read by the pipeline (TmpRelSpeedFilter
-        # bypass, evasion/diverge exemption) and the precompute prefilter.
+        # Follow-threat tracks + hold; see README follow-threat section.
         self._follow_tracks: dict[int, deque] = {}
         self._follow_hold_until: dict[int, float] = {}
         self._follow_threat_ids: set[int] = set()
         # Continuous-decel state
         self._engaged: bool = False
-        # Engagement qualification streak, occupancy-windowed (lapse-tolerant
-        # replacement for the old hard-reset timer). window_s is re-set each
-        # frame to the geometry-graded confirm window (near-certain vs
-        # oblique). Reset while engaged, per the entry certainty gate.
+        # Engage confirm: geometry-graded window_s each frame (README tiered entry).
         self._engage_confirm = OccupancyConfirm(
             self._cal.aeb_confirm_occupancy,
             self._cal.aeb_confirm_max_gap_frames,
             self._cal.aeb_engage_confirm_oblique_s,
         )
-        # Raw warn-condition persistence streak, same mechanism. Fixed window
-        # aeb_warn_confirm_oblique_s. Warn qualifies on a superset of the
-        # engage frames and has the shorter window, so warn always confirms
-        # >= 0.1 s ahead of an oblique engagement even through flicker.
+        # Oblique warn occupancy; shorter window than oblique engage (README).
         self._warn_confirm = OccupancyConfirm(
             self._cal.aeb_confirm_occupancy,
             self._cal.aeb_confirm_max_gap_frames,
@@ -898,31 +733,16 @@ class AEBThread(BaseThread):
         self._published_target_ms2: float = 0.0
         self._last_target_change_mono: float = 0.0
         self._prev_loop_mono: float | None = None
-        # Vehicle ids latched by a confirmed engagement event. Held across
-        # frames so a TMP target that drops below the rel-speed pre-filter
-        # (because ego is now matching its speed) keeps flowing through the
-        # pipeline, and so engagement holds until the gap has actually
-        # re-opened: not just until v_closing^2 collapses to zero.
+        # Latched threats: TMP rel-speed bypass + headway hold (README latched-threat).
         self._latched_threat_ids: set[int] = set()
-        # Per latched id: last monotonic time the target was still in scope
-        # (forward of ego inside the EGO lane band, or predicted-colliding).
-        # Ids out of scope longer than cal.latched_scope_release_s lose the
-        # latch so distance alone cannot hold the brake on a cleared target.
+        # Scope stamp per latched id; out-of-scope grace before release.
         self._latched_scope_ok_mono: dict[int, float] = {}
-        # Replay seams (headless clip eval). Default to live behaviour: the
-        # loop's single clock read and the enable flag. The clip-eval driver
-        # overrides these plus the three read-seam methods and the sound handler
-        # to re-run the pipeline deterministically over recorded frames.
+        # Clip replay overrides _now, readers, and _aeb_active_fn (clip_eval).
         self._now = time.monotonic
         self._aeb_active_fn = None
 
     def _read_user_braking(self) -> bool:
-        """True when braking already addresses the threat (suppress redundant warn).
-
-        Counts the driver's physical pedal, and the final program brake
-        (``sending_thread.abackward``) while CC/ACC is commanding. AEB's own
-        slam/FF must not count: that would silence the warn during engagement.
-        """
+        """Suppress warn when user/CC already braking unless near-full AEB demand."""
         try:
             pt = registry.get_thread("main_pedal_thread")
             if pt is not None and pt.is_alive():
@@ -967,14 +787,7 @@ class AEBThread(BaseThread):
         now_mono: float,
         cal: AEBCalibration,
     ) -> None:
-        """Rebuild the follow-threat flag set from per-target behavior tracks.
-
-        Two-part test (see ``AEBCalibration`` follow_threat_* comments):
-        1) Kinematic qualification — co-directional target sustains closing
-           range and own deceleration over the trailing window; starts a hold.
-        2) Geometric gate — while the hold is active, the target must be in
-           Lane.EGO or laterally converging (arc-projected d_abs shrinking).
-        """
+        """Follow-threat ids: kinematic hold + lane/converge gate (README follow-threat)."""
         active: set[int] = set()
         for v in vehicles_eff:
             dx = v.position.x - ego_x
@@ -1019,11 +832,7 @@ class AEBThread(BaseThread):
         self._follow_threat_ids = active
 
     def _read_acc_lead_id(self) -> int | None:
-        """Return the current ACC primary lead vehicle id, or None.
-
-        Visualizer-only consumer: never raises so a missing/dead ACC
-        thread cannot impact AEB safety logic.
-        """
+        """ACC lead id for debug visualizer only; never raises."""
         try:
             acc = registry.get_thread("acc_thread")
             if acc is None or not acc.is_alive():
@@ -1036,11 +845,7 @@ class AEBThread(BaseThread):
             return None
 
     def _read_max_brake_ms2(self) -> float:
-        """Read the live max brake capacity from sending_thread.
-
-        Falls back to ``_FULL_BRAKE_DECEL`` when the sending thread is
-        unavailable or has not yet published a valid estimate.
-        """
+        """Max brake from sending_thread; fallback _FULL_BRAKE_DECEL if unavailable."""
         try:
             st = registry.get_thread("sending_thread")
             if st is not None and st.is_alive():
@@ -1091,10 +896,7 @@ class AEBThread(BaseThread):
         aeb_warn: bool, aeb_brake: bool, new_state: "AEBState",
         tmp_traffic_session: bool,
     ) -> None:
-        """Record one AEB tick + fire the engagement trigger (debug capture, guarded).
-
-        Never raises into the AEB loop: capture must not touch the safety path.
-        """
+        """Debug capture tick + engagement trigger; never raises into the loop."""
         recorder = get_recorder()
         if recorder is None:
             return
@@ -1145,13 +947,7 @@ class AEBThread(BaseThread):
                     calibration=self._cal,
                 )
 
-            # Boundary-negative sampler: AEB stayed silent this tick but a filter
-            # rejected a real candidate. The recorder throttles these hard and
-            # auto-tags them true negatives; fired every qualifying tick, it
-            # simply lands one clip per cooldown while such traffic is around.
-            # Skip while the threat is already being braked (user or CC/ACC):
-            # filtered convoy traffic during a stop is junk TN data (mirrors
-            # warn suppression policy).
+            # shadow_near TN sampler when filters reject a candidate (debug; recorder throttles).
             if (aeb_active
                     and new_state == AEBState.STANDBY
                     and not self._engaged
@@ -1242,7 +1038,7 @@ class AEBThread(BaseThread):
 
         now_mono = self._now()
 
-        # Yaw-rate proxy: see AGENTS.md §1. Do NOT use RadarData.ego_curvature.
+        # Yaw-rate proxy: see core/aeb/README.md §1. Do NOT use RadarData.ego_curvature.
         if ego_speed > 0.5:
             yaw_rate_rad_s = math.radians(steer * ego_speed * cal.yaw_rate_steer_gain)
             ego_curvature = yaw_rate_rad_s / ego_speed
@@ -1361,23 +1157,15 @@ class AEBThread(BaseThread):
         best_v_closing: float = 0.0
         best_ego_travel: float = _INF
         best_codir_cap: float = _INF
-        # Engagement-eligible aggregates: same chain minus LOS-vetoed targets.
-        # Only the engagement-entry decision reads these; warn / display /
-        # disarm / holds keep the full aggregates so a veto can never silence
-        # an active event or the warning.
+        # Engage aggregates exclude LOS-vetoed ids; warn/disarm use full set (README).
         best_ttb_engage: float = _INF
         best_closing_distance_engage: float = _INF
         best_v_closing_engage: float = 0.0
         best_ego_travel_engage: float = _INF
         best_codir_cap_engage: float = _INF
-        # Distance from the ego arc reference to ego's own contact surface
-        # (capsule tip + radius): subtracted from the reference-to-hit-point
-        # distance to get ego's drivable travel before contact.
+        # Ego travel to hit uses capsule tip offset from arc reference.
         ego_front_to_surface = ego_cap_fwd + ego_hw
-        # Colliding targets with certain geometry (Lane.EGO, aligned heading):
-        # these skip the confirm wait at engagement entry. nearcertain covers
-        # targets in-lane OR aligned (one classification step from certain):
-        # they get the short confirm window instead of the oblique one.
+        # certain_geom / nearcertain_geom drive tiered confirm (README tiered entry).
         certain_geom_ids: set[int] = set()
         nearcertain_geom_ids: set[int] = set()
         los_vetoed_ids: set[int] = set()
@@ -1641,10 +1429,7 @@ class AEBThread(BaseThread):
                     aligned = abs(ctx.fwd_dot) >= cal.aeb_certain_fwd_dot
                     if ctx.lane == Lane.EGO and aligned:
                         certain_geom_ids.add(v.id)
-                    # A crash-confirmed wreck gets the short confirm window:
-                    # its spun pose makes the lane / heading classification
-                    # unreliable, and it is exactly the target that must not
-                    # wait out the oblique window (crash clip 397148fd).
+                    # crash_confirmed uses short confirm window (unreliable lane pose).
                     if (ctx.lane == Lane.EGO or aligned
                             or getattr(v, "crash_confirmed", False)):
                         nearcertain_geom_ids.add(v.id)
@@ -1677,12 +1462,7 @@ class AEBThread(BaseThread):
                     )
 
                     # Closing-speed comparison: vector magnitude of the
-                    # relative velocity in world frame, not the axial projection
-                    # onto ego's heading. The vector form correctly captures
-                    # rear-end scenarios where a faster trailing target's
-                    # closing rate INCREASES as ego brakes: the axial form
-                    # clamps to zero and misses this entirely. Subsumes the
-                    # legacy RearOvertakerFilter under one principled mechanism.
+                    # closing_speed = world-frame |v_ego - v_target| (README braking_worsens).
                     v_ego_x = ego_speed * ego_fwd_x
                     v_ego_z = ego_speed * ego_fwd_z
                     v_t_x = v.speed * veh_fwd_x
@@ -1692,10 +1472,7 @@ class AEBThread(BaseThread):
 
                     braking_worsens = False
                     if braked_hit is not None:
-                        # Target moving faster than ego along ego's heading
-                        # axis means braking can only increase relative impact
-                        # speed: handles imminent rear-ends where t_braked is
-                        # too small for the hysteresis comparison to fire.
+                        # Faster along ego axis: braking worsens imminent rear-end.
                         if v_target_along_ego > ego_speed:
                             braking_worsens = True
                         else:
@@ -1708,17 +1485,7 @@ class AEBThread(BaseThread):
                                 braking_worsens = True
                     elif (v_target_along_ego > ego_speed
                             and dx * ego_fwd_x + dz * ego_fwd_z < 0.0):
-                        # Rear overtaker whose collision full braking AVOIDS
-                        # entirely (no braked hit). Braking is still never the
-                        # right response to faster traffic approaching from
-                        # behind: the unbraked hit exists only while ego holds
-                        # speed, and feeding the overtaker's closing speed into
-                        # required_decel reads a routine adjacent-lane pass as a
-                        # frontal threat (passing FP clips f0b2ace6 / 02642609:
-                        # phantom warn and engagement while being overtaken).
-                        # Scoped to targets behind ego so a faster crosser
-                        # ahead, where braking IS the avoidance, keeps
-                        # contributing to the decel aggregates.
+                        # Rear overtaker with no braked hit: adjacent pass, not frontal threat.
                         braking_worsens = True
 
                     if braking_worsens:
@@ -1732,20 +1499,7 @@ class AEBThread(BaseThread):
                         best_ttb = ttb
                         best_hit_x = unbraked_hit[1]
                         best_hit_z = unbraked_hit[2]
-                        # Distance for required_decel = v_rel^2 / 2d: take the
-                        # tighter of two frames, since neither is right for
-                        # every geometry.
-                        # - Relative gap (v_rel * ttc): correct for
-                        #   co-directional leads. The world-frame hit distance
-                        #   is ego's TRAVEL (~v_ego * ttc); pairing that with
-                        #   v_rel underestimates required by ~v_rel/v_ego for
-                        #   a moving lead (crash clip 0fe85c88 read 32% of max
-                        #   at a 100%-of-capacity rear-end).
-                        # - Ego travel to the hit point: tighter for crossing
-                        #   or oncoming arcs where v_rel > v_ego; switching
-                        #   those to the relative gap drops genuine crossing
-                        #   TPs 898e3a46 / f64d2a6b below the engage ratio.
-                        # For stationary targets both forms agree.
+                        # required_decel gap: min(v_rel*ttc, ego travel to hit); see README.
                         hit_dist = math.hypot(
                             unbraked_hit[1] - ego_front_x,
                             unbraked_hit[2] - ego_front_z,
@@ -1765,12 +1519,7 @@ class AEBThread(BaseThread):
                     vetoed = los_veto_memo.get(v.id)
                     if vetoed is None:
                         vetoed = False
-                        # Never veto a crash-confirmed target: its track
-                        # violates the constant-velocity assumption (the fit
-                        # window still carries pre-crash momentum), and the
-                        # tractor point can predict a miss while its trailer
-                        # blocks the lane (crash clip 397148fd: veto held the
-                        # engagement 0.75 s past the last stopping point).
+                        # crash_confirmed skips LOS veto (README LOS veto).
                         if (cal.los_veto_enabled
                                 and dist >= cal.los_veto_min_range_m
                                 and not getattr(v, "crash_confirmed", False)):
@@ -1853,32 +1602,20 @@ class AEBThread(BaseThread):
         # An event already latched while moving may continue to completion.
         aeb_outputs_ok = aeb_speed_ok or self._engaged
 
-        # brake_ttb_active: unbraked geometry says collision is within the
-        # emergency window. The window is `brake_ttb + brake_response_window_s`
-        # to compensate for actuator lag and the rate-limited brake ramp —
-        # without this headroom the slam fires after the pedal has already
-        # needed to be at full. Handles path-crossing / arc-cross scenarios
-        # where v_closing≈0 collapses required_decel, but the geometry still
-        # says ego is about to hit something.
+        # brake_ttb + response window: TTB slam headroom for actuator lag (README).
         brake_ttb_active = (
             run_collision
             and time_to_brake < cal.brake_ttb + cal.brake_response_window_s
         )
 
-        # Hold an active event while a colliding target's ttc is inside
-        # disarm_hold_ttc_s: a working brake trips the plain disarm mid-stop
-        # and the event pumps (see AGENTS.md engagement hysteresis).
+        # Geometry latch while colliding unbraked ttc inside disarm_hold_ttc_s.
         geom_threat_latched = (
             run_collision
             and best_unbraked_ttc < cal.disarm_hold_ttc_s
             and bool(colliding_ids)
         )
 
-        # Distance-based engagement latch over previously-latched targets.
-        # required_decel = v_closing^2/2d collapses to zero when ego matches
-        # target speed, but the physical gap may still be unsafe. Hold while
-        # any latched id has headway < latched_min_headway_s; release the id
-        # once its headway grows past latched_release_headway_s.
+        # Latched headway hold + scope release (README latched-threat).
         active_vid_set = {v.id for v in vehicles_eff}
         ego_v_safe = max(ego_speed, 0.5)
         latched_headway_min = _INF
@@ -1892,11 +1629,7 @@ class AEBThread(BaseThread):
                 self._latched_threat_ids.discard(vid)
                 self._latched_scope_ok_mono.pop(vid, None)
                 continue
-            # Scope check: the hold exists for a forward, in-lane lead (or a
-            # target still predicted-colliding). A latched id that is neither
-            # (ego passed it, it sits beside ego, or it swept clear of the
-            # lane) releases after latched_scope_release_s so raw euclidean
-            # distance alone cannot keep the brake on.
+            # Latched scope: forward in-lane or still colliding (README scope release).
             s_along, d_abs = project_to_ego_arc(
                 ego_arc, ego_x + pc[3], ego_z + pc[4],
             )
@@ -1961,13 +1694,7 @@ class AEBThread(BaseThread):
                          and aeb_speed_ok
                          and (effective_required_engage >= engage_threshold
                               or brake_ttb_engage_active))
-            # Confirm window graded by geometry: near-certain targets
-            # (in-lane or aligned) get the short window; oblique out-of-lane
-            # crossers, the extrapolation-fragile class, must sustain
-            # qualification longer. Set every frame (qualified or not) so the
-            # occupancy streak trims and confirms against the current window,
-            # then feed this frame's qualification into it. An isolated 1-2
-            # frame dropout no longer restarts the window (lapse tolerance).
+            # Tiered engage confirm window + occupancy observe (README tiered entry).
             self._engage_confirm.window_s = (
                 cal.aeb_engage_confirm_s
                 if any(vid in nearcertain_geom_ids for vid in colliding_ids)
@@ -1975,12 +1702,7 @@ class AEBThread(BaseThread):
             )
             self._engage_confirm.observe(now_mono, qualified)
             if qualified:
-                # Certainty tiers that engage without the confirm wait:
-                # imminent (full brake barely avoids), certain geometry
-                # (aligned in-lane target, engage-eligible), or continuity
-                # with a previously latched threat. Everything else: crossing
-                # arcs, oblique sweeps: must sustain qualification, which
-                # single-tick extrapolation phantoms never do.
+                # Instant engage paths: TTB slam, certain geom, latched (README).
                 certain = (
                     brake_ttb_engage_active
                     or any(vid in certain_geom_ids and vid not in los_vetoed_ids
@@ -2050,18 +1772,7 @@ class AEBThread(BaseThread):
         )
         warn_raw = bool(warn_by_decel or warn_by_ttb)
 
-        # Warn persistence gate: mirrors the engagement certainty tiers.
-        # Certain/near-certain geometry, imminent TTB, latched threats, and
-        # active engagement warn instantly; oblique out-of-lane threats must
-        # sustain the warn condition for the occupancy window
-        # aeb_warn_confirm_oblique_s, which filters the transient phantom
-        # beeps of that class while keeping >= 0.1 s of warning ahead of an
-        # oblique engagement (whose confirm is aeb_engage_confirm_oblique_s;
-        # warn qualifies on a superset of the engage frames and has the
-        # shorter window, so its streak confirms first even through flicker).
-        # The streak tracks the raw threat condition every frame so the
-        # user-braking display suppression below never resets it, and an
-        # isolated 1-2 frame dropout does not restart the window.
+        # Oblique warn occupancy gate; instant paths unchanged (README warn persistence).
         self._warn_confirm.observe(now_mono, warn_raw)
         if warn_raw:
             warn_instant = (
@@ -2226,11 +1937,7 @@ class AEBThread(BaseThread):
         self,
     ) -> tuple[list[Vehicle], float, float, float, float, float, float, float,
                bool, float | None, bool, bool, float] | None:
-        """Read the radar thread's published snapshot under its data lock.
-
-        Returns ``None`` when the radar thread is missing / not alive: AEB
-        then skips the loop rather than fabricating an ego pose.
-        """
+        """Radar snapshot tuple under lock; None if radar thread missing."""
         try:
             rt = registry.get_thread("radar_thread")
         except KeyError:

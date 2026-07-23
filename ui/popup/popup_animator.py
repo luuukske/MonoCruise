@@ -1,6 +1,4 @@
-﻿"""
-animations for popup widgets using PySide6.
-"""
+"""Popup scale/fade animations for PySide6 widgets."""
 
 from typing import Optional
 from PySide6.QtCore import (
@@ -15,14 +13,7 @@ from PySide6.QtGui import QTransform, QPainter, QColor
 
 
 class ScalableContainer(QGraphicsView):
-    """A container that can scale its content using graphics transforms.
-    
-    Supports two independent scale factors that are composed together:
-    - base_scale: permanent scale derived from screen resolution (can be > 1.0).
-      The viewport is resized to content_size * base_scale so nothing is clipped.
-    - anim_scale: transient scale used for scale_in / scale_out animations
-      (always centered, typically 0.8..1.0).
-    """
+    """Graphics view: base_scale (DPI) plus anim_scale for popup animations."""
     
     def __init__(self, content_widget: QWidget, parent: QWidget = None):
         super().__init__(parent)

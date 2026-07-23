@@ -1,11 +1,4 @@
-"""TP: vehicle cuts across ego lane at 90 deg on a direct collision course.
-
-Target approaches from the right at 50 km/h heading west while ego travels at
-70 km/h north. x_start is chosen so both vehicles arrive at the intercept
-point simultaneously (unbraked). The braked-ego arc still reaches z=25 m when
-the target is within vehicle-width of x=0, so BRAKE is expected.
-"""
-
+"""TP: 90 deg intercept, simultaneous arrival at x=0; EXPECTED BRAKE."""
 import math
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 

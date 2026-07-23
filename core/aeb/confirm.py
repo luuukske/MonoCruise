@@ -1,26 +1,4 @@
-"""Lapse-tolerant occupancy confirm window for AEB engagement/warn streaks.
-
-Replaces the old hard-reset streak timers (`_risk_first_seen`,
-`_engage_qual_since`, `_warn_qual_since`). Those restarted their whole
-confirm clock on a single unqualified frame, so per-frame detection flicker
-(the 36-sample collision time grid, TMP measurement jitter walking the
-predicted course across coverage edges) turned one solid threat into
-repeated full restarts of the confirm windows.
-
-`OccupancyConfirm` tracks (timestamp, qualified) observations over a trailing
-window and confirms only when BOTH:
-  1. the window has been observed for at least `window_s`, and
-  2. the qualified fraction over that trailing window reaches `occupancy`.
-
-A run of more than `max_gap` consecutive unqualified observations drops the
-streak. Together these tolerate isolated 1-2 frame dropouts inside an
-otherwise-solid streak (constraint a) while still rejecting a signal that is
-mostly absent (constraint b): sparse 1-tick blips never reach the occupancy
-threshold, and a long gap resets the streak so blips separated by dead time
-cannot accumulate into a false confirm.
-
-Pure and dependency-free so the streak logic is unit-testable in isolation.
-"""
+"""Occupancy confirm for engage/warn/risk streaks. See core/aeb/README.md."""
 
 from __future__ import annotations
 
@@ -28,14 +6,7 @@ from collections import deque
 
 
 class OccupancyConfirm:
-    """Rolling-window occupancy confirm with bounded lapse tolerance.
-
-    `window_s` is mutable so a caller with a geometry-graded window (the
-    engagement gate switches between the near-certain and oblique windows
-    frame to frame, the per-target risk gate between the straight and
-    oncoming windows) can set it before each `observe`. `confirmed` and the
-    window-elapsed check both read the current `window_s`.
-    """
+    """Trailing-window qualified fraction; `window_s` may change each `observe`."""
 
     __slots__ = ("occupancy", "max_gap", "window_s",
                  "_samples", "_first_mono", "_gap_run")

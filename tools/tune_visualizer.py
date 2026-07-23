@@ -1,11 +1,6 @@
-﻿"""Live tuning visualizer for accel_to_pedals_debug.csv.
-
-Run from the project root:
-    .venv/Scripts/python tools/tune_visualizer.py
-
-Then open http://localhost:8050 in your browser.
-Shows the last N seconds of data (default 60s, set with --window).
-"""
+"""Live tuning visualizer for accel_to_pedals_debug.csv. Run from the project root:
+.venv/Scripts/python tools/tune_visualizer.py Then open http://localhost:8050 in your browser.
+Shows the last N seconds of data (default 60s, set with --window)."""
 from __future__ import annotations
 
 import argparse

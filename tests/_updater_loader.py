@@ -1,11 +1,4 @@
-"""Helper to import updater/updater.py inside the test suite.
-
-The updater ships as a standalone exe and uses sibling-absolute imports
-(`from styles import ...`, `from github_api import ...`), so it expects its own
-directory on sys.path rather than being imported as a package. This helper puts
-that directory on the path and loads the module under a private name.
-"""
-
+"""Import updater/updater.py for tests (standalone sibling imports, not a package)."""
 from __future__ import annotations
 
 import importlib.util

@@ -1,18 +1,4 @@
-"""TP: fast perpendicular crosser on a body-contact course inside the legacy
-dead band.
-
-Ego 80 km/h straight; a 90 km/h vehicle crosses perpendicularly on a true
-collision course whose reference-point miss (4.0 m) lands in the band the old
-ghost-arc comb left uncovered (3.4-5.0 m for this speed pair). With fixed
-speed-scaled ghost spacing the three strips sat far enough apart in the
-relative frame that this offset produced ZERO hits across the entire approach
-(TTC 2.5 s to 0.15 s). The ArcPath capsule body covers the crosser's length,
-so the impending side contact is detected every frame.
-
-Steer formula for scenarios: steer = kappa * 180 / (12 * pi); ego is straight
-so steer = 0.
-"""
-
+"""TP: fast perpendicular crosser in legacy ghost-arc dead band (ArcPath capsule hits)."""
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 
 _EGO_SPEED = 80.0 / 3.6       # 22.22 m/s
@@ -32,9 +18,7 @@ def build() -> list[Frame]:
         if ttc <= 0.15:
             break
         ego = EgoState(x=0.0, y=0.0, z=0.0, yaw_norm=0.5, speed=_EGO_SPEED)
-        # Contact point: ego reaches z = ego_speed*ttc; the crosser reaches x=0
-        # there, offset by _DMISS in z (the reference miss). yaw=90 -> fwd=(-1,0)
-        # so the crosser sweeps from +x toward ego's lane.
+        # Crosser at x=0 when ego reaches z=ego_speed*ttc; yaw 90 sweeps from +x (ref miss _DMISS).
         cross_x = _CROSS_SPEED * ttc
         cross_z = _EGO_SPEED * ttc + _DMISS
         target = make_vehicle(

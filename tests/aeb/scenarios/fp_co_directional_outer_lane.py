@@ -1,4 +1,4 @@
-﻿"""FP: co-directional vehicle in outer lane of same-turn corner, ego overtaking."""
+"""FP: co-directional vehicle in outer lane of same-turn corner, ego overtaking."""
 
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 import math
@@ -28,10 +28,7 @@ def build() -> list[Frame]:
             x=0.0, y=0.0, z=0.0, yaw_norm=0.5,
             speed=_EGO_SPEED, steer=steer,
         )
-        # Slower co-directional vehicle at x=2.2 (right, outer lane).
-        # Arc corridors overlap (2.2 < 2.9m). With extended same-turn lookahead,
-        # CoDirectionalDivergeFilter detects that ego overtakes (diverges) within
-        # the horizon and suppresses.
+        # Outer-lane co-directional; same-turn lookahead sees ego overtaking, suppresses.
         distance = 5.0 + closing * t
         target = make_vehicle(
             vid=1,

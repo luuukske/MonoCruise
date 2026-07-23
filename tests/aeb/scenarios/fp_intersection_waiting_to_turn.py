@@ -1,10 +1,6 @@
-"""FP: stationary vehicle in opposite lane, yaw rotated 30° from anti-parallel.
-
-Ego at 60 km/h approaching. Vehicle oriented at 30° from south-facing,
-indicating left-turn intent. CornerEntryStationaryFilter + EgoEvasionFilter
-suppresses.
-"""
-
+"""FP: stationary vehicle in opposite lane, yaw rotated 30° from anti-parallel. Ego at 60 km/h
+approaching. Vehicle oriented at 30° from south-facing, indicating left-turn intent.
+CornerEntryStationaryFilter + EgoEvasionFilter suppresses."""
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 
 _EGO_SPEED = 60.0 / 3.6

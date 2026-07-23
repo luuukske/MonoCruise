@@ -1,10 +1,6 @@
-"""Unit tests for the stable/preview channel selection and version logic.
-
-Channels are decided by the GitHub `prerelease` flag (not target_commitish),
-and the updater reads the channel + installed version from files the app writes
-into the install dir.
-"""
-
+"""Unit tests for the stable/preview channel selection and version logic. Channels are decided by
+the GitHub `prerelease` flag (not target_commitish), and the updater reads the channel +
+installed version from files the app writes into the install dir."""
 from __future__ import annotations
 
 import json
@@ -111,9 +107,7 @@ def test_get_releases_raises_on_http_error(monkeypatch):
 
 
 def test_prerelease_orders_below_final():
-    # PEP 440: a preview of 1.1.0 is older than 1.1.0 final, so a stable 1.1.0
-    # is correctly offered as an upgrade to a preview user on 1.1.0-preview.1.
-    # (packaging normalizes the "preview" label to "rc"; ordering still holds.)
+    # Preview 1.1.0-preview.1 is older than stable 1.1.0 (PEP 440 / packaging rc normalize).
     assert Version("1.1.0-preview.1") < Version("1.1.0")
     assert Version("1.1.0-preview.1") < Version("1.1.0-preview.2")
     assert Version("1.1.0-preview.1") == Version("1.1.0rc1")

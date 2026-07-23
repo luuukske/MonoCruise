@@ -1,12 +1,4 @@
-"""
-MonoCruise – Animated top banner widget.
-
-Displays status text with animated trailing dots.  Background colour
-transitions between WAITING → CONNECTED → LOST using QVariantAnimation
-with an InOutCubic easing curve, exactly replicating the original
-``start_color_transition`` / ``_perform_step`` code in MonoCruise.py.
-"""
-
+"""MonoCruise animated status banner (WAITING/CONNECTED/LOST colour transitions)."""
 from __future__ import annotations
 
 from enum import Enum, auto
@@ -51,10 +43,7 @@ class BannerWidget(QFrame):
         super().__init__(parent)
         self.setFixedHeight(32)
 
-        # Set before the first _state_text() call below (used while building the
-        # label). When set, the idle WAITING presentation is replaced by an
-        # "update available" prompt (text + amber accent); Connected/Lost are
-        # unaffected so live connection status always wins while driving.
+        # Set before first _state_text(); WAITING shows update prompt when _update_ready.
         self._update_ready = False
 
         # Layout
@@ -114,13 +103,7 @@ class BannerWidget(QFrame):
         self._label.setText(text)
 
     def set_update_ready(self, ready: bool) -> None:
-        """Flag that a newer build is available.
-
-        While the banner is WAITING this swaps 'Waiting for ...' for an 'Update
-        available' prompt and shifts the accent colour. Connected/Lost states
-        are untouched: live connection status wins while the user is driving.
-        Idempotent, so the window can call it every poll tick.
-        """
+        """Flag that a newer build is available. While the banner is WAITING this swaps..."""
         if ready == self._update_ready:
             return
         self._update_ready = ready
@@ -150,18 +133,7 @@ class BannerWidget(QFrame):
     # Internal
 
     def _update_state_from_telemetry(self) -> None:
-        """
-        Auto-update banner state from TelemetryThread and MainPedalThread.
-
-        Logic:
-
-            if ets2_detected.is_set() and device_lost == False:
-                current_mode = "running"  -> CONNECTED
-            elif device_lost == True:
-                current_mode = "lost"     -> LOST
-            else:
-                current_mode = "waiting"  -> WAITING
-        """
+        """Map telemetry + pedal device state to WAITING / CONNECTED / LOST."""
         device_lost = self._pedals_lost()
 
         try:
@@ -182,13 +154,9 @@ class BannerWidget(QFrame):
             self.set_state(BannerState.WAITING)
 
     def _pedals_lost(self) -> bool:
-        """
-        True when configured pedals are currently disconnected.
-
-        device_lost defaults to True in MainPedalThreadData and never clears
-        when no pedal device is configured, so an unconfigured install must
-        read as "not lost" (banner stays WAITING/CONNECTED).
-        """
+        """True when configured pedals are currently disconnected. device_lost defaults to True in
+        MainPedalThreadData and never clears when no pedal device is configured, so an
+        unconfigured install must         read as "not lost" (banner stays WAITING/CONNECTED)."""
         if not getattr(Settings, "device", None):
             return False
         try:

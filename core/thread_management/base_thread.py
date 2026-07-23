@@ -1,21 +1,4 @@
-﻿"""
-BaseThread: inherit this for every worker thread.
-
-Lifecycle:
-    setup()   → called once before the loop starts
-    loop()    → called repeatedly at `loop_interval` seconds
-    teardown()→ called once after the loop exits (even on error)
-
-The watchdog reads `heartbeat_at` and `restart_count` / `stable_loops`.
-
-Threading backend:
-    By default, uses ``threading.Thread``.  Pass ``use_qthread=True`` to
-    use ``QThread`` instead: required for any thread that creates Qt
-    objects with timers/signals (e.g. the UI thread).
-
-    The lifecycle, watchdog integration, heartbeat, restart logic, and
-    ``stop(force=True)`` behaviour are **identical** regardless of backend.
-"""
+"""BaseThread worker lifecycle. See AGENTS.md and core/example_thread."""
 
 from __future__ import annotations
 
@@ -68,14 +51,7 @@ class _StdThreadBackend:
 
 
 class _QThreadBackend:
-    """
-    Wraps ``PySide6.QtCore.QThread``.
-
-    The QThread is used purely as a thread host: we override its ``run()``
-    to call the provided ``target`` callable, exactly like threading.Thread.
-    This means Qt's event-loop integration (timers, signals across threads)
-    works correctly, while all lifecycle logic stays in BaseThread.
-    """
+    """QThread host; run() calls the same target as threading.Thread (Qt timers/signals)."""
 
     def __init__(self, name: str, daemon: bool, target) -> None:
         # Late import so non-UI threads never pull in PySide6
@@ -91,9 +67,7 @@ class _QThreadBackend:
                 self._fn()
 
         self._qthread = _Worker(target, name)
-        # QThread doesn't have a "daemon" flag.  We handle cleanup in
-        # BaseThread.stop() / teardown() instead.  Setting the parent to
-        # None ensures it won't be prematurely garbage-collected.
+        # QThread has no daemon flag; cleanup is in BaseThread.stop/teardown.
 
     def start(self) -> None:
         self._qthread.start()
@@ -110,14 +84,7 @@ class _QThreadBackend:
 
     @property
     def ident(self) -> int | None:
-        """
-        Return the native thread ID.
-        
-        ``QThread.currentThread()`` inside the running thread would give us
-        this directly, but we need it from *outside*.  We grab it during
-        ``run()`` by having BaseThread stash ``threading.current_thread().ident``
-       : see ``BaseThread._run_lifecycle``.
-        """
+        """Native thread id; captured in _run_lifecycle for force-stop from outside."""
         # Populated by BaseThread._run_lifecycle at the start of run()
         return getattr(self, "_captured_ident", None)
 
@@ -125,14 +92,7 @@ class _QThreadBackend:
 # BaseThread
 
 class BaseThread:
-    """
-    Base class for all MonoCruise worker threads.
-
-    Not a subclass of ``threading.Thread``: instead it *owns* an internal
-    thread backend (_StdThreadBackend or _QThreadBackend) and delegates
-    start/join/is_alive to it.  The full lifecycle (setup → loop → teardown)
-    runs inside ``_run_lifecycle`` which the backend calls as its target.
-    """
+    """Owns _StdThreadBackend or _QThreadBackend; lifecycle in _run_lifecycle."""
 
     # tunables: override in subclass
     loop_interval: float = 0.05          # seconds between loop() calls
@@ -199,11 +159,7 @@ class BaseThread:
     # Public API
 
     def stop(self, force: bool = False) -> None:
-        """Signal the thread to stop.
-
-        If force=True, also inject ThreadForcedStop into the thread so it can
-        exit even when stuck inside loop().
-        """
+        """Stop loop; force=True injects ThreadForcedStop into a stuck loop()."""
         self._stop_event.set()
         if force and self._ident is not None and self.is_alive():
             try:
@@ -260,24 +216,12 @@ class BaseThread:
 
     @staticmethod
     def safe_state() -> None:
-        """Optional hook: drive external/physical outputs to a safe state.
-
-        Called by the watchdog just before this thread is restarted. Threads
-        that command physical hardware should override this to neutralise any
-        output that may be stuck at a dangerous value. Default is a no-op.
-
-        Runs on a throwaway watchdog-spawned thread, not this thread, so it
-        must not rely on this instance's own (possibly frozen) resources —
-        open fresh handles instead. Must not raise.
-        """
+        """Watchdog calls before restart; override to neutralize hardware outputs (no-op default)."""
 
     # Internal lifecycle (runs inside the backend thread)
 
     def _run_lifecycle(self) -> None:
-        """
-        The full thread lifecycle.  Identical regardless of whether we're
-        running on threading.Thread or QThread.
-        """
+        """setup, loop, teardown; same path for threading.Thread and QThread."""
         # Capture the native thread ident so force-stop and the watchdog work
         self._ident = threading.current_thread().ident
         # Also store on the QThread backend if applicable

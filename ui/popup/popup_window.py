@@ -1,6 +1,4 @@
-﻿"""
-Main popup window with clean queue-based message handling.
-"""
+"""Main popup window with queue-based message handling."""
 import logging
 import os
 from typing import ClassVar, Optional
@@ -73,23 +71,7 @@ class PopupContainer(QWidget):
 
 
 class PopupWindow(QWidget):
-    """
-    Popup notification window with priority queue.
-
-    Animation rules:
-    - New message (first in queue): slide_in
-    - Message from queue (was waiting): scale_in (previous slides out)
-    - Higher priority interrupts: current scales out, new slides in
-
-    Thread-safe global access
-    -------------------------
-    After the window is created in main.py, any thread can post a message
-    without holding a direct reference::
-
-        PopupWindow.emit("Title", "Body text", "c")
-
-    Message type codes: 'e' = error, 'w' = warning, 'c' = check, 'n' = notice.
-    """
+    """Priority popup queue with slide/scale animations; thread-safe via PopupWindow.emit()."""
 
     _instance: ClassVar[Optional["PopupWindow"]] = None
     _new_message_signal = Signal(object)
@@ -156,15 +138,7 @@ class PopupWindow(QWidget):
         return int(self._DESIGN_MARGIN * self._scale)
     
     def set_scale(self, scale: float):
-        """
-        Set the display scale factor.
-        
-        The initial scale is auto-calculated from screen resolution.
-        Call this to override with a custom value, e.g. from user settings.
-        
-        Uniformly scales the entire message box via the graphics transform —
-        the container stays at design-pixel size, so nothing is clipped.
-        """
+        """Override auto DPI scale; scales via graphics transform (design-pixel layout)."""
         self._scale = scale
         
         sw = self._scaled_window_width()
@@ -283,10 +257,7 @@ class PopupWindow(QWidget):
         title_h = self._title_label.sizeHint().height()
         msg_h = self._label.sizeHint().height()
         
-        # Calculate even spacing: divide available space into 3 sections
-        # Section 1: top padding + title
-        # Section 2: middle padding + message  
-        # Section 3: bottom padding
+        # Split remaining height into three vertical padding bands (title / message / bottom).
         total_content_h = title_h + msg_h
         available_padding = area_h - total_content_h
         section_padding = available_padding // 3
@@ -397,17 +368,7 @@ class PopupWindow(QWidget):
         duration_ms: int = 5000,
         priority: int = 0
     ):
-        """
-        Emit a popup message (thread-safe).
-        
-        Args:
-            title: Bold title shown at the top of the popup.
-            message: Body text shown below the title.
-            message_type: Single character for the type of message:
-                'e' = error, 'w' = warning, 'c' = check, 'n' = notice.
-            duration_ms: How long to display the message (optional, default 5000).
-            priority: Message priority for queue ordering (optional, default 0).
-        """
+        """Enqueue a popup (thread-safe on GUI thread via signal). Types: e/w/c/n."""
         style = MESSAGE_TYPE_MAP.get(message_type.lower(), MessageStyle.NOTICE)
         popup_message = PopupMessage(
             priority=priority,
@@ -427,20 +388,7 @@ class PopupWindow(QWidget):
         duration_ms: int = 5000,
         priority: int = 0,
     ) -> None:
-        """
-        Post a popup message from any thread (thread-safe).
-
-        Delegates to the singleton instance created in main.py.
-        Logs a warning and returns silently if the window has not been
-        created yet (e.g. during early startup).
-
-        Args:
-            title: Bold title shown at the top of the popup.
-            message: Body text shown below the title.
-            message_type: 'e' = error, 'w' = warning, 'c' = check, 'n' = notice.
-            duration_ms: How long to display the message (default 5000 ms).
-            priority: Queue priority: higher value shown first (default 0).
-        """
+        """Post from any thread; no-op with warning if singleton not created yet."""
         if cls._instance is None:
             logger.warning("PopupWindow.emit called before window was created; dropping message: %s", title)
             return
@@ -625,9 +573,7 @@ class PopupWindow(QWidget):
         if anim_type in ("slide_in", "scale_in"):
             self._state = State.DISPLAYING
             self._start_timers()
-            # Check if cursor is already over the popup after animation.
-            # Use a singleShot(0) so the check runs after the final
-            # geometry update from the animation has been applied.
+            # After scale-in, defer cursor-over check until geometry settles (singleShot 0).
             QTimer.singleShot(0, self._check_cursor_position)
         
         elif anim_type == "scale_out":

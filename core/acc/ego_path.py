@@ -1,34 +1,6 @@
-﻿"""
-ACC ego path prediction: blended curvature + dynamic half-width.
+"""ACC ego path: blended steer/history curvature and dynamic half-width.
 
-The ego corridor used for scoring is an arc built from:
-
-    curvature   = blend( steer-derived κ, history-derived κ, by speed )
-    half_width  = LANE_BASE/2 + sin(|steer·1.5|·π/2) · LANE_FLARE
-    horizon     = small fixed window: scoring cares about the next
-                  few metres, not AEB's full collision horizon.
-
-Why blend?  At very low speeds the position-history fit collapses to
-zero (near-zero chord) and the only reliable signal is the steering
-wheel.  Once we are moving well, the steering input leads the actual
-trajectory (driver sets the wheel before the truck rotates), so the
-history fit gives a more accurate "where I'm actually going" than
-steer × gain.  Blend by speed:
-
-    speed ≤ 15 km/h  → 100 % steer
-    speed ≥ 30 km/h  → 70 % history + 30 % steer
-    linear between.
-
-The steer → curvature gain (``_STEER_KAPPA_GAIN``) is an empirical
-small-number; it's not a precise wheel-to-road ratio, it just gives
-the corridor a reasonable bend while we're below the history-fit
-window.
-
-History-derived curvature comes from RadarThread (``RadarData.ego_curvature``)
-— the position-history circle fit shared with Vehicle targets so
-"our path" and "their path" are measured the same way.  AEB does
-*not* consume that value; see core/aeb/AGENTS.md.
-"""
+Blend weights, corridor flare, and AEB vs history κ: ``core/acc/README.md`` §2."""
 
 from __future__ import annotations
 
@@ -37,24 +9,17 @@ import math
 from core.radar.traffic import ArcPath, build_arc
 
 
-# Steering-wheel → curvature gain.  ~0.17 matches SCORING_REFERENCE
-# legacy value once rewritten in metres.  Tune if the corridor leads /
-# lags the actual truck trajectory noticeably at low speed.
+# Steer→κ gain (~0.17 legacy); tune if corridor leads/lags at low speed.
 _STEER_KAPPA_GAIN: float = 0.17
 
 # Speed thresholds for the steer / history blend (km/h).
 _BLEND_LOW_KMH: float = 15.0
 _BLEND_HIGH_KMH: float = 30.0
 
-# Weight given to the history fit once we are above _BLEND_HIGH_KMH.
-# The legacy logic favoured steering (~30 %) because it leads: this
-# keeps that asymmetry.
+# History weight above _BLEND_HIGH_KMH (legacy kept ~30 % steer at high speed).
 _HISTORY_WEIGHT_HIGH: float = 0.70
 
-# Dynamic corridor width (m).  Straight driving → LANE_BASE half-width.
-# As |steer| grows we fan the corridor wider because (a) the circle
-# approximation loses accuracy in tight manoeuvres and (b) scoring
-# should tolerate more lateral slop when the truck is turning.
+# Corridor half-width: base lane + steer flare (README §2 path half-width).
 LANE_BASE_HALF_M: float = 1.25       # 2.5 m corridor on straight road
 LANE_FLARE_HALF_M: float = 2.0       # up to +2.0 m extra per side
 
@@ -68,12 +33,7 @@ def blend_curvature(
     history_kappa: float | None,
     ego_speed_ms: float,
 ) -> float:
-    """Combine steer-derived κ and history-derived κ by ego speed.
-
-    steer           : telemetry userSteer, signed, roughly [-1, 1].
-    history_kappa   : RadarData.ego_curvature (1/m) or None.
-    ego_speed_ms    : current ego speed (m/s).
-    """
+    """Blend steer κ and ``RadarData.ego_curvature`` by ego speed (km/h ramp)."""
     steer_kappa = steer * _STEER_KAPPA_GAIN
     if history_kappa is None:
         return steer_kappa
@@ -104,14 +64,7 @@ def build_ego_arc(
     steer: float,
     history_kappa: float | None,
 ) -> ArcPath:
-    """Ego corridor arc used for in-path scoring.
-
-    Blinker bias is **not** applied to the arc geometry: legacy
-    scoring subtracts ``blinker·4.5`` from the scored lateral offset
-    directly (see ``core/acc/scoring.py`` and SCORING_REFERENCE §8.1).
-    Shifting the arc would also distort arc-arc hit tests, which is
-    not what we want.
-    """
+    """Scoring ego arc; blinker bias is applied in scoring, not here (README §5)."""
     kappa = blend_curvature(steer, history_kappa, ego_speed_ms)
     half_w = path_half_width(steer)
 

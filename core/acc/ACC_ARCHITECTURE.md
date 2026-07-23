@@ -2,7 +2,7 @@
 
 This document describes the gap-control law in
 `core/cruise_control_thread/acc_controller.py`. ACC consumes the in-lane lead
-published by `ACCThread` (see `core/acc/AGENTS.md`) and returns an upper
+published by `ACCThread` (see `core/acc/README.md`) and returns an upper
 bound on commanded acceleration in m/s². The outer cruise control loop in
 `cruise_control_thread.py` takes `min(speed_pid_output, acc_cap)` so this
 module is a *cap*, not a speed regulator.
@@ -274,7 +274,7 @@ first branch holds and CAH contributes nothing: no comfort cost.
 ## 9. Multi-vehicle anticipation
 
 `ACCThread` already publishes the top-3 in-lane leads by score (see
-`core/acc/AGENTS.md §6`). The controller treats them as a longitudinal
+`core/acc/README.md §6`). The controller treats them as a longitudinal
 chain. The command is composed as
 
 ```

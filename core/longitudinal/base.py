@@ -1,15 +1,4 @@
-﻿"""
-Longitudinal controller stack: parent class + shared types.
-
-Three children inherit:
-- AdaptiveCruiseController  (following distance)
-- CruiseController          (set-speed PID)
-- SpeedLimiter              (global cap, future)
-
-Each child's `step(ctx)` returns a m/s² request. The orchestrator
-(`cruise_control_thread`) arbitrates `min(...)` of active children and
-publishes the winner to telemetry for `accel_to_pedals.step()`.
-"""
+"""LongitudinalController base + LongCtx/LongOutput. See core/longitudinal/README.md."""
 
 from __future__ import annotations
 
@@ -19,11 +8,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class LongCtx:
-    """Per-tick input snapshot for longitudinal controllers.
-
-    Built once by the orchestrator from telemetry/pedal/AEB readings, then
-    handed to every child's `step()` so children don't touch the registry.
-    """
+    """Per-tick input snapshot for longitudinal controllers. See `core/longitudinal/README.md`."""
     now: float                  # monotonic clock
     dt: float                   # seconds since previous tick
     speed_ms: float
@@ -38,22 +23,16 @@ class LongCtx:
     em_stop: bool
     device_lost: bool
     # Raw physical brake pedal value (pre-OPD). Distinguishes user-pressed
-    # brake from One Pedal Drive synthesised brake. Defaults to 0.0 so older
-    # callers don't need updating.
+    # See `core/longitudinal/README.md`.
     user_raw_brake: float = 0.0
     # Maximum brake value sent to the game over the last few ticks. Lets the
-    # CC disengage check tell apart a lagged readback of our own brake command
-    # from the user actually pressing the in-game brake.
+    # See `core/longitudinal/README.md`.
     commanded_brake_recent_max: float = 0.0
 
 
 @dataclass(slots=True)
 class LongOutput:
-    """One controller's bid for a single tick.
-
-    `wanted_ms2 is None` ⇔ inactive ⇔ this controller does not bid this tick
-    (orchestrator excludes it from the `min()` arbitration).
-    """
+    """One controller's bid for a single tick. See `core/longitudinal/README.md`."""
     wanted_ms2: float | None
     active: bool
 

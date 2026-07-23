@@ -1,10 +1,4 @@
-"""TP: slower vehicle cuts in at close range with sustained lateral drift.
-
-Ego at 70 km/h, target at 50 km/h, initial gap 10 m. Target drifts left at
-1.5 m/s sustained from frame 0. Tests close-range geometry where evasion
-arcs are most likely to over-suppress.
-"""
-
+"""TP: close-range cut-in with sustained lateral drift (evasion over-suppress guard)."""
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 
 _EGO_SPEED = 70.0 / 3.6

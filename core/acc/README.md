@@ -1,12 +1,11 @@
-﻿# AGENTS.md: MonoCruise ACC (in-lane vehicle tracker)
+﻿# MonoCruise ACC (in-lane vehicle tracker)
 
 > ACC-specific logic. Coordinate system, Vehicle smoothing, ArcPath
 > geometry, and the RadarThread snapshot shape are documented in
-> `core/radar/AGENTS.md`: **read that first.** This file only covers
+> `core/radar/README.md`: **read that first.** This file only covers
 > what differs from the shared radar layer.
 >
-> Repo-wide workflow, style, and reputation conventions live in the
-> top-level `AGENTS.md`: read that too.
+> Agent workflow and do-not-break rules: top-level `AGENTS.md`.
 
 ---
 
@@ -48,7 +47,7 @@ Blend weight is a linear ramp in `km/h`:
     linear between.
 
 **AEB does not consume `RadarData.ego_curvature`**: see
-`core/aeb/AGENTS.md`. AEB must react to the instantaneous yaw-rate
+`core/aeb/README.md`. AEB must react to the instantaneous yaw-rate
 proxy. ACC can (and should) use the smoothed history fit because
 tracking tolerates: and prefers: a little smoothing.
 
@@ -128,6 +127,10 @@ target-to-centre vectors), so it follows `ArcPath._sign` without
 needing kappa to be signed up front: +1 ⇒ left turn ⇒ CW sweep
 around the centre, per `max_sweep = -sign · arc_length / radius`.
 
+The LS circle fit mean-centres `(x, z)` before solving the normal
+equations so TMP world coordinates in the 10⁵ range do not collapse the
+3×3 determinant (otherwise every trail reads as straight on real maps).
+
 ### path: slow_speed_amp and blinker reduction
 
     slow_amp          = 1.4 + (kmh / 100) · 4.1
@@ -183,12 +186,19 @@ convoy that made the rearmost trailer, the one ego actually closes on,
 invisible to scoring.
 
 `RadarThread` now publishes those nested trailers wrapped as standalone
-`Vehicle`s in `RadarData.trailer_vehicles` (see `core/radar/AGENTS.md`
+`Vehicle`s in `RadarData.trailer_vehicles` (see `core/radar/README.md`
 §12). `ACCThread` scores them alongside `vehicles`: no tracker change,
 they are just more entries in the list. Each carries its own position
 history and smoothing (synthetic per-id continuity), so it scores and
 locks exactly like a real vehicle, and a wrapped trailer lead still
 goes through the trailer→tractor kinematic swap above.
+
+TMP top-level trailers have no buffer parent link. `ACCTracker._resolve_tractor`
+locks a tractor with a **strict** gate on first pick (longi 3–16 m, |lat| ≤ 1.5 m,
+|Δyaw| ≤ 15°) and a **loose** gate when revalidating a cached pair (longi 1–25 m,
+|lat| ≤ 4 m, |Δyaw| ≤ 60°). Among strict candidates, lowest
+`|lat| + 0.05·|longi−10| + 0.2·|Δyaw|` wins. Wrapped nested trailers
+(`id ≥ 1_000_000`) skip locking and use their own filtered kinematics.
 
 ---
 
@@ -278,12 +288,14 @@ before doing any further work:
 
 ## 8. Critical rules
 
+Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep that in sync if you change them).
+
 1. **Never mutate Vehicle instances from ACC.** They are shared
    references with AEB; `RadarThread` carries smoothing state forward
    across frames via `update_from_last`. A mutation here corrupts AEB
    next tick.
 2. **AEB uses yaw-rate proxy, ACC uses history fit.** Codified in
-   `core/aeb/AGENTS.md` and `core/radar/AGENTS.md §11`. Don't cross
+   `core/aeb/README.md` and `core/radar/README.md` §11. Don't cross
    the streams.
 3. **No control law lives in this module.** `core/cruise_control_thread`
    owns longitudinal decisions. If you're tempted to compute an

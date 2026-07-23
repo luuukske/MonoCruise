@@ -1,14 +1,4 @@
-"""AEB capture clip schema: raw two-stream trace + metadata + label.
-
-Mirrors ``docs/aeb_capture_replay_plan.md`` section 4. A clip is metadata plus
-two parallel streams recorded at their own cadence: ``radar_frames`` (radar
-thread) and ``aeb_ticks`` (AEB thread), merged only by timestamp at replay.
-
-This module is pure data and (de)serialization: no threads, no disk, no game
-state, so it can be exercised in isolation. Raw shared-memory buffers are held
-as ``bytes`` in memory and base64-encoded only at serialization time, so the
-capture hot path never pays for encoding.
-"""
+"""AEB clip schema: radar + AEB streams, metadata, JSON; raw buffers base64 at serialize only."""
 
 from __future__ import annotations
 
@@ -53,7 +43,7 @@ def _unb64(s: str | None) -> bytes | None:
 
 @dataclass
 class EgoTelemetry:
-    """Raw ego telemetry as read by ``RadarThread._read_ego`` (see radar AGENTS.md)."""
+    """Raw ego telemetry as read by ``RadarThread._read_ego`` (see radar README.md)."""
 
     coordinateX: float = 0.0
     coordinateY: float = 0.0
@@ -95,12 +85,7 @@ class EgoTelemetry:
 
 @dataclass
 class RadarFrameRecord:
-    """One radar-thread frame: the exact bytes radar consumed plus ego state.
-
-    ``traffic_buf`` / ``parked_buf`` are the raw slices decoded by
-    ``TrafficReader.read`` (nullable when a buffer was absent or paused). Stored
-    as ``bytes`` in memory; base64 only in JSON.
-    """
+    """One radar frame: traffic/parked bytes + ego telemetry (base64 at JSON only)."""
 
     t_wall: float                  # time.time() at frame: smoothing clock
     t_mono: float                  # time.monotonic() at frame: snapshot clock
@@ -157,12 +142,7 @@ class ConsumedContext:
 
 @dataclass
 class LiveAEB:
-    """Parity oracle: the live AEB decision recorded at capture, not a replay input.
-
-    Replay reproduces this from the raw streams; any post-burn-in divergence is a
-    captured-context, warm-state, or clock bug. The id sets and
-    ``suppression_reasons`` localise a divergence to a filter stage.
-    """
+    """Recorded live decision for parity replay; id sets localize filter divergences."""
 
     aeb_warn: bool = False
     aeb_brake: bool = False
@@ -248,10 +228,7 @@ class AEBTickRecord:
 
 @dataclass
 class AEBWarmState:
-    """Discrete AEB state at window start (plan 5). Never converges from cold, so
-    replay applies it before the first tick. The exact field list is finalised
-    by the phase-1 parity work.
-    """
+    """Discrete AEB state applied before first replay tick (see clip_eval warm start)."""
 
     engaged: bool = False
     latched_threat_ids: list[int] = field(default_factory=list)
@@ -415,12 +392,7 @@ class ClipMetadata:
 
 @dataclass
 class Clip:
-    """A full capture: metadata plus the two parallel streams.
-
-    Serialized JSON puts the metadata fields at the top level and the two
-    streams beside them as ``radar_frames`` / ``aeb_ticks`` arrays, matching the
-    server payload contract (plan 11).
-    """
+    """Full capture: metadata plus radar_frames and aeb_ticks arrays in JSON."""
 
     metadata: ClipMetadata = field(default_factory=ClipMetadata)
     radar_frames: list[RadarFrameRecord] = field(default_factory=list)

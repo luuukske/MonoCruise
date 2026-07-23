@@ -178,12 +178,9 @@ def test_subframe_copies_transient_and_reanchor_resets_it():
 
 
 def test_confirmed_crash_feeds_acc_the_same_estimate_as_aeb(monkeypatch):
-    """A confirmed crash must not leave ACC on the long window.
-
-    The split routes ACC to the long position window, but a crashed vehicle has
-    to reach both consumers through the same unfiltered estimate, so the crash
-    bypass pins the ACC input back to the AEB one.
-    """
+    """A confirmed crash must not leave ACC on the long window. The split routes ACC to the long
+    position window, but a crashed vehicle has to reach both consumers through the same
+    unfiltered estimate, so the crash bypass pins the ACC input back to the AEB one."""
     from core.radar import traffic as traffic_mod
 
     prev, t_now, z = _seed_cruise(12.0)

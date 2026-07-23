@@ -31,16 +31,11 @@ TEXT_SECONDARY = "#b0b0b0"
 # Font
 FONT_FAMILY = "Inter, Sans-serif"
 
-# The animated channel/version dropdown widget and its design constants live in
-# the shared UI library (shared/dropdown.py); only the updater's usage-specific
-# minimum field widths belong here.
-# Field/popup min widths (reference: version 190, channel 120)
+# Dropdown widget lives in shared/dropdown.py; min field widths for updater layout only.
 DROPDOWN_MIN_WIDTH_VERSION = 190
 DROPDOWN_MIN_WIDTH_CHANNEL = 120
 
-# Splash screens shown centered in the release-notes area: an indeterminate
-# sweep bar while the release list is fetched from GitHub, and a no-connection
-# notice when GitHub is unreachable.
+# Splash while release list loads or GitHub is unreachable (updater/README.md).
 SPLASH_BAR_WIDTH = 180
 SPLASH_BAR_HEIGHT = 6
 SPLASH_BAR_SEGMENT = 0.35     # sweep segment width as a fraction of the bar
@@ -51,24 +46,14 @@ SPLASH_SPACING = 12
 SPLASH_TITLE_STYLE = f"color: {TEXT_PRIMARY}; font-size: 16px; font-weight: bold;"
 SPLASH_SUBTITLE_STYLE = f"color: {TEXT_SECONDARY}; font-size: 13px;"
 
-# Changelog cascade: each release-notes block (paragraph/heading/list/alert)
-# fades + slides in like the dropdown's rows (EASE_STD from shared/dropdown.py),
-# on every version change. Faster than the dropdown's timings: changelogs have
-# far more rows than a dropdown, so the same stagger would drag the intro out
-# and get in the way of reading.
+# Changelog block stagger (faster than dropdown rows); see updater/README.md.
 CHANGELOG_STAGGER_MS = 15
 CHANGELOG_DURATION_MS = 250
 CHANGELOG_ROW_OFFSET_PX = 7   # matches DROPDOWN_ROW_OFFSET_PX in shared/dropdown.py
 
 
 def _combo_arrow_rule() -> str:
-    """Render a down-arrow chevron to a temp PNG and return its stylesheet rule.
-
-    Qt stylesheets can't draw CSS-triangle borders (a ``border-top`` trick
-    renders as a solid block, not a triangle), so we rasterise an SVG chevron
-    to a PNG and point ``image:`` at it. Returns "" on failure, in which case
-    the combo just shows no custom arrow.
-    """
+    """Rasterize SVG chevron to temp PNG for QSS image: (Qt cannot do CSS triangles)."""
     try:
         from PySide6.QtSvg import QSvgRenderer
         from PySide6.QtGui import QImage, QPainter

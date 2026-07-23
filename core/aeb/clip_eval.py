@@ -1,18 +1,4 @@
-"""Headless AEB replay + parity + candidate-calibration evaluation.
-
-Re-runs the real, stateful AEB pipeline over a captured clip by driving a real
-``AEBThread`` with injected radar snapshots, consumed context, and clocks (the
-replay seams added to ``thread.py``). State carries tick to tick exactly as live
-(One-Euro blender, latches, engagement hysteresis, decel rate-limit, holds), with
-the clip's ``aeb_warm_state`` applied before the first tick (plan sections 5, 7).
-
-Two uses:
-- ``parity_report``: re-run with the capture-time calibration and confirm the
-  re-run matches the recorded ``live_aeb`` after burn-in (plan section 8). This
-  validates that replay is faithful before any scoring is built on it.
-- ``run_headless(clip, cal=candidate)``: re-run with a *different* calibration to
-  see what a new filter / constant would have done, for filter evaluation.
-"""
+"""Stateful AEBThread replay over clips: parity vs live_aeb and candidate cal evaluation."""
 
 from __future__ import annotations
 
@@ -249,15 +235,7 @@ class Outcome:
 
 def outcome_under(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
                   burn_in_s: float = 0.0) -> Outcome:
-    """Classify a calibration's run against the clip's human label.
-
-    Ticks before ``burn_in_s`` are ignored (continuous-state convergence noise,
-    plan 5/10). Verdicts:
-      must-not-trigger window (None): ``false_positive`` if it brakes, else
-      ``true_negative``. should-trigger window: ``false_negative`` if it never
-      brakes, ``late`` if it only brakes after the window ends, else
-      ``true_positive``. ``unlabeled`` when the clip has no label.
-    """
+    """Classify candidate run vs label after ``burn_in_s``; verdicts in doc of ``Outcome``."""
     lbl = clip.metadata.label
     evs = [e for e in run_headless(clip, cal=cal) if e.t_rel >= burn_in_s]
     braked = [e for e in evs if e.aeb_brake]

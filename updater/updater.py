@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 import os
 import json
 import math
@@ -30,10 +30,7 @@ from packaging.version import Version, InvalidVersion
 from github_api import GitHubAPI
 from video_player import VideoPlayer
 
-# The shared UI library (markdown renderer + dropdown) lives at the repo root
-# (bundled into the updater exe via updater.spec). Put the repo root on
-# sys.path so `import shared` works both when running from source and from the
-# frozen build.
+# Repo root on sys.path for bundled `shared` (source tree and frozen updater).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from shared import GitHubMarkdownRenderer, Theme
@@ -97,26 +94,10 @@ THEME = _shared_theme()
 REPO_OWNER = "luuukske"
 REPO_NAME = "MonoCruise"
 
-# The updater is a separate exe that can't import the app's modules, so it reads
-# install-root state (channel + installed version) from plain files written by the
-# running app: config.json (settings) and installed_version.txt (version marker).
+# Install-root channel/version from config.json + installed_version.txt. Layout: updater/README.md.
 DEFAULT_CHANNEL = "stable"
 
-# Self-update layout, all directly under the install root:
-#   updater/          the updater's own exe + support files (this program)
-#   updater_pending/  new updater files staged by an update (sentinel written
-#                     last marks the stage complete)
-#   updater_old/      previous updater files parked by a swap
-#   update_staging.tmp/  scratch dir an update extracts into before any live
-#                     file is touched
-# This program only STAGES its own update (updater_pending/); the swap into
-# place is applied by MonoCruise once the updater has exited — see
-# shared/updater_swap.py for why it cannot happen in-process (zipimport holds
-# base_library.zip without FILE_SHARE_DELETE, blocking the rename while the
-# updater runs). Deliberately no helper script or watcher process: an unsigned
-# exe spawning a script that rewrites exes is a classic antivirus
-# false-positive pattern.
-# Names must match shared/updater_swap.py (tests assert this).
+# Self-update dir names (must match shared/updater_swap.py; swap runs in app after exit).
 PENDING_DIR = 'updater_pending'
 OLD_DIR = 'updater_old'
 STAGING_DIR = 'update_staging.tmp'
@@ -124,11 +105,8 @@ PENDING_SENTINEL = '.complete'
 
 
 def updater_dir() -> str:
-    """Directory the updater itself lives in.
-
-    Frozen (PyInstaller), __file__ points inside the bundle's _internal dir,
-    so use the exe path: {install root}/updater.
-    """
+    """Directory the updater itself lives in. Frozen (PyInstaller), __file__ points inside the
+    bundle's _internal dir,     so use the exe path: {install root}/updater."""
     if getattr(sys, 'frozen', False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
@@ -172,12 +150,7 @@ def installed_version(root: str) -> Version | None:
 
 
 def _move_tree(src: str, dst: str) -> None:
-    """Move every file under src into dst via per-file renames.
-
-    A directory rename fails while any file inside it is open, but renaming
-    the individual files succeeds even for a running exe or loaded DLLs —
-    that's what makes the self-update swap possible.
-    """
+    """Move every file under src into dst via per-file renames (works while exe/DLLs are open)."""
     for dirpath, _dirnames, filenames in os.walk(src):
         rel = os.path.relpath(dirpath, src)
         target_dir = dst if rel == os.curdir else os.path.join(dst, rel)
@@ -226,10 +199,7 @@ class UpdateWorker(QThread):
         'config.json.bak',
         'logs/',
     )
-    # Root-level updater files from the old flat zip layout: can't be replaced
-    # while the updater runs, and there's no pending-swap path for them. Current
-    # zips ship the updater under updater/ instead, which is staged to
-    # updater_pending/ by _move_into_place.
+    # Legacy flat-zip root updater.exe/py (not pending-swapped); current zips use updater/.
     UPDATER_FILES = ('updater.exe', 'updater.py')
 
     def __init__(self, api: GitHubAPI, release: dict, install_root: str):
@@ -287,15 +257,7 @@ class UpdateWorker(QThread):
         return False
 
     def _install_update(self, zip_path: str):
-        """Extract to a staging dir inside the install root, validate, then
-        move files into place.
-
-        Staging first means a corrupt archive, a full disk or an unwritable
-        install dir is caught before a single live file is touched; the move
-        phase that follows is same-volume renames only — the fastest and least
-        interruptible part. Staging inside the install root (not %TEMP%)
-        guarantees the renames stay on one volume.
-        """
+        """Stage zip in install root, validate, then rename into place (updater/README.md)."""
         staging = os.path.join(self.install_root, STAGING_DIR)
         shutil.rmtree(staging, ignore_errors=True)
         os.makedirs(staging)
@@ -324,20 +286,11 @@ class UpdateWorker(QThread):
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
-    # How long to wait for MonoCruise to finish its graceful shutdown after the
-    # close request. The app joins each worker thread with a 3 s timeout, so a
-    # clean exit can legitimately take several seconds.
+    # Grace period after close request (worker join timeouts can span several seconds).
     APP_CLOSE_TIMEOUT_S = 15.0
 
     def _ensure_app_not_running(self):
-        """A running MonoCruise.exe locks the files about to be replaced.
-
-        First ask the app to close itself (see _request_app_close) — its normal
-        shutdown path saves settings and neutralises pedal outputs. Only fail if
-        it is still running after the timeout (or is an older version that does
-        not listen for the request). Failing here, before any file has moved,
-        beats failing halfway through.
-        """
+        """A running MonoCruise.exe locks the files about to be replaced. First ask the app..."""
         exe = os.path.join(self.install_root, 'MonoCruise.exe')
         if not os.path.exists(exe):
             return
@@ -361,14 +314,7 @@ class UpdateWorker(QThread):
 
     @staticmethod
     def _request_app_close() -> None:
-        """Signal the named event MonoCruise polls for a graceful shutdown.
-
-        The app (monocruise.py) creates the event at boot and closes its main
-        window when it is signalled — the same code path as the user clicking
-        the X, so settings are saved and outputs released. A missing event
-        (app not running, or a pre-1.1.0-preview.2 version without the
-        listener) is not an error; the lock wait above simply times out.
-        """
+        """Signal MonoCruise's graceful-shutdown event (same path as closing the main window)."""
         try:
             import ctypes
             kernel32 = ctypes.windll.kernel32
@@ -385,14 +331,7 @@ class UpdateWorker(QThread):
             pass  # non-Windows dev run, or no permission: the wait times out
 
     def _move_into_place(self, staging: str):
-        """Move validated staged files into the install tree.
-
-        The zip's updater/ subtree goes to updater_pending/ (the running
-        updater can't replace its own files; the next launch swaps them in —
-        see _apply_pending_self_update). Everything else renames straight into
-        the install root. Pending is staged first so the app-file loop below
-        never touches the live updater/ dir.
-        """
+        """Move staged files into the install tree; updater/ goes to updater_pending/ first."""
         pending = os.path.join(self.install_root, PENDING_DIR)
         staged_updater = os.path.join(staging, 'updater')
         if os.path.isdir(staged_updater):
@@ -537,11 +476,8 @@ class IconWidget(QLabel):
 
 
 class LoadingBar(QWidget):
-    """Indeterminate horizontal bar: a rounded segment sweeps left-right-left.
-
-    The repaint timer only runs while the widget is visible, so a hidden
-    splash page costs nothing.
-    """
+    """Indeterminate horizontal bar: a rounded segment sweeps left-right-left. The repaint timer
+    only runs while the widget is visible, so a hidden     splash page costs nothing."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -679,14 +615,7 @@ class SelectorSection(QFrame):
 
 
 class _BlockEffect(QGraphicsEffect):
-    """Fade + slide-down-from-above for one changelog block, as a paint-time
-    graphics effect.
-
-    Animating at paint time (instead of e.g. animating margins) keeps every
-    label's geometry fixed for the whole cascade: the scroll-area layout never
-    reflows mid-animation, so the content height stays stable (no jitter when
-    scrolled to the bottom) and there is no snap when the animation lands.
-    """
+    """Paint-time fade/slide for one changelog block (layout stays fixed)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -724,15 +653,7 @@ class _BlockEffect(QGraphicsEffect):
 
 
 class ChangelogCascade(QWidget):
-    """Stacks the release notes as one QLabel per markdown block (heading/
-    paragraph/list item/alert/...) and, on a version change, cascades them in
-    with the same fade + slide stagger as the Dropdown's rows.
-
-    A single ``cascade`` clock drives every row's progress (mirroring
-    ``_PopupCard.cascade`` in dropdown.py) instead of one animation per row.
-    Blank-line spacer blocks are laid out but hold no stagger slot, so the
-    visible lines cascade back to back like the dropdown's rows do.
-    """
+    """Markdown blocks with shared cascade clock (dropdown-style stagger; updater/README.md)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -761,9 +682,9 @@ class ChangelogCascade(QWidget):
             effect.set_progress(EASE_STD.valueForProgress(t))
 
     def set_blocks(self, style_tag: str, blocks: list[str], animate: bool):
-        """Replace the shown blocks. Cascades them in only when *animate* is
-        set -- callers pass False when the version selection hasn't actually
-        changed, so re-rendering the same release doesn't replay the intro."""
+        """Replace the shown blocks. Cascades them in only when *animate* is set -- callers pass
+        False when the version selection hasn't actually         changed, so re-rendering the
+        same release doesn't replay the intro."""
         self._anim.stop()
         while self._layout.count():
             item = self._layout.takeAt(0)
@@ -1058,10 +979,7 @@ class SelectorPanel(QWidget):
         self._retry_timer.start()
 
     def orphan_fetch_worker(self):
-        """Detach a still-running fetch so the window can close immediately.
-        Returns the worker (for the caller to wait() on after the UI is gone)
-        or None. A blocking wait here would freeze the close for up to the
-        15s request timeout."""
+        """Detach a still-running fetch so the window can close immediately. Returns the..."""
         self._retry_timer.stop()
         worker = self._fetch_worker
         self._fetch_worker = None
@@ -1103,10 +1021,7 @@ class SelectorPanel(QWidget):
         else:
             self.details.destroy_video_player()
 
-        # Cascade the changelog in only when the selected version actually
-        # changed (not on a redundant re-render of the same release). A new
-        # version starts reading from the top, so drop any old scroll offset
-        # before the new (differently sized) content lands.
+        # Changelog cascade only when tag changes; reset scroll before new content height.
         version_key = self.current_release.get('tag_name')
         animate = version_key != self._last_version_key
         self._last_version_key = version_key
@@ -1122,12 +1037,7 @@ class SelectorPanel(QWidget):
         self._apply_install_state()
 
     def _apply_install_state(self):
-        """Reflect the installed version on the update button.
-
-        If the selected release is already the installed version there is
-        nothing to do; otherwise it can be installed (newer = upgrade, older =
-        downgrade). When the installed version is unknown, always allow it.
-        """
+        """Update button: disabled when selected tag equals installed_version."""
         selected = release_version(self.current_release)
         is_installed = (
             self.installed_version is not None
@@ -1207,13 +1117,7 @@ class UpdaterWindow(QMainWindow):
         QTimer.singleShot(FINISH_LINGER_MS, self._handoff)
 
     def _handoff(self):
-        """Start the freshly installed app, then close.
-
-        Closing right away means the updater is gone before anyone launches
-        it again, so the next launch starts by applying the pending
-        self-update (updater_pending/) and relaunching as the new version —
-        see _relaunch_self.
-        """
+        """Start the freshly installed app, then close. Closing right away means the updater..."""
         self._launch_app()
         self.close()
 
@@ -1243,9 +1147,7 @@ class UpdaterWindow(QMainWindow):
     
     def _cleanup_worker(self):
         if self.worker is not None:
-            # Wait for the thread to fully exit before destroying the object.
-            # The custom finished_signal fires from inside run(), so the
-            # thread is still alive at that point.
+            # wait() before deleteLater; finished_signal fires before thread exit.
             self.worker.wait()
             self.worker.deleteLater()
             self.worker = None
@@ -1255,11 +1157,9 @@ _INSTANCE_MUTEX = None
 
 
 def _other_instance_running() -> bool:
-    """True if another updater instance already holds the single-instance mutex.
-
-    Two concurrent updaters installing into the same directory would corrupt
-    each other (shared staging dir, competing file moves, double self-swap).
-    """
+    """True if another updater instance already holds the single-instance mutex. Two concurrent
+    updaters installing into the same directory would corrupt     each other (shared staging dir,
+    competing file moves, double self-swap)."""
     try:
         import ctypes
         kernel32 = ctypes.windll.kernel32

@@ -1,11 +1,4 @@
-﻿"""
-Registry: central directory of named components.
-
-Rules:
-  • Thread access: registry.get_thread("telemetry").data.speed
-  • Object access: registry.get("main_window")
-  • Thread-safe via a single RLock.
-"""
+"""Named thread/object registry (RLock). get_thread / get. See AGENTS.md."""
 
 from __future__ import annotations
 

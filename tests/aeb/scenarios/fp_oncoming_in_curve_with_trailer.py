@@ -1,9 +1,6 @@
-"""FP: oncoming truck + 1 trailer in opposite lane on a 200 m radius gentle curve.
-
-Both ego and oncoming at 80 km/h. R=200 m → kappa=0.005.
-Stresses lane-frame projection + multi-arc handling. OppositeLaneFilter suppresses.
-"""
-
+"""FP: oncoming truck + 1 trailer in opposite lane on a 200 m radius gentle curve. Both ego and
+oncoming at 80 km/h. R=200 m → kappa=0.005. Stresses lane-frame projection + multi-arc handling.
+OppositeLaneFilter suppresses."""
 import math
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 from core.radar.traffic import Trailer, Position, Quaternion, Size

@@ -1,17 +1,4 @@
-"""AEB clip review + labelling tool (repo-only, never shipped).
-
-Standalone PySide6 app for tagging captured AEB clips. Lists clips from the
-local store, replays each one through the real radar smoothing, renders the
-scene with the existing AEB debug renderer, and lets you scrub, mark a
-should-trigger window, pick the threat vehicle, assign class + severity, and
-persist a label back into the clip (plan section 9).
-
-It is never packaged into shipped builds (PyInstaller specs exclude ``tools/``);
-testers only capture and submit. Run from the repo root:
-
-    python -m tools.aeb_review
-"""
-
+"""Dev-only PySide6 AEB clip labeling UI (repo root: python -m tools.aeb_review). Not shipped."""
 from __future__ import annotations
 
 import os
@@ -160,9 +147,7 @@ class ReviewWindow(QMainWindow):
         self._target_vid: int | None = None
         self._window: tuple[float, float] | None = None
 
-        # Directory scan, cached across reloads. peek_metadata is decoded once
-        # per clip and reused (keyed on mtime+size) so filtering / searching /
-        # re-selecting never re-reads the store.
+        # Clip list cache: peek_metadata once per mtime+size; reload skips store re-reads.
         self._entries: list[tuple[ClipInfo, ClipMetadata | None]] = []
         self._meta_cache: dict[str, tuple[float, int, ClipMetadata | None]] = {}
 
@@ -333,12 +318,9 @@ class ReviewWindow(QMainWindow):
         self._apply_filter()
 
     def _rescan(self) -> None:
-        """Scan the store, decoding metadata only for new or changed clips.
-
-        Cached entries are reused whenever the file's mtime and size are
-        unchanged, so a manual refresh only pays for clips that actually
-        appeared or were relabelled.
-        """
+        """Scan the store, decoding metadata only for new or changed clips. Cached entries are
+        reused whenever the file's mtime and size are unchanged, so a manual refresh only pays
+        for clips that actually appeared or were relabelled."""
         infos = self._store.list_clips()
         live: set[str] = set()
         entries: list[tuple[ClipInfo, ClipMetadata | None]] = []

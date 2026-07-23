@@ -1,22 +1,4 @@
-"""Local, on-disk store for AEB capture clips (plan 3.4 / 11).
-
-Clips are gzipped JSON written under ``%LOCALAPPDATA%\\MonoCruise\\aeb_clips``,
-deliberately outside the install root so a client update (which overwrites the
-install dir) never evicts them. Writes are atomic (temp file + ``os.replace``);
-a rotation cap evicts the oldest clips once the store exceeds ``max_clips`` or
-``max_bytes``.
-
-``ClipStore`` is synchronous: every method touches the disk and may block, so
-threads on the 30 Hz loops must not call it directly. ``AsyncClipWriter`` wraps
-it on a background daemon fed by a queue, so a slow disk never stalls a
-real-time loop. The writer is a plain daemon rather than a ``BaseThread``: it is
-a best-effort I/O sink with no physical output and no real-time deadline, and it
-blocks on the queue (which a watchdog-paced loop must not do). Losing a queued
-clip on shutdown is acceptable and never a safety concern.
-
-Capture stays local: nothing here uploads. Submission to the server is a
-separate, explicit, consent-gated action built later (plan 11).
-"""
+"""Gzipped JSON AEB clips under LOCALAPPDATA; ClipStore sync, AsyncClipWriter for loops."""
 
 from __future__ import annotations
 
@@ -44,11 +26,7 @@ _TMP_SUFFIX: str = ".tmp"
 
 
 def default_clip_root() -> Path:
-    """Resolve the clip directory at runtime (never hardcoded / persisted).
-
-    Uses ``%LOCALAPPDATA%`` on Windows; falls back to the user home on other
-    platforms or when the variable is unset (dev / CI).
-    """
+    """LOCALAPPDATA/MonoCruise/aeb_clips on Windows; ~/.monocruise/aeb_clips elsewhere."""
     base = os.environ.get("LOCALAPPDATA")
     if base:
         return Path(base) / "MonoCruise" / "aeb_clips"
@@ -66,21 +44,13 @@ def deserialize_clip(blob: bytes) -> Clip:
     return Clip.from_json_dict(json.loads(gzip.decompress(blob).decode("utf-8")))
 
 
-# Stream keys are serialized after every metadata field (see Clip.to_json_dict),
-# so the first occurrence marks the end of the metadata prefix. The quotes on
-# both sides rule out a collision with an escaped (\") occurrence inside a note.
+# Metadata prefix ends at first serialized stream key (see Clip.to_json_dict).
 _STREAM_MARKER: bytes = b'"radar_frames"'
 _PEEK_CHUNK: int = 65536
 
 
 def deserialize_metadata(blob: bytes) -> ClipMetadata:
-    """Decode only a clip's metadata dict, stopping before the raw streams.
-
-    Incrementally gunzips just far enough to reach the ``radar_frames`` key,
-    then parses the metadata prefix on its own. This skips decompressing the
-    base64 radar/tick streams (the bulk of a clip), which makes a full-store
-    scan roughly an order of magnitude cheaper than decoding every clip.
-    """
+    """Gunzip only through metadata prefix (stops at ``radar_frames`` key)."""
     dobj = zlib.decompressobj(16 + zlib.MAX_WBITS)  # 16 => gzip framing
     out = bytearray()
     scanned = 0
@@ -141,12 +111,7 @@ class ClipStore:
         return f"{stamp}_{meta.trigger_source}_{cid}{_CLIP_SUFFIX}"
 
     def write(self, clip: Clip) -> Path | None:
-        """Serialize + atomically write one clip, then prune. Returns its path.
-
-        Never raises: a disk failure is logged and swallowed so a caller on the
-        capture path is never disturbed. Logs the basename only, never the full
-        path (privacy: no machine-specific paths in logs).
-        """
+        """Serialize, atomic write, prune. Never raises; logs basename only."""
         if not self._ensure_root():
             return None
 
@@ -190,12 +155,7 @@ class ClipStore:
             return False
 
     def peek_metadata(self, path: Path) -> ClipMetadata | None:
-        """Decode only a clip's metadata (skips decompressing the streams).
-
-        Cheap enough to scan the whole store for a list view / tagged badge.
-        Uses the partial-decompress fast path and falls back to a full decode
-        if the prefix ever fails to parse, so it is never worse than a full read.
-        """
+        """Metadata-only decode for list views; partial gunzip with full fallback."""
         try:
             blob = Path(path).read_bytes()
         except OSError:
@@ -213,11 +173,7 @@ class ClipStore:
             return None
 
     def write_label(self, path: Path, label: Label | None) -> bool:
-        """Attach (or clear) a label on an existing clip, rewriting it in place.
-
-        Keeps the same filename (label does not affect it) so tagging a clip
-        never spawns a duplicate. Never raises.
-        """
+        """Rewrite clip in place with label; same filename. Never raises."""
         clip = self.load(path)
         if clip is None:
             return False
@@ -288,13 +244,7 @@ class ClipStore:
 
 
 class AsyncClipWriter:
-    """Background daemon that serializes + stores clips off a queue.
-
-    ``submit`` is O(1) and non-blocking, safe to call from a 30 Hz loop. If the
-    queue is full (disk backed up) the clip is dropped and logged rather than
-    blocking the caller. ``notify`` receives the saved clip's basename on
-    success and is the hook for the "AEB clip saved" popup / sound (plan 3.3).
-    """
+    """Queue + daemon writer; submit is non-blocking, drops when full."""
 
     def __init__(
         self,

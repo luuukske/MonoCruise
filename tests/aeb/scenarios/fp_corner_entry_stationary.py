@@ -19,9 +19,7 @@ def build() -> list[Frame]:
     for i in range(_N_FRAMES):
         t = i * _DT
         ego = EgoState(x=0.0, y=0.0, z=0.0, yaw_norm=0.5, speed=_EGO_SPEED, steer=0.0)
-        # Parked vehicle ahead and laterally offset (around the bend)
-        # yaw_deg ~30 degrees: road curves to the left 30 deg over 40m → kappa~0.013
-        # Anti-parallel to ego = 0 deg. Tilted 30 deg from anti-parallel means yaw=30.
+        # Parked around bend, yaw ~30 deg (left curve kappa ~0.013 over 40 m).
         target = make_vehicle(
             vid=1,
             x=4.0,

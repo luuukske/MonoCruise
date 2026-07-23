@@ -1,31 +1,6 @@
-﻿"""
-Per-vehicle in-path tracker: accumulates score, selects top-3 lead.
+"""Per-vehicle in-path tracker: ego arc, scoring, top-3 leads, trailer swap.
 
-State lives in :class:`ACCTracker` (one instance per ACC thread).
-
-Per frame the tracker:
-    1. Builds the ego arc (see ``ego_path.build_ego_arc``).
-    2. Computes the signed blinker scalar (``-1`` full left, ``+1``
-       full right, ``0`` neutral): cos-decays over ``_BLINKER_HOLD_S``
-       once the blinker turns off.  Legacy SCORING_REFERENCE §7.
-    3. For every Vehicle in RadarData:
-         - Skips rear / too-far / wrong-elevation targets.
-         - Computes lateral offset from the ego heading, longitudinal
-           distance along the arc, and heading mismatch.
-         - Subtracts ``blinker_scalar · 4.5 m`` from the scored lateral
-           offset so adjacent-lane targets gain score during a lane
-           change.
-         - Feeds the four scoring components into ``scoring.accumulate``,
-           scaling by the **target** vehicle's speed (legacy §9).
-    4. Decays scores for vehicles we didn't see this frame (missing →
-       path penalty only: they drift toward the negative floor).
-    5. Applies the trailer→tractor swap on the top-3 list so a lead
-       trailer reports its tractor's speed/accel.
-
-At ego speeds ≥ ``_BLINKER_SCORE_RESET_KMH`` the blinker rising edge
-zeroes all accumulated scores once: legacy "highway lane change"
-reset so a new lead gets picked cleanly on the other side.
-"""
+Frame pipeline and blinker behaviour: ``core/acc/README.md`` §3–5."""
 
 from __future__ import annotations
 
@@ -59,20 +34,14 @@ logger = logging.getLogger(__name__)
 # Filter bounds: vehicles outside these are never scored.
 _MAX_SCORE_RANGE_M: float = 150.0      # longitudinal cut-off.
 _REAR_DOT_THRESHOLD: float = -0.2      # rear half cone: fwd-dot below → skip.
-# Pitch-aware elevation margin.  Same value AEB uses
-# (``AEBCalibration.elevation_margin = 5.0``); the gate checks |v.y −
-# expected_y| where expected_y is ego_y projected forward along the
-# road surface using ego pitch: so leads on hills are accepted but
-# bridges / underpasses still get rejected.
+# Pitch elevation gate: same margin as AEB; README §8 / core/aeb (pitch-projected y).
 _ELEVATION_MARGIN_M: float = 5.0
 
 # Missing-target decay: same rate as out-of-path per frame so we don't
 # pile artificial penalties onto a briefly occluded car.
 _MISSING_OUT_DECAY_S: float = 2.0      # expires track after this long missing.
 
-# Blinker scalar decay.  Rising edge pins |scalar| = 1; after release it
-# cos-decays to 0 over _BLINKER_HOLD_S.  Applied as ``offset - s·4.5 m``
-# on the scored lateral offset (SCORING_REFERENCE §7, §8.1).
+# Blinker cos decay; lateral shift via offset - scalar·4.5 m (README §5).
 _BLINKER_HOLD_S: float = 2.5
 _BLINKER_OFFSET_M: float = 4.5
 
@@ -80,10 +49,7 @@ _BLINKER_OFFSET_M: float = 4.5
 # above this ego speed so a new lead can lock cleanly on the new side.
 _BLINKER_SCORE_RESET_KMH: float = 65.0
 
-# Tractor locking: TMP trailers arrive as independent top-level Vehicles
-# with no parent link in the buffer; we have to infer which tractor pulls
-# this trailer. Strict gate on acquisition rejects passers; loose gate on
-# cached pairs survives curves and TMP physics transients without churn.
+# TMP trailer→tractor inference; strict acquire / loose revalidate (README §4).
 _TRACTOR_LOCK_LONGI_MIN_M: float = 3.0
 _TRACTOR_LOCK_LONGI_MAX_M: float = 16.0
 _TRACTOR_LOCK_LAT_MAX_M: float = 1.5
@@ -94,9 +60,7 @@ _TRACTOR_LOCK_VALID_LONGI_MAX_M: float = 25.0
 _TRACTOR_LOCK_VALID_LAT_MAX_M: float = 4.0
 _TRACTOR_LOCK_VALID_YAW_MAX_DEG: float = 60.0
 
-# Mirrors core/radar/reader.py: wrapped nested trailers carry synthetic
-# ids above this base. They already get filtered speed/accel from their
-# own per-id filter chain, so skip tractor locking for them.
+# Synthetic nested-trailer ids; skip tractor lock (own acc_speed chain).
 _TRAILER_VEHICLE_ID_BASE: int = 1_000_000
 
 
@@ -108,9 +72,7 @@ class TrackState:
     in_path: bool = False
     dist_m: float = 0.0           # last longitudinal distance along ego path.
 
-    # Per-frame scoring breakdown: populated for every scored vehicle each
-    # tick. Consumed by the debug window to surface why a vehicle is or is
-    # not being tracked. Not used by control logic.
+    # Last-frame component breakdown for the debug window only.
     last_offset: float = 0.0
     last_yaw: float = 0.0
     last_path: float = 0.0
@@ -124,9 +86,7 @@ class TrackState:
     last_lat_margin: float = 0.0      # corridor_half + width/2 - |lat|; positive = inside gate
     last_corridor_half: float = 0.0
     last_seen_this_frame: bool = False
-    # Trail-arc fit + crossing: populated each frame so the debug
-    # window can render the arc behind the vehicle.  None whenever the
-    # fit / crossing failed (NO_HISTORY / NO_ARC_HIT).
+    # Trail-arc debug fields; unset when fit/crossing failed (README §3).
     last_trail_is_straight: bool = False
     last_trail_cx: float = 0.0
     last_trail_cz: float = 0.0
@@ -158,15 +118,10 @@ class LeadInfo:
 @dataclass
 class ACCTracker:
     tracks: dict[int, TrackState] = field(default_factory=dict)
-    # Sticky TMP trailer→tractor map. Cleared when the trailer's track
-    # expires (see expired loop in update()) or when its cached tractor
-    # falls out of the loose validation gate.
+    # Sticky TMP trailer→tractor id; cleared on track expiry or failed revalidation.
     _trailer_to_tractor: dict[int, int] = field(default_factory=dict)
 
-    # Blinker scalar state: ``_last_*_active`` is bumped every frame
-    # while the blinker is on, so once it releases the cos decay
-    # starts cleanly at t=0.  Scalar resolves to ``right - left``
-    # (only one side is usually active).
+    # Blinker decay state; scalar = right_side - left_side after release cos decay.
     _last_left_active: float = 0.0
     _last_right_active: float = 0.0
     _prev_left: bool = False
@@ -178,9 +133,6 @@ class ACCTracker:
     last_ego_kappa_used: float = 0.0
     last_corridor_half: float = 0.0
 
-    # ------------------------------------------------------------------
-    # Blinker handling
-    # ------------------------------------------------------------------
     def update_blinkers(
         self,
         now_mono: float,
@@ -204,12 +156,7 @@ class ACCTracker:
                 st.score = 0.0
 
     def _side_scalar(self, now_mono: float, last_active_t: float) -> float:
-        """Per-side scalar in [0, 1]: 1 while held, cos decay after.
-
-        Because ``last_active_t`` is bumped every frame while the
-        blinker is on, ``t = now - last_active_t`` is 0 at the moment
-        of release and grows afterwards, giving a clean decay curve.
-        """
+        """Per-side [0,1]: 1 while held, cos decay to 0 over ``_BLINKER_HOLD_S``."""
         if last_active_t <= 0.0:
             return 0.0
         t = now_mono - last_active_t
@@ -225,21 +172,13 @@ class ACCTracker:
         right = self._side_scalar(now_mono, self._last_right_active)
         return right - left
 
-    # ------------------------------------------------------------------
-    # Geometry helpers
-    # ------------------------------------------------------------------
     @staticmethod
     def _ego_local(
         ego_x: float, ego_z: float,
         ego_fwd_x: float, ego_fwd_z: float,
         target_x: float, target_z: float,
     ) -> tuple[float, float]:
-        """(longitudinal, lateral) of target in ego heading frame.  Right=+lat.
-
-        Uses ego's *instantaneous* forward vector: good for the rear
-        cone gate, not for scoring on a curve.  See :func:`_project_onto_arc`
-        for the arc-relative projection used by the scorer.
-        """
+        """Ego-frame (longi, lat); rear cone only (scoring uses ``_project_onto_arc``)."""
         dx = target_x - ego_x
         dz = target_z - ego_z
         longi = dx * ego_fwd_x + dz * ego_fwd_z
@@ -253,18 +192,7 @@ class ACCTracker:
         target_x: float, target_z: float,
         fwd_x: float, fwd_z: float,
     ) -> tuple[float, float]:
-        """(arc_dist, lateral_from_arc): signed, positive lateral = right.
-
-        Straight arc: same as :func:`_ego_local`.
-
-        Curved arc: the arc is a circle, so the target's distance from
-        the arc center minus the arc radius gives a signed lateral
-        (using `_sign` to keep "positive = right of the heading at
-        that point").  Longitudinal is the angular span from ``angle0``
-        unwrapped in the sweep direction, converted back to metres via
-        ``-span·radius·_sign``.  Valid beyond the arc's finite horizon
-       : treats the arc as an infinite circle.
-        """
+        """Arc-frame (arc_dist, lateral); curved arcs use infinite-circle unwrap (README §2)."""
         if arc.is_straight:
             dx = target_x - arc.start_x
             dz = target_z - arc.start_z
@@ -285,9 +213,7 @@ class ACCTracker:
 
         target_angle = math.atan2(dcz, dcx)
         span = target_angle - arc.angle0
-        # Unwrap to the same rotational direction as the sweep so a
-        # target "ahead" on a curve of arbitrary radius yields a
-        # positive arc_dist.
+        # Unwrap span to match sweep direction so ahead-on-curve stays positive longi.
         span = (span + math.pi) % (2.0 * math.pi) - math.pi
         if arc.max_sweep > 0.0 and span < 0.0:
             span += 2.0 * math.pi
@@ -298,9 +224,6 @@ class ACCTracker:
         lat = (r_t - arc.radius) * arc._sign
         return arc_dist, lat
 
-    # ------------------------------------------------------------------
-    # Main update
-    # ------------------------------------------------------------------
     def update(
         self,
         now_mono: float,
@@ -319,9 +242,7 @@ class ACCTracker:
         ego_fwd_x = -math.sin(ego_yaw_rad)
         ego_fwd_z = -math.cos(ego_yaw_rad)
         ego_kmh = ego_speed_ms * 3.6
-        # Pitch-projected forward axis for the elevation gate: matches
-        # core/aeb/filters.py:ElevationFilter so ACC and AEB agree on
-        # which road surface each candidate belongs to.
+        # Pitch-projected elevation axis (matches AEB ElevationFilter).
         ego_yaw_sin = math.sin(ego_yaw_rad)
         ego_yaw_cos = math.cos(ego_yaw_rad)
         ego_pitch_tan = math.tan(ego_pitch_rad)
@@ -348,12 +269,7 @@ class ACCTracker:
                 continue
             if v.id < 0:
                 continue
-            # Pitch-projected elevation gate: matches AEB's
-            # ElevationFilter. ``rz`` is the AEB-convention forward
-            # distance from ego (dx·sin + dz·cos), so on an incline
-            # ``expected_y`` slides along the road surface as the
-            # target moves ahead, instead of being pinned to ego's
-            # current altitude.
+            # Elevation gate: pitch-projected expected_y vs target y (AEB-aligned).
             _dx = v.position.x - ego_x
             _dz = v.position.z - ego_z
             rz_ele = _dx * ego_yaw_sin + _dz * ego_yaw_cos
@@ -361,9 +277,7 @@ class ACCTracker:
             if abs(v.position.y - expected_y) > _ELEVATION_MARGIN_M:
                 continue
 
-            # Rear cone gate runs on the *instantaneous* ego frame so a
-            # car directly behind on a bend still counts as "rear" even
-            # if the arc would curl back over it.
+            # Rear cone uses instantaneous ego frame (not arc projection).
             straight_longi, _ = self._ego_local(
                 ego_x, ego_z, ego_fwd_x, ego_fwd_z, v.position.x, v.position.z,
             )
@@ -373,20 +287,12 @@ class ACCTracker:
                 if fwd_dot < _REAR_DOT_THRESHOLD:
                     continue
 
-            # Scoring-space geometry: project the vehicle center into
-            # the ego arc frame. Used by the scoring components below
-            # (offset / yaw / path); their tuning is calibrated against
-            # center distance.
+            # Scoring geometry: vehicle center on ego arc (offset/yaw/path tuning).
             longi, lat = self._project_onto_arc(
                 ego_arc, v.position.x, v.position.z, ego_fwd_x, ego_fwd_z,
             )
 
-            # Geometric distance + in-path: project all four footprint
-            # corners. dist_m is the nearest-corner arc distance (first
-            # impingement), in_path fires if any corner is inside the
-            # corridor. This collapses the tractor+trailer rig naturally
-            # via the controller's chain-gap filter and removes the
-            # bounding-circle approximation that misjudges yawed leads.
+            # Footprint corners: nearest forward corner dist_m; any corner in corridor → in_path.
             corner_projs = [
                 self._project_onto_arc(ego_arc, cx, cz, ego_fwd_x, ego_fwd_z)
                 for cx, cz in v.get_corners()
@@ -399,15 +305,7 @@ class ACCTracker:
                 continue
             in_path = any(abs(lt) <= corridor_half for _, lt in corner_projs)
 
-            # Trail-arc fit: project the target's smoothed path onto the
-            # line through ego perpendicular to ego heading.  Three
-            # baseline buckets, matching SCORING_REFERENCE §8.1:
-            #   HIT          fit + crossing → arc-crossing lateral and
-            #                tangent-angle amp from the fit.
-            #   NO_ARC_HIT   fit exists but doesn't reach the ego row →
-            #                -0.40 baseline, fall back to current lateral.
-            #   NO_HISTORY   too few samples / chord / curvature → -0.16
-            #                baseline, current lateral, full angle amp.
+            # Trail-arc offset baselines HIT / NO_ARC_HIT / NO_HISTORY (README §3).
             v_yaw_rad = (
                 v._smooth_yaw
                 if v._smooth_yaw is not None
@@ -442,10 +340,7 @@ class ACCTracker:
                         ego_z + arc_offset * right_z,
                     )
 
-            # Blinker scalar shifts the *scored* lateral offset by up to
-            # 4.5 m toward the indicated side (SCORING_REFERENCE §7).
-            # Targets in the adjacent lane thus score near 0 offset
-            # during the signalled manoeuvre.
+            # Scored lateral: arc offset minus blinker·4.5 m (README §5).
             offset_for_score = arc_offset - blinker * _BLINKER_OFFSET_M
 
             off = offset_component(
@@ -508,9 +403,7 @@ class ACCTracker:
             seen_ids.add(v.id)
             id_to_vehicle[v.id] = v
 
-        # Decay / expire unseen tracks.  We don't know the target's
-        # current speed, so fall back to ego speed for the accumulator
-        # multiplier: it's close enough for a decay-only tick.
+        # Unseen tracks: path-only decay; expire after ``_MISSING_OUT_DECAY_S``.
         expired: list[int] = []
         for vid, st in self.tracks.items():
             if vid in seen_ids:
@@ -533,9 +426,6 @@ class ACCTracker:
         leads = self._top_leads(id_to_vehicle, vehicles, ego_fwd_x, ego_fwd_z, ego_speed_ms)
         return leads
 
-    # ------------------------------------------------------------------
-    # Top-N selection + trailer swap
-    # ------------------------------------------------------------------
     def _top_leads(
         self,
         id_to_vehicle: dict[int, Vehicle],
@@ -556,10 +446,7 @@ class ACCTracker:
             eff_speed = v.acc_speed
             eff_accel = v.acc_accel
 
-            # Trailer → tractor swap (TMP top-level trailers only: wrapped
-            # nested trailers have their own per-id filter chain and use
-            # their own acc_speed). Sticky resolver below: strict gate on
-            # first acquisition, loose gate on cached pairs.
+            # TMP top-level trailer: sticky tractor lock + kinematic swap (README §4).
             if (
                 v.is_tmp and v.is_trailer
                 and v.id < _TRAILER_VEHICLE_ID_BASE
@@ -582,9 +469,6 @@ class ACCTracker:
             )
         return out
 
-    # ------------------------------------------------------------------
-    # Tractor locking for TMP top-level trailers
-    # ------------------------------------------------------------------
     @staticmethod
     def _trailer_local_frame(
         trailer: Vehicle, other: Vehicle,
@@ -630,13 +514,7 @@ class ACCTracker:
     def _resolve_tractor(
         self, trailer: Vehicle, vehicles: list[Vehicle],
     ) -> Vehicle | None:
-        """Return the locked tractor for ``trailer`` (TMP top-level only).
-
-        Cached pair revalidated through the loose gate; new acquisitions
-        must pass the strict gate. Among candidates passing strict,
-        ``lock_cost`` prefers laterally-centered, near-typical coupling
-        distance, yaw-aligned matches.
-        """
+        """Sticky TMP tractor for a trailer; strict acquire, loose revalidate (README §4)."""
         cached_id = self._trailer_to_tractor.get(trailer.id)
         if cached_id is not None:
             cached = next((o for o in vehicles if o.id == cached_id), None)

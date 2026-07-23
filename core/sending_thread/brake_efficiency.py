@@ -1,18 +1,4 @@
-﻿"""
-Tracks braking efficiency during cruise control to detect performance degradation.
-
-Compares a rolling EMA of measured deceleration to the deceleration expected from
-the current brake command, using a nominal full-pedal capability of 11.5 m/s² at
-12 wheels and 17 t (scaled linearly with wheel count and inversely with mass).
-efficiency_ratio < 1.0 indicates reduced braking performance (worn tires, snow, etc.).
-
-Only samples when:
-  - cruise is commanding brake (caller's responsibility to gate this)
-  - speed is above MIN_SAMPLE_SPEED_MS
-  - measured decel is above MIN_DECEL_MS2 (filters coasting / noise)
-  - brake output is above BRAKE_ACTIVE_THRESHOLD
-  - road is approximately flat (|slope_rad| < MAX_SLOPE_RAD)
-"""
+"""Tracks braking efficiency during cruise control to detect performance degradation. See `core/sending_thread/README.md`."""
 
 from __future__ import annotations
 
@@ -40,30 +26,14 @@ _REF_MASS_KG: float = 17000.0
 
 
 def nominal_max_brake_decel_ms2(wheels_on_ground: int, mass_kg: float) -> float:
-    """
-    Expected maximum deceleration (m/s²) at brake=1.0 for the given wheel count and mass.
-
-    Unknown wheel count defaults to the reference 12 wheels; unknown/non-positive mass
-    defaults to 17 t so the nominal deceleration is 11.5 m/s².
-    """
+    """Expected maximum deceleration (m/s²) at brake=1.0 for the given wheel count and mass. See `core/sending_thread/README.md`."""
     w = float(wheels_on_ground) if wheels_on_ground > 0 else float(_REF_WHEELS)
     m = float(mass_kg) if mass_kg > 0.0 else _REF_MASS_KG
     return _REF_NOMINAL_MAX_DECEL_MS2 * (w / float(_REF_WHEELS)) * (_REF_MASS_KG / m)
 
 
 class BrakeEfficiencyTracker:
-    """
-    Estimates vehicle braking performance and detects degradation via EMA.
-
-    Each sample contributes measured_decel / (brake * nominal_max_decel), where
-    nominal_max_decel is derived from wheel count and mass (see
-    nominal_max_brake_decel_ms2).
-
-    Reads live from Settings:
-      - brake_efficiency_learning : enable/disable the tracker
-      - brake_efficiency_alpha    : EMA smoothing factor (0.0–1.0)
-      - brake_efficiency_warn_ratio: ratio below which to emit a popup warning
-    """
+    """Estimates vehicle braking performance and detects degradation via EMA. See `core/sending_thread/README.md`."""
 
     def __init__(self) -> None:
         self._ema_max_decel_ms2: float = 0.0
@@ -100,21 +70,7 @@ class BrakeEfficiencyTracker:
         wheels_on_ground: int = 0,
         mass_kg: float = 0.0,
     ) -> None:
-        """
-        Feed one braking sample. Call only when cruise is actively commanding brake.
-
-        Args:
-            brake_output: Normalized brake pedal (0–1) as output by the mapper.
-            measured_decel_ms2: Positive deceleration from telemetry (m/s²).
-            speed_ms: Current vehicle speed (m/s).
-            slope_rad: Road slope in radians (positive = uphill). Used to filter
-                sloped roads where gravity contaminates the decel measurement.
-            wheels_on_ground: Total wheels in contact with the ground (tractor +
-                trailers). More wheels increases the expected max deceleration; 0 uses
-                the reference 12 wheels.
-            mass_kg: Total vehicle mass (kg). Heavier mass lowers expected max
-                deceleration; non-positive values use the reference 17 t.
-        """
+        """Feed one braking sample. Call only when cruise is actively commanding brake. See `core/sending_thread/README.md`."""
         if not Settings.brake_efficiency_learning:
             self._efficiency_ratio = 1.0
             return

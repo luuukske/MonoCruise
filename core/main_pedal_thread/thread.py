@@ -1,40 +1,4 @@
-﻿"""
-Main Pedal Thread: owns joystick input and computes pedal outputs.
-
-Responsibilities:
-  - Initialize and manage all required pygame joysticks:
-      * The configured pedal device (critical path: drives brake/gas outputs).
-      * Any additional joystick devices referenced by button bindings.
-  - Read raw gas and brake axis values every loop tick.
-  - Apply the One-Pedal-Drive transformation (disabled while cruise control is commanding).
-  - Apply weight-based brake adjustment.
-  - Manage the `stopped` hold-brake state and park-brake detection.
-  - Detect emergency braking events (sudden pedal slam / crash) and hold
-    full brake until the user releases, exposing `em_stop` for the sending thread.
-  - Resolve button bindings (joystick buttons, hat directions, keyboard keys) and
-    publish cc_*_held booleans for cruise_control_thread to read.
-  - Expose joystick_button_states for input_bindings.resolve_held() callers.
-  - Expose a capture API (start_capture / cancel_capture / consume_capture /
-    set_capture_guard) for the settings-panel button assignment flow.
-  - Expose a pedal configuration API (start_pedal_config / cancel_pedal_config /
-    consume_pedal_config) for the settings-panel "Connect to pedals" flow:
-    tap brake, tap gas, axes and inversion are detected and saved.
-
-Does NOT own:
-  - Sending values to the game  → sending_thread (reads ThreadData).
-  - Hazard / horn actuation     → sending_thread (reads ThreadData flags).
-  - Cruise control / ACC        → cruise_control_thread reads CC button holds from this data.
-  - AEB / radar                 → aeb_thread / radar_thread.
-  - Keyboard hook lifecycle     → keyboard_thread.
-
-Other threads read state via:
-  registry.get_thread("main_pedal_thread").data.<field>
-
-Hat direction virtual-button encoding (matches legacy MonoCruise):
-  virtual_code = button_count + hat_index * 4 + direction_index
-  direction_index: 0=up  1=right  2=down  3=left
-  pygame hat xy:   (0,1) (1,0)    (0,-1)  (-1,0)
-"""
+"""Joystick pedals and CC button holds. See core/main_pedal_thread/README.md."""
 
 from __future__ import annotations
 
@@ -61,8 +25,6 @@ _DIR_IDX_TO_XY: dict[int, tuple[int, int]] = {
     3: (-1, 0),   # left
 }
 
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _read_axis(device: pygame.joystick.JoystickType, axis: int, inverted: bool) -> float:
     """Return a normalised [0.0, 1.0] value from a joystick axis."""
@@ -98,12 +60,7 @@ def _onepedaldrive(
     *,
     apply_opd_mapping: bool = True,
 ) -> tuple[float, float]:
-    """
-    One-pedal mapping: combined axis → gas/brake, with gas and brake exponents applied
-    (brake curve uses sqrt(Settings.brake_exponent_variable) as in legacy MonoCruise).
-    When *apply_opd_mapping* is False, only the two-pedal path and exponents are
-    used: same as legacy opd_mode off.
-    """
+    """One-pedal mapping: combined axis → gas/brake, with gas and brake exponents applied See `core/main_pedal_thread/README.md`."""
     offset = float(Settings.offset_variable or 0.0)
     be_full = float(Settings.brake_exponent_variable or 1.0)
     brake_exponent = be_full**0.5
@@ -138,8 +95,6 @@ def _onepedaldrive(
     return gas_out, brake_out
 
 
-# ── ThreadData ────────────────────────────────────────────────────────────────
-
 @dataclass
 class MainPedalThreadData(ThreadData):
     # Computed outputs: sending_thread reads these every tick.
@@ -169,21 +124,18 @@ class MainPedalThreadData(ThreadData):
     acc_dist_dec_held: bool = False
 
     # Full joystick button state snapshot: {device_guid: {virtual_code: bool}}.
-    # Includes hat directions encoded as virtual button indices.
-    # Used by input_bindings.resolve_held() for external callers.
+    # See `core/main_pedal_thread/README.md`.
     joystick_button_states: dict = field(default_factory=dict, repr=False)
 
     # Capture API (used by the settings panel button-assignment flow).
     capture_active: bool = False
     # True after this thread has published all-joystick states for an active
-    # capture. button_device_thread waits on this before opening its HID scan
-    # so pygame-owned devices are excluded from raw HID.
+    # See `core/main_pedal_thread/README.md`.
     joystick_capture_ready: bool = False
     # ("joystick", guid, code, label, device_name) when a joystick input captured
     capture_event: object = None
     # Binding dict set by the UI right after a capture is consumed: CC button
-    # holds stay suppressed until this input is physically released, so
-    # assigning a button can never immediately trigger its action.
+    # See `core/main_pedal_thread/README.md`.
     capture_guard: object = None
 
     # Pedal configuration flow (settings-panel "Connect to pedals").
@@ -196,8 +148,6 @@ class MainPedalThreadData(ThreadData):
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
-# ── Thread ────────────────────────────────────────────────────────────────────
-
 class MainPedalThread(BaseThread):
     loop_interval = 1.0 / Settings.polling_rate
     max_restarts  = 3
@@ -206,7 +156,6 @@ class MainPedalThread(BaseThread):
         super().__init__(name="main_pedal_thread")
         self.data = MainPedalThreadData()
 
-        # ── Pedal device (critical path) ──────────────────────────────────────
         self._device: pygame.joystick.JoystickType | None = None
         self._device_instance_id: int | None = None
 
@@ -217,7 +166,6 @@ class MainPedalThread(BaseThread):
         self._reconnect_attempt: int = 0
         self._reconnect_js: pygame.joystick.JoystickType | None = None
 
-        # ── Button devices (non-critical, any GUID referenced by button bindings) ──
         # device_guid → Joystick | None (None = not yet found / lost)
         self._button_devices: dict[str, pygame.joystick.JoystickType | None] = {}
         # device_guid → instance_id (for JOYDEVICEREMOVED matching)
@@ -227,15 +175,12 @@ class MainPedalThread(BaseThread):
         # device_guid → human-readable name (for popups)
         self._button_device_names: dict[str, str] = {}
 
-        # ── Joystick state snapshots ──────────────────────────────────────────
         # {guid: {virtual_code: bool}}: updated every tick by _update_joystick_states
         self._joystick_states: dict[str, dict[int, bool]] = {}
         # previous tick's states: used for 0→1 capture detection
         self._prev_capture_states: dict[str, dict[int, bool]] = {}
 
-        # ── Capture scan (thread-owned) ───────────────────────────────────────
-        # While capture is active, every connected joystick is watched, not
-        # just tracked ones, so a first-time device can be assigned.
+        # See `core/main_pedal_thread/README.md`.
         self._capture_scan_devices: dict[str, pygame.joystick.JoystickType] = {}
         self._capture_scan_count: int = -1
         # Guard safety timeout: clear a stuck capture_guard (e.g. bound to a
@@ -253,12 +198,10 @@ class MainPedalThread(BaseThread):
         self._pconf_brake_axis: int | None = None
         self._pconf_brake_inverted: bool = False
 
-        # ── Operational state ─────────────────────────────────────────────────
         self._prev_brakeval: float = 0.0
         self._prev_speed: float = 0.0
         self._latency_ts: float = 0.0
 
-    # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def setup(self) -> None:
         pygame.init()
@@ -298,11 +241,7 @@ class MainPedalThread(BaseThread):
         self.loop_interval = 1.0 / polling_rate
 
         # perf_counter, not monotonic: on Windows time.monotonic() is
-        # GetTickCount64 with a 15.6 ms resolution, so above ~64 Hz polling two
-        # consecutive loops read the same tick and latency came out 0.0. That
-        # made the brake-rise threshold below collapse to -0.0 and fire the
-        # emergency stop with the pedal untouched. Clamped as well, so a stalled
-        # or duplicated tick can never produce a degenerate threshold.
+        # See `core/main_pedal_thread/README.md`.
         now = time.perf_counter()
         latency = min(max(now - self._latency_ts, 0.001), 0.1)
         self._latency_ts = now
@@ -311,8 +250,7 @@ class MainPedalThread(BaseThread):
         tel = self._get_telemetry()
 
         # Pedal configuration flow: runs before the telemetry gate so pedals
-        # can be configured with the game closed. Outputs stay neutral for the
-        # whole flow; the user deliberately started it from the settings panel.
+        # See `core/main_pedal_thread/README.md`.
         if self.data.pedal_config_active:
             # Keep pumping SDL so get_axis() stays live and hot-plug
             # bookkeeping (device added/removed) keeps working.
@@ -337,8 +275,7 @@ class MainPedalThread(BaseThread):
 
         if tel is None:
             # Game closed: still pump SDL events and tick the reconnect FSM so
-            # pedal hot-plug (device_lost) stays accurate for the UI. Axis
-            # values are discarded; outputs below stay neutral.
+            # See `core/main_pedal_thread/README.md`.
             self._process_pygame_events(0.0)
             self._tick_reconnect()
             with self.data._lock:
@@ -360,8 +297,7 @@ class MainPedalThread(BaseThread):
         cargo_mass = tel["cargoMass"]
 
         # Only treat CC as "commanding the pedal" in Cruise control mode.
-        # In Speed limiter mode CC just CAPS the user's gas pedal in
-        # sending_thread (`min(user, mapper_gas)`)
+        # See `core/main_pedal_thread/README.md`.
         cruise_commanding = False
         try:
             cc = registry.get_thread("cruise_control_thread")
@@ -370,8 +306,7 @@ class MainPedalThread(BaseThread):
                     cc_active = bool(cc.data.active)
                     cc_winner = str(cc.data.active_controller)
                 # Only treat the CC controller (or ACC) winning arbitration as
-                # cruise commanding. A limiter-only win (CC button-disabled,
-                # global limit active) must NOT suppress OPD coast-down brake.
+                # See `core/main_pedal_thread/README.md`.
                 if cc_active and Settings.cc_mode == "Cruise control" and cc_winner == "cc":
                     cruise_commanding = True
         except (KeyError, AttributeError):
@@ -384,8 +319,7 @@ class MainPedalThread(BaseThread):
         self._tick_reconnect()
 
         # Ensure newly-referenced button device GUIDs are tracked BEFORE the
-        # state snapshot, so a freshly saved binding resolves on the same tick
-        # and the capture guard stays alive until the input is truly released.
+        # See `core/main_pedal_thread/README.md`.
         self._ensure_button_devices()
 
         # Update all joystick button/hat state snapshots (button devices + pedals).
@@ -412,17 +346,13 @@ class MainPedalThread(BaseThread):
             return
 
         # opdgasval is always OPD-mapped: it is the user-side input for the
-        # CC override comparison in sending_thread, so the override criterion
-        # matches the same OPD feel the driver gets when CC is off. The brake
-        # side of this call is discarded when CC is commanding; only the
-        # two-pedal output below is sent to the truck in that case.
+        # See `core/main_pedal_thread/README.md`.
         opdgasval, opdbrakeval_full = _onepedaldrive(
             gasval, brakeval, apply_opd_mapping=True
         )
         if cruise_commanding:
             # CC owns the longitudinal command: drop OPD coast-down and shaping
-            # from the output path so the truck doesn't fight CC. User brake
-            # pedal still passes through (two-pedal raw, exponented).
+            # See `core/main_pedal_thread/README.md`.
             _, opdbrakeval = _onepedaldrive(
                 gasval, brakeval, apply_opd_mapping=False
             )
@@ -442,9 +372,7 @@ class MainPedalThread(BaseThread):
         opdbrakeval = (opdbrakeval ** (1 / weight_var)).real
 
         # OPD coast-down brake (user-pedal shaping only). The stopped-state
-        # hold brake and its FSM live in sending_thread so they apply to every
-        # output source (user, mapper, AEB): `stopped` is read back from there
-        # to preserve the original if/elif gating.
+        # See `core/main_pedal_thread/README.md`.
         sending_stopped = False
         try:
             st = registry.get_thread("sending_thread")
@@ -455,10 +383,7 @@ class MainPedalThread(BaseThread):
             pass
 
         # The shaping fades back out between 0.2 and 0.3 opdbrakeval instead
-        # of the old hard `< 0.3` gate, which stepped the output by roughly 2x
-        # at the boundary at low speed (felt as a sudden bite when pressing
-        # through it). At or below 0.2 and at or above 0.3 the output is
-        # identical to the old curve.
+        # See `core/main_pedal_thread/README.md`.
         a = 0.035 - slope / 2
         if (
             not sending_stopped
@@ -478,10 +403,6 @@ class MainPedalThread(BaseThread):
         brake_output = opdbrakeval
 
         # AEB override: on engagement (AEB_brake), slam brake to 1.0 and zero
-        # gas. The graduated FF additive path in sending_thread handles the
-        # sub-engagement assist band on top of user braking. Engagement, by
-        # definition, means the system has decided full braking is warranted.
-        # Full-gas user authority preserved via the gas_output < 0.8 gate.
         try:
             aeb = registry.get_thread("aeb_thread")
             if aeb is not None and aeb.is_alive() and gas_output < 0.8:
@@ -496,8 +417,6 @@ class MainPedalThread(BaseThread):
         em_stop = self.data.em_stop
 
         # A slam needs the pedal to actually be moving down: the `> 0.0` guard
-        # keeps a resting pedal out of the rate test no matter what the timing
-        # looks like.
         brake_rise = brakeval - prev_brakeval
         sudden_brake_slam = (
             (brake_rise > 0.05 and brake_rise >= 0.07 * latency_multiplier)
@@ -564,7 +483,6 @@ class MainPedalThread(BaseThread):
             pass
         logger.debug("teardown complete")
 
-    # ── Capture API ───────────────────────────────────────────────────────────
 
     def start_capture(self) -> None:
         """Enable joystick capture mode: next button/hat press populates capture_event."""
@@ -581,10 +499,7 @@ class MainPedalThread(BaseThread):
             self.data.joystick_capture_ready = False
 
     def consume_capture(self) -> tuple | None:
-        """Read + clear the captured joystick event. Returns None if nothing captured.
-
-        Returns ("joystick", guid, virtual_code, label, device_name) on success.
-        """
+        """Read and clear capture event; returns (joystick, guid, code, label, name) or None."""
         with self.data._lock:
             ev = self.data.capture_event
             self.data.capture_event = None
@@ -593,10 +508,7 @@ class MainPedalThread(BaseThread):
             return ev
 
     def set_capture_guard(self, binding: object) -> None:
-        """Suppress CC button holds until *binding* is physically released.
-
-        Called by the UI right after saving a freshly captured binding.
-        """
+        """Suppress CC button holds until the new binding is physically released."""
         self._capture_guard_ts = time.monotonic()
         with self.data._lock:
             self.data.capture_guard = binding
@@ -604,13 +516,7 @@ class MainPedalThread(BaseThread):
     _CAPTURE_GUARD_TIMEOUT_S = 10.0
 
     def _sync_capture_scan_devices(self, capture_active: bool) -> None:
-        """Enumerate every connected joystick while capture is active.
-
-        Tracked devices only cover the pedals and devices already referenced
-        by a binding; without this scan a first-time device could never be
-        assigned. Re-enumerates when the device count changes (hot-plug),
-        clears when capture ends.
-        """
+        """Enumerate every connected joystick while capture is active. See `core/main_pedal_thread/README.md`."""
         if not capture_active:
             if self._capture_scan_devices:
                 self._capture_scan_devices = {}
@@ -633,7 +539,6 @@ class MainPedalThread(BaseThread):
                 logger.debug("capture scan: skipping joystick %d", i, exc_info=True)
         self._capture_scan_devices = devices
 
-    # ── Pedal configuration API ───────────────────────────────────────────────
 
     # Minimum axis movement from the resting baseline that counts as a tap.
     _PCONF_TAP_THRESHOLD = 0.3
@@ -671,29 +576,14 @@ class MainPedalThread(BaseThread):
             logger.info("pedal config cancelled")
 
     def consume_pedal_config(self) -> dict | None:
-        """Read + clear the finished pedal configuration result.
-
-        Returns None if the flow hasn't finished. The settings values are
-        already saved by the thread when the result appears; the UI only
-        needs this for display.
-        """
+        """Read + clear the finished pedal configuration result. See `core/main_pedal_thread/README.md`."""
         with self.data._lock:
             res = self.data.pedal_config_result
             self.data.pedal_config_result = None
             return res
 
     def _tick_pedal_config(self) -> None:
-        """Advance the pedal configuration flow by one tick (never blocks).
-
-        Stage "brake": watch every axis on every connected joystick; the first
-        axis moved more than _PCONF_TAP_THRESHOLD from its resting baseline
-        becomes the brake axis and locks the pedal device.
-        Stage "gas": same detection, restricted to the locked device; the
-        first axis other than the brake axis wins and finishes the flow.
-
-        Inversion matches _read_axis: not-inverted means pressing drives the
-        raw value up toward +1, so movement below the baseline is inverted.
-        """
+        """Advance the pedal configuration flow by one tick (never blocks). See `core/main_pedal_thread/README.md`."""
         self._sync_pconf_devices()
 
         with self.data._lock:
@@ -715,13 +605,7 @@ class MainPedalThread(BaseThread):
             self._finish_pedal_config(guid, axis, inverted)
 
     def _sync_pconf_devices(self) -> None:
-        """Enumerate connected joysticks and capture resting axis baselines.
-
-        Re-enumerates when the device count changes (hot-plug). Baselines of
-        already-seen devices are kept so a replug or an unrelated hot-plug
-        can't re-baseline a pedal the user is holding. The virtual vJoy
-        output device is never a pedal source and is skipped.
-        """
+        """Enumerate connected joysticks and capture resting axis baselines. See `core/main_pedal_thread/README.md`."""
         try:
             count = pygame.joystick.get_count()
         except Exception:
@@ -753,9 +637,7 @@ class MainPedalThread(BaseThread):
                 )
 
     def _pconf_detect_tap(self, stage: str) -> tuple[str, int, bool] | None:
-        """Return (guid, axis, inverted) for the first axis moved past the tap
-        threshold, or None. In the gas stage only the locked pedal device is
-        watched and the brake axis is skipped."""
+        """Return (guid, axis, inverted) for the first axis moved past the tap See `core/main_pedal_thread/README.md`."""
         for guid, js in self._pconf_devices.items():
             if stage == "gas" and guid != self._pconf_device_guid:
                 continue
@@ -825,7 +707,6 @@ class MainPedalThread(BaseThread):
         self._pconf_count = -1
         self._pconf_baselines = {}
 
-    # ── Private helpers ───────────────────────────────────────────────────────
 
     def _get_telemetry(self) -> dict | None:
         try:
@@ -844,7 +725,6 @@ class MainPedalThread(BaseThread):
                 "cargoMass": tel.data.cargoMass,
             }
 
-    # ── Button device management ──────────────────────────────────────────────
 
     def _collect_button_guids(self) -> set[str]:
         """Return all unique device GUIDs referenced by current joystick button bindings."""
@@ -908,14 +788,9 @@ class MainPedalThread(BaseThread):
             )
         return False
 
-    # ── Joystick state snapshot ───────────────────────────────────────────────
 
     def _update_joystick_states(self) -> None:
-        """Read all tracked joystick button/hat states and publish them.
-
-        Also performs capture-mode 0→1 transition detection.
-        Hat directions are encoded as virtual button indices per the module-level scheme.
-        """
+        """Read all tracked joystick button/hat states and publish them. See `core/main_pedal_thread/README.md`."""
         new_states: dict[str, dict[int, bool]] = {}
 
         with self.data._lock:
@@ -965,10 +840,6 @@ class MainPedalThread(BaseThread):
                 new_states[guid] = states
 
                 # Capture: detect first 0→1 transition on any tracked device.
-                # A device with no previous snapshot (just added by the
-                # capture scan) only seeds its baseline this tick: otherwise
-                # an always-on button bit would fire the instant the scan
-                # starts.
                 prev = self._prev_capture_states.get(guid)
                 if capture_active and prev is not None:
                     for code, held in states.items():
@@ -1011,18 +882,9 @@ class MainPedalThread(BaseThread):
             elif not self.data.capture_active:
                 self.data.joystick_capture_ready = False
 
-    # ── Button binding resolution ─────────────────────────────────────────────
 
     def _read_cc_button_states(self) -> tuple[bool, bool, bool, bool, bool]:
-        """Return (cc_start, cc_inc, cc_dec, acc_dist_inc, acc_dist_dec) held states.
-
-        Bindings are resolved against self._joystick_states (joystick/hat) or via
-        keyboard.is_pressed() (keyboard), so results are always current for this tick.
-
-        While the UI is capturing a new binding, and until a freshly captured
-        input is physically released (capture_guard), all holds read False so
-        assigning a button never triggers a CC action mid-configuration.
-        """
+        """Return (cc_start, cc_inc, cc_dec, acc_dist_inc, acc_dist_dec) held states. See `core/main_pedal_thread/README.md`."""
         with self.data._lock:
             capture_active = self.data.capture_active
             guard = self.data.capture_guard
@@ -1034,8 +896,7 @@ class MainPedalThread(BaseThread):
                 > self._CAPTURE_GUARD_TIMEOUT_S
             )
             # binding_state None means the source device hasn't reported yet
-            # (e.g. just tracked): keep suppressing rather than clearing on a
-            # device that may still be reporting the input as held.
+            # See `core/main_pedal_thread/README.md`.
             if not expired and binding_state(guard) is not False:
                 return (False, False, False, False, False)
             with self.data._lock:
@@ -1065,7 +926,6 @@ class MainPedalThread(BaseThread):
             return False
         return keyboard_is_pressed(str(key))
 
-    # ── Pygame event processing ───────────────────────────────────────────────
 
     def _process_pygame_events(self, speed: float) -> tuple[float, float]:
         """Handle all pending pygame events and return the current (gasval, brakeval)."""
@@ -1152,22 +1012,9 @@ class MainPedalThread(BaseThread):
             except Exception:
                 logger.debug("failed to init reconnected button device %s", guid, exc_info=True)
 
-    # ── Pedal reconnect FSM ───────────────────────────────────────────────────
 
     def _tick_reconnect(self) -> None:
-        """
-        Advance the pedal reconnect state machine by one tick.  Called every loop()
-        iteration: never sleeps, never blocks.
-
-        State transitions:
-          initial_wait  → (after 3 s)   → attempt
-          attempt       → (js found)    → reinit_wait
-                        → (not found)   → attempt_wait  (retry indefinitely)
-                        → (exception)   → attempt_wait  (retry indefinitely)
-          attempt_wait  → (after 0.2 s) → attempt
-          reinit_wait   → (after 4 s)   → reinit
-          reinit        →               → None (done)
-        """
+        """Advance the pedal reconnect state machine by one tick.  Called every loop() See `core/main_pedal_thread/README.md`."""
         if self._reconnect_state is None:
             return
 

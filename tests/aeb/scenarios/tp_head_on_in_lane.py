@@ -1,4 +1,4 @@
-﻿"""TP: head-on vehicle drifted into ego lane (zero lateral offset)."""
+"""TP: head-on vehicle drifted into ego lane (zero lateral offset)."""
 
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 

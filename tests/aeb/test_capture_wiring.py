@@ -1,10 +1,6 @@
-"""Wiring tests for the radar / AEB capture glue.
-
-Exercises the thread-side helpers that the game would drive (`_capture_frame`,
-`_capture_aeb_tick`, `_build_warm_state`) with a stub recorder, so the mapping
-from live state into the clip schema is covered without a game or the loops.
-"""
-
+"""Wiring tests for the radar / AEB capture glue. Exercises the thread-side helpers that the game
+would drive (`_capture_frame`, `_capture_aeb_tick`, `_build_warm_state`) with a stub recorder, so
+the mapping from live state into the clip schema is covered without a game or the loops."""
 from __future__ import annotations
 
 import core.aeb.thread as aeb_thread_mod

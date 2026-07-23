@@ -1,12 +1,11 @@
-﻿# AGENTS.md: AEB (Automatic Emergency Braking)
+﻿# AEB (Automatic Emergency Braking)
 
 > AEB-specific reference. Shared fundamentals (coordinate system, rotation,
 > world→ego transforms, the shared-memory buffer, Vehicle state/smoothing,
 > ArcPath geometry, position-based curvature) live in
-> `core/radar/AGENTS.md`: read that first.
+> `core/radar/README.md`: read that first.
 >
-> Repo-wide workflow, style, and reputation conventions live in the
-> top-level `AGENTS.md`: read that too.
+> Agent workflow and do-not-break rules: top-level `AGENTS.md`.
 
 ---
 
@@ -627,6 +626,25 @@ true (newly latched ids get their scope stamp at promotion). Cleared on
 | `latched_min_decel_frac` | 0.7 | Fraction of `effective_max_decel` as the `target_raw` floor under hold |
 | `latched_scope_release_s` | 0.5 s | Grace before an out-of-scope (not colliding, not forward-in-lane) latched id is dropped |
 
+### Follow-threat flag
+
+Behavioral latch for a genuine slowing lead (co-directional, sustained closing
+and own deceleration over `follow_threat_window_s`, then `follow_threat_hold_s`).
+While the hold is active, the target must be in `Lane.EGO` **or** arc-projected
+`d_abs` must be shrinking (lateral converge): a braking cut-in often decels
+before its centre enters ego lane.
+
+Flagged ids bypass `TmpRelSpeedFilter`, are exempt from
+`EgoEvasionFilter` and `CoDirectionalDivergeFilter`, and get follow-track decel
+on collision arcs so a braking lead does not clip through on constant-speed
+projection. Implemented in `AEBThread._update_follow_threats`.
+
+| Knob | Default | Role |
+|------|---------|------|
+| `follow_threat_window_s` | 0.6 s | Trailing kinematic window |
+| `follow_threat_hold_s` | 2.0 s | Hold after kinematic qualification |
+| `follow_threat_min_decel_ms2` | 1.5 m/s² | Min own-decel slope to qualify |
+
 ### Closed-loop coupling
 
 `sending_thread` consumes `AEB_target_decel_ms2` via `AEBDecelController`:
@@ -669,9 +687,9 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `warn_ttb` | 1.3 s | WARN threshold |
 | `brake_ttb` | 0.2 s | BRAKE threshold |
 | `ego_half_width` | 1.15 m | Ego arc corridor half-width |
-| `ego_half_length` | 3.0 m | Ego capsule half-length (body extents via `capsule_extents`; collision segments are cap-aligned: extents minus half_width, see radar AGENTS.md §8) |
+| `ego_half_length` | 3.0 m | Ego capsule half-length (body extents via `capsule_extents`; collision segments are cap-aligned: extents minus half_width, see `core/radar/README.md` §8) |
 | `corridor_margin` | 0.5 m | Corridor padding for crossing-path sample uncertainty |
-| `stop_buffer_response_s` | 0.45 s | Speed-proportional response-lag distance (`v_closing * this`) subtracted from the required-decel gap. Value from corpus scan (183 clips). A distance cap and threat-age tiering were both scanned and REJECTED (notes in calibration.py) |
+| `stop_buffer_response_s` | 0.10 s | Response-lag distance in required-decel gap (`v_closing * this`). Last-point envelope, not corpus timing optimum; rejected cap/tiering in calibration comments |
 | `disarm_hold_ttc_s` | 3.0 s | Geometry latch window while engaged: hold the event while any colliding target's unbraked ttc is inside it (anti-pumping; was `warn_ttb`) |
 | `capsule_parallel_margin_scale` | 0.3 | Near-parallel capsule contacts use `margin * scale` blended by heading sine toward full margin at perpendicular; kills adjacent-lane side-graze FPs (ab524f87 / 29bf31b8). 1.0 disables |
 | `lane_half_width` | 1.95 m | EGO lane boundary |
@@ -707,6 +725,8 @@ apart laterally are suppressed at the `arc_arc_collision` level
 ---
 
 ## 9. Critical Rules: Do Not Break (AEB-specific)
+
+Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep that in sync if you change them).
 
 - **AEB is a consumer of `RadarThread`.** Do not open the traffic shared-memory buffer directly and do not mutate `Vehicle` instances.
 - **AEB ego curvature is the yaw-rate proxy, full stop.** Do not read `RadarData.ego_curvature` from AEB.

@@ -1,20 +1,4 @@
-"""TP: genuine straight perpendicular TMP crosser on a dead-center collision course.
-
-Ego 80 km/h straight; a TMP (multiplayer) vehicle at 90 km/h crosses
-perpendicularly with zero curvature, its reference point arriving at ego's
-reference point exactly (dead-center). A collision hit is present every frame.
-
-Regression for the TmpCrossTrafficFilter endpoint-lane bug: a straight crosser
-always ends tens of metres past ego's lane at the 3 s horizon, so the
-endpoint-lane test suppressed it at every range (no warn, no brake in TMP
-sessions until the crosser's measured speed dropped). The straight-path pass
-(|v_curvature| < turning_diverge_kappa) plus the imminence floor keep it alive.
-Corpus FN clip ffd29f9e.
-
-Steer formula for scenarios: steer = kappa * 180 / (12 * pi); ego is straight
-so steer = 0.
-"""
-
+"""TP: straight TMP perpendicular crosser (TmpCrossTraffic endpoint-lane regression)."""
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 
 _EGO_SPEED = 80.0 / 3.6       # 22.22 m/s

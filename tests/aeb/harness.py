@@ -1,10 +1,6 @@
-﻿"""Scenario builder and frame evaluator for AEB unit tests.
-
-No radar thread, no shared memory. Builds synthetic Vehicle instances with
-seeded position history and runs the filter pipeline + collision evaluator
-directly.
-"""
-
+"""Scenario builder and frame evaluator for AEB unit tests. No radar thread, no shared memory.
+Builds synthetic Vehicle instances with seeded position history and runs the filter pipeline +
+collision evaluator directly."""
 from __future__ import annotations
 
 import math
@@ -78,21 +74,7 @@ def _make_quaternion_from_yaw_deg(yaw_deg: float) -> Quaternion:
     w = math.cos(yaw_rad / 2.0)
     # In ETS2 convention the yaw axis is Z
     z = math.sin(yaw_rad / 2.0)
-    # Quaternion.__init__ swaps x/y: self.x = y_arg, self.y = x_arg
-    # We want: pitch=0, yaw=yaw_deg, roll=0.
-    # euler() uses: yaw = atan2(2*(y*z + w*x), w²-x²-y²+z²)
-    # With x=0, y=0: yaw = atan2(2*0, w²+z²) = 0 unless we set correctly.
-    # The swap means Quaternion(w, x_in, y_in, z) stores x=y_in, y=x_in.
-    # For pure yaw: pass x_in=sin(yaw/2), y_in=0 → self.y=sin(yaw/2), self.x=0.
-    # Then: yaw = atan2(2*(0*z + w*0), ...) -- wrong.
-    # Actually for ETS2 yaw: the quaternion represents rotation around Y-world-axis.
-    # Euler yaw from the formula in Quaternion.euler():
-    #   yaw = atan2(2*(self.y*self.z + self.w*self.x), w²-x²-y²+z²)
-    # For pure yaw (rotation around z axis in stored coords):
-    # self.y = sin(yaw/2), self.z = 0, self.w = cos(yaw/2), self.x = 0 gives:
-    #   yaw = atan2(2*(sin/2 * 0 + cos/2 * 0), ...) = 0: wrong.
-    # The simplest approach: use angular_velocity and _smooth_yaw directly.
-    # Return identity and set _smooth_yaw separately in ScenarioBuilder.
+    # Quaternion x/y swap makes pure-yaw fragile; callers set Vehicle._smooth_yaw instead.
     return Quaternion(1.0, 0.0, 0.0, 0.0)
 
 
@@ -110,16 +92,7 @@ def make_vehicle(
     y: float = 0.0,
     noise_seed: int | None = None,
 ) -> Vehicle:
-    """Construct a synthetic Vehicle seeded for use in filter tests.
-
-    Sets _smooth_yaw, _smooth_speed, angular_velocity, and seeds
-    _position_history with ≥ 15 backdated samples so curvature_from_history()
-    returns a stable value from frame 1 onward.
-
-    `noise_seed` (typically the per-frame loop index) opts the snapshot into
-    deterministic small Gaussian position jitter, mimicking filtered TMP/MP
-    data. Omit it for clean geometric scenarios.
-    """
+    """Synthetic Vehicle for AEB filter tests (seeded history, optional TMP noise)."""
     if noise_seed is not None:
         nx, nz = _noise_offset(vid, noise_seed)
         x = x + nx
@@ -186,10 +159,7 @@ def evaluate_frame(
     frame: Frame,
     calibration: AEBCalibration = CAL_DEFAULT,
 ) -> EvalResult:
-    """Run the AEB filter pipeline on a single frame without a radar thread.
-
-    Returns EvalResult with max AEB state and suppression data.
-    """
+    """Run AEB filters on one frame (no radar thread). Returns EvalResult."""
     ego = frame.ego
     ego_yaw_rad = ego.yaw_norm * 2.0 * math.pi
     ego_speed = ego.speed
@@ -423,10 +393,7 @@ def build_scenario_frames(
     ego_states: list[EgoState],
     vehicle_builders: list[Any],
 ) -> list[Frame]:
-    """Build a list of frames from ego state sequence and vehicle builder callables.
-
-    Each vehicle_builder is a callable(frame_idx, t) -> Vehicle | None.
-    """
+    """Build frames from ego sequence and per-index vehicle builder callables."""
     frames = []
     for i, ego in enumerate(ego_states):
         t = i * _DT

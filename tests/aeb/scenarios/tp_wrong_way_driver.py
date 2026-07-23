@@ -1,9 +1,4 @@
-﻿"""TP: wrong-way driver directly in ego lane (x≈0), head-on at 80 km/h each.
-
-OppositeLaneFilter must NOT suppress because the vehicle is in ego's lane (EGO).
-EXPECTED: BRAKE.
-"""
-
+"""TP: wrong-way head-on in ego lane (EGO); OppositeLaneFilter must not suppress."""
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 
 _EGO_SPEED = 80.0 / 3.6

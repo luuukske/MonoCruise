@@ -1,43 +1,6 @@
-﻿"""
-ACC trail-arc fit: target arc projected onto the ego row.
+"""Trail-arc fit: target path vs ego row for offset_m and angle_amp.
 
-Closes the gap documented in ``core/acc/AGENTS.md §3``. For each target,
-the scorer asks: *"where would this vehicle's path cross the line
-through ego perpendicular to ego heading, and at what angle?"*  The
-two outputs
-
-    offset_m    signed lateral from ego centerline at the arc-crossing
-                of the ego row.  Positive = right of ego.
-    arc_angle   absolute angle (rad) between the target's tangent at
-                the crossing and ego's forward axis.  Drives
-                ``angle_amp = 2^(-(arc_angle/0.06)²)`` in
-                ``scoring.offset_component``.
-
-feed ``scoring.offset_component`` and replace the "current lateral as
-fallback" stand-in.
-
-This module owns its own sampling and curvature pipeline so the radar /
-TMP-speed / AEB code paths can keep their dense ``_position_history``
-buffers untouched.  We downsample the raw buffer ourselves
-(``_HISTORY_MIN_DIST_M = 1.0``, ``_HISTORY_MIN_DT_S = 0.05``) and fit
-an algebraic least-squares circle directly to the kept points: the
-centre, radius, and direction-of-travel sign all come from the
-positions, not from the smoothed yaw.  That removes the yaw-jitter
-sensitivity the previous "kappa from radar + centre from yaw" version
-suffered at low speeds.
-
-Two failure modes: both surfaced to the caller as the legacy baseline
-buckets (`HIT` / `NO_ARC_HIT` / `NO_HISTORY`) from ``scoring``:
-
-    fit_trail returns None
-        fewer than ``_MIN_FIT_SAMPLES`` downsampled points, total
-        chord < ``_MIN_PATH_LEN_M``, or the LS fit is singular
-        (perfectly collinear and we couldn't recover a line direction).
-        → NO_HISTORY
-    crossing_offset_and_angle returns None
-        target's fitted line/circle does not intersect the ego row.
-        → NO_ARC_HIT
-"""
+Downsample, LS circle fit, baselines: ``core/acc/README.md`` §3."""
 
 from __future__ import annotations
 
@@ -45,61 +8,29 @@ import math
 from dataclasses import dataclass
 
 
-# Per-fit downsampling.  At raw radar cadence (~30 Hz) low-speed buffers
-# bunch within centimetres and the LS fit's normal matrix collapses;
-# at high speed the buffer is dense enough that every-other sample is
-# redundant.  Keep only samples that are ≥ ``_HISTORY_MIN_DIST_M``
-# apart AND ≥ ``_HISTORY_MIN_DT_S`` apart from the last kept sample.
+# Downsample raw history: min 1 m and 0.05 s between kept samples (README §3).
 _HISTORY_MIN_DIST_M: float = 1.0
 _HISTORY_MIN_DT_S: float = 0.05
 
-# Minimum kept samples before a fit is attempted.  Five is the legacy
-# ``fit_circle`` gate and gives the 3×3 normal-equation system room to
-# average out a noisy sample without collapsing.
+# Legacy fit_circle gate: five samples minimum for a stable LS fit.
 _MIN_FIT_SAMPLES: int = 5
 
-# Reject near-stationary tracks: sub-half-metre total chord across
-# the downsampled window is well under the per-sample distance gate
-# and would only happen if the buffer hasn't filled up yet.
+# Total downsampled chord must exceed this (near-stationary → NO_HISTORY).
 _MIN_PATH_LEN_M: float = 0.5
 
-# Below this curvature magnitude, treat the trail as a straight line.
-# 1 / 2000 m ⇒ a 2 km-radius arc is indistinguishable from straight at
-# realistic scoring ranges (≤150 m horizon).
+# κ below 1/2000 m⁻¹ treated as straight at scoring horizons.
 _STRAIGHT_KAPPA_MAX: float = 1.0 / 2000.0
 
-# Goodness-of-fit gate.  After the LS circle fit returns ``(cx, cz,
-# R)``, we measure the actual max perpendicular distance from the
-# first→last chord to any interior kept sample.  An R-of-truth curve
-# of chord L produces sagitta ≈ L² / (8R); if the observed deviation
-# is significantly less than that, the LS fit is being driven by
-# position noise rather than real curvature and we collapse it to a
-# straight line.  0.5 = "the curve has to account for at least half
-# of the sagitta its own radius implies."  This catches the noise-
-# driven small-R failure mode without rejecting genuine gentle curves
-# whose sagittas happen to fall under any absolute threshold.
+# Sagitta ratio gate: collapse noisy LS circles to straight (README §3).
 _MIN_SAGITTA_RATIO: float = 0.5
 
-# Legacy SCORING_REFERENCE §8.1 angle-amp denominator.  σ = 0.06 rad
-# (~3.4°).  Tangent within ~3.4° of ego fwd ⇒ amp ≥ 0.5; past ~7° amp
-# falls below 1 / 16.
+# angle_amp Gaussian σ (rad); legacy SCORING_REFERENCE §8.1.
 _ANGLE_AMP_SIGMA: float = 0.06
 
 
 @dataclass(slots=True, frozen=True)
 class TrailFit:
-    """Result of fitting a trail to a target's position history.
-
-    ``is_straight`` discriminates the active fields:
-
-        straight  → (point_x, point_z, dir_x, dir_z)
-        curved    → (center_x, center_z, radius, sign)
-
-    ``sign`` follows ``ArcPath._sign``: +1 left-turning (centre on left
-    of forward direction, target sweeps CW around centre), −1 right-
-    turning (centre on right, sweeps CCW).  ``(dir_x, dir_z)`` is the
-    target's unit forward direction derived from the trailing chord.
-    """
+    """Straight (point+dir) or curved (centre+radius+sign); see README §3 trail-arc."""
     is_straight: bool
     center_x: float = 0.0
     center_z: float = 0.0
@@ -114,9 +45,7 @@ class TrailFit:
 def _downsample(
     history: list[tuple[float, float, float]],
 ) -> list[tuple[float, float, float]]:
-    """Keep samples ≥ ``_HISTORY_MIN_DIST_M`` AND ≥ ``_HISTORY_MIN_DT_S``
-    apart from the last kept one.  Always keeps the first and last raw
-    samples so the final tangent reflects the freshest motion."""
+    """Gate history by ``_HISTORY_MIN_DIST_M`` and ``_HISTORY_MIN_DT_S``; keep first/last."""
     if not history:
         return []
     kept: list[tuple[float, float, float]] = [history[0]]
@@ -129,9 +58,7 @@ def _downsample(
         if (dx * dx + dz * dz) < (_HISTORY_MIN_DIST_M * _HISTORY_MIN_DIST_M):
             continue
         kept.append((t, x, z))
-    # Always append the newest sample so the trailing chord reflects
-    # current motion even if it would have been gated out for being too
-    # close to the previous kept sample.
+    # Always keep newest sample for trailing-chord direction.
     if len(history) > 1:
         last = history[-1]
         if not kept or kept[-1] is not last:
@@ -142,22 +69,7 @@ def _downsample(
 def _ls_circle_fit(
     samples: list[tuple[float, float, float]],
 ) -> tuple[float, float, float] | None:
-    """Algebraic LS circle fit on ``(t, x, z)`` samples.
-
-    Solves Σ (x² + z² + A·x + B·z + C)² for (A, B, C).  Centre =
-    (−A/2, −B/2), R² = A²/4 + B²/4 − C.  Returns ``(cx, cz, R)`` or
-    ``None`` when the system is singular (collinear points) or the
-    recovered radius is non-positive.
-
-    **The data is centred around its mean before fitting.** In TMP
-    world coordinates can sit in the 10⁵ range, which makes the raw
-    normal equations operate on entries of order 10¹⁰–10²⁰ and the
-    3 × 3 determinant collapses numerically: the recovered radius
-    blows up to 10⁵+ regardless of the actual curvature, which is
-    exactly the "always straight" symptom on a real map.  Centring
-    decouples the (A, B) sub-system from C and keeps every entry of
-    the normal matrix on a sane scale.
-    """
+    """Algebraic LS circle on (x,z); data mean-centred for TMP coordinate scale (README §3)."""
     n = len(samples)
     if n < 3:
         return None
@@ -183,9 +95,7 @@ def _ls_circle_fit(
         syr += z * r2
         sr += r2
 
-    # With centred data ``Σ x = Σ z = 0`` so the normal-equation
-    # matrix decouples into a 2×2 block for (A, B) and an independent
-    # equation for C.
+    # Centred normal equations: 2×2 block for (A,B) plus C row.
     det_2 = sxx * syy - sxy * sxy
     if abs(det_2) < 1e-9:
         return None
@@ -204,14 +114,7 @@ def fit_trail(
     history: list[tuple[float, float, float]],
     target_yaw_rad_fallback: float,
 ) -> TrailFit | None:
-    """LS-fit a circle (or line) to the target's downsampled history.
-
-    ``target_yaw_rad_fallback`` is only consulted when the downsampled
-    history collapses to two samples too close together to define a
-    direction: in that degenerate case the smoothed yaw is used so
-    the caller still gets a (best-effort) straight TrailFit instead of
-    a hard ``None``.
-    """
+    """Downsample, LS circle or straight line; sagitta gate; README §3 constants."""
     samples = _downsample(history)
     if len(samples) < _MIN_FIT_SAMPLES:
         return None
@@ -229,8 +132,7 @@ def fit_trail(
     prev_x, prev_z = samples[-2][1], samples[-2][2]
     first_x, first_z = samples[0][1], samples[0][2]
 
-    # Long-baseline direction: first → last sample.  Less jittery than
-    # the last-two-samples chord; used as the straight-fit direction.
+    # Long baseline first→last for straight direction; trailing chord for tangent.
     long_dx = target_x - first_x
     long_dz = target_z - first_z
     long_len = math.hypot(long_dx, long_dz)
@@ -241,10 +143,6 @@ def fit_trail(
         long_ux = -math.sin(target_yaw_rad_fallback)
         long_uz = -math.cos(target_yaw_rad_fallback)
 
-    # Trailing chord: direction the target is heading right now.  This
-    # is what we want for the freshest tangent on a curve.  Falls back
-    # to the long chord (and then to smoothed yaw) only if the last
-    # two kept samples coincide.
     chord_dx = target_x - prev_x
     chord_dz = target_z - prev_z
     chord_len = math.hypot(chord_dx, chord_dz)
@@ -269,10 +167,7 @@ def fit_trail(
             dir_x=long_ux, dir_z=long_uz,
         )
 
-    # Goodness-of-fit: compare observed max perpendicular against the
-    # sagitta the LS radius implies for the first→last chord.  If the
-    # data doesn't actually deviate from the chord enough to back up
-    # the radius, the LS is fitting noise: collapse to straight.
+    # Reject LS circle when interior sagitta is below ``_MIN_SAGITTA_RATIO`` of expected.
     perp_x = -long_uz
     perp_z = long_ux
     max_perp = 0.0
@@ -290,10 +185,7 @@ def fit_trail(
             dir_x=long_ux, dir_z=long_uz,
         )
 
-    # ArcPath sign from the actual sweep direction.  v1 (prev →
-    # centre) and v2 (target → centre) span a small wedge at the
-    # centre; the cross product (v1 × v2) is positive iff target is
-    # CCW from prev around centre.  ArcPath: +1 = left turn = sweep CW.
+    # Sweep sign from prev→centre × target→centre (matches ``ArcPath._sign``).
     v1x = prev_x - cx
     v1z = prev_z - cz
     v2x = target_x - cx
@@ -313,14 +205,7 @@ def crossing_offset_and_angle(
     ego_x: float, ego_z: float,
     ego_fwd_x: float, ego_fwd_z: float,
 ) -> tuple[float, float] | None:
-    """Return (offset_m, arc_angle_rad) at the trail's crossing of the
-    ego row, or ``None`` when the trail does not reach the row.
-
-    ``offset_m`` is signed, positive = right of ego centerline.
-    ``arc_angle_rad`` ∈ [0, π]: 0 = target parallel to ego, π/2 =
-    perpendicular, π = oncoming.  Caller feeds it through
-    :func:`angle_amp_from`.
-    """
+    """(offset_m, arc_angle_rad) at trail ∩ ego row, or None → NO_ARC_HIT baseline."""
     right_x = -ego_fwd_z
     right_z = ego_fwd_x
 
@@ -365,10 +250,7 @@ def crossing_offset_and_angle(
 
     rx = cross_x - fit.center_x
     rz = cross_z - fit.center_z
-    # ArcPath ``max_sweep = -sign · arc_len / radius`` so target sweeps
-    # CW around centre when sign = +1 and CCW when sign = -1.  CW
-    # tangent at (rx, rz) is (rz, -rx); CCW is (-rz, rx).  Combined:
-    # sign·(rz, -rx).
+    # Tangent at crossing: sign·(rz, -rx) per ArcPath sweep convention.
     tan_x = rz * fit.sign
     tan_z = -rx * fit.sign
     tan_mag = math.hypot(tan_x, tan_z)
@@ -381,11 +263,7 @@ def crossing_offset_and_angle(
 
 
 def angle_amp_from(arc_angle_rad: float) -> float:
-    """``2^(-(arc_angle/0.06)²)``: legacy SCORING_REFERENCE §8.1.
-
-    Sharp cutoff: at ≈3.4° (= σ) amp = 0.5; at ≈7° amp = 1/16.
-    Perpendicular / oncoming arcs collapse to near zero.
-    """
+    """``2^(-(arc_angle/σ)²)`` with σ = ``_ANGLE_AMP_SIGMA`` (README §3)."""
     x = arc_angle_rad / _ANGLE_AMP_SIGMA
     return math.exp(-(x * x) * math.log(2.0))
 

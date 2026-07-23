@@ -1,23 +1,4 @@
-"""AEB clip recorder: two ring buffers + trigger logic + retroactive freeze.
-
-Owns two rolling ring buffers (one per producer thread) and the capture state
-machine. The radar thread pushes ``RadarFrameRecord``s, the AEB thread pushes
-``AEBTickRecord``s plus its current discrete warm state, both at their own
-cadence. A trigger freezes the same ``[trigger - pre_s, trigger + post_s]``
-window across both streams; once the post-roll has elapsed the window is copied,
-assembled into a ``Clip`` and handed to the ``AsyncClipWriter`` (plan 3, 4, 5).
-
-Nothing here blocks: pushes are O(1); the only heavier step (copying ~330 small
-records at freeze) runs under a short lock, and serialization happens on the
-writer's background thread. Capture is inert until ``enabled`` is set by the
-caller (gated on ``Settings.debug`` at wiring time); this module imports no
-settings so it stays unit-testable.
-
-Freeze and cooldown run on the *stream* clock (record ``t_mono``), not wall
-time, so replay windows line up with recorded timestamps and tests are
-deterministic. In production ``t_mono`` is ``time.monotonic``, so a trigger
-default of "now" and the recorded stream share one clock.
-"""
+"""Ring buffers + trigger freeze for debug AEB clips (``t_mono`` clock)."""
 
 from __future__ import annotations
 
@@ -51,19 +32,12 @@ TRIGGER_PRIORITY: dict[str, int] = {
     "random": 0,
 }
 
-# Background / boundary-negative sources: the system correctly stayed silent.
-# These are auto-tagged as true negatives (must-not-trigger) so they seed the
-# negative corpus without manual review, are throttled far harder than real
-# events (``tn_cooldown_s``), and skip the context thumbnail (a screenshot adds
-# nothing to "nothing happened here" and would cost a grab on every sample).
+# Auto-tagged TN corpus sources: heavy throttle, no thumbnail (see recorder trigger docs).
 _TN_SOURCES: frozenset[str] = frozenset({"shadow_near", "random"})
 
 
 def _auto_label_for(source: str) -> Label | None:
-    """Auto-tag for a background/negative source, or None for a real event.
-
-    A human can still open the clip in the review tool and override the class.
-    """
+    """Auto-tag TN sources; human may override in review tool."""
     if source in _TN_SOURCES:
         return Label(
             class_="tn",
@@ -74,11 +48,7 @@ def _auto_label_for(source: str) -> Label | None:
 
 
 def calibration_fingerprint(cal: object) -> tuple[str, dict]:
-    """(stable hash, full field dict) for an ``AEBCalibration`` dataclass.
-
-    The hash keys the server index; the full dict is stored too because a hash
-    alone goes stale when fields are added (plan 4.3).
-    """
+    """Stable hash + full cal dict for clip metadata fingerprint."""
     if cal is None or not dataclasses.is_dataclass(cal):
         return "", {}
     fields = dataclasses.asdict(cal)
@@ -154,10 +124,7 @@ class AEBClipRecorder:
         self.post_s = post_s
         self.burn_in_s = burn_in_s
         self.cooldown_s = cooldown_s
-        # Background/negative captures are throttled on their own long timer so a
-        # steady stream of them can never crowd out real events (they share the
-        # store's rotation cap). One boundary negative at most per this many
-        # stream-seconds while qualifying traffic persists.
+        # TN captures throttled separately so they never crowd real events.
         self.tn_cooldown_s = tn_cooldown_s
         self.enabled = enabled
         # Optional () -> base64 JPEG | None, grabbed off-thread at trigger time.
@@ -209,13 +176,7 @@ class AEBClipRecorder:
         calibration: object | None = None,
         at: float | None = None,
     ) -> str:
-        """Request a capture. Returns 'started' | 'folded' | 'ignored' | 'disabled'.
-
-        A trigger while a capture is already in flight folds into it: the window
-        is unchanged, ``trigger_source`` upgrades to the higher priority and the
-        rest accumulate in ``also_triggered``. Auto / shadow / random triggers
-        respect the post-capture cooldown; ``manual`` bypasses it.
-        """
+        """Capture trigger: started/folded/ignored/disabled; manual bypasses cooldown."""
         if not self.enabled:
             return "disabled"
         if source not in TRIGGER_PRIORITY:

@@ -1,15 +1,4 @@
-﻿"""
-Keyboard Thread: lifecycle wrapper for the `keyboard` library.
-
-Provides:
-  - Global keyboard state accessible via keyboard.is_pressed() from any thread.
-  - Capture mode for UI button assignment (future use): next key press populates
-    capture_event so the UI can read and save it.
-
-This thread's own loop() is lightweight (heartbeat only). The `keyboard` library
-runs its hooks on its own OS-level background thread; state is read directly via
-keyboard.is_pressed() in core.input_bindings without going through this thread's data.
-"""
+"""Keyboard library lifecycle wrapper; is_pressed used from input_bindings."""
 
 from __future__ import annotations
 

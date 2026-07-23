@@ -1,11 +1,4 @@
-﻿"""FP: oncoming vehicle in opposite lane, straight road.
-
-Vehicle at x=2.5m: in OPPOSITE_OR_OUTER lane (d_abs=2.5 > lane_half_width=1.95).
-Arc corridors overlap geometrically (2.5 < ego_hw+target_hw+margin=2.9m), so AEB
-would trigger without OppositeLaneFilter. With it, the oncoming evasion logic
-(Fix B) lets the vehicle follow the road and clear ego's arc.
-"""
-
+"""FP: oncoming straight opposite lane (Fix B evasion); OppositeLaneFilter suppresses."""
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 
 _EGO_SPEED = 80.0 / 3.6

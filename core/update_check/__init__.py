@@ -1,43 +1,4 @@
-"""Boot-time update check for MonoCruise.
-
-Mirrors ``core.sdk_installer.start_boot_check``: a one-shot daemon thread runs
-the (possible) GitHub round-trip off the boot / Qt main thread, so checking for
-an update can NEVER add to startup time. Every failure is logged and swallowed;
-the app boots identically whether or not GitHub can be reached.
-
-What it does
-------------
-Once per boot it asks GitHub for the newest release on the user's update
-channel (stable vs preview) and compares it to the running build. The result is
-handed to a callback (wired in ``monocruise.py``), and the newest-seen version
-is cached in ``Settings`` so the UI can keep signalling a pending update
-without another network call.
-
-Two surfaces, driven separately:
-
-* Popup (opt-in): fires when ``Settings.notify_for_updates`` is True, a newer
-  build is known (fresh or cached), and the user hasn't already been shown the
-  popup within ``THROTTLE_SECONDS``. See :func:`popup_throttled` /
-  :func:`mark_popup_shown` and the callback in ``monocruise.py``. Gating on the
-  last popup rather than the last check means a boot that found an update but
-  didn't show it (opted out at the time, etc.) doesn't push the next prompt
-  back by a full throttle window.
-* Banner + update-button tint (always): derived on the Qt main thread from
-  :func:`update_is_pending`, so they reflect a pending update on every boot,
-  including throttled ones, with zero network cost.
-
-Interaction with auto-close
----------------------------
-When MonoCruise was started with the game already connected (typically via the
-background checker) and the main window is still minimized, it closes itself
-after the game disconnects — once the live visualization bar has run down to
-center. See ``monocruise.py`` ``_check_threads`` and ``TelemetryThread``.
-
-Auto-close must NOT quit while an update is ready. Keep MonoCruise open so the
-update signals (banner / update-button tint / popup) stay visible and the user
-can act on them. The gate is :func:`update_is_pending`: skip the auto-close
-while it returns True. This module never closes the window itself.
-"""
+"""Boot-time GitHub update check (daemon thread). See README.md in this package."""
 
 from __future__ import annotations
 
@@ -57,10 +18,7 @@ REPO_NAME = "MonoCruise"
 _RELEASES_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases"
 _REQUEST_TIMEOUT = 15  # seconds, matches updater/github_api.py
 
-# Minimum spacing between network checks. The background checker can relaunch
-# MonoCruise once per game session (several times a day); without this the popup
-# would re-fire every launch. 30h means at most one check/popup per ~day even
-# with daily play, while still catching updates promptly.
+# Spacing between network checks (background checker may relaunch often).
 THROTTLE_SECONDS = 30 * 60 * 60
 
 
@@ -97,13 +55,7 @@ def _is_newer(candidate_tag: str, current_text: str) -> bool:
 
 
 def _latest_tag_for_channel(channel: str) -> str:
-    """Newest release tag visible on *channel*, or "" if none. Raises on network error.
-
-    Channel selection mirrors ``updater.github_api.get_releases_for_channel``:
-    'preview' sees only prereleases, 'stable' only non-prereleases, keyed on the
-    release's ``prerelease`` flag (CI sets it from the tag). GitHub returns
-    releases newest-first, so the first on-channel match wins.
-    """
+    """Newest on-channel release tag from GitHub (newest-first list). Raises on error."""
     import requests
 
     resp = requests.get(_RELEASES_URL, timeout=_REQUEST_TIMEOUT)
@@ -116,13 +68,7 @@ def _latest_tag_for_channel(channel: str) -> str:
 
 
 def update_is_pending() -> bool:
-    """True when the cached newest-seen release is newer than the running build.
-
-    Pure and cheap: reads ``Settings`` + ``core.version`` only, no network. Safe
-    to call from the Qt main thread on a timer. Drives the banner and the
-    update-button tint so a pending update shows on every boot, including
-    throttled ones.
-    """
+    """True when cached latest_known_version beats running build (no network)."""
     try:
         from core.settings import Settings
         from core.version import __version__
@@ -134,14 +80,7 @@ def update_is_pending() -> bool:
 
 
 def popup_throttled() -> bool:
-    """True when the user was already shown the update popup within THROTTLE_SECONDS.
-
-    Gated on ``Settings.last_update_popup`` (when the popup last actually
-    reached the user), not on ``last_update_check`` (when the network was last
-    hit). A boot that finds an update but skips the popup, e.g. notifications
-    were off at the time, must not push the next real prompt back by a full
-    throttle window.
-    """
+    """True if update popup was shown within THROTTLE_SECONDS (uses last_update_popup)."""
     from core.settings import Settings
 
     last = float(getattr(Settings, "last_update_popup", 0.0) or 0.0)
@@ -174,9 +113,7 @@ def _run_check(on_result: Callable[[UpdateCheckResult], None]) -> None:
     else:
         latest = _latest_tag_for_channel(channel)
         fresh = True
-        # Persist the throttle stamp + newest-seen tag so throttled boots and the
-        # banner/button can answer without a network call. A failed fetch raises
-        # above and never reaches here, so the stamp only advances on success.
+        # Advance throttle stamp only after a successful fetch.
         Settings.save(values={"last_update_check": now, "latest_known_version": latest})
         log.info(
             "update check (%s channel): latest=%r current=%s",
@@ -197,12 +134,7 @@ def _run_check(on_result: Callable[[UpdateCheckResult], None]) -> None:
 def start_update_check(
     on_result: Callable[[UpdateCheckResult], None],
 ) -> threading.Thread:
-    """Run the update check on a daemon thread and hand the result back.
-
-    Keeps the (possible) network call off the boot / Qt main thread. Any error
-    is logged and swallowed so a failed check can never affect startup; on
-    failure ``on_result`` is not called (the UI simply shows no pending update).
-    """
+    """Daemon thread update check; errors swallowed; on_result skipped on failure."""
 
     def _worker() -> None:
         try:

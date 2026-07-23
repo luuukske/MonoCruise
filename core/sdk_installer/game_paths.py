@@ -1,12 +1,4 @@
-"""Locate ETS2 / ATS installations and their plugin folders on Windows.
-
-Adapted from the original standalone ``connect_SDK`` script. All lookups are
-local (registry + filesystem stats) and fast; nothing here touches the network.
-
-Windows only: Steam detection uses ``winreg`` and the plugin folder lives under
-``bin/win_x64/plugins``. On any other platform every function degrades to
-"no games found" so importing this module can never crash the Linux build.
-"""
+"""Find ETS2/ATS plugin folders (Windows registry/Steam; no-op elsewhere)."""
 
 from __future__ import annotations
 
@@ -121,12 +113,7 @@ def validate_game_installation(game_path: Path, game_type: str) -> bool:
 
 
 def find_game_installations(game_type: str) -> list[Path]:
-    """All valid installations of ``game_type`` found on this machine.
-
-    Combines the uninstall registry key, every Steam library, the default
-    install locations and a last-resort scan of common paths on each drive.
-    Returns validated, de-duplicated paths (may be empty).
-    """
+    """Registry, Steam libraries, and common paths; de-duplicated valid installs."""
     config = GAME_CONFIG.get(game_type)
     if not config or not is_steam_installed():
         return []
@@ -189,12 +176,7 @@ def is_game_running(game_type: str) -> bool:
 
 
 def close_game(game_type: str) -> bool:
-    """Ask the game to close, escalating to kill only if it ignores us.
-
-    Returns True if no matching process remains afterwards. The caller is
-    responsible for confirming this with the user first (closing the game is a
-    user-facing action).
-    """
+    """Terminate game process; kill if needed. Caller must have user consent."""
     config = GAME_CONFIG.get(game_type)
     if not config:
         return False

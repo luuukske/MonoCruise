@@ -1,20 +1,4 @@
-"""Guards on the brake capacity estimate (pedal_capacity.py).
-
-The estimate is AEB's engagement denominator and pedal-FF divisor:
-contamination that inflates it silently disables emergency braking (crash
-clips ddc0cdf7 / 0fe85c88, 2026-07-10, estimate at 16.8-17.9 m/s2 vs a real
-~7.8), and contamination that deflates it makes AEB engage early and brake
-harder than needed (short AEB taps used to slam it to mid-transient ratios).
-
-These tests pin:
-  * implausible-candidate rejection and the 1.3x baseline ceiling;
-  * the startup clamp on a poisoned persisted value;
-  * the pedal settle gate (EMA + full-window excursion, step guard);
-  * the decel settle gate (taps and transients contribute nothing);
-  * ripple averaging (window means, no downward rectification);
-  * heavy settled AEB braking re-teaching the estimate fast.
-"""
-
+"""Guards on pedal_capacity brake estimate (AEB denominator). See core/sending_thread/README.md."""
 from __future__ import annotations
 
 import pytest
@@ -73,9 +57,7 @@ def _feed(t, clk, pedal, decel, ticks=60, dt=DT, speed=SPEED, aeb=False):
 
 
 def test_contaminated_sample_rejected(clock):
-    """Partial pedal + retarder-inflated decel implies an impossible
-    full-pedal capacity (candidate is curve-corrected: 6.0 at 0.2 pedal
-    extrapolates to ~13 m/s2, above the 1.35x baseline cap)."""
+    """Reject inflated decel at partial pedal (above 1.35x baseline cap after curve correction)."""
     t = _fresh()
     _feed(t, clock, pedal=0.2, decel=6.0)
     assert t.max_brake_ms2 == pytest.approx(BASE)
@@ -89,9 +71,9 @@ def test_legit_strong_brake_still_learns(clock):
 
 
 def test_gentle_press_drifts_estimate_slowly(clock):
-    """Soft presses still teach, but slowly: a 2 s gentle stop must barely
-    move the estimate, so a stretch of abnormal braking cannot poison it
-    (estimate fell 9 -> 4 m/s2 in routine driving, 2026-07-19)."""
+    """Soft presses still teach, but slowly: a 2 s gentle stop must barely move the estimate, so a
+    stretch of abnormal braking cannot poison it (estimate fell 9 -> 4 m/s2 in routine driving,
+    2026-07-19)."""
     t = _fresh()
     _feed(t, clock, pedal=0.3, decel=1.2, ticks=60)
     assert t.max_brake_ms2 == pytest.approx(BASE, rel=0.05)
@@ -120,10 +102,9 @@ def test_heavy_settled_aeb_is_excellent_data(clock):
 
 
 def test_tap_transient_rejected_then_settled_phase_teaches(clock):
-    """An AEB tap whose decel is still rising contributes nothing; once the
-    decel flattens, the settled phase re-teaches fast. This is the tap
-    poisoning fix: before the decel settle gate, the rising phase's
-    mid-transient ratios became the estimate within ~100 ms."""
+    """An AEB tap whose decel is still rising contributes nothing; once the decel flattens, the
+    settled phase re-teaches fast. This is the tap poisoning fix: before the decel settle gate,
+    the rising phase's mid-transient ratios became the estimate within ~100 ms."""
     t = _fresh()
     # 1 s tap: pedal settled at 0.8, decel ramping 0 -> 6 (never flat).
     for i in range(30):
@@ -140,10 +121,9 @@ def test_tap_transient_rejected_then_settled_phase_teaches(clock):
 
 
 def test_v_dip_rejected(clock):
-    """A pedal dip that returns to its old level within one window used to
-    pass the endpoint-only settle check while the decel was still chasing
-    the dip. The excursion check + decel gate must reject every sample of
-    the dip and its recovery."""
+    """A pedal dip that returns to its old level within one window used to pass the endpoint-only
+    settle check while the decel was still chasing the dip. The excursion check + decel gate must
+    reject every sample of the dip and its recovery."""
     t = _fresh()
     _feed(t, clock, pedal=0.6, decel=4.0, ticks=60, aeb=True)
     est0 = t.max_brake_ms2
@@ -163,9 +143,9 @@ def test_v_dip_rejected(clock):
 
 
 def test_release_gap_blocks_relearn_until_resettled(clock):
-    """Between two presses the pedal drops out and the decel decays. The
-    second press must not inherit the first press's settled window: no
-    sample may fire until pedal AND decel are flat again."""
+    """Between two presses the pedal drops out and the decel decays. The second press must not
+    inherit the first press's settled window: no sample may fire until pedal AND decel are flat
+    again."""
     t = _fresh()
     _feed(t, clock, pedal=0.7, decel=5.0, ticks=60, aeb=True)
     est0 = t.max_brake_ms2
@@ -182,10 +162,9 @@ def test_release_gap_blocks_relearn_until_resettled(clock):
 
 
 def test_ripple_averages_instead_of_rectifying(clock):
-    """Telemetry cadence puts zero-mean ripple on the decel signal. Window
-    means must make the estimate track the true mean, not the lower envelope
-    (the asymmetric underperform alpha would otherwise rectify the ripple
-    into downward drift)."""
+    """Telemetry cadence puts zero-mean ripple on the decel signal. Window means must make the
+    estimate track the true mean, not the lower envelope (the asymmetric underperform alpha would
+    otherwise rectify the ripple into downward drift)."""
     t = _fresh()
     for i in range(90):
         clock.t += DT

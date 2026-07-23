@@ -1,10 +1,6 @@
-"""Tests for the AEB clip capture-and-save path: schema, store, recorder.
-
-Exercises serialization round-trip, on-disk rotation, the background writer, and
-the recorder's retroactive freeze / trigger-priority / cooldown logic without a
-game, shared memory, or the live threads.
-"""
-
+"""Tests for the AEB clip capture-and-save path: schema, store, recorder. Exercises serialization
+round-trip, on-disk rotation, the background writer, and the recorder's retroactive freeze /
+trigger-priority / cooldown logic without a game, shared memory, or the live threads."""
 from __future__ import annotations
 
 import os

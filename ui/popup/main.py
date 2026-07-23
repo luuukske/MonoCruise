@@ -1,6 +1,4 @@
-"""
-Entry point for the popup notification system.
-"""
+"""Entry point for the popup notification system."""
 import sys
 import threading
 import time

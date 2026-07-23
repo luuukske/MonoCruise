@@ -1,27 +1,4 @@
-"""Detect, fetch and install the ETS2 / ATS SDK DLLs.
-
-This is the backend only: it decides *what* needs doing and can carry it out,
-but never shows UI. A front-end drives it by calling :func:`check_sdk` (or
-:func:`start_boot_check` for a non-blocking boot check), inspecting the returned
-:class:`SdkCheckResult`, and calling :meth:`SdkManager.apply` once the user has
-agreed.
-
-Boot policy
------------
-* Locate every ETS2 / ATS install and check which managed files are present.
-  This is entirely local and fast.
-* The repository is only consulted (one JSON request) when a file is missing,
-  or when this build opts into a forced refetch and the running version has not
-  refetched yet. When every DLL is already installed on a normal build we never
-  touch the network.
-
-Forced refetch
---------------
-Set :data:`FORCE_REFETCH` to ``True`` in a build that must re-pull the ETS2LA
-plugin even though the DLLs look installed (e.g. shipping a fix for a bad plugin
-build). It runs once: after the SDK is confirmed up to date the running
-MonoCruise version is recorded and later boots skip the network again.
-"""
+"""ETS2/ATS SDK install backend (no UI). See README.md in this package."""
 
 from __future__ import annotations
 
@@ -55,9 +32,7 @@ from .remote import (
 
 log = logging.getLogger("sdk")
 
-# Game engine version the bundled ETS2LA plugin supports. Bump this when the
-# plugin gains support for a newer game version (a matching Assets/SDKs/<ver>
-# folder must exist in the ETS2LA repository).
+# Plugin targets this game engine version (Assets/SDKs/<ver> upstream).
 SUPPORTED_GAME_VERSION = "1.60"
 
 # Flip to True in a build that must re-fetch the plugin even when the DLLs are
@@ -145,9 +120,7 @@ class GameApplyResult:
     installed: list[str] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)
     skipped_running: bool = False
-    # Files left unwritten because the running game holds them loaded (present
-    # but outdated) and we were told not to close it. Replacing them needs the
-    # game closed. Distinct from skipped_running, which skips the whole game.
+    # Present-but-outdated DLLs while game runs (see deferred_running vs skipped_running).
     deferred_running: list[str] = field(default_factory=list)
     # True when the target game version has no SDK folder in the repository yet.
     unsupported: bool = False
@@ -201,12 +174,7 @@ class SdkManager:
     # Detection
 
     def check(self, *, force_remote: bool | None = None) -> SdkCheckResult:
-        """Inspect every install and report what (if anything) needs doing.
-
-        Read-only: never downloads, copies or deletes. Consults the repository
-        only when needed (see the module docstring) unless ``force_remote`` is
-        given explicitly.
-        """
+        """Read-only install scan; remote only when missing or FORCE_REFETCH."""
         if not is_steam_installed():
             return SdkCheckResult(self.version, False, False, None)
 
@@ -279,10 +247,7 @@ class SdkManager:
         return result
 
     def locate_games(self) -> list[GameSdkState]:
-        """Every ETS2 / ATS install as a state object, without consulting the
-        repository (per-file up-to-date flags are left optimistic). Used to
-        drive a forced reinstall where the current file state does not matter.
-        """
+        """All local installs without remote SHA checks (force reinstall path)."""
         states: list[GameSdkState] = []
         for game_type in GAME_TYPES:
             for game_path in find_game_installations(game_type):
@@ -336,25 +301,7 @@ class SdkManager:
         force_all: bool = False,
         allow_running_missing: bool = False,
     ) -> list[GameApplyResult]:
-        """Install missing / outdated files into the given installations.
-
-        Downloads each needed file once (verified) into the cache, then copies
-        it into every game's plugin folder. If a game is running it is skipped
-        unless ``close_running`` is True, in which case it is closed first
-        (the caller must have obtained the user's consent).
-
-        With ``force_all`` every managed file the repository publishes is
-        (re)downloaded and overwritten regardless of the file's current state -
-        used by the "reinstall SDK" action.
-
-        With ``allow_running_missing`` a running game is not skipped: files
-        that are absent on disk are still installed (the game never loaded them,
-        so there is no lock, and they take effect on its next start), while
-        present-but-outdated files it holds loaded are recorded in
-        ``deferred_running`` rather than overwritten. Lets a boot-time
-        auto-install stage the plugin without closing a live game. Ignored when
-        ``close_running`` is True.
-        """
+        """Copy verified cache files into plugin dirs; see README for running-game modes."""
         try:
             remote_files = self.source.list_files()
         except SdkVersionUnsupported as exc:
@@ -394,11 +341,7 @@ class SdkManager:
 
             wanted = self._files_to_install(game, remote_files, force_all=force_all)
             if restrict_to_missing:
-                # A present DLL the game already loaded is memory-mapped and
-                # cannot be replaced now, so defer it for a close + reinstall.
-                # Everything else (an absent DLL, the version marker, the
-                # courtesy file) is not locked and is written normally: it
-                # takes effect on the next game start.
+                # Loaded DLLs stay deferred; absent files install for next game start.
                 result.deferred_running = [
                     n for n in wanted
                     if n.endswith(".dll") and (game.plugins_dir / n).exists()
@@ -431,9 +374,7 @@ class SdkManager:
         *,
         force_all: bool = False,
     ) -> list[str]:
-        """Filenames to (re)install for one game: stale/missing tracked files,
-        plus any courtesy file that is absent or differs from the source. With
-        ``force_all``, every published managed file is returned."""
+        """Stale/missing tracked files plus courtesy files; force_all returns all remote."""
         if force_all:
             return [n for n in (*self.tracked_files, *COURTESY_FILES) if n in remote_files]
         wanted = [f.name for f in game.files if not f.installed or not f.up_to_date]
@@ -480,12 +421,7 @@ def start_boot_check(
     *,
     force_remote: bool | None = None,
 ) -> threading.Thread:
-    """Run :func:`check_sdk` on a daemon thread and hand the result back.
-
-    Keeps the (possible) network call off the boot / Qt main thread. Any error
-    is logged and swallowed so a failed check can never affect startup; in that
-    case ``on_result`` is not called.
-    """
+    """Daemon check_sdk; errors swallowed; on_result not called on failure."""
 
     def _run() -> None:
         try:
@@ -508,12 +444,7 @@ def start_reinstall(
     *,
     close_running: bool = True,
 ) -> threading.Thread:
-    """Force-reinstall every managed file on a daemon thread, then hand the
-    per-game results back. Keeps the download / file I/O off the caller's
-    thread; ``on_result`` runs on the worker thread, so a Qt caller must marshal
-    any UI work (or use the thread-safe logging popup). On failure ``on_result``
-    receives an empty list.
-    """
+    """Daemon reinstall_all; on_result([]) on failure; UI must marshal from worker."""
 
     def _run() -> None:
         try:

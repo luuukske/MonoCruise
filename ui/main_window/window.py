@@ -1,14 +1,4 @@
-﻿"""
-MonoCruise – Main application window.
-
-Assembles banner, settings panel, gear button, command bar, and version
-label.  Integrates with ``core.settings.Settings`` for persistence and
-reads thread state from the ``Registry`` via periodic QTimer polling.
-
-Lives on the main thread alongside the QApplication event loop.  Created
-by ``create_main_window()`` in ``ui/main_window/main.py``.
-"""
-
+"""MonoCruise – Main application window. Assembles banner, settings panel, gear button,..."""
 from __future__ import annotations
 
 import logging
@@ -69,11 +59,7 @@ _BANNER_STATE_NAMES: dict[BannerState, str] = {
 
 
 class MonoCruiseWindow(QMainWindow):
-    """Top‑level MonoCruise window (700×500, dark theme).
-
-    Emits ``window_closed`` when the user closes the window so the root
-    main.py can trigger a clean shutdown of all threads.
-    """
+    """Top‑level MonoCruise window (700×500, dark theme). Emits ``window_closed`` when the..."""
 
     # Signal emitted when the window is closed by the user
     window_closed = Signal()
@@ -193,9 +179,7 @@ class MonoCruiseWindow(QMainWindow):
         self._cc_panel: CcPanel | None = None
         self._cc_panel_scale_snap: float | None = None
         self._cc_panel_update_snap: tuple | None = None
-        # Lead speed throttle: only push a new int km/h every _CC_LEAD_SPEED_MIN_INTERVAL_S
-        # so rapid telemetry jitter doesn't flicker the displayed value faster
-        # than a human can read it. None pass-through is immediate (retract).
+        # Throttle lead speed int km/h updates so telemetry jitter does not flicker the label.
         self._cc_lead_speed_emit_val: int | None = None
         self._cc_lead_speed_emit_ts: float = 0.0
         self._init_cc_panel()
@@ -279,15 +263,7 @@ class MonoCruiseWindow(QMainWindow):
     # Startup visibility
 
     def apply_startup_visibility(self) -> None:
-        """
-        Initial startup behaviour.
-
-        Always lands in the taskbar first (minimised) so a game-session launch
-        never steals focus. If the SCS telemetry shared-memory block is absent,
-        show normally immediately (manual / no-game launch). Otherwise wait for
-        telemetry's first result in ``_poll_threads()`` before deciding — the
-        mapping can exist briefly while ``truck_telemetry`` is not yet usable.
-        """
+        """Initial startup behaviour. Always lands in the taskbar first (minimised) so a..."""
         from core.telemetry_thread.thread import sdk_shm_active
 
         self.showMinimized()
@@ -306,10 +282,7 @@ class MonoCruiseWindow(QMainWindow):
     # Thread‑state polling
 
     def _poll_threads(self) -> None:
-        """
-        Called every 100 ms by QTimer.  Reads data from registered threads
-        via the Registry and updates the UI accordingly.
-        """
+        """Poll registry thread data every 100 ms and refresh UI."""
         try:
             self._apply_deferred_startup_visibility()
         except Exception:
@@ -326,13 +299,7 @@ class MonoCruiseWindow(QMainWindow):
             logger.exception("main window poll: update indicator sync failed")
 
     def _apply_deferred_startup_visibility(self) -> None:
-        """Restore the window once telemetry's first result is known.
-
-        Startup always begins minimized (taskbar present, no focus steal).
-        After telemetry setup/first loop:
-          - game connected → stay minimized
-          - no game (manual_start) → show normally
-        """
+        """Restore the window once telemetry's first result is known. Startup always begins..."""
         if self._startup_visibility_applied:
             return
         try:
@@ -368,12 +335,9 @@ class MonoCruiseWindow(QMainWindow):
         self._open_on_taskbar = True
 
     def _sync_update_indicator(self) -> None:
-        """Reflect a pending update on the banner + settings update button.
-
-        Both derive from the cached boot-check result (core.update_check), so
-        this is a cheap main-thread read with no network. Idempotent: the
-        widgets no-op when the state is unchanged.
-        """
+        """Reflect a pending update on the banner + settings update button. Both derive from the
+        cached boot-check result (core.update_check), so this is a cheap main-thread read with no
+        network. Idempotent: the widgets no-op when the state is unchanged."""
         from core.update_check import update_is_pending
 
         pending = update_is_pending()
@@ -406,11 +370,7 @@ class MonoCruiseWindow(QMainWindow):
             return "Speed limiter"
         return "Cruise control"
 
-    # Truck detection for the CC-panel icon swap. The ACC tracker keeps
-    # `LeadInfo.vehicle` pointing at the trailer record even after the
-    # tractor-kinematics swap, so `is_trailer` alone identifies an
-    # articulated rig. trailer_count and length cover unattached tractors
-    # and long rigid trucks (no trailer, but clearly not a car).
+    # Lead truck heuristic (trailer / count / length). See ui/cc_panel/README.md.
     _TRUCK_LENGTH_M: float = 6.0
 
     @classmethod
@@ -483,17 +443,12 @@ class MonoCruiseWindow(QMainWindow):
                 if primary is not None:
                     acc_locked = True
                     acc_truck = self._classify_lead_as_truck(primary.vehicle)
-                    # Quantize the lead's smoothed absolute speed to int km/h so
-                    # the snap below only fires panel updates when the displayed
-                    # value would actually change (panel renders to int anyway).
+                    # Int km/h snap so panel updates only when displayed value would change.
                     lead_speed_kmh = int(round(primary.effective_speed_ms * 3.6))
         except (KeyError, AttributeError):
             pass
 
-        # Throttle lead-speed pass-through so rapid changes don't flicker the
-        # text faster than a human can read. Pass-through is immediate when
-        # the lead first appears (last emit was None) or when retracting (new
-        # value is None); only value-to-value changes are rate-limited.
+        # Rate-limit lead speed changes; None first/last pass through immediately.
         now_mono = time.monotonic()
         last_val = self._cc_lead_speed_emit_val
         if lead_speed_kmh is None or last_val is None:

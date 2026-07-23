@@ -25,12 +25,7 @@ class GitHubAPI:
         return []
     
     def get_releases(self) -> list[dict]:
-        """Fetch all releases including pre-releases.
-
-        Raises GitHubAPIError when GitHub is unreachable (no internet) or
-        answers with a non-200 status (rate limit, outage) — callers must be
-        able to distinguish "no releases" from "couldn't ask".
-        """
+        """Fetch all releases including pre-releases; raises GitHubAPIError when unreachable."""
         if self._releases_cache is not None:
             return self._releases_cache
         try:
@@ -62,15 +57,7 @@ class GitHubAPI:
         return releases[0] if releases else None
 
     def get_releases_for_channel(self, channel: str) -> list[dict]:
-        """Releases visible on an update channel, newest first.
-
-        'preview' sees only pre-release builds; 'stable' sees only
-        non-prerelease builds. Selection is by each release's `prerelease`
-        flag, which CI sets reliably from the tag suffix (a '-' in the tag).
-        This deliberately does NOT filter on target_commitish: for releases
-        created against a pre-existing tag GitHub reports the default branch
-        there, so branch-based filtering is unreliable.
-        """
+        """Channel-filtered releases (preview=prerelease only); ignores target_commitish."""
         releases = self.get_releases()
         if channel == "preview":
             return [r for r in releases if r.get('prerelease', False)]

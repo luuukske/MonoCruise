@@ -1,12 +1,4 @@
-﻿"""FP: vehicle far behind ego closing at high speed in same lane.
-
-Ego at 80 km/h, vehicle 50 m behind in ego's lane at 144 km/h (overtaking).
-Closing rate 17.8 m/s. Braking ego would worsen the impact, so AEB must
-not trigger: the braking_worsens vector-magnitude check owns this case.
-Companion to fp_overtaker which uses an adjacent lane; this variant puts
-the closer in ego's lane.
-"""
-
+"""FP: high-closure overtaker in ego lane behind ego; braking_worsens must suppress."""
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 
 _EGO_SPEED = 80.0 / 3.6

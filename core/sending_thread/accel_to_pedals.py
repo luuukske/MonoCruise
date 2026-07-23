@@ -1,4 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+"""Commanded m/s² to gas/brake mapping. See core/sending_thread/README.md."""
 
 import csv
 import logging
@@ -30,10 +32,6 @@ _OUTPUT_SMOOTHING_TAU_S: float = 0.08
 _OUTPUT_SMOOTHING_DELTA_REF_MS2: float = 1.0
 
 # Fast PID (unified trim, m/s² space): injected into `combined` upstream of the FF
-# mapping. Capacities are pedal-output scalers (FF), not trims: they map combined
-# m/s² → pedal via `combined / max_accel` (gas) or the inverse brake curve.
-# Routing the fast trim through the same FF eliminates the zero-crossing
-# discontinuity that a sign-switched capacity-divide produced.
 _KP_FAST: float = 0.25
 _KI_FAST: float = 0.25
 _KD_FAST: float = 0.15
@@ -41,52 +39,28 @@ _FAST_I_CLAMP_MS2: float = 1.5      # m/s²
 _FAST_DERIV_TAU_S: float = 0.12     # measurement derivative smoothing
 
 # Low-gear D-term attenuation. At gear 1-2 the engine has a 300-400 ms response
-# lag and the truck self-surges with no pedal input (clutch engaged, idle creep);
-# differentiating raw_smooth at full Kd amplifies that surge into a pedal limit
-# cycle. Scaling Kd down at low gears damps the inner loop without sacrificing
-# steady-state tracking (FF + slow_integral still carry it).
 _LOW_GEAR_KD_SCALE: float = 0.5
 _LOW_GEAR_KD_MAX_GEAR: int = 2
 
 # Slow integral (road load bias correction in m/s² space).
-# This is the PRIMARY absorber of persistent road-load error. Kept fast enough that
-# fast PID never has to carry bias (which would cause stale state across context flips).
 _KI_SLOW: float = 0.15
 # Measured road-load error is around 0.5 m/s2, so +-1.0 is double the headroom
 # the correction actually needs. The old +-2.0 mostly bounded windup, not bias.
 _SLOW_I_CLAMP_MS2: float = 1.0
 # Anti-windup. A railed pedal has no authority left, so tracking error that
-# persists there is not road-load bias and integrating it is pure windup. A
-# loaded truck rails the gas for minutes at a time on climbs, which wound the
-# integral to its clamp; the mapper then kept feeding gas for tens of seconds
-# after the commander asked for decel, because the wound bias sits inside the
-# effective road load the feedforward has to overcome before it reaches the
-# brake side. Same role the fast integral's back-calc plays in `step`.
 _SLOW_I_SAT_EFFORT: float = 0.95
 # Unwinding runs faster than winding: bias written in during a saturated climb
-# must be sheddable in seconds when the road flips, not tens of seconds. Only
-# applies while the error opposes the stored bias, and it drops out at the zero
-# crossing, so it cannot drive the integral past zero.
 _KI_SLOW_UNWIND_MULT: float = 3.0
 # Initial bias: overestimates resistance so the limiter approaches the set speed
 # conservatively on first engagement. The integral corrects this within a few seconds.
 _SLOW_I_INIT_BIAS_MS2: float = -0.4
 # Stationary gate: at speeds below this, freeze slow_integral negative
-# accumulation. ACC publishes a -0.6 m/s² standstill hold; raw_smooth is 0
-# (truck not moving), so error stays negative forever and the integrator winds
-# toward -_SLOW_I_CLAMP_MS2, then fights gas-side launch when traffic moves.
 _STATIONARY_SLOW_I_GATE_SPEED_MS: float = 0.5
 
 # When the hold FSM owns standstill (freeze_slow_i=True), bleed slow_integral
-# toward 0 with this time constant so stale bias from the decel-to-stop doesn't
-# linger and fight the eventual launch.
 _HOLD_SLOW_I_LEAK_TAU_S: float = 10.0
 
 # Brake feedforward curve constants: fitted from collected data
-# DO NOT CHANGE WITHOUT VALID COLLECTED DATA
-# y = A * (1 - e^(-rate * x^power))
-# where x = brake pedal [0,1], y = |decel| in m/s².
-# Code uses the inverse: pedal from desired deceleration.
 _BRAKE_CURVE_RATE: float = 2.4277
 _BRAKE_CURVE_POWER: float = 0.8518
 
@@ -96,50 +70,20 @@ _ROAD_LOAD_DELTA_REF_MS2: float = 0.25  # above this → fast tracking
 _ROAD_LOAD_SPEED_EPSILON_MS: float = 0.2
 _MAX_ROAD_GRADE_RAD: float = 0.35  # clamp pathological game values
 # Aerodynamic drag coefficient fitted from coast-down data.
-# decel_aero = _AERO_DRAG_ACCEL_PER_V2 * v^2  [m/s² per (m/s)²]
-# Fit on ~41 t truck gave ~4.9e-5. Close enough for any mass: slow integral
-# absorbs mass-driven residual.
 _AERO_DRAG_ACCEL_PER_V2: float = 4.9e-5
 
 # Idle-creep feedforward. With the driveline closed the idle governor
-# drives the truck through the lowest gear (D1 forward or R1 reverse; the
-# game's automatic only declutches near standstill), so the brake FF must
-# overcome a real along-gear force during the final approach or ACC stalls
-# on a creep plateau instead of stopping. Injected clutch is ignored by the
-# game's transmission automation, so this is compensated in control space.
-# Fitted from quasi-steady low-speed braking samples (speed constant, so
-# creep = brake decel + road load exactly): saturated below the knee,
-# linear to zero at the idle-match speed. Stored mass-normalized to the
-# 20 t reference and scaled by gain_scale at runtime (creep is a fixed
-# force, so accel scales with 1/mass). Forward magnitude is the fit; reverse
-# is the same shape scaled down — R1 was never separately fitted and full
-# D1 cancel over-brakes in reverse in-game.
-# DO NOT CHANGE WITHOUT VALID COLLECTED DATA
 _CREEP_MAX_REF_MS2: float = 2.343   # m/s² at 20 t, below the knee
 _CREEP_REVERSE_SCALE: float = 0.5   # R1 magnitude / D1 magnitude (tunable)
 _CREEP_KNEE_SPEED_MS: float = 0.55  # governor saturation below this
 _CREEP_ZERO_SPEED_MS: float = 2.54  # idle-match speed: creep reaches 0
 
 # Gearshift handling. While the clutch is open (plus a short block after
-# release) the measured-accel path is frozen and all trim state is held; the
-# frozen measurement then blends back to live over the ramp. Trim OUTPUT is
-# never gated: only accumulation is, so the pedal command stays continuous
-# through the whole shift (zeroing the output and snapping it back is what
-# used to jolt the gas at every shift).
 _GAME_CLUTCH_ACTIVE_THRESHOLD: float = 0.05
 _GEARSHIFT_BLOCK_DURATION_S: float = 0.2
 _GEARSHIFT_RAMP_DURATION_S: float = 0.5
 
 # Gas-capacity glide across gearshifts. The per-gear capacity from
-# PedalCapacityTracker steps ~27% at every shift and passes through the anchor
-# value while telemetry gear reads neutral mid-shift; dividing the FF by it
-# directly steps the gas pedal at each of those moments. Near full power that
-# step ping-pongs the game's transmission (downshift -> gas cut -> upshift ->
-# gas floor -> kickdown...). Instead the capacity used for the gas mapping is
-# frozen while the driveline is open, then glides to the new gear's value:
-# slowly when capacity rises (downshift: bleed gas off gently so the box
-# isn't provoked into upshifting right back), fast when capacity falls
-# (upshift: gas must come back quickly or the truck sags).
 _CAPACITY_GLIDE_RISE_TAU_S: float = 1.0
 _CAPACITY_GLIDE_FALL_TAU_S: float = 0.3
 
@@ -238,14 +182,7 @@ def baseline_brake_ms2(total_mass_kg: float, has_trailer: bool) -> float:
 
 
 def brake_curve_fraction(pedal: float) -> float:
-    """Fraction of max brake capacity the game delivers at *pedal* [0-1].
-
-    The fitted game curve is y = A * (1 - e^(-rate * x^power)); this returns
-    the A-independent factor. Capacity learning divides a measured decel by
-    this instead of by the raw pedal: the linear ratio decel/pedal over-reads
-    the asymptote A below ~0.9 pedal (+48% at half pedal) and under-reads
-    ~9% at full pedal, so partial-pedal samples biased the learned estimate.
-    """
+    """Fraction of max brake capacity the game delivers at *pedal* [0-1]. See `core/sending_thread/README.md`."""
     x = _clamp(_finite_or_zero(pedal), 0.0, 1.0)
     if x <= 0.0:
         return 0.0
@@ -271,15 +208,7 @@ def creep_accel_ms2(
     game_clutch: float,
     gain_scale: float,
 ) -> float:
-    """Idle-creep along-gear accel magnitude (m/s²) with the driveline closed.
-
-    Lowest gear only (D1 or R1): the only regimes the fit covers (the
-    automatic holds that gear across the whole creep band). Uses |speed|
-    so reverse matches forward shape. R1 is scaled by ``_CREEP_REVERSE_SCALE``
-    Scaled by clutch closure (``1 - game_clutch``; caller should pass
-    ``max(userClutch, gameClutch)`` so a manual press also fades creep:
-    0.5 clutch → half cancel, 1.0 → none). Returned magnitude is always >= 0.
-    """
+    """Idle-creep along-gear accel magnitude (m/s²) with the driveline closed. See `core/sending_thread/README.md`."""
     gear = int(gear_dashboard)
     if abs(gear) != 1:
         return 0.0
@@ -309,17 +238,7 @@ _STATE_NAMES: dict[int, str] = {_STATE_GAS: "GAS", _STATE_BRAKE: "BRAKE"}
 
 @dataclass(slots=True)
 class MapperSharedState:
-    """State shared across multiple AccelToPedals instances.
-
-    Allows two mappers (e.g. a cruise-side and a limiter-side) to hand over
-    pedal control without losing learned bias, capacity, or output continuity.
-    Everything except the integrators is committed every tick: measurement
-    EMAs, road load, gearshift snapshot, and output trajectory are the
-    mapper's live view of the truck and its own pedal continuity, not
-    learning. Only the slow integral (and the per-instance fast integral)
-    is gated on learn=True so adaptation freezes while someone else (user
-    pedal, AEB) drives the truck.
-    """
+    """State shared across multiple AccelToPedals instances. See `core/sending_thread/README.md`."""
     # Time
     prev_mono: float | None = None
 
@@ -336,9 +255,6 @@ class MapperSharedState:
     road_load_smooth: float = 0.0
 
     # Slow road-load bias correction integral (m/s² space).
-    # Persists across commander handover so transitions don't lose the learned bias.
-    # Starts at _SLOW_I_INIT_BIAS_MS2 (overestimates resistance) so the limiter
-    # approaches the set speed conservatively; corrects quickly once active.
     slow_integral: float = _SLOW_I_INIT_BIAS_MS2
 
     # Output m/s² EMA: continuity across handover.
@@ -348,15 +264,9 @@ class MapperSharedState:
     prev_gas_cmd: float | None = None
 
     # Signed effort committed on the previous tick (pedal units, gas positive).
-    # Slow-integral anti-windup reads it: the integral must not keep
-    # accumulating toward a pedal that is already railed. Lagged by one tick
-    # because the effort is only known after the integral has been folded into
-    # the effective road load.
     prev_effort: float = 0.0
 
     # Gas-capacity glide state (m/s² at gas=1.0): the capacity actually used
-    # for the gas mapping, chasing the per-gear estimate with asymmetric taus
-    # so the pedal glides across gear changes instead of stepping.
     accel_capacity_glide_ms2: float | None = None
 
     # Capacity estimates (single source of truth, fed in from PedalCapacityTracker).
@@ -386,12 +296,6 @@ class PedalTargets:
     estimated_max_accel_ms2: float = 0.0
     estimated_max_brake_ms2: float = 0.0
     # Diagnostics: field names preserved for external consumers.
-    # Semantic mapping to unified controller:
-    #   gas_p/gas_i/gas_d → fast PID terms (used for gas OR brake, unified)
-    #   brake_ff          → brake-side feedforward pedal magnitude (0 when effort>=0)
-    #   brake_trim_p      → slow_integral in m/s² space (repurposed; no trim P anymore)
-    #   brake_trim_i      → fast integral in pedal units (same as gas_i, kept for compat)
-    #   brake_multiplier  → fixed 1.0 (deprecated; pedal_capacity.py handles this)
     gas_p: float = 0.0
     gas_i: float = 0.0
     gas_d: float = 0.0
@@ -405,17 +309,12 @@ class PedalTargets:
     # the capacity tracker can subtract it from manual-driving gas samples.
     creep_ms2: float = 0.0
     # True when the pure-FF gas pedal alone saturates: the commanded accel
-    # exceeds the truck's capability, so the bid is a headroom cap (allow
-    # max), not a trackable setpoint. Learn gate uses it to keep the limiter
-    # from adapting integrators toward an unsatisfiable command.
     ff_saturated: bool = False
 
 
 class AccelToPedals:
     def __init__(self, shared: MapperSharedState | None = None) -> None:
         # Shared state: owned externally when multiple mappers must share
-        # learned bias/capacity/output continuity. When None, this instance
-        # owns its own (single-mapper case, behavior unchanged).
         self._shared: MapperSharedState = shared if shared is not None else MapperSharedState()
 
         # Per-instance smoothed signals (controller-specific)
@@ -473,26 +372,7 @@ class AccelToPedals:
         s.frozen_raw_smooth = 0.0
 
     def handover_reseed(self, applied_gas: float | None) -> None:
-        """Commander handover (cc <-> limiter <-> none): one-shot bumpless
-        re-seat.
-
-        The wanted EMA seeds directly with the next step's bid: a handover
-        is a setpoint replacement, not a trajectory, and slewing across the
-        gap (sole-limiter headroom bid ~10 m/s2 above a CC bid) saturates
-        the pedal and lets the anti-windup back-calc snap the fast integral
-        to its clamp.
-
-        The gas rate-limit anchor re-seats per the incoming commander:
-        - applied_gas set (limiter taking over): the cap starts at the pedal
-          the game actually received, so it neither dips a user override
-          (inheriting CC's low gas) nor has to travel down from a stale
-          open-cap value before it can bind.
-        - applied_gas None (tracking commander taking over): the anchor
-          clears so CC steps straight to its own output. Anchoring it to the
-          user's abandoned pedal forces the symmetric rate limiter to walk
-          the throttle down from that value: a ~0.3 s surge the controller
-          never commanded (release of a gas override must feel like a
-          natural lift-off, not a decaying pulse)."""
+        """Commander handover (cc <-> limiter <-> none): one-shot bumpless See `core/sending_thread/README.md`."""
         self._pending_wanted_snap = True
         if applied_gas is None:
             self._shared.prev_gas_cmd = None
@@ -565,12 +445,7 @@ class AccelToPedals:
         decel_ms2: float,
         max_brake_ms2_override: float | None = None,
     ) -> float:
-        """Inverse of y = A * (1 - e^(-rate * x^power)) -> pedal x from decel y.
-
-        A = current estimated max brake capacity (m/s²). Returns pedal in [0, 1].
-        Pass `max_brake_ms2_override` to use a freshly-computed capacity that
-        hasn't been committed to shared state yet.
-        """
+        """Inverse of y = A * (1 - e^(-rate * x^power)) -> pedal x from decel y. See `core/sending_thread/README.md`."""
         if decel_ms2 <= 0.0:
             return 0.0
         if max_brake_ms2_override is not None:
@@ -595,13 +470,7 @@ class AccelToPedals:
         decel_ms2: float,
         max_brake_ms2_override: float | None = None,
     ) -> float:
-        """Public wrapper around the inverse brake curve.
-
-        Exposed so the hold controller (and any other consumer that needs the
-        decel→pedal mapping) reuses the same fitted curve instead of duplicating
-        it. Falls back to the baseline brake estimate when capacity hasn't been
-        learned yet.
-        """
+        """Public wrapper around the inverse brake curve. See `core/sending_thread/README.md`."""
         if max_brake_ms2_override is None and not (
             self._shared.estimated_max_brake_ms2
             and math.isfinite(self._shared.estimated_max_brake_ms2)
@@ -617,13 +486,7 @@ class AccelToPedals:
         pedal: float,
         max_brake_ms2_override: float | None = None,
     ) -> float:
-        """Forward brake curve: decel (m/s²) the game produces at *pedal*.
-
-        Evaluates y = A * (1 - e^(-rate * x^power)), the exact inverse of
-        `brake_pedal_from_decel`, with the same baseline fallback when
-        capacity hasn't been learned yet. Lets sending_thread re-express a
-        user brake pedal in decel space for the idle-creep compensation.
-        """
+        """Forward brake curve: decel (m/s²) the game produces at *pedal*. See `core/sending_thread/README.md`."""
         x = _clamp(_finite_or_zero(pedal), 0.0, 1.0)
         if x <= 0.0:
             return 0.0
@@ -652,23 +515,7 @@ class AccelToPedals:
         raw_smooth_live: float,
         learn: bool,
     ) -> tuple[float, float]:
-        """Track clutch state. Returns (factor, effective_raw_smooth).
-
-        factor: 0.0 while the clutch is open and through the post-release
-        block, then ramps linearly to 1.0. It gates trim/slow-I accumulation
-        and the capacity glide only; trim OUTPUT is never gated (see
-        _fast_pid_compute), so the pedal command stays continuous across the
-        whole shift.
-
-        effective_raw_smooth: the pre-shift snapshot during clutch+block (the
-        accel dip while the driveline is open is not tracking error), blended
-        toward the live EMA over the ramp, fully live after it.
-
-        Gearshift state lives in shared state (truck-level, controller-agnostic).
-        Edges are only committed when learn=True so non-commanding mappers don't
-        clobber the shared snapshot; a non-committing caller that sees the clutch
-        pressed without an armed snapshot falls back to the live value.
-        """
+        """Track clutch state. Returns (factor, effective_raw_smooth). See `core/sending_thread/README.md`."""
         s = self._shared
         now_safe = now if math.isfinite(now) else 0.0
         clutch_pressed = clutch > _GAME_CLUTCH_ACTIVE_THRESHOLD
@@ -676,8 +523,6 @@ class AccelToPedals:
         if learn:
             if clutch_pressed and not s.clutch_active:
                 # Leading edge: snapshot the live measurement so error keeps
-                # using the pre-shift value. Trim state is held, not reset:
-                # resetting at the edge tested as massive gas spikes post-shift.
                 s.clutch_active = True
                 s.frozen_raw_smooth = raw_smooth_live
             elif not clutch_pressed and s.clutch_active:
@@ -716,26 +561,7 @@ class AccelToPedals:
         prev_fast_deriv_smooth: float,
         kd_scale: float = 1.0,
     ) -> tuple[float, float, float, float, float, float]:
-        """Pure compute: returns (fast_trim_ms2, p_ms2, i_ms2, d_ms2,
-        new_fast_integral, new_fast_deriv_smooth): m/s² space.
-
-        Caller decides whether to commit the new integrator/derivative state.
-
-        Gearshift continuity: the trim output is never gated by `factor`.
-        P stays continuous because the upstream error is computed against the
-        frozen/blended measurement; I always outputs its (held) state, with
-        accumulation scaled by factor; D holds its last smoothed derivative
-        until the ramp completes (factor >= 1), then resumes from the live
-        EMA. Nothing steps when a shift starts or ends. The old behavior of
-        zeroing the output at factor 0 and restoring it at ramp start snapped
-        the whole trim (up to the I clamp) out of and back into the pedal at
-        every shift, which is what jolted the gas and fed the shift-hunt
-        oscillation near full power.
-
-        `active=False` (an external commander such as AEB owns the pedals)
-        keeps the old semantics: trim output zeroed, all state held, so the
-        two controllers don't fight.
-        """
+        """Pure compute: returns (fast_trim_ms2, p_ms2, i_ms2, d_ms2, See `core/sending_thread/README.md`."""
         if not active:
             return 0.0, 0.0, 0.0, 0.0, prev_fast_integral, prev_fast_deriv_smooth
 
@@ -896,30 +722,7 @@ class AccelToPedals:
         freeze_slow_i: bool = False,
         cap_mode: bool = False,
     ) -> PedalTargets:
-        """Compute pedal targets for one tick.
-
-        `learn` gates the integrators only (fast trim I, slow integral):
-        `learn=False` freezes adaptation while the mapper's command is not
-        what drives the truck (user pedal above the mapper's gas, sole-
-        limiter headroom bidding, AEB). Signal smoothing, dt bookkeeping,
-        gearshift tracking, and the output trajectory commit every tick so
-        the mapper's view of the world and its pedal continuity stay live
-        through learn=False stretches (a frozen cap would otherwise pin the
-        user's pedal under the min-merge, and stale dt/EMAs would spike on
-        resume).
-
-        When `freeze_slow_i=True` (hold FSM owns standstill), the slow integral
-        is frozen both signs and leaks toward 0 with _HOLD_SLOW_I_LEAK_TAU_S so
-        stale negative bias from the decel-to-stop bleeds out before launch.
-        Outside that, it carries its own anti-windup (frozen against a railed
-        pedal) and unwinds at _KI_SLOW_UNWIND_MULT times the winding rate.
-
-        `cap_mode=True` (sole-limiter: the output is a pedal cap, not a
-        tracking command): the anti-windup back-calc is skipped. A railed cap
-        is an OPEN cap (headroom), not tracking saturation; the back-calc is
-        a one-tick snap that a lagged learn flag cannot intercept, and it
-        dumps the saturation overhang straight into the fast integral.
-        """
+        """Compute pedal targets for one tick. See `core/sending_thread/README.md`."""
         s = self._shared
 
         gear_dash = int(_finite_or_zero(gear_dashboard))
@@ -953,15 +756,10 @@ class AccelToPedals:
             new_wanted_smooth = self._ema_step(self._wanted_smooth, wanted, wanted_alpha)
 
         # Live raw EMA (shared, never frozen): physics truth. The gearshift
-        # logic snapshots and blends from this; the effective value it returns
-        # (frozen during clutch+block, blended over the ramp, live otherwise)
-        # is what drives error computations and external reporting.
         raw_alpha = self._ema_alpha(dt, _RAW_SMOOTHING_TAU_S)
         new_raw_smooth_live = self._ema_step(s.raw_smooth_live, raw, raw_alpha)
 
         # Gearshift: truck-level physics tracking, edges always committed
-        # (single mapper owns the shared state; clutch edges during a
-        # learn=False stretch must still arm the snapshot).
         factor, new_raw_smooth = self._gearshift_factor(
             now, clutch_applied, new_raw_smooth_live, learn=True,
         )
@@ -993,11 +791,6 @@ class AccelToPedals:
             new_max_brake = bl_brake
 
         # The caller passes a per-gear accel gain stored in mass-normalized
-        # form (PedalCapacityTracker multiplies each sample by weight_factor
-        # before learning, so the map holds only the gear-ratio shape).
-        # Dividing by weight_factor here scales it back to the current truck
-        # mass: a load/unload adapts instantly without the per-gear map
-        # needing to relearn.
         if max_accel_ms2 > 0.0 and math.isfinite(max_accel_ms2):
             new_max_accel = max_accel_ms2 / max(
                 weight_factor(total_mass_kg, has_trailer), 1e-6
@@ -1010,9 +803,6 @@ class AccelToPedals:
         gain_scale = _REFERENCE_MASS_KG / mass_kg
 
         # Idle-creep FF term: along-gear accel the engine provides for free in
-        # the creep band (D1 or R1). Computed unconditionally (also reported
-        # when not commanding) so capacity learning can subtract it from gas
-        # samples.
         creep_ms2 = creep_accel_ms2(speed, gear_dash, clutch_applied, gain_scale)
 
         # Defaults
@@ -1042,17 +832,6 @@ class AccelToPedals:
                 error_ms2 = 0.0
 
             # Slow integral: m/s² space, frozen during gearshift, no decay.
-            # Freeze regimes:
-            #   * freeze_slow_i=True (hold FSM owns standstill): freeze both
-            #     signs and leak toward 0 with _HOLD_SLOW_I_LEAK_TAU_S so stale
-            #     bias from the decel-to-stop bleeds out before launch.
-            #   * Otherwise, the one-sided stationary gate: at speeds below
-            #     _STATIONARY_SLOW_I_GATE_SPEED_MS the negative accumulation
-            #     path is frozen (raw_accel can't go below 0 while stationary so
-            #     error stays negative forever); positive errors still bleed
-            #     wound state toward zero.
-            #   * Plus anti-windup against a railed pedal, and a boosted gain
-            #     while unwinding (see the constants for both).
             if freeze_slow_i:
                 leak = math.exp(-dt / max(_HOLD_SLOW_I_LEAK_TAU_S, 1e-6))
                 new_slow_integral = new_slow_integral * leak
@@ -1063,17 +842,12 @@ class AccelToPedals:
                     else 1.0
                 )
                 # Anti-windup: the previous tick's pedal was railed, so error
-                # pushing further that way cannot be answered with more command.
-                # Winding on it only delays the eventual recovery.
                 if (
                     (s.prev_effort >= _SLOW_I_SAT_EFFORT and error_ms2 > 0.0)
                     or (s.prev_effort <= -_SLOW_I_SAT_EFFORT and error_ms2 < 0.0)
                 ):
                     slow_i_gate = 0.0
                 # Asymmetric rate: error opposing the stored bias sheds it at
-                # the boosted gain, error reinforcing it accumulates at the base
-                # gain. The sign test goes false as soon as the integral crosses
-                # zero, so the boost cannot keep driving it out the far side.
                 ki_slow = _KI_SLOW
                 if new_slow_integral * error_ms2 < 0.0:
                     ki_slow *= _KI_SLOW_UNWIND_MULT
@@ -1086,10 +860,6 @@ class AccelToPedals:
             effective_road_load = road_load_accel + new_slow_integral - creep_ms2
 
             # Fast trim in m/s² space. Output stays continuous through
-            # gearshifts (factor gates accumulation only); active=False (an
-            # external commander like AEB owns the brake) zeroes the trim and
-            # holds all state so the two controllers don't fight.
-            # Damp D-term in low gears to break the engine-surge limit cycle.
             kd_scale = (
                 _LOW_GEAR_KD_SCALE
                 if 1 <= gear_dash <= _LOW_GEAR_KD_MAX_GEAR
@@ -1111,9 +881,6 @@ class AccelToPedals:
             )
 
             # Gas capacity glide: frozen while the driveline is open (also
-            # bridges the anchor-value spike while telemetry gear reads
-            # neutral), then chases the per-gear estimate with asymmetric
-            # taus. See the constant block for the full rationale.
             cap_target = max(new_max_accel or 0.1, 0.1)
             if (
                 new_accel_capacity_glide is None
@@ -1141,9 +908,6 @@ class AccelToPedals:
             else:
                 ff = -self._brake_pedal_from_decel(-combined_ff_only, max_b_use)
             # Gas-side FF saturation = unsatisfiable bid (headroom cap).
-            # Widened below once total effort is known: a railed pedal is an
-            # open cap even when FF alone sits just under 1.0 (the P-term on
-            # a large error can carry it over the rail).
             ff_saturated = combined_ff_only > max_a_use
 
             # Unified mapping: FF + fast trim through the same capacity scaling.
@@ -1160,12 +924,6 @@ class AccelToPedals:
             ff_saturated = ff_saturated or effort >= 1.0
 
             # Back-calc anti-windup: if FF saturates the pedal, snap fast_integral
-            # so (wanted + effective_road_load + p + i + d) sits on the saturation
-            # edge. Integrator stops winding, system snaps back cleanly on recovery.
-            # Skipped on the gas rail in cap_mode: a railed cap is an open
-            # cap (headroom bid), and the one-tick snap would poison the
-            # fast integral with error the mapper's command never caused.
-            # The limiter's brake side is genuine tracking and keeps it.
             if (
                 effort != unclamped_effort
                 and not freeze_trim
@@ -1215,13 +973,6 @@ class AccelToPedals:
         pedal_state = _STATE_BRAKE if effort < 0.0 else _STATE_GAS
 
         # === Commit gating ===
-        # Physics view + output trajectory always commit: signal smoothing,
-        # dt bookkeeping, road load, and the rate-limit/EMA output state are
-        # the mapper's live view of the truck and its own pedal continuity,
-        # not learning. Committing them through learn=False stretches keeps
-        # the cap able to ramp during a user override and prevents stale-dt
-        # spikes and raw-smooth jumps when learning resumes.
-        # Capacity is sourced externally and idempotent: always commit.
         self._wanted_smooth = new_wanted_smooth
         self._fast_deriv_smooth = new_fast_deriv_smooth
         s.estimated_max_accel_ms2 = new_max_accel

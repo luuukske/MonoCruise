@@ -1,15 +1,4 @@
-"""Process-wide owner of the AEB clip recorder + background writer.
-
-Debug-gated: :func:`get_recorder` returns ``None`` unless ``Settings.debug`` is
-on, so in normal builds the radar / AEB loops fetch ``None`` once and touch no
-capture code. When active, one recorder feeds one background ``AsyncClipWriter``;
-the writer daemon starts on first use and is drained at process exit.
-
-The radar and AEB threads call :func:`get_recorder` each loop (cheap after the
-first call) and push their records; a returned ``None`` means "capture off, do
-nothing". This module is the only place that reads ``Settings`` so the recorder
-core stays settings-free and unit-testable.
-"""
+"""Debug-gated shared AEB clip recorder + writer; sole Settings touchpoint for capture."""
 
 from __future__ import annotations
 
@@ -35,12 +24,7 @@ def _notify_saved(name: str) -> None:
 
 
 def get_recorder() -> AEBClipRecorder | None:
-    """Return the shared recorder, or ``None`` when capture is disabled.
-
-    Decided once, from ``Settings.debug``, on the first call. Never raises: any
-    failure to start capture leaves it disabled so a recorder problem can never
-    disturb the radar / AEB loops.
-    """
+    """Shared recorder or None (Settings.debug gate); never raises."""
     global _initialized
     if _initialized:
         return _recorder

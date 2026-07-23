@@ -1,13 +1,4 @@
-"""FP: parked vehicle near ego's predicted arc on a tight right turn.
-
-Ego turns right at 50 km/h on R=50 m (kappa=+0.02). Parked car at (5, 25)
-is just outside the arc circle (~1.5 m), so cross-product lateral_offset
-would read 5 m (clearly opposite-lane), but lane_frame's arc projection
-correctly reads ~1.5 m (in ego's curving corridor). The hit is real;
-EgoEvasionFilter must suppress because ego could steer further left to
-clear (left-evasion arc bends back toward straight).
-"""
-
+"""FP: parked car near ego arc on tight right turn; EgoEvasionFilter suppresses."""
 import math
 from tests.aeb.harness import Frame, EgoState, make_vehicle, _DT
 

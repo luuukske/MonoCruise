@@ -1,11 +1,4 @@
-"""Synthetic-trace tests for the shared speed/accel filter chain.
-
-Covers the acc_speed anti-oscillation changes (trend-gated fast tau,
-standstill latch) and the faster front-end accel filter. Feeds
-_smooth_vehicle_kinematics directly; no game or shared memory involved.
-See core/radar/AGENTS.md §7.
-"""
-
+"""Synthetic _smooth_vehicle_kinematics traces. See core/radar/README.md §7."""
 from __future__ import annotations
 
 import math
@@ -17,12 +10,7 @@ DT = 0.05  # full-update cadence (s)
 
 def _run_chain(raw_speeds: list[float], dt: float = DT,
                acc_raw_speeds: list[float] | None = None):
-    """Run the chain over a raw-speed trace, carrying state like update_from_last.
-
-    ``acc_raw_speeds`` feeds the ACC chain separately; it defaults to the same
-    trace, which is what update_from_last passes whenever no hard-brake window
-    is selected and on a confirmed crash.
-    """
+    """Drive _smooth_vehicle_kinematics over raw traces; optional separate acc_raw_speeds."""
     t = 100.0
     speed_ema = accel = acc_speed = None
     acc_ema = acc_accel = None
@@ -46,12 +34,7 @@ def _run_chain(raw_speeds: list[float], dt: float = DT,
 
 
 def test_acc_chain_ignores_the_aeb_hard_brake_window():
-    """acc_speed follows its own raw trace, not the brake-selected one.
-
-    This is the point of the split: on TMP the short window latches on packet
-    stalls and stays selected long after the stall ended, and ACC used to read
-    that as a sustained lead brake. See core/radar/AGENTS.md §7.
-    """
+    """acc_speed ignores AEB hard-brake window (TMP stall). See core/radar/README.md §7."""
     cruise = [12.0] * int(3.0 / DT)
     # AEB path sees a stall dip and recovery; ACC path sees steady cruise.
     aeb = cruise + [3.0] * int(0.3 / DT) + [12.0] * int(2.0 / DT)
@@ -142,9 +125,7 @@ def test_launch_releases_latch_and_tracks():
 
 
 def test_convoy_sawtooth_attenuated_at_cruise():
-    # TMP reconciliation shape: slow drift down, snap back up, zero mean.
-    # Each drift phase looks like a real ramp on the short trend window; the
-    # consistency factor must keep the feed-forward shut so acc_speed stays flat.
+    # TMP reconciliation wobble: consistency factor keeps acc_speed flat (no feed-forward).
     period = 3.0
     n = int(24.0 / DT)
     trace = [22.0 + 0.8 * (1.0 - 2.0 * ((i * DT % period) / period)) for i in range(n)]
@@ -172,6 +153,5 @@ def test_accel_estimate_reacts_within_half_second():
     trace += _ramp(20.0, -5.0, 2.0)
     out = _run_chain(trace)
     at_half_s = out[int(2.0 / DT) + int(0.5 / DT)]
-    # Old front end (fit 0.80, ema 0.40) read -1.91 here; fit 0.70 / ema 0.45
-    # reads -2.40. Threshold sits between so a filtering regression fails.
+    # Hard-brake accel threshold: fit 0.70 / ema 0.45 must read below old 0.80 / 0.40 baseline.
     assert at_half_s[2] < -2.2
