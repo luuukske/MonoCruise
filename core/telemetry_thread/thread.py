@@ -106,7 +106,8 @@ class TelemetryThreadData(ThreadData):
     trailer_count: int = 0   # attached trailers with wheels (from SDK list)
     estimated_total_mass_kg: float = 0.0  # unitMass + cargoMass + fuel mass
 
-    # Longitudinal accel (truck-local); forward axis from SDK
+    # Truck-local LATERAL accel (right/left), not longitudinal, despite the SDK's field
+    # name. Do not use as accel/decel feedback; see AGENTS.md domain invariants.
     lv_accelerationX: float = 0.0  # m/s²
     # Commanded accel for ACC / cruise (other threads may set; default 0).
     commanded_accel_ms2: float = 0.0

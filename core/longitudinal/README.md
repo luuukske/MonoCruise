@@ -54,7 +54,9 @@ at most doubles the user-tuned floor.
   not stacking brake when the mapper or driver is already slowing ego.
 - kp boost when overshooting: blended over `_OVERSHOOT_BOOST_BAND_MS` to avoid chatter at zero error.
 - Measured accel for the gate: tracking differentiator on speed (`_ACCEL_TRACK_TAU_S`), shorter
-  than the mapper's accel tau so external braking is seen quickly.
+  than the mapper's accel tau so external braking is seen quickly. Not `lv_accelerationX`: that
+  telemetry field is lateral (truck-local right/left), not longitudinal, and reads nonzero from
+  cornering alone (see root `AGENTS.md` domain invariants).
 
 ## ACC child (`acc.py`)
 

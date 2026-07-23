@@ -8,7 +8,7 @@ MonoCruise is a third-party software that sits in between ETS2/ATS and your peda
 
 ### Module docs (human-facing)
 
-Long domain / tuning / coordinate docs live in module `README.md` files, not here:
+Long domain / tuning / coordinate docs live in module `README.md` files, not here. **Read a directory's README.md before modifying code in it** (and parent-directory READMEs, if present) — they hold architectural constraints and conventions that blind edits will miss:
 
 - `core/radar/README.md`: coordinates, traffic buffer, Vehicle smoothing, ArcPath
 - `core/aeb/README.md`: AEB pipeline, filters, engagement, calibration
@@ -18,8 +18,9 @@ Long domain / tuning / coordinate docs live in module `README.md` files, not her
 - `core/cruise_control_thread/README.md`: orchestrator and ACC anticipation
 - `core/main_pedal_thread/README.md`: joystick, OPD, capture APIs
 - `core/sdk_installer/README.md`, `core/update_check/README.md`, `updater/README.md`, `shared/README.md`
+- `checker/README.md`: background game-launch checker, mutex-based detection, AV-safe design
 
-Do-not-break rules for radar/AEB/ACC are summarized under **Domain invariants** below; full rationale stays in the module README.
+Do-not-break rules for radar/AEB/ACC/longitudinal are summarized under **Domain invariants** below; full rationale stays in the module README.
 
 ### Comment budget
 
@@ -168,17 +169,19 @@ Refer back to `core/example_thread/thread.py` whenever you are unsure about the 
 - **Testing and validation**
   - Do not add or update tests when changing thread behaviour that could affect stability or watchdog/monitor behaviour.
   - Do not disable existing safety checks (watchdog, health checks, restart limits, etc.) to “fix” failing tests or crashes.
+  - **Running `pytest` (or any script that imports `core.settings`) can silently overwrite the user's real `config.json`** with near-default values: some tests drive real settings-writing code (e.g. pedal capacity learning) without `Settings.load()` having run first, so the later `Settings.save()` writes dataclass defaults over the live file, and a second save rotates the wiped file into `config.json.bak` too. Snapshot both `config.json` and `config.json.bak` before any pytest run or core-importing scratch script in this repo, diff after, and restore them if changed.
 
 - **Physical safety**
   - When an error uccurs or certain parts of the code fail, the user must ALWAYS be able to stop the vehicle being controlled in ETS2 or ATS without causing an accident.
 
-### Domain invariants (radar / AEB / ACC)
+### Domain invariants (radar / AEB / ACC / longitudinal)
 
 Do not reintroduce these without reading the linked README section first:
 
 - **Radar** (`core/radar/README.md` §14): quaternion x/y swap intentional; `rotationX` is yaw; radar render uses `+0.5` yaw offset, arc geometry does not; bodies are symmetric `± length/2`; use `_smooth_yaw` for arcs; `acc_speed` is ACC-only; consumers must not open the traffic shared-memory buffer or mutate `Vehicle` instances.
 - **AEB** (`core/aeb/README.md` §9): yaw-rate ego curvature only (never `RadarData.ego_curvature`); target κ via `_vehicle_curvature_blend` stepped once per vehicle per frame; all tunables in `AEBCalibration`; `lane_frame.project_to_ego_arc` is the lane primitive; TMP trailer kinematics via shallow-copy swap; two-layer pedal authority (FF assist + engagement slam), gas ≥ 0.8 is the only AEB override.
 - **ACC** (`core/acc/README.md` §8): never mutate `Vehicle`; history-fit ego curvature (not AEB's yaw-rate proxy); no control law in this module (cruise owns accel); scoring stays meter-native.
+- **Longitudinal telemetry** (`core/longitudinal/README.md`): `lv_accelerationX` is the truck-local **lateral** axis (right/left), not longitudinal, despite its name and the SDK's own labeling. Using it as an accel/decel feedback signal causes phantom braking on right turns and phantom acceleration on left turns, worsening the longer CC stays in the turn (the integral term amplifies it). Use a tracking differentiator on `speed` instead (`_spd_smooth` in `core/sending_thread/thread.py`, `_ACCEL_TRACK_TAU_S` in `core/longitudinal/limiter.py`) — not raw tick-to-tick `d(speed)/dt`, which spikes because ETS2 physics runs at ~20Hz against a faster control loop.
 
 ### Longitudinal control invariants
 
@@ -222,6 +225,9 @@ Do not reintroduce these without reading the linked README section first:
 - **Never use an em dash ("—") in code or code-adjacent text**: comments, docstrings, strings, commit messages, log messages. Use a comma, a colon, or start a new sentence instead.
 - **Do not commit immediately after writing code.** Implement the change, then wait for the user to test it and explicitly confirm it works before running `git commit`.
 - **No decorative divider comments.** Do not write banner-style separators like `# --- Section ---` or `# ====` in source files. Section structure should come from function/class boundaries; a short prose lead-in comment is fine (for example: `# Headway time follows the user's gap-level setting.`). Module docstrings may use markdown headings since they render as documentation; source-code comments may not.
+- **When unsure, ask.** If an instruction or the surrounding context is ambiguous (multiple plausible interpretations, missing key parameter, unclear scope), ask a clarifying question instead of guessing or silently picking a default. Don't overuse this for trivial ambiguity resolvable from context, codebase conventions, or existing docs.
+- **State confidence.** Flag it explicitly when unsure (below roughly 80% confidence) so the user knows to verify. Above roughly 90% confidence, only call it out for larger architectural changes, not routine fixes.
+- **Pushback is welcome.** Higher-reasoning models are encouraged to suggest a better approach or architecture instead of executing a request mechanically, and to briefly state the tradeoff so the user can decide.
 
 ### Changelog conventions
 
@@ -230,16 +236,20 @@ Do not reintroduce these without reading the linked README section first:
 
 ### Reputation and community-trust guardrails
 
-MonoCruise's community signed up for offline operation and no data collection. Changes that touch that trust need a higher bar than ordinary code review.
+MonoCruise's community signed up for offline operation and no data collection. Changes that touch that trust need a higher bar than ordinary code review. Two failure modes this guards against: shipping something that damages community trust (privacy, monetization, tone), and acting as an echo chamber that validates a weak feature idea just because it was pitched with confidence.
 
-- **Hard stop, needs maintainer sign-off before implementation:** selling, sharing, or monetizing user data, hardware stats, telemetry, or usage info; adding telemetry, phone-home behavior, or logging beyond the stated offline / no-data stance; license changes or paywalling previously free functionality; reusing third-party or copyrighted mod assets; anything else that directly contradicts the offline-operation / no-data-collection / privacy stance the community expects. If a change falls into this category, state the specific risk and who would object, then stop and get explicit approval from the maintainer before writing implementation code. Discussion and planning can continue; implementation cannot.
-- **Flag, don't block:** monetization presentation (donation prompts, placement, frequency, wording); public-facing comms (Discord, README, release notes, replies to critics) that read as defensive, dismissive, condescending, or that overcommit on features or timelines; any change the community could plausibly read as values drift even if it technically isn't one. Raise this during planning, not only at commit time.
-- **Feature merit check:** before writing implementation code for a new user-facing feature or UX change, give an honest verdict: ship / ship with changes / don't ship, plus the strongest case against it from the driver's seat (distraction while driving, visual clutter, config burden, surprising behavior, whether any trucker actually asked for this). Confidence or enthusiasm in the request is not evidence the feature is good. Skip this only for bug fixes, refactors, perf work, or internal tooling.
+- **Tier 1, hard gate (halts implementation):** selling, sharing, or monetizing user data, hardware stats, telemetry, or usage info; adding telemetry, phone-home behavior, or logging beyond the stated offline / no-data stance; license changes or paywalling previously free functionality; reusing third-party or copyrighted mod assets; anything else that directly contradicts the offline-operation / no-data-collection / privacy stance the community expects. State the specific risk and who would object (max 5 sentences), then halt implementation until the user replies with the exact phrase "I see the risk and I acknowledge the risk." Discussion, planning, and red-teaming stay open; only implementation halts.
+- **Tier 2, inline flag (no gate):** monetization presentation (donation prompts, placement, frequency, wording); public-facing comms (Discord, README, release notes, replies to critics) that read as defensive, dismissive, condescending, or that overcommit on features or timelines; any change the community could plausibly read as values drift even if it technically isn't one. Flag inline (max 3 sentences), then keep helping. Raise during planning and design discussion, not only at commit time.
+- **Tier 3, minor optics:** "this could read as weird or off to users." One sentence, then proceed; no follow-up unless asked.
+- **Feature merit check** (separate axis, anti-echo-chamber): before writing implementation code for a new user-facing feature or UX change, give an independent verdict: ship / ship with changes / don't ship, plus the strongest case against it from the driver's seat (distraction while driving, visual clutter, config burden, surprising behavior, whether any trucker actually asked for this). Confidence or enthusiasm in the request is not evidence the feature is good; a merit check that always returns "ship" is a failed check. Skip only for bug fixes, refactors, perf work, internal tooling, or features already vetted earlier in the same conversation. Placement/styling questions ("where do I put it", "how should it look") presuppose the feature ships — treat that framing as a trigger, not a pass.
+- **Noise control:** one flag per issue per conversation. After acknowledgment or override, drop it; don't re-raise or append warnings to later replies.
+- **Limits:** this is a soft prior, not a guarantee — it catches recognizable categories, not every community-specific landmine. Mechanizable risks (telemetry/phone-home, leaked secrets, license incompatibility) belong in CI where possible; this section is the backstop for what CI can't check (optics, tone, feature merit, community vibe).
 
 ### Packaging and antivirus false positives
 
 MonoCruise ships unsigned (no code-signing certificate) and will remain unsigned until there is monetization to justify one. Unsigned binaries already draw more antivirus scrutiny.
 
-- When touching the updater, installer, or release/build pipeline, prefer conventional, well-documented approaches: standard HTTPS downloads, standard file replacement. Avoid patterns that read as malware to AV heuristics: packing/UPX, self-modifying or self-updating executable tricks, process/memory-injection-like behavior.
+- When touching the updater (`updater/`), installer (`installer/MonoCruise.iss`), the background checker (`checker/`), or the release/build pipeline (`.github/workflows/release.yml`), prefer conventional, well-documented approaches: standard HTTPS downloads, standard file replacement. Avoid patterns that read as malware to AV heuristics: packing/UPX, self-modifying or self-updating executable tricks, process/memory-injection-like behavior, `shell=True` process enumeration, or writing Run/startup registry keys from anywhere but the (visible, consent-based) installer.
 - If a risky-looking pattern is genuinely necessary, flag it explicitly rather than shipping it silently.
+- **PyInstaller 6 resolves relative paths in `.spec` files against the spec file's own directory, not the invocation cwd.** A spec under a subdirectory (e.g. `updater/updater.spec`) must build paths from the `SPECPATH` global, not repo-root-relative strings, or CI builds silently break on PyInstaller ≥6. Specs at repo root (`monocruise.spec`) are unaffected.
 
