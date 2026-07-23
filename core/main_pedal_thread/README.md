@@ -14,6 +14,22 @@
 
 Does not send to the game, hazard/horn, cruise logic, AEB, or keyboard hook lifecycle.
 
+## Pre-override intent fields
+
+`opdgasval` and `opdbrakeval` publish the OPD-mapped user demand as computed at
+`gas_output` / `brake_output` assignment time, **before** the AEB override,
+sudden-slam, crash, and `em_stop` branches rewrite the outputs. `gas_output` /
+`brake_output` are the post-override values actually sent onward.
+
+Consumers wanting the driver's intent must read the `opd*` pair; reading
+`brake_output` instead feeds AEB's own slam back in. Keep any new override
+branch below the `opd*` snapshot.
+
+`opdbrakeval` is recorded in AEB clips but is **not** used by AEB warn
+suppression: it never exceeds `brakeval` under pedal input, and its coast-down
+floor would make ordinary OPD coasting look like braking. See `core/aeb/README.md`
+section 3 item 6.
+
 ## Hat virtual buttons
 
 `virtual_code = button_count + hat_index * 4 + direction_index`

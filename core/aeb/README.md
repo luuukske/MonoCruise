@@ -565,8 +565,43 @@ aeb.snapshot                       # AEBSnapshot: full debug state
      through flicker: the driver's gas-override reaction window is preserved.
    - `AEB_brake` is true while engagement is latched and the published target
      is above zero. Other subsystems (cruise/HMI) gate off this flag.
+   - **User-braking suppression**: when `_read_user_braking()` is true and
+     demand has not reached `aeb_warn_near_full_frac · effective_max`,
+     `AEB_warn` is forced false: a driver already braking is not warned about a
+     threat they are handling. This silences the cue only. Engagement, the
+     published target, and `AEB_brake` are untouched. Two sources count, each
+     compared against `_USER_BRAKE_LATCH_THRESHOLD` (0.03):
+     - `main_pedal_thread.brakeval`, the physical brake axis.
+     - `sending_thread.mapper_command_brake`, the CC/ACC/limiter command.
+
+     The threshold is deliberately low: a light dab still carries braking force
+     and signals that the driver saw the hazard, and AEB engagement remains the
+     emergency override when the dab is not enough.
+
+     `main_pedal_thread.opdbrakeval` is **excluded on purpose**. It sits below
+     `brakeval` whenever the pedal is pressed (measured: 0.28 -> 0.21,
+     0.17 -> 0.13), so it adds nothing there; its only unique contribution is
+     the OPD coast-down floor, which is capped by `max_opd_brake_variable`
+     (default 0.04) but still clears 0.03. Including it would read ordinary
+     coasting, the default OPD state, as a deliberate danger response: measured
+     at 518 such ticks over one session.
+
+     Both taps are AEB-free by construction: `brakeval` is raw axis input, and
+     `mapper_command_brake` is read upstream of the point where AEB's FF and
+     slam merge into the pedal. **Never source this from `abackward` or
+     `brake_output`**: both contain AEB's own brake, so AEB would read its own
+     output back and silence its own warning. The old `if self._engaged:
+     return False` guard existed only to paper over that contamination.
 7. Hold semantics: warn/brake state holds for 0.3 s after a downgrade to
-   suppress chatter, identical to the old WARN→STANDBY hold.
+   suppress chatter, identical to the old WARN→STANDBY hold. The hold shapes
+   `aeb_state` and `AEB_brake`, but must **not** re-assert `AEB_warn` on a tick
+   where the user-braking suppression fired. Suppression is computed before the
+   hold and `warn_suppressed` carries past it. Without that carry the hold
+   reinstated the cue for up to 0.3 s after every warn, and since each
+   legitimate re-warn re-arms the hold, a driver braking through a decaying
+   threat heard near-continuous beeping. `stop_warning()` still replays the
+   clip plus `_AEB_WARNING_STOP_EXTRA_REPLAYS`, so even a 2-frame spurious warn
+   is audible: short suppression leaks are not cosmetic.
 8. Head-on targets: modelled as also braking at `full_brake_decel (7.8 m/s²)`
    inside the collision pipeline (unchanged).
 
@@ -733,6 +768,8 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `aeb_engage_confirm_s` | 0.06 s | Sustained-qualification wait for near-certain engagement entries (3rd tick at 30 Hz) |
 | `aeb_engage_confirm_oblique_s` | 0.20 s | Sustained-qualification wait for oblique out-of-lane entries (extrapolation-fragile class) |
 | `aeb_warn_confirm_oblique_s` | 0.10 s | Warn persistence for oblique out-of-lane threats; keeps ≥ 0.1 s warn lead ahead of an oblique engagement |
+| `aeb_warn_frac` | 0.5 | Fraction of `effective_max` at which `AEB_warn` rises |
+| `aeb_warn_near_full_frac` | 0.85 | Demand fraction above which the warn cue survives the user-braking suppression. Currently equal to `aeb_engage_frac`, so any engagement warns even while the driver brakes; raising it restores a quiet band but silences the cue on under-braking drivers |
 | `aeb_confirm_occupancy` | 0.6 | Min qualified fraction over the trailing confirm window for the three `OccupancyConfirm` streaks (risk / engage / warn) to fire |
 | `aeb_confirm_max_gap_frames` | 2 | Max consecutive unqualified frames tolerated before a confirm streak drops; absorbs isolated collision-grid / TMP-jitter dropouts |
 | `aeb_certain_fwd_dot` | 0.95 | `\|fwd_dot\|` above which an in-lane colliding target is "certain" and skips the confirm wait |

@@ -120,6 +120,8 @@ class ConsumedContext:
     max_brake_ms2: float = 7.8     # sending_thread capacity estimate
     brakeval: float = 0.0          # main_pedal_thread user brake
     gasval: float = 0.0            # gas override gate
+    opdbrakeval: float = 0.0       # OPD gas-lift brake demand, pre-AEB-override
+    program_brake: float = 0.0     # mapper_command_brake (CC/ACC/limiter), AEB-free
     aeb_enabled: bool = True
 
     def to_json(self) -> dict:
@@ -127,6 +129,8 @@ class ConsumedContext:
             "max_brake_ms2": self.max_brake_ms2,
             "brakeval": self.brakeval,
             "gasval": self.gasval,
+            "opdbrakeval": self.opdbrakeval,
+            "program_brake": self.program_brake,
             "aeb_enabled": self.aeb_enabled,
         }
 
@@ -136,6 +140,8 @@ class ConsumedContext:
             max_brake_ms2=float(d.get("max_brake_ms2", 7.8)),
             brakeval=float(d.get("brakeval", 0.0)),
             gasval=float(d.get("gasval", 0.0)),
+            opdbrakeval=float(d.get("opdbrakeval", 0.0)),
+            program_brake=float(d.get("program_brake", 0.0)),
             aeb_enabled=bool(d.get("aeb_enabled", True)),
         )
 

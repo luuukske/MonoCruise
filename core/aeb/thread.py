@@ -59,7 +59,9 @@ _FULL_BRAKE_DECEL_FALLBACK: float = 7.8
 _TMP_FILTER_EGO_SPLIT_KMH: float = 40.0
 _TMP_FILTER_REL_ABOVE_SPLIT_KMH: float = 15.0
 _TMP_FILTER_REL_AT_OR_BELOW_SPLIT_KMH: float = 40.0
-_USER_BRAKE_LATCH_THRESHOLD: float = 0.12
+# Low on purpose: a light dab still carries braking force and shows the driver
+# saw the hazard. AEB engagement is the emergency override if it is not enough.
+_USER_BRAKE_LATCH_THRESHOLD: float = 0.03
 
 _STOP_BUFFER_FIXED: float = 1.6
 _ARC_START_PCTG: float = 0.2
@@ -745,34 +747,28 @@ class AEBThread(BaseThread):
 
     def _read_user_braking(self) -> bool:
         """Suppress warn when user/CC already braking unless near-full AEB demand."""
+        # Physical pedal only. opdbrakeval is deliberately excluded: it is below
+        # brakeval whenever the pedal is pressed, and its coast-down floor would
+        # read ordinary OPD coasting as a danger response.
         try:
             pt = registry.get_thread("main_pedal_thread")
             if pt is not None and pt.is_alive():
                 with pt.data._lock:
-                    if (
-                        float(getattr(pt.data, "brakeval", 0.0))
-                        > _USER_BRAKE_LATCH_THRESHOLD
-                    ):
-                        return True
+                    driver_brake = float(getattr(pt.data, "brakeval", 0.0))
+                if driver_brake > _USER_BRAKE_LATCH_THRESHOLD:
+                    return True
         except (KeyError, AttributeError):
             pass
 
-        # Program end brake from CC/ACC follow, not from AEB itself.
-        if self._engaged:
-            return False
+        # Program brake from CC/ACC/limiter. mapper_command_brake is AEB-free by
+        # construction: AEB's FF and slam merge into abackward after the mapper.
         try:
-            cruise = registry.get_thread("cruise_control_thread")
-            if cruise is None or not cruise.is_alive():
-                return False
-            with cruise.data._lock:
-                if not bool(cruise.data.active):
-                    return False
             st = registry.get_thread("sending_thread")
             if st is None or not st.is_alive():
                 return False
             with st.data._lock:
                 return (
-                    float(getattr(st.data, "abackward", 0.0))
+                    float(getattr(st.data, "mapper_command_brake", 0.0))
                     > _USER_BRAKE_LATCH_THRESHOLD
                 )
         except (KeyError, AttributeError):
@@ -859,19 +855,31 @@ class AEBThread(BaseThread):
             pass
         return _FULL_BRAKE_DECEL_FALLBACK
 
-    def _read_pedals_for_capture(self) -> tuple[float, float]:
-        """(brakeval, gasval) floats for the clip's consumed context. Never raises."""
+    def _read_pedals_for_capture(self) -> tuple[float, float, float]:
+        """(brakeval, gasval, opdbrakeval) for the consumed context. Never raises."""
         try:
             pt = registry.get_thread("main_pedal_thread")
             if pt is None or not pt.is_alive():
-                return 0.0, 0.0
+                return 0.0, 0.0, 0.0
             with pt.data._lock:
                 return (
                     float(getattr(pt.data, "brakeval", 0.0)),
                     float(getattr(pt.data, "gasval", 0.0)),
+                    float(getattr(pt.data, "opdbrakeval", 0.0)),
                 )
         except (KeyError, AttributeError):
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
+
+    def _read_program_brake_for_capture(self) -> float:
+        """Mapper brake command for the consumed context. Never raises."""
+        try:
+            st = registry.get_thread("sending_thread")
+            if st is None or not st.is_alive():
+                return 0.0
+            with st.data._lock:
+                return float(getattr(st.data, "mapper_command_brake", 0.0))
+        except (KeyError, AttributeError):
+            return 0.0
 
     def _build_warm_state(self) -> AEBWarmState:
         """Snapshot the discrete engagement state for the clip window start (plan 5)."""
@@ -903,7 +911,7 @@ class AEBThread(BaseThread):
         if recorder is None:
             return
         try:
-            brakeval, gasval = self._read_pedals_for_capture()
+            brakeval, gasval, opdbrakeval = self._read_pedals_for_capture()
             reasons = {
                 str(vid): [r.reason for r in results if getattr(r, "reason", None)]
                 for vid, results in snap.suppression_reasons.items()
@@ -916,6 +924,8 @@ class AEBThread(BaseThread):
                     max_brake_ms2=float(max_brake_ms2),
                     brakeval=brakeval,
                     gasval=gasval,
+                    opdbrakeval=opdbrakeval,
+                    program_brake=self._read_program_brake_for_capture(),
                     aeb_enabled=bool(aeb_active),
                 ),
                 live_aeb=LiveAEB(
@@ -1792,7 +1802,10 @@ class AEBThread(BaseThread):
             effective_max_decel > 0.1
             and effective_required >= cal.aeb_warn_near_full_frac * effective_max_decel
         )
-        if user_braking_now and not near_full_target:
+        # Suppression must outlive the state hold below, which re-asserts warn
+        # on a held WARN/BRAKE and would otherwise undo it for up to 0.3 s.
+        warn_suppressed = bool(user_braking_now and not near_full_target)
+        if warn_suppressed:
             aeb_warn = False
 
         aeb_brake = bool(self._engaged and target_published > 0.0)
@@ -1808,9 +1821,9 @@ class AEBThread(BaseThread):
             new_state = self._prev_state
             if new_state == AEBState.BRAKE:
                 aeb_brake = True
-                aeb_warn = True
+                aeb_warn = not warn_suppressed
             elif new_state == AEBState.WARN:
-                aeb_warn = True
+                aeb_warn = not warn_suppressed
         if new_state != self._prev_state:
             self._state_hold_until = now_mono + 0.3
 

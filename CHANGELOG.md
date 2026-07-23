@@ -16,6 +16,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **Prevent duplicate popups**: duplicate popups are now prevented by checking the dedup_key of the popup message.
 
 ### Fixed
+- **AEB still beeped while you were braking**: the warning kept sounding for a moment after every alert, and light braking did not count as braking at all. A gentle dab on the pedal now silences it, and so does ACC slowing for the hazard. Hard automatic braking still warns you.
 - **MAJOR: pedals dead after updating from 1.0**: after an update the game could load the old plugin beside the new one and swallow gas and brake entirely while the UI still looked fine. The leftover plugin is now disabled automatically at startup; restart the game once after the message appears.
 - **Speed limiter fighting ACC at the limit**: with the global limit on, ACC holding right at the cap could get brake stabs from the limiter's overshoot protection over tiny speed drifts. Overshoot protection now stays out until you are properly over the limit, so ACC has room to work.
 

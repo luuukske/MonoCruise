@@ -109,6 +109,10 @@ class MainPedalThreadData(ThreadData):
     # can drive its stopped-state FSM off the user's true intent.
     opdgasval: float = 0.0
 
+    # OPD-transformed brake, same pre-override rule. AEB reads this as the
+    # driver's braking intent; brake_output is unusable there (AEB writes it).
+    opdbrakeval: float = 0.0
+
     # State flags: sending_thread uses these to decide what to send.
     device_lost: bool = True    # True until the *pedal* joystick is successfully opened.
     em_stop: bool = False       # Full emergency brake engaged.
@@ -337,6 +341,7 @@ class MainPedalThread(BaseThread):
                 self.data.gas_output  = 0.0
                 self.data.brake_output = 0.15
                 self.data.opdgasval   = 0.0
+                self.data.opdbrakeval = 0.0
                 self.data.em_stop     = speed > 0.1
                 self.data.cc_start_held = False
                 self.data.cc_inc_held = False
@@ -463,6 +468,7 @@ class MainPedalThread(BaseThread):
             self.data.gas_output  = gas_output
             self.data.brake_output = brake_output
             self.data.opdgasval   = opdgasval
+            self.data.opdbrakeval = opdbrakeval
             self.data.em_stop     = em_stop
             self.data.cc_start_held = cc_start_held
             self.data.cc_inc_held = cc_inc_held

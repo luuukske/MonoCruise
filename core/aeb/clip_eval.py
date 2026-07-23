@@ -116,7 +116,9 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
         t._read_radar_snapshot = lambda s=snap: s
         t._read_max_brake_ms2 = lambda mb=tk.consumed.max_brake_ms2: mb
         t._read_user_braking = (
-            lambda bv=tk.consumed.brakeval: bv > _USER_BRAKE_LATCH_THRESHOLD
+            lambda bv=max(tk.consumed.brakeval, tk.consumed.program_brake): (
+                bv > _USER_BRAKE_LATCH_THRESHOLD
+            )
         )
         t._now = lambda tm=tk.t_mono: tm
         t._aeb_active_fn = lambda en=tk.consumed.aeb_enabled: bool(en)
