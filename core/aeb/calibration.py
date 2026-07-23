@@ -84,6 +84,8 @@ class AEBCalibration:
     tmp_filter_rel_above_kmh: float = 5.0
     tmp_filter_rel_below_kmh: float = 50.0
     user_brake_latch: float = 0.12
+    # FF assist ramps in from here to user_brake_latch (README pedal authority).
+    ff_assist_ramp_lo: float = 0.03
 
     # TmpCrossTrafficFilter straight-snapshot center hit threshold (README TmpCrossTrafficFilter).
     tmp_cross_center_hit_dist: float = 2.5

@@ -1271,14 +1271,17 @@ class SendingThread(BaseThread):
         if cushion > 0.0:
             b = max(b, cushion)
 
-        # AEB additive FF pedal: sub-engagement assist that boosts active
-        user_braking = brakeval > _AEB_CAL.user_brake_latch
-        if AEB_ff_decel > 0.0 and gasval < 0.8 and user_braking:
+        # AEB additive FF pedal: sub-engagement assist, ramped in over the
+        # driver's braking intent so a light dab cannot slam the pedal.
+        _ramp_lo = _AEB_CAL.ff_assist_ramp_lo
+        _ramp_span = max(_AEB_CAL.user_brake_latch - _ramp_lo, 1e-6)
+        assist_w = min(max((brakeval - _ramp_lo) / _ramp_span, 0.0), 1.0)
+        if AEB_ff_decel > 0.0 and gasval < 0.8 and assist_w > 0.0:
             aeb_ff_pedal = self._accel_mapper._brake_pedal_from_decel(
                 AEB_ff_decel,
                 max(self._capacity_tracker.max_brake_ms2, 0.1),
             )
-            b = max(b, aeb_ff_pedal)
+            b = max(b, b + (aeb_ff_pedal - b) * assist_w)
 
         # AEB active: closed-loop decel controller writes the brake pedal
         if _aeb_active and gasval < 0.8:
