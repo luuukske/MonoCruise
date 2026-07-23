@@ -17,10 +17,10 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ### Changed
 - **internal docs reorganized into README.md and AGENTS.md files**: the internal docs were scattered across the codebase, making it difficult to find the information i needed. they have been organized into README.md and AGENTS.md files to make it easier to find the information i need.
+- **Smarter speed-limiter braking on hills**: the limiter now brakes progressively harder the further you are over the limit, and eases off when the truck is already slowing on its own, so downhill and crest overshoots come back sooner without surprise brake piles. I would even say, it is better than most irl limiters. I outsmarted them.
 
 ### Fixed
 - **Loaded truck slow to come back down to the set speed**: after a long climb the truck could sit above the set speed or the speed limit for tens of seconds with the throttle still feeding in. It now drops the throttle right away and brakes when it needs to.
-- **Speed limiter slow to pull back a big overshoot**: cresting a hill or running downhill could leave the truck over the limit for several seconds. The limiter now brakes progressively harder the further over it is, while easing off if the truck is already slowing on its own so it never piles on unexpected braking.
 - **False emergency stop with foot off the brake**: on Windows the pedal reader could mis-time a resting brake and slam full emergency stop. Timing and slam detection now ignore an untouched pedal.
 - **AEB warning sound silent**: the warning beep failed to load its sound file; it plays again.
 
