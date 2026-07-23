@@ -75,7 +75,12 @@ class PopupMessage:
     def type_rank(self) -> int:
         """The rank derived from the message type (higher = more important)."""
         return self.style.value
-    
+
+    @property
+    def dedup_key(self) -> tuple["MessageStyle", str, str]:
+        """Identity used to suppress duplicates; ignores priority, duration and timing."""
+        return (self.style, self.title, self.text)
+
     def __post_init__(self):
         if self.remaining_ms == 0:
             self.remaining_ms = self.duration_ms

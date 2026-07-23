@@ -396,10 +396,16 @@ class PopupWindow(QWidget):
         logger.info(f"PopupWindow.emit: {title}, {message}, {message_type}, {duration_ms}, {priority}")
 
     def _on_new_message(self, message: PopupMessage):
-        """Handle new message arrival."""
-        
-        self._queue.push(message)
-        
+        """Handle new message arrival; identical messages are dropped."""
+
+        if self._current is not None and self._current.dedup_key == message.dedup_key:
+            logger.debug("Duplicate popup dropped (currently on screen): %s", message.title)
+            return
+
+        if not self._queue.push(message):
+            logger.debug("Duplicate popup dropped (already queued): %s", message.title)
+            return
+
         if self._state == State.IDLE:
             self._show_next(from_queue=False)
         elif self._state == State.DISPLAYING:

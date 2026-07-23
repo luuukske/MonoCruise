@@ -12,11 +12,22 @@ class MessageQueue:
         self._heap: list[PopupMessage] = []
         self._lock = threading.Lock()
         
-    def push(self, message: PopupMessage) -> None:
-        """Add a message to the queue."""
+    def push(self, message: PopupMessage) -> bool:
+        """Add a message unless an identical one is queued. False if it was dropped."""
         with self._lock:
+            key = message.dedup_key
+            if any(queued.dedup_key == key for queued in self._heap):
+                return False
             heapq.heappush(self._heap, message)
-            
+            return True
+
+    def contains(self, message: PopupMessage) -> bool:
+        """Check if an identical message (same style, title and text) is already queued."""
+        with self._lock:
+            key = message.dedup_key
+            return any(queued.dedup_key == key for queued in self._heap)
+
+
     def pop(self) -> Optional[PopupMessage]:
         """Remove and return the highest priority message, or None if empty."""
         with self._lock:
