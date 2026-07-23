@@ -11,6 +11,9 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Changed
+- **Prevent duplicate popups**: duplicate popups are now prevented by checking the dedup_key of the popup message.
+
 ### Fixed
 - **Truck ignores the pedals after updating from 1.0**: the game kept loading the old plugin next to the new one, which swallowed gas and brake while everything on screen still looked fine. The leftover plugin is now disabled automatically at startup; restart the game once after the message appears.
 - **Speed limiter fighting ACC at the limit**: with the global limit on, ACC holding right at the cap could get brake stabs from the limiter's overshoot protection over tiny speed drifts. Overshoot protection now stays out until you are properly over the limit, so ACC has room to work.
