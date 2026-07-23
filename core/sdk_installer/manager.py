@@ -49,6 +49,14 @@ DLL_FILES: tuple[str, ...] = (
 # each DLL comes from). Its absence never counts as a problem.
 COURTESY_FILES: tuple[str, ...] = ("sources.txt",)
 
+# Plugins older MonoCruise versions installed, superseded by DLL_FILES. A
+# leftover copy loads alongside the current one and fights it for the game.
+LEGACY_FILES: tuple[str, ...] = (
+    "input_semantical.dll",
+    "ets2_la_plugin.dll",
+)
+_DISABLED_SUFFIX = ".monocruise-disabled"
+
 _STATE_FILE = "sdk_state.json"
 _CACHE_DIRNAME = "sdk_cache"
 
@@ -56,6 +64,11 @@ _CACHE_DIRNAME = "sdk_cache"
 def _marker_name(version: str) -> str:
     """ETS2LA version-marker filename (the version lives in the name)."""
     return f"ets2la_{version}"
+
+
+def _find_conflicting(plugins_dir: Path) -> list[str]:
+    """Superseded plugin files still sitting in a game's plugins folder."""
+    return [name for name in LEGACY_FILES if (plugins_dir / name).exists()]
 
 
 # Result types the front-end reads
@@ -75,6 +88,8 @@ class GameSdkState:
     plugins_dir: Path
     running: bool
     files: list[ManagedFileState]
+    # Superseded plugins found in plugins_dir; detected locally, no remote needed.
+    conflicting: list[str] = field(default_factory=list)
 
     @property
     def missing(self) -> list[str]:
@@ -86,7 +101,7 @@ class GameSdkState:
 
     @property
     def needs_action(self) -> bool:
-        return bool(self.missing or self.outdated)
+        return bool(self.missing or self.outdated or self.conflicting)
 
 
 @dataclass
@@ -118,6 +133,8 @@ class GameApplyResult:
     game_type: str
     game_path: Path
     installed: list[str] = field(default_factory=list)
+    # Superseded plugins renamed aside so the game stops loading them.
+    disabled: list[str] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)
     skipped_running: bool = False
     # Present-but-outdated DLLs while game runs (see deferred_running vs skipped_running).
@@ -228,6 +245,7 @@ class SdkManager:
                     plugins_dir=plugins,
                     running=is_game_running(game_type),
                     files=file_states,
+                    conflicting=_find_conflicting(plugins),
                 )
             )
 
@@ -263,6 +281,7 @@ class SdkManager:
                         plugins_dir=plugins,
                         running=is_game_running(game_type),
                         files=files,
+                        conflicting=_find_conflicting(plugins),
                     )
                 )
         return states
@@ -302,22 +321,26 @@ class SdkManager:
         allow_running_missing: bool = False,
     ) -> list[GameApplyResult]:
         """Copy verified cache files into plugin dirs; see README for running-game modes."""
-        try:
-            remote_files = self.source.list_files()
-        except SdkVersionUnsupported as exc:
-            log.warning("cannot install SDK, version %s unsupported: %s", self.version, exc)
-            return [
-                GameApplyResult(
-                    g.game_type, g.game_path, errors=[("version", str(exc))], unsupported=True
-                )
-                for g in games
-            ]
-        except SdkSourceError as exc:
-            log.error("cannot install SDK, source unreachable: %s", exc)
-            return [
-                GameApplyResult(g.game_type, g.game_path, errors=[("source", str(exc))])
-                for g in games
-            ]
+        # Nothing to download when the only work is disabling a superseded
+        # plugin, so that pass must not need the network.
+        remote_files: dict[str, RemoteFile] = {}
+        if force_all or any(g.missing or g.outdated for g in games):
+            try:
+                remote_files = self.source.list_files()
+            except SdkVersionUnsupported as exc:
+                log.warning("cannot install SDK, version %s unsupported: %s", self.version, exc)
+                return [
+                    GameApplyResult(
+                        g.game_type, g.game_path, errors=[("version", str(exc))], unsupported=True
+                    )
+                    for g in games
+                ]
+            except SdkSourceError as exc:
+                log.error("cannot install SDK, source unreachable: %s", exc)
+                return [
+                    GameApplyResult(g.game_type, g.game_path, errors=[("source", str(exc))])
+                    for g in games
+                ]
 
         results: list[GameApplyResult] = []
         for game in games:
@@ -338,6 +361,19 @@ class SdkManager:
                     result.skipped_running = True
                     results.append(result)
                     continue
+
+            # Renaming works even on a DLL the game holds loaded; it just takes
+            # effect at the next game start, so no running-game special case.
+            for name in _find_conflicting(game.plugins_dir):
+                try:
+                    if on_progress:
+                        on_progress(f"Disabling {name} for {game.game_type.upper()}...")
+                    self._disable_legacy(game.plugins_dir / name)
+                    result.disabled.append(name)
+                    log.info("disabled superseded plugin %s for %s", name, game.game_type)
+                except OSError as exc:
+                    log.error("could not disable %s for %s: %s", name, game.game_type, exc)
+                    result.errors.append((name, str(exc)))
 
             wanted = self._files_to_install(game, remote_files, force_all=force_all)
             if restrict_to_missing:
@@ -385,6 +421,11 @@ class SdkManager:
             if git_blob_sha_of(game.plugins_dir / name) != remote.sha:
                 wanted.append(name)
         return wanted
+
+    @staticmethod
+    def _disable_legacy(path: Path) -> None:
+        """Rename a superseded plugin aside. Never deletes; see the README."""
+        os.replace(path, path.with_name(path.name + _DISABLED_SUFFIX))
 
     @staticmethod
     def _copy_into_place(source: Path, dest: Path) -> None:

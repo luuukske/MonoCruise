@@ -289,20 +289,34 @@ def main() -> None:
             )
             return
 
-        installed = [r for r in results if r.installed and not r.errors]
+        changed = [r for r in results if (r.installed or r.disabled) and not r.errors]
+        cleaned = [r for r in changed if r.disabled]
         deferred = [r for r in results if r.deferred_running and not r.errors]
         failed = [r for r in results if r.errors]
 
-        if installed:
-            games = ", ".join(r.game_type.upper() for r in installed)
-            log.info("SDK auto-install: installed the plugin for %s", games)
-            PopupWindow.emit(
-                "Game plugin installed",
-                f"MonoCruise installed the game plugin for {games}. Restart the "
-                f"game to activate pedal control.",
-                "c",
-                duration_ms=9000,
-            )
+        if changed:
+            games = ", ".join(r.game_type.upper() for r in changed)
+            if cleaned:
+                log.info(
+                    "SDK auto-install: disabled superseded plugins for %s",
+                    ", ".join(r.game_type.upper() for r in cleaned),
+                )
+                PopupWindow.emit(
+                    "Old game plugin disabled",
+                    f"MonoCruise found a plugin from an older version for {games} and "
+                    f"disabled it. Restart the game to activate pedal control.",
+                    "c",
+                    duration_ms=9000,
+                )
+            else:
+                log.info("SDK auto-install: installed the plugin for %s", games)
+                PopupWindow.emit(
+                    "Game plugin installed",
+                    f"MonoCruise installed the game plugin for {games}. Restart the "
+                    f"game to activate pedal control.",
+                    "c",
+                    duration_ms=9000,
+                )
         if deferred:
             games = ", ".join(r.game_type.upper() for r in deferred)
             log.info("SDK auto-install: update deferred, %s is running", games)
@@ -338,7 +352,7 @@ def main() -> None:
             )
         elif result.needs_action:
             games = ", ".join(g.game_type.upper() for g in result.games_needing_action)
-            log.info("SDK check: install/update needed for %s; installing", games)
+            log.info("SDK check: action needed for %s; applying", games)
             _auto_install_sdk(result)
         else:
             log.info("SDK check: SDK DLLs present and up to date")

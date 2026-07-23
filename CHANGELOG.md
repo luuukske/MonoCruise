@@ -12,6 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Fixed
+- **Truck ignores the pedals after updating from 1.0**: the game kept loading the old plugin next to the new one, which swallowed gas and brake while everything on screen still looked fine. The leftover plugin is now disabled automatically at startup; restart the game once after the message appears.
 - **Speed limiter fighting ACC at the limit**: with the global limit on, ACC holding right at the cap could get brake stabs from the limiter's overshoot protection over tiny speed drifts. Overshoot protection now stays out until you are properly over the limit, so ACC has room to work.
 
 ## [1.1.0-preview.10] - 2026-07-23

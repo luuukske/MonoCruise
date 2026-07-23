@@ -22,10 +22,41 @@ maintainers and the license):
 They are installed into each game's `bin/win_x64/plugins` folder. ETS2LA installs
 the same files, so the two coexist - matching files are simply left in place.
 
+## Superseded plugins (`LEGACY_FILES`)
+
+MonoCruise 1.0 shipped its own copies of two plugins under different filenames:
+
+| old file | superseded by |
+| --- | --- |
+| `input_semantical.dll` | `scs_sdk_controller.dll` |
+| `ets2_la_plugin.dll` | `ets2la_plugin.dll` |
+
+Because the names differ, upgrading leaves the old copy in the plugins folder and
+the game loads both. For the input plugin that is fatal: both builds register the
+same SCS input device id (`laneassist`, shown as "ETS2 Lane Assist"), so the
+second registration fails with `Unable to register device` in the game log, and
+plugin load order is alphabetical, so the **old** copy wins. It then reads
+`Local\SCSControls` with the 1.0 layout (62 bytes, `aforward` at offset 4) while
+MonoCruise writes the current one (342 bytes, `aforward` at offset 122). Gas and
+brake land on bytes nothing reads. Telemetry is a separate plugin and keeps
+working, so the app looks perfectly healthy while the pedals do nothing.
+
+`check()` reports these in `GameSdkState.conflicting` (a local file test, no
+network) and `needs_action` covers them, so a stale install is repaired on the
+next boot. `apply()` renames each one to `<name>.monocruise-disabled` and reports
+it in `GameApplyResult.disabled`.
+
+Renamed, never deleted: the file came from an older MonoCruise, the user can put
+it back, and it keeps the AV story below intact. Windows allows renaming a DLL
+the game currently holds loaded, so this needs no running-game special case; the
+old plugin stays resident until the game restarts, which is what the popup asks
+for.
+
 ## Boot policy
 
-1. Find every ETS2 / ATS install and check which managed files are present.
-   This is local and fast; nothing hits the network.
+1. Find every ETS2 / ATS install and check which managed files are present, plus
+   any superseded plugin left behind. This is local and fast; nothing hits the
+   network.
 2. The repository is consulted (one JSON request to the GitHub contents API)
    only when a file is missing, or when `FORCE_REFETCH` is set and this build
    has not refetched yet. **When the DLLs are already installed on a normal
@@ -56,7 +87,8 @@ is exactly the shape heuristic scanners dislike. Mitigations kept deliberately:
 - Downloads land in a cache first, then move into place atomically; a partial or
   mismatched file never reaches the game folder.
 - No process injection, no obfuscation, no executing downloaded content, no
-  deleting files we did not create.
+  deleting files we did not create. Superseded plugins we did install are
+  renamed aside, not removed.
 
 ## Game paths (`game_paths.py`)
 
