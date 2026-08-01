@@ -345,7 +345,7 @@ class Settings(metaclass=_SingletonMeta):
                         setattr(self, k, v)
 
                     if k == "polling_rate":
-                        for thread in registry.get_all_threads():
+                        for thread in registry.all_threads():
                             if hasattr(thread, "update_polling_rate"):
                                 thread.update_polling_rate()
 
