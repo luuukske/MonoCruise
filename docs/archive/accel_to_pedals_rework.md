@@ -1,4 +1,9 @@
-﻿# `accel_to_pedals.py`: Architecture Rework Plan
+> **COMPLETED, historical.** The unified effort controller described here shipped:
+> `core/sending_thread/accel_to_pedals.py` computes a single signed `effort` and splits
+> it into gas/brake. Kept for the rationale, not as current intent. Current behaviour is
+> documented in `core/sending_thread/README.md`.
+
+# `accel_to_pedals.py`: Architecture Rework Plan
 
 ## Goal
 

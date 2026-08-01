@@ -13,9 +13,15 @@ and commander merge (CC/ACC/limiter/AEB/user). Publishes `aforward` / `abackward
 ## AccelToPedals (`accel_to_pedals.py`)
 
 Single mapper instance for the process. Converts wanted m/s² to gas/brake with smoothing,
-leaky integral, road-load feed-forward (pitch via `rotationY`, rolling resistance setting),
-adaptive full-pedal accel/brake estimates, gearshift integrator freeze, and tuning CSV rows
-when high-demand estimates underperform.
+leaky integral, road-load feed-forward, adaptive full-pedal accel/brake estimates,
+gearshift integrator freeze, and tuning CSV rows when high-demand estimates underperform.
+
+- Road load is gravity along grade plus rolling resistance. Pitch comes from telemetry
+  `rotationY` in degrees, converted with `math.radians` (same convention as AEB), scaled
+  by the `mapper_rolling_resistance` setting.
+- Adaptive accel/brake estimates learn from load-compensated accel (`raw + road_load`),
+  so a slope cannot bias the learned full-pedal capability.
+- Also holds the shared telemetry mass-estimate helper that `telemetry_thread` uses.
 
 ## Pedal capacity (`pedal_capacity.py`)
 

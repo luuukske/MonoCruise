@@ -229,6 +229,34 @@ def test_large_file_count_does_not_grow():
     )
 
 
+def test_agent_docs_only_point_at_files_that_exist():
+    """AGENTS.md referenced `main.py` for months; the entry point is monocruise.py.
+
+    A pointer to a file that is not there is worse than no pointer: an agent
+    burns a search on it and then guesses.
+    """
+    docs = [REPO / "AGENTS.md"] + sorted(
+        p for p in REPO.rglob("README.md")
+        if "__pycache__" not in p.parts
+        and "build" not in p.parts
+        and "dist" not in p.parts
+        and "archive" not in p.parts
+        and ".venv" not in p.parts
+    )
+    # Backticked paths only, so prose like "the loop method" is never mistaken for one.
+    ref = re.compile(r"`([A-Za-z0-9_./-]+\.(?:py|md|json|toml|yml|yaml|iss|spec))`")
+    offenders = []
+    for doc in docs:
+        for lineno, line in enumerate(_read(doc).splitlines(), 1):
+            for match in ref.findall(line):
+                if "/" not in match and match not in {"AGENTS.md", "README.md"}:
+                    continue  # bare filename: could be any of several, skip
+                candidates = [REPO / match, doc.parent / match]
+                if not any(c.exists() for c in candidates):
+                    offenders.append(f"{_rel(doc)}:{lineno} -> {match}")
+    assert not offenders, f"agent-facing doc points at a file that does not exist: {offenders}"
+
+
 def test_duplication_stays_under_budget():
     """Clones are where a fix lands in one copy and not the other."""
     windows: Counter[str] = Counter()

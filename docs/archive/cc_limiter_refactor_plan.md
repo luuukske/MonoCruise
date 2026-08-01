@@ -1,4 +1,9 @@
-﻿# CC / Speed Limiter Refactor
+> **COMPLETED, historical.** CC and the limiter are mutually exclusive siblings under
+> `CruiseControlThread` with their own `limiter_*` settings, as planned here. Kept for the
+> rationale, not as current intent. Current invariants are in root `AGENTS.md` and
+> `core/longitudinal/README.md`.
+
+# CC / Speed Limiter Refactor
 
 ## Context
 
