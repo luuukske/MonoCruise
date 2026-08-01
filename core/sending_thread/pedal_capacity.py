@@ -34,7 +34,7 @@ _ESTIMATE_UPPER_BOUND: float = 1.3  # fraction of mass-adjusted baseline
 _BRAKE_CANDIDATE_MAX_FRACTION: float = 1.35
 # Temporary recovery ceiling vs mapper_brake_scale_ms2 (mass baseline under-
 # predicts). TODO: root-cause inaccurate mass-adjusted brake baseline; retighten.
-_BRAKE_CEILING_NOMINAL_MULT: float = 1.8
+_BRAKE_CEILING_NOMINAL_MULT: float = 3.0
 _BRAKE_HIGH_PEDAL_FOR_LOOSE_CAP: float = 0.85
 _BRAKE_ESTIMATE_ABS_MAX_MS2: float = 20.0
 # Two-speed brake learning. Routine presses are shallow (pedal³ weight) and
