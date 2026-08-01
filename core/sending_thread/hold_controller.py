@@ -402,7 +402,7 @@ class HoldController:
                 self._launch_t = 0.0
                 self._rollback_decel_ms2 = 0.0
             elif self._launch_t <= 0.0:
-                # `t` fully retreated AND the truck has not built speed —
+                # `t` fully retreated AND the truck has not built speed:
                 self._state = STATE_HOLDING
                 self._release_dwell_acc_s = 0.0
                 self._launch_t = 0.0

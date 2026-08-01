@@ -43,3 +43,8 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           MONOCRUISE_STRICT_SKIPS: '1'
         run: pytest -q --strict-markers -m "not needs_clips"
+
+      # Runs after the tests on purpose: a style nit must never mask a real
+      # test failure for a whole cycle. Rule set is narrow, see ruff.toml.
+      - name: Lint
+        run: ruff check .

@@ -63,7 +63,7 @@ class _QThreadBackend:
                 self._fn = fn
                 self.setObjectName(thread_name)
 
-            def run(self) -> None:       # noqa: D401: Qt override
+            def run(self) -> None:       # Qt override
                 self._fn()
 
         self._qthread = _Worker(target, name)

@@ -11,7 +11,7 @@ What it does, in full:
      only exists while the game is running; its first byte is the plugin's
      "SDK active" flag.
   2. When the game comes up and MonoCruise is not already open, starts
-     ``MonoCruise.exe`` from the install root — at most once per game session,
+     ``MonoCruise.exe`` from the install root, at most once per game session,
      so quitting MonoCruise mid-game does not relaunch it.
   3. When the game closes, goes back to waiting.
 

@@ -7,7 +7,7 @@ import threading
 from dataclasses import dataclass, field
 
 from core.thread_management.base_thread import BaseThread, ThreadData
-from core.thread_management.registry import registry  # noqa: F401: keep for watchdog compat
+from core.thread_management.registry import registry  # noqa: F401  (keep for watchdog compat)
 
 logger = logging.getLogger(__name__)
 

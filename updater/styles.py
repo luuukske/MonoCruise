@@ -297,11 +297,11 @@ UPDATE_BUTTON_STYLE = f"""
     }}
 """
 
-RELEASE_TITLE_STYLE = f"""
-    QLabel#releaseTitle {{
+RELEASE_TITLE_STYLE = """
+    QLabel#releaseTitle {
         font-size: 22px;
         font-weight: bold;
-    }}
+    }
 """
 
 PRERELEASE_BADGE_STYLE = f"""

@@ -24,7 +24,7 @@ Do-not-break rules for radar/AEB/ACC/longitudinal are summarized under **Domain 
 
 ### Comment budget
 
-Root `AGENTS.md` is present, so inline comments/docstrings that act as comments are capped at **2 consecutive lines** (absolute max **3** only when truly necessary). Put durable explanation in the nearest module `README.md` (human) or this file (agent-only). No decorative `# ---` / `# ====` dividers. No em dash in comments, docstrings, commit-adjacent text, or log strings.
+Inline comments/docstrings that act as comments are capped at **2 consecutive lines**. Put durable explanation in the nearest module `README.md` (human) or this file (agent-only). No decorative `# ---` / `# ====` dividers. No em dash in comments, docstrings, commit-adjacent text, or log strings. Comment budget and em dashes are enforced by `tests/invariants/test_repo_hygiene.py`.
 
 ### High‑level architecture
 
@@ -143,9 +143,7 @@ Refer back to `core/example_thread/thread.py` whenever you are unsure about the 
 ### Privacy and safety requirements for agents
 
 - **Do not store absolute paths**
-  - Never write or persist absolute filesystem paths into source files, documentation, logs, or configuration that will be committed or logged.
-  - This includes any path that contains user or machine names (for example, home directories).
-  - When referencing files or directories in this repository, always use relative paths from the project root (for example, `core/thread_management/registry.py`).
+  - Never write or persist absolute filesystem paths (or anything containing a user or machine name) into files that will be committed or logged. Reference repository files by their path from the project root, for example `core/thread_management/registry.py`. Enforced by `tests/invariants/test_repo_hygiene.py`.
 
 - **Be careful with logging**
   - Avoid introducing log messages that include personally identifying information or machine‑specific details.
@@ -153,7 +151,7 @@ Refer back to `core/example_thread/thread.py` whenever you are unsure about the 
 
 - **Logging and resilience**
   - Use the standard `logging` module for all diagnostic output. Log unexpected behaviour (e.g. exceptions, missing or down threads, invalid state) so that failures are diagnosable; avoid using `print` for errors or warnings.
-  - **`extra={"popup": True}` must be used sparingly.** Only add it when the message is genuinely useful information for the end-user (e.g. "cruise control engaged", "target vehicle lost"). Never add it to error messages, exception traces, debug output, or internal state logs: those belong in the log file only. Overuse causes popup spam; the popup threshold was lowered and this surfaced many inappropriate popups as a regression. If you need to surface a user-facing summary alongside a detailed log, make two separate log calls: one with `extra={"popup": True}` for the short user message, and one without for the full context.
+  - **`extra={"popup": True}` must be used sparingly.** Only for information the driver can act on (e.g. "cruise control engaged", "target vehicle lost"); never on traces, debug output, or internal state. Overuse already shipped as a popup-spam regression. To surface a user-facing summary alongside detail, make two log calls: a short one with the flag, a full one without. Enforced by `tests/invariants/test_repo_hygiene.py` (hard block on traces/debug, ratchet on error/critical).
   - When a thread reads from the registry or another thread’s data, it must handle missing or down sibling threads gracefully: catch `KeyError` and attribute or lock failures, use safe defaults, log at debug or warning level as appropriate, and continue. A thread must never crash or exit its loop because another thread is missing or has crashed. Enforced by `tests/invariants/test_source_invariants.py`.
 
 - **Independent threads**
@@ -169,7 +167,8 @@ Refer back to `core/example_thread/thread.py` whenever you are unsure about the 
 - **Testing and validation**
   - Never weaken, disable, or delete an existing safety check (watchdog, health check, restart limit) or an existing test assertion to make a test or build pass. Adding new tests for thread behaviour is encouraged; changing an existing safety assertion needs explicit approval.
   - `pytest` is safe to run: the root `conftest.py` redirects `core.settings` at a throwaway directory for the whole session, so no test can touch the live `config.json`. A scratch script that imports `core.settings` outside pytest still can, so snapshot `config.json` and `config.json.bak` before running one.
-  - CI (`.github/workflows/tests.yml`) runs `pytest -m "not needs_clips"` on every PR with `MONOCRUISE_STRICT_SKIPS=1`: any test that skips fails the build. A test needing an AEB clip from the local clip store must carry `@pytest.mark.needs_clips`.
+  - CI (`.github/workflows/tests.yml`) runs `pytest -m "not needs_clips"` on every PR with `MONOCRUISE_STRICT_SKIPS=1`: any test that skips fails the build. A test needing an AEB clip from the local clip store must carry `@pytest.mark.needs_clips`. CI then runs `ruff check .`; the rule set in `ruff.toml` is deliberately narrow, so a ruff failure is always something you just introduced.
+  - `tests/invariants/` holds the mechanised AGENTS.md rules. Some are absolute, some carry a recorded baseline the tree does not yet meet. Lower a baseline when you clean up; never raise one to go green.
 
 - **Physical safety**
   - When an error uccurs or certain parts of the code fail, the user must ALWAYS be able to stop the vehicle being controlled in ETS2 or ATS without causing an accident.
@@ -241,7 +240,7 @@ MonoCruise's community signed up for offline operation and no data collection. C
 - **Tier 3, minor optics:** "this could read as weird or off to users." One sentence, then proceed; no follow-up unless asked.
 - **Feature merit check** (separate axis, anti-echo-chamber): before writing implementation code for a new user-facing feature or UX change, give an independent verdict: ship / ship with changes / don't ship, plus the strongest case against it from the driver's seat (distraction while driving, visual clutter, config burden, surprising behavior, whether any trucker actually asked for this). Confidence or enthusiasm in the request is not evidence the feature is good; a merit check that always returns "ship" is a failed check. Skip only for bug fixes, refactors, perf work, internal tooling, or features already vetted earlier in the same conversation. Placement/styling questions ("where do I put it", "how should it look") presuppose the feature ships — treat that framing as a trigger, not a pass.
 - **Noise control:** one flag per issue per conversation. After acknowledgment or override, drop it; don't re-raise or append warnings to later replies.
-- **Limits:** this is a soft prior, not a guarantee — it catches recognizable categories, not every community-specific landmine. Mechanizable risks (telemetry/phone-home, leaked secrets, license incompatibility) belong in CI where possible; this section is the backstop for what CI can't check (optics, tone, feature merit, community vibe).
+- **Limits:** this is a soft prior, not a guarantee — it catches recognizable categories, not every community-specific landmine. Mechanizable risks belong in CI, and the ones that already are live in `tests/invariants/`; this section is the backstop for what CI can't check (optics, tone, feature merit, community vibe).
 
 ### Packaging and antivirus false positives
 

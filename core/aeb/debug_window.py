@@ -123,7 +123,7 @@ class AEBDebugWindow(QWidget):
         try:
             with acc.data._lock:
                 leads = list(acc.data.leads)
-                top = [(l.vehicle.id, l.score, l.dist_m) for l in leads]
+                top = [(ld.vehicle.id, ld.score, ld.dist_m) for ld in leads]
                 components = dict(acc.data.debug_components)
                 return {
                     "enabled": bool(acc.data.enabled),
