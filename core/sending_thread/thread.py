@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 import threading
 
 from core.thread_management.base_thread import BaseThread, ThreadData
@@ -27,7 +28,9 @@ from .hold_controller import (
 )
 from .pedal_capacity import PedalCapacityTracker
 from .scscontroller import SCSController
-from .visualization_bar import VisualizationBar
+
+if TYPE_CHECKING:
+    from .visualization_bar import VisualizationBar
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +58,10 @@ _COAST_LOG_HEADER_ROW: list[str] = [
 ]
 
 
-def create_visualization_bar() -> VisualizationBar:
+def create_visualization_bar() -> "VisualizationBar":
     """Pedal visualization bar; call from the Qt main thread only."""
+    # Imported lazily: keeps this module importable without Qt.
+    from .visualization_bar import VisualizationBar
     return VisualizationBar()
 
 BOOL_PRESS_DURATION: float = 0.1

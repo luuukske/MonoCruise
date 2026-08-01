@@ -105,13 +105,31 @@ def test_cmd_bump_refuses_empty_unreleased(repo):
         release.cmd_bump(args)
 
 
-def test_cmd_bump_pre_dry_run(repo, fixed_today, monkeypatch):
+def test_cmd_bump_pre_dry_run(repo, fixed_today, monkeypatch, capsys):
+    """Dry-run prints the planned version and leaves version.py/CHANGELOG untouched."""
     write_changelog(repo.changelog, unreleased_body="\n### Added\n- new\n")
     monkeypatch.setattr(release, "_run", lambda *a: pytest.fail("git must not run in dry-run"))
     args = argparse.Namespace(set=None, level=None, pre="preview", dry_run=True)
     release.cmd_bump(args)
+    out = capsys.readouterr().out
+    assert "1.1.0  ->  1.1.0-preview.1" in out
+    assert "v1.1.0-preview.1" in out
+    assert release._read_version() == "1.1.0"
+    assert "1.1.0-preview.1" not in repo.changelog.read_text(encoding="utf-8")
+
+
+def test_cmd_bump_pre_writes_and_tags(repo, fixed_today, monkeypatch):
+    """Non-dry-run bumps version.py, promotes the changelog, and tags."""
+    write_changelog(repo.changelog, unreleased_body="\n### Added\n- new\n")
+    calls: list[tuple] = []
+    monkeypatch.setattr(release, "_check_gh", lambda: None)
+    monkeypatch.setattr(release, "_create_draft", lambda *a: None)
+    monkeypatch.setattr(release, "_run", lambda *a: calls.append(a))
+    args = argparse.Namespace(set=None, level=None, pre="preview", dry_run=False, yes=True)
+    release.cmd_bump(args)
     assert release._read_version() == "1.1.0-preview.1"
     assert "## [1.1.0-preview.1] - 2026-06-26" in repo.changelog.read_text(encoding="utf-8")
+    assert ("git", "tag", "-a", "v1.1.0-preview.1", "-m", "Release v1.1.0-preview.1") in calls
 
 
 def test_cmd_notes(repo, capsys):

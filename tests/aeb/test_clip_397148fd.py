@@ -17,9 +17,12 @@ def _clip_path() -> Path | None:
     return p if p.is_file() else None
 
 
-pytestmark = pytest.mark.skipif(
-    _clip_path() is None, reason="clip 397148fd not in local clip store",
-)
+pytestmark = [
+    pytest.mark.needs_clips,
+    pytest.mark.skipif(
+        _clip_path() is None, reason="clip 397148fd not in local clip store",
+    ),
+]
 
 
 @pytest.fixture(scope="module")

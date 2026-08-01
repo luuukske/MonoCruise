@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 
 import pygame
 
-from ui.popup.popup_window import PopupWindow
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 from core.settings import Settings
@@ -1079,6 +1078,8 @@ class MainPedalThread(BaseThread):
                 self._reconnect_js.init()
                 with self.data._lock:
                     self.data.device_lost = False
+                # Imported lazily: keeps this module importable without Qt.
+                from ui.popup.popup_window import PopupWindow
                 PopupWindow.emit("Pedals reconnected", "Pedals reconnected to pedals", "c", 2000)
             except Exception as exc:
                 logger.error("reinit failed after reconnect: %s", exc, extra={"popup": True})

@@ -15,7 +15,6 @@ from pathlib import Path
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 from core.settings import Settings
-from ui.popup.popup_window import PopupWindow
 
 from core.radar.traffic import (
     Vehicle,
@@ -1835,6 +1834,8 @@ class AEBThread(BaseThread):
             elif (not self._brake_popup_fired
                     and now_mono - self._brake_span_start_mono >= _BRAKE_POPUP_MIN_DURATION_S
                     and abs(ego_speed) <= _BRAKE_POPUP_STOPPED_SPEED_MS):
+                # Imported lazily: keeps this module (and the AEB tests) Qt-free.
+                from ui.popup.popup_window import PopupWindow
                 PopupWindow.emit(
                     "AEB intervention",
                     "Automatic Emergency Braking intervention",

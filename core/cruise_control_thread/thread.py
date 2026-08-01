@@ -15,7 +15,6 @@ from core.longitudinal.limiter import SpeedLimiter
 from core.settings import Settings
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
-from ui.popup.popup_window import PopupWindow
 
 logger = logging.getLogger(__name__)
 
@@ -667,6 +666,8 @@ class CruiseControlThread(BaseThread):
                 self._cc_disarm_pending_until = 0.0
                 label = "ACC" if Settings.acc_enabled else "CC"
                 logger.info(f"{label} disabled for safety\ntap set/+ to resume")
+                # Imported lazily: keeps this module importable without Qt.
+                from ui.popup.popup_window import PopupWindow
                 PopupWindow.emit(
                     f"{label} disabled", "disabled for safety\ntap set/+ to resume", "w",
                 )

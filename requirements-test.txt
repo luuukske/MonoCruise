@@ -1,0 +1,9 @@
+# Test-only dependencies: everything `pytest` needs on a clean machine.
+# Deliberately does NOT pull requirements.txt: the game and hardware bridges
+# there (truck_telemetry, hidapi, keyboard, pygame) are not importable in CI or
+# in an agent sandbox, and no test touches them.
+pytest
+PySide6  # updater tests load updater/updater.py, which is a Qt GUI
+Pillow>=12.2.0  # AEB clip thumbnail encode/decode
+packaging  # updater version comparison
+requests  # updater GitHub API client

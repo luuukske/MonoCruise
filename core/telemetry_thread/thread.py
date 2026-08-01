@@ -16,7 +16,6 @@ import threading
 
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
-from ui.popup.popup_window import PopupWindow
 
 from core.settings import Settings
 from core.sending_thread.accel_to_pedals import compute_estimated_mass_kg
@@ -246,6 +245,8 @@ class TelemetryThread(BaseThread):
             if not raw.get("sdkActive", False):
                 raise Exception("SDK_NOT_ACTIVE")
             if not self.data.is_connected:
+                # Imported lazily: keeps this module importable without Qt.
+                from ui.popup.popup_window import PopupWindow
                 PopupWindow.emit("SDK connected", "MonoCruise is now connected to the game", "c", 3000)
             with self.data._lock:
                 self.data.is_connected = True

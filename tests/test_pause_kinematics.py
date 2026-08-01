@@ -155,14 +155,17 @@ def _assert_unpause_speeds(clip_glob: str, min_fast: int = 3) -> None:
     assert checked >= min_fast, "expected several fast vehicles to validate"
 
 
+@pytest.mark.needs_clips
 def test_clip_f5b4e904_unpause_preserves_raw_speed():
     _assert_unpause_speeds("*f5b4e904*")
 
 
+@pytest.mark.needs_clips
 def test_clip_b53e42df_unpause_does_not_stall_speeds():
     _assert_unpause_speeds("*b53e42df*")
 
 
+@pytest.mark.needs_clips
 def test_clip_53a580e7_unpause_tracks_buffer_speed():
     """Post-unpause filtered speed must stay near the traffic buffer speed."""
     root = default_clip_root()

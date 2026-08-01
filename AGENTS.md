@@ -169,7 +169,8 @@ Refer back to `core/example_thread/thread.py` whenever you are unsure about the 
 - **Testing and validation**
   - Do not add or update tests when changing thread behaviour that could affect stability or watchdog/monitor behaviour.
   - Do not disable existing safety checks (watchdog, health checks, restart limits, etc.) to “fix” failing tests or crashes.
-  - **Running `pytest` (or any script that imports `core.settings`) can silently overwrite the user's real `config.json`** with near-default values: some tests drive real settings-writing code (e.g. pedal capacity learning) without `Settings.load()` having run first, so the later `Settings.save()` writes dataclass defaults over the live file, and a second save rotates the wiped file into `config.json.bak` too. Snapshot both `config.json` and `config.json.bak` before any pytest run or core-importing scratch script in this repo, diff after, and restore them if changed.
+  - `pytest` is safe to run: the root `conftest.py` redirects `core.settings` at a throwaway directory for the whole session, so no test can touch the live `config.json`. A scratch script that imports `core.settings` outside pytest still can, so snapshot `config.json` and `config.json.bak` before running one.
+  - CI (`.github/workflows/tests.yml`) runs `pytest -m "not needs_clips"` on every PR with `MONOCRUISE_STRICT_SKIPS=1`: any test that skips fails the build. A test needing an AEB clip from the local clip store must carry `@pytest.mark.needs_clips`.
 
 - **Physical safety**
   - When an error uccurs or certain parts of the code fail, the user must ALWAYS be able to stop the vehicle being controlled in ETS2 or ATS without causing an accident.

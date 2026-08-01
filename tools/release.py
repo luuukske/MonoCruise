@@ -193,6 +193,17 @@ def _confirm(prompt: str) -> bool:
     return answer in {"y", "yes"}
 
 
+def _repo_rel(path: Path) -> str:
+    """Repo-relative path for display; falls back to the name when outside ROOT.
+
+    Tests point VERSION_FILE/CHANGELOG at a tmp dir, where relative_to raises.
+    """
+    try:
+        return path.relative_to(ROOT).as_posix()
+    except ValueError:
+        return path.name
+
+
 def _print_plan(
     *,
     current: str,
@@ -203,8 +214,8 @@ def _print_plan(
     tag = f"v{new_version}"
     is_prerelease = "-" in new_version
     notes = (_extract_section("Unreleased") or "").strip()
-    version_rel = VERSION_FILE.relative_to(ROOT).as_posix()
-    changelog_rel = CHANGELOG.relative_to(ROOT).as_posix()
+    version_rel = _repo_rel(VERSION_FILE)
+    changelog_rel = _repo_rel(CHANGELOG)
 
     print()
     print("Release plan")
@@ -281,8 +292,8 @@ def cmd_bump(args: argparse.Namespace) -> None:
     tag = f"v{new_version}"
     _run(
         "git", "add",
-        str(VERSION_FILE.relative_to(ROOT)),
-        str(CHANGELOG.relative_to(ROOT)),
+        _repo_rel(VERSION_FILE),
+        _repo_rel(CHANGELOG),
     )
     _run("git", "commit", "-m", f"Release {tag}")
     _run("git", "tag", "-a", tag, "-m", f"Release {tag}")
