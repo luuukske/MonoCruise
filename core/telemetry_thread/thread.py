@@ -181,11 +181,9 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.parkBrake           = raw.get("parkBrake", False)
         data.rotationY           = raw.get("rotationY", 0.0)
         data.hazardsActive       = raw.get("lightsHazards", False)
-        # A trailer slot is considered present when it has wheels and is attached.
-        data.ego_has_trailer = (
-            raw.get("trailer[0].wheelCount", 0) > 0
-            and raw.get("trailer[0].attached", False)
-        )
+        # trailer_count already counts leading slots with wheels and attached;
+        # raw["trailer"] is an array of structs, so flat "trailer[0].x" keys never match.
+        data.ego_has_trailer = data.trailer_count > 0
         data.estimated_total_mass_kg = compute_estimated_mass_kg(
             data.unitMass,
             data.cargoMass,
