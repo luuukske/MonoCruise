@@ -19,7 +19,6 @@ from core.aeb.clip_schema import Clip, ClipMetadata, Label
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MAX_CLIPS: int = 300
 _DEFAULT_MAX_BYTES: int = 500 * 1024 * 1024
 _CLIP_SUFFIX: str = ".json.gz"
 _TMP_SUFFIX: str = ".tmp"
@@ -83,13 +82,13 @@ def _safe_stamp(captured_at: str) -> str:
 
 
 class ClipStore:
-    """Synchronous gzipped-JSON clip store with size/count rotation."""
+    """Synchronous gzipped-JSON clip store with size rotation (count cap optional)."""
 
     def __init__(
         self,
         root: Path | None = None,
         *,
-        max_clips: int = _DEFAULT_MAX_CLIPS,
+        max_clips: int | None = None,
         max_bytes: int = _DEFAULT_MAX_BYTES,
     ) -> None:
         self.root: Path = Path(root) if root is not None else default_clip_root()
@@ -228,12 +227,15 @@ class ClipStore:
             return False
 
     def prune(self) -> int:
-        """Evict oldest clips until within the count and size caps. Returns count removed."""
+        """Evict oldest clips until within the size cap (and count cap, if set). Returns count removed."""
         clips = self.list_clips()
         total = sum(c.size_bytes for c in clips)
         removed = 0
         # Oldest last (list is newest-first): pop from the tail.
-        while clips and (len(clips) > self.max_clips or total > self.max_bytes):
+        while clips and (
+            (self.max_clips is not None and len(clips) > self.max_clips)
+            or total > self.max_bytes
+        ):
             victim = clips.pop()
             if self.delete(victim.path):
                 total -= victim.size_bytes
