@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 # Bump when the on-disk shape changes; the server rejects unknown versions.
-SCHEMA_VERSION: int = 1
+# v2 adds EgoTelemetry.estimated_total_mass_kg (None on v1 clips).
+SCHEMA_VERSION: int = 2
 
 # Sentinel used by the AEB thread for "no threat this tick".
 _INF: float = 1e9
@@ -54,6 +55,8 @@ class EgoTelemetry:
     userSteer: float = 0.0
     paused: bool = False
     ego_has_trailer: bool = False
+    # None means the clip predates schema v2, not a massless truck.
+    estimated_total_mass_kg: float | None = None
 
     def to_json(self) -> dict:
         return {
@@ -66,6 +69,7 @@ class EgoTelemetry:
             "userSteer": self.userSteer,
             "paused": self.paused,
             "ego_has_trailer": self.ego_has_trailer,
+            "estimated_total_mass_kg": self.estimated_total_mass_kg,
         }
 
     @classmethod
@@ -80,6 +84,7 @@ class EgoTelemetry:
             userSteer=float(d.get("userSteer", 0.0)),
             paused=bool(d.get("paused", False)),
             ego_has_trailer=bool(d.get("ego_has_trailer", False)),
+            estimated_total_mass_kg=_opt_float(d.get("estimated_total_mass_kg")),
         )
 
 

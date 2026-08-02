@@ -33,7 +33,7 @@ def test_radar_capture_frame_maps_ego_and_buffers():
         stub, now_mono=5.0, t_wall=1000.0,
         ego_x=1.0, ego_y=2.0, ego_z=3.0, ego_yaw_norm=0.5,
         ego_speed=25.0, ego_steer=0.1, ego_pitch_raw=0.0,
-        ego_has_trailer=True, paused=False,
+        ego_has_trailer=True, paused=False, ego_mass_kg=27500.0,
         traffic_buf=b"x" * 6960, parked_buf=None,
     )
     assert len(stub.frames) == 1
@@ -41,6 +41,7 @@ def test_radar_capture_frame_maps_ego_and_buffers():
     assert isinstance(f, RadarFrameRecord)
     assert f.t_mono == 5.0 and f.t_wall == 1000.0
     assert f.ego.rotationX == 0.5 and f.ego.speed == 25.0 and f.ego.ego_has_trailer is True
+    assert f.ego.estimated_total_mass_kg == 27500.0
     assert f.traffic_buf == b"x" * 6960 and f.parked_buf is None
 
 

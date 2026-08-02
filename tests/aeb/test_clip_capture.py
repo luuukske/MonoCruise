@@ -18,6 +18,7 @@ from core.aeb.clip_schema import (
     Label,
     LiveAEB,
     RadarFrameRecord,
+    SCHEMA_VERSION,
 )
 from core.aeb.clip_store import (
     AsyncClipWriter,
@@ -89,11 +90,27 @@ def test_serialization_round_trip_preserves_streams_and_bytes():
 def test_top_level_json_shape_matches_payload_contract():
     d = _make_clip().to_json_dict()
     # Metadata fields sit at the top level; streams are arrays beside them.
-    assert d["schema_version"] == 1
+    assert d["schema_version"] == SCHEMA_VERSION
     assert "clip_id" in d and "calibration" in d
     assert d["label"] is None
     assert isinstance(d["radar_frames"], list) and isinstance(d["aeb_ticks"], list)
     assert d["radar_frames"][0]["traffic_buf"] is not None
+
+
+def test_ego_mass_round_trips():
+    ego = EgoTelemetry(speed=20.0, estimated_total_mass_kg=31250.0)
+    assert EgoTelemetry.from_json(ego.to_json()).estimated_total_mass_kg == 31250.0
+
+
+def test_ego_mass_absent_on_v1_clips_is_none_not_zero():
+    """v1 clips predate the field; 0.0 would read as a massless truck."""
+    v1 = {"speed": 20.0, "rotationX": 0.5, "ego_has_trailer": True}
+    assert EgoTelemetry.from_json(v1).estimated_total_mass_kg is None
+
+
+def test_ego_mass_zero_survives_round_trip():
+    ego = EgoTelemetry(estimated_total_mass_kg=0.0)
+    assert EgoTelemetry.from_json(ego.to_json()).estimated_total_mass_kg == 0.0
 
 
 def test_label_round_trip_uses_class_key():
