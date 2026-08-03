@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Fixed
+- **AEB warned after a crash with nothing in front of you**: being flipped, launched, or left sitting at a steep angle could set off the collision warning and add brake help on its own, with no vehicle anywhere near. A slope alone no longer counts as a hazard.
 
 ## [1.1.0-preview.11] - 2026-07-24
 ### Changed

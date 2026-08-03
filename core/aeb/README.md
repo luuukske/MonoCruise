@@ -467,6 +467,20 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    ```
    `capacity_estimate` is read from `sending_thread.data.max_brake_ms2`
    (PedalCapacityTracker) with a fallback constant.
+
+   `threat_present = required_decel > 0`. Slope modifies a threat-derived
+   demand, it never sources one: `warn_by_decel` and the FF branch both
+   require `threat_present`, so gravity alone can neither warn nor feed
+   brake assist. Without that gate the offset raises `effective_required`
+   and lowers `warn_threshold` (itself `0.5 · effective_max`) at the same
+   time, so pitch alone crosses the bar once `downhill_offset ≥ 0.3 ·
+   capacity_estimate`, about 17°. Public roads never reach that; a wreck,
+   an embankment or an airborne truck does immediately, which was the
+   phantom-warn-after-crash class (clip b530ea7b: 9 warn ticks and 92 FF
+   ticks up to 3.16 m/s² with `colliding_ids` empty and `ttb`/`ttc` at
+   infinity for the entire clip; 844 of 7199 corpus warn ticks were pure
+   slope). `brake_ttb_active` is deliberately outside the gate: it owns the
+   geometric threats where `required_decel` collapses to 0 by design.
 4. Engagement hysteresis (slope-aware):
    - `brake_ttb_active = (time_to_brake < cal.brake_ttb + cal.brake_response_window_s)`
     : emergency criterion for path-crossing / arc-cross threats where

@@ -1600,6 +1600,9 @@ class AEBThread(BaseThread):
                 ego_speed, cal, best_codir_cap,
             )
 
+        # Slope modifies a threat-derived demand, it never sources one: gravity
+        # alone must not warn or feed FF (README warn/FF contract).
+        threat_present = required_decel > 0.0
         effective_required = required_decel + downhill_offset
 
         engage_threshold = cal.aeb_engage_frac * effective_max_decel
@@ -1768,7 +1771,7 @@ class AEBThread(BaseThread):
         if run_collision and effective_max_decel > 0.1 and aeb_outputs_ok:
             if brake_ttb_active:
                 aeb_ff_decel = effective_max_decel
-            elif effective_required > 0.0:
+            elif threat_present:
                 aeb_ff_decel = min(effective_required, effective_max_decel)
             else:
                 aeb_ff_decel = 0.0
@@ -1776,7 +1779,10 @@ class AEBThread(BaseThread):
             aeb_ff_decel = 0.0
 
         warn_by_decel = (
-            run_collision and aeb_outputs_ok and effective_required >= warn_threshold
+            run_collision
+            and aeb_outputs_ok
+            and threat_present
+            and effective_required >= warn_threshold
         )
         warn_by_ttb = (
             run_collision and aeb_outputs_ok and time_to_brake < cal.warn_ttb
