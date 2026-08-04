@@ -461,6 +461,11 @@ Recorded so they are not retried blind. All on the same 40-clip sample.
 | Rate limiting the fitted deviation instead of the absolute lateral | **Algebraically a no-op** while the nodes hold absolute laterals: the base arc appears in both the fresh value and the prior and cancels. Bit-identical output. Decoupling requires the nodes themselves to store deviation, and even then a curvature change is a genuine disagreement between the carried road and the new reference, not a bookkeeping artefact. |
 | Restricting the cubic on the grid to `support_x_m` rather than `support + 30` | The discontinuity at that boundary is real and large (p50 7.1 m, p90 87 m, max 470 m), and the code gating on `confidence_at(x) > 0` did contradict this section. Fixing it moved nothing measurable: jump p90 0.820 -> 0.834. The far nodes are dominated by the base arc, not the cubic. |
 | Gating the `path` in-corridor reward on evidence with no floor | Stationary false-lock 4.3 -> 2.6 % but moving recall 41.5 -> 39.0 %. Too blunt on its own; the arc evidence floor is what makes it affordable. |
+| Range (`max - min`) of per-source residuals as the agreement statistic | Zeroed confidence at five or more sources: corroboration made it worse. Shipped in 0180e4b and reported from the driver's seat as the prediction fading in and out. Replaced by a quantile. |
+| Residual of the initial unrobust fit as the agreement statistic | Correct that post-IRLS statistics are laundered, but an RMS over all rows is not robust: one source drifting 1 m dragged the fit until every source read wrong, 0.77 -> 0.00 confidence. Best p90 at matched coverage, worst dissenter tolerance. |
+| Weighted consensus share (fraction of source weight agreeing) | Count-stable and flicker-free, but measured **after** the robust passes, so it reads ~1.0 even on a fit captured by a minority. Raising it to a power changed nothing at all: a no-op, which is how the laundering was confirmed. |
+| Share of source weight the robust passes discarded | Real discrimination (p50 error 0.57 -> 5.47 across its range) but strictly worse than the quantile at matched coverage, and redundant once IRLS stopped compounding weights. |
+| Median of per-source residuals | Too permissive: p99 at matched coverage ~15 m against 9.6-10.1 for the 75th percentile. The right amount of pessimism is an upper quantile, not a central one. |
 
 Confidence must come from **traffic weight only**, never total weight including
 ego. Ego anchors the fit but samples no road ahead, so counting it lets an empty
@@ -524,6 +529,22 @@ A lane-changing target violates that, so two robust passes run:
   not sample by sample; sample-level rejection alone lets the cubic absorb its
   ramp.
 
+**Each pass must rescale the original weights, never the previous pass's.**
+Compounding them (`w * scale` accumulated across passes) makes the down-weighting
+monotone and irreversible, so a first fit dragged by one dissenter craters every
+source and no later pass can undo it. Measured on four sources fitting a
+synthetic road exactly, adding one vehicle drifting 0.5 m:
+
+| | surviving source weight | confidence |
+|---|---|---|
+| compounding (was) | 24.00 → **1.48** | 0.77 → **0.00** |
+| rescaling originals | 24.00 → 24.01 | 0.77 → 0.77 |
+
+A 94 % weight collapse from a correctly-rejected dissenter, which drops total
+weight under `_CONF_WEIGHT_MIN` and zeroes confidence. This was the dominant
+cause of the estimate dropping out in traffic, ahead of the choice of agreement
+statistic above. `tests/acc/test_road_model.py` pins it at four drift sizes.
+
 ### Confidence must measure agreement, not volume
 
 The first version was `weight_term × residual_term`, and the residual term was
@@ -548,26 +569,50 @@ compares each vehicle against the shared fit, so with one source there is nothin
 to disagree with and `_source_scales` returns 1.0 whatever that vehicle does.
 **Robust estimation needs a quorum, and nothing was checking for one.**
 
-The signal that fixes it was already being computed and thrown away: the spread
-of the per-source residual RMS.
+The signal that fixes it was already being computed and thrown away: the
+per-source residual RMS. **Which statistic you reduce it with is the whole
+result**, and the first two choices were both wrong in instructive ways.
 
-| spread of `source_rms` | error @50 m p50 | p90 |
-|---|---|---|
-| 0.05-0.2 m | 0.47 | **2.41** |
-| 0.2-0.5 m | 0.62 | 2.67 |
-| 0.5 m and above | 1.34 | **13.38** |
+#### Never a range, never an RMS over all rows
 
-`_CONF_SPREAD_GOOD_M` / `_CONF_SPREAD_BAD_M` scale confidence by it, and
-`_CONF_SINGLE_SOURCE_CAP` bounds the unverifiable case. Effect where the model is
-consumed: error at 50 m p99 **20.59 m → 10.41 m**, at 70 m p99 **57.67 → 28.50**.
+The first version used the **range** (`max - min`) of the per-source residuals.
+A range has a breakdown point of zero and its expected value grows with the
+number of samples, so more corroborating traffic made it worse. Measured:
 
-Keep the band tight. Loosening it to 0.30-1.00 restores coverage (38.8 % to
-43.6 %) but gives back the entire accuracy win (50 m p99 back to 20.85 m) for no
-measurable downstream gain, so the coverage was never worth having.
+| sources | 2 | 3 | 4 | 5 | 7 | 9+ |
+|---|---|---|---|---|---|---|
+| confidence p50 | 0.42 | 0.77 | 0.60 | **0.00** | **0.00** | **0.00** |
 
-The cost is real and deliberate: coverage falls from 49.8 % to 38.9 % of frames
-and moving in-corridor recall from 43.2 % to 40.6 %. Those are frames where the
-sources disagreed, which is where the estimate measured twice as bad.
+Five vehicles in view zeroed the estimate. From the driver's seat that is the
+prediction fading in and out exactly when the traffic to support it is there.
+
+The second attempt used the **residual of the initial unrobust fit**, on the
+argument that anything measured after the robust passes is laundered by them.
+That argument is right, but an RMS over all rows is not robust either: one
+dissenter drags the initial fit, and then *every* source reads as wrong. A
+vehicle drifting 1 m over 120 m took confidence from 0.77 to 0.00.
+
+What works is an **upper quantile** (`_CONF_AGREE_QUANTILE`, `agreement_residual_m`).
+It is count-stable, and it survives a minority of dissenters while still rising
+when the majority disagree, which is the capture case that matters. Compared at
+**matched coverage** (see below), error p99 at 50 m:
+
+| statistic | 25 % | 40 % | 55 % | 70 % |
+|---|---|---|---|---|
+| weight only | 11.22 | 15.81 | 15.50 | 15.19 |
+| range | 9.93 | 10.13 | 10.10 | 10.22 |
+| initial-fit RMS | 9.93 | 14.86 | 14.00 | 13.29 |
+| median | 15.72 | 15.12 | 14.86 | 14.37 |
+| **75th percentile** | **9.93** | **10.10** | **9.79** | **9.61** |
+
+**Compare confidence signals only at matched coverage.** Percentiles conditioned
+on `confidence > 0` are not comparable between candidates: a signal that fires
+less often is scored on a smaller and more selective set, which flatters it for
+free. Rank the frames by each candidate and take a fixed top fraction.
+
+The quantile is low-passed (`_CONF_RESIDUAL_TAU_S`) before it reaches confidence.
+Smooth the measurement, rate limit the decision: they are separate jobs, and
+skipping the first put confidence reversals at p90 5.0/s.
 
 ### Confidence, and why it must fade with distance
 

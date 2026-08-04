@@ -265,3 +265,52 @@ def test_smoother_does_not_carry_untrusted_extrapolation():
     out = _smoother_step(RoadSmoother(), wild)
     assert abs(out.lateral_at(140.0)) < 5.0
     assert abs(wild.raw_lateral_at(140.0)) > 500.0
+
+
+def test_more_agreeing_traffic_never_lowers_confidence():
+    """Corroboration must not be punished.
+
+    The first agreement term was the range of the per-source residuals, a
+    statistic with no breakdown point whose expected value grows with the number
+    of sources. Confidence therefore fell to zero once five vehicles were in
+    view, which is the opposite of what corroboration means, and showed up from
+    the driver's seat as the prediction fading in and out in traffic."""
+    xs = [20.0 * i for i in range(1, 7)]
+    confidences = []
+    for count in range(2, 7):
+        samples = []
+        for k in range(count):
+            samples += _lane(k, 3.5 * k, xs, kappa=1.0 / 400.0)
+        model = fit_road_model(_ego_path(1.0 / 400.0), samples, 1.0 / 400.0)
+        confidences.append(model.confidence)
+    assert all(b >= a - 1e-9 for a, b in zip(confidences, confidences[1:])), (
+        f"confidence fell as sources were added: {confidences}"
+    )
+    assert confidences[-1] > 0.5
+
+
+@pytest.mark.parametrize("drift_m", [0.5, 1.0, 3.5, 10.0])
+def test_one_dissenter_does_not_cost_the_agreeing_sources_their_weight(drift_m):
+    """Rejecting a vehicle leaving the road must not disarm the fit.
+
+    The IRLS passes used to compound weights instead of rescaling the originals,
+    so a first fit dragged by one dissenter cratered every source: four sources
+    fitting perfectly still lost 94% of their weight, confidence hit zero, and
+    the prediction dropped out exactly when traffic was there to support it."""
+    kappa = 1.0 / 400.0
+    xs = [20.0 * i for i in range(1, 7)]
+    good = []
+    for k in range(4):
+        good += _lane(k, 3.5 * k, xs, kappa=kappa)
+    clean = fit_road_model(_ego_path(kappa), good, kappa)
+
+    a = drift_m / (120.0 ** 2)
+    turning = [(99, x, a * x * x, 1.0) for x in xs]
+    mixed = fit_road_model(_ego_path(kappa), good + turning, kappa)
+
+    assert clean.confidence > 0.5
+    assert mixed.target_weight >= clean.target_weight * 0.9
+    assert mixed.confidence >= clean.confidence * 0.9
+    # And the dissenter is still kept out of the shape.
+    for x in (60.0, 120.0):
+        assert abs(mixed.lateral_at(x) - clean.lateral_at(x)) < 0.5

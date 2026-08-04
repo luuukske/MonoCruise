@@ -21,6 +21,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
   - **Standing vehicles treated as the most certain target on the road**: the in-lane check needs to see a vehicle move and quietly gave up on anything that wasn't. They now have to earn it, and one you watched drive into place before it stopped still counts properly.
   - **The predicted lane jumped around in traffic and through corners**: it could shift sideways in a single frame as vehicles came and went, and through corners the far end lagged behind and then caught up in a rush. Both are damped now without making it sluggish.
   - **Slow to let go of a car that had moved over**: release could take over two seconds. It is roughly twice as quick now, with no change to how fast a car cutting in is picked up.
+  - **The prediction faded in and out with traffic all around**: having more vehicles ahead to confirm the road made the estimate *less* certain rather than more, and a single car turning off could throw away everything the others had established. Corroboration now counts for you instead of against you, so the more traffic is holding the same road, the steadier the prediction gets.
 
 ### Fixed
 - **ACC braked hardest for the targets it was least sure about**: full emergency braking could fire on a vehicle it had barely started tracking, usually something parked near the road. Maximum braking now needs the same confidence the rest of ACC uses, and close-range emergency braking is unchanged.

@@ -26,16 +26,15 @@ _SOURCE_REJECT_POWER: float = 2.0
 _CONF_WEIGHT_MIN: float = 4.0
 _CONF_WEIGHT_FULL: float = 30.0
 
-# Residual ramp, measured after the robust passes: it says the fit converged, not
-# that the sources agreed. The spread term below is what carries agreement.
-_CONF_RESIDUAL_GOOD_M: float = 0.5
-_CONF_RESIDUAL_BAD_M: float = 3.0
+# Agreement ramp, on an upper quantile of the per-source residuals: count-stable
+# and dissenter-tolerant, which neither a range nor an RMS is (README §9).
+_CONF_AGREE_QUANTILE: float = 0.75
+_CONF_RESIDUAL_GOOD_M: float = 0.10
+_CONF_RESIDUAL_BAD_M: float = 0.60
 
 # Agreement, not volume. Source-level rejection has no quorum, so a lone source
 # is unchecked and a vehicle turning off is absorbed as road shape. README §9.
 _CONF_SINGLE_SOURCE_CAP: float = 0.25
-_CONF_SPREAD_GOOD_M: float = 0.20
-_CONF_SPREAD_BAD_M: float = 0.60
 
 # A source needs this many samples to say anything about shape once its own
 # lateral offset is eliminated.
@@ -63,6 +62,10 @@ _NODE_X: tuple[float, ...] = tuple(i * _NODE_STEP_M for i in range(_NODE_COUNT))
 _SMOOTH_MAX_KAPPA_RATE: float = 0.010     # (1/m) per second
 _SMOOTH_MIN_RATE_MS: float = 20.0         # floor so the near nodes are not frozen
 _SMOOTH_RESET_JUMP_M: float = 20.0
+
+# The agreement residual comes from an unrobust fit, so one outlier sample moves
+# it. Smooth the measurement here; the rate limit below governs the decision.
+_CONF_RESIDUAL_TAU_S: float = 0.30
 
 # Confidence rate limit (per second). Unsmoothed it went 1 -> 0 inside a frame,
 # retargeting the whole centreline and reading as a bounce between arcs.
@@ -117,6 +120,9 @@ class RoadModel:
     support_x_m: float = 0.0
     # Per-source residual RMS about the shared fit; drives the caller's trust EMA.
     source_rms: dict = field(default_factory=dict)
+    # Inputs the smoother needs to recompute confidence on a filtered residual.
+    agreement_rms_m: float = 0.0
+    target_weight: float = 0.0
     # Temporally smoothed centreline on ``_NODE_X``; empty means evaluate the fit.
     nodes: tuple = ()
 
@@ -210,12 +216,14 @@ class RoadSmoother:
         self._pose: tuple[float, float, float, float] | None = None
         self._confidence: float = 0.0
         self._support_x_m: float = 0.0
+        self._residual: float | None = None
 
     def reset(self) -> None:
         self._nodes = None
         self._pose = None
         self._confidence = 0.0
         self._support_x_m = 0.0
+        self._residual = None
 
     def step(
         self,
@@ -225,7 +233,7 @@ class RoadSmoother:
         dt: float,
     ) -> RoadModel:
         """Return ``model`` carrying the smoothed centreline and confidence."""
-        conf = self._step_confidence(model.confidence, dt)
+        conf = self._step_confidence(self._filtered_confidence(model, dt), dt)
         support = (
             model.support_x_m if model.confidence >= self._confidence
             else max(model.support_x_m, self._support_x_m if conf > 0.0 else 0.0)
@@ -253,6 +261,19 @@ class RoadSmoother:
         self._confidence = conf
         self._support_x_m = support
         return replace(held, nodes=self._nodes)
+
+    def _filtered_confidence(self, model: RoadModel, dt: float) -> float:
+        """Confidence from the low-passed agreement residual, not the raw one."""
+        if model.n_sources <= 0:
+            self._residual = None
+            return model.confidence
+        fresh = model.agreement_rms_m
+        if self._residual is None:
+            self._residual = fresh
+        else:
+            alpha = 1.0 - math.exp(-max(dt, 1e-6) / _CONF_RESIDUAL_TAU_S)
+            self._residual += alpha * (fresh - self._residual)
+        return _confidence(model.target_weight, self._residual, model.n_sources)
 
     def _step_confidence(self, fresh: float, dt: float) -> float:
         rate = _CONF_RATE_UP_PER_S if fresh >= self._confidence else _CONF_RATE_DOWN_PER_S
@@ -455,25 +476,29 @@ def _source_scales(rows, beta) -> dict[int, float]:
     return scales
 
 
+def agreement_residual_m(source_rms: dict) -> float:
+    """Upper quantile of the per-source residuals: how badly the sources agree.
+
+    A quantile survives one dissenter among several, and does not drift upward
+    as sources are added the way a max or a range does."""
+    finite = sorted(r for r in source_rms.values() if math.isfinite(r))
+    if not finite:
+        return 0.0
+    idx = min(len(finite) - 1, int(_CONF_AGREE_QUANTILE * len(finite)))
+    return finite[idx]
+
+
 def _confidence(
     total_weight: float,
-    residual_rms: float,
+    agreement_rms: float,
     n_sources: int,
-    source_rms: dict,
 ) -> float:
+    """Weight the fit earned, scaled by how well its sources agree with it."""
     span_w = _CONF_WEIGHT_FULL - _CONF_WEIGHT_MIN
     w_term = max(0.0, min(1.0, (total_weight - _CONF_WEIGHT_MIN) / span_w))
     span_r = _CONF_RESIDUAL_BAD_M - _CONF_RESIDUAL_GOOD_M
-    r_term = max(0.0, min(1.0, (_CONF_RESIDUAL_BAD_M - residual_rms) / span_r))
+    r_term = max(0.0, min(1.0, (_CONF_RESIDUAL_BAD_M - agreement_rms) / span_r))
     conf = w_term * r_term
-
-    # Sources disagreeing with each other is the failure the fit residual cannot
-    # see, because the robust passes have already down-weighted the dissenter.
-    finite = [r for r in source_rms.values() if math.isfinite(r)]
-    if len(finite) >= 2:
-        spread = max(finite) - min(finite)
-        span_s = _CONF_SPREAD_BAD_M - _CONF_SPREAD_GOOD_M
-        conf *= max(0.0, min(1.0, (_CONF_SPREAD_BAD_M - spread) / span_s))
     if n_sources <= 1:
         conf = min(conf, _CONF_SINGLE_SOURCE_CAP)
     return conf
@@ -508,17 +533,18 @@ def fit_road_model(
         return from_curvature(fallback_kappa)
     beta, rms = fit
 
-    # Sample-level Huber handles noise; source-level scaling drops a whole
-    # vehicle whose trail disagrees with the road, which is what a lane change is.
+    # Huber handles sample noise, source-level scaling drops a manoeuvring vehicle.
+    # Each pass rescales the ORIGINAL weights; compounding craters every source.
+    base_rows = rows
     for _ in range(_IRLS_PASSES):
         scales = _source_scales(rows, beta)
         reweighted = []
-        for source_id, basis, y, w in rows:
+        for source_id, basis, y, w0 in base_rows:
             pred = beta[0] * basis[0] + beta[1] * basis[1] + beta[2] * basis[2]
             residual = abs(y - pred)
             scale = 1.0 if residual <= _HUBER_DELTA_M else _HUBER_DELTA_M / residual
             scale *= scales.get(source_id, 1.0)
-            reweighted.append((source_id, basis, y, w * scale))
+            reweighted.append((source_id, basis, y, w0 * scale))
         fit = _weighted_fit(reweighted)
         if fit is None:
             return from_curvature(fallback_kappa)
@@ -528,19 +554,23 @@ def fit_road_model(
     # Ego anchors the fit but samples no road ahead, so it buys no confidence.
     target_weight = sum(w for sid, _, _, w in rows if sid != _EGO_SOURCE_ID)
     source_rms = _source_residuals(rows, beta)
-    confidence = _confidence(target_weight, rms, n_sources, source_rms)
+    agreement = agreement_residual_m(source_rms)
+    confidence = _confidence(target_weight, agreement, n_sources)
     if confidence <= 0.0:
         # Keep the per-source diagnostics even when the fit is not trusted, or a
         # caller's trust loop can never bootstrap out of a cold start.
         return RoadModel(
             base_kappa=fallback_kappa, confidence=0.0,
             residual_rms_m=rms, source_rms=source_rms,
+            agreement_rms_m=agreement, target_weight=target_weight,
+            n_sources=n_sources, support_x_m=support,
         )
     return RoadModel(
         c1=beta[0], c2=beta[1], c3=beta[2], base_kappa=fallback_kappa,
         confidence=confidence, residual_rms_m=rms,
         n_samples=len(rows), n_sources=n_sources,
         support_x_m=support, source_rms=source_rms,
+        agreement_rms_m=agreement, target_weight=target_weight,
     )
 
 
