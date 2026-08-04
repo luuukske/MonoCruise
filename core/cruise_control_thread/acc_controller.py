@@ -41,8 +41,9 @@ ANT_GAP_ZERO_S: float = 3.0
 # Pair time gaps are normalised by the follower's speed, floored so
 # slow-moving packed traffic keeps a finite gap time.
 ANT_TIME_REF_FLOOR_MS: float = 5.0
-# In-lane tracker score confidence ramp: zero at or below SCORE_MIN
-ANT_SCORE_MIN: float = 1.0
+# In-lane tracker score confidence ramp: zero at or below SCORE_MIN. This floor is
+# what gates latch time; road-model smoothing measured as no influence on it.
+ANT_SCORE_MIN: float = 0.5
 ANT_SCORE_FULL: float = 5.0
 # Per-vehicle confidence is EMA-filtered asymmetrically: fast upward so
 ANT_CONF_TAU_UP_S: float = 0.10

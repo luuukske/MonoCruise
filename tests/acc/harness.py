@@ -15,10 +15,12 @@ from core.acc.tracker import ACCTracker
 from core.radar.ego_path import EGO_POSITION_HISTORY_LEN, ego_curvature_from_history
 from core.radar.reader import TrafficReader
 
-# Confidence thresholds the ACC controller applies to tracker score; metrics are
-# expressed against them so harness numbers mean something downstream.
-CONF_MIN = 1.0
-CONF_FULL = 5.0
+# Imported, not copied: retuning the controller must not leave these metrics
+# silently measuring the old threshold while reporting the new behaviour.
+from core.cruise_control_thread.acc_controller import ANT_SCORE_FULL, ANT_SCORE_MIN
+
+CONF_MIN = ANT_SCORE_MIN
+CONF_FULL = ANT_SCORE_FULL
 
 # A track counts as stationary below this speed, moving above it.
 STATIONARY_MS = 1.0
