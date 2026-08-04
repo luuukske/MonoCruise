@@ -175,6 +175,73 @@ def test_packet_stall_frozen_rotation_enters_lag_freeze():
     assert prev._lag_since is not None
 
 
+def test_braking_to_a_stop_never_enters_lag_freeze():
+    """The regression from clips f7a2793c / b3419ab0.
+
+    A target braking to a standstill in a straight line has ~0 rotation, so the
+    rotation gate alone let it in. The filtered speed still reads high there, so the
+    freeze pinned a stopped vehicle at ~9 m/s for over a second.
+    """
+    speed = 15.0
+    prev, t_now, z, yaw = _seed_cruise(speed)
+
+    true_speed = speed
+    while true_speed > 0.0:
+        next_speed = max(0.0, true_speed - 6.0 * DT)
+        z -= 0.5 * (true_speed + next_speed) * DT
+        t_now += DT
+        prev = _step(prev, t_now, z, next_speed, yaw, ego_speed=20.0)
+        assert prev._lag_since is None
+        true_speed = next_speed
+
+    # And it stays out once fully stopped, so the stop reaches AEB raw.
+    for _ in range(int(0.6 / DT)):
+        t_now += DT
+        prev = _step(prev, t_now, z, 0.0, yaw, ego_speed=20.0)
+        assert prev._lag_since is None
+        assert prev.lag_confirmed is False
+    assert abs(prev.speed) < 0.5
+
+
+def test_stopped_target_speed_converges_without_a_freeze_holding_it():
+    """A stopped target must reach ~0 promptly, not sit at a stale filtered speed."""
+    speed = 15.0
+    prev, t_now, z, yaw = _seed_cruise(speed)
+
+    true_speed = speed
+    while true_speed > 0.0:
+        next_speed = max(0.0, true_speed - 6.0 * DT)
+        z -= 0.5 * (true_speed + next_speed) * DT
+        t_now += DT
+        prev = _step(prev, t_now, z, next_speed, yaw, ego_speed=20.0)
+        true_speed = next_speed
+
+    stopped_at = t_now
+    while abs(prev.speed) >= 1.0:
+        t_now += DT
+        prev = _step(prev, t_now, z, 0.0, yaw, ego_speed=20.0)
+        assert t_now - stopped_at < 0.8, "stopped target still reads above 1 m/s"
+
+
+def test_decaying_motion_before_a_dropout_blocks_lag_entry():
+    """Gate A: raw motion already collapsing means a stop, even without a full stall."""
+    speed = 15.0
+    prev, t_now, z, yaw = _seed_cruise(speed)
+
+    # Decelerate hard enough that the recent raw window is well under the older one,
+    # then drop a single near-zero-displacement frame.
+    true_speed = speed
+    for _ in range(6):
+        true_speed = max(0.0, true_speed - 9.0 * DT)
+        z -= true_speed * DT
+        t_now += DT
+        prev = _step(prev, t_now, z, true_speed, yaw, ego_speed=20.0)
+
+    t_now += DT
+    prev = _step(prev, t_now, z, true_speed, yaw, ego_speed=20.0)
+    assert prev._lag_since is None
+
+
 def test_subframe_carries_crash_latch():
     speed = 15.0
     prev, t_now, z, yaw = _seed_cruise(speed)

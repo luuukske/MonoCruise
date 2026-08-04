@@ -438,15 +438,37 @@ is_lag         = (abs(prev.speed) > _LAG_MIN_SPEED_MS          # was moving
                  # raw moved less than 10 % of expected displacement
 ```
 
-**Entry rotation gate**: entry (not continuation) additionally requires the
-rotation stream to not be clearly live: the max per-axis rotation delta from
-the previous frame, as a rate, must stay under `_LAG_ROT_LIVE_DEG_S` (2 deg/s).
-A packet stall freezes the whole pose (corpus: p99 of genuine lag-entry
-rotation rates ≈ 1.6 deg/s), while a physically crashing / stopping vehicle
-keeps rotating at 10+ deg/s. This is the discriminator between "packets
-stopped coming" (freeze it) and "vehicle stopped moving" (fall through so AEB
-sees the stop raw). An established freeze window is not bounced by mid-stall
-rotation flicker.
+**Entry gates** (`Vehicle._lag_entry_allowed`, entry only, never continuation).
+The criterion above compares raw motion against `prev.speed`, which is the
+filter's *own* output. On a hard stop that output lags truth by about a second,
+so a genuine stop satisfies the criterion by construction: the staleness is both
+the evidence for freezing and the thing the freeze then preserves. Four gates
+break that circle; all must pass to open a freeze.
+
+1. **Hard-brake veto**: `prev._raw_brake_active` blocks entry. A confirmed
+   deceleration ramp is measured motion, so the target is stopping, not stalled.
+2. **Rotation**: max per-axis rotation delta as a rate must stay under
+   `_LAG_ROT_LIVE_DEG_S` (2 deg/s). A packet stall freezes the whole pose;
+   a crashing vehicle keeps rotating at 10+ deg/s. Note this gate says nothing
+   about a vehicle braking in a straight line, which is why the two below exist.
+3. **Recent raw speed** (`_LAG_ENTRY_RAW_SPEED_MS`): path-length speed over the
+   last `_LAG_ENTRY_WINDOW` intervals of `_position_history` must reach the
+   threshold. Measured from raw positions only, so a stale filtered speed cannot
+   satisfy it.
+4. **Raw decay** (`_LAG_ENTRY_DECAY_MIN`): that window over the one before it.
+   A stall from cruise keeps both windows equal; a target already braking shows
+   the recent window collapsing first.
+
+Gates 3 and 4 fall open when `_position_history` is too short to measure, so a
+freshly spawned track keeps the pre-gate behaviour rather than being judged on
+one or two samples. An established freeze window is not bounced by mid-stall
+rotation flicker or by the raw windows going quiet during the freeze.
+
+Why this ordering: the freeze mutes a vehicle's true speed, so a wrong freeze on
+a real stop hides a stationary obstacle (clips f7a2793c and b3419ab0 pinned
+stopped traffic at 4.6 to 9.5 m/s for 0.9 to 1.5 s, and f7a2793c ended in a
+collision). A missed freeze on a real stall only costs smoothing. The gates are
+deliberately biased toward not freezing.
 
 **Freeze duration is TTC-scaled** so a close vehicle's real stop is not masked
 by the filter (a 0.5 s freeze on a vehicle 1 s ahead would rear-end ego). Let
@@ -797,8 +819,9 @@ double-count each trailer.
 | Speed / accel filter (AI + TMP) | Long-window position LS raw speed by default; confirmed hard braking temporarily selects a 5-sample LS suffix and its measured decel. Then `_smooth_vehicle_kinematics()` runs `speed_ema` (EMA of raw) → `accel` (LS slope with confirmed short-window brake floor) → `speed_corr = speed_ema + accel·τ` (`self.speed`) → `acc_speed` (adaptive low-pass on `speed_corr`: `tau` ramps `_ACC_SPEED_TAU_SLOW_S`→`_ACC_SPEED_TAU_FAST_S` as the per-tick change grows past `_ACC_SPEED_DEADBAND_MS` **and agrees with the de-noised trend**, and is scaled down at low speed and during a steady decel/accel: plus a constant-accel feed-forward, gated by de-noised `accel_trend`, that zeroes sustained-ramp lag with no windup; standstill latch clamps to 0 near rest with hysteresis release; `self.acc_speed`) |
 | AI vs TMP raw speed | AI = buffer field 10; TMP = position-history LS fit. Filter chain identical after that |
 | Positions | No EMA: always raw world coordinates |
-| Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > 2 m/s` → decay speed: `prev_speed × (1 − frac²)`, release after 0.3 s |
-| Pos mismatch | `dot(raw_disp, prev_fwd) < -0.05 m` AND `is_tmp` AND `frames < 10` → hold smooth pos + speed, allow yaw |
+| Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > _LAG_MIN_SPEED_MS` (5 m/s) AND all four entry gates pass → decay speed: `prev_speed × (1 − frac²)`, release after the TTC-scaled `freeze_dur` (≤ 0.5 s) |
+| Lag entry gates | no armed brake transient AND rotation rate < 2 deg/s AND recent raw window ≥ `_LAG_ENTRY_RAW_SPEED_MS` AND recent/older raw ≥ `_LAG_ENTRY_DECAY_MIN` |
+| Pos mismatch | `dot(raw_disp, prev_fwd) < -0.00 m` AND `is_tmp` AND `frames < 5` → hold smooth pos + speed, allow yaw |
 | Crash detection | live-frame rotation jerk (pitch 12 / yaw 40 / roll 20 deg/s) AND kinematic anomaly (vertical jerk > 0.08 m OR XZ reversal cos < -0.3 OR 2-frame disp collapse < 50 %); confirm latches 2.0 s; disables pos-mismatch filter and lag freeze; speed/accel stay raw |
 | Yaw EMA (wrap-safe) | `smooth += 0.5 * ((raw - smooth + π) % 2π - π)` |
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
@@ -820,18 +843,20 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 - **Arc forward vector formula is `(-sin, -cos)`.** Do not flip signs or swap to `(sin, cos)`.
 - **Speed/accel filtering runs for AI and TMP** via `_smooth_vehicle_kinematics()`: the 4-signal chain `speed_ema → accel → speed_corr → acc_speed`. `self.speed` is the accel-corrected `speed_corr`; `self.acc_speed` is the adaptive-filtered ACC speed (ACC only); `self.acceleration` is the LS-slope `accel`. World positions are not low-pass filtered.
 - **Hard-brake raw-speed mode requires a measured deceleration ramp.** Never activate the short position window from a zero-displacement sample alone: below `_LAG_MIN_SPEED_MS`, a TMP packet stall is not owned by lag freeze and would look like a stopped obstacle.
-- **Lag freeze owns kinematics before hard-brake selection.** A freeze resets hard-brake transient state; the short estimator must not bypass or advance during the freeze early return.
+- **An armed hard-brake transient vetoes lag entry.** A confirmed decel ramp is measured motion, so the target is stopping and must reach AEB raw. This inverts the older "freeze always wins" priority, which pinned stopping traffic at a stale speed.
+- **Lag freeze owns kinematics once it opens.** A freeze that does open still resets hard-brake transient state; the short estimator must not bypass or advance during the freeze early return.
+- **Lag entry gates read raw positions, never `prev.speed`.** The freeze criterion itself compares against the filter's own output, so gating on that output too would be circular: a stale speed would justify the freeze that keeps it stale. `_lag_entry_allowed` measures `_position_history` directly.
 - **`acceleration` is kinematic-only**: buffer field 11 is ignored for AI and TMP; `accel_for_arc()` reads `self.acceleration` (least-squares slope of the `speed_ema` history, light-EMA smoothed).
 - **`acc_speed` is ACC-only.** AEB and arc geometry use `self.speed`; never swap them.
 - **TMP lag freeze holds position, filtered speed decay, and internal EMA state.** Do not advance position during a freeze: that would snap when updates resume.
 - **Lag freeze speed decays quadratically: `prev_speed × (1 − frac²)`.** Never hold speed constant during lag: it keeps downstream threads informed while smoothly approaching 0.
 - **`lag_confirmed` is set by `traffic.py`, not by consumer threads.** A confirmed-stopped vehicle has speed = 0 and is detected as a stationary obstacle by the existing arc collision logic.
 - **Position mismatch (TMP only) runs before lag detection.** It is mutually exclusive with lag: a backward jump is not near-stationary. The `not _skip_position_update` guard on the lag block enforces this.
-- **Position mismatch is capped at `_POS_MISMATCH_MAX_FRAMES (10)`.** When the cap is reached, the next frame always passes raw position through. Without this cap, a genuine crash or prolonged backward event would be silently swallowed.
+- **Position mismatch is capped at `_POS_MISMATCH_MAX_FRAMES (5)`.** When the cap is reached, the next frame always passes raw position through. Without this cap, a genuine crash or prolonged backward event would be silently swallowed.
 - **Crash detection does not override speed or acceleration.** It disables the pos-mismatch filter and lag freeze so raw position data passes through unfiltered.
 - **Crash detection runs before pos-mismatch and lag early-returns.** Both signals (rotation jerk and a kinematic anomaly) must fire on the same live frame; the confirmation then latches for `_CRASH_HOLD_S` so consumers never see per-frame flicker.
 - **Crash rotation rates span packet stalls.** A frozen (byte-identical) frame must not advance the rate baseline: the stall-exit snap has to read as its average rate, or every stall resume fires a phantom crash (the pre-fix detector flagged 59.7 % of TMP vehicles).
-- **Lag entry requires a non-live rotation stream** (`_LAG_ROT_LIVE_DEG_S`): a frozen position with crash-scale rotation is a physical stop and must reach AEB raw, not decay behind the freeze.
+- **Lag entry requires a non-live rotation stream** (`_LAG_ROT_LIVE_DEG_S`): a frozen position with crash-scale rotation is a physical stop and must reach AEB raw, not decay behind the freeze. Necessary but not sufficient: a vehicle braking to a stop in a straight line has ~0 rotation, so the raw-motion gates carry that case.
 - **Vehicle longitudinal accel for arcs**: `Vehicle.accel_for_arc()` → `self.acceleration` (TMP = filtered kinematic; AI = buffer). Then `_accel_to_arc_params(accel, override_decel)`.
 - **AI (singleplayer) speed is used as-is from the buffer.** Do not derive/flip sign from displacement or turning vehicles can be misclassified as reversing.
 - **`Vehicle.curvature_from_history()` is the curvature source.** Returns circumscribed-circle curvature from `_position_history`; `None` when < 3 samples (caller falls back to yaw-rate); `0.0` when near-stationary. Both TMP and AI vehicles populate `_position_history` in `update_from_last()`.

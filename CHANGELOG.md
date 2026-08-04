@@ -12,6 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Fixed
+- **AEB braked late for traffic stopping ahead (TMP)**: a vehicle braking to a standstill in front of you could be mistaken for a stalled connection, so MonoCruise kept reading it as still moving for up to a second and a half and left the emergency brake far too late. Traffic coming to a stop is now told apart from a frozen connection.
 - **AEB warned after a crash with nothing in front of you**: being flipped, launched, or left sitting at a steep angle could set off the collision warning and add brake help on its own, with no vehicle anywhere near. A slope alone no longer counts as a hazard.
 
 ## [1.1.0-preview.11] - 2026-07-24

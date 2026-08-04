@@ -72,6 +72,11 @@ _LAG_MIN_SPEED_MS: float = 5.0           # m/s : below this no lag detection run
 _LAG_DISP_RATIO: float = 0.10           # flag lag if raw disp < 10 % of expected
 # Lag entry blocked when rotation looks live (not a stall). See core/radar/README.md §7.
 _LAG_ROT_LIVE_DEG_S: float = 2.0         # deg/s: rotation at/above this blocks entry
+# Lag entry needs raw-stream evidence, not the filter's own output, that the target
+# was still moving and was not already stopping. See core/radar/README.md §7.
+_LAG_ENTRY_WINDOW: int = 4               # raw intervals per comparison window
+_LAG_ENTRY_RAW_SPEED_MS: float = 4.0     # m/s : recent raw window under this blocks entry
+_LAG_ENTRY_DECAY_MIN: float = 0.50       # recent/older raw speed under this blocks entry
 
 # TMP lag/freeze tunables. See core/radar/README.md §7.
 _LAG_FREEZE_TTC_LO: float = 0.3                  # s   : freeze = 0 at/below this TTC
@@ -132,6 +137,24 @@ def _lag_freeze_duration(gap_3d: float, ego_speed: float) -> float:
     if ttc >= _LAG_FREEZE_TTC_HI:
         return _LAG_FREEZE_DUR_MAX
     return _LAG_FREEZE_LOG_K * math.log(ttc / _LAG_FREEZE_TTC_LO)
+
+
+def _raw_path_speed(
+    history: list[tuple[float, float, float]],
+    start: int,
+    end: int | None,
+) -> float | None:
+    """Unsigned path-length speed over ``history[start:end]``, else None."""
+    seg = history[start:end]
+    if len(seg) < 2:
+        return None
+    span = seg[-1][0] - seg[0][0]
+    if span <= 1e-9:
+        return None
+    dist = 0.0
+    for (_, x0, z0), (_, x1, z1) in zip(seg, seg[1:]):
+        dist += math.sqrt((x1 - x0) ** 2 + (z1 - z0) ** 2)
+    return dist / span
 
 
 def _raw_speed_from_position_history(
@@ -1109,6 +1132,34 @@ class Vehicle:
         self._raw_brake_active = False
         self._raw_brake_converged_frames = 0
 
+    def _lag_entry_allowed(self, prev: "Vehicle", dt: float) -> bool:
+        """Gate a new lag freeze on raw-stream evidence. See core/radar/README.md §7."""
+        if prev._raw_brake_active:
+            # A confirmed decel ramp is measured motion, so this is a stop, not a stall.
+            return False
+
+        _pe = prev.rotation.euler()
+        _ce = self.rotation.euler()
+        _rot_delta = max(
+            abs((_c - _p + 180.0) % 360.0 - 180.0) for _c, _p in zip(_ce, _pe)
+        )
+        if _rot_delta / dt >= _LAG_ROT_LIVE_DEG_S:
+            return False
+
+        _hist = self._position_history
+        _w = _LAG_ENTRY_WINDOW
+        _recent = _raw_path_speed(_hist, -(_w + 1), None)
+        if _recent is None:
+            # Too little raw history to judge: keep the pre-gate behaviour.
+            return True
+        if _recent < _LAG_ENTRY_RAW_SPEED_MS:
+            return False
+
+        _older = _raw_path_speed(_hist, -(2 * _w + 1), -_w)
+        if _older is None or _older <= 1e-9:
+            return True
+        return _recent / _older >= _LAG_ENTRY_DECAY_MIN
+
     def _select_raw_speed(
         self,
         long_speed: float,
@@ -1481,19 +1532,11 @@ class Vehicle:
             _raw_disp_sq = (raw_x - prev._raw_x) ** 2 + (raw_z - prev._raw_z) ** 2
             _expected_disp = abs(prev.speed) * dt
             _lag_threshold_sq = (_expected_disp * _LAG_DISP_RATIO) ** 2
-            _lag_rot_ok = True
-            if prev._lag_since is None:
-                # Lag entry needs non-live rotation. See core/radar/README.md §7.
-                _pe_lag = prev.rotation.euler()
-                _ce_lag = self.rotation.euler()
-                _rot_delta_lag = max(
-                    abs((_c - _p + 180.0) % 360.0 - 180.0)
-                    for _c, _p in zip(_ce_lag, _pe_lag)
-                )
-                _lag_rot_ok = _rot_delta_lag / dt < _LAG_ROT_LIVE_DEG_S
+            # Entry gates run once, on the frame that would open the freeze.
             if (abs(prev.speed) > _LAG_MIN_SPEED_MS
                     and _raw_disp_sq < _lag_threshold_sq
-                    and _lag_rot_ok):
+                    and (prev._lag_since is not None
+                         or self._lag_entry_allowed(prev, dt))):
                 if self._lag_since is None:
                     self._lag_since = t_now
                 _lag_duration = t_now - self._lag_since

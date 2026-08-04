@@ -148,10 +148,27 @@ def test_low_speed_packet_stall_without_brake_ramp_does_not_enter():
         assert prev._raw_brake_active is False
 
 
-def test_high_speed_lag_freeze_resets_transient():
+def test_confirmed_hard_brake_vetoes_lag_entry():
+    """An armed brake transient is measured decel, so the freeze must not open.
+
+    Replaces the old priority (a freeze always reset the transient). Entry is now
+    blocked instead, because a stopping target used to get frozen at a stale speed.
+    """
     prev, t_now, z = _seed_cruise(8.0)
     prev._raw_brake_active = True
     prev._raw_brake_confirm_frames = 2
+    t_now += DT
+    cur = _step(prev, t_now, z, 8.0, ego_speed=8.0)
+
+    assert cur._lag_since is None
+    assert cur.lag_confirmed is False
+
+
+def test_lag_freeze_still_resets_transient_when_it_does_open():
+    """With no brake transient armed, a stall freezes and owns the transient state."""
+    prev, t_now, z = _seed_cruise(8.0)
+    assert prev._raw_brake_active is False
+    prev._raw_brake_confirm_frames = 1
     t_now += DT
     cur = _step(prev, t_now, z, 8.0, ego_speed=8.0)
 
