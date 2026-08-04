@@ -11,8 +11,20 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Added
+- **Road prediction model**: ACC used to work out your lane from your own steering wheel, which only ever describes the road *behind* you. It now predicts the road ahead from the paths the traffic in front is actually driving, and knows how far out that prediction is still worth trusting, so where it genuinely cannot tell which lane something is in it leaves it alone instead of guessing. Since this is what picks your lead, it settles a family of long-standing complaints:
+  - **Parked and shoulder vehicles grabbed from far away**: a vehicle standing well off to the side could become your lead from 60 m back. It is now left alone until you are close enough to place it properly.
+  - **Lead dropped halfway through a curve**: on winding roads the car in front stopped counting as your lead well before it left your lane, so you would accelerate into the bend and then brake late.
+  - **Your lane placed to the outside of tight bends**: sharp corners were read as gentler than they are, putting your lane over a metre wide of the truck by 60 m ahead. Wide motorway curves were never affected.
+  - **Seconds of hesitation on winding roads**: the lead could take several seconds to be accepted, long enough that the collision warning spoke up first on a car that was simply slower than you.
+  - **Slow traffic could not be placed in a lane**: below about 20 km/h a vehicle covered too little ground to read its path from, so queues and town traffic were tracked on position alone.
+  - **Standing vehicles treated as the most certain target on the road**: the in-lane check needs to see a vehicle move and quietly gave up on anything that wasn't. They now have to earn it, and one you watched drive into place before it stopped still counts properly.
+  - **The predicted lane jumped around in traffic and through corners**: it could shift sideways in a single frame as vehicles came and went, and through corners the far end lagged behind and then caught up in a rush. Both are damped now without making it sluggish.
+  - **Slow to let go of a car that had moved over**: release could take over two seconds. It is roughly twice as quick now, with no change to how fast a car cutting in is picked up.
+
 ### Fixed
-- **AEB braked late for traffic stopping ahead (TMP)**: a vehicle braking to a standstill in front of you could be mistaken for a stalled connection, so MonoCruise kept reading it as still moving for up to a second and a half and left the emergency brake far too late. Traffic coming to a stop is now told apart from a frozen connection.
+- **ACC braked hardest for the targets it was least sure about**: full emergency braking could fire on a vehicle it had barely started tracking, usually something parked near the road. Maximum braking now needs the same confidence the rest of ACC uses, and close-range emergency braking is unchanged.
+- **AEB braked late for traffic stopping ahead (TMP)**: a vehicle braking to a standstill in front of you could be mistaken for a stalled connection, so MonoCruise kept reading it as still moving for up to a second and a half and left the emergency brake far too late.
 - **AEB warned after a crash with nothing in front of you**: being flipped, launched, or left sitting at a steep angle could set off the collision warning and add brake help on its own, with no vehicle anywhere near. A slope alone no longer counts as a hazard.
 
 ## [1.1.0-preview.11] - 2026-07-24

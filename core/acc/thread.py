@@ -12,6 +12,7 @@ from core.settings import Settings
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 
+from .road_model import RoadModel
 from .tracker import ACCTracker, LeadInfo
 
 
@@ -42,6 +43,7 @@ class ACCData(ThreadData):
     debug_blinker: float = 0.0
     debug_ego_kappa: float = 0.0
     debug_corridor_half: float = 0.0
+    debug_road_model: RoadModel = field(default_factory=RoadModel)
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
@@ -171,6 +173,10 @@ class ACCThread(BaseThread):
                 "offset_for_score": st.last_offset_for_score,
                 "yaw_diff_deg": st.last_yaw_diff_deg,
                 "arc_angle_amp": st.last_arc_angle_amp,
+                "evidence": st.last_evidence,
+                "moving_validated": st.moving_validated,
+                "road_weight": st.last_road_weight,
+                "lat_uncertainty": st.last_lat_uncertainty,
                 "offset_delta": st.last_offset_delta,
                 "score_delta": st.last_score_delta,
                 "trail_valid": st.last_trail_valid,
@@ -205,4 +211,5 @@ class ACCThread(BaseThread):
             self.data.debug_blinker = self._tracker.last_blinker_scalar
             self.data.debug_ego_kappa = self._tracker.last_ego_kappa_used
             self.data.debug_corridor_half = self._tracker.last_corridor_half
+            self.data.debug_road_model = self._tracker.last_road_model
 

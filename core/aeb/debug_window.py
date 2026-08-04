@@ -49,6 +49,7 @@ _TRAIL_ARC_CLR = QColor(130, 130, 200, 90)   # faint dashed line behind each veh
 _TRAIL_CROSS_CLR = QColor(255, 200, 80, 180) # ego-row crossing marker
 _TRAIL_ARC_HALF_SPAN_M = 50.0
 _TRAIL_ARC_SAMPLES = 32
+_ROAD_MODEL_SAMPLES = 24
 
 _EGO_TRAILER_HALF_W = 1.25
 _EGO_TRAILER_HALF_L = 6.8
@@ -137,6 +138,7 @@ class AEBDebugWindow(QWidget):
                     "blinker": float(acc.data.debug_blinker),
                     "ego_kappa": float(acc.data.debug_ego_kappa),
                     "corridor_half": float(acc.data.debug_corridor_half),
+                    "road_model": acc.data.debug_road_model,
                 }
         except AttributeError:
             return None
@@ -174,6 +176,7 @@ class AEBDebugWindow(QWidget):
         # First pass: fitted trail arcs behind all vehicles, so labels
         # and bodies always sit on top of the dashed line.
         if acc is not None:
+            self._draw_road_model(p, acc, ex, ez, ey, snap.ego_yaw)
             for v in snap.vehicles:
                 if v["vid"] in detailed_ids or v["vid"] == acc["lead_id"]:
                     self._draw_trail_arc(p, v["vid"], acc, ex, ez, ey)
@@ -232,7 +235,7 @@ class AEBDebugWindow(QWidget):
                     else:
                         kin_text, kin_clr = "kin:raw (no tractor<30m)", _DANGER_CLR
                     self._draw_label(p, sx, sy - 26, kin_text, kin_clr)
-                self._draw_acc_components(p, sx, sy, vid, acc, body_clr)
+                self._draw_acc_components(p, sx, sy, vid, acc)
 
             for tr in v.get("trailers", []):
                 yaw = tr["yaw"]
@@ -354,9 +357,8 @@ class AEBDebugWindow(QWidget):
         sy: float,
         vid: int,
         acc: dict | None,
-        body_clr: QColor,
     ) -> None:
-        """Per-vehicle ACC score components beside the vehicle (debug overlay)."""
+        """Minimal per-vehicle ACC score label."""
         if acc is None:
             return
         comp = acc.get("components", {}).get(vid)
@@ -365,60 +367,14 @@ class AEBDebugWindow(QWidget):
 
         score = comp["score"]
         in_path = comp["in_path"]
-        lat_margin = comp.get("lat_margin", 0.0)
         seen = comp.get("seen", True)
-        lat = comp["lat"]
-
         score_clr = _SAFE_CLR if score > 0 else (_WARN_CLR if score > -2 else _DANGER_CLR)
-        self._draw_label(p, sx, sy + 14, f"s{score:+.1f}", score_clr)
-
-        flags = []
-        flags.append("IN" if in_path else "out")
-        flags.append(f"m{lat_margin:+.2f}")   # gate margin: positive = inside
+        tag = f"s{score:+.1f}"
+        if in_path:
+            tag += " IN"
         if not seen:
-            flags.append("decay")
-        flags_clr = _SAFE_CLR if (in_path and seen) else _WARN_CLR
-        self._draw_label(p, sx, sy + 26, " ".join(flags), flags_clr)
-
-        offset = comp["offset"]
-        yaw_c = comp["yaw"]
-        path = comp["path"]
-        comp_clr = _TEXT if seen else _SUPPRESSED_CLR
-        self._draw_label(
-            p, sx, sy + 38,
-            f"o{offset:+.2f} y{yaw_c:+.2f} p{path:+.2f}",
-            comp_clr,
-        )
-
-        ofs = comp["offset_for_score"]
-        yd = comp["yaw_diff_deg"]
-        self._draw_label(
-            p, sx, sy + 50,
-            f"lat={lat:+.2f} ofs={ofs:+.2f} Δyaw={yd:+.0f}°",
-            comp_clr,
-        )
-
-        od = comp.get("offset_delta", 0.0)
-        sd = comp.get("score_delta", 0.0)
-        amp = comp.get("arc_angle_amp", 1.0)
-        bl = comp.get("baseline", 0.0)
-        # HIT=0.0, NO_ARC_HIT=-0.40, NO_HISTORY=-0.16: discriminate.
-        if abs(bl) < 0.05:
-            bl_tag = "HIT"
-            bl_clr = _SAFE_CLR
-        elif abs(bl + 0.40) < 0.05:
-            bl_tag = "NO_ARC"
-            bl_clr = _WARN_CLR
-        else:
-            bl_tag = "NO_HIST"
-            bl_clr = _SUPPRESSED_CLR
-        od_clr = _SAFE_CLR if od > 0 else (_DANGER_CLR if od < 0 else _TEXT)
-        self._draw_label(
-            p, sx, sy + 62,
-            f"Δo{od:+.3f} Δs{sd:+.3f} amp{amp:.2f}",
-            od_clr,
-        )
-        self._draw_label(p, sx, sy + 74, bl_tag, bl_clr)
+            tag += " decay"
+        self._draw_label(p, sx, sy + 14, tag, score_clr)
 
     def _draw_grid(self, p: QPainter, cx: float, cy: float) -> None:
         max_r = max(self.width(), self.height()) / _PPM + _GRID_STEP_MAJOR
@@ -580,6 +536,33 @@ class AEBDebugWindow(QWidget):
         p.setPen(Qt.NoPen)
         p.setBrush(QBrush(_HIT_CLR))
         p.drawEllipse(QPointF(sx, sy), 3, 3)
+
+    def _draw_road_model(
+        self, p: QPainter, acc: dict,
+        ex: float, ez: float, ey: float, ego_yaw: float,
+    ) -> None:
+        """ACC shared road centreline, drawn out to where its samples reach."""
+        road = acc.get("road_model")
+        if road is None or getattr(road, "confidence", 0.0) <= 0.0:
+            return
+        span = max(getattr(road, "support_x_m", 0.0), 20.0)
+        fwd_x = -math.sin(ego_yaw)
+        fwd_z = -math.cos(ego_yaw)
+        right_x = -fwd_z
+        right_z = fwd_x
+        poly = QPolygonF()
+        for i in range(_ROAD_MODEL_SAMPLES):
+            x = span * i / (_ROAD_MODEL_SAMPLES - 1)
+            y = road.lateral_at(x)
+            wx = ex + x * fwd_x + y * right_x
+            wz = ez + x * fwd_z + y * right_z
+            sx, sy = self._ws(wx, wz, ex, ez, ey)
+            poly.append(QPointF(sx, sy))
+        alpha = int(60 + 120 * max(0.0, min(1.0, road.confidence)))
+        pen = QPen(QColor(120, 220, 160, alpha), 1.6, Qt.DashLine)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawPolyline(poly)
 
     def _draw_trail_arc(
         self, p: QPainter, vid: int, acc: dict,

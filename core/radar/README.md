@@ -192,7 +192,36 @@ corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
 | `acc_accel` | Same derivation on the **ACC chain**: long window, no hard-brake floor. AI + TMP | ACC `a_lead` (CAH) only |
 | `angular_velocity` | Degrees/s from rotation delta/dt | Arc curvature via `κ = ω_rad/speed` |
 | `_position_history` | `(t, x, z)` tuples appended each full update (AI + TMP); capped at `_POSITION_HISTORY_LEN = 25` | TMP raw-speed LS fit (uses last `_TMP_SPEED_HISTORY_LEN = 20`), `curvature_from_history`, ACC trail arcs |
+| `_trail_history` | `(t, x, z)` retained on a **distance** grid (`_TRAIL_MIN_STEP_M = 0.5 m`), capped by span (`_TRAIL_SPAN_M = 40 m`), count (`_TRAIL_MAX_LEN = 64`) and age (`_TRAIL_MAX_AGE_S = 2.0 s`) | ACC trail arcs and road-model samples **only** |
 | `_speed_ema_history` | `(t, speed_ema)` tuples appended each full update (AI + TMP); capped at `_SPEED_EMA_HISTORY_LEN` | LS-slope fits: `accel` over `_ACCEL_FIT_WINDOW_S`, `accel_trend` over `_ACC_SPEED_ACCEL_WINDOW_S` |
+
+### Two position buffers: time-capped vs distance-retained
+
+`_position_history` is **time/count capped** (25 full-update samples, ~1.7 s) and
+must stay that way: the TMP raw-speed LS fit, `curvature_from_history` and AEB's
+`pos_kappa` all need a *recent* window, and a distance-gated buffer would stall
+them when a vehicle slows.
+
+That cap is wrong for geometry. At 2 m/s the 25 samples span 3.3 m, so ACC's
+1 m downsample gate left too few points and every slow vehicle read `NO_HISTORY`
+(66 % of tracked frames below 20 km/h on the clip corpus, median trail span
+0.4 m). `_trail_history` therefore retains on a **distance grid** instead: a
+sample is kept only once the vehicle has moved `_TRAIL_MIN_STEP_M`, so at speed
+it degenerates to the frame rate and at low speed it holds older samples rather
+than discarding them. Measured: `NO_HISTORY` below 20 km/h 66.2 % -> 51.0 %,
+median span 0.4 m -> 6.1 m.
+
+Two rules for consumers:
+
+- **Fits only, never per-segment heading.** At 0.5 m spacing with a few cm of
+  position noise, adjacent-sample heading carries ~6 deg of error per segment.
+  The win is that a least-squares fit over the whole span averages that down.
+- **The age cap is a correctness constraint, not memory management.** A stopped
+  vehicle's buffer freezes, which is wanted (it preserves the trail from when it
+  was moving), but a long window on a slow vehicle spans a *manoeuvre*, and a
+  circle fitted across a lane change or a turn describes a path the vehicle is
+  no longer on. On the corpus, ages of 3 s and above pushed ACC's stationary
+  false-lock rate from 2.3 % to 4.1 % for no extra recall.
 
 ### Speed & acceleration: filter chain (AI + TMP)
 

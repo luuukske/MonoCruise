@@ -460,7 +460,9 @@ class AdaptiveCruiseController:
             return cfg.emergency_decel_ms2, True
 
         v_close_raw = v_ego - primary_raw.v_lead_ms
-        if v_close_raw > cfg.standstill_speed_ms:
+        if v_close_raw > cfg.standstill_speed_ms and self._score_conf(primary_raw.score) > 0.0:
+            # Full braking authority needs the same minimum tracker confidence the
+            # rest of the law already requires; d_emergency stays ungated.
             ttc = eff_dist_raw / max(v_close_raw, TTC_MIN_VCLOSE_MS)
             if ttc < cfg.ttc_hard_s:
                 self._ant_delta_ms2 = 0.0
@@ -489,6 +491,7 @@ class AdaptiveCruiseController:
 
         # Immediate-lead confidence blend: a marginal chain[0] (tracker
         conf0 = primary.conf
+        a_lead_only = a_base
         if conf0 < 1.0:
             if len(chain_smooth) > 1:
                 nxt = chain_smooth[1]
@@ -499,6 +502,10 @@ class AdaptiveCruiseController:
             else:
                 a_alt = cfg.no_lead_ceiling_ms2
             a_base = conf0 * a_base + (1.0 - conf0) * a_alt
+            if a_lead_only < 0.0:
+                # Low confidence may soften braking, never invert it into
+                # acceleration toward the lead the law is braking for.
+                a_base = min(a_base, 0.0)
 
         a_base = self._apply_primary_ghost(chain_smooth, v_ego, a_base, t_headway)
 

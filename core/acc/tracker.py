@@ -8,9 +8,17 @@ import logging
 import math
 from dataclasses import dataclass, field
 
+from core.radar.ego_path import EGO_POSITION_HISTORY_LEN
 from core.radar.traffic import Vehicle
 
 from .ego_path import build_ego_arc, path_half_width
+from .road_model import (
+    SOURCE_RESIDUAL_DELTA_M,
+    RoadModel,
+    RoadSmoother,
+    fit_road_model,
+    lateral_sigma_m,
+)
 from .scoring import (
     IN_PATH_THRESHOLD,
     LEGACY_RATE_HZ,
@@ -25,7 +33,13 @@ from .scoring import (
     speed_multiplier,
     yaw_component,
 )
-from .trail_arc import angle_amp_from, crossing_offset_and_angle, fit_trail
+from .trail_arc import (
+    angle_amp_from,
+    crossing_offset_and_angle,
+    fit_trail,
+    observed_motion_m,
+    trail_evidence,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -48,6 +62,36 @@ _BLINKER_OFFSET_M: float = 4.5
 # Highway lane change reset: zero all scores on blinker rising edge
 # above this ego speed so a new lead can lock cleanly on the new side.
 _BLINKER_SCORE_RESET_KMH: float = 65.0
+
+# Trail validation: a target seen driving its own line while moving keeps a
+# usable lateral once it stops. Never-validated stops score on geometry only.
+_VALIDATE_MIN_EVIDENCE: float = 0.5
+_VALIDATE_MIN_SPEED_MS: float = 2.0
+# Must stay above _ARC_EVIDENCE_FLOOR: a target watched driving its own line is
+# known better than one the ego arc alone places, or the latch says nothing.
+_VALIDATED_STATIONARY_EVIDENCE: float = 0.75
+
+# In-path hysteresis: a held target keeps this much extra corridor before it is
+# released, so a noisy lateral cannot flicker the decision (README §3).
+_IN_PATH_HYSTERESIS_M: float = 0.8
+
+# Evidence the ego arc alone carries. The blend always contains it, so position
+# evidence never reaches zero however weak the trail and the road model are.
+_ARC_EVIDENCE_FLOOR: float = 0.45
+
+# Co-directional sources only; TMP trails are half as trustworthy. Oncoming
+# traffic was measured as a source and rejected, see README §9.
+_ROAD_SAMPLE_CODIR_DEG: float = 30.0
+_ROAD_SAMPLE_TMP_WEIGHT: float = 0.5
+_ROAD_SAMPLE_MIN_X_M: float = -30.0
+_ROAD_SAMPLE_MAX_X_M: float = 170.0
+
+# Per-source trust: a source earns weight by agreeing with the road over time and
+# loses it fast when it stops. Slow up also stops the fit jumping as ids churn.
+_ROAD_TRUST_TAU_UP_S: float = 0.5
+_ROAD_TRUST_TAU_DOWN_S: float = 0.15
+_ROAD_TRUST_INITIAL: float = 0.5
+_ROAD_TRUST_MIN: float = 0.05
 
 # TMP trailer→tractor inference; strict acquire / loose revalidate (README §4).
 _TRACTOR_LOCK_LONGI_MIN_M: float = 3.0
@@ -81,6 +125,12 @@ class TrackState:
     last_yaw_diff_deg: float = 0.0
     last_baseline: float = 0.0
     last_arc_angle_amp: float = 1.0   # 2^(-(arc_angle/0.06)²) from the fit
+    last_evidence: float = 0.0        # trail confidence applied to the offset term
+    last_road_weight: float = 0.0     # road-model share of the blended lateral
+    last_trail_offset: float = 0.0    # trail-crossing lateral before the road blend
+    last_lat_uncertainty: float = 0.0  # metres added to the in-path gate
+    # Set once the target held a usable trail while moving (README §3 validation).
+    moving_validated: bool = False
     last_offset_delta: float = 0.0    # per-frame score contribution from offset alone
     last_score_delta: float = 0.0     # per-frame total Δscore (all components)
     last_lat_margin: float = 0.0      # corridor_half + width/2 - |lat|; positive = inside gate
@@ -127,11 +177,19 @@ class ACCTracker:
     _prev_left: bool = False
     _prev_right: bool = False
 
+    # Ego world path in kinematics time; feeds the road model's near anchor.
+    _ego_history: list[tuple[float, float, float]] = field(default_factory=list)
+    # Per-source road-model trust, earned by agreeing with the fitted road.
+    _source_trust: dict[int, float] = field(default_factory=dict)
+    # Carries the centreline across frames in sample space (README §9).
+    _road_smoother: RoadSmoother = field(default_factory=RoadSmoother)
+
     # Last-frame debug snapshot: populated by `update()` so the debug
     # window can render the inputs the scorer saw.
     last_blinker_scalar: float = 0.0
     last_ego_kappa_used: float = 0.0
     last_corridor_half: float = 0.0
+    last_road_model: RoadModel = field(default_factory=RoadModel)
 
     def update_blinkers(
         self,
@@ -224,6 +282,101 @@ class ACCTracker:
         lat = (r_t - arc.radius) * arc._sign
         return arc_dist, lat
 
+    def _push_ego_history(self, now_mono: float, ego_x: float, ego_z: float) -> None:
+        """Append ego's world position, capped like the radar ego path."""
+        if self._ego_history and now_mono <= self._ego_history[-1][0]:
+            return
+        self._ego_history.append((now_mono, ego_x, ego_z))
+        if len(self._ego_history) > EGO_POSITION_HISTORY_LEN:
+            del self._ego_history[:-EGO_POSITION_HISTORY_LEN]
+
+    def _update_source_trust(self, road: RoadModel, dt: float) -> None:
+        """Raise trust on sources that agree with the road, drop it fast when not."""
+        seen = set(road.source_rms)
+        for sid, rms in road.source_rms.items():
+            target = (
+                1.0 if rms <= SOURCE_RESIDUAL_DELTA_M
+                else max(0.0, SOURCE_RESIDUAL_DELTA_M / max(rms, 1e-6))
+            )
+            prev = self._source_trust.get(sid, _ROAD_TRUST_INITIAL)
+            tau = _ROAD_TRUST_TAU_UP_S if target >= prev else _ROAD_TRUST_TAU_DOWN_S
+            alpha = 1.0 - math.exp(-dt / max(tau, 1e-6))
+            self._source_trust[sid] = prev + alpha * (target - prev)
+        for sid in [s for s in self._source_trust if s not in seen]:
+            self._source_trust.pop(sid, None)
+
+    def _build_road_model(
+        self,
+        vehicles: list[Vehicle],
+        ego_x: float, ego_z: float,
+        ego_fwd_x: float, ego_fwd_z: float,
+        ego_yaw_rad: float,
+        fallback_kappa: float,
+    ) -> RoadModel:
+        """Fit the shared centreline from ego's path and co-directional trails."""
+        ego_samples = [
+            self._ego_local(ego_x, ego_z, ego_fwd_x, ego_fwd_z, hx, hz)
+            for _, hx, hz in self._ego_history
+        ]
+        target_samples: list[tuple[int, float, float, float]] = []
+        for v in vehicles:
+            if v.id < 0 or getattr(v, "is_parked", False):
+                continue
+            v_yaw = (
+                v._smooth_yaw
+                if v._smooth_yaw is not None
+                else math.radians(v.rotation.euler()[1])
+            )
+            yaw_diff = math.degrees(
+                (v_yaw - ego_yaw_rad + math.pi) % (2.0 * math.pi) - math.pi
+            )
+            if abs(yaw_diff) > _ROAD_SAMPLE_CODIR_DEG:
+                continue
+            history = getattr(v, "_trail_history", []) or []
+            weight = trail_evidence(observed_motion_m(history))
+            if weight <= 0.0:
+                continue
+            if v.is_tmp:
+                weight *= _ROAD_SAMPLE_TMP_WEIGHT
+            weight *= max(
+                _ROAD_TRUST_MIN,
+                self._source_trust.get(v.id, _ROAD_TRUST_INITIAL),
+            )
+            projected = [
+                self._ego_local(ego_x, ego_z, ego_fwd_x, ego_fwd_z, hx, hz)
+                for _, hx, hz in history
+            ]
+            in_span = [
+                (sx, sy) for sx, sy in projected
+                if _ROAD_SAMPLE_MIN_X_M <= sx <= _ROAD_SAMPLE_MAX_X_M
+            ]
+            if not in_span:
+                continue
+            for sx, sy in in_span:
+                target_samples.append((v.id, sx, sy, weight))
+        return fit_road_model(ego_samples, target_samples, fallback_kappa)
+
+    @staticmethod
+    def _apply_validation(
+        st: TrackState,
+        v: Vehicle,
+        lat: float,
+        evidence: float,
+        arc_offset: float,
+        arc_angle_amp: float,
+        baseline: float,
+    ) -> tuple[float, float, float, float]:
+        """Latch trail validation while moving; reuse it once stopped (README §3)."""
+        moving = abs(v.speed) >= _VALIDATE_MIN_SPEED_MS
+        if (moving and evidence >= _VALIDATE_MIN_EVIDENCE
+                and baseline == OFFSET_BASELINE_HIT):
+            st.moving_validated = True
+            return evidence, arc_offset, arc_angle_amp, baseline
+        if evidence <= 0.0 and not moving and st.moving_validated:
+            # Watched it drive this line before it stopped, so its lateral holds.
+            return _VALIDATED_STATIONARY_EVIDENCE, lat, 1.0, OFFSET_BASELINE_HIT
+        return evidence, arc_offset, arc_angle_amp, baseline
+
     def update(
         self,
         now_mono: float,
@@ -253,9 +406,20 @@ class ACCTracker:
         )
         corridor_half = path_half_width(ego_steer)
 
+        self._push_ego_history(now_mono, ego_x, ego_z)
+        road = self._build_road_model(
+            vehicles, ego_x, ego_z, ego_fwd_x, ego_fwd_z,
+            ego_yaw_rad, ego_arc.curvature,
+        )
+        road = self._road_smoother.step(
+            road, ego_x, ego_z, ego_fwd_x, ego_fwd_z, dt,
+        )
+        self._update_source_trust(road, dt)
+
         self.last_blinker_scalar = blinker
         self.last_ego_kappa_used = ego_arc.curvature
         self.last_corridor_half = corridor_half
+        self.last_road_model = road
 
         for st in self.tracks.values():
             st.last_seen_this_frame = False
@@ -278,7 +442,7 @@ class ACCTracker:
                 continue
 
             # Rear cone uses instantaneous ego frame (not arc projection).
-            straight_longi, _ = self._ego_local(
+            straight_longi, straight_lat = self._ego_local(
                 ego_x, ego_z, ego_fwd_x, ego_fwd_z, v.position.x, v.position.z,
             )
             chord_len = math.hypot(v.position.x - ego_x, v.position.z - ego_z)
@@ -293,17 +457,31 @@ class ACCTracker:
             )
 
             # Footprint corners: nearest forward corner dist_m; any corner in corridor → in_path.
-            corner_projs = [
-                self._project_onto_arc(ego_arc, cx, cz, ego_fwd_x, ego_fwd_z)
-                for cx, cz in v.get_corners()
-            ]
+            corner_projs = []
+            corner_lats = []
+            for cx, cz in v.get_corners():
+                arc_dist, arc_lat = self._project_onto_arc(
+                    ego_arc, cx, cz, ego_fwd_x, ego_fwd_z,
+                )
+                corner_projs.append((arc_dist, arc_lat))
+                sx, sy = self._ego_local(ego_x, ego_z, ego_fwd_x, ego_fwd_z, cx, cz)
+                w_road = road.confidence_at(sx)
+                corner_lats.append(
+                    w_road * road.offset_of(sx, sy) + (1.0 - w_road) * arc_lat
+                )
             fwd_corners = [(ad, lt) for ad, lt in corner_projs if ad >= 0.0]
             if not fwd_corners:
                 continue
             dist_m = min(ad for ad, _ in fwd_corners)
             if dist_m > _MAX_SCORE_RANGE_M:
                 continue
-            in_path = any(abs(lt) <= corridor_half for _, lt in corner_projs)
+            body_lat_min = min(corner_lats)
+            body_lat_max = max(corner_lats)
+
+            st = self.tracks.get(v.id)
+            if st is None:
+                st = TrackState()
+                self.tracks[v.id] = st
 
             # Trail-arc offset baselines HIT / NO_ARC_HIT / NO_HISTORY (README §3).
             v_yaw_rad = (
@@ -311,10 +489,11 @@ class ACCTracker:
                 if v._smooth_yaw is not None
                 else math.radians(v.rotation.euler()[1])
             )
-            trail = fit_trail(
-                getattr(v, "_position_history", []) or [],
-                v_yaw_rad,
-            )
+            history = getattr(v, "_trail_history", []) or []
+            trail = fit_trail(history, v_yaw_rad)
+            # Evidence is observed motion, not fit success: a slow target with no
+            # usable circle still shows which lane it is travelling.
+            evidence = trail_evidence(observed_motion_m(history))
             crossing: tuple[float, float] | None = None
             if trail is None:
                 arc_offset = lat
@@ -340,24 +519,48 @@ class ACCTracker:
                         ego_z + arc_offset * right_z,
                     )
 
+            trail_ev, arc_offset, arc_angle_amp, baseline = self._apply_validation(
+                st, v, lat, evidence, arc_offset, arc_angle_amp, baseline,
+            )
+
+            # Road model knows where the target is even when it has no trail of
+            # its own; the trail only ever spoke to where it was going.
+            st.last_trail_offset = arc_offset
+            road_w = road.confidence_at(straight_longi)
+            if road_w > 0.0:
+                d_road = road.offset_of(straight_longi, straight_lat)
+                arc_offset = road_w * d_road + (1.0 - road_w) * arc_offset
+            # Floored: the ego arc is itself a measurement, so the blend is never
+            # evidence-free and cannot fall through to scoring on path (README §3).
+            evidence = max(trail_ev, road_w, _ARC_EVIDENCE_FLOOR)
+
+            # Body must still overlap the corridor after a sigma shift both ways;
+            # only the target's own trajectory shrinks sigma (README §9 gate).
+            lat_uncertainty = lateral_sigma_m(dist_m) * (1.0 - trail_ev)
+            hold_half = corridor_half + (
+                _IN_PATH_HYSTERESIS_M if st.in_path else 0.0
+            )
+            near_side = hold_half - (body_lat_min + lat_uncertainty)
+            far_side = (body_lat_max - lat_uncertainty) + hold_half
+            in_path = near_side >= 0.0 and far_side >= 0.0
+
             # Scored lateral: arc offset minus blinker·4.5 m (README §5).
             offset_for_score = arc_offset - blinker * _BLINKER_OFFSET_M
 
             off = offset_component(
                 offset_for_score, longi,
                 angle_amp=arc_angle_amp, baseline=baseline,
+                evidence=evidence, angle_evidence=trail_ev,
             )
             yaw_diff_deg = math.degrees(
                 (v_yaw_rad - ego_yaw_rad + math.pi) % (2.0 * math.pi) - math.pi
             )
             yaw_c = yaw_component(yaw_diff_deg)
-            path_c = path_component(longi, ego_kmh, in_path, blinker_offset=blinker)
+            path_c = path_component(
+                longi, ego_kmh, in_path, blinker_offset=blinker, evidence=evidence,
+            )
             comps = ScoreComponents(offset=off, yaw=yaw_c, path=path_c, angle=0.0)
 
-            st = self.tracks.get(v.id)
-            if st is None:
-                st = TrackState()
-                self.tracks[v.id] = st
             # Legacy §9 uses the **target's** speed, not ego's.
             prev_score = st.score
             st.score = accumulate(st.score, dt, comps, v.speed)
@@ -377,6 +580,9 @@ class ACCTracker:
             st.last_yaw_diff_deg = yaw_diff_deg
             st.last_baseline = baseline
             st.last_arc_angle_amp = arc_angle_amp
+            st.last_evidence = evidence
+            st.last_road_weight = road_w
+            st.last_lat_uncertainty = lat_uncertainty
             if trail is not None:
                 st.last_trail_valid = True
                 st.last_trail_is_straight = trail.is_straight
@@ -396,8 +602,8 @@ class ACCTracker:
                 st.last_trail_crossing_valid = True
             else:
                 st.last_trail_crossing_valid = False
-            # Margin: positive when the nearest corner is inside the corridor.
-            st.last_lat_margin = corridor_half - min(abs(lt) for _, lt in corner_projs)
+            # Margin: slack on whichever side of the corridor binds first.
+            st.last_lat_margin = min(near_side, far_side)
             st.last_corridor_half = corridor_half
             st.last_seen_this_frame = True
             seen_ids.add(v.id)
@@ -542,3 +748,9 @@ class ACCTracker:
             self._trailer_to_tractor[trailer.id] = best.id
         return best
 
+
+
+# Re-exports for tests and tuning tools.
+ARC_EVIDENCE_FLOOR = _ARC_EVIDENCE_FLOOR
+VALIDATED_STATIONARY_EVIDENCE = _VALIDATED_STATIONARY_EVIDENCE
+IN_PATH_HYSTERESIS_M = _IN_PATH_HYSTERESIS_M

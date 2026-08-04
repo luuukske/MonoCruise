@@ -112,6 +112,13 @@ _STRAIGHT_CURVATURE_EPS: float = 1e-6
 
 # Position history buffer (speed LS, curvature, ACC). See core/radar/README.md §7.
 _POSITION_HISTORY_LEN: int = 25
+
+# Geometry-only trail, retained on a distance grid instead of a time/count cap so
+# a slow vehicle still spans usable ground. See core/radar/README.md §7.
+_TRAIL_MIN_STEP_M: float = 0.5
+_TRAIL_SPAN_M: float = 40.0
+_TRAIL_MAX_LEN: int = 64
+_TRAIL_MAX_AGE_S: float = 2.0
 _RAW_SPEED_HISTORY_LEN: int = 20
 _RAW_SPEED_NEAR_ZERO_CHORD: float = 0.025  # m: same gate as per-frame displacement
 _BUFFER_SIGN_SPEED_MS: float = 0.05        # m/s: below this, trust LS sign on AI
@@ -1093,6 +1100,8 @@ class Vehicle:
         # (time, x, z) per full update: newest last, capped at _POSITION_HISTORY_LEN.
         # Populated for both TMP and AI; speed LS fit uses a shorter internal window.
         self._position_history: list[tuple[float, float, float]] = []
+        # Distance-retained geometry trail; fits only, never per-segment heading.
+        self._trail_history: list[tuple[float, float, float]] = []
 
         # TMP lag/freeze tunables. See core/radar/README.md §7.
         self._lag_since: Optional[float] = None
@@ -1364,6 +1373,7 @@ class Vehicle:
             (t_now - dt_seed, back_x, back_z),
             (t_now, raw_x, raw_z),
         ]
+        self._trail_history = [(t_now, raw_x, raw_z)]
         if prev._speed_ema is not None:
             self._speed_ema_history = [
                 (t_now - dt_seed, prev._speed_ema),
@@ -1431,6 +1441,7 @@ class Vehicle:
             self._raw_brake_active = prev._raw_brake_active
             self._raw_brake_converged_frames = prev._raw_brake_converged_frames
             self._position_history = list(prev._position_history)
+            self._trail_history = list(prev._trail_history)
             self._speed_ema_history = list(prev._speed_ema_history)
             self._acc_speed_ema_history = list(prev._acc_speed_ema_history)
             self._acc_standstill = prev._acc_standstill
@@ -1495,6 +1506,7 @@ class Vehicle:
         self._raw_brake_active = prev._raw_brake_active
         self._raw_brake_converged_frames = prev._raw_brake_converged_frames
         self._position_history = list(prev._position_history)
+        self._trail_history = list(prev._trail_history)
         self._speed_ema_history = list(prev._speed_ema_history)
         self._acc_speed_ema_history = list(prev._acc_speed_ema_history)
         self._acc_standstill = prev._acc_standstill
@@ -1620,6 +1632,7 @@ class Vehicle:
         self._position_history.append((t_now, raw_x, raw_z))
         if len(self._position_history) > _POSITION_HISTORY_LEN:
             self._position_history = self._position_history[-_POSITION_HISTORY_LEN:]
+        self._append_trail(t_now, raw_x, raw_z)
 
         # Raw speed: TMP from position LS; AI keeps buffer sign. See core/radar/README.md §7.
         _prx = prev._raw_x if prev._raw_x is not None else prev.position.x
@@ -1678,6 +1691,33 @@ class Vehicle:
         self.acc_accel = acc_accel
         self._acc_standstill = acc_standstill
         self._acc_release_s = acc_release_s
+
+    def _append_trail(self, t_now: float, raw_x: float, raw_z: float) -> None:
+        """Retain the geometry trail on a distance grid. See core/radar/README.md §7."""
+        trail = self._trail_history
+        if trail:
+            last_t, last_x, last_z = trail[-1]
+            if math.hypot(raw_x - last_x, raw_z - last_z) < _TRAIL_MIN_STEP_M:
+                return
+        trail.append((t_now, raw_x, raw_z))
+
+        # Drop from the oldest end on span, count, or age.
+        cutoff = t_now - _TRAIL_MAX_AGE_S
+        start = 0
+        while start < len(trail) - 1 and trail[start][0] < cutoff:
+            start += 1
+        span = 0.0
+        keep = len(trail) - 1
+        while keep > start:
+            _, x1, z1 = trail[keep]
+            _, x0, z0 = trail[keep - 1]
+            span += math.hypot(x1 - x0, z1 - z0)
+            if span >= _TRAIL_SPAN_M:
+                break
+            keep -= 1
+        start = max(start, keep, len(trail) - _TRAIL_MAX_LEN)
+        if start > 0:
+            self._trail_history = trail[start:]
 
     def curvature_from_history(self) -> float | None:
         """κ (1/m) from position history; cached per tick. See core/radar/README.md §11."""

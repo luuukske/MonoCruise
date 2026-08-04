@@ -30,6 +30,31 @@ when the immediate lead vanishes. Accel-side lift (`ANT_KV`, `ANT_KA`, TTC ramp)
 decel anticipation binds. Stationary immediate lead disables anticipation (speed ramp
 `ANT_LEAD_MOVING_MIN_MS` to `ANT_LEAD_MOVING_FULL_MS`).
 
+### Braking authority vs tracker confidence
+
+The tracker publishes leads at `score > 0`; this controller only starts trusting
+one at `score > ANT_SCORE_MIN` (1.0). Everything in that gap used to receive full
+braking authority anyway, because the TTC overlay ran on `chain_raw[0]` before the
+confidence blend. Measured on the clip corpus, 22.9 % of overlay trips came from a
+lead below the confidence floor and 8.2 % from one at exactly zero confidence,
+nearly all of them stationary vehicles at 6 to 24 m. The least certain leads were
+getting the most violent response.
+
+Two rules now:
+
+- The **TTC overlay** (`ttc_hard_s` to `max_decel_ms2`) requires
+  `_score_conf(...) > 0`. Below that the lead still goes through the normal
+  IIDM+CAH law with the confidence blend, so it decelerates, just not at full
+  authority. The **close-range emergency overlay** (`d_emergency_m`) stays
+  ungated: at that distance certainty is irrelevant.
+- Low confidence may **soften braking, never invert it**. With a single-lead
+  chain the blend's alternative is `NO_LEAD_CEILING_MS2` (+1.5 m/s²), so a
+  zero-confidence lead used to blend all the way to full acceleration toward the
+  very target the lead law wanted to brake for. When the pre-blend lead law is
+  negative the blended command is now clamped at 0, i.e. coast at worst.
+
+Enforced by `tests/acc/test_overlay_confidence_gate.py`.
+
 ### Lead-loss grace
 
 Brief empty-chain ticks reuse the last chain for `LEAD_LOSS_GRACE_S` so IIDM state does not

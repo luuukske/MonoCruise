@@ -8,16 +8,18 @@ import math
 from dataclasses import dataclass
 
 
-# Score clamp: asymmetric so lock is fast and unlock is slow.
+# Score clamp: asymmetric so lock is fast and unlock is slow. The ceiling is
+# capped just above the consumer's confidence saturation (README §3).
 _SCORE_MIN: float = -5.0
-_SCORE_MAX: float = 20.0
+_SCORE_MAX: float = 8.0
 
 # Offset Gaussian width (metres).  σ = 2.25 m legacy; the
 # zero-crossing of ``offset_raw`` sits at |x| ≈ 2.58 m at angle_amp = 1.
 _OFFSET_SIGMA_M: float = 2.25
 
-# Path decay base 1.03^(-d m); kept explicit for legacy bit-identical maths.
-_PATH_DECAY_BASE: float = 1.03
+# Path decay base b^(-d m). Legacy 1.03 left a distant in-lane lead accumulating
+# at about an eighth of its close-range rate. See README §3 accumulation.
+_PATH_DECAY_BASE: float = 1.022
 
 # Slow-speed path amplifier: ``slow_amp = 1.4 + (kmh / 100) × 4.1``.
 # Reference table in SCORING_REFERENCE §8.3.2.
@@ -81,14 +83,33 @@ def offset_component(
     dist_m: float,
     angle_amp: float = 1.0,
     baseline: float = OFFSET_BASELINE_HIT,
+    evidence: float = 1.0,
+    angle_evidence: float | None = None,
 ) -> float:
-    """Gaussian offset on blinker-adjusted lateral; baselines from trail-arc fit (README §3)."""
+    """Gaussian offset on blinker-adjusted lateral, scaled by evidence (README §3).
+
+    ``evidence`` is how well the target's lateral position is known and scales the
+    whole term. ``angle_evidence`` is how well its heading is known and gates the
+    arrival-angle penalty only; it defaults to ``evidence``. The road model supplies
+    position knowledge for targets that have no trail of their own."""
+    ev = max(0.0, min(1.0, evidence))
+    if ev <= 0.0:
+        return 0.0
+    ang_ev = ev if angle_evidence is None else max(0.0, min(1.0, angle_evidence))
+    # A short trail measures its own arrival angle badly, so the angle penalty
+    # regresses to neutral with the evidence that produced it.
+    amp = ang_ev * angle_amp + (1.0 - ang_ev)
     x = offset_m / _OFFSET_SIGMA_M
     gauss = math.exp(-(x * x) * math.log(2.0))         # 2^(-(x/σ)²)
-    raw = gauss * 2.5 * angle_amp - 1.0
+    raw = gauss * 2.5 * amp - 1.0
     clamped = max(-1.0, min(1.0, raw * _distance_amp(dist_m)))
-    outer = 1.5 * (angle_amp * 0.4 + 0.6)
-    return baseline + clamped * outer
+    outer = 1.5 * (amp * 0.4 + 0.6)
+    value = baseline + clamped * outer
+    if value > 0.0:
+        # Calling a target in-lane needs to know it is travelling the lane, not
+        # crossing it. Rejecting one only needs to know where it is.
+        value *= ang_ev
+    return ev * value
 
 
 def yaw_component(yaw_diff_deg: float) -> float:
@@ -105,8 +126,13 @@ def path_component(
     ego_speed_kmh: float,
     in_path: bool,
     blinker_offset: float = 0.0,
+    evidence: float = 1.0,
 ) -> float:
-    """Path decay × slow_amp × blinker reduction; in/out caps (README §3)."""
+    """Path decay × slow_amp × blinker reduction; in/out caps (README §3).
+
+    ``evidence`` gates the in-corridor reward only. Awarding "it is in my lane"
+    needs to know where it is; the out-of-corridor penalty is the conservative
+    direction and stays ungated, same asymmetry as ``offset_component``."""
     if dist_m < 0.0:
         dist_m = 0.0
     decay = math.pow(_PATH_DECAY_BASE, -dist_m)        # legacy 1.03^(-d)
@@ -115,7 +141,7 @@ def path_component(
     amp = slow_amp * (1.0 - blinker_sq * 0.4)
     base = decay * amp
     if in_path:
-        return min(_PATH_IN_CAP, base)
+        return min(_PATH_IN_CAP, base) * max(0.0, min(1.0, evidence))
     return -min(_PATH_OUT_CAP, base * _PATH_OUT_GAIN)
 
 

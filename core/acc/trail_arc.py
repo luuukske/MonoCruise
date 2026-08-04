@@ -8,8 +8,9 @@ import math
 from dataclasses import dataclass
 
 
-# Downsample raw history: min 1 m and 0.05 s between kept samples (README §3).
-_HISTORY_MIN_DIST_M: float = 1.0
+# Downsample gate. The trail buffer is already retained on a 0.5 m grid, so this
+# is a floor rather than the decimator it used to be (README §3).
+_HISTORY_MIN_DIST_M: float = 0.5
 _HISTORY_MIN_DT_S: float = 0.05
 
 # Legacy fit_circle gate: five samples minimum for a stable LS fit.
@@ -27,6 +28,11 @@ _MIN_SAGITTA_RATIO: float = 0.5
 # angle_amp Gaussian σ (rad); legacy SCORING_REFERENCE §8.1.
 _ANGLE_AMP_SIGMA: float = 0.06
 
+# Evidence ramp on the downsampled chord: the LS circle error scales with
+# 1/chord², so a short trail carries almost no geometric information.
+_EVIDENCE_CHORD_MIN_M: float = 1.0
+_EVIDENCE_CHORD_FULL_M: float = 8.0
+
 
 @dataclass(slots=True, frozen=True)
 class TrailFit:
@@ -40,6 +46,7 @@ class TrailFit:
     point_z: float = 0.0
     dir_x: float = 1.0
     dir_z: float = 0.0
+    evidence: float = 1.0
 
 
 def _downsample(
@@ -110,6 +117,24 @@ def _ls_circle_fit(
     return cx_c + mx, cz_c + mz, math.sqrt(r2)
 
 
+def trail_evidence(path_len_m: float) -> float:
+    """Confidence [0,1] in a trail fit from its downsampled chord (README §3)."""
+    span = _EVIDENCE_CHORD_FULL_M - _EVIDENCE_CHORD_MIN_M
+    return max(0.0, min(1.0, (path_len_m - _EVIDENCE_CHORD_MIN_M) / span))
+
+
+def observed_motion_m(history: list[tuple[float, float, float]]) -> float:
+    """Net displacement across the raw history; 0 for a target that never moved.
+
+    Net rather than summed path length so position noise on a parked vehicle
+    cannot accumulate into apparent travel."""
+    if len(history) < 2:
+        return 0.0
+    _, x0, z0 = history[0]
+    _, x1, z1 = history[-1]
+    return math.hypot(x1 - x0, z1 - z0)
+
+
 def fit_trail(
     history: list[tuple[float, float, float]],
     target_yaw_rad_fallback: float,
@@ -127,6 +152,7 @@ def fit_trail(
         px, pz = hx, hz
     if path_len < _MIN_PATH_LEN_M:
         return None
+    evidence = trail_evidence(path_len)
 
     target_x, target_z = samples[-1][1], samples[-1][2]
     prev_x, prev_z = samples[-2][1], samples[-2][2]
@@ -158,6 +184,7 @@ def fit_trail(
             is_straight=True,
             point_x=target_x, point_z=target_z,
             dir_x=long_ux, dir_z=long_uz,
+            evidence=evidence,
         )
     cx, cz, R = fit
     if (1.0 / R) < _STRAIGHT_KAPPA_MAX:
@@ -165,6 +192,7 @@ def fit_trail(
             is_straight=True,
             point_x=target_x, point_z=target_z,
             dir_x=long_ux, dir_z=long_uz,
+            evidence=evidence,
         )
 
     # Reject LS circle when interior sagitta is below ``_MIN_SAGITTA_RATIO`` of expected.
@@ -183,6 +211,7 @@ def fit_trail(
             is_straight=True,
             point_x=target_x, point_z=target_z,
             dir_x=long_ux, dir_z=long_uz,
+            evidence=evidence,
         )
 
     # Sweep sign from prev→centre × target→centre (matches ``ArcPath._sign``).
@@ -197,6 +226,7 @@ def fit_trail(
         center_x=cx, center_z=cz, radius=R, sign=sign,
         point_x=target_x, point_z=target_z,
         dir_x=dir_x, dir_z=dir_z,
+        evidence=evidence,
     )
 
 
@@ -274,4 +304,6 @@ MIN_PATH_LEN_M = _MIN_PATH_LEN_M
 ANGLE_AMP_SIGMA = _ANGLE_AMP_SIGMA
 HISTORY_MIN_DIST_M = _HISTORY_MIN_DIST_M
 HISTORY_MIN_DT_S = _HISTORY_MIN_DT_S
+EVIDENCE_CHORD_MIN_M = _EVIDENCE_CHORD_MIN_M
+EVIDENCE_CHORD_FULL_M = _EVIDENCE_CHORD_FULL_M
 
