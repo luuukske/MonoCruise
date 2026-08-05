@@ -27,11 +27,11 @@ _SLOW_AMP_BASE: float = 1.4
 _SLOW_AMP_SLOPE: float = 4.1
 _SLOW_AMP_REF_KMH: float = 100.0
 
-# In-/out-of-path caps.  Reference: ``min(base, 5.0)`` and
-# ``-min(base × 0.6, 4.0)``.
+# In-/out-of-path caps. The out gain sets release speed; raised with the
+# arc-length road model, which holds a lead in corridor longer and correctly.
 _PATH_IN_CAP: float = 5.0
 _PATH_OUT_CAP: float = 4.0
-_PATH_OUT_GAIN: float = 0.6
+_PATH_OUT_GAIN: float = 1.2
 
 # Yaw component shape.  Kept legacy.
 _YAW_SCALE_DEG: float = 90.0

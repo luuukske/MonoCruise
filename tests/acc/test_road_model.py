@@ -28,14 +28,28 @@ def _true_arc(kappa, x):
 
 
 def _lane(source_id, lane_offset, xs, kappa=0.0, weight=1.0, jitter=0.0):
-    """Samples of a vehicle holding ``lane_offset`` on a road of curvature kappa."""
+    """Samples of a vehicle holding ``lane_offset`` on a road of curvature kappa.
+
+    The offset is **perpendicular** to the road, because that is what a lane is.
+    Offsetting in +y instead makes the neighbouring lane a different shape, not
+    a parallel one, and the fit is then right to report that they disagree."""
     out = []
     for i, x in enumerate(xs):
-        y = lane_offset + _true_arc(kappa, x)
-        if jitter:
-            y += jitter * math.sin(i * 1.7)
-        out.append((source_id, x, y, weight))
+        offset = lane_offset + (jitter * math.sin(i * 1.7) if jitter else 0.0)
+        px, py = _parallel_point(kappa, x, offset)
+        out.append((source_id, px, py, weight))
     return out
+
+
+def _parallel_point(kappa, x, offset):
+    """Point ``offset`` m right of the centreline, at the arc reaching ``x``."""
+    if abs(kappa) < 1e-9:
+        return x, offset
+    radius = 1.0 / abs(kappa)
+    sign = 1.0 if kappa > 0.0 else -1.0
+    theta = math.asin(min(abs(x), radius * 0.999) / radius)
+    bx, by = radius * math.sin(theta), -sign * radius * (1.0 - math.cos(theta))
+    return bx + offset * sign * math.sin(theta), by + offset * math.cos(theta)
 
 
 def _ego_path(kappa=0.0, back_m=20.0, n=10):
@@ -185,6 +199,119 @@ def test_base_arc_is_bounded_past_its_radius():
     assert abs(base_arc_lateral(kappa, 500.0)) <= 50.0
 
 
+def _arc_lane(source_id, offset, kappa, s_values, weight=1.0):
+    """Samples holding ``offset`` m right of the centreline, placed by arc length."""
+    from core.acc.road_model import arc_normal, arc_point
+
+    out = []
+    for s_m in s_values:
+        bx, by = arc_point(kappa, s_m)
+        nx, ny = arc_normal(kappa, s_m)
+        out.append((source_id, bx + offset * nx, by + offset * ny, weight))
+    return out
+
+
+@pytest.mark.parametrize("radius", [500.0, 100.0, 25.0])
+@pytest.mark.parametrize("side", [1.0, -1.0])
+@pytest.mark.parametrize("sweep_deg", [30.0, 90.0, 179.0])
+def test_arc_coords_inverts_arc_point_at_any_angle(radius, side, sweep_deg):
+    """The transform the whole model rests on, checked past the 90 deg fold."""
+    from core.acc.road_model import arc_coords, arc_normal, arc_point
+
+    kappa = side / radius
+    s_m = radius * math.radians(sweep_deg)
+    for offset in (0.0, 3.5, -3.5):
+        bx, by = arc_point(kappa, s_m)
+        nx, ny = arc_normal(kappa, s_m)
+        got_s, got_n = arc_coords(kappa, bx + offset * nx, by + offset * ny)
+        assert got_s == pytest.approx(s_m, abs=1e-6)
+        assert got_n == pytest.approx(offset, abs=1e-9)
+
+
+def test_arc_length_is_monotone_where_forward_distance_folds():
+    """Forward distance stops being unique at 90 deg and decreases after it.
+
+    That fold is what made two points on the road share an x, read as one source
+    contradicting itself, and collapse confidence. Arc length never folds."""
+    from core.acc.road_model import arc_coords, arc_point
+
+    kappa = 1.0 / 40.0
+    s_values = [i * 5.0 for i in range(1, 25)]
+    forward = [arc_point(kappa, s)[0] for s in s_values]
+    assert any(b < a for a, b in zip(forward, forward[1:])), "no fold to test"
+    arc = [arc_coords(kappa, *arc_point(kappa, s))[0] for s in s_values]
+    assert all(b > a for a, b in zip(arc, arc[1:]))
+
+
+@pytest.mark.parametrize("sweep_deg", [60.0, 90.0, 135.0, 170.0])
+def test_fit_survives_past_the_forward_distance_wall(sweep_deg):
+    """A forward-distance fit gave up at 71.8 deg of heading change, where the
+    base arc saturates and its own frozen value reads as sources disagreeing.
+
+    Perfect samples on a perfect circle used to reach agreement rms 0.963 and
+    confidence 0.00 by 80 deg. Indexed by arc length the only limit left is
+    the circle closing on itself, just short of a half turn."""
+    radius = 60.0
+    kappa = 1.0 / radius
+    span = radius * math.radians(sweep_deg)
+    s_values = [span * i / 24.0 for i in range(1, 25)]
+    samples = (
+        _arc_lane(1, 0.0, kappa, s_values)
+        + _arc_lane(2, 3.5, kappa, s_values)
+        + _arc_lane(3, -3.5, kappa, s_values)
+    )
+    model = fit_road_model(_ego_path(kappa=kappa), samples, fallback_kappa=kappa)
+    assert model.confidence > 0.0
+    assert model.support_s_m == pytest.approx(span, rel=0.05)
+    # The centreline still reports a lane offset correctly at the far end.
+    far = _arc_lane(0, 3.5, kappa, [span * 0.9])[0]
+    assert model.offset_of(far[1], far[2]) == pytest.approx(3.5, abs=0.35)
+
+
+def test_a_hard_steer_standstill_cannot_alias_samples_round_its_own_circle():
+    """Ego steering hard at a standstill reports R = 7 m, whose circle closes
+    inside the sample span. Without the span limit those samples wrapped onto
+    the near side and the fit answered with a 4 km deviation."""
+    from core.acc.road_model import arc_span_limit
+
+    kappa = 0.134
+    assert arc_span_limit(kappa) < 25.0
+    xs = list(range(10, 140, 10))
+    model = fit_road_model(
+        _ego_path(), _lane(1, 0.0, xs) + _lane(2, 3.5, xs), fallback_kappa=kappa,
+    )
+    assert model.support_s_m <= arc_span_limit(kappa)
+    for s_m in (30.0, 80.0, 150.0):
+        assert model.confidence_at(s_m) == 0.0
+    assert all(abs(v) < 50.0 for v in (model.c1, model.c2, model.c3))
+
+
+def test_straight_roads_have_no_span_limit():
+    from core.acc.road_model import arc_span_limit
+
+    assert math.isinf(arc_span_limit(0.0))
+    assert arc_span_limit(1.0 / 400.0) > 170.0
+
+
+def test_support_is_arc_length_not_forward_distance():
+    """Round a bend the two differ by sin(theta)/theta, so a forward-distance
+    support cut the estimate off well short of the traffic that made it."""
+    radius = 40.0
+    kappa = 1.0 / radius
+    span = radius * math.radians(120.0)
+    s_values = [span * i / 20.0 for i in range(1, 21)]
+    model = fit_road_model(
+        _ego_path(kappa=kappa),
+        _arc_lane(1, 0.0, kappa, s_values) + _arc_lane(2, 3.5, kappa, s_values),
+        fallback_kappa=kappa,
+    )
+    forward_reach = max(
+        abs(x) for _, x, _, _ in _arc_lane(1, 0.0, kappa, s_values)
+    )
+    assert model.support_s_m > forward_reach * 1.4
+    assert model.confidence_at(span * 0.95) > 0.0
+
+
 def _smoother_step(sm, model, x=0.0, z=0.0, fwd=(1.0, 0.0), dt=1 / 30):
     return sm.step(model, x, z, fwd[0], fwd[1], dt)
 
@@ -197,7 +324,7 @@ def test_smoother_passes_normal_change_untouched():
     _smoother_step(sm, from_curvature(0.0))
     out = _smoother_step(sm, from_curvature(1.0 / 2000.0))
     assert out.lateral_at(50.0) == pytest.approx(
-        from_curvature(1.0 / 2000.0).raw_lateral_at(50.0), abs=0.05,
+        from_curvature(1.0 / 2000.0).lateral_at(50.0), abs=0.05,
     )
 
 
@@ -233,7 +360,7 @@ def test_smoother_still_reaches_the_new_shape():
     out = None
     for _ in range(120):
         out = _smoother_step(sm, target)
-    assert out.lateral_at(50.0) == pytest.approx(target.raw_lateral_at(50.0), abs=0.2)
+    assert out.lateral_at(50.0) == pytest.approx(target.lateral_at(50.0), abs=0.2)
 
 
 def test_smoother_keeps_the_centreline_through_ego():
@@ -253,7 +380,7 @@ def test_smoother_resets_on_an_ego_jump():
     _smoother_step(sm, from_curvature(0.0))
     out = _smoother_step(sm, from_curvature(1.0 / 60.0), x=500.0, z=500.0)
     assert out.lateral_at(50.0) == pytest.approx(
-        from_curvature(1.0 / 60.0).raw_lateral_at(50.0), abs=1e-6,
+        from_curvature(1.0 / 60.0).lateral_at(50.0), abs=1e-6,
     )
 
 
@@ -261,10 +388,10 @@ def test_smoother_does_not_carry_untrusted_extrapolation():
     """Beyond support the base arc goes on the grid, not the runaway cubic."""
     from core.acc.road_model import RoadSmoother
 
-    wild = RoadModel(c1=0.0, c2=0.0, c3=400.0, confidence=1.0, support_x_m=30.0)
+    wild = RoadModel(c1=0.0, c2=0.0, c3=400.0, confidence=1.0, support_s_m=30.0)
     out = _smoother_step(RoadSmoother(), wild)
     assert abs(out.lateral_at(140.0)) < 5.0
-    assert abs(wild.raw_lateral_at(140.0)) > 500.0
+    assert abs(wild.raw_deviation_at(140.0)) > 500.0
 
 
 def test_more_agreeing_traffic_never_lowers_confidence():

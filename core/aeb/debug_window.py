@@ -545,15 +545,15 @@ class AEBDebugWindow(QWidget):
         road = acc.get("road_model")
         if road is None or getattr(road, "confidence", 0.0) <= 0.0:
             return
-        span = max(getattr(road, "support_x_m", 0.0), 20.0)
+        span = max(getattr(road, "support_s_m", 0.0), 20.0)
         fwd_x = -math.sin(ego_yaw)
         fwd_z = -math.cos(ego_yaw)
         right_x = -fwd_z
         right_z = fwd_x
         poly = QPolygonF()
         for i in range(_ROAD_MODEL_SAMPLES):
-            x = span * i / (_ROAD_MODEL_SAMPLES - 1)
-            y = road.lateral_at(x)
+            # Walked in arc length, so the line keeps going round a tight bend.
+            x, y = road.point_at(span * i / (_ROAD_MODEL_SAMPLES - 1))
             wx = ex + x * fwd_x + y * right_x
             wz = ez + x * fwd_z + y * right_z
             sx, sy = self._ws(wx, wz, ex, ez, ey)

@@ -169,7 +169,7 @@ def test_road_model_is_built_each_frame():
     tracker = ACCTracker()
     _run(tracker, [_ahead(15, 50.0, 22.0), _ahead(16, 90.0, 22.0)], frames=45)
     assert tracker.last_road_model is not None
-    assert tracker.last_road_model.support_x_m > 0.0
+    assert tracker.last_road_model.support_s_m > 0.0
 
 
 def test_parked_vehicles_are_dropped_from_tracking():

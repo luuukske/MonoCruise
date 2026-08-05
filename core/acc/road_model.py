@@ -9,9 +9,9 @@ import math
 from dataclasses import dataclass, field, replace
 
 
-# Basis scale (m): u = x / _X_REF_M keeps the cubic design matrix conditioned
-# over the 150 m scoring range instead of spanning 10^6 in the x³ column.
-_X_REF_M: float = 100.0
+# Basis scale (m): v = s / _S_REF_M keeps the cubic design matrix conditioned
+# over the 150 m scoring range instead of spanning 10^6 in the s³ column.
+_S_REF_M: float = 100.0
 
 # Robust reweighting: Huber threshold on the per-sample fit residual, in metres.
 _HUBER_DELTA_M: float = 1.0
@@ -51,11 +51,11 @@ _EXTRAPOLATION_FADE_M: float = 30.0
 # heading. Comparable to total sample weight; 0 leaves it free.
 _HEADING_PRIOR_WEIGHT: float = 400.0
 
-# Fixed lookahead grid the smoothed centreline is carried on. Sample space, not
-# coefficient space: filtering the cubic terms frame to frame sloshes.
+# Fixed lookahead grid the smoothed centreline is carried on, in arc length.
+# Sample space, not coefficient space: filtering the cubic terms sloshes.
 _NODE_STEP_M: float = 10.0
 _NODE_COUNT: int = 16
-_NODE_X: tuple[float, ...] = tuple(i * _NODE_STEP_M for i in range(_NODE_COUNT))
+_NODE_S: tuple[float, ...] = tuple(i * _NODE_STEP_M for i in range(_NODE_COUNT))
 
 # Centreline slew limit: a rate limit, not a low-pass (README §9). Budgeted in
 # curvature, because lateral offset grows as x^2/2 and a flat m/s cap is all far.
@@ -77,6 +77,16 @@ _CONF_RATE_DOWN_PER_S: float = 1.5
 _STRAIGHT_KAPPA: float = 1.0 / 5000.0
 _BASE_ARC_MAX_FRAC: float = 0.95
 
+# Damped steps used to walk arc length onto a requested forward distance.
+_INVERT_PASSES: int = 12
+
+# Half-step of the central difference the centreline tangent is read from.
+_TANGENT_STEP_M: float = 0.5
+
+# Fraction of half the circumference the arc parameterisation will use: at
+# exactly pi*R the far end is opposite ego and its sign is ambiguous.
+_ARC_MAX_SPAN_FRAC: float = 0.97
+
 # Measured lateral error of the blended estimate against ego's own future path
 # (clip corpus): 0.65 m at 30-60 m, 2.0 m at 60-90 m, 3.7 m at 90-130 m.
 _SIGMA_MIN_M: float = 0.25
@@ -87,9 +97,9 @@ _SIGMA_SLOPE: float = 0.047
 def base_arc_lateral(kappa: float, x_m: float) -> float:
     """Exact circular-arc offset through ego at curvature ``kappa``.
 
-    A parabola undershoots a circle, so a polynomial-only centreline sits toward
-    the outside of a tight bend. The base arc carries the large curvature exactly
-    and the cubic only has to describe the deviation. See README §9."""
+    Indexed by forward distance, so it saturates at ``_BASE_ARC_MAX_FRAC`` of
+    the radius. Kept for drawing and for tests; the fit itself is indexed by arc
+    length and has no such limit. See README §9."""
     if abs(kappa) < _STRAIGHT_KAPPA:
         return 0.0
     radius = 1.0 / abs(kappa)
@@ -99,13 +109,62 @@ def base_arc_lateral(kappa: float, x_m: float) -> float:
     return sign * (math.sqrt(max(radius * radius - reach * reach, 0.0)) - radius)
 
 
+def arc_point(kappa: float, s_m: float) -> tuple[float, float]:
+    """Ego-frame point at arc length ``s_m`` along the base circle."""
+    if abs(kappa) < _STRAIGHT_KAPPA:
+        return s_m, 0.0
+    radius = 1.0 / abs(kappa)
+    sign = 1.0 if kappa > 0.0 else -1.0
+    theta = s_m / radius
+    return radius * math.sin(theta), -sign * radius * (1.0 - math.cos(theta))
+
+
+def arc_normal(kappa: float, s_m: float) -> tuple[float, float]:
+    """Unit normal to ego's right at arc length ``s_m``; (0, 1) at ego."""
+    if abs(kappa) < _STRAIGHT_KAPPA:
+        return 0.0, 1.0
+    sign = 1.0 if kappa > 0.0 else -1.0
+    theta = s_m * abs(kappa)
+    return sign * math.sin(theta), math.cos(theta)
+
+
+def arc_span_limit(kappa: float) -> float:
+    """Largest ``|s|`` this base arc resolves unambiguously.
+
+    A circle closes, so arc length is periodic and a sample past ``pi·R`` reads
+    as one on the near side. A straight road has no limit; ego steering hard at
+    a standstill reports R = 7 m and has almost none, which is correct, because
+    that is a manoeuvre rather than a road anyone is tracking traffic along."""
+    if abs(kappa) < _STRAIGHT_KAPPA:
+        return math.inf
+    return _ARC_MAX_SPAN_FRAC * math.pi / abs(kappa)
+
+
+def arc_coords(kappa: float, x_m: float, y_m: float) -> tuple[float, float]:
+    """Ego-frame point to (arc length, signed normal offset) on the base circle.
+
+    This is the inverse of ``arc_point`` plus ``arc_normal`` and it is exact for
+    any heading change up to half a turn either way. Arc length stays monotone
+    around a bend, which is the whole reason the fit is indexed by it: a forward
+    distance stops being unique at 90 deg and folds back after it."""
+    if abs(kappa) < _STRAIGHT_KAPPA:
+        return x_m, y_m
+    radius = 1.0 / abs(kappa)
+    sign = 1.0 if kappa > 0.0 else -1.0
+    # Centre of the base circle, and the point's position relative to it.
+    vx = x_m
+    vy = y_m + sign * radius
+    return radius * math.atan2(vx, sign * vy), sign * (math.hypot(vx, vy) - radius)
+
+
 @dataclass(slots=True, frozen=True)
 class RoadModel:
-    """Centreline through ego: exact base arc plus a cubic deviation.
+    """Centreline through ego: exact base arc plus a cubic normal deviation.
 
-    ``y(x) = base_arc(base_kappa, x) + c1·u + c2·u² + c3·u³`` with
-    ``u = x / 100 m``; +y is ego's right, +x is ego's forward. Anchored at ego,
-    so ``y(0) = 0`` by construction."""
+    ``n(s) = c1·v + c2·v² + c3·v³`` with ``v = s / 100 m``, where ``s`` is arc
+    length along the base circle and ``n`` is offset along its normal, positive
+    to ego's right. The centreline is ``arc_point(s) + n(s)·arc_normal(s)``.
+    Anchored at ego, so ``n(0) = 0`` by construction."""
 
     c1: float = 0.0
     c2: float = 0.0
@@ -115,92 +174,143 @@ class RoadModel:
     residual_rms_m: float = 0.0
     n_samples: int = 0
     n_sources: int = 0
-    # Furthest forward distance any sample reached; beyond it the cubic is
+    # Furthest arc length any sample reached; beyond it the cubic is
     # extrapolating and its confidence has to decay.
-    support_x_m: float = 0.0
+    support_s_m: float = 0.0
     # Per-source residual RMS about the shared fit; drives the caller's trust EMA.
     source_rms: dict = field(default_factory=dict)
     # Inputs the smoother needs to recompute confidence on a filtered residual.
     agreement_rms_m: float = 0.0
     target_weight: float = 0.0
-    # Temporally smoothed centreline on ``_NODE_X``; empty means evaluate the fit.
+    # Temporally smoothed deviation on ``_NODE_S``; empty means evaluate the fit.
     nodes: tuple = ()
 
-    def confidence_at(self, x_m: float) -> float:
-        """Confidence for a query at forward distance ``x_m``.
+    def confidence_at(self, s_m: float) -> float:
+        """Confidence for a query at arc length ``s_m``.
 
         A cubic fitted to samples ending at 60 m says nothing trustworthy at
         140 m, however well it fits the samples it does have."""
         if self.confidence <= 0.0:
             return 0.0
-        if x_m <= self.support_x_m:
+        if abs(s_m) > arc_span_limit(self.base_kappa):
+            return 0.0
+        if s_m <= self.support_s_m:
             return self.confidence
-        over = x_m - self.support_x_m
+        over = s_m - self.support_s_m
         decay = max(0.0, 1.0 - over / _EXTRAPOLATION_FADE_M)
         return self.confidence * decay
 
-    def lateral_at(self, x_m: float) -> float:
-        """Centreline lateral offset at forward distance ``x_m``."""
+    def deviation_at(self, s_m: float) -> float:
+        """Centreline offset from the base arc, along the arc's normal."""
         if self.nodes:
-            return _interp_nodes(self.nodes, x_m)
-        return self.raw_lateral_at(x_m)
+            return _interp_nodes(self.nodes, s_m)
+        return self.raw_deviation_at(s_m)
 
-    def raw_lateral_at(self, x_m: float) -> float:
+    def raw_deviation_at(self, s_m: float) -> float:
         """This frame's fit alone, before any temporal smoothing."""
-        u = x_m / _X_REF_M
-        deviation = self.c1 * u + self.c2 * u * u + self.c3 * u * u * u
-        return base_arc_lateral(self.base_kappa, x_m) + deviation
+        v = s_m / _S_REF_M
+        return self.c1 * v + self.c2 * v * v + self.c3 * v * v * v
+
+    def point_at(self, s_m: float) -> tuple[float, float]:
+        """Ego-frame (forward, right) point on the centreline at arc length s."""
+        bx, by = arc_point(self.base_kappa, s_m)
+        nx, ny = arc_normal(self.base_kappa, s_m)
+        deviation = self.deviation_at(s_m)
+        return bx + deviation * nx, by + deviation * ny
+
+    def tangent_at(self, s_m: float) -> tuple[float, float]:
+        """Unit direction the centreline runs at arc length ``s_m``, ego frame.
+
+        Central difference rather than the analytic derivative, so it follows
+        the smoothed nodes when they are set instead of the raw cubic."""
+        ax, ay = self.point_at(s_m - _TANGENT_STEP_M)
+        bx, by = self.point_at(s_m + _TANGENT_STEP_M)
+        dx, dy = bx - ax, by - ay
+        norm = math.hypot(dx, dy)
+        return (1.0, 0.0) if norm < 1e-9 else (dx / norm, dy / norm)
+
+    def road_coords(self, x_m: float, y_m: float) -> tuple[float, float]:
+        """Ego-frame point to (arc length, offset right of the centreline).
+
+        Prefer this over ``lateral_at``: it is defined all the way around a
+        bend, where a forward distance is not."""
+        s_m, normal = arc_coords(self.base_kappa, x_m, y_m)
+        return s_m, normal - self.deviation_at(s_m)
 
     def offset_of(self, x_m: float, y_m: float) -> float:
         """Road-relative lateral of a point: + is right of the centreline."""
-        return y_m - self.lateral_at(x_m)
+        return self.road_coords(x_m, y_m)[1]
 
-    def curvature_at(self, x_m: float) -> float:
-        """Signed curvature (1/m); + is a left turn, matching ArcPath."""
-        u = x_m / _X_REF_M
-        d2 = (2.0 * self.c2 + 6.0 * self.c3 * u) / (_X_REF_M * _X_REF_M)
+    def lateral_at(self, x_m: float) -> float:
+        """Centreline lateral at forward distance ``x_m``, for drawing and tests.
+
+        A forward distance stops being unique past 90 deg of heading change, so
+        this saturates where the base arc does. Anything holding a 2D point
+        should call ``road_coords``, which has no such limit."""
+        kappa = self.base_kappa
+        if abs(kappa) < _STRAIGHT_KAPPA:
+            s_m = x_m
+        else:
+            radius = 1.0 / abs(kappa)
+            reach = min(abs(x_m), radius * _BASE_ARC_MAX_FRAC)
+            s_m = math.copysign(radius * math.asin(reach / radius), x_m)
+        # The deviation moves the point along the arc's normal, which shifts its
+        # forward distance too; walk s onto the requested x before reading y.
+        px, py = self.point_at(s_m)
+        for _ in range(_INVERT_PASSES):
+            step = s_m + (x_m - px) * 0.5
+            nx, ny = self.point_at(step)
+            if abs(nx - x_m) >= abs(px - x_m):
+                break
+            s_m, px, py = step, nx, ny
+        return py
+
+    def curvature_at(self, s_m: float) -> float:
+        """Signed curvature (1/m) at arc length s; + is left, matching ArcPath."""
+        v = s_m / _S_REF_M
+        d2 = (2.0 * self.c2 + 6.0 * self.c3 * v) / (_S_REF_M * _S_REF_M)
         return self.base_kappa - d2
 
 
-def node_slew_budget_ms(x_m: float) -> float:
-    """Lateral rate a node at ``x_m`` may move (m/s), from the curvature budget."""
-    return max(_SMOOTH_MIN_RATE_MS, _SMOOTH_MAX_KAPPA_RATE * 0.5 * x_m * x_m)
+def node_slew_budget_ms(s_m: float) -> float:
+    """Rate a node at arc length ``s_m`` may move (m/s), from the curvature budget."""
+    return max(_SMOOTH_MIN_RATE_MS, _SMOOTH_MAX_KAPPA_RATE * 0.5 * s_m * s_m)
 
 
-def _interp_nodes(nodes: tuple, x_m: float) -> float:
-    """Linear interpolation over ``_NODE_X``, extrapolating from the end slopes."""
+def _interp_nodes(nodes: tuple, s_m: float) -> float:
+    """Linear interpolation over ``_NODE_S``, extrapolating from the end slopes."""
     last = len(nodes) - 1
-    if x_m <= _NODE_X[0]:
+    if s_m <= _NODE_S[0]:
         slope = (nodes[1] - nodes[0]) / _NODE_STEP_M
-        return nodes[0] + slope * (x_m - _NODE_X[0])
-    if x_m >= _NODE_X[last]:
+        return nodes[0] + slope * (s_m - _NODE_S[0])
+    if s_m >= _NODE_S[last]:
         slope = (nodes[last] - nodes[last - 1]) / _NODE_STEP_M
-        return nodes[last] + slope * (x_m - _NODE_X[last])
-    idx = int(x_m / _NODE_STEP_M)
+        return nodes[last] + slope * (s_m - _NODE_S[last])
+    idx = int(s_m / _NODE_STEP_M)
     idx = max(0, min(last - 1, idx))
-    frac = (x_m - _NODE_X[idx]) / _NODE_STEP_M
+    frac = (s_m - _NODE_S[idx]) / _NODE_STEP_M
     return nodes[idx] + frac * (nodes[idx + 1] - nodes[idx])
 
 
 def _resample(points: list[tuple[float, float]]) -> list[float | None]:
-    """Sample an ascending (x, y) polyline onto ``_NODE_X``; None where unseen."""
+    """Sample an ascending (s, n) polyline onto ``_NODE_S``; None where unseen."""
     out: list[float | None] = []
     n = len(points)
-    for node_x in _NODE_X:
-        if n < 2 or node_x < points[0][0] or node_x > points[-1][0]:
+    for node_s in _NODE_S:
+        if n < 2 or node_s < points[0][0] or node_s > points[-1][0]:
             out.append(None)
             continue
         lo, hi = 0, n - 1
         while hi - lo > 1:
             mid = (lo + hi) // 2
-            if points[mid][0] <= node_x:
+            if points[mid][0] <= node_s:
                 lo = mid
             else:
                 hi = mid
-        x0, y0 = points[lo]
-        x1, y1 = points[hi]
-        span = x1 - x0
-        out.append(y0 if span < 1e-9 else y0 + (node_x - x0) * (y1 - y0) / span)
+        s0, n0 = points[lo]
+        s1, n1 = points[hi]
+        span = s1 - s0
+        out.append(n0 if span < 1e-9 else n0 + (node_s - s0) * (n1 - n0) / span)
     return out
 
 
@@ -214,15 +324,17 @@ class RoadSmoother:
     def __init__(self) -> None:
         self._nodes: tuple | None = None
         self._pose: tuple[float, float, float, float] | None = None
+        self._kappa: float = 0.0
         self._confidence: float = 0.0
-        self._support_x_m: float = 0.0
+        self._support_s_m: float = 0.0
         self._residual: float | None = None
 
     def reset(self) -> None:
         self._nodes = None
         self._pose = None
+        self._kappa = 0.0
         self._confidence = 0.0
-        self._support_x_m = 0.0
+        self._support_s_m = 0.0
         self._residual = None
 
     def step(
@@ -233,33 +345,39 @@ class RoadSmoother:
         dt: float,
     ) -> RoadModel:
         """Return ``model`` carrying the smoothed centreline and confidence."""
+        # A confident fit on top of nothing carried is not a step to suppress:
+        # limiting it publishes the base arc at the fit's confidence (README §9).
+        reacquiring = self._confidence <= 0.0 < model.confidence
         conf = self._step_confidence(self._filtered_confidence(model, dt), dt)
         support = (
-            model.support_x_m if model.confidence >= self._confidence
-            else max(model.support_x_m, self._support_x_m if conf > 0.0 else 0.0)
+            model.support_s_m if model.confidence >= self._confidence
+            else max(model.support_s_m, self._support_s_m if conf > 0.0 else 0.0)
         )
-        held = replace(model, confidence=conf, support_x_m=support)
+        held = replace(model, confidence=conf, support_s_m=support)
 
-        prior = self._prior_on_grid(ego_x, ego_z, ego_fwd_x, ego_fwd_z)
+        prior = None if reacquiring else self._prior_on_grid(
+            ego_x, ego_z, ego_fwd_x, ego_fwd_z, model.base_kappa,
+        )
         target = self._target_grid(model, held, prior, conf)
         if prior is None:
             blended = target
         else:
             span = max(dt, 1e-6)
             blended = []
-            for x, f, p in zip(_NODE_X, target, prior):
-                if p is None:
-                    blended.append(f)
+            for s_m, fresh, carried in zip(_NODE_S, target, prior):
+                if carried is None:
+                    blended.append(fresh)
                     continue
-                step = node_slew_budget_ms(x) * span
-                blended.append(max(p - step, min(p + step, f)))
+                step = node_slew_budget_ms(s_m) * span
+                blended.append(max(carried - step, min(carried + step, fresh)))
         # Re-anchor so the centreline still passes through ego exactly.
         anchor = blended[0]
         blended = [value - anchor for value in blended]
         self._nodes = tuple(blended)
         self._pose = (ego_x, ego_z, ego_fwd_x, ego_fwd_z)
+        self._kappa = model.base_kappa
         self._confidence = conf
-        self._support_x_m = support
+        self._support_s_m = support
         return replace(held, nodes=self._nodes)
 
     def _filtered_confidence(self, model: RoadModel, dt: float) -> float:
@@ -284,27 +402,33 @@ class RoadSmoother:
     def _target_grid(
         model: RoadModel, held: RoadModel, prior, conf: float,
     ) -> list[float]:
-        """Where each node wants to be this frame.
+        """Where each node's deviation wants to be this frame.
 
         Nodes the fit still reaches take it. Nodes it does not keep the shape
-        already carried, fading to the bare ego arc as the held confidence
-        decays, so losing the last source is a fade rather than a snap."""
+        already carried, fading to zero (the bare base arc) as the held
+        confidence decays, so losing the last source is a fade, not a snap."""
         out: list[float] = []
-        for i, x in enumerate(_NODE_X):
-            if model.confidence_at(x) > 0.0:
-                out.append(model.raw_lateral_at(x))
+        for i, s_m in enumerate(_NODE_S):
+            if model.confidence_at(s_m) > 0.0:
+                out.append(model.raw_deviation_at(s_m))
                 continue
-            arc = base_arc_lateral(model.base_kappa, x)
             carried = None if prior is None else prior[i]
-            if carried is None or conf <= 0.0 or held.confidence_at(x) <= 0.0:
-                out.append(arc)
+            if carried is None or conf <= 0.0 or held.confidence_at(s_m) <= 0.0:
+                out.append(0.0)
             else:
-                out.append(arc + (carried - arc) * conf)
+                out.append(carried * conf)
         return out
 
     def _prior_on_grid(
         self, ego_x: float, ego_z: float, ego_fwd_x: float, ego_fwd_z: float,
+        kappa: float,
     ) -> list[float | None] | None:
+        """Last frame's deviations, re-expressed against this frame's base arc.
+
+        Nodes hold a deviation from a base arc, so carrying them over means
+        rebuilding the world points under the old arc and reading them back
+        under the new one. Ego's own motion drops out; a curvature change does
+        not, and should not."""
         if self._nodes is None or self._pose is None:
             return None
         px, pz, pfx, pfz = self._pose
@@ -312,12 +436,23 @@ class RoadSmoother:
             return None
         prx, prz = -pfz, pfx
         rx, rz = -ego_fwd_z, ego_fwd_x
+        was_valid = arc_span_limit(self._kappa)
+        now_valid = arc_span_limit(kappa)
         points: list[tuple[float, float]] = []
-        for node_x, node_y in zip(_NODE_X, self._nodes):
-            wx = px + node_x * pfx + node_y * prx
-            wz = pz + node_x * pfz + node_y * prz
+        for node_s, node_n in zip(_NODE_S, self._nodes):
+            if node_s > was_valid:
+                break
+            bx, by = arc_point(self._kappa, node_s)
+            nx, ny = arc_normal(self._kappa, node_s)
+            lx, ly = bx + node_n * nx, by + node_n * ny
+            wx = px + lx * pfx + ly * prx
+            wz = pz + lx * pfz + ly * prz
             dx, dz = wx - ego_x, wz - ego_z
-            points.append((dx * ego_fwd_x + dz * ego_fwd_z, dx * rx + dz * rz))
+            carried = arc_coords(
+                kappa, dx * ego_fwd_x + dz * ego_fwd_z, dx * rx + dz * rz,
+            )
+            if abs(carried[0]) <= now_valid:
+                points.append(carried)
         points.sort(key=lambda pt: pt[0])
         return _resample(points)
 
@@ -360,9 +495,9 @@ def _solve3(a: list[list[float]], b: list[float]) -> tuple[float, float, float] 
     return out[0], out[1], out[2]
 
 
-def _basis(x_m: float) -> tuple[float, float, float]:
-    u = x_m / _X_REF_M
-    return u, u * u, u * u * u
+def _basis(s_m: float) -> tuple[float, float, float]:
+    v = s_m / _S_REF_M
+    return v, v * v, v * v * v
 
 
 _EGO_SOURCE_ID = -1
@@ -513,18 +648,24 @@ def fit_road_model(
 
     ``ego_samples`` are ego's own recent path in the current ego frame (x behind
     ego is negative). ``target_samples`` are ``(source_id, x, y, weight)``."""
-    # Deviation from the exact base arc, so the cubic never has to represent
-    # large curvature itself (README §9 tight-corner bias).
-    base_ego = [(x, y - base_arc_lateral(fallback_kappa, x)) for x, y in ego_samples]
-    base_targets = [
-        (sid, x, y - base_arc_lateral(fallback_kappa, x), w)
-        for sid, x, y, w in target_samples
+    # Into arc length and normal offset, so the cubic never carries large
+    # curvature and never folds. Past the span limit a sample aliases (README §9).
+    span = arc_span_limit(fallback_kappa)
+    base_ego = [
+        coords for coords in
+        (arc_coords(fallback_kappa, x, y) for x, y in ego_samples)
+        if abs(coords[0]) <= span
     ]
+    base_targets = []
+    for sid, x, y, w in target_samples:
+        s_m, normal = arc_coords(fallback_kappa, x, y)
+        if abs(s_m) <= span:
+            base_targets.append((sid, s_m, normal, w))
     rows, n_sources = _grouped_rows(base_ego, base_targets)
     if len(rows) < 4:
         return from_curvature(fallback_kappa)
     support = max(
-        (x for _, x, _, w in base_targets if w > 0.0),
+        (s for _, s, _, w in base_targets if w > 0.0),
         default=0.0,
     )
 
@@ -563,21 +704,21 @@ def fit_road_model(
             base_kappa=fallback_kappa, confidence=0.0,
             residual_rms_m=rms, source_rms=source_rms,
             agreement_rms_m=agreement, target_weight=target_weight,
-            n_sources=n_sources, support_x_m=support,
+            n_sources=n_sources, support_s_m=support,
         )
     return RoadModel(
         c1=beta[0], c2=beta[1], c3=beta[2], base_kappa=fallback_kappa,
         confidence=confidence, residual_rms_m=rms,
         n_samples=len(rows), n_sources=n_sources,
-        support_x_m=support, source_rms=source_rms,
+        support_s_m=support, source_rms=source_rms,
         agreement_rms_m=agreement, target_weight=target_weight,
     )
 
 
 # Re-exports for tests and tuning tools.
-X_REF_M = _X_REF_M
+S_REF_M = _S_REF_M
 MIN_SOURCE_SAMPLES = _MIN_SOURCE_SAMPLES
-NODE_X = _NODE_X
+NODE_S = _NODE_S
 SMOOTH_MAX_KAPPA_RATE = _SMOOTH_MAX_KAPPA_RATE
 SMOOTH_MIN_RATE_MS = _SMOOTH_MIN_RATE_MS
 CONF_RATE_UP_PER_S = _CONF_RATE_UP_PER_S

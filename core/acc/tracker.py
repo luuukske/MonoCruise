@@ -12,10 +12,12 @@ from core.radar.ego_path import EGO_POSITION_HISTORY_LEN
 from core.radar.traffic import Vehicle
 
 from .ego_path import build_ego_arc, path_half_width
+from .corroboration import slow_vehicle_evidence
 from .road_model import (
     SOURCE_RESIDUAL_DELTA_M,
     RoadModel,
     RoadSmoother,
+    arc_coords,
     fit_road_model,
     lateral_sigma_m,
 )
@@ -85,8 +87,10 @@ _ROAD_SAMPLE_CODIR_DEG: float = 30.0
 _ROAD_SAMPLE_ONCOMING_DEG: float = 150.0
 _ROAD_SAMPLE_ONCOMING_WEIGHT: float = 1.0
 _ROAD_SAMPLE_TMP_WEIGHT: float = 0.5
-_ROAD_SAMPLE_MIN_X_M: float = -30.0
-_ROAD_SAMPLE_MAX_X_M: float = 170.0
+# Span the road fit accepts, as arc length along the ego arc rather than forward
+# distance: round a bend the two diverge by sin(theta)/theta (README §9).
+_ROAD_SAMPLE_MIN_S_M: float = -30.0
+_ROAD_SAMPLE_MAX_S_M: float = 170.0
 
 # Per-source trust: a source earns weight by agreeing with the road over time and
 # loses it fast when it stops. Slow up also stops the fit jumping as ids churn.
@@ -362,7 +366,9 @@ class ACCTracker:
             ]
             in_span = [
                 (sx, sy) for sx, sy in projected
-                if _ROAD_SAMPLE_MIN_X_M <= sx <= _ROAD_SAMPLE_MAX_X_M
+                if _ROAD_SAMPLE_MIN_S_M
+                <= arc_coords(fallback_kappa, sx, sy)[0]
+                <= _ROAD_SAMPLE_MAX_S_M
             ]
             if not in_span:
                 continue
@@ -429,6 +435,10 @@ class ACCTracker:
             road, ego_x, ego_z, ego_fwd_x, ego_fwd_z, dt,
         )
         self._update_source_trust(road, dt)
+        corroboration = slow_vehicle_evidence(
+            vehicles, ego_x, ego_z, ego_fwd_x, ego_fwd_z, ego_yaw_rad,
+            road, _ROAD_SAMPLE_MAX_S_M,
+        )
 
         self.last_blinker_scalar = blinker
         self.last_ego_kappa_used = ego_arc.curvature
@@ -479,9 +489,10 @@ class ACCTracker:
                 )
                 corner_projs.append((arc_dist, arc_lat))
                 sx, sy = self._ego_local(ego_x, ego_z, ego_fwd_x, ego_fwd_z, cx, cz)
-                w_road = road.confidence_at(sx)
+                road_s, road_off = road.road_coords(sx, sy)
+                w_road = road.confidence_at(road_s)
                 corner_lats.append(
-                    w_road * road.offset_of(sx, sy) + (1.0 - w_road) * arc_lat
+                    w_road * road_off + (1.0 - w_road) * arc_lat
                 )
             fwd_corners = [(ad, lt) for ad, lt in corner_projs if ad >= 0.0]
             if not fwd_corners:
@@ -540,13 +551,16 @@ class ACCTracker:
             # Road model knows where the target is even when it has no trail of
             # its own; the trail only ever spoke to where it was going.
             st.last_trail_offset = arc_offset
-            road_w = road.confidence_at(straight_longi)
+            road_s, d_road = road.road_coords(straight_longi, straight_lat)
+            road_w = road.confidence_at(road_s)
             if road_w > 0.0:
-                d_road = road.offset_of(straight_longi, straight_lat)
                 arc_offset = road_w * d_road + (1.0 - road_w) * arc_offset
             # Floored: the ego arc is itself a measurement, so the blend is never
             # evidence-free and cannot fall through to scoring on path (README §3).
-            evidence = max(trail_ev, road_w, _ARC_EVIDENCE_FLOOR)
+            evidence = max(
+                trail_ev, road_w, corroboration.get(v.id, 0.0),
+                _ARC_EVIDENCE_FLOOR,
+            )
 
             # Body must still overlap the corridor after a sigma shift both ways;
             # only the target's own trajectory shrinks sigma (README §9 gate).

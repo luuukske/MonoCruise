@@ -192,7 +192,7 @@ corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
 | `acc_accel` | Same derivation on the **ACC chain**: long window, no hard-brake floor. AI + TMP | ACC `a_lead` (CAH) only |
 | `angular_velocity` | Degrees/s from rotation delta/dt | Arc curvature via `κ = ω_rad/speed` |
 | `_position_history` | `(t, x, z)` tuples appended each full update (AI + TMP); capped at `_POSITION_HISTORY_LEN = 25` | TMP raw-speed LS fit (uses last `_TMP_SPEED_HISTORY_LEN = 20`), `curvature_from_history`, ACC trail arcs |
-| `_trail_history` | `(t, x, z)` retained on a **distance** grid (`_TRAIL_MIN_STEP_M = 0.5 m`), capped by span (`_TRAIL_SPAN_M = 40 m`), count (`_TRAIL_MAX_LEN = 64`) and age (`_TRAIL_MAX_AGE_S = 2.0 s`) | ACC trail arcs and road-model samples **only** |
+| `_trail_history` | `(t, x, z)` retained on a **distance** grid (`_TRAIL_MIN_STEP_M = 0.5 m`), capped by span (`_TRAIL_SPAN_M = 40 m`), count (`_TRAIL_MAX_LEN = 64`) and age (`_TRAIL_MAX_AGE_S = 6.0 s`) | ACC trail arcs and road-model samples **only** |
 | `_speed_ema_history` | `(t, speed_ema)` tuples appended each full update (AI + TMP); capped at `_SPEED_EMA_HISTORY_LEN` | LS-slope fits: `accel` over `_ACCEL_FIT_WINDOW_S`, `accel_trend` over `_ACC_SPEED_ACCEL_WINDOW_S` |
 
 ### Two position buffers: time-capped vs distance-retained
@@ -220,8 +220,34 @@ Two rules for consumers:
   vehicle's buffer freezes, which is wanted (it preserves the trail from when it
   was moving), but a long window on a slow vehicle spans a *manoeuvre*, and a
   circle fitted across a lane change or a turn describes a path the vehicle is
-  no longer on. On the corpus, ages of 3 s and above pushed ACC's stationary
-  false-lock rate from 2.3 % to 4.1 % for no extra recall.
+  no longer on.
+
+  **It was 2.0 s and is now 6.0 s**, which overturns an earlier measurement on
+  this same corpus that ages of 3 s and above bought "no extra recall" for a
+  stationary false-lock rise of 2.3 % -> 4.1 %. That reading was correct when it
+  was taken and is now stale: evidence gating, the shared road model and the
+  arc-length centreline all arrived afterwards, and they are what turned the
+  extra trail from noise into signal. Re-measured at 6.0 s, false lock rises
+  only 2.4 % -> 2.7 % against a 6.0 % bound, and the recall is no longer absent:
+
+  | | 2.0 s | 6.0 s |
+  |---|---|---|
+  | in-path latch, 0-10 km/h | 1.09 s | **0.95 s** |
+  | in-path recall, 0-10 km/h | 31.8 % | **42.0 %** |
+  | in-path latch, 10-20 km/h | 0.92 s | **0.31 s** |
+  | moving in-corridor recall, overall | 43.9 % | **46.4 %** |
+  | ACC lock p50 | 0.89 s | **0.55 s** |
+  | trail span p50, 0-10 km/h | 3.5 m | **8.8 m** |
+  | trail span p50, 40-70 km/h | 27.7 m | **39.3 m** |
+
+  Note the last row: at 2.0 s the age cap was truncating the trail well below
+  70 km/h, so this was never only a slow-traffic constraint. The span cap binds
+  at 2.06 s at 70 km/h, which is why raising the age changes nothing above it.
+
+  **Do not raise it further without re-measuring lead release.** 8.0 s is better
+  again for slow traffic (latch 0.38 s, recall 45.7 %) and was rejected because
+  it puts ACC's hook p90 over its bound; the manoeuvre-span problem above is
+  real and this is where it starts to show.
 
 ### Speed & acceleration: filter chain (AI + TMP)
 

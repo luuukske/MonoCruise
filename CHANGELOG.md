@@ -12,18 +12,19 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Added
-- **Road prediction model**: ACC used to work out your lane from your own steering wheel, which only ever describes the road *behind* you. It now predicts the road ahead from the paths the traffic in front is actually driving, and knows how far out that prediction is still worth trusting, so where it genuinely cannot tell which lane something is in it leaves it alone instead of guessing. Since this is what picks your lead, it settles a family of long-standing complaints:
-  - **Parked and shoulder vehicles grabbed from far away**: a vehicle standing well off to the side could become your lead from 60 m back. It is now left alone until you are close enough to place it properly.
-  - **Lead dropped halfway through a curve**: on winding roads the car in front stopped counting as your lead well before it left your lane, so you would accelerate into the bend and then brake late.
-  - **Your lane placed to the outside of tight bends**: sharp corners were read as gentler than they are, putting your lane over a metre wide of the truck by 60 m ahead. Wide motorway curves were never affected.
-  - **Seconds of hesitation on winding roads**: the lead could take several seconds to be accepted, long enough that the collision warning spoke up first on a car that was simply slower than you.
-  - **Slow traffic could not be placed in a lane**: below about 20 km/h a vehicle covered too little ground to read its path from, so queues and town traffic were tracked on position alone.
-  - **Standing vehicles treated as the most certain target on the road**: the in-lane check needs to see a vehicle move and quietly gave up on anything that wasn't. They now have to earn it, and one you watched drive into place before it stopped still counts properly.
-  - **The predicted lane jumped around in traffic and through corners**: it could shift sideways in a single frame as vehicles came and went, and through corners the far end lagged behind and then caught up in a rush. Both are damped now without making it sluggish.
-  - **Slow to let go of a car that had moved over**: release could take over two seconds. It is roughly twice as quick now, with no change to how fast a car cutting in is picked up.
-  - **The prediction faded in and out with traffic all around**: having more vehicles ahead to confirm the road made the estimate *less* certain rather than more, and a single car turning off could throw away everything the others had established. Corroboration now counts for you instead of against you, so the more traffic is holding the same road, the steadier the prediction gets.
-  - **Oncoming traffic was ignored entirely**: with one car ahead and a stream of vehicles coming the other way, the road ahead was worked out from that single car and usually not at all, even though the opposite traffic was driving the very road you were about to. Traffic in both directions now counts, which is most of the difference on two-way roads: with only oncoming traffic in sight the road is now predicted about 46% of the time instead of essentially never, and the road far ahead reads roughly twice as accurately at 100 m.
-  - **ACC was slower than it needed to be to pick up and let go**: it waited for more certainty than it actually needed before treating a car as your lead, and held onto a lead that had moved over longer than it needed to. Both are quicker now, roughly a fifth off the time to settle on a car ahead and a fifth off the time to release one.
+- **Road prediction model**: ACC used to work out your lane from your own steering wheel, which only ever describes the road *behind* you. It now predicts the road ahead from the paths the traffic in front is actually driving, and knows how far out that prediction is still worth trusting. Since this is what picks your lead, it settles a family of long-standing complaints:
+  - **Parked and shoulder vehicles grabbed from far away**: one standing off to the side could become your lead from 60 m back.
+  - **Lead dropped halfway through a curve**: the car ahead stopped counting well before it left your lane, so you accelerated into the bend and then braked late.
+  - **Your lane placed to the outside of tight bends**: sharp corners read as gentler than they are, by over a metre at 60 m ahead. Motorway curves were never affected.
+  - **Seconds of hesitation on winding roads**: the collision warning could speak up before ACC had accepted a car that was simply slower than you.
+  - **Standing vehicles treated as the most certain target on the road**: they now have to earn it, and one you watched drive into place before it stopped still counts properly.
+  - **The predicted lane jumped around in traffic and through corners**: both are damped now, without making it sluggish.
+  - **The prediction faded in and out with traffic all around**: more traffic holding the same road now makes it steadier rather than shakier.
+  - **Oncoming traffic was ignored entirely**: it now counts too, which is most of the difference on two-way roads.
+  - **Slow to pick up a lead and slow to let one go**: roughly a fifth off both.
+  - **The prediction gave up in tight, low-speed corners**: it cut off partway round junctions, roundabouts and hairpins, and tracking went with it. It now follows a corner the whole way round.
+  - **Slow traffic read as standing still and took too long to pick up**: it kept too little of its own path to place in a lane. Slow vehicles directly ahead are now picked up in about a third of the time.
+  - **Queued traffic did not help ACC recognise itself**: stopped vehicles lined up along the road now back each other up. One standing on its own is treated exactly as before, and a line that does not match the road you are on counts for nothing.
 
 ### Fixed
 - **ACC braked hardest for the targets it was least sure about**: full emergency braking could fire on a vehicle it had barely started tracking, usually something parked near the road. Maximum braking now needs the same confidence the rest of ACC uses, and close-range emergency braking is unchanged.

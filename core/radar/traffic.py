@@ -118,7 +118,9 @@ _POSITION_HISTORY_LEN: int = 25
 _TRAIL_MIN_STEP_M: float = 0.5
 _TRAIL_SPAN_M: float = 40.0
 _TRAIL_MAX_LEN: int = 64
-_TRAIL_MAX_AGE_S: float = 2.0
+# Age is a backstop, not the retention rule: the span cap binds at 2.06 s at
+# 70 km/h, so this only governs slow traffic. See core/acc/README.md §3.
+_TRAIL_MAX_AGE_S: float = 6.0
 _RAW_SPEED_HISTORY_LEN: int = 20
 _RAW_SPEED_NEAR_ZERO_CHORD: float = 0.025  # m: same gate as per-frame displacement
 _BUFFER_SIGN_SPEED_MS: float = 0.05        # m/s: below this, trust LS sign on AI
