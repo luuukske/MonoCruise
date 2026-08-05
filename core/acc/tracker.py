@@ -79,9 +79,11 @@ _IN_PATH_HYSTERESIS_M: float = 0.8
 # evidence never reaches zero however weak the trail and the road model are.
 _ARC_EVIDENCE_FLOOR: float = 0.45
 
-# Co-directional sources only; TMP trails are half as trustworthy. Oncoming
-# traffic was measured as a source and rejected, see README §9.
+# Direction bands: oncoming samples the same road at its own offset, cross traffic
+# between the two bands is turning off and describes no road ego drives (README §9).
 _ROAD_SAMPLE_CODIR_DEG: float = 30.0
+_ROAD_SAMPLE_ONCOMING_DEG: float = 150.0
+_ROAD_SAMPLE_ONCOMING_WEIGHT: float = 1.0
 _ROAD_SAMPLE_TMP_WEIGHT: float = 0.5
 _ROAD_SAMPLE_MIN_X_M: float = -30.0
 _ROAD_SAMPLE_MAX_X_M: float = 170.0
@@ -106,6 +108,16 @@ _TRACTOR_LOCK_VALID_YAW_MAX_DEG: float = 60.0
 
 # Synthetic nested-trailer ids; skip tractor lock (own acc_speed chain).
 _TRAILER_VEHICLE_ID_BASE: int = 1_000_000
+
+
+def _direction_weight(yaw_diff_deg: float) -> float:
+    """Road-sample weight by heading relative to ego; 0 means not a road source."""
+    heading = abs(yaw_diff_deg)
+    if heading <= _ROAD_SAMPLE_CODIR_DEG:
+        return 1.0
+    if heading >= _ROAD_SAMPLE_ONCOMING_DEG:
+        return _ROAD_SAMPLE_ONCOMING_WEIGHT
+    return 0.0
 
 
 @dataclass(slots=True)
@@ -313,7 +325,7 @@ class ACCTracker:
         ego_yaw_rad: float,
         fallback_kappa: float,
     ) -> RoadModel:
-        """Fit the shared centreline from ego's path and co-directional trails."""
+        """Fit the shared centreline from ego's path and the traffic trails."""
         ego_samples = [
             self._ego_local(ego_x, ego_z, ego_fwd_x, ego_fwd_z, hx, hz)
             for _, hx, hz in self._ego_history
@@ -330,12 +342,14 @@ class ACCTracker:
             yaw_diff = math.degrees(
                 (v_yaw - ego_yaw_rad + math.pi) % (2.0 * math.pi) - math.pi
             )
-            if abs(yaw_diff) > _ROAD_SAMPLE_CODIR_DEG:
+            direction_weight = _direction_weight(yaw_diff)
+            if direction_weight <= 0.0:
                 continue
             history = getattr(v, "_trail_history", []) or []
             weight = trail_evidence(observed_motion_m(history))
             if weight <= 0.0:
                 continue
+            weight *= direction_weight
             if v.is_tmp:
                 weight *= _ROAD_SAMPLE_TMP_WEIGHT
             weight *= max(

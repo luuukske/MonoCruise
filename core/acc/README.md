@@ -213,11 +213,11 @@ blinker scalar reduces the path amplitude by up to 40 %, so targets
 in the current lane stop pinning score while we're committing to the
 move.
 
-### Accumulation: `[-5, +8]` clamp
+### Accumulation: `[-5, +6]` clamp
 
     weighted  = offset·1.5 + yaw + path·0.7 + angle
     delta     = weighted · speed_mult(v_target) · dt · 10
-    score_new = clamp(score_prev + delta, -5, +8)
+    score_new = clamp(score_prev + delta, -5, +6)
 
 - Asymmetric clamp: fast lock on in-path vehicles, slow release on
   uncertain tracks (narrow negative floor).
@@ -226,9 +226,10 @@ move.
   (`ANT_SCORE_FULL`), so score above that buys nothing except release
   latency. At the old ceiling of 20, half of all positive-score frames sat
   pinned at the clamp and a lead leaving the lane took a p90 of 2.45 s to
-  fall back under confidence. At 8 that is 1.20 s with lock latency
-  unchanged. Raising the ceiling again re-creates the hooking.
-  Enforced by `tests/acc/test_scoring_evidence.py`.
+  fall back under confidence. At 8 that was 1.30 s and at **6 it is 1.06 s**,
+  with lock p50 and p90 both bit-identical and recall within 0.1 points, because
+  the headroom was never doing anything but delaying release. Raising the ceiling
+  again re-creates the hooking. Enforced by `tests/acc/test_scoring_evidence.py`.
 - `speed_mult = max((|v_target| / 90 m/s)^0.8, 0.5)`: **target**
   vehicle speed, not ego's. The 0.5 floor applies at every realistic road
   speed, so in practice this term is the constant 0.5.
@@ -457,7 +458,11 @@ Recorded so they are not retried blind. All on the same 40-clip sample.
 | Lateral cap on sources, per source | Still 4.1 %. |
 | Lateral cap measured against the base arc | 4.1 % and recall 56.9 -> 55.9 %. On an R200 bend an **in-lane** vehicle 120 m ahead is 40 m laterally in the straight frame, so any lateral cap preferentially deletes the far-field sources that carry the curve. Dropped entirely. |
 | Plausibility clamp on cubic deviation | Rejects legitimate **curve entry**, where ego is still straight while the road ahead bends, so the deviation is genuinely large exactly when the model matters. Reverted. |
-| Oncoming traffic as a road source | Recall unchanged to -0.3 pts, stationary false-lock 2.3 -> 1.6 %, but centreline jump p99 at 50 m 1.33 -> 1.79 m and at 100 m 3.16 -> 6.45 m. The reasoning holds (an oncoming vehicle's trail lies **beyond** it, so it is the only source sampling road further ahead than the furthest co-directional vehicle) but oncoming traffic passes quickly and churns the source set. Re-measured after the slew and confidence work: confident frames 49.8 -> 72.1 %, error at 70 m p90 12.78 -> 9.25 m, downstream lock and false-lock unchanged. Not yet enabled. |
+| Oncoming traffic as a road source | Rejected on its first measurement (centreline jump p99 at 50 m 1.33 -> 1.79 m) and **that rejection was wrong**: the churn it was blamed for was the IRLS weight compounding below, not the oncoming traffic. Now enabled; see the oncoming subsection above. |
+| Loosening the centreline slew limit to speed up reaction | Latch time is **byte-identical** at every setting from current to fully off, so the road smoothing does not gate reaction at all. Loosening flatters jump p90 (0.67 -> 0.48 m) while making p99 4.7x worse and the max 11x worse (3.36 -> 37.84 m). A limiter is judged on its tail. |
+| Shortening the agreement low-pass, or removing the confidence rate limit, to speed up reaction | Both made latching **slower**: lock p90 2.68 -> 4.89 s at tau 0.05, and 2.68 -> 3.53 s with the rate limit off. |
+| Speeding up the per-source trust ramp | Lock p50 identical at 0.81 s for every tau tried, and cut-in latch got worse (1.10 -> 1.29 s). Nothing to gain. |
+| Raising `_PATH_OUT_GAIN` to release a departing lead faster | Works (hook p90 1.30 -> 1.13 s) but costs lock p90 (2.29 -> 2.36 s). Lowering the score ceiling does the same job for free. |
 | Rate limiting the fitted deviation instead of the absolute lateral | **Algebraically a no-op** while the nodes hold absolute laterals: the base arc appears in both the fresh value and the prior and cancels. Bit-identical output. Decoupling requires the nodes themselves to store deviation, and even then a curvature change is a genuine disagreement between the carried road and the new reference, not a bookkeeping artefact. |
 | Restricting the cubic on the grid to `support_x_m` rather than `support + 30` | The discontinuity at that boundary is real and large (p50 7.1 m, p90 87 m, max 470 m), and the code gating on `confidence_at(x) > 0` did contradict this section. Fixing it moved nothing measurable: jump p90 0.820 -> 0.834. The far nodes are dominated by the base arc, not the cubic. |
 | Gating the `path` in-corridor reward on evidence with no floor | Stationary false-lock 4.3 -> 2.6 % but moving recall 41.5 -> 39.0 %. Too blunt on its own; the arc evidence floor is what makes it affordable. |
@@ -465,6 +470,8 @@ Recorded so they are not retried blind. All on the same 40-clip sample.
 | Residual of the initial unrobust fit as the agreement statistic | Correct that post-IRLS statistics are laundered, but an RMS over all rows is not robust: one source drifting 1 m dragged the fit until every source read wrong, 0.77 -> 0.00 confidence. Best p90 at matched coverage, worst dissenter tolerance. |
 | Weighted consensus share (fraction of source weight agreeing) | Count-stable and flicker-free, but measured **after** the robust passes, so it reads ~1.0 even on a fit captured by a minority. Raising it to a power changed nothing at all: a no-op, which is how the laundering was confirmed. |
 | Share of source weight the robust passes discarded | Real discrimination (p50 error 0.57 -> 5.47 across its range) but strictly worse than the quantile at matched coverage, and redundant once IRLS stopped compounding weights. |
+| Stationary vehicles as a road source, unfiltered | Only **8.9 %** of stationary traffic within 170 m sits within 5.5 m of the road ego goes on to drive, median offset **23.8 m**, and headings match the road tangent within 5 deg only 8.8 % of the time (median error **53 deg**). What the radar reports as stationary is mostly car parks, service areas, depots and side streets. |
+| A queue as a road source, with all three filters | **Built and reverted.** A real queue *is* separable: requiring the group to be aligned with the road (25 deg), mutually parallel (15 deg spread) and collinear once the base arc is removed leaves **90.8 %** of members genuinely on ego's road, in 4.8 % of frames. It still does not work, and the reason is not the filter. Where a queue was accepted and confident, the road model including it was **worse than the bare ego arc it replaced** (error at 50 m p50 0.59 against 0.44, p90 1.25 against 0.96, better in only 55 % of frames): three to six points spanning 40 m is a far weaker shape constraint than one vehicle's 40 m trail, and the queue enters exactly where the model was already weakest. Every weight from 1 to 8, with and without keeping members' own trails, measured worse than off. The circularity also showed up as predicted, stationary false-lock 3.28 % -> 3.39-3.97 %, since a stopped vehicle used to define the road then scores as being on it. Restricting it to a pure fallback removed that cost but still added only worse-than-arc estimates. **Do not rebuild this without a corpus containing real jams**: only 6 of 12,608 frames had a queue as the sole traffic, so the corpus can measure this idea's cost but not its benefit. |
 | Median of per-source residuals | Too permissive: p99 at matched coverage ~15 m against 9.6-10.1 for the 75th percentile. The right amount of pessimism is an upper quantile, not a central one. |
 
 Confidence must come from **traffic weight only**, never total weight including
@@ -507,9 +514,57 @@ from.
 |--------|-----------|--------|
 | Ego's own recent path | road **behind** ego | 1.0, and it is the reference |
 | Co-directional target histories | road **ahead** of ego | trail evidence, halved for TMP |
+| Oncoming target histories | road **beyond** them | as above, times `_ROAD_SAMPLE_ONCOMING_WEIGHT` |
 
 Only the targets carry preview. Ego's path and yaw rate describe the road at and
 behind ego, which is exactly why extrapolating from them failed ahead.
+
+Traffic between the two heading bands (`_ROAD_SAMPLE_CODIR_DEG` to
+`_ROAD_SAMPLE_ONCOMING_DEG`) is turning off and describes no road ego will drive,
+so it contributes nothing.
+
+#### Oncoming traffic
+
+An oncoming vehicle drives the same road in the other direction, and the sign of
+its heading changes nothing about the geometry it carries: the per-source offset
+elimination removes its lane offset exactly as it does for an adjacent lane. It
+is also the **only** source whose trail lies further ahead than the vehicle
+itself, so it reaches past the furthest co-directional target.
+
+Without it, one vehicle ahead means one source, which the single-source cap holds
+at 0.25, and a road full of opposite traffic contributed nothing at all. Fraction
+of frames with a usable estimate at 50 m, by what traffic is present:
+
+| scene | co-directional only | with oncoming |
+|---|---|---|
+| oncoming only, no co-directional | **0.2 %** | **40.2 %** |
+| one co-directional, plus oncoming | 4.2 % | **37.9 %** |
+| two or more co-directional | 53.6 % | **65.4 %** |
+
+Accuracy improves at the same time rather than trading against availability: in
+the one-co-directional case, error at 50 m p90 falls from 3.42 m to 1.40 m.
+
+Weighted at parity with co-directional traffic. The reason to discount it would
+be that on a divided highway the opposite carriageway is a **concentric arc at a
+different radius**: offset elimination removes the separation but not the
+curvature difference, about 1.7 m at 100 m for an R200 bend with a 15 m median.
+That cost did not appear. At parity, against the co-directional-only model:
+
+| | co-dir only | oncoming at parity |
+|---|---|---|
+| frames with any confidence | 41.1 % | **58.9 %** |
+| lateral error @50 m p90 | 3.48 | **2.44** |
+| lateral error @70 m p90 | 7.51 | **5.18** |
+| lateral error @100 m p90 | 15.26 | **8.86** |
+| moving in-corridor recall | 41.5 % | **43.9 %** |
+| lock p50 | 0.99 s | **0.89 s** |
+
+The cost is **source churn**: oncoming traffic passes quickly, so the source set
+turns over faster and confidence moves more. Slew saturation 17.5 -> 24.2 % and
+confidence peak-to-peak over 1 s p90 0.41 -> 0.61. Measured at half weight as
+well, and the churn is the same there (p90 0.51), so it is the price of using
+oncoming at all rather than of the weight. That is what the first attempt at this
+source misread as a reason to reject it.
 
 A vehicle one lane over still describes the road's **shape**, just at its own
 lateral offset. Each non-ego source therefore has its own offset eliminated

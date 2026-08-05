@@ -8,10 +8,10 @@ import math
 from dataclasses import dataclass
 
 
-# Score clamp: asymmetric so lock is fast and unlock is slow. The ceiling is
-# capped just above the consumer's confidence saturation (README §3).
+# Score clamp: asymmetric so lock is fast and unlock is slow. Everything above the
+# consumer's saturation (ANT_SCORE_FULL) is windup a departing lead must unwind.
 _SCORE_MIN: float = -5.0
-_SCORE_MAX: float = 8.0
+_SCORE_MAX: float = 6.0
 
 # Offset Gaussian width (metres).  σ = 2.25 m legacy; the
 # zero-crossing of ``offset_raw`` sits at |x| ≈ 2.58 m at angle_amp = 1.

@@ -33,12 +33,21 @@ decel anticipation binds. Stationary immediate lead disables anticipation (speed
 ### Braking authority vs tracker confidence
 
 The tracker publishes leads at `score > 0`; this controller only starts trusting
-one at `score > ANT_SCORE_MIN` (1.0). Everything in that gap used to receive full
+one at `score > ANT_SCORE_MIN` (0.5). Everything in that gap used to receive full
 braking authority anyway, because the TTC overlay ran on `chain_raw[0]` before the
 confidence blend. Measured on the clip corpus, 22.9 % of overlay trips came from a
 lead below the confidence floor and 8.2 % from one at exactly zero confidence,
 nearly all of them stationary vehicles at 6 to 24 m. The least certain leads were
 getting the most violent response.
+
+`ANT_SCORE_MIN` is the **only** knob measured to change latch time: it was
+lowered from 1.0 to 0.5 for lock p50 0.99 -> 0.81 s and cut-in lock 1.26 -> 1.10 s.
+Loosening any of the road-model smoothing left latch time bit-identical (see
+`core/acc/README.md` §9 rejected table). The floor also gates the TTC overlay
+below, so lowering it buys reaction time at the cost of some braking exposure:
+hard-brake trips on stopped vehicles rose 147 -> 154 on the clip corpus, which is
+an upper bound because that count includes legitimate stopped traffic. Do not
+lower it further; at 0.25 the median gained 0.02 s while cut-in latch got worse.
 
 Two rules now:
 

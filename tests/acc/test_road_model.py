@@ -314,3 +314,34 @@ def test_one_dissenter_does_not_cost_the_agreeing_sources_their_weight(drift_m):
     # And the dissenter is still kept out of the shape.
     for x in (60.0, 120.0):
         assert abs(mixed.lateral_at(x) - clean.lateral_at(x)) < 0.5
+
+
+def test_oncoming_traffic_is_a_usable_road_source():
+    """Opposite traffic drives the same road, just in the other direction.
+
+    Its lateral offset is removed by the same per-source centring that lets an
+    adjacent lane contribute shape, so the sign of its heading changes nothing
+    about the geometry it carries."""
+    kappa = 1.0 / 300.0
+    xs = [20.0 * i for i in range(1, 8)]
+    # Two opposing lanes, sampled the way an approaching vehicle's trail is:
+    # its history lies ahead of it, further from ego than the vehicle itself.
+    oncoming = _lane(1, -3.5, xs, kappa=kappa) + _lane(2, -7.0, xs, kappa=kappa)
+    model = fit_road_model(_ego_path(kappa), oncoming, kappa)
+
+    assert model.confidence > 0.0, "oncoming-only traffic must still fit a road"
+    for x in (40.0, 100.0):
+        assert model.lateral_at(x) == pytest.approx(_true_arc(kappa, x), abs=0.6)
+    # And it is not dragged into the opposing lanes.
+    assert model.offset_of(100.0, _true_arc(kappa, 100.0)) == pytest.approx(0.0, abs=0.6)
+
+
+def test_cross_traffic_is_not_a_road_source():
+    """Between the co-directional and oncoming bands sits traffic turning off."""
+    from core.acc.tracker import _direction_weight
+
+    assert _direction_weight(0.0) == 1.0
+    assert _direction_weight(180.0) > 0.0
+    assert _direction_weight(-175.0) > 0.0
+    for turning in (60.0, 90.0, -110.0):
+        assert _direction_weight(turning) == 0.0
