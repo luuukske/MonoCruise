@@ -347,6 +347,10 @@ class FilterContext:
     precomputed_cross_arcs: list | None = None
     lane: Lane = Lane.EGO
 
+    # Measured CBDR miss for this vehicle this frame; None when the track is
+    # too short. Filters must fail open on None (README oncoming clearance).
+    d_miss: float | None = None
+
     # Latched ids bypass TMP rel-speed prefilter (README latched-threat).
     latched_threat_ids: set = field(default_factory=set)
 
@@ -470,9 +474,15 @@ class OppositeLaneFilter:
 
         if own_lane:
             # Bodies already physically separated: direct suppress (no evasion arc needed).
+            # Pose and measurement must agree on the clearance (README oncoming clearance).
             v_hw_coll = max(ctx.v.size.width / 2.0 - 0.1, 0.3)
             _, d_abs = project_to_ego_arc(ctx.ego_arc, ctx.v.position.x, ctx.v.position.z)
-            if d_abs >= ctx.ego_hw + v_hw_coll:
+            clear_bar = ctx.ego_hw + v_hw_coll
+            measured_clear = (
+                ctx.d_miss is None
+                or ctx.d_miss >= clear_bar * cal.oncoming_body_sep_miss_scale
+            )
+            if d_abs >= clear_bar and measured_clear:
                 return _suppress("OppositeLaneFilter")
 
         for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):

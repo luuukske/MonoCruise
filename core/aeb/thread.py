@@ -211,6 +211,8 @@ class AEBSnapshot:
     # Targets whose measured LOS drift vetoed engagement entry this tick
     # (debug/eval visibility; they still warn and still show as colliding).
     los_vetoed_ids: set = field(default_factory=set)
+    # Superset: LOS veto plus the extrapolation vetoes (README engagement vetoes).
+    engage_vetoed_ids: set = field(default_factory=set)
 
     aeb_state: AEBState = AEBState.STANDBY
     time_to_collision: float = _INF
@@ -1437,6 +1439,7 @@ class AEBThread(BaseThread):
                 cross_padding=cross_padding,
                 latched_threat_ids=self._latched_threat_ids,
                 follow_threat_ids=self._follow_threat_ids,
+                d_miss=los_miss(v),
             )
 
             suppression_reasons[v.id] = []
@@ -1496,7 +1499,7 @@ class AEBThread(BaseThread):
                     aligned = abs(ctx.fwd_dot) >= cal.aeb_certain_fwd_dot
                     # Pose fixes a lane only inside the range an unseen bend
                     # cannot span (README lane confidence range).
-                    d_miss_v = los_miss(v)
+                    d_miss_v = ctx.d_miss
                     lane_trusted = (
                         ctx.co_directional or dist <= cal.lane_confidence_range_m
                     )
@@ -1676,7 +1679,15 @@ class AEBThread(BaseThread):
         threat_present = required_decel > 0.0
         effective_required = required_decel + downhill_offset
 
-        engage_threshold = cal.aeb_engage_frac * effective_max_decel
+        # The engage fraction is a hedge against uncertain geometry. Aligned
+        # in-lane traffic needs no hedge (README geometry-graded engage).
+        certain_engage = any(
+            vid in certain_geom_ids and vid not in engage_vetoed_ids
+            for vid in colliding_ids
+        )
+        engage_threshold = effective_max_decel * (
+            cal.aeb_engage_frac_certain if certain_engage else cal.aeb_engage_frac
+        )
         disarm_threshold = cal.aeb_disarm_frac * effective_max_decel
         warn_threshold = cal.aeb_warn_frac * effective_max_decel
 
@@ -1954,6 +1965,7 @@ class AEBThread(BaseThread):
             evasion_filtered_ids=evasion_filtered_ids,
             oncoming_evasion_filtered_ids=oncoming_evasion_filtered_ids,
             los_vetoed_ids=los_vetoed_ids,
+            engage_vetoed_ids=engage_vetoed_ids,
             aeb_state=new_state, time_to_collision=display_ttc,
             time_to_brake=time_to_brake,
             hit_x=best_hit_x, hit_z=best_hit_z,

@@ -99,6 +99,9 @@ class AEBCalibration:
 
     # Oncoming evasion kappa scaling
     opposite_lane_kappa_scale: float = 2.0
+    # OppositeLaneFilter body-separation fast path: the measured miss must also
+    # clear this multiple of the body bar. 0 trusts pose alone (README).
+    oncoming_body_sep_miss_scale: float = 0.25
 
     # Fix A: near-head-on ghost-arc reduction
     near_head_on_cross_scale: float = 0.3
@@ -110,6 +113,9 @@ class AEBCalibration:
     aeb_target_rate_ms3: float = 8.0
     # aeb_engage_frac 0.85 from 2026-07-19 scan; 0.9 rejected (README §7 rejected tunings).
     aeb_engage_frac: float = 0.85
+    # Geometry-graded: aligned in-lane traffic skips the uncertainty hedge.
+    # Pure sensitivity trade, no flat band; see README geometry-graded engage.
+    aeb_engage_frac_certain: float = 0.70
     aeb_disarm_frac: float = 0.45
     # Geometry latch while colliding unbraked ttc inside window (anti-pumping; README).
     disarm_hold_ttc_s: float = 3.0
