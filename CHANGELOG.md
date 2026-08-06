@@ -30,6 +30,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **ACC braked hardest for the targets it was least sure about**: full emergency braking could fire on a vehicle it had barely started tracking, usually something parked near the road. Maximum braking now needs the same confidence the rest of ACC uses, and close-range emergency braking is unchanged.
 - **AEB braked late for traffic stopping ahead (TMP)**: a vehicle braking to a standstill in front of you could be mistaken for a stalled connection, so MonoCruise kept reading it as still moving for up to a second and a half and left the emergency brake far too late.
 - **AEB warned after a crash with nothing in front of you**: being flipped, launched, or left sitting at a steep angle could set off the collision warning and add brake help on its own, with no vehicle anywhere near. A slope alone no longer counts as a hazard.
+- **AEB braked for oncoming traffic on gentle bends**: on a long motorway curve a car coming the other way lined up with your bonnet from 40-90 m out and read as head-on, even though it passed cleanly. MonoCruise now checks whether the two of you are actually converging before braking, so traffic measured to pass clear is left alone. Genuine wrong-way drivers are unaffected.
+- **AEB braked while turning at junctions and roundabouts**: holding a tight steering angle projected your path across the road you were turning onto, so traffic already on it looked like a collision from 30-60 m away. Far-off crossings found this way no longer trigger the brake; anything close still does.
+- **AEB braked for vehicles driving alongside you at the same speed**: a neighbour in the next lane you were neither catching nor being passed by could set off a hard brake mid-turn. Braking cannot avoid a sideways contact, so it no longer tries, unless the other vehicle is measurably drifting into you.
 
 ## [1.1.0-preview.11] - 2026-07-24
 ### Changed

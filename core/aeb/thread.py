@@ -30,7 +30,7 @@ from core.aeb.filters import (
     FilterContext, FilterResult,
     _build_vehicle_collision_data, _world_to_ego_forward, _cross_zone_padding,
     _apply_cross_zone, _earliest_hit, _is_approaching, _dampen_turning_curvature,
-    _vehicle_curvature_blend, VehicleCurvatureBlender,
+    _any_body_in_ego_lane, _vehicle_curvature_blend, VehicleCurvatureBlender,
     build_pipeline,
 )
 
@@ -430,6 +430,51 @@ def _los_predicted_miss(
     if v_rel < 0.5:
         return None
     return abs(omega) * r_now * r_now / v_rel
+
+
+def _los_veto_bar(
+    fwd_dot: float,
+    abs_v_speed: float,
+    v_curvature: float,
+    cal: AEBCalibration,
+) -> tuple[float, float]:
+    """(min_range_m, miss_threshold_m) for the CBDR veto; see README LOS veto."""
+    if fwd_dot > cal.head_on_dot:
+        return cal.los_veto_min_range_m, cal.los_veto_miss_dist_m
+    manoeuvring = (
+        abs_v_speed >= cal.los_veto_headon_min_speed_ms
+        and abs(v_curvature) >= cal.los_veto_headon_max_kappa
+    )
+    if manoeuvring:
+        return cal.los_veto_min_range_m, cal.los_veto_miss_dist_m
+    return cal.los_veto_headon_min_range_m, cal.los_veto_headon_miss_dist_m
+
+
+def _extrapolation_veto(
+    ctx,
+    unbraked_ttc: float,
+    v_target_along_ego: float,
+    in_lane_body: bool,
+    cal: AEBCalibration,
+    d_miss: float | None = None,
+) -> bool:
+    """Engagement-entry veto for extrapolation-fragile hits (README engagement vetoes)."""
+    if not cal.extrap_veto_enabled:
+        return False
+    if ctx.lane == Lane.EGO or in_lane_body:
+        return False
+    if ctx.co_directional:
+        # Matched-speed neighbour: any contact is lateral, and brakes do not steer.
+        # A faster target is an overtaker, a separate class owned by braking_worsens.
+        axial = ctx.ego_speed - v_target_along_ego
+        if not 0.0 <= axial < cal.codir_adjacent_veto_axial_ms:
+            return False
+        # Measurably converging tracks are a real side contact, not lane-keeping.
+        return d_miss is not None and d_miss >= cal.codir_adjacent_veto_miss_m
+    # Crossing/oncoming reached only by holding the current steer: real turns are
+    # transient, so a far hit off a bent ego arc is extrapolation, not evidence.
+    return (abs(ctx.ego_curvature) >= cal.turn_veto_min_kappa
+            and unbraked_ttc >= cal.turn_veto_min_ttc_s)
 
 
 def _dampen_turning_curvature(
@@ -1180,7 +1225,18 @@ class AEBThread(BaseThread):
         certain_geom_ids: set[int] = set()
         nearcertain_geom_ids: set[int] = set()
         los_vetoed_ids: set[int] = set()
+        # Superset of los_vetoed_ids: every target barred from engagement entry.
+        engage_vetoed_ids: set[int] = set()
         los_veto_memo: dict[int, bool] = {}
+        los_miss_memo: dict[int, float | None] = {}
+
+        def los_miss(veh: Vehicle) -> float | None:
+            """Measured CBDR miss for one vehicle, computed once per frame."""
+            if veh.id not in los_miss_memo:
+                los_miss_memo[veh.id] = _los_predicted_miss(
+                    self._los_tracks.get(veh.id, ()), now_mono, cal,
+                )
+            return los_miss_memo[veh.id]
         vehicle_dicts: list[dict] = []
         vehicle_arcs: dict[int, list[ArcPath]] = {}
         newly_risky: set[int] = set()
@@ -1438,10 +1494,19 @@ class AEBThread(BaseThread):
                     unbraked_ttc = unbraked_hit[0]
                     colliding_ids.add(v.id)
                     aligned = abs(ctx.fwd_dot) >= cal.aeb_certain_fwd_dot
-                    if ctx.lane == Lane.EGO and aligned:
+                    # Pose fixes a lane only inside the range an unseen bend
+                    # cannot span, or when the miss agrees (README lane confidence).
+                    d_miss_v = los_miss(v)
+                    lane_trusted = (
+                        ctx.co_directional
+                        or dist <= cal.lane_confidence_range_m
+                        or (d_miss_v is not None
+                            and d_miss_v <= cal.lane_confidence_miss_m)
+                    )
+                    if ctx.lane == Lane.EGO and aligned and lane_trusted:
                         certain_geom_ids.add(v.id)
                     # crash_confirmed uses short confirm window (unreliable lane pose).
-                    if (ctx.lane == Lane.EGO or aligned
+                    if ((ctx.lane == Lane.EGO or aligned) and lane_trusted
                             or getattr(v, "crash_confirmed", False)):
                         nearcertain_geom_ids.add(v.id)
                     newly_risky.add(v.id)
@@ -1530,18 +1595,25 @@ class AEBThread(BaseThread):
                     vetoed = los_veto_memo.get(v.id)
                     if vetoed is None:
                         vetoed = False
+                        min_range, miss_bar = _los_veto_bar(
+                            fwd_dot, abs_v_speed, ctx.v_curvature, cal,
+                        )
                         # crash_confirmed skips LOS veto (README LOS veto).
                         if (cal.los_veto_enabled
-                                and dist >= cal.los_veto_min_range_m
+                                and dist >= min_range
                                 and not getattr(v, "crash_confirmed", False)):
-                            d_miss = _los_predicted_miss(
-                                self._los_tracks.get(v.id, ()), now_mono, cal,
-                            )
-                            vetoed = (d_miss is not None
-                                      and d_miss > cal.los_veto_miss_dist_m)
+                            vetoed = d_miss_v is not None and d_miss_v > miss_bar
                         los_veto_memo[v.id] = vetoed
                         if vetoed:
                             los_vetoed_ids.add(v.id)
+                    if not vetoed and _extrapolation_veto(
+                            ctx, unbraked_ttc, v_target_along_ego,
+                            _any_body_in_ego_lane(
+                                ego_arc, all_target_arcs, cal.lane_half_width),
+                            cal, d_miss_v):
+                        vetoed = True
+                    if vetoed:
+                        engage_vetoed_ids.add(v.id)
                     if not vetoed and ttb < best_ttb_engage:
                         best_ttb_engage = ttb
                         # Same tighter-of-two-frames distance as
@@ -1719,7 +1791,7 @@ class AEBThread(BaseThread):
                 # Instant engage paths: TTB slam, certain geom, latched (README).
                 certain = (
                     brake_ttb_engage_active
-                    or any(vid in certain_geom_ids and vid not in los_vetoed_ids
+                    or any(vid in certain_geom_ids and vid not in engage_vetoed_ids
                            for vid in colliding_ids)
                     or any(vid in self._latched_threat_ids
                            for vid in colliding_ids)

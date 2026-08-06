@@ -120,7 +120,7 @@ class AEBCalibration:
     aeb_min_engage_speed_kmh: float = 5.0
     # Tiered engage confirm windows; brake-TTB slam exempt (README continuous-decel).
     aeb_engage_confirm_s: float = 0.06
-    aeb_engage_confirm_oblique_s: float = 0.20
+    aeb_engage_confirm_oblique_s: float = 0.30
     aeb_certain_fwd_dot: float = 0.95
     # Oblique warn must lead oblique engage by >= 0.1 s (README warn persistence).
     aeb_warn_confirm_oblique_s: float = 0.10
@@ -133,8 +133,28 @@ class AEBCalibration:
     los_veto_enabled: bool = True
     los_veto_window_s: float = 0.6
     los_veto_min_samples: int = 12
-    los_veto_min_range_m: float = 30.0
+    los_veto_min_range_m: float = 25.0
     los_veto_miss_dist_m: float = 6.0
+    # Head-on branch: antiparallel pairs clear each other on measured lateral
+    # gap alone, so the miss bar drops to body clearance (README LOS veto).
+    los_veto_headon_miss_dist_m: float = 2.8
+    los_veto_headon_min_range_m: float = 20.0
+    # Straight-line CBDR is void for a manoeuvring target; kappa is only
+    # trustworthy above this speed (kappa = yaw_rate / v blows up near zero).
+    los_veto_headon_max_kappa: float = 0.05
+    los_veto_headon_min_speed_ms: float = 5.0
+
+    # Engagement-entry vetoes for hits that rest on unsupportable extrapolation
+    # (README engagement-entry vetoes). Warn and FF assist are untouched.
+    extrap_veto_enabled: bool = True
+    turn_veto_min_kappa: float = 0.012
+    turn_veto_min_ttc_s: float = 1.2
+    codir_adjacent_veto_axial_ms: float = 2.0
+    codir_adjacent_veto_miss_m: float = 2.0
+    # Range past which an unseen bend moves a non-co-directional target by more
+    # than a lane; a miss this small re-earns the lane (README lane confidence).
+    lane_confidence_range_m: float = 35.0
+    lane_confidence_miss_m: float = 1.3
 
     # Follow-threat: kinematic hold + lane/converge gate; README follow-threat section.
     follow_threat_window_s: float = 0.6
