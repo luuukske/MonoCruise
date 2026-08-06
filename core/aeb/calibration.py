@@ -152,9 +152,8 @@ class AEBCalibration:
     codir_adjacent_veto_axial_ms: float = 2.0
     codir_adjacent_veto_miss_m: float = 2.0
     # Range past which an unseen bend moves a non-co-directional target by more
-    # than a lane; a miss this small re-earns the lane (README lane confidence).
-    lane_confidence_range_m: float = 35.0
-    lane_confidence_miss_m: float = 1.3
+    # than a lane, so its lane stops being evidence (README lane confidence).
+    lane_confidence_range_m: float = 30.0
 
     # Follow-threat: kinematic hold + lane/converge gate; README follow-threat section.
     follow_threat_window_s: float = 0.6

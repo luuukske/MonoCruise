@@ -1495,18 +1495,17 @@ class AEBThread(BaseThread):
                     colliding_ids.add(v.id)
                     aligned = abs(ctx.fwd_dot) >= cal.aeb_certain_fwd_dot
                     # Pose fixes a lane only inside the range an unseen bend
-                    # cannot span, or when the miss agrees (README lane confidence).
+                    # cannot span (README lane confidence range).
                     d_miss_v = los_miss(v)
                     lane_trusted = (
-                        ctx.co_directional
-                        or dist <= cal.lane_confidence_range_m
-                        or (d_miss_v is not None
-                            and d_miss_v <= cal.lane_confidence_miss_m)
+                        ctx.co_directional or dist <= cal.lane_confidence_range_m
                     )
                     if ctx.lane == Lane.EGO and aligned and lane_trusted:
                         certain_geom_ids.add(v.id)
-                    # crash_confirmed uses short confirm window (unreliable lane pose).
+                    # Co-directional and crash_confirmed skip the oblique window:
+                    # neither is the extrapolation-fragile class it exists for.
                     if ((ctx.lane == Lane.EGO or aligned) and lane_trusted
+                            or ctx.co_directional
                             or getattr(v, "crash_confirmed", False)):
                         nearcertain_geom_ids.add(v.id)
                     newly_risky.add(v.id)

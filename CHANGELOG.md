@@ -33,6 +33,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **AEB braked for oncoming traffic on gentle bends**: on a long motorway curve a car coming the other way lined up with your bonnet from 40-90 m out and read as head-on, even though it passed cleanly. MonoCruise now checks whether the two of you are actually converging before braking, so traffic measured to pass clear is left alone. Genuine wrong-way drivers are unaffected.
 - **AEB braked while turning at junctions and roundabouts**: holding a tight steering angle projected your path across the road you were turning onto, so traffic already on it looked like a collision from 30-60 m away. Far-off crossings found this way no longer trigger the brake; anything close still does.
 - **AEB braked for vehicles driving alongside you at the same speed**: a neighbour in the next lane you were neither catching nor being passed by could set off a hard brake mid-turn. Braking cannot avoid a sideways contact, so it no longer tries, unless the other vehicle is measurably drifting into you.
+- **AEB missed a vehicle pulling out in front of you and stopping**: something merging in from a side road at a shallow angle was treated as uncertain cross-traffic and had to prove itself for too long, so the brake came late or not at all. Traffic heading the same way as you is now recognised straight away.
 
 ## [1.1.0-preview.11] - 2026-07-24
 ### Changed

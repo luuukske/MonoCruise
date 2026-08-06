@@ -125,11 +125,11 @@ def test_narrow_clearance_is_still_a_collision():
     assert any(e.aeb_brake for e in run_headless(_bend_clip(2.0)))
 
 
-def test_far_obstacle_the_measurement_agrees_with_still_engages():
-    """Beyond the lane-confidence range, a near-zero measured miss re-earns the lane.
+def test_far_obstacle_still_engages_through_the_confirm_window():
+    """The lane-confidence range costs instant certainty, never the engagement.
 
-    A stopped obstacle 40 m out is past the range where pose fixes a lane, but
-    the CBDR read says ego arrives on top of it, so certainty is restored.
+    A stopped obstacle past the range takes the oblique confirm window instead
+    of the instant path, and still brakes well before reaching that range.
     """
     n, dt = 45, 1.0 / _HZ
     frames, ticks = [], []
@@ -152,9 +152,8 @@ def test_far_obstacle_the_measurement_agrees_with_still_engages():
     ev = run_headless(clip)
     braked = [e for e in ev if e.aeb_brake]
     assert braked, "a stopped obstacle dead ahead must brake at any range"
-    # Range at first brake, to prove it did not simply wait for 35 m.
-    first = braked[0]
-    assert 55.0 - _EGO_MS * first.t_rel > CAL.lane_confidence_range_m
+    # Range at first brake, to prove the gate did not defer it to close quarters.
+    assert 55.0 - _EGO_MS * braked[0].t_rel > CAL.lane_confidence_range_m
 
 
 def test_los_veto_bar_scopes_the_tight_threshold_to_head_on():
