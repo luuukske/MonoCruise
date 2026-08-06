@@ -345,22 +345,23 @@ are measured against it.
 
 ### Parameterisation
 
-    n(s) = c1·v + c2·v² + c3·v³        v = s / 100 m
-    κ(s) = base_kappa − (2·c2 + 6·c3·v) / 100²
+    n(s) = c1·v + c2·v² + c3·v³ + c4·v⁴      v = s / 100 m
+    κ(s) = base_kappa − (2·c2 + 6·c3·v + 12·c4·v²) / 100²
     centreline(s) = arc_point(base_kappa, s) + n(s)·arc_normal(base_kappa, s)
 
 `s` is **arc length** along the base arc and `n` is offset along its normal,
-positive to ego's right, anchored so `n(0) = 0`. This is the standard clothoid
-cubic: `c2` is curvature at ego and `c3` is **curvature rate**, which is what the
-old constant-curvature arc lacked and why it lost in-lane leads past ~40 m on
-curves.
+positive to ego's right, anchored so `n(0) = 0`. `c2` is curvature at ego, `c3`
+is **curvature rate**, which is what the old constant-curvature arc lacked and
+why it lost in-lane leads past ~40 m on curves, and `c4` lets curvature **bend**
+rather than only ramp. See the corner-entry section below for why the clothoid
+cubic alone was not enough.
 
 **It used to be `y(x)`, indexed by forward distance, and that is a graph.** A
 graph cannot describe a road that turns more than 90 deg, because the road then
 revisits `x` and every point has two answers. The failure did not wait for 90
 deg either: see the angle-ceiling section below for the four separate walls that
 produced it. Arc length has none of them, and it is a coordinate change only,
-so the fit stays one weighted 3x3 solve.
+so the fit stays one weighted solve.
 
 Callers holding a 2D point should use `road_coords(x, y)`, which returns
 `(arc length, offset right of the centreline)` and is defined all the way round
@@ -612,10 +613,13 @@ Recorded so they are not retried blind. All on the same 40-clip sample.
 | Share of source weight the robust passes discarded | Real discrimination (p50 error 0.57 -> 5.47 across its range) but strictly worse than the quantile at matched coverage, and redundant once IRLS stopped compounding weights. |
 | Stationary vehicles as a road source, unfiltered | Only **8.9 %** of stationary traffic within 170 m sits within 5.5 m of the road ego goes on to drive, median offset **23.8 m**, and headings match the road tangent within 5 deg only 8.8 % of the time (median error **53 deg**). What the radar reports as stationary is mostly car parks, service areas, depots and side streets. |
 | A queue as a road source, with all three filters | **Built and reverted.** A real queue *is* separable: requiring the group to be aligned with the road (25 deg), mutually parallel (15 deg spread) and collinear once the base arc is removed leaves **90.8 %** of members genuinely on ego's road, in 4.8 % of frames. It still does not work, and the reason is not the filter. Where a queue was accepted and confident, the road model including it was **worse than the bare ego arc it replaced** (error at 50 m p50 0.59 against 0.44, p90 1.25 against 0.96, better in only 55 % of frames): three to six points spanning 40 m is a far weaker shape constraint than one vehicle's 40 m trail, and the queue enters exactly where the model was already weakest. Every weight from 1 to 8, with and without keeping members' own trails, measured worse than off. The circularity also showed up as predicted, stationary false-lock 3.28 % -> 3.39-3.97 %, since a stopped vehicle used to define the road then scores as being on it. Restricting it to a pure fallback removed that cost but still added only worse-than-arc estimates. **Do not rebuild this without a corpus containing real jams**: only 6 of 12,608 frames had a queue as the sole traffic, so the corpus can measure this idea's cost but not its benefit. |
+| Damping the re-base part-way toward ego's curvature | Strictly worse at 0.7 than committing fully: R < 80 coverage 49.7 -> 42.1 %, cut-in p90 2.87 -> 2.94 s, centreline jump p99 at 30 m 1.87 -> 4.42 m. Damping scales the vote's noise and its signal by the same factor, so it buys no stability, and the mismatch it deliberately leaves behind is exactly the coupling the quartic then has to spend its freedom undoing. The constant was removed rather than left at 1.0. |
+| A ridge on `c4` | Its response is a cliff rather than a damper: after per-source offset elimination the `v⁴` diagonal is order 0.03, so every value from 0.03 to 8.0 pins the term outright and only exactly zero frees it, while `c4` reaches -40 to -165 on a real corner. Left free. Not retried on the re-based `base_kappa`, which is not fitted and so has no diagonal to ridge. |
 | Median of per-source residuals | Too permissive: p99 at matched coverage ~15 m against 9.6-10.1 for the 75th percentile. The right amount of pessimism is an upper quantile, not a central one. |
+| Correcting the agreement quantile index | `agreement_residual_m` indexes `int(0.75 · n)` clamped to `n − 1`, which **is the maximum** for every source count up to four, and that is most real scenes. Indexing `n − 1` instead makes it a genuine quantile that drops one dissenter from three or more. Measured on top of `c4`: coverage up again (R 80-200 48.4 -> 54.4 %, R < 80 29.0 -> 33.2 %) but cut-in lock p90 2.31 -> 2.81 s against a 3.0 bound and recall 45.4 -> 43.9 %. It costs more than `c4` did and buys less. **Reverted, and the docstring now says the index is deliberate**: with few sources the pessimistic reading is the protective one, and `_CONF_SINGLE_SOURCE_CAP` only covers `n = 1`. Retry only alongside something that improves far-field accuracy. |
 | Ego curvature from yaw rate instead of the position circle fit | `kappa = dpsi/ds` regressed over the path is better *conditioned* than a three-point circle fit, and it is still **worse**, because it is a trailing estimate either way and the window needed to condition it costs more lag than it buys noise. Measured against a forward reference (heading change over the next 20 m of path), p90 error 0-20 km/h: chord fit **0.0586**, yaw regression 0.1032, distance-capped 40 m window 0.1301. The shipped fit wins in every speed bucket. Note a first pass measured against a *centred* reference and got the opposite answer: a trailing estimator matches a centred reference by lagging, so only a forward reference can rank these. |
 | Distance-capping the ego position history instead of the 25-sample cap | Same table. Lengthening the window monotonically worsens the forward-reference error at every speed. Also moot below 15 km/h, where `blend_curvature` gives history curvature weight **0.00** and the corridor is `steer * 0.17` alone. |
-| Letting the fit choose `base_kappa` instead of inheriting ego's | **Built and reverted**, patch kept. The mechanism is real: the implied curvature converges to the truth (0.0051 against 0.0050) once damped, and on a synthetic R200 corner entry at 60 deg of sweep it takes the estimate from 26.79 m error at zero confidence to 0.84 m at 0.85. On the corpus it is **exactly nothing** where it matters: at matched coverage the 30 m percentiles are identical and 50-100 m are within noise. All it adds is +5.8 points of coverage whose median error is *outside the model's own stated sigma* at the range ACC locks (0.77 m against 0.25 at 30 m, 1.30 against 0.955 at 50 m). It costs lead release, hook p90 **1.026 -> 1.338 s**, breaching the corpus bound, plus cut-in p90 2.212 -> 2.420 and 410 -> 1567 us of fit. Four gates were tried to separate the benefit from the cost (source count, cost margin, a confidence haircut on re-based fits, minimum curvature disagreement); **three are exact no-ops on hook p90** and the only setting that clears the bound clears it by 0.009 s while cutting the synthetic win from 8 of 16 cases to 5. The cost comes from the firings that are wanted, not from marginal ones. Part of its value is compensating for the forward-distance parameterisation, so retry it only *after* arc-length, and only against a corpus with real corners. |
+| Letting the fit choose `base_kappa` instead of inheriting ego's | **Built and reverted**, patch kept. The mechanism is real: the implied curvature converges to the truth (0.0051 against 0.0050) once damped, and on a synthetic R200 corner entry at 60 deg of sweep it takes the estimate from 26.79 m error at zero confidence to 0.84 m at 0.85. On the corpus it is **exactly nothing** where it matters: at matched coverage the 30 m percentiles are identical and 50-100 m are within noise. All it adds is +5.8 points of coverage whose median error is *outside the model's own stated sigma* at the range ACC locks (0.77 m against 0.25 at 30 m, 1.30 against 0.955 at 50 m). It costs lead release, hook p90 **1.026 -> 1.338 s**, breaching the corpus bound, plus cut-in p90 2.212 -> 2.420 and 410 -> 1567 us of fit. Four gates were tried to separate the benefit from the cost (source count, cost margin, a confidence haircut on re-based fits, minimum curvature disagreement); **three are exact no-ops on hook p90** and the only setting that clears the bound clears it by 0.009 s while cutting the synthetic win from 8 of 16 cases to 5. The cost comes from the firings that are wanted, not from marginal ones. Part of its value is compensating for the forward-distance parameterisation, so retry it only *after* arc-length, and only against a corpus with real corners. **Superseded**: retried as instructed and shipped, but by raw trail geometry rather than by fitting. See the re-basing section. |
 
 Confidence must come from **traffic weight only**, never total weight including
 ego. Ego anchors the fit but samples no road ahead, so counting it lets an empty
@@ -664,6 +668,140 @@ resampling, which would scramble a folded prior. It never folds. The prior is a
 graph by construction and one frame of yaw is 2.3 deg at R25, nowhere near the
 87 deg tangent needed. The smoother's de-rotation is already correct.
 
+### Corner entry: the fifth wall, and why `c4` exists
+
+Arc length removed the four walls above but left a fifth, reported from the
+driver's seat the same way: traffic round a bend stops being tracked at roughly
+45 deg, with oncoming traffic present and confirming the road.
+
+**A corner is a curvature step and the cubic's curvature is affine in `s`.**
+With `c1` pinned by the heading prior the model has exactly two free terms to
+describe the road ahead, which is one clothoid: curvature may ramp linearly and
+nothing else. A real corner has a definite station where the bend starts. Best
+achievable weighted residual on **noiseless** samples of a straight-then-R80
+road, `c1` pinned, against `_CONF_RESIDUAL_BAD_M` of 0.60:
+
+| visible bend | c2,c3 | c2,c3,c4 | c2..c5 |
+|---|---|---|---|
+| 30 deg | 0.341 | 0.126 | 0.125 |
+| **45 deg** | **0.492** | 0.210 | 0.138 |
+| 60 deg | 0.493 | 0.422 | 0.138 |
+| 75 deg | 1.029 | 0.965 | 0.306 |
+
+So at 45 deg the cubic's own bias already ate 80 % of the confidence budget with
+nothing wrong with the evidence. Source-level IRLS then compounds it: the misfit
+is largest where the road is most bent, so the sources reaching furthest round
+the corner score worst and are the first discarded. Oncoming traffic is exactly
+that source, which is why the case with the **most** corroboration failed. On a
+noiseless R80 corner at 45 deg of sweep the co-directional lead read 0.248 and
+the oncoming source 3.406, and the fit kept the lead and threw away the corner.
+
+`c4` is the smallest term that buys a curvature step. Measured over 60 clips,
+fraction of frames with any road confidence, bucketed by ego curvature:
+
+| ego curvature | cubic | with `c4` |
+|---|---|---|
+| straight | 73.8 % | 76.9 % |
+| R > 500 | 78.1 % | 82.9 % |
+| R 200-500 | 65.6 % | 69.9 % |
+| **R 80-200** | **35.7 %** | **48.4 %** |
+| **R < 80** | **19.2 %** | **29.0 %** |
+
+**It is not free, and the cost is lock latency, not accuracy.** Cut-in lock p90
+2.08 -> 2.31 s (bound 3.0), fresh-id lock p90 0.98 -> 2.82 s, moving in-corridor
+recall 46.6 -> 45.4 % (floor 38 %). Hook p90 is unmoved at 1.264, hook p50
+improved 0.478 -> 0.410, and rank mismatches fell 279 -> 263. Every recorded
+baseline stays green. The mechanism is coverage, not wobble: the model is
+now confident in frames where it previously abstained, and in those frames it
+overrides the ego arc, which at 70-100 m is the better estimator (see the table
+in "What this model cannot do"). Tightening the slew limit was measured and
+recovers the jump but **not** the latency, confirming the same insensitivity the
+rejected table records.
+
+**No ridge on `c4`**; see the rejected table.
+
+`c4` roughly doubles the centreline's frame-to-frame jump (p90 at 30 m 0.126 ->
+0.306 m, p99 1.07 -> 3.00 m); the p99 tail is re-acquisition, which bypasses the
+slew limiter by design.
+
+### Re-basing the arc onto the traffic
+
+`c4` moved the wall from 45 deg to about 60, and left the fold beyond it: on
+corner entry `base_kappa` is ego's trailing curvature, which is **zero**, so arc
+length degenerates back to forward distance and every wall in the section above
+comes back. Ego's curvature describes the road at ego. The road 100 m ahead is a
+whole bend away from it.
+
+`_rebased_kappa` lets the traffic choose the base arc. Each qualifying source
+votes with the curvature of the least-squares circle through **its own** samples,
+and the median wins. Three properties matter, and all three were arrived at by
+getting them wrong first:
+
+- **Its own trail, not a bearing from ego.** A chord from ego to a vehicle is
+  biased by that vehicle's lane offset, so traffic sitting in the right-hand lane
+  of a dead straight road reads as a right-hand bend. A source's own trail is
+  parallel to the road, so the offset cancels; all that survives is the radius
+  difference between lanes, 4 % at R80.
+- **Least squares over the whole trail, not three points on it.** The
+  three-point circle reads the road off two gaps, jitters frame to frame, and the
+  base arc hands that jitter to every lateral at once.
+- **Only sources the fit itself would accept.** Gated on `_MIN_SOURCE_SAMPLES`
+  and on the source's own span, not its range: the vote is that trail's
+  curvature, so a short trail is the noisy one wherever it sits.
+
+This is the rejected table's "letting the fit choose `base_kappa`" retried after
+arc-length, as that entry said to. It is **not** the same mechanism: nothing
+searches for a base that minimises residual. That objective is degenerate, and
+measurably so, since on a noiseless R80 corner at 45 deg of sweep the argmin
+picks R18 while the geometry says R80. Raw geometry beats fitting here.
+
+One thing had to go with it. **Ego's own samples are dropped whenever the arc is
+re-based**, because they lie on the base arc only while the base is ego's own
+curvature, and otherwise they fight the traffic for the quartic's freedom. They
+cost nothing: `n(0) = 0` is structural, since the basis has no constant term, so
+ego anchors nothing that the parameterisation was not already anchoring, and the
+rejected table already records that ego's weight changes nothing. With them in,
+a noiseless R80 corner at 75 deg still read 0.620 agreement and zero confidence.
+With them out it reads 0.000 and 1.00.
+
+Confidence on a noiseless straight-then-bend corner, ego at the bend start:
+
+| visible bend | 30 deg | 45 deg | 60 deg | 75 deg | 90 deg | 120 deg |
+|---|---|---|---|---|---|---|
+| cubic | 0.59 | 0.06 | 0.00 | 0.00 | 0.00 | 0.00 |
+| `c4` | 0.98 | 0.69 | 0.04 | 0.00 | 0.00 | 0.00 |
+| `c4` + re-based | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** |
+
+That holds at every radius from 20 m to 500 m. Corpus coverage, fraction of
+frames with any road confidence:
+
+| ego curvature | cubic | `c4` | `c4` + re-based |
+|---|---|---|---|
+| straight | 73.8 % | 76.9 % | 77.6 % |
+| R > 500 | 78.1 % | 82.9 % | 83.4 % |
+| R 200-500 | 65.6 % | 69.9 % | 72.2 % |
+| **R 80-200** | **35.7 %** | 48.4 % | **57.9 %** |
+| **R < 80** | **19.2 %** | 29.0 % | **49.7 %** |
+
+The two are complementary rather than redundant, which was measured rather than
+assumed: re-basing on a cubic gives 48.5 % and 40.1 % in those two buckets, so
+each buys roughly independent coverage and the pair is additive. `c4` still earns
+its place because a re-based arc carries a road that **is** one arc, and a bend
+that arrives and then leaves is not.
+
+Costs, against the cubic baseline: cut-in lock p90 2.08 -> **2.87 s** against a
+3.0 bound, fresh-id p90 0.98 -> 2.41 s, moving recall 46.6 -> 42.3 % (floor 38).
+Gains: hook p90 1.264 -> 1.224, hook p50 0.478 -> 0.339, rank mismatches 279 ->
+243, zero-confidence overlay trips 4.06 -> 3.10 %. Every recorded baseline stays
+green, but **cut-in p90 is now the binding one** with 0.13 s of headroom, where
+it had 0.92 s. Anything that widens road-model coverage again has to buy that
+back first.
+
+Note this is the opposite sign to the reverted attempt, which cost hook p90
+(1.026 -> 1.338, breaching the bound). Releasing a departing lead got *better*
+here, and the likely reason is that the earlier version re-based by fitting, so
+it was wrong in a way that dragged the corridor with it.
+
 ### What this model cannot do
 
 Beyond about 70 m **no available estimator resolves a lane width.** Measured
@@ -698,7 +836,7 @@ from.
 
 | Source | Describes | Weight |
 |--------|-----------|--------|
-| Ego's own recent path | road **behind** ego | 1.0, and it is the reference |
+| Ego's own recent path | road **behind** ego | 1.0, and it is the reference, but only while the base arc is ego's own curvature (see re-basing) |
 | Co-directional target histories | road **ahead** of ego | trail evidence, halved for TMP |
 | Oncoming target histories | road **beyond** them | as above, times `_ROAD_SAMPLE_ONCOMING_WEIGHT` |
 

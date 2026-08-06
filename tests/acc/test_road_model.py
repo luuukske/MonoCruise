@@ -161,7 +161,9 @@ def test_model_is_stateless_and_repeatable():
     first = fit_road_model(_ego_path(kappa=1 / 400), samples)
     second = fit_road_model(_ego_path(kappa=1 / 400), samples)
     assert isinstance(first, RoadModel)
-    assert (first.c1, first.c2, first.c3) == (second.c1, second.c2, second.c3)
+    assert (first.c1, first.c2, first.c3, first.c4) == (
+        second.c1, second.c2, second.c3, second.c4,
+    )
 
 
 @pytest.mark.parametrize("radius,x_eval", [(500.0, 100.0), (200.0, 100.0), (100.0, 60.0)])
@@ -283,7 +285,7 @@ def test_a_hard_steer_standstill_cannot_alias_samples_round_its_own_circle():
     assert model.support_s_m <= arc_span_limit(kappa)
     for s_m in (30.0, 80.0, 150.0):
         assert model.confidence_at(s_m) == 0.0
-    assert all(abs(v) < 50.0 for v in (model.c1, model.c2, model.c3))
+    assert all(abs(v) < 50.0 for v in (model.c1, model.c2, model.c3, model.c4))
 
 
 def test_straight_roads_have_no_span_limit():
@@ -312,13 +314,97 @@ def test_support_is_arc_length_not_forward_distance():
     assert model.confidence_at(span * 0.95) > 0.0
 
 
+def _corner_lane(source_id, offset, radius, sweep_deg, n=20):
+    """A lane on a road that runs straight up to ego and then bends right at R.
+
+    Ego sits exactly at the bend start, so the base arc it hands the fit is
+    straight while the road ahead is not. That is corner entry, and it is the
+    case the cubic could not describe: its curvature is affine in s and a
+    corner's is a step."""
+    out = []
+    for i in range(1, n + 1):
+        theta = math.radians(sweep_deg) * i / n
+        bx, by = radius * math.sin(theta), radius * (1.0 - math.cos(theta))
+        out.append((source_id,
+                    bx - offset * math.sin(theta),
+                    by + offset * math.cos(theta), 1.0))
+    return out
+
+
+@pytest.mark.parametrize("radius", [200.0, 80.0, 40.0])
+def test_corner_entry_stays_confident_past_45_degrees(radius):
+    """Reported from the driver's seat: traffic round a bend stopped being
+    tracked at roughly 45 deg, even with oncoming traffic confirming the road.
+
+    On noiseless samples of a perfect corner the cubic reached agreement 0.49 m
+    by 45 deg of visible bend, against a `_CONF_RESIDUAL_BAD_M` of 0.60, so
+    confidence collapsed with nothing whatever wrong with the evidence."""
+    samples = (
+        _corner_lane(1, 0.0, radius, 45.0)
+        + _corner_lane(2, 3.5, radius, 45.0)
+    )
+    model = fit_road_model(_ego_path(), samples, fallback_kappa=0.0)
+    assert model.confidence > 0.35
+    # A vehicle in ego's lane at the far end of the bend still reads in-lane,
+    # and one a lane over still reads out of it.
+    centre = _corner_lane(0, 0.0, radius, 45.0, n=1)[0]
+    adjacent = _corner_lane(0, 3.5, radius, 45.0, n=1)[0]
+    assert abs(model.offset_of(centre[1], centre[2])) < 0.5
+    assert model.offset_of(adjacent[1], adjacent[2]) > 2.0
+
+
+def _profile_lane(source_id, offset, kappa_at, length_m, n=24):
+    """A lane on a road whose curvature follows ``kappa_at(s)``.
+
+    Re-basing carries a road that is one arc, so the term that still has to
+    exist for a road that is not gets tested on a road that is not."""
+    out = []
+    x = y = heading = 0.0
+    step = length_m / (n * 4)
+    for i in range(n * 4):
+        heading += kappa_at(i * step) * step
+        x += math.cos(heading) * step
+        y -= math.sin(heading) * step
+        if (i + 1) % 4 == 0:
+            out.append((source_id,
+                        x - offset * math.sin(heading),
+                        y + offset * math.cos(heading), 1.0))
+    return out
+
+
+def test_a_bend_that_straightens_needs_the_quartic_term():
+    """Pins the mechanism, not just the symptom.
+
+    A single clothoid has curvature affine in s, so it can describe a bend
+    tightening at a constant rate and nothing else. A bend that arrives and
+    then leaves is the ordinary case a base arc cannot carry either. The
+    corpus is the real evidence for `c4`; this pins that it is load-bearing."""
+    def kappa_at(s_m):
+        return -(1.0 / 250.0) * math.sin(math.pi * s_m / 120.0)
+
+    samples = (
+        _profile_lane(1, 0.0, kappa_at, 120.0)
+        + _profile_lane(2, 3.5, kappa_at, 120.0)
+    )
+    model = fit_road_model(_ego_path(), samples, fallback_kappa=0.0)
+    cubic_only = RoadModel(
+        c1=model.c1, c2=model.c2, c3=model.c3, base_kappa=model.base_kappa,
+    )
+    worst = max(
+        abs(cubic_only.raw_deviation_at(s) - model.raw_deviation_at(s))
+        for s in (40.0, 70.0, 100.0)
+    )
+    assert worst > 0.5, "c4 is carrying nothing; re-check whether it earns its place"
+
+
 def _smoother_step(sm, model, x=0.0, z=0.0, fwd=(1.0, 0.0), dt=1 / 30):
     return sm.step(model, x, z, fwd[0], fwd[1], dt)
 
 
 def test_smoother_passes_normal_change_untouched():
     """Frame-to-frame change is far below the slew limit in normal driving."""
-    from core.acc.road_model import RoadSmoother, from_curvature
+    from core.acc.road_model import from_curvature
+    from core.acc.road_smoother import RoadSmoother
 
     sm = RoadSmoother()
     _smoother_step(sm, from_curvature(0.0))
@@ -330,7 +416,8 @@ def test_smoother_passes_normal_change_untouched():
 
 def test_smoother_clips_a_step_event():
     """A sudden centreline snap is rate limited, not passed straight through."""
-    from core.acc.road_model import RoadSmoother, from_curvature, node_slew_budget_ms
+    from core.acc.road_model import from_curvature
+    from core.acc.road_smoother import RoadSmoother, node_slew_budget_ms
 
     sm = RoadSmoother()
     _smoother_step(sm, from_curvature(0.0))
@@ -342,7 +429,7 @@ def test_smoother_clips_a_step_event():
 def test_slew_budget_is_uniform_in_curvature():
     """Above the floor a node twice as far may move four times as fast, so one
     curvature change costs the same fraction of the budget at every distance."""
-    from core.acc.road_model import SMOOTH_MIN_RATE_MS, node_slew_budget_ms
+    from core.acc.road_smoother import SMOOTH_MIN_RATE_MS, node_slew_budget_ms
 
     near, far = node_slew_budget_ms(80.0), node_slew_budget_ms(160.0)
     assert near > SMOOTH_MIN_RATE_MS, "pick distances above the floor knee"
@@ -353,7 +440,8 @@ def test_slew_budget_is_uniform_in_curvature():
 
 def test_smoother_still_reaches_the_new_shape():
     """Rate limiting delays a step, it does not reject it."""
-    from core.acc.road_model import RoadSmoother, from_curvature
+    from core.acc.road_model import from_curvature
+    from core.acc.road_smoother import RoadSmoother
 
     sm = RoadSmoother()
     target = from_curvature(1.0 / 200.0)
@@ -364,7 +452,8 @@ def test_smoother_still_reaches_the_new_shape():
 
 
 def test_smoother_keeps_the_centreline_through_ego():
-    from core.acc.road_model import RoadSmoother, from_curvature
+    from core.acc.road_model import from_curvature
+    from core.acc.road_smoother import RoadSmoother
 
     sm = RoadSmoother()
     for kappa in (0.0, 1.0 / 400.0, -1.0 / 250.0):
@@ -374,7 +463,8 @@ def test_smoother_keeps_the_centreline_through_ego():
 
 def test_smoother_resets_on_an_ego_jump():
     """A teleport must not be smoothed across."""
-    from core.acc.road_model import RoadSmoother, from_curvature
+    from core.acc.road_model import from_curvature
+    from core.acc.road_smoother import RoadSmoother
 
     sm = RoadSmoother()
     _smoother_step(sm, from_curvature(0.0))
@@ -386,7 +476,7 @@ def test_smoother_resets_on_an_ego_jump():
 
 def test_smoother_does_not_carry_untrusted_extrapolation():
     """Beyond support the base arc goes on the grid, not the runaway cubic."""
-    from core.acc.road_model import RoadSmoother
+    from core.acc.road_smoother import RoadSmoother
 
     wild = RoadModel(c1=0.0, c2=0.0, c3=400.0, confidence=1.0, support_s_m=30.0)
     out = _smoother_step(RoadSmoother(), wild)

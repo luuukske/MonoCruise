@@ -16,11 +16,11 @@ from .corroboration import slow_vehicle_evidence
 from .road_model import (
     SOURCE_RESIDUAL_DELTA_M,
     RoadModel,
-    RoadSmoother,
     arc_coords,
     fit_road_model,
     lateral_sigma_m,
 )
+from .road_smoother import RoadSmoother
 from .scoring import (
     IN_PATH_THRESHOLD,
     LEGACY_RATE_HZ,

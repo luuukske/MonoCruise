@@ -1,12 +1,13 @@
 """Shared road centreline fitted from ego's own path and the traffic ahead.
 
-One weighted cubic per frame, stateless. Parameterisation, the per-source offset
-elimination, and why fusion happens in sample space: ``core/acc/README.md`` §9."""
+One weighted solve per frame, stateless; the frame-to-frame carry lives in
+``road_smoother``. Parameterisation, the per-source offset elimination, and why
+fusion happens in sample space: ``core/acc/README.md`` §9."""
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 
 # Basis scale (m): v = s / _S_REF_M keeps the cubic design matrix conditioned
@@ -40,8 +41,8 @@ _CONF_SINGLE_SOURCE_CAP: float = 0.25
 # lateral offset is eliminated.
 _MIN_SOURCE_SAMPLES: int = 3
 
-# Ego anchors the absolute position. Raising this was measured to change nothing
-# once the base arc carries ego's curvature exactly, so it stays at parity.
+# Raising this was measured to change nothing once the base arc carries ego's
+# curvature exactly, so it stays at parity. Dropped entirely when re-based.
 _EGO_SAMPLE_WEIGHT: float = 1.0
 
 # Confidence falls to zero this far past the furthest sample.
@@ -51,31 +52,25 @@ _EXTRAPOLATION_FADE_M: float = 30.0
 # heading. Comparable to total sample weight; 0 leaves it free.
 _HEADING_PRIOR_WEIGHT: float = 400.0
 
+# Number of terms in n(s). Four, because with c1 pinned by the heading prior a
+# cubic leaves only a linear curvature ramp, and a corner is a step (README §9).
+_N_COEF: int = 4
+
 # Fixed lookahead grid the smoothed centreline is carried on, in arc length.
 # Sample space, not coefficient space: filtering the cubic terms sloshes.
 _NODE_STEP_M: float = 10.0
 _NODE_COUNT: int = 16
 _NODE_S: tuple[float, ...] = tuple(i * _NODE_STEP_M for i in range(_NODE_COUNT))
 
-# Centreline slew limit: a rate limit, not a low-pass (README §9). Budgeted in
-# curvature, because lateral offset grows as x^2/2 and a flat m/s cap is all far.
-_SMOOTH_MAX_KAPPA_RATE: float = 0.010     # (1/m) per second
-_SMOOTH_MIN_RATE_MS: float = 20.0         # floor so the near nodes are not frozen
-_SMOOTH_RESET_JUMP_M: float = 20.0
-
-# The agreement residual comes from an unrobust fit, so one outlier sample moves
-# it. Smooth the measurement here; the rate limit below governs the decision.
-_CONF_RESIDUAL_TAU_S: float = 0.30
-
-# Confidence rate limit (per second). Unsmoothed it went 1 -> 0 inside a frame,
-# retargeting the whole centreline and reading as a bounce between arcs.
-_CONF_RATE_UP_PER_S: float = 3.0
-_CONF_RATE_DOWN_PER_S: float = 1.5
-
 # Base-arc guards: below this curvature the road is straight, and the arc is
 # only evaluated within this fraction of its radius (beyond it x is degenerate).
 _STRAIGHT_KAPPA: float = 1.0 / 5000.0
 _BASE_ARC_MAX_FRAC: float = 0.95
+
+# Re-basing the arc onto the traffic. Gated on the source's own trail span, not
+# its range: the vote is that trail's curvature (README §9).
+_REBASE_MIN_SPAN_M: float = 15.0
+_REBASE_MAX_KAPPA: float = 1.0 / 25.0
 
 # Damped steps used to walk arc length onto a requested forward distance.
 _INVERT_PASSES: int = 12
@@ -159,16 +154,17 @@ def arc_coords(kappa: float, x_m: float, y_m: float) -> tuple[float, float]:
 
 @dataclass(slots=True, frozen=True)
 class RoadModel:
-    """Centreline through ego: exact base arc plus a cubic normal deviation.
+    """Centreline through ego: exact base arc plus a quartic normal deviation.
 
-    ``n(s) = c1·v + c2·v² + c3·v³`` with ``v = s / 100 m``, where ``s`` is arc
-    length along the base circle and ``n`` is offset along its normal, positive
-    to ego's right. The centreline is ``arc_point(s) + n(s)·arc_normal(s)``.
-    Anchored at ego, so ``n(0) = 0`` by construction."""
+    ``n(s) = c1·v + c2·v² + c3·v³ + c4·v⁴`` with ``v = s / 100 m``, where ``s``
+    is arc length along the base circle and ``n`` is offset along its normal,
+    positive to ego's right. The centreline is
+    ``arc_point(s) + n(s)·arc_normal(s)``. Anchored at ego, so ``n(0) = 0``."""
 
     c1: float = 0.0
     c2: float = 0.0
     c3: float = 0.0
+    c4: float = 0.0
     base_kappa: float = 0.0
     confidence: float = 0.0
     residual_rms_m: float = 0.0
@@ -209,7 +205,7 @@ class RoadModel:
     def raw_deviation_at(self, s_m: float) -> float:
         """This frame's fit alone, before any temporal smoothing."""
         v = s_m / _S_REF_M
-        return self.c1 * v + self.c2 * v * v + self.c3 * v * v * v
+        return v * (self.c1 + v * (self.c2 + v * (self.c3 + v * self.c4)))
 
     def point_at(self, s_m: float) -> tuple[float, float]:
         """Ego-frame (forward, right) point on the centreline at arc length s."""
@@ -268,13 +264,10 @@ class RoadModel:
     def curvature_at(self, s_m: float) -> float:
         """Signed curvature (1/m) at arc length s; + is left, matching ArcPath."""
         v = s_m / _S_REF_M
-        d2 = (2.0 * self.c2 + 6.0 * self.c3 * v) / (_S_REF_M * _S_REF_M)
+        d2 = (
+            2.0 * self.c2 + 6.0 * self.c3 * v + 12.0 * self.c4 * v * v
+        ) / (_S_REF_M * _S_REF_M)
         return self.base_kappa - d2
-
-
-def node_slew_budget_ms(s_m: float) -> float:
-    """Rate a node at arc length ``s_m`` may move (m/s), from the curvature budget."""
-    return max(_SMOOTH_MIN_RATE_MS, _SMOOTH_MAX_KAPPA_RATE * 0.5 * s_m * s_m)
 
 
 def _interp_nodes(nodes: tuple, s_m: float) -> float:
@@ -292,169 +285,7 @@ def _interp_nodes(nodes: tuple, s_m: float) -> float:
     return nodes[idx] + frac * (nodes[idx + 1] - nodes[idx])
 
 
-def _resample(points: list[tuple[float, float]]) -> list[float | None]:
-    """Sample an ascending (s, n) polyline onto ``_NODE_S``; None where unseen."""
-    out: list[float | None] = []
-    n = len(points)
-    for node_s in _NODE_S:
-        if n < 2 or node_s < points[0][0] or node_s > points[-1][0]:
-            out.append(None)
-            continue
-        lo, hi = 0, n - 1
-        while hi - lo > 1:
-            mid = (lo + hi) // 2
-            if points[mid][0] <= node_s:
-                lo = mid
-            else:
-                hi = mid
-        s0, n0 = points[lo]
-        s1, n1 = points[hi]
-        span = s1 - s0
-        out.append(n0 if span < 1e-9 else n0 + (node_s - s0) * (n1 - n0) / span)
-    return out
 
-
-class RoadSmoother:
-    """Carries the centreline across frames in sample space. See README §9.
-
-    The previous frame's nodes are transformed into the current ego frame and
-    resampled before the EMA, so ego's own motion is removed rather than being
-    smoothed as if it were a change in the road."""
-
-    def __init__(self) -> None:
-        self._nodes: tuple | None = None
-        self._pose: tuple[float, float, float, float] | None = None
-        self._kappa: float = 0.0
-        self._confidence: float = 0.0
-        self._support_s_m: float = 0.0
-        self._residual: float | None = None
-
-    def reset(self) -> None:
-        self._nodes = None
-        self._pose = None
-        self._kappa = 0.0
-        self._confidence = 0.0
-        self._support_s_m = 0.0
-        self._residual = None
-
-    def step(
-        self,
-        model: RoadModel,
-        ego_x: float, ego_z: float,
-        ego_fwd_x: float, ego_fwd_z: float,
-        dt: float,
-    ) -> RoadModel:
-        """Return ``model`` carrying the smoothed centreline and confidence."""
-        # A confident fit on top of nothing carried is not a step to suppress:
-        # limiting it publishes the base arc at the fit's confidence (README §9).
-        reacquiring = self._confidence <= 0.0 < model.confidence
-        conf = self._step_confidence(self._filtered_confidence(model, dt), dt)
-        support = (
-            model.support_s_m if model.confidence >= self._confidence
-            else max(model.support_s_m, self._support_s_m if conf > 0.0 else 0.0)
-        )
-        held = replace(model, confidence=conf, support_s_m=support)
-
-        prior = None if reacquiring else self._prior_on_grid(
-            ego_x, ego_z, ego_fwd_x, ego_fwd_z, model.base_kappa,
-        )
-        target = self._target_grid(model, held, prior, conf)
-        if prior is None:
-            blended = target
-        else:
-            span = max(dt, 1e-6)
-            blended = []
-            for s_m, fresh, carried in zip(_NODE_S, target, prior):
-                if carried is None:
-                    blended.append(fresh)
-                    continue
-                step = node_slew_budget_ms(s_m) * span
-                blended.append(max(carried - step, min(carried + step, fresh)))
-        # Re-anchor so the centreline still passes through ego exactly.
-        anchor = blended[0]
-        blended = [value - anchor for value in blended]
-        self._nodes = tuple(blended)
-        self._pose = (ego_x, ego_z, ego_fwd_x, ego_fwd_z)
-        self._kappa = model.base_kappa
-        self._confidence = conf
-        self._support_s_m = support
-        return replace(held, nodes=self._nodes)
-
-    def _filtered_confidence(self, model: RoadModel, dt: float) -> float:
-        """Confidence from the low-passed agreement residual, not the raw one."""
-        if model.n_sources <= 0:
-            self._residual = None
-            return model.confidence
-        fresh = model.agreement_rms_m
-        if self._residual is None:
-            self._residual = fresh
-        else:
-            alpha = 1.0 - math.exp(-max(dt, 1e-6) / _CONF_RESIDUAL_TAU_S)
-            self._residual += alpha * (fresh - self._residual)
-        return _confidence(model.target_weight, self._residual, model.n_sources)
-
-    def _step_confidence(self, fresh: float, dt: float) -> float:
-        rate = _CONF_RATE_UP_PER_S if fresh >= self._confidence else _CONF_RATE_DOWN_PER_S
-        step = rate * max(dt, 1e-6)
-        return max(self._confidence - step, min(self._confidence + step, fresh))
-
-    @staticmethod
-    def _target_grid(
-        model: RoadModel, held: RoadModel, prior, conf: float,
-    ) -> list[float]:
-        """Where each node's deviation wants to be this frame.
-
-        Nodes the fit still reaches take it. Nodes it does not keep the shape
-        already carried, fading to zero (the bare base arc) as the held
-        confidence decays, so losing the last source is a fade, not a snap."""
-        out: list[float] = []
-        for i, s_m in enumerate(_NODE_S):
-            if model.confidence_at(s_m) > 0.0:
-                out.append(model.raw_deviation_at(s_m))
-                continue
-            carried = None if prior is None else prior[i]
-            if carried is None or conf <= 0.0 or held.confidence_at(s_m) <= 0.0:
-                out.append(0.0)
-            else:
-                out.append(carried * conf)
-        return out
-
-    def _prior_on_grid(
-        self, ego_x: float, ego_z: float, ego_fwd_x: float, ego_fwd_z: float,
-        kappa: float,
-    ) -> list[float | None] | None:
-        """Last frame's deviations, re-expressed against this frame's base arc.
-
-        Nodes hold a deviation from a base arc, so carrying them over means
-        rebuilding the world points under the old arc and reading them back
-        under the new one. Ego's own motion drops out; a curvature change does
-        not, and should not."""
-        if self._nodes is None or self._pose is None:
-            return None
-        px, pz, pfx, pfz = self._pose
-        if math.hypot(ego_x - px, ego_z - pz) > _SMOOTH_RESET_JUMP_M:
-            return None
-        prx, prz = -pfz, pfx
-        rx, rz = -ego_fwd_z, ego_fwd_x
-        was_valid = arc_span_limit(self._kappa)
-        now_valid = arc_span_limit(kappa)
-        points: list[tuple[float, float]] = []
-        for node_s, node_n in zip(_NODE_S, self._nodes):
-            if node_s > was_valid:
-                break
-            bx, by = arc_point(self._kappa, node_s)
-            nx, ny = arc_normal(self._kappa, node_s)
-            lx, ly = bx + node_n * nx, by + node_n * ny
-            wx = px + lx * pfx + ly * prx
-            wz = pz + lx * pfz + ly * prz
-            dx, dz = wx - ego_x, wz - ego_z
-            carried = arc_coords(
-                kappa, dx * ego_fwd_x + dz * ego_fwd_z, dx * rx + dz * rz,
-            )
-            if abs(carried[0]) <= now_valid:
-                points.append(carried)
-        points.sort(key=lambda pt: pt[0])
-        return _resample(points)
 
 
 def lateral_sigma_m(x_m: float) -> float:
@@ -471,33 +302,43 @@ def from_curvature(kappa: float) -> RoadModel:
     return RoadModel(base_kappa=kappa, confidence=0.0)
 
 
-def _solve3(a: list[list[float]], b: list[float]) -> tuple[float, float, float] | None:
-    """Gaussian elimination with partial pivoting on a 3x3 system."""
+def _solve(a: list[list[float]], b: list[float]) -> tuple[float, ...] | None:
+    """Gaussian elimination with partial pivoting on an n x n system."""
+    n = len(b)
     m = [row[:] + [rhs] for row, rhs in zip(a, b)]
-    for col in range(3):
-        pivot = max(range(col, 3), key=lambda r: abs(m[r][col]))
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(m[r][col]))
         if abs(m[pivot][col]) < 1e-12:
             return None
         m[col], m[pivot] = m[pivot], m[col]
         inv = 1.0 / m[col][col]
-        for r in range(col + 1, 3):
+        for r in range(col + 1, n):
             factor = m[r][col] * inv
             if factor == 0.0:
                 continue
-            for c in range(col, 4):
+            for c in range(col, n + 1):
                 m[r][c] -= factor * m[col][c]
-    out = [0.0, 0.0, 0.0]
-    for row in range(2, -1, -1):
-        acc = m[row][3]
-        for col in range(row + 1, 3):
+    out = [0.0] * n
+    for row in range(n - 1, -1, -1):
+        acc = m[row][n]
+        for col in range(row + 1, n):
             acc -= m[row][col] * out[col]
         out[row] = acc / m[row][row]
-    return out[0], out[1], out[2]
+    return tuple(out)
 
 
-def _basis(s_m: float) -> tuple[float, float, float]:
+def _basis(s_m: float) -> tuple[float, ...]:
     v = s_m / _S_REF_M
-    return v, v * v, v * v * v
+    out = []
+    power = 1.0
+    for _ in range(_N_COEF):
+        power *= v
+        out.append(power)
+    return tuple(out)
+
+
+def _predict(beta, basis) -> float:
+    return sum(b * c for b, c in zip(basis, beta))
 
 
 _EGO_SOURCE_ID = -1
@@ -512,7 +353,7 @@ def _grouped_rows(
     Ego is the reference so its rows pass through untouched; every other source
     is centred on its own mean, which removes the unknown lane offset while
     keeping the shape it contributes."""
-    rows: list[tuple[int, tuple[float, float, float], float, float]] = []
+    rows: list[tuple[int, tuple[float, ...], float, float]] = []
     for x, y in ego_samples:
         rows.append((_EGO_SOURCE_ID, _basis(x), y, _EGO_SAMPLE_WEIGHT))
 
@@ -529,44 +370,43 @@ def _grouped_rows(
         total_w = sum(w for _, _, w in samples)
         if total_w <= 0.0:
             continue
-        mean_b = [0.0, 0.0, 0.0]
+        mean_b = [0.0] * _N_COEF
         mean_y = 0.0
         for x, y, w in samples:
             basis = _basis(x)
-            for i in range(3):
+            for i in range(_N_COEF):
                 mean_b[i] += w * basis[i]
             mean_y += w * y
-        for i in range(3):
+        for i in range(_N_COEF):
             mean_b[i] /= total_w
         mean_y /= total_w
         for x, y, w in samples:
             basis = _basis(x)
-            centred = (basis[0] - mean_b[0], basis[1] - mean_b[1], basis[2] - mean_b[2])
+            centred = tuple(basis[i] - mean_b[i] for i in range(_N_COEF))
             rows.append((source_id, centred, y - mean_y, w))
         n_sources += 1
     return rows, n_sources
 
 
-def _weighted_fit(rows) -> tuple[tuple[float, float, float], float] | None:
+def _weighted_fit(rows) -> tuple[tuple[float, ...], float] | None:
     """Weighted normal equations plus the weighted residual RMS."""
-    ata = [[0.0] * 3 for _ in range(3)]
-    atb = [0.0] * 3
+    ata = [[0.0] * _N_COEF for _ in range(_N_COEF)]
+    atb = [0.0] * _N_COEF
     for _, basis, y, w in rows:
-        for i in range(3):
+        for i in range(_N_COEF):
             atb[i] += w * basis[i] * y
-            for j in range(3):
+            for j in range(_N_COEF):
                 ata[i][j] += w * basis[i] * basis[j]
     # Heading prior: the road leaves ego along ego's heading, so c1 is pulled to
     # zero. Without it a far source's local shape tilts the whole centreline.
     ata[0][0] += _HEADING_PRIOR_WEIGHT
-    beta = _solve3(ata, atb)
+    beta = _solve(ata, atb)
     if beta is None:
         return None
     total_w = 0.0
     sq = 0.0
     for _, basis, y, w in rows:
-        pred = beta[0] * basis[0] + beta[1] * basis[1] + beta[2] * basis[2]
-        sq += w * (y - pred) ** 2
+        sq += w * (y - _predict(beta, basis)) ** 2
         total_w += w
     rms = math.sqrt(sq / total_w) if total_w > 0.0 else 0.0
     return beta, rms
@@ -578,9 +418,8 @@ def _source_residuals(rows, beta) -> dict[int, float]:
     for source_id, basis, y, w in rows:
         if source_id == _EGO_SOURCE_ID:
             continue
-        pred = beta[0] * basis[0] + beta[1] * basis[1] + beta[2] * basis[2]
         bucket = acc.setdefault(source_id, [0.0, 0.0])
-        bucket[0] += w * (y - pred) ** 2
+        bucket[0] += w * (y - _predict(beta, basis)) ** 2
         bucket[1] += w
     return {
         sid: math.sqrt(sq / tw) if tw > 0.0 else math.inf
@@ -594,9 +433,8 @@ def _source_scales(rows, beta) -> dict[int, float]:
     for source_id, basis, y, w in rows:
         if source_id == _EGO_SOURCE_ID:
             continue
-        pred = beta[0] * basis[0] + beta[1] * basis[1] + beta[2] * basis[2]
         bucket = acc.setdefault(source_id, [0.0, 0.0])
-        bucket[0] += w * (y - pred) ** 2
+        bucket[0] += w * (y - _predict(beta, basis)) ** 2
         bucket[1] += w
     scales: dict[int, float] = {}
     for source_id, (sq, total_w) in acc.items():
@@ -614,13 +452,13 @@ def _source_scales(rows, beta) -> dict[int, float]:
 def agreement_residual_m(source_rms: dict) -> float:
     """Upper quantile of the per-source residuals: how badly the sources agree.
 
-    A quantile survives one dissenter among several, and does not drift upward
-    as sources are added the way a max or a range does."""
+    Indexing ``n`` rather than ``n - 1`` makes this the plain maximum at four
+    sources or fewer. That is deliberate and measured: correcting it costs more
+    lock latency than it buys coverage. See the rejected table in README §9."""
     finite = sorted(r for r in source_rms.values() if math.isfinite(r))
     if not finite:
         return 0.0
-    idx = min(len(finite) - 1, int(_CONF_AGREE_QUANTILE * len(finite)))
-    return finite[idx]
+    return finite[min(len(finite) - 1, int(_CONF_AGREE_QUANTILE * len(finite)))]
 
 
 def _confidence(
@@ -639,6 +477,103 @@ def _confidence(
     return conf
 
 
+def _rows_for_base(
+    ego_samples: list[tuple[float, float]],
+    target_samples: list[tuple[int, float, float, float]],
+    kappa: float,
+):
+    """Project every sample onto the base arc at ``kappa`` and build the rows.
+
+    Into arc length and normal offset, so the cubic never carries large
+    curvature and never folds. Past the span limit a sample aliases (README §9)."""
+    span = arc_span_limit(kappa)
+    base_ego = [
+        coords for coords in
+        (arc_coords(kappa, x, y) for x, y in ego_samples)
+        if abs(coords[0]) <= span
+    ]
+    base_targets = []
+    for sid, x, y, w in target_samples:
+        s_m, normal = arc_coords(kappa, x, y)
+        if abs(s_m) <= span:
+            base_targets.append((sid, s_m, normal, w))
+    rows, n_sources = _grouped_rows(base_ego, base_targets)
+    support = max((s for _, s, _, w in base_targets if w > 0.0), default=0.0)
+    return rows, n_sources, support
+
+
+def _trail_kappa(points: list[tuple[float, float]]) -> float | None:
+    """Signed curvature of the least-squares circle through a source's own
+    samples; + is left, and a straight trail reads as zero.
+
+    Its own trail, so its lane offset cancels instead of reading as a bend the
+    way a bearing from ego would. Least squares over the whole trail rather
+    than three points off it: the three-point circle reads the road off two
+    gaps and jitters frame to frame, which the base arc then passes on to
+    every lateral at once."""
+    ordered = sorted(points, key=lambda p: p[0] * p[0] + p[1] * p[1])
+    (x1, y1), (xn, yn) = ordered[0], ordered[-1]
+    if math.hypot(xn - x1, yn - y1) < _REBASE_MIN_SPAN_M:
+        return None
+    # Mean-centred algebraic fit: |p|² + D·x + E·y + F = 0.
+    mx = sum(p[0] for p in ordered) / len(ordered)
+    my = sum(p[1] for p in ordered) / len(ordered)
+    ata = [[0.0] * 3 for _ in range(3)]
+    atb = [0.0] * 3
+    for px, py in ordered:
+        x, y = px - mx, py - my
+        row = (x, y, 1.0)
+        rhs = -(x * x + y * y)
+        for i in range(3):
+            atb[i] += row[i] * rhs
+            for j in range(3):
+                ata[i][j] += row[i] * row[j]
+    sol = _solve(ata, atb)
+    if sol is None:
+        return None
+    cx, cy = -0.5 * sol[0], -0.5 * sol[1]
+    radius_sq = cx * cx + cy * cy - sol[2]
+    if radius_sq <= 1e-9:
+        return None
+    radius = math.sqrt(radius_sq)
+    # Centre to the right of travel means the road turns right, so kappa < 0.
+    cross = (xn - x1) * (cy - (y1 - my)) - (yn - y1) * (cx - (x1 - mx))
+    return (-1.0 if cross > 0.0 else 1.0) / radius
+
+
+def _rebased_kappa(
+    ego_kappa: float,
+    target_samples: list[tuple[int, float, float, float]],
+) -> float:
+    """Base curvature to index arc length by: ego's, bent toward the traffic's.
+
+    Ego's curvature describes the road at ego, and on corner entry the road
+    ahead is a whole bend away from it. This is raw ego-frame geometry, so
+    unlike a curvature read off the fit it does not need the base arc to
+    already be right, which is exactly the case that fails."""
+    grouped: dict[int, list[tuple[float, float]]] = {}
+    for sid, x, y, w in target_samples:
+        if w <= 0.0:
+            continue
+        grouped.setdefault(sid, []).append((x, y))
+    votes = []
+    for points in grouped.values():
+        # Same floor as the fit: a source too thin to carry shape cannot re-base.
+        if len(points) < _MIN_SOURCE_SAMPLES:
+            continue
+        kappa = _trail_kappa(points)
+        if kappa is not None:
+            votes.append(kappa)
+    if not votes:
+        return ego_kappa
+    # Median over sources, so one vehicle turning off cannot re-base the road.
+    votes.sort()
+    bent = votes[len(votes) // 2]
+    if abs(bent - ego_kappa) < _STRAIGHT_KAPPA:
+        return ego_kappa
+    return max(-_REBASE_MAX_KAPPA, min(_REBASE_MAX_KAPPA, bent))
+
+
 def fit_road_model(
     ego_samples: list[tuple[float, float]],
     target_samples: list[tuple[int, float, float, float]],
@@ -648,26 +583,20 @@ def fit_road_model(
 
     ``ego_samples`` are ego's own recent path in the current ego frame (x behind
     ego is negative). ``target_samples`` are ``(source_id, x, y, weight)``."""
-    # Into arc length and normal offset, so the cubic never carries large
-    # curvature and never folds. Past the span limit a sample aliases (README §9).
-    span = arc_span_limit(fallback_kappa)
-    base_ego = [
-        coords for coords in
-        (arc_coords(fallback_kappa, x, y) for x, y in ego_samples)
-        if abs(coords[0]) <= span
-    ]
-    base_targets = []
-    for sid, x, y, w in target_samples:
-        s_m, normal = arc_coords(fallback_kappa, x, y)
-        if abs(s_m) <= span:
-            base_targets.append((sid, s_m, normal, w))
-    rows, n_sources = _grouped_rows(base_ego, base_targets)
+    base_kappa = _rebased_kappa(fallback_kappa, target_samples)
+    # Ego's path lies on the base arc only while the base is ego's own
+    # curvature, and it never described the road ahead anyway (README §9).
+    ego_rows = ego_samples if base_kappa == fallback_kappa else []
+    rows, n_sources, support = _rows_for_base(
+        ego_rows, target_samples, base_kappa,
+    )
+    if len(rows) < 4 and base_kappa != fallback_kappa:
+        base_kappa = fallback_kappa
+        rows, n_sources, support = _rows_for_base(
+            ego_samples, target_samples, base_kappa,
+        )
     if len(rows) < 4:
         return from_curvature(fallback_kappa)
-    support = max(
-        (s for _, s, _, w in base_targets if w > 0.0),
-        default=0.0,
-    )
 
     fit = _weighted_fit(rows)
     if fit is None:
@@ -681,8 +610,7 @@ def fit_road_model(
         scales = _source_scales(rows, beta)
         reweighted = []
         for source_id, basis, y, w0 in base_rows:
-            pred = beta[0] * basis[0] + beta[1] * basis[1] + beta[2] * basis[2]
-            residual = abs(y - pred)
+            residual = abs(y - _predict(beta, basis))
             scale = 1.0 if residual <= _HUBER_DELTA_M else _HUBER_DELTA_M / residual
             scale *= scales.get(source_id, 1.0)
             reweighted.append((source_id, basis, y, w0 * scale))
@@ -701,13 +629,14 @@ def fit_road_model(
         # Keep the per-source diagnostics even when the fit is not trusted, or a
         # caller's trust loop can never bootstrap out of a cold start.
         return RoadModel(
-            base_kappa=fallback_kappa, confidence=0.0,
+            base_kappa=base_kappa, confidence=0.0,
             residual_rms_m=rms, source_rms=source_rms,
             agreement_rms_m=agreement, target_weight=target_weight,
             n_sources=n_sources, support_s_m=support,
         )
     return RoadModel(
-        c1=beta[0], c2=beta[1], c3=beta[2], base_kappa=fallback_kappa,
+        c1=beta[0], c2=beta[1], c3=beta[2], c4=beta[3],
+        base_kappa=base_kappa,
         confidence=confidence, residual_rms_m=rms,
         n_samples=len(rows), n_sources=n_sources,
         support_s_m=support, source_rms=source_rms,
@@ -719,10 +648,6 @@ def fit_road_model(
 S_REF_M = _S_REF_M
 MIN_SOURCE_SAMPLES = _MIN_SOURCE_SAMPLES
 NODE_S = _NODE_S
-SMOOTH_MAX_KAPPA_RATE = _SMOOTH_MAX_KAPPA_RATE
-SMOOTH_MIN_RATE_MS = _SMOOTH_MIN_RATE_MS
-CONF_RATE_UP_PER_S = _CONF_RATE_UP_PER_S
-CONF_RATE_DOWN_PER_S = _CONF_RATE_DOWN_PER_S
 EGO_SAMPLE_WEIGHT = _EGO_SAMPLE_WEIGHT
 SOURCE_RESIDUAL_DELTA_M = _SOURCE_RESIDUAL_DELTA_M
 HUBER_DELTA_M = _HUBER_DELTA_M
