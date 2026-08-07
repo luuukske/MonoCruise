@@ -10,7 +10,18 @@ from dataclasses import dataclass
 from core.settings import Settings
 from core.thread_management.registry import registry
 
+from .blinker_arbitration import (
+    BLINKER_STAGE1_HEADWAY_SCALE,
+    BLINKER_TTC_FLOOR_S,
+    BlinkerArbiter,
+    BlinkerState,
+)
+from .idm_cah import acc_blend, cah, iidm
+
 logger = logging.getLogger(__name__)
+
+# Re-export for fixtures.
+__all__ = ("AdaptiveCruiseController", "BLINKER_TTC_FLOOR_S", "_LeadSnapshot")
 
 
 A_MAX_MS2: float = 1.5
@@ -197,69 +208,6 @@ def _fade(x: float, full: float, zero: float) -> float:
     return 0.5 * (1.0 + math.cos(math.pi * t))
 
 
-def _iidm(
-    s: float,
-    v: float,
-    v_lead: float,
-    a_max: float,
-    b_comfort: float,
-    s0: float,
-    t_headway: float,
-    v0: float,
-    delta: float,
-) -> float:
-    """Improved IDM piecewise control law (Treiber & Kesting 2013, §11.3.4)."""
-    dv = v - v_lead
-    sqrt_ab = math.sqrt(max(a_max * b_comfort, 1e-6))
-    s_star_dyn = v * t_headway + (v * dv) / (2.0 * sqrt_ab)
-    s_star = s0 + max(0.0, s_star_dyn)
-
-    z = s_star / max(s, 1e-3)
-
-    v_ratio = v / max(v0, 1e-3)
-    a_free = a_max * (1.0 - v_ratio ** delta)
-
-    if z >= 1.0:
-        return a_max * (1.0 - z * z)
-
-    if a_free <= 1e-6:
-        return -a_max * (z * z)
-    exponent = 2.0 * a_max / a_free
-    return a_free * (1.0 - z ** exponent)
-
-
-def _cah(
-    s: float,
-    v: float,
-    v_lead: float,
-    a_lead: float,
-    a_max: float,
-) -> float:
-    """Constant-Acceleration Heuristic (Kesting/Treiber/Helbing 2010)."""
-    a_lead_eff = min(a_lead, a_max)
-    s_safe = max(s, 1e-3)
-
-    denom = v_lead * v_lead - 2.0 * s_safe * a_lead_eff
-    selector = v_lead * (v - v_lead)
-
-    if selector <= -2.0 * s_safe * a_lead_eff:
-        if abs(denom) < 1e-6:
-            return a_lead_eff
-        return (v * v * a_lead_eff) / denom
-
-    dv = v - v_lead
-    heaviside = 1.0 if dv > 0.0 else 0.0
-    return a_lead_eff - (dv * dv) * heaviside / (2.0 * s_safe)
-
-
-def _acc_blend(a_iidm: float, a_cah: float, b_comfort: float, c: float) -> float:
-    """ACC model blend with cool factor c (Kesting et al. 2010)."""
-    if a_iidm >= a_cah:
-        return a_iidm
-    b = max(b_comfort, 1e-6)
-    return (1.0 - c) * a_iidm + c * (a_cah + b * math.tanh((a_iidm - a_cah) / b))
-
-
 class AdaptiveCruiseController:
     """Commands an upper bound on longitudinal accel (m/s²) from the lead chain."""
 
@@ -269,14 +217,12 @@ class AdaptiveCruiseController:
         self._lead_emas: dict[int, _LeadEMA] = {}
         self._output_ema: float | None = None
         self._prev_cmd_ms2: float | None = None
-        # Filtered multi-vehicle anticipation delta (m/s^2, added to the
         self._ant_delta_ms2: float = 0.0
-        # Immediate-lead identity tracking for the ghost hold.
         self._prev_primary_vid: int | None = None
         self._ghost_vid: int | None = None
-        # Lead-loss grace cache: see accel_cap_ms2.
         self._last_chain_raw: list[_LeadSnapshot] = []
         self._last_chain_mono: float = -math.inf
+        self._blinker = BlinkerArbiter()
 
     def accel_cap_ms2(self, ego_speed_ms: float) -> float:
         now = time.monotonic()
@@ -286,7 +232,7 @@ class AdaptiveCruiseController:
             dt = _clamp(now - self._prev_mono, 1e-3, DT_MAX_S)
         self._prev_mono = now
 
-        chain_raw = self._read_chain()
+        chain_raw, indicated_raw, blinker = self._read_acc_snapshot()
 
         # Lead-loss grace. ACC's tracker can drop a lead for 1-2 ETS2 physics
         if chain_raw:
@@ -295,19 +241,34 @@ class AdaptiveCruiseController:
         elif self._last_chain_raw and (now - self._last_chain_mono) < LEAD_LOSS_GRACE_S:
             chain_raw = self._last_chain_raw
 
-        if not chain_raw:
+        v_ego = max(0.0, float(ego_speed_ms))
+        if not chain_raw and indicated_raw is None:
             # Truly no lead. Route the ceiling through the SAME jerk + output
             self._gc_emas(now)
             self._ant_delta_ms2 = 0.0
+            self._blinker.committed = False
+            self._blinker.released_vid = None
             target = self.config.no_lead_ceiling_ms2
             a_jerk = self._jerk_limit(target, dt, is_emergency=False)
             return self._output_filter(a_jerk, dt, is_emergency=False)
 
-        v_ego = max(0.0, float(ego_speed_ms))
-        chain_smooth = self._smooth_chain(chain_raw, dt, now)
+        if chain_raw:
+            chain_smooth = self._smooth_chain(chain_raw, dt, now)
+        else:
+            chain_smooth = []
+        indicated_smooth = None
+        if indicated_raw is not None:
+            indicated_smooth = self._smooth_chain([indicated_raw], dt, now)[0]
         self._gc_emas(now)
 
-        a_raw, is_emergency = self._compute_command(chain_raw, chain_smooth, v_ego, dt)
+        a_raw, is_emergency = self._compute_command(
+            chain_raw, chain_smooth, v_ego, dt,
+            indicated_raw=indicated_raw,
+            indicated_smooth=indicated_smooth,
+            b_eff=blinker.b_eff,
+            committed=blinker.committed,
+            lane_offset_m=blinker.lane_offset_m,
+        )
         a_jerk = self._jerk_limit(a_raw, dt, is_emergency)
         return self._output_filter(a_jerk, dt, is_emergency)
 
@@ -321,58 +282,67 @@ class AdaptiveCruiseController:
         self._ghost_vid = None
         self._last_chain_raw = []
         self._last_chain_mono = -math.inf
+        self._blinker.reset()
 
-    def _read_chain(self) -> list[_LeadSnapshot]:
-        """Snapshot the in-lane lead chain from acc_thread under its lock. See `core/cruise_control_thread/README.md`."""
+    def _lead_to_snapshot(self, lead: object) -> _LeadSnapshot | None:
         cfg = self.config
         try:
-            acc = registry.get_thread("acc_thread")
-        except KeyError:
-            return []
+            vehicle = lead.vehicle
+            if getattr(vehicle, "is_parked", False):
+                return None
+            vid = int(vehicle.id)
+            dist_m = float(lead.dist_m)
+            v_lead = float(lead.effective_speed_ms)
+            a_lead = float(lead.effective_accel_ms2)
+            score = float(getattr(lead, "score", 0.0))
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if not (math.isfinite(dist_m) and math.isfinite(v_lead) and math.isfinite(a_lead)):
+            return None
+        if not math.isfinite(score):
+            score = 0.0
+        dist_m = max(0.0, dist_m - cfg.ego_front_offset_m)
+        if dist_m <= 0.0:
+            return None
+        a_lead = _clamp(a_lead, cfg.emergency_decel_ms2, cfg.max_accel_ms2)
+        return _LeadSnapshot(vid, dist_m, v_lead, a_lead, score)
+
+    def _read_acc_snapshot(
+        self,
+    ) -> tuple[list[_LeadSnapshot], _LeadSnapshot | None, BlinkerState]:
+        """In-lane chain, indicated lead, blinker state. Anticipation uses chain only."""
+        idle = BlinkerState()
         try:
+            acc = registry.get_thread("acc_thread")
             if not acc.is_alive():
-                return []
-        except AttributeError:
-            return []
+                return [], None, idle
+        except (KeyError, AttributeError):
+            return [], None, idle
 
         try:
             with acc.data._lock:
-                if not acc.data.has_lead or not acc.data.leads:
-                    return []
-                raw_leads = list(acc.data.leads)
-        except AttributeError:
-            return []
+                raw_leads = list(acc.data.leads) if acc.data.leads else []
+                indicated = getattr(acc.data, "indicated_lead", None)
+                blinker = BlinkerState(
+                    float(getattr(acc.data, "blinker_b_eff", 0.0) or 0.0),
+                    bool(getattr(acc.data, "blinker_committed", False)),
+                    float(getattr(acc.data, "blinker_lane_offset_m", 0.0) or 0.0),
+                )
+        except (AttributeError, TypeError, ValueError):
+            return [], None, idle
 
         snapshots: list[_LeadSnapshot] = []
         for lead in raw_leads:
-            try:
-                vehicle = lead.vehicle
-                if getattr(vehicle, "is_parked", False):
-                    continue
-                vid = int(vehicle.id)
-                dist_m = float(lead.dist_m)
-                v_lead = float(lead.effective_speed_ms)
-                a_lead = float(lead.effective_accel_ms2)
-                score = float(getattr(lead, "score", 0.0))
-            except (AttributeError, TypeError, ValueError):
-                continue
-
-            if not (math.isfinite(dist_m) and math.isfinite(v_lead) and math.isfinite(a_lead)):
-                continue
-            if not math.isfinite(score):
-                score = 0.0
-            dist_m = max(0.0, dist_m - cfg.ego_front_offset_m)
-            if dist_m <= 0.0:
-                continue
-
-            a_lead = _clamp(a_lead, cfg.emergency_decel_ms2, cfg.max_accel_ms2)
-            snapshots.append(_LeadSnapshot(vid, dist_m, v_lead, a_lead, score))
+            snap = self._lead_to_snapshot(lead)
+            if snap is not None:
+                snapshots.append(snap)
+        indicated_snap = self._lead_to_snapshot(indicated) if indicated is not None else None
 
         if not snapshots:
-            return []
+            return [], indicated_snap, blinker
 
         snapshots.sort(key=lambda s: s.dist_m)
-
+        cfg = self.config
         chain: list[_LeadSnapshot] = [snapshots[0]]
         for s in snapshots[1:]:
             if len(chain) >= cfg.ma_max_leads:
@@ -380,6 +350,11 @@ class AdaptiveCruiseController:
             if s.dist_m - chain[-1].dist_m < cfg.ma_min_chain_gap_m:
                 continue
             chain.append(s)
+        return chain, indicated_snap, blinker
+
+    def _read_chain(self) -> list[_LeadSnapshot]:
+        """Snapshot the in-lane lead chain from acc_thread under its lock."""
+        chain, _, _ = self._read_acc_snapshot()
         return chain
 
     def _smooth_chain(
@@ -442,29 +417,21 @@ class AdaptiveCruiseController:
         for vid in stale:
             self._lead_emas.pop(vid, None)
 
-    def _compute_command(
+    def _safety_overlays(
         self,
-        chain_raw: list[_LeadSnapshot],
-        chain_smooth: list[_LeadSnapshot],
+        primary_raw: _LeadSnapshot,
         v_ego: float,
-        dt: float,
-    ) -> tuple[float, bool]:
+    ) -> tuple[float, bool] | None:
+        """Emergency / hard-TTC / standstill overlays. None means continue normal law."""
         cfg = self.config
-
-        primary_raw = chain_raw[0]
-        eff_dist_raw = max(primary_raw.dist_m, 0.01)
-
-        if eff_dist_raw <= cfg.d_emergency_m:
-            # Safety overlays reset anticipation: on exit the controller
-            # restarts from the pure immediate-lead law.
+        eff_dist = max(primary_raw.dist_m, 0.01)
+        if eff_dist <= cfg.d_emergency_m:
             self._ant_delta_ms2 = 0.0
             return cfg.emergency_decel_ms2, True
 
-        v_close_raw = v_ego - primary_raw.v_lead_ms
-        if v_close_raw > cfg.standstill_speed_ms and self._score_conf(primary_raw.score) > 0.0:
-            # Full braking authority needs the same minimum tracker confidence the
-            # rest of the law already requires; d_emergency stays ungated.
-            ttc = eff_dist_raw / max(v_close_raw, TTC_MIN_VCLOSE_MS)
+        v_close = v_ego - primary_raw.v_lead_ms
+        if v_close > cfg.standstill_speed_ms and self._score_conf(primary_raw.score) > 0.0:
+            ttc = eff_dist / max(v_close, TTC_MIN_VCLOSE_MS)
             if ttc < cfg.ttc_hard_s:
                 self._ant_delta_ms2 = 0.0
                 return cfg.max_decel_ms2, True
@@ -472,11 +439,26 @@ class AdaptiveCruiseController:
         if (
             v_ego < cfg.standstill_speed_ms
             and primary_raw.v_lead_ms < cfg.standstill_speed_ms
-            and eff_dist_raw <= cfg.s0_m + cfg.standstill_gap_slack_m
+            and eff_dist <= cfg.s0_m + cfg.standstill_gap_slack_m
         ):
-            # Standstill behind a stationary lead: publish 0 m/s² (no command).
             self._ant_delta_ms2 = 0.0
             return 0.0, False
+        return None
+
+    def _compute_command(
+        self,
+        chain_raw: list[_LeadSnapshot],
+        chain_smooth: list[_LeadSnapshot],
+        v_ego: float,
+        dt: float,
+        indicated_raw: _LeadSnapshot | None = None,
+        indicated_smooth: _LeadSnapshot | None = None,
+        b_eff: float = 0.0,
+        committed: bool = False,
+        lane_offset_m: float = 0.0,
+    ) -> tuple[float, bool]:
+        cfg = self.config
+        now = self._prev_mono if self._prev_mono is not None else 0.0
 
         try:
             level = int(Settings.acc_gap_level)
@@ -484,41 +466,101 @@ class AdaptiveCruiseController:
             level = 0
         t_headway = _headway_for_level(level) if level else cfg.t_headway_s
 
+        if not chain_raw:
+            # Empty in-lane chain with a published indicated lead: follow it.
+            # Keep arbiter in pass so hysteresis is not stale when leads return.
+            if indicated_smooth is None or indicated_raw is None:
+                self._ant_delta_ms2 = 0.0
+                self._blinker.mode = "lane"
+                self._blinker.committed = False
+                return cfg.no_lead_ceiling_ms2, False
+            a_ind = self._indicated_accel(indicated_smooth, v_ego, t_headway)
+            self._ant_delta_ms2 = 0.0
+            self._blinker._set_mode("pass", now)
+            self._blinker.committed = committed
+            return a_ind, False
+
+        primary_raw = chain_raw[0]
+        overlay = self._safety_overlays(primary_raw, v_ego)
+        if overlay is not None:
+            return overlay
+
+        # R8: stage-1 softening only while in-lane TTC and comfort allow it.
+        t_lane = t_headway
+        v_close_soft = v_ego - primary_raw.v_lead_ms
+        ttc_soft = (
+            max(primary_raw.dist_m, 0.01) / v_close_soft
+            if v_close_soft > TTC_MIN_VCLOSE_MS else math.inf
+        )
+        a_req_soft = self._lead_law(
+            primary_raw.dist_m, v_ego, primary_raw.v_lead_ms,
+            primary_raw.a_lead_ms2, t_headway,
+        )
+        soft_ok = self._blinker.soft_ok(
+            ttc=ttc_soft, a_req=a_req_soft,
+            b_comfort=cfg.b_comfort_ms2, now=now,
+        )
+        if abs(b_eff) > 1e-6 and soft_ok:
+            t_lane = max(
+                T_HEADWAY_BY_LEVEL_S[1],
+                t_headway * BLINKER_STAGE1_HEADWAY_SCALE,
+            )
+
         primary = chain_smooth[0]
         a_base = self._lead_law(
-            primary.dist_m, v_ego, primary.v_lead_ms, primary.a_lead_ms2, t_headway,
+            primary.dist_m, v_ego, primary.v_lead_ms, primary.a_lead_ms2, t_lane,
         )
         a_base = _clamp(a_base, cfg.max_decel_ms2, cfg.max_accel_ms2)
+
+        # What the chain would command without chain[0]: the fallback for a
+        # marginal immediate lead, and the target when stage 2 releases it.
+        a_free = self._chain_tail_accel(chain_smooth, v_ego, t_headway)
 
         # Immediate-lead confidence blend: a marginal chain[0] (tracker
         conf0 = primary.conf
         a_lead_only = a_base
         if conf0 < 1.0:
-            if len(chain_smooth) > 1:
-                nxt = chain_smooth[1]
-                a_alt = self._lead_law(
-                    nxt.dist_m, v_ego, nxt.v_lead_ms, nxt.a_lead_ms2, t_headway,
-                )
-                a_alt = _clamp(a_alt, cfg.max_decel_ms2, cfg.max_accel_ms2)
-            else:
-                a_alt = cfg.no_lead_ceiling_ms2
-            a_base = conf0 * a_base + (1.0 - conf0) * a_alt
+            a_base = conf0 * a_base + (1.0 - conf0) * a_free
             if a_lead_only < 0.0:
                 # Low confidence may soften braking, never invert it into
                 # acceleration toward the lead the law is braking for.
                 a_base = min(a_base, 0.0)
 
-        a_base = self._apply_primary_ghost(chain_smooth, v_ego, a_base, t_headway)
+        # A lead we drove away from is not a lead we lost; the ghost is for
+        # id churn and lane-edge drift only. See core/acc/README.md §5.
+        if self._blinker.released_vid is not None or (committed and abs(b_eff) > 1e-6):
+            self._ghost_vid = None
+            self._prev_primary_vid = chain_smooth[0].vid
+        else:
+            a_base = self._apply_primary_ghost(chain_smooth, v_ego, a_base, t_lane)
+
+        if indicated_smooth is None:
+            a_ind = cfg.no_lead_ceiling_ms2
+            ind_vid = None
+        else:
+            a_ind = self._indicated_accel(indicated_smooth, v_ego, t_headway)
+            ind_vid = indicated_smooth.vid
+
+        a_base = self._blinker.arbitrate(
+            a_base, a_ind,
+            b_eff=b_eff, committed=committed, soft_ok=soft_ok,
+            ind_vid=ind_vid, now=now,
+            lead_ttc_s=ttc_soft, lead_gap_m=primary_raw.dist_m, v_ego=v_ego,
+            lane_vid=primary.vid, a_free=a_free, lane_offset_m=lane_offset_m,
+        )
 
         if a_base <= cfg.max_decel_ms2 + 1e-6:
-            # At-clamp hard overlay: the immediate lead alone demands full
-            # braking authority. Anticipation must never soften this.
+            # At-clamp: immediate lead demands full brake; ant must not soften.
             self._ant_delta_ms2 = 0.0
             return a_base, True
 
-        delta_target = self._anticipation_delta(
-            chain_raw, chain_smooth, v_ego, a_base, t_headway,
-        )
+        # Anticipation reads leads[] only. Skip during stage-2 pass release.
+        if self._blinker.mode == "pass" or len(chain_smooth) < 2:
+            delta_target = 0.0
+        else:
+            delta_target = self._anticipation_delta(
+                chain_raw, chain_smooth, v_ego, a_base, t_headway,
+            )
         self._ant_delta_ms2 = _ema_step(
             self._ant_delta_ms2, delta_target, dt, cfg.ant_tau_s,
         )
@@ -526,6 +568,19 @@ class AdaptiveCruiseController:
         a_cmd = _clamp(a_base + self._ant_delta_ms2, cfg.max_decel_ms2, cfg.max_accel_ms2)
         is_emergency = a_cmd <= cfg.max_decel_ms2 + 1e-6
         return a_cmd, is_emergency
+
+    def _chain_tail_accel(
+        self, chain_smooth: list[_LeadSnapshot], v_ego: float, t_headway: float,
+    ) -> float:
+        """The command the chain would give with its immediate lead removed."""
+        cfg = self.config
+        if len(chain_smooth) <= 1:
+            return cfg.no_lead_ceiling_ms2
+        nxt = chain_smooth[1]
+        return _clamp(
+            self._lead_law(nxt.dist_m, v_ego, nxt.v_lead_ms, nxt.a_lead_ms2, t_headway),
+            cfg.max_decel_ms2, cfg.max_accel_ms2,
+        )
 
     def _score_conf(self, score: float) -> float:
         cfg = self.config
@@ -590,7 +645,7 @@ class AdaptiveCruiseController:
         """IIDM + CAH + ACC blend for one lead at its direct gap."""
         cfg = self.config
         eff_dist = max(dist_m, 1e-3)
-        a_iidm = _iidm(
+        a_iidm = iidm(
             s=eff_dist,
             v=v_ego,
             v_lead=v_lead,
@@ -601,14 +656,25 @@ class AdaptiveCruiseController:
             v0=cfg.v0_ms,
             delta=cfg.delta,
         )
-        a_cah_val = _cah(
+        a_cah_val = cah(
             s=eff_dist,
             v=v_ego,
             v_lead=v_lead,
             a_lead=a_lead,
             a_max=cfg.a_max_ms2,
         )
-        return _acc_blend(a_iidm, a_cah_val, cfg.b_comfort_ms2, cfg.cool_factor_c)
+        return acc_blend(a_iidm, a_cah_val, cfg.b_comfort_ms2, cfg.cool_factor_c)
+
+    def _indicated_accel(
+        self, ind: _LeadSnapshot, v_ego: float, t_headway: float,
+    ) -> float:
+        """Indicated-lane gap demand, bounded to comfort braking.
+
+        A candidate is published only from outside ego's corridor, so there is
+        no collision path to it. See `core/cruise_control_thread/README.md`."""
+        cfg = self.config
+        a = self._lead_law(ind.dist_m, v_ego, ind.v_lead_ms, ind.a_lead_ms2, t_headway)
+        return _clamp(a, -cfg.b_comfort_ms2, cfg.max_accel_ms2)
 
     def _anticipation_delta(
         self,

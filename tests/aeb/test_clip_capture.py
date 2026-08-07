@@ -113,6 +113,19 @@ def test_ego_mass_zero_survives_round_trip():
     assert EgoTelemetry.from_json(ego.to_json()).estimated_total_mass_kg == 0.0
 
 
+def test_ego_blinkers_round_trip():
+    ego = EgoTelemetry(blinkerLeft=True, blinkerRight=False)
+    loaded = EgoTelemetry.from_json(ego.to_json())
+    assert loaded.blinkerLeft is True and loaded.blinkerRight is False
+
+
+def test_ego_blinkers_absent_on_older_clips_default_false():
+    """Pre-v3 clips have no blinker fields; replay must not invent a bias."""
+    older = {"speed": 20.0, "rotationX": 0.5}
+    loaded = EgoTelemetry.from_json(older)
+    assert loaded.blinkerLeft is False and loaded.blinkerRight is False
+
+
 def test_label_round_trip_uses_class_key():
     lbl = Label(class_="fp", severity=4, should_trigger=None,
                 target_vid=7, notes="phantom on oncoming")

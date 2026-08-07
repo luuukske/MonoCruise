@@ -122,6 +122,20 @@ class RadarThread(BaseThread):
             return simulated_time_us / 1_000_000.0
         return time.time()
 
+    def _read_blinkers(self) -> tuple[bool, bool]:
+        """Telemetry blinkers for clip capture; False,False if telemetry is down."""
+        try:
+            tel = registry.get_thread("telemetry_thread")
+            if tel is None or not tel.is_alive():
+                return False, False
+            with tel.data._lock:
+                return (
+                    bool(getattr(tel.data, "blinkerLeft", False)),
+                    bool(getattr(tel.data, "blinkerRight", False)),
+                )
+        except (KeyError, AttributeError):
+            return False, False
+
     def _capture_frame(
         self, recorder, now_mono: float, t_wall: float,
         ego_x: float, ego_y: float, ego_z: float, ego_yaw_norm: float,
@@ -131,11 +145,13 @@ class RadarThread(BaseThread):
     ) -> None:
         """Debug clip capture; never raises into the radar loop."""
         try:
+            bl_left, bl_right = self._read_blinkers()
             ego = EgoTelemetry(
                 coordinateX=ego_x, coordinateY=ego_y, coordinateZ=ego_z,
                 rotationX=ego_yaw_norm, rotationY=ego_pitch_raw, speed=ego_speed,
                 userSteer=ego_steer, paused=paused, ego_has_trailer=ego_has_trailer,
                 estimated_total_mass_kg=ego_mass_kg,
+                blinkerLeft=bl_left, blinkerRight=bl_right,
             )
             recorder.push_radar_frame(RadarFrameRecord(
                 t_wall=t_wall, t_mono=now_mono, ego=ego,

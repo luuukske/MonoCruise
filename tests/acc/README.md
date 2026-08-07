@@ -9,6 +9,7 @@ Two layers. Everything except `test_corpus_baseline.py` runs in CI.
 | `test_scoring_evidence.py` | no | Evidence gating of the offset term, score clamp vs consumer confidence |
 | `test_tracker_validation.py` | no | Tracker on synthetic traffic: lock, release, stationary validation latch |
 | `test_overlay_confidence_gate.py` | no | ACC controller braking authority vs tracker confidence |
+| `test_blinker_offset.py` | no | Blinker candidacy (R0-R4/R9-R15) and arbitration (R5-R8) fixtures |
 | `test_corpus_baseline.py` | **yes** | Replay of the local AEB clip store, bounded against recorded metrics |
 
 ## Harness
@@ -16,7 +17,8 @@ Two layers. Everything except `test_corpus_baseline.py` runs in CI.
 `harness.py` drives `TrafficReader` + `ACCTracker` over recorded AEB clips,
 mirroring `RadarThread.loop` and `ACCThread.loop`: same 25-sample ego position
 history, same `ego_curvature_from_history`, same reanchor-on-unpause, same dt
-clamp. Clips carry no blinker state, so both blinkers are held false.
+clamp. Older clips lack blinker fields (default false); newer clips replay
+the recorded stalk. Corpus baselines stay bit-identical while `b_eff` is 0.
 
 `make_vehicle()` builds a synthetic `Vehicle` with a seeded position history for
 the non-clip tests. Pass `history_speed` with `speed=0` to model a vehicle that

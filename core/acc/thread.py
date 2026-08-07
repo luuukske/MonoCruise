@@ -32,8 +32,16 @@ class ACCData(ThreadData):
     lead_score: float = 0.0
 
     # Top-3 ordered by score (post trailer→tractor swap).  Empty when
-    # no vehicle has score > 0.
+    # no vehicle has score > 0. In-lane only; never indicated-lane candidates.
     leads: list[LeadInfo] = field(default_factory=list)
+    # Best indicated-lane candidate (blinker bias); separate from leads[] (R15).
+    indicated_lead: LeadInfo | None = None
+    blinker_b_eff: float = 0.0
+    ego_lat_vel_ms: float = 0.0
+    # Signed metres ego has moved toward the indicated lane, and the latch
+    # the controller arbitrates stage 2 on (README §5).
+    blinker_lane_offset_m: float = 0.0
+    blinker_committed: bool = False
 
     # Monotonic time this snapshot corresponds to (= radar t_mono).
     t_mono: float = 0.0
@@ -66,6 +74,11 @@ class ACCThread(BaseThread):
             self.data.enabled = False
             self.data.has_lead = False
             self.data.leads = []
+            self.data.indicated_lead = None
+            self.data.blinker_b_eff = 0.0
+            self.data.ego_lat_vel_ms = 0.0
+            self.data.blinker_lane_offset_m = 0.0
+            self.data.blinker_committed = False
         logger.debug("acc teardown complete")
 
     def _read_radar(self) -> tuple | None:
@@ -118,7 +131,7 @@ class ACCThread(BaseThread):
 
         snap = self._read_radar()
         if snap is None:
-            self._publish(enabled, [], self._last_snapshot_t)
+            self._publish(enabled, [], None, self._last_snapshot_t)
             return
 
         (vehicles, trailer_vehicles, ex, ey, ez, eyaw, epitch, espeed, esteer,
@@ -131,7 +144,10 @@ class ACCThread(BaseThread):
         # Paused / stale frame: hold the previous lead list.  Don't advance
         # the tracker so scores don't decay against a frozen frame.
         if paused or t_radar <= self._last_snapshot_t:
-            self._publish(enabled, self.data.leads, self._last_snapshot_t)
+            self._publish(
+                enabled, self.data.leads, self.data.indicated_lead,
+                self._last_snapshot_t,
+            )
             return
 
         dt = t_radar - self._last_snapshot_t if self._last_snapshot_t > 0 else self.loop_interval
@@ -153,12 +169,20 @@ class ACCThread(BaseThread):
             )
         except Exception:
             logger.exception("acc tracker update failed; holding previous leads")
-            self._publish(enabled, [], t_radar)
+            self._publish(enabled, [], None, t_radar)
             return
 
-        self._publish(enabled, leads, t_radar)
+        self._publish(
+            enabled, leads, self._tracker.last_indicated_lead, t_radar,
+        )
 
-    def _publish(self, enabled: bool, leads: list[LeadInfo], t_mono: float) -> None:
+    def _publish(
+        self,
+        enabled: bool,
+        leads: list[LeadInfo],
+        indicated_lead: LeadInfo | None,
+        t_mono: float,
+    ) -> None:
         primary = leads[0] if leads else None
         debug_components = {
             vid: {
@@ -195,12 +219,18 @@ class ACCThread(BaseThread):
                 "lat_margin": st.last_lat_margin,
                 "corridor_half": st.last_corridor_half,
                 "seen": st.last_seen_this_frame,
+                "indicated_candidate": st.indicated_candidate,
             }
             for vid, st in self._tracker.tracks.items()
         }
         with self.data._lock:
             self.data.enabled = enabled
             self.data.leads = leads
+            self.data.indicated_lead = indicated_lead
+            self.data.blinker_b_eff = self._tracker.last_b_eff
+            self.data.ego_lat_vel_ms = self._tracker.last_ego_lat_vel_ms
+            self.data.blinker_lane_offset_m = self._tracker.last_lane_offset_m
+            self.data.blinker_committed = self._tracker.last_blinker_committed
             self.data.has_lead = primary is not None
             self.data.lead_id = primary.vehicle.id if primary is not None else -1
             self.data.lead_dist_m = primary.dist_m if primary is not None else 0.0
@@ -208,7 +238,7 @@ class ACCThread(BaseThread):
             self.data.lead_score = primary.score if primary is not None else 0.0
             self.data.t_mono = t_mono
             self.data.debug_components = debug_components
-            self.data.debug_blinker = self._tracker.last_blinker_scalar
+            self.data.debug_blinker = self._tracker.last_b_eff
             self.data.debug_ego_kappa = self._tracker.last_ego_kappa_used
             self.data.debug_corridor_half = self._tracker.last_corridor_half
             self.data.debug_road_model = self._tracker.last_road_model

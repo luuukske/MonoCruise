@@ -11,6 +11,18 @@ from dataclasses import dataclass, field
 from core.radar.ego_path import EGO_POSITION_HISTORY_LEN
 from core.radar.traffic import Vehicle
 
+from .blinker import (
+    BLINKER_OFFSET_M,
+    EGO_FRONT_OFFSET_M,
+    BlinkerBias,
+    desired_time_headway_s,
+    ego_lat_vel_ms,
+    is_vacating,
+    measure_lane_offset,
+    pick_sticky_candidate,
+    train_corners,
+)
+from .trailer_lock import TRAILER_VEHICLE_ID_BASE, resolve_tractor
 from .ego_path import build_ego_arc, path_half_width
 from .corroboration import slow_vehicle_evidence
 from .road_model import (
@@ -57,61 +69,24 @@ _ELEVATION_MARGIN_M: float = 5.0
 # pile artificial penalties onto a briefly occluded car.
 _MISSING_OUT_DECAY_S: float = 2.0      # expires track after this long missing.
 
-# Blinker cos decay; lateral shift via offset - scalar·4.5 m (README §5).
-_BLINKER_HOLD_S: float = 2.5
-_BLINKER_OFFSET_M: float = 4.5
-
-# Highway lane change reset: zero all scores on blinker rising edge
-# above this ego speed so a new lead can lock cleanly on the new side.
-_BLINKER_SCORE_RESET_KMH: float = 65.0
-
-# Trail validation: a target seen driving its own line while moving keeps a
-# usable lateral once it stops. Never-validated stops score on geometry only.
+# Trail validation latch (README §3). Floor must stay below validated evidence.
 _VALIDATE_MIN_EVIDENCE: float = 0.5
 _VALIDATE_MIN_SPEED_MS: float = 2.0
-# Must stay above _ARC_EVIDENCE_FLOOR: a target watched driving its own line is
-# known better than one the ego arc alone places, or the latch says nothing.
 _VALIDATED_STATIONARY_EVIDENCE: float = 0.75
-
-# In-path hysteresis: a held target keeps this much extra corridor before it is
-# released, so a noisy lateral cannot flicker the decision (README §3).
 _IN_PATH_HYSTERESIS_M: float = 0.8
-
-# Evidence the ego arc alone carries. The blend always contains it, so position
-# evidence never reaches zero however weak the trail and the road model are.
 _ARC_EVIDENCE_FLOOR: float = 0.45
 
-# Direction bands: oncoming samples the same road at its own offset, cross traffic
-# between the two bands is turning off and describes no road ego drives (README §9).
+# Road-sample direction bands and span (README §9).
 _ROAD_SAMPLE_CODIR_DEG: float = 30.0
 _ROAD_SAMPLE_ONCOMING_DEG: float = 150.0
 _ROAD_SAMPLE_ONCOMING_WEIGHT: float = 1.0
 _ROAD_SAMPLE_TMP_WEIGHT: float = 0.5
-# Span the road fit accepts, as arc length along the ego arc rather than forward
-# distance: round a bend the two diverge by sin(theta)/theta (README §9).
 _ROAD_SAMPLE_MIN_S_M: float = -30.0
 _ROAD_SAMPLE_MAX_S_M: float = 170.0
-
-# Per-source trust: a source earns weight by agreeing with the road over time and
-# loses it fast when it stops. Slow up also stops the fit jumping as ids churn.
 _ROAD_TRUST_TAU_UP_S: float = 0.5
 _ROAD_TRUST_TAU_DOWN_S: float = 0.15
 _ROAD_TRUST_INITIAL: float = 0.5
 _ROAD_TRUST_MIN: float = 0.05
-
-# TMP trailer→tractor inference; strict acquire / loose revalidate (README §4).
-_TRACTOR_LOCK_LONGI_MIN_M: float = 3.0
-_TRACTOR_LOCK_LONGI_MAX_M: float = 16.0
-_TRACTOR_LOCK_LAT_MAX_M: float = 1.5
-_TRACTOR_LOCK_YAW_MAX_DEG: float = 15.0
-
-_TRACTOR_LOCK_VALID_LONGI_MIN_M: float = 1.0
-_TRACTOR_LOCK_VALID_LONGI_MAX_M: float = 25.0
-_TRACTOR_LOCK_VALID_LAT_MAX_M: float = 4.0
-_TRACTOR_LOCK_VALID_YAW_MAX_DEG: float = 60.0
-
-# Synthetic nested-trailer ids; skip tractor lock (own acc_speed chain).
-_TRAILER_VEHICLE_ID_BASE: int = 1_000_000
 
 
 def _direction_weight(yaw_diff_deg: float) -> float:
@@ -166,6 +141,12 @@ class TrackState:
     last_trail_crossing_x: float = 0.0
     last_trail_crossing_z: float = 0.0
     last_trail_crossing_valid: bool = False
+    # Blinker candidacy (R2-R4/R12/R13); leads[] still needs unshifted in_path (R15).
+    last_behind_mono: float = float("-inf")
+    indicated_candidate: bool = False
+    in_path_unshifted: bool = False
+    last_road_lat: float = 0.0
+    last_time_headway_s: float = float("inf")
 
 
 @dataclass(slots=True)
@@ -187,11 +168,7 @@ class ACCTracker:
     # Sticky TMP trailer→tractor id; cleared on track expiry or failed revalidation.
     _trailer_to_tractor: dict[int, int] = field(default_factory=dict)
 
-    # Blinker decay state; scalar = right_side - left_side after release cos decay.
-    _last_left_active: float = 0.0
-    _last_right_active: float = 0.0
-    _prev_left: bool = False
-    _prev_right: bool = False
+    _blinker: BlinkerBias = field(default_factory=BlinkerBias)
 
     # Ego world path in kinematics time; feeds the road model's near anchor.
     _ego_history: list[tuple[float, float, float]] = field(default_factory=list)
@@ -200,51 +177,17 @@ class ACCTracker:
     # Carries the centreline across frames in sample space (README §9).
     _road_smoother: RoadSmoother = field(default_factory=RoadSmoother)
 
-    # Last-frame debug snapshot: populated by `update()` so the debug
-    # window can render the inputs the scorer saw.
+    _last_primary_vid: int | None = None
+
     last_blinker_scalar: float = 0.0
+    last_b_eff: float = 0.0
+    last_ego_lat_vel_ms: float = 0.0
+    last_lane_offset_m: float = 0.0
+    last_blinker_committed: bool = False
+    last_indicated_lead: LeadInfo | None = None
     last_ego_kappa_used: float = 0.0
     last_corridor_half: float = 0.0
     last_road_model: RoadModel = field(default_factory=RoadModel)
-
-    def update_blinkers(
-        self,
-        now_mono: float,
-        ego_speed_ms: float,
-        blinker_left: bool,
-        blinker_right: bool,
-    ) -> None:
-        rising = (blinker_left and not self._prev_left) or (
-            blinker_right and not self._prev_right
-        )
-        if blinker_left:
-            self._last_left_active = now_mono
-        if blinker_right:
-            self._last_right_active = now_mono
-        self._prev_left = blinker_left
-        self._prev_right = blinker_right
-
-        if rising and (ego_speed_ms * 3.6) >= _BLINKER_SCORE_RESET_KMH:
-            # Highway lane change: clear current locks.
-            for st in self.tracks.values():
-                st.score = 0.0
-
-    def _side_scalar(self, now_mono: float, last_active_t: float) -> float:
-        """Per-side [0,1]: 1 while held, cos decay to 0 over ``_BLINKER_HOLD_S``."""
-        if last_active_t <= 0.0:
-            return 0.0
-        t = now_mono - last_active_t
-        if t <= 0.0:
-            return 1.0
-        if t >= _BLINKER_HOLD_S:
-            return 0.0
-        return math.cos((t / _BLINKER_HOLD_S) * (math.pi * 0.5))
-
-    def _blinker_scalar(self, now_mono: float) -> float:
-        """Signed blinker scalar: -1 = full left, +1 = full right."""
-        left = self._side_scalar(now_mono, self._last_left_active)
-        right = self._side_scalar(now_mono, self._last_right_active)
-        return right - left
 
     @staticmethod
     def _ego_local(
@@ -408,14 +351,24 @@ class ACCTracker:
         ego_history_kappa: float | None,
         blinker_left: bool, blinker_right: bool,
     ) -> list[LeadInfo]:
-        """Tick the tracker.  Returns top-3 leads (after trailer swap)."""
-        self.update_blinkers(now_mono, ego_speed_ms, blinker_left, blinker_right)
-        blinker = self._blinker_scalar(now_mono)
+        """Tick the tracker. Returns top-3 in-lane leads (after trailer swap).
 
+        Indicated-lane candidates are published separately on
+        ``last_indicated_lead`` (R15); they never enter ``leads``."""
         ego_fwd_x = -math.sin(ego_yaw_rad)
         ego_fwd_z = -math.cos(ego_yaw_rad)
         ego_kmh = ego_speed_ms * 3.6
-        # Pitch-projected elevation axis (matches AEB ElevationFilter).
+        self._blinker.update_stalk(
+            now_mono, ego_speed_ms, blinker_left, blinker_right,
+            ego_x=ego_x, ego_z=ego_z, ego_fwd_x=ego_fwd_x, ego_fwd_z=ego_fwd_z,
+        )
+        b_eff = self._blinker.compute_b_eff(now_mono, ego_kmh)
+        if self._blinker.rising_this_frame:
+            ref_st = self.tracks.get(self._last_primary_vid)
+            self._blinker.set_commit_reference(
+                self._last_primary_vid,
+                ref_st.last_road_lat if ref_st is not None else 0.0,
+            )
         ego_yaw_sin = math.sin(ego_yaw_rad)
         ego_yaw_cos = math.cos(ego_yaw_rad)
         ego_pitch_tan = math.tan(ego_pitch_rad)
@@ -439,17 +392,39 @@ class ACCTracker:
             vehicles, ego_x, ego_z, ego_fwd_x, ego_fwd_z, ego_yaw_rad,
             road, _ROAD_SAMPLE_MAX_S_M,
         )
+        desired_th_s = desired_time_headway_s()
+        lat_shift = b_eff * BLINKER_OFFSET_M
+        # This frame's commitment needs this frame's laterals, so the corridor
+        # gate below reads last frame's latch. One frame at 30 Hz.
+        committed_prev = self._blinker.committed
 
-        self.last_blinker_scalar = blinker
+        self.last_blinker_scalar = self._blinker.last_scalar
+        self.last_b_eff = b_eff
+        self.last_ego_lat_vel_ms = ego_lat_vel_ms(
+            self._ego_history, ego_fwd_x, ego_fwd_z,
+        )
         self.last_ego_kappa_used = ego_arc.curvature
         self.last_corridor_half = corridor_half
         self.last_road_model = road
 
         for st in self.tracks.values():
             st.last_seen_this_frame = False
+            st.indicated_candidate = False
 
         seen_ids: set[int] = set()
         id_to_vehicle: dict[int, Vehicle] = {}
+        candidate_ids: list[int] = []
+        # TMP trailers are top-level vehicles; nest them under their tractor so
+        # parallel / R4 see the train rear, not the cab rear alone.
+        tmp_trailers_by_tractor: dict[int, list[Vehicle]] = {}
+        for tv in vehicles:
+            if not (tv.is_tmp and tv.is_trailer):
+                continue
+            if tv.id >= TRAILER_VEHICLE_ID_BASE:
+                continue
+            tractor = resolve_tractor(tv, vehicles, self._trailer_to_tractor)
+            if tractor is not None:
+                tmp_trailers_by_tractor.setdefault(tractor.id, []).append(tv)
 
         for v in vehicles:
             if getattr(v, "is_parked", False):
@@ -472,7 +447,13 @@ class ACCTracker:
             chord_len = math.hypot(v.position.x - ego_x, v.position.z - ego_z)
             if chord_len > 1e-3:
                 fwd_dot = straight_longi / chord_len
-                if fwd_dot < _REAR_DOT_THRESHOLD:
+                # Soften the rear cone on the indicated side so R3 can see overtakers.
+                rear_thresh = _REAR_DOT_THRESHOLD
+                if abs(b_eff) > 1e-6:
+                    side_lat = straight_lat * math.copysign(1.0, b_eff)
+                    if side_lat > 1.0:
+                        rear_thresh = -0.85
+                if fwd_dot < rear_thresh:
                     continue
 
             # Scoring geometry: vehicle center on ego arc (offset/yaw/path tuning).
@@ -496,17 +477,32 @@ class ACCTracker:
                 )
             fwd_corners = [(ad, lt) for ad, lt in corner_projs if ad >= 0.0]
             if not fwd_corners:
+                # Stamp behind-history on an existing track only (no new tracks).
+                st_behind = self.tracks.get(v.id)
+                if st_behind is not None and straight_longi < EGO_FRONT_OFFSET_M:
+                    st_behind.last_behind_mono = now_mono
                 continue
             dist_m = min(ad for ad, _ in fwd_corners)
             if dist_m > _MAX_SCORE_RANGE_M:
                 continue
             body_lat_min = min(corner_lats)
             body_lat_max = max(corner_lats)
+            # R4 / parallel: ego-local rear of the whole train (cab + trailers).
+            extras = tmp_trailers_by_tractor.get(v.id)
+            train_pts = train_corners(v, extras)
+            body_rear_m = min(
+                self._ego_local(
+                    ego_x, ego_z, ego_fwd_x, ego_fwd_z, cx, cz,
+                )[0]
+                for cx, cz in train_pts
+            )
 
             st = self.tracks.get(v.id)
             if st is None:
                 st = TrackState()
                 self.tracks[v.id] = st
+            if straight_longi < EGO_FRONT_OFFSET_M:
+                st.last_behind_mono = now_mono
 
             # Trail-arc offset baselines HIT / NO_ARC_HIT / NO_HISTORY (README §3).
             v_yaw_rad = (
@@ -561,31 +557,56 @@ class ACCTracker:
                 trail_ev, road_w, corroboration.get(v.id, 0.0),
                 _ARC_EVIDENCE_FLOOR,
             )
+            st.last_road_lat = d_road
 
-            # Body must still overlap the corridor after a sigma shift both ways;
-            # only the target's own trajectory shrinks sigma (README §9 gate).
+            # Unshifted corridor membership: leads[] only (R15).
             lat_uncertainty = lateral_sigma_m(dist_m) * (1.0 - trail_ev)
-            hold_half = corridor_half + (
-                _IN_PATH_HYSTERESIS_M if st.in_path else 0.0
-            )
+            hold_bonus = _IN_PATH_HYSTERESIS_M if st.in_path_unshifted else 0.0
+            # Hysteresis absorbs lateral noise; a committed lane change is not
+            # noise, so it must not hold the vehicle being left (README §5).
+            if committed_prev and is_vacating(body_lat_min, body_lat_max, b_eff):
+                hold_bonus = 0.0
+            hold_half = corridor_half + hold_bonus
             near_side = hold_half - (body_lat_min + lat_uncertainty)
             far_side = (body_lat_max - lat_uncertainty) + hold_half
-            in_path = near_side >= 0.0 and far_side >= 0.0
+            in_path_unshifted = near_side >= 0.0 and far_side >= 0.0
 
-            # Scored lateral: arc offset minus blinker·4.5 m (README §5).
-            offset_for_score = arc_offset - blinker * _BLINKER_OFFSET_M
+            yaw_diff_deg = math.degrees(
+                (v_yaw_rad - ego_yaw_rad + math.pi) % (2.0 * math.pi) - math.pi
+            )
+            is_cand, th_s = BlinkerBias.is_candidate(
+                last_behind_mono=st.last_behind_mono,
+                now_mono=now_mono, b_eff=b_eff, dist_m=dist_m,
+                body_rear_m=body_rear_m,
+                road_lat=d_road, yaw_diff_deg=yaw_diff_deg,
+                ego_speed_ms=ego_speed_ms, v_speed_ms=float(v.acc_speed),
+                desired_th_s=desired_th_s,
+            )
+            st.last_time_headway_s = th_s
+            st.indicated_candidate = is_cand
+
+            # R14: per-candidate shift only. Non-candidates keep true lateral.
+            if is_cand:
+                offset_for_score = arc_offset - lat_shift
+                shift_min = body_lat_min - lat_shift
+                shift_max = body_lat_max - lat_shift
+                near_s = hold_half - (shift_min + lat_uncertainty)
+                far_s = (shift_max - lat_uncertainty) + hold_half
+                in_path_for_score = near_s >= 0.0 and far_s >= 0.0
+            else:
+                offset_for_score = arc_offset
+                in_path_for_score = in_path_unshifted
 
             off = offset_component(
                 offset_for_score, longi,
                 angle_amp=arc_angle_amp, baseline=baseline,
                 evidence=evidence, angle_evidence=trail_ev,
             )
-            yaw_diff_deg = math.degrees(
-                (v_yaw_rad - ego_yaw_rad + math.pi) % (2.0 * math.pi) - math.pi
-            )
             yaw_c = yaw_component(yaw_diff_deg)
+            # b² path-amp cut stays global (slows in-lane windup, empty-lane pass).
             path_c = path_component(
-                longi, ego_kmh, in_path, blinker_offset=blinker, evidence=evidence,
+                longi, ego_kmh, in_path_for_score,
+                blinker_offset=b_eff, evidence=evidence,
             )
             comps = ScoreComponents(offset=off, yaw=yaw_c, path=path_c, angle=0.0)
 
@@ -598,7 +619,8 @@ class ACCTracker:
                 off * OFFSET_WEIGHT * spd_mult * dt * LEGACY_RATE_HZ
             )
             st.last_seen_mono = now_mono
-            st.in_path = in_path
+            st.in_path = in_path_unshifted
+            st.in_path_unshifted = in_path_unshifted
             st.dist_m = dist_m
             st.last_offset = off
             st.last_yaw = yaw_c
@@ -636,6 +658,14 @@ class ACCTracker:
             st.last_seen_this_frame = True
             seen_ids.add(v.id)
             id_to_vehicle[v.id] = v
+            if is_cand:
+                candidate_ids.append(v.id)
+
+        # R10: floor-lift on rising edge above the R0 gate. Never wipe positives.
+        if self._blinker.rising_this_frame:
+            for st in self.tracks.values():
+                if st.score < 0.0:
+                    st.score = 0.0
 
         # Unseen tracks: path-only decay; expire after ``_MISSING_OUT_DECAY_S``.
         expired: list[int] = []
@@ -647,18 +677,76 @@ class ACCTracker:
                 continue
             decay_comps = ScoreComponents(
                 path=path_component(
-                    st.dist_m, ego_kmh, in_path=False, blinker_offset=blinker,
+                    st.dist_m, ego_kmh, in_path=False, blinker_offset=b_eff,
                 ),
             )
             st.score = accumulate(st.score, dt, decay_comps, ego_speed_ms)
             st.in_path = False
+            st.in_path_unshifted = False
+            st.indicated_candidate = False
         for vid in expired:
             self.tracks.pop(vid, None)
             self._trailer_to_tractor.pop(vid, None)
 
-        # Rank and swap.
-        leads = self._top_leads(id_to_vehicle, vehicles, ego_fwd_x, ego_fwd_z, ego_speed_ms)
+        ref = self.tracks.get(self._blinker.commit_ref_vid)
+        lane_offset = measure_lane_offset(
+            b_eff,
+            ref.last_road_lat if ref is not None and ref.last_seen_this_frame else None,
+            self._blinker.commit_ref_lat,
+            self._blinker.lateral_commit_m(ego_x, ego_z),
+        )
+        self.last_lane_offset_m = lane_offset
+        self._blinker.update_commit(lane_offset)
+        self.last_blinker_committed = self._blinker.committed
+
+        sticky = self._blinker.sticky_id
+        sticky_in = bool(
+            sticky is not None
+            and sticky in self.tracks
+            and self.tracks[sticky].in_path_unshifted
+        )
+        b_eff = self._blinker.maybe_collapse(b_eff, sticky_in_corridor=sticky_in)
+        self.last_b_eff = b_eff
+
+        leads = self._top_leads(
+            id_to_vehicle, vehicles, ego_fwd_x, ego_fwd_z, ego_speed_ms,
+        )
+        self._last_primary_vid = leads[0].vehicle.id if leads else None
+        self.last_indicated_lead = self._pick_indicated_lead(
+            candidate_ids, id_to_vehicle, vehicles, ego_speed_ms, now_mono,
+        )
         return leads
+
+    def _make_lead_info(
+        self,
+        vid: int,
+        st: TrackState,
+        id_to_vehicle: dict[int, Vehicle],
+        vehicles: list[Vehicle],
+        ego_speed_ms: float,
+    ) -> LeadInfo | None:
+        v = id_to_vehicle.get(vid)
+        if v is None:
+            return None
+        eff_speed = v.acc_speed
+        eff_accel = v.acc_accel
+        if (
+            v.is_tmp and v.is_trailer
+            and v.id < TRAILER_VEHICLE_ID_BASE
+        ):
+            tractor = resolve_tractor(v, vehicles, self._trailer_to_tractor)
+            if tractor is not None:
+                eff_speed = tractor.acc_speed
+                eff_accel = tractor.acc_accel
+        rel = eff_speed - ego_speed_ms
+        return LeadInfo(
+            vehicle=v,
+            score=st.score,
+            dist_m=st.dist_m,
+            rel_speed_ms=rel,
+            effective_speed_ms=eff_speed,
+            effective_accel_ms2=eff_accel,
+        )
 
     def _top_leads(
         self,
@@ -667,115 +755,57 @@ class ACCTracker:
         ego_fwd_x: float, ego_fwd_z: float,
         ego_speed_ms: float,
     ) -> list[LeadInfo]:
+        # Score > 0 is the historic publish rule. R15 only blocks live candidates
+        # that lack unshifted in-path evidence (shifted scores must not enter leads[]).
         in_path = [
             (vid, st) for vid, st in self.tracks.items()
-            if st.score > IN_PATH_THRESHOLD and vid in id_to_vehicle
+            if (
+                st.score > IN_PATH_THRESHOLD
+                and vid in id_to_vehicle
+                and not (st.indicated_candidate and not st.in_path_unshifted)
+            )
         ]
         # Primary sort: closest first. Secondary: score (descending) breaks ties.
         top = sorted(in_path, key=lambda item: (item[1].dist_m, -item[1].score))[:3]
 
         out: list[LeadInfo] = []
         for vid, st in top:
-            v = id_to_vehicle[vid]
-            eff_speed = v.acc_speed
-            eff_accel = v.acc_accel
-
-            # TMP top-level trailer: sticky tractor lock + kinematic swap (README §4).
-            if (
-                v.is_tmp and v.is_trailer
-                and v.id < _TRAILER_VEHICLE_ID_BASE
-            ):
-                tractor = self._resolve_tractor(v, vehicles)
-                if tractor is not None:
-                    eff_speed = tractor.acc_speed
-                    eff_accel = tractor.acc_accel
-
-            rel = eff_speed - ego_speed_ms  # signed closing = negative
-            out.append(
-                LeadInfo(
-                    vehicle=v,
-                    score=st.score,
-                    dist_m=st.dist_m,
-                    rel_speed_ms=rel,
-                    effective_speed_ms=eff_speed,
-                    effective_accel_ms2=eff_accel,
-                )
+            lead = self._make_lead_info(
+                vid, st, id_to_vehicle, vehicles, ego_speed_ms,
             )
+            if lead is not None:
+                out.append(lead)
         return out
 
-    @staticmethod
-    def _trailer_local_frame(
-        trailer: Vehicle, other: Vehicle,
-    ) -> tuple[float, float, float]:
-        """(longi, lat, yaw_delta_deg) of other in trailer's smoothed heading frame."""
-        trailer_yaw = (
-            trailer._smooth_yaw
-            if trailer._smooth_yaw is not None
-            else math.radians(trailer.rotation.euler()[1])
+    def _pick_indicated_lead(
+        self,
+        candidate_ids: list[int],
+        id_to_vehicle: dict[int, Vehicle],
+        vehicles: list[Vehicle],
+        ego_speed_ms: float,
+        now_mono: float,
+    ) -> LeadInfo | None:
+        """R9: most binding score-positive candidate, identity-sticky (R7)."""
+        scored = [
+            (vid, self.tracks[vid].last_time_headway_s)
+            for vid in candidate_ids
+            if vid in self.tracks
+            and self.tracks[vid].score > IN_PATH_THRESHOLD
+            and not self.tracks[vid].in_path_unshifted
+        ]
+        best_vid, sticky_mono = pick_sticky_candidate(
+            scored,
+            sticky_id=self._blinker.sticky_id,
+            sticky_mono=self._blinker.sticky_mono,
+            now_mono=now_mono,
         )
-        fwd_x = -math.sin(trailer_yaw)
-        fwd_z = -math.cos(trailer_yaw)
-        dx = other.position.x - trailer.position.x
-        dz = other.position.z - trailer.position.z
-        longi = dx * fwd_x + dz * fwd_z
-        lat = dx * (-fwd_z) + dz * fwd_x
-        other_yaw = (
-            other._smooth_yaw
-            if other._smooth_yaw is not None
-            else math.radians(other.rotation.euler()[1])
+        self._blinker.sticky_id = best_vid
+        self._blinker.sticky_mono = sticky_mono
+        if best_vid is None:
+            return None
+        return self._make_lead_info(
+            best_vid, self.tracks[best_vid], id_to_vehicle, vehicles, ego_speed_ms,
         )
-        yaw_delta = math.degrees(
-            (other_yaw - trailer_yaw + math.pi) % (2.0 * math.pi) - math.pi
-        )
-        return longi, lat, yaw_delta
-
-    @staticmethod
-    def _passes_strict_gate(longi: float, lat: float, yaw_delta_deg: float) -> bool:
-        return (
-            _TRACTOR_LOCK_LONGI_MIN_M <= longi <= _TRACTOR_LOCK_LONGI_MAX_M
-            and abs(lat) <= _TRACTOR_LOCK_LAT_MAX_M
-            and abs(yaw_delta_deg) <= _TRACTOR_LOCK_YAW_MAX_DEG
-        )
-
-    @staticmethod
-    def _passes_loose_gate(longi: float, lat: float, yaw_delta_deg: float) -> bool:
-        return (
-            _TRACTOR_LOCK_VALID_LONGI_MIN_M <= longi <= _TRACTOR_LOCK_VALID_LONGI_MAX_M
-            and abs(lat) <= _TRACTOR_LOCK_VALID_LAT_MAX_M
-            and abs(yaw_delta_deg) <= _TRACTOR_LOCK_VALID_YAW_MAX_DEG
-        )
-
-    def _resolve_tractor(
-        self, trailer: Vehicle, vehicles: list[Vehicle],
-    ) -> Vehicle | None:
-        """Sticky TMP tractor for a trailer; strict acquire, loose revalidate (README §4)."""
-        cached_id = self._trailer_to_tractor.get(trailer.id)
-        if cached_id is not None:
-            cached = next((o for o in vehicles if o.id == cached_id), None)
-            if cached is not None and cached.is_tmp and not cached.is_trailer:
-                longi, lat, yaw_delta = self._trailer_local_frame(trailer, cached)
-                if self._passes_loose_gate(longi, lat, yaw_delta):
-                    return cached
-            self._trailer_to_tractor.pop(trailer.id, None)
-
-        best: Vehicle | None = None
-        best_cost = math.inf
-        for other in vehicles:
-            if other.id == trailer.id:
-                continue
-            if not other.is_tmp or other.is_trailer:
-                continue
-            longi, lat, yaw_delta = self._trailer_local_frame(trailer, other)
-            if not self._passes_strict_gate(longi, lat, yaw_delta):
-                continue
-            cost = abs(lat) + 0.05 * abs(longi - 10.0) + 0.2 * abs(yaw_delta)
-            if cost < best_cost:
-                best_cost = cost
-                best = other
-        if best is not None:
-            self._trailer_to_tractor[trailer.id] = best.id
-        return best
-
 
 
 # Re-exports for tests and tuning tools.

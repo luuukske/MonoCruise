@@ -83,10 +83,10 @@ semantic departure is dt-scaling so the loop can run at any cadence.
                      = -0.40 when the arc was fit but didn't cross ego row
                      = -0.16 when position history was too short to fit
 
-Blinker lateral bias is applied as a **scalar offset shift** on the
-scored lateral: `offset_for_score = lat - blinker · 4.5 m`: not as
-an ego-arc translation. Shifting the arc geometrically would distort
-arc-arc hit tests, which we don't want.
+Blinker lateral bias is a **per-candidate** scalar offset shift on the
+scored lateral (`offset_for_score = lat - b_eff · 4.5 m`), never a
+global shift and never an ego-arc translation. In-lane leads keep their
+true lateral. See §5.
 
 ### Trail-arc fit (`core/acc/trail_arc.py`)
 
@@ -1105,30 +1105,179 @@ locks a tractor with a **strict** gate on first pick (longi 3–16 m, |lat| ≤ 
 
 ## 5. Blinker lateral bias
 
-Blinker state resolves to a signed scalar `b ∈ [-1, +1]` (`-1` full
-left, `+1` full right):
+Blinker bias means: ego is committing to the indicated lane; look there
+for who to follow after the merge. The tracker owns **candidacy**; the
+controller owns **arbitration**. No control law lives here.
 
-- **Pinned at 1** on the indicated side while the blinker is held.
-- **Cos decay to 0** over `_BLINKER_HOLD_S = 2.5 s` after release, so
-  a short blink still covers the full manoeuvre. Implemented by
-  stamping `_last_*_active` every active frame: on release, decay
-  starts cleanly at `t = 0`.
+### The input is the lamp, not the stalk
 
-The scalar is consumed in two places:
-- **Scoring lateral shift**: `offset_for_score = lat - b · 4.5 m`.
-  Targets in the indicated adjacent lane score near zero offset during
-  the manoeuvre.
-- **Path amplitude reduction**: `amp *= 1 - b² · 0.4`. Up to 40 %
-  cut so the current-lane lead stops pinning score while we commit
-  to the change.
+`telemetry_thread` publishes `blinkerLeftActive`, which is the **lamp**: it
+toggles at roughly 1.5 Hz for as long as the stalk is held. The SDK has no
+stalk-level field. Everything below depends on getting this right, because
+a rising-edge design fed a square wave re-triggers once per flash.
 
-On blinker **rising edge** at ego speed ≥ `_BLINKER_SCORE_RESET_KMH`
-(65 km/h), all per-id scores are reset to 0 once. Legacy "highway
-lane change" reset: clear the current lead completely so a new lead
-can be picked up on the new side without inheriting residual score.
+The first version treated each lamp edge as an intent and suppressed
+re-triggers only while its 1.6 s pulse was alive. With the stalk held that
+produced a **sawtooth**: `b_eff` decayed to zero at 1.6 s and re-armed on
+the next flash at about 2.0 s, so roughly 0.4 s in every 2 s sat at zero.
+Every one of those gaps dropped the controller back to `lane` mode, wiped
+the commitment latch, re-based the lateral-commit origin and cleared the
+sticky candidate. Reported from the driver's seat as ACC repeatedly
+grabbing the vehicle being overtaken back, which is exactly what it did.
 
-The ego arc itself is **not** translated: doing so would distort
-arc-arc hit tests. Shift lives in scoring only.
+`BLINKER_LAMP_GAP_S` (1.0 s) debounces the lamp back into a held intent: a
+dark gap longer than that is the driver cancelling, anything shorter is the
+lamp between flashes. **One flick, one intent**, and the intent lives until
+it is cancelled or the merge completes.
+
+### Effective scalar `b_eff`
+
+One envelope per intent, not per flash:
+
+    peak     1.0 for BLINKER_PEAK_S (0.35 s)
+    decay    cos to BLINKER_SUSTAIN (0.55) over BLINKER_DECAY_S (1.25 s)
+    sustain  held for as long as the intent is live
+    release  cos to 0 over BLINKER_RELEASE_S (0.8 s) after it ends
+
+The peak biases the lane hard while we look for who to follow. Pinning
+there for the whole manoeuvre over-biases the lane, which is what the
+original pulse was avoiding; but decaying to **zero** loses the candidate
+halfway through the move, which is worse. The sustain is what a mid-change
+bias should be: ego is already partway over, so the shift it needs is
+smaller than the one it needed at the flick. Then:
+
+- **R0**: gate with ~3 km/h hysteresis, ramp 0→1 over ego 45→60 km/h.
+  No hard step; kills intersections and yards.
+- **R11**: collapse `b_eff` to 0 on merge completion (adopted candidate
+  goes in-corridor under unshifted geometry, or the lane offset below
+  reaches ~0.7 lane width). Collapse now survives the whole intent instead
+  of being undone by the next flash.
+
+**R11 ends the geometry shift, not the release.** The collapse fires while
+the vehicle ego just left is still in `leads[]` waiting out its score decay,
+so treating it as the end of the release handed that vehicle full command
+back for about a second and produced a brake tap right as ego cleared the
+old lane. The controller holds the release on that specific id past the
+collapse; see `core/cruise_control_thread/README.md`.
+
+### Commitment: how "ego is moving over" is measured
+
+`ego_lat_vel_ms` was the original gate: 0.3 m/s sustained for 0.3 s. It can
+never fire on real signal. A vehicle's velocity lies along its own heading,
+so lateral velocity in the **current** ego frame is `|v|·sin(dyaw/2)` per
+frame, about 0.015 m/s during a brisk lane change at 90 km/h. That is twenty
+times below the threshold, while 1 cm of position jitter at 30 Hz reads
+0.3 m/s exactly. The gate was measuring noise and rejecting the manoeuvre.
+The function is kept for the debug window and must not gate control.
+
+The frozen-frame alternative is worse in a different way: ego displacement
+measured against the axes captured at the flick accumulates `x²/2R` on any
+curve, which is 5.6 m over three seconds at R500 with no lane change at all.
+
+`lane_offset_m` therefore measures the **vehicle ego was following sliding
+across ego's road frame**. That vehicle holds the road, so a curve carries
+ego and it together and the offset reads zero; only ego leaving its line
+moves it. `BlinkerBias.set_commit_reference` freezes that id and its road
+lateral once per intent, and commitment latches at
+`BLINKER_COMMIT_LAT_M` (0.4 m).
+
+The latch **holds for the life of the intent**. A lane change does not
+un-happen, and re-testing it every frame is what let a single bad frame
+drop the release. With no reference vehicle visible the frozen-frame
+displacement is the fallback, and its curve error does not matter there:
+with nothing ahead there is no lead to release.
+
+### Candidacy (tracker, per vehicle)
+
+All of R2–R4, R12, R13 must hold. The tracker publishes the single most
+binding score-positive candidate as `ACCData.indicated_lead` (R9, sticky
+per R7). It never enters `leads[]` (R15).
+
+| Rule | Gate |
+|------|------|
+| R2 | Front ahead of ego front by ≥ 1.5 m |
+| R3 | Not an overtaker: `v_rel > +1 m/s` **and** id was behind within ~4 s |
+| R4 | Time headway to the **train rear** (cab + nested trailers) < desired gap + margin. Applies to closing and non-closing traffic alike: the window counts until that rear bumper is next to ego, not the nose. Far closing traffic is not a blinker candidate until it enters the window. |
+| R4b | The window has a **bottom** as well as a top: a train rear at or behind ego's front is alongside, and one ego draws level with inside `BLINKER_PASS_CLEAR_S` (3.0 s) belongs to a vehicle ego is passing. Neither is who ego follows after the merge. |
+| R12 | Heading within ±30° of ego (`_ROAD_SAMPLE_CODIR_DEG`) |
+| R13 | `road_coords` lateral near `sign(b)·lane_width`, range capped at ~100 m |
+
+Parallel traffic (truck+trailer beside ego) can clear R2 with its nose while the
+body still overlaps longitudinally, so R4b rejects any train whose ego-local
+`body_rear` sits at or behind ego's front. Train rear includes nested
+`Vehicle.trailers` and linked TMP trailer vehicles (separate buffer entries
+resolved via `resolve_tractor`); cab rear alone is not enough, or a TMP tractor
+ahead of ego would bias while its trailer still overlaps.
+
+**The overlap rejection must not carry a "unless it is closing" exemption.**
+It did, and closing is exactly what overtaking looks like: `v_rel` is strongly
+negative for the vehicle ego is passing, so the one case the rule existed to
+catch was the one it waved through. Worse, a car can never reach that test at
+all, because R2 already forces `dist_m ≥ 4 m` and for a vehicle fully ahead
+`dist_m` **is** the rear corner. R4b is therefore two gates, not one: the
+overlap test for bodies beside ego at any relative speed, and the pass-clear
+time for bodies still ahead of ego but not for long. Measured before the fix,
+indicating right while overtaking a car 20 km/h slower published it as
+`indicated_lead` at a 4.5 m gap with a 0.18 s headway, and the controller
+answered with -6.55 m/s² flagged as an emergency. That is the reported
+"ACC slams on the brakes", and R4's one-sided window is why R4 did not stop it.
+
+The pass-clear time is deliberately relative-speed gated, not a flat minimum
+headway. A flat floor opens a coverage hole: sitting behind a same-speed
+vehicle mid-merge is a tight gap that ego is *not* passing, and dropping the
+candidate there would let the controller accelerate into it. Closing time is
+infinite when `v_close` is at or below `BLINKER_CLOSING_VREL_MS` (0.5 m/s), so
+that case stays a candidate for as long as the top of the window allows.
+
+The accepted cost: a stopped or very slow vehicle in the indicated lane also
+falls out of candidacy, because ego passes it well inside 3 s. Ego then gets no
+anticipatory braking for it, which is the right call for a lane ego has only
+signalled toward, and `leads[]` plus AEB still cover actually steering into it.
+
+### Score handling
+
+- **R14**: lateral shift is per-candidate only. In-lane / non-candidates
+  keep true lateral. The `b²·0.4` path-amp cut stays global.
+- **R10**: on the intent edge above the R0 gate, clamp negative scores up
+  to 0 (floor-lift). Never wipe a locked positive lead. Once per intent:
+  firing it per flash re-floated the vehicle ego had just left, every 2 s.
+- **R15**: `leads[]` keeps its meaning (ego's current lane). AEB and the
+  anticipation chain read `leads[]` only.
+
+### Letting go of the lane being left
+
+Once committed, three separate mechanisms used to keep the overtaken
+vehicle in command, none of them blinker-aware:
+
+- It stays in `leads[]` until its body clears `corridor_half +
+  _IN_PATH_HYSTERESIS_M`, roughly 3.5 m of ego lateral travel, which is
+  the entire lane change. The hysteresis exists to absorb lateral noise,
+  and a committed lane change is not noise, so `is_vacating` drops the
+  bonus for bodies on the side ego is leaving.
+- Its score then has to decay below zero (release p90 1.06 s, §3).
+- `_apply_primary_ghost` then re-latched it for `PRIMARY_GHOST_HOLD_S`.
+  The ghost exists for id churn and lane-edge drift; a lead ego
+  deliberately drove away from is not a lead it lost, so the controller
+  skips the ghost entirely while committed.
+
+### Arbitration (controller)
+
+`AdaptiveCruiseController` reads `indicated_lead`, `blinker_b_eff` and
+`blinker_committed`, and applies R5–R8: soften the gap on intent, **fully
+release** the lane being left on commitment, merge into a tighter lane
+(min of both), hysteresis, and a TTC floor so stage-1 softening never drops
+a closing in-lane threat. A candidate is published only from **outside** ego's
+corridor, so it carries no collision authority there: its demand is bounded to
+comfort braking and it can never raise an emergency.
+`core/cruise_control_thread/README.md` has the release ramp, that bound, and
+the two bugs that made stage 2 unreachable.
+
+**The corpus cannot measure any of this.** Recorded clips carry blinker
+state only from schema v3 onward and the replay corpus predates it, so
+`b_eff` is 0 on every corpus frame and every baseline in this file is
+bit-identical with the feature on or off. `tests/acc/test_blinker_offset.py`
+pins the behaviour on synthetic scenes instead; the in-game test is what
+arbitrates the tuning.
 
 ---
 
@@ -1142,7 +1291,10 @@ arc-arc hit tests. Shift lives in scoring only.
         lead_dist_m: float       # leads[0].dist_m
         lead_rel_speed_ms: float # leads[0].rel_speed_ms (lead - ego; neg = closing)
         lead_score: float        # leads[0].score
-        leads: list[LeadInfo]    # top-3 nearest first (score breaks ties), post trailer-swap
+        leads: list[LeadInfo]    # top-3 in-lane (score breaks ties), post trailer-swap
+        indicated_lead: LeadInfo | None  # blinker candidate; never inside leads[]
+        blinker_b_eff: float     # gated blinker scalar the controller arbitrates on
+        ego_lat_vel_ms: float    # signed lateral vel (right +) for stage-2 commit
         t_mono: float            # radar t_mono the snapshot is tied to
         _lock: threading.Lock
 

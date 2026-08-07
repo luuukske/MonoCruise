@@ -235,7 +235,8 @@ def replay_clip(clip, metrics: Metrics, tracker: ACCTracker | None = None) -> AC
             ego_pitch_rad=-pitch_norm * 2.0 * math.pi,
             ego_speed_ms=ego.speed, ego_steer=ego.userSteer,
             ego_history_kappa=ego_kappa,
-            blinker_left=False, blinker_right=False,
+            blinker_left=bool(getattr(ego, "blinkerLeft", False)),
+            blinker_right=bool(getattr(ego, "blinkerRight", False)),
         )
         _accumulate(metrics, windows, tracker, targets, leads, ego, frame.t_mono)
     return tracker

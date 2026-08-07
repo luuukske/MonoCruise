@@ -7,9 +7,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-# Bump when the on-disk shape changes; the server rejects unknown versions.
-# v2 adds EgoTelemetry.estimated_total_mass_kg (None on v1 clips).
-SCHEMA_VERSION: int = 2
+# Bump on shape change. v2: mass_kg. v3: blinkerLeft/Right (False if absent).
+SCHEMA_VERSION: int = 3
 
 # Sentinel used by the AEB thread for "no threat this tick".
 _INF: float = 1e9
@@ -57,6 +56,9 @@ class EgoTelemetry:
     ego_has_trailer: bool = False
     # None means the clip predates schema v2, not a massless truck.
     estimated_total_mass_kg: float | None = None
+    # Absent on pre-v3 clips; False is the safe default (no blinker bias in replay).
+    blinkerLeft: bool = False
+    blinkerRight: bool = False
 
     def to_json(self) -> dict:
         return {
@@ -70,6 +72,8 @@ class EgoTelemetry:
             "paused": self.paused,
             "ego_has_trailer": self.ego_has_trailer,
             "estimated_total_mass_kg": self.estimated_total_mass_kg,
+            "blinkerLeft": self.blinkerLeft,
+            "blinkerRight": self.blinkerRight,
         }
 
     @classmethod
@@ -85,6 +89,8 @@ class EgoTelemetry:
             paused=bool(d.get("paused", False)),
             ego_has_trailer=bool(d.get("ego_has_trailer", False)),
             estimated_total_mass_kg=_opt_float(d.get("estimated_total_mass_kg")),
+            blinkerLeft=bool(d.get("blinkerLeft", False)),
+            blinkerRight=bool(d.get("blinkerRight", False)),
         )
 
 
