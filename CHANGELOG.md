@@ -12,7 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Added
-- **Road prediction model**: ACC used to work out your lane from your own steering wheel, which only ever describes the road *behind* you. It now predicts the road ahead from the paths the traffic in front is actually driving, and knows how far out that prediction is still worth trusting. Since this is what picks your lead, it settles a family of long-standing complaints:
+- **Road prediction model**: ACC used to work out your lane from your own steering wheel, which only ever describes the road *behind* you. It now predicts the road ahead from the paths the traffic in front is actually driving, and knows how far out that prediction is still worth trusting (not used by AEB yet). Since this is what picks your lead, it settles a family of long-standing complaints:
   - **Parked and shoulder vehicles grabbed from far away**: one standing off to the side could become your lead from 60 m back.
   - **Lead dropped halfway through a curve**: the car ahead stopped counting well before it left your lane, so you accelerated into the bend and then braked late.
   - **Your lane placed to the outside of tight bends**: sharp corners read as gentler than they are, by over a metre at 60 m ahead. Motorway curves were never affected.
@@ -26,8 +26,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
   - **Slow traffic read as standing still and took too long to pick up**: it kept too little of its own path to place in a lane. Slow vehicles directly ahead are now picked up in about a third of the time.
   - **Queued traffic did not help ACC recognise itself**: stopped vehicles lined up along the road now back each other up. One standing on its own is treated exactly as before, and a line that does not match the road you are on counts for nothing.
 
+- **ACC intelligently handles lane changes**: ACC now looks at if you are passing, getting passed or just have a vehicle you don't want to follow next to you. This new system is also able to keep the vehicle you are trying to pass into account while doing the lane change.
+
 ### Fixed
-- **ACC slammed the brakes when you indicated while overtaking**: signalling toward a lane you were most of the way past made the vehicle you were overtaking count as the one to fall in behind, so ACC braked as hard as it could for a car sitting beside your bumper. Traffic you are passing no longer counts, and a vehicle in the lane you have only signalled toward can never ask for more than gentle braking.
 - **ACC braked hardest for the targets it was least sure about**: full emergency braking could fire on a vehicle it had barely started tracking, usually something parked near the road. Maximum braking now needs the same confidence the rest of ACC uses, and close-range emergency braking is unchanged.
 - **AEB braked late for traffic stopping ahead (TMP)**: a vehicle braking to a standstill in front of you could be mistaken for a stalled connection, so MonoCruise kept reading it as still moving for up to a second and a half and left the emergency brake far too late.
 - **AEB warned after a crash with nothing in front of you**: being flipped, launched, or left sitting at a steep angle could set off the collision warning and add brake help on its own, with no vehicle anywhere near. A slope alone no longer counts as a hazard.

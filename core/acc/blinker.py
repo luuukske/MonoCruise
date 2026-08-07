@@ -18,6 +18,9 @@ BLINKER_PEAK_S: float = 0.35
 BLINKER_DECAY_S: float = 1.75
 BLINKER_SUSTAIN: float = 0.55
 BLINKER_RELEASE_S: float = 0.8
+# One tap has to carry a whole lane change, so the intent outlives a dark lamp
+# and coasts to zero at this age instead of snapping there. README §5.
+BLINKER_MIN_HOLD_S: float = 4.0
 BLINKER_OFFSET_M: float = 4.5
 BLINKER_LANE_WIDTH_M: float = 4.5
 BLINKER_RAMP_LO_KMH: float = 45.0
@@ -109,6 +112,9 @@ class BlinkerBias:
     # Current intent: -1 left, +1 right, 0 idle. One flick, one intent.
     intent_sign: float = 0.0
     _intent_mono: float = float("-inf")
+    # When the lamp went dark on a still-live intent; the envelope coasts down
+    # from here instead of holding. Infinite while the lamp is still asking.
+    _dark_mono: float = float("inf")
     # Release fade after the intent ends, so b_eff never steps to zero.
     _release_sign: float = 0.0
     _release_amp: float = 0.0
@@ -168,11 +174,24 @@ class BlinkerBias:
 
         self.rising_this_frame = False
         if want == self.intent_sign:
+            if want != 0.0:
+                # Lamp back on before the coast ended: the driver is still asking.
+                self._dark_mono = float("inf")
             return
-        if want == 0.0:
-            self._end_intent(now_mono)
-        else:
+        if want != 0.0:
             self._begin_intent(now_mono, want, ego_x, ego_z, ego_fwd_x, ego_fwd_z)
+            return
+        # Minimum envelope: a dark lamp does not end the intent until the tap
+        # has bought a realistic lane change. The R0 gate is not held this way.
+        if (
+            self.gate_on
+            and not self.collapsed
+            and (now_mono - self._intent_mono) < BLINKER_MIN_HOLD_S
+        ):
+            if not math.isfinite(self._dark_mono):
+                self._dark_mono = now_mono
+            return
+        self._end_intent(now_mono)
 
     def _begin_intent(
         self,
@@ -186,6 +205,7 @@ class BlinkerBias:
         self.rising_this_frame = True
         self.intent_sign = sign
         self._intent_mono = now_mono
+        self._dark_mono = float("inf")
         self._release_sign = 0.0
         self.collapsed = False
         self.committed = False
@@ -204,11 +224,9 @@ class BlinkerBias:
         self.committed = False
         self.lane_offset_m = 0.0
 
-    def _envelope_amp(self, now_mono: float) -> float:
-        """Peak, cos-decay, then sustain. Amplitude of a live intent only."""
-        if self.intent_sign == 0.0:
-            return 0.0
-        age = now_mono - self._intent_mono
+    @staticmethod
+    def _lamp_amp(age: float) -> float:
+        """Peak, cos-decay, then sustain, for as long as the lamp is asking."""
         if age <= BLINKER_PEAK_S:
             return 1.0
         t = age - BLINKER_PEAK_S
@@ -216,6 +234,21 @@ class BlinkerBias:
             return BLINKER_SUSTAIN
         c = math.cos((t / BLINKER_DECAY_S) * (math.pi * 0.5))
         return BLINKER_SUSTAIN + (1.0 - BLINKER_SUSTAIN) * c
+
+    def _envelope_amp(self, now_mono: float) -> float:
+        """Amplitude of a live intent: on the lamp, or coasting down off it."""
+        if self.intent_sign == 0.0:
+            return 0.0
+        if not math.isfinite(self._dark_mono):
+            return self._lamp_amp(now_mono - self._intent_mono)
+        # Lamp already dark: coast what is left to zero over the rest of the
+        # minimum envelope, rather than holding a sustain and stepping off it.
+        dark_age = self._dark_mono - self._intent_mono
+        span = max(BLINKER_MIN_HOLD_S - dark_age, BLINKER_RELEASE_S)
+        t = (now_mono - self._dark_mono) / span
+        if t >= 1.0:
+            return 0.0
+        return self._lamp_amp(dark_age) * math.cos(t * (math.pi * 0.5))
 
     def scalar(self, now_mono: float) -> float:
         """Signed intent envelope: sustained while indicating, faded after."""

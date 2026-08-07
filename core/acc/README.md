@@ -1135,16 +1135,18 @@ it is cancelled or the merge completes.
 One envelope per intent, not per flash:
 
     peak     1.0 for BLINKER_PEAK_S (0.35 s)
-    decay    cos to BLINKER_SUSTAIN (0.55) over BLINKER_DECAY_S (1.25 s)
-    sustain  held for as long as the intent is live
-    release  cos to 0 over BLINKER_RELEASE_S (0.8 s) after it ends
+    decay    cos to BLINKER_SUSTAIN (0.55) over BLINKER_DECAY_S (1.75 s)
+    sustain  held for as long as the lamp is still asking
+    coast    once the lamp goes dark, cos to 0 over whatever is left of
+             BLINKER_MIN_HOLD_S (minimum envelope below), floored at
+             BLINKER_RELEASE_S (0.8 s) so a cancel is never a step
 
 The peak biases the lane hard while we look for who to follow. Pinning
 there for the whole manoeuvre over-biases the lane, which is what the
-original pulse was avoiding; but decaying to **zero** loses the candidate
-halfway through the move, which is worse. The sustain is what a mid-change
-bias should be: ego is already partway over, so the shift it needs is
-smaller than the one it needed at the flick. Then:
+original pulse was avoiding; but decaying to **zero** while the driver is
+still asking loses the candidate halfway through the move, which is worse.
+The sustain is what a mid-change bias should be: ego is already partway over,
+so the shift it needs is smaller than the one it needed at the flick. Then:
 
 - **R0**: gate with ~3 km/h hysteresis, ramp 0→1 over ego 45→60 km/h.
   No hard step; kills intersections and yards.
@@ -1159,6 +1161,78 @@ so treating it as the end of the release handed that vehicle full command
 back for about a second and produced a brake tap right as ego cleared the
 old lane. The controller holds the release on that specific id past the
 collapse; see `core/cruise_control_thread/README.md`.
+
+### The minimum envelope: one tap is a whole lane change
+
+Drivers tap the stalk and move over; they do not hold it for the manoeuvre.
+The debounce turns a tap into an intent, but the intent then ended 1.0 s after
+the lamp went dark, so a tap bought **2.1 s** of bias for a manoeuvre that
+takes four or more. Worse, `_end_intent` clears `committed` and
+`lane_offset_m`, so a tap produced a commit latch that survived 0.13 s to 0.4 s
+and then evaporated with ego barely a third of the way over. Stage 2 needs
+`BLINKER_RELEASE_HOLD_MIN_M` (2.0 m) of *measured* offset while the bias is
+still live, and a tap never reached it at any lane-change rate: **letting go of
+the lane being left was unreachable from a tap**, which is the one thing the
+driver taps the stalk to ask for.
+
+`BLINKER_MIN_HOLD_S` (4.0 s) is a floor on the intent's life, measured from the
+intent edge. A dark lamp does not end the intent while the floor is still
+running, so the guaranteed minimum graph is a single monotone decay:
+
+    tap    peak 1.0 (0.35 s), then decay to 0 by BLINKER_MIN_HOLD_S (4.0 s),
+           via the sustain shape while the lamp is lit and a cos coast after
+    hold   identical, except the sustain runs until the stalk is cancelled
+
+**The floor must not hold the sustain flat and then release from it.** That was
+the first shape, and it is a step: 0.55 for three seconds, then a fade. Nothing
+about the manoeuvre justifies a constant bias there, because the further ego is
+over the less shift it needs to see the new lane, and the unshifted corridor is
+already picking that traffic up in `leads[]`. Coasting instead of holding is
+also why the floor can be a fixed length rather than a tuned strength: the area
+under the curve scales with how long the lamp was actually lit, so more flashes
+still mean more bias, and a tap is the weakest member of that family rather than
+a different rule. The only thing the floor owes the driver is that the offset
+does not return to zero the moment the lamp does.
+
+The coast spans whatever is left of the floor, floored at `BLINKER_RELEASE_S`,
+so the two cases are one formula: a tap coasts for ~2.7 s, a lamp that goes dark
+right at the floor still gets the ordinary 0.8 s fade instead of falling off a
+cliff. A lamp that comes back before the coast finishes clears the coast and
+returns to the sustain; that is a step *up* in bias, which costs nothing but the
+gap softening the driver just re-asked for.
+
+Two things the floor is deliberately **not**:
+
+- **Not an extension.** A hold longer than the floor releases on the debounce
+  alone, so a deliberate cancel after a long signal still lets go promptly.
+- **Not stronger than R0.** Slowing under the gate ends the intent whatever the
+  floor says. Holding it there would leave a stale intent to resurrect on the
+  way back up, with the lamp still lit and so no rising edge left to re-seat
+  the commit reference or fire the floor-lift.
+
+R11 collapse also cuts the floor short: on a brisk change the merge completes
+first, measured at 3.0 s for a 1.3 m/s lateral rate. So the full 4.0 s is only
+spent when nothing happens, which is the cost of a stray tap: up to 4.0 s of
+decaying stage-1 gap softening. Stage 2 still needs real measured movement, so a
+stray tap can never release the current lead.
+
+Why 4.0 s, measured on a 3.6 m change with 0.6 s of reaction time, reading the
+offset reached while the bias is still live (stage 2 needs 2.0 m):
+
+| lateral rate | change takes | floor 3.5 s | floor 4.0 s | floor 4.5 s |
+|---|---|---|---|---|
+| 0.6 m/s | 6.0 s | 1.72 m, no stage 2 | 2.02 m, stage 2 | 2.32 m, stage 2 |
+| 0.7 m/s | 5.1 s | 2.01 m, stage 2 | 2.36 m, stage 2 | 2.71 m, stage 2 |
+| 0.9 m/s | 4.0 s | 2.58 m, stage 2 | 3.03 m, stage 2 | 3.15 m, stage 2 |
+| 1.3 m/s | 2.8 s | R11 collapse at 3.0 s | R11 collapse at 3.0 s | R11 collapse at 3.0 s |
+
+The coast costs offset compared with a flat sustain of the same length, because
+the bias is smaller for most of the window, so 3.5 s no longer covers a lazy
+0.6 m/s change and 4.0 s is the shortest floor that does. Going to 4.5 s buys
+only margin on rates that already pass, at more stray-tap exposure.
+`test_one_tap_carries_a_whole_lane_change` pins the 0.7 m/s row, and
+`test_one_tap_coasts_to_zero_instead_of_holding_the_sustain` pins the shape:
+monotone after the peak, no single-frame step, and no plateau.
 
 ### Commitment: how "ego is moving over" is measured
 
@@ -1181,9 +1255,10 @@ moves it. `BlinkerBias.set_commit_reference` freezes that id and its road
 lateral once per intent, and commitment latches at
 `BLINKER_COMMIT_LAT_M` (0.4 m).
 
-The latch **holds for the life of the intent**. A lane change does not
-un-happen, and re-testing it every frame is what let a single bad frame
-drop the release. With no reference vehicle visible the frozen-frame
+The latch **holds for the life of the intent**, and that life has a floor
+(minimum envelope above) precisely so a tap is long enough to reach the latch
+and keep it. A lane change does not un-happen, and re-testing it every frame is
+what let a single bad frame drop the release. With no reference vehicle visible the frozen-frame
 displacement is the fallback, and its curve error does not matter there:
 with nothing ahead there is no lead to release.
 
