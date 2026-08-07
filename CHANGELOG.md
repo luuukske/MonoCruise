@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.0-preview.12] - 2026-08-07
 ### Added
 - **Road prediction model**: ACC used to work out your lane from your own steering wheel, which only ever describes the road *behind* you. It now predicts the road ahead from the paths the traffic in front is actually driving, and knows how far out that prediction is still worth trusting (not used by AEB yet). Since this is what picks your lead, it settles a family of long-standing complaints:
   - **Parked and shoulder vehicles grabbed from far away**: one standing off to the side could become your lead from 60 m back.
