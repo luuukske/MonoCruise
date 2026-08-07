@@ -36,6 +36,7 @@ live_accel_pedals_viz_30s.bat
 
 # personal documentation for MonoCruise
 docs/
+tools/aeb_corpus_run/
 
 # PyInstaller / Inno Setup build outputs
 *.exe
