@@ -32,6 +32,24 @@ class ReviewFrame:
     snapshot: AEBSnapshot
     live_aeb: LiveAEB
     consumed: ConsumedContext
+    raw_target_ms2: float = 0.0  # pre-slew demand, see raw_target_decel
+
+
+def raw_target_decel(live: LiveAEB, cal: dict) -> float:
+    """Pre-slew decel demand rebuilt from a recorded tick (README §review desmoothing).
+
+    ``LiveAEB.target_decel_ms2`` is deadbanded and rate limited, so it lags the moment
+    a threat became real by up to several ticks. This mirrors ``target_raw`` in
+    ``AEBThread.loop`` before that limiter. The latched-hold floor is not recorded, so
+    this under-reads on hold ticks; it is never wrong about onset timing.
+    """
+    if not live.engaged:
+        return 0.0
+    cap = live.effective_max_decel_ms2
+    ttb_gate = cal.get("brake_ttb", 0.2) + cal.get("brake_response_window_s", 0.30)
+    if live.time_to_brake < ttb_gate:
+        return cap
+    return max(0.0, min(live.required_decel_ms2, cap))
 
 
 def _ego_curvature(steer: float, speed: float) -> float:
@@ -240,6 +258,8 @@ def replay_clip(clip: Clip) -> list[ReviewFrame]:
     # the way it does across live AEB loops, or the drawn arcs are unsmoothed.
     blender = VehicleCurvatureBlender(_CAL)
 
+    cal_rec = clip.metadata.calibration or {}
+
     out: list[ReviewFrame] = []
     for tk in sorted(clip.aeb_ticks, key=lambda x: x.t_mono):
         ft = nearest_frame_t(frame_t, tk.radar_t_mono)
@@ -253,7 +273,10 @@ def replay_clip(clip: Clip) -> list[ReviewFrame]:
         snap = _build_snapshot(
             ego, vehicles_eff, tk.live_aeb, tk.consumed, blender, tk.t_mono,
         )
-        out.append(ReviewFrame(tk.t_mono - t0, tk.t_mono, snap, tk.live_aeb, tk.consumed))
+        out.append(ReviewFrame(
+            tk.t_mono - t0, tk.t_mono, snap, tk.live_aeb, tk.consumed,
+            raw_target_decel(tk.live_aeb, cal_rec),
+        ))
     return out
 
 

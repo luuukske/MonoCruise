@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import base64
+import os
 import struct
 
 from core.aeb.clip_schema import (
     AEBTickRecord, ConsumedContext, EgoTelemetry, Label, LiveAEB, RadarFrameRecord,
 )
-from core.aeb.clip_replay import replay_clip
-from core.aeb.clip_store import ClipStore
+from core.aeb.clip_replay import raw_target_decel, replay_clip
+from core.aeb.clip_store import _PEEK_PREFIX, ClipStore
 from core.aeb.thread import AEBState
 from core.radar.reader import _BUF_SIZE, _TOTAL_FORMAT
 
@@ -114,3 +116,69 @@ def test_replay_smoothing_advances_vehicle_speed():
     frames = replay_clip(_build_replayable_clip())
     v_last = next(v for v in frames[-1].snapshot.vehicles if v["vid"] == 7)
     assert v_last["speed_kmh"] >= 0.0   # decoded + smoothed without error
+
+
+_CAL_REC = {"brake_ttb": 0.2, "brake_response_window_s": 0.30}
+
+
+def test_raw_target_decel_undoes_the_published_slew():
+    # The reviewer reads onset timing off this signal, so it must track the demand
+    # the tick computed, not the rate-limited value that was published.
+    ramping = LiveAEB(engaged=True, required_decel_ms2=9.4, effective_max_decel_ms2=8.0,
+                      time_to_brake=1.5, target_decel_ms2=1.1)
+    assert raw_target_decel(ramping, _CAL_REC) == 8.0        # clamped to capacity
+    assert ramping.target_decel_ms2 == 1.1                   # what was actually sent
+
+    below_cap = LiveAEB(engaged=True, required_decel_ms2=3.2, effective_max_decel_ms2=8.0,
+                        time_to_brake=1.5)
+    assert raw_target_decel(below_cap, _CAL_REC) == 3.2
+
+    # Inside brake_ttb + response window the tick slams to full capacity.
+    slam = LiveAEB(engaged=True, required_decel_ms2=0.4, effective_max_decel_ms2=7.5,
+                   time_to_brake=0.1)
+    assert raw_target_decel(slam, _CAL_REC) == 7.5
+
+    # Disengaged demands nothing however large the recorded requirement is.
+    idle = LiveAEB(engaged=False, required_decel_ms2=11.0, effective_max_decel_ms2=8.0,
+                   time_to_brake=0.05)
+    assert raw_target_decel(idle, _CAL_REC) == 0.0
+
+
+def test_replay_populates_raw_target_per_frame():
+    clip = _build_replayable_clip()
+    for tk in clip.aeb_ticks:
+        if tk.live_aeb.engaged:
+            tk.live_aeb.required_decel_ms2 = 4.5
+            tk.live_aeb.effective_max_decel_ms2 = 9.0
+            tk.live_aeb.target_decel_ms2 = 0.6   # mid-slew, well under the demand
+
+    frames = replay_clip(clip)
+    # Ticks 0-3 are not engaged in the fixture, so nothing is demanded there.
+    assert frames[0].raw_target_ms2 == 0.0
+    assert frames[5].raw_target_ms2 == 4.5
+    assert frames[5].live_aeb.target_decel_ms2 == 0.6
+
+
+def test_peek_metadata_falls_back_when_metadata_exceeds_the_prefix(tmp_path):
+    # peek_metadata reads a prefix first; a clip whose thumbnail pushes the metadata
+    # past that prefix must still decode via the whole-file path.
+    store = ClipStore(root=tmp_path)
+    clip = _make_clip(clip_id="bigthumb")
+    clip.metadata.thumbnail_jpeg = base64.b64encode(
+        os.urandom(_PEEK_PREFIX * 2)
+    ).decode("ascii")
+    path = store.write(clip)
+    assert path is not None
+    assert path.stat().st_size > _PEEK_PREFIX
+
+    meta = store.peek_metadata(path)
+    assert meta is not None
+    assert meta.clip_id == "bigthumb"
+    assert meta.thumbnail_jpeg == clip.metadata.thumbnail_jpeg
+
+
+def test_peek_metadata_matches_a_full_decode(tmp_path):
+    store = ClipStore(root=tmp_path)
+    path = store.write(_make_clip(clip_id="peekcmp0"))
+    store.write_label(path, Label(class_="tn", severity=1))
+    assert store.peek_metadata(path).to_json() == store.load(path).metadata.to_json()

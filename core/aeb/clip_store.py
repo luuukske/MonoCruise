@@ -46,6 +46,9 @@ def deserialize_clip(blob: bytes) -> Clip:
 # Metadata prefix ends at first serialized stream key (see Clip.to_json_dict).
 _STREAM_MARKER: bytes = b'"radar_frames"'
 _PEEK_CHUNK: int = 65536
+# Compressed bytes read before falling back to the whole file. Metadata needs a
+# median 14 KB of a 423 KB clip, so a listing reads a few percent of the store.
+_PEEK_PREFIX: int = 65536
 
 
 def deserialize_metadata(blob: bytes) -> ClipMetadata:
@@ -153,12 +156,27 @@ class ClipStore:
                 pass
             return False
 
-    def peek_metadata(self, path: Path) -> ClipMetadata | None:
-        """Metadata-only decode for list views; partial gunzip with full fallback."""
+    @staticmethod
+    def _read_head(path: Path, size: int) -> bytes | None:
         try:
-            blob = Path(path).read_bytes()
+            with open(path, "rb") as fh:
+                return fh.read(size)
         except OSError:
-            logger.exception("failed to read AEB clip %s", Path(path).name)
+            return None
+
+    def peek_metadata(self, path: Path) -> ClipMetadata | None:
+        """Metadata-only decode for list views; prefix gunzip with full-file fallback."""
+        p = Path(path)
+        head = self._read_head(p, _PEEK_PREFIX)
+        if head is not None:
+            try:
+                return deserialize_metadata(head)
+            except Exception:
+                pass
+        try:
+            blob = p.read_bytes()
+        except OSError:
+            logger.exception("failed to read AEB clip %s", p.name)
             return None
         try:
             return deserialize_metadata(blob)
@@ -168,7 +186,7 @@ class ClipStore:
             top = json.loads(gzip.decompress(blob).decode("utf-8"))
             return ClipMetadata.from_json(top)
         except Exception:
-            logger.exception("failed to read AEB clip metadata %s", Path(path).name)
+            logger.exception("failed to read AEB clip metadata %s", p.name)
             return None
 
     def write_label(self, path: Path, label: Label | None) -> bool:
