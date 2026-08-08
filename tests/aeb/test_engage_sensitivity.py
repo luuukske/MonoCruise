@@ -88,6 +88,27 @@ def test_graded_bar_is_the_only_thing_that_changed():
     assert not any(e.aeb_brake for e in run_headless(clip))
 
 
+def test_certain_ttb_bridge_engages_soft_crawl_rear_end():
+    """Crawl in-lane stop: demand under 0.70, TTB in (0.5, 1.0], certain bridge fires."""
+    # gap=14 m at 3.6 m/s: within a short clip demand stays soft and TTB never
+    # reaches the 0.50 s slam, so only the certain-TTB bridge can engage.
+    ego_ms, gap, capacity = 3.6, 14.0, 10.0
+    clip = _stopped_ahead_clip(ego_ms, gap, capacity=capacity, n=45)
+    off = replace(CAL, certain_engage_ttb=0.0)
+    assert not any(e.aeb_brake for e in run_headless(clip, cal=off)), (
+        "without the certain-TTB bridge this soft crawl must not engage"
+    )
+    assert any(e.aeb_brake for e in run_headless(clip, cal=CAL)), (
+        "certain-TTB bridge must engage an in-lane crawl rear-end before impact"
+    )
+
+
+def test_certain_ttb_bridge_does_not_engage_far_soft_threat():
+    """Far soft demand with TTB well above the bridge stays silent."""
+    clip = _stopped_ahead_clip(3.6, 30.0, capacity=10.0, n=45)
+    assert not any(e.aeb_brake for e in run_headless(clip))
+
+
 def _oncoming_ctx(d_miss: float | None, lateral_m: float = 3.0):
     """Head-on target in its own lane, at ``lateral_m`` from ego's straight arc."""
     cal = CAL
@@ -139,3 +160,21 @@ def test_body_separation_shortcut_yields_to_a_measured_collision_course():
     assert not res.suppressed, (
         "a measured head-on course must not be waved through on pose alone"
     )
+
+
+def test_body_separation_yields_to_turn_into_path_closing():
+    """Inflated arc d_abs with collapsing |lat| and shrinking CBDR miss."""
+    ctx = _oncoming_ctx(d_miss=4.0, lateral_m=0.1)
+    ctx.ego_curvature = 0.05
+    ctx.d_miss_rate = -5.0
+    res = OppositeLaneFilter(CAL).apply(ctx)
+    assert not res.suppressed
+
+
+def test_body_separation_keeps_shared_bend_when_lat_floors():
+    """Miss-rate closing alone must not skip body-sep if |lat| stays wide."""
+    ctx = _oncoming_ctx(d_miss=4.0, lateral_m=1.2)
+    ctx.ego_curvature = 0.05
+    ctx.d_miss_rate = -5.0
+    res = OppositeLaneFilter(CAL).apply(ctx)
+    assert res.suppressed and res.reason == "OppositeLaneFilter"

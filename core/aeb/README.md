@@ -224,7 +224,19 @@ Applies only to `head_on` vehicles (`fwd_dot < cal.head_on_dot=-0.7`).
    - `delta_kappa_t = min(evasion_g_oncoming / v², evasion_max_dkappa)`, scaled by
      `opposite_lane_kappa_scale` when `own_lane`.
    - Fix B: `delta_kappa_t = max(delta_kappa_t, min(|ego_curvature|, shared_turn_max_kappa))`
-     when `own_lane` and ego is turning.
+     when `own_lane` and ego is turning, **except** when CBDR miss is closing
+     fast while ego turns (below).
+
+**Turn-into-path (CBDR miss rate).** Ego steering into oncoming can inflate
+arc `d_abs` while the measured miss shrinks (clip `e0fd28b3`: `d_miss` rate
+about −5.6 m/s). Closing predicate: `|ego_curvature| >= turning_diverge_kappa`,
+`d_miss_rate <= oncoming_closing_dmiss_rate_mps` (−1.5 m/s), and straight-frame
+`|lat| < oncoming_closing_lat_m` (0.85 m; shared-bend phantoms that only graze
+this bar still lose to oncoming evasion). On that course skip body-sep and Fix B
+κ expansion; also skip engagement-entry LOS / turn extrapolation vetoes so warn
+can promote to brake. Evasion clearance still may suppress. Colliding closing
+targets also earn `certain_geom` for instant engage. `OppositeLaneFilterMirrored`
+stays `Lane.EGO` only.
 
 ### `CoDirectionalDivergeFilter`
 
@@ -768,6 +780,28 @@ same clip count as 0.65 but brakes harder on them. Every clip the lower bar
 newly brakes on is the same shape as the ones it rescues (a co-directional
 slow or stopped lead in ego's lane at 30-60 m), so there is no geometric
 scoping that separates them: this really is the sensitivity dial.
+
+### Certain-geom TTB engage bridge
+
+Even at `aeb_engage_frac_certain = 0.70`, a second soft class remains: crawl-speed
+or matched-speed in-lane rear-ends whose `v²/2d` demand peaks at roughly
+0.18-0.67 of capacity while `ttb` sits in `(brake_ttb + brake_response_window_s,
+warn_ttb]` (about 0.50-1.3 s). Warn and FF fire on the TTB path; engagement
+never qualifies because demand stays under the graded bar and outside the
+0.50 s slam.
+
+For colliding, non-engage-vetoed `certain_geom` targets only,
+`certain_engage_ttb` (default 1.0 s) is an additional qualification OR: if
+`best_ttb_engage` is under that bar, engage qualifies (and takes the same
+instant certain path). Non-certain geometry still needs the demand bar or the
+0.50 s slam. Warn, FF, vetoes, and `nearcertain` grading are untouched.
+
+Corpus evidence for the new path: seven labelled soft certain FNs sharing that
+TTB-gap story (`030488be`, `ed9df207`, `0da1f6eb`, `b8d308f4`, `541030ee`,
+`e66a2827`, `cbc09fcb`). Prefer a dedicated `certain_engage_ttb` (default **1.25 s**, between the 0.50 s
+slam and `warn_ttb` 1.3) so soft certain rear-ends qualify without opening all
+the way to warn. Re-price against the FP watchlist
+(`15eba13d`, `7add71c9`, `6d23fe39`, `82acb8e8`) when the label set grows.
 
 ### Oncoming clearance: pose plus measurement
 

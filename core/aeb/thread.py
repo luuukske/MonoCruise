@@ -31,7 +31,7 @@ from core.aeb.filters import (
     _build_vehicle_collision_data, _world_to_ego_forward, _cross_zone_padding,
     _apply_cross_zone, _earliest_hit, _is_approaching, _dampen_turning_curvature,
     _any_body_in_ego_lane, _vehicle_curvature_blend, VehicleCurvatureBlender,
-    build_pipeline,
+    build_pipeline, oncoming_closing_into,
 )
 
 logger = logging.getLogger(__name__)
@@ -475,6 +475,9 @@ def _extrapolation_veto(
         return d_miss is not None and d_miss >= cal.codir_adjacent_veto_miss_m
     # Crossing/oncoming reached only by holding the current steer: real turns are
     # transient, so a far hit off a bent ego arc is extrapolation, not evidence.
+    # Turn-into-path closing (shrinking miss + collapsed |lat|) is the exception.
+    if oncoming_closing_into(ctx, cal):
+        return False
     return (abs(ctx.ego_curvature) >= cal.turn_veto_min_kappa
             and unbraked_ttc >= cal.turn_veto_min_ttc_s)
 
@@ -762,6 +765,8 @@ class AEBThread(BaseThread):
         self._curvature_blender = VehicleCurvatureBlender(self._cal)
         # LOS tracks for engagement-entry CBDR veto (README LOS veto).
         self._los_tracks: dict[int, deque] = {}
+        # Per-target (t, d_miss) for turn-into-path closing rate (README).
+        self._d_miss_hist: dict[int, deque] = {}
         # Follow-threat tracks + hold; see README follow-threat section.
         self._follow_tracks: dict[int, deque] = {}
         self._follow_hold_until: dict[int, float] = {}
@@ -1239,6 +1244,27 @@ class AEBThread(BaseThread):
                     self._los_tracks.get(veh.id, ()), now_mono, cal,
                 )
             return los_miss_memo[veh.id]
+
+        def los_miss_rate(veh: Vehicle) -> float | None:
+            """d(d_miss)/dt over the LOS window; None until span >= 0.2 s."""
+            dm = los_miss(veh)
+            if dm is None:
+                return None
+            hist = self._d_miss_hist.get(veh.id)
+            if hist is None:
+                hist = self._d_miss_hist[veh.id] = deque()
+            hist.append((now_mono, dm))
+            cutoff = now_mono - cal.los_veto_window_s
+            while hist and hist[0][0] < cutoff:
+                hist.popleft()
+            if len(hist) < 2:
+                return None
+            t0, m0 = hist[0]
+            t1, m1 = hist[-1]
+            dt = t1 - t0
+            if dt < 0.2:
+                return None
+            return (m1 - m0) / dt
         vehicle_dicts: list[dict] = []
         vehicle_arcs: dict[int, list[ArcPath]] = {}
         newly_risky: set[int] = set()
@@ -1440,6 +1466,7 @@ class AEBThread(BaseThread):
                 latched_threat_ids=self._latched_threat_ids,
                 follow_threat_ids=self._follow_threat_ids,
                 d_miss=los_miss(v),
+                d_miss_rate=los_miss_rate(v),
             )
 
             suppression_reasons[v.id] = []
@@ -1505,11 +1532,15 @@ class AEBThread(BaseThread):
                     )
                     if ctx.lane == Lane.EGO and aligned and lane_trusted:
                         certain_geom_ids.add(v.id)
+                    elif head_on and oncoming_closing_into(ctx, cal):
+                        # Turn-into-path: shrinking CBDR miss while ego turns.
+                        certain_geom_ids.add(v.id)
                     # Co-directional and crash_confirmed skip the oblique window:
                     # neither is the extrapolation-fragile class it exists for.
                     if ((ctx.lane == Lane.EGO or aligned) and lane_trusted
                             or ctx.co_directional
-                            or getattr(v, "crash_confirmed", False)):
+                            or getattr(v, "crash_confirmed", False)
+                            or v.id in certain_geom_ids):
                         nearcertain_geom_ids.add(v.id)
                     newly_risky.add(v.id)
                     rc = self._risk_confirm.get(v.id)
@@ -1601,9 +1632,11 @@ class AEBThread(BaseThread):
                             fwd_dot, abs_v_speed, ctx.v_curvature, cal,
                         )
                         # crash_confirmed skips LOS veto (README LOS veto).
+                        # Turn-into-path: CBDR miss is still large while closing.
                         if (cal.los_veto_enabled
                                 and dist >= min_range
-                                and not getattr(v, "crash_confirmed", False)):
+                                and not getattr(v, "crash_confirmed", False)
+                                and not oncoming_closing_into(ctx, cal)):
                             vetoed = d_miss_v is not None and d_miss_v > miss_bar
                         los_veto_memo[v.id] = vetoed
                         if vetoed:
@@ -1652,6 +1685,9 @@ class AEBThread(BaseThread):
         for vid in list(self._los_tracks.keys()):
             if vid not in _active_vids:
                 del self._los_tracks[vid]
+        for vid in list(self._d_miss_hist.keys()):
+            if vid not in _active_vids:
+                del self._d_miss_hist[vid]
         for vid in list(self._follow_tracks.keys()):
             if vid not in _active_vids:
                 del self._follow_tracks[vid]
@@ -1775,6 +1811,13 @@ class AEBThread(BaseThread):
             run_collision
             and best_ttb_engage < cal.brake_ttb + cal.brake_response_window_s
         )
+        # Soft certain rear-ends: demand below the graded bar, TTB still urgent
+        # enough to warn, but outside the 0.50 s slam (README certain-TTB bridge).
+        certain_ttb_engage_active = (
+            certain_engage
+            and run_collision
+            and best_ttb_engage < cal.certain_engage_ttb
+        )
 
         if self._engaged:
             if (effective_required < disarm_threshold
@@ -1789,7 +1832,8 @@ class AEBThread(BaseThread):
             qualified = (run_collision
                          and aeb_speed_ok
                          and (effective_required_engage >= engage_threshold
-                              or brake_ttb_engage_active))
+                              or brake_ttb_engage_active
+                              or certain_ttb_engage_active))
             # Tiered engage confirm window + occupancy observe (README tiered entry).
             self._engage_confirm.window_s = (
                 cal.aeb_engage_confirm_s
@@ -1801,6 +1845,7 @@ class AEBThread(BaseThread):
                 # Instant engage paths: TTB slam, certain geom, latched (README).
                 certain = (
                     brake_ttb_engage_active
+                    or certain_ttb_engage_active
                     or any(vid in certain_geom_ids and vid not in engage_vetoed_ids
                            for vid in colliding_ids)
                     or any(vid in self._latched_threat_ids
@@ -2026,6 +2071,7 @@ class AEBThread(BaseThread):
         self._brake_popup_fired = False
         self._curvature_blender.prune(set())
         self._los_tracks.clear()
+        self._d_miss_hist.clear()
         with self.data._lock:
             self.data.AEB_warn = False
             self.data.AEB_brake = False

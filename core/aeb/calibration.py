@@ -102,6 +102,13 @@ class AEBCalibration:
     # OppositeLaneFilter body-separation fast path: the measured miss must also
     # clear this multiple of the body bar. 0 trusts pose alone (README).
     oncoming_body_sep_miss_scale: float = 0.25
+    # Turn-into-path: CBDR miss closing this fast (m/s) with ego turning skips
+    # OppositeLane body-sep / Fix B (README turn-into-path). e0fd ~ -5.6 m/s.
+    oncoming_closing_dmiss_rate_mps: float = -1.5
+    # Straight-frame |lat| must collapse under this (m) with the miss-rate gate.
+    # 0.85 recovers e0fd confirm span; 7c635440 id162 floors ~0.72 but stays TN
+    # via remaining evasion (corpus sweep).
+    oncoming_closing_lat_m: float = 0.85
 
     # Fix A: near-head-on ghost-arc reduction
     near_head_on_cross_scale: float = 0.3
@@ -116,6 +123,9 @@ class AEBCalibration:
     # Geometry-graded: aligned in-lane traffic skips the uncertainty hedge.
     # Pure sensitivity trade, no flat band; see README geometry-graded engage.
     aeb_engage_frac_certain: float = 0.70
+    # Certain-geom soft rear-ends: warn via ttb < warn_ttb while v^2/2d stays
+    # below the 0.70 bar and outside the 0.50 s slam (README certain-TTB bridge).
+    certain_engage_ttb: float = 1.25
     aeb_disarm_frac: float = 0.45
     # Geometry latch while colliding unbraked ttc inside window (anti-pumping; README).
     disarm_hold_ttc_s: float = 3.0
@@ -127,7 +137,7 @@ class AEBCalibration:
     # Tiered engage confirm windows; brake-TTB slam exempt (README continuous-decel).
     aeb_engage_confirm_s: float = 0.06
     aeb_engage_confirm_oblique_s: float = 0.30
-    aeb_certain_fwd_dot: float = 0.95
+    aeb_certain_fwd_dot: float = 0.90
     # Oblique warn must lead oblique engage by >= 0.1 s (README warn persistence).
     aeb_warn_confirm_oblique_s: float = 0.10
 

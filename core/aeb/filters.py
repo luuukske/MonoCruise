@@ -350,6 +350,8 @@ class FilterContext:
     # Measured CBDR miss for this vehicle this frame; None when the track is
     # too short. Filters must fail open on None (README oncoming clearance).
     d_miss: float | None = None
+    # d(d_miss)/dt over the LOS window; None until the track spans enough time.
+    d_miss_rate: float | None = None
 
     # Latched ids bypass TMP rel-speed prefilter (README latched-threat).
     latched_threat_ids: set = field(default_factory=set)
@@ -363,6 +365,17 @@ class FilterContext:
 
 
 # ---- Filter stages ----
+
+def oncoming_closing_into(ctx: "FilterContext", cal: AEBCalibration) -> bool:
+    """Ego turning into oncoming with shrinking CBDR miss and collapsed |lat|."""
+    if abs(ctx.ego_curvature) < cal.turning_diverge_kappa:
+        return False
+    rate = getattr(ctx, "d_miss_rate", None)
+    if rate is None or rate > cal.oncoming_closing_dmiss_rate_mps:
+        return False
+    lat = abs(-ctx.dx * ctx.ego_fwd_z + ctx.dz * ctx.ego_fwd_x)
+    return lat < cal.oncoming_closing_lat_m
+
 
 class RangeFilter:
     name = "RangeFilter"
@@ -478,12 +491,16 @@ class OppositeLaneFilter:
             v_hw_coll = max(ctx.v.size.width / 2.0 - 0.1, 0.3)
             _, d_abs = project_to_ego_arc(ctx.ego_arc, ctx.v.position.x, ctx.v.position.z)
             clear_bar = ctx.ego_hw + v_hw_coll
+            # Turn-into-path: shrinking CBDR miss + collapsed |lat| (README).
+            closing_into = oncoming_closing_into(ctx, cal)
             measured_clear = (
                 ctx.d_miss is None
                 or ctx.d_miss >= clear_bar * cal.oncoming_body_sep_miss_scale
             )
-            if d_abs >= clear_bar and measured_clear:
+            if d_abs >= clear_bar and measured_clear and not closing_into:
                 return _suppress("OppositeLaneFilter")
+        else:
+            closing_into = False
 
         for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
             # Determine effective cross padding (Fix A equivalent)
@@ -512,8 +529,9 @@ class OppositeLaneFilter:
                     delta_kappa_t * cal.opposite_lane_kappa_scale,
                     cal.evasion_max_dkappa * cal.opposite_lane_kappa_scale,
                 )
-            # Fix B: road-following expansion
-            if own_lane and abs(ctx.ego_curvature) >= cal.turning_diverge_kappa:
+            # Fix B: road-following expansion (skipped while miss is closing).
+            if (own_lane and not closing_into
+                    and abs(ctx.ego_curvature) >= cal.turning_diverge_kappa):
                 delta_kappa_t = max(
                     delta_kappa_t,
                     min(abs(ctx.ego_curvature), cal.shared_turn_max_kappa),
@@ -557,6 +575,10 @@ class OppositeLaneFilterMirrored:
         if not ctx.head_on or ctx.abs_v_speed <= 1.0:
             return _PASS
         cal = self._cal
+        # Own-lane oncoming is OppositeLaneFilter's job; this stage only covers
+        # the mirrored case where arc lane still reads EGO mid-corner.
+        if ctx.lane != Lane.EGO:
+            return _PASS
         if abs(ctx.ego_curvature) < cal.turning_diverge_kappa:
             return _PASS
         if abs(ctx.v_curvature) >= cal.turning_diverge_kappa:
