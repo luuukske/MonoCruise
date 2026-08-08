@@ -214,12 +214,16 @@ Lane thresholds (`cal.lane_half_width=1.95 m`, `cal.lane_separation=3.9 m`):
 
 ### `OppositeLaneFilter`
 
-Applies only to `head_on` vehicles (`fwd_dot < cal.head_on_dot=-0.7`).
+Applies to `head_on` vehicles (`fwd_dot < cal.head_on_dot=-0.7`), and to
+`near_head_on` for the **body-separation** fast path only (collide can start
+before `fd` crosses `head_on_dot`).
 
 1. Lane check: `own_lane = ctx.lane in (OPPOSITE_OR_OUTER, OFF_ROAD)`
-2. Body-separation fast path: if `own_lane` and `d_abs >= ego_hw + v_hw_coll`, the
-   vehicles already have physical body clearance: suppress directly.
-3. Evasion arc test: for each target arc, build two curvature-offset arcs
+2. Body-separation fast path: if pose `d_abs >= clear_bar - oncoming_body_sep_soft_m`
+   and the measured miss agrees, suppress (also when lane reads `EGO` under the
+   soft bar: corner-pull adjacent). Skip when `oncoming_closing_into` (below)
+   or when `max_evasion_lat_g` refuses (physically unavoidable closing).
+3. Evasion arc test (`head_on` only): for each target arc, build two curvature-offset arcs
    (`base_curvature ± delta_kappa_t`, `decel=0`). If either clears `ego_arc`, suppress.
    - `delta_kappa_t = min(evasion_g_oncoming / v², evasion_max_dkappa)`, scaled by
      `opposite_lane_kappa_scale` when `own_lane`.
@@ -230,13 +234,14 @@ Applies only to `head_on` vehicles (`fwd_dot < cal.head_on_dot=-0.7`).
 **Turn-into-path (CBDR miss rate).** Ego steering into oncoming can inflate
 arc `d_abs` while the measured miss shrinks (clip `e0fd28b3`: `d_miss` rate
 about −5.6 m/s). Closing predicate: `|ego_curvature| >= turning_diverge_kappa`,
-`d_miss_rate <= oncoming_closing_dmiss_rate_mps` (−1.5 m/s), and straight-frame
-`|lat| < oncoming_closing_lat_m` (0.85 m; shared-bend phantoms that only graze
-this bar still lose to oncoming evasion). On that course skip body-sep and Fix B
-κ expansion; also skip engagement-entry LOS / turn extrapolation vetoes so warn
-can promote to brake. Evasion clearance still may suppress. Colliding closing
-targets also earn `certain_geom` for instant engage. `OppositeLaneFilterMirrored`
-stays `Lane.EGO` only.
+`d_miss_rate <= oncoming_closing_dmiss_rate_mps` (−1.5 m/s), straight-frame
+`|lat| < oncoming_closing_lat_m` (0.85 m), and arc inflation
+`d_abs >= |lat| * oncoming_closing_dabs_lat_ratio` (honest adjacent stays
+body-sep; turn-into with inflated `d_abs` still skips). On that course skip
+body-sep and Fix B κ expansion; also skip engagement-entry LOS / turn
+extrapolation vetoes so warn can promote to brake. Evasion clearance still may
+suppress. Colliding closing targets also earn `certain_geom` for instant engage.
+`OppositeLaneFilterMirrored` stays `Lane.EGO` only.
 
 ### `CoDirectionalDivergeFilter`
 
@@ -298,6 +303,14 @@ oncoming is handled by `OppositeLaneFilter`; follow / latched threats and any
 body sample already in the EGO band (trailer swung into path, clip 434f0401)
 are exempt.
 
+**Stationary adjacent straddle.** An angled parked body can put the reference
+pose (or a shallow centreline graze) in `Lane.EGO` while the far end sits in
+the adjacent lane (clip `82acb8e8`: samples ~1.0–3.5 m). When
+`min(d_abs)` in `(stationary_ool_graze_min_m, stationary_ool_graze_max_m]` and
+`max(d_abs)` in `[lane_half_width * stationary_ool_span_scale, lane_separation]`,
+suppress as roadside. Stationary centre scans also use `v.position` instead of the
+body-offset `arc.start`, which otherwise fakes an in-lane centre.
+
 **Rear-overtaker early suppress.** Faster co-directional traffic approaching
 from behind in another lane (`v·ego_fwd > ego_speed` and `dx·ego_fwd < 0`) is
 suppressed *before* the predicted-centre scan. That scan is circular: it
@@ -341,6 +354,13 @@ the correct question for the trustworthy straight case: a real collision brings
 the reference centres to ~0 m, a body-only graze keeps them metres apart. The
 turning branch is unchanged and still suppresses the mid-turn jitter phantom
 (regression `fp_tmp_side_road_right_turn` phase 2, `fp_cross_traffic_completing_turn`).
+
+Optional `tmp_cross_in_corridor_pass`: when enabled, do not graze-suppress if the
+body is already inside `|lat| ≤ lane_half_width` ahead with a closing (or unknown)
+miss rate. Default off: max_evasion fail-closed covers the hard TMP twins without
+the side-road FP cost. `max_evasion_lat_g` also refuses TmpCross suppress when
+straight-frame `|lat| ≥ clear_bar` and required lateral accel exceeds the truck
+budget (physically unavoidable closing).
 
 No imminence / TTB floor is used: the turning phantom persists to `hit ≈ 0`
 (the jittered vehicle sweeps through ego's lane right up to closest approach),
@@ -791,17 +811,19 @@ never qualifies because demand stays under the graded bar and outside the
 0.50 s slam.
 
 For colliding, non-engage-vetoed `certain_geom` targets only,
-`certain_engage_ttb` (default 1.0 s) is an additional qualification OR: if
+`certain_engage_ttb` (default **1.30 s**) is an additional qualification OR: if
 `best_ttb_engage` is under that bar, engage qualifies (and takes the same
 instant certain path). Non-certain geometry still needs the demand bar or the
 0.50 s slam. Warn, FF, vetoes, and `nearcertain` grading are untouched.
 
 Corpus evidence for the new path: seven labelled soft certain FNs sharing that
 TTB-gap story (`030488be`, `ed9df207`, `0da1f6eb`, `b8d308f4`, `541030ee`,
-`e66a2827`, `cbc09fcb`). Prefer a dedicated `certain_engage_ttb` (default **1.25 s**, between the 0.50 s
-slam and `warn_ttb` 1.3) so soft certain rear-ends qualify without opening all
-the way to warn. Re-price against the FP watchlist
-(`15eba13d`, `7add71c9`, `6d23fe39`, `82acb8e8`) when the label set grows.
+`e66a2827`, `cbc09fcb`). Prefer a dedicated `certain_engage_ttb` (between the 0.50 s
+slam and `warn_ttb`) so soft certain rear-ends qualify without opening the
+uncertain bar. Raising to 1.8 s (global or co-dir-only) recovered soft FNs but
+minted ~15 new FPs on the labelled corpus; 1.30 recovers one more soft FN
+(6895548c) with FP flat vs 1.25. Re-price against the
+FP watchlist (`15eba13d`, `7add71c9`, `6d23fe39`, `82acb8e8`) when the label set grows.
 
 ### Oncoming clearance: pose plus measurement
 
@@ -900,7 +922,7 @@ low-speed dangers.
 |------|---------|------|
 | `follow_threat_window_s` | 0.6 s | Trailing kinematic window |
 | `follow_threat_hold_s` | 2.0 s | Hold after kinematic qualification |
-| `follow_threat_min_decel_ms2` | 1.5 m/s² | Min own-decel slope to qualify |
+| `follow_threat_min_decel_ms2` | 0.8 m/s² | Min own-decel slope to qualify |
 
 ### Closed-loop coupling
 

@@ -189,6 +189,17 @@ def _any_body_in_ego_lane(
     ego_arc: ArcPath, target_arcs: list[ArcPath], lane_half_width: float,
 ) -> bool:
     """Any target body centreline sample in ego lane at t=0 (trailer-in-lane rescue)."""
+    return any(
+        d <= lane_half_width
+        for d in _body_centreline_d_abs(ego_arc, target_arcs)
+    )
+
+
+def _body_centreline_d_abs(
+    ego_arc: ArcPath, target_arcs: list[ArcPath],
+) -> list[float]:
+    """Arc-projected |d| for centreline samples along each target body at t=0."""
+    out: list[float] = []
     for arc in target_arcs:
         fx, fz = arc.fwd_x, arc.fwd_z
         back = -arc.back_len
@@ -198,9 +209,31 @@ def _any_body_in_ego_lane(
             px = arc.start_x + s * fx
             pz = arc.start_z + s * fz
             _, d_abs = project_to_ego_arc(ego_arc, px, pz)
-            if d_abs <= lane_half_width:
-                return True
-    return False
+            out.append(d_abs)
+    return out
+
+
+def _stationary_adjacent_straddle(
+    ego_arc: ArcPath, target_arcs: list[ArcPath], cal: AEBCalibration,
+) -> bool:
+    """Parked body only grazes ego lane; far end sits in adjacent (82acb8e8).
+
+    ``min`` must sit in (graze_min, graze_max]: deep occupation stays a threat,
+    and a high min with a far max is a long angled body (5bca), not next-lane.
+    ``max`` capped at ``lane_separation`` so far-field samples do not qualify.
+    """
+    ds = _body_centreline_d_abs(ego_arc, target_arcs)
+    if not ds:
+        return False
+    d_min = min(ds)
+    d_max = max(ds)
+    if d_min <= cal.stationary_ool_graze_min_m:
+        return False
+    if d_min > cal.stationary_ool_graze_max_m:
+        return False
+    if d_max > cal.lane_separation:
+        return False
+    return d_max >= cal.lane_half_width * cal.stationary_ool_span_scale
 
 
 def _dampen_turning_curvature(
@@ -366,15 +399,76 @@ class FilterContext:
 
 # ---- Filter stages ----
 
-def oncoming_closing_into(ctx: "FilterContext", cal: AEBCalibration) -> bool:
-    """Ego turning into oncoming with shrinking CBDR miss and collapsed |lat|."""
+def oncoming_closing_into(
+    ctx: "FilterContext",
+    cal: AEBCalibration,
+    d_abs: float | None = None,
+) -> bool:
+    """Ego turning into oncoming with shrinking CBDR miss and collapsed |lat|.
+
+    Optional ``d_abs`` inflation guard: adjacent head-on with honest arc offset
+    (d_abs/|lat| low) must not skip body-sep; turn-into with inflated d_abs can.
+    """
     if abs(ctx.ego_curvature) < cal.turning_diverge_kappa:
         return False
     rate = getattr(ctx, "d_miss_rate", None)
     if rate is None or rate > cal.oncoming_closing_dmiss_rate_mps:
         return False
     lat = abs(-ctx.dx * ctx.ego_fwd_z + ctx.dz * ctx.ego_fwd_x)
-    return lat < cal.oncoming_closing_lat_m
+    if lat >= cal.oncoming_closing_lat_m:
+        return False
+    if d_abs is not None and lat > 1e-3:
+        if d_abs < lat * cal.oncoming_closing_dabs_lat_ratio:
+            return False
+    return True
+
+
+def _required_evasion_lat_ms2(
+    ctx: "FilterContext", clear_bar: float,
+) -> float | None:
+    """Lateral accel (m/s2) to hold body clearance by closest approach; None if unknown."""
+    rate = getattr(ctx, "d_miss_rate", None)
+    if rate is None:
+        return None
+    lat = abs(-ctx.dx * ctx.ego_fwd_z + ctx.dz * ctx.ego_fwd_x)
+    axial = ctx.dx * ctx.ego_fwd_x + ctx.dz * ctx.ego_fwd_z
+    if axial <= 1.0:
+        return None
+    closing = max(ctx.ego_speed, 0.5)
+    if ctx.head_on:
+        closing += max(ctx.abs_v_speed, 0.0)
+    else:
+        closing = max(ctx.ego_speed - ctx.v.speed * ctx.fwd_dot, 0.5)
+    t_close = axial / max(closing, 0.5)
+    if t_close < 0.15:
+        return 1e6
+    # clear_bar - |lat| - lat_rate * t_close (rate < 0 = miss collapsing).
+    needed = clear_bar - lat - rate * t_close
+    if needed <= 0.0:
+        return 0.0
+    return 2.0 * needed / (t_close * t_close)
+
+
+def _max_evasion_blocks_suppress(
+    ctx: "FilterContext", cal: AEBCalibration, clear_bar: float,
+    d_abs: float | None = None,
+) -> bool:
+    """True: refuse filter suppress (closing needs more than truck max lat-g).
+
+    Pre-collapse only: straight-frame |lat| still outside body clear_bar so
+    soft adjacent (280/887) keeps body-sep; wide closing miss (e09) can refuse.
+    ``d_abs`` reserved for callers; inflation is not required here.
+    """
+    del d_abs  # API symmetry with body-sep callers; unused for now.
+    if cal.max_evasion_lat_g <= 0.0:
+        return False
+    lat = abs(-ctx.dx * ctx.ego_fwd_z + ctx.dz * ctx.ego_fwd_x)
+    if lat < clear_bar:
+        return False
+    a_lat = _required_evasion_lat_ms2(ctx, clear_bar)
+    if a_lat is None:
+        return False
+    return a_lat > cal.max_evasion_lat_g
 
 
 class RangeFilter:
@@ -477,7 +571,11 @@ class OppositeLaneFilter:
         self._cal = cal
 
     def apply(self, ctx: FilterContext) -> FilterResult:
-        if not ctx.head_on or ctx.abs_v_speed <= 1.0:
+        if ctx.abs_v_speed <= 1.0:
+            return _PASS
+        # Body-sep for near_head_on (6a35 collide before fd crosses head_on_dot);
+        # full oncoming evasion arcs stay head_on-only.
+        if not ctx.head_on and not ctx.near_head_on:
             return _PASS
         cal = self._cal
 
@@ -485,22 +583,26 @@ class OppositeLaneFilter:
         # OPPOSITE_OR_OUTER = vehicle is in its own lane (or outer), not in ego's lane.
         own_lane = ctx.lane in (Lane.OPPOSITE_OR_OUTER, Lane.OFF_ROAD)
 
-        if own_lane:
-            # Bodies already physically separated: direct suppress (no evasion arc needed).
-            # Pose and measurement must agree on the clearance (README oncoming clearance).
-            v_hw_coll = max(ctx.v.size.width / 2.0 - 0.1, 0.3)
-            _, d_abs = project_to_ego_arc(ctx.ego_arc, ctx.v.position.x, ctx.v.position.z)
-            clear_bar = ctx.ego_hw + v_hw_coll
-            # Turn-into-path: shrinking CBDR miss + collapsed |lat| (README).
-            closing_into = oncoming_closing_into(ctx, cal)
-            measured_clear = (
-                ctx.d_miss is None
-                or ctx.d_miss >= clear_bar * cal.oncoming_body_sep_miss_scale
-            )
-            if d_abs >= clear_bar and measured_clear and not closing_into:
-                return _suppress("OppositeLaneFilter")
-        else:
-            closing_into = False
+        closing_into = False
+        v_hw_coll = max(ctx.v.size.width / 2.0 - 0.1, 0.3)
+        _, d_abs = project_to_ego_arc(ctx.ego_arc, ctx.v.position.x, ctx.v.position.z)
+        clear_bar = ctx.ego_hw + v_hw_coll
+        closing_into = oncoming_closing_into(ctx, cal, d_abs=d_abs)
+        measured_clear = (
+            ctx.d_miss is None
+            or ctx.d_miss >= clear_bar * cal.oncoming_body_sep_miss_scale
+        )
+        soft = cal.oncoming_body_sep_soft_m
+        pose_clear = d_abs >= (clear_bar - soft)
+        # Soft bar also when arc lane reads EGO (corner-pull adjacent, 280/887).
+        if (pose_clear and measured_clear and not closing_into
+                and (own_lane or soft > 0.0)
+                and not _max_evasion_blocks_suppress(
+                    ctx, cal, clear_bar, d_abs=d_abs)):
+            return _suppress("OppositeLaneFilter")
+
+        if not ctx.head_on:
+            return _PASS
 
         for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
             # Determine effective cross padding (Fix A equivalent)
@@ -723,6 +825,20 @@ class TmpCrossTrafficFilter:
         if ctx.abs_v_speed < 1.0:
             return _PASS
         cal = self._cal
+        # In-corridor closer: body already in ego lane band; do not graze-suppress.
+        # Require closing miss (or unknown rate) so completing side-road sweeps stay suppressed.
+        if cal.tmp_cross_in_corridor_pass:
+            lat = abs(-ctx.dx * ctx.ego_fwd_z + ctx.dz * ctx.ego_fwd_x)
+            axial = ctx.dx * ctx.ego_fwd_x + ctx.dz * ctx.ego_fwd_z
+            rate = getattr(ctx, "d_miss_rate", None)
+            closing = rate is None or rate <= cal.oncoming_closing_dmiss_rate_mps
+            if lat <= cal.lane_half_width and axial > 0.0 and closing:
+                return _PASS
+        v_hw_coll = max(ctx.v.size.width / 2.0 - 0.1, 0.3)
+        clear_bar = ctx.ego_hw + v_hw_coll
+        _, d_abs = project_to_ego_arc(ctx.ego_arc, ctx.v.position.x, ctx.v.position.z)
+        if _max_evasion_blocks_suppress(ctx, cal, clear_bar, d_abs=d_abs):
+            return _PASS
         straight = abs(ctx.v_curvature) < cal.turning_diverge_kappa
         any_hit = False
         for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
@@ -788,6 +904,10 @@ class OutOfLaneParallelFilter:
             return _PASS
         if ctx.v.id in ctx.follow_threat_ids or ctx.v.id in ctx.latched_threat_ids:
             return _PASS
+        # Angled parked body: shallow ego-lane graze with far end adjacent.
+        if (stationary and _stationary_adjacent_straddle(
+                ctx.ego_arc, ctx.all_target_arcs, cal)):
+            return _suppress("OutOfLaneParallelFilter")
         if ctx.lane == Lane.EGO:
             return _PASS
         if _any_body_in_ego_lane(ctx.ego_arc, ctx.all_target_arcs, cal.lane_half_width):
@@ -798,15 +918,21 @@ class OutOfLaneParallelFilter:
                 and ctx.dx * ctx.ego_fwd_x + ctx.dz * ctx.ego_fwd_z < 0.0):
             return _suppress("OutOfLaneParallelFilter")
         # Predicted center must stay out of ego's lane across the horizon.
+        # Stationary: use pose (arc.start is body-offset and can fake an in-lane centre).
         n = max(1, cal.out_of_lane_scan_samples)
         for base_target_arc in ctx.all_target_arcs:
             horizon = base_target_arc.horizon
             for k in range(n + 1):
-                t = horizon * k / n
-                px, pz = base_target_arc.position_at_time(t)
+                if stationary:
+                    px, pz = ctx.v.position.x, ctx.v.position.z
+                else:
+                    t = horizon * k / n
+                    px, pz = base_target_arc.position_at_time(t)
                 _, d_abs = project_to_ego_arc(ctx.ego_arc, px, pz)
                 if d_abs <= cal.lane_half_width:
                     return _PASS
+                if stationary:
+                    break
         return _suppress("OutOfLaneParallelFilter")
 
 

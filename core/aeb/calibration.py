@@ -96,6 +96,10 @@ class AEBCalibration:
 
     # OutOfLaneParallelFilter horizon lane scan count; see README OutOfLaneParallelFilter.
     out_of_lane_scan_samples: int = 10
+    # Stationary angled adjacent: shallow graze (min d_abs) with far end out of lane.
+    stationary_ool_graze_min_m: float = 0.90
+    stationary_ool_graze_max_m: float = 1.50
+    stationary_ool_span_scale: float = 1.5
 
     # Oncoming evasion kappa scaling
     opposite_lane_kappa_scale: float = 2.0
@@ -109,6 +113,18 @@ class AEBCalibration:
     # 0.85 recovers e0fd confirm span; 7c635440 id162 floors ~0.72 but stays TN
     # via remaining evasion (corpus sweep).
     oncoming_closing_lat_m: float = 0.85
+    # Closing skip requires arc inflation vs |lat|; kills false closing on
+    # adjacent head-on (6a35 engage d_abs/|lat|~9.3) while e0fd (~30) still skips.
+    oncoming_closing_dabs_lat_ratio: float = 10.0
+    # Soft pose clearance under clear_bar for OppositeLane body-sep (m).
+    # 0.80 locks 887 engage (d_abs 1.58 vs clear ~2.32) and 280 (1.8 vs ~2.31).
+    oncoming_body_sep_soft_m: float = 0.80
+    # Fail-closed: do not suppress Opp/TmpCross when required a_lat exceeds this.
+    # Only when straight |lat| >= clear_bar (wide pre-collapse); soft adjacent stays.
+    max_evasion_lat_g: float = 0.35 * 9.81
+    # TmpCross: pass when body already in ego lane band. Off: +FP without new FN win
+    # once max_evasion recovers cca/e09.
+    tmp_cross_in_corridor_pass: bool = False
 
     # Fix A: near-head-on ghost-arc reduction
     near_head_on_cross_scale: float = 0.3
@@ -118,14 +134,14 @@ class AEBCalibration:
     aeb_target_deadband_ms2: float = 0.4
     aeb_target_refresh_min_s: float = 0.20
     aeb_target_rate_ms3: float = 8.0
-    # aeb_engage_frac 0.85 from 2026-07-19 scan; 0.9 rejected (README §7 rejected tunings).
+    # aeb_engage_frac 0.85 from 2026-07-19 scan; 0.80 rejected (full corpus +8 FP).
     aeb_engage_frac: float = 0.85
     # Geometry-graded: aligned in-lane traffic skips the uncertainty hedge.
     # Pure sensitivity trade, no flat band; see README geometry-graded engage.
     aeb_engage_frac_certain: float = 0.70
     # Certain-geom soft rear-ends: warn via ttb < warn_ttb while v^2/2d stays
     # below the 0.70 bar and outside the 0.50 s slam (README certain-TTB bridge).
-    certain_engage_ttb: float = 1.25
+    certain_engage_ttb: float = 1.30
     aeb_disarm_frac: float = 0.45
     # Geometry latch while colliding unbraked ttc inside window (anti-pumping; README).
     disarm_hold_ttc_s: float = 3.0
@@ -136,7 +152,7 @@ class AEBCalibration:
     aeb_min_engage_speed_kmh: float = 5.0
     # Tiered engage confirm windows; brake-TTB slam exempt (README continuous-decel).
     aeb_engage_confirm_s: float = 0.06
-    aeb_engage_confirm_oblique_s: float = 0.30
+    aeb_engage_confirm_oblique_s: float = 0.40
     aeb_certain_fwd_dot: float = 0.90
     # Oblique warn must lead oblique engage by >= 0.1 s (README warn persistence).
     aeb_warn_confirm_oblique_s: float = 0.10
@@ -175,7 +191,7 @@ class AEBCalibration:
     follow_threat_window_s: float = 0.6
     follow_threat_min_span_s: float = 0.45
     follow_threat_min_samples: int = 8
-    follow_threat_min_decel_ms2: float = 1.5
+    follow_threat_min_decel_ms2: float = 0.8
     follow_threat_min_closing_ms: float = 0.5
     follow_threat_min_lat_converge_ms: float = 0.3
     follow_threat_hold_s: float = 2.0

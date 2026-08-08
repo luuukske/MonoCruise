@@ -162,13 +162,38 @@ def test_body_separation_shortcut_yields_to_a_measured_collision_course():
     )
 
 
-def test_body_separation_yields_to_turn_into_path_closing():
+def test_body_separation_yields_to_turn_into_path_closing(monkeypatch):
     """Inflated arc d_abs with collapsing |lat| and shrinking CBDR miss."""
+    import core.aeb.filters as filters_mod
+
     ctx = _oncoming_ctx(d_miss=4.0, lateral_m=0.1)
     ctx.ego_curvature = 0.05
     ctx.d_miss_rate = -5.0
+    # Honest adjacent has d_abs~|lat|; turn-into inflates arc offset (~30x).
+    monkeypatch.setattr(
+        filters_mod, "project_to_ego_arc",
+        lambda arc, x, z: (40.0, 3.0),
+    )
+    # Inflated turn-into: d_abs/|lat| must clear the ratio gate (DEFAULT=10).
+    assert 3.0 >= 0.1 * CAL.oncoming_closing_dabs_lat_ratio
     res = OppositeLaneFilter(CAL).apply(ctx)
     assert not res.suppressed
+
+
+def test_body_separation_keeps_honest_adjacent_despite_closing_rate(monkeypatch):
+    """Low d_abs/|lat| must not skip body-sep (6a35-style adjacent)."""
+    import core.aeb.filters as filters_mod
+
+    ctx = _oncoming_ctx(d_miss=5.0, lateral_m=0.8)
+    ctx.ego_curvature = 0.05
+    ctx.d_miss_rate = -10.0
+    monkeypatch.setattr(
+        filters_mod, "project_to_ego_arc",
+        lambda arc, x, z: (40.0, 3.5),
+    )
+    # 3.5/0.8 = 4.375 < ratio 10 → closing false → body-sep.
+    res = OppositeLaneFilter(CAL).apply(ctx)
+    assert res.suppressed and res.reason == "OppositeLaneFilter"
 
 
 def test_body_separation_keeps_shared_bend_when_lat_floors():

@@ -14,7 +14,7 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `full_brake_decel` | 7.8 m/s² | Full brake deceleration |
 | `warn_ttb` | 1.3 s | WARN threshold |
 | `brake_ttb` | 0.2 s | BRAKE threshold |
-| `certain_engage_ttb` | 1.25 s | Certain-geom soft rear-end engage OR: `best_ttb_engage` under this qualifies (between the 0.50 s slam and warn_ttb); see README certain-TTB bridge |
+| `certain_engage_ttb` | 1.30 s | Certain-geom soft rear-end engage OR: `best_ttb_engage` under this qualifies (between the 0.50 s slam and warn_ttb); see README certain-TTB bridge |
 | `ego_half_width` | 1.15 m | Ego arc corridor half-width |
 | `ego_half_length` | 3.0 m | Ego capsule half-length (body extents via `capsule_extents`; collision segments are cap-aligned: extents minus half_width, see `core/radar/README.md` §8) |
 | `corridor_margin` | 0.5 m | Corridor padding for crossing-path sample uncertainty |
@@ -23,12 +23,20 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `capsule_parallel_margin_scale` | 0.3 | Near-parallel capsule contacts use `margin * scale` blended by heading sine toward full margin at perpendicular; kills adjacent-lane side-graze FPs (ab524f87 / 29bf31b8). 1.0 disables |
 | `lane_half_width` | 1.95 m | EGO lane boundary |
 | `lane_separation` | 3.9 m | Road lane pitch |
+| `out_of_lane_scan_samples` | 10 | OutOfLaneParallelFilter horizon lane scan count |
+| `stationary_ool_graze_min_m` | 0.90 m | Stationary straddle: closest centreline sample must stay above this |
+| `stationary_ool_graze_max_m` | 1.50 m | Stationary straddle: closest sample must stay at or below this |
+| `stationary_ool_span_scale` | 1.5 | Stationary straddle: farthest sample ≥ `lane_half_width ×` this |
 | `head_on_dot` | -0.7 | `head_on` flag threshold |
 | `co_directional_dot` | 0.7 | `co_directional` flag threshold |
 | `evasion_g` | 0.08×9.81 | Ego evasion lateral accel |
 | `oncoming_body_sep_miss_scale` | 0.25 | OppositeLane body-sep also needs measured miss ≥ clear_bar × this |
+| `oncoming_body_sep_soft_m` | 0.80 m | Pose clear when `d_abs ≥ clear_bar − soft` (EGO lane allowed) |
 | `oncoming_closing_dmiss_rate_mps` | −1.5 m/s | Turn-into-path: miss closing this fast with ego turning |
 | `oncoming_closing_lat_m` | 0.85 m | Turn-into-path: straight `|lat|` must collapse under this |
+| `oncoming_closing_dabs_lat_ratio` | 10.0 | Turn-into also needs `d_abs ≥ \|lat\| × ratio` (adjacent vs inflated) |
+| `max_evasion_lat_g` | 0.35×9.81 | Refuse Opp/TmpCross suppress when required `a_lat` exceeds this and `|lat| ≥ clear_bar` |
+| `tmp_cross_in_corridor_pass` | false | TmpCross: pass when `|lat| ≤ lane_half_width` ahead (and miss closing) |
 | `evasion_max_dkappa` | 0.008 /m | Max curvature offset for evasion arcs |
 | `opposite_lane_kappa_scale` | 2.0 | Kappa multiplier when target in own lane |
 | `turning_diverge_kappa` | 0.007 /m | Corner threshold for Fix-C/D conditions; also the straight/turning split in `TmpCrossTrafficFilter` |
@@ -36,7 +44,7 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `co_same_turn_lookahead_scale` | 0.5 | Extended lookahead fraction of horizon |
 | `diverge_dip_samples` | 8 | `_is_approaching` window samples for the in-lane pass-through dip check |
 | `aeb_engage_confirm_s` | 0.06 s | Sustained-qualification wait for near-certain engagement entries (3rd tick at 30 Hz) |
-| `aeb_engage_confirm_oblique_s` | 0.20 s | Sustained-qualification wait for oblique out-of-lane entries (extrapolation-fragile class) |
+| `aeb_engage_confirm_oblique_s` | 0.40 s | Sustained-qualification wait for oblique out-of-lane entries (extrapolation-fragile class); 0.40 silences three FPs on the labelled corpus for +2 FN |
 | `aeb_warn_confirm_oblique_s` | 0.10 s | Warn persistence for oblique out-of-lane threats; keeps ≥ 0.1 s warn lead ahead of an oblique engagement |
 | `aeb_warn_frac` | 0.5 | Fraction of `effective_max` at which `AEB_warn` rises |
 | `aeb_warn_near_full_frac` | 0.85 | Demand fraction above which the warn cue survives the user-braking suppression. Currently equal to `aeb_engage_frac`, so any engagement warns even while the driver brakes; raising it restores a quiet band but silences the cue on under-braking drivers |
