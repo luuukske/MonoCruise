@@ -785,6 +785,12 @@ class AEBThread(BaseThread):
             self._cal.aeb_confirm_max_gap_frames,
             self._cal.aeb_warn_confirm_oblique_s,
         )
+        # Longer warn occupancy for fully engage-vetoed out-of-lane sets (README).
+        self._warn_vetoed_confirm = OccupancyConfirm(
+            self._cal.aeb_confirm_occupancy,
+            self._cal.aeb_confirm_max_gap_frames,
+            self._cal.aeb_warn_confirm_vetoed_s,
+        )
         self._published_target_ms2: float = 0.0
         self._last_target_change_mono: float = 0.0
         self._prev_loop_mono: float | None = None
@@ -1231,6 +1237,8 @@ class AEBThread(BaseThread):
         # certain_geom / nearcertain_geom drive tiered confirm (README tiered entry).
         certain_geom_ids: set[int] = set()
         nearcertain_geom_ids: set[int] = set()
+        # Colliding ids whose pose sits in ego's lane band, for the warn gate.
+        ego_lane_colliding_ids: set[int] = set()
         los_vetoed_ids: set[int] = set()
         # Superset of los_vetoed_ids: every target barred from engagement entry.
         engage_vetoed_ids: set[int] = set()
@@ -1523,6 +1531,8 @@ class AEBThread(BaseThread):
 
                     unbraked_ttc = unbraked_hit[0]
                     colliding_ids.add(v.id)
+                    if ctx.lane == Lane.EGO:
+                        ego_lane_colliding_ids.add(v.id)
                     aligned = abs(ctx.fwd_dot) >= cal.aeb_certain_fwd_dot
                     # Pose fixes a lane only inside the range an unseen bend
                     # cannot span (README lane confidence range).
@@ -1917,15 +1927,33 @@ class AEBThread(BaseThread):
         warn_raw = bool(warn_by_decel or warn_by_ttb)
 
         # Oblique warn occupancy gate; instant paths unchanged (README warn persistence).
+        # Windows are refreshed per frame so a candidate calibration can move them.
+        self._warn_confirm.window_s = cal.aeb_warn_confirm_oblique_s
         self._warn_confirm.observe(now_mono, warn_raw)
+
+        # Every colliding target vetoed out of engagement and out of ego's lane
+        # is the extrapolation-phantom class: warn waits on a longer window.
+        warn_vetoed_only = bool(colliding_ids) and all(
+            vid in engage_vetoed_ids and vid not in ego_lane_colliding_ids
+            for vid in colliding_ids
+        )
+        self._warn_vetoed_confirm.window_s = cal.aeb_warn_confirm_vetoed_s
+        self._warn_vetoed_confirm.observe(now_mono, warn_raw and warn_vetoed_only)
+
         if warn_raw:
+            warn_latched = any(
+                vid in self._latched_threat_ids for vid in colliding_ids
+            )
             warn_instant = (
                 self._engaged
                 or brake_ttb_active
                 or any(vid in nearcertain_geom_ids for vid in colliding_ids)
-                or any(vid in self._latched_threat_ids for vid in colliding_ids)
+                or warn_latched
             )
             aeb_warn = warn_instant or self._warn_confirm.confirmed(now_mono)
+            if (aeb_warn and warn_vetoed_only and not self._engaged
+                    and not brake_ttb_active and not warn_latched):
+                aeb_warn = self._warn_vetoed_confirm.confirmed(now_mono)
         else:
             aeb_warn = False
 
@@ -2056,6 +2084,7 @@ class AEBThread(BaseThread):
         self._engaged = False
         self._engage_confirm.reset()
         self._warn_confirm.reset()
+        self._warn_vetoed_confirm.reset()
         self._risk_confirm.clear()
         self._published_target_ms2 = 0.0
         self._last_target_change_mono = 0.0

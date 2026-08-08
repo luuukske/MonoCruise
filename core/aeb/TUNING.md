@@ -49,8 +49,9 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `diverge_dip_samples` | 8 | `_is_approaching` window samples for the in-lane pass-through dip check |
 | `aeb_engage_confirm_s` | 0.06 s | Sustained-qualification wait for near-certain engagement entries (3rd tick at 30 Hz) |
 | `aeb_engage_confirm_oblique_s` | 0.40 s | Sustained-qualification wait for oblique out-of-lane entries (extrapolation-fragile class); 0.40 silences three FPs on the labelled corpus for +2 FN |
-| `aeb_warn_confirm_oblique_s` | 0.10 s | Warn persistence for oblique out-of-lane threats; keeps ≥ 0.1 s warn lead ahead of an oblique engagement |
-| `aeb_warn_frac` | 0.5 | Fraction of `effective_max` at which `AEB_warn` rises |
+| `aeb_warn_confirm_oblique_s` | 0.30 s | Warn persistence for oblique out-of-lane threats; keeps ≥ 0.1 s warn lead ahead of an oblique engagement. 0.30 silences short clear-pass flicker (the 2 s head-on bend unit case no longer warns). Pair with `aeb_warn_confirm_vetoed_s` and `aeb_warn_frac` |
+| `aeb_warn_confirm_vetoed_s` | 1.00 s | Warn persistence when **every** colliding target is engage-vetoed **and** outside ego's lane band: the extrapolation-phantom class. Latency, never silence. Saturates at 1.0 s |
+| `aeb_warn_frac` | 0.60 | Fraction of `effective_max` at which `AEB_warn` rises via demand. Raised from 0.50 with the persistence windows to cut highway oncoming beeps |
 | `aeb_warn_near_full_frac` | 0.85 | Demand fraction above which the warn cue survives the user-braking suppression. Currently equal to `aeb_engage_frac`, so any engagement warns even while the driver brakes; raising it restores a quiet band but silences the cue on under-braking drivers |
 | `user_brake_latch` | 0.12 | Top of the FF-assist ramp: at or above this the sub-engagement assist applies at full weight |
 | `ff_assist_ramp_lo` | 0.03 | Bottom of the FF-assist ramp; below it the assist contributes nothing. Matches `_USER_BRAKE_LATCH_THRESHOLD` so one notion of "the driver is braking" governs both the warn cue and the assist |
@@ -58,6 +59,8 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `aeb_confirm_max_gap_frames` | 2 | Max consecutive unqualified frames tolerated before a confirm streak drops; absorbs isolated collision-grid / TMP-jitter dropouts |
 | `aeb_certain_fwd_dot` | 0.90 | `|fwd_dot|` above which an in-lane colliding target is "certain" and skips the confirm wait |
 | `corner_entry_min_road_bend` | 0.10 rad | Min ego↔tangent angle for Mode-B suppression |
+
+**TODO (warn comfort, residual false_warn ~42 on the labelled store):** the mass that remains is still mostly highway oncoming flicker where `nearcertain_geom` grants an instant warn before the veto track is long enough, or demand clears 0.60 of capacity for a few ticks. Persistence alone cannot finish the job without eating more genuine warn lead. Next work should tighten the *raw* oncoming warn condition (or the nearcertain instant path for out-of-lane / engage-vetoed ids), not raise these windows further. Context and rejected levers: `tools/aeb_corpus_run/progress.md` (section "2026-08-08 warn gate"), `tools/aeb_corpus_run/hypotheses.md`, offline replay `tools/aeb_corpus_run/_sim_warn_rules.py`, feature dump `_probe_warn_feats.py`, live score `_verify_warn_knob.py`.
 | `corner_entry_min_lateral` | 0.4 m | Min |lat_signed| to claim "off ego axis" (Mode B) |
 | `corner_entry_lateral_tol` | 1.5 m | Chord-offset tolerance for arc-consistency check (Mode B) |
 

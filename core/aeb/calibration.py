@@ -148,7 +148,6 @@ class AEBCalibration:
     aeb_disarm_frac: float = 0.45
     # Geometry latch while colliding unbraked ttc inside window (anti-pumping; README).
     disarm_hold_ttc_s: float = 3.0
-    aeb_warn_frac: float = 0.5
     aeb_warn_near_full_frac: float = 0.85
     brake_actuator_lag_s: float = 0.10
     # New engagements only fire when |ego_speed| is above this threshold.
@@ -158,7 +157,13 @@ class AEBCalibration:
     aeb_engage_confirm_oblique_s: float = 0.40
     aeb_certain_fwd_dot: float = 0.90
     # Oblique warn must lead oblique engage by >= 0.1 s (README warn persistence).
-    aeb_warn_confirm_oblique_s: float = 0.10
+    # 0.30 trades short clear-pass cues for fewer phantom beeps; see TUNING.md TODO.
+    aeb_warn_confirm_oblique_s: float = 0.30
+    # Fully engage-vetoed out-of-lane sets warn only after this occupancy window.
+    # Latency, never silence: a persisting course still warns (README).
+    aeb_warn_confirm_vetoed_s: float = 1.00
+    # Demand bar for warn_by_decel; 0.60 with the windows above ~42 false_warn.
+    aeb_warn_frac: float = 0.60
 
     # OccupancyConfirm lapse tolerance; shared by risk/engage/warn (README).
     aeb_confirm_occupancy: float = 0.6

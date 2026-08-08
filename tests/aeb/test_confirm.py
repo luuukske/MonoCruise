@@ -105,6 +105,24 @@ def test_calibration_preserves_warn_lead_invariant():
             <= CAL.aeb_engage_confirm_oblique_s - 0.1 + 1e-9)
 
 
+def test_vetoed_warn_window_outlasts_the_oblique_one():
+    # The fully-vetoed out-of-lane class waits longer than an ordinary oblique warn.
+    assert CAL.aeb_warn_confirm_vetoed_s > CAL.aeb_warn_confirm_oblique_s
+
+
+def test_vetoed_warn_window_delays_but_never_silences():
+    # Latency, never silence: a course that persists past the window still warns.
+    frame = _first_confirm_frame([True] * 60, CAL.aeb_warn_confirm_vetoed_s)
+    assert frame is not None
+    assert frame * _DT >= CAL.aeb_warn_confirm_oblique_s
+
+
+def test_vetoed_warn_window_drops_the_blink_pattern():
+    # The phantom class arrives as isolated blips; those must never confirm.
+    pattern = [True, False, False] * 30
+    assert _first_confirm_frame(pattern, CAL.aeb_warn_confirm_vetoed_s) is None
+
+
 def test_window_can_shrink_and_confirm_earlier():
     # Shorter near-certain engage window can confirm immediately after oblique streak built.
     oc = _new(CAL.aeb_engage_confirm_oblique_s)
