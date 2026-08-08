@@ -11,8 +11,11 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.0-preview.14] - 2026-08-09
+Emergency update addressing an elevated rate of false warnings.
 ### Fixed
-- **Collision warning beeped at oncoming traffic that passed cleanly**: on open roads a car coming the other way could set off a short beep from tens of metres away, even though MonoCruise had already decided not to brake for it. Those brief alerts are much rarer now unless the vehicle really keeps coming at you. On the labelled clip set, nuisance beeps are down about **65%**, with no change to any genuine emergency brake.
+- **Collision warning beeped at oncoming traffic that passed cleanly**: oncoming cars could trigger a short beep from far away, even when no brake was needed. Now, alerts only sound if the vehicle is really coming toward you.
 
 ## [1.1.0-preview.13] - 2026-08-08
 ### Fixed
