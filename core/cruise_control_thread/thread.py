@@ -29,6 +29,11 @@ _CC_DISARM_PENDING_TIMEOUT_S = 5.0
 _CC_OVERRIDE_GAS_RELEASE = 0.02
 _CC_OVERRIDE_SPEED_MARGIN_KMH = 2.0
 
+# Neutral: CC stays engaged (manual shift-through-N), but gas bids are cut.
+# Popup waits this long so brief shift flashes never spam the driver.
+_CC_NEUTRAL_GAS_POPUP_DWELL_S = 2.0
+_CC_NEUTRAL_GAS_POPUP_COOLDOWN_S = 2.0
+
 # Button timing (legacy MonoCruise main_cruise_control)
 _LONG_PRESS_DEC_INC_FIRST_S = 0.3
 _LONG_PRESS_DEC_INC_REPEAT_S = 0.6
@@ -90,6 +95,8 @@ class CruiseControlThread(BaseThread):
         # Rate-limited UI messages
         self._last_assign_warn_mono: float = 0.0
         self._last_block_msg_mono: float = 0.0
+        self._neutral_since_mono: float | None = None
+        self._last_neutral_gas_popup_mono: float = 0.0
 
     def setup(self) -> None:
         self._prev_loop_mono = time.monotonic()
@@ -138,8 +145,9 @@ class CruiseControlThread(BaseThread):
             all_assigned = self._all_cc_buttons_assigned()
 
             # Block-message: warn when user presses inc/start but truck is in
+            # park or reverse (neutral no longer blocks engage; gas is cut instead).
             if connected and Settings.cc_mode == "Cruise control" and (cc_inc or cc_start):
-                if self._park_or_gear_blocks_cc(
+                if self._park_or_reverse_blocks_cc(
                     tel["park_brake"], tel["gear_dashboard"]
                 ):
                     if now - self._last_block_msg_mono > 2.0:
@@ -216,6 +224,7 @@ class CruiseControlThread(BaseThread):
             # Dispatch by mode.
             if mode == "Speed limiter":
                 self._cc_user_override = False
+                self._neutral_since_mono = None
                 # CC's button-set target wins; global limit is the always-on fallback
                 # when no target has been set via the buttons.
                 if self._cc_ctrl.enabled and self._cc_ctrl.target_speed_kmh is not None:
@@ -255,6 +264,9 @@ class CruiseControlThread(BaseThread):
                 else:
                     self._acc_ctrl.reset()
                     acc_out = LongOutput(None, False)
+
+                # Manual shift flashes N; keep CC on, cut gas, warn after dwell.
+                cc_out, acc_out = self._apply_neutral_gas_hold(ctx, cc_out, acc_out)
 
             wanted_accel, commanding, winner = self._arbitrate_named(
                 ("cc", cc_out), ("limiter", limiter_out), ("acc", acc_out),
@@ -343,8 +355,12 @@ class CruiseControlThread(BaseThread):
             return 0.0
         return max(float(x) for x in recent)
 
+    def _park_or_reverse_blocks_cc(self, park_brake: bool, gear_dashboard: int) -> bool:
+        """Park brake or reverse. Neutral no longer blocks: gas is cut instead."""
+        return bool(park_brake) or gear_dashboard < 0
+
     def _read_auto_neutral_holding(self) -> bool:
-        """True while sending_thread's auto-neutral owns the gearbox. See `core/cruise_control_thread/README.md`."""
+        """True while sending_thread's auto-neutral owns the gearbox. See README."""
         try:
             st = registry.get_thread("sending_thread")
         except KeyError:
@@ -357,11 +373,45 @@ class CruiseControlThread(BaseThread):
         except (AttributeError, KeyError):
             return False
 
-    def _park_or_gear_blocks_cc(self, park_brake: bool, gear_dashboard: int) -> bool:
-        """Park brake, reverse, or a neutral NOT commanded by auto-neutral."""
-        if park_brake or gear_dashboard < 0:
-            return True
-        return gear_dashboard == 0 and not self._read_auto_neutral_holding()
+    @staticmethod
+    def _cut_positive_gas_bid(out: LongOutput) -> tuple[LongOutput, bool]:
+        """Clamp a positive m/s² bid to 0. Returns (out, True) if gas was cut."""
+        if out.active and out.wanted_ms2 is not None and out.wanted_ms2 > 0.0:
+            return LongOutput(0.0, True), True
+        return out, False
+
+    def _apply_neutral_gas_hold(
+        self, ctx: LongCtx, cc_out: LongOutput, acc_out: LongOutput
+    ) -> tuple[LongOutput, LongOutput]:
+        """Keep CC on in N; cut gas; popup after dwell. See README."""
+        in_neutral = ctx.gear_dashboard == 0
+        cc_on = self._cc_ctrl.enabled
+        if not (in_neutral and cc_on and ctx.connected):
+            self._neutral_since_mono = None
+            return cc_out, acc_out
+
+        # Auto-neutral needs the published launch bid (>0.25 m/s²) to shift
+        # back to drive; clamping here would leave the truck stuck in N.
+        if self._read_auto_neutral_holding():
+            self._neutral_since_mono = None
+            return cc_out, acc_out
+
+        if self._neutral_since_mono is None:
+            self._neutral_since_mono = ctx.now
+
+        cc_out, cc_cut = self._cut_positive_gas_bid(cc_out)
+        acc_out, acc_cut = self._cut_positive_gas_bid(acc_out)
+        cut_gas = cc_cut or acc_cut
+
+        dwell_ok = (ctx.now - self._neutral_since_mono) >= _CC_NEUTRAL_GAS_POPUP_DWELL_S
+        cooldown_ok = (
+            ctx.now - self._last_neutral_gas_popup_mono
+        ) >= _CC_NEUTRAL_GAS_POPUP_COOLDOWN_S
+        if cut_gas and dwell_ok and cooldown_ok:
+            self._last_neutral_gas_popup_mono = ctx.now
+            logger.info("CC can't accelerate in neutral", extra={"popup": True})
+
+        return cc_out, acc_out
 
     def _read_aeb_brake(self) -> bool:
         try:
@@ -413,7 +463,7 @@ class CruiseControlThread(BaseThread):
         cruise_mode = Settings.cc_mode == "Cruise control"
         block_inc_start = (
             cruise_mode
-            and self._park_or_gear_blocks_cc(
+            and self._park_or_reverse_blocks_cc(
                 tel["park_brake"], tel["gear_dashboard"]
             )
         )
@@ -631,7 +681,7 @@ class CruiseControlThread(BaseThread):
             self.data.active_controller = active_ctrl
 
     def _handle_cc_disengage_conditions(self, ctx: LongCtx) -> None:
-        """Disengage CC on user brake, park/gear, or crash-then-stop. See `core/cruise_control_thread/README.md`."""
+        """Disengage CC on user brake, park/reverse, or crash-then-stop. See `core/cruise_control_thread/README.md`."""
         cc = self._cc_ctrl
 
         if cc.enabled:
@@ -646,7 +696,7 @@ class CruiseControlThread(BaseThread):
         if (
             cc.enabled
             and ctx.connected
-            and self._park_or_gear_blocks_cc(ctx.park_brake, ctx.gear_dashboard)
+            and self._park_or_reverse_blocks_cc(ctx.park_brake, ctx.gear_dashboard)
         ):
             cc.disable()
             if ctx.park_brake:

@@ -12,6 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Fixed
+- **Cruise control turned off when shifting a manual**: simulated gearboxes flash neutral between gears and that used to cancel cruise. Cruise now stays on, just will not accelerate in neutral, and tells you after a couple of seconds if you are still in N.
 - **AEB braked for traffic that was going to miss in the next lane**: oncoming or parked vehicles beside you could still look like a hit when the road bent or the body only grazed your lane line. Clear next-lane passes are left alone.
 - **AEB stayed quiet when you could not steer out of a closing vehicle**: a target already too close to dodge with a normal steer could still be treated as a safe miss. Those closings now get the brake.
 

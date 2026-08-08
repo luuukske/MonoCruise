@@ -267,3 +267,91 @@ def test_unassigned_buttons_do_not_engage_cc(rig, monkeypatch):
     monkeypatch.setattr(settings, "cc_inc_button", None)
     _press(pedal, "cc_inc_held", thread)
     assert thread._cc_ctrl.enabled is False
+
+
+def test_neutral_does_not_disengage_cc(rig):
+    """Simulated manuals flash N between gears; that must not cancel cruise."""
+    thread, tel, _, _, _ = rig
+    _engage_cc(thread)
+    thread.loop()
+    assert thread._cc_ctrl.enabled is True
+
+    tel.data.set(gear_dashboard=0)
+    thread.loop()
+    assert thread._cc_ctrl.enabled is True
+
+
+def test_neutral_cuts_cc_gas_but_keeps_brake_authority(rig):
+    thread, tel, _, _, _ = rig
+    _engage_cc(thread, TARGET_KMH)
+    # Below target so the set-speed PID asks for positive accel.
+    tel.data.set(speed=(TARGET_KMH - 15.0) / 3.6, gear_dashboard=1)
+    thread.loop()
+    assert thread.data.wanted_accel_ms2 > 0.0
+
+    tel.data.set(gear_dashboard=0)
+    thread.loop()
+    assert thread._cc_ctrl.enabled is True
+    assert thread.data.wanted_accel_ms2 == pytest.approx(0.0)
+
+
+def test_auto_neutral_holding_allows_cc_launch_bid_in_neutral(rig):
+    """Auto-neutral exits N when commanded_accel exceeds its launch threshold."""
+    thread, tel, _, sending, _ = rig
+    _engage_cc(thread, TARGET_KMH)
+    tel.data.set(speed=(TARGET_KMH - 15.0) / 3.6, gear_dashboard=0)
+    sending.data.set(auto_neutral_holding=True)
+    thread.loop()
+    assert thread._cc_ctrl.enabled is True
+    assert thread.data.wanted_accel_ms2 > 0.25
+
+
+def test_neutral_gas_popup_waits_two_seconds(rig, monkeypatch):
+    import time as time_mod
+
+    from core.cruise_control_thread import thread as cc_mod
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(time_mod, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(cc_mod.time, "monotonic", lambda: clock["t"])
+
+    popups: list[str] = []
+
+    class _FakeLog:
+        def info(self, msg, *args, **kwargs):
+            if kwargs.get("extra", {}).get("popup"):
+                popups.append(str(msg))
+
+        def debug(self, *args, **kwargs):
+            pass
+
+        def exception(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(cc_mod, "logger", _FakeLog())
+
+    thread, tel, _, _, _ = rig
+    _engage_cc(thread, TARGET_KMH)
+    tel.data.set(speed=(TARGET_KMH - 15.0) / 3.6, gear_dashboard=0)
+
+    thread.loop()
+    assert popups == []
+    assert thread._cc_ctrl.enabled is True
+
+    clock["t"] += 1.5
+    thread.loop()
+    assert popups == []
+
+    clock["t"] += 0.6
+    thread.loop()
+    assert any("neutral" in p.lower() for p in popups)
+
+
+def test_reverse_still_disengages_cc(rig):
+    thread, tel, _, _, _ = rig
+    _engage_cc(thread)
+    thread.loop()
+
+    tel.data.set(gear_dashboard=-1)
+    thread.loop()
+    assert thread._cc_ctrl.enabled is False

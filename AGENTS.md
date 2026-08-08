@@ -83,8 +83,9 @@ Do not reintroduce these without reading the linked README section first:
   - The CC FSM (`enable`/`disable`/`set_target_kmh`) drives `_cc_ctrl` in both modes. In limiter mode the CC's enabled state and target are forwarded to the limiter as its cap.
   - On mode flip, the now-inactive controller's PID state is reset to avoid stale integrators on re-entry.
 
-- **Disengage conditions (brake, park, neutral/reverse, disarm-on-stop) are CC-only.**
+- **Disengage conditions (brake, park, reverse, disarm-on-stop) are CC-only.**
   - `CruiseControlThread._handle_cc_disengage_conditions()` is called inside `if mode == "Cruise control"` only. The limiter never sees these events.
+  - Neutral does not disengage CC (simulated manuals flash N while shifting). While `gear_dashboard == 0`, CC/ACC positive m/s² bids are clamped to 0; after 2 s continuous N with gas cut, a rate-limited popup explains that CC can't accelerate in neutral. Exception: while `sending_thread` publishes `auto_neutral_holding`, the clamp is skipped so the launch bid can shift back to drive.
   - This preserves the original always-on limiter behaviour: the limiter remains active through brake presses, gear changes, and crash events.
 
 - **`global_speed_limit_kmh` has a dual role.**
