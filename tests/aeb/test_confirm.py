@@ -91,7 +91,7 @@ def test_reset_clears_state():
 
 def test_warn_confirms_before_oblique_engage_on_shared_stream():
     # Oblique warn window must confirm at least 0.1 s before oblique engage on same stream.
-    stream = [True] * 12
+    stream = [True] * 24  # covers engage_confirm_oblique_s=0.40 at 30 Hz
     warn_frame = _first_confirm_frame(stream, CAL.aeb_warn_confirm_oblique_s)
     engage_frame = _first_confirm_frame(stream, CAL.aeb_engage_confirm_oblique_s)
     assert warn_frame is not None and engage_frame is not None

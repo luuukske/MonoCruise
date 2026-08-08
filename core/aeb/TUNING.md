@@ -35,7 +35,11 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `oncoming_closing_dmiss_rate_mps` | −1.5 m/s | Turn-into-path: miss closing this fast with ego turning |
 | `oncoming_closing_lat_m` | 0.85 m | Turn-into-path: straight `|lat|` must collapse under this |
 | `oncoming_closing_dabs_lat_ratio` | 10.0 | Turn-into also needs `d_abs ≥ \|lat\| × ratio` (adjacent vs inflated) |
-| `max_evasion_lat_g` | 0.35×9.81 | Refuse Opp/TmpCross suppress when required `a_lat` exceeds this and `|lat| ≥ clear_bar` |
+| `max_evasion_lat_g` | 0.35×9.81 | Refuse Opp/TmpCross suppress when required `a_lat` exceeds this and `|lat|` clears the stage arm |
+| `max_evasion_min_lat_m` | 7.0 | OppositeLane arm: `|lat|` must reach this (or `clear_bar`) before max-g refuse |
+| `max_evasion_min_lat_m_opp_fast` | 4.5 | Opp arm when target ≥ `max_evasion_opp_fast_kmh`. Provisional n=1 (`0af8aedb`); corpus ablation finds no twins |
+| `max_evasion_opp_fast_kmh` | 60.0 | Target speed for opp_fast arm. Provisional; do not retune as if corpus-fit |
+| `max_evasion_min_lat_m_tmp_cross` | 3.0 | TmpCross arm (lower): cca-class TMP never hits Opp head_on |
 | `tmp_cross_in_corridor_pass` | false | TmpCross: pass when `|lat| ≤ lane_half_width` ahead (and miss closing) |
 | `evasion_max_dkappa` | 0.008 /m | Max curvature offset for evasion arcs |
 | `opposite_lane_kappa_scale` | 2.0 | Kappa multiplier when target in own lane |

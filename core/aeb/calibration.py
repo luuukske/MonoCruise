@@ -110,8 +110,7 @@ class AEBCalibration:
     # OppositeLane body-sep / Fix B (README turn-into-path). e0fd ~ -5.6 m/s.
     oncoming_closing_dmiss_rate_mps: float = -1.5
     # Straight-frame |lat| must collapse under this (m) with the miss-rate gate.
-    # 0.85 recovers e0fd confirm span; 7c635440 id162 floors ~0.72 but stays TN
-    # via remaining evasion (corpus sweep).
+    # 0.85 recovers e0fd; 7c635440 id162 ~0.72 stays TN via remaining evasion.
     oncoming_closing_lat_m: float = 0.85
     # Closing skip requires arc inflation vs |lat|; kills false closing on
     # adjacent head-on (6a35 engage d_abs/|lat|~9.3) while e0fd (~30) still skips.
@@ -119,9 +118,13 @@ class AEBCalibration:
     # Soft pose clearance under clear_bar for OppositeLane body-sep (m).
     # 0.80 locks 887 engage (d_abs 1.58 vs clear ~2.32) and 280 (1.8 vs ~2.31).
     oncoming_body_sep_soft_m: float = 0.80
-    # Fail-closed: do not suppress Opp/TmpCross when required a_lat exceeds this.
-    # Only when straight |lat| >= clear_bar (wide pre-collapse); soft adjacent stays.
+    # Fail-closed max-g refuse: Opp arm 7 m (opp_fast 4.5 @ ≥60 km/h); TmpCross 3 m.
+    # opp_fast is provisional n=1 (0af8); see TUNING.md / cards/0af8aedb_recovery.md.
     max_evasion_lat_g: float = 0.35 * 9.81
+    max_evasion_min_lat_m: float = 7.0
+    max_evasion_min_lat_m_opp_fast: float = 4.5
+    max_evasion_opp_fast_kmh: float = 60.0
+    max_evasion_min_lat_m_tmp_cross: float = 3.0
     # TmpCross: pass when body already in ego lane band. Off: +FP without new FN win
     # once max_evasion recovers cca/e09.
     tmp_cross_in_corridor_pass: bool = False

@@ -179,9 +179,8 @@ def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1,
     return di_sq < d0_sq
 
 
-# Fractions along the rigid body capsule (rear -> front) sampled by
-# _any_body_in_ego_lane. Five points bracket a long trailer whose rear corner
-# sits in ego's lane while its reference centre rides the outer lane.
+# Fractions along the rigid body capsule (rear -> front) for _any_body_in_ego_lane.
+# Five points bracket a long trailer with rear in-lane while centre rides outer.
 _BODY_LANE_SAMPLES = (0.0, 0.25, 0.5, 0.75, 1.0)
 
 
@@ -452,18 +451,23 @@ def _required_evasion_lat_ms2(
 def _max_evasion_blocks_suppress(
     ctx: "FilterContext", cal: AEBCalibration, clear_bar: float,
     d_abs: float | None = None,
+    min_lat_m: float | None = None,
 ) -> bool:
     """True: refuse filter suppress (closing needs more than truck max lat-g).
 
-    Pre-collapse only: straight-frame |lat| still outside body clear_bar so
-    soft adjacent (280/887) keeps body-sep; wide closing miss (e09) can refuse.
+    Pre-collapse only: straight-frame |lat| still at/above the stage arm so
+    soft/mid adjacent keeps body-sep; wide closing miss (e09) can refuse.
+    OppositeLane uses max_evasion_min_lat_m (or opp_fast when caller passes
+    it); TmpCross uses max_evasion_min_lat_m_tmp_cross (cca never hits Opp).
     ``d_abs`` reserved for callers; inflation is not required here.
     """
     del d_abs  # API symmetry with body-sep callers; unused for now.
     if cal.max_evasion_lat_g <= 0.0:
         return False
     lat = abs(-ctx.dx * ctx.ego_fwd_z + ctx.dz * ctx.ego_fwd_x)
-    if lat < clear_bar:
+    floor = float(cal.max_evasion_min_lat_m if min_lat_m is None else min_lat_m)
+    arm = max(floor, clear_bar)
+    if lat < arm:
         return False
     a_lat = _required_evasion_lat_ms2(ctx, clear_bar)
     if a_lat is None:
@@ -519,9 +523,8 @@ class TmpRelSpeedFilter:
         # of the pipeline once ego matches their speed under braking.
         if ctx.v.id in ctx.latched_threat_ids:
             return _PASS
-        # Follow-threat targets bypass too: sustained closing + sustained own
-        # deceleration is realistic follow-traffic behavior, which the
-        # rel-speed floor (a no-collision-zone guard) must not silence.
+        # Follow-threat bypass: sustained closing + own decel is real follow traffic;
+        # the rel-speed floor (no-collision-zone guard) must not silence it.
         if ctx.v.id in ctx.follow_threat_ids:
             return _PASS
         v_yaw_rad = _vehicle_yaw_rad(ctx.v)
@@ -594,11 +597,15 @@ class OppositeLaneFilter:
         )
         soft = cal.oncoming_body_sep_soft_m
         pose_clear = d_abs >= (clear_bar - soft)
+        # Fast oncoming: lower max-evasion arm (0af8 ~82 km/h vs f959 ~48).
+        opp_min_lat = cal.max_evasion_min_lat_m
+        if ctx.abs_v_speed * 3.6 >= cal.max_evasion_opp_fast_kmh:
+            opp_min_lat = cal.max_evasion_min_lat_m_opp_fast
         # Soft bar also when arc lane reads EGO (corner-pull adjacent, 280/887).
         if (pose_clear and measured_clear and not closing_into
                 and (own_lane or soft > 0.0)
                 and not _max_evasion_blocks_suppress(
-                    ctx, cal, clear_bar, d_abs=d_abs)):
+                    ctx, cal, clear_bar, d_abs=d_abs, min_lat_m=opp_min_lat)):
             return _suppress("OppositeLaneFilter")
 
         if not ctx.head_on:
@@ -736,9 +743,8 @@ class CoDirectionalDivergeFilter:
     def apply(self, ctx: FilterContext) -> FilterResult:
         if not ctx.co_directional:
             return _PASS
-        # Follow-threat targets are exempt: the diverge check reads arc
-        # extrapolation, and a jitter frame can call a genuinely braking
-        # in-lane lead "diverging" moments before contact.
+        # Follow-threat exempt: diverge reads arc extrapolation; jitter can call a
+        # braking in-lane lead "diverging" moments before contact.
         if ctx.v.id in ctx.follow_threat_ids:
             return _PASS
         cal = self._cal
@@ -837,7 +843,9 @@ class TmpCrossTrafficFilter:
         v_hw_coll = max(ctx.v.size.width / 2.0 - 0.1, 0.3)
         clear_bar = ctx.ego_hw + v_hw_coll
         _, d_abs = project_to_ego_arc(ctx.ego_arc, ctx.v.position.x, ctx.v.position.z)
-        if _max_evasion_blocks_suppress(ctx, cal, clear_bar, d_abs=d_abs):
+        if _max_evasion_blocks_suppress(
+                ctx, cal, clear_bar, d_abs=d_abs,
+                min_lat_m=cal.max_evasion_min_lat_m_tmp_cross):
             return _PASS
         straight = abs(ctx.v_curvature) < cal.turning_diverge_kappa
         any_hit = False

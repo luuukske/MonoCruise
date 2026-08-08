@@ -222,7 +222,9 @@ before `fd` crosses `head_on_dot`).
 2. Body-separation fast path: if pose `d_abs >= clear_bar - oncoming_body_sep_soft_m`
    and the measured miss agrees, suppress (also when lane reads `EGO` under the
    soft bar: corner-pull adjacent). Skip when `oncoming_closing_into` (below)
-   or when `max_evasion_lat_g` refuses (physically unavoidable closing).
+   or when `max_evasion_lat_g` refuses (physically unavoidable closing). Opp
+   arms max-g refuse at 7 m by default; targets ≥ `max_evasion_opp_fast_kmh`
+   (60) use the lower `max_evasion_min_lat_m_opp_fast` (4.5) arm.
 3. Evasion arc test (`head_on` only): for each target arc, build two curvature-offset arcs
    (`base_curvature ± delta_kappa_t`, `decel=0`). If either clears `ego_arc`, suppress.
    - `delta_kappa_t = min(evasion_g_oncoming / v², evasion_max_dkappa)`, scaled by
@@ -359,7 +361,8 @@ Optional `tmp_cross_in_corridor_pass`: when enabled, do not graze-suppress if th
 body is already inside `|lat| ≤ lane_half_width` ahead with a closing (or unknown)
 miss rate. Default off: max_evasion fail-closed covers the hard TMP twins without
 the side-road FP cost. `max_evasion_lat_g` also refuses TmpCross suppress when
-straight-frame `|lat| ≥ clear_bar` and required lateral accel exceeds the truck
+straight-frame `|lat|` clears `max_evasion_min_lat_m_tmp_cross` (3 m; Opp
+uses the higher 7 m arm) and required lateral accel exceeds the truck
 budget (physically unavoidable closing).
 
 No imminence / TTB floor is used: the turning phantom persists to `hit ≈ 0`
