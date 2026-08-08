@@ -1,4 +1,9 @@
-"""Corpus objective over labelled clip replays: safety-weighted FN/late, comfort FP, TP reward."""
+"""Corpus objective over labelled clip replays: safety-weighted FN/late, comfort FP, TP reward.
+
+Must-not-trigger clips pay comfort cost for any reaction: brake FPs use intensity
+times duration; warn-only FPs (``false_warn``) use ``FP_WARN_SCALE`` times duration
+so a beep costs less than a phantom stop but still moves the corpus total.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +21,8 @@ LATE_SAFETY_FRACTION: float = 0.5
 # A false positive always costs at least this fraction of a full-duration brake,
 # so even a brief phantom brake is penalised.
 FP_MIN_DURATION_S: float = 0.3
+# Warn-only FP intensity vs a full-brake FP of equal duration (beep << slam).
+FP_WARN_SCALE: float = 0.25
 
 
 @dataclass
@@ -103,6 +110,10 @@ def _cost(clip: Clip, o: Outcome, sev: int, cal: AEBCalibration) -> tuple[float,
         intensity = o.peak_decel_ms2 / max(cal.full_brake_decel, 1e-3)
         return (sev * COMFORT_SCALE * intensity * (FP_MIN_DURATION_S + dur),
                 f"FP: braked {dur:.2f}s @ {o.peak_decel_ms2:.1f} m/s2")
+    if o.verdict == "false_warn":
+        dur = (o.warn_window[1] - o.warn_window[0]) if o.warn_window else 0.0
+        return (sev * COMFORT_SCALE * FP_WARN_SCALE * (FP_MIN_DURATION_S + dur),
+                f"FP-warn: {dur:.2f}s")
     if o.verdict == "true_positive":
         q = _tp_quality(clip, o)
         return -sev * TP_REWARD * q, f"TP: correct (quality {q:.2f})"

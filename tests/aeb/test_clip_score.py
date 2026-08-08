@@ -5,10 +5,11 @@ from __future__ import annotations
 from dataclasses import replace
 
 from core.aeb.calibration import DEFAULT
-from core.aeb.clip_eval import run_headless
+from core.aeb.clip_eval import Outcome, run_headless
 from core.aeb.clip_schema import Label
 from core.aeb.clip_score import (
-    SAFETY_SCALE, audit_corpus, class_window_warning, score_clip, score_corpus,
+    FP_MIN_DURATION_S, FP_WARN_SCALE, SAFETY_SCALE, _cost, audit_corpus,
+    class_window_warning, score_clip, score_corpus,
 )
 
 from tests.aeb.test_clip_eval import _collision_clip
@@ -31,6 +32,28 @@ def test_false_positive_costs_comfort_true_negative_free():
     tn = score_clip(clip, _OFF, burn_in_s=0.0)
     assert fp.verdict == "false_positive" and fp.cost > 0
     assert tn.verdict == "true_negative" and tn.cost == 0.0
+
+
+def test_false_warn_costs_less_than_brake_fp():
+    # Warn-only on must-not-trigger: positive cost, below a same-duration full brake.
+    clip = _collision_clip()
+    sev = 3
+    dur = 1.0
+    warn_o = Outcome(
+        label_class="fp", should_trigger=None, engaged=False,
+        brake_window=None, peak_decel_ms2=0.0, verdict="false_warn",
+        warn_window=(0.0, dur),
+    )
+    brake_o = Outcome(
+        label_class="fp", should_trigger=None, engaged=True,
+        brake_window=(0.0, dur), peak_decel_ms2=DEFAULT.full_brake_decel,
+        verdict="false_positive", warn_window=(0.0, dur),
+    )
+    warn_cost, warn_detail = _cost(clip, warn_o, sev, DEFAULT)
+    brake_cost, _ = _cost(clip, brake_o, sev, DEFAULT)
+    assert warn_cost == sev * FP_WARN_SCALE * (FP_MIN_DURATION_S + dur)
+    assert 0.0 < warn_cost < brake_cost
+    assert "FP-warn" in warn_detail
 
 
 def test_false_negative_pays_safety_scale():

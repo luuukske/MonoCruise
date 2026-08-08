@@ -225,23 +225,31 @@ class CandidateDiff:
 
 @dataclass
 class Outcome:
-    """A calibration's outcome on one labelled clip, judged against its window."""
+    """A calibration's outcome on one labelled clip, judged against its window.
+
+    Verdicts: ``true_positive``, ``false_negative``, ``late``, ``false_positive``
+    (must-not-trigger + brake), ``false_warn`` (must-not-trigger + warn only),
+    ``true_negative`` (must-not-trigger + silent), ``unlabeled``.
+    """
 
     label_class: str
     should_trigger: tuple | None      # (from_t, to_t) or None = must-not-trigger
     engaged: bool
     brake_window: tuple | None        # (from_t, to_t) t_rel where the candidate braked
     peak_decel_ms2: float
-    verdict: str                      # see below
+    verdict: str
+    warn_window: tuple | None = None  # (from_t, to_t) t_rel where the candidate warned
 
 
 def outcome_under(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
                   burn_in_s: float = 0.0) -> Outcome:
-    """Classify candidate run vs label after ``burn_in_s``; verdicts in doc of ``Outcome``."""
+    """Classify candidate run vs label after ``burn_in_s``; verdicts on ``Outcome``."""
     lbl = clip.metadata.label
     evs = [e for e in run_headless(clip, cal=cal) if e.t_rel >= burn_in_s]
     braked = [e for e in evs if e.aeb_brake]
+    warned = [e for e in evs if e.aeb_warn]
     bw = (braked[0].t_rel, braked[-1].t_rel) if braked else None
+    ww = (warned[0].t_rel, warned[-1].t_rel) if warned else None
     peak = max((e.target_decel_ms2 for e in evs), default=0.0)
     engaged = bool(braked)
 
@@ -252,7 +260,12 @@ def outcome_under(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
     if lbl is None:
         verdict = "unlabeled"
     elif st is None:
-        verdict = "false_positive" if engaged else "true_negative"
+        if engaged:
+            verdict = "false_positive"
+        elif ww is not None:
+            verdict = "false_warn"
+        else:
+            verdict = "true_negative"
     elif not engaged:
         verdict = "false_negative"
     elif bw[0] > st[1]:
@@ -263,7 +276,7 @@ def outcome_under(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
     return Outcome(
         label_class=(lbl.class_ if lbl else "unlabeled"),
         should_trigger=st, engaged=engaged, brake_window=bw,
-        peak_decel_ms2=peak, verdict=verdict,
+        peak_decel_ms2=peak, verdict=verdict, warn_window=ww,
     )
 
 

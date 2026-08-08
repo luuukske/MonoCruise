@@ -114,3 +114,25 @@ def test_outcome_false_positive_and_true_negative():
     assert outcome_under(clip).verdict == "false_positive"
     off = replace(DEFAULT, aeb_min_engage_speed_kmh=1000.0)
     assert outcome_under(clip, off).verdict == "true_negative"
+
+
+def test_outcome_false_warn_when_warn_without_brake(monkeypatch):
+    clip = _collision_clip()
+    clip.metadata.label = Label(class_="fp", severity=2, should_trigger=None)
+
+    class _Tick:
+        def __init__(self, t_rel, warn, brake):
+            self.t_rel = t_rel
+            self.aeb_warn = warn
+            self.aeb_brake = brake
+            self.target_decel_ms2 = 0.0
+
+    monkeypatch.setattr(
+        "core.aeb.clip_eval.run_headless",
+        lambda *a, **k: [_Tick(0.0, True, False), _Tick(0.5, True, False)],
+    )
+    o = outcome_under(clip, burn_in_s=0.0)
+    assert o.verdict == "false_warn"
+    assert o.warn_window == (0.0, 0.5)
+    assert o.brake_window is None
+    assert not o.engaged
