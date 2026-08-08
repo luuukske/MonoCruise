@@ -11,6 +11,9 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Fixed
+- **AEB braked for traffic that was going to miss in the next lane**: oncoming or parked vehicles beside you could still look like a hit when the road bent or the body only grazed your lane line. Clear next-lane passes are left alone.
+- **AEB stayed quiet when you could not steer out of a closing vehicle**: a target already too close to dodge with a normal steer could still be treated as a safe miss. Those closings now get the brake.
 
 ## [1.1.0-preview.12] - 2026-08-07
 ### Added
