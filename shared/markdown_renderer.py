@@ -2,8 +2,60 @@
 import re
 import html
 import base64
+import logging
+from pathlib import Path
 
 from shared.theme import Theme
+
+logger = logging.getLogger(__name__)
+
+# QTextDocument does no networking, so only local images can be shown. They are
+# inlined as data URIs; remote ones stay links. See shared/README.md.
+_IMAGE_MIME = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".svg": "image/svg+xml", ".webp": "image/webp",
+}
+_MAX_IMAGE_BYTES = 2 * 1024 * 1024
+# A line holding only an image: body line-height would otherwise multiply the
+# image's own height (1.6x), leaving a large gap under it.
+_IMAGE_ONLY_LINE = re.compile(r'^!\[[^\]]*\]\([^)]+\)$')
+# Qt's rich text engine ignores CSS border-radius, so corners are masked into
+# the pixels. Needs alpha, hence PNG out regardless of what came in.
+_IMAGE_CORNER_RADIUS_PX = 5
+
+
+def _rounded_png(data: bytes) -> bytes | None:
+    """Raster image bytes with rounded corners as PNG, or None to keep the original."""
+    try:
+        from PySide6.QtCore import QBuffer, QIODevice, Qt
+        from PySide6.QtGui import QImage, QPainter, QPainterPath
+    except Exception:
+        return None
+    try:
+        img = QImage()
+        if not img.loadFromData(data):
+            return None
+        img = img.convertToFormat(QImage.Format_ARGB32)
+        out = QImage(img.size(), QImage.Format_ARGB32)
+        out.fill(Qt.transparent)
+        painter = QPainter(out)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            path = QPainterPath()
+            r = float(_IMAGE_CORNER_RADIUS_PX)
+            path.addRoundedRect(0.0, 0.0, float(img.width()), float(img.height()), r, r)
+            painter.setClipPath(path)
+            painter.drawImage(0, 0, img)
+        finally:
+            painter.end()
+        buf = QBuffer()
+        buf.open(QIODevice.WriteOnly)
+        if not out.save(buf, "PNG"):
+            return None
+        return bytes(buf.data())
+    except Exception:
+        logger.debug("markdown image corner rounding failed", exc_info=True)
+        return None
 
 
 class GitHubMarkdownRenderer:
@@ -17,8 +69,11 @@ class GitHubMarkdownRenderer:
         'CAUTION': '''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="ALERT_COLOR" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-octagon-alert-icon lucide-octagon-alert"><path d="M12 16h.01"/><path d="M12 8v4"/><path d="M15.312 2a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586l-4.688-4.688A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2z"/></svg>''',
     }
 
-    def __init__(self, theme: Theme | None = None):
+    def __init__(self, theme: Theme | None = None, image_base: "Path | str | None" = None):
         self.theme = theme or Theme()
+        # Local image sources resolve against this directory, and only inside it.
+        # Left None (the updater's case) every image stays a link.
+        self.image_base = Path(image_base).resolve() if image_base is not None else None
         self.video_url = None
         # Alert colours depend on the injected theme, so build the map per instance.
         t = self.theme
@@ -279,7 +334,10 @@ class GitHubMarkdownRenderer:
                 continue
 
             processed = self._process_inline(line)
-            result.append(f'<p>{processed}</p>')
+            # Only a real <img> needs the class; a remote image fell back to a link.
+            lone_image = (_IMAGE_ONLY_LINE.match(line.strip()) is not None
+                          and processed.lstrip().startswith('<img'))
+            result.append(f'<p{" class=\"imgblock\"" if lone_image else ""}>{processed}</p>')
             last_was_header = False
             i += 1
 
@@ -303,11 +361,45 @@ class GitHubMarkdownRenderer:
         text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
         text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text)
         text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+        # Images must precede links: the link rule also matches ![alt](src) and
+        # would leave a stray "!" plus a link, which is what it used to do.
+        text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', self._replace_image, text)
         text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
-        text = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', r'<a href="\2">[Image: \1]</a>', text)
-        text = re.sub(r'(?<!href=")(https?://[^\s<>"]+)', r'<a href="\1">\1</a>', text)
+        text = re.sub(r'(?<!href=")(?<!src=")(https?://[^\s<>"]+)', r'<a href="\1">\1</a>', text)
 
         return text
+
+    def _replace_image(self, match: "re.Match") -> str:
+        """An inlinable local image becomes <img>; anything else stays a link."""
+        alt, src = match.group(1), match.group(2)
+        uri = self._image_data_uri(src)
+        if uri is None:
+            return f'<a href="{src}">{alt or "[Image]"}</a>'
+        return f'<img src="{uri}" alt="{alt}">'
+
+    def _image_data_uri(self, src: str) -> str | None:
+        """Local image file to a base64 data URI, or None when it cannot be inlined."""
+        if src.startswith("data:"):
+            return src
+        if re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*:', src) or self.image_base is None:
+            return None
+        try:
+            path = (self.image_base / src).resolve()
+            # Confine to image_base: markdown from a release body is untrusted.
+            if not path.is_file() or self.image_base not in path.parents:
+                return None
+            mime = _IMAGE_MIME.get(path.suffix.lower())
+            if mime is None or path.stat().st_size > _MAX_IMAGE_BYTES:
+                return None
+            raw = path.read_bytes()
+        except OSError:
+            logger.debug("markdown image could not be read", exc_info=True)
+            return None
+        if mime != "image/svg+xml":
+            rounded = _rounded_png(raw)
+            if rounded is not None:
+                mime, raw = "image/png", rounded
+        return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
     def _render_quote(self, content: str) -> str:
         """Render a standard blockquote with grey left border."""
@@ -539,6 +631,10 @@ class GitHubMarkdownRenderer:
                     color: {TEXT_SECONDARY};
                 }}
                 p {{
+                    margin: 5px 0;
+                }}
+                p.imgblock {{
+                    line-height: 1;
                     margin: 5px 0;
                 }}
                 a {{
