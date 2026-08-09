@@ -14,10 +14,13 @@ from PySide6.QtWidgets import QApplication
 from core.aeb.clip_replay import ReviewFrame, replay_clip
 from core.aeb.clip_schema import Label, LiveAEB
 from core.aeb.clip_store import ClipStore
+from tools import aeb_fetch
+from tools.aeb_fetch import PullResult
 from tools.aeb_review import ReviewWindow
 from tools.aeb_review_widgets import ThumbnailView, action_index, recorded_band
 
 from tests.aeb.test_clip_review import _build_replayable_clip
+from tests.aeb.test_fetch_tool import _FakeSession, _clip_blob
 
 
 @pytest.fixture(scope="module")
@@ -283,5 +286,54 @@ def test_show_appends_thumbnail_resolution_to_the_metadata_line(tmp_path, qapp):
         win._list.setCurrentRow(0)
         assert _spin_until(qapp, lambda: bool(win._frames)), "clip never decoded"
         assert "240x135" in win._clip_meta_lbl.text()
+    finally:
+        win.close()
+
+
+def test_update_from_server_button_pulls_and_refreshes(tmp_path, qapp, monkeypatch):
+    """The button runs the pull off-thread, then rescans when clips landed."""
+    monkeypatch.setenv("MONOCRUISE_PULL_TOKEN", "a-token")
+    clip_id = "aaaaaaaa-1111-4111-8111-111111111111"
+    rows = [{"clip_id": clip_id, "received_at": "2026-08-09T10:00:00Z",
+             "trigger_source": "auto_engagement", "session_kind": "SP",
+             "bytes": 100, "client_version": "1.1.0"}]
+    session = _FakeSession(rows, {clip_id: _clip_blob(clip_id)})
+    monkeypatch.setattr(aeb_fetch, "_session", lambda token: session)
+
+    store = ClipStore(root=tmp_path)
+    win = ReviewWindow(store)
+    try:
+        win._update_btn.click()
+        assert _spin_until(qapp, lambda: not win._pulling), "pull never finished"
+        assert len(store.list_clips()) == 1
+        assert "saved 1" in win._status.text()
+        assert win._update_btn.isEnabled()
+        assert _spin_until(qapp, lambda: len(win._entries) == 1), "list never refreshed"
+    finally:
+        win.close()
+
+
+def test_update_from_server_reports_a_missing_token(tmp_path, qapp, monkeypatch):
+    monkeypatch.delenv("MONOCRUISE_PULL_TOKEN", raising=False)
+    store = ClipStore(root=tmp_path)
+    win = ReviewWindow(store)
+    try:
+        win._update_btn.click()
+        assert _spin_until(qapp, lambda: not win._pulling), "pull never finished"
+        assert "MONOCRUISE_PULL_TOKEN" in win._status.text()
+        assert win._update_btn.isEnabled()
+        assert store.list_clips() == []
+    finally:
+        win.close()
+
+
+def test_update_from_server_finished_handler_summarises(tmp_path, qapp):
+    store = ClipStore(root=tmp_path)
+    win = ReviewWindow(store)
+    try:
+        win._on_pull_finished(PullResult(
+            listed=3, already=2, saved=0, failed=0, landed=0, root=str(tmp_path),
+        ))
+        assert "up to date" in win._status.text()
     finally:
         win.close()

@@ -129,6 +129,20 @@ class ClipLoader(QObject):
         self.scanned.emit(entries)
 
 
+class PullWorker(QObject):
+    """Network pull off the GUI thread; result is a tools.aeb_fetch.PullResult."""
+
+    finished = Signal(object)
+    progress = Signal(str)
+
+    @Slot(object)
+    def pull(self, root) -> None:
+        from tools.aeb_fetch import pull_missing
+
+        result = pull_missing(ClipStore(root=root), on_progress=self.progress.emit)
+        self.finished.emit(result)
+
+
 class SceneWidget(AEBDebugWindow):
     """Debug renderer fed replayed snapshots; click picks the nearest vehicle."""
 

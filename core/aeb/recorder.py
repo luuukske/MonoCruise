@@ -117,6 +117,7 @@ class AEBClipRecorder:
         tn_cooldown_s: float = 600.0,
         ring_margin_s: float = 1.0,
         enabled: bool = True,
+        capture_tn: bool = True,
         screenshot_provider=None,
     ) -> None:
         self._writer = writer
@@ -127,6 +128,9 @@ class AEBClipRecorder:
         # TN captures throttled separately so they never crowd real events.
         self.tn_cooldown_s = tn_cooldown_s
         self.enabled = enabled
+        # Background negatives are cheap to generate locally and the least
+        # informative from a stranger's machine, so contributors skip them.
+        self.capture_tn = capture_tn
         # Optional () -> base64 JPEG | None, grabbed off-thread at trigger time.
         self._screenshot_provider = screenshot_provider
 
@@ -181,6 +185,10 @@ class AEBClipRecorder:
             return "disabled"
         if source not in TRIGGER_PRIORITY:
             logger.warning("unknown AEB trigger source %r", source)
+            return "ignored"
+        # Refused before the fold too, so a background negative never even
+        # reaches also_triggered on a contributor's clip.
+        if source in _TN_SOURCES and not self.capture_tn:
             return "ignored"
 
         with self._lock:

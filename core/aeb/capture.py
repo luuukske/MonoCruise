@@ -11,6 +11,10 @@ from core.aeb.recorder import AEBClipRecorder
 
 logger = logging.getLogger(__name__)
 
+# Contribute-only stores stage clips for upload rather than holding a corpus,
+# so they get a fifth of the debug cap.
+_CONTRIBUTOR_MAX_BYTES: int = 100 * 1024 * 1024
+
 _lock = threading.Lock()
 _recorder: AEBClipRecorder | None = None
 _writer: AsyncClipWriter | None = None
@@ -38,15 +42,18 @@ def get_recorder() -> AEBClipRecorder | None:
 
 def _init_locked() -> None:
     global _recorder, _writer
-    enabled = False
+    debug = False
+    contributing = False
     try:
+        from core.aeb.intake_policy import contribution_enabled
         from core.settings import Settings
 
-        enabled = bool(Settings.debug)
+        debug = bool(Settings.debug)
+        contributing = contribution_enabled()
     except Exception:
-        logger.debug("could not read Settings.debug for capture gate", exc_info=True)
-        enabled = False
-    if not enabled:
+        logger.debug("could not read the AEB capture gate", exc_info=True)
+        return
+    if not (debug or contributing):
         return
     provider = None
     try:
@@ -60,14 +67,18 @@ def _init_locked() -> None:
         logger.debug("could not set up AEB screenshot provider", exc_info=True)
 
     try:
-        store = ClipStore()
+        # A contributor keeps a smaller store: it is a staging area, not the
+        # working corpus a debug user tags from.
+        store = ClipStore() if debug else ClipStore(max_bytes=_CONTRIBUTOR_MAX_BYTES)
         writer = AsyncClipWriter(store, notify=_notify_saved)
         writer.start()
         _writer = writer
-        _recorder = AEBClipRecorder(writer, enabled=True, screenshot_provider=provider)
+        _recorder = AEBClipRecorder(
+            writer, enabled=True, capture_tn=debug, screenshot_provider=provider,
+        )
         atexit.register(_shutdown)
-        logger.info("AEB clip recorder active (debug mode, screenshots=%s)",
-                    provider is not None)
+        logger.info("AEB clip recorder active (debug=%s, contributing=%s, screenshots=%s)",
+                    debug, contributing, provider is not None)
     except Exception:
         logger.exception("failed to start AEB clip recorder; capture disabled")
         _recorder = None

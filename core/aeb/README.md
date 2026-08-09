@@ -1264,6 +1264,12 @@ process-wide flip.
 sharing: whether intake is open at all, and the floors a clip has to clear.
 Nothing uploads yet; this is the gate the uploader will consult.
 
+`contribution_enabled()` also gates capture itself: `core/aeb/capture.py` starts
+a recorder when `Settings.debug` **or** the opt-in is current. A contribute-only
+user gets a 100 MB store instead of 500 MB, and `capture_tn=False` so the
+`shadow_near` and `random` background triggers never fire. Someone who is both
+debug and contributing keeps the debug behaviour on both counts.
+
 ### Fetched only for users who opted in
 
 `start_policy_fetch()` returns `None` and starts no thread unless

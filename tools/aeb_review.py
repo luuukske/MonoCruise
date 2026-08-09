@@ -22,8 +22,10 @@ from core.aeb.clip_replay import ReviewFrame
 from core.aeb.clip_schema import ClipMetadata, Label
 from core.aeb.clip_score import class_window_warning
 from core.aeb.clip_store import ClipInfo, ClipStore, contributed_clip_root
+from tools.aeb_fetch import safe_pull_root
 from tools.aeb_review_widgets import (
-    ClipLoader, DecisionStrip, Loaded, SceneWidget, ThumbnailView, action_index, recorded_band,
+    ClipLoader, DecisionStrip, Loaded, PullWorker, SceneWidget, ThumbnailView,
+    action_index, recorded_band,
 )
 
 _CLASSES = ["tp", "good_intervention", "fp", "fn", "tn", "ignore"]
@@ -68,6 +70,7 @@ class ReviewWindow(QMainWindow):
 
     load_requested = Signal(str)
     scan_requested = Signal(object)
+    pull_requested = Signal(object)
 
     def __init__(self, store: ClipStore) -> None:
         super().__init__()
@@ -81,6 +84,7 @@ class ReviewWindow(QMainWindow):
         self._target_vid: int | None = None
         self._window: tuple[float, float] | None = None
         self._proposal: tuple[float, float] | None = None
+        self._pulling = False
 
         # Clip list cache: peek_metadata once per mtime+size; reload skips store re-reads.
         self._entries: list[tuple[ClipInfo, ClipMetadata | None]] = []
@@ -103,6 +107,11 @@ class ReviewWindow(QMainWindow):
         self.scan_requested.connect(self._loader.scan)
         self._loader.loaded.connect(self._on_loaded)
         self._loader.scanned.connect(self._on_scanned)
+        self._puller = PullWorker()
+        self._puller.moveToThread(self._thread)
+        self.pull_requested.connect(self._puller.pull)
+        self._puller.progress.connect(self._on_pull_progress)
+        self._puller.finished.connect(self._on_pull_finished)
         self._thread.start()
 
         self._build_ui()
@@ -146,6 +155,8 @@ class ReviewWindow(QMainWindow):
         left.addWidget(self._list, 1)
         self._count_lbl = QLabel("scanning...")
         left.addWidget(self._count_lbl)
+        self._update_btn = _button("Update from server", self._update_from_server)
+        left.addWidget(self._update_btn)
 
         lw = QWidget()
         lw.setLayout(left)
@@ -347,6 +358,42 @@ class ReviewWindow(QMainWindow):
         """Kick a background rescan; the list re-renders when it lands."""
         self._count_lbl.setText("scanning...")
         self.scan_requested.emit(dict(self._meta_cache))
+
+    def _update_from_server(self) -> None:
+        """Pull missing contributed clips; never writes into the local capture store."""
+        if self._pulling:
+            return
+        root = safe_pull_root(self._store.root)
+        self._pulling = True
+        self._update_btn.setEnabled(False)
+        self._status.setText(f"updating from server into {root.name}...")
+        self.pull_requested.emit(root)
+
+    @Slot(str)
+    def _on_pull_progress(self, msg: str) -> None:
+        self._status.setText(msg)
+
+    @Slot(object)
+    def _on_pull_finished(self, result) -> None:
+        self._pulling = False
+        self._update_btn.setEnabled(True)
+        if result.error:
+            self._status.setText(result.error)
+            return
+        parts = [f"saved {result.landed}"]
+        if result.failed:
+            parts.append(f"{result.failed} failed")
+        if result.saved and result.landed != result.saved:
+            parts.append(f"{result.saved - result.landed} lost to filename collision")
+        if result.landed == 0 and result.failed == 0:
+            parts = [f"up to date ({result.already} local, {result.listed} on server)"]
+        self._status.setText(", ".join(parts))
+        try:
+            same = self._store.root.resolve() == safe_pull_root(self._store.root).resolve()
+        except OSError:
+            same = False
+        if same and result.landed:
+            self._refresh_clips()
 
     @Slot(object)
     def _on_scanned(self, entries) -> None:

@@ -62,9 +62,22 @@ def test_the_contributed_root_is_not_the_local_store():
     assert contributed_clip_root().name == "aeb_clips_contributed"
 
 
+def test_safe_pull_root_redirects_away_from_the_local_capture_store(tmp_path):
+    assert aeb_fetch.safe_pull_root(default_clip_root()) == contributed_clip_root()
+    assert aeb_fetch.safe_pull_root(None) == contributed_clip_root()
+    assert aeb_fetch.safe_pull_root(tmp_path) == tmp_path
+
+
 def test_a_missing_token_refuses_to_run(monkeypatch, tmp_path):
     monkeypatch.delenv("MONOCRUISE_PULL_TOKEN", raising=False)
     assert aeb_fetch.main(["--root", str(tmp_path)]) == 2
+
+
+def test_pull_missing_reports_a_missing_token(monkeypatch, tmp_path):
+    monkeypatch.delenv("MONOCRUISE_PULL_TOKEN", raising=False)
+    result = aeb_fetch.pull_missing(ClipStore(root=tmp_path))
+    assert result.error is not None
+    assert "MONOCRUISE_PULL_TOKEN" in result.error
 
 
 def test_clips_are_fetched_into_the_given_root(wired):
