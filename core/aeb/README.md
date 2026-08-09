@@ -1148,6 +1148,76 @@ definition, which is what makes them misses.
 
 ---
 
+## 12. Screenshot capture
+
+`core/aeb/screenshot.py::grab_thumbnail()` supplies the optional
+`thumbnail_jpeg` clip field; `capture.py` calls it off-thread
+(`AEBClipRecorder._start_thumbnail_grab`) so no control loop is touched. Two
+properties are load-bearing, not incidental, and must not be relaxed without
+updating the claims linked below.
+
+### Game-window crop only
+
+`FindWindowW(None, title)` is tried for "Euro Truck Simulator 2" then
+"American Truck Simulator", in that order (`ctypes`, no pywin32 dependency).
+The handle is cached and revalidated with `IsWindow` before every capture,
+since the game can be restarted between clips. `GetWindowRect` gives the
+bbox passed to `ImageGrab.grab(bbox=...)`.
+
+**No game window found means `None`, never a full-monitor grab.** Before
+this, `ImageGrab.grab()` took no bbox and captured the whole primary
+display: a user with the game on a second monitor uploaded whatever sat on
+the first one, and one sampled clip in the local store shows a strip of
+desktop chrome along the top edge. Do not reintroduce an unconditional
+fallback grab; it defeats the reason this code exists.
+
+Non-Windows platforms never look up a window (`ctypes.windll` does not exist
+there) and always return `None`. `_game_window_rect()` checks
+`sys.platform` before any `ctypes.windll` access, so importing this module
+on Linux CI stays safe; keep any new Windows-only call behind that guard.
+
+### `_MAX_PX = 240`: text must not survive
+
+At the previous `480x270`, sampled real clips had a readable speedometer,
+speed-limit signs, a route HUD city name, job cargo/payment figures, and a
+full in-game notification sentence. The clip-contribution consent prompt
+tells contributors "text is not legible", and that sentence is only true at
+240x135, so this constant backs a user-facing claim. Raising it makes the
+claim false.
+
+Resolution ladder on one sampled frame at quality 50: 480x270 (17.5 KB) text
+readable; 360x203 (10.9 KB) marginal; 240x135 (5.7 KB) illegible with road
+layout still clear; 160x90 (3.1 KB) vehicles too mushy to tag. 240x135 was
+re-checked against the two hardest sampled frames, a TMP scene with nametags
+and a frame with a notification popup, and no text survives either.
+
+Existing clips in the store stay at 480x270; only newly captured ones drop
+to 240x135. `tools/aeb_review.py` renders both sizes, aspect-correct, from
+the original decoded pixmap each time rather than re-scaling a scaled copy.
+
+### DPI caveat: unresolved, needs a scaled display to verify
+
+`GetWindowRect` returns physical pixels. `ImageGrab.grab(bbox=...)` expects
+virtual-screen coordinates. The two agree when the calling process is
+per-monitor DPI aware and can disagree otherwise. No scaled secondary
+display was available to reproduce the mismatch, so no numeric correction
+is applied here: this is a known open item, not a silently-ignored one.
+
+`_dpi_mismatch_note()` logs a debug line when `GetDpiForWindow(hwnd)`
+(Windows 10 1607+) reports something other than 96, so a support log at
+least carries the signal. That is detection only; the capture bbox is
+unchanged either way.
+
+Process-wide DPI awareness is deliberately not touched to fix this: the
+Qt UI is not per-monitor DPI aware today, and flipping that process-wide
+for one screenshot crop would rescale the entire settings panel and debug
+windows. If a clip from a scaled display shows a wrong crop, the fix to
+try first is a thread-local DPI awareness override
+(`SetThreadDpiAwarenessContext`) around just the capture call, not a
+process-wide flip.
+
+---
+
 *Source: `core/aeb/thread.py`, `core/aeb/filters.py`, `core/aeb/calibration.py`,
 `core/aeb/lane_frame.py`, `core/radar/*`: LD-Tech / MonoCruise.*
 

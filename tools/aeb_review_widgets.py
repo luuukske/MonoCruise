@@ -1,11 +1,12 @@
 """Custom widgets and the background decoder behind tools/aeb_review.py. Not shipped."""
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, replace
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QLabel, QWidget
 
 from core.aeb.clip_replay import ReviewFrame, replay_clip
 from core.aeb.clip_schema import Clip, ClipMetadata
@@ -15,6 +16,11 @@ from core.aeb.debug_window import AEBDebugWindow
 TTC_INF = 100.0         # recorded sentinel is 1e9; past this there is no tracked threat
 _DECEL_AXIS_MIN = 8.0   # m/s2 floor; the axis grows to the clip's own brake capacity
 _TTC_AXIS_MAX = 8.0     # s
+
+_THUMB_MIN_W = 200      # right panel is 320px wide; clamp floor
+# Ceiling matters as much as the floor: an unshown/not-yet-laid-out label
+# reports width() as 640 in this Qt version, not a small stale value.
+_THUMB_MAX_W = 300      # clamp ceiling, also the panel's real content width
 
 
 @dataclass
@@ -45,6 +51,48 @@ def action_index(frames: list[ReviewFrame]) -> int:
         if f.live_aeb.time_to_collision < best_ttc:
             best_i, best_ttc = i, f.live_aeb.time_to_collision
     return best_i
+
+
+class ThumbnailView(QLabel):
+    """Clip screenshot: holds the decoded original and rescales into the panel width.
+
+    Every rescale, including its own resize, starts from the cached original;
+    an already-scaled pixmap is never re-scaled, which would destroy detail.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("(no screenshot)")
+        self.setMinimumHeight(100)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet("background:#111; color:#666; border:1px solid #333;")
+        self._orig: QPixmap | None = None
+
+    def set_jpeg(self, b64: str | None) -> None:
+        self._orig = None
+        self.setPixmap(QPixmap())
+        if not b64:
+            self.setText("(no screenshot)")
+            return
+        pix = QPixmap()
+        if not pix.loadFromData(base64.b64decode(b64), "JPEG"):
+            self.setText("(thumbnail decode failed)")
+            return
+        self.setText("")
+        self._orig = pix
+        self._rescale()
+
+    def source_size(self) -> tuple[int, int] | None:
+        return (self._orig.width(), self._orig.height()) if self._orig is not None else None
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._rescale()
+
+    def _rescale(self) -> None:
+        if self._orig is None or self._orig.isNull():
+            return
+        w = min(max(self.width(), _THUMB_MIN_W), _THUMB_MAX_W)
+        self.setPixmap(self._orig.scaledToWidth(w, Qt.SmoothTransformation))
 
 
 class ClipLoader(QObject):

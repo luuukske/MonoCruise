@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import base64
+import importlib
 import io
+import sys
 
 import pytest
 
+import core.aeb.screenshot as screenshot_mod
 from core.aeb.recorder import AEBClipRecorder
 from core.aeb.clip_store import deserialize_clip, serialize_clip
 
@@ -30,6 +33,124 @@ def test_grab_thumbnail_never_raises():
 
     result = grab_thumbnail()
     assert result is None or isinstance(result, str)
+
+
+class _FakeUser32:
+    """Stand-in for ctypes.windll.user32: no real window, no real Windows call."""
+
+    def __init__(self, *, found_title=None, hwnd=4321, rect=(100, 60, 740, 330), valid=True):
+        self.found_title = found_title
+        self.hwnd = hwnd
+        self.rect = rect
+        self.valid = valid
+        self.found_titles: list[str] = []
+
+    def FindWindowW(self, _null, title):
+        self.found_titles.append(title)
+        return self.hwnd if title == self.found_title else 0
+
+    def IsWindow(self, hwnd):
+        return bool(self.valid and hwnd == self.hwnd)
+
+    def GetWindowRect(self, hwnd, rect_ptr):
+        r = rect_ptr.contents
+        r.left, r.top, r.right, r.bottom = self.rect
+        return 1
+
+
+@pytest.fixture(autouse=True)
+def _reset_screenshot_module_state():
+    screenshot_mod._cached_hwnd = None
+    screenshot_mod._user32 = None
+    yield
+    screenshot_mod._cached_hwnd = None
+    screenshot_mod._user32 = None
+
+
+def test_module_import_is_safe_on_non_windows(monkeypatch):
+    # ctypes.windll must never be touched at import time: CI runs on Ubuntu.
+    monkeypatch.setattr(sys, "platform", "linux", raising=False)
+    importlib.reload(screenshot_mod)
+
+
+def test_grab_thumbnail_none_when_no_game_window(monkeypatch):
+    monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
+    monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: _FakeUser32(found_title=None))
+    assert screenshot_mod.grab_thumbnail() is None
+
+
+def test_grab_thumbnail_never_falls_back_to_full_grab(monkeypatch):
+    Image = pytest.importorskip("PIL.Image")
+    image_grab_mod = pytest.importorskip("PIL.ImageGrab")
+
+    monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
+    monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: _FakeUser32(found_title=None))
+    calls = []
+
+    def _fake_grab(**kw):
+        calls.append(kw)
+        return Image.new("RGB", (10, 10))
+
+    monkeypatch.setattr(image_grab_mod, "grab", _fake_grab)
+    result = screenshot_mod.grab_thumbnail()
+    assert result is None
+    assert calls == []          # ImageGrab.grab is never invoked without a real window
+
+
+def test_grab_thumbnail_bbox_matches_window_rect(monkeypatch):
+    Image = pytest.importorskip("PIL.Image")
+    image_grab_mod = pytest.importorskip("PIL.ImageGrab")
+
+    monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
+    fake = _FakeUser32(found_title="Euro Truck Simulator 2", rect=(50, 40, 1330, 760))
+    monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
+    calls = []
+
+    def _fake_grab(**kw):
+        calls.append(kw.get("bbox"))
+        return Image.new("RGB", (1280, 720))
+
+    monkeypatch.setattr(image_grab_mod, "grab", _fake_grab)
+    result = screenshot_mod.grab_thumbnail()
+    assert result is not None
+    assert calls == [(50, 40, 1330, 760)]
+
+
+def test_grab_thumbnail_finds_ats_when_ets2_absent(monkeypatch):
+    Image = pytest.importorskip("PIL.Image")
+    image_grab_mod = pytest.importorskip("PIL.ImageGrab")
+
+    monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
+    fake = _FakeUser32(found_title="American Truck Simulator", rect=(0, 0, 800, 600))
+    monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
+    monkeypatch.setattr(image_grab_mod, "grab", lambda **kw: Image.new("RGB", (800, 600)))
+    assert screenshot_mod.grab_thumbnail() is not None
+    assert fake.found_titles == ["Euro Truck Simulator 2", "American Truck Simulator"]
+
+
+def test_grab_thumbnail_output_long_side_is_240(monkeypatch):
+    Image = pytest.importorskip("PIL.Image")
+    image_grab_mod = pytest.importorskip("PIL.ImageGrab")
+
+    monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
+    fake = _FakeUser32(found_title="American Truck Simulator", rect=(0, 0, 1920, 1080))
+    monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
+    monkeypatch.setattr(image_grab_mod, "grab", lambda **kw: Image.new("RGB", (1920, 1080)))
+
+    b64 = screenshot_mod.grab_thumbnail()
+    assert b64 is not None
+    img = Image.open(io.BytesIO(base64.b64decode(b64)))
+    assert max(img.size) == 240
+
+
+def test_grab_thumbnail_none_on_non_windows(monkeypatch):
+    monkeypatch.setattr(screenshot_mod.sys, "platform", "linux")
+
+    def _must_not_be_called():
+        raise AssertionError("must not touch user32 on a non-Windows platform")
+
+    monkeypatch.setattr(screenshot_mod, "_get_user32", _must_not_be_called)
+    assert screenshot_mod.grab_thumbnail() is None
 
 
 def test_thumbnail_survives_clip_serialization():

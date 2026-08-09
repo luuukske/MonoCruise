@@ -8,11 +8,10 @@ _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _repo not in sys.path:
     sys.path.insert(0, _repo)
 
-import base64
 from collections import OrderedDict
 
 from PySide6.QtCore import QEvent, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QFont, QPixmap
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QPlainTextEdit,
@@ -24,7 +23,7 @@ from core.aeb.clip_schema import ClipMetadata, Label
 from core.aeb.clip_score import class_window_warning
 from core.aeb.clip_store import ClipInfo, ClipStore
 from tools.aeb_review_widgets import (
-    ClipLoader, DecisionStrip, Loaded, SceneWidget, action_index, recorded_band,
+    ClipLoader, DecisionStrip, Loaded, SceneWidget, ThumbnailView, action_index, recorded_band,
 )
 
 _CLASSES = ["tp", "good_intervention", "fp", "fn", "tn", "ignore"]
@@ -206,11 +205,8 @@ class ReviewWindow(QMainWindow):
         right.addWidget(self._clip_meta_lbl)
 
         # Context screenshot grabbed at the trigger moment (above the labeling).
-        self._thumb_lbl = QLabel("(no screenshot)")
-        self._thumb_lbl.setMinimumHeight(150)
-        self._thumb_lbl.setAlignment(Qt.AlignCenter)
-        self._thumb_lbl.setStyleSheet("background:#111; color:#666; border:1px solid #333;")
-        right.addWidget(self._thumb_lbl)
+        self._thumb = ThumbnailView()
+        right.addWidget(self._thumb)
         right.addWidget(_hline())
 
         right.addWidget(QLabel("<b>Label</b>"))
@@ -503,11 +499,15 @@ class ReviewWindow(QMainWindow):
         self._proposal = loaded.proposal
         m = loaded.clip.metadata
         self._clip_name_lbl.setText(m.clip_id)
-        self._clip_meta_lbl.setText(
+        self._thumb.set_jpeg(m.thumbnail_jpeg)
+        meta = (
             f"{m.trigger_source} · {m.session_kind} · {m.captured_at}\n"
             f"{m.frame_count} frames / {m.tick_count} ticks · v{m.client_version}"
         )
-        self._set_thumbnail(m.thumbnail_jpeg)
+        size = self._thumb.source_size()
+        if size is not None:
+            meta += f" · thumb {size[0]}x{size[1]}"
+        self._clip_meta_lbl.setText(meta)
         dur = self._frames[-1].t_rel if self._frames else 1.0
         self._strip.set_frames(self._frames, dur)
         self._strip.set_proposal(self._proposal)
@@ -515,21 +515,6 @@ class ReviewWindow(QMainWindow):
         self._load_label_into_form(loaded.clip)
         self._refresh()
         self._prefetch()
-
-    def _set_thumbnail(self, b64: str | None) -> None:
-        self._thumb_lbl.setPixmap(QPixmap())
-        if not b64:
-            self._thumb_lbl.setText("(no screenshot)")
-            return
-        pix = QPixmap()
-        if not pix.loadFromData(base64.b64decode(b64), "JPEG"):
-            self._thumb_lbl.setText("(thumbnail decode failed)")
-            return
-        w = max(self._thumb_lbl.width(), 200)
-        self._thumb_lbl.setText("")
-        self._thumb_lbl.setPixmap(
-            pix.scaled(w, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        )
 
     # Label form
 

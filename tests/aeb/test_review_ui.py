@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
+import base64
 import time
 
 import pytest
 
-from PySide6.QtCore import QEvent, Qt
-from PySide6.QtGui import QKeyEvent
+from PySide6.QtCore import QEvent, QSize, Qt
+from PySide6.QtGui import QKeyEvent, QResizeEvent
 from PySide6.QtWidgets import QApplication
 
 from core.aeb.clip_replay import ReviewFrame, replay_clip
 from core.aeb.clip_schema import Label, LiveAEB
 from core.aeb.clip_store import ClipStore
 from tools.aeb_review import ReviewWindow
-from tools.aeb_review_widgets import action_index, recorded_band
+from tools.aeb_review_widgets import ThumbnailView, action_index, recorded_band
 
 from tests.aeb.test_clip_review import _build_replayable_clip
 
@@ -211,5 +212,76 @@ def test_save_advances_to_the_next_untagged_clip(tmp_path, qapp):
         # The already-tagged clip is skipped, whichever order the store listed them in.
         expected = next(p for p in order[1:] if store.peek_metadata(p).label is None)
         assert win._path == expected
+    finally:
+        win.close()
+
+
+def _thumbnail_b64(size: tuple[int, int]) -> str:
+    Image = pytest.importorskip("PIL.Image")
+    from core.aeb.screenshot import encode_thumbnail
+
+    img = Image.new("RGB", size, (30, 60, 90))
+    return encode_thumbnail(img, max_px=max(size), quality=70)
+
+
+@pytest.mark.parametrize("size", [(480, 270), (240, 135)])
+def test_thumbnail_scales_aspect_correct_and_fits_the_panel(qapp, size):
+    view = ThumbnailView()
+    view.set_jpeg(_thumbnail_b64(size))
+    pix = view.pixmap()
+    assert pix is not None and not pix.isNull()
+    assert pix.width() <= 320                     # never wider than the right panel
+    src_w, src_h = size
+    assert abs((pix.width() / pix.height()) - (src_w / src_h)) < 0.01
+    assert view.source_size() == size
+
+
+def test_thumbnail_rescales_from_the_cached_original(qapp):
+    """Every rescale starts from the decoded original, never from a previously scaled copy."""
+    view = ThumbnailView()
+    view.set_jpeg(_thumbnail_b64((240, 135)))
+    assert view.source_size() == (240, 135)
+
+    # An unshown widget does not get resizeEvent delivered, so drive it directly.
+    view.resize(150, 90)
+    view.resizeEvent(QResizeEvent(QSize(150, 90), QSize(0, 0)))
+    small = view.pixmap().width()
+
+    view.resize(300, 180)
+    view.resizeEvent(QResizeEvent(QSize(300, 180), QSize(150, 90)))
+    large = view.pixmap().width()
+
+    assert large > small
+    # The tell for re-scaling a scaled copy: the source would have shrunk with it.
+    assert view.source_size() == (240, 135)
+
+
+def test_no_screenshot_state_still_works(qapp):
+    view = ThumbnailView()
+    view.set_jpeg(_thumbnail_b64((240, 135)))
+    view.set_jpeg(None)
+    assert view.text() == "(no screenshot)"
+    assert view.source_size() is None
+
+
+def test_thumbnail_decode_failure_state_still_works(qapp):
+    view = ThumbnailView()
+    view.set_jpeg(base64.b64encode(b"not a jpeg").decode("ascii"))
+    assert view.text() == "(thumbnail decode failed)"
+    assert view.source_size() is None
+
+
+def test_show_appends_thumbnail_resolution_to_the_metadata_line(tmp_path, qapp):
+    store = ClipStore(root=tmp_path)
+    clip = _build_replayable_clip()
+    clip.metadata.thumbnail_jpeg = _thumbnail_b64((240, 135))
+    path = store.write(clip)
+
+    win = ReviewWindow(store)
+    try:
+        win._on_scanned([(i, store.peek_metadata(i.path)) for i in store.list_clips()])
+        win._list.setCurrentRow(0)
+        assert _spin_until(qapp, lambda: bool(win._frames)), "clip never decoded"
+        assert "240x135" in win._clip_meta_lbl.text()
     finally:
         win.close()
