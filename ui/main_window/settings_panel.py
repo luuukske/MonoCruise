@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 
 from core.input_bindings import binding_display_name, migrate_binding, resolve_held
 from core.thread_management.registry import registry
+from ui.main_window.consent_overlay import CONSENT_VERSION
 from ui.main_window.constants import (
     FIELD_ROW_HEIGHT,
     RADIUS_SETTINGS_PANEL,
@@ -82,11 +83,13 @@ class SettingsPanel(QWidget):
         on_save: Callable[[], None],
         on_reset: Callable[[], None],
         show_confirm: Callable[..., Any],
+        show_consent: Callable[..., Any],
     ) -> None:
         super().__init__(parent)
         self._settings = settings
         self._on_save = on_save
         self._show_confirm = show_confirm
+        self._show_consent = show_consent
         self._on_reset = on_reset
         self._reset_armed = False
         # Row min-heights stashed while a conditional row is hidden (see
@@ -700,6 +703,19 @@ class SettingsPanel(QWidget):
         self._grid.addWidget(aeb_widget, r_aeb, 1)
         self._grid.setRowMinimumHeight(r_aeb, FIELD_ROW_HEIGHT)
 
+        # Clip sharing (opt-in)
+        r_share = self._r()
+        new_label(p, r_share, 0, "Help improve AEB and ACC:")
+        self.chk_contribute = CheckBox()
+        self.chk_contribute.setFixedSize(24, 24)
+        self.chk_contribute.setChecked(
+            bool(s.aeb_contribute)
+            and int(s.aeb_contribute_consent_version) >= CONSENT_VERSION
+        )
+        self.chk_contribute.toggled.connect(self._on_contribute_toggled)
+        self._grid.addWidget(self.chk_contribute, r_share, 1, Qt.AlignmentFlag.AlignRight)
+        self._grid.setRowMinimumHeight(r_share, FIELD_ROW_HEIGHT)
+
     # Cruise helpers
 
     def _speed_unit(self) -> str:
@@ -1047,6 +1063,27 @@ class SettingsPanel(QWidget):
             )
         else:
             self._set("AEB_enabled", False)
+
+    def _on_contribute_toggled(self, checked: bool) -> None:
+        """Ticking opens the consent prompt; the setting only moves on accept."""
+        if not checked:
+            self._set("aeb_contribute", False)
+            return
+        self._check_contribute(False)
+        self._show_consent(
+            on_accept=lambda include_screenshot: (
+                self._check_contribute(True),
+                self._set("aeb_capture_screenshots", bool(include_screenshot)),
+                self._set("aeb_contribute_consent_version", CONSENT_VERSION),
+                self._set("aeb_contribute", True),
+            ),
+        )
+
+    def _check_contribute(self, checked: bool) -> None:
+        """Move the box without re-entering the toggle handler."""
+        self.chk_contribute.blockSignals(True)
+        self.chk_contribute.setChecked(checked)
+        self.chk_contribute.blockSignals(False)
 
     # Section 4 – One‑Pedal‑Drive
 

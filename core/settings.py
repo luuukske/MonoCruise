@@ -104,6 +104,10 @@ class Settings(metaclass=_SingletonMeta):
     AEB_enabled: bool = False
     # Debug AEB clip capture: grab a screen thumbnail per clip for tagging context.
     aeb_capture_screenshots: bool = True
+    # Opt-in clip sharing. Off until the consent prompt is accepted; the version
+    # records which text was agreed to, so a changed document re-prompts.
+    aeb_contribute: bool = False
+    aeb_contribute_consent_version: int = 0
 
     # Cruise/ACC/Custom buttons
     cc_dec_button: object = None

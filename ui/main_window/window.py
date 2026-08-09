@@ -31,6 +31,7 @@ from core.thread_management.registry import registry
 from ui.cc_panel.main import cc_panel as CcPanel
 from ui.main_window.banner import BannerState, BannerWidget
 from ui.main_window.confirmation_overlay import show_confirmation
+from ui.main_window.consent_overlay import show_consent
 from ui.main_window.constants import (
     APP_NAME,
     SETTINGS_PANEL_WIDTH,
@@ -107,6 +108,7 @@ class MonoCruiseWindow(QMainWindow):
             on_save=self._save,
             on_reset=self._reset_settings,
             show_confirm=self._show_confirmation,
+            show_consent=self._show_consent,
         )
         body_lay.addWidget(self._settings_panel)
 
@@ -249,6 +251,9 @@ class MonoCruiseWindow(QMainWindow):
         show_confirmation(
             self.centralWidget(), title, message, on_confirm, on_cancel
         )
+
+    def _show_consent(self, on_accept, on_decline=None):
+        show_consent(self.centralWidget(), on_accept, on_decline)
 
     # Command bar
 

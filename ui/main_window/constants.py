@@ -174,6 +174,13 @@ QPushButton#hideButton:hover {{
     color: {TEXT_COLOR};
 }}
 
+/* Without this a disabled button is indistinguishable from an enabled one,
+   which hides any gated action from the user. Applies to every button type. */
+QPushButton:disabled {{
+    background-color: {SETTINGS_COLOR};
+    color: {SUBTEXT_COLOR};
+}}
+
 QPushButton#dangerButton {{
     background-color: {DANGER_BUTTON_COLOR};
 }}
