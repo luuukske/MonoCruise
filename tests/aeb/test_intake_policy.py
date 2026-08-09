@@ -65,6 +65,28 @@ def test_an_old_client_is_refused(opted_in):
     assert _blocked(policy, client_version="2.0.0") is None
 
 
+def test_a_bare_release_floor_refuses_every_preview_of_that_release(opted_in):
+    """PEP 440 orders a prerelease before its release, so a floor of "1.1.0"
+    turns away 1.1.0-preview.N. That is correct ordering and the wrong policy: a
+    floor written as a bare release number while the channel ships prereleases
+    refuses the entire fleet, silently, with "client too old" at debug level.
+    Found by an end-to-end run against the real endpoint, so the server's policy
+    floor names a prerelease. Do not "fix" this in the client."""
+    policy = ip.IntakePolicy.from_json({**_OPEN, "min_client_version": "1.1.0"})
+    assert _blocked(policy, client_version="1.1.0-preview.14") == "client too old"
+
+    admits_previews = ip.IntakePolicy.from_json({**_OPEN, "min_client_version": "1.1.0-preview.14"})
+    assert _blocked(admits_previews, client_version="1.1.0-preview.14") is None
+    assert _blocked(admits_previews, client_version="1.1.0") is None
+
+
+def test_the_running_client_would_not_be_refused_by_its_own_version(opted_in):
+    from core.version import __version__
+
+    policy = ip.IntakePolicy.from_json({**_OPEN, "min_client_version": __version__})
+    assert _blocked(policy, client_version=__version__) is None
+
+
 def test_an_unparseable_version_does_not_satisfy_the_floor(opted_in):
     policy = ip.IntakePolicy.from_json({**_OPEN, "min_client_version": "2.0.0"})
     assert _blocked(policy, client_version="not-a-version") == "client too old"
