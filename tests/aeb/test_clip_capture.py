@@ -150,9 +150,10 @@ def test_store_write_load_and_count_rotation(tmp_path):
 
 
 def test_async_writer_persists_and_notifies(tmp_path):
-    saved_names: list[str] = []
+    """The callback gets the full path, which is what the uploader opens."""
+    saved_paths: list = []
     store = ClipStore(root=tmp_path)
-    writer = AsyncClipWriter(store, notify=saved_names.append)
+    writer = AsyncClipWriter(store, notify=saved_paths.append)
     writer.start()
     try:
         assert writer.submit(_make_clip(clip_id="async001")) is True
@@ -162,7 +163,7 @@ def test_async_writer_persists_and_notifies(tmp_path):
     infos = store.list_clips()
     assert len(infos) == 1
     assert store.load(infos[0].path).metadata.clip_id == "async001"
-    assert saved_names == [infos[0].name]
+    assert saved_paths == [infos[0].path]
 
 
 class _StubWriter:

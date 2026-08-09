@@ -1,6 +1,8 @@
 """Capture gate: who records, with what cap, and that contributors skip background negatives."""
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from core.aeb import capture as capture_mod
@@ -13,6 +15,8 @@ def fresh(monkeypatch, tmp_path):
     """A capture module reset between tests, with the store pointed at tmp_path."""
     monkeypatch.setattr(capture_mod, "_recorder", None)
     monkeypatch.setattr(capture_mod, "_writer", None)
+    monkeypatch.setattr(capture_mod, "_uploader", None)
+    monkeypatch.setattr(capture_mod, "_debug", False)
     monkeypatch.setattr(capture_mod, "_initialized", False)
 
     made: dict = {}
@@ -24,9 +28,12 @@ def fresh(monkeypatch, tmp_path):
 
     monkeypatch.setattr(capture_mod, "ClipStore", _store)
     monkeypatch.setattr(capture_mod.AsyncClipWriter, "start", lambda self: None)
+    monkeypatch.setattr(capture_mod.ClipUploader, "start", lambda self: None)
     yield made
     capture_mod._recorder = None
     capture_mod._writer = None
+    capture_mod._uploader = None
+    capture_mod._debug = False
     capture_mod._initialized = False
 
 
@@ -77,6 +84,75 @@ def test_a_contributor_does_not_capture_background_negatives(fresh, monkeypatch)
 def test_debug_still_captures_background_negatives(fresh, monkeypatch):
     _gate(monkeypatch, debug=True, contributing=True)
     assert capture_mod.get_recorder().capture_tn is True
+
+
+def test_a_debug_user_who_never_opted_in_never_queues_a_clip(fresh, monkeypatch, tmp_path):
+    """The write callback is the boundary; consent is checked there, not only at the socket."""
+    _gate(monkeypatch, debug=True, contributing=False)
+    submitted: list = []
+    monkeypatch.setattr(capture_mod, "_uploader", _StubUploader(submitted))
+    capture_mod._on_clip_written(tmp_path / "clip.json.gz")
+    assert submitted == []
+
+
+def test_an_opted_in_user_queues_the_clip(fresh, monkeypatch, tmp_path):
+    _gate(monkeypatch, debug=False, contributing=True)
+    submitted: list = []
+    monkeypatch.setattr(capture_mod, "_uploader", _StubUploader(submitted))
+    path = tmp_path / "clip.json.gz"
+    capture_mod._on_clip_written(path)
+    assert submitted == [path]
+
+
+def test_a_queued_clip_does_not_also_pop_the_saved_notice(fresh, monkeypatch, tmp_path, caplog):
+    """One notification per clip: the uploader announces the send instead."""
+    _gate(monkeypatch, debug=True, contributing=True)
+    monkeypatch.setattr(capture_mod, "_debug", True)
+    monkeypatch.setattr(capture_mod, "_uploader", _StubUploader([]))
+    with caplog.at_level(logging.INFO, logger="core.aeb.capture"):
+        capture_mod._on_clip_written(tmp_path / "clip.json.gz")
+    assert [r for r in caplog.records if getattr(r, "popup", False)] == []
+
+
+def test_a_debug_user_still_gets_the_saved_notice(fresh, monkeypatch, tmp_path, caplog):
+    _gate(monkeypatch, debug=True, contributing=False)
+    monkeypatch.setattr(capture_mod, "_debug", True)
+    monkeypatch.setattr(capture_mod, "_uploader", None)
+    with caplog.at_level(logging.INFO, logger="core.aeb.capture"):
+        capture_mod._on_clip_written(tmp_path / "clip.json.gz")
+    assert [r.getMessage() for r in caplog.records
+            if getattr(r, "popup", False)] == ["AEB clip saved"]
+
+
+def test_a_contributor_without_debug_gets_no_saved_notice(fresh, monkeypatch, tmp_path, caplog):
+    """The save popup is a debug affordance; contributors hear about sends only."""
+    _gate(monkeypatch, debug=False, contributing=True)
+    monkeypatch.setattr(capture_mod, "_debug", False)
+    monkeypatch.setattr(capture_mod, "_uploader", None)
+    with caplog.at_level(logging.INFO, logger="core.aeb.capture"):
+        capture_mod._on_clip_written(tmp_path / "clip.json.gz")
+    assert [r for r in caplog.records if getattr(r, "popup", False)] == []
+
+
+def test_the_uploader_only_starts_for_a_contributor(fresh, monkeypatch):
+    _gate(monkeypatch, debug=True, contributing=False)
+    capture_mod.get_recorder()
+    assert capture_mod.get_uploader() is None
+
+
+def test_a_debug_contributor_never_deletes_after_upload(fresh, monkeypatch):
+    _gate(monkeypatch, debug=True, contributing=True)
+    capture_mod.get_recorder()
+    assert capture_mod.get_uploader().delete_after is False
+
+
+class _StubUploader:
+    def __init__(self, sink: list) -> None:
+        self._sink = sink
+
+    def submit(self, path) -> bool:
+        self._sink.append(path)
+        return True
 
 
 def _recorder(capture_tn: bool) -> AEBClipRecorder:

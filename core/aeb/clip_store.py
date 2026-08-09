@@ -275,7 +275,7 @@ class AsyncClipWriter:
         self,
         store: ClipStore | None = None,
         *,
-        notify: Callable[[str], None] | None = None,
+        notify: Callable[[Path], None] | None = None,
         queue_max: int = 32,
     ) -> None:
         self._store = store if store is not None else ClipStore()
@@ -315,7 +315,8 @@ class AsyncClipWriter:
             return
         if path is not None and self._notify is not None:
             try:
-                self._notify(path.name)
+                # The full path, not the basename: the uploader needs to open it.
+                self._notify(path)
             except Exception:
                 logger.exception("AEB clip notify callback raised")
 

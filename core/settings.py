@@ -118,6 +118,12 @@ class Settings(metaclass=_SingletonMeta):
     # knobs). Raw text is kept so unknown fields survive a round trip.
     aeb_intake_policy_json: str = ""
     aeb_intake_checked: float = 0.0
+    # Delete a contributed clip once the server confirms it holds it. Debug
+    # users never delete, whatever this says: that store is the working corpus.
+    aeb_delete_after_upload: bool = True
+    # Tell the user when a clip leaves the machine. Default on deliberately: a
+    # silent background upload is what the notification exists to disprove.
+    aeb_contribute_notify: bool = True
 
     # Cruise/ACC/Custom buttons
     cc_dec_button: object = None

@@ -1303,6 +1303,60 @@ from the cached policy's own `refresh_hours`.
 
 ---
 
+## 14. Clip upload
+
+`core/aeb/upload.py` is the **only** module in this package that may send a clip
+anywhere, and `tests/aeb/test_upload_egress.py` asserts that by scanning the
+package rather than trusting the convention. `intake_policy.py` is the one other
+module allowed to make a request at all, and it only fetches the kill switch.
+
+### Consent is checked twice
+
+Once in `capture._on_clip_written`, which is where a clip enters the upload path,
+and once in `ClipUploader._handle` before the socket is opened. The first check
+is not redundant: since the capture gate widened to `debug or
+contribution_enabled()`, the writer callback also fires for debug testers who
+never opted in, and their clips must never reach the queue. **A config flag is
+never consent.** Both checks read the setting live, so unticking the box stops
+uploads immediately rather than at the next boot.
+
+### Eligibility is per clip, never per store
+
+`clip_ineligible_reason()` judges each clip from its own metadata:
+
+- `shadow_near` and `random` are background negatives and are never contributed.
+- A thumbnail whose long side exceeds `screenshot._MAX_PX` predates the
+  game-window crop and may show the whole monitor with legible text.
+- An unreadable thumbnail, unreadable metadata, or a non-null `client_id` all
+  refuse. Fail closed.
+
+The capture-time TN exclusion does not cover this, because a user who is both
+debug and contributing keeps `capture_tn=True` by design and their store holds
+clips from many builds. Judge the image, not a version string.
+
+### Responses
+
+`accepted` and `duplicate` delete locally; `quota` and `closed` pause the whole
+uploader for the server's `retry_after_s`; everything else is kept and not
+retried. Network errors and 5xx retry four times with bounded backoff, waiting on
+the stop event so shutdown stays prompt. **A debug user never deletes**, whatever
+`aeb_delete_after_upload` says: that store is the working corpus.
+
+### One notification per clip
+
+Exactly one of "sent" or "saved" fires for a given clip. The uploader announces a
+successful send, coalescing after the first into a summary once per
+`_NOTIFY_COOLDOWN_S`, held while AEB is intervening (`note_intervention`, called
+from the capture tick). When a clip stays on the machine the `on_kept` callback
+fires instead, and `capture._notify_kept` shows the old "AEB clip saved" popup to
+debug users only. Refusals and offline machines never claim a send.
+
+`aeb_submissions.jsonl` beside the store records one line per attempt, capped at
+5000 lines, carrying no coordinates and no image data. It is what makes
+delete-on-ack defensible.
+
+---
+
 *Source: `core/aeb/thread.py`, `core/aeb/filters.py`, `core/aeb/calibration.py`,
 `core/aeb/lane_frame.py`, `core/radar/*`: LD-Tech / MonoCruise.*
 

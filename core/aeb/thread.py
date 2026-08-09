@@ -24,7 +24,7 @@ from core.radar.traffic import (
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT
 from core.aeb.confirm import OccupancyConfirm
 from core.aeb.lane_frame import project_to_ego_arc, classify, Lane
-from core.aeb.capture import get_recorder
+from core.aeb.capture import get_recorder, note_intervention
 from core.aeb.clip_schema import AEBTickRecord, AEBWarmState, ConsumedContext, LiveAEB
 from core.aeb.filters import (
     FilterContext, FilterResult,
@@ -987,6 +987,9 @@ class AEBThread(BaseThread):
         if recorder is None:
             return
         try:
+            # Nothing competes with the road during the event that caused the
+            # clip, so upload notifications are held until it ends.
+            note_intervention(bool(aeb_warn) or bool(aeb_brake) or bool(self._engaged))
             brakeval, gasval, opdbrakeval = self._read_pedals_for_capture()
             reasons = {
                 str(vid): [r.reason for r in results if getattr(r, "reason", None)]
