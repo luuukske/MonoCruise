@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 from core.aeb.clip_replay import ReviewFrame
 from core.aeb.clip_schema import ClipMetadata, Label
 from core.aeb.clip_score import class_window_warning
-from core.aeb.clip_store import ClipInfo, ClipStore
+from core.aeb.clip_store import ClipInfo, ClipStore, contributed_clip_root
 from tools.aeb_review_widgets import (
     ClipLoader, DecisionStrip, Loaded, SceneWidget, ThumbnailView, action_index, recorded_band,
 )
@@ -770,10 +770,22 @@ def _fmt(v: float) -> str:
     return f"{v:.2f}" if v < 100 else "inf"
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="AEB clip review.")
+    parser.add_argument("--root", default=None,
+                        help="clip store to open (default: the local capture store)")
+    parser.add_argument("--contributed", action="store_true",
+                        help="open the pulled-in contributed store instead")
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+
+    root = args.root or (contributed_clip_root() if args.contributed else None)
+    store = ClipStore(root=root)
     app = QApplication.instance() or QApplication(sys.argv)
-    store = ClipStore()
     win = ReviewWindow(store)
+    # Two stores now exist, so the window has to say which one is open.
+    win.setWindowTitle(f"AEB Clip Review  [{store.root}]")
     win.show()
     return app.exec()
 

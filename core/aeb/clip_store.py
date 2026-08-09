@@ -32,6 +32,11 @@ def default_clip_root() -> Path:
     return Path.home() / ".monocruise" / "aeb_clips"
 
 
+def contributed_clip_root() -> Path:
+    """Pulled-in clips, kept apart so prune() can never evict the local corpus."""
+    return default_clip_root().with_name("aeb_clips_contributed")
+
+
 def serialize_clip(clip: Clip) -> bytes:
     """Clip -> gzipped UTF-8 JSON bytes."""
     payload = json.dumps(clip.to_json_dict()).encode("utf-8")
