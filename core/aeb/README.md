@@ -632,6 +632,46 @@ aeb.snapshot                       # AEBSnapshot: full debug state
      (engaged, TTB slam, latched) bypass it. A target only joins the vetoed set
      once its LOS track is long enough (`los_veto_min_samples`), so the opening
      frames of a short encounter still use the ordinary oblique timing.
+
+     **Evidence-class persistence (oncoming / wide-lateral).** Two more
+     all-targets windows sit alongside the vetoed one, because near-certain
+     geometry alone was granting an instant warn to the corpus's two dominant
+     phantom-beep classes. `aeb_warn_confirm_oncoming_s` applies while every
+     colliding target is head-on or near-head-on: opposite-carriageway traffic
+     is aligned (`|fwd_dot| >= aeb_certain_fwd_dot`), so it reached
+     `nearcertain_geom_ids` and beeped on a single frame of corridor clip.
+     `aeb_warn_confirm_wide_lat_s` applies while every colliding target
+     projects more than `aeb_warn_wide_lat_m` off the ego arc, roughly a full
+     lane over: slow or stopped vehicles ego is passing. Both are latency, not
+     silence, and share the vetoed window's instant bypasses, with one
+     exception: the TTB slam presumes an in-path target, so
+     `aeb_warn_ttb_needs_narrow` makes an all-wide-lateral set clear the
+     wide-lateral window even when `brake_ttb_active`. Separately,
+     `aeb_warn_max_range_m` drops the raw warn when the nearest colliding
+     target is past it: no corpus clip's genuine warn opens beyond ~80 m, and a
+     beep about something further out is not actionable.
+
+     **Class stickiness and the instant floor.** Two escapes closed the gate's
+     back door. A target that shrinks under `aeb_warn_wide_lat_m` as it closes
+     used to leave the wide class mid-approach and collect an instant warn the
+     gate had been refusing a frame earlier, so the class is sticky across
+     `aeb_warn_wide_lat_sticky_s` of lapse. The grace is deliberately short: it
+     bridges a collision-grid dropout but lets a target that genuinely leaves
+     and re-approaches start fresh, which is what keeps the one real trigger in
+     `075d163a` while dropping its two phantom ones. Separately,
+     `aeb_warn_instant_min_s` makes even certain geometry show a couple of
+     frames of raw warn before the instant bypass fires, since a single-frame
+     demand spike on a target that then vanishes is a tracking artefact that
+     the 0.3 s state hold would otherwise stretch into an audible beep.
+
+     Corpus effect of the whole gate: `false_warn` 43 -> 3, `TN` 286 -> 326,
+     every other verdict unmoved. Three genuine clips lose their warn
+     (`adf20ad7`, `4ba23e1c`, `505af174`, all one-to-two-frame blips). The
+     dominant price is lead, not coverage: warn-before-brake clips 120 -> 59
+     and clips with at least 0.3 s of lead 28 -> 14, almost all of it from
+     `aeb_warn_instant_min_s`. Setting that knob to 0 restores lead (88
+     warn-before-brake, 21 at >= 0.3 s) at the cost of one false_warn
+     (`9fa4c844`). See TUNING.md before touching either.
    - `AEB_brake` is true while engagement is latched and the published target
      is above zero. Other subsystems (cruise/HMI) gate off this flag.
    - **User-braking suppression**: when `_read_user_braking()` is true and

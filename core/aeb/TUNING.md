@@ -58,10 +58,29 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `aeb_confirm_occupancy` | 0.6 | Min qualified fraction over the trailing confirm window for the three `OccupancyConfirm` streaks (risk / engage / warn) to fire |
 | `aeb_confirm_max_gap_frames` | 2 | Max consecutive unqualified frames tolerated before a confirm streak drops; absorbs isolated collision-grid / TMP-jitter dropouts |
 | `aeb_certain_fwd_dot` | 0.90 | `|fwd_dot|` above which an in-lane colliding target is "certain" and skips the confirm wait |
+| `aeb_warn_confirm_oncoming_s` | 2.00 s | Warn occupancy while *every* colliding target is head-on / near-head-on (opposite-carriageway phantom class) |
+| `aeb_warn_confirm_wide_lat_s` | 0.50 s | Warn occupancy while *every* colliding target projects past `aeb_warn_wide_lat_m` off the ego arc |
+| `aeb_warn_wide_lat_m` | 4.0 m | Arc-lateral offset above which a colliding target counts as "a full lane over" for the warn gate |
+| `aeb_warn_wide_lat_sticky_s` | 0.20 s | How long the wide class survives a lapse, so a target closing under the bar cannot buy back the instant warn |
+| `aeb_warn_instant_min_s` | 0.05 s | Raw-warn floor under the certain-geometry instant bypass; kills single-frame demand spikes. Costs warn lead, see below |
+| `aeb_warn_ttb_needs_narrow` | True | An all-wide-lateral set clears the wide-lateral window even under the TTB slam, which presumes an in-path target |
+| `aeb_warn_max_range_m` | 90 m | Raw warn is dropped when the nearest colliding target is past this; no genuine corpus warn opens beyond ~80 m |
 | `corner_entry_min_road_bend` | 0.10 rad | Min ego↔tangent angle for Mode-B suppression |
-
-**TODO (warn comfort, residual false_warn ~42 on the labelled store):** the mass that remains is still mostly highway oncoming flicker where `nearcertain_geom` grants an instant warn before the veto track is long enough, or demand clears 0.60 of capacity for a few ticks. Persistence alone cannot finish the job without eating more genuine warn lead. Next work should tighten the *raw* oncoming warn condition (or the nearcertain instant path for out-of-lane / engage-vetoed ids), not raise these windows further. Context and rejected levers: `tools/aeb_corpus_run/progress.md` (section "2026-08-08 warn gate"), `tools/aeb_corpus_run/hypotheses.md`, offline replay `tools/aeb_corpus_run/_sim_warn_rules.py`, feature dump `_probe_warn_feats.py`, live score `_verify_warn_knob.py`.
 | `corner_entry_min_lateral` | 0.4 m | Min |lat_signed| to claim "off ego axis" (Mode B) |
 | `corner_entry_lateral_tol` | 1.5 m | Chord-offset tolerance for arc-consistency check (Mode B) |
+
+**Warn comfort status (residual false_warn 3 on the 610-clip store):** the gate
+took `false_warn` 43 -> 3 with no verdict other than false_warn moving. The
+three left (`075d163a`, `6f5a1555`, `75f2969c`) were reviewed and accepted:
+`075d163a` now fires only its one reasonable trigger, the other two are
+persistent converging geometry no warn knob reaches.
+
+`aeb_warn_instant_min_s` is the knob to revisit first. It buys exactly one
+false_warn (`9fa4c844`) and costs two extra genuine clips plus a third of the
+meaningful warn lead (clips with >= 0.3 s lead, 21 -> 14). Set it to 0 to trade
+back. `aeb_warn_confirm_wide_lat_s` must not go past 0.6: at 0.7 it drops
+`88f8223d`, a real converging crosser. Full frontier, per-clip traces, and the
+rejected levers (demand floors, slope gate, speed-ratio carve-outs,
+co-directional out-of-lane window): `tools/aeb_corpus_run/progress.md`.
 
 ---

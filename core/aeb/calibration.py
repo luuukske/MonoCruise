@@ -164,6 +164,22 @@ class AEBCalibration:
     aeb_warn_confirm_vetoed_s: float = 1.00
     # Demand bar for warn_by_decel; 0.60 with the windows above ~42 false_warn.
     aeb_warn_frac: float = 0.60
+    # Evidence-class warn windows: oncoming sets and sets a full lane off the
+    # ego arc are the two phantom-beep classes (README warn persistence).
+    aeb_warn_confirm_oncoming_s: float = 2.00
+    aeb_warn_confirm_wide_lat_s: float = 0.60
+    aeb_warn_wide_lat_m: float = 4.0
+    # Wide class survives this much lapse, so a target closing under the bar
+    # cannot buy back the instant warn. Bridges a dropout, not a re-approach.
+    aeb_warn_wide_lat_sticky_s: float = 0.20
+    # Even certain geometry must show this much raw warn before the instant
+    # bypass fires; kills single-frame demand spikes the state hold stretches.
+    aeb_warn_instant_min_s: float = 0.05
+    # The TTB-slam warn shortcut assumes an in-path target; a set this far off
+    # the arc must still clear the wide-lateral window.
+    aeb_warn_ttb_needs_narrow: bool = True
+    # No genuine corpus warn opens beyond 80 m; a beep that far out is noise.
+    aeb_warn_max_range_m: float = 90.0
 
     # OccupancyConfirm lapse tolerance; shared by risk/engage/warn (README).
     aeb_confirm_occupancy: float = 0.6

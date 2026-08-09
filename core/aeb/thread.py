@@ -791,6 +791,25 @@ class AEBThread(BaseThread):
             self._cal.aeb_confirm_max_gap_frames,
             self._cal.aeb_warn_confirm_vetoed_s,
         )
+        # Evidence-class warn occupancy: all-oncoming and all-wide-lateral sets.
+        self._warn_oncoming_confirm = OccupancyConfirm(
+            self._cal.aeb_confirm_occupancy,
+            self._cal.aeb_confirm_max_gap_frames,
+            self._cal.aeb_warn_confirm_oncoming_s,
+        )
+        self._warn_wide_lat_confirm = OccupancyConfirm(
+            self._cal.aeb_confirm_occupancy,
+            self._cal.aeb_confirm_max_gap_frames,
+            self._cal.aeb_warn_confirm_wide_lat_s,
+        )
+        # Raw-warn floor under the certain-geometry instant bypass.
+        self._warn_instant_confirm = OccupancyConfirm(
+            self._cal.aeb_confirm_occupancy,
+            self._cal.aeb_confirm_max_gap_frames,
+            self._cal.aeb_warn_instant_min_s,
+        )
+        # vid -> last mono time the target sat a full lane off the ego arc.
+        self._warn_wide_seen: dict[int, float] = {}
         self._published_target_ms2: float = 0.0
         self._last_target_change_mono: float = 0.0
         self._prev_loop_mono: float | None = None
@@ -1239,6 +1258,11 @@ class AEBThread(BaseThread):
         nearcertain_geom_ids: set[int] = set()
         # Colliding ids whose pose sits in ego's lane band, for the warn gate.
         ego_lane_colliding_ids: set[int] = set()
+        # Warn-gate evidence classes: oncoming, and a full lane off the ego arc.
+        oncoming_colliding_ids: set[int] = set()
+        wide_lat_colliding_ids: set[int] = set()
+        wide_lat_checked_ids: set[int] = set()
+        nearest_colliding_range: float = _INF
         los_vetoed_ids: set[int] = set()
         # Superset of los_vetoed_ids: every target barred from engagement entry.
         engage_vetoed_ids: set[int] = set()
@@ -1552,6 +1576,24 @@ class AEBThread(BaseThread):
                             or getattr(v, "crash_confirmed", False)
                             or v.id in certain_geom_ids):
                         nearcertain_geom_ids.add(v.id)
+                    # Warn-persistence classes: evidence quality, not threat
+                    # level, so they add latency only (README warn persistence).
+                    if head_on or near_head_on:
+                        oncoming_colliding_ids.add(v.id)
+                    if v.id not in wide_lat_checked_ids:
+                        wide_lat_checked_ids.add(v.id)
+                        _, warn_d_abs = project_to_ego_arc(
+                            ego_arc, ego_x + dx, ego_z + dz,
+                        )
+                        if warn_d_abs > cal.aeb_warn_wide_lat_m:
+                            self._warn_wide_seen[v.id] = now_mono
+                        # Sticky: closing across the bar must not hand back the
+                        # instant warn this gate was already refusing.
+                        seen = self._warn_wide_seen.get(v.id)
+                        if (seen is not None
+                                and now_mono - seen <= cal.aeb_warn_wide_lat_sticky_s):
+                            wide_lat_colliding_ids.add(v.id)
+                    nearest_colliding_range = min(nearest_colliding_range, dist)
                     newly_risky.add(v.id)
                     rc = self._risk_confirm.get(v.id)
                     if rc is None:
@@ -1925,6 +1967,9 @@ class AEBThread(BaseThread):
             run_collision and aeb_outputs_ok and time_to_brake < cal.warn_ttb
         )
         warn_raw = bool(warn_by_decel or warn_by_ttb)
+        # A beep about something this far out is not actionable, only noise.
+        if warn_raw and nearest_colliding_range > cal.aeb_warn_max_range_m:
+            warn_raw = False
 
         # Oblique warn occupancy gate; instant paths unchanged (README warn persistence).
         # Windows are refreshed per frame so a candidate calibration can move them.
@@ -1940,22 +1985,48 @@ class AEBThread(BaseThread):
         self._warn_vetoed_confirm.window_s = cal.aeb_warn_confirm_vetoed_s
         self._warn_vetoed_confirm.observe(now_mono, warn_raw and warn_vetoed_only)
 
+        # Two more phantom-beep classes: every colliding target oncoming, or
+        # every one a full lane off the ego arc. Both gate latency, not silence.
+        warn_oncoming_only = bool(colliding_ids) and colliding_ids <= oncoming_colliding_ids
+        self._warn_oncoming_confirm.window_s = cal.aeb_warn_confirm_oncoming_s
+        self._warn_oncoming_confirm.observe(now_mono, warn_raw and warn_oncoming_only)
+
+        warn_wide_lat_only = bool(colliding_ids) and colliding_ids <= wide_lat_colliding_ids
+        self._warn_wide_lat_confirm.window_s = cal.aeb_warn_confirm_wide_lat_s
+        self._warn_wide_lat_confirm.observe(now_mono, warn_raw and warn_wide_lat_only)
+
+        self._warn_instant_confirm.window_s = cal.aeb_warn_instant_min_s
+        self._warn_instant_confirm.observe(now_mono, warn_raw)
+        for _vid, _seen in list(self._warn_wide_seen.items()):
+            if now_mono - _seen > cal.aeb_warn_wide_lat_sticky_s:
+                del self._warn_wide_seen[_vid]
+
         if warn_raw:
             warn_latched = any(
                 vid in self._latched_threat_ids for vid in colliding_ids
             )
-            warn_instant = (
-                self._engaged
-                or brake_ttb_active
-                or any(vid in nearcertain_geom_ids for vid in colliding_ids)
-                or warn_latched
+            # The TTB slam assumes an in-path target; off-arc sets lose it.
+            warn_ttb_hard = brake_ttb_active and not (
+                cal.aeb_warn_ttb_needs_narrow and warn_wide_lat_only
+            )
+            warn_hard = bool(self._engaged or warn_ttb_hard or warn_latched)
+            warn_instant = warn_hard or (
+                any(vid in nearcertain_geom_ids for vid in colliding_ids)
+                and self._warn_instant_confirm.confirmed(now_mono)
             )
             aeb_warn = warn_instant or self._warn_confirm.confirmed(now_mono)
-            if (aeb_warn and warn_vetoed_only and not self._engaged
-                    and not brake_ttb_active and not warn_latched):
-                aeb_warn = self._warn_vetoed_confirm.confirmed(now_mono)
+            if aeb_warn and not warn_hard:
+                if warn_vetoed_only and not self._warn_vetoed_confirm.confirmed(now_mono):
+                    aeb_warn = False
+                if (aeb_warn and warn_oncoming_only
+                        and not self._warn_oncoming_confirm.confirmed(now_mono)):
+                    aeb_warn = False
+                if (aeb_warn and warn_wide_lat_only
+                        and not self._warn_wide_lat_confirm.confirmed(now_mono)):
+                    aeb_warn = False
         else:
             aeb_warn = False
+
 
         user_braking_now = self._read_user_braking()
         near_full_target = (
@@ -2085,6 +2156,10 @@ class AEBThread(BaseThread):
         self._engage_confirm.reset()
         self._warn_confirm.reset()
         self._warn_vetoed_confirm.reset()
+        self._warn_oncoming_confirm.reset()
+        self._warn_wide_lat_confirm.reset()
+        self._warn_instant_confirm.reset()
+        self._warn_wide_seen.clear()
         self._risk_confirm.clear()
         self._published_target_ms2 = 0.0
         self._last_target_change_mono = 0.0
