@@ -50,6 +50,11 @@ class _SingletonMeta(type):
         return super().__getattribute__(name)
 
 
+# Consent text version for opt-in clip sharing. Bump whenever the shipped
+# clip_contribution.md changes what leaves the machine, so the prompt reopens.
+CONSENT_VERSION = 1
+
+
 @dataclass
 class Settings(metaclass=_SingletonMeta):
     # General settings
@@ -107,7 +112,12 @@ class Settings(metaclass=_SingletonMeta):
     # Opt-in clip sharing. Off until the consent prompt is accepted; the version
     # records which text was agreed to, so a changed document re-prompts.
     aeb_contribute: bool = False
+    # Compared against CONSENT_VERSION below; older means the prompt reopens.
     aeb_contribute_consent_version: int = 0
+    # Server intake policy cache (written by core/aeb/intake_policy.py, not user
+    # knobs). Raw text is kept so unknown fields survive a round trip.
+    aeb_intake_policy_json: str = ""
+    aeb_intake_checked: float = 0.0
 
     # Cruise/ACC/Custom buttons
     cc_dec_button: object = None

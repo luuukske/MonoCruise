@@ -1258,6 +1258,45 @@ process-wide flip.
 
 ---
 
+## 13. Clip contribution intake policy
+
+`core/aeb/intake_policy.py` holds the server's terms for the opt-in clip
+sharing: whether intake is open at all, and the floors a clip has to clear.
+Nothing uploads yet; this is the gate the uploader will consult.
+
+### Fetched only for users who opted in
+
+`start_policy_fetch()` returns `None` and starts no thread unless
+`contribution_enabled()` is true, which requires both `Settings.aeb_contribute`
+and a consent version at or above `CONSENT_VERSION`. A machine that never ticked
+the box therefore makes **no request to the server at all**, which is what keeps
+this a continuation of the consent the user already gave rather than a new
+network behaviour. Do not move the fetch above that gate.
+
+It is a plain daemon thread at boot, like `core/update_check`, so the Qt main
+thread never waits on it. Failures are logged and swallowed.
+
+### Fail closed
+
+`upload_blocked_reason()` returns a reason string, or `None` to allow. Every
+unknown is a refusal: no policy cached, a policy that cannot be parsed, an
+unparseable version against a floor, and the dataclass defaults themselves all
+refuse. `accepting: false` is the fleet kill switch and needs no client release.
+
+The document is a static JSON file at the edge rather than an endpoint, so it
+costs nothing to serve and cannot be knocked over.
+
+### Cache
+
+The **raw response text** is cached in `Settings.aeb_intake_policy_json`, not the
+parsed fields, so a field added server-side survives a round trip through an
+older client. `aeb_intake_checked` stamps the last successful fetch and is only
+advanced after a response parses, so a bad response retries on the next boot
+rather than being cached as a refusal for a full window. The refresh window comes
+from the cached policy's own `refresh_hours`.
+
+---
+
 *Source: `core/aeb/thread.py`, `core/aeb/filters.py`, `core/aeb/calibration.py`,
 `core/aeb/lane_frame.py`, `core/radar/*`: LD-Tech / MonoCruise.*
 

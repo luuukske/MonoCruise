@@ -21,14 +21,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+# Lives in core so nothing under core/ has to import this UI module. Re-exported
+# here because the settings panel reads it alongside the overlay.
+from core.settings import CONSENT_VERSION  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 _ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 CONSENT_MARKDOWN = os.path.join(_ASSET_DIR, "clip_contribution.md")
-
-# Bump whenever clip_contribution.md changes what leaves the machine, so a user
-# who accepted the older text is asked again.
-CONSENT_VERSION = 1
 
 _CARD_WIDTH = 620
 _BODY_HEIGHT = 380

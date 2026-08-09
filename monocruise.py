@@ -385,6 +385,15 @@ def main() -> None:
     except Exception:
         log.debug("could not start update check", exc_info=True)
 
+    # Clip-contribution intake policy. No-op unless the user opted in, so a
+    # machine that never ticked the box makes no request (see core/aeb/README.md).
+    try:
+        from core.aeb.intake_policy import start_policy_fetch
+
+        start_policy_fetch()
+    except Exception:
+        log.debug("could not start the AEB intake policy fetch", exc_info=True)
+
     # Main window (lives on the main thread: no separate thread needed)
     window = create_main_window(settings, version=f"v{__version__}")
     registry.register_object("main_window", window)
