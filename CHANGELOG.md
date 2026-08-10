@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Fixed
+- **MAJOR: preview.15 closed instantly on startup**: the build was missing one of its own files, so MonoCruise quit before the window ever appeared. It was broken for about an hour after release, and this build fixes it. If you are on preview.15, update.
 
 ## [1.1.0-preview.15] - 2026-08-10
 ### Added

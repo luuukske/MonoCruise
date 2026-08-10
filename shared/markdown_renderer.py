@@ -337,7 +337,10 @@ class GitHubMarkdownRenderer:
             # Only a real <img> needs the class; a remote image fell back to a link.
             lone_image = (_IMAGE_ONLY_LINE.match(line.strip()) is not None
                           and processed.lstrip().startswith('<img'))
-            result.append(f'<p{" class=\"imgblock\"" if lone_image else ""}>{processed}</p>')
+            # Built outside the f-string: a backslash in an f-string expression
+            # is a SyntaxError before Python 3.12, and CI freezes on 3.11.
+            attrs = ' class="imgblock"' if lone_image else ''
+            result.append(f'<p{attrs}>{processed}</p>')
             last_was_header = False
             i += 1
 
