@@ -9,9 +9,8 @@ import logging
 import os
 from typing import Callable
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtWidgets import (
-    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -25,6 +24,13 @@ from PySide6.QtWidgets import (
 # here because the settings panel reads it alongside the overlay.
 from core.settings import CONSENT_VERSION  # noqa: F401
 from ui.main_window.constants import SETTINGS_COLOR
+from ui.main_window.overlay_chrome import (
+    attach_overlay,
+    begin_centered_outer,
+    finish_centered_outer,
+    OverlayCard,
+    sync_overlay_to_parent,
+)
 from ui.main_window.widgets import CheckBox
 
 logger = logging.getLogger(__name__)
@@ -34,7 +40,6 @@ CONSENT_MARKDOWN = os.path.join(_ASSET_DIR, "clip_contribution.md")
 
 _CARD_WIDTH = 620
 _BODY_HEIGHT = 380
-_CARD_EDGE_PAD = 16
 # Must match QFrame#dialogCard in constants.STYLESHEET.
 _DIALOG_CARD_BG = "#252525"
 # Qt leaves the scrollbar a pixel or two short of maximum at the bottom.
@@ -64,18 +69,6 @@ class _ConsentBody(QTextBrowser):
         return QSize(hint.width(), 0)
 
 
-class _ConsentCard(QFrame):
-    """Prefers ``_CARD_WIDTH`` but shrinks when the host is narrower."""
-
-    def sizeHint(self) -> QSize:
-        hint = super().sizeHint()
-        return QSize(_CARD_WIDTH, hint.height())
-
-    def minimumSizeHint(self) -> QSize:
-        hint = super().minimumSizeHint()
-        return QSize(0, hint.height())
-
-
 class ConsentOverlay(QWidget):
     """Full-window overlay whose accept button unlocks once the text has been read."""
 
@@ -94,25 +87,13 @@ class ConsentOverlay(QWidget):
         self._on_decline = on_decline
         self._unlocked = False
 
-        self.setGeometry(parent.rect())
-        self.setAutoFillBackground(True)
-        # Absolute geometry, so parent resizes would otherwise leave the card
-        # at its old size and the fixed-preference body would cover the footer.
-        parent.installEventFilter(self)
+        attach_overlay(self, parent)
 
         # Stretches centre the card when tall; when short the body shrinks first
         # so the checkbox and buttons stay visible instead of being painted over.
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(_CARD_EDGE_PAD, _CARD_EDGE_PAD, _CARD_EDGE_PAD, _CARD_EDGE_PAD)
-        outer.setSpacing(0)
-        outer.addStretch(1)
+        outer = begin_centered_outer(self)
 
-        card = _ConsentCard()
-        card.setObjectName("dialogCard")
-        # Cap at preferred width; shrink when the host is narrow, same idea as
-        # the body height yielding under a short window.
-        card.setMaximumWidth(_CARD_WIDTH)
-        card.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
+        card = OverlayCard(_CARD_WIDTH)
         # Margins and spacing match confirmation_overlay so both prompts read
         # as the same component.
         card_lay = QVBoxLayout(card)
@@ -167,8 +148,7 @@ class ConsentOverlay(QWidget):
         btn_row.addWidget(self._accept_btn)
         card_lay.addLayout(btn_row)
 
-        outer.addWidget(card, 0, Qt.AlignmentFlag.AlignHCenter)
-        outer.addStretch(1)
+        finish_centered_outer(outer, card)
         self._card = card
 
         self._body.verticalScrollBar().valueChanged.connect(self._check_read)
@@ -189,8 +169,7 @@ class ConsentOverlay(QWidget):
         self._check_read()
 
     def eventFilter(self, obj, event) -> bool:
-        if obj is self.parent() and event.type() == QEvent.Type.Resize:
-            self.setGeometry(obj.rect())
+        sync_overlay_to_parent(self, obj, event)
         return super().eventFilter(obj, event)
 
     def _check_read(self, *_args) -> None:

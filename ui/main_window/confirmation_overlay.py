@@ -1,13 +1,13 @@
-"""MonoCruise – In‑window modal confirmation overlay. Non‑blocking: uses signals/slots, never
-``QDialog.exec()``. Signature:: show_confirmation(parent, title, message, on_confirm,
-on_cancel=None)"""
+"""In-window modal confirmation overlay.
+
+Non-blocking: signals and slots, never ``QDialog.exec()``.
+Signature:: show_confirmation(parent, title, message, on_confirm, on_cancel=None)
+"""
 from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -15,9 +15,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ui.main_window.overlay_chrome import (
+    attach_overlay,
+    begin_centered_outer,
+    finish_centered_outer,
+    OverlayCard,
+    sync_overlay_to_parent,
+)
+
+_CARD_WIDTH = 380
+
 
 class ConfirmationOverlay(QWidget):
-    """Full‑window semi‑transparent overlay with a centred dialog card."""
+    """Full-window semi-transparent overlay with a centred dialog card."""
 
     def __init__(
         self,
@@ -32,17 +42,11 @@ class ConfirmationOverlay(QWidget):
         self._on_confirm = on_confirm
         self._on_cancel = on_cancel
 
-        # Fill entire parent
-        self.setGeometry(parent.rect())
-        self.setAutoFillBackground(True)
+        attach_overlay(self, parent)
 
-        # Centred card
-        outer = QVBoxLayout(self)
-        outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        outer = begin_centered_outer(self)
 
-        card = QFrame()
-        card.setObjectName("dialogCard")
-        card.setFixedWidth(380)
+        card = OverlayCard(_CARD_WIDTH)
         card_lay = QVBoxLayout(card)
         card_lay.setSpacing(14)
         card_lay.setContentsMargins(24, 20, 24, 20)
@@ -70,10 +74,15 @@ class ConfirmationOverlay(QWidget):
         btn_row.addWidget(confirm_btn)
 
         card_lay.addLayout(btn_row)
-        outer.addWidget(card)
+        finish_centered_outer(outer, card)
+        self._card = card
 
         self.show()
         self.raise_()
+
+    def eventFilter(self, obj, event) -> bool:
+        sync_overlay_to_parent(self, obj, event)
+        return super().eventFilter(obj, event)
 
     def _confirm(self) -> None:
         self._on_confirm()
@@ -94,8 +103,6 @@ class ConfirmationOverlay(QWidget):
         super().resizeEvent(event)
 
 
-# Convenience function
-
 def show_confirmation(
     parent: QWidget,
     title: str,
@@ -103,5 +110,5 @@ def show_confirmation(
     on_confirm: Callable[[], None],
     on_cancel: Callable[[], None] | None = None,
 ) -> ConfirmationOverlay:
-    """Show a modal‑style overlay inside *parent*.  Returns the overlay widget."""
+    """Show a modal-style overlay inside *parent*. Returns the overlay widget."""
     return ConfirmationOverlay(parent, title, message, on_confirm, on_cancel)
