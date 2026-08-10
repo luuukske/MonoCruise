@@ -35,4 +35,4 @@ There is no account and no ID. Nothing marks which clips are yours, which also m
 
 Clips are used to tune AEB and ACC. Never sold, never shared, no ads, no analytics. Just AEB/ACC improvements.
 
-MonoCruise tells you when clips are sent, and the button next to this setting lists everything that has been. Untick the box any time to stop.
+MonoCruise tells you when clips are sent. Untick the box any time to stop.
