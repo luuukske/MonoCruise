@@ -7,7 +7,8 @@ import pytest
 
 from PySide6.QtWidgets import QApplication, QWidget
 
-from ui.main_window.consent_overlay import CONSENT_MARKDOWN, ConsentOverlay
+from ui.main_window.constants import WINDOW_HEIGHT, WINDOW_WIDTH
+from ui.main_window.consent_overlay import _BODY_HEIGHT, CONSENT_MARKDOWN, ConsentOverlay
 
 
 @pytest.fixture(scope="module")
@@ -39,6 +40,26 @@ def _overlay(host, tmp_path, body: str, **kw) -> ConsentOverlay:
     )
     ov._calls = calls
     return ov
+
+
+def _assert_footer_clear_of_body(ov: ConsentOverlay) -> None:
+    """Body must end above the checkbox; checkbox and buttons must stay in the card."""
+    body = ov._body.geometry()
+    shot = ov._screenshot.geometry()
+    btn = ov._accept_btn.geometry()
+    card = ov._card.geometry()
+    assert body.bottom() < shot.top(), (
+        f"body overlaps checkbox: body.bottom={body.bottom()} shot.top={shot.top()}"
+    )
+    assert shot.bottom() < btn.top(), (
+        f"checkbox overlaps buttons: shot.bottom={shot.bottom()} btn.top={btn.top()}"
+    )
+    assert btn.bottom() <= card.height(), (
+        f"buttons clipped by card: btn.bottom={btn.bottom()} card.h={card.height()}"
+    )
+    assert card.bottom() <= ov.height(), (
+        f"card overflows overlay: card.bottom={card.bottom()} ov.h={ov.height()}"
+    )
 
 
 def test_the_shipped_document_and_image_are_both_present():
@@ -91,6 +112,17 @@ def test_decline_always_works_even_while_locked(host, tmp_path, qapp):
     assert ov._calls.get("decline") is True
 
 
+def test_screenshot_checkbox_is_the_settings_checkmark_widget(host, tmp_path, qapp):
+    """Plain QCheckBox has no glyph under our QSS; settings uses CheckBox for that."""
+    from ui.main_window.widgets import CheckBox
+
+    ov = _overlay(host, tmp_path, "short")
+    qapp.processEvents()
+    assert isinstance(ov._screenshot, CheckBox)
+    assert ov._screenshot.isChecked()
+    assert ov._screenshot.width() == 24 and ov._screenshot.height() == 24
+
+
 def test_screenshot_is_on_by_default_and_reported_on_accept(host, tmp_path, qapp):
     ov = _overlay(host, tmp_path, "short")
     qapp.processEvents()
@@ -113,3 +145,60 @@ def test_an_unreadable_document_cannot_be_accepted_blindly(host, qapp, tmp_path)
     ov = ConsentOverlay(host, markdown_path=str(tmp_path / "gone.md"), on_accept=lambda _s: None)
     qapp.processEvents()
     assert "could not be loaded" in ov._body.toPlainText()
+
+
+def test_body_uses_full_preferred_height_when_the_window_is_tall(host, tmp_path, qapp):
+    ov = _overlay(host, tmp_path, "para\n\n" * 400)
+    qapp.processEvents()
+    assert ov._body.height() == _BODY_HEIGHT
+    _assert_footer_clear_of_body(ov)
+
+
+@pytest.mark.parametrize("height", [WINDOW_HEIGHT, 450, 400, 350, 300, 250])
+def test_body_shrinks_instead_of_covering_the_footer(qapp, tmp_path, height):
+    """Default window height is shorter than the card's preferred size; body must yield."""
+    host = QWidget()
+    host.resize(WINDOW_WIDTH, height)
+    host.show()
+    qapp.processEvents()
+    try:
+        ov = _overlay(host, tmp_path, "para\n\n" * 400)
+        qapp.processEvents()
+        assert ov._body.height() <= _BODY_HEIGHT
+        if height < 520:
+            assert ov._body.height() < _BODY_HEIGHT
+        _assert_footer_clear_of_body(ov)
+    finally:
+        host.hide()
+        host.deleteLater()
+
+
+def test_shrinking_the_host_keeps_the_footer_clear(host, tmp_path, qapp):
+    ov = _overlay(host, tmp_path, "para\n\n" * 400)
+    qapp.processEvents()
+    assert ov._body.height() == _BODY_HEIGHT
+
+    for height in (500, 420, 360, 280):
+        host.resize(WINDOW_WIDTH, height)
+        qapp.processEvents()
+        assert ov._body.height() < _BODY_HEIGHT
+        _assert_footer_clear_of_body(ov)
+
+
+def test_read_gate_still_works_when_the_body_is_compressed(qapp, tmp_path):
+    host = QWidget()
+    host.resize(WINDOW_WIDTH, WINDOW_HEIGHT)
+    host.show()
+    qapp.processEvents()
+    try:
+        ov = _overlay(host, tmp_path, "para\n\n" * 400)
+        qapp.processEvents()
+        assert ov._body.height() < _BODY_HEIGHT
+        assert not ov._accept_btn.isEnabled()
+        bar = ov._body.verticalScrollBar()
+        assert bar.maximum() > 0
+        bar.setValue(bar.maximum())
+        assert ov._accept_btn.isEnabled()
+    finally:
+        host.hide()
+        host.deleteLater()

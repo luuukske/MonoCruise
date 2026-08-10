@@ -9,13 +9,13 @@ import logging
 import os
 from typing import Callable
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer
 from PySide6.QtWidgets import (
-    QCheckBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 # Lives in core so nothing under core/ has to import this UI module. Re-exported
 # here because the settings panel reads it alongside the overlay.
 from core.settings import CONSENT_VERSION  # noqa: F401
+from ui.main_window.widgets import CheckBox
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +33,25 @@ CONSENT_MARKDOWN = os.path.join(_ASSET_DIR, "clip_contribution.md")
 
 _CARD_WIDTH = 620
 _BODY_HEIGHT = 380
+_CARD_EDGE_PAD = 16
 # Qt leaves the scrollbar a pixel or two short of maximum at the bottom.
 _SCROLL_EPSILON_PX = 4
 
 # The stylesheet has no QTextBrowser rule, so without this it renders on the
 # default light background under the dark-theme markdown palette.
 _BODY_STYLE = "QTextBrowser{background:transparent; border:none;}"
+
+
+class _ConsentBody(QTextBrowser):
+    """Prefers ``_BODY_HEIGHT`` but yields space so the card footer never overlaps."""
+
+    def sizeHint(self) -> QSize:
+        hint = super().sizeHint()
+        return QSize(hint.width(), _BODY_HEIGHT)
+
+    def minimumSizeHint(self) -> QSize:
+        hint = super().minimumSizeHint()
+        return QSize(hint.width(), 0)
 
 
 class ConsentOverlay(QWidget):
@@ -60,13 +74,21 @@ class ConsentOverlay(QWidget):
 
         self.setGeometry(parent.rect())
         self.setAutoFillBackground(True)
+        # Absolute geometry, so parent resizes would otherwise leave the card
+        # at its old size and the fixed-preference body would cover the footer.
+        parent.installEventFilter(self)
 
+        # Stretches centre the card when tall; when short the body shrinks first
+        # so the checkbox and buttons stay visible instead of being painted over.
         outer = QVBoxLayout(self)
-        outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        outer.setContentsMargins(_CARD_EDGE_PAD, _CARD_EDGE_PAD, _CARD_EDGE_PAD, _CARD_EDGE_PAD)
+        outer.setSpacing(0)
+        outer.addStretch(1)
 
         card = QFrame()
         card.setObjectName("dialogCard")
         card.setFixedWidth(_CARD_WIDTH)
+        card.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Maximum)
         # Margins and spacing match confirmation_overlay so both prompts read
         # as the same component.
         card_lay = QVBoxLayout(card)
@@ -77,18 +99,31 @@ class ConsentOverlay(QWidget):
         title_lbl = QLabel(title or "Help improve AEB and ACC")
         title_lbl.setStyleSheet("font-size: 15px; font-weight: bold; background: transparent;")
         title_lbl.setWordWrap(True)
+        title_lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         card_lay.addWidget(title_lbl)
 
-        self._body = QTextBrowser()
+        self._body = _ConsentBody()
         self._body.setOpenExternalLinks(True)
-        self._body.setFixedHeight(_BODY_HEIGHT)
+        self._body.setMaximumHeight(_BODY_HEIGHT)
+        self._body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._body.setStyleSheet(_BODY_STYLE)
         self._body.setHtml(body_html)
-        card_lay.addWidget(self._body)
+        card_lay.addWidget(self._body, 1)
 
-        self._screenshot = QCheckBox("Include the screenshot")
+        # Same CheckBox glyph as the settings panel; label + box both right-aligned.
+        shot_row = QHBoxLayout()
+        shot_row.setSpacing(8)
+        shot_row.setContentsMargins(0, 0, 0, 0)
+        self._screenshot = CheckBox()
+        self._screenshot.setFixedSize(24, 24)
         self._screenshot.setChecked(screenshot_default)
-        card_lay.addWidget(self._screenshot)
+        shot_lbl = QLabel("Include the screenshot")
+        shot_lbl.setStyleSheet("background: transparent;")
+        shot_lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        shot_row.addStretch(1)
+        shot_row.addWidget(shot_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        shot_row.addWidget(self._screenshot, 0, Qt.AlignmentFlag.AlignVCenter)
+        card_lay.addLayout(shot_row)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(12)
@@ -108,9 +143,9 @@ class ConsentOverlay(QWidget):
         btn_row.addWidget(self._accept_btn)
         card_lay.addLayout(btn_row)
 
-        # Without the alignment flag the card stretches to the parent height and
-        # the layout spreads the slack between the rows.
-        outer.addWidget(card, 0, Qt.AlignmentFlag.AlignCenter)
+        outer.addWidget(card, 0)
+        outer.addStretch(1)
+        self._card = card
 
         self._body.verticalScrollBar().valueChanged.connect(self._check_read)
         self._body.verticalScrollBar().rangeChanged.connect(self._check_read)
@@ -128,6 +163,11 @@ class ConsentOverlay(QWidget):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self._check_read()
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.parent() and event.type() == QEvent.Type.Resize:
+            self.setGeometry(obj.rect())
+        return super().eventFilter(obj, event)
 
     def _check_read(self, *_args) -> None:
         """Unlock at the bottom, or at once when the text does not scroll at all."""
