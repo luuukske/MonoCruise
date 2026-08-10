@@ -47,7 +47,7 @@ _DELETE_REASONS: frozenset[str] = frozenset({"duplicate"})
 
 
 def _post(url: str, data: bytes, headers: dict) -> tuple[int, dict]:
-    """POST and decode the JSON body. Seam for tests; nothing else may call it."""
+    """POST and normalise the response. Seam for tests; nothing else may call it."""
     import requests
 
     resp = requests.post(url, data=data, headers=headers, timeout=_REQUEST_TIMEOUT)
@@ -55,7 +55,13 @@ def _post(url: str, data: bytes, headers: dict) -> tuple[int, dict]:
         body = resp.json()
     except ValueError:
         body = {}
-    return resp.status_code, body if isinstance(body, dict) else {}
+    if not isinstance(body, dict):
+        body = {}
+    # An edge throttle answers with an HTML page and a Retry-After header, not
+    # the endpoint's JSON, so carry the header through as the same field.
+    if "retry_after_s" not in body and resp.headers.get("Retry-After"):
+        body = {**body, "retry_after_s": resp.headers["Retry-After"]}
+    return resp.status_code, body
 
 
 def _thumbnail_long_side(b64: str | None) -> int | None:
@@ -341,7 +347,10 @@ class ClipUploader:
             self._delete(path)
             return
 
-        if reason in _KEEP_AND_STOP:
+        # 429 without a reason is an edge throttle rather than this endpoint, so
+        # the status has to be enough on its own. Treating it as an ordinary
+        # refusal would keep every later clip hammering a door already shut.
+        if reason in _KEEP_AND_STOP or status == 429:
             self._pause(body)
 
         self._record(path, meta, size, reason or f"http_{status}")

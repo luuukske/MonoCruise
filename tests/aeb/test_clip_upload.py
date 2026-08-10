@@ -222,6 +222,32 @@ def test_a_5xx_retries_then_gives_up(tmp_path, opted_in, monkeypatch):
     assert len(transport.calls) == upload_mod._MAX_ATTEMPTS
 
 
+def test_an_edge_throttle_pauses_even_without_a_reason(tmp_path, opted_in):
+    """Cloudflare answers a rate limit with an HTML page, not the endpoint's JSON.
+    Without the status-only branch every later clip would hammer a shut door."""
+    transport = _Transport((429, {"retry_after_s": "60"}))
+    store, up = _uploader(tmp_path, transport)
+    up._handle(_write(store, _clip(clip_id="first")))
+    up._handle(_write(store, _clip(clip_id="second", captured_at="2026-08-10T12:00:01Z")))
+    assert len(transport.calls) == 1
+
+
+def test_an_edge_throttle_without_a_retry_header_still_pauses(tmp_path, opted_in):
+    transport = _Transport((429, {}))
+    store, up = _uploader(tmp_path, transport)
+    up._handle(_write(store, _clip(clip_id="first")))
+    up._handle(_write(store, _clip(clip_id="second", captured_at="2026-08-10T12:00:01Z")))
+    assert len(transport.calls) == 1
+
+
+def test_an_http_date_retry_header_does_not_crash_the_pause(tmp_path, opted_in):
+    """Retry-After may be a date; an unparseable one must fall back, not raise."""
+    store, up = _uploader(tmp_path, _Transport(
+        (429, {"retry_after_s": "Wed, 21 Oct 2026 07:28:00 GMT"})))
+    up._handle(_write(store, _clip()))
+    assert up._paused_until > 0.0
+
+
 def test_a_4xx_is_not_retried(tmp_path, opted_in):
     transport = _Transport((400, {"accepted": False, "reason": "bad_schema"}))
     store, up = _uploader(tmp_path, transport)
