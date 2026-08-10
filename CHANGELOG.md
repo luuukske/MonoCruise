@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.0-preview.15] - 2026-08-10
 ### Added
 - **Help improve AEB/ACC**: added a feature to send clips to help me improve the AEB/ACC system filtering system. this does not store any personal information or data, it is only used to help me improve MonoCruise's behavior. **Please turn this on so i can improve AEB/ACC!**
 
