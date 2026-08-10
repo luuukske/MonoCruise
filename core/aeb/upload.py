@@ -45,9 +45,12 @@ _LOG_NAME: str = "aeb_submissions.jsonl"
 
 # Results worth offering again on a later boot. Everything else is terminal:
 # the server made a judgement about the clip and repeating it wastes both ends.
-_RETRYABLE_RESULTS: frozenset[str] = frozenset(
-    {"network_error", "server_error", "quota", "closed", "http_429", "paused"}
-)
+_RETRYABLE_RESULTS: frozenset[str] = frozenset({
+    "network_error", "server_error", "quota", "closed", "http_429", "paused",
+    # Said nothing about the clip, only about the moment. A boot fetch that had
+    # not landed yet, or a server that was closed then and may be open now.
+    "no intake policy", "intake closed",
+})
 # Bounded so a long outage cannot turn the next launch into a mass upload.
 _RETRY_BATCH: int = 20
 
@@ -360,6 +363,10 @@ class ClipUploader:
         )
         if blocked is not None:
             logger.debug("not uploading %s: %s", path.name, blocked)
+            # "not opted in" is unreachable here and must never be written: no
+            # consent means no record either.
+            if blocked != "not opted in":
+                self._record(path, meta, len(blob), blocked)
             return self._kept(path)
 
         self._send(path, blob, meta)

@@ -364,6 +364,41 @@ def test_the_retry_batch_is_bounded(tmp_path, opted_in):
     assert len(transport.calls) == 2
 
 
+def test_a_clip_refused_before_the_policy_landed_is_recoverable(tmp_path, monkeypatch, opted_in):
+    """The boot fetch is async, so a clip captured before it lands is a matter of
+    timing, not a judgement about the clip."""
+    monkeypatch.setattr(upload_mod, "upload_blocked_reason", lambda *a, **k: "no intake policy")
+    transport = _Transport()
+    store, up = _uploader(tmp_path, transport)
+    up._handle(_write(store, _clip(clip_id="raced-the-fetch")))
+    assert transport.calls == []
+    assert up._log.retryable_clip_ids() == {"raced-the-fetch"}
+
+
+def test_a_clip_refused_while_intake_was_closed_is_recoverable(tmp_path, monkeypatch, opted_in):
+    monkeypatch.setattr(upload_mod, "upload_blocked_reason", lambda *a, **k: "intake closed")
+    store, up = _uploader(tmp_path, _Transport())
+    up._handle(_write(store, _clip(clip_id="closed-then-1")))
+    assert up._log.retryable_clip_ids() == {"closed-then-1"}
+
+
+@pytest.mark.parametrize("reason", ["clip too large", "clip schema too old", "client too old"])
+def test_a_permanent_refusal_is_logged_but_never_retried(tmp_path, monkeypatch, opted_in, reason):
+    monkeypatch.setattr(upload_mod, "upload_blocked_reason", lambda *a, **k: reason)
+    store, up = _uploader(tmp_path, _Transport())
+    up._handle(_write(store, _clip(clip_id="permanently-no")))
+    assert up._log.retryable_clip_ids() == set()
+
+
+def test_a_non_consenting_machine_writes_no_log_line(tmp_path, monkeypatch, opted_in):
+    """No consent, no record: the log is itself something the user did not agree to."""
+    monkeypatch.setattr(upload_mod, "upload_blocked_reason", lambda *a, **k: "not opted in")
+    log_path = tmp_path / "log.jsonl"
+    store, up = _uploader(tmp_path, _Transport(), log=SubmissionLog(log_path))
+    up._handle(_write(store, _clip()))
+    assert not log_path.exists()
+
+
 def test_a_missing_file_is_skipped_rather_than_retried(tmp_path, opted_in):
     transport = _Transport()
     _store, up = _uploader(tmp_path, transport)
