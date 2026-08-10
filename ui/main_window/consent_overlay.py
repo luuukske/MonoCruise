@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 # Lives in core so nothing under core/ has to import this UI module. Re-exported
 # here because the settings panel reads it alongside the overlay.
 from core.settings import CONSENT_VERSION  # noqa: F401
+from ui.main_window.constants import SETTINGS_COLOR
 from ui.main_window.widgets import CheckBox
 
 logger = logging.getLogger(__name__)
@@ -34,12 +35,21 @@ CONSENT_MARKDOWN = os.path.join(_ASSET_DIR, "clip_contribution.md")
 _CARD_WIDTH = 620
 _BODY_HEIGHT = 380
 _CARD_EDGE_PAD = 16
+# Must match QFrame#dialogCard in constants.STYLESHEET.
+_DIALOG_CARD_BG = "#252525"
 # Qt leaves the scrollbar a pixel or two short of maximum at the bottom.
 _SCROLL_EPSILON_PX = 4
 
-# The stylesheet has no QTextBrowser rule, so without this it renders on the
-# default light background under the dark-theme markdown palette.
-_BODY_STYLE = "QTextBrowser{background:transparent; border:none;}"
+# Transparent QTextBrowser bg; scrollbar track matches the card so the groove
+# does not read as a separate box (same trick settings uses with #333333).
+_BODY_STYLE = (
+    "QTextBrowser{background:transparent; border:none;}"
+    f"QScrollBar:vertical{{background-color:{_DIALOG_CARD_BG}; width:8px; margin:0;}}"
+    f"QScrollBar::handle:vertical{{background-color:{SETTINGS_COLOR};"
+    " min-height:30px; border-radius:4px;}}"
+    "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical{height:0;}"
+    "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical{background:none;}"
+)
 
 
 class _ConsentBody(QTextBrowser):
@@ -52,6 +62,18 @@ class _ConsentBody(QTextBrowser):
     def minimumSizeHint(self) -> QSize:
         hint = super().minimumSizeHint()
         return QSize(hint.width(), 0)
+
+
+class _ConsentCard(QFrame):
+    """Prefers ``_CARD_WIDTH`` but shrinks when the host is narrower."""
+
+    def sizeHint(self) -> QSize:
+        hint = super().sizeHint()
+        return QSize(_CARD_WIDTH, hint.height())
+
+    def minimumSizeHint(self) -> QSize:
+        hint = super().minimumSizeHint()
+        return QSize(0, hint.height())
 
 
 class ConsentOverlay(QWidget):
@@ -85,10 +107,12 @@ class ConsentOverlay(QWidget):
         outer.setSpacing(0)
         outer.addStretch(1)
 
-        card = QFrame()
+        card = _ConsentCard()
         card.setObjectName("dialogCard")
-        card.setFixedWidth(_CARD_WIDTH)
-        card.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Maximum)
+        # Cap at preferred width; shrink when the host is narrow, same idea as
+        # the body height yielding under a short window.
+        card.setMaximumWidth(_CARD_WIDTH)
+        card.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
         # Margins and spacing match confirmation_overlay so both prompts read
         # as the same component.
         card_lay = QVBoxLayout(card)
@@ -143,7 +167,7 @@ class ConsentOverlay(QWidget):
         btn_row.addWidget(self._accept_btn)
         card_lay.addLayout(btn_row)
 
-        outer.addWidget(card, 0)
+        outer.addWidget(card, 0, Qt.AlignmentFlag.AlignHCenter)
         outer.addStretch(1)
         self._card = card
 
