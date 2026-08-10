@@ -356,8 +356,11 @@ class GitHubMarkdownRenderer:
     def _process_inline(self, text: str) -> str:
         """Process inline markdown elements."""
         text = html.escape(text)
-        text = re.sub(r'\*\*\*(.+?)\*\*\*', r'<b><i>\1</i></b>', text)
-        text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+        # Inline style: Qt often ignores body/b CSS against the host palette,
+        # and a color-only style on <b> can drop the default bold weight.
+        bold = f'color: {self.theme.md_text_primary}; font-weight: bold'
+        text = re.sub(r'\*\*\*(.+?)\*\*\*', rf'<b style="{bold}"><i>\1</i></b>', text)
+        text = re.sub(r'\*\*(.+?)\*\*', rf'<b style="{bold}">\1</b>', text)
         text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
         text = re.sub(r'~~(.+?)~~', r'<s>\1</s>', text)
         text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
@@ -613,6 +616,11 @@ class GitHubMarkdownRenderer:
                     padding-top: 8px;
                     padding-bottom: 4px;
                 }}
+                b, strong {{
+                    color: {TEXT_PRIMARY};
+                    font-weight: bold;
+                }}
+
                 h1 {{
                     font-size: 2em;
                     border-bottom: 1px solid {BG_SECTION_BORDER};
