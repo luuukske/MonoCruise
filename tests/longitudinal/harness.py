@@ -75,6 +75,15 @@ def pedal_data(**overrides) -> Data:
         cc_start_held=False,
         acc_dist_inc_held=False,
         acc_dist_dec_held=False,
+        # Real main_pedal_thread publishes a rising-edge count per binding,
+        # seeded at zero; short presses fire from it, not from the held level.
+        cc_button_press_counts={
+            "cc_start_button": 0,
+            "cc_inc_button": 0,
+            "cc_dec_button": 0,
+            "acc_dist_inc_button": 0,
+            "acc_dist_dec_button": 0,
+        },
         brakeval=0.0,
         opdgasval=0.0,
     )

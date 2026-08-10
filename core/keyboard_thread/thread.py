@@ -25,6 +25,9 @@ except Exception:
 @dataclass
 class KeyboardThreadData(ThreadData):
     is_available: bool = False
+    # {capitalized key name: monotonic press count} for bound keys only. Read
+    # from the OS hook so a tap shorter than a consumer's tick still counts.
+    key_press_counts: dict = field(default_factory=dict, repr=False)
     capture_active: bool = False
     capture_event: str | None = None  # capitalized key name when captured, e.g. "A", "Space"
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
@@ -38,6 +41,11 @@ class KeyboardThread(BaseThread):
         super().__init__(name="keyboard_thread")
         self.data = KeyboardThreadData()
         self._capture_hook = None
+        self._press_hook = None
+        # Only keys currently bound to a CC button are counted, so this never
+        # becomes a tally of everything typed.
+        self._watched_keys: set[str] = set()
+        self._keys_down: set[str] = set()
 
     def setup(self) -> None:
         if not _keyboard_available or _kb is None:
@@ -55,12 +63,64 @@ class KeyboardThread(BaseThread):
 
         with self.data._lock:
             self.data.is_available = True
+        self._refresh_watched_keys()
+        self._install_press_counter()
         logger.debug("keyboard_thread setup complete")
 
     def loop(self) -> None:
         if not self.running:
             return
-        # keyboard lib manages its own OS hook thread; nothing to poll here.
+        # keyboard lib manages its own OS hook thread; only the watched-key set
+        # needs refreshing here, in case a binding changed.
+        self._refresh_watched_keys()
+
+    def _refresh_watched_keys(self) -> None:
+        """Track only the keys bound to CC buttons."""
+        from core.input_bindings import migrate_binding
+        from core.settings import Settings
+
+        keys: set[str] = set()
+        for name in (
+            "cc_start_button", "cc_inc_button", "cc_dec_button",
+            "acc_dist_inc_button", "acc_dist_dec_button",
+        ):
+            try:
+                b = migrate_binding(getattr(Settings, name, None))
+            except Exception:
+                continue
+            if b and b.get("source") == "keyboard" and b.get("code"):
+                keys.add(str(b["code"]).capitalize())
+        self._watched_keys = keys
+
+    def _install_press_counter(self) -> None:
+        """Count press edges for bound keys from the OS hook, ignoring auto-repeat."""
+        if not _keyboard_available or _kb is None:
+            return
+        data = self.data
+
+        def _on_event(event) -> None:
+            name = getattr(event, "name", None)
+            if not name:
+                return
+            key = str(name).capitalize()
+            if key not in self._watched_keys:
+                return
+            if getattr(event, "event_type", None) == "down":
+                # Held keys repeat at the OS repeat rate; only the first counts.
+                if key in self._keys_down:
+                    return
+                self._keys_down.add(key)
+                with data._lock:
+                    counts = dict(data.key_press_counts)
+                    counts[key] = counts.get(key, 0) + 1
+                    data.key_press_counts = counts
+            else:
+                self._keys_down.discard(key)
+
+        try:
+            self._press_hook = _kb.hook(_on_event, suppress=False)
+        except Exception:
+            logger.debug("failed to install keyboard press counter", exc_info=True)
 
     def teardown(self) -> None:
         self._remove_capture_hook()

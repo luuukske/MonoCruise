@@ -12,9 +12,19 @@ import pygame
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 from core.settings import Settings
-from core.input_bindings import binding_state, migrate_binding, keyboard_is_pressed, resolve_held
+from core.input_bindings import (
+    binding_state,
+    keyboard_is_pressed,
+    migrate_binding,
+    resolve_held,
+    resolve_press_count,
+)
 
 logger = logging.getLogger(__name__)
+
+# A press is latched for at least this long. Consumers resample this thread's
+# published level, so a tap shorter than their tick would otherwise vanish.
+_BUTTON_MIN_HOLD_S = 0.06
 
 # Hat direction index → pygame hat (x, y) value
 _DIR_IDX_TO_XY: dict[int, tuple[int, int]] = {
@@ -126,6 +136,10 @@ class MainPedalThreadData(ThreadData):
     acc_dist_inc_held: bool = False
     acc_dist_dec_held: bool = False
 
+    # Rising-edge count per CC button binding name; lets a consumer prove no
+    # press was dropped between its samples.
+    cc_button_press_counts: dict = field(default_factory=dict, repr=False)
+
     # Full joystick button state snapshot: {device_guid: {virtual_code: bool}}.
     # See `core/main_pedal_thread/README.md`.
     joystick_button_states: dict = field(default_factory=dict, repr=False)
@@ -189,6 +203,13 @@ class MainPedalThread(BaseThread):
         # Guard safety timeout: clear a stuck capture_guard (e.g. bound to a
         # device that never reports) so CC buttons cannot stay dead forever.
         self._capture_guard_ts: float = 0.0
+
+        # Button press latch: raw edge tracking, minimum-hold deadline, and a
+        # monotonic press count per binding name.
+        self._button_raw_prev: dict[str, bool] = {}
+        self._button_hold_until: dict[str, float] = {}
+        self._button_press_counts: dict[str, int] = {}
+        self._button_source_counts: dict[str, int] = {}
 
         # Pedal configuration flow (thread-owned):
         # guid → joystick for every connected device while config is active.
@@ -731,13 +752,15 @@ class MainPedalThread(BaseThread):
             }
 
 
+    _CC_BUTTON_NAMES = (
+        "cc_start_button", "cc_inc_button", "cc_dec_button",
+        "acc_dist_inc_button", "acc_dist_dec_button",
+    )
+
     def _collect_button_guids(self) -> set[str]:
         """Return all unique device GUIDs referenced by current joystick button bindings."""
         guids: set[str] = set()
-        for name in (
-            "cc_start_button", "cc_inc_button", "cc_dec_button",
-            "acc_dist_inc_button", "acc_dist_dec_button",
-        ):
+        for name in self._CC_BUTTON_NAMES:
             raw = getattr(Settings, name)
             b = migrate_binding(raw)
             if b and b.get("source") == "joystick":
@@ -894,6 +917,7 @@ class MainPedalThread(BaseThread):
             capture_active = self.data.capture_active
             guard = self.data.capture_guard
         if capture_active:
+            self._reset_button_latch()
             return (False, False, False, False, False)
         if guard is not None:
             expired = (
@@ -903,17 +927,49 @@ class MainPedalThread(BaseThread):
             # binding_state None means the source device hasn't reported yet
             # See `core/main_pedal_thread/README.md`.
             if not expired and binding_state(guard) is not False:
+                self._reset_button_latch()
                 return (False, False, False, False, False)
             with self.data._lock:
                 self.data.capture_guard = None
 
+        now = time.perf_counter()
         results: list[bool] = []
-        for name in (
-            "cc_start_button", "cc_inc_button", "cc_dec_button",
-            "acc_dist_inc_button", "acc_dist_dec_button",
-        ):
-            results.append(resolve_held(getattr(Settings, name)))
+        for name in self._CC_BUTTON_NAMES:
+            # Seed at zero so a consumer baselining on first sight cannot
+            # swallow the very first press of a button.
+            self._button_press_counts.setdefault(name, 0)
+            binding = getattr(Settings, name)
+            raw = resolve_held(binding)
+
+            # Prefer the source's own count: this loop can be far slower than a
+            # tap, so watching for an edge here would miss it entirely.
+            source_count = resolve_press_count(binding)
+            if source_count is not None:
+                prev = self._button_source_counts.get(name)
+                if prev is None or source_count < prev:
+                    self._button_source_counts[name] = source_count
+                elif source_count > prev:
+                    self._button_press_counts[name] += source_count - prev
+                    self._button_source_counts[name] = source_count
+                    # Deadline runs from the press, so a press already longer
+                    # than the window is never extended.
+                    self._button_hold_until[name] = now + _BUTTON_MIN_HOLD_S
+            elif raw and not self._button_raw_prev.get(name, False):
+                self._button_press_counts[name] += 1
+                self._button_hold_until[name] = now + _BUTTON_MIN_HOLD_S
+
+            self._button_raw_prev[name] = raw
+            results.append(raw or now < self._button_hold_until.get(name, 0.0))
+
+        with self.data._lock:
+            self.data.cc_button_press_counts = dict(self._button_press_counts)
         return tuple(results)  # type: ignore[return-value]
+
+    def _reset_button_latch(self) -> None:
+        """Drop latched presses so a capture or guard cannot release a stale one."""
+        self._button_raw_prev.clear()
+        self._button_hold_until.clear()
+        self._button_source_counts.clear()
 
     def _resolve_joystick_binding(self, binding: dict) -> bool:
         """Look up the virtual button code in the current tick's joystick state snapshot."""

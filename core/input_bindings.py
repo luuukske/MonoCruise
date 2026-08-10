@@ -97,6 +97,42 @@ def binding_state(binding: object) -> bool | None:
     return False
 
 
+def resolve_press_count(binding: object) -> int | None:
+    """Monotonic press count from the source, or None if it does not count edges.
+
+    Sources that see every edge (HID reports, the keyboard OS hook) count them,
+    so a consumer polling slower than a tap lasts still sees the press.
+    """
+    b = migrate_binding(binding)
+    if b is None:
+        return None
+    source = b.get("source")
+    try:
+        if source == "button_device":
+            vid_pid = b.get("vid_pid")
+            button_id = b.get("button_id")
+            if not vid_pid or button_id is None:
+                return None
+            bt = registry.get_thread("button_device_thread")
+            with bt.data._lock:
+                counts = bt.data.button_press_counts.get(vid_pid) or {}
+            return int(counts.get(button_id, 0))
+        if source == "keyboard":
+            key = b.get("code")
+            if not key:
+                return None
+            kt = registry.get_thread("keyboard_thread")
+            with kt.data._lock:
+                counts = dict(kt.data.key_press_counts)
+            return int(counts.get(str(key).capitalize(), 0))
+    except (KeyError, AttributeError):
+        return None
+    except Exception:
+        logger.debug("failed to resolve press count for %s", source, exc_info=True)
+        return None
+    return None
+
+
 def binding_display_name(raw: object) -> str:
     """Display label for UI; prefers stored label."""
     b = migrate_binding(raw)

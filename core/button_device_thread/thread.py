@@ -28,9 +28,14 @@ except Exception:
 
 _RECONNECT_INTERVAL = 2.0  # seconds between reconnect attempts for a lost device
 
-# Switch contact bounce measured on a MOZA stalk peaks near 7 ms. A bit must
-# hold its new value this long before it is published. See the README.
-_DEBOUNCE_S = 0.020
+# A release must hold this long to count; a shorter dip is contact bounce,
+# which peaks near 7 ms on a MOZA stalk. Presses are never delayed.
+_RELEASE_HOLD_S = 0.015
+# Each published level is held at least this long so a consumer sampling on
+# Windows timer granularity cannot step over an edge. See the README.
+_MIN_DWELL_S = 0.020
+# Above roughly 25 taps/s the edge queue cannot keep up; resync rather than lag.
+_MAX_PENDING_EDGES = 8
 # Bound the per-tick drain so a runaway device cannot stall the loop.
 _MAX_REPORTS_PER_TICK = 64
 
@@ -56,9 +61,26 @@ def _parse_vid_pid(vid_pid: str) -> tuple[int, int] | None:
 
 
 @dataclass
+class _ButtonState:
+    """Per-bit debounce and publication state. See the README."""
+
+    raw: bool = False
+    logical: bool = False       # raw with contact bounce filtered out
+    published: bool = False     # logical rate-limited so no edge is skipped
+    presses: int = 0            # monotonic count of published press edges
+    release_ts: float | None = None
+    last_publish_ts: float = 0.0
+    pending: list[bool] = field(default_factory=list)
+
+
+@dataclass
 class ButtonDeviceThreadData(ThreadData):
     # {vid_pid: {button_id: bool}}: updated every loop tick
     button_states: Dict[str, Dict[int, bool]] = field(default_factory=dict, repr=False)
+
+    # {vid_pid: {button_id: int}}: monotonic press count. Consumers poll slower
+    # than a tap lasts, so they read this instead of watching for an edge.
+    button_press_counts: Dict[str, Dict[int, int]] = field(default_factory=dict, repr=False)
 
     # Capture API (used by the settings panel button-assignment flow).
     capture_active: bool = False
@@ -79,11 +101,8 @@ class ButtonDeviceThread(BaseThread):
         self._devices: dict[str, object] = {}
         # vid_pid → last raw HID report (list[int]): retained between ticks
         self._last_reports: dict[str, list[int]] = {}
-        # Debounce state: raw bits as reported, when each last changed, and the
-        # settled bits actually published. See the README.
-        self._raw_bits: dict[str, dict[int, bool]] = {}
-        self._raw_change_ts: dict[str, dict[int, float]] = {}
-        self._stable_bits: dict[str, dict[int, bool]] = {}
+        # vid_pid → {button_id: _ButtonState}: debounce and publication state
+        self._buttons: dict[str, dict[int, _ButtonState]] = {}
         # vid_pid → human-readable name (for logging/popup)
         self._device_names: dict[str, str] = {}
         # vid_pid → monotonic time after which the next reconnect attempt is allowed
@@ -124,6 +143,7 @@ class ButtonDeviceThread(BaseThread):
 
         now = time.perf_counter()
         new_states: dict[str, dict[int, bool]] = {}
+        new_counts: dict[str, dict[int, int]] = {}
 
         for vid_pid, device in list(self._devices.items()):
             if not self.running:
@@ -133,6 +153,7 @@ class ButtonDeviceThread(BaseThread):
                 self._maybe_reconnect(vid_pid)
                 self._reset_button_state(vid_pid)
                 new_states[vid_pid] = {}
+                new_counts[vid_pid] = {}
                 continue
 
             try:
@@ -149,6 +170,7 @@ class ButtonDeviceThread(BaseThread):
                 self._reconnect_deadlines[vid_pid] = time.monotonic() + _RECONNECT_INTERVAL
                 self._reset_button_state(vid_pid)
                 new_states[vid_pid] = {}
+                new_counts[vid_pid] = {}
                 continue
 
             except Exception:
@@ -157,16 +179,42 @@ class ButtonDeviceThread(BaseThread):
                 logger.debug("failed to read button device %s", vid_pid, exc_info=True)
 
             new_states[vid_pid] = self._settle_buttons(vid_pid, now)
+            new_counts[vid_pid] = self._press_counts(vid_pid)
 
         self._tick_capture(new_states, now)
 
         with self.data._lock:
             self.data.button_states = new_states
+            self.data.button_press_counts = new_counts
+
+    @staticmethod
+    def _queue_edge(state: _ButtonState, value: bool) -> None:
+        """Queue a logical edge for publication, keeping the queue alternating."""
+        if state.pending:
+            if state.pending[-1] == value:
+                return
+        elif state.published == value:
+            return
+        state.pending.append(value)
+        if len(state.pending) > _MAX_PENDING_EDGES:
+            state.pending = [] if state.published == value else [value]
+
+    def _apply_release_hold(self, states: dict[int, _ButtonState], now: float) -> None:
+        """Promote a release to logical once it has outlasted contact bounce."""
+        for state in states.values():
+            if state.release_ts is None or state.raw or not state.logical:
+                continue
+            if now - state.release_ts >= _RELEASE_HOLD_S:
+                state.logical = False
+                state.release_ts = None
+                self._queue_edge(state, False)
 
     def _drain_reports(self, vid_pid: str, device, now: float) -> None:
-        """Consume every queued report and track when each bit last changed."""
-        raw_bits = self._raw_bits.setdefault(vid_pid, {})
-        change_ts = self._raw_change_ts.setdefault(vid_pid, {})
+        """Consume every queued report and turn raw bit changes into logical edges."""
+        states = self._buttons.setdefault(vid_pid, {})
+        # A release that matured before this tick's reports must land first,
+        # or a press arriving now would erase it.
+        self._apply_release_hold(states, now)
 
         for _ in range(_MAX_REPORTS_PER_TICK):
             if not self.running:
@@ -179,30 +227,40 @@ class ButtonDeviceThread(BaseThread):
                 for bit in range(8):
                     button_id = byte_idx * 8 + bit
                     held = bool((byte_val >> bit) & 1)
-                    if raw_bits.get(button_id) != held:
-                        raw_bits[button_id] = held
-                        change_ts[button_id] = now
+                    state = states.setdefault(button_id, _ButtonState())
+                    if held and not state.raw:
+                        # A press is never delayed, and a re-press inside the
+                        # hold window cancels the release: that dip was bounce.
+                        state.release_ts = None
+                        if not state.logical:
+                            state.logical = True
+                            self._queue_edge(state, True)
+                    elif not held and state.raw:
+                        state.release_ts = now
+                    state.raw = held
 
     def _settle_buttons(self, vid_pid: str, now: float) -> dict[int, bool]:
-        """Publish a raw bit only once it has held its new value for _DEBOUNCE_S."""
-        raw_bits = self._raw_bits.setdefault(vid_pid, {})
-        change_ts = self._raw_change_ts.setdefault(vid_pid, {})
-        stable = self._stable_bits.setdefault(vid_pid, {})
+        """Publish at most one edge per bit per tick, holding each level _MIN_DWELL_S."""
+        states = self._buttons.setdefault(vid_pid, {})
+        self._apply_release_hold(states, now)
 
-        for button_id, held in raw_bits.items():
-            if stable.get(button_id, False) == held:
-                continue
-            if now - change_ts.get(button_id, now) >= _DEBOUNCE_S:
-                stable[button_id] = held
+        for state in states.values():
+            if state.pending and now - state.last_publish_ts >= _MIN_DWELL_S:
+                state.published = state.pending.pop(0)
+                state.last_publish_ts = now
+                if state.published:
+                    state.presses += 1
         # Cover every bit the device has reported: binding_state() reads an
         # empty dict as "device has not reported yet".
-        return {button_id: stable.get(button_id, False) for button_id in raw_bits}
+        return {button_id: state.published for button_id, state in states.items()}
+
+    def _press_counts(self, vid_pid: str) -> dict[int, int]:
+        states = self._buttons.get(vid_pid, {})
+        return {button_id: state.presses for button_id, state in states.items()}
 
     def _reset_button_state(self, vid_pid: str) -> None:
         """Drop settled state so a reconnect never inherits a stale held button."""
-        self._raw_bits.pop(vid_pid, None)
-        self._raw_change_ts.pop(vid_pid, None)
-        self._stable_bits.pop(vid_pid, None)
+        self._buttons.pop(vid_pid, None)
         self._last_reports.pop(vid_pid, None)
 
     def teardown(self) -> None:

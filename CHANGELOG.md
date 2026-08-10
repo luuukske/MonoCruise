@@ -15,6 +15,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **help improve AEB/ACC**: added a feature to send clips to help me improve the AEB/ACC system filtering system. this does not store any personal information or data, it is only used to help me improve MonoCruise's behavior.
 
 ### Fixed
+- **Quick taps on the cruise buttons did nothing**: tap fast and some presses were simply missed, more often at lower polling rates. Every press now counts, however fast you tap.
 - **Cruise control buttons counted one press as two**: a quick press could change the set speed twice, or switch cruise on and straight back off. One press is now one press.
 
 ## [1.1.0-preview.14] - 2026-08-09

@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from core.button_device_thread.thread import (
-    _DEBOUNCE_S,
+    _RELEASE_HOLD_S,
     ButtonDeviceThread,
 )
 
@@ -123,15 +123,48 @@ def test_burst_of_queued_reports_does_not_stretch_a_glitch():
         device.push(bits)
     thread._drain_reports(VID_PID, device, 0.0)
     assert device.queue == [], "every queued report must be consumed in one tick"
-    assert thread._raw_bits[VID_PID][CC_INC] is True
+    assert thread._buttons[VID_PID][CC_INC].raw is True
 
 
-def test_press_shorter_than_debounce_is_rejected():
+def test_very_short_tap_still_registers():
+    """A press shorter than the release hold must not be swallowed."""
     device = FakeHidDevice()
     thread = _make_thread(device)
-    events = [(0.10, SET), (0.10 + _DEBOUNCE_S / 2, CLEAR)]
+    events = [(0.10, SET), (0.10 + _RELEASE_HOLD_S / 3, CLEAR)]
     samples = _run(thread, device, events, 0.40)
-    assert _count_presses(samples) == 0
+    assert _count_presses(samples) == 1
+
+
+def test_tap_entirely_inside_one_drain_still_registers():
+    """Press and release arriving in the same tick must reach the consumer."""
+    device = FakeHidDevice()
+    thread = _make_thread(device)
+    device.push(SET)
+    device.push(CLEAR)
+    base = 1.0
+    thread._drain_reports(VID_PID, device, base)
+    held = [
+        thread._settle_buttons(VID_PID, base + i * TICK_S).get(CC_INC, False)
+        for i in range(12)
+    ]
+    assert any(held), "a tap inside one drain must still reach the consumer"
+    assert not held[-1], "and must be released again afterwards"
+
+
+@pytest.mark.parametrize("tap_hz", [5, 8, 12, 15, 20])
+def test_rapid_tapping_registers_every_tap(tap_hz):
+    """Genuine fast tapping must not be filtered as bounce."""
+    device = FakeHidDevice()
+    thread = _make_thread(device)
+    period = 1.0 / tap_hz
+    taps = 5
+    events = []
+    for i in range(taps):
+        start = 0.10 + i * period
+        events.append((start, SET))
+        events.append((start + period / 2, CLEAR))
+    samples = _run(thread, device, events, 0.10 + taps * period + 0.20)
+    assert _count_presses(samples) == taps
 
 
 def test_reconnect_does_not_inherit_a_held_button():

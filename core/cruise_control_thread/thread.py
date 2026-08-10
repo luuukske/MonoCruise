@@ -8,6 +8,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from core.cruise_control_thread.acc_distance import AccDistanceButtons
+from core.cruise_control_thread.press_counter import PressCounter
 from core.longitudinal.acc import AdaptiveCruiseController
 from core.longitudinal.base import LongCtx, LongOutput
 from core.longitudinal.cc import CruiseController
@@ -80,17 +82,18 @@ class CruiseControlThread(BaseThread):
         self._time_pressed_dec: float | None = None
         self._time_pressed_inc: float | None = None
         self._time_pressed_start: float | None = None
-        self._time_pressed_acc_dist_inc: float | None = None
-        self._time_pressed_acc_dist_dec: float | None = None
         self._long_press_dec = False
         self._long_press_inc = False
         self._long_press_start = False
-        self._long_press_acc_dist_inc = False
-        self._long_press_acc_dist_dec = False
 
         # Loop cadence
         self._prev_loop_mono = time.monotonic()
         self._was_commanding = False
+
+        # Short presses fire per press counted by the pedal thread, so a tap
+        # cannot be lost when this thread samples slower than the tap is long.
+        self._presses = PressCounter()
+        self._acc_distance = AccDistanceButtons(self._presses)
 
         # Rate-limited UI messages
         self._last_assign_warn_mono: float = 0.0
@@ -165,24 +168,49 @@ class CruiseControlThread(BaseThread):
                     connected, paused, device_lost, all_assigned,
                 )
 
+            self._presses.sync(pedal.get("press_counts"))
+            self._presses.audit(
+                now,
+                {
+                    "cc_start_button": cc_start,
+                    "cc_inc_button": cc_inc,
+                    "cc_dec_button": cc_dec,
+                    "acc_dist_inc_button": acc_dist_inc,
+                    "acc_dist_dec_button": acc_dist_dec,
+                },
+                pedal.get("pedal_loop_hz", 0.0),
+                self.avg_framerate,
+            )
+
             # Drive CC button FSM and ACC distance FSM.
             if connected and not paused and not device_lost:
-                if not all_assigned and (cc_dec or cc_inc or cc_start):
-                    if now - self._last_assign_warn_mono > 2.0:
-                        self._last_assign_warn_mono = now
-                        logger.info(
-                            "Please assign all cruise control buttons in the settings",
-                            extra={"popup": True},
-                        )
-                elif all_assigned:
+                if not all_assigned:
+                    if cc_dec or cc_inc or cc_start:
+                        if now - self._last_assign_warn_mono > 2.0:
+                            self._last_assign_warn_mono = now
+                            logger.info(
+                                "Please assign all cruise control buttons in the settings",
+                                extra={"popup": True},
+                            )
+                    self._presses.discard()
+                else:
                     self._tick_button_fsm(tel, now, cc_dec, cc_inc, cc_start)
-                self._tick_acc_distance_fsm(now, acc_dist_inc, acc_dist_dec)
-            elif any((cc_dec, cc_inc, cc_start)):
-                logger.debug(
-                    "CC button press ignored: guard blocked "
-                    "(need: connected=%s, not paused=%s, not device_lost=%s)",
-                    connected, not paused, not device_lost,
-                )
+                self._acc_distance.tick(now, acc_dist_inc, acc_dist_dec)
+            else:
+                # Gated: drop what was counted so unpausing cannot replay it.
+                self._presses.discard()
+                if any((cc_dec, cc_inc, cc_start)):
+                    blocked = []
+                    if not connected:
+                        blocked.append("telemetry disconnected")
+                    if paused:
+                        blocked.append("game paused")
+                    if device_lost:
+                        blocked.append("pedal device lost")
+                    logger.debug(
+                        "CC button press ignored: %s",
+                        ", ".join(blocked) or "unknown reason",
+                    )
 
             # Build context for controllers.
             user_raw_brake = float(pedal.get("brakeval", 0.0))
@@ -441,6 +469,8 @@ class CruiseControlThread(BaseThread):
                     "cc_start_held": bool(pt.data.cc_start_held),
                     "acc_dist_inc_held": bool(getattr(pt.data, "acc_dist_inc_held", False)),
                     "acc_dist_dec_held": bool(getattr(pt.data, "acc_dist_dec_held", False)),
+                    "press_counts": dict(getattr(pt.data, "cc_button_press_counts", None) or {}),
+                    "pedal_loop_hz": float(getattr(pt, "avg_framerate", 0.0) or 0.0),
                     "brakeval": float(getattr(pt.data, "brakeval", 0.0)),
                     "opdgasval": float(getattr(pt.data, "opdgasval", 0.0)),
                 }
@@ -470,7 +500,11 @@ class CruiseControlThread(BaseThread):
 
         cc = self._cc_ctrl
 
-        # Decrease
+        # A press blocked by park or reverse is dropped, never queued.
+        if block_inc_start:
+            self._presses.discard(("cc_inc_button",))
+
+        # Decrease: long press repeats while held, short presses fire per count.
         if cc_dec and not cc_inc and not cc_start:
             if self._time_pressed_dec is None:
                 self._time_pressed_dec = now
@@ -478,16 +512,19 @@ class CruiseControlThread(BaseThread):
             if (not self._long_press_dec and dt_dec > _LONG_PRESS_DEC_INC_FIRST_S) or (
                 self._long_press_dec and dt_dec > _LONG_PRESS_DEC_INC_REPEAT_S
             ):
+                if not self._long_press_dec:
+                    self._presses.consume_one("cc_dec_button")
                 self._long_press_dec = True
                 self._time_pressed_dec = now
                 if cc.target_speed_kmh is not None:
                     cc.change_target_kmh(-float(long_i))
-        elif self._time_pressed_dec is not None:
-            if not self._long_press_dec and cc.target_speed_kmh is not None:
-                cc.change_target_kmh(-float(short_i))
-            else:
-                self._long_press_dec = False
+        else:
+            self._long_press_dec = False
             self._time_pressed_dec = None
+
+        for _ in range(self._presses.take_short("cc_dec_button", cc_dec)):
+            if cc.target_speed_kmh is not None:
+                cc.change_target_kmh(-float(short_i))
 
         # Increase (and enable on first press if disabled)
         if cc_inc and not cc_dec and not cc_start and not block_inc_start:
@@ -497,6 +534,8 @@ class CruiseControlThread(BaseThread):
             if (not self._long_press_inc and dt_inc > _LONG_PRESS_DEC_INC_FIRST_S) or (
                 self._long_press_inc and dt_inc > _LONG_PRESS_DEC_INC_REPEAT_S
             ):
+                if not self._long_press_inc:
+                    self._presses.consume_one("cc_inc_button")
                 self._long_press_inc = True
                 self._time_pressed_inc = now
                 if cc.enabled:
@@ -507,8 +546,12 @@ class CruiseControlThread(BaseThread):
                     cc.enable()
                     _lbl = "Cruise control" if cruise_mode else "Speed limiter"
                     logger.info(f"{_lbl} enabled")
-        elif self._time_pressed_inc is not None:
-            if not self._long_press_inc:
+        else:
+            self._long_press_inc = False
+            self._time_pressed_inc = None
+
+        if not block_inc_start:
+            for _ in range(self._presses.take_short("cc_inc_button", cc_inc)):
                 if cc.enabled:
                     cc.change_target_kmh(float(short_i))
                 elif cc.target_speed_kmh is None or speed_kmh > (cc.target_speed_kmh or 0):
@@ -517,9 +560,6 @@ class CruiseControlThread(BaseThread):
                     cc.enable()
                     _lbl = "Cruise control" if cruise_mode else "Speed limiter"
                     logger.info(f"{_lbl} enabled")
-            else:
-                self._long_press_inc = False
-            self._time_pressed_inc = None
 
         # Start / toggle
         if cc_start and not cc_dec and not cc_inc:
@@ -527,6 +567,7 @@ class CruiseControlThread(BaseThread):
                 self._time_pressed_start = now
             dt_start = now - self._time_pressed_start
             if not self._long_press_start and dt_start > _LONG_PRESS_START_S:
+                self._presses.consume_one("cc_start_button")
                 self._long_press_start = True
                 if Settings.long_press_reset and not block_inc_start:
                     cc.set_target_from_speed_kmh(speed_kmh)
@@ -536,121 +577,20 @@ class CruiseControlThread(BaseThread):
                     logger.info(f"{_lbl} reset to current speed")
                 elif not Settings.long_press_reset:
                     logger.info("Long press to reset is disabled")
-        elif self._time_pressed_start is not None:
-            if not self._long_press_start:
-                _lbl = "Cruise control" if cruise_mode else "Speed limiter"
-                if cc.enabled:
-                    cc.disable()
-                    logger.info(f"{_lbl} disabled")
-                else:
-                    cc.enable()
-                    logger.info(f"{_lbl} enabled")
-                if cc.target_speed_kmh is None:
-                    cc.set_target_from_speed_kmh(speed_kmh)
-            else:
-                self._long_press_start = False
+        else:
+            self._long_press_start = False
             self._time_pressed_start = None
 
-    def _tick_acc_distance_fsm(self, now: float, inc_held: bool, dec_held: bool) -> None:
-        """Drive the ACC gap level from one or two dedicated buttons. See `core/cruise_control_thread/README.md`."""
-        inc_assigned = Settings.acc_dist_inc_button is not None
-        dec_assigned = Settings.acc_dist_dec_button is not None
-
-        if not inc_assigned and not dec_assigned:
-            if (inc_held or dec_held) and now - self._last_assign_warn_mono > 2.0:
-                self._last_assign_warn_mono = now
-                logger.info(
-                    "Please assign the ACC distance button(s) in the settings",
-                    extra={"popup": True},
-                )
-            self._time_pressed_acc_dist_inc = None
-            self._time_pressed_acc_dist_dec = None
-            self._long_press_acc_dist_inc = False
-            self._long_press_acc_dist_dec = False
-            return
-
-        cycle_mode = inc_assigned ^ dec_assigned
-        if cycle_mode:
-            held = inc_held if inc_assigned else dec_held
-
-            def _apply() -> None:
-                self._step_acc_gap_level(+1, wrap=True)
-
-            self._time_pressed_acc_dist_inc, self._long_press_acc_dist_inc = self._tick_dist_button(
-                now, held, self._time_pressed_acc_dist_inc, self._long_press_acc_dist_inc, _apply,
-            )
-            self._time_pressed_acc_dist_dec = None
-            self._long_press_acc_dist_dec = False
-            return
-
-        # Both assigned: clamped step. Suppress when both are held.
-        if inc_held and dec_held:
-            self._time_pressed_acc_dist_inc = None
-            self._time_pressed_acc_dist_dec = None
-            self._long_press_acc_dist_inc = False
-            self._long_press_acc_dist_dec = False
-            return
-
-        self._time_pressed_acc_dist_inc, self._long_press_acc_dist_inc = self._tick_dist_button(
-            now, inc_held, self._time_pressed_acc_dist_inc, self._long_press_acc_dist_inc,
-            lambda: self._step_acc_gap_level(+1, wrap=False),
-        )
-        self._time_pressed_acc_dist_dec, self._long_press_acc_dist_dec = self._tick_dist_button(
-            now, dec_held, self._time_pressed_acc_dist_dec, self._long_press_acc_dist_dec,
-            lambda: self._step_acc_gap_level(-1, wrap=False),
-        )
-
-    @staticmethod
-    def _tick_dist_button(
-        now: float,
-        held: bool,
-        time_pressed: float | None,
-        long_press: bool,
-        apply,
-    ) -> tuple[float | None, bool]:
-        """Generic short/long-press FSM."""
-        if held:
-            if time_pressed is None:
-                time_pressed = now
-            held_dt = now - time_pressed
-            if (not long_press and held_dt > _LONG_PRESS_DEC_INC_FIRST_S) or (
-                long_press and held_dt > _LONG_PRESS_DEC_INC_REPEAT_S
-            ):
-                long_press = True
-                time_pressed = now
-                apply()
-            return time_pressed, long_press
-        if time_pressed is not None:
-            if not long_press:
-                apply()
+        for _ in range(self._presses.take_short("cc_start_button", cc_start)):
+            _lbl = "Cruise control" if cruise_mode else "Speed limiter"
+            if cc.enabled:
+                cc.disable()
+                logger.info(f"{_lbl} disabled")
             else:
-                long_press = False
-            time_pressed = None
-        return time_pressed, long_press
-
-    @staticmethod
-    def _step_acc_gap_level(delta: int, *, wrap: bool) -> None:
-        try:
-            current = int(Settings.acc_gap_level)
-        except (TypeError, ValueError):
-            current = 2
-        current = max(1, min(4, current))
-        new_level = current + int(delta)
-        if wrap:
-            if new_level > 4:
-                new_level = 1
-            elif new_level < 1:
-                new_level = 4
-        else:
-            new_level = max(1, min(4, new_level))
-        if new_level == current:
-            return
-        try:
-            Settings.save(values={"acc_gap_level": new_level})
-        except Exception:
-            logger.exception("failed to persist acc_gap_level")
-            return
-        logger.info("ACC gap set to %d/4", new_level)
+                cc.enable()
+                logger.info(f"{_lbl} enabled")
+            if cc.target_speed_kmh is None:
+                cc.set_target_from_speed_kmh(speed_kmh)
 
     def _publish_telemetry_command(self, wanted_accel_ms2: float) -> None:
         try:

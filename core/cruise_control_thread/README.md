@@ -19,6 +19,44 @@ Limiter path never sees these.
 User OPD gas override (cruise mode, limiter active): latch excludes CC/ACC bids so the
 limiter caps the user pedal until gas releases or ego falls below CC target minus margin.
 
+## Button presses (`press_counter.py`)
+
+Short presses fire per press **counted**, not per press **observed**. This thread
+samples `main_pedal_thread`'s published button level on its own clock, and both
+run at `max(Settings.polling_rate, 10)`. At 10 Hz that is a 100 ms tick, so a tap
+can begin and end entirely between two samples and be lost. Measured in the wild:
+6 of 22 rapid taps dropped, while slow presses were never affected.
+
+Counting has to happen where the edges are actually visible. `button_device_thread`
+(100 Hz, drains every HID report) and `keyboard_thread` (OS hook, no polling)
+each publish their own press counts; `resolve_press_count()` in
+`core/input_bindings.py` reads them. `main_pedal_thread` consumes those deltas
+into `cc_button_press_counts`, seeded at zero for all five bindings so a consumer
+baselining on first sight cannot swallow the first press, and falls back to its
+own edge detection only for joystick bindings, which have no source counter.
+Counting in the pedal thread alone was not enough: it polls at the same 10 Hz and
+missed the tap before its own counter ever saw it. `PressCounter.take_short`
+returns how many counted presses still owe an action, excluding one still in
+progress (it may yet become a long press). A long press calls `consume_one` so the
+same press never also fires a short action.
+
+Long presses still come from the level, since they need continuous hold. Only the
+short-press path is count-driven.
+
+Presses counted while input is gated are **discarded**, never queued: `discard()`
+runs whenever telemetry is disconnected, the game is paused, the pedal device is
+lost, the buttons are unassigned, or park/reverse blocks increase. Without that,
+unpausing would replay a burst of speed changes at once.
+
+`main_pedal_thread` also latches each press for `_BUTTON_MIN_HOLD_S`, which keeps
+the level representative for anything reading it; correctness no longer depends on
+that latch.
+
+## ACC gap buttons (`acc_distance.py`)
+
+One button assigned cycles the level and wraps; two assigned step and clamp, and
+are suppressed while both are held. Same count-driven short press as above.
+
 ## Adaptive cruise (`acc_controller.py`)
 
 Publishes an upper bound on commanded accel (m/s²). Orchestrator uses `min(speed_pid, cap)`.

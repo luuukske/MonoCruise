@@ -58,8 +58,23 @@ def _engage_cc(thread, target_kmh: float = TARGET_KMH) -> None:
     thread._cc_ctrl.set_target_kmh(target_kmh)
 
 
+_HELD_TO_BINDING = {
+    "cc_dec_held": "cc_dec_button",
+    "cc_inc_held": "cc_inc_button",
+    "cc_start_held": "cc_start_button",
+    "acc_dist_inc_held": "acc_dist_inc_button",
+    "acc_dist_dec_held": "acc_dist_dec_button",
+}
+
+
 def _press(pedal, button: str, thread, ticks: int = 1) -> None:
-    pedal.data.set(**{button: True})
+    # The real thread sees the zero-seeded counters before any press happens.
+    thread.loop()
+    # Mirror main_pedal_thread: a press raises the level and bumps the counter.
+    counts = dict(getattr(pedal.data, "cc_button_press_counts", None) or {})
+    name = _HELD_TO_BINDING[button]
+    counts[name] = counts.get(name, 0) + 1
+    pedal.data.set(**{button: True, "cc_button_press_counts": counts})
     for _ in range(ticks):
         thread.loop()
     pedal.data.set(**{button: False})

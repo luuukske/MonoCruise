@@ -27,6 +27,16 @@ fire a spurious press. Only a real disconnect (`OSError`) clears the state, via
 `_reset_button_state`, so a reconnect cannot inherit a button that was held when
 the device went away.
 
+## Press counts
+
+`data.button_press_counts` is a monotonic count of published press edges per bit,
+alongside the level in `data.button_states`. Consumers poll far slower than a tap
+lasts (`main_pedal_thread` runs at `polling_rate`, as low as 10 Hz), so watching
+the level for an edge loses presses; they read the count instead. This thread can
+count exactly because it runs at 100 Hz and drains every report. Counts reset with
+the device on disconnect, and consumers treat a count going backwards as a resync
+rather than replaying presses. See `core/INPUT_BINDINGS.md`.
+
 `_settle_buttons` returns an entry for every bit the device has ever reported,
 including bits that are false. `binding_state()` treats an empty dict as "device
 has not reported yet" and returns `None`, which the capture guard in
@@ -34,9 +44,7 @@ has not reported yet" and returns `None`, which the capture guard in
 
 ## Debounce
 
-`_DEBOUNCE_S` (20 ms) is the window a bit must hold a new value before it is
-published. Without it, switch contact bounce turns one physical press into two.
-
+Switch contact bounce turns one physical press into two if it is not filtered.
 Measured on a MOZA Multi-function Stalk (346e:0024): the device sends 8-byte
 reports, a keepalive every ~200 ms, and an immediate report on every change.
 Two of six presses bounced, with glitches of 1.5 ms to 7.2 ms:
@@ -45,11 +53,33 @@ Two of six presses bounced, with glitches of 1.5 ms to 7.2 ms:
 12.167 down -> 12.174 up (7.2 ms) -> 12.176 down (1.6 ms) -> 12.338 up
 ```
 
-20 ms clears the worst observed bounce with margin while staying well under a
-humanly producible press. The cost is 20 ms of press latency, which replaces the
-coarser quantization the old 20 Hz tick already imposed.
+Filtering this by requiring every level to hold for a fixed window does work,
+but it also throws away genuine fast taps, because a short tap and a bounce
+glitch are both just short. The two are told apart by structure instead:
+**bounce is a dip inside a press, never a standalone pulse from idle.** So the
+filter runs in two stages, each with its own job.
 
-Debounce covers the HID path only. Joystick and keyboard bindings resolve
+**Stage 1, bounce to logical** (`_apply_release_hold`, and the edge handling in
+`_drain_reports`). A press promotes immediately, so no tap is ever too short to
+count and press latency stays at zero. A release only promotes once the bit has
+stayed low for `_RELEASE_HOLD_S` (15 ms); a re-press inside that window cancels
+it, because that dip was bounce. This absorbs the glitch above without touching
+the surrounding press.
+
+**Stage 2, logical to published** (`_settle_buttons`). Stage 1 can move faster
+than the consumer samples, so a release that matures and a press that lands in
+the same tick would otherwise merge two taps into one hold. Logical edges are
+queued and published at most one per tick, each level held for `_MIN_DWELL_S`
+(20 ms), which is above Windows timer granularity so a consumer cannot step over
+an edge. No edge is dropped, only delayed. Beyond `_MAX_PENDING_EDGES` the queue
+resyncs to the current level rather than lagging further behind.
+
+Measured behaviour: every tap down to 2 ms registers, sustained tapping is exact
+through 25 taps/s and degrades gracefully above it (7/10 at 30 Hz, 2/10 at
+40 Hz), and bounce glitches up to 14 ms still read as a single press. Human
+tapping tops out near 8 to 14 taps/s.
+
+Both stages cover the HID path only. Joystick and keyboard bindings resolve
 through `main_pedal_thread._read_cc_button_states`, which is the choke point to
 extend if those sources ever show the same symptom.
 
