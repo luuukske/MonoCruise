@@ -36,6 +36,9 @@ _BACKOFF_BASE_S: float = 2.0
 # Cap on the total sleep one clip may cost, so a dead server cannot wedge the
 # queue behind a single item.
 _MAX_BACKOFF_S: float = 30.0
+# Smallest gap between two POSTs. An edge rate limit counts requests, not
+# intentions, so a queue drain has to look like traffic rather than a flood.
+_MIN_SEND_GAP_S: float = 2.0
 _NOTIFY_COOLDOWN_S: float = 600.0
 _LOG_MAX_LINES: int = 5000
 _LOG_NAME: str = "aeb_submissions.jsonl"
@@ -160,6 +163,7 @@ class ClipUploader:
         log: SubmissionLog | None = None,
         queue_max: int = _QUEUE_MAX,
         notify_cooldown_s: float = _NOTIFY_COOLDOWN_S,
+        min_send_gap_s: float = _MIN_SEND_GAP_S,
     ) -> None:
         self._store = store
         self._transport = transport
@@ -175,7 +179,10 @@ class ClipUploader:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
 
+        self.min_send_gap_s = min_send_gap_s
         self._paused_until: float = 0.0
+        # -inf so the first send of a session is never delayed.
+        self._last_send_mono: float = float("-inf")
         self._intervening: bool = False
         self._pending_notice: int = 0
         # -inf so the first notice is never held back by the cooldown, however
@@ -298,8 +305,22 @@ class ClipUploader:
             "User-Agent": f"MonoCruise/{version}" if version else "MonoCruise",
         }
 
+    def _pace(self) -> None:
+        """Space POSTs out so a queue drain never looks like a flood.
+
+        A clip is captured every minute or so, but the queue holds up to
+        `_QUEUE_MAX`, so a machine that was offline would otherwise empty it back
+        to back and trip an edge rate limit on its own traffic. Waits on the stop
+        event rather than sleeping, so shutdown stays prompt.
+        """
+        gap = self.min_send_gap_s - (time.monotonic() - self._last_send_mono)
+        if gap > 0:
+            self._stop.wait(gap)
+        self._last_send_mono = time.monotonic()
+
     def _send(self, path: Path, blob: bytes, meta: ClipMetadata) -> None:
         headers = self._headers(meta)
+        self._pace()
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             if self._stop.is_set():
                 return

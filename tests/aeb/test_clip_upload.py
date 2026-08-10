@@ -59,6 +59,8 @@ def opted_in(monkeypatch):
 def _uploader(tmp_path, transport, **kwargs):
     store = ClipStore(root=tmp_path / "clips")
     kwargs.setdefault("log", SubmissionLog(tmp_path / "log.jsonl"))
+    # Unpaced by default so the rest of the suite is not waiting on the clock.
+    kwargs.setdefault("min_send_gap_s", 0.0)
     return store, ClipUploader(store, transport=transport, **kwargs)
 
 
@@ -253,6 +255,48 @@ def test_a_4xx_is_not_retried(tmp_path, opted_in):
     store, up = _uploader(tmp_path, transport)
     up._handle(_write(store, _clip()))
     assert len(transport.calls) == 1
+
+
+# -- pacing ---------------------------------------------------------------
+
+def _record_waits(up) -> list[float]:
+    """Capture what the uploader asks to wait for, without waiting for it."""
+    waits: list[float] = []
+
+    def _wait(timeout=None):
+        waits.append(timeout)
+        return False
+
+    up._stop.wait = _wait
+    return waits
+
+
+def test_the_first_send_is_not_delayed(tmp_path, opted_in):
+    store, up = _uploader(tmp_path, _Transport(), min_send_gap_s=2.0)
+    waits = _record_waits(up)
+    up._handle(_write(store, _clip()))
+    assert waits == []
+
+
+def test_a_queue_drain_is_paced_rather_than_bursted(tmp_path, opted_in):
+    """Cloudflare counts requests, not intentions: 16 queued clips must not
+    arrive as a flood and trip a rate limit on the contributor's own traffic."""
+    store, up = _uploader(tmp_path, _Transport(), min_send_gap_s=2.0)
+    waits = _record_waits(up)
+    for i in range(3):
+        up._handle(_write(store, _clip(clip_id=f"c{i}",
+                                       captured_at=f"2026-08-10T12:00:0{i}Z")))
+    assert len(waits) == 2                      # every send after the first
+    assert all(0 < w <= 2.0 for w in waits), waits
+
+
+def test_pacing_never_delays_a_clip_that_is_not_sent(tmp_path, opted_in):
+    """A refused clip costs no request, so it must not cost a gap either."""
+    store, up = _uploader(tmp_path, _Transport(), min_send_gap_s=2.0)
+    waits = _record_waits(up)
+    up._handle(_write(store, _clip(trigger_source="shadow_near")))
+    up._handle(_write(store, _clip(clip_id="real", captured_at="2026-08-10T12:00:01Z")))
+    assert waits == []
 
 
 # -- queue ----------------------------------------------------------------

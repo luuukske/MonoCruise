@@ -1336,8 +1336,17 @@ clips from many builds. Judge the image, not a version string.
 
 ### Responses
 
+Sends are paced by `_MIN_SEND_GAP_S`. A clip is captured about once a minute, but
+the queue holds up to `_QUEUE_MAX`, so a machine that was offline would otherwise
+drain it back to back. An edge rate limit counts requests rather than intentions,
+and a contributor tripping one on their own recovery traffic loses every clip
+still queued, since a paused uploader drops rather than retries. Measured against
+the live rule on 2026-08-10: it fires from about the fifth rapid request.
+
 `accepted` and `duplicate` delete locally; `quota` and `closed` pause the whole
-uploader for the server's `retry_after_s`; everything else is kept and not
+uploader for the server's `retry_after_s`; a bare `429` pauses on the status
+alone, because an edge throttle answers with an HTML page carrying no `reason`
+and would otherwise read as an ordinary refusal. Everything else is kept and not
 retried. Network errors and 5xx retry four times with bounded backoff, waiting on
 the stop event so shutdown stays prompt. **A debug user never deletes**, whatever
 `aeb_delete_after_upload` says: that store is the working corpus.
