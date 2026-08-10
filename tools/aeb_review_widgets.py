@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QLabel, QWidget
 
 from core.aeb.clip_replay import ReviewFrame, replay_clip
 from core.aeb.clip_schema import Clip, ClipMetadata
-from core.aeb.clip_store import ClipInfo, ClipStore
+from core.aeb.clip_store import ClipInfo, ClipStore, contributed_clip_root
 from core.aeb.debug_window import AEBDebugWindow
 
 TTC_INF = 100.0         # recorded sentinel is 1e9; past this there is no tracked threat
@@ -21,6 +21,16 @@ _THUMB_MIN_W = 200      # right panel is 320px wide; clamp floor
 # Ceiling matters as much as the floor: an unshown/not-yet-laid-out label
 # reports width() as 640 in this Qt version, not a small stale value.
 _THUMB_MAX_W = 300      # clamp ceiling, also the panel's real content width
+
+
+def store_origin(store: ClipStore) -> str:
+    """``remote`` for the contributed pull root, else ``local``."""
+    try:
+        if store.root.resolve() == contributed_clip_root().resolve():
+            return "remote"
+    except OSError:
+        pass
+    return "local"
 
 
 @dataclass
@@ -99,33 +109,40 @@ class ClipLoader(QObject):
     """Store reads off the GUI thread: load plus replay costs ~0.5 s per clip."""
 
     loaded = Signal(str, object, object)   # path, Clip | None, list[ReviewFrame]
-    scanned = Signal(object)               # list[tuple[ClipInfo, ClipMetadata | None]]
+    # list[tuple[ClipInfo, ClipMetadata | None, str]] with origin "local"|"remote"
+    scanned = Signal(object)
 
-    def __init__(self, store: ClipStore) -> None:
+    def __init__(self, stores: ClipStore | list[ClipStore]) -> None:
         super().__init__()
-        self._store = store
+        self._stores = [stores] if isinstance(stores, ClipStore) else list(stores)
+        # load / peek are path-based; any store instance can read any clip file.
+        self._io = self._stores[0]
 
     @Slot(str)
     def load(self, path: str) -> None:
-        clip = self._store.load(path)
+        clip = self._io.load(path)
         frames = replay_clip(clip) if clip is not None else []
         self.loaded.emit(path, clip, frames)
 
     @Slot(object)
     def scan(self, known: dict) -> None:
-        """Rescan the store, decoding metadata only for new or changed clips.
+        """Rescan every store, decoding metadata only for new or changed clips.
 
         ``known`` maps path to (mtime, size, metadata) from the caller's cache, so a
         refresh only pays for clips that actually appeared or were relabelled.
         """
-        entries: list[tuple[ClipInfo, ClipMetadata | None]] = []
-        for info in self._store.list_clips():
-            cached = known.get(str(info.path))
-            if cached is not None and cached[0] == info.mtime and cached[1] == info.size_bytes:
-                meta = cached[2]
-            else:
-                meta = self._store.peek_metadata(info.path)
-            entries.append((info, meta))
+        entries: list[tuple[ClipInfo, ClipMetadata | None, str]] = []
+        for store in self._stores:
+            origin = store_origin(store)
+            for info in store.list_clips():
+                cached = known.get(str(info.path))
+                if (cached is not None
+                        and cached[0] == info.mtime and cached[1] == info.size_bytes):
+                    meta = cached[2]
+                else:
+                    meta = store.peek_metadata(info.path)
+                entries.append((info, meta, origin))
+        entries.sort(key=lambda row: row[0].mtime, reverse=True)
         self.scanned.emit(entries)
 
 

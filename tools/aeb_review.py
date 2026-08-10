@@ -9,9 +9,10 @@ if _repo not in sys.path:
     sys.path.insert(0, _repo)
 
 from collections import OrderedDict
+from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QBrush, QColor, QFont
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QPlainTextEdit,
@@ -21,11 +22,13 @@ from PySide6.QtWidgets import (
 from core.aeb.clip_replay import ReviewFrame
 from core.aeb.clip_schema import ClipMetadata, Label
 from core.aeb.clip_score import class_window_warning
-from core.aeb.clip_store import ClipInfo, ClipStore, contributed_clip_root
+from core.aeb.clip_store import (
+    ClipInfo, ClipStore, contributed_clip_root, default_clip_root,
+)
 from tools.aeb_fetch import safe_pull_root
 from tools.aeb_review_widgets import (
     ClipLoader, DecisionStrip, Loaded, PullWorker, SceneWidget, ThumbnailView,
-    action_index, recorded_band,
+    action_index, recorded_band, store_origin,
 )
 
 _CLASSES = ["tp", "good_intervention", "fp", "fn", "tn", "ignore"]
@@ -39,6 +42,10 @@ _CLASS_KEYS = {
 _STEP_COARSE = 10       # frames per Shift+arrow
 _CACHE_MAX = 4          # replayed clips held in RAM, ~14 MB each
 _PREFETCH_AHEAD = 2
+
+# List-row backgrounds: remote gets a slight green shift against the local cool grey.
+_LOCAL_BG = QColor(30, 32, 38)
+_REMOTE_BG = QColor(30, 40, 34)
 
 _KEYMAP_TEXT = """\
 CLIPS      N / P             next / prev clip
@@ -72,11 +79,13 @@ class ReviewWindow(QMainWindow):
     scan_requested = Signal(object)
     pull_requested = Signal(object)
 
-    def __init__(self, store: ClipStore) -> None:
+    def __init__(self, stores: ClipStore | list[ClipStore]) -> None:
         super().__init__()
         self.setWindowTitle("AEB Clip Review")
         self.resize(1650, 900)
-        self._store = store
+        self._stores = [stores] if isinstance(stores, ClipStore) else list(stores)
+        # Path-based load / label writes work through any store instance.
+        self._store = self._stores[0]
         self._clip = None
         self._path = None
         self._frames: list[ReviewFrame] = []
@@ -87,7 +96,7 @@ class ReviewWindow(QMainWindow):
         self._pulling = False
 
         # Clip list cache: peek_metadata once per mtime+size; reload skips store re-reads.
-        self._entries: list[tuple[ClipInfo, ClipMetadata | None]] = []
+        self._entries: list[tuple[ClipInfo, ClipMetadata | None, str]] = []
         self._meta_cache: dict[str, tuple[float, int, ClipMetadata | None]] = {}
         self._visible: list[str] = []
 
@@ -101,7 +110,7 @@ class ReviewWindow(QMainWindow):
         self._play_timer.timeout.connect(self._advance)
 
         self._thread = QThread(self)
-        self._loader = ClipLoader(store)
+        self._loader = ClipLoader(self._stores)
         self._loader.moveToThread(self._thread)
         self.load_requested.connect(self._loader.load)
         self.scan_requested.connect(self._loader.scan)
@@ -363,11 +372,18 @@ class ReviewWindow(QMainWindow):
         """Pull missing contributed clips; never writes into the local capture store."""
         if self._pulling:
             return
-        root = safe_pull_root(self._store.root)
+        root = self._pull_target()
         self._pulling = True
         self._update_btn.setEnabled(False)
         self._status.setText(f"updating from server into {root.name}...")
         self.pull_requested.emit(root)
+
+    def _pull_target(self):
+        """Prefer the contributed store when it is in this view."""
+        for store in self._stores:
+            if store_origin(store) == "remote":
+                return store.root
+        return safe_pull_root(self._store.root)
 
     @Slot(str)
     def _on_pull_progress(self, msg: str) -> None:
@@ -388,18 +404,31 @@ class ReviewWindow(QMainWindow):
         if result.landed == 0 and result.failed == 0:
             parts = [f"up to date ({result.already} local, {result.listed} on server)"]
         self._status.setText(", ".join(parts))
+        if not result.landed:
+            return
         try:
-            same = self._store.root.resolve() == safe_pull_root(self._store.root).resolve()
+            pull_root = Path(result.root).resolve()
+            visible = any(s.root.resolve() == pull_root for s in self._stores)
         except OSError:
-            same = False
-        if same and result.landed:
+            visible = True
+        if visible:
             self._refresh_clips()
 
     @Slot(object)
     def _on_scanned(self, entries) -> None:
-        self._entries = entries
+        # Accept (info, meta) or (info, meta, origin) so older call sites still work.
+        normalized: list[tuple[ClipInfo, ClipMetadata | None, str]] = []
+        for row in entries:
+            if len(row) == 2:
+                info, meta = row
+                origin = "local"
+            else:
+                info, meta, origin = row
+            normalized.append((info, meta, origin))
+        self._entries = normalized
         self._meta_cache = {
-            str(info.path): (info.mtime, info.size_bytes, meta) for info, meta in entries
+            str(info.path): (info.mtime, info.size_bytes, meta)
+            for info, meta, _origin in normalized
         }
         self._apply_filter()
 
@@ -411,15 +440,20 @@ class ReviewWindow(QMainWindow):
         self._list.clear()
         self._visible = []
         untagged = 0
-        for info, meta in self._entries:
+        remote_n = 0
+        for info, meta, origin in self._entries:
+            if origin == "remote":
+                remote_n += 1
             if meta is None or meta.label is None:
                 untagged += 1
             if not _entry_visible(meta, search, cls_filter):
                 continue
-            self._list.addItem(_clip_item(info, meta))
+            self._list.addItem(_clip_item(info, meta, origin))
             self._visible.append(str(info.path))
+        local_n = len(self._entries) - remote_n
         self._count_lbl.setText(
-            f"{len(self._visible)} shown / {len(self._entries)} total / {untagged} untagged"
+            f"{len(self._visible)} shown / {len(self._entries)} total / "
+            f"{untagged} untagged  ({local_n} local, {remote_n} remote)"
         )
         self._reselect(self._path)
         self._list.blockSignals(False)
@@ -662,7 +696,7 @@ class ReviewWindow(QMainWindow):
 
     def _refresh_entry(self, path: str) -> None:
         meta = self._store.peek_metadata(path)
-        for i, (info, _old) in enumerate(self._entries):
+        for i, (info, _old, origin) in enumerate(self._entries):
             if str(info.path) != path:
                 continue
             try:
@@ -671,7 +705,7 @@ class ReviewWindow(QMainWindow):
                                 size_bytes=st.st_size, mtime=st.st_mtime)
             except OSError:
                 pass
-            self._entries[i] = (info, meta)
+            self._entries[i] = (info, meta, origin)
             self._meta_cache[path] = (info.mtime, info.size_bytes, meta)
             break
         self._apply_filter()
@@ -783,7 +817,8 @@ def _entry_visible(meta: ClipMetadata | None, search: str, cls_filter: str) -> b
     return True
 
 
-def _clip_item(info: ClipInfo, meta: ClipMetadata | None) -> QListWidgetItem:
+def _clip_item(info: ClipInfo, meta: ClipMetadata | None,
+               origin: str = "local") -> QListWidgetItem:
     """One list row: clip id, tag badge, trigger source, and size."""
     tagged = meta is not None and meta.label is not None
     cls = meta.label.class_ if tagged else None
@@ -793,6 +828,7 @@ def _clip_item(info: ClipInfo, meta: ClipMetadata | None) -> QListWidgetItem:
     cid = meta.clip_id[:8] if meta else "????????"
     item = QListWidgetItem(f"{cid}   {badge}\n{trig}  {kb} KB")
     item.setData(Qt.UserRole, str(info.path))
+    item.setBackground(QBrush(_REMOTE_BG if origin == "remote" else _LOCAL_BG))
     return item
 
 
@@ -817,22 +853,33 @@ def _fmt(v: float) -> str:
     return f"{v:.2f}" if v < 100 else "inf"
 
 
+def _review_stores(*, root: str | None, contributed_only: bool) -> list[ClipStore]:
+    """Default view merges local + contributed; flags narrow it to one root."""
+    if root:
+        return [ClipStore(root=root)]
+    if contributed_only:
+        return [ClipStore(root=contributed_clip_root())]
+    return [
+        ClipStore(root=default_clip_root()),
+        ClipStore(root=contributed_clip_root()),
+    ]
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description="AEB clip review.")
     parser.add_argument("--root", default=None,
-                        help="clip store to open (default: the local capture store)")
+                        help="open only this clip store (default: local + contributed)")
     parser.add_argument("--contributed", action="store_true",
-                        help="open the pulled-in contributed store instead")
+                        help="open only the pulled-in contributed store")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
-    root = args.root or (contributed_clip_root() if args.contributed else None)
-    store = ClipStore(root=root)
+    stores = _review_stores(root=args.root, contributed_only=args.contributed)
     app = QApplication.instance() or QApplication(sys.argv)
-    win = ReviewWindow(store)
-    # Two stores now exist, so the window has to say which one is open.
-    win.setWindowTitle(f"AEB Clip Review  [{store.root}]")
+    win = ReviewWindow(stores)
+    labels = "+".join(store_origin(s) for s in stores)
+    win.setWindowTitle(f"AEB Clip Review  [{labels}]")
     win.show()
     return app.exec()
 

@@ -16,7 +16,7 @@ from core.aeb.clip_schema import Label, LiveAEB
 from core.aeb.clip_store import ClipStore
 from tools import aeb_fetch
 from tools.aeb_fetch import PullResult
-from tools.aeb_review import ReviewWindow
+from tools.aeb_review import ReviewWindow, _LOCAL_BG, _REMOTE_BG
 from tools.aeb_review_widgets import ThumbnailView, action_index, recorded_band
 
 from tests.aeb.test_clip_review import _build_replayable_clip
@@ -335,5 +335,66 @@ def test_update_from_server_finished_handler_summarises(tmp_path, qapp):
             listed=3, already=2, saved=0, failed=0, landed=0, root=str(tmp_path),
         ))
         assert "up to date" in win._status.text()
+    finally:
+        win.close()
+
+
+def test_merged_view_lists_local_and_remote_with_different_row_colors(
+        tmp_path, qapp, monkeypatch):
+    local_root = tmp_path / "local"
+    remote_root = tmp_path / "remote"
+    local_root.mkdir()
+    remote_root.mkdir()
+    monkeypatch.setattr(
+        "tools.aeb_review_widgets.contributed_clip_root", lambda: remote_root,
+    )
+
+    local_store = ClipStore(root=local_root)
+    remote_store = ClipStore(root=remote_root)
+    for n, store in enumerate((local_store, remote_store)):
+        clip = _build_replayable_clip()
+        clip.metadata.clip_id = f"origin0{n}xxxxxxxx"
+        store.write(clip)
+
+    win = ReviewWindow([local_store, remote_store])
+    try:
+        assert _spin_until(qapp, lambda: len(win._entries) == 2), "scan never landed"
+        by_path = {
+            win._list.item(i).data(Qt.UserRole): win._list.item(i).background().color()
+            for i in range(win._list.count())
+        }
+        local_path = str(local_store.list_clips()[0].path)
+        remote_path = str(remote_store.list_clips()[0].path)
+        assert by_path[local_path] == _LOCAL_BG
+        assert by_path[remote_path] == _REMOTE_BG
+        assert "1 local, 1 remote" in win._count_lbl.text()
+    finally:
+        win.close()
+
+
+def test_merged_view_can_label_a_remote_clip(tmp_path, qapp, monkeypatch):
+    local_root = tmp_path / "local"
+    remote_root = tmp_path / "remote"
+    local_root.mkdir()
+    remote_root.mkdir()
+    monkeypatch.setattr(
+        "tools.aeb_review_widgets.contributed_clip_root", lambda: remote_root,
+    )
+
+    remote_store = ClipStore(root=remote_root)
+    clip = _build_replayable_clip()
+    clip.metadata.clip_id = "remote01xxxxxxxx"
+    path = remote_store.write(clip)
+
+    win = ReviewWindow([ClipStore(root=local_root), remote_store])
+    try:
+        win._on_scanned([
+            (i, remote_store.peek_metadata(i.path), "remote")
+            for i in remote_store.list_clips()
+        ])
+        win._path = str(path)
+        win._class.setCurrentText("fp")
+        assert win._save() is True
+        assert remote_store.peek_metadata(path).label.class_ == "fp"
     finally:
         win.close()
