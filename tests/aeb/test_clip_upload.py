@@ -206,6 +206,27 @@ def test_a_quota_refusal_pauses_further_uploads(tmp_path, opted_in, reason):
     assert len(transport.calls) == 1
 
 
+def test_a_clip_held_back_by_a_pause_is_recoverable(tmp_path, opted_in):
+    """Otherwise a day at the cap loses every clip captured after it was hit."""
+    log_path = tmp_path / "log.jsonl"
+    transport = _Transport((200, {"accepted": False, "reason": "quota", "retry_after_s": 3600}))
+    store, up = _uploader(tmp_path, transport, log=SubmissionLog(log_path))
+    up._handle(_write(store, _clip(clip_id="triggers-the-pause")))
+    up._handle(_write(store, _clip(clip_id="held-back-by-it",
+                                   captured_at="2026-08-10T12:00:01Z")))
+    assert up._log.retryable_clip_ids() == {"triggers-the-pause", "held-back-by-it"}
+
+
+def test_a_pause_does_not_log_a_clip_that_was_never_eligible(tmp_path, opted_in):
+    """A background negative must not enter the log and become retryable."""
+    transport = _Transport((200, {"accepted": False, "reason": "quota", "retry_after_s": 3600}))
+    store, up = _uploader(tmp_path, transport)
+    up._handle(_write(store, _clip(clip_id="triggers-the-pause")))
+    up._handle(_write(store, _clip(clip_id="a-tn-clip-9999", trigger_source="shadow_near",
+                                   captured_at="2026-08-10T12:00:01Z")))
+    assert up._log.retryable_clip_ids() == {"triggers-the-pause"}
+
+
 def test_a_network_error_retries_then_gives_up(tmp_path, opted_in, monkeypatch):
     monkeypatch.setattr(upload_mod, "_BACKOFF_BASE_S", 0.0)
     transport = _Boom()
@@ -255,6 +276,99 @@ def test_a_4xx_is_not_retried(tmp_path, opted_in):
     store, up = _uploader(tmp_path, transport)
     up._handle(_write(store, _clip()))
     assert len(transport.calls) == 1
+
+
+# -- holdover retry -------------------------------------------------------
+
+def _log_lines(path, *entries) -> SubmissionLog:
+    log = SubmissionLog(path)
+    for e in entries:
+        log.append(e)
+    return log
+
+
+def test_only_transient_failures_come_back(tmp_path):
+    log = _log_lines(
+        tmp_path / "log.jsonl",
+        {"clip_id": "a", "result": "network_error"},
+        {"clip_id": "b", "result": "server_error"},
+        {"clip_id": "c", "result": "quota"},
+        {"clip_id": "d", "result": "closed"},
+        {"clip_id": "e", "result": "http_429"},
+        {"clip_id": "j", "result": "paused"},
+        {"clip_id": "f", "result": "accepted"},
+        {"clip_id": "g", "result": "duplicate"},
+        {"clip_id": "h", "result": "unwanted"},
+        {"clip_id": "i", "result": "bad_schema"},
+    )
+    assert log.retryable_clip_ids() == {"a", "b", "c", "d", "e", "j"}
+
+
+def test_a_later_success_retires_an_earlier_failure(tmp_path):
+    log = _log_lines(
+        tmp_path / "log.jsonl",
+        {"clip_id": "a", "result": "network_error"},
+        {"clip_id": "a", "result": "accepted"},
+    )
+    assert log.retryable_clip_ids() == set()
+
+
+def test_a_clip_that_failed_again_stays_eligible(tmp_path):
+    log = _log_lines(
+        tmp_path / "log.jsonl",
+        {"clip_id": "a", "result": "accepted"},
+        {"clip_id": "a", "result": "network_error"},
+    )
+    assert log.retryable_clip_ids() == {"a"}
+
+
+def test_a_held_over_clip_is_re_offered(tmp_path, opted_in):
+    transport = _Transport()
+    store, up = _uploader(tmp_path, transport)
+    path = _write(store, _clip(clip_id="held-over-1234"))
+    up._log.append({"clip_id": "held-over-1234", "result": "network_error"})
+    assert up._retry_pending() == 1
+    assert len(transport.calls) == 1
+    assert not path.exists()
+
+
+def test_a_clip_that_was_never_offered_is_never_swept_in(tmp_path, opted_in):
+    """The whole safety property: no log entry means unreachable from a retry."""
+    transport = _Transport()
+    store, up = _uploader(tmp_path, transport)
+    _write(store, _clip(clip_id="never-offered-1"))
+    _write(store, _clip(clip_id="never-offered-2", captured_at="2026-08-10T12:00:01Z"))
+    assert up._retry_pending() == 0
+    assert transport.calls == []
+
+
+def test_a_refused_clip_is_not_resurrected_by_a_retry(tmp_path, opted_in):
+    """A TN clip logged under an old build must not come back through this door."""
+    transport = _Transport()
+    store, up = _uploader(tmp_path, transport)
+    path = _write(store, _clip(clip_id="tn-clip-9999", trigger_source="shadow_near"))
+    up._log.append({"clip_id": "tn-clip-9999", "result": "network_error"})
+    up._retry_pending()
+    assert transport.calls == []
+    assert path.exists()
+
+
+def test_the_retry_batch_is_bounded(tmp_path, opted_in):
+    transport = _Transport()
+    store, up = _uploader(tmp_path, transport)
+    for i in range(6):
+        cid = f"holdover{i:04d}"
+        _write(store, _clip(clip_id=cid, captured_at=f"2026-08-10T12:00:0{i}Z"))
+        up._log.append({"clip_id": cid, "result": "network_error"})
+    assert up._retry_pending(limit=2) == 2
+    assert len(transport.calls) == 2
+
+
+def test_a_missing_file_is_skipped_rather_than_retried(tmp_path, opted_in):
+    transport = _Transport()
+    _store, up = _uploader(tmp_path, transport)
+    up._log.append({"clip_id": "gone-forever-01", "result": "network_error"})
+    assert up._retry_pending() == 0
 
 
 # -- pacing ---------------------------------------------------------------

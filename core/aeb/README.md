@@ -1362,7 +1362,32 @@ debug users only. Refusals and offline machines never claim a send.
 
 `aeb_submissions.jsonl` beside the store records one line per attempt, capped at
 5000 lines, carrying no coordinates and no image data. It is what makes
-delete-on-ack defensible.
+delete-on-ack defensible, and it is also what drives the retry pass below.
+
+### Holdover retry, driven by the log and not by the store
+
+A clip is offered once, at the moment it is written. Without a retry pass an
+offline machine, or an hour of server downtime, silently costs every clip
+captured in that window: a failed send is abandoned and no later run knows the
+clip exists.
+
+`_retry_pending()` runs on the uploader thread before the queue loop. It reads
+`SubmissionLog.retryable_clip_ids()`, which returns ids whose **most recent**
+entry is in `_RETRYABLE_RESULTS`, and re-offers up to `_RETRY_BATCH` of them
+oldest-first through the normal `_handle()` path, so eligibility, consent and
+pacing all still apply.
+
+`paused` is one of those results, which is why the pause check sits **after** the
+eligibility check rather than first: a clip held back by a pause needs a log
+entry to be recoverable, while one that was never going to be sent must stay out
+of the log entirely. Without that, hitting the daily cap at noon would lose every
+clip captured for the rest of the day.
+
+**A clip with no log entry is unreachable from here.** That is the safety
+property, and it holds by construction rather than by a filter: a back
+catalogue, anything captured before this feature shipped, and everything the
+eligibility rules refuse have no entries, so a retry pass cannot reach them. Do
+not replace the log lookup with a store scan.
 
 ---
 

@@ -43,6 +43,14 @@ _NOTIFY_COOLDOWN_S: float = 600.0
 _LOG_MAX_LINES: int = 5000
 _LOG_NAME: str = "aeb_submissions.jsonl"
 
+# Results worth offering again on a later boot. Everything else is terminal:
+# the server made a judgement about the clip and repeating it wastes both ends.
+_RETRYABLE_RESULTS: frozenset[str] = frozenset(
+    {"network_error", "server_error", "quota", "closed", "http_429", "paused"}
+)
+# Bounded so a long outage cannot turn the next launch into a mass upload.
+_RETRY_BATCH: int = 20
+
 # Server verdicts. Anything unrecognised is treated as "do not retry", because a
 # reason this client does not understand is not one it can act on.
 _KEEP_AND_STOP: frozenset[str] = frozenset({"quota", "closed"})
@@ -132,6 +140,28 @@ class SubmissionLog:
         except OSError:
             logger.debug("could not trim the AEB submission log", exc_info=True)
 
+    def retryable_clip_ids(self) -> set[str]:
+        """Clip ids whose most recent attempt failed for a reason worth retrying.
+
+        Most recent wins, so a clip that later succeeded drops out. A clip with no
+        entry at all is absent from the result by construction, which is what
+        keeps a retry pass from reaching clips that were never offered.
+        """
+        latest: dict[str, str] = {}
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    cid = entry.get("clip_id")
+                    if cid:
+                        latest[str(cid)] = str(entry.get("result", ""))
+        except OSError:
+            return set()
+        return {cid for cid, result in latest.items() if result in _RETRYABLE_RESULTS}
+
     def append(self, entry: dict) -> None:
         """One line per attempt. Never contains coordinates or image data."""
         with self._lock:
@@ -164,6 +194,7 @@ class ClipUploader:
         queue_max: int = _QUEUE_MAX,
         notify_cooldown_s: float = _NOTIFY_COOLDOWN_S,
         min_send_gap_s: float = _MIN_SEND_GAP_S,
+        retry_on_start: bool = True,
     ) -> None:
         self._store = store
         self._transport = transport
@@ -180,6 +211,9 @@ class ClipUploader:
         self._stop = threading.Event()
 
         self.min_send_gap_s = min_send_gap_s
+        # The retry pass runs on the worker thread, before the queue loop, so a
+        # boot scan never sits on whichever loop first asked for the recorder.
+        self.retry_on_start = retry_on_start
         self._paused_until: float = 0.0
         # -inf so the first send of a session is never delayed.
         self._last_send_mono: float = float("-inf")
@@ -239,7 +273,47 @@ class ClipUploader:
 
     # -- worker ------------------------------------------------------------
 
+    def _retry_pending(self, limit: int = _RETRY_BATCH) -> int:
+        """Re-offer clips whose last attempt failed transiently. Returns the count.
+
+        Driven by the submission log, never by a sweep of the store. A clip with
+        no log entry was never offered, so a back catalogue, anything captured
+        before this feature existed, and everything the eligibility rules refuse
+        are all unreachable from here by construction rather than by a filter
+        somebody could remove.
+        """
+        ids = self._log.retryable_clip_ids()
+        if not ids:
+            return 0
+        # Filenames carry only 8 characters of the clip id, so filter on those
+        # first: peeking metadata for every clip in a large store is not cheap.
+        prefixes = {cid[:8] for cid in ids}
+        found: list[tuple[float, Path]] = []
+        for info in self._store.list_clips():
+            stem = info.name.split(".", 1)[0]
+            if stem.rsplit("_", 1)[-1] not in prefixes:
+                continue
+            meta = self._store.peek_metadata(info.path)
+            if meta is not None and meta.clip_id in ids:
+                found.append((info.mtime, info.path))
+
+        found.sort()
+        sent = 0
+        for _mtime, path in found[:limit]:
+            if self._stop.is_set():
+                break
+            self._handle(path)
+            sent += 1
+        if sent:
+            logger.info("re-offered %d AEB clip(s) held over from a previous run", sent)
+        return sent
+
     def _run(self) -> None:
+        if self.retry_on_start:
+            try:
+                self._retry_pending()
+            except Exception:
+                logger.exception("AEB clip retry pass raised")
         while not self._stop.is_set():
             try:
                 path = self._queue.get(timeout=0.5)
@@ -258,14 +332,18 @@ class ClipUploader:
         # unticking the box stops uploads immediately rather than next boot.
         if not contribution_enabled():
             return self._kept(path)
-        if time.monotonic() < self._paused_until:
-            logger.debug("AEB upload paused; keeping %s locally", path.name)
-            return self._kept(path)
 
         meta = self._store.peek_metadata(path)
         reason = clip_ineligible_reason(meta)
         if reason is not None:
             logger.debug("not contributing %s: %s", path.name, reason)
+            return self._kept(path)
+
+        # After eligibility, so a clip held back by a pause is recorded and stays
+        # recoverable while one that was never sendable stays out of the log.
+        if time.monotonic() < self._paused_until:
+            logger.debug("AEB upload paused; keeping %s locally", path.name)
+            self._record(path, meta, 0, "paused")
             return self._kept(path)
 
         try:
