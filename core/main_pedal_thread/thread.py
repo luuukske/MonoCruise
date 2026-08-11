@@ -427,14 +427,14 @@ class MainPedalThread(BaseThread):
         gas_output   = opdgasval
         brake_output = opdbrakeval
 
-        # AEB override: on engagement (AEB_brake), slam brake to 1.0 and zero
+        # AEB override: on engagement (AEB_brake) the gas is cut here; the brake is
+        # owned by AEBDecelController in sending_thread (README pedal authority).
         try:
             aeb = registry.get_thread("aeb_thread")
             if aeb is not None and aeb.is_alive() and gas_output < 0.8:
                 with aeb.data._lock:
                     if aeb.data.AEB_brake:
                         gas_output = 0.0
-                        brake_output = 1.0
         except (KeyError, AttributeError):
             pass
 

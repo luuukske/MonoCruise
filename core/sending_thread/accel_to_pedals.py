@@ -24,6 +24,14 @@ _WEIGHT_STRENGTH: float = 0.27
 _WEIGHT_MIN_FACTOR: float = 0.55
 _WEIGHT_MAX_FACTOR: float = 1.85
 _TRAILER_WEIGHT_BIAS: float = 1.02
+# Brake capability, fitted to full-pedal stops across four rigs. Mass exponent
+# is 0.25, not 1: air brakes are load-sensed (README has the numbers).
+_BRAKE_FIT_COEFF: float = 70.8
+_BRAKE_WHEEL_EXP: float = 0.52
+_BRAKE_MASS_EXP: float = 0.31
+# Fallbacks, used only when the wheel count is unavailable.
+_BRAKE_LOAD_MULT_SOLO: float = 1.47
+_BRAKE_LOAD_MULT_TRAILER: float = 2.18
 
 # Smoothing time constants
 _WANTED_SMOOTHING_TAU_S: float = 0.05
@@ -171,14 +179,24 @@ def baseline_accel_ms2(total_mass_kg: float, has_trailer: bool) -> float:
     )
 
 
-def baseline_brake_ms2(total_mass_kg: float, has_trailer: bool) -> float:
-    """Expected max deceleration (m/s^2) at brake=1.0, adjusted for mass/trailer."""
+def baseline_brake_ms2(
+    total_mass_kg: float, has_trailer: bool, wheels_on_ground: int = 0,
+) -> float:
+    """Expected max deceleration (m/s^2) at brake=1.0 for this rig. See README."""
+    mass = _finite_or_zero(total_mass_kg)
+    if wheels_on_ground > 0 and mass > 1000.0:
+        # Braked axles vs mass. Never `weight_factor`: that is the acceleration
+        # model, where more mass means less accel. Braking runs the other way.
+        return _clamp(
+            _BRAKE_FIT_COEFF
+            * wheels_on_ground ** _BRAKE_WHEEL_EXP
+            * mass ** -_BRAKE_MASS_EXP,
+            _MIN_BRAKE_ESTIMATE_MS2,
+            _MAX_BRAKE_ESTIMATE_MS2,
+        )
     base = max(_MIN_BRAKE_ESTIMATE_MS2, _finite_or_zero(Settings.mapper_brake_scale_ms2))
-    return _clamp(
-        base / max(weight_factor(total_mass_kg, has_trailer), 1e-6),
-        _MIN_BRAKE_ESTIMATE_MS2,
-        _MAX_BRAKE_ESTIMATE_MS2,
-    )
+    mult = _BRAKE_LOAD_MULT_TRAILER if has_trailer else _BRAKE_LOAD_MULT_SOLO
+    return _clamp(base * mult, _MIN_BRAKE_ESTIMATE_MS2, _MAX_BRAKE_ESTIMATE_MS2)
 
 
 def brake_curve_fraction(pedal: float) -> float:
@@ -196,10 +214,17 @@ def compute_estimated_mass_kg(
     fuel_kg_per_liter: float = FUEL_KG_PER_LITER,
     trailer_count: int = 0,
 ) -> float:
-    """Tractor + cargo + fuel mass from telemetry (kg)."""
+    """Tractor + cargo + fuel mass from telemetry (kg).
+
+    Cargo only counts while a trailer is attached: the SDK keeps reporting the
+    assigned job's cargoMass after you drop the trailer, which made a bobtail
+    read 39.8 t instead of ~10.7 t (see core/sending_thread/README.md).
+    """
+    trailers = max(0, int(trailer_count))
     fuel_kg = max(0.0, float(fuel_litres)) * float(fuel_kg_per_liter)
-    trailer_mass_kg = max(0, int(trailer_count)) * 7000.0
-    return max(0.0, float(unit_mass_kg)) + cargo_mass_kg + fuel_kg + trailer_mass_kg
+    trailer_mass_kg = trailers * 7000.0
+    carried_cargo = max(0.0, float(cargo_mass_kg)) if trailers > 0 else 0.0
+    return max(0.0, float(unit_mass_kg)) + carried_cargo + fuel_kg + trailer_mass_kg
 
 
 def creep_accel_ms2(

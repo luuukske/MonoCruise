@@ -92,12 +92,13 @@ class RadarThread(BaseThread):
 
     def _read_ego(self) -> tuple[
         float, float, float, float, float, float, bool, bool, float, int, float,
+        int, int,
     ]:
-        """Ego tuple: pose, speed, steer, pause, trailer, pitch_deg, sim time, mass."""
+        """Ego tuple: pose, speed, steer, pause, trailer, pitch, sim time, mass, wheels."""
         try:
             tel = registry.get_thread("telemetry_thread")
             if tel is None or not tel.is_alive():
-                return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False, False, 0.0, 0, 0.0
+                return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False, False, 0.0, 0, 0.0, 0, 0
             with tel.data._lock:
                 return (
                     float(getattr(tel.data, "coordinateX", 0.0)),
@@ -111,9 +112,11 @@ class RadarThread(BaseThread):
                     float(getattr(tel.data, "rotationY", 0.0)),
                     int(getattr(tel.data, "simulated_time_us", 0) or 0),
                     float(getattr(tel.data, "estimated_total_mass_kg", 0.0)),
+                    int(getattr(tel.data, "wheels_on_ground", 0) or 0),
+                    int(getattr(tel.data, "trailer_count", 0) or 0),
                 )
         except (KeyError, AttributeError):
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False, False, 0.0, 0, 0.0
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, False, False, 0.0, 0, 0.0, 0, 0
 
     @staticmethod
     def _kinematics_t(simulated_time_us: int) -> float:
@@ -142,6 +145,7 @@ class RadarThread(BaseThread):
         ego_speed: float, ego_steer: float, ego_pitch_raw: float,
         ego_has_trailer: bool, paused: bool, ego_mass_kg: float,
         traffic_buf: bytes | None, parked_buf: bytes | None,
+        ego_wheels: int = 0, ego_trailer_count: int = 0,
     ) -> None:
         """Debug clip capture; never raises into the radar loop."""
         try:
@@ -151,6 +155,7 @@ class RadarThread(BaseThread):
                 rotationX=ego_yaw_norm, rotationY=ego_pitch_raw, speed=ego_speed,
                 userSteer=ego_steer, paused=paused, ego_has_trailer=ego_has_trailer,
                 estimated_total_mass_kg=ego_mass_kg,
+                wheels_on_ground=ego_wheels, trailer_count=ego_trailer_count,
                 blinkerLeft=bl_left, blinkerRight=bl_right,
             )
             recorder.push_radar_frame(RadarFrameRecord(
@@ -225,7 +230,7 @@ class RadarThread(BaseThread):
 
         (ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
          paused, ego_has_trailer, ego_pitch_deg, simulated_time_us,
-         ego_mass_kg) = self._read_ego()
+         ego_mass_kg, ego_wheels, ego_trailer_count) = self._read_ego()
         t_kin = self._kinematics_t(simulated_time_us)
         use_sim = simulated_time_us > 0
         # Wall↔sim switch without a reset leaves Vehicle.time in the old domain
@@ -248,6 +253,7 @@ class RadarThread(BaseThread):
                     capture, time.monotonic(), time.time(),
                     ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
                     ego_pitch_deg, ego_has_trailer, True, ego_mass_kg, None, None,
+                    ego_wheels, ego_trailer_count,
                 )
             return
 
@@ -291,5 +297,6 @@ class RadarThread(BaseThread):
                 ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
                 ego_pitch_deg, ego_has_trailer, False, ego_mass_kg,
                 self._traffic.last_traffic_bytes, self._traffic.last_parked_bytes,
+                ego_wheels, ego_trailer_count,
             )
 

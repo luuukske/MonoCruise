@@ -30,7 +30,7 @@ _SAVE_THRESHOLD: float = 0.1        # save when drift exceeds 10% of saved value
 _SAVE_COOLDOWN_S: float = 30.0      # min seconds between successive writes
 _ESTIMATE_LOWER_BOUND: float = 0.35 # fraction of baseline: hard floor
 _ESTIMATE_UPPER_BOUND: float = 1.3  # fraction of mass-adjusted baseline
-# Reject partial-pedal extrapolations above this fraction of mass baseline.
+# Reject partial-pedal extrapolations above this fraction of the load baseline.
 _BRAKE_CANDIDATE_MAX_FRACTION: float = 1.35
 # Temporary recovery ceiling vs mapper_brake_scale_ms2 (mass baseline under-
 # predicts). TODO: root-cause inaccurate mass-adjusted brake baseline; retighten.

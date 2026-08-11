@@ -227,3 +227,79 @@ def test_load_persisted_clamps_poisoned_value(monkeypatch):
     t2 = pc.PedalCapacityTracker()
     t2.load_persisted(BASE, 2.0)
     assert t2.max_brake_ms2 == pytest.approx(BASE)
+
+
+def test_brake_baseline_rises_with_a_trailer(monkeypatch):
+    """Braking must not use the acceleration mass model, which has it backwards.
+
+    Measured over 134 clips on flat road: 9.5 m/s2 solo at 10 t against 14.1 with a
+    trailer at 17-24 t. The old baseline divided by `weight_factor` and so predicted
+    8.26 solo vs 5.87 loaded, which made the partial-pedal candidate cap reject every
+    truthful loaded sample and froze the estimate. See core/sending_thread/README.md.
+    """
+    from core.sending_thread import accel_to_pedals as ap
+
+    solo = ap.baseline_brake_ms2(10_000.0, False)
+    loaded = ap.baseline_brake_ms2(24_000.0, True)
+    assert loaded > solo, f"trailer baseline {loaded:.2f} must exceed solo {solo:.2f}"
+
+    # Mass alone, within a load class, must not move it: a trailer's own braked
+    # axles are the mechanism, not the tonnage.
+    assert ap.baseline_brake_ms2(17_000.0, True) == pytest.approx(
+        ap.baseline_brake_ms2(24_000.0, True)
+    )
+    assert ap.baseline_brake_ms2(8_000.0, False) == pytest.approx(solo)
+
+
+# Full-pedal stops: (wheels, mass_kg, max decel at brake=1.0). Clip-derived rows
+# are converted out of raw peak decel into the same units the probe reports.
+MEASURED_RIGS = (
+    (6, 10_470.0, 10.14),   # bobtail, brake probe, n=3 plateaued stops
+    (12, 17_000.0, 12.70),  # single trailer
+    (18, 24_000.0, 13.90),  # double, empty
+    (18, 54_310.0, 10.85),  # double, ~29 t cargo
+)
+
+
+def test_baseline_tracks_measured_capability(monkeypatch):
+    """The 1.35x partial-pedal cap must sit above real capability, not below it."""
+    from core.sending_thread import accel_to_pedals as ap
+
+    for wheels, mass, measured in MEASURED_RIGS:
+        base = ap.baseline_brake_ms2(mass, wheels > 6, wheels)
+        assert 0.85 <= measured / base <= 1.15, (
+            f"baseline {base:.2f} vs measured {measured:.2f}"
+        )
+        assert measured <= pc._brake_candidate_cap_ms2(base, 0.5), (
+            "a truthful partial-pedal candidate would be rejected"
+        )
+
+
+def test_loading_a_rig_barely_lowers_its_braking(monkeypatch):
+    """Air brakes are load-sensed, so decel must not fall like 1/mass.
+
+    Same 18-wheel double, empty vs ~29 t of cargo: measured 13.17 -> 10.83, a
+    factor of 0.82 for 2.24x the mass. A 1/mass model predicts 5.88.
+    """
+    from core.sending_thread import accel_to_pedals as ap
+
+    empty = ap.baseline_brake_ms2(24_000.0, True, 18)
+    loaded = ap.baseline_brake_ms2(54_310.0, True, 18)
+    assert loaded < empty, "loading must not increase predicted capability"
+    assert loaded / empty > 0.70, (
+        f"mass term too strong: {loaded / empty:.2f}, measured ratio is 0.78"
+    )
+
+
+def test_cargo_needs_a_trailer_to_count(monkeypatch):
+    """Dropping the trailer must drop its cargo from the mass estimate.
+
+    The SDK keeps reporting the assigned job's cargoMass after you unhook, which
+    read a bobtail as 39.8 t and corrupted every mass-scaled term.
+    """
+    from core.sending_thread.accel_to_pedals import compute_estimated_mass_kg
+
+    bobtail = compute_estimated_mass_kg(10_000.0, 29_000.0, 800.0, trailer_count=0)
+    hooked = compute_estimated_mass_kg(10_000.0, 29_000.0, 800.0, trailer_count=2)
+    assert bobtail < 12_000.0, f"bobtail read {bobtail / 1000:.1f} t"
+    assert hooked - bobtail == pytest.approx(29_000.0 + 14_000.0)

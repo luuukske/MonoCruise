@@ -12,6 +12,15 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+### Changed
+- **ego's collision box**: changed the collision box to be more accurate to the game.
+- **AEB steps in slightly later on traffic in your own lane**: preview.12 made it engage earlier for vehicles squarely in front of you, which turned out to feel over-eager now that braking eases off properly. It waits as long as it does for everything else again, and brakes harder when it does commit.
+
+### Fixed
+- **AEB grabbed the brakes early at low speed**: a timer forced it to engage whenever a collision was about a second and a half away, even when barely any braking was needed. At crawl speed that stopped you a metre or two short of the vehicle in front; it now waits until real braking is actually called for.
+- **AEB braking was all-or-nothing**: every trigger went straight to the floor instead of braking as hard as the situation needed, so a 65 km/h stop finished around 5 m short of the vehicle ahead. It now works out what your rig can really do from its axles and weight, eases off as the gap closes, and still uses everything when a crash can't be avoided.
+- **Weight was wrong after dropping a trailer**: with a job still assigned, MonoCruise kept counting cargo you were no longer pulling and read an empty cab as nearly four times its real weight. That threw off braking, throttle response and creep until you hooked up again.
+
 ## [1.1.0-preview.16] - 2026-08-10
 ### Fixed
 - **MAJOR: preview.15 closed instantly on startup**: the build was missing one of its own files, so MonoCruise quit before the window ever appeared. It was broken for about an hour after release, and this build fixes it. If you are on preview.15, update.

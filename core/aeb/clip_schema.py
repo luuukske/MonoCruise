@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 # Bump on shape change. v2: mass_kg. v3: blinkerLeft/Right (False if absent).
-SCHEMA_VERSION: int = 3
+SCHEMA_VERSION: int = 4
 
 # Sentinel used by the AEB thread for "no threat this tick".
 _INF: float = 1e9
@@ -56,6 +56,10 @@ class EgoTelemetry:
     ego_has_trailer: bool = False
     # None means the clip predates schema v2, not a massless truck.
     estimated_total_mass_kg: float | None = None
+    # Braked-axle count and trailer count: needed to fit max brake decel to the
+    # rig rather than to a per-load-class constant (see sending_thread README).
+    wheels_on_ground: int = 0
+    trailer_count: int = 0
     # Absent on pre-v3 clips; False is the safe default (no blinker bias in replay).
     blinkerLeft: bool = False
     blinkerRight: bool = False
@@ -72,6 +76,8 @@ class EgoTelemetry:
             "paused": self.paused,
             "ego_has_trailer": self.ego_has_trailer,
             "estimated_total_mass_kg": self.estimated_total_mass_kg,
+            "wheels_on_ground": self.wheels_on_ground,
+            "trailer_count": self.trailer_count,
             "blinkerLeft": self.blinkerLeft,
             "blinkerRight": self.blinkerRight,
         }
@@ -89,6 +95,8 @@ class EgoTelemetry:
             paused=bool(d.get("paused", False)),
             ego_has_trailer=bool(d.get("ego_has_trailer", False)),
             estimated_total_mass_kg=_opt_float(d.get("estimated_total_mass_kg")),
+            wheels_on_ground=int(d.get("wheels_on_ground", 0) or 0),
+            trailer_count=int(d.get("trailer_count", 0) or 0),
             blinkerLeft=bool(d.get("blinkerLeft", False)),
             blinkerRight=bool(d.get("blinkerRight", False)),
         )

@@ -14,11 +14,13 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `full_brake_decel` | 7.8 m/s² | Full brake deceleration |
 | `warn_ttb` | 1.3 s | WARN threshold |
 | `brake_ttb` | 0.2 s | BRAKE threshold |
-| `certain_engage_ttb` | 1.30 s | Certain-geom soft rear-end engage OR: `best_ttb_engage` under this qualifies (between the 0.50 s slam and warn_ttb); see README certain-TTB bridge |
-| `ego_half_width` | 1.15 m | Ego arc corridor half-width |
-| `ego_half_length` | 3.0 m | Ego capsule half-length (body extents via `capsule_extents`; collision segments are cap-aligned: extents minus half_width, see `core/radar/README.md` §8) |
+| `ego_half_width` | 1.265 m | Ego arc corridor half-width (flush trailer standoff 2026-08-11) |
+| `ego_half_length` | 3.333 m | Ego capsule half-length (flush trailer standoff 2026-08-11; body extents via `capsule_extents`; collision segments are cap-aligned: extents minus half_width, see `core/radar/README.md` §8) |
 | `corridor_margin` | 0.5 m | Corridor padding for crossing-path sample uncertainty |
-| `stop_buffer_response_s` | 0.10 s | Response-lag distance in required-decel gap (`v_closing * this`). Last-point envelope, not corpus timing optimum; rejected cap/tiering in calibration comments |
+| `stop_buffer_response_s` | 0.16 s | Brake build-up distance for a solo tractor (`v_closing * this`). Pays for the actuation lag now that `AEBDecelController` tracks the target instead of slamming; at 0.00 a tracking stop runs 2.7 m past the target. Rejected cap/tiering in calibration comments |
+| `stop_buffer_response_trailer_s` | 0.50 s | Same term with a trailer attached. Trailer air brakes measure t63 ~0.65 s against a solo ~0.22 s, so the solo value is not enough: at 0.16 simulated trailer stops overshoot by 0.6-2.5 m. Corpus cost at 0.50 is -149.8 vs -15.3 flat, buying 25 fewer FN for 13 more FP |
+| `aeb_target_rate_engaged_ms3` | 30 m/s³ | Target slew while engaged. The engagement edge itself is exempt and steps straight to the requirement: ramping from zero used to cost the entire brake build-up window |
+| `aeb_engage_frac_certain` | 0.85 | **In-game trial from 2026-08-11**, was 0.70. Now equal to `aeb_engage_frac`, so the geometry grading is flat and aligned in-lane traffic no longer skips the uncertainty hedge (`tests/aeb/test_engage_sensitivity.py::test_graded_bar_brakes_earlier_on_an_in_lane_obstacle` fails by design while this holds). Note this knob does not soften braking: required decel is recomputed as the gap closes, so engaging later means engaging at a *higher* demand. On clip `ac6b48b4` the engage-tick command rises 6.26 to 7.61 m/s², and headroom below `effective_max` for the loop to recover a build-up shortfall drops from 30% to 15% |
 | `disarm_hold_ttc_s` | 3.0 s | Geometry latch window while engaged: hold the event while any colliding target's unbraked ttc is inside it (anti-pumping; was `warn_ttb`) |
 | `capsule_parallel_margin_scale` | 0.3 | Near-parallel capsule contacts use `margin * scale` blended by heading sine toward full margin at perpendicular; kills adjacent-lane side-graze FPs (ab524f87 / 29bf31b8). 1.0 disables |
 | `lane_half_width` | 1.95 m | EGO lane boundary |

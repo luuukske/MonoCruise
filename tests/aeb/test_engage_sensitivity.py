@@ -28,6 +28,9 @@ from tests.aeb.harness import make_vehicle
 
 _HZ = 30.0
 _FLAT = replace(CAL, aeb_engage_frac_certain=CAL.aeb_engage_frac)
+# The shipped default currently equals aeb_engage_frac (0.85 in-game trial from
+# 2026-08-11), so grading is flat. Drive the mechanism explicitly to keep it covered.
+_GRADED = replace(CAL, aeb_engage_frac_certain=0.70)
 
 
 def _stopped_ahead_clip(ego_ms: float, gap_m: float, capacity: float,
@@ -70,15 +73,26 @@ def _brake_range(clip: Clip, cal, ego_ms: float, gap_m: float) -> float | None:
 
 
 def test_graded_bar_brakes_earlier_on_an_in_lane_obstacle():
-    """Same clip, same capacity: the graded bar engages further out."""
+    """Same clip, same capacity: a lower certain-geometry bar engages further out."""
     ego_ms, gap = 22.0, 60.0
     clip = _stopped_ahead_clip(ego_ms, gap, capacity=10.0)
     flat_r = _brake_range(clip, _FLAT, ego_ms, gap)
-    graded_r = _brake_range(clip, CAL, ego_ms, gap)
+    graded_r = _brake_range(clip, _GRADED, ego_ms, gap)
     assert flat_r is not None and graded_r is not None
     assert graded_r > flat_r, (
         f"graded bar should brake further out: {graded_r:.1f} m vs {flat_r:.1f} m"
     )
+
+
+def test_shipped_default_currently_has_no_geometry_grading():
+    """Pin the live trial so flipping it back is a deliberate, visible edit.
+
+    `aeb_engage_frac_certain` was lowered to 0.70 in preview.12 to step in earlier
+    on traffic squarely in your lane. It is back at `aeb_engage_frac` while the
+    2026-08-11 over-eagerness trial runs, which makes aligned in-lane traffic take
+    the same uncertainty hedge as everything else.
+    """
+    assert CAL.aeb_engage_frac_certain == CAL.aeb_engage_frac
 
 
 def test_graded_bar_is_the_only_thing_that_changed():
@@ -88,23 +102,16 @@ def test_graded_bar_is_the_only_thing_that_changed():
     assert not any(e.aeb_brake for e in run_headless(clip))
 
 
-def test_certain_ttb_bridge_engages_soft_crawl_rear_end():
-    """Crawl in-lane stop: demand under 0.70, TTB in (0.5, 1.0], certain bridge fires."""
-    # gap=14 m at 3.6 m/s: within a short clip demand stays soft and TTB never
-    # reaches the 0.50 s slam, so only the certain-TTB bridge can engage.
-    ego_ms, gap, capacity = 3.6, 14.0, 10.0
-    clip = _stopped_ahead_clip(ego_ms, gap, capacity=capacity, n=45)
-    off = replace(CAL, certain_engage_ttb=0.0)
-    assert not any(e.aeb_brake for e in run_headless(clip, cal=off)), (
-        "without the certain-TTB bridge this soft crawl must not engage"
-    )
-    assert any(e.aeb_brake for e in run_headless(clip, cal=CAL)), (
-        "certain-TTB bridge must engage an in-lane crawl rear-end before impact"
-    )
+def test_soft_crawl_rear_end_does_not_engage_without_slam():
+    """Crawl in-lane stop: demand under 0.70 and TTB above slam stays warn-only."""
+    # gap=14 m at 3.6 m/s: demand stays soft and TTB never reaches the 0.50 s
+    # slam. The removed certain-TTB bridge used to engage here early.
+    clip = _stopped_ahead_clip(3.6, 14.0, capacity=10.0, n=45)
+    assert not any(e.aeb_brake for e in run_headless(clip))
 
 
-def test_certain_ttb_bridge_does_not_engage_far_soft_threat():
-    """Far soft demand with TTB well above the bridge stays silent."""
+def test_soft_crawl_far_threat_stays_silent():
+    """Far soft demand with TTB well above the slam stays silent."""
     clip = _stopped_ahead_clip(3.6, 30.0, capacity=10.0, n=45)
     assert not any(e.aeb_brake for e in run_headless(clip))
 

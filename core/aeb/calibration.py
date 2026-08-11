@@ -20,14 +20,17 @@ class AEBCalibration:
     brake_worsens_hysteresis_ms: float = 0.5
 
     # Geometry / corridor
-    ego_half_width: float = 1.15
-    ego_half_length: float = 3.0
+    # Flush standoff vs parked trailer (2026-08-11 clearance probe).
+    ego_half_width: float = 1.265
+    ego_half_length: float = 3.333
     corridor_margin: float = 0.5
     # Near-parallel capsule contacts: margin * scale at parallel; see core/aeb/README.md.
     capsule_parallel_margin_scale: float = 0.3
     stop_buffer: float = 0.2
-    # Response-lag gap term (v_closing * this); last-point envelope, not corpus timing optimum.
-    stop_buffer_response_s: float = 0.10
+    # Response-lag gap term (v_closing * this), paying for brake build-up so the
+    # tracking controller is not late. Solo t63 ~0.22 s, trailer ~0.65 s (README §7).
+    stop_buffer_response_s: float = 0.16
+    stop_buffer_response_trailer_s: float = 0.50
     # Rejected 2026-07-19: response distance cap, threat-age tiering, engage 0.9 (README §7).
     elevation_margin: float = 5.0
     max_range: float = 200.0
@@ -137,14 +140,13 @@ class AEBCalibration:
     aeb_target_deadband_ms2: float = 0.4
     aeb_target_refresh_min_s: float = 0.20
     aeb_target_rate_ms3: float = 8.0
-    # aeb_engage_frac 0.85 from 2026-07-19 scan; 0.80 rejected (full corpus +8 FP).
+    # While engaged the pedal controller tracks this target, so a slow software ramp
+    # only delays the bite; the plant's own 0.15 s lag is the real jerk limit.
+    aeb_target_rate_engaged_ms3: float = 30.0
     aeb_engage_frac: float = 0.85
-    # Geometry-graded: aligned in-lane traffic skips the uncertainty hedge.
-    # Pure sensitivity trade, no flat band; see README geometry-graded engage.
-    aeb_engage_frac_certain: float = 0.70
-    # Certain-geom soft rear-ends: warn via ttb < warn_ttb while v^2/2d stays
-    # below the 0.70 bar and outside the 0.50 s slam (README certain-TTB bridge).
-    certain_engage_ttb: float = 1.30
+    # Graded hedge skip for aligned in-lane traffic; 0.85 in-game trial from
+    # 2026-08-11 equals aeb_engage_frac, so grading is flat (README, TUNING.md).
+    aeb_engage_frac_certain: float = 0.85
     aeb_disarm_frac: float = 0.45
     # Geometry latch while colliding unbraked ttc inside window (anti-pumping; README).
     disarm_hold_ttc_s: float = 3.0

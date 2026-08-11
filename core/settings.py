@@ -159,7 +159,9 @@ class Settings(metaclass=_SingletonMeta):
     # AccelToPedals tuning: split gas (PID) / brake (feedforward + trim PI) architecture.
     # Weight baselines and smoothing constants stay fixed in code.
     mapper_accel_scale_ms2: float = 1.0       # baseline max gas accel for capacity estimate
-    mapper_brake_scale_ms2: float = 6.5       # baseline max brake decel for capacity estimate
+    # Nominal brake scale. Not the max decel itself: baseline_brake_ms2 applies a
+    # measured per-load-class multiplier on top (see core/sending_thread/README.md).
+    mapper_brake_scale_ms2: float = 6.5
     mapper_rolling_resistance: float = 0.07   # rolling resistance coefficient for road load
 
     # Adaptive brake efficiency

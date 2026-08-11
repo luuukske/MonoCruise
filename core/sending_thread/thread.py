@@ -42,20 +42,31 @@ _COAST_LOG_MIN_SPEED_MS: float = 1.0
 _COAST_LOG_HEADER_ROW: list[str] = [
     "t_s",
     "utc",
+    "sample_kind",     # "coast" (drag fit) or "brake" (capacity fit)
     "speed_ms",
     "raw_accel_ms2",
     "slope_rad",
     "slope_accel_ms2",
     "drag_accel_ms2",  # raw_accel - slope_accel: this is what you plot vs speed
+    "road_load_ms2",
     "gear",
     "game_clutch",
     "game_throttle",
     "game_brake",
     "mass_kg",
     "has_trailer",
+    "wheels_on_ground",
+    "trailer_count",
+    "est_brake_ms2",
+    "aeb_active",
     "aforward",
     "abackward",
 ]
+# Brake-capacity samples: a full-pedal stop is the only regime where
+# decel / brake_curve_fraction(pedal) is a trustworthy capacity estimate.
+_BRAKE_PROBE_MIN_PEDAL: float = 0.85
+_BRAKE_PROBE_MIN_SPEED_MS: float = 8.0
+_BRAKE_PROBE_MAX_SLOPE_RAD: float = 0.05
 
 
 def create_visualization_bar() -> "VisualizationBar":
@@ -69,10 +80,23 @@ HAZARD_PRESS_DURATION: float = 0.4
 HAZARD_VERIFY_DELAY: float = 0.1
 HAZARD_MAX_RETRIGGERS: int = 3
 
-# Closed-loop decel controller: feedforward via the inverse brake curve plus
-_AEB_KP: float = 0.06
-_AEB_KI: float = 0.04
+# Closed-loop decel controller: feedforward via the inverse brake curve plus a
+# disturbance observer that nulls environment error (grade, capacity, curve bias).
 _AEB_LEAD_CLAMP_MS2: float = 3.0
+# Brake plant model, fitted from engagement step responses in the clip corpus.
+# Both taus sit above the measured median deliberately, see the module README.
+_AEB_PLANT_DEAD_SOLO_S: float = 0.06
+_AEB_PLANT_TAU_SOLO_S: float = 0.25
+_AEB_PLANT_DEAD_TRAILER_S: float = 0.10
+_AEB_PLANT_TAU_TRAILER_S: float = 0.50
+# Decel measurement filter for the AEB loop only. Deliberately faster than the
+# 0.30 s `_spd_smooth` that capacity learning and published telemetry tap.
+_AEB_MEAS_TAU_S: float = 0.12
+# Residual filter. Model and measurement carry the same lag, so the residual is
+# bias rather than lag, and it settles with the plant instead of behind it.
+_AEB_BIAS_TAU_S: float = 0.10
+_AEB_BIAS_CLAMP_FRAC: float = 0.6
+_AEB_PEDAL_HISTORY_S: float = 0.6
 
 # Idle-creep compensation for the user brake path. In gear 1 below the creep
 _CREEP_COMP_FULL_AT_PEDAL: float = 0.04
@@ -113,46 +137,119 @@ class AEBDecelController:
 
     def __init__(self) -> None:
         self._active: bool = False
-        self._integral: float = 0.0
+        self._bias_ms2: float = 0.0
+        self._model_decel_ms2: float = 0.0
+        self._model_filt_ms2: float = 0.0
+        self._pedal_hist: list[tuple[float, float]] = []
 
     @property
     def active(self) -> bool:
         return self._active
 
+    @property
+    def bias_ms2(self) -> float:
+        """Estimated environmental decel bias (measured minus modelled)."""
+        return self._bias_ms2
+
     def update_active(self, aeb_brake: bool) -> bool:
         was_active = self._active
         self._active = aeb_brake
         if not aeb_brake:
-            self._integral = 0.0
+            self._bias_ms2 = 0.0
+            self._model_decel_ms2 = 0.0
+            self._model_filt_ms2 = 0.0
+            self._pedal_hist.clear()
         return aeb_brake and not was_active
+
+    def note_applied_pedal(self, pedal: float, now: float) -> None:
+        """Record the brake actually sent to the game: the plant model's input."""
+        self._pedal_hist.append((now, max(0.0, min(1.0, pedal))))
+        cutoff = now - _AEB_PEDAL_HISTORY_S
+        while len(self._pedal_hist) > 2 and self._pedal_hist[0][0] < cutoff:
+            self._pedal_hist.pop(0)
+
+    @staticmethod
+    def _plant_model(has_trailer: bool) -> tuple[float, float]:
+        """Plant (dead time, tau) for the current load class."""
+        if has_trailer:
+            return _AEB_PLANT_DEAD_TRAILER_S, _AEB_PLANT_TAU_TRAILER_S
+        return _AEB_PLANT_DEAD_SOLO_S, _AEB_PLANT_TAU_SOLO_S
+
+    def _delayed_pedal(self, now: float, dead_s: float) -> float:
+        """Pedal applied one plant dead time ago; 0 until history covers it."""
+        want = now - dead_s
+        value = 0.0
+        for t, p in self._pedal_hist:
+            if t > want:
+                break
+            value = p
+        return value
+
+    def _update_observer(
+        self,
+        measured_decel_ms2: float,
+        max_brake_ms2: float,
+        decel_from_pedal_fn,
+        has_trailer: bool,
+        now: float,
+        dt: float,
+    ) -> None:
+        """Advance the plant model and refresh the bias estimate."""
+        dead_s, plant_tau = self._plant_model(has_trailer)
+        commanded_decel = decel_from_pedal_fn(
+            self._delayed_pedal(now, dead_s), max_brake_ms2
+        )
+        step = max(dt, 1e-4)
+        self._model_decel_ms2 += (
+            1.0 - math.exp(-step / plant_tau)
+        ) * (commanded_decel - self._model_decel_ms2)
+        # Same filter the measurement carries, so the residual is bias not lag.
+        self._model_filt_ms2 += (
+            1.0 - math.exp(-step / _AEB_MEAS_TAU_S)
+        ) * (self._model_decel_ms2 - self._model_filt_ms2)
+
+        clamp = _AEB_BIAS_CLAMP_FRAC * max_brake_ms2
+        residual = max(
+            -clamp, min(clamp, measured_decel_ms2 - self._model_filt_ms2)
+        )
+        self._bias_ms2 += (
+            1.0 - math.exp(-step / _AEB_BIAS_TAU_S)
+        ) * (residual - self._bias_ms2)
 
     def step(
         self,
         target_decel_ms2: float,
-        measured_lead_decel_ms2: float,
+        floor_decel_ms2: float,
+        demand_decel_ms2: float,
+        measured_decel_ms2: float,
         max_brake_ms2: float,
         ff_pedal_fn,
+        decel_from_pedal_fn,
+        has_trailer: bool,
+        now: float,
         dt: float,
     ) -> float:
         """Compute brake pedal [0, 1] for the current tick."""
-        if not self._active or target_decel_ms2 <= 0.0 or max_brake_ms2 <= 0.1:
-            self._integral = 0.0
+        if not self._active or max_brake_ms2 <= 0.1:
             return 0.0
 
-        ff_pedal = ff_pedal_fn(target_decel_ms2, max_brake_ms2)
-        error = target_decel_ms2 - measured_lead_decel_ms2
-        p_term = _AEB_KP * error
-        i_candidate = self._integral + _AEB_KI * error * max(dt, 1e-4)
-
-        unclamped = ff_pedal + p_term + i_candidate
-        clamped = max(0.0, min(1.0, unclamped))
-
-        saturated_pushing = (
-            (clamped >= 1.0 and error > 0.0) or (clamped <= 0.0 and error < 0.0)
+        self._update_observer(
+            measured_decel_ms2, max_brake_ms2, decel_from_pedal_fn,
+            has_trailer, now, dt,
         )
-        if not saturated_pushing:
-            self._integral = i_candidate
-        return clamped
+
+        # Past the pedal's reach there is nothing left to track. The headroom in
+        # ego_decel_frac is a tracking margin, not a reason to hold brake back.
+        if demand_decel_ms2 >= decel_from_pedal_fn(1.0, max_brake_ms2):
+            return 1.0
+
+        # AEB never commands less decel than it says the threat requires; the
+        # observer only changes the pedal needed to deliver it.
+        commanded = max(target_decel_ms2, floor_decel_ms2)
+        if commanded <= 0.0:
+            return 0.0
+        wanted = max(0.0, min(commanded - self._bias_ms2, max_brake_ms2))
+        return max(0.0, min(1.0, ff_pedal_fn(wanted, max_brake_ms2)))
 
 
 @dataclass
@@ -236,6 +333,9 @@ class SendingThread(BaseThread):
         self._aeb_controller = AEBDecelController()
         self._key_listener = None
         self._spd_smooth: float | None = None
+        # Second, faster differentiator scoped to the AEB loop. Kept separate so
+        # capacity learning and published telemetry keep the 0.30 s estimate.
+        self._spd_smooth_fast: float | None = None
         self._prev_spd_mono: float | None = None
         self._prev_measured_decel_ms2: float = 0.0
         # True when the mapper's gas bid won the user-pedal merge on the
@@ -280,11 +380,29 @@ class SendingThread(BaseThread):
 
     # Coast-down CSV logger 
 
+    @staticmethod
+    def _coast_header_differs(path) -> bool:
+        """True when the on-disk header does not match the current columns."""
+        try:
+            with path.open("r", newline="", encoding="utf-8") as fh:
+                return next(csv.reader(fh), []) != _COAST_LOG_HEADER_ROW
+        except OSError:
+            return False
+
     def _ensure_coast_log(self) -> None:
         if self._coast_log_file is not None:
             return
         path = self._project_root / _COAST_LOG_NAME
         write_header = not path.exists() or path.stat().st_size == 0
+        if not write_header and self._coast_header_differs(path):
+            # Appending new columns under an old header silently misaligns every
+            # later row. Rotate instead, so both files stay parseable.
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            try:
+                path.rename(path.with_name(f"{path.stem}_{stamp}{path.suffix}"))
+                write_header = True
+            except OSError:
+                logger.debug("coast_debug rotate failed", exc_info=True)
         try:
             self._coast_log_file = path.open("a", newline="", encoding="utf-8")
             self._coast_log_writer = csv.writer(self._coast_log_file)
@@ -310,13 +428,29 @@ class SendingThread(BaseThread):
         has_trailer: bool,
         aforward: float,
         abackward: float,
+        road_load_ms2: float = 0.0,
+        wheels_on_ground: int = 0,
+        trailer_count: int = 0,
+        est_brake_ms2: float = 0.0,
+        aeb_active: bool = False,
     ) -> None:
-        if abs(aforward) > 1e-4 or abs(abackward) > 1e-4:
+        coasting = (
+            abs(aforward) <= 1e-4 and abs(abackward) <= 1e-4
+            and abs(game_throttle) <= 0.02 and abs(game_brake) <= 0.02
+            and speed_ms >= _COAST_LOG_MIN_SPEED_MS
+        )
+        # Hard-brake sample: the driver's em_stop slam or AEB at full pedal. No
+        # traffic needed, which is what makes a capacity sweep practical.
+        braking = (
+            max(abackward, game_brake) >= _BRAKE_PROBE_MIN_PEDAL
+            and abs(aforward) <= 1e-4
+            and abs(game_throttle) <= 0.02
+            and speed_ms >= _BRAKE_PROBE_MIN_SPEED_MS
+            and abs(slope_rad) <= _BRAKE_PROBE_MAX_SLOPE_RAD
+        )
+        if not coasting and not braking:
             return
-        if abs(game_throttle) > 0.02 or abs(game_brake) > 0.02:
-            return
-        if speed_ms < _COAST_LOG_MIN_SPEED_MS:
-            return
+        sample_kind = "coast" if coasting else "brake"
 
         now = time.monotonic()
         if now - self._last_coast_log_mono < _COAST_LOG_INTERVAL_S:
@@ -336,17 +470,23 @@ class SendingThread(BaseThread):
             self._coast_log_writer.writerow([
                 f"{t_s:.3f}",
                 datetime.now(timezone.utc).isoformat(),
+                sample_kind,
                 f"{speed_ms:.3f}",
                 f"{raw_accel_ms2:+.4f}",
                 f"{slope_rad:+.5f}",
                 f"{slope_accel:+.4f}",
                 f"{drag_accel:+.4f}",
+                f"{road_load_ms2:+.4f}",
                 gear,
                 f"{game_clutch:.3f}",
                 f"{game_throttle:.3f}",
                 f"{game_brake:.3f}",
                 f"{mass_kg:.1f}",
                 int(bool(has_trailer)),
+                int(wheels_on_ground),
+                int(trailer_count),
+                f"{est_brake_ms2:.3f}",
+                int(bool(aeb_active)),
                 f"{aforward:.4f}",
                 f"{abackward:.4f}",
             ])
@@ -714,6 +854,7 @@ class SendingThread(BaseThread):
         AEB_warn = False
         AEB_target_decel = 0.0
         AEB_ff_decel = 0.0
+        AEB_required_decel = 0.0
         if pedal_thread is not None and pedal_alive:
             try:
                 with pedal_thread.data._lock:
@@ -731,6 +872,11 @@ class SendingThread(BaseThread):
                         )
                         AEB_ff_decel = float(
                             getattr(aeb_thread.data, "AEB_ff_decel_ms2", 0.0)
+                        )
+                        # Uncapped requirement: tells the controller when the
+                        # threat needs more decel than the truck can deliver.
+                        AEB_required_decel = float(
+                            getattr(aeb_thread.data, "AEB_required_decel_ms2", 0.0)
                         )
             except (KeyError, Exception):
                 pass
@@ -807,6 +953,7 @@ class SendingThread(BaseThread):
         wanted_a = 0.0
         raw_a = 0.0
         measured_decel_ms2 = 0.0
+        measured_decel_fast_ms2 = 0.0
         measured_decel_lead_ms2 = 0.0
         dt_aeb = self.loop_interval
         mass_kg = 0.0
@@ -820,6 +967,8 @@ class SendingThread(BaseThread):
         tel_gear_dashboard = 0
         tel_gear = 0
         engine_rpm = 0.0
+        wheels_on_ground = 0
+        ego_trailer_count = 0
         if connected and tel_thread is not None and tel_thread.is_alive() and not tel_paused:
             try:
                 with tel_thread.data._lock:
@@ -828,6 +977,9 @@ class SendingThread(BaseThread):
                     spd_ms = float(tel_thread.data.speed)
                     has_t = bool(tel_thread.data.ego_has_trailer)
                     wheels_on_ground = int(tel_thread.data.wheels_on_ground)
+                    ego_trailer_count = int(
+                        getattr(tel_thread.data, "trailer_count", 0) or 0
+                    )
                     road_pitch = float(tel_thread.data.rotationY)
                     tel_gear_dashboard = int(tel_thread.data.gear_dashboard)
                     tel_gear = int(tel_thread.data.gear)
@@ -837,6 +989,7 @@ class SendingThread(BaseThread):
                     game_brake = float(getattr(tel_thread.data, "gameBrake", 0.0))
                     user_clutch = float(getattr(tel_thread.data, "userClutch", 0.0))
                 now_spd = time.monotonic()
+                dt_spd = now_spd - self._prev_spd_mono if self._prev_spd_mono else 0.02
                 if self._spd_smooth is None:
                     self._spd_smooth = spd_ms
                     raw_a = 0.0
@@ -844,11 +997,18 @@ class SendingThread(BaseThread):
                     # Tracking differentiator: acceleration = (speed - smoothed_speed) / tau.
                     _TAU = 0.30
                     raw_a = (spd_ms - self._spd_smooth) / _TAU
-                    dt_spd = now_spd - self._prev_spd_mono if self._prev_spd_mono else 0.02
                     alpha = 1.0 - math.exp(-max(dt_spd, 1e-4) / _TAU)
                     self._spd_smooth += alpha * (spd_ms - self._spd_smooth)
+                if self._spd_smooth_fast is None:
+                    self._spd_smooth_fast = spd_ms
+                    fast_a = 0.0
+                else:
+                    fast_a = (spd_ms - self._spd_smooth_fast) / _AEB_MEAS_TAU_S
+                    alpha_f = 1.0 - math.exp(-max(dt_spd, 1e-4) / _AEB_MEAS_TAU_S)
+                    self._spd_smooth_fast += alpha_f * (spd_ms - self._spd_smooth_fast)
                 self._prev_spd_mono = now_spd
                 measured_decel_ms2 = max(0.0, -raw_a)
+                measured_decel_fast_ms2 = max(0.0, -fast_a)
 
                 now_aeb = time.monotonic()
                 if self._prev_aeb_loop_mono is None:
@@ -988,6 +1148,7 @@ class SendingThread(BaseThread):
 
         if not connected:
             self._spd_smooth = None
+            self._spd_smooth_fast = None
             self._prev_spd_mono = None
             self._prev_measured_decel_ms2 = 0.0
             self._prev_aeb_loop_mono = None
@@ -1288,13 +1449,20 @@ class SendingThread(BaseThread):
             )
             b = max(b, b + (aeb_ff_pedal - b) * assist_w)
 
-        # AEB active: closed-loop decel controller writes the brake pedal
+        # AEB active: closed-loop decel controller writes the brake pedal. The
+        # merge stays a max so a driver out-braking AEB always wins.
+        now_ctrl = time.monotonic()
         if _aeb_active and gasval < 0.8:
             aeb_pedal = self._aeb_controller.step(
                 target_decel_ms2=AEB_target_decel,
-                measured_lead_decel_ms2=measured_decel_lead_ms2,
+                floor_decel_ms2=AEB_ff_decel,
+                demand_decel_ms2=AEB_required_decel,
+                measured_decel_ms2=measured_decel_fast_ms2,
                 max_brake_ms2=max(self._capacity_tracker.max_brake_ms2, 0.1),
                 ff_pedal_fn=self._accel_mapper._brake_pedal_from_decel,
+                decel_from_pedal_fn=self._accel_mapper.brake_decel_from_pedal,
+                has_trailer=has_t,
+                now=now_ctrl,
                 dt=dt_aeb,
             )
             b = max(b, aeb_pedal)
@@ -1335,6 +1503,10 @@ class SendingThread(BaseThread):
         self._pause_held_aforward = a
         self._pause_held_abackward = b
 
+        # Close the observer loop on what the game actually received, not on the
+        # controller's own request: hold, cushion and user brake all raise it.
+        self._aeb_controller.note_applied_pedal(b, now_ctrl)
+
         # Push the actual brake value sent this tick into the ring buffer so
         self._recent_brake_outputs.append(b)
         if len(self._recent_brake_outputs) > 3:
@@ -1353,10 +1525,15 @@ class SendingThread(BaseThread):
             has_trailer=has_t,
             aforward=a,
             abackward=b,
+            road_load_ms2=mapper_road_load_ms2,
+            wheels_on_ground=wheels_on_ground,
+            trailer_count=ego_trailer_count,
+            est_brake_ms2=self._capacity_tracker.max_brake_ms2,
+            aeb_active=_aeb_active,
         )
 
         # Update pedal capacity estimates from actual pedal values sent to the game.
-        _base_brake = baseline_brake_ms2(mass_kg, has_t)
+        _base_brake = baseline_brake_ms2(mass_kg, has_t, wheels_on_ground)
         self._capacity_tracker.update_brake(
             max(float(b), 0.0), measured_decel_ms2, speed_ms, brake_grade_rad,
             _base_brake,

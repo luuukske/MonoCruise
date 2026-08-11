@@ -19,7 +19,7 @@ from core.settings import Settings
 from core.radar.traffic import (
     Vehicle,
     ArcPath, build_arc, arc_arc_collision, _accel_to_arc_params,
-    capsule_extents,
+    capsule_extents, pair_body_dist_sq,
 )
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT
 from core.aeb.confirm import OccupancyConfirm
@@ -195,8 +195,8 @@ class AEBSnapshot:
     ego_z: float = 0.0
     ego_yaw: float = 0.0
     ego_speed: float = 0.0
-    ego_half_w: float = 1.15
-    ego_half_l: float = 3.0
+    ego_half_w: float = 1.265
+    ego_half_l: float = 3.333
     ego_arc: ArcPath | None = None
     ego_braked_arc: ArcPath | None = None
     ego_has_trailer: bool = False
@@ -324,9 +324,19 @@ def _world_to_ego_forward(dx: float, dz: float, ego_yaw_rad: float) -> float:
     return dx * math.sin(ego_yaw_rad) + dz * math.cos(ego_yaw_rad)
 
 
-def _response_dist(v: float, cal) -> float:
-    """Uncapped v * stop_buffer_response_s; rejected cap/tiering in README §7."""
-    return abs(v) * cal.stop_buffer_response_s
+def _response_dist(v: float, cal, response_s: float | None = None) -> float:
+    """Uncapped v * response_s; rejected cap/tiering in README §7."""
+    if response_s is None:
+        response_s = cal.stop_buffer_response_s
+    return abs(v) * response_s
+
+
+def _response_s_for_load(cal, has_trailer: bool) -> float:
+    """Brake build-up pad for the current load class (trailer air brakes are slower)."""
+    return (
+        cal.stop_buffer_response_trailer_s if has_trailer
+        else cal.stop_buffer_response_s
+    )
 
 
 def _codir_required_cap(
@@ -337,6 +347,7 @@ def _codir_required_cap(
     v_closing: float,
     ego_speed: float,
     cal,
+    response_s: float | None = None,
 ) -> float:
     """Co-directional required decel cap (moving vs stopped lead); min with relative frame."""
     if fwd_dot < cal.co_directional_dot:
@@ -345,7 +356,7 @@ def _codir_required_cap(
     gap_est = max(ego_travel - target_arc._dist_at_time(unbraked_ttc), 0.0)
     a_t = target_arc.decel if target_arc.decel > 1e-3 else 0.0
     d_move = max(
-        gap_est - cal.stop_buffer - _response_dist(v_closing, cal),
+        gap_est - cal.stop_buffer - _response_dist(v_closing, cal, response_s),
         1e-3,
     )
     r_move = a_t + (v_closing * v_closing) / (2.0 * d_move)
@@ -353,7 +364,7 @@ def _codir_required_cap(
     if a_t > 0.0 and target_arc.speed > 1e-3:
         s_stop = (target_arc.speed * target_arc.speed) / (2.0 * a_t)
         d_stop = max(
-            gap_est + s_stop - cal.stop_buffer - _response_dist(abs_ego, cal),
+            gap_est + s_stop - cal.stop_buffer - _response_dist(abs_ego, cal, response_s),
             1e-3,
         )
         r_stop = (abs_ego * abs_ego) / (2.0 * d_stop)
@@ -367,17 +378,18 @@ def _required_decel_two_frame(
     ego_speed: float,
     cal,
     codir_cap: float = _INF,
+    response_s: float | None = None,
 ) -> float:
     """Required decel: relative frame or ego fallback; optional co-dir cap (README continuous-decel)."""
     d_rel = (
-        closing_distance - cal.stop_buffer - _response_dist(v_closing, cal)
+        closing_distance - cal.stop_buffer - _response_dist(v_closing, cal, response_s)
     )
     abs_ego = abs(ego_speed)
     if d_rel > 1e-3:
         required = (v_closing * v_closing) / (2.0 * d_rel)
     else:
         d_ego = max(
-            ego_travel - cal.stop_buffer - _response_dist(abs_ego, cal),
+            ego_travel - cal.stop_buffer - _response_dist(abs_ego, cal, response_s),
             1e-3,
         )
         required = (abs_ego * abs_ego) / (2.0 * d_ego)
@@ -817,6 +829,9 @@ class AEBThread(BaseThread):
         self._latched_threat_ids: set[int] = set()
         # Scope stamp per latched id; out-of-scope grace before release.
         self._latched_scope_ok_mono: dict[int, float] = {}
+        # Rate-limit for gap/collision box debug (Settings.debug only).
+        self._gap_debug_last_mono: float = 0.0
+        self._gap_debug_was_engaged: bool = False
         # Clip replay overrides _now, readers, and _aeb_active_fn (clip_eval).
         self._now = time.monotonic
         self._aeb_active_fn = None
@@ -1122,6 +1137,10 @@ class AEBThread(BaseThread):
 
         vehicles_eff = _swap_trailer_kinematics(vehicles)
 
+        # Brake build-up pad, keyed on load: a trailer's air brakes take about
+        # three times longer to reach full decel than a solo tractor.
+        load_response_s = _response_s_for_load(cal, ego_has_trailer)
+
         if paused and self._last_snapshot is not None:
             with self.data._lock:
                 self.data.snapshot = self._last_snapshot
@@ -1248,6 +1267,8 @@ class AEBThread(BaseThread):
         best_v_closing: float = 0.0
         best_ego_travel: float = _INF
         best_codir_cap: float = _INF
+        best_threat_vid: int | None = None
+        best_hit_dist: float = _INF
         # Engage aggregates exclude LOS-vetoed ids; warn/disarm use full set (README).
         best_ttb_engage: float = _INF
         best_closing_distance_engage: float = _INF
@@ -1661,6 +1682,7 @@ class AEBThread(BaseThread):
 
                     if ttb < best_ttb:
                         best_ttb = ttb
+                        best_threat_vid = v.id
                         best_hit_x = unbraked_hit[1]
                         best_hit_z = unbraked_hit[2]
                         # required_decel gap: min(v_rel*ttc, ego travel to hit); see README.
@@ -1668,6 +1690,7 @@ class AEBThread(BaseThread):
                             unbraked_hit[1] - ego_front_x,
                             unbraked_hit[2] - ego_front_z,
                         )
+                        best_hit_dist = hit_dist
                         best_closing_distance = min(
                             closing_unbraked * unbraked_ttc, hit_dist,
                         )
@@ -1676,6 +1699,7 @@ class AEBThread(BaseThread):
                         best_codir_cap = _codir_required_cap(
                             base_target_arc, fwd_dot, unbraked_ttc,
                             best_ego_travel, closing_unbraked, ego_speed, cal,
+                            response_s=load_response_s,
                         )
 
                     # LOS-rate veto (engagement entry only): once per vehicle
@@ -1722,7 +1746,7 @@ class AEBThread(BaseThread):
                         best_codir_cap_engage = _codir_required_cap(
                             base_target_arc, fwd_dot, unbraked_ttc,
                             best_ego_travel_engage, closing_unbraked,
-                            ego_speed, cal,
+                            ego_speed, cal, response_s=load_response_s,
                         )
                     found_hit = True
 
@@ -1762,7 +1786,7 @@ class AEBThread(BaseThread):
         if run_collision and best_closing_distance < _INF and best_v_closing > 0.0:
             required_decel = _required_decel_two_frame(
                 best_closing_distance, best_v_closing, best_ego_travel,
-                ego_speed, cal, best_codir_cap,
+                ego_speed, cal, best_codir_cap, response_s=load_response_s,
             )
 
         # Slope modifies a threat-derived demand, it never sources one: gravity
@@ -1859,19 +1883,12 @@ class AEBThread(BaseThread):
             required_decel_engage = _required_decel_two_frame(
                 best_closing_distance_engage, best_v_closing_engage,
                 best_ego_travel_engage, ego_speed, cal,
-                best_codir_cap_engage,
+                best_codir_cap_engage, response_s=load_response_s,
             )
         effective_required_engage = required_decel_engage + downhill_offset
         brake_ttb_engage_active = (
             run_collision
             and best_ttb_engage < cal.brake_ttb + cal.brake_response_window_s
-        )
-        # Soft certain rear-ends: demand below the graded bar, TTB still urgent
-        # enough to warn, but outside the 0.50 s slam (README certain-TTB bridge).
-        certain_ttb_engage_active = (
-            certain_engage
-            and run_collision
-            and best_ttb_engage < cal.certain_engage_ttb
         )
 
         if self._engaged:
@@ -1887,8 +1904,7 @@ class AEBThread(BaseThread):
             qualified = (run_collision
                          and aeb_speed_ok
                          and (effective_required_engage >= engage_threshold
-                              or brake_ttb_engage_active
-                              or certain_ttb_engage_active))
+                              or brake_ttb_engage_active))
             # Tiered engage confirm window + occupancy observe (README tiered entry).
             self._engage_confirm.window_s = (
                 cal.aeb_engage_confirm_s
@@ -1900,7 +1916,6 @@ class AEBThread(BaseThread):
                 # Instant engage paths: TTB slam, certain geom, latched (README).
                 certain = (
                     brake_ttb_engage_active
-                    or certain_ttb_engage_active
                     or any(vid in certain_geom_ids and vid not in engage_vetoed_ids
                            for vid in colliding_ids)
                     or any(vid in self._latched_threat_ids
@@ -1938,11 +1953,20 @@ class AEBThread(BaseThread):
 
         delta = target_raw - self._published_target_ms2
         time_since_change = now_mono - self._last_target_change_mono
-        if (abs(delta) < cal.aeb_target_deadband_ms2
+        if self._published_target_ms2 <= 1e-6 and target_raw > 0.0:
+            # Engagement edge: step straight to the requirement. Ramping from zero
+            # costs the whole build-up window and leaves metres of gap unspent.
+            target_published = target_raw
+            self._last_target_change_mono = now_mono
+        elif (abs(delta) < cal.aeb_target_deadband_ms2
                 and time_since_change < cal.aeb_target_refresh_min_s):
             target_published = self._published_target_ms2
         else:
-            slew_limit = cal.aeb_target_rate_ms3 * dt_loop
+            rate = (
+                cal.aeb_target_rate_engaged_ms3 if self._engaged
+                else cal.aeb_target_rate_ms3
+            )
+            slew_limit = rate * dt_loop
             step = max(-slew_limit, min(slew_limit, delta))
             target_published = self._published_target_ms2 + step
             target_published = max(0.0, target_published)
@@ -2147,6 +2171,227 @@ class AEBThread(BaseThread):
             tmp_traffic_session,
         )
 
+        if Settings.debug and run_collision and (
+            self._engaged or bool(colliding_ids) or required_decel > 0.5
+        ):
+            self._log_gap_debug(
+                now_mono=now_mono,
+                cal=cal,
+                ego_x=ego_x,
+                ego_z=ego_z,
+                ego_yaw_rad=ego_yaw_rad,
+                ego_speed=ego_speed,
+                ego_hw=ego_hw,
+                ego_half_l=ego_half_l,
+                ego_cap_fwd=ego_cap_fwd,
+                ego_cap_back=ego_cap_back,
+                ego_front_to_surface=ego_front_to_surface,
+                ego_arc=ego_arc,
+                vehicles_eff=vehicles_eff,
+                vehicle_collision_data=vehicle_collision_data,
+                best_threat_vid=best_threat_vid,
+                best_ttb=best_ttb,
+                best_unbraked_ttc=best_unbraked_ttc,
+                best_closing_distance=best_closing_distance,
+                best_v_closing=best_v_closing,
+                best_ego_travel=best_ego_travel,
+                best_hit_dist=best_hit_dist,
+                best_codir_cap=best_codir_cap,
+                required_decel=required_decel,
+                required_decel_engage=required_decel_engage,
+                effective_required=effective_required,
+                effective_required_engage=effective_required_engage,
+                engage_threshold=engage_threshold,
+                effective_max_decel=effective_max_decel,
+                brake_ttb_active=brake_ttb_active,
+                brake_ttb_engage_active=brake_ttb_engage_active,
+                certain_engage=certain_engage,
+                geom_threat_latched=geom_threat_latched,
+                latched_distance_threat=latched_distance_threat,
+                target_raw=target_raw,
+                target_published=target_published,
+                colliding_ids=colliding_ids,
+                response_s=load_response_s,
+            )
+
+    def _log_gap_debug(
+        self,
+        *,
+        now_mono: float,
+        cal: AEBCalibration,
+        ego_x: float,
+        ego_z: float,
+        ego_yaw_rad: float,
+        ego_speed: float,
+        ego_hw: float,
+        ego_half_l: float,
+        ego_cap_fwd: float,
+        ego_cap_back: float,
+        ego_front_to_surface: float,
+        ego_arc: ArcPath,
+        vehicles_eff: list[Vehicle],
+        vehicle_collision_data: dict,
+        best_threat_vid: int | None,
+        best_ttb: float,
+        best_unbraked_ttc: float,
+        best_closing_distance: float,
+        best_v_closing: float,
+        best_ego_travel: float,
+        best_hit_dist: float,
+        best_codir_cap: float,
+        required_decel: float,
+        required_decel_engage: float,
+        effective_required: float,
+        effective_required_engage: float,
+        engage_threshold: float,
+        effective_max_decel: float,
+        brake_ttb_active: bool,
+        brake_ttb_engage_active: bool,
+        certain_engage: bool,
+        geom_threat_latched: bool,
+        latched_distance_threat: bool,
+        target_raw: float,
+        target_published: float,
+        colliding_ids: set[int],
+        response_s: float,
+    ) -> None:
+        """INFO dump of why AEB thinks a stop gap remains (debug mode only)."""
+        engage_edge = self._engaged and not self._gap_debug_was_engaged
+        self._gap_debug_was_engaged = self._engaged
+        if not engage_edge and (now_mono - self._gap_debug_last_mono) < 0.5:
+            return
+        self._gap_debug_last_mono = now_mono
+
+        abs_v = abs(ego_speed)
+        resp = abs(best_v_closing) * response_s
+        d_rel = best_closing_distance - cal.stop_buffer - resp
+        d_ego = best_ego_travel - cal.stop_buffer - abs_v * response_s
+        ttb_slam_s = cal.brake_ttb + cal.brake_response_window_s
+        slam_ttb_reach_m = abs_v * ttb_slam_s
+
+        body_lines: list[str] = []
+        if best_threat_vid is not None:
+            threat = next((v for v in vehicles_eff if v.id == best_threat_vid), None)
+            arcs = None
+            pc = vehicle_collision_data.get(best_threat_vid)
+            if pc is not None:
+                arcs = pc[0]
+            if threat is not None and arcs:
+                # OBB face gap in ego frame (+rz ahead, +rx left); same as debug radar.
+                c, s = math.cos(-ego_yaw_rad), math.sin(-ego_yaw_rad)
+
+                def _w2e(wx: float, wz: float) -> tuple[float, float]:
+                    dx = wx - ego_x
+                    dz = wz - ego_z
+                    return (-dx) * c - dz * s, (-dx) * s + dz * c
+
+                corners = [_w2e(cx, cz) for cx, cz in threat.get_corners()]
+                min_rz = min(rz for _, rz in corners)
+                max_rz = max(rz for _, rz in corners)
+                min_rx = min(rx for rx, _ in corners)
+                max_rx = max(rx for rx, _ in corners)
+                face_ahead = min_rz - ego_half_l
+                face_behind = -max_rz - ego_half_l
+                # Right-of-ego face: negative rx in this frame.
+                face_right = -max_rx - ego_hw if max_rx < 0.0 else None
+
+                tgt = arcs[0]
+                dsq = pair_body_dist_sq(ego_arc, tgt, 0.0)
+                body_sep = math.sqrt(max(dsq, 0.0))
+                cosd = abs(
+                    ego_arc.fwd_x * tgt.fwd_x + ego_arc.fwd_z * tgt.fwd_z
+                )
+                sind = math.sqrt(max(0.0, 1.0 - cosd * cosd))
+                pms = min(
+                    getattr(ego_arc, "parallel_margin_scale", 1.0),
+                    getattr(tgt, "parallel_margin_scale", 1.0),
+                )
+                hw_sum = ego_arc.half_width + tgt.half_width
+                thr = hw_sum + cal.corridor_margin * (pms + (1.0 - pms) * sind)
+                clearance = body_sep - thr
+                body_lines = [
+                    f"threat id={best_threat_vid} L={threat.size.length:.2f} "
+                    f"W={threat.size.width:.2f} trailer={threat.is_trailer} "
+                    f"parked={threat.is_parked}",
+                    f"obb face_ahead(bumper gap est)={face_ahead:+.3f}m "
+                    f"face_behind={face_behind:+.3f}m "
+                    f"rx=[{min_rx:+.2f},{max_rx:+.2f}] "
+                    f"rz=[{min_rz:+.2f},{max_rz:+.2f}]",
+                    (
+                        f"obb face_right={face_right:+.3f}m"
+                        if face_right is not None else "obb face_right=n/a"
+                    ),
+                    f"capsule t=0 body_sep={body_sep:.3f}m thr={thr:.3f}m "
+                    f"(hw_sum={hw_sum:.3f} margin={cal.corridor_margin:.3f} "
+                    f"pms={pms:.2f} sind={sind:.2f}) clearance={clearance:+.3f}m "
+                    f"(<0 = already overlapping corridor)",
+                    f"ego capsule fwd/back={ego_cap_fwd:.3f}/{ego_cap_back:.3f} "
+                    f"_cap={ego_arc._cap_fwd:.3f}/{ego_arc._cap_back:.3f} "
+                    f"hw={ego_arc.half_width:.3f}",
+                    f"tgt capsule fwd/back={tgt.fwd_len:.3f}/{tgt.back_len:.3f} "
+                    f"_cap={tgt._cap_fwd:.3f}/{tgt._cap_back:.3f} "
+                    f"hw={tgt.half_width:.3f}",
+                ]
+
+        engage_why = []
+        if brake_ttb_engage_active:
+            engage_why.append("brake_ttb_slam")
+        if effective_required_engage >= engage_threshold:
+            engage_why.append("required_decel")
+        if geom_threat_latched:
+            engage_why.append("geom_latch")
+        if latched_distance_threat:
+            engage_why.append("latched_headway")
+        if not engage_why:
+            engage_why.append("none")
+
+        logger.info(
+            "AEB gap debug: engaged=%s edge=%s speed=%.1fkm/h colliding=%s\n"
+            "  cal stop_buffer=%.3f response_s=%.3f corridor_margin=%.3f "
+            "parallel_scale=%.2f slam_ttb=%.2fs reach@v slam=%.2fm\n"
+            "  closing_dist=%.3f hit_dist=%.3f ego_travel=%.3f "
+            "ego_front_to_surface=%.3f (cap_fwd+hw) v_close=%.2f\n"
+            "  d_rel=%.3f d_ego=%.3f resp_term=%.3f codir_cap=%.2f\n"
+            "  ttc=%.3f ttb=%.3f req=%.2f req_engage=%.2f "
+            "eff_req=%.2f thr_engage=%.2f max=%.2f\n"
+            "  flags slam=%s slam_eng=%s certain=%s "
+            "why=%s raw=%.2f pub=%.2f\n"
+            "  %s",
+            self._engaged,
+            engage_edge,
+            abs_v * 3.6,
+            sorted(colliding_ids)[:8],
+            cal.stop_buffer,
+            response_s,
+            cal.corridor_margin,
+            cal.capsule_parallel_margin_scale,
+            ttb_slam_s,
+            slam_ttb_reach_m,
+            best_closing_distance if best_closing_distance < _INF else -1.0,
+            best_hit_dist if best_hit_dist < _INF else -1.0,
+            best_ego_travel if best_ego_travel < _INF else -1.0,
+            ego_front_to_surface,
+            best_v_closing,
+            d_rel,
+            d_ego,
+            resp,
+            best_codir_cap if best_codir_cap < _INF else -1.0,
+            best_unbraked_ttc if best_unbraked_ttc < _INF else -1.0,
+            best_ttb if best_ttb < _INF else -1.0,
+            required_decel,
+            required_decel_engage,
+            effective_required,
+            engage_threshold,
+            effective_max_decel,
+            brake_ttb_active,
+            brake_ttb_engage_active,
+            certain_engage,
+            "+".join(engage_why),
+            target_raw,
+            target_published,
+            ("\n  ".join(body_lines) if body_lines else "threat body: n/a"),
+        )
+
     def teardown(self) -> None:
         self._sound_handler.cleanup()
         if self._radar_visualizer is not None:
@@ -2169,6 +2414,8 @@ class AEBThread(BaseThread):
         self._prev_loop_mono = None
         self._latched_threat_ids.clear()
         self._latched_scope_ok_mono.clear()
+        self._gap_debug_last_mono = 0.0
+        self._gap_debug_was_engaged = False
         self._follow_tracks.clear()
         self._follow_hold_until.clear()
         self._follow_threat_ids = set()

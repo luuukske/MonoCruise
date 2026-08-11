@@ -860,29 +860,11 @@ newly brakes on is the same shape as the ones it rescues (a co-directional
 slow or stopped lead in ego's lane at 30-60 m), so there is no geometric
 scoping that separates them: this really is the sensitivity dial.
 
-### Certain-geom TTB engage bridge
-
-Even at `aeb_engage_frac_certain = 0.70`, a second soft class remains: crawl-speed
-or matched-speed in-lane rear-ends whose `v²/2d` demand peaks at roughly
-0.18-0.67 of capacity while `ttb` sits in `(brake_ttb + brake_response_window_s,
-warn_ttb]` (about 0.50-1.3 s). Warn and FF fire on the TTB path; engagement
-never qualifies because demand stays under the graded bar and outside the
-0.50 s slam.
-
-For colliding, non-engage-vetoed `certain_geom` targets only,
-`certain_engage_ttb` (default **1.30 s**) is an additional qualification OR: if
-`best_ttb_engage` is under that bar, engage qualifies (and takes the same
-instant certain path). Non-certain geometry still needs the demand bar or the
-0.50 s slam. Warn, FF, vetoes, and `nearcertain` grading are untouched.
-
-Corpus evidence for the new path: seven labelled soft certain FNs sharing that
-TTB-gap story (`030488be`, `ed9df207`, `0da1f6eb`, `b8d308f4`, `541030ee`,
-`e66a2827`, `cbc09fcb`). Prefer a dedicated `certain_engage_ttb` (between the 0.50 s
-slam and `warn_ttb`) so soft certain rear-ends qualify without opening the
-uncertain bar. Raising to 1.8 s (global or co-dir-only) recovered soft FNs but
-minted ~15 new FPs on the labelled corpus; 1.30 recovers one more soft FN
-(6895548c) with FP flat vs 1.25. Re-price against the
-FP watchlist (`15eba13d`, `7add71c9`, `6d23fe39`, `82acb8e8`) when the label set grows.
+Soft crawl / matched-speed in-lane rear-ends whose `v²/2d` stays under the
+graded bar still only engage via the ~0.50 s TTB slam (or wait until demand
+climbs). A former `certain_engage_ttb` bridge that engaged whenever TTB was
+under 1.30 s for certain geometry was removed: at crawl speed that was metres
+of bumper gap and felt like AEB ignoring the collision boxes.
 
 ### Oncoming clearance: pose plus measurement
 
@@ -987,8 +969,23 @@ low-speed dangers.
 
 `sending_thread` consumes `AEB_target_decel_ms2` via `AEBDecelController`:
 - Feedforward pedal from the inverse brake curve (`_brake_pedal_from_decel`).
-- Small PI on lead-compensated measured decel; integrator freezes on
-  pedal saturation so AEB never fights its own anti-windup.
+- Disturbance observer instead of a PI: a brake-plant model (dead time plus
+  first-order lag, keyed on trailer presence) is driven by the pedal actually
+  sent to the game, and the filtered residual against measured decel is the
+  environment bias. That bias is subtracted from the target before the inverse
+  curve, so grade, capacity error and curve error are compensated without an
+  integrator to wind up. Both model taus are set slower than the measured
+  median on purpose: modelling the plant slower than it is biases the estimate
+  toward under-braking, and only over-braking is dangerous.
+- Decel measurement for this loop uses its own 0.12 s differentiator, not the
+  0.30 s `_spd_smooth` that capacity learning and published telemetry read.
+- The merge stays `b = max(b, aeb_pedal)`, so a driver out-braking AEB wins,
+  and `AEB_ff_decel_ms2` floors the commanded decel so a stale target cannot
+  silence AEB.
+- `AEB_required_decel_ms2` is published **uncapped** for this reason: when it
+  reaches the decel pedal 1.0 can deliver, sending_thread slams rather than
+  inverting the curve at the `ego_decel_frac`-capped target. Do not clamp that
+  field to `effective_max_decel`, it is the saturation signal.
 - Mapper's fast-PID trim is frozen while `AEB_brake` is true (via
   `AccelToPedals.step(..., freeze_trim=True)`) so two controllers don't
   fight on the brake.
@@ -1044,7 +1041,9 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 - **Fix D (target arc over-rotation damping) applies to `arc_curvature`, not `v_curvature`.** `v_curvature` is the raw measured value used by `same_curve` and `CoDirectionalDivergeFilter`. Collision and visualization arcs both use the damped `arc_curvature` when building predicted paths.
 - **`LaneClassifier` must run before `OppositeLaneFilter`, `CoDirectionalDivergeFilter`, and `EgoEvasionFilter`**: those stages read `ctx.lane`, `ctx.fwd_dot`, `ctx.v_curvature` etc. populated by `LaneClassifier`.
 - **TMP trailer-as-vehicles get tractor speed/accel via `_swap_trailer_kinematics`.** Buffer speed for trailer slots is unreliable (often 0). The swap is done on a shallow copy: never mutate the original Vehicle.
-- **AEB pedal authority is two-layered, never binary-gated to zero.** AEB publishes `AEB_ff_decel_ms2` every tick when there is any real threat (`required_decel > 0`); sending_thread converts it to a brake pedal via the inverse FF curve and merges it as `b = max(b, aeb_ff_pedal)`. This is the **sub-engagement assist** layer: it adds force on top of user braking when the system warns but has not yet engaged. It is **ramped**, not gated: the assist weight rises linearly from 0 at `cal.ff_assist_ramp_lo` (0.03) to 1 at `cal.user_brake_latch` (0.12), and the merge is `b = max(b, b + (aeb_ff_pedal - b) * w)`. Below the ramp floor it contributes nothing, so it still cannot phantom-brake during normal manual cruising where routine lead-following yields a small non-zero `required_decel` (measured median FF pedal there: 0.004). At or above `user_brake_latch` the weight is 1 and the expression collapses to the original `max(b, aeb_ff_pedal)`, so behaviour above the old gate is unchanged. The ramp exists because a hard gate at 0.12 activated the assist only where the driver was already out-braking it (median jump **−0.187** pedal, i.e. inert) while blocking it across 0.03–0.12 where it would actually add force (median **+0.054**, 51% of those ticks carrying `ff_decel ≥ 2.0`). Dropping the gate outright instead was rejected: it left an 0.877-pedal worst-case jump off a 6% dab, which the ramp cuts to 0.476 and takes to zero above 0.60. When AEB engages (`AEB_brake == True`), main_pedal_thread slams `brake_output = 1.0` (the **engagement slam** layer): by definition, engagement means the system has decided full braking is warranted, and the inverse FF curve at a modest required-decel would produce a pedal too soft to act on the threat. The engagement slam is independent of `brakeval` (it must fire even on a distracted driver). All AEB pedal paths are gated by `gas_output >= 0.8` (full-gas user authority, the only override that can defeat AEB braking). Reason: removing the engagement slam in favour of pure FF made AEB feel silenced on engagement because FF pedal for 3–5 m/s² is only ~0.14–0.34.
+- **AEB pedal authority is two-layered, never binary-gated to zero.** AEB publishes `AEB_ff_decel_ms2` every tick when there is any real threat (`required_decel > 0`); sending_thread converts it to a brake pedal via the inverse FF curve and merges it as `b = max(b, aeb_ff_pedal)`. This is the **sub-engagement assist** layer: it adds force on top of user braking when the system warns but has not yet engaged. It is **ramped**, not gated: the assist weight rises linearly from 0 at `cal.ff_assist_ramp_lo` (0.03) to 1 at `cal.user_brake_latch` (0.12), and the merge is `b = max(b, b + (aeb_ff_pedal - b) * w)`. Below the ramp floor it contributes nothing, so it still cannot phantom-brake during normal manual cruising where routine lead-following yields a small non-zero `required_decel` (measured median FF pedal there: 0.004). At or above `user_brake_latch` the weight is 1 and the expression collapses to the original `max(b, aeb_ff_pedal)`, so behaviour above the old gate is unchanged. The ramp exists because a hard gate at 0.12 activated the assist only where the driver was already out-braking it (median jump **−0.187** pedal, i.e. inert) while blocking it across 0.03–0.12 where it would actually add force (median **+0.054**, 51% of those ticks carrying `ff_decel ≥ 2.0`). Dropping the gate outright instead was rejected: it left an 0.877-pedal worst-case jump off a 6% dab, which the ramp cuts to 0.476 and takes to zero above 0.60. When AEB engages (`AEB_brake == True`), main_pedal_thread cuts gas only; the brake is owned by `AEBDecelController` in sending_thread, which tracks `AEB_target_decel_ms2` (the **closed-loop** layer). All AEB pedal paths are gated by `gas_output >= 0.8` (full-gas user authority, the only override that can defeat AEB braking).
+
+**History (2026-08-11):** main_pedal_thread used to slam `brake_output = 1.0` on engagement. Because sending_thread merges every AEB path with `max()`, that slam pinned the pedal at 1.0 for the whole engagement and `AEBDecelController` never influenced the output: `AEB_target_decel_ms2` and its rate limit were dead code. Measured over 32 engagement clips, realized decel was a median **2.25x** the published target, which left **5 to 6 m** of unused gap on 65 km/h stops (0.2 m at crawl, hence the speed-squared symptom). An earlier attempt to drop the slam in favour of *pure FF* was reverted because AEB felt silenced; that failed for two reasons now fixed: the target ramped from 0 at `aeb_target_rate_ms3` (0.8 s to reach the requirement, so the first bite was ~0.005 pedal), and there was no pad for brake build-up. Engagement now steps the target straight to the requirement, and `stop_buffer_response_s` covers the plant lag. Do not restore the slam without re-reading `docs/aeb_high_speed_stop_overshoot.md`: a `max()`-merged constant of 1.0 silently disables every layer beneath it.
 - **Engagement-entry vetoes never touch warn timing beyond persistence, and never touch FF assist, disarm, or the holds.** `_los_veto_bar`, `_extrapolation_veto`, and the lane-confidence range all feed `engage_vetoed_ids`, which is subtracted from the engagement-only aggregate chain (`best_ttb_engage` and friends) and from the `certain_geom` instant path. The full aggregates still drive `AEB_warn`, `AEB_ff_decel_ms2`, the disarm gate, the geometry latch, and the latched-distance hold. The one permitted coupling is `aeb_warn_confirm_vetoed_s`: when every colliding target is vetoed **and** out of ego's lane, warn waits on a longer occupancy window. That is a delay a persisting course clears, not a suppression, and a vetoed target may never be removed from the warn aggregate outright. Keep it that way: a wrong veto must cost latency on one target, never silence. Measured on the labelled corpus, the vetoes left warn coverage on positive clips unchanged (135 of 160 clips, identical lead-time distribution) while cutting warn ticks on must-not-trigger clips by 11 %.
 - **A measured miss may remove certainty, never grant it.** The vetoes exist because arc-projected lane membership is an extrapolation and the CBDR miss is a measurement, so a *large* measured miss removes certainty (head-on bar, matched-speed neighbour). The converse does not hold: `d_miss` scales as `omega * R^2 / v_rel`, so a small value at range is not evidence of danger, it is a short-baseline fit over a long lever arm. A `lane_confidence_miss_m` clause that restored certainty on a small miss was tried and removed after the corpus grew: it was wrong on all four clips it affected. Also do not let a veto fire with no measurement at all unless its own physics stands alone (the ego-turn branch does; the matched-speed branch deliberately does not).
 - **The engage fraction is graded by certainty, and only by certainty.** `aeb_engage_frac_certain` applies when a colliding, non-engage-vetoed target is in `certain_geom_ids`, the same set that grants the instant confirm path. Do not widen it to `nearcertain_geom_ids` or to demand magnitude: required-decel size is not a certainty signal (see the tiered entry gate), and the corpus shows every clip the lower bar newly brakes on is geometrically identical to the ones it rescues. Unlike the veto thresholds it has no flat band, so re-price it against the corpus rather than assuming it still holds.
