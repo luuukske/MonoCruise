@@ -13,7 +13,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ## [Unreleased]
 
 ### Changed
-- **ego's collision box**: changed the collision box to be more accurate to the game.
+- **ego's collision box**: changed the collision box to be more accurate to the game (Volvo FH6 780 6x4).
 - **AEB steps in slightly later on traffic in your own lane**: preview.12 made it engage earlier for vehicles squarely in front of you, which turned out to feel over-eager now that braking eases off properly. It waits as long as it does for everything else again, and brakes harder when it does commit.
 
 ### Fixed
