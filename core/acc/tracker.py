@@ -25,6 +25,13 @@ from .blinker import (
 from .trailer_lock import TRAILER_VEHICLE_ID_BASE, resolve_tractor
 from .ego_path import build_ego_arc, path_half_width
 from .corroboration import slow_vehicle_evidence
+from .failsafe import (
+    RECENT_LEAD_S,
+    FailsafeInputs,
+    FailsafeState,
+    failsafe_decay,
+    failsafe_step,
+)
 from .road_model import (
     SOURCE_RESIDUAL_DELTA_M,
     RoadModel,
@@ -89,6 +96,11 @@ _ROAD_TRUST_INITIAL: float = 0.5
 _ROAD_TRUST_MIN: float = 0.05
 
 
+def effective_score(st: "TrackState") -> float:
+    """Published score: the scorer's own, floored by an active failsafe rescue."""
+    return max(st.score, st.failsafe_score)
+
+
 def _direction_weight(yaw_diff_deg: float) -> float:
     """Road-sample weight by heading relative to ego; 0 means not a road source."""
     heading = abs(yaw_diff_deg)
@@ -147,6 +159,12 @@ class TrackState:
     in_path_unshifted: bool = False
     last_road_lat: float = 0.0
     last_time_headway_s: float = float("inf")
+    # Geometric failsafe (README §10): ramp state, the floor it publishes, and
+    # the last frame the scorer itself called this track a lead.
+    failsafe: FailsafeState = field(default_factory=FailsafeState)
+    failsafe_score: float = 0.0
+    last_failsafe_lat: float = 0.0
+    last_scored_lead_mono: float = float("-inf")
 
 
 @dataclass(slots=True)
@@ -487,6 +505,10 @@ class ACCTracker:
                 continue
             body_lat_min = min(corner_lats)
             body_lat_max = max(corner_lats)
+            # Kept unblended for the failsafe: a wrong road model must not move
+            # the geometry the rescue is judged on (README §10).
+            arc_lat_min = min(lt for _, lt in corner_projs)
+            arc_lat_max = max(lt for _, lt in corner_projs)
             # R4 / parallel: ego-local rear of the whole train (cab + trailers).
             extras = tmp_trailers_by_tractor.get(v.id)
             train_pts = train_corners(v, extras)
@@ -622,6 +644,33 @@ class ACCTracker:
             st.in_path = in_path_unshifted
             st.in_path_unshifted = in_path_unshifted
             st.dist_m = dist_m
+            if st.score > IN_PATH_THRESHOLD:
+                st.last_scored_lead_mono = now_mono
+            # Failsafe: raw ego-arc geometry only, so it survives the road model
+            # being wrong. It floors the published score, never ``st.score``.
+            st.last_failsafe_lat = 0.5 * (arc_lat_min + arc_lat_max)
+            st.failsafe_score = failsafe_step(
+                st.failsafe,
+                FailsafeInputs(
+                    dist_m=dist_m,
+                    body_lat_min=arc_lat_min,
+                    body_lat_max=arc_lat_max,
+                    lat_uncertainty_m=lat_uncertainty,
+                    yaw_diff_deg=yaw_diff_deg,
+                    ego_speed_ms=ego_speed_ms,
+                    lead_speed_ms=float(v.acc_speed),
+                    desired_th_s=desired_th_s,
+                    recently_led=(
+                        now_mono - st.last_scored_lead_mono <= RECENT_LEAD_S
+                    ),
+                    suppressed=(
+                        is_cand
+                        or (abs(b_eff) > 1e-6
+                            and is_vacating(arc_lat_min, arc_lat_max, b_eff))
+                    ),
+                ),
+                dt,
+            )
             st.last_offset = off
             st.last_yaw = yaw_c
             st.last_path = path_c
@@ -684,6 +733,8 @@ class ACCTracker:
             st.in_path = False
             st.in_path_unshifted = False
             st.indicated_candidate = False
+            # A track radar no longer reports has no geometry left to rescue on.
+            st.failsafe_score = failsafe_decay(st.failsafe, dt)
         for vid in expired:
             self.tracks.pop(vid, None)
             self._trailer_to_tractor.pop(vid, None)
@@ -741,7 +792,7 @@ class ACCTracker:
         rel = eff_speed - ego_speed_ms
         return LeadInfo(
             vehicle=v,
-            score=st.score,
+            score=effective_score(st),
             dist_m=st.dist_m,
             rel_speed_ms=rel,
             effective_speed_ms=eff_speed,
@@ -760,7 +811,7 @@ class ACCTracker:
         in_path = [
             (vid, st) for vid, st in self.tracks.items()
             if (
-                st.score > IN_PATH_THRESHOLD
+                effective_score(st) > IN_PATH_THRESHOLD
                 and vid in id_to_vehicle
                 and not (st.indicated_candidate and not st.in_path_unshifted)
             )

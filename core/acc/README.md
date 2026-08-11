@@ -1356,6 +1356,131 @@ arbitrates the tuning.
 
 ---
 
+## 10. Geometric lead failsafe (`core/acc/failsafe.py`)
+
+Reported from the driver's seat as ACC losing tracking on complex road layouts.
+§9's centreline is the best lateral estimate available and it is still one
+estimate, so when it is wrong the scored lateral is wrong with it, the score
+decays, and the lead leaves `leads[]` while sitting squarely in front of ego.
+
+The failsafe is a second, independent answer to "is something in my lane",
+computed from the **raw ego arc alone**: no road model, no trail crossing, no
+score integrator. It cannot be suppressed by the thing that failed. It does not
+replace the scorer and never touches `st.score`; it publishes a **floor** on the
+score `leads[]` carries, so when the scorer recovers the natural score takes
+over with nothing to unwind.
+
+### What it takes to fire
+
+Geometry, all required, on the raw ego-arc corner laterals:
+
+| Gate | Value | Why |
+|---|---|---|
+| range | `dist_m ≤ 50 m` | past ~70 m no estimator resolves a lane (§9) |
+| corridor | body overlaps `± 1.10 m` | tighter than the scored corridor, never flared |
+| centre | body mid within `± 1.60 m` | an adjacent lane centre sits 3.5 m or more out |
+| heading | `abs(Δyaw) ≤ 12°` | co-directional only |
+| uncertainty | `lateral_sigma_m` shrinks the overlap | the §9 gate's asymmetry is not dropped here |
+
+Then **one reason** must hold, or nothing depends on this lead and it is not
+rescued: `tracked` (the scorer itself had it within 2.0 s), `close` (≤ 30 m),
+`closing` (ego faster by ≥ 1.5 m/s), `safety` (TTC ≤ 5 s or inside the
+configured headway). A vehicle dead ahead at 45 m matching ego's speed on an
+empty road earns nothing and gets nothing.
+
+Suppressed entirely for blinker candidates and for a body on the side ego is
+vacating. Both belong to §5, and a failsafe that re-grabs the vehicle ego just
+overtook is the exact regression §5 was written to remove.
+
+### Authority
+
+Confirm `0.5 s` (`0.2 s` when the scorer had it recently or TTC ≤ 3 s), then
+ramp to full over `0.3 s`; release over `0.7 s`. **Confirming is not
+confirmed**: a frame that passes the gate before the confirm completes still
+runs the release ramp, so a target flickering across the corridor edge lets go
+of authority instead of freezing it part way up.
+
+The floor is `ANT_SCORE_FULL`, imported from the controller rather than
+duplicated. Anything lower is decorative: the confidence ramp gives a lead below
+`ANT_SCORE_MIN` no authority at all, and `_safety_overlays` gates the hard TTC
+floor on the same confidence, so a rescue that publishes a score the controller
+ignores has published nothing.
+
+### Measured, 200 clips
+
+Ground truth is ego's own future path, as in the tests/acc README.
+
+| | n | in-lane (≤2 m) | off-path (>4 m) | p50 | p90 |
+|---|---|---|---|---|---|
+| scorer's own primary lead | 7492 | 94.2 % | 2.4 % | 0.32 m | 1.13 m |
+| primary lead the rescue alone published | 245 | 75.9 % | 18.0 % | 1.11 m | 5.07 m |
+
+The rescue is the primary lead in **5.04 %** of lead frames (1234 of 24483),
+across 247 episodes, p50 2.79 s. Corpus baselines in
+`tests/acc/test_corpus_baseline.py` are unchanged, because they measure
+`st.score`, which this does not touch.
+
+Two representative episodes, both of them the reported failure:
+
+- The road model at zero confidence for 1.3 s while a car closes from 45 m to
+  22 m dead ahead at 1.0 m of arc lateral. Score is at -3.5 and climbing too
+  slowly to publish; the rescue carries it until the scorer catches up at 22 m.
+- The road model **confident and wrong**: 0.81 confidence placing a lead 5.0 m
+  right of the centreline at 49 m, converging to 0 only as ego closes. The ego
+  arc had it at -0.76 m throughout, and ego went on to follow it to 9.5 m.
+
+That second case is why there is **no veto on a confident road model**. It was
+built, and it suppresses exactly the episodes the failsafe exists for: a model
+that is confidently wrong is indistinguishable, frame by frame, from one that is
+confidently right, and deferring to confidence hands the failure back.
+
+### The residual, and why it is not tuned away
+
+18 % of rescue-only primary frames sit more than 4 m from ego's future path,
+against 2.4 % for the scorer's own leads. In absolute terms that is 44 frames in
+60,861 (0.07 %), in one narrow cluster: 28-43 m, ~100 km/h, ground truth 4.7-5.4
+m, which is one lane. Two thirds of them are release ramps at decaying
+authority. The remainder is consistent with **ego** changing lanes away from a
+vehicle that genuinely was its lead at that instant, which this ground truth
+cannot distinguish from picking the wrong target, and which is the same effect
+that puts the scorer's own number at 2.4 % rather than 0.
+
+Restricting the `closing` reason removes the cluster and also removes the first
+episode above, which enters on `closing` at 44.8 m. Do not trade it away without
+a measurement that separates the two.
+
+### Known gap: a stationary vehicle under a mis-aimed arc
+
+The `abs(Δyaw) ≤ 12°` gate keeps opposite-direction traffic out entirely, so the
+exposure is co-directional only. Within that, the failsafe reads the ego arc,
+which is a constant-curvature trailing estimate whose lateral error grows as
+`kappa_error·x²/2`. Where the arc over-curves (corner exit, or the steer term
+leading the road) it can sweep into an adjacent lane, and a **stationary**
+vehicle parked there lands near arc-lateral zero: it clears the corridor and
+centre gates, and `closing` is satisfied for free because it is not moving.
+`lateral_sigma_m` is the only push-back, and a body centred on a wrong arc
+survives it.
+
+Accepted for now, deliberately, with the driver's brake as the backstop. Two
+fixes were designed and **not built**, recorded so the analysis is not redone:
+
+- **Require trail evidence** (or `moving_validated`) to rescue. Closes the
+  stationary case unconditionally and costs nothing measurable, since every
+  episode above is a moving lead. Gives up the already-stopped-queue case, which
+  `leads[]` and AEB still cover.
+- **A measured CBDR miss**, as in AEB's LOS veto. Arc-independent, and the more
+  general fix, because it also catches a *moving* adjacent-lane vehicle under a
+  mis-aimed arc. Needs closure to develop, so it is weakest at low closing
+  speed.
+
+AEB's `CornerEntryStationaryFilter` does **not** cover this and importing it
+would be a no-op: its `implied_kappa = road_bend / dist` gate needs 16° of
+heading difference at 40 m and 20° at 50 m, both above this module's 12° cap.
+Its `FilterContext` also carries AEB's yaw-rate curvature and lane
+classification, which §8 rule 2 keeps separate from ACC's history fit.
+
+---
+
 ## 6. Published data (`ACCData`)
 
     @dataclass
@@ -1378,7 +1503,7 @@ arbitrates the tuning.
     @dataclass
     class LeadInfo:
         vehicle: Vehicle            # shared ref: READ ONLY
-        score: float                # current accumulated score
+        score: float                # accumulated score, floored by §10's rescue
         dist_m: float               # longitudinal distance along ego heading
         rel_speed_ms: float         # effective_speed - ego_speed (signed)
         effective_speed_ms: float   # tractor speed when vehicle is a TMP trailer
@@ -1451,4 +1576,10 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
    evidence without heading evidence (§9).
 10. **Do not filter road-model coefficients frame to frame.** The clothoid
     parameter space is ill-conditioned; fuse in sample space and refit (§9).
+11. **The failsafe reads raw ego-arc geometry and nothing else.** Feeding it the
+    road model, the blended lateral, or the score couples it to the estimate it
+    exists to survive. A veto on a confident road model was built and measured:
+    it suppresses precisely the episodes the rescue is for (§10).
+12. **The failsafe floors the published score, never `st.score`.** Writing into
+    the integrator hooks the release and hides the scorer's own recovery (§10).
 

@@ -13,7 +13,7 @@ from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 
 from .road_model import RoadModel
-from .tracker import ACCTracker, LeadInfo
+from .tracker import ACCTracker, LeadInfo, effective_score
 
 
 logger = logging.getLogger(__name__)
@@ -187,6 +187,9 @@ class ACCThread(BaseThread):
         debug_components = {
             vid: {
                 "score": st.score,
+                "effective_score": effective_score(st),
+                "failsafe": st.failsafe.authority,
+                "failsafe_reason": st.failsafe.reason,
                 "in_path": st.in_path,
                 "lat": st.last_lat,
                 "dist_m": st.dist_m,
