@@ -1247,11 +1247,16 @@ updating the claims linked below.
 
 ### Game-window crop only
 
-`FindWindowW(None, title)` is tried for "Euro Truck Simulator 2" then
-"American Truck Simulator", in that order (`ctypes`, no pywin32 dependency).
-The handle is cached and revalidated with `IsWindow` before every capture,
-since the game can be restarted between clips. `GetWindowRect` gives the
-bbox passed to `ImageGrab.grab(bbox=...)`.
+`FindWindowW(None, title)` is tried for the vanilla titles then the
+TruckersMP titles ("Euro Truck Simulator 2 Multiplayer", "American Truck
+Simulator Multiplayer"), in that order (`ctypes`, no pywin32 dependency).
+FindWindowW is an exact-title match, so the vanilla string alone misses
+TMP and every contributed TMP clip after the crop landed with no
+screenshot. If no title hits, `FindWindowW("prism3d", None)` is the
+fallback: that is the SCS window class, shared by SP and TMP. The handle
+is cached and revalidated with `IsWindow` before every capture, since the
+game can be restarted between clips. `GetWindowRect` gives the bbox
+passed to `ImageGrab.grab(bbox=...)`.
 
 **No game window found means `None`, never a full-monitor grab.** Before
 this, `ImageGrab.grab()` took no bbox and captured the whole primary

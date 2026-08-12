@@ -38,16 +38,24 @@ def test_grab_thumbnail_never_raises():
 class _FakeUser32:
     """Stand-in for ctypes.windll.user32: no real window, no real Windows call."""
 
-    def __init__(self, *, found_title=None, hwnd=4321, rect=(100, 60, 740, 330), valid=True):
+    def __init__(
+        self, *, found_title=None, found_class=None, hwnd=4321,
+        rect=(100, 60, 740, 330), valid=True,
+    ):
         self.found_title = found_title
+        self.found_class = found_class
         self.hwnd = hwnd
         self.rect = rect
         self.valid = valid
         self.found_titles: list[str] = []
+        self.found_classes: list[str] = []
 
-    def FindWindowW(self, _null, title):
-        self.found_titles.append(title)
-        return self.hwnd if title == self.found_title else 0
+    def FindWindowW(self, class_name, title):
+        if title is not None:
+            self.found_titles.append(title)
+            return self.hwnd if title == self.found_title else 0
+        self.found_classes.append(class_name)
+        return self.hwnd if class_name == self.found_class else 0
 
     def IsWindow(self, hwnd):
         return bool(self.valid and hwnd == self.hwnd)
@@ -125,7 +133,42 @@ def test_grab_thumbnail_finds_ats_when_ets2_absent(monkeypatch):
     monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
     monkeypatch.setattr(image_grab_mod, "grab", lambda **kw: Image.new("RGB", (800, 600)))
     assert screenshot_mod.grab_thumbnail() is not None
-    assert fake.found_titles == ["Euro Truck Simulator 2", "American Truck Simulator"]
+    assert fake.found_titles == [
+        "Euro Truck Simulator 2",
+        "Euro Truck Simulator 2 Multiplayer",
+        "American Truck Simulator",
+    ]
+    assert fake.found_classes == []
+
+
+@pytest.mark.parametrize("title", [
+    "Euro Truck Simulator 2 Multiplayer",
+    "American Truck Simulator Multiplayer",
+])
+def test_grab_thumbnail_finds_truckersmp_titles(monkeypatch, title):
+    Image = pytest.importorskip("PIL.Image")
+    image_grab_mod = pytest.importorskip("PIL.ImageGrab")
+
+    monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
+    fake = _FakeUser32(found_title=title, rect=(0, 0, 800, 600))
+    monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
+    monkeypatch.setattr(image_grab_mod, "grab", lambda **kw: Image.new("RGB", (800, 600)))
+    assert screenshot_mod.grab_thumbnail() is not None
+    assert title in fake.found_titles
+    assert fake.found_classes == []
+
+
+def test_grab_thumbnail_falls_back_to_prism3d_class(monkeypatch):
+    Image = pytest.importorskip("PIL.Image")
+    image_grab_mod = pytest.importorskip("PIL.ImageGrab")
+
+    monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
+    fake = _FakeUser32(found_class="prism3d", rect=(0, 0, 800, 600))
+    monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
+    monkeypatch.setattr(image_grab_mod, "grab", lambda **kw: Image.new("RGB", (800, 600)))
+    assert screenshot_mod.grab_thumbnail() is not None
+    assert fake.found_titles == list(screenshot_mod._GAME_WINDOW_TITLES)
+    assert fake.found_classes == ["prism3d"]
 
 
 def test_grab_thumbnail_output_long_side_is_240(monkeypatch):

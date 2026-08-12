@@ -12,6 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Fixed
+- **No screenshot on TruckersMP clips**: clips sent to help improve AEB/ACC from multiplayer had no picture of the road. They include one again.
 - **AEB braking with trailers**: fixed early/late AEB triggers and slow stops after hooking up, plus trailer brake delay is now realistic for all rigs; braking adjusts instantly to your current setup.
 
 ## [1.1.0-preview.17] - 2026-08-11

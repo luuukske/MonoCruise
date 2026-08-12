@@ -14,7 +14,15 @@ logger = logging.getLogger(__name__)
 _MAX_PX = 240
 _QUALITY = 50
 
-_GAME_WINDOW_TITLES = ("Euro Truck Simulator 2", "American Truck Simulator")
+# TruckersMP appends " Multiplayer"; FindWindowW is an exact-title match.
+_GAME_WINDOW_TITLES = (
+    "Euro Truck Simulator 2",
+    "Euro Truck Simulator 2 Multiplayer",
+    "American Truck Simulator",
+    "American Truck Simulator Multiplayer",
+)
+# SCS Prism3D class, last resort if a future title variant appears.
+_GAME_WINDOW_CLASS = "prism3d"
 
 _cached_hwnd = None
 _user32 = None
@@ -59,7 +67,10 @@ def _find_game_window():
         hwnd = user32.FindWindowW(None, title)
         if hwnd:
             _cached_hwnd = hwnd
-            break
+            return _cached_hwnd
+    hwnd = user32.FindWindowW(_GAME_WINDOW_CLASS, None)
+    if hwnd:
+        _cached_hwnd = hwnd
     return _cached_hwnd
 
 
