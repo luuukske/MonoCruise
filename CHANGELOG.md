@@ -11,12 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
-### Changed
-- **AEB waits longer before braking with a trailer**: the head start it takes for the trailer's brakes to build up was set for air brakes about twice as slow as they actually measure. It has been shortened, which brings the trigger point in around 3 m at 100 km/h without eating into the stopping margin.
-
 ### Fixed
-- **AEB triggered far too early at speed and then crawled to a stop**: it kept using the braking power of whatever rig you were driving before, so after hooking up a trailer it still thought it had a solo cab's brakes. On a double at 100 km/h it stepped in about 24 m too soon and then held roughly two thirds of the braking the truck actually had. Braking power is now worked out from your current axles and weight every tick, so hooking or dropping a trailer takes effect immediately.
-- **AEB hedged its trigger point twice**: the safety margin it keeps for adjusting the brakes mid-stop was also being subtracted from the decision of whether to brake at all, so it committed a little earlier than intended on every rig.
+- **AEB braking with trailers**: fixed early/late AEB triggers and slow stops after hooking up, plus trailer brake delay is now realistic for all rigs; braking adjusts instantly to your current setup.
 
 ## [1.1.0-preview.17] - 2026-08-11
 ### Changed
