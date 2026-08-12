@@ -30,9 +30,36 @@ Always-on brake decel and gas gain learning (replaces legacy brake efficiency tr
 **Brake**: `update_brake` every tick; accept samples only when pedal and decel settle.
 Candidate inverts the fitted brake curve; pedal³ weighting; underperformance drops estimate
 2× faster than overperformance rises. Road load canceled before sampling. Fast EMA during
-deep settled AEB braking. Partial-pedal candidates reject above
-`_BRAKE_CANDIDATE_MAX_FRACTION` (1.35) of the load baseline; settled high pedal may use the
-nominal ceiling.
+deep settled AEB braking. Candidates reject above `_BRAKE_CANDIDATE_MAX_FRACTION` (1.35) of
+the load baseline.
+
+**What is learned is `brake_scale`, a dimensionless correction on the baseline, not an
+absolute m/s².** Capacity is a property of the rig, and the rig changes the moment you back
+under a trailer: braked axles roughly double while the EMA carries the old number. At the
+shipped rate an absolute scalar needs hours of *accepted* samples to catch up, and accepted
+samples are ~0.07% of ticks, so in practice it never does. Measured live: 44 recorded
+engagements read `max_brake_ms2` 8.90 on an 18-wheel 24 t double whose baseline is 13.89,
+10.53 on a 12-wheel single against 12.58, and 9.54 on a bobtail against 10.22 — the error
+tracks rig size, because it is the rig change the estimator cannot follow. `update_brake`
+now re-resolves `scale × baseline_brake_ms2(wheels, mass)` every tick, so a trailer hookup
+lands in the same tick and only the correction is carried across.
+
+The bounds are asymmetric on purpose:
+
+- `_BRAKE_SCALE_MIN` 0.35 — a genuinely weak rig (wet grip, worn brakes, fade) must be
+  believable all the way down. AEB planning against capability the truck no longer has is
+  what hits things.
+- `_BRAKE_SCALE_MAX` 1.05 — over-reading raises the entry bar, so AEB engages at a gap
+  sized for a stop it cannot make. `tests/aeb/test_stop_distance_envelope.py` simulates the
+  closed loop and finds collisions from about 1.10× truth; 1.05 is the last safe step. This
+  replaces the old `_BRAKE_CEILING_NOMINAL_MULT` workaround, which allowed ~19.5 m/s².
+
+The residual risk is now baseline error rather than estimator drift: `1.05 × baseline` is
+only safe while the baseline is. It is fitted to one user's four rigs.
+
+`_UNDERPERFORM_MULT` (2.0) biases the settled estimate 4-10% low under symmetric candidate
+noise, measured; at the observed scatter it is ~10%. That is deliberate — believing
+degradation quickly is the safe asymmetry — and low is the safe direction, so it stays.
 
 **The brake baseline is braked axles vs mass** (`baseline_brake_ms2`), fitted as
 `70.8 * wheels^0.52 * mass^-0.31`. It must never divide by `weight_factor`: that is the
@@ -82,8 +109,13 @@ job's `cargoMass` after you unhook, which read a bobtail as 39.8 t instead of 10
 corrupted every mass-scaled term (accel `weight_factor`, `gain_scale`, creep FF, this
 baseline). `compute_estimated_mass_kg` drops cargo when `trailer_count == 0`.
 
-The `_BRAKE_CEILING_NOMINAL_MULT` path stays for now; it was a workaround for the broken
-baseline, and retightening it needs in-game confirmation of the corrected values first.
+**Measured brake plant, from 61 fitted braking episodes.** Fitting a first-order-plus-dead-
+time build-up to the *speed* trace (never to differentiated decel, which amplifies the 20 Hz
+physics staircase) gives tau 0.19 s median, 0.31 s p90, 0.38 s max, with 0.12 s dead time.
+Build-up (dead + tau) is therefore 0.25 s median and 0.37 s p90. The observer's model taus
+(0.25 solo / 0.50 trailer) sit above that, which is the intended safe side, and the fit
+could not separate the load classes, so they are left alone. `stop_buffer_response_s` in AEB
+is sized against this, not against the model.
 
 `brake_efficiency.nominal_max_brake_decel_ms2` (`11.5 * wheels/12 * 17000/mass`) carries the
 same `1/mass` error and is therefore badly low on loaded rigs. It only feeds the optional

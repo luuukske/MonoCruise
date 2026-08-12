@@ -1781,6 +1781,9 @@ class AEBThread(BaseThread):
         effective_max_decel = max(
             0.1, cal.ego_decel_frac * capacity_estimate - downhill_offset,
         )
+        # Entry base: ego_decel_frac is a margin on the command, and folding it
+        # in here hedged twice (README engagement thresholds).
+        capability_decel = max(0.1, capacity_estimate - downhill_offset)
 
         required_decel = 0.0
         if run_collision and best_closing_distance < _INF and best_v_closing > 0.0:
@@ -1800,7 +1803,7 @@ class AEBThread(BaseThread):
             vid in certain_geom_ids and vid not in engage_vetoed_ids
             for vid in colliding_ids
         )
-        engage_threshold = effective_max_decel * (
+        engage_threshold = capability_decel * (
             cal.aeb_engage_frac_certain if certain_engage else cal.aeb_engage_frac
         )
         disarm_threshold = cal.aeb_disarm_frac * effective_max_decel
@@ -2056,9 +2059,11 @@ class AEBThread(BaseThread):
 
 
         user_braking_now = self._read_user_braking()
+        # Shares the engage base so any engagement still warns while the driver
+        # brakes: aeb_warn_near_full_frac must stay equal to it (TUNING.md).
         near_full_target = (
-            effective_max_decel > 0.1
-            and effective_required >= cal.aeb_warn_near_full_frac * effective_max_decel
+            capability_decel > 0.1
+            and effective_required >= cal.aeb_warn_near_full_frac * capability_decel
         )
         # Suppression must outlive the state hold below, which re-asserts warn
         # on a held WARN/BRAKE and would otherwise undo it for up to 0.3 s.

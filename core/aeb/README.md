@@ -502,8 +502,18 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    slope_accel       = g · sin(ego_pitch_rad)         # +ve = uphill (radar convention)
    downhill_offset   = max(−slope_accel, 0)           # gravity stealing brake force
    effective_max     = ego_decel_frac · capacity_estimate − downhill_offset
+   capability_decel  = capacity_estimate − downhill_offset
    effective_required= required_decel + downhill_offset
    ```
+   Two bases, and mixing them up is the "AEB steps in far too early and then
+   crawls to a stop" bug. `effective_max` caps the *command*, because
+   `ego_decel_frac` is the headroom the tracking controller corrects into.
+   `capability_decel` is what the truck can actually deliver, and that is the
+   only honest question for an *entry* threshold. Basing entry on
+   `effective_max` multiplied the two hedges and put the real bar at
+   `0.85 · 0.90 = 0.765` of capacity: 3.7 m of extra trigger distance at
+   100 km/h on a 13.89 m/s² double. Small next to the capacity error that
+   shipped alongside it (20 m), but it compounds with it.
    `capacity_estimate` is read from `sending_thread.data.max_brake_ms2`
    (PedalCapacityTracker) with a fallback constant.
 
@@ -541,8 +551,11 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    - Latched-distance hold: see "Latched-threat hold" below. Adds a
      headway-driven engagement hold over targets that have been engaged
      on previously, independent of current `v_closing`.
-   - Engage when `effective_required ≥ aeb_engage_frac · effective_max` **OR**
-     `brake_ttb_active`, subject to the tiered entry certainty gate below.
+   - Engage when `effective_required ≥ aeb_engage_frac · capability_decel`
+     **OR** `brake_ttb_active`, subject to the tiered entry certainty gate
+     below. `aeb_warn_near_full_frac` shares this base so it stays equal to
+     `aeb_engage_frac` in absolute terms; `aeb_disarm_frac` and
+     `aeb_warn_frac` stay on `effective_max` and are unchanged.
    - **Tiered entry certainty gate**: a new engagement additionally requires
      one of: (a) `brake_ttb_engage_active` (imminent, full brake barely
      avoids: instant), (b) certain geometry: a colliding, non-LOS-vetoed
@@ -1084,6 +1097,43 @@ brake, 3 m does not and only warns).
 
 Run with: `pytest tests/aeb -v`
 Report: `python -m tests.aeb.report`
+
+### Stop-distance envelope: the arbiter for entry-bar changes
+
+`tests/aeb/test_stop_distance_envelope.py` simulates a whole AEB stop: the
+shipped `_required_decel_two_frame`, the shipped entry bar, the real
+`AEBDecelController`, and a brake plant fitted to 61 recorded braking episodes
+(dead time 0.12 s, tau 0.19 s median / 0.31 s p90). It reports residual gap.
+
+**Use it, not the corpus, whenever the engage point moves.** Corpus labels were
+tagged against one engage point, so shifting the bar re-labels clips instead of
+scoring them, and the shift always reads as a swing in FN. Worse, headless
+replay scores the engagement decision and never touches the brake pedal, so it
+is structurally blind to whether the truck actually stops. The corpus arbitrates
+*filtering*; this arbitrates *timing*.
+
+What it pins:
+
+- with the capacity estimate correct, every rig stops clear at 40-120 km/h;
+- at `_BRAKE_SCALE_MAX` (1.05× truth) it still stops — collisions begin near
+  1.10×, which is where that ceiling comes from;
+- under-reading capacity is always safe, just early and soft;
+- the response pads survive p90 brake build-up;
+- **a descent engages earlier, not later.** The two bases diverge on a grade
+  (`capability_decel` loses the gravity term, `effective_required` gains it), so
+  the bar in raw required-decel terms is `frac · (capacity − downhill) −
+  downhill` and falls about twice as fast as capability does. On an 8% descent a
+  bobtail engages on 7.2 m/s² instead of 8.7 and finishes with 2.4 m more in
+  hand. This was expected to be the dangerous case and is the opposite;
+- **the decel controller is not bypassed.** Entry at 0.85 of capability leaves
+  only 5.6% below the command cap, which looked thin enough that the saturation
+  override might hold pedal 1.0 for whole events and reinstate the old slam.
+  Measured duty at full pedal is 0.17-0.36 of engaged ticks on the flat and
+  lower on a grade, so most of a stop is genuine tracking.
+
+The closed loop converges onto the distance it planned for, finishing on
+`stop_buffer`, so there is no slack beyond what the pad and the capacity
+estimate provide. That is why both are treated as safety parameters.
 
 ### Corpus result
 

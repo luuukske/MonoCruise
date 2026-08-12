@@ -33,9 +33,8 @@ _CONFIRM_S: float = 0.5
 _CONFIRM_FAST_S: float = 0.2
 _URGENT_TTC_S: float = 3.0
 
-# Authority ramp, so entry and exit are never a step in the consumer's
-# confidence. Release is slower than entry: dropping a real lead is the costlier
-# direction.
+# Authority ramp: never a step. Release is slower than entry because dropping a
+# real lead is the costlier direction.
 _RAMP_UP_S: float = 0.3
 _RAMP_DOWN_S: float = 0.7
 
@@ -141,9 +140,8 @@ def failsafe_step(state: FailsafeState, inp: FailsafeInputs, dt: float) -> float
     state.confirm_s += dt
     need = _CONFIRM_FAST_S if (inp.recently_led or ttc_s <= _URGENT_TTC_S) else _CONFIRM_S
     if state.confirm_s < need:
-        # Confirming is not confirmed. Releasing here rather than holding is what
-        # stops a target flickering across the corridor edge from freezing
-        # authority part way up instead of letting go of it.
+        # Confirming is not confirmed: releasing rather than holding stops a
+        # target flickering across the corridor edge freezing authority part way.
         return _release(state, dt)
     state.authority = min(1.0, state.authority + dt / _RAMP_UP_S)
     return state.authority * score_floor()

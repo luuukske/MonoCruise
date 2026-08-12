@@ -27,10 +27,10 @@ class AEBCalibration:
     # Near-parallel capsule contacts: margin * scale at parallel; see core/aeb/README.md.
     capsule_parallel_margin_scale: float = 0.3
     stop_buffer: float = 0.2
-    # Response-lag gap term (v_closing * this), paying for brake build-up so the
-    # tracking controller is not late. Solo t63 ~0.22 s, trailer ~0.65 s (README §7).
-    stop_buffer_response_s: float = 0.16
-    stop_buffer_response_trailer_s: float = 0.50
+    # Response-lag gap term (v_closing * this): brake build-up, and since the
+    # engage bar moved off ego_decel_frac, the only entry margin (README §7).
+    stop_buffer_response_s: float = 0.30
+    stop_buffer_response_trailer_s: float = 0.40
     # Rejected 2026-07-19: response distance cap, threat-age tiering, engage 0.9 (README §7).
     elevation_margin: float = 5.0
     max_range: float = 200.0

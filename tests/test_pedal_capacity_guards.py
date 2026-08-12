@@ -31,6 +31,7 @@ def _no_settings_io(monkeypatch):
     """Learning ticks trigger _maybe_save; keep it away from the real config."""
 
     class _S:
+        pedal_capacity_brake_scale = 0.0
         pedal_capacity_max_brake_ms2 = 0.0
         pedal_capacity_max_accel_ms2 = 0.0
         pedal_capacity_accel_anchor_gain_ms2 = 0.0
@@ -189,30 +190,54 @@ def test_settle_window_blocks_early_samples(clock):
     assert t.max_brake_ms2 > BASE
 
 
-def test_estimate_ceiling(clock):
+def test_over_reading_the_rig_is_refused(clock):
+    """Believing more brake than the rig has is the collision direction.
+
+    The closed-loop stop simulation collides once the estimate reaches ~1.10x
+    truth, because AEB then engages at a gap sized for a stop it cannot make.
+    A stream of inflated full-pedal samples must not walk the estimate there.
+    """
     t = _fresh()
-    ceiling = pc._brake_estimate_ceiling_ms2(BASE)
     _feed(t, clock, pedal=1.0, decel=10.5, ticks=600)
-    assert t.max_brake_ms2 <= ceiling + 1e-6
-    assert t.max_brake_ms2 >= 11.0   # actually learned to the ceiling
+    assert t.max_brake_ms2 <= BASE * pc._BRAKE_SCALE_MAX + 1e-6
+    assert t.brake_scale == pytest.approx(pc._BRAKE_SCALE_MAX, rel=1e-3)
 
 
-def test_high_pedal_recovers_past_mass_ceiling(clock):
-    """Loaded mass baseline used to cap/reject honest ~9.5 full-brake samples.
-    Temporary nominal ceiling must let settled high pedal relearn upward."""
+def test_under_delivery_is_believed_all_the_way_down(clock):
+    """The floor must stay low enough to represent a genuinely weak rig.
+
+    Wet grip, worn brakes or a fade episode all reduce real capability, and AEB
+    planning against a capability the truck no longer has is what hits things.
+    """
     t = _fresh()
-    t._max_brake_ms2 = 4.353
-    heavy_base = 5.0
-    old_cap = heavy_base * pc._ESTIMATE_UPPER_BOUND
-    _feed(t, clock, pedal=1.0, decel=9.5, ticks=120, aeb=True, baseline=heavy_base)
-    expected = 9.5 / brake_curve_fraction(1.0)
-    assert t.max_brake_ms2 > old_cap
+    _feed(t, clock, pedal=1.0, decel=4.0, ticks=400, aeb=True)
+    expected = 4.0 / brake_curve_fraction(1.0)   # ~4.39 m/s2
     assert t.max_brake_ms2 == pytest.approx(expected, rel=0.05)
+    assert expected > BASE * pc._BRAKE_SCALE_MIN, "floor would have hidden this"
+
+
+def test_hooking_a_trailer_moves_the_estimate_the_same_tick(clock):
+    """The learned quantity is a correction, so a rig change lands immediately.
+
+    An absolute m/s2 scalar cannot follow: hooking a trailer roughly doubles the
+    braked axles, and at the shipped EMA rate the old estimate needed hours of
+    accepted samples to catch up. Measured live it never did: 44 recorded
+    engagements read 8.90 m/s2 on an 18-wheel double whose baseline is 13.89.
+    """
+    solo_base, trailer_base = 10.22, 13.89
+    t = _fresh()
+    _feed(t, clock, pedal=0.4, decel=3.0, ticks=80, baseline=solo_base)
+    learned_scale = t.brake_scale
+    assert t.max_brake_ms2 == pytest.approx(learned_scale * solo_base)
+
+    t.update_brake(0.0, 0.0, SPEED, 0.0, trailer_base, road_load_ms2=0.0)
+    assert t.brake_scale == pytest.approx(learned_scale), "correction must survive"
+    assert t.max_brake_ms2 == pytest.approx(learned_scale * trailer_base)
 
 
 def test_load_persisted_clamps_poisoned_value(monkeypatch):
     class _FakeSettings:
-        pedal_capacity_max_brake_ms2 = 17.9
+        pedal_capacity_brake_scale = 3.7
         pedal_capacity_max_accel_ms2 = 2.0
         pedal_capacity_accel_anchor_gain_ms2 = 0.0
         pedal_capacity_accel_ratio_step = 0.0
@@ -221,12 +246,12 @@ def test_load_persisted_clamps_poisoned_value(monkeypatch):
     monkeypatch.setattr(pc, "Settings", _FakeSettings)
     t = pc.PedalCapacityTracker()
     t.load_persisted(BASE, 2.0)
-    assert t.max_brake_ms2 <= pc._brake_estimate_ceiling_ms2(BASE) + 1e-6
+    assert t.max_brake_ms2 <= BASE * pc._BRAKE_SCALE_MAX + 1e-6
 
-    _FakeSettings.pedal_capacity_max_brake_ms2 = 0.0
+    _FakeSettings.pedal_capacity_brake_scale = 0.0
     t2 = pc.PedalCapacityTracker()
     t2.load_persisted(BASE, 2.0)
-    assert t2.max_brake_ms2 == pytest.approx(BASE)
+    assert t2.max_brake_ms2 == pytest.approx(BASE), "unset means believe the model"
 
 
 def test_brake_baseline_rises_with_a_trailer(monkeypatch):
@@ -270,7 +295,7 @@ def test_baseline_tracks_measured_capability(monkeypatch):
         assert 0.85 <= measured / base <= 1.15, (
             f"baseline {base:.2f} vs measured {measured:.2f}"
         )
-        assert measured <= pc._brake_candidate_cap_ms2(base, 0.5), (
+        assert measured <= pc._brake_candidate_cap_ms2(base), (
             "a truthful partial-pedal candidate would be rejected"
         )
 

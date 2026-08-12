@@ -170,6 +170,10 @@ class Settings(metaclass=_SingletonMeta):
     brake_efficiency_warn_ratio: float = 0.75
 
     # PedalCapacityTracker: persisted estimates (0 = use baseline on next startup)
+    # Learned brake correction on the rig baseline; dimensionless, 0 = unset.
+    pedal_capacity_brake_scale: float = 0.0
+    # Superseded by pedal_capacity_brake_scale: an absolute m/s2 cannot survive a
+    # trailer hookup. Retained so existing config files still load.
     pedal_capacity_max_brake_ms2: float = 11.457
     # Legacy global accel scalar: kept as the cold-start seed source for the
     # shape-function anchor below before any new sample has been taken.
