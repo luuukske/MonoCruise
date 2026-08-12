@@ -31,7 +31,7 @@ _SAVE_COOLDOWN_S: float = 30.0      # min seconds between successive writes
 # Learned correction on the rig baseline, not an absolute m/s2. Bounds are
 # asymmetric on purpose: under-delivery must be believable, over-reading is not.
 _BRAKE_SCALE_MIN: float = 0.35
-_BRAKE_SCALE_MAX: float = 1.05
+_BRAKE_SCALE_MAX: float = 1.00
 # Reject partial-pedal extrapolations above this fraction of the load baseline.
 _BRAKE_CANDIDATE_MAX_FRACTION: float = 1.35
 # Two-speed brake learning. Routine presses are shallow (pedal³ weight) and

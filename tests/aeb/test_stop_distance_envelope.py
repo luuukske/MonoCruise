@@ -15,6 +15,7 @@ import math
 
 import pytest
 
+import core.sending_thread.pedal_capacity as pc
 from core.aeb.calibration import DEFAULT as CAL
 from core.aeb.thread import _required_decel_two_frame
 from core.sending_thread.accel_to_pedals import brake_curve_fraction
@@ -142,18 +143,23 @@ def test_a_correct_estimate_always_stops_in_time(label, capacity, trailer, v0):
     assert r["gap"] > 0.0, f"{label} at {v0} km/h collided ({r['gap']:.2f} m)"
 
 
-@pytest.mark.parametrize("label,capacity,trailer", RIGS)
-def test_the_scale_ceiling_is_the_last_safe_over_estimate(label, capacity, trailer):
-    """`_BRAKE_SCALE_MAX` is what stops AEB planning a stop it cannot make.
+def test_the_measured_loaded_double_survives_the_model_over_reading_it():
+    """2026-08-12 probe, and the reason the ceiling came down to 1.00.
 
-    Over-reading capacity raises the entry bar, so AEB engages at a gap sized for
-    a shorter stop than the truck can deliver. At the ceiling it still stops; the
-    margin is gone not long after, which is why the ceiling is 1.05 and not 1.3.
+    Four full-pedal stops on one double, cargo the only variable, peak-A method:
+    24.3 t measured 15.10 m/s2 against a model 13.91 (model 8% low, safe), and
+    40.5 t measured 11.37 against a model 11.87 (model 4% high, the collision
+    direction). At the old 1.05 ceiling the loaded rig would have been believed
+    at 12.46 against a real 11.30, which is 1.10x and collides at 80-120 km/h.
     """
-    for v0 in SPEEDS_KMH:
-        at_ceiling = stop_against_stationary(v0, capacity, capacity * 1.05, trailer)
-        assert at_ceiling["gap"] > 0.0, (
-            f"{label} at {v0} km/h collides at the shipped ceiling"
+    true_cap, model = 11.30, 11.87
+    for v0 in (80, 100, 120):
+        ceiling = stop_against_stationary(
+            v0, true_cap, model * pc._BRAKE_SCALE_MAX, True, plant_tau=PLANT_TAU_P90,
+        )
+        assert ceiling["gap"] > 0.0, (
+            f"{v0} km/h collides on the measured loaded double "
+            f"({ceiling['gap']:.2f} m)"
         )
 
 

@@ -49,13 +49,33 @@ The bounds are asymmetric on purpose:
 - `_BRAKE_SCALE_MIN` 0.35 — a genuinely weak rig (wet grip, worn brakes, fade) must be
   believable all the way down. AEB planning against capability the truck no longer has is
   what hits things.
-- `_BRAKE_SCALE_MAX` 1.05 — over-reading raises the entry bar, so AEB engages at a gap
-  sized for a stop it cannot make. `tests/aeb/test_stop_distance_envelope.py` simulates the
-  closed loop and finds collisions from about 1.10× truth; 1.05 is the last safe step. This
-  replaces the old `_BRAKE_CEILING_NOMINAL_MULT` workaround, which allowed ~19.5 m/s².
+- `_BRAKE_SCALE_MAX` **1.00** — the learner may correct the model down but never up.
+  Over-reading raises the entry bar, so AEB engages at a gap sized for a stop it cannot
+  make; the stop simulation collides from about 1.10× truth. This replaces the old
+  `_BRAKE_CEILING_NOMINAL_MULT` workaround, which allowed ~19.5 m/s².
 
-The residual risk is now baseline error rather than estimator drift: `1.05 × baseline` is
-only safe while the baseline is. It is fitted to one user's four rigs.
+**Why the ceiling is one-sided.** The room for an upward correction is already spent by the
+model. Probed 2026-08-12 on one double with cargo as the only variable:
+
+| rig | probe (peak-A) | model | model/probe |
+|-----|---------------:|------:|------------:|
+| double, empty, 24.3 t | 15.10 | 13.91 | 0.92 |
+| double, 16 t cargo, 40.5 t | 11.37 | 11.87 | **1.04** |
+
+The over-prediction on the loaded rig is not a fitting accident: refitting the power law
+over all six measured points, or any subset, still runs 3.8-4.5% high there, and the two
+controlled cargo-only pairs disagree on the mass exponent (0.31 from 24→54 t, 0.555 from
+24.3→40.5 t). On top of a model already 4% high, a ceiling of 1.02 collides at 80-120 km/h
+under p90 brake lag; 1.05 collides at every speed.
+
+The mechanism a one-sided ceiling blocks is a **carry-over, the same class as the bug that
+motivated this rewrite**: `brake_scale` is global but the model's error is not. Learning
+1.05 on the empty double, where the model is 8% low and samples honestly say 1.08, then
+hooking cargo applies it to a model already 4% high. Raising the ceiling needs the mass
+exponent resolved first, which needs a probe at a third cargo mass.
+
+The residual risk is baseline error rather than estimator drift, and the baseline is fitted
+to one user's rigs.
 
 `_UNDERPERFORM_MULT` (2.0) biases the settled estimate 4-10% low under symmetric candidate
 noise, measured; at the observed scatter it is ~10%. That is deliberate — believing

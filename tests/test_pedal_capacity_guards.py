@@ -45,9 +45,10 @@ def _no_settings_io(monkeypatch):
     monkeypatch.setattr(pc, "Settings", _S)
 
 
-def _fresh() -> pc.PedalCapacityTracker:
+def _fresh(scale: float = 1.0) -> pc.PedalCapacityTracker:
     t = pc.PedalCapacityTracker()
-    t._max_brake_ms2 = BASE
+    t._brake_scale = scale
+    t._max_brake_ms2 = scale * BASE
     return t
 
 
@@ -65,11 +66,12 @@ def test_contaminated_sample_rejected(clock):
     assert t.max_brake_ms2 == pytest.approx(BASE)
 
 
-def test_legit_strong_brake_still_learns(clock):
-    t = _fresh()
-    _feed(t, clock, pedal=0.9, decel=8.5)
-    expected = 8.5 / brake_curve_fraction(0.9)   # ~9.54 m/s2
-    assert BASE < t.max_brake_ms2 <= expected + 0.1
+def test_legit_strong_brake_recovers_the_estimate_up_to_the_model(clock):
+    """Upward learning works, but stops at the model. See `_BRAKE_SCALE_MAX`."""
+    t = _fresh(scale=0.85)
+    _feed(t, clock, pedal=0.9, decel=8.5)       # candidate ~9.54, scale ~1.09
+    assert 0.85 * BASE < t.max_brake_ms2
+    assert t.max_brake_ms2 <= BASE + 1e-6
 
 
 def test_gentle_press_drifts_estimate_slowly(clock):
@@ -95,12 +97,11 @@ def test_aeb_reteaches_fast_after_underperformance(clock):
 
 
 def test_heavy_settled_aeb_is_excellent_data(clock):
-    """A sustained hard AEB stop with settled decel is full-scale capacity
-    data: the estimate must converge to it within the stop."""
-    t = _fresh()
+    """A sustained hard AEB stop with settled decel is full-scale capacity data:
+    the estimate must converge on it within the stop, up to the model ceiling."""
+    t = _fresh(scale=0.70)
     _feed(t, clock, pedal=1.0, decel=8.5, ticks=60, aeb=True)
-    expected = 8.5 / brake_curve_fraction(1.0)   # ~9.32 m/s2
-    assert t.max_brake_ms2 == pytest.approx(expected, rel=0.03)
+    assert t.max_brake_ms2 == pytest.approx(BASE, rel=0.01)
 
 
 def test_tap_transient_rejected_then_settled_phase_teaches(clock):
@@ -181,26 +182,40 @@ def test_ripple_averages_instead_of_rectifying(clock):
 def test_settle_window_blocks_early_samples(clock):
     """After a pedal step, no sample may fire until the smoothed pedal has
     been flat for the full window (EMA convergence + window span, ~0.8 s)."""
-    t = _fresh()
+    t = _fresh(scale=0.85)
     clock.t += 1.0
     t.update_brake(0.0, 0.0, SPEED, 0.0, BASE)
     _feed(t, clock, pedal=0.9, decel=8.5, ticks=18)   # 0.59 s after step
-    assert t.max_brake_ms2 == pytest.approx(BASE)
+    assert t.max_brake_ms2 == pytest.approx(0.85 * BASE)
     _feed(t, clock, pedal=0.9, decel=8.5, ticks=15)   # 1.09 s after step
-    assert t.max_brake_ms2 > BASE
+    assert t.max_brake_ms2 > 0.85 * BASE
 
 
 def test_over_reading_the_rig_is_refused(clock):
-    """Believing more brake than the rig has is the collision direction.
+    """The learner may only correct the model down, never up. Deliberate.
 
-    The closed-loop stop simulation collides once the estimate reaches ~1.10x
-    truth, because AEB then engages at a gap sized for a stop it cannot make.
-    A stream of inflated full-pedal samples must not walk the estimate there.
+    Believing more brake than the rig has is the collision direction: the stop
+    simulation collides once the estimate reaches ~1.10x truth, because AEB then
+    engages at a gap sized for a stop it cannot make.
+
+    The margin for an upward correction is already spent by the model itself.
+    Probed 2026-08-12, `baseline_brake_ms2` runs 4-5% *high* on a loaded double
+    (40.5 t measured 11.37 against a model 11.87), and no refit removes that:
+    every power law through the six measured points over-predicts that rig by
+    3.8-4.5%. A ceiling of 1.02 on top of it already collides at 80-120 km/h
+    under p90 brake lag, so the ceiling is 1.00.
+
+    The mechanism this blocks is a carry-over, the same class as the bug that
+    motivated the rig-relative rewrite: `brake_scale` is global, but the model's
+    error is not. Learning 1.05 on an unloaded double (where the model is ~8%
+    low, so samples honestly say 1.08) and then hooking cargo applies it to a
+    model already 4% high.
     """
     t = _fresh()
     _feed(t, clock, pedal=1.0, decel=10.5, ticks=600)
-    assert t.max_brake_ms2 <= BASE * pc._BRAKE_SCALE_MAX + 1e-6
-    assert t.brake_scale == pytest.approx(pc._BRAKE_SCALE_MAX, rel=1e-3)
+    assert t.max_brake_ms2 <= BASE + 1e-6
+    assert t.brake_scale == pytest.approx(1.0, rel=1e-3)
+    assert pc._BRAKE_SCALE_MAX == 1.0, "raising this needs the mass exponent resolved"
 
 
 def test_under_delivery_is_believed_all_the_way_down(clock):
