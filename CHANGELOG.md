@@ -11,11 +11,14 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.0-preview.18] - 2026-08-13
 ### Changed
 - **AEB holds its braking force instead of easing off near the end**: the head start it reserves for the brakes to build up was being re-charged every moment, so as you slowed it quietly handed that distance back and the braking faded away while the warning was still going. It is now paid once, when AEB commits. Stops are shorter, and hold a steady force the whole way.
 
 
 ### Fixed
+- **Cruise late on hills**: the pedals barely moved with the slope, so speed ran away downhill before cruise braked. Real grades now move them sooner.
 - **AEB beeped with no warning on the cruise panel**: a warning that appeared and vanished in a moment could still play the full sound after the icon had already missed it. The beep now waits until the warning holds, and braking to dismiss it cuts the sound at once.
 - **AEB still beeped during light cruise or one-pedal braking**: a small ACC or OPD brake did not count as braking, so the warning kept sounding while MonoCruise was already slowing you. Any of that brake now silences it. Hard automatic braking still warns you.
 - **No screenshot on TruckersMP clips**: clips sent to help improve AEB/ACC from multiplayer had no picture of the road. They include one again.
