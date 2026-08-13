@@ -672,13 +672,11 @@ def _build_vehicle_collision_data(
             v_yaw_rad, abs_v_speed, veh_fwd_x, veh_fwd_z, v_curvature)
 
 
-def _hmi_sound_step(
-    warn: bool, prev: bool, suppressed: bool,
-) -> tuple[str, bool]:
-    """Gate AEB sound to two consecutive warn ticks; hard-stop on suppress."""
+def _hmi_sound_step(warn: bool, prev: bool) -> tuple[str, bool]:
+    """Gate AEB sound to two consecutive warn ticks; soft-stop on any end."""
     if warn:
         return ("start" if prev else "none", True)
-    return ("hard_stop" if suppressed else "stop", False)
+    return ("stop", False)
 
 
 class _SoundState(enum.IntEnum):
@@ -2234,12 +2232,10 @@ class AEBThread(BaseThread):
         )
 
         action, self._hmi_sound_prev = _hmi_sound_step(
-            aeb_warn, self._hmi_sound_prev, warn_suppressed,
+            aeb_warn, self._hmi_sound_prev,
         )
         if action == "start":
             self._sound_handler.start_warning()
-        elif action == "hard_stop":
-            self._sound_handler.stop_warning(hard=True)
         elif action == "stop":
             self._sound_handler.stop_warning()
 

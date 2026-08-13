@@ -1,36 +1,65 @@
-"""AEB HMI sound gate: two-tick arm, hard-stop on suppress."""
+"""AEB HMI sound gate: two-tick arm, soft-stop on any warn end."""
 from __future__ import annotations
 
-from core.aeb.thread import _hmi_sound_step
+import threading
+
+from core.aeb.thread import _AEBSoundHandler, _SoundState, _hmi_sound_step
 
 
 def test_first_warn_tick_does_not_start_sound():
-    action, prev = _hmi_sound_step(True, False, False)
+    action, prev = _hmi_sound_step(True, False)
     assert action == "none"
     assert prev is True
 
 
 def test_second_warn_tick_starts_sound():
-    action, prev = _hmi_sound_step(True, True, False)
+    action, prev = _hmi_sound_step(True, True)
     assert action == "start"
     assert prev is True
 
 
-def test_suppress_hard_stops_and_disarms():
-    action, prev = _hmi_sound_step(False, True, True)
-    assert action == "hard_stop"
-    assert prev is False
-
-
-def test_natural_end_soft_stops():
-    action, prev = _hmi_sound_step(False, True, False)
+def test_warn_end_soft_stops():
+    action, prev = _hmi_sound_step(False, True)
     assert action == "stop"
     assert prev is False
 
 
-def test_one_tick_warn_then_suppress_never_starts():
-    action, prev = _hmi_sound_step(True, False, False)
+def test_one_tick_warn_then_end_never_starts():
+    action, prev = _hmi_sound_step(True, False)
     assert action == "none"
-    action, prev = _hmi_sound_step(False, prev, True)
-    assert action == "hard_stop"
+    action, prev = _hmi_sound_step(False, prev)
+    assert action == "stop"
     assert prev is False
+
+
+def test_later_idle_ticks_keep_soft_stop():
+    action, prev = _hmi_sound_step(False, True)
+    assert action == "stop"
+    action, prev = _hmi_sound_step(False, prev)
+    assert action == "stop"
+    assert prev is False
+
+
+def _handler_stub(*, state: _SoundState) -> _AEBSoundHandler:
+    h = object.__new__(_AEBSoundHandler)
+    h._sound = object()
+    h._state = state
+    h._lock = threading.Lock()
+    h._stop_extra_replays = 1
+    h._replays_remaining = 1
+    return h
+
+
+def test_soft_stop_from_running_schedules_extra_replay():
+    h = _handler_stub(state=_SoundState.RUNNING)
+    h._replays_remaining = 0
+    h.stop_warning()
+    assert h._state == _SoundState.SHUTTING_DOWN
+    assert h._replays_remaining == 1
+
+
+def test_soft_stop_does_not_cut_shutdown_tail():
+    h = _handler_stub(state=_SoundState.SHUTTING_DOWN)
+    h.stop_warning()
+    assert h._state == _SoundState.SHUTTING_DOWN
+    assert h._replays_remaining == 1
