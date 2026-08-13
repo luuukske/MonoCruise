@@ -2185,7 +2185,7 @@ class AEBThread(BaseThread):
                 PopupWindow.emit(
                     "AEB intervention",
                     "Automatic Emergency Braking intervention",
-                    "w",
+                    "n",
                 )
                 self._brake_popup_fired = True
         else:
