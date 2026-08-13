@@ -116,6 +116,38 @@ def test_cmd_bump_refuses_dirty_worktree(repo, monkeypatch):
     assert "## [1.1.1]" not in repo.changelog.read_text(encoding="utf-8")
 
 
+def test_cmd_bump_allows_dirty_changelog(repo, fixed_today, monkeypatch, capsys):
+    write_changelog(repo.changelog, unreleased_body="\n### Added\n- new\n")
+    monkeypatch.setattr(release, "_git_status_porcelain", lambda: " M CHANGELOG.md\n")
+    monkeypatch.setattr(release, "_run", lambda *a: pytest.fail("git must not run in dry-run"))
+    args = argparse.Namespace(set=None, level=None, pre="preview", dry_run=True)
+    release.cmd_bump(args)
+    out = capsys.readouterr().out
+    assert "CHANGELOG.md uncommitted" in out
+    assert release._read_version() == "1.1.0"
+
+
+def test_cmd_bump_refuses_dirty_mixed_with_changelog(repo, monkeypatch):
+    write_changelog(repo.changelog, unreleased_body="\n### Added\n- new\n")
+    monkeypatch.setattr(
+        release,
+        "_git_status_porcelain",
+        lambda: " M CHANGELOG.md\n M core/foo.py\n",
+    )
+    monkeypatch.setattr(release, "_run", lambda *a: pytest.fail("git must not run"))
+    args = argparse.Namespace(set=None, level="patch", pre=None, dry_run=True)
+    with pytest.raises(SystemExit, match="core/foo.py") as exc:
+        release.cmd_bump(args)
+    assert " M CHANGELOG.md" not in str(exc.value)
+    assert release._read_version() == "1.1.0"
+
+
+def test_porcelain_path():
+    assert release._porcelain_path(" M CHANGELOG.md") == "CHANGELOG.md"
+    assert release._porcelain_path("R  old.md -> CHANGELOG.md") == "CHANGELOG.md"
+    assert release._porcelain_path('?? "CHANGELOG.md"') == "CHANGELOG.md"
+
+
 def test_cmd_bump_pre_dry_run(repo, fixed_today, monkeypatch, capsys):
     """Dry-run prints the planned version and leaves version.py/CHANGELOG untouched."""
     write_changelog(repo.changelog, unreleased_body="\n### Added\n- new\n")

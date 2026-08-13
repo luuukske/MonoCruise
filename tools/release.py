@@ -152,16 +152,43 @@ def _git_status_porcelain() -> str:
     return result.stdout
 
 
-def _check_clean_worktree() -> None:
-    # Bump commits only version.py and CHANGELOG.md, so a dirty tree means
-    # the tag would omit whatever is still uncommitted.
-    dirty = _git_status_porcelain().strip()
-    if not dirty:
-        return
-    raise SystemExit(
-        "working tree is not clean. Commit or stash everything before "
-        "bumping, otherwise the tag will not include it.\n" + dirty
-    )
+def _porcelain_path(line: str) -> str:
+    """Path from a `git status --porcelain` v1 line."""
+    raw = line[3:] if len(line) >= 3 else line
+    if " -> " in raw:
+        raw = raw.split(" -> ", 1)[1]
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+        raw = raw[1:-1]
+    return raw.replace("\\", "/")
+
+
+def _split_dirty(porcelain: str) -> tuple[list[str], list[str]]:
+    """Split porcelain lines into (changelog, everything else)."""
+    allowed = _repo_rel(CHANGELOG).replace("\\", "/")
+    changelog: list[str] = []
+    other: list[str] = []
+    for line in porcelain.splitlines():
+        if not line.strip():
+            continue
+        if _porcelain_path(line) == allowed:
+            changelog.append(line)
+        else:
+            other.append(line)
+    return changelog, other
+
+
+def _check_clean_worktree() -> bool:
+    # Bump commits version.py and CHANGELOG.md. Uncommitted changelog notes
+    # go in that commit; any other dirty path would be omitted from the tag.
+    changelog, other = _split_dirty(_git_status_porcelain())
+    if other:
+        raise SystemExit(
+            "working tree is not clean. Commit or stash everything except "
+            "CHANGELOG.md before bumping, otherwise the tag will not "
+            "include it.\n" + "\n".join(other)
+        )
+    return bool(changelog)
 
 
 def _check_gh() -> None:
@@ -236,6 +263,7 @@ def _print_plan(
     current: str,
     new_version: str,
     dry_run: bool,
+    changelog_dirty: bool = False,
 ) -> None:
     today = _dt.date.today().isoformat()
     tag = f"v{new_version}"
@@ -251,7 +279,10 @@ def _print_plan(
     print(f"  Tag           : {tag}")
     print(f"  Channel       : {'prerelease (preview)' if is_prerelease else 'stable'}")
     print(f"  Date          : {today}")
-    print("  Worktree      : clean")
+    if changelog_dirty:
+        print("  Worktree      : CHANGELOG.md uncommitted (included in this commit)")
+    else:
+        print("  Worktree      : clean")
     print()
     print("Files that will be updated:")
     print(f"  - {version_rel}   (__version__ = \"{new_version}\")")
@@ -300,11 +331,16 @@ def cmd_bump(args: argparse.Namespace) -> None:
             "Add changelog entries before bumping."
         )
 
-    _check_clean_worktree()
+    changelog_dirty = _check_clean_worktree()
     if not args.dry_run:
         _check_gh()
 
-    _print_plan(current=current, new_version=new_version, dry_run=args.dry_run)
+    _print_plan(
+        current=current,
+        new_version=new_version,
+        dry_run=args.dry_run,
+        changelog_dirty=changelog_dirty,
+    )
 
     if args.dry_run:
         print("Dry-run only: nothing was changed or created.")
@@ -387,7 +423,7 @@ def main() -> None:
         "-y", "--yes",
         action="store_true",
         help="skip the confirmation prompt (still refuses an empty "
-             "[Unreleased] and a dirty working tree)",
+             "[Unreleased] and a dirty working tree, except CHANGELOG.md)",
     )
     bump.set_defaults(func=cmd_bump)
 
