@@ -137,9 +137,12 @@ Build-up (dead + tau) is therefore 0.25 s median and 0.37 s p90. The observer's 
 could not separate the load classes, so they are left alone. `stop_buffer_response_s` in AEB
 is sized against this, not against the model.
 
-`brake_efficiency.nominal_max_brake_decel_ms2` (`11.5 * wheels/12 * 17000/mass`) carries the
-same `1/mass` error and is therefore badly low on loaded rigs. It only feeds the optional
-degradation warning, so it is left alone for now, but do not reuse it as a capacity model.
+`brake_efficiency.nominal_max_brake_decel_ms2` now defers to `baseline_brake_ms2` instead of
+carrying its own `11.5 * wheels/12 * 17000/mass`. That old form had the same `1/mass` error
+and collapsed on a loaded rig: against the probe it read **45% low on the 54 t double** and
+30% low at 40 t, which inverts the whole point of a degradation warning, since a healthy
+truck looks like it is over-performing and real fade can never reach the ratio. It returns
+decel *at brake=1.0*, so it scales the fitted asymptote by `brake_curve_fraction(1.0)`.
 
 **Gas**: shape model `G(gear) = anchor * ratio^(_ANCHOR_GEAR - gear)` learned in log-space;
 monotonic ratio clamp. Skipped after clutch, gear dwell, or moving pedal. Persisted to
@@ -186,8 +189,14 @@ live rollback, not on stored integrator level (avoids steep-hill launch livelock
 
 ## Brake efficiency (`brake_efficiency.py`)
 
-Optional cruise-only degradation warning via EMA of measured vs expected decel (nominal max
-scales with wheels and mass). Flat-road gate; high-brake samples only.
+Optional cruise-only degradation warning via EMA of measured vs expected decel. Flat-road
+gate; high-brake samples only. Expected decel follows the fitted brake curve, not a straight
+line through the pedal: at the 0.70 sampling threshold the truck already makes 84% of full,
+so the old `pedal * nominal` under-predicted by a fifth and read grip that much high.
+
+**`BrakeEfficiencyTracker` is not wired to anything.** Nothing in `core/` constructs it; only
+its three `Settings` flags exist. The model it references is now correct, but the warning
+does not run, so fixing it changes no behaviour until something calls `update()`.
 
 ## Main pedal thread
 

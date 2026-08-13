@@ -8,6 +8,8 @@ import time
 
 from core.settings import Settings
 
+from .accel_to_pedals import baseline_brake_ms2, brake_curve_fraction
+
 logger = logging.getLogger(__name__)
 
 _MIN_SAMPLE_SPEED_MS: float = 5.0      # ~18 km/h
@@ -18,18 +20,16 @@ _MAX_SLOPE_RAD: float = 0.03           # ~1.7°: skip sloped road to avoid gravi
 _BASELINE_REQUIRED: int = 15           # high-brake samples before baseline is locked
 _WARN_COOLDOWN_S: float = 30.0         # minimum seconds between popup warnings
 
-# Nominal full-pedal deceleration on dry grip: scales with contact patch (wheels)
-# and inversely with mass. Reference: 12 wheels, 17 t → 11.5 m/s².
-_REF_NOMINAL_MAX_DECEL_MS2: float = 11.5
 _REF_WHEELS: int = 12
 _REF_MASS_KG: float = 17000.0
 
 
 def nominal_max_brake_decel_ms2(wheels_on_ground: int, mass_kg: float) -> float:
-    """Expected maximum deceleration (m/s²) at brake=1.0 for the given wheel count and mass. See `core/sending_thread/README.md`."""
-    w = float(wheels_on_ground) if wheels_on_ground > 0 else float(_REF_WHEELS)
+    """Expected deceleration at brake=1.0 for this rig. See `core/sending_thread/README.md`."""
+    w = wheels_on_ground if wheels_on_ground > 0 else _REF_WHEELS
     m = float(mass_kg) if mass_kg > 0.0 else _REF_MASS_KG
-    return _REF_NOMINAL_MAX_DECEL_MS2 * (w / float(_REF_WHEELS)) * (_REF_MASS_KG / m)
+    # Asymptote of the fitted brake curve, so scale by what the pedal reaches.
+    return baseline_brake_ms2(m, w > 6, w) * brake_curve_fraction(1.0)
 
 
 class BrakeEfficiencyTracker:
@@ -86,7 +86,12 @@ class BrakeEfficiencyTracker:
 
         alpha = max(1e-4, min(1.0, float(Settings.brake_efficiency_alpha)))
         nominal_max = nominal_max_brake_decel_ms2(wheels_on_ground, mass_kg)
-        expected_decel = max(float(brake_output), _BRAKE_OUTPUT_FLOOR) * nominal_max
+        # Pedal to decel is the fitted curve, not a straight line: at 0.7 pedal
+        # the truck already makes 84% of full, so linear read grip 20% high.
+        pedal = max(float(brake_output), _BRAKE_OUTPUT_FLOOR)
+        expected_decel = (
+            nominal_max * brake_curve_fraction(pedal) / brake_curve_fraction(1.0)
+        )
         grip = measured_decel_ms2 / expected_decel
         if not math.isfinite(grip) or grip <= 0.0:
             return

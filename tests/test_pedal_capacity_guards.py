@@ -298,6 +298,8 @@ MEASURED_RIGS = (
     (12, 17_000.0, 12.70),  # single trailer
     (18, 24_000.0, 13.90),  # double, empty
     (18, 54_310.0, 10.85),  # double, ~29 t cargo
+    (18, 24_300.0, 15.10),  # double, empty, 2026-08-12 probe, n=2
+    (18, 40_500.0, 11.37),  # double, 16 t cargo, 2026-08-12 probe, n=2
 )
 
 
@@ -313,6 +315,42 @@ def test_baseline_tracks_measured_capability(monkeypatch):
         assert measured <= pc._brake_candidate_cap_ms2(base), (
             "a truthful partial-pedal candidate would be rejected"
         )
+
+
+def test_weight_adjusted_nominal_tracks_the_measured_rigs():
+    """The degradation warning's reference must be the same fitted capability.
+
+    It used to carry its own `11.5 * wheels/12 * 17000/mass` model, whose 1/mass
+    term collapses on a loaded rig: against the probe it read 45% low on the
+    54 t double and 30% low at 40 t, so a healthy truck looked like it was
+    over-performing and real fade could never trip the ratio.
+    """
+    from core.sending_thread.accel_to_pedals import brake_curve_fraction as frac
+    from core.sending_thread.brake_efficiency import nominal_max_brake_decel_ms2
+
+    for wheels, mass, measured_asymptote in MEASURED_RIGS:
+        # The model answers "decel at brake=1.0"; the probe measures the curve's
+        # asymptote, which full pedal only reaches frac(1.0) of.
+        at_full_pedal = measured_asymptote * frac(1.0)
+        got = nominal_max_brake_decel_ms2(wheels, mass)
+        assert 0.85 <= got / at_full_pedal <= 1.15, (
+            f"{wheels}w {mass / 1000:.1f}t: nominal {got:.2f} vs measured "
+            f"{at_full_pedal:.2f} at brake=1.0"
+        )
+
+
+def test_the_efficiency_reference_follows_the_brake_curve():
+    """Expected decel per pedal is the fitted curve, never a straight line.
+
+    A linear read makes a healthy truck look weak at part pedal: at the 0.70
+    sampling threshold the curve is already at 84% of full, so `pedal * nominal`
+    under-predicts by a fifth and the grip ratio comes out high.
+    """
+    from core.sending_thread.accel_to_pedals import brake_curve_fraction as frac
+
+    assert frac(0.70) / frac(1.0) > 0.70 * 1.15, (
+        "the curve is far from linear at the sampling threshold"
+    )
 
 
 def test_loading_a_rig_barely_lowers_its_braking(monkeypatch):
