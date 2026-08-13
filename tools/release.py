@@ -137,6 +137,33 @@ def _run(*cmd: str) -> None:
     subprocess.run(cmd, check=True, cwd=ROOT)
 
 
+def _git_status_porcelain() -> str:
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "git status failed").strip()
+        raise SystemExit(
+            "git status failed; bump needs a git working tree.\n" + err
+        )
+    return result.stdout
+
+
+def _check_clean_worktree() -> None:
+    # Bump commits only version.py and CHANGELOG.md, so a dirty tree means
+    # the tag would omit whatever is still uncommitted.
+    dirty = _git_status_porcelain().strip()
+    if not dirty:
+        return
+    raise SystemExit(
+        "working tree is not clean. Commit or stash everything before "
+        "bumping, otherwise the tag will not include it.\n" + dirty
+    )
+
+
 def _check_gh() -> None:
     """Fail before anything is written or pushed if gh is unusable. Ordering matters: once the tag
     is pushed, CI starts a build that expects a draft to exist. Discovering a missing gh at that
@@ -224,6 +251,7 @@ def _print_plan(
     print(f"  Tag           : {tag}")
     print(f"  Channel       : {'prerelease (preview)' if is_prerelease else 'stable'}")
     print(f"  Date          : {today}")
+    print("  Worktree      : clean")
     print()
     print("Files that will be updated:")
     print(f"  - {version_rel}   (__version__ = \"{new_version}\")")
@@ -272,6 +300,7 @@ def cmd_bump(args: argparse.Namespace) -> None:
             "Add changelog entries before bumping."
         )
 
+    _check_clean_worktree()
     if not args.dry_run:
         _check_gh()
 
@@ -357,7 +386,8 @@ def main() -> None:
     bump.add_argument(
         "-y", "--yes",
         action="store_true",
-        help="skip the confirmation prompt (still refuses an empty [Unreleased])",
+        help="skip the confirmation prompt (still refuses an empty "
+             "[Unreleased] and a dirty working tree)",
     )
     bump.set_defaults(func=cmd_bump)
 
