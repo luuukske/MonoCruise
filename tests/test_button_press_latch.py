@@ -7,7 +7,13 @@ between samples. See core/main_pedal_thread/README.md.
 
 from __future__ import annotations
 
+import sys
+from unittest.mock import MagicMock
+
 import pytest
+
+# CI does not install pygame; this test only needs the latch helpers.
+sys.modules.setdefault("pygame", MagicMock())
 
 from core.main_pedal_thread.thread import _BUTTON_MIN_HOLD_S, MainPedalThread
 
