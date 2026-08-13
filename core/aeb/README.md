@@ -741,9 +741,12 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    hold and `warn_suppressed` carries past it. Without that carry the hold
    reinstated the cue for up to 0.3 s after every warn, and since each
    legitimate re-warn re-arms the hold, a driver braking through a decaying
-   threat heard near-continuous beeping. `stop_warning()` still replays the
-   clip plus `_AEB_WARNING_STOP_EXTRA_REPLAYS`, so even a 2-frame spurious warn
-   is audible: short suppression leaks are not cosmetic.
+   threat heard near-continuous beeping. Sound follows a two-tick gate and a
+   hard stop on suppression: `start_warning` only after two consecutive warn
+   ticks, and `stop_warning(hard=True)` silences immediately with no extra
+   replay. That keeps the beep from outliving a pulse the 100 ms CC-panel poll
+   never sampled. Soft `stop_warning()` still replays the clip plus
+   `_AEB_WARNING_STOP_EXTRA_REPLAYS` when a held warn ends normally.
 8. Head-on targets: modelled as also braking at `full_brake_decel (7.8 m/s²)`
    inside the collision pipeline (unchanged).
 

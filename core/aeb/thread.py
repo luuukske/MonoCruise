@@ -672,6 +672,15 @@ def _build_vehicle_collision_data(
             v_yaw_rad, abs_v_speed, veh_fwd_x, veh_fwd_z, v_curvature)
 
 
+def _hmi_sound_step(
+    warn: bool, prev: bool, suppressed: bool,
+) -> tuple[str, bool]:
+    """Gate AEB sound to two consecutive warn ticks; hard-stop on suppress."""
+    if warn:
+        return ("start" if prev else "none", True)
+    return ("hard_stop" if suppressed else "stop", False)
+
+
 class _SoundState(enum.IntEnum):
     STOPPED = 0
     RUNNING = 1
@@ -711,16 +720,16 @@ class _AEBSoundHandler:
             self._sound = None
 
     def start_warning(self) -> None:
-        """Start loop; cancels in-flight shutdown and resumes."""
+        """Start loop; resumes an in-flight thread instead of spawning a second."""
         if self._sound is None:
             return
         with self._lock:
             if self._state == _SoundState.RUNNING:
                 return
-            if self._state == _SoundState.SHUTTING_DOWN:
+            self._replays_remaining = 0
+            if self._sound_thread is not None and self._sound_thread.is_alive():
                 self._state = _SoundState.RUNNING
-                self._replays_remaining = 0
-                logger.debug("AEB sound: shutdown cancelled, resuming loop")
+                logger.debug("AEB sound: existing loop resumed")
                 return
             self._state = _SoundState.RUNNING
             self._sound_thread = threading.Thread(
@@ -729,11 +738,22 @@ class _AEBSoundHandler:
             self._sound_thread.start()
             logger.debug("AEB sound: warning loop started")
 
-    def stop_warning(self) -> None:
-        """Schedule extra replays then finish current clip (non-blocking)."""
+    def stop_warning(self, *, hard: bool = False) -> None:
+        """Soft: extra replays then finish. Hard: silence now, no tail."""
         if self._sound is None:
             return
         with self._lock:
+            if hard:
+                if self._state == _SoundState.STOPPED:
+                    return
+                self._state = _SoundState.STOPPED
+                self._replays_remaining = 0
+                try:
+                    self._sound.stop()
+                except Exception:
+                    pass
+                logger.debug("AEB sound: hard stop")
+                return
             if self._state == _SoundState.RUNNING:
                 self._state = _SoundState.SHUTTING_DOWN
                 self._replays_remaining = self._stop_extra_replays
@@ -746,11 +766,21 @@ class _AEBSoundHandler:
         sound_length = self._sound.get_length()
         overlap_time = 0.15
         sleep_duration = max(0.0, sound_length - overlap_time)
+        slice_s = 0.02
 
         last_channel = self._sound.play()
+        aborted = False
 
         while True:
-            time.sleep(sleep_duration)
+            deadline = time.monotonic() + sleep_duration
+            while time.monotonic() < deadline:
+                time.sleep(slice_s)
+                with self._lock:
+                    if self._state == _SoundState.STOPPED:
+                        aborted = True
+                        break
+            if aborted:
+                break
             with self._lock:
                 if self._state == _SoundState.RUNNING:
                     last_channel = self._sound.play()
@@ -759,20 +789,29 @@ class _AEBSoundHandler:
                         self._replays_remaining -= 1
                         last_channel = self._sound.play()
                     else:
-                        logger.debug("AEB sound: extra replays done: letting current sound finish")
+                        logger.debug(
+                            "AEB sound: extra replays done: letting current sound finish"
+                        )
                         break
+                else:
+                    aborted = True
+                    break
 
-        if last_channel:
+        if last_channel and not aborted:
             while last_channel.get_busy():
                 time.sleep(0.01)
+                with self._lock:
+                    if self._state == _SoundState.STOPPED:
+                        break
 
         with self._lock:
-            self._state = _SoundState.STOPPED
+            if self._state != _SoundState.RUNNING:
+                self._state = _SoundState.STOPPED
         logger.debug("AEB sound: finished playing naturally, thread closing")
 
     def cleanup(self) -> None:
-        """Block until all sound activity is finished, then quit the mixer."""
-        self.stop_warning()
+        """Silence immediately, wait for the loop thread, then quit the mixer."""
+        self.stop_warning(hard=True)
         if self._sound_thread and self._sound_thread.is_alive():
             self._sound_thread.join()
         if _PYGAME_AVAILABLE and pygame.mixer.get_init():
@@ -802,6 +841,7 @@ class AEBThread(BaseThread):
         self._radar_vis_last_vehicle_time: float = -1.0
         self._latched_filter_ego_kmh: float | None = None
         self._sound_handler = _AEBSoundHandler(_AEB_SOUND_PATH)
+        self._hmi_sound_prev = False
         self._cal: AEBCalibration = _CAL_DEFAULT
         self._pipeline = build_pipeline(self._cal)
         # One-Euro per target kappa; stepped once per vehicle per frame (README).
@@ -2193,9 +2233,14 @@ class AEBThread(BaseThread):
             tmp_traffic_session=tmp_traffic_session,
         )
 
-        if aeb_warn:
+        action, self._hmi_sound_prev = _hmi_sound_step(
+            aeb_warn, self._hmi_sound_prev, warn_suppressed,
+        )
+        if action == "start":
             self._sound_handler.start_warning()
-        else:
+        elif action == "hard_stop":
+            self._sound_handler.stop_warning(hard=True)
+        elif action == "stop":
             self._sound_handler.stop_warning()
 
         with self.data._lock:
@@ -2440,6 +2485,7 @@ class AEBThread(BaseThread):
         )
 
     def teardown(self) -> None:
+        self._hmi_sound_prev = False
         self._sound_handler.cleanup()
         if self._radar_visualizer is not None:
             try:
