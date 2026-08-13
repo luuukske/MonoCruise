@@ -12,7 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Changed
-- **AEB holds its braking force instead of easing off near the end**: the head start it reserves for the brakes to build up was being re-charged every moment, so as you slowed it quietly handed that distance back and the braking faded away while the warning was still going. It is now paid once, when AEB commits. Stops are shorter, finish further from the vehicle ahead, and hold a steady force the whole way.
+- **AEB holds its braking force instead of easing off near the end**: the head start it reserves for the brakes to build up was being re-charged every moment, so as you slowed it quietly handed that distance back and the braking faded away while the warning was still going. It is now paid once, when AEB commits. Stops are shorter, and hold a steady force the whole way.
 
 
 ### Fixed
