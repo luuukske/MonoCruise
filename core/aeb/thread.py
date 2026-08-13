@@ -149,7 +149,7 @@ _CRASH_SPEED_DROP_KMH: float = 5.0
 # has held this long, so a single-frame flicker never pops up a notice, and
 # only once ego_speed shows the brake actually stopped the truck.
 _BRAKE_POPUP_MIN_DURATION_S: float = 0.5
-_BRAKE_POPUP_STOPPED_SPEED_MS: float = 0.3
+_BRAKE_POPUP_STOPPED_SPEED_MS: float = 5
 
 
 def _find_tractor_for_trailer(trailer: Vehicle, vehicles: list[Vehicle]) -> Vehicle | None:
