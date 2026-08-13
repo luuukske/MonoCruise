@@ -5,12 +5,12 @@ import base64
 from dataclasses import dataclass, replace
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QLabel, QWidget
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QFrame, QLabel, QListWidgetItem, QPushButton, QWidget
 
 from core.aeb.clip_replay import ReviewFrame, replay_clip
 from core.aeb.clip_schema import Clip, ClipMetadata
-from core.aeb.clip_store import ClipInfo, ClipStore, contributed_clip_root
+from core.aeb.clip_store import ClipInfo, ClipStore, contributed_clip_root, default_clip_root
 from core.aeb.debug_window import AEBDebugWindow
 
 TTC_INF = 100.0         # recorded sentinel is 1e9; past this there is no tracked threat
@@ -392,3 +392,111 @@ class DecisionStrip(QWidget):
         for run in runs:
             for (x0, y0), (x1, y1) in zip(run, run[1:]):
                 p.drawLine(int(x0), int(y0), int(x1), int(y1))
+
+
+_CLASSES = ["tp", "good_intervention", "fp", "fn", "tn", "ignore"]
+
+# Digit row picks a class; order matches _CLASSES.
+_CLASS_KEYS = {
+    Qt.Key_1: "tp", Qt.Key_2: "good_intervention", Qt.Key_3: "fp",
+    Qt.Key_4: "fn", Qt.Key_5: "tn", Qt.Key_6: "ignore",
+}
+
+# List-row backgrounds: remote gets a slight green shift against the local cool grey.
+_LOCAL_BG = QColor(30, 32, 38)
+_REMOTE_BG = QColor(30, 40, 34)
+
+_KEYMAP_TEXT = """\
+CLIPS      N / P             next / prev clip
+           Ctrl+N            next untagged
+
+TRANSPORT  Left / Right      step 1 frame
+           Shift+Left/Right  step 10 frames
+           Home / End        first / last frame
+           Space             play / pause
+
+LABEL      1 tp    2 good_intervention   3 fp
+           4 fn    5 tn                  6 ignore
+           PageUp / PageDown  severity +/-
+
+WINDOW     [  set start at cursor
+           ]  set end at cursor
+           \\  clear window
+           W  accept the proposed window
+
+TARGET     V  pick-on-scene, then click the vehicle
+
+SAVE       Enter  save and go to next untagged
+
+NOTES      Tab into notes, Esc back out
+F1         hide this panel"""
+
+
+def _entry_visible(meta: ClipMetadata | None, search: str, cls_filter: str) -> bool:
+    """Whether a scanned clip passes the class filter and search text."""
+    label = meta.label if meta is not None else None
+    cls = label.class_ if label is not None else None
+    if cls_filter == "untagged" and cls is not None:
+        return False
+    if cls_filter == "tagged" and cls is None:
+        return False
+    if cls_filter not in ("all", "untagged", "tagged") and cls != cls_filter:
+        return False
+    if search:
+        hay = " ".join(part for part in (
+            (meta.clip_id if meta else ""),
+            (meta.trigger_source if meta else ""),
+            (cls or ""),
+            (label.notes if label is not None else ""),
+        ) if part).lower()
+        if search not in hay:
+            return False
+    return True
+
+
+def _clip_item(info: ClipInfo, meta: ClipMetadata | None,
+               origin: str = "local") -> QListWidgetItem:
+    """One list row: clip id, tag badge, trigger source, and size."""
+    tagged = meta is not None and meta.label is not None
+    cls = meta.label.class_ if tagged else None
+    trig = meta.trigger_source if meta else "?"
+    badge = f"● {cls}" if tagged else "○ untagged"
+    kb = info.size_bytes // 1024
+    cid = meta.clip_id[:8] if meta else "????????"
+    item = QListWidgetItem(f"{cid}   {badge}\n{trig}  {kb} KB")
+    item.setData(Qt.UserRole, str(info.path))
+    item.setBackground(QBrush(_REMOTE_BG if origin == "remote" else _LOCAL_BG))
+    return item
+
+
+def _button(text: str, fn, *, width: int | None = None) -> QPushButton:
+    """Keyboard-transparent button: focus stays on the window so bindings keep working."""
+    b = QPushButton(text)
+    b.setFocusPolicy(Qt.NoFocus)
+    b.clicked.connect(fn)
+    if width is not None:
+        b.setFixedWidth(width)
+    return b
+
+
+def _hline() -> QFrame:
+    f = QFrame()
+    f.setFrameShape(QFrame.HLine)
+    f.setStyleSheet("color:#333;")
+    return f
+
+
+def _fmt(v: float) -> str:
+    return f"{v:.2f}" if v < 100 else "inf"
+
+
+def _review_stores(*, root: str | None, contributed_only: bool) -> list[ClipStore]:
+    """Default view merges local + contributed; flags narrow it to one root."""
+    if root:
+        return [ClipStore(root=root)]
+    if contributed_only:
+        return [ClipStore(root=contributed_clip_root())]
+    return [
+        ClipStore(root=default_clip_root()),
+        ClipStore(root=contributed_clip_root()),
+    ]

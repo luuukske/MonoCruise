@@ -10,8 +10,10 @@ from __future__ import annotations
 import ast
 import io
 import re
+import subprocess
 import tokenize
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
@@ -39,16 +41,35 @@ OVERSIZED_FILES = {
 FILE_LINE_CEILING = 1200
 
 
+@lru_cache(maxsize=1)
+def _git_ignored_py() -> frozenset[str]:
+    """Untracked ignored .py paths, so local probe scripts cannot trip the ratchets."""
+    result = subprocess.run(
+        ["git", "ls-files", "-o", "-i", "--exclude-standard", "--", "*.py"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return frozenset()
+    return frozenset(line.replace("\\", "/") for line in result.stdout.splitlines() if line)
+
+
 def _py_files():
+    ignored = _git_ignored_py()
     for name in SOURCE_ROOTS:
         root = REPO / name
         if root.is_dir():
             for path in sorted(root.rglob("*.py")):
-                if "__pycache__" not in path.parts:
-                    yield path
+                if "__pycache__" in path.parts:
+                    continue
+                if path.relative_to(REPO).as_posix() in ignored:
+                    continue
+                yield path
     for name in LOOSE_FILES:
         path = REPO / name
-        if path.is_file():
+        if path.is_file() and path.relative_to(REPO).as_posix() not in ignored:
             yield path
 
 

@@ -18,6 +18,7 @@ Custom animated dropdown used by the MonoCruise app and the updater. Pixel-faith
 
 **Implementation notes:**
 
+- Field widget is `shared/dropdown.py`; popup card paint and motion live in `shared/dropdown_popup.py`.
 - Popup is a child overlay of the field's top-level window (shared coordinates and DPR; avoids fractional-DPI misalignment).
 - Drop shadow is seam-clipped so blur does not paint above the field bottom edge.
 - Open height clamped by natural height, `DROPDOWN_MAX_VISIBLE_ROWS`, and window cap; overflow scrolls with a thin thumb.
