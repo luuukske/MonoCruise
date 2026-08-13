@@ -194,3 +194,25 @@ def test_user_gas_above_mapper_is_branch_independent():
                 f"{_rel(path)}:{node.lineno} user_gas_above_mapper is nested under a "
                 "branch on cruise_active_controller; it must be branch-independent"
             )
+
+
+_SLOPE_TOKENS = ("rotationY", "road_pitch", "grade_rad", "slope_accel")
+_CRUISE_PID_ROOTS = (
+    REPO / "core" / "longitudinal",
+    REPO / "core" / "cruise_control_thread",
+)
+
+
+def test_cruise_pid_does_not_read_road_pitch():
+    """Grade feed-forward belongs in AccelToPedals, not the speed PID."""
+    offenders = [
+        f"{_rel(path)}:{i}"
+        for root in _CRUISE_PID_ROOTS
+        for path in _py_files(root)
+        for i, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1)
+        if any(tok in line for tok in _SLOPE_TOKENS)
+    ]
+    assert not offenders, (
+        "slope/pitch terms in the cruise PID; keep grade FF in AccelToPedals. "
+        f"Found at: {offenders}"
+    )

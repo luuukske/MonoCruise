@@ -217,6 +217,7 @@ class CruiseController(LongitudinalController):
         target_ms = target_kmh / 3.6
         target_ms = self._smooth_target_speed_ema(target_ms, ctx.dt)
 
+        # Speed error only. Grade feed-forward lives in AccelToPedals, not here.
         kp = float(Settings.cc_kp)
         ki = float(Settings.cc_ki)
         kd = float(Settings.cc_kd)

@@ -159,6 +159,27 @@ def test_saving_polling_rate_notifies_running_threads(cfg):
     assert Settings.polling_rate == 80
 
 
+def test_coast_fit_rolling_resistance_0_01_is_remapped(cfg):
+    """The coast-fit 0.01 default made mapping worse; load rewrites it."""
+    primary, _ = cfg
+    Settings.save(force=True)
+    data = json.loads(primary.read_text(encoding="utf-8"))
+    data["mapper_rolling_resistance"] = 0.01
+    _write(primary, data)
+
+    Settings.load()
+    assert Settings.mapper_rolling_resistance == pytest.approx(0.07)
+    written = json.loads(primary.read_text(encoding="utf-8"))
+    assert written["mapper_rolling_resistance"] == pytest.approx(0.07)
+
+
+def test_custom_rolling_resistance_is_kept(cfg):
+    primary, _ = cfg
+    Settings.save(values={"mapper_rolling_resistance": 0.02}, force=True)
+    Settings.load()
+    assert Settings.mapper_rolling_resistance == pytest.approx(0.02)
+
+
 def test_a_failed_write_leaves_the_on_disk_config_untouched(cfg, monkeypatch):
     primary, _ = cfg
     Settings.save(values={"last_game": 2}, force=True)

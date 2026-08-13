@@ -107,6 +107,10 @@ Do not reintroduce these without reading the linked README section first:
   - There is exactly one `AccelToPedals` instance in the running system (in `SendingThread`). `CruiseControlThread` publishes a single m/s² bid covering whichever controller is active (CC or limiter). `SendingThread` reads that bid from `telemetry_thread.commanded_accel_ms2` and feeds it straight to the mapper.
   - Do not give the limiter (or any other longitudinal child) its own `AccelToPedals` instance. Two parallel mappers diverge in `wanted_smooth` / fast PID / output EMA per-instance state, which broke commander handover at the limit boundary. Enforced by `tests/invariants/test_source_invariants.py`.
 
+- **Slope compensation is mapper feed-forward, not the cruise PID.**
+  - `AccelToPedals` adds `g sin(θ)` (plus rolling and aero) to the bid. CC and the limiter only track speed error.
+  - Do not add pitch or grade terms to `CruiseController` or `SpeedLimiter`. A second copy in the PID fights the mapper FF and still waits on speed error if the FF is wrong. Enforced by `tests/invariants/test_source_invariants.py`.
+
 - **New `limiter_*` settings.**
   - `limiter_kp`, `limiter_ki`, `limiter_kd`, `limiter_integral_clamp`, `limiter_accel_min_ms2` in `core/settings.py`. Independent of the CC gains so each can be tuned separately. Defaults match the original CC defaults so behaviour is identical until the user tunes them.
 

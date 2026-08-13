@@ -23,6 +23,9 @@ else:
     CONFIG_PATH = Path(__file__).parent.parent / "config.json"
 BACKUP_PATH = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".bak")
 
+# Brief coast-fit (0.01) made mapping worse. Remap that value back to 0.07.
+_COAST_FIT_MAPPER_ROLLING_RESISTANCE = 0.01
+
 _log = logging.getLogger("settings")
 
 
@@ -289,6 +292,7 @@ class Settings(metaclass=_SingletonMeta):
                 data = {}
 
             missing_from_file = any(k not in data for k in public_keys)
+            remapped_legacy_rolling = False
 
             for k in public_keys:
                 if k in data:
@@ -297,6 +301,18 @@ class Settings(metaclass=_SingletonMeta):
                         v = self._normalize_increment(v)
                     elif k == "update_channel":
                         v = self._normalize_channel(v)
+                    elif k == "mapper_rolling_resistance":
+                        try:
+                            fv = float(v)
+                        except (TypeError, ValueError):
+                            fv = None
+                        if (
+                            fv is not None
+                            and abs(fv - _COAST_FIT_MAPPER_ROLLING_RESISTANCE) < 1e-9
+                        ):
+                            f = self.__dataclass_fields__[k]
+                            v = cls._dataclass_field_default(f)
+                            remapped_legacy_rolling = True
                     setattr(self, k, v)
                 else:
                     f = self.__dataclass_fields__[k]
@@ -310,7 +326,14 @@ class Settings(metaclass=_SingletonMeta):
                 source, missing_from_file, file_was_recoverable,
             )
 
-            if not had_complete_file:
+            if remapped_legacy_rolling:
+                _log.info(
+                    "remapped mapper_rolling_resistance from coast-fit %.2f to %.2f",
+                    _COAST_FIT_MAPPER_ROLLING_RESISTANCE,
+                    self.mapper_rolling_resistance,
+                )
+
+            if not had_complete_file or remapped_legacy_rolling:
                 # Persist merged defaults when the file was incomplete or recovered.
                 cls.save(force=True)
 

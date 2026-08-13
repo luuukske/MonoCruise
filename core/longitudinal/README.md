@@ -28,6 +28,8 @@ owns PID state only.
 - Output EMA bypassed when game throttle > 0.1 and CC wants brake.
 - Integral freezes and leaks (`_HOLD_INTEGRAL_LEAK_TAU_S`) while `sending_thread.data.hold_active`
   so standstill does not wind the integrator to its clamp.
+- Speed error only. Grade feed-forward is `AccelToPedals` road load, not this PID
+  (see root `AGENTS.md`).
 
 ## SpeedLimiter (`limiter.py`)
 

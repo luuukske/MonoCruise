@@ -16,9 +16,15 @@ Single mapper instance for the process. Converts wanted m/s² to gas/brake with 
 leaky integral, road-load feed-forward, adaptive full-pedal accel/brake estimates,
 gearshift integrator freeze, and tuning CSV rows when high-demand estimates underperform.
 
-- Road load is gravity along grade plus rolling resistance. Pitch comes from telemetry
-  `rotationY` in degrees, converted with `math.radians` (same convention as AEB), scaled
-  by the `mapper_rolling_resistance` setting.
+- Road load is gravity along grade plus rolling resistance and aero. Pitch comes from
+  telemetry `rotationY` as a normalized full-circle float, converted by
+  `_road_grade_from_norm`. Rolling coefficient is `mapper_rolling_resistance`.
+  Grade uses a slow EMA for pitch noise; a large grade error blends toward a
+  short tau with `1-exp(-(err/ref)^2)` so a real hill still tracks. Rolling and
+  aero stay slower. Slope compensation stays in this mapper, not the cruise PID.
+  A positive accel bid is never mapped to brake by gravity (downhill launch).
+  Positive `slow_integral` leftover from a climb bleeds off when already
+  accelerating with no accel bid, so it cannot keep FF on gas over a crest.
 - Adaptive accel/brake estimates learn from load-compensated accel (`raw + road_load`),
   so a slope cannot bias the learned full-pedal capability.
 - Also holds the shared telemetry mass-estimate helper that `telemetry_thread` uses.

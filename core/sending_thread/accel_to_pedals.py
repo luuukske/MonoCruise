@@ -59,6 +59,8 @@ _SLOW_I_CLAMP_MS2: float = 1.0
 _SLOW_I_SAT_EFFORT: float = 0.95
 # Unwinding runs faster than winding: bias written in during a saturated climb
 _KI_SLOW_UNWIND_MULT: float = 3.0
+# Climb leftover on a crest: shed gas bias when already speeding with no accel bid.
+_SLOW_I_CREST_BLEED_TAU_S: float = 0.8
 # Initial bias: overestimates resistance so the limiter approaches the set speed
 # conservatively on first engagement. The integral corrects this within a few seconds.
 _SLOW_I_INIT_BIAS_MS2: float = -0.4
@@ -72,9 +74,12 @@ _HOLD_SLOW_I_LEAK_TAU_S: float = 10.0
 _BRAKE_CURVE_RATE: float = 2.4277
 _BRAKE_CURVE_POWER: float = 0.8518
 
-# Road load
-_ROAD_LOAD_SMOOTH_TAU_S: float = 1.2   # slow EMA for small bumps
-_ROAD_LOAD_DELTA_REF_MS2: float = 0.25  # above this → fast tracking
+# Road load. Grade uses a slow EMA for pitch noise; large grade error
+# blends toward a short tau via 1-exp(-(err/ref)^2).
+_GRADE_SMOOTH_TAU_S: float = 0.9
+_GRADE_FAST_TAU_S: float = 0.25
+_GRADE_ERR_REF_MS2: float = 0.20
+_DRAG_SMOOTH_TAU_S: float = 1.2
 _ROAD_LOAD_SPEED_EPSILON_MS: float = 0.2
 _MAX_ROAD_GRADE_RAD: float = 0.35  # clamp pathological game values
 # Aerodynamic drag coefficient fitted from coast-down data.
@@ -276,8 +281,11 @@ class MapperSharedState:
     # Previous live EMA value: D-term derivative source.
     prev_raw_smooth: float = 0.0
 
-    # Road load EMA (physics)
+    # Road load EMAs (physics). Grade is separate so crests are not stuck on the
+    # slow drag tau that exists to filter pitch jitter on rolling+aero.
     road_load_smooth: float = 0.0
+    grade_accel_smooth: float = 0.0
+    drag_accel_smooth: float = 0.0
 
     # Slow road-load bias correction integral (m/s² space).
     slow_integral: float = _SLOW_I_INIT_BIAS_MS2
@@ -392,6 +400,8 @@ class AccelToPedals:
         s.slow_integral = _SLOW_I_INIT_BIAS_MS2
         s.prev_mono = None
         s.road_load_smooth = 0.0
+        s.grade_accel_smooth = 0.0
+        s.drag_accel_smooth = 0.0
         s.clutch_active = False
         s.clutch_release_mono = -math.inf
         s.frozen_raw_smooth = 0.0
@@ -413,6 +423,14 @@ class AccelToPedals:
     @staticmethod
     def _ema_alpha(dt: float, tau_s: float) -> float:
         return 1.0 - math.exp(-dt / max(tau_s, 1e-6))
+
+    def _grade_ema_alpha(self, dt: float, err_ms2: float) -> float:
+        """Slow tau for pitch noise; 1-exp(-(err/ref)^2) toward the fast tau."""
+        slow = self._ema_alpha(dt, _GRADE_SMOOTH_TAU_S)
+        fast = self._ema_alpha(dt, _GRADE_FAST_TAU_S)
+        ratio = abs(err_ms2) / max(_GRADE_ERR_REF_MS2, 1e-6)
+        blend = 1.0 - math.exp(-(ratio * ratio))
+        return slow + (fast - slow) * _clamp(blend, 0.0, 1.0)
 
     @staticmethod
     def _motion_sign(speed_ms: float, wanted_accel_ms2: float, gear_dashboard: int) -> float:
@@ -444,20 +462,21 @@ class AccelToPedals:
         theta = val * 2.0 * math.pi
         return theta, _clamp(theta, -_MAX_ROAD_GRADE_RAD, _MAX_ROAD_GRADE_RAD)
 
-    def _road_load_accel_ms2(
+    def _road_load_parts(
         self,
         speed_ms: float,
         wanted_accel_ms2: float,
         pitch: float,
         gear_dashboard: int,
-    ) -> tuple[float, float, float]:
+    ) -> tuple[float, float, float, float, float]:
+        """rolling, slope, aero, unclamped grade rad, clamped grade rad."""
         motion_sign = self._motion_sign(speed_ms, wanted_accel_ms2, gear_dashboard)
         grade_unc_rad, grade_rad = self._road_grade_from_norm(pitch)
         rolling_coeff = max(0.0, _finite_or_zero(Settings.mapper_rolling_resistance))
         rolling_accel = motion_sign * rolling_coeff * GRAVITY_MS2 * math.cos(grade_rad)
         slope_accel = motion_sign * GRAVITY_MS2 * math.sin(grade_rad)
         aero_accel = motion_sign * _AERO_DRAG_ACCEL_PER_V2 * speed_ms * speed_ms
-        return rolling_accel + slope_accel + aero_accel, grade_unc_rad, grade_rad
+        return rolling_accel, slope_accel, aero_accel, grade_unc_rad, grade_rad
 
     @staticmethod
     def _measured_control_accel_ms2(raw_accel_ms2: float, road_load_ms2: float) -> float:
@@ -789,17 +808,23 @@ class AccelToPedals:
             now, clutch_applied, new_raw_smooth_live, learn=True,
         )
 
-        # Road load: adaptive EMA: slow for small bumps, fast for steep hills
-        road_load_raw, grade_unc_rad, grade_rad = self._road_load_accel_ms2(
-            speed, wanted, pitch, gear_dash
+        # Road load: slow grade EMA for pitch noise; large error goes fast.
+        rolling_accel, slope_accel, aero_accel, grade_unc_rad, grade_rad = (
+            self._road_load_parts(speed, wanted, pitch, gear_dash)
         )
-        rl_base_alpha = self._ema_alpha(dt, _ROAD_LOAD_SMOOTH_TAU_S)
-        rl_delta_ratio = _clamp(
-            abs(road_load_raw - s.road_load_smooth) / max(_ROAD_LOAD_DELTA_REF_MS2, 1e-6),
-            0.0, 1.0,
-        )
-        rl_alpha = rl_base_alpha + (1.0 - rl_base_alpha) * (rl_delta_ratio ** 2)
-        new_road_load_smooth = self._ema_step(s.road_load_smooth, road_load_raw, rl_alpha)
+        drag_raw = rolling_accel + aero_accel
+        if s.prev_mono is None:
+            new_grade_smooth = slope_accel
+            new_drag_smooth = drag_raw
+        else:
+            grade_err = slope_accel - s.grade_accel_smooth
+            new_grade_smooth = self._ema_step(
+                s.grade_accel_smooth, slope_accel, self._grade_ema_alpha(dt, grade_err),
+            )
+            new_drag_smooth = self._ema_step(
+                s.drag_accel_smooth, drag_raw, self._ema_alpha(dt, _DRAG_SMOOTH_TAU_S),
+            )
+        new_road_load_smooth = new_grade_smooth + new_drag_smooth
         road_load_accel = new_road_load_smooth
 
         # Capacity estimates
@@ -880,6 +905,13 @@ class AccelToPedals:
                     new_slow_integral + ki_slow * error_ms2 * factor * dt * slow_i_gate,
                     -_SLOW_I_CLAMP_MS2, _SLOW_I_CLAMP_MS2,
                 )
+                if (
+                    new_slow_integral > 0.0
+                    and new_wanted_smooth <= 0.0
+                    and new_raw_smooth > 0.0
+                ):
+                    leak = math.exp(-dt / max(_SLOW_I_CREST_BLEED_TAU_S, 1e-6))
+                    new_slow_integral *= leak
             # Creep subtracts from the effective road load: the brake FF must
             # overcome it and the gas FF must not double-provide it.
             effective_road_load = road_load_accel + new_slow_integral - creep_ms2
@@ -928,6 +960,9 @@ class AccelToPedals:
 
             # Pure-FF pedal for diagnostics (what the mapping would give with no trim)
             combined_ff_only = new_wanted_smooth + effective_road_load
+            # Downhill gravity must not turn a positive accel bid into brake.
+            if new_wanted_smooth > 0.0 and combined_ff_only < 0.0:
+                combined_ff_only = 0.0
             if combined_ff_only >= 0.0:
                 ff = combined_ff_only / max_a_use
             else:
@@ -1007,6 +1042,8 @@ class AccelToPedals:
         s.raw_smooth_live = new_raw_smooth_live
         s.prev_raw_smooth = new_raw_smooth_live
         s.road_load_smooth = new_road_load_smooth
+        s.grade_accel_smooth = new_grade_smooth
+        s.drag_accel_smooth = new_drag_smooth
         s.output_smooth_ms2 = new_output_smooth_ms2
         s.prev_gas_cmd = new_prev_gas_cmd
         s.prev_effort = effort
