@@ -11,6 +11,10 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Changed
+- **AEB holds its braking force instead of easing off near the end**: the head start it reserves for the brakes to build up was being re-charged every moment, so as you slowed it quietly handed that distance back and the braking faded away while the warning was still going. It is now paid once, when AEB commits. Stops are shorter, finish further from the vehicle ahead, and hold a steady force the whole way.
+
+
 ### Fixed
 - **No screenshot on TruckersMP clips**: clips sent to help improve AEB/ACC from multiplayer had no picture of the road. They include one again.
 - **AEB braking with trailers**: fixed early/late AEB triggers and slow stops after hooking up, plus trailer brake delay is now realistic for all rigs; braking adjusts instantly to your current setup.

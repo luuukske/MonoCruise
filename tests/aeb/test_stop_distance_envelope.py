@@ -12,12 +12,13 @@ tau 0.19 s median / 0.31 s p90, dead time 0.12 s.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import pytest
 
 import core.sending_thread.pedal_capacity as pc
 from core.aeb.calibration import DEFAULT as CAL
-from core.aeb.thread import _required_decel_two_frame
+from core.aeb.thread import AEBThread, _required_decel_two_frame
 from core.sending_thread.accel_to_pedals import brake_curve_fraction
 from core.sending_thread.thread import _AEB_MEAS_TAU_S, AEBDecelController
 
@@ -67,9 +68,10 @@ class _Plant:
 def stop_against_stationary(
     v0_kmh: float, capacity: float, estimate: float, has_trailer: bool,
     plant_tau: float = PLANT_TAU_MEDIAN, start_gap: float = 500.0,
-    grade_pct: float = 0.0,
+    grade_pct: float = 0.0, cal=None,
 ) -> dict:
     """Run one AEB stop; returns residual gap, engage range, peak, saturation duty."""
+    CAL = globals()["CAL"] if cal is None else cal
     pad = (CAL.stop_buffer_response_trailer_s if has_trailer
            else CAL.stop_buffer_response_s)
     # Downhill: gravity is stolen from brake force and added to the demand.
@@ -83,15 +85,20 @@ def stop_against_stationary(
     v, gap, measured, now = v0_kmh / 3.6, start_gap, 0.0, 0.0
     engaged, published, last_change = False, 0.0, -1e9
     engage_gap, peak, sat, held = None, 0.0, 0, 0
+    reserve = _Reserve(None, 0.0, engaged=False)
 
     while now < 90.0 and gap > 0.0:
         required = (
-            _required_decel_two_frame(gap, v, gap, v, CAL, response_s=pad)
+            _required_decel_two_frame(
+                gap, v, gap, v, CAL, response_s=pad,
+                response_dist_m=reserve.released(now, CAL),
+            )
             if v > 0.0 else 0.0
         ) + downhill
         if not engaged:
             if required >= engage_bar and v * 3.6 >= CAL.aeb_min_engage_speed_kmh:
                 engaged, engage_gap = True, gap
+                reserve = _Reserve(pad * v, now)
 
         target_raw = max(0.0, min(required, effective_max)) if engaged else 0.0
         delta = target_raw - published
@@ -134,13 +141,49 @@ def stop_against_stationary(
             "saturated": sat / max(held, 1)}
 
 
+HELD = replace(CAL, aeb_reserve_release_s=0.0)
+
+
 @pytest.mark.parametrize("label,capacity,trailer", RIGS)
 @pytest.mark.parametrize("v0", SPEEDS_KMH)
 def test_a_correct_estimate_always_stops_in_time(label, capacity, trailer, v0):
-    """With the capacity estimate right, every rig stops short of the obstacle."""
-    r = stop_against_stationary(v0, capacity, capacity, trailer)
+    """With the capacity estimate right, every rig stops short of the obstacle.
+
+    Evaluated with the reserve held, which is the configuration that carries a
+    stopping margin. The shipped release deliberately spends it; that cost is
+    pinned separately in `test_the_shipped_release_trades_the_stopping_margin`
+    so it stays visible instead of quietly relaxing this bound.
+    """
+    r = stop_against_stationary(v0, capacity, capacity, trailer, cal=HELD)
     assert r["engage_gap"] is not None, f"{label} at {v0} km/h never engaged"
     assert r["gap"] > 0.0, f"{label} at {v0} km/h collided ({r['gap']:.2f} m)"
+
+
+def test_the_shipped_release_trades_the_stopping_margin():
+    """The measured price of `aeb_reserve_release_s`, kept in front of us.
+
+    Releasing the reserve is what keeps AEB responsive: it comes off the command
+    cap mid-stop, so a lead braking harder gets an actual increase (0.13 s to
+    answer a step) instead of "already at maximum". The cost is the margin. The
+    stop then lands on the obstacle at walking-pace-zero rather than short of it,
+    on every trailer rig, and no `stop_buffer` or partial release recovers it:
+    swept 0.2-1.8 m and 70-100% release, every combination is negative at p90
+    brake lag, and `stop_buffer` at 0.7 and above also brakes while creeping up
+    to a queue. The conflict is set by the engage bar, not by these knobs.
+    """
+    assert CAL.aeb_reserve_release_s > 0.0, "shipped configuration is released"
+    for _, capacity, trailer in RIGS:
+        if not trailer:
+            continue
+        released = stop_against_stationary(100, capacity, capacity, trailer)
+        held = stop_against_stationary(100, capacity, capacity, trailer, cal=HELD)
+        assert held["gap"] > released["gap"] + 1.0, (
+            "holding the reserve must still be the higher-margin option"
+        )
+        assert released["gap"] > -0.5, (
+            f"released stop must still finish at the bumper, not through it "
+            f"({released['gap']:.2f} m)"
+        )
 
 
 def test_the_measured_loaded_double_survives_the_model_over_reading_it():
@@ -195,29 +238,66 @@ def test_a_descent_engages_earlier_not_later(label, capacity, trailer, grade_pct
     decel instead of 8.7, and finishes with more gap in hand, not less.
     """
     for v0 in SPEEDS_KMH:
-        flat = stop_against_stationary(v0, capacity, capacity, trailer)
+        flat = stop_against_stationary(v0, capacity, capacity, trailer, cal=HELD)
         down = stop_against_stationary(v0, capacity, capacity, trailer,
-                                       grade_pct=grade_pct)
+                                       grade_pct=grade_pct, cal=HELD)
         assert down["gap"] > 0.0, f"{label} at {v0} km/h collided on {grade_pct}%"
         assert down["gap"] >= flat["gap"] - 1e-6, (
             f"{label} at {v0} km/h has less margin downhill than on the flat"
         )
 
 
-@pytest.mark.parametrize("label,capacity,trailer", RIGS)
-def test_the_controller_still_tracks_rather_than_slams(label, capacity, trailer):
-    """Entry at 0.85 of capability leaves only 5.6% below the command cap.
+class _Reserve:
+    """Minimal stand-in for the engagement state `_released_reserve_m` reads."""
 
-    That is thin enough that the pedal could sit at 1.0 for the whole event via
-    the saturation override, which would put us back at the engagement slam this
-    controller replaced. Most of a stop must still be genuine tracking.
+    def __init__(self, latched, at_mono, engaged=True):
+        self._engage_pad_dist_m = latched
+        self._engage_pad_at_mono = at_mono
+        self._engaged = engaged
+
+    released = AEBThread._released_reserve_m
+
+
+def test_the_build_up_reserve_is_latched_at_engagement():
+    """The reserve pays for build-up, which happens once, at the start.
+
+    Charging `response_s * v_closing` every tick hands the metres back as ego
+    slows: demand decays with no external cause and the brake fades out. On clip
+    e9fb04c9 the command fell 10.68 -> 0.41 m/s2 while the warn still sounded.
+    Latching it at engagement removes that decay.
     """
-    for v0 in (80, 100, 120):
-        r = stop_against_stationary(v0, capacity, capacity, trailer)
-        assert r["saturated"] < 0.5, (
-            f"{label} at {v0} km/h spent {r['saturated']:.0%} of the event at "
-            "full pedal; the decel controller is being bypassed"
-        )
+    latched = CAL.stop_buffer_response_trailer_s * 27.8   # ~11 m at 100 km/h
+
+    assert _Reserve(latched, 0.0, engaged=False).released(1.0, CAL) is None, (
+        "disengaged must keep the live term the entry decision needs"
+    )
+    assert _Reserve(latched, 0.0).released(0.0, CAL) == pytest.approx(latched)
+
+    # Shipped: bled off over the measured build-up, so demand goes fully live.
+    assert CAL.aeb_reserve_release_s > 0.0
+    mid = _Reserve(latched, 0.0).released(CAL.aeb_reserve_release_s / 2, CAL)
+    assert 0.0 < mid < latched
+    gone = _Reserve(latched, 0.0).released(CAL.aeb_reserve_release_s * 2, CAL)
+    assert gone == pytest.approx(0.0)
+
+    # Setting it to 0 holds the reserve for the whole event instead.
+    held = replace(CAL, aeb_reserve_release_s=0.0)
+    assert _Reserve(latched, 0.0).released(30.0, held) == pytest.approx(latched)
+
+
+def test_releasing_the_reserve_buys_headroom_to_answer_a_lead():
+    """Why the release is shipped: it gets the command off the command cap.
+
+    Held, the command sits at the cap for ~80% of the event, so a lead that
+    suddenly brakes harder gets no increase because AEB is already at maximum.
+    Released, it tracks what the threat actually needs and has somewhere to go.
+    """
+    released = stop_against_stationary(100, 13.89, 13.89, True)
+    held = stop_against_stationary(100, 13.89, 13.89, True, cal=HELD)
+    assert released["saturated"] < held["saturated"] - 0.1, (
+        f"released {released['saturated']:.0%} vs held {held['saturated']:.0%}: "
+        "the release must leave room to brake harder"
+    )
 
 
 def test_the_entry_bar_is_not_discounted_twice():

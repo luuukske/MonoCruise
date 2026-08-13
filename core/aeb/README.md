@@ -505,6 +505,23 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    capability_decel  = capacity_estimate − downhill_offset
    effective_required= required_decel + downhill_offset
    ```
+   **The build-up reserve is latched at engagement.** Before engagement the
+   `v_closing * response_s` term is live, because the entry decision has to
+   account for build-up. Once engaged it becomes a fixed distance
+   (`_engage_pad_dist_m`), cleared on disarm. Re-charging it every tick was
+   the "brakes hard then fades out" complaint: the reserve shrinks with speed,
+   so it hands metres back through the stop and the demand decays with it.
+   Replayed on clip e9fb04c9 the commanded decel fell 10.68 to 0.41 m/s²
+   across a 2.4 s event, with the warn still sounding at the end. Latched, the
+   command holds, the event is 0.7-0.9 s shorter, and the residual gap grows
+   from 3.1 m to 5.0 m at 100 km/h with the p90-lag margin unchanged.
+
+   Note what this exposes rather than causes: with `aeb_engage_frac` at 0.85
+   and `aeb_engage_frac_certain` at 0.90, AEB only fires when the threat needs
+   ~90% of the truck, so a *consistent* stop at that demand is a near-maximum
+   stop (~80% of the event at the command cap). The gentleness in the old
+   profile was the reserve leaking, not a designed proportionality.
+
    Two bases, and mixing them up is the "AEB steps in far too early and then
    crawls to a stop" bug. `effective_max` caps the *command*, because
    `ego_decel_frac` is the headroom the tracking controller corrects into.

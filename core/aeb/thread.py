@@ -324,8 +324,13 @@ def _world_to_ego_forward(dx: float, dz: float, ego_yaw_rad: float) -> float:
     return dx * math.sin(ego_yaw_rad) + dz * math.cos(ego_yaw_rad)
 
 
-def _response_dist(v: float, cal, response_s: float | None = None) -> float:
-    """Uncapped v * response_s; rejected cap/tiering in README §7."""
+def _response_dist(
+    v: float, cal, response_s: float | None = None,
+    dist_m: float | None = None,
+) -> float:
+    """Build-up reserve. `dist_m` is the value latched at engagement (README §7)."""
+    if dist_m is not None:
+        return max(0.0, dist_m)
     if response_s is None:
         response_s = cal.stop_buffer_response_s
     return abs(v) * response_s
@@ -348,6 +353,7 @@ def _codir_required_cap(
     ego_speed: float,
     cal,
     response_s: float | None = None,
+    response_dist_m: float | None = None,
 ) -> float:
     """Co-directional required decel cap (moving vs stopped lead); min with relative frame."""
     if fwd_dot < cal.co_directional_dot:
@@ -355,16 +361,15 @@ def _codir_required_cap(
     abs_ego = abs(ego_speed)
     gap_est = max(ego_travel - target_arc._dist_at_time(unbraked_ttc), 0.0)
     a_t = target_arc.decel if target_arc.decel > 1e-3 else 0.0
-    d_move = max(
-        gap_est - cal.stop_buffer - _response_dist(v_closing, cal, response_s),
-        1e-3,
-    )
+    reserve = _response_dist(v_closing, cal, response_s, response_dist_m)
+    d_move = max(gap_est - cal.stop_buffer - reserve, 1e-3)
     r_move = a_t + (v_closing * v_closing) / (2.0 * d_move)
     r_stop = 0.0
     if a_t > 0.0 and target_arc.speed > 1e-3:
         s_stop = (target_arc.speed * target_arc.speed) / (2.0 * a_t)
         d_stop = max(
-            gap_est + s_stop - cal.stop_buffer - _response_dist(abs_ego, cal, response_s),
+            gap_est + s_stop - cal.stop_buffer
+            - _response_dist(abs_ego, cal, response_s, response_dist_m),
             1e-3,
         )
         r_stop = (abs_ego * abs_ego) / (2.0 * d_stop)
@@ -379,17 +384,20 @@ def _required_decel_two_frame(
     cal,
     codir_cap: float = _INF,
     response_s: float | None = None,
+    response_dist_m: float | None = None,
 ) -> float:
     """Required decel: relative frame or ego fallback; optional co-dir cap (README continuous-decel)."""
     d_rel = (
-        closing_distance - cal.stop_buffer - _response_dist(v_closing, cal, response_s)
+        closing_distance - cal.stop_buffer
+        - _response_dist(v_closing, cal, response_s, response_dist_m)
     )
     abs_ego = abs(ego_speed)
     if d_rel > 1e-3:
         required = (v_closing * v_closing) / (2.0 * d_rel)
     else:
         d_ego = max(
-            ego_travel - cal.stop_buffer - _response_dist(abs_ego, cal, response_s),
+            ego_travel - cal.stop_buffer
+            - _response_dist(abs_ego, cal, response_s, response_dist_m),
             1e-3,
         )
         required = (abs_ego * abs_ego) / (2.0 * d_ego)
@@ -785,6 +793,9 @@ class AEBThread(BaseThread):
         self._follow_threat_ids: set[int] = set()
         # Continuous-decel state
         self._engaged: bool = False
+        # Build-up reserve latched at engagement (m); None = compute from speed.
+        self._engage_pad_dist_m: float | None = None
+        self._engage_pad_at_mono: float = 0.0
         # Engage confirm: geometry-graded window_s each frame (README tiered entry).
         self._engage_confirm = OccupancyConfirm(
             self._cal.aeb_confirm_occupancy,
@@ -932,6 +943,22 @@ class AEBThread(BaseThread):
                 return int(getattr(acc.data, "lead_id", -1))
         except (KeyError, AttributeError):
             return None
+
+    def _released_reserve_m(self, now_mono: float, cal) -> float | None:
+        """Engaged build-up reserve, released to the standoff (README §7).
+
+        None while disengaged, which leaves the live `v_closing * response_s`
+        term the entry decision needs. `aeb_reserve_release_s` 0 holds it for
+        the event; a positive value bleeds it off over the brake build-up.
+        """
+        latched = self._engage_pad_dist_m
+        if not self._engaged or latched is None:
+            return None
+        span = cal.aeb_reserve_release_s
+        if span <= 0.0:
+            return latched
+        done = max(0.0, min(1.0, (now_mono - self._engage_pad_at_mono) / span))
+        return latched * (1.0 - done)
 
     def _read_max_brake_ms2(self) -> float:
         """Max brake from sending_thread; fallback _FULL_BRAKE_DECEL if unavailable."""
@@ -1147,6 +1174,7 @@ class AEBThread(BaseThread):
             return
 
         now_mono = self._now()
+        engaged_pad_m = self._released_reserve_m(now_mono, cal)
 
         # Yaw-rate proxy: see core/aeb/README.md §1. Do NOT use RadarData.ego_curvature.
         if ego_speed > 0.5:
@@ -1700,6 +1728,7 @@ class AEBThread(BaseThread):
                             base_target_arc, fwd_dot, unbraked_ttc,
                             best_ego_travel, closing_unbraked, ego_speed, cal,
                             response_s=load_response_s,
+                            response_dist_m=engaged_pad_m,
                         )
 
                     # LOS-rate veto (engagement entry only): once per vehicle
@@ -1790,6 +1819,7 @@ class AEBThread(BaseThread):
             required_decel = _required_decel_two_frame(
                 best_closing_distance, best_v_closing, best_ego_travel,
                 ego_speed, cal, best_codir_cap, response_s=load_response_s,
+                response_dist_m=engaged_pad_m,
             )
 
         # Slope modifies a threat-derived demand, it never sources one: gravity
@@ -1900,6 +1930,7 @@ class AEBThread(BaseThread):
                     and not geom_threat_latched
                     and not latched_distance_threat):
                 self._engaged = False
+                self._engage_pad_dist_m = None
             self._engage_confirm.reset()
         else:
             # New engagements are gated by |ego_speed|: below the threshold
@@ -1926,6 +1957,11 @@ class AEBThread(BaseThread):
                 )
                 if certain or self._engage_confirm.confirmed(now_mono):
                     self._engaged = True
+                    if best_v_closing > 0.0 and best_v_closing < _INF:
+                        self._engage_pad_dist_m = _response_dist(
+                            best_v_closing, cal, load_response_s,
+                        )
+                        self._engage_pad_at_mono = now_mono
 
         # Promote every currently-colliding target into the latched set so
         # subsequent frames keep them in the pipeline and in the hold check.
@@ -2406,6 +2442,7 @@ class AEBThread(BaseThread):
                 pass
         self._latched_filter_ego_kmh = None
         self._engaged = False
+        self._engage_pad_dist_m = None
         self._engage_confirm.reset()
         self._warn_confirm.reset()
         self._warn_vetoed_confirm.reset()

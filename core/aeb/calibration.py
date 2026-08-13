@@ -26,11 +26,14 @@ class AEBCalibration:
     corridor_margin: float = 0.5
     # Near-parallel capsule contacts: margin * scale at parallel; see core/aeb/README.md.
     capsule_parallel_margin_scale: float = 0.3
-    stop_buffer: float = 0.2
+    stop_buffer: float = 0.7
     # Response-lag gap term (v_closing * this): brake build-up, and since the
     # engage bar moved off ego_decel_frac, the only entry margin (README §7).
     stop_buffer_response_s: float = 0.30
     stop_buffer_response_trailer_s: float = 0.40
+    # Reserve release after engagement: 0 holds it, 0.35 bleeds it off over the
+    # measured build-up. Measured trade in TUNING.md; held is shipped.
+    aeb_reserve_release_s: float = 0.35
     # Rejected 2026-07-19: response distance cap, threat-age tiering, engage 0.9 (README §7).
     elevation_margin: float = 5.0
     max_range: float = 200.0
@@ -143,10 +146,10 @@ class AEBCalibration:
     # While engaged the pedal controller tracks this target, so a slow software ramp
     # only delays the bite; the plant's own 0.15 s lag is the real jerk limit.
     aeb_target_rate_engaged_ms3: float = 30.0
-    aeb_engage_frac: float = 0.85
+    aeb_engage_frac: float = 0.90
     # Graded hedge skip for aligned in-lane traffic; 0.85 in-game trial from
     # 2026-08-11 equals aeb_engage_frac, so grading is flat (README, TUNING.md).
-    aeb_engage_frac_certain: float = 0.85
+    aeb_engage_frac_certain: float = 0.90
     aeb_disarm_frac: float = 0.45
     # Geometry latch while colliding unbraked ttc inside window (anti-pumping; README).
     disarm_hold_ttc_s: float = 3.0
@@ -164,8 +167,7 @@ class AEBCalibration:
     # Fully engage-vetoed out-of-lane sets warn only after this occupancy window.
     # Latency, never silence: a persisting course still warns (README).
     aeb_warn_confirm_vetoed_s: float = 1.00
-    # Demand bar for warn_by_decel; 0.60 with the windows above ~42 false_warn.
-    aeb_warn_frac: float = 0.60
+    aeb_warn_frac: float = 0.50
     # Evidence-class warn windows: oncoming sets and sets a full lane off the
     # ego arc are the two phantom-beep classes (README warn persistence).
     aeb_warn_confirm_oncoming_s: float = 2.00
