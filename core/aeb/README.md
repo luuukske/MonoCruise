@@ -435,8 +435,9 @@ When **any** slot in the frame has `is_tmp`, AEB pre-filters targets by
 - ref **≤ 40 km/h** → threat only if rel **> 40 km/h**
 
 Reference is current ego speed unless **latched**: the first frame with
-`AEBState ≥ WARN` or addressing brake (`_read_user_braking`: driver pedal or
-CC/ACC program end brake) saves `ego_kmh`;
+`AEBState ≥ WARN` or addressing brake (`_read_addressing_brake`: driver pedal
+or CC/ACC program brake above the 0.03 deadzone, not OPD coast-down) saves
+`ego_kmh`;
 latch held until state drops below WARN **and** brake released; cleared when
 the session is no longer TMP.
 
@@ -708,29 +709,31 @@ aeb.snapshot                       # AEBSnapshot: full debug state
      demand has not reached `aeb_warn_near_full_frac · effective_max`,
      `AEB_warn` is forced false: a driver already braking is not warned about a
      threat they are handling. This silences the cue only. Engagement, the
-     published target, and `AEB_brake` are untouched. Two sources count, each
-     compared against `_USER_BRAKE_LATCH_THRESHOLD` (0.03):
-     - `main_pedal_thread.brakeval`, the physical brake axis.
-     - `sending_thread.mapper_command_brake`, the CC/ACC/limiter command.
+     published target, and `AEB_brake` are untouched. Three sources count:
+     - `main_pedal_thread.brakeval`, the physical brake axis, compared against
+       `_USER_BRAKE_LATCH_THRESHOLD` (0.03).
+     - `main_pedal_thread.opdbrakeval`, any OPD brake including the coast-down
+       floor. Any value above zero silences the cue.
+     - `sending_thread.mapper_command_brake`, the CC/ACC/limiter command. Any
+       value above zero silences the cue.
 
-     The threshold is deliberately low: a light dab still carries braking force
-     and signals that the driver saw the hazard, and AEB engagement remains the
-     emergency override when the dab is not enough.
+     The physical-pedal threshold is a joystick deadzone: a light dab still
+     counts, and AEB engagement remains the emergency override if it is not
+     enough. OPD and the mapper have no floor: any commanded brake means
+     MonoCruise is already slowing the truck.
 
-     `main_pedal_thread.opdbrakeval` is **excluded on purpose**. It sits below
-     `brakeval` whenever the pedal is pressed (measured: 0.28 -> 0.21,
-     0.17 -> 0.13), so it adds nothing there; its only unique contribution is
-     the OPD coast-down floor, which is capped by `max_opd_brake_variable`
-     (default 0.04) but still clears 0.03. Including it would read ordinary
-     coasting, the default OPD state, as a deliberate danger response: measured
-     at 518 such ticks over one session.
-
-     Both taps are AEB-free by construction: `brakeval` is raw axis input, and
+     All three taps are AEB-free by construction: `brakeval` is raw axis input,
+     `opdbrakeval` is snapped before the AEB override, and
      `mapper_command_brake` is read upstream of the point where AEB's FF and
      slam merge into the pedal. **Never source this from `abackward` or
      `brake_output`**: both contain AEB's own brake, so AEB would read its own
      output back and silence its own warning. The old `if self._engaged:
      return False` guard existed only to paper over that contamination.
+
+     The TMP rel-speed latch and the shadow-near sampler still use
+     `_read_addressing_brake` (physical / mapper above 0.03, no OPD): OPD
+     coast-down is on whenever the foot is off the gas, and would pin that
+     latch for the rest of the session.
 7. Hold semantics: warn/brake state holds for 0.3 s after a downgrade to
    suppress chatter, identical to the old WARN→STANDBY hold. The hold shapes
    `aeb_state` and `AEB_brake`, but must **not** re-assert `AEB_warn` on a tick
@@ -1078,7 +1081,7 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 - **A measured miss may remove certainty, never grant it.** The vetoes exist because arc-projected lane membership is an extrapolation and the CBDR miss is a measurement, so a *large* measured miss removes certainty (head-on bar, matched-speed neighbour). The converse does not hold: `d_miss` scales as `omega * R^2 / v_rel`, so a small value at range is not evidence of danger, it is a short-baseline fit over a long lever arm. A `lane_confidence_miss_m` clause that restored certainty on a small miss was tried and removed after the corpus grew: it was wrong on all four clips it affected. Also do not let a veto fire with no measurement at all unless its own physics stands alone (the ego-turn branch does; the matched-speed branch deliberately does not).
 - **The engage fraction is graded by certainty, and only by certainty.** `aeb_engage_frac_certain` applies when a colliding, non-engage-vetoed target is in `certain_geom_ids`, the same set that grants the instant confirm path. Do not widen it to `nearcertain_geom_ids` or to demand magnitude: required-decel size is not a certainty signal (see the tiered entry gate), and the corpus shows every clip the lower bar newly brakes on is geometrically identical to the ones it rescues. Unlike the veto thresholds it has no flat band, so re-price it against the corpus rather than assuming it still holds.
 - **Co-directional targets are exempt from the lane-confidence range and the oblique confirm window.** Both exemptions rest on the same fact: a pair travelling the same way shares whatever bend it is on, so the bend's lateral error is common-mode. Removing either one costs true positives on vehicles merging in and stopping ahead, which read as oblique purely because `fwd_dot` lands just under `aeb_certain_fwd_dot`.
-- **Warn suppression while already braking.** `aeb_warn` is suppressed when `_read_user_braking()` is true UNLESS `effective_required >= cal.aeb_warn_near_full_frac × effective_max_decel`. That helper is true for the driver's physical `brakeval` or the mapper's `sending_thread.mapper_command_brake` (CC/ACC/limiter), each above `_USER_BRAKE_LATCH_THRESHOLD` (0.03). Both taps are AEB-free by construction; never source it from `abackward` or `brake_output`, which carry AEB's own slam and FF and would silence the warn during engagement. See section 3 item 6 for why `opdbrakeval` is excluded. The driver / ACC already addressing the threat does not need a redundant alert: only surface it when AEB itself wants near-full brake.
+- **Warn suppression while already braking.** `aeb_warn` is suppressed when `_read_user_braking()` is true UNLESS `effective_required >= cal.aeb_warn_near_full_frac × effective_max_decel`. That helper is true for the driver's physical `brakeval` above `_USER_BRAKE_LATCH_THRESHOLD` (0.03), or any `opdbrakeval` / `sending_thread.mapper_command_brake` above zero. All three taps are AEB-free by construction; never source it from `abackward` or `brake_output`, which carry AEB's own slam and FF and would silence the warn during engagement. The driver / ACC / OPD already addressing the threat does not need a redundant alert: only surface it when AEB itself wants near-full brake.
 
 ---
 

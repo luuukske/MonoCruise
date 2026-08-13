@@ -25,10 +25,9 @@ Consumers wanting the driver's intent must read the `opd*` pair; reading
 `brake_output` instead feeds AEB's own slam back in. Keep any new override
 branch below the `opd*` snapshot.
 
-`opdbrakeval` is recorded in AEB clips but is **not** used by AEB warn
-suppression: it never exceeds `brakeval` under pedal input, and its coast-down
-floor would make ordinary OPD coasting look like braking. See `core/aeb/README.md`
-section 3 item 6.
+`opdbrakeval` is recorded in AEB clips. Any value above zero silences AEB warn
+(along with `mapper_command_brake`). See `core/aeb/README.md` section 3 item 6.
+`brake_output` is still unusable for this: AEB writes it.
 
 ## Hat virtual buttons
 

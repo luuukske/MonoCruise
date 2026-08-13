@@ -58,9 +58,32 @@ _FULL_BRAKE_DECEL_FALLBACK: float = 7.8
 _TMP_FILTER_EGO_SPLIT_KMH: float = 40.0
 _TMP_FILTER_REL_ABOVE_SPLIT_KMH: float = 15.0
 _TMP_FILTER_REL_AT_OR_BELOW_SPLIT_KMH: float = 40.0
-# Low on purpose: a light dab still carries braking force and shows the driver
-# saw the hazard. AEB engagement is the emergency override if it is not enough.
+# Physical-pedal deadzone only. OPD and mapper_command_brake silence warn at
+# any value above zero: they are already a commanded brake.
 _USER_BRAKE_LATCH_THRESHOLD: float = 0.03
+
+
+def _user_braking_from_sources(
+    brakeval: float = 0.0,
+    opdbrakeval: float = 0.0,
+    program_brake: float = 0.0,
+) -> bool:
+    """True when a non-AEB brake source should silence the warn cue."""
+    if brakeval > _USER_BRAKE_LATCH_THRESHOLD:
+        return True
+    return opdbrakeval > 0.0 or program_brake > 0.0
+
+
+def _addressing_brake_from_sources(
+    brakeval: float = 0.0,
+    program_brake: float = 0.0,
+) -> bool:
+    """TMP latch / shadow sampler: physical or mapper above the deadzone."""
+    return (
+        brakeval > _USER_BRAKE_LATCH_THRESHOLD
+        or program_brake > _USER_BRAKE_LATCH_THRESHOLD
+    )
+
 
 _STOP_BUFFER_FIXED: float = 1.6
 _ARC_START_PCTG: float = 0.2
@@ -849,32 +872,15 @@ class AEBThread(BaseThread):
 
     def _read_user_braking(self) -> bool:
         """Suppress warn when user/CC already braking unless near-full AEB demand."""
-        # Physical pedal only. opdbrakeval is deliberately excluded: it is below
-        # brakeval whenever the pedal is pressed, and its coast-down floor would
-        # read ordinary OPD coasting as a danger response.
-        try:
-            pt = registry.get_thread("main_pedal_thread")
-            if pt is not None and pt.is_alive():
-                with pt.data._lock:
-                    driver_brake = float(getattr(pt.data, "brakeval", 0.0))
-                if driver_brake > _USER_BRAKE_LATCH_THRESHOLD:
-                    return True
-        except (KeyError, AttributeError):
-            pass
+        brakeval, _, opdbrakeval = self._read_pedals_for_capture()
+        program_brake = self._read_program_brake_for_capture()
+        return _user_braking_from_sources(brakeval, opdbrakeval, program_brake)
 
-        # Program brake from CC/ACC/limiter. mapper_command_brake is AEB-free by
-        # construction: AEB's FF and slam merge into abackward after the mapper.
-        try:
-            st = registry.get_thread("sending_thread")
-            if st is None or not st.is_alive():
-                return False
-            with st.data._lock:
-                return (
-                    float(getattr(st.data, "mapper_command_brake", 0.0))
-                    > _USER_BRAKE_LATCH_THRESHOLD
-                )
-        except (KeyError, AttributeError):
-            return False
+    def _read_addressing_brake(self) -> bool:
+        """TMP rel-speed latch and shadow sampler. OPD coast-down is excluded."""
+        brakeval, _, _ = self._read_pedals_for_capture()
+        program_brake = self._read_program_brake_for_capture()
+        return _addressing_brake_from_sources(brakeval, program_brake)
 
     def _update_follow_threats(
         self,
@@ -1084,7 +1090,7 @@ class AEBThread(BaseThread):
             if (aeb_active
                     and new_state == AEBState.STANDBY
                     and not self._engaged
-                    and not self._read_user_braking()
+                    and not self._read_addressing_brake()
                     and snap.ego_speed > _SHADOW_MIN_SPEED_MS
                     and _should_sample_shadow_tn(snap)):
                 recorder.trigger(
@@ -2158,7 +2164,7 @@ class AEBThread(BaseThread):
         except (KeyError, AttributeError):
             pass
 
-        user_brake = self._read_user_braking()
+        user_brake = self._read_addressing_brake()
         if not tmp_traffic_session:
             self._latched_filter_ego_kmh = None
         elif not aeb_warn and not user_brake:

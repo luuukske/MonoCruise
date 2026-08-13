@@ -10,7 +10,8 @@ from core.aeb.clip_replay import decode_radar_stream, nearest_frame_t
 from core.aeb.clip_schema import Clip
 from core.aeb.filters import VehicleCurvatureBlender, build_pipeline
 from core.aeb.thread import (
-    AEBSnapshot, AEBState, AEBThread, _INF, _USER_BRAKE_LATCH_THRESHOLD,
+    AEBSnapshot, AEBState, AEBThread, _INF,
+    _addressing_brake_from_sources, _user_braking_from_sources,
 )
 
 
@@ -116,8 +117,13 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
         t._read_radar_snapshot = lambda s=snap: s
         t._read_max_brake_ms2 = lambda mb=tk.consumed.max_brake_ms2: mb
         t._read_user_braking = (
-            lambda bv=max(tk.consumed.brakeval, tk.consumed.program_brake): (  # noqa: B008
-                bv > _USER_BRAKE_LATCH_THRESHOLD
+            lambda c=tk.consumed: _user_braking_from_sources(
+                c.brakeval, c.opdbrakeval, c.program_brake,
+            )
+        )
+        t._read_addressing_brake = (
+            lambda c=tk.consumed: _addressing_brake_from_sources(
+                c.brakeval, c.program_brake,
             )
         )
         t._now = lambda tm=tk.t_mono: tm

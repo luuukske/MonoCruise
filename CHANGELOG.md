@@ -16,6 +16,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 
 ### Fixed
+- **AEB still beeped during light cruise or one-pedal braking**: a small ACC or OPD brake did not count as braking, so the warning kept sounding while MonoCruise was already slowing you. Any of that brake now silences it. Hard automatic braking still warns you.
 - **No screenshot on TruckersMP clips**: clips sent to help improve AEB/ACC from multiplayer had no picture of the road. They include one again.
 - **AEB braking with trailers**: fixed early/late AEB triggers and slow stops after hooking up, plus trailer brake delay is now realistic for all rigs; braking adjusts instantly to your current setup.
 
