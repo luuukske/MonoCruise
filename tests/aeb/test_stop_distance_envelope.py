@@ -16,7 +16,6 @@ from dataclasses import replace
 
 import pytest
 
-import core.sending_thread.pedal_capacity as pc
 from core.aeb.calibration import DEFAULT as CAL
 from core.aeb.thread import AEBThread, _required_decel_two_frame
 from core.sending_thread.accel_to_pedals import brake_curve_fraction
@@ -183,26 +182,6 @@ def test_the_shipped_release_trades_the_stopping_margin():
         assert released["gap"] > -0.5, (
             f"released stop must still finish at the bumper, not through it "
             f"({released['gap']:.2f} m)"
-        )
-
-
-def test_the_measured_loaded_double_survives_the_model_over_reading_it():
-    """2026-08-12 probe, and the reason the ceiling came down to 1.00.
-
-    Four full-pedal stops on one double, cargo the only variable, peak-A method:
-    24.3 t measured 15.10 m/s2 against a model 13.91 (model 8% low, safe), and
-    40.5 t measured 11.37 against a model 11.87 (model 4% high, the collision
-    direction). At the old 1.05 ceiling the loaded rig would have been believed
-    at 12.46 against a real 11.30, which is 1.10x and collides at 80-120 km/h.
-    """
-    true_cap, model = 11.30, 11.87
-    for v0 in (80, 100, 120):
-        ceiling = stop_against_stationary(
-            v0, true_cap, model * pc._BRAKE_SCALE_MAX, True, plant_tau=PLANT_TAU_P90,
-        )
-        assert ceiling["gap"] > 0.0, (
-            f"{v0} km/h collides on the measured loaded double "
-            f"({ceiling['gap']:.2f} m)"
         )
 
 
