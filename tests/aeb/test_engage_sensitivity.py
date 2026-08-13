@@ -84,16 +84,14 @@ def test_graded_bar_brakes_earlier_on_an_in_lane_obstacle():
     )
 
 
-def test_shipped_default_grades_certain_geometry_later_not_earlier():
-    """Pin the inverted grading so flipping it back is a deliberate, visible edit.
+def test_shipped_default_does_not_grade_certain_geometry_earlier():
+    """Certain-geometry bar must not sit below the base bar.
 
-    `aeb_engage_frac_certain` started as a *lower* bar (0.70 in preview.12): where
-    the geometry is certain, the uncertainty hedge buys nothing, so engage sooner.
-    It is now 0.90 against a 0.85 base, which inverts that: aligned in-lane traffic
-    needs *more* demand than oblique traffic before AEB commits. Deliberate, for
-    responsiveness feel, and it makes the rear-end case the latest-engaging one.
+    `aeb_engage_frac_certain` started as a lower bar (0.70 in preview.12). The
+    2026-08-11 in-game trial flattened it onto `aeb_engage_frac`. Pin that
+    certain traffic is never invited in earlier than oblique traffic.
     """
-    assert CAL.aeb_engage_frac_certain > CAL.aeb_engage_frac
+    assert CAL.aeb_engage_frac_certain >= CAL.aeb_engage_frac
 
 
 def test_graded_bar_is_the_only_thing_that_changed():

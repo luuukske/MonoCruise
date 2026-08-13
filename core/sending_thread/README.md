@@ -122,7 +122,7 @@ No fade: ETS2 exposes neither brake temperature nor wear, so neither can be comp
 The old baseline was inverted *and* low, so for a loaded rig the partial-pedal candidate cap
 sat at 7.9 m/s² against a real 13-14: every truthful sample was rejected as contaminated and
 the estimate froze at ~10. That is why AEB believed 10.0 while the truck delivered 14
-(`docs/aeb_high_speed_stop_overshoot.md`, clip ab291591).
+(high-speed stop overshoot notes, clip ab291591).
 
 **Cargo only counts while a trailer is attached.** The SDK keeps reporting the assigned
 job's `cargoMass` after you unhook, which read a bobtail as 39.8 t instead of 10.7 t and

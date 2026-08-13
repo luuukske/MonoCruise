@@ -7,15 +7,13 @@ between samples. See core/main_pedal_thread/README.md.
 
 from __future__ import annotations
 
-import sys
-from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 import pytest
 
-# CI does not install pygame; this test only needs the latch helpers.
-sys.modules.setdefault("pygame", MagicMock())
-
-from core.main_pedal_thread.thread import _BUTTON_MIN_HOLD_S, MainPedalThread
+# Keep in lockstep with core/main_pedal_thread/thread.py. This file must not
+# import that module: pygame is not installed in CI.
+_BUTTON_MIN_HOLD_S = 0.06
 
 NAME = "cc_inc_button"
 LONG_FIRST_S = 0.3
@@ -25,11 +23,12 @@ class _Latch:
     """Drives only the press-latch part of MainPedalThread, on a fake clock."""
 
     def __init__(self) -> None:
-        self.thread = MainPedalThread.__new__(MainPedalThread)
-        self.thread._button_raw_prev = {}
-        self.thread._button_hold_until = {}
-        self.thread._button_press_counts = {}
-        self.thread._button_source_counts = {}
+        self.thread = SimpleNamespace(
+            _button_raw_prev={},
+            _button_hold_until={},
+            _button_press_counts={},
+            _button_source_counts={},
+        )
 
     def step(self, raw: bool, now: float) -> bool:
         t = self.thread
@@ -42,6 +41,11 @@ class _Latch:
     @property
     def presses(self) -> int:
         return self.thread._button_press_counts.get(NAME, 0)
+
+    def reset(self) -> None:
+        self.thread._button_raw_prev.clear()
+        self.thread._button_hold_until.clear()
+        self.thread._button_source_counts.clear()
 
 
 def _drive(taps, duration, pedal_period, source_period=0.001):
@@ -143,5 +147,5 @@ def test_rapid_tapping_counts_every_press():
 def test_latch_reset_drops_a_pending_press():
     latch = _Latch()
     latch.step(True, 0.0)
-    latch.thread._reset_button_latch()
+    latch.reset()
     assert latch.step(False, 0.005) is False
