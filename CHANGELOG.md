@@ -11,6 +11,11 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.0-preview.19] - 2026-08-13
+### Changed
+- **AEB intervention popup**: the intervention popup now a notice. a long time ask from a community member, i forgot about...
+
 ### Fixed
 - **AEB beep cut off the moment the warning ended**: the alert stopped mid-chirp as soon as AEB let go, often while you were still braking or coasting. It now finishes the current beep and plays one more after the warning clears.
 
