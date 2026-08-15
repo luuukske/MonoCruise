@@ -29,6 +29,20 @@ branch below the `opd*` snapshot.
 (along with `mapper_command_brake`). See `core/aeb/README.md` section 3 item 6.
 `brake_output` is still unusable for this: AEB writes it.
 
+## Binding capture runs with the game closed
+
+`loop()` returns early when telemetry is not connected, but button assignment
+must still work, so that branch keeps `_ensure_button_devices()` and
+`_update_joystick_states()`. Those publish `joystick_button_states` (the pressed
+highlight in settings), detect the joystick capture press, and publish
+`joystick_capture_ready`, which gates the HID capture scan in
+`button_device_thread`. With the calls behind the telemetry gate, both joystick
+and HID assignment were dead whenever the game was not running, while keyboard
+assignment kept working because it captures from an OS hook.
+
+Nothing can act on a press there: `_read_cc_button_states` stays below the gate,
+so `cc_*_held` remains False while the game is closed.
+
 ## Hat virtual buttons
 
 `virtual_code = button_count + hat_index * 4 + direction_index`

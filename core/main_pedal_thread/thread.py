@@ -302,6 +302,10 @@ class MainPedalThread(BaseThread):
             # See `core/main_pedal_thread/README.md`.
             self._process_pygame_events(0.0)
             self._tick_reconnect()
+            # Binding capture must work with the game closed; this publishes
+            # joystick_capture_ready too. See `core/main_pedal_thread/README.md`.
+            self._ensure_button_devices()
+            self._update_joystick_states()
             with self.data._lock:
                 self.data.gas_output  = 0.0
                 self.data.brake_output = 0.0

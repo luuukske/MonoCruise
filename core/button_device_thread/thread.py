@@ -122,6 +122,8 @@ class ButtonDeviceThread(BaseThread):
         # (vid_pid, button_id) being hold-confirmed, and when the hold started
         self._capture_candidate: tuple[str, int] | None = None
         self._capture_candidate_ts = 0.0
+        # One debug line per capture session while the pygame gate blocks
+        self._capture_wait_logged = False
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -310,6 +312,9 @@ class ButtonDeviceThread(BaseThread):
             if not self._pygame_capture_ready():
                 # Pedal thread has not published the all-joysticks set yet;
                 # opening now would raw-scan pygame-owned devices (e.g. wheel).
+                if not self._capture_wait_logged:
+                    self._capture_wait_logged = True
+                    logger.debug("capture waiting on main_pedal_thread joystick snapshot")
                 return
             self._capture_opened = True
             self._capture_started_ts = time.monotonic()
@@ -446,6 +451,10 @@ class ButtonDeviceThread(BaseThread):
         """True when main_pedal_thread published joystick_capture_ready."""
         try:
             pt = registry.get_thread("main_pedal_thread")
+            if not pt.is_alive():
+                # Nothing owns the joysticks then, and a dead thread never
+                # publishes the flag. See the README.
+                return True
             with pt.data._lock:
                 return bool(pt.data.joystick_capture_ready)
         except Exception:
@@ -486,6 +495,7 @@ class ButtonDeviceThread(BaseThread):
         self._capture_candidate = None
         self._capture_candidate_ts = 0.0
         self._capture_opened = False
+        self._capture_wait_logged = False
 
     # ── Device management ─────────────────────────────────────────────────────
 

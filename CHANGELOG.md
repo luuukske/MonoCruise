@@ -18,7 +18,8 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **ACC follows a little further back by default**: the starting following distance moved up one step.
 
 ### Fixed
-- **AEB braking for traffic under a bridge you are driving over**: MonoCruise decided what counts as "on your road" by drawing a straight line out from the nose of your truck, with several metres of slack either side. Coming down a hill onto an overpass, that line pointed straight at the road underneath, so the cars down there looked like they were in your lane. It now works out the shape of the road ahead instead, and reads the tilt of each vehicle to see whether it is sitting on your road or a different one. Traffic under a bridge inside 30 m is now essentially always ignored.
+- **Wheel and stalk buttons could not be assigned with the game closed**: clicking a cruise control button in the settings and pressing a button on your wheel, stalk or gamepad did nothing unless the game was running, while keyboard keys assigned fine. Assignment now works with the game closed, and buttons you already assigned show up as pressed there too.
+- **AEB braking for traffic under a bridge**: MonoCruise used to see cars under bridges as on your road due to a straight-ahead check. It now follows the road's shape and checks each vehicle's tilt to tell if it's actually on your route. Cars under bridges within 30 m are now ignored.
 - **ACC losing the vehicle ahead on hills at speed**: that same straight line went badly wrong over crests and dips, and the faster you went the further ahead your lead was, so it fell outside the slack and ACC let go of it. Above 85 km/h it was dropping 4 % of the traffic it should have been following, and over 11 % on steep grades. Both are now effectively zero.
 
 ## [1.1.0-preview.19] - 2026-08-13

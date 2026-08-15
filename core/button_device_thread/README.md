@@ -103,3 +103,10 @@ capture session.
 Capture must not open before `main_pedal_thread` publishes
 `joystick_capture_ready`, or pygame-owned devices get raw-scanned and report
 phantom buttons.
+
+That flag comes from `_update_joystick_states`, which `main_pedal_thread` runs
+whether or not the game is connected; see its README. If that thread is not
+alive the gate opens anyway, because nothing then owns the joysticks and a flag
+a dead thread will never publish would disable capture outright. The gate is the
+whole feature when it blocks, so a blocked wait logs one debug line per capture
+session.
