@@ -1526,7 +1526,12 @@ before doing any further work:
 - Reads `RadarData` (vehicles + ego snapshot) and telemetry blinkers.
 - Advances only when `t_mono` changed: paused / stale frames hold
   the previous lead list and skip tracker integration.
-- Publishes to `self.data`.
+- Forwards `RadarData.off_surface_ids` into `ACCTracker.update`. The tracker
+  drops those ids and forgets their track state; it does **not** run an
+  elevation test of its own (`core/radar/README.md` §15). The old local
+  ±5 m pitch window is what dropped leads on hills at speed: it lost 4.06 %
+  of candidate leads above 85 km/h and 11.31 % on grades past 3 deg, both
+  now 0.00 % / 0.21 %. `ACCTracker.update` no longer takes `ego_pitch_rad`.
 
 ### Registry names
 
@@ -1550,6 +1555,10 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 2. **AEB uses yaw-rate proxy, ACC uses history fit.** Codified in
    `core/aeb/README.md` and `core/radar/README.md` §11. Don't cross
    the streams.
+2b. **Elevation is radar's call, not the tracker's.** Consume
+   `off_surface_ids`; never reintroduce a pitch-projected `expected_y`
+   check here. The shared gate exists so ACC and AEB cannot disagree about
+   which vehicles are on ego's road (`core/radar/README.md` §15).
 3. **No control law lives in this module.** `core/cruise_control_thread`
    owns longitudinal decisions. If you're tempted to compute an
    accel cap here, stop and put it there instead.

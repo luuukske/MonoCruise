@@ -388,6 +388,10 @@ class FilterContext:
     # Latched ids bypass TMP rel-speed prefilter (README latched-threat).
     latched_threat_ids: set = field(default_factory=set)
 
+    # Ids the shared radar elevation gate placed off ego's road surface,
+    # already minus the latched set (core/radar/README.md §15).
+    off_surface_ids: frozenset = frozenset()
+
     # follow_threat_ids: behavioral slowing lead (README follow-threat).
     follow_threat_ids: set = field(default_factory=set)
 
@@ -493,15 +497,15 @@ class RangeFilter:
 
 
 class ElevationFilter:
+    """Off ego's road surface per the shared radar gate (core/radar/README.md §15)."""
+
     name = "ElevationFilter"
 
     def __init__(self, cal: AEBCalibration | None = None) -> None:
         pass
 
     def apply(self, ctx: FilterContext) -> FilterResult:
-        rz = _world_to_ego_forward(ctx.dx, ctx.dz, ctx.ego_yaw_rad)
-        expected_y = ctx.ego_y + rz * math.tan(ctx.ego_pitch_rad)
-        if abs(ctx.v.position.y - expected_y) > ctx.cal.elevation_margin:
+        if ctx.v.id in ctx.off_surface_ids:
             return _suppress("ElevationFilter")
         return _PASS
 

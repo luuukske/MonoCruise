@@ -15,12 +15,19 @@ from core.aeb.thread import AEBState
 from core.radar.reader import _BUF_SIZE, _TOTAL_FORMAT
 
 from tests.aeb.test_clip_capture import _make_clip
+from core.radar.elevation import BODY_DATUM_FRAC
+
+
+# Traffic position.y is the body datum, not ground level: ego coordinateY is
+# the road surface and a body sits BODY_DATUM_FRAC of its height above it.
+_BODY_H: float = 3.0
+_BODY_Y: float = BODY_DATUM_FRAC * _BODY_H
 
 
 def _one_vehicle_buf(px: float, pz: float, vid: int, speed: float) -> bytes:
     """Traffic buffer with a single populated vehicle in slot 0."""
     flat: list = []
-    slot0 = [px, 0.0, pz, 1.0, 0.0, 0.0, 0.0, 2.5, 3.0, 6.0, speed, 0.0] + [0, vid, 0, 0] + [0.0] * 30
+    slot0 = [px, _BODY_Y, pz, 1.0, 0.0, 0.0, 0.0, 2.5, _BODY_H, 6.0, speed, 0.0] + [0, vid, 0, 0] + [0.0] * 30
     flat += slot0
     for _ in range(39):
         flat += [0.0] * 12 + [0, 0, 0, 0] + [0.0] * 30

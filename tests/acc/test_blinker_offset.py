@@ -45,8 +45,8 @@ def _tick(
 ):
     return tracker.update(
         now_mono=t, dt=_DT, vehicles=vehicles,
-        ego_x=ego_x, ego_y=0.0, ego_z=ego_z,
-        ego_yaw_rad=_EGO_YAW, ego_pitch_rad=0.0,
+        ego_x=ego_x, ego_z=ego_z,
+        ego_yaw_rad=_EGO_YAW,
         ego_speed_ms=ego_speed, ego_steer=0.0,
         ego_history_kappa=0.0,
         blinker_left=blinker_left, blinker_right=blinker_right,

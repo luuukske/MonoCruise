@@ -93,8 +93,6 @@ _RISK_CONFIRM_DURATION_ONCOMING: float = _RISK_CONFIRM_DURATION * 2.0
 _REAR_DOT_THRESHOLD: float = -0.5
 _OVERTAKE_SPEED_MARGIN: float = 2.0
 
-_ELEVATION_MARGIN_M: float = 5.0
-
 _CROSS_SAFE_ZONE_BASE: float = 2.0
 _CROSS_SAFE_ZONE_SPEED: float = 0.3
 
@@ -1204,7 +1202,11 @@ class AEBThread(BaseThread):
             return
         (vehicles, ego_x, ego_y, ego_z, ego_yaw_rad, ego_speed, ego_pitch_deg,
          steer, ego_has_trailer, _ego_curvature_from_history, tmp_traffic_session,
-         paused, radar_t_mono) = snapshot
+         paused, radar_t_mono, off_surface_ids) = snapshot
+
+        # Latched threats keep their pipeline seat: the shared gate must never
+        # drop a target AEB is already braking for. See core/radar/README.md §15.
+        off_surface_ids = off_surface_ids - self._latched_threat_ids
 
         vehicles_eff = _swap_trailer_kinematics(vehicles)
 
@@ -1419,9 +1421,7 @@ class AEBThread(BaseThread):
                 dz = vz - ego_z
                 if dx * dx + dz * dz > max_range_sq:
                     continue
-                rz = _world_to_ego_forward(dx, dz, ego_yaw_rad)
-                expected_y = ego_y + rz * math.tan(ego_pitch_rad)
-                if abs(v.position.y - expected_y) > cal.elevation_margin:
+                if v.id in off_surface_ids:
                     continue
                 if (tmp_traffic_session
                         and v.id not in self._latched_threat_ids
@@ -1481,9 +1481,7 @@ class AEBThread(BaseThread):
                 dist_sq = dx * dx + dz * dz
                 if dist_sq > max_range_sq:
                     continue
-                rz = _world_to_ego_forward(dx, dz, ego_yaw_rad)
-                expected_y = ego_y + rz * math.tan(ego_pitch_rad)
-                if abs(v.position.y - expected_y) > cal.elevation_margin:
+                if v.id in off_surface_ids:
                     continue
                 dist = math.sqrt(dist_sq)
                 v_yaw_rad = (
@@ -1593,6 +1591,7 @@ class AEBThread(BaseThread):
                 cross_padding=cross_padding,
                 latched_threat_ids=self._latched_threat_ids,
                 follow_threat_ids=self._follow_threat_ids,
+                off_surface_ids=off_surface_ids,
                 d_miss=los_miss(v),
                 d_miss_rate=los_miss_rate(v),
             )
@@ -2532,7 +2531,7 @@ class AEBThread(BaseThread):
     def _read_radar_snapshot(
         self,
     ) -> tuple[list[Vehicle], float, float, float, float, float, float, float,
-               bool, float | None, bool, bool, float] | None:
+               bool, float | None, bool, bool, float, frozenset] | None:
         """Radar snapshot tuple under lock; None if radar thread missing."""
         try:
             rt = registry.get_thread("radar_thread")
@@ -2557,6 +2556,7 @@ class AEBThread(BaseThread):
                     bool(rt.data.tmp_session),
                     bool(rt.data.paused),
                     float(rt.data.t_mono),
+                    frozenset(getattr(rt.data, "off_surface_ids", frozenset())),
                 )
         except AttributeError:
             return None

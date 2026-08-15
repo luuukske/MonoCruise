@@ -37,7 +37,7 @@ def test_crash_flag_latched_on_target_through_impact(clip):
     """Vehicle 440 must hold crash_confirmed from the collision to impact."""
     from core.aeb.clip_replay import decode_radar_stream
 
-    veh_by_t, _, frame_t = decode_radar_stream(clip)
+    veh_by_t, _, frame_t, _ = decode_radar_stream(clip)
     t0 = frame_t[0]
     flag_by_t = {}
     lag_by_t = {}

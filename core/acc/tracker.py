@@ -69,8 +69,8 @@ logger = logging.getLogger(__name__)
 # Filter bounds: vehicles outside these are never scored.
 _MAX_SCORE_RANGE_M: float = 150.0      # longitudinal cut-off.
 _REAR_DOT_THRESHOLD: float = -0.2      # rear half cone: fwd-dot below → skip.
-# Pitch elevation gate: same margin as AEB; README §8 / core/aeb (pitch-projected y).
-_ELEVATION_MARGIN_M: float = 5.0
+# Elevation is gated by the shared radar road-surface model, not here:
+# core/radar/README.md §15. The tracker only reads the published id set.
 
 # Missing-target decay: same rate as out-of-path per frame so we don't
 # pile artificial penalties onto a briefly occluded car.
@@ -363,11 +363,12 @@ class ACCTracker:
         now_mono: float,
         dt: float,
         vehicles: list[Vehicle],
-        ego_x: float, ego_y: float, ego_z: float,
-        ego_yaw_rad: float, ego_pitch_rad: float,
+        ego_x: float, ego_z: float,
+        ego_yaw_rad: float,
         ego_speed_ms: float, ego_steer: float,
         ego_history_kappa: float | None,
         blinker_left: bool, blinker_right: bool,
+        off_surface_ids: frozenset[int] = frozenset(),
     ) -> list[LeadInfo]:
         """Tick the tracker. Returns top-3 in-lane leads (after trailer swap).
 
@@ -387,9 +388,6 @@ class ACCTracker:
                 self._last_primary_vid,
                 ref_st.last_road_lat if ref_st is not None else 0.0,
             )
-        ego_yaw_sin = math.sin(ego_yaw_rad)
-        ego_yaw_cos = math.cos(ego_yaw_rad)
-        ego_pitch_tan = math.tan(ego_pitch_rad)
 
         ego_arc = build_ego_arc(
             ego_x, ego_z, ego_yaw_rad, ego_speed_ms,
@@ -450,12 +448,8 @@ class ACCTracker:
                 continue
             if v.id < 0:
                 continue
-            # Elevation gate: pitch-projected expected_y vs target y (AEB-aligned).
-            _dx = v.position.x - ego_x
-            _dz = v.position.z - ego_z
-            rz_ele = _dx * ego_yaw_sin + _dz * ego_yaw_cos
-            expected_y = ego_y + rz_ele * ego_pitch_tan
-            if abs(v.position.y - expected_y) > _ELEVATION_MARGIN_M:
+            if v.id in off_surface_ids:
+                self.tracks.pop(v.id, None)
                 continue
 
             # Rear cone uses instantaneous ego frame (not arc projection).

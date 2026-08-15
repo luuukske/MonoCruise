@@ -115,7 +115,7 @@ def _assert_unpause_speeds(clip_glob: str, min_fast: int = 3) -> None:
     gap = frames[first_post_i].t_wall - frames[last_pre_i].t_wall
     assert gap > _READER_CLOCK_GAP_S
 
-    veh_by_t, _, _ = decode_radar_stream(clip)
+    veh_by_t, _, _, _ = decode_radar_stream(clip)
     pre = {v.id: v for v in veh_by_t[frames[last_pre_i].t_mono]}
     post = {v.id: v for v in veh_by_t[frames[first_post_i].t_mono]}
     # A few frames after unpause: speeds must still track (not stuck ~25%).
@@ -182,7 +182,7 @@ def test_clip_53a580e7_unpause_tracks_buffer_speed():
     last_pre_i, first_post_i = _unpause_indices(frames)
     assert last_pre_i is not None and first_post_i is not None
 
-    veh_by_t, _, _ = decode_radar_stream(clip)
+    veh_by_t, _, _, _ = decode_radar_stream(clip)
     # Check ~0.5 s after unpause (not the hold frame itself).
     check_i = min(first_post_i + 12, len(frames) - 1)
     while check_i > first_post_i and (

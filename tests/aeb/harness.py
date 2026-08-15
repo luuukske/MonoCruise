@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from core.radar.elevation import ElevationGate, build_surface
 from core.radar.traffic import (
     Vehicle, Position, Quaternion, Size, Trailer,
     ArcPath, build_arc, arc_arc_collision, _accel_to_arc_params,
@@ -226,6 +227,12 @@ def evaluate_frame(
     ego_pitch_rad = math.radians(ego.pitch_deg)
     max_range_sq = cal.max_range ** 2
 
+    # Single-frame surface: no ego history, so grade comes from pitch alone.
+    _surface = build_surface(ego.y, ego_pitch_rad, None)
+    off_surface_ids = ElevationGate().step(
+        list(frame.vehicles), _surface, ego.x, ego.z, ego_yaw_rad_val,
+    )
+
     pipeline = build_pipeline(cal)
 
     colliding_ids: set[int] = set()
@@ -290,6 +297,7 @@ def evaluate_frame(
             all_target_arcs=all_target_arcs,
             precomputed_cross_arcs=precomputed_cross_arcs,
             cross_padding=cross_padding,
+            off_surface_ids=off_surface_ids,
         )
 
         suppression_reasons[v.id] = []

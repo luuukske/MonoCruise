@@ -97,12 +97,12 @@ class ACCThread(BaseThread):
                     rt.data.ego_y,
                     rt.data.ego_z,
                     rt.data.ego_yaw_rad,
-                    rt.data.ego_pitch_rad,
                     rt.data.ego_speed,
                     rt.data.ego_steer,
                     rt.data.ego_curvature,
                     rt.data.paused,
                     rt.data.t_mono,
+                    frozenset(getattr(rt.data, "off_surface_ids", frozenset())),
                 )
         except AttributeError:
             return None
@@ -134,8 +134,8 @@ class ACCThread(BaseThread):
             self._publish(enabled, [], None, self._last_snapshot_t)
             return
 
-        (vehicles, trailer_vehicles, ex, ey, ez, eyaw, epitch, espeed, esteer,
-         ekappa, paused, t_radar) = snap
+        (vehicles, trailer_vehicles, ex, ey, ez, eyaw, espeed, esteer,
+         ekappa, paused, t_radar, off_ids) = snap
 
         # Nested trailers (road-train trailers behind the first) ride in a
         # separate radar list; score them alongside top-level vehicles.
@@ -161,11 +161,12 @@ class ACCThread(BaseThread):
                 now_mono=t_radar,
                 dt=dt,
                 vehicles=targets,
-                ego_x=ex, ego_y=ey, ego_z=ez,
-                ego_yaw_rad=eyaw, ego_pitch_rad=epitch,
+                ego_x=ex, ego_z=ez,
+                ego_yaw_rad=eyaw,
                 ego_speed_ms=espeed, ego_steer=esteer,
                 ego_history_kappa=ekappa,
                 blinker_left=bl_left, blinker_right=bl_right,
+                off_surface_ids=off_ids,
             )
         except Exception:
             logger.exception("acc tracker update failed; holding previous leads")

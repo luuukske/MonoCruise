@@ -25,6 +25,13 @@ from core.aeb.clip_schema import (
 from core.aeb.lane_frame import Lane
 from core.aeb.thread import _extrapolation_veto, _los_veto_bar
 from core.radar.reader import _BUF_SIZE, _TOTAL_FORMAT
+from core.radar.elevation import BODY_DATUM_FRAC
+
+
+# Traffic position.y is the body datum, not ground level: ego coordinateY is
+# the road surface and a body sits BODY_DATUM_FRAC of its height above it.
+_BODY_H: float = 3.0
+_BODY_Y: float = BODY_DATUM_FRAC * _BODY_H
 
 _EGO_MS = 25.0            # 90 km/h
 _TGT_MS = 20.0            # 72 km/h oncoming
@@ -50,7 +57,7 @@ def _traffic_buf(px: float, pz: float, yaw_rad: float, speed: float,
     """One-slot traffic buffer. Quaternion (w, 0, sin(yaw/2), 0) yields euler yaw."""
     qw = math.cos(yaw_rad / 2.0)
     qy = math.sin(yaw_rad / 2.0)
-    flat: list = [px, 0.0, pz, qw, 0.0, qy, 0.0, 2.5, 3.0, 6.0, speed, 0.0]
+    flat: list = [px, _BODY_Y, pz, qw, 0.0, qy, 0.0, 2.5, _BODY_H, 6.0, speed, 0.0]
     flat += [0, vid, 0, 0] + [0.0] * 30
     for _ in range(39):
         flat += [0.0] * 12 + [0, 0, 0, 0] + [0.0] * 30

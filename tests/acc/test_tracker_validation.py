@@ -24,8 +24,8 @@ def _run(tracker: ACCTracker, vehicles, frames: int, ego_speed: float = 20.0,
     for i in range(frames):
         tracker.update(
             now_mono=start_t + i * _DT, dt=_DT, vehicles=vehicles,
-            ego_x=0.0, ego_y=0.0, ego_z=0.0,
-            ego_yaw_rad=_EGO_YAW, ego_pitch_rad=0.0,
+            ego_x=0.0, ego_z=0.0,
+            ego_yaw_rad=_EGO_YAW,
             ego_speed_ms=ego_speed, ego_steer=0.0,
             ego_history_kappa=0.0,
             blinker_left=False, blinker_right=False,

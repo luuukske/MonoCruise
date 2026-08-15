@@ -74,7 +74,7 @@ def _apply_warm_state(t: AEBThread, ws) -> None:
         t._state_hold_until = float(ws.warn_hold_until_mono)
 
 
-def _snapshot_tuple(ego, vehicles, radar_t_mono: float):
+def _snapshot_tuple(ego, vehicles, radar_t_mono: float, off_ids=frozenset()):
     """Build the tuple _read_radar_snapshot returns, from clip ego + vehicles."""
     return (
         vehicles,
@@ -88,13 +88,14 @@ def _snapshot_tuple(ego, vehicles, radar_t_mono: float):
         any(v.is_tmp for v in vehicles),
         bool(ego.paused),
         radar_t_mono,
+        frozenset(off_ids),
     )
 
 
 def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
                  warm: bool = True) -> list[EvalTick]:
     """Re-run the AEB pipeline over the clip under ``cal``; one EvalTick per tick."""
-    veh_by_t, ego_by_t, frame_t = decode_radar_stream(clip)
+    veh_by_t, ego_by_t, frame_t, off_by_t = decode_radar_stream(clip)
     t = _make_headless(cal)
     if warm:
         _apply_warm_state(t, clip.metadata.aeb_warm_state)
@@ -113,7 +114,7 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
         if ego is None:
             continue
 
-        snap = _snapshot_tuple(ego, vehicles, ft)
+        snap = _snapshot_tuple(ego, vehicles, ft, off_by_t.get(ft, frozenset()))
         t._read_radar_snapshot = lambda s=snap: s
         t._read_max_brake_ms2 = lambda mb=tk.consumed.max_brake_ms2: mb
         t._read_user_braking = (

@@ -171,7 +171,7 @@ pass, the vehicle enters collision evaluation.
 | Stage | Purpose |
 |-------|---------|
 | `RangeFilter` | Distance gate (`cal.max_range`) |
-| `ElevationFilter` | Slope-aware Y check (`cal.elevation_margin`) |
+| `ElevationFilter` | Membership in radar's `off_surface_ids` (core/radar/README.md §15) |
 | `TmpRelSpeedFilter` | TMP session relative-speed pre-filter |
 | `LaneClassifier` | Populates `ctx` geometry fields; sets `ctx.lane` via `lane_frame` |
 | `OppositeLaneFilter` | Oncoming vehicles in their own lane (collapses Fix A + Fix B) |
@@ -1032,17 +1032,34 @@ low-speed dangers.
 
 ---
 
-## 6. Elevation filter (slope-aware)
+## 6. Elevation filter (shared road-surface gate)
+
+AEB no longer owns an elevation test. `RadarThread` runs the shared gate
+(`core/radar/elevation.py`) once per frame and publishes
+`RadarData.off_surface_ids`; the AEB snapshot carries that set and three
+places consume it: the collision-arc precompute, the fallback path, and
+`ElevationFilter` in the pipeline.
 
 ```python
-rz          = _world_to_ego_forward(dx, dz, ego_yaw_rad)
-expected_y  = ego_y + rz * math.tan(ego_pitch_rad)
-if abs(v.position.y - expected_y) > cal.elevation_margin:
+off_surface_ids = off_surface_ids - self._latched_threat_ids   # never drop a latched threat
+...
+if v.id in off_surface_ids:
     continue
 ```
 
-`ego_pitch_rad` is the radar-thread pitch snapshot: telemetry `rotationY`
-is inverted before it reaches AEB, so use the published value as-is.
+The full model, the constants, the corpus fits behind them and the failsafe
+list live in `core/radar/README.md` §15. Two properties matter here:
+
+- The band is **tighter than the old ±5 m window inside ~90 m** (it kills
+  traffic on a road under a bridge ego is crossing) and **wider beyond it**
+  (a lead over a crest is no longer lost). Measured: the old window dropped
+  4.06 % of candidate leads above 85 km/h; the new gate drops 0.00 %.
+- Suppression is **latched-threat-exempt and persistence-gated**, so no
+  single-frame rotation or pitch glitch can pull a target out of the
+  pipeline mid-event.
+
+`cal.elevation_margin` is retained on `AEBCalibration` for recorded-clip
+metadata compatibility only. It no longer gates anything: do not tune it.
 
 ---
 
@@ -1066,6 +1083,7 @@ apart laterally are suppressed at the `arc_arc_collision` level
 Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep that in sync if you change them).
 
 - **AEB is a consumer of `RadarThread`.** Do not open the traffic shared-memory buffer directly and do not mutate `Vehicle` instances.
+- **Elevation comes from radar's `off_surface_ids`, minus the latched set.** Do not reintroduce a local pitch-window test in `thread.py` or `filters.py`, and do not tune `cal.elevation_margin`: it is dead, kept only so recorded clip calibrations still deserialize. See `core/radar/README.md` §15.
 - **AEB ego curvature is the yaw-rate proxy, full stop.** Do not read `RadarData.ego_curvature` from AEB.
 - **Target-vehicle curvature is the `_vehicle_curvature_blend` helper** (sliced position fit blended with `angular_velocity`-derived yaw rate, weighted by `cal.aeb_yaw_blend`, then One-Euro filtered per-vehicle by `AEBThread._curvature_blender`). Do not call `v.curvature_from_history()` directly from AEB paths and do not enlarge `aeb_pos_history_len` toward 25. The blender must be stepped exactly **once per vehicle per frame**: any new call site must thread the existing `ctx.v_curvature` through rather than re-invoking `_vehicle_curvature_blend(...)` with the production blender.
 - **`co_directional` must use `fwd_dot > 0.7`, not `abs(fwd_dot) > 0.7`.** The two flags must be mutually exclusive with `head_on`.

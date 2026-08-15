@@ -14,11 +14,18 @@ from core.aeb.clip_schema import (
     LiveAEB, RadarFrameRecord,
 )
 from core.radar.reader import _BUF_SIZE, _TOTAL_FORMAT
+from core.radar.elevation import BODY_DATUM_FRAC
+
+
+# Traffic position.y is the body datum, not ground level: ego coordinateY is
+# the road surface and a body sits BODY_DATUM_FRAC of its height above it.
+_BODY_H: float = 3.0
+_BODY_Y: float = BODY_DATUM_FRAC * _BODY_H
 
 
 def _stopped_vehicle_buf(px: float, pz: float, vid: int) -> bytes:
     flat: list = []
-    flat += [px, 0.0, pz, 1.0, 0.0, 0.0, 0.0, 2.5, 3.0, 6.0, 0.0, 0.0] + [0, vid, 0, 0] + [0.0] * 30
+    flat += [px, _BODY_Y, pz, 1.0, 0.0, 0.0, 0.0, 2.5, _BODY_H, 6.0, 0.0, 0.0] + [0, vid, 0, 0] + [0.0] * 30
     for _ in range(39):
         flat += [0.0] * 12 + [0, 0, 0, 0] + [0.0] * 30
     buf = struct.pack(_TOTAL_FORMAT, *flat)

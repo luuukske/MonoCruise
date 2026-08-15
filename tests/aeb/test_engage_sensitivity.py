@@ -25,6 +25,13 @@ from core.aeb.lane_frame import Lane
 from core.radar.reader import _BUF_SIZE, _TOTAL_FORMAT
 from core.radar.traffic import build_arc, capsule_extents
 from tests.aeb.harness import make_vehicle
+from core.radar.elevation import BODY_DATUM_FRAC
+
+
+# Traffic position.y is the body datum, not ground level: ego coordinateY is
+# the road surface and a body sits BODY_DATUM_FRAC of its height above it.
+_BODY_H: float = 3.0
+_BODY_Y: float = BODY_DATUM_FRAC * _BODY_H
 
 _HZ = 30.0
 _FLAT = replace(CAL, aeb_engage_frac_certain=CAL.aeb_engage_frac)
@@ -42,7 +49,7 @@ def _stopped_ahead_clip(ego_ms: float, gap_m: float, capacity: float,
     """
     dt = 1.0 / _HZ
     # yaw = pi faces +Z like ego: quaternion (cos(pi/2), 0, sin(pi/2), 0).
-    flat: list = [0.0, 0.0, gap_m, 0.0, 0.0, 1.0, 0.0, 2.5, 3.0, 6.0, 0.0, 0.0]
+    flat: list = [0.0, _BODY_Y, gap_m, 0.0, 0.0, 1.0, 0.0, 2.5, _BODY_H, 6.0, 0.0, 0.0]
     flat += [0, 3, 0, 0] + [0.0] * 30
     for _ in range(39):
         flat += [0.0] * 12 + [0, 0, 0, 0] + [0.0] * 30

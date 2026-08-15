@@ -823,6 +823,8 @@ with rt.data._lock:
     ego_steer     = rt.data.ego_steer
     ego_has_trailer = rt.data.ego_has_trailer
     ego_curvature = rt.data.ego_curvature     # None → fall back to yaw-rate proxy
+    off_surface_ids = rt.data.off_surface_ids # frozenset[int], see §15
+    road_surface  = rt.data.road_surface      # RoadSurface (ego plane + curvature)
     paused        = rt.data.paused
     t_mono        = rt.data.t_mono            # snapshot time (monotonic)
 ```
@@ -880,6 +882,11 @@ double-count each trailer.
 | Crash detection | live-frame rotation jerk (pitch 12 / yaw 40 / roll 20 deg/s) AND kinematic anomaly (vertical jerk > 0.08 m OR XZ reversal cos < -0.3 OR 2-frame disp collapse < 50 %); confirm latches 2.0 s; disables pos-mismatch filter and lag freeze; speed/accel stay raw |
 | Yaw EMA (wrap-safe) | `smooth += 0.5 * ((raw - smooth + π) % 2π - π)` |
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
+| Target road surface (§15) | `v.position.y - 0.58 * v.size.height` (ego's is `ego_y`) |
+| Road height prediction (§15) | `m0*s + clamp(0.5*κ_v*s², ±2 m)`, `m0 = tan(ego_pitch_rad)` |
+| Elevation band (§15) | `1.2 + 0.0006*s²` (cap 15) `+ 0.25*height` |
+| Target road grade (§15) | `m1 = m0*sin²(Δyaw) − tan(target_pitch)*cos(Δyaw)` |
+| Vertical-curvature test (§15) | `max(\|6D/s² − 2M/s\|, \|4M/s − 6D/s²\|) ≤ max(0.006, 6/s²)` |
 
 ---
 
@@ -895,6 +902,19 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 - **All vehicle bodies are symmetric `± length/2` about the pivot (AI and TMP).** The historical asymmetric 0.82/0.18 AI offsets were a `0.32·length` rear phantom (see §6 history); do not reintroduce them.
 - **Always use `_smooth_yaw` for arc construction**, never `rotation.euler()` directly.
 - **Y axis is never used in 2D math**, only for elevation filtering.
+- **Elevation is decided once, in radar.** `RadarThread` publishes
+  `off_surface_ids`; AEB and ACC read it and must not re-derive an elevation
+  test of their own. Two consumers computing it separately is how the old
+  duplicated pitch window drifted (§15).
+- **Traffic `position.y` is a body datum, not the road.** Subtract
+  `BODY_DATUM_FRAC * size.height` before comparing it with `ego_y`. Never
+  compare the two raw: that is a systematic bias of up to ~2.3 m (§15).
+- **Traffic euler pitch is the negated road grade**, and only its ego-axis
+  component is evidence. Roll is not a usable cross-grade signal (§15).
+- **The elevation gate fails open, never closed.** Unusable target rotation,
+  ego pose, body height or ego history all widen the test rather than
+  suppress. Marginal failures need `SUPPRESS_CONFIRM_FRAMES` consecutive
+  frames, and latched AEB threats bypass the gate outright (§15).
 - **Arc forward vector formula is `(-sin, -cos)`.** Do not flip signs or swap to `(sin, cos)`.
 - **Speed/accel filtering runs for AI and TMP** via `_smooth_vehicle_kinematics()`: the 4-signal chain `speed_ema → accel → speed_corr → acc_speed`. `self.speed` is the accel-corrected `speed_corr`; `self.acc_speed` is the adaptive-filtered ACC speed (ACC only); `self.acceleration` is the LS-slope `accel`. World positions are not low-pass filtered.
 - **Hard-brake raw-speed mode requires a measured deceleration ramp.** Never activate the short position window from a zero-displacement sample alone: below `_LAG_MIN_SPEED_MS`, a TMP packet stall is not owned by lag freeze and would look like a stopped obstacle.
@@ -916,6 +936,200 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 - **AI (singleplayer) speed is used as-is from the buffer.** Do not derive/flip sign from displacement or turning vehicles can be misclassified as reversing.
 - **`Vehicle.curvature_from_history()` is the curvature source.** Returns circumscribed-circle curvature from `_position_history`; `None` when < 3 samples (caller falls back to yaw-rate); `0.0` when near-stationary. Both TMP and AI vehicles populate `_position_history` in `update_from_last()`.
 - **Consumer threads must not open the traffic shared-memory buffer.** Read vehicles from `registry.get_thread("radar_thread").data.vehicles` under the data lock. Mutating Vehicle instances from consumer threads corrupts the per-id smoothing state carried forward by the reader.
+
+---
+
+## 15. Road-Surface Elevation Gate (shared AEB/ACC)
+
+`core/radar/elevation.py`. `RadarThread` steps it once per frame over
+`vehicles + trailer_vehicles` and publishes `RadarData.off_surface_ids`;
+AEB and ACC both read that id set and never re-derive it. One computation,
+one set of constants, so the two consumers cannot drift apart.
+
+### What it replaced
+
+A fixed window on the pitch tangent, duplicated in three AEB call sites and
+one ACC one:
+
+```python
+expected_y = ego_y + rz * math.tan(ego_pitch_rad)
+if abs(v.position.y - expected_y) > 5.0:   # cal.elevation_margin
+    continue
+```
+
+Two defects, both structural rather than a bad constant:
+
+- **A systematic ~2 m bias.** Traffic `position.y` is the *body datum*, not
+  the road under it, while ego `coordinateY` is the road surface. Fitting
+  `dy = a·height + b` on level ground over 41,216 corpus samples gives
+  `a = 0.5565`, `b = +0.076 m`, residual p90 0.24 m. The through-origin fit
+  is `0.5808`, and the ratio holds across body classes (0.52 to 0.61 for
+  heights 1.5 to 4.0 m), so the datum is proportional to height and the
+  worst per-class error is ~0.22 m. Uncorrected, that bias ate 40 % of the
+  5 m budget before any geometry was considered.
+- **A tangent extrapolated to arbitrary range.** The error of a straight
+  line drawn from ego's instantaneous pitch grows quadratically, so a single
+  scalar margin is simultaneously far too loose near ego and far too tight
+  far from it. Measured on 250 clips, the old window dropped **4.06 % of
+  candidate leads above 85 km/h and 11.31 % on grades past 3 deg**, while
+  admitting **53 %** of the traffic sitting more than 3 m below ego's road
+  inside 80 m.
+
+### The model
+
+```python
+dy   = v.position.y - BODY_DATUM_FRAC * v.size.height - ego_y   # road to road
+m0   = tan(ego_pitch_rad)                                       # ego road grade
+kv   = quadratic LS fit of ego's own (arc length, elevation) history
+pred = m0 * s + clamp(0.5 * kv * s**2, +-2 m)
+```
+
+Ego pitch supplies the grade and the history supplies only the **curvature**.
+That split is measured, not assumed: taking the grade from the history fit
+instead is far worse (predictor error p90 6.62 m vs 1.06 m at 45-60 m,
+because the fit's linear coefficient is noisy at the endpoint). Adding the
+curvature term roughly halves the remaining error:
+
+| range | tangent p99 / p100 | with ego curvature p99 / p100 |
+|-------|--------------------|-------------------------------|
+| 30-45 m | 1.78 / 2.62 m | **0.97 / 1.63 m** |
+| 45-60 m | 2.06 / 3.24 m | **1.52 / 2.81 m** |
+| 60-80 m | 3.40 / 8.16 m | **1.95 / 6.71 m** |
+| 80-110 m | 4.80 / 7.06 m | **3.09 / 5.06 m** |
+| 110-160 m | 8.12 / 11.76 m | 8.02 / 9.76 m |
+
+The fit is usable on **84.2 % of moving frames** and shifts the prediction at
+60 m by a median 0.25 m, p90 1.31 m, so the clamp binds only in the tail.
+
+### Two tests, evaluated in order
+
+**1. Profile band.** `|dy - pred(s)| <= band(s)`, with
+`band(s) = 1.2 + 0.0006·s² (cap 15) + 0.25·height`. Range-aware, so it is
+**tighter than the old window inside ~90 m and wider beyond it**. The
+height-proportional term is a failsafe, not a fit: it guarantees a body whose
+datum the fit does not describe can never be gated on that correction alone
+(the term is ~4x the measured worst-class datum error).
+
+**2. Grade consistency.** Only reached when the band passes, and only past
+12 m. Fit the cubic joining `(0, 0, m0)` to `(s, dy, m1)` and take its peak
+vertical curvature:
+
+```python
+dev   = dy - m0 * s
+dm    = m1 - m0
+k_req = max(|6·dev/s² - 2·dm/s|, |4·dm/s - 6·dev/s²|)
+k_max = max(0.006, 6.0 / s**2)
+```
+
+`m1` is the road grade under the target, read from its own rotation. Traffic
+euler pitch runs **opposite** to ego pitch and is accurate: on near
+co-directional traffic within 25 m the regression against ego pitch is
+slope +1.008, corr 0.974, median error 0.26 deg. Only the ego-axis component
+is evidence, so the estimate falls back to ego's own grade as the heading
+turns away:
+
+```python
+m1 = m0 * sin(yaw_diff)**2 - tan(target_pitch) * cos(yaw_diff)
+```
+
+At `yaw_diff = 0` that is the target's grade, at 180 deg it is the same grade
+read backwards, and at 90 deg it is exactly `m0`, i.e. no evidence and no
+suppression. **Roll carries no usable cross-grade** (corr 0.26, slope 0.107
+against ego pitch on near-perpendicular traffic), so it is only used to
+detect an unusable pose.
+
+This is the test that catches the reported false positive: a hill running
+down into a low bridge points ego's tangent straight at the traffic
+underneath, so the height residual is small and only the target sitting on a
+*flat* road gives it away.
+
+### Failsafes
+
+The gate suppresses, so a wrong suppression is a missed collision. Every
+uncertain path fails open:
+
+- **Unusable target rotation** (zero quaternion, roll > 15 deg, pitch >
+  20 deg: a wreck, a spun or jackknifed rig) drops `m1` back to `m0`, which
+  reduces the test to the band alone. Wrecks keep their pipeline seat.
+- **Unusable ego pose**: non-finite pitch, or a grade past 0.5, reads level.
+- **Missing or absurd `size.height`** skips the datum and widens the band by
+  the full plausible datum instead. Height is clamped to 0.5-5.0 m before it
+  scales anything.
+- **Unusable ego history** (short span, fit rms > 0.15 m, curvature past
+  0.01, a teleport) drops the curvature term, leaving the tangent.
+- **Persistence.** A *marginal* failure must repeat for
+  `SUPPRESS_CONFIRM_FRAMES` (3, i.e. 100 ms at 30 Hz) before the id is
+  suppressed, and one passing frame clears the count. A single rotation or
+  pitch glitch therefore cannot drop a target. A **gross** failure (past
+  twice the bar, or past the 20 m hard cap) suppresses on the first frame,
+  so a real bridge is not admitted for three frames while the counter runs.
+- **Latched AEB threats bypass the gate entirely** (`core/aeb/thread.py`
+  subtracts `_latched_threat_ids`): once AEB is braking for a target, no
+  elevation reading may take it away.
+
+### Measured effect
+
+250 clips, per vehicle-frame, old gate vs new.
+
+Candidate leads (co-directional, moving, within 6 m laterally, 10-150 m)
+dropped by the gate. This is the ACC tracking-loss defect:
+
+| ego speed | n | old | new |
+|-----------|---|-----|-----|
+| 0-50 km/h | 15801 | 1.240 % | 0.190 % |
+| 50-70 | 12890 | 1.808 % | 0.000 % |
+| 70-85 | 7874 | 1.461 % | 0.000 % |
+| 85+ | 7114 | **4.062 %** | **0.000 %** |
+
+| \|ego grade\| | n | old | new |
+|---------------|---|-----|-----|
+| < 1 deg | 28035 | 0.571 % | 0.000 % |
+| 1-3 deg | 11381 | 1.678 % | 0.185 % |
+| 3+ deg | 4263 | **11.307 %** | **0.211 %** |
+
+Widening the same set to 9 m laterally and every range band, 55,915
+lead-frames: dropped **1.89 % -> 0.09 %**, and at 110-160 m
+**8.31 % -> 0.00 %**.
+
+Traffic whose road surface is more than 3 m below ego's, inside 80 m: the
+under-bridge population, 38,190 rows. Suppression **46.9 % -> 72.8 %**
+overall, and by range **67.2 -> 99.8 %** (8-20 m), **63.2 -> 99.5 %**
+(20-30 m), 45.8 -> 80.3 % (30-45 m), 41.8 -> 65.7 % (45-60 m),
+34.0 -> 47.8 % (60-80 m). Total suppression across all tracked vehicles
+*falls* (18.0 % -> 15.4 %): the gate redistributes rather than tightening,
+trading 27.9 -> 5.5 % at 110-160 m for 15.7 -> 22.3 % inside 20 m. Of the
+new gate's suppressions, 78 % come from the band, 12 % from the grade test
+and 10 % from the hard cap.
+
+**The residual is deliberate.** Beyond ~45 m a perpendicular vehicle a few
+metres below ego is genuinely ambiguous: the same geometry describes a real
+lead on a descending road, and the target's own pitch carries no ego-axis
+grade at 90 deg. Closing that gap needs a traffic-anchored elevation profile
+(other vehicles corroborating the road ahead), which is not built here.
+
+Choosing `_K_FLOOR` on band-passing rows over 250 clips (440,309 rows,
+54,181 of them co-directional moving leads, 40,724 more than 3 m below):
+
+| floor | leads lost | below-road caught |
+|-------|-----------|-------------------|
+| 0.012 | 0.000 % | 0.37 % |
+| 0.010 | 0.000 % | 0.80 % |
+| 0.008 | 0.000 % | 1.56 % |
+| **0.006** | **0.009 %** | **3.26 %** |
+| 0.004 | 0.170 % | 11.86 % |
+
+0.006 is shipped: it gives the grade test roughly nine times the authority of
+0.012 for five lost lead-frames in 54,181, and it clears the hill-into-bridge
+case (`k_req` 0.0117) with margin.
+
+AEB clip corpus, 636 labelled clips: verdict counts **identical** (FN 48,
+FP 18, false-warn 9, late 7, TN 331, TP 223). Two clips changed at all, both
+staying true positives with slightly lower intervention quality (total cost
++18.34 -> +19.57). ACC corpus over 120 clips: in-corridor moving frames
+52,268 -> 53,366, lead frames 14,334 -> 14,416, stationary false-lock rate
+4.11 % -> 4.04 %, hook p90 1.20 -> 1.00 s.
+
+---
 
 ---
 

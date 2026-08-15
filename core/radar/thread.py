@@ -12,6 +12,7 @@ from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 
 from .ego_path import EGO_POSITION_HISTORY_LEN, ego_curvature_from_history
+from .elevation import ElevationGate, EgoElevationTrack, RoadSurface, build_surface
 from .reader import TrafficReader
 from .traffic import Vehicle
 
@@ -46,6 +47,11 @@ class RadarData(ThreadData):
     # Geometry-based ego curvature (1/m). None ⇒ caller falls back to yaw-rate proxy.
     ego_curvature: float | None = None
 
+    # Ids confirmed off ego's road surface (bridge decks, crossings). Shared
+    # AEB/ACC elevation gate: see core/radar/README.md §15.
+    off_surface_ids: frozenset[int] = frozenset()
+    road_surface: RoadSurface = field(default_factory=RoadSurface)
+
     # Monotonic time when snapshot was published.
     # Held (not bumped) while paused so AEB/ACC treat the frame as stale.
     t_mono: float = 0.0
@@ -63,6 +69,8 @@ class RadarThread(BaseThread):
         self._traffic = TrafficReader()
         self._ego_position_history: list[tuple[float, float, float]] = []
         self._last_ego_hist_t: float = 0.0
+        self._elevation_track = EgoElevationTrack()
+        self._elevation_gate = ElevationGate()
         # None until the first frame; then True when using SCS simulatedTime.
         self._kin_use_sim: bool | None = None
         self._was_paused: bool = False
@@ -75,12 +83,15 @@ class RadarThread(BaseThread):
         self._traffic.close()
         self._ego_position_history.clear()
         self._last_ego_hist_t = 0.0
+        self._elevation_track.clear()
+        self._elevation_gate.clear()
         self._kin_use_sim = None
         self._was_paused = False
         with self.data._lock:
             self.data.vehicles = []
             self.data.trailer_vehicles = []
             self.data.tmp_session = False
+            self.data.off_surface_ids = frozenset()
         logger.debug("radar teardown complete")
 
     def _reset_kinematics_clock(self) -> None:
@@ -88,6 +99,8 @@ class RadarThread(BaseThread):
         self._traffic.clear_kinematics_state()
         self._ego_position_history.clear()
         self._last_ego_hist_t = 0.0
+        self._elevation_track.clear()
+        self._elevation_gate.clear()
         logger.debug("radar kinematics clock domain reset")
 
     def _read_ego(self) -> tuple[
@@ -181,6 +194,8 @@ class RadarThread(BaseThread):
         trailer_vehicles: list[Vehicle] | None = None,
         tmp_session: bool | None = None,
         ego_curvature: float | None = None,
+        off_surface_ids: frozenset[int] | None = None,
+        road_surface: RoadSurface | None = None,
         bump_t_mono: bool = False,
     ) -> None:
         ego_yaw_rad = ego_yaw_norm * 2.0 * math.pi
@@ -193,6 +208,10 @@ class RadarThread(BaseThread):
                 self.data.trailer_vehicles = trailer_vehicles
             if tmp_session is not None:
                 self.data.tmp_session = tmp_session
+            if off_surface_ids is not None:
+                self.data.off_surface_ids = off_surface_ids
+            if road_surface is not None:
+                self.data.road_surface = road_surface
             self.data.ego_x = ego_x
             self.data.ego_y = ego_y
             self.data.ego_z = ego_z
@@ -260,6 +279,8 @@ class RadarThread(BaseThread):
         if self._was_paused:
             self._was_paused = False
             self._traffic.request_reanchor()
+            self._elevation_track.clear()
+            self._elevation_gate.clear()
 
         # Ego path history: advance only when the kinematics clock moves so a
         # hitch (frozen simulatedTime) does not stretch curvature samples.
@@ -270,6 +291,7 @@ class RadarThread(BaseThread):
                 self._ego_position_history = self._ego_position_history[-EGO_POSITION_HISTORY_LEN:]
 
         ego_curvature = ego_curvature_from_history(self._ego_position_history)
+        self._elevation_track.push(ego_x, ego_z, ego_y)
 
         traffic = self._read_traffic(ego_x, ego_y, ego_z, ego_speed, t_kin)
         if traffic is None:
@@ -278,6 +300,13 @@ class RadarThread(BaseThread):
             vehicles, trailer_vehicles = traffic
         tmp_session = any(v.is_tmp for v in vehicles)
 
+        ego_yaw_rad = ego_yaw_norm * 2.0 * math.pi
+        _pv = (ego_pitch_deg + 0.5) % 1.0 - 0.5
+        road_surface = build_surface(ego_y, -_pv * 2.0 * math.pi, self._elevation_track)
+        off_surface_ids = self._elevation_gate.step(
+            vehicles + trailer_vehicles, road_surface, ego_x, ego_z, ego_yaw_rad,
+        )
+
         self._publish_ego_fields(
             ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
             ego_has_trailer, ego_pitch_deg, False,
@@ -285,6 +314,8 @@ class RadarThread(BaseThread):
             trailer_vehicles=trailer_vehicles,
             tmp_session=tmp_session,
             ego_curvature=ego_curvature,
+            off_surface_ids=off_surface_ids,
+            road_surface=road_surface,
             bump_t_mono=True,
         )
 

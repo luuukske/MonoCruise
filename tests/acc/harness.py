@@ -13,6 +13,7 @@ from pathlib import Path
 
 from core.acc.tracker import ACCTracker
 from core.radar.ego_path import EGO_POSITION_HISTORY_LEN, ego_curvature_from_history
+from core.radar.elevation import ElevationGate, EgoElevationTrack, build_surface
 from core.radar.reader import TrafficReader
 
 # Imported, not copied: retuning the controller must not leave these metrics
@@ -193,6 +194,8 @@ def replay_clip(clip, metrics: Metrics, tracker: ACCTracker | None = None) -> AC
     tracker = tracker or ACCTracker()
     windows = _TrackWindows()
     ego_hist: list[tuple[float, float, float]] = []
+    elev_track = EgoElevationTrack()
+    elev_gate = ElevationGate()
     last_hist_t = -1.0
     last_t = 0.0
     was_paused = False
@@ -207,6 +210,8 @@ def replay_clip(clip, metrics: Metrics, tracker: ACCTracker | None = None) -> AC
             reader.request_reanchor()
             ego_hist = []
             last_hist_t = -1.0
+            elev_track.clear()
+            elev_gate.clear()
 
         t_kin = frame.t_wall
         if t_kin > last_hist_t:
@@ -214,6 +219,7 @@ def replay_clip(clip, metrics: Metrics, tracker: ACCTracker | None = None) -> AC
             last_hist_t = t_kin
             ego_hist = ego_hist[-EGO_POSITION_HISTORY_LEN:]
         ego_kappa = ego_curvature_from_history(ego_hist)
+        elev_track.push(ego.coordinateX, ego.coordinateZ, ego.coordinateY)
 
         decoded = reader.replay_frame(
             frame.traffic_buf, frame.parked_buf,
@@ -228,15 +234,22 @@ def replay_clip(clip, metrics: Metrics, tracker: ACCTracker | None = None) -> AC
         last_t = frame.t_mono
 
         pitch_norm = (ego.rotationY + 0.5) % 1.0 - 0.5
+        ego_yaw_rad = ego.rotationX * 2.0 * math.pi
+        surface = build_surface(
+            ego.coordinateY, -pitch_norm * 2.0 * math.pi, elev_track,
+        )
+        off_ids = elev_gate.step(
+            targets, surface, ego.coordinateX, ego.coordinateZ, ego_yaw_rad,
+        )
         leads = tracker.update(
             now_mono=frame.t_mono, dt=dt, vehicles=targets,
-            ego_x=ego.coordinateX, ego_y=ego.coordinateY, ego_z=ego.coordinateZ,
-            ego_yaw_rad=ego.rotationX * 2.0 * math.pi,
-            ego_pitch_rad=-pitch_norm * 2.0 * math.pi,
+            ego_x=ego.coordinateX, ego_z=ego.coordinateZ,
+            ego_yaw_rad=ego_yaw_rad,
             ego_speed_ms=ego.speed, ego_steer=ego.userSteer,
             ego_history_kappa=ego_kappa,
             blinker_left=bool(getattr(ego, "blinkerLeft", False)),
             blinker_right=bool(getattr(ego, "blinkerRight", False)),
+            off_surface_ids=off_ids,
         )
         _accumulate(metrics, windows, tracker, targets, leads, ego, frame.t_mono)
     return tracker

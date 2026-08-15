@@ -12,6 +12,7 @@ from core.aeb.thread import (
     AEBSnapshot, AEBState, _INF, _dampen_turning_curvature,
     _swap_trailer_kinematics,
 )
+from core.radar.elevation import ElevationGate, EgoElevationTrack, build_surface
 from core.radar.reader import TrafficReader
 from core.radar.traffic import ArcPath, Vehicle, build_arc
 
@@ -209,29 +210,50 @@ def _build_snapshot(ego, vehicles: list[Vehicle], live: LiveAEB,
 
 
 def decode_radar_stream(clip: Clip):
-    """TrafficReader-smoothed vehicles per radar frame; (veh_by_t, ego_by_t, frame_t)."""
+    """Smoothed vehicles + elevation gate per radar frame, as RadarThread.loop runs them.
+
+    Returns ``(veh_by_t, ego_by_t, frame_t, off_by_t)``."""
     reader = TrafficReader()
     frames = sorted(clip.radar_frames, key=lambda f: f.t_mono)
     veh_by_t: dict[float, list[Vehicle]] = {}
+    off_by_t: dict[float, frozenset[int]] = {}
+    elev_track = EgoElevationTrack()
+    elev_gate = ElevationGate()
     last_vehs: list[Vehicle] = []
+    last_off: frozenset[int] = frozenset()
     was_paused = False
     for f in frames:
         if f.traffic_buf is None or f.ego.paused:
             was_paused = True
             veh_by_t[f.t_mono] = list(last_vehs)
+            off_by_t[f.t_mono] = last_off
             continue
         if was_paused:
             was_paused = False
             reader.request_reanchor()
+            elev_track.clear()
+            elev_gate.clear()
+        ego = f.ego
+        elev_track.push(ego.coordinateX, ego.coordinateZ, ego.coordinateY)
         res = reader.replay_frame(
             f.traffic_buf, f.parked_buf,
-            f.ego.coordinateX, f.ego.coordinateY, f.ego.coordinateZ, f.ego.speed,
+            ego.coordinateX, ego.coordinateY, ego.coordinateZ, ego.speed,
             f.t_wall,
         )
         last_vehs = list(res[0]) if res is not None else []
+        trailers = list(res[1]) if res is not None else []
+        pitch_norm = (ego.rotationY + 0.5) % 1.0 - 0.5
+        surface = build_surface(
+            ego.coordinateY, -pitch_norm * 2.0 * math.pi, elev_track,
+        )
+        last_off = elev_gate.step(
+            last_vehs + trailers, surface,
+            ego.coordinateX, ego.coordinateZ, ego.rotationX * 2.0 * math.pi,
+        )
         veh_by_t[f.t_mono] = last_vehs
+        off_by_t[f.t_mono] = last_off
     ego_by_t = {f.t_mono: f.ego for f in frames}
-    return veh_by_t, ego_by_t, sorted(veh_by_t)
+    return veh_by_t, ego_by_t, sorted(veh_by_t), off_by_t
 
 
 def nearest_frame_t(frame_t: list[float], t: float) -> float | None:
@@ -248,7 +270,7 @@ def replay_clip(clip: Clip) -> list[ReviewFrame]:
     if not clip.aeb_ticks and not clip.radar_frames:
         return []
 
-    veh_by_t, ego_by_t, frame_t = decode_radar_stream(clip)
+    veh_by_t, ego_by_t, frame_t, _off_by_t = decode_radar_stream(clip)
     frames = sorted(clip.radar_frames, key=lambda f: f.t_mono)
 
     t_candidates = [f.t_mono for f in frames] + [tk.t_mono for tk in clip.aeb_ticks]
