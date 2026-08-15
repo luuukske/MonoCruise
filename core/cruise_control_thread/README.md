@@ -57,6 +57,19 @@ that latch.
 One button assigned cycles the level and wraps; two assigned step and clamp, and
 are suppressed while both are held. Same count-driven short press as above.
 
+`Settings.acc_gap_level` has two writers: these buttons and the "Following
+distance" dropdown in the settings panel. Both bindings are optional, so the
+dropdown is the only way to reach the setting without spare hardware. It is
+shown only while `acc_enabled` is on, and revealed from the BETA confirm
+callback rather than the toggle, so declining the prompt does not leave the row
+behind. The panel re-reads the level on its binding poll, or a press made while
+the drawer is open would leave the dropdown showing a stale level.
+
+Level labels carry their headway (`_GAP_LEVEL_LABELS` in the panel) and the
+level is parsed back out of the display text, so the level must stay the first
+digit in the label. Headway per level is `T_HEADWAY_BY_LEVEL_S`; see
+`core/acc/ACC_ARCHITECTURE.md` §14 for the values and their open provenance.
+
 ## Adaptive cruise (`acc_controller.py`)
 
 Publishes an upper bound on commanded accel (m/s²). Orchestrator uses `min(speed_pid, cap)`.

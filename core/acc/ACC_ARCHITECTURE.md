@@ -569,16 +569,29 @@ transient under-braking: precisely the regime where giving up some
 smoothness for safety is correct.
 
 User-facing gap level (`Settings.acc_gap_level`) maps to four headway
-values, all ≥ 1.0 s:
+values in `T_HEADWAY_BY_LEVEL_S`, which is indexed by level with index 0
+holding the fallback used when the level is out of range:
 
 | Level | Headway T | Effective behaviour |
 |---|---|---|
-| 1 | 1.0 s | Closest: at the string-stability boundary; reactive |
-| 2 | 1.5 s | Default: comfortable, stable |
-| 3 | 2.0 s | Relaxed |
-| 4 | 2.5 s | Farthest: very stable, large equilibrium gap |
+| 1 | 0.7 s | Closest: below the string-stability bound; reactive |
+| 2 | 1.1 s | Default: comfortable |
+| 3 | 1.5 s | Relaxed |
+| 4 | 2.2 s | Farthest: very stable, large equilibrium gap |
 
-Headways below 1.0 s are deliberately not exposed.
+Only levels 3 and 4 clear the `T ≥ 1.0 s` bound the linearisation above
+assumes, so 1 and 2 are not string-stable in the textbook sense: a
+disturbance ahead can amplify down a queue. The safety overlays in §10
+and AEB are what bound that, not the headway.
+
+**Open:** why the set runs below 1.0 s is not recorded anywhere, and no
+measurement in this repo justifies the current values. An earlier
+revision of this table claimed 1.0 / 1.5 / 2.0 / 2.5 s and stated that
+headways below 1.0 s were deliberately not exposed; the constants have
+not matched that for some time. The numbers above are the shipped ones,
+and the settings panel now prints each level's headway next to it, so
+they are user-visible. Treat the values as unvalidated rather than
+tuned, and re-derive them before citing this table as a rationale.
 
 ---
 

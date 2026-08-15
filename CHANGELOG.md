@@ -11,6 +11,12 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Added
+- **Set how far ACC follows**: there is now a following-distance setting under Adaptive Cruise Control with four steps, from closest to farthest. You can also bind buttons to change it while driving, under the cruise control buttons in the settings. Bind only one and it cycles through all four.
+
+### Changed
+- **ACC follows a little further back by default**: the starting following distance moved up one step. If you had already picked a distance, yours is kept.
+
 ### Fixed
 - **AEB braking for traffic under a bridge you are driving over**: MonoCruise decided what counts as "on your road" by drawing a straight line out from the nose of your truck, with several metres of slack either side. Coming down a hill onto an overpass, that line pointed straight at the road underneath, so the cars down there looked like they were in your lane. It now works out the shape of the road ahead instead, and reads the tilt of each vehicle to see whether it is sitting on your road or a different one. Traffic under a bridge inside 30 m is now essentially always ignored.
 - **ACC losing the vehicle ahead on hills at speed**: that same straight line went badly wrong over crests and dips, and the faster you went the further ahead your lead was, so it fell outside the slack and ACC let go of it. Above 85 km/h it was dropping 4 % of the traffic it should have been following, and over 11 % on steep grades. Both are now effectively zero.

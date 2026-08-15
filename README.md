@@ -79,7 +79,7 @@ MonoCruise will automatically start together with ETS2. you can disable this in 
 > The MonoCruise window should remain open if you want to use it
 
 ## Adaptive Cruise Control (v1.1.0 and above):
-Enable the ACC and it will hold a safe following distance from the lead vehicle in singleplayer or TruckersMP. The ACC uses an intelligent driver model (IIDM) to select and track the closest in-lane vehicle, and scores multiple candidates to pick the correct lead. You can adjust the following gap with dedicated buttons (4 levels).
+Enable the ACC and it will hold a safe following distance from the lead vehicle in singleplayer or TruckersMP. The ACC uses an intelligent driver model (IIDM) to select and track the closest in-lane vehicle, and scores multiple candidates to pick the correct lead. The following gap has 4 levels, set from "Following distance" under Adaptive Cruise Control in the settings, or changed while driving with the optional ACC distance buttons (bind just one and it cycles through all four).
 
 > [!CAUTION]
 > The ACC is EXTREMELY experimental.

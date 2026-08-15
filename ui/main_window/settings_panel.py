@@ -64,6 +64,9 @@ _BIND_KEYS = (
 _BIND_BUTTON_SIZE = (150, 30)
 _BIND_POLL_MS = 33.333
 
+# ACC gap level 1..4 (core/cruise_control_thread/acc_distance.py owns the range).
+_GAP_LEVEL_LABELS = ("1 (0.7s)", "2 (1.1s)", "3 (1.5s)", "4 (2.2s)")
+
 # Extra breathing room under the Unassign button, before the next setting.
 _UNASSIGN_GAP = 10
 
@@ -607,6 +610,18 @@ class SettingsPanel(QWidget):
         new_label(p, self._r(0), 0, "Decrease button:")
         self._add_bind_button(self._r(), "cc_dec_button")
 
+        new_label(p, self._r(0), 0, "ACC distance up:")
+        self._add_bind_button(self._r(), "acc_dist_inc_button")
+
+        new_label(p, self._r(0), 0, "ACC distance down:")
+        self._add_bind_button(self._r(), "acc_dist_dec_button")
+
+        new_subtext(
+            p, self._r(), 0,
+            "Optional. Bind just one and it cycles through all four distances.",
+            col_span=2,
+        )
+
         # Unassign button: arms unassign mode, or clears the binding
         # currently being configured.
         self._unassign_btn = QPushButton("Unassign")
@@ -683,6 +698,19 @@ class SettingsPanel(QWidget):
         self._grid.addWidget(acc_widget, r_acc, 1)
         self._grid.setRowMinimumHeight(r_acc, FIELD_ROW_HEIGHT)
 
+        # Same level the ACC distance buttons step, so _sync_gap_level keeps
+        # this dropdown in step with presses made while the drawer is open.
+        r_gap = self._r(0)
+        new_label(p, r_gap, 0, "  Following distance:")
+        self.opt_acc_gap = new_optionmenu(
+            p, self._r(), 1,
+            values=_GAP_LEVEL_LABELS,
+            default=self._gap_level_label(s.acc_gap_level),
+            callback=self._on_gap_level_changed,
+        )
+        self._acc_gap_row = r_gap
+        self._set_row_visible(r_gap, bool(s.acc_enabled))
+
         # AEB (BETA)
         r_aeb = self._r()
         new_label(p, r_aeb, 0, "Emergency Braking:")
@@ -736,6 +764,30 @@ class SettingsPanel(QWidget):
 
     def _format_increment_value(self, value: Any) -> str:
         return f"{self._parse_increment_value(value)} {self._speed_unit()}"
+
+    @staticmethod
+    def _gap_level_label(level: Any) -> str:
+        try:
+            n = int(level)
+        except (TypeError, ValueError):
+            n = 2
+        return _GAP_LEVEL_LABELS[max(1, min(4, n)) - 1]
+
+    def _on_gap_level_changed(self, value: str) -> None:
+        match = re.search(r"\d", str(value))
+        if not match:
+            return
+        self._set("acc_gap_level", max(1, min(4, int(match.group(0)))))
+
+    def _sync_gap_level(self) -> None:
+        """The ACC distance buttons write the level from the CC thread, so the
+        dropdown has to follow a press instead of only a click."""
+        label = self._gap_level_label(getattr(self._settings, "acc_gap_level", 2))
+        if self.opt_acc_gap.currentText() == label:
+            return
+        self.opt_acc_gap.blockSignals(True)
+        self.opt_acc_gap.setCurrentText(label)
+        self.opt_acc_gap.blockSignals(False)
 
     def _set_cruise_mode(self, mode: str) -> None:
         self._set("cc_mode", mode)
@@ -890,6 +942,7 @@ class SettingsPanel(QWidget):
                 self._poll_pedal_config()
             self._poll_held_glow()
             self._poll_pedal_status()
+            self._sync_gap_level()
         except Exception:
             logger.debug("binding poll failed", exc_info=True)
 
@@ -1040,10 +1093,13 @@ class SettingsPanel(QWidget):
                     self.chk_acc.setChecked(True),
                     self.chk_acc.blockSignals(False),
                     self._set("acc_enabled", True),
+                    # Only on confirm: declining must not leave the gap row behind.
+                    self._set_row_visible(self._acc_gap_row, True),
                 ),
             )
         else:
             self._set("acc_enabled", False)
+            self._set_row_visible(self._acc_gap_row, False)
 
     def _on_aeb_toggled(self, checked: bool) -> None:
         if checked:
@@ -1431,6 +1487,11 @@ class SettingsPanel(QWidget):
         self.chk_acc.blockSignals(True)
         self.chk_acc.setChecked(bool(s.acc_enabled))
         self.chk_acc.blockSignals(False)
+
+        self.opt_acc_gap.blockSignals(True)
+        self.opt_acc_gap.setCurrentText(self._gap_level_label(s.acc_gap_level))
+        self.opt_acc_gap.blockSignals(False)
+        self._set_row_visible(self._acc_gap_row, bool(s.acc_enabled))
 
         self.chk_aeb.blockSignals(True)
         self.chk_aeb.setChecked(s.AEB_enabled)

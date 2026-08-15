@@ -136,7 +136,7 @@ class Settings(metaclass=_SingletonMeta):
     acc_dist_dec_button: object = None  # lowers gap (toward closest, level 1)
     cc_mode: str = "Cruise control"
     acc_enabled: object = None
-    acc_gap_level: int = 2  # 1=closest, 4=farthest. Drives ACC headway and cc_panel lines.
+    acc_gap_level: int = 3  # 1=closest, 4=farthest. Drives ACC headway and cc_panel lines.
     long_increments: int = 1
     short_increments: int = 5
     long_press_reset: bool = True
