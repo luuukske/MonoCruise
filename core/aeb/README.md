@@ -1050,7 +1050,7 @@ if v.id in off_surface_ids:
 The full model, the constants, the corpus fits behind them and the failsafe
 list live in `core/radar/README.md` §15. Two properties matter here:
 
-- The band is **tighter than the old ±5 m window inside ~90 m** (it kills
+- The band is **tighter than the old ±5 m window inside ~65 m** (it kills
   traffic on a road under a bridge ego is crossing) and **wider beyond it**
   (a lead over a crest is no longer lost). Measured: the old window dropped
   4.06 % of candidate leads above 85 km/h; the new gate drops 0.00 %.

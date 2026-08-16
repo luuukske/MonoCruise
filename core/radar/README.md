@@ -973,7 +973,8 @@ Two defects, both structural rather than a bad constant:
   far from it. Measured on 250 clips, the old window dropped **4.06 % of
   candidate leads above 85 km/h and 11.31 % on grades past 3 deg**, while
   admitting **53 %** of the traffic sitting more than 3 m below ego's road
-  inside 80 m.
+  inside 80 m. A first version of the replacement then over-corrected on
+  transients and crests; see "the three conditions" below.
 
 ### The model
 
@@ -1004,8 +1005,8 @@ The fit is usable on **84.2 % of moving frames** and shifts the prediction at
 ### Two tests, evaluated in order
 
 **1. Profile band.** `|dy - pred(s)| <= band(s)`, with
-`band(s) = 1.2 + 0.0006·s² (cap 15) + 0.25·height`. Range-aware, so it is
-**tighter than the old window inside ~90 m and wider beyond it**. The
+`band(s) = 1.2 + 0.0011·s² (cap 15) + 0.25·height`. Range-aware, so it is
+**tighter than the old window inside ~65 m and wider beyond it**. The
 height-proportional term is a failsafe, not a fit: it guarantees a body whose
 datum the fit does not describe can never be gated on that correction alone
 (the term is ~4x the measured worst-class datum error).
@@ -1043,6 +1044,34 @@ down into a low bridge points ego's tangent straight at the traffic
 underneath, so the height residual is small and only the target sitting on a
 *flat* road gives it away.
 
+**3. Target-perspective fallback.** Both tests above start from ego's pitch,
+so both inherit whatever ego's pitch gets wrong. The fallback runs the
+*target's* own tangent back to ego instead, and rescues the vehicle when it
+lands on ego's road:
+
+```python
+abs(dy - m1 * s) <= 2.0 + 0.03 * abs(s)
+```
+
+It is consulted only after the band or the grade test has already failed, and
+only when `m1` was actually **observed**: past `_MIN_GRADE_ALIGN_COS` the
+target's heading carries no along-ego grade, `m1` collapses to `m0`, and the
+expression degenerates into the ego tangent it exists to be independent of.
+Gating on that is load-bearing, not tidiness: ungated it re-admits a
+perpendicular vehicle under a bridge whenever ego is pitched down at it, which
+is the original false positive.
+
+### Ego grade is smoothed, and absurd pitch reads level
+
+A truck pitches on its suspension over level crossings, kerbs and potholes;
+the road under it does not. Ego grade is therefore an EMA
+(`_GRADE_EMA_ALPHA` 0.15 per frame at radar's fixed 30 Hz, so a one-frame
+spike moves it by a seventh), and any reading past `_MAX_EGO_GRADE` (0.18) is
+discarded as level rather than clamped. Measured `|ego pitch|` p100 over the
+corpus is 0.126, so 0.18 is above anything real and a larger reading is
+always garbage. Without this, a measured 88 deg/s bounce put `m0` at +0.42 and
+the prediction at **+34 m** at 80 m range, which dropped every lead ahead.
+
 ### Failsafes
 
 The gate suppresses, so a wrong suppression is a missed collision. Every
@@ -1051,12 +1080,16 @@ uncertain path fails open:
 - **Unusable target rotation** (zero quaternion, roll > 15 deg, pitch >
   20 deg: a wreck, a spun or jackknifed rig) drops `m1` back to `m0`, which
   reduces the test to the band alone. Wrecks keep their pipeline seat.
-- **Unusable ego pose**: non-finite pitch, or a grade past 0.5, reads level.
+- **Unusable ego pose**: non-finite pitch, or a grade past 0.18, reads level;
+  everything else is smoothed before use.
 - **Missing or absurd `size.height`** skips the datum and widens the band by
   the full plausible datum instead. Height is clamped to 0.5-5.0 m before it
   scales anything.
 - **Unusable ego history** (short span, fit rms > 0.15 m, curvature past
   0.01, a teleport) drops the curvature term, leaving the tangent.
+- **The target-perspective fallback** is a second opinion that never
+  suppresses, only rescues, and it is inert whenever the target's grade was
+  not actually observed.
 - **Persistence.** A *marginal* failure must repeat for
   `SUPPRESS_CONFIRM_FRAMES` (3, i.e. 100 ms at 30 Hz) before the id is
   suppressed, and one passing frame clears the count. A single rotation or
@@ -1076,7 +1109,7 @@ dropped by the gate. This is the ACC tracking-loss defect:
 
 | ego speed | n | old | new |
 |-----------|---|-----|-----|
-| 0-50 km/h | 15801 | 1.240 % | 0.190 % |
+| 0-50 km/h | 15801 | 1.240 % | 0.196 % |
 | 50-70 | 12890 | 1.808 % | 0.000 % |
 | 70-85 | 7874 | 1.461 % | 0.000 % |
 | 85+ | 7114 | **4.062 %** | **0.000 %** |
@@ -1084,22 +1117,60 @@ dropped by the gate. This is the ACC tracking-loss defect:
 | \|ego grade\| | n | old | new |
 |---------------|---|-----|-----|
 | < 1 deg | 28035 | 0.571 % | 0.000 % |
-| 1-3 deg | 11381 | 1.678 % | 0.185 % |
+| 1-3 deg | 11381 | 1.678 % | 0.193 % |
 | 3+ deg | 4263 | **11.307 %** | **0.211 %** |
 
 Widening the same set to 9 m laterally and every range band, 55,915
 lead-frames: dropped **1.89 % -> 0.09 %**, and at 110-160 m
 **8.31 % -> 0.00 %**.
 
+### The three conditions that broke the first version
+
+In-game testing found lead loss at level crossings, cresting a hill onto
+standing traffic, and tight descending corners. Splitting every lead-frame by
+how far the target sits from ego's road plane localises all three, and shows
+what the fix has to be measured against. `shallow` (within 4 m) is the traffic
+you actually follow; `deep` is bridge decks and switchback levels.
+
+| condition | n | old, shallow | now, shallow | old, deep | now, deep |
+|-----------|---|--------------|--------------|-----------|-----------|
+| all | 44012 / 2760 | 1.416 % | **0.005 %** | 8.44 % | 1.88 % |
+| calm and flat | 20262 / 173 | 0.000 % | 0.000 % | 70.5 % | 0.00 % |
+| ego pitch transient | 498 / 62 | 2.811 % | **0.000 %** | 17.7 % | 14.5 % |
+| cresting | 3664 / 580 | 0.000 % | 0.000 % | 13.1 % | 6.03 % |
+| tight descent | 55 / 41 | 0.000 % | 0.000 % | 100 % | 85.4 % |
+
+Read the split before reacting to a headline number. The tight-descent bucket
+looked catastrophic at 42.7 % of all its lead-frames, but **every one of those
+drops was a deep target**: traffic 9 to 10 m below on the switchback level of
+a hairpin, which is not reachable in the range being tested and which the gate
+is right to drop. No shallow lead was ever dropped in a tight descent, before
+or after. The genuine regressions were the transient bucket (2.8 % of shallow
+leads) and the deep-target rates generally.
+
+**An ego-curvature abstain was built for the hairpin case and rejected.**
+Switching the tests off past 25 m whenever ego path curvature exceeded a
+threshold took the tight-descent bucket to zero, but it cost a false warn on a
+labelled clip (118d02c9), and a bisect pinned that flip on the abstain alone.
+The threshold cannot be set safely: that clip runs a twisty descent at
+`|kappa|` p50 0.0166 / max 0.0339, overlapping the hairpin it was meant to
+catch. Since the split above shows the hairpin drops were correct anyway, the
+escape bought nothing real. Do not reintroduce it.
+
 Traffic whose road surface is more than 3 m below ego's, inside 80 m: the
-under-bridge population, 38,190 rows. Suppression **46.9 % -> 72.8 %**
-overall, and by range **67.2 -> 99.8 %** (8-20 m), **63.2 -> 99.5 %**
-(20-30 m), 45.8 -> 80.3 % (30-45 m), 41.8 -> 65.7 % (45-60 m),
-34.0 -> 47.8 % (60-80 m). Total suppression across all tracked vehicles
-*falls* (18.0 % -> 15.4 %): the gate redistributes rather than tightening,
-trading 27.9 -> 5.5 % at 110-160 m for 15.7 -> 22.3 % inside 20 m. Of the
-new gate's suppressions, 78 % come from the band, 12 % from the grade test
-and 10 % from the hard cap.
+under-bridge population, 38,190 rows. Suppression **46.9 % -> 69.8 %**
+overall, and by range **67.2 -> 98.5 %** (8-20 m), **63.2 -> 95.5 %**
+(20-30 m), 45.8 -> 76.8 % (30-45 m), 41.8 -> 60.8 % (45-60 m),
+34.0 -> 45.7 % (60-80 m). Total suppression across all tracked vehicles
+*falls* (18.0 % -> 13.0 %): the gate redistributes rather than tightening,
+trading 27.9 -> 4.7 % at 110-160 m for 15.7 -> 19.8 % inside 20 m. Of the
+new gate's suppressions, 70 % come from the band, 18 % from the grade test
+and 12 % from the hard cap.
+
+Widening the band and adding the fallback cost some of this: before those
+changes the same measurement read 72.8 % overall and 99.8 % inside 20 m. That
+is the price of taking shallow-lead loss to zero in the table above, and it is
+paid almost entirely beyond 30 m, where AEB is not the thing at stake.
 
 **The residual is deliberate.** Beyond ~45 m a perpendicular vehicle a few
 metres below ego is genuinely ambiguous: the same geometry describes a real
@@ -1122,12 +1193,15 @@ Choosing `_K_FLOOR` on band-passing rows over 250 clips (440,309 rows,
 0.012 for five lost lead-frames in 54,181, and it clears the hill-into-bridge
 case (`k_req` 0.0117) with margin.
 
-AEB clip corpus, 636 labelled clips: verdict counts **identical** (FN 48,
-FP 18, false-warn 9, late 7, TN 331, TP 223). Two clips changed at all, both
-staying true positives with slightly lower intervention quality (total cost
-+18.34 -> +19.57). ACC corpus over 120 clips: in-corridor moving frames
-52,268 -> 53,366, lead frames 14,334 -> 14,416, stationary false-lock rate
-4.11 % -> 4.04 %, hook p90 1.20 -> 1.00 s.
+AEB clip corpus, 636 labelled clips: verdict counts **identical** to the
+pre-gate baseline (FN 48, FP 18, false-warn 9, late 7, TN 331, TP 223). Three
+clips changed at all, all staying in their class (total cost +18.34 ->
++19.32). ACC corpus over 120 clips: in-corridor moving frames 52,268 ->
+53,549, lead frames 14,334 -> 14,420, stationary false-lock rate 4.11 % ->
+3.96 %, hook p90 1.20 -> 0.97 s.
+
+The corpus holds no bridge clip, so it can only show the absence of
+regression, never the fix. Both reported symptoms need an in-game check.
 
 ---
 

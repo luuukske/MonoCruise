@@ -19,7 +19,7 @@ _UNKNOWN_DATUM_SLACK_M: float = 2.2
 
 # Profile band: base + curvature term. Envelope of the measured predictor error.
 _BAND_BASE_M: float = 1.2
-_BAND_CURV: float = 0.0006
+_BAND_CURV: float = 0.0011
 _BAND_MAX_M: float = 15.0
 # Slack proportional to the datum this vehicle's height bought, so a body the
 # datum fit does not describe can never be gated on that correction alone.
@@ -36,8 +36,18 @@ _MIN_GRADE_RANGE_M: float = 12.0
 # Target rotation outside these is not a road grade (crashed, spun, jackknifed).
 _MAX_TARGET_ROLL_DEG: float = 15.0
 _MAX_TARGET_PITCH_DEG: float = 20.0
-# Ego pitch beyond this is not a drivable grade; treat the frame as level.
-_MAX_EGO_GRADE: float = 0.5
+# Ego pitch beyond this is not a road at all (measured p100 0.126), so it reads
+# level; the EMA below is what absorbs suspension bounce at a fixed 30 Hz.
+_MAX_EGO_GRADE: float = 0.18
+_GRADE_EMA_ALPHA: float = 0.15
+
+# A heading this far off ego's axis carries no along-axis grade evidence.
+_MIN_GRADE_ALIGN_COS: float = 0.30
+
+# Fallback: the target's own tangent run back to ego, immune to ego pitch. Only
+# valid on an observed target grade, or it is just the ego tangent again.
+_FB_BASE_M: float = 2.0
+_FB_GRADE: float = 0.03
 
 # Ego elevation history: distance grid, quadratic fit, clamped forward term.
 _FIT_SPAN_M: float = 45.0
@@ -50,7 +60,7 @@ _MAX_VERT_CURVATURE: float = 0.01
 
 # Suppression needs this many consecutive failing frames unless it is gross.
 SUPPRESS_CONFIRM_FRAMES: int = 3
-_GROSS_RATIO: float = 2.0
+_GROSS_RATIO: float = 1.7
 
 
 @dataclass(frozen=True)
@@ -74,19 +84,30 @@ class RoadSurface:
 class EgoElevationTrack:
     """Ego (arc length, elevation) samples on a distance grid, for the fit."""
 
-    __slots__ = ("_samples", "_last_x", "_last_z", "_s")
+    __slots__ = ("_samples", "_last_x", "_last_z", "_s", "_grade")
 
     def __init__(self) -> None:
         self._samples: list[tuple[float, float]] = []
         self._last_x: float | None = None
         self._last_z: float | None = None
         self._s: float = 0.0
+        self._grade: float | None = None
 
     def clear(self) -> None:
         self._samples.clear()
         self._last_x = None
         self._last_z = None
         self._s = 0.0
+        self._grade = None
+
+    def smooth_grade(self, raw: float) -> float:
+        """EMA of ego grade. A truck pitches on its suspension over bumps and
+        level crossings; the road under it does not."""
+        if self._grade is None:
+            self._grade = raw
+        else:
+            self._grade += _GRADE_EMA_ALPHA * (raw - self._grade)
+        return self._grade
 
     def push(self, x: float, z: float, y: float) -> None:
         if self._last_x is None:
@@ -169,7 +190,10 @@ def build_surface(
     grade = math.tan(ego_pitch_rad) if math.isfinite(ego_pitch_rad) else 0.0
     if not math.isfinite(grade) or abs(grade) > _MAX_EGO_GRADE:
         grade = 0.0
-    kappa, ok = track.curvature() if track is not None else (0.0, False)
+    kappa, ok = (0.0, False)
+    if track is not None:
+        grade = track.smooth_grade(grade)
+        kappa, ok = track.curvature()
     return RoadSurface(ego_y=ego_y, grade=grade, curvature=kappa, curvature_ok=ok)
 
 
@@ -185,21 +209,25 @@ def road_y_offset(v: Vehicle, ego_y: float) -> tuple[float, float]:
     return v.position.y - BODY_DATUM_FRAC * h - ego_y, h
 
 
-def target_grade(v: Vehicle, ego_grade: float, yaw_diff_rad: float) -> float:
-    """Road grade under the target along ego forward; ego's grade when unobservable.
+def target_grade(
+    v: Vehicle, ego_grade: float, yaw_diff_rad: float,
+) -> tuple[float, bool]:
+    """Road grade under the target along ego forward, and whether it was observed.
 
     Traffic euler pitch is the negated nose-up angle along the target's own
-    heading, so only its ego-axis component is evidence (README §15)."""
+    heading, so only its ego-axis component is evidence (README §15). Returns
+    ego's own grade, unobserved, whenever that evidence is missing."""
     if v.rotation.is_zero():
-        return ego_grade
+        return ego_grade, False
     pitch_deg, _, roll_deg = v.rotation.euler()
     if not (math.isfinite(pitch_deg) and math.isfinite(roll_deg)):
-        return ego_grade
+        return ego_grade, False
     if abs(roll_deg) > _MAX_TARGET_ROLL_DEG or abs(pitch_deg) > _MAX_TARGET_PITCH_DEG:
-        return ego_grade
+        return ego_grade, False
     c = math.cos(yaw_diff_rad)
     sn = math.sin(yaw_diff_rad)
-    return ego_grade * sn * sn - math.tan(math.radians(pitch_deg)) * c
+    grade = ego_grade * sn * sn - math.tan(math.radians(pitch_deg)) * c
+    return grade, abs(c) >= _MIN_GRADE_ALIGN_COS
 
 
 def profile_band(s: float, body_height: float) -> float:
@@ -243,6 +271,11 @@ class ElevationVerdict:
 _PASS = ElevationVerdict()
 
 
+def fallback_window(s: float) -> float:
+    """Window for the target-perspective tangent check."""
+    return _FB_BASE_M + _FB_GRADE * abs(s)
+
+
 def evaluate_vehicle(
     v: Vehicle, surface: RoadSurface, s: float, yaw_diff_rad: float,
 ) -> ElevationVerdict:
@@ -255,7 +288,10 @@ def evaluate_vehicle(
 
     band = profile_band(s, body_height)
     residual = abs(dy - surface.predict(s))
+    m1, m1_seen = target_grade(v, surface.grade, yaw_diff_rad)
     if residual > band:
+        if m1_seen and _fallback_holds(dy, m1, s):
+            return ElevationVerdict(False, False, dy, residual, band, 0.0, 0.0)
         return ElevationVerdict(
             True, residual > band * _GROSS_RATIO, dy, residual, band, 0.0, 0.0,
         )
@@ -263,14 +299,21 @@ def evaluate_vehicle(
     if abs(s) < _MIN_GRADE_RANGE_M:
         return ElevationVerdict(False, False, dy, residual, band, 0.0, 0.0)
 
-    m1 = target_grade(v, surface.grade, yaw_diff_rad)
     k_req = required_curvature(s, dy, surface.grade, m1)
     k_max = max_curvature(s)
-    if k_req > k_max:
+    if k_req > k_max and not (m1_seen and _fallback_holds(dy, m1, s)):
         return ElevationVerdict(
             True, k_req > k_max * _GROSS_RATIO, dy, residual, band, k_req, k_max,
         )
     return ElevationVerdict(False, False, dy, residual, band, k_req, k_max)
+
+
+def _fallback_holds(dy: float, m1: float, s: float) -> bool:
+    """Target's own road tangent, run back to ego, lands on ego's road.
+
+    Independent of ego pitch, which is what spikes over level crossings and
+    crests. See core/radar/README.md §15."""
+    return abs(dy - m1 * s) <= fallback_window(s)
 
 
 class ElevationGate:

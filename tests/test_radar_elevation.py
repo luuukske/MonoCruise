@@ -181,34 +181,121 @@ class TestUnderBridge:
         assert not evaluate_vehicle(v, _surface(grade), s, 0.0).off_surface
 
 
+class TestTargetPerspectiveFallback:
+    """The target's own tangent run back to ego, immune to ego pitch (README §15)."""
+
+    def test_lead_on_ego_road_survives_a_bogus_ego_pitch(self):
+        """Level crossing: the truck pitches on its suspension, the road does not."""
+        s = 40.0
+        v = _veh(1, s, EL.BODY_DATUM_FRAC * 1.5)          # dead level with ego
+        bogus = _surface(0.15)                            # ego reads 15 % uphill
+        assert abs(0.0 - bogus.predict(s)) > profile_band(s, 1.5)
+        assert not evaluate_vehicle(v, bogus, s, 0.0).off_surface
+
+    def test_fallback_does_not_rescue_traffic_under_a_bridge(self):
+        """Same shape as the crossing case, but 5 m down: the window is finite."""
+        s = 40.0
+        v = _veh(1, s, -5.0 + EL.BODY_DATUM_FRAC * 1.5)
+        assert abs(-5.0) > EL.fallback_window(s)
+        assert evaluate_vehicle(v, _surface(0.0), s, 0.0).off_surface
+
+    def test_unobserved_grade_gets_no_fallback(self):
+        """A perpendicular target's m1 collapses to ego's, so the fallback would
+        just be the ego tangent again and must not be consulted."""
+        s = 30.0
+        dy = -2.7                                   # inside the window, past the band
+        assert profile_band(s, 1.5) < abs(dy) <= EL.fallback_window(s)
+        cross = _veh(1, s, dy + EL.BODY_DATUM_FRAC * 1.5, yaw_deg=90.0)
+        assert not target_grade(cross, 0.0, math.pi / 2.0)[1]
+        assert evaluate_vehicle(cross, _surface(0.0), s, math.pi / 2.0).off_surface
+        # Same geometry, grade observed and consistent: the fallback applies.
+        along = _veh(2, s, dy + EL.BODY_DATUM_FRAC * 1.5,
+                     pitch_deg=-math.degrees(math.atan(dy / s)))
+        assert target_grade(along, 0.0, 0.0)[1]
+        assert not evaluate_vehicle(along, _surface(0.0), s, 0.0).off_surface
+
+    def test_perpendicular_under_bridge_on_a_descent_is_a_known_gap(self):
+        """Ego pitched down at a crossing vehicle 5 m below: the tangent points
+        straight at it and a 90 deg heading carries no grade. Recorded, not fixed
+        (core/radar/README.md §15)."""
+        grade = math.tan(math.radians(-8.0))
+        s = 30.0
+        v = _veh(1, s, -5.0 + EL.BODY_DATUM_FRAC * 1.5, yaw_deg=90.0)
+        verdict = evaluate_vehicle(v, _surface(grade), s, math.pi / 2.0)
+        assert not verdict.off_surface
+        assert verdict.residual < verdict.band
+
+    def test_window_grows_with_range(self):
+        assert EL.fallback_window(20.0) < EL.fallback_window(120.0)
+
+    def test_window_is_symmetric_behind_ego(self):
+        assert EL.fallback_window(-60.0) == EL.fallback_window(60.0)
+
+    def test_fallback_also_covers_the_grade_test(self):
+        """A target whose own tangent lands on ego must survive both stages."""
+        s = 60.0
+        v = _veh(1, s, EL.BODY_DATUM_FRAC * 1.5)
+        surface = _surface(0.06)
+        assert not evaluate_vehicle(v, surface, s, 0.0).off_surface
+
+
+class TestEgoGradeRobustness:
+    def test_suspension_spike_is_smoothed_away(self):
+        """One frame of 24 deg nose-up must barely move the grade used."""
+        track = EgoElevationTrack()
+        for _ in range(20):
+            build_surface(0.0, 0.0, track)
+        spiked = build_surface(0.0, math.atan(0.42), track).grade
+        assert abs(spiked) < 0.02
+
+    def test_sustained_grade_is_still_followed(self):
+        track = EgoElevationTrack()
+        for _ in range(60):
+            surface = build_surface(0.0, math.atan(0.08), track)
+        assert math.isclose(surface.grade, 0.08, rel_tol=0.05)
+
+    def test_absurd_pitch_reads_level_not_clamped(self):
+        assert build_surface(0.0, math.radians(80.0), None).grade == 0.0
+
+    def test_grade_ema_resets_with_the_track(self):
+        track = EgoElevationTrack()
+        for _ in range(60):
+            build_surface(0.0, math.atan(0.10), track)
+        track.clear()
+        assert build_surface(0.0, 0.0, track).grade == 0.0
+
+
 class TestGradeSignal:
     def test_codirectional_pitch_is_negated(self):
         """Traffic euler pitch runs opposite to ego pitch (corpus fit)."""
-        g = target_grade(_veh(1, 40.0, 0.0, pitch_deg=-5.0), 0.0, 0.0)
-        assert g > 0.0
+        g, seen = target_grade(_veh(1, 40.0, 0.0, pitch_deg=-5.0), 0.0, 0.0)
+        assert seen and g > 0.0
         assert math.isclose(g, math.tan(math.radians(5.0)), rel_tol=1e-6)
 
     def test_oncoming_pitch_flips_back(self):
         v = _veh(1, 40.0, 0.0, pitch_deg=5.0, yaw_deg=180.0)
-        g = target_grade(v, 0.0, math.pi)
+        g, seen = target_grade(v, 0.0, math.pi)
+        assert seen
         assert math.isclose(g, math.tan(math.radians(5.0)), rel_tol=1e-6)
 
     def test_perpendicular_target_yields_no_grade_evidence(self):
         v = _veh(1, 40.0, 0.0, pitch_deg=-6.0, yaw_deg=90.0)
-        assert math.isclose(target_grade(v, 0.123, math.pi / 2.0), 0.123, rel_tol=1e-9)
+        g, seen = target_grade(v, 0.123, math.pi / 2.0)
+        assert not seen
+        assert math.isclose(g, 0.123, rel_tol=1e-9)
 
     def test_rolled_wreck_fails_open(self):
         v = _veh(1, 40.0, 0.0, pitch_deg=0.0, roll_deg=40.0)
-        assert target_grade(v, 0.077, 0.0) == 0.077
+        assert target_grade(v, 0.077, 0.0) == (0.077, False)
 
     def test_extreme_pitch_fails_open(self):
         v = _veh(1, 40.0, 0.0, pitch_deg=55.0)
-        assert target_grade(v, 0.077, 0.0) == 0.077
+        assert target_grade(v, 0.077, 0.0) == (0.077, False)
 
     def test_zero_quaternion_fails_open(self):
         v = _veh(1, 40.0, 0.0)
         v.rotation = Quaternion(0.0, 0.0, 0.0, 0.0)
-        assert target_grade(v, 0.077, 0.0) == 0.077
+        assert target_grade(v, 0.077, 0.0) == (0.077, False)
 
     def test_wreck_keeps_its_pipeline_seat(self):
         """The bridge geometry with an unusable rotation must not suppress."""
