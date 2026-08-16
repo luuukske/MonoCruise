@@ -16,7 +16,7 @@ from .blinker_arbitration import (
     BlinkerArbiter,
     BlinkerState,
 )
-from .idm_cah import acc_blend, cah, iidm
+from .idm_cah import lead_law
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,21 @@ T_HEADWAY_BY_LEVEL_S: tuple[float, float, float, float, float] = (
 )
 
 COOL_FACTOR_C: float = 0.99
+
+# Gap-error gain shaping. Smoothness follows the gap the driver asked for,
+# measured against level 2; being inside that gap adds firmness back.
+GAP_GAIN_REF_HEADWAY_S: float = T_HEADWAY_BY_LEVEL_S[2]
+GAP_GAIN_EXPONENT: float = 0.6
+GAP_GAIN_MIN: float = 0.35
+GAP_GAIN_MAX: float = 1.5
+
+# A lead pulling away restores the gap without ego lifting off, so its share of
+# the comfort brake is cut. Full relief once it opens this fast.
+OPENING_GAIN_MIN: float = 0.25
+OPENING_GAIN_FULL_MS: float = 1.5
+# The relief fades back out inside the wanted gap, reaching zero at this
+# fraction of it: a deficit that deep is not worth leaving to the lead.
+OPENING_RELIEF_FADE_FRAC: float = 0.6
 
 MA_MAX_LEADS: int = 3
 MA_MIN_CHAIN_GAP_M: float = 4.0
@@ -129,6 +144,13 @@ class ACConfig:
     ego_front_offset_m: float = EGO_FRONT_OFFSET_M
     t_headway_s: float = T_HEADWAY_S
     cool_factor_c: float = COOL_FACTOR_C
+    gap_gain_ref_headway_s: float = GAP_GAIN_REF_HEADWAY_S
+    gap_gain_exponent: float = GAP_GAIN_EXPONENT
+    gap_gain_min: float = GAP_GAIN_MIN
+    gap_gain_max: float = GAP_GAIN_MAX
+    opening_gain_min: float = OPENING_GAIN_MIN
+    opening_gain_full_ms: float = OPENING_GAIN_FULL_MS
+    opening_relief_fade_frac: float = OPENING_RELIEF_FADE_FRAC
     ma_max_leads: int = MA_MAX_LEADS
     ma_min_chain_gap_m: float = MA_MIN_CHAIN_GAP_M
     ant_gap_full_s: float = ANT_GAP_FULL_S
@@ -351,11 +373,6 @@ class AdaptiveCruiseController:
                 continue
             chain.append(s)
         return chain, indicated_snap, blinker
-
-    def _read_chain(self) -> list[_LeadSnapshot]:
-        """Snapshot the in-lane lead chain from acc_thread under its lock."""
-        chain, _, _ = self._read_acc_snapshot()
-        return chain
 
     def _smooth_chain(
         self,
@@ -642,28 +659,7 @@ class AdaptiveCruiseController:
         a_lead: float,
         t_headway: float,
     ) -> float:
-        """IIDM + CAH + ACC blend for one lead at its direct gap."""
-        cfg = self.config
-        eff_dist = max(dist_m, 1e-3)
-        a_iidm = iidm(
-            s=eff_dist,
-            v=v_ego,
-            v_lead=v_lead,
-            a_max=cfg.a_max_ms2,
-            b_comfort=cfg.b_comfort_ms2,
-            s0=cfg.s0_m,
-            t_headway=t_headway,
-            v0=cfg.v0_ms,
-            delta=cfg.delta,
-        )
-        a_cah_val = cah(
-            s=eff_dist,
-            v=v_ego,
-            v_lead=v_lead,
-            a_lead=a_lead,
-            a_max=cfg.a_max_ms2,
-        )
-        return acc_blend(a_iidm, a_cah_val, cfg.b_comfort_ms2, cfg.cool_factor_c)
+        return lead_law(self.config, dist_m, v_ego, v_lead, a_lead, t_headway)
 
     def _indicated_accel(
         self, ind: _LeadSnapshot, v_ego: float, t_headway: float,

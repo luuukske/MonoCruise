@@ -246,6 +246,19 @@ where lead's residual stopping distance is shorter than the gap allows
 second branch covers the case where there is enough room to glide to a
 stop using only the closing-speed energy.
 
+**The branch test is strict for a reason.** A stopped, non-accelerating
+lead puts `v_lead · (v − v_lead)` and `−2 · s · a_lead_eff` both at zero.
+With a non-strict `≤` that selects the first branch, whose numerator and
+denominator are then both zero, and the divide-by-zero guard returned
+`a_lead_eff` = 0: "a stopped vehicle needs no braking". The blend below
+then relaxed IIDM's demand onto that non-answer, so the command flatlined
+near `a_cah − b` = −2 m/s² the whole way in and the TTC overlay (§10) was
+left to catch the stop at −6.55 m/s², unfiltered. The two branches agree
+analytically at the boundary wherever both are defined, so `<` changes
+nothing except the degenerate case, where it yields the correct
+glide-to-stop rate `−v² / 2s`. Pinned by
+`tests/acc/test_gap_law_shaping.py`.
+
 CAH supersedes the legacy `K_FF · a_lead` feedforward term entirely.
 Anticipation now comes from a kinematically correct limit, not a hand-
 tuned scalar.
@@ -268,6 +281,78 @@ else:
 with cool factor `c = 0.99` (Kesting et al recommend `c ∈ [0.95, 0.99]`)
 and `b = b_comfort`. The `tanh` makes the blend C¹. In equilibrium the
 first branch holds and CAH contributes nothing: no comfort cost.
+
+Note the direction: the blend output is always **≥ `a_iidm`**, bounded
+below by `a_cah − b`. CAH relaxes IIDM's braking toward the kinematic
+requirement; it never adds authority of its own. Braking authority in
+this controller comes from IIDM's `z²` term and the overlays in §10.
+That is why a wrong `a_cah` (above) shows up as under-braking rather
+than over-braking.
+
+### 8.4 Gap-error shaping
+
+The blend answers "how hard, given this gap". It does not say how much
+that gap error should matter, and IIDM's answer to that was too stiff far
+out and too slack up close: rubber-banding behind a distant lead, and
+braking to restore a gap that the lead was already opening on its own.
+
+**How smooth the loop is comes from the gap the driver asked for, not
+from how far away the lead happens to be.** A wanted gap is a statement
+about how relaxed the following should feel; the instantaneous gap is
+just where you are on the way there. Keying the gain on the current gap
+was tried first and made a close setting go slack whenever the lead was a
+long way off, which is the opposite of what a close setting means.
+
+```
+s_want = s0 + v · T                                # this level's wanted gap
+s_ref  = s0 + v · GAP_GAIN_REF_HEADWAY_S           # level-2 wanted gap
+
+w_level = (s_ref / s_want) ^ 0.6                   # the setting, not the gap
+w_close = max(1, (s_ref / s) ^ 0.6)                # firmness once genuinely close
+w_open  = 1 − (1 − 0.25) · cos-ramp(v_lead − v, 0 → 1.5 m/s)
+          faded back to 1 as s drops from s_want to 0.6 · s_want
+
+a_out   = a_acc · clamp(w_level · w_close, 0.35, 1.5) · w_open   if a_acc < 0
+        = a_acc · max(1, w_level)                                if a_acc ≥ 0
+```
+
+* `w_level` is **1.0 at level 2 by construction**, so the calibration
+  everything else was tuned against comes out unchanged. At 80 km/h:
+  1.24 / 1.00 / 0.85 / 0.70 for levels 1 to 4, and **flat with distance**.
+  A farther setting gets a lazier loop at every gap; a closer one stays
+  eager at every gap.
+* `w_close` keys on `s_ref`, not `s_want`, so "close" is the same physical
+  distance whatever the driver asked for.
+* `w_open` is the "it will get there by itself" relief, and it only holds
+  where that reasoning does. At or beyond the wanted gap a lead opening at
+  1.5 m/s or more keeps a quarter of the comfort brake. Inside the wanted
+  gap the relief fades back out: a deficit that deep does not recover fast
+  enough to be left to the lead, so a close vehicle pulling away gets the
+  close-range gain in full.
+* The accel side is scaled **upward only**. A close setting closes on its
+  target harder; a far setting keeps full pull rather than being throttled
+  by its own smoothness. Headroom there is small in practice, since
+  `a_free` already sits near `max_accel_ms2`.
+* `gap_gain_min` (0.35) cannot bind while the level table stays inside
+  `[0.7, 2.2]` s. It is a bound on a computed quantity, not a tunable.
+
+**Equilibrium is untouched at every level.** The weights scale a command
+that is already zero at `s = s*`, so only the gain around the operating
+point changes, never where it sits.
+
+**The relief stops at the kinematics.** Where CAH demands deceleration,
+the shaped output is floored at `max(a_acc, a_cah)`: shaping may give
+back comfort margin, never the glide-to-stop rate, and never more than
+the unshaped law was asking for in the first place. This is what keeps
+the §8.2 fix from being cancelled by a relaxed gain on the approach to a
+stopped vehicle.
+
+Measured, 90 km/h onto a stopped vehicle first seen at 250 m: peak
+command −6.55 → −2.56 m/s² at level 2 (−2.26 at level 4), peak jerk 133 →
+0.5 m/s³, and the same run with the vehicle first published at 110 m goes
+from a collision to a clean stop 6.8 m short. Catching a slower lead from
+150 m settles 11 % sooner at level 4. Equilibrium gaps and the response to
+a lead braking at −2/−4/−6 m/s² are unchanged.
 
 ---
 
@@ -437,12 +522,15 @@ emergency.
 |---|---|---|---|
 | Emergency band | `eff_dist ≤ 1.5 m` | `−8.0 m/s²` | jerk + EMA |
 | TTC hard floor | `v_close > 0.3` AND `raw_eff_dist / v_close < 1.5 s` | `MAX_DECEL = −6.55 m/s²` | jerk + EMA |
-| Standstill hold | `v_ego < 0.4` AND `v_lead < 0.4` AND `eff_dist ≤ s0 + 1.0` | `−0.6 m/s²` | none |
+| Standstill hold | `v_ego < 0.4` AND `v_lead < 0.4` AND `eff_dist ≤ s0 + 2.0` | `0.0 m/s²` | none |
 | At-clamp hard | `a_chain ≤ MAX_DECEL + 1e-6` | as-is | jerk + EMA |
 
-The standstill hold is a real-vehicle extension to the textbook IIDM —
-without it, IIDM commands exactly zero at a dead stop and the truck
-creeps against the torque converter / engine idle.
+The standstill hold is a real-vehicle extension to the textbook IIDM.
+Inside the window IIDM still reads the gap as larger than `s0` and asks
+for a small positive command; pinning the cap at zero stops the truck
+creeping up on a stopped lead. `standstill_hold_decel_ms2` (−0.6) is
+**not** wired to anything: the overlay returns 0.0. Actually holding the
+truck still is `sending_thread`'s hold and creep-cancel job.
 
 ---
 
@@ -452,16 +540,16 @@ creeps against the torque converter / engine idle.
   ACCThread.data.leads[0..2]
         │
         ▼
-  _read_chain       : sort by dist, sanity filter, lock-scoped copy
+  _read_acc_snapshot: sort by dist, sanity filter, lock-scoped copy
         │
         ▼
-  _smooth_inputs    : distance-adaptive EMA on (s, v_lead);
+  _smooth_chain     : distance-adaptive EMA on (s, v_lead);
                        asymmetric EMA on a_lead (fast on brake, slow on relax)
         │
         ▼
   _compute_command  : emergency band, TTC floor, standstill hold,
-                       immediate-lead IIDM/CAH/ACC blend + confidence
-                       blend + ghost hold, anticipation delta (EMA)
+                       immediate-lead IIDM/CAH/ACC blend + gap shaping
+                       + confidence blend + ghost hold, anticipation delta (EMA)
         │
         ▼
   _jerk_limit       : |da/dt| ≤ 2.5 m/s³, bypassed on emergency
@@ -614,6 +702,10 @@ classical implementation suffered from:
 | Double-counting of lead accel | legacy `K_FF · a_lead` term removed (CAH supersedes) |
 | Phantom traffic jams from accel amplification | `T ≥ 1.0 s` + IIDM string stability + anticipation |
 | Step changes at handover (e.g. lead → no-lead) | continuous IIDM domain across all gap regimes |
+| Coast to a stopped vehicle, then a full-authority slam | strict CAH branch test (§8.2) |
+| Rubber-banding at a farther gap setting | `w_level` (§8.4) |
+| Braking to close a gap the lead is already opening | `w_open` (§8.4) |
+| A close setting going slack behind a far-off lead | gain keys on the wanted gap, not the current one (§8.4) |
 
 ---
 
@@ -626,6 +718,8 @@ All defaults live in module-level constants and are replicated on
 a_max_ms2, b_comfort_ms2, delta, v0_ms,
 s0_m, t_headway_s,
 cool_factor_c,
+gap_gain_ref_headway_s, gap_gain_exponent, gap_gain_min, gap_gain_max,
+opening_gain_min, opening_gain_full_ms, opening_relief_fade_frac,
 ma_max_leads, ma_min_chain_gap_m,
 ant_gap_full_s, ant_gap_zero_s, ant_time_ref_floor_ms,
 ant_score_min, ant_score_full,

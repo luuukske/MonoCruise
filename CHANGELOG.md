@@ -16,8 +16,10 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ### Changed
 - **ACC follows a little further back by default**: the starting following distance moved up one step.
+- **ACC's following distance setting now sets how relaxed it drives**: a farther setting is calmer about the gap, a closer one stays eager and pulls up to the vehicle ahead sooner, and neither goes slack just because the vehicle ahead is a long way off. A vehicle pulling away from you barely counts any more, since the gap is opening on its own, unless you are already close behind it. The gap you settle at is unchanged on every setting.
 
 ### Fixed
+- **ACC braked far too late and far too hard for stopped vehicles**: it would coast in with a light brake and then slam on hard at the last moment. It now starts slowing early and stops with roughly half the braking force, no jolt. In a test where the stopped vehicle only came into view at 110 m, ACC used to hit it.
 - **Wheel and stalk buttons could not be assigned with the game closed**: clicking a cruise control button in the settings and pressing a button on your wheel, stalk or gamepad did nothing unless the game was running, while keyboard keys assigned fine. Assignment now works with the game closed, and buttons you already assigned show up as pressed there too.
 - **AEB braking for traffic under a bridge**: MonoCruise used to see cars under bridges as on your road due to a straight-ahead check. It now follows the road's shape and checks each vehicle's tilt to tell if it's actually on your route. Cars under bridges within 30 m are now ignored.
 - **ACC losing the vehicle ahead on hills at speed**: that same straight line went badly wrong over crests and dips, and the faster you went the further ahead your lead was, so it fell outside the slack and ACC let go of it. Above 85 km/h it was dropping 4 % of the traffic it should have been following, and over 11 % on steep grades. Both are now effectively zero.

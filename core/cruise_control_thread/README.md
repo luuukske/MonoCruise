@@ -74,6 +74,30 @@ digit in the label. Headway per level is `T_HEADWAY_BY_LEVEL_S`; see
 
 Publishes an upper bound on commanded accel (m/s²). Orchestrator uses `min(speed_pid, cap)`.
 
+The gap law itself (`iidm`, `cah`, `acc_blend`, `level_gain`, `comfort_gain`,
+`lead_law`) lives in `idm_cah.py` as pure functions of a gap plus an `ACConfig`.
+`acc_controller.py` keeps everything stateful: smoothing, the chain, the overlays,
+anticipation, blinker arbitration. `_lead_law` is a thin delegate.
+
+### Gap-error shaping
+
+How eager the loop is comes from the **wanted** gap, not the current one: `level_gain`
+is 1.0 at level 2 by construction and flat with distance (1.24 / 1.00 / 0.85 / 0.70 at
+80 km/h). Keying it on the current gap was tried first and made a close setting go
+slack behind a far-off lead. On top of that, `w_close` adds firmness once ego is
+genuinely close in absolute terms, and `w_open` relieves braking for a lead opening
+the gap, but only at or beyond the wanted gap: inside it the relief fades back out, so
+a close vehicle pulling away keeps the full close-range gain. Acceleration is scaled
+upward only, so a far setting is never throttled by its own smoothness. Where CAH
+demands deceleration the result is floored at `max(a_acc, a_cah)`, so relief can hand
+back comfort margin but never the glide-to-stop rate.
+
+Approaching a **stopped** vehicle used to flatline near -2 m/s² and then hand the stop
+to the TTC overlay at -6.55 unfiltered, because `cah()` reported zero for a stationary
+lead (both sides of its branch test are zero there, and the branch it picked is 0/0).
+Full derivation and the measured before/after: `core/acc/ACC_ARCHITECTURE.md` §8.2 and
+§8.4.
+
 ### Anticipation and chain tuning
 
 Multi-lead anticipation weights pairwise time gaps (cosine ramp `ANT_GAP_FULL_S` to
