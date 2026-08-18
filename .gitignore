@@ -38,6 +38,9 @@ live_accel_pedals_viz_30s.bat
 docs/
 tools/aeb_corpus_run/
 
+# ACC response-map renders and their grids
+tools/acc_response_map_out/
+
 # PyInstaller / Inno Setup build outputs
 *.exe
 build/

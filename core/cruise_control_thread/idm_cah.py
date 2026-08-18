@@ -12,6 +12,59 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .acc_controller import ACConfig
 
+# Lead-braking feedforward. The blend discards a_cah whenever IIDM is already
+# the harder demand, which leaves a_lead no path to the command. See §8.6.
+LEAD_BRAKE_FF_SHARE: float = 0.50
+# Matches b_comfort: a spurious a_lead spike costs one comfort brake, never more.
+LEAD_BRAKE_FF_MAX_MS2: float = 2.0
+# Cubic soft corner on the demand, so gain rises from zero instead of stepping
+# there. 0 restores the hard corner. See §8.7.
+LEAD_BRAKE_FF_SOFT_MS2: float = 0.50
+
+
+# Softening width of the kinematic floor, in m/s^2 of command. 0 restores the
+# hard clamp. Biased to the braking side so it can never relax the floor. §8.7.
+LEAD_LAW_FLOOR_SOFT_MS2: float = 0.09
+
+# Accel-side phase lead. Deliberately a fraction of the brake side: it buys feel,
+# not safety, so it is bounded far tighter and gated off while closing. See §8.9.
+LEAD_ACCEL_NUDGE_SHARE: float = 0.50
+LEAD_ACCEL_NUDGE_MAX_MS2: float = 0.75
+LEAD_ACCEL_NUDGE_SOFT_MS2: float = 0.30
+LEAD_ACCEL_NUDGE_ZERO_MS: float = 2.0
+
+# The feedforwards read a_lead through their own slower symmetric filter. CAH
+# keeps the fast asymmetric one: it sizes a stopping requirement. See §8.10.
+TAU_ALEAD_FF_S: float = 0.50
+
+
+def ema_step(prev: float | None, new: float, dt: float, tau: float) -> float:
+    if prev is None or not math.isfinite(prev):
+        return new
+    alpha = 1.0 - math.exp(-dt / max(tau, 1e-6))
+    return prev + alpha * (new - prev)
+
+
+def _soft_min(a: float, b: float, eps: float) -> float:
+    """Log-sum-exp minimum, always <= min(a, b), by at most `eps` at a == b.
+
+    Deviating downward keeps every "never relaxes past" assertion valid."""
+    if eps <= 0.0:
+        return min(a, b)
+    lo, hi = (a, b) if a <= b else (b, a)
+    return lo - eps * math.log1p(math.exp(-(hi - lo) * math.log(2.0) / eps)) / math.log(2.0)
+
+
+def _soft_negative(d: float, eps: float) -> float:
+    """C1 replacement for `min(0, d)`: zero above 0, exact below -eps.
+
+    A hard corner rectifies jitter around it into a one-sided mean."""
+    if d >= 0.0:
+        return 0.0
+    if eps <= 0.0 or d <= -eps:
+        return d
+    return -(d * d * d) / (eps * eps) - 2.0 * (d * d) / eps
+
 
 def iidm(
     s: float,
@@ -69,6 +122,66 @@ def acc_blend(a_iidm: float, a_cah: float, b_comfort: float, c: float) -> float:
         return a_iidm
     b = max(b_comfort, 1e-6)
     return (1.0 - c) * a_iidm + c * (a_cah + b * math.tanh((a_iidm - a_cah) / b))
+
+
+def lead_brake_ff(
+    cfg: ACConfig,
+    s: float,
+    v: float,
+    v_lead: float,
+    a_lead: float,
+) -> float:
+    """Bounded share of the braking CAH demands purely because the lead is braking.
+
+    Exactly zero for a lead that is not decelerating, so it moves only the
+    `a_lead` axis. See core/acc/ACC_ARCHITECTURE.md §8.6."""
+    if a_lead >= 0.0:
+        return 0.0
+    coasting = cah(s=s, v=v, v_lead=v_lead, a_lead=0.0, a_max=cfg.a_max_ms2)
+    braking = cah(s=s, v=v, v_lead=v_lead, a_lead=a_lead, a_max=cfg.a_max_ms2)
+    demand = _soft_negative(braking - coasting, cfg.lead_brake_ff_soft_ms2)
+    return max(cfg.lead_brake_ff_share * demand, -cfg.lead_brake_ff_max_ms2)
+
+
+def alead_tau_s(cfg: ACConfig, innovation: float) -> float:
+    """Filter time constant for a_lead, ramped over the innovation not switched.
+
+    See core/acc/ACC_ARCHITECTURE.md §12.2."""
+    span = max(cfg.a_lead_tau_ramp_ms2, 1e-9)
+    urgency = _cos_ramp((-innovation - cfg.a_lead_deadband_ms2) / span)
+    return (cfg.tau_alead_relax_s
+            + (cfg.tau_alead_brake_s - cfg.tau_alead_relax_s) * urgency)
+
+
+def lead_accel_nudge(
+    cfg: ACConfig,
+    v: float,
+    v_lead: float,
+    a_lead: float,
+) -> float:
+    """Bounded accel-side phase lead for a lead that is pulling harder.
+
+    Zero unless the lead is accelerating, and gated off while ego is closing, so
+    a phantom a_lead can never add pull toward a lead. See §8.9."""
+    if a_lead <= 0.0:
+        return 0.0
+    # Soft-cornered at both ends: at a_max because ego cannot follow what it
+    # cannot produce, and at zero so jitter is not rectified into pull.
+    eps = cfg.lead_accel_nudge_soft_ms2
+    capped = cfg.a_max_ms2 + _soft_negative(a_lead - cfg.a_max_ms2, eps)
+    demand = -_soft_negative(-capped, eps)
+    gate = 1.0 - _cos_ramp((v - v_lead) / max(cfg.lead_accel_nudge_zero_ms, 1e-6))
+    return min(cfg.lead_accel_nudge_share * demand * gate,
+               cfg.lead_accel_nudge_max_ms2)
+
+
+def fade(x: float, full: float, zero: float) -> float:
+    """C1 cosine ramp: 1.0 at x <= full, 0.0 at x >= zero."""
+    if x <= full:
+        return 1.0
+    if x >= zero:
+        return 0.0
+    return 0.5 * (1.0 + math.cos(math.pi * (x - full) / max(zero - full, 1e-6)))
 
 
 def _cos_ramp(t: float) -> float:
@@ -133,9 +246,11 @@ def lead_law(
     v_lead: float,
     a_lead: float,
     t_headway: float,
+    a_lead_ff: float | None = None,
 ) -> float:
     """IIDM + CAH + ACC blend for one lead at its direct gap, then gap shaping."""
     eff_dist = max(dist_m, 1e-3)
+    a_ff = a_lead if a_lead_ff is None else a_lead_ff
     a_iidm = iidm(
         s=eff_dist,
         v=v_ego,
@@ -155,13 +270,14 @@ def lead_law(
         a_max=cfg.a_max_ms2,
     )
     a_acc = acc_blend(a_iidm, a_cah_val, cfg.b_comfort_ms2, cfg.cool_factor_c)
+    # Outside the blend, which steps across its own branch test. See §8.6.
+    a_acc += lead_brake_ff(cfg, eff_dist, v_ego, v_lead, a_ff)
+    a_acc += lead_accel_nudge(cfg, v_ego, v_lead, a_ff)
     if a_acc >= 0.0:
         # Upward only: a close setting closes on its target harder, a far one
         # keeps full pull rather than being throttled by its own smoothness.
         return a_acc * max(1.0, level_gain(cfg, v_ego, t_headway))
     a_soft = a_acc * comfort_gain(cfg, eff_dist, v_ego, v_lead, t_headway)
-    if a_cah_val < 0.0:
-        # Shaping may relax the comfort term, never past the deceleration the
-        # kinematics already require, and never below the unshaped law.
-        a_soft = min(a_soft, max(a_acc, a_cah_val))
-    return a_soft
+    # Kinematic floor, softened downward only. Ungated and the inner max hard,
+    # both for continuity reasons set out in §8.7.
+    return _soft_min(a_soft, max(a_acc, a_cah_val), cfg.lead_law_floor_soft_ms2)

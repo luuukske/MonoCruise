@@ -16,7 +16,7 @@ from .blinker_arbitration import (
     BlinkerArbiter,
     BlinkerState,
 )
-from .idm_cah import lead_law
+from . import idm_cah
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +114,8 @@ D_INPUT_FAR_M: float = 80.0
 TAU_ALEAD_BRAKE_S: float = 0.080
 TAU_ALEAD_RELAX_S: float = 0.350
 A_LEAD_DEADBAND_MS2: float = 0.30
+# Innovation span above the deadband over which the fast tau fades in. §12.2.
+A_LEAD_TAU_RAMP_MS2: float = 0.45
 
 TAU_OUTPUT_S: float = 0.05
 
@@ -148,6 +150,8 @@ class ACConfig:
     gap_gain_exponent: float = GAP_GAIN_EXPONENT
     gap_gain_min: float = GAP_GAIN_MIN
     gap_gain_max: float = GAP_GAIN_MAX
+    lead_brake_ff_share: float = idm_cah.LEAD_BRAKE_FF_SHARE
+    lead_brake_ff_max_ms2: float = idm_cah.LEAD_BRAKE_FF_MAX_MS2
     opening_gain_min: float = OPENING_GAIN_MIN
     opening_gain_full_ms: float = OPENING_GAIN_FULL_MS
     opening_relief_fade_frac: float = OPENING_RELIEF_FADE_FRAC
@@ -185,7 +189,15 @@ class ACConfig:
     d_input_far_m: float = D_INPUT_FAR_M
     tau_alead_brake_s: float = TAU_ALEAD_BRAKE_S
     tau_alead_relax_s: float = TAU_ALEAD_RELAX_S
+    tau_alead_ff_s: float = idm_cah.TAU_ALEAD_FF_S
     a_lead_deadband_ms2: float = A_LEAD_DEADBAND_MS2
+    a_lead_tau_ramp_ms2: float = A_LEAD_TAU_RAMP_MS2
+    lead_brake_ff_soft_ms2: float = idm_cah.LEAD_BRAKE_FF_SOFT_MS2
+    lead_law_floor_soft_ms2: float = idm_cah.LEAD_LAW_FLOOR_SOFT_MS2
+    lead_accel_nudge_share: float = idm_cah.LEAD_ACCEL_NUDGE_SHARE
+    lead_accel_nudge_max_ms2: float = idm_cah.LEAD_ACCEL_NUDGE_MAX_MS2
+    lead_accel_nudge_soft_ms2: float = idm_cah.LEAD_ACCEL_NUDGE_SOFT_MS2
+    lead_accel_nudge_zero_ms: float = idm_cah.LEAD_ACCEL_NUDGE_ZERO_MS
     tau_output_s: float = TAU_OUTPUT_S
     no_lead_ceiling_ms2: float = NO_LEAD_CEILING_MS2
 
@@ -198,6 +210,7 @@ class _LeadSnapshot:
     a_lead_ms2: float
     score: float = 0.0
     conf: float = 1.0
+    a_lead_ff_ms2: float | None = None
 
 
 @dataclass(slots=True)
@@ -205,29 +218,13 @@ class _LeadEMA:
     dist_m: float | None = None
     v_lead_ms: float | None = None
     a_lead_ms2: float | None = None
+    a_lead_ff_ms2: float | None = None
     conf: float | None = None
     last_seen_mono: float = 0.0
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
-
-
-def _ema_step(prev: float | None, new: float, dt: float, tau: float) -> float:
-    if prev is None or not math.isfinite(prev):
-        return new
-    alpha = 1.0 - math.exp(-dt / max(tau, 1e-6))
-    return prev + alpha * (new - prev)
-
-
-def _fade(x: float, full: float, zero: float) -> float:
-    """C1 cosine ramp: 1.0 at x <= full, 0.0 at x >= zero."""
-    if x <= full:
-        return 1.0
-    if x >= zero:
-        return 0.0
-    t = (x - full) / max(zero - full, 1e-6)
-    return 0.5 * (1.0 + math.cos(math.pi * t))
 
 
 class AdaptiveCruiseController:
@@ -394,28 +391,24 @@ class AdaptiveCruiseController:
             t = _clamp((anchor_d - cfg.d_input_near_m) / span, 0.0, 1.0)
             tau_input = cfg.tau_input_near_s + (cfg.tau_input_far_s - cfg.tau_input_near_s) * t
 
-            ema.dist_m = _ema_step(ema.dist_m, raw.dist_m, dt, tau_input)
-            ema.v_lead_ms = _ema_step(ema.v_lead_ms, raw.v_lead_ms, dt, tau_input)
+            ema.dist_m = idm_cah.ema_step(ema.dist_m, raw.dist_m, dt, tau_input)
+            ema.v_lead_ms = idm_cah.ema_step(ema.v_lead_ms, raw.v_lead_ms, dt, tau_input)
 
             prev_a = ema.a_lead_ms2
-            if prev_a is None:
-                tau_a = cfg.tau_alead_relax_s
-            else:
-                delta_a = raw.a_lead_ms2 - prev_a
-                if abs(delta_a) < cfg.a_lead_deadband_ms2:
-                    tau_a = cfg.tau_alead_relax_s
-                elif delta_a < 0.0:
-                    tau_a = cfg.tau_alead_brake_s
-                else:
-                    tau_a = cfg.tau_alead_relax_s
-            ema.a_lead_ms2 = _ema_step(prev_a, raw.a_lead_ms2, dt, tau_a)
+            tau_a = (cfg.tau_alead_relax_s if prev_a is None
+                     else idm_cah.alead_tau_s(cfg, raw.a_lead_ms2 - prev_a))
+            ema.a_lead_ms2 = idm_cah.ema_step(prev_a, raw.a_lead_ms2, dt, tau_a)
+            # Symmetric and slower: a static gain on a_lead would otherwise
+            # transmit its noise straight to the pedal. See §8.10.
+            ema.a_lead_ff_ms2 = idm_cah.ema_step(
+                ema.a_lead_ff_ms2, raw.a_lead_ms2, dt, cfg.tau_alead_ff_s)
 
             conf_target = self._score_conf(raw.score)
             if ema.conf is None or conf_target >= ema.conf:
                 tau_c = cfg.ant_conf_tau_up_s
             else:
                 tau_c = cfg.ant_conf_tau_down_s
-            ema.conf = _ema_step(ema.conf, conf_target, dt, tau_c)
+            ema.conf = idm_cah.ema_step(ema.conf, conf_target, dt, tau_c)
             ema.last_seen_mono = now_mono
 
             smoothed.append(_LeadSnapshot(
@@ -425,6 +418,7 @@ class AdaptiveCruiseController:
                 a_lead_ms2=ema.a_lead_ms2,
                 score=raw.score,
                 conf=ema.conf,
+                a_lead_ff_ms2=ema.a_lead_ff_ms2,
             ))
         return smoothed
 
@@ -511,7 +505,7 @@ class AdaptiveCruiseController:
         )
         a_req_soft = self._lead_law(
             primary_raw.dist_m, v_ego, primary_raw.v_lead_ms,
-            primary_raw.a_lead_ms2, t_headway,
+            primary_raw.a_lead_ms2, t_headway, primary_raw.a_lead_ff_ms2,
         )
         soft_ok = self._blinker.soft_ok(
             ttc=ttc_soft, a_req=a_req_soft,
@@ -526,6 +520,7 @@ class AdaptiveCruiseController:
         primary = chain_smooth[0]
         a_base = self._lead_law(
             primary.dist_m, v_ego, primary.v_lead_ms, primary.a_lead_ms2, t_lane,
+            primary.a_lead_ff_ms2,
         )
         a_base = _clamp(a_base, cfg.max_decel_ms2, cfg.max_accel_ms2)
 
@@ -578,7 +573,7 @@ class AdaptiveCruiseController:
             delta_target = self._anticipation_delta(
                 chain_raw, chain_smooth, v_ego, a_base, t_headway,
             )
-        self._ant_delta_ms2 = _ema_step(
+        self._ant_delta_ms2 = idm_cah.ema_step(
             self._ant_delta_ms2, delta_target, dt, cfg.ant_tau_s,
         )
 
@@ -595,7 +590,8 @@ class AdaptiveCruiseController:
             return cfg.no_lead_ceiling_ms2
         nxt = chain_smooth[1]
         return _clamp(
-            self._lead_law(nxt.dist_m, v_ego, nxt.v_lead_ms, nxt.a_lead_ms2, t_headway),
+            self._lead_law(nxt.dist_m, v_ego, nxt.v_lead_ms, nxt.a_lead_ms2,
+                           t_headway, nxt.a_lead_ff_ms2),
             cfg.max_decel_ms2, cfg.max_accel_ms2,
         )
 
@@ -639,13 +635,14 @@ class AdaptiveCruiseController:
             self._ghost_vid = None
             return a_base
         age = now - ema.last_seen_mono
-        fade = _fade(age, 0.0, cfg.primary_ghost_hold_s)
+        fade = idm_cah.fade(age, 0.0, cfg.primary_ghost_hold_s)
         if fade <= 0.0 or age > cfg.primary_ghost_hold_s:
             self._ghost_vid = None
             return a_base
 
         a_ghost = self._lead_law(
             ema.dist_m, v_ego, ema.v_lead_ms, ema.a_lead_ms2, t_headway,
+            ema.a_lead_ff_ms2,
         )
         a_ghost = _clamp(a_ghost, cfg.max_decel_ms2, cfg.max_accel_ms2)
         w = ema.conf * fade
@@ -658,8 +655,10 @@ class AdaptiveCruiseController:
         v_lead: float,
         a_lead: float,
         t_headway: float,
+        a_lead_ff: float | None = None,
     ) -> float:
-        return lead_law(self.config, dist_m, v_ego, v_lead, a_lead, t_headway)
+        return idm_cah.lead_law(self.config, dist_m, v_ego, v_lead, a_lead,
+                                t_headway, a_lead_ff)
 
     def _indicated_accel(
         self, ind: _LeadSnapshot, v_ego: float, t_headway: float,
@@ -669,7 +668,8 @@ class AdaptiveCruiseController:
         A candidate is published only from outside ego's corridor, so there is
         no collision path to it. See `core/cruise_control_thread/README.md`."""
         cfg = self.config
-        a = self._lead_law(ind.dist_m, v_ego, ind.v_lead_ms, ind.a_lead_ms2, t_headway)
+        a = self._lead_law(ind.dist_m, v_ego, ind.v_lead_ms, ind.a_lead_ms2,
+                           t_headway, ind.a_lead_ff_ms2)
         return _clamp(a, -cfg.b_comfort_ms2, cfg.max_accel_ms2)
 
     def _anticipation_delta(
@@ -704,7 +704,7 @@ class AdaptiveCruiseController:
             cur = chain_smooth[n]
             v_ref = max(prev.v_lead_ms, cfg.ant_time_ref_floor_ms)
             gap_s = max(cur.dist_m - prev.dist_m, 0.0) / v_ref
-            w_pair = _fade(gap_s, cfg.ant_gap_full_s, cfg.ant_gap_zero_s)
+            w_pair = idm_cah.fade(gap_s, cfg.ant_gap_full_s, cfg.ant_gap_zero_s)
             w_run *= w_pair * cur.conf
             if w_run < 1e-4:
                 w_run = 0.0
@@ -721,6 +721,7 @@ class AdaptiveCruiseController:
             lead = chain_smooth[n]
             a_n = self._lead_law(
                 lead.dist_m, v_ego, lead.v_lead_ms, lead.a_lead_ms2, t_headway,
+                lead.a_lead_ff_ms2,
             )
             a_n = _clamp(a_n, cfg.max_decel_ms2, cfg.max_accel_ms2)
             contrib = w * min(0.0, a_n - a_base)
@@ -740,12 +741,12 @@ class AdaptiveCruiseController:
 
         primary = chain_smooth[0]
         v_virt = max(0.0, primary.v_lead_ms + cfg.ant_kv * dv_up)
-        a_virt = _clamp(
-            primary.a_lead_ms2 + cfg.ant_ka * da_up,
-            cfg.emergency_decel_ms2,
-            cfg.max_accel_ms2,
-        )
-        a_virt_cmd = self._lead_law(primary.dist_m, v_ego, v_virt, a_virt, t_headway)
+        lo, hi = cfg.emergency_decel_ms2, cfg.max_accel_ms2
+        a_virt = _clamp(primary.a_lead_ms2 + cfg.ant_ka * da_up, lo, hi)
+        a_virt_ff = _clamp((primary.a_lead_ff_ms2 if primary.a_lead_ff_ms2 is not None
+                            else primary.a_lead_ms2) + cfg.ant_ka * da_up, lo, hi)
+        a_virt_cmd = self._lead_law(primary.dist_m, v_ego, v_virt, a_virt, t_headway,
+                                    a_virt_ff)
         a_virt_cmd = _clamp(a_virt_cmd, cfg.max_decel_ms2, cfg.max_accel_ms2)
         virt_delta = a_virt_cmd - a_base
         if virt_delta < a_dec_delta:
@@ -759,7 +760,7 @@ class AdaptiveCruiseController:
             v_close = v_ego - pr.v_lead_ms
             if v_close > TTC_MIN_VCLOSE_MS:
                 ttc = max(pr.dist_m, 0.01) / v_close
-                lift *= 1.0 - _fade(ttc, cfg.ant_lift_ttc_min_s, cfg.ant_lift_ttc_full_s)
+                lift *= 1.0 - idm_cah.fade(ttc, cfg.ant_lift_ttc_min_s, cfg.ant_lift_ttc_full_s)
             # Fade lift out when decel anticipation is binding so the two
             # sides never fight.
             lift *= _clamp(

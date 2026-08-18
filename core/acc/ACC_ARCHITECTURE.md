@@ -219,9 +219,14 @@ IIDM caps growth at `a_free` and enforces C¹ continuity at `z = 1`.
 
 CAH is the closed-form maximum ego accel that avoids collision under the
 assumption that both vehicles hold their current acceleration until stop.
-It does not depend on `Δv` and therefore does not require the closing
-speed to develop before responding: the failure mode classical IDM
-exhibits when "lead brakes hard and ego is matching the deceleration".
+It is the only term in the law that reads `a_lead` at all.
+
+**`a_cah` not depending on `Δv` does not mean the command responds
+without `Δv`.** An earlier revision of this section claimed CAH removes
+the failure mode classical IDM exhibits when "lead brakes hard and ego is
+matching the deceleration". It does not, and cannot: the blend in §8.3 is
+one-directional, so it discards `a_cah` in exactly that state. Measured
+in §8.5.
 
 Cap lead's accel by ego's authority so CAH cannot demand more than the
 truck can produce:
@@ -259,9 +264,11 @@ nothing except the degenerate case, where it yields the correct
 glide-to-stop rate `−v² / 2s`. Pinned by
 `tests/acc/test_gap_law_shaping.py`.
 
-CAH supersedes the legacy `K_FF · a_lead` feedforward term entirely.
-Anticipation now comes from a kinematically correct limit, not a hand-
-tuned scalar.
+The legacy `K_FF · a_lead` feedforward term was removed when CAH landed,
+on the stated premise that CAH supersedes it. **That premise holds only
+where the blend actually selects CAH.** Where it does not (§8.5), the
+removal left `a_lead` with no path to the command at all. Treat the
+absence of a feedforward term as an open question, not a settled one.
 
 ### 8.3 ACC blend
 
@@ -353,6 +360,403 @@ command −6.55 → −2.56 m/s² at level 2 (−2.26 at level 4), peak jerk 133
 from a collision to a clean stop 6.8 m short. Catching a slower lead from
 150 m settles 11 % sooner at level 4. Equilibrium gaps and the response to
 a lead braking at −2/−4/−6 m/s² are unchanged.
+
+### 8.5 Measured: `a_lead` did not reach the command (fixed in §8.6)
+
+**The law was blind to how hard the lead was braking.** This is a
+property of the model, not a bug in the implementation, but it
+contradicts what §8.2 used to claim, so it is recorded here with numbers.
+§8.6 is the term that closed it; everything below is the pre-fix
+measurement and the reasoning that picked the exit.
+
+`a_lead` enters the law through exactly one door, `cah()`. §8.3 shuts
+that door whenever `a_iidm ≥ a_cah`:
+
+```
+if a_iidm >= a_cah:
+    return a_iidm          # a_lead is now absent from the command
+```
+
+`iidm()` takes no `a_lead` argument, and neither does `level_gain` nor
+`comfort_gain`. So in that branch the only residue of the lead's
+deceleration is the `min(a_soft, max(a_acc, a_cah))` floor in §8.4, worth
+about 0.01 m/s².
+
+At 80 km/h, level 3, 37.5 m effective gap, speeds matched, sweeping the
+lead from coasting to an emergency stop:
+
+| lead decel | 0 | 2 | 4 | 6 | 8 |
+|---|---|---|---|---|---|
+| cap (m/s²) | −0.06 | −0.07 | −0.07 | −0.07 | −0.07 |
+
+`a_iidm` is −0.06 and `a_cah` is −3.61 at the right-hand end, so the
+blend returns −0.06 and discards CAH. At a 77.5 m gap with the lead
+braking at 8 m/s² the cap is still **+1.07**: still commanding
+acceleration.
+
+Closed loop, lead brakes from matched speed and holds, perfect actuator
+(so these are floors, real actuation lag adds on top):
+
+| case | to −0.5 | to −1.0 | to −2.0 | peak | min gap | TTC overlay |
+|---|---|---|---|---|---|---|
+| 80 km/h, 40 m, lead −2 | 0.63 s | 1.23 s | 5.93 s | −2.07 | 7.6 m | no |
+| 80 km/h, 40 m, lead −4 | 0.37 s | 0.63 s | 1.13 s | −3.71 | 6.5 m | no |
+| 80 km/h, 40 m, lead −6 | 0.30 s | 0.50 s | 0.90 s | −6.55 | 8.6 m | fires at 3.70 s |
+
+The response does develop, because closing speed builds and IIDM reacts
+to that. Two costs. The gap collapses from 40 m to 6.5 m against an `s0`
+of 5 m, spending nearly the whole buffer. And at lead −6 the gap law
+never gets there: the TTC floor of §10 fires and slams −6.55 unfiltered,
+which is the same coast-then-slam shape §8.2's strict branch test fixed
+for stopped leads, reached by a different route.
+
+**Why this is defensible.** IDM-family models exclude `a_lead` on
+purpose. Feeding lead acceleration straight through re-transmits a
+disturbance upstream with gain instead of absorbing it, which is a
+string-stability hazard, and string stability is a first-class
+requirement here (§5). The code matches Kesting et al. 2010 exactly.
+
+**"Near matched speed" understated it.** The freeze is a threshold in
+`a_lead`, not a band in closing speed, and it bit everywhere. At 80 km/h,
+40 m, closing 2 m/s the cap was `-1.292` for every lead decel from 2 to
+10 m/s². Worst in the pulling-away region, where anticipation is
+cheapest: a lead 4 m/s faster and braking at 8 m/s² drew `+1.234`, bit
+identical to one coasting away, so ACC accelerated through the half
+second before the closing speed arrived.
+
+**Three exits, none free:**
+
+1. Accept it and let the overlays plus AEB be the backstop. Cost: the
+   hard-brake case is handled by an unfiltered slam, which §4 exists to
+   avoid.
+2. Let CAH bind downward in a gated regime (`min` rather than
+   passthrough). Cost: CAH commits to the worst case every tick, so this
+   is where over-braking and string-stability loss come from.
+3. Reinstate a bounded `a_lead` feedforward, sized so it cannot dominate.
+   Cost: the double-counting §15 warns about, and a hand-tuned scalar
+   again.
+
+The virtual lead in §9.3 already does something close to option 3, but
+only with two or more chain members, so it is unavailable in exactly the
+single-lead case above.
+
+**Exit 3 was taken.** See §8.6.
+
+Reproduce with `tools/acc_response_map.py` (see `tools/README.md`):
+
+```
+python tools/acc_response_map.py --scenario matched-speed --report text
+python tools/acc_response_map.py --scenario brake-onset
+```
+
+### 8.6 Lead-braking feedforward
+
+The signal is not raw `a_lead`. It is the share of CAH's demand that
+exists **only because** the lead is braking:
+
+```
+a_ff = max(FF_SHARE · min(0, cah(a_lead) − cah(0)), −FF_MAX)
+a_acc = acc_blend(...) + a_ff
+```
+
+with `FF_SHARE = 0.50` and `FF_MAX = b_comfort = 2.0 m/s²`.
+
+Why this signal rather than `K_FF · a_lead`, which §8.2 removed:
+
+* **It is exactly zero whenever `a_lead ≥ 0`.** The equilibrium of every
+  gap level, the accel side, and the whole stopped-lead approach are
+  untouched by construction, not by tuning. Pinned by
+  `test_feedforward_is_silent_for_a_lead_that_is_not_braking`.
+* **It self-gates on range.** `cah` already folds in gap, ego speed and
+  lead speed, so a lead braking hard far enough away contributes almost
+  nothing without a distance ramp to tune. A scalar on `a_lead` needs one
+  and gets it wrong at the edges.
+* **It is bounded.** `FF_MAX` equals the comfort brake, so a spurious
+  `a_lead` from laggy TMP traffic costs at most one comfort brake and can
+  never reach the decel clamp. This bound is the string-stability
+  argument and the jitter argument at once. Pinned by
+  `test_feedforward_is_bounded`.
+
+**Applied outside the blend, not inside it.** The blend steps across its
+own branch test (`a_iidm ≥ a_cah`), so a term added on only one side
+would be discontinuous there. Adding it to `a_acc` keeps `lead_law`
+C⁰ across the boundary. Pinned by
+`test_lead_law_is_continuous_across_the_cah_branch_test`.
+
+**No double count with §9.3.** Anticipation composes differences
+(`a_virt_cmd − a_base`, `a_n − a_base`), and both terms come from
+`lead_law`, so a term inside `lead_law` cancels and only its *excess* on
+the virtual lead survives.
+
+Measured, level 3, single lead, closing 0 m/s, the `cap span over the
+whole decel axis` that §8.5 reported as ~0:
+
+| panel | before | after |
+|---|---|---|
+| 50 km/h, 40 m | 0.00 | 0.97 |
+| 50 km/h, 60 m | 0.00 | 0.69 |
+| 80 km/h, 30 m | 0.33 | 2.33 |
+| 80 km/h, 40 m | 0.01 | 1.82 |
+| 80 km/h, 60 m | 0.00 | 1.40 |
+
+Closed loop from matched speed at the level's own equilibrium, perfect
+actuator:
+
+| case | peak before | peak after | TTC overlay |
+|---|---|---|---|
+| 80 km/h, 40 m, lead −2 | −2.07 | −1.92 | no → no |
+| 80 km/h, 40 m, lead −4 | −3.71 | −3.36 | no → no |
+| 80 km/h, 40 m, lead −6 | −6.55 | −4.44 | 3.70 s → **no** |
+| 80 km/h, 40 m, lead −8 | −6.55 | −5.27 | 3.47 s → **no** |
+
+The overlay no longer fires anywhere a truck lead can physically brake,
+so the coast-then-slam shape of §4 is gone from this path. Peak ego decel
+stays under the lead's at every rate tested, which is the string
+stability §5 asks for. Pinned by
+`test_following_a_braking_lead_is_string_stable` and
+`test_a_hard_braking_lead_no_longer_needs_the_ttc_overlay`.
+
+**What this did not fix.** Minimum gap still collapses to 6.0-6.6 m from
+40 m whatever the lead does, and sweeping `FF_SHARE` from 0.35 to 0.80
+does not move it: the buffer is set by the IIDM equilibrium and the
+authority limit, not by the `a_lead` path. Lead decel beyond ~10 m/s²
+still reaches the overlay, correctly.
+
+### 8.7 Transition smoothness at small lead braking
+
+Three hard clamps sat within 1 m/s² of `a_lead = 0`, which is where a
+lead in traffic spends most of its time. Each one is a step in
+`d(cap)/d(a_lead)`, and a step in gain rectifies jitter around it into a
+one-sided mean: the command responds on one half-cycle of the noise and
+not the other.
+
+Measured at 80 km/h, 40 m, closing 0.5 m/s, sweeping `a_lead` at 0.0025
+m/s² resolution, worst adjacent change in gain:
+
+| clamp | site | before | after |
+|---|---|---|---|
+| `min(0, demand)` | feedforward corner at `a_lead = 0` | step | cubic soft corner |
+| `min(a_soft, floor)` | kinematic floor at decel 0.525 | step | log-sum-exp soft min |
+| `max(a_acc, a_cah)` | floor argument swap at decel 0.723 | step | **still hard** |
+| worst gain jump | | **0.798** | **0.171** |
+
+Closed loop against a lead holding −0.3 m/s² with 0.35 m/s²
+sample-and-hold telemetry noise at 8 Hz, averaged over 12 seeds:
+
+| | RMS jerk | peak jerk |
+|---|---|---|
+| HEAD | 0.139 | 0.705 |
+| current | 0.278 | 1.010 |
+
+The first version of this table read 0.500 against 0.431 and claimed an
+improvement. Its baseline was wrong: `BASELINE` in the probe omitted the
+two feedforward shares, so the feedforward was live in both columns and
+the comparison was the change against itself. §8.10 is the consequence.
+
+**Why the third clamp stays hard.** A C1 maximum necessarily approaches
+from above: `f = max(a,b) − g(|a−b|)` has a gradient mismatch at `a = b`
+for any `g`, and only the `+g` family (log-sum-exp) is smooth. Above is
+the direction that *relaxes* the kinematic floor, and softening it by
+0.09 m/s² lifted the command 0.0033 above the glide-to-stop rate at 150
+m, breaking `test_shaping_never_relaxes_past_the_kinematic_requirement`.
+Smoothness is not worth trading that assertion for. The soft min is
+biased downward for the same reason, so it can only ever add braking.
+
+**The floor band is not monotone in smoothness.** 0.09 m/s² is a
+measured optimum, re-derived against a true HEAD baseline: worst gain
+jump 0.394 / 0.205 / **0.171** / 0.155 / 0.146 and RMS jerk 0.332 /
+0.296 / **0.278** / 0.285 / 0.462 at bands 0 / 0.045 / 0.09 / 0.14 /
+0.20. Past 0.14 a wide band adds a standing downward bias the loop then
+fights. Re-measure with the probe before moving it, and average over
+seeds: one noise realisation ranks the variants wrongly.
+
+Reproduce with `tools/acc_transition_probe.py`.
+
+### 8.8 Why the accel side is flat near equilibrium
+
+At the wanted gap with speeds matched, a lead accelerating gently commands
+almost nothing: `a_lead` of 0.25 m/s² gives `+0.0013`, against `0.0000`
+for a coasting lead. Measured gains at that state, level 3:
+
+| | lead braking (−2..0) | lead accelerating (0..+2) |
+|---|---|---|
+| before §8.6 | +0.000 | +0.153 |
+| after §8.6 | +0.371 | +0.153 |
+
+**The feedforward did not cause this.** The accel side is unchanged to
+four decimals; only the ratio moved. The flatness is the `tanh` blend
+doing its job: with `a_iidm = 0` at
+equilibrium the blend reduces to `a_cah + b·tanh(−a_cah/b)`, which is
+`a_cah³/12` for small `a_cah`. Gain is zero to second order, which is
+exactly the "CAH contributes nothing in equilibrium, no comfort cost"
+property §8.3 is built on. Linearising it puts micro-corrections back
+into steady following, against §1.
+
+**Why the two sides are not worth the same.** `a_lead` integrates to
+`Δv` and twice to gap error, both already high-gain inputs, so a
+feedforward buys only phase lead. On the brake side that is worth a
+bounded string-stability cost because lateness costs a collision. On the
+accel side lateness costs a slightly wider gap that closes itself, while
+earliness means surging at a vehicle that may brake again. Left alone,
+`Δv` does get there: closed loop from equilibrium with the lead
+accelerating at 1.0 m/s², the cap passed `+0.1` at 0.20 s and `+0.3` at
+0.87 s with no accel-side term at all.
+
+**This section originally concluded "do not add one".** That was
+overruled on responsiveness grounds, and §8.9 is the result. The argument
+above is not withdrawn: it is why §8.9 is a bounded gated nudge at 0.30
+m/s² rather than a mirror of the 2.0 m/s² brake side, and it is the
+reason to be suspicious of any future request to raise that bound.
+
+`a_lead_eff = min(a_lead, a_max)` also clamps the accel side at 1.5 m/s².
+That is correct, ego cannot follow an acceleration it cannot produce, and
+it sits far from the `a_lead ≈ 0` band where telemetry jitter lives, so
+it carries none of the §8.7 rectification risk.
+
+### 8.9 Accel-side nudge
+
+A bounded, gated phase lead for a lead that is pulling harder. It buys
+feel, not safety, and is sized accordingly.
+
+```
+demand = soft-corner(min(a_lead, a_max))          # 0 for a_lead <= 0
+gate   = 1 − cos-ramp((v − v_lead) / 2.0 m/s)     # 1 matched, 0 closing at 2
+a_acc += min(0.25 · demand · gate, 0.30)
+```
+
+| | brake side (§8.6) | accel side |
+|---|---|---|
+| share | 0.50 | 0.50 |
+| bound | 2.0 m/s² (`b_comfort`) | **0.75 m/s²** |
+| gate | none, self-scales via `cah` | closing speed |
+
+The accel share was raised from 0.25 to 0.50 once the gap cost was priced
+honestly (below). Its bound had to go 0.30 to 0.75 with it: at share 0.50
+a 0.30 bound clips from `a_lead` 0.6 upward, putting a 0.50 gain step in
+the middle of the gentle-acceleration band. At 0.75 the bound cannot bind,
+because `demand` is already capped at `a_max`, so ego's own authority is
+the limiter. The `min(a_lead, a_max)` inside the nudge is soft-cornered
+for the same reason; without that, doubling the share doubled the step at
+`a_lead = 1.5` (0.399 to 0.899). With it the step is 0.407, unchanged.
+What remains there is `cah`'s own hard `a_lead_eff = min(a_lead, a_max)`,
+which predates all of this and only binds when a lead out-accelerates the
+truck.
+
+Three guards, each measured:
+
+* **Zero unless the lead is accelerating.** `brake-onset` traces come back
+  bit identical and the stopped-lead grid is untouched, so nothing on the
+  safety-carrying side moved. Pinned by
+  `test_accel_nudge_is_silent_unless_the_lead_is_accelerating`.
+* **Gated on closing speed.** Contribution against a lead reporting +1.0
+  m/s²: `0.250` at matched speed, `0.107` closing at 1 m/s, `0.000` at 2
+  m/s. A phantom `a_lead` cannot add pull toward a lead ego is catching.
+  Pinned by `test_accel_nudge_gates_off_while_closing`.
+* **Soft-cornered and capped at `a_max`.** The worst gain jump of §8.7
+  stays at 0.1435, so this does not reintroduce a step at `a_lead = 0`,
+  and a lead accelerating at 20 m/s² reads the same as one at 1.5.
+
+Measured at the wanted gap, matched speed, level 3:
+
+| lead accel | 0.00 | 0.25 | 0.50 | 1.00 | 1.50 |
+|---|---|---|---|---|---|
+| before | 0.0000 | 0.0013 | 0.0101 | 0.0750 | 0.2274 |
+| after | 0.0000 | 0.0620 | 0.1351 | 0.3250 | 0.5274 |
+
+Equilibrium is untouched, exactly, because the nudge is zero at
+`a_lead = 0`.
+
+**The cost of more push was mispriced first time.** The original figure,
+a 15.65 m standing gap loss at share 1.0, came from a test that held the
+lead's *speed* constant while reporting a sustained `+1.0 m/s²`. Those
+contradict each other: a real lead accelerating at 1.0 for a minute
+reaches 216 km/h, and if the kinematics estimator ever reports sustained
+acceleration against a flat speed that is a bug upstream of ACC, not a
+case to tune against. Re-measured with `v_lead` integrated from the same
+`a_lead` the lead reports, 8 seeds, σ 0.35 of noise:
+
+| nudge share | resume to +0.3 | settled gap (wanted 38.33) | RMS jerk | peak jerk | cap at 6 m, 2 m/s |
+|---|---|---|---|---|---|
+| 0 | 0.97 s | 41.16 | 0.216 | 1.428 | −0.096 |
+| 0.25 | 0.60 s | 41.12 | 0.244 | 1.425 | +0.182 |
+| **0.50** | **0.40 s** | **41.07** | **0.281** | **1.512** | **+0.451** |
+| 1.00 | 0.27 s | 40.94 | 0.382 | 1.732 | +0.987 |
+
+Settled gap moves 0.2 m across a 4x share change, and jerk moves little.
+Neither is a reason to hold the share down.
+
+**The cost that is real is the close-range column.** The nudge takes no
+distance argument, so its contribution is the same at 3 m as at 1000 m,
+and it can invert a small braking command into a small pull: at 6 m and
+2 m/s behind a lead reporting `+1.0`, `−0.096` becomes `+0.451`. The
+bound is currently doing the job a range gate should do. Add the range
+term before raising the share again.
+
+Closed loop, lead accelerating at 1.0 m/s² from equilibrium: the cap
+passes `+0.1` at 0.00 s (was 0.20), `+0.3` at 0.00 s (was 0.87) and `+0.5`
+at 1.07 s (was 1.70). Peak gap 49.1 m rather than 52.4 m, so ego holds 3.3
+m closer through the manoeuvre.
+
+### 8.10 The feedforwards read their own `a_lead` estimate
+
+`a_lead` is the noisiest signal in the pipeline, a second derivative of
+telemetry. §8.5's defect and the old noise immunity were **the same
+property**: the blend discarding `a_cah` was also what kept that noise
+out of the command. §8.6 removed the defect and removed the filter with
+it, and a static gain on `a_lead` then transmitted its noise to the
+pedal.
+
+Measured, lead holding a constant speed with 8 Hz sample-and-hold noise
+on `a_lead`, 12 seeds, RMS commanded jerk:
+
+| σ(`a_lead`) | HEAD | §8.6 as first written | with this section |
+|---|---|---|---|
+| 0.35 | 0.016 | 0.775 | 0.243 |
+| 0.60 | 0.027 | 1.158 | 0.388 |
+
+Peak jerk at σ 0.60 went 0.285 (HEAD) to **2.451**, against a
+`J_MAX_MS3` of 2.5: the command was being rate-clipped while nothing was
+happening.
+
+**The fix is a filter, not a smaller gain.** Cutting `share` or widening
+the soft corner would pay for the jerk with steady-state response, which
+is the entire point of §8.6. A low-pass pays with phase lag instead, and
+lag is the cheap currency here: the deadline before the TTC overlay fires
+is seconds. It is also **invisible to the response map**, so every §8.5
+and §8.6 steady-state number is preserved by construction rather than by
+tuning. Verified: the decel-axis spans are identical at every tau tried.
+
+`TAU_ALEAD_FF_S = 0.50 s`, symmetric, maintained in `_smooth_chain`
+alongside the existing estimate and carried on `_LeadSnapshot`. CAH keeps
+the fast asymmetric one of §12.2, because it sizes a stopping requirement
+where lateness is dangerous. Only the additive bonus term is slowed, so
+the worst case of over-filtering is that §8.6 degrades toward HEAD, which
+is what shipped.
+
+Filtered **before** the one-sided nonlinearity, not after. The
+feedforward is zero for `a_lead ≥ 0`, so it rectifies; filtering after
+the corner cuts variance only, filtering before cuts the standing bias
+too.
+
+Trade curve, lag measured from the moment a coasting lead starts braking
+(the earlier trace published a lead already braking at t=0, and the EMA
+seeds to its first input, so it showed no lag at all):
+
+| tau | RMS jerk σ0.35 | peak σ0.60 | lag to −1.0, lead −2 / −4 / −6 |
+|---|---|---|---|
+| HEAD | 0.016 | 0.285 | 1.27 / 0.63 / 0.50 s, slams at −6 |
+| 0.08 | 0.775 | 2.451 | 0.50 / 0.43 / 0.43 s |
+| 0.35 | 0.299 | 2.027 | 0.63 / 0.43 / 0.43 s |
+| **0.50** | **0.243** | **1.803** | **0.70 / 0.43 / 0.43 s** |
+| 0.70 | 0.189 | 1.591 | 0.77 / 0.43 / 0.43 s |
+
+The lag cost lands almost entirely on the gentlest brake. At −4 and −6 it
+is 0.43 s at every tau, and no tau reintroduces the slam.
+
+The virtual lead of §9.3 builds its own feedforward input the same way. If
+it read the unfiltered estimate while `a_base` read the filtered one, the
+`a_virt_cmd − a_base` difference would carry back exactly the noise this
+section removes.
 
 ---
 
@@ -588,10 +992,22 @@ discontinuity on the new lead-of-lead.
 deadband = 0.30 m/s²     # AI tick-to-tick wobble + MP packet jitter floor
 
 Δ = new_a_lead − prev_a_lead_ema
-τ = τ_relax           if |Δ| < deadband   # noise: heaviest filter
-τ = τ_brake           if Δ ≤ −deadband    # real brake event
-τ = τ_relax           otherwise           # real positive change
+ramp = 0.45 m/s²         # innovation span the fast τ fades in over
+
+urgency = cos-ramp(−Δ, deadband → deadband + ramp)      # 0 to 1, C1
+τ = τ_relax + (τ_brake − τ_relax) · urgency
 ```
+
+**The threshold used to be a switch, and that was a chatter source.** A
+lead whose reported `a_lead` sits on the deadband edge re-picked between
+a 80 ms and a 350 ms filter every tick, a 4.4x bandwidth change with no
+transition. Worse, the switch is one-sided by design, so symmetric
+telemetry noise was rectified: the filter jumped down fast on every
+negative innovation past the floor and crawled back at 350 ms, dragging
+the filtered `a_lead` systematically negative into a phantom brake. The
+ramp keeps the intent (fast on a genuine brake, slow on noise) and
+removes the edge. `alead_tau_s` in `idm_cah.py`, `A_LEAD_TAU_RAMP_MS2 =
+0` restores the old switch for A/B runs.
 
 Rationale: AI traffic in ETS2/ATS wobbles `a_lead` by ±0.5–1 m/s²
 tick-to-tick as a game-AI artefact, and TruckersMP injects intermittent
@@ -691,7 +1107,7 @@ classical implementation suffered from:
 | Failure mode | Mitigation |
 |---|---|
 | Free-term recovery overshoot (classical IDM) | IIDM piecewise form caps the upper branch at `a_free` |
-| Soft response when lead matches ego decel | CAH overlay, blended via cool-factor model |
+| Soft response when lead matches ego decel | **Still open.** CAH is discarded by the blend in exactly this state (§8.5) |
 | Late, sharp brake on slowdowns ahead of lead | Weighted per-lead demand + virtual-lead prediction (§9.3) |
 | Chain membership snapping (lane entry/exit) | Continuous coupling weights + anticipation delta EMA (§9.2) |
 | Marginal in-lane vehicle flapping the command | Score-confidence blend + asymmetric conf EMA + ghost hold (§9.5) |
@@ -699,7 +1115,7 @@ classical implementation suffered from:
 | Anticipating past a stopped lead | Stationary-lead failsafe (§9.6) |
 | Jitter-driven micro-oscillation in equilibrium | symmetric EMA on `s, v_lead`; jerk limiter |
 | Brake-event lag from filtering | asymmetric EMA on `a_lead`; TTC + emergency on raw |
-| Double-counting of lead accel | legacy `K_FF · a_lead` term removed (CAH supersedes) |
+| Double-counting of lead accel | legacy `K_FF · a_lead` term removed. Premise re-opened by §8.5 |
 | Phantom traffic jams from accel amplification | `T ≥ 1.0 s` + IIDM string stability + anticipation |
 | Step changes at handover (e.g. lead → no-lead) | continuous IIDM domain across all gap regimes |
 | Coast to a stopped vehicle, then a full-authority slam | strict CAH branch test (§8.2) |

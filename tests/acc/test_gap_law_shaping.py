@@ -7,12 +7,17 @@ in until the TTC overlay slammed the pedal. See `core/acc/ACC_ARCHITECTURE.md`
 §8.2 and §8.4."""
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from core.cruise_control_thread.acc_controller import (
     T_HEADWAY_BY_LEVEL_S, AdaptiveCruiseController, _LeadSnapshot,
 )
-from core.cruise_control_thread.idm_cah import acc_blend, cah, comfort_gain, iidm
+from core.cruise_control_thread.idm_cah import (
+    LEAD_BRAKE_FF_MAX_MS2, LEAD_BRAKE_FF_SHARE, _soft_min, _soft_negative, acc_blend, alead_tau_s, cah,
+    comfort_gain, iidm, lead_accel_nudge, lead_brake_ff,
+)
 from core.settings import Settings
 
 DT = 1.0 / 30.0
@@ -228,6 +233,242 @@ def test_shaping_never_softens_a_braking_lead():
     for a_lead in (-2.0, -4.0, -6.0):
         assert ctrl._lead_law(s, v, v, a_lead, 1.1) <= \
             _unshaped(ctrl, s, v, v, a_lead, 1.1) + 1e-6
+
+
+def _brake_from_matched(lead_decel: float, level: int = 2, v0_ms: float = 22.2):
+    """Lead brakes from the level's own equilibrium. Returns (peak decel, min gap).
+
+    Starting anywhere else measures the gap-closing transient on top."""
+    ctrl = _controller()
+    v_ego = v_lead = v0_ms
+    gap0_m = ctrl.config.s0_m + v0_ms * T_HEADWAY_BY_LEVEL_S[level]
+    gap, t, peak, min_gap = gap0_m, 0.0, 0.0, gap0_m
+    while t < 12.0 and gap > 0.5 and v_ego > 0.05:
+        ctrl._prev_mono = t
+        raw, _ = _snap(gap, v_lead=v_lead, a_lead=-lead_decel)
+        smooth = ctrl._smooth_chain(raw, DT, t)
+        a_raw, emergency = ctrl._compute_command(raw, smooth, v_ego, DT)
+        a = ctrl._output_filter(ctrl._jerk_limit(a_raw, DT, emergency), DT, emergency)
+        a = min(0.0, a)
+        peak = min(peak, a)
+        v_ego = max(0.0, v_ego + a * DT)
+        v_lead = max(0.0, v_lead - lead_decel * DT)
+        gap += (v_lead - v_ego) * DT
+        min_gap = min(min_gap, gap)
+        t += DT
+    return peak, min_gap
+
+
+def test_feedforward_is_silent_for_a_lead_that_is_not_braking():
+    """It must move the a_lead axis and nothing else, or it shifts equilibrium."""
+    ctrl = _controller()
+    for a_lead in (0.0, 0.5, 1.5):
+        for s, v_lead in ((30.0, 22.2), (60.0, 18.0), (120.0, 0.0)):
+            assert lead_brake_ff(ctrl.config, s, 22.2, v_lead, a_lead) == 0.0
+
+
+def test_feedforward_is_bounded():
+    """A spurious a_lead spike must cost one comfort brake, never a slam."""
+    ctrl = _controller()
+    for a_lead in (-4.0, -8.0, -20.0):
+        for s in (10.0, 40.0, 150.0):
+            ff = lead_brake_ff(ctrl.config, s, 22.2, 20.0, a_lead)
+            assert -LEAD_BRAKE_FF_MAX_MS2 - 1e-9 <= ff <= 0.0
+
+
+def test_command_responds_to_lead_braking_at_the_wanted_gap():
+    """§8.5: the blend discarded a_cah here, freezing the command above ~2 m/s2."""
+    ctrl = _controller()
+    v, t_three = 22.2, T_HEADWAY_BY_LEVEL_S[3]
+    s_want = ctrl.config.s0_m + v * t_three
+    commands = [ctrl._lead_law(s_want, v, v - 2.0, -a, t_three)
+                for a in (0.0, 2.0, 4.0, 6.0)]
+    assert commands == sorted(commands, reverse=True)
+    assert commands[0] - commands[-1] > 0.75, "lead braking still barely reaches it"
+
+
+def test_a_braking_lead_that_is_pulling_away_still_cuts_the_pull():
+    """The cheapest anticipation window: closing speed has not built yet."""
+    ctrl = _controller()
+    v, t_three = 22.2, T_HEADWAY_BY_LEVEL_S[3]
+    coasting = ctrl._lead_law(40.0, v, v + 4.0, 0.0, t_three)
+    braking = ctrl._lead_law(40.0, v, v + 4.0, -6.0, t_three)
+    assert coasting > 0.0, "a lead pulling away should still allow pull"
+    assert braking < coasting * 0.5
+
+
+def test_lead_law_is_continuous_across_the_cah_branch_test():
+    """The feedforward sits outside the blend so it cannot step at the branch."""
+    ctrl = _controller()
+    v, v_lead, s = 22.2, 18.0, 45.0
+    boundary = -v_lead * (v - v_lead) / (2.0 * s)
+    below = ctrl._lead_law(s, v, v_lead, boundary - 1e-6, 1.5)
+    above = ctrl._lead_law(s, v, v_lead, boundary + 1e-6, 1.5)
+    assert below == pytest.approx(above, abs=1e-4)
+
+
+@pytest.mark.parametrize("lead_decel", [2.0, 4.0, 6.0, 8.0])
+def test_following_a_braking_lead_is_string_stable(level_two, lead_decel):
+    """Ego must not amplify the lead's deceleration back up the platoon (§5)."""
+    peak, _ = _brake_from_matched(lead_decel)
+    assert -peak <= lead_decel + 1e-6, "ego out-braked the disturbance"
+
+
+@pytest.mark.parametrize("lead_decel", [5.0, 6.0, 7.0])
+def test_a_hard_braking_lead_no_longer_needs_the_ttc_overlay(level_two, lead_decel):
+    """The overlay slams unfiltered, which is the shape §4 exists to avoid."""
+    peak, _ = _brake_from_matched(lead_decel)
+    ctrl = _controller()
+    assert peak > ctrl.config.max_decel_ms2 + 0.05
+
+
+def _gain_jumps(ctrl, decels, s=37.5, v=22.22, closing=0.5, t_headway=1.5):
+    """Adjacent-sample changes in d(cap)/d(a_lead) across a fine sweep."""
+    caps = [ctrl._lead_law(s, v, v - closing, -d, t_headway) for d in decels]
+    step = decels[1] - decels[0]
+    gain = [(caps[i + 1] - caps[i]) / step for i in range(len(caps) - 1)]
+    return [abs(gain[i + 1] - gain[i]) for i in range(len(gain) - 1)]
+
+
+def test_soft_min_never_relaxes_the_value_it_clamps():
+    """It may only deviate downward, or the kinematic floor stops holding."""
+    for a in (-6.0, -1.0, -0.05, 0.0, 0.4):
+        for b in (-6.0, -1.0, -0.05, 0.0, 0.4):
+            for eps in (0.0, 0.02, 0.12, 0.5):
+                assert _soft_min(a, b, eps) <= min(a, b) + 1e-12
+
+
+def test_soft_negative_is_c1_monotone_and_never_positive():
+    eps = 0.5
+    xs = [i / 500.0 for i in range(-1000, 400)]
+    vals = [_soft_negative(x, eps) for x in xs]
+    assert max(vals) <= 0.0
+    assert all(b >= a - 1e-12 for a, b in zip(vals, vals[1:]))
+    slopes = [(vals[i + 1] - vals[i]) / (xs[1] - xs[0]) for i in range(len(vals) - 1)]
+    assert max(abs(b - a) for a, b in zip(slopes, slopes[1:])) < 0.02
+    assert _soft_negative(-2.0, eps) == pytest.approx(-2.0)
+
+
+def test_alead_tau_ramps_instead_of_switching():
+    """A lead on the deadband edge must not re-pick a 4x bandwidth every tick."""
+    cfg = _controller().config
+    xs = [i / 400.0 for i in range(-800, 800)]
+    taus = [alead_tau_s(cfg, x) for x in xs]
+    assert alead_tau_s(cfg, 0.0) == pytest.approx(cfg.tau_alead_relax_s)
+    assert alead_tau_s(cfg, -4.0) == pytest.approx(cfg.tau_alead_brake_s)
+    assert all(b >= a - 1e-12 for a, b in zip(taus, taus[1:])), "monotone in braking"
+    assert max(abs(b - a) for a, b in zip(taus, taus[1:])) < 0.01, "tau still steps"
+
+
+def test_no_step_in_gain_through_the_small_braking_zone():
+    """Hard clamps here made the command jump as the lead dipped in and out."""
+    ctrl = _controller()
+    decels = [(-0.6 + i * 0.0025) for i in range(881)]
+    assert max(_gain_jumps(ctrl, decels)) < 0.20
+
+
+def test_softening_off_reproduces_the_old_hard_transitions():
+    """The probe's `before` column depends on 0 restoring the old behaviour."""
+    ctrl = _controller()
+    decels = [(-0.6 + i * 0.0025) for i in range(881)]
+    smooth = max(_gain_jumps(ctrl, decels))
+    ctrl.config.lead_law_floor_soft_ms2 = 0.0
+    ctrl.config.lead_brake_ff_soft_ms2 = 0.0
+    assert max(_gain_jumps(ctrl, decels)) > smooth * 1.4
+
+
+def test_accel_nudge_is_silent_unless_the_lead_is_accelerating():
+    """It must not touch the braking side, which carries the safety argument."""
+    cfg = _controller().config
+    for a_lead in (0.0, -0.5, -2.0, -8.0):
+        assert lead_accel_nudge(cfg, 22.2, 20.0, a_lead) == 0.0
+
+
+def test_accel_nudge_is_bounded_and_capped_at_ego_authority():
+    cfg = _controller().config
+    for a_lead in (0.5, 1.5, 4.0, 20.0):
+        n = lead_accel_nudge(cfg, 22.2, 22.2, a_lead)
+        assert 0.0 <= n <= cfg.lead_accel_nudge_max_ms2 + 1e-12
+    assert lead_accel_nudge(cfg, 22.2, 22.2, 4.0) == pytest.approx(
+        lead_accel_nudge(cfg, 22.2, 22.2, 20.0)), "must saturate at a_max"
+
+
+def test_accel_nudge_gates_off_while_closing():
+    """A phantom a_lead must never add pull toward a lead ego is catching."""
+    cfg = _controller().config
+    v = 22.2
+    closing = [lead_accel_nudge(cfg, v, v - dv, 1.0)
+               for dv in (0.0, 0.5, 1.0, 1.5, 2.0, 4.0)]
+    assert closing == sorted(closing, reverse=True)
+    assert closing[0] > 0.2
+    assert closing[-2] == 0.0 and closing[-1] == 0.0
+
+
+def test_a_gently_accelerating_lead_is_distinguishable_from_a_coasting_one():
+    """§8.8 said flat was defensible; §8.9 overrode that for feel."""
+    ctrl = _controller()
+    v, t_three = 22.2, T_HEADWAY_BY_LEVEL_S[3]
+    s_want = ctrl.config.s0_m + v * t_three
+    coasting = ctrl._lead_law(s_want, v, v, 0.0, t_three)
+    assert coasting == pytest.approx(0.0, abs=1e-6), "equilibrium still exact"
+    for a_lead, floor in ((0.25, 0.03), (0.5, 0.08), (1.0, 0.20)):
+        assert ctrl._lead_law(s_want, v, v, a_lead, t_three) > floor
+
+
+def _probe_baseline() -> dict:
+    """Read BASELINE from the probe source; importing it needs tools/ on sys.path."""
+    import ast
+    src = (pathlib.Path(__file__).resolve().parents[2]
+           / "tools" / "acc_transition_probe.py").read_text(encoding="utf-8")
+    for node in ast.parse(src).body:
+        target = node.targets[0] if isinstance(node, ast.Assign) else None
+        if isinstance(target, ast.Name) and target.id == "BASELINE":
+            return ast.literal_eval(node.value)
+    raise AssertionError("tools/acc_transition_probe.py defines no BASELINE")
+
+
+def test_feedforward_reads_its_own_a_lead_estimate_not_cah_s():
+    """CAH keeps the fast filter, the feedforwards get a slower one. See §8.10."""
+    ctrl = _controller()
+    cfg = ctrl.config
+    s, v, v_lead, T = 37.5, 22.2, 20.2, T_HEADWAY_BY_LEVEL_S[3]
+
+    braking = ctrl._lead_law(s, v, v_lead, -6.0, T)
+    ff_still_coasting = ctrl._lead_law(s, v, v_lead, -6.0, T, 0.0)
+    no_brake_at_all = ctrl._lead_law(s, v, v_lead, 0.0, T)
+
+    assert ff_still_coasting > braking, "a lagging ff estimate must soften the term"
+    assert ff_still_coasting < no_brake_at_all, "CAH must still see the real a_lead"
+    # A coasting ff estimate must be exactly equivalent to the term being off.
+    cfg.lead_brake_ff_share = 0.0
+    assert ctrl._lead_law(s, v, v_lead, -6.0, T) == pytest.approx(
+        ff_still_coasting, abs=1e-9)
+    cfg.lead_brake_ff_share = LEAD_BRAKE_FF_SHARE
+    assert ctrl._lead_law(s, v, v_lead, -6.0, T, None) == braking
+    assert cfg.tau_alead_ff_s > cfg.tau_alead_brake_s, "ff filter must be the slower one"
+
+
+def test_every_feature_knob_disables_its_feature_at_zero():
+    """`tools/acc_transition_probe.BASELINE` is only a baseline if this holds.
+
+    It once omitted the two shares, so the probe compared the change to itself."""
+    ctrl = _controller()
+    baseline = _probe_baseline()
+    for key, value in baseline.items():
+        assert hasattr(ctrl.config, key), f"BASELINE names a dead field {key!r}"
+        setattr(ctrl.config, key, value)
+    cfg = ctrl.config
+    for s, v, v_lead, a_lead in ((37.5, 22.2, 22.2, -4.0), (20.0, 13.9, 10.0, -1.0),
+                                 (60.0, 25.0, 27.0, 1.0), (12.0, 8.0, 0.0, 0.2)):
+        assert lead_brake_ff(cfg, s, v, v_lead, a_lead) == 0.0
+        assert lead_accel_nudge(cfg, v, v_lead, a_lead) == 0.0
+    for a, b in ((-1.0, -2.0), (0.5, 0.5), (-0.05, 0.0)):
+        assert _soft_min(a, b, cfg.lead_law_floor_soft_ms2) == min(a, b)
+    for d in (-1.0, -0.2, 0.0, 0.3):
+        assert _soft_negative(d, cfg.lead_brake_ff_soft_ms2) == min(0.0, d)
+    hard = cfg.a_lead_deadband_ms2
+    assert alead_tau_s(cfg, -hard - 1e-6) == pytest.approx(cfg.tau_alead_brake_s)
+    assert alead_tau_s(cfg, -hard + 1e-6) == pytest.approx(cfg.tau_alead_relax_s)
 
 
 def test_acceleration_is_scaled_upward_only():
