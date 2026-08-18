@@ -33,6 +33,11 @@ LEAD_ACCEL_NUDGE_MAX_MS2: float = 0.75
 LEAD_ACCEL_NUDGE_SOFT_MS2: float = 0.30
 LEAD_ACCEL_NUDGE_ZERO_MS: float = 2.0
 
+# Gap-error braking is halved while ego is not actually catching the lead, and
+# back to normal by 2 km/h of closing. The kinematic floor still holds. §8.11.
+CLOSING_RELIEF_MIN: float = 0.50
+CLOSING_RELIEF_FULL_MS: float = 2.0 / 3.6
+
 # The feedforwards read a_lead through their own slower symmetric filter. CAH
 # keeps the fast asymmetric one: it sizes a stopping requirement. See §8.10.
 TAU_ALEAD_FF_S: float = 0.50
@@ -239,6 +244,15 @@ def comfort_gain(
     return gain
 
 
+def closing_relief(cfg: ACConfig, v_ego: float, v_lead: float) -> float:
+    """Softens gap-error braking while the lead is level with ego or opening.
+
+    Only the comfort term: the §8.4 floor still enforces the kinematics. §8.11."""
+    closing = v_ego - v_lead
+    ramp = _cos_ramp(closing / max(cfg.closing_relief_full_ms, 1e-6))
+    return cfg.closing_relief_min + (1.0 - cfg.closing_relief_min) * ramp
+
+
 def lead_law(
     cfg: ACConfig,
     dist_m: float,
@@ -277,7 +291,8 @@ def lead_law(
         # Upward only: a close setting closes on its target harder, a far one
         # keeps full pull rather than being throttled by its own smoothness.
         return a_acc * max(1.0, level_gain(cfg, v_ego, t_headway))
-    a_soft = a_acc * comfort_gain(cfg, eff_dist, v_ego, v_lead, t_headway)
+    a_soft = (a_acc * comfort_gain(cfg, eff_dist, v_ego, v_lead, t_headway)
+              * closing_relief(cfg, v_ego, v_lead))
     # Kinematic floor, softened downward only. Ungated and the inner max hard,
     # both for continuity reasons set out in §8.7.
     return _soft_min(a_soft, max(a_acc, a_cah_val), cfg.lead_law_floor_soft_ms2)

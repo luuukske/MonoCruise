@@ -16,7 +16,7 @@ from core.cruise_control_thread.acc_controller import (
 )
 from core.cruise_control_thread.idm_cah import (
     LEAD_BRAKE_FF_MAX_MS2, LEAD_BRAKE_FF_SHARE, _soft_min, _soft_negative, acc_blend, alead_tau_s, cah,
-    comfort_gain, iidm, lead_accel_nudge, lead_brake_ff,
+    closing_relief, comfort_gain, iidm, lead_accel_nudge, lead_brake_ff,
 )
 from core.settings import Settings
 
@@ -469,6 +469,47 @@ def test_every_feature_knob_disables_its_feature_at_zero():
     hard = cfg.a_lead_deadband_ms2
     assert alead_tau_s(cfg, -hard - 1e-6) == pytest.approx(cfg.tau_alead_brake_s)
     assert alead_tau_s(cfg, -hard + 1e-6) == pytest.approx(cfg.tau_alead_relax_s)
+
+
+def test_closing_relief_matches_the_requested_shape():
+    """Half braking at or below zero closing, normal from 2 km/h up."""
+    cfg = _controller().config
+    v = 22.2
+    assert closing_relief(cfg, v, v) == pytest.approx(cfg.closing_relief_min)
+    assert closing_relief(cfg, v, v + 3.0) == pytest.approx(cfg.closing_relief_min)
+    for kmh in (2.0, 3.0, 10.0):
+        assert closing_relief(cfg, v, v - kmh / 3.6) == pytest.approx(1.0)
+    vals = [closing_relief(cfg, v, v - k / 3.6) for k in (0.0, 0.5, 1.0, 1.5, 2.0)]
+    assert vals == sorted(vals), "must ramp, not step"
+
+
+def test_closing_relief_leaves_the_normal_regime_untouched():
+    """Above 2 km/h of closing the command must be bit identical."""
+    ctrl, off = _controller(), _controller()
+    off.config.closing_relief_min = 1.0
+    v, t_three = 22.2, T_HEADWAY_BY_LEVEL_S[3]
+    for kmh in (2.0, 4.0, 10.0, 25.0):
+        for s in (15.0, 25.0, 40.0, 90.0):
+            for a_lead in (0.0, -3.0):
+                vl = v - kmh / 3.6
+                assert ctrl._lead_law(s, v, vl, a_lead, t_three) ==                     off._lead_law(s, v, vl, a_lead, t_three)
+
+
+def test_closing_relief_cannot_relax_past_the_floor():
+    """It is a comfort term. The §8.4 floor, max(a_acc, a_cah), binds under it.
+
+    Not `a_cah` alone: the blend relaxes CAH by design, so `a_acc` is the
+    higher of the two beyond about 30 m and the floor follows it."""
+    ctrl = _controller()
+    cfg = ctrl.config
+    v, t_three = 22.2, T_HEADWAY_BY_LEVEL_S[3]
+    for s in (15.0, 20.0, 30.0, 40.0, 80.0):
+        for a_lead in (-1.0, -2.0, -4.0, -6.0):
+            a_cah = cah(s=s, v=v, v_lead=v, a_lead=a_lead, a_max=cfg.a_max_ms2)
+            a_acc = (_unshaped(ctrl, s, v, v, a_lead, t_three)
+                     + lead_brake_ff(cfg, s, v, v, a_lead)
+                     + lead_accel_nudge(cfg, v, v, a_lead))
+            assert ctrl._lead_law(s, v, v, a_lead, t_three) <=                 max(a_acc, a_cah) + 1e-9
 
 
 def test_acceleration_is_scaled_upward_only():

@@ -758,6 +758,54 @@ it read the unfiltered estimate while `a_base` read the filtered one, the
 `a_virt_cmd − a_base` difference would carry back exactly the noise this
 section removes.
 
+### 8.11 Closing-speed relief
+
+Gap-error braking is halved while ego is not actually catching the lead,
+and returns to normal by 2 km/h of closing:
+
+```
+relief = 0.50 + 0.50 · cos-ramp((v − v_lead) / (2 km/h))
+a_soft = a_acc · comfort_gain · relief          # decel side only
+```
+
+Driver-reported: the truck braked harder than expected behind a lead that
+was level or pulling away. §8.4's `w_open` was supposed to cover this and
+does not, because it keys on *opening* speed and fades to nothing inside
+0.6 · `s_want`, so it gives no relief at all at matched speed.
+
+**Above 2 km/h of closing the command is bit identical.** That is the
+requested boundary and it is worth keeping: everything the earlier
+sections measured about approach and lead braking lives above it.
+
+**This is a comfort term and the §8.4 floor still binds under it.** At a
+20 m gap, matched speed, lead braking at 6 m/s², the command relaxes from
+−6.47 to −4.038, and the floor there is −4.037. The relief spent exactly
+the margin the previous build was adding *past* the floor and stopped on
+it.
+
+Be precise about what that floor is: it is `max(a_acc, a_cah)`, not
+`a_cah`. Beyond roughly 30 m the blend has already relaxed CAH so `a_acc`
+is the higher of the two and the floor follows it, which is why the
+command legitimately sits above the raw CAH rate at 40 m (−1.399 against
+−3.042). That is the ACC blend of §8.3 working as designed and predates
+this section. The relief cannot pass that floor; it was never bounded by
+`a_cah` alone.
+
+Measured cost, closed loop with a perfect actuator:
+
+| case | min gap, relief off | relief on |
+|---|---|---|
+| 80 km/h, 20 m, lead −6 | 6.2 | 5.9 |
+| 80 km/h, 25 m, lead −6 | 6.3 | 6.1 |
+| 50 km/h, 15 m, lead −6 | 5.4 | 5.2 |
+| 80 km/h, 30 m, lead −8 | 8.6 | 8.6 |
+
+0.2 to 0.3 m of minimum gap in hard-braking cases at short range, all in
+the same direction. The `brake-onset` suite is unchanged (peaks −1.92 /
+−3.35 / −4.44, no overlay trip), and the overlay trips that do appear at
+20 m and below are **not new**: with the relief off those cases trip at
+0.00 s, so the relief delays the trip rather than causing it.
+
 ---
 
 ## 9. Multi-vehicle anticipation
