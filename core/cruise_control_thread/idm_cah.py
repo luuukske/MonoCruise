@@ -32,6 +32,10 @@ LEAD_ACCEL_NUDGE_SHARE: float = 0.50
 LEAD_ACCEL_NUDGE_MAX_MS2: float = 0.75
 LEAD_ACCEL_NUDGE_SOFT_MS2: float = 0.30
 LEAD_ACCEL_NUDGE_ZERO_MS: float = 2.0
+# Room gate, as a fraction of the wanted gap. Without it the nudge pulls just as
+# hard at 6 m as at 1000 m and can cancel a real brake. See §8.12.
+LEAD_ACCEL_NUDGE_ROOM_LO: float = 0.70
+LEAD_ACCEL_NUDGE_ROOM_HI: float = 1.05
 
 # Gap-error braking is halved while ego is not actually catching the lead, and
 # back to normal by 2 km/h of closing. The kinematic floor still holds. §8.11.
@@ -160,14 +164,17 @@ def alead_tau_s(cfg: ACConfig, innovation: float) -> float:
 
 def lead_accel_nudge(
     cfg: ACConfig,
+    s: float,
     v: float,
     v_lead: float,
     a_lead: float,
+    t_headway: float,
 ) -> float:
     """Bounded accel-side phase lead for a lead that is pulling harder.
 
-    Zero unless the lead is accelerating, and gated off while ego is closing, so
-    a phantom a_lead can never add pull toward a lead. See §8.9."""
+    Zero unless the lead is accelerating, and gated on both closing speed and
+    room, so it cannot add pull toward a lead ego is catching or crowding.
+    See §8.9 and §8.12."""
     if a_lead <= 0.0:
         return 0.0
     # Soft-cornered at both ends: at a_max because ego cannot follow what it
@@ -176,7 +183,10 @@ def lead_accel_nudge(
     capped = cfg.a_max_ms2 + _soft_negative(a_lead - cfg.a_max_ms2, eps)
     demand = -_soft_negative(-capped, eps)
     gate = 1.0 - _cos_ramp((v - v_lead) / max(cfg.lead_accel_nudge_zero_ms, 1e-6))
-    return min(cfg.lead_accel_nudge_share * demand * gate,
+    s_want = max(cfg.s0_m + max(v, 0.0) * t_headway, 1e-3)
+    span = max(cfg.lead_accel_nudge_room_hi - cfg.lead_accel_nudge_room_lo, 1e-6)
+    room = _cos_ramp((s / s_want - cfg.lead_accel_nudge_room_lo) / span)
+    return min(cfg.lead_accel_nudge_share * demand * gate * room,
                cfg.lead_accel_nudge_max_ms2)
 
 
@@ -286,7 +296,7 @@ def lead_law(
     a_acc = acc_blend(a_iidm, a_cah_val, cfg.b_comfort_ms2, cfg.cool_factor_c)
     # Outside the blend, which steps across its own branch test. See §8.6.
     a_acc += lead_brake_ff(cfg, eff_dist, v_ego, v_lead, a_ff)
-    a_acc += lead_accel_nudge(cfg, v_ego, v_lead, a_ff)
+    a_acc += lead_accel_nudge(cfg, eff_dist, v_ego, v_lead, a_ff, t_headway)
     if a_acc >= 0.0:
         # Upward only: a close setting closes on its target harder, a far one
         # keeps full pull rather than being throttled by its own smoothness.

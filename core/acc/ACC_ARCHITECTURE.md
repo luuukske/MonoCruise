@@ -806,6 +806,40 @@ the same direction. The `brake-onset` suite is unchanged (peaks −1.92 /
 20 m and below are **not new**: with the relief off those cases trip at
 0.00 s, so the relief delays the trip rather than causing it.
 
+### 8.12 Room gate on the accel nudge
+
+§8.9 shipped without a distance argument, so the nudge pulled exactly as
+hard at 6 m as at 1000 m. `lead_brake_ff` gets its range scaling free from
+`cah`; the nudge is not built from `cah` and inherited none of it.
+
+**The harm metric is how much of a real brake it gives back**, not how
+often it flips a sign. Flipping `−0.006` to `+0.921` is adding pull where
+the law was neutral, which is the design intent. Sweeping four gap levels,
+seven speeds, ten gaps, seven lead speeds and five positive `a_lead`,
+restricted to states already commanding a genuine brake (below −0.30):
+
+| | p90 | p99 | max | states giving back >50% |
+|---|---|---|---|---|
+| no gate | 0.588 | 1.704 | 2.236 | 588 |
+| **0.70 to 1.05** | 0.000 | 0.016 | 0.594 | **1** |
+| 0.60 to 1.00 | 0.000 | 0.121 | 0.876 | 7 |
+| 0.80 to 1.10 | 0.000 | 0.000 | 0.337 | 0 |
+
+514 of those 588 sat under 10 m of gap, so the signature is absolute room,
+not a stopped lead (only 101 had one). The gate is therefore a cos-ramp on
+`s / s_want`, zero at 0.70 and full at 1.05.
+
+**0.70 to 1.05 costs nothing.** Resume to `+0.3` against a lead
+accelerating from the wanted gap is 0.37 s gated and 0.37 s ungated.
+0.80 to 1.10 removes the last state but pushes resume to 0.43 s, which is
+paying feel for a case the tighter band already handles.
+
+The two states the review named are now bit identical to the nudge being
+off: a stopped lead reporting `+1.5` at 4 m stays at −0.447, and 6 m at
+97 km/h stays at −0.561. The design case keeps 96 % of its pull (+0.550
+against +0.575). Brake-onset is untouched, since the nudge is zero for any
+braking lead.
+
 ---
 
 ## 9. Multi-vehicle anticipation

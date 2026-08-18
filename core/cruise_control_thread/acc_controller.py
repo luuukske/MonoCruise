@@ -198,6 +198,8 @@ class ACConfig:
     lead_accel_nudge_max_ms2: float = idm_cah.LEAD_ACCEL_NUDGE_MAX_MS2
     lead_accel_nudge_soft_ms2: float = idm_cah.LEAD_ACCEL_NUDGE_SOFT_MS2
     lead_accel_nudge_zero_ms: float = idm_cah.LEAD_ACCEL_NUDGE_ZERO_MS
+    lead_accel_nudge_room_lo: float = idm_cah.LEAD_ACCEL_NUDGE_ROOM_LO
+    lead_accel_nudge_room_hi: float = idm_cah.LEAD_ACCEL_NUDGE_ROOM_HI
     closing_relief_min: float = idm_cah.CLOSING_RELIEF_MIN
     closing_relief_full_ms: float = idm_cah.CLOSING_RELIEF_FULL_MS
     tau_output_s: float = TAU_OUTPUT_S

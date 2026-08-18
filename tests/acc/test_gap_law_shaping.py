@@ -381,23 +381,35 @@ def test_accel_nudge_is_silent_unless_the_lead_is_accelerating():
     """It must not touch the braking side, which carries the safety argument."""
     cfg = _controller().config
     for a_lead in (0.0, -0.5, -2.0, -8.0):
-        assert lead_accel_nudge(cfg, 22.2, 20.0, a_lead) == 0.0
+        assert lead_accel_nudge(cfg, 60.0, 22.2, 20.0, a_lead, 1.5) == 0.0
 
 
 def test_accel_nudge_is_bounded_and_capped_at_ego_authority():
     cfg = _controller().config
     for a_lead in (0.5, 1.5, 4.0, 20.0):
-        n = lead_accel_nudge(cfg, 22.2, 22.2, a_lead)
+        n = lead_accel_nudge(cfg, 60.0, 22.2, 22.2, a_lead, 1.5)
         assert 0.0 <= n <= cfg.lead_accel_nudge_max_ms2 + 1e-12
-    assert lead_accel_nudge(cfg, 22.2, 22.2, 4.0) == pytest.approx(
-        lead_accel_nudge(cfg, 22.2, 22.2, 20.0)), "must saturate at a_max"
+    assert lead_accel_nudge(cfg, 60.0, 22.2, 22.2, 4.0, 1.5) == pytest.approx(
+        lead_accel_nudge(cfg, 60.0, 22.2, 22.2, 20.0, 1.5)), "must saturate at a_max"
+
+
+def test_accel_nudge_gates_off_without_room():
+    """It pulled as hard at 6 m as at 1000 m, and could cancel a real brake."""
+    cfg = _controller().config
+    v, t_three = 22.2, T_HEADWAY_BY_LEVEL_S[3]
+    s_want = cfg.s0_m + v * t_three
+    room = [lead_accel_nudge(cfg, f * s_want, v, v, 1.0, t_three)
+            for f in (0.3, 0.6, 0.7, 0.85, 1.0, 1.05, 1.5)]
+    assert room == sorted(room), "must ramp with room, not step"
+    assert room[0] == 0.0 and room[2] == 0.0, "no pull when crowding the lead"
+    assert room[-1] > 0.2 and room[-1] == room[-2], "full at and beyond the gap"
 
 
 def test_accel_nudge_gates_off_while_closing():
     """A phantom a_lead must never add pull toward a lead ego is catching."""
     cfg = _controller().config
     v = 22.2
-    closing = [lead_accel_nudge(cfg, v, v - dv, 1.0)
+    closing = [lead_accel_nudge(cfg, 60.0, v, v - dv, 1.0, 1.5)
                for dv in (0.0, 0.5, 1.0, 1.5, 2.0, 4.0)]
     assert closing == sorted(closing, reverse=True)
     assert closing[0] > 0.2
@@ -461,7 +473,7 @@ def test_every_feature_knob_disables_its_feature_at_zero():
     for s, v, v_lead, a_lead in ((37.5, 22.2, 22.2, -4.0), (20.0, 13.9, 10.0, -1.0),
                                  (60.0, 25.0, 27.0, 1.0), (12.0, 8.0, 0.0, 0.2)):
         assert lead_brake_ff(cfg, s, v, v_lead, a_lead) == 0.0
-        assert lead_accel_nudge(cfg, v, v_lead, a_lead) == 0.0
+        assert lead_accel_nudge(cfg, s, v, v_lead, a_lead, 1.5) == 0.0
     for a, b in ((-1.0, -2.0), (0.5, 0.5), (-0.05, 0.0)):
         assert _soft_min(a, b, cfg.lead_law_floor_soft_ms2) == min(a, b)
     for d in (-1.0, -0.2, 0.0, 0.3):
@@ -508,7 +520,7 @@ def test_closing_relief_cannot_relax_past_the_floor():
             a_cah = cah(s=s, v=v, v_lead=v, a_lead=a_lead, a_max=cfg.a_max_ms2)
             a_acc = (_unshaped(ctrl, s, v, v, a_lead, t_three)
                      + lead_brake_ff(cfg, s, v, v, a_lead)
-                     + lead_accel_nudge(cfg, v, v, a_lead))
+                     + lead_accel_nudge(cfg, s, v, v, a_lead, t_three))
             assert ctrl._lead_law(s, v, v, a_lead, t_three) <=                 max(a_acc, a_cah) + 1e-9
 
 
