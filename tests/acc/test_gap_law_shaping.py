@@ -524,6 +524,55 @@ def test_closing_relief_cannot_relax_past_the_floor():
             assert ctrl._lead_law(s, v, v, a_lead, t_three) <=                 max(a_acc, a_cah) + 1e-9
 
 
+def _brake_to_a_halt(lead_decel: float, gap0_m: float = 40.0, v0_ms: float = 22.22):
+    """Lead brakes to a stop. Returns (min effective gap, overlay ticks, peak jerk).
+
+    Below standstill the longitudinal stack holds the truck; ACC only caps, so a
+    plant that integrates min(0, cap) alone can never stop and creeps instead."""
+    previous = Settings.instance().acc_gap_level
+    Settings.instance().acc_gap_level = 3
+    try:
+        ctrl = _controller()
+        cfg = ctrl.config
+        v_ego = v_lead = v0_ms
+        gap, t = gap0_m, 0.0
+        min_gap, trips, peak_jerk, prev = gap0_m, 0, 0.0, None
+        while t < 40.0:
+            ctrl._prev_mono = t
+            raw, _ = _snap(max(gap - cfg.ego_front_offset_m, 0.01), v_lead=v_lead,
+                           a_lead=-lead_decel if v_lead > 0.01 else 0.0)
+            smooth = ctrl._smooth_chain(raw, DT, t)
+            a_raw, emergency = ctrl._compute_command(raw, smooth, v_ego, DT)
+            cap = ctrl._output_filter(ctrl._jerk_limit(a_raw, DT, emergency),
+                                      DT, emergency)
+            trips += int(emergency)
+            if prev is not None:
+                peak_jerk = max(peak_jerk, abs(cap - prev) / DT)
+            prev = cap
+            a = min(0.0, cap)
+            if v_ego < cfg.standstill_speed_ms and a > cfg.standstill_hold_decel_ms2:
+                a = cfg.standstill_hold_decel_ms2
+            v_ego = max(0.0, v_ego + a * DT)
+            v_lead = max(0.0, v_lead - lead_decel * DT)
+            gap += (v_lead - v_ego) * DT
+            min_gap = min(min_gap, gap - cfg.ego_front_offset_m)
+            t += DT
+        return min_gap, trips, peak_jerk
+    finally:
+        Settings.instance().acc_gap_level = previous
+
+
+@pytest.mark.parametrize("lead_decel", [2.0, 4.0, 6.0, 8.0])
+def test_braking_to_a_halt_needs_no_overlay_and_stays_jerk_limited(lead_decel):
+    """HEAD tripped the overlay at lead -6 and -8 and stepped the pedal 20x
+    over the limit. The feedforward removes both. See §8.6."""
+    ctrl = _controller()
+    min_gap, trips, peak_jerk = _brake_to_a_halt(lead_decel)
+    assert trips == 0, "the smooth law should get there without an overlay"
+    assert peak_jerk <= ctrl.config.j_max_ms3 + 1e-6
+    assert min_gap > 3.0, "stopped far too close"
+
+
 def test_acceleration_is_scaled_upward_only():
     """A close setting pulls in harder; a far one keeps full pull, never less."""
     ctrl = _controller()

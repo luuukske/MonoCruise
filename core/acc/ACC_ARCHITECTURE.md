@@ -471,11 +471,22 @@ Why this signal rather than `K_FF · a_lead`, which §8.2 removed:
   lead speed, so a lead braking hard far enough away contributes almost
   nothing without a distance ramp to tune. A scalar on `a_lead` needs one
   and gets it wrong at the edges.
-* **It is bounded.** `FF_MAX` equals the comfort brake, so a spurious
-  `a_lead` from laggy TMP traffic costs at most one comfort brake and can
-  never reach the decel clamp. This bound is the string-stability
-  argument and the jitter argument at once. Pinned by
-  `test_feedforward_is_bounded`.
+* **It is bounded, but read the bound carefully.** `FF_MAX` is 2.0 on the
+  term itself. The term is added to `a_acc` *before* the sign test, so on
+  the decel branch `comfort_gain` multiplies it, and that is clamped at
+  `gap_gain_max` = 1.5. **The effective ceiling at the command is 3.0
+  m/s², not 2.0**, and worst case is −3.000 of extra braking against HEAD
+  at level 1, 25 m/s, 8 m, lead braking −6. An earlier version of this
+  section claimed the term could "never reach the decel clamp"; that is
+  false, it reaches it in 223 sampled states. `test_feedforward_is_bounded`
+  pins the isolated function and by construction cannot catch this.
+
+  The 3.0 is deliberate rather than tolerated. `comfort_gain` exceeds 1
+  only when ego is inside the reference gap, which is exactly where extra
+  authority belongs, and the jitter argument the 2.0 was originally sized
+  for is now carried by the §8.10 filter instead. Reducing it would remove
+  authority from the close-range hard-braking states where the measured
+  effect is to *prevent* overlay trips.
 
 **Applied outside the blend, not inside it.** The blend steps across its
 own branch test (`a_iidm ≥ a_cah`), so a term added on only one side
@@ -516,11 +527,34 @@ stability §5 asks for. Pinned by
 `test_following_a_braking_lead_is_string_stable` and
 `test_a_hard_braking_lead_no_longer_needs_the_ttc_overlay`.
 
-**What this did not fix.** Minimum gap still collapses to 6.0-6.6 m from
-40 m whatever the lead does, and sweeping `FF_SHARE` from 0.35 to 0.80
-does not move it: the buffer is set by the IIDM equilibrium and the
-authority limit, not by the `a_lead` path. Lead decel beyond ~10 m/s²
-still reaches the overlay, correctly.
+**On the "minimum gap collapses to 6 m" claim, withdrawn.** That number
+was the *published* distance, which the controller offsets by
+`ego_front_offset_m` before the law sees it, and it was measured with a
+plant that could not stop: the sim integrated `min(0, cap)`, so once the
+command reached zero the truck held its speed forever and crept. With the
+standstill hold modelled, approach-to-stop from 40 m settles at 3.9 to
+4.4 m of *effective* gap against an `s0` of 5.0. That is roughly a metre
+inside the standstill target, present in HEAD too, and not a collapse.
+
+Measured properly, the feedforward **improves** the stop. Approach from
+40 m, lead braking to a halt, min effective gap / overlay ticks / peak
+jerk:
+
+| lead | HEAD | with the feedforward |
+|---|---|---|
+| −2 | 4.38 / 0 / 2.5 | 4.44 / 0 / 2.5 |
+| −4 | 4.02 / 0 / 2.5 | 4.32 / 0 / 2.5 |
+| −6 | 6.12 / 9 / **59.3** | 4.15 / 0 / **2.5** |
+| −8 | 2.46 / 65 / **30.1** | 3.91 / 0 / **2.5** |
+
+HEAD tripped the overlay on the last two and stepped the pedal at 20x the
+jerk limit. The feedforward removes both trips and holds the command on
+the 2.5 m/s³ limiter throughout.
+
+**Still true and not fixed:** once any overlay does fire, it bypasses the
+jerk limiter and the output filter by design, and that step measures 50 to
+80 m/s³ at tight gaps. It is pre-existing, it is what §10 is for, and it
+is unchanged in kind by any of this.
 
 ### 8.7 Transition smoothness at small lead braking
 
