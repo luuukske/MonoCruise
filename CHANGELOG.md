@@ -12,9 +12,13 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Added
+- **Pick how eagerly cruise control accelerates**: a new Acceleration style setting under Cruise Control offers Efficiency, Normal and Sport. Normal is the default. Efficiency eases off soon after pulling away and stays gentle; Sport uses as much of the engine as your truck and load will give, so on a steep hill it is the truck holding you back rather than the setting.
+
 - **Set how far ACC follows**: there is now a following-distance setting under Adaptive Cruise Control with four steps, from closest to farthest. You can also bind buttons to change it while driving, under the cruise control buttons in the settings. Bind only one and it cycles through all four.
 
 ### Changed
+- **Cruise control pulled away too slowly and pushed too hard at speed**: it used to aim for the same acceleration at 15 km/h as at 85 km/h. It now accelerates noticeably harder from low speed and eases off as you get faster, and it no longer asks for more than your truck and load can actually deliver.
+
 - **ACC follows a little further back by default**: the starting following distance moved up one step.
 - **ACC's following distance setting now sets how relaxed it drives**: a farther setting is calmer about the gap, a closer one stays eager and pulls up to the vehicle ahead sooner, and neither goes slack just because the vehicle ahead is a long way off. A vehicle pulling away from you barely counts any more, since the gap is opening on its own, unless you are already close behind it. The gap you settle at is unchanged on every setting.
 

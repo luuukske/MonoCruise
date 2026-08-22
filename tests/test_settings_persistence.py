@@ -191,3 +191,33 @@ def test_a_failed_write_leaves_the_on_disk_config_untouched(cfg, monkeypatch):
     monkeypatch.setattr(Settings, "_atomic_write", classmethod(lambda cls, payload: _boom(payload)))
     Settings.save(values={"last_game": 1}, force=True)
     assert primary.read_text(encoding="utf-8") == before
+
+
+def test_legacy_accel_ceiling_is_remapped_to_the_safety_rail(cfg):
+    """cc_accel_max_ms2 was the accel ceiling; it is now only a rail above the envelope.
+
+    Leaving the old shipped 1.0 in place would cap every acceleration profile at
+    today's flat value and silently undo the speed-scheduled envelope.
+    """
+    primary, _ = cfg
+    _write(primary, {"cc_accel_max_ms2": 1.0})
+    Settings.load()
+    assert Settings.cc_accel_max_ms2 == 2.5
+
+
+def test_a_deliberately_tuned_accel_ceiling_survives_the_remap(cfg):
+    primary, _ = cfg
+    _write(primary, {"cc_accel_max_ms2": 1.4})
+    Settings.load()
+    assert Settings.cc_accel_max_ms2 == 1.4
+
+
+def test_accel_profile_round_trips_and_rejects_junk(cfg):
+    primary, _ = cfg
+    _write(primary, {"cc_accel_profile": "sport"})
+    Settings.load()
+    assert Settings.cc_accel_profile == "Sport"
+
+    _write(primary, {"cc_accel_profile": "ludicrous"})
+    Settings.load()
+    assert Settings.cc_accel_profile == "Normal"

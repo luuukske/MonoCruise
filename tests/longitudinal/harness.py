@@ -97,6 +97,7 @@ def sending_data(**overrides) -> Data:
         auto_neutral_holding=False,
         user_gas_above_mapper=False,
         hold_active=False,
+        mapper_est_max_accel_ms2=0.0,
     )
     fields.update(overrides)
     return Data(**fields)

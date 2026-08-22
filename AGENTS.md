@@ -118,6 +118,14 @@ Do not reintroduce these without reading the linked README section first:
   - `AccelToPedals` adds `g sin(θ)` (plus rolling and aero) to the bid. CC and the limiter only track speed error.
   - Do not add pitch or grade terms to `CruiseController` or `SpeedLimiter`. A second copy in the PID fights the mapper FF and still waits on speed error if the FF is wrong. Enforced by `tests/invariants/test_source_invariants.py`.
 
+- **The acceleration envelope is a request-side ceiling, never a mapper gas gain.**
+  - `core/longitudinal/accel_envelope.py` caps `CruiseController`'s positive bid by speed and by the truck's estimated capability. ACC inherits it through the orchestrator `min()`, so the gap law is not touched.
+  - Do not move it into `AccelToPedals`. That is a closed loop on measured accel, so an inflated gas gain is integrated back out within seconds, and `PedalCapacityTracker` learns the inflated gain as truck capability.
+  - `HEADROOM_FRAC` must stay a single control constant and must not become a per-profile utilization share. A share was costed and rejected: a 40 t rig at 85 km/h has 0.71 m/s2 at gas=1.0, so a 0.70 share commands 0.50 while today's railed pedal delivers the full 0.71. It makes loaded trucks slower than no envelope at all, which is the complaint the envelope exists to fix. Re-measure with `tools/accel_envelope_probe.py --rig loaded` before touching it.
+  - Normal's `a_launch * v_knee` product is the entire highway tail at `taper_power = 1.0`. It is pinned to the pre-envelope curve so raising the launch never changes behaviour above 35 km/h, and `test_normal_raised_the_launch_without_touching_the_highway_tail` enforces that. Sport's shape is deliberately above any rig's capability, so capability is its only real limiter.
+  - Never apply the envelope to `SpeedLimiter`. Its positive bid caps the user's own pedal via the min-merge, so shaping it throttles a driver flooring it below the cap.
+  - The rise limit is measured against `max(prev_bid, 0)` and is bypassed in neutral. Both are load-bearing: the first stops a negative previous bid holding the command negative as phantom brake, the second stops auto-neutral's 0.25 m/s2 launch gate being delayed at every standstill.
+
 - **New `limiter_*` settings.**
   - `limiter_kp`, `limiter_ki`, `limiter_kd`, `limiter_integral_clamp`, `limiter_accel_min_ms2` in `core/settings.py`. Independent of the CC gains so each can be tuned separately. Defaults match the original CC defaults so behaviour is identical until the user tunes them.
 

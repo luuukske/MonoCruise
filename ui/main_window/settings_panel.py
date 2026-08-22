@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.input_bindings import binding_display_name, migrate_binding, resolve_held
+from core.longitudinal.accel_envelope import PROFILE_LABELS, resolve_profile
 from core.thread_management.registry import registry
 from ui.main_window.consent_overlay import CONSENT_VERSION
 from ui.main_window.constants import (
@@ -586,6 +587,19 @@ class SettingsPanel(QWidget):
         self._row += 1  # advance past the shared label/segmented-control row
         self._update_seg_style(s.cc_mode)
 
+        # Acceleration style. Shapes the CC/ACC accel ceiling by speed; the
+        # limiter never uses it, so the row hides in Speed limiter mode.
+        r_style = self._r(0)
+        new_label(p, r_style, 0, "Acceleration style:")
+        self.opt_accel_style = new_optionmenu(
+            p, self._r(), 1,
+            values=list(PROFILE_LABELS),
+            default=resolve_profile(s.cc_accel_profile).label,
+            callback=lambda v: self._set("cc_accel_profile", v),
+        )
+        self._accel_style_row = r_style
+        self._set_row_visible(r_style, self._is_cruise_mode(s.cc_mode))
+
         # Global speed limiter (empty → None disables both CC clamp and
         # always-on limiter: see AGENTS.md global_speed_limit_kmh).
         self.ent_global_limit, _, _ = self._field_with_subtext(
@@ -792,9 +806,14 @@ class SettingsPanel(QWidget):
     def _set_cruise_mode(self, mode: str) -> None:
         self._set("cc_mode", mode)
         self._update_seg_style(mode)
+        self._set_row_visible(self._accel_style_row, self._is_cruise_mode(mode))
+
+    @staticmethod
+    def _is_cruise_mode(mode: object) -> bool:
+        return mode in ("Cruise control", "ACC")
 
     def _update_seg_style(self, mode: str) -> None:
-        cc_active = mode in ("Cruise control", "ACC")
+        cc_active = self._is_cruise_mode(mode)
         for btn, active in ((self._seg_cc, cc_active), (self._seg_sl, not cc_active)):
             btn.setProperty("active", active)
             style = btn.style()
@@ -1483,6 +1502,11 @@ class SettingsPanel(QWidget):
         self.chk_hold_reset.setChecked(s.long_press_reset)
         self.chk_show_speed.setChecked(s.show_cc_ui)
         self.opt_scaling.setCurrentText(str(s.cc_panel_scaling) if s.cc_panel_scaling else "100%")
+
+        self.opt_accel_style.blockSignals(True)
+        self.opt_accel_style.setCurrentText(resolve_profile(s.cc_accel_profile).label)
+        self.opt_accel_style.blockSignals(False)
+        self._set_row_visible(self._accel_style_row, self._is_cruise_mode(s.cc_mode))
 
         self.chk_acc.blockSignals(True)
         self.chk_acc.setChecked(bool(s.acc_enabled))
