@@ -670,9 +670,11 @@ def _build_vehicle_collision_data(
             v_yaw_rad, abs_v_speed, veh_fwd_x, veh_fwd_z, v_curvature)
 
 
-def _hmi_sound_step(warn: bool, prev: bool) -> tuple[str, bool]:
-    """Gate AEB sound to two consecutive warn ticks; soft-stop on any end."""
-    if warn:
+def _hmi_sound_step(warn: bool, brake: bool, prev: bool) -> tuple[str, bool]:
+    """Gate AEB sound to two consecutive cue ticks; soft-stop on any end."""
+    # Brake is part of the cue: a latched engagement keeps braking after the
+    # threat metric collapses, and warn does not follow the latch (README §7).
+    if warn or brake:
         return ("start" if prev else "none", True)
     return ("stop", False)
 
@@ -2231,7 +2233,7 @@ class AEBThread(BaseThread):
         )
 
         action, self._hmi_sound_prev = _hmi_sound_step(
-            aeb_warn, self._hmi_sound_prev,
+            aeb_warn, aeb_brake, self._hmi_sound_prev,
         )
         if action == "start":
             self._sound_handler.start_warning()

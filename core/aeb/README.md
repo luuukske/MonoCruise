@@ -449,7 +449,7 @@ Read from other threads (acquire `data._lock` first):
 
 ```python
 aeb = registry.get_thread("aeb_thread").data
-aeb.AEB_warn                       # bool: UI/sound cue (warn fraction or TTB)
+aeb.AEB_warn                       # bool: UI cue (warn fraction or TTB); sound is warn OR brake
 aeb.AEB_brake                      # bool: engagement latched and target > 0
 aeb.AEB_target_decel_ms2           # float: rate-limited commanded decel (m/s²)
 aeb.AEB_ff_decel_ms2               # float: always-on additive FF decel (m/s²); 0 when no threat
@@ -741,12 +741,29 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    hold and `warn_suppressed` carries past it. Without that carry the hold
    reinstated the cue for up to 0.3 s after every warn, and since each
    legitimate re-warn re-arms the hold, a driver braking through a decaying
-   threat heard near-continuous beeping. Sound follows a two-tick gate:
-   `start_warning` only after two consecutive warn ticks, so a pulse the
-   100 ms CC-panel poll never sampled cannot beep. Any warn end (threat gone
-   or user-braking suppression) uses soft `stop_warning()`: finish the
-   current clip plus `_AEB_WARNING_STOP_EXTRA_REPLAYS`.
+   threat heard near-continuous beeping. Sound follows a two-tick gate on the
+   HMI cue, and the cue is `AEB_warn OR AEB_brake`, not warn alone:
+   `start_warning` only after two consecutive cue ticks, so a pulse the
+   100 ms CC-panel poll never sampled cannot beep. Any cue end (threat gone,
+   user-braking suppression, or brake released) uses soft `stop_warning()`:
+   finish the current clip plus `_AEB_WARNING_STOP_EXTRA_REPLAYS`.
    `stop_warning(hard=True)` is teardown only.
+
+   The brake half of the cue is load-bearing, and dropping it is how AEB
+   brakes silently. `self._engaged` sits *inside* `if warn_raw:`, so an
+   engagement latch can only upgrade an existing raw warn, it can never source
+   one. A threat that spikes, engages, then leaves the corridor takes
+   `effective_required` below `warn_threshold` on the very next tick while the
+   latch keeps braking, so warn is a one-tick spike and the two-tick gate eats
+   it. The 0.3 s hold does not rescue it either: the hold re-asserts warn only
+   on a state *downgrade*, and the state stays BRAKE throughout. Clip
+   `0a2dbd74` is the reference case: 42 brake ticks at 84 km/h, 2 warn ticks
+   (the two engagement edges), no beep. 37 of 561 braking clips in the corpus
+   never reached two consecutive warn ticks. Binding the cue to `AEB_brake`
+   leaves `AEB_warn` itself untouched, so no corpus verdict moves, and it also
+   means an engagement outbeats the user-braking suppression by construction,
+   which is what "AEB engagement is the emergency override" above already
+   promises.
 8. Head-on targets: modelled as also braking at `full_brake_decel (7.8 m/s²)`
    inside the collision pipeline (unchanged).
 
