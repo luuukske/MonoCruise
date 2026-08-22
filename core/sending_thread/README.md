@@ -39,6 +39,48 @@ Candidate inverts the fitted brake curve; pedal³ weighting; underperformance dr
 deep settled AEB braking. Candidates reject above `_BRAKE_CANDIDATE_MAX_FRACTION` (1.35) of
 the load baseline.
 
+**Gas**: `update_accel` every tick that the pedal is above zero, learning the shape-function
+anchor and the per-gear ratio in log space. Same acceptance discipline as the brake side, and
+for the same reason.
+
+### Gear-shift poisoning (the post-shift pedal step)
+
+For a long time CC/ACC stepped the gas pedal up about 5-10% for a few seconds after every
+gear change, at unchanged demand. Repeated fixes to the mapper's clutch freeze, blend ramp
+and capacity glide never removed it, because the fault was never in `accel_to_pedals.py`.
+
+Measured over 36 h of debug logs, 1602 clean steady-demand upshifts:
+
+- The driveline takes about **1.5 s** to restore torque. True accel goes to about
+  **-0.7 m/s²** during the shift and stays below its pre-shift level for seconds after.
+- The old gear-dwell gate was **0.30 s**, so it opened while accel was still deeply
+  depressed. **60%** of ticks in the 0.3-2.0 s recovery window passed every remaining gate,
+  because the gas pedal ramps slowly enough during recovery to read as settled.
+- Those samples carry pedal³ weight of **0.514 against 0.329** in steady cruise (the pedal is
+  high exactly then), and `_UNDERPERFORM_MULT` doubles the rate again because a recovery
+  sample is by definition below expectation.
+- So the tracker attributed the torque interruption to the truck being weak, dropped the
+  anchor, and `gas = combined / max_a_use` rose. That is the pedal step.
+
+Two gates close it, and both are needed. Replaying the real learner over the same 36 h:
+today 3.433, dwell alone 3.910, settle gate alone 4.111, **both 4.778**, against a reference
+of 4.708 built from pristine samples only. Both together land within 1.5% of that reference.
+
+- `_GEAR_DWELL_S` **1.50 s**, sized on the measured recovery rather than the differentiator
+  glitch it originally guarded. `_LOW_GEAR_DWELL_S` stays shorter (0.30 s) so brief low-gear
+  holds during a launch can still learn; the settle gate covers them.
+- An **accel-settled gate** mirroring the decel-settled gate: the accel signal itself has to
+  have stopped moving, not just the pedal. A call-stream gap restarts both windows, which is
+  what handles a shift through neutral (gas is cut to zero there, so `update_accel` stops
+  being called and the window must not straddle the hole).
+
+The candidate is a window mean on both sides for the same reason the brake side is.
+
+Consequence to expect on first drive after this: the persisted anchor is currently poisoned
+low, so it re-learns upward over tens of minutes rather than jumping. Steady-state gas will
+fall as it does (the replay predicts roughly 28%), and `fast_i`, which sat permanently at
+-0.2 to -0.5 absorbing the over-generous feedforward, should relax toward zero.
+
 **What is learned is `brake_scale`, a dimensionless correction on the baseline, not an
 absolute m/s².** Capacity is a property of the rig, and the rig changes the moment you back
 under a trailer: braked axles roughly double while the EMA carries the old number. At the

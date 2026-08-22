@@ -54,9 +54,12 @@ _LEGACY_SEED_GEAR: int = 8           # legacy max_accel_ms2 was mostly learned i
 _ACCEL_ANCHOR_MIN_MS2: float = 0.5
 _ACCEL_ANCHOR_MAX_MS2: float = 8.0
 
-# Gear-dwell gate. After a gear change the speed differentiator
-_GEAR_DWELL_S: float = 0.30
-_LOW_GEAR_DWELL_S: float = 0.10
+# Gear-dwell gate. After a gear change the driveline is still restoring
+# torque, so accel is depressed for reasons that have nothing to do with gas.
+# Measured recovery is about 1.5 s; the old 0.30 s opened mid-recovery and let
+# the anchor learn the sag as weakness. See `core/sending_thread/README.md`.
+_GEAR_DWELL_S: float = 1.50
+_LOW_GEAR_DWELL_S: float = 0.30
 _LOW_GEAR_DWELL_MAX_GEAR: int = 3
 
 # Gas settled-pedal gate: skip learning while the gas pedal is still moving.
@@ -74,6 +77,13 @@ _BRAKE_STEP_THRESHOLD: float = 0.05
 _BRAKE_STEP_GUARD_S: float = 0.25
 _BRAKE_PEDAL_HISTORY_LIMIT: int = 64
 _BRAKE_PEDAL_SMOOTH_TAU_S: float = 0.10
+
+# Accel settled gate: the gas counterpart of the decel gate below. A settled
+# pedal is not enough, the accel signal itself has to have stopped moving.
+_ACCEL_SETTLE_WINDOW_S: float = 0.50
+_ACCEL_SETTLE_ABS_MS2: float = 0.15
+_ACCEL_SETTLE_FRAC: float = 0.10
+_ACCEL_HISTORY_LIMIT: int = 64
 
 # Decel settled gate: the decel signal trails the pedal through the game's
 _DECEL_SETTLE_WINDOW_S: float = 0.40
@@ -122,6 +132,10 @@ class PedalCapacityTracker:
         self._gas_pedal_history: Deque[tuple[float, float]] = deque(
             maxlen=_GAS_PEDAL_HISTORY_LIMIT
         )
+        self._accel_history: Deque[tuple[float, float]] = deque(
+            maxlen=_ACCEL_HISTORY_LIMIT
+        )
+        self._last_accel_call_mono: float | None = None
         self._last_gas_step_mono: float = -math.inf
         # Gear-change tracking for the dwell gate.
         self._prev_gear: int = 0
@@ -324,6 +338,14 @@ class PedalCapacityTracker:
             self._prev_gear = g_now
             self._last_gear_change_mono = now
 
+        # A gap in the call stream means the pedal was released or the gearbox
+        # went through neutral, so both windows restart rather than straddle it.
+        last_call = self._last_accel_call_mono
+        self._last_accel_call_mono = now
+        if last_call is None or now - last_call > _ACCEL_SETTLE_WINDOW_S:
+            self._gas_pedal_history.clear()
+            self._accel_history.clear()
+
         history = self._gas_pedal_history
         if history:
             prev_pedal = history[-1][1]
@@ -334,6 +356,13 @@ class PedalCapacityTracker:
         cutoff = now - _GAS_SETTLE_WINDOW_S
         while len(history) > 2 and history[1][0] <= cutoff:
             history.popleft()
+
+        corrected_accel = measured_accel_ms2 + road_load_ms2
+        a_hist = self._accel_history
+        a_hist.append((now, corrected_accel))
+        a_cutoff = now - _ACCEL_SETTLE_WINDOW_S
+        while len(a_hist) > 2 and a_hist[1][0] <= a_cutoff:
+            a_hist.popleft()
 
         if game_clutch > _CLUTCH_ACTIVE_THRESHOLD:
             self._last_clutch_mono = now
@@ -364,12 +393,29 @@ class PedalCapacityTracker:
                 or abs(gas_output - oldest_in_window) > _GAS_SETTLE_TOLERANCE):
             return
 
-        corrected_accel = measured_accel_ms2 + road_load_ms2
-        if corrected_accel < _MIN_ACCEL_MS2:
+        # Accel settled: a gain read while the accel signal is still moving
+        # measures the disturbance, not the truck.
+        if a_hist[-1][0] - a_hist[0][0] < _ACCEL_SETTLE_WINDOW_S:
+            return
+        accel_values = [a for _, a in a_hist]
+        a_max = max(accel_values)
+        if a_max - min(accel_values) > max(
+            _ACCEL_SETTLE_ABS_MS2, _ACCEL_SETTLE_FRAC * abs(a_max)
+        ):
             return
 
+        # Window means on both sides, so telemetry ripple averages out instead
+        # of picking whichever tick the gate happened to open on.
+        mean_accel = sum(accel_values) / len(accel_values)
+        if mean_accel < _MIN_ACCEL_MS2:
+            return
+        pedal_values = [p for _, p in history]
+        mean_pedal = max(
+            sum(pedal_values) / len(pedal_values), _ACCEL_PEDAL_FLOOR
+        )
+
         # Per-pedal gain at current mass, then mass-normalized.
-        candidate = corrected_accel / max(gas_output, _ACCEL_PEDAL_FLOOR)
+        candidate = mean_accel / mean_pedal
         candidate *= weight_factor(total_mass_kg, has_trailer)
 
         # Log-space linear regression on the model
@@ -389,7 +435,7 @@ class PedalCapacityTracker:
         log_anchor = math.log(self._accel_anchor_gain_ms2)
         residual = log_m - (log_anchor + x * log_ratio)
 
-        weight = gas_output ** _WEIGHT_POWER
+        weight = mean_pedal ** _WEIGHT_POWER
         lr_anchor = _ACCEL_BASE_ALPHA * weight
         lr_ratio = _RATIO_BASE_ALPHA * weight
         if residual < 0.0:

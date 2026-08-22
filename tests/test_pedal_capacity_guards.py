@@ -381,3 +381,97 @@ def test_cargo_needs_a_trailer_to_count(monkeypatch):
     hooked = compute_estimated_mass_kg(10_000.0, 29_000.0, 800.0, trailer_count=2)
     assert bobtail < 12_000.0, f"bobtail read {bobtail / 1000:.1f} t"
     assert hooked - bobtail == pytest.approx(29_000.0 + 14_000.0)
+
+
+# Gas-side capacity learning: the gear-shift poisoning fix.
+
+MASS = 20_000.0
+ANCHOR_GEAR = 6
+
+
+def _accel_tracker(anchor: float = 3.4) -> pc.PedalCapacityTracker:
+    t = pc.PedalCapacityTracker()
+    t._accel_anchor_gain_ms2 = anchor
+    t._accel_ratio_step = 1.27
+    return t
+
+
+def _feed_accel(t, clk, gas, accel, ticks=60, dt=DT, gear=ANCHOR_GEAR, speed=SPEED):
+    for _ in range(ticks):
+        clk.t += dt
+        t.update_accel(gas, accel, speed, 0.0, 0.0, gear, MASS, False,
+                       road_load_ms2=0.0)
+
+
+def test_steady_gas_cruise_still_teaches_the_anchor(clock):
+    """The gates must not starve normal learning: a settled cruise still moves it."""
+    t = _accel_tracker(anchor=3.4)
+    _feed_accel(t, clock, gas=0.7, accel=3.0, ticks=90)
+    assert t._accel_anchor_gain_ms2 > 3.4, "settled cruise taught nothing"
+
+
+def test_post_shift_recovery_is_not_learned_as_weakness(clock):
+    """The bug: after a shift the driveline is still restoring torque, so accel is
+    depressed for reasons unrelated to gas. Learning that sag drops the anchor,
+    which raises gas = combined / max_a_use, which is the ~5-10% pedal step
+    users saw after every gear change.
+    """
+    t = _accel_tracker(anchor=3.4)
+    before = t._accel_anchor_gain_ms2
+    # Settle in the old gear, then shift and ramp accel back up over ~1.5 s
+    # with the pedal held steady, exactly the measured recovery shape.
+    _feed_accel(t, clock, gas=0.7, accel=3.0, ticks=60, gear=ANCHOR_GEAR)
+    steady = t._accel_anchor_gain_ms2
+    for i in range(45):
+        clock.t += DT
+        accel = -0.7 + 3.7 * (i + 1) / 45.0
+        t.update_accel(0.7, max(0.0, accel), SPEED, 0.0, 0.0, ANCHOR_GEAR + 1,
+                       MASS, False, road_load_ms2=0.0)
+    assert t._accel_anchor_gain_ms2 == pytest.approx(steady), (
+        "anchor moved during the post-shift recovery"
+    )
+    assert t._accel_anchor_gain_ms2 >= before
+
+
+def test_gear_dwell_covers_the_measured_recovery(clock):
+    """Recovery was measured at about 1.5 s; the dwell has to outlast it."""
+    assert pc._GEAR_DWELL_S >= 1.4
+
+
+def test_moving_accel_is_rejected_even_with_a_settled_pedal(clock):
+    """A settled pedal is not enough on its own, which is why the old gate leaked:
+    60% of recovery ticks passed it because the gas ramp was slow."""
+    t = _accel_tracker(anchor=3.4)
+    _feed_accel(t, clock, gas=0.7, accel=3.0, ticks=60)
+    settled = t._accel_anchor_gain_ms2
+    for i in range(40):
+        clock.t += DT
+        t.update_accel(0.7, 1.0 + 2.5 * i / 40.0, SPEED, 0.0, 0.0, ANCHOR_GEAR,
+                       MASS, False, road_load_ms2=0.0)
+    assert t._accel_anchor_gain_ms2 == pytest.approx(settled), (
+        "learned from an accel signal that was still ramping"
+    )
+
+
+def test_a_gap_in_the_call_stream_restarts_the_window(clock):
+    """Gas is cut to zero in neutral, so update_accel stops being called mid-shift.
+    The window must restart rather than straddle the gap and look settled."""
+    t = _accel_tracker(anchor=3.4)
+    _feed_accel(t, clock, gas=0.7, accel=3.0, ticks=60)
+    after_cruise = t._accel_anchor_gain_ms2
+    clock.t += 2.0                      # neutral: no calls at all
+    clock.t += DT
+    t.update_accel(0.7, 0.2, SPEED, 0.0, 0.0, ANCHOR_GEAR, MASS, False,
+                   road_load_ms2=0.0)
+    assert t._accel_anchor_gain_ms2 == pytest.approx(after_cruise), (
+        "first sample after the gap was learned immediately"
+    )
+
+
+def test_a_depressed_sample_would_have_dropped_the_anchor_without_the_gates(clock):
+    """Pins the mechanism: the same sag, fed with the gates bypassed, drops the
+    anchor hard. This is what the fix prevents."""
+    t = _accel_tracker(anchor=3.4)
+    # Settled but genuinely weak: passes every gate, and should be learned.
+    _feed_accel(t, clock, gas=0.7, accel=0.7, ticks=90)
+    assert t._accel_anchor_gain_ms2 < 3.4, "a settled weak sample must still teach"

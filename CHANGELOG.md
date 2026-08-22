@@ -12,9 +12,12 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Added
-- **Pick how eagerly cruise control accelerates**: a new Acceleration style setting under Cruise Control offers Efficiency, Normal and Sport. Normal is the default. Efficiency eases off soon after pulling away and stays gentle; Sport uses as much of the engine as your truck and load will give, so on a steep hill it is the truck holding you back rather than the setting.
+- **Pick how eagerly cruise control accelerates**: a new Acceleration style setting under Cruise Control offers Efficiency, Normal and Sport. Normal is the default. Efficiency eases off soon after pulling away and stays gentle; Sport uses way more engine power to pull away faster.
 
 - **Set how far ACC follows**: there is now a following-distance setting under Adaptive Cruise Control with four steps, from closest to farthest. You can also bind buttons to change it while driving, under the cruise control buttons in the settings. Bind only one and it cycles through all four.
+
+### Fixed
+- **Throttle crept up after every gear change**: cruise control nudged the accelerator up a few percent for a few seconds after each shift, even though nothing about the road or your set speed had changed. It was misreading the brief pause in pulling power during a shift as the truck being weaker than it is, and had been quietly under-rating every truck because of it.
 
 ### Changed
 - **Cruise control pulled away too slowly and pushed too hard at speed**: it used to aim for the same acceleration at 15 km/h as at 85 km/h. It now accelerates noticeably harder from low speed and eases off as you get faster, and it no longer asks for more than your truck and load can actually deliver.
@@ -24,7 +27,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ### Fixed
 - **AEB braked without making a sound**: when a vehicle cut in and then moved away again, AEB kept braking but the alert never played, so the first thing you noticed was the truck slowing on its own. The alert now sounds for as long as AEB is braking.
-- **ACC braked far too late and far too hard for stopped vehicles**: it would coast in with a light brake and then slam on hard at the last moment. It now starts slowing early and stops with roughly half the braking force, no jolt. In a test where the stopped vehicle only came into view at 110 m, ACC used to hit it.
+- **ACC braked too late and far too hard for stopped vehicles**: it would coast in with a light brake and then slam on hard at the last moment. It now starts slowing early and stops with roughly half the braking force, no jolt. In a test where the stopped vehicle only came into view at 110 m, ACC used to hit it.
 - **Wheel and stalk buttons could not be assigned with the game closed**: clicking a cruise control button in the settings and pressing a button on your wheel, stalk or gamepad did nothing unless the game was running, while keyboard keys assigned fine. Assignment now works with the game closed, and buttons you already assigned show up as pressed there too.
 - **AEB braking for traffic under a bridge**: MonoCruise used to see cars under bridges as on your road due to a straight-ahead check. It now follows the road's shape and checks each vehicle's tilt to tell if it's actually on your route. Cars under bridges within 30 m are now ignored.
 - **ACC losing the vehicle ahead on hills at speed**: that same straight line went badly wrong over crests and dips, and the faster you went the further ahead your lead was, so it fell outside the slack and ACC let go of it. Above 85 km/h it was dropping 4 % of the traffic it should have been following, and over 11 % on steep grades. Both are now effectively zero.
