@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.0-preview.20] - 2026-08-22
 ### Added
 - **Pick how eagerly cruise control accelerates**: a new Acceleration style setting under Cruise Control offers Efficiency, Normal and Sport. Normal is the default. Efficiency eases off soon after pulling away and stays gentle; Sport uses way more engine power to pull away faster.
 
