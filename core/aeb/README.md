@@ -488,28 +488,33 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    - Non-worsens targets set `ttb = unbraked_ttc` and contribute to
      `best_ttb`, `best_closing_distance`, `best_v_closing` (all from the
      lowest-`ttb` target).
-3. Required decel for the worst target:
+3. Required decel, **per target, aggregated by `max`** (`core/aeb/clearance.py`).
+   The demand is the smallest constant ego decel that keeps ego's front behind
+   every body it would otherwise occupy the same space as. See
+   "Clearance-based demand" below for the derivation.
    ```
-   d_rel             = closing_distance - stop_buffer - v_closing * stop_buffer_response_s
-   required_decel    = v_closing² / (2 * d_rel)              # while d_rel > 0
-   # d_rel <= 0 fallback (_required_decel_two_frame): the relative frame
-   # degenerates when v_closing * ttc undershoots stop_buffer at near-zero
-   # closing speed (hit exists only via the target's predicted decel: ego
-   # creeping behind a slowing lead, clip 5a6050f5). Braking can never do
-   # better than stopping ego before the contact point, so switch to the
-   # consistent ego frame; imminent contacts are owned by the TTB slam.
-   required_decel    = ego_speed² / (2 * max(ego_travel_to_hit - stop_buffer
-                                             - ego_speed * stop_buffer_response_s, 1e-3))
+   # per occupancy sample k of one target, with lag = stop_buffer_response_s:
+   D_k        = s_near(t_k) - ego_front_to_surface - stop_buffer   (- latched pad)
+   a_roll     = 2 * (v0 * t_k - D_k) / (t_k - lag)²      # still rolling at t_k
+   a_stop     = v0² / (2 * (D_k - v0 * lag))             # stopped before t_k
+   a_k        = a_roll if a_roll * (t_k - lag) <= v0 else a_stop
+   required_target   = max over k of a_k                 # INF when unavoidable
+   required_decel    = max over targets of required_target
    slope_accel       = g · sin(ego_pitch_rad)         # +ve = uphill (radar convention)
    downhill_offset   = max(−slope_accel, 0)           # gravity stealing brake force
    effective_max     = ego_decel_frac · capacity_estimate − downhill_offset
    capability_decel  = capacity_estimate − downhill_offset
    effective_required= required_decel + downhill_offset
    ```
-   **The build-up reserve is latched at engagement.** Before engagement the
-   `v_closing * response_s` term is live, because the entry decision has to
+   `max` over targets, not "the lowest-`ttb` target's demand". A crosser can now
+   report a low demand honestly, and with the old single-target selection it
+   would have masked a slower-`ttb` lead behind it. `best_ttb` stays a separate
+   aggregate for the TTB slam and the displays.
+   **The build-up reserve is latched at engagement.** Before engagement the lag
+   term is live, because the entry decision has to
    account for build-up. Once engaged it becomes a fixed distance
-   (`_engage_pad_dist_m`), cleared on disarm. Re-charging it every tick was
+   (`_engage_pad_dist_m`, seeded from the rate the binding constraint actually
+   closes at) and `lag` goes to zero, cleared on disarm. Re-charging it every tick was
    the "brakes hard then fades out" complaint: the reserve shrinks with speed,
    so it hands metres back through the stop and the demand decays with it.
    Replayed on clip e9fb04c9 the commanded decel fell 10.68 to 0.41 m/s²
@@ -766,6 +771,153 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    promises.
 8. Head-on targets: modelled as also braking at `full_brake_decel (7.8 m/s²)`
    inside the collision pipeline (unchanged).
+
+### Clearance-based demand
+
+`core/aeb/clearance.py`. Replaces `_required_decel_two_frame` and
+`_codir_required_cap` for **every** target class; both functions survive only as
+the `clearance_required_enabled = False` A/B path and as the fallback when a
+target produces no corridor occupancy at all.
+
+**The problem it fixes.** The relative frame drove `|v_ego − v_target|` to zero
+over the closing distance. For a 90° crosser that vector is
+`sqrt(v_ego² + v_t²)`, most of it lateral, and brakes cannot remove a lateral
+component: ego at 80 km/h against a crosser at 90 reads ~120 km/h of "closing
+speed" it must somehow shed. The `d_rel <= 0` fallback was worse in kind, not
+just degree: it explicitly required ego to come to a full stop at the contact
+point. Meanwhile the one model that credited target motion,
+`_codir_required_cap`, returned `_INF` for anything with `fwd_dot < 0.7`. So a
+crosser ego could simply arrive behind was priced as a wall, and AEB engaged
+far earlier than the situation deserved.
+
+**The model.** Braking cannot make ego arrive *earlier*, so the only escape
+braking buys is *arrive behind*. Work in ego arc-length `s`: the arc's shape
+comes from curvature, not speed, so it is fixed independently of the
+deceleration being solved for. Sample the target capsule over the window, keep
+the times it sits inside ego's corridor, and take `s_near(t)` as the smallest
+arc-length any of its body points reaches. Ego's front must stay behind that
+for every such `t`. Each sample yields a closed-form minimum decel (the two
+branches in step 3 above, which meet continuously at `D = v0 · (t + lag) / 2`),
+and the target's demand is their maximum.
+
+**Why this is one model and not a crossing special case.** The same expression
+reproduces what the old code computed by hand:
+
+| Geometry | `s_near(t)` | Result |
+|---|---|---|
+| Steady lead in lane | `gap + v_lead · t`, linear | peaks at `t* = 2·gap/dv` and evaluates to exactly `dv² / (2 · d_rel)` |
+| Braking lead | follows the lead's decel profile | lands on the `r_stop` branch, and reads **higher** where the binding moment falls between the lead's start and its stop |
+| Head-on | shrinks; the arc already carries `full_brake_decel` | the honest requirement, and unavoidable geometries return `INF` as before |
+| Crosser | ends when it vacates | demand is what it takes to be behind the conflict *while it is occupied*, which is the question that was never asked |
+| Stopped / turning-in target | never ends inside the window | last sample binds: stop-short, unchanged |
+
+`test_clearance.py` pins the first three as equivalences. The braking-lead case
+is the one deliberate correction: `max(r_move, r_stop)` sampled two points of a
+continuous curve and could under-read a hard-braking lead by about 30%.
+
+**Horizon.** Collision detection keeps `dynamic_horizon` exactly, so
+`colliding_ids`, `unbraked_ttc` and every filter verdict are untouched. The
+solver samples its own copies of the target arcs (`dataclasses.replace` with a
+longer `horizon`; only the `position_at_dist` clamp moves, the curve is the
+same) over `clearance_samples` dense to `dynamic_horizon` plus
+`clearance_far_samples` sparse to `clearance_horizon_s`. A target still in the
+corridor at the window edge has its `s_near` linearly extrapolated to the
+closed-form peak `t* = lag + 2·(C − dv·lag)/dv`, which is what recovers
+`dv²/(2·(gap − dv·lag))` for a distant slow-closing lead instead of truncating
+its demand to zero. That extrapolation is the same constant-velocity assumption
+the relative frame always made, and it is bounded to 60 s past the window.
+
+**Cost.** ~120 µs per colliding target worst case against a 33.3 ms tick, and it
+only runs for targets that already produced a hit. Two implementation choices
+carry that and are pinned by `test_the_solver_stays_cheap_enough_for_the_30_hz_loop`:
+the lateral test runs *before* the arc-length one so `project_to_ego_arc` and
+its `atan2` are only paid for points already inside the corridor (213 µs → 62 µs
+for an identical result), and each arc is coarse-rejected on its body centre
+before its five body points are touched.
+
+**Fail-closed properties.** Every degenerate input resolves toward braking, not
+away from it: a target that never clears gives stop-short; an already-overlapping
+geometry gives `INF` (clamped to `_REQUIRED_CEIL_MS2` so logs and clip records
+stay finite); no occupancy at all falls back to the old relative frame; and an
+over-long predicted occupancy, which is what a bad target-speed estimate
+produces, brakes *earlier*, not later. The TTB slam, `geom_threat_latched`, the
+latched-distance hold and the decel floor are all untouched.
+
+**Corpus, 2026-08-24** (`clearance_required_enabled` off vs on). Two stores:
+`score_once.py` only reads the local one, so the contributed store has to be
+scored explicitly (`ClipStore(contributed_clip_root())`) or its clips are
+silently absent from any A/B.
+
+| | local off | local on | contrib off | contrib on |
+|---|---|---|---|---|
+| Total cost (lower is better) | −41.93 | **−385.42** | 33.07 | **0.84** |
+| True positives | 226 | 240 | 14 | 15 |
+| False negatives | 46 | 30 | 2 | 1 |
+| Late | 7 | 9 | 1 | 1 |
+| False positives | 18 | 22 | 5 | 5 |
+| False warns | 9 | 14 | 1 | 1 |
+
+Scoring is deterministic: two identical runs agree on every clip. Numbers from
+different sessions are not comparable, though, because the label set moves.
+
+The gain is not the crossing work. It is the braking-lead correction and the
+`max` aggregation, both of which raise the demand on genuine in-lane threats
+that used to sit under the bar: 19 clips move the right way, and 10 of them
+never see more than one colliding target at once, so the aggregation cannot
+explain those. The crossing work shows up as *later* entry on events that
+already engaged, which the corpus cannot price because its labels are windows,
+not timings; `tests/aeb/test_crossing_clearance.py` measures that instead
+(0.17 s to 0.50 s later on four crossing geometries, none dropped).
+
+**The one new false positive is not a crosser.** `fa53208a` (sev 1) is ego
+overtaking a slower vehicle about a lane and a half over: `fwd_dot` 1.00, 10 m
+ahead, 4.6 to 5.6 m lateral, 18 km/h of closing. Its lateral gap is shrinking at
+about 2.4 m/s, and the binding sample sits 1.4 s out where that extrapolates to
+roughly a metre, so the model reads a cut-in and refuses to be alongside when it
+lands. The demand is arithmetically right (`s_near` about 32.9 m against 36 m of
+freewheel, with 1.0 s of braking left after the lag); whether the geometry is
+real depends on whether that lateral convergence is the target merging or ego's
+own arc bending under hard acceleration. Note the guard that would normally own
+this class does not reach it: `codir_adjacent_veto_axial_ms` needs axial closing
+under 2.0 m/s and this is 5.0.
+
+The price is 4 false positives and 5 false warns, plus lost lead on two clips.
+
+**The lost-lead class, and why the engage bar is not the lever.** `3a47b621`
+(sev 5, TMP) keeps its true positive but its quality falls 0.81 to 0.19: an
+oblique oncoming convergence, 45 m ahead and 28 m left at `fwd_dot` −0.47,
+where the relative frame demanded 18.1 m/s² and the clearance model demands
+6.7. Sweeping `aeb_engage_frac` from 0.90 down to **0.70 does not move it at
+all** (brake at 8.64 s, quality 0.19, at every value), because the engagement
+aggregate excludes engage-vetoed ids and the demand is not what is waiting. The
+gate is `aeb_engage_confirm_oblique_s`: at 0.40 the brake lands at 8.64, at 0.30
+8.55, at 0.20 8.47, at 0.0 8.28. Priced over the corpus, buying that lead back
+costs false positives steeply and nothing else:
+
+| `aeb_engage_confirm_oblique_s` | local cost | TP | FN | **FP** | `3a47b621` |
+|---|---|---|---|---|---|
+| **0.40 (shipped)** | −385.42 | 240 | 30 | **22** | −1.90 |
+| 0.30 | −378.46 | 240 | 30 | **26** | −3.04 |
+| 0.25 | −377.81 | 240 | 30 | **28** | −3.60 |
+| 0.20 | −390.60 | 241 | 29 | **33** | −4.04 |
+
+Eleven extra unwanted brake interventions to buy one true positive and half of
+one clip's lead. Total cost barely moves because the cost model prices FN at
+10x FP, which is exactly where that model stops matching what a driver feels.
+**Leave it at 0.40.**
+
+`2202afb9` was the other one (sev 3, TP to FN) and is now labelled `ignore`, so
+it no longer scores. The diagnosis is still worth keeping: a hard-braking lead
+90 m ahead around a bend, relative frame 16.3 m/s², clearance model 5.8. By hand
+(lead stopping from 14.2 m/s at about 10 m/s², ego at 23 m/s) it is roughly 4
+plus the reserve, so **5.8 is the correct number and 16.3 was inflated
+threefold** by the lateral part of `v_closing` on the bend. Do not "fix" either
+clip by re-inflating the demand.
+
+**Side effect worth knowing.** The demand layer now declines the measured
+clear-pass oncoming case on geometry alone, reaching the same verdict the LOS
+veto was added for (`test_the_clearance_model_alone_declines_the_measured_clear_pass`).
+The vetoes still run and still scope to engagement entry.
 
 ### LOS-rate engagement veto (CBDR)
 

@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Changed
+- **Emergency braking grabbed too early for traffic crossing ahead of you**: it used to work out how to come to a full stop at the point where your paths meet, even when the other vehicle would be long gone by the time you got there. It now works out how fast you can safely go through that point instead, and only brakes once passing behind them stops being possible.
 
 ## [1.1.0-preview.20] - 2026-08-22
 ### Added

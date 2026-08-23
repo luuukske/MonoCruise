@@ -31,6 +31,10 @@ class EvalTick:
     colliding_ids: set = field(default_factory=set)
     suppressed_ids: set = field(default_factory=set)
     braking_worsens_ids: set = field(default_factory=set)
+    clearance_required_ms2: float = 0.0
+    clearance_v_pass_ms: float = 0.0
+    clearance_t_bind_s: float = 0.0
+    clearance_clears_ids: set = field(default_factory=set)
 
 
 class _NoSound:
@@ -147,6 +151,10 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
             colliding_ids=set(snap_out.colliding_ids),
             suppressed_ids=set(snap_out.suppressed_ids),
             braking_worsens_ids=set(snap_out.braking_worsens_ids),
+            clearance_required_ms2=float(snap_out.clearance_required_ms2),
+            clearance_v_pass_ms=float(snap_out.clearance_v_pass_ms),
+            clearance_t_bind_s=float(snap_out.clearance_t_bind_s),
+            clearance_clears_ids=set(snap_out.clearance_clears_ids),
         ))
     return out
 

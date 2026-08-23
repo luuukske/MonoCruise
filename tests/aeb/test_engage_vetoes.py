@@ -49,6 +49,7 @@ _OLD = replace(
     extrap_veto_enabled=False,
     aeb_engage_confirm_oblique_s=0.20,
     los_veto_min_range_m=30.0,
+    clearance_required_enabled=False,
 )
 
 
@@ -120,6 +121,19 @@ def test_oncoming_that_measurably_clears_does_not_engage():
     assert not any(e.aeb_brake for e in run_headless(clip)), (
         "a target measured to pass 3 m clear must not trigger a brake"
     )
+
+
+def test_the_clearance_model_alone_declines_the_measured_clear_pass():
+    """The demand layer reaches the same verdict as the vetoes, from geometry.
+
+    With every engagement-entry veto disabled, the relative-frame formula peaked
+    around 19 m/s2 on this pass and engaged. The clearance model knows the bodies
+    go by 3 m apart, so it never asks for more than the truck can comfortably
+    give and the vetoes are not what is holding the brake off here.
+    """
+    clip = _bend_clip(_CLEAR_OFFSET)
+    no_vetoes = replace(_OLD, clearance_required_enabled=True)
+    assert not any(e.aeb_brake for e in run_headless(clip, cal=no_vetoes))
 
 
 def test_vetoes_leave_engagement_alone_on_clear_pass():

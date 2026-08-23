@@ -17,7 +17,8 @@ from dataclasses import replace
 import pytest
 
 from core.aeb.calibration import DEFAULT as CAL
-from core.aeb.thread import AEBThread, _required_decel_two_frame
+from core.aeb.clearance import min_decel_to_clear, sample_times
+from core.aeb.thread import AEBThread
 from core.sending_thread.accel_to_pedals import brake_curve_fraction
 from core.sending_thread.thread import _AEB_MEAS_TAU_S, AEBDecelController
 
@@ -64,6 +65,27 @@ class _Plant:
         return self.decel
 
 
+def required_against_stationary(gap: float, v: float, cal, pad: float,
+                                pad_m: float | None) -> float:
+    """Shipped clearance demand for an obstacle sitting `gap` ahead of ego's front.
+
+    A parked obstacle holds one arc-length forever, so its occupancy profile is
+    a constant and `front_to_surface` is already folded into `gap`.
+    """
+    if v <= 0.0:
+        return 0.0
+    times = sample_times(3.0, cal.clearance_horizon_s,
+                         cal.clearance_samples, cal.clearance_far_samples)
+    profile = [(t, gap) for t in times]
+    res = min_decel_to_clear(
+        v, profile, False, cal,
+        lag_s=(0.0 if pad_m is not None else pad),
+        pad_m=(pad_m or 0.0),
+        front_to_surface=0.0,
+    )
+    return min(res.required_ms2, 1000.0) if res is not None else 0.0
+
+
 def stop_against_stationary(
     v0_kmh: float, capacity: float, estimate: float, has_trailer: bool,
     plant_tau: float = PLANT_TAU_MEDIAN, start_gap: float = 500.0,
@@ -87,12 +109,8 @@ def stop_against_stationary(
     reserve = _Reserve(None, 0.0, engaged=False)
 
     while now < 90.0 and gap > 0.0:
-        required = (
-            _required_decel_two_frame(
-                gap, v, gap, v, CAL, response_s=pad,
-                response_dist_m=reserve.released(now, CAL),
-            )
-            if v > 0.0 else 0.0
+        required = required_against_stationary(
+            gap, v, CAL, pad, reserve.released(now, CAL),
         ) + downhill
         if not engaged:
             if required >= engage_bar and v * 3.6 >= CAL.aeb_min_engage_speed_kmh:

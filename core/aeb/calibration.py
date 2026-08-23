@@ -215,6 +215,17 @@ class AEBCalibration:
     # than a lane, so its lane stops being evidence (README lane confidence).
     lane_confidence_range_m: float = 30.0
 
+    # Clearance-based required decel (README continuous-decel). False restores
+    # the pre-clearance relative-frame path and is how the corpus is A/B'd.
+    clearance_required_enabled: bool = True
+    clearance_horizon_s: float = 5.0
+    clearance_samples: int = 24
+    clearance_far_samples: int = 8
+    clearance_refine_steps: int = 4
+    # Margin past the frame a crosser vacates the corridor on, so ego does not
+    # arrive on its tail. Only applies when occupancy ends inside the window.
+    clearance_clear_margin_s: float = 0.30
+
     # Follow-threat: kinematic hold + lane/converge gate; README follow-threat section.
     follow_threat_window_s: float = 0.6
     follow_threat_min_span_s: float = 0.45

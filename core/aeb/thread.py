@@ -23,6 +23,7 @@ from core.radar.traffic import (
 )
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT
 from core.aeb.confirm import OccupancyConfirm
+from core.aeb.clearance import ClearanceResult, clearance_required
 from core.aeb.lane_frame import project_to_ego_arc, classify, Lane
 from core.aeb.capture import get_recorder, note_intervention
 from core.aeb.clip_schema import AEBTickRecord, AEBWarmState, ConsumedContext, LiveAEB
@@ -49,6 +50,9 @@ _AEB_WARNING_STOP_EXTRA_REPLAYS = 1
 # Constants
 
 _INF: float = 1e9
+# Unavoidable-geometry demand. Saturates every threshold without polluting logs
+# and clip records with an infinity the schema cannot round-trip.
+_REQUIRED_CEIL_MS2: float = 1000.0
 _GRAVITY_MS2: float = 9.81
 
 # Brake-capacity floor used when sending_thread has not yet published an
@@ -234,6 +238,13 @@ class AEBSnapshot:
     los_vetoed_ids: set = field(default_factory=set)
     # Superset: LOS veto plus the extrapolation vetoes (README engagement vetoes).
     engage_vetoed_ids: set = field(default_factory=set)
+
+    # Clearance model: what the binding target demands, the speed ego could pass
+    # its conflict at, and the ids whose occupancy ends inside the window.
+    clearance_required_ms2: float = 0.0
+    clearance_v_pass_ms: float = 0.0
+    clearance_t_bind_s: float = 0.0
+    clearance_clears_ids: set = field(default_factory=set)
 
     aeb_state: AEBState = AEBState.STANDBY
     time_to_collision: float = _INF
@@ -1351,6 +1362,15 @@ class AEBThread(BaseThread):
         best_v_closing_engage: float = 0.0
         best_ego_travel_engage: float = _INF
         best_codir_cap_engage: float = _INF
+        # Required decel is per target and aggregated by max, so the most
+        # demanding threat drives the command even if it is not the soonest.
+        best_required: float = 0.0
+        best_required_engage: float = 0.0
+        best_required_pad_rate: float = 0.0
+        best_required_vid: int | None = None
+        best_clearance: ClearanceResult | None = None
+        clearance_memo: dict[int, ClearanceResult | None] = {}
+        clearance_clears_ids: set[int] = set()
         # Ego travel to hit uses capsule tip offset from arc reference.
         ego_front_to_surface = ego_cap_fwd + ego_hw
         # certain_geom / nearcertain_geom drive tiered confirm (README tiered entry).
@@ -1753,28 +1773,70 @@ class AEBThread(BaseThread):
 
                     ttb = unbraked_ttc
 
+                    # required_decel gap: min(v_rel*ttc, ego travel to hit); see README.
+                    hit_dist = math.hypot(
+                        unbraked_hit[1] - ego_front_x,
+                        unbraked_hit[2] - ego_front_z,
+                    )
+                    closing_distance_t = min(
+                        closing_unbraked * unbraked_ttc, hit_dist,
+                    )
+                    ego_travel_t = max(hit_dist - ego_front_to_surface, 0.0)
+                    codir_cap_t = _codir_required_cap(
+                        base_target_arc, fwd_dot, unbraked_ttc,
+                        ego_travel_t, closing_unbraked, ego_speed, cal,
+                        response_s=load_response_s,
+                        response_dist_m=engaged_pad_m,
+                    )
+
+                    # Clearance demand, once per vehicle across its arcs: the
+                    # min decel that keeps ego behind every body it occupies with.
+                    if cal.clearance_required_enabled:
+                        if v.id in clearance_memo:
+                            cres = clearance_memo[v.id]
+                        else:
+                            cres = clearance_required(
+                                ego_arc, all_target_arcs, ego_speed, cal,
+                                lag_s=(0.0 if engaged_pad_m is not None
+                                       else load_response_s),
+                                pad_m=(engaged_pad_m or 0.0),
+                                front_to_surface=ego_front_to_surface,
+                                near_horizon_s=dynamic_horizon,
+                            )
+                            clearance_memo[v.id] = cres
+                            if cres is not None and cres.clears:
+                                clearance_clears_ids.add(v.id)
+                    else:
+                        cres = None
+
+                    if cres is not None:
+                        required_t = min(cres.required_ms2, _REQUIRED_CEIL_MS2)
+                        pad_rate_t = cres.pad_rate_ms
+                    else:
+                        # Fail closed: no usable occupancy, keep the old frame.
+                        required_t = _required_decel_two_frame(
+                            closing_distance_t, closing_unbraked, ego_travel_t,
+                            ego_speed, cal, codir_cap_t,
+                            response_s=load_response_s,
+                            response_dist_m=engaged_pad_m,
+                        )
+                        pad_rate_t = closing_unbraked
+
+                    if required_t > best_required:
+                        best_required = required_t
+                        best_required_pad_rate = pad_rate_t
+                        best_required_vid = v.id
+                        best_clearance = cres
                     if ttb < best_ttb:
                         best_ttb = ttb
                         best_threat_vid = v.id
                         best_hit_x = unbraked_hit[1]
                         best_hit_z = unbraked_hit[2]
-                        # required_decel gap: min(v_rel*ttc, ego travel to hit); see README.
-                        hit_dist = math.hypot(
-                            unbraked_hit[1] - ego_front_x,
-                            unbraked_hit[2] - ego_front_z,
-                        )
                         best_hit_dist = hit_dist
-                        best_closing_distance = min(
-                            closing_unbraked * unbraked_ttc, hit_dist,
-                        )
+                        best_closing_distance = closing_distance_t
                         best_v_closing = closing_unbraked
-                        best_ego_travel = max(hit_dist - ego_front_to_surface, 0.0)
-                        best_codir_cap = _codir_required_cap(
-                            base_target_arc, fwd_dot, unbraked_ttc,
-                            best_ego_travel, closing_unbraked, ego_speed, cal,
-                            response_s=load_response_s,
-                            response_dist_m=engaged_pad_m,
-                        )
+                        best_ego_travel = ego_travel_t
+                        best_codir_cap = codir_cap_t
 
                     # LOS-rate veto (engagement entry only): once per vehicle
                     # per frame, memoized across its arcs.
@@ -1802,26 +1864,15 @@ class AEBThread(BaseThread):
                         vetoed = True
                     if vetoed:
                         engage_vetoed_ids.add(v.id)
-                    if not vetoed and ttb < best_ttb_engage:
-                        best_ttb_engage = ttb
-                        # Same tighter-of-two-frames distance as
-                        # best_closing_distance above.
-                        hit_dist_e = math.hypot(
-                            unbraked_hit[1] - ego_front_x,
-                            unbraked_hit[2] - ego_front_z,
-                        )
-                        best_closing_distance_engage = min(
-                            closing_unbraked * unbraked_ttc, hit_dist_e,
-                        )
-                        best_v_closing_engage = closing_unbraked
-                        best_ego_travel_engage = max(
-                            hit_dist_e - ego_front_to_surface, 0.0,
-                        )
-                        best_codir_cap_engage = _codir_required_cap(
-                            base_target_arc, fwd_dot, unbraked_ttc,
-                            best_ego_travel_engage, closing_unbraked,
-                            ego_speed, cal, response_s=load_response_s,
-                        )
+                    if not vetoed:
+                        if required_t > best_required_engage:
+                            best_required_engage = required_t
+                        if ttb < best_ttb_engage:
+                            best_ttb_engage = ttb
+                            best_closing_distance_engage = closing_distance_t
+                            best_v_closing_engage = closing_unbraked
+                            best_ego_travel_engage = ego_travel_t
+                            best_codir_cap_engage = codir_cap_t
                     found_hit = True
 
                 vehicle_dicts.append(veh_dict)
@@ -1859,13 +1910,9 @@ class AEBThread(BaseThread):
         # in here hedged twice (README engagement thresholds).
         capability_decel = max(0.1, capacity_estimate - downhill_offset)
 
-        required_decel = 0.0
-        if run_collision and best_closing_distance < _INF and best_v_closing > 0.0:
-            required_decel = _required_decel_two_frame(
-                best_closing_distance, best_v_closing, best_ego_travel,
-                ego_speed, cal, best_codir_cap, response_s=load_response_s,
-                response_dist_m=engaged_pad_m,
-            )
+        # Per-target demands are aggregated by max in the collision loop, so the
+        # most demanding threat drives the command, not the soonest one.
+        required_decel = best_required if run_collision else 0.0
 
         # Slope modifies a threat-derived demand, it never sources one: gravity
         # alone must not warn or feed FF (README warn/FF contract).
@@ -1955,14 +2002,7 @@ class AEBThread(BaseThread):
         # Engagement entry evaluates only LOS-eligible targets. When no veto
         # fired this frame these equal the full aggregates and behaviour is
         # identical to the unvetoed pipeline.
-        required_decel_engage = 0.0
-        if (run_collision and best_closing_distance_engage < _INF
-                and best_v_closing_engage > 0.0):
-            required_decel_engage = _required_decel_two_frame(
-                best_closing_distance_engage, best_v_closing_engage,
-                best_ego_travel_engage, ego_speed, cal,
-                best_codir_cap_engage, response_s=load_response_s,
-            )
+        required_decel_engage = best_required_engage if run_collision else 0.0
         effective_required_engage = required_decel_engage + downhill_offset
         brake_ttb_engage_active = (
             run_collision
@@ -2002,9 +2042,13 @@ class AEBThread(BaseThread):
                 )
                 if certain or self._engage_confirm.confirmed(now_mono):
                     self._engaged = True
-                    if best_v_closing > 0.0 and best_v_closing < _INF:
+                    # Latch the build-up reserve on the rate the binding
+                    # constraint actually closes at (README section 7).
+                    pad_rate = (best_required_pad_rate if best_required_vid is not None
+                                else best_v_closing)
+                    if 0.0 < pad_rate < _INF:
                         self._engage_pad_dist_m = _response_dist(
-                            best_v_closing, cal, load_response_s,
+                            pad_rate, cal, load_response_s,
                         )
                         self._engage_pad_at_mono = now_mono
 
@@ -2223,6 +2267,14 @@ class AEBThread(BaseThread):
             oncoming_evasion_filtered_ids=oncoming_evasion_filtered_ids,
             los_vetoed_ids=los_vetoed_ids,
             engage_vetoed_ids=engage_vetoed_ids,
+            clearance_required_ms2=(
+                min(best_clearance.required_ms2, _REQUIRED_CEIL_MS2)
+                if best_clearance is not None else 0.0),
+            clearance_v_pass_ms=(
+                best_clearance.v_pass_ms if best_clearance is not None else 0.0),
+            clearance_t_bind_s=(
+                best_clearance.t_bind_s if best_clearance is not None else 0.0),
+            clearance_clears_ids=clearance_clears_ids,
             aeb_state=new_state, time_to_collision=display_ttc,
             time_to_brake=time_to_brake,
             hit_x=best_hit_x, hit_z=best_hit_z,
@@ -2301,6 +2353,8 @@ class AEBThread(BaseThread):
                 target_published=target_published,
                 colliding_ids=colliding_ids,
                 response_s=load_response_s,
+                clearance=best_clearance,
+                clearance_vid=best_required_vid,
             )
 
     def _log_gap_debug(
@@ -2343,6 +2397,8 @@ class AEBThread(BaseThread):
         target_published: float,
         colliding_ids: set[int],
         response_s: float,
+        clearance: ClearanceResult | None = None,
+        clearance_vid: int | None = None,
     ) -> None:
         """INFO dump of why AEB thinks a stop gap remains (debug mode only)."""
         engage_edge = self._engaged and not self._gap_debug_was_engaged
@@ -2441,6 +2497,8 @@ class AEBThread(BaseThread):
             "  closing_dist=%.3f hit_dist=%.3f ego_travel=%.3f "
             "ego_front_to_surface=%.3f (cap_fwd+hw) v_close=%.2f\n"
             "  d_rel=%.3f d_ego=%.3f resp_term=%.3f codir_cap=%.2f\n"
+            "  clearance vid=%s req=%.2f s_bind=%.2f t_bind=%.2f "
+            "v_pass=%.2f clears=%s n=%d\n"
             "  ttc=%.3f ttb=%.3f req=%.2f req_engage=%.2f "
             "eff_req=%.2f thr_engage=%.2f max=%.2f\n"
             "  flags slam=%s slam_eng=%s certain=%s "
@@ -2465,6 +2523,13 @@ class AEBThread(BaseThread):
             d_ego,
             resp,
             best_codir_cap if best_codir_cap < _INF else -1.0,
+            clearance_vid if clearance_vid is not None else -1,
+            min(clearance.required_ms2, _REQUIRED_CEIL_MS2) if clearance else -1.0,
+            clearance.s_bind_m if clearance else -1.0,
+            clearance.t_bind_s if clearance else -1.0,
+            clearance.v_pass_ms if clearance else -1.0,
+            clearance.clears if clearance else False,
+            clearance.n_samples if clearance else 0,
             best_unbraked_ttc if best_unbraked_ttc < _INF else -1.0,
             best_ttb if best_ttb < _INF else -1.0,
             required_decel,
