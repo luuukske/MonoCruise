@@ -1,6 +1,8 @@
-﻿<a href="https://sourceforge.net/p/monocruise/"><img alt="Download MonoCruise" src="https://sourceforge.net/sflogo.php?type=18&amp;group_id=3904914" width=150></a>
+<a href="https://sourceforge.net/p/monocruise/"><img alt="Download MonoCruise" src="https://sourceforge.net/sflogo.php?type=18&amp;group_id=3904914" width=150></a>
 [![Download MonoCruise](https://img.shields.io/sourceforge/dw/monocruise.svg)](https://sourceforge.net/projects/monocruise/files/latest/download)
 [![Download MonoCruise](https://img.shields.io/sourceforge/dt/monocruise.svg)](https://sourceforge.net/projects/monocruise/files/latest/download)
+
+## Visit the official site for accurate and up-to-date showcases and information: https://ld-tech.org/projects/monocruise/
 
 > [!WARNING]
 > v1.1.0 is a major architecture rewrite and is still being stabilized.
