@@ -36,10 +36,12 @@ class VisualizationBar(QWidget):
             Qt.FramelessWindowHint
             | Qt.WindowStaysOnTopHint
             | Qt.Tool
+            | Qt.WindowDoesNotAcceptFocus
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_NoSystemBackground)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setWindowOpacity(0.8)
 
         self._update_screen_geometry()
@@ -194,8 +196,6 @@ class VisualizationBar(QWidget):
         elif close_bar:
             gas_output = 0.0
             brake_output = 0.0
-
-        self.raise_()
 
         average = 10  # fixed; ACC could use higher value for extra smoothing (see comment above)
         self.temp_gasval = (gas_output + self.temp_gasval * average) / (average + 1)

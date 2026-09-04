@@ -246,6 +246,17 @@ so the old `pedal * nominal` under-predicted by a fifth and read grip that much 
 its three `Settings` flags exist. The model it references is now correct, but the warning
 does not run, so fixing it changes no behaviour until something calls `update()`.
 
+## Visualization bar (`visualization_bar.py`)
+
+A 3 px always-on-top `Qt.Tool` strip along the bottom of the primary screen. Created on
+the Qt main thread via `create_visualization_bar()`. It reads `aforward` / `abackward`
+and flashes on `em_stop` / `AEB_warn`.
+
+It must not call `raise_()` from its animation timer. `WindowStaysOnTopHint` already
+keeps it above other applications; a per-frame raise fights `cc_panel` wherever they
+overlap and can freeze Qt on Windows when the main window is minimised. The bar is
+`WA_ShowWithoutActivating` and `WindowDoesNotAcceptFocus` for the same reason.
+
 ## Main pedal thread
 
 See `core/main_pedal_thread/README.md` for joystick, OPD, em_stop, and button capture.

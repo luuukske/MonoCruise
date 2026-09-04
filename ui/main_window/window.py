@@ -510,8 +510,9 @@ class MonoCruiseWindow(QMainWindow):
 
         if should_show:
             self._cc_panel.ensure_on_screen()
-            self._cc_panel.show()
-        else:
+            if not self._cc_panel.is_visible():
+                self._cc_panel.show()
+        elif self._cc_panel.is_visible():
             self._cc_panel.hide()
 
     # Overrides

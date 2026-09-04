@@ -163,6 +163,7 @@ class _PanelWidget(QWidget):
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         p = self._p
         self.setFixedSize(p._panel_w, p._panel_h)
         if p._start_x is not None and p._start_y is not None:
@@ -172,7 +173,6 @@ class _PanelWidget(QWidget):
 
     def _on_show(self):
         self.show()
-        self.raise_()
 
     def _on_hide(self):
         self.hide()
@@ -304,7 +304,6 @@ class _PanelWidget(QWidget):
             self._start_lead_anim(new_lead_target)
 
         self.update()
-        self.raise_()
 
     # AEB blink
 
@@ -1779,8 +1778,12 @@ class cc_panel:
                 self._coalesce_armed = True
                 self._widget._flush_coalesced_sig.emit()
 
+    def is_visible(self) -> bool:
+        """True if the panel widget is currently shown. Qt main thread only."""
+        return self._widget.isVisible()
+
     def show(self):
-        """Show the panel and bring it to the front."""
+        """Show the panel. WindowStaysOnTopHint keeps it above other apps."""
         self._widget._show_sig.emit()
 
     def ensure_on_screen(self) -> None:

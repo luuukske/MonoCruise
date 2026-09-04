@@ -55,8 +55,9 @@ All methods below are safe to call from any thread **unless noted otherwise**.
   - Coalesced: safe to invoke on every loop iteration; pending keys merge until the next GUI flush.
 
 - **Visibility / lifecycle**
-  - `show()` / `hide()`
+  - `show()` / `hide()` / `is_visible()` (`is_visible()` is Qt main thread only)
   - `stop()` closes the window and stops the panel (intended for shutdown).
+  - `show()` does not `raise_()`. `WindowStaysOnTopHint` keeps the panel above other apps; calling `raise_()` on a timer fights the live pedal bar and can freeze Qt when the main window is minimised.
 
 - **Position / appearance**
   - `move(x, y)`
@@ -132,6 +133,7 @@ panel.update(AEB_warn=False)  # blink may continue briefly (cooldown)
 
 - **Don’t block the GUI thread**
   - Keep updates small; do heavy work in worker threads and only publish the final UI state through `update()`.
+  - The panel is `WA_ShowWithoutActivating` so `show()` cannot restore a minimised main window. The 100 ms main-window poll only calls `show()` when the panel is hidden.
 
 ## ACC distance lines and vehicle cutout
 
