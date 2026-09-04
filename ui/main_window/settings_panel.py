@@ -1299,11 +1299,7 @@ class SettingsPanel(QWidget):
         )
 
     def _do_reinstall_sdk(self) -> None:
-        from core.sdk_installer import (
-            SUPPORTED_GAME_VERSION,
-            GameApplyResult,
-            start_reinstall,
-        )
+        from core.sdk_installer import GameApplyResult, start_reinstall
 
         # SDK worker callback; PopupWindow.emit is thread-safe onto the GUI thread.
         def _on_done(results: list["GameApplyResult"]) -> None:
@@ -1317,15 +1313,21 @@ class SettingsPanel(QWidget):
                 return
             unsupported = [r for r in results if r.unsupported]
             if unsupported:
-                games = ", ".join(r.game_type.upper() for r in unsupported)
+                detail = "; ".join(
+                    f"{r.game_type.upper()}: {r.unsupported_reason}" for r in unsupported
+                )
                 PopupWindow.emit(
                     "Unsupported game version",
-                    f"{games} {SUPPORTED_GAME_VERSION} is not supported yet.",
+                    f"{detail}. Adaptive cruise control and emergency braking will "
+                    f"not see other vehicles until a matching plugin is available.",
                     "e",
-                    duration_ms=8000,
+                    duration_ms=12000,
                 )
+            # One game can be unsupported while the other installs fine.
+            rest = [r for r in results if not r.unsupported]
+            if not rest:
                 return
-            failed = [r for r in results if not r.success]
+            failed = [r for r in rest if not r.success]
             if failed:
                 games = ", ".join(r.game_type.upper() for r in failed)
                 PopupWindow.emit(
@@ -1335,7 +1337,7 @@ class SettingsPanel(QWidget):
                     duration_ms=7000,
                 )
             else:
-                games = ", ".join(r.game_type.upper() for r in results)
+                games = ", ".join(r.game_type.upper() for r in rest)
                 PopupWindow.emit(
                     "SDK reinstalled",
                     f"All plugins were reinstalled for {games}. Restart the game "

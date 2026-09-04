@@ -14,6 +14,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ### Changed
 - **Emergency braking grabbed too early for traffic crossing ahead of you**: it used to work out how to come to a full stop at the point where your paths meet, even when the other vehicle would be long gone by the time you got there. It now works out how fast you can safely go through that point instead, and only brakes once passing behind them stops being possible.
 
+### Fixed
+- **ACC and AEB saw no traffic at all after a game update**: MonoCruise installed the game plugin built for one fixed game version, so on a newer game such as the 1.61 open beta it loaded but reported no vehicles at all, with nothing on screen to say so. It now installs the plugin for the game version you actually have, and warns you plainly when there is none for it yet instead of quietly installing the wrong one.
+
 ## [1.1.0-preview.20] - 2026-08-22
 ### Added
 - **Pick how eagerly cruise control accelerates**: a new Acceleration style setting under Cruise Control offers Efficiency, Normal and Sport. Normal is the default. Efficiency eases off soon after pulling away and stays gentle; Sport uses way more engine power to pull away faster.

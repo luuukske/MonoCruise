@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import re
 import string
@@ -152,6 +153,92 @@ def find_game_installations(game_type: str) -> list[Path]:
         if validate_game_installation(candidate, game_type):
             valid.append(candidate)
     return valid
+
+
+class _FixedFileInfo(ctypes.Structure):
+    """Head of VS_FIXEDFILEINFO, up to the fields carrying the file version."""
+
+    _fields_ = [
+        ("dwSignature", ctypes.c_uint32),
+        ("dwStrucVersion", ctypes.c_uint32),
+        ("dwFileVersionMS", ctypes.c_uint32),
+        ("dwFileVersionLS", ctypes.c_uint32),
+        ("dwProductVersionMS", ctypes.c_uint32),
+        ("dwProductVersionLS", ctypes.c_uint32),
+    ]
+
+
+_VS_FFI_SIGNATURE = 0xFEEF04BD
+
+
+def _exe_file_version(path: Path) -> tuple[int, int, int, int] | None:
+    """Four-part file version from a Windows executable's version resource."""
+    if not _IS_WINDOWS:
+        return None
+    try:
+        version_dll = ctypes.WinDLL("version")
+        version_dll.GetFileVersionInfoSizeW.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        version_dll.GetFileVersionInfoSizeW.restype = ctypes.c_uint32
+        version_dll.GetFileVersionInfoW.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        version_dll.GetFileVersionInfoW.restype = ctypes.c_int
+        version_dll.VerQueryValueW.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_wchar_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        version_dll.VerQueryValueW.restype = ctypes.c_int
+
+        name = str(path)
+        size = version_dll.GetFileVersionInfoSizeW(name, None)
+        if not size:
+            return None
+        buffer = ctypes.create_string_buffer(size)
+        if not version_dll.GetFileVersionInfoW(name, 0, size, buffer):
+            return None
+        block = ctypes.c_void_p()
+        length = ctypes.c_uint32()
+        if not version_dll.VerQueryValueW(buffer, "\\", ctypes.byref(block), ctypes.byref(length)):
+            return None
+        if not block.value or length.value < ctypes.sizeof(_FixedFileInfo):
+            return None
+        info = ctypes.cast(block, ctypes.POINTER(_FixedFileInfo)).contents
+        if info.dwSignature != _VS_FFI_SIGNATURE:
+            return None
+        return (
+            info.dwFileVersionMS >> 16,
+            info.dwFileVersionMS & 0xFFFF,
+            info.dwFileVersionLS >> 16,
+            info.dwFileVersionLS & 0xFFFF,
+        )
+    except (OSError, ValueError, AttributeError):
+        log.debug("could not read a version resource", exc_info=True)
+        return None
+
+
+def detect_game_version(game_path: Path, game_type: str) -> str | None:
+    """Engine version ("1.60") this install reports, or None if unreadable.
+
+    The plugin is built against one engine version, so this is what decides
+    which upstream SDK folder to ask for. See README.md.
+    """
+    config = GAME_CONFIG.get(game_type)
+    if not config or not game_path:
+        return None
+    parts = _exe_file_version(game_path / "bin" / "win_x64" / config["exe_name"])
+    if parts is None:
+        log.info("could not read the %s game version from its executable", game_type)
+        return None
+    log.info("%s reports game version %d.%d.%d.%d", game_type, *parts)
+    return f"{parts[0]}.{parts[1]}"
 
 
 def get_plugins_dir(game_path: Path) -> Path:

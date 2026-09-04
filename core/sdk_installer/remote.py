@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +16,7 @@ log = logging.getLogger("sdk")
 _OWNER = "ETS2LA"
 _REPO = "ETS2LA"
 _SUBDIR = "Windows"
+_VERSIONS_PATH = "Assets/SDKs"
 _REQUEST_TIMEOUT = 20  # seconds
 # GitHub requires a User-Agent; a descriptive one also keeps the traffic
 # obviously legitimate rather than looking like an anonymous downloader.
@@ -26,7 +28,35 @@ class SdkSourceError(Exception):
 
 
 class SdkVersionUnsupported(SdkSourceError):
-    """The requested game version has no SDK folder in the repository yet."""
+    """The requested game version has no SDK folder in the repository.
+
+    Either direction: a version too new to be published yet, or an old one
+    upstream has since pruned.
+    """
+
+
+def version_key(version: str) -> tuple[int, ...]:
+    """Sortable key for a dotted version, or () when it is not numeric."""
+    parts: list[int] = []
+    for chunk in version.split("."):
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            return ()
+    return tuple(parts)
+
+
+def unsupported_reason(version: str, published: Sequence[str]) -> str:
+    """Plain reason a game version has no plugin, in whichever direction."""
+    key = version_key(version)
+    keys = [k for k in (version_key(p) for p in published) if k]
+    if not key or not keys:
+        return f"no game plugin is published for game version {version}"
+    if key > max(keys):
+        return f"game version {version} is newer than any published game plugin"
+    if key < min(keys):
+        return f"the game plugin for game version {version} is no longer published"
+    return f"no game plugin is published for game version {version}"
 
 
 def git_blob_sha(data: bytes) -> str:
@@ -86,7 +116,7 @@ class SdkSource:
         # limit, so callers can tell "not supported yet" from "couldn't ask".
         if response.status_code == 404:
             raise SdkVersionUnsupported(
-                f"SDK version {self.version} is not published in the repository"
+                f"no game plugin is published for game version {self.version}"
             )
         if response.status_code != 200:
             raise SdkSourceError(
@@ -99,7 +129,9 @@ class SdkSource:
             raise SdkSourceError("GitHub returned an unreadable response") from exc
 
         if not isinstance(entries, list):
-            raise SdkVersionUnsupported(f"SDK version {self.version} not found in the repository")
+            raise SdkVersionUnsupported(
+                f"no game plugin folder for game version {self.version} in the repository"
+            )
 
         listing: dict[str, RemoteFile] = {}
         for entry in entries:
@@ -114,6 +146,34 @@ class SdkSource:
 
         self._listing = listing
         return listing
+
+    def list_versions(self) -> list[str]:
+        """Game versions published upstream, oldest first. Empty when unknown.
+
+        Only consulted to explain a version that has no folder, so the happy
+        path still costs exactly one API call.
+        """
+        url = f"https://api.github.com/repos/{self.owner}/{self.repo}/contents/{_VERSIONS_PATH}"
+        try:
+            response = requests.get(
+                url,
+                headers=self._headers("application/vnd.github+json"),
+                timeout=_REQUEST_TIMEOUT,
+            )
+            if response.status_code != 200:
+                return []
+            entries = response.json()
+        except (requests.RequestException, ValueError):
+            log.debug("could not list the published SDK versions", exc_info=True)
+            return []
+        if not isinstance(entries, list):
+            return []
+        names = [
+            entry.get("name")
+            for entry in entries
+            if isinstance(entry, dict) and entry.get("type") == "dir"
+        ]
+        return sorted((n for n in names if n and version_key(n)), key=version_key)
 
     def download(self, remote: RemoteFile, dest: Path) -> None:
         """Download to dest via temp file; git-blob SHA must match remote."""

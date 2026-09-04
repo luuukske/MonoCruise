@@ -3,6 +3,7 @@
 from .game_paths import (
     GAME_TYPES,
     close_game,
+    detect_game_version,
     find_game_installations,
     get_plugins_dir,
     is_game_running,
@@ -10,10 +11,10 @@ from .game_paths import (
 )
 from .manager import (
     COURTESY_FILES,
+    DEFAULT_GAME_VERSION,
     DLL_FILES,
     FORCE_REFETCH,
     LEGACY_FILES,
-    SUPPORTED_GAME_VERSION,
     GameApplyResult,
     GameSdkState,
     ManagedFileState,
@@ -24,20 +25,21 @@ from .manager import (
     start_boot_check,
     start_reinstall,
 )
-from .remote import SdkSource, SdkSourceError, SdkVersionUnsupported
+from .remote import SdkSource, SdkSourceError, SdkVersionUnsupported, unsupported_reason
 
 __all__ = [
     "GAME_TYPES",
     "close_game",
+    "detect_game_version",
     "find_game_installations",
     "get_plugins_dir",
     "is_game_running",
     "is_steam_installed",
     "COURTESY_FILES",
+    "DEFAULT_GAME_VERSION",
     "DLL_FILES",
     "FORCE_REFETCH",
     "LEGACY_FILES",
-    "SUPPORTED_GAME_VERSION",
     "GameApplyResult",
     "GameSdkState",
     "ManagedFileState",
@@ -50,4 +52,5 @@ __all__ = [
     "SdkSource",
     "SdkSourceError",
     "SdkVersionUnsupported",
+    "unsupported_reason",
 ]

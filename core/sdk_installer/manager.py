@@ -17,6 +17,7 @@ from core.version import __version__
 from .game_paths import (
     GAME_TYPES,
     close_game,
+    detect_game_version,
     find_game_installations,
     get_plugins_dir,
     is_game_running,
@@ -28,12 +29,14 @@ from .remote import (
     SdkSourceError,
     SdkVersionUnsupported,
     git_blob_sha_of,
+    unsupported_reason,
 )
 
 log = logging.getLogger("sdk")
 
-# Plugin targets this game engine version (Assets/SDKs/<ver> upstream).
-SUPPORTED_GAME_VERSION = "1.60"
+# Only used when an install's own version cannot be read. The version that
+# actually decides which plugin to fetch comes from the game executable.
+DEFAULT_GAME_VERSION = "1.60"
 
 # Flip to True in a build that must re-fetch the plugin even when the DLLs are
 # already installed. See the module docstring.
@@ -59,6 +62,7 @@ _DISABLED_SUFFIX = ".monocruise-disabled"
 
 _STATE_FILE = "sdk_state.json"
 _CACHE_DIRNAME = "sdk_cache"
+_MANIFEST_FILE = "manifest.json"
 
 
 def _marker_name(version: str) -> str:
@@ -90,6 +94,16 @@ class GameSdkState:
     files: list[ManagedFileState]
     # Superseded plugins found in plugins_dir; detected locally, no remote needed.
     conflicting: list[str] = field(default_factory=list)
+    # Engine version this install reports, and whether it was actually read
+    # (False means DEFAULT_GAME_VERSION is a guess).
+    game_version: str = DEFAULT_GAME_VERSION
+    version_detected: bool = False
+    # No plugin published upstream for game_version, in either direction.
+    version_unsupported: bool = False
+    unsupported_reason: str = ""
+    # A verified local copy of that version's file set exists, so an
+    # unsupported version can still be installed offline.
+    cache_available: bool = False
 
     @property
     def missing(self) -> list[str]:
@@ -103,17 +117,18 @@ class GameSdkState:
     def needs_action(self) -> bool:
         return bool(self.missing or self.outdated or self.conflicting)
 
+    @property
+    def installable(self) -> bool:
+        """False when nothing, remote or cached, can supply this version."""
+        return not self.version_unsupported or self.cache_available
+
 
 @dataclass
 class SdkCheckResult:
-    supported_version: str
     steam_installed: bool
     consulted_remote: bool
     remote_error: str | None
     games: list[GameSdkState] = field(default_factory=list)
-    # True when the repository has no SDK folder for supported_version yet
-    # (the games are installed but that game version is not supported).
-    version_unsupported: bool = False
 
     @property
     def found_games(self) -> bool:
@@ -127,6 +142,15 @@ class SdkCheckResult:
     def games_needing_action(self) -> list[GameSdkState]:
         return [g for g in self.games if g.needs_action]
 
+    @property
+    def unsupported_games(self) -> list[GameSdkState]:
+        """Installs whose game version has no plugin and no cached fallback."""
+        return [g for g in self.games if g.version_unsupported and not g.cache_available]
+
+    @property
+    def version_unsupported(self) -> bool:
+        return bool(self.unsupported_games)
+
 
 @dataclass
 class GameApplyResult:
@@ -139,16 +163,33 @@ class GameApplyResult:
     skipped_running: bool = False
     # Present-but-outdated DLLs while game runs (see deferred_running vs skipped_running).
     deferred_running: list[str] = field(default_factory=list)
-    # True when the target game version has no SDK folder in the repository yet.
+    # True when this install's game version has no SDK folder upstream.
     unsupported: bool = False
+    game_version: str = ""
+    unsupported_reason: str = ""
+    # Installed from the local cache because the source had nothing to offer.
+    from_cache: bool = False
 
     @property
     def success(self) -> bool:
         return (
             not self.errors
+            and not self.unsupported
             and not self.skipped_running
             and not self.deferred_running
         )
+
+
+@dataclass(frozen=True)
+class _LocalScan:
+    """One install as seen offline, before any remote call."""
+
+    game_type: str
+    game_path: Path
+    plugins_dir: Path
+    version: str
+    version_detected: bool
+    present: dict[str, bool]
 
 
 class SdkManager:
@@ -157,17 +198,91 @@ class SdkManager:
     def __init__(
         self,
         *,
-        supported_version: str = SUPPORTED_GAME_VERSION,
+        default_version: str = DEFAULT_GAME_VERSION,
         data_dir: Path | None = None,
     ):
-        self.version = supported_version
-        self.marker = _marker_name(supported_version)
-        self.tracked_files: tuple[str, ...] = DLL_FILES + (self.marker,)
-        self.source = SdkSource(supported_version)
+        self.default_version = default_version
 
         base = data_dir if data_dir is not None else CONFIG_PATH.parent
-        self.cache_dir = base / _CACHE_DIRNAME / supported_version
+        self._cache_root = base / _CACHE_DIRNAME
         self._state_path = base / _STATE_FILE
+        self._sources: dict[str, SdkSource] = {}
+        self._published: list[str] | None = None
+
+    # Per-version helpers (one game version per install, so nothing is global)
+
+    def tracked_files(self, version: str) -> tuple[str, ...]:
+        """Files that must be present for one game version."""
+        return DLL_FILES + (_marker_name(version),)
+
+    def cache_dir(self, version: str) -> Path:
+        return self._cache_root / version
+
+    def _source(self, version: str) -> SdkSource:
+        source = self._sources.get(version)
+        if source is None:
+            source = SdkSource(version)
+            self._sources[version] = source
+        return source
+
+    def _unsupported_reason(self, version: str) -> str:
+        """Why this version has no plugin, said in the right direction."""
+        if self._published is None:
+            self._published = self._source(version).list_versions()
+        return unsupported_reason(version, self._published)
+
+    def _game_version(self, game_type: str, game_path: Path) -> tuple[str, bool]:
+        detected = detect_game_version(game_path, game_type)
+        if detected:
+            return detected, True
+        log.warning(
+            "could not read the %s game version, assuming %s", game_type, self.default_version
+        )
+        return self.default_version, False
+
+    # Local cache (last known-good set, keyed by game version)
+
+    def _manifest_path(self, version: str) -> Path:
+        return self.cache_dir(version) / _MANIFEST_FILE
+
+    def _read_manifest(self, version: str) -> dict[str, str]:
+        try:
+            data = json.loads(self._manifest_path(version).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        files = data.get("files") if isinstance(data, dict) else None
+        if not isinstance(files, dict):
+            return {}
+        return {k: v for k, v in files.items() if isinstance(k, str) and isinstance(v, str)}
+
+    def _record_cached(self, version: str, remote: RemoteFile) -> None:
+        """Remember the SHA of a verified cached file so it can be reused offline."""
+        files = self._read_manifest(version)
+        if files.get(remote.name) == remote.sha:
+            return
+        files[remote.name] = remote.sha
+        try:
+            path = self._manifest_path(version)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"files": files}), encoding="utf-8")
+        except OSError:
+            log.debug("could not write the SDK cache manifest", exc_info=True)
+
+    def cached_listing(self, version: str) -> dict[str, RemoteFile]:
+        """Cached files that still hash to what was verified when they landed."""
+        listing: dict[str, RemoteFile] = {}
+        for name, sha in self._read_manifest(version).items():
+            path = self.cache_dir(version) / name
+            if git_blob_sha_of(path) != sha:
+                continue
+            # No URL: a cache entry is usable as-is or not at all, never fetched.
+            listing[name] = RemoteFile(name, sha, 0, "")
+        return listing
+
+    def cache_is_complete(self, version: str) -> bool:
+        """True when the cache alone can produce a working install."""
+        listing = self.cached_listing(version)
+        return all(name in listing for name in self.tracked_files(version))
 
     # State (records which MonoCruise version last confirmed the SDK)
 
@@ -193,7 +308,7 @@ class SdkManager:
     def check(self, *, force_remote: bool | None = None) -> SdkCheckResult:
         """Read-only install scan; remote only when missing or FORCE_REFETCH."""
         if not is_steam_installed():
-            return SdkCheckResult(self.version, False, False, None)
+            return SdkCheckResult(False, False, None)
 
         located: list[tuple[str, Path]] = [
             (game_type, path)
@@ -201,61 +316,68 @@ class SdkManager:
             for path in find_game_installations(game_type)
         ]
         if not located:
-            return SdkCheckResult(self.version, True, False, None)
+            return SdkCheckResult(True, False, None)
 
-        # Local presence first (fast, offline).
-        presence: list[tuple[str, Path, Path, dict[str, bool]]] = []
+        # Local presence first (fast, offline). The version marker carries the
+        # game version, so a game update alone already shows up as missing.
+        scans: list[_LocalScan] = []
         any_missing = False
         for game_type, game_path in located:
             plugins = get_plugins_dir(game_path)
-            present = {name: (plugins / name).exists() for name in self.tracked_files}
+            version, detected = self._game_version(game_type, game_path)
+            present = {n: (plugins / n).exists() for n in self.tracked_files(version)}
             any_missing = any_missing or not all(present.values())
-            presence.append((game_type, game_path, plugins, present))
+            scans.append(_LocalScan(game_type, game_path, plugins, version, detected, present))
 
         forced = FORCE_REFETCH and self._read_last_checked() != __version__
         consult = force_remote if force_remote is not None else (any_missing or forced)
 
-        remote_files: dict[str, RemoteFile] | None = None
+        listings: dict[str, dict[str, RemoteFile]] = {}
+        unsupported: dict[str, str] = {}
         remote_error: str | None = None
-        version_unsupported = False
         if consult:
-            try:
-                remote_files = self.source.list_files()
-            except SdkVersionUnsupported as exc:
-                version_unsupported = True
-                remote_error = str(exc)
-                log.warning("SDK version %s is not supported yet: %s", self.version, exc)
-            except SdkSourceError as exc:
-                remote_error = str(exc)
-                log.warning("SDK check could not reach the ETS2LA source: %s", exc)
+            for version in dict.fromkeys(scan.version for scan in scans):
+                try:
+                    listings[version] = self._source(version).list_files()
+                except SdkVersionUnsupported as exc:
+                    unsupported[version] = self._unsupported_reason(version)
+                    log.warning("SDK check: %s", exc)
+                except SdkSourceError as exc:
+                    remote_error = str(exc)
+                    log.warning("SDK check could not reach the ETS2LA source: %s", exc)
 
         games: list[GameSdkState] = []
-        for game_type, game_path, plugins, present in presence:
+        for scan in scans:
+            listing = listings.get(scan.version)
             file_states: list[ManagedFileState] = []
-            for name in self.tracked_files:
-                installed = present[name]
+            for name in self.tracked_files(scan.version):
+                installed = scan.present[name]
                 up_to_date = True
-                if installed and remote_files and name in remote_files:
-                    up_to_date = git_blob_sha_of(plugins / name) == remote_files[name].sha
+                if installed and listing and name in listing:
+                    up_to_date = git_blob_sha_of(scan.plugins_dir / name) == listing[name].sha
                 file_states.append(ManagedFileState(name, installed, up_to_date))
+            is_unsupported = scan.version in unsupported
             games.append(
                 GameSdkState(
-                    game_type=game_type,
-                    game_path=game_path,
-                    plugins_dir=plugins,
-                    running=is_game_running(game_type),
+                    game_type=scan.game_type,
+                    game_path=scan.game_path,
+                    plugins_dir=scan.plugins_dir,
+                    running=is_game_running(scan.game_type),
                     files=file_states,
-                    conflicting=_find_conflicting(plugins),
+                    conflicting=_find_conflicting(scan.plugins_dir),
+                    game_version=scan.version,
+                    version_detected=scan.version_detected,
+                    version_unsupported=is_unsupported,
+                    unsupported_reason=unsupported.get(scan.version, ""),
+                    cache_available=is_unsupported and self.cache_is_complete(scan.version),
                 )
             )
 
         result = SdkCheckResult(
-            supported_version=self.version,
             steam_installed=True,
-            consulted_remote=remote_files is not None,
+            consulted_remote=bool(listings),
             remote_error=remote_error,
             games=games,
-            version_unsupported=version_unsupported,
         )
 
         # Nothing to do and we actually looked: record the version so a forced
@@ -270,9 +392,10 @@ class SdkManager:
         for game_type in GAME_TYPES:
             for game_path in find_game_installations(game_type):
                 plugins = get_plugins_dir(game_path)
+                version, detected = self._game_version(game_type, game_path)
                 files = [
                     ManagedFileState(name, (plugins / name).exists(), True)
-                    for name in self.tracked_files
+                    for name in self.tracked_files(version)
                 ]
                 states.append(
                     GameSdkState(
@@ -282,6 +405,8 @@ class SdkManager:
                         running=is_game_running(game_type),
                         files=files,
                         conflicting=_find_conflicting(plugins),
+                        game_version=version,
+                        version_detected=detected,
                     )
                 )
         return states
@@ -303,13 +428,51 @@ class SdkManager:
 
     # Installation
 
-    def _ensure_cached(self, remote: RemoteFile) -> Path:
+    def _ensure_cached(self, version: str, remote: RemoteFile) -> Path:
         """Return a verified local copy of ``remote``, downloading if needed."""
-        cached = self.cache_dir / remote.name
-        if git_blob_sha_of(cached) == remote.sha:
-            return cached
-        self.source.download(remote, cached)
+        cached = self.cache_dir(version) / remote.name
+        if git_blob_sha_of(cached) != remote.sha:
+            if not remote.download_url:
+                raise SdkSourceError(f"{remote.name} is not in the local cache")
+            self._source(version).download(remote, cached)
+        self._record_cached(version, remote)
         return cached
+
+    def _install_listing(
+        self,
+        game: GameSdkState,
+        result: GameApplyResult,
+        *,
+        force_all: bool,
+    ) -> dict[str, RemoteFile] | None:
+        """Files to install from, for this install's own game version.
+
+        Falls back to the verified cache when the source has nothing for that
+        version, so a pruned upstream folder cannot strand a working install.
+        """
+        if not (force_all or game.missing or game.outdated):
+            return {}  # only a legacy plugin to disable; that needs no network
+
+        version = game.game_version
+        try:
+            return self._source(version).list_files()
+        except SdkSourceError as exc:
+            unsupported = isinstance(exc, SdkVersionUnsupported)
+            cached = self.cached_listing(version)
+            if all(n in cached for n in self.tracked_files(version)):
+                log.info("installing the cached plugin set for game version %s: %s", version, exc)
+                result.from_cache = True
+                return cached
+            if unsupported:
+                # Not an error entry: a legacy plugin this pass disabled is
+                # still worth reporting alongside the version warning.
+                result.unsupported = True
+                result.unsupported_reason = self._unsupported_reason(version)
+                log.warning("cannot install the SDK: %s", result.unsupported_reason)
+            else:
+                log.error("cannot install SDK, source unreachable: %s", exc)
+                result.errors.append(("source", str(exc)))
+            return None
 
     def apply(
         self,
@@ -320,31 +483,12 @@ class SdkManager:
         force_all: bool = False,
         allow_running_missing: bool = False,
     ) -> list[GameApplyResult]:
-        """Copy verified cache files into plugin dirs; see README for running-game modes."""
-        # Nothing to download when the only work is disabling a superseded
-        # plugin, so that pass must not need the network.
-        remote_files: dict[str, RemoteFile] = {}
-        if force_all or any(g.missing or g.outdated for g in games):
-            try:
-                remote_files = self.source.list_files()
-            except SdkVersionUnsupported as exc:
-                log.warning("cannot install SDK, version %s unsupported: %s", self.version, exc)
-                return [
-                    GameApplyResult(
-                        g.game_type, g.game_path, errors=[("version", str(exc))], unsupported=True
-                    )
-                    for g in games
-                ]
-            except SdkSourceError as exc:
-                log.error("cannot install SDK, source unreachable: %s", exc)
-                return [
-                    GameApplyResult(g.game_type, g.game_path, errors=[("source", str(exc))])
-                    for g in games
-                ]
-
+        """Copy verified files into plugin dirs; see README for running-game modes."""
         results: list[GameApplyResult] = []
         for game in games:
-            result = GameApplyResult(game.game_type, game.game_path)
+            result = GameApplyResult(
+                game.game_type, game.game_path, game_version=game.game_version
+            )
 
             restrict_to_missing = False
             if is_game_running(game.game_type):
@@ -375,7 +519,14 @@ class SdkManager:
                     log.error("could not disable %s for %s: %s", name, game.game_type, exc)
                     result.errors.append((name, str(exc)))
 
-            wanted = self._files_to_install(game, remote_files, force_all=force_all)
+            # Never install another version's plugin: it loads, resolves
+            # nothing, and the failure is silent.
+            available = self._install_listing(game, result, force_all=force_all)
+            if available is None:
+                results.append(result)
+                continue
+
+            wanted = self._files_to_install(game, available, force_all=force_all)
             if restrict_to_missing:
                 # Loaded DLLs stay deferred; absent files install for next game start.
                 result.deferred_running = [
@@ -384,13 +535,13 @@ class SdkManager:
                 ]
                 wanted = [n for n in wanted if n not in result.deferred_running]
             for name in wanted:
-                remote = remote_files.get(name)
+                remote = available.get(name)
                 if remote is None:
                     continue  # not published for this version; nothing to do
                 try:
                     if on_progress:
                         on_progress(f"Installing {name} for {game.game_type.upper()}...")
-                    source_file = self._ensure_cached(remote)
+                    source_file = self._ensure_cached(game.game_version, remote)
                     self._copy_into_place(source_file, game.plugins_dir / name)
                     result.installed.append(name)
                 except (SdkSourceError, OSError) as exc:
@@ -412,7 +563,8 @@ class SdkManager:
     ) -> list[str]:
         """Stale/missing tracked files plus courtesy files; force_all returns all remote."""
         if force_all:
-            return [n for n in (*self.tracked_files, *COURTESY_FILES) if n in remote_files]
+            tracked = self.tracked_files(game.game_version)
+            return [n for n in (*tracked, *COURTESY_FILES) if n in remote_files]
         wanted = [f.name for f in game.files if not f.installed or not f.up_to_date]
         for name in COURTESY_FILES:
             remote = remote_files.get(name)

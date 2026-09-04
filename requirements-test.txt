@@ -8,3 +8,4 @@ PySide6  # updater tests load updater/updater.py, which is a Qt GUI
 Pillow>=12.2.0  # AEB clip thumbnail encode/decode
 packaging  # updater version comparison
 requests  # updater GitHub API client
+psutil  # core/sdk_installer/game_paths.py: running-game detection

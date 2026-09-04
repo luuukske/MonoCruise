@@ -292,6 +292,7 @@ def main() -> None:
         changed = [r for r in results if (r.installed or r.disabled) and not r.errors]
         cleaned = [r for r in changed if r.disabled]
         deferred = [r for r in results if r.deferred_running and not r.errors]
+        unsupported = [r for r in results if r.unsupported]
         failed = [r for r in results if r.errors]
 
         if changed:
@@ -327,6 +328,8 @@ def main() -> None:
                 "n",
                 duration_ms=9000,
             )
+        if unsupported:
+            _warn_unsupported_versions(unsupported)
         if failed:
             games = ", ".join(r.game_type.upper() for r in failed)
             log.warning("SDK auto-install failed for %s", games)
@@ -338,22 +341,29 @@ def main() -> None:
                 duration_ms=9000,
             )
 
+    def _warn_unsupported_versions(entries) -> None:
+        """No plugin exists for this game version, so ACC and AEB stay blind."""
+        detail = "; ".join(
+            f"{e.game_type.upper()}: {e.unsupported_reason}" for e in entries
+        )
+        log.warning("SDK check: %s", detail)
+        PopupWindow.emit(
+            "Unsupported game version",
+            f"{detail}. Adaptive cruise control and emergency braking will not "
+            f"see other vehicles until a matching plugin is available.",
+            "e",
+            duration_ms=12000,
+        )
+
     def _on_sdk_result(result: SdkCheckResult) -> None:
         if not result.found_games:
             log.info("SDK check: no ETS2/ATS installation found")
-        elif result.version_unsupported:
-            games = ", ".join(g.game_type.upper() for g in result.games)
-            log.warning("SDK check: version %s is not supported yet", result.supported_version)
-            PopupWindow.emit(
-                "Unsupported game version",
-                f"{games} {result.supported_version} is not supported yet.",
-                "e",
-                duration_ms=8000,
-            )
         elif result.needs_action:
             games = ", ".join(g.game_type.upper() for g in result.games_needing_action)
             log.info("SDK check: action needed for %s; applying", games)
             _auto_install_sdk(result)
+        elif result.unsupported_games:
+            _warn_unsupported_versions(result.unsupported_games)
         else:
             log.info("SDK check: SDK DLLs present and up to date")
 
