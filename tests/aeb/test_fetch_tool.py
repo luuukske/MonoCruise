@@ -126,3 +126,65 @@ def test_a_corrupt_download_is_not_stored(wired, monkeypatch):
 
     assert aeb_fetch.main(["--root", str(tmp_path)]) == 1
     assert ClipStore(root=tmp_path).list_clips() == []
+
+
+class _PagingSession:
+    """Stands in for the real endpoint: oldest first, capped, `since` inclusive."""
+
+    def __init__(self, rows, cap):
+        self._rows = rows
+        self._cap = cap
+        self.headers: dict[str, str] = {}
+        self.pages: list[str] = []
+
+    def get(self, url, params=None, timeout=None):
+        params = params or {}
+        since = str(params.get("since", ""))
+        self.pages.append(since)
+        rows = [r for r in self._rows if r["received_at"][:10] >= since]
+        limit = int(params.get("limit", self._cap))
+        return _FakeResponse(payload={"clips": rows[:min(limit, self._cap)]})
+
+
+def _row(day: int, n: int) -> dict:
+    return {"clip_id": f"{day:08d}-0000-4000-8000-{n:012d}",
+            "received_at": f"2026-08-{day:02d}T10:00:{n % 60:02d}Z"}
+
+
+def test_the_listing_is_paged_past_the_server_cap(monkeypatch):
+    """The server answers oldest first and caps the page, so one call is not the corpus."""
+    rows = [_row(day, n) for day in range(9, 15) for n in range(40)]
+    session = _PagingSession(rows, cap=50)
+
+    listed, truncated = aeb_fetch.list_all(session, aeb_fetch.BASE_URL, page=50)
+
+    assert not truncated
+    assert len(listed) == len(rows)
+    assert listed[-1]["received_at"].startswith("2026-08-14")
+    assert len(session.pages) > 1, "a single request cannot have covered the index"
+
+
+def test_a_day_larger_than_a_page_is_reported_truncated(monkeypatch):
+    """`since` has day granularity, so such a day cannot be walked past: say so."""
+    rows = [_row(9, n) for n in range(80)]
+    session = _PagingSession(rows, cap=50)
+
+    listed, truncated = aeb_fetch.list_all(session, aeb_fetch.BASE_URL, page=50)
+
+    assert truncated
+    assert len(listed) == 50
+
+
+def test_pull_missing_reports_what_the_server_holds(monkeypatch, tmp_path):
+    """The newest received time is the signal that a stale listing would hide."""
+    monkeypatch.setenv("MONOCRUISE_PULL_TOKEN", "a-token")
+    ids = ["33333333-3333-4333-8333-333333333333"]
+    rows = [{"clip_id": ids[0], "received_at": "2026-09-05T19:30:05Z"}]
+    session = _FakeSession(rows, {ids[0]: _clip_blob(ids[0])})
+    monkeypatch.setattr(aeb_fetch, "_session", lambda token: session)
+
+    result = aeb_fetch.pull_missing(ClipStore(root=tmp_path))
+
+    assert result.newest == "2026-09-05T19:30:05Z"
+    assert result.listed == 1
+    assert not result.truncated

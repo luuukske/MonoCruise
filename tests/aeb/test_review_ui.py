@@ -333,8 +333,27 @@ def test_update_from_server_finished_handler_summarises(tmp_path, qapp):
     try:
         win._on_pull_finished(PullResult(
             listed=3, already=2, saved=0, failed=0, landed=0, root=str(tmp_path),
+            newest="2026-09-05T19:30:05Z",
         ))
-        assert "up to date" in win._status.text()
+        text = win._status.text()
+        # "Up to date" was the wording that hid 284 clips the server held and
+        # this store did not, because the listing had been silently truncated.
+        assert "up to date" not in text.lower()
+        assert "3 on server" in text
+        assert "2026-09-05T19:30:05Z" in text
+    finally:
+        win.close()
+
+
+def test_a_truncated_listing_is_never_reported_as_complete(tmp_path, qapp):
+    store = ClipStore(root=tmp_path)
+    win = ReviewWindow(store)
+    try:
+        win._on_pull_finished(PullResult(
+            listed=500, already=500, saved=0, failed=0, landed=0, root=str(tmp_path),
+            newest="2026-08-28T23:20:33Z", truncated=True,
+        ))
+        assert "incomplete" in win._status.text()
     finally:
         win.close()
 

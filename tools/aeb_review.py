@@ -359,13 +359,20 @@ class ReviewWindow(QMainWindow):
         if result.error:
             self._status.setText(result.error)
             return
-        parts = [f"saved {result.landed}"]
+        parts = [f"saved {result.landed} clip(s) into {Path(result.root).name}"]
         if result.failed:
             parts.append(f"{result.failed} failed")
         if result.saved and result.landed != result.saved:
             parts.append(f"{result.saved - result.landed} lost to filename collision")
         if result.landed == 0 and result.failed == 0:
-            parts = [f"up to date ({result.already} local, {result.listed} on server)"]
+            # Never the words "up to date" on a listing alone: that claim is
+            # what hid a corpus the server had and this store did not.
+            parts = [f"nothing new to fetch: {result.already} local, "
+                     f"{result.listed} on server"]
+        if result.newest:
+            parts.append(f"newest on server {result.newest}")
+        if result.truncated:
+            parts.append("server listing incomplete")
         self._status.setText(", ".join(parts))
         if not result.landed:
             return
