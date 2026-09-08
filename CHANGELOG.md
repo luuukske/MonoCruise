@@ -12,7 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Fixed
-- **AEB triggering while coupling a trailer**: AEB no longer reacts to a trailer sitting behind the cab while you are under 20 km/h, in reverse or forward. backing on to a fifth wheel and pulling out from under a dropped trailer both put the trailer inside the truck's path on purpose. trailers *ahead* of you are unchanged, so rolling up behind a parked trailer still brakes.
+- **AEB triggering while coupling a trailer**: AEB no longer reacts to a trailer sitting behind the cab while you are under 20 km/h, in reverse or forward. backing on to a fifth wheel and pulling out from under a dropped trailer both put the trailer inside the truck's path on purpose.
 
 ## [1.1.0-preview.21] - 2026-09-05
 this will be one of the last preview builds of v1.1.0 before the final v1.1 release. any critical bugs can be reported and will be fixed before the stable release. **thanks to everyone who has been testing and sending in AEB clips!**
