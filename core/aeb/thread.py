@@ -2357,7 +2357,14 @@ class AEBThread(BaseThread):
                 clearance_vid=best_required_vid,
             )
 
-    def _log_gap_debug(
+    def _log_gap_debug(self, **kwargs) -> None:
+        """Guarded wrapper: a debug dump must never kill the AEB loop."""
+        try:
+            self._log_gap_debug_impl(**kwargs)
+        except Exception:
+            logger.exception("gap debug dump failed (debug output only)")
+
+    def _log_gap_debug_impl(
         self,
         *,
         now_mono: float,
@@ -2453,7 +2460,7 @@ class AEBThread(BaseThread):
                 )
                 hw_sum = ego_arc.half_width + tgt.half_width
                 thr = hw_sum + cal.corridor_margin * (pms + (1.0 - pms) * sind)
-                clearance = body_sep - thr
+                body_clearance = body_sep - thr
                 body_lines = [
                     f"threat id={best_threat_vid} L={threat.size.length:.2f} "
                     f"W={threat.size.width:.2f} trailer={threat.is_trailer} "
@@ -2468,7 +2475,7 @@ class AEBThread(BaseThread):
                     ),
                     f"capsule t=0 body_sep={body_sep:.3f}m thr={thr:.3f}m "
                     f"(hw_sum={hw_sum:.3f} margin={cal.corridor_margin:.3f} "
-                    f"pms={pms:.2f} sind={sind:.2f}) clearance={clearance:+.3f}m "
+                    f"pms={pms:.2f} sind={sind:.2f}) clearance={body_clearance:+.3f}m "
                     f"(<0 = already overlapping corridor)",
                     f"ego capsule fwd/back={ego_cap_fwd:.3f}/{ego_cap_back:.3f} "
                     f"_cap={ego_arc._cap_fwd:.3f}/{ego_arc._cap_back:.3f} "
