@@ -510,6 +510,36 @@ class ElevationFilter:
         return _PASS
 
 
+class LowSpeedTrailerFilter:
+    """Trailers behind ego at manoeuvring speed: coupling drives under one.
+
+    Backing on to a fifth wheel and pulling out from under a dropped trailer
+    are the same geometry at walking pace, and the trailer body is inside the
+    ego capsule on purpose. Both put the trailer behind the cab, so the stage
+    never touches a trailer ahead of it: stop-and-go traffic queueing behind a
+    parked trailer keeps full AEB (README).
+    """
+
+    name = "LowSpeedTrailerFilter"
+
+    def __init__(self, cal: AEBCalibration) -> None:
+        self._floor_kmh = cal.trailer_ignore_below_kmh
+
+    def apply(self, ctx: FilterContext) -> FilterResult:
+        if not ctx.v.is_trailer:
+            return _PASS
+        if ctx.v.id in ctx.latched_threat_ids:
+            return _PASS
+        if abs(ctx.ego_speed) * 3.6 >= self._floor_kmh:
+            return _PASS
+        # Body frame, not ctx.ego_fwd_*: that pair flips with travel direction,
+        # and backing under a trailer would then read as "ahead".
+        fwd = -ctx.dx * math.sin(ctx.ego_yaw_rad) - ctx.dz * math.cos(ctx.ego_yaw_rad)
+        if fwd > 0.0:
+            return _PASS
+        return _suppress("LowSpeedTrailerFilter")
+
+
 def _vehicle_yaw_rad(v: "Vehicle") -> float:
     if v._smooth_yaw is not None:
         return v._smooth_yaw
@@ -1121,6 +1151,7 @@ def build_pipeline(cal: AEBCalibration) -> list:
     return [
         RangeFilter(cal),
         ElevationFilter(cal),
+        LowSpeedTrailerFilter(cal),
         TmpRelSpeedFilter(),
         LaneClassifier(cal),
         OppositeLaneFilter(cal),

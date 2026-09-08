@@ -92,6 +92,7 @@ def make_vehicle(
     acceleration: float = 0.0,
     y: float = 0.0,
     noise_seed: int | None = None,
+    is_trailer: bool = False,
 ) -> Vehicle:
     """Synthetic Vehicle for AEB filter tests (seeded history, optional TMP noise)."""
     if noise_seed is not None:
@@ -112,7 +113,7 @@ def make_vehicle(
         trailers=[],
         id=vid,
         is_tmp=is_tmp,
-        is_trailer=False,
+        is_trailer=is_trailer,
     )
 
     yaw_rad = math.radians(yaw_deg)

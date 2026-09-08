@@ -157,6 +157,9 @@ class AEBCalibration:
     brake_actuator_lag_s: float = 0.10
     # New engagements only fire when |ego_speed| is above this threshold.
     aeb_min_engage_speed_kmh: float = 5.0
+    # Trailers are ignored below this |ego_speed|: coupling and uncoupling
+    # drive the truck under one on purpose (README low-speed trailer ignore).
+    trailer_ignore_below_kmh: float = 20.0
     # Tiered engage confirm windows; brake-TTB slam exempt (README continuous-decel).
     aeb_engage_confirm_s: float = 0.06
     aeb_engage_confirm_oblique_s: float = 0.40

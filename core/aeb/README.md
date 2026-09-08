@@ -172,6 +172,7 @@ pass, the vehicle enters collision evaluation.
 |-------|---------|
 | `RangeFilter` | Distance gate (`cal.max_range`) |
 | `ElevationFilter` | Membership in radar's `off_surface_ids` (core/radar/README.md §15) |
+| `LowSpeedTrailerFilter` | Trailers while ego is below `cal.trailer_ignore_below_kmh` |
 | `TmpRelSpeedFilter` | TMP session relative-speed pre-filter |
 | `LaneClassifier` | Populates `ctx` geometry fields; sets `ctx.lane` via `lane_frame` |
 | `OppositeLaneFilter` | Oncoming vehicles in their own lane (collapses Fix A + Fix B) |
@@ -194,6 +195,36 @@ The legacy `RearOvertakerFilter` was retired in favour of a unified
 That check compares closing-speed magnitude under braked vs unbraked
 trajectories and subsumes the rear-overtaker case along with cross-traffic
 scenarios where braking parks ego in a target's path.
+
+### `LowSpeedTrailerFilter`
+
+Suppresses `is_trailer` targets that sit **behind the cab** while
+`|ego_speed|` is under `cal.trailer_ignore_below_kmh` (20 km/h), in both
+directions of travel. Coupling drives the truck under a trailer on purpose:
+backing on to the fifth wheel and pulling out from under a dropped one are
+the same geometry at manoeuvring speed, and the trailer body is inside the
+ego capsule by design. No geometric test separates that from a threat,
+because it *is* an intentional collision course.
+
+Two details are load-bearing:
+
+- The behind test uses the **body frame** (`-dx sin(yaw) - dz cos(yaw)`), not
+  `ctx.ego_fwd_*`. That pair flips with travel direction (`build_arc`
+  normalises reversing to positive speed), so a trailer being backed under
+  would read as "ahead" and pass.
+- Trailers **ahead** of the cab are never touched. Rolling into the back of a
+  parked trailer at 10-15 km/h is a labelled TP class in the corpus
+  (`1df08197`, `ced27cc6`, `84fafd65`, `541030ee`, `3fc7738c`, `4ba23e1c`);
+  a blanket low-speed trailer ignore turned all six into misses for +143
+  corpus points.
+
+Latched ids bypass the stage, so an event that engaged above the floor keeps
+its pipeline seat and runs to completion instead of releasing the brake as
+ego decelerates through 20 km/h.
+
+Corpus: -324.00 to -342.30 over 784 clips. FP 40 to 34, TP and FN unchanged.
+The six cleared are `c6595282`, `08223dda`, `db1ae7e7`, `97f813ce`,
+`b295e45f`, `638920e7`, plus a partial on `aeaa0d6c`.
 
 ### `LaneClassifier`: canonical lane primitive
 
