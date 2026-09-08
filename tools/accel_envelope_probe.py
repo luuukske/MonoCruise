@@ -33,6 +33,9 @@ TIME_TARGETS_KMH: tuple[int, ...] = (50, 90)
 # Replicated, not imported, so the probe never pulls in core.settings.
 _ANCHOR_GEAR: int = 6
 _DEFAULT_RATIO: float = 1.27
+# The anchor is the pedal slope; full-pedal accel is offset + slope. See
+# core/sending_thread/README.md, "The pedal model is affine".
+_DEFAULT_ZERO_OFFSET_MS2: float = 0.50
 # Cold-start seed: shipped pedal_capacity_max_accel_ms2, learned around gear 8
 # and projected back to the anchor gear. Mass-normalized, so a rig divides it out.
 _DEFAULT_ANCHOR_NORM_MS2: float = 2.124 * _DEFAULT_RATIO ** 2
@@ -81,8 +84,8 @@ def capacity_ms2(speed_ms: float, rig: tuple[float, bool] | None, ratio: float, 
     if rig is None:
         return None
     gear = gear_for_speed(speed_ms * 3.6)
-    normalized = anchor * (ratio ** (_ANCHOR_GEAR - gear))
-    return normalized / weight_factor(*rig)
+    slope = anchor * (ratio ** (_ANCHOR_GEAR - gear))
+    return slope / weight_factor(*rig) + _DEFAULT_ZERO_OFFSET_MS2
 
 
 def ceiling_ms2(
@@ -216,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument(
         "--anchor", type=float, default=_DEFAULT_ANCHOR_NORM_MS2,
-        help=f"mass-normalized gain at gear {_ANCHOR_GEAR} (default is the cold-start seed)",
+        help=f"mass-normalized pedal slope at gear {_ANCHOR_GEAR} (cold-start seed)",
     )
     ap.add_argument("--ratio", type=float, default=_DEFAULT_RATIO, help="per-gear gain step")
     ap.add_argument("--report", default="text", choices=("text", "json"))

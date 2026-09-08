@@ -1061,7 +1061,9 @@ class SendingThread(BaseThread):
                     spd_ms,
                     mass_kg,
                     has_t,
-                    max_accel_ms2=self._capacity_tracker.accel_gain_for_gear(tel_gear),
+                    max_accel_ms2=self._capacity_tracker.accel_gain_for_gear(
+                        tel_gear, mass_kg, has_t
+                    ),
                     max_brake_ms2=self._capacity_tracker.max_brake_ms2,
                     road_pitch=road_pitch,
                     cruise_commanding=mapper_engaged,

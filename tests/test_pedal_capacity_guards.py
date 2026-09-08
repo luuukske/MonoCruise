@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 import core.sending_thread.pedal_capacity as pc
-from core.sending_thread.accel_to_pedals import brake_curve_fraction
+from core.sending_thread.accel_to_pedals import brake_curve_fraction, weight_factor
 
 BASE = 8.74
 DT = 0.033
@@ -475,3 +475,103 @@ def test_a_depressed_sample_would_have_dropped_the_anchor_without_the_gates(cloc
     # Settled but genuinely weak: passes every gate, and should be learned.
     _feed_accel(t, clock, gas=0.7, accel=0.7, ticks=90)
     assert t._accel_anchor_gain_ms2 < 3.4, "a settled weak sample must still teach"
+
+
+# Affine pedal model: accel vs gas has a non-zero intercept.
+
+
+def _offset_tracker(anchor: float = 3.4, offset: float = 0.5):
+    t = _accel_tracker(anchor=anchor)
+    t._accel_zero_offset_ms2 = offset
+    return t
+
+
+def test_constant_speed_cruise_does_not_teach_the_slope(clock):
+    """The bug this fix exists for. Holding speed on a rise means the corrected
+    accel is the road load and the true accel is zero, so `accel / pedal` read a
+    capability out of a moment the truck was not accelerating in."""
+    t = _offset_tracker()
+    # 0.5 pedal, corrected accel is the offset alone: no pedal authority at all.
+    _feed_accel(t, clock, gas=0.5, accel=0.5, ticks=90)
+    assert t._accel_anchor_gain_ms2 == pytest.approx(3.4), (
+        "learned a slope from a constant-speed sample"
+    )
+
+
+def test_low_pedal_no_longer_inflates_the_slope(clock):
+    """`accel / pedal` blew up as the pedal shrank, because the offset landed
+    entirely on the gain. The low band must not touch the anchor at all."""
+    t = _offset_tracker()
+    _feed_accel(t, clock, gas=0.08, accel=0.62, ticks=120)
+    assert t._accel_anchor_gain_ms2 == pytest.approx(3.4), (
+        "a 0.08 pedal sample moved the slope"
+    )
+
+
+def test_low_pedal_band_teaches_the_offset(clock):
+    """The samples that used to be poison are the ones that measure the intercept."""
+    t = _offset_tracker(offset=0.20)
+    _feed_accel(t, clock, gas=0.10, accel=0.60, ticks=400, gear=12)
+    assert t._accel_zero_offset_ms2 > 0.30, "offset did not follow the samples"
+    assert t._accel_zero_offset_ms2 <= pc._ACCEL_OFFSET_MAX_MS2
+
+
+def test_offset_is_removed_before_the_slope_is_taken(clock):
+    """Same measurement, two offsets: the learned slope must differ by the offset."""
+    a = _offset_tracker(offset=0.0)
+    b = _offset_tracker(offset=0.5)
+    _feed_accel(a, clock, gas=0.8, accel=2.8, ticks=90)
+    _feed_accel(b, clock, gas=0.8, accel=2.8, ticks=90)
+    assert a._accel_anchor_gain_ms2 > b._accel_anchor_gain_ms2, (
+        "the offset was not subtracted before dividing by the pedal"
+    )
+
+
+def test_dead_band_between_the_two_fits_teaches_nothing(clock):
+    """Between the bands neither term dominates, so neither is separable."""
+    t = _offset_tracker()
+    anchor, offset = t._accel_anchor_gain_ms2, t._accel_zero_offset_ms2
+    mid = 0.5 * (pc._ACCEL_OFFSET_MAX_PEDAL + pc._ACCEL_SLOPE_MIN_PEDAL)
+    _feed_accel(t, clock, gas=mid, accel=1.4, ticks=90)
+    assert t._accel_anchor_gain_ms2 == pytest.approx(anchor)
+    assert t._accel_zero_offset_ms2 == pytest.approx(offset)
+
+
+def test_out_of_range_candidate_is_rejected(clock):
+    """The per-candidate sanity guard existed before the shape function replaced
+    the per-gear dict, and was lost in that refactor. An absurd sample must not
+    reach the EMA at all."""
+    t = _offset_tracker()
+    _feed_accel(t, clock, gas=0.9, accel=40.0, ticks=90)
+    assert t._accel_anchor_gain_ms2 == pytest.approx(3.4), (
+        "an out-of-range candidate was learned"
+    )
+
+
+def test_full_pedal_gain_is_offset_plus_slope(clock):
+    """The mapper divides by weight_factor, so the offset has to survive that
+    round trip whole: it is mass-independent, the slope is not."""
+    t = _offset_tracker(anchor=3.4, offset=0.5)
+    wf = weight_factor(MASS, False)
+    gain = t.accel_gain_for_gear(ANCHOR_GEAR, MASS, False)
+    assert gain / wf == pytest.approx(0.5 + 3.4 / wf)
+
+
+def test_ratio_step_is_normalised_by_the_lever_arm(clock):
+    """`x` reaches -8 in top gear, and the ratio update carries `x` as a factor
+    while the anchor update does not. Unnormalised, one top-gear sample moved the
+    ratio 8x further than the anchor and the pair walked its degenerate direction.
+    Comparing the two movements from the same samples isolates that factor.
+    """
+    import math
+
+    t = _offset_tracker()
+    a0, r0 = t._accel_anchor_gain_ms2, t._accel_ratio_step
+    _feed_accel(t, clock, gas=0.8, accel=1.0, ticks=90, gear=ANCHOR_GEAR + 8)
+    d_anchor = abs(math.log(t._accel_anchor_gain_ms2) - math.log(a0))
+    d_ratio = abs(math.log(t._accel_ratio_step) - math.log(r0))
+    assert d_anchor > 0.0, "the sample taught nothing, so the test proves nothing"
+    # Normalised: (lr_ratio/lr_anchor) * |x|/(1+x^2) ~= 0.03. Unnormalised: ~2.0.
+    assert d_ratio / d_anchor < 0.5, (
+        "ratio still moves with the raw lever arm instead of the normalised one"
+    )

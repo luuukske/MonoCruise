@@ -39,9 +39,71 @@ Candidate inverts the fitted brake curve; pedal³ weighting; underperformance dr
 deep settled AEB braking. Candidates reject above `_BRAKE_CANDIDATE_MAX_FRACTION` (1.35) of
 the load baseline.
 
-**Gas**: `update_accel` every tick that the pedal is above zero, learning the shape-function
-anchor and the per-gear ratio in log space. Same acceptance discipline as the brake side, and
-for the same reason.
+**Gas**: `update_accel` every tick that the pedal is above zero, learning the zero-pedal
+offset, the shape-function anchor and the per-gear ratio. Same acceptance discipline as the
+brake side, and for the same reason.
+
+### The pedal model is affine, not a line through the origin
+
+`candidate = accel / pedal` is only a capability estimate if zero pedal means zero accel. It
+does not. At gas 0 in gear the sim still drives the truck, measured at **+0.50 m/s2, flat**
+across 10-55 t and 5-35 m/s over 4021 `sample_kind="coast"` rows, and flat over the length of
+a coast episode (+0.540 at 0 s, +0.485 at 5 s), so it is physics and not differentiator lag.
+An independent affine fit of the accepted samples per gear and mass bucket puts the intercept
+at **0.51-0.76 in every bucket**, agreeing with the coast number.
+
+Dividing an affine signal by the pedal makes the answer blow up as the pedal shrinks. Replayed
+over 1.3 M rows of `accel_to_pedals_debug.csv`, the estimate walked from **9.36 m/s2 at pedal
+0.05-0.10 down to 1.17 at full pedal**: an 8x spread that is a function of pedal position and
+nothing else. It is one-directional, so it never averages out.
+
+The gates did not catch it because they were never looking for it. Of the samples that passed
+every gate, **75.9% were taken at constant speed and 13.3% while the truck was slowing down**,
+carrying 39.8% and 10.0% of the pedal-cubed weight. `_WEIGHT_POWER` suppresses them but there
+are too many for that to be enough.
+
+Three changes close it:
+
+- **Band split.** Below `_ACCEL_OFFSET_MAX_PEDAL` (0.25) the offset dominates, so that band
+  fits the intercept and never touches the slope. Above `_ACCEL_SLOPE_MIN_PEDAL` (0.35) the
+  slope dominates. Between them neither term is separable, so neither is learned. The offset
+  band is additionally skipped whenever the modelled slope contribution already exceeds the
+  offset, which is what keeps low gears (slope 5+ m/s2) out of the intercept fit.
+- **Authority gate.** A slope sample must still carry `_ACCEL_MIN_AUTHORITY_MS2` (0.10) and
+  `_ACCEL_MIN_AUTHORITY_FRAC` (0.25) of the measurement once the offset is removed. This is
+  what keeps a constant-speed reading out of an acceleration-capability estimate.
+- **Candidate rejection restored.** The per-candidate bound existed as
+  `_clamp(candidate, _ACCEL_GAIN_MIN_MS2, _ACCEL_GAIN_MAX_MS2)` until commit `e151848`
+  replaced the per-gear dict with the shape function; the bounds were renamed to
+  `_ACCEL_ANCHOR_*` and re-applied to the anchor only. The sample-level guard is back, tested
+  in the shape function's own units against the implied anchor.
+
+`_ACCEL_ANCHOR_MIN/MAX_MS2` are 0.2 and 7.5 rather than 0.5 and 8.0 because the anchor is the
+pedal **slope** now; full-pedal capability is `offset + slope`, so the old bounds move down by
+the offset. `accel_gain_for_gear` returns that sum, scaling the offset by `weight_factor` so
+the mapper's own division returns it whole: the offset is mass-independent, the slope is not.
+
+### The anchor and ratio walked their degenerate direction
+
+`log_ratio += lr_ratio * x * residual` carries the lever arm `x = _ANCHOR_GEAR - gear`, which
+reaches -8 in top gear, while the anchor update does not. One top-gear sample therefore moved
+the ratio 8x further than the anchor. With the gear distribution as lopsided as it is (gear 14
+is 100 k of ~400 k accepted samples at 17 t against 842 at gear 1) the pair is only identified
+along one direction, and the unnormalized step slid it along the other. Replayed over the full
+log the ratio hit both rails repeatedly. Normalizing that step by `1 + x^2` fixes the lever arm
+without touching the anchor rate the gear-shift replay tuned; the ratio then stays inside
+1.05-1.33 over the same replay.
+
+Replaying the fixed learner over the same 1.3 M rows, the offset converges to **0.509**,
+independently reproducing the 0.504 measured from coast. Top gear at 17 t reads **1.029 m/s2**
+against a measured **1.02**; before the fix the persisted state gave **0.203** against the same
+truth, which is why a bid over 0.2 m/s2 floored the throttle.
+
+**Still open, deliberately not fixed here.** `weight_factor` is a straight line in tonnes with
+an effective mass exponent of ~0.46 where the data reads 0.65-1.0, so the residual error grows
+with mass: top gear reads 1.6x high at 40 t while it is exact at 17 t. It is load-bearing for
+the mapper's round trip on every rig, so re-fitting it is its own change with its own probe,
+the way `baseline_brake_ms2` was done.
 
 ### Gear-shift poisoning (the post-shift pedal step)
 

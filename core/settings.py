@@ -193,6 +193,8 @@ class Settings(metaclass=_SingletonMeta):
     pedal_capacity_accel_anchor_gain_ms2: float = 0.0
     # Per-gear ratio step for accel shape (0 = in-code default on startup).
     pedal_capacity_accel_ratio_step: float = 0.0
+    # Zero-pedal tractive accel: the intercept of the affine pedal model.
+    pedal_capacity_accel_zero_offset_ms2: float = 0.0
 
     _saved_state: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     _state_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)

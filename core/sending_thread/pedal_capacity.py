@@ -50,9 +50,25 @@ _ANCHOR_GEAR: int = 6                # mid-stack reference gear
 _LEGACY_SEED_GEAR: int = 8           # legacy max_accel_ms2 was mostly learned in top
                                      # cruise gears; project from here when seeding
 
-# Anchor-gain bounds (m/s² at gas=1.0, weight-normalized, evaluated at
-_ACCEL_ANCHOR_MIN_MS2: float = 0.5
-_ACCEL_ANCHOR_MAX_MS2: float = 8.0
+# Anchor bounds (weight-normalized, at the anchor gear). The anchor is the
+# pedal slope now, so these are the old full-pedal bounds less the offset.
+_ACCEL_ANCHOR_MIN_MS2: float = 0.2
+_ACCEL_ANCHOR_MAX_MS2: float = 7.5
+
+# Zero-pedal tractive accel. At gas 0 in gear the sim still drives the truck,
+# so accel vs pedal is affine, not a line through the origin. See README.
+_ACCEL_OFFSET_INIT_MS2: float = 0.50
+_ACCEL_OFFSET_MIN_MS2: float = 0.0
+_ACCEL_OFFSET_MAX_MS2: float = 1.5
+_ACCEL_OFFSET_ALPHA: float = 0.02
+# Band split for the affine fit. The offset dominates below the first bound and
+# the slope above the second; between them neither term is separable.
+_ACCEL_OFFSET_MAX_PEDAL: float = 0.25
+_ACCEL_SLOPE_MIN_PEDAL: float = 0.35
+# Accel the sample must still carry once the offset is removed, absolute and as
+# a share of the measurement. Keeps a reading that is mostly offset off the slope.
+_ACCEL_MIN_AUTHORITY_MS2: float = 0.10
+_ACCEL_MIN_AUTHORITY_FRAC: float = 0.25
 
 # Gear-dwell gate. After a gear change the driveline is still restoring
 # torque, so accel is depressed for reasons that have nothing to do with gas.
@@ -116,6 +132,10 @@ class PedalCapacityTracker:
         # regression in update_accel adjusts it as cross-gear samples arrive.
         self._accel_ratio_step: float = _RATIO_INIT
         self._saved_accel_ratio: float = _RATIO_INIT
+        # Zero-pedal tractive accel, real m/s2 (not mass-normalized: measured
+        # flat across 10-55 t). The intercept of the affine pedal model.
+        self._accel_zero_offset_ms2: float = _ACCEL_OFFSET_INIT_MS2
+        self._saved_accel_offset: float = _ACCEL_OFFSET_INIT_MS2
         # Legacy scalar kept as a fallback before the anchor is seeded.
         self._global_accel_scalar: float = 0.0
         self._last_save_mono: float = 0.0
@@ -147,6 +167,11 @@ class PedalCapacityTracker:
         return self._max_brake_ms2
 
     @property
+    def accel_zero_offset_ms2(self) -> float:
+        """Tractive accel the engine delivers at gas=0 in gear (m/s²)."""
+        return self._accel_zero_offset_ms2
+
+    @property
     def brake_scale(self) -> float:
         """Learned correction on the rig brake baseline (1.0 = model believed)."""
         return self._brake_scale
@@ -173,10 +198,25 @@ class PedalCapacityTracker:
         self._saved_accel_ratio = self._accel_ratio_step
 
         # Shape-function anchor. If a persisted anchor is present, use it.
+        offset = _safe_float(
+            getattr(Settings, "pedal_capacity_accel_zero_offset_ms2", 0.0)
+        )
+        legacy_anchor = offset <= 0.0
+        self._accel_zero_offset_ms2 = _clamp(
+            offset if offset > 0.0 else _ACCEL_OFFSET_INIT_MS2,
+            _ACCEL_OFFSET_MIN_MS2, _ACCEL_OFFSET_MAX_MS2,
+        )
+        self._saved_accel_offset = self._accel_zero_offset_ms2
+
         anchor = _safe_float(getattr(Settings, "pedal_capacity_accel_anchor_gain_ms2", 0.0))
         if anchor <= 0.0:
             seed_source = legacy if legacy > 0.0 else baseline_accel
             anchor = seed_source * (self._accel_ratio_step ** (_LEGACY_SEED_GEAR - _ANCHOR_GEAR))
+            legacy_anchor = True
+        if legacy_anchor:
+            # Pre-offset configs stored full-pedal gain here; the anchor is the
+            # slope now, so take the offset back out rather than double-count it.
+            anchor -= self._accel_zero_offset_ms2
         self._accel_anchor_gain_ms2 = _clamp(
             anchor, _ACCEL_ANCHOR_MIN_MS2, _ACCEL_ANCHOR_MAX_MS2
         )
@@ -187,8 +227,8 @@ class PedalCapacityTracker:
             self._accel_ratio_step,
         )
 
-    def accel_gain_for_gear(self, gear: int) -> float:
-        """Mass-normalized gas gain for *gear* (m/s² at gas=1.0). See `core/sending_thread/README.md`."""
+    def accel_slope_for_gear(self, gear: int) -> float:
+        """Mass-normalized pedal slope for *gear* (m/s² per unit gas). See README."""
         anchor = self._accel_anchor_gain_ms2
         if anchor <= 0.0:
             # Fallback before the anchor is seeded (shouldn't happen after
@@ -205,6 +245,24 @@ class PedalCapacityTracker:
         if g <= 0:
             return anchor
         return anchor * (self._accel_ratio_step ** (_ANCHOR_GEAR - g))
+
+    def accel_gain_for_gear(
+        self,
+        gear: int,
+        total_mass_kg: float = 0.0,
+        has_trailer: bool = False,
+    ) -> float:
+        """Mass-normalized accel at gas=1.0 for *gear* (m/s²). See README.
+
+        Offset plus slope: the pedal model is affine, so full-pedal capability
+        is not the slope alone. The offset is carried in real units and scaled
+        up here so the mapper's own division by `weight_factor` returns it whole.
+        """
+        slope = self.accel_slope_for_gear(gear)
+        if total_mass_kg <= 0.0:
+            return slope + self._accel_zero_offset_ms2
+        wf = max(weight_factor(total_mass_kg, has_trailer), 1e-6)
+        return slope + self._accel_zero_offset_ms2 * wf
 
     def update_brake(
         self,
@@ -414,20 +472,59 @@ class PedalCapacityTracker:
             sum(pedal_values) / len(pedal_values), _ACCEL_PEDAL_FLOOR
         )
 
-        # Per-pedal gain at current mass, then mass-normalized.
-        candidate = mean_accel / mean_pedal
-        candidate *= weight_factor(total_mass_kg, has_trailer)
+        wf = max(weight_factor(total_mass_kg, has_trailer), 1e-6)
+        # Real-unit slope this gear currently believes in, for the band split.
+        slope_here = self.accel_slope_for_gear(g) / wf
+
+        # Low pedal: the offset dominates, so this band fits the intercept and
+        # nothing else. Skip it when the modelled slope term is not small.
+        if mean_pedal <= _ACCEL_OFFSET_MAX_PEDAL:
+            slope_part = slope_here * mean_pedal
+            if slope_part > self._accel_zero_offset_ms2:
+                return
+            cand_offset = mean_accel - slope_part
+            if not (_ACCEL_OFFSET_MIN_MS2 <= cand_offset <= _ACCEL_OFFSET_MAX_MS2):
+                return
+            self._accel_zero_offset_ms2 = _clamp(
+                self._accel_zero_offset_ms2
+                + _ACCEL_OFFSET_ALPHA
+                * (cand_offset - self._accel_zero_offset_ms2),
+                _ACCEL_OFFSET_MIN_MS2, _ACCEL_OFFSET_MAX_MS2,
+            )
+            self._maybe_save(now)
+            return
+
+        # Dead band: neither term is separable here, so learn neither.
+        if mean_pedal < _ACCEL_SLOPE_MIN_PEDAL:
+            return
+
+        # Slope band. Removing the offset is what stops a constant-speed cruise
+        # from reading as capability: without it the whole offset lands on gain.
+        authority = mean_accel - self._accel_zero_offset_ms2
+        if authority < max(
+            _ACCEL_MIN_AUTHORITY_MS2, _ACCEL_MIN_AUTHORITY_FRAC * mean_accel
+        ):
+            return
+
+        # Per-pedal slope at current mass, then mass-normalized.
+        candidate = authority / mean_pedal
+        candidate *= wf
 
         # Log-space linear regression on the model
         x = _ANCHOR_GEAR - g
         log_ratio = math.log(self._accel_ratio_step)
         log_m = math.log(candidate)
 
+        # Sanity reject, in the shape function's own units. The equivalent guard
+        # existed per-candidate before the shape function replaced the gear dict.
+        implied_anchor = math.exp(log_m - x * log_ratio)
+        if not (_ACCEL_ANCHOR_MIN_MS2 <= implied_anchor <= _ACCEL_ANCHOR_MAX_MS2):
+            return
+
         if self._accel_anchor_gain_ms2 <= 0.0:
             # First valid sample: seed the anchor from this single sample
-            seed = math.exp(log_m - x * log_ratio)
             self._accel_anchor_gain_ms2 = _clamp(
-                seed, _ACCEL_ANCHOR_MIN_MS2, _ACCEL_ANCHOR_MAX_MS2,
+                implied_anchor, _ACCEL_ANCHOR_MIN_MS2, _ACCEL_ANCHOR_MAX_MS2,
             )
             self._maybe_save(now)
             return
@@ -444,8 +541,10 @@ class PedalCapacityTracker:
         lr_anchor = min(lr_anchor, 1.0)
         lr_ratio = min(lr_ratio, 0.5)
 
+        # Ratio step normalized by the lever arm: unnormalized, top gear learned
+        # it 8x faster and walked the pair's degenerate direction. See README.
         log_anchor += lr_anchor * residual
-        log_ratio += lr_ratio * x * residual
+        log_ratio += lr_ratio * x * residual / (1.0 + x * x)
 
         self._accel_anchor_gain_ms2 = _clamp(
             math.exp(log_anchor), _ACCEL_ANCHOR_MIN_MS2, _ACCEL_ANCHOR_MAX_MS2,
@@ -470,19 +569,28 @@ class PedalCapacityTracker:
             abs(self._accel_ratio_step - self._saved_accel_ratio)
             / max(self._saved_accel_ratio, 0.01)
         )
+        offset_drift = (
+            abs(self._accel_zero_offset_ms2 - self._saved_accel_offset)
+            / max(self._saved_accel_offset, 0.01)
+        )
         if (brake_drift < _SAVE_THRESHOLD
                 and anchor_drift < _SAVE_THRESHOLD
-                and ratio_drift < _SAVE_THRESHOLD):
+                and ratio_drift < _SAVE_THRESHOLD
+                and offset_drift < _SAVE_THRESHOLD):
             return
         try:
             Settings.save(values={
                 "pedal_capacity_brake_scale": round(self._brake_scale, 4),
                 "pedal_capacity_accel_anchor_gain_ms2": round(self._accel_anchor_gain_ms2, 3),
                 "pedal_capacity_accel_ratio_step": round(self._accel_ratio_step, 4),
+                "pedal_capacity_accel_zero_offset_ms2": round(
+                    self._accel_zero_offset_ms2, 3
+                ),
             })
             self._saved_brake_scale = self._brake_scale
             self._saved_accel_anchor = self._accel_anchor_gain_ms2
             self._saved_accel_ratio = self._accel_ratio_step
+            self._saved_accel_offset = self._accel_zero_offset_ms2
             self._last_save_mono = now
             logger.debug(
                 "pedal_capacity saved: brake_scale=%.4f accel_anchor=%.3f ratio=%.4f",
