@@ -819,7 +819,7 @@ with rt.data._lock:
     ego_z         = rt.data.ego_z
     ego_yaw_rad   = rt.data.ego_yaw_rad
     ego_speed     = rt.data.ego_speed         # m/s
-    ego_pitch_rad = rt.data.ego_pitch_rad     # inverted from telemetry rotationY
+    ego_pitch_rad = rt.data.ego_pitch_rad     # NEGATED grade: see §15 doubly-negated frame
     ego_steer     = rt.data.ego_steer
     ego_has_trailer = rt.data.ego_has_trailer
     ego_curvature = rt.data.ego_curvature     # None → fall back to yaw-rate proxy
@@ -883,7 +883,7 @@ double-count each trailer.
 | Yaw EMA (wrap-safe) | `smooth += 0.5 * ((raw - smooth + π) % 2π - π)` |
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
 | Target road surface (§15) | `v.position.y - 0.58 * v.size.height` (ego's is `ego_y`) |
-| Road height prediction (§15) | `m0*s + clamp(0.5*κ_v*s², ±2 m)`, `m0 = tan(ego_pitch_rad)` |
+| Road height prediction (§15) | `m0*s + clamp(0.5*κ_v*s², ±2 m)`, `m0 = tan(ego_pitch_rad)` = **minus** the grade, paired with a backwards `s` |
 | Elevation band (§15) | `1.2 + 0.0006*s²` (cap 15) `+ 0.25*height` |
 | Target road grade (§15) | `m1 = m0*sin²(Δyaw) − tan(target_pitch)*cos(Δyaw)` |
 | Vertical-curvature test (§15) | `max(\|6D/s² − 2M/s\|, \|4M/s − 6D/s²\|) ≤ max(0.006, 6/s²)` |
@@ -980,7 +980,7 @@ Two defects, both structural rather than a bad constant:
 
 ```python
 dy   = v.position.y - BODY_DATUM_FRAC * v.size.height - ego_y   # road to road
-m0   = tan(ego_pitch_rad)                                       # ego road grade
+m0   = tan(ego_pitch_rad)                                       # MINUS ego road grade
 kv   = quadratic LS fit of ego's own (arc length, elevation) history
 pred = m0 * s + clamp(0.5 * kv * s**2, +-2 m)
 ```
@@ -1023,11 +1023,14 @@ k_max = max(0.006, 6.0 / s**2)
 ```
 
 `m1` is the road grade under the target, read from its own rotation. Traffic
-euler pitch runs **opposite** to ego pitch and is accurate: on near
-co-directional traffic within 25 m the regression against ego pitch is
-slope +1.008, corr 0.974, median error 0.26 deg. Only the ego-axis component
-is evidence, so the estimate falls back to ego's own grade as the heading
-turns away:
+euler pitch is accurate: on near co-directional traffic within 25 m the
+regression against ego pitch is slope +1.008, corr 0.974, median error
+0.26 deg. It runs **opposite to `ego_pitch_rad`**, which is what the `-tan`
+below cancels; measured against ego's own travel it *is* the road grade
+(co-directional slope +0.869, corr +0.916 over 200 clips). The difference
+matters only if you touch the signs: see "the doubly-negated frame" below.
+Only the ego-axis component is evidence, so the estimate falls back to ego's
+own grade as the heading turns away:
 
 ```python
 m1 = m0 * sin(yaw_diff)**2 - tan(target_pitch) * cos(yaw_diff)
@@ -1061,12 +1064,40 @@ Gating on that is load-bearing, not tidiness: ungated it re-admits a
 perpendicular vehicle under a bridge whenever ego is pitched down at it, which
 is the original false positive.
 
+### The doubly-negated frame: do not "fix" one sign
+
+Every quantity in this section runs with the opposite sign to the physical one,
+and they cancel in pairs. Measured against ground truth (ego's own `dy/ds`
+along the direction it actually travelled, 870 clips):
+
+| quantity | truth | what the gate uses |
+|---|---|---|
+| telemetry `rotationY` | **is** the grade, +ve = climbing (slope +0.990, corr +0.972) | `thread.py` publishes `ego_pitch_rad = -rotationY`, so `m0 = -grade` |
+| traffic euler pitch | **is** the grade (co-dir slope +0.869, corr +0.916) | `target_grade` negates it, so `m1 = -grade` |
+| forward range | ego forward is `-(dx·sin+dz·cos)` (slope −0.999, corr −1.000) | `ElevationGate.step` builds `s = +(dx·sin+dz·cos)`, so `s = -forward` |
+
+Every expression pairs two of them, so the frame is exactly invariant:
+`predict` is `m0·s` plus an even `s²` term; `required_curvature` has
+`dev = dy - m0·s` and `dm/s` where `dm` and `s` both flip; `_fallback_holds` is
+`|dy - m1·s|`; everything else uses `abs(s)`.
+
+**Verified, not argued.** Running the gate twice per frame, once as shipped and
+once with all three un-negated together, gives identical suppressed-id sets on
+**71,419 of 71,419 frames** over 250 clips. Partial flips are destructive:
+pitch alone drops 0.23 % of shallow leads at 3+ deg grade, the forward axis
+alone drops 60 %. If you change one sign here you must change all three, and
+the only thing you win is readability.
+
+The one place the negation does **not** cancel is gravity, which has nothing to
+pair against: see the slope term in `core/aeb/README.md`. `MAX_EGO_GRADE` is
+public because AEB applies the same plausibility bound to it.
+
 ### Ego grade is smoothed, and absurd pitch reads level
 
 A truck pitches on its suspension over level crossings, kerbs and potholes;
 the road under it does not. Ego grade is therefore an EMA
 (`_GRADE_EMA_ALPHA` 0.15 per frame at radar's fixed 30 Hz, so a one-frame
-spike moves it by a seventh), and any reading past `_MAX_EGO_GRADE` (0.18) is
+spike moves it by a seventh), and any reading past `MAX_EGO_GRADE` (0.18) is
 discarded as level rather than clamped. Measured `|ego pitch|` p100 over the
 corpus is 0.126, so 0.18 is above anything real and a larger reading is
 always garbage. Without this, a measured 88 deg/s bounce put `m0` at +0.42 and

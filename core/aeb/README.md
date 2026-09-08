@@ -531,7 +531,8 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    a_k        = a_roll if a_roll * (t_k - lag) <= v0 else a_stop
    required_target   = max over k of a_k                 # INF when unavoidable
    required_decel    = max over targets of required_target
-   slope_accel       = g · sin(ego_pitch_rad)         # +ve = uphill (radar convention)
+   road_grade        = tan(ego_pitch_rad), 0 if |·| > MAX_EGO_GRADE
+   slope_accel       = g · sin(atan(road_grade))      # +ve = uphill
    downhill_offset   = max(−slope_accel, 0)           # gravity stealing brake force
    effective_max     = ego_decel_frac · capacity_estimate − downhill_offset
    capability_decel  = capacity_estimate − downhill_offset
@@ -570,6 +571,23 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    shipped alongside it (20 m), but it compounds with it.
    `capacity_estimate` is read from `sending_thread.data.max_brake_ms2`
    (PedalCapacityTracker) with a fallback constant.
+
+   **The slope term is the one place radar's negated pitch does not cancel.**
+   Every consumer in `core/radar/elevation.py` pairs `ego_pitch_rad` with a
+   forward axis negated the same way, so the gate is exactly sign-invariant
+   (radar README §15, "the doubly-negated frame"). Gravity has nothing to pair
+   against, so this is the only site that has to know which way is up. Do not
+   try to fix it by changing the sign in `core/radar/thread.py`: that breaks the
+   gate and leaves this term wrong anyway.
+
+   **A pose past `MAX_EGO_GRADE` reads level**, the same bound and the same
+   discard-not-clamp policy the elevation gate uses. Unclamped, a wreck, an
+   embankment or an airborne truck injected up to 9.81 m/s² into
+   `effective_required` and out of `capability_decel`; measured `|ego grade|`
+   p100 on real road is 0.126. Corpus effect of the clamp alone, over the 1,275
+   clips scored both before and after: two false positives recovered
+   (`bb8f3596`, `50df93bc`, both long weak brakings at 1.0-1.8 m/s² with no
+   threat behind them) and **zero** other clips moved by any amount.
 
    `threat_present = required_decel > 0`. Slope modifies a threat-derived
    demand, it never sources one: `warn_by_decel` and the FF branch both

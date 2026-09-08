@@ -14,6 +14,10 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ### Fixed
 - **AEB triggering while coupling a trailer**: AEB no longer reacts to a trailer sitting behind the cab while you are under 20 km/h, in reverse or forward. backing on to a fifth wheel and pulling out from under a dropped trailer both put the trailer inside the truck's path on purpose.
 
+- **Emergency braking had hills backwards**: it treated every climb as if gravity were stealing brake force, so it grabbed early going uphill, and it gave you nothing at all going downhill, which is the one case where gravity really does eat into your braking. Downhill stopping distance is now accounted for properly and climbs no longer trigger early.
+
+- **A crash or a steep drop could make AEB think the road was vertical**: if the truck ended up pitched right over, jackknifed or airborne, the hill correction ran on that attitude and could ask for full braking on its own. Anything steeper than a real road now counts as flat.
+
 ## [1.1.0-preview.21] - 2026-09-05
 this will be one of the last preview builds of v1.1.0 before the final v1.1 release. any critical bugs can be reported and will be fixed before the stable release. **thanks to everyone who has been testing and sending in AEB clips!**
 

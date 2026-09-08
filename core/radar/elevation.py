@@ -36,9 +36,9 @@ _MIN_GRADE_RANGE_M: float = 12.0
 # Target rotation outside these is not a road grade (crashed, spun, jackknifed).
 _MAX_TARGET_ROLL_DEG: float = 15.0
 _MAX_TARGET_PITCH_DEG: float = 20.0
-# Ego pitch beyond this is not a road at all (measured p100 0.126), so it reads
-# level; the EMA below is what absorbs suspension bounce at a fixed 30 Hz.
-_MAX_EGO_GRADE: float = 0.18
+# Not a road at all past this (measured p100 0.126): reads level. Public because
+# AEB's gravity term shares the bound; the EMA below absorbs suspension bounce.
+MAX_EGO_GRADE: float = 0.18
 _GRADE_EMA_ALPHA: float = 0.15
 
 # A heading this far off ego's axis carries no along-axis grade evidence.
@@ -188,7 +188,7 @@ def build_surface(
 ) -> RoadSurface:
     """Ego road plane for this frame. Pitch is the grade; history gives curvature."""
     grade = math.tan(ego_pitch_rad) if math.isfinite(ego_pitch_rad) else 0.0
-    if not math.isfinite(grade) or abs(grade) > _MAX_EGO_GRADE:
+    if not math.isfinite(grade) or abs(grade) > MAX_EGO_GRADE:
         grade = 0.0
     kappa, ok = (0.0, False)
     if track is not None:

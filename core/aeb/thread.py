@@ -21,6 +21,7 @@ from core.radar.traffic import (
     ArcPath, build_arc, arc_arc_collision, _accel_to_arc_params,
     capsule_extents, pair_body_dist_sq,
 )
+from core.radar.elevation import MAX_EGO_GRADE
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT
 from core.aeb.confirm import OccupancyConfirm
 from core.aeb.clearance import ClearanceResult, clearance_required
@@ -1900,7 +1901,12 @@ class AEBThread(BaseThread):
         time_to_brake = best_ttb if (run_collision and best_ttb < _INF) else _INF
         display_ttc = best_unbraked_ttc
 
-        slope_accel = _GRAVITY_MS2 * math.sin(ego_pitch_rad)
+        # ego_pitch_rad is the NEGATED grade and gravity has nothing to cancel
+        # against; a pose past the bound is a wreck, not a road (README slope term).
+        road_grade = math.tan(-ego_pitch_rad) if math.isfinite(ego_pitch_rad) else 0.0
+        if not math.isfinite(road_grade) or abs(road_grade) > MAX_EGO_GRADE:
+            road_grade = 0.0
+        slope_accel = _GRAVITY_MS2 * math.sin(math.atan(road_grade))
         downhill_offset = max(-slope_accel, 0.0)
         capacity_estimate = _max_brake_live
         effective_max_decel = max(
