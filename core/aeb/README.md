@@ -1432,6 +1432,24 @@ Do **not** include `speed` in the inverse formula.
 the window and the label form; `tools/aeb_review_widgets.py` holds the scene, the
 timeline strip, and the background decoder.
 
+### Ground reference markers
+
+The scene is ego-locked: ego sits at a fixed screen point and the range rings are
+drawn around it, so nothing in the background moves when ego drives. A replay of a
+straight 90 km/h run and a replay of a truck parked at a light look the same, and a
+heading change only shows up as the whole world silently swinging.
+
+`_draw_ground_markers` fixes that with a world-anchored dot lattice: a small dot at
+every 10 m of the world X/Z grid, a larger one where both axes hit a 100 m multiple.
+Because the dots are pinned to world coordinates, they slide backwards at ego's
+speed and rotate with ego's heading, which is what makes acceleration, braking and
+steering readable frame to frame. They double as a scale: dot to dot is 10 m.
+
+The lattice is culled to the window rect, so a 1200x700 view draws about 280 dots
+and costs ~1.2 ms of a 33 ms frame. `_MARKER_MAX_DOTS` bounds the candidate loop;
+past it the 10 m dots are dropped and only the 100 m ones remain, so an absurdly
+large window degrades instead of stalling the repaint.
+
 ### Decode happens off the GUI thread
 
 `ClipStore.load` plus `replay_clip` costs about 0.5 s per clip, so a `ClipLoader`

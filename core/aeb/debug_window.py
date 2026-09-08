@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QWidget
 
 from core.thread_management.registry import registry
 from .thread import AEBState, AEBSnapshot
+from .debug_grid import draw_ground_markers, MAJOR_CLR as _MARKER_CLR
 from core.radar.traffic import ArcPath
 
 logger = logging.getLogger(__name__)
@@ -147,6 +148,14 @@ class AEBDebugWindow(QWidget):
         rx, rz = _w2e(wx, wz, ex, ez, ey)
         return _e2s(rx, rz, self.width() / 2.0, self.height() * 0.75)
 
+    def _sw(self, sx: float, sy: float, ex: float, ez: float, ey: float) -> tuple[float, float]:
+        """Screen pixel back to world metres. The ego rotation is its own inverse."""
+        rx = (self.width() / 2.0 - sx) / _PPM
+        rz = (sy - self.height() * 0.75) / _PPM
+        c = math.cos(-ey)
+        s = math.sin(-ey)
+        return ex - rx * c - rz * s, ez - rx * s + rz * c
+
     def paintEvent(self, event: QPaintEvent) -> None:
         snap = self._snapshot_provider()
         acc = self._acc_provider()
@@ -165,6 +174,12 @@ class AEBDebugWindow(QWidget):
         cx, cy = self.width() / 2.0, self.height() * 0.75
 
         self._draw_grid(p, cx, cy)
+        draw_ground_markers(
+            p,
+            lambda wx, wz: self._ws(wx, wz, ex, ez, ey),
+            lambda sx, sy: self._sw(sx, sy, ex, ez, ey),
+            float(self.width()), float(self.height()),
+        )
 
         # Nearest half of vehicles get full annotations; threats and ACC lead always full.
         by_dist = sorted(
@@ -713,9 +728,9 @@ class AEBDebugWindow(QWidget):
 
     def _draw_legend(self, p: QPainter) -> None:
         lx = 10
-        ly = self.height() - 135
+        ly = self.height() - 148
         lw = 145
-        lh = 130
+        lh = 143
 
         p.setPen(QPen(_HUD_BORDER, 1))
         p.setBrush(QBrush(_HUD_BG))
@@ -732,6 +747,7 @@ class AEBDebugWindow(QWidget):
             (_EVASION_FILTER_CLR, "Evasion-filtered"),
             (_ACC_LEAD_CLR, "ACC lead"),
             (_ACC_CANDIDATE_CLR, "ACC candidate"),
+            (_MARKER_CLR, "Ground 10/100 m"),
         ]
         y = ly + 13
         for clr, label in items:
