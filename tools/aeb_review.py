@@ -9,10 +9,8 @@ if _repo not in sys.path:
     sys.path.insert(0, _repo)
 
 from collections import OrderedDict
-from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QMainWindow, QPlainTextEdit,
@@ -27,8 +25,9 @@ from tools.aeb_fetch import safe_pull_root
 from tools.aeb_review_widgets import (
     ClipLoader, DecisionStrip, Loaded, PullWorker, SceneWidget, ThumbnailView,
     action_index, recorded_band, store_origin,
-    _CLASSES, _CLASS_KEYS, _KEYMAP_TEXT, _LOCAL_BG, _REMOTE_BG,
+    _CLASSES, _CLASS_KEYS, _LOCAL_BG, _REMOTE_BG,
     _button, _clip_item, _entry_visible, _fmt, _hline, _review_stores,
+    _KEY_ACTIONS, keymap_overlay, pull_landed_in_view, pull_status_text,
 )
 
 _STEP_COARSE = 10       # frames per Shift+arrow
@@ -39,6 +38,7 @@ _PREFETCH_AHEAD = 2
 class ReviewWindow(QMainWindow):
 
     load_requested = Signal(str)
+    eval_requested = Signal(str, object)
     scan_requested = Signal(object)
     pull_requested = Signal(object)
 
@@ -57,6 +57,8 @@ class ReviewWindow(QMainWindow):
         self._window: tuple[float, float] | None = None
         self._proposal: tuple[float, float] | None = None
         self._pulling = False
+        self._charts = None
+        self._loaded: Loaded | None = None
 
         # Clip list cache: peek_metadata once per mtime+size; reload skips store re-reads.
         self._entries: list[tuple[ClipInfo, ClipMetadata | None, str]] = []
@@ -79,6 +81,8 @@ class ReviewWindow(QMainWindow):
         self.scan_requested.connect(self._loader.scan)
         self._loader.loaded.connect(self._on_loaded)
         self._loader.scanned.connect(self._on_scanned)
+        self.eval_requested.connect(self._loader.evaluate)
+        self._loader.evaluated.connect(self._on_evaluated)
         self._puller = PullWorker()
         self._puller.moveToThread(self._thread)
         self.pull_requested.connect(self._puller.pull)
@@ -141,13 +145,7 @@ class ReviewWindow(QMainWindow):
         self._scene.vehicle_picked.connect(self._on_vehicle_picked)
         center.addWidget(self._scene, 1)
 
-        self._keys_lbl = QLabel(_KEYMAP_TEXT, self._scene)
-        self._keys_lbl.setFont(QFont("Consolas", 9))
-        self._keys_lbl.setStyleSheet(
-            "background:rgba(10,10,14,230); color:#bbb; border:1px solid #444; padding:10px;"
-        )
-        self._keys_lbl.move(14, 14)
-        self._keys_lbl.adjustSize()
+        self._keys_lbl = keymap_overlay(self._scene)
 
         self._strip = DecisionStrip()
         self._strip.seeked.connect(self._seek_time)
@@ -281,7 +279,6 @@ class ReviewWindow(QMainWindow):
         key = event.key()
         mods = event.modifiers()
         shift = bool(mods & Qt.ShiftModifier)
-        ctrl = bool(mods & Qt.ControlModifier)
 
         if key in _CLASS_KEYS:
             self._class.setCurrentText(_CLASS_KEYS[key])
@@ -293,36 +290,27 @@ class ReviewWindow(QMainWindow):
             self._step(-_STEP_COARSE if shift else -1)
         elif key == Qt.Key_Right:
             self._step(_STEP_COARSE if shift else 1)
-        elif key == Qt.Key_Home:
-            self._first()
-        elif key == Qt.Key_End:
-            self._last()
-        elif key == Qt.Key_Space:
-            self._toggle_play()
-        elif key == Qt.Key_BracketLeft:
-            self._win_start()
-        elif key == Qt.Key_BracketRight:
-            self._win_end()
-        elif key == Qt.Key_Backslash:
-            self._win_clear()
-        elif key == Qt.Key_W:
-            self._win_accept()
-        elif key == Qt.Key_V:
-            self._pick_btn.setChecked(not self._pick_btn.isChecked())
-        elif key == Qt.Key_N and ctrl:
-            self._advance_to_untagged()
         elif key == Qt.Key_N:
-            self._step_clip(1)
-        elif key == Qt.Key_P:
-            self._step_clip(-1)
-        elif key in (Qt.Key_Return, Qt.Key_Enter):
-            self._save_and_advance()
-        elif key == Qt.Key_Tab:
-            self._notes.setFocus()
-        elif key == Qt.Key_F1:
-            self._keys_lbl.setVisible(not self._keys_lbl.isVisible())
+            if mods & Qt.ControlModifier:
+                self._advance_to_untagged()
+            else:
+                self._step_clip(1)
+        elif key in _KEY_ACTIONS:
+            getattr(self, _KEY_ACTIONS[key])()
         else:
             super().keyPressEvent(event)
+
+    def _toggle_pick_mode(self) -> None:
+        self._pick_btn.setChecked(not self._pick_btn.isChecked())
+
+    def _prev_clip(self) -> None:
+        self._step_clip(-1)
+
+    def _focus_notes(self) -> None:
+        self._notes.setFocus()
+
+    def _toggle_keymap(self) -> None:
+        self._keys_lbl.setVisible(not self._keys_lbl.isVisible())
 
     # Clip list
 
@@ -356,32 +344,10 @@ class ReviewWindow(QMainWindow):
     def _on_pull_finished(self, result) -> None:
         self._pulling = False
         self._update_btn.setEnabled(True)
-        if result.error:
-            self._status.setText(result.error)
+        self._status.setText(pull_status_text(result))
+        if result.error or not result.landed:
             return
-        parts = [f"saved {result.landed} clip(s) into {Path(result.root).name}"]
-        if result.failed:
-            parts.append(f"{result.failed} failed")
-        if result.saved and result.landed != result.saved:
-            parts.append(f"{result.saved - result.landed} lost to filename collision")
-        if result.landed == 0 and result.failed == 0:
-            # Never the words "up to date" on a listing alone: that claim is
-            # what hid a corpus the server had and this store did not.
-            parts = [f"nothing new to fetch: {result.already} local, "
-                     f"{result.listed} on server"]
-        if result.newest:
-            parts.append(f"newest on server {result.newest}")
-        if result.truncated:
-            parts.append("server listing incomplete")
-        self._status.setText(", ".join(parts))
-        if not result.landed:
-            return
-        try:
-            pull_root = Path(result.root).resolve()
-            visible = any(s.root.resolve() == pull_root for s in self._stores)
-        except OSError:
-            visible = True
-        if visible:
+        if pull_landed_in_view(result, self._stores):
             self._refresh_clips()
 
     @Slot(object)
@@ -517,13 +483,14 @@ class ReviewWindow(QMainWindow):
         self._inflight = self._queue.pop(0)
         self.load_requested.emit(self._inflight)
 
-    @Slot(str, object, object)
-    def _on_loaded(self, path: str, clip, frames) -> None:
+    @Slot(str, object, object, object)
+    def _on_loaded(self, path: str, clip, frames, trace) -> None:
         self._inflight = None
         if clip is not None:
             self._cache[path] = Loaded(
                 clip=clip, frames=frames,
                 proposal=recorded_band(frames), action_idx=action_index(frames),
+                trace=trace,
             )
             self._cache.move_to_end(path)
             while len(self._cache) > _CACHE_MAX:
@@ -547,6 +514,7 @@ class ReviewWindow(QMainWindow):
     def _show(self, path: str, loaded: Loaded) -> None:
         self._clip = loaded.clip
         self._frames = loaded.frames
+        self._loaded = loaded
         self._proposal = loaded.proposal
         m = loaded.clip.metadata
         self._clip_name_lbl.setText(m.clip_id)
@@ -564,6 +532,7 @@ class ReviewWindow(QMainWindow):
         self._strip.set_proposal(self._proposal)
         self._idx = loaded.action_idx
         self._load_label_into_form(loaded.clip)
+        self._push_charts()
         self._refresh()
         self._prefetch()
 
@@ -606,6 +575,9 @@ class ReviewWindow(QMainWindow):
             )
         self._target_lbl.setText("none" if self._target_vid is None else f"#{self._target_vid}")
         self._strip.set_window(self._window)
+        if self._charts is not None:
+            self._charts.set_window(self._window)
+            self._charts.set_target(self._target_vid)
         warn = class_window_warning(self._class.currentText(), self._window is not None)
         self._warn_lbl.setText(f"⚠ {warn}" if warn else "")
 
@@ -694,6 +666,40 @@ class ReviewWindow(QMainWindow):
                 self._status.setText("saved; no untagged clips left in this filter")
                 return
 
+    # Filter charts
+
+    def _toggle_charts(self) -> None:
+        """Open (or re-show) the tuning window. Built on first use, kept afterwards."""
+        if self._charts is None:
+            from tools.aeb_filter_charts import FilterChartWindow
+
+            self._charts = FilterChartWindow.attached_to(self)
+            self._push_charts()
+        elif self._charts.isVisible():
+            self._charts.hide()
+            self.setFocus()
+            return
+        self._charts.show()
+        self._charts.raise_()
+
+    def _push_charts(self) -> None:
+        """Hand the chart window the decoded clip, and ask for the re-run band."""
+        if self._charts is None or self._loaded is None:
+            return
+        self._charts.show_clip(self._loaded, self._frames, self._window,
+                               self._target_vid, self._cur_t())
+        if self._loaded.evaluated is None:
+            self.eval_requested.emit(str(self._path), self._loaded.clip)
+
+    @Slot(str, object)
+    def _on_evaluated(self, path: str, track) -> None:
+        """The re-run decision landed; it belongs to whichever clip asked for it."""
+        cached = self._cache.get(path)
+        if cached is not None:
+            cached.evaluated = track or []
+        if path == str(self._path) and self._charts is not None:
+            self._charts.set_replayed(track or [])
+
     # Transport
 
     def _cur_t(self) -> float:
@@ -747,6 +753,8 @@ class ReviewWindow(QMainWindow):
         f = self._frames[self._idx]
         self._scene.set_snapshot(f.snapshot)
         self._strip.set_cursor(f.t_rel)
+        if self._charts is not None:
+            self._charts.set_cursor(f.t_rel)
         self._time_lbl.setText(f"t={f.t_rel:.2f}s  ({self._idx + 1}/{len(self._frames)})")
         la = f.live_aeb
         state = "BRAKE" if la.aeb_brake else ("WARN" if la.aeb_warn else "standby")
@@ -760,6 +768,9 @@ class ReviewWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._play_timer.stop()
+        if self._charts is not None:
+            self._charts.deleteLater()
+            self._charts = None
         self._thread.quit()
         self._thread.wait(2000)
         super().closeEvent(event)

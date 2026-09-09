@@ -1448,7 +1448,8 @@ Do **not** include `speed` in the inverse formula.
 
 `python -m tools.aeb_review` (dev only, never shipped). `tools/aeb_review.py` holds
 the window and the label form; `tools/aeb_review_widgets.py` holds the scene, the
-timeline strip, and the background decoder.
+timeline strip, the key table and the background decoder; `tools/aeb_filter_trace.py`
+and `tools/aeb_filter_charts.py` hold the `C` filter-tuning window.
 
 ### Ground reference markers
 
@@ -1497,6 +1498,40 @@ on every `ReviewFrame` as `raw_target_ms2`. It is exact except for the
 latched-hold floor (`latched_min_decel_frac`), whose state is not recorded, so it
 under-reads during a latched hold. It is never wrong about onset timing, which is
 what it is drawn for. `required_decel_ms2` is already raw and needs no rebuild.
+
+### Filter tuning charts (C)
+
+The scene answers "what did AEB decide". It cannot answer "why did this vehicle's
+speed read 42 m/s while it was doing 36", which is a radar-filter question and the
+one that a suspicious clip usually turns into. `C` opens a separate top-level window
+plotting one vehicle's chain over the clip: the speed chain (raw through
+`speed_ema`, `speed_corr` and `acc_speed`), the accel chain against its gate
+thresholds, the step 4 gates including `tau`, the four lag entry gates, and a row
+per filter state flag. `tools/README.md` documents the lanes and the axes.
+
+Nothing is simulated. `ClipLoader` runs `decode_radar_stream` once and derives both
+the `ReviewFrame` list and the trace from it, so the charts cost about 0.1 s per
+clip on the loader thread and nothing on the GUI thread. Values are read off the
+replayed `Vehicle` objects, or rebuilt with the production helpers.
+
+Two decision bands sit above the lanes: `rec` from the clip, and `now` from
+`clip_eval.run_headless` at the working tree's constants, with the disagreements
+ticked. The re-run is 0.8 s a clip, more than the rest of the load put together,
+so it is a lazy follow-up job that only fires while the chart window is open. Do
+not move it into `ClipLoader.load`: that cost lands on every clip in a tagging
+pass, which is the one thing the review tool is optimised against.
+
+The step 4 gates are the exception: `_acc_speed_step` returns only a speed, so the
+tool restates that arithmetic to expose `tau`, `ramp`, `consistency` and `ff_gate`.
+Every frame carries the residual between the rebuilt `acc_speed` and the recorded
+one, and `tests/aeb/test_filter_charts.py` fails if they ever disagree. Do not
+relax that test: without it the gate lane can drift away from `traffic.py` and keep
+drawing confident, wrong curves.
+
+The two windows share one clock and one keymap. Scrubbing either moves both, the
+vehicle picker follows the labelled target until it is used by hand, and every
+review binding still works while the chart window has focus, so a tagging pass
+never has to click back.
 
 ### Should-trigger window proposal
 

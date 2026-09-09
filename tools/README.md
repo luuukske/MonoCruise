@@ -10,6 +10,7 @@ hygiene rules apply to every file in it.
 | `acc_transition_probe.py` | Is the command smooth as the lead barely brakes? Sweeps `a_lead` through zero for the gain steps, then runs closed loop against noisy telemetry. Renders before/after in one process. |
 | `acc_probe_rig.py` | Measurement half: loads a checkout, publishes a synthetic lead, reads the cap. Import this directly to build a new ACC probe without the map's presentation. |
 | `aeb_clearance_probe.py`, `aeb_fetch.py`, `aeb_review.py`, `aeb_review_widgets.py` | AEB clip corpus tooling. See `core/aeb/README.md`. |
+| `aeb_filter_trace.py`, `aeb_filter_charts.py` | The `C` window in the review tool: what the radar speed / accel / lag filters did to one vehicle over a clip. Documented below. |
 | `aeb_agent/` | Headless clip review for an agent: text dossiers instead of watching a clip, scenario tags, mistag audit, and a validated propose/apply/revert path for labels. Read `tools/aeb_agent/README.md` first. |
 | `accel_envelope_probe.py` | What does the CC accel ceiling command at each speed, and how long is 0-50 / 0-90? Prints the per-profile table plus a capability-limited rig model (`--rig loaded`) so the light and loaded regimes can be compared. |
 | `plot_coast.py` | Coast-fit plots for the mapper. |
@@ -217,3 +218,102 @@ cap)`), so the printed onset times are a floor. Mapper lag, brake build-up and
 the ~20 Hz physics tick all add on top. `clamp` is the time the cap first
 reaches `max_decel_ms2`; a value there means the smooth law did not get the job
 done and the TTC overlay took over.
+
+---
+
+## aeb_filter_charts.py
+
+Answers "why did this vehicle's speed, acceleration or freeze state look like
+that", against a clip already in the corpus. Press `C` in `tools/aeb_review.py`.
+
+It is not a simulator. Every number is read off the `Vehicle` objects that
+`decode_radar_stream` already produced for the replay, so what is drawn is what
+the filter did on that clip, at the constants in the working tree. Changing a
+constant and reloading the clip redraws it.
+
+### Where the numbers come from
+
+`aeb_filter_trace.build_trace` walks one sample per radar frame per vehicle
+within `TRACE_RANGE_M`, plus any id the live AEB ever tracked or suppressed.
+Most signals are attributes (`speed`, `acc_speed`, `_speed_ema`, `acceleration`,
+`_raw_speed`, the state flags). The rest are rebuilt with the production helpers
+from `core/radar/traffic.py`, never re-derived by hand:
+
+* `raw_long`, `brake_floor`, `accel_trend`, `accel_long`, `lag_raw_recent`,
+  `lag_raw_decay` and `lag_freeze_dur` all call the same private helper the
+  filter calls.
+* The step 4 gates (`ramp`, `consistency`, `ff_gate`, `accel_factor`,
+  `speed_factor`, `tau`) have no such helper: `_acc_speed_step` returns only the
+  speed. They are the one place the arithmetic is restated. `_RESIDUAL` carries
+  the rebuilt `acc_speed` minus the recorded one on every frame, and
+  `test_step4_rebuild_reproduces_the_recorded_acc_speed` fails the moment they
+  disagree. Measured bit-exact over 50,119 samples on 25 corpus clips; a 1%
+  change to the rebuilt `tau` fails the test.
+
+### Which frames carry which signals
+
+Sub-frames (`dt < _LOCATION_UPDATE_FREQUENCY`), clock re-anchors, lag freezes,
+position-mismatch holds and a track's first full update all skip the chain. Half
+the radar frames in a typical clip are sub-frames, so this is the normal case,
+not an edge:
+
+* `st_subframe` marks a copy, `st_bypassed` marks a real early return. They are
+  never both set.
+* Step 4 internals are **held** across sub-frames, because the filter genuinely
+  still holds them, and left blank on a bypass.
+* The lag gates only evaluate on full frames, which is why a trace is drawn
+  through a hole up to `_MAX_GAP_S` rather than broken at every gap. Breaking at
+  every gap left the lane empty: alternate samples were `NaN` so no two adjacent
+  points ever existed.
+
+`_thin` exists for the same reason. About half of consecutive samples are exact
+repeats, so plotting every one draws a staircase whose treads are the radar rate
+rather than anything the vehicle did. A run of equal values contributes its first
+sample, plus its last when the run outlasted `_HOLD_MIN_S`: a one or two frame
+copy becomes a line straight from update to update, while a genuine hold still
+reads flat with a steep exit. Curves are drawn antialiased at float coordinates;
+the grid, the state ticks and the decision band stay on integer pixels because
+they are single-pixel verticals that antialiasing only blurs.
+
+### Reading the lanes
+
+| Lane | Axis | What it answers |
+|---|---|---|
+| speed chain | m/s, auto | Where does AEB's `speed` sit against ACC's `acc_speed`, and how far behind the raw input is each. |
+| accel chain | m/s², symmetric | Does `acc_accel` reach the lead's real deceleration, and did the hard-brake floor engage. |
+| step 4 gates | 0..1, `tau` at half scale | Which term is setting the ACC filter's time constant right now. |
+| lag entry gates | log2 of gate over threshold | Which of the four entry gates is holding a freeze open or shut. |
+| filter state | one row per flag | Freeze, short window, mismatch, crash, standstill, sub-frame, bypass. |
+
+Above the lanes sit two decision bands. **rec** is what the clip recorded live.
+**now** is the same clip re-run through `clip_eval.run_headless` at the working
+tree's constants, with a cyan tick wherever the two disagree. Everything below is
+drawn at the current constants, so a recorded-only band could not be compared
+against it; the second row is what makes "my change moved this" legible on the
+same page. The re-run costs about 0.8 s a clip, more than the whole rest of the
+load, so it is a **separate job the review window only asks for while the chart
+window is open**, and it arrives after the clip is already on screen. The row
+reads `now recomputing...` until it lands.
+
+The lag lane needs its axis explained. The four gates run between roughly 0.1x
+and 13x their own thresholds, so no single linear range shows all four. Each is
+plotted as `log2(gate / its own threshold)`: **zero is the threshold**, +1 is
+twice it, -1 is half it, clipped at ±3. A gate crossing zero is a gate changing
+its answer.
+
+The auto ranges use a percentile over the trace **past `_SETTLE_S`**. A fresh
+track's least-squares slope runs through two or three points and reaches tens of
+m/s², which is an artefact of the fit rather than of the vehicle; ranging on the
+whole trace put every real signal flat against the axis.
+
+### Workflow
+
+The chart window is a separate top level, so it belongs on a second monitor. It
+shares the review window's clock: scrubbing either moves both, and every review
+binding still works while the chart window has focus, so tagging never needs a
+click back. The vehicle picker follows the labelled target by default and
+releases that link the moment it is used by hand.
+
+`ClipLoader` builds the trace on its own thread from the decode the replay
+already paid for, so opening the charts costs about 0.1 s per clip in the
+background and nothing on the GUI thread.

@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QFrame, QLabel, QListWidgetItem, QPushButton, QWidget
 
-from core.aeb.clip_replay import ReviewFrame, replay_clip
+from core.aeb.clip_replay import ReviewFrame, decode_radar_stream, replay_clip
 from core.aeb.clip_schema import Clip, ClipMetadata
 from core.aeb.clip_store import ClipInfo, ClipStore, contributed_clip_root, default_clip_root
 from core.aeb.debug_window import AEBDebugWindow
@@ -41,6 +42,8 @@ class Loaded:
     frames: list[ReviewFrame]
     proposal: tuple[float, float] | None
     action_idx: int
+    trace: object = None
+    evaluated: object = None
 
 
 def recorded_band(frames: list[ReviewFrame]) -> tuple[float, float] | None:
@@ -108,7 +111,8 @@ class ThumbnailView(QLabel):
 class ClipLoader(QObject):
     """Store reads off the GUI thread: load plus replay costs ~0.5 s per clip."""
 
-    loaded = Signal(str, object, object)   # path, Clip | None, list[ReviewFrame]
+    loaded = Signal(str, object, object, object)   # path, Clip | None, frames, ClipTrace
+    evaluated = Signal(str, object)                # path, list[(t_rel, state)] | None
     # list[tuple[ClipInfo, ClipMetadata | None, str]] with origin "local"|"remote"
     scanned = Signal(object)
 
@@ -120,9 +124,39 @@ class ClipLoader(QObject):
 
     @Slot(str)
     def load(self, path: str) -> None:
+        """Decode once, then derive both the review frames and the filter trace from it."""
+        from tools.aeb_filter_trace import build_trace
+
         clip = self._io.load(path)
-        frames = replay_clip(clip) if clip is not None else []
-        self.loaded.emit(path, clip, frames)
+        if clip is None:
+            self.loaded.emit(path, None, [], None)
+            return
+        stream = decode_radar_stream(clip)
+        frames = replay_clip(clip, stream=stream)
+        try:
+            trace = build_trace(clip, stream=stream)
+        except Exception:
+            trace = None   # a chart is never worth losing the clip over
+        self.loaded.emit(path, clip, frames, trace)
+
+    @Slot(str, object)
+    def evaluate(self, path: str, clip) -> None:
+        """Re-run the AEB pipeline at the working tree's constants for the chart band.
+
+        About 0.8 s a clip, well past the rest of the load, so it is a separate job
+        the review window only asks for while the chart window is open.
+        """
+        from core.aeb.clip_eval import run_headless
+
+        try:
+            ticks = run_headless(clip, stream=decode_radar_stream(clip))
+        except Exception:
+            self.evaluated.emit(path, None)
+            return
+        self.evaluated.emit(path, [
+            (tk.t_rel, 2 if tk.aeb_brake else (1 if tk.aeb_warn else 0))
+            for tk in ticks
+        ])
 
     @Slot(object)
     def scan(self, known: dict) -> None:
@@ -406,6 +440,25 @@ _CLASS_KEYS = {
 _LOCAL_BG = QColor(30, 32, 38)
 _REMOTE_BG = QColor(30, 40, 34)
 
+# Single-key bindings, key -> ReviewWindow method. Shift and Ctrl variants and the
+# class digits are handled separately in ReviewWindow.keyPressEvent.
+_KEY_ACTIONS = {
+    Qt.Key_Home: "_first",
+    Qt.Key_End: "_last",
+    Qt.Key_Space: "_toggle_play",
+    Qt.Key_BracketLeft: "_win_start",
+    Qt.Key_BracketRight: "_win_end",
+    Qt.Key_Backslash: "_win_clear",
+    Qt.Key_W: "_win_accept",
+    Qt.Key_V: "_toggle_pick_mode",
+    Qt.Key_C: "_toggle_charts",
+    Qt.Key_P: "_prev_clip",
+    Qt.Key_Return: "_save_and_advance",
+    Qt.Key_Enter: "_save_and_advance",
+    Qt.Key_Tab: "_focus_notes",
+    Qt.Key_F1: "_toggle_keymap",
+}
+
 _KEYMAP_TEXT = """\
 CLIPS      N / P             next / prev clip
            Ctrl+N            next untagged
@@ -426,10 +479,53 @@ WINDOW     [  set start at cursor
 
 TARGET     V  pick-on-scene, then click the vehicle
 
+CHARTS     C  filter tuning window (speed / accel / lag)
+
 SAVE       Enter  save and go to next untagged
 
 NOTES      Tab into notes, Esc back out
 F1         hide this panel"""
+
+
+def pull_status_text(result) -> str:
+    """One status line for a tools.aeb_fetch.PullResult."""
+    if result.error:
+        return result.error
+    parts = [f"saved {result.landed} clip(s) into {Path(result.root).name}"]
+    if result.failed:
+        parts.append(f"{result.failed} failed")
+    if result.saved and result.landed != result.saved:
+        parts.append(f"{result.saved - result.landed} lost to filename collision")
+    if result.landed == 0 and result.failed == 0:
+        # Never the words "up to date" on a listing alone: that claim is what hid a
+        # corpus the server had and this store did not.
+        parts = [f"nothing new to fetch: {result.already} local, "
+                 f"{result.listed} on server"]
+    if result.newest:
+        parts.append(f"newest on server {result.newest}")
+    if result.truncated:
+        parts.append("server listing incomplete")
+    return ", ".join(parts)
+
+
+def pull_landed_in_view(result, stores) -> bool:
+    """Did the pull write into a store this window is showing? Unreadable roots refresh."""
+    try:
+        root = Path(result.root).resolve()
+        return any(store.root.resolve() == root for store in stores)
+    except OSError:
+        return True
+
+
+def keymap_overlay(parent: QWidget) -> QLabel:
+    """The F1 key card, floated over the scene."""
+    lbl = QLabel(_KEYMAP_TEXT, parent)
+    lbl.setFont(QFont("Consolas", 9))
+    lbl.setStyleSheet(
+        "background:rgba(10,10,14,230); color:#bbb; border:1px solid #444; padding:10px;")
+    lbl.move(14, 14)
+    lbl.adjustSize()
+    return lbl
 
 
 def _entry_visible(meta: ClipMetadata | None, search: str, cls_filter: str) -> bool:

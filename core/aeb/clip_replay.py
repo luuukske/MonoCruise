@@ -265,16 +265,27 @@ def nearest_frame_t(frame_t: list[float], t: float) -> float | None:
     return min(frame_t, key=lambda ft: abs(ft - t))
 
 
-def replay_clip(clip: Clip) -> list[ReviewFrame]:
-    """Decode + smooth the radar stream and build one ReviewFrame per AEB tick."""
+def clip_t0(clip: Clip) -> float:
+    """Clip-relative time origin. Every t_rel in the review tools is measured from it."""
+    ts = [f.t_mono for f in clip.radar_frames] + [tk.t_mono for tk in clip.aeb_ticks]
+    return min(ts) if ts else 0.0
+
+
+def replay_clip(clip: Clip, *, stream=None) -> list[ReviewFrame]:
+    """Decode + smooth the radar stream and build one ReviewFrame per AEB tick.
+
+    ``stream`` accepts an existing ``decode_radar_stream`` result so a caller that
+    also needs the raw stream pays the decode once.
+    """
     if not clip.aeb_ticks and not clip.radar_frames:
         return []
 
-    veh_by_t, ego_by_t, frame_t, _off_by_t = decode_radar_stream(clip)
+    veh_by_t, ego_by_t, frame_t, _off_by_t = (
+        stream if stream is not None else decode_radar_stream(clip)
+    )
     frames = sorted(clip.radar_frames, key=lambda f: f.t_mono)
 
-    t_candidates = [f.t_mono for f in frames] + [tk.t_mono for tk in clip.aeb_ticks]
-    t0 = min(t_candidates) if t_candidates else 0.0
+    t0 = clip_t0(clip)
 
     # One blender for the whole clip: its One-Euro state must carry tick to tick
     # the way it does across live AEB loops, or the drawn arcs are unsmoothed.

@@ -97,9 +97,15 @@ def _snapshot_tuple(ego, vehicles, radar_t_mono: float, off_ids=frozenset()):
 
 
 def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
-                 warm: bool = True) -> list[EvalTick]:
-    """Re-run the AEB pipeline over the clip under ``cal``; one EvalTick per tick."""
-    veh_by_t, ego_by_t, frame_t, off_by_t = decode_radar_stream(clip)
+                 warm: bool = True, stream=None) -> list[EvalTick]:
+    """Re-run the AEB pipeline over the clip under ``cal``; one EvalTick per tick.
+
+    ``stream`` accepts an existing ``decode_radar_stream`` result so a caller that
+    already decoded the clip does not pay for it twice.
+    """
+    veh_by_t, ego_by_t, frame_t, off_by_t = (
+        stream if stream is not None else decode_radar_stream(clip)
+    )
     t = _make_headless(cal)
     if warm:
         _apply_warm_state(t, clip.metadata.aeb_warm_state)
