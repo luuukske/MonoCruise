@@ -148,6 +148,25 @@ def _lag_freeze_duration(gap_3d: float, ego_speed: float) -> float:
     return _LAG_FREEZE_LOG_K * math.log(ttc / _LAG_FREEZE_TTC_LO)
 
 
+def _hold_coast_speed(prev_speed: float, accel: float, dt: float) -> float:
+    """Advance a held speed by its own frozen deceleration. See core/radar/README.md §7.
+
+    A hold has no new position evidence, so the last measured acceleration is the
+    best estimate of what the target did during it. Only the component that shrinks
+    |speed| is integrated: extrapolating a target *faster* would invent motion it may
+    not have and bias every consumer toward less braking, which is the one direction a
+    stalled stream must never move. The magnitude never crosses zero.
+    """
+    if dt <= 0.0 or accel * prev_speed >= 0.0:
+        return prev_speed
+    return math.copysign(max(0.0, abs(prev_speed) - abs(accel) * dt), prev_speed)
+
+
+def _min_magnitude(a: float, b: float) -> float:
+    """Whichever of two same-signed speeds is closer to zero."""
+    return a if abs(a) <= abs(b) else b
+
+
 def _raw_path_speed(
     history: list[tuple[float, float, float]],
     start: int,
@@ -1151,6 +1170,37 @@ class Vehicle:
         self._raw_brake_active = False
         self._raw_brake_converged_frames = 0
 
+    def _advance_held_kinematics(
+        self,
+        prev: "Vehicle",
+        dt: float,
+        decay: float | None = None,
+    ) -> None:
+        """Coast a held frame on its frozen accel. See core/radar/README.md §7.
+
+        Both holds (lag freeze, position mismatch) suspend the position stream, and
+        holding the *speed* with it made a hard-braking target read as still cruising
+        for the whole hold. Each lane keeps its own accel and coasts on it. ``decay``,
+        when given, is the lag freeze's ramp toward the stationary reading it releases
+        into; the slower of the two is used so the release stays continuous.
+        """
+        speed = _hold_coast_speed(prev.speed, prev.acceleration, dt)
+        acc_speed = _hold_coast_speed(prev.acc_speed, prev.acc_accel, dt)
+        if decay is not None:
+            speed = _min_magnitude(speed, prev.speed * decay)
+            acc_speed = _min_magnitude(acc_speed, prev.acc_speed * decay)
+        self.speed = speed
+        self.acc_speed = acc_speed
+        self.acceleration = prev.acceleration
+        self.acc_accel = prev.acc_accel
+        self._smooth_accel = prev._smooth_accel
+        self._acc_smooth_accel = prev._acc_smooth_accel
+        # Carry the coasted value into the filter state, or the release frame blends
+        # against the pre-hold speed and undoes the coast in one step.
+        self._smooth_speed = speed
+        self._speed_ema = speed
+        self._acc_speed_ema = acc_speed
+
     def _lag_entry_allowed(self, prev: "Vehicle", dt: float) -> bool:
         """Gate a new lag freeze on raw-stream evidence. See core/radar/README.md §7."""
         if prev._raw_brake_active:
@@ -1628,15 +1678,9 @@ class Vehicle:
                     self._smooth_z = prev._smooth_z
                     self._smooth_yaw = prev._smooth_yaw
                     self.angular_velocity = prev.angular_velocity
-                    self.speed = prev.speed * (1.0 - _lag_frac * _lag_frac)
-                    self.acceleration = 0.0
-                    self._smooth_accel = 0.0
-                    self._smooth_speed = self.speed
-                    self._speed_ema = self.speed
-                    self._acc_speed_ema = self.speed
-                    self._acc_smooth_accel = 0.0
-                    self.acc_speed = self.speed
-                    self.acc_accel = 0.0
+                    self._advance_held_kinematics(
+                        prev, dt, decay=1.0 - _lag_frac * _lag_frac,
+                    )
                     self._raw_speed = 0.0
                     if self._smooth_x is not None:
                         self.position.x = self._smooth_x
@@ -1663,18 +1707,14 @@ class Vehicle:
         raw_av = _yaw_diff_deg / dt
         self.angular_velocity = 0.0 if abs(raw_av) > _MAX_ANGULAR_VELOCITY else raw_av
 
-        # Position mismatch: hold smooth position and carry speed; yaw already updated above.
+        # Position mismatch: hold smooth position, coast speed on the frozen accel;
+        # yaw already updated above.
         if _skip_position_update:
             self._raw_brake_confirm_frames = 0
             if self._smooth_x is not None:
                 self.position.x = self._smooth_x
                 self.position.z = self._smooth_z
-            self.speed = prev.speed
-            self.acceleration = prev.acceleration
-            self.acc_speed = prev.acc_speed
-            self.acc_accel = prev.acc_accel
-            self._smooth_accel = prev._smooth_accel
-            self._acc_smooth_accel = prev._acc_smooth_accel
+            self._advance_held_kinematics(prev, dt)
             return
 
         # World position is unfiltered: arcs and debug use true coordinates.

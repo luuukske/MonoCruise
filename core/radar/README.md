@@ -353,8 +353,9 @@ is taken in full: tau 2.0 -> 0.1997, 1.6 -> 0.2462, 1.4 -> 0.2775, 1.2 -> 0.3158
 both chains, so a crashed vehicle reaches ACC through the same unfiltered
 estimate as AEB with nothing extra in between.
 
-Position mismatch holds active state without advancing it and clears an
-unconfirmed entry. Sub-frames copy state unchanged. Lag-freeze early returns
+Position mismatch holds the *brake-transient* state without advancing it and
+clears an unconfirmed entry; the speed itself does advance, see "Held frames
+coast" below. Sub-frames copy state unchanged. Lag-freeze early returns
 and clock re-anchors reset it; a culled/disappeared id loses it with the
 `Vehicle` instance. TMP lag freeze still runs first and owns the output while
 active.
@@ -570,7 +571,7 @@ Sample points: 0.3 s → 0.00 s, 0.5 s → 0.10 s, 1.0 s → 0.23 s, 2.0 s → 0
 | Elapsed since first frozen frame | Action |
 |----------------------------------|--------|
 | `freeze_dur == 0` (TTC ≤ 0.3 s)  | **No freeze**: reset `_lag_since`, fall through. A real stop close to ego is treated as real immediately. |
-| 0 – `freeze_dur` | **Freeze**: hold last position; decay speed quadratically: `speed = prev_speed × (1 − frac²)` where `frac = elapsed / freeze_dur`; force `acceleration = 0`; return early. AEB sees the vehicle at its last known position decelerating toward 0. |
+| 0 – `freeze_dur` | **Freeze**: hold last position; coast speed on the frozen accel, capped by the quadratic ramp `prev_speed × (1 − frac²)` where `frac = elapsed / freeze_dur` (see "Held frames coast", below); return early. AEB sees the vehicle at its last known position decelerating toward 0. |
 | ≥ `freeze_dur` | **Release**: set `lag_confirmed = True`, fall through to normal update. Speed falls to 0. AEB detects the stopped obstacle naturally via arc collision. |
 | Raw position moves again | Reset `_lag_since = None`, `lag_confirmed = False`. |
 
@@ -608,13 +609,57 @@ Detects out-of-order packets where the raw position jumps backward along the hea
 
 **Detection:** `dot(raw_disp, prev_smooth_fwd) < -_POS_MISMATCH_BACKWARD_THRESHOLD`, which is **0.00 m**: any backward component at all flags the frame.
 
-**Action:** Increment `_pos_mismatch_frames` counter; hold `_smooth_x/z`; carry `speed`, `acceleration`, `acc_speed` and `acc_accel` from prev; return early **after** yaw EMA and angular_velocity have run. Path, arc construction, and all other state are unaffected.
+**Action:** Increment `_pos_mismatch_frames` counter; hold `_smooth_x/z`; carry `acceleration` and `acc_accel` from prev and coast `speed` and `acc_speed` on them (see "Held frames coast", below); return early **after** yaw EMA and angular_velocity have run. Path, arc construction, and all other state are unaffected.
 
 **Cap:** When `_POS_MISMATCH_MAX_FRAMES` is reached (**5** frames), the counter resets and raw position is passed through on the next frame regardless.
 
 **Known gap, deliberately left open.** The detection reference is `prev._raw_x/_raw_z`, which advances on held frames, so the guard sees the *rate* of a rewind and not the fact that the position is still behind the last sample `_position_history` accepted. It therefore releases as soon as motion turns forward, and the sample it then appends can sit behind the previous history entry (0.27 m on clip 1f14b55a). Measured on 120 clips / 1901 TMP tracks: 13 % of clips admit at least one backward step, median 0.24 m, worst 4.3 m.
 
 Two closures were built and measured against the corpus, and **both cost score**: referencing the last accepted sample and reseeding history at the cap (−374.71), and clamping a backward step to zero forward progress at the append (−411.80), against **−421.00** for leaving it alone. Once the raw-speed fit stopped anchoring on `window[0]` (see "Why the intercept is free"), a lone backward sample carries only its 1/20 share of the fit, and the residual step on 1f14b55a is +0.47 m/s with or without either guard. Do not re-add a guard here on correctness grounds alone: the defect is real but the estimator no longer amplifies it, and every version tried traded AEB outcome for buffer hygiene. Re-measure if `_position_history` gains a consumer that *is* sensitive to a single backward sample.
+
+### Held frames coast on their frozen accel
+
+Both holds above suspend the raw position stream, and both used to suspend the
+*speed* with it. That is safe on a cruising target and dangerous on a braking
+one: a hold reports the target still doing what it was doing at hold entry, so a
+lead standing on the brakes reads as coasting for the whole hold, and every
+consumer (AEB required-decel, ACC gap law) under-reads the threat.
+
+`Vehicle._advance_held_kinematics` replaces the hold with a coast. Each lane
+keeps its own frozen accel and integrates on it:
+
+```python
+speed     = _hold_coast_speed(prev.speed,     prev.acceleration, dt)
+acc_speed = _hold_coast_speed(prev.acc_speed, prev.acc_accel,    dt)
+```
+
+`_hold_coast_speed` integrates only the component that shrinks `|speed|`
+(`accel * speed < 0`), never crosses zero, and never flips sign. The asymmetry
+is deliberate: a hold has no evidence, and extrapolating a target *faster* would
+invent motion it may not have and move every consumer toward less braking, the
+one direction a stalled stream must never move. A target that was accelerating
+into the hold therefore still reads flat, exactly as it did before.
+
+The lag freeze passes its `1 − frac²` ramp in as `decay` and the slower of the
+two wins, so the freeze still ramps into the stationary reading it releases
+into, and the coast only binds early in the window where `frac²` is ~0. Because
+the entry gates only open a freeze on a target with no measured decay
+(gates 3 and 4), the frozen accel there is usually ~0 and the coast is inert;
+position mismatch has no such gates and is where this actually bites.
+
+The coasted value is written to `_smooth_speed`, `_speed_ema` and
+`_acc_speed_ema` as well, or the release frame blends the new raw sample
+against the pre-hold speed and undoes the coast in a single step. The
+`_speed_ema_history` LS windows are deliberately *not* appended to during a
+hold: they keep the hole, so the accel fit at release measures a real slope over
+real elapsed time instead of a fabricated one.
+
+**Measured** (792-clip corpus, `tools/aeb_corpus_run/score_once.py`):
+−431.57 → −435.01, 9 clips moved, no verdict flipped in either direction
+(FN 39, FP 37, false-warn 15, late 12 both before and after). The gain is TP
+quality: engagement moves earlier on targets whose brake was being held flat.
+Found on clip 2da7f2fb, where a 5-frame rewind at t ≈ 7.1 s pinned a lead
+braking at −4.6 m/s² to 14.17 m/s for 0.27 s while the gap closed 51.6 → 45.5 m.
 
 ### Crash detection (TMP only, full frames only)
 

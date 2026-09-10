@@ -19,6 +19,8 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 - **Traffic braking hard could briefly read as speeding up**: on TruckersMP a vehicle slowing in front of you could suddenly show a jump in speed about a second later, well after the moment that caused it. Their speed is now read more accurately while they brake, so ACC and emergency braking respond to what they are actually doing.
 
+- **Traffic hard braking the moment their position stuttered**: Their braking now carries through the lag freeze gap instead of pausing with it, so ACC and emergency braking keep reacting to a hard stop while it is happening.
+
 - **AEB triggering while coupling a trailer**: AEB no longer reacts to a trailer sitting behind the cab while you are under 20 km/h, in reverse or forward. backing on to a fifth wheel and pulling out from under a dropped trailer both put the trailer inside the truck's path on purpose.
 
 - **Emergency braking had hills backwards**: it treated every climb as if gravity were stealing brake force, so it grabbed early going uphill, and it gave you nothing at all going downhill, which is the one case where gravity really does eat into your braking. Downhill stopping distance is now accounted for properly and climbs no longer trigger early.
