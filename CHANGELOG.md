@@ -11,6 +11,9 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Changed
+- **Fewer clips sent when you help improve AEB/ACC**: clips where nothing ever came near you, and most of the ordinary "following a car at low speed" ones, are now kept on your machine instead of being sent. You will see the sent notification less often, and the clips that do go carry situations worth testing against.
+
 ### Fixed
 - **Traffic braking hard could briefly read as speeding up**: on TruckersMP a vehicle slowing in front of you could suddenly show a jump in speed about a second later, well after the moment that caused it. Their speed is now read more accurately while they brake, so ACC and emergency braking respond to what they are actually doing.
 

@@ -131,6 +131,9 @@ class Settings(metaclass=_SingletonMeta):
     # Tell the user when a clip leaves the machine. Default on deliberately: a
     # silent background upload is what the notification exists to disprove.
     aeb_contribute_notify: bool = True
+    # How many straight sub-40 clips this machine has triaged. Persisted so the
+    # one-in-ten sample keeps its cadence across restarts, not a user knob.
+    aeb_triage_straight_seen: int = 0
 
     # Cruise/ACC/Custom buttons
     cc_dec_button: object = None

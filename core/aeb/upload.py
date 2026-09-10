@@ -19,7 +19,10 @@ from pathlib import Path
 from typing import Callable
 
 from core.aeb.clip_schema import SCHEMA_VERSION, ClipMetadata, utc_now_iso
-from core.aeb.clip_store import ClipStore
+from core.aeb.clip_store import ClipStore, deserialize_clip
+from core.aeb.clip_triage import (
+    STRAIGHT_SAMPLE_EVERY, is_straight_slow, sample_keeps, summarize, triage_reason,
+)
 from core.aeb.intake_policy import cached_policy, contribution_enabled, upload_blocked_reason
 from core.aeb.recorder import _TN_SOURCES
 from core.aeb.screenshot import _MAX_PX as _MAX_THUMBNAIL_PX
@@ -218,6 +221,8 @@ class ClipUploader:
         # boot scan never sits on whichever loop first asked for the recorder.
         self.retry_on_start = retry_on_start
         self._paused_until: float = 0.0
+        # Sample position used only when settings cannot be read or written.
+        self._straight_seen: int = 0
         # -inf so the first send of a session is never delayed.
         self._last_send_mono: float = float("-inf")
         self._intervening: bool = False
@@ -342,17 +347,22 @@ class ClipUploader:
             logger.debug("not contributing %s: %s", path.name, reason)
             return self._kept(path)
 
-        # After eligibility, so a clip held back by a pause is recorded and stays
-        # recoverable while one that was never sendable stays out of the log.
-        if time.monotonic() < self._paused_until:
-            logger.debug("AEB upload paused; keeping %s locally", path.name)
-            self._record(path, meta, 0, "paused")
-            return self._kept(path)
-
         try:
             blob = path.read_bytes()
         except OSError:
             logger.debug("could not read %s for upload", path.name, exc_info=True)
+            return self._kept(path)
+
+        held = self._triage_reason(blob)
+        if held is not None:
+            logger.debug("not contributing %s: %s", path.name, held)
+            return self._kept(path)
+
+        # After both eligibility gates, so a clip held back by a pause is recorded
+        # and stays recoverable while one that was never sendable stays out of the log.
+        if time.monotonic() < self._paused_until:
+            logger.debug("AEB upload paused; keeping %s locally", path.name)
+            self._record(path, meta, 0, "paused")
             return self._kept(path)
 
         blocked = upload_blocked_reason(
@@ -370,6 +380,50 @@ class ClipUploader:
             return self._kept(path)
 
         self._send(path, blob, meta)
+
+    def _triage_reason(self, blob: bytes) -> str | None:
+        """Why this clip carries nothing new, or None when it should be sent.
+
+        Fails open: a clip this cannot judge is offered. Triage is a redundancy
+        filter, so a decode failure must never become a silent refusal the way
+        the consent and thumbnail gates deliberately do.
+        """
+        try:
+            summary = summarize(deserialize_clip(blob))
+        except Exception:
+            logger.debug("AEB upload triage could not read a clip", exc_info=True)
+            return None
+        reason = triage_reason(summary)
+        if reason is not None:
+            return reason
+        if not is_straight_slow(summary):
+            return None
+        position = self._advance_straight_counter()
+        if sample_keeps(position, STRAIGHT_SAMPLE_EVERY):
+            return None
+        return f"straight below 40 km/h, sending 1 in {STRAIGHT_SAMPLE_EVERY}"
+
+    def _advance_straight_counter(self) -> int:
+        """This clip's position in the straight sub-40 run, then persist the next.
+
+        Persisted rather than held in memory: the cadence has to survive a restart
+        or a driver who relaunches often would send far more than one in ten.
+        """
+        try:
+            from core.settings import Settings
+
+            position = int(getattr(Settings, "aeb_triage_straight_seen", 0) or 0)
+            Settings.save({"aeb_triage_straight_seen": position + 1})
+            return position
+        except Exception:
+            logger.debug("could not advance the AEB triage sample counter", exc_info=True)
+            return self._straight_seen_fallback()
+
+    def _straight_seen_fallback(self) -> int:
+        """In-memory position for when settings cannot be read or written."""
+        position = self._straight_seen
+        self._straight_seen = position + 1
+        return position
 
     def _kept(self, path: Path) -> None:
         """The clip stays here. Never raises into the worker loop."""

@@ -1755,6 +1755,80 @@ catalogue, anything captured before this feature shipped, and everything the
 eligibility rules refuse have no entries, so a retry pass cannot reach them. Do
 not replace the log lookup with a store scan.
 
+## 15. Upload triage: which clips still carry information
+
+`core/aeb/clip_triage.py` is the second eligibility gate. Section 14 judges a
+clip on privacy and provenance; this one judges whether it says anything the
+corpus does not already hold. It runs in `ClipUploader._triage_reason`, on the
+uploader thread, after the metadata gate and before the pause check, so a clip
+it refuses never gets a submission-log entry and is therefore unreachable from
+the retry pass by the same construction section 14 relies on.
+
+### Measured, not assumed
+
+Every threshold below comes from replaying the 852 labelled contributed clips
+held on 2026-09-10 and scoring each candidate rule by how much of the reviewer's
+time it saves against what it costs in labelled positives. "Waste" means a clip
+that was tagged `ignore` or `tn`, the two outcomes that consume a review slot and
+return nothing. Baseline waste rate over that corpus was 50.6%.
+
+| Rule | dropped | waste | tp lost | fn lost | fp lost |
+|---|---|---|---|---|---|
+| no traffic in the clip | 31 | 100% | 0 | 0 | 0 |
+| nothing came within `NEAR_RANGE_M` | 80 | 92.5% | 0 | 1 | 5 |
+| min TTC past `QUIET_TTC_S` and no brake | 97 | 100% | 0 | 0 | 0 |
+| **all three** | **208** | **97.1%** | **0** | **1** | **5** |
+
+Survivor waste rate falls to 35.6% with all 237 true positives intact. The three
+rules are cheap because each names a clip in which nothing ever approached ego:
+they are not a proxy for "boring", they are a statement that the recorded scene
+contains no encounter to judge.
+
+### Rules that were measured and rejected
+
+Traffic density and ego speed both **fail** as filters, in the direction opposite
+to intuition. Median vehicle count is 8 on waste clips against 29 on useful ones,
+and median ego speed at the action is 59 km/h on waste against 50 km/h on useful.
+Dense, slow scenes are where the events are. `crossing` geometry is 83.6% waste
+and `codirectional` is 40.9%, so the geometry that looks least interesting is the
+one worth keeping. Do not reintroduce a "dense and slow is noise" rule.
+
+A crash trigger with nothing in ego's corridor scores 99.1% waste, and it is
+still **deliberately not implemented**. A collision that AEB never saw coming is
+exactly what the crash trigger exists to capture, and a rule keyed on "no target
+was ever in the corridor" would refuse the clearest misses this corpus can hold.
+`test_a_crash_clip_that_missed_a_close_target_still_goes` pins that.
+
+### The straight sub-40 class is sampled, not refused
+
+Bucketing the corpus by relative motion, speed band, corridor gap and lane gives
+81 distinct scenes, and the top five cover 44% of all clips. The largest single
+bucket, a co-directional in-lane lead below 40 km/h, is 160 clips on its own. It
+is repetitive but **not** low value at 35.0% waste, so banning it would cost real
+positives: over the survivors of the three rules above it is 136 clips carrying
+66 tp and 13 fn.
+
+`is_straight_slow()` therefore feeds `sample_keeps()` rather than
+`triage_reason()`. One clip in `STRAIGHT_SAMPLE_EVERY` is sent, counting the
+first as sent, so the class keeps a trickle of coverage and a regression in it
+still surfaces between versions. The position counter lives in
+`Settings.aeb_triage_straight_seen` rather than in the uploader, because a driver
+who relaunches often would otherwise send the first clip of every session and
+land far above one in ten.
+
+### Fail open, unlike section 14
+
+`SceneSummary.decoded` is False when the clip has no AEB ticks or the radar
+stream will not replay, and every geometry rule is skipped in that case. Triage
+is a redundancy filter, so a clip it cannot judge is offered. That is the
+opposite of the consent and thumbnail gates, which fail closed on purpose: those
+protect the contributor, this one only protects the reviewer's afternoon.
+
+Definitions here mirror `tools/aeb_agent/features.py` so the shipped gate and the
+offline corpus tooling agree on what a primary target is. If `_primary` or the
+co-directional test drifts from that file, the measured rates above stop
+describing what the gate does.
+
 ---
 
 *Source: `core/aeb/thread.py`, `core/aeb/filters.py`, `core/aeb/calibration.py`,
