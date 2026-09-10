@@ -258,13 +258,37 @@ same 4-signal chain for AI and TMP (`_smooth_vehicle_kinematics()` in
 - **AI** raw speed = buffer field 10 as-is.
 - **TMP** raw speed = LS fit of longitudinal motion over the last
   `_TMP_SPEED_HISTORY_LEN` `(t, x, z)` position-history samples: fit `s ≈ v·τ`
-  with `s = dot(p − p₀, fwd(smooth_yaw))`, `τ = t − t₀`, `v = Σ(τ s)/Σ(τ²)`.
+  with `s = dot(p − p₀, fwd(smooth_yaw))`, `τ = t − t₀`, and the **free-intercept**
+  slope `v = Σ((τ−τ̄)(s−s̄))/Σ((τ−τ̄)²)`.
   Chord below 0.025 m → `raw_speed = 0`; one sample → single-interval `Δraw/dt`.
   The window is deliberately ~1.3 s long: TMP transmits remote-vehicle position
   with a ~1 Hz netcode-reconciliation ripple (local interpolation undershoots,
   then a periodic authoritative update snaps it forward); a window spanning
   2–3 ripple cycles averages that jitter out so the derived speed does not
   oscillate. Buffer fields 10/11 are never used for TMP physics.
+
+#### Why the intercept is free
+
+The fit used to be forced through `window[0]` (`v = Σ(τ s)/Σ(τ²)`), which gives the
+**oldest** sample in the window unbounded leverage. Two consequences, both measured
+on the 2026-09-09 clips 1f14b55a and a653cf15:
+
+- Whatever lands on `window[0]` sets the fit. A TMP position rewind that reached the
+  anchor stepped raw speed +3.0 m/s (7.20 → 10.22) on a lead that was in fact
+  decelerating smoothly the whole time; a lag-freeze hole reaching the anchor stepped
+  it +2.4 m/s. Both fire ~1.4 s *after* their cause, because that is the window span,
+  which is why they never look connected to anything on the chart.
+- Through-origin reports the speed at `τ = 0.375·T`, free-intercept at `τ = 0.5·T`.
+  During decel the anchored form is therefore **more** stale, over-reading a braking
+  lead by `0.625·a·T` instead of `0.5·a·T`.
+
+Free-intercept fixes both: no sample outranks any other, and the decel lag drops by
+`0.125·a·T`. Corpus cost −386.56 → **−421.00** (793 clips), false negatives 41 → 40,
+true positives 339 → 341.
+
+**Do not re-anchor it to buy responsiveness.** The staleness this estimator has left
+is the window length, not the intercept; shortening `_RAW_SPEED_HISTORY_LEN` is the
+knob, and it trades against the ~1 Hz netcode ripple the window exists to average out.
 
 **Hard-brake transient (AI + TMP):** the long position window remains the
 default, but it takes about a second to forget pre-brake motion after a lead
@@ -588,6 +612,10 @@ Detects out-of-order packets where the raw position jumps backward along the hea
 
 **Cap:** When `_POS_MISMATCH_MAX_FRAMES` is reached (**5** frames), the counter resets and raw position is passed through on the next frame regardless.
 
+**Known gap, deliberately left open.** The detection reference is `prev._raw_x/_raw_z`, which advances on held frames, so the guard sees the *rate* of a rewind and not the fact that the position is still behind the last sample `_position_history` accepted. It therefore releases as soon as motion turns forward, and the sample it then appends can sit behind the previous history entry (0.27 m on clip 1f14b55a). Measured on 120 clips / 1901 TMP tracks: 13 % of clips admit at least one backward step, median 0.24 m, worst 4.3 m.
+
+Two closures were built and measured against the corpus, and **both cost score**: referencing the last accepted sample and reseeding history at the cap (−374.71), and clamping a backward step to zero forward progress at the append (−411.80), against **−421.00** for leaving it alone. Once the raw-speed fit stopped anchoring on `window[0]` (see "Why the intercept is free"), a lone backward sample carries only its 1/20 share of the fit, and the residual step on 1f14b55a is +0.47 m/s with or without either guard. Do not re-add a guard here on correctness grounds alone: the defect is real but the estimator no longer amplifies it, and every version tried traded AEB outcome for buffer hygiene. Re-measure if `_position_history` gains a consumer that *is* sensitive to a single backward sample.
+
 ### Crash detection (TMP only, full frames only)
 
 A crash confirms when a **rotation-jerk frame coincides with a kinematic
@@ -872,7 +900,7 @@ double-count each trailer.
 | Quaternion euler yaw | `atan2(2*(y*z + w*x), w²-x²-y²+z²)` degrees |
 | Arc curvature | `κ = omega_rad_s / abs_speed` |
 | Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
-| TMP raw speed | LS on longitudinal `(t,x,z)` history (max `_TMP_SPEED_HISTORY_LEN` full frames): `v = Σ(τ s)/Σ(τ²)`; else `Δraw/dt`, signed via forward dot |
+| TMP raw speed | Free-intercept LS on longitudinal `(t,x,z)` history (max `_TMP_SPEED_HISTORY_LEN` full frames): `v = Σ((τ−τ̄)(s−s̄))/Σ((τ−τ̄)²)`; else `Δraw/dt`, signed via forward dot |
 | Speed / accel filter (AI + TMP) | Long-window position LS raw speed by default; confirmed hard braking temporarily selects a 5-sample LS suffix and its measured decel. Then `_smooth_vehicle_kinematics()` runs `speed_ema` (EMA of raw) → `accel` (LS slope with confirmed short-window brake floor) → `speed_corr = speed_ema + accel·τ` (`self.speed`) → `acc_speed` (adaptive low-pass on `speed_corr`: `tau` ramps `_ACC_SPEED_TAU_SLOW_S`→`_ACC_SPEED_TAU_FAST_S` as the per-tick change grows past `_ACC_SPEED_DEADBAND_MS` **and agrees with the de-noised trend**, and is scaled down at low speed and during a steady decel/accel: plus a constant-accel feed-forward, gated by de-noised `accel_trend`, that zeroes sustained-ramp lag with no windup; standstill latch clamps to 0 near rest with hysteresis release; `self.acc_speed`) |
 | AI vs TMP raw speed | AI = buffer field 10; TMP = position-history LS fit. Filter chain identical after that |
 | Positions | No EMA: always raw world coordinates |

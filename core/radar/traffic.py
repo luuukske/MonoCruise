@@ -182,15 +182,23 @@ def _raw_speed_from_position_history(
     chord = math.sqrt(chord_dx * chord_dx + chord_dz * chord_dz)
     if chord < _RAW_SPEED_NEAR_ZERO_CHORD:
         return 0.0
+    # Free-intercept slope, not a fit through window[0]: see core/radar/README.md
+    # section 7 "Why the intercept is free".
+    n = 0
+    sum_tau = 0.0
+    sum_s = 0.0
+    for t, x, z in window:
+        n += 1
+        sum_tau += t - t0
+        sum_s += (x - x0) * fwd_x + (z - z0) * fwd_z
+    mean_tau = sum_tau / n
+    mean_s = sum_s / n
     num = 0.0
     den = 0.0
     for t, x, z in window:
-        tau = t - t0
-        if tau <= 1e-9:
-            continue
-        s = (x - x0) * fwd_x + (z - z0) * fwd_z
-        num += tau * s
-        den += tau * tau
+        d_tau = (t - t0) - mean_tau
+        num += d_tau * (((x - x0) * fwd_x + (z - z0) * fwd_z) - mean_s)
+        den += d_tau * d_tau
     if den < 1e-12:
         dt = tn - t0
         if dt < 1e-9:
