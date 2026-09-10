@@ -690,6 +690,35 @@ during lag freeze (`_lag_since` inside the TTC-scaled freeze window), position-m
 (`_pos_mismatch_frames > 0`), and `crash_confirmed`. Acceleration is still carried
 from the last full update on sub-frames.
 
+### First sighting: the pose carried on a sub-frame
+
+A vehicle's first frame only stamps `Vehicle.time`; the frame after it is a
+sub-frame (dt < 0.05 s), which freezes `Vehicle.time` at the sighting. The pose
+carried through that sub-frame must be the one that matches the frozen time. It
+used to be the newly decoded pose, so the first full update measured one frame of
+travel and divided it by two frames of dt: a car entering radar range at 72 km/h
+read **36 km/h**, and the LS window then took about five full updates to climb
+back. The cold branch now holds `prev.position`, the same way the warm branch
+holds `_smooth_x/z`.
+
+This is a live bug, not only a replay one: every vehicle that comes into range
+mid-drive went through it.
+
+### Cold-start speed seeding (offline replay only)
+
+`Vehicle.seed_cold_start_speed(speed, t_now)` fills the speed chain, the raw
+anchor, the yaw and a two-sample velocity-seeded `_position_history` for a vehicle
+being seen for the first time, using the same idiom as
+`_hold_across_clock_discontinuity`. Two samples on purpose: enough for the LS raw
+speed fit, one short of `curvature_from_history`, which must stay unknown rather
+than read a fabricated straight prehistory as kappa = 0.
+
+`TrafficReader.set_cold_start_speeds()` installs the mapping and only clip replay
+calls it, because measuring the speed needs frames the live reader has not read
+yet. Each id is seeded once: a vehicle that drops out and returns mid-clip is a
+genuine cold start, and the clip-start measurement no longer describes it. A live
+`read` must never be given a non-empty mapping.
+
 ### Simulation clock (pause / hitch)
 
 Vehicle kinematics use SCS **`simulatedTime`** (µs → seconds) as `Vehicle.time` /

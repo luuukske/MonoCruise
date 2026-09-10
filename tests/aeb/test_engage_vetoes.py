@@ -39,7 +39,7 @@ _ROAD_R = 1200.0          # bend radius: 4050/R = 3.4 m of lateral shift over 90
 _START_GAP = 90.0
 _HZ = 30.0
 # Wide enough that the bodies pass; the arc model still calls it a collision.
-_CLEAR_OFFSET = 3.0
+_CLEAR_OFFSET = 2.85
 # Behaviour before the head-on bar and the lane-confidence gate existed.
 _OLD = replace(
     CAL,
@@ -113,13 +113,13 @@ def test_wrong_way_driver_on_the_same_bend_still_engages():
 
 
 def test_oncoming_that_measurably_clears_does_not_engage():
-    """Same bend, 3 m of measured clearance: pose says in-lane, the track says pass."""
+    """Same bend, 2.85 m of measured clearance: pose says in-lane, the track says pass."""
     clip = _bend_clip(_CLEAR_OFFSET)
     assert any(e.aeb_brake for e in run_headless(clip, cal=_OLD)), (
         "precondition: this engaged before the engagement-entry vetoes existed"
     )
     assert not any(e.aeb_brake for e in run_headless(clip)), (
-        "a target measured to pass 3 m clear must not trigger a brake"
+        "a target measured to pass 2.85 m clear must not trigger a brake"
     )
 
 
@@ -128,7 +128,7 @@ def test_the_clearance_model_alone_declines_the_measured_clear_pass():
 
     With every engagement-entry veto disabled, the relative-frame formula peaked
     around 19 m/s2 on this pass and engaged. The clearance model knows the bodies
-    go by 3 m apart, so it never asks for more than the truck can comfortably
+    go by 2.85 m apart, so it never asks for more than the truck can comfortably
     give and the vetoes are not what is holding the brake off here.
     """
     clip = _bend_clip(_CLEAR_OFFSET)

@@ -86,13 +86,13 @@ def _first_brake_t(evs) -> float | None:
     return next((e.t_rel for e in evs if e.aeb_brake), None)
 
 
-# (cross speed km/h, conflict range m, crosser start X m). Measured cases where
-# the two models disagree on when to engage.
+# (cross speed km/h, conflict range m, crosser start X m). Each X is the centre
+# of the phasing band where the two demand models disagree on when to engage.
 _LATE_CASES = [
-    (30.0, 50.0, -24.0),
-    (50.0, 50.0, -36.0),
-    (50.0, 60.0, -42.0),
-    (70.0, 50.0, -48.0),
+    (30.0, 50.0, -15.5),
+    (50.0, 50.0, -30.0),
+    (50.0, 60.0, -36.0),
+    (70.0, 50.0, -43.0),
 ]
 
 
@@ -124,14 +124,14 @@ def test_the_delay_is_real_but_bounded():
 
 def test_the_model_knows_a_crosser_vacates_the_corridor():
     """`clears` is the fact the old demand had no way to express."""
-    clip = crossing_clip(-36.0, 50.0, 50.0 / 3.6)
+    clip = crossing_clip(-30.0, 50.0, 50.0 / 3.6)
     evs = run_headless(clip)
     assert any(e.clearance_clears_ids for e in evs)
 
 
 def test_a_crosser_gets_a_pass_speed_before_it_gets_a_brake():
     """At range the answer is a speed to go through at, not a stop."""
-    clip = crossing_clip(-36.0, 50.0, 50.0 / 3.6)
+    clip = crossing_clip(-30.0, 50.0, 50.0 / 3.6)
     evs = run_headless(clip)
     early = [e for e in evs if e.colliding_ids and not e.aeb_brake]
     assert early, "expected ticks that see the crosser without engaging"

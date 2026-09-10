@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import struct
 from dataclasses import dataclass, field
 
 from core.aeb.calibration import DEFAULT as _CAL
@@ -13,8 +14,11 @@ from core.aeb.thread import (
     _swap_trailer_kinematics,
 )
 from core.radar.elevation import ElevationGate, EgoElevationTrack, build_surface
-from core.radar.reader import TrafficReader
-from core.radar.traffic import ArcPath, Vehicle, build_arc
+from core.radar.reader import TrafficReader, _TOTAL_FORMAT, _TOTAL_PARKED_FORMAT
+from core.radar.traffic import (
+    ArcPath, Vehicle, build_arc,
+    _LOCATION_UPDATE_FREQUENCY, _raw_speed_from_position_history,
+)
 
 # Suppression stages the debug window colours as "evasion filtered" (cyan)
 # rather than hard-suppressed (grey); mirrors the classification in thread.py.
@@ -209,11 +213,91 @@ def _build_snapshot(ego, vehicles: list[Vehicle], live: LiveAEB,
     )
 
 
+# Buffer positions read ahead of the clip start to measure a first-sighting
+# speed: 4 samples give the 3 intervals the LS fit needs to reject one bad step.
+_SEED_SAMPLES: int = 4
+_SEED_MAX_SPAN_S: float = 1.0
+
+
+def cold_start_speeds(clip: Clip) -> dict[int, float]:
+    """Signed m/s per vehicle id at the clip's first frame, from later frames.
+
+    A clip window is an arbitrary cut of a continuous stream, so a vehicle in the
+    first frame was already moving. Live radar cannot know that and starts the
+    speed chain cold; offline the samples are right there, so read ahead and run
+    the same estimator the live chain uses. See core/aeb/README.md.
+    """
+    frames = sorted(clip.radar_frames, key=lambda f: f.t_mono)
+    samples: dict[int, list[tuple[float, float, float]]] = {}
+    yaws: dict[int, float] = {}
+    first_ids: set[int] | None = None
+    t_start: float | None = None
+    for f in frames:
+        if f.traffic_buf is None or f.ego.paused:
+            continue
+        if t_start is None:
+            t_start = f.t_wall
+        elif f.t_wall - t_start > _SEED_MAX_SPAN_S:
+            break
+        vehicles = _decode_buffers(f.traffic_buf, f.parked_buf)
+        if vehicles is None:
+            continue
+        if first_ids is None:
+            first_ids = {int(v.id) for v in vehicles}
+        for v in vehicles:
+            vid = int(v.id)
+            if vid not in first_ids:
+                continue
+            hist = samples.setdefault(vid, [])
+            if len(hist) >= _SEED_SAMPLES:
+                continue
+            # Same cadence as a live full update, so the fit sees the same samples.
+            if hist and f.t_wall - hist[-1][0] < _LOCATION_UPDATE_FREQUENCY:
+                continue
+            if not hist:
+                yaws[vid] = math.radians(v.rotation.euler()[1])
+            hist.append((f.t_wall, v.position.x, v.position.z))
+        if first_ids and all(
+            len(samples.get(vid, ())) >= _SEED_SAMPLES for vid in first_ids
+        ):
+            break
+
+    out: dict[int, float] = {}
+    for vid, hist in samples.items():
+        yaw = yaws.get(vid, 0.0)
+        speed = _raw_speed_from_position_history(
+            hist, -math.sin(yaw), -math.cos(yaw),
+        )
+        if speed is not None:
+            out[vid] = speed
+    return out
+
+
+def _decode_buffers(traffic_buf: bytes, parked_buf: bytes | None) -> list[Vehicle] | None:
+    """Traffic plus parked decode, in the id-precedence order ``replay_frame`` uses."""
+    try:
+        vehicles = TrafficReader._build_vehicles_from_raw(
+            struct.unpack(_TOTAL_FORMAT, traffic_buf)
+        )
+    except Exception:
+        return None
+    if parked_buf is not None:
+        try:
+            vehicles.extend(TrafficReader._build_parked_from_raw(
+                struct.unpack(_TOTAL_PARKED_FORMAT, parked_buf),
+                {int(v.id) for v in vehicles},
+            ))
+        except Exception:
+            pass
+    return vehicles
+
+
 def decode_radar_stream(clip: Clip):
     """Smoothed vehicles + elevation gate per radar frame, as RadarThread.loop runs them.
 
     Returns ``(veh_by_t, ego_by_t, frame_t, off_by_t)``."""
     reader = TrafficReader()
+    reader.set_cold_start_speeds(cold_start_speeds(clip))
     frames = sorted(clip.radar_frames, key=lambda f: f.t_mono)
     veh_by_t: dict[float, list[Vehicle]] = {}
     off_by_t: dict[float, frozenset[int]] = {}

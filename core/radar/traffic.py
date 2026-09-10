@@ -1320,6 +1320,50 @@ class Vehicle:
         self._prev_disp_dt = dt
         self._prev_disp_y = dy
 
+    def seed_cold_start_speed(self, speed: float, t_now: float) -> None:
+        """Seed first-sighting filter state from an externally measured speed.
+
+        Offline replay only: the measurement needs samples after ``t_now``, which
+        live radar does not have. See core/radar/README.md section 7.
+        """
+        self.time = t_now
+        self.speed = speed
+        self.acc_speed = speed
+        self.acceleration = 0.0
+        self.acc_accel = 0.0
+        self._smooth_speed = speed
+        self._smooth_accel = 0.0
+        self._speed_ema = speed
+        self._acc_speed_ema = speed
+        self._acc_smooth_accel = 0.0
+        self._raw_speed = speed
+        self._acc_standstill = False
+        self._acc_release_s = 0.0
+
+        raw_x = self.position.x
+        raw_z = self.position.z
+        self._raw_x = raw_x
+        self._raw_z = raw_z
+        self._smooth_x = raw_x
+        self._smooth_z = raw_z
+        yaw = math.radians(self.rotation.euler()[1])
+        self._smooth_yaw = yaw
+
+        # Two samples only: enough for the LS fit to return the seeded speed,
+        # too few for curvature_from_history, which stays unknown as before.
+        dt_seed = _LOCATION_UPDATE_FREQUENCY
+        fwd_x = -math.sin(yaw)
+        fwd_z = -math.cos(yaw)
+        self._position_history = [
+            (t_now - dt_seed,
+             raw_x - speed * fwd_x * dt_seed,
+             raw_z - speed * fwd_z * dt_seed),
+            (t_now, raw_x, raw_z),
+        ]
+        self._trail_history = [(t_now, raw_x, raw_z)]
+        self._speed_ema_history = [(t_now - dt_seed, speed), (t_now, speed)]
+        self._acc_speed_ema_history = list(self._speed_ema_history)
+
     def _hold_across_clock_discontinuity(self, prev: "Vehicle", t_now: float) -> None:
         """Hold kinematics across reader clock discontinuity. See core/radar/README.md §7."""
         self.time = t_now
@@ -1493,6 +1537,11 @@ class Vehicle:
             elif self._smooth_x is not None:
                 self.position.x = self._smooth_x
                 self.position.z = self._smooth_z
+            else:
+                # First sighting: hold the pose that matches the frozen time, or
+                # the next full update divides one frame of travel by two of dt.
+                self.position.x = prev.position.x
+                self.position.z = prev.position.z
             return
 
         self.time = t_now

@@ -41,6 +41,11 @@ _TRAILER_VEHICLE_ID_BASE: int = 1_000_000
 _MAX_TRACKED_VEHICLES: int = 24
 
 
+def _parent_vehicle_id(synthetic_id: int) -> int:
+    """Tractor id behind a trailer-as-vehicle synthetic id (inverse of the encoding)."""
+    return (int(synthetic_id) - _TRAILER_VEHICLE_ID_BASE) // 4
+
+
 class TrafficReader:
     """Traffic mmap reader; per-id state via ``update_from_last``. See core/radar/README.md §5."""
 
@@ -59,6 +64,9 @@ class TrafficReader:
         self._last_kin_t: float | None = None
         # Set by radar on pause→unpause when the sim clock may not have jumped.
         self._pending_reanchor: bool = False
+        # Replay-only first-sighting speeds, vehicle id -> m/s. Live leaves empty.
+        self._cold_start_speeds: dict[int, float] = {}
+        self._cold_started: set[int] = set()
 
     def clear_kinematics_state(self) -> None:
         """Clear per-id smoothing after clock domain change. See core/radar/README.md §7."""
@@ -70,6 +78,15 @@ class TrafficReader:
     def request_reanchor(self) -> None:
         """Force a discontinuity hold on the next ``read`` / ``replay_frame``."""
         self._pending_reanchor = True
+
+    def set_cold_start_speeds(self, speeds: dict[int, float]) -> None:
+        """Install first-sighting speeds for replay. See core/radar/README.md section 7.
+
+        Offline only: the caller measures these from frames the live reader has
+        not seen yet, so ``read`` must never be given a non-empty mapping.
+        """
+        self._cold_start_speeds = dict(speeds)
+        self._cold_started.clear()
 
     def open(self) -> bool:
         if self._buf is not None:
@@ -205,6 +222,11 @@ class TrafficReader:
                     v.update_from_last(
                         prev, t_now, ego_x, ego_y, ego_z, ego_speed,
                     )
+            elif int(v.id) in self._cold_start_speeds and int(v.id) not in self._cold_started:
+                # One shot: a vehicle that reappears mid-clip is a genuine cold
+                # start, and the clip-start measurement no longer describes it.
+                self._cold_started.add(int(v.id))
+                v.seed_cold_start_speed(self._cold_start_speeds[int(v.id)], t_now)
             else:
                 # TMP sub-frame pose snap rules. See core/radar/README.md §7.
                 v.time = t_now
@@ -274,6 +296,10 @@ class TrafficReader:
                     tv._hold_across_clock_discontinuity(prev, t_now)
                 else:
                     tv.update_from_last(prev, t_now, ego_x, ego_y, ego_z, ego_speed)
+            elif tv.id not in self._cold_started and _parent_vehicle_id(tv.id) in self._cold_start_speeds:
+                # tv.speed came from the parent, seeded above on the same frame.
+                self._cold_started.add(tv.id)
+                tv.seed_cold_start_speed(tv.speed, t_now)
             else:
                 tv.time = t_now
         self._last_trailer_vehicles = {tv.id: tv for tv in trailer_vehicles}

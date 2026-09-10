@@ -1482,6 +1482,37 @@ file. Metadata needs a median 14 KB of a 423 KB clip (max seen 20 KB), so a list
 touches a few percent of the store instead of all of it. The fallback matters:
 `thumbnail_jpeg` lives in the metadata and can push it past the prefix.
 
+### Traffic does not start the clip at 0 km/h
+
+A clip window is an arbitrary cut of a continuous stream, so every vehicle in the
+first frame was already moving and live radar already had a warm filter for it.
+Replay used to start each one cold, which showed up as the jump at the head of
+every clip: 0 km/h, then a ramp. Measured over 40 clips against a centred offline
+fit, mean speed error was **40.0 km/h at t=0** (p90 92.9) and stayed above the
+steady-state floor for about a second.
+
+`cold_start_speeds(clip)` reads ahead over the leading frames, takes each id's
+first four buffer positions at the live full-update cadence, and fits them with
+`_raw_speed_from_position_history`, the same estimator the live chain uses. Both
+the traffic and the parked buffer are scanned, in the id-precedence order
+`replay_frame` uses: the parked buffer carries moving vehicles too, and they are
+built with `speed = 0.0`. The result goes to `TrafficReader.set_cold_start_speeds`
+(see core/radar/README.md section 7). Error at t=0 drops to **2.5 km/h**, which is
+the same as the steady-state error at t=1.2 s: no transient left.
+
+**The corpus objective was being paid for this.** Seven clips had a brake window
+opening within 0.12 s of the `burn_in_s` edge, latched since the clip's start by
+traffic that read as stopped; five of them scored TP quality 1.00 by braking six
+seconds before the labelled event, and one scored an outright false positive. With
+the seed, five move to the real event, the false positive disappears, and no clip
+gains a brake. On the 792 clips both runs score, the total moves -441.00 to
+-431.57: the metric giving back credit it should not have had, not a behaviour
+regression. (The published -421.00 baseline was over 793 clips; the extra one has
+since been relabelled `ignore`, which is unrelated to this change.) The
+synthetic phasings in `tests/aeb/test_crossing_clearance.py` and
+`tests/aeb/test_engage_vetoes.py` were measured against the cold start and were
+re-measured with it gone.
+
 ### Desmoothing the recorded decel
 
 `LiveAEB.target_decel_ms2` is what the tick **published**, after the deadband

@@ -12,9 +12,11 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Changed
-- **Fewer clips sent when you help improve AEB/ACC**: clips where nothing ever came near you, and most of the ordinary "following a car at low speed" ones, are now kept on your machine instead of being sent. You will see the sent notification less often, and the clips that do go carry situations worth testing against.
+- **Fewer clips sent when you help improve AEB/ACC**: clips where nothing ever came near you, and most of the ordinary "following a car at low speed" ones, are now kept on your machine instead of being sent. You will see the sent notification less often, and the clips that do go carry situations worth testing against. thanks again to everyone who has been testing and contributing with AEB/ACC clips!
 
 ### Fixed
+- **A car coming into view read at half its real speed**: for the first third of a second after a vehicle entered radar range, its speed was measured over twice the time it had actually been tracked, so a car joining at 72 km/h showed as 36 and climbed back over the next few frames. ACC and emergency braking now get its real speed from the moment it appears.
+
 - **Traffic braking hard could briefly read as speeding up**: on TruckersMP a vehicle slowing in front of you could suddenly show a jump in speed about a second later, well after the moment that caused it. Their speed is now read more accurately while they brake, so ACC and emergency braking respond to what they are actually doing.
 
 - **AEB triggering while coupling a trailer**: AEB no longer reacts to a trailer sitting behind the cab while you are under 20 km/h, in reverse or forward. backing on to a fifth wheel and pulling out from under a dropped trailer both put the trailer inside the truck's path on purpose.
