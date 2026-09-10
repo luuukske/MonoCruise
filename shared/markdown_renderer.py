@@ -19,6 +19,9 @@ _MAX_IMAGE_BYTES = 2 * 1024 * 1024
 # A line holding only an image: body line-height would otherwise multiply the
 # image's own height (1.6x), leaving a large gap under it.
 _IMAGE_ONLY_LINE = re.compile(r'^!\[[^\]]*\]\([^)]+\)$')
+# Updater changelog: first top-of-body .mp4/.webm link is peeled off for VideoPlayer.
+_VIDEO_MD_URL = r'https?://[^\s)]+\.(?:mp4|webm)(?:\?[^\s)]*)?'
+_VIDEO_BARE_URL = r'https?://[^\s<>\[\]()]+\.(?:mp4|webm)(?:\?[^\s<>\[\]()]*)?'
 # Qt's rich text engine ignores CSS border-radius, so corners are masked into
 # the pixels. Needs alpha, hence PNG out regardless of what came in.
 _IMAGE_CORNER_RADIUS_PX = 5
@@ -118,12 +121,12 @@ class GitHubMarkdownRenderer:
         return self.video_url
 
     def _extract_and_remove_video(self, text: str) -> str:
-        """Extract the first .mp4 video link from the top and remove it."""
+        """Extract the first .mp4/.webm link from the top and remove it."""
         lines = text.split('\n')
         new_lines = []
         video_found = False
 
-        for i, line in enumerate(lines):
+        for line in lines:
             if video_found:
                 new_lines.append(line)
                 continue
@@ -135,15 +138,19 @@ class GitHubMarkdownRenderer:
                 new_lines.append(line)
                 continue
 
-            # Check for markdown link format: [text](url.mp4)
-            md_link_match = re.match(r'^\[([^\]]*)\]\((https?://[^\s)]+\.mp4(?:\?[^\s)]*)?)\)\s*$', stripped, re.IGNORECASE)
+            # Markdown link: [text](url.mp4|.webm)
+            md_link_match = re.match(
+                rf'^\[([^\]]*)\]\(({_VIDEO_MD_URL})\)\s*$', stripped, re.IGNORECASE
+            )
             if md_link_match:
                 self.video_url = md_link_match.group(2)
                 video_found = True
                 continue
 
-            # Check for bare URL format: https://...mp4
-            bare_url_match = re.match(r'^(https?://[^\s<>\[\]()]+\.mp4(?:\?[^\s<>\[\]()]*)?)\s*$', stripped, re.IGNORECASE)
+            # Bare URL: https://...mp4|.webm
+            bare_url_match = re.match(
+                rf'^({_VIDEO_BARE_URL})\s*$', stripped, re.IGNORECASE
+            )
             if bare_url_match:
                 self.video_url = bare_url_match.group(1)
                 video_found = True

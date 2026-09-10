@@ -11,6 +11,9 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Added
+- **WebM clips in the updater**: release-note videos can be `.webm` as well as `.mp4`. a prep for v1.1 release trailer in the updater.
+
 ### Changed
 - **Fewer clips sent when you help improve AEB/ACC**: clips where nothing ever came near you, and most of the ordinary "following a car at low speed" ones, are now kept on your machine instead of being sent. You will see the sent notification less often, and the clips that do go carry situations worth testing against. thanks again to everyone who has been testing and contributing with AEB/ACC clips!
 

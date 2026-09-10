@@ -26,4 +26,4 @@ Custom animated dropdown used by the MonoCruise app and the updater. Pixel-faith
 
 ## Markdown renderer (`markdown_renderer.py`)
 
-GitHub-flavoured markdown to HTML for release notes (updater + app). Alert blocks, lists, and `_style_tag()` embed multi-line CSS in triple-quoted strings; those are stylesheet literals, not documentation comments.
+GitHub-flavoured markdown to HTML for release notes (updater + app). Alert blocks, lists, and `_style_tag()` embed multi-line CSS in triple-quoted strings; those are stylesheet literals, not documentation comments. A leading `.mp4` or `.webm` URL (bare or markdown link) is stripped for the updater `VideoPlayer`.

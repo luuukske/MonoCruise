@@ -447,7 +447,7 @@ class VideoPlayer(QWidget):
     #  Public API
 
     def load_video(self, url: str):
-        """Load a video from *url*. Shows thumbnail + play button once ready."""
+        """Load an HTTP .mp4 or .webm URL. Shows thumbnail + play button once ready."""
         if not url:
             self.hide()
             return

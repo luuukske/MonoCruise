@@ -117,11 +117,11 @@ class GitHubAPI:
     
     @staticmethod
     def extract_first_mp4_url(text: str) -> Optional[str]:
-        """Extract the first .mp4 URL from markdown text."""
-        # Match URLs ending with .mp4 (with optional query params)
+        """Extract the first .mp4 or .webm URL from markdown text."""
+        # Match URLs ending with .mp4/.webm (with optional query params)
         # Handles both direct URLs and markdown links
         patterns = [
-            r'https?://[^\s\)\]"\'<>]+\.mp4(?:\?[^\s\)\]"\'<>]*)?',
+            r'https?://[^\s\)\]"\'<>]+\.(?:mp4|webm)(?:\?[^\s\)\]"\'<>]*)?',
         ]
         
         for pattern in patterns:
