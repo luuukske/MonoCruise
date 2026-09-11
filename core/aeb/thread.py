@@ -2004,18 +2004,21 @@ class AEBThread(BaseThread):
                 self._latched_threat_ids.discard(vid)
                 self._latched_scope_ok_mono.pop(vid, None)
                 continue
-            # The hold covers a matched gap, not an opening one. A lead pulling
-            # away stays latched but stops flooring the brake (README).
+            # An opening gap is credited with the ground it covers over the
+            # lookahead: the hold asks if it is still unsafe, not if it shrinks.
+            hw_hold = hw
             if vid not in colliding_ids and dist_vid > 1e-6:
                 v_latched = active_veh[vid]
                 closing = (
                     (ego_speed * ego_fwd_x - v_latched.speed * pc[8]) * pc[3]
                     + (ego_speed * ego_fwd_z - v_latched.speed * pc[9]) * pc[4]
                 ) / dist_vid
-                if closing < -cal.latched_open_release_ms:
-                    continue
-            if hw < latched_headway_min:
-                latched_headway_min = hw
+                if closing < 0.0:
+                    hw_hold = (
+                        gap - closing * cal.latched_open_lookahead_s
+                    ) / ego_v_safe
+            if hw_hold < latched_headway_min:
+                latched_headway_min = hw_hold
 
         latched_distance_threat = (
             run_collision

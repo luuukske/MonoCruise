@@ -622,8 +622,8 @@ aeb.snapshot                       # AEBSnapshot: full debug state
      ego stops (no closing → ttc ∞). Entry is untouched.
    - Latched-distance hold: see "Latched-threat hold" below. Adds a
      headway-driven engagement hold over targets that have been engaged
-     on previously; independent of the magnitude of `v_closing`, but not of
-     its sign, since an opening gap releases the hold.
+     on previously; the headway it tests credits an opening gap with a
+     lookahead, so a lead pulling away releases the hold early.
    - Engage when `effective_required ≥ aeb_engage_frac · capability_decel`
      **OR** `brake_ttb_active`, subject to the tiered entry certainty gate
      below. `aeb_warn_near_full_frac` shares this base so it stays equal to
@@ -1209,39 +1209,57 @@ letting a cleared target hold engagement. Scope stamps travel with the clip
 warm state (`AEBWarmState.latched_scope_ok_mono`); clips recorded before the
 field default to grace-starts-at-window-start.
 
-**Closing-rate release.** Scope is geometric, so it cannot separate the two
+**Opening-gap lookahead.** Scope is geometric, so it cannot separate the two
 states a forward in-lane lead can be in once `required_decel` has collapsed:
 ego matched the lead at an unsafe gap (the case the hold exists for), or ego is
 now *slower* than the lead and the gap is opening (where holding is wrong).
-Headway cannot separate them either, because it is a following-distance metric:
-13 m at 75 km/h reads as 0.62 s whether the gap is closing or opening, so every
-engagement on a close lead used to stay held until the truck was slow enough
-that the same metres read as 1.5 s. Clip `d16d0575` is the case: the threat
-metric collapsed 0.12 s after engagement and the brake stayed floored at 70 % of
-max for the remaining 2.6 s while the lead accelerated away from 13.2 m to
-16.8 m.
+Raw headway cannot separate them either, because it is a following-distance
+metric: 13 m at 75 km/h reads as 0.62 s whether the gap is closing or opening,
+so every engagement on a close lead used to stay held until the truck was slow
+enough that the same metres read as 1.5 s. Clip `d16d0575` is the case: the
+threat metric collapsed 0.12 s after engagement and the brake stayed floored at
+70 % of max while the lead accelerated away from 13.2 m to 16.8 m, still braking
+when the recording ended 1.9 s later.
 
-So each latched id also carries the line-of-sight range rate
+So each latched id carries the line-of-sight range rate
 
 ```
 closing = ((v_ego·ego_fwd − v_tgt·tgt_fwd) · (dx, dz)) / dist    # > 0 = gap shrinking
 ```
 
-and an id with `closing < −cal.latched_open_release_ms` is skipped when
-aggregating `latched_headway_min`. It is **skipped, not dropped**: the id stays
-in `_latched_threat_ids`, so the TMP rel-speed bypass (effect 1) and the instant
-re-engage path both survive. A lead that opens and then brakes again raises
-`required_decel`, re-enters `colliding_ids`, and re-engages with no confirm
-window via the latched branch of `certain`. Ids still in `colliding_ids` are
-exempt: an active collision hit already justifies the hold, and the exemption
-keeps the release confined to the collapsed-metric case.
+and an opening gap is credited with the ground it covers over
+`cal.latched_open_lookahead_s` before the hold re-tests it:
 
-The threshold is a deadband, not a hysteresis loop or a timer. Both input
-speeds are already EMA-smoothed upstream, which leaves about ±0.25 m/s of
-tick-to-tick jitter on a matched pair, so 0.5 m/s sits roughly 2σ below the
-matched point and a genuinely opening gap crosses it monotonically. Raising it
-toward 2 m/s walks the behaviour back toward the un-gated hold; the measured
-cost on `d16d0575` is 0.43 s of extra zero-threat braking.
+```
+hw_hold = (gap + max(0, −closing) · lookahead) / max(v_ego, 0.5)
+```
+
+`hw_hold` feeds `latched_headway_min`; the raw `hw` still drives the
+`latched_release_headway_s` drop, so an opening lead is **held less, not dropped
+sooner**. The id stays in `_latched_threat_ids`, which keeps the TMP rel-speed
+bypass (effect 1) and the instant re-engage path alive: a lead that opens and
+then brakes again raises `required_decel`, re-enters `colliding_ids`, and
+re-engages with no confirm window via the latched branch of `certain`. Ids still
+in `colliding_ids` are exempt, since an active collision hit already justifies
+the hold.
+
+**Do not turn this back into a threshold on the sign of `closing`.** That was
+tried and is wrong: a truck braking at 3.5 m/s² sails past speed-match, so a
+small negative closing is the normal end state of a *correct* intervention, not
+evidence the threat is over. A −0.5 m/s bar cut clip `3c1bd9af` (labelled TP,
+window 7.7-11.1) from 2.7 s of braking to 0.6 s while the gap sat at 8.2-8.7 m,
+about 2 m bumper to bumper at 51 km/h. The question the hold has to answer is
+whether the gap is still unsafe, not whether it is shrinking this instant, and
+only the projected form answers it. Note that `outcome_under` marks TP on
+*brake onset* (`bw[0] <= st[1]`), so truncating a brake can never flip a verdict
+and a clean verdict table proves nothing here: read `_tp_quality` instead.
+
+The lookahead is a safety-versus-comfort dial with a narrow usable band.
+Measured on the corpus: 1.0 s costs clip `3c1bd9af` 0.79 → 0.69 quality and
+`eb92f30d` 0.65 → 0.55, while 1.5 s drops `eb92f30d` to 0.27 because its brake
+falls off a cliff between the two. Below ~0.3 s the release never fires on
+`d16d0575` at all. 1.0 s sits at the edge of the safe band, not in the middle
+of it.
 
 The set is populated every frame after the engagement state machine via
 `self._latched_threat_ids.update(colliding_ids)` while `self._engaged` is
@@ -1254,7 +1272,7 @@ true (newly latched ids get their scope stamp at promotion). Cleared on
 | `latched_release_headway_s` | 2.5 s | Headway above which a latched id is dropped |
 | `latched_min_decel_frac` | 0.7 | Fraction of `effective_max_decel` as the `target_raw` floor under hold |
 | `latched_scope_release_s` | 0.5 s | Grace before an out-of-scope (not colliding, not forward-in-lane) latched id is dropped |
-| `latched_open_release_ms` | 0.5 m/s | Opening range rate above which a non-colliding latched id stops feeding the hold |
+| `latched_open_lookahead_s` | 1.0 s | Ground an opening non-colliding latched gap is credited with before the hold re-tests its headway |
 
 ### Follow-threat flag
 

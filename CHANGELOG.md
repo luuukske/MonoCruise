@@ -31,7 +31,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 - **A crash or a steep drop could make AEB think the road was vertical**: if the truck ended up pitched right over, jackknifed or airborne, the hill correction ran on that attitude and could ask for full braking on its own. Anything steeper than a real road now counts as flat.
 
-- **Emergency braking kept going after the car ahead had pulled away**: once it had braked for a car in front, it held the brake on until the gap grew to a full 1.5 seconds of following distance. At speed that meant it carried on slowing you for seconds after the other car had sped off and the gap was already opening. It now lets go as soon as the gap starts opening, and still holds on when the car ahead is only matching your speed.
+- **Emergency braking kept going after the car ahead had pulled away**: once it had braked for a car in front, it held the brake on until the gap grew to a full 1.5 seconds of following distance, measured as if the gap were standing still. At speed that meant it carried on slowing you for seconds after the other car had sped off. It now takes the opening gap into account, so it lets go once the space ahead is about to be clear, and still holds on when the car in front is close and only matching your speed.
 
 ## [1.1.0-preview.21] - 2026-09-05
 this will be one of the last preview builds of v1.1.0 before the final v1.1 release. any critical bugs can be reported and will be fixed before the stable release. **thanks to everyone who has been testing and sending in AEB clips!**
