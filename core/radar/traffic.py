@@ -25,9 +25,15 @@ _SPEED_EMA_CURVE_D: float = (
     / (_SPEED_EMA_AT_REST - _SPEED_EMA_AT_90_KMH)
 )
 
-# Accel: LS slope of speed_ema history, then light EMA. See core/radar/README.md §7.
-_ACCEL_FIT_WINDOW_S: float = 0.70
+# Accel: LS slope of speed_ema history, then light EMA. Both chains fit the same
+# de-noised window, speed-scaled below. See core/radar/README.md §7.
+_ACCEL_FIT_WINDOW_S: float = 1.50
 _ACCEL_EMA_ALPHA: float = 0.45
+# The fit window scales with the vehicle's own speed: reactive in town, smoother
+# at motorway speed. 1.0 at the reference. See core/radar/README.md §7.
+_ACCEL_WINDOW_REF_MS: float = 80.0 / 3.6
+_ACCEL_WINDOW_SCALE_MIN: float = 0.30
+_ACCEL_WINDOW_SCALE_MAX: float = 1.60
 # acc_speed step-4 tunables. See core/radar/README.md §7.
 _SPEED_EMA_HISTORY_LEN: int = 120
 
@@ -321,6 +327,13 @@ def _tmp_speed_ema_alpha(speed_ms: float) -> float:
     )
 
 
+def _accel_window_scale(speed_ms: float) -> float:
+    """Multiplier on every accel fit window; 1.0 at ``_ACCEL_WINDOW_REF_MS``."""
+    frac = abs(speed_ms) / _ACCEL_WINDOW_REF_MS
+    scale = _ACCEL_WINDOW_SCALE_MIN + (1.0 - _ACCEL_WINDOW_SCALE_MIN) * frac
+    return max(_ACCEL_WINDOW_SCALE_MIN, min(_ACCEL_WINDOW_SCALE_MAX, scale))
+
+
 def _accel_from_speed_history(
     history: list[tuple[float, float]],
     window_s: float,
@@ -369,7 +382,8 @@ def _speed_corr_chain(
     history.append((t_now, speed_ema))
     if len(history) > _SPEED_EMA_HISTORY_LEN:
         history = history[-_SPEED_EMA_HISTORY_LEN:]
-    accel_raw = _accel_from_speed_history(history, _ACCEL_FIT_WINDOW_S)
+    accel_raw = _accel_from_speed_history(
+        history, _ACCEL_FIT_WINDOW_S * _accel_window_scale(speed_ema))
     if prev_accel is None:
         accel = accel_raw
     else:

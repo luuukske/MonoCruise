@@ -71,7 +71,8 @@ class ClipTrace:
 # added once, here, and appears without touching the widget.
 SPEED_SIGNALS = ("raw_sel", "raw_long", "speed_ema", "speed", "acc_corr", "acc_speed")
 ACCEL_SIGNALS = ("accel", "acc_accel", "accel_trend", "accel_long", "brake_floor")
-GATE_SIGNALS = ("ramp", "consistency", "ff_gate", "accel_factor", "speed_factor", "tau")
+GATE_SIGNALS = ("accel_win", "ramp", "consistency", "ff_gate", "accel_factor",
+                "speed_factor", "tau")
 LAG_SIGNALS = ("lag_disp_ratio", "lag_rot_rate", "lag_raw_recent", "lag_raw_decay",
                "lag_freeze_dur", "lag_elapsed", "gap_ttc")
 STATE_SIGNALS = ("st_frozen", "st_lag_confirmed", "st_raw_brake", "st_pos_mismatch",
@@ -230,6 +231,8 @@ def _sample(prev: Vehicle | None, cur: Vehicle, ego,
         "speed": cur.speed,
         "acc_corr": NAN, "acc_speed": cur.acc_speed,
         "accel": cur.acceleration, "acc_accel": cur.acc_accel,
+        "accel_win": (T._ACCEL_FIT_WINDOW_S
+                      * T._accel_window_scale(cur._speed_ema or 0.0)),
         "brake_floor": brake_floor,
         "accel_trend": NAN, "accel_long": NAN,
         "ramp": NAN, "consistency": NAN, "ff_gate": NAN,

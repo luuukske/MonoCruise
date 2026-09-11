@@ -188,12 +188,12 @@ corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
 | `_smooth_yaw` | Wrap-safe EMA of `rotation.euler()[1]` in radians (`_RAW_YAW_ALPHA = 0.5`, AI and TMP) | **Arc curvature. Never use `rotation.euler()` directly for arcs.** |
 | `speed` | Accel-corrected smoothed speed (`speed_corr`): see filter chain below. AI + TMP | AEB arc direction, TTB |
 | `acc_speed` | ACC speed: adaptive filter on `speed_corr`: sub-deadband per-tick changes get a long time constant, larger changes a short one when they agree with the de-noised trend; standstill latch clamps to exactly 0 near rest (filter chain below). Runs on the **ACC chain** (long position window only). AI + TMP | ACC following-distance only |
-| `acceleration` | Nonlinear EMA of `d(speed_ema)/dt`: see filter chain below. Runs on the **AEB chain**, so it carries the hard-brake floor. AI + TMP (buffer field 11 unused) | Arc decel/accel via `_accel_to_arc_params()` |
-| `acc_accel` | Same derivation on the **ACC chain**: long window, no hard-brake floor. AI + TMP | ACC `a_lead` (CAH) only |
+| `acceleration` | Nonlinear EMA of `d(speed_ema)/dt` over the speed-scaled `_ACCEL_FIT_WINDOW_S`: see filter chain below. Runs on the **AEB chain**, so it carries the hard-brake floor. AI + TMP (buffer field 11 unused) | Arc decel/accel via `_accel_to_arc_params()` |
+| `acc_accel` | Same derivation and the **same window** on the **ACC chain**: long position window, no hard-brake floor. AI + TMP | ACC `a_lead` (CAH) only |
 | `angular_velocity` | Degrees/s from rotation delta/dt | Arc curvature via `κ = ω_rad/speed` |
 | `_position_history` | `(t, x, z)` tuples appended each full update (AI + TMP); capped at `_POSITION_HISTORY_LEN = 25` | TMP raw-speed LS fit (uses last `_TMP_SPEED_HISTORY_LEN = 20`), `curvature_from_history`, ACC trail arcs |
 | `_trail_history` | `(t, x, z)` retained on a **distance** grid (`_TRAIL_MIN_STEP_M = 0.5 m`), capped by span (`_TRAIL_SPAN_M = 40 m`), count (`_TRAIL_MAX_LEN = 64`) and age (`_TRAIL_MAX_AGE_S = 6.0 s`) | ACC trail arcs and road-model samples **only** |
-| `_speed_ema_history` | `(t, speed_ema)` tuples appended each full update (AI + TMP); capped at `_SPEED_EMA_HISTORY_LEN` | LS-slope fits: `accel` over `_ACCEL_FIT_WINDOW_S`, `accel_trend` over `_ACC_SPEED_ACCEL_WINDOW_S` |
+| `_speed_ema_history` | `(t, speed_ema)` tuples appended each full update (AI + TMP); capped at `_SPEED_EMA_HISTORY_LEN` | LS-slope fits: `accel` over `_ACCEL_FIT_WINDOW_S` x `_accel_window_scale`, `accel_trend` over the fixed `_ACC_SPEED_ACCEL_WINDOW_S` |
 
 ### Two position buffers: time-capped vs distance-retained
 
@@ -364,8 +364,9 @@ active.
 # 1. speed_ema : plain EMA of raw speed (no lag compensation)
 alpha      = _tmp_speed_ema_alpha(|avg(prev_speed_ema, raw_speed)|)   # 1.0 rest → 0.25 @ 90 km/h
 speed_ema  = alpha * raw_speed + (1 - alpha) * prev_speed_ema
-# 2. accel : LS slope of the speed_ema history over _ACCEL_FIT_WINDOW_S, light EMA
-accel_raw  = least_squares_slope( (t, speed_ema) samples within _ACCEL_FIT_WINDOW_S )
+# 2. accel : LS slope of the speed_ema history over a speed-scaled window, light EMA
+win        = _ACCEL_FIT_WINDOW_S * _accel_window_scale(speed_ema)   # both chains
+accel_raw  = least_squares_slope( (t, speed_ema) samples within win )
 accel      = prev_accel + _ACCEL_EMA_ALPHA * (accel_raw - prev_accel)
 # 3. speed_corr : lag-compensated; τ is the step-1 EMA settling time
 speed_corr = speed_ema + clamp(accel * dt*(1-alpha)/alpha, ±_SPEED_CORR_CLAMP_MS)
@@ -390,6 +391,92 @@ acc_speed    = predicted + alpha_a * (speed_corr - predicted)
 # trend → acc_speed = 0, latched; released after |speed_corr| >
 # _ACC_SPEED_STANDSTILL_RELEASE_MS sustained _ACC_SPEED_STANDSTILL_RELEASE_S
 ```
+
+#### One fit window for both chains, scaled by speed
+
+`_ACCEL_FIT_WINDOW_S` is **1.50 s** and both chains fit it. It was 0.70 s and
+AEB-only for the fast estimate; the wider window is now the standard because a
+0.70 s least-squares fit over `speed_ema` is noise, not trend, and both consumers
+were paying for it: AEB built target arcs from it, ACC read it as `a_lead`.
+
+The window is then multiplied by `_accel_window_scale(speed_ema)`, a clamped
+linear ramp in the vehicle's **own** speed: `_ACCEL_WINDOW_SCALE_MIN` (0.30) at
+rest, exactly 1.0 at `_ACCEL_WINDOW_REF_MS` (80 km/h), `_ACCEL_WINDOW_SCALE_MAX`
+(1.60) from about 148 km/h up.
+
+| target speed | 0 | 20 | 40 | 60 | **80** | 100 | 120 | 160+ km/h |
+|---|---|---|---|---|---|---|---|---|
+| fit window | 0.45 | 0.71 | 0.97 | 1.24 | **1.50** | 1.76 | 2.03 | 2.40 s |
+
+The argument for the ramp is that a braking event's time scale goes with speed: a
+lead shedding 30 km/h is done in about a second, where the same decel from 80 km/h
+runs three, so a window tuned at motorway speed spans the whole low-speed event.
+80 km/h is the anchor because that is where the old constants were tuned.
+
+**What it costs AEB.** 792 labelled clips, cost lower is better:
+
+| variant | AEB fit window | cost | TP | LATE | FN | FP | FW |
+|---|---|---|---|---|---|---|---|
+| old | 0.70 flat | **-435.01** | 341 | 12 | 39 | 37 | 15 |
+| window only | 1.50 flat | -432.32 | 341 | 11 | 40 | 36 | 15 |
+| ramp only | 0.70 x scale | -360.65 | 339 | 13 | 40 | 37 | 14 |
+| **shipped** | 1.50 x scale | **-424.73** | 341 | 11 | 40 | 38 | 14 |
+
+Three things that table is saying. **The wider window is close to free**: no
+labelled positive drops to a miss, the true-positive count does not move, and the
+2.48 s phantom brake on `2b98649d` goes silent outright. **The high half of the
+ramp is unpriceable here**: clamping the scale to `[1.0, 1.6]` reproduces the flat
+1.50 run on all 792 clips bit for bit, and clamping it to `[0.30, 1.0]` reproduces
+the shipped run bit for bit, so every AEB cost in the ramp is bought below the
+reference speed and nothing at all above it. **The ramp on its own is bad for
+AEB**: on the old 0.70 s base it drops `cdd9e5cb` from a true positive to a miss
+(+31.88), `fb2ba37e` to late (+16.54), and stretches an existing phantom on
+`2ad4514f` from 1.52 s to 7.32 s (+21.15), the last of which is a slow or stopped
+target whose accel estimate went noisy. On the 1.50 s base it costs +10.27, which
+is what the wider window is buying back.
+
+**What it costs ACC, and why the ramp is not optional there.** The ACC response
+probes cannot see this change at all: `acc_probe_rig` publishes `a_lead` straight
+onto a stub lead, so the radar chain never runs. The instrument is
+`tools/aeb_corpus_run/_acc_accel_lag.py`, which replays clips twice and measures
+when `acc_accel` crosses the 2 m/s2 bar that `a_lead` consumers react to. 250
+clips, 2808 lead-brake onsets:
+
+| vs the old 0.70 s window | 1.50 flat | **1.50 x scale** |
+|---|---|---|
+| onsets that never reach the bar | 402 (14.3 %) | **181 (6.4 %)** |
+| onset lag p50 / p90 | 0.135 / 0.500 s | **0.000 / 0.273 s** |
+| peak decel kept, p50 / p10 | 0.869 / 0.603 | **1.000 / 0.780** |
+| onset lag p50 / p90, 0-20 km/h | 0.205 / 0.545 s | **0.000 / 0.000 s** |
+| onset lag p50 / p90, 80+ km/h | 0.136 / 0.543 s | 0.070 / 0.611 s |
+
+The ramp halves every cost of the wider window and removes it outright below
+20 km/h, which is the whole reason it exists. The residual 6.4 % is a bar-crossing
+artefact rather than a lost brake: 80.7 % of those onsets peaked between 2.0 and
+2.5 m/s2 on the old signal and land at a median of 1.77 on the new one, only two
+of 181 peaked above 4 m/s2, and three of 181 were below 20 km/h.
+
+**Step 4 is deliberately exempt from the scale.** `accel_trend` and `accel_long`
+are not acceleration measurements for a consumer, they are discriminators whose
+windows were tuned against artefact periods that do not shrink when a vehicle
+slows: TMP's ~1 Hz netcode ripple, the 2-4 s convoy drift-and-snap cycle, and the
+~1 Hz crash-bounce rock. Scaling them removes the discrimination exactly where
+those artefacts live. Measured: with the scale applied to step 4 the standstill
+latch never engages on a crash bounce, because a 0.45 s window fits the individual
+half cycles instead of averaging them, and
+`test_standstill_bounce_latches_acc_speed_to_zero`,
+`test_bounce_does_not_release_latch` and `test_launch_releases_latch_and_tracks`
+all fail. None of that is visible in the clip corpus, because `acc_speed` is
+ACC-only.
+
+**Two pinned bounds moved and both are in the chart above.**
+`test_accel_estimate_reacts_within_half_second` read -2.40 m/s2 at 0.70 s and
+reads -0.74 at 1.50 s against a -2.2 bound; that harness passes
+`responsive_brake_decel = 0`, so it never exercises the hard-brake floor, which is
+why the corpus loses no true positive to it. Sub-2 m/s2 decel gets no floor and is
+where the lag is real. `test_hard_brake_ramp_tracks_with_bounded_lag` went 0.96 to
+1.04 m/s against a 1.00 bound on a 6 m/s2 synthetic ramp, and it was already
+within 4 % of that bound before this change.
 
 Step 4 makes `acc_speed` both noise-free and responsive: properties a linear
 EMA cannot give at once. The per-tick change `delta = speed_corr -
