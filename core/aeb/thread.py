@@ -1966,11 +1966,11 @@ class AEBThread(BaseThread):
         )
 
         # Latched headway hold + scope release (README latched-threat).
-        active_vid_set = {v.id for v in vehicles_eff}
+        active_veh = {v.id: v for v in vehicles_eff}
         ego_v_safe = max(ego_speed, 0.5)
         latched_headway_min = _INF
         for vid in list(self._latched_threat_ids):
-            if vid not in active_vid_set:
+            if vid not in active_veh:
                 self._latched_threat_ids.discard(vid)
                 self._latched_scope_ok_mono.pop(vid, None)
                 continue
@@ -2004,6 +2004,16 @@ class AEBThread(BaseThread):
                 self._latched_threat_ids.discard(vid)
                 self._latched_scope_ok_mono.pop(vid, None)
                 continue
+            # The hold covers a matched gap, not an opening one. A lead pulling
+            # away stays latched but stops flooring the brake (README).
+            if vid not in colliding_ids and dist_vid > 1e-6:
+                v_latched = active_veh[vid]
+                closing = (
+                    (ego_speed * ego_fwd_x - v_latched.speed * pc[8]) * pc[3]
+                    + (ego_speed * ego_fwd_z - v_latched.speed * pc[9]) * pc[4]
+                ) / dist_vid
+                if closing < -cal.latched_open_release_ms:
+                    continue
             if hw < latched_headway_min:
                 latched_headway_min = hw
 

@@ -247,6 +247,9 @@ class AEBCalibration:
     latched_release_headway_s: float = 2.5
     latched_min_decel_frac: float = 0.7
     latched_scope_release_s: float = 0.5
+    # Range rate at which a latched lead stops counting as a held threat: the
+    # hold is for a matched gap, not an opening one (README latched-threat).
+    latched_open_release_ms: float = 0.5
 
 
 DEFAULT = AEBCalibration()
