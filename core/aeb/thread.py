@@ -237,6 +237,8 @@ class AEBSnapshot:
     # Targets whose measured LOS drift vetoed engagement entry this tick
     # (debug/eval visibility; they still warn and still show as colliding).
     los_vetoed_ids: set = field(default_factory=set)
+    # Targets under the closing-speed comfort floor (README closing-speed floor).
+    closing_floor_ids: set = field(default_factory=set)
     # Superset: LOS veto plus the extrapolation vetoes (README engagement vetoes).
     engage_vetoed_ids: set = field(default_factory=set)
 
@@ -1385,6 +1387,7 @@ class AEBThread(BaseThread):
         wide_lat_checked_ids: set[int] = set()
         nearest_colliding_range: float = _INF
         los_vetoed_ids: set[int] = set()
+        closing_floor_ids: set[int] = set()
         # Superset of los_vetoed_ids: every target barred from engagement entry.
         engage_vetoed_ids: set[int] = set()
         los_veto_memo: dict[int, bool] = {}
@@ -1863,6 +1866,11 @@ class AEBThread(BaseThread):
                                 ego_arc, all_target_arcs, cal.lane_half_width),
                             cal, d_miss_v):
                         vetoed = True
+                    # Comfort floor: below this relative speed the contact is a
+                    # nudge and the jolt costs more (README closing-speed floor).
+                    if not vetoed and closing_unbraked < cal.aeb_min_closing_ms:
+                        vetoed = True
+                        closing_floor_ids.add(v.id)
                     if vetoed:
                         engage_vetoed_ids.add(v.id)
                     if not vetoed:
@@ -2272,6 +2280,7 @@ class AEBThread(BaseThread):
             evasion_filtered_ids=evasion_filtered_ids,
             oncoming_evasion_filtered_ids=oncoming_evasion_filtered_ids,
             los_vetoed_ids=los_vetoed_ids,
+            closing_floor_ids=closing_floor_ids,
             engage_vetoed_ids=engage_vetoed_ids,
             clearance_required_ms2=(
                 min(best_clearance.required_ms2, _REQUIRED_CEIL_MS2)

@@ -16,6 +16,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ### Changed
 - **Fewer clips sent when you help improve AEB/ACC**: clips where nothing ever came near you, and most of the ordinary "following a car at low speed" ones, are now kept on your machine instead of being sent. You will see the sent notification less often, and the clips that do go carry situations worth testing against. thanks again to everyone who has been testing and contributing with AEB/ACC clips!
+- **Less AEB brake triggers at similar speeds**: added a required relative speed to ensure less close driving false positives.
 
 ### Fixed
 - **A car coming into view read at half its real speed**: for the first third of a second after a vehicle entered radar range, its speed was measured over twice the time it had actually been tracked, so a car joining at 72 km/h showed as 36 and climbed back over the next few frames. ACC and emergency braking now get its real speed from the moment it appears.

@@ -157,6 +157,9 @@ class AEBCalibration:
     brake_actuator_lag_s: float = 0.10
     # New engagements only fire when |ego_speed| is above this threshold.
     aeb_min_engage_speed_kmh: float = 5.0
+    # Comfort floor on |v_ego - v_target|: a target closing slower than this
+    # is barred from engagement entry (README closing-speed floor).
+    aeb_min_closing_ms: float = 1.0
     # Trailers are ignored below this |ego_speed|: coupling and uncoupling
     # drive the truck under one on purpose (README low-speed trailer ignore).
     trailer_ignore_below_kmh: float = 20.0
