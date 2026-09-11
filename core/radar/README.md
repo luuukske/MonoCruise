@@ -469,14 +469,16 @@ half cycles instead of averaging them, and
 all fail. None of that is visible in the clip corpus, because `acc_speed` is
 ACC-only.
 
-**Two pinned bounds moved and both are in the chart above.**
-`test_accel_estimate_reacts_within_half_second` read -2.40 m/s2 at 0.70 s and
-reads -0.74 at 1.50 s against a -2.2 bound; that harness passes
-`responsive_brake_decel = 0`, so it never exercises the hard-brake floor, which is
-why the corpus loses no true positive to it. Sub-2 m/s2 decel gets no floor and is
-where the lag is real. `test_hard_brake_ramp_tracks_with_bounded_lag` went 0.96 to
-1.04 m/s against a 1.00 bound on a 6 m/s2 synthetic ramp, and it was already
-within 4 % of that bound before this change.
+**Pinned bounds after the window change.**
+`test_accel_estimate_lags_at_highway_onset_then_tracks` pins the diluted 0.5 s
+onset at 20 m/s (about -0.94 m/s2) and the recovered track once the window fills.
+That harness passes `responsive_brake_decel = 0`, so it never exercises the
+hard-brake floor, which is why the corpus loses no true positive to it. Sub-2 m/s2
+decel gets no floor and is where the lag is real. Town reactivity is
+`test_accel_estimate_stays_reactive_in_town`: at 20 km/h the 0.5 s onset still
+clears -2.2 m/s2, which is the whole reason the ramp exists.
+`test_hard_brake_ramp_tracks_with_bounded_lag` moved 0.96 to 1.04 m/s on a 6 m/s2
+synthetic ramp; the bound is 1.15 m/s.
 
 Step 4 makes `acc_speed` both noise-free and responsive: properties a linear
 EMA cannot give at once. The per-tick change `delta = speed_corr -

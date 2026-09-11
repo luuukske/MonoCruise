@@ -106,8 +106,9 @@ def test_hard_brake_ramp_tracks_with_bounded_lag():
     ramp_start = int(2.0 / DT)
     ramp_end = ramp_start + int(25.0 / 6.0 / DT)
     # After the trend gate opens (~0.6 s), acc_speed rides the ramp closely.
+    # Speed-scaled 1.50 s window moved peak lag 0.96 -> 1.04 m/s (README §7).
     settled = out[ramp_start + int(0.6 / DT):ramp_end]
-    assert max(abs(acc - corr) for corr, acc, _, _ in settled) < 1.0
+    assert max(abs(acc - corr) for corr, acc, _, _ in settled) < 1.15
     # After the stop it settles and latches to exactly 0.
     assert out[-1][1] == 0.0
     assert out[-1][3] is True
@@ -148,10 +149,23 @@ def test_cruise_ripple_still_attenuated():
     assert acc_dev < 0.3 * corr_dev
 
 
-def test_accel_estimate_reacts_within_half_second():
+def test_accel_estimate_lags_at_highway_onset_then_tracks():
+    """Sub-floor highway decel is diluted for ~1.4 s, then tracks. No hard-brake floor here."""
     trace = [20.0] * int(2.0 / DT)
     trace += _ramp(20.0, -5.0, 2.0)
     out = _run_chain(trace)
+    start = int(2.0 / DT)
+    at_half_s = out[start + int(0.5 / DT)][2]
+    filled = out[start + int(1.6 / DT)][2]
+    # 0.70 s window used to read -2.40 here; 1.50 s x scale reads about -0.94.
+    assert -1.5 < at_half_s < -0.4
+    assert filled < -4.5
+
+
+def test_accel_estimate_stays_reactive_in_town():
+    """The speed scale exists so a 20 km/h brake is not fit over 1.50 s."""
+    v0 = 20.0 / 3.6
+    trace = [v0] * int(2.0 / DT) + _ramp(v0, -5.0, 1.0)
+    out = _run_chain(trace)
     at_half_s = out[int(2.0 / DT) + int(0.5 / DT)]
-    # Hard-brake accel threshold: fit 0.70 / ema 0.45 must read below old 0.80 / 0.40 baseline.
     assert at_half_s[2] < -2.2

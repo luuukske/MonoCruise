@@ -26,10 +26,8 @@ from core.aeb.clip_store import (
 BASE_URL = "https://ld-tech.org/api/v1/aeb_pull.php"
 _TOKEN_ENV = "MONOCRUISE_PULL_TOKEN"
 _TIMEOUT = 60
-# The server answers a listing oldest-first, honours no ordering or offset, and
-# caps at its own default of 500 rows when asked for nothing. A corpus past that
-# size therefore stops showing anything new, which is why listing is paged with
-# a date cursor instead of asking for one page and trusting it to be whole.
+# Listing is oldest-first with a server-side row cap, so paging uses a date
+# cursor instead of trusting one request to be the whole corpus.
 _PAGE_LIMIT = 2000
 
 
