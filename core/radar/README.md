@@ -438,7 +438,8 @@ is what the wider window is buying back.
 **What it costs ACC, and why the ramp is not optional there.** The ACC response
 probes cannot see this change at all: `acc_probe_rig` publishes `a_lead` straight
 onto a stub lead, so the radar chain never runs. The instrument is
-`tools/aeb_corpus_run/_acc_accel_lag.py`, which replays clips twice and measures
+`_acc_accel_lag.py`, a local probe in the gitignored `tools/aeb_corpus_run/`, which
+replays clips twice and measures
 when `acc_accel` crosses the 2 m/s2 bar that `a_lead` consumers react to. 250
 clips, 2808 lead-brake onsets:
 
@@ -743,7 +744,7 @@ against the pre-hold speed and undoes the coast in a single step. The
 hold: they keep the hole, so the accel fit at release measures a real slope over
 real elapsed time instead of a fabricated one.
 
-**Measured** (792-clip corpus, `tools/aeb_corpus_run/score_once.py`):
+**Measured** (792-clip corpus, `score_once.py` in the gitignored `tools/aeb_corpus_run/`):
 −431.57 → −435.01, 9 clips moved, no verdict flipped in either direction
 (FN 39, FP 37, false-warn 15, late 12 both before and after). The gain is TP
 quality: engagement moves earlier on targets whose brake was being held flat.
