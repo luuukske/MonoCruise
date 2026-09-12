@@ -1538,6 +1538,9 @@ class AEBThread(BaseThread):
                 arc_start_pctg=cal.arc_start_pctg,
                 curvature_override=arc_curvature,
             )
+            # get_arc() maps accel_for_arc() internally; build_arc() below does not,
+            # so trailers need the same params explicitly or they draw flat.
+            dbg_decel, dbg_accel = _accel_to_arc_params(v.accel_for_arc())
             trailer_dicts = []
             trailer_arcs: list[ArcPath] = []
             for tr in v.trailers:
@@ -1556,6 +1559,8 @@ class AEBThread(BaseThread):
                     tr_arc_pos.z + tr_body_offset * tr_fwd_z_l,
                     tr_yaw_rad,
                     v.speed, arc_curvature, tr_hw, dynamic_horizon,
+                    decel=dbg_decel,
+                    accel=dbg_accel,
                 )
                 trailer_arcs.append(tr_arc)
                 trailer_dicts.append({
