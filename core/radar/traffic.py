@@ -366,7 +366,6 @@ def _speed_corr_chain(
     prev_speed_ema: float | None,
     prev_accel: float | None,
     prev_speed_ema_history: list[tuple[float, float]] | None,
-    responsive_brake_decel: float = 0.0,
 ) -> tuple[float, float, float, list[tuple[float, float]]]:
     """Filter steps 1-3: speed_ema, accel, speed_corr. See core/radar/README.md §7."""
     # Step 1: plain EMA of raw speed (no lag compensation).
@@ -388,8 +387,6 @@ def _speed_corr_chain(
         accel = accel_raw
     else:
         accel = prev_accel + _ACCEL_EMA_ALPHA * (accel_raw - prev_accel)
-    if responsive_brake_decel > 0.0:
-        accel = min(accel, -responsive_brake_decel)
 
     # Step 3: lag-compensated speed. τ is the step-1 EMA's settling time.
     tau_eff = dt * (1.0 - alpha_s) / alpha_s if alpha_s > 1e-6 else 0.0
@@ -485,14 +482,12 @@ def _smooth_vehicle_kinematics(
     prev_acc_speed: float | None,
     prev_acc_standstill: bool = False,
     prev_acc_release_s: float = 0.0,
-    responsive_brake_decel: float = 0.0,
 ) -> tuple[float, float, float, list[tuple[float, float]],
            float, float, list[tuple[float, float]], float, bool, float]:
     """Dual AEB/ACC kinematics chains from raw speeds. See core/radar/README.md §7."""
     speed_ema, accel, speed_corr, history = _speed_corr_chain(
         raw_speed, t_now, dt,
         prev_speed_ema, prev_accel, prev_speed_ema_history,
-        responsive_brake_decel,
     )
 
     # Separate AEB vs ACC filter state. See core/radar/README.md §7.
@@ -1770,15 +1765,6 @@ class Vehicle:
             raw_speed, self.speed, fwd_x, fwd_z,
         )
         acc_raw_speed = raw_speed if self.crash_confirmed else long_raw_speed
-        responsive_brake_decel = 0.0
-        if self._raw_brake_active:
-            recent_decel = _hard_brake_decel_from_position_history(
-                self._position_history, fwd_x, fwd_z,
-            )
-            if recent_decel is not None:
-                responsive_brake_decel = min(
-                    recent_decel, _ACC_SPEED_FF_ACCEL_CLAMP_MS2,
-                )
 
         (speed_ema, accel, speed_corr, speed_ema_history,
          acc_speed_ema, acc_accel, acc_speed_ema_history, acc_speed,
@@ -1788,7 +1774,6 @@ class Vehicle:
             prev._acc_speed_ema, prev._acc_smooth_accel,
             prev._acc_speed_ema_history, prev.acc_speed,
             prev._acc_standstill, prev._acc_release_s,
-            responsive_brake_decel,
         )
         self._raw_speed = raw_speed
         self._speed_ema = speed_ema

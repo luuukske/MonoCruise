@@ -239,7 +239,7 @@ Most signals are attributes (`speed`, `acc_speed`, `_speed_ema`, `acceleration`,
 `_raw_speed`, the state flags). The rest are rebuilt with the production helpers
 from `core/radar/traffic.py`, never re-derived by hand:
 
-* `raw_long`, `brake_floor`, `accel_trend`, `accel_long`, `accel_win`, `lag_raw_recent`,
+* `raw_long`, `accel_trend`, `accel_long`, `accel_win`, `lag_raw_recent`,
   `lag_raw_decay` and `lag_freeze_dur` all call the same private helper the
   filter calls.
 * The step 4 gates (`ramp`, `consistency`, `ff_gate`, `accel_factor`,
@@ -280,7 +280,7 @@ they are single-pixel verticals that antialiasing only blurs.
 | Lane | Axis | What it answers |
 |---|---|---|
 | speed chain | m/s, auto | Where does AEB's `speed` sit against ACC's `acc_speed`, and how far behind the raw input is each. |
-| accel chain | m/s², symmetric | Does `acc_accel` reach the lead's real deceleration, and did the hard-brake floor engage. `accel` and `acc_accel` fit the speed-scaled window; `accel_trend` and `accel_long` are the step-4 gate inputs and keep fixed windows. |
+| accel chain | m/s², symmetric | Does `acc_accel` reach the lead's real deceleration, and how far AEB's `accel` leads it once the short window is selected. `accel` and `acc_accel` fit the speed-scaled window; `accel_trend` and `accel_long` are the step-4 gate inputs and keep fixed windows. |
 | step 4 gates | 0..1, `tau` at half scale, `accel_win` at 0.4 | Which term is setting the ACC filter's time constant right now, plus the live accel fit window in seconds. |
 | lag entry gates | log2 of gate over threshold | Which of the four entry gates is holding a freeze open or shut. |
 | filter state | one row per flag | Freeze, short window, mismatch, crash, standstill, sub-frame, bypass. |

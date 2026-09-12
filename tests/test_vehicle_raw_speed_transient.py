@@ -59,7 +59,7 @@ def test_low_speed_hard_brake_reaches_aeb_speed_bound():
     brake_onset = t_now
     true_speed = 4.0
     active_at = None
-    accel_at_04 = None
+    accel_at_05 = None
 
     while true_speed > 0.0:
         next_speed = max(0.0, true_speed - 4.0 * DT)
@@ -68,8 +68,8 @@ def test_low_speed_hard_brake_reaches_aeb_speed_bound():
         prev = _step(prev, t_now, z, next_speed)
         if prev._raw_brake_active and active_at is None:
             active_at = t_now
-        if accel_at_04 is None and t_now - brake_onset >= 0.4:
-            accel_at_04 = prev.acceleration
+        if accel_at_05 is None and t_now - brake_onset >= 0.5:
+            accel_at_05 = prev.acceleration
         true_speed = next_speed
 
     stop_time = t_now
@@ -81,7 +81,8 @@ def test_low_speed_hard_brake_reaches_aeb_speed_bound():
 
     assert active_at is not None
     assert active_at - brake_onset <= 0.3
-    assert accel_at_04 is not None and accel_at_04 <= -2.0
+    # Unfloored fit: -2.40 at 0.5 s. The old 0.4 s bound pinned the removed floor.
+    assert accel_at_05 is not None and accel_at_05 <= -2.0
     deadline = [sample for sample in stop_samples if sample[0] - stop_time <= 0.4 + DT]
     assert abs(deadline[-1][1]) < 0.4
     assert abs(deadline[-1][2]) < 0.5
@@ -146,6 +147,26 @@ def test_low_speed_packet_stall_without_brake_ramp_does_not_enter():
         t_now += DT
         prev = _step(prev, t_now, z, 4.0)
         assert prev._raw_brake_active is False
+
+
+def test_publish_lag_that_latches_the_transient_never_floors_acceleration():
+    """A growing publish lag on a steady track can pass the hard-brake check.
+
+    It may select the short window, but `acceleration` must stay a fit: the removed
+    floor pinned this track at -6.00. See core/radar/README.md §7.
+    """
+    speed = 18.0
+    prev, t_now, _ = _seed_cruise(speed)
+    latched = False
+    accels: list[float] = []
+    for lag_m in [0.02, 0.06, 0.12, 0.20, 0.30] + [0.0] * int(1.5 / DT):
+        t_now += DT
+        prev = _step(prev, t_now, -speed * t_now + lag_m, speed)
+        latched = latched or prev._raw_brake_active
+        accels.append(prev.acceleration)
+
+    assert latched, "the jitter pattern no longer exercises the transient"
+    assert min(accels) > -1.0
 
 
 def test_confirmed_hard_brake_vetoes_lag_entry():

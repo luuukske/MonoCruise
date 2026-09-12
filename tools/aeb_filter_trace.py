@@ -70,7 +70,7 @@ class ClipTrace:
 # Signal names in draw order per lane. The chart reads these, so a new signal is
 # added once, here, and appears without touching the widget.
 SPEED_SIGNALS = ("raw_sel", "raw_long", "speed_ema", "speed", "acc_corr", "acc_speed")
-ACCEL_SIGNALS = ("accel", "acc_accel", "accel_trend", "accel_long", "brake_floor")
+ACCEL_SIGNALS = ("accel", "acc_accel", "accel_trend", "accel_long")
 GATE_SIGNALS = ("accel_win", "ramp", "consistency", "ff_gate", "accel_factor",
                 "speed_factor", "tau")
 LAG_SIGNALS = ("lag_disp_ratio", "lag_rot_rate", "lag_raw_recent", "lag_raw_decay",
@@ -217,12 +217,6 @@ def _sample(prev: Vehicle | None, cur: Vehicle, ego,
         (cur.position.x, cur.position.y, cur.position.z),
         (ego.coordinateX, ego.coordinateY, ego.coordinateZ),
     )
-    brake_floor = NAN
-    if cur._raw_brake_active:
-        decel = T._hard_brake_decel_from_position_history(
-            cur._position_history, fwd_x, fwd_z)
-        if decel is not None:
-            brake_floor = -min(decel, T._ACC_SPEED_FF_ACCEL_CLAMP_MS2)
 
     row = {
         "raw_sel": cur._raw_speed if cur._raw_speed is not None else NAN,
@@ -233,7 +227,6 @@ def _sample(prev: Vehicle | None, cur: Vehicle, ego,
         "accel": cur.acceleration, "acc_accel": cur.acc_accel,
         "accel_win": (T._ACCEL_FIT_WINDOW_S
                       * T._accel_window_scale(cur._speed_ema or 0.0)),
-        "brake_floor": brake_floor,
         "accel_trend": NAN, "accel_long": NAN,
         "ramp": NAN, "consistency": NAN, "ff_gate": NAN,
         "accel_factor": NAN, "speed_factor": NAN, "tau": NAN, _RESIDUAL: NAN,

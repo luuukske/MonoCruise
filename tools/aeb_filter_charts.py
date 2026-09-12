@@ -164,7 +164,6 @@ def _accel_lane() -> Lane:
             Curve("accel_long",
                   f"step-4 consistency {T._ACC_SPEED_CONSIST_WINDOW_S:g}s (fixed)",
                   _c(90, 170, 235), 1.2),
-            Curve("brake_floor", "hard-brake floor", _c(200, 120, 220), 1.6, dashed=True),
         ],
     )
 

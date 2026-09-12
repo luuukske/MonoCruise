@@ -188,8 +188,8 @@ corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
 | `_smooth_yaw` | Wrap-safe EMA of `rotation.euler()[1]` in radians (`_RAW_YAW_ALPHA = 0.5`, AI and TMP) | **Arc curvature. Never use `rotation.euler()` directly for arcs.** |
 | `speed` | Accel-corrected smoothed speed (`speed_corr`): see filter chain below. AI + TMP | AEB arc direction, TTB |
 | `acc_speed` | ACC speed: adaptive filter on `speed_corr`: sub-deadband per-tick changes get a long time constant, larger changes a short one when they agree with the de-noised trend; standstill latch clamps to exactly 0 near rest (filter chain below). Runs on the **ACC chain** (long position window only). AI + TMP | ACC following-distance only |
-| `acceleration` | Nonlinear EMA of `d(speed_ema)/dt` over the speed-scaled `_ACCEL_FIT_WINDOW_S`: see filter chain below. Runs on the **AEB chain**, so it carries the hard-brake floor. AI + TMP (buffer field 11 unused) | Arc decel/accel via `_accel_to_arc_params()` |
-| `acc_accel` | Same derivation and the **same window** on the **ACC chain**: long position window, no hard-brake floor. AI + TMP | ACC `a_lead` (CAH) only |
+| `acceleration` | Nonlinear EMA of `d(speed_ema)/dt` over the speed-scaled `_ACCEL_FIT_WINDOW_S`: see filter chain below. Runs on the **AEB chain**, so it fits the short window's raw speed during a confirmed hard brake. Never floored or overridden (§7 "No floor on `acceleration`"). AI + TMP (buffer field 11 unused) | Arc decel/accel via `_accel_to_arc_params()` |
+| `acc_accel` | Same derivation and the **same window** on the **ACC chain**: long position window only. AI + TMP | ACC `a_lead` (CAH) only |
 | `angular_velocity` | Degrees/s from rotation delta/dt | Arc curvature via `κ = ω_rad/speed` |
 | `_position_history` | `(t, x, z)` tuples appended each full update (AI + TMP); capped at `_POSITION_HISTORY_LEN = 25` | TMP raw-speed LS fit (uses last `_TMP_SPEED_HISTORY_LEN = 20`), `curvature_from_history`, ACC trail arcs |
 | `_trail_history` | `(t, x, z)` retained on a **distance** grid (`_TRAIL_MIN_STEP_M = 0.5 m`), capped by span (`_TRAIL_SPAN_M = 40 m`), count (`_TRAIL_MAX_LEN = 64`) and age (`_TRAIL_MAX_AGE_S = 6.0 s`) | ACC trail arcs and road-model samples **only** |
@@ -301,10 +301,48 @@ subsequent launch; it returns to the long estimate after both agree within
 0.3 m/s for 3 moving frames. At standstill it does not release, which prevents
 stale long-window samples from raising the speed again.
 
-Confirmed short-window deceleration also floors `acceleration` to the measured
-negative rate before `speed_corr` is calculated. AEB therefore receives both
-the responsive speed and braking trend. Normal cruise, ACC filtering, and the
-long-window TMP ripple rejection are unchanged.
+The transient changes only the raw speed that enters steps 1-3. `acceleration`
+is the step-2 fit of that speed and nothing else; normal cruise, ACC filtering and
+the long-window TMP ripple rejection are unchanged.
+
+**No floor on `acceleration`.** Until September 2026 a confirmed transient also
+overrode step 2 with `accel = min(accel, -min(recent_decel, 6.0))`, re-measuring
+the short-window decel every frame. It was removed because it invented threats:
+
+- **The check it keyed on fires on publish jitter.** Traffic positions carry a
+  few milliseconds of publish jitter, enough to scatter interval speeds by 16-18 %
+  on a constant-speed track, against a 0.4 m/s loss requirement. The two-frame
+  confirmation re-reads 3 of the same 4 intervals, so it is not independent
+  evidence. 84 % of clips latch at least once, 68 % of latches have no matching
+  decel on the ACC chain, and 181 tracks that never slowed anywhere in their clip
+  peaked at exactly -6.00, the clamp.
+- **Every false fire could only add threat.** The override was one-directional,
+  bypassed both smoothers and was written back into `_smooth_accel`, so it also
+  left a ~0.3 s decay tail. `acceleration` bends the target's predicted arc into a
+  stop through `_accel_to_arc_params`.
+- **On real brakes it overshot rather than tracked.** Against a non-causal fit of
+  the whole track, no floor was closer on 66.3 % of 793 genuine latches: median
+  error 2.94 m/s2 with it, 2.65 without, and it overshot truth by a median
+  2.56 m/s2. The p90 is the one place it helped (6.81 against 7.24).
+
+Priced before removal. **Corpus** (792 clips): -419.73 to -378.65, 15 clips
+changed at all, and all but -0.72 of the cost is `60198ac0` going from true
+positive to miss. There the lead held about 5.5 m/s while its raw speed wobbled
+between 4.2 and 6.3; the floor pinned -6.00 for two frames, lifted required decel
+from about 5 to 15 m/s2, and that spike was the whole brake. The recorded ego
+braking in that clip came from the live AEB of the client that captured it, which
+an open-loop replay cannot separate. The other brake it trimmed, the tail of
+`47ff41e8`, was on a vehicle already pulling away. **Closed loop**: a lead braking
+at 4-10 m/s2 ahead of three rigs at 60-100 km/h and 0.8-2.0 s headway, its
+positions run through `Vehicle` with publish jitter, into the shipped clearance
+demand, follow-threat override, entry bar and `AEBDecelController` on the fitted
+brake plant. The worst residual gap was identical with and without the floor
+(-0.20 m at median plant lag, -0.21 m at p90), no single case moved by more than
+0.08 m, and engagement came at most 0.04 s later. A closing lead gets its arc
+decel from the follow-threat track, which is why the floor barely reached it.
+
+Do not re-add it. If a gated version is ever tried, apply it to the output only,
+never write it back into `_smooth_accel`, and confirm on non-overlapping windows.
 
 ### Two chains: AEB reads the short window, ACC never does
 
@@ -313,8 +351,8 @@ step 4 on the ACC chain only:
 
 | Chain | Raw input | Outputs | State |
 |-------|-----------|---------|-------|
-| AEB | hard-brake-selected raw speed (short window when a brake is confirmed), plus the `responsive_brake_decel` floor | `speed`, `acceleration` | `_speed_ema`, `_smooth_accel`, `_speed_ema_history` |
-| ACC | long position window only, no floor | `acc_speed`, `acc_accel` | `_acc_speed_ema`, `_acc_smooth_accel`, `_acc_speed_ema_history` |
+| AEB | hard-brake-selected raw speed (short window when a brake is confirmed) | `speed`, `acceleration` | `_speed_ema`, `_smooth_accel`, `_speed_ema_history` |
+| ACC | long position window only | `acc_speed`, `acc_accel` | `_acc_speed_ema`, `_acc_smooth_accel`, `_acc_speed_ema_history` |
 
 The short window is an AEB responsiveness device and ACC never needed it. On TMP
 it latches on packet stalls and then stays selected a **median of 1.83 s (p90
@@ -473,9 +511,11 @@ ACC-only.
 **Pinned bounds after the window change.**
 `test_accel_estimate_lags_at_highway_onset_then_tracks` pins the diluted 0.5 s
 onset at 20 m/s (about -0.94 m/s2) and the recovered track once the window fills.
-That harness passes `responsive_brake_decel = 0`, so it never exercises the
-hard-brake floor, which is why the corpus loses no true positive to it. Sub-2 m/s2
-decel gets no floor and is where the lag is real. Town reactivity is
+That harness feeds a synthetic speed trace straight into the chain, so the short
+window never engages and the lag it pins is the whole cost on any decel the
+hard-brake transient does not confirm. The corpus figures in this section were
+measured while the hard-brake floor still existed; its removal is priced on its
+own above. Town reactivity is
 `test_accel_estimate_stays_reactive_in_town`: at 20 km/h the 0.5 s onset still
 clears -2.2 m/s2, which is the whole reason the ramp exists.
 `test_hard_brake_ramp_tracks_with_bounded_lag` moved 0.96 to 1.04 m/s on a 6 m/s2
@@ -617,6 +657,14 @@ break that circle; all must pass to open a freeze.
 
 1. **Hard-brake veto**: `prev._raw_brake_active` blocks entry. A confirmed
    deceleration ramp is measured motion, so the target is stopping, not stalled.
+   The latch also fires on publish jitter (see "No floor on `acceleration`"), so
+   it does block some genuine stall freezes, and it was costed for removal on that
+   basis. **It stays: it is the only gate that catches some real stops.** On
+   `c6e05e3d` a vehicle came to a near-instant stop from 15 m/s and gates 2-4 all
+   passed; without gate 1 the freeze held it at 15.3 m/s for 0.4 s, AEB let go
+   about 17 m from it and never came back while the driver was on full brake. The cost of keeping
+   it is smoothing: `12cc15e6` reads a real stall as a stop and brakes 0.24 s
+   earlier than a freeze would let it.
 2. **Rotation**: max per-axis rotation delta as a rate must stay under
    `_LAG_ROT_LIVE_DEG_S` (2 deg/s). A packet stall freezes the whole pose;
    a crashing vehicle keeps rotating at 10+ deg/s. Note this gate says nothing
@@ -1065,7 +1113,7 @@ double-count each trailer.
 | Arc curvature | `κ = omega_rad_s / abs_speed` |
 | Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
 | TMP raw speed | Free-intercept LS on longitudinal `(t,x,z)` history (max `_TMP_SPEED_HISTORY_LEN` full frames): `v = Σ((τ−τ̄)(s−s̄))/Σ((τ−τ̄)²)`; else `Δraw/dt`, signed via forward dot |
-| Speed / accel filter (AI + TMP) | Long-window position LS raw speed by default; confirmed hard braking temporarily selects a 5-sample LS suffix and its measured decel. Then `_smooth_vehicle_kinematics()` runs `speed_ema` (EMA of raw) → `accel` (LS slope with confirmed short-window brake floor) → `speed_corr = speed_ema + accel·τ` (`self.speed`) → `acc_speed` (adaptive low-pass on `speed_corr`: `tau` ramps `_ACC_SPEED_TAU_SLOW_S`→`_ACC_SPEED_TAU_FAST_S` as the per-tick change grows past `_ACC_SPEED_DEADBAND_MS` **and agrees with the de-noised trend**, and is scaled down at low speed and during a steady decel/accel: plus a constant-accel feed-forward, gated by de-noised `accel_trend`, that zeroes sustained-ramp lag with no windup; standstill latch clamps to 0 near rest with hysteresis release; `self.acc_speed`) |
+| Speed / accel filter (AI + TMP) | Long-window position LS raw speed by default; confirmed hard braking temporarily selects a 5-sample LS suffix. Then `_smooth_vehicle_kinematics()` runs `speed_ema` (EMA of raw) → `accel` (LS slope, never floored) → `speed_corr = speed_ema + accel·τ` (`self.speed`) → `acc_speed` (adaptive low-pass on `speed_corr`: `tau` ramps `_ACC_SPEED_TAU_SLOW_S`→`_ACC_SPEED_TAU_FAST_S` as the per-tick change grows past `_ACC_SPEED_DEADBAND_MS` **and agrees with the de-noised trend**, and is scaled down at low speed and during a steady decel/accel: plus a constant-accel feed-forward, gated by de-noised `accel_trend`, that zeroes sustained-ramp lag with no windup; standstill latch clamps to 0 near rest with hysteresis release; `self.acc_speed`) |
 | AI vs TMP raw speed | AI = buffer field 10; TMP = position-history LS fit. Filter chain identical after that |
 | Positions | No EMA: always raw world coordinates |
 | Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > _LAG_MIN_SPEED_MS` (5 m/s) AND all four entry gates pass → decay speed: `prev_speed × (1 − frac²)`, release after the TTC-scaled `freeze_dur` (≤ 0.5 s) |
@@ -1110,10 +1158,11 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 - **Arc forward vector formula is `(-sin, -cos)`.** Do not flip signs or swap to `(sin, cos)`.
 - **Speed/accel filtering runs for AI and TMP** via `_smooth_vehicle_kinematics()`: the 4-signal chain `speed_ema → accel → speed_corr → acc_speed`. `self.speed` is the accel-corrected `speed_corr`; `self.acc_speed` is the adaptive-filtered ACC speed (ACC only); `self.acceleration` is the LS-slope `accel`. World positions are not low-pass filtered.
 - **Hard-brake raw-speed mode requires a measured deceleration ramp.** Never activate the short position window from a zero-displacement sample alone: below `_LAG_MIN_SPEED_MS`, a TMP packet stall is not owned by lag freeze and would look like a stopped obstacle.
-- **An armed hard-brake transient vetoes lag entry.** A confirmed decel ramp is measured motion, so the target is stopping and must reach AEB raw. This inverts the older "freeze always wins" priority, which pinned stopping traffic at a stale speed.
+- **An armed hard-brake transient vetoes lag entry.** A confirmed decel ramp is measured motion, so the target is stopping and must reach AEB raw. This inverts the older "freeze always wins" priority, which pinned stopping traffic at a stale speed. The latch's false fires on publish jitter do not make this veto removable: on `c6e05e3d` it is the only gate that keeps a real stop out of a freeze (§7, lag entry gates).
 - **Lag freeze owns kinematics once it opens.** A freeze that does open still resets hard-brake transient state; the short estimator must not bypass or advance during the freeze early return.
 - **Lag entry gates read raw positions, never `prev.speed`.** The freeze criterion itself compares against the filter's own output, so gating on that output too would be circular: a stale speed would justify the freeze that keeps it stale. `_lag_entry_allowed` measures `_position_history` directly.
 - **`acceleration` is kinematic-only**: buffer field 11 is ignored for AI and TMP; `accel_for_arc()` reads `self.acceleration` (least-squares slope of the `speed_ema` history, light-EMA smoothed).
+- **Nothing floors or overrides `acceleration`.** The hard-brake transient feeds the short window's raw speed into the chain and stops there. The old `min(accel, -recent_decel)` floor fired on publish jitter, could only add threat, and re-seeded `_smooth_accel` with its own output (§7, "No floor on `acceleration`").
 - **`acc_speed` is ACC-only.** AEB and arc geometry use `self.speed`; never swap them.
 - **TMP lag freeze holds position, filtered speed decay, and internal EMA state.** Do not advance position during a freeze: that would snap when updates resume.
 - **Lag freeze speed decays quadratically: `prev_speed × (1 − frac²)`.** Never hold speed constant during lag: it keeps downstream threads informed while smoothly approaching 0.
