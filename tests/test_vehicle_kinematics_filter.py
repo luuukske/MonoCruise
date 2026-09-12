@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import math
 
-from core.radar.traffic import _smooth_vehicle_kinematics
+from core.radar.traffic import (
+    _ACCEL_FIT_WINDOW_S,
+    _accel_window_scale,
+    _smooth_vehicle_kinematics,
+)
 
 DT = 0.05  # full-update cadence (s)
 
@@ -147,6 +151,17 @@ def test_cruise_ripple_still_attenuated():
     corr_dev = max(abs(corr - 25.0) for corr, _, _, _ in tail)
     acc_dev = max(abs(acc - 25.0) for _, acc, _, _ in tail)
     assert acc_dev < 0.3 * corr_dev
+
+
+def test_accel_window_scale_pins_40_and_100_kmh():
+    """Rest, 40 km/h, and 100 km/h windows. See core/radar/README.md §7."""
+    def window_s(kmh: float) -> float:
+        return _ACCEL_FIT_WINDOW_S * _accel_window_scale(kmh / 3.6)
+
+    assert abs(window_s(0.0) - 0.45) < 0.005
+    assert abs(window_s(40.0) - 1.05) < 0.01
+    assert abs(window_s(100.0) - 1.50) < 0.005
+    assert window_s(160.0) < 1.75
 
 
 def test_accel_estimate_lags_at_highway_onset_then_tracks():

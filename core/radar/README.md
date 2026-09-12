@@ -438,35 +438,41 @@ AEB-only for the fast estimate; the wider window is now the standard because a
 were paying for it: AEB built target arcs from it, ACC read it as `a_lead`.
 
 The window is then multiplied by `_accel_window_scale(speed_ema)`, a clamped
-linear ramp in the vehicle's **own** speed: `_ACCEL_WINDOW_SCALE_MIN` (0.30) at
-rest, exactly 1.0 at `_ACCEL_WINDOW_REF_MS` (80 km/h), `_ACCEL_WINDOW_SCALE_MAX`
-(1.60) from about 148 km/h up.
+saturating exponential in the vehicle's **own** speed: `_ACCEL_WINDOW_SCALE_MIN`
+(0.30) at rest, exactly 1.0 at `_ACCEL_WINDOW_REF_MS` (100 km/h). The shape is
+`(1 - e^{-k x}) / (1 - e^{-k})` with `x = v / v_ref` and `k = 1.42`, which pins
+~1.05 s at 40 km/h and 1.50 s at 100 km/h, then flattens (asymptote ~1.83 s).
+`_ACCEL_WINDOW_SCALE_MAX` (1.60) is a backstop; the curve saturates near 1.22
+and never reaches it.
 
-| target speed | 0 | 20 | 40 | 60 | **80** | 100 | 120 | 160+ km/h |
+| target speed | 0 | 20 | **40** | 60 | 80 | **100** | 120 | 160+ km/h |
 |---|---|---|---|---|---|---|---|---|
-| fit window | 0.45 | 0.71 | 0.97 | 1.24 | **1.50** | 1.76 | 2.03 | 2.40 s |
+| fit window | 0.45 | 0.79 | **1.05** | 1.24 | 1.39 | **1.50** | 1.58 | 1.69 s |
 
 The argument for the ramp is that a braking event's time scale goes with speed: a
-lead shedding 30 km/h is done in about a second, where the same decel from 80 km/h
+lead shedding 30 km/h is done in about a second, where the same decel from 100 km/h
 runs three, so a window tuned at motorway speed spans the whole low-speed event.
-80 km/h is the anchor because that is where the old constants were tuned.
+100 km/h is the 1.0 anchor. The exponential (vs the old linear ramp at 80 km/h)
+keeps town windows short while stopping the motorway end from stretching past
+~1.7 s.
 
-**What it costs AEB.** 792 labelled clips, cost lower is better:
+**What it costs AEB.** 792 labelled clips, cost lower is better. Figures below
+are the linear ramp at 80 km/h, not the exponential at 100 km/h:
 
 | variant | AEB fit window | cost | TP | LATE | FN | FP | FW |
 |---|---|---|---|---|---|---|---|
 | old | 0.70 flat | **-435.01** | 341 | 12 | 39 | 37 | 15 |
 | window only | 1.50 flat | -432.32 | 341 | 11 | 40 | 36 | 15 |
 | ramp only | 0.70 x scale | -360.65 | 339 | 13 | 40 | 37 | 14 |
-| **shipped** | 1.50 x scale | **-424.73** | 341 | 11 | 40 | 38 | 14 |
+| linear@80 | 1.50 x scale | **-424.73** | 341 | 11 | 40 | 38 | 14 |
 
 Three things that table is saying. **The wider window is close to free**: no
 labelled positive drops to a miss, the true-positive count does not move, and the
 2.48 s phantom brake on `2b98649d` goes silent outright. **The high half of the
 ramp is unpriceable here**: clamping the scale to `[1.0, 1.6]` reproduces the flat
 1.50 run on all 792 clips bit for bit, and clamping it to `[0.30, 1.0]` reproduces
-the shipped run bit for bit, so every AEB cost in the ramp is bought below the
-reference speed and nothing at all above it. **The ramp on its own is bad for
+the linear@80 run bit for bit, so every AEB cost in that ramp is bought below the
+80 km/h reference and nothing at all above it. **The ramp on its own is bad for
 AEB**: on the old 0.70 s base it drops `cdd9e5cb` from a true positive to a miss
 (+31.88), `fb2ba37e` to late (+16.54), and stretches an existing phantom on
 `2ad4514f` from 1.52 s to 7.32 s (+21.15), the last of which is a slow or stopped

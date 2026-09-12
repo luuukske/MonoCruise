@@ -178,7 +178,7 @@ def _gate_lane() -> Lane:
         hi=1.05,
         height=110,
         rules=[(1.0, ""), (T._ACC_SPEED_TAU_SLOW_S * 0.5, "tau slow"),
-               (T._ACCEL_FIT_WINDOW_S * 0.4, "accel fit at 80 km/h")],
+               (T._ACCEL_FIT_WINDOW_S * 0.4, "accel fit at 100 km/h")],
         signals=[
             Curve("accel_win", "AEB accel fit window (s, x0.4)",
                   _c(150, 210, 255), 1.3, scale=0.4, dashed=True),
