@@ -19,6 +19,8 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **Less AEB brake triggers at similar speeds**: added a required relative speed to ensure less close driving false positives.
 
 ### Fixed
+- **ACC slow to pull away after a stop**: it waited until the vehicle ahead was already rolling at around 5 km/h before moving off. It now reacts to the gap opening instead of the other vehicle's speed, so it pulls away sooner, and closes up when traffic ahead inches forward.
+
 - **A car coming into view read at half its real speed**: for the first third of a second after a vehicle entered radar range, its speed was measured over twice the time it had actually been tracked, so a car joining at 72 km/h showed as 36 and climbed back over the next few frames. ACC and emergency braking now get its real speed from the moment it appears.
 
 - **Traffic braking hard could briefly read as speeding up**: on TruckersMP a vehicle slowing in front of you could suddenly show a jump in speed about a second later, well after the moment that caused it. Their speed is now read more accurately while they brake, so ACC and emergency braking respond to what they are actually doing.

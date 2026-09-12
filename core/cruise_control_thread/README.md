@@ -209,6 +209,17 @@ Two rules now:
 
 Enforced by `tests/acc/test_overlay_confidence_gate.py`.
 
+### Standstill hold
+
+`standstill_hold.py` pins the cap at zero while ego is stopped behind a close
+lead, and releases it on the gap law's wanted accel (0.25 m/s², the hold FSM's
+launch bid), not on the lead's speed. The lead's `acc_speed` is latched at 0
+until it holds 0.6 m/s for 0.5 s, so the old speed test launched only once the
+lead was doing ~1.35 m/s; the law sees the gap and `a_lead` about 0.6 s sooner.
+The engage-time margin, the no-bid-at-rest rule and the snap from a positive
+cap each fix a measured failure: rationale and numbers in
+`core/acc/ACC_ARCHITECTURE.md` §10.1. Enforced by `tests/acc/test_standstill_hold.py`.
+
 ### Lead-loss grace
 
 Brief empty-chain ticks reuse the last chain for `LEAD_LOSS_GRACE_S` so IIDM state does not

@@ -16,7 +16,7 @@ from .blinker_arbitration import (
     BlinkerArbiter,
     BlinkerState,
 )
-from . import idm_cah
+from . import idm_cah, standstill_hold
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +182,7 @@ class ACConfig:
     standstill_speed_ms: float = STANDSTILL_SPEED_MS
     standstill_gap_slack_m: float = STANDSTILL_GAP_SLACK_M
     standstill_hold_decel_ms2: float = STANDSTILL_HOLD_DECEL_MS2
+    standstill_launch_accel_ms2: float = standstill_hold.LAUNCH_ACCEL_MS2
     j_max_ms3: float = J_MAX_MS3
     tau_input_near_s: float = TAU_INPUT_NEAR_S
     tau_input_far_s: float = TAU_INPUT_FAR_S
@@ -246,6 +247,7 @@ class AdaptiveCruiseController:
         self._last_chain_raw: list[_LeadSnapshot] = []
         self._last_chain_mono: float = -math.inf
         self._blinker = BlinkerArbiter()
+        self._standstill = standstill_hold.StandstillHold()
 
     def accel_cap_ms2(self, ego_speed_ms: float) -> float:
         now = time.monotonic()
@@ -271,6 +273,7 @@ class AdaptiveCruiseController:
             self._ant_delta_ms2 = 0.0
             self._blinker.committed = False
             self._blinker.released_vid = None
+            self._standstill.reset()
             target = self.config.no_lead_ceiling_ms2
             a_jerk = self._jerk_limit(target, dt, is_emergency=False)
             return self._output_filter(a_jerk, dt, is_emergency=False)
@@ -306,6 +309,7 @@ class AdaptiveCruiseController:
         self._last_chain_raw = []
         self._last_chain_mono = -math.inf
         self._blinker.reset()
+        self._standstill.reset()
 
     def _lead_to_snapshot(self, lead: object) -> _LeadSnapshot | None:
         cfg = self.config
@@ -437,7 +441,7 @@ class AdaptiveCruiseController:
         primary_raw: _LeadSnapshot,
         v_ego: float,
     ) -> tuple[float, bool] | None:
-        """Emergency / hard-TTC / standstill overlays. None means continue normal law."""
+        """Emergency / hard-TTC overlays. None means continue normal law."""
         cfg = self.config
         eff_dist = max(primary_raw.dist_m, 0.01)
         if eff_dist <= cfg.d_emergency_m:
@@ -450,14 +454,6 @@ class AdaptiveCruiseController:
             if ttc < cfg.ttc_hard_s:
                 self._ant_delta_ms2 = 0.0
                 return cfg.max_decel_ms2, True
-
-        if (
-            v_ego < cfg.standstill_speed_ms
-            and primary_raw.v_lead_ms < cfg.standstill_speed_ms
-            and eff_dist <= cfg.s0_m + cfg.standstill_gap_slack_m
-        ):
-            self._ant_delta_ms2 = 0.0
-            return 0.0, False
         return None
 
     def _compute_command(
@@ -499,6 +495,11 @@ class AdaptiveCruiseController:
         overlay = self._safety_overlays(primary_raw, v_ego)
         if overlay is not None:
             return overlay
+        if self._standstill.step(cfg, primary_raw.dist_m, chain_smooth[0], v_ego, t_headway):
+            # Unsmoothed only from a positive cap: one decaying toward zero from
+            # above never reads as a stop to the hold FSM. See ACC_ARCHITECTURE §10.1.
+            self._ant_delta_ms2 = 0.0
+            return 0.0, (self._output_ema or 0.0) > 0.0
 
         # R8: stage-1 softening only while in-lane TTC and comfort allow it.
         t_lane = t_headway

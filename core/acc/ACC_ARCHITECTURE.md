@@ -1041,16 +1041,83 @@ emergency.
 | Overlay | Trigger | Output | Bypass |
 |---|---|---|---|
 | Emergency band | `eff_dist ≤ 1.5 m` | `−8.0 m/s²` | jerk + EMA |
-| TTC hard floor | `v_close > 0.3` AND `raw_eff_dist / v_close < 1.5 s` | `MAX_DECEL = −6.55 m/s²` | jerk + EMA |
-| Standstill hold | `v_ego < 0.4` AND `v_lead < 0.4` AND `eff_dist ≤ s0 + 2.0` | `0.0 m/s²` | none |
+| TTC hard floor | `v_close > 0.4` AND `raw_eff_dist / v_close < 1.5 s` | `MAX_DECEL = −6.55 m/s²` | jerk + EMA |
+| Standstill hold | `v_ego < 0.4` AND `eff_dist ≤ s0 + 2.0` AND the law's wanted accel has not asked to launch (§10.1) | `0.0 m/s²` | only from a positive cap |
 | At-clamp hard | `a_chain ≤ MAX_DECEL + 1e-6` | as-is | jerk + EMA |
 
+### 10.1 Standstill hold
+
 The standstill hold is a real-vehicle extension to the textbook IIDM.
-Inside the window IIDM still reads the gap as larger than `s0` and asks
-for a small positive command; pinning the cap at zero stops the truck
-creeping up on a stopped lead. `standstill_hold_decel_ms2` (−0.6) is
-**not** wired to anything: the overlay returns 0.0. Actually holding the
-truck still is `sending_thread`'s hold and creep-cancel job.
+Pinning the cap at zero behind a close lead stops the truck creeping up
+on it. `standstill_hold_decel_ms2` (−0.6) is **not** wired to anything:
+the hold returns 0.0. Actually holding the truck still is
+`sending_thread`'s hold FSM and creep-cancel job. The latch lives in
+`core/cruise_control_thread/standstill_hold.py`.
+
+**Released by the law's wanted accel, not by lead speed.** The hold
+used to release once the lead's speed passed 0.4 m/s. That speed is
+`acc_speed`, whose standstill latch (`core/radar/README.md` §7) reads a
+departing lead as exactly 0 until `speed_corr` has held 0.6 m/s for
+0.5 s, so the release waited for a lead already doing about 1.35 m/s:
+the "ACC needs the car ahead at ~5 km/h before it moves" report.
+`acc_accel` is not latched, and at `v_ego = 0` the law sees a departure
+through CAH and the accel nudge well before the speed reads moving. The
+wanted accel is `lead_law` on the smoothed immediate lead, with the gap
+taken as `min(raw, smoothed)` so a same-id jump closer holds at once
+instead of after the distance EMA.
+
+Measured on the clip corpus (1093 clips, lead law evaluated at ego
+standstill with the controller's own input filters):
+
+| | lead-speed release (`acc_speed ≥ 0.4`) | wanted-accel release (law ≥ 0.25) |
+|---|---|---|
+| 667 real departures, delay after the lead starts moving | p50 1.22 s | p50 0.64 s (gain p10 0.51, p90 0.71) |
+| lead travel at release | p50 2.18 m | p50 0.79 m |
+
+Robustness on 4973 stationary-lead episodes (9.45 h, frames where the
+lead stayed within 0.15 m): at a 4.6 m stop the law never reaches 0.25
+(max +0.10); at 5.0 m, 4 episodes do (max +0.40). ACC's own stops settle
+at 4.5 to 4.95 m in closed loop, where the law is negative. In a
+closed-loop sim (real radar filter chain, controller and hold FSM, crude
+truck plant) the launch command arrives 0.5 to 0.66 s sooner and the
+truck rolls 0.3 to 0.37 s sooner, with stop gaps unchanged.
+
+The latch has four rules, each paid for by a measured failure:
+
+- **Engage** once the law stops asking for accel (≤ 0), or, at rest
+  (`< 0.1 m/s`), whenever it asks for less than the launch bid. The band
+  `[0, launch)` is hysteresis while rolling, so a crawl the law still
+  wants is not pinned. At rest a sub-launch bid is not allowed to sit on
+  the published command: the mapper's fast PI integrates it against the
+  hold brake.
+- **Release** at `standstill_launch_accel_ms2` (0.25), the hold FSM's
+  own launch release, so every release is a real launch bid.
+- **Margin.** A hold engaged with the law already positive releases only
+  at that law plus 0.15, tracked downward. After a lead inches forward
+  and stops, ego creeps until the law equals the hold FSM's 0.25 and
+  stops exactly there; without the margin that edge re-launched on noise,
+  14 launch cycles in 20 s in the sim. A normal stop engages while the
+  law brakes, so it keeps the plain 0.25.
+- **Snap.** Engaging from a positive cap bypasses the jerk limiter and
+  output EMA. A cap decaying toward 0 from above never satisfies the hold
+  FSM's `commanded ≤ 0` capture. In the sim a truck rolling at 0.35 m/s,
+  5.8 m behind a stationary lead, crept on to 1.46 m and was only stopped
+  by the emergency band; with the snap it stops at 5.46 m. From a braking
+  cap the hold still eases in through the jerk limit, as before.
+
+Two behaviours changed, and both were hidden rather than prevented by the
+lead-speed release:
+
+- Resting 5.5 to 7 m behind a stationary lead (resumed at a standstill,
+  or a lead that inched forward), ACC closes up to about 5.0 to 5.5 m
+  instead of staying put.
+- Behind a lead crawling under 0.6 m/s, its speed stays latched at 0.
+  ACC now follows at 5.7 to 6.2 m with brake pulses, because the hold
+  FSM captures `STOPPING` whenever the command dips to 0 under 2 km/h.
+  It used to sit until the gap reached the 7 m window and then roll,
+  which is fewer but larger stop-and-go events.
+
+Do not re-add a lead-speed term to the release.
 
 ---
 
@@ -1263,6 +1330,7 @@ ant_lead_moving_min_ms, ant_lead_moving_full_ms,
 ttc_hard_s, d_emergency_m, emergency_decel_ms2,
 max_accel_ms2, max_decel_ms2,
 standstill_speed_ms, standstill_gap_slack_m, standstill_hold_decel_ms2,
+standstill_launch_accel_ms2,
 j_max_ms3,
 tau_input_near_s, tau_input_far_s, d_input_near_m, d_input_far_m,
 tau_alead_brake_s, tau_alead_relax_s,
