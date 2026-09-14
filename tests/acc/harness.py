@@ -14,6 +14,7 @@ from pathlib import Path
 from core.acc.tracker import ACCTracker
 from core.radar.ego_path import EGO_POSITION_HISTORY_LEN, ego_curvature_from_history
 from core.radar.elevation import ElevationGate, EgoElevationTrack, build_surface
+from core.aeb.clip_timebase import replay_frames
 from core.radar.reader import TrafficReader
 
 # Imported, not copied: retuning the controller must not leave these metrics
@@ -200,7 +201,7 @@ def replay_clip(clip, metrics: Metrics, tracker: ACCTracker | None = None) -> AC
     last_t = 0.0
     was_paused = False
 
-    for frame in sorted(clip.radar_frames, key=lambda f: f.t_mono):
+    for frame in replay_frames(clip):
         ego = frame.ego
         if frame.traffic_buf is None or ego.paused:
             was_paused = True

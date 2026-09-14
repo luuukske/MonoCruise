@@ -17,6 +17,7 @@ import pytest
 
 from core.aeb.calibration import DEFAULT as CAL
 from core.aeb.clip_eval import run_headless
+from core.aeb.clip_replay import decode_radar_stream
 from core.aeb.clip_schema import (
     AEBTickRecord, Clip, ClipMetadata, ConsumedContext, EgoTelemetry, LiveAEB,
     RadarFrameRecord,
@@ -112,8 +113,9 @@ def _braked_past_match_clip() -> Clip:
     return _clip_from_profile(ego_speeds, lead_speeds, gap_m=18.0)
 
 
-def _brake_window(clip: Clip, cal) -> tuple[float, float] | None:
-    braked = [e.t_rel for e in run_headless(clip, cal=cal) if e.aeb_brake]
+def _brake_window(clip: Clip, cal, as_recorded: bool = False) -> tuple[float, float] | None:
+    stream = decode_radar_stream(clip, as_recorded=as_recorded)
+    braked = [e.t_rel for e in run_headless(clip, cal=cal, stream=stream) if e.aeb_brake]
     return (braked[0], braked[-1]) if braked else None
 
 
@@ -195,9 +197,12 @@ def test_clip_d16d0575_stops_braking_inside_the_recording():
         [f.t_mono for f in clip.radar_frames] + [t.t_mono for t in clip.aeb_ticks]
     )
 
-    held = _brake_window(clip, _NO_RELEASE)
-    gated = _brake_window(clip, CAL)
+    # Capture-time input on purpose: the simulated replay clock removes the phantom
+    # demand that opened this hold (core/aeb/README.md section 16), so it never engages.
+    held = _brake_window(clip, _NO_RELEASE, as_recorded=True)
+    gated = _brake_window(clip, CAL, as_recorded=True)
     assert held is not None and gated is not None
     assert held[1] >= end_t - 0.1, "un-gated hold still braking when the recording ends"
     assert gated[0] == held[0], "entry timing must be untouched"
     assert gated[1] < end_t - 0.2, "the gated hold must release inside the recording"
+    assert _brake_window(clip, CAL) is None, "the simulated clock must not re-create the phantom entry"

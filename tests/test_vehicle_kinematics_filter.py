@@ -184,3 +184,14 @@ def test_accel_estimate_stays_reactive_in_town():
     out = _run_chain(trace)
     at_half_s = out[int(2.0 / DT) + int(0.5 / DT)]
     assert at_half_s[2] < -2.2
+
+
+def test_three_physics_steps_stay_a_sub_frame_whatever_the_float_noise():
+    """Sim-time dt lands exactly on the sub-frame bar; see core/radar/README.md section 16."""
+    from core.radar.traffic import is_sub_frame
+
+    assert is_sub_frame(2.0 / 60.0)
+    assert is_sub_frame(3.0 / 60.0)
+    assert is_sub_frame(1000.05 - 1000.0)
+    assert is_sub_frame((1_780_000_000.0 + 0.05) - 1_780_000_000.0)
+    assert not is_sub_frame(4.0 / 60.0)

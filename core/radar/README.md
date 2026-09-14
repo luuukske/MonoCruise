@@ -911,7 +911,8 @@ genuine cold start, and the clip-start measurement no longer describes it. A liv
 ### Simulation clock (pause / hitch)
 
 Vehicle kinematics use SCS **`simulatedTime`** (µs → seconds) as `Vehicle.time` /
-`update_from_last` `t_now`, not `time.time()`. Telemetry exposes it as
+`update_from_last` `t_now`, not `time.time()`. Radar reads it from the SCS
+telemetry block in the traffic buffer's game frame (§16), falling back to
 `TelemetryThreadData.simulated_time_us`. While paused, radar does **not** call
 `TrafficReader.read`: frozen positions plus a still-ticking sim clock would
 pull every derived speed toward 0. `RadarData.t_mono` is also held so AEB/ACC
@@ -925,7 +926,9 @@ and sim domains clears per-id state and ego path history.
 freeze `Vehicle.time`, so dt since the last full update is not a pause signal.
 
 If `simulated_time_us == 0` (SDK not ready), radar falls back to wall time.
-Clip replay uses recorded `t_wall` and the same pause-skip + reanchor path.
+Clip replay rebuilds the simulated clock from physics-step counts
+(`core/aeb/README.md` section 16), keeps recorded `t_wall` where the counts cannot
+explain a segment, and uses the same pause-skip + reanchor path.
 
 ---
 
@@ -1183,6 +1186,7 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 - **AI (singleplayer) speed is used as-is from the buffer.** Do not derive/flip sign from displacement or turning vehicles can be misclassified as reversing.
 - **`Vehicle.curvature_from_history()` is the curvature source.** Returns circumscribed-circle curvature from `_position_history`; `None` when < 3 samples (caller falls back to yaw-rate); `0.0` when near-stationary. Both TMP and AI vehicles populate `_position_history` in `update_from_last()`.
 - **Consumer threads must not open the traffic shared-memory buffer.** Read vehicles from `registry.get_thread("radar_thread").data.vehicles` under the data lock. Mutating Vehicle instances from consumer threads corrupts the per-id smoothing state carried forward by the reader.
+- **Ego pose, speed and `simulatedTime` are read in the traffic buffer's game frame** (§16), from the SCS telemetry block, never from `telemetry_thread.data` while that block is readable. One step of staleness against the traffic is the whole defect §16 removed.
 
 ---
 
@@ -1480,6 +1484,68 @@ clips changed at all, all staying in their class (total cost +18.34 ->
 
 The corpus holds no bridge clip, so it can only show the absence of
 regression, never the fix. Both reported symptoms need an in-game check.
+
+---
+
+## 16. Ego Pose and Traffic Share One Game Frame
+
+### The defect
+
+Until September 2026 radar paired a traffic buffer read fresh at the radar tick
+with an ego pose copied from `telemetry_thread`, which polls SCS telemetry at
+50 Hz on its own schedule. Ego and traffic both move in whole 1/60 s physics
+steps: ego advances `speed / 60` per step (speed read at the end of the step),
+and every AI car in one buffer advances the same number of steps. The ego copy
+trailed the traffic snapshot by 0 to 3 steps, changing frame to frame, so range
+to every target carried `v_ego * lag / 60`: about 0.4 m per step at 90 km/h,
+plus a mean bias of roughly one step because ego always read behind itself. The
+same stale sample supplied `simulatedTime`, so the kinematics clock jittered
+against the positions it was timing.
+
+Range residual against a smooth fit on the step clock, 360-clip sample:
+
+| | SP p50 / p90 | TMP p50 / p90 |
+|---|---|---|
+| recorded pairing | 0.144 / 0.23 m | 0.152 / 0.27 m |
+| re-paired onto the traffic step | 0.001 / 0.003 m | 0.010 / 0.13 m |
+
+Much of the "publish jitter" in §7 ("No floor on `acceleration`") is timestamp
+error of this kind. AI raw-speed third-difference sigma over 40 SP clips (642
+tracks), replay on the old wall clock against the rebuilt step clock: p50 0.048 ->
+**0.024** m/s, p90 0.247 -> **0.075**. Hard-brake transient latches on tracks whose
+buffer speed never moved more than 0.5 m/s: 54 -> **6** across 122 tracks.
+
+### The fix
+
+`core/radar/scs_pose.py` reads the timing-critical fields (position, yaw, pitch,
+speed, `simulatedTime`, `paused`) straight from the SCS telemetry block at fixed
+offsets, identical in plugin revisions 10 and 12 and cross-checked against
+`truck_telemetry` when the block opens. `RadarThread._sample_traffic_and_pose`
+reads `simulatedTime`, copies the traffic and parked buffers
+(`TrafficReader.copy_raw`), then reads the pose; if `simulatedTime` moved in
+between, it retries once. `read_raw` decodes the copy afterwards, so decoding
+cost never sits between the two reads. Steering, trailer, mass, wheels and
+blinkers still come from `telemetry_thread`: a step of staleness costs them
+nothing. If the block cannot be opened, or its revision or offsets are not
+recognised, radar keeps the telemetry thread pose and logs a warning once.
+
+**Not verified in game yet:** that the ETS2LA traffic plugin and SCS telemetry
+publish in the same game frame, and that `simulatedTime` advances exactly 1/60 s
+per step. A constant one-frame offset between the two plugins would not jitter,
+and replay's legacy re-pairing lands on the same convention, so old and new clips
+would still agree. Check with one SP drive: per-frame ego and traffic step counts
+should match on nearly every frame (38 % did before).
+
+### Sub-frames on the step lattice
+
+On the simulated clock `dt` is a multiple of 1/60 s, and three steps land exactly
+on `_LOCATION_UPDATE_FREQUENCY` (0.05 s), where float rounding picked the branch.
+`is_sub_frame` adds `_SUB_FRAME_EPS_S` so exactly three steps is always a
+sub-frame. That keeps full updates at four steps or more, the ~70 ms cadence the
+filter chain was tuned on with ~28 Hz reads. The other side of the lattice (three
+steps runs the chain) was measured: it lost labelled positives this side keeps,
+among them `3224c16c` (stopped car 14.7 m ahead at 44 km/h), `403e9c4f`,
+`1a4fa80f`, `4d8f47a2` and `b6f9a8c8`.
 
 ---
 

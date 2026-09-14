@@ -135,6 +135,13 @@ class TrafficReader:
         t_now: float | None = None,
     ) -> tuple[list[Vehicle], list[Vehicle]] | None:
         """Decode one frame; ``t_now`` is kinematics seconds. See core/radar/README.md §7."""
+        raw = self.copy_raw()
+        if raw is None:
+            return None
+        return self.read_raw(raw, ego_x, ego_y, ego_z, ego_speed, t_now=t_now)
+
+    def copy_raw(self) -> tuple[bytes, bytes | None] | None:
+        """Snapshot the traffic and parked buffers now, decode later. See core/radar/README.md section 16."""
         self.last_traffic_bytes = None
         self.last_parked_bytes = None
         if self._buf is None and not self.open():
@@ -144,18 +151,36 @@ class TrafficReader:
         except Exception:
             return None
         try:
-            slice_bytes = self._buf[:_BUF_SIZE]
-            raw = struct.unpack(_TOTAL_FORMAT, slice_bytes)
+            traffic = self._buf[:_BUF_SIZE]
+        except Exception:
+            self._buf = None
+            return None
+        parked = self._copy_parked()
+        self.last_t_wall = time.time()
+        return traffic, parked
+
+    def read_raw(
+        self,
+        raw: tuple[bytes, bytes | None],
+        ego_x: float,
+        ego_y: float,
+        ego_z: float,
+        ego_speed: float,
+        t_now: float | None = None,
+    ) -> tuple[list[Vehicle], list[Vehicle]] | None:
+        """Decode a ``copy_raw`` snapshot through the live smoothing path."""
+        traffic, parked = raw
+        try:
+            unpacked = struct.unpack(_TOTAL_FORMAT, traffic)
         except Exception:
             self._buf = None
             return None
         if self.capture_raw:
-            self.last_traffic_bytes = bytes(slice_bytes)
+            self.last_traffic_bytes = bytes(traffic)
 
-        vehicles = self._build_vehicles_from_raw(raw)
-        vehicles.extend(self._read_parked_vehicles({int(v.id) for v in vehicles}))
+        vehicles = self._build_vehicles_from_raw(unpacked)
+        vehicles.extend(self._decode_parked(parked, {int(v.id) for v in vehicles}))
 
-        self.last_t_wall = time.time()
         kin_t = self.last_t_wall if t_now is None else float(t_now)
         return self._smooth_and_build(vehicles, kin_t, ego_x, ego_y, ego_z, ego_speed)
 
@@ -305,21 +330,32 @@ class TrafficReader:
         self._last_trailer_vehicles = {tv.id: tv for tv in trailer_vehicles}
         return trailer_vehicles
 
-    def _read_parked_vehicles(self, existing_ids: set[int]) -> list[Vehicle]:
+    def _copy_parked(self) -> bytes | None:
         if self._parked_buf is None:
             self._open_parked_buffer()
             if self._parked_buf is None:
-                return []
+                return None
         try:
             self._parked_buf.seek(0)
-            parked_slice = self._parked_buf[:_PARKED_BUF_SIZE]
-            raw = struct.unpack(_TOTAL_PARKED_FORMAT, parked_slice)
+            return self._parked_buf[:_PARKED_BUF_SIZE]
         except Exception:
-            self._parked_buf = None
-            self._parked_retry_at = time.monotonic() + 1.0
+            self._drop_parked_buffer()
+            return None
+
+    def _drop_parked_buffer(self) -> None:
+        self._parked_buf = None
+        self._parked_retry_at = time.monotonic() + 1.0
+
+    def _decode_parked(self, parked: bytes | None, existing_ids: set[int]) -> list[Vehicle]:
+        if parked is None:
+            return []
+        try:
+            raw = struct.unpack(_TOTAL_PARKED_FORMAT, parked)
+        except Exception:
+            self._drop_parked_buffer()
             return []
         if self.capture_raw:
-            self.last_parked_bytes = bytes(parked_slice)
+            self.last_parked_bytes = bytes(parked)
 
         return self._build_parked_from_raw(raw, existing_ids)
 

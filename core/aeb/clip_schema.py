@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 # Bump on shape change. v2: mass_kg. v3: blinkerLeft/Right (False if absent).
-SCHEMA_VERSION: int = 4
+# v5: ego pose read in the traffic buffer's game frame; replay re-pairs older clips.
+SCHEMA_VERSION: int = 5
 
 # Sentinel used by the AEB thread for "no threat this tick".
 _INF: float = 1e9

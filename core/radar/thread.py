@@ -14,6 +14,7 @@ from core.thread_management.registry import registry
 from .ego_path import EGO_POSITION_HISTORY_LEN, ego_curvature_from_history
 from .elevation import ElevationGate, EgoElevationTrack, RoadSurface, build_surface
 from .reader import TrafficReader
+from .scs_pose import ScsPose, ScsPoseReader
 from .traffic import Vehicle
 
 from core.aeb.capture import get_recorder
@@ -21,6 +22,9 @@ from core.aeb.clip_schema import EgoTelemetry, RadarFrameRecord
 
 
 logger = logging.getLogger(__name__)
+
+# One retry when a game frame lands between the traffic copy and the pose read.
+_PAIRED_READ_ATTEMPTS: int = 2
 
 
 @dataclass
@@ -67,6 +71,7 @@ class RadarThread(BaseThread):
         super().__init__(name="radar_thread")
         self.data = RadarData()
         self._traffic = TrafficReader()
+        self._pose = ScsPoseReader()
         self._ego_position_history: list[tuple[float, float, float]] = []
         self._last_ego_hist_t: float = 0.0
         self._elevation_track = EgoElevationTrack()
@@ -81,6 +86,7 @@ class RadarThread(BaseThread):
 
     def teardown(self) -> None:
         self._traffic.close()
+        self._pose.close()
         self._ego_position_history.clear()
         self._last_ego_hist_t = 0.0
         self._elevation_track.clear()
@@ -229,8 +235,22 @@ class RadarThread(BaseThread):
             if bump_t_mono:
                 self.data.t_mono = time.monotonic()
 
+    def _sample_traffic_and_pose(
+        self,
+    ) -> tuple[tuple[bytes, bytes | None] | None, ScsPose | None]:
+        """Traffic bytes plus the ego pose of the same game frame. See core/radar/README.md section 16."""
+        raw, pose = None, None
+        for _ in range(_PAIRED_READ_ATTEMPTS):
+            sim_before = self._pose.simulated_time_us()
+            raw = self._traffic.copy_raw()
+            pose = self._pose.read()
+            if pose is None or sim_before is None or pose.simulated_time_us == sim_before:
+                break
+        return raw, pose
+
     def _read_traffic(
         self,
+        raw: tuple[bytes, bytes | None] | None,
         ego_x: float,
         ego_y: float,
         ego_z: float,
@@ -239,8 +259,10 @@ class RadarThread(BaseThread):
     ) -> tuple[list[Vehicle], list[Vehicle]] | None:
         capture = get_recorder()
         self._traffic.capture_raw = capture is not None
-        return self._traffic.read(
-            ego_x, ego_y, ego_z, ego_speed, t_now=t_kin,
+        if raw is None:
+            return None
+        return self._traffic.read_raw(
+            raw, ego_x, ego_y, ego_z, ego_speed, t_now=t_kin,
         )
 
     def loop(self) -> None:
@@ -250,6 +272,12 @@ class RadarThread(BaseThread):
         (ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
          paused, ego_has_trailer, ego_pitch_deg, simulated_time_us,
          ego_mass_kg, ego_wheels, ego_trailer_count) = self._read_ego()
+        raw, pose = self._sample_traffic_and_pose()
+        if pose is not None:
+            # The telemetry thread's copy is up to 3 physics steps older than the traffic.
+            ego_x, ego_y, ego_z = pose.x, pose.y, pose.z
+            ego_yaw_norm, ego_pitch_deg, ego_speed = pose.yaw_norm, pose.pitch_raw, pose.speed
+            paused, simulated_time_us = pose.paused, pose.simulated_time_us
         t_kin = self._kinematics_t(simulated_time_us)
         use_sim = simulated_time_us > 0
         # Wall↔sim switch without a reset leaves Vehicle.time in the old domain
@@ -293,7 +321,7 @@ class RadarThread(BaseThread):
         ego_curvature = ego_curvature_from_history(self._ego_position_history)
         self._elevation_track.push(ego_x, ego_z, ego_y)
 
-        traffic = self._read_traffic(ego_x, ego_y, ego_z, ego_speed, t_kin)
+        traffic = self._read_traffic(raw, ego_x, ego_y, ego_z, ego_speed, t_kin)
         if traffic is None:
             vehicles, trailer_vehicles = [], []
         else:

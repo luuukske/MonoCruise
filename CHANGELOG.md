@@ -12,6 +12,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+### Fixed
+- **Distance to the traffic ahead jittered**: your truck's position was read a few frames out of step with the traffic around it, so the gap to the vehicle in front wobbled by up to a metre at motorway speed, and ACC and emergency braking both reacted to it. Both are now read from the same moment in the game.
+
 ## [1.1.0-preview.22] - 2026-09-13
 ### Added
 - **WebM clips in the updater**: release-note videos can be `.webm` as well as `.mp4`. a prep for v1.1 release trailer in the updater.

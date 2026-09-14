@@ -9,6 +9,8 @@ from typing import Optional
 
 _MAX_ANGULAR_VELOCITY: float = 45.0
 _LOCATION_UPDATE_FREQUENCY: float = 0.05
+# Three 1/60 s physics steps land exactly on the bar, so float noise must not decide it.
+_SUB_FRAME_EPS_S: float = 1e-4
 # Reader kinematics clock gap (pause/hitch). See core/radar/README.md §7.
 _READER_CLOCK_GAP_S: float = 0.50
 
@@ -144,6 +146,14 @@ _RAW_BRAKE_MONOTONIC_TOL_MS: float = 0.15
 _RAW_BRAKE_CONVERGENCE_MS: float = 0.3
 _RAW_BRAKE_RELEASE_FRAMES: int = 3
 _RAW_BRAKE_STANDSTILL_SPEED_MS: float = 0.1
+
+
+def is_sub_frame(dt: float) -> bool:
+    """True when ``dt`` since the last full update is too short to run the chain.
+
+    Exactly three physics steps still counts, which keeps the ~70 ms cadence the chain was tuned on.
+    """
+    return dt < _LOCATION_UPDATE_FREQUENCY + _SUB_FRAME_EPS_S
 
 
 def _lag_freeze_duration(gap_3d: float, ego_speed: float) -> float:
@@ -1523,7 +1533,7 @@ class Vehicle:
             return
 
         # Sub-frame pass: carry forward all smoothed state unchanged.
-        if dt < _LOCATION_UPDATE_FREQUENCY:
+        if is_sub_frame(dt):
             self.time = prev.time
             self.last_location = prev.last_location
             self.last_rotation = prev.last_rotation

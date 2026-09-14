@@ -1945,6 +1945,104 @@ describing what the gate does.
 
 ---
 
+## 16. Replay timebase
+
+`core/aeb/clip_timebase.py` (`replay_frames`) is where every replay gets its radar
+frames: `decode_radar_stream`, `cold_start_speeds`, headless scoring, the review
+tool, triage and the ACC harness. It returns copies and never mutates the clip.
+`decode_radar_stream(clip, as_recorded=True)` skips both corrections below, for a
+probe that needs the capture-time input.
+
+### Legacy pairing (schema 4 and older)
+
+Those clips carry the ego pose from the telemetry thread, up to three physics steps
+older than the traffic buffer beside it (`core/radar/README.md` section 16). Replay
+re-pairs them from data the clip already holds:
+
+- **Ego steps** per frame pair: `|displacement| * 60 / speed`, with the speed read at
+  the end of the step, rounded when within 0.25 of a whole number.
+- **Traffic steps**: every car in one buffer moved the same whole number of steps.
+  AI cars carry their speed; TMP cars do not, so their travel per step is measured
+  over a +-6 frame window, first on wall time and then on the step index that pass
+  produced. One AI car or two agreeing TMP cars decide the count.
+- **Lag**: the running sum of traffic minus ego steps, re-anchored on its minimum
+  over +-45 frames (the freshest telemetry poll lags zero) and clamped to 3. An
+  uncounted pair holds the lag rather than guessing.
+- Ego is advanced by the lag along the midpoint heading, with speed and yaw moved on
+  their per-step rates.
+
+Where nothing can be counted, TMP scenes with one or two cars or a stopped scene, the
+recorded pairing is kept, so the worst case is the old replay.
+
+### The simulated clock (every schema)
+
+Live radar integrates vehicle kinematics on `simulatedTime` at the traffic step. No
+clip records it, and adding a field would bump `CONSENT_VERSION`, so replay rebuilds
+it: each segment's `t_wall` becomes `t0 + steps / 60` when its counts cover at least
+half the frame pairs and explain its wall duration within 5 %. Synthetic test clips
+that do not move in physics steps fail that check and keep `t_wall`.
+
+### What it did to the corpus
+
+Measured 2026-09-14 over 747 labelled clips, after the local store had been pruned
+to 298 files, so the totals do not compare with earlier sections:
+
+| | cost | FN | TP | FP | false warn | TN |
+|---|---|---|---|---|---|---|
+| wall clock, recorded pairing | +404.59 | 64 | 388 | 110 | 25 | 155 |
+| re-pairing only | +380.31 | 62 | 389 | 111 | 24 | 155 |
+| simulated clock only | +788.86 | 75 | 375 | 106 | 28 | 156 |
+| **both (shipped)** | **+617.49** | 70 | 382 | 107 | 26 | 157 |
+
+Re-pairing is a clean gain. The clock costs score, and about equally in SP (+186,
+where the rebuilt clock is exact) and TMP (+199), so it is not a reconstruction
+artefact: AEB's entry path was tuned against the wall clock's timing noise. It was
+adopted anyway, for three measured reasons:
+
+- **It removes phantom engagements.** `d16d0575` no longer engages at all (the
+  latched-hold test replays it `as_recorded` for that reason), and 9 must-not-trigger
+  clips stop braking, against 6 that start.
+- **Much of the loss was labels built on noise.** The corpus is mostly
+  `auto_engagement` captures, recorded because an older AEB fired, and many positive
+  labels were drawn around that trigger. Where the trigger came from wall-clock noise,
+  the clean clock reads as a miss.
+- **Closed loop it is not later.** Against a lead braking at 4 to 10 m/s2 ahead of
+  three rigs at 60 to 100 km/h and 0.8 to 2.0 s headway (108 cases, positions on
+  physics steps, the `_lead_brake_sim.py` harness), the step clock engages 0.27 s
+  earlier on average, worst residual gap -0.11 m against -0.15 m, and no case loses
+  more than 0.25 m.
+
+### After the 2026-09-15 relabel
+
+Lukas re-reviewed every clip whose verdict the timebase flipped and every
+slow-approach-at-speed positive (ego at 60 km/h or more, lead closing under 25 km/h),
+by hand. On the restored store, 1280 labelled clips:
+
+| | cost | FN | TP | FP | false warn | TN |
+|---|---|---|---|---|---|---|
+| wall clock, recorded pairing | +23.21 | 85 | 573 | 131 | 32 | 448 |
+| **physics-step timebase** | **+94.12** | 89 | 567 | 126 | 34 | 451 |
+
+The relabel took the timebase's cost from +240 to +71. What is left is real, not
+labelling: the 12 positives the step clock still loses were each reviewed and kept
+(`0b0bcfd8`, `280b8d64`, `5e8ac731`, `6895548c`, `72406b04`, `73490d0f`, `7a2b27df`,
+`7c1e86b1`, `7e2f395c`, `a7c911a9`, `ccc7eaa4`, `dc321ac6`). Every remaining
+positive is a danger AEB must brake for, however the longitudinal estimates read it;
+the fix belongs in the entry path, never in the labels. The step clock also adds 21
+phantom brakes or warnings (17 TMP) against 20 it removes.
+
+Two labelling rules came out of the pass:
+
+- **A TMP lead stall is `ignore`, never `fp`.** The lead's position freezes, reads
+  0 km/h at highway speed, then snaps back (`1223f8d3`, `430f5fd0`, `9ca453d8`,
+  `f54e3098`, `ef817c01`). At onset that is the same observable as a dead stop, so an
+  `fp` label would teach entry to wait on real sudden stops.
+- **A slow approach whose lead never braked is not a positive.** Measure it on the
+  step clock: closing speed from the gap slope, lead deceleration from a fit of its
+  own positions, never from AEB's decision stream.
+
+---
+
 *Source: `core/aeb/thread.py`, `core/aeb/filters.py`, `core/aeb/calibration.py`,
 `core/aeb/lane_frame.py`, `core/radar/*`: LD-Tech / MonoCruise.*
 
