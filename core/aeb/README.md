@@ -1746,9 +1746,26 @@ Nothing uploads yet; this is the gate the uploader will consult.
 
 `contribution_enabled()` also gates capture itself: `core/aeb/capture.py` starts
 a recorder when `Settings.debug` **or** the opt-in is current. A contribute-only
-user gets a 100 MB store instead of 500 MB, and `capture_tn=False` so the
-`shadow_near` and `random` background triggers never fire. Someone who is both
-debug and contributing keeps the debug behaviour on both counts.
+user gets `capture_tn=False` so the `shadow_near` and `random` background
+triggers never fire. Someone who is both debug and contributing keeps the debug
+behaviour.
+
+### No clip store rotates
+
+`ClipStore` never evicts, in any mode and in any root (local corpus, the
+contributed pull root, a tester's store). Clips leave a store only by an explicit
+`delete`: the review tool, or the uploader's delete-on-accept for a contribute-only
+user. The one bound is the disk: `write` returns `None` while the clip drive has
+less than `_MIN_FREE_BYTES` (2 GB) free, warning once per low-space episode.
+Relabelling rewrites in place and is not gated.
+
+Do not reintroduce a cap. The mode is per process but the directory is per
+machine: the release build (debug off, contributing) and a debug checkout both
+write `default_clip_root()`, and on 2026-09-13 the release build's 100 MB
+contributor cap evicted 809 corpus clips on its first save. Growth without a cap
+is small: a contribute-only store keeps only what triage or eligibility held back,
+about 38% of captures by the section 15 corpus, and every tester combined sent
+about 230 MB in the five weeks before triage.
 
 ### Fetched only for users who opted in
 

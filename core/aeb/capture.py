@@ -13,10 +13,6 @@ from core.aeb.upload import ClipUploader
 
 logger = logging.getLogger(__name__)
 
-# Contribute-only stores stage clips for upload rather than holding a corpus,
-# so they get a fifth of the debug cap.
-_CONTRIBUTOR_MAX_BYTES: int = 100 * 1024 * 1024
-
 _lock = threading.Lock()
 _recorder: AEBClipRecorder | None = None
 _writer: AsyncClipWriter | None = None
@@ -111,9 +107,8 @@ def _init_locked() -> None:
         logger.debug("could not set up AEB screenshot provider", exc_info=True)
 
     try:
-        # A contributor keeps a smaller store: it is a staging area, not the
-        # working corpus a debug user tags from.
-        store = ClipStore() if debug else ClipStore(max_bytes=_CONTRIBUTOR_MAX_BYTES)
+        # One uncapped store for every mode: builds on one machine share the directory.
+        store = ClipStore()
         _uploader = _build_uploader(store, debug) if contributing else None
         writer = AsyncClipWriter(store, notify=_on_clip_written)
         writer.start()

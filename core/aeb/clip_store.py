@@ -8,6 +8,7 @@ import logging
 import os
 import queue
 import re
+import shutil
 import tempfile
 import threading
 import zlib
@@ -19,7 +20,8 @@ from core.aeb.clip_schema import Clip, ClipMetadata, Label
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MAX_BYTES: int = 500 * 1024 * 1024
+# Stores never evict, so the only bound is the disk: stop saving before it fills.
+_MIN_FREE_BYTES: int = 2 * 1024 * 1024 * 1024
 _CLIP_SUFFIX: str = ".json.gz"
 _TMP_SUFFIX: str = ".tmp"
 
@@ -33,7 +35,7 @@ def default_clip_root() -> Path:
 
 
 def contributed_clip_root() -> Path:
-    """Pulled-in clips, kept apart so prune() can never evict the local corpus."""
+    """Pulled-in clips, kept apart from the local corpus."""
     return default_clip_root().with_name("aeb_clips_contributed")
 
 
@@ -90,18 +92,17 @@ def _safe_stamp(captured_at: str) -> str:
 
 
 class ClipStore:
-    """Synchronous gzipped-JSON clip store with size rotation (count cap optional)."""
+    """Synchronous gzipped-JSON clip store. Never evicts: see core/aeb/README.md section 13."""
 
     def __init__(
         self,
         root: Path | None = None,
         *,
-        max_clips: int | None = None,
-        max_bytes: int = _DEFAULT_MAX_BYTES,
+        min_free_bytes: int = _MIN_FREE_BYTES,
     ) -> None:
         self.root: Path = Path(root) if root is not None else default_clip_root()
-        self.max_clips = max_clips
-        self.max_bytes = max_bytes
+        self.min_free_bytes = min_free_bytes
+        self._low_disk_logged = False
 
     def _ensure_root(self) -> bool:
         try:
@@ -117,9 +118,23 @@ class ClipStore:
         cid = (meta.clip_id or "clip")[:8]
         return f"{stamp}_{meta.trigger_source}_{cid}{_CLIP_SUFFIX}"
 
+    def _disk_has_room(self) -> bool:
+        """False below the free-space floor. Fails open when the disk cannot be read."""
+        try:
+            free = shutil.disk_usage(self.root).free
+        except OSError:
+            return True
+        if free >= self.min_free_bytes:
+            self._low_disk_logged = False
+            return True
+        if not self._low_disk_logged:
+            logger.warning("AEB clips not saved: %.1f GB free on the clip drive", free / 1024 ** 3)
+            self._low_disk_logged = True
+        return False
+
     def write(self, clip: Clip) -> Path | None:
-        """Serialize, atomic write, prune. Never raises; logs basename only."""
-        if not self._ensure_root():
+        """Serialize and atomic write. Never raises; logs basename only."""
+        if not self._ensure_root() or not self._disk_has_room():
             return None
 
         name = self._filename(clip)
@@ -134,7 +149,6 @@ class ClipStore:
             return None
 
         logger.debug("saved AEB clip %s (%d bytes)", name, len(blob))
-        self.prune()
         return final
 
     def _atomic_write(self, final: Path, blob: bytes) -> bool:
@@ -248,24 +262,6 @@ class ClipStore:
         except OSError:
             logger.exception("failed to delete AEB clip %s", p.name)
             return False
-
-    def prune(self) -> int:
-        """Evict oldest clips until within the size cap (and count cap, if set). Returns count removed."""
-        clips = self.list_clips()
-        total = sum(c.size_bytes for c in clips)
-        removed = 0
-        # Oldest last (list is newest-first): pop from the tail.
-        while clips and (
-            (self.max_clips is not None and len(clips) > self.max_clips)
-            or total > self.max_bytes
-        ):
-            victim = clips.pop()
-            if self.delete(victim.path):
-                total -= victim.size_bytes
-                removed += 1
-        if removed:
-            logger.debug("pruned %d old AEB clip(s)", removed)
-        return removed
 
 
 class AsyncClipWriter:

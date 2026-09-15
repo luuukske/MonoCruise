@@ -1,7 +1,8 @@
-"""Capture gate: who records, with what cap, and that contributors skip background negatives."""
+"""Capture gate: who records, that no mode evicts clips, and that contributors skip background negatives."""
 from __future__ import annotations
 
 import logging
+import os
 
 import pytest
 
@@ -23,8 +24,8 @@ def fresh(monkeypatch, tmp_path):
     real_store = ClipStore
 
     def _store(*args, **kwargs):
-        made["max_bytes"] = kwargs.get("max_bytes")
-        return real_store(root=tmp_path, **kwargs)
+        made["kwargs"] = kwargs
+        return real_store(root=tmp_path, min_free_bytes=0)
 
     monkeypatch.setattr(capture_mod, "ClipStore", _store)
     monkeypatch.setattr(capture_mod.AsyncClipWriter, "start", lambda self: None)
@@ -63,17 +64,19 @@ def test_debug_still_records_without_opting_in(fresh, monkeypatch):
     assert capture_mod.get_recorder() is not None
 
 
-def test_a_contributor_gets_the_smaller_cap(fresh, monkeypatch):
-    _gate(monkeypatch, debug=False, contributing=True)
-    capture_mod.get_recorder()
-    assert fresh["max_bytes"] == capture_mod._CONTRIBUTOR_MAX_BYTES
+@pytest.mark.parametrize("debug", [False, True])
+def test_no_capture_mode_evicts_existing_clips(fresh, monkeypatch, tmp_path, debug):
+    """A release build and a debug build share one directory (809 clips lost 2026-09-13)."""
+    from tests.aeb.test_clip_capture import _make_clip
 
+    seeded = ClipStore(root=tmp_path, min_free_bytes=0)
+    for i in range(3):
+        os.utime(seeded.write(_make_clip(clip_id=f"old{i:05d}")), (100 + i, 100 + i))
 
-def test_debug_keeps_the_full_cap(fresh, monkeypatch):
-    """The debug store is the working corpus, not a staging area."""
-    _gate(monkeypatch, debug=True, contributing=True)
+    _gate(monkeypatch, debug=debug, contributing=True)
     capture_mod.get_recorder()
-    assert fresh["max_bytes"] is None      # ClipStore default, 500 MB
+    assert capture_mod._writer.store.write(_make_clip(clip_id="new00001")) is not None
+    assert len(seeded.list_clips()) == 4
 
 
 def test_a_contributor_does_not_capture_background_negatives(fresh, monkeypatch):

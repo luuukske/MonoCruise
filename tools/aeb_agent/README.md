@@ -303,6 +303,8 @@ Two ready prompts live beside this file:
 
 ## Rendering a clip as footage
 
+For published footage use `python -m tools.clip_export` instead (`tools/clip_export/README.md`): it drops the debug overlays, reframes on ego and the threat, and smooths the tick jitter. `render` below stays the full debug view.
+
 `render` replays a clip through the same top-down view the review UI draws and
 writes one PNG per tick, so a recorded event can become video without re-driving
 it. It prefers the native Qt platform: under `offscreen` the font database can

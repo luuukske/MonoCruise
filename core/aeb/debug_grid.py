@@ -25,8 +25,13 @@ _Project = Callable[[float, float], tuple[float, float]]
 
 def draw_ground_markers(
     p: QPainter, project: _Project, unproject: _Project, w: float, h: float,
+    *, minor_clr: QColor = MINOR_CLR, major_clr: QColor = MAJOR_CLR,
+    minor_r: float = _MINOR_R, major_r: float = _MAJOR_R,
 ) -> None:
-    """A dot per 10 m of world grid, a larger one per 100 m, culled to the window."""
+    """A dot per 10 m of world grid, a larger one per 100 m, culled to the window.
+
+    The style overrides exist for `tools/clip_export`, which draws the same lattice darker.
+    """
     xs, zs = zip(*(unproject(sx, sy) for sx, sy in
                    ((0.0, 0.0), (w, 0.0), (0.0, h), (w, h))))
 
@@ -54,7 +59,7 @@ def draw_ground_markers(
             (major if is_major else minor).append(QPointF(sx, sy))
 
     p.setPen(Qt.NoPen)
-    for pts, clr, r in ((minor, MINOR_CLR, _MINOR_R), (major, MAJOR_CLR, _MAJOR_R)):
+    for pts, clr, r in ((minor, minor_clr, minor_r), (major, major_clr, major_r)):
         p.setBrush(QBrush(clr))
         for pt in pts:
             p.drawEllipse(pt, r, r)

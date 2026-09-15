@@ -11,6 +11,7 @@ hygiene rules apply to every file in it.
 | `acc_probe_rig.py` | Measurement half: loads a checkout, publishes a synthetic lead, reads the cap. Import this directly to build a new ACC probe without the map's presentation. |
 | `aeb_clearance_probe.py`, `aeb_fetch.py`, `aeb_review.py`, `aeb_review_widgets.py` | AEB clip corpus tooling. See `core/aeb/README.md`. |
 | `aeb_filter_trace.py`, `aeb_filter_charts.py` | The `C` window in the review tool: what the radar speed / accel / lag filters did to one vehicle over a clip. Documented below. |
+| `clip_export/` | Clean top-down showcase video of one clip for trailers and docs: auto-reframes on ego and the threat, removes 60 Hz tick jitter. Read `tools/clip_export/README.md` first. |
 | `aeb_agent/` | Headless clip review for an agent: text dossiers instead of watching a clip, scenario tags, mistag audit, and a validated propose/apply/revert path for labels. Read `tools/aeb_agent/README.md` first. |
 | `accel_envelope_probe.py` | What does the CC accel ceiling command at each speed, and how long is 0-50 / 0-90? Prints the per-profile table plus a capability-limited rig model (`--rig loaded`) so the light and loaded regimes can be compared. |
 | `plot_coast.py` | Coast-fit plots for the mapper. |

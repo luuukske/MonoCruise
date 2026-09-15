@@ -135,18 +135,39 @@ def test_label_round_trip_uses_class_key():
     assert Label.from_json(d).class_ == "fp"
 
 
-def test_store_write_load_and_count_rotation(tmp_path):
-    store = ClipStore(root=tmp_path, max_clips=3)
+def test_store_write_load_never_evicts(tmp_path):
+    """An old, untouched clip survives any number of writes: the store has no rotation."""
+    store = ClipStore(root=tmp_path, min_free_bytes=0)
     for i in range(5):
         path = store.write(_make_clip(clip_id=f"clip{i:04d}"))
         assert path is not None
-        # Force deterministic ordering so the newest three are the survivors.
         os.utime(path, (100 + i, 100 + i))
 
     infos = store.list_clips()
-    assert len(infos) == 3
     survivors = {store.load(info.path).metadata.clip_id for info in infos}
-    assert survivors == {"clip0002", "clip0003", "clip0004"}
+    assert survivors == {f"clip{i:04d}" for i in range(5)}
+
+
+def test_store_skips_writes_below_the_free_space_floor(tmp_path, monkeypatch, caplog):
+    from collections import namedtuple
+
+    from core.aeb import clip_store as clip_store_mod
+
+    usage = namedtuple("usage", "total used free")
+    free = {"bytes": 1024}
+    monkeypatch.setattr(clip_store_mod.shutil, "disk_usage",
+                        lambda _p: usage(10 ** 12, 10 ** 12 - free["bytes"], free["bytes"]))
+    store = ClipStore(root=tmp_path, min_free_bytes=4096)
+
+    with caplog.at_level("WARNING", logger=clip_store_mod.__name__):
+        assert store.write(_make_clip(clip_id="low00001")) is None
+        assert store.write(_make_clip(clip_id="low00002")) is None
+    assert store.list_clips() == []
+    # One warning per low-space episode, not one per clip.
+    assert sum("not saved" in r.getMessage() for r in caplog.records) == 1
+
+    free["bytes"] = 8192
+    assert store.write(_make_clip(clip_id="ok000001")) is not None
 
 
 def test_async_writer_persists_and_notifies(tmp_path):
