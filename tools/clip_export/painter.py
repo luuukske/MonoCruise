@@ -92,7 +92,7 @@ class ShowcaseRenderer:
         self.credit = credit
         s = self.s
         self._f_state = _font(22 * s, QFont.Bold, 2.0 * s)
-        self._f_credit = _font(17 * s, QFont.Medium)
+        self._f_credit = _font(22 * s, QFont.Medium)
         # Top-left like the debug view's state title, one width so it never resizes.
         fm = QFontMetricsF(self._f_state)
         text_w = max(fm.horizontalAdvance(label) for label, _bg, _ink in STATE_LABELS)
