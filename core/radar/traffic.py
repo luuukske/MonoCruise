@@ -98,9 +98,11 @@ _LAG_FREEZE_LOG_K: float = _LAG_FREEZE_DUR_MAX / math.log(
 )
 
 # Position mismatch (TMP only): out-of-order packet rejection.
-# Fires when raw position jumps backward along heading.  Max 3 consecutive frames.
+# Fires when raw position jumps against the direction of travel.
 _POS_MISMATCH_BACKWARD_THRESHOLD: float = 0.00   # m: min backward dot to flag
+# Held frames per backward run; a longer run is real backward motion (README §7).
 _POS_MISMATCH_MAX_FRAMES: int = 5
+_POS_MISMATCH_REVERSE_MS: float = 1.0            # m/s: signed speed below -this travels -fwd
 
 # TMP crash detection tunables. See core/radar/README.md §7.
 _CRASH_PITCH_JERK: float = 12.0                 # deg/s pitch rate delta threshold
@@ -1594,7 +1596,7 @@ class Vehicle:
                 and prev._smooth_yaw is not None
             )
             if self.is_tmp and not self.crash_confirmed:
-                if _sf_lag_active or prev._pos_mismatch_frames > 0:
+                if _sf_lag_active or prev.pos_mismatch_holding:
                     _sf_snap_ok = False
             if _sf_snap_ok:
                 # TMP sub-frame pose snap rules. See core/radar/README.md §7.
@@ -1661,11 +1663,18 @@ class Vehicle:
             _pm_dz = raw_z - prev._raw_z
             _pm_fwd_x = -math.sin(prev._smooth_yaw)
             _pm_fwd_z = -math.cos(prev._smooth_yaw)
-            if (_pm_dx * _pm_fwd_x + _pm_dz * _pm_fwd_z < -_POS_MISMATCH_BACKWARD_THRESHOLD
-                    and self._pos_mismatch_frames < _POS_MISMATCH_MAX_FRAMES
-                    and not self.crash_confirmed):
+            # A rewind runs against the direction of travel, which is -fwd when reversing.
+            _pm_travel = -1.0 if prev.speed < -_POS_MISMATCH_REVERSE_MS else 1.0
+            _pm_along = _pm_travel * (_pm_dx * _pm_fwd_x + _pm_dz * _pm_fwd_z)
+            if self.crash_confirmed:
+                self._pos_mismatch_frames = 0
+            elif (_pm_dx == 0.0 and _pm_dz == 0.0
+                    and prev._pos_mismatch_frames > _POS_MISMATCH_MAX_FRAMES):
+                # Packet stall inside real backward motion: no evidence, the run survives it.
+                self._pos_mismatch_frames = prev._pos_mismatch_frames
+            elif _pm_along < -_POS_MISMATCH_BACKWARD_THRESHOLD:
                 self._pos_mismatch_frames = prev._pos_mismatch_frames + 1
-                _skip_position_update = True
+                _skip_position_update = self.pos_mismatch_holding
             else:
                 self._pos_mismatch_frames = 0
 
@@ -1934,6 +1943,11 @@ class Vehicle:
 
     def is_zero(self) -> bool:
         return self.position.is_zero() and self.rotation.is_zero()
+
+    @property
+    def pos_mismatch_holding(self) -> bool:
+        """Position held as a rewind; past the cap the run counts as real backward motion."""
+        return 0 < self._pos_mismatch_frames <= _POS_MISMATCH_MAX_FRAMES
 
     def get_corners(self) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]]:
         """World corners; symmetric ± length/2 (core/radar/README.md §6)."""

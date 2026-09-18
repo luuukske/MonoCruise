@@ -243,6 +243,66 @@ Lane thresholds (`cal.lane_half_width=1.95 m`, `cal.lane_separation=3.9 m`):
 | 1.95–7.8 m | `OPPOSITE_OR_OUTER` |
 | > 7.8 m | `OFF_ROAD` |
 
+### Travel frame: reversing targets
+
+Target arcs have always moved along the direction of travel (`ArcPath.build` flips
+`fwd` for negative speed), but the regime flags that choose which filters apply
+(`head_on`, `near_head_on`, `co_directional`) were read off the **heading**. A
+reversing truck therefore sat in a regime that contradicted its own arc:
+
+- Clip d80936f9: a TMP truck facing ego at an angle (heading `fwd_dot` -0.67)
+  backed across ego's lane at 2.9 m/s. The heading frame called it oncoming in
+  its own lane, so `OppositeLaneFilter` and the 3.9 m head-on lateral gap
+  dropped it and the arc assumed it would stop at `full_brake_decel`. At 40 km/h
+  that clip stays silent by design (the TMP rel-speed floor, §4); at road speed
+  the same pose is scenario `tp_reversing_truck_backs_across_path`.
+- Clip 66874532: a rig heading ego's way (`fwd_dot` +0.85) backed diagonally into
+  ego's lane at 4.5 m/s. The heading frame got that one right by accident: it
+  read co-directional, which is the one class that was not wrong for it.
+
+The rule has two halves, and both are needed:
+
+1. **Regimes follow travel.** `travel_sign(v.speed, cal)` is -1 once the signed
+   speed is below `-cal.reversing_speed_ms` (1.0 m/s, the same line
+   `sweep_pass_max_target_speed` draws for "stationary"), and `fwd_dot` is taken
+   against the travel direction everywhere a regime is decided: `LaneClassifier`,
+   the collision-data helper (both copies), Fix D damping, follow-threat and
+   `clip_replay`. Products that turn `fwd_dot` back into a velocity use
+   `ctx.v_travel_speed`, so `speed * fwd_dot` keeps meaning velocity along ego.
+   Target velocity itself stays `v.speed * heading`, which was always right.
+2. **A reversing target is never oncoming.** `head_on` and `near_head_on` are
+   forced false for it. Every oncoming rule models a driver proceeding along a
+   road who can see ego: `OppositeLaneFilter` (keeps its lane or steers away),
+   the head-on lateral gap (§8), the full-brake target arc, the oncoming risk
+   and warn persistence windows, and the head-on LOS bar. None of that
+   describes a truck backing up. Travel frame alone moved 66874532 into
+   `OppositeLaneFilter` and turned a severity-4 TP into a miss; the scenario
+   `tp_reversing_rig_backs_into_lane` pins the warn time that exposes it.
+
+`TmpCrossTrafficFilter` also skips reversing targets by name: it models a TMP
+driver sweeping through a junction. **`TmpRelSpeedFilter` does not.** Exempting
+reversing targets from the floor made d80936f9 brake and would bring back the
+low-speed TMP false positives the floor exists for; the travel frame is for
+reversing traffic that clears the floor, not a way around it. Geometric
+stages (`CoDirectionalDivergeFilter`, `TurningCrossTrafficFilter`,
+`OutOfLaneParallelFilter`, `EgoEvasionFilter`) run unchanged in the travel frame.
+
+`_body_centreline_d_abs` samples along the heading (`arc.yaw_rad`), not
+`arc.fwd_*`: capsule extents are heading-relative, so the travel `fwd` mirrored
+the samples off a reversing body. `TmpCrossTrafficFilter`'s sweep arc is rebuilt
+with the sign of `v.speed`, since `ArcPath.speed` is stored as `|speed|`.
+
+The radar side of the same clip is in `core/radar/README.md` (position
+mismatch): before it, a reversing TMP vehicle was frozen 5 frames in 6 and read at
+about half its speed, so none of the above could see it clearly anyway.
+
+**Measured** (pre-change baseline -> radar run rule plus travel frame, 810 local /
+491 remote clips): local -386.93 -> -421.15, remote +358.71 -> +326.27. Misses to
+TP: 5f0da738, 0a5eacdc; 9cc70333 miss to late; 4cb90214, 626d28b6 and 888b45fd FP
+to silent, a823f720 false warn to silent. No verdict got worse. ebb1e8cf (labelled
+FP for parked bodies) brakes 0.9 s longer, on a real TMP truck reversing across
+ego's path about 6 m ahead.
+
 ### `OppositeLaneFilter`
 
 Applies to `head_on` vehicles (`fwd_dot < cal.head_on_dot=-0.7`), and to
@@ -412,6 +472,8 @@ masks where the cross-traffic actually sweeps to.
 
 Non-TMP targets bypass entirely: AI vehicles' arcs are deterministic and
 already handled by `OppositeLaneFilter`, `TurningCrossTrafficFilter`, etc.
+Reversing targets bypass too: the stage models a driver sweeping through a
+junction, and its centre-miss graze test suppressed a rig backing into ego's lane.
 
 ### `CornerEntryStationaryFilter`
 
@@ -464,6 +526,10 @@ When **any** slot in the frame has `is_tmp`, AEB pre-filters targets by
 
 - ref **> 40 km/h** → threat only if rel **> 15 km/h**
 - ref **≤ 40 km/h** → threat only if rel **> 40 km/h**
+
+Reversing targets get no exemption. The floor keeps d80936f9 (a truck backing across
+ego's lane at 35 km/h relative) silent on purpose: exempting them re-opens the low-speed
+TMP false positives the floor was added for. See the travel frame section.
 
 Reference is current ego speed unless **latched**: the first frame with
 `AEBState ≥ WARN` or addressing brake (`_read_addressing_brake`: driver pedal
@@ -1375,7 +1441,8 @@ or `evaluate_frame(frame, cal)`.
 
 `cal.lane_separation = 3.9 m`: oncoming vehicles whose centerlines are this far
 apart laterally are suppressed at the `arc_arc_collision` level
-(`min_lateral_gap`). Passed only for `near_head_on` vehicles (`fwd_dot < -0.5`).
+(`min_lateral_gap`). Passed only for `near_head_on` vehicles (`fwd_dot < -0.5`),
+which excludes reversing targets: the gap assumes a driver keeping to its own lane.
 
 ---
 
@@ -1388,6 +1455,7 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 - **AEB ego curvature is the yaw-rate proxy, full stop.** Do not read `RadarData.ego_curvature` from AEB.
 - **Target-vehicle curvature is the `_vehicle_curvature_blend` helper** (sliced position fit blended with `angular_velocity`-derived yaw rate, weighted by `cal.aeb_yaw_blend`, then One-Euro filtered per-vehicle by `AEBThread._curvature_blender`). Do not call `v.curvature_from_history()` directly from AEB paths and do not enlarge `aeb_pos_history_len` toward 25. The blender must be stepped exactly **once per vehicle per frame**: any new call site must thread the existing `ctx.v_curvature` through rather than re-invoking `_vehicle_curvature_blend(...)` with the production blender.
 - **`co_directional` must use `fwd_dot > 0.7`, not `abs(fwd_dot) > 0.7`.** The two flags must be mutually exclusive with `head_on`.
+- **Regimes read the travel direction, and a reversing target is never oncoming.** Take `fwd_dot` through `travel_sign(v.speed, cal)` wherever it decides a regime, and keep `head_on` / `near_head_on` false for a reversing target. Heading alone dropped a truck backing across ego's lane (d80936f9); travel alone put a rig backing into the lane under the oncoming evasion rules (66874532). See the travel frame section.
 - **All tunable constants live in `AEBCalibration`.** Do not introduce new bare numeric literals in `thread.py` or `filters.py`. Add the constant to `calibration.py` first.
 - **`lane_frame.project_to_ego_arc` is the canonical lane primitive.** Do not use cross-product `lateral_offset` for lane classification: it compresses on curved roads. The `max(d_arc, d_straight)` formula in `project_to_ego_arc` is the safety-critical fix.
 - **`OppositeLaneFilter` body-separation check uses `ego_hw + v_hw_coll`, not corridor width.** The margin (`corridor_margin=0.5 m`) is for probabilistic corridor overlap; body separation uses only actual half-widths.

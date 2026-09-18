@@ -749,13 +749,17 @@ speed = direction * dist / dt
 
 ### Position mismatch (TMP only)
 
-Detects out-of-order packets where the raw position jumps backward along the heading for a limited number of frames.
+Detects out-of-order packets where the raw position jumps back against the direction of travel for a limited number of frames. A longer run of backward frames is real backward motion and passes.
 
-**Detection:** `dot(raw_disp, prev_smooth_fwd) < -_POS_MISMATCH_BACKWARD_THRESHOLD`, which is **0.00 m**: any backward component at all flags the frame.
+**Detection:** `travel * dot(raw_disp, prev_smooth_fwd) < -_POS_MISMATCH_BACKWARD_THRESHOLD`, which is **0.00 m**: any component against the direction of travel flags the frame. `travel` is -1 once `prev.speed < -_POS_MISMATCH_REVERSE_MS` (**1.0 m/s**), so for a vehicle that is already reversing a *forward* jump is the rewind.
 
-**Action:** Increment `_pos_mismatch_frames` counter; hold `_smooth_x/z`; carry `acceleration` and `acc_accel` from prev and coast `speed` and `acc_speed` on them (see "Held frames coast", below); return early **after** yaw EMA and angular_velocity have run. Path, arc construction, and all other state are unaffected.
+**Action:** Increment `_pos_mismatch_frames`; while it is at most `_POS_MISMATCH_MAX_FRAMES` (**5**, `Vehicle.pos_mismatch_holding`) hold `_smooth_x/z`, carry `acceleration` and `acc_accel` from prev and coast `speed` and `acc_speed` on them (see "Held frames coast", below), and return early **after** yaw EMA and angular_velocity have run. Path, arc construction, and all other state are unaffected. A forward step resets the count.
 
-**Cap:** When `_POS_MISMATCH_MAX_FRAMES` is reached (**5** frames), the counter resets and raw position is passed through on the next frame regardless.
+**Past the cap the run is real.** From the sixth consecutive backward full frame on, raw position passes and keeps passing for as long as the run lasts: a truck reversing, a vehicle shoved back in a collision, or one bounced back by a head-on. The old cap reset the counter instead, released a single frame and re-armed, so a reversing truck was held 5 frames in 6, lagged by up to 0.5 m, and read -0.8 to -1.5 m/s against a real -2.9 (clip d80936f9). A packet stall (byte-identical position) inside an accepted run keeps the count, so a stalling reverse is not re-held. A stall during a hold still resets it as before: carrying the hold across stalls kept a stalled in-lane trailer frozen and cost the TP on 6f2377d7.
+
+**Why 5 is the line.** Measured on 2126 clips through the radar chain, in full frames: rewinds of TMP vehicles moving forward at more than 2 m/s before and after the run last 1 to 4 frames in 1915 of 1951 runs, 5 frames in 26, and 6 or more in 10. Most of those 10 lose half their speed across the run (16.6 -> 6.9 m/s, 15.4 -> 2.4 m/s), which is what a collision looks like. The filter stays armed at every speed; an earlier version skipped it below 1 m/s instead, which fixed one FP (13d8b3d7) by accident and is not what the filter is for.
+
+**Measured** (with the AEB travel frame, `core/aeb/README.md`): local -386.93 -> -421.15 against the pre-change baseline, remote +358.71 -> +326.27. Every verdict that moved improved; 13d8b3d7 is back to its baseline FP.
 
 **Known gap, deliberately left open.** The detection reference is `prev._raw_x/_raw_z`, which advances on held frames, so the guard sees the *rate* of a rewind and not the fact that the position is still behind the last sample `_position_history` accepted. It therefore releases as soon as motion turns forward, and the sample it then appends can sit behind the previous history entry (0.27 m on clip 1f14b55a). Measured on 120 clips / 1901 TMP tracks: 13 % of clips admit at least one backward step, median 0.24 m, worst 4.3 m.
 
@@ -1177,7 +1181,8 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 - **Lag freeze speed decays quadratically: `prev_speed × (1 − frac²)`.** Never hold speed constant during lag: it keeps downstream threads informed while smoothly approaching 0.
 - **`lag_confirmed` is set by `traffic.py`, not by consumer threads.** A confirmed-stopped vehicle has speed = 0 and is detected as a stationary obstacle by the existing arc collision logic.
 - **Position mismatch (TMP only) runs before lag detection.** It is mutually exclusive with lag: a backward jump is not near-stationary. The `not _skip_position_update` guard on the lag block enforces this.
-- **Position mismatch is capped at `_POS_MISMATCH_MAX_FRAMES (5)`.** When the cap is reached, the next frame always passes raw position through. Without this cap, a genuine crash or prolonged backward event would be silently swallowed.
+- **Position mismatch holds at most `_POS_MISMATCH_MAX_FRAMES (5)` frames per backward run, and the rest of the run passes.** A longer run is reversing or a collision shove. Do not go back to resetting at the cap: re-arming held a reversing truck 5 frames in 6. Without any cap a genuine crash or prolonged backward event would be silently swallowed.
+- **Position mismatch tests against the direction of travel, at every speed.** Testing against the heading alone rejects every forward jump of a reversing vehicle as real and every backward one as a rewind.
 - **Crash detection does not override speed or acceleration.** It disables the pos-mismatch filter and lag freeze so raw position data passes through unfiltered.
 - **Crash detection runs before pos-mismatch and lag early-returns.** Both signals (rotation jerk and a kinematic anomaly) must fire on the same live frame; the confirmation then latches for `_CRASH_HOLD_S` so consumers never see per-frame flicker.
 - **Crash rotation rates span packet stalls.** A frozen (byte-identical) frame must not advance the rate baseline: the stall-exit snap has to read as its average rate, or every stall resume fires a phantom crash (the pre-fix detector flagged 59.7 % of TMP vehicles).

@@ -33,7 +33,7 @@ from core.aeb.filters import (
     _build_vehicle_collision_data, _world_to_ego_forward, _cross_zone_padding,
     _apply_cross_zone, _earliest_hit, _is_approaching, _dampen_turning_curvature,
     _any_body_in_ego_lane, _vehicle_curvature_blend, VehicleCurvatureBlender,
-    build_pipeline, oncoming_closing_into,
+    build_pipeline, oncoming_closing_into, travel_sign,
 )
 
 logger = logging.getLogger(__name__)
@@ -617,8 +617,10 @@ def _build_vehicle_collision_data(
     v_yaw_rad = v._smooth_yaw if v._smooth_yaw is not None else math.radians(v.rotation.euler()[1])
     veh_fwd_x = -math.sin(v_yaw_rad)
     veh_fwd_z = -math.cos(v_yaw_rad)
-    fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
-    head_on = fwd_dot < cal.near_head_on_dot
+    sign = travel_sign(v.speed, cal)
+    fwd_dot = sign * (ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z)
+    # Only a forward oncoming driver is assumed to brake; a reversing one looks away.
+    head_on = sign > 0.0 and fwd_dot < cal.near_head_on_dot
     target_override_decel = cal.full_brake_decel if head_on else 0.0
     arc_decel = target_override_decel
     if follow_decel_ms2 is not None and follow_decel_ms2 > 0.0:
@@ -626,7 +628,7 @@ def _build_vehicle_collision_data(
     # Fix D on arc_curvature only; v_curvature unchanged for filters.
     arc_curvature = _dampen_turning_curvature(
         v_curvature, fwd_dot,
-        ego_fwd_x, ego_fwd_z, veh_fwd_x, veh_fwd_z,
+        ego_fwd_x, ego_fwd_z, sign * veh_fwd_x, sign * veh_fwd_z,
         abs_v_speed, abs_v_speed * dynamic_horizon,
         cal,
     )
@@ -970,8 +972,8 @@ class AEBThread(BaseThread):
                     if v._smooth_yaw is not None
                     else math.radians(v.rotation.euler()[1])
                 )
-                fwd_dot = (ego_fwd_x * -math.sin(v_yaw)
-                           + ego_fwd_z * -math.cos(v_yaw))
+                fwd_dot = travel_sign(v.speed, cal) * (
+                    ego_fwd_x * -math.sin(v_yaw) + ego_fwd_z * -math.cos(v_yaw))
                 if fwd_dot >= cal.co_directional_dot:
                     closing = -_ls_slope(trk, 1)
                     own_decel = -_ls_slope(trk, 2)
@@ -1522,10 +1524,11 @@ class AEBThread(BaseThread):
                 )
                 veh_fwd_x = -math.sin(v_yaw_rad)
                 veh_fwd_z = -math.cos(v_yaw_rad)
-                fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
+                sign = travel_sign(v.speed, cal)
+                fwd_dot = sign * (ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z)
                 arc_curvature = _dampen_turning_curvature(
                     v_curvature, fwd_dot,
-                    ego_fwd_x, ego_fwd_z, veh_fwd_x, veh_fwd_z,
+                    ego_fwd_x, ego_fwd_z, sign * veh_fwd_x, sign * veh_fwd_z,
                     abs_v_speed, abs_v_speed * dynamic_horizon,
                     cal,
                 )
@@ -1852,8 +1855,10 @@ class AEBThread(BaseThread):
                     vetoed = los_veto_memo.get(v.id)
                     if vetoed is None:
                         vetoed = False
+                        # Reversing is manoeuvring: never the head-on bar (README travel frame).
                         min_range, miss_bar = _los_veto_bar(
-                            fwd_dot, abs_v_speed, ctx.v_curvature, cal,
+                            fwd_dot if not ctx.reversing else 0.0,
+                            abs_v_speed, ctx.v_curvature, cal,
                         )
                         # crash_confirmed skips LOS veto (README LOS veto).
                         # Turn-into-path: CBDR miss is still large while closing.

@@ -131,6 +131,11 @@ def _suppress(reason: str) -> FilterResult:
     return FilterResult(suppressed=True, reason=reason)
 
 
+def travel_sign(speed: float, cal: AEBCalibration) -> float:
+    """-1 for a target reversing faster than ``reversing_speed_ms``, else +1 (README travel frame)."""
+    return -1.0 if speed < -cal.reversing_speed_ms else 1.0
+
+
 # ---- helpers moved from thread.py ----
 
 def _cross_zone_padding(ego_yaw_rad: float, v_yaw_rad: float, v_speed_ms: float,
@@ -200,7 +205,8 @@ def _body_centreline_d_abs(
     """Arc-projected |d| for centreline samples along each target body at t=0."""
     out: list[float] = []
     for arc in target_arcs:
-        fx, fz = arc.fwd_x, arc.fwd_z
+        # Heading, not arc.fwd_*: capsule extents are heading-relative, fwd flips on reverse.
+        fx, fz = -math.sin(arc.yaw_rad), -math.cos(arc.yaw_rad)
         back = -arc.back_len
         span = arc.fwd_len + arc.back_len
         for frac in _BODY_LANE_SAMPLES:
@@ -277,12 +283,14 @@ def _build_vehicle_collision_data(
     v_yaw_rad = v._smooth_yaw if v._smooth_yaw is not None else math.radians(v.rotation.euler()[1])
     veh_fwd_x = -math.sin(v_yaw_rad)
     veh_fwd_z = -math.cos(v_yaw_rad)
-    fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
-    head_on = fwd_dot < -0.5
+    sign = travel_sign(v.speed, cal)
+    fwd_dot = sign * (ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z)
+    # Only a forward oncoming driver is assumed to brake; a reversing one looks away.
+    head_on = sign > 0.0 and fwd_dot < -0.5
     target_override_decel = cal.full_brake_decel if head_on else 0.0
     arc_curvature = _dampen_turning_curvature(
         v_curvature, fwd_dot,
-        ego_fwd_x, ego_fwd_z, veh_fwd_x, veh_fwd_z,
+        ego_fwd_x, ego_fwd_z, sign * veh_fwd_x, sign * veh_fwd_z,
         abs_v_speed, abs_v_speed * dynamic_horizon,
         cal,
     )
@@ -399,6 +407,16 @@ class FilterContext:
     unbraked_hit: tuple | None = None
     lateral_gap: float = 0.0
 
+    @property
+    def reversing(self) -> bool:
+        """Travelling against its heading: a manoeuvre, never oncoming road traffic."""
+        return travel_sign(self.v.speed, self.cal) < 0.0
+
+    @property
+    def v_travel_speed(self) -> float:
+        """Target speed along its travel direction; pairs with the travel-frame fwd_dot."""
+        return self.v.speed * travel_sign(self.v.speed, self.cal)
+
 
 # ---- Filter stages ----
 
@@ -441,7 +459,7 @@ def _required_evasion_lat_ms2(
     if ctx.head_on:
         closing += max(ctx.abs_v_speed, 0.0)
     else:
-        closing = max(ctx.ego_speed - ctx.v.speed * ctx.fwd_dot, 0.5)
+        closing = max(ctx.ego_speed - ctx.v_travel_speed * ctx.fwd_dot, 0.5)
     t_close = axial / max(closing, 0.5)
     if t_close < 0.15:
         return 1e6
@@ -587,9 +605,11 @@ class LaneClassifier:
     def apply(self, ctx: FilterContext) -> FilterResult:
         cal = self._cal
         # ctx geometry from upstream; do not re-blend kappa (double-steps One-Euro).
-        ctx.fwd_dot = ctx.ego_fwd_x * ctx.veh_fwd_x + ctx.ego_fwd_z * ctx.veh_fwd_z
-        ctx.head_on = ctx.fwd_dot < cal.head_on_dot
-        ctx.near_head_on = ctx.fwd_dot < cal.near_head_on_dot
+        # Travel frame, and a reversing target is never oncoming (README travel frame).
+        ctx.fwd_dot = travel_sign(ctx.v.speed, cal) * (
+            ctx.ego_fwd_x * ctx.veh_fwd_x + ctx.ego_fwd_z * ctx.veh_fwd_z)
+        ctx.head_on = ctx.fwd_dot < cal.head_on_dot and not ctx.reversing
+        ctx.near_head_on = ctx.fwd_dot < cal.near_head_on_dot and not ctx.reversing
         ctx.co_directional = ctx.fwd_dot > cal.co_directional_dot
 
         # Lane classification via arc projection
@@ -860,7 +880,8 @@ class TmpCrossTrafficFilter:
     def apply(self, ctx: FilterContext) -> FilterResult:
         if not ctx.v.is_tmp:
             return _PASS
-        if ctx.co_directional:
+        # Models a TMP driver sweeping through a junction; reversing is a manoeuvre.
+        if ctx.co_directional or ctx.reversing:
             return _PASS
         if ctx.abs_v_speed < 1.0:
             return _PASS
@@ -894,9 +915,10 @@ class TmpCrossTrafficFilter:
             if ghost_hit is None:
                 continue
             any_hit = True
+            # ArcPath stores |speed|: the sign keeps a reversing sweep on its travel side.
             sweep_arc = build_arc(
                 base_target_arc.start_x, base_target_arc.start_z,
-                base_target_arc.yaw_rad, base_target_arc.speed,
+                base_target_arc.yaw_rad, math.copysign(base_target_arc.speed, ctx.v.speed),
                 ctx.v_curvature, base_target_arc.half_width,
                 base_target_arc.horizon, decel=0.0,
             )
@@ -956,7 +978,7 @@ class OutOfLaneParallelFilter:
             return _PASS
         # Rear overtaker early suppress before centre scan (README OutOfLaneParallelFilter).
         if (ctx.co_directional and not stationary
-                and (ctx.v.speed * ctx.fwd_dot) > ctx.ego_speed
+                and (ctx.v_travel_speed * ctx.fwd_dot) > ctx.ego_speed
                 and ctx.dx * ctx.ego_fwd_x + ctx.dz * ctx.ego_fwd_z < 0.0):
             return _suppress("OutOfLaneParallelFilter")
         # Predicted center must stay out of ego's lane across the horizon.

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from core.aeb.calibration import DEFAULT as _CAL
 from core.aeb.clip_schema import Clip, ConsumedContext, LiveAEB, RadarFrameRecord
 from core.aeb.clip_timebase import decode_buffers, replay_frames
-from core.aeb.filters import VehicleCurvatureBlender, _vehicle_curvature_blend
+from core.aeb.filters import VehicleCurvatureBlender, _vehicle_curvature_blend, travel_sign
 from core.aeb.thread import (
     AEBSnapshot, AEBState, _INF, _dampen_turning_curvature,
     _swap_trailer_kinematics,
@@ -102,8 +102,9 @@ def _arc_curvature(v: Vehicle, ego_fwd_x: float, ego_fwd_z: float,
     abs_v_speed = abs(v.speed)
     v_curvature = _vehicle_curvature_blend(v, abs_v_speed, _CAL, blender, now)
     v_yaw = _veh_yaw(v)
-    veh_fwd_x = -math.sin(v_yaw)
-    veh_fwd_z = -math.cos(v_yaw)
+    sign = travel_sign(v.speed, _CAL)
+    veh_fwd_x = -sign * math.sin(v_yaw)
+    veh_fwd_z = -sign * math.cos(v_yaw)
     fwd_dot = ego_fwd_x * veh_fwd_x + ego_fwd_z * veh_fwd_z
     return _dampen_turning_curvature(
         v_curvature, fwd_dot,

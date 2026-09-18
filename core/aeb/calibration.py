@@ -52,6 +52,8 @@ class AEBCalibration:
     head_on_dot: float = -0.7
     near_head_on_dot: float = -0.5
     co_directional_dot: float = 0.7
+    # Target reversing faster than this: regimes use travel direction (README travel frame).
+    reversing_speed_ms: float = 1.0
 
     # Curvature / dynamics
     turning_diverge_kappa: float = 0.007

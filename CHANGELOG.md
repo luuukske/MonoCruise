@@ -16,6 +16,8 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 - **ACC kept braking after the car ahead stopped braking**: after a hard stop in front of you, ACC let go of the brakes so slowly that you ended up far slower than the traffic ahead and had to press the gas yourself. It now eases off as soon as the car ahead stops slowing down.
 - **ACC lost the car ahead on winding roads**: in bends it was slow to lock on to the vehicle in your lane, and one bad reading could throw the predicted road far off to the side, leaving a stretch where ACC saw nobody. It now follows your lane through corners and picks up the car ahead much sooner.
+- **Reversing traffic on TruckersMP was barely tracked**: a truck backing up, or one knocked backwards in a crash, was mistaken for a lagging connection, so the radar froze it most of the time and read it at about half its real speed. Short connection hiccups are still filtered out, but a vehicle that keeps moving backwards is now tracked as it moves.
+- **Emergency braking misjudged reversing trucks**: a truck backing out across the road while facing you was treated as oncoming traffic that would stay in its lane. Vehicles are now judged by the way they are actually moving. At low speeds on TruckersMP nothing changes: AEB still leaves slow traffic to you there.
 - **Distance to the traffic ahead jittered**: your truck's position was read a few frames out of step with the traffic around it, so the gap to the vehicle in front wobbled by up to a metre at motorway speed, and ACC and emergency braking both reacted to it. Both are now read from the same moment in the game.
 
 ## [1.1.0-preview.22] - 2026-09-13

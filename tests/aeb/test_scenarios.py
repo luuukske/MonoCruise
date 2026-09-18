@@ -45,6 +45,9 @@ _SCENARIO_MODULES = [
     ("tp_fast_perpendicular_crosser", "TP"),
     ("tp_tmp_perpendicular_crosser", "TP"),
     ("tp_trailer_in_lane_shared_curve", "TP"),
+    ("tp_reversing_truck_backs_across_path", "TP"),
+    ("tp_reversing_rig_backs_into_lane", "TP"),
+    ("fp_reversing_on_shoulder_tmp", "FP"),
 ]
 
 
