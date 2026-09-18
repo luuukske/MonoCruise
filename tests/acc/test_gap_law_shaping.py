@@ -16,7 +16,7 @@ from core.cruise_control_thread.acc_controller import (
 )
 from core.cruise_control_thread.idm_cah import (
     LEAD_BRAKE_FF_MAX_MS2, LEAD_BRAKE_FF_SHARE, _soft_min, _soft_negative, acc_blend, alead_tau_s, cah,
-    closing_relief, comfort_gain, iidm, lead_accel_nudge, lead_brake_ff,
+    closing_relief, comfort_gain, iidm, jerk_step, lead_accel_nudge, lead_brake_ff,
 )
 from core.settings import Settings
 
@@ -481,6 +481,9 @@ def test_every_feature_knob_disables_its_feature_at_zero():
     hard = cfg.a_lead_deadband_ms2
     assert alead_tau_s(cfg, -hard - 1e-6) == pytest.approx(cfg.tau_alead_brake_s)
     assert alead_tau_s(cfg, -hard + 1e-6) == pytest.approx(cfg.tau_alead_relax_s)
+    for prev in (-6.55, -2.0, -0.8):
+        assert jerk_step(prev, 1.5, DT, cfg.j_max_ms3, cfg.j_release_tau_s) == \
+            prev + cfg.j_max_ms3 * DT
 
 
 def test_closing_relief_matches_the_requested_shape():

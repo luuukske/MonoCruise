@@ -184,6 +184,7 @@ class ACConfig:
     standstill_hold_decel_ms2: float = STANDSTILL_HOLD_DECEL_MS2
     standstill_launch_accel_ms2: float = standstill_hold.LAUNCH_ACCEL_MS2
     j_max_ms3: float = J_MAX_MS3
+    j_release_tau_s: float = idm_cah.J_RELEASE_TAU_S
     tau_input_near_s: float = TAU_INPUT_NEAR_S
     tau_input_far_s: float = TAU_INPUT_FAR_S
     d_input_near_m: float = D_INPUT_NEAR_M
@@ -275,7 +276,7 @@ class AdaptiveCruiseController:
             self._blinker.released_vid = None
             self._standstill.reset()
             target = self.config.no_lead_ceiling_ms2
-            a_jerk = self._jerk_limit(target, dt, is_emergency=False)
+            a_jerk = self._jerk_limit(target, dt, is_emergency=False, law_release=False)
             return self._output_filter(a_jerk, dt, is_emergency=False)
 
         if chain_raw:
@@ -774,16 +775,15 @@ class AdaptiveCruiseController:
 
         return a_dec_delta + lift
 
-    def _jerk_limit(self, a_new: float, dt: float, is_emergency: bool) -> float:
+    def _jerk_limit(self, a_new: float, dt: float, is_emergency: bool,
+                    law_release: bool = True) -> float:
         if is_emergency or self._prev_cmd_ms2 is None:
             self._prev_cmd_ms2 = a_new
             return a_new
-        max_step = self.config.j_max_ms3 * dt
-        delta = a_new - self._prev_cmd_ms2
-        if delta > max_step:
-            a_new = self._prev_cmd_ms2 + max_step
-        elif delta < -max_step:
-            a_new = self._prev_cmd_ms2 - max_step
+        # Fast release follows the law only: a lost lead and the hold keep the plain rate. §13.1.
+        fast = law_release and not self._standstill.held
+        a_new = idm_cah.jerk_step(self._prev_cmd_ms2, a_new, dt, self.config.j_max_ms3,
+                                  self.config.j_release_tau_s if fast else 0.0)
         self._prev_cmd_ms2 = a_new
         return a_new
 

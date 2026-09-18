@@ -46,12 +46,34 @@ CLOSING_RELIEF_FULL_MS: float = 2.0 / 3.6
 # keeps the fast asymmetric one: it sizes a stopping requirement. See §8.10.
 TAU_ALEAD_FF_S: float = 0.50
 
+# Brake release chases the law with this time constant instead of the jerk rate,
+# so a slam that bypassed the limiter can let go. 0 disables. §13.1.
+J_RELEASE_TAU_S: float = 0.30
+
 
 def ema_step(prev: float | None, new: float, dt: float, tau: float) -> float:
     if prev is None or not math.isfinite(prev):
         return new
     alpha = 1.0 - math.exp(-dt / max(tau, 1e-6))
     return prev + alpha * (new - prev)
+
+
+def jerk_step(prev: float, target: float, dt: float, j_max: float,
+              release_tau: float) -> float:
+    """One jerk-limited step toward `target`; a braking command may rise faster.
+
+    Within about `j_max * release_tau` of the target it is the plain limit."""
+    max_step = j_max * dt
+    delta = target - prev
+    rise = max_step
+    if release_tau > 0.0 and prev < 0.0:
+        # Never past zero: above it the gas side keeps the plain jerk limit.
+        rise = max(rise, min(delta * (1.0 - math.exp(-dt / release_tau)), -prev))
+    if delta > rise:
+        return prev + rise
+    if delta < -max_step:
+        return prev - max_step
+    return target
 
 
 def _soft_min(a: float, b: float, eps: float) -> float:

@@ -1139,7 +1139,8 @@ Do not re-add a lead-speed term to the release.
                        + confidence blend + ghost hold, anticipation delta (EMA)
         │
         ▼
-  _jerk_limit       : |da/dt| ≤ 2.5 m/s³, bypassed on emergency
+  _jerk_limit       : |da/dt| ≤ 2.5 m/s³, bypassed on emergency;
+                       brake release chases the law with τ 0.30 s (§13.1)
         │
         ▼
   _output_filter    : light EMA (τ ≈ 36 ms), bypassed on emergency
@@ -1226,6 +1227,7 @@ constant per lead vehicle. `eff_dist = lead.dist_m − tail_m`.
 | Layer | Time constant / cap | Notes |
 |---|---|---|
 | Jerk limiter | `J_MAX = 2.5 m/s³` | Below 2.94 m/s³ comfort threshold (Bellem 2022). Bypassed on emergency. |
+| Brake release | `J_RELEASE_TAU_S = 0.30 s` | A braking command rising toward the law may chase it with this τ instead of `J_MAX`, never past zero. §13.1. |
 | Output EMA  | `τ = 36 ms` | Legacy α=0.6 per 30 Hz tick, ported to framerate-independent τ. Bypassed on emergency. |
 
 The jerk cap is the dominant smoothness shaper between the control law
@@ -1233,6 +1235,70 @@ The jerk cap is the dominant smoothness shaper between the control law
 by sub-emergency CAH commands: only by the explicit safety overlays in
 §10. Moderate CAH-driven braking events therefore stay jerk-limited and
 feel firm rather than sharp.
+
+### 13.1 Brake release
+
+The limiter used to be one symmetric rate, so letting go of the brake
+was exactly as slow as applying it. That interacts badly with the
+at-clamp and overlay paths (§10): they bypass the limiter on the way in,
+seed `_prev_cmd_ms2` at `max_decel_ms2`, and the way out runs back
+through it. Releasing −6.55 m/s² at 2.5 m/s³ takes 2.6 s whatever the
+law asks for.
+
+Clip `c5a0a74e` is the reference case: level 1, 57 km/h, a TruckersMP
+truck ahead braking 61 → 31 km/h at about 6 m/s². The law clamped at
+4.95 s, the lead stopped braking at 5.45 s, the law was asking for
+acceleration from 6.26 s, and the cap only reached zero at 8.38 s. The
+truck braked to 8 km/h behind a lead holding 31 km/h before the driver
+overrode it; closed loop without the override it bottoms out at 2.2 km/h.
+At level 1 the comfort gain drives the raw law well past the clamp
+(−10.8 m/s² in that clip), so nearly every lead brake above ~3 m/s²
+takes this path. The recorded truck deceleration tracks the replayed cap
+with a 0.15 s lag, which rules out the mapper.
+
+**Rule.** While the previous command is negative, the rise per tick is
+`max(J_MAX·dt, min(Δ·(1 − e^(−dt/τ)), −prev))`, with `Δ` the gap to the
+law (`idm_cah.jerk_step`). Properties this buys, all pinned in
+`tests/acc/test_brake_release.py`:
+
+- Within about `J_MAX·τ` (0.75 m/s²) of the law it is the plain limit,
+  bit for bit, so telemetry jitter still sees one symmetric rate and is
+  not rectified into a weaker mean brake.
+- Brake onset and the gas side are untouched: a falling command and any
+  command at or above zero use `J_MAX` exactly as before.
+- It never carries the command past zero; above zero the gas side ramps
+  at `J_MAX`.
+- It only follows the law. A lost lead (no chain and no indicated lead
+  after the grace window) and the standstill hold (§10.1) keep the plain
+  rate: the first is missing information rather than a law asking to let
+  go, the second would dip the brake just as the hold FSM applies its own.
+
+Measured in closed loop (simulated truck with 0.1 s dead time and 0.15 s
+lag, the shipped radar kinematics chain on the lead; `j_release_tau_s = 0`
+is the old limiter):
+
+| | clip `c5a0a74e` lowest speed (lead 31 km/h) | synthetic clamp cases, braking after the law turned positive |
+|---|---|---|
+| plain limiter | 2.2 km/h | 1.3–2.3 s |
+| τ 0.30 | 22.5 km/h | 0.2–0.5 s |
+| τ 0.50 | 19.4 km/h | 0.6–0.8 s |
+| fixed 5 m/s³ release (rejected) | 17.6 km/h | 0.1–1.0 s |
+
+Minimum gap was identical in every synthetic case: the closest point
+comes before the release. Fixed asymmetric rates were rejected on noise:
+with σ 1.0 m/s² on `a_lead` during braking they added 19% (5 m/s³) and
+39% (10 m/s³) RMS commanded jerk. τ 0.30 is bit-identical to the plain
+limiter there: over 12 seeds the release engaged on 0 of about 5000
+ticks at σ 1.0 and 1.5, and on 4 at σ 2.0. A stop behind a lead braking
+to zero also ends at the same gap, because the hold keeps the plain rate.
+
+**Open, not fixed here.** The lead-accel estimate still reads a finished
+brake for about 1 s (the 1.05–1.5 s fit window, then the 0.35 s and
+0.50 s controller filters), and the brake feedforward carries it into
+the command. In brakes that never reach the clamp this is the larger
+cost: level 1, 80 km/h, lead −2 m/s² for 20 km/h leaves the truck
+6.3 km/h under the lead's new speed with this change and 1.2 km/h with
+perfect lead kinematics.
 
 ---
 
@@ -1331,7 +1397,7 @@ ttc_hard_s, d_emergency_m, emergency_decel_ms2,
 max_accel_ms2, max_decel_ms2,
 standstill_speed_ms, standstill_gap_slack_m, standstill_hold_decel_ms2,
 standstill_launch_accel_ms2,
-j_max_ms3,
+j_max_ms3, j_release_tau_s,
 tau_input_near_s, tau_input_far_s, d_input_near_m, d_input_far_m,
 tau_alead_brake_s, tau_alead_relax_s,
 tau_output_s,
