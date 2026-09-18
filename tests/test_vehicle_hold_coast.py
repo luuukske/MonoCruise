@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 
 from core.radar.traffic import (
-    Position, Quaternion, Size, Vehicle, _hold_coast_speed,
+    _POS_MISMATCH_MAX_FRAMES, Position, Quaternion, Size, Vehicle, _hold_coast_speed,
 )
 
 DT = 0.0501
@@ -157,3 +157,82 @@ def test_lag_freeze_on_a_cruising_target_keeps_the_decay_ramp():
     # frac = 0 on the first frame and the accel is zero, so nothing moves yet.
     assert frozen[0] == entry_speed
     assert frozen[-1] < entry_speed
+
+
+def _reverse_from_rest(reverse_ms: float, duration_s: float):
+    """Standstill, then backing up at a steady speed (z grows: against heading)."""
+    t_now = 0.0
+    z = 0.0
+    prev = _vehicle(z, 0.0)
+    prev.time = t_now
+    for _ in range(10):
+        t_now += DT
+        prev = _step(prev, t_now, z)
+    for _ in range(int(round(duration_s / DT))):
+        t_now += DT
+        z += reverse_ms * DT
+        prev = _step(prev, t_now, z)
+    return prev, t_now, z
+
+
+def test_reverse_from_rest_is_held_as_a_rewind_then_tracked():
+    """Clip d80936f9: the cap used to release one frame in six and re-arm, forever."""
+    prev, t_now, z = _reverse_from_rest(2.9, 0.0)
+    for k in range(1, _POS_MISMATCH_MAX_FRAMES + 1):
+        t_now += DT
+        z += 2.9 * DT
+        prev = _step(prev, t_now, z)
+        assert prev.pos_mismatch_holding and prev._pos_mismatch_frames == k
+        assert prev.position.z == 0.0
+    # Past the cap the run is real backward motion: tracked, and never re-held.
+    for _ in range(20):
+        t_now += DT
+        z += 2.9 * DT
+        prev = _step(prev, t_now, z)
+        assert not prev.pos_mismatch_holding
+        assert prev.position.z == z
+    assert prev.speed < -2.0
+
+
+def test_short_rewind_of_a_reversing_target_is_still_held():
+    """Travelling -fwd, a rewind is a jump forward along the heading."""
+    prev, t_now, z = _reverse_from_rest(2.9, 1.5)
+    assert prev.speed < -2.0 and prev._pos_mismatch_frames == 0
+    t_now += DT
+    prev = _step(prev, t_now, z - 0.05)
+    assert prev.pos_mismatch_holding
+    assert prev.position.z == z
+
+
+def test_collision_shove_back_passes_after_the_cap():
+    """A cruising target knocked backwards: a run longer than any rewind is real."""
+    t_now = 0.0
+    z = 0.0
+    prev = _vehicle(z, 15.0)
+    prev.time = t_now
+    for _ in range(24):
+        t_now += DT
+        z -= 15.0 * DT
+        prev = _step(prev, t_now, z)
+    held_z = prev.position.z
+    for k in range(1, 12):
+        t_now += DT
+        z += 0.4
+        prev = _step(prev, t_now, z)
+        if k <= _POS_MISMATCH_MAX_FRAMES:
+            assert prev.position.z == held_z
+        else:
+            assert prev.position.z == z
+
+
+def test_stall_does_not_restart_an_accepted_backward_run():
+    """An identical-pose frame is no evidence: a real reverse must not be re-held after it."""
+    prev, t_now, z = _reverse_from_rest(2.9, (_POS_MISMATCH_MAX_FRAMES + 1) * DT)
+    assert prev._pos_mismatch_frames > _POS_MISMATCH_MAX_FRAMES
+    t_now += DT
+    prev = _step(prev, t_now, z)  # stall inside the accepted run
+    assert prev._pos_mismatch_frames > _POS_MISMATCH_MAX_FRAMES
+    t_now += DT
+    z += 2.9 * DT
+    prev = _step(prev, t_now, z)
+    assert not prev.pos_mismatch_holding and prev.position.z == z
