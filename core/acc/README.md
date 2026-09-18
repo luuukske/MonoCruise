@@ -99,7 +99,9 @@ prevents position noise from being fit as a tight curve. The fitted
 circle is intersected with the **ego row** (line through ego
 perpendicular to ego heading); the crossing point gives `offset_m`,
 and the tangent direction there gives `arc_angle` which feeds
-`angle_amp = 2^(-(arc_angle / 0.06)²)`.
+`angle_amp = 2^(-(arc_angle / 0.06)²)`. Beyond 20 m, where the road model is
+confident, that amp is blended with the angle read against the road at the target
+(§9, "Arrival angle at range").
 
 The downsampling lives inside this module: radar's
 `_position_history`, `Vehicle.curvature_from_history`, the TMP raw-
@@ -424,6 +426,52 @@ The ridge form is kept rather than a hard pin so the constraint stays soft: ego
 is not always lane-aligned. Since the result saturates, the exact weight does not
 matter; do not spend time tuning it.
 
+### Curvature prior: the shape is not free where the traffic is silent
+
+`c1` was the only coefficient with a prior, and the other three carry the shape.
+After offset elimination each source contributes only the shape inside its own
+trail window, so a handful of short windows leaves the quartic free between and
+beyond them. It then runs away, and confidence cannot see it: agreement only asks
+whether the sources agree with **each other**. Measured over 271k fits on the
+corpus, the fits the tracker leaned on that sat more than 10 m off their lane at
+50 m had 0.74 confidence and 0.17 m agreement, with `c3` and `c4` at 58 and 31 m
+against 11 and 5 m for the rest. The raw fit's p99 error reached 535 m at 100 m
+and 1818 m at 150 m, and the published centreline took seconds to walk back.
+
+`_CURV_PRIOR_WEIGHT` adds the integral of `n''(s)²` over the published range to
+the normal equations, as a closed-form 4x4. It says what a road is: curvature
+changes gradually. Where the traffic constrains the shape the term is negligible;
+where it does not, the deviation relaxes onto the base arc, which is the honest
+answer rather than an extrapolated quartic.
+
+Measured on 475 clips, published centreline against hindsight lanes, counting only
+frames the tracker leans on (`confidence_at >= 0.3`), with the smoother change below:
+
+| | before | after |
+|---|---|---|
+| share > 10 m off at 25 / 50 m | 3.7 / 5.2 % | **0.7 / 2.2 %** |
+| p99 error at 25 / 50 m | 32.4 / 42.2 m | **9.2 / 22.5 m** |
+| raw fit p99 at 150 m, all fits | 2192 m | **126 m** |
+| excursions past 10 m at 50 m | 132 in 123 clips | **72 in 77 clips** |
+| road confidence coverage at 50 m | 45.1 % | 42.0 % |
+
+Tracker effects over 1068 clips: adjacent-lane false locks down 0.7 points on
+straights and 0.5 at 5-15 deg, lock precision up, wrong-lane leads down 0.4 points
+on straights, cut-in lock p90 0.11 s faster, median lock 0.04 s faster. The cost is
+1.6 points of in-corridor recall at 15-30 deg, from the lost coverage.
+
+Weight 100 buys almost nothing more (0.021 against 0.022 at 50 m) and costs 0.12 s
+of lead release, so 30 it is.
+
+Rejected on the same corpus, both measured after the prior was in:
+
+- **Shrinking the re-base toward ego's curvature by how well the votes agree.**
+  The base arc in bad frames is 12 m off at 50 m where ego's own arc would be 3.9 m,
+  so it looks like the cause, but correcting it changes nothing: 27 excursions
+  either way. The fit follows the same sources whichever arc it is indexed on.
+- **Moving the base arc onto the curvature the fit reports at ego, then refitting.**
+  Costs 7 points of coverage and doubles the p99 at 150 m for no fewer excursions.
+
 ### Base arc: why the centreline is not a polynomial alone
 
 A parabola **undershoots** a circle. True offset is `R − √(R²−x²)`; `x²/2R`
@@ -504,6 +552,29 @@ Do not tighten the limit chasing the tail. Below about 20 m/s the clipped
 centreline diverges from the fit and then catches up in a rush, so **jumpiness
 gets worse than no limit at all** (at 8 m/s, jump p99 at 50 m rises to 1.39 m
 against 1.33 m unlimited) while recall collapses.
+
+#### Dropping a shape the fit has left
+
+The limit is there for jitter, and it was also defending shapes the data had
+abandoned. At 50 m it allows about 12 m/s, so one bad frame carried on cost
+seconds of centreline, and the tracker cannot see traffic in a centreline that is
+in the wrong place. Measured over 1068 clips: 556 excursions past 10 m in 364 of
+them, median 1.1 s and p90 3.0 s, and in a quarter of them the fresh fit had
+already been right for five frames or more while the published one was still wrong.
+That is the reported symptom, a dead zone that clears itself after a while.
+
+So when a fit with confidence at or above `_SNAP_MIN_CONFIDENCE` disagrees with
+what is published by more than `_SNAP_GAP_M` at any node it still reaches, for
+`_SNAP_FRAMES` frames in a row, the carry is dropped and the centreline re-acquires
+on the fresh fit. Three frames is about a tenth of a second, far too short for
+jitter to sustain and far shorter than the second or more the rate limit needed.
+Re-acquiring restarts the confidence ramp, so the tracker leans on it gradually
+rather than trusting the new shape instantly.
+
+Measured with the curvature prior above: excursions 132 -> 72 on 475 clips, median
+0.77 -> 0.52 s, and the share of excursion frames whose fresh fit was already clean
+27 % -> 6 %. Lead release costs 0.03 s (p90 0.818 -> 0.850) and cut-in locks come
+0.11 s sooner.
 
 #### The budget is curvature, not metres
 
@@ -1004,7 +1075,7 @@ with the confidence blend it is better (19.72 m).
 
 ### How the tracker consumes it
 
-    w        = model.confidence_at(x_target)
+    w        = model.trust_at(x_target)
     lateral  = w · model.offset_of(x, y) + (1 - w) · arc_offset
 
 Blended at the **input**, not added as a fourth score component: the road model
@@ -1012,6 +1083,66 @@ and the arc measure the same physical quantity by two methods, so summing them
 double-counts lateral position with two error models and, on a curve, makes half
 a correct signal fight half a wrong one. At `w = 0` behaviour collapses to
 exactly the pre-road-model tracker, which is what happens on an empty road.
+
+### Trust: how much of the centreline to believe, which is not confidence
+
+`confidence` answers whether the sources agree with each other. The blend needs a
+different answer, how wrong this centreline is about to be, and the two ramps and
+the single-source cap are the wrong shape for it. Refitting a logistic on
+`confidence`'s **own four inputs** already halves the blended error at range, so
+the shape was the problem rather than the information:
+
+| blended error p50 | 25 m | 50 m | 75 m | 100 m | 150 m |
+|---|---|---|---|---|---|
+| `confidence_at` | 0.363 | 0.987 | 1.987 | 3.626 | 9.278 |
+| logistic on the same four inputs | 0.359 | 0.893 | 1.500 | 2.157 | 4.361 |
+| `trust_at` | 0.357 | 0.846 | 1.240 | 1.757 | 3.640 |
+
+`trust_at(s)` is a logistic on the fit's own least-squares uncertainty
+`sigma_at(s)`, the query distance, the sample weight past `_TRUST_FAR_M`, the
+residual RMS, the median source span and the agreement quantile. Its coefficients
+were fitted against the realised error of the blend it feeds, not against a
+likelihood, over 1730 clips and 649 one-km cells with folds grouped by cell. Two
+of those inputs, `sigma_at` and `s`, carry almost all of it past 75 m; the rest
+buy about 1 % near ego. `sigma_at` needs the coefficient covariance, so the fit
+now keeps it, which costs four 4x4 back-substitutions a frame.
+
+Trust is answered for every fit that solved, including one `confidence` rejects,
+because the blend still has to decide how much base arc to take instead. With no
+fit at all there is no covariance and `trust_at` falls back to `confidence_at`.
+
+Measured in the tracker over 1974 clips, paired clip bootstrap, in-lane moving
+vehicles locked by bend: +1.9 / +4.5 / +7.4 / +3.6 points at under 5, 5-15, 15-30
+and over 30 degrees, every interval excluding zero. Lead release is 0.147 s
+faster. Lock precision is flat to within 0.2 points.
+
+**What it costs.** The centreline is untouched, so its error, its p99 and its
+frame-to-frame jump are bit-identical. What changes is how hard a wrong one is
+believed: mean weight at 100 m goes 0.287 to 0.597, and the share of **all**
+frames that are both trusted and more than 10 m off goes 0.007 to 0.019 at 50 m
+and 0.009 to 0.048 at 100 m. The tracker-level price of that is adjacent-lane
+moving vehicles locked +0.6 to +1.5 points by bend, none of it significant in
+corners, against the in-lane gains above.
+
+#### Rejected: publishing the raw fit on every node
+
+The same weight rule with the node grid taking `raw_deviation_at` everywhere
+inside the arc span, instead of only where `confidence_at` is positive, is
+tempting because it improves the typical centreline: p50 at 50 m 0.98 to 0.87 m,
+p90 15.89 to 14.29, share past 10 m 0.081 to 0.071, and 766 excursions fall to
+641. It also doubles the in-lane lock gain.
+
+It was rejected on the tail, which is the failure anyone actually reports:
+
+| published centreline | 50 m | 100 m | 150 m |
+|---|---|---|---|
+| p99 today | 43.6 | 79.5 | 117.9 |
+| p99 with the fit on every node | 54.3 | 118.7 | 186.1 |
+
+Centreline jump goes p90 6.27 to 9.38 m and p99 103.4 to 138.6 m, and
+adjacent-lane locks rise significantly in corners (15-30 degrees +2.7 points,
+over 30 degrees +2.2, corners at 40-80 m +4.1). Publishing an unconfident shape
+re-opens the route the curvature prior and the snap above were added to close.
 
 ### Lateral uncertainty gate
 
@@ -1062,6 +1193,61 @@ it is travelling the lane rather than crossing it; rejecting one only needs to
 know where it is. Without that asymmetry, `amp = ang_ev·angle_amp + (1 - ang_ev)`
 reaches its **maximum** at zero heading evidence, which reintroduced the original
 inversion as soon as the road model started supplying position evidence.
+
+### Arrival angle at range: read against the road, not at ego's row
+
+`angle_amp` comes from where the target's trail circle crosses ego's row. On a
+straight road that crossing is right beside ego. In a bend it is the trail
+extrapolated back 50 to 150 m round the curve, so any radius error, or ego still on
+the straight before the corner, makes an in-lane car arrive steeply. Below amp 0.4
+`offset_component` is negative whatever the lateral, and the road blend never
+reached it: the blend replaces the offset, not the angle.
+
+Measured against hindsight lanes on the corpus, in-lane moving traffic in 15-30 deg
+bends at 40-80 m was 70 % in the corridor, but only half of that locked, and amp was
+under 0.4 in 58 % of the in-corridor frames. With the penalty removed, frames with a
+rising score went 54 % -> 92 %.
+
+So `tracker.py` also reads the angle between the target's own travel at its newest
+trail sample (`trail_arc.travel_direction`) and the road's `tangent_at` its position,
+and blends the two amps by `road_angle_weight`: road `confidence_at`, ramped in from
+0 at `ROAD_ANGLE_NEAR_M` (20 m) to 1 at `ROAD_ANGLE_FAR_M` (40 m). Crossing and
+oncoming traffic is still misaligned with the road, so the rejection the penalty
+exists for survives, and where the road model is silent nothing changes.
+
+Corpus, 1062 clips, all changes significant (paired clip bootstrap):
+
+| | before | after |
+|---|---|---|
+| in-lane moving locked, bend < 5 / 5-15 / 15-30 / >= 30 deg | 75.4 / 53.4 / 31.1 / 10.4 % | 82.0 / 67.6 / 48.7 / 13.9 % |
+| same, corners >= 15 deg at 40-80 / 80-150 m | 23.8 / 5.0 % | 34.5 / 20.0 % |
+| nearest in-lane car is the lead, 15-30 deg | 55.1 % | 62.9 % |
+| lead in the wrong lane, >= 30 deg | 17.4 % | 15.8 % |
+| cut-in lock p90 / all locks p90 | 3.57 / 3.31 s | 2.31 / 1.83 s |
+| adjacent-lane moving traffic locked, all bends | 7.2 % | 8.5 % |
+| crossing traffic within 6 m of ego's path locked | 7.7 % | 9.8 % |
+| hook p90 | 0.67 s | 0.82 s |
+
+The extra adjacent-lane locks do not become the lead: the wrong-lane lead share is
+unchanged below 30 deg and lower above it. Stationary lock rate on the test sample
+went 3.1 % -> 5.0 %; 99 % of the added stationary locks are stopped cars already in
+the corridor past the end of the clip's recorded path, and of those that can be
+checked against where they drove, 93 % held ego's lane and none the adjacent one.
+
+Rejected on the same corpus:
+
+- **No ramp, road angle at every range.** Same gains, but a slow lead moving aside
+  1-4 m ahead stayed locked. Close in, the ego-row crossing is a short extrapolation
+  and it is what caught that departure.
+- **Ego arc tangent where the road model is silent.** Loses locks under 40 m in
+  bends and picks the wrong lead more often above 30 deg: ego's arc is wrong exactly
+  at corner entry and exit.
+- **Weight also scaled by how centred the road puts the target.** Cut the added
+  adjacent-lane locks by a third, gave back a tenth of the gain, and did not touch
+  the close-range cases the ramp handles.
+- **No arrival-angle penalty at all.** The recall ceiling, but adjacent-lane locks in
+  bends above 30 deg rose 7.6 points, stationary adjacent-lane locks doubled and hook
+  p90 reached 1.34 s. The penalty does real work; it was measured in the wrong place.
 
 ---
 

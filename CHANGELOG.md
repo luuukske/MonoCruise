@@ -13,6 +13,8 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ## [Unreleased]
 
 ### Fixed
+
+- **ACC lost the car ahead on winding roads**: in bends it was slow to lock on to the vehicle in your lane, and one bad reading could throw the predicted road far off to the side, leaving a stretch where ACC saw nobody. It now follows your lane through corners and picks up the car ahead much sooner.
 - **Distance to the traffic ahead jittered**: your truck's position was read a few frames out of step with the traffic around it, so the gap to the vehicle in front wobbled by up to a metre at motorway speed, and ACC and emergency braking both reacted to it. Both are now read from the same moment in the game.
 
 ## [1.1.0-preview.22] - 2026-09-13

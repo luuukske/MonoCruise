@@ -165,6 +165,42 @@ def test_uncertainty_does_not_reject_a_vehicle_centred_in_its_own_lane():
     assert tracks[14].in_path
 
 
+def _on_bend(vid, s_m, lane_off, speed=22.0, straight_m=30.0, radius=120.0):
+    """Moving vehicle on a road that runs straight ahead of ego for ``straight_m``, then bends left."""
+    def pose(s):
+        if s <= straight_m:
+            return lane_off, -s, 0.0
+        yaw = (s - straight_m) / radius
+        return (radius * (math.cos(yaw) - 1.0) + lane_off * math.cos(yaw),
+                -straight_m - radius * math.sin(yaw) - lane_off * math.sin(yaw), yaw)
+
+    x, z, yaw = pose(s_m)
+    vehicle = make_vehicle(vid, x, z, speed, yaw_rad=yaw)
+    history = [(i * (1.0 / 15.0), *pose(s_m - (24 - i) * speed / 15.0)[:2]) for i in range(25)]
+    vehicle._position_history = history
+    vehicle._trail_history = history
+    return vehicle
+
+
+def test_in_lane_target_past_a_bend_is_not_rejected_by_its_ego_row_angle():
+    """Ego is on the straight; the lane bends 30 m ahead. The target's trail, extrapolated
+    back to ego's row, arrives steeply, so the old amp was ~0 and the lead never locked."""
+    from core.acc.trail_arc import angle_amp_from, crossing_offset_and_angle, fit_trail
+
+    scene = [_on_bend(31, 55.0, 0.0), _on_bend(32, 90.0, 0.0), _on_bend(33, 125.0, 0.0),
+             _on_bend(34, 70.0, -4.5), _on_bend(35, 105.0, -4.5)]
+    tracker = ACCTracker()
+    tracks = _run(tracker, scene, frames=45)
+    target = scene[1]
+    fit = fit_trail(target._trail_history, target._smooth_yaw)
+    crossing = crossing_offset_and_angle(fit, 0.0, 0.0, 0.0, -1.0)
+    assert crossing is not None and angle_amp_from(crossing[1]) < 0.05
+    assert tracker.last_road_model.confidence > 0.0
+    assert tracks[32].last_road_weight > 0.0
+    assert tracks[32].last_arc_angle_amp > angle_amp_from(crossing[1]) + 0.3
+    assert tracks[32].score > IN_PATH_THRESHOLD
+
+
 def test_road_model_is_built_each_frame():
     tracker = ACCTracker()
     _run(tracker, [_ahead(15, 50.0, 22.0), _ahead(16, 90.0, 22.0)], frames=45)

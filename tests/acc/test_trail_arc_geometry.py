@@ -10,7 +10,8 @@ import random
 import pytest
 
 from core.acc.trail_arc import (
-    MIN_FIT_SAMPLES, crossing_offset_and_angle, fit_trail,
+    MIN_FIT_SAMPLES, ROAD_ANGLE_FAR_M, ROAD_ANGLE_NEAR_M, angle_to_direction,
+    crossing_offset_and_angle, fit_trail, road_angle_weight, travel_direction,
 )
 
 
@@ -119,3 +120,70 @@ def test_moving_target_has_enough_downsampled_samples():
 
     kept = _downsample(_history(None, 0.0, 50.0, speed=25.0))
     assert len(kept) >= MIN_FIT_SAMPLES
+
+
+def _bend(straight_m, radius, s_m, speed=25.0):
+    """(t, x, z) history on ego's lane: straight for ``straight_m``, then a curve to ego's right.
+
+    Returns the history and the road's unit direction at the newest sample."""
+    def point(s):
+        if s <= straight_m:
+            return 0.0, s, 0.0
+        turn = (s - straight_m) / radius
+        return -radius * (1.0 - math.cos(turn)), straight_m + radius * math.sin(turn), turn
+
+    history = []
+    for i in range(_SAMPLES):
+        x, z, _ = point(s_m - (_SAMPLES - 1 - i) * speed * _DT)
+        history.append((i * _DT, x, z))
+    turn = point(s_m)[2]
+    return history, (-math.sin(turn), math.cos(turn))
+
+
+@pytest.mark.parametrize("radius", [500.0, 150.0])
+@pytest.mark.parametrize("side", [1.0, -1.0])
+def test_travel_direction_follows_the_target_round_a_curve(radius, side):
+    history, (dir_x, dir_z) = _bend(0.0, radius, 60.0)
+    history = [(t, side * x, z) for t, x, z in history]
+    fit = fit_trail(history, math.pi)
+    assert fit is not None
+    tx, tz = travel_direction(fit)
+    assert math.degrees(math.acos(max(-1.0, min(1.0, tx * side * dir_x + tz * dir_z)))) < 1.0
+
+
+def test_in_lane_target_past_a_bend_aligns_with_the_road_not_the_ego_row():
+    """Extrapolated back to ego, a curve entered 40 m ahead crosses ego's row steeply.
+
+    Read where the target is, against the road direction there, the same trail is
+    travelling the lane. That gap is what locked out in-lane traffic in bends."""
+    history, (dir_x, dir_z) = _bend(40.0, 150.0, 110.0)
+    fit = fit_trail(history, math.pi)
+    assert fit is not None
+    crossing = crossing_offset_and_angle(fit, *_EGO)
+    assert crossing is None or crossing[1] > 0.1
+    assert math.degrees(angle_to_direction(fit, dir_x, dir_z)) < 1.0
+
+
+def test_crossing_and_oncoming_targets_stay_misaligned_with_the_road():
+    across = [(t, z - 60.0, 60.0) for t, _, z in _history(None, 0.0, 60.0)]
+    fit = fit_trail(across, math.pi)
+    assert fit is not None
+    assert math.degrees(angle_to_direction(fit, 0.0, 1.0)) > 80.0
+    oncoming = fit_trail([(t, x, -z) for t, x, z in _history(None, 0.0, -50.0)], 0.0)
+    assert oncoming is not None
+    assert math.degrees(angle_to_direction(oncoming, 0.0, 1.0)) > 150.0
+
+
+def test_angle_to_a_zero_direction_is_undefined():
+    fit = fit_trail(_history(None, 0.0, 50.0), math.pi)
+    assert angle_to_direction(fit, 0.0, 0.0) is None
+
+
+def test_road_angle_weight_ramps_in_with_distance_and_scales_with_confidence():
+    mid = 0.5 * (ROAD_ANGLE_NEAR_M + ROAD_ANGLE_FAR_M)
+    assert road_angle_weight(1.0, ROAD_ANGLE_NEAR_M) == 0.0
+    assert road_angle_weight(1.0, 5.0) == 0.0
+    assert road_angle_weight(1.0, mid) == pytest.approx(0.5)
+    assert road_angle_weight(1.0, ROAD_ANGLE_FAR_M) == 1.0
+    assert road_angle_weight(0.6, 120.0) == pytest.approx(0.6)
+    assert road_angle_weight(0.0, 120.0) == 0.0

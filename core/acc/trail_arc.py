@@ -33,6 +33,11 @@ _ANGLE_AMP_SIGMA: float = 0.06
 _EVIDENCE_CHORD_MIN_M: float = 1.0
 _EVIDENCE_CHORD_FULL_M: float = 8.0
 
+# Arrival angle against the road: off inside the near bound, where the ego-row
+# crossing is a short extrapolation and the better departure cue (README §9).
+_ROAD_ANGLE_NEAR_M: float = 20.0
+_ROAD_ANGLE_FAR_M: float = 40.0
+
 
 @dataclass(slots=True, frozen=True)
 class TrailFit:
@@ -298,12 +303,47 @@ def angle_amp_from(arc_angle_rad: float) -> float:
     return math.exp(-(x * x) * math.log(2.0))
 
 
+def travel_direction(fit: TrailFit) -> tuple[float, float]:
+    """World unit direction the target travels at its newest trail sample."""
+    if fit.is_straight:
+        return fit.dir_x, fit.dir_z
+    tan_x = (fit.point_z - fit.center_z) * fit.sign
+    tan_z = -(fit.point_x - fit.center_x) * fit.sign
+    tan_mag = math.hypot(tan_x, tan_z)
+    if tan_mag < 1e-9:
+        return fit.dir_x, fit.dir_z
+    tan_x /= tan_mag
+    tan_z /= tan_mag
+    # Orient by the trailing chord, which always points the way the target moved.
+    if tan_x * fit.dir_x + tan_z * fit.dir_z < 0.0:
+        return -tan_x, -tan_z
+    return tan_x, tan_z
+
+
+def angle_to_direction(fit: TrailFit, dir_x: float, dir_z: float) -> float | None:
+    """Angle (rad) between the target's travel and a world direction; None if it has no length."""
+    mag = math.hypot(dir_x, dir_z)
+    if mag < 1e-9:
+        return None
+    tx, tz = travel_direction(fit)
+    return math.acos(max(-1.0, min(1.0, (tx * dir_x + tz * dir_z) / mag)))
+
+
+def road_angle_weight(road_confidence: float, road_s_m: float) -> float:
+    """Share of the arrival angle read against the road tangent at the target (README §9)."""
+    span = _ROAD_ANGLE_FAR_M - _ROAD_ANGLE_NEAR_M
+    reach = max(0.0, min(1.0, (road_s_m - _ROAD_ANGLE_NEAR_M) / span))
+    return max(0.0, min(1.0, road_confidence)) * reach
+
+
 # Re-exports for tests / debug window.
 MIN_FIT_SAMPLES = _MIN_FIT_SAMPLES
 MIN_PATH_LEN_M = _MIN_PATH_LEN_M
 ANGLE_AMP_SIGMA = _ANGLE_AMP_SIGMA
 HISTORY_MIN_DIST_M = _HISTORY_MIN_DIST_M
 HISTORY_MIN_DT_S = _HISTORY_MIN_DT_S
+ROAD_ANGLE_NEAR_M = _ROAD_ANGLE_NEAR_M
+ROAD_ANGLE_FAR_M = _ROAD_ANGLE_FAR_M
 EVIDENCE_CHORD_MIN_M = _EVIDENCE_CHORD_MIN_M
 EVIDENCE_CHORD_FULL_M = _EVIDENCE_CHORD_FULL_M
 

@@ -397,6 +397,48 @@ def test_a_bend_that_straightens_needs_the_quartic_term():
     assert worst > 0.5, "c4 is carrying nothing; re-check whether it earns its place"
 
 
+def _short_trails(kappa=0.0):
+    """Three sources holding their lanes, each seen over a few metres of road.
+
+    The case that used to run away: the sources agree with each other, and none
+    of them spans enough road to say what the shape does beyond them."""
+    samples = []
+    for k, (lane, start) in enumerate(((0.0, 55.0), (3.7, 60.0), (-3.6, 65.0))):
+        xs = [start + 1.5 * i for i in range(5)]
+        samples += _lane(k, lane, xs, kappa=kappa, jitter=0.3)
+    return samples
+
+
+def test_short_trails_cannot_extrapolate_a_runaway_shape(monkeypatch):
+    """Pins the mechanism: without the curvature prior the same rows run away.
+
+    On the corpus the unpenalised fit reached a p99 of 1818 m at 150 m, and the
+    published centreline carried that for seconds (README §9)."""
+    from core.acc import road_model as rm
+
+    samples = _short_trails()
+    model = fit_road_model(_ego_path(), samples, fallback_kappa=0.0)
+    assert abs(model.raw_deviation_at(150.0)) < 5.0
+    monkeypatch.setattr(rm, "_CURV_PRIOR", tuple(tuple(0.0 for _ in range(4)) for _ in range(4)))
+    unpenalised = fit_road_model(_ego_path(), samples, fallback_kappa=0.0)
+    assert abs(unpenalised.raw_deviation_at(150.0)) > 3.0 * abs(model.raw_deviation_at(150.0))
+
+
+def test_the_prior_still_lets_supported_traffic_carry_a_bend():
+    """A bend the traffic actually covers must survive the prior."""
+    kappa = 1.0 / 400.0
+    xs = [10.0 * i for i in range(2, 13)]
+    samples = (
+        _lane(1, 0.0, xs, kappa=kappa)
+        + _lane(2, 3.5, xs, kappa=kappa)
+        + _lane(3, -3.5, xs, kappa=kappa)
+    )
+    model = fit_road_model(_ego_path(), samples, fallback_kappa=0.0)
+    assert model.confidence > 0.9
+    for x in (60.0, 100.0):
+        assert model.lateral_at(x) == pytest.approx(_true_arc(kappa, x), abs=0.3)
+
+
 def _smoother_step(sm, model, x=0.0, z=0.0, fwd=(1.0, 0.0), dt=1 / 30):
     return sm.step(model, x, z, fwd[0], fwd[1], dt)
 
@@ -484,6 +526,46 @@ def test_smoother_does_not_carry_untrusted_extrapolation():
     assert abs(wild.raw_deviation_at(140.0)) > 500.0
 
 
+def test_smoother_drops_a_shape_a_confident_fit_has_left():
+    """The rate limit is for jitter. A confident fit that keeps disagreeing wins.
+
+    At 50 m the limit allows about 12 m/s, so carrying one bad frame used to cost
+    seconds of centreline that no traffic could be seen in (README §9)."""
+    from core.acc.road_smoother import RoadSmoother, SNAP_FRAMES
+
+    sm = RoadSmoother()
+    carried = RoadModel(confidence=1.0, support_s_m=150.0)
+    for _ in range(10):
+        _smoother_step(sm, carried)
+    fresh = RoadModel(c2=32.0, confidence=1.0, support_s_m=150.0)
+    for _ in range(SNAP_FRAMES - 1):
+        out = _smoother_step(sm, fresh)
+        assert abs(out.deviation_at(50.0)) < 2.0, "a rate limit still applies while it is only a step"
+    out = _smoother_step(sm, fresh)
+    assert out.deviation_at(50.0) == pytest.approx(fresh.raw_deviation_at(50.0), abs=0.2)
+
+
+def test_smoother_does_not_drop_a_shape_for_jitter_or_an_unsure_fit():
+    from core.acc.road_smoother import RoadSmoother, SNAP_GAP_M, SNAP_MIN_CONFIDENCE
+
+    settled = RoadModel(confidence=1.0, support_s_m=150.0)
+    sm = RoadSmoother()
+    for _ in range(10):
+        _smoother_step(sm, settled)
+    small = RoadModel(c2=4.0, confidence=1.0, support_s_m=150.0)
+    assert abs(small.raw_deviation_at(50.0)) < SNAP_GAP_M
+    out = _smoother_step(sm, small)
+    assert abs(out.deviation_at(50.0)) < abs(small.raw_deviation_at(50.0))
+
+    sm = RoadSmoother()
+    for _ in range(10):
+        _smoother_step(sm, settled)
+    unsure = RoadModel(c2=32.0, confidence=SNAP_MIN_CONFIDENCE - 0.1, support_s_m=150.0)
+    for _ in range(6):
+        out = _smoother_step(sm, unsure)
+    assert abs(out.deviation_at(50.0)) < 0.5 * abs(unsure.raw_deviation_at(50.0))
+
+
 def test_more_agreeing_traffic_never_lowers_confidence():
     """Corroboration must not be punished.
 
@@ -562,3 +644,64 @@ def test_cross_traffic_is_not_a_road_source():
     assert _direction_weight(-175.0) > 0.0
     for turning in (60.0, 90.0, -110.0):
         assert _direction_weight(turning) == 0.0
+
+
+def test_covariance_is_symmetric_and_grows_past_the_samples():
+    """The fit's own uncertainty, which is what the blend weight is built on."""
+    xs = [10.0 * i for i in range(1, 7)]
+    model = fit_road_model(_ego_path(), _lane(1, 0.0, xs, jitter=0.2), 0.0)
+
+    assert len(model.cov) == 4
+    for i in range(4):
+        for j in range(4):
+            assert model.cov[i][j] == pytest.approx(model.cov[j][i], rel=1e-9)
+    near = model.sigma_at(30.0)
+    far = model.sigma_at(150.0)
+    assert 0.0 < near < far, "extrapolating past the samples cannot be as certain"
+
+
+def test_trust_is_high_where_sources_agree_and_low_where_one_short_trail_guesses():
+    """Weight for the blend against the ego arc, not a restatement of confidence."""
+    supported = _lane(1, 0.0, [10.0 * i for i in range(1, 9)]) + _lane(
+        2, 3.5, [10.0 * i for i in range(1, 9)],
+    )
+    thin = _lane(1, 0.0, [50.0, 53.0, 56.0], jitter=0.3)
+
+    strong = fit_road_model(_ego_path(), supported, 0.0)
+    weak = fit_road_model(_ego_path(), thin, 0.0)
+
+    assert strong.trust_at(80.0) > 0.8
+    assert weak.trust_at(150.0) < strong.trust_at(150.0)
+
+
+def test_trust_without_a_fit_is_the_old_confidence():
+    """No solve, no covariance: the caller must still get an answer it can use."""
+    arc_only = from_curvature(1.0 / 400.0)
+
+    assert arc_only.cov == ()
+    for s_m in (0.0, 40.0, 120.0):
+        assert arc_only.trust_at(s_m) == arc_only.confidence_at(s_m)
+
+
+def test_trust_is_zero_beyond_the_arc_span():
+    """Past half a turn the arc parameterisation aliases, so nothing is trusted."""
+    kappa = 1.0 / 40.0
+    xs = [5.0 * i for i in range(1, 7)]
+    model = fit_road_model(_ego_path(kappa), _lane(1, 0.0, xs, kappa=kappa), kappa)
+
+    beyond = 2.0 * math.pi / abs(kappa)
+    assert model.trust_at(beyond) == 0.0
+
+
+def test_the_smoother_carries_the_trust_inputs_to_what_it_publishes():
+    """Trust is read off the published model, so its inputs have to survive the carry."""
+    from core.acc.road_smoother import RoadSmoother
+
+    xs = [10.0 * i for i in range(1, 9)]
+    model = fit_road_model(_ego_path(), _lane(1, 0.0, xs) + _lane(2, 3.5, xs), 0.0)
+    published = RoadSmoother().step(model, 0.0, 0.0, 1.0, 0.0, 0.033)
+
+    assert published.cov == model.cov
+    assert published.far_weight == model.far_weight
+    assert published.span_med_m == model.span_med_m
+    assert published.trust_at(60.0) == pytest.approx(model.trust_at(60.0))

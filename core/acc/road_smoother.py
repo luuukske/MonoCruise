@@ -36,6 +36,12 @@ _CONF_RESIDUAL_TAU_S: float = 0.30
 _CONF_RATE_UP_PER_S: float = 3.0
 _CONF_RATE_DOWN_PER_S: float = 1.5
 
+# Dropping a carried shape a confident fit has left: the rate limit is there for
+# jitter, not to defend a shape the data abandoned (README §9).
+_SNAP_GAP_M: float = 5.0
+_SNAP_FRAMES: int = 3
+_SNAP_MIN_CONFIDENCE: float = 0.5
+
 
 
 
@@ -81,6 +87,7 @@ class RoadSmoother:
         self._confidence: float = 0.0
         self._support_s_m: float = 0.0
         self._residual: float | None = None
+        self._snap_frames: int = 0
 
     def reset(self) -> None:
         self._nodes = None
@@ -89,8 +96,44 @@ class RoadSmoother:
         self._confidence = 0.0
         self._support_s_m = 0.0
         self._residual = None
+        self._snap_frames = 0
 
     def step(
+        self,
+        model: RoadModel,
+        ego_x: float, ego_z: float,
+        ego_fwd_x: float, ego_fwd_z: float,
+        dt: float,
+    ) -> RoadModel:
+        """Smoothed centreline, re-acquired outright when the carried shape is dead."""
+        out = self._step_once(model, ego_x, ego_z, ego_fwd_x, ego_fwd_z, dt)
+        if not self._shape_is_dead(model, out):
+            return out
+        self.reset()
+        return self._step_once(model, ego_x, ego_z, ego_fwd_x, ego_fwd_z, dt)
+
+    def _shape_is_dead(self, model: RoadModel, out: RoadModel) -> bool:
+        """True once a confident fit has disagreed with what is published for long enough.
+
+        Correcting is rate limited to about 12 m/s at 50 m, so without this a single bad
+        frame carried on costs seconds of centreline the tracker cannot see traffic in."""
+        if model.confidence < _SNAP_MIN_CONFIDENCE:
+            self._snap_frames = 0
+            return False
+        gap = 0.0
+        for node_s in _NODE_S:
+            if model.confidence_at(node_s) > 0.0:
+                gap = max(gap, abs(out.deviation_at(node_s) - model.raw_deviation_at(node_s)))
+        if gap <= _SNAP_GAP_M:
+            self._snap_frames = 0
+            return False
+        self._snap_frames += 1
+        if self._snap_frames < _SNAP_FRAMES:
+            return False
+        self._snap_frames = 0
+        return True
+
+    def _step_once(
         self,
         model: RoadModel,
         ego_x: float, ego_z: float,
@@ -215,3 +258,6 @@ SMOOTH_MAX_KAPPA_RATE = _SMOOTH_MAX_KAPPA_RATE
 SMOOTH_MIN_RATE_MS = _SMOOTH_MIN_RATE_MS
 CONF_RATE_UP_PER_S = _CONF_RATE_UP_PER_S
 CONF_RATE_DOWN_PER_S = _CONF_RATE_DOWN_PER_S
+SNAP_GAP_M = _SNAP_GAP_M
+SNAP_FRAMES = _SNAP_FRAMES
+SNAP_MIN_CONFIDENCE = _SNAP_MIN_CONFIDENCE

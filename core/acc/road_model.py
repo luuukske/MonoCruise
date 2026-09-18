@@ -52,6 +52,22 @@ _EXTRAPOLATION_FADE_M: float = 30.0
 # heading. Comparable to total sample weight; 0 leaves it free.
 _HEADING_PRIOR_WEIGHT: float = 400.0
 
+# Curvature prior on the deviation, integrated over the published range. Roads
+# change curvature gradually, so unsupported shape has to cost something (README §9).
+_CURV_PRIOR_WEIGHT: float = 30.0
+_CURV_PRIOR_SPAN_V: float = 1.5
+
+# Blend trust: a logistic on the fit's own uncertainty, fitted against the realised
+# error of the blend it feeds over 1730 clips and 649 one-km cells (README §9).
+_TRUST_BIAS: float = -3.4187
+_TRUST_SIGMA: float = -5.3305
+_TRUST_S_PER_M: float = 0.0581
+_TRUST_FAR_WEIGHT: float = -0.1592
+_TRUST_RMS: float = -0.0531
+_TRUST_SPAN_MED: float = 0.9345
+_TRUST_AGREEMENT: float = -2.5727
+_TRUST_FAR_M: float = 60.0
+
 # Number of terms in n(s). Four, because with c1 pinned by the heading prior a
 # cubic leaves only a linear curvature ramp, and a corner is a step (README §9).
 _N_COEF: int = 4
@@ -180,6 +196,11 @@ class RoadModel:
     target_weight: float = 0.0
     # Temporally smoothed deviation on ``_NODE_S``; empty means evaluate the fit.
     nodes: tuple = ()
+    # This frame's coefficient covariance plus the two trail statistics the trust
+    # rule needs beyond the residuals. Empty covariance means no fit to trust.
+    cov: tuple = ()
+    far_weight: float = 0.0
+    span_med_m: float = 0.0
 
     def confidence_at(self, s_m: float) -> float:
         """Confidence for a query at arc length ``s_m``.
@@ -195,6 +216,38 @@ class RoadModel:
         over = s_m - self.support_s_m
         decay = max(0.0, 1.0 - over / _EXTRAPOLATION_FADE_M)
         return self.confidence * decay
+
+    def sigma_at(self, s_m: float) -> float:
+        """Least-squares 1-sigma of this frame's deviation at arc length ``s_m``."""
+        if not self.cov:
+            return 0.0
+        basis = _basis(s_m)
+        var = 0.0
+        for i in range(_N_COEF):
+            row = self.cov[i]
+            for j in range(_N_COEF):
+                var += basis[i] * row[j] * basis[j]
+        return math.sqrt(var) if var > 0.0 else 0.0
+
+    def trust_at(self, s_m: float) -> float:
+        """How much of the centreline to believe at ``s_m``, against the ego arc.
+
+        ``confidence`` answers whether the sources agree with each other, which is a
+        different question and the wrong shape for this one (README §9)."""
+        if not self.cov:
+            return self.confidence_at(s_m)
+        if abs(s_m) > arc_span_limit(self.base_kappa):
+            return 0.0
+        logit = (
+            _TRUST_BIAS
+            + _TRUST_SIGMA * math.log1p(self.sigma_at(s_m))
+            + _TRUST_S_PER_M * s_m
+            + _TRUST_FAR_WEIGHT * math.log1p(max(0.0, self.far_weight))
+            + _TRUST_RMS * math.log1p(max(0.0, self.residual_rms_m))
+            + _TRUST_SPAN_MED * math.log1p(max(0.0, self.span_med_m))
+            + _TRUST_AGREEMENT * math.log1p(max(0.0, self.agreement_rms_m))
+        )
+        return 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, logit))))
 
     def deviation_at(self, s_m: float) -> float:
         """Centreline offset from the base arc, along the arc's normal."""
@@ -388,6 +441,26 @@ def _grouped_rows(
     return rows, n_sources
 
 
+def _curvature_prior() -> tuple[tuple[float, ...], ...]:
+    """``integral of n''(s)^2 ds`` over the published range, as a form in the coefficients.
+
+    ``n''`` is linear in c2, c3, c4, so the integral is closed form and the prior is
+    four rows added to the normal equations once."""
+    v = _CURV_PRIOR_SPAN_V
+    scale = _CURV_PRIOR_WEIGHT / (_S_REF_M ** 3)
+    a = [[0.0] * _N_COEF for _ in range(_N_COEF)]
+    a[1][1] = 4.0 * v
+    a[1][2] = a[2][1] = 6.0 * v ** 2
+    a[1][3] = a[3][1] = 8.0 * v ** 3
+    a[2][2] = 12.0 * v ** 3
+    a[2][3] = a[3][2] = 18.0 * v ** 4
+    a[3][3] = 28.8 * v ** 5
+    return tuple(tuple(scale * value for value in row) for row in a)
+
+
+_CURV_PRIOR = _curvature_prior()
+
+
 def _weighted_fit(rows) -> tuple[tuple[float, ...], float] | None:
     """Weighted normal equations plus the weighted residual RMS."""
     ata = [[0.0] * _N_COEF for _ in range(_N_COEF)]
@@ -400,6 +473,11 @@ def _weighted_fit(rows) -> tuple[tuple[float, ...], float] | None:
     # Heading prior: the road leaves ego along ego's heading, so c1 is pulled to
     # zero. Without it a far source's local shape tilts the whole centreline.
     ata[0][0] += _HEADING_PRIOR_WEIGHT
+    # Curvature prior: shape the traffic does not support relaxes onto the base arc,
+    # instead of the quartic whipping between short trails (README §9).
+    for i in range(_N_COEF):
+        for j in range(_N_COEF):
+            ata[i][j] += _CURV_PRIOR[i][j]
     beta = _solve(ata, atb)
     if beta is None:
         return None
@@ -410,6 +488,56 @@ def _weighted_fit(rows) -> tuple[tuple[float, ...], float] | None:
         total_w += w
     rms = math.sqrt(sq / total_w) if total_w > 0.0 else 0.0
     return beta, rms
+
+
+def _covariance(rows, beta, n_sources: int) -> tuple:
+    """Coefficient covariance of the final weighted fit, as four rows.
+
+    The same normal equations the fit solved, priors included, scaled by the
+    weighted residual variance. Symmetric, so a solved column is also a row."""
+    ata = [[0.0] * _N_COEF for _ in range(_N_COEF)]
+    sq = 0.0
+    used = 0
+    for _source_id, basis, y, w in rows:
+        if w <= 0.0:
+            continue
+        for i in range(_N_COEF):
+            for j in range(_N_COEF):
+                ata[i][j] += w * basis[i] * basis[j]
+        sq += w * (y - _predict(beta, basis)) ** 2
+        used += 1
+    ata[0][0] += _HEADING_PRIOR_WEIGHT
+    for i in range(_N_COEF):
+        for j in range(_N_COEF):
+            ata[i][j] += _CURV_PRIOR[i][j]
+    scale = sq / max(1, used - _N_COEF - max(1, n_sources))
+    out = []
+    for i in range(_N_COEF):
+        column = _solve(ata, [1.0 if j == i else 0.0 for j in range(_N_COEF)])
+        if column is None:
+            return ()
+        out.append(tuple(scale * value for value in column))
+    return tuple(out)
+
+
+def _trail_extent(target_samples) -> tuple[float, float]:
+    """Summed weight of samples past ``_TRUST_FAR_M`` and the median source span."""
+    far = 0.0
+    bounds: dict[int, tuple[float, float]] = {}
+    for source_id, x_m, _y_m, w in target_samples:
+        if w <= 0.0:
+            continue
+        if x_m > _TRUST_FAR_M:
+            far += w
+        low, high = bounds.get(source_id, (x_m, x_m))
+        bounds[source_id] = (min(low, x_m), max(high, x_m))
+    if not bounds:
+        return far, 0.0
+    spans = sorted(high - low for low, high in bounds.values())
+    mid = len(spans) // 2
+    if len(spans) % 2:
+        return far, spans[mid]
+    return far, 0.5 * (spans[mid - 1] + spans[mid])
 
 
 def _source_residuals(rows, beta) -> dict[int, float]:
@@ -625,6 +753,10 @@ def fit_road_model(
     source_rms = _source_residuals(rows, beta)
     agreement = agreement_residual_m(source_rms)
     confidence = _confidence(target_weight, agreement, n_sources)
+    # Trust is answered for every fit that solved, including one confidence rejects:
+    # the blend still has to decide how much of the base arc to take instead.
+    cov = _covariance(rows, beta, n_sources)
+    far_weight, span_med = _trail_extent(target_samples)
     if confidence <= 0.0:
         # Keep the per-source diagnostics even when the fit is not trusted, or a
         # caller's trust loop can never bootstrap out of a cold start.
@@ -633,6 +765,7 @@ def fit_road_model(
             residual_rms_m=rms, source_rms=source_rms,
             agreement_rms_m=agreement, target_weight=target_weight,
             n_sources=n_sources, support_s_m=support,
+            cov=cov, far_weight=far_weight, span_med_m=span_med,
         )
     return RoadModel(
         c1=beta[0], c2=beta[1], c3=beta[2], c4=beta[3],
@@ -641,6 +774,7 @@ def fit_road_model(
         n_samples=len(rows), n_sources=n_sources,
         support_s_m=support, source_rms=source_rms,
         agreement_rms_m=agreement, target_weight=target_weight,
+        cov=cov, far_weight=far_weight, span_med_m=span_med,
     )
 
 
@@ -651,3 +785,5 @@ NODE_S = _NODE_S
 EGO_SAMPLE_WEIGHT = _EGO_SAMPLE_WEIGHT
 SOURCE_RESIDUAL_DELTA_M = _SOURCE_RESIDUAL_DELTA_M
 HUBER_DELTA_M = _HUBER_DELTA_M
+CURV_PRIOR_WEIGHT = _CURV_PRIOR_WEIGHT
+TRUST_FAR_M = _TRUST_FAR_M

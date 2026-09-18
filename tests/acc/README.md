@@ -4,10 +4,10 @@ Two layers. Everything except `test_corpus_baseline.py` runs in CI.
 
 | File | Needs clips | Covers |
 |------|-------------|--------|
-| `test_trail_arc_geometry.py` | no | Trail fit + ego-row crossing against synthetic straight and curved roads |
+| `test_trail_arc_geometry.py` | no | Trail fit + ego-row crossing against synthetic straight and curved roads; arrival angle against the road and its range ramp |
 | `test_road_model.py` | no | Shared centreline fit: curvature recovery, per-source offset elimination, lane-change rejection, fallbacks |
 | `test_scoring_evidence.py` | no | Evidence gating of the offset term, score clamp vs consumer confidence |
-| `test_tracker_validation.py` | no | Tracker on synthetic traffic: lock, release, stationary validation latch |
+| `test_tracker_validation.py` | no | Tracker on synthetic traffic: lock, release, stationary validation latch, in-lane lock past a bend |
 | `test_overlay_confidence_gate.py` | no | ACC controller braking authority vs tracker confidence |
 | `test_standstill_hold.py` | no | Standstill hold released by wanted accel, not lead speed: margin, rest, crawl, snap and raw-gap rules |
 | `test_blinker_offset.py` | no | Blinker candidacy (R0-R4/R9-R15) and arbitration (R5-R8) fixtures |
@@ -125,6 +125,58 @@ overtaken and shoulder traffic. The working version measures the minimum distanc
 from a target's position to the polyline ego actually drove afterwards, and only
 scores samples where ego's path got past the target. A clip that ends with ego
 stopped behind a lead contributes nothing rather than a false "shoulder".
+
+### Step 4: arrival angle read against the road at range
+
+`core/acc/README.md` §9 has the mechanism and the hindsight-lane numbers (1062
+clips). Harness metrics over the test sample, before -> after:
+
+| | before | after |
+|---|---|---|
+| moving in-corridor locked | 40.7 % | 57.6 % |
+| stationary locked | 3.1 % | 5.0 % |
+| score saturated | 67.6 % | 74.1 % |
+| cut-in lock p90 | 3.06 s | 1.87 s |
+| lock p50 / p90 | 0.61 / 2.87 s | 0.51 / 1.60 s |
+| hook p90 | 1.20 s | 1.23 s |
+
+The saturation bound was raised to 0.76 with this change, the one loosened bound:
+in-lane traffic at range stopped being rejected and now reaches the ceiling, and
+the release latency that bound exists for is pinned directly by the hook test,
+which still passes. The recall floor and the cut-in bound were tightened.
+
+### Step 5: curvature prior and dropping a dead carried shape
+
+`core/acc/README.md` §9 has both mechanisms and the corpus numbers. Harness
+metrics over the test sample, before -> after:
+
+| | before | after |
+|---|---|---|
+| moving in-corridor locked | 57.6 % | 59.2 % |
+| stationary locked | 5.0 % | 5.0 % |
+| score saturated | 74.1 % | 73.5 % |
+| cut-in lock p90 | 1.87 s | 1.60 s |
+| lock p50 / p90 | 0.51 / 1.60 s | 0.51 / 1.40 s |
+| hook p90 | 1.23 s | 1.20 s |
+
+### Step 6: trust replaces confidence as the blend weight
+
+`core/acc/README.md` §9 has the rule, the corpus numbers and the rejected
+raw-publish variant. Harness metrics over the test sample, before -> after:
+
+| | before | after |
+|---|---|---|
+| moving in-corridor locked | 59.2 % | 58.9 % |
+| stationary locked | 5.0 % | 4.8 % |
+| score saturated | 73.5 % | 73.6 % |
+| cut-in lock p90 | 1.60 s | 1.84 s |
+| lock p50 / p90 | 0.51 / 1.40 s | 0.58 / 1.57 s |
+| hook p90 | 1.20 s | 1.03 s |
+
+The sample metrics barely move because this change acts at range, where the test
+sample has few labelled targets; the 1974-clip in-path measurement in §9 is the
+one that shows it. Cut-in p90 moves 0.24 s here against 0.006 s [-0.145, +0.125]
+over all clips, which is the n = 60 noise the README warns about.
 
 ## Running
 

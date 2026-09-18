@@ -56,9 +56,11 @@ from .scoring import (
 )
 from .trail_arc import (
     angle_amp_from,
+    angle_to_direction,
     crossing_offset_and_angle,
     fit_trail,
     observed_motion_m,
+    road_angle_weight,
     trail_evidence,
 )
 
@@ -483,7 +485,7 @@ class ACCTracker:
                 corner_projs.append((arc_dist, arc_lat))
                 sx, sy = self._ego_local(ego_x, ego_z, ego_fwd_x, ego_fwd_z, cx, cz)
                 road_s, road_off = road.road_coords(sx, sy)
-                w_road = road.confidence_at(road_s)
+                w_road = road.trust_at(road_s)
                 corner_lats.append(
                     w_road * road_off + (1.0 - w_road) * arc_lat
                 )
@@ -520,6 +522,9 @@ class ACCTracker:
             if straight_longi < EGO_FRONT_OFFSET_M:
                 st.last_behind_mono = now_mono
 
+            road_s, d_road = road.road_coords(straight_longi, straight_lat)
+            road_w = road.trust_at(road_s)
+
             # Trail-arc offset baselines HIT / NO_ARC_HIT / NO_HISTORY (README §3).
             v_yaw_rad = (
                 v._smooth_yaw
@@ -547,6 +552,21 @@ class ACCTracker:
                 else:
                     arc_offset, arc_angle_rad = cx_cz_ang
                     arc_angle_amp = angle_amp_from(arc_angle_rad)
+                    # At range the crossing extrapolates the trail round the bend and reads
+                    # steep for in-lane traffic; the road knows the lane direction there (README §9).
+                    angle_w = road_angle_weight(road_w, road_s)
+                    if angle_w > 0.0:
+                        tan_f, tan_r = road.tangent_at(road_s)
+                        road_angle = angle_to_direction(
+                            trail,
+                            tan_f * ego_fwd_x - tan_r * ego_fwd_z,
+                            tan_f * ego_fwd_z + tan_r * ego_fwd_x,
+                        )
+                        if road_angle is not None:
+                            arc_angle_amp = (
+                                angle_w * angle_amp_from(road_angle)
+                                + (1.0 - angle_w) * arc_angle_amp
+                            )
                     baseline = OFFSET_BASELINE_HIT
                     # World-space crossing point for debug rendering.
                     right_x = -ego_fwd_z
@@ -563,8 +583,6 @@ class ACCTracker:
             # Road model knows where the target is even when it has no trail of
             # its own; the trail only ever spoke to where it was going.
             st.last_trail_offset = arc_offset
-            road_s, d_road = road.road_coords(straight_longi, straight_lat)
-            road_w = road.confidence_at(road_s)
             if road_w > 0.0:
                 arc_offset = road_w * d_road + (1.0 - road_w) * arc_offset
             # Floored: the ego arc is itself a measurement, so the blend is never
