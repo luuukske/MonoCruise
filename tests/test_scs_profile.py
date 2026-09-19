@@ -7,9 +7,13 @@ from pathlib import Path
 import pytest
 
 from core.scs_profile.intensity import (
+    AEB_UNSAFE_INTENSITY,
     DEFAULT_BRAKE_INTENSITY,
     TUNE_BRAKE_INTENSITY,
     BrakeIntensityCache,
+    LowBrakeIntensityAebWarning,
+    aeb_available_decel_scale,
+    aeb_max_brake_ms2,
     apply_brake_intensity,
     learn_decel_scale,
 )
@@ -242,6 +246,39 @@ def test_lower_intensity_sends_more_mid_pedal():
     assert apply_brake_intensity(mid, 2.0) < mid
 
 
+def test_full_authority_writes_the_logical_pedal():
+    assert apply_brake_intensity(1.0, 3.0, full_authority=True) == pytest.approx(1.0)
+    assert apply_brake_intensity(0.4, 3.0, full_authority=True) == pytest.approx(0.4)
+    assert apply_brake_intensity(0.4, 0.5, full_authority=True) == pytest.approx(0.4)
+    assert apply_brake_intensity(1.0, 3.0) == pytest.approx(TUNE_BRAKE_INTENSITY / 3.0)
+
+
+def test_full_authority_is_identity_at_the_tune():
+    p = 0.37
+    assert apply_brake_intensity(p, TUNE_BRAKE_INTENSITY, full_authority=True) == (
+        pytest.approx(p)
+    )
+
+
+def test_low_i_aeb_warning_skips_when_aeb_is_off():
+    w = LowBrakeIntensityAebWarning()
+    assert w.tick(0.5, aeb_enabled=False, now=10.0) is False
+
+
+def test_low_i_aeb_warning_skips_at_or_above_100pct():
+    w = LowBrakeIntensityAebWarning()
+    assert w.tick(AEB_UNSAFE_INTENSITY, aeb_enabled=True, now=10.0) is False
+    assert w.tick(1.1, aeb_enabled=True, now=10.0) is False
+
+
+def test_low_i_aeb_warning_fires_hourly(caplog):
+    w = LowBrakeIntensityAebWarning()
+    assert w.tick(0.5, aeb_enabled=True, now=10.0) is True
+    assert w.tick(0.5, aeb_enabled=True, now=10.0 + 3599.0) is False
+    assert w.tick(0.5, aeb_enabled=True, now=10.0 + 3600.0) is True
+    assert "below 100%" in caplog.text
+
+
 def test_learn_decel_scale_maps_cvar_to_tune_units():
     assert learn_decel_scale(TUNE_BRAKE_INTENSITY) == pytest.approx(1.0)
     assert learn_decel_scale(1.0) == pytest.approx(TUNE_BRAKE_INTENSITY)
@@ -249,6 +286,16 @@ def test_learn_decel_scale_maps_cvar_to_tune_units():
     assert learn_decel_scale(None) == pytest.approx(TUNE_BRAKE_INTENSITY)
     assert brake_ui_scale(1.0 / 3.0) == pytest.approx(0.5)
     assert brake_ui_scale(3.0) == pytest.approx(1.5)
+
+
+def test_aeb_capacity_is_physical_full_pedal_decel():
+    tune = 10.0
+    assert aeb_available_decel_scale(TUNE_BRAKE_INTENSITY) == pytest.approx(1.0)
+    assert aeb_max_brake_ms2(tune, TUNE_BRAKE_INTENSITY) == pytest.approx(tune)
+    assert aeb_max_brake_ms2(tune, 3.0) == pytest.approx(tune * 3.0 / TUNE_BRAKE_INTENSITY)
+    assert aeb_max_brake_ms2(tune, 0.5) == pytest.approx(tune * 0.5 / TUNE_BRAKE_INTENSITY)
+    assert aeb_available_decel_scale(3.0) * learn_decel_scale(3.0) == pytest.approx(1.0)
+    assert apply_brake_intensity(0.5, 3.0) == pytest.approx(0.5 * TUNE_BRAKE_INTENSITY / 3.0)
 
 
 def test_brake_intensity_cache_rate_limits(monkeypatch):

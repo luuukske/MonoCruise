@@ -1025,12 +1025,15 @@ class AEBThread(BaseThread):
         return latched * (1.0 - done)
 
     def _read_max_brake_ms2(self) -> float:
-        """Max brake from sending_thread; fallback _FULL_BRAKE_DECEL if unavailable."""
+        """Physical AEB capacity from sending_thread; fallback if unavailable."""
         try:
             st = registry.get_thread("sending_thread")
             if st is not None and st.is_alive():
                 with st.data._lock:
+                    aeb_v = float(getattr(st.data, "aeb_max_brake_ms2", 0.0) or 0.0)
                     v = float(st.data.max_brake_ms2)
+                if aeb_v > 1.0:
+                    return aeb_v
                 if v > 1.0:
                     return v
         except (KeyError, AttributeError):

@@ -18,7 +18,12 @@ from core.settings import Settings
 
 from core.aeb.calibration import DEFAULT as _AEB_CAL
 
-from core.scs_profile.intensity import BrakeIntensityCache, apply_brake_intensity
+from core.scs_profile.intensity import (
+    BrakeIntensityCache,
+    LowBrakeIntensityAebWarning,
+    aeb_max_brake_ms2,
+    apply_brake_intensity,
+)
 
 from .accel_to_pedals import AccelToPedals, MapperSharedState, baseline_accel_ms2, baseline_brake_ms2
 from .hold_controller import (
@@ -288,6 +293,7 @@ class SendingThreadData(ThreadData):
     mapper_gain_scale: float = 1.0
     mapper_pedal_state: int = 0
     max_brake_ms2: float = 0.0         # live PedalCapacityTracker estimate (m/s²)
+    aeb_max_brake_ms2: float = 0.0     # physical full-pedal decel for AEB
     # Hold FSM (single authority for "we want zero motion"). Replaces the old
     stopped: bool = False
     hold_active: bool = False
@@ -333,6 +339,7 @@ class SendingThread(BaseThread):
         self._hold = HoldController(self._accel_mapper.brake_pedal_from_decel)
         self._capacity_tracker = PedalCapacityTracker()
         self._brake_intensity = BrakeIntensityCache()
+        self._low_i_aeb_warn = LowBrakeIntensityAebWarning()
         self._aeb_controller = AEBDecelController()
         self._key_listener = None
         self._spd_smooth: float | None = None
@@ -376,6 +383,7 @@ class SendingThread(BaseThread):
         # SCS write) do not drop when CC nulls its bid in the menu/map.
         self._pause_held_aforward: float = 0.0
         self._pause_held_abackward: float = 0.0
+        self._pause_held_full_authority: bool = False
         try:
             self._project_root = Path(__file__).resolve().parents[2]
         except Exception:
@@ -843,6 +851,26 @@ class SendingThread(BaseThread):
                 self.data.aforward = 0.0
                 self.data.abackward = 0.0
 
+    def _clear_pause_held(self) -> None:
+        self._pause_held_aforward = 0.0
+        self._pause_held_abackward = 0.0
+        self._pause_held_full_authority = False
+
+    def _map_sent_brake(
+        self,
+        logical_b: float,
+        tel_game: str | None,
+        *,
+        full_authority: bool,
+    ) -> tuple[float, float]:
+        """Intensity invert plus the hourly AEB low-I popup. Returns (I, sent)."""
+        intensity = self._brake_intensity.get(tel_game)
+        self._low_i_aeb_warn.tick(intensity, bool(Settings.AEB_enabled))
+        sent_b = apply_brake_intensity(
+            logical_b, intensity, full_authority=full_authority,
+        )
+        return intensity, sent_b
+
     def _loop_body(self, controller: SCSController) -> None:
         try:
             pedal_thread = registry.get_thread("main_pedal_thread")
@@ -1172,8 +1200,7 @@ class SendingThread(BaseThread):
             self._autoneutral_retries = 0
             self._autoneutral_drive_until = 0.0
             self._autoneutral_flag_linger_until = 0.0
-            self._pause_held_aforward = 0.0
-            self._pause_held_abackward = 0.0
+            self._clear_pause_held()
             controller.aforward = 0.0
             controller.abackward = 0.0
             with self.data._lock:
@@ -1218,8 +1245,7 @@ class SendingThread(BaseThread):
         if not pedal_alive:
             self._prev_mapper_owned_gas = False
             self._prev_applied_gas = 0.0
-            self._pause_held_aforward = 0.0
-            self._pause_held_abackward = 0.0
+            self._clear_pause_held()
             controller.aforward = 0.0
             controller.abackward = 0.0
             with self.data._lock:
@@ -1269,8 +1295,10 @@ class SendingThread(BaseThread):
             # Game paused (menu/map): freeze last pedal outputs so the live
             a = self._pause_held_aforward
             logical_b = self._pause_held_abackward
-            sent_b = apply_brake_intensity(
-                logical_b, self._brake_intensity.get(tel_game)
+            _, sent_b = self._map_sent_brake(
+                logical_b,
+                tel_game,
+                full_authority=self._pause_held_full_authority,
             )
             controller.aforward = a
             controller.abackward = sent_b
@@ -1299,8 +1327,7 @@ class SendingThread(BaseThread):
             logger.debug("pedal read failed: %s", e)
             self._prev_mapper_owned_gas = False
             self._prev_applied_gas = 0.0
-            self._pause_held_aforward = 0.0
-            self._pause_held_abackward = 0.0
+            self._clear_pause_held()
             controller.aforward = 0.0
             controller.abackward = 0.0
             with self.data._lock:
@@ -1471,12 +1498,17 @@ class SendingThread(BaseThread):
         # merge stays a max so a driver out-braking AEB always wins.
         now_ctrl = time.monotonic()
         if _aeb_active and gasval < 0.8:
+            aeb_i = self._brake_intensity.get(tel_game)
+            aeb_cap = max(
+                aeb_max_brake_ms2(self._capacity_tracker.max_brake_ms2, aeb_i),
+                0.1,
+            )
             aeb_pedal = self._aeb_controller.step(
                 target_decel_ms2=AEB_target_decel,
                 floor_decel_ms2=AEB_ff_decel,
                 demand_decel_ms2=AEB_required_decel,
                 measured_decel_ms2=measured_decel_fast_ms2,
-                max_brake_ms2=max(self._capacity_tracker.max_brake_ms2, 0.1),
+                max_brake_ms2=aeb_cap,
                 ff_pedal_fn=self._accel_mapper._brake_pedal_from_decel,
                 decel_from_pedal_fn=self._accel_mapper.brake_decel_from_pedal,
                 has_trailer=has_t,
@@ -1517,15 +1549,18 @@ class SendingThread(BaseThread):
             b = 0.001
 
         # Last step: invert live I so physical force matches the 1.1 tune.
-        # Viz stays logical.
-        intensity = self._brake_intensity.get(tel_game)
+        # AEB and em_stop keep the full axis. Viz stays logical.
         logical_b = b
-        sent_b = apply_brake_intensity(logical_b, intensity)
+        full_authority = bool(em_stop)
+        intensity, sent_b = self._map_sent_brake(
+            logical_b, tel_game, full_authority=full_authority,
+        )
 
         controller.aforward = a
         controller.abackward = sent_b
         self._pause_held_aforward = a
         self._pause_held_abackward = logical_b
+        self._pause_held_full_authority = full_authority
 
         # Close the observer loop on what the game actually received, not on the
         # controller's own request: hold, cushion and user brake all raise it.
@@ -1591,6 +1626,9 @@ class SendingThread(BaseThread):
             self.data.decel_measured_ms2 = measured_decel_ms2
             self.data.decel_measured_lead_ms2 = measured_decel_lead_ms2
             self.data.max_brake_ms2 = self._capacity_tracker.max_brake_ms2
+            self.data.aeb_max_brake_ms2 = aeb_max_brake_ms2(
+                self._capacity_tracker.max_brake_ms2, intensity,
+            )
             self.data.mapper_commanded_ms2 = wanted_a
             self.data.mapper_control_wanted_ms2 = mapper_control_wanted_ms2
             self.data.mapper_raw_accel_ms2 = raw_a
@@ -1673,8 +1711,7 @@ class SendingThread(BaseThread):
             self.data.mapper_brake_multiplier = 1.0
             self.data.mapper_gain_scale = 1.0
             self.data.mapper_pedal_state = 0
-        self._pause_held_aforward = 0.0
-        self._pause_held_abackward = 0.0
+        self._clear_pause_held()
         self._prev_measured_decel_ms2 = 0.0
         self._prev_aeb_loop_mono = None
         self._accel_mapper.close()

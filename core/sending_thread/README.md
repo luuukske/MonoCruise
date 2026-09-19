@@ -10,7 +10,8 @@ visualization bar, hazard toggling, AEB decel assist, auto-neutral, creep compen
 and commander merge (CC/ACC/limiter/AEB/user). Publishes `aforward` / `abackward` on
 `SendingThreadData` as the **logical** pedals (what the mapper and viz use). The value
 written to `SCSController.abackward` is remapped by live `g_brake_intensity` as the
-last step before send. See **Brake intensity** below.
+last step before send, except AEB and `em_stop` which keep the full brake axis.
+See **Brake intensity** below.
 
 ## AccelToPedals (`accel_to_pedals.py`)
 
@@ -334,6 +335,14 @@ The live cvar is a multiply (1/3, 1, 3). The remap inverts it, last step before
 
 `sent = min(1, logical * 1.1 / I)`
 
+AEB (`AEB_brake`, folded into `em_stop` in this thread) and a manual `em_stop`
+slam pass `full_authority=True`. That path writes the logical pedal, so AEB's
+0-1 command is the real game axis and a slam still writes 1.0. AEB planning and
+`AEBDecelController` use `aeb_max_brake_ms2 = tune_max * I / 1.1`, the physical
+decel at pedal 1.0. Sub-engagement FF assist and cruise stay on the invert and
+on the unscaled tracker so a slider change does not retune ACC. `I < 1.0`
+cannot be fully recovered: if AEB is enabled, warn once an hour.
+
 Confirmed in-game: higher `I` is stronger braking, and this linear invert is
 the mapping. Do not restore a pedal power or treat UI 50/100/150 as the gain
 (150% is `I = 3`). A power cannot invert a multiply (`1 ** x` stays 1). At
@@ -347,7 +356,9 @@ reads that ring buffer.
 
 Capacity learning takes the sent pedal and multiplies load-corrected decel by
 `1.1 / I` before the ratio, so a slider change is not a `brake_scale`
-change. The settle gates still look at physical decel.
+change. The settle gates still look at physical decel. `max_brake_ms2` on
+`SendingThreadData` stays in those 1.1 units; `aeb_max_brake_ms2` is the
+physical value AEB reads.
 
 ## Main pedal thread
 

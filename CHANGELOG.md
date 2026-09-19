@@ -13,7 +13,8 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ## [Unreleased]
 
 ### Changed
-- **game's brake intensity now taken into account**: no matter the brake intensity, ACC and AEB will remain smooth.
+- **Cruise follows in-game Braking intensity; emergency braking does not**: cruise stays consistent when you move the slider. Emergency braking uses the full brake the game will accept, and it plans the stop with that same force.
+- **Warning when Braking intensity is below 100%**: if emergency braking is on, you get a reminder once an hour that a low slider cuts how hard it can stop.
 
 ### Fixed
 - **ACC kept braking after the car ahead stopped braking**: after a hard stop in front of you, ACC let go of the brakes so slowly that you ended up far slower than the traffic ahead and had to press the gas yourself. It now eases off as soon as the car ahead stops slowing down.

@@ -74,13 +74,18 @@ by the live cvar `I`. The sending thread inverts that as the last step before
 
 `sent = min(1, logical * 1.1 / I)`
 
-Confirmed: `I` is a force multiply, higher is stronger. Do not go back to
-`p ** (I / 1.1)` or to UI%/100 as the gain (150% UI is `I = 3`, not 1.5).
+AEB and a manual emergency-stop slam use `full_authority`: the logical pedal
+is written as-is, because AEB's capacity is already `tune_max * I / 1.1`
+(physical full-pedal decel). Cruise stays on the invert so a slider change
+does not retune ACC. Confirmed: `I` is a force multiply, higher is
+stronger. Do not go back to `p ** (I / 1.1)` or to UI%/100 as the gain
+(150% UI is `I = 3`, not 1.5).
 
-At `I = 1.1` this is identity. At `I = 1.0` (100% UI) it is `* 1.1`, the linear
-stand-in for the old `b ** 0.91`. Unreadable files behave as `I = 1.0`. A weak
-slider cannot be fully recovered once that product clips at 1. Capacity
-learning takes the sent pedal and scales measured decel by `1.1 / I`. See
+At `I = 1.1` this is identity. At `I = 1.0` (100% UI) cruise is `* 1.1`, the
+linear stand-in for the old `b ** 0.91`. Unreadable files behave as `I = 1.0`.
+A weak slider (`I < 1.0`) cannot be fully recovered once pedal 1.0 still
+multiplies by I. If AEB is enabled, warn once an hour. Capacity learning takes
+the sent pedal and scales measured decel by `1.1 / I`. See
 `core/sending_thread/README.md`.
 
 ## AV
