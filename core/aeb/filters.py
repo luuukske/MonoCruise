@@ -14,7 +14,7 @@ from core.radar.traffic import (
 )
 from core.radar.ego_path import ego_curvature_from_history
 from core.aeb.calibration import AEBCalibration
-from core.aeb.lane_frame import Lane, project_to_ego_arc, classify
+from core.aeb.lane_frame import Lane, project_to_ego_arc, classify, in_lane_closing
 
 
 class OneEuroFilter:
@@ -393,7 +393,7 @@ class FilterContext:
     # d(d_miss)/dt over the LOS window; None until the track spans enough time.
     d_miss_rate: float | None = None
 
-    # Latched ids bypass TMP rel-speed prefilter (README latched-threat).
+    # Latched ids bypass TMP rel-speed and the spatial drop filters (README).
     latched_threat_ids: set = field(default_factory=set)
 
     # Ids the shared radar elevation gate placed off ego's road surface,
@@ -1043,6 +1043,9 @@ class CornerEntryStationaryFilter:
         self._cal = cal
 
     def apply(self, ctx: FilterContext) -> FilterResult:
+        # Mode B only: Mode A is the out-of-lane queue, not a latched lead.
+        if ctx.v.id in ctx.latched_threat_ids and ctx.lane == Lane.EGO:
+            return _PASS
         cal = self._cal
         if ctx.abs_v_speed >= cal.sweep_pass_max_target_speed:
             return _PASS
@@ -1105,6 +1108,10 @@ class CornerEntryStationaryFilterMirrored:
         if implied_kappa <= cal.turning_diverge_kappa:
             return _PASS
 
+        # Follow-threat: stopped cut-in can sit in OPPO while occupying the
+        # corridor (c3c7a529). Latch still has no Mode A seat.
+        if ctx.v.id in ctx.follow_threat_ids:
+            return _PASS
         if ctx.lane != Lane.EGO:
             return _suppress("CornerEntryStationaryFilterMirrored")
         return _PASS
@@ -1118,14 +1125,21 @@ class EgoEvasionFilter:
         self._cal = cal
 
     def apply(self, ctx: FilterContext) -> FilterResult:
+        if ctx.v.id in ctx.latched_threat_ids:
+            return _PASS
         cal = self._cal
         target_moving = any(a.speed > 0.5 for a in ctx.all_target_arcs)
         # Moving oncoming belongs to OppositeLaneFilter; a stationary target
         # facing ego is a parked obstacle, so it runs the check (README).
         if ctx.head_on and target_moving:
             return _PASS
-        # Co-dir moving with a body in ego lane but tractor out of lane (trailer
-        # swing): rear-end, bypass. Lane.EGO targets always run the evasion check.
+        # In-lane closer: straight |lat|, not Lane.EGO (arc d_abs inflates).
+        if (ctx.co_directional or not target_moving) and in_lane_closing(
+                ctx.dx, ctx.dz, ctx.ego_fwd_x, ctx.ego_fwd_z, ctx.ego_speed,
+                ctx.v_travel_speed, ctx.fwd_dot, cal.lane_half_width,
+                cal.aeb_min_closing_ms):
+            return _PASS
+        # Trailer swing: out-of-lane co-dir mover with a body in-lane (README).
         if (ctx.lane != Lane.EGO
                 and ctx.co_directional
                 and target_moving

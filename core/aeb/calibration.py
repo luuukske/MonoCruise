@@ -217,6 +217,7 @@ class AEBCalibration:
     extrap_veto_enabled: bool = True
     turn_veto_min_kappa: float = 0.012
     turn_veto_min_ttc_s: float = 1.2
+    # 6 m/s closing must stay unvetoed (test_codir_veto_is_a_band_around_matched_speed).
     codir_adjacent_veto_axial_ms: float = 2.0
     codir_adjacent_veto_miss_m: float = 2.0
     # Range past which an unseen bend moves a non-co-directional target by more
@@ -241,6 +242,8 @@ class AEBCalibration:
     follow_threat_min_decel_ms2: float = 0.8
     follow_threat_min_closing_ms: float = 0.5
     follow_threat_min_lat_converge_ms: float = 0.3
+    # Sweep-past on a bend collapses d_abs at 15-25 m/s (8e213c9e); a cut-in stays ~2-7.
+    follow_threat_max_lat_converge_ms: float = 10.0
     follow_threat_hold_s: float = 2.0
     follow_threat_max_range_m: float = 80.0
 

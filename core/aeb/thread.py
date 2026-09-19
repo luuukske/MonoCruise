@@ -986,8 +986,12 @@ class AEBThread(BaseThread):
             if hold is not None and hold > now_mono:
                 in_ego = classify(d_abs, cal) == Lane.EGO
                 lat_converge = -_ls_slope(trk, 3)
-                if (in_ego
-                        or lat_converge >= cal.follow_threat_min_lat_converge_ms):
+                cut_in = (
+                    cal.follow_threat_min_lat_converge_ms
+                    <= lat_converge
+                    <= cal.follow_threat_max_lat_converge_ms
+                )
+                if in_ego or cut_in:
                     active.add(v.id)
         self._follow_threat_ids = active
 

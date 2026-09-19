@@ -52,3 +52,19 @@ def classify(d_abs: float, cal: AEBCalibration) -> Lane:
         return Lane.OPPOSITE_OR_OUTER
     return Lane.OFF_ROAD
 
+
+def in_lane_closing(
+    dx: float, dz: float, ego_fwd_x: float, ego_fwd_z: float,
+    ego_speed: float, v_travel_speed: float, fwd_dot: float,
+    lane_half_width: float, min_closing: float = 1.0,
+) -> bool:
+    """Ahead, |lat| inside the lane band, and closing. Straight frame, not arc d_abs."""
+    axial = dx * ego_fwd_x + dz * ego_fwd_z
+    if axial <= 0.0:
+        return False
+    lat = abs(-dx * ego_fwd_z + dz * ego_fwd_x)
+    if lat > lane_half_width:
+        return False
+    closing = ego_speed - v_travel_speed * max(fwd_dot, 0.0)
+    return closing > min_closing
+

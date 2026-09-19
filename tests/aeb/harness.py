@@ -160,6 +160,7 @@ def make_vehicle(
 def evaluate_frame(
     frame: Frame,
     calibration: AEBCalibration = CAL_DEFAULT,
+    latched_threat_ids: set | None = None,
 ) -> EvalResult:
     """Run AEB filters on one frame (no radar thread). Returns EvalResult."""
     ego = frame.ego
@@ -299,6 +300,7 @@ def evaluate_frame(
             precomputed_cross_arcs=precomputed_cross_arcs,
             cross_padding=cross_padding,
             off_surface_ids=off_surface_ids,
+            latched_threat_ids=latched_threat_ids or set(),
         )
 
         suppression_reasons[v.id] = []

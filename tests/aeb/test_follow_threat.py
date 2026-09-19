@@ -65,6 +65,34 @@ def test_out_of_lane_lead_not_flagged():
     assert 7 not in flags
 
 
+def test_adjacent_cut_in_is_flagged():
+    """Braking cut-in from the next lane (c3c7a529): lat-converge keeps the hold."""
+    frames = []
+    for i in range(30):
+        now = 100.0 + i * DT
+        dist = 40.0 - 6.0 * i * DT
+        speed = max(0.0, 14.0 - 3.0 * i * DT)
+        lat = 4.5 - 2.5 * i * DT
+        v = make_vehicle(7, lat, -dist, 0.0, speed)
+        frames.append((now, [v]))
+    flags = _drive(_tracker(), frames)
+    assert 7 in flags
+
+
+def test_sweep_past_lat_converge_is_not_flagged():
+    """d_abs collapsing faster than the cut-in cap stays unflagged (8e213c9e)."""
+    frames = []
+    for i in range(30):
+        now = 100.0 + i * DT
+        dist = 40.0 - 6.0 * i * DT
+        speed = max(0.0, 14.0 - 3.0 * i * DT)
+        lat = 20.0 - 12.0 * i * DT
+        v = make_vehicle(7, lat, -dist, 0.0, speed)
+        frames.append((now, [v]))
+    flags = _drive(_tracker(), frames)
+    assert 7 not in flags
+
+
 def test_oncoming_not_flagged():
     frames = []
     for i in range(30):

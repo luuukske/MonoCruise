@@ -492,6 +492,15 @@ straight-line path.
   direction, and `|dist · sin(road_bend / 2) − |lat_signed||` must fall within
   `corner_entry_lateral_tol`. Catches MP stopped queues whose lead vehicle
   projects to ego's straight axis but whose pose only makes sense on a curve.
+- Latched ids skip **Mode B only** (`lane == EGO`). Mode A's out-of-lane queue
+  must stay suppressed even if a graze latched the id.
+  Mode B's `implied_kappa = road_bend / dist` grows as range falls, so a few
+  degrees of yaw error that was legal at 40 m fires at 17 m while AEB is
+  already braking. Do not add an in-lane bypass here: Mode B *is* the in-lane
+  case (`fp_mp_stationary_corner_entry`). `CornerEntryStationaryFilterMirrored`
+  is Mode A and has no **latch** seat. Follow-threat ids do pass: a stopped
+  in-path cut-in can sit in `OPPOSITE_OR_OUTER` while occupying the corridor
+  (clip `c3c7a529`, d_abs ~4 m at bite).
 
 ### `EgoEvasionFilter`
 
@@ -499,23 +508,24 @@ After all previous stages pass, checks if ego could steer around the target
 within `evasion_g=0.08 g`. Uses `margin=0.0` for evasion arc checks (physical
 body clearance, not padded corridor).
 
-**`ctx.lane == Lane.EGO` never bypasses this stage.** Lane-EGO classification
-is not evidence of danger: stationary shoulder vehicles and passing traffic on
-wide or curved roads land in the EGO bucket routinely, and a target a 0.08 g
-steer clears is not a threat whatever bucket it sits in. Geometry decides.
-The three remaining bypasses are narrow:
+**`ctx.lane == Lane.EGO` by itself never bypasses this stage.** Lane-EGO
+classification is not evidence of danger: stationary shoulder vehicles and
+passing traffic on wide or curved roads land in the EGO bucket routinely, and
+a target a 0.08 g steer clears is not a threat whatever bucket it sits in.
+The in-lane closer bypass below uses the straight body frame (`|lat|`, axial,
+closing), not the lane bucket, because a parked truck's arc origin inflates
+`d_abs` into `OPPOSITE_OR_OUTER` while the body is still dead ahead.
 
 | Bypass | Condition | Why |
 |--------|-----------|-----|
-| Head-on | `head_on` **and** target moving | Oncoming traffic belongs to `OppositeLaneFilter`, which runs its own evasion arcs at `evasion_g_oncoming`. A *stationary* target facing ego is a parked obstacle, not oncoming, so it runs the check. |
+| Latched threat | `v.id in latched_threat_ids` | Mid-brake hold. Dropping the vehicle AEB is already braking for empties `colliding_ids` and collapses demand. Same seat as `OutOfLaneParallelFilter`. |
+| In-lane closer | ahead, straight `\|lat\| <= lane_half_width`, closing `> aeb_min_closing_ms` (1.0), and co-directional or stationary | Pre-brake rescue for a lead in the lane band. Weak closing stays on the 0.08 g check. Shoulder FPs sit outside the band (`fp_parked_shoulder` x=2.2). |
+| Head-on | `head_on` **and** target moving | Oncoming traffic belongs to `OppositeLaneFilter`, which runs its own evasion arcs at `evasion_g_oncoming`. A *stationary* target facing ego is a parked obstacle, not oncoming, so it runs the check unless the in-lane closer bypass already took it. |
 | Trailer swing | out-of-lane co-directional mover with a body inside `lane_half_width` | Genuine rear-end course; crash clip 434f0401 must never be evasion-suppressed. This is the one place the trailer-in-lane rescue is deliberately *stronger* than `Lane.EGO`. |
 | Follow-threat | `v.id in follow_threat_ids` **and** `ref_kmh_for_filter <= tmp_filter_split_kmh` | Inside the low-speed TMP band `TmpRelSpeedFilter` drops targets unless relative speed exceeds `tmp_filter_rel_below_kmh`, which discards real low-speed dangers; the behavioral latch is the fallback there. Above the split the latch is ACC-shaped lead tracking, which does not establish danger, so it no longer shields a target. |
 
-Corpus note: making `Lane.EGO` run the check costs clip `55848211` (fn, sev 4)
-a TP → LATE and ~26 cost on the labelled corpus as of this change. Accepted
-deliberately: the FP class it targets (shoulder and passing vehicles bucketed
-as `Lane.EGO`) is not yet labelled, so the corpus cannot currently price the
-upside. Re-check this trade once those clips are in.
+Do not change the OR-of-sides rule (suppress if *either* 0.08 g arc misses)
+into AND: that re-opens the shoulder FP class the 0.08 g filter exists for.
 
 ---
 
@@ -1097,7 +1107,8 @@ exemptions: the trailer-in-lane rescue must survive both (clip 434f0401).
   `[0, codir_adjacent_veto_axial_ms)` (2.0 m/s) **and** the measured
   `d_miss >= codir_adjacent_veto_miss_m` (2.0 m). Braking removes at most the
   axial component, so at under 7 km/h of axial closure any predicted contact is
-  lateral and brakes do not steer. The lower bound of the band matters: a
+  lateral and brakes do not steer. Raising this to 4.0 silenced `bbed6ec4` but
+  turned `5366cb63` TP into FN and `cf0b2767` TP into LATE; reverted. The lower bound of the band matters: a
   *faster* target is an overtaker, which `braking_worsens` already owns and
   which the corpus labels as a genuine threat when it cuts in. The miss term
   matters too: a neighbour whose measured track is converging on ego is a real
@@ -1238,7 +1249,7 @@ evidence this system does not have; they are the road model's to fix.
 ### Latched-threat hold
 
 `AEBThread._latched_threat_ids: set[int]` keeps an engaged target attached
-to the pipeline across frames so two effects can hold:
+to the pipeline across frames so three effects can hold:
 
 1. **TMP rel-speed pre-filter bypass**: `TmpRelSpeedFilter` (and the
    matching precompute prefilter in `thread.py::loop`) skip the rel-speed
@@ -1246,7 +1257,15 @@ to the pipeline across frames so two effects can hold:
    convoy partner's speed under braking drops `rel_kmh` below the 15 / 40
    km/h threshold, the target leaves the pipeline, `colliding_ids` empties
    and AEB disarms while the gap may still be unsafe.
-2. **Distance-based engagement hold + decel floor**: for every latched id
+2. **Spatial drop-filter bypass**: `OutOfLaneParallelFilter` and
+   `EgoEvasionFilter` skip a latched id; `CornerEntryStationaryFilter` skips
+   only a latched **Mode B** (`Lane.EGO`) id. The 0.08 g evasion pair and
+   Mode B `implied_kappa` are pose-jitter sensitive at short range: they fire
+   on the vehicle AEB is already braking for, empty `colliding_ids`, and leave
+   only the distance hold (~0.7 of max). Scope release still drops a latched
+   id that has left the forward lane band, so a cleared shoulder does not
+   keep the brake.
+3. **Distance-based engagement hold + decel floor**: for every latched id
    still in `vehicle_collision_data`, compute
    `headway = max(dist − stop_buffer, 0) / max(ego_speed, 0.5)`. Release
    the id when it leaves `vehicles_eff`, drops out of `vehicle_collision_data`
@@ -1345,12 +1364,16 @@ true (newly latched ids get their scope stamp at promotion). Cleared on
 Behavioral latch for a genuine slowing lead (co-directional, sustained closing
 and own deceleration over `follow_threat_window_s`, then `follow_threat_hold_s`).
 While the hold is active, the target must be in `Lane.EGO` **or** arc-projected
-`d_abs` must be shrinking (lateral converge): a braking cut-in often decels
-before its centre enters ego lane.
+`d_abs` must be shrinking at a cut-in rate (between
+`follow_threat_min_lat_converge_ms` and `follow_threat_max_lat_converge_ms`).
+A braking cut-in often decels before its centre enters ego lane. A parked body
+ego sweeps past on a bend collapses `d_abs` at 15-25 m/s and must not inherit
+the flag (`8e213c9e`).
 
-Flagged ids bypass `TmpRelSpeedFilter`, are exempt from
+   Flagged ids bypass `TmpRelSpeedFilter`, are exempt from
 `CoDirectionalDivergeFilter`, are exempt from `EgoEvasionFilter` **only while
-`ref_kmh_for_filter <= tmp_filter_split_kmh`**, and get follow-track decel
+`ref_kmh_for_filter <= tmp_filter_split_kmh`** (the latched-id and in-lane
+closer bypasses are separate and speed-agnostic), and get follow-track decel
 on collision arcs so a braking lead does not clip through on constant-speed
 projection. Implemented in `AEBThread._update_follow_threats`.
 
@@ -1367,6 +1390,7 @@ low-speed dangers.
 | `follow_threat_window_s` | 0.6 s | Trailing kinematic window |
 | `follow_threat_hold_s` | 2.0 s | Hold after kinematic qualification |
 | `follow_threat_min_decel_ms2` | 0.8 m/s² | Min own-decel slope to qualify |
+| `follow_threat_max_lat_converge_ms` | 10.0 m/s | Cap on the out-of-lane lat-converge seat; sweep-past is faster |
 
 ### Closed-loop coupling
 
