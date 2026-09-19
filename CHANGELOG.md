@@ -17,6 +17,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **Warning when Braking intensity is below 100%**: if emergency braking is on, you get a reminder once an hour that a low slider cuts how hard it can stop.
 
 ### Fixed
+- **Emergency braking stopped too close to crossing traffic**: a vehicle coming across your path was treated as only as large as its body, so a small change in its speed or direction could still hit you. It now keeps extra room around those vehicles, including when it has to stop.
 - **ACC kept braking after the car ahead stopped braking**: after a hard stop in front of you, ACC let go of the brakes so slowly that you ended up far slower than the traffic ahead and had to press the gas yourself. It now eases off as soon as the car ahead stops slowing down.
 - **ACC lost the car ahead on winding roads**: in bends it was slow to lock on to the vehicle in your lane, and one bad reading could throw the predicted road far off to the side, leaving a stretch where ACC saw nobody. It now follows your lane through corners and picks up the car ahead much sooner.
 - **Reversing traffic on TruckersMP was barely tracked**: a truck backing up, or one knocked backwards in a crash, was mistaken for a lagging connection, so the radar froze it most of the time and read it at about half its real speed. Short connection hiccups are still filtered out, but a vehicle that keeps moving backwards is now tracked as it moves.

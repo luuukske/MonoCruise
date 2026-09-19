@@ -940,6 +940,19 @@ reproduces what the old code computed by hand:
 | Crosser | ends when it vacates | demand is what it takes to be behind the conflict *while it is occupied*, which is the question that was never asked |
 | Stopped / turning-in target | never ends inside the window | last sample binds: stop-short, unchanged |
 
+**Perpendicular body buffer.** A crosser's heading and speed are not reliable,
+so the physical capsule is not the whole threat. `_apply_cross_zone` expands
+the target by `|sin(heading diff)|`: extra length of
+`cross_zone_base + cross_zone_speed * v` along travel (1 m plus 0.3 s at
+90 deg) and a radial halo of `cross_zone_radial` (0.7 m). Parallel and
+head-on headings get zero. Collision and the occupancy profile both read the
+inflated body, so a required stop also stops short of the halo. Lane
+classification stays on the physical capsule. A turning body that only the
+halo touches is a completing-turn graze (`TurningCrossTrafficFilter`); a
+straight crosser the halo is the first to see stays a threat. Do not call
+`ArcPath.build()` when applying the halo: `build()` re-derives `fwd` from yaw
+and drops reverse travel. Do not restore the old ghost-arc comb.
+
 `test_clearance.py` pins the first three as equivalences. The braking-lead case
 is the one deliberate correction: `max(r_move, r_stop)` sampled two points of a
 continuous curve and could under-read a hard-braking lead by about 30%.

@@ -98,9 +98,10 @@ class AEBCalibration:
     # TmpCrossTrafficFilter straight-snapshot center hit threshold (README TmpCrossTrafficFilter).
     tmp_cross_center_hit_dist: float = 2.5
 
-    # Retired ghost-arc padding fields; kept for name compatibility only.
-    cross_zone_base: float = 2.0
+    # Perpendicular halo: |sin(yaw diff)| * (base + speed * this). Radial is separate.
+    cross_zone_base: float = 1.0
     cross_zone_speed: float = 0.3
+    cross_zone_radial: float = 0.7
 
     # OutOfLaneParallelFilter horizon lane scan count; see README OutOfLaneParallelFilter.
     out_of_lane_scan_samples: int = 10
@@ -137,7 +138,7 @@ class AEBCalibration:
     # once max_evasion recovers cca/e09.
     tmp_cross_in_corridor_pass: bool = False
 
-    # Fix A: near-head-on ghost-arc reduction
+    # Fix A: near-head-on cross-zone reduction
     near_head_on_cross_scale: float = 0.3
     near_head_on_lateral_min: float = 3.0
 

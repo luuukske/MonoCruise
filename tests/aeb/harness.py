@@ -334,7 +334,9 @@ def evaluate_frame(
 
             for arc_idx, base_target_arc in enumerate(all_target_arcs):
                 if fix_a_active or precomputed_cross_arcs is None:
-                    cross_arcs = _apply_cross_zone(base_target_arc, effective_cross_padding)
+                    cross_arcs = _apply_cross_zone(
+                        base_target_arc, effective_cross_padding, cal,
+                    )
                 else:
                     cross_arcs = precomputed_cross_arcs[arc_idx]
 

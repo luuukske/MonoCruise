@@ -18,6 +18,7 @@ from core.aeb.clearance import (
     clearance_required, min_decel_to_clear, occupancy_profile, required_at,
     sample_times,
 )
+from core.aeb.filters import _apply_cross_zone, _cross_zone_padding
 from core.radar.traffic import build_arc, capsule_extents
 
 _EGO_OFFSET = (CAL.arc_start_pctg - 0.5) * (2.0 * CAL.ego_half_length)
@@ -235,3 +236,69 @@ def test_occupancy_of_a_crosser_is_a_bounded_window():
     assert clears
     assert 0 < len(profile) < len(times)
     assert profile[-1][0] < times[-1]
+
+
+def test_parallel_heading_gets_no_cross_zone():
+    assert _cross_zone_padding(0.0, 0.0, 20.0, CAL) == 0.0
+    assert _cross_zone_padding(0.0, math.pi, 20.0, CAL) == pytest.approx(0.0)
+
+
+def test_perpendicular_heading_gets_the_full_halo():
+    pad = _cross_zone_padding(0.0, math.pi / 2.0, 20.0, CAL)
+    assert pad == pytest.approx(CAL.cross_zone_base + CAL.cross_zone_speed * 20.0)
+
+
+def test_zero_padding_returns_the_same_arc():
+    body = _crosser(-18.0, -45.0, 20.0)
+    assert _apply_cross_zone(body, 0.0, CAL)[0] is body
+
+
+def test_a_moving_crosser_gains_length_beyond_the_radial_halo():
+    body = _crosser(-18.0, -45.0, 20.0)
+    pad = _cross_zone_padding(0.0, math.radians(270.0), 20.0, CAL)
+    out = _apply_cross_zone(body, pad, CAL)[0]
+    assert out.half_width == pytest.approx(body.half_width + CAL.cross_zone_radial)
+    assert out.fwd_len == pytest.approx(body.fwd_len + pad)
+    assert out.back_len == pytest.approx(body.back_len + pad)
+    assert (out.fwd_len - body.fwd_len) > (out.half_width - body.half_width)
+
+
+def test_crosser_occupancy_covers_the_halo_before_and_after():
+    """The inflated body occupies earlier and leaves later than the physical one."""
+    ego = _ego(80.0 / 3.6)
+    times = sample_times(3.0, CAL.clearance_horizon_s,
+                         CAL.clearance_samples, CAL.clearance_far_samples)
+    body = _crosser(-18.0, -45.0, 50.0 / 3.6)
+    pad = _cross_zone_padding(0.0, math.radians(270.0), 50.0 / 3.6, CAL)
+    bare, _ = occupancy_profile(ego, [body], times, _NO_MARGIN)
+    halo, _ = occupancy_profile(
+        ego, _apply_cross_zone(body, pad, CAL), times, _NO_MARGIN,
+    )
+    assert halo[0][0] < bare[0][0]
+    assert halo[-1][0] > bare[-1][0]
+
+
+def test_a_stopped_crosser_stop_pays_the_radial_halo():
+    """A stop in front of a perpendicular body must clear the halo, not the skin."""
+    v0 = 20.0
+    body = _crosser(0.0, -30.0, 0.0)
+    bare = _solve(_ego(v0), [body], v0, lag_s=0.30)
+    halo = _solve(
+        _ego(v0), _apply_cross_zone(body, CAL.cross_zone_base, CAL), v0, lag_s=0.30,
+    )
+    assert bare is not None and halo is not None
+    assert halo.required_ms2 > bare.required_ms2
+    assert halo.s_bind_m < bare.s_bind_m
+
+
+def test_cross_zone_keeps_reverse_travel_direction():
+    """Rebuilding the arc from yaw would send a reversing body the wrong way."""
+    body = build_arc(
+        0.0, -20.0, 0.0, -5.0, 0.0, 0.9, 3.0,
+        fwd_len=2.5, back_len=2.5,
+    )
+    assert body.speed == pytest.approx(5.0)
+    out = _apply_cross_zone(body, 2.0, CAL)[0]
+    assert out.fwd_x == pytest.approx(body.fwd_x)
+    assert out.fwd_z == pytest.approx(body.fwd_z)
+    assert out.speed == pytest.approx(body.speed)

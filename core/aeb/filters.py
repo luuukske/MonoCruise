@@ -14,6 +14,7 @@ from core.radar.traffic import (
 )
 from core.radar.ego_path import ego_curvature_from_history
 from core.aeb.calibration import AEBCalibration
+from core.aeb.cross_zone import _apply_cross_zone, _cross_zone_padding
 from core.aeb.lane_frame import Lane, project_to_ego_arc, classify, in_lane_closing
 
 
@@ -137,19 +138,6 @@ def travel_sign(speed: float, cal: AEBCalibration) -> float:
 
 
 # ---- helpers moved from thread.py ----
-
-def _cross_zone_padding(ego_yaw_rad: float, v_yaw_rad: float, v_speed_ms: float,
-                        cal: AEBCalibration) -> float:
-    cross_factor = abs(math.sin(ego_yaw_rad - v_yaw_rad))
-    return cross_factor * (cal.cross_zone_base + cal.cross_zone_speed * v_speed_ms)
-
-
-def _apply_cross_zone(arc: ArcPath, padding: float) -> list[ArcPath]:
-    """Return [arc]. Legacy ghost-arc comb subsumed by ArcPath capsule body
-    extents (see traffic.py::_sampled_collision). Kept as a pass-through so the
-    padding plumbing retires without editing every call site."""
-    return [arc]
-
 
 def _earliest_hit(
     ego_arc: ArcPath,
@@ -338,7 +326,7 @@ def _build_vehicle_collision_data(
     all_target_arcs = [veh_arc_coll] + trailer_arcs_coll
     cross_padding = _cross_zone_padding(ego_yaw_rad, v_yaw_rad, abs_v_speed, cal)
     cross_arcs_list = [
-        _apply_cross_zone(bt, cross_padding) for bt in all_target_arcs
+        _apply_cross_zone(bt, cross_padding, cal) for bt in all_target_arcs
     ]
     return (all_target_arcs, cross_padding, cross_arcs_list,
             v_yaw_rad, abs_v_speed, veh_fwd_x, veh_fwd_z, v_curvature)
@@ -669,11 +657,11 @@ class OppositeLaneFilter:
             # Determine effective cross padding (Fix A equivalent)
             if (ctx.near_head_on and own_lane):
                 effective_padding = ctx.cross_padding * cal.near_head_on_cross_scale
-                cross_arcs = _apply_cross_zone(base_target_arc, effective_padding)
+                cross_arcs = _apply_cross_zone(base_target_arc, effective_padding, cal)
             else:
                 cross_arcs = (ctx.precomputed_cross_arcs[arc_idx]
                               if ctx.precomputed_cross_arcs else
-                              _apply_cross_zone(base_target_arc, ctx.cross_padding))
+                              _apply_cross_zone(base_target_arc, ctx.cross_padding, cal))
 
             unbraked_hit = _earliest_hit(
                 ctx.ego_arc, cross_arcs, cal.corridor_margin, cal.collision_samples,
@@ -752,7 +740,7 @@ class OppositeLaneFilterMirrored:
         for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
             cross_arcs = (ctx.precomputed_cross_arcs[arc_idx]
                           if ctx.precomputed_cross_arcs else
-                          _apply_cross_zone(base_target_arc, ctx.cross_padding))
+                          _apply_cross_zone(base_target_arc, ctx.cross_padding, cal))
             unbraked_hit = _earliest_hit(
                 ctx.ego_arc, cross_arcs, cal.corridor_margin, cal.collision_samples,
                 ctx.lateral_gap,
@@ -812,7 +800,7 @@ class CoDirectionalDivergeFilter:
                 continue
             cross_arcs = (ctx.precomputed_cross_arcs[arc_idx]
                           if ctx.precomputed_cross_arcs else
-                          _apply_cross_zone(base_target_arc, ctx.cross_padding))
+                          _apply_cross_zone(base_target_arc, ctx.cross_padding, cal))
             unbraked_hit = _earliest_hit(
                 ctx.ego_arc, cross_arcs, cal.corridor_margin, cal.collision_samples,
                 ctx.lateral_gap,
@@ -855,7 +843,7 @@ class TurningCrossTrafficFilter:
                 continue
             cross_arcs = (ctx.precomputed_cross_arcs[arc_idx]
                           if ctx.precomputed_cross_arcs else
-                          _apply_cross_zone(base_target_arc, ctx.cross_padding))
+                          _apply_cross_zone(base_target_arc, ctx.cross_padding, cal))
             unbraked_hit = _earliest_hit(
                 ctx.ego_arc, cross_arcs, cal.corridor_margin, cal.collision_samples,
                 ctx.lateral_gap,
@@ -866,6 +854,10 @@ class TurningCrossTrafficFilter:
             if g_veh_k and not _is_approaching(ctx.ego_arc, base_target_arc, unbraked_hit[0],
                                                dip_samples=cal.diverge_dip_samples,
                                                dip_active=ctx.lane == Lane.EGO):
+                return _suppress("TurningCrossTrafficFilter")
+            if g_veh_k and _earliest_hit(
+                    ctx.ego_arc, [base_target_arc], cal.corridor_margin,
+                    cal.collision_samples, ctx.lateral_gap) is None:
                 return _suppress("TurningCrossTrafficFilter")
         return _PASS
 
@@ -907,7 +899,7 @@ class TmpCrossTrafficFilter:
         for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
             cross_arcs = (ctx.precomputed_cross_arcs[arc_idx]
                           if ctx.precomputed_cross_arcs else
-                          _apply_cross_zone(base_target_arc, ctx.cross_padding))
+                          _apply_cross_zone(base_target_arc, ctx.cross_padding, cal))
             ghost_hit = _earliest_hit(
                 ctx.ego_arc, cross_arcs, cal.corridor_margin, cal.collision_samples,
                 ctx.lateral_gap,
@@ -1018,7 +1010,7 @@ class SweepPassFilter:
         for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
             cross_arcs = (ctx.precomputed_cross_arcs[arc_idx]
                           if ctx.precomputed_cross_arcs else
-                          _apply_cross_zone(base_target_arc, ctx.cross_padding))
+                          _apply_cross_zone(base_target_arc, ctx.cross_padding, cal))
             unbraked_hit = _earliest_hit(
                 ctx.ego_arc, cross_arcs, cal.corridor_margin, cal.collision_samples,
                 ctx.lateral_gap,
@@ -1158,11 +1150,11 @@ class EgoEvasionFilter:
             # Use Fix A effective padding for near-head-on own-lane vehicles
             if ctx.near_head_on and ctx.lane in (Lane.OPPOSITE_OR_OUTER, Lane.OFF_ROAD):
                 effective_padding = ctx.cross_padding * cal.near_head_on_cross_scale
-                cross_arcs = _apply_cross_zone(base_target_arc, effective_padding)
+                cross_arcs = _apply_cross_zone(base_target_arc, effective_padding, cal)
             else:
                 cross_arcs = (ctx.precomputed_cross_arcs[arc_idx]
                               if ctx.precomputed_cross_arcs else
-                              _apply_cross_zone(base_target_arc, ctx.cross_padding))
+                              _apply_cross_zone(base_target_arc, ctx.cross_padding, cal))
 
             unbraked_hit = _earliest_hit(
                 ctx.ego_arc, cross_arcs, cal.corridor_margin, cal.collision_samples,

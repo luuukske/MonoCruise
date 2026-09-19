@@ -323,22 +323,6 @@ class AEBData(ThreadData):
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
-def _cross_zone_padding(
-    ego_yaw_rad: float,
-    v_yaw_rad: float,
-    v_speed_ms: float,
-    cal: AEBCalibration = _CAL_DEFAULT,
-) -> float:
-    """Perpendicular-target ghost-arc padding (peaks at 90° yaw diff)."""
-    cross_factor = abs(math.sin(ego_yaw_rad - v_yaw_rad))
-    return cross_factor * (cal.cross_zone_base + cal.cross_zone_speed * v_speed_ms)
-
-
-def _apply_cross_zone(arc: ArcPath, padding: float) -> list[ArcPath]:
-    """Ghost-arc comb retired; capsule extents cover body (pass-through for call sites)."""
-    return [arc]
-
-
 def _earliest_hit(
     ego_arc: ArcPath,
     check_arcs: list[ArcPath],
@@ -680,7 +664,7 @@ def _build_vehicle_collision_data(
     all_target_arcs = [veh_arc_coll] + trailer_arcs_coll
     cross_padding = _cross_zone_padding(ego_yaw_rad, v_yaw_rad, abs_v_speed, cal)
     cross_arcs_list = [
-        _apply_cross_zone(bt, cross_padding) for bt in all_target_arcs
+        _apply_cross_zone(bt, cross_padding, cal) for bt in all_target_arcs
     ]
     return (all_target_arcs, cross_padding, cross_arcs_list,
             v_yaw_rad, abs_v_speed, veh_fwd_x, veh_fwd_z, v_curvature)
@@ -1675,12 +1659,20 @@ class AEBThread(BaseThread):
                 else:
                     effective_cross_padding = cross_padding
 
-                found_hit = False
+                cross_groups: list[list[ArcPath]] = []
                 for arc_idx, base_target_arc in enumerate(all_target_arcs):
                     if fix_a_active or precomputed_cross_arcs is None:
-                        cross_arcs = _apply_cross_zone(base_target_arc, effective_cross_padding)
+                        group = _apply_cross_zone(
+                            base_target_arc, effective_cross_padding, cal,
+                        )
                     else:
-                        cross_arcs = precomputed_cross_arcs[arc_idx]
+                        group = precomputed_cross_arcs[arc_idx]
+                    cross_groups.append(group)
+                padded_target_arcs = [a for g in cross_groups for a in g]
+
+                found_hit = False
+                for arc_idx, base_target_arc in enumerate(all_target_arcs):
+                    cross_arcs = cross_groups[arc_idx]
 
                     unbraked_hit = _earliest_hit(
                         ego_arc, cross_arcs, cal.corridor_margin, cal.collision_samples,
@@ -1815,7 +1807,7 @@ class AEBThread(BaseThread):
                             cres = clearance_memo[v.id]
                         else:
                             cres = clearance_required(
-                                ego_arc, all_target_arcs, ego_speed, cal,
+                                ego_arc, padded_target_arcs, ego_speed, cal,
                                 lag_s=(0.0 if engaged_pad_m is not None
                                        else load_response_s),
                                 pad_m=(engaged_pad_m or 0.0),
