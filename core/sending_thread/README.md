@@ -8,7 +8,9 @@
 Opens SCS controls, runs `AccelToPedals`, hold FSM, pedal capacity learning, optional
 visualization bar, hazard toggling, AEB decel assist, auto-neutral, creep compensation,
 and commander merge (CC/ACC/limiter/AEB/user). Publishes `aforward` / `abackward` on
-`SendingThreadData`.
+`SendingThreadData` as the **logical** pedals (what the mapper and viz use). The value
+written to `SCSController.abackward` is remapped by live `g_brake_intensity` as the
+last step before send. See **Brake intensity** below.
 
 ## AccelToPedals (`accel_to_pedals.py`)
 
@@ -37,7 +39,8 @@ Always-on brake decel and gas gain learning (replaces legacy brake efficiency tr
 Candidate inverts the fitted brake curve; pedal³ weighting; underperformance drops estimate
 2× faster than overperformance rises. Road load canceled before sampling. Fast EMA during
 deep settled AEB braking. Candidates reject above `_BRAKE_CANDIDATE_MAX_FRACTION` (1.35) of
-the load baseline.
+the load baseline. The pedal is the value written to the game. Measured decel is scaled
+by `1.1 / I` so a slider change is not learned as truck weakness.
 
 **Gas**: `update_accel` every tick that the pedal is above zero, learning the zero-pedal
 offset, the shape-function anchor and the per-gear ratio. Same acceptance discipline as the
@@ -318,6 +321,33 @@ It must not call `raise_()` from its animation timer. `WindowStaysOnTopHint` alr
 keeps it above other applications; a per-frame raise fights `cc_panel` wherever they
 overlap and can freeze Qt on Windows when the main window is minimised. The bar is
 `WA_ShowWithoutActivating` and `WindowDoesNotAcceptFocus` for the same reason.
+
+## Brake intensity (`core/scs_profile/intensity.py`)
+
+In-game **Braking intensity** (`g_brake_intensity`) is a force gain on the
+brake axis. Mapper, AEB and ACC were tuned at **I = 1.1**. The previous send
+path hard-coded `b ** 0.91` on the user pedal only, a [0, 1] fudge for sitting
+at I=1.0 after that tune.
+
+The live cvar is a multiply (1/3, 1, 3). The remap inverts it, last step before
+`SCSController.abackward`:
+
+`sent = min(1, logical * 1.1 / I)`
+
+Confirmed in-game: higher `I` is stronger braking, and this linear invert is
+the mapping. Do not restore a pedal power or treat UI 50/100/150 as the gain
+(150% is `I = 3`). A power cannot invert a multiply (`1 ** x` stays 1). At
+`I = 1.1` this is identity. At `I = 1.0` it is `* 1.1`. Unreadable files
+behave as `I = 1.0`.
+
+`SendingThreadData.abackward` stays logical so the viz bar does not show the
+remapped axis. `recent_brake_outputs` and the AEB observer use the sent value,
+because `gameBrake` and the plant see that. CC's game-brake disengage compare
+reads that ring buffer.
+
+Capacity learning takes the sent pedal and multiplies load-corrected decel by
+`1.1 / I` before the ratio, so a slider change is not a `brake_scale`
+change. The settle gates still look at physical decel.
 
 ## Main pedal thread
 

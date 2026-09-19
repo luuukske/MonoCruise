@@ -218,6 +218,31 @@ def test_over_reading_the_rig_is_refused(clock):
     assert pc._BRAKE_SCALE_MAX == 1.0, "raising this needs the mass exponent resolved"
 
 
+def test_brake_intensity_does_not_poison_scale(clock):
+    """Same truck at two slider values must learn the same brake_scale."""
+    from core.scs_profile.intensity import TUNE_BRAKE_INTENSITY, apply_brake_intensity
+
+    logical = 0.75
+    learned = []
+    for intensity in (1.0 / 3.0, 1.0, 3.0):
+        t = _fresh(scale=0.85)
+        sent = apply_brake_intensity(logical, intensity)
+        physical = (
+            brake_curve_fraction(sent) * BASE * (intensity / TUNE_BRAKE_INTENSITY)
+        )
+        for _ in range(250):
+            clock.t += DT
+            t.update_brake(
+                sent, physical, SPEED, 0.0, BASE, road_load_ms2=0.0,
+                aeb_active=True,
+                brake_intensity=intensity,
+            )
+        learned.append(t.brake_scale)
+        assert t.brake_scale > 0.85, "intensity path accepted no samples"
+    assert learned[0] == pytest.approx(1.0, rel=0.03)
+    assert learned[1] == pytest.approx(learned[0], rel=0.03)
+
+
 def test_under_delivery_is_believed_all_the_way_down(clock):
     """The floor must stay low enough to represent a genuinely weak rig.
 

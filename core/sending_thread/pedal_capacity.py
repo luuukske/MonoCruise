@@ -8,6 +8,7 @@ import time
 from collections import deque
 from typing import Deque
 
+from core.scs_profile.intensity import learn_decel_scale
 from core.settings import Settings
 
 from .accel_to_pedals import brake_curve_fraction, weight_factor
@@ -273,6 +274,7 @@ class PedalCapacityTracker:
         baseline_ms2: float,
         road_load_ms2: float = 0.0,
         aeb_active: bool = False,
+        brake_intensity: float | None = None,
     ) -> None:
         """Feed one braking tick. See `core/sending_thread/README.md`."""
         # Re-resolve against this tick's rig: hooking a trailer must move the
@@ -343,6 +345,8 @@ class PedalCapacityTracker:
         mean_decel = sum(decel_values) / len(decel_values)
         if mean_decel < _MIN_DECEL_MS2:
             return
+        if brake_intensity is not None:
+            mean_decel *= learn_decel_scale(brake_intensity)
 
         # Window means on both sides: zero-mean dither and telemetry ripple
         mean_pedal = max(

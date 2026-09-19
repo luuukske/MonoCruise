@@ -18,6 +18,8 @@ from core.settings import Settings
 
 from core.aeb.calibration import DEFAULT as _AEB_CAL
 
+from core.scs_profile.intensity import BrakeIntensityCache, apply_brake_intensity
+
 from .accel_to_pedals import AccelToPedals, MapperSharedState, baseline_accel_ms2, baseline_brake_ms2
 from .hold_controller import (
     HoldController,
@@ -330,6 +332,7 @@ class SendingThread(BaseThread):
         # Hill-hold / stopping FSM. Reuses the mapper's brake inverse curve so
         self._hold = HoldController(self._accel_mapper.brake_pedal_from_decel)
         self._capacity_tracker = PedalCapacityTracker()
+        self._brake_intensity = BrakeIntensityCache()
         self._aeb_controller = AEBDecelController()
         self._key_listener = None
         self._spd_smooth: float | None = None
@@ -893,6 +896,7 @@ class SendingThread(BaseThread):
         tel_hazards = False
         speed_ms = 0.0
         park_brake = False
+        tel_game: str | None = None
 
         try:
             tel_thread = registry.get_thread("telemetry_thread")
@@ -903,6 +907,7 @@ class SendingThread(BaseThread):
         tel_paused = False
         if tel_thread is not None and tel_thread.is_alive():
             try:
+                raw_game = 0
                 with tel_thread.data._lock:
                     connected = tel_thread.data.is_connected
                     gear = tel_thread.data.gear_dashboard
@@ -910,6 +915,11 @@ class SendingThread(BaseThread):
                     speed_ms = tel_thread.data.speed
                     park_brake = bool(tel_thread.data.parkBrake)
                     tel_paused = bool(getattr(tel_thread.data, "paused", False))
+                    raw_game = int(getattr(tel_thread.data, "game", 0) or 0)
+                if raw_game == 1:
+                    tel_game = "ets2"
+                elif raw_game == 2:
+                    tel_game = "ats"
             except Exception as e:
                 logger.debug("telemetry read failed: %s", e)
 
@@ -1258,13 +1268,20 @@ class SendingThread(BaseThread):
         if tel_paused:
             # Game paused (menu/map): freeze last pedal outputs so the live
             a = self._pause_held_aforward
-            b = self._pause_held_abackward
+            logical_b = self._pause_held_abackward
+            sent_b = apply_brake_intensity(
+                logical_b, self._brake_intensity.get(tel_game)
+            )
             controller.aforward = a
-            controller.abackward = b
+            controller.abackward = sent_b
+            self._recent_brake_outputs.append(sent_b)
+            if len(self._recent_brake_outputs) > 3:
+                self._recent_brake_outputs = self._recent_brake_outputs[-3:]
             self._tick_bool_presses(controller)
             with self.data._lock:
                 self.data.aforward = a
-                self.data.abackward = b
+                self.data.abackward = logical_b
+                self.data.recent_brake_outputs = tuple(self._recent_brake_outputs)
                 self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
@@ -1341,7 +1358,6 @@ class SendingThread(BaseThread):
         except Exception:
             b = max(b, max(float(brakeval), 0.0))
 
-        b = b ** 0.91 # from going from 110% braking to 100% braking intensity
         a = float(complex(a).real)
         b = float(complex(b).real)
 
@@ -1500,17 +1516,23 @@ class SendingThread(BaseThread):
         ):
             b = 0.001
 
+        # Last step: invert live I so physical force matches the 1.1 tune.
+        # Viz stays logical.
+        intensity = self._brake_intensity.get(tel_game)
+        logical_b = b
+        sent_b = apply_brake_intensity(logical_b, intensity)
+
         controller.aforward = a
-        controller.abackward = b
+        controller.abackward = sent_b
         self._pause_held_aforward = a
-        self._pause_held_abackward = b
+        self._pause_held_abackward = logical_b
 
         # Close the observer loop on what the game actually received, not on the
         # controller's own request: hold, cushion and user brake all raise it.
-        self._aeb_controller.note_applied_pedal(b, now_ctrl)
+        self._aeb_controller.note_applied_pedal(sent_b, now_ctrl)
 
         # Push the actual brake value sent this tick into the ring buffer so
-        self._recent_brake_outputs.append(b)
+        self._recent_brake_outputs.append(sent_b)
         if len(self._recent_brake_outputs) > 3:
             self._recent_brake_outputs = self._recent_brake_outputs[-3:]
 
@@ -1526,7 +1548,7 @@ class SendingThread(BaseThread):
             mass_kg=mass_kg,
             has_trailer=has_t,
             aforward=a,
-            abackward=b,
+            abackward=sent_b,
             road_load_ms2=mapper_road_load_ms2,
             wheels_on_ground=wheels_on_ground,
             trailer_count=ego_trailer_count,
@@ -1534,13 +1556,14 @@ class SendingThread(BaseThread):
             aeb_active=_aeb_active,
         )
 
-        # Update pedal capacity estimates from actual pedal values sent to the game.
+        # Capacity from the pedal the game received, decel scaled to 110% intensity.
         _base_brake = baseline_brake_ms2(mass_kg, has_t, wheels_on_ground)
         self._capacity_tracker.update_brake(
-            max(float(b), 0.0), measured_decel_ms2, speed_ms, brake_grade_rad,
+            max(float(sent_b), 0.0), measured_decel_ms2, speed_ms, brake_grade_rad,
             _base_brake,
             road_load_ms2=mapper_road_load_ms2,
             aeb_active=_aeb_active,
+            brake_intensity=intensity,
         )
         if a > 0.01:
             # Creep subtracted so gear-1 samples learn the throttle-commanded
@@ -1553,7 +1576,7 @@ class SendingThread(BaseThread):
 
         with self.data._lock:
             self.data.aforward = a
-            self.data.abackward = b
+            self.data.abackward = logical_b
             # `stopped` retained for legacy consumers: True whenever the FSM is
             self.data.stopped = hold_out.active
             self.data.hold_active = hold_out.active

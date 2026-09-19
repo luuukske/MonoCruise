@@ -14,6 +14,7 @@ hygiene rules apply to every file in it.
 | `clip_export/` | Clean top-down showcase video of one clip for trailers and docs: auto-reframes on ego and the threat, removes 60 Hz tick jitter. Read `tools/clip_export/README.md` first. |
 | `aeb_agent/` | Headless clip review for an agent: text dossiers instead of watching a clip, scenario tags, mistag audit, and a validated propose/apply/revert path for labels. Read `tools/aeb_agent/README.md` first. |
 | `accel_envelope_probe.py` | What does the CC accel ceiling command at each speed, and how long is 0-50 / 0-90? Prints the per-profile table plus a capability-limited rig model (`--rig loaded`) so the light and loaded regimes can be compared. |
+| `read_scs_profile.py` | Transmission and braking intensity for the selected ETS2/ATS profile. Steam Cloud vs local, `game.log.txt` identity, live `shifterType` when the SDK is up. `--json` for agents. |
 | `plot_coast.py` | Coast-fit plots for the mapper. |
 | `release.py`, `tune_visualizer.py` | Release packaging and live tuning UI. |
 

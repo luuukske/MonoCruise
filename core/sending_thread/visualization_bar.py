@@ -143,7 +143,7 @@ class VisualizationBar(QWidget):
         em_stop = False
         AEB_warn = False
 
-        # SendingThread: provides aforward / abackward (pedal output to the game)
+        # SendingThread: aforward / abackward are logical pedals (pre intensity remap).
         try:
             sending_thread = registry.get_thread("sending_thread")
         except KeyError:
