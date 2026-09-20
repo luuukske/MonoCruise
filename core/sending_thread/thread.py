@@ -86,6 +86,24 @@ BOOL_PRESS_DURATION: float = 0.1
 HAZARD_PRESS_DURATION: float = 0.4
 HAZARD_VERIFY_DELAY: float = 0.1
 HAZARD_MAX_RETRIGGERS: int = 3
+# Same floors as the driver's slam / autodisable. Cruise mapper output is
+# visible to hazards as if the driver pressed those pedals.
+_HAZARD_HARD_BRAKE: float = 0.8
+_HAZARD_GAS_RESET: float = 0.60
+_HAZARD_BRAKE_CLEAR: float = 0.05
+
+
+def cruise_pedals_for_hazards(
+    user_gas: float,
+    user_brake: float,
+    mapper_gas: float,
+    mapper_brake: float,
+    cruise_active: bool,
+) -> tuple[float, float]:
+    """Cruise gas/brake look like the driver's pedals to automatic hazards."""
+    if not cruise_active:
+        return user_gas, user_brake
+    return max(user_gas, mapper_gas), max(user_brake, mapper_brake)
 
 # Closed-loop decel controller: feedforward via the inverse brake curve plus a
 # disturbance observer that nulls environment error (grade, capacity, curve bias).
@@ -1163,10 +1181,13 @@ class SendingThread(BaseThread):
                 with pedal_thread.data._lock:
                     gas_pct = pedal_thread.data.gasval
                     brake_pct = pedal_thread.data.brakeval
+                gas_pct, brake_pct = cruise_pedals_for_hazards(
+                    gas_pct, brake_pct, mapper_gas, mapper_brake, cruise_active,
+                )
                 if (
                     speed_kmh > 12.0
-                    and gas_pct >= 0.60
-                    and brake_pct < 0.05
+                    and gas_pct >= _HAZARD_GAS_RESET
+                    and brake_pct < _HAZARD_BRAKE_CLEAR
                     and not AEB_warn
                     and not self._hazard_user_override
                 ):
@@ -1177,7 +1198,11 @@ class SendingThread(BaseThread):
             except Exception as e:
                 logger.debug("autodisable_hazards read failed: %s", e)
 
-        should_force = not pedal_alive or em_stop
+        should_force = (
+            not pedal_alive
+            or em_stop
+            or (cruise_active and mapper_brake >= _HAZARD_HARD_BRAKE)
+        )
         if should_force and not self._last_should_force:
             self.change_hazards(True)
         self._last_should_force = should_force

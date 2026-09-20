@@ -9,7 +9,7 @@ from .base import LongCtx, LongitudinalController, LongOutput
 
 
 class AdaptiveCruiseController(LongitudinalController):
-    """Following-distance accel cap, exposed as a longitudinal child."""
+    """Following-distance cap, exposed as a longitudinal child."""
 
     name = "acc"
 
@@ -31,4 +31,3 @@ class AdaptiveCruiseController(LongitudinalController):
 
     def reset(self) -> None:
         self._inner.reset()
-

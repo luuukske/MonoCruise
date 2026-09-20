@@ -12,6 +12,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+### Added
+- **ACC uses the same hazard lights as a hard brake**: when adaptive cruise slams the brakes the hazards come on, and they go off again when it gets back on the accelerator.
+
 ### Changed
 - **Cruise follows in-game Braking intensity; emergency braking does not**: cruise stays consistent when you move the slider. Emergency braking uses the full brake the game will accept, and it plans the stop with that same force.
 - **Warning when Braking intensity is below 100%**: if emergency braking is on, you get a reminder once an hour that a low slider cuts how hard it can stop.

@@ -13,6 +13,19 @@ written to `SCSController.abackward` is remapped by live `g_brake_intensity` as 
 last step before send, except AEB and `em_stop` which keep the full brake axis.
 See **Brake intensity** below.
 
+## Hazards
+
+`hazards_variable` gates every automatic press. Pedal loss and `em_stop` (AEB
+or the driver's slam) turn hazards on on the rising edge and leave them on.
+`autodisable_hazards` turns them off when the driver is back on the gas above
+12 km/h.
+
+Cruise mapper output is visible to that same logic. A cruise brake at the
+driver's slam floor (`brakeval >= 0.8`) turns hazards on. Cruise gas at the
+autodisable floor (`gasval >= 0.60`, brake clear) turns them off again. The
+lamps do not go off just because the slam ended; they wait for accelerator,
+the same as a driver slam.
+
 ## AccelToPedals (`accel_to_pedals.py`)
 
 Single mapper instance for the process. Converts wanted m/s² to gas/brake with smoothing,
