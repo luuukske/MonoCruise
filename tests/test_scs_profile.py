@@ -16,6 +16,7 @@ from core.scs_profile.intensity import (
     aeb_max_brake_ms2,
     apply_brake_intensity,
     learn_decel_scale,
+    tune_unit_decel,
 )
 from core.scs_profile.reader import (
     _adaptive_label,
@@ -277,6 +278,12 @@ def test_low_i_aeb_warning_fires_hourly(caplog):
     assert w.tick(0.5, aeb_enabled=True, now=10.0 + 3599.0) is False
     assert w.tick(0.5, aeb_enabled=True, now=10.0 + 3600.0) is True
     assert "below 100%" in caplog.text
+
+
+def test_tune_unit_decel_is_identity_without_a_cvar():
+    assert tune_unit_decel(4.0, None) == pytest.approx(4.0)
+    assert tune_unit_decel(4.0, TUNE_BRAKE_INTENSITY) == pytest.approx(4.0)
+    assert tune_unit_decel(4.0, 3.0) == pytest.approx(4.0 * TUNE_BRAKE_INTENSITY / 3.0)
 
 
 def test_learn_decel_scale_maps_cvar_to_tune_units():

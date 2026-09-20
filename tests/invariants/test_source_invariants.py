@@ -216,3 +216,23 @@ def test_cruise_pid_does_not_read_road_pitch():
         "slope/pitch terms in the cruise PID; keep grade FF in AccelToPedals. "
         f"Found at: {offenders}"
     )
+
+
+def test_brake_capacity_learns_from_the_sent_pedal_and_live_i():
+    """Learning takes gameBrake and 1.1/I, not the logical viz pedal."""
+    path = REPO / "core" / "sending_thread" / "thread.py"
+    calls = []
+    for node in ast.walk(_parse(path)):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != "update_brake":
+            continue
+        calls.append(node)
+    assert len(calls) == 1, f"expected one update_brake call, found {calls}"
+    call = calls[0]
+    first = ast.unparse(call.args[0])
+    assert "sent_b" in first, f"update_brake must take the sent pedal, got {first}"
+    keywords = {kw.arg: ast.unparse(kw.value) for kw in call.keywords if kw.arg}
+    assert keywords.get("brake_intensity") == "intensity", (
+        f"update_brake must pass live I, got {keywords}"
+    )

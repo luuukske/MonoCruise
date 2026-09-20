@@ -8,7 +8,7 @@ import time
 from collections import deque
 from typing import Deque
 
-from core.scs_profile.intensity import learn_decel_scale
+from core.scs_profile.intensity import tune_unit_decel
 from core.settings import Settings
 
 from .accel_to_pedals import brake_curve_fraction, weight_factor
@@ -276,7 +276,7 @@ class PedalCapacityTracker:
         aeb_active: bool = False,
         brake_intensity: float | None = None,
     ) -> None:
-        """Feed one braking tick. See `core/sending_thread/README.md`."""
+        """Feed one braking tick. ``brake_output`` is the sent pedal. See README."""
         # Re-resolve against this tick's rig: hooking a trailer must move the
         # estimate in the same tick, so only the correction is carried over.
         if baseline_ms2 > 0.0:
@@ -345,8 +345,8 @@ class PedalCapacityTracker:
         mean_decel = sum(decel_values) / len(decel_values)
         if mean_decel < _MIN_DECEL_MS2:
             return
-        if brake_intensity is not None:
-            mean_decel *= learn_decel_scale(brake_intensity)
+        # Plant is sent * I. Put decel in I=1.1 units; the pedal is already sent.
+        mean_decel = tune_unit_decel(mean_decel, brake_intensity)
 
         # Window means on both sides: zero-mean dither and telemetry ripple
         mean_pedal = max(

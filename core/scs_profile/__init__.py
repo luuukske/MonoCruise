@@ -6,6 +6,7 @@ from .intensity import (
     aeb_max_brake_ms2,
     apply_brake_intensity,
     learn_decel_scale,
+    tune_unit_decel,
 )
 from .reader import SelectedProfileSettings, brake_ui_scale, read_selected_profile
 
@@ -18,4 +19,5 @@ __all__ = [
     "brake_ui_scale",
     "learn_decel_scale",
     "read_selected_profile",
+    "tune_unit_decel",
 ]

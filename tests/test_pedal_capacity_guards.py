@@ -219,28 +219,60 @@ def test_over_reading_the_rig_is_refused(clock):
 
 
 def test_brake_intensity_does_not_poison_scale(clock):
-    """Same truck at two slider values must learn the same brake_scale."""
+    """Same truck at any slider, cruise or AEB send, must learn the same scale.
+
+    Plant is sent * I. Learning takes the sent pedal and ``tune_unit_decel``.
+    Cruise remaps the pedal; AEB full_authority writes it as-is. Both must
+    land on the same ``brake_scale``.
+    """
     from core.scs_profile.intensity import TUNE_BRAKE_INTENSITY, apply_brake_intensity
 
-    logical = 0.75
+    logical = 1.0
     learned = []
-    for intensity in (1.0 / 3.0, 1.0, 3.0):
-        t = _fresh(scale=0.85)
-        sent = apply_brake_intensity(logical, intensity)
-        physical = (
-            brake_curve_fraction(sent) * BASE * (intensity / TUNE_BRAKE_INTENSITY)
-        )
-        for _ in range(250):
-            clock.t += DT
-            t.update_brake(
-                sent, physical, SPEED, 0.0, BASE, road_load_ms2=0.0,
-                aeb_active=True,
-                brake_intensity=intensity,
+    for full_authority in (False, True):
+        for intensity in (1.0 / 3.0, 1.0, TUNE_BRAKE_INTENSITY, 3.0):
+            t = _fresh(scale=0.85)
+            sent = apply_brake_intensity(
+                logical, intensity, full_authority=full_authority,
             )
-        learned.append(t.brake_scale)
-        assert t.brake_scale > 0.85, "intensity path accepted no samples"
-    assert learned[0] == pytest.approx(1.0, rel=0.03)
-    assert learned[1] == pytest.approx(learned[0], rel=0.03)
+            physical = (
+                brake_curve_fraction(sent) * BASE
+                * (intensity / TUNE_BRAKE_INTENSITY)
+            )
+            for _ in range(400):
+                clock.t += DT
+                t.update_brake(
+                    sent, physical, SPEED, 0.0, BASE, road_load_ms2=0.0,
+                    aeb_active=True,
+                    brake_intensity=intensity,
+                )
+            assert t.brake_scale > 0.85, (
+                f"no samples I={intensity} full_authority={full_authority}"
+            )
+            learned.append(t.brake_scale)
+    first = learned[0]
+    assert first == pytest.approx(1.0, rel=0.03)
+    for scale in learned[1:]:
+        assert scale == pytest.approx(first, rel=0.03)
+
+
+def test_high_i_without_the_scale_is_rejected_as_contamination(clock):
+    """AEB at I=3 and pedal 1.0 looks 2.7x strong unless decel is scaled first."""
+    from core.scs_profile.intensity import TUNE_BRAKE_INTENSITY
+
+    t = _fresh(scale=0.85)
+    sent = 1.0
+    intensity = 3.0
+    physical = (
+        brake_curve_fraction(sent) * BASE * (intensity / TUNE_BRAKE_INTENSITY)
+    )
+    for _ in range(250):
+        clock.t += DT
+        t.update_brake(
+            sent, physical, SPEED, 0.0, BASE, road_load_ms2=0.0,
+            aeb_active=True,
+        )
+    assert t.brake_scale == pytest.approx(0.85)
 
 
 def test_under_delivery_is_believed_all_the_way_down(clock):

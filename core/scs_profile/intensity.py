@@ -58,6 +58,13 @@ def learn_decel_scale(intensity: float | None) -> float:
     return TUNE_BRAKE_INTENSITY / clamp_brake_intensity(intensity)
 
 
+def tune_unit_decel(physical_decel: float, intensity: float | None) -> float:
+    """Measured plant decel into I=1.1 units. None means already in tune units."""
+    if intensity is None:
+        return float(physical_decel)
+    return float(physical_decel) * learn_decel_scale(intensity)
+
+
 def aeb_available_decel_scale(intensity: float | None) -> float:
     """Scale I=1.1 capacity into the physical full-pedal decel AEB can get."""
     return clamp_brake_intensity(intensity) / TUNE_BRAKE_INTENSITY

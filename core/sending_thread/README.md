@@ -354,9 +354,11 @@ remapped axis. `recent_brake_outputs` and the AEB observer use the sent value,
 because `gameBrake` and the plant see that. CC's game-brake disengage compare
 reads that ring buffer.
 
-Capacity learning takes the sent pedal and multiplies load-corrected decel by
-`1.1 / I` before the ratio, so a slider change is not a `brake_scale`
-change. The settle gates still look at physical decel. `max_brake_ms2` on
+Capacity learning takes the sent pedal and runs load-corrected decel through
+`tune_unit_decel` (`* 1.1 / I`) before the ratio, so a slider change is not a
+`brake_scale` change. Cruise remap and AEB full-authority send both use that
+pair: the pedal is what the game received, the decel is scaled from the plant.
+The settle gates still look at physical decel. `max_brake_ms2` on
 `SendingThreadData` stays in those 1.1 units; `aeb_max_brake_ms2` is the
 physical value AEB reads.
 
