@@ -12,7 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Fixed
-- **Emergency braking ignored the room you had to steer around something**: since the last update it judged every way out by the corner you were already in, so it braked for vehicles a light steering input would have cleared. It only closes off the sharper way out when the truck is genuinely at the limit of grip.
+- **Emergency braking ignored the room you had to steer around something**: the fix from preview.23 where AEB relied on the actual path you were going to travel a bit too much, and evasion paths were not accounted for. fixed now.
 
 ## [1.1.0-preview.23] - 2026-09-21
 ### Added
