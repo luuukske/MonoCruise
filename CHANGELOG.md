@@ -12,6 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+## [1.1.0-preview.23] - 2026-09-21
 ### Added
 - **ACC uses the same hazard lights as a hard brake**: hazards come on when ACC slams the brakes, and go off when it gets back on the gas.
 
