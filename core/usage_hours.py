@@ -14,15 +14,12 @@ logger = logging.getLogger(__name__)
 PROMPT_BASE_HOURS = 100.0
 PROMPT_EXPONENT = 2.5
 
+SECONDS_PER_MINUTE = 60.0
 SECONDS_PER_HOUR = 3600.0
 
 # Settings fields this module owns. They are history, not preferences, so a
 # reset to defaults must leave them alone or a 600 hour user is asked again.
-RESET_EXEMPT_FIELDS = ("usage_seconds", "support_prompts_dismissed")
-
-# Flush at most this often in accumulated usage seconds. Between flushes the
-# counter moves in memory only; the window's close already saves settings.
-FLUSH_INTERVAL_S = 300.0
+RESET_EXEMPT_FIELDS = ("usage_minutes", "support_prompts_dismissed")
 
 # A gap larger than this is machine sleep, a debugger pause or a clock step,
 # never play time, so it is dropped rather than counted.
@@ -63,20 +60,27 @@ def record_prompt_dismissed(settings) -> int:
 
 
 class UsageTracker:
-    """Accumulates connected game time onto ``Settings.usage_seconds``."""
+    """Accumulates connected game time onto ``Settings.usage_minutes``.
+
+    Seconds short of a minute stay here. Crossing a minute updates the setting
+    and writes the config.
+    """
 
     def __init__(self, settings) -> None:
         self._settings = settings
         self._last_tick: float | None = None
-        self._unflushed_s = 0.0
+        self._remainder_s = 0.0
+
+    def _stored_minutes(self) -> int:
+        try:
+            with self._settings._state_lock:
+                return max(0, int(self._settings.usage_minutes))
+        except (AttributeError, TypeError, ValueError):
+            return 0
 
     @property
     def usage_seconds(self) -> float:
-        try:
-            with self._settings._state_lock:
-                return max(0.0, float(self._settings.usage_seconds))
-        except (AttributeError, TypeError, ValueError):
-            return 0.0
+        return self._stored_minutes() * SECONDS_PER_MINUTE + self._remainder_s
 
     @property
     def usage_hours(self) -> float:
@@ -93,20 +97,21 @@ class UsageTracker:
         if delta <= 0.0 or delta > MAX_TICK_S:
             return self.usage_seconds
 
-        total = self.usage_seconds + delta
-        self._store(total)
-        self._unflushed_s += delta
-        if self._unflushed_s >= FLUSH_INTERVAL_S:
-            self._unflushed_s = 0.0
+        self._remainder_s += delta
+        whole = int(self._remainder_s // SECONDS_PER_MINUTE)
+        if whole > 0 and self._store(self._stored_minutes() + whole):
+            self._remainder_s -= whole * SECONDS_PER_MINUTE
             self._flush()
-        return total
+        return self.usage_seconds
 
-    def _store(self, total_seconds: float) -> None:
+    def _store(self, total_minutes: int) -> bool:
         try:
             with self._settings._state_lock:
-                self._settings.usage_seconds = total_seconds
+                self._settings.usage_minutes = int(total_minutes)
+            return True
         except AttributeError:
-            logger.debug("settings object cannot hold usage_seconds", exc_info=True)
+            logger.debug("settings object cannot hold usage_minutes", exc_info=True)
+            return False
 
     def _flush(self) -> None:
         try:

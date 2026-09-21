@@ -10,7 +10,7 @@ import pytest
 from PySide6.QtWidgets import QApplication
 
 from core.settings import Settings
-from core.usage_hours import RESET_EXEMPT_FIELDS, SECONDS_PER_HOUR
+from core.usage_hours import RESET_EXEMPT_FIELDS
 
 
 @pytest.fixture(scope="module")
@@ -74,12 +74,12 @@ def test_reset_clears_a_bound_pedal(window):
 def test_usage_history_survives_a_reset(window):
     """The whole point of RESET_EXEMPT_FIELDS: no re-nagging a 600 hour user."""
     s = window._settings
-    s.usage_seconds = 612.0 * SECONDS_PER_HOUR
+    s.usage_minutes = 612 * 60
     s.support_prompts_dismissed = 2
 
     window._reset_settings()
 
-    assert s.usage_seconds == pytest.approx(612.0 * SECONDS_PER_HOUR)
+    assert s.usage_minutes == 612 * 60
     assert s.support_prompts_dismissed == 2
 
 

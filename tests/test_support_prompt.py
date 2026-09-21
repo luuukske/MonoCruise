@@ -30,7 +30,7 @@ class _FakeSettings:
     """Enough of Settings for the tracker: the two fields, the lock, and save."""
 
     def __init__(self) -> None:
-        self.usage_seconds = 0.0
+        self.usage_minutes = 0
         self.support_prompts_dismissed = 0
         self._state_lock = threading.RLock()
         self.saves = 0
@@ -104,7 +104,7 @@ def test_unusable_usage_values_are_never_due():
 
 def test_the_usage_fields_are_exempt_from_a_settings_reset():
     """Hours are history: a reset must not restart the prompt cadence."""
-    assert "usage_seconds" in RESET_EXEMPT_FIELDS
+    assert "usage_minutes" in RESET_EXEMPT_FIELDS
     assert "support_prompts_dismissed" in RESET_EXEMPT_FIELDS
 
 
@@ -129,7 +129,7 @@ def test_the_reset_path_honours_the_exemption():
 
 def test_nothing_else_is_swept_into_the_exemption():
     """Exempting a real preference would make Reset quietly stop resetting it."""
-    assert set(RESET_EXEMPT_FIELDS) == {"usage_seconds", "support_prompts_dismissed"}
+    assert set(RESET_EXEMPT_FIELDS) == {"usage_minutes", "support_prompts_dismissed"}
 
 
 # Usage clock
@@ -141,11 +141,12 @@ def test_time_accrues_only_while_the_game_is_connected():
 
     tracker.tick(True, 0.0)
     tracker.tick(True, 1.0)
-    assert s.usage_seconds == pytest.approx(1.0)
+    assert tracker.usage_seconds == pytest.approx(1.0)
+    assert s.usage_minutes == 0
 
     tracker.tick(False, 2.0)
     tracker.tick(False, 3.0)
-    assert s.usage_seconds == pytest.approx(1.0)
+    assert tracker.usage_seconds == pytest.approx(1.0)
 
 
 def test_reconnecting_does_not_backfill_the_disconnected_gap():
@@ -155,7 +156,8 @@ def test_reconnecting_does_not_backfill_the_disconnected_gap():
     tracker.tick(False, 1.0)
     tracker.tick(True, 900.0)
     tracker.tick(True, 901.0)
-    assert s.usage_seconds == pytest.approx(1.0)
+    assert tracker.usage_seconds == pytest.approx(1.0)
+    assert s.usage_minutes == 0
 
 
 def test_a_sleep_or_clock_step_is_dropped_rather_than_counted():
@@ -163,19 +165,21 @@ def test_a_sleep_or_clock_step_is_dropped_rather_than_counted():
     tracker = UsageTracker(s)
     tracker.tick(True, 0.0)
     tracker.tick(True, MAX_TICK_S + 60.0)
-    assert s.usage_seconds == 0.0
+    assert tracker.usage_seconds == 0.0
+    assert s.usage_minutes == 0
 
 
 def test_a_backwards_clock_does_not_subtract_hours():
     s = _FakeSettings()
     tracker = UsageTracker(s)
-    s.usage_seconds = 500.0
+    s.usage_minutes = 8
     tracker.tick(True, 10.0)
     tracker.tick(True, 5.0)
-    assert s.usage_seconds == pytest.approx(500.0)
+    assert s.usage_minutes == 8
+    assert tracker.usage_seconds == pytest.approx(8 * 60)
 
 
-def test_the_counter_is_not_flushed_to_disk_on_every_tick():
+def test_the_counter_is_not_written_on_every_tick():
     """A 100 ms poll writing config.json each time would hammer the disk."""
     s = _FakeSettings()
     tracker = UsageTracker(s)
@@ -184,22 +188,36 @@ def test_the_counter_is_not_flushed_to_disk_on_every_tick():
         tracker.tick(True, now)
         now += 0.1
     assert s.saves == 0
-    assert s.usage_seconds == pytest.approx(19.9, abs=0.01)
+    assert s.usage_minutes == 0
+    assert tracker.usage_seconds == pytest.approx(19.9, abs=0.01)
 
 
-def test_the_counter_is_eventually_flushed():
+def test_the_config_is_written_when_a_minute_passes():
     s = _FakeSettings()
     tracker = UsageTracker(s)
     now = 0.0
-    for _ in range(200):
+    tracker.tick(True, now)
+    for _ in range(59):
+        now += 1.0
         tracker.tick(True, now)
-        now += 2.0
-    assert s.saves >= 1
+    assert s.saves == 0
+    assert s.usage_minutes == 0
+
+    now += 1.0
+    tracker.tick(True, now)
+    assert s.usage_minutes == 1
+    assert s.saves == 1
+
+    now += 1.0
+    tracker.tick(True, now)
+    assert s.saves == 1
+    assert s.usage_minutes == 1
+    assert tracker.usage_seconds == pytest.approx(61.0)
 
 
-def test_usage_hours_reports_the_stored_seconds():
+def test_usage_hours_reports_the_stored_minutes():
     s = _FakeSettings()
-    s.usage_seconds = 3.0 * SECONDS_PER_HOUR
+    s.usage_minutes = 3 * 60
     assert UsageTracker(s).usage_hours == pytest.approx(3.0)
 
 
@@ -214,7 +232,8 @@ def test_a_failing_save_does_not_lose_the_in_memory_count():
     for _ in range(400):
         tracker.tick(True, now)
         now += 2.0
-    assert s.usage_seconds == pytest.approx(798.0, abs=0.01)
+    assert s.usage_minutes == 13
+    assert tracker.usage_seconds == pytest.approx(798.0, abs=0.01)
 
 
 def test_dismissal_counts_up_and_persists():
@@ -372,7 +391,7 @@ def window(qapp):
     from ui.main_window.window import MonoCruiseWindow
 
     settings = Settings.instance()
-    settings.usage_seconds = 0.0
+    settings.usage_minutes = 0
     settings.support_prompts_dismissed = 0
 
     w = MonoCruiseWindow(settings, version="v0.0.0-test")
@@ -386,7 +405,7 @@ def window(qapp):
 
 def _arm(window, hours: float) -> None:
     """Put the window in the state the prompt needs, minus the visibility gate."""
-    window._settings.usage_seconds = hours * SECONDS_PER_HOUR
+    window._settings.usage_minutes = int(hours * 60)
     window._support_visible_since = -_SUPPORT_PROMPT_DELAY_S * 2
 
 
@@ -414,7 +433,7 @@ def test_no_prompt_while_the_window_is_minimised(window, qapp):
 
 def test_the_visible_delay_has_to_elapse_first(window, qapp):
     window._open_on_taskbar = True
-    window._settings.usage_seconds = 100.0 * SECONDS_PER_HOUR
+    window._settings.usage_minutes = 100 * 60
     window._support_visible_since = None
     window._sync_support_prompt()
     assert window._support_overlay is None
@@ -454,7 +473,8 @@ def test_the_usage_clock_runs_while_minimised(window, qapp):
     window._open_on_taskbar = False
     window._usage.tick(True, 0.0)
     window._usage.tick(True, 2.0)
-    assert window._settings.usage_seconds == pytest.approx(2.0)
+    assert window._usage.usage_seconds == pytest.approx(2.0)
+    assert window._settings.usage_minutes == 0
 
 
 def test_a_missing_telemetry_thread_does_not_break_the_poll(window, qapp):

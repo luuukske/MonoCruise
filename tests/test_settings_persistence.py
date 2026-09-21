@@ -193,6 +193,35 @@ def test_a_failed_write_leaves_the_on_disk_config_untouched(cfg, monkeypatch):
     assert primary.read_text(encoding="utf-8") == before
 
 
+def test_legacy_usage_seconds_become_whole_minutes(cfg):
+    """An existing exact-second total must not reset the support schedule."""
+    primary, _ = cfg
+    _write(primary, {
+        "usage_seconds": 360089.06861279946,
+        "support_prompts_dismissed": 1,
+    })
+    Settings.load()
+    assert Settings.usage_minutes == 6001
+    saved = json.loads(primary.read_text(encoding="utf-8"))
+    assert saved["usage_minutes"] == 6001
+    assert "usage_seconds" not in saved
+    assert saved["support_prompts_dismissed"] == 1
+
+
+def test_stored_usage_minutes_are_not_rebuilt_from_legacy_seconds(cfg):
+    primary, _ = cfg
+    _write(primary, {"usage_minutes": 10, "usage_seconds": 99999})
+    Settings.load()
+    assert Settings.usage_minutes == 10
+
+
+def test_a_junk_usage_minute_count_loads_as_zero(cfg):
+    primary, _ = cfg
+    _write(primary, {"usage_minutes": "later"})
+    Settings.load()
+    assert Settings.usage_minutes == 0
+
+
 def test_legacy_accel_ceiling_is_remapped_to_the_safety_rail(cfg):
     """cc_accel_max_ms2 was the accel ceiling; it is now only a rail above the envelope.
 

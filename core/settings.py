@@ -79,9 +79,9 @@ class Settings(metaclass=_SingletonMeta):
     latest_known_version: str = ""
     last_update_popup: float = 0.0
 
-    # Accumulated seconds with the game SDK connected, and how many support
+    # Whole minutes with the game SDK connected, and how many support
     # prompts have been dismissed. History, not user knobs (core/usage_hours.py).
-    usage_seconds: float = 0.0
+    usage_minutes: int = 0
     support_prompts_dismissed: int = 0
 
     # UI position/appearance
@@ -229,6 +229,19 @@ class Settings(metaclass=_SingletonMeta):
         _log.warning("invalid cc_accel_profile %r; falling back to 'Normal'", value)
         return "Normal"
 
+    def _adopt_legacy_usage_seconds(self, data: dict) -> None:
+        """Fold a pre-minute usage_seconds value into usage_minutes. Once."""
+        if "usage_minutes" in data or "usage_seconds" not in data:
+            return
+        try:
+            minutes = int(float(data["usage_seconds"]) // 60)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if minutes <= 0:
+            return
+        self.usage_minutes = minutes
+        _log.info("converted stored usage to %d minutes", minutes)
+
     @staticmethod
     def _normalize_channel(value: object) -> str:
         if isinstance(value, str) and value.lower() in {"stable", "preview"}:
@@ -332,6 +345,11 @@ class Settings(metaclass=_SingletonMeta):
                         v = self._normalize_increment(v)
                     elif k == "update_channel":
                         v = self._normalize_channel(v)
+                    elif k == "usage_minutes":
+                        try:
+                            v = max(0, int(float(v)))
+                        except (TypeError, ValueError, OverflowError):
+                            v = 0
                     elif k == "cc_accel_profile":
                         v = self._normalize_accel_profile(v)
                     elif k == "cc_accel_max_ms2":
@@ -362,6 +380,8 @@ class Settings(metaclass=_SingletonMeta):
                 else:
                     f = self.__dataclass_fields__[k]
                     setattr(self, k, cls._dataclass_field_default(f))
+
+            self._adopt_legacy_usage_seconds(data)
 
             had_complete_file = (source.startswith("config.json")) and not missing_from_file
             self._saved_state = self._public_fields() if had_complete_file else {}
