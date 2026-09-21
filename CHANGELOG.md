@@ -12,7 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Added
-- **You can get past a speed limit set too low**: holding the gas still holds you at the limit. A fast stab of the gas lets you past it. The limit comes back only once you are 5 km/h under it.
+- **You can get past a speed limit set too low**: holding the gas still holds you at the limit. A fast stab of the gas lets you past it. The limit comes back once you slow to less than 5 km/h over it.
 - **American Truck Simulator uses mph**: the cruise set speed, the speed of the vehicle ahead, the up and down steps, and the global speed limiter are in mph. Euro Truck Simulator 2 stays in km/h.
 
 ### Changed

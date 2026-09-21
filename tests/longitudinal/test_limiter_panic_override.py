@@ -164,12 +164,22 @@ def test_staying_off_the_pedal_does_not_restore_the_limiter():
     assert _step(ov, 0.0, LIMIT + 5.0, n=200) is True
 
 
-def test_slowing_back_under_the_cap_restores_the_limiter():
+def test_a_stab_at_the_cap_holds_until_you_fall_back_through_5_above():
     ov = LimiterPanicOverride()
-    _hold(ov, LIMIT + 5.0)
-    assert _blip(ov, LIMIT + 5.0) is True
-    assert _step(ov, 1.0, LIMIT - 5.0) is True
-    assert _step(ov, 1.0, LIMIT - 5.1) is False
+    _hold(ov, LIMIT)
+    assert _blip(ov, LIMIT) is True
+    assert _step(ov, 1.0, LIMIT, n=40) is True
+    assert _step(ov, 1.0, LIMIT + 6.0) is True
+    assert _step(ov, 1.0, LIMIT + 5.0) is True
+    assert _step(ov, 1.0, LIMIT + 4.9) is False
+
+
+def test_slowing_below_5_above_the_cap_restores_the_limiter():
+    ov = LimiterPanicOverride()
+    _hold(ov, LIMIT + 10.0)
+    assert _blip(ov, LIMIT + 10.0) is True
+    assert _step(ov, 1.0, LIMIT + 5.0) is True
+    assert _step(ov, 1.0, LIMIT + 4.9) is False
 
 
 def test_a_stalled_tick_cannot_finish_the_hold_by_itself():

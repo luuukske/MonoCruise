@@ -22,7 +22,8 @@ limiter caps the user pedal until gas releases or ego falls below CC target minu
 Panic bypass of the limiter (`core/longitudinal/limiter_override.py`): a fast
 stab while already at the cap drops CC, ACC, and limiter bids together. The pedal
 only has to move a small minimum; a slow lift does not count. A held floor does
-not either. The latch ends only once speed is more than 5 km/h under the cap.
+not either. The latch ends only once speed drops below 5 km/h above the cap,
+after it has been at least that far over.
 Engage emits a priority-2 warning with a short message.
 
 ## Button presses (`press_counter.py`)

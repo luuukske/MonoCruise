@@ -213,8 +213,9 @@ on the way off and `_BLIP_WINDOW_S` on the way back.
 
 While latched, the orchestrator publishes no CC, ACC, or limiter bid. The driver's
 pedal is the only longitudinal command. AEB is untouched. Lifting off does not
-end it. The latch ends only when speed is more than `_REARM_UNDER_KMH` under the
-cap, so the next approach needs a new stab. The rising edge emits a warning popup
+end it. The latch ends only when speed falls below `_REARM_ABOVE_KMH` above the
+cap, and only after the bypass has already been at least that far over, so a
+stab at the cap can still pull away. The next approach needs a new stab. The rising edge emits a warning popup
 at priority 2 with a short message (`PopupWindow.emit`, not the log-handler notice).
 
 Do not treat a held floor as the bypass. That was the case this exists to refuse.

@@ -19,8 +19,8 @@ _RELEASE_MIN_S = 0.05
 _BLIP_WINDOW_S = 0.30
 # Stab only counts this close to the cap, or already over it.
 _BIND_UNDER_KMH = 3.0
-# Only restore once speed is more than this far under the cap.
-_REARM_UNDER_KMH = 5.0
+# Restore once speed falls below this far above the cap, after having reached it.
+_REARM_ABOVE_KMH = 5.0
 # One stalled tick must not complete the hold or the blip by itself.
 _DT_CAP_S = 0.1
 
@@ -33,12 +33,14 @@ class LimiterPanicOverride:
         self._floor_hold_s = 0.0
         self._off_floor_s = 0.0
         self._window_s: float | None = None
+        self._seen_above = False
 
     def reset(self) -> None:
         self.overridden = False
         self._floor_hold_s = 0.0
         self._off_floor_s = 0.0
         self._window_s = None
+        self._seen_above = False
 
     def update(
         self,
@@ -69,6 +71,7 @@ class LimiterPanicOverride:
             if self._window_s is not None:
                 if self._window_s >= _RELEASE_MIN_S:
                     self.overridden = True
+                    self._seen_above = speed_kmh >= limit_kmh + _REARM_ABOVE_KMH
                     self._window_s = None
                     self._floor_hold_s = 0.0
                     return True
@@ -95,7 +98,10 @@ class LimiterPanicOverride:
         return False
 
     def _tick_latched(self, speed_kmh: float, limit_kmh: float) -> bool:
-        if speed_kmh < limit_kmh - _REARM_UNDER_KMH:
+        line = limit_kmh + _REARM_ABOVE_KMH
+        if speed_kmh >= line:
+            self._seen_above = True
+        elif self._seen_above:
             self.reset()
             return False
         return True
