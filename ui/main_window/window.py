@@ -259,12 +259,17 @@ class MonoCruiseWindow(QMainWindow):
             logger.exception("Failed to save settings")
 
     def _reset_settings(self) -> None:
+        """Put every public field back to its dataclass default, except the
+        usage history in RESET_EXEMPT_FIELDS."""
         from core.settings import Settings
 
-        fresh = Settings()
-        for k in fresh.__dataclass_fields__:
-            if not k.startswith("_") and k not in RESET_EXEMPT_FIELDS:
-                setattr(self._settings, k, getattr(fresh, k))
+        # Settings is a singleton, so Settings() returns the live instance and
+        # reading defaults off it would write each value back onto itself.
+        with self._settings._state_lock:
+            for name, field in self._settings.__dataclass_fields__.items():
+                if name.startswith("_") or name in RESET_EXEMPT_FIELDS:
+                    continue
+                setattr(self._settings, name, Settings._dataclass_field_default(field))
         self._settings.save()
         self._settings_panel.apply_settings(self._settings)
         self.set_cmd("All settings reset to defaults.")
