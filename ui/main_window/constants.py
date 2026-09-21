@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+from core.update_check import REPO_NAME, REPO_OWNER
+
 # Application metadata
 APP_NAME = "MonoCruise"
 WINDOW_WIDTH = 700
 WINDOW_HEIGHT = 500
 SETTINGS_PANEL_WIDTH = 400
+
+# Project links, shared by the settings panel button bar and the support
+# prompt so a changed URL only has to move in one place.
+PROJECT_URL = "https://ld-tech.org/projects/monocruise/"
+GITHUB_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
+PATREON_URL = "https://www.patreon.com/c/lukasdeschryver"
+YOUTUBE_URL = "https://www.youtube.com/@ld-tech_org"
 
 # Colour palette
 BG_COLOR       = "#2B2B2B"
@@ -198,6 +207,30 @@ QPushButton#supportButton {{
 }}
 QPushButton#supportButton:hover {{
     background-color: lightgrey;
+}}
+
+/* Support-prompt share buttons: the supportButton look at a compact padding,
+   so the whole share row fits inside the card at the minimum window width. */
+QPushButton#shareButton {{
+    background-color: white;
+    color: black;
+    font-size: 11px;
+    font-weight: normal;
+    padding: 4px 8px;
+    border-radius: 5px;
+}}
+QPushButton#shareButton:hover {{
+    background-color: lightgrey;
+}}
+
+/* Neutral dismiss. Red would read as a warning and the default blue would
+   compete with the share row it sits under. */
+QPushButton#quietButton {{
+    background-color: {SETTINGS_COLOR};
+    color: {TEXT_COLOR};
+}}
+QPushButton#quietButton:hover {{
+    background-color: {BIND_HOVER_BG};
 }}
 
 QPushButton#reinstallButton {{

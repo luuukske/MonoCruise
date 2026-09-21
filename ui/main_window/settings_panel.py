@@ -38,10 +38,12 @@ from core.thread_management.registry import registry
 from ui.main_window.consent_overlay import CONSENT_VERSION
 from ui.main_window.constants import (
     FIELD_ROW_HEIGHT,
+    PATREON_URL,
     RADIUS_SETTINGS_PANEL,
     SETTINGS_PANEL_WIDTH,
     SUBTEXT_GAP_TOP,
     UPDATE_TINT,
+    YOUTUBE_URL,
 )
 from ui.main_window.widgets import (
     BindButton,
@@ -250,7 +252,7 @@ class SettingsPanel(QWidget):
         if os.path.exists(patreon_path):
             self._btn_patreon.setIcon(QIcon(QPixmap(patreon_path)))
         self._btn_patreon.clicked.connect(
-            lambda: webbrowser.open("https://www.patreon.com/")
+            lambda: webbrowser.open(PATREON_URL)
         )
         bar.addWidget(self._btn_patreon)
 
@@ -260,7 +262,7 @@ class SettingsPanel(QWidget):
         if os.path.exists(youtube_path):
             self._btn_youtube.setIcon(QIcon(QPixmap(youtube_path)))
         self._btn_youtube.clicked.connect(
-            lambda: webbrowser.open("https://www.youtube.com/@ld-tech_org")
+            lambda: webbrowser.open(YOUTUBE_URL)
         )
         bar.addWidget(self._btn_youtube)
 

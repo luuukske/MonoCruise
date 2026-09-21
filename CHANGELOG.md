@@ -13,6 +13,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ## [Unreleased]
 ### Added
 - **You can get past a speed limit set too low**: holding the gas still holds you at the limit. A fast stab of the gas lets you past it. The limit comes back once you slow to less than 5 km/h over it.
+- **A support prompt after 100 hours of driving**: when you open MonoCruise and you have 100 hours with the game connected behind you, a card asks for a share or a star, with links to TruckersMP, the SCS forum, Reddit, YouTube and the Steam discussions, plus GitHub and Patreon. Sharing copies the MonoCruise link for you to paste. Dismissing it pushes the next one far out (100, then 566, then 1559 hours), and it never appears while MonoCruise sits minimised behind the game.
 - **American Truck Simulator uses mph**: the cruise set speed, the speed of the vehicle ahead, the up and down steps, and the global speed limiter are in mph. Euro Truck Simulator 2 stays in km/h.
 
 ### Changed
@@ -20,6 +21,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **Cruise is calmer in heavy traffic**: the quicker brake release from preview.23 made it jump back on the gas after every brake in stop-and-go. It now only helps you get going again from a crawl or a stop, and at road speed the brake eases off smoothly like before.
 
 ### Fixed
+- **"reset all settings" actually resets now**: the button reported success but changed nothing, so every setting stayed exactly as it was. Your driving hours and the support prompt schedule are deliberately kept, everything else goes back to default. Note this also clears your pedal and button bindings, turns AEB back off, and drops the learned pedal calibration, which is what the button always said it would do.
 - **Clip screenshot on a 4K display showed readable text**: the picture was a zoomed-in corner (due to the DPI setting) of the game instead of the whole window. It now grabs the full game window, so on-screen text stays unreadable.
 - **Emergency braking ignored the room you had to steer around something**: the fix from preview.23 where AEB relied on the actual path you were going to travel a bit too much, and evasion paths were not accounted for. fixed now.
 - **Windows kept showing the version you first installed**: the installer writes that entry once, and updates replace the files without touching it, so the installed apps list still said preview.9 for anyone who has been updating in place since. The updater corrects it after every update, and MonoCruise also fixes it at startup, so an install that is already wrong is right again after one launch.

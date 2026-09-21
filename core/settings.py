@@ -79,6 +79,11 @@ class Settings(metaclass=_SingletonMeta):
     latest_known_version: str = ""
     last_update_popup: float = 0.0
 
+    # Accumulated seconds with the game SDK connected, and how many support
+    # prompts have been dismissed. History, not user knobs (core/usage_hours.py).
+    usage_seconds: float = 0.0
+    support_prompts_dismissed: int = 0
+
     # UI position/appearance
     panel_x: int = None
     panel_y: int = None
