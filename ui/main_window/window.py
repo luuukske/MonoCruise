@@ -29,7 +29,12 @@ from PySide6.QtWidgets import (
 
 from core.speed_units import display_from_ms, format_kmh, unit_label
 from core.thread_management.registry import registry
-from core.usage_hours import UsageTracker, prompt_is_due, record_prompt_dismissed
+from core.usage_hours import (
+    RESET_EXEMPT_FIELDS,
+    UsageTracker,
+    prompt_is_due,
+    record_prompt_dismissed,
+)
 from ui.cc_panel.main import cc_panel as CcPanel
 from ui.main_window.banner import BannerState, BannerWidget
 from ui.main_window.confirmation_overlay import show_confirmation
@@ -49,10 +54,6 @@ _CC_LEAD_SPEED_MIN_INTERVAL_S = 0.5
 # The support prompt waits this long after the window becomes visible, so it
 # never lands on top of a window the user is still bringing up.
 _SUPPORT_PROMPT_DELAY_S = 3.0
-
-# History rather than preferences: a settings reset must not restart the
-# support prompt cadence for someone who is already hundreds of hours in.
-_RESET_EXEMPT = ("usage_seconds", "support_prompts_dismissed")
 
 if TYPE_CHECKING:
     from core.settings import Settings
@@ -262,7 +263,7 @@ class MonoCruiseWindow(QMainWindow):
 
         fresh = Settings()
         for k in fresh.__dataclass_fields__:
-            if not k.startswith("_") and k not in _RESET_EXEMPT:
+            if not k.startswith("_") and k not in RESET_EXEMPT_FIELDS:
                 setattr(self._settings, k, getattr(fresh, k))
         self._settings.save()
         self._settings_panel.apply_settings(self._settings)

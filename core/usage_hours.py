@@ -16,6 +16,10 @@ PROMPT_EXPONENT = 2.5
 
 SECONDS_PER_HOUR = 3600.0
 
+# Settings fields this module owns. They are history, not preferences, so a
+# reset to defaults must leave them alone or a 600 hour user is asked again.
+RESET_EXEMPT_FIELDS = ("usage_seconds", "support_prompts_dismissed")
+
 # Flush at most this often in accumulated usage seconds. Between flushes the
 # counter moves in memory only; the window's close already saves settings.
 FLUSH_INTERVAL_S = 300.0

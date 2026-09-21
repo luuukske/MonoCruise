@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 from core.usage_hours import (
     MAX_TICK_S,
     PROMPT_BASE_HOURS,
+    RESET_EXEMPT_FIELDS,
     SECONDS_PER_HOUR,
     UsageTracker,
     prompt_is_due,
@@ -96,6 +97,39 @@ def test_hitting_the_first_threshold_is_not_enough_for_the_second():
 def test_unusable_usage_values_are_never_due():
     assert not prompt_is_due(None, 0)
     assert not prompt_is_due("later", 0)
+
+
+# Reset exemption
+
+
+def test_the_usage_fields_are_exempt_from_a_settings_reset():
+    """Hours are history: a reset must not restart the prompt cadence."""
+    assert "usage_seconds" in RESET_EXEMPT_FIELDS
+    assert "support_prompts_dismissed" in RESET_EXEMPT_FIELDS
+
+
+def test_every_exempt_name_is_a_real_settings_field():
+    """A typo here exempts nothing and fails silently, so pin the names."""
+    from core.settings import Settings
+
+    fields = Settings.instance().__dataclass_fields__
+    for name in RESET_EXEMPT_FIELDS:
+        assert name in fields, name
+
+
+def test_the_reset_path_honours_the_exemption():
+    """Guards the wiring, not just the tuple: window.py must consult it."""
+    import inspect
+
+    from ui.main_window.window import MonoCruiseWindow
+
+    src = inspect.getsource(MonoCruiseWindow._reset_settings)
+    assert "RESET_EXEMPT_FIELDS" in src
+
+
+def test_nothing_else_is_swept_into_the_exemption():
+    """Exempting a real preference would make Reset quietly stop resetting it."""
+    assert set(RESET_EXEMPT_FIELDS) == {"usage_seconds", "support_prompts_dismissed"}
 
 
 # Usage clock
