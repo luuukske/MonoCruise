@@ -12,6 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Added
+- **A support prompt after 100 hours of driving**: when you open MonoCruise and you have 100 hours with the game connected behind you, a card asks for a share or a star, with links to TruckersMP, the SCS forum, Reddit, YouTube and the Steam discussions, plus GitHub and Patreon. Sharing copies the MonoCruise link for you to paste. Dismissing it pushes the next one far out (100, then 566, then 1559 hours), and it never appears while MonoCruise sits minimised behind the game.
 - **American Truck Simulator uses mph**: the cruise set speed, the speed of the vehicle ahead, the up and down steps, and the global speed limiter are in mph. Euro Truck Simulator 2 stays in km/h.
 
 ### Changed

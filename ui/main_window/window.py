@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from core.speed_units import display_from_ms, format_kmh, unit_label
 from core.thread_management.registry import registry
+from core.usage_hours import UsageTracker, prompt_is_due, record_prompt_dismissed
 from ui.cc_panel.main import cc_panel as CcPanel
 from ui.main_window.banner import BannerState, BannerWidget
 from ui.main_window.confirmation_overlay import show_confirmation
@@ -41,8 +42,17 @@ from ui.main_window.constants import (
     WINDOW_WIDTH,
 )
 from ui.main_window.settings_panel import SettingsPanel
+from ui.main_window.support_overlay import show_support
 
 _CC_LEAD_SPEED_MIN_INTERVAL_S = 0.5
+
+# The support prompt waits this long after the window becomes visible, so it
+# never lands on top of a window the user is still bringing up.
+_SUPPORT_PROMPT_DELAY_S = 3.0
+
+# History rather than preferences: a settings reset must not restart the
+# support prompt cadence for someone who is already hundreds of hours in.
+_RESET_EXEMPT = ("usage_seconds", "support_prompts_dismissed")
 
 if TYPE_CHECKING:
     from core.settings import Settings
@@ -75,6 +85,13 @@ class MonoCruiseWindow(QMainWindow):
         # first result; until then the window stays hidden.
         self._startup_visibility_applied = False
         self._open_on_taskbar = False
+
+        # Support prompt: usage accrues whenever the game is connected, the
+        # prompt itself only appears on a window the user can actually see.
+        self._usage = UsageTracker(settings)
+        self._support_overlay = None
+        self._support_prompt_done = False
+        self._support_visible_since: float | None = None
 
         # Window properties
         self.setWindowTitle(APP_NAME)
@@ -245,7 +262,7 @@ class MonoCruiseWindow(QMainWindow):
 
         fresh = Settings()
         for k in fresh.__dataclass_fields__:
-            if not k.startswith("_"):
+            if not k.startswith("_") and k not in _RESET_EXEMPT:
                 setattr(self._settings, k, getattr(fresh, k))
         self._settings.save()
         self._settings_panel.apply_settings(self._settings)
@@ -314,6 +331,11 @@ class MonoCruiseWindow(QMainWindow):
         except Exception:
             logger.exception("main window poll: update indicator sync failed")
 
+        try:
+            self._sync_support_prompt()
+        except Exception:
+            logger.exception("main window poll: support prompt sync failed")
+
     def _apply_deferred_startup_visibility(self) -> None:
         """Restore the window once telemetry's first result is known. Startup always begins..."""
         if self._startup_visibility_applied:
@@ -341,6 +363,54 @@ class MonoCruiseWindow(QMainWindow):
 
         self.show_normally()
         logger.info("startup: no game, showing window normally")
+
+    def _sync_support_prompt(self) -> None:
+        """Accrue connected game time, then offer the support card when it is due."""
+        connected = False
+        try:
+            telemetry = registry.get_thread("telemetry_thread")
+            with telemetry.data._lock:
+                connected = bool(telemetry.data.is_connected)
+        except (KeyError, AttributeError):
+            pass
+        except Exception:
+            logger.debug("support prompt: telemetry unreadable", exc_info=True)
+
+        now = time.monotonic()
+        usage_seconds = self._usage.tick(connected, now)
+
+        if self._support_prompt_done or self._support_overlay is not None:
+            return
+        # Minimised or hidden means the app was auto-launched behind the game,
+        # which is exactly when this prompt must stay out of the way.
+        if not self._open_on_taskbar:
+            self._support_visible_since = None
+            return
+        if self._support_visible_since is None:
+            self._support_visible_since = now
+        if (now - self._support_visible_since) < _SUPPORT_PROMPT_DELAY_S:
+            return
+
+        try:
+            dismissed = int(self._settings.support_prompts_dismissed)
+        except (TypeError, ValueError):
+            dismissed = 0
+        if not prompt_is_due(usage_seconds, dismissed):
+            return
+
+        self._support_prompt_done = True
+        self._show_support_prompt()
+
+    def _show_support_prompt(self) -> None:
+        """One prompt per run; dismissing it schedules the next threshold."""
+        def _on_dismiss() -> None:
+            self._support_overlay = None
+            record_prompt_dismissed(self._settings)
+
+        logger.info(
+            "support prompt shown after %.1f usage hours", self._usage.usage_hours
+        )
+        self._support_overlay = show_support(self.centralWidget(), _on_dismiss)
 
     def show_normally(self) -> None:
         """Restore from minimized and bring the window to the foreground."""
