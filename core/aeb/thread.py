@@ -554,6 +554,38 @@ def _dampen_turning_curvature(
     return v_curvature / cal.turn_complete_curvature_scale
 
 
+def _evasion_kappas(
+    ego_curvature: float, ego_speed: float, cal,
+    cap: float | None = None, cap_weight: float = 0.0,
+) -> tuple[float, float]:
+    """Curvature of the two escape arcs: steer out of the turn, or tighten it.
+
+    ``cap`` is the grip ceiling, set only while saturation is confirmed, and it
+    spends on one side: the arc that turns tighter than the line ego already
+    holds gets whatever grip is left over, so a truck at the ceiling has no
+    tighter escape route. Unwinding asks for less curvature than the path, so
+    that arc is never limited, and in the linear regime neither is.
+
+    The allowance fades with the model's sat_weight rather than switching, the
+    way the path itself takes the cap: clamped outright on the arming frame the
+    corridor edge stepped 1.8 times as far as the path under it.
+    """
+    delta_kappa = min(cal.evasion_g / (ego_speed * ego_speed), cal.evasion_max_dkappa)
+    tighten = delta_kappa
+    if cap is not None and cap_weight > 0.0:
+        headroom = max(0.0, cap - abs(ego_curvature))
+        tighten = ((1.0 - cap_weight) * delta_kappa
+                   + cap_weight * min(delta_kappa, headroom))
+    turning_left = ego_curvature >= 0.0
+    left_kappa = ego_curvature + (tighten if turning_left else delta_kappa)
+    if ego_curvature < 0 and left_kappa < 0:
+        left_kappa = left_kappa / 1.3
+    right_kappa = ego_curvature - (delta_kappa if turning_left else tighten)
+    if ego_curvature > 0 and right_kappa > 0:
+        right_kappa = right_kappa / 1.3
+    return left_kappa, right_kappa
+
+
 def _ls_slope(samples, idx: int) -> float:
     """LS slope of samples[i][idx] vs time; robust to TMP jitter."""
     n = len(samples)
@@ -1246,9 +1278,10 @@ class AEBThread(BaseThread):
         # measured to hold. See core/aeb/README.md §1. Never RadarData.ego_curvature.
         ego_path = self._step_ego_path(ego_t_kin, ego_yaw_rad, ego_speed, steer)
         ego_curvature = ego_path.kappa_path
-        # Grip ceiling for every ego arc, evasion included: an arc tighter than
-        # the vehicle can hold is not an escape route.
+        # Grip ceiling for the escape arcs, set only while saturation is
+        # confirmed (README §1): unarmed it is the line ego is already on.
         ego_kappa_cap = ego_path.kappa_cap
+        ego_cap_weight = ego_path.sat_weight
 
         ego_hw: float = cal.ego_half_width
         ego_half_l: float = cal.ego_half_length
@@ -1293,19 +1326,9 @@ class AEBThread(BaseThread):
         ego_evasion_left: ArcPath | None = None
         ego_evasion_right: ArcPath | None = None
         if run_collision and ego_speed > 1.0:
-            delta_kappa = min(
-                cal.evasion_g / (ego_speed * ego_speed),
-                cal.evasion_max_dkappa,
+            left_kappa, right_kappa = _evasion_kappas(
+                ego_curvature, ego_speed, cal, ego_kappa_cap, ego_cap_weight,
             )
-            left_kappa = ego_curvature + delta_kappa
-            if ego_curvature < 0 and left_kappa < 0:
-                left_kappa = left_kappa / 1.3
-            right_kappa = ego_curvature - delta_kappa
-            if ego_curvature > 0 and right_kappa > 0:
-                right_kappa = right_kappa / 1.3
-            if ego_kappa_cap is not None:
-                left_kappa = max(-ego_kappa_cap, min(ego_kappa_cap, left_kappa))
-                right_kappa = max(-ego_kappa_cap, min(ego_kappa_cap, right_kappa))
             ego_evasion_left = build_arc(
                 ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
                 left_kappa, ego_hw, dynamic_horizon,

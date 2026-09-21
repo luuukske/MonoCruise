@@ -1072,6 +1072,10 @@ only accepts steady steer at low lateral load and skips the 2 s after a
 crash-sized speed step; the cap only engages above a lateral-accel floor. See
 `core/aeb/README.md` §1 for the rule that binds them and for the replay seeding.
 
+`kappa_cap` is published only while the cap is armed (`sat_weight > 0`).
+Unarmed it is the measured line, not a ceiling, and it is not a bound any
+consumer may apply.
+
 ---
 
 ## 12. RadarThread Interface

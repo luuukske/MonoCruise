@@ -22,7 +22,7 @@ from core.aeb.filters import (
     _apply_cross_zone, _earliest_hit, build_pipeline,
 )
 from core.aeb.lane_frame import Lane, project_to_ego_arc, classify
-from core.aeb.thread import AEBState, _INF
+from core.aeb.thread import AEBState, _INF, _evasion_kappas
 
 
 _DT = 1.0 / 30.0  # 30 Hz frame interval
@@ -208,15 +208,9 @@ def evaluate_frame(
 
     ego_evasion_left = ego_evasion_right = None
     if ego_speed > 1.0:
-        delta_kappa = min(
-            cal.evasion_g / (ego_speed * ego_speed), cal.evasion_max_dkappa,
-        )
-        left_kappa = ego_curvature + delta_kappa
-        if ego_curvature < 0 and left_kappa < 0:
-            left_kappa /= 1.3
-        right_kappa = ego_curvature - delta_kappa
-        if ego_curvature > 0 and right_kappa > 0:
-            right_kappa /= 1.3
+        # The thread's own helper, so scenarios cannot drift from the live
+        # corridor. Scenarios carry no saturation state, so no grip cap.
+        left_kappa, right_kappa = _evasion_kappas(ego_curvature, ego_speed, cal)
         ego_evasion_left = build_arc(
             ego_front_x, ego_front_z, ego_yaw_rad_val, ego_speed,
             left_kappa, ego_hw, dynamic_horizon,

@@ -170,6 +170,10 @@ class EgoPathModel:
             if cap is not None and self._sat_w > 0.0:
                 capped = math.copysign(min(abs(kappa_steer), cap), kappa_steer)
                 kappa_path = (1.0 - self._sat_w) * kappa_steer + self._sat_w * capped
+            else:
+                # Unarmed the EMA is the measured line, not a ceiling: read as
+                # a bound it pins every arc to the turn ego is already in.
+                cap = None
         else:
             self._sat_w = 0.0
             self._armed = False

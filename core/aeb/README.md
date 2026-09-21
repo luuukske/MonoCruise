@@ -122,6 +122,14 @@ still reach the corridor on the same frame. Do not add an "optional" history
 fallback beyond that cap: the reactivity loss is the problem, not the
 transient-sample count.
 
+The rule binds the published value too: `EgoPathState.kappa_cap` is set only
+while `sat_weight > 0`. Unarmed, the EMA is just the measured line within
+`sat_cap_margin` of what the truck is doing anyway, and a consumer that reads
+it as a ceiling bounds its arcs to the turn ego is already in. That is how it
+reached the evasion corridor: over a 200 clip sample it bit 78.1% of moving
+frames, 98.5% of them with the tires in their linear range, and 22.3% of
+frames lost both escape arcs at once.
+
 The learner and the cap split on lateral load, and that split is load-bearing:
 underperformance below `ego_path_learn_max_lat_ms2` is geometry, so the gain
 adapts; underperformance above `ego_path_sat_min_lat_ms2` is grip, so the cap
@@ -617,6 +625,16 @@ straight-line path.
 After all previous stages pass, checks if ego could steer around the target
 within `evasion_g=0.08 g`. Uses `margin=0.0` for evasion arc checks (physical
 body clearance, not padded corridor).
+
+**The escape arcs and the grip cap.** `thread.py::_evasion_kappas` offsets the
+ego path by `delta_kappa = min(evasion_g / v², evasion_max_dkappa)` on each
+side. While `EgoPathModel` has saturation confirmed, the arc that turns
+*tighter* than the line ego holds may only spend the grip left over
+(`cap - |kappa_path|`), so a truck already at the ceiling has no tighter escape
+route. The arc that unwinds asks for less curvature than the path and is never
+limited; in the linear regime neither is. The allowance fades with
+`sat_weight` rather than switching, because clamping outright on the arming
+frame stepped the corridor edge 1.8x as far as the path under it.
 
 **`ctx.lane == Lane.EGO` by itself never bypasses this stage.** Lane-EGO
 classification is not evidence of danger: stationary shoulder vehicles and
