@@ -173,6 +173,20 @@ def _write_version_marker() -> None:
         logging.getLogger("main").debug("could not write version marker", exc_info=True)
 
 
+def _sync_windows_app_details() -> None:
+    """Relabel the Windows Apps-list entry to this build (best-effort).
+
+    The updater does this too, right after installing. Doing it at boot as well
+    heals installs that were already updated in place before that existed, and
+    costs nothing once the entry is correct (shared/windows_app_details.py)."""
+    try:
+        from shared.windows_app_details import sync_app_details
+
+        sync_app_details(__version__, str(CONFIG_PATH.parent))
+    except Exception:
+        logging.getLogger("main").debug("could not sync Windows app details", exc_info=True)
+
+
 def _read_version_marker() -> str:
     """Previous-run version from marker (read before _write_version_marker)."""
     try:
@@ -235,6 +249,7 @@ def main() -> None:
     log.info("starting: debug=%s", settings.debug)
     previous_version = _read_version_marker()
     _write_version_marker()
+    _sync_windows_app_details()
     _sync_channel_to_build(settings, previous_version)
 
     # Auto-refresh settings in debug mode (lets you edit config.json while running).

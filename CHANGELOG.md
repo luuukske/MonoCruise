@@ -17,6 +17,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ### Fixed
 - **Clip screenshot on a 4K display showed readable text**: the picture was a zoomed-in corner (due to the DPI setting) of the game instead of the whole window. It now grabs the full game window, so on-screen text stays unreadable.
 - **Emergency braking ignored the room you had to steer around something**: the fix from preview.23 where AEB relied on the actual path you were going to travel a bit too much, and evasion paths were not accounted for. fixed now.
+- **Windows kept showing the version you first installed**: the installer writes that entry once, and updates replace the files without touching it, so the installed apps list still said preview.9 for anyone who has been updating in place since. The updater corrects it after every update, and MonoCruise also fixes it at startup, so an install that is already wrong is right again after one launch.
 
 ## [1.1.0-preview.23] - 2026-09-21
 ### Added

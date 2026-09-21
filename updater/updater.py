@@ -175,6 +175,30 @@ def release_version(release: dict) -> Version | None:
     except (InvalidVersion, ValueError):
         return None
 
+
+def release_version_text(release: dict) -> str:
+    """A release's tag without the leading 'v', as the version strings on disk
+    are written (e.g. '1.1.0-preview.1'). '' when the release has no tag."""
+    tag = ((release or {}).get("tag_name") or "").strip()
+    return tag[1:] if tag.startswith("v") else tag
+
+
+def sync_app_details(release: dict, root: str) -> None:
+    """Point the Windows Apps list at the version just installed.
+
+    The installer writes that entry once and an in-place update never reruns
+    it, so without this Windows keeps naming the originally installed version
+    (shared/windows_app_details.py). Best-effort: a registry write must not
+    fail an update whose files landed fine."""
+    version = release_version_text(release)
+    if not version:
+        return
+    try:
+        from shared.windows_app_details import sync_app_details as _sync
+        _sync(version, root)
+    except Exception:
+        pass  # cosmetic; the app retries this at its next boot
+
 # Embedded SVG icons
 SVG_ICONS = { # credits to https://lucide.dev/
     'download': '''<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 13v8l-4-4"/><path d="m12 21 4-4"/><path d="M4.393 15.269A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.436 8.284"/></svg>''',
@@ -228,6 +252,7 @@ class UpdateWorker(QThread):
 
                 self.stage_changed.emit('install')
                 self._install_update(temp_zip)
+                sync_app_details(self.release, self.install_root)
             finally:
                 try:
                     os.remove(temp_zip)

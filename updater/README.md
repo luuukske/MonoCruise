@@ -19,6 +19,10 @@ Directory and sentinel names must match `shared/updater_swap.py` (tests assert t
 
 Markdown renderer and dropdown live at repo root (`shared/`), bundled via `updater.spec`. Repo root is added to `sys.path` for source and frozen builds.
 
+## Windows "Installed apps" entry
+
+The Inno uninstall key is written once, by the installer. After a successful install the updater relabels its `DisplayVersion`/`DisplayName` (`shared/windows_app_details.py`); MonoCruise repeats the call at boot, which heals installs updated before this existed. Best-effort, and skipped when the entry's `InstallLocation` is not this install root.
+
 ## Update safety
 
 Paths under install root in `_PRESERVE_PREFIXES` are never overwritten or deleted. Root-level updater files from the old flat zip layout are skipped during extract; current zips ship `updater/` and stage via `_move_into_place`.

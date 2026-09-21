@@ -56,6 +56,9 @@ a = Analysis(
         'shared.theme',
         'shared.markdown_renderer',
         'shared.dropdown',
+        # Imported lazily (inside sync_app_details) so a broken shared/ cannot
+        # stop the updater from starting; listed here so it still gets bundled.
+        'shared.windows_app_details',
     ],
     hookspath=[],
     runtime_hooks=[],
