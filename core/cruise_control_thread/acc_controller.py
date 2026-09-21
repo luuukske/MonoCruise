@@ -185,6 +185,8 @@ class ACConfig:
     standstill_launch_accel_ms2: float = standstill_hold.LAUNCH_ACCEL_MS2
     j_max_ms3: float = J_MAX_MS3
     j_release_tau_s: float = idm_cah.J_RELEASE_TAU_S
+    j_release_full_ms: float = idm_cah.J_RELEASE_FULL_MS
+    j_release_zero_ms: float = idm_cah.J_RELEASE_ZERO_MS
     tau_input_near_s: float = TAU_INPUT_NEAR_S
     tau_input_far_s: float = TAU_INPUT_FAR_S
     d_input_near_m: float = D_INPUT_NEAR_M
@@ -276,8 +278,8 @@ class AdaptiveCruiseController:
             self._blinker.released_vid = None
             self._standstill.reset()
             target = self.config.no_lead_ceiling_ms2
-            a_jerk = self._jerk_limit(target, dt, is_emergency=False, law_release=False)
-            return self._output_filter(a_jerk, dt, is_emergency=False)
+            return self._output_filter(
+                self._jerk_limit(target, dt, False, v_ego, law_release=False), dt, False)
 
         if chain_raw:
             chain_smooth = self._smooth_chain(chain_raw, dt, now)
@@ -296,8 +298,7 @@ class AdaptiveCruiseController:
             committed=blinker.committed,
             lane_offset_m=blinker.lane_offset_m,
         )
-        a_jerk = self._jerk_limit(a_raw, dt, is_emergency)
-        return self._output_filter(a_jerk, dt, is_emergency)
+        return self._output_filter(self._jerk_limit(a_raw, dt, is_emergency, v_ego), dt, is_emergency)
 
     def reset(self) -> None:
         self._prev_mono = None
@@ -775,15 +776,14 @@ class AdaptiveCruiseController:
 
         return a_dec_delta + lift
 
-    def _jerk_limit(self, a_new: float, dt: float, is_emergency: bool,
+    def _jerk_limit(self, a_new: float, dt: float, is_emergency: bool, v_ego: float,
                     law_release: bool = True) -> float:
-        if is_emergency or self._prev_cmd_ms2 is None:
-            self._prev_cmd_ms2 = a_new
-            return a_new
-        # Fast release follows the law only: a lost lead and the hold keep the plain rate. §13.1.
-        fast = law_release and not self._standstill.held
-        a_new = idm_cah.jerk_step(self._prev_cmd_ms2, a_new, dt, self.config.j_max_ms3,
-                                  self.config.j_release_tau_s if fast else 0.0)
+        if not is_emergency and self._prev_cmd_ms2 is not None:
+            # Fast release is the launch out of a stop: a lost lead, the hold and a rolling truck keep the plain rate. §13.1.
+            cfg, fast = self.config, law_release and not self._standstill.held
+            a_new = idm_cah.jerk_step(
+                self._prev_cmd_ms2, a_new, dt, cfg.j_max_ms3, cfg.j_release_tau_s,
+                idm_cah.fade(v_ego, cfg.j_release_full_ms, cfg.j_release_zero_ms) if fast else 0.0)
         self._prev_cmd_ms2 = a_new
         return a_new
 

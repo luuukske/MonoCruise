@@ -11,6 +11,9 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Changed
+- **Cruise is calmer in heavy traffic**: the quicker brake release from preview.23 made it jump back on the gas after every brake in stop-and-go. It now only helps you get going again from a crawl or a stop, and at road speed the brake eases off smoothly like before.
+
 ### Fixed
 - **Emergency braking ignored the room you had to steer around something**: the fix from preview.23 where AEB relied on the actual path you were going to travel a bit too much, and evasion paths were not accounted for. fixed now.
 

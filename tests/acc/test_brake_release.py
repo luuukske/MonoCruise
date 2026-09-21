@@ -2,7 +2,9 @@
 
 The at-clamp slam bypasses the jerk limiter on entry but not on exit, so letting
 go of -6.55 m/s^2 at the 2.5 m/s^3 onset rate took 2.6 s whatever the law asked.
-Clip c5a0a74e: the truck braked to 8 km/h behind a lead holding 31 km/h. See
+Clip c5a0a74e: the truck braked to 8 km/h behind a lead holding 31 km/h. The
+faster release is gated to the launch band: a rolling truck keeps the symmetric
+rate, which is what stops heavy traffic feeling eager. See
 core/acc/ACC_ARCHITECTURE.md §13.1."""
 from __future__ import annotations
 
@@ -14,6 +16,7 @@ import pytest
 from core.cruise_control_thread import acc_controller
 from core.cruise_control_thread.acc_controller import AdaptiveCruiseController, _LeadSnapshot
 from core.cruise_control_thread.blinker_arbitration import BlinkerState
+from core.cruise_control_thread import idm_cah
 from core.cruise_control_thread.idm_cah import jerk_step
 from core.settings import Settings
 
@@ -88,26 +91,56 @@ def _snap(dist_m: float, v_lead: float, a_lead: float = 0.0):
 def _tick(ctrl, dist_m, v_ego, v_lead, a_lead=0.0):
     raw, smooth = _snap(dist_m, v_lead, a_lead)
     a_raw, bypass = ctrl._compute_command(raw, smooth, v_ego, DT)
-    return a_raw, ctrl._output_filter(ctrl._jerk_limit(a_raw, DT, bypass), DT, bypass), bypass
+    return a_raw, ctrl._output_filter(ctrl._jerk_limit(a_raw, DT, bypass, v_ego), DT, bypass), bypass
 
 
-def _seconds_to_let_go(release_tau: float) -> float:
+# (gap m, ego m/s, lead m/s) for a slam through the hard-TTC overlay. One crawls
+# out of a stop-and-go brake, the other rolls at 54 km/h.
+LAUNCH_SLAM = (2.0, 1.5, 0.0)
+ROLLING_SLAM = (8.0, 15.0, 8.0)
+
+
+def _seconds_to_let_go(release_tau: float, slam: tuple[float, float, float] = LAUNCH_SLAM
+                       ) -> float:
     """Slam on a close braking lead, then the lead is clear: time until the cap is >= 0."""
+    gap_m, v_ego, v_lead = slam
     ctrl = AdaptiveCruiseController()
     ctrl.config.j_release_tau_s = release_tau
-    _, cap, bypass = _tick(ctrl, 8.0, 15.0, 8.0, -6.0)
+    _, cap, bypass = _tick(ctrl, gap_m, v_ego, v_lead, -6.0)
     assert bypass and cap == pytest.approx(ctrl.config.max_decel_ms2)
     t = 0.0
     while cap < 0.0 and t < 10.0:
-        law, cap, _ = _tick(ctrl, 30.0, 15.0, 20.0)
+        law, cap, _ = _tick(ctrl, 30.0, v_ego, v_ego + 5.0)
         assert law > 0.0, "the law has already let go; only the limiter holds the brake"
         t += DT
     return t
 
 
-def test_a_slam_lets_go_once_the_law_does():
+def test_a_slam_lets_go_once_the_law_does_while_launching():
     assert _seconds_to_let_go(_cfg().j_release_tau_s) < 0.8
     assert _seconds_to_let_go(0.0) > 2.5, "the fixture must reproduce the old hangover"
+
+
+def test_a_rolling_truck_keeps_the_plain_release():
+    """The gate: above the launch band the limiter is symmetric again."""
+    assert _seconds_to_let_go(_cfg().j_release_tau_s, ROLLING_SLAM) == pytest.approx(
+        _seconds_to_let_go(0.0, ROLLING_SLAM))
+    assert _seconds_to_let_go(_cfg().j_release_tau_s, ROLLING_SLAM) > 2.5
+
+
+def test_the_gate_is_a_ramp_over_the_launch_band():
+    cfg = _cfg()
+    assert cfg.j_release_full_ms < cfg.j_release_zero_ms
+    w = [idm_cah.fade(v, cfg.j_release_full_ms, cfg.j_release_zero_ms)
+         for v in (0.0, cfg.j_release_full_ms, 4.5, cfg.j_release_zero_ms, 20.0)]
+    assert w[0] == 1.0 and w[1] == 1.0 and 0.0 < w[2] < 1.0 and w[3] == 0.0 and w[4] == 0.0
+
+
+def test_a_zero_weight_is_the_old_limiter_bit_for_bit():
+    """The gate must not leave a residue of the boost above the band."""
+    j = _cfg().j_max_ms3
+    for prev, target, dt in _cases():
+        assert jerk_step(prev, target, dt, j, _cfg().j_release_tau_s, 0.0) ==             _plain(prev, target, dt, j)
 
 
 def test_a_lost_lead_releases_at_the_plain_rate(monkeypatch):
@@ -132,12 +165,13 @@ def test_the_standstill_hold_is_eased_into_at_the_plain_rate():
     # Same starting command, law asking to go: the release is not rate-capped.
     moving = AdaptiveCruiseController()
     moving._prev_cmd_ms2 = moving._output_ema = -2.0
-    _tick(moving, 30.0, 15.0, 20.0)
+    _tick(moving, 30.0, 1.5, 6.5)
     assert moving._prev_cmd_ms2 > -2.0 + 1.5 * j * DT
 
 
 def _follow_a_braking_lead(release_tau: float, level: int = 1, v0_kmh: float = 50.0,
-                           decel: float = 4.0, dv_kmh: float = 25.0):
+                           decel: float = 4.0, dv_kmh: float = 25.0,
+                           band: tuple[float, float] | None = None):
     """Closed loop: lead brakes, then holds its new speed. Returns (undershoot km/h, hang s).
 
     Perfect lead kinematics, so this isolates the limiter from the radar chain."""
@@ -146,6 +180,8 @@ def _follow_a_braking_lead(release_tau: float, level: int = 1, v0_kmh: float = 5
     try:
         ctrl = AdaptiveCruiseController()
         ctrl.config.j_release_tau_s = release_tau
+        if band is not None:
+            ctrl.config.j_release_full_ms, ctrl.config.j_release_zero_ms = band
         v = v_lead = v0_kmh / 3.6
         v_end = v_lead - dv_kmh / 3.6
         gap = ctrl.config.s0_m + v * acc_controller.T_HEADWAY_BY_LEVEL_S[level]
@@ -170,7 +206,18 @@ def _follow_a_braking_lead(release_tau: float, level: int = 1, v0_kmh: float = 5
 
 
 def test_ego_does_not_fall_far_below_a_lead_that_stopped_braking():
-    under, hang = _follow_a_braking_lead(_cfg().j_release_tau_s)
-    old_under, old_hang = _follow_a_braking_lead(0.0)
-    assert hang < 0.7 and under < 3.0
+    """Closed loop through the launch band: 30 km/h down to a 10 km/h crawl."""
+    kw = dict(v0_kmh=30.0, decel=4.0, dv_kmh=20.0)
+    under, hang = _follow_a_braking_lead(_cfg().j_release_tau_s, **kw)
+    old_under, old_hang = _follow_a_braking_lead(0.0, **kw)
+    assert hang < 0.7 and under < 5.0
     assert old_hang > 1.2 and old_under > 8.0, "the fixture must reproduce the old hangover"
+
+
+def test_a_rolling_truck_follows_a_braking_lead_exactly_as_before():
+    """The gate: a brake that never enters the band cannot be made eager by it."""
+    kw = dict(v0_kmh=70.0, decel=4.0, dv_kmh=20.0)
+    assert _follow_a_braking_lead(_cfg().j_release_tau_s, **kw) ==         _follow_a_braking_lead(0.0, **kw)
+    # Same run with the gate opened at every speed: this is what it costs.
+    wide = _follow_a_braking_lead(_cfg().j_release_tau_s, band=(1e6, 1e6 + 1.0), **kw)
+    assert wide[1] < _follow_a_braking_lead(0.0, **kw)[1] - 0.5

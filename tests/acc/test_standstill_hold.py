@@ -35,7 +35,7 @@ def _tick(ctrl: AdaptiveCruiseController, dist_m: float, v_ego: float,
     """One controller tick. Returns (law command, published cap, smoothing bypassed)."""
     raw, smooth = _snap(dist_m, v_lead, a_lead, vid)
     a_raw, bypass = ctrl._compute_command(raw, smooth, v_ego, DT)
-    cap = ctrl._output_filter(ctrl._jerk_limit(a_raw, DT, bypass), DT, bypass)
+    cap = ctrl._output_filter(ctrl._jerk_limit(a_raw, DT, bypass, v_ego), DT, bypass)
     return a_raw, cap, bypass
 
 

@@ -49,6 +49,10 @@ TAU_ALEAD_FF_S: float = 0.50
 # Brake release chases the law with this time constant instead of the jerk rate,
 # so a slam that bypassed the limiter can let go. 0 disables. §13.1.
 J_RELEASE_TAU_S: float = 0.30
+# Ego-speed gate on it: the launch out of a stop-and-go brake gets the faster
+# release, a rolling truck keeps the plain symmetric rate. §13.1.
+J_RELEASE_FULL_MS: float = 2.0
+J_RELEASE_ZERO_MS: float = 7.0
 
 
 def ema_step(prev: float | None, new: float, dt: float, tau: float) -> float:
@@ -59,16 +63,18 @@ def ema_step(prev: float | None, new: float, dt: float, tau: float) -> float:
 
 
 def jerk_step(prev: float, target: float, dt: float, j_max: float,
-              release_tau: float) -> float:
+              release_tau: float, release_w: float = 1.0) -> float:
     """One jerk-limited step toward `target`; a braking command may rise faster.
 
+    `release_w` scales that faster rise; 0 is the plain limit bit for bit.
     Within about `j_max * release_tau` of the target it is the plain limit."""
     max_step = j_max * dt
     delta = target - prev
     rise = max_step
-    if release_tau > 0.0 and prev < 0.0:
+    if release_tau > 0.0 and release_w > 0.0 and prev < 0.0:
         # Never past zero: above it the gas side keeps the plain jerk limit.
-        rise = max(rise, min(delta * (1.0 - math.exp(-dt / release_tau)), -prev))
+        boost = release_w * delta * (1.0 - math.exp(-dt / release_tau))
+        rise = max(rise, min(boost, -prev))
     if delta > rise:
         return prev + rise
     if delta < -max_step:

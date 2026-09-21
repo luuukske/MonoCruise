@@ -71,7 +71,7 @@ def _approach_stopped(level: int, v0_ms: float = 25.0, d0_m: float = 250.0):
             raw, _ = _snap(max(d - 2.5, 0.01))
             smooth = ctrl._smooth_chain(raw, DT, t)
             a_raw, emergency = ctrl._compute_command(raw, smooth, v, DT)
-            a = ctrl._output_filter(ctrl._jerk_limit(a_raw, DT, emergency),
+            a = ctrl._output_filter(ctrl._jerk_limit(a_raw, DT, emergency, v),
                                     DT, emergency)
             v = max(0.0, v + max(a, -8.0) * DT)
             d -= v * DT
@@ -248,7 +248,7 @@ def _brake_from_matched(lead_decel: float, level: int = 2, v0_ms: float = 22.2):
         raw, _ = _snap(gap, v_lead=v_lead, a_lead=-lead_decel)
         smooth = ctrl._smooth_chain(raw, DT, t)
         a_raw, emergency = ctrl._compute_command(raw, smooth, v_ego, DT)
-        a = ctrl._output_filter(ctrl._jerk_limit(a_raw, DT, emergency), DT, emergency)
+        a = ctrl._output_filter(ctrl._jerk_limit(a_raw, DT, emergency, v_ego), DT, emergency)
         a = min(0.0, a)
         peak = min(peak, a)
         v_ego = max(0.0, v_ego + a * DT)
@@ -546,7 +546,7 @@ def _brake_to_a_halt(lead_decel: float, gap0_m: float = 40.0, v0_ms: float = 22.
                            a_lead=-lead_decel if v_lead > 0.01 else 0.0)
             smooth = ctrl._smooth_chain(raw, DT, t)
             a_raw, emergency = ctrl._compute_command(raw, smooth, v_ego, DT)
-            cap = ctrl._output_filter(ctrl._jerk_limit(a_raw, DT, emergency),
+            cap = ctrl._output_filter(ctrl._jerk_limit(a_raw, DT, emergency, v_ego),
                                       DT, emergency)
             trips += int(emergency)
             if prev is not None:

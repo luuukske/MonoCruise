@@ -1227,7 +1227,7 @@ constant per lead vehicle. `eff_dist = lead.dist_m − tail_m`.
 | Layer | Time constant / cap | Notes |
 |---|---|---|
 | Jerk limiter | `J_MAX = 2.5 m/s³` | Below 2.94 m/s³ comfort threshold (Bellem 2022). Bypassed on emergency. |
-| Brake release | `J_RELEASE_TAU_S = 0.30 s` | A braking command rising toward the law may chase it with this τ instead of `J_MAX`, never past zero. §13.1. |
+| Brake release | `J_RELEASE_TAU_S = 0.30 s`, gated to `v_ego ≤ 7 m/s` | A braking command rising toward the law may chase it with this τ instead of `J_MAX`, never past zero, and only while ego is in the launch band. §13.1. |
 | Output EMA  | `τ = 36 ms` | Legacy α=0.6 per 30 Hz tick, ported to framerate-independent τ. Bypassed on emergency. |
 
 The jerk cap is the dominant smoothness shaper between the control law
@@ -1257,9 +1257,9 @@ takes this path. The recorded truck deceleration tracks the replayed cap
 with a 0.15 s lag, which rules out the mapper.
 
 **Rule.** While the previous command is negative, the rise per tick is
-`max(J_MAX·dt, min(Δ·(1 − e^(−dt/τ)), −prev))`, with `Δ` the gap to the
-law (`idm_cah.jerk_step`). Properties this buys, all pinned in
-`tests/acc/test_brake_release.py`:
+`max(J_MAX·dt, min(w·Δ·(1 − e^(−dt/τ)), −prev))`, with `Δ` the gap to the
+law and `w` the speed gate below (`idm_cah.jerk_step`). Properties this
+buys, all pinned in `tests/acc/test_brake_release.py`:
 
 - Within about `J_MAX·τ` (0.75 m/s²) of the law it is the plain limit,
   bit for bit, so telemetry jitter still sees one symmetric rate and is
@@ -1272,6 +1272,9 @@ law (`idm_cah.jerk_step`). Properties this buys, all pinned in
   after the grace window) and the standstill hold (§10.1) keep the plain
   rate: the first is missing information rather than a law asking to let
   go, the second would dip the brake just as the hold FSM applies its own.
+- It only runs in the launch band. `w = fade(v_ego, 2.0, 7.0)`: full at or
+  below 7 km/h, zero at or above 25 km/h, a cosine ramp between. At `w = 0`
+  the step is the plain limiter bit for bit.
 
 Measured in closed loop (simulated truck with 0.1 s dead time and 0.15 s
 lag, the shipped radar kinematics chain on the lead; `j_release_tau_s = 0`
@@ -1283,6 +1286,19 @@ is the old limiter):
 | τ 0.30 | 22.5 km/h | 0.2–0.5 s |
 | τ 0.50 | 19.4 km/h | 0.6–0.8 s |
 | fixed 5 m/s³ release (rejected) | 17.6 km/h | 0.1–1.0 s |
+
+**The speed gate (2026-09-21).** Ungated, this fires on nearly every lead
+brake at level 1, and in dense traffic the truck was back on the gas as
+soon as the lead stopped braking, over and over. The driver read that as
+eagerness. The release is now the thing it was needed for, which is the
+launch out of a stop-and-go brake: it is full strength up to 7 km/h, gone
+by 25 km/h, and a brake that carries ego down into the band gets it on the
+way out. The cost is the case it was written for. In the closed-loop
+fixture at 70 km/h behind a lead braking 4 m/s² for 20 km/h, the hang
+after the law turns positive goes 0.52 s → 1.96 s and the undershoot
+3.4 km/h → 18.7 km/h; at 50 km/h, 0.51 s → 1.28 s and 0.6 → 11.0 km/h.
+The knobs are `j_release_full_ms` / `j_release_zero_ms`; widening them is
+the one-line way back.
 
 Minimum gap was identical in every synthetic case: the closest point
 comes before the release. Fixed asymmetric rates were rejected on noise:
@@ -1397,7 +1413,7 @@ ttc_hard_s, d_emergency_m, emergency_decel_ms2,
 max_accel_ms2, max_decel_ms2,
 standstill_speed_ms, standstill_gap_slack_m, standstill_hold_decel_ms2,
 standstill_launch_accel_ms2,
-j_max_ms3, j_release_tau_s,
+j_max_ms3, j_release_tau_s, j_release_full_ms, j_release_zero_ms,
 tau_input_near_s, tau_input_far_s, d_input_near_m, d_input_far_m,
 tau_alead_brake_s, tau_alead_relax_s,
 tau_output_s,
