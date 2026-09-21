@@ -159,8 +159,12 @@ class ClipFeatures:
 
 
 def _ego_kappa(steer: float) -> float:
-    """AEB's yaw-rate proxy curvature. Speed cancels, see core/aeb/README.md."""
-    return math.radians(steer * _CAL.yaw_rate_steer_gain)
+    """Steer term of the ego path, at the gain prior. See core/aeb/README.md §1.
+
+    A dossier feature, not the arc: the learned gain and the grip cap belong to
+    the model the replay steps, and this is a per-frame scalar for sorting.
+    """
+    return _CAL.ego_path_gain_prior * steer
 
 
 def _veh_yaw(v) -> float:

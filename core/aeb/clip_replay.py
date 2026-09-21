@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from core.aeb.calibration import DEFAULT as _CAL
+from core.aeb.calibration import DEFAULT as _CAL, ego_path_params
 from core.aeb.clip_schema import Clip, ConsumedContext, LiveAEB, RadarFrameRecord
 from core.aeb.clip_timebase import decode_buffers, replay_frames
 from core.aeb.filters import VehicleCurvatureBlender, _vehicle_curvature_blend, travel_sign
@@ -13,6 +13,7 @@ from core.aeb.thread import (
     AEBSnapshot, AEBState, _INF, _dampen_turning_curvature,
     _swap_trailer_kinematics,
 )
+from core.radar.ego_path_model import EgoPathModel, EgoPathState, warm_gain
 from core.radar.elevation import ElevationGate, EgoElevationTrack, build_surface
 from core.radar.reader import TrafficReader
 from core.radar.traffic import (
@@ -56,10 +57,22 @@ def raw_target_decel(live: LiveAEB, cal: dict) -> float:
     return max(0.0, min(live.required_decel_ms2, cap))
 
 
-def _ego_curvature(steer: float, speed: float) -> float:
-    if speed > 0.5:
-        return math.radians(steer * speed * _CAL.yaw_rate_steer_gain) / speed
-    return 0.0
+def ego_path_replay(clip: Clip, cal=_CAL) -> tuple[dict[float, float], float]:
+    """Sim-clock time per radar frame, plus the steer gain a live session would hold.
+
+    Clips never record the learned gain (a new clip field bumps CONSENT_VERSION),
+    so replay re-derives it from the whole clip: a live truck has been learning
+    far longer than an 11 second window, and starting from the prior every time
+    would replay a colder model than the one that made the recorded decisions.
+    """
+    frames = replay_frames(clip)
+    tkin_by_t = {f.t_mono: f.t_wall for f in frames}
+    samples = [
+        (f.t_wall, f.ego.rotationX * 2.0 * math.pi, f.ego.speed, f.ego.userSteer)
+        for f in frames
+        if not f.ego.paused
+    ]
+    return tkin_by_t, warm_gain(samples, ego_path_params(cal))
 
 
 def _veh_yaw(v: Vehicle) -> float:
@@ -140,7 +153,8 @@ def _vehicle_arc_list(v: Vehicle, arc_curvature: float,
 
 def _build_snapshot(ego, vehicles: list[Vehicle], live: LiveAEB,
                     consumed: ConsumedContext,
-                    blender: VehicleCurvatureBlender, now: float) -> AEBSnapshot:
+                    blender: VehicleCurvatureBlender, now: float,
+                    ego_path=None) -> AEBSnapshot:
     ego_x = ego.coordinateX
     ego_z = ego.coordinateZ
     ego_yaw = ego.rotationX * 2.0 * math.pi
@@ -151,7 +165,8 @@ def _build_snapshot(ego, vehicles: list[Vehicle], live: LiveAEB,
     capacity = max(consumed.max_brake_ms2, 1.0)
     t_stop = ego_speed / (_CAL.ego_decel_frac * capacity) if capacity > 0 else 0.0
     horizon = min(max(_CAL.arc_horizon_min, t_stop * 2.0), _CAL.arc_horizon_max)
-    curv = _ego_curvature(ego.userSteer, ego_speed)
+    path = ego_path if ego_path is not None else EgoPathState()
+    curv = path.kappa_path
 
     fwd_x = -math.sin(ego_yaw)
     fwd_z = -math.cos(ego_yaw)
@@ -210,6 +225,10 @@ def _build_snapshot(ego, vehicles: list[Vehicle], live: LiveAEB,
         hit_x=hit_x, hit_z=hit_z,
         suppression_reasons={int(k): v for k, v in live.suppression_reasons.items()},
         tmp_traffic_session=any(v.is_tmp for v in vehicles),
+        ego_kappa_steer=path.kappa_steer,
+        ego_kappa_meas=path.kappa_meas,
+        ego_steer_gain=path.gain,
+        ego_path_saturated=path.saturated,
     )
 
 
@@ -355,6 +374,10 @@ def replay_clip(clip: Clip, *, stream=None) -> list[ReviewFrame]:
     )
     frames = sorted(clip.radar_frames, key=lambda f: f.t_mono)
 
+    # Same ego path model the live loop runs, stepped on the same frames.
+    tkin_by_t, warm = ego_path_replay(clip)
+    ego_path = EgoPathModel(params=ego_path_params(_CAL), gain=warm)
+
     t0 = clip_t0(clip)
 
     # One blender for the whole clip: its One-Euro state must carry tick to tick
@@ -373,8 +396,16 @@ def replay_clip(clip: Clip, *, stream=None) -> list[ReviewFrame]:
         if ego is None:
             continue
         vehicles_eff = _swap_trailer_kinematics(vehicles)
+        t_kin = tkin_by_t.get(ft, 0.0) if ft is not None else 0.0
+        if t_kin > 0.0 and not ego.paused:
+            path_state = ego_path.step(
+                t_kin, ego.rotationX * 2.0 * math.pi, ego.speed, ego.userSteer,
+            )
+        else:
+            path_state = ego_path.state
         snap = _build_snapshot(
             ego, vehicles_eff, tk.live_aeb, tk.consumed, blender, tk.t_mono,
+            ego_path=path_state,
         )
         out.append(ReviewFrame(
             tk.t_mono - t0, tk.t_mono, snap, tk.live_aeb, tk.consumed,

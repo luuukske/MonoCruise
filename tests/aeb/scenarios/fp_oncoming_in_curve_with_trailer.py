@@ -15,7 +15,6 @@ EXPECTED = {"max_state": "STANDBY"}
 
 
 def build() -> list[Frame]:
-    steer = _EGO_KAPPA * 180.0 / (12.0 * math.pi)
     frames = []
     closing = _EGO_SPEED + _TARGET_SPEED
     for i in range(60):
@@ -24,7 +23,7 @@ def build() -> list[Frame]:
         if distance < 5.0:
             break
         ego = EgoState(x=0.0, y=0.0, z=0.0, yaw_norm=0.5,
-                       speed=_EGO_SPEED, steer=steer)
+                       speed=_EGO_SPEED, kappa=_EGO_KAPPA)
         tractor = make_vehicle(
             vid=1,
             x=3.5,

@@ -116,6 +116,10 @@ class TelemetryThreadData(ThreadData):
     rotationY: float = 0.0          # pitch normalized [0, 1] full-circle: use _road_grade_from_norm to convert
     hazardsActive: bool = False
 
+    # SDK truck model id ("vehicle.scania.r" and the like). Runtime only: the
+    # ego path model drops its learned steer gain when the vehicle changes.
+    truck_id: str = ""
+
     coordinateX: float = 0.0
     coordinateY: float = 0.0   # elevation (m): used for road-level filtering
     coordinateZ: float = 0.0
@@ -181,6 +185,7 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.parkBrake           = raw.get("parkBrake", False)
         data.rotationY           = raw.get("rotationY", 0.0)
         data.hazardsActive       = raw.get("lightsHazards", False)
+        data.truck_id            = str(raw.get("truckId", "") or "")
         # trailer_count already counts leading slots with wheels and attached;
         # raw["trailer"] is an array of structs, so flat "trailer[0].x" keys never match.
         data.ego_has_trailer = data.trailer_count > 0

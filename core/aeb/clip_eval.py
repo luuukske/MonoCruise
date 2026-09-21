@@ -5,8 +5,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT
-from core.aeb.clip_replay import decode_radar_stream, nearest_frame_t
+from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT, ego_path_params
+from core.aeb.clip_replay import decode_radar_stream, ego_path_replay, nearest_frame_t
+from core.radar.ego_path_model import EgoPathModel
 from core.aeb.clip_schema import Clip
 from core.aeb.filters import VehicleCurvatureBlender, build_pipeline
 from core.aeb.thread import (
@@ -53,6 +54,8 @@ def _make_headless(cal: AEBCalibration) -> AEBThread:
     t._cal = cal
     t._pipeline = build_pipeline(cal)
     t._curvature_blender = VehicleCurvatureBlender(cal)
+    t._ego_path = EgoPathModel(params=ego_path_params(cal))
+    t._ego_path_cal = cal
     t.running = True
     t._radar_visualizer = None
     t._sound_handler = _NoSound()
@@ -78,7 +81,8 @@ def _apply_warm_state(t: AEBThread, ws) -> None:
         t._state_hold_until = float(ws.warn_hold_until_mono)
 
 
-def _snapshot_tuple(ego, vehicles, radar_t_mono: float, off_ids=frozenset()):
+def _snapshot_tuple(ego, vehicles, radar_t_mono: float, off_ids=frozenset(),
+                    t_kin: float = 0.0):
     """Build the tuple _read_radar_snapshot returns, from clip ego + vehicles."""
     return (
         vehicles,
@@ -88,11 +92,12 @@ def _snapshot_tuple(ego, vehicles, radar_t_mono: float, off_ids=frozenset()):
         _pitch_deg(ego.rotationY),
         ego.userSteer,
         bool(ego.ego_has_trailer),
-        None,                       # ego_curvature: AEB uses the yaw-rate proxy
+        None,                       # ego_curvature: history fit, AEB never uses it
         any(v.is_tmp for v in vehicles),
         bool(ego.paused),
         radar_t_mono,
         frozenset(off_ids),
+        t_kin,
     )
 
 
@@ -107,6 +112,12 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
         stream if stream is not None else decode_radar_stream(clip)
     )
     t = _make_headless(cal)
+    # Seed the ego path gain the way a live session would hold it (the clip
+    # cannot record it); with learning off the prior stands. See ego_path_replay.
+    tkin_by_t, warm_steer_gain = ego_path_replay(clip, cal)
+    if cal.ego_path_gain_learning_enabled:
+        t._ego_path.gain = warm_steer_gain
+    t._read_vehicle_key = lambda: None      # one clip is one vehicle
     if warm:
         _apply_warm_state(t, clip.metadata.aeb_warm_state)
 
@@ -124,7 +135,10 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
         if ego is None:
             continue
 
-        snap = _snapshot_tuple(ego, vehicles, ft, off_by_t.get(ft, frozenset()))
+        snap = _snapshot_tuple(
+            ego, vehicles, ft, off_by_t.get(ft, frozenset()),
+            tkin_by_t.get(ft, 0.0),
+        )
         t._read_radar_snapshot = lambda s=snap: s
         t._read_max_brake_ms2 = lambda mb=tk.consumed.max_brake_ms2: mb
         t._read_user_braking = (

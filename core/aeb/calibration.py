@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
+from core.radar.ego_path_model import EgoPathParams
+
 
 @dataclass(frozen=True)
 class AEBCalibration:
@@ -62,7 +64,27 @@ class AEBCalibration:
     evasion_g: float = 0.08 * 9.81
     evasion_g_oncoming: float = 0.13 * 9.81
     evasion_max_dkappa: float = 0.008
+    # Dead: kept for clip-metadata compatibility. Ego curvature now comes from
+    # EgoPathModel (core/radar/ego_path_model.py), see core/aeb/README.md §1.
     yaw_rate_steer_gain: float = 12.0
+
+    # Ego path: steer-led, gain learned per vehicle, grip capped (README §1).
+    # Prior stays the historical value; the learner is what makes it accurate.
+    ego_path_gain_prior: float = math.radians(12.0)
+    ego_path_gain_learning_enabled: bool = True
+    ego_path_cap_enabled: bool = True
+    ego_path_meas_window_s: float = 0.13
+    ego_path_learn_window_s: float = 0.25
+    ego_path_learn_min_steer: float = 0.012
+    ego_path_learn_max_lat_ms2: float = 3.5
+    ego_path_learn_tau_s: float = 8.0
+    ego_path_sat_ratio: float = 0.75
+    ego_path_sat_release_ratio: float = 0.85
+    ego_path_sat_min_lat_ms2: float = 4.0
+    ego_path_sat_enter_s: float = 0.15
+    ego_path_sat_exit_s: float = 0.20
+    ego_path_sat_cap_margin: float = 0.10
+
     # Target path: pos slice + yaw rate blend; see core/aeb/README.md (target curvature).
     aeb_pos_history_len: int = 10
     aeb_yaw_blend: float = 0.7
@@ -259,4 +281,24 @@ class AEBCalibration:
 
 
 DEFAULT = AEBCalibration()
+
+
+def ego_path_params(cal: AEBCalibration = DEFAULT) -> EgoPathParams:
+    """EgoPathModel tunables from the calibration AEB is running."""
+    return EgoPathParams(
+        gain_prior=cal.ego_path_gain_prior,
+        learn_enabled=cal.ego_path_gain_learning_enabled,
+        cap_enabled=cal.ego_path_cap_enabled,
+        meas_window_s=cal.ego_path_meas_window_s,
+        learn_window_s=cal.ego_path_learn_window_s,
+        learn_min_steer=cal.ego_path_learn_min_steer,
+        learn_max_lat_ms2=cal.ego_path_learn_max_lat_ms2,
+        learn_tau_s=cal.ego_path_learn_tau_s,
+        sat_ratio=cal.ego_path_sat_ratio,
+        sat_release_ratio=cal.ego_path_sat_release_ratio,
+        sat_min_lat_ms2=cal.ego_path_sat_min_lat_ms2,
+        sat_enter_s=cal.ego_path_sat_enter_s,
+        sat_exit_s=cal.ego_path_sat_exit_s,
+        sat_cap_margin=cal.ego_path_sat_cap_margin,
+    )
 

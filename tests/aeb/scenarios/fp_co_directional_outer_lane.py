@@ -22,11 +22,9 @@ def build() -> list[Frame]:
     closing = _EGO_SPEED - _TARGET_SPEED
     for i in range(_N_FRAMES):
         t = i * _DT
-        # kappa = radians(steer * 12); steer = kappa * 180 / (12 * pi)
-        steer = _EGO_KAPPA * 180.0 / (12.0 * math.pi)
         ego = EgoState(
             x=0.0, y=0.0, z=0.0, yaw_norm=0.5,
-            speed=_EGO_SPEED, steer=steer,
+            speed=_EGO_SPEED, kappa=_EGO_KAPPA,
         )
         # Outer-lane co-directional; same-turn lookahead sees ego overtaking, suppresses.
         distance = 5.0 + closing * t

@@ -1039,13 +1039,38 @@ Ego uses the same math in `core/radar/ego_path.py::ego_curvature_from_history`, 
 - **ACC** uses `RadarData.ego_curvature` for in-path scoring. The
   smoothed, geometry-based value matches the smoothing applied to target
   vehicles, so scoring stays consistent across long horizons.
-- **AEB** does **not** read `RadarData.ego_curvature`. It computes the
-  yaw-rate proxy `steer * speed * 12.0 / speed` inline every frame. The
-  ego arc must react instantly to driver input: a history-based fit
-  lags the truck through transients and produces corridor-misalignment
-  false positives / negatives during and after corners.
+- **AEB** does **not** read `RadarData.ego_curvature`. It steps
+  `EgoPathModel` instead (below). The ego arc must react instantly to driver
+  input: a history-based fit lags the truck through transients and produces
+  corridor-misalignment false positives / negatives during and after corners.
 
-Sign convention: positive = left turn (κ > 0), matching `ArcPath`.
+Sign convention: positive = left turn (κ > 0), matching `ArcPath`. `gameSteer`
+is counterclockwise-positive, so positive steer is a left turn too, and ego yaw
+decreases through a right-hander.
+
+### Ego path model (`core/radar/ego_path_model.py`)
+
+`EgoPathModel` answers "where is ego actually going", from three signals that
+each cover the others' blind spot. AEB owns an instance and steps it once per
+new radar frame on `RadarData.ego_t_kin`; timing it on `t_mono` would be wrong,
+because `time.monotonic()` is 15.6 ms granular on Windows against 33 ms frames.
+
+| Part | What it gives | Measured basis |
+| --- | --- | --- |
+| `gain * steer` | zero-lag intent | steer to curvature is linear and lag-free in ETS2: best cross-correlation shift is 0 frames (<= 35 ms) over 437 corpus clips |
+| learned `gain` | the vehicle being driven | per-clip gains run 0.09 to 0.24 across ~2100 clips; fleet median 0.19 |
+| grip cap | what the tires still deliver | saturated plateaus run 6 to 13 m/s^2 and rise with speed, so no constant describes them |
+
+`kappa_meas` is a yaw delta over ~0.13 s of frame-paired poses, not a circle
+fit: over that window a 3-point fit is dominated by its own noise, while the
+yaw signal is clean. There is no bias term, because there is nothing to
+correct: the median per-clip straight-line steering offset is worth 0.06 m of
+lateral error at 75 m (p90 0.35 m).
+
+Gates exist so the two adaptations never take each other's work. The learner
+only accepts steady steer at low lateral load and skips the 2 s after a
+crash-sized speed step; the cap only engages above a lateral-accel floor. See
+`core/aeb/README.md` §1 for the rule that binds them and for the replay seeding.
 
 ---
 

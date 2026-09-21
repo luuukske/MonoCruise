@@ -188,6 +188,13 @@ def test_clip_d16d0575_stops_braking_inside_the_recording():
     The recording stops 1.9 s after the threat collapses and the un-gated hold is
     still braking at 70 % of max, so the only bound the clip can prove is that the
     release now happens at all. See core/aeb/README.md (opening-gap lookahead).
+
+    This used to assert the simulated clock produced no brake here at all, on the
+    reading that its entry was a phantom. It is not: ego enters at 102.6 km/h,
+    0.74 s behind a lead at 88.4 km/h decelerating 1.5 m/s^2, and the driver
+    brakes to 75 km/h over the next 1.5 s. The old ego path only missed it by
+    curving away from a lead that was in lane (core/aeb/README.md §1), so the
+    claim to make on both clocks is about the release, not the absence.
     """
     from core.aeb.clip_store import ClipStore
 
@@ -197,12 +204,17 @@ def test_clip_d16d0575_stops_braking_inside_the_recording():
         [f.t_mono for f in clip.radar_frames] + [t.t_mono for t in clip.aeb_ticks]
     )
 
-    # Capture-time input on purpose: the simulated replay clock removes the phantom
-    # demand that opened this hold (core/aeb/README.md section 16), so it never engages.
     held = _brake_window(clip, _NO_RELEASE, as_recorded=True)
     gated = _brake_window(clip, CAL, as_recorded=True)
     assert held is not None and gated is not None
     assert held[1] >= end_t - 0.1, "un-gated hold still braking when the recording ends"
     assert gated[0] == held[0], "entry timing must be untouched"
     assert gated[1] < end_t - 0.2, "the gated hold must release inside the recording"
-    assert _brake_window(clip, CAL) is None, "the simulated clock must not re-create the phantom entry"
+
+    # Both clocks, because the entry is real under both: ego sits 0.74 s behind a
+    # lead decelerating 1.5 m/s^2 (README §1, what it did to the corpus).
+    sim_held = _brake_window(clip, _NO_RELEASE)
+    sim_gated = _brake_window(clip, CAL)
+    assert sim_held is not None and sim_gated is not None
+    assert sim_held[1] >= end_t - 0.1, "un-gated hold must still run to the recording's end"
+    assert sim_gated[1] <= sim_held[1] - 0.2, "the lookahead must shorten the hold"

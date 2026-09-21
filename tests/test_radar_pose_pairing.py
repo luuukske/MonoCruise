@@ -17,6 +17,7 @@ def _block(revision: int = 12, active: bool = True, **fields) -> bytearray:
         "sdkActive": active, "paused": False, "simulatedTime": 123_450_000,
         "speed": 21.5, "coordinateX": -64875.889, "coordinateY": 12.25,
         "coordinateZ": 3019.5, "rotationX": 0.375, "rotationY": 0.0625,
+        "gameSteer": -0.125,
     }
     values.update(fields)
     for name, value in values.items():
@@ -29,7 +30,7 @@ def test_pose_is_decoded_from_the_documented_offsets():
     pose = pose_from_buffer(_block())
     assert pose == ScsPose(
         simulated_time_us=123_450_000, paused=False, x=-64875.889, y=12.25, z=3019.5,
-        yaw_norm=0.375, pitch_raw=0.0625, speed=21.5,
+        yaw_norm=0.375, pitch_raw=0.0625, speed=21.5, steer=-0.125,
     )
 
 
@@ -62,7 +63,8 @@ class _FakePose:
     def read(self) -> ScsPose | None:
         self.reads += 1
         sim = self._sims.pop(0)
-        base = dict(paused=False, x=1.0, y=2.0, z=3.0, yaw_norm=0.25, pitch_raw=0.0, speed=20.0)
+        base = dict(paused=False, x=1.0, y=2.0, z=3.0, yaw_norm=0.25, pitch_raw=0.0,
+                    speed=20.0, steer=0.05)
         base.update(self._fields)
         return ScsPose(simulated_time_us=sim, **base)
 
@@ -101,14 +103,16 @@ def test_loop_publishes_the_paired_pose_not_the_telemetry_thread_copy(monkeypatc
     stale = (9.0, 9.0, 9.0, 0.5, 5.0, 0.1, False, False, 0.0, 50, 20000.0, 6, 1)
     monkeypatch.setattr(rt, "_read_ego", lambda: stale)
     pose = ScsPose(simulated_time_us=66_667, paused=False, x=1.0, y=2.0, z=3.0,
-                   yaw_norm=0.25, pitch_raw=0.0, speed=20.0)
+                   yaw_norm=0.25, pitch_raw=0.0, speed=20.0, steer=0.05)
     monkeypatch.setattr(rt, "_sample_traffic_and_pose", lambda: (None, pose))
     rt.running = True
     rt.loop()
     with rt.data._lock:
         assert (rt.data.ego_x, rt.data.ego_y, rt.data.ego_z) == (1.0, 2.0, 3.0)
         assert rt.data.ego_speed == 20.0 and rt.data.ego_yaw_norm == 0.25
-        assert rt.data.ego_steer == 0.1
+        # Steer is a pose field too: from the 50 Hz copy it aliases against the
+        # 30 Hz frame, which stepped the ego path (README §16).
+        assert rt.data.ego_steer == 0.05
     assert rt._ego_position_history[-1] == (0.066667, 1.0, 3.0)
 
 

@@ -26,12 +26,9 @@ def build() -> list[Frame]:
         distance = 100.0 - closing * t
         if distance < 3.0:
             break
-        # kappa = radians(steer * speed * 12) / speed = radians(steer * 12)
-        # steer = degrees(kappa) / 12 = kappa * 180 / (12 * pi)
-        steer = _EGO_KAPPA * 180.0 / (12.0 * math.pi)
         ego = EgoState(
             x=0.0, y=0.0, z=0.0, yaw_norm=0.5,
-            speed=_EGO_SPEED, steer=steer,
+            speed=_EGO_SPEED, kappa=_EGO_KAPPA,
         )
         target = make_vehicle(
             vid=1,

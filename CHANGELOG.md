@@ -13,18 +13,18 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ## [Unreleased]
 
 ### Added
-- **ACC uses the same hazard lights as a hard brake**: when adaptive cruise slams the brakes the hazards come on, and they go off again when it gets back on the accelerator.
+- **ACC uses the same hazard lights as a hard brake**: hazards come on when ACC slams the brakes, and go off when it gets back on the gas.
 
 ### Changed
-- **Cruise follows in-game Braking intensity; emergency braking does not**: cruise stays consistent when you move the slider. Emergency braking uses the full brake the game will accept, and it plans the stop with that same force.
-- **Warning when Braking intensity is below 100%**: if emergency braking is on, you get a reminder once an hour that a low slider cuts how hard it can stop.
+- **Cruise follows in-game Braking intensity**: cruise stays consistent when you move the slider. Emergency braking still uses the full brake.
 
 ### Fixed
-- **Emergency braking stopped too close to crossing traffic**: a vehicle coming across your path was treated as only as large as its body, so a small change in its speed or direction could still hit you. It now keeps extra room around those vehicles, including when it has to stop.
-- **ACC kept braking after the car ahead stopped braking**: after a hard stop in front of you, ACC let go of the brakes so slowly that you ended up far slower than the traffic ahead and had to press the gas yourself. It now eases off as soon as the car ahead stops slowing down.
-- **ACC lost the car ahead on winding roads**: in bends it was slow to lock on to the vehicle in your lane, and one bad reading could throw the predicted road far off to the side, leaving a stretch where ACC saw nobody. It now follows your lane through corners and picks up the car ahead much sooner.
-- **Reversing traffic on TruckersMP was barely tracked**: a truck backing up, or one knocked backwards in a crash, was mistaken for a lagging connection, so the radar froze it most of the time and read it at about half its real speed. Short connection hiccups are still filtered out, but a vehicle that keeps moving backwards is now tracked as it moves.
-- **Distance to the traffic ahead jittered**: your truck's position was read a few frames out of step with the traffic around it, so the gap to the vehicle in front wobbled by up to a metre at motorway speed, and ACC and emergency braking both reacted to it. Both are now read from the same moment in the game.
+- **Emergency braking misread where your vehicle was heading**: it assumed you always go where the wheel points, so a fast corner or a longer vehicle like a bus got a path tighter than the road. It follows what the vehicle is actually doing, not just the wheel.
+- **Emergency braking stopped too close to crossing traffic**: a vehicle coming across was treated as only as large as its body, so a small change in speed or direction could still hit you. Crossing traffic gets extra room, including at a stop.
+- **ACC kept braking after the car ahead stopped braking**: after a hard stop in front it let go so slowly you ended up far slower than traffic and had to press the gas yourself. It lets go once the car ahead stops slowing down.
+- **ACC lost the car ahead on winding roads**: in bends it was slow to lock on, and one bad reading could throw the predicted road off so it saw nobody. It holds your lane through corners.
+- **Reversing traffic on TruckersMP was barely tracked**: a truck backing up was mistaken for lag, so radar froze it and read about half its real speed. Short hiccups are still filtered out; a vehicle that keeps reversing is tracked as it moves.
+- **Distance to the traffic ahead jittered**: your truck's position was a few frames out of step with the traffic around it, so the gap wobbled. Truck and traffic now come from the same moment in the game.
 
 ## [1.1.0-preview.22] - 2026-09-13
 ### Added

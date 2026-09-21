@@ -19,7 +19,6 @@ EXPECTED = {
 
 
 def build() -> list[Frame]:
-    steer = _EGO_KAPPA * 180.0 / (12.0 * math.pi)
     closing = _EGO_SPEED - _TARGET_SPEED
     frames = []
     for i in range(_N_FRAMES):
@@ -31,7 +30,7 @@ def build() -> list[Frame]:
         x_cab = -(1.4 + 0.14 * (z_cab - 14.0))   # left of ego, outer lane
 
         ego = EgoState(
-            x=0.0, y=0.0, z=0.0, yaw_norm=0.5, speed=_EGO_SPEED, steer=steer,
+            x=0.0, y=0.0, z=0.0, yaw_norm=0.5, speed=_EGO_SPEED, kappa=_EGO_KAPPA,
         )
         tractor = make_vehicle(
             vid=1,

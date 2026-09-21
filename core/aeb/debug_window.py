@@ -307,7 +307,7 @@ class AEBDebugWindow(QWidget):
         hud_w = 310
         hud_h = 122
         hud_x = 10
-        hud_y = 195  # below main AEB HUD (175+10+10)
+        hud_y = 223  # below main AEB HUD (203+10+10)
 
         p.setPen(QPen(_HUD_BORDER, 1))
         p.setBrush(QBrush(_HUD_BG))
@@ -649,7 +649,7 @@ class AEBDebugWindow(QWidget):
 
     def _draw_hud(self, p: QPainter, snap: AEBSnapshot) -> None:
         hud_w = 310
-        hud_h = 175
+        hud_h = 203
         hud_x = 10
         hud_y = 10
 
@@ -708,6 +708,23 @@ class AEBDebugWindow(QWidget):
 
         y += 18
         p.setFont(self._font_small)
+
+        arc = snap.ego_arc
+        k_path = arc.curvature if arc is not None else 0.0
+        r_txt = f"R={1.0 / abs(k_path):.0f}m" if abs(k_path) > 1e-6 else "R=∞"
+        k_meas = snap.ego_kappa_meas
+        meas_txt = f"{k_meas:+.4f}" if k_meas is not None else "  —   "
+        p.setPen(QPen(_DANGER_CLR if snap.ego_path_saturated else _TEXT))
+        p.drawText(
+            QPointF(x, y),
+            f"path κ={k_path:+.4f} ({r_txt})  steer={snap.ego_kappa_steer:+.4f}  "
+            f"meas={meas_txt}",
+        )
+        y += 14
+        sat_txt = "GRIP CAP" if snap.ego_path_saturated else "linear"
+        p.drawText(QPointF(x, y), f"steer gain={snap.ego_steer_gain:.3f}  {sat_txt}")
+        y += 14
+        p.setPen(QPen(_TEXT))
 
         if ns > 0:
             p.setPen(QPen(_SUPPRESSED_CLR))

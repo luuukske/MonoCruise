@@ -22,7 +22,8 @@ from core.radar.traffic import (
     capsule_extents, pair_body_dist_sq,
 )
 from core.radar.elevation import MAX_EGO_GRADE
-from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT
+from core.radar.ego_path_model import EgoPathModel, EgoPathState
+from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT, ego_path_params
 from core.aeb.confirm import OccupancyConfirm
 from core.aeb.clearance import ClearanceResult, clearance_required
 from core.aeb.lane_frame import project_to_ego_arc, classify, Lane
@@ -257,6 +258,12 @@ class AEBSnapshot:
 
     evasion_left_arc: ArcPath | None = None
     evasion_right_arc: ArcPath | None = None
+
+    # Ego path model readout (debug window only, never recorded in a clip).
+    ego_kappa_steer: float = 0.0
+    ego_kappa_meas: float | None = None
+    ego_steer_gain: float = 0.0
+    ego_path_saturated: bool = False
 
     suppression_reasons: dict = field(default_factory=dict)
     tmp_traffic_session: bool = False
@@ -844,6 +851,10 @@ class AEBThread(BaseThread):
         self._pipeline = build_pipeline(self._cal)
         # One-Euro per target kappa; stepped once per vehicle per frame (README).
         self._curvature_blender = VehicleCurvatureBlender(self._cal)
+        # Ego path: steer-led, gain learned from the driven line, grip capped.
+        self._ego_path = EgoPathModel(params=ego_path_params(self._cal))
+        self._ego_path_cal: AEBCalibration = self._cal
+        self._ego_path_t_kin: float | None = None
         # LOS tracks for engagement-entry CBDR veto (README LOS veto).
         self._los_tracks: dict[int, deque] = {}
         # Per-target (t, d_miss) for turn-into-path closing rate (README).
@@ -1211,7 +1222,7 @@ class AEBThread(BaseThread):
             return
         (vehicles, ego_x, ego_y, ego_z, ego_yaw_rad, ego_speed, ego_pitch_deg,
          steer, ego_has_trailer, _ego_curvature_from_history, tmp_traffic_session,
-         paused, radar_t_mono, off_surface_ids) = snapshot
+         paused, radar_t_mono, off_surface_ids, ego_t_kin) = snapshot
 
         # Latched threats keep their pipeline seat: the shared gate must never
         # drop a target AEB is already braking for. See core/radar/README.md §15.
@@ -1231,12 +1242,13 @@ class AEBThread(BaseThread):
         now_mono = self._now()
         engaged_pad_m = self._released_reserve_m(now_mono, cal)
 
-        # Yaw-rate proxy: see core/aeb/README.md §1. Do NOT use RadarData.ego_curvature.
-        if ego_speed > 0.5:
-            yaw_rate_rad_s = math.radians(steer * ego_speed * cal.yaw_rate_steer_gain)
-            ego_curvature = yaw_rate_rad_s / ego_speed
-        else:
-            ego_curvature = 0.0
+        # Ego path: steer-led with a learned gain, capped at what the vehicle is
+        # measured to hold. See core/aeb/README.md §1. Never RadarData.ego_curvature.
+        ego_path = self._step_ego_path(ego_t_kin, ego_yaw_rad, ego_speed, steer)
+        ego_curvature = ego_path.kappa_path
+        # Grip ceiling for every ego arc, evasion included: an arc tighter than
+        # the vehicle can hold is not an escape route.
+        ego_kappa_cap = ego_path.kappa_cap
 
         ego_hw: float = cal.ego_half_width
         ego_half_l: float = cal.ego_half_length
@@ -1291,6 +1303,9 @@ class AEBThread(BaseThread):
             right_kappa = ego_curvature - delta_kappa
             if ego_curvature > 0 and right_kappa > 0:
                 right_kappa = right_kappa / 1.3
+            if ego_kappa_cap is not None:
+                left_kappa = max(-ego_kappa_cap, min(ego_kappa_cap, left_kappa))
+                right_kappa = max(-ego_kappa_cap, min(ego_kappa_cap, right_kappa))
             ego_evasion_left = build_arc(
                 ego_front_x, ego_front_z, ego_yaw_rad, ego_speed,
                 left_kappa, ego_hw, dynamic_horizon,
@@ -2319,6 +2334,10 @@ class AEBThread(BaseThread):
             evasion_right_arc=ego_evasion_right,
             suppression_reasons=suppression_reasons,
             tmp_traffic_session=tmp_traffic_session,
+            ego_kappa_steer=ego_path.kappa_steer,
+            ego_kappa_meas=ego_path.kappa_meas,
+            ego_steer_gain=ego_path.gain,
+            ego_path_saturated=ego_path.saturated,
         )
 
         action, self._hmi_sound_prev = _hmi_sound_step(
@@ -2642,7 +2661,7 @@ class AEBThread(BaseThread):
     def _read_radar_snapshot(
         self,
     ) -> tuple[list[Vehicle], float, float, float, float, float, float, float,
-               bool, float | None, bool, bool, float, frozenset] | None:
+               bool, float | None, bool, bool, float, frozenset, float] | None:
         """Radar snapshot tuple under lock; None if radar thread missing."""
         try:
             rt = registry.get_thread("radar_thread")
@@ -2668,7 +2687,54 @@ class AEBThread(BaseThread):
                     bool(rt.data.paused),
                     float(rt.data.t_mono),
                     frozenset(getattr(rt.data, "off_surface_ids", frozenset())),
+                    float(getattr(rt.data, "ego_t_kin", 0.0) or 0.0),
                 )
+        except AttributeError:
+            return None
+
+    def _step_ego_path(
+        self, t_kin: float, ego_yaw_rad: float, ego_speed: float, steer: float,
+    ) -> EgoPathState:
+        """Advance the ego path model once per new radar frame.
+
+        The AEB loop and the radar both run at 30 Hz but are not locked, so a
+        frame can be read twice; the model's own clock check makes that a no-op.
+        """
+        if self._ego_path_cal is not self._cal:
+            # Calibration swapped under us (A/B replay, tuning). Follow the
+            # tunables but keep the gain: it describes the vehicle, not the tuning.
+            self._ego_path_cal = self._cal
+            self._ego_path.params = ego_path_params(self._cal)
+        if t_kin <= 0.0:
+            # No simulated clock: fall back to the steer term alone rather than
+            # timing curvature on t_mono, which is 15.6 ms granular on Windows.
+            return EgoPathState(
+                kappa_path=self._ego_path.gain * steer if ego_speed > 0.5 else 0.0,
+                kappa_steer=self._ego_path.gain * steer if ego_speed > 0.5 else 0.0,
+                gain=self._ego_path.gain,
+            )
+        if self._ego_path_t_kin is not None and t_kin < self._ego_path_t_kin - 1.0:
+            # Simulated clock restarted (new session, teleport): history is void.
+            self._ego_path.reset(keep_gain=True)
+            self._ego_path_t_kin = None
+        if self._ego_path_t_kin is not None and t_kin <= self._ego_path_t_kin:
+            return self._ego_path.state
+        self._ego_path_t_kin = t_kin
+        self._ego_path.note_vehicle(self._read_vehicle_key())
+        return self._ego_path.step(t_kin, ego_yaw_rad, ego_speed, steer)
+
+    @staticmethod
+    def _read_vehicle_key() -> str | None:
+        """SDK truck id, so a vehicle swap drops a gain learned on the old one."""
+        try:
+            tel = registry.get_thread("telemetry_thread")
+        except KeyError:
+            return None
+        if tel is None:
+            return None
+        try:
+            with tel.data._lock:
+                return str(getattr(tel.data, "truck_id", "") or "") or None
         except AttributeError:
             return None
 

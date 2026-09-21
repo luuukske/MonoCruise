@@ -13,12 +13,11 @@ EXPECTED = {
 
 
 def build() -> list[Frame]:
-    steer = _EGO_KAPPA * 180.0 / (12.0 * math.pi)
     frames = []
     target_z = 25.0
     for i in range(_N_FRAMES):
         t = i * _DT
-        ego = EgoState(x=0.0, y=0.0, z=0.0, yaw_norm=0.5, speed=_EGO_SPEED, steer=steer)
+        ego = EgoState(x=0.0, y=0.0, z=0.0, yaw_norm=0.5, speed=_EGO_SPEED, kappa=_EGO_KAPPA)
         target = make_vehicle(
             vid=1, x=5.0, z=target_z,
             yaw_deg=180.0, speed=0.0, curvature=0.0,

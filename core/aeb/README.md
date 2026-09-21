@@ -52,26 +52,114 @@ Only the precompute and main collision iterations consume `vehicles_eff`. The
 radar visualizer still reads the original `vehicles` so raw vs filtered speed
 displays remain meaningful for debugging the source data.
 
-### Ego curvature: yaw-rate proxy only
+### Ego curvature: steer-led, gain adapted, grip capped
 
-AEB **does not** consume `RadarData.ego_curvature` (the position-history
-fit). The ego path must react instantly to steering input; a history-based
-fit lags the truck through a transient steer and either smears the ego
-corridor onto the outgoing lane (false positive after the corner clears)
-or leaves it pointing at the previous lane (false negative into the
-corner). The yaw-rate proxy has zero lag and zero smoothing:
+AEB **does not** consume `RadarData.ego_curvature` (the 25-sample
+position-history fit). The ego path must react instantly to steering input;
+a history-based fit lags the truck through a transient steer and either
+smears the ego corridor onto the outgoing lane (false positive after the
+corner clears) or leaves it pointing at the previous lane (false negative
+into the corner).
+
+The path comes from `EgoPathModel` (`core/radar/ego_path_model.py`), stepped
+once per new radar frame on the simulated clock. It is the old steer proxy
+plus the two things that proxy could not know: which vehicle is being driven,
+and whether it can still hold the line the wheel is asking for.
 
 ```python
-if ego_speed > 0.5:
-    yaw_rate_rad_s = math.radians(steer * ego_speed * 12.0)
-    ego_curvature  = yaw_rate_rad_s / ego_speed
-else:
-    ego_curvature  = 0.0
+capped     = sign(steer) * min(|gain * steer|, cap)   # cap = EMA of |kappa_meas| * 1.10
+kappa_path = (1 - w) * gain * steer + w * capped      # w: how much the cap owns
 ```
 
-`RadarData.ego_curvature` is consumed by ACC, not AEB. Do not add an
-"optional" history fallback to AEB: the reactivity loss is the problem,
-not the transient-sample count.
+- **Gain** starts at `cal.ego_path_gain_prior`, still the historical
+  `radians(12)` = 0.2094, and is learned per vehicle from the driven line.
+  Per-vehicle gains run 0.09 to 0.24: a long bus turns far less per unit steer
+  than a 4x2 tractor, so a fixed value draws a corridor up to twice too tight.
+  The prior stays historical on purpose. The fleet median is 0.19, but moving
+  the prior there was measured and rejected: on one corpus vehicle the truth is
+  0.137 and on another 0.205, so a median prior is a coin flip that shifts every
+  filter threshold at once. A measured per-vehicle gain is the accuracy claim;
+  the prior is only where a fresh session starts.
+- **Cap**: saturation is detected, never assumed from a constant. Measured
+  saturated plateaus run 6 to 13 m/s^2 and rise with speed, so a fixed
+  lateral-g ceiling would either bind on ordinary cornering or never bind.
+  The cap is what the vehicle is currently measured to hold.
+- **`w` is confirmed first, then ramped, and both halves are load-bearing.**
+  `sat_enter_s` of sustained evidence arms the cap; only then does `w` move,
+  toward a target that follows the measured/commanded ratio (full at
+  `sat_ratio`, zero at `sat_release_ratio`), at `sat_ramp_s` up and
+  `sat_exit_s` down. The cap value itself is an EMA (`sat_cap_tau_s`).
+
+  Both halves were measured. The first version latched: the corpus
+  frame-to-frame step at engagement was 0.032 1/m at p90 against 0.0006 in
+  ordinary driving, so the corridor radius halved in one frame, visible in the
+  debug view and enough to step filter regimes across their kappa thresholds.
+  Dropping the confirm window and letting the ratio drive `w` on its own fixed
+  the step (p90 0.0050) but capped on turn-in transients, where the measurement
+  window still trails the wheel: clips that merely brushed the cap went from 3
+  to 61 of 405, and the corpus went from 4 better / 3 worse to 5 better / 7
+  worse. Confirm plus ramp keeps the selectivity (3 of 405) at a p90 step of
+  0.0071, and the while-capped jitter at 0.0025 from 0.0088. Scaling `w` across
+  the ratio band instead of arming all-or-nothing was also measured and
+  rejected: it capped mild under-turn (ratio 0.75 to 0.85) that the latch never
+  took, which is what cost `e0fd28b3`, the clip `oncoming_closing_lat_m` exists
+  to recover.
+
+  **Two lag traps sit either side of the detector, and both were live:**
+
+  - The **ratio** compares a yaw delta across the window against the command.
+    Tested against the instantaneous steer, a fast wind-on reads as understeer,
+    because the wheel has already moved on. It reads `_kappa_cmd_ref`, the
+    command averaged over that same window, so the comparison is like for like.
+  - The **cap value** smooths downward only (`max(ema, raw)`). Into a tightening
+    corner both the window and the EMA trail the real line, and a cap under it
+    points the corridor at traffic the truck is already curving around.
+
+The **rule**: measured curvature may only lower the magnitude while saturation
+is confirmed. It never raises it, never flips its sign, and never replaces the
+steer term in the linear regime, so unwinding the wheel and counter-steering
+still reach the corridor on the same frame. Do not add an "optional" history
+fallback beyond that cap: the reactivity loss is the problem, not the
+transient-sample count.
+
+The learner and the cap split on lateral load, and that split is load-bearing:
+underperformance below `ego_path_learn_max_lat_ms2` is geometry, so the gain
+adapts; underperformance above `ego_path_sat_min_lat_ms2` is grip, so the cap
+takes it and the gain is left alone. Without it a single understeering corner
+would teach the model that the truck steers badly everywhere.
+
+Clips never record the learned gain (a new clip field bumps `CONSENT_VERSION`),
+so replay re-derives it with `clip_replay.ego_path_replay`, which runs the
+learner over the whole clip before the first tick. Live has been learning for
+far longer than an 11 second window; starting replay from the prior would
+replay a colder model than the one that made the recorded decisions.
+
+### What it did to the corpus
+
+Measured 2026-09-21 over 2225 clips (1144 labelled, ignore and unlabelled excluded),
+against today's fixed-gain path with no cap:
+
+| | clips whose stream moved | better | worse |
+|---|---|---|---|
+| grip cap only | 149 (6.7%) | 5 | 5 |
+| cap + learned gain | 647 (29.1%) | 10 | 8 |
+
+**No true positive is lost in either column.** Better is two false negatives recovered
+(`6adac35a` and `7b945148`, both crash clips) plus false positives becoming true
+negatives; worse is entirely "brakes where the label says it should not", on clips
+labelled `fp` or `tn`.
+
+Every flip opened by hand came down the same way: the old corridor was up to three times
+more curved than the line the truck actually held, and that error was sweeping the
+corridor off targets by accident in both directions. On `84cdd6b3` the truck was on a
+114 m radius at 91 km/h with a 22.5 km/h vehicle 33 m dead ahead, and the driver steered
+around it a second later; on `d16d0575` a lead at 0.74 s headway decelerating 1.5 m/s^2
+was held out of lane. An accurate path hands both decisions back to AEB's own threat and
+evasion logic, which is where they belong. Read a verdict drop here as that class
+surfacing rather than as a regression on its own: the corpus windows were hand-tagged
+against the old corridor.
+
+`RadarData.ego_curvature` is consumed by ACC, not AEB.
 
 ### Target-vehicle curvature: two-source blend
 

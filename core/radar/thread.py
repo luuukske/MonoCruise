@@ -60,6 +60,10 @@ class RadarData(ThreadData):
     # Held (not bumped) while paused so AEB/ACC treat the frame as stale.
     t_mono: float = 0.0
 
+    # Simulated clock of this frame (s), or wall time when it is unavailable.
+    # Ego kinematics time on this, never t_mono. See core/radar/README.md §16.
+    ego_t_kin: float = 0.0
+
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
@@ -202,6 +206,7 @@ class RadarThread(BaseThread):
         ego_curvature: float | None = None,
         off_surface_ids: frozenset[int] | None = None,
         road_surface: RoadSurface | None = None,
+        t_kin: float | None = None,
         bump_t_mono: bool = False,
     ) -> None:
         ego_yaw_rad = ego_yaw_norm * 2.0 * math.pi
@@ -231,6 +236,8 @@ class RadarThread(BaseThread):
             # Only overwrite curvature on a published (unpaused) frame.
             if bump_t_mono:
                 self.data.ego_curvature = ego_curvature
+            if t_kin is not None:
+                self.data.ego_t_kin = t_kin
             self.data.paused = paused
             if bump_t_mono:
                 self.data.t_mono = time.monotonic()
@@ -278,6 +285,7 @@ class RadarThread(BaseThread):
             ego_x, ego_y, ego_z = pose.x, pose.y, pose.z
             ego_yaw_norm, ego_pitch_deg, ego_speed = pose.yaw_norm, pose.pitch_raw, pose.speed
             paused, simulated_time_us = pose.paused, pose.simulated_time_us
+            ego_steer = pose.steer
         t_kin = self._kinematics_t(simulated_time_us)
         use_sim = simulated_time_us > 0
         # Wall↔sim switch without a reset leaves Vehicle.time in the old domain
@@ -344,6 +352,7 @@ class RadarThread(BaseThread):
             ego_curvature=ego_curvature,
             off_surface_ids=off_surface_ids,
             road_surface=road_surface,
+            t_kin=t_kin,
             bump_t_mono=True,
         )
 

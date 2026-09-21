@@ -21,6 +21,9 @@ _FIELDS: dict[str, tuple[int, struct.Struct]] = {
     "paused": (4, struct.Struct("<?")),
     "simulatedTime": (16, struct.Struct("<Q")),
     "speed": (948, struct.Struct("<f")),
+    # Steer belongs to the pose: read from the telemetry thread's own copy it
+    # aliases against the radar frame and the ego path steps. README §16.
+    "gameSteer": (972, struct.Struct("<f")),
     "coordinateX": (2200, struct.Struct("<d")),
     "coordinateY": (2208, struct.Struct("<d")),
     "coordinateZ": (2216, struct.Struct("<d")),
@@ -42,6 +45,7 @@ class ScsPose:
     yaw_norm: float
     pitch_raw: float
     speed: float
+    steer: float
 
 
 def _field(buf, name: str):
@@ -69,6 +73,7 @@ def pose_from_buffer(buf) -> ScsPose | None:
         yaw_norm=float(_field(buf, "rotationX")),
         pitch_raw=float(_field(buf, "rotationY")),
         speed=float(_field(buf, "speed")),
+        steer=float(_field(buf, "gameSteer")),
     )
 
 

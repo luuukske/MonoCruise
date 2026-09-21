@@ -46,8 +46,11 @@ class EgoState:
     z: float = 0.0
     yaw_norm: float = 0.5  # 0.5 = North (forward = -Z direction)
     speed: float = 0.0  # m/s
-    steer: float = 0.0  # degrees (ETS2 steer)
+    steer: float = 0.0  # normalized SDK steering (gameSteer, -1..1)
     pitch_deg: float = 0.0
+    # Scenarios that care about the ego arc set curvature directly, so their
+    # intent does not move when the steer gain prior does.
+    kappa: float | None = None
 
 
 @dataclass
@@ -168,9 +171,10 @@ def evaluate_frame(
     ego_speed = ego.speed
     cal = calibration
 
-    if ego_speed > 0.5:
-        yaw_rate_rad_s = math.radians(ego.steer * ego_speed * cal.yaw_rate_steer_gain)
-        ego_curvature = yaw_rate_rad_s / ego_speed
+    if ego.kappa is not None:
+        ego_curvature = ego.kappa
+    elif ego_speed > 0.5:
+        ego_curvature = cal.ego_path_gain_prior * ego.steer
     else:
         ego_curvature = 0.0
 
@@ -209,10 +213,10 @@ def evaluate_frame(
         )
         left_kappa = ego_curvature + delta_kappa
         if ego_curvature < 0 and left_kappa < 0:
-            left_kappa /= 1.5
+            left_kappa /= 1.3
         right_kappa = ego_curvature - delta_kappa
         if ego_curvature > 0 and right_kappa > 0:
-            right_kappa /= 1.5
+            right_kappa /= 1.3
         ego_evasion_left = build_arc(
             ego_front_x, ego_front_z, ego_yaw_rad_val, ego_speed,
             left_kappa, ego_hw, dynamic_horizon,
