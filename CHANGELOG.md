@@ -15,6 +15,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **Cruise is calmer in heavy traffic**: the quicker brake release from preview.23 made it jump back on the gas after every brake in stop-and-go. It now only helps you get going again from a crawl or a stop, and at road speed the brake eases off smoothly like before.
 
 ### Fixed
+- **Clip screenshot on a 4K display showed readable text**: the picture was a zoomed-in corner (due to the DPI setting) of the game instead of the whole window. It now grabs the full game window, so on-screen text stays unreadable.
 - **Emergency braking ignored the room you had to steer around something**: the fix from preview.23 where AEB relied on the actual path you were going to travel a bit too much, and evasion paths were not accounted for. fixed now.
 
 ## [1.1.0-preview.23] - 2026-09-21

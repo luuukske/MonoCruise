@@ -1952,26 +1952,27 @@ Existing clips in the store stay at 480x270; only newly captured ones drop
 to 240x135. `tools/aeb_review.py` renders both sizes, aspect-correct, from
 the original decoded pixmap each time rather than re-scaling a scaled copy.
 
-### DPI caveat: unresolved, needs a scaled display to verify
+### Scaled displays: thread DPI, not a process-wide flip
 
-`GetWindowRect` returns physical pixels. `ImageGrab.grab(bbox=...)` expects
-virtual-screen coordinates. The two agree when the calling process is
-per-monitor DPI aware and can disagree otherwise. No scaled secondary
-display was available to reproduce the mismatch, so no numeric correction
-is applied here: this is a known open item, not a silently-ignored one.
+`ImageGrab.grab` measures the screen in physical pixels. `GetWindowRect`
+on a thread that is not per-monitor aware returns virtualized coordinates.
+On a 4K display at 175% those are 1/1.75 of the real window, so the crop
+is a corner of the game (measured: logical 842x601 against a 1474x1052
+window) and in-game text survives the 240 px downscale. That breaks the
+consent claim that text is not legible.
 
-`_dpi_mismatch_note()` logs a debug line when `GetDpiForWindow(hwnd)`
-(Windows 10 1607+) reports something other than 96, so a support log at
-least carries the signal. That is detection only; the capture bbox is
-unchanged either way.
+`grab_thumbnail` calls `SetThreadDpiAwarenessContext`
+(`DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`) around both the rect query
+and the grab, then restores the previous context. Both calls have to sit
+inside it: Pillow sets per-monitor awareness only while measuring, then
+restores the caller's context before the blit. The thumbnail thread has
+no windows, so the thread override is allowed. Do not move this to
+`SetProcessDpiAwarenessContext`. A process-wide flip rescales the Qt
+settings panel and debug windows.
 
-Process-wide DPI awareness is deliberately not touched to fix this: the
-Qt UI is not per-monitor DPI aware today, and flipping that process-wide
-for one screenshot crop would rescale the entire settings panel and debug
-windows. If a clip from a scaled display shows a wrong crop, the fix to
-try first is a thread-local DPI awareness override
-(`SetThreadDpiAwarenessContext`) around just the capture call, not a
-process-wide flip.
+If the thread context call fails, the crop is left as-is and a debug line
+is logged. Do not "fix" that by multiplying the rect by `dpi/96`: a
+process that is already system-DPI aware would be scaled twice.
 
 ---
 

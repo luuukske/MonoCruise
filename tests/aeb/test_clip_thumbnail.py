@@ -171,6 +171,73 @@ def test_grab_thumbnail_falls_back_to_prism3d_class(monkeypatch):
     assert fake.found_classes == ["prism3d"]
 
 
+class _ScaledUser32(_FakeUser32):
+    """175% 4K: virtualized rect unless the thread is per-monitor aware."""
+
+    LOGICAL = (676, 293, 1518, 894)
+    PHYSICAL = (1183, 512, 2657, 1564)
+
+    def __init__(self):
+        super().__init__(
+            found_title="Euro Truck Simulator 2", rect=self.LOGICAL,
+        )
+        self.ctx = None
+        self.rect_ctx = None
+
+    def SetThreadDpiAwarenessContext(self, ctx):
+        prev = 1 if self.ctx is None else self.ctx
+        self.ctx = ctx
+        return prev
+
+    def GetWindowRect(self, hwnd, rect_ptr):
+        self.rect_ctx = self.ctx
+        vals = self.PHYSICAL if self.ctx == screenshot_mod._DPI_CONTEXT_PER_MONITOR_V2 else self.LOGICAL
+        rect_ptr.contents.left, rect_ptr.contents.top, rect_ptr.contents.right, rect_ptr.contents.bottom = vals
+        return 1
+
+
+def test_grab_thumbnail_uses_physical_rect_on_scaled_display(monkeypatch):
+    Image = pytest.importorskip("PIL.Image")
+    image_grab_mod = pytest.importorskip("PIL.ImageGrab")
+
+    monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
+    fake = _ScaledUser32()
+    monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
+    calls = []
+
+    def _fake_grab(**kw):
+        calls.append(kw.get("bbox"))
+        return Image.new("RGB", (1474, 1052))
+
+    monkeypatch.setattr(image_grab_mod, "grab", _fake_grab)
+    result = screenshot_mod.grab_thumbnail()
+    assert result is not None
+    assert calls == [_ScaledUser32.PHYSICAL]
+    assert fake.rect_ctx == screenshot_mod._DPI_CONTEXT_PER_MONITOR_V2
+    assert fake.ctx == 1
+
+
+def test_dpi_context_restored_when_grab_fails(monkeypatch):
+    image_grab_mod = pytest.importorskip("PIL.ImageGrab")
+
+    monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
+    fake = _ScaledUser32()
+    monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
+
+    def _boom(**kw):
+        raise OSError("grab failed")
+
+    monkeypatch.setattr(image_grab_mod, "grab", _boom)
+    assert screenshot_mod.grab_thumbnail() is None
+    assert fake.ctx == 1
+
+
+def test_screenshot_does_not_set_process_dpi():
+    import pathlib
+    src = pathlib.Path(screenshot_mod.__file__).read_text(encoding="utf-8")
+    assert "SetProcessDpiAwareness" not in src
+
+
 def test_grab_thumbnail_output_long_side_is_240(monkeypatch):
     Image = pytest.importorskip("PIL.Image")
     image_grab_mod = pytest.importorskip("PIL.ImageGrab")

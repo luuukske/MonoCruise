@@ -6,6 +6,7 @@ import base64
 import io
 import logging
 import sys
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +14,8 @@ logger = logging.getLogger(__name__)
 # Do not raise this; see core/aeb/README.md section 12.
 _MAX_PX = 240
 _QUALITY = 50
+# DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2. Thread-local only, Win10 1703+.
+_DPI_CONTEXT_PER_MONITOR_V2 = -4
 
 # TruckersMP appends " Multiplayer"; FindWindowW is an exact-title match.
 _GAME_WINDOW_TITLES = (
@@ -52,6 +55,9 @@ def _get_user32():
     user32.IsWindow.argtypes = [wintypes.HWND]
     user32.GetWindowRect.restype = wintypes.BOOL
     user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    if hasattr(user32, "SetThreadDpiAwarenessContext"):
+        user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
     _user32 = user32
     return user32
 
@@ -74,20 +80,30 @@ def _find_game_window():
     return _cached_hwnd
 
 
-def _dpi_mismatch_note(user32, hwnd) -> None:
-    """Debug-only flag for a scaled-display crop risk; detection, not correction."""
-    try:
-        dpi = user32.GetDpiForWindow(hwnd)
-    except (AttributeError, OSError):
+@contextmanager
+def _physical_pixels():
+    """Per-monitor DPI on this thread so the window rect matches the grab."""
+    if sys.platform != "win32":
+        yield
         return
-    if dpi and dpi != 96:
-        logger.debug(
-            "AEB screenshot: game window DPI %s, crop is unverified on scaled displays", dpi
-        )
+    user32 = _get_user32()
+    set_ctx = getattr(user32, "SetThreadDpiAwarenessContext", None)
+    if set_ctx is None:
+        yield
+        return
+    prev = set_ctx(_DPI_CONTEXT_PER_MONITOR_V2)
+    if not prev:
+        logger.debug("AEB screenshot: thread DPI context unchanged, scaled crop may be wrong")
+        yield
+        return
+    try:
+        yield
+    finally:
+        set_ctx(prev)
 
 
 def _game_window_rect():
-    """Physical-pixel (left, top, right, bottom) of the game window, or None."""
+    """(left, top, right, bottom) of the game window, or None. Physical only inside _physical_pixels."""
     if sys.platform != "win32":
         return None
     import ctypes
@@ -101,7 +117,6 @@ def _game_window_rect():
     if not user32.GetWindowRect(hwnd, ctypes.pointer(rect)):
         logger.debug("AEB screenshot: GetWindowRect failed")
         return None
-    _dpi_mismatch_note(user32, hwnd)
     return (rect.left, rect.top, rect.right, rect.bottom)
 
 
@@ -117,15 +132,17 @@ def grab_thumbnail(max_px: int = _MAX_PX, quality: int = _QUALITY) -> str | None
         logger.debug("Pillow unavailable; AEB screenshot skipped")
         return None
     try:
-        rect = _game_window_rect()
-    except Exception:
-        logger.debug("AEB screenshot: game window lookup failed", exc_info=True)
-        return None
-    if rect is None:
-        logger.debug("AEB screenshot: no game window found")
-        return None
-    try:
-        return encode_thumbnail(ImageGrab.grab(bbox=rect), max_px, quality)
+        with _physical_pixels():
+            try:
+                rect = _game_window_rect()
+            except Exception:
+                logger.debug("AEB screenshot: game window lookup failed", exc_info=True)
+                return None
+            if rect is None:
+                logger.debug("AEB screenshot: no game window found")
+                return None
+            image = ImageGrab.grab(bbox=rect)
+        return encode_thumbnail(image, max_px, quality)
     except Exception:
         logger.debug("AEB screenshot grab failed", exc_info=True)
         return None
