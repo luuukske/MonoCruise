@@ -14,6 +14,7 @@ from core.longitudinal.acc import AdaptiveCruiseController
 from core.longitudinal.base import LongCtx, LongOutput
 from core.longitudinal.cc import CruiseController
 from core.longitudinal.limiter import SpeedLimiter
+from core.longitudinal.limiter_override import LimiterPanicOverride
 from core.settings import Settings
 from core.speed_units import quantize_speed_kmh, step_setpoint_kmh, uses_mph
 from core.thread_management.base_thread import BaseThread, ThreadData
@@ -78,6 +79,8 @@ class CruiseControlThread(BaseThread):
 
         # User OPD-gas override latch (cruise mode, limiter active only).
         self._cc_user_override: bool = False
+        # Quick lift-and-press at the cap drops the limiter. See README.
+        self._limiter_panic = LimiterPanicOverride()
 
         # Button FSM state: owns press timing only; acts on CC via _cc_ctrl.
         self._time_pressed_dec: float | None = None
@@ -130,6 +133,7 @@ class CruiseControlThread(BaseThread):
 
         try:
             if tel is None or pedal is None:
+                self._limiter_panic.reset()
                 self._publish_telemetry_command(0.0)
                 self._publish_data(False, 0.0, Settings.cc_mode)
                 self._maybe_reset_mapper_on_commanding_end(False)
@@ -296,6 +300,14 @@ class CruiseControlThread(BaseThread):
 
                 # Manual shift flashes N; keep CC on, cut gas, warn after dwell.
                 cc_out, acc_out = self._apply_neutral_gas_hold(ctx, cc_out, acc_out)
+
+            # Panic bypass: a quick lift-and-press at the cap drops every bid.
+            # See `core/longitudinal/README.md`.
+            self._apply_limiter_panic(ctx, pedal)
+            if self._limiter_panic.overridden:
+                limiter_out = LongOutput(None, False)
+                cc_out = LongOutput(None, False)
+                acc_out = LongOutput(None, False)
 
             wanted_accel, commanding, winner = self._arbitrate_named(
                 ("cc", cc_out), ("limiter", limiter_out), ("acc", acc_out),
@@ -685,6 +697,32 @@ class CruiseControlThread(BaseThread):
         else:
             self._cc_disarm_pending_until = 0.0
         self._cc_prev_speed_ms = ctx.speed_ms
+
+    def _apply_limiter_panic(self, ctx: LongCtx, pedal: dict) -> None:
+        """Drop the limiter after a quick lift-and-press at the cap. See `core/longitudinal/README.md`."""
+        was = self._limiter_panic.overridden
+        if not ctx.connected:
+            self._limiter_panic.reset()
+        elif not ctx.paused:
+            self._limiter_panic.update(
+                gas=float(pedal.get("opdgasval", 0.0)),
+                speed_kmh=ctx.speed_ms * 3.6,
+                limit_kmh=self._limiter_ctrl.target_speed_kmh,
+                limiter_active=self._limiter_ctrl.active,
+                dt=ctx.dt,
+            )
+        if self._limiter_panic.overridden and not was:
+            logger.info("Speed limiter bypassed")
+            # Lazy import: this module stays importable without Qt.
+            from ui.popup.popup_window import PopupWindow
+            PopupWindow.emit(
+                "Limiter bypassed",
+                "Slow down to restore",
+                "w",
+                priority=2,
+            )
+        elif was and not self._limiter_panic.overridden:
+            logger.info("Speed limiter restored")
 
     def _update_cc_override_latch(self, ctx: LongCtx, pedal: dict) -> None:
         """Latch/unlatch the user OPD-gas override of CC (cruise mode only). See `core/cruise_control_thread/README.md`."""

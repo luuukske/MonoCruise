@@ -162,7 +162,12 @@ so the mapper tightens the gas pedal progressively (see `AGENTS.md`).
 The kp term already bids strong decel for small overshoots; recovery time is mostly set
 by the **floor** clamp, not gain above it. `_overshoot_floor` adds a cubic extra decel
 term (`_OVERSHOOT_CUBIC_K * excess_ms³`), capped at `|accel_min|`, so overshoot protection
-at most doubles the user-tuned floor.
+at most doubles the user-tuned floor. The published bid is then raised to
+`_LIMITER_MAX_DECEL_MS2` (1.0 m/s²) when the floor plus cubic is deeper than that.
+A limit set far below current speed eases the truck back. It does not haul it down
+at the old doubled floor (2.0 at the old default, 3.0 at a saved floor of -1.5).
+Do not remove the ceiling. Grade is still the mapper's feed-forward, so this cap
+is extra closing rate, not the brake that holds a hill.
 
 - **Deadband** (`_OVERSHOOT_DEADBAND_MS`, 0.15 m/s ≈ 0.5 km/h): protection contributes
   nothing until ego is past the limit by more than the deadband, so ACC can sit at the
@@ -171,7 +176,7 @@ at most doubles the user-tuned floor.
   boundary. This is not the forbidden "only when over the limit" gate on the limiter bid:
   the continuous tracker still runs and bids every tick, only the extra floor is deadbanded.
 - Cubic: negligible at the engagement boundary, meaningful only for real overshoot.
-  Saturates at the doubled floor around 1.75 m/s (~6.3 km/h) over.
+  Its own term still saturates at `|accel_min|`, but the published bid stops at the ceiling.
 - **Engagement gate**: cubic scales by shortfall vs external decel only, measured against
   the **full** overshoot (`overshoot_ms / _OVERSHOOT_CLEAR_S`) since the recovery target is
   the limit itself, not the deadband edge. The protection's own commanded decel is
@@ -184,6 +189,35 @@ at most doubles the user-tuned floor.
   than the mapper's accel tau so external braking is seen quickly. Not `lv_accelerationX`: that
   telemetry field is lateral (truck-local right/left), not longitudinal, and reads nonzero from
   cornering alone (see root `AGENTS.md` domain invariants).
+
+## Panic bypass (`limiter_override.py`)
+
+A limit set lower than the driver meant has two outs. The brake ceiling above is the
+passive one. The other is a pedal gesture, owned by `CruiseControlThread` because
+the limiter child never sees the pedal.
+
+Holding the gas at the floor keeps the limiter in command. That is the normal
+"floor it until the cap" case, and it must not get past the limit. The bypass is
+a fast stab while speed is already within `_BIND_UNDER_KMH` of the cap or over it.
+How far the pedal moves is only a minimum (`_GAS_FLOOR` to `_GAS_RELEASE`). A
+slow lift of any size does not qualify. The speed gates are `_QUICK_RELEASE_S`
+on the way off and `_BLIP_WINDOW_S` on the way back.
+
+1. Gas has been at `_GAS_FLOOR` for `_ARM_HOLD_S` in one press. Time on the floor
+   counts on the way up, so a driver who has been pressing into the cap can stab
+   as soon as it binds. A short press does not arm.
+2. Gas falls through `_GAS_RELEASE` within `_QUICK_RELEASE_S` of leaving the floor.
+   That interval is the speed of the lift. A roll-off drops the arm.
+3. Gas is back at the floor inside `_BLIP_WINDOW_S`, and the lift lasted at least
+   `_RELEASE_MIN_S` so a one-sample dip does not count.
+
+While latched, the orchestrator publishes no CC, ACC, or limiter bid. The driver's
+pedal is the only longitudinal command. AEB is untouched. Lifting off does not
+end it. The latch ends only when speed is more than `_REARM_UNDER_KMH` under the
+cap, so the next approach needs a new stab. The rising edge emits a warning popup
+at priority 2 with a short message (`PopupWindow.emit`, not the log-handler notice).
+
+Do not treat a held floor as the bypass. That was the case this exists to refuse.
 
 ## ACC child (`acc.py`)
 

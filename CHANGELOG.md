@@ -12,9 +12,11 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Added
+- **You can get past a speed limit set too low**: holding the gas still holds you at the limit. A fast stab of the gas lets you past it. The limit comes back only once you are 5 km/h under it.
 - **American Truck Simulator uses mph**: the cruise set speed, the speed of the vehicle ahead, the up and down steps, and the global speed limiter are in mph. Euro Truck Simulator 2 stays in km/h.
 
 ### Changed
+- **Speed limiter brakes more gently**: a limit below the speed you are already doing eases the truck back, instead of braking hard.
 - **Cruise is calmer in heavy traffic**: the quicker brake release from preview.23 made it jump back on the gas after every brake in stop-and-go. It now only helps you get going again from a crawl or a stop, and at road speed the brake eases off smoothly like before.
 
 ### Fixed

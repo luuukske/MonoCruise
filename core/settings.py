@@ -161,11 +161,12 @@ class Settings(metaclass=_SingletonMeta):
     cc_accel_min_ms2: float = -1.0
 
     # PID tuning for SpeedLimiter: independent of CC so each can be tuned separately.
+    # Brake floor is gentler than CC: a limit set too low must not haul the truck down.
     limiter_kp: float = 1.3
     limiter_ki: float = 0.0
     limiter_kd: float = 0.25
     limiter_integral_clamp: float = 3.0
-    limiter_accel_min_ms2: float = -1.0
+    limiter_accel_min_ms2: float = -0.8
 
     # CC set-speed clamp and always-on limiter cap (Speed limiter mode); None disables.
     global_speed_limit_kmh: float | None = None

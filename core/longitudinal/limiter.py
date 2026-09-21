@@ -37,6 +37,10 @@ _CUBIC_LEAK_TAU_S = 0.25
 # See `core/longitudinal/README.md`.
 _ACCEL_TRACK_TAU_S = 0.15
 
+# Published brake ceiling. A limit set far below current speed must not brake hard.
+# See `core/longitudinal/README.md`.
+_LIMITER_MAX_DECEL_MS2 = 1.0
+
 
 class SpeedLimiter(LongitudinalController):
     """Set-speed PID for the speed-limiter mode."""
@@ -128,6 +132,9 @@ class SpeedLimiter(LongitudinalController):
         # Asymmetric clamp: only bound the lower side. Positive bids are left
         # See `core/longitudinal/README.md`.
         wanted = max(accel_min, wanted)
+        # Safety ceiling: a too-low limit must not brake harder than this.
+        # See `core/longitudinal/README.md`.
+        wanted = max(wanted, -_LIMITER_MAX_DECEL_MS2)
 
         # Return active=True every tick while enabled: continuous-tracker invariant
         # See `core/longitudinal/README.md`.

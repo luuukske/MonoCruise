@@ -93,8 +93,15 @@ def test_asymmetric_clamp_leaves_the_positive_side_open(limiter):
 def test_lower_clamp_bounds_the_decel_bid(limiter, monkeypatch):
     """With overshoot protection off, accel_min is a hard floor."""
     monkeypatch.setattr(limiter_mod, "_OVERSHOOT_CUBIC_K", 0.0)
+    monkeypatch.setattr(limiter_mod, "_LIMITER_MAX_DECEL_MS2", 100.0)
     out = _run(limiter, TARGET_KMH + 20.0)
     assert out.wanted_ms2 == pytest.approx(ACCEL_MIN)
+
+
+def test_brake_ceiling_cuts_a_deep_overshoot(limiter):
+    """Floor plus cubic used to double the brake. A too-low limit must not."""
+    out = _run(limiter, TARGET_KMH + 40.0, ticks=300)
+    assert out.wanted_ms2 == pytest.approx(-limiter_mod._LIMITER_MAX_DECEL_MS2)
 
 
 def test_overshoot_protection_at_most_doubles_the_floor(limiter):

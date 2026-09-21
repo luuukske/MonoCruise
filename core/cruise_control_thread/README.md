@@ -19,6 +19,12 @@ Limiter path never sees these.
 User OPD gas override (cruise mode, limiter active): latch excludes CC/ACC bids so the
 limiter caps the user pedal until gas releases or ego falls below CC target minus margin.
 
+Panic bypass of the limiter (`core/longitudinal/limiter_override.py`): a fast
+stab while already at the cap drops CC, ACC, and limiter bids together. The pedal
+only has to move a small minimum; a slow lift does not count. A held floor does
+not either. The latch ends only once speed is more than 5 km/h under the cap.
+Engage emits a priority-2 warning with a short message.
+
 ## Button presses (`press_counter.py`)
 
 Short presses fire per press **counted**, not per press **observed**. This thread
