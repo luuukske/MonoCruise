@@ -34,6 +34,7 @@ def rig(monkeypatch):
     settings = Settings.instance()
     for key, value in (
         ("cc_mode", "Cruise control"),
+        ("last_game", 1),
         ("global_speed_limit_kmh", 90.0),
         ("acc_enabled", False),
         ("short_increments", 1),

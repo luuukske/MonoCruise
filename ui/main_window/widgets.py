@@ -188,9 +188,16 @@ def new_entry(
     _debounce.setSingleShot(True)
     _debounce.setInterval(2000)
 
-    _last_good = [value]  # mutable container so the closure can update it
+    # Bounds live on the widget so a unit switch can retarget them.
+    le._mc_minimum = minimum
+    le._mc_maximum = maximum
+    le._mc_last_good = [value]
+    le._mc_unit_label = None
+    _last_good = le._mc_last_good
 
     def _validate() -> None:
+        minimum = le._mc_minimum
+        maximum = le._mc_maximum
         raw = le.text().strip()
         if optional and not raw:
             v = None
@@ -245,6 +252,7 @@ def new_entry(
         lay.addWidget(le, alignment=Qt.AlignmentFlag.AlignVCenter)
         unit_lbl = QLabel(suffix)
         unit_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        le._mc_unit_label = unit_lbl
         lay.addWidget(unit_lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
         grid.addWidget(wrapper, row, col, alignment=align)
     else:

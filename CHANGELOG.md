@@ -11,6 +11,9 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Added
+- **American Truck Simulator uses mph**: the cruise set speed, the speed of the vehicle ahead, the up and down steps, and the global speed limiter are in mph. Euro Truck Simulator 2 stays in km/h.
+
 ### Changed
 - **Cruise is calmer in heavy traffic**: the quicker brake release from preview.23 made it jump back on the gas after every brake in stop-and-go. It now only helps you get going again from a crawl or a stop, and at road speed the brake eases off smoothly like before.
 

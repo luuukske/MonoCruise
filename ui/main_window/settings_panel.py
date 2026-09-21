@@ -27,6 +27,13 @@ from PySide6.QtWidgets import (
 
 from core.input_bindings import binding_display_name, migrate_binding, resolve_held
 from core.longitudinal.accel_envelope import PROFILE_LABELS, resolve_profile
+from core.speed_units import (
+    display_from_kmh,
+    global_limit_bounds,
+    kmh_from_display,
+    unit_label,
+    uses_mph,
+)
 from core.thread_management.registry import registry
 from ui.main_window.consent_overlay import CONSENT_VERSION
 from ui.main_window.constants import (
@@ -602,14 +609,15 @@ class SettingsPanel(QWidget):
 
         # Global speed limiter (empty → None disables both CC clamp and
         # always-on limiter: see AGENTS.md global_speed_limit_kmh).
+        limit_lo, limit_hi = global_limit_bounds()
         self.ent_global_limit, _, _ = self._field_with_subtext(
             "Global speed limiter:",
             lambda c, r, col: new_entry(
                 c, r, col,
-                value=s.global_speed_limit_kmh, value_type=int,
-                minimum=60, maximum=130, optional=True,
-                suffix="km/h",
-                callback=lambda v: self._set("global_speed_limit_kmh", v),
+                value=self._global_limit_field_value(), value_type=int,
+                minimum=limit_lo, maximum=limit_hi, optional=True,
+                suffix=unit_label(),
+                callback=self._on_global_limit,
             ),
             "Empty to disable.",
         )
@@ -762,7 +770,54 @@ class SettingsPanel(QWidget):
 
     def _speed_unit(self) -> str:
         # ATS uses mph, ETS2 uses km/h.
-        return "mph" if self._settings.last_game == 2 else "km/h"
+        return unit_label()
+
+    def _global_limit_field_value(self):
+        kmh = self._settings.global_speed_limit_kmh
+        if kmh is None:
+            return None
+        if uses_mph():
+            return display_from_kmh(float(kmh))
+        return kmh
+
+    def _on_global_limit(self, value) -> None:
+        if value is None:
+            self._set("global_speed_limit_kmh", None)
+            return
+        if uses_mph():
+            self._set("global_speed_limit_kmh", kmh_from_display(int(value)))
+            return
+        self._set("global_speed_limit_kmh", value)
+
+    def _show_global_limit(self) -> None:
+        le = self.ent_global_limit
+        lo, hi = global_limit_bounds()
+        le._mc_minimum = lo
+        le._mc_maximum = hi
+        unit = getattr(le, "_mc_unit_label", None)
+        if unit is not None:
+            unit.setText(unit_label())
+        shown = self._global_limit_field_value()
+        le.blockSignals(True)
+        le.setText("" if shown is None else str(shown))
+        le.blockSignals(False)
+        le._mc_last_good[0] = shown
+
+    def refresh_speed_unit(self) -> None:
+        """Repaint increment labels and the global-limit box for the current game."""
+        self._show_global_limit()
+        s = self._settings
+        self.opt_short.blockSignals(True)
+        self.opt_long.blockSignals(True)
+        self.opt_short.clear()
+        self.opt_long.clear()
+        increment_values = self._increment_display_values()
+        self.opt_short.addItems(increment_values)
+        self.opt_long.addItems(increment_values)
+        self.opt_short.setCurrentText(self._format_increment_value(s.short_increments))
+        self.opt_long.setCurrentText(self._format_increment_value(s.long_increments))
+        self.opt_short.blockSignals(False)
+        self.opt_long.blockSignals(False)
 
     def _increment_display_values(self) -> list[str]:
         unit = self._speed_unit()
@@ -1479,28 +1534,13 @@ class SettingsPanel(QWidget):
 
         # Cruise control
         self._update_seg_style(s.cc_mode)
-        self.ent_global_limit.setText(
-            "" if s.global_speed_limit_kmh is None else str(s.global_speed_limit_kmh)
-        )
         if self._configuring_key is not None:
             self._stop_configuring()
         self._glow_suppress.clear()
         for key in self._bind_buttons:
             self._refresh_bind_button(key)
         # Keep persisted values numeric; add units only in UI display.
-        self.opt_short.blockSignals(True)
-        self.opt_long.blockSignals(True)
-        self.opt_short.clear()
-        self.opt_long.clear()
-        increment_values = self._increment_display_values()
-        self.opt_short.addItems(increment_values)
-        self.opt_long.addItems(increment_values)
-        short_val = self._format_increment_value(s.short_increments)
-        long_val = self._format_increment_value(s.long_increments)
-        self.opt_short.setCurrentText(short_val)
-        self.opt_long.setCurrentText(long_val)
-        self.opt_short.blockSignals(False)
-        self.opt_long.blockSignals(False)
+        self.refresh_speed_unit()
         self.chk_hold_reset.setChecked(s.long_press_reset)
         self.chk_show_speed.setChecked(s.show_cc_ui)
         self.opt_scaling.setCurrentText(str(s.cc_panel_scaling) if s.cc_panel_scaling else "100%")

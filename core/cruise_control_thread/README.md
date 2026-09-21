@@ -52,6 +52,21 @@ unpausing would replay a burst of speed changes at once.
 the level representative for anything reading it; correctness no longer depends on
 that latch.
 
+## Set-speed units
+
+ETS2 steps and shows integer km/h. ATS (`Settings.last_game == 2`) steps and shows
+integer mph. The number on `CruiseController` stays km/h either way: an ATS step
+converts with the international mile, 1 mph = 1.609344 km/h, and the PID still
+turns that into m/s with `/ 3.6`. ACC and AEB are not part of this conversion.
+They already consume m/s.
+
+The mph grid stays inside the existing 30 to 130 km/h set-speed clamp, so the
+lowest ATS set speed is 19 mph and the highest is 80 mph. The global limiter box
+is 38 to 80 mph, the same 60 to 130 km/h range the ETS2 box uses. A limit saved
+earlier as km/h is shown as the nearest mph and is not rewritten until the driver
+edits the box. A step that does not change the displayed number leaves the stored
+km/h alone, so a target set in ETS2 is not nudged just by pressing a blocked step.
+
 ## ACC gap buttons (`acc_distance.py`)
 
 One button assigned cycles the level and wraps; two assigned step and clamp, and

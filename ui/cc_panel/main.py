@@ -1005,9 +1005,8 @@ class _PanelWidget(QWidget):
             max(0, min(255, int(round(base.blue() * b)))),
         )
 
-    @staticmethod
-    def _format_lead_text(speed: float) -> str:
-        return f"{int(round(speed))} km/h"
+    def _format_lead_text(self, speed: float) -> str:
+        return f"{int(round(speed))} {self._p._speed_unit}"
 
     def _make_feathered_rect_pixmap(
         self, inner_w: int, inner_h: int, blur_r: int, dpr: float
@@ -1689,6 +1688,7 @@ class cc_panel:
         self._current_icon: QPixmap | None = None
 
         # Lead speed: latest in _lead_vehicle_speed; _lead_displayed_speed kept during retract.
+        self._speed_unit = "km/h"
         self._lead_vehicle_speed: float | None = None
         self._lead_displayed_speed: float | None = None
         self._lead_visual = 0.0
@@ -1745,6 +1745,7 @@ class cc_panel:
         acc_enabled: bool | None = None,
         acc_truck: bool | None = None,
         lead_vehicle_speed=_LEAD_UNSET,
+        speed_unit: str | None = None,
     ):
         """Update the display. Thread-safe, never drops changes. Safe to call at high..."""
         d: dict = {}
@@ -1766,6 +1767,8 @@ class cc_panel:
             d["acc_truck"] = acc_truck
         if lead_vehicle_speed is not _LEAD_UNSET:
             d["lead_vehicle_speed"] = lead_vehicle_speed
+        if speed_unit is not None:
+            d["speed_unit"] = speed_unit
         if complete_update:
             d["_complete_update"] = True
         if not d:

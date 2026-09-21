@@ -15,6 +15,7 @@ from core.longitudinal.base import LongCtx, LongOutput
 from core.longitudinal.cc import CruiseController
 from core.longitudinal.limiter import SpeedLimiter
 from core.settings import Settings
+from core.speed_units import quantize_speed_kmh, step_setpoint_kmh, uses_mph
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 
@@ -477,6 +478,26 @@ class CruiseControlThread(BaseThread):
         except Exception:
             return None
 
+    def _nudge_target(self, cc: CruiseController, delta: float) -> None:
+        """ETS2 steps integer km/h. ATS steps integer mph, stored back as km/h."""
+        if cc.target_speed_kmh is None:
+            return
+        if uses_mph():
+            cc.set_target_kmh(step_setpoint_kmh(
+                cc.target_speed_kmh, delta, Settings.global_speed_limit_kmh,
+            ))
+            return
+        cc.change_target_kmh(delta)
+
+    def _capture_target(self, cc: CruiseController, speed_ms: float) -> None:
+        """Snap the set speed to the current speed in the driver's unit."""
+        if uses_mph():
+            cc.set_target_kmh(quantize_speed_kmh(
+                speed_ms, Settings.global_speed_limit_kmh,
+            ))
+            return
+        cc.set_target_from_speed_kmh(speed_ms * 3.6)
+
     def _tick_button_fsm(
         self,
         tel: dict,
@@ -517,14 +538,14 @@ class CruiseControlThread(BaseThread):
                 self._long_press_dec = True
                 self._time_pressed_dec = now
                 if cc.target_speed_kmh is not None:
-                    cc.change_target_kmh(-float(long_i))
+                    self._nudge_target(cc, -float(long_i))
         else:
             self._long_press_dec = False
             self._time_pressed_dec = None
 
         for _ in range(self._presses.take_short("cc_dec_button", cc_dec)):
             if cc.target_speed_kmh is not None:
-                cc.change_target_kmh(-float(short_i))
+                self._nudge_target(cc, -float(short_i))
 
         # Increase (and enable on first press if disabled)
         if cc_inc and not cc_dec and not cc_start and not block_inc_start:
@@ -539,9 +560,9 @@ class CruiseControlThread(BaseThread):
                 self._long_press_inc = True
                 self._time_pressed_inc = now
                 if cc.enabled:
-                    cc.change_target_kmh(float(long_i))
+                    self._nudge_target(cc, float(long_i))
                 elif cc.target_speed_kmh is None or speed_kmh > (cc.target_speed_kmh or 0):
-                    cc.set_target_from_speed_kmh(speed_kmh)
+                    self._capture_target(cc, tel["speed_ms"])
                 if not cc.enabled:
                     cc.enable()
                     _lbl = "Cruise control" if cruise_mode else "Speed limiter"
@@ -553,9 +574,9 @@ class CruiseControlThread(BaseThread):
         if not block_inc_start:
             for _ in range(self._presses.take_short("cc_inc_button", cc_inc)):
                 if cc.enabled:
-                    cc.change_target_kmh(float(short_i))
+                    self._nudge_target(cc, float(short_i))
                 elif cc.target_speed_kmh is None or speed_kmh > (cc.target_speed_kmh or 0):
-                    cc.set_target_from_speed_kmh(speed_kmh)
+                    self._capture_target(cc, tel["speed_ms"])
                 if not cc.enabled:
                     cc.enable()
                     _lbl = "Cruise control" if cruise_mode else "Speed limiter"
@@ -570,7 +591,7 @@ class CruiseControlThread(BaseThread):
                 self._presses.consume_one("cc_start_button")
                 self._long_press_start = True
                 if Settings.long_press_reset and not block_inc_start:
-                    cc.set_target_from_speed_kmh(speed_kmh)
+                    self._capture_target(cc, tel["speed_ms"])
                     if not cc.enabled:
                         cc.enable()
                     _lbl = "Cruise target" if cruise_mode else "Speed limit"
@@ -590,7 +611,7 @@ class CruiseControlThread(BaseThread):
                 cc.enable()
                 logger.info(f"{_lbl} enabled")
             if cc.target_speed_kmh is None:
-                cc.set_target_from_speed_kmh(speed_kmh)
+                self._capture_target(cc, tel["speed_ms"])
 
     def _publish_telemetry_command(self, wanted_accel_ms2: float) -> None:
         try:

@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
 )
 
+from core.speed_units import display_from_ms, format_kmh, unit_label
 from core.thread_management.registry import registry
 from ui.cc_panel.main import cc_panel as CcPanel
 from ui.main_window.banner import BannerState, BannerWidget
@@ -171,6 +172,11 @@ class MonoCruiseWindow(QMainWindow):
         self._panel_anim_group.addAnimation(self._panel_fade_anim)
         self._panel_open = True
 
+        try:
+            self._shown_game = int(self._settings.last_game)
+        except (TypeError, ValueError):
+            self._shown_game = 1
+
         # Registry polling timer (reads thread state → updates UI)
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(100)
@@ -181,7 +187,7 @@ class MonoCruiseWindow(QMainWindow):
         self._cc_panel: CcPanel | None = None
         self._cc_panel_scale_snap: float | None = None
         self._cc_panel_update_snap: tuple | None = None
-        # Throttle lead speed int km/h updates so telemetry jitter does not flicker the label.
+        # Throttle lead-speed integer updates so telemetry jitter does not flicker the label.
         self._cc_lead_speed_emit_val: int | None = None
         self._cc_lead_speed_emit_ts: float = 0.0
         self._init_cc_panel()
@@ -294,6 +300,11 @@ class MonoCruiseWindow(QMainWindow):
             logger.exception("main window poll: startup visibility failed")
 
         try:
+            self._sync_speed_unit()
+        except Exception:
+            logger.exception("main window poll: speed unit sync failed")
+
+        try:
             self._sync_cc_panel()
         except Exception:
             logger.exception("main window poll: CC panel sync failed")
@@ -396,7 +407,7 @@ class MonoCruiseWindow(QMainWindow):
             py = int(self._settings.panel_y) if self._settings.panel_y is not None else 100
             mode = self._cc_panel_display_mode(self._settings.cc_mode)
             self._cc_panel = CcPanel(
-                "-- km/h",
+                format_kmh(None),
                 cc_mode=mode,
                 cc_enabled=False,
                 x_co=px,
@@ -409,6 +420,17 @@ class MonoCruiseWindow(QMainWindow):
         except Exception:
             logger.exception("failed to create cruise control panel")
             self._cc_panel = None
+
+    def _sync_speed_unit(self) -> None:
+        """Settings widgets follow last_game. The cruise panel reads it on its own poll."""
+        try:
+            game = int(self._settings.last_game)
+        except (TypeError, ValueError):
+            game = 1
+        if game == self._shown_game:
+            return
+        self._shown_game = game
+        self._settings_panel.refresh_speed_unit()
 
     def _sync_cc_panel(self) -> None:
         """Drive CcPanel from registry + Settings (AEB blink, speed limiter colours, etc.)."""
@@ -438,7 +460,7 @@ class MonoCruiseWindow(QMainWindow):
 
         acc_locked = False
         acc_truck = False
-        lead_speed_kmh: int | None = None
+        lead_speed: int | None = None
         try:
             acc = registry.get_thread("acc_thread")
             if acc is not None and acc.is_alive():
@@ -448,22 +470,22 @@ class MonoCruiseWindow(QMainWindow):
                 if primary is not None:
                     acc_locked = True
                     acc_truck = self._classify_lead_as_truck(primary.vehicle)
-                    # Int km/h snap so panel updates only when displayed value would change.
-                    lead_speed_kmh = int(round(primary.effective_speed_ms * 3.6))
+                    # Integer in the driver's unit, so the label changes only on a new number.
+                    lead_speed = display_from_ms(primary.effective_speed_ms)
         except (KeyError, AttributeError):
             pass
 
         # Rate-limit lead speed changes; None first/last pass through immediately.
         now_mono = time.monotonic()
         last_val = self._cc_lead_speed_emit_val
-        if lead_speed_kmh is None or last_val is None:
+        if lead_speed is None or last_val is None:
             emit_now = True
         else:
             emit_now = (now_mono - self._cc_lead_speed_emit_ts) >= _CC_LEAD_SPEED_MIN_INTERVAL_S
         if emit_now:
-            self._cc_lead_speed_emit_val = lead_speed_kmh
+            self._cc_lead_speed_emit_val = lead_speed
             self._cc_lead_speed_emit_ts = now_mono
-        lead_speed_kmh = self._cc_lead_speed_emit_val
+        lead_speed = self._cc_lead_speed_emit_val
 
         s = self._settings
         with s._state_lock:
@@ -485,14 +507,12 @@ class MonoCruiseWindow(QMainWindow):
             self._cc_panel.update_scaling(new_scale)
 
         display_mode = self._cc_panel_display_mode(cc_mode_raw)
-        if target_kmh is None:
-            text = "-- km/h"
-        else:
-            text = f"{int(round(target_kmh))} km/h"
+        unit = unit_label()
+        text = format_kmh(target_kmh)
 
         update_snap = (
             text, display_mode, cruise_enabled, aeb_warn, acc_on,
-            acc_locked, acc_truck, gap_level, lead_speed_kmh,
+            acc_locked, acc_truck, gap_level, lead_speed, unit,
         )
         if self._cc_panel_update_snap != update_snap:
             self._cc_panel_update_snap = update_snap
@@ -505,7 +525,8 @@ class MonoCruiseWindow(QMainWindow):
                 acc_locked=acc_locked,
                 distance_to_lead=gap_level,
                 acc_truck=acc_truck,
-                lead_vehicle_speed=lead_speed_kmh,
+                lead_vehicle_speed=lead_speed,
+                speed_unit=unit,
             )
 
         if should_show:
