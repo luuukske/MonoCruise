@@ -218,3 +218,60 @@ def test_body_separation_keeps_shared_bend_when_lat_floors():
     ctx.d_miss_rate = -5.0
     res = OppositeLaneFilter(CAL).apply(ctx)
     assert res.suppressed and res.reason == "OppositeLaneFilter"
+
+
+def test_turn_into_path_yields_to_a_target_tracking_the_same_bend(monkeypatch):
+    """Mid-corner |lat| sweeps the nose on every oncoming pass (clip 7d76e26d)."""
+    import core.aeb.filters as filters_mod
+
+    ctx = _oncoming_ctx(d_miss=1.13, lateral_m=0.48)
+    ctx.ego_curvature = -0.0350
+    ctx.v_curvature = -0.0256
+    ctx.d_miss_rate = -4.24
+    monkeypatch.setattr(
+        filters_mod, "project_to_ego_arc",
+        lambda arc, x, z: (40.0, 6.95),
+    )
+    assert not filters_mod.oncoming_closing_into(ctx, CAL, d_abs=6.95), (
+        "a target following ego's own bend is a pass, not a turn-into-path"
+    )
+    res = OppositeLaneFilter(CAL).apply(ctx)
+    assert res.suppressed and res.reason == "OppositeLaneFilter"
+
+
+def test_turn_into_path_survives_a_straight_running_oncoming_target(monkeypatch):
+    """The e0fd28b3 shape: ego turns hard, the target holds a straight line."""
+    import core.aeb.filters as filters_mod
+
+    ctx = _oncoming_ctx(d_miss=6.34, lateral_m=0.19)
+    ctx.ego_curvature = 0.0521
+    ctx.v_curvature = 0.0018
+    ctx.d_miss_rate = -8.41
+    monkeypatch.setattr(
+        filters_mod, "project_to_ego_arc",
+        lambda arc, x, z: (40.0, 33.65),
+    )
+    assert filters_mod.oncoming_closing_into(ctx, CAL, d_abs=33.65)
+
+
+def test_shared_bend_exit_is_magnitude_only_and_ignores_curvature_sign():
+    """Oncoming on one bend is usually opposite-signed; only |kappa| may decide."""
+    from core.aeb.filters import oncoming_closing_into
+
+    base = _oncoming_ctx(d_miss=1.13, lateral_m=0.48)
+    base.ego_curvature = -0.0350
+    base.d_miss_rate = -4.24
+    for v_curvature in (-0.0256, 0.0256):
+        base.v_curvature = v_curvature
+        assert not oncoming_closing_into(base, CAL), (
+            f"sign of v_curvature ({v_curvature}) must not change the verdict"
+        )
+
+
+def test_shared_bend_exit_ignores_a_barely_turning_target():
+    """A target twitching below the corner threshold is not sharing ego's bend."""
+    from core.aeb.lane_frame import shares_bend
+
+    assert not shares_bend(0.0350, CAL.turning_diverge_kappa * 0.5, CAL)
+    assert not shares_bend(0.0350, 0.0350 * CAL.oncoming_shared_bend_ratio * 0.9, CAL)
+    assert shares_bend(0.0350, 0.0350 * CAL.oncoming_shared_bend_ratio, CAL)

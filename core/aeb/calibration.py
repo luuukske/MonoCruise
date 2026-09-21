@@ -146,6 +146,9 @@ class AEBCalibration:
     # Closing skip requires arc inflation vs |lat|; kills false closing on
     # adjacent head-on (6a35 engage d_abs/|lat|~9.3) while e0fd (~30) still skips.
     oncoming_closing_dabs_lat_ratio: float = 10.0
+    # Shared bend: target kappa this fraction of ego's means it tracks the same
+    # road, so |lat| grazing the nose is a pass (7d76 0.73-0.97, e0fd 0.00-0.04).
+    oncoming_shared_bend_ratio: float = 0.5
     # Soft pose clearance under clear_bar for OppositeLane body-sep (m).
     # 0.80 locks 887 engage (d_abs 1.58 vs clear ~2.32) and 280 (1.8 vs ~2.31).
     oncoming_body_sep_soft_m: float = 0.80

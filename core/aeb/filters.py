@@ -15,7 +15,7 @@ from core.radar.traffic import (
 from core.radar.ego_path import ego_curvature_from_history
 from core.aeb.calibration import AEBCalibration
 from core.aeb.cross_zone import _apply_cross_zone, _cross_zone_padding
-from core.aeb.lane_frame import Lane, project_to_ego_arc, classify, in_lane_closing
+from core.aeb.lane_frame import Lane, project_to_ego_arc, classify, in_lane_closing, shares_bend
 
 
 class OneEuroFilter:
@@ -422,6 +422,9 @@ def oncoming_closing_into(
         return False
     rate = getattr(ctx, "d_miss_rate", None)
     if rate is None or rate > cal.oncoming_closing_dmiss_rate_mps:
+        return False
+    # Mid-bend, |lat| sweeps the nose on every oncoming pass (README shared bend).
+    if shares_bend(ctx.ego_curvature, ctx.v_curvature, cal):
         return False
     lat = abs(-ctx.dx * ctx.ego_fwd_z + ctx.dz * ctx.ego_fwd_x)
     if lat >= cal.oncoming_closing_lat_m:

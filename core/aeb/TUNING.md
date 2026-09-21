@@ -49,6 +49,7 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `oncoming_closing_dmiss_rate_mps` | −1.5 m/s | Turn-into-path: miss closing this fast with ego turning |
 | `oncoming_closing_lat_m` | 0.85 m | Turn-into-path: straight `|lat|` must collapse under this |
 | `oncoming_closing_dabs_lat_ratio` | 10.0 | Turn-into also needs `d_abs ≥ \|lat\| × ratio` (adjacent vs inflated) |
+| `oncoming_shared_bend_ratio` | 0.5 | Turn-into exits when target `\|κ\| ≥ ego \|κ\| ×` this: both on one bend, so `\|lat\|` sweeping the nose is a pass, not a turn-into. Magnitude only, no sign test |
 | `max_evasion_lat_g` | 0.35×9.81 | Refuse Opp/TmpCross suppress when required `a_lat` exceeds this and `|lat|` clears the stage arm |
 | `max_evasion_min_lat_m` | 7.0 | OppositeLane arm: `|lat|` must reach this (or `clear_bar`) before max-g refuse |
 | `max_evasion_min_lat_m_opp_fast` | 4.5 | Opp arm when target ≥ `max_evasion_opp_fast_kmh`. Provisional n=1 (`0af8aedb`); corpus ablation finds no twins |

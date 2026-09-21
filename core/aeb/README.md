@@ -424,6 +424,28 @@ extrapolation vetoes so warn can promote to brake. Evasion clearance still may
 suppress. Colliding closing targets also earn `certain_geom` for instant engage.
 `OppositeLaneFilterMirrored` stays `Lane.EGO` only.
 
+**Shared bend beats the `|lat|` collapse.** `|lat|` is measured against ego's
+straight-ahead axis, so mid-corner it sweeps through zero on *every* oncoming
+pass while the arc offset stays a full lane wide. That is what made clip
+`7d76e26d` brake: `d_abs` held 6.95 m against a 2.46 m body bar for the whole
+approach, and the only signal that disagreed was `|lat|` grazing 0.16 m for four
+ticks. `lane_frame.shares_bend` exits the predicate first: the target must be turning
+(`|v_curvature| >= turning_diverge_kappa`) at `oncoming_shared_bend_ratio` (0.5)
+or more of ego's `|κ|`, which says it is following the same road and the wide
+arc offset is real rather than ego's held steer extrapolated. Measured ratios:
+`7d76e26d` 0.73-0.97 and `458b8166` 0.97-1.07 on the bend, against 0.00-0.04 for
+the turn-into TP `e0fd28b3`, whose oncoming target runs straight (`|v_curvature|`
+under 0.002) while ego turns at 0.05-0.06.
+
+**No sign test, deliberately.** Two vehicles meeting on one bend usually carry
+*opposite*-signed curvature, because each signs its own travel direction: over
+the corpus, 89.8% of head-on ticks with both vehicles turning inside 40 m are
+opposite-signed (n=34154). Requiring agreement would miss most real shared
+bends, and requiring disagreement would miss `7d76e26d` itself, which is
+same-signed. The magnitude ratio carries the whole test and stays correct under
+either convention. `CoDirectionalDivergeFilter` Fix C does use a sign test, but
+it compares co-directional traffic, where both vehicles sign the same way.
+
 ### `CoDirectionalDivergeFilter`
 
 Applies only to `co_directional` vehicles (`fwd_dot > cal.co_directional_dot=0.7`).

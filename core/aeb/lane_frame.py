@@ -68,3 +68,11 @@ def in_lane_closing(
     closing = ego_speed - v_travel_speed * max(fwd_dot, 0.0)
     return closing > min_closing
 
+
+def shares_bend(ego_curvature: float, v_curvature: float,
+                cal: AEBCalibration) -> bool:
+    """Both paths on one bend, so a wide arc offset is real; see core/aeb/README.md."""
+    v_kappa = abs(v_curvature)
+    if v_kappa < cal.turning_diverge_kappa:
+        return False
+    return v_kappa >= abs(ego_curvature) * cal.oncoming_shared_bend_ratio
