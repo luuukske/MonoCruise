@@ -157,6 +157,12 @@ Lifecycle via orchestrator; no disengage logic here. Gains: `Settings.limiter_*`
 PID runs every tick while enabled; returns `LongOutput(wanted, True)` even below the cap
 so the mapper tightens the gas pedal progressively (see `AGENTS.md`).
 
+The one exception is a telemetry disconnect. The speed it would track is stale, so the
+limiter bids nothing and resets its PID state, while the enabled flag and target stay
+set so the cap is back on the first connected tick. The zeroed pedals in
+`sending_thread`'s disconnected branch used to be the only defence against that stale
+bid.
+
 ### Overshoot protection
 
 The kp term already bids strong decel for small overshoots; recovery time is mostly set

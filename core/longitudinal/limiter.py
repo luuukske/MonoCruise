@@ -94,7 +94,9 @@ class SpeedLimiter(LongitudinalController):
         self._cubic_engage = 0.0
 
     def step(self, ctx: LongCtx) -> LongOutput:
-        if not self.active:
+        # Disconnected speed is stale: bid nothing and start clean on reconnect.
+        # Enabled flag and target survive, so this is not a disengage.
+        if not self.active or not ctx.connected:
             self.reset()
             return LongOutput(None, False)
 

@@ -84,6 +84,26 @@ def test_inactive_only_when_disabled_or_targetless():
     assert out.active is False and out.wanted_ms2 is None
 
 
+def test_disconnect_drops_the_bid_but_keeps_the_cap_armed(limiter):
+    """Stale speed never reaches the mapper, and the cap is back on the first connected tick."""
+    out = limiter.step(make_ctx(60.0 / 3.6, connected=False))
+    assert out.active is False and out.wanted_ms2 is None
+    assert limiter.enabled is True
+    assert limiter.target_speed_kmh == TARGET_KMH
+
+    out = limiter.step(make_ctx(60.0 / 3.6, now=0.02))
+    assert out.active is True and out.wanted_ms2 is not None
+
+
+def test_reconnect_starts_from_a_clean_state(limiter):
+    """An integrator wound up before the disconnect must not carry over into the reconnect."""
+    _run(limiter, 60.0, ticks=200)
+    limiter.step(make_ctx(60.0 / 3.6, connected=False))
+    after = limiter.step(make_ctx(60.0 / 3.6))
+    fresh = _limiter_at(TARGET_KMH).step(make_ctx(60.0 / 3.6))
+    assert after.wanted_ms2 == pytest.approx(fresh.wanted_ms2)
+
+
 def test_asymmetric_clamp_leaves_the_positive_side_open(limiter):
     """max(accel_min, wanted) only: a positive bid must pass through unbounded."""
     out = _run(limiter, 30.0)

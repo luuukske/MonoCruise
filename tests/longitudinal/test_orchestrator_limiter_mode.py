@@ -92,6 +92,25 @@ def test_limiter_survives_a_brake_press(rig):
     assert thread._cc_ctrl.enabled is True
 
 
+def test_disconnect_publishes_no_limiter_bid(rig):
+    """Telemetry gone: nothing is published on stale speed, and the cap re-arms on reconnect."""
+    thread, tel, _, _ = rig
+    thread.loop()
+    assert thread.data.active_controller == "limiter"
+    assert tel.data.commanded_accel_ms2 != 0.0
+
+    tel.data.set(is_connected=False)
+    thread.loop()
+    assert thread.data.active is False
+    assert thread.data.active_controller == "none"
+    assert tel.data.commanded_accel_ms2 == 0.0
+    assert thread._limiter_ctrl.active is True  # armed, just not bidding
+
+    tel.data.set(is_connected=True)
+    thread.loop()
+    assert thread.data.active_controller == "limiter"
+
+
 @pytest.mark.parametrize("missing", ["telemetry_thread", "main_pedal_thread", "sending_thread"])
 def test_a_missing_sibling_does_not_break_the_loop(rig, missing):
     """A thread must never crash or stop looping because a sibling is gone."""
