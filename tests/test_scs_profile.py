@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -164,8 +165,13 @@ def test_mtime_fallback_when_log_is_missing(tmp_path: Path):
     user = tmp_path / "user"
     older = _hex("DriverA")
     newer = _hex("DriverB")
-    _uset(user / "profiles" / older / "config_local.cfg", g_trans="3", g_brake_intensity="1")
-    _uset(user / "profiles" / newer / "config_local.cfg", g_trans="1", g_brake_intensity="0.5")
+    older_cfg = user / "profiles" / older / "config_local.cfg"
+    newer_cfg = user / "profiles" / newer / "config_local.cfg"
+    _uset(older_cfg, g_trans="3", g_brake_intensity="1")
+    _uset(newer_cfg, g_trans="1", g_brake_intensity="0.5")
+    # Windows can stamp two back-to-back writes with the same mtime, so order them explicitly.
+    os.utime(older_cfg, (1_700_000_000, 1_700_000_000))
+    os.utime(newer_cfg, (1_700_000_100, 1_700_000_100))
 
     settings = read_selected_profile(
         "ets2",
