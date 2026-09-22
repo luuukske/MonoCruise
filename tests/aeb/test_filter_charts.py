@@ -262,7 +262,7 @@ def test_the_chart_asks_for_the_replay_only_while_it_is_open(qapp, tmp_path):
     win.close()
 
 
-def test_the_loader_emits_a_trace_beside_the_frames(qapp, tmp_path):
+def test_the_loader_defers_the_trace_until_charts_ask(qapp, tmp_path):
     store = ClipStore(root=tmp_path)
     path = store.write(_braking_clip())
     loader = ClipLoader(store)
@@ -271,9 +271,57 @@ def test_the_loader_emits_a_trace_beside_the_frames(qapp, tmp_path):
 
     loader.load(str(path))
     assert len(received) == 1
-    _path, clip, frames, trace = received[0]
+    _path, clip, frames, trace, stream = received[0]
     assert clip is not None and frames
+    assert trace is None and stream is not None
+
+    received.clear()
+    loader.load(str(path), True)
+    _path, clip, frames, trace, stream = received[0]
     assert trace is not None and 7 in trace.vehicles
+    assert stream is None
+
+
+def test_scan_reads_unchanged_clips_from_the_disk_index(tmp_path, qapp, monkeypatch):
+    from pathlib import Path
+
+    from core.aeb.clip_schema import Label
+
+    store = ClipStore(root=tmp_path)
+    path_a = store.write(_make_clip(clip_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"))
+    path_b = store.write(_make_clip(clip_id="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"))
+    assert store.write_label(path_a, Label(class_="fp", notes="hill"))
+    loader = ClipLoader(store)
+    seen: list[str] = []
+    real = store.peek_metadata
+
+    def counting(path):
+        seen.append(Path(path).name)
+        return real(path)
+
+    monkeypatch.setattr(store, "peek_metadata", counting)
+    got = []
+    loader.scanned.connect(got.append)
+
+    loader.scan({})
+    assert len(seen) == 2
+    classes = {
+        info.name: (None if meta is None or meta.label is None else meta.label.class_)
+        for info, meta, _origin in got[-1]
+    }
+    assert "fp" in classes.values()
+    assert None in classes.values()
+
+    seen.clear()
+    loader.scan({})
+    assert seen == []
+    notes = [meta.label.notes for _info, meta, _origin in got[-1]
+             if meta is not None and meta.label is not None]
+    assert notes == ["hill"]
+
+    assert store.write_label(path_b, Label(class_="fn", notes="late"))
+    loader.scan({})
+    assert len(seen) == 1
 
 
 def test_a_trace_failure_never_costs_the_clip(qapp, tmp_path, monkeypatch):
@@ -291,9 +339,9 @@ def test_a_trace_failure_never_costs_the_clip(qapp, tmp_path, monkeypatch):
     received = []
     loader.loaded.connect(lambda *args: received.append(args))
 
-    loader.load(str(path))
+    loader.load(str(path), True)
     assert len(received) == 1
-    _path, clip, frames, trace = received[0]
+    _path, clip, frames, trace, _stream = received[0]
     assert clip is not None
     assert frames, "frames should survive a trace failure"
     assert trace is None

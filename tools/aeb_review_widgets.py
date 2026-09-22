@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import base64
+import json
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QFrame, QLabel, QListWidgetItem, QPushButton, QWidget
 
-from core.aeb.clip_replay import ReviewFrame, decode_radar_stream, replay_clip
-from core.aeb.clip_schema import Clip, ClipMetadata
+from core.aeb.clip_replay import ReviewFrame, decode_radar_stream, replay_clip, replay_frames
+from core.aeb.clip_schema import Clip, ClipMetadata, Label
 from core.aeb.clip_store import ClipInfo, ClipStore, contributed_clip_root, default_clip_root
 from core.aeb.debug_window import AEBDebugWindow
 
@@ -43,6 +46,7 @@ class Loaded:
     proposal: tuple[float, float] | None
     action_idx: int
     trace: object = None
+    stream: object = None
     evaluated: object = None
 
 
@@ -108,11 +112,122 @@ class ThumbnailView(QLabel):
         self.setPixmap(self._orig.scaledToWidth(w, Qt.SmoothTransformation))
 
 
-class ClipLoader(QObject):
-    """Store reads off the GUI thread: load plus replay costs ~0.5 s per clip."""
+_INDEX_NAME = ".review_index.json"
+_INDEX_VERSION = 1
 
-    loaded = Signal(str, object, object, object)   # path, Clip | None, frames, ClipTrace
-    evaluated = Signal(str, object)                # path, list[(t_rel, state)] | None
+
+def _read_index(store: ClipStore) -> dict:
+    path = store.root / _INDEX_NAME
+    try:
+        blob = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(blob, dict):
+        return {}
+    try:
+        version = int(blob.get("version", 0))
+    except (TypeError, ValueError):
+        return {}
+    if version != _INDEX_VERSION:
+        return {}
+    rows = blob.get("rows")
+    return rows if isinstance(rows, dict) else {}
+
+
+def _write_index(store: ClipStore, rows: dict) -> None:
+    path = store.root / _INDEX_NAME
+    tmp = path.with_name(_INDEX_NAME + ".tmp")
+    try:
+        tmp.write_text(
+            json.dumps({"version": _INDEX_VERSION, "rows": rows}, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _meta_from_index(row: dict) -> ClipMetadata:
+    cls = row.get("label")
+    label = Label(class_=str(cls), notes=str(row.get("notes") or "")) if cls else None
+    return ClipMetadata(
+        clip_id=str(row.get("clip_id") or ""),
+        trigger_source=str(row.get("trigger") or ""),
+        label=label,
+    )
+
+
+def _index_row(meta: ClipMetadata | None, mtime_ns: int, size: int) -> dict:
+    label = meta.label if meta is not None else None
+    return {
+        "ns": str(int(mtime_ns)),
+        "size": int(size),
+        "clip_id": meta.clip_id if meta else "",
+        "trigger": meta.trigger_source if meta else "",
+        "label": label.class_ if label else None,
+        "notes": (label.notes or "") if label else "",
+    }
+
+
+def _peek_many(store: ClipStore, infos: list[ClipInfo]):
+    if len(infos) < 8:
+        return [store.peek_metadata(info.path) for info in infos]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        return list(pool.map(lambda info: store.peek_metadata(info.path), infos))
+
+
+def _resolve_store(store: ClipStore, known: dict, origin: str):
+    """One store's rows. Disk index is keyed by filename, mtime in nanoseconds as text."""
+    disk = _read_index(store)
+    updated = dict(disk)
+    changed = False
+    infos = store.list_clips()
+    names = {info.path.name for info in infos}
+    for name in [name for name in updated if name not in names]:
+        del updated[name]
+        changed = True
+    resolved: dict[str, ClipMetadata | None] = {}
+    misses: list[ClipInfo] = []
+    for info in infos:
+        key = str(info.path)
+        cached = known.get(key)
+        if cached is not None and cached[0] == info.mtime and cached[1] == info.size_bytes:
+            resolved[key] = cached[2]
+            row = _index_row(cached[2], info.mtime_ns, info.size_bytes)
+            if updated.get(info.path.name) != row:
+                updated[info.path.name] = row
+                changed = True
+            continue
+        row = disk.get(info.path.name)
+        try:
+            indexed_size = int(row.get("size", -1)) if isinstance(row, dict) else -1
+        except (TypeError, ValueError):
+            indexed_size = -1
+        if (isinstance(row, dict) and row.get("ns") == str(info.mtime_ns)
+                and indexed_size == info.size_bytes):
+            resolved[key] = _meta_from_index(row)
+            continue
+        misses.append(info)
+    if misses:
+        changed = True
+        for info, meta in zip(misses, _peek_many(store, misses)):
+            resolved[str(info.path)] = meta
+            updated[info.path.name] = _index_row(meta, info.mtime_ns, info.size_bytes)
+    if changed:
+        _write_index(store, updated)
+    return [(info, resolved[str(info.path)], origin) for info in infos]
+
+
+class ClipLoader(QObject):
+    """Store reads off the GUI thread. Scan and decode do not share a thread."""
+
+    loaded = Signal(str, object, object, object, object)  # path, Clip, frames, trace, stream
+    preview = Signal(str, object)                         # path, Clip, before replay
+    evaluated = Signal(str, object)                       # path, list[(t_rel, state)] | None
+    traced = Signal(str, object)                          # path, ClipTrace | None
     # list[tuple[ClipInfo, ClipMetadata | None, str]] with origin "local"|"remote"
     scanned = Signal(object)
 
@@ -122,22 +237,39 @@ class ClipLoader(QObject):
         # load / peek are path-based; any store instance can read any clip file.
         self._io = self._stores[0]
 
-    @Slot(str)
-    def load(self, path: str) -> None:
-        """Decode once, then derive both the review frames and the filter trace from it."""
+    @Slot(str, bool)
+    def load(self, path: str, with_trace: bool = False) -> None:
+        """Decode one clip. The filter trace is built only when the chart window is open."""
         from tools.aeb_filter_trace import build_trace
 
         clip = self._io.load(path)
         if clip is None:
-            self.loaded.emit(path, None, [], None)
+            self.loaded.emit(path, None, [], None, None)
             return
-        stream = decode_radar_stream(clip)
-        frames = replay_clip(clip, stream=stream)
+        self.preview.emit(path, clip)
+        radar_frames = replay_frames(clip)
+        stream = decode_radar_stream(clip, frames=radar_frames, with_elevation=False)
+        frames = replay_clip(clip, stream=stream, radar_frames=radar_frames)
+        trace = None
+        if with_trace:
+            try:
+                trace = build_trace(clip, stream=stream)
+            except Exception:
+                trace = None
+            else:
+                stream = None
+        self.loaded.emit(path, clip, frames, trace, stream)
+
+    @Slot(str, object, object)
+    def trace(self, path: str, clip, stream) -> None:
+        """Chart trace for a clip already decoded. ``stream`` skips a second radar replay."""
+        from tools.aeb_filter_trace import build_trace
+
         try:
-            trace = build_trace(clip, stream=stream)
+            built = build_trace(clip, stream=stream)
         except Exception:
-            trace = None   # a chart is never worth losing the clip over
-        self.loaded.emit(path, clip, frames, trace)
+            built = None
+        self.traced.emit(path, built)
 
     @Slot(str, object)
     def evaluate(self, path: str, clip) -> None:
@@ -160,22 +292,13 @@ class ClipLoader(QObject):
 
     @Slot(object)
     def scan(self, known: dict) -> None:
-        """Rescan every store, decoding metadata only for new or changed clips.
+        """Rescan every store. Unchanged clips come from memory or the on-disk index.
 
-        ``known`` maps path to (mtime, size, metadata) from the caller's cache, so a
-        refresh only pays for clips that actually appeared or were relabelled.
+        ``known`` maps path to (mtime, size, metadata) from the caller's cache.
         """
         entries: list[tuple[ClipInfo, ClipMetadata | None, str]] = []
         for store in self._stores:
-            origin = store_origin(store)
-            for info in store.list_clips():
-                cached = known.get(str(info.path))
-                if (cached is not None
-                        and cached[0] == info.mtime and cached[1] == info.size_bytes):
-                    meta = cached[2]
-                else:
-                    meta = store.peek_metadata(info.path)
-                entries.append((info, meta, origin))
+            entries.extend(_resolve_store(store, known, store_origin(store)))
         entries.sort(key=lambda row: row[0].mtime, reverse=True)
         self.scanned.emit(entries)
 
@@ -584,6 +707,85 @@ def _hline() -> QFrame:
 
 def _fmt(v: float) -> str:
     return f"{v:.2f}" if v < 100 else "inf"
+
+
+def show_clip_preview(win, path: str, clip) -> None:
+    """Thumbnail and the label form, before the radar replay finishes."""
+    if path != win._awaiting or clip is None:
+        return
+    win._frames = []
+    win._proposal = None
+    win._scene.set_snapshot(None)
+    win._strip.set_frames([], 1.0)
+    win._strip.set_proposal(None)
+    meta = clip.metadata
+    win._clip_name_lbl.setText(meta.clip_id)
+    win._thumb.set_jpeg(meta.thumbnail_jpeg)
+    win._clip_meta_lbl.setText(
+        f"{meta.trigger_source} · {meta.session_kind} · {meta.captured_at}"
+    )
+    win._load_label_into_form(clip)
+    win._form_path = path
+
+
+def show_clip_trace(win, path: str, trace) -> None:
+    cached = win._cache.get(path)
+    if cached is not None:
+        cached.trace = trace
+        cached.stream = None
+    if path != str(win._path) or win._charts is None or cached is None:
+        return
+    win._charts.show_clip(
+        cached, win._frames, win._window, win._target_vid, win._cur_t(),
+    )
+
+
+class ReviewBridge(QObject):
+    """GUI-thread slots for worker results. A bare function would run on the worker."""
+
+    def __init__(self, win) -> None:
+        super().__init__(win)
+        self._win = win
+
+    @Slot(str, object)
+    def preview(self, path: str, clip) -> None:
+        show_clip_preview(self._win, path, clip)
+
+    @Slot(str, object)
+    def traced(self, path: str, trace) -> None:
+        show_clip_trace(self._win, path, trace)
+
+
+def start_review_workers(win) -> None:
+    win._load_thread = QThread(win)
+    win._scan_thread = QThread(win)
+    win._loader = ClipLoader(win._stores)
+    win._loader.moveToThread(win._load_thread)
+    win._scanner = ClipLoader(win._stores)
+    win._scanner.moveToThread(win._scan_thread)
+    win._bridge = ReviewBridge(win)
+    win.load_requested.connect(win._loader.load)
+    win._loader.preview.connect(win._bridge.preview)
+    win._loader.loaded.connect(win._on_loaded)
+    win.scan_requested.connect(win._scanner.scan)
+    win._scanner.scanned.connect(win._on_scanned)
+    win.eval_requested.connect(win._scanner.evaluate)
+    win._scanner.evaluated.connect(win._on_evaluated)
+    win.trace_requested.connect(win._scanner.trace)
+    win._scanner.traced.connect(win._bridge.traced)
+    win._puller = PullWorker()
+    win._puller.moveToThread(win._scan_thread)
+    win.pull_requested.connect(win._puller.pull)
+    win._puller.progress.connect(win._on_pull_progress)
+    win._puller.finished.connect(win._on_pull_finished)
+    win._load_thread.start()
+    win._scan_thread.start()
+
+
+def stop_review_workers(win) -> None:
+    for thread in (win._load_thread, win._scan_thread):
+        thread.quit()
+        thread.wait(2000)
 
 
 def _review_stores(*, root: str | None, contributed_only: bool) -> list[ClipStore]:

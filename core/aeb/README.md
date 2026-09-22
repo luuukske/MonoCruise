@@ -1791,16 +1791,45 @@ large window degrades instead of stalling the repaint.
 
 ### Decode happens off the GUI thread
 
-`ClipStore.load` plus `replay_clip` costs about 0.5 s per clip, so a `ClipLoader`
-worker does both on its own thread and the window keeps an LRU of four decoded
-clips (~14 MB each). Selecting a row queues the next two, so a pass down the list
-hits the cache and lands in ~0.1 s instead of ~0.5 s. The store rescan runs on the
-same worker: 652 clips take ~1.1 s and the UI stays live throughout.
+Opening a clip is the gzip (`ClipStore.load`, about 20 ms) and then the radar
+replay. A tagging load measures about 0.4 s. The chart trace is another 0.1 s
+and runs only while that window is open. The AEB re-run (about 0.8 s) stays a
+separate job.
+
+Decode has its own thread. Scan, the server pull, and the chart jobs share
+another, so a rescan cannot sit in front of the clip you just clicked. The
+window keeps eight decoded clips and queues the next four. The thumbnail and
+the label form are filled from the gzip before the replay finishes.
+
+`replay_frames` used to run twice per open, because the ego-path gain rebuilt
+the clock on its own. It runs once now, and that pass reads slot kinematics
+instead of building `Vehicle` objects: about 15 ms, down from about 120 ms.
+What is left is `TrafficReader.replay_frame`, the same smoother live radar
+runs, plus the arc snapshots the scene draws. Do not skip the smoother to make
+the open faster. The scene would no longer be what AEB saw.
+
+The review scene does not read `off_by_t`, so its decode skips the elevation
+gate. The chart re-run decodes again with the gate on, because headless AEB
+reads those ids. Do not feed the review stream into `run_headless`.
+
+### The clip list
+
+A rescan used to gunzip every clip's metadata on the decode thread. On 2275
+clips that was about 4 s with the files already cached and about 12 s from a
+cold disk, and the first open waited behind it.
+
+Each store keeps `.review_index.json` next to the clips: filename, mtime in
+nanoseconds (stored as text, the integer does not round-trip through JSON),
+size, clip id, trigger, label, notes. A refresh stats the directory and peeks
+only new or rewritten files. Reopening the tool is about 0.07 s for both
+stores. The first open, or a refresh with no index, peeks on eight threads:
+about 2 s for 2275 clips. `list_clips` only matches `*.json.gz`, so the index
+is not a clip and is not uploaded.
 
 `ClipStore.peek_metadata` reads a 64 KB prefix before falling back to the whole
-file. Metadata needs a median 14 KB of a 423 KB clip (max seen 20 KB), so a listing
-touches a few percent of the store instead of all of it. The fallback matters:
-`thumbnail_jpeg` lives in the metadata and can push it past the prefix.
+file. Metadata needs a median 14 KB of a 423 KB clip (max seen 20 KB), so a
+listing touches a few percent of the store instead of all of it. The fallback
+matters: `thumbnail_jpeg` lives in the metadata and can push it past the prefix.
 
 ### Traffic does not start the clip at 0 km/h
 
@@ -1860,10 +1889,11 @@ plotting one vehicle's chain over the clip: the speed chain (raw through
 thresholds, the step 4 gates including `tau`, the four lag entry gates, and a row
 per filter state flag. `tools/README.md` documents the lanes and the axes.
 
-Nothing is simulated. `ClipLoader` runs `decode_radar_stream` once and derives both
-the `ReviewFrame` list and the trace from it, so the charts cost about 0.1 s per
-clip on the loader thread and nothing on the GUI thread. Values are read off the
-replayed `Vehicle` objects, or rebuilt with the production helpers.
+Nothing is simulated. While the chart window is open, `ClipLoader.load` derives
+the trace from the same `decode_radar_stream` result as the review frames, about
+0.1 s. A tagging pass does not build it. Opening the window later reuses the
+stream kept on the decoded clip, so it does not replay the radar again. Values
+are read off the replayed `Vehicle` objects, or rebuilt with the production helpers.
 
 Two decision bands sit above the lanes: `rec` from the clip, and `now` from
 `clip_eval.run_headless` at the working tree's constants, with the disagreements
@@ -2207,6 +2237,13 @@ frames: `decode_radar_stream`, `cold_start_speeds`, headless scoring, the review
 tool, triage and the ACC harness. It returns copies and never mutates the clip.
 `decode_radar_stream(clip, as_recorded=True)` skips both corrections below, for a
 probe that needs the capture-time input.
+
+Step counting does not build `Vehicle` objects. It unpacks position, speed and
+the TMP flag from each traffic slot, with the same occupied-slot rule as
+`TrafficReader._build_vehicles_from_raw` (non-zero position and quaternion).
+Parked-buffer vehicles are skipped by `_pair_steps` and never override a traffic
+id, so they are not decoded here. The smoothing pass still builds full vehicles.
+`_VEH_HDR` has to stay in step with `_VEHICLE_OBJECT_FORMAT`.
 
 ### Legacy pairing (schema 4 and older)
 

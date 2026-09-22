@@ -10,7 +10,7 @@ if _repo not in sys.path:
 
 from collections import OrderedDict
 
-from PySide6.QtCore import QEvent, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QMainWindow, QPlainTextEdit,
@@ -23,22 +23,23 @@ from core.aeb.clip_score import class_window_warning
 from core.aeb.clip_store import ClipInfo, ClipStore
 from tools.aeb_fetch import safe_pull_root
 from tools.aeb_review_widgets import (
-    ClipLoader, DecisionStrip, Loaded, PullWorker, SceneWidget, ThumbnailView,
-    action_index, recorded_band, store_origin,
+    DecisionStrip, Loaded, SceneWidget, ThumbnailView,
+    action_index, recorded_band, start_review_workers, stop_review_workers, store_origin,
     _CLASSES, _CLASS_KEYS, _LOCAL_BG, _REMOTE_BG,
     _button, _clip_item, _entry_visible, _fmt, _hline, _review_stores,
     _KEY_ACTIONS, keymap_overlay, pull_landed_in_view, pull_status_text,
 )
 
 _STEP_COARSE = 10       # frames per Shift+arrow
-_CACHE_MAX = 4          # replayed clips held in RAM, ~14 MB each
-_PREFETCH_AHEAD = 2
+_CACHE_MAX = 8          # replayed clips held in RAM, about 14 MB each
+_PREFETCH_AHEAD = 4
 
 
 class ReviewWindow(QMainWindow):
 
-    load_requested = Signal(str)
+    load_requested = Signal(str, bool)
     eval_requested = Signal(str, object)
+    trace_requested = Signal(str, object, object)
     scan_requested = Signal(object)
     pull_requested = Signal(object)
 
@@ -74,21 +75,7 @@ class ReviewWindow(QMainWindow):
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance)
 
-        self._thread = QThread(self)
-        self._loader = ClipLoader(self._stores)
-        self._loader.moveToThread(self._thread)
-        self.load_requested.connect(self._loader.load)
-        self.scan_requested.connect(self._loader.scan)
-        self._loader.loaded.connect(self._on_loaded)
-        self._loader.scanned.connect(self._on_scanned)
-        self.eval_requested.connect(self._loader.evaluate)
-        self._loader.evaluated.connect(self._on_evaluated)
-        self._puller = PullWorker()
-        self._puller.moveToThread(self._thread)
-        self.pull_requested.connect(self._puller.pull)
-        self._puller.progress.connect(self._on_pull_progress)
-        self._puller.finished.connect(self._on_pull_finished)
-        self._thread.start()
+        start_review_workers(self)
 
         self._build_ui()
         self._refresh_clips()
@@ -481,16 +468,17 @@ class ReviewWindow(QMainWindow):
         if self._inflight is not None or not self._queue:
             return
         self._inflight = self._queue.pop(0)
-        self.load_requested.emit(self._inflight)
+        charts = self._charts is not None and self._charts.isVisible()
+        self.load_requested.emit(self._inflight, charts)
 
-    @Slot(str, object, object, object)
-    def _on_loaded(self, path: str, clip, frames, trace) -> None:
+    @Slot(str, object, object, object, object)
+    def _on_loaded(self, path: str, clip, frames, trace, stream) -> None:
         self._inflight = None
         if clip is not None:
             self._cache[path] = Loaded(
                 clip=clip, frames=frames,
                 proposal=recorded_band(frames), action_idx=action_index(frames),
-                trace=trace,
+                trace=trace, stream=stream,
             )
             self._cache.move_to_end(path)
             while len(self._cache) > _CACHE_MAX:
@@ -531,7 +519,12 @@ class ReviewWindow(QMainWindow):
         self._strip.set_frames(self._frames, dur)
         self._strip.set_proposal(self._proposal)
         self._idx = loaded.action_idx
-        self._load_label_into_form(loaded.clip)
+        # Preview already filled the form. Loading it again would wipe a keypress
+        # that landed while the radar replay was still running.
+        if getattr(self, "_form_path", None) != path:
+            self._load_label_into_form(loaded.clip)
+        else:
+            self._sync_label_widgets()
         self._push_charts()
         self._refresh()
         self._prefetch()
@@ -688,6 +681,8 @@ class ReviewWindow(QMainWindow):
             return
         self._charts.show_clip(self._loaded, self._frames, self._window,
                                self._target_vid, self._cur_t())
+        if self._loaded.trace is None:
+            self.trace_requested.emit(str(self._path), self._loaded.clip, self._loaded.stream)
         if self._loaded.evaluated is None:
             self.eval_requested.emit(str(self._path), self._loaded.clip)
 
@@ -771,8 +766,7 @@ class ReviewWindow(QMainWindow):
         if self._charts is not None:
             self._charts.deleteLater()
             self._charts = None
-        self._thread.quit()
-        self._thread.wait(2000)
+        stop_review_workers(self)
         super().closeEvent(event)
 
 

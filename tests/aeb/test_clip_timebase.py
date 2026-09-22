@@ -159,6 +159,36 @@ def test_uncounted_pairs_hold_the_lag_instead_of_guessing():
     assert pairing_lag_steps(traffic_steps, ego_steps) == [0, 1, 1, 1, 1]
 
 
+def test_traffic_kinematics_match_a_full_vehicle_decode():
+    """Step counting must see the same slots ``_build_vehicles_from_raw`` would keep."""
+    from core.aeb.clip_timebase import _BUF_SIZE, _VEH_HDR, _VEH_STRIDE, _traffic_kinematics
+    from core.aeb.clip_timebase import decode_buffers
+
+    assert _VEH_STRIDE * 40 == _BUF_SIZE
+    assert _VEH_HDR.size < _VEH_STRIDE
+    buf = _traffic_buf([(1.0, 10.0, 5.0, 7), (3.5, 40.0, 12.0, 9)], is_tmp=True)
+    kin = _traffic_kinematics(buf)
+    full = decode_buffers(buf, None)
+    assert kin is not None and full is not None
+
+    def fields(vehicles):
+        return [(int(v.id), v.position.x, v.position.z, v.speed, v.is_tmp, v.is_parked)
+                for v in vehicles]
+
+    assert fields(kin) == fields(full)
+    assert _traffic_kinematics(None) is None
+    assert _traffic_kinematics(b"nope") is None
+
+    raw = list(struct.unpack(_TOTAL_FORMAT, buf))
+    raw[3] = raw[4] = raw[5] = raw[6] = 0.0
+    dropped = struct.pack(_TOTAL_FORMAT, *raw)
+    kin_dropped = _traffic_kinematics(dropped)
+    full_dropped = decode_buffers(dropped, None)
+    assert kin_dropped is not None and full_dropped is not None
+    assert fields(kin_dropped) == fields(full_dropped)
+    assert 7 not in [v.id for v in kin_dropped]
+
+
 def test_ego_heading_advance_follows_the_turn():
     """A turning ego is advanced along the arc midpoint, not the stale heading."""
     clip, k_traffic, zs = _game_clip(schema=4, stale=_LEGACY_STALE)

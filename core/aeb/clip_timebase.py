@@ -11,7 +11,9 @@ import struct
 from dataclasses import replace
 
 from core.aeb.clip_schema import Clip, RadarFrameRecord
-from core.radar.reader import TrafficReader, _TOTAL_FORMAT, _TOTAL_PARKED_FORMAT
+from core.radar.reader import (
+    TrafficReader, _BUF_SIZE, _TOTAL_FORMAT, _TOTAL_PARKED_FORMAT, _VEHICLE_OBJECT_FORMAT,
+)
 from core.radar.traffic import Vehicle, _READER_CLOCK_GAP_S
 
 PHYSICS_STEP_HZ: float = 60.0
@@ -33,7 +35,52 @@ _CLOCK_SPAN_TOLERANCE: float = 0.05
 _MIN_SEGMENT_FRAMES: int = 3
 
 _Steps = list[int | None]
-_Snapshot = dict[int, Vehicle]
+
+# One traffic slot: 12 floats, trailer count, id, tmp flag, trailer flag. Trailers follow.
+_VEH_HDR = struct.Struct("=12f2h2b")
+_VEH_STRIDE = struct.calcsize("=" + _VEHICLE_OBJECT_FORMAT)
+
+
+class _KinPos:
+    __slots__ = ("x", "z")
+
+    def __init__(self, x: float, z: float) -> None:
+        self.x = x
+        self.z = z
+
+
+class _TrafficKin:
+    """The fields ``_pair_steps`` reads. The timebase does not smooth, so it is not a Vehicle."""
+
+    __slots__ = ("id", "position", "speed", "is_tmp", "is_parked")
+
+    def __init__(self, vid: int, x: float, z: float, speed: float, is_tmp: bool) -> None:
+        self.id = vid
+        self.position = _KinPos(x, z)
+        self.speed = speed
+        self.is_tmp = is_tmp
+        self.is_parked = False
+
+
+_Snapshot = dict[int, _TrafficKin]
+
+
+def _traffic_kinematics(buf: bytes | None) -> list[_TrafficKin] | None:
+    """Occupied traffic slots in slot order, or None if the buffer will not unpack."""
+    if not isinstance(buf, (bytes, bytearray)) or len(buf) != _BUF_SIZE:
+        return None
+    out: list[_TrafficKin] = []
+    try:
+        for i in range(40):
+            x, y, z, q0, q1, q2, q3, _sx, _sy, _sz, speed, _acc, _tc, vid, is_tmp, _tr = (
+                _VEH_HDR.unpack_from(buf, i * _VEH_STRIDE)
+            )
+            if (x == 0.0 and y == 0.0 and z == 0.0) or (q0 == 0.0 and q1 == 0.0 and q2 == 0.0 and q3 == 0.0):
+                continue
+            out.append(_TrafficKin(int(vid), x, z, float(speed), bool(is_tmp)))
+    except struct.error:
+        return None
+    return out
 
 
 def decode_buffers(traffic_buf: bytes, parked_buf: bytes | None) -> list[Vehicle] | None:
@@ -96,10 +143,12 @@ def _segments(frames: list[RadarFrameRecord]) -> list[list[RadarFrameRecord]]:
 def _apply_timebase(frames: list[RadarFrameRecord], repair: bool) -> None:
     if len(frames) < _MIN_SEGMENT_FRAMES:
         return
-    decoded = [decode_buffers(f.traffic_buf, f.parked_buf) for f in frames]
-    if any(d is None for d in decoded):
-        return
-    snapshots = [{int(v.id): v for v in d} for d in decoded]
+    snapshots: list[_Snapshot] = []
+    for f in frames:
+        kin = _traffic_kinematics(f.traffic_buf)
+        if kin is None:
+            return
+        snapshots.append({int(v.id): v for v in kin})
     ego_steps: _Steps = [None] + [_ego_steps(a, b) for a, b in zip(frames, frames[1:])]
     traffic_steps = _traffic_steps(frames, snapshots, ego_steps)
     if repair:

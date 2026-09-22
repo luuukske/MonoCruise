@@ -84,6 +84,7 @@ class ClipInfo:
     name: str
     size_bytes: int
     mtime: float
+    mtime_ns: int = 0
 
 
 def _safe_stamp(captured_at: str) -> str:
@@ -237,7 +238,10 @@ class ClipStore:
                 st = p.stat()
             except OSError:
                 continue
-            out.append(ClipInfo(path=p, name=p.name, size_bytes=st.st_size, mtime=st.st_mtime))
+            out.append(ClipInfo(
+                path=p, name=p.name, size_bytes=st.st_size,
+                mtime=st.st_mtime, mtime_ns=st.st_mtime_ns,
+            ))
         out.sort(key=lambda c: c.mtime, reverse=True)
         return out
 

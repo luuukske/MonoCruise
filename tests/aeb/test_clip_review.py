@@ -189,3 +189,42 @@ def test_peek_metadata_matches_a_full_decode(tmp_path):
     path = store.write(_make_clip(clip_id="peekcmp0"))
     store.write_label(path, Label(class_="tn", severity=1))
     assert store.peek_metadata(path).to_json() == store.load(path).metadata.to_json()
+
+
+def test_replay_clip_runs_the_timebase_once(monkeypatch):
+    from core.aeb import clip_replay as mod
+
+    calls = {"n": 0}
+    real = mod.replay_frames
+
+    def wrapped(clip, as_recorded=False):
+        calls["n"] += 1
+        return real(clip, as_recorded=as_recorded)
+
+    monkeypatch.setattr(mod, "replay_frames", wrapped)
+    replay_clip(_build_replayable_clip())
+    assert calls["n"] == 1
+
+
+def test_skipping_elevation_does_not_move_the_review_scene():
+    from core.aeb.clip_replay import decode_radar_stream, replay_frames
+
+    clip = _build_replayable_clip()
+    on_frames = replay_frames(clip)
+    off_frames = replay_frames(clip)
+    on = replay_clip(
+        clip, stream=decode_radar_stream(clip, frames=on_frames), radar_frames=on_frames,
+    )
+    off = replay_clip(
+        clip,
+        stream=decode_radar_stream(clip, frames=off_frames, with_elevation=False),
+        radar_frames=off_frames,
+    )
+    assert len(on) == len(off) and on
+    for left, right in zip(on, off):
+        assert left.t_rel == right.t_rel
+        assert left.snapshot.ego_x == right.snapshot.ego_x
+        assert left.snapshot.ego_z == right.snapshot.ego_z
+        assert [(v["vid"], v["x"], v["z"]) for v in left.snapshot.vehicles] == [
+            (v["vid"], v["x"], v["z"]) for v in right.snapshot.vehicles
+        ]

@@ -57,15 +57,17 @@ def raw_target_decel(live: LiveAEB, cal: dict) -> float:
     return max(0.0, min(live.required_decel_ms2, cap))
 
 
-def ego_path_replay(clip: Clip, cal=_CAL) -> tuple[dict[float, float], float]:
+def ego_path_replay(clip: Clip, cal=_CAL, frames=None) -> tuple[dict[float, float], float]:
     """Sim-clock time per radar frame, plus the steer gain a live session would hold.
 
     Clips never record the learned gain (a new clip field bumps CONSENT_VERSION),
     so replay re-derives it from the whole clip: a live truck has been learning
     far longer than an 11 second window, and starting from the prior every time
     would replay a colder model than the one that made the recorded decisions.
+    ``frames`` reuses a ``replay_frames`` result so the gain sees that clock.
     """
-    frames = replay_frames(clip)
+    if frames is None:
+        frames = replay_frames(clip)
     tkin_by_t = {f.t_mono: f.t_wall for f in frames}
     samples = [
         (f.t_wall, f.ego.rotationX * 2.0 * math.pi, f.ego.speed, f.ego.userSteer)
@@ -296,18 +298,22 @@ def cold_start_speeds(
     return out
 
 
-def decode_radar_stream(clip: Clip, as_recorded: bool = False):
+def decode_radar_stream(clip: Clip, as_recorded: bool = False, *,
+                        frames=None, with_elevation: bool = True):
     """Smoothed vehicles + elevation gate per radar frame, as RadarThread.loop runs them.
 
     Frames come from ``replay_frames``: legacy ego poses re-paired, simulated clock.
-    Returns ``(veh_by_t, ego_by_t, frame_t, off_by_t)``."""
-    frames = replay_frames(clip, as_recorded=as_recorded)
+    ``frames`` reuses that result. ``with_elevation`` defaults on.
+    Returns ``(veh_by_t, ego_by_t, frame_t, off_by_t)``.
+    """
+    if frames is None:
+        frames = replay_frames(clip, as_recorded=as_recorded)
     reader = TrafficReader()
     reader.set_cold_start_speeds(cold_start_speeds(clip, frames))
     veh_by_t: dict[float, list[Vehicle]] = {}
     off_by_t: dict[float, frozenset[int]] = {}
-    elev_track = EgoElevationTrack()
-    elev_gate = ElevationGate()
+    elev_track = EgoElevationTrack() if with_elevation else None
+    elev_gate = ElevationGate() if with_elevation else None
     last_vehs: list[Vehicle] = []
     last_off: frozenset[int] = frozenset()
     was_paused = False
@@ -320,25 +326,28 @@ def decode_radar_stream(clip: Clip, as_recorded: bool = False):
         if was_paused:
             was_paused = False
             reader.request_reanchor()
-            elev_track.clear()
-            elev_gate.clear()
+            if elev_track is not None:
+                elev_track.clear()
+                elev_gate.clear()
         ego = f.ego
-        elev_track.push(ego.coordinateX, ego.coordinateZ, ego.coordinateY)
+        if elev_track is not None:
+            elev_track.push(ego.coordinateX, ego.coordinateZ, ego.coordinateY)
         res = reader.replay_frame(
             f.traffic_buf, f.parked_buf,
             ego.coordinateX, ego.coordinateY, ego.coordinateZ, ego.speed,
             f.t_wall,
         )
         last_vehs = list(res[0]) if res is not None else []
-        trailers = list(res[1]) if res is not None else []
-        pitch_norm = (ego.rotationY + 0.5) % 1.0 - 0.5
-        surface = build_surface(
-            ego.coordinateY, -pitch_norm * 2.0 * math.pi, elev_track,
-        )
-        last_off = elev_gate.step(
-            last_vehs + trailers, surface,
-            ego.coordinateX, ego.coordinateZ, ego.rotationX * 2.0 * math.pi,
-        )
+        if elev_track is not None:
+            trailers = list(res[1]) if res is not None else []
+            pitch_norm = (ego.rotationY + 0.5) % 1.0 - 0.5
+            surface = build_surface(
+                ego.coordinateY, -pitch_norm * 2.0 * math.pi, elev_track,
+            )
+            last_off = elev_gate.step(
+                last_vehs + trailers, surface,
+                ego.coordinateX, ego.coordinateZ, ego.rotationX * 2.0 * math.pi,
+            )
         veh_by_t[f.t_mono] = last_vehs
         off_by_t[f.t_mono] = last_off
     ego_by_t = {f.t_mono: f.ego for f in frames}
@@ -360,22 +369,27 @@ def clip_t0(clip: Clip) -> float:
     return min(ts) if ts else 0.0
 
 
-def replay_clip(clip: Clip, *, stream=None) -> list[ReviewFrame]:
+def replay_clip(clip: Clip, *, stream=None, radar_frames=None) -> list[ReviewFrame]:
     """Decode + smooth the radar stream and build one ReviewFrame per AEB tick.
 
-    ``stream`` accepts an existing ``decode_radar_stream`` result so a caller that
-    also needs the raw stream pays the decode once.
+    ``stream`` and ``radar_frames`` reuse one ``replay_frames`` result. Passing
+    ``stream`` alone rebuilds the timebase for the ego-path gain.
     """
     if not clip.aeb_ticks and not clip.radar_frames:
         return []
 
-    veh_by_t, ego_by_t, frame_t, _off_by_t = (
-        stream if stream is not None else decode_radar_stream(clip)
-    )
+    if stream is None:
+        if radar_frames is None:
+            radar_frames = replay_frames(clip)
+        stream = decode_radar_stream(clip, frames=radar_frames)
+    elif radar_frames is None:
+        radar_frames = replay_frames(clip)
+
+    veh_by_t, ego_by_t, frame_t, _off_by_t = stream
     frames = sorted(clip.radar_frames, key=lambda f: f.t_mono)
 
     # Same ego path model the live loop runs, stepped on the same frames.
-    tkin_by_t, warm = ego_path_replay(clip)
+    tkin_by_t, warm = ego_path_replay(clip, frames=radar_frames)
     ego_path = EgoPathModel(params=ego_path_params(_CAL), gain=warm)
 
     t0 = clip_t0(clip)
