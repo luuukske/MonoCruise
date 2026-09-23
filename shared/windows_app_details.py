@@ -17,6 +17,7 @@ stop the app from starting or fail an otherwise good update.
 from __future__ import annotations
 
 import logging
+import ntpath
 import os
 
 try:  # Windows-only; the module must stay importable for the Linux test run.
@@ -80,7 +81,8 @@ def entry_matches_install(location: str, install_root: str) -> bool:
 
 
 def _norm(path: str) -> str:
-    return os.path.normcase(os.path.normpath(path))
+    # Registry paths are Windows paths whatever the host OS, so ntpath, not os.path.
+    return ntpath.normcase(ntpath.normpath(path))
 
 
 def _read(key, name: str):
