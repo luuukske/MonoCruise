@@ -112,6 +112,17 @@ QLabel#versionLabel {{
     background-color: transparent;
 }}
 
+QLabel#previewTitle {{
+    color: {CMD_COLOR};
+    font-size: 16px;
+    font-weight: bold;
+}}
+
+QLabel#previewSubtitle {{
+    color: {SUBTEXT_COLOR};
+    font-size: 12px;
+}}
+
 QLabel#pillBeta {{
     color: white;
     background-color: {PILL_RED};

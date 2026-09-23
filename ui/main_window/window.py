@@ -154,6 +154,10 @@ class MonoCruiseWindow(QMainWindow):
             alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
         )
         right_lay.addStretch()
+        right_lay.addWidget(self._build_preview_placeholder())
+        right_lay.addStretch()
+        # Matches the gear button so the placeholder sits on the area's true centre.
+        right_lay.addSpacing(self._gear_btn.height())
 
         body_lay.addWidget(right)
         root.addWidget(body, 1)
@@ -226,6 +230,26 @@ class MonoCruiseWindow(QMainWindow):
     @property
     def is_open_on_taskbar(self) -> bool:
         return self._open_on_taskbar
+
+    @staticmethod
+    def _build_preview_placeholder() -> QWidget:
+        """Stand-in for the live preview that will fill the right area."""
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(16, 0, 16, 0)
+        lay.setSpacing(4)
+
+        title = QLabel("Live preview coming soon")
+        title.setObjectName("previewTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(title)
+
+        subtitle = QLabel("You will be able to tune MonoCruise live in this panel.")
+        subtitle.setObjectName("previewSubtitle")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setWordWrap(True)
+        lay.addWidget(subtitle)
+        return box
 
     # Settings panel slide
 
