@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.0-rc.24] - 2026-09-24
 ### Added
 - **You can get past a speed limit set too low**: holding the gas still holds you at the limit. A fast stab of the gas lets you past it. The limit comes back once you slow to less than 5 km/h over it.
 - **A support prompt after 100 hours of driving**: a card asks for a share or a GitHub star, with links to the truck sim communities and Patreon. It never appears while MonoCruise sits minimised behind the game, and each dismissal pushes the next one much further out.
