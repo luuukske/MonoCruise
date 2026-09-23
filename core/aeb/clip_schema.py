@@ -259,6 +259,7 @@ class AEBWarmState:
     engaged: bool = False
     latched_threat_ids: list[int] = field(default_factory=list)
     latched_scope_ok_mono: dict[int, float] = field(default_factory=dict)
+    latched_hit_mono: dict[int, float] = field(default_factory=dict)
     latched_filter_ego_kmh: float | None = None
     warn_hold_until_mono: float | None = None
     brake_hold_until_mono: float | None = None
@@ -271,6 +272,7 @@ class AEBWarmState:
             "latched_scope_ok_mono": {
                 str(k): v for k, v in self.latched_scope_ok_mono.items()
             },
+            "latched_hit_mono": {str(k): v for k, v in self.latched_hit_mono.items()},
             "latched_filter_ego_kmh": self.latched_filter_ego_kmh,
             "warn_hold_until_mono": self.warn_hold_until_mono,
             "brake_hold_until_mono": self.brake_hold_until_mono,
@@ -285,6 +287,9 @@ class AEBWarmState:
             latched_scope_ok_mono={
                 int(k): float(v)
                 for k, v in d.get("latched_scope_ok_mono", {}).items()
+            },
+            latched_hit_mono={
+                int(k): float(v) for k, v in d.get("latched_hit_mono", {}).items()
             },
             latched_filter_ego_kmh=_opt_float(d.get("latched_filter_ego_kmh")),
             warn_hold_until_mono=_opt_float(d.get("warn_hold_until_mono")),

@@ -103,7 +103,6 @@ def _dump(thread: AEBThread, clearance, *, now_mono: float = 10.0) -> None:
         brake_ttb_engage_active=False,
         certain_engage=True,
         geom_threat_latched=False,
-        latched_distance_threat=False,
         target_raw=0.0,
         target_published=0.0,
         colliding_ids={threat.id},

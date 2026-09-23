@@ -940,10 +940,12 @@ class AEBThread(BaseThread):
         self._published_target_ms2: float = 0.0
         self._last_target_change_mono: float = 0.0
         self._prev_loop_mono: float | None = None
-        # Latched threats: TMP rel-speed bypass + headway hold (README latched-threat).
+        # Latched threats: filter bypass + instant re-engage, never a brake hold (README).
         self._latched_threat_ids: set[int] = set()
         # Scope stamp per latched id; out-of-scope grace before release.
         self._latched_scope_ok_mono: dict[int, float] = {}
+        # Last tick each latched id was colliding; the latch expires latched_max_s later.
+        self._latched_hit_mono: dict[int, float] = {}
         # Rate-limit for gap/collision box debug (Settings.debug only).
         self._gap_debug_last_mono: float = 0.0
         self._gap_debug_was_engaged: bool = False
@@ -1105,6 +1107,7 @@ class AEBThread(BaseThread):
             engaged=bool(self._engaged),
             latched_threat_ids=sorted(self._latched_threat_ids),
             latched_scope_ok_mono=dict(self._latched_scope_ok_mono),
+            latched_hit_mono=dict(self._latched_hit_mono),
             latched_filter_ego_kmh=self._latched_filter_ego_kmh,
             warn_hold_until_mono=warn_hold,
             brake_hold_until_mono=brake_hold,
@@ -2012,66 +2015,31 @@ class AEBThread(BaseThread):
             and bool(colliding_ids)
         )
 
-        # Latched headway hold + scope release (README latched-threat).
+        # Latch lifetime (README latched-threat): a hit refreshes it; otherwise it lasts
+        # while the target can still steer into ego's lane, and never past latched_max_s.
         active_veh = {v.id: v for v in vehicles_eff}
-        ego_v_safe = max(ego_speed, 0.5)
-        latched_headway_min = _INF
         for vid in list(self._latched_threat_ids):
-            if vid not in active_veh:
-                self._latched_threat_ids.discard(vid)
-                self._latched_scope_ok_mono.pop(vid, None)
-                continue
-            pc = vehicle_collision_data.get(vid)
+            pc = vehicle_collision_data.get(vid) if vid in active_veh else None
             if pc is None:
-                self._latched_threat_ids.discard(vid)
-                self._latched_scope_ok_mono.pop(vid, None)
+                self._release_latched(vid)
                 continue
-            # Latched scope: forward in-lane or still colliding (README scope release).
+            if vid in colliding_ids:
+                self._latched_hit_mono[vid] = now_mono
+                self._latched_scope_ok_mono[vid] = now_mono
+                continue
+            last_hit = self._latched_hit_mono.setdefault(vid, now_mono)
+            if now_mono - last_hit > cal.latched_max_s:
+                self._release_latched(vid)
+                continue
             s_along, d_abs = project_to_ego_arc(
                 ego_arc, ego_x + pc[3], ego_z + pc[4],
             )
-            in_scope = (
-                vid in colliding_ids
-                or (s_along > 0.0 and d_abs <= cal.lane_half_width)
-            )
-            if in_scope:
+            if s_along > 0.0 and d_abs <= cal.latched_steer_in_half_width_m:
                 self._latched_scope_ok_mono[vid] = now_mono
             else:
-                last_ok = self._latched_scope_ok_mono.get(vid)
-                if last_ok is None:
-                    self._latched_scope_ok_mono[vid] = last_ok = now_mono
+                last_ok = self._latched_scope_ok_mono.setdefault(vid, now_mono)
                 if now_mono - last_ok > cal.latched_scope_release_s:
-                    self._latched_threat_ids.discard(vid)
-                    self._latched_scope_ok_mono.pop(vid, None)
-                    continue
-            dist_vid = math.sqrt(pc[5])
-            gap = max(dist_vid - cal.stop_buffer, 0.0)
-            hw = gap / ego_v_safe
-            if hw > cal.latched_release_headway_s:
-                self._latched_threat_ids.discard(vid)
-                self._latched_scope_ok_mono.pop(vid, None)
-                continue
-            # An opening gap is credited with the ground it covers over the
-            # lookahead: the hold asks if it is still unsafe, not if it shrinks.
-            hw_hold = hw
-            if vid not in colliding_ids and dist_vid > 1e-6:
-                v_latched = active_veh[vid]
-                closing = (
-                    (ego_speed * ego_fwd_x - v_latched.speed * pc[8]) * pc[3]
-                    + (ego_speed * ego_fwd_z - v_latched.speed * pc[9]) * pc[4]
-                ) / dist_vid
-                if closing < 0.0:
-                    hw_hold = (
-                        gap - closing * cal.latched_open_lookahead_s
-                    ) / ego_v_safe
-            if hw_hold < latched_headway_min:
-                latched_headway_min = hw_hold
-
-        latched_distance_threat = (
-            run_collision
-            and bool(self._latched_threat_ids)
-            and latched_headway_min < cal.latched_min_headway_s
-        )
+                    self._release_latched(vid)
 
         # Engagement entry evaluates only LOS-eligible targets. When no veto
         # fired this frame these equal the full aggregates and behaviour is
@@ -2086,8 +2054,7 @@ class AEBThread(BaseThread):
         if self._engaged:
             if (effective_required < disarm_threshold
                     and not brake_ttb_active
-                    and not geom_threat_latched
-                    and not latched_distance_threat):
+                    and not geom_threat_latched):
                 self._engaged = False
                 self._engage_pad_dist_m = None
             self._engage_confirm.reset()
@@ -2126,24 +2093,19 @@ class AEBThread(BaseThread):
                         )
                         self._engage_pad_at_mono = now_mono
 
-        # Promote every currently-colliding target into the latched set so
-        # subsequent frames keep them in the pipeline and in the hold check.
-        # Newly latched ids start their scope grace at promotion time.
+        # Promote every currently-colliding target into the latched set so later
+        # frames keep it in the pipeline; its lifetime starts at this hit.
         if self._engaged and run_collision and colliding_ids:
             self._latched_threat_ids.update(colliding_ids)
             for vid in colliding_ids:
                 self._latched_scope_ok_mono.setdefault(vid, now_mono)
+                self._latched_hit_mono[vid] = now_mono
 
         if self._engaged:
             if brake_ttb_active:
                 target_raw = effective_max_decel
             else:
                 target_raw = max(0.0, min(effective_required, effective_max_decel))
-                if latched_distance_threat:
-                    target_raw = max(
-                        target_raw,
-                        cal.latched_min_decel_frac * effective_max_decel,
-                    )
         else:
             target_raw = 0.0
 
@@ -2427,7 +2389,6 @@ class AEBThread(BaseThread):
                 brake_ttb_engage_active=brake_ttb_engage_active,
                 certain_engage=certain_engage,
                 geom_threat_latched=geom_threat_latched,
-                latched_distance_threat=latched_distance_threat,
                 target_raw=target_raw,
                 target_published=target_published,
                 colliding_ids=colliding_ids,
@@ -2435,6 +2396,11 @@ class AEBThread(BaseThread):
                 clearance=best_clearance,
                 clearance_vid=best_required_vid,
             )
+
+    def _release_latched(self, vid: int) -> None:
+        self._latched_threat_ids.discard(vid)
+        self._latched_scope_ok_mono.pop(vid, None)
+        self._latched_hit_mono.pop(vid, None)
 
     def _log_gap_debug(self, **kwargs) -> None:
         """Guarded wrapper: a debug dump must never kill the AEB loop."""
@@ -2478,7 +2444,6 @@ class AEBThread(BaseThread):
         brake_ttb_engage_active: bool,
         certain_engage: bool,
         geom_threat_latched: bool,
-        latched_distance_threat: bool,
         target_raw: float,
         target_published: float,
         colliding_ids: set[int],
@@ -2571,8 +2536,6 @@ class AEBThread(BaseThread):
             engage_why.append("required_decel")
         if geom_threat_latched:
             engage_why.append("geom_latch")
-        if latched_distance_threat:
-            engage_why.append("latched_headway")
         if not engage_why:
             engage_why.append("none")
 
@@ -2656,6 +2619,7 @@ class AEBThread(BaseThread):
         self._prev_loop_mono = None
         self._latched_threat_ids.clear()
         self._latched_scope_ok_mono.clear()
+        self._latched_hit_mono.clear()
         self._gap_debug_last_mono = 0.0
         self._gap_debug_was_engaged = False
         self._follow_tracks.clear()

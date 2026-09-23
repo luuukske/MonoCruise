@@ -71,6 +71,10 @@ def _apply_warm_state(t: AEBThread, ws) -> None:
         int(k): float(v)
         for k, v in getattr(ws, "latched_scope_ok_mono", {}).items()
     }
+    # Clips older than the hit stamp start each latch's lifetime at the window start.
+    t._latched_hit_mono = {
+        int(k): float(v) for k, v in getattr(ws, "latched_hit_mono", {}).items()
+    }
     t._latched_filter_ego_kmh = ws.latched_filter_ego_kmh
     t._published_target_ms2 = float(ws.target_decel_ms2)
     if ws.brake_hold_until_mono is not None:

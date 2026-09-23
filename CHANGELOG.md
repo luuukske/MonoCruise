@@ -21,6 +21,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **Cruise is calmer in heavy traffic**: the quicker brake release from preview.23 made it jump back on the gas after every brake in stop-and-go. It now only helps you get going again from a crawl or a stop, and at road speed the brake eases off smoothly like before.
 
 ### Fixed
+- **Emergency braking held on long after the danger had passed**: when a car cut in close ahead, AEB kept braking hard for seconds while it pulled away, until you floored the gas. It now lets go as soon as nothing is on a collision course.
 - **"reset all settings" actually resets now**: the button reported success but changed nothing, so every setting stayed exactly as it was. Your driving hours and the support prompt schedule are deliberately kept, everything else goes back to default.
 - **Clip screenshot on a 4K display showed readable text**: the picture was a zoomed-in corner (due to the DPI setting) of the game instead of the whole window. It now grabs the full game window, so on-screen text stays unreadable.
 - **Emergency braking ignored the room you had to steer around something**: the fix from preview.23 where AEB relied on the actual path you were going to travel a bit too much, and evasion paths were not accounted for. fixed now.

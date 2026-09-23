@@ -273,14 +273,11 @@ class AEBCalibration:
     follow_threat_hold_s: float = 2.0
     follow_threat_max_range_m: float = 80.0
 
-    # Latched-threat TMP bypass + headway hold; scope release grace (README latched-threat).
-    latched_min_headway_s: float = 1.5
-    latched_release_headway_s: float = 2.5
-    latched_min_decel_frac: float = 0.7
+    # Latched ids: filter bypass only, never a brake hold (README latched-threat).
+    # Kept while ahead within the steer-in band, for at most latched_max_s past the last hit.
     latched_scope_release_s: float = 0.5
-    # Lookahead an opening latched gap is credited with before the hold re-tests
-    # it, so a lead pulling away releases and a matched one does not (README).
-    latched_open_lookahead_s: float = 1.0
+    latched_steer_in_half_width_m: float = 5.5
+    latched_max_s: float = 2.0
 
 
 DEFAULT = AEBCalibration()

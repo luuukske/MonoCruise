@@ -827,10 +827,9 @@ aeb.snapshot                       # AEBSnapshot: full debug state
      re-engage at 7 m (clip 29c8e7e0). The hold releases when the target
      clears laterally (not colliding), accelerates away (ttc grows), or
      ego stops (no closing → ttc ∞). Entry is untouched.
-   - Latched-distance hold: see "Latched-threat hold" below. Adds a
-     headway-driven engagement hold over targets that have been engaged
-     on previously; the headway it tests credits an opening gap with a
-     lookahead, so a lead pulling away releases the hold early.
+   - Latched threats never hold the brake by themselves: see
+     "Latched-threat hold" below. The latched set keeps a target in the
+     pipeline and on the instant re-engage path, nothing more.
    - Engage when `effective_required ≥ aeb_engage_frac · capability_decel`
      **OR** `brake_ttb_active`, subject to the tiered entry certainty gate
      below. `aeb_warn_near_full_frac` shares this base so it stays equal to
@@ -884,12 +883,10 @@ aeb.snapshot                       # AEBSnapshot: full debug state
      frames before being dropped, so a single collision-grid dropout no
      longer restarts its clock or evicts it from the tracking dict.
    - Disarm when `effective_required <  aeb_disarm_frac · effective_max` **AND
-     NOT** `brake_ttb_active` **AND NOT** `geom_threat_latched` **AND NOT**
-     `latched_distance_threat`.
+     NOT** `brake_ttb_active` **AND NOT** `geom_threat_latched`.
 5. Setpoint pipeline:
    - When `brake_ttb_active`: `target_raw = effective_max` (slam: required formula is unreliable).
-   - Otherwise: `target_raw = clamp(effective_required, 0, effective_max)` while engaged,
-     then floored at `cal.latched_min_decel_frac · effective_max` when `latched_distance_threat`.
+   - Otherwise: `target_raw = clamp(effective_required, 0, effective_max)` while engaged.
    - **Deadband + rate-limit**: if `|Δ| < aeb_target_deadband_ms2` and the
      held value is younger than `aeb_target_refresh_min_s`, hold. Else move
      toward `target_raw` capped at `aeb_target_rate_ms3 · dt` (m/s² per tick).
@@ -1110,8 +1107,8 @@ away from it: a target that never clears gives stop-short; an already-overlappin
 geometry gives `INF` (clamped to `_REQUIRED_CEIL_MS2` so logs and clip records
 stay finite); no occupancy at all falls back to the old relative frame; and an
 over-long predicted occupancy, which is what a bad target-speed estimate
-produces, brakes *earlier*, not later. The TTB slam, `geom_threat_latched`, the
-latched-distance hold and the decel floor are all untouched.
+produces, brakes *earlier*, not later. The TTB slam, `geom_threat_latched` and the
+decel floor are all untouched.
 
 **Corpus, 2026-08-24** (`clearance_required_enabled` off vs on). Two stores:
 `score_once.py` only reads the local one, so the contributed store has to be
@@ -1222,8 +1219,8 @@ ego curvature cannot see a bend that gentle. The 2.8 m bar was derived on the
 engagements measuring 0.19-2.72 m of miss against 13 phantoms measuring
 1.74-6.24 m; it held unchanged when the corpus grew to 514.
 
-Scope is strictly engagement *entry*: warn, disarm, geometry latch, and
-distance holds all keep the full aggregates, so a wrong veto costs latency on
+Scope is strictly engagement *entry*: warn, disarm and the geometry latch
+all keep the full aggregates, so a wrong veto costs latency on
 one target, never silence. Vetoed ids are published in
 `snapshot.los_vetoed_ids`.
 
@@ -1282,8 +1279,8 @@ Two consequences to keep in mind when reading a trace:
 - **Warn and FF are untouched, holds are untouched.** Like the other
   engagement-entry gates, the floor is subtracted from `best_ttb_engage` and
   friends only. A target under the bar still warns, still feeds
-  `AEB_ff_decel_ms2`, still counts for disarm and for the latched-distance
-  hold, and an event already engaged runs to completion on the full
+  `AEB_ff_decel_ms2`, still counts for disarm and for the geometry latch,
+  and an event already engaged runs to completion on the full
   aggregates. The one coupling is the documented `aeb_warn_confirm_vetoed_s`
   window, which a matched-speed target **out of ego's lane** now takes.
 
@@ -1393,115 +1390,69 @@ evidence this system does not have; they are the road model's to fix.
 ### Latched-threat hold
 
 `AEBThread._latched_threat_ids: set[int]` keeps an engaged target attached
-to the pipeline across frames so three effects can hold:
+to the pipeline across frames. It never holds the brake: after a threat, AEB
+keeps braking only on demand (`effective_required` above the disarm bar), the
+TTB slam, or `geom_threat_latched` (still colliding, unbraked TTC inside
+`disarm_hold_ttc_s`). When the danger passes, AEB lets go. Membership does three
+things:
 
 1. **TMP rel-speed pre-filter bypass**: `TmpRelSpeedFilter` (and the
    matching precompute prefilter in `thread.py::loop`) skip the rel-speed
    gate for any id in the latched set. Without this, ego matching a TMP
    convoy partner's speed under braking drops `rel_kmh` below the 15 / 40
-   km/h threshold, the target leaves the pipeline, `colliding_ids` empties
-   and AEB disarms while the gap may still be unsafe.
+   km/h threshold and the target leaves the pipeline mid-stop.
 2. **Spatial drop-filter bypass**: `OutOfLaneParallelFilter` and
    `EgoEvasionFilter` skip a latched id; `CornerEntryStationaryFilter` skips
    only a latched **Mode B** (`Lane.EGO`) id. The 0.08 g evasion pair and
-   Mode B `implied_kappa` are pose-jitter sensitive at short range: they fire
-   on the vehicle AEB is already braking for, empty `colliding_ids`, and leave
-   only the distance hold (~0.7 of max). Scope release still drops a latched
-   id that has left the forward lane band, so a cleared shoulder does not
-   keep the brake.
-3. **Distance-based engagement hold + decel floor**: for every latched id
-   still in `vehicle_collision_data`, compute
-   `headway = max(dist − stop_buffer, 0) / max(ego_speed, 0.5)`. Release
-   the id when it leaves `vehicles_eff`, drops out of `vehicle_collision_data`
-   (range/elevation), its headway exceeds `cal.latched_release_headway_s`,
-   or it falls out of **scope** (below).
-   While any remaining latched id is **still closing** (below) and has
-   `headway < cal.latched_min_headway_s` set `latched_distance_threat = True`:
-   - The disarm gate gains `... and not latched_distance_threat`.
-   - `target_raw` is floored at `cal.latched_min_decel_frac · effective_max_decel`
-     so the published decel doesn't decay to zero when
-     `required_decel = v_closing²/2d` collapses on speed-match.
+   Mode B `implied_kappa` are pose-jitter sensitive at short range and would
+   otherwise fire on the vehicle AEB is already braking for.
+3. **Instant re-engage**: a latched id that becomes colliding again engages
+   through the `certain` path, with no confirm window. The demand still has to
+   clear the engage bar.
 
-**Scope release.** The hold exists for one scenario: a forward, in-lane lead
-that ego has speed-matched (so it no longer registers as colliding while the
-gap is still unsafe). Headway alone is euclidean and direction-blind: without
-a geometry re-check, a target ego has evaded around, is driving beside, or a
-crosser that swept clear keeps the brake floored at 70 % of max until it is
-~1.5 s of *distance* away in any direction. Per frame, each latched id is
-checked via `project_to_ego_arc(ego_arc, …)`: it is **in scope** when it is
-still in `colliding_ids`, or when `s > 0` (forward of ego along the arc) and
-`d_abs ≤ cal.lane_half_width` (EGO lane band). In-scope ids refresh
-`AEBThread._latched_scope_ok_mono[vid]`; ids out of scope longer than
-`cal.latched_scope_release_s` lose the latch. The grace absorbs
-lane-classification flicker (curve transients, One-Euro settling) without
-letting a cleared target hold engagement. Scope stamps travel with the clip
-warm state (`AEBWarmState.latched_scope_ok_mono`); clips recorded before the
-field default to grace-starts-at-window-start.
+**Lifetime.** A hit (the id is in `colliding_ids`) refreshes the latch and
+stamps `_latched_hit_mono`. Between hits, an id stays latched while it can
+still steer into ego's lane: forward of ego along the arc (`s > 0`) and within
+`cal.latched_steer_in_half_width_m` of it, which covers ego's lane and the
+lanes either side. Out of that band longer than `cal.latched_scope_release_s`,
+it is released; the grace absorbs lane-classification flicker. Inside it, it is
+released `cal.latched_max_s` after its last hit, so no latch outlives its
+threat by more than that. Stamps travel with the clip warm state
+(`AEBWarmState.latched_scope_ok_mono`, `latched_hit_mono`); older clips start
+both at the window start.
 
-**Opening-gap lookahead.** Scope is geometric, so it cannot separate the two
-states a forward in-lane lead can be in once `required_decel` has collapsed:
-ego matched the lead at an unsafe gap (the case the hold exists for), or ego is
-now *slower* than the lead and the gap is opening (where holding is wrong).
-Raw headway cannot separate them either, because it is a following-distance
-metric: 13 m at 75 km/h reads as 0.62 s whether the gap is closing or opening,
-so every engagement on a close lead used to stay held until the truck was slow
-enough that the same metres read as 1.5 s. Clip `d16d0575` is the case: the
-threat metric collapsed 0.12 s after engagement and the brake stayed floored at
-70 % of max while the lead accelerated away from 13.2 m to 16.8 m, still braking
-when the recording ended 1.9 s later.
+**Why there is no distance hold any more.** Until 2026-09-23 a latched id inside
+`latched_min_headway_s` (1.5 s) of headway held engagement and floored the target
+at 70 % of max. It dates from 2026-05-24, when the required decel was the relative
+`v_closing^2 / 2d`: that collapses to 0 the moment ego matches a lead's speed, even
+with the lead still braking two metres ahead. The clearance demand (section 5)
+prices the lead's own braking in, and the geometry latch keeps a real collision
+course engaged, so the hold only ever added braking after the danger had passed.
+Clip `33d87007` is the case: a car cut in at 120 km/h, the threat ended at 5.31 s,
+and the hold braked at 4 m/s^2 until 9.21 s while the car pulled away, until the
+driver floored the gas. The 2026-09-11 opening-gap lookahead could not catch it: it
+credited `closing x 1.0 s`, and a cut-in that has just been matched is not closing.
+Two earlier fixes (scope release, the lookahead) narrowed the hold; neither changed
+what it measured, a following distance, which is ACC's job and not an emergency.
 
-So each latched id carries the line-of-sight range rate
-
-```
-closing = ((v_ego·ego_fwd − v_tgt·tgt_fwd) · (dx, dz)) / dist    # > 0 = gap shrinking
-```
-
-and an opening gap is credited with the ground it covers over
-`cal.latched_open_lookahead_s` before the hold re-tests it:
-
-```
-hw_hold = (gap + max(0, −closing) · lookahead) / max(v_ego, 0.5)
-```
-
-`hw_hold` feeds `latched_headway_min`; the raw `hw` still drives the
-`latched_release_headway_s` drop, so an opening lead is **held less, not dropped
-sooner**. The id stays in `_latched_threat_ids`, which keeps the TMP rel-speed
-bypass (effect 1) and the instant re-engage path alive: a lead that opens and
-then brakes again raises `required_decel`, re-enters `colliding_ids`, and
-re-engages with no confirm window via the latched branch of `certain`. Ids still
-in `colliding_ids` are exempt, since an active collision hit already justifies
-the hold.
-
-**Do not turn this back into a threshold on the sign of `closing`.** That was
-tried and is wrong: a truck braking at 3.5 m/s² sails past speed-match, so a
-small negative closing is the normal end state of a *correct* intervention, not
-evidence the threat is over. A −0.5 m/s bar cut clip `3c1bd9af` (labelled TP,
-window 7.7-11.1) from 2.7 s of braking to 0.6 s while the gap sat at 8.2-8.7 m,
-about 2 m bumper to bumper at 51 km/h. The question the hold has to answer is
-whether the gap is still unsafe, not whether it is shrinking this instant, and
-only the projected form answers it. Note that `outcome_under` marks TP on
-*brake onset* (`bw[0] <= st[1]`), so truncating a brake can never flip a verdict
-and a clean verdict table proves nothing here: read `_tp_quality` instead.
-
-The lookahead is a safety-versus-comfort dial with a narrow usable band.
-Measured on the corpus: 1.0 s costs clip `3c1bd9af` 0.79 → 0.69 quality and
-`eb92f30d` 0.65 → 0.55, while 1.5 s drops `eb92f30d` to 0.27 because its brake
-falls off a cliff between the two. Below ~0.3 s the release never fires on
-`d16d0575` at all. 1.0 s sits at the edge of the safe band, not in the middle
-of it.
-
-The set is populated every frame after the engagement state machine via
-`self._latched_threat_ids.update(colliding_ids)` while `self._engaged` is
-true (newly latched ids get their scope stamp at promotion). Cleared on
-`teardown`.
+Measured on removal: the corpus verdicts barely move (one FP becomes TN), 39
+clips improve and 77 lose TP quality. The large losses are windows tagged
+against the old pipeline: several end exactly where the hold used to release
+(`77902df4`, `cbd525cd`), and others were copied from preview.20 recordings
+whose live brake was the hold itself at `required 0.00` (`84faf786`,
+`5f5bb8f3`). A closed-loop run on the real thread with a distracted driver
+(lead braking hard, then on at 1.5 m/s^2 to a stop) shows the known cost: the
+brake now tracks the demand smoothly instead of holding 4 m/s^2, and lets go at
+walking pace once the lead is momentarily faster, so a driver who never brakes
+rolls into the stopped lead below `aeb_min_engage_speed_kmh`. Accepted by design
+(2026-09-23): AEB decides whether a danger exists, and with none predicted it
+coasts. Do not add a stop-completion hold to cover this case.
 
 | Knob | Default | Role |
 |------|---------|------|
-| `latched_min_headway_s` | 1.5 s | Headway below which latched-distance hold fires |
-| `latched_release_headway_s` | 2.5 s | Headway above which a latched id is dropped |
-| `latched_min_decel_frac` | 0.7 | Fraction of `effective_max_decel` as the `target_raw` floor under hold |
-| `latched_scope_release_s` | 0.5 s | Grace before an out-of-scope (not colliding, not forward-in-lane) latched id is dropped |
-| `latched_open_lookahead_s` | 1.0 s | Ground an opening non-colliding latched gap is credited with before the hold re-tests its headway |
+| `latched_scope_release_s` | 0.5 s | Grace before a latched id outside the steer-in band is dropped |
+| `latched_steer_in_half_width_m` | 5.5 m | Half-width of the band a latched id may stay in between hits: ego's lane and the next one out |
+| `latched_max_s` | 2.0 s | Longest a latched id outlives its last hit |
 
 ### Follow-threat flag
 
@@ -1636,7 +1587,7 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 
 **History (2026-08-11):** main_pedal_thread used to slam `brake_output = 1.0` on engagement. Because sending_thread merges every AEB path with `max()`, that slam pinned the pedal at 1.0 for the whole engagement and `AEBDecelController` never influenced the output: `AEB_target_decel_ms2` and its rate limit were dead code. Measured over 32 engagement clips, realized decel was a median **2.25x** the published target, which left **5 to 6 m** of unused gap on 65 km/h stops (0.2 m at crawl, hence the speed-squared symptom). An earlier attempt to drop the slam in favour of *pure FF* was reverted because AEB felt silenced; that failed for two reasons now fixed: the target ramped from 0 at `aeb_target_rate_ms3` (0.8 s to reach the requirement, so the first bite was ~0.005 pedal), and there was no pad for brake build-up. Engagement now steps the target straight to the requirement, and `stop_buffer_response_s` covers the plant lag. Do not restore the slam without re-reading the high-speed stop overshoot notes: a `max()`-merged constant of 1.0 silently disables every layer beneath it.
 - **AEB and em_stop send on the full brake axis.** The `g_brake_intensity` invert is for mapper/ACC. While `AEB_brake` or `em_stop` is true, `apply_brake_intensity(..., full_authority=True)` writes the logical pedal. AEB planning and `AEBDecelController` use `aeb_max_brake_ms2 = tune_max * I / 1.1` so the estimated max decel is the physical force pedal 1.0 can make. Sub-engagement FF assist stays on the invert and the unscaled tracker. `I < 1.0` cannot be fully recovered; warn hourly while AEB is enabled, never when it is off. Do not remap an engaged AEB back onto the 1.1 invert, and do not leave AEB planning on the unscaled tracker: that made a 150% slider look like the 1.1 tune.
-- **Engagement-entry vetoes never touch warn timing beyond persistence, and never touch FF assist, disarm, or the holds.** `_los_veto_bar`, `_extrapolation_veto`, the closing-speed floor, and the lane-confidence range all feed `engage_vetoed_ids`, which is subtracted from the engagement-only aggregate chain (`best_ttb_engage` and friends) and from the `certain_geom` instant path. The full aggregates still drive `AEB_warn`, `AEB_ff_decel_ms2`, the disarm gate, the geometry latch, and the latched-distance hold. The one permitted coupling is `aeb_warn_confirm_vetoed_s`: when every colliding target is vetoed **and** out of ego's lane, warn waits on a longer occupancy window. That is a delay a persisting course clears, not a suppression, and a vetoed target may never be removed from the warn aggregate outright. Keep it that way: a wrong veto must cost latency on one target, never silence. Measured on the labelled corpus, the vetoes left warn coverage on positive clips unchanged (135 of 160 clips, identical lead-time distribution) while cutting warn ticks on must-not-trigger clips by 11 %.
+- **Engagement-entry vetoes never touch warn timing beyond persistence, and never touch FF assist, disarm, or the holds.** `_los_veto_bar`, `_extrapolation_veto`, the closing-speed floor, and the lane-confidence range all feed `engage_vetoed_ids`, which is subtracted from the engagement-only aggregate chain (`best_ttb_engage` and friends) and from the `certain_geom` instant path. The full aggregates still drive `AEB_warn`, `AEB_ff_decel_ms2`, the disarm gate and the geometry latch. The one permitted coupling is `aeb_warn_confirm_vetoed_s`: when every colliding target is vetoed **and** out of ego's lane, warn waits on a longer occupancy window. That is a delay a persisting course clears, not a suppression, and a vetoed target may never be removed from the warn aggregate outright. Keep it that way: a wrong veto must cost latency on one target, never silence. Measured on the labelled corpus, the vetoes left warn coverage on positive clips unchanged (135 of 160 clips, identical lead-time distribution) while cutting warn ticks on must-not-trigger clips by 11 %.
 - **A measured miss may remove certainty, never grant it.** The vetoes exist because arc-projected lane membership is an extrapolation and the CBDR miss is a measurement, so a *large* measured miss removes certainty (head-on bar, matched-speed neighbour). The converse does not hold: `d_miss` scales as `omega * R^2 / v_rel`, so a small value at range is not evidence of danger, it is a short-baseline fit over a long lever arm. A `lane_confidence_miss_m` clause that restored certainty on a small miss was tried and removed after the corpus grew: it was wrong on all four clips it affected. Also do not let a veto fire with no measurement at all unless its own physics stands alone (the ego-turn branch does; the matched-speed branch deliberately does not).
 - **The engage fraction is graded by certainty, and only by certainty.** `aeb_engage_frac_certain` applies when a colliding, non-engage-vetoed target is in `certain_geom_ids`, the same set that grants the instant confirm path. Do not widen it to `nearcertain_geom_ids` or to demand magnitude: required-decel size is not a certainty signal (see the tiered entry gate), and the corpus shows every clip the lower bar newly brakes on is geometrically identical to the ones it rescues. Unlike the veto thresholds it has no flat band, so re-price it against the corpus rather than assuming it still holds.
 - **Co-directional targets are exempt from the lane-confidence range and the oblique confirm window.** Both exemptions rest on the same fact: a pair travelling the same way shares whatever bend it is on, so the bend's lateral error is common-mode. Removing either one costs true positives on vehicles merging in and stopping ahead, which read as oblique purely because `fwd_dot` lands just under `aeb_certain_fwd_dot`.
@@ -1874,9 +1825,9 @@ is exactly the moment the reviewer is placing a window against.
 `clip_replay.raw_target_decel` rebuilds the pre-slew `target_raw` from the recorded
 tick (`engaged`, `time_to_brake` against `brake_ttb + brake_response_window_s`,
 `required_decel_ms2` clamped to `effective_max_decel_ms2`) and `replay_clip` puts it
-on every `ReviewFrame` as `raw_target_ms2`. It is exact except for the
-latched-hold floor (`latched_min_decel_frac`), whose state is not recorded, so it
-under-reads during a latched hold. It is never wrong about onset timing, which is
+on every `ReviewFrame` as `raw_target_ms2`. It was inexact only under the latched-hold
+floor, which no longer exists, so clips recorded on preview.23 or older can read below
+the recorded target during a hold tail. It is never wrong about onset timing, which is
 what it is drawn for. `required_decel_ms2` is already raw and needs no rebuild.
 
 ### Filter tuning charts (C)
