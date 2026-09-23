@@ -15,6 +15,7 @@ from typing import Callable
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QGuiApplication, QIcon, QPixmap
 from PySide6.QtWidgets import (
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -42,7 +43,7 @@ logger = logging.getLogger(__name__)
 _ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
 # Five share buttons with brand marks land near 510 px at the shipped font.
-# The slack over that is what absorbs a wider font or a DPI change.
+# A wider font or DPI wraps them onto two rows, see _place_share_buttons.
 _CARD_WIDTH = 600
 
 TITLE = "Hey, Lukas here \N{WAVING HAND SIGN}"
@@ -173,20 +174,21 @@ class SupportOverlay(QWidget):
         share_lbl.setStyleSheet("font-size: 13px; background: transparent;")
         card_lay.addWidget(share_lbl)
 
-        share_row = QHBoxLayout()
-        share_row.setSpacing(6)
-        share_row.setContentsMargins(0, 0, 0, 0)
+        # Filled by _place_share_buttons once the card is parented and the
+        # buttons can measure in the font they will actually render with.
+        self._share_grid = QGridLayout()
+        self._share_grid.setSpacing(6)
+        self._share_grid.setContentsMargins(0, 0, 0, 0)
         self._share_buttons: list[QPushButton] = []
         for target in SHARE_TARGETS:
-            btn = QPushButton(target.label)
+            btn = QPushButton(target.label, card)
             btn.setObjectName("shareButton")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
             _apply_icon(btn, target.icon)
             btn.clicked.connect(lambda _checked=False, t=target: self._share(t))
-            share_row.addWidget(btn, 1)
             self._share_buttons.append(btn)
-        card_lay.addLayout(share_row)
+        card_lay.addLayout(self._share_grid)
 
         self._hint = QLabel(SHARE_HINT)
         self._hint.setStyleSheet(
@@ -227,9 +229,25 @@ class SupportOverlay(QWidget):
 
         finish_centered_outer(outer, card)
         self._card = card
+        self._place_share_buttons(card_lay)
 
         self.show()
         self.raise_()
+
+    def _place_share_buttons(self, card_lay: QVBoxLayout) -> None:
+        """One row when every label fits at its natural width, two rows otherwise."""
+        margins = card_lay.contentsMargins()
+        room = _CARD_WIDTH - margins.left() - margins.right()
+        buttons = self._share_buttons
+        for btn in buttons:
+            btn.ensurePolished()
+        needed = sum(btn.sizeHint().width() for btn in buttons)
+        needed += self._share_grid.horizontalSpacing() * (len(buttons) - 1)
+        cols = len(buttons) if needed <= room else (len(buttons) + 1) // 2
+        for i, btn in enumerate(buttons):
+            self._share_grid.addWidget(btn, i // cols, i % cols)
+        for col in range(cols):
+            self._share_grid.setColumnStretch(col, 1)
 
     def eventFilter(self, obj, event) -> bool:
         sync_overlay_to_parent(self, obj, event)
