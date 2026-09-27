@@ -1,9 +1,10 @@
 # Road layout
 
-First slice of the map reader in `docs/ROAD_LAYOUT_PLAN.md`. It loads road
-centerlines from the game's 4 km sectors and can check them against a truck
-pose. Nothing here is wired into ACC or AEB. Until it is, those systems behave
-as they do today.
+First slice of the map reader in `docs/ROAD_LAYOUT_PLAN.md`. It loads lane
+centerlines from the game's 4 km sectors, including the driving lines through
+junctions and roundabouts, and can check them against a truck pose. Nothing
+here is wired into ACC or AEB. Until it is, those systems behave as they do
+today.
 
 Parsed geometry is not written anywhere and is not shipped.
 
@@ -30,13 +31,29 @@ value both revisions share.
 ## What a centerline is
 
 A `.base` file is binary, template version 907 on the current game. A road item
-is two node ids plus a road-look token. Node positions are integers in 1/256 m.
+is two node ids plus a road-look token. A prefab item is a model token, the
+node that anchors it, and which of the prefab's own nodes that anchor is.
+Node positions are integers in 1/256 m.
 X and Z are the ground plane (east and south), Y is up, the same frame as
 `coordinateX/Y/Z`.
 
-The centerline is a cubic Hermite spline between the two nodes. The tangent at
-each node is that node's ahead direction times the XZ distance between them.
-Ahead is local -Z of the node quaternion:
+The centerline of the carriageway is a cubic Hermite spline between the two
+nodes. Each lane is that spline shifted sideways to the middle of the lane.
+The look lists the lanes on the left and the right. A lane is 4.5 m wide, and
+`road_offset` is how far each side's inner edge sits from the spline. A one-way
+road has lanes on only one side. An even count is centered on the spline. An
+odd count sits half a lane to the left, so the spline is the right edge of the
+middle lane. A look with only left lanes is the mirror of that.
+A per-lane shift from the look is added when the template asks for one.
+Positive is to the right of travel, from the start node toward the end node.
+
+Junctions, roundabouts and merges are not road items. Each driving line
+through them is a nav curve in the prefab's `.ppd`, already one lane. The
+sector names the world node the prefab's origin sits on, and the curve is
+rotated by the difference of those two headings.
+
+The tangent at each node is that node's ahead direction times the XZ chord
+length. Ahead is local -Z of the node quaternion:
 
 ```
 yaw = atan2(-qy, qw) * 2 - pi/2
@@ -44,36 +61,33 @@ ahead = (cos yaw, sin yaw)
 ```
 
 On one 3x3 window that ahead vector agrees with the chord at both ends (mean
-dot 0.96). Y along the spline is linear between the node heights. Lane lines
-and the asphalt edge are this spline offset by the road-look, which this slice
-does not read. Prefab junctions live in `.ppd` and are not in these polylines.
+dot 0.96). Y along a road lane is linear between the node heights.
 
 A road can reference a node stored in the neighboring sector, so a pose check
 loads the truck's square and the ring around it (3x3 at radius 1).
 
+## Checked against poses
+
+On a live stop in a junction the carriageway center was 22.8 m away and the
+nearest prefab lane was 0.3 m away. On recent clips, a pose that sat 2 to 4 m
+off the carriageway center (the right-hand lane) lands within about 2 m of a
+lane center, often under 1 m. A pose 16 m off every road center, the junction
+gap, landed 0.1 m from a prefab curve.
+
 ## Checked against clip poses
 
-`tools/road_layout_check.py` reads the newest AEB clips, takes the mid frame,
-and measures XZ distance to the nearest centerline. On this machine that is
-`europe` from three archives (base map, Going East, Scandinavia), 40 clips:
+`tools/road_layout_check.py` uses the mid frame of a saved clip, or the
+coordinates you pass. It prints the distance to the carriageway center and to
+the nearest lane, whether that lane is a road or a prefab.
 
-| | |
-|---|---|
-| within 4 m | 21 / 40 |
-| within 6 m | 27 / 40 |
-| xz, all clips, p50 / p90 / max | 3.6 / 25 / 147 m |
-| xz, the ones within 6 m, p50 / p90 | 2.8 / 4.7 m |
-| height error \|dy\| p50 / p90 / max | 0.08 / 0.39 / 1.21 m |
-
-The close hits sit about a lane off the spline, which is what a truck in the
-right-hand lane looks like when the spline is the carriageway center. Height
-tracks the road surface. The far misses are poses with no road item nearby
-(a junction, a yard, or off the asphalt). A node can still be close there,
-because the node table also holds prefab origins and props. Those curves are
-the prefab step, not this one.
+`tools/road_layout_view.py` is a separate window for driving. North is up and
+the truck stays centred. Road looks and the prefab index load once. A sector
+is parsed when the view can reach it (about 1.4 km, so a road's far node is
+included) and dropped once the truck is a full sector past that. The picture
+updates from telemetry the whole time. It is not part of the ACC debug window.
 
 ```
 python tools/road_layout_check.py
 python tools/road_layout_check.py --samples 40
-python tools/road_layout_check.py --x 3296 --y 5 --z 19626
+python tools/road_layout_view.py
 ```

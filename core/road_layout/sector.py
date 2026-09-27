@@ -76,13 +76,24 @@ class MapRoad:
     length: float
 
 
+@dataclass(frozen=True)
+class MapPrefab:
+    """One prefab item. ``node_uids[0]`` is the world node the local origin sits on."""
+
+    uid: int
+    model: str
+    node_uids: tuple[int, ...]
+    origin_index: int
+
+
 @dataclass
 class SectorMesh:
-    """Roads and nodes from one or more `.base` sectors."""
+    """Roads, prefabs and nodes from one or more `.base` sectors."""
 
     version: int = 0
     nodes: dict[int, MapNode] = field(default_factory=dict)
     roads: list[MapRoad] = field(default_factory=list)
+    prefabs: list[MapPrefab] = field(default_factory=list)
     sectors: int = 0
 
 
@@ -260,19 +271,21 @@ def _read_road(c: _Cur, uid: int) -> MapRoad:
     return MapRoad(uid, look, start, end, length)
 
 
-def _skip_prefab(c: _Cur) -> None:
-    c.token()
+def _read_prefab(c: _Cur, uid: int) -> MapPrefab:
+    model = c.token()
     c.token()
     for _ in range(c.u32()):
         c.token()
-    nodes = _u64s(c)
+    count = c.u32()
+    node_uids = tuple(c.u64() for _ in range(count))
     _u64s(c)
     c.u64()
-    c.u16()
-    for _ in range(nodes):
+    origin = c.u16()
+    for _ in range(count):
         c.token()
         c.f32()
     c.token()
+    return MapPrefab(uid, model, node_uids, origin)
 
 
 def _skip_model(c: _Cur) -> None:
@@ -536,7 +549,6 @@ def _read_node(c: _Cur) -> MapNode:
 _SKIP = {
     _TERRAIN: _skip_terrain,
     _BUILDING: _skip_building,
-    _PREFAB: _skip_prefab,
     _MODEL: _skip_model,
     _COMPANY: _skip_company,
     _SERVICE: _skip_service,
@@ -572,6 +584,9 @@ def _read_item(c: _Cur, mesh: SectorMesh, nested: bool) -> None:
     uid = _header(c)
     if typ == ROAD:
         mesh.roads.append(_read_road(c, uid))
+        return
+    if typ == _PREFAB:
+        mesh.prefabs.append(_read_prefab(c, uid))
         return
     if typ == _COMPOUND:
         if nested:

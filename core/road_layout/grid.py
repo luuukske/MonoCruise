@@ -36,6 +36,14 @@ def neighborhood(ix: int, iz: int, radius: int = 1) -> list[tuple[int, int]]:
     return [(ix + dx, iz + dz) for dz in span for dx in span]
 
 
+def sectors_touching(x: float, z: float, radius_m: float) -> list[tuple[int, int]]:
+    """Sectors whose square meets the circle of ``radius_m`` around ``(x, z)``."""
+    reach = max(0.0, radius_m)
+    ix0, iz0 = sector_index(x - reach, z - reach)
+    ix1, iz1 = sector_index(x + reach, z + reach)
+    return [(ix, iz) for iz in range(iz0, iz1 + 1) for ix in range(ix0, ix1 + 1)]
+
+
 def map_folder(archive: HashFs) -> str | None:
     """``europe`` or ``usa`` from the single ``.mbd`` under ``map/``, if present."""
     listing = archive.listdir("map")
@@ -79,5 +87,6 @@ def load_sectors(
         mesh.version = part.version
         mesh.nodes.update(part.nodes)
         mesh.roads.extend(part.roads)
+        mesh.prefabs.extend(part.prefabs)
         mesh.sectors += 1
     return mesh

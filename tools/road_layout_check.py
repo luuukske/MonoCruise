@@ -27,7 +27,6 @@ from core.road_layout.archive import HashFs
 from core.road_layout.centerline import (
     nearest_centerline,
     node_forward_xz,
-    roads_missing_a_node,
 )
 from core.road_layout.grid import (
     load_sectors,
@@ -35,10 +34,15 @@ from core.road_layout.grid import (
     neighborhood,
     sector_index,
 )
+from core.road_layout.lanes import lane_lines, nearest_lane
+from core.road_layout.looks import load_road_looks
+from core.road_layout.prefab import PrefabLibrary, load_prefab_paths
+
+
 from core.sdk_installer.game_paths import find_game_installations
 
 
-def _open_map(game: Path) -> tuple[str, list[HashFs]]:
+def _open_map(game: Path) -> tuple[str, list[HashFs], list[HashFs]]:
     opened: list[HashFs] = []
     for path in sorted(game.glob("*.scs")):
         try:
@@ -58,7 +62,7 @@ def _open_map(game: Path) -> tuple[str, list[HashFs]]:
     ]
     if not kept:
         raise SystemExit("map archives have no sectors")
-    return map_name, kept
+    return map_name, kept, opened
 
 
 def _pose_from_clip(index: int) -> tuple[float, float, float, str]:
@@ -75,29 +79,32 @@ def _pose_from_clip(index: int) -> tuple[float, float, float, str]:
     return ego.coordinateX, ego.coordinateY, ego.coordinateZ, label
 
 
-def _report_one(mesh, x: float, y: float, z: float, label: str) -> None:
+def _report_one(mesh, looks, prefabs, x: float, y: float, z: float, label: str) -> None:
     hit = nearest_centerline(mesh, x, z)
+    lane = nearest_lane(lane_lines(mesh, looks, prefabs), x, z)
     ix, iz = sector_index(x, z)
     print(
         f"{label} sector {ix:+d} {iz:+d}  files {mesh.sectors}  "
-        f"roads {len(mesh.roads)}  missing-node {roads_missing_a_node(mesh)}"
+        f"roads {len(mesh.roads)}  prefabs {len(mesh.prefabs)}"
     )
     print(f"  pose x {x:.1f}  z {z:.1f}  y {y:.2f}")
     if hit is None:
-        print("  no centerline")
+        print("  no road centerline")
+    else:
+        print(f"  road center {hit.distance_m:.2f} m  look {hit.look}")
+    if lane is None:
+        print("  no lane")
         return
-    print(
-        f"  centerline {hit.distance_m:.2f} m  road y {hit.road_y:.2f}  "
-        f"dy {y - hit.road_y:+.2f}  look {hit.look}"
-    )
+    print(f"  lane {lane.distance_m:.2f} m  {lane.kind}  {lane.label}")
 
 
-def _report_samples(archives, map_name: str, count: int) -> None:
+def _report_samples(archives, map_name: str, looks, prefabs, count: int) -> None:
     infos = ClipStore().list_clips()
     if not infos:
         raise SystemExit("no AEB clips")
     dists: list[float] = []
     dys: list[float] = []
+    lane_dists: list[float] = []
     far = 0
     agree_mesh = None
     for info in infos[:count]:
@@ -110,9 +117,12 @@ def _report_samples(archives, map_name: str, count: int) -> None:
         if agree_mesh is None:
             agree_mesh = mesh
         hit = nearest_centerline(mesh, ego.coordinateX, ego.coordinateZ)
+        lane = nearest_lane(lane_lines(mesh, looks, prefabs, steps=6), ego.coordinateX, ego.coordinateZ)
         if hit is None:
             continue
         dists.append(hit.distance_m)
+        if lane is not None:
+            lane_dists.append(lane.distance_m)
         dys.append(abs(ego.coordinateY - hit.road_y))
         if hit.distance_m > 8.0:
             far += 1
@@ -133,6 +143,13 @@ def _report_samples(archives, map_name: str, count: int) -> None:
         f"  |dy| m  p50 {statistics.median(dys):.2f}  "
         f"p90 {_pct(dys, 0.90):.2f}  max {dys[-1]:.2f}"
     )
+    if not lane_dists:
+        print("  lane m  none")
+    else:
+        print(
+            f"  lane m  p50 {statistics.median(lane_dists):.2f}  "
+            f"p90 {_pct(sorted(lane_dists), 0.90):.2f}  max {max(lane_dists):.2f}"
+        )
     print(
         f"  node ahead vs chord  start {start_dot:+.3f}  end {end_dot:+.3f}  "
         f"roads {n_roads}"
@@ -186,9 +203,11 @@ def main(argv: list[str] | None = None) -> int:
     installs = find_game_installations(args.game)
     if not installs:
         raise SystemExit(f"no {args.game} install found")
-    map_name, archives = _open_map(installs[0])
+    map_name, archives, everything = _open_map(installs[0])
+    looks = load_road_looks(everything)
+    prefabs = PrefabLibrary(everything, load_prefab_paths(everything))
     if args.samples > 0:
-        _report_samples(archives, map_name, args.samples)
+        _report_samples(archives, map_name, looks, prefabs, args.samples)
         return 0
     if (args.x is None) != (args.z is None):
         raise SystemExit("pass both --x and --z")
@@ -203,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
     ix, iz = sector_index(x, z)
     mesh = load_sectors(archives, map_name, neighborhood(ix, iz, args.radius))
     print(f"map {map_name}  archives {len(archives)}")
-    _report_one(mesh, x, y, z, label)
+    _report_one(mesh, looks, prefabs, x, y, z, label)
     return 0
 
 

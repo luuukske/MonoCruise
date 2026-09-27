@@ -6,7 +6,7 @@ import struct
 
 from core.road_layout.centerline import nearest_centerline, sample_centerline
 from core.road_layout.cityhash import city_hash64_path
-from core.road_layout.grid import sector_filename, sector_index
+from core.road_layout.grid import sector_filename, sector_index, sectors_touching
 from core.road_layout.sector import MapNode, parse_sector
 
 # Directory hashes from base_map.scs. CityHash 1.1 does not produce these.
@@ -29,6 +29,13 @@ def test_sector_index_and_filename():
     assert sector_filename(-3, 1) == "sec-0003+0001.base"
 
 
+def test_sectors_touching_grows_only_at_the_edge():
+    assert sectors_touching(2000.0, 2000.0, 100.0) == [(0, 0)]
+    assert sectors_touching(3990.0, 2000.0, 50.0) == [(0, 0), (1, 0)]
+    corner = sectors_touching(3990.0, 10.0, 50.0)
+    assert (0, 0) in corner and (1, 0) in corner and (0, -1) in corner and (1, -1) in corner
+
+
 def test_straight_centerline_is_the_chord():
     start = MapNode(1, 0.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0)
     end = MapNode(2, 0.0, 5.0, -100.0, 1.0, 0.0, 0.0, 0.0)
@@ -39,6 +46,73 @@ def test_straight_centerline_is_the_chord():
     assert abs(pts[1][0]) < 1e-6
     assert abs(pts[1][2] + 25.0) < 1e-4
     assert abs(pts[1][1] - 5.0) < 1e-6
+
+
+def test_one_plus_one_lanes_sit_half_a_lane_off_the_spline():
+    from core.road_layout.lanes import lane_lines, nearest_lane
+    from core.road_layout.looks import RoadLook
+    from core.road_layout.sector import MapNode, MapRoad, SectorMesh
+
+    look = RoadLook("road.look0", ["traffic_lane.road.local"], ["traffic_lane.road.local"])
+    assert look.laterals() == [2.25, -2.25]
+    wide = RoadLook(
+        "ger31",
+        ["a", "a"],
+        ["a", "a"],
+        offset_m=5.75,
+        shift_left=[-4.75, -4.75],
+        shift_right=[-4.75, -4.75],
+    )
+    assert wide.laterals() == [3.25, 7.75, -3.25, -7.75]
+    gapped = RoadLook("gap", ["a"], ["a"], offset_m=1.0)
+    assert gapped.laterals() == [3.25, -3.25]
+    start = MapNode(1, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+    end = MapNode(2, 0.0, 0.0, -100.0, 1.0, 0.0, 0.0, 0.0)
+    mesh = SectorMesh(nodes={1: start, 2: end}, roads=[
+        MapRoad(10, "road.look0", 1, 2, 100.0),
+    ])
+    lines = lane_lines(mesh, {"road.look0": look}, None, steps=4)
+    assert len(lines) == 2
+    hit = nearest_lane(lines, 2.25, -25.0)
+    assert hit is not None
+    assert hit.distance_m < 0.05
+    assert hit.kind == "road"
+
+
+def test_one_way_odd_counts_sit_half_a_lane_left():
+    from core.road_layout.looks import RoadLook
+
+    assert RoadLook("ow1", [], ["a"]).laterals() == [-2.25]
+    assert RoadLook("ow2", [], ["a", "b"]).laterals() == [-2.25, 2.25]
+    assert RoadLook("ow3", [], ["a", "b", "c"]).laterals() == [-6.75, -2.25, 2.25]
+    assert RoadLook("ow4", [], ["a"] * 4).laterals() == [-6.75, -2.25, 2.25, 6.75]
+    assert RoadLook("ow5", [], ["a"] * 5).laterals() == [-11.25, -6.75, -2.25, 2.25, 6.75]
+    assert RoadLook("shift", [], ["a"], shift_right=[1.75]).laterals() == [-0.5]
+    assert RoadLook("left", ["a"], []).laterals() == [2.25]
+
+
+def test_prefab_curve_bytes_roundtrip():
+    import struct
+
+    from core.road_layout.prefab import _read_ppd
+
+    node = bytearray(104)
+    struct.pack_into("<3f", node, 16, 10.0, 1.0, 5.0)
+    struct.pack_into("<3f", node, 28, 1.0, 0.0, 0.0)
+    curve = bytearray(132)
+    struct.pack_into("<3f", curve, 16, 1.0, 2.0, 3.0)
+    struct.pack_into("<3f", curve, 28, 4.0, 5.0, 6.0)
+    struct.pack_into("<4f", curve, 40, 1.0, 0.0, 0.0, 0.0)
+    struct.pack_into("<4f", curve, 56, 1.0, 0.0, 0.0, 0.0)
+    blob = struct.pack("<I 11I 12I", 25, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 96, 200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    blob += bytes(node) + bytes(curve)
+    desc = _read_ppd(blob)
+    assert desc is not None
+    assert abs(desc.nodes[0].x - 10.0) < 1e-5
+    assert abs(desc.nodes[0].z - 5.0) < 1e-5
+    assert abs(desc.curves[0].x0 - 1.0) < 1e-5
+    assert abs(desc.curves[0].z0 - 3.0) < 1e-5
+    assert abs(desc.curves[0].y0 - 2.0) < 1e-5
 
 
 def test_synthetic_sector_roundtrip_and_offset():

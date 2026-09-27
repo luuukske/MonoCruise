@@ -30,29 +30,57 @@ def node_forward_xz(node: MapNode) -> tuple[float, float]:
     return math.cos(yaw), math.sin(yaw)
 
 
+def sample_span(
+    x0: float,
+    y0: float,
+    z0: float,
+    fx0: float,
+    fz0: float,
+    x1: float,
+    y1: float,
+    z1: float,
+    fx1: float,
+    fz1: float,
+    steps: int = 16,
+) -> list[tuple[float, float, float, float, float]]:
+    """Samples ``(x, y, z, forward_x, forward_z)`` along one Hermite span."""
+    steps = max(int(steps), 1)
+    dx = x1 - x0
+    dz = z1 - z0
+    chord = math.hypot(dx, dz)
+    m0x, m0z = fx0 * chord, fz0 * chord
+    m1x, m1z = fx1 * chord, fz1 * chord
+    points: list[tuple[float, float, float, float, float]] = []
+    for i in range(steps + 1):
+        t = i / steps
+        x = _hermite(t, x0, x1, m0x, m1x)
+        z = _hermite(t, z0, z1, m0z, m1z)
+        tx = _hermite_d(t, x0, x1, m0x, m1x)
+        tz = _hermite_d(t, z0, z1, m0z, m1z)
+        norm = math.hypot(tx, tz)
+        if norm < 1e-8:
+            fx, fz = fx0, fz0
+        else:
+            fx, fz = tx / norm, tz / norm
+        y = (1.0 - t) * y0 + t * y1
+        points.append((x, y, z, fx, fz))
+    return points
+
+
 def sample_centerline(
     start: MapNode,
     end: MapNode,
     steps: int = 16,
 ) -> list[tuple[float, float, float]]:
     """World (x, y, z) samples. Y is linear between the nodes."""
-    steps = max(int(steps), 1)
-    dx = end.x - start.x
-    dz = end.z - start.z
-    chord = math.hypot(dx, dz)
     f0x, f0z = node_forward_xz(start)
     f1x, f1z = node_forward_xz(end)
-    m0x, m0z = f0x * chord, f0z * chord
-    m1x, m1z = f1x * chord, f1z * chord
-    points: list[tuple[float, float, float]] = []
-    for i in range(steps + 1):
-        t = i / steps
-        points.append((
-            _hermite(t, start.x, end.x, m0x, m1x),
-            (1.0 - t) * start.y + t * end.y,
-            _hermite(t, start.z, end.z, m0z, m1z),
-        ))
-    return points
+    span = sample_span(
+        start.x, start.y, start.z, f0x, f0z,
+        end.x, end.y, end.z, f1x, f1z,
+        steps,
+    )
+    return [(x, y, z) for x, y, z, _fx, _fz in span]
 
 
 def nearest_centerline(
@@ -83,6 +111,16 @@ def roads_missing_a_node(mesh: SectorMesh) -> int:
         if road.start_uid not in mesh.nodes or road.end_uid not in mesh.nodes:
             missing += 1
     return missing
+
+
+def _hermite_d(t: float, p0: float, p1: float, m0: float, m1: float) -> float:
+    t2 = t * t
+    return (
+        (6.0 * t2 - 6.0 * t) * p0
+        + (3.0 * t2 - 4.0 * t + 1.0) * m0
+        + (-6.0 * t2 + 6.0 * t) * p1
+        + (3.0 * t2 - 2.0 * t) * m1
+    )
 
 
 def _hermite(t: float, p0: float, p1: float, m0: float, m1: float) -> float:
