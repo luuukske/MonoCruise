@@ -57,7 +57,7 @@ All methods below are safe to call from any thread **unless noted otherwise**.
 - **Visibility / lifecycle**
   - `show()` / `hide()` / `is_visible()` (`is_visible()` is Qt main thread only)
   - `stop()` closes the window and stops the panel (intended for shutdown).
-  - `show()` does not `raise_()`. `WindowStaysOnTopHint` keeps the panel above other apps; calling `raise_()` on a timer fights the live pedal bar and can freeze Qt when the main window is minimised.
+  - `show()` does not `raise_()`. A per-frame `raise_()` fights the live pedal bar and can freeze Qt when the main window is minimised. Topmost is reasserted every 5 s from the main window (`ui/overlay_topmost.py`), because the NVIDIA overlay plus alt-tab can drop it while Qt still reports the panel visible.
 
 - **Position / appearance**
   - `move(x, y)`

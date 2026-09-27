@@ -127,6 +127,16 @@ class PopupWindow(QWidget):
         self._animator.set_base_scale(self._scale)
         
         self._new_message_signal.connect(self._on_new_message)
+
+    def reassert_if_showing(self) -> None:
+        """GUI thread. Idle popups stay put; a message on screen is put back on top."""
+        if self._state == State.IDLE:
+            return
+        if not self.isVisible():
+            self.show()
+        from ui.overlay_topmost import reassert_topmost
+
+        reassert_topmost(self)
     
     def _scaled_window_width(self) -> int:
         return int(self._DESIGN_PANEL_WIDTH * self._scale)

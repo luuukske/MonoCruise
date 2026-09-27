@@ -225,3 +225,16 @@ class VisualizationBar(QWidget):
 
         self.update()
 
+    def ensure_present(self) -> None:
+        """GUI thread. Re-open an enabled bar whose timer was stopped."""
+        try:
+            bar_active = bool(Settings.bar_variable)
+        except Exception:
+            return
+        if not bar_active:
+            return
+        if not self.timer.isActive():
+            self.timer.start(10)
+        if not self.isVisible():
+            self.show()
+

@@ -48,6 +48,7 @@ from ui.main_window.constants import (
 )
 from ui.main_window.settings_panel import SettingsPanel
 from ui.main_window.support_overlay import show_support
+from ui.overlay_topmost import OVERLAY_KEEP_MS, reassert_topmost
 
 _CC_LEAD_SPEED_MIN_INTERVAL_S = 0.5
 
@@ -204,6 +205,13 @@ class MonoCruiseWindow(QMainWindow):
         self._poll_timer.setInterval(100)
         self._poll_timer.timeout.connect(self._poll_threads)
         self._poll_timer.start()
+
+        # NVIDIA overlay + alt-tab drops topmost while Qt still reports visible.
+        # Reassert slowly. Do not raise_() here: see ui/overlay_topmost.py.
+        self._overlay_keep_timer = QTimer(self)
+        self._overlay_keep_timer.setInterval(OVERLAY_KEEP_MS)
+        self._overlay_keep_timer.timeout.connect(self._reassert_overlays)
+        self._overlay_keep_timer.start()
 
         # Cruise control floater (Qt main thread only; see CcPanel docstring)
         self._cc_panel: CcPanel | None = None
@@ -636,6 +644,53 @@ class MonoCruiseWindow(QMainWindow):
         elif self._cc_panel.is_visible():
             self._cc_panel.hide()
 
+    def _reassert_overlays(self) -> None:
+        """Every 5 s, put enabled overlays back above the game. See overlay_topmost.py."""
+        if self._closing:
+            return
+        try:
+            self._reassert_cc_panel()
+        except Exception:
+            logger.exception("overlay keep: cruise panel failed")
+        try:
+            self._reassert_bar()
+        except Exception:
+            logger.exception("overlay keep: pedal bar failed")
+        try:
+            self._reassert_popup()
+        except Exception:
+            logger.exception("overlay keep: popup failed")
+
+    def _reassert_cc_panel(self) -> None:
+        panel = self._cc_panel
+        if panel is None:
+            return
+        with self._settings._state_lock:
+            show_ui = bool(self._settings.show_cc_ui)
+        if not show_ui:
+            return
+        if not panel.is_visible():
+            panel.show()
+        panel.reassert_topmost()
+
+    def _reassert_bar(self) -> None:
+        try:
+            bar = registry.get("visualization_bar")
+        except KeyError:
+            return
+        ensure = getattr(bar, "ensure_present", None)
+        if ensure is not None:
+            ensure()
+        reassert_topmost(bar)
+
+    def _reassert_popup(self) -> None:
+        from ui.popup.popup_window import PopupWindow
+
+        popup = PopupWindow._instance
+        if popup is None:
+            return
+        popup.reassert_if_showing()
+
     # Overrides
 
     def resizeEvent(self, event) -> None:
@@ -672,6 +727,7 @@ class MonoCruiseWindow(QMainWindow):
         self._open_on_taskbar = False
 
         self._poll_timer.stop()
+        self._overlay_keep_timer.stop()
         if self._cc_panel is not None:
             try:
                 self._cc_panel.stop()

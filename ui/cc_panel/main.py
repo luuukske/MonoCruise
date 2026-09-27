@@ -1785,6 +1785,12 @@ class cc_panel:
         """True if the panel widget is currently shown. Qt main thread only."""
         return self._widget.isVisible()
 
+    def reassert_topmost(self) -> None:
+        """GUI thread only. Put the panel back above the game."""
+        from ui.overlay_topmost import reassert_topmost
+
+        reassert_topmost(self._widget)
+
     def show(self):
         """Show the panel. WindowStaysOnTopHint keeps it above other apps."""
         self._widget._show_sig.emit()

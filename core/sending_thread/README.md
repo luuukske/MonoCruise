@@ -331,10 +331,12 @@ A 3 px always-on-top `Qt.Tool` strip along the bottom of the primary screen. Cre
 the Qt main thread via `create_visualization_bar()`. It reads `aforward` / `abackward`
 and flashes on `em_stop` / `AEB_warn`.
 
-It must not call `raise_()` from its animation timer. `WindowStaysOnTopHint` already
-keeps it above other applications; a per-frame raise fights `cc_panel` wherever they
-overlap and can freeze Qt on Windows when the main window is minimised. The bar is
-`WA_ShowWithoutActivating` and `WindowDoesNotAcceptFocus` for the same reason.
+It must not call `raise_()` from its animation timer. A per-frame raise fights
+`cc_panel` and can freeze Qt on Windows when the main window is minimised.
+`WindowStaysOnTopHint` does not survive the NVIDIA overlay plus alt-tab: Qt still
+reports the window visible, so `show()` never runs again. The main window puts it
+back every 5 s with `SetWindowPos` (`ui/overlay_topmost.py`) without activating it.
+The bar is `WA_ShowWithoutActivating` and `WindowDoesNotAcceptFocus` for the same reason.
 
 ## Brake intensity (`core/scs_profile/intensity.py`)
 
