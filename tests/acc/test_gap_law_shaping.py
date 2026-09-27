@@ -18,6 +18,8 @@ from core.cruise_control_thread.idm_cah import (
     LEAD_BRAKE_FF_MAX_MS2, LEAD_BRAKE_FF_SHARE, _soft_min, _soft_negative, acc_blend, alead_tau_s, cah,
     closing_relief, comfort_gain, iidm, jerk_step, lead_accel_nudge, lead_brake_ff,
 )
+from core.cruise_control_thread.approach_profile import approach_band
+from core.cruise_control_thread.brake_landing import BrakeLanding
 from core.settings import Settings
 
 DT = 1.0 / 30.0
@@ -484,6 +486,26 @@ def test_every_feature_knob_disables_its_feature_at_zero():
     for prev in (-6.55, -2.0, -0.8):
         assert jerk_step(prev, 1.5, DT, cfg.j_max_ms3, cfg.j_release_tau_s) == \
             prev + cfg.j_max_ms3 * DT
+    # Gas pacing: straight after a hard brake the gas side is the plain limit.
+    default = _controller()
+    for c in (ctrl, default):
+        c._jerk_limit(-3.0, DT, True, 20.0)
+        c._prev_cmd_ms2 = 0.0
+    assert ctrl._jerk_limit(1.5, DT, False, 20.0) == pytest.approx(cfg.j_max_ms3 * DT)
+    assert default._jerk_limit(1.5, DT, False, 20.0) < cfg.j_max_ms3 * DT
+    # Landing: a truck braking hard onto a lead that stopped slowing keeps the law.
+    landed = {}
+    for name, conf in (("baseline", cfg), ("default", _controller().config)):
+        landing = BrakeLanding()
+        for i in range(40):
+            landing.track_ego(21.0 + 5.0 * (39 - i) * DT, DT)
+            lead = _LeadSnapshot(vid=1, dist_m=40.0, v_lead_ms=20.0, a_lead_ms2=0.0, score=6.0)
+            landed[name] = landing.step(conf, -5.0, lead, lead, 21.0, 1.5, i * DT)
+    assert landed["baseline"] == -5.0 and landed["default"] > -4.0
+    # Approach band: a stopped vehicle at 150 m from 50 km/h leaves the law alone.
+    stopped = _LeadSnapshot(vid=1, dist_m=150.0, v_lead_ms=0.0, a_lead_ms2=0.0, score=6.0, conf=1.0)
+    assert approach_band(cfg, 0.9, stopped, 13.9, 1.1) == 0.9
+    assert approach_band(_controller().config, 0.9, stopped, 13.9, 1.1) < 0.0
 
 
 def test_closing_relief_matches_the_requested_shape():

@@ -16,7 +16,7 @@ from .blinker_arbitration import (
     BlinkerArbiter,
     BlinkerState,
 )
-from . import idm_cah, standstill_hold
+from . import anticipation, approach_profile, brake_landing, idm_cah, standstill_hold
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,9 @@ ANT_TAU_S: float = 0.4
 # Stationary-lead failsafe: anticipation is fully disabled when the
 ANT_LEAD_MOVING_MIN_MS: float = 0.75
 ANT_LEAD_MOVING_FULL_MS: float = 1.5
+# Anticipation alone may take the command no lower than this; harder braking is
+# the immediate lead's call. b_comfort x gap_gain_max. See ACC_ARCHITECTURE §9.7.
+ANT_BRAKE_FLOOR_MS2: float = -3.0
 
 TTC_HARD_S: float = 1.5
 TTC_MIN_VCLOSE_MS: float = 0.3
@@ -174,6 +177,7 @@ class ACConfig:
     ant_tau_s: float = ANT_TAU_S
     ant_lead_moving_min_ms: float = ANT_LEAD_MOVING_MIN_MS
     ant_lead_moving_full_ms: float = ANT_LEAD_MOVING_FULL_MS
+    ant_brake_floor_ms2: float = ANT_BRAKE_FLOOR_MS2
     ttc_hard_s: float = TTC_HARD_S
     d_emergency_m: float = D_EMERGENCY_M
     emergency_decel_ms2: float = EMERGENCY_DECEL_MS2
@@ -185,8 +189,46 @@ class ACConfig:
     standstill_launch_accel_ms2: float = standstill_hold.LAUNCH_ACCEL_MS2
     j_max_ms3: float = J_MAX_MS3
     j_release_tau_s: float = idm_cah.J_RELEASE_TAU_S
-    j_release_full_ms: float = idm_cah.J_RELEASE_FULL_MS
-    j_release_zero_ms: float = idm_cah.J_RELEASE_ZERO_MS
+    j_gas_pace_ms3: float = idm_cah.J_GAS_PACE_MS3
+    gas_pace_s: float = idm_cah.GAS_PACE_S
+    gas_pace_brake_ms2: float = idm_cah.GAS_PACE_BRAKE_MS2
+    launch_band_full_ms: float = idm_cah.LAUNCH_BAND_FULL_MS
+    launch_band_zero_ms: float = idm_cah.LAUNCH_BAND_ZERO_MS
+    j_onset_tau_s: float = idm_cah.J_ONSET_TAU_S
+    j_onset_dead_ms2: float = idm_cah.J_ONSET_DEAD_MS2
+    # A/B switch back to the old controller: True restores the at-clamp snap. §13.2.
+    at_clamp_slam: bool = False
+    landing_momentum_s: float = brake_landing.LANDING_MOMENTUM_S
+    landing_horizon_s: float = brake_landing.LANDING_HORIZON_S
+    landing_reopen_s: float = brake_landing.LANDING_REOPEN_S
+    landing_trend_window_s: float = brake_landing.LANDING_TREND_WINDOW_S
+    landing_trend_off_ms2: float = brake_landing.LANDING_TREND_OFF_MS2
+    landing_trend_full_ms2: float = brake_landing.LANDING_TREND_FULL_MS2
+    landing_lead_min_ms: float = brake_landing.LANDING_LEAD_MIN_MS
+    landing_ego_decel_ms2: float = brake_landing.LANDING_EGO_DECEL_MS2
+    landing_gap_tol_ms: float = brake_landing.LANDING_GAP_TOL_MS
+    landing_block_s: float = brake_landing.LANDING_BLOCK_S
+    approach_share: float = approach_profile.APPROACH_SHARE
+    approach_dv_lo_ms: float = approach_profile.APPROACH_DV_LO_MS
+    approach_dv_hi_ms: float = approach_profile.APPROACH_DV_HI_MS
+    approach_a_lead_full_ms2: float = approach_profile.APPROACH_A_LEAD_FULL_MS2
+    approach_a_lead_zero_ms2: float = approach_profile.APPROACH_A_LEAD_ZERO_MS2
+    approach_stop_margin_m: float = approach_profile.APPROACH_STOP_MARGIN_M
+    approach_room_min_m: float = approach_profile.APPROACH_ROOM_MIN_M
+    approach_room_full_m: float = approach_profile.APPROACH_ROOM_FULL_M
+    approach_lower_gap_frac: float = approach_profile.APPROACH_LOWER_GAP_FRAC
+    approach_need_on_ms2: float = approach_profile.APPROACH_NEED_ON_MS2
+    approach_need_full_ms2: float = approach_profile.APPROACH_NEED_FULL_MS2
+    approach_lower_full_ms2: float = approach_profile.APPROACH_LOWER_FULL_MS2
+    approach_lower_zero_ms2: float = approach_profile.APPROACH_LOWER_ZERO_MS2
+    approach_stopped_upper_extra_ms2: float = approach_profile.APPROACH_STOPPED_UPPER_EXTRA_MS2
+    approach_stopped_full_ms: float = approach_profile.APPROACH_STOPPED_FULL_MS
+    approach_stopped_zero_ms: float = approach_profile.APPROACH_STOPPED_ZERO_MS
+    approach_upper_gain: float = approach_profile.APPROACH_UPPER_GAIN
+    approach_upper_margin_ms2: float = approach_profile.APPROACH_UPPER_MARGIN_MS2
+    approach_upper_full_ms2: float = approach_profile.APPROACH_UPPER_FULL_MS2
+    approach_upper_zero_ms2: float = approach_profile.APPROACH_UPPER_ZERO_MS2
+    approach_slew_ms3: float = approach_profile.APPROACH_SLEW_MS3
     tau_input_near_s: float = TAU_INPUT_NEAR_S
     tau_input_far_s: float = TAU_INPUT_FAR_S
     d_input_near_m: float = D_INPUT_NEAR_M
@@ -251,6 +293,9 @@ class AdaptiveCruiseController:
         self._last_chain_mono: float = -math.inf
         self._blinker = BlinkerArbiter()
         self._standstill = standstill_hold.StandstillHold()
+        self._landing = brake_landing.BrakeLanding()
+        self._since_brake_s = math.inf
+        self._approach_delta = 0.0
 
     def accel_cap_ms2(self, ego_speed_ms: float) -> float:
         now = time.monotonic()
@@ -270,6 +315,7 @@ class AdaptiveCruiseController:
             chain_raw = self._last_chain_raw
 
         v_ego = max(0.0, float(ego_speed_ms))
+        self._landing.track_ego(v_ego, dt)
         if not chain_raw and indicated_raw is None:
             # Truly no lead. Route the ceiling through the SAME jerk + output
             self._gc_emas(now)
@@ -312,6 +358,9 @@ class AdaptiveCruiseController:
         self._last_chain_mono = -math.inf
         self._blinker.reset()
         self._standstill.reset()
+        self._landing.reset()
+        self._since_brake_s = math.inf
+        self._approach_delta = 0.0
 
     def _lead_to_snapshot(self, lead: object) -> _LeadSnapshot | None:
         cfg = self.config
@@ -479,6 +528,8 @@ class AdaptiveCruiseController:
             level = 0
         t_headway = _headway_for_level(level) if level else cfg.t_headway_s
 
+        # The band only pulls on a law it just saw; any path that skips the law drops it.
+        banded_before, self._approach_delta = self._approach_delta, 0.0
         if not chain_raw:
             # Empty in-lane chain with a published indicated lead: follow it.
             # Keep arbiter in pass so hysteresis is not stale when leads return.
@@ -530,6 +581,12 @@ class AdaptiveCruiseController:
             primary.a_lead_ff_ms2,
         )
         a_base = _clamp(a_base, cfg.max_decel_ms2, cfg.max_accel_ms2)
+        # A slower lead is closed on at a constant rate and landed on, not braked past. §13.4, §13.5.
+        banded = approach_profile.approach_band(cfg, a_base, primary, v_ego, t_lane)
+        self._approach_delta = approach_profile.slew_delta(
+            banded_before, banded - a_base, cfg.approach_slew_ms3 * dt, cfg.j_max_ms3 * dt)
+        a_base += self._approach_delta
+        a_base = self._landing.step(cfg, a_base, primary_raw, primary, v_ego, t_lane, now)
 
         # What the chain would command without chain[0]: the fallback for a
         # marginal immediate lead, and the target when stage 2 releases it.
@@ -569,9 +626,10 @@ class AdaptiveCruiseController:
         )
 
         if a_base <= cfg.max_decel_ms2 + 1e-6:
-            # At-clamp: immediate lead demands full brake; ant must not soften.
+            # At-clamp: ant must not soften it, but it is not an emergency either;
+            # the overlays own the step to full brake. See ACC_ARCHITECTURE §13.2.
             self._ant_delta_ms2 = 0.0
-            return a_base, True
+            return a_base, cfg.at_clamp_slam
 
         # Anticipation reads leads[] only. Skip during stage-2 pass release.
         if self._blinker.mode == "pass" or len(chain_smooth) < 2:
@@ -580,13 +638,17 @@ class AdaptiveCruiseController:
             delta_target = self._anticipation_delta(
                 chain_raw, chain_smooth, v_ego, a_base, t_headway,
             )
+        # Floored on the target too, so the filter never winds past what it may command.
+        ant_floor = min(0.0, cfg.ant_brake_floor_ms2 - a_base)
         self._ant_delta_ms2 = idm_cah.ema_step(
-            self._ant_delta_ms2, delta_target, dt, cfg.ant_tau_s,
+            self._ant_delta_ms2, max(delta_target, ant_floor), dt, cfg.ant_tau_s,
         )
 
-        a_cmd = _clamp(a_base + self._ant_delta_ms2, cfg.max_decel_ms2, cfg.max_accel_ms2)
-        is_emergency = a_cmd <= cfg.max_decel_ms2 + 1e-6
-        return a_cmd, is_emergency
+        # Never an emergency: that flag skips the jerk limit, and anticipation
+        # is for smoothing. Only the safety overlays set it. §9.7, §13.2.
+        a_cmd = _clamp(a_base + max(self._ant_delta_ms2, ant_floor),
+                       cfg.max_decel_ms2, cfg.max_accel_ms2)
+        return a_cmd, False
 
     def _chain_tail_accel(
         self, chain_smooth: list[_LeadSnapshot], v_ego: float, t_headway: float,
@@ -687,103 +749,25 @@ class AdaptiveCruiseController:
         a_base: float,
         t_headway: float,
     ) -> float:
-        """Unfiltered anticipation adjustment (m/s^2) from leads beyond the first. See `core/cruise_control_thread/README.md`."""
-        cfg = self.config
-        if len(chain_smooth) < 2:
-            return 0.0
-
-        # Stationary-lead failsafe on the RAW immediate lead speed: traffic
-        # beyond a stopped vehicle predicts nothing about when it will move.
-        moving_gate = _clamp(
-            (chain_raw[0].v_lead_ms - cfg.ant_lead_moving_min_ms)
-            / max(cfg.ant_lead_moving_full_ms - cfg.ant_lead_moving_min_ms, 1e-6),
-            0.0,
-            1.0,
-        )
-        if moving_gate <= 0.0:
-            return 0.0
-
-        # Coupling weights: pairwise time-gap ramp x tracker-score
-        weights: list[float] = []
-        w_run = moving_gate * chain_smooth[0].conf
-        for n in range(1, len(chain_smooth)):
-            prev = chain_smooth[n - 1]
-            cur = chain_smooth[n]
-            v_ref = max(prev.v_lead_ms, cfg.ant_time_ref_floor_ms)
-            gap_s = max(cur.dist_m - prev.dist_m, 0.0) / v_ref
-            w_pair = idm_cah.fade(gap_s, cfg.ant_gap_full_s, cfg.ant_gap_zero_s)
-            w_run *= w_pair * cur.conf
-            if w_run < 1e-4:
-                w_run = 0.0
-            weights.append(w_run)
-
-        if not any(weights):
-            return 0.0
-
-        # Decel side: each anticipated lead is evaluated at its direct gap
-        a_dec_delta = 0.0
-        for n, w in enumerate(weights, start=1):
-            if w <= 0.0:
-                continue
-            lead = chain_smooth[n]
-            a_n = self._lead_law(
-                lead.dist_m, v_ego, lead.v_lead_ms, lead.a_lead_ms2, t_headway,
-                lead.a_lead_ff_ms2,
-            )
-            a_n = _clamp(a_n, cfg.max_decel_ms2, cfg.max_accel_ms2)
-            contrib = w * min(0.0, a_n - a_base)
-            if contrib < a_dec_delta:
-                a_dec_delta = contrib
-
-        # Virtual lead: predict the immediate lead's near-future state from
-        dv_up = 0.0
-        da_up = 0.0
-        for n, w in enumerate(weights, start=1):
-            if w <= 0.0:
-                continue
-            prev = chain_smooth[n - 1]
-            cur = chain_smooth[n]
-            dv_up += w * (cur.v_lead_ms - prev.v_lead_ms)
-            da_up += w * (cur.a_lead_ms2 - prev.a_lead_ms2)
-
-        primary = chain_smooth[0]
-        v_virt = max(0.0, primary.v_lead_ms + cfg.ant_kv * dv_up)
-        lo, hi = cfg.emergency_decel_ms2, cfg.max_accel_ms2
-        a_virt = _clamp(primary.a_lead_ms2 + cfg.ant_ka * da_up, lo, hi)
-        a_virt_ff = _clamp((primary.a_lead_ff_ms2 if primary.a_lead_ff_ms2 is not None
-                            else primary.a_lead_ms2) + cfg.ant_ka * da_up, lo, hi)
-        a_virt_cmd = self._lead_law(primary.dist_m, v_ego, v_virt, a_virt, t_headway,
-                                    a_virt_ff)
-        a_virt_cmd = _clamp(a_virt_cmd, cfg.max_decel_ms2, cfg.max_accel_ms2)
-        virt_delta = a_virt_cmd - a_base
-        if virt_delta < a_dec_delta:
-            a_dec_delta = virt_delta
-        lift = _clamp(virt_delta, 0.0, cfg.ant_lift_max_ms2)
-
-        if lift > 0.0:
-            # Kinematic gate on RAW immediate-lead data: no lift while
-            # actually closing on the lead with an uncomfortable TTC.
-            pr = chain_raw[0]
-            v_close = v_ego - pr.v_lead_ms
-            if v_close > TTC_MIN_VCLOSE_MS:
-                ttc = max(pr.dist_m, 0.01) / v_close
-                lift *= 1.0 - idm_cah.fade(ttc, cfg.ant_lift_ttc_min_s, cfg.ant_lift_ttc_full_s)
-            # Fade lift out when decel anticipation is binding so the two
-            # sides never fight.
-            lift *= _clamp(
-                1.0 + a_dec_delta / max(cfg.ant_lift_fade_ms2, 1e-6), 0.0, 1.0,
-            )
-
-        return a_dec_delta + lift
+        return anticipation.anticipation_delta(
+            self.config, chain_raw, chain_smooth, v_ego, a_base, t_headway, TTC_MIN_VCLOSE_MS)
 
     def _jerk_limit(self, a_new: float, dt: float, is_emergency: bool, v_ego: float,
                     law_release: bool = True) -> float:
+        cfg = self.config
+        self._since_brake_s += dt
         if not is_emergency and self._prev_cmd_ms2 is not None:
-            # Fast release is the launch out of a stop: a lost lead, the hold and a rolling truck keep the plain rate. §13.1.
-            cfg, fast = self.config, law_release and not self._standstill.held
+            # A lost lead and the hold release at the plain rate: neither is the law letting go. §13.1.
+            prev, fast = self._prev_cmd_ms2, law_release and not self._standstill.held
             a_new = idm_cah.jerk_step(
-                self._prev_cmd_ms2, a_new, dt, cfg.j_max_ms3, cfg.j_release_tau_s,
-                idm_cah.fade(v_ego, cfg.j_release_full_ms, cfg.j_release_zero_ms) if fast else 0.0)
+                prev, a_new, dt, cfg.j_max_ms3, cfg.j_release_tau_s, 1.0 if fast else 0.0,
+                cfg.j_onset_tau_s, cfg.j_onset_dead_ms2)
+            if a_new > max(prev, 0.0) and self._since_brake_s < cfg.gas_pace_s:
+                band = idm_cah.fade(v_ego, cfg.launch_band_full_ms, cfg.launch_band_zero_ms)
+                rate = cfg.j_gas_pace_ms3 + band * (cfg.j_max_ms3 - cfg.j_gas_pace_ms3)
+                a_new = min(a_new, max(prev, 0.0) + rate * dt)
+        if a_new <= cfg.gas_pace_brake_ms2:
+            self._since_brake_s = 0.0
         self._prev_cmd_ms2 = a_new
         return a_new
 

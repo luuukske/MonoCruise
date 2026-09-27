@@ -3,8 +3,8 @@
 The at-clamp slam bypasses the jerk limiter on entry but not on exit, so letting
 go of -6.55 m/s^2 at the 2.5 m/s^3 onset rate took 2.6 s whatever the law asked.
 Clip c5a0a74e: the truck braked to 8 km/h behind a lead holding 31 km/h. The
-faster release is gated to the launch band: a rolling truck keeps the symmetric
-rate, which is what stops heavy traffic feeling eager. See
+brake now lets go at every speed; what stops heavy traffic feeling eager is the
+gas coming back paced after a brake, above the launch band. See
 core/acc/ACC_ARCHITECTURE.md §13.1."""
 from __future__ import annotations
 
@@ -116,23 +116,18 @@ def _seconds_to_let_go(release_tau: float, slam: tuple[float, float, float] = LA
     return t
 
 
-def test_a_slam_lets_go_once_the_law_does_while_launching():
-    assert _seconds_to_let_go(_cfg().j_release_tau_s) < 0.8
-    assert _seconds_to_let_go(0.0) > 2.5, "the fixture must reproduce the old hangover"
+@pytest.mark.parametrize("slam", [LAUNCH_SLAM, ROLLING_SLAM], ids=["launching", "rolling"])
+def test_a_slam_lets_go_once_the_law_does(slam):
+    """At any speed: the 2026-09-21 speed gate is what brought c5a0a74e back at cruise."""
+    assert _seconds_to_let_go(_cfg().j_release_tau_s, slam) < 0.8
+    assert _seconds_to_let_go(0.0, slam) > 2.5, "the fixture must reproduce the old hangover"
 
 
-def test_a_rolling_truck_keeps_the_plain_release():
-    """The gate: above the launch band the limiter is symmetric again."""
-    assert _seconds_to_let_go(_cfg().j_release_tau_s, ROLLING_SLAM) == pytest.approx(
-        _seconds_to_let_go(0.0, ROLLING_SLAM))
-    assert _seconds_to_let_go(_cfg().j_release_tau_s, ROLLING_SLAM) > 2.5
-
-
-def test_the_gate_is_a_ramp_over_the_launch_band():
+def test_the_launch_band_is_a_ramp():
     cfg = _cfg()
-    assert cfg.j_release_full_ms < cfg.j_release_zero_ms
-    w = [idm_cah.fade(v, cfg.j_release_full_ms, cfg.j_release_zero_ms)
-         for v in (0.0, cfg.j_release_full_ms, 4.5, cfg.j_release_zero_ms, 20.0)]
+    assert cfg.launch_band_full_ms < cfg.launch_band_zero_ms
+    w = [idm_cah.fade(v, cfg.launch_band_full_ms, cfg.launch_band_zero_ms)
+         for v in (0.0, cfg.launch_band_full_ms, 4.5, cfg.launch_band_zero_ms, 20.0)]
     assert w[0] == 1.0 and w[1] == 1.0 and 0.0 < w[2] < 1.0 and w[3] == 0.0 and w[4] == 0.0
 
 
@@ -171,7 +166,7 @@ def test_the_standstill_hold_is_eased_into_at_the_plain_rate():
 
 def _follow_a_braking_lead(release_tau: float, level: int = 1, v0_kmh: float = 50.0,
                            decel: float = 4.0, dv_kmh: float = 25.0,
-                           band: tuple[float, float] | None = None):
+                           onset_tau: float | None = None):
     """Closed loop: lead brakes, then holds its new speed. Returns (undershoot km/h, hang s).
 
     Perfect lead kinematics, so this isolates the limiter from the radar chain."""
@@ -180,8 +175,9 @@ def _follow_a_braking_lead(release_tau: float, level: int = 1, v0_kmh: float = 5
     try:
         ctrl = AdaptiveCruiseController()
         ctrl.config.j_release_tau_s = release_tau
-        if band is not None:
-            ctrl.config.j_release_full_ms, ctrl.config.j_release_zero_ms = band
+        if onset_tau is not None:
+            ctrl.config.j_onset_tau_s = onset_tau
+            ctrl.config.at_clamp_slam = onset_tau == 0.0
         v = v_lead = v0_kmh / 3.6
         v_end = v_lead - dv_kmh / 3.6
         gap = ctrl.config.s0_m + v * acc_controller.T_HEADWAY_BY_LEVEL_S[level]
@@ -209,15 +205,55 @@ def test_ego_does_not_fall_far_below_a_lead_that_stopped_braking():
     """Closed loop through the launch band: 30 km/h down to a 10 km/h crawl."""
     kw = dict(v0_kmh=30.0, decel=4.0, dv_kmh=20.0)
     under, hang = _follow_a_braking_lead(_cfg().j_release_tau_s, **kw)
-    old_under, old_hang = _follow_a_braking_lead(0.0, **kw)
+    # The old controller: no release chase, no §13.2 onset chase, the clamp snap back.
+    old_under, old_hang = _follow_a_braking_lead(0.0, onset_tau=0.0, **kw)
     assert hang < 0.7 and under < 5.0
     assert old_hang > 1.2 and old_under > 8.0, "the fixture must reproduce the old hangover"
 
 
-def test_a_rolling_truck_follows_a_braking_lead_exactly_as_before():
-    """The gate: a brake that never enters the band cannot be made eager by it."""
+def test_a_rolling_truck_does_not_fall_far_below_a_lead_that_stopped_braking():
+    """At 70 km/h: the gated release left the truck 18.7 km/h under the lead."""
     kw = dict(v0_kmh=70.0, decel=4.0, dv_kmh=20.0)
-    assert _follow_a_braking_lead(_cfg().j_release_tau_s, **kw) ==         _follow_a_braking_lead(0.0, **kw)
-    # Same run with the gate opened at every speed: this is what it costs.
-    wide = _follow_a_braking_lead(_cfg().j_release_tau_s, band=(1e6, 1e6 + 1.0), **kw)
-    assert wide[1] < _follow_a_braking_lead(0.0, **kw)[1] - 0.5
+    under, hang = _follow_a_braking_lead(_cfg().j_release_tau_s, **kw)
+    old_under, old_hang = _follow_a_braking_lead(0.0, onset_tau=0.0, **kw)
+    assert hang < 0.7 and under < 5.0
+    assert old_hang > 1.5 and old_under > 15.0, "the fixture must reproduce the old hangover"
+
+
+def _gas_after_a_brake(v_ego: float, pace_s: float | None = None) -> float:
+    """Cap one second after a brake at -3 lets go toward a law asking for full pull."""
+    ctrl = AdaptiveCruiseController()
+    if pace_s is not None:
+        ctrl.config.gas_pace_s = pace_s
+    ctrl._prev_cmd_ms2 = ctrl._output_ema = -3.0
+    ctrl._jerk_limit(-3.0, DT, False, v_ego)
+    cap = -3.0
+    for _ in range(int(1.0 / DT)):
+        cap = ctrl._jerk_limit(1.5, DT, False, v_ego)
+    return cap
+
+
+def test_gas_comes_back_paced_after_a_brake_at_road_speed():
+    """What kept heavy traffic from feeling eager once the brake lets go at every speed."""
+    cfg = _cfg()
+    paced = _gas_after_a_brake(20.0)
+    plain = _gas_after_a_brake(20.0, pace_s=0.0)
+    assert paced < plain - 0.5
+    assert paced <= cfg.j_gas_pace_ms3 * 1.0 + 1e-9, "never faster than the pace once above zero"
+
+
+def test_the_launch_band_is_not_paced():
+    """Out of a crawl or a stop the gas comes back at the plain rate, as before."""
+    assert _gas_after_a_brake(1.0) == pytest.approx(_gas_after_a_brake(1.0, pace_s=0.0))
+
+
+def test_the_pace_ends_after_its_window():
+    """Two seconds on from the last hard brake the gas side is the plain limit again."""
+    ctrl = AdaptiveCruiseController()
+    ctrl._prev_cmd_ms2 = -3.0
+    ctrl._jerk_limit(-3.0, DT, False, 20.0)
+    for _ in range(int((ctrl.config.gas_pace_s + 1.0) / DT)):
+        ctrl._jerk_limit(-0.5, DT, False, 20.0)
+    assert ctrl._prev_cmd_ms2 > ctrl.config.gas_pace_brake_ms2 + 0.4
+    ctrl._prev_cmd_ms2 = 0.0
+    assert ctrl._jerk_limit(1.5, DT, False, 20.0) == pytest.approx(ctrl.config.j_max_ms3 * DT)

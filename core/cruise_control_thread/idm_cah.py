@@ -47,12 +47,20 @@ CLOSING_RELIEF_FULL_MS: float = 2.0 / 3.6
 TAU_ALEAD_FF_S: float = 0.50
 
 # Brake release chases the law with this time constant instead of the jerk rate,
-# so a slam that bypassed the limiter can let go. 0 disables. §13.1.
+# at any speed, so a brake the law no longer wants lets go. 0 disables. §13.1.
 J_RELEASE_TAU_S: float = 0.30
-# Ego-speed gate on it: the launch out of a stop-and-go brake gets the faster
-# release, a rolling truck keeps the plain symmetric rate. §13.1.
-J_RELEASE_FULL_MS: float = 2.0
-J_RELEASE_ZERO_MS: float = 7.0
+# After a brake the gas comes back at this jerk, for this long past the last brake
+# this hard. What keeps heavy traffic from feeling eager. 0 s disables. §13.1.
+J_GAS_PACE_MS3: float = 0.8
+GAS_PACE_S: float = 2.0
+GAS_PACE_BRAKE_MS2: float = -1.0
+# Launch band: out of a crawl or a stop the gas is not paced, above it fully. §13.1.
+LAUNCH_BAND_FULL_MS: float = 2.0
+LAUNCH_BAND_ZERO_MS: float = 7.0
+# Brake onset chases a law that has run this far below the command, instead of
+# creeping at the jerk rate and then snapping at the clamp. 0 disables. §13.2.
+J_ONSET_TAU_S: float = 0.15
+J_ONSET_DEAD_MS2: float = 1.0
 
 
 def ema_step(prev: float | None, new: float, dt: float, tau: float) -> float:
@@ -63,11 +71,12 @@ def ema_step(prev: float | None, new: float, dt: float, tau: float) -> float:
 
 
 def jerk_step(prev: float, target: float, dt: float, j_max: float,
-              release_tau: float, release_w: float = 1.0) -> float:
-    """One jerk-limited step toward `target`; a braking command may rise faster.
+              release_tau: float, release_w: float = 1.0,
+              onset_tau: float = 0.0, onset_dead: float = 0.0) -> float:
+    """One jerk-limited step toward `target`; braking may rise or deepen faster.
 
-    `release_w` scales that faster rise; 0 is the plain limit bit for bit.
-    Within about `j_max * release_tau` of the target it is the plain limit."""
+    `release_w` scales the faster rise and `onset_tau` 0 turns off the faster
+    fall; both at 0 is the plain limit bit for bit. §13.1, §13.2."""
     max_step = j_max * dt
     delta = target - prev
     rise = max_step
@@ -75,10 +84,13 @@ def jerk_step(prev: float, target: float, dt: float, j_max: float,
         # Never past zero: above it the gas side keeps the plain jerk limit.
         boost = release_w * delta * (1.0 - math.exp(-dt / release_tau))
         rise = max(rise, min(boost, -prev))
+    fall = max_step
+    if onset_tau > 0.0 and -delta > onset_dead:
+        fall += (-delta - onset_dead) * (1.0 - math.exp(-dt / onset_tau))
     if delta > rise:
         return prev + rise
-    if delta < -max_step:
-        return prev - max_step
+    if delta < -fall:
+        return prev - fall
     return target
 
 

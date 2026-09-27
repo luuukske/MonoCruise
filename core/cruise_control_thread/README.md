@@ -122,13 +122,44 @@ Full derivation and the measured before/after: `core/acc/ACC_ARCHITECTURE.md` §
 
 ### Anticipation and chain tuning
 
-Multi-lead anticipation weights pairwise time gaps (cosine ramp `ANT_GAP_FULL_S` to
-`ANT_GAP_ZERO_S`), multiplies down the chain, and EMA-filters the total delta (`ANT_TAU_S`).
+Multi-lead anticipation (`anticipation.py`, a pure function of the chain) weights pairwise
+time gaps (cosine ramp `ANT_GAP_FULL_S` to `ANT_GAP_ZERO_S`), multiplies down the chain, and
+EMA-filters the total delta (`ANT_TAU_S`). It adds prediction and nothing else: the virtual
+lead is differenced against the law on the unmodified immediate lead, never `a_base`, the
+anticipated command never sets `is_emergency`, and anticipation alone brakes no harder than
+`ANT_BRAKE_FLOOR_MS2` (-3.0). The first two were phantom full-brake paths; see
+`core/acc/ACC_ARCHITECTURE.md` §9.3, §9.7, and §9.8 for what was measured and rejected.
 Score confidence ramps (`ANT_SCORE_MIN` to `ANT_SCORE_FULL`); per-vehicle confidence EMA
 is fast up / slow down. Primary-lead ghost hold (`PRIMARY_GHOST_HOLD_S`) fades braking
 when the immediate lead vanishes. Accel-side lift (`ANT_KV`, `ANT_KA`, TTC ramp) fades when
 decel anticipation binds. Stationary immediate lead disables anticipation (speed ramp
 `ANT_LEAD_MOVING_MIN_MS` to `ANT_LEAD_MOVING_FULL_MS`).
+
+### Brake onset
+
+A law that reaches `max_decel_ms2` is no longer an emergency: it goes through the
+jerk limiter, which chases a law more than `J_ONSET_DEAD_MS2` below the command
+with `J_ONSET_TAU_S`. Only the emergency band and the TTC overlay still step to
+full brake in one tick. The old snap is what TruckersMP drivers felt as a stomp;
+measurements and the two related ideas that were not shipped are in
+`core/acc/ACC_ARCHITECTURE.md` §13.2 and §13.3.
+
+### Brake release and landing
+
+The brake lets go toward the law at every speed (`J_RELEASE_TAU_S`); only the
+lost-lead path and the standstill hold keep the plain jerk rate. What keeps
+heavy traffic from feeling eager is on the gas side: for `GAS_PACE_S` after a
+brake the cap climbs above zero at `J_GAS_PACE_MS3`, faded out through the
+launch band. `brake_landing.BrakeLanding` then stops the immediate-lead law
+braking past the lead once the lead's smoothed speed is flat, counting the
+speed the truck still sheds while the brake lets go. Rationale, guards and
+measurements: `core/acc/ACC_ARCHITECTURE.md` §13.1 and §13.4.
+
+Before landing, `approach_profile.approach_band` keeps the immediate-lead law near
+the constant decel that meets a slower or stopped lead: at least that need, and
+no more than 1.15 times it plus 0.2 m/s² until the approach turns critical. The
+law on its own held speed toward a stopped vehicle, then braked firmly, or at
+close settings braked far over the need and crawled in. §13.5.
 
 ### Blinker arbitration
 

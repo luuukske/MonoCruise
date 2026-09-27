@@ -957,8 +957,16 @@ Two mechanisms, combined by minimum:
    blend ignores CAH in the comfort regime, so a distant decelerating
    vehicle barely registers through mechanism 1).
 
+   The delta is taken against the same law on the **unmodified** immediate
+   lead, `a_lead_cmd`, never against `a_base`. `a_base` carries the
+   confidence blend (§9.5), the ghost hold and blinker arbitration; differencing
+   against it made the virtual lead re-impose the raw law on a low-confidence
+   lead whenever any upstream weight was non-zero, however small. That is a
+   slower car beside the real lead, barely scored, braking ego at full
+   strength. With the difference the term is zero at zero weight, as it must be.
+
 ```
-delta_dec = min(min over n of dec_n, min(0, a_virt_cmd − a_base))
+delta_dec = min(min over n of dec_n, min(0, a_virt_cmd − a_lead_cmd))
 ```
 
 ### 9.4 Accel side: bounded, gated lift
@@ -966,7 +974,7 @@ delta_dec = min(min over n of dec_n, min(0, a_virt_cmd − a_base))
 The positive part of the virtual-lead delta becomes the lift:
 
 ```
-lift = clamp(a_virt_cmd − a_base, 0, ant_lift_max_ms2)      # 0.5 m/s²
+lift = clamp(a_virt_cmd − a_lead_cmd, 0, ant_lift_max_ms2)  # 1.0 m/s²
 ```
 
 gated by two safety conditions:
@@ -980,7 +988,7 @@ gated by two safety conditions:
 `delta_anticipation = delta_dec + lift`, then EMA (`ant_tau_s = 0.4 s`)
 before being added to `a_base`. Ego eases off the brake, or picks up
 throttle slightly earlier, when the pack ahead of the lead accelerates;
-it can never gain more than 0.5 m/s² over the immediate-lead law.
+it can never gain more than `ant_lift_max_ms2` over the immediate-lead law.
 
 ### 9.5 Confidence and the immediate-lead blend
 
@@ -1029,6 +1037,69 @@ anticipation delta is additive on top of `a_base`, so a hazard the
 immediate lead poses is never masked: `delta_dec` only tightens, and
 lift is bounded, TTC-gated, and disabled at the decel clamp.
 
+The command after anticipation **never sets `is_emergency`**, even when
+`a_base + delta` reaches `max_decel`. The flag skips the jerk limiter and
+the output filter, so it turned a filtered anticipatory ramp into a
+single-tick step to full brake. It fired because `a_base` can fall while the
+filtered delta still carries its earlier, larger gap to the upstream demand.
+Replayed over 1274 clips (`accel_cap_ms2` with and without anticipation, same
+inputs): 102 such steps, median 4.3 m/s² above what the same controller without
+anticipation commanded.
+
+Anticipation on its own also brakes no harder than `ant_brake_floor_ms2`
+(−3.0 m/s², `b_comfort × gap_gain_max`, the same ceiling §8.6 lands on).
+The floor is applied to the command and to the filter target, so the filter
+never winds past what it may command:
+
+```
+floor = min(0, ant_brake_floor_ms2 − a_base)
+a_cmd = a_base + max(EMA(max(delta, floor)), floor)
+```
+
+Once `a_base` is already below the floor, anticipation can only lift. That is
+§3 and §4 taken literally: anticipation eases off or applies mild braking, and
+strong deceleration belongs to the immediate lead, the overlays and AEB. Cost on
+the corpus replay: 18 % of anticipation braking impulse, all of it in hazard
+clips, where the lead law takes over once the hazard is the immediate lead.
+
+### 9.8 Measured: telling a phantom from a reveal
+
+The stationary or slower vehicle past or beside the lead is the case that
+brakes hardest through §9.3, and whether it is a phantom depends only on
+whether it is in ego's lane. A lead that swerves round a stopped car in
+ego's lane looks the same as one passing a car in the next lane until the
+swerve. Three discriminators were built and replayed over 1274 clips; none is
+shippable:
+
+| Test | Result |
+|---|---|
+| Longitudinal overlap: member's rear inside its predecessor's body, so beside it | Of slower vehicles found beside the lead, 16 became ego's lead and 43 lay on ego's later path, against 7 ego passed (70 undetermined). Dropping them removes braking where it is needed. |
+| Kinematic: braking the predecessor would need beyond what it already does | Past 9 m/s² of shortfall the lead still stopped short of the member in 352 frames and drove past it in 170. AI brakes that hard. |
+| Tracker lateral offset between member and lead, or the stationary validation latch | Catching half the adjacent cases also drops 7 to 15 % of the in-lane ones. |
+
+The corpus is AEB clips, so it is biased towards real hazards; it can price
+what a filter costs in a reveal but cannot count everyday phantoms. A fix
+here needs lane evidence the tracker does not publish yet. Until then
+§9.7 keeps any such brake on the jerk limit and above the floor.
+
+**Trailers stay in the chain.** Skipping trailers past the immediate lead was
+built and reverted: trucks enter the chain rear part first, so the 3-slot chain
+is often only trailers (a TMP trailer plus its nested trailer, tractor out of
+range). 71 % of frames where anticipation braked had a trailer upstream, and in
+21 clips the truck ahead of the lead vanished completely; it removed 58 % of
+anticipation braking impulse, real slowdowns included. TMP trailers already
+carry their tractor's kinematics (tracker swap). The right fix is collapsing a
+rig to its rearmost part, which needs a tractor id per lead from the tracker.
+
+**Predicting the lead with a car-following model.** Replacing the virtual lead
+(`v_0 + ant_kv·ΣWΔv`, `a_0 + ant_ka·ΣWΔa`) with the lead simulated as an IDM
+follower of the member ahead of it was scored against each lead's actual speed
+1 to 3 s later. Where the member was in the lead's path and slower, RMSE at 3 s
+fell from 6.9 to 4.5 m/s (stationary member: 5.0 to 2.3); where it was not in
+the lead's path, RMSE rose from 6.8 to 10.6 m/s with a −7 m/s bias, braking the
+lead never did. It sharpens every lane call, the wrong ones included, so it is
+not shipped ahead of better lane evidence.
+
 ---
 
 ## 10. Safety overlays
@@ -1043,7 +1114,11 @@ emergency.
 | Emergency band | `eff_dist ≤ 1.5 m` | `−8.0 m/s²` | jerk + EMA |
 | TTC hard floor | `v_close > 0.4` AND `raw_eff_dist / v_close < 1.5 s` | `MAX_DECEL = −6.55 m/s²` | jerk + EMA |
 | Standstill hold | `v_ego < 0.4` AND `eff_dist ≤ s0 + 2.0` AND the law's wanted accel has not asked to launch (§10.1) | `0.0 m/s²` | only from a positive cap |
-| At-clamp hard | `a_chain ≤ MAX_DECEL + 1e-6` | as-is | jerk + EMA |
+| At-clamp hard | `a_chain ≤ MAX_DECEL + 1e-6` | as-is | none: jerk-limited with the §13.2 onset chase |
+
+The at-clamp row used to bypass the jerk limit and the output filter like the
+two above it. It is not an emergency: the law got there behind the 2.5 m/s³
+ramp and the bypass then stepped the rest of the way in one tick. See §13.2.
 
 ### 10.1 Standstill hold
 
@@ -1227,7 +1302,11 @@ constant per lead vehicle. `eff_dist = lead.dist_m − tail_m`.
 | Layer | Time constant / cap | Notes |
 |---|---|---|
 | Jerk limiter | `J_MAX = 2.5 m/s³` | Below 2.94 m/s³ comfort threshold (Bellem 2022). Bypassed on emergency. |
-| Brake release | `J_RELEASE_TAU_S = 0.30 s`, gated to `v_ego ≤ 7 m/s` | A braking command rising toward the law may chase it with this τ instead of `J_MAX`, never past zero, and only while ego is in the launch band. §13.1. |
+| Brake release | `J_RELEASE_TAU_S = 0.30 s` | A braking command rising toward the law may chase it with this τ instead of `J_MAX`, never past zero, at any speed. §13.1. |
+| Gas after a brake | `J_GAS_PACE_MS3 = 0.8`, for `GAS_PACE_S = 2.0 s` after a command at or below `GAS_PACE_BRAKE_MS2 = -1.0` | Above the launch band (`LAUNCH_BAND_*`, 7 to 25 km/h ramp) the command climbs above zero no faster than this. §13.1. |
+| Brake landing | `LANDING_*` in `brake_landing.py` | Once the lead's smoothed speed stops falling, the immediate-lead law brakes no harder than it takes to land on it. §13.4. |
+| Approach profile | `APPROACH_*` in `approach_profile.py` | Toward a slower or stopped lead the immediate-lead law is held near the constant decel that meets it, not late-then-firm or hard-then-crawl. §13.5. |
+| Brake onset | `J_ONSET_TAU_S = 0.15 s`, dead band `J_ONSET_DEAD_MS2 = 1.0` | A command more than the dead band above a diving law chases it with this τ on top of `J_MAX`; inside the band it is the plain limit. §13.2. |
 | Output EMA  | `τ = 36 ms` | Legacy α=0.6 per 30 Hz tick, ported to framerate-independent τ. Bypassed on emergency. |
 
 The jerk cap is the dominant smoothness shaper between the control law
@@ -1258,8 +1337,8 @@ with a 0.15 s lag, which rules out the mapper.
 
 **Rule.** While the previous command is negative, the rise per tick is
 `max(J_MAX·dt, min(w·Δ·(1 − e^(−dt/τ)), −prev))`, with `Δ` the gap to the
-law and `w` the speed gate below (`idm_cah.jerk_step`). Properties this
-buys, all pinned in `tests/acc/test_brake_release.py`:
+law and `w` 1, or 0 on the paths below (`idm_cah.jerk_step`). Properties
+this buys, all pinned in `tests/acc/test_brake_release.py`:
 
 - Within about `J_MAX·τ` (0.75 m/s²) of the law it is the plain limit,
   bit for bit, so telemetry jitter still sees one symmetric rate and is
@@ -1272,9 +1351,9 @@ buys, all pinned in `tests/acc/test_brake_release.py`:
   after the grace window) and the standstill hold (§10.1) keep the plain
   rate: the first is missing information rather than a law asking to let
   go, the second would dip the brake just as the hold FSM applies its own.
-- It only runs in the launch band. `w = fade(v_ego, 2.0, 7.0)`: full at or
-  below 7 km/h, zero at or above 25 km/h, a cosine ramp between. At `w = 0`
-  the step is the plain limiter bit for bit.
+- It runs at every speed again since 2026-09-27; what keeps heavy traffic
+  calm is the gas pace below. At `w = 0` the step is the plain limiter bit
+  for bit.
 
 Measured in closed loop (simulated truck with 0.1 s dead time and 0.15 s
 lag, the shipped radar kinematics chain on the lead; `j_release_tau_s = 0`
@@ -1297,8 +1376,20 @@ way out. The cost is the case it was written for. In the closed-loop
 fixture at 70 km/h behind a lead braking 4 m/s² for 20 km/h, the hang
 after the law turns positive goes 0.52 s → 1.96 s and the undershoot
 3.4 km/h → 18.7 km/h; at 50 km/h, 0.51 s → 1.28 s and 0.6 → 11.0 km/h.
-The knobs are `j_release_full_ms` / `j_release_zero_ms`; widening them is
-the one-line way back.
+
+**Gate replaced by a gas pace (2026-09-27).** The cost came back as the
+next report: in TruckersMP the hard braking stayed on after the lead stopped
+slowing (§13.4 has the reproduction). A taper to 60 km/h would have left
+highway speeds as they were, so the release runs at every speed again and
+the eagerness is handled where it was felt, on the gas: for 2 s after a
+command at or below -1 m/s² the cap may climb above zero at 0.8 m/s³ instead
+of 2.5, faded out through the old launch band (7 to 25 km/h) so the launch
+out of a crawl is unchanged. `gas_pace_s = 0` disables it and is in
+`tools/acc_transition_probe.BASELINE`. Measured with §13.4 in the heavy-traffic
+rig: the brake-to-gas flip count is 23 against 16 with the gate, but the
+gate's 16 came from braking the truck 15.8 km/h under the lead's lowest speed
+and then pulling back up at full gas (8.1 km/h now). Whether the pace is gentle
+enough is an in-game call.
 
 Minimum gap was identical in every synthetic case: the closest point
 comes before the release. Fixed asymmetric rates were rejected on noise:
@@ -1308,13 +1399,250 @@ limiter there: over 12 seeds the release engaged on 0 of about 5000
 ticks at σ 1.0 and 1.5, and on 4 at σ 2.0. A stop behind a lead braking
 to zero also ends at the same gap, because the hold keeps the plain rate.
 
-**Open, not fixed here.** The lead-accel estimate still reads a finished
-brake for about 1 s (the 1.05–1.5 s fit window, then the 0.35 s and
-0.50 s controller filters), and the brake feedforward carries it into
-the command. In brakes that never reach the clamp this is the larger
-cost: level 1, 80 km/h, lead −2 m/s² for 20 km/h leaves the truck
-6.3 km/h under the lead's new speed with this change and 1.2 km/h with
-perfect lead kinematics.
+**Open, worked around in §13.4.** The lead-accel estimate still reads a
+finished brake for about 1 s (the 1.05–1.5 s fit window, then the 0.35 s
+and 0.50 s controller filters), and the brake feedforward carries it into
+the command. §13.4 lands the brake once the lead's smoothed speed is flat,
+which overrides that stale estimate in the recovery; the estimate itself is
+unchanged, see §13.3 for why.
+
+### 13.2 Brake onset: no snap at the clamp
+
+The stomp drivers report in TruckersMP is this shape, reproduced from clip
+`60b49759` (TMP road train 45 m ahead loses about 8 m/s in a second; ego
+88 km/h, level 3): the law dives from -1 to -6.5 m/s² in half a second, the
+2.5 m/s³ limiter holds the command at -2.2, and the moment the law touches
+`max_decel_ms2` the at-clamp branch set the emergency flag, which skips the
+limiter and the output filter. The pedal went 0.06 -> 1.00 in 0.17 s in game.
+
+The at-clamp branch now returns the clamp **without** the flag, and
+`idm_cah.jerk_step` lets the command chase a law that has run more than
+`J_ONSET_DEAD_MS2` below it, with `J_ONSET_TAU_S` on top of the plain rate.
+Only the emergency band and the TTC overlay still step. On that clip the
+largest 0.2 s drop goes 4.96 -> 1.91 m/s² and the command is within the dead
+band of the clamp about 0.45 s after the dive starts.
+
+Measured by closed-loop replay: each recorded lead's path along ego's route
+(ego's recorded travel plus the tracker distance) against the real controller,
+ego simulated through a 0.1 s dead time and 0.35 s brake lag, 1 s warm-up on
+the recording. "Stomp" is at least 2.5 m/s² of command drop within 0.2 s ending
+at or below -3.5.
+
+| | stomps | collisions | worse / avoided |
+|---|---|---|---|
+| TMP, 406 lead episodes, before | 124 | 61 | |
+| TMP, after | 49 | 56 | 3 / 6 |
+| SP, 220 lead episodes, before | 25 | 19 | |
+| SP, after | 10 | 14 | 0 / 5 |
+
+The three worse TMP episodes are leads that crashed or appeared point-blank,
+where no following gap avoids contact. `at_clamp_slam = True` restores the old
+snap for A/B work and is in `tools/acc_transition_probe.BASELINE`.
+
+### 13.3 Measured, not shipped
+
+The first two came out of the same stomp report and the same replay, the
+third out of §13.4's. None is in the code; this is so they are not
+re-derived blind.
+
+**Latency and TruckersMP artefacts in `a_lead`, `v_lead`.** Against a centred
+fit of the lead's own positions, `acc_speed` runs 0.87 s behind on TMP leads
+(p90 1.07 s), and position freezes of about 0.25 s collapse it (18.8 -> 6.1 m/s
+on `e86f3a72`) into a phantom -6 m/s² lead brake. A stall-aware
+constant-acceleration Kalman on along-track position (freezes predicted
+through for 0.4 s, then snapped to a real stop; the first sample after a
+shorter freeze re-anchors position only) cuts the lag to 0.33 s and TMP
+collisions 56 -> 38 with §13.2 in place. It was not shipped because it reads the
+TMP netcode ripple, a forward snap then slow steps, as a -7 m/s² brake
+(`12cc15e6`), and every setting smooth enough to reject that gives the
+collisions back (q 1 to 2, r 0.5 to 1: 51 to 58). Unneeded hard brakes stayed
+at about 30 of 149 at every setting. Two traps in building one: an outlier gate
+on the innovation rejected a real stop after a long freeze (a collision in
+`2a04a43c`), and a freeze held past the hold must reset the speed, not decay it.
+
+**Escalation budget on the gap law.** Clip the law's braking to the gentlest
+brake that still leaves a 0.8 s escalation to 5 m/s² feasible if the lead keeps
+braking to a stop. On the TMP replay it cut hard brakes in episodes that never
+needed 2 m/s² from 30 to 13 to 17. It fails
+`test_following_a_braking_lead_is_string_stable` and
+`test_a_hard_braking_lead_no_longer_needs_the_ttc_overlay`: braking late means
+braking harder later when the lead does keep going. Near a stopped lead it also
+plans stops whose minimum TTC, `sqrt(2 m / d)` for margin `m` at decel `d`, is
+under the 1.5 s overlay, so the plan ends in the stomp it exists to avoid.
+Constrained until those pass (trusted after the lead has shed 1.0 to 2.5 m/s,
+only above a TTC of 2.5 to 4 s) it moved TMP stomps 49 -> 45 and nothing else.
+
+**Where the remaining unneeded hard brakes come from.** The law answering a
+short real lead brake. For gap 35 m, 24.5 vs 15.4 m/s, `a_lead` -5.2 it commands
+-7.8 before the clamp: IIDM saturates inside the wanted gap, the §8.3 blend sits
+`b_comfort` below CAH, and the §8.6 feedforward adds its share on top. The
+kinematic requirement is 5.3 m/s² if the lead brakes to a stop and 1.2 m/s² if it
+stops braking now. §5 requires the first reading, because the two look the same
+until the lead either keeps braking or does not.
+
+**Lead braking read off the smoothed speed.** The literal version of "follow
+the smoothed speed": feed the law the LS slope of `acc_speed` over 0.3 to 0.8 s
+instead of `acc_accel`. On TMP lead brakes it releases 0.35 s before
+`acc_accel` and 0.67 s before what CAH sees after its filter, sees the onset
+0.35 s sooner, and reads the peak without the 1.8 m/s² shortfall. On the
+windowed replay the 0.3 s window cut clean TMP collisions 56 -> 51, but it also
+added unneeded stomps (new in 7 windows that never needed 2 m/s², gone from 2)
+because the shorter window passes TMP stalls straight to CAH's 80 ms brake
+filter. Release-only (`max(acc_accel, slope)`, and pulling both filtered
+estimates up to it) moved the undershoot by under 1 km/h once §13.1 and §13.4
+were in, with one extra clean collision. Neither is in the code.
+
+### 13.4 Brake landing: stop braking once the lead stops slowing
+
+Reported from TruckersMP (2026-09-27): when the vehicle ahead brakes and then
+holds its speed, ACC keeps braking hard well after the lead's speed on the
+panel has settled. Reproduced on clean synthetic leads through the real ACC
+radar chain (positions at 20 Hz, the shipped `acc_speed` / `acc_accel`, truck
+with 0.1 s dead time and 0.35 s lag): level 2 at 90 km/h behind a lead braking
+at 4 m/s² to 65 km/h, the truck bottomed out at 32 km/h. Three things stack:
+
+- The radar chain sees the brake about 0.85 s late, and `acc_accel` plus the
+  controller filters read it as over for another 0.5 s after that, so the law
+  is at its hardest once the lead has already stopped braking.
+- The law is memoryless. IIDM lets go as the speed difference closes, but the
+  truck is still decelerating at 5 to 6 m/s² at that moment, and the §13.1
+  release above the launch band then took 2 s more.
+- `acc_speed` itself dips below the lead's real speed after a brake: p50
+  1.7 m/s on TMP leads, 2.3 m/s on SP, from the step 3 and 4 feed-forward
+  running on the lagging accel (`core/radar/README.md` §7).
+
+**Rule** (`brake_landing.BrakeLanding`, applied to the immediate-lead law
+before the confidence blend, ghost, blinker arbitration and anticipation):
+once the trend of the lead's smoothed speed over 0.5 s is flat (weight 0 at
+-1.0 m/s², 1 at -0.3), the law may brake no harder than
+`-(v_ego - v_target + a_ego · 0.5 s) / 1.0 s`, where `a_ego` is a tracking
+differentiator on ego speed and `v_target` is the lead's smoothed speed less
+the wanted-gap deficit spread over 6 s. It only raises a braking law, never
+past zero, and stays out of the way unless ego is braking harder than
+0.5 m/s², the lead is above 4 m/s, and the gap is not closing more than
+1.5 m/s faster than the seen speeds allow (then it is off for 0.5 s).
+
+Each guard is there because a version without it failed the replay:
+
+- Without the gap deficit it parked ego inside its wanted gap behind a steady
+  lead, which a lead that then crashed turned into a harder impact
+  (`397148fd`, 4.7 -> 12.5 m/s).
+- Without the gap-rate check it trusted a lagging lead speed while the gap
+  collapsed, on crash clips and on a TMP cut-in whose `acc_speed` read 82 km/h
+  for a lead doing 45.
+- A stopped lead reads as flat too: evaluating the whole law at a predicted
+  state instead relaxed the approach to a stopped vehicle into a collision.
+- Letting it act while the smoothed speed still falls at up to 2.5 m/s²
+  (extrapolating the target) cut the synthetic undershoot a further third but
+  added 2 collisions on clean TMP windows. Not shipped.
+
+**Measured.** Synthetic grid (levels 1 to 3, 50 and 90 km/h, lead -2/-4/-6 m/s²
+for 10 and 25 km/h, then holding), against the §13.2 controller with the
+§13.1 speed gate:
+
+| | ego under the lead's new speed, mean / max | minimum gap, min |
+|---|---|---|
+| before, 0.35 s truck lag | 13.6 / 41.8 km/h | 4.5 m |
+| after | 5.6 / 16.1 km/h | 4.5 m |
+| before, 0.15 s truck lag | 8.0 / 35.6 km/h | 6.0 m |
+| after | 3.4 / 12.2 km/h | 6.0 m |
+
+Level 3 at 90 km/h, lead -6 m/s² for 25 km/h: 20.2 -> 2.7 km/h under, minimum
+gap 29.2 -> 29.1 m. Heavy traffic (a lead cycling 50 <-> 30, 60 <-> 40 and
+40 <-> 15 km/h): ego's speed swing went from 1.78x the lead's to 1.25x, and its
+lowest speed from 15.8 to 8.1 km/h under the lead's.
+
+Windowed closed-loop replay: the loop closes every 3.5 s for 7 s from the
+recorded state, so a variant cannot bank gap from an earlier over-brake. The
+once-per-episode replay of §13.2 counted exactly that as safety: a 25 km/h
+phantom brake early in a clip protected the base run from the real crash at its
+end. "Clean" windows exclude lead paths with a gap jump over 2 m in a frame or
+more than 12 m/s² of decel, which are TMP teleports.
+
+| | collisions, clean windows | stomps | braking beyond need | undershoot after a lead brake, p50 / p90 |
+|---|---|---|---|---|
+| TMP 837 windows (487 clean), before | 56 | 99 | 2512 | 8.5 / 25.9 km/h |
+| TMP, after | 56 | 99 | 2086 | 7.2 / 18.3 km/h |
+| SP 436 windows (358 clean), before | 13 | 19 | 1198 | 5.7 / 27.9 km/h |
+| SP, after | 13 | 22 | 1078 | 2.9 / 22.2 km/h |
+
+The one closer TMP window (`de4962d7`, 6.4 -> 2.8 m) is the same pattern as
+above: the base run had over-braked 18 km/h on a phantom earlier in the window.
+The three extra SP stomps are phantom-lead windows where the base run had
+already braked far enough to miss the second phantom.
+`landing_horizon_s = 0` disables it and is in `tools/acc_transition_probe.BASELINE`.
+
+### 13.5 Approach profile: meet a slower lead at a constant rate
+
+Reported 2026-09-27, after the §13.4 build: stopping for a stationary vehicle,
+ACC "brakes super hard in the beginning and slowly comes to a stop", sometimes
+pulling forward again to close in, as if it added a fixed amount to the braking
+it wanted. The law has two shapes that produce this, both visible in its static
+map for a stopped lead against the constant decel that stops ego 6 m short:
+
+| | law | need |
+|---|---|---|
+| level 2, 50 km/h, 150 m | +1.11 | -0.67 |
+| level 2, 50 km/h, 60 m | -0.99 | -1.79 |
+| level 2, 50 km/h, 40 m | -3.68 | -2.84 |
+| level 1, 90 km/h, 90 m | -6.51 | -3.72 |
+| level 2, 90 km/h, 90 m | -5.36 | -3.72 |
+
+- **Late, then firm.** IIDM does not brake until the gap is under `s*` (about
+  80 m at 50 km/h, level 2), and CAH never adds authority of its own (§8.3), so
+  ACC holds speed toward a vehicle it has seen at 150 m, then brakes at up to
+  2.4 m/s² where 0.7 from the start would have done.
+- **Hard, then a crawl.** Once IIDM is far below CAH the blend sits up to
+  `b_comfort` under CAH, and `comfort_gain` multiplies that at close settings
+  (up to 1.5 inside the reference gap). At levels 1 and 2 the command runs 50
+  to 75 % over the need mid-approach; braking harder than needed shrinks the
+  need, so the command tapers all the way in.
+
+**Rule** (`approach_profile.approach_band`, on the immediate-lead law before
+landing): with `need = dv² / 2·room`, hold the law between `need` (lower edge)
+and `1.15·need + 0.2` (upper edge). `room` runs to `s0 + max(1 m, v_lead·T)` for
+the upper edge and to `s0 + max(1 m, 0.6·v_lead·T)` for the lower one, because a
+moving lead's wanted gap is a comfort target the law may dip into and recover
+from. Weight: in over 1.5 to 3 m/s of closing, out for a lead accelerating or
+braking at 0.5 to 1 m/s² either way, and out over the last 5 to 2 m of room. The
+lower edge fades in over a need of 0.15 to 0.45 m/s². The pull on the law
+builds at 1.5 m/s³; extra braking releases at the plain jerk rate, a softened
+law gets its braking back at once.
+
+Each guard is there because a version without it failed:
+
+- **Criticality.** The upper edge fades out between a need of 3 and 4.5 m/s²
+  (4 and 5.5 for a stopped lead). Past that the law's front-loading is what
+  pays for the brake's onset delay, and a 6 m target at more than about
+  5.3 m/s² would put the minimum TTC, `sqrt(2·6 / d)`, under the 1.5 s overlay.
+- **The lower edge on a moving lead** fades out between 2 and 3 m/s². Without it
+  a TMP lead whose speed jumped 55 -> 59 km/h with a phantom +1.3 m/s² turned a
+  4 m gap deficit into a -10.7 m/s² command (`88b04e54`).
+- **The lower edge on a stopped lead** never fades out: its need is exact, and
+  fading it as the stop tightened let the need run away from it. Level 4 at
+  90 km/h onto a vehicle seen at 80 m stopped 2.4 m short before, 4.9 m now.
+- **Slew and room fade.** Stepping the band in as a lead's brake to a halt ended,
+  and out at the target, drove `test_braking_to_a_halt_needs_no_overlay_and_stays_jerk_limited`
+  to 3.1 m/s³.
+
+**Measured.** Synthetic approach (lead published at 80, 150 and 250 m, levels
+1 to 4, truck with 0.1 s dead time and 0.35 s lag): mean decel in the first half
+of the stop against the second half.
+
+| | before | after |
+|---|---|---|
+| 50 km/h, seen at 150 m, level 2 | 0.09 / 1.85 m/s², peak 2.41 | 0.65 / 0.75, peak 1.09 |
+| 90 km/h, seen at 250 m, level 2 | 0.91 / 2.25, peak 2.62 | 1.25 / 1.43, peak 1.62 |
+| 90 km/h, seen at 150 m, level 2 | 2.18 / 2.18 | 2.17 / 2.13 |
+| 90 km/h, seen at 80 m, level 4 | 3.37 / 6.28, stops at 2.4 m | 3.60 / 6.18, stops at 4.9 m |
+
+The windowed replay (§13.4) is flat: clean collisions 56 -> 56 (TMP) and 13 -> 13
+(SP), stomps 99 -> 98 and 22 -> 22, no window braking 0.5 m/s² harder where the
+recording needed under 2.5. The recovery rigs of §13.4 are unchanged. Not
+reproduced: stopping short and pulling forward. The synthetic stops end 4 to 5 m
+from the vehicle with the old law too, so if it persists in game it is below ACC,
+in the hold or the low-speed brake. `approach_share = 0` disables the band and
+is in `tools/acc_transition_probe.BASELINE`.
 
 ---
 
@@ -1386,6 +1714,9 @@ classical implementation suffered from:
 | Coast to a stopped vehicle, then a full-authority slam | strict CAH branch test (§8.2) |
 | Rubber-banding at a farther gap setting | `w_level` (§8.4) |
 | Braking to close a gap the lead is already opening | `w_open` (§8.4) |
+| Braking on after the lead stopped slowing | release at every speed (§13.1) + brake landing (§13.4) |
+| Back on the gas after every brake in heavy traffic | gas pace after a brake (§13.1) |
+| Hard early braking and a crawl into stopped traffic | approach profile (§13.5) |
 | A close setting going slack behind a far-off lead | gain keys on the wanted gap, not the current one (§8.4) |
 
 ---
@@ -1413,7 +1744,19 @@ ttc_hard_s, d_emergency_m, emergency_decel_ms2,
 max_accel_ms2, max_decel_ms2,
 standstill_speed_ms, standstill_gap_slack_m, standstill_hold_decel_ms2,
 standstill_launch_accel_ms2,
-j_max_ms3, j_release_tau_s, j_release_full_ms, j_release_zero_ms,
+j_max_ms3, j_release_tau_s, j_onset_tau_s, j_onset_dead_ms2,
+j_gas_pace_ms3, gas_pace_s, gas_pace_brake_ms2,
+launch_band_full_ms, launch_band_zero_ms,
+landing_momentum_s, landing_horizon_s, landing_reopen_s,
+landing_trend_window_s, landing_trend_off_ms2, landing_trend_full_ms2,
+landing_lead_min_ms, landing_ego_decel_ms2, landing_gap_tol_ms, landing_block_s,
+approach_share, approach_dv_lo_ms, approach_dv_hi_ms,
+approach_a_lead_full_ms2, approach_a_lead_zero_ms2,
+approach_stop_margin_m, approach_room_min_m, approach_room_full_m, approach_lower_gap_frac,
+approach_need_on_ms2, approach_need_full_ms2, approach_lower_full_ms2, approach_lower_zero_ms2,
+approach_stopped_upper_extra_ms2, approach_stopped_full_ms, approach_stopped_zero_ms,
+approach_upper_gain, approach_upper_margin_ms2, approach_upper_full_ms2, approach_upper_zero_ms2,
+approach_slew_ms3,
 tau_input_near_s, tau_input_far_s, d_input_near_m, d_input_far_m,
 tau_alead_brake_s, tau_alead_relax_s,
 tau_output_s,
