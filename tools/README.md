@@ -15,6 +15,7 @@ hygiene rules apply to every file in it.
 | `aeb_agent/` | Headless clip review for an agent: text dossiers instead of watching a clip, scenario tags, mistag audit, and a validated propose/apply/revert path for labels. Read `tools/aeb_agent/README.md` first. |
 | `accel_envelope_probe.py` | What does the CC accel ceiling command at each speed, and how long is 0-50 / 0-90? Prints the per-profile table plus a capability-limited rig model (`--rig loaded`) so the light and loaded regimes can be compared. |
 | `read_scs_profile.py` | Transmission and braking intensity for the selected ETS2/ATS profile. Steam Cloud vs local, `game.log.txt` identity, live `shifterType` when the SDK is up. `--json` for agents. |
+| `road_layout_check.py` | Distance from a truck pose to the nearest map centerline. Reads 4 km sectors from the game archives. See `core/road_layout/README.md`. |
 | `plot_coast.py` | Coast-fit plots for the mapper. |
 | `release.py`, `tune_visualizer.py` | Release packaging and live tuning UI. |
 
