@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.0-rc.25] - 2026-09-28
 ### Fixed
 - **Set speed and the pedal bar could vanish and stay gone**: after some alt-tab sequences they never came back until a restart or toggling an overlay. They now put themselves back on screen.
 - **ACC braking for traffic was harsh and uneven**: it could brake late and hard, brake far harder than the stop needed and crawl the rest of the way, or jump to full brake for a hard stop or for traffic past that vehicle and then hang on. It now slows you evenly as soon as slower traffic is ahead, stays moderate beyond the vehicle directly ahead, lets go once that vehicle holds its speed, and only an imminent collision still gets full brake at once.
