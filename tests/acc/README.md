@@ -13,6 +13,8 @@ Two layers. Everything except `test_corpus_baseline.py` runs in CI.
 | `test_blinker_offset.py` | no | Blinker candidacy (R0-R4/R9-R15) and arbitration (R5-R8) fixtures |
 | `test_lead_failsafe.py` | no | Geometric rescue gates, reasons, ramp, and survival of a poisoned road model |
 | `test_corpus_baseline.py` | **yes** | Replay of the local AEB clip store, bounded against recorded metrics |
+| `test_platoon.py` | no | Ten ACC clients in a TMP convoy at gap level 2: phantom braking, string stability, harsh brake, full stop, queue stop and relaunch, AEB lock-up, packet blackout, desync, a laggy client. Ratchet baselines, see `tools/acc_platoon/README.md` |
+| `test_platoon_calibration.py` | **yes** | The TMP display model against every stream in the local clip store |
 
 ## Harness
 

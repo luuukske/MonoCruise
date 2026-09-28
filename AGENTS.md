@@ -23,6 +23,7 @@ Long domain / tuning / coordinate docs live in module `README.md` files, not her
 - `core/scs_profile/README.md`: selected ETS2/ATS profile, `g_trans`, `g_brake_intensity`, Steam Cloud split. Files and telemetry SHM only.
 - `checker/README.md`: background game-launch checker, mutex-based detection, AV-safe design
 - `tools/README.md`: offline probes. `acc_response_map.py` answers "what does the ACC gap law command here, and what did my change do to it" without the game running, and has a text/JSON mode built for agents.
+- `tools/acc_platoon/README.md`: ten ACC clients in a TruckersMP convoy, closed loop, with a TMP netcode model calibrated on the clip corpus. `tests/acc/test_platoon.py` carries ratchet baselines for phantom braking, string stability and convoy safety: lower them when ACC improves, never raise one.
 
 Do-not-break rules for radar/AEB/ACC/longitudinal are summarized under **Domain invariants** below; full rationale stays in the module README.
 
