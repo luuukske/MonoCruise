@@ -95,6 +95,7 @@ def _follow_through_the_radar(level: int, v0_kmh: float, decel: float, dv_kmh: f
             cfg = ctrl.config
             cfg.j_release_tau_s = cfg.j_onset_tau_s = cfg.landing_horizon_s = cfg.gas_pace_s = 0.0
             cfg.at_clamp_slam = True
+            cfg.follow_share = 0.0
         clock = [100.0]
         monkeypatch.setattr(acc_controller.time, "monotonic", lambda: clock[0])
         v0, v_end = v0_kmh / 3.6, (v0_kmh - dv_kmh) / 3.6

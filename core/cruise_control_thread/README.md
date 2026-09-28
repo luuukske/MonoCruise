@@ -161,6 +161,13 @@ no more than 1.15 times it plus 0.2 m/s² until the approach turns critical. The
 law on its own held speed toward a stopped vehicle, then braked firmly, or at
 close settings braked far over the need and crawled in. §13.5.
 
+After that, `approach_profile.brake_follow_limit` may ease the immediate-lead
+command by at most 1 m/s² when ego is already closing and the brake has run past
+both the lead's deceleration and the constant deceleration that would meet its
+speed. It stays out when the gap is closing much faster than those speeds (the
+picture is late, and easing it made a hard stop late), when the gap is short in
+time, and in the last few metres. `follow_share` 0 disables it.
+
 ### Blinker arbitration
 
 Tracker publishes `indicated_lead`, `blinker_b_eff` and `blinker_committed`

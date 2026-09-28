@@ -209,6 +209,9 @@ class ACConfig:
     landing_gap_tol_ms: float = brake_landing.LANDING_GAP_TOL_MS
     landing_block_s: float = brake_landing.LANDING_BLOCK_S
     approach_share: float = approach_profile.APPROACH_SHARE
+    follow_share: float = approach_profile.FOLLOW_SHARE
+    follow_dv_lo_ms: float = approach_profile.FOLLOW_DV_LO_MS
+    follow_dv_hi_ms: float = approach_profile.FOLLOW_DV_HI_MS
     approach_dv_lo_ms: float = approach_profile.APPROACH_DV_LO_MS
     approach_dv_hi_ms: float = approach_profile.APPROACH_DV_HI_MS
     approach_a_lead_full_ms2: float = approach_profile.APPROACH_A_LEAD_FULL_MS2
@@ -587,6 +590,8 @@ class AdaptiveCruiseController:
             banded_before, banded - a_base, cfg.approach_slew_ms3 * dt, cfg.j_max_ms3 * dt)
         a_base += self._approach_delta
         a_base = self._landing.step(cfg, a_base, primary_raw, primary, v_ego, t_lane, now)
+        a_base = approach_profile.brake_follow_limit(
+            cfg, a_base, primary, v_ego, t_lane, self._landing.gap_excess_ms)
 
         # What the chain would command without chain[0]: the fallback for a
         # marginal immediate lead, and the target when stage 2 releases it.

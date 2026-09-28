@@ -12,6 +12,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+### Fixed
+- **ACC braked harder than the truck ahead once you were already catching it**: in a line of traffic a modest slowdown could turn into a much harder brake, and the trucks behind copied it. The extra brake is now smaller while there is still room, and a close stop is unchanged.
+
 ## [1.1.0-rc.25] - 2026-09-28
 ### Fixed
 - **Set speed and the pedal bar could vanish and stay gone**: after some alt-tab sequences they never came back until a restart or toggling an overlay. They now put themselves back on screen.

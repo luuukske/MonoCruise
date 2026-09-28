@@ -34,7 +34,8 @@ BASELINE = {"lead_brake_ff_share": 0.0, "lead_accel_nudge_share": 0.0,
             "a_lead_tau_ramp_ms2": 0.0, "lead_brake_ff_soft_ms2": 0.0,
             "lead_law_floor_soft_ms2": 0.0, "j_release_tau_s": 0.0,
             "j_onset_tau_s": 0.0, "at_clamp_slam": True,
-            "landing_horizon_s": 0.0, "gas_pace_s": 0.0, "approach_share": 0.0}
+            "landing_horizon_s": 0.0, "gas_pace_s": 0.0, "approach_share": 0.0,
+            "follow_share": 0.0}
 
 VARIANTS = (("HEAD", BASELINE), ("current", {}))
 

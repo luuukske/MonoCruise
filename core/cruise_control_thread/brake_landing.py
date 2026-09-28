@@ -61,6 +61,7 @@ class BrakeLanding:
         self._v_smooth: float | None = None
         self.ego_accel_ms2 = 0.0
         self._blocked_until = -math.inf
+        self.gap_excess_ms: float | None = None
 
     def reset(self) -> None:
         self._hist.clear()
@@ -68,6 +69,7 @@ class BrakeLanding:
         self._v_smooth = None
         self.ego_accel_ms2 = 0.0
         self._blocked_until = -math.inf
+        self.gap_excess_ms = None
 
     def track_ego(self, v_ego: float, dt: float) -> None:
         """Step the ego accel estimate. Every tick, lead or not."""
@@ -91,6 +93,7 @@ class BrakeLanding:
         if raw.vid != self._vid:
             self._hist.clear()
             self._vid = raw.vid
+            self.gap_excess_ms = None
         window = cfg.landing_trend_window_s
         if not self._hist or now > self._hist[-1][0]:
             self._hist.append((now, raw.v_lead_ms, raw.dist_m))
@@ -102,6 +105,7 @@ class BrakeLanding:
         gap_rate = _ls_slope([(t, d) for t, _, d in self._hist])
         if trend is None or gap_rate is None:
             return a_law
+        self.gap_excess_ms = (raw.v_lead_ms - v_ego) - gap_rate
         # The gap is timely where the lead speed lags: trust it over a flat trend.
         if gap_rate < raw.v_lead_ms - v_ego - cfg.landing_gap_tol_ms:
             self._blocked_until = now + cfg.landing_block_s
