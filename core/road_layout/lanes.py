@@ -14,6 +14,10 @@ from core.road_layout.looks import RoadLook
 from core.road_layout.prefab import PrefabLibrary, place_curve
 from core.road_layout.sector import MapNode, SectorMesh
 
+# A short junction stays at the caller's step count. A long bend grows from here.
+_SAMPLE_M = 10.0
+_MAX_STEPS = 80
+
 
 @dataclass(frozen=True)
 class LaneLine:
@@ -22,6 +26,7 @@ class LaneLine:
     kind: str
     label: str
     points: tuple[tuple[float, float, float], ...]
+    prefab_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -51,7 +56,7 @@ def lane_lines(
         laterals = look.laterals(apply_shift=apply_shift) if look is not None else [0.0]
         if not laterals:
             laterals = [0.0]
-        span = _road_span(start, end, steps)
+        span = _road_span(start, end, _steps_for(road.length, steps))
         for index, lateral in enumerate(laterals):
             lines.append(LaneLine(
                 "road",
@@ -60,6 +65,7 @@ def lane_lines(
             ))
     if prefabs is None:
         return lines
+    prefab_n = 0
     for item in mesh.prefabs:
         if not item.node_uids:
             continue
@@ -67,6 +73,7 @@ def lane_lines(
         desc = prefabs.curves_for(item)
         if world is None or desc is None:
             continue
+        prefab_n += 1
         for curve in desc.curves:
             ends = place_curve(curve, world, desc, item.origin_index)
             if ends is None:
@@ -75,12 +82,13 @@ def lane_lines(
             span = sample_span(
                 x0, y0, z0, math.cos(yaw0), math.sin(yaw0),
                 x1, y1, z1, math.cos(yaw1), math.sin(yaw1),
-                steps,
+                _steps_for(math.hypot(x1 - x0, z1 - z0), steps),
             )
             lines.append(LaneLine(
                 "prefab",
                 item.model,
                 tuple((x, y, z) for x, y, z, _fx, _fz in span),
+                prefab_n,
             ))
     return lines
 
@@ -95,6 +103,12 @@ def nearest_lane(lines: list[LaneLine], x: float, z: float) -> LaneHit | None:
             if best is None or dist < best.distance_m:
                 best = LaneHit(dist, height, line.kind, line.label)
     return best
+
+
+def _steps_for(length_m: float, floor: int) -> int:
+    """More samples on a longer span. ``floor`` is the count a short span keeps."""
+    counted = math.ceil(max(length_m, 0.0) / _SAMPLE_M)
+    return min(_MAX_STEPS, max(int(floor), counted))
 
 
 def _road_span(start: MapNode, end: MapNode, steps: int):

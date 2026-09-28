@@ -74,6 +74,18 @@ off the carriageway center (the right-hand lane) lands within about 2 m of a
 lane center, often under 1 m. A pose 16 m off every road center, the junction
 gap, landed 0.1 m from a prefab curve.
 
+## Which lane ego is in
+
+The live window keeps one lane for the truck. How far the truck sits from a
+centerline is the main term. Direction still counts: a sharp branch does not
+win by passing only a little closer, and a branch that still shares a tangent
+is judged by where it goes next. A few metres of offset beats a modest angle.
+Parallel lanes, which head the same way, take the nearer center.
+
+The bright line follows that lane forward until just before the sixth prefab,
+or 200 m, whichever comes first. A lane that ends beside the one it joins
+continues on that lane. Curves that belong to the same prefab count as one.
+
 ## Checked against clip poses
 
 `tools/road_layout_check.py` uses the mid frame of a saved clip, or the
@@ -84,7 +96,10 @@ the nearest lane, whether that lane is a road or a prefab.
 the truck stays centred. Road looks and the prefab index load once. A sector
 is parsed when the view can reach it (about 1.4 km, so a road's far node is
 included) and dropped once the truck is a full sector past that. The picture
-updates from telemetry the whole time. It is not part of the ACC debug window.
+updates from telemetry the whole time. A longer road is drawn with more points
+than a short one, about one every 10 m. It is not part of the ACC debug window.
+The bright line is the lane chosen above. The pink line is the road model
+fitted from that lane: its direction, with the truck's sideways offset held.
 
 ```
 python tools/road_layout_check.py

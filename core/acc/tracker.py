@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from core.radar.ego_path import EGO_POSITION_HISTORY_LEN
@@ -32,6 +33,7 @@ from .failsafe import (
     failsafe_decay,
     failsafe_step,
 )
+from .lane_direction import LaneDirection, lane_direction_samples
 from .road_model import (
     SOURCE_RESIDUAL_DELTA_M,
     RoadModel,
@@ -196,6 +198,8 @@ class ACCTracker:
     _source_trust: dict[int, float] = field(default_factory=dict)
     # Carries the centreline across frames in sample space (README §9).
     _road_smoother: RoadSmoother = field(default_factory=RoadSmoother)
+    # Map lanes for the road model. None leaves the fit as it is today.
+    _lane_directions: tuple[LaneDirection, ...] | None = None
 
     _last_primary_vid: int | None = None
 
@@ -337,7 +341,18 @@ class ACCTracker:
                 continue
             for sx, sy in in_span:
                 target_samples.append((v.id, sx, sy, weight))
-        return fit_road_model(ego_samples, target_samples, fallback_kappa)
+        lane_samples = None
+        if self._lane_directions:
+            lane_samples = lane_direction_samples(
+                self._lane_directions, ego_x, ego_z, ego_fwd_x, ego_fwd_z,
+            )
+        return fit_road_model(
+            ego_samples, target_samples, fallback_kappa, lane_samples or None,
+        )
+
+    def set_lane_directions(self, routes: Sequence[LaneDirection] | None) -> None:
+        """Publish the lane ego is in. Empty clears it and the fit stays as before."""
+        self._lane_directions = tuple(routes) if routes else None
 
     @staticmethod
     def _apply_validation(

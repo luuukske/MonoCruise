@@ -1,7 +1,8 @@
 """Standalone top-down lane map. Not part of the ACC debug window yet.
 
 North is up and the truck stays in the centre. Sectors load on a side thread
-when the view can reach them.
+when the view can reach them. The bright line is the lane the truck is in, drawn forward until just before
+the sixth prefab, or 200 m. The pink line is the road model.
 """
 
 from __future__ import annotations
@@ -13,7 +14,17 @@ from PySide6.QtCore import QObject, QPointF, QThread, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QPainter, QPaintEvent, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
+from core.acc.lane_direction import LaneDirection, centreline_world, lane_direction_samples
+from core.acc.road_model import fit_road_model
 from core.radar.scs_pose import ScsPose, ScsPoseReader
+from core.road_layout.ego_lane import (
+    EgoLaneChoice,
+    EgoLaneTrack,
+    LineIndex,
+    extend_lane,
+    path_curvature,
+    ranked_lanes,
+)
 from core.road_layout.live import LiveMap, MapFrame, MapLine
 
 log = logging.getLogger("road_layout")
@@ -22,12 +33,16 @@ _BG = QColor(15, 15, 20)
 _GRID = QColor(40, 40, 50)
 _ROAD = QColor(224, 154, 69)
 _JUNCTION = QColor(106, 168, 224)
+_CHOSEN = QColor(190, 235, 130)
+_MODEL = QColor(255, 120, 210)
 _TRUCK = QColor(242, 242, 242)
 _TEXT = QColor(215, 215, 215)
 _MUTED = QColor(150, 150, 160)
 _VIEW_M = 200.0
 _TICK_MS = 50
 _MOVE_M = 50.0
+_HOLD_M = 2.5
+_HOLD_DOT = 0.992
 
 
 class _Worker(QObject):
@@ -86,6 +101,12 @@ class LaneMapWindow(QWidget):
         self._reader = ScsPoseReader()
         self._pose: ScsPose | None = None
         self._frame: MapFrame | None = None
+        self._track = EgoLaneTrack()
+        self._near: LineIndex | None = None
+        self._near_frame: MapFrame | None = None
+        self._pts: tuple[tuple[tuple[float, float], ...], ...] = ()
+        self._held: tuple | None = None
+        self._model: tuple[tuple[float, float], ...] = ()
         self._status = "Indexing the map"
         self._catalog_ready = False
         self._zoom = 1.0
@@ -163,8 +184,9 @@ class LaneMapWindow(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._status or "Waiting for the game")
             painter.end()
             return
-        self._draw_map(painter, self._pose, self._frame)
-        self._draw_hud(painter, self._pose, self._frame)
+        choice, chain = self._highlight(self._pose, self._frame)
+        self._draw_map(painter, self._pose, self._frame, chain, self._model)
+        self._draw_hud(painter, self._pose, self._frame, choice)
         painter.end()
 
     def _ppm(self) -> float:
@@ -176,7 +198,43 @@ class LaneMapWindow(QWidget):
         north = -(z - pose.z)
         return QPointF(self.width() * 0.5 + east * ppm, self.height() * 0.5 - north * ppm)
 
-    def _draw_map(self, painter: QPainter, pose: ScsPose, frame: MapFrame) -> None:
+    def _highlight(self, pose: ScsPose, frame: MapFrame):
+        fx, fz = _nose(pose)
+        held = self._held
+        if (
+            held is not None
+            and held[0] is frame
+            and math.hypot(pose.x - held[1], pose.z - held[2]) < _HOLD_M
+            and fx * held[3] + fz * held[4] > _HOLD_DOT
+        ):
+            self._track.note(pose.x, pose.z)
+            return held[5], held[6]
+        near = self._line_index(frame)
+        choice = self._track.choose(self._pts, pose.x, pose.z, fx, fz, near=near)
+        chain: tuple = ()
+        if choice is not None:
+            chain = extend_lane(frame.lines, choice.index, pose.x, pose.z, fx, fz, near)
+        self._model = _road_model_line(
+            self._track, self._pts, frame.lines, near, pose, fx, fz, choice, chain,
+        )
+        self._held = (frame, pose.x, pose.z, fx, fz, choice, chain)
+        return choice, chain
+
+    def _line_index(self, frame: MapFrame) -> LineIndex:
+        if self._near_frame is not frame or self._near is None:
+            self._pts = tuple(line.pts for line in frame.lines)
+            self._near = LineIndex(frame.lines)
+            self._near_frame = frame
+        return self._near
+
+    def _draw_map(
+        self,
+        painter: QPainter,
+        pose: ScsPose,
+        frame: MapFrame,
+        chain: tuple,
+        model: tuple[tuple[float, float], ...],
+    ) -> None:
         ppm = self._ppm()
         half_x = self.width() * 0.5 / ppm + 30.0
         half_z = self.height() * 0.5 / ppm + 30.0
@@ -193,6 +251,19 @@ class LaneMapWindow(QWidget):
             painter.setPen(junction_pen if line.kind == "prefab" else road_pen)
             painter.drawPolyline(QPolygonF([
                 self._to_screen(x, z, pose, ppm) for x, z in line.pts
+            ]))
+        if chain:
+            painter.setPen(QPen(_CHOSEN, 3.0))
+            for span in chain:
+                if len(span.pts) < 2:
+                    continue
+                painter.drawPolyline(QPolygonF([
+                    self._to_screen(x, z, pose, ppm) for x, z in span.pts
+                ]))
+        if len(model) >= 2:
+            painter.setPen(QPen(_MODEL, 2.6))
+            painter.drawPolyline(QPolygonF([
+                self._to_screen(x, z, pose, ppm) for x, z in model
             ]))
         self._draw_truck(painter, pose, ppm)
 
@@ -215,9 +286,7 @@ class LaneMapWindow(QWidget):
             x += step
 
     def _draw_truck(self, painter: QPainter, pose: ScsPose, ppm: float) -> None:
-        yaw = pose.yaw_norm * 2.0 * math.pi
-        fwd_x = -math.sin(yaw)
-        fwd_z = -math.cos(yaw)
+        fwd_x, fwd_z = _nose(pose)
         tip = self._to_screen(pose.x + fwd_x * 16.0, pose.z + fwd_z * 16.0, pose, ppm)
         center = self._to_screen(pose.x, pose.z, pose, ppm)
         painter.setPen(QPen(_TRUCK, 2.0))
@@ -226,15 +295,19 @@ class LaneMapWindow(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(center, 4.0, 4.0)
 
-    def _draw_hud(self, painter: QPainter, pose: ScsPose, frame: MapFrame) -> None:
-        dist, kind = _nearest(frame.lines, pose.x, pose.z)
+    def _draw_hud(
+        self,
+        painter: QPainter,
+        pose: ScsPose,
+        frame: MapFrame,
+        choice: EgoLaneChoice | None,
+    ) -> None:
         speed = pose.speed * 3.6
-        where = "junction" if kind == "prefab" else "road lane" if kind else "none"
-        dist_txt = "n/a" if dist is None else f"{dist:.1f} m {where}"
         lines = [
             "North up. Scroll to zoom.",
+            "Pink line is the road model.",
             f"{speed:.0f} km/h" if speed >= 0.5 else "Stopped",
-            f"Nearest lane {dist_txt}",
+            _lane_text(frame.lines, choice),
             f"Sectors {frame.sectors}",
         ]
         if self._status:
@@ -242,33 +315,63 @@ class LaneMapWindow(QWidget):
         painter.setPen(QPen(_MUTED))
         y = 16
         for text in lines:
-            painter.setPen(QPen(_TEXT if text == lines[1] else _MUTED))
+            painter.setPen(QPen(
+                _MODEL if text == lines[1] else _TEXT if text == lines[2] else _MUTED
+            ))
             painter.drawText(16, y, text)
             y += 18
 
 
-def _nearest(lines: tuple[MapLine, ...], x: float, z: float) -> tuple[float | None, str]:
-    best: float | None = None
-    kind = ""
-    for line in lines:
-        if x < line.min_x - 25.0 or x > line.max_x + 25.0:
-            continue
-        if z < line.min_z - 25.0 or z > line.max_z + 25.0:
-            continue
-        pts = line.pts
-        for i in range(len(pts) - 1):
-            dist = _segment(x, z, pts[i], pts[i + 1])
-            if best is None or dist < best:
-                best = dist
-                kind = line.kind
-    return best, kind
+def _nose(pose: ScsPose) -> tuple[float, float]:
+    yaw = pose.yaw_norm * 2.0 * math.pi
+    return -math.sin(yaw), -math.cos(yaw)
 
 
-def _segment(x: float, z: float, a: tuple[float, float], b: tuple[float, float]) -> float:
-    dx = b[0] - a[0]
-    dz = b[1] - a[1]
-    length2 = dx * dx + dz * dz
-    if length2 < 1e-12:
-        return math.hypot(x - a[0], z - a[1])
-    t = max(0.0, min(1.0, ((x - a[0]) * dx + (z - a[1]) * dz) / length2))
-    return math.hypot(x - (a[0] + t * dx), z - (a[1] + t * dz))
+def _road_model_line(track, pts, lines, near, pose, fx, fz, choice, chain):
+    """World points of the fitted centreline. Reuses the lane already extended."""
+    kappa = path_curvature(track.points())
+    ranked = ranked_lanes(pts, pose.x, pose.z, fx, fz, near, kappa)
+    routes = []
+    for index, dist, cost in ranked:
+        spans = chain if choice is not None and index == choice.index else extend_lane(
+            lines, index, pose.x, pose.z, fx, fz, near,
+        )
+        route = _join_spans(spans)
+        if len(route) >= 2:
+            routes.append(LaneDirection(route, dist, cost))
+    samples = lane_direction_samples(routes, pose.x, pose.z, fx, fz)
+    ego = []
+    for hx, hz in track.points():
+        dx = hx - pose.x
+        dz = hz - pose.z
+        ego.append((dx * fx + dz * fz, dx * (-fz) + dz * fx))
+    model = fit_road_model(ego, [], kappa, samples or None)
+    return centreline_world(model, pose.x, pose.z, fx, fz)
+
+
+def _join_spans(spans) -> tuple[tuple[float, float], ...]:
+    pts: list[tuple[float, float]] = []
+    for span in spans:
+        chunk = list(span.pts)
+        if len(chunk) < 2:
+            continue
+        if pts:
+            last = pts[-1]
+            if _gap(chunk[-1], last) < _gap(chunk[0], last):
+                chunk.reverse()
+            if _gap(chunk[0], last) < 0.5:
+                chunk = chunk[1:]
+        pts.extend(chunk)
+    return tuple(pts)
+
+
+def _gap(a, b) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def _lane_text(lines: tuple[MapLine, ...], choice: EgoLaneChoice | None) -> str:
+    if choice is None or choice.index < 0 or choice.index >= len(lines):
+        return "No lane"
+    kind = lines[choice.index].kind
+    where = "junction" if kind == "prefab" else "road lane"
+    return f"{where} {choice.distance_m:.1f} m, {math.degrees(choice.angle_rad):.0f}°"

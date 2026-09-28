@@ -79,6 +79,22 @@ def test_one_plus_one_lanes_sit_half_a_lane_off_the_spline():
     assert hit.kind == "road"
 
 
+def test_a_long_road_has_more_points_than_a_short_one():
+    from core.road_layout.lanes import lane_lines
+    from core.road_layout.sector import MapNode, MapRoad, SectorMesh
+
+    def _points(length: float) -> int:
+        start = MapNode(1, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+        end = MapNode(2, 0.0, 0.0, -length, 1.0, 0.0, 0.0, 0.0)
+        mesh = SectorMesh(nodes={1: start, 2: end}, roads=[
+            MapRoad(10, "look", 1, 2, length),
+        ])
+        lines = lane_lines(mesh, {}, None, steps=8)
+        return len(lines[0].points)
+
+    assert _points(400.0) > _points(40.0)
+
+
 def test_one_way_odd_counts_sit_half_a_lane_left():
     from core.road_layout.looks import RoadLook
 

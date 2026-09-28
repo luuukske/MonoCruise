@@ -42,6 +42,7 @@ class MapLine:
     max_x: float
     min_z: float
     max_z: float
+    prefab_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -151,7 +152,7 @@ def parse_or_empty(blob: bytes | None) -> SectorMesh:
 def _pack(line: LaneLine) -> MapLine:
     pts = tuple((p[0], p[2]) for p in line.points)
     if not pts:
-        return MapLine(line.kind, (), 0.0, 0.0, 0.0, 0.0)
+        return MapLine(line.kind, (), 0.0, 0.0, 0.0, 0.0, line.prefab_id)
     xs = [p[0] for p in pts]
     zs = [p[1] for p in pts]
-    return MapLine(line.kind, pts, min(xs), max(xs), min(zs), max(zs))
+    return MapLine(line.kind, pts, min(xs), max(xs), min(zs), max(zs), line.prefab_id)

@@ -4,8 +4,11 @@ Run from the repo root, with the game already in a truck:
 
   python tools/road_layout_view.py
 
-North is up. The truck stays centred. A sector is read when the view can
-reach it, and dropped after the truck has moved on.
+North is up. The truck stays centred. The bright line is the lane it is in,
+drawn forward until just before the sixth prefab, or 200 m. The pink line
+is the road model.
+A sector is read when the view can reach it, and dropped after the truck has
+moved on.
 """
 
 from __future__ import annotations

@@ -472,6 +472,18 @@ Rejected on the same corpus, both measured after the prior was in:
 - **Moving the base arc onto the curvature the fit reports at ego, then refitting.**
   Costs 7 points of coverage and doubles the p99 at 150 m for no fewer excursions.
 
+### Lane direction
+
+The map can publish the lane ego is in. Its samples are the line ego would
+drive by holding its current sideways offset, so the fit takes the lane's
+direction and does not steer that offset back to the lane centre. Points
+close to ego are blended into the truck's own heading, fully at the bumper
+and not at all by about 50 m, which keeps a vehicle straight ahead from being
+scored out of lane by a small heading error in the map. When ego sits between
+two lanes of similar score, and is not on a centreline, those two directions
+are averaged by how far ego is from each. A trail that disagrees still
+outvotes the lane. With nothing published the fit is unchanged.
+
 ### Base arc: why the centreline is not a polynomial alone
 
 A parabola **undershoots** a circle. True offset is `R − √(R²−x²)`; `x²/2R`
