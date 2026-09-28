@@ -253,3 +253,191 @@ def test_subframe_carries_crash_latch():
 
     sub = _step(prev, t_now + 0.01, z, 0.0, yaw)
     assert sub.crash_confirmed is True
+
+
+def _quat(pitch_deg: float, yaw_deg: float, roll_deg: float = 0.0) -> Quaternion:
+    """Quaternion whose ``euler()`` reads back (pitch, yaw, roll); undoes the x/y swap."""
+    a, b, c = (math.radians(d) / 2.0 for d in (yaw_deg, pitch_deg, roll_deg))
+    w = math.cos(a) * math.cos(b) * math.cos(c) + math.sin(a) * math.sin(b) * math.sin(c)
+    x = math.sin(a) * math.cos(b) * math.cos(c) - math.cos(a) * math.sin(b) * math.sin(c)
+    y = math.cos(a) * math.sin(b) * math.cos(c) + math.sin(a) * math.cos(b) * math.sin(c)
+    z = math.cos(a) * math.cos(b) * math.sin(c) - math.sin(a) * math.sin(b) * math.cos(c)
+    return Quaternion(w, y, x, z)
+
+
+def _pose_step(prev: Vehicle, t_now: float, z: float, speed: float,
+               pitch: float = 0.0, yaw: float = 0.0, roll: float = 0.0,
+               y: float = 0.0, is_trailer: bool = False) -> Vehicle:
+    cur = Vehicle(
+        Position(0.0, y, z), _quat(pitch, yaw, roll), Size(2.5, 3.0, 13.6),
+        speed, 0.0, 0, [], 1, True, is_trailer,
+    )
+    cur.update_from_last(prev, t_now, 0.0, 0.0, 100.0, 0.0)
+    return cur
+
+
+def test_quat_helper_round_trips():
+    p, y, r = _quat(1.2, 30.0, -0.8).euler()
+    assert abs(p - 1.2) < 1e-6 and abs(y - 30.0) < 1e-6 and abs(r + 0.8) < 1e-6
+
+
+def test_rotation_built_over_two_frames_turns_a_shove_into_a_crash():
+    """Clips dc3c6e29 / 168ba6a8: TMP spreads the impact over two packets.
+
+    Neither frame steps the pitch rate past the bar on its own, so the one-frame
+    test missed it and position mismatch held the trailer at cruise speed.
+    """
+    speed = 15.0
+    prev, t_now, z, _ = _seed_cruise(speed)
+
+    # Pitch rate 0 -> 8 -> 16 deg/s: each step is under the 12 deg/s bar.
+    t_now += DT
+    z -= speed * DT
+    pitch = 8.0 * DT
+    prev = _pose_step(prev, t_now, z, speed, pitch=pitch)
+    assert prev.crash_confirmed is False
+
+    # Second frame knocks it back against travel.
+    t_now += DT
+    z += 0.3
+    pitch += 16.0 * DT
+    prev = _pose_step(prev, t_now, z, speed, pitch=pitch)
+    assert prev.crash_confirmed is True
+    assert not prev.pos_mismatch_holding
+    assert prev.position.z == z
+
+
+def test_rewind_with_steady_rotation_is_still_held():
+    """A step back with nothing new in the rotation is a netcode rewind, not a crash."""
+    speed = 15.0
+    prev, t_now, z, yaw = _seed_cruise(speed, yaw_rate_deg_s=8.0)
+    held_z = prev.position.z
+
+    t_now += DT
+    yaw += 8.0 * DT
+    prev = _pose_step(prev, t_now, z + 0.4, speed, yaw=yaw)
+    assert prev.crash_confirmed is False
+    assert prev.pos_mismatch_holding
+    assert prev.position.z == held_z
+
+
+def test_slow_step_back_with_rotation_is_not_a_shove():
+    """Below walking pace a step back is jitter, whatever the rotation does."""
+    speed = 2.0
+    prev, t_now, z, _ = _seed_cruise(speed)
+
+    for k in range(2):
+        t_now += DT
+        z += 0.02
+        prev = _pose_step(prev, t_now, z, speed, roll=(k + 1) * 30.0 * DT)
+    assert prev.crash_confirmed is False
+
+
+def test_subframe_snap_does_not_read_as_displacement_collapse():
+    """A sub-frame moves prev._raw_x forward, so the frame-to-frame step is short.
+
+    Measured against it, every cruising frame looked collapsed and a lane-change
+    roll alone confirmed a crash. The planar checks measure from the last live frame.
+    """
+    speed = 20.0
+    prev, t_now, z, _ = _seed_cruise(speed)
+    full_t = t_now
+    roll = 0.0
+    for k in range(10):
+        # Roll rate steps 0 -> 25 deg/s at k = 5, past the 20 deg/s bar.
+        roll_rate = 25.0 if k >= 5 else 0.0
+        # Sub-frame 40 ms in, then the full frame 67 ms after the last one.
+        prev = _pose_step(prev, full_t + 0.040, z - speed * 0.040, speed,
+                          roll=roll + roll_rate * 0.040)
+        full_t += 0.0667
+        z -= speed * 0.0667
+        roll += roll_rate * 0.0667
+        prev = _pose_step(prev, full_t, z, speed, roll=roll)
+        assert prev.crash_confirmed is False
+
+
+def _knock_back(speed: float, is_trailer: bool = False):
+    """Cruise, then two frames of pitch build-up that end in a step back: a crash shove."""
+    prev, t_now, z, _ = _seed_cruise(speed)
+    prev.is_trailer = is_trailer
+    t_now += DT
+    z -= speed * DT
+    pitch = 8.0 * DT
+    prev = _pose_step(prev, t_now, z, speed, pitch=pitch, is_trailer=is_trailer)
+    t_now += DT
+    z += 0.3
+    pitch += 16.0 * DT
+    prev = _pose_step(prev, t_now, z, speed, pitch=pitch, is_trailer=is_trailer)
+    return prev, t_now, z, pitch
+
+
+def _long_window_speed(v: Vehicle) -> float:
+    from core.radar.traffic import _raw_speed_from_position_history
+    yaw = v._smooth_yaw
+    return _raw_speed_from_position_history(v._position_history, -math.sin(yaw), -math.cos(yaw))
+
+
+def test_knocked_back_crash_reads_its_stop_through_the_short_window():
+    """Clip 168ba6a8: the long window still read 21 m/s while the rig had stopped."""
+    speed = 20.0
+    prev, t_now, z, pitch = _knock_back(speed)
+    assert prev.crash_confirmed is True
+    for _ in range(4):
+        t_now += DT
+        prev = _pose_step(prev, t_now, z, 0.0, pitch=pitch)
+    assert prev._raw_brake_active is True
+    assert abs(prev._raw_speed) < 1.0
+    assert _long_window_speed(prev) > 10.0
+
+
+def test_crash_without_a_knock_keeps_the_long_window():
+    """Rotation and a vertical jolt with the body still driving on: no stop to follow."""
+    speed = 20.0
+    prev, t_now, z, _ = _seed_cruise(speed)
+    y = 0.0
+    for k in range(2):
+        t_now += DT
+        z -= speed * DT
+        y += 0.2 if k == 1 else 0.0
+        prev = _pose_step(prev, t_now, z, speed, pitch=(k + 1) * 16.0 * DT, y=y)
+    assert prev.crash_confirmed is True
+    assert prev.time >= prev._crash_knock_until
+    assert prev._raw_brake_active is False
+
+
+def test_trailer_follows_its_crash_stop_then_hands_back():
+    speed = 20.0
+    prev, t_now, z, pitch = _knock_back(speed, is_trailer=True)
+    assert prev.crash_confirmed is True
+    for _ in range(4):
+        t_now += DT
+        prev = _pose_step(prev, t_now, z, 0.0, pitch=pitch, is_trailer=True)
+    assert prev._raw_brake_active is True
+    assert abs(prev._raw_speed) < 1.0
+    # A trailer keeps it for the crash only: once the latch lapses it is off again.
+    while prev.crash_confirmed:
+        t_now += DT
+        prev = _pose_step(prev, t_now, z, 0.0, pitch=pitch, is_trailer=True)
+    t_now += DT
+    prev = _pose_step(prev, t_now, z, 0.0, pitch=pitch, is_trailer=True)
+    assert prev._raw_brake_active is False
+
+
+def test_stall_that_resumes_behind_is_not_a_collapse():
+    """Clip aeedafdf: a frozen frame, then TMP resumes from where it froze.
+
+    Measured across the stall that reads as a collapse, and a cresting truck's pitch
+    supplied the rotation jerk. Displacement across frozen frames is no evidence.
+    """
+    speed = 25.0
+    prev, t_now, z, _ = _seed_cruise(speed)
+    t_now += DT
+    prev = _pose_step(prev, t_now, z, speed)                        # frozen
+    pitch = 0.0
+    for k in range(4):
+        t_now += DT
+        # Resumes 70 % short of where it should be, then drives on normally.
+        z -= (0.3 if k == 0 else 1.0) * speed * DT
+        pitch += 30.0 * (2 * DT if k == 0 else DT)
+        prev = _pose_step(prev, t_now, z, speed, pitch=pitch)
+        assert prev.crash_confirmed is False

@@ -301,6 +301,19 @@ subsequent launch; it returns to the long estimate after both agree within
 0.3 m/s for 3 moving frames. At standstill it does not release, which prevents
 stale long-window samples from raising the speed again.
 
+**A knocked-back crash enters the transient directly** (TMP, trailer records
+included for as long as the crash latch holds). A crash scatters the interval
+speeds, so the brake test above never qualifies on one: on 168ba6a8 the short
+window read 5 m/s while the long window still said 21, and it went on lagging by
+about 0.4 s. Once a crash is confirmed with knock-back evidence (see "Crash
+detection") and the short window reads at least `_CRASH_SHORT_MIN_LOSS_MS`
+(2 m/s) slower than the long one in the direction of travel, the short window is
+selected, and it hands back through the same convergence rule. Only knock-back
+counts: a confirmation from collapse or a vertical jolt alone can be a stall
+artefact on a cresting truck, and on aeedafdf that version dropped the speed of
+an oncoming truck through a TMP position dip and cost a true positive. The
+short window may read negative when the body is shoved back, and that is kept.
+
 The transient changes only the raw speed that enters steps 1-3. `acceleration`
 is the step-2 fit of that speed and nothing else; normal cruise, ACC filtering and
 the long-window TMP ripple rejection are unchanged.
@@ -753,7 +766,7 @@ Detects out-of-order packets where the raw position jumps back against the direc
 
 **Detection:** `travel * dot(raw_disp, prev_smooth_fwd) < -_POS_MISMATCH_BACKWARD_THRESHOLD`, which is **0.00 m**: any component against the direction of travel flags the frame. `travel` is -1 once `prev.speed < -_POS_MISMATCH_REVERSE_MS` (**1.0 m/s**), so for a vehicle that is already reversing a *forward* jump is the rewind.
 
-**Action:** Increment `_pos_mismatch_frames`; while it is at most `_POS_MISMATCH_MAX_FRAMES` (**5**, `Vehicle.pos_mismatch_holding`) hold `_smooth_x/z`, carry `acceleration` and `acc_accel` from prev and coast `speed` and `acc_speed` on them (see "Held frames coast", below), and return early **after** yaw EMA and angular_velocity have run. Path, arc construction, and all other state are unaffected. A forward step resets the count.
+**Action:** Increment `_pos_mismatch_frames`; while it is at most `_POS_MISMATCH_MAX_FRAMES` (**5**, `Vehicle.pos_mismatch_holding`) hold `_smooth_x/z`, carry `acceleration` and `acc_accel` from prev and coast `speed` and `acc_speed` on them (see "Held frames coast", below), and return early **after** yaw EMA and angular_velocity have run. Path, arc construction, and all other state are unaffected. A forward step resets the count. Crash detection sees the frame first: a step back that comes with rotation jerk confirms a crash and passes at once (see "Crash detection", shove), because a rewind moves a vehicle back along its path and a crash moves its rotation too.
 
 **Past the cap the run is real.** From the sixth consecutive backward full frame on, raw position passes and keeps passing for as long as the run lasts: a truck reversing, a vehicle shoved back in a collision, or one bounced back by a head-on. The old cap reset the counter instead, released a single frame and re-armed, so a reversing truck was held 5 frames in 6, lagged by up to 0.5 m, and read -0.8 to -1.5 m/s against a real -2.9 (clip d80936f9). A packet stall (byte-identical position) inside an accepted run keeps the count, so a stalling reverse is not re-held. A stall during a hold still resets it as before: carrying the hold across stalls kept a stalled in-lane trailer frozen and cost the TP on 6f2377d7.
 
@@ -809,6 +822,61 @@ quality: engagement moves earlier on targets whose brake was being held flat.
 Found on clip 2da7f2fb, where a 5-frame rewind at t ≈ 7.1 s pinned a lead
 braking at −4.6 m/s² to 14.17 m/s for 0.27 s while the gap closed 51.6 → 45.5 m.
 
+### Pose jump (TMP only, full frames only)
+
+TMP sometimes relocates a vehicle instead of driving it: a parked vehicle
+swings round at 450-750 deg/s and flies several metres a frame to a new spot, a
+desynced one snaps 8-20 m along the road, a respawn lands 45-70 m away. Read as
+motion, a relocation becomes speed. On bc99e7ff a parked vehicle that flew 22 m
+read 20 m/s and AEB braked for it; on 41867763 one landed 6 m from ego reading
+17 m/s; and the spin on the way confirmed crashes too.
+
+`_pose_jumped` runs first on every full TMP frame, measured from the last
+accepted history sample:
+
+| state | a jump is |
+|---|---|
+| moving | a step faster than `_POSE_JUMP_MAX_MS` (100 m/s), timed from its arrival at that sample so a stall catch-up reads its real pace |
+| standing: \|speed\| under 2 m/s over the last 3 s | a step over 2.5 m, or a turn faster than 300 deg/s |
+| within `_POSE_JUMP_SETTLE_S` (1 s) of a jump from standing | a step over 1.0 m, or a turn faster than 150 deg/s |
+
+A jump is taken, not held: the pose moves to where TMP now puts it, but the
+motion history restarts there (`_reanchor_after_pose_jump`). Position history
+and trail are reseeded at the held speed along the new heading, the smoothed yaw
+takes the new heading, filtered speeds are held, and no crash rate or
+displacement may span the jump. A crash already confirmed stays latched. The
+guard arms after `_POSE_JUMP_MIN_UPDATES` filter updates, because a vehicle
+entering range has no speed to judge a step by.
+
+Why these bars:
+
+- **Moving.** Implied speeds of moving TMP vehicles reach 69 m/s at p99.99 from
+  frame timing alone, so 100 m/s stays clear. A bar relative to the vehicle's
+  own estimate was tried first and is wrong: TMP catching a vehicle up runs it
+  at 45 m/s past a 15 m/s estimate (fe811101, 4b20d80b), the guard held it at the
+  stale speed, and each held frame made the next step look like a jump again.
+- **Standing.** Nothing moves a standing vehicle 2.5 m in one frame, and the
+  54 frames where one turned faster than 300 deg/s (27 clips) were relocations
+  or rotation snaps at rest wherever checked. Real crash spins measured up to
+  about 470 deg/s, all on moving vehicles.
+- **Settle window.** A flight lasts 0.3-0.9 s and its tail steps are under
+  2.5 m, so without the window the tail read as motion, and once the estimate
+  passed 2 m/s the vehicle counted as moving. The window opens only on a jump
+  from outside it, so a vehicle that really drives off after landing is let go
+  after 1 s instead of being reseeded for ever.
+
+Measured over 1511 TMP clips: 623 reseeded frames in 63 clips, 146 of them
+within 60 m of ego. Crash confirmations that follow a pose jump fall from 75 to
+23. AEB clip corpus: local -759.86 -> -760.89 (c5d6411a quality 0.13 -> 0.26),
+remote -537.96 -> -491.25. bc99e7ff goes from a false brake to silent.
+**7e2a64b7 goes from a true positive to a miss (+47.67)**, and that positive was
+a phantom: the trailer (198) relocated 70 m at 4.0 s, the lag freeze kept the
+pre-jump sample in its history for 3.4 s, and the LS fit read it as 12-30 m/s on
+a trailer standing in ego's lane. When that phantom decayed at 6.9-7.4 s it made
+the trailer a follow threat, the only thing that took it past
+`TmpRelSpeedFilter`, which suppresses targets under 50 km/h relative speed at
+ego speeds of 50 km/h and below. The guard is right; that filter is the gap.
+
 ### Crash detection (TMP only, full frames only)
 
 A crash confirms when a **rotation-jerk frame coincides with a kinematic
@@ -826,9 +894,10 @@ crashed *during* the stall resumes with a genuinely different average rate.
 
 **Rotation jerk**: per-axis rate (deg/s) from `rotation.euler()`
 (pitch/yaw/roll) over the span since the last live frame. Jerk = change in
-rate since the previous live pair. Thresholds sit above normal TMP rotation
-noise (pitch/roll deltas of several deg/s, yaw to ~25 on curves) and below
-measured crash rotation (pitch 19+, roll 60+, yaw 100+ on clip 397148fd):
+rate against **either of the last two live rates** (`_prev_rates`,
+`_prev2_rates`). Thresholds sit above normal TMP rotation noise (pitch/roll
+deltas of several deg/s, yaw to ~25 on curves) and below measured crash
+rotation (pitch 19+, roll 60+, yaw 100+ on clip 397148fd):
 
 | Axis | Jerk threshold |
 |------|---------------|
@@ -836,34 +905,116 @@ measured crash rotation (pitch 19+, roll 60+, yaw 100+ on clip 397148fd):
 | Yaw | 40 deg/s |
 | Roll | 20 deg/s |
 
+Two live rates, not one, because TMP interpolates a remote pose between
+packets, so a single impact reaches the rate over two consecutive live frames.
+Every crash in the pending-evaluation clips built its rotation that way, each
+step under its bar: the trailer record of the rig on dc3c6e29 pitched
+0 -> 9 -> 17 deg/s, the trailer on 168ba6a8 rolled 1 -> 18 -> 29, and vehicle
+190 on 8aefa3a2, bounced back by a head-on with ego, went +31 -> +6 -> -18 in yaw.
+The one-frame test missed all three onsets, and position mismatch then held the
+knocked-back body at its cruise speed: 27.4 m/s for 5 frames on dc3c6e29, 15.9 m/s
+for 5 frames on 8aefa3a2.
+
 **Kinematic anomaly** (same frame, any of):
 - Vertical jerk: `|ΔY - prev ΔY| > 0.08 m` (a jerk, not a slope, so a steady
   grade never qualifies),
 - XZ direction reversal: `cos(prev_disp, cur_disp) < -0.3` when both
   displacement magnitudes exceed 0.025 m,
 - Displacement collapse: displacement summed over the last TWO live frames
-  under 50 % of `|prev.speed| × Σdt` while `|prev.speed| > 3 m/s`. Two frames
+  under 50 % of `|prev.speed| × Σspan` while `|prev.speed| > 3 m/s`. Two frames
   because TMP's ~1 Hz position-reconciliation ripple dips single-frame ratios
   to ~0.3-0.5 while its 2-frame sum stays ≈ 1.0; a physical stop keeps
   consecutive frames collapsed (a 1-frame 50 % collapse implies ~0.5·v/dt
-  m/s² of decel, far beyond braking).
+  m/s² of decel, far beyond braking). Never across frozen frames: TMP resumes
+  from where it froze without catching up, so neither the resume step nor the
+  one after it reads as a collapse (aeedafdf).
+- Shove: a step back against travel of more than `_CRASH_SHOVE_MIN_M` (2.5 cm)
+  while `|prev.speed| > _CRASH_SHOVE_MIN_SPEED_MS` (3 m/s), with the same
+  reference and travel sign position mismatch uses. That is exactly the frame
+  position mismatch would hold as a rewind. A rewind only moves the vehicle back
+  along its own path; a crash moves its rotation too, so the rotation jerk is what
+  tells them apart. With no rotation jerk the step is still held as a rewind.
+
+Reversal and shove are **knock-back** evidence and are always evaluated, even
+when another check has already qualified the frame. They also set
+`_crash_knock_until`, which lets the crash hand its raw speed to the short
+position window (see "Hard-brake transient"). Collapse and vertical jerk confirm
+a crash but never do that.
+
+**Planar checks measure from the last live frame** (`_last_live_xz`). A
+sub-frame snaps `prev._raw_x` forward, so on a full frame the frame-to-frame
+step covers only the time since the sub-frame, about half of `dt`. Measured
+against that, the 2-frame collapse ratio sat near 0.5 on every cruising frame
+and passed on two thirds of all frames with rotation jerk: the detector was in
+effect rotation jerk alone. Collapse and reversal now use the displacement
+since the last live frame over its own span. The shove test keeps the
+frame-to-frame step on purpose, because it has to see what position mismatch
+sees. The vertical check still uses the frame-to-frame `ΔY`: its jerk form
+compares two steps of the same cadence.
+
+The window and the reference fix belong together. The two-frame window on the
+snapped collapse flagged 1.10 % of moving frames and turned 249434e3 from a
+false warn into a false brake: a crosser 130 m out whose rotation stream had
+stalled and then caught up, confirmed through the snap.
+
+The shove needs travel. Without the 3 m/s floor, 53 of 99 shove confirmations
+came from vehicles below it: slow reversing, turning on the spot and standstill
+jitter, where a step back says nothing. The floor also gives up real low-speed
+contact, such as a standing car shoved sideways 5 m from ego on d3754cf7; a
+stationary body that gets hit is left to the reversal and vertical checks.
 
 **Latch**: a qualifying frame sets `_crash_hold_until = t + _CRASH_HOLD_S`
 (2.0 s); `crash_confirmed` stays true until the hold expires and refreshes on
 every qualifying frame. Consumers see a stable event flag, not per-frame
 flicker.
 
-Measured on the clip corpus (300 clips): `crash_confirmed` on **0.8 %** of
-moving TMP frames (was 9.7 % with the old jerk-only detector), **2.3 %** of
-moving TMP vehicles ever flagged (was 59.7 %). On crash clip 397148fd the flag
-holds continuously on the crashing road train from impact (t = 7.14) through
-ego's collision window with zero flicker, and fires on no pre-crash frame.
+**Measured** over 1511 TMP clips, every moving TMP record including trailer
+records (the first corroborated version took the flag from 9.7 % to 0.8 % of
+moving frames against the jerk-only detector; this is the step after it). The
+middle column is the rotation window, the shove and the live-frame reference;
+the last adds the pose-jump guard and the frozen-frame rule on collapse:
+
+| | before | detector | + pose jump |
+|---|---|---|---|
+| moving frames flagged | 0.738 % | 0.407 % | **0.326 %** |
+| moving records ever flagged | 3.08 % | 2.19 % | **1.92 %** |
+| confirmations | 870 | 644 | 576 |
+
+| crash | confirmed before | after |
+|---|---|---|
+| dc3c6e29 trailer 3 | 4.788 s, held as a rewind 4.00-4.28 | **4.004** |
+| dc3c6e29 tractor 4 | 3.936 | 4.004 |
+| 168ba6a8 trailer 4 | 4.047 | **3.937** |
+| 168ba6a8 tractor 5 | 3.844 | 3.937 |
+| 8aefa3a2 vehicle 190 | never, held 5 frames | **4.827** |
+| 397148fd trailer 440 | 7.137 | 7.137 |
+
+The tractors lose a frame because their old confirmation came from the snapped
+collapse, not from anything they did. On crash clip 397148fd the flag still
+holds continuously on the crashing road train from impact through ego's
+collision window, and fires on no pre-crash frame.
+
+AEB clip corpus: local -759.98 -> -759.86, remote -535.84 -> -537.96, no verdict
+lost. 2faae5bd goes from a false brake to silent (a crosser 126 m out confirmed
+only through the snap). One positive loses quality, eb67cc2d 0.92 -> 0.74: a
+lead at 105 km/h rolls through a lane-change wobble and then brakes at about
+15 m/s², the old detector confirmed it through the snap on the wobble, and the
+steps back that follow carry no rotation, so they are now held as rewinds.
+Replayed brake onset moves earlier on the pending crash clips: dc3c6e29
+4.59 -> 4.49 s, 168ba6a8 4.47 -> 4.42 s. The crash short window (see
+"Hard-brake transient") then takes them to 4.26 s and 4.25 s. Measured on its
+own with the frozen-frame rule: local -760.89 -> -763.90, remote -491.25 ->
+-491.41, no verdict moved; b9802c7d 0.33 -> 0.77 is the largest gain, 8335e15a
+1.00 -> 0.80 the largest loss: a lead crashing 41 m ahead now reads its real
+stop, and the stale 25 m/s arc that crossed ego's path 0.3 s earlier is gone.
 
 **Effect of `crash_confirmed`:** disables the position-mismatch filter and the
 lag freeze for that vehicle, and pins the ACC chain's raw input to the AEB
 one. Position, speed, and acceleration are derived from raw data as normal.
 Any displacement: even tiny: passes through unfiltered. Speed and acceleration
-are **not** overridden; AEB evaluates the vehicle from live kinematics. In
+are **not** overridden; AEB evaluates the vehicle from live kinematics. With
+knock-back evidence the raw speed comes from the short position window, which
+is still a measurement, not an override (see "Hard-brake transient"). In
 `core/aeb/thread.py` the flag additionally (a) bypasses the LOS-rate
 engagement veto (a crashed target's track violates the veto's
 constant-velocity assumption, and the tractor point can predict a miss while
@@ -1161,7 +1312,8 @@ double-count each trailer.
 | Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > _LAG_MIN_SPEED_MS` (5 m/s) AND all four entry gates pass → decay speed: `prev_speed × (1 − frac²)`, release after the TTC-scaled `freeze_dur` (≤ 0.5 s) |
 | Lag entry gates | no armed brake transient AND rotation rate < 2 deg/s AND recent raw window ≥ `_LAG_ENTRY_RAW_SPEED_MS` AND recent/older raw ≥ `_LAG_ENTRY_DECAY_MIN` |
 | Pos mismatch | `dot(raw_disp, prev_fwd) < -0.00 m` AND `is_tmp` AND `frames < 5` → hold smooth pos + speed, allow yaw |
-| Crash detection | live-frame rotation jerk (pitch 12 / yaw 40 / roll 20 deg/s) AND kinematic anomaly (vertical jerk > 0.08 m OR XZ reversal cos < -0.3 OR 2-frame disp collapse < 50 %); confirm latches 2.0 s; disables pos-mismatch filter and lag freeze; speed/accel stay raw |
+| Pose jump | standing (\|speed\| < 2 m/s for 3 s): step > 2.5 m OR turn > 300 deg/s; moving: step > 100 m/s from arrival; 1 s after a standing jump: step > 1.0 m OR turn > 150 deg/s → take the pose, reseed history at held speed, no crash rate spans it |
+| Crash detection | live-frame rotation jerk against either of the last two live rates (pitch 12 / yaw 40 / roll 20 deg/s) AND kinematic anomaly (vertical jerk > 0.08 m OR XZ reversal cos < -0.3 OR 2-frame disp collapse < 50 %, both from the last live frame and never across frozen frames, OR a step back against travel above 3 m/s); confirm latches 2.0 s; disables pos-mismatch filter and lag freeze; knock-back (reversal or step back) hands raw speed to the short window once it reads 2 m/s slower |
 | Yaw EMA (wrap-safe) | `smooth += 0.5 * ((raw - smooth + π) % 2π - π)` |
 | TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
 | Target road surface (§15) | `v.position.y - 0.58 * v.size.height` (ego's is `ego_y`) |
@@ -1199,7 +1351,7 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
   frames, and latched AEB threats bypass the gate outright (§15).
 - **Arc forward vector formula is `(-sin, -cos)`.** Do not flip signs or swap to `(sin, cos)`.
 - **Speed/accel filtering runs for AI and TMP** via `_smooth_vehicle_kinematics()`: the 4-signal chain `speed_ema → accel → speed_corr → acc_speed`. `self.speed` is the accel-corrected `speed_corr`; `self.acc_speed` is the adaptive-filtered ACC speed (ACC only); `self.acceleration` is the LS-slope `accel`. World positions are not low-pass filtered.
-- **Hard-brake raw-speed mode requires a measured deceleration ramp.** Never activate the short position window from a zero-displacement sample alone: below `_LAG_MIN_SPEED_MS`, a TMP packet stall is not owned by lag freeze and would look like a stopped obstacle.
+- **Hard-brake raw-speed mode requires a measured deceleration ramp.** Never activate the short position window from a zero-displacement sample alone: below `_LAG_MIN_SPEED_MS`, a TMP packet stall is not owned by lag freeze and would look like a stopped obstacle. The one other entry is a crash with knock-back evidence whose short window reads 2 m/s slower: never widen it to collapse or vertical-jerk confirmations, which a stall on a cresting truck produces (aeedafdf lost a true positive that way).
 - **An armed hard-brake transient vetoes lag entry.** A confirmed decel ramp is measured motion, so the target is stopping and must reach AEB raw. This inverts the older "freeze always wins" priority, which pinned stopping traffic at a stale speed. The latch's false fires on publish jitter do not make this veto removable: on `c6e05e3d` it is the only gate that keeps a real stop out of a freeze (§7, lag entry gates).
 - **Lag freeze owns kinematics once it opens.** A freeze that does open still resets hard-brake transient state; the short estimator must not bypass or advance during the freeze early return.
 - **Lag entry gates read raw positions, never `prev.speed`.** The freeze criterion itself compares against the filter's own output, so gating on that output too would be circular: a stale speed would justify the freeze that keeps it stale. `_lag_entry_allowed` measures `_position_history` directly.
@@ -1212,9 +1364,12 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 - **Position mismatch (TMP only) runs before lag detection.** It is mutually exclusive with lag: a backward jump is not near-stationary. The `not _skip_position_update` guard on the lag block enforces this.
 - **Position mismatch holds at most `_POS_MISMATCH_MAX_FRAMES (5)` frames per backward run, and the rest of the run passes.** A longer run is reversing or a collision shove. Do not go back to resetting at the cap: re-arming held a reversing truck 5 frames in 6. Without any cap a genuine crash or prolonged backward event would be silently swallowed.
 - **Position mismatch tests against the direction of travel, at every speed.** Testing against the heading alone rejects every forward jump of a reversing vehicle as real and every backward one as a rewind.
-- **Crash detection does not override speed or acceleration.** It disables the pos-mismatch filter and lag freeze so raw position data passes through unfiltered.
+- **Crash detection does not override speed or acceleration.** It disables the pos-mismatch filter and lag freeze so raw position data passes through unfiltered, and with knock-back evidence it selects the short position window, which is measured data. Nothing sets a speed or clamps it.
 - **Crash detection runs before pos-mismatch and lag early-returns.** Both signals (rotation jerk and a kinematic anomaly) must fire on the same live frame; the confirmation then latches for `_CRASH_HOLD_S` so consumers never see per-frame flicker.
 - **Crash rotation rates span packet stalls.** A frozen (byte-identical) frame must not advance the rate baseline: the stall-exit snap has to read as its average rate, or every stall resume fires a phantom crash (the pre-fix detector flagged 59.7 % of TMP vehicles).
+- **A step back with rotation jerk is a crash, not a rewind.** The shove anomaly is what stops position mismatch from holding a knocked-back vehicle at its cruise speed (27.4 m/s for 5 frames on dc3c6e29). It uses the position-mismatch reference and travel sign so the two tests judge the same frame, and it needs travel above 3 m/s.
+- **Crash jerk spans two live frames; collapse and reversal measure from the last live frame.** Keep both: the wider window on the sub-frame-snapped displacement flagged 1.10 % of moving frames and cost a false brake on 249434e3 (§7, Crash detection).
+- **A TMP pose jump is taken, never read as motion.** It runs before crash detection and reseeds the history instead of holding the pose: holding would hide a vehicle TMP has put in front of ego. Do not judge a moving vehicle against its own speed estimate: a catch-up runs it far past the estimate, and every reseeded frame then looks like another jump. The settle window opens only from outside itself, or a vehicle that drives off after landing is held for ever (§7, Pose jump).
 - **Lag entry requires a non-live rotation stream** (`_LAG_ROT_LIVE_DEG_S`): a frozen position with crash-scale rotation is a physical stop and must reach AEB raw, not decay behind the freeze. Necessary but not sufficient: a vehicle braking to a stop in a straight line has ~0 rotation, so the raw-motion gates carry that case.
 - **Vehicle longitudinal accel for arcs**: `Vehicle.accel_for_arc()` → `self.acceleration` (TMP = filtered kinematic; AI = buffer). Then `_accel_to_arc_params(accel, override_decel)`.
 - **AI (singleplayer) speed is used as-is from the buffer.** Do not derive/flip sign from displacement or turning vehicles can be misclassified as reversing.
