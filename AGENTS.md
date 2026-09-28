@@ -160,6 +160,8 @@ Do not reintroduce these without reading the linked README section first:
 
 - `CHANGELOG.md` entries are user-facing, not developer-facing. Format: a bold title naming the symptom or feature as the user experiences it, then one short sentence (two at most, only if genuinely needed) describing what they noticed and what changed. No internal constant names, thresholds, taus, or control-theory jargon. Releases `1.1.0-preview.1` through `.5` are the style reference for length and tone.
 - Example of the right size: "**Anti-creep too strong at launch**: weak engines couldn't overcome the creep-cancel brake; it now releases much earlier on the gas pedal."
+- One `[Unreleased]` bullet per complaint a driver would make. Before adding a bullet, re-read the ones already there. When the new change is the same thing they felt (same feature, same symptom while driving), rewrite that bullet so it covers both. A separate code path is still one issue. Add a new bullet only when they would report it separately: ACC braking too hard and ACC letting go too slowly are one complaint; ACC braking too hard and the set-speed overlay vanishing are two.
+- A merged bullet stays the same size: one broader title and one or two sentences. Keep what the driver noticed and what they will feel now.
 
 ### Reputation and community-trust guardrails
 

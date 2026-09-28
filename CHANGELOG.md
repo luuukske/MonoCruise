@@ -13,8 +13,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ## [Unreleased]
 ### Fixed
 - **Set speed and the pedal bar could vanish and stay gone**: after some alt-tab sequences they never came back until a restart or toggling an overlay. They now put themselves back on screen.
-- **ACC braked hard at first when stopping for traffic, then crawled in**: it either held your speed until late and braked firmly, or braked much harder than needed and eased off all the way to the stop. It now slows you evenly, starting as soon as it sees stopped or much slower traffic ahead.
-- **ACC braked too hard and let go too slowly**: a hard stop ahead, or traffic past that vehicle, could jump straight to full brake, and the brake then hung on so you ended up far slower than the traffic. It now builds smoothly, stays moderate beyond the vehicle directly ahead, eases off once that vehicle holds its speed, and only an imminent collision still gets full brake at once.
+- **ACC braking for traffic was harsh and uneven**: it could brake late and hard, brake far harder than the stop needed and crawl the rest of the way, or jump to full brake for a hard stop or for traffic past that vehicle and then hang on. It now slows you evenly as soon as slower traffic is ahead, stays moderate beyond the vehicle directly ahead, lets go once that vehicle holds its speed, and only an imminent collision still gets full brake at once.
 
 ## [1.1.0-rc.24] - 2026-09-24
 ### Added
