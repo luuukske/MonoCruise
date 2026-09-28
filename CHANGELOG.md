@@ -14,6 +14,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ### Fixed
 - **ACC braked harder than the truck ahead once you were already catching it**: in a line of traffic a modest slowdown could turn into a much harder brake, and the trucks behind copied it. The extra brake is now smaller while there is still room, and a close stop is unchanged.
+- **ACC braked too hard for a stop, then rolled closer**: the learned brakes sat weaker than the stops the truck had actually made, so the pedal pressed harder than asked and let off with gap left. A stronger stop now teaches just as quickly as a weaker one, and emergency braking still will not trust more brake than the truck's size says it has.
 
 ## [1.1.0-rc.25] - 2026-09-28
 ### Fixed

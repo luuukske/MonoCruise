@@ -24,7 +24,8 @@ _MIN_ACCEL_MS2: float = 0.2         # ignore near-zero accel
 _MAX_SLOPE_RAD: float = 0.15        # ~8.6°: skip extreme slopes (sensor uncertainty)
 _WEIGHT_POWER: float = 3.0          # alpha scaled by pedal^3: full pedal dominates
 _ACCEL_BASE_ALPHA: float = 0.08     # EMA alpha at full gas pedal, no underperformance
-_UNDERPERFORM_MULT: float = 2.0     # drop estimate this much faster when below expectation
+# Brake uses this both ways. Gas uses it only when the sample is below the estimate.
+_UNDERPERFORM_MULT: float = 2.0
 _CLUTCH_GUARD_S: float = 0.5        # seconds after clutch to skip gas learning
 _CLUTCH_ACTIVE_THRESHOLD: float = 0.05
 _SAVE_THRESHOLD: float = 0.1        # save when drift exceeds 10% of saved value
@@ -362,8 +363,9 @@ class PedalCapacityTracker:
         weight = mean_pedal ** _WEIGHT_POWER
         base = _BRAKE_ALPHA_AEB if aeb_active else _BRAKE_ALPHA_NORMAL
         alpha = base * weight
-        if candidate_scale < self._brake_scale:
-            alpha *= _UNDERPERFORM_MULT
+        # Same rate up and down. A harder stop used to rise at half this, so the
+        # estimate sat under the brakes it had measured and the pedal over-braked.
+        alpha *= _UNDERPERFORM_MULT
         alpha = min(alpha, 1.0)
 
         self._brake_scale = _clamp(

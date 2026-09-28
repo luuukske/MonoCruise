@@ -50,8 +50,9 @@ gearshift integrator freeze, and tuning CSV rows when high-demand estimates unde
 Always-on brake decel and gas gain learning (replaces legacy brake efficiency tracker).
 
 **Brake**: `update_brake` every tick; accept samples only when pedal and decel settle.
-Candidate inverts the fitted brake curve; pedal³ weighting; underperformance drops estimate
-2× faster than overperformance rises. Road load canceled before sampling. Fast EMA during
+Candidate inverts the fitted brake curve; pedal³ weighting; a sample moves the estimate
+at the same rate whether the stop was harder or softer than the current figure. Road load
+canceled before sampling. Fast EMA during
 deep settled AEB braking. Candidates reject above `_BRAKE_CANDIDATE_MAX_FRACTION` (1.35) of
 the load baseline. The pedal is the value written to the game. Measured decel is scaled
 by `1.1 / I` so a slider change is not learned as truck weakness.
@@ -204,9 +205,12 @@ exponent resolved first, which needs a probe at a third cargo mass.
 The residual risk is baseline error rather than estimator drift, and the baseline is fitted
 to one user's rigs.
 
-`_UNDERPERFORM_MULT` (2.0) biases the settled estimate 4-10% low under symmetric candidate
-noise, measured; at the observed scatter it is ~10%. That is deliberate — believing
-degradation quickly is the safe asymmetry — and low is the safe direction, so it stays.
+A brake sample moves the estimate at `_UNDERPERFORM_MULT` (2.0) whether it is above or
+below the current figure. It used to rise at half that rate, which settled the estimate
+4-10% under the samples and made the cruise pedal harder than the commanded stop. A
+weaker stop still drops it at that same rate, down to `_BRAKE_SCALE_MIN`. The ceiling
+stays 1.00: AEB plans with this number, and believing more brake than the model engages
+late. Gas learning still applies the 2.0 only when the sample is below the estimate.
 
 **The brake baseline is braked axles vs mass** (`baseline_brake_ms2`), fitted as
 `70.8 * wheels^0.52 * mass^-0.31`. It must never divide by `weight_factor`: that is the

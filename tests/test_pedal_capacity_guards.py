@@ -74,6 +74,40 @@ def test_legit_strong_brake_recovers_the_estimate_up_to_the_model(clock):
     assert t.max_brake_ms2 <= BASE + 1e-6
 
 
+def test_a_stronger_stop_teaches_as_fast_as_a_weaker_one(clock):
+    """Equal distance up and down must move the scale the same amount.
+
+    The rise used to run at half the drop, so the estimate sat under the samples
+    and cruise over-braked. The drop rate itself stays put.
+    """
+    frac = brake_curve_fraction(1.0)
+    alpha = pc._BRAKE_ALPHA_AEB * pc._UNDERPERFORM_MULT
+    steps = 5
+
+    def _moved(start: float, target: float) -> float:
+        t = _fresh(scale=start)
+        decel = target * BASE * frac
+        scale0 = t.brake_scale
+        for _ in range(80):
+            clock.t += DT
+            t.update_brake(1.0, decel, SPEED, 0.0, BASE, road_load_ms2=0.0, aeb_active=True)
+            if abs(t.brake_scale - scale0) > 1e-9:
+                break
+        else:
+            raise AssertionError("no sample accepted")
+        for _ in range(steps - 1):
+            clock.t += DT
+            t.update_brake(1.0, decel, SPEED, 0.0, BASE, road_load_ms2=0.0, aeb_active=True)
+        return t.brake_scale - start
+
+    up = _moved(0.80, 0.90)
+    down = _moved(0.80, 0.70)
+    expect = 0.10 * (1.0 - (1.0 - alpha) ** steps)
+    assert up == pytest.approx(expect, abs=0.008)
+    assert down == pytest.approx(-expect, abs=0.008)
+    assert up == pytest.approx(-down, abs=0.004)
+
+
 def test_gentle_press_drifts_estimate_slowly(clock):
     """Soft presses still teach, but slowly: a 2 s gentle stop must barely move the estimate, so a
     stretch of abnormal braking cannot poison it (estimate fell 9 -> 4 m/s2 in routine driving,
@@ -166,8 +200,7 @@ def test_release_gap_blocks_relearn_until_resettled(clock):
 
 def test_ripple_averages_instead_of_rectifying(clock):
     """Telemetry cadence puts zero-mean ripple on the decel signal. Window means must make the
-    estimate track the true mean, not the lower envelope (the asymmetric underperform alpha would
-    otherwise rectify the ripple into downward drift)."""
+    estimate track the true mean, not whichever tick in the window was lowest."""
     t = _fresh()
     for i in range(90):
         clock.t += DT
