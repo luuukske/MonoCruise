@@ -86,24 +86,38 @@ BOOL_PRESS_DURATION: float = 0.1
 HAZARD_PRESS_DURATION: float = 0.4
 HAZARD_VERIFY_DELAY: float = 0.1
 HAZARD_MAX_RETRIGGERS: int = 3
-# Same floors as the driver's slam / autodisable. Cruise mapper output is
-# visible to hazards as if the driver pressed those pedals.
+# Driver slam floor and autodisable floor, applied to the pedals about to
+# be sent. A commander brake the merge dropped never reaches this check.
 _HAZARD_HARD_BRAKE: float = 0.8
 _HAZARD_GAS_RESET: float = 0.60
 _HAZARD_BRAKE_CLEAR: float = 0.05
 
 
-def cruise_pedals_for_hazards(
-    user_gas: float,
-    user_brake: float,
-    mapper_gas: float,
-    mapper_brake: float,
-    cruise_active: bool,
-) -> tuple[float, float]:
-    """Cruise gas/brake look like the driver's pedals to automatic hazards."""
-    if not cruise_active:
-        return user_gas, user_brake
-    return max(user_gas, mapper_gas), max(user_brake, mapper_brake)
+def hazard_action_for_sent_pedals(
+    gas: float,
+    brake: float,
+    *,
+    speed_kmh: float,
+    aeb_warn: bool,
+    user_override: bool,
+    autodisable: bool,
+    was_hard: bool,
+) -> tuple[str | None, bool]:
+    """'on', 'off', or None from the pedals about to be sent. 'on' wins."""
+    action: str | None = None
+    if (
+        autodisable
+        and speed_kmh > 12.0
+        and gas >= _HAZARD_GAS_RESET
+        and brake < _HAZARD_BRAKE_CLEAR
+        and not aeb_warn
+        and not user_override
+    ):
+        action = "off"
+    hard = brake >= _HAZARD_HARD_BRAKE
+    if hard and not was_hard:
+        action = "on"
+    return action, hard
 
 # Closed-loop decel controller: feedforward via the inverse brake curve plus a
 # disturbance observer that nulls environment error (grade, capacity, curve bias).
@@ -348,6 +362,7 @@ class SendingThread(BaseThread):
         self._hazard_phase: str = "idle"
 
         self._last_should_force: bool = False
+        self._last_hard_brake: bool = False
         self._hazard_user_override: bool = False
         self._prev_tel_hazards: bool = False
         # Single mapper. CruiseControlThread publishes one m/s² bid covering
@@ -552,6 +567,31 @@ class SendingThread(BaseThread):
             self._hazard_retriggers = 0
             self._hazard_phase = "idle"
         logger.debug("change_hazards: wanted=%s duration=%.3fs", wanted, duration)
+
+    def _apply_sent_brake_hazards(
+        self,
+        gas: float,
+        brake: float,
+        speed_kmh: float,
+        aeb_warn: bool,
+    ) -> None:
+        """Arm hazards from the brake about to be sent, then autodisable."""
+        action, self._last_hard_brake = hazard_action_for_sent_pedals(
+            gas,
+            brake,
+            speed_kmh=speed_kmh,
+            aeb_warn=aeb_warn,
+            user_override=self._hazard_user_override,
+            autodisable=bool(Settings.autodisable_hazards),
+            was_hard=self._last_hard_brake,
+        )
+        if action == "on":
+            self.change_hazards(True)
+        elif action == "off":
+            with self._lock:
+                self._hazard_wanted = False
+                if self._hazard_phase == "idle":
+                    self._hazard_retriggers = 0
 
     def reset_accel_mapper_smoothing(self) -> None:
         """Clear mapper smoothing/correction when cruise stops commanding."""
@@ -823,6 +863,7 @@ class SendingThread(BaseThread):
         self._hazard_phase = "idle"
         self._hazard_wanted = None
         self._last_should_force = False
+        self._last_hard_brake = False
         self._hazard_user_override = False
         self._prev_tel_hazards = False
         self._brake_active = False
@@ -899,6 +940,8 @@ class SendingThread(BaseThread):
         pedal_alive = pedal_thread is not None and pedal_thread.is_alive()
 
         em_stop = False
+        pedal_em_stop = False
+        device_lost = False
         AEB_brake = False
         AEB_warn = False
         AEB_target_decel = 0.0
@@ -907,7 +950,9 @@ class SendingThread(BaseThread):
         if pedal_thread is not None and pedal_alive:
             try:
                 with pedal_thread.data._lock:
-                    em_stop = bool(pedal_thread.data.em_stop)
+                    pedal_em_stop = bool(pedal_thread.data.em_stop)
+                    device_lost = bool(pedal_thread.data.device_lost)
+                em_stop = pedal_em_stop
             except Exception as e:
                 logger.debug("em_stop read failed: %s", e)
             try:
@@ -1176,42 +1221,19 @@ class SendingThread(BaseThread):
                 self._hazard_user_override = False
             self._prev_tel_hazards = tel_hazards
 
-        if Settings.autodisable_hazards and pedal_thread is not None and pedal_alive:
-            try:
-                with pedal_thread.data._lock:
-                    gas_pct = pedal_thread.data.gasval
-                    brake_pct = pedal_thread.data.brakeval
-                gas_pct, brake_pct = cruise_pedals_for_hazards(
-                    gas_pct, brake_pct, mapper_gas, mapper_brake, cruise_active,
-                )
-                if (
-                    speed_kmh > 12.0
-                    and gas_pct >= _HAZARD_GAS_RESET
-                    and brake_pct < _HAZARD_BRAKE_CLEAR
-                    and not AEB_warn
-                    and not self._hazard_user_override
-                ):
-                    with self._lock:
-                        self._hazard_wanted = False
-                        if self._hazard_phase == "idle":
-                            self._hazard_retriggers = 0
-            except Exception as e:
-                logger.debug("autodisable_hazards read failed: %s", e)
-
-        should_force = (
-            not pedal_alive
-            or em_stop
-            or (cruise_active and mapper_brake >= _HAZARD_HARD_BRAKE)
-        )
-        if should_force and not self._last_should_force:
+        # Device loss sets em_stop without a hard brake. A driver slam and
+        # AEB reach the sent pedal instead, and are handled there.
+        pedals_lost = (not pedal_alive) or (device_lost and pedal_em_stop)
+        if pedals_lost and not self._last_should_force:
             self.change_hazards(True)
-        self._last_should_force = should_force
+        self._last_should_force = pedals_lost
 
-        self._tick_hazards(controller, tel_hazards)
         self._tick_bool_overrides(controller)
 
 
         if not connected:
+            self._last_hard_brake = False
+            self._tick_hazards(controller, tel_hazards)
             self._spd_smooth = None
             self._spd_smooth_fast = None
             self._prev_spd_mono = None
@@ -1268,6 +1290,8 @@ class SendingThread(BaseThread):
             return
 
         if not pedal_alive:
+            self._last_hard_brake = False
+            self._tick_hazards(controller, tel_hazards)
             self._prev_mapper_owned_gas = False
             self._prev_applied_gas = 0.0
             self._clear_pause_held()
@@ -1338,6 +1362,7 @@ class SendingThread(BaseThread):
                 self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
+            self._tick_hazards(controller, tel_hazards)
             return
 
         opdgasval = 0.0
@@ -1350,6 +1375,8 @@ class SendingThread(BaseThread):
                 opdgasval = float(getattr(pedal_thread.data, "opdgasval", 0.0))
         except Exception as e:
             logger.debug("pedal read failed: %s", e)
+            self._last_hard_brake = False
+            self._tick_hazards(controller, tel_hazards)
             self._prev_mapper_owned_gas = False
             self._prev_applied_gas = 0.0
             self._clear_pause_held()
@@ -1586,6 +1613,8 @@ class SendingThread(BaseThread):
         self._pause_held_aforward = a
         self._pause_held_abackward = logical_b
         self._pause_held_full_authority = full_authority
+        self._apply_sent_brake_hazards(a, logical_b, speed_kmh, AEB_warn)
+        self._tick_hazards(controller, tel_hazards)
 
         # Close the observer loop on what the game actually received, not on the
         # controller's own request: hold, cushion and user brake all raise it.

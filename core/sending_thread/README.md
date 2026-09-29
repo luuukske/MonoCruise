@@ -15,16 +15,16 @@ See **Brake intensity** below.
 
 ## Hazards
 
-`hazards_variable` gates every automatic press. Pedal loss and `em_stop` (AEB
-or the driver's slam) turn hazards on on the rising edge and leave them on.
-`autodisable_hazards` turns them off when the driver is back on the gas above
-12 km/h.
+`hazards_variable` gates every automatic press. Pedal loss turns hazards on
+on the rising edge and leaves them on. So does a hard brake on the pedal
+actually sent to the game, at the driver's slam floor (0.8). That check sits
+after the user-override merge, so an ACC brake the driver has overridden
+never lights the lamps. Braking-intensity compensation is applied after this
+check and does not change the floor.
 
-Cruise mapper output is visible to that same logic. A cruise brake at the
-driver's slam floor (`brakeval >= 0.8`) turns hazards on. Cruise gas at the
-autodisable floor (`gasval >= 0.60`, brake clear) turns them off again. The
-lamps do not go off just because the slam ended; they wait for accelerator,
-the same as a driver slam.
+`autodisable_hazards` turns them off from those same sent pedals: gas at the
+autodisable floor (0.60), brake clear, above 12 km/h. The lamps do not go
+off just because the hard brake ended; they wait for accelerator.
 
 ## AccelToPedals (`accel_to_pedals.py`)
 
