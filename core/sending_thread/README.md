@@ -45,6 +45,70 @@ gearshift integrator freeze, and tuning CSV rows when high-demand estimates unde
   so a slope cannot bias the learned full-pedal capability.
 - Also holds the shared telemetry mass-estimate helper that `telemetry_thread` uses.
 
+### Launch governor (`launch_governor.py`)
+
+At a launch the game's automatic clutch slips from rest to somewhere between 5 and 20 km/h,
+and `game_clutch` reads pressed the whole time. `_gearshift_factor` treats that as a
+gearshift: it freezes the measured accel at its value when the clutch opened and stops the
+fast trim integrating. The pedal during a launch was therefore pure feedforward,
+`(wanted + road_load) / capacity`, and that feedforward is wrong at a launch:
+
+- Fitted over 62 logged slip launches (September 2026, mostly 17 t): accel = 0.25 +
+  2.75 x throttle (0.3 s dead time) - 0.68 x g sin(grade). The learned per-gear capacity
+  the feedforward divides by read anywhere from 1.2 to 4.0 on those same launches, so it
+  does not predict the launch.
+- Road load includes `mapper_rolling_resistance` x g (0.69 m/s2), a coast fit a slipping
+  clutch never sees, and the idle creep the game adds is only counted in gear 1.
+- 2026-09-28, 5% grade, capacity 1.31: ACC asked for +0.3 to +0.4 m/s2, gas went to 1.0,
+  the truck did about 2 m/s2, ACC braked, and it repeated every 4.5 s. That is the
+  "lurching" launch behind slow traffic. Across recent launches the truck overshot the bid
+  1.2 to 1.8x at a 1.5 bid and 3 to 6x at small bids.
+
+The governor caps the mapper's gas while that lasts. It arms when the clutch is pressed
+below 1.5 m/s in a forward gear with CC/ACC commanding, never in limiter mode or under
+AEB. It is a PI servo in pedal units on the live accel (`raw_smooth_live`), with gains
+divided by `gain_scale` because launch gain falls with mass: kp 0.30, ki 0.40 while the
+truck is short of the bid and 0.80 while it is ahead. On the rising edge of a launch bid
+the cap starts no lower than the pedal that holds the grade, so a hill start never waits
+for the integrator. Once the clutch has closed and the gearshift ramp has run out (or
+above 7 m/s) the cap opens at 1.0/s, and the governor goes idle on the first tick it no
+longer binds, so handing back is bumpless. In `accel_to_pedals_debug.csv` it shows as
+`gas_cmd` below `effort`.
+
+Closed loop, the real mapper against the fitted plant (a reduced copy is in
+`tests/test_mapper_launch_governor.py`). Peak accel while the clutch slips, and t90, the
+time to 90% of the bid after it starts ramping:
+
+| case | peak before | peak after | t90 before / after |
+|---|---|---|---|
+| bid 0.35, 5% grade, capacity 1.31 (the 09-28 rig) | 2.49 (7.1x) | 1.21 (3.5x) | n/a |
+| bid 0.35, flat, capacity 3.0 | 0.93 (2.7x) | 0.40 (1.1x) | n/a |
+| bid 0.8, flat | 1.46 (1.8x) | 0.85 (1.1x) | 0.56 / 0.84 s |
+| bid 1.5, flat | 2.29 (1.5x) | 1.54 (1.0x) | 0.82 / 1.08 s |
+| bid 0.8, 8% grade | 2.46 (3.1x) | 1.48 (1.8x) | 0.16 / 0.56 s |
+| 10 t, bid 1.5, flat | 3.93 (2.6x) | 1.50 (1.0x) | 0.64 / 1.12 s |
+| 40 t, bid 1.0, 3% grade | 1.05 (1.0x) | 1.03 (1.0x) | 0.80 / 0.90 s |
+
+The truck reaches the bid 0.1 to 0.5 s later, because before it got there by overshooting.
+Hills still overshoot: the holding pedal comes from the same learned capacity, which
+under-reads at a launch, and it stays because a hill start must not stall.
+
+Rules:
+
+- Ceiling only. It never raises gas above what the mapper computed;
+  `test_governor_only_lowers_gas` pins it.
+- Never in limiter mode, where the mapper's gas caps the driver's own pedal, or under AEB.
+- It starts from the gas actually sent, and while it binds the rate limiter's memory is held
+  at the cap. In neutral the mapper keeps its gas trajectory running so gas returns at once
+  when a gear engages. With auto neutral that trajectory had already reached 1.0 by the
+  time drive engaged, and the first tick in gear stepped straight there.
+- Do not fix this by un-freezing the measured accel during the slip instead. The freeze is
+  there for gearshifts, and the fast trim's P and D cannot undo a feedforward at twice the
+  truth before the loop delay lets them see it.
+- Retune against the plant fit, not by feel. The loop delay is roughly half a second (plant
+  dead time plus the measurement's tracking differentiator), and `KI_RISE` sets the phase
+  margin against it: about 1 rad/s crossover and 55 degrees at the fitted gain.
+
 ## Pedal capacity (`pedal_capacity.py`)
 
 Always-on brake decel and gas gain learning (replaces legacy brake efficiency tracker).

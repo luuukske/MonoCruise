@@ -14,7 +14,7 @@ Long domain / tuning / coordinate docs live in module `README.md` files, not her
 - `core/radar/README.md`: coordinates, traffic buffer, Vehicle smoothing, ArcPath
 - `core/aeb/README.md`: AEB pipeline, filters, engagement; `core/aeb/TUNING.md`: calibration reference
 - `core/acc/README.md`: in-lane tracker, scoring, blinker bias
-- `core/sending_thread/README.md`: mapper, pedal capacity, hold, brake efficiency. Brake intensity remap is a linear invert of the cvar, not a pedal power.
+- `core/sending_thread/README.md`: mapper, launch governor, pedal capacity, hold, brake efficiency. Brake intensity remap is a linear invert of the cvar, not a pedal power.
 - `core/longitudinal/README.md`: CC/limiter/ACC children
 - `core/cruise_control_thread/README.md`: orchestrator and ACC anticipation
 - `core/main_pedal_thread/README.md`: joystick, OPD, capture APIs

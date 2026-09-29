@@ -13,6 +13,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ## [Unreleased]
 
 ### Fixed
+- **ACC lunged when pulling away**: a gentle start behind slow or creeping traffic could floor the gas, then brake straight away, over and over. Pulling away now follows how fast the truck is actually picking up speed until the clutch has fully engaged.
 - **Hazards flashed while you were overriding cruise**: taking over with the gas still turned the hazards on whenever cruise wanted a hard brake. They now follow the brake that actually goes to the truck.
 - **ACC braked harder than the truck ahead once you were already catching it**: in a line of traffic a modest slowdown could turn into a much harder brake, and the trucks behind copied it. The extra brake is now smaller while there is still room, and a close stop is unchanged.
 - **ACC braked too hard for a stop, then rolled closer**: with Braking intensity raised in game, the learned brakes drifted far weaker than the truck really is, so cruise pressed much harder than it asked for and let off with gap left. The slider is now read correctly and the brakes relearn once after updating, and emergency braking no longer counts on extra brake from a raised slider.
