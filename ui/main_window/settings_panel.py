@@ -366,7 +366,6 @@ class SettingsPanel(QWidget):
     def _on_connect_pedals(self) -> None:
         if self._pedal_configuring:
             self._stop_pedal_config()
-            self._set_cmd_hint("Pedal configuration cancelled.")
             return
 
         pt = self._get_thread("main_pedal_thread")
@@ -391,7 +390,6 @@ class SettingsPanel(QWidget):
         self._pedal_configuring = True
         self.lbl_conn_error.setText("")
         self.btn_connect.setText("Tap the brake pedal  (click to cancel)")
-        self._set_cmd_hint("Tap the brake pedal.")
 
     def _stop_pedal_config(self) -> None:
         """Cancel any active pedal configuration and restore the button."""
@@ -416,18 +414,15 @@ class SettingsPanel(QWidget):
             has_result = pt.data.pedal_config_result is not None
 
         if has_result:
-            res = pt.consume_pedal_config()
+            pt.consume_pedal_config()
             self._pedal_configuring = False
             self._refresh_pedal_widgets()
             self.lbl_conn_error.setText("")
-            name = (res or {}).get("device_name") or "pedals"
-            self._set_cmd_hint(f"Pedals connected: {name}.")
             return
 
         if not active:
             # Cancelled or restarted underneath us (e.g. watchdog restart).
             self._stop_pedal_config()
-            self._set_cmd_hint("Pedal configuration cancelled.")
             return
 
         text = (
@@ -437,8 +432,6 @@ class SettingsPanel(QWidget):
         )
         if self.btn_connect.text() != text:
             self.btn_connect.setText(text)
-            if stage == "gas":
-                self._set_cmd_hint("Brake axis saved. Tap the gas pedal.")
 
     def _poll_pedal_status(self) -> None:
         """Keep the 'Connected pedals' label in sync with the pedal thread."""
@@ -900,11 +893,6 @@ class SettingsPanel(QWidget):
         btn.set_binding_text(binding_display_name(raw), is_none=b is None)
         btn.setToolTip(str(b.get("device_name") or "") if b else "")
 
-    def _set_cmd_hint(self, text: str) -> None:
-        set_cmd = getattr(self.window(), "set_cmd", None)
-        if callable(set_cmd):
-            set_cmd(text)
-
     # Button binding: click handling
 
     def _on_bind_clicked(self, key: str) -> None:
@@ -914,7 +902,6 @@ class SettingsPanel(QWidget):
             return
         if self._configuring_key == key:
             self._stop_configuring()
-            self._set_cmd_hint("Assignment cancelled.")
             return
         self._start_configuring(key)
 
@@ -926,11 +913,9 @@ class SettingsPanel(QWidget):
             return
         if self._unassign_armed:
             self._disarm_unassign()
-            self._set_cmd_hint("Unassign cancelled.")
             return
         self._unassign_armed = True
         self._set_unassign_armed_style(True)
-        self._set_cmd_hint("Click a configure button to unassign it.")
 
     def _disarm_unassign(self) -> None:
         self._unassign_armed = False
@@ -947,7 +932,6 @@ class SettingsPanel(QWidget):
         self._set(key, None)
         self._glow_suppress.discard(key)
         self._refresh_bind_button(key)
-        self._set_cmd_hint("Button unassigned.")
 
     # Button binding: capture lifecycle
 
@@ -978,10 +962,6 @@ class SettingsPanel(QWidget):
                 logger.debug("failed to start keyboard capture", exc_info=True)
 
         self._bind_buttons[key].set_configuring(True)
-        self._set_cmd_hint(
-            "Press a button, hat direction or key to assign. "
-            "Esc or click again to cancel."
-        )
 
     def _stop_configuring(self) -> None:
         key = self._configuring_key
@@ -1001,12 +981,10 @@ class SettingsPanel(QWidget):
         """Abort any active capture / armed unassign (e.g. drawer closed)."""
         if self._configuring_key is not None:
             self._stop_configuring()
-            self._set_cmd_hint("Assignment cancelled.")
         if self._unassign_armed:
             self._disarm_unassign()
         if self._pedal_configuring:
             self._stop_pedal_config()
-            self._set_cmd_hint("Pedal configuration cancelled.")
 
     # Button binding: polling (QTimer, main thread)
 
@@ -1076,7 +1054,6 @@ class SettingsPanel(QWidget):
                 elif self._kb_capture_started and not kb_active:
                     # Esc pressed: keyboard hook cleared its capture flag.
                     self._stop_configuring()
-                    self._set_cmd_hint("Assignment cancelled.")
                     return
 
         if binding is not None and key is not None:
@@ -1096,7 +1073,6 @@ class SettingsPanel(QWidget):
             except Exception:
                 logger.debug("failed to set capture guard", exc_info=True)
         self._refresh_bind_button(key)
-        self._set_cmd_hint(f"Assigned {binding_display_name(binding)}.")
 
     def _steal_duplicates(self, binding: dict, *, except_key: str) -> None:
         """Move the input if it was bound to another action: one input, one action."""
@@ -1403,7 +1379,6 @@ class SettingsPanel(QWidget):
                     duration_ms=7000,
                 )
 
-        self._set_cmd_hint("Reinstalling SDK...")
         try:
             start_reinstall(_on_done)
         except Exception:

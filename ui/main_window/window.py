@@ -163,12 +163,6 @@ class MonoCruiseWindow(QMainWindow):
         body_lay.addWidget(right)
         root.addWidget(body, 1)
 
-        # Command bar (bottom strip)
-        self._cmd_label = QLabel("Starting MonoCruise...")
-        self._cmd_label.setObjectName("cmdLabel")
-        self._cmd_label.setFixedHeight(22)
-        root.addWidget(self._cmd_label)
-
         # Version label (bottom‑right, absolute position)
         self._version_label = QLabel(self._version, central)
         self._version_label.setObjectName("versionLabel")
@@ -304,7 +298,6 @@ class MonoCruiseWindow(QMainWindow):
                 setattr(self._settings, name, Settings._dataclass_field_default(field))
         self._settings.save()
         self._settings_panel.apply_settings(self._settings)
-        self.set_cmd("All settings reset to defaults.")
 
     # Confirmation overlay
 
@@ -315,11 +308,6 @@ class MonoCruiseWindow(QMainWindow):
 
     def _show_consent(self, on_accept, on_decline=None):
         show_consent(self.centralWidget(), on_accept, on_decline)
-
-    # Command bar
-
-    def set_cmd(self, text: str) -> None:
-        self._cmd_label.setText(text)
 
     # Banner convenience
 

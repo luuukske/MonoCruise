@@ -27,8 +27,7 @@ LOST_COLOR     = "#FF0000"
 UPDATE_COLOR   = "#3FB950"
 UPDATE_TINT    = "#52DC63"
 HEADER_BG      = "#454545"
-CMD_COLOR      = "#808080"
-CMD_BG_COLOR   = "#202020"
+PREVIEW_TITLE_COLOR = "#808080"
 TEXT_COLOR     = "#d3d3d3"
 SUBTEXT_COLOR  = "#606060"
 PILL_RED       = "#FF0000"
@@ -65,8 +64,6 @@ SUBTEXT_GAP_BOTTOM = 4
 FONT_FAMILY = "Segoe UI"
 FONT_FAMILY_FALLBACK = "Helvetica Neue"
 FONT_SIZE = 13
-MONO_FAMILY = "Courier New"
-MONO_SIZE = 10
 
 # Centralised QSS
 STYLESHEET = f"""
@@ -97,15 +94,6 @@ QLabel#sectionHeader {{
     qproperty-alignment: AlignCenter;
 }}
 
-QLabel#cmdLabel {{
-    color: {CMD_COLOR};
-    font-family: "{MONO_FAMILY}";
-    font-size: {MONO_SIZE}px;
-    background-color: {CMD_BG_COLOR};
-    padding: 4px 8px;
-    border-radius: 5px;
-}}
-
 QLabel#versionLabel {{
     color: #505050;
     font-size: 11px;
@@ -113,7 +101,7 @@ QLabel#versionLabel {{
 }}
 
 QLabel#previewTitle {{
-    color: {CMD_COLOR};
+    color: {PREVIEW_TITLE_COLOR};
     font-size: 16px;
     font-weight: bold;
 }}

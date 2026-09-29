@@ -17,6 +17,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **ACC braked harder than the truck ahead once you were already catching it**: in a line of traffic a modest slowdown could turn into a much harder brake, and the trucks behind copied it. The extra brake is now smaller while there is still room, and a close stop is unchanged.
 - **ACC braked too hard for a stop, then rolled closer**: with Braking intensity raised in game, the learned brakes drifted far weaker than the truck really is, so cruise pressed much harder than it asked for and let off with gap left. The slider is now read correctly and the brakes relearn once after updating, and emergency braking no longer counts on extra brake from a raised slider.
 
+### Removed
+- **Status line at the bottom of the window**: the small terminal-style strip that echoed setup messages is gone, and the settings panel now uses the space. Pedal and button setup still show their progress on the buttons themselves.
+
 ## [1.1.0-rc.25] - 2026-09-28
 ### Fixed
 - **Set speed and the pedal bar could vanish and stay gone**: after some alt-tab sequences they never came back until a restart or toggling an overlay. They now put themselves back on screen.
