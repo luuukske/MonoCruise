@@ -16,8 +16,7 @@ from core.scs_profile.intensity import (
     aeb_available_decel_scale,
     aeb_max_brake_ms2,
     apply_brake_intensity,
-    learn_decel_scale,
-    tune_unit_decel,
+    effective_brake_pedal,
 )
 from core.scs_profile.reader import (
     _adaptive_label,
@@ -286,28 +285,50 @@ def test_low_i_aeb_warning_fires_hourly(caplog):
     assert "below 100%" in caplog.text
 
 
-def test_tune_unit_decel_is_identity_without_a_cvar():
-    assert tune_unit_decel(4.0, None) == pytest.approx(4.0)
-    assert tune_unit_decel(4.0, TUNE_BRAKE_INTENSITY) == pytest.approx(4.0)
-    assert tune_unit_decel(4.0, 3.0) == pytest.approx(4.0 * TUNE_BRAKE_INTENSITY / 3.0)
+def test_a_small_input_brakes_the_same_across_the_slider():
+    """Driver requirement: a given pedal brakes the same at every slider setting.
+
+    What reaches the game, scaled back by I / 1.1, must be the logical pedal again,
+    for cruise and the driver's own foot alike. See core/sending_thread/README.md.
+    """
+    for intensity in (1.0 / 3.0, 0.5, 1.0, TUNE_BRAKE_INTENSITY, 1.5, 2.158, 3.0):
+        for logical in (0.01, 0.03, 0.08, 0.15, 0.3):
+            sent = apply_brake_intensity(logical, intensity)
+            if sent < 1.0:
+                assert sent * intensity / TUNE_BRAKE_INTENSITY == pytest.approx(logical)
 
 
-def test_learn_decel_scale_maps_cvar_to_tune_units():
-    assert learn_decel_scale(TUNE_BRAKE_INTENSITY) == pytest.approx(1.0)
-    assert learn_decel_scale(1.0) == pytest.approx(TUNE_BRAKE_INTENSITY)
-    assert learn_decel_scale(3.0) == pytest.approx(TUNE_BRAKE_INTENSITY / 3.0)
-    assert learn_decel_scale(None) == pytest.approx(TUNE_BRAKE_INTENSITY)
+def test_effective_pedal_undoes_the_cruise_remap():
+    """Learning reads the sent pedal back in tune units, wherever the slider sits."""
+    for intensity in (1.0 / 3.0, 1.0, TUNE_BRAKE_INTENSITY, 2.158, 3.0):
+        for logical in (0.05, 0.2, 0.5, 0.9):
+            sent = apply_brake_intensity(logical, intensity)
+            if sent < 1.0:
+                assert effective_brake_pedal(sent, intensity) == pytest.approx(logical)
+
+
+def test_effective_pedal_saturates_like_the_game():
+    """A full pedal at a high slider is a full pedal, not a light press on strong brakes."""
+    assert effective_brake_pedal(1.0, 3.0) == pytest.approx(1.0)
+    assert effective_brake_pedal(1.0, 2.158) == pytest.approx(1.0)
+    assert effective_brake_pedal(1.0, 1.0) == pytest.approx(1.0 / TUNE_BRAKE_INTENSITY)
+    assert effective_brake_pedal(0.4, None) == pytest.approx(0.4)
+    assert effective_brake_pedal(0.0, 3.0) == 0.0
+
+
+def test_brake_ui_scale_labels():
     assert brake_ui_scale(1.0 / 3.0) == pytest.approx(0.5)
     assert brake_ui_scale(3.0) == pytest.approx(1.5)
 
 
-def test_aeb_capacity_is_physical_full_pedal_decel():
+def test_aeb_capacity_never_exceeds_the_tune():
+    """A high slider reaches full brake with less travel; it adds no brake. See README."""
     tune = 10.0
     assert aeb_available_decel_scale(TUNE_BRAKE_INTENSITY) == pytest.approx(1.0)
     assert aeb_max_brake_ms2(tune, TUNE_BRAKE_INTENSITY) == pytest.approx(tune)
-    assert aeb_max_brake_ms2(tune, 3.0) == pytest.approx(tune * 3.0 / TUNE_BRAKE_INTENSITY)
+    assert aeb_max_brake_ms2(tune, 2.158) == pytest.approx(tune)
+    assert aeb_max_brake_ms2(tune, 3.0) == pytest.approx(tune)
     assert aeb_max_brake_ms2(tune, 0.5) == pytest.approx(tune * 0.5 / TUNE_BRAKE_INTENSITY)
-    assert aeb_available_decel_scale(3.0) * learn_decel_scale(3.0) == pytest.approx(1.0)
     assert apply_brake_intensity(0.5, 3.0) == pytest.approx(0.5 * TUNE_BRAKE_INTENSITY / 3.0)
 
 

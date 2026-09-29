@@ -1,10 +1,12 @@
 """Invert live g_brake_intensity so the sent pedal matches the 1.1 tune.
 
-The game multiplies brake force by the cvar (1/3 left, 1 centre, 3 right).
-Mapper and ACC send ``min(1, logical * 1.1 / I)``. AEB and em_stop pass
-``full_authority`` so the logical pedal is the game axis. AEB's capacity is
-``tune_max * I / 1.1``, the physical full-pedal decel. I below 1.0 cannot
-be fully recovered; warn while AEB is enabled. See README.md.
+The slider makes the same pedal brake harder (1/3 left, 1 centre, 3 right).
+Cruise and the driver's pedal send ``min(1, logical * 1.1 / I)``, so a given pedal
+brakes the same at every setting; capacity learning undoes that same remap with
+``effective_brake_pedal``. AEB and em_stop pass ``full_authority``. Full pedal
+gains little at a high slider (traction, ABS), and AEB leaves it unused: capacity
+is ``tune_max * min(1, I / 1.1)``. I below 1.0 cannot be fully recovered; warn
+while AEB is enabled. See README.md.
 """
 
 from __future__ import annotations
@@ -53,21 +55,25 @@ def apply_brake_intensity(
     return min(p * scale, 1.0)
 
 
-def learn_decel_scale(intensity: float | None) -> float:
-    """Scale load-corrected decel into the I=1.1 units the brake baseline uses."""
-    return TUNE_BRAKE_INTENSITY / clamp_brake_intensity(intensity)
+def effective_brake_pedal(sent: float, intensity: float | None) -> float:
+    """Sent pedal back in tune units, capped at 1. None means already tune units.
 
-
-def tune_unit_decel(physical_decel: float, intensity: float | None) -> float:
-    """Measured plant decel into I=1.1 units. None means already in tune units."""
+    Inverse of the cruise remap, so learning reads a press at any slider as the
+    logical pedal it came from, not as a light press on a strong truck.
+    """
+    p = min(max(float(sent), 0.0), 1.0)
     if intensity is None:
-        return float(physical_decel)
-    return float(physical_decel) * learn_decel_scale(intensity)
+        return p
+    return min(p * clamp_brake_intensity(intensity) / TUNE_BRAKE_INTENSITY, 1.0)
 
 
 def aeb_available_decel_scale(intensity: float | None) -> float:
-    """Scale I=1.1 capacity into the physical full-pedal decel AEB can get."""
-    return clamp_brake_intensity(intensity) / TUNE_BRAKE_INTENSITY
+    """Share of the I=1.1 capacity AEB can count on. Never above 1.
+
+    Full pedal at 150% measured 1.29x the 100% figure, not 3x (traction, ABS); that
+    extra is left unused. A low slider is priced as a force cut: never over-reads.
+    """
+    return min(clamp_brake_intensity(intensity) / TUNE_BRAKE_INTENSITY, 1.0)
 
 
 def aeb_max_brake_ms2(tune_max: float, intensity: float | None) -> float:

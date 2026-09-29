@@ -54,8 +54,9 @@ Candidate inverts the fitted brake curve; pedal³ weighting; a sample moves the 
 at the same rate whether the stop was harder or softer than the current figure. Road load
 canceled before sampling. Fast EMA during
 deep settled AEB braking. Candidates reject above `_BRAKE_CANDIDATE_MAX_FRACTION` (1.35) of
-the load baseline. The pedal is the value written to the game. Measured decel is scaled
-by `1.1 / I` so a slider change is not learned as truck weakness.
+the load baseline. The pedal is the value written to the game, read back into tune units
+with `effective_brake_pedal` (the inverse of the cruise remap) so a slider change is not
+learned as truck weakness. See **Brake intensity**.
 
 **Gas**: `update_accel` every tick that the pedal is above zero, learning the zero-pedal
 offset, the shape-function anchor and the per-gear ratio. Same acceptance discipline as the
@@ -344,42 +345,78 @@ The bar is `WA_ShowWithoutActivating` and `WindowDoesNotAcceptFocus` for the sam
 
 ## Brake intensity (`core/scs_profile/intensity.py`)
 
-In-game **Braking intensity** (`g_brake_intensity`) is a force gain on the
-brake axis. Mapper, AEB and ACC were tuned at **I = 1.1**. The previous send
-path hard-coded `b ** 0.91` on the user pedal only, a [0, 1] fudge for sitting
-at I=1.0 after that tune.
-
-The live cvar is a multiply (1/3, 1, 3). The remap inverts it, last step before
-`SCSController.abackward`:
+In-game **Braking intensity** (`g_brake_intensity`, 1/3 left, 1 centre, 3 right)
+makes the same pedal brake harder. Mapper, AEB and ACC were tuned at **I = 1.1**.
+The remap inverts it, last step before `SCSController.abackward`:
 
 `sent = min(1, logical * 1.1 / I)`
 
-AEB (`AEB_brake`, folded into `em_stop` in this thread) and a manual `em_stop`
-slam pass `full_authority=True`. That path writes the logical pedal, so AEB's
-0-1 command is the real game axis and a slam still writes 1.0. AEB planning and
-`AEBDecelController` use `aeb_max_brake_ms2 = tune_max * I / 1.1`, the physical
-decel at pedal 1.0. Sub-engagement FF assist and cruise stay on the invert and
-on the unscaled tracker so a slider change does not retune ACC. `I < 1.0`
-cannot be fully recovered: if AEB is enabled, warn once an hour.
+**A given pedal must brake the same at every slider setting.** That is the point
+of the remap and it is confirmed by feel (Lukas, 2026-09-29): a small brake input
+has the same effect at either end of the slider. It applies to the driver's own
+pedal as well as to cruise, deliberately; only AEB and an `em_stop` slam bypass it.
+Keep it that way. `test_a_small_input_brakes_the_same_across_the_slider` pins it.
 
-Confirmed in-game: higher `I` is stronger braking, and this linear invert is
-the mapping. Do not restore a pedal power or treat UI 50/100/150 as the gain
-(150% is `I = 3`). A power cannot invert a multiply (`1 ** x` stays 1). At
-`I = 1.1` this is identity. At `I = 1.0` it is `* 1.1`. Unreadable files
+Do not restore a pedal power or treat UI 50/100/150 as the gain (150% is `I = 3`).
+At `I = 1.1` the remap is identity. At `I = 1.0` it is `* 1.1`. Unreadable files
 behave as `I = 1.0`.
+
+### What the slider does, measured 2026-09-29
+
+- Per unit of **logical** pedal the truck braked as it did before the remap
+  existed (27-30 against 26-34 m/s2 per unit, lag-aligned ACC braking over nine
+  days at `I = 2.158`). The linear invert holds partial braking constant.
+- Full-pedal capacity rises far less than the slider. The in-game A/B (one
+  12-wheel 17 t rig, 90 km/h, peak capacity as the curve asymptote) read 12.6 m/s2
+  at 100%, 14.9 at 135% and 16.2 at 150%: x1.29 where the slider value alone
+  predicts x3. The likely cause is traction: past ~15-16 m/s2 the tyres are at
+  their grip limit and ABS caps the decel, while at 100% the rig is still
+  brake-limited. At 100% it matched `baseline_brake_ms2` (12.57) to 0.1%.
+- The September learner multiplied every measured decel by `1.1 / I` and divided by
+  the curve at the sent pedal. At 135% that read the truck 51-85% as strong as it
+  was, and full-pedal stops, capped by traction, read 0.51. `brake_scale` walked
+  from 0.94 to 0.57, the mapper believed 7.2 m/s2 against a real ~12, and ACC's peak
+  delivered/requested decel went to 1.21 (median, 182 stops). After the fix: 0.99
+  (11 stops), against 1.02 before the remap existed.
+
+`tools/brake_intensity_probe.py` re-runs these checks from `brake_debug.csv`.
+
+What follows from it:
+
+- **Learning** reads the sent pedal back through the same remap,
+  `effective_brake_pedal` = `min(1, sent * I / 1.1)`, and never scales decel, so
+  `brake_scale` and `max_brake_ms2` stay in tune units at any slider.
+- **AEB capacity** is `aeb_max_brake_ms2 = tune_max * min(1, I / 1.1)`. The extra a
+  high slider buys at full pedal (15-22% on the A/B) is traction-limited and rig
+  dependent, so it is left unused, on the safe side. A low slider is priced as a
+  full force cut, which can only under-read it. Never let this exceed `tune_max`:
+  with the September learner recovered it would have believed up to 2x the truck,
+  and on 09-21 it already believed ~19.7 m/s2 against stops of at most 17.5.
+- **AEB and `em_stop`** still pass `full_authority=True` and write the logical
+  pedal, so a slam writes 1.0 and saturation cannot be starved. At a high slider
+  AEB's feedforward over-brakes mid-range; the observer takes that out.
+- `brake_scale` persisted under the old learner is dropped once, keyed on
+  `pedal_capacity_brake_model`.
+
+Sub-engagement FF assist and cruise stay on the invert and on the tracker in tune
+units, so a slider change does not retune ACC. `I < 1.0` cannot be fully
+recovered: if AEB is enabled, warn once an hour.
 
 `SendingThreadData.abackward` stays logical so the viz bar does not show the
 remapped axis. `recent_brake_outputs` and the AEB observer use the sent value,
 because `gameBrake` and the plant see that. CC's game-brake disengage compare
-reads that ring buffer.
+reads that ring buffer. `max_brake_ms2` on `SendingThreadData` is in tune units;
+`aeb_max_brake_ms2` is what AEB reads.
 
-Capacity learning takes the sent pedal and runs load-corrected decel through
-`tune_unit_decel` (`* 1.1 / I`) before the ratio, so a slider change is not a
-`brake_scale` change. Cruise remap and AEB full-authority send both use that
-pair: the pedal is what the game received, the decel is scaled from the plant.
-The settle gates still look at physical decel. `max_brake_ms2` on
-`SendingThreadData` stays in those 1.1 units; `aeb_max_brake_ms2` is the
-physical value AEB reads.
+## Brake debug log (`debug_csv.py`)
+
+With `debug` on in `config.json`, `brake_debug.csv` at the project root gets every
+braking tick at 20 Hz plus a 2 s tail: speed, the 0.30 s and 0.12 s decel
+measurements, road load, each brake source (user, mapper, hold, AEB), the pedal
+before and after the intensity remap, the tune pedal learning inverts, AEB's
+target and demand, the learned capacity, and which gate ended the learner's tick.
+Off by default, so it never ships to drivers. A header change rotates the old file
+aside, the same as `coast_debug.csv`.
 
 ## Main pedal thread
 

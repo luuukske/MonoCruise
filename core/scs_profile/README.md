@@ -57,36 +57,39 @@ Telemetry `shifterType` strings: `arcade`, `manual` (sequential), `hshifter`,
 eco. Other values are custom.
 
 `g_brake_intensity` is the Gameplay **Braking intensity** slider, not a
-hidden analog curve. The cvar is the force gain: about `1/3` left, `1.0`
-centre, `3` right. The UI labels that **50% / 100% / 150%**; those labels
-are not the gain. 150% stores `3.0` and the game brakes about 3x as hard as
-centre. Analog "sensitivity" in Controls is only the deadzone (`c_brake_dz`)
-plus whatever the `abackward` mix does; stock mixes are linear.
+hidden analog curve. The cvar makes the same pedal brake harder: about `1/3`
+left, `1.0` centre, `3` right. The UI labels that **50% / 100% / 150%**; those
+labels are not the gain. 150% stores `3.0`, so light braking is about 3x as
+strong as centre, while full brake rises only ~1.3x, most likely because the
+tyres reach their grip limit and ABS caps the decel. Analog "sensitivity" in
+Controls is only the deadzone (`c_brake_dz`) plus whatever the `abackward` mix
+does; stock mixes are linear.
 
 `g_intelligent_transmission` lives in the **global** `config.cfg` and is not
 the Controls transmission dropdown.
 
 ## Send remap
 
-Mapper, AEB and ACC were tuned at cvar `1.1`. The game multiplies brake force
-by the live cvar `I`. The sending thread inverts that as the last step before
-`SCSController.abackward`:
+Mapper, AEB and ACC were tuned at cvar `1.1`. The sending thread inverts the
+live cvar `I` as the last step before `SCSController.abackward`:
 
 `sent = min(1, logical * 1.1 / I)`
 
-AEB and a manual emergency-stop slam use `full_authority`: the logical pedal
-is written as-is, because AEB's capacity is already `tune_max * I / 1.1`
-(physical full-pedal decel). Cruise stays on the invert so a slider change
-does not retune ACC. Confirmed: `I` is a force multiply, higher is
-stronger. Do not go back to `p ** (I / 1.1)` or to UI%/100 as the gain
-(150% UI is `I = 3`, not 1.5).
+So a given pedal brakes the same at every slider setting, the driver's own
+pedal included. That is the requirement, confirmed by feel: keep it.
+
+Capacity learning undoes the same remap with `effective_brake_pedal` and never
+scales decel. AEB counts on `tune_max * min(1, I / 1.1)`: the traction-limited
+extra a high slider adds at full pedal is left unused. AEB and a manual
+emergency-stop slam use `full_authority` and write the logical pedal. Do not go
+back to `p ** (I / 1.1)` or to UI%/100 as the gain (150% UI is `I = 3`, not 1.5).
+Measurements and the reasoning are in `core/sending_thread/README.md` under
+**Brake intensity**.
 
 At `I = 1.1` this is identity. At `I = 1.0` (100% UI) cruise is `* 1.1`, the
 linear stand-in for the old `b ** 0.91`. Unreadable files behave as `I = 1.0`.
-A weak slider (`I < 1.0`) cannot be fully recovered once pedal 1.0 still
-multiplies by I. If AEB is enabled, warn once an hour. Capacity learning takes
-the sent pedal and scales measured decel by `1.1 / I`. See
-`core/sending_thread/README.md`.
+A weak slider (`I < 1.0`) cannot be fully recovered: pedal 1.0 only reaches
+`I / 1.1` of the tune's travel. If AEB is enabled, warn once an hour.
 
 ## AV
 

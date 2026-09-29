@@ -254,11 +254,15 @@ def test_over_reading_the_rig_is_refused(clock):
 def test_brake_intensity_does_not_poison_scale(clock):
     """Same truck at any slider, cruise or AEB send, must learn the same scale.
 
-    Plant is sent * I. Learning takes the sent pedal and ``tune_unit_decel``.
-    Cruise remaps the pedal; AEB full_authority writes it as-is. Both must
-    land on the same ``brake_scale``.
+    The remap makes a logical pedal brake the same at any slider, and learning reads
+    the sent pedal back through ``effective_brake_pedal``. Cruise remaps the pedal;
+    AEB full_authority writes it as-is. Both must land on the same ``brake_scale``.
     """
-    from core.scs_profile.intensity import TUNE_BRAKE_INTENSITY, apply_brake_intensity
+    from core.scs_profile.intensity import (
+        TUNE_BRAKE_INTENSITY,
+        apply_brake_intensity,
+        effective_brake_pedal,
+    )
 
     logical = 1.0
     learned = []
@@ -268,9 +272,8 @@ def test_brake_intensity_does_not_poison_scale(clock):
             sent = apply_brake_intensity(
                 logical, intensity, full_authority=full_authority,
             )
-            physical = (
-                brake_curve_fraction(sent) * BASE
-                * (intensity / TUNE_BRAKE_INTENSITY)
+            physical = BASE * brake_curve_fraction(
+                effective_brake_pedal(sent, intensity)
             )
             for _ in range(400):
                 clock.t += DT
@@ -290,7 +293,7 @@ def test_brake_intensity_does_not_poison_scale(clock):
 
 
 def test_high_i_without_the_scale_is_rejected_as_contamination(clock):
-    """AEB at I=3 and pedal 1.0 looks 2.7x strong unless decel is scaled first."""
+    """Decel 2.7x the model at full pedal is contamination, whatever the slider."""
     from core.scs_profile.intensity import TUNE_BRAKE_INTENSITY
 
     t = _fresh(scale=0.85)
@@ -306,6 +309,29 @@ def test_high_i_without_the_scale_is_rejected_as_contamination(clock):
             aeb_active=True,
         )
     assert t.brake_scale == pytest.approx(0.85)
+
+
+def test_a_high_slider_is_not_learned_as_weak_brakes(clock):
+    """Field bug: at 135% (I = 2.158) brake_scale slid from 0.94 to 0.57 in a week.
+
+    A full-authority slam at a high slider is a full pedal, and a cruise press is
+    the logical pedal it was remapped from. Neither may read as a weak truck.
+    """
+    from core.scs_profile.intensity import apply_brake_intensity, effective_brake_pedal
+
+    intensity = 2.158
+    for logical, full_authority in ((1.0, True), (0.3, False), (0.6, False)):
+        t = _fresh(scale=1.0)
+        sent = apply_brake_intensity(logical, intensity, full_authority=full_authority)
+        physical = BASE * brake_curve_fraction(effective_brake_pedal(sent, intensity))
+        for _ in range(400):
+            clock.t += DT
+            t.update_brake(
+                sent, physical, SPEED, 0.0, BASE, road_load_ms2=0.0,
+                aeb_active=full_authority, brake_intensity=intensity,
+            )
+        assert t.brake_samples_accepted > 0, f"no samples at logical {logical}"
+        assert t.brake_scale == pytest.approx(1.0, rel=0.02)
 
 
 def test_under_delivery_is_believed_all_the_way_down(clock):
@@ -343,6 +369,7 @@ def test_hooking_a_trailer_moves_the_estimate_the_same_tick(clock):
 def test_load_persisted_clamps_poisoned_value(monkeypatch):
     class _FakeSettings:
         pedal_capacity_brake_scale = 3.7
+        pedal_capacity_brake_model = pc._BRAKE_MODEL_VERSION
         pedal_capacity_max_accel_ms2 = 2.0
         pedal_capacity_accel_anchor_gain_ms2 = 0.0
         pedal_capacity_accel_ratio_step = 0.0
@@ -357,6 +384,39 @@ def test_load_persisted_clamps_poisoned_value(monkeypatch):
     t2 = pc.PedalCapacityTracker()
     t2.load_persisted(BASE, 2.0)
     assert t2.max_brake_ms2 == pytest.approx(BASE), "unset means believe the model"
+
+
+def test_a_scale_from_the_old_model_is_dropped_once(monkeypatch):
+    """Scales learned before the intensity read-back are poisoned at high sliders."""
+    saved = {}
+
+    class _FakeSettings:
+        pedal_capacity_brake_scale = 0.57
+        pedal_capacity_brake_model = 0
+        pedal_capacity_max_accel_ms2 = 2.0
+        pedal_capacity_accel_anchor_gain_ms2 = 0.0
+        pedal_capacity_accel_ratio_step = 0.0
+        mapper_brake_scale_ms2 = 6.5
+
+        @staticmethod
+        def save(values=None):
+            saved.update(values or {})
+
+    monkeypatch.setattr(pc, "Settings", _FakeSettings)
+    t = pc.PedalCapacityTracker()
+    t.load_persisted(BASE, 2.0)
+    assert t.brake_scale == pytest.approx(1.0)
+    assert saved == {
+        "pedal_capacity_brake_scale": 1.0,
+        "pedal_capacity_brake_model": pc._BRAKE_MODEL_VERSION,
+    }
+
+    saved.clear()
+    _FakeSettings.pedal_capacity_brake_model = pc._BRAKE_MODEL_VERSION
+    t2 = pc.PedalCapacityTracker()
+    t2.load_persisted(BASE, 2.0)
+    assert t2.brake_scale == pytest.approx(0.57), "a current-model scale is kept"
+    assert saved == {}
 
 
 def test_brake_baseline_rises_with_a_trailer(monkeypatch):

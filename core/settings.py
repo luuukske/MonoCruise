@@ -192,6 +192,8 @@ class Settings(metaclass=_SingletonMeta):
     # PedalCapacityTracker: persisted estimates (0 = use baseline on next startup)
     # Learned brake correction on the rig baseline; dimensionless, 0 = unset.
     pedal_capacity_brake_scale: float = 0.0
+    # Model version the scale above was learned under; a mismatch relearns it.
+    pedal_capacity_brake_model: int = 0
     # Superseded by pedal_capacity_brake_scale: an absolute m/s2 cannot survive a
     # trailer hookup. Retained so existing config files still load.
     pedal_capacity_max_brake_ms2: float = 11.457

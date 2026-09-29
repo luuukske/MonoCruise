@@ -8,7 +8,7 @@ import time
 from collections import deque
 from typing import Deque
 
-from core.scs_profile.intensity import tune_unit_decel
+from core.scs_profile.intensity import effective_brake_pedal
 from core.settings import Settings
 
 from .accel_to_pedals import brake_curve_fraction, weight_factor
@@ -34,6 +34,9 @@ _SAVE_COOLDOWN_S: float = 30.0      # min seconds between successive writes
 # asymmetric on purpose: under-delivery must be believable, over-reading is not.
 _BRAKE_SCALE_MIN: float = 0.35
 _BRAKE_SCALE_MAX: float = 1.00
+# Bump when a persisted brake_scale can no longer be trusted. 2: scales learned
+# before the intensity read-back took a high slider for weak brakes.
+_BRAKE_MODEL_VERSION: int = 2
 # Reject partial-pedal extrapolations above this fraction of the load baseline.
 _BRAKE_CANDIDATE_MAX_FRACTION: float = 1.35
 # Two-speed brake learning. Routine presses are shallow (pedal³ weight) and
@@ -162,6 +165,10 @@ class PedalCapacityTracker:
         # Gear-change tracking for the dwell gate.
         self._prev_gear: int = 0
         self._last_gear_change_mono: float = -math.inf
+        # Diagnostics for the brake debug log: the gate that ended the last tick.
+        self.last_brake_gate: str = ""
+        self.brake_samples_accepted: int = 0
+        self.last_brake_candidate_scale: float = 0.0
 
     @property
     def max_brake_ms2(self) -> float:
@@ -181,6 +188,20 @@ class PedalCapacityTracker:
     def load_persisted(self, baseline_brake: float, baseline_accel: float) -> None:
         """Seed estimates from persisted settings at startup. See `core/sending_thread/README.md`."""
         scale = _safe_float(Settings.pedal_capacity_brake_scale)
+        model = int(_safe_float(getattr(Settings, "pedal_capacity_brake_model", 0)))
+        if model != _BRAKE_MODEL_VERSION:
+            if scale > 0.0:
+                logger.info(
+                    "brake capacity relearns from the model (dropped scale %.3f)", scale,
+                )
+            scale = 1.0
+            try:
+                Settings.save(values={
+                    "pedal_capacity_brake_scale": 1.0,
+                    "pedal_capacity_brake_model": _BRAKE_MODEL_VERSION,
+                })
+            except Exception:
+                logger.debug("pedal_capacity model reset save failed", exc_info=True)
         self._brake_scale = _clamp(
             scale if scale > 0.0 else 1.0, _BRAKE_SCALE_MIN, _BRAKE_SCALE_MAX,
         )
@@ -277,27 +298,31 @@ class PedalCapacityTracker:
         aeb_active: bool = False,
         brake_intensity: float | None = None,
     ) -> None:
-        """Feed one braking tick. ``brake_output`` is the sent pedal. See README."""
+        """Feed one braking tick. ``brake_output`` is the sent pedal, read back through
+        ``brake_intensity`` into tune units. See README."""
         # Re-resolve against this tick's rig: hooking a trailer must move the
         # estimate in the same tick, so only the correction is carried over.
         if baseline_ms2 > 0.0:
             self._max_brake_ms2 = self._brake_scale * baseline_ms2
 
         now = time.monotonic()
+        # Everything below runs in tune units: gates and the curve read the pedal the
+        # intensity remap began from, which brakes the same at every slider setting.
+        pedal = effective_brake_pedal(brake_output, brake_intensity)
 
         # Smoothed pedal for gating and the ratio (see the settle-gate note
         last = self._last_brake_call_mono
         self._last_brake_call_mono = now
         smooth = self._brake_pedal_smooth
         if smooth is None or last is None or now - last > _BRAKE_SETTLE_WINDOW_S:
-            smooth = brake_output
+            smooth = pedal
             self._brake_pedal_history.clear()
             self._decel_history.clear()
         else:
             a_s = 1.0 - math.exp(
                 -max(now - last, 1e-4) / _BRAKE_PEDAL_SMOOTH_TAU_S
             )
-            smooth += a_s * (brake_output - smooth)
+            smooth += a_s * (pedal - smooth)
         self._brake_pedal_smooth = smooth
 
         history = self._brake_pedal_history
@@ -319,35 +344,41 @@ class PedalCapacityTracker:
             d_hist.popleft()
 
         if speed_ms < _MIN_BRAKE_SPEED_MS or baseline_ms2 <= 0.0:
+            self.last_brake_gate = "speed"
             return
         if smooth < _BRAKE_PEDAL_FLOOR:
+            self.last_brake_gate = "pedal"
             return
         if abs(slope_rad) > _MAX_SLOPE_RAD:
+            self.last_brake_gate = "slope"
             return
 
         if now - self._last_brake_step_mono < _BRAKE_STEP_GUARD_S:
+            self.last_brake_gate = "step"
             return
 
         pedal_values = [p for _, p in history]
         if (history[-1][0] - history[0][0] < _BRAKE_SETTLE_WINDOW_S
                 or max(pedal_values) - min(pedal_values) > _BRAKE_SETTLE_TOLERANCE):
+            self.last_brake_gate = "pedal_settle"
             return
 
         # Decel settled: the ratio below is only meaningful once the measured
         if d_hist[-1][0] - d_hist[0][0] < _DECEL_SETTLE_WINDOW_S:
+            self.last_brake_gate = "decel_window"
             return
         decel_values = [d for _, d in d_hist]
         d_max = max(decel_values)
         if d_max - min(decel_values) > max(
             _DECEL_SETTLE_ABS_MS2, _DECEL_SETTLE_FRAC * d_max
         ):
+            self.last_brake_gate = "decel_settle"
             return
 
         mean_decel = sum(decel_values) / len(decel_values)
         if mean_decel < _MIN_DECEL_MS2:
+            self.last_brake_gate = "decel_min"
             return
-        # Plant is sent * I. Put decel in I=1.1 units; the pedal is already sent.
-        mean_decel = tune_unit_decel(mean_decel, brake_intensity)
 
         # Window means on both sides: zero-mean dither and telemetry ripple
         mean_pedal = max(
@@ -355,11 +386,15 @@ class PedalCapacityTracker:
         )
         candidate = mean_decel / brake_curve_fraction(mean_pedal)
         if candidate > _brake_candidate_cap_ms2(baseline_ms2):
+            self.last_brake_gate = "cap"
             return
 
         # Learn in baseline-relative units so the sample stays meaningful after
         # the rig changes underneath it.
         candidate_scale = candidate / baseline_ms2
+        self.last_brake_gate = "ok"
+        self.brake_samples_accepted += 1
+        self.last_brake_candidate_scale = candidate_scale
         weight = mean_pedal ** _WEIGHT_POWER
         base = _BRAKE_ALPHA_AEB if aeb_active else _BRAKE_ALPHA_NORMAL
         alpha = base * weight

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 """Sending thread: SCS I/O, mapper, hold, capacity. See core/sending_thread/README.md."""
 
-import csv
 import logging
 import math
 import time
@@ -23,9 +22,11 @@ from core.scs_profile.intensity import (
     LowBrakeIntensityAebWarning,
     aeb_max_brake_ms2,
     apply_brake_intensity,
+    effective_brake_pedal,
 )
 
 from .accel_to_pedals import AccelToPedals, MapperSharedState, baseline_accel_ms2, baseline_brake_ms2
+from .debug_csv import BrakeDebugLog, open_debug_csv
 from .hold_controller import (
     HoldController,
     STATE_HOLDING,
@@ -421,42 +422,16 @@ class SendingThread(BaseThread):
             self._project_root = Path(__file__).resolve().parents[2]
         except Exception:
             self._project_root = Path(".").resolve()
+        self._brake_log = BrakeDebugLog(self._project_root)
 
-    # Coast-down CSV logger 
-
-    @staticmethod
-    def _coast_header_differs(path) -> bool:
-        """True when the on-disk header does not match the current columns."""
-        try:
-            with path.open("r", newline="", encoding="utf-8") as fh:
-                return next(csv.reader(fh), []) != _COAST_LOG_HEADER_ROW
-        except OSError:
-            return False
+    # Coast-down CSV logger
 
     def _ensure_coast_log(self) -> None:
         if self._coast_log_file is not None:
             return
-        path = self._project_root / _COAST_LOG_NAME
-        write_header = not path.exists() or path.stat().st_size == 0
-        if not write_header and self._coast_header_differs(path):
-            # Appending new columns under an old header silently misaligns every
-            # later row. Rotate instead, so both files stay parseable.
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            try:
-                path.rename(path.with_name(f"{path.stem}_{stamp}{path.suffix}"))
-                write_header = True
-            except OSError:
-                logger.debug("coast_debug rotate failed", exc_info=True)
-        try:
-            self._coast_log_file = path.open("a", newline="", encoding="utf-8")
-            self._coast_log_writer = csv.writer(self._coast_log_file)
-            if write_header:
-                self._coast_log_writer.writerow(_COAST_LOG_HEADER_ROW)
-                self._coast_log_file.flush()
-        except OSError:
-            self._coast_log_file = None
-            self._coast_log_writer = None
-            logger.debug("coast_debug log unavailable", exc_info=True)
+        self._coast_log_file, self._coast_log_writer = open_debug_csv(
+            self._project_root / _COAST_LOG_NAME, _COAST_LOG_HEADER_ROW,
+        )
 
     def _log_coast_step(
         self,
@@ -1549,6 +1524,7 @@ class SendingThread(BaseThread):
         # AEB active: closed-loop decel controller writes the brake pedal. The
         # merge stays a max so a driver out-braking AEB always wins.
         now_ctrl = time.monotonic()
+        aeb_pedal = 0.0
         if _aeb_active and gasval < 0.8:
             aeb_i = self._brake_intensity.get(tel_game)
             aeb_cap = max(
@@ -1645,7 +1621,7 @@ class SendingThread(BaseThread):
             aeb_active=_aeb_active,
         )
 
-        # Capacity from the pedal the game received, decel scaled to 110% intensity.
+        # Capacity from the pedal the game received, read back through the remap.
         _base_brake = baseline_brake_ms2(mass_kg, has_t, wheels_on_ground)
         self._capacity_tracker.update_brake(
             max(float(sent_b), 0.0), measured_decel_ms2, speed_ms, brake_grade_rad,
@@ -1660,6 +1636,57 @@ class SendingThread(BaseThread):
                 a, max(0.0, raw_a), speed_ms, brake_grade_rad, game_clutch, tel_gear,
                 mass_kg, has_t, road_load_ms2=mapper_road_load_ms2 - mapper_creep_ms2,
             )
+
+        # Debug only, after every output is committed: loop() zeroes the pedals on
+        # any exception, so a logging fault must never escape this block.
+        if Settings.debug:
+            try:
+                tracker = self._capacity_tracker
+                self._brake_log.tick(
+                    time.monotonic(),
+                    (speed_ms >= 1.0 and logical_b > 0.002)
+                    or game_brake > 0.02 or _aeb_active,
+                    {
+                        "speed_ms": speed_ms,
+                        "accel_ms2": raw_a,
+                        "decel_fast_ms2": measured_decel_fast_ms2,
+                        "road_load_ms2": mapper_road_load_ms2,
+                        "slope_rad": brake_grade_rad,
+                        "gear": tel_gear_dashboard,
+                        "game_clutch": game_clutch,
+                        "game_throttle": game_throttle,
+                        "game_brake": game_brake,
+                        "gas": a,
+                        "user_brake": pedal_brake,
+                        "mapper_brake": mapper_brake,
+                        "hold_brake": hold_out.brake_pedal,
+                        "aeb_pedal": aeb_pedal,
+                        "logical_brake": logical_b,
+                        "sent_brake": sent_b,
+                        "full_authority": full_authority,
+                        "brake_intensity": intensity,
+                        "tune_pedal": effective_brake_pedal(sent_b, intensity),
+                        "aeb_active": _aeb_active,
+                        "aeb_warn": AEB_warn,
+                        "aeb_target_decel_ms2": AEB_target_decel,
+                        "aeb_required_decel_ms2": AEB_required_decel,
+                        "cruise_active": cruise_active,
+                        "controller": cruise_active_controller,
+                        "wanted_ms2": wanted_a,
+                        "est_brake_ms2": tracker.max_brake_ms2,
+                        "aeb_max_brake_ms2": aeb_max_brake_ms2(tracker.max_brake_ms2, intensity),
+                        "brake_scale": tracker.brake_scale,
+                        "baseline_brake_ms2": _base_brake,
+                        "learn_gate": tracker.last_brake_gate,
+                        "learn_count": tracker.brake_samples_accepted,
+                        "learn_candidate": tracker.last_brake_candidate_scale,
+                        "mass_kg": mass_kg,
+                        "wheels_on_ground": wheels_on_ground,
+                        "trailer_count": ego_trailer_count,
+                    },
+                )
+            except Exception:
+                logger.debug("brake_debug tick failed", exc_info=True)
 
         self._tick_bool_presses(controller)
 
@@ -1770,6 +1797,7 @@ class SendingThread(BaseThread):
         self._prev_aeb_loop_mono = None
         self._accel_mapper.close()
         self._close_coast_log()
+        self._brake_log.close()
         logger.debug("teardown complete")
 
     def _tick_bool_overrides(self, controller: SCSController) -> None:
