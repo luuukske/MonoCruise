@@ -100,6 +100,9 @@ updates from telemetry the whole time. A longer road is drawn with more points
 than a short one, about one every 10 m. It is not part of the ACC debug window.
 The bright line is the lane chosen above. The pink line is the road model
 fitted from that lane: its direction, with the truck's sideways offset held.
+Map objects out to 400 m are drawn in their own color. Pointing at one
+shows the model path and the hex color. Road paint, power lines, low curbs,
+forest bands, plant circles, and the ground surface are left out.
 
 ```
 python tools/road_layout_check.py

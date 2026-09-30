@@ -16,7 +16,8 @@ hygiene rules apply to every file in it.
 | `accel_envelope_probe.py` | What does the CC accel ceiling command at each speed, and how long is 0-50 / 0-90? Prints the per-profile table plus a capability-limited rig model (`--rig loaded`) so the light and loaded regimes can be compared. |
 | `read_scs_profile.py` | Transmission and braking intensity for the selected ETS2/ATS profile. Steam Cloud vs local, `game.log.txt` identity, live `shifterType` when the SDK is up. `--json` for agents. |
 | `road_layout_check.py` | Distance from a truck pose to the nearest lane centerline, including prefab junctions. See `core/road_layout/README.md`. |
-| `road_layout_view.py` | Live lane map while driving. Separate window, north up, loads a sector when the truck gets near it. |
+| `road_layout_view.py` | Live lane map while driving. Separate window, north up, loads a sector when the truck gets near it. Guardrails, signs and posts draw out to 400 m. |
+| `map_obstacle_probe.py` | Times and classifies trees, signs, pillars, guardrails and other map objects in one sector. Vegetation is a density band, not individual trees. |
 | `plot_coast.py` | Coast-fit plots for the mapper. |
 | `release.py`, `tune_visualizer.py` | Release packaging and live tuning UI. |
 

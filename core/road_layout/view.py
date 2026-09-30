@@ -3,6 +3,7 @@
 North is up and the truck stays in the centre. Sectors load on a side thread
 when the view can reach them. The bright line is the lane the truck is in, drawn forward until just before
 the sixth prefab, or 200 m. The pink line is the road model.
+Map objects out to 400 m each have their own color. Point at one to read its name.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import logging
 import math
 
 from PySide6.QtCore import QObject, QPointF, QThread, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QPainter, QPaintEvent, QPen, QPolygonF
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPaintEvent, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
 from core.acc.lane_direction import LaneDirection, centreline_world, lane_direction_samples
@@ -39,6 +40,8 @@ _TRUCK = QColor(242, 242, 242)
 _TEXT = QColor(215, 215, 215)
 _MUTED = QColor(150, 150, 160)
 _VIEW_M = 200.0
+_PROP_M = 400.0
+_PICK_PX = 12.0
 _TICK_MS = 50
 _MOVE_M = 50.0
 _HOLD_M = 2.5
@@ -96,6 +99,7 @@ class LaneMapWindow(QWidget):
         self.setWindowTitle("Lane map")
         self.resize(960, 720)
         self.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
+        self.setMouseTracking(True)
         self._font = QFont()
         self._font.setPointSize(10)
         self._reader = ScsPoseReader()
@@ -110,6 +114,7 @@ class LaneMapWindow(QWidget):
         self._status = "Indexing the map"
         self._catalog_ready = False
         self._zoom = 1.0
+        self._pointer: QPointF | None = None
         self._req: tuple[float, float] | None = None
         self._thread = QThread(self)
         self._worker = _Worker()
@@ -132,6 +137,15 @@ class LaneMapWindow(QWidget):
         self._thread.wait(3000)
         self._reader.close()
         super().closeEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        self._pointer = event.position()
+        self.update()
+
+    def leaveEvent(self, event) -> None:
+        self._pointer = None
+        self.update()
+        super().leaveEvent(event)
 
     def wheelEvent(self, event) -> None:
         step = 1.12 if event.angleDelta().y() > 0 else 1 / 1.12
@@ -252,6 +266,7 @@ class LaneMapWindow(QWidget):
             painter.drawPolyline(QPolygonF([
                 self._to_screen(x, z, pose, ppm) for x, z in line.pts
             ]))
+        self._draw_props(painter, pose, frame, ppm)
         if chain:
             painter.setPen(QPen(_CHOSEN, 3.0))
             for span in chain:
@@ -266,6 +281,95 @@ class LaneMapWindow(QWidget):
                 self._to_screen(x, z, pose, ppm) for x, z in model
             ]))
         self._draw_truck(painter, pose, ppm)
+
+    def _draw_props(self, painter: QPainter, pose: ScsPose, frame: MapFrame, ppm: float) -> None:
+        reach = _PROP_M
+        reach2 = reach * reach
+        for line in frame.props:
+            if line.max_x < pose.x - reach or line.min_x > pose.x + reach:
+                continue
+            if line.max_z < pose.z - reach or line.min_z > pose.z + reach:
+                continue
+            if not line.color:
+                continue
+            painter.setPen(QPen(QColor(line.color), 2.2))
+            run: list[QPointF] = []
+            for x, z in line.pts:
+                dx = x - pose.x
+                dz = z - pose.z
+                if dx * dx + dz * dz > reach2:
+                    if len(run) >= 2:
+                        painter.drawPolyline(QPolygonF(run))
+                    run = []
+                    continue
+                run.append(self._to_screen(x, z, pose, ppm))
+            if len(run) >= 2:
+                painter.drawPolyline(QPolygonF(run))
+        painter.setPen(Qt.PenStyle.NoPen)
+        for dot in frame.dots:
+            dx = dot.x - pose.x
+            dz = dot.z - pose.z
+            if dx * dx + dz * dz > reach2:
+                continue
+            if not dot.color:
+                continue
+            painter.setBrush(QColor(dot.color))
+            radius = 3.2
+            painter.drawEllipse(self._to_screen(dot.x, dot.z, pose, ppm), radius, radius)
+
+    def _draw_pick(self, painter: QPainter, pose: ScsPose, frame: MapFrame, ppm: float) -> None:
+        text = self._pick_label(pose, frame, ppm)
+        color = _TEXT
+        if text.startswith("#") and len(text) >= 7:
+            color = QColor(text[:7])
+        shown = QFontMetrics(self._font).elidedText(
+            text, Qt.TextElideMode.ElideMiddle, max(40, self.width() - 32),
+        )
+        painter.setPen(QPen(color))
+        painter.drawText(16, self.height() - 16, shown)
+
+    def _pick_label(self, pose: ScsPose, frame: MapFrame, ppm: float) -> str:
+        if self._pointer is None:
+            return "Point at an object to read its name and color."
+        px, py = self._pointer.x(), self._pointer.y()
+        limit = _PICK_PX * _PICK_PX
+        best = limit
+        found = ""
+        reach2 = _PROP_M * _PROP_M
+        for dot in frame.dots:
+            dx = dot.x - pose.x
+            dz = dot.z - pose.z
+            if dx * dx + dz * dz > reach2 or not dot.label:
+                continue
+            screen = self._to_screen(dot.x, dot.z, pose, ppm)
+            dist = (screen.x() - px) ** 2 + (screen.y() - py) ** 2
+            if dist < best:
+                best = dist
+                found = f"{dot.color}  {dot.label}"
+        wx, wz = self._cursor_world(pose, ppm)
+        pad = _PICK_PX / max(ppm, 0.05)
+        for line in frame.props:
+            if not line.label or line.max_x < wx - pad or line.min_x > wx + pad:
+                continue
+            if line.max_z < wz - pad or line.min_z > wz + pad:
+                continue
+            previous: QPointF | None = None
+            for x, z in line.pts:
+                screen = self._to_screen(x, z, pose, ppm)
+                if previous is not None:
+                    dist = _segment_dist2(px, py, previous.x(), previous.y(), screen.x(), screen.y())
+                    if dist < best:
+                        best = dist
+                        found = f"{line.color}  {line.label}"
+                previous = screen
+        return found or "Point at an object to read its name and color."
+
+    def _cursor_world(self, pose: ScsPose, ppm: float) -> tuple[float, float]:
+        if self._pointer is None:
+            return pose.x, pose.z
+        east = (self._pointer.x() - self.width() * 0.5) / ppm
+        north = (self.height() * 0.5 - self._pointer.y()) / ppm
+        return pose.x + east, pose.z - north
 
     def _draw_grid(self, painter: QPainter, pose: ScsPose, ppm: float) -> None:
         painter.setPen(QPen(_GRID, 1.0))
@@ -304,7 +408,7 @@ class LaneMapWindow(QWidget):
     ) -> None:
         speed = pose.speed * 3.6
         lines = [
-            "North up. Scroll to zoom.",
+            "North up. Scroll to zoom. Objects to 400 m.",
             "Pink line is the road model.",
             f"{speed:.0f} km/h" if speed >= 0.5 else "Stopped",
             _lane_text(frame.lines, choice),
@@ -320,6 +424,17 @@ class LaneMapWindow(QWidget):
             ))
             painter.drawText(16, y, text)
             y += 18
+        self._draw_pick(painter, pose, frame, self._ppm())
+
+
+def _segment_dist2(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+    dx = bx - ax
+    dy = by - ay
+    length2 = dx * dx + dy * dy
+    if length2 < 1e-6:
+        return (px - ax) ** 2 + (py - ay) ** 2
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length2))
+    return (px - (ax + t * dx)) ** 2 + (py - (ay + t * dy)) ** 2
 
 
 def _nose(pose: ScsPose) -> tuple[float, float]:

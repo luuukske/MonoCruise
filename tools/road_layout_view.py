@@ -6,7 +6,8 @@ Run from the repo root, with the game already in a truck:
 
 North is up. The truck stays centred. The bright line is the lane it is in,
 drawn forward until just before the sixth prefab, or 200 m. The pink line
-is the road model.
+is the road model. Other map objects out to 400 m each have their own color.
+Point at one and the bottom line shows its name and hex color.
 A sector is read when the view can reach it, and dropped after the truck has
 moved on.
 """
