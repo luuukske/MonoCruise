@@ -14,6 +14,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ### Changed
 - **The log of your last session is kept**: MonoCruise used to overwrite its log on every start, so the log of a session that went wrong was often gone before it could be shared. The previous one is now kept as `monocruise.prev.log`.
 
+### Fixed
+- **Cruise panel floated on the desktop without the game**: opening MonoCruise on its own showed the set-speed panel on top of everything. It now only shows while the game is running.
+
 ## [1.1.0-rc.26] - 2026-09-30
 ### Fixed
 - **ACC lurched when pulling away behind slow traffic**: it waited too long when the truck ahead moved off gently or crept forward, then floored the gas and braked again, over and over. It now sees slow traffic moving sooner, pulls away and creeps along at its pace without stopping, and the gas no longer floors while the clutch is still engaging.

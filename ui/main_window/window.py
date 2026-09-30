@@ -52,6 +52,10 @@ from ui.overlay_topmost import OVERLAY_KEEP_MS, reassert_topmost
 
 _CC_LEAD_SPEED_MIN_INTERVAL_S = 0.5
 
+# The cruise panel stays up this long after the game SDK drops, so a single
+# failed telemetry read does not blink it off.
+_CC_PANEL_DISCONNECT_GRACE_S = 3.0
+
 # The support prompt waits this long after the window becomes visible, so it
 # never lands on top of a window the user is still bringing up.
 _SUPPORT_PROMPT_DELAY_S = 3.0
@@ -214,6 +218,9 @@ class MonoCruiseWindow(QMainWindow):
         # Throttle lead-speed integer updates so telemetry jitter does not flicker the label.
         self._cc_lead_speed_emit_val: int | None = None
         self._cc_lead_speed_emit_ts: float = 0.0
+        # Panel only shows while the game runs (pause and menus included).
+        self._cc_game_seen_mono: float | None = None
+        self._cc_game_live: bool = False
         self._init_cc_panel()
 
         # Apply loaded settings to widgets
@@ -594,8 +601,9 @@ class MonoCruiseWindow(QMainWindow):
             except (TypeError, ValueError):
                 gap_level = 2
 
-        # Show whenever "Show CC UI" is on (including game pause / menu).
-        should_show = show_ui
+        # Show whenever "Show CC UI" is on and the game runs (pause / menu included).
+        self._cc_game_live = self._game_live_for_cc_panel(now_mono)
+        should_show = show_ui and self._cc_game_live
 
         new_scale = self._cc_scale_mult(scaling_raw)
         if self._cc_panel_scale_snap != new_scale:
@@ -655,11 +663,28 @@ class MonoCruiseWindow(QMainWindow):
             return
         with self._settings._state_lock:
             show_ui = bool(self._settings.show_cc_ui)
-        if not show_ui:
+        if not show_ui or not self._cc_game_live:
             return
         if not panel.is_visible():
             panel.show()
         panel.reassert_topmost()
+
+    def _game_live_for_cc_panel(self, now_mono: float) -> bool:
+        """True while the game SDK is connected, held for a short grace after it drops."""
+        connected = False
+        try:
+            telemetry = registry.get_thread("telemetry_thread")
+            with telemetry.data._lock:
+                connected = bool(telemetry.data.is_connected)
+        except (KeyError, AttributeError):
+            pass
+        except Exception:
+            logger.debug("cc panel: telemetry unreadable", exc_info=True)
+        if connected:
+            self._cc_game_seen_mono = now_mono
+            return True
+        seen = self._cc_game_seen_mono
+        return seen is not None and (now_mono - seen) < _CC_PANEL_DISCONNECT_GRACE_S
 
     def _reassert_bar(self) -> None:
         try:

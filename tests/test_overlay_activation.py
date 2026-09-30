@@ -222,6 +222,7 @@ def test_cruise_panel_reassert_follows_the_setting():
         _cc_panel=panel,
         _settings=SimpleNamespace(show_cc_ui=False, _state_lock=threading.RLock()),
         _closing=False,
+        _cc_game_live=True,
     )
     MonoCruiseWindow._reassert_cc_panel(host)
     assert panel.shown == 0
@@ -232,6 +233,39 @@ def test_cruise_panel_reassert_follows_the_setting():
     MonoCruiseWindow._reassert_cc_panel(host)
     assert panel.shown == 1
     assert panel.reasserted == 1
+
+
+def test_cruise_panel_stays_hidden_without_the_game():
+    panel = SimpleNamespace(visible=False, shown=0, reasserted=0)
+    panel.is_visible = lambda: panel.visible
+    panel.show = lambda: setattr(panel, "shown", panel.shown + 1)
+    panel.reassert_topmost = lambda: setattr(panel, "reasserted", panel.reasserted + 1)
+    host = SimpleNamespace(
+        _cc_panel=panel,
+        _settings=SimpleNamespace(show_cc_ui=True, _state_lock=threading.RLock()),
+        _closing=False,
+        _cc_game_live=False,
+    )
+    MonoCruiseWindow._reassert_cc_panel(host)
+    assert panel.shown == 0
+    assert panel.reasserted == 0
+
+
+def test_cruise_panel_game_liveness_rides_out_a_read_hiccup(monkeypatch):
+    import ui.main_window.window as window_mod
+
+    data = SimpleNamespace(is_connected=False, _lock=threading.RLock())
+    fake_registry = SimpleNamespace(get_thread=lambda name: SimpleNamespace(data=data))
+    monkeypatch.setattr(window_mod, "registry", fake_registry)
+    host = SimpleNamespace(_cc_game_seen_mono=None)
+    live = MonoCruiseWindow._game_live_for_cc_panel
+
+    assert live(host, 100.0) is False  # game never seen: desktop launch stays clean
+    data.is_connected = True
+    assert live(host, 101.0) is True
+    data.is_connected = False
+    assert live(host, 102.0) is True  # one bad read inside the grace
+    assert live(host, 101.0 + window_mod._CC_PANEL_DISCONNECT_GRACE_S + 0.1) is False
 
 
 def test_popup_reassert_skips_idle(qapp, monkeypatch):
