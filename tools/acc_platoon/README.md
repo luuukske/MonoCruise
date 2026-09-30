@@ -100,6 +100,8 @@ All at gap level 2, 80 km/h, set speed 90 km/h, a mixed fleet, ten followers.
 | `stationary_lock` | the emergency stop with AEB and nobody tapping resume |
 | `queue_stop` | 50 km/h to a standstill at 2 m/s², stands 20 s, drives off |
 | `stop_and_go` | 60 and 25 km/h in turns |
+| `slow_pull_away` | the convoy stands; the lead pulls away at 0.3 m/s² to 30 km/h |
+| `creep` | the convoy stands; the lead inches off at 2 km/h, below where `acc_speed` reads non-zero, and never stops |
 | `laggy_client` | holds 80 km/h, follower 5 is on `LAGGY` |
 | `blackout_brake` | `hard_brake` while follower 1 gets no update for 1.0 s, the worst pause seen |
 | `desync_snap` | holds 80 km/h, drawn 8 m closer to follower 1 for 0.3 s |
@@ -140,7 +142,7 @@ Two separate mechanisms, and the clean link separates them:
 
 ## The tests
 
-`tests/acc/test_platoon.py` runs eleven scenarios once per session in spawned
+`tests/acc/test_platoon.py` runs thirteen scenarios once per session in spawned
 worker processes: about 11 s on eight cores. Bounds come in two kinds. `TARGET_*`
 is the requirement. `BASELINE_*` is the worst of seeds 1 to 3 at landing where the
 stack is short of its target; lower it when ACC improves, never raise it, and once
@@ -182,6 +184,7 @@ the netcode does from what the speed estimate's own lag does. A run costs about
 | unprovoked brakes | brake episodes (command below -1 m/s²) a truck starts while the truck ahead has not braked for 3 s |
 | contacts | followers whose drawn gap reached zero |
 | stopped | followers that came to a standstill |
+| re-stops | times a truck came back to rest after rolling off; behind a lead that never stops, each one is a lurch |
 | disarmed | followers whose ACC an AEB stop switched off |
 
 ## Limits

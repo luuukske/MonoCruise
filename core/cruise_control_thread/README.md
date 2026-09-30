@@ -280,6 +280,23 @@ The engage-time margin, the no-bid-at-rest rule and the snap from a positive
 cap each fix a measured failure: rationale and numbers in
 `core/acc/ACC_ARCHITECTURE.md` §10.1. Enforced by `tests/acc/test_standstill_hold.py`.
 
+### Pulling away
+
+`pull_away.py`, below 4 m/s only. `LeadMotion` measures the immediate lead's
+speed from its own displacement (gap plus ego odometer), which sees a crawl
+`acc_speed` still latches at 0; the smoothed lead takes that speed while
+`acc_speed` is under 0.8 m/s. `pace_lift` raises the law toward the lead's pace
+and gives a launch bid at rest, where IIDM cannot see lead speed at all. Both
+the command and the standstill hold's wanted accel go through it. It only ever
+raises a law, never inside 75 % of the wanted gap, and never touches the raw lead
+the safety overlays read. Rationale and convoy measurements:
+`core/acc/ACC_ARCHITECTURE.md` §10.2. Enforced by `tests/acc/test_pull_away.py`
+and the `slow_pull_away` and `creep` runs in `tests/acc/test_platoon.py`.
+
+While ACC's bid is the command and it follows a lead it measures moving, the
+thread publishes `commanded_crawl_follow` beside the command, so the hold FSM
+does not read steady speed keeping under 2 km/h as a stop (§10.3).
+
 ### Lead-loss grace
 
 Brief empty-chain ticks reuse the last chain for `LEAD_LOSS_GRACE_S` so IIDM state does not

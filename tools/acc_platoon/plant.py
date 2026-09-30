@@ -65,11 +65,12 @@ class TruckPlant:
         self.hold = HoldController(lambda d: min(1.0, max(0.0, d) / spec.brake_ms2))
         self.hold_out = HoldOutput()
 
-    def step(self, cmd_ms2: float, dt: float) -> None:
+    def step(self, cmd_ms2: float, dt: float, crawl_follow: bool = False) -> None:
         spec = self.spec
         self.hold_out = self.hold.update(
             speed_kmh=self.v * 3.6, gear=1, pitch_norm=0.0, commanded_accel_ms2=cmd_ms2,
             gasval=0.0, opdgasval=0.0, offset=0.0, park_brake=False, aeb_active=False, dt=dt,
+            crawl_follow=crawl_follow,
         )
         self._queue.append(cmd_ms2)
         target = self._queue.popleft()

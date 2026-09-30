@@ -16,7 +16,7 @@ from .blinker_arbitration import (
     BlinkerArbiter,
     BlinkerState,
 )
-from . import anticipation, approach_profile, brake_landing, idm_cah, standstill_hold
+from . import anticipation, approach_profile, brake_landing, idm_cah, pull_away, standstill_hold
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +210,7 @@ class ACConfig:
     landing_block_s: float = brake_landing.LANDING_BLOCK_S
     approach_share: float = approach_profile.APPROACH_SHARE
     follow_share: float = approach_profile.FOLLOW_SHARE
+    pull_away_share: float = 1.0
     follow_dv_lo_ms: float = approach_profile.FOLLOW_DV_LO_MS
     follow_dv_hi_ms: float = approach_profile.FOLLOW_DV_HI_MS
     approach_dv_lo_ms: float = approach_profile.APPROACH_DV_LO_MS
@@ -264,6 +265,7 @@ class _LeadSnapshot:
     score: float = 0.0
     conf: float = 1.0
     a_lead_ff_ms2: float | None = None
+    crashed: bool = False
 
 
 @dataclass(slots=True)
@@ -296,9 +298,12 @@ class AdaptiveCruiseController:
         self._last_chain_mono: float = -math.inf
         self._blinker = BlinkerArbiter()
         self._standstill = standstill_hold.StandstillHold()
+        self._motion = pull_away.LeadMotion()
         self._landing = brake_landing.BrakeLanding()
         self._since_brake_s = math.inf
         self._approach_delta = 0.0
+
+    crawl_follow = property(lambda self: self._motion.confirmed and not self._standstill.held)
 
     def accel_cap_ms2(self, ego_speed_ms: float) -> float:
         now = time.monotonic()
@@ -326,6 +331,7 @@ class AdaptiveCruiseController:
             self._blinker.committed = False
             self._blinker.released_vid = None
             self._standstill.reset()
+            self._motion.reset()
             target = self.config.no_lead_ceiling_ms2
             return self._output_filter(
                 self._jerk_limit(target, dt, False, v_ego, law_release=False), dt, False)
@@ -361,6 +367,7 @@ class AdaptiveCruiseController:
         self._last_chain_mono = -math.inf
         self._blinker.reset()
         self._standstill.reset()
+        self._motion.reset()
         self._landing.reset()
         self._since_brake_s = math.inf
         self._approach_delta = 0.0
@@ -376,6 +383,7 @@ class AdaptiveCruiseController:
             v_lead = float(lead.effective_speed_ms)
             a_lead = float(lead.effective_accel_ms2)
             score = float(getattr(lead, "score", 0.0))
+            crashed = bool(getattr(vehicle, "crash_confirmed", False))
         except (AttributeError, TypeError, ValueError):
             return None
         if not (math.isfinite(dist_m) and math.isfinite(v_lead) and math.isfinite(a_lead)):
@@ -386,7 +394,7 @@ class AdaptiveCruiseController:
         if dist_m <= 0.0:
             return None
         a_lead = _clamp(a_lead, cfg.emergency_decel_ms2, cfg.max_accel_ms2)
-        return _LeadSnapshot(vid, dist_m, v_lead, a_lead, score)
+        return _LeadSnapshot(vid, dist_m, v_lead, a_lead, score, crashed=crashed)
 
     def _read_acc_snapshot(
         self,
@@ -534,6 +542,7 @@ class AdaptiveCruiseController:
         # The band only pulls on a law it just saw; any path that skips the law drops it.
         banded_before, self._approach_delta = self._approach_delta, 0.0
         if not chain_raw:
+            self._motion.reset()
             # Empty in-lane chain with a published indicated lead: follow it.
             # Keep arbiter in pass so hysteresis is not stale when leads return.
             if indicated_smooth is None or indicated_raw is None:
@@ -548,6 +557,7 @@ class AdaptiveCruiseController:
             return a_ind, False
 
         primary_raw = chain_raw[0]
+        chain_smooth = pull_away.follow_lead_motion(self._motion, cfg, now, dt, primary_raw, chain_smooth, v_ego)
         overlay = self._safety_overlays(primary_raw, v_ego)
         if overlay is not None:
             return overlay
@@ -583,6 +593,7 @@ class AdaptiveCruiseController:
             primary.dist_m, v_ego, primary.v_lead_ms, primary.a_lead_ms2, t_lane,
             primary.a_lead_ff_ms2,
         )
+        a_base = pull_away.lift_for(cfg, a_base, primary.dist_m, primary, v_ego, t_lane)
         a_base = _clamp(a_base, cfg.max_decel_ms2, cfg.max_accel_ms2)
         # A slower lead is closed on at a constant rate and landed on, not braked past. §13.4, §13.5.
         banded = approach_profile.approach_band(cfg, a_base, primary, v_ego, t_lane)

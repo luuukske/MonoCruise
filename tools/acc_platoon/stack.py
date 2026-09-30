@@ -153,6 +153,7 @@ class Client:
         self.truck = TruckPlant(spec, s0, v0, dt)
         self.path = TruePath(t0, s0, v0)
         self.cmd = 0.0
+        self.crawl_follow = False
         self.acc_data = _AccData()
         self.sending_data = _SendingData()
         self.threads = {"acc_thread": _Thread(self.acc_data),
@@ -232,7 +233,8 @@ class Client:
         acc_out = self.acc.step(ctx) if cc_out.active else LongOutput(None, False)
         if not cc_out.active:
             self.acc.reset()
-        wanted, commanding, _ = CruiseControlThread._arbitrate_named(("cc", cc_out), ("acc", acc_out))
+        wanted, commanding, winner = CruiseControlThread._arbitrate_named(("cc", cc_out), ("acc", acc_out))
+        self.crawl_follow = CruiseControlThread._crawl_follow(self.acc, acc_out, wanted, commanding, winner)
         cmd = wanted if commanding else 0.0
         if self.aeb_brake:
             cmd = min(cmd, -self.aeb_target_ms2)

@@ -110,6 +110,8 @@ class TelemetryThreadData(ThreadData):
     lv_accelerationX: float = 0.0  # m/s²
     # Commanded accel for ACC / cruise (other threads may set; default 0).
     commanded_accel_ms2: float = 0.0
+    # ACC is keeping speed behind a lead it measures moving: a mild decel is not a stop.
+    commanded_crawl_follow: bool = False
 
     # Vehicle state
     parkBrake: bool = False

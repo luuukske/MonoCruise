@@ -29,6 +29,8 @@ CLEAN_SPEED_STD_KMH = 0.3
 CREEP_TOL_M = 0.3
 # Least room AEB may leave when it rescues the convoy.
 AEB_MIN_GAP_M = 0.5
+# By then the creep's start wave has passed the first followers.
+CREEP_STEADY_FROM_S = 15.0
 
 TARGET_UNPROVOKED_BRAKES = 0
 TARGET_SPEED_STD_KMH = 1.0
@@ -40,6 +42,8 @@ TARGET_DISARMED = 0
 TARGET_STOP_GAP_M = 4.0
 TARGET_RELAUNCH_HOP_S = 2.0
 TARGET_SNAP_BRAKE_MS2 = 0.5
+TARGET_PULL_AWAY_START_S = 0.5
+TARGET_CREEP_RESTOPS = 0
 
 BASELINE_STEADY_UNPROVOKED_BRAKES = 11
 BASELINE_STEADY_SPEED_STD_KMH = 10.1
@@ -54,6 +58,9 @@ BASELINE_QUEUE_STOP_GAP_M = 1.0
 BASELINE_QUEUE_RELAUNCH_HOP_S = 4.0
 BASELINE_SNAP_BRAKE_MS2 = 1.9
 BASELINE_LAGGY_UNPROVOKED_BRAKES = 8
+# Landed 2026-09-30 with ACC_ARCHITECTURE.md §10.2; before it 1.37 s and 12 re-stops.
+BASELINE_PULL_AWAY_START_S = 0.85
+BASELINE_CREEP_RESTOPS = 14
 
 
 def cases(seed: int = 1) -> dict[str, Scenario]:
@@ -71,6 +78,8 @@ def cases(seed: int = 1) -> dict[str, Scenario]:
         "blackout_aeb": scenarios.blackout_brake(seed, aeb=True),
         "laggy_client": scenarios.laggy_client(seed),
         "desync_snap": scenarios.desync_snap(seed),
+        "slow_pull_away": scenarios.slow_pull_away(seed),
+        "creep": scenarios.creep(seed),
     }
 
 
@@ -252,6 +261,33 @@ def test_a_stopped_queue_drives_off_again(runs):
     assert max(hops) <= BASELINE_QUEUE_RELAUNCH_HOP_S, _why(r, f"relaunch hops {hops}")
 
 
+def test_a_gentle_pull_away_is_followed_promptly(runs):
+    """Lead eases off at 0.3 m/s^2 from rest; the first follower rolls soon after."""
+    r = runs["slow_pull_away"]
+    launch = metrics.relaunch_times(r, scenarios.PULL_AWAY_S)
+    assert None not in launch, _why(r, f"never drove off: {launch}")
+    start = launch[1] - launch[0]
+    assert start <= BASELINE_PULL_AWAY_START_S, _why(r, f"first follower {start:.2f} s")
+    hops = [launch[k] - launch[k - 1] for k in range(1, len(launch))]
+    assert max(hops) <= TARGET_RELAUNCH_HOP_S, _why(r, f"relaunch hops {hops}")
+    assert metrics.contacts(r) == [], _why(r, "contact")
+
+
+def test_a_creeping_lead_is_followed_without_stopping(runs):
+    """Lead inches at 2 km/h, below where acc_speed reads non-zero, and never stops."""
+    r = runs["creep"]
+    stops = metrics.restops(r, scenarios.PULL_AWAY_S)
+    assert sum(stops) <= BASELINE_CREEP_RESTOPS, _why(r, f"re-stops {stops}")
+    assert metrics.contacts(r) == [], _why(r, "contact")
+
+
+def test_the_first_followers_creep_along_without_the_hold_stopping_them(runs):
+    """Steady speed keeping behind a crawl commands about zero; the hold must not read it as a stop."""
+    r = runs["creep"]
+    caps = metrics.hold_captures(r, CREEP_STEADY_FROM_S, r.scenario.duration_s)
+    assert caps[1:3] == [0, 0], _why(r, f"hold captures {caps}")
+
+
 def test_a_desync_snap_barely_moves_the_brake(runs):
     """Lead drawn 8 m closer for 0.3 s: the radar holds it as a rewind. Target 0.5 m/s^2."""
     r = runs["desync_snap"]
@@ -283,6 +319,8 @@ def test_every_baseline_is_still_short_of_its_target():
         (BASELINE_QUEUE_RELAUNCH_HOP_S, TARGET_RELAUNCH_HOP_S, 1),
         (BASELINE_SNAP_BRAKE_MS2, TARGET_SNAP_BRAKE_MS2, 1),
         (BASELINE_QUEUE_STOP_GAP_M, TARGET_STOP_GAP_M, -1),
+        (BASELINE_PULL_AWAY_START_S, TARGET_PULL_AWAY_START_S, 1),
+        (BASELINE_CREEP_RESTOPS, TARGET_CREEP_RESTOPS, 1),
     ]
     for baseline, target, sign in pairs:
         assert sign * (baseline - target) > 0.0, (baseline, target)

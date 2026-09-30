@@ -383,6 +383,17 @@ Hold states combine slope feedforward (inverse brake curve) plus a rollback inte
 only adds brake. LAUNCHING ramps feedforward down; integrator stays active; ramp retreats on
 live rollback, not on stored integrator level (avoids steep-hill launch livelock).
 
+ROLLING captures STOPPING below 2 km/h on any command at or below zero, except
+while `crawl_follow` is set: ACC is keeping speed behind a lead it measures
+moving (`commanded_crawl_follow` on the telemetry thread, passed in only while
+the tracking commander owns the command). Then a mild decel is speed keeping, and
+the capture still happens on a command at or below -0.3 m/s², under 1 km/h, on
+any rollback, or when the measured (or commanded) decel plus 30 % of the uphill
+grade's pull would reach zero within 1 s. Those four are what keep crawl follow
+from ever rolling back further than the plain capture; do not relax one without
+re-running the hill grid in `tests/test_hold_crawl_follow.py`. Rationale and
+measurements: `core/acc/ACC_ARCHITECTURE.md` §10.3.
+
 ## Brake efficiency (`brake_efficiency.py`)
 
 Optional cruise-only degradation warning via EMA of measured vs expected decel. Flat-road

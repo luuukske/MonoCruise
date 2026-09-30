@@ -1027,6 +1027,7 @@ class SendingThread(BaseThread):
         mapper_pedal_state = 0
         mapper_creep_ms2 = 0.0
         wanted_a = 0.0
+        crawl_follow = False
         raw_a = 0.0
         measured_decel_ms2 = 0.0
         measured_decel_fast_ms2 = 0.0
@@ -1049,6 +1050,7 @@ class SendingThread(BaseThread):
             try:
                 with tel_thread.data._lock:
                     wanted_a = float(tel_thread.data.commanded_accel_ms2)
+                    crawl_follow = bool(getattr(tel_thread.data, "commanded_crawl_follow", False))
                     mass_kg = float(tel_thread.data.estimated_total_mass_kg)
                     spd_ms = float(tel_thread.data.speed)
                     has_t = bool(tel_thread.data.ego_has_trailer)
@@ -1495,6 +1497,8 @@ class SendingThread(BaseThread):
             dt=dt_aeb,
             game_clutch=game_clutch,
             auto_neutral_active=self._autoneutral_neutral,
+            # Only while ACC's bid is the command; any other commander keeps the plain capture.
+            crawl_follow=crawl_follow and cruise_active_controller == "cc",
         )
         b = max(b, hold_out.brake_pedal)
 

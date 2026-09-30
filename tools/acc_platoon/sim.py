@@ -211,7 +211,7 @@ def run(sc: Scenario) -> Run:
             closed = t >= t_closed
             for c in clients:
                 if closed:
-                    c.truck.step(c.cmd, DT)
+                    c.truck.step(c.cmd, DT, c.crawl_follow)
                 else:
                     c.truck.s += v0 * DT
             for c in followers:

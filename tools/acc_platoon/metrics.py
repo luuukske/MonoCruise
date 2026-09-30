@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass
 
 from core.cruise_control_thread.acc_controller import S0_M
-from core.sending_thread.hold_controller import STATE_HOLDING
+from core.sending_thread.hold_controller import STATE_HOLDING, STATE_ROLLING, STATE_STOPPING
 
 from .sim import Run
 
@@ -164,6 +164,30 @@ def standstill_creep(run: Run, t_from: float, t_to: float) -> list[float]:
                 creep = max(creep, floor - tr.gap_drawn[i])
         out.append(creep)
     return out
+
+
+def restops(run: Run, t_from: float) -> list[int]:
+    """How often each truck came back to rest after first rolling off at `t_from` or later.
+
+    Behind a lead that never stops, every one of these is a lurch."""
+    out = []
+    for tr in run.traces:
+        rolled, count = False, 0
+        for i in _window(run, t_from, None):
+            if tr.v[i] > MOVING_MS / 2.0:
+                rolled = True
+            elif rolled and tr.v[i] < STOPPED_MS / 3.0:
+                rolled, count = False, count + 1
+        out.append(count)
+    return out
+
+
+def hold_captures(run: Run, t_from: float, t_to: float) -> list[int]:
+    """How often the hold FSM took each truck from ROLLING into STOPPING in the window."""
+    win = _window(run, t_from, t_to)
+    return [sum(1 for a, b in zip(win, win[1:])
+                if tr.hold[a] == STATE_ROLLING and tr.hold[b] == STATE_STOPPING)
+            for tr in run.traces]
 
 
 def moved_after_disarm(run: Run) -> list[float]:

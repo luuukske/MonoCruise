@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from . import idm_cah
+from . import idm_cah, pull_away
 
 if TYPE_CHECKING:
     from .acc_controller import ACConfig, _LeadSnapshot
@@ -45,8 +45,10 @@ class StandstillHold:
             self.held = False
             return False
         # The raw gap binds only when shorter: a lead closing in holds at once.
-        wanted = idm_cah.lead_law(cfg, min(gap_raw_m, primary.dist_m), v_ego, primary.v_lead_ms,
+        gap = min(gap_raw_m, primary.dist_m)
+        wanted = idm_cah.lead_law(cfg, gap, v_ego, primary.v_lead_ms,
                                   primary.a_lead_ms2, t_headway, primary.a_lead_ff_ms2)
+        wanted = pull_away.lift_for(cfg, wanted, gap, primary, v_ego, t_headway)
         launch = cfg.standstill_launch_accel_ms2
         if not self.held:
             # Rolling, [0, launch) is hysteresis so a crawl the law still wants

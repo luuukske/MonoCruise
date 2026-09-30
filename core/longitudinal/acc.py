@@ -29,5 +29,10 @@ class AdaptiveCruiseController(LongitudinalController):
         cap_ms2 = self._inner.accel_cap_ms2(ctx.speed_ms)
         return LongOutput(cap_ms2, True)
 
+    @property
+    def crawl_follow(self) -> bool:
+        """Following a lead measured moving, outside the standstill hold. ACC_ARCHITECTURE §10.3."""
+        return self.active and self._inner.crawl_follow
+
     def reset(self) -> None:
         self._inner.reset()

@@ -21,6 +21,9 @@ STANDSTILL_S: float = 15.0
 # Queue stop: when the lead drives off again.
 QUEUE_GO_S: float = EVENT_S + 20.0
 LAGGY_CLIENT: int = 5
+# Pull-away scenarios start the convoy at rest, every truck at the standstill gap.
+PULL_AWAY_S: float = 2.0
+SLOW_PULL_MS2: float = 0.3
 
 
 def steady(seed: int = 1, aeb: bool = False) -> Scenario:
@@ -76,6 +79,18 @@ def stop_and_go(seed: int = 1, aeb: bool = False) -> Scenario:
                     duration_s=55.0, seed=seed, aeb=aeb)
 
 
+def slow_pull_away(seed: int = 1, aeb: bool = False) -> Scenario:
+    """A queue at rest; the lead pulls away gently, 0.3 m/s^2 to 30 km/h."""
+    return Scenario("slow_pull_away", v0_kmh=0.0, set_kmh=60.0, duration_s=40.0, seed=seed,
+                    aeb=aeb, phases=(Phase(PULL_AWAY_S, 30.0, accel=SLOW_PULL_MS2),))
+
+
+def creep(seed: int = 1, aeb: bool = False) -> Scenario:
+    """A queue at rest; the lead inches forward at 2 km/h, below where its speed reads non-zero."""
+    return Scenario("creep", v0_kmh=0.0, set_kmh=60.0, duration_s=30.0, seed=seed, aeb=aeb,
+                    phases=(Phase(PULL_AWAY_S, 2.0, accel=SLOW_PULL_MS2),))
+
+
 def laggy_client(seed: int = 1, aeb: bool = False) -> Scenario:
     """Steady lead, one follower mid-convoy on a bad connection."""
     nets = tuple(LAGGY if i == LAGGY_CLIENT else NORMAL for i in range(11))
@@ -96,5 +111,5 @@ def desync_snap(seed: int = 1, aeb: bool = False) -> Scenario:
 
 
 ALL = {f.__name__: f for f in (steady, human_lead, slowdown, hard_brake, emergency_stop,
-                                stationary_lock, queue_stop, stop_and_go, laggy_client,
-                                blackout_brake, desync_snap)}
+                                stationary_lock, queue_stop, stop_and_go, slow_pull_away, creep,
+                                laggy_client, blackout_brake, desync_snap)}
