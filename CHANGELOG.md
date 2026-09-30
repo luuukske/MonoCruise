@@ -11,12 +11,32 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+MonoCruise rebuilt from the ground up. Coming from v1.0.x? Uninstall it first, then set up your pedals and buttons again. From here on MonoCruise updates itself.
+
+### Added
+- **Automatic Emergency Braking (AEB)**: watches the traffic along your path, warns you, and brakes for vehicles you would otherwise hit. Off by default; press the gas fully to override it.
+- **Built-in updater**: MonoCruise tells you when an update is out and installs it for you. Your settings are kept.
+- **ACC following distance**: four gap levels, set in the settings or changed while driving with an optional button.
+- **Acceleration style**: pick how eagerly cruise control pulls away.
+- **Global speed limit**: caps your truck at a set speed even with cruise off. A quick stab of the gas gets you past it.
+- **Any button works**: cruise buttons can be wheel buttons, hat directions, keyboard keys or USB button devices like stalks.
+- **Automatic game plugin install**: MonoCruise installs and updates the plugins it needs, also after a game update.
+- **American Truck Simulator in mph**.
+- **Help improve AEB and ACC**: opt-in sharing of short, anonymous recordings of AEB events. Off unless you tick it.
+
 ### Changed
-- **The log of your last session is kept**: MonoCruise used to overwrite its log on every start, so the log of a session that went wrong was often gone before it could be shared. The previous one is now kept as `monocruise.prev.log`.
+- **ACC rebuilt**: finds the right vehicle in your lane through bends and lane changes, slows evenly for traffic and pulls away with it. It brake-checks far less than v1.0.
+- **Cruise control learns your truck**: it learns how hard your truck accelerates and brakes with its current load, and compensates for hills.
+- **New, more stable app**: a faster interface, and a part that crashes restarts on its own instead of taking MonoCruise down.
+- **Autostart**: chosen in the installer and switched on or off in the settings. The old background checker that antivirus flagged is gone.
 
 ### Fixed
-- **"Autostart MonoCruise" did nothing**: unticking it never stopped MonoCruise opening with the game. It now does, and it is greyed out with an explanation when autostart was not chosen in the installer.
-- **Cruise panel floated on the desktop without the game**: opening MonoCruise on its own showed the set-speed panel on top of everything. It now only shows while the game is running.
+- **ACC unstable since ETS2 1.58**: it works properly on current game versions again.
+- **ACC overreacting to TruckersMP lag spikes**.
+
+### Known
+- **ACC and AEB are still experimental**: ACC can brake harder than needed, and AEB can brake at junctions or for traffic changing lanes next to you.
+- **Windows may warn when installing**: MonoCruise is not code-signed yet. Click "More info", then "Run anyway".
 
 ## [1.1.0-rc.26] - 2026-09-30
 ### Fixed
