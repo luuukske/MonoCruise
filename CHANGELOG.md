@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Changed
+- **The log of your last session is kept**: MonoCruise used to overwrite its log on every start, so the log of a session that went wrong was often gone before it could be shared. The previous one is now kept as `monocruise.prev.log`.
 
 ## [1.1.0-rc.26] - 2026-09-30
 ### Fixed

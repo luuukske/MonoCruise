@@ -60,6 +60,7 @@ def _shutdown_requested(handle) -> bool:
     return kernel32.WaitForSingleObject(handle, 0) == 0  # WAIT_OBJECT_0
 
 import logging
+import os
 import re
 import signal
 import time
@@ -144,7 +145,15 @@ def _configure_logging() -> None:
     stream_handler.setLevel(logging.INFO)
     stream_handler.setFormatter(stream_formatter)
 
-    file_handler = logging.FileHandler("monocruise.log", encoding="utf-8", mode="w")
+    # Keep the previous session's log: the checker relaunches on the next game
+    # start, which used to overwrite the log of the session that went wrong.
+    log_path = CONFIG_PATH.parent / "monocruise.log"
+    try:
+        if log_path.exists():
+            os.replace(log_path, log_path.with_name("monocruise.prev.log"))
+    except OSError:
+        pass
+    file_handler = logging.FileHandler(log_path, encoding="utf-8", mode="w")
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(file_formatter)
 
