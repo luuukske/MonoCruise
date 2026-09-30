@@ -11,7 +11,7 @@ import sys
 import webbrowser
 from typing import TYPE_CHECKING, Any, Callable
 
-from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core import checker_status
 from core.input_bindings import binding_display_name, migrate_binding, resolve_held
 from core.longitudinal.accel_envelope import PROFILE_LABELS, resolve_profile
 from core.speed_units import (
@@ -73,6 +74,12 @@ _BIND_KEYS = (
 
 _BIND_BUTTON_SIZE = (150, 30)
 _BIND_POLL_MS = 33.333
+
+# Shown under a greyed-out autostart toggle when the checker is not running.
+_AUTOSTART_LIMITED_TEXT = (
+    "Your installation config is limiting this feature. Reinstall with autostart "
+    "ticked, or enable MonoCruiseChecker in Task Manager > Startup apps."
+)
 
 # ACC gap level 1..4 (core/cruise_control_thread/acc_distance.py owns the range).
 _GAP_LEVEL_LABELS = ("1 (0.7s)", "2 (1.1s)", "3 (1.5s)", "4 (2.2s)")
@@ -469,11 +476,15 @@ class SettingsPanel(QWidget):
 
         new_section_header(p, self._r(), "Program settings")
 
-        new_label(p, self._r(0), 0, "Autostart MonoCruise:")
-        self.chk_autostart = new_checkbutton(
-            p, self._r(), 1, s.autostart_variable,
-            callback=lambda v: self._set("autostart_variable", v),
+        self.chk_autostart, self._autostart_subtext, _ = self._field_with_subtext(
+            "Autostart MonoCruise:",
+            lambda c, r, col: new_checkbutton(
+                c, r, col, s.autostart_variable,
+                callback=lambda v: self._set("autostart_variable", v),
+            ),
+            _AUTOSTART_LIMITED_TEXT,
         )
+        self.refresh_autostart_availability()
 
         self.ent_polling, _, _ = self._field_with_subtext(
             "Target polling rate (Hz):",
@@ -539,6 +550,15 @@ class SettingsPanel(QWidget):
         # Only the subtext toggles here -- the dropdown itself always stays
         # visible, unlike the whole-row conditionals (see _set_row_visible).
         self._preview_subtext.setVisible(s.update_channel.lower() == "preview")
+
+    def refresh_autostart_availability(self) -> None:
+        """Grey the autostart toggle out while no background checker runs to act on it."""
+        available = checker_status.checker_running()
+        self.chk_autostart.parentWidget().setEnabled(available)
+        self._autostart_subtext.setVisible(not available)
+        # Unticked while unavailable, since nothing will start; the stored value is kept.
+        with QSignalBlocker(self.chk_autostart):
+            self.chk_autostart.setChecked(bool(self._settings.autostart_variable) and available)
 
     def _on_update_channel_changed(self, value: str) -> None:
         self._set("update_channel", value.lower())
@@ -1497,7 +1517,7 @@ class SettingsPanel(QWidget):
         self._refresh_pedal_widgets()
 
         # Program settings
-        self.chk_autostart.setChecked(s.autostart_variable)
+        self.refresh_autostart_availability()
         self.ent_polling.setText(str(s.polling_rate))
         self.chk_hazards.setChecked(s.hazards_variable)
         self.chk_autodisable.setChecked(s.autodisable_hazards)

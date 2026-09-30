@@ -79,6 +79,9 @@ QLabel {{
     background-color: transparent;
     padding: 0px;
 }}
+QLabel:disabled {{
+    color: {SUBTEXT_COLOR};
+}}
 
 QLabel#subtext {{
     color: {SUBTEXT_COLOR};
@@ -303,6 +306,11 @@ QCheckBox::indicator:checked {{
 }}
 QCheckBox::indicator:hover {{
     border-color: {WAITING_COLOR};
+}}
+/* Greyed out: a gated setting (e.g. autostart without the checker) must read as unavailable. */
+QCheckBox::indicator:disabled, QCheckBox::indicator:disabled:hover {{
+    background-color: {SETTINGS_COLOR};
+    border-color: {SETTINGS_COLOR};
 }}
 
 QLineEdit {{

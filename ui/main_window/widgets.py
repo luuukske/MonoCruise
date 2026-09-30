@@ -25,6 +25,7 @@ from ui.main_window.constants import (
     FONT_SIZE,
     RADIUS_INPUT,
     SETTINGS_COLOR,
+    SUBTEXT_COLOR,
     TEXT_COLOR,
     WAITING_COLOR,
 )
@@ -124,7 +125,7 @@ class CheckBox(QCheckBox):
             rect = self.rect()
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        pen = QPen(QColor("white"), 2.0)
+        pen = QPen(QColor("white" if self.isEnabled() else SUBTEXT_COLOR), 2.0)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         x, y, w, h = rect.x(), rect.y(), rect.width(), rect.height()
