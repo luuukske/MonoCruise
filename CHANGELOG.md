@@ -12,6 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+## [1.1.0-rc.26] - 2026-09-30
 ### Fixed
 - **ACC lurched when pulling away behind slow traffic**: it waited too long when the truck ahead moved off gently or crept forward, then floored the gas and braked again, over and over. It now sees slow traffic moving sooner, pulls away and creeps along at its pace without stopping, and the gas no longer floors while the clutch is still engaging.
 - **Hazards flashed while you were overriding cruise**: taking over with the gas still turned the hazards on whenever cruise wanted a hard brake. They now follow the brake that actually goes to the truck.
