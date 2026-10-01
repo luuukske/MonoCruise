@@ -1,0 +1,197 @@
+"""Synthetic _smooth_vehicle_kinematics traces. See core/radar/README.md §7."""
+from __future__ import annotations
+
+import math
+
+from core.radar.traffic import (
+    _ACCEL_FIT_WINDOW_S,
+    _accel_window_scale,
+    _smooth_vehicle_kinematics,
+)
+
+DT = 0.05  # full-update cadence (s)
+
+
+def _run_chain(raw_speeds: list[float], dt: float = DT,
+               acc_raw_speeds: list[float] | None = None):
+    """Drive _smooth_vehicle_kinematics over raw traces; optional separate acc_raw_speeds."""
+    t = 100.0
+    speed_ema = accel = acc_speed = None
+    acc_ema = acc_accel = None
+    history = acc_history = None
+    standstill = False
+    release_s = 0.0
+    out = []
+    acc_trace = acc_raw_speeds if acc_raw_speeds is not None else raw_speeds
+    for raw, acc_raw in zip(raw_speeds, acc_trace):
+        (speed_ema, accel, speed_corr, history,
+         acc_ema, acc_accel, acc_history, acc_speed,
+         standstill, release_s) = _smooth_vehicle_kinematics(
+            raw, acc_raw, t, dt,
+            speed_ema, accel, history,
+            acc_ema, acc_accel, acc_history, acc_speed,
+            standstill, release_s,
+        )
+        out.append((speed_corr, acc_speed, accel, standstill))
+        t += dt
+    return out
+
+
+def test_acc_chain_ignores_the_aeb_hard_brake_window():
+    """acc_speed ignores AEB hard-brake window (TMP stall). See core/radar/README.md §7."""
+    cruise = [12.0] * int(3.0 / DT)
+    # AEB path sees a stall dip and recovery; ACC path sees steady cruise.
+    aeb = cruise + [3.0] * int(0.3 / DT) + [12.0] * int(2.0 / DT)
+    acc = [12.0] * len(aeb)
+
+    out = _run_chain(aeb, acc_raw_speeds=acc)
+    speed_corr = [s for s, _, _, _ in out]
+    acc_speed = [a for _, a, _, _ in out]
+
+    dip_from = int(3.0 / DT)
+    assert min(speed_corr[dip_from:]) < 9.0        # AEB saw the dip
+    assert min(acc_speed[dip_from:]) > 11.0        # ACC did not
+
+
+def test_acc_chain_still_tracks_a_real_lead_brake():
+    """The split must not make ACC blind: a brake on both inputs still lands."""
+    trace = [12.0] * int(3.0 / DT) + _ramp(12.0, -4.0, 2.0)
+    out = _run_chain(trace)
+    acc_speed = [a for _, a, _, _ in out]
+    assert acc_speed[-1] < 6.0
+
+
+def _bounce(amp: float, freq_hz: float, dur_s: float, dt: float = DT) -> list[float]:
+    n = int(dur_s / dt)
+    return [amp * math.sin(2.0 * math.pi * freq_hz * i * dt) for i in range(n)]
+
+
+def _ramp(v0: float, a: float, dur_s: float, dt: float = DT) -> list[float]:
+    n = int(dur_s / dt)
+    return [v0 + a * i * dt for i in range(n)]
+
+
+def _crash_stop_trace() -> list[float]:
+    """Cruise, hard decel to 0, then a crash-style rock around standstill."""
+    trace = [8.0] * int(2.0 / DT)
+    trace += _ramp(8.0, -4.0, 2.0)
+    trace += _bounce(1.0, 1.0, 4.0)
+    return trace
+
+
+def test_standstill_bounce_latches_acc_speed_to_zero():
+    out = _run_chain(_crash_stop_trace())
+    tail = out[-int(1.5 / DT):]
+    assert all(acc_speed == 0.0 for _, acc_speed, _, _ in tail)
+    assert all(standstill for _, _, _, standstill in tail)
+
+
+def test_standstill_bounce_keeps_aeb_speed_responsive():
+    out = _run_chain(_crash_stop_trace())
+    tail = out[-int(2.0 / DT):]
+    # The AEB-facing speed_corr must still show the raw oscillation.
+    assert max(abs(speed_corr) for speed_corr, _, _, _ in tail) > 0.5
+
+
+def test_bounce_does_not_release_latch():
+    trace = _crash_stop_trace()
+    trace += _bounce(1.0, 1.0, 3.0)
+    out = _run_chain(trace)
+    # Once latched, a continuing +-1 m/s 1 Hz rock never releases the latch.
+    latched_from = next(i for i, (_, _, _, ss) in enumerate(out) if ss)
+    assert all(ss for _, _, _, ss in out[latched_from:])
+
+
+def test_hard_brake_ramp_tracks_with_bounded_lag():
+    trace = [25.0] * int(2.0 / DT)
+    trace += _ramp(25.0, -6.0, 25.0 / 6.0)
+    trace += [0.0] * int(2.5 / DT)
+    out = _run_chain(trace)
+    ramp_start = int(2.0 / DT)
+    ramp_end = ramp_start + int(25.0 / 6.0 / DT)
+    # After the trend gate opens (~0.6 s), acc_speed rides the ramp closely.
+    # Speed-scaled 1.50 s window moved peak lag 0.96 -> 1.04 m/s (README §7).
+    settled = out[ramp_start + int(0.6 / DT):ramp_end]
+    assert max(abs(acc - corr) for corr, acc, _, _ in settled) < 1.15
+    # After the stop it settles and latches to exactly 0.
+    assert out[-1][1] == 0.0
+    assert out[-1][3] is True
+
+
+def test_launch_releases_latch_and_tracks():
+    trace = _crash_stop_trace()
+    trace += _ramp(0.0, 1.5, 2.5)
+    out = _run_chain(trace)
+    assert out[len(_crash_stop_trace()) - 1][3] is True
+    # Raw crosses 0.6 m/s at 0.4 s into the launch; release needs 0.5 s more.
+    end_corr, end_acc, _, end_ss = out[-1]
+    assert end_ss is False
+    assert end_acc > 0.5 * end_corr
+
+
+def test_convoy_sawtooth_attenuated_at_cruise():
+    # TMP reconciliation wobble: consistency factor keeps acc_speed flat (no feed-forward).
+    period = 3.0
+    n = int(24.0 / DT)
+    trace = [22.0 + 0.8 * (1.0 - 2.0 * ((i * DT % period) / period)) for i in range(n)]
+    out = _run_chain(trace)
+    tail = out[-int(10.0 / DT):]
+    corr_dev = max(abs(corr - 22.0) for corr, _, _, _ in tail)
+    acc_dev = max(abs(acc - 22.0) for _, acc, _, _ in tail)
+    # Without the consistency factor this rode at ~0.8x of the input wobble.
+    assert acc_dev < 0.30
+    assert acc_dev < 0.4 * corr_dev
+
+
+def test_cruise_ripple_still_attenuated():
+    n = int(6.0 / DT)
+    trace = [25.0 + 0.5 * math.sin(2.0 * math.pi * 1.0 * i * DT) for i in range(n)]
+    out = _run_chain(trace)
+    tail = out[-int(3.0 / DT):]
+    corr_dev = max(abs(corr - 25.0) for corr, _, _, _ in tail)
+    acc_dev = max(abs(acc - 25.0) for _, acc, _, _ in tail)
+    assert acc_dev < 0.3 * corr_dev
+
+
+def test_accel_window_scale_pins_40_and_100_kmh():
+    """Rest, 40 km/h, and 100 km/h windows. See core/radar/README.md §7."""
+    def window_s(kmh: float) -> float:
+        return _ACCEL_FIT_WINDOW_S * _accel_window_scale(kmh / 3.6)
+
+    assert abs(window_s(0.0) - 0.45) < 0.005
+    assert abs(window_s(40.0) - 1.05) < 0.01
+    assert abs(window_s(100.0) - 1.50) < 0.005
+    assert window_s(160.0) < 1.75
+
+
+def test_accel_estimate_lags_at_highway_onset_then_tracks():
+    """Sub-floor highway decel is diluted for ~1.4 s, then tracks. No hard-brake floor here."""
+    trace = [20.0] * int(2.0 / DT)
+    trace += _ramp(20.0, -5.0, 2.0)
+    out = _run_chain(trace)
+    start = int(2.0 / DT)
+    at_half_s = out[start + int(0.5 / DT)][2]
+    filled = out[start + int(1.6 / DT)][2]
+    # 0.70 s window used to read -2.40 here; 1.50 s x scale reads about -0.94.
+    assert -1.5 < at_half_s < -0.4
+    assert filled < -4.5
+
+
+def test_accel_estimate_stays_reactive_in_town():
+    """The speed scale exists so a 20 km/h brake is not fit over 1.50 s."""
+    v0 = 20.0 / 3.6
+    trace = [v0] * int(2.0 / DT) + _ramp(v0, -5.0, 1.0)
+    out = _run_chain(trace)
+    at_half_s = out[int(2.0 / DT) + int(0.5 / DT)]
+    assert at_half_s[2] < -2.2
+
+
+def test_three_physics_steps_stay_a_sub_frame_whatever_the_float_noise():
+    """Sim-time dt lands exactly on the sub-frame bar; see core/radar/README.md section 16."""
+    from core.radar.traffic import is_sub_frame
+
+    assert is_sub_frame(2.0 / 60.0)
+    assert is_sub_frame(3.0 / 60.0)
+    assert is_sub_frame(1000.05 - 1000.0)
+    assert is_sub_frame((1_780_000_000.0 + 0.05) - 1_780_000_000.0)
+    assert not is_sub_frame(4.0 / 60.0)

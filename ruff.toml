@@ -1,0 +1,11 @@
+# Deliberately narrow: these are the rules the tree already satisfies, so a
+# ruff failure always means a new problem and never a pre-existing one. The
+# ignored codes are a backlog, not a verdict that they do not matter. Counts at
+# the time this landed: E501 836, E402 70 (mostly the deliberate lazy imports
+# that keep core importable without Qt), F401 44, F841 20, B905 11, F811 7,
+# B007 2. Retire them from this list one at a time, never in bulk.
+exclude = ["build", "dist", "sdk_cache", "installer", "__pycache__"]
+
+[lint]
+select = ["E", "F", "B"]
+ignore = ["E501", "E402", "F401", "F841", "B905", "F811", "B007"]

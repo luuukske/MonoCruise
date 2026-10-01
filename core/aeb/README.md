@@ -1,0 +1,2291 @@
+# AEB (Automatic Emergency Braking)
+
+> AEB-specific reference. Shared fundamentals (coordinate system, rotation,
+> world→ego transforms, the shared-memory buffer, Vehicle state/smoothing,
+> ArcPath geometry, position-based curvature) live in
+> `core/radar/README.md`: read that first.
+>
+> Agent workflow and do-not-break rules: top-level `AGENTS.md`.
+
+---
+
+## 1. Data pipeline
+
+AEB is a consumer of `RadarThread`:
+
+```python
+rt = registry.get_thread("radar_thread")
+with rt.data._lock:
+    vehicles      = rt.data.vehicles
+    tmp_session   = rt.data.tmp_session
+    ego_x, ego_y, ego_z = rt.data.ego_x, rt.data.ego_y, rt.data.ego_z
+    ego_yaw_rad   = rt.data.ego_yaw_rad
+    ego_speed     = rt.data.ego_speed
+    ego_pitch_rad = rt.data.ego_pitch_rad
+    ego_steer     = rt.data.ego_steer
+    ego_curvature = rt.data.ego_curvature      # may be None
+    paused        = rt.data.paused
+```
+
+Vehicle instances are shared references: do not mutate them from AEB. All
+smoothing, yaw EMA, position history, and curvature state is produced once
+per frame by the radar thread.
+
+### TMP trailer-as-vehicle kinematic swap
+
+In TMP sessions, other players' trailers appear as separate top-level radar
+vehicles (`is_tmp=True`, `is_trailer=True`). The shared-memory speed field for
+those slots has no engine telemetry: it commonly reports 0: and the
+position-history LS fit can also return 0 during transients (small chord,
+stall, fresh spawn). Without correction, AEB sees a "stationary" obstacle
+directly ahead of ego and triggers falsely.
+
+`_swap_trailer_kinematics()` in `thread.py` walks the vehicle list once at the
+top of each loop. For every `is_tmp` + `is_trailer` entry it locates the
+nearest non-trailer TMP vehicle within 30 m (the pulling tractor) and returns
+a shallow copy with `speed` and `acceleration` replaced by the tractor's
+filtered values. The trailer's pose, yaw, curvature, and trailer-flag stay
+its own: only the kinematics it cannot self-measure are inherited. ACC has
+the same swap in `core/acc/tracker.py::_top_leads`.
+
+Only the precompute and main collision iterations consume `vehicles_eff`. The
+radar visualizer still reads the original `vehicles` so raw vs filtered speed
+displays remain meaningful for debugging the source data.
+
+### Ego curvature: steer-led, gain adapted, grip capped
+
+AEB **does not** consume `RadarData.ego_curvature` (the 25-sample
+position-history fit). The ego path must react instantly to steering input;
+a history-based fit lags the truck through a transient steer and either
+smears the ego corridor onto the outgoing lane (false positive after the
+corner clears) or leaves it pointing at the previous lane (false negative
+into the corner).
+
+The path comes from `EgoPathModel` (`core/radar/ego_path_model.py`), stepped
+once per new radar frame on the simulated clock. It is the old steer proxy
+plus the two things that proxy could not know: which vehicle is being driven,
+and whether it can still hold the line the wheel is asking for.
+
+```python
+capped     = sign(steer) * min(|gain * steer|, cap)   # cap = EMA of |kappa_meas| * 1.10
+kappa_path = (1 - w) * gain * steer + w * capped      # w: how much the cap owns
+```
+
+- **Gain** starts at `cal.ego_path_gain_prior`, still the historical
+  `radians(12)` = 0.2094, and is learned per vehicle from the driven line.
+  Per-vehicle gains run 0.09 to 0.24: a long bus turns far less per unit steer
+  than a 4x2 tractor, so a fixed value draws a corridor up to twice too tight.
+  The prior stays historical on purpose. The fleet median is 0.19, but moving
+  the prior there was measured and rejected: on one corpus vehicle the truth is
+  0.137 and on another 0.205, so a median prior is a coin flip that shifts every
+  filter threshold at once. A measured per-vehicle gain is the accuracy claim;
+  the prior is only where a fresh session starts.
+- **Cap**: saturation is detected, never assumed from a constant. Measured
+  saturated plateaus run 6 to 13 m/s^2 and rise with speed, so a fixed
+  lateral-g ceiling would either bind on ordinary cornering or never bind.
+  The cap is what the vehicle is currently measured to hold.
+- **`w` is confirmed first, then ramped, and both halves are load-bearing.**
+  `sat_enter_s` of sustained evidence arms the cap; only then does `w` move,
+  toward a target that follows the measured/commanded ratio (full at
+  `sat_ratio`, zero at `sat_release_ratio`), at `sat_ramp_s` up and
+  `sat_exit_s` down. The cap value itself is an EMA (`sat_cap_tau_s`).
+
+  Both halves were measured. The first version latched: the corpus
+  frame-to-frame step at engagement was 0.032 1/m at p90 against 0.0006 in
+  ordinary driving, so the corridor radius halved in one frame, visible in the
+  debug view and enough to step filter regimes across their kappa thresholds.
+  Dropping the confirm window and letting the ratio drive `w` on its own fixed
+  the step (p90 0.0050) but capped on turn-in transients, where the measurement
+  window still trails the wheel: clips that merely brushed the cap went from 3
+  to 61 of 405, and the corpus went from 4 better / 3 worse to 5 better / 7
+  worse. Confirm plus ramp keeps the selectivity (3 of 405) at a p90 step of
+  0.0071, and the while-capped jitter at 0.0025 from 0.0088. Scaling `w` across
+  the ratio band instead of arming all-or-nothing was also measured and
+  rejected: it capped mild under-turn (ratio 0.75 to 0.85) that the latch never
+  took, which is what cost `e0fd28b3`, the clip `oncoming_closing_lat_m` exists
+  to recover.
+
+  **Two lag traps sit either side of the detector, and both were live:**
+
+  - The **ratio** compares a yaw delta across the window against the command.
+    Tested against the instantaneous steer, a fast wind-on reads as understeer,
+    because the wheel has already moved on. It reads `_kappa_cmd_ref`, the
+    command averaged over that same window, so the comparison is like for like.
+  - The **cap value** smooths downward only (`max(ema, raw)`). Into a tightening
+    corner both the window and the EMA trail the real line, and a cap under it
+    points the corridor at traffic the truck is already curving around.
+
+The **rule**: measured curvature may only lower the magnitude while saturation
+is confirmed. It never raises it, never flips its sign, and never replaces the
+steer term in the linear regime, so unwinding the wheel and counter-steering
+still reach the corridor on the same frame. Do not add an "optional" history
+fallback beyond that cap: the reactivity loss is the problem, not the
+transient-sample count.
+
+The rule binds the published value too: `EgoPathState.kappa_cap` is set only
+while `sat_weight > 0`. Unarmed, the EMA is just the measured line within
+`sat_cap_margin` of what the truck is doing anyway, and a consumer that reads
+it as a ceiling bounds its arcs to the turn ego is already in. That is how it
+reached the evasion corridor: over a 200 clip sample it bit 78.1% of moving
+frames, 98.5% of them with the tires in their linear range, and 22.3% of
+frames lost both escape arcs at once.
+
+The learner and the cap split on lateral load, and that split is load-bearing:
+underperformance below `ego_path_learn_max_lat_ms2` is geometry, so the gain
+adapts; underperformance above `ego_path_sat_min_lat_ms2` is grip, so the cap
+takes it and the gain is left alone. Without it a single understeering corner
+would teach the model that the truck steers badly everywhere.
+
+Clips never record the learned gain (a new clip field bumps `CONSENT_VERSION`),
+so replay re-derives it with `clip_replay.ego_path_replay`, which runs the
+learner over the whole clip before the first tick. Live has been learning for
+far longer than an 11 second window; starting replay from the prior would
+replay a colder model than the one that made the recorded decisions.
+
+### What it did to the corpus
+
+Measured 2026-09-21 over 2225 clips (1144 labelled, ignore and unlabelled excluded),
+against today's fixed-gain path with no cap:
+
+| | clips whose stream moved | better | worse |
+|---|---|---|---|
+| grip cap only | 149 (6.7%) | 5 | 5 |
+| cap + learned gain | 647 (29.1%) | 10 | 8 |
+
+**No true positive is lost in either column.** Better is two false negatives recovered
+(`6adac35a` and `7b945148`, both crash clips) plus false positives becoming true
+negatives; worse is entirely "brakes where the label says it should not", on clips
+labelled `fp` or `tn`.
+
+Every flip opened by hand came down the same way: the old corridor was up to three times
+more curved than the line the truck actually held, and that error was sweeping the
+corridor off targets by accident in both directions. On `84cdd6b3` the truck was on a
+114 m radius at 91 km/h with a 22.5 km/h vehicle 33 m dead ahead, and the driver steered
+around it a second later; on `d16d0575` a lead at 0.74 s headway decelerating 1.5 m/s^2
+was held out of lane. An accurate path hands both decisions back to AEB's own threat and
+evasion logic, which is where they belong. Read a verdict drop here as that class
+surfacing rather than as a regression on its own: the corpus windows were hand-tagged
+against the old corridor.
+
+`RadarData.ego_curvature` is consumed by ACC, not AEB.
+
+### Target-vehicle curvature: two-source blend
+
+Per-target arc curvature is computed by `_vehicle_curvature_blend()` in
+`filters.py`. AEB-local two-source path prediction combines:
+
+| Signal | Source | Role |
+|--------|--------|------|
+| `pos_kappa` | `ego_curvature_from_history` on the last `cal.aeb_pos_history_len = 6` samples of `v._position_history` (shorter than the full 25-sample fit used elsewhere) | **Smooth**: damps single-frame yaw noise |
+| `yaw_kappa` | `radians(v.angular_velocity) / abs_v_speed`: per-frame yaw rate already maintained by the radar thread | **Responsive**: single-frame rotation signal |
+
+```python
+if pos_kappa is not None and yaw_kappa is not None:
+    v_curvature = cal.aeb_yaw_blend * yaw_kappa + (1 - cal.aeb_yaw_blend) * pos_kappa
+elif pos_kappa is not None:
+    v_curvature = pos_kappa
+elif yaw_kappa is not None:
+    v_curvature = yaw_kappa
+else:
+    v_curvature = 0.0
+```
+
+`aeb_yaw_blend` (default `0.4`) controls the mix. This produces
+`v_curvature`, the raw measured curvature used by same-curve and diverge
+filters. Arcs built for prediction use `arc_curvature`, which is `v_curvature`
+after Fix D over-rotation damping when that damping applies. Visualization and
+collision must use the same `arc_curvature` so the debug view matches what AEB
+actually evaluates. Call sites that go through the helper:
+
+1. `thread.py::_build_vehicle_collision_data` (precompute path): collision tractor + trailer
+2. `thread.py::loop` (per-vehicle else branch): visualization, deriving `arc_curvature` from `_dampen_turning_curvature(...)`, then passing it to `v.get_arc(...)` and trailer `build_arc(...)`
+3. `filters.py::_build_vehicle_collision_data` (test harness path): collision tractor + trailer
+
+`LaneClassifier.apply` does **not** recompute `v_curvature`: the upstream
+call sites above populate it on the `FilterContext` once per frame and the
+stage reads it as-is. Recomputing there would double-step the One-Euro state
+(see below).
+
+### One-Euro post-filter on `v_curvature`
+
+The yaw+pos blend is fed through a per-vehicle One-Euro filter
+(`VehicleCurvatureBlender` in `filters.py`) before reaching the pipeline.
+Speed-adaptive low-pass: cutoff = `min_cutoff + beta · |dkappa/dt|`. Quiet
+steady state → heavy smoothing (kills single-frame jitter). Genuine corner
+entry → cutoff jumps with the derivative and the filter approaches
+passthrough within a frame. Reference: Casiez et al., "1€ Filter", CHI 2012.
+
+State lives on `AEBThread._curvature_blender`, keyed by `vehicle.id`. The
+helper is stepped exactly once per vehicle per frame: first call site that
+sees the vehicle (precompute or fallback else branch in the per-vehicle
+loop) advances the filter; `LaneClassifier` reads the cached value from
+`ctx.v_curvature`. The blender is `prune`d at the end of each loop against
+the current `vehicles_eff` id set so disappearing targets release state.
+
+Calibration:
+
+| Knob | Default | Role |
+|------|---------|------|
+| `aeb_kappa_one_euro_min_cutoff` | 1.0 Hz | Smooth-floor cutoff at zero derivative |
+| `aeb_kappa_one_euro_beta` | 200.0 | Slope of cutoff vs `|dkappa/dt|`: higher = snappier transient, lets more noise through |
+| `aeb_kappa_one_euro_d_cutoff` | 1.0 Hz | Low-pass on the derivative estimate (rejects noise-driven cutoff swings) |
+| `aeb_kappa_one_euro_beta_turn_scale` | 30.0 | Progressive beta attenuation with `\|kappa\|`: `beta_eff = beta / (1 + scale * \|x_prev\|)`. Counters in-turn cutoff inflation from magnitude-scaling noise (yaw_rate/v amplification, pos-fit numerical sensitivity). 0 disables |
+
+When `_vehicle_curvature_blend()` is called without a blender (e.g. test
+paths that don't carry filter state across frames), it returns the raw
+blended value. Production paths in `AEBThread` always pass the blender.
+
+Never call `v.get_arc()` from AEB without a `curvature_override`: the
+fallback inside `traffic.py::get_arc` uses the full 25-sample
+`curvature_from_history()` fit, which lags exiting a corner and leaves
+the tractor arc curved long after the trailer arc has straightened.
+
+Do not enlarge `aeb_pos_history_len` toward 25: the responsiveness gain
+is the whole point, and `curvature_from_history()` on the full buffer is
+what ACC uses.
+
+---
+
+## 2. Module layout
+
+| Module | Role |
+|--------|------|
+| `core/aeb/calibration.py` | Frozen `AEBCalibration` dataclass: all tunable constants. `DEFAULT` singleton used by both `thread.py` and tests. |
+| `core/aeb/lane_frame.py` | `Lane` enum, `project_to_ego_arc()`, `classify()`: arc-projected lane membership, replacing the old cross-product `lateral_offset`. |
+| `core/aeb/filters.py` | Named filter pipeline: 12 stage classes + `FilterContext` + `build_pipeline()`. |
+| `core/aeb/thread.py` | `AEBThread`: data acquisition, ego-arc construction, pipeline dispatch, TTB/state output. |
+
+---
+
+## 3. Filter pipeline
+
+`build_pipeline(cal)` returns the ordered list of stage instances. Each stage
+exposes `.apply(ctx) -> FilterResult`. The first stage that returns
+`suppressed=True` short-circuits and the vehicle is skipped. If all stages
+pass, the vehicle enters collision evaluation.
+
+| Stage | Purpose |
+|-------|---------|
+| `RangeFilter` | Distance gate (`cal.max_range`) |
+| `ElevationFilter` | Membership in radar's `off_surface_ids` (core/radar/README.md §15) |
+| `LowSpeedTrailerFilter` | Trailers while ego is below `cal.trailer_ignore_below_kmh` |
+| `TmpRelSpeedFilter` | TMP session relative-speed pre-filter |
+| `LaneClassifier` | Populates `ctx` geometry fields; sets `ctx.lane` via `lane_frame` |
+| `OppositeLaneFilter` | Oncoming vehicles in their own lane (collapses Fix A + Fix B) |
+| `CoDirectionalDivergeFilter` | Co-directional arcs already diverging (Fix C + outer-lane same-turn) |
+| `TurningCrossTrafficFilter` | Cross-traffic turning through intersection (Fix D absorbed) |
+| `OutOfLaneParallelFilter` | Capsule lane-keeping adjacent / roadside traffic; also rear overtakers |
+| `TmpCrossTrafficFilter` | TMP-only: straight snapshot uses centre closest-approach (T-bone vs body-graze), turning snapshot uses full-horizon endpoint lane |
+| `SweepPassFilter` | Stationary cross-traffic ego turns through |
+| `CornerEntryStationaryFilter` | Stationary at corner entry: out-of-lane oncoming/co-dir, or in-lane with arc consistency |
+| `EgoEvasionFilter` | Ego can steer around target within 0.08 g (runs for `Lane.EGO` too) |
+
+`FilterContext.d_miss` carries the measured CBDR miss for the vehicle, computed
+once per vehicle per frame by the `los_miss` memo in `thread.py::loop`. It is
+`None` when the track is too short; filters must fail open on `None`.
+
+Fix labels A/B/C/D are retired: the logic now lives in the named stages above.
+
+The legacy `RearOvertakerFilter` was retired in favour of a unified
+"braking worsens" classification in the collision-evaluation step (see §5).
+That check compares closing-speed magnitude under braked vs unbraked
+trajectories and subsumes the rear-overtaker case along with cross-traffic
+scenarios where braking parks ego in a target's path.
+
+### `LowSpeedTrailerFilter`
+
+Suppresses `is_trailer` targets that sit **behind the cab** while
+`|ego_speed|` is under `cal.trailer_ignore_below_kmh` (20 km/h), in both
+directions of travel. Coupling drives the truck under a trailer on purpose:
+backing on to the fifth wheel and pulling out from under a dropped one are
+the same geometry at manoeuvring speed, and the trailer body is inside the
+ego capsule by design. No geometric test separates that from a threat,
+because it *is* an intentional collision course.
+
+Two details are load-bearing:
+
+- The behind test uses the **body frame** (`-dx sin(yaw) - dz cos(yaw)`), not
+  `ctx.ego_fwd_*`. That pair flips with travel direction (`build_arc`
+  normalises reversing to positive speed), so a trailer being backed under
+  would read as "ahead" and pass.
+- Trailers **ahead** of the cab are never touched. Rolling into the back of a
+  parked trailer at 10-15 km/h is a labelled TP class in the corpus
+  (`1df08197`, `ced27cc6`, `84fafd65`, `541030ee`, `3fc7738c`, `4ba23e1c`);
+  a blanket low-speed trailer ignore turned all six into misses for +143
+  corpus points.
+
+Latched ids bypass the stage, so an event that engaged above the floor keeps
+its pipeline seat and runs to completion instead of releasing the brake as
+ego decelerates through 20 km/h.
+
+Corpus: -324.00 to -342.30 over 784 clips. FP 40 to 34, TP and FN unchanged.
+The six cleared are `c6595282`, `08223dda`, `db1ae7e7`, `97f813ce`,
+`b295e45f`, `638920e7`, plus a partial on `aeaa0d6c`.
+
+### `LaneClassifier`: canonical lane primitive
+
+`LaneClassifier` is the first stage to populate all geometry fields. It uses
+`project_to_ego_arc()` from `core/aeb/lane_frame.py` to compute the arc-projected
+lateral offset. For curved ego arcs, the returned `d_abs` is the **maximum** of
+the circle-offset and the straight-line heading offset. This prevents a tight ego
+turn from projecting an opposite-lane vehicle into the EGO bucket.
+
+Lane thresholds (`cal.lane_half_width=1.95 m`, `cal.lane_separation=3.9 m`):
+
+| d_abs | Lane |
+|-------|------|
+| ≤ 1.95 m | `EGO` |
+| 1.95–1.95 m | `ADJACENT` (empty range: no ADJACENT in practice) |
+| 1.95–7.8 m | `OPPOSITE_OR_OUTER` |
+| > 7.8 m | `OFF_ROAD` |
+
+### Travel frame: reversing targets
+
+Target arcs have always moved along the direction of travel (`ArcPath.build` flips
+`fwd` for negative speed), but the regime flags that choose which filters apply
+(`head_on`, `near_head_on`, `co_directional`) were read off the **heading**. A
+reversing truck therefore sat in a regime that contradicted its own arc:
+
+- Clip d80936f9: a TMP truck facing ego at an angle (heading `fwd_dot` -0.67)
+  backed across ego's lane at 2.9 m/s. The heading frame called it oncoming in
+  its own lane, so `OppositeLaneFilter` and the 3.9 m head-on lateral gap
+  dropped it and the arc assumed it would stop at `full_brake_decel`. At 40 km/h
+  that clip stays silent by design (the TMP rel-speed floor, §4); at road speed
+  the same pose is scenario `tp_reversing_truck_backs_across_path`.
+- Clip 66874532: a rig heading ego's way (`fwd_dot` +0.85) backed diagonally into
+  ego's lane at 4.5 m/s. The heading frame got that one right by accident: it
+  read co-directional, which is the one class that was not wrong for it.
+
+The rule has two halves, and both are needed:
+
+1. **Regimes follow travel.** `travel_sign(v.speed, cal)` is -1 once the signed
+   speed is below `-cal.reversing_speed_ms` (1.0 m/s, the same line
+   `sweep_pass_max_target_speed` draws for "stationary"), and `fwd_dot` is taken
+   against the travel direction everywhere a regime is decided: `LaneClassifier`,
+   the collision-data helper (both copies), Fix D damping, follow-threat and
+   `clip_replay`. Products that turn `fwd_dot` back into a velocity use
+   `ctx.v_travel_speed`, so `speed * fwd_dot` keeps meaning velocity along ego.
+   Target velocity itself stays `v.speed * heading`, which was always right.
+2. **A reversing target is never oncoming.** `head_on` and `near_head_on` are
+   forced false for it. Every oncoming rule models a driver proceeding along a
+   road who can see ego: `OppositeLaneFilter` (keeps its lane or steers away),
+   the head-on lateral gap (§8), the full-brake target arc, the oncoming risk
+   and warn persistence windows, and the head-on LOS bar. None of that
+   describes a truck backing up. Travel frame alone moved 66874532 into
+   `OppositeLaneFilter` and turned a severity-4 TP into a miss; the scenario
+   `tp_reversing_rig_backs_into_lane` pins the warn time that exposes it.
+
+`TmpCrossTrafficFilter` also skips reversing targets by name: it models a TMP
+driver sweeping through a junction. **`TmpRelSpeedFilter` does not.** Exempting
+reversing targets from the floor made d80936f9 brake and would bring back the
+low-speed TMP false positives the floor exists for; the travel frame is for
+reversing traffic that clears the floor, not a way around it. Geometric
+stages (`CoDirectionalDivergeFilter`, `TurningCrossTrafficFilter`,
+`OutOfLaneParallelFilter`, `EgoEvasionFilter`) run unchanged in the travel frame.
+
+`_body_centreline_d_abs` samples along the heading (`arc.yaw_rad`), not
+`arc.fwd_*`: capsule extents are heading-relative, so the travel `fwd` mirrored
+the samples off a reversing body. `TmpCrossTrafficFilter`'s sweep arc is rebuilt
+with the sign of `v.speed`, since `ArcPath.speed` is stored as `|speed|`.
+
+The radar side of the same clip is in `core/radar/README.md` (position
+mismatch): before it, a reversing TMP vehicle was frozen 5 frames in 6 and read at
+about half its speed, so none of the above could see it clearly anyway.
+
+**Measured** (pre-change baseline -> radar run rule plus travel frame, 810 local /
+491 remote clips): local -386.93 -> -421.15, remote +358.71 -> +326.27. Misses to
+TP: 5f0da738, 0a5eacdc; 9cc70333 miss to late; 4cb90214, 626d28b6 and 888b45fd FP
+to silent, a823f720 false warn to silent. No verdict got worse. ebb1e8cf (labelled
+FP for parked bodies) brakes 0.9 s longer, on a real TMP truck reversing across
+ego's path about 6 m ahead.
+
+### `OppositeLaneFilter`
+
+Applies to `head_on` vehicles (`fwd_dot < cal.head_on_dot=-0.7`), and to
+`near_head_on` for the **body-separation** fast path only (collide can start
+before `fd` crosses `head_on_dot`).
+
+1. Lane check: `own_lane = ctx.lane in (OPPOSITE_OR_OUTER, OFF_ROAD)`
+2. Body-separation fast path: if pose `d_abs >= clear_bar - oncoming_body_sep_soft_m`
+   and the measured miss agrees, suppress (also when lane reads `EGO` under the
+   soft bar: corner-pull adjacent). Skip when `oncoming_closing_into` (below)
+   or when `max_evasion_lat_g` refuses (physically unavoidable closing). Opp
+   arms max-g refuse at 7 m by default; targets ≥ `max_evasion_opp_fast_kmh`
+   (60) use the lower `max_evasion_min_lat_m_opp_fast` (4.5) arm.
+3. Evasion arc test (`head_on` only): for each target arc, build two curvature-offset arcs
+   (`base_curvature ± delta_kappa_t`, `decel=0`). If either clears `ego_arc`, suppress.
+   - `delta_kappa_t = min(evasion_g_oncoming / v², evasion_max_dkappa)`, scaled by
+     `opposite_lane_kappa_scale` when `own_lane`.
+   - Fix B: `delta_kappa_t = max(delta_kappa_t, min(|ego_curvature|, shared_turn_max_kappa))`
+     when `own_lane` and ego is turning, **except** when CBDR miss is closing
+     fast while ego turns (below).
+
+**Turn-into-path (CBDR miss rate).** Ego steering into oncoming can inflate
+arc `d_abs` while the measured miss shrinks (clip `e0fd28b3`: `d_miss` rate
+about −5.6 m/s). Closing predicate: `|ego_curvature| >= turning_diverge_kappa`,
+`d_miss_rate <= oncoming_closing_dmiss_rate_mps` (−1.5 m/s), straight-frame
+`|lat| < oncoming_closing_lat_m` (0.85 m), and arc inflation
+`d_abs >= |lat| * oncoming_closing_dabs_lat_ratio` (honest adjacent stays
+body-sep; turn-into with inflated `d_abs` still skips). On that course skip
+body-sep and Fix B κ expansion; also skip engagement-entry LOS / turn
+extrapolation vetoes so warn can promote to brake. Evasion clearance still may
+suppress. Colliding closing targets also earn `certain_geom` for instant engage.
+`OppositeLaneFilterMirrored` stays `Lane.EGO` only.
+
+**Shared bend beats the `|lat|` collapse.** `|lat|` is measured against ego's
+straight-ahead axis, so mid-corner it sweeps through zero on *every* oncoming
+pass while the arc offset stays a full lane wide. That is what made clip
+`7d76e26d` brake: `d_abs` held 6.95 m against a 2.46 m body bar for the whole
+approach, and the only signal that disagreed was `|lat|` grazing 0.16 m for four
+ticks. `lane_frame.shares_bend` exits the predicate first: the target must be turning
+(`|v_curvature| >= turning_diverge_kappa`) at `oncoming_shared_bend_ratio` (0.5)
+or more of ego's `|κ|`, which says it is following the same road and the wide
+arc offset is real rather than ego's held steer extrapolated. Measured ratios:
+`7d76e26d` 0.73-0.97 and `458b8166` 0.97-1.07 on the bend, against 0.00-0.04 for
+the turn-into TP `e0fd28b3`, whose oncoming target runs straight (`|v_curvature|`
+under 0.002) while ego turns at 0.05-0.06.
+
+**No sign test, deliberately.** Two vehicles meeting on one bend usually carry
+*opposite*-signed curvature, because each signs its own travel direction: over
+the corpus, 89.8% of head-on ticks with both vehicles turning inside 40 m are
+opposite-signed (n=34154). Requiring agreement would miss most real shared
+bends, and requiring disagreement would miss `7d76e26d` itself, which is
+same-signed. The magnitude ratio carries the whole test and stays correct under
+either convention. `CoDirectionalDivergeFilter` Fix C does use a sign test, but
+it compares co-directional traffic, where both vehicles sign the same way.
+
+### `CoDirectionalDivergeFilter`
+
+Applies only to `co_directional` vehicles (`fwd_dot > cal.co_directional_dot=0.7`).
+For each arc with `speed > 0.5 m/s` evaluate `_is_approaching` at the hit point
+(lookahead `co_dir_diverge_lookahead_s=0.25 s`). **Suppress only when every
+colliding body of the rig diverges** (the first approaching arc passes the rig):
+a tractor pulling into the outer lane genuinely diverges, but if its trailer is
+still closing in ego's lane the rig is a real rear-end course, and vetoing on the
+cab arc (evaluated first) would drop the approaching trailer with it (crash clip
+434f0401).
+Extended lookahead (`dynamic_horizon × co_same_turn_lookahead_scale=0.5`) when
+all four conditions hold: vehicle in outer lane, both curvatures above threshold,
+same curvature sign.
+
+**Trailer-in-lane rescue.** The lane primitive (`ctx.lane`) keys off the tractor
+reference point only, so a long trailer swung across ego's lane while its tractor
+rides the outer lane of a shared curve reads as EGO-lane-clear: the extended
+lookahead then extrapolates the whole rig away as "diverging" and suppresses a
+genuine rear-end until the cab crosses into ego's lane at contact (crash clip
+434f0401). `_any_body_in_ego_lane` samples each arc's rigid body capsule
+centreline (rear→front) at `t=0`; when any body is physically inside
+`lane_half_width`, the same-turn extended lookahead is dropped and the in-lane
+dip check is armed. The centreline (no body half-width) is used so a
+corridor-grazing outer-lane body is not miscounted as in-lane
+(`fp_co_directional_outer_lane` stays suppressed). Regression scenario:
+`tp_trailer_in_lane_shared_curve`. The same primitive gates the equivalent
+tractor-based lane checks in `OutOfLaneParallelFilter` and `EgoEvasionFilter`.
+
+**Pass-through dip check (in-lane only).** The `_is_approaching` endpoint
+comparison alone inverts for fast closers: the hit time is the capsule
+contact moment (bumper gap ≈ the effective corridor margin since the
+cap-alignment fix), so a modest closing speed already carries the `t + dt`
+sample beyond the target, center distance grows again, and a lead about to
+be rear-ended reads as "diverging" (FN clip fbc397b3: 97 km/h ego suppressed
+a 20 km/h in-lane lead until impact, back when the padded contact distance
+still put the inversion near ~70 km/h closing). Fix:
+`_is_approaching` samples `cal.diverge_dip_samples` points across the
+window; when `dip_active` and any sample's center distance drops below the
+sum of the body half-widths (no corridor margin), the extrapolated bodies
+overlap and the pair counts as approaching regardless of the endpoints.
+`dip_active` is `ctx.lane == Lane.EGO` in `TurningCrossTrafficFilter`, and
+`ctx.lane == Lane.EGO or in_lane_body` in this stage (see the trailer-in-lane
+rescue above): for out-of-lane targets with no body in ego's lane an
+extrapolated body overlap is usually a constant-curvature artifact (e.g.
+overtaking a slower outer-lane vehicle in a shared turn:
+`fp_co_directional_outer_lane`), which is exactly what the filter exists to
+suppress. Regression scenario: `tp_fast_closing_lead` (80 km/h closing, in-lane).
+
+### `OutOfLaneParallelFilter`
+
+Suppresses co-directional / stationary traffic whose body stays out of ego's
+lane: the capsule collision body registers a grazing corridor overlap for a
+long vehicle driving or parked alongside ego that the point model mostly
+missed. A target whose centre never enters ego's lane over the horizon
+(arc-projected offset stays above `lane_half_width`) is lane-keeping adjacent
+traffic or a roadside object, not a collision course. Head-on own-lane
+oncoming is handled by `OppositeLaneFilter`; follow / latched threats and any
+body sample already in the EGO band (trailer swung into path, clip 434f0401)
+are exempt.
+
+**Stationary adjacent straddle.** An angled parked body can put the reference
+pose (or a shallow centreline graze) in `Lane.EGO` while the far end sits in
+the adjacent lane (clip `82acb8e8`: samples ~1.0–3.5 m). When
+`min(d_abs)` in `(stationary_ool_graze_min_m, stationary_ool_graze_max_m]` and
+`max(d_abs)` in `[lane_half_width * stationary_ool_span_scale, lane_separation]`,
+suppress as roadside. Stationary centre scans also use `v.position` instead of the
+body-offset `arc.start`, which otherwise fakes an in-lane centre.
+
+**Rear-overtaker early suppress.** Faster co-directional traffic approaching
+from behind in another lane (`v·ego_fwd > ego_speed` and `dx·ego_fwd < 0`) is
+suppressed *before* the predicted-centre scan. That scan is circular: it
+projects onto the same bent ego arc that manufactures the phantom capsule
+hit, so it leaks exactly on the wiggle ticks that create the FP (passing
+clips f0b2ace6 / 02642609). A genuine cut-in brings its body into the EGO
+band and is not suppressed here; braking_worsens covers the same class if
+anything still reaches collision eval.
+
+### `TmpCrossTrafficFilter`
+
+TMP-only filter that absorbs MP-data uncertainty for routine intersection
+maneuvers. TMP position/yaw/curvature snapshots are jittered enough that an
+in-progress turn at a side road can briefly project an arc through ego's lane
+even though the actual MP target is sweeping past. Applies to TMP vehicles
+(`v.is_tmp=True`) that aren't co-directional and have non-trivial speed. For
+each target arc with a collision hit, build a non-braked "sweep" arc from the
+snapshot's `(start, yaw, curvature, speed)`, then branch on how trustworthy
+the snapshot's motion is (`ctx.v_curvature`):
+
+- **Straight snapshot** (`|v_curvature| < turning_diverge_kappa`): the motion
+  is trustworthy, so decide on the geometry directly. Take the closest approach
+  of the two reference **centres** over the horizon (ego arc vs sweep arc). If
+  they genuinely meet (`d_min <= cal.tmp_cross_center_hit_dist`) it is a real
+  T-bone → **pass** (brake). If the centres miss (the collision is only the
+  target's long body grazing ego's corridor as it sweeps clear) → **suppress**.
+- **Turning snapshot** (`|v_curvature| >= turning_diverge_kappa`): the jittered
+  curvature makes the predicted centre path unreliable, so keep the full-horizon
+  endpoint-lane test. Endpoint in `OPPOSITE_OR_OUTER` / `OFF_ROAD` → the target
+  sweeps clear → **suppress**; endpoint in `Lane.EGO` → real continuing threat →
+  **pass**.
+
+The split fixes a false negative in the old design, which used the endpoint
+test for **all** TMP cross-traffic. The endpoint answers "where does the target
+*end up* at the 3 s horizon", not "does it occupy ego's lane *when ego
+arrives*". A genuine straight perpendicular crosser on a dead-center collision
+course always ends tens of metres past ego's lane at the endpoint, so it was
+suppressed at every range (no warn, no brake in TMP sessions until the crosser's
+measured speed dropped: corpus FN clip ffd29f9e). The centre-miss test answers
+the correct question for the trustworthy straight case: a real collision brings
+the reference centres to ~0 m, a body-only graze keeps them metres apart. The
+turning branch is unchanged and still suppresses the mid-turn jitter phantom
+(regression `fp_tmp_side_road_right_turn` phase 2, `fp_cross_traffic_completing_turn`).
+
+Optional `tmp_cross_in_corridor_pass`: when enabled, do not graze-suppress if the
+body is already inside `|lat| ≤ lane_half_width` ahead with a closing (or unknown)
+miss rate. Default off: max_evasion fail-closed covers the hard TMP twins without
+the side-road FP cost. `max_evasion_lat_g` also refuses TmpCross suppress when
+straight-frame `|lat|` clears `max_evasion_min_lat_m_tmp_cross` (3 m; Opp
+uses the higher 7 m arm) and required lateral accel exceeds the truck
+budget (physically unavoidable closing).
+
+No imminence / TTB floor is used: the turning phantom persists to `hit ≈ 0`
+(the jittered vehicle sweeps through ego's lane right up to closest approach),
+so any positive "never suppress below this hit time" floor would leak that
+regression. A turning TMP target that is genuinely on a collision course and
+close-in relies on the engagement-certainty gate + TTB slam net downstream, not
+this stage.
+
+Uses a freshly-built non-braking arc from the **undamped** `ctx.v_curvature`
+(rather than `base_target_arc`) in both branches: the standard arc may be
+truncated by target-side full-brake modeling at near-head-on angles, and its
+Fix D over-rotation damping straightens the arc of a target genuinely sweeping
+through a corner. Either one distorts the projected centre path and endpoint and
+masks where the cross-traffic actually sweeps to.
+
+Non-TMP targets bypass entirely: AI vehicles' arcs are deterministic and
+already handled by `OppositeLaneFilter`, `TurningCrossTrafficFilter`, etc.
+Reversing targets bypass too: the stage models a driver sweeping through a
+junction, and its centre-miss graze test suppressed a rig backing into ego's lane.
+
+### `CornerEntryStationaryFilter`
+
+Suppresses stationary targets (`|speed| < sweep_pass_max_target_speed`) at
+corner *entry* (`|ego_curvature| < turning_diverge_kappa`) when their pose
+implies they sit on a curved road continuation rather than blocking ego's
+straight-line path.
+
+- Symmetric road-bend formula: `road_bend = acos(|fwd_dot|)`: folds oncoming
+  (`fwd_dot ≈ -1`) and co-directional (`fwd_dot ≈ +1`) cases into `[0, π/2]`.
+- Implied curvature `road_bend / dist` must exceed `turning_diverge_kappa`.
+- **Mode A** (out-of-lane): vehicle in `OPPOSITE_OR_OUTER`/`OFF_ROAD` → suppress.
+  Covers the original "around the bend" oncoming case, now also co-directional.
+- **Mode B** (in-lane): vehicle in `Lane.EGO` → require geometric consistency
+  with a curved continuation. Yaw-rotation direction must match lateral-offset
+  direction, and `|dist · sin(road_bend / 2) − |lat_signed||` must fall within
+  `corner_entry_lateral_tol`. Catches MP stopped queues whose lead vehicle
+  projects to ego's straight axis but whose pose only makes sense on a curve.
+- Latched ids skip **Mode B only** (`lane == EGO`). Mode A's out-of-lane queue
+  must stay suppressed even if a graze latched the id.
+  Mode B's `implied_kappa = road_bend / dist` grows as range falls, so a few
+  degrees of yaw error that was legal at 40 m fires at 17 m while AEB is
+  already braking. Do not add an in-lane bypass here: Mode B *is* the in-lane
+  case (`fp_mp_stationary_corner_entry`). `CornerEntryStationaryFilterMirrored`
+  is Mode A and has no **latch** seat. Follow-threat ids do pass: a stopped
+  in-path cut-in can sit in `OPPOSITE_OR_OUTER` while occupying the corridor
+  (clip `c3c7a529`, d_abs ~4 m at bite).
+
+### `EgoEvasionFilter`
+
+After all previous stages pass, checks if ego could steer around the target
+within `evasion_g=0.08 g`. Uses `margin=0.0` for evasion arc checks (physical
+body clearance, not padded corridor).
+
+**The escape arcs and the grip cap.** `thread.py::_evasion_kappas` offsets the
+ego path by `delta_kappa = min(evasion_g / v², evasion_max_dkappa)` on each
+side. While `EgoPathModel` has saturation confirmed, the arc that turns
+*tighter* than the line ego holds may only spend the grip left over
+(`cap - |kappa_path|`), so a truck already at the ceiling has no tighter escape
+route. The arc that unwinds asks for less curvature than the path and is never
+limited; in the linear regime neither is. The allowance fades with
+`sat_weight` rather than switching, because clamping outright on the arming
+frame stepped the corridor edge 1.8x as far as the path under it.
+
+**`ctx.lane == Lane.EGO` by itself never bypasses this stage.** Lane-EGO
+classification is not evidence of danger: stationary shoulder vehicles and
+passing traffic on wide or curved roads land in the EGO bucket routinely, and
+a target a 0.08 g steer clears is not a threat whatever bucket it sits in.
+The in-lane closer bypass below uses the straight body frame (`|lat|`, axial,
+closing), not the lane bucket, because a parked truck's arc origin inflates
+`d_abs` into `OPPOSITE_OR_OUTER` while the body is still dead ahead.
+
+| Bypass | Condition | Why |
+|--------|-----------|-----|
+| Latched threat | `v.id in latched_threat_ids` | Mid-brake hold. Dropping the vehicle AEB is already braking for empties `colliding_ids` and collapses demand. Same seat as `OutOfLaneParallelFilter`. |
+| In-lane closer | ahead, straight `\|lat\| <= lane_half_width`, closing `> aeb_min_closing_ms` (1.0), and co-directional or stationary | Pre-brake rescue for a lead in the lane band. Weak closing stays on the 0.08 g check. Shoulder FPs sit outside the band (`fp_parked_shoulder` x=2.2). |
+| Head-on | `head_on` **and** target moving | Oncoming traffic belongs to `OppositeLaneFilter`, which runs its own evasion arcs at `evasion_g_oncoming`. A *stationary* target facing ego is a parked obstacle, not oncoming, so it runs the check unless the in-lane closer bypass already took it. |
+| Trailer swing | out-of-lane co-directional mover with a body inside `lane_half_width` | Genuine rear-end course; crash clip 434f0401 must never be evasion-suppressed. This is the one place the trailer-in-lane rescue is deliberately *stronger* than `Lane.EGO`. |
+| Follow-threat | `v.id in follow_threat_ids` **and** `ref_kmh_for_filter <= tmp_filter_split_kmh` | Inside the low-speed TMP band `TmpRelSpeedFilter` drops targets unless relative speed exceeds `tmp_filter_rel_below_kmh`, which discards real low-speed dangers; the behavioral latch is the fallback there. Above the split the latch is ACC-shaped lead tracking, which does not establish danger, so it no longer shields a target. |
+
+Do not change the OR-of-sides rule (suppress if *either* 0.08 g arc misses)
+into AND: that re-opens the shoulder FP class the 0.08 g filter exists for.
+
+---
+
+## 4. TMP rel-speed pre-filter
+
+When **any** slot in the frame has `is_tmp`, AEB pre-filters targets by
+**‖v_ego − v_target‖** (km/h) vs a **reference ego speed**:
+
+- ref **> 40 km/h** → threat only if rel **> 15 km/h**
+- ref **≤ 40 km/h** → threat only if rel **> 40 km/h**
+
+Reversing targets get no exemption. The floor keeps d80936f9 (a truck backing across
+ego's lane at 35 km/h relative) silent on purpose: exempting them re-opens the low-speed
+TMP false positives the floor was added for. See the travel frame section.
+
+Reference is current ego speed unless **latched**: the first frame with
+`AEBState ≥ WARN` or addressing brake (`_read_addressing_brake`: driver pedal
+or CC/ACC program brake above the 0.03 deadzone, not OPD coast-down) saves
+`ego_kmh`;
+latch held until state drops below WARN **and** brake released; cleared when
+the session is no longer TMP.
+
+---
+
+## 5. AEB Thread Interface
+
+Read from other threads (acquire `data._lock` first):
+
+```python
+aeb = registry.get_thread("aeb_thread").data
+aeb.AEB_warn                       # bool: UI cue (warn fraction or TTB); sound is warn OR brake
+aeb.AEB_brake                      # bool: engagement latched and target > 0
+aeb.AEB_target_decel_ms2           # float: rate-limited commanded decel (m/s²)
+aeb.AEB_ff_decel_ms2               # float: always-on additive FF decel (m/s²); 0 when no threat
+aeb.AEB_required_decel_ms2         # float: slope-corrected required decel
+aeb.AEB_effective_max_decel_ms2    # float: slope-corrected capacity ceiling
+aeb.AEB_realized_decel_ms2         # float: lead-compensated measured decel
+aeb.time_to_brake                  # float: seconds (1e9 = no threat)
+aeb.em_stop_requested              # bool: mirror of AEB_brake
+aeb.snapshot                       # AEBSnapshot: full debug state
+```
+
+### Continuous-decel logic
+
+1. Pipeline runs as before. First `suppressed=True` short-circuits.
+2. For surviving targets: collision check yields `unbraked_hit` and
+   `braked_hit`. Per-target `closing_speed` is the **vector magnitude** of
+   the relative velocity in world frame (`|v_ego_vec − v_target_vec|`), not
+   the axial projection onto ego's heading. The axial form clamps to zero
+   for rear-overtakers and misses the rear-end-worsens case.
+   - `braking_worsens` is set if either:
+     - `braked_hit is not None` and (`v_target_along_ego > ego_speed`
+       — pure rear-overtaker shortcut for imminent collisions where
+       `t_braked` is too small for the comparison below — **or**
+       `closing_braked > closing_unbraked + brake_worsens_hysteresis_ms`
+       — cross-traffic where braking parks ego in target's path), **or**
+     - `braked_hit is None` and `v_target_along_ego > ego_speed` and the
+       target is behind ego (`dx·ego_fwd < 0`): full braking clears a
+       rear-overtaker entirely, but feeding its closing speed into
+       required_decel still reads an adjacent-lane pass as a frontal
+       threat (passing FP clips f0b2ace6 / 02642609). Scoped behind ego
+       so a faster crosser ahead, where braking *is* the avoidance, still
+       contributes.
+   - Targets flagged `braking_worsens` are added to `braking_worsens_ids`
+     and excluded from `best_ttb` / `best_v_closing`. AEB engagement on
+     these is forbidden.
+   - Non-worsens targets set `ttb = unbraked_ttc` and contribute to
+     `best_ttb`, `best_closing_distance`, `best_v_closing` (all from the
+     lowest-`ttb` target).
+3. Required decel, **per target, aggregated by `max`** (`core/aeb/clearance.py`).
+   The demand is the smallest constant ego decel that keeps ego's front behind
+   every body it would otherwise occupy the same space as. See
+   "Clearance-based demand" below for the derivation.
+   ```
+   # per occupancy sample k of one target, with lag = stop_buffer_response_s:
+   D_k        = s_near(t_k) - ego_front_to_surface - stop_buffer   (- latched pad)
+   a_roll     = 2 * (v0 * t_k - D_k) / (t_k - lag)²      # still rolling at t_k
+   a_stop     = v0² / (2 * (D_k - v0 * lag))             # stopped before t_k
+   a_k        = a_roll if a_roll * (t_k - lag) <= v0 else a_stop
+   required_target   = max over k of a_k                 # INF when unavoidable
+   required_decel    = max over targets of required_target
+   road_grade        = tan(ego_pitch_rad), 0 if |·| > MAX_EGO_GRADE
+   slope_accel       = g · sin(atan(road_grade))      # +ve = uphill
+   downhill_offset   = max(−slope_accel, 0)           # gravity stealing brake force
+   effective_max     = ego_decel_frac · capacity_estimate − downhill_offset
+   capability_decel  = capacity_estimate − downhill_offset
+   effective_required= required_decel + downhill_offset
+   ```
+   `max` over targets, not "the lowest-`ttb` target's demand". A crosser can now
+   report a low demand honestly, and with the old single-target selection it
+   would have masked a slower-`ttb` lead behind it. `best_ttb` stays a separate
+   aggregate for the TTB slam and the displays.
+   **The build-up reserve is latched at engagement.** Before engagement the lag
+   term is live, because the entry decision has to
+   account for build-up. Once engaged it becomes a fixed distance
+   (`_engage_pad_dist_m`, seeded from the rate the binding constraint actually
+   closes at) and `lag` goes to zero, cleared on disarm. Re-charging it every tick was
+   the "brakes hard then fades out" complaint: the reserve shrinks with speed,
+   so it hands metres back through the stop and the demand decays with it.
+   Replayed on clip e9fb04c9 the commanded decel fell 10.68 to 0.41 m/s²
+   across a 2.4 s event, with the warn still sounding at the end. Latched, the
+   command holds, the event is 0.7-0.9 s shorter, and the residual gap grows
+   from 3.1 m to 5.0 m at 100 km/h with the p90-lag margin unchanged.
+
+   Note what this exposes rather than causes: with `aeb_engage_frac` at 0.85
+   and `aeb_engage_frac_certain` at 0.90, AEB only fires when the threat needs
+   ~90% of the truck, so a *consistent* stop at that demand is a near-maximum
+   stop (~80% of the event at the command cap). The gentleness in the old
+   profile was the reserve leaking, not a designed proportionality.
+
+   Two bases, and mixing them up is the "AEB steps in far too early and then
+   crawls to a stop" bug. `effective_max` caps the *command*, because
+   `ego_decel_frac` is the headroom the tracking controller corrects into.
+   `capability_decel` is what the truck can actually deliver, and that is the
+   only honest question for an *entry* threshold. Basing entry on
+   `effective_max` multiplied the two hedges and put the real bar at
+   `0.85 · 0.90 = 0.765` of capacity: 3.7 m of extra trigger distance at
+   100 km/h on a 13.89 m/s² double. Small next to the capacity error that
+   shipped alongside it (20 m), but it compounds with it.
+   `capacity_estimate` is read from `sending_thread.data.aeb_max_brake_ms2`
+   (`tune_max * I / 1.1`, physical full-pedal decel) with a fallback to
+   `max_brake_ms2` then a constant. The tracker itself stays in I=1.1 units
+   for the mapper and ACC. Clip replay overrides `_read_max_brake_ms2` with
+   the recorded number and must not re-apply the live slider.
+
+   **The slope term is the one place radar's negated pitch does not cancel.**
+   Every consumer in `core/radar/elevation.py` pairs `ego_pitch_rad` with a
+   forward axis negated the same way, so the gate is exactly sign-invariant
+   (radar README §15, "the doubly-negated frame"). Gravity has nothing to pair
+   against, so this is the only site that has to know which way is up. Do not
+   try to fix it by changing the sign in `core/radar/thread.py`: that breaks the
+   gate and leaves this term wrong anyway.
+
+   **A pose past `MAX_EGO_GRADE` reads level**, the same bound and the same
+   discard-not-clamp policy the elevation gate uses. Unclamped, a wreck, an
+   embankment or an airborne truck injected up to 9.81 m/s² into
+   `effective_required` and out of `capability_decel`; measured `|ego grade|`
+   p100 on real road is 0.126. Corpus effect of the clamp alone, over the 1,275
+   clips scored both before and after: two false positives recovered
+   (`bb8f3596`, `50df93bc`, both long weak brakings at 1.0-1.8 m/s² with no
+   threat behind them) and **zero** other clips moved by any amount.
+
+   `threat_present = required_decel > 0`. Slope modifies a threat-derived
+   demand, it never sources one: `warn_by_decel` and the FF branch both
+   require `threat_present`, so gravity alone can neither warn nor feed
+   brake assist. Without that gate the offset raises `effective_required`
+   and lowers `warn_threshold` (itself `0.5 · effective_max`) at the same
+   time, so pitch alone crosses the bar once `downhill_offset ≥ 0.3 ·
+   capacity_estimate`, about 17°. Public roads never reach that; a wreck,
+   an embankment or an airborne truck does immediately, which was the
+   phantom-warn-after-crash class (clip b530ea7b: 9 warn ticks and 92 FF
+   ticks up to 3.16 m/s² with `colliding_ids` empty and `ttb`/`ttc` at
+   infinity for the entire clip; 844 of 7199 corpus warn ticks were pure
+   slope). `brake_ttb_active` is deliberately outside the gate: it owns the
+   geometric threats where `required_decel` collapses to 0 by design.
+4. Engagement hysteresis (slope-aware):
+   - `brake_ttb_active = (time_to_brake < cal.brake_ttb + cal.brake_response_window_s)`
+    : emergency criterion for path-crossing / arc-cross threats where
+     `v_closing ≈ 0` collapses the `required_decel = v_closing²/2d` formula
+     but the geometry still says full brake can't avoid intersection. The
+     `brake_response_window_s` headroom compensates for actuator lag + the
+     rate-limited brake ramp so the slam fires before impact rather than
+     after the pedal has already needed to be at full. Without it, AEB
+     stays in WARN forever in these scenarios.
+   - Geometry-driven engagement latch: once engaged, hold engagement
+     while any colliding target has `unbraked_ttc < disarm_hold_ttc_s`.
+     A working brake pushes `effective_required` under the disarm
+     threshold and headway over the distance latch by construction
+     (`required ~ v²`, `headway = d/v`), so a narrow hold window releases
+     mid-stop and the event pumps: release at ~30 km/h closing, coast,
+     re-engage at 7 m (clip 29c8e7e0). The hold releases when the target
+     clears laterally (not colliding), accelerates away (ttc grows), or
+     ego stops (no closing → ttc ∞). Entry is untouched.
+   - Latched threats never hold the brake by themselves: see
+     "Latched-threat hold" below. The latched set keeps a target in the
+     pipeline and on the instant re-engage path, nothing more.
+   - Engage when `effective_required ≥ aeb_engage_frac · capability_decel`
+     **OR** `brake_ttb_active`, subject to the tiered entry certainty gate
+     below. `aeb_warn_near_full_frac` shares this base so it stays equal to
+     `aeb_engage_frac` in absolute terms; `aeb_disarm_frac` and
+     `aeb_warn_frac` stay on `effective_max` and are unchanged.
+   - **Tiered entry certainty gate**: a new engagement additionally requires
+     one of: (a) `brake_ttb_engage_active` (imminent, full brake barely
+     avoids: instant), (b) certain geometry: a colliding, non-LOS-vetoed
+     target in `Lane.EGO` with `|fwd_dot| ≥ aeb_certain_fwd_dot` (aligned
+     in-lane traffic: rear-end or wrong-way, whose collision prediction
+     barely depends on arc extrapolation: instant), (c) continuity: a
+     colliding target already in `_latched_threat_ids` (instant), or (d)
+     qualification sustained for a geometry-graded confirm window (tracked
+     by `AEBThread._engage_confirm`, an `OccupancyConfirm`; reset while
+     engaged): `aeb_engage_confirm_s` when any qualifying colliding
+     target is **near-certain** (in `Lane.EGO`, or aligned `|fwd_dot| ≥
+     aeb_certain_fwd_dot` in any lane: one classification step from
+     certain), else `aeb_engage_confirm_oblique_s` for **oblique
+     out-of-lane** threats, the extrapolation-fragile class (corner
+     sweeps, mutual-turn passes) whose corpus phantoms qualify ≤ ~0.15 s.
+     **Lapse tolerance (occupancy window).** The confirm window is not a
+     hard-reset timer. `OccupancyConfirm` (`core/aeb/confirm.py`) tracks the
+     per-frame qualification over a trailing window and fires when the
+     window has elapsed AND the qualified fraction reaches
+     `aeb_confirm_occupancy`, dropping the streak only after more than
+     `aeb_confirm_max_gap_frames` consecutive unqualified frames. This
+     absorbs the per-frame detection flicker (the 36-sample collision time
+     grid, TMP jitter walking the predicted course across coverage edges)
+     that used to restart the whole window on a single missed frame, without
+     letting sparse 1-tick blips accumulate: they never reach the occupancy
+     threshold and a long gap resets. The instant paths (a)/(b)/(c) and the
+     reset-while-engaged behaviour are unchanged.
+     Known trade at 0.20 s: a genuine perpendicular crosser whose
+     qualification sustains ~0.16 s (clip ffd29f9e) loses the brake: warn
+     still fires and the TTB slam net catches a materializing threat, but
+     the phantom and genuine distributions touch at ~0.16 s, so the window
+     cannot separate them perfectly. Rationale: corpus analysis showed phantom engagements
+     from extrapolation-fragile crossing arcs qualify for 1-2 ticks and
+     vanish, while genuine threats sustain qualification 3-30 ticks; and
+     the dominant genuine classes (in-lane aligned) skip the wait entirely,
+     so the confirm window costs real rear-end/head-on events zero latency.
+     Required-decel magnitude is NOT a certainty signal: crossing-arc
+     phantoms enter at ~200% of max (collapsed d_remaining) while genuine
+     rear-ends enter at 70-100%. Warn and the FF-assist layer are untouched
+     by this gate.
+   - **Per-target risk confirm** shares the same `OccupancyConfirm`
+     mechanism (`AEBThread._risk_confirm`, keyed by vehicle id). A colliding
+     target must sustain qualification for `risk_confirm_s`
+     (`risk_confirm_oncoming_s` for head-on) before it contributes to the
+     aggregates; an id survives up to `aeb_confirm_max_gap_frames` missed
+     frames before being dropped, so a single collision-grid dropout no
+     longer restarts its clock or evicts it from the tracking dict.
+   - Disarm when `effective_required <  aeb_disarm_frac · effective_max` **AND
+     NOT** `brake_ttb_active` **AND NOT** `geom_threat_latched`.
+5. Setpoint pipeline:
+   - When `brake_ttb_active`: `target_raw = effective_max` (slam: required formula is unreliable).
+   - Otherwise: `target_raw = clamp(effective_required, 0, effective_max)` while engaged.
+   - **Deadband + rate-limit**: if `|Δ| < aeb_target_deadband_ms2` and the
+     held value is younger than `aeb_target_refresh_min_s`, hold. Else move
+     toward `target_raw` capped at `aeb_target_rate_ms3 · dt` (m/s² per tick).
+   - The published value is `AEB_target_decel_ms2` consumed by sending_thread.
+6. Flags:
+   - `AEB_warn` rises on `effective_required ≥ aeb_warn_frac · effective_max`
+     OR `time_to_brake < warn_ttb`, gated by warn persistence: certain /
+     near-certain geometry, imminent TTB, latched threats, and active
+     engagement warn instantly, while oblique out-of-lane threats must
+     sustain the raw warn condition for the `aeb_warn_confirm_oblique_s`
+     occupancy window (tracked by `AEBThread._warn_confirm`, an
+     `OccupancyConfirm` observed every frame; the streak follows the raw
+     condition, so the user-braking display suppression never resets it, and
+     an isolated 1-2 frame dropout does not restart the window). Because warn
+     qualifies on a superset of the engage-qualified frames, uses the same
+     `aeb_confirm_occupancy` / `aeb_confirm_max_gap_frames`, and
+     `aeb_warn_confirm_oblique_s ≤ aeb_engage_confirm_oblique_s − 0.1`, the
+     warn streak confirms at least 0.1 s before an oblique engagement even
+     through flicker: the driver's gas-override reaction window is preserved.
+     Default `aeb_warn_confirm_oblique_s` is 0.30 s (paired with
+     `aeb_warn_frac=0.60` and the vetoed window below): short clear-pass
+     encounters that only flicker the raw condition may stay silent. That is
+     intentional comfort trade; see TUNING.md TODO for residual false_warn.
+
+     **Fully-vetoed out-of-lane persistence.** A second, longer occupancy
+     window (`aeb_warn_confirm_vetoed_s`, `AEBThread._warn_vetoed_confirm`)
+     applies on the frames where *every* colliding target is both in
+     `engage_vetoed_ids` and outside ego's lane band
+     (`ego_lane_colliding_ids`). That intersection is the extrapolation-phantom
+     class: highway oncoming at tens of metres whose predicted contact the LOS
+     or turn veto has already refused to engage on. The window is latency, not
+     silence: a course that persists still warns, and the instant paths
+     (engaged, TTB slam, latched) bypass it. A target only joins the vetoed set
+     once its LOS track is long enough (`los_veto_min_samples`), so the opening
+     frames of a short encounter still use the ordinary oblique timing.
+
+     **Evidence-class persistence (oncoming / wide-lateral).** Two more
+     all-targets windows sit alongside the vetoed one, because near-certain
+     geometry alone was granting an instant warn to the corpus's two dominant
+     phantom-beep classes. `aeb_warn_confirm_oncoming_s` applies while every
+     colliding target is head-on or near-head-on: opposite-carriageway traffic
+     is aligned (`|fwd_dot| >= aeb_certain_fwd_dot`), so it reached
+     `nearcertain_geom_ids` and beeped on a single frame of corridor clip.
+     `aeb_warn_confirm_wide_lat_s` applies while every colliding target
+     projects more than `aeb_warn_wide_lat_m` off the ego arc, roughly a full
+     lane over: slow or stopped vehicles ego is passing. Both are latency, not
+     silence, and share the vetoed window's instant bypasses, with one
+     exception: the TTB slam presumes an in-path target, so
+     `aeb_warn_ttb_needs_narrow` makes an all-wide-lateral set clear the
+     wide-lateral window even when `brake_ttb_active`. Separately,
+     `aeb_warn_max_range_m` drops the raw warn when the nearest colliding
+     target is past it: no corpus clip's genuine warn opens beyond ~80 m, and a
+     beep about something further out is not actionable.
+
+     **Class stickiness and the instant floor.** Two escapes closed the gate's
+     back door. A target that shrinks under `aeb_warn_wide_lat_m` as it closes
+     used to leave the wide class mid-approach and collect an instant warn the
+     gate had been refusing a frame earlier, so the class is sticky across
+     `aeb_warn_wide_lat_sticky_s` of lapse. The grace is deliberately short: it
+     bridges a collision-grid dropout but lets a target that genuinely leaves
+     and re-approaches start fresh, which is what keeps the one real trigger in
+     `075d163a` while dropping its two phantom ones. Separately,
+     `aeb_warn_instant_min_s` makes even certain geometry show a couple of
+     frames of raw warn before the instant bypass fires, since a single-frame
+     demand spike on a target that then vanishes is a tracking artefact that
+     the 0.3 s state hold would otherwise stretch into an audible beep.
+
+     Corpus effect of the whole gate: `false_warn` 43 -> 3, `TN` 286 -> 326,
+     every other verdict unmoved. Three genuine clips lose their warn
+     (`adf20ad7`, `4ba23e1c`, `505af174`, all one-to-two-frame blips). The
+     dominant price is lead, not coverage: warn-before-brake clips 120 -> 59
+     and clips with at least 0.3 s of lead 28 -> 14, almost all of it from
+     `aeb_warn_instant_min_s`. Setting that knob to 0 restores lead (88
+     warn-before-brake, 21 at >= 0.3 s) at the cost of one false_warn
+     (`9fa4c844`). See TUNING.md before touching either.
+   - `AEB_brake` is true while engagement is latched and the published target
+     is above zero. Other subsystems (cruise/HMI) gate off this flag.
+   - **User-braking suppression**: when `_read_user_braking()` is true and
+     demand has not reached `aeb_warn_near_full_frac · effective_max`,
+     `AEB_warn` is forced false: a driver already braking is not warned about a
+     threat they are handling. This silences the cue only. Engagement, the
+     published target, and `AEB_brake` are untouched. Three sources count:
+     - `main_pedal_thread.brakeval`, the physical brake axis, compared against
+       `_USER_BRAKE_LATCH_THRESHOLD` (0.03).
+     - `main_pedal_thread.opdbrakeval`, any OPD brake including the coast-down
+       floor. Any value above zero silences the cue.
+     - `sending_thread.mapper_command_brake`, the CC/ACC/limiter command. Any
+       value above zero silences the cue.
+
+     The physical-pedal threshold is a joystick deadzone: a light dab still
+     counts, and AEB engagement remains the emergency override if it is not
+     enough. OPD and the mapper have no floor: any commanded brake means
+     MonoCruise is already slowing the truck.
+
+     All three taps are AEB-free by construction: `brakeval` is raw axis input,
+     `opdbrakeval` is snapped before the AEB override, and
+     `mapper_command_brake` is read upstream of the point where AEB's FF and
+     slam merge into the pedal. **Never source this from `abackward` or
+     `brake_output`**: both contain AEB's own brake, so AEB would read its own
+     output back and silence its own warning. The old `if self._engaged:
+     return False` guard existed only to paper over that contamination.
+
+     The TMP rel-speed latch and the shadow-near sampler still use
+     `_read_addressing_brake` (physical / mapper above 0.03, no OPD): OPD
+     coast-down is on whenever the foot is off the gas, and would pin that
+     latch for the rest of the session.
+7. Hold semantics: warn/brake state holds for 0.3 s after a downgrade to
+   suppress chatter, identical to the old WARN→STANDBY hold. The hold shapes
+   `aeb_state` and `AEB_brake`, but must **not** re-assert `AEB_warn` on a tick
+   where the user-braking suppression fired. Suppression is computed before the
+   hold and `warn_suppressed` carries past it. Without that carry the hold
+   reinstated the cue for up to 0.3 s after every warn, and since each
+   legitimate re-warn re-arms the hold, a driver braking through a decaying
+   threat heard near-continuous beeping. Sound follows a two-tick gate on the
+   HMI cue, and the cue is `AEB_warn OR AEB_brake`, not warn alone:
+   `start_warning` only after two consecutive cue ticks, so a pulse the
+   100 ms CC-panel poll never sampled cannot beep. Any cue end (threat gone,
+   user-braking suppression, or brake released) uses soft `stop_warning()`:
+   finish the current clip plus `_AEB_WARNING_STOP_EXTRA_REPLAYS`.
+   `stop_warning(hard=True)` is teardown only.
+
+   The brake half of the cue is load-bearing, and dropping it is how AEB
+   brakes silently. `self._engaged` sits *inside* `if warn_raw:`, so an
+   engagement latch can only upgrade an existing raw warn, it can never source
+   one. A threat that spikes, engages, then leaves the corridor takes
+   `effective_required` below `warn_threshold` on the very next tick while the
+   latch keeps braking, so warn is a one-tick spike and the two-tick gate eats
+   it. The 0.3 s hold does not rescue it either: the hold re-asserts warn only
+   on a state *downgrade*, and the state stays BRAKE throughout. Clip
+   `0a2dbd74` is the reference case: 42 brake ticks at 84 km/h, 2 warn ticks
+   (the two engagement edges), no beep. 37 of 561 braking clips in the corpus
+   never reached two consecutive warn ticks. Binding the cue to `AEB_brake`
+   leaves `AEB_warn` itself untouched, so no corpus verdict moves, and it also
+   means an engagement outbeats the user-braking suppression by construction,
+   which is what "AEB engagement is the emergency override" above already
+   promises.
+8. Head-on targets: modelled as also braking at `full_brake_decel (7.8 m/s²)`
+   inside the collision pipeline (unchanged).
+
+### Clearance-based demand
+
+`core/aeb/clearance.py`. Replaces `_required_decel_two_frame` and
+`_codir_required_cap` for **every** target class; both functions survive only as
+the `clearance_required_enabled = False` A/B path and as the fallback when a
+target produces no corridor occupancy at all.
+
+**The problem it fixes.** The relative frame drove `|v_ego − v_target|` to zero
+over the closing distance. For a 90° crosser that vector is
+`sqrt(v_ego² + v_t²)`, most of it lateral, and brakes cannot remove a lateral
+component: ego at 80 km/h against a crosser at 90 reads ~120 km/h of "closing
+speed" it must somehow shed. The `d_rel <= 0` fallback was worse in kind, not
+just degree: it explicitly required ego to come to a full stop at the contact
+point. Meanwhile the one model that credited target motion,
+`_codir_required_cap`, returned `_INF` for anything with `fwd_dot < 0.7`. So a
+crosser ego could simply arrive behind was priced as a wall, and AEB engaged
+far earlier than the situation deserved.
+
+**The model.** Braking cannot make ego arrive *earlier*, so the only escape
+braking buys is *arrive behind*. Work in ego arc-length `s`: the arc's shape
+comes from curvature, not speed, so it is fixed independently of the
+deceleration being solved for. Sample the target capsule over the window, keep
+the times it sits inside ego's corridor, and take `s_near(t)` as the smallest
+arc-length any of its body points reaches. Ego's front must stay behind that
+for every such `t`. Each sample yields a closed-form minimum decel (the two
+branches in step 3 above, which meet continuously at `D = v0 · (t + lag) / 2`),
+and the target's demand is their maximum.
+
+**Why this is one model and not a crossing special case.** The same expression
+reproduces what the old code computed by hand:
+
+| Geometry | `s_near(t)` | Result |
+|---|---|---|
+| Steady lead in lane | `gap + v_lead · t`, linear | peaks at `t* = 2·gap/dv` and evaluates to exactly `dv² / (2 · d_rel)` |
+| Braking lead | follows the lead's decel profile | lands on the `r_stop` branch, and reads **higher** where the binding moment falls between the lead's start and its stop |
+| Head-on | shrinks; the arc already carries `full_brake_decel` | the honest requirement, and unavoidable geometries return `INF` as before |
+| Crosser | ends when it vacates | demand is what it takes to be behind the conflict *while it is occupied*, which is the question that was never asked |
+| Stopped / turning-in target | never ends inside the window | last sample binds: stop-short, unchanged |
+
+**Perpendicular body buffer.** A crosser's heading and speed are not reliable,
+so the physical capsule is not the whole threat. `_apply_cross_zone` expands
+the target by `|sin(heading diff)|`: extra length of
+`cross_zone_base + cross_zone_speed * v` along travel (1 m plus 0.3 s at
+90 deg) and a radial halo of `cross_zone_radial` (0.7 m). Parallel and
+head-on headings get zero. Collision and the occupancy profile both read the
+inflated body, so a required stop also stops short of the halo. Lane
+classification stays on the physical capsule. A turning body that only the
+halo touches is a completing-turn graze (`TurningCrossTrafficFilter`); a
+straight crosser the halo is the first to see stays a threat. Do not call
+`ArcPath.build()` when applying the halo: `build()` re-derives `fwd` from yaw
+and drops reverse travel. Do not restore the old ghost-arc comb.
+
+`test_clearance.py` pins the first three as equivalences. The braking-lead case
+is the one deliberate correction: `max(r_move, r_stop)` sampled two points of a
+continuous curve and could under-read a hard-braking lead by about 30%.
+
+**Horizon.** Collision detection keeps `dynamic_horizon` exactly, so
+`colliding_ids`, `unbraked_ttc` and every filter verdict are untouched. The
+solver samples its own copies of the target arcs (`dataclasses.replace` with a
+longer `horizon`; only the `position_at_dist` clamp moves, the curve is the
+same) over `clearance_samples` dense to `dynamic_horizon` plus
+`clearance_far_samples` sparse to `clearance_horizon_s`. A target still in the
+corridor at the window edge has its `s_near` linearly extrapolated to the
+closed-form peak `t* = lag + 2·(C − dv·lag)/dv`, which is what recovers
+`dv²/(2·(gap − dv·lag))` for a distant slow-closing lead instead of truncating
+its demand to zero. That extrapolation is the same constant-velocity assumption
+the relative frame always made, and it is bounded to 60 s past the window.
+
+**Cost.** ~120 µs per colliding target worst case against a 33.3 ms tick, and it
+only runs for targets that already produced a hit. Two implementation choices
+carry that and are pinned by `test_the_solver_stays_cheap_enough_for_the_30_hz_loop`:
+the lateral test runs *before* the arc-length one so `project_to_ego_arc` and
+its `atan2` are only paid for points already inside the corridor (213 µs → 62 µs
+for an identical result), and each arc is coarse-rejected on its body centre
+before its five body points are touched.
+
+**Fail-closed properties.** Every degenerate input resolves toward braking, not
+away from it: a target that never clears gives stop-short; an already-overlapping
+geometry gives `INF` (clamped to `_REQUIRED_CEIL_MS2` so logs and clip records
+stay finite); no occupancy at all falls back to the old relative frame; and an
+over-long predicted occupancy, which is what a bad target-speed estimate
+produces, brakes *earlier*, not later. The TTB slam, `geom_threat_latched` and the
+decel floor are all untouched.
+
+**Corpus, 2026-08-24** (`clearance_required_enabled` off vs on). Two stores:
+`score_once.py` only reads the local one, so the contributed store has to be
+scored explicitly (`ClipStore(contributed_clip_root())`) or its clips are
+silently absent from any A/B.
+
+| | local off | local on | contrib off | contrib on |
+|---|---|---|---|---|
+| Total cost (lower is better) | −41.93 | **−385.42** | 33.07 | **0.84** |
+| True positives | 226 | 240 | 14 | 15 |
+| False negatives | 46 | 30 | 2 | 1 |
+| Late | 7 | 9 | 1 | 1 |
+| False positives | 18 | 22 | 5 | 5 |
+| False warns | 9 | 14 | 1 | 1 |
+
+Scoring is deterministic: two identical runs agree on every clip. Numbers from
+different sessions are not comparable, though, because the label set moves.
+
+The gain is not the crossing work. It is the braking-lead correction and the
+`max` aggregation, both of which raise the demand on genuine in-lane threats
+that used to sit under the bar: 19 clips move the right way, and 10 of them
+never see more than one colliding target at once, so the aggregation cannot
+explain those. The crossing work shows up as *later* entry on events that
+already engaged, which the corpus cannot price because its labels are windows,
+not timings; `tests/aeb/test_crossing_clearance.py` measures that instead
+(0.17 s to 0.50 s later on four crossing geometries, none dropped).
+
+**The one new false positive is not a crosser.** `fa53208a` (sev 1) is ego
+overtaking a slower vehicle about a lane and a half over: `fwd_dot` 1.00, 10 m
+ahead, 4.6 to 5.6 m lateral, 18 km/h of closing. Its lateral gap is shrinking at
+about 2.4 m/s, and the binding sample sits 1.4 s out where that extrapolates to
+roughly a metre, so the model reads a cut-in and refuses to be alongside when it
+lands. The demand is arithmetically right (`s_near` about 32.9 m against 36 m of
+freewheel, with 1.0 s of braking left after the lag); whether the geometry is
+real depends on whether that lateral convergence is the target merging or ego's
+own arc bending under hard acceleration. Note the guard that would normally own
+this class does not reach it: `codir_adjacent_veto_axial_ms` needs axial closing
+under 2.0 m/s and this is 5.0.
+
+The price is 4 false positives and 5 false warns, plus lost lead on two clips.
+
+**The lost-lead class, and why the engage bar is not the lever.** `3a47b621`
+(sev 5, TMP) keeps its true positive but its quality falls 0.81 to 0.19: an
+oblique oncoming convergence, 45 m ahead and 28 m left at `fwd_dot` −0.47,
+where the relative frame demanded 18.1 m/s² and the clearance model demands
+6.7. Sweeping `aeb_engage_frac` from 0.90 down to **0.70 does not move it at
+all** (brake at 8.64 s, quality 0.19, at every value), because the engagement
+aggregate excludes engage-vetoed ids and the demand is not what is waiting. The
+gate is `aeb_engage_confirm_oblique_s`: at 0.40 the brake lands at 8.64, at 0.30
+8.55, at 0.20 8.47, at 0.0 8.28. Priced over the corpus, buying that lead back
+costs false positives steeply and nothing else:
+
+| `aeb_engage_confirm_oblique_s` | local cost | TP | FN | **FP** | `3a47b621` |
+|---|---|---|---|---|---|
+| **0.40 (shipped)** | −385.42 | 240 | 30 | **22** | −1.90 |
+| 0.30 | −378.46 | 240 | 30 | **26** | −3.04 |
+| 0.25 | −377.81 | 240 | 30 | **28** | −3.60 |
+| 0.20 | −390.60 | 241 | 29 | **33** | −4.04 |
+
+Eleven extra unwanted brake interventions to buy one true positive and half of
+one clip's lead. Total cost barely moves because the cost model prices FN at
+10x FP, which is exactly where that model stops matching what a driver feels.
+**Leave it at 0.40.**
+
+`2202afb9` was the other one (sev 3, TP to FN) and is now labelled `ignore`, so
+it no longer scores. The diagnosis is still worth keeping: a hard-braking lead
+90 m ahead around a bend, relative frame 16.3 m/s², clearance model 5.8. By hand
+(lead stopping from 14.2 m/s at about 10 m/s², ego at 23 m/s) it is roughly 4
+plus the reserve, so **5.8 is the correct number and 16.3 was inflated
+threefold** by the lateral part of `v_closing` on the bend. Do not "fix" either
+clip by re-inflating the demand.
+
+**Side effect worth knowing.** The demand layer now declines the measured
+clear-pass oncoming case on geometry alone, reaching the same verdict the LOS
+veto was added for (`test_the_clearance_model_alone_declines_the_measured_clear_pass`).
+The vetoes still run and still scope to engagement entry.
+
+### LOS-rate engagement veto (CBDR)
+
+New engagements evaluate a second, engagement-only aggregate chain that
+excludes targets vetoed by measured line-of-sight drift. A genuine collision
+course holds near-constant world-frame bearing while range shrinks (constant
+bearing, decreasing range); corner cross-traffic whose extrapolated arc
+phantom-intersects ego's corridor drifts its bearing consistently instead.
+Per target, `_los_predicted_miss()` fits bearing/range slopes over the last
+`los_veto_window_s` of raw positions (`AEBThread._los_tracks`, fed every
+frame for every tracked vehicle, pruned with the blender) and estimates
+`d_miss = |omega_los| * R^2 / |v_rel|`. It is computed at most once per
+vehicle per frame (`los_miss` memo in `loop`) and reused by every consumer
+below.
+
+Veto fires only when the track has `los_veto_min_samples`, the target is
+beyond a range floor, and `d_miss` exceeds a miss bar. `_los_veto_bar()`
+picks the pair:
+
+| Geometry | Range floor | Miss bar | Why |
+|----------|-------------|----------|-----|
+| Co-directional or crossing | `los_veto_min_range_m` (25 m) | `los_veto_miss_dist_m` (6.0 m) | Relative motion is not constant, so the estimate needs a wide margin. Corpus separation: genuine engagement edges 0.05-4.4 m, corner phantoms 6.8-12.3 m. |
+| Head-on (`fwd_dot < head_on_dot`) | `los_veto_headon_min_range_m` (20 m) | `los_veto_headon_miss_dist_m` (2.8 m) | An antiparallel encounter lasts 1-3 s and is decided by lateral separation alone, so the bar is physical body clearance (`ego_hw + target_hw` is about 2.4 m) plus measurement margin. |
+| Head-on but manoeuvring | falls back to the general pair | | `|v_curvature| >= los_veto_headon_max_kappa` (0.05, about R 20 m) at `abs_speed >= los_veto_headon_min_speed_ms`: a target turning that hard is not holding a straight line, so straight-line CBDR does not describe it. The speed floor is required because `kappa = yaw_rate / v` diverges near zero speed. |
+
+The head-on branch exists because the dominant labelled false-positive class
+was oncoming traffic that the arc model placed in `Lane.EGO`. On a bend of
+1000-1500 m radius the lateral shift over 40-90 m of straight-line
+extrapolation is 1-4 m, which is exactly a lane width, and the steer-derived
+ego curvature cannot see a bend that gentle. The 2.8 m bar was derived on the
+360-clip corpus, where the split at the engaging tick was 8 genuine head-on
+engagements measuring 0.19-2.72 m of miss against 13 phantoms measuring
+1.74-6.24 m; it held unchanged when the corpus grew to 514.
+
+Scope is strictly engagement *entry*: warn, disarm and the geometry latch
+all keep the full aggregates, so a wrong veto costs latency on
+one target, never silence. Vetoed ids are published in
+`snapshot.los_vetoed_ids`.
+
+### Extrapolation vetoes
+
+`_extrapolation_veto()` bars engagement entry on two further classes where the
+predicted contact rests on extrapolation the system cannot support. Both feed
+the same engagement-only aggregate as the LOS veto, so warn and FF assist are
+untouched. `ctx.lane == Lane.EGO` and `_any_body_in_ego_lane` are hard
+exemptions: the trailer-in-lane rescue must survive both (clip 434f0401).
+`extrap_veto_enabled` disables the whole helper.
+
+- **Ego-turn extrapolation** (non-co-directional targets). A hit reachable only
+  by holding the current steer for `turn_veto_min_ttc_s` (1.2 s) while
+  `|ego_curvature| >= turn_veto_min_kappa` (0.012, about R 83 m) is vetoed.
+  Real turns are transient (entry, apex, exit); a constant-curvature ego arc
+  swept 20-30 degrees into a junction manufactures crossings with traffic on
+  the road ego is turning onto. Near-term hits and straight-line driving are
+  untouched, so the scope is junctions and roundabouts only. Corpus: the
+  labelled phantoms sat at 17-31 degrees of required sweep with the target
+  23-49 m off the ego arc, while every genuine engagement while turning had
+  its hit within 0.5 s or its target inside the lane.
+- **Matched-speed neighbour** (co-directional, out of lane). Vetoed when the
+  axial closing speed `ego_speed - v_target_along_ego` is in
+  `[0, codir_adjacent_veto_axial_ms)` (2.0 m/s) **and** the measured
+  `d_miss >= codir_adjacent_veto_miss_m` (2.0 m). Braking removes at most the
+  axial component, so at under 7 km/h of axial closure any predicted contact is
+  lateral and brakes do not steer. Raising this to 4.0 silenced `bbed6ec4` but
+  turned `5366cb63` TP into FN and `cf0b2767` TP into LATE; reverted. The lower bound of the band matters: a
+  *faster* target is an overtaker, which `braking_worsens` already owns and
+  which the corpus labels as a genuine threat when it cuts in. The miss term
+  matters too: a neighbour whose measured track is converging on ego is a real
+  side contact, and with no measurement yet the veto stays off.
+
+### Closing-speed floor
+
+`aeb_min_closing_ms` (1.0 m/s) bars engagement entry on any target whose
+world-frame relative speed `|v_ego - v_target|` is under the bar, feeding
+`closing_floor_ids` and the same engagement-only aggregate as the vetoes above.
+It is a comfort gate, not a threat judgement: under 1 m/s the contact AEB would
+prevent is a 3.6 km/h nudge, and an automatic stop is a worse outcome than the
+bump it avoids. It applies to every class, not just the co-directional
+neighbour `codir_adjacent_veto_axial_ms` already owns, because the same
+argument holds for a crawling crosser and for a stopped obstacle ego is
+creeping at.
+
+Two consequences to keep in mind when reading a trace:
+
+- **A decelerating lead is delayed, not suppressed.** Relative speed is
+  measured at the current frame while `required_decel` already integrates the
+  lead's deceleration, so a lead braking from matched speed sits under the bar
+  for however long it takes to open 1 m/s of difference: about 0.2 s at 5 m/s²,
+  and the gap it costs is that window times the closing rate, which is under
+  0.1 m by construction. The threat is not re-derived from scratch: the frame
+  the bar clears is the frame the existing demand engages on.
+- **Warn and FF are untouched, holds are untouched.** Like the other
+  engagement-entry gates, the floor is subtracted from `best_ttb_engage` and
+  friends only. A target under the bar still warns, still feeds
+  `AEB_ff_decel_ms2`, still counts for disarm and for the geometry latch,
+  and an event already engaged runs to completion on the full
+  aggregates. The one coupling is the documented `aeb_warn_confirm_vetoed_s`
+  window, which a matched-speed target **out of ego's lane** now takes.
+
+### Lane confidence range
+
+`Lane.EGO` is treated as certainty only where pose can actually fix a lane.
+For a non-co-directional target an unseen road bend displaces it by roughly
+`kappa_road * s^2 / 2`, which reaches a lane half-width (1.95 m) at about 30 m
+for the gentlest bend worth worrying about, so beyond
+`lane_confidence_range_m` neither `certain_geom_ids` nor `nearcertain_geom_ids`
+is populated and the target takes the oblique confirm window instead of an
+instant engage. Engagement is not blocked, only its instant path: a stopped
+obstacle 55 m ahead still brakes well outside the range, it just confirms
+first (`test_far_obstacle_still_engages_through_the_confirm_window`).
+
+**Co-directional targets are exempt** from both this range and the oblique
+window, via `lane_trusted` and the `ctx.co_directional` term in
+`nearcertain_geom_ids`. A pair travelling the same way shares whatever bend it
+is on, so the bend's lateral error is common-mode and cancels; the pair is
+simply not the extrapolation-fragile class the window exists for. Dropping
+that exemption cost two true positives on the corpus (`cad4dae6`: a vehicle
+merging in from the right and stopping dead ahead, 55 m to 15 m at constant
+bearing, which read as "oblique" only because `fwd_dot` was 0.91 rather than
+0.95).
+
+A `lane_confidence_miss_m` clause used to re-earn the lane at any range when
+the measured miss was near zero. It was **removed**: on the expanded corpus it
+was wrong on every clip it touched (`44681ca9`, `4c18f4cd`, `d53658ef`,
+`f0450e0f`, all labelled false positives). The reason is that `d_miss` scales
+as `omega * R^2 / v_rel`, so at 40-120 m it is a short-baseline measurement
+extrapolated over a long lever arm and cannot resolve the very bend that puts
+the target in the wrong lane bucket. The measurement outranks pose only where
+its own error is smaller than the pose error it is correcting, which for this
+estimator means removing certainty (a *large* miss is robust to that noise),
+not restoring it.
+
+These mechanisms are a stopgap for not having a road model. When
+`core/acc/road_model.py` is stable enough to consume here, the honest fix is to
+project lane membership onto the estimated road instead of onto a
+constant-curvature extrapolation, and these range and miss bars should be
+re-derived against it rather than carried over.
+
+### Geometry-graded engage fraction
+
+`aeb_engage_frac` (0.85) is a hedge: only take the brake off the driver once
+the situation needs most of the truck's capacity, because the geometry that
+produced `required_decel` might be wrong. Where the geometry is certain that
+hedge buys nothing, so the threshold is graded by the same
+`certain_geom_ids` the confirm window already uses (aligned, in-lane,
+lane-trusted, not engage-vetoed): `aeb_engage_frac_certain` (0.70) applies
+when such a target is colliding, `aeb_engage_frac` otherwise.
+
+This is the fix for the largest missed-positive class on the corpus: 21 of 79
+misses were in-lane co-directional rear-ends the pipeline tracked as colliding
+and warned on, whose demand peaked at 0.18-0.83 of capacity and so never
+crossed a flat 0.85. On a 10 m/s² truck the graded bar engages at about
+6.3 m/s² of required decel instead of 7.65, both of which are well past
+comfortable braking (2-3 m/s²).
+
+**This knob has no flat band.** Unlike the veto thresholds it is a pure
+sensitivity trade, and every value buys true positives at a steady price in
+false ones, so it should be re-priced against the corpus whenever the label
+set changes rather than treated as settled:
+
+| `aeb_engage_frac_certain` | TP | late | FN | FP | FP cost |
+|---|---|---|---|---|---|
+| 0.85 (ungraded) | 161 | 5 | 74 | 6 | 0.83 |
+| 0.80 | 167 | 4 | 69 | 6 | 0.86 |
+| 0.75 | 169 | 4 | 67 | 7 | 1.42 |
+| **0.70** | **174** | **6** | **60** | **8** | **3.26** |
+| 0.65 | 177 | 5 | 58 | 10 | 8.38 |
+| 0.60 | 182 | 9 | 49 | 10 | 10.71 |
+
+0.80 is free. 0.70 is the knee. Below it the price climbs sharply: 0.65 costs
+two more false positives and 2.5x the comfort cost for three true positives.
+0.60 is available if the miss rate matters more than comfort: it costs the
+same clip count as 0.65 but brakes harder on them. Every clip the lower bar
+newly brakes on is the same shape as the ones it rescues (a co-directional
+slow or stopped lead in ego's lane at 30-60 m), so there is no geometric
+scoping that separates them: this really is the sensitivity dial.
+
+Soft crawl / matched-speed in-lane rear-ends whose `v²/2d` stays under the
+graded bar still only engage via the ~0.50 s TTB slam (or wait until demand
+climbs). A former `certain_engage_ttb` bridge that engaged whenever TTB was
+under 1.30 s for certain geometry was removed: at crawl speed that was metres
+of bumper gap and felt like AEB ignoring the collision boxes.
+
+### Oncoming clearance: pose plus measurement
+
+`OppositeLaneFilter`'s body-separation fast path suppresses a head-on target
+outright when its arc-projected offset already exceeds `ego_hw + v_hw_coll`.
+That is the same extrapolation-fragile quantity the engagement vetoes exist to
+distrust, and it accounted for 18 of the 79 missed positives: on every one of
+them the fast path fired, and on several the measured CBDR miss flatly
+contradicted the pose (clip 9cc70333: pose 9.1 m of clearance, measurement
+0.44 m).
+
+The fast path now also requires `ctx.d_miss >= clear_bar *
+oncoming_body_sep_miss_scale`, failing open when there is no track yet. The
+scale is **0.25**, not 1.0: at parity the guard costs 5 false positives for
+2 true positives, because the pose-clear and measurement-clear populations
+overlap heavily. At 0.25 it only overrides the shortcut when the measurement
+says the two will pass within about 0.6 m of centreline separation, which is a
+dead-on course, and it costs nothing. The remaining head-on misses need
+evidence this system does not have; they are the road model's to fix.
+
+### Latched-threat hold
+
+`AEBThread._latched_threat_ids: set[int]` keeps an engaged target attached
+to the pipeline across frames. It never holds the brake: after a threat, AEB
+keeps braking only on demand (`effective_required` above the disarm bar), the
+TTB slam, or `geom_threat_latched` (still colliding, unbraked TTC inside
+`disarm_hold_ttc_s`). When the danger passes, AEB lets go. Membership does three
+things:
+
+1. **TMP rel-speed pre-filter bypass**: `TmpRelSpeedFilter` (and the
+   matching precompute prefilter in `thread.py::loop`) skip the rel-speed
+   gate for any id in the latched set. Without this, ego matching a TMP
+   convoy partner's speed under braking drops `rel_kmh` below the 15 / 40
+   km/h threshold and the target leaves the pipeline mid-stop.
+2. **Spatial drop-filter bypass**: `OutOfLaneParallelFilter` and
+   `EgoEvasionFilter` skip a latched id; `CornerEntryStationaryFilter` skips
+   only a latched **Mode B** (`Lane.EGO`) id. The 0.08 g evasion pair and
+   Mode B `implied_kappa` are pose-jitter sensitive at short range and would
+   otherwise fire on the vehicle AEB is already braking for.
+3. **Instant re-engage**: a latched id that becomes colliding again engages
+   through the `certain` path, with no confirm window. The demand still has to
+   clear the engage bar.
+
+**Lifetime.** A hit (the id is in `colliding_ids`) refreshes the latch and
+stamps `_latched_hit_mono`. Between hits, an id stays latched while it can
+still steer into ego's lane: forward of ego along the arc (`s > 0`) and within
+`cal.latched_steer_in_half_width_m` of it, which covers ego's lane and the
+lanes either side. Out of that band longer than `cal.latched_scope_release_s`,
+it is released; the grace absorbs lane-classification flicker. Inside it, it is
+released `cal.latched_max_s` after its last hit, so no latch outlives its
+threat by more than that. Stamps travel with the clip warm state
+(`AEBWarmState.latched_scope_ok_mono`, `latched_hit_mono`); older clips start
+both at the window start.
+
+**Why there is no distance hold any more.** Until 2026-09-23 a latched id inside
+`latched_min_headway_s` (1.5 s) of headway held engagement and floored the target
+at 70 % of max. It dates from 2026-05-24, when the required decel was the relative
+`v_closing^2 / 2d`: that collapses to 0 the moment ego matches a lead's speed, even
+with the lead still braking two metres ahead. The clearance demand (section 5)
+prices the lead's own braking in, and the geometry latch keeps a real collision
+course engaged, so the hold only ever added braking after the danger had passed.
+Clip `33d87007` is the case: a car cut in at 120 km/h, the threat ended at 5.31 s,
+and the hold braked at 4 m/s^2 until 9.21 s while the car pulled away, until the
+driver floored the gas. The 2026-09-11 opening-gap lookahead could not catch it: it
+credited `closing x 1.0 s`, and a cut-in that has just been matched is not closing.
+Two earlier fixes (scope release, the lookahead) narrowed the hold; neither changed
+what it measured, a following distance, which is ACC's job and not an emergency.
+
+Measured on removal: the corpus verdicts barely move (one FP becomes TN), 39
+clips improve and 77 lose TP quality. The large losses are windows tagged
+against the old pipeline: several end exactly where the hold used to release
+(`77902df4`, `cbd525cd`), and others were copied from preview.20 recordings
+whose live brake was the hold itself at `required 0.00` (`84faf786`,
+`5f5bb8f3`). A closed-loop run on the real thread with a distracted driver
+(lead braking hard, then on at 1.5 m/s^2 to a stop) shows the known cost: the
+brake now tracks the demand smoothly instead of holding 4 m/s^2, and lets go at
+walking pace once the lead is momentarily faster, so a driver who never brakes
+rolls into the stopped lead below `aeb_min_engage_speed_kmh`. Accepted by design
+(2026-09-23): AEB decides whether a danger exists, and with none predicted it
+coasts. Do not add a stop-completion hold to cover this case.
+
+| Knob | Default | Role |
+|------|---------|------|
+| `latched_scope_release_s` | 0.5 s | Grace before a latched id outside the steer-in band is dropped |
+| `latched_steer_in_half_width_m` | 5.5 m | Half-width of the band a latched id may stay in between hits: ego's lane and the next one out |
+| `latched_max_s` | 2.0 s | Longest a latched id outlives its last hit |
+
+### Follow-threat flag
+
+Behavioral latch for a genuine slowing lead (co-directional, sustained closing
+and own deceleration over `follow_threat_window_s`, then `follow_threat_hold_s`).
+While the hold is active, the target must be in `Lane.EGO` **or** arc-projected
+`d_abs` must be shrinking at a cut-in rate (between
+`follow_threat_min_lat_converge_ms` and `follow_threat_max_lat_converge_ms`).
+A braking cut-in often decels before its centre enters ego lane. A parked body
+ego sweeps past on a bend collapses `d_abs` at 15-25 m/s and must not inherit
+the flag (`8e213c9e`).
+
+   Flagged ids bypass `TmpRelSpeedFilter`, are exempt from
+`CoDirectionalDivergeFilter`, are exempt from `EgoEvasionFilter` **only while
+`ref_kmh_for_filter <= tmp_filter_split_kmh`** (the latched-id and in-lane
+closer bypasses are separate and speed-agnostic), and get follow-track decel
+on collision arcs so a braking lead does not clip through on constant-speed
+projection. Implemented in `AEBThread._update_follow_threats`.
+
+The speed gate on the evasion exemption is deliberate. The flag is a
+lead-following signal of the same shape ACC uses, and following something is
+not evidence that it is dangerous, so above the split it must not be able to
+wave a target past a geometric filter. Below the split it stays unconditional
+because `TmpRelSpeedFilter` is at its most aggressive there
+(`rel > tmp_filter_rel_below_kmh` to survive) and would otherwise discard real
+low-speed dangers.
+
+| Knob | Default | Role |
+|------|---------|------|
+| `follow_threat_window_s` | 0.6 s | Trailing kinematic window |
+| `follow_threat_hold_s` | 2.0 s | Hold after kinematic qualification |
+| `follow_threat_min_decel_ms2` | 0.8 m/s² | Min own-decel slope to qualify |
+| `follow_threat_max_lat_converge_ms` | 10.0 m/s | Cap on the out-of-lane lat-converge seat; sweep-past is faster |
+
+### Closed-loop coupling
+
+`sending_thread` consumes `AEB_target_decel_ms2` via `AEBDecelController`:
+- Feedforward pedal from the inverse brake curve (`_brake_pedal_from_decel`).
+- Disturbance observer instead of a PI: a brake-plant model (dead time plus
+  first-order lag, keyed on trailer presence) is driven by the pedal actually
+  sent to the game, and the filtered residual against measured decel is the
+  environment bias. That bias is subtracted from the target before the inverse
+  curve, so grade, capacity error and curve error are compensated without an
+  integrator to wind up. Both model taus are set slower than the measured
+  median on purpose: modelling the plant slower than it is biases the estimate
+  toward under-braking, and only over-braking is dangerous.
+- Decel measurement for this loop uses its own 0.12 s differentiator, not the
+  0.30 s `_spd_smooth` that capacity learning and published telemetry read.
+- The merge stays `b = max(b, aeb_pedal)`, so a driver out-braking AEB wins,
+  and `AEB_ff_decel_ms2` floors the commanded decel so a stale target cannot
+  silence AEB.
+- `AEB_required_decel_ms2` is published **uncapped** for this reason: when it
+  reaches the decel pedal 1.0 can deliver, sending_thread slams rather than
+  inverting the curve at the `ego_decel_frac`-capped target. Do not clamp that
+  field to `effective_max_decel`, it is the saturation signal.
+- Mapper's fast-PID trim is frozen while `AEB_brake` is true (via
+  `AccelToPedals.step(..., freeze_trim=True)`) so two controllers don't
+  fight on the brake.
+- All three AEB→pedal paths (engagement slam in `main_pedal_thread`, FF
+  additive in `sending_thread`, closed-loop controller in `sending_thread`)
+  are gated by `gas_output / gasval >= 0.8`: full gas pedal is the user
+  override and defeats AEB braking authority across every layer.
+
+---
+
+## 6. Elevation filter (shared road-surface gate)
+
+AEB no longer owns an elevation test. `RadarThread` runs the shared gate
+(`core/radar/elevation.py`) once per frame and publishes
+`RadarData.off_surface_ids`; the AEB snapshot carries that set and three
+places consume it: the collision-arc precompute, the fallback path, and
+`ElevationFilter` in the pipeline.
+
+```python
+off_surface_ids = off_surface_ids - self._latched_threat_ids   # never drop a latched threat
+...
+if v.id in off_surface_ids:
+    continue
+```
+
+The full model, the constants, the corpus fits behind them and the failsafe
+list live in `core/radar/README.md` §15. Two properties matter here:
+
+- The band is **tighter than the old ±5 m window inside ~65 m** (it kills
+  traffic on a road under a bridge ego is crossing) and **wider beyond it**
+  (a lead over a crest is no longer lost). Measured: the old window dropped
+  4.06 % of candidate leads above 85 km/h; the new gate drops 0.00 %.
+- Suppression is **latched-threat-exempt and persistence-gated**, so no
+  single-frame rotation or pitch glitch can pull a target out of the
+  pipeline mid-event.
+
+`cal.elevation_margin` is retained on `AEBCalibration` for recorded-clip
+metadata compatibility only. It no longer gates anything: do not tune it.
+
+---
+
+## 7. Calibration constants
+
+The full constant-by-constant reference moved to `core/aeb/TUNING.md`. All tunables
+live in `AEBCalibration` (frozen dataclass, `core/aeb/calibration.py`); `DEFAULT` is
+the production singleton and tests pass a modified instance to `build_pipeline(cal)`
+or `evaluate_frame(frame, cal)`.
+
+## 8. Head-on lateral-gap activation
+
+`cal.lane_separation = 3.9 m`: oncoming vehicles whose centerlines are this far
+apart laterally are suppressed at the `arc_arc_collision` level
+(`min_lateral_gap`). Passed only for `near_head_on` vehicles (`fwd_dot < -0.5`),
+which excludes reversing targets: the gap assumes a driver keeping to its own lane.
+
+---
+
+## 9. Critical Rules: Do Not Break (AEB-specific)
+
+Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep that in sync if you change them).
+
+- **AEB is a consumer of `RadarThread`.** Do not open the traffic shared-memory buffer directly and do not mutate `Vehicle` instances.
+- **Elevation comes from radar's `off_surface_ids`, minus the latched set.** Do not reintroduce a local pitch-window test in `thread.py` or `filters.py`, and do not tune `cal.elevation_margin`: it is dead, kept only so recorded clip calibrations still deserialize. See `core/radar/README.md` §15.
+- **AEB ego curvature is the yaw-rate proxy, full stop.** Do not read `RadarData.ego_curvature` from AEB.
+- **Target-vehicle curvature is the `_vehicle_curvature_blend` helper** (sliced position fit blended with `angular_velocity`-derived yaw rate, weighted by `cal.aeb_yaw_blend`, then One-Euro filtered per-vehicle by `AEBThread._curvature_blender`). Do not call `v.curvature_from_history()` directly from AEB paths and do not enlarge `aeb_pos_history_len` toward 25. The blender must be stepped exactly **once per vehicle per frame**: any new call site must thread the existing `ctx.v_curvature` through rather than re-invoking `_vehicle_curvature_blend(...)` with the production blender.
+- **`co_directional` must use `fwd_dot > 0.7`, not `abs(fwd_dot) > 0.7`.** The two flags must be mutually exclusive with `head_on`.
+- **Regimes read the travel direction, and a reversing target is never oncoming.** Take `fwd_dot` through `travel_sign(v.speed, cal)` wherever it decides a regime, and keep `head_on` / `near_head_on` false for a reversing target. Heading alone dropped a truck backing across ego's lane (d80936f9); travel alone put a rig backing into the lane under the oncoming evasion rules (66874532). See the travel frame section.
+- **All tunable constants live in `AEBCalibration`.** Do not introduce new bare numeric literals in `thread.py` or `filters.py`. Add the constant to `calibration.py` first.
+- **`lane_frame.project_to_ego_arc` is the canonical lane primitive.** Do not use cross-product `lateral_offset` for lane classification: it compresses on curved roads. The `max(d_arc, d_straight)` formula in `project_to_ego_arc` is the safety-critical fix.
+- **`OppositeLaneFilter` body-separation check uses `ego_hw + v_hw_coll`, not corridor width.** The margin (`corridor_margin=0.5 m`) is for probabilistic corridor overlap; body separation uses only actual half-widths.
+- **`EgoEvasionFilter` uses `margin=0.0` for evasion arc checks.** Physical body clearance, not padded corridors. Main collision detection still uses `cal.corridor_margin`.
+- **Fix B has no ego_k guard.** The `own_lane` check is the only gate; `|ego_curvature|` expands `delta_kappa_t` only if it would actually increase it.
+- **Fix D (target arc over-rotation damping) applies to `arc_curvature`, not `v_curvature`.** `v_curvature` is the raw measured value used by `same_curve` and `CoDirectionalDivergeFilter`. Collision and visualization arcs both use the damped `arc_curvature` when building predicted paths.
+- **`LaneClassifier` must run before `OppositeLaneFilter`, `CoDirectionalDivergeFilter`, and `EgoEvasionFilter`**: those stages read `ctx.lane`, `ctx.fwd_dot`, `ctx.v_curvature` etc. populated by `LaneClassifier`.
+- **TMP trailer-as-vehicles get tractor speed/accel via `_swap_trailer_kinematics`.** Buffer speed for trailer slots is unreliable (often 0). The swap is done on a shallow copy: never mutate the original Vehicle.
+- **AEB pedal authority is two-layered, never binary-gated to zero.** AEB publishes `AEB_ff_decel_ms2` every tick when there is any real threat (`required_decel > 0`); sending_thread converts it to a brake pedal via the inverse FF curve and merges it as `b = max(b, aeb_ff_pedal)`. This is the **sub-engagement assist** layer: it adds force on top of user braking when the system warns but has not yet engaged. It is **ramped**, not gated: the assist weight rises linearly from 0 at `cal.ff_assist_ramp_lo` (0.03) to 1 at `cal.user_brake_latch` (0.12), and the merge is `b = max(b, b + (aeb_ff_pedal - b) * w)`. Below the ramp floor it contributes nothing, so it still cannot phantom-brake during normal manual cruising where routine lead-following yields a small non-zero `required_decel` (measured median FF pedal there: 0.004). At or above `user_brake_latch` the weight is 1 and the expression collapses to the original `max(b, aeb_ff_pedal)`, so behaviour above the old gate is unchanged. The ramp exists because a hard gate at 0.12 activated the assist only where the driver was already out-braking it (median jump **−0.187** pedal, i.e. inert) while blocking it across 0.03–0.12 where it would actually add force (median **+0.054**, 51% of those ticks carrying `ff_decel ≥ 2.0`). Dropping the gate outright instead was rejected: it left an 0.877-pedal worst-case jump off a 6% dab, which the ramp cuts to 0.476 and takes to zero above 0.60. When AEB engages (`AEB_brake == True`), main_pedal_thread cuts gas only; the brake is owned by `AEBDecelController` in sending_thread, which tracks `AEB_target_decel_ms2` (the **closed-loop** layer). All AEB pedal paths are gated by `gas_output >= 0.8` (full-gas user authority, the only override that can defeat AEB braking).
+
+**History (2026-08-11):** main_pedal_thread used to slam `brake_output = 1.0` on engagement. Because sending_thread merges every AEB path with `max()`, that slam pinned the pedal at 1.0 for the whole engagement and `AEBDecelController` never influenced the output: `AEB_target_decel_ms2` and its rate limit were dead code. Measured over 32 engagement clips, realized decel was a median **2.25x** the published target, which left **5 to 6 m** of unused gap on 65 km/h stops (0.2 m at crawl, hence the speed-squared symptom). An earlier attempt to drop the slam in favour of *pure FF* was reverted because AEB felt silenced; that failed for two reasons now fixed: the target ramped from 0 at `aeb_target_rate_ms3` (0.8 s to reach the requirement, so the first bite was ~0.005 pedal), and there was no pad for brake build-up. Engagement now steps the target straight to the requirement, and `stop_buffer_response_s` covers the plant lag. Do not restore the slam without re-reading the high-speed stop overshoot notes: a `max()`-merged constant of 1.0 silently disables every layer beneath it.
+- **AEB and em_stop send on the full brake axis.** The `g_brake_intensity` invert is for mapper/ACC. While `AEB_brake` or `em_stop` is true, `apply_brake_intensity(..., full_authority=True)` writes the logical pedal. AEB planning and `AEBDecelController` use `aeb_max_brake_ms2 = tune_max * I / 1.1` so the estimated max decel is the physical force pedal 1.0 can make. Sub-engagement FF assist stays on the invert and the unscaled tracker. `I < 1.0` cannot be fully recovered; warn hourly while AEB is enabled, never when it is off. Do not remap an engaged AEB back onto the 1.1 invert, and do not leave AEB planning on the unscaled tracker: that made a 150% slider look like the 1.1 tune.
+- **Engagement-entry vetoes never touch warn timing beyond persistence, and never touch FF assist, disarm, or the holds.** `_los_veto_bar`, `_extrapolation_veto`, the closing-speed floor, and the lane-confidence range all feed `engage_vetoed_ids`, which is subtracted from the engagement-only aggregate chain (`best_ttb_engage` and friends) and from the `certain_geom` instant path. The full aggregates still drive `AEB_warn`, `AEB_ff_decel_ms2`, the disarm gate and the geometry latch. The one permitted coupling is `aeb_warn_confirm_vetoed_s`: when every colliding target is vetoed **and** out of ego's lane, warn waits on a longer occupancy window. That is a delay a persisting course clears, not a suppression, and a vetoed target may never be removed from the warn aggregate outright. Keep it that way: a wrong veto must cost latency on one target, never silence. Measured on the labelled corpus, the vetoes left warn coverage on positive clips unchanged (135 of 160 clips, identical lead-time distribution) while cutting warn ticks on must-not-trigger clips by 11 %.
+- **A measured miss may remove certainty, never grant it.** The vetoes exist because arc-projected lane membership is an extrapolation and the CBDR miss is a measurement, so a *large* measured miss removes certainty (head-on bar, matched-speed neighbour). The converse does not hold: `d_miss` scales as `omega * R^2 / v_rel`, so a small value at range is not evidence of danger, it is a short-baseline fit over a long lever arm. A `lane_confidence_miss_m` clause that restored certainty on a small miss was tried and removed after the corpus grew: it was wrong on all four clips it affected. Also do not let a veto fire with no measurement at all unless its own physics stands alone (the ego-turn branch does; the matched-speed branch deliberately does not).
+- **The engage fraction is graded by certainty, and only by certainty.** `aeb_engage_frac_certain` applies when a colliding, non-engage-vetoed target is in `certain_geom_ids`, the same set that grants the instant confirm path. Do not widen it to `nearcertain_geom_ids` or to demand magnitude: required-decel size is not a certainty signal (see the tiered entry gate), and the corpus shows every clip the lower bar newly brakes on is geometrically identical to the ones it rescues. Unlike the veto thresholds it has no flat band, so re-price it against the corpus rather than assuming it still holds.
+- **Co-directional targets are exempt from the lane-confidence range and the oblique confirm window.** Both exemptions rest on the same fact: a pair travelling the same way shares whatever bend it is on, so the bend's lateral error is common-mode. Removing either one costs true positives on vehicles merging in and stopping ahead, which read as oblique purely because `fwd_dot` lands just under `aeb_certain_fwd_dot`.
+- **Warn suppression while already braking.** `aeb_warn` is suppressed when `_read_user_braking()` is true UNLESS `effective_required >= cal.aeb_warn_near_full_frac × effective_max_decel`. That helper is true for the driver's physical `brakeval` above `_USER_BRAKE_LATCH_THRESHOLD` (0.03), or any `opdbrakeval` / `sending_thread.mapper_command_brake` above zero. All three taps are AEB-free by construction; never source it from `abackward` or `brake_output`, which carry AEB's own slam and FF and would silence the warn during engagement. The driver / ACC / OPD already addressing the threat does not need a redundant alert: only surface it when AEB itself wants near-full brake.
+
+---
+
+## 10. Test suite
+
+```
+tests/aeb/
+    harness.py          # Frame, EgoState, make_vehicle, evaluate_frame
+    test_scenarios.py   # pytest parametrized over 12 scenarios
+    report.py           # standalone human-readable table: python -m tests.aeb.report
+    scenarios/
+        tp_stopped_in_lane.py
+        tp_slow_lead.py
+        tp_lane_cutter.py
+        tp_head_on_in_lane.py
+        fp_oncoming_straight.py
+        fp_oncoming_gentle_curve.py
+        fp_oncoming_sharp_curve.py
+        fp_corner_entry_stationary.py
+        fp_side_road_uturn.py
+        fp_overtaker.py
+        fp_co_directional_outer_lane.py
+        fp_parked_shoulder.py
+```
+
+`tests/aeb/test_engage_vetoes.py` covers the engagement-entry vetoes. The
+scenario harness (`evaluate_frame`) stops at the filter pipeline and does not
+run the engagement state machine, so those tests drive whole synthetic clips
+through `run_headless` instead: ego and an oncoming vehicle on a shared 1200 m
+bend with ego reporting zero steer, which is the mechanism the head-on bar
+exists for. Only the oncoming lane offset changes between cases (0 m and 2 m
+brake, 3 m does not and only warns).
+
+Run with: `pytest tests/aeb -v`
+Report: `python -m tests.aeb.report`
+
+### Stop-distance envelope: the arbiter for entry-bar changes
+
+`tests/aeb/test_stop_distance_envelope.py` simulates a whole AEB stop: the
+shipped `_required_decel_two_frame`, the shipped entry bar, the real
+`AEBDecelController`, and a brake plant fitted to 61 recorded braking episodes
+(dead time 0.12 s, tau 0.19 s median / 0.31 s p90). It reports residual gap.
+
+**Use it, not the corpus, whenever the engage point moves.** Corpus labels were
+tagged against one engage point, so shifting the bar re-labels clips instead of
+scoring them, and the shift always reads as a swing in FN. Worse, headless
+replay scores the engagement decision and never touches the brake pedal, so it
+is structurally blind to whether the truck actually stops. The corpus arbitrates
+*filtering*; this arbitrates *timing*.
+
+What it pins:
+
+- with the capacity estimate correct, every rig stops clear at 40-120 km/h;
+- at `_BRAKE_SCALE_MAX` (1.05× truth) it still stops — collisions begin near
+  1.10×, which is where that ceiling comes from;
+- under-reading capacity is always safe, just early and soft;
+- the response pads survive p90 brake build-up;
+- **a descent engages earlier, not later.** The two bases diverge on a grade
+  (`capability_decel` loses the gravity term, `effective_required` gains it), so
+  the bar in raw required-decel terms is `frac · (capacity − downhill) −
+  downhill` and falls about twice as fast as capability does. On an 8% descent a
+  bobtail engages on 7.2 m/s² instead of 8.7 and finishes with 2.4 m more in
+  hand. This was expected to be the dangerous case and is the opposite;
+- **the decel controller is not bypassed.** Entry at 0.85 of capability leaves
+  only 5.6% below the command cap, which looked thin enough that the saturation
+  override might hold pedal 1.0 for whole events and reinstate the old slam.
+  Measured duty at full pedal is 0.17-0.36 of engaged ticks on the flat and
+  lower on a grade, so most of a stop is genuine tracking.
+
+The closed loop converges onto the distance it planned for, finishing on
+`stop_buffer`, so there is no slack beyond what the pad and the capacity
+estimate provide. That is why both are treated as safety parameters.
+
+### Corpus result
+
+Measured over the 514 labelled clips in the local store (272 must-not-trigger,
+242 with a should-trigger window). "vetoes" is the engagement-entry work;
+"graded" adds the geometry-graded engage fraction and the oncoming clearance
+guard:
+
+| | before | vetoes | + graded |
+|---|---|---|---|
+| False positives (must-not-trigger clips that engaged) | 46 | 6 | 8 |
+| ... in SP | 14 | 4 | 4 |
+| ... in TMP | 32 | 2 | 4 |
+| Comfort cost of those engagements | 21.18 | 0.83 | 3.26 |
+| True positives | 161 | 161 | 174 |
+| Late | 5 | 5 | 7 |
+| False negatives | 74 | 74 | 59 |
+| Total corpus cost | 1038.3 | 1033.2 | 654.5 |
+
+No clip regresses on the positive side against the original at any stage.
+
+The positive side is bit-identical, and setting the new knobs back to their
+pre-change values reproduces the old score exactly, so nothing else moved.
+
+Every **veto** threshold sits inside a flat response band rather than on a
+cliff, which is the check that those numbers are not fitted to individual
+clips: `lane_confidence_range_m` is flat over 25-33 m,
+`los_veto_headon_miss_dist_m` over 2.4-2.8 m, `turn_veto_min_kappa` over
+0.008-0.018, `turn_veto_min_ttc_s` over 0.8-1.2 s, and
+`codir_adjacent_veto_axial_ms` over 1.5-2.0 m/s. `turn_veto_min_kappa` 0.008
+removes one more sev-1 false positive but sits one step from 0.006, which
+costs a true positive; 0.012 keeps the margin instead.
+`aeb_engage_frac_certain` is the exception and has no such band: see the
+geometry-graded engage section for its trade curve.
+
+The eight survivors are two stopped-vehicle-at-the-lane-edge clips
+(`15eba13d`, `7add71c9`, both sev 1, sitting inside the distribution of
+genuine stopped-lead engagements), two long-range oncoming clips (`1c25f5a1`
+at 60 m, `27ba3683` at 94 m), two far off-lane clips (`4099ba36`, `6a9c94cd`)
+whose ego curvature falls just under the turn veto, and the two slow-lead
+clips the graded engage bar buys (`6d23fe39`, `82acb8e8`). Together they cost
+3.26, against 21.18 before.
+
+### Steer formula for scenarios
+
+The AEB yaw-rate proxy: `kappa = radians(steer * speed * 12) / speed = radians(steer * 12)`.
+Inverting: `steer = kappa * 180 / (12 * pi)` (speed cancels).
+Do **not** include `speed` in the inverse formula.
+
+---
+
+## 11. Review and labelling tool
+
+`python -m tools.aeb_review` (dev only, never shipped). `tools/aeb_review.py` holds
+the window and the label form; `tools/aeb_review_widgets.py` holds the scene, the
+timeline strip, the key table and the background decoder; `tools/aeb_filter_trace.py`
+and `tools/aeb_filter_charts.py` hold the `C` filter-tuning window.
+
+### Ground reference markers
+
+The scene is ego-locked: ego sits at a fixed screen point and the range rings are
+drawn around it, so nothing in the background moves when ego drives. A replay of a
+straight 90 km/h run and a replay of a truck parked at a light look the same, and a
+heading change only shows up as the whole world silently swinging.
+
+`_draw_ground_markers` fixes that with a world-anchored dot lattice: a small dot at
+every 10 m of the world X/Z grid, a larger one where both axes hit a 100 m multiple.
+Because the dots are pinned to world coordinates, they slide backwards at ego's
+speed and rotate with ego's heading, which is what makes acceleration, braking and
+steering readable frame to frame. They double as a scale: dot to dot is 10 m.
+
+The lattice is culled to the window rect, so a 1200x700 view draws about 280 dots
+and costs ~1.2 ms of a 33 ms frame. `_MARKER_MAX_DOTS` bounds the candidate loop;
+past it the 10 m dots are dropped and only the 100 m ones remain, so an absurdly
+large window degrades instead of stalling the repaint.
+
+### Decode happens off the GUI thread
+
+Opening a clip is the gzip (`ClipStore.load`, about 20 ms) and then the radar
+replay. A tagging load measures about 0.4 s. The chart trace is another 0.1 s
+and runs only while that window is open. The AEB re-run (about 0.8 s) stays a
+separate job.
+
+Decode has its own thread. Scan, the server pull, and the chart jobs share
+another, so a rescan cannot sit in front of the clip you just clicked. The
+window keeps eight decoded clips and queues the next four. The thumbnail and
+the label form are filled from the gzip before the replay finishes.
+
+`replay_frames` used to run twice per open, because the ego-path gain rebuilt
+the clock on its own. It runs once now, and that pass reads slot kinematics
+instead of building `Vehicle` objects: about 15 ms, down from about 120 ms.
+What is left is `TrafficReader.replay_frame`, the same smoother live radar
+runs, plus the arc snapshots the scene draws. Do not skip the smoother to make
+the open faster. The scene would no longer be what AEB saw.
+
+The review scene does not read `off_by_t`, so its decode skips the elevation
+gate. The chart re-run decodes again with the gate on, because headless AEB
+reads those ids. Do not feed the review stream into `run_headless`.
+
+### The clip list
+
+A rescan used to gunzip every clip's metadata on the decode thread. On 2275
+clips that was about 4 s with the files already cached and about 12 s from a
+cold disk, and the first open waited behind it.
+
+Each store keeps `.review_index.json` next to the clips: filename, mtime in
+nanoseconds (stored as text, the integer does not round-trip through JSON),
+size, clip id, trigger, label, notes. A refresh stats the directory and peeks
+only new or rewritten files. Reopening the tool is about 0.07 s for both
+stores. The first open, or a refresh with no index, peeks on eight threads:
+about 2 s for 2275 clips. `list_clips` only matches `*.json.gz`, so the index
+is not a clip and is not uploaded.
+
+`ClipStore.peek_metadata` reads a 64 KB prefix before falling back to the whole
+file. Metadata needs a median 14 KB of a 423 KB clip (max seen 20 KB), so a
+listing touches a few percent of the store instead of all of it. The fallback
+matters: `thumbnail_jpeg` lives in the metadata and can push it past the prefix.
+
+### Traffic does not start the clip at 0 km/h
+
+A clip window is an arbitrary cut of a continuous stream, so every vehicle in the
+first frame was already moving and live radar already had a warm filter for it.
+Replay used to start each one cold, which showed up as the jump at the head of
+every clip: 0 km/h, then a ramp. Measured over 40 clips against a centred offline
+fit, mean speed error was **40.0 km/h at t=0** (p90 92.9) and stayed above the
+steady-state floor for about a second.
+
+`cold_start_speeds(clip)` reads ahead over the leading frames, takes each id's
+first four buffer positions at the live full-update cadence, and fits them with
+`_raw_speed_from_position_history`, the same estimator the live chain uses. Both
+the traffic and the parked buffer are scanned, in the id-precedence order
+`replay_frame` uses: the parked buffer carries moving vehicles too, and they are
+built with `speed = 0.0`. The result goes to `TrafficReader.set_cold_start_speeds`
+(see core/radar/README.md section 7). Error at t=0 drops to **2.5 km/h**, which is
+the same as the steady-state error at t=1.2 s: no transient left.
+
+**The corpus objective was being paid for this.** Seven clips had a brake window
+opening within 0.12 s of the `burn_in_s` edge, latched since the clip's start by
+traffic that read as stopped; five of them scored TP quality 1.00 by braking six
+seconds before the labelled event, and one scored an outright false positive. With
+the seed, five move to the real event, the false positive disappears, and no clip
+gains a brake. On the 792 clips both runs score, the total moves -441.00 to
+-431.57: the metric giving back credit it should not have had, not a behaviour
+regression. (The published -421.00 baseline was over 793 clips; the extra one has
+since been relabelled `ignore`, which is unrelated to this change.) The
+synthetic phasings in `tests/aeb/test_crossing_clearance.py` and
+`tests/aeb/test_engage_vetoes.py` were measured against the cold start and were
+re-measured with it gone.
+
+### Desmoothing the recorded decel
+
+`LiveAEB.target_decel_ms2` is what the tick **published**, after the deadband
+(`aeb_target_deadband_ms2`, `aeb_target_refresh_min_s`) and the slew limit
+(`aeb_target_rate_ms3`). On a real engagement it reads 0.26, 1.11, 1.40, 1.67 over
+four ticks while the demand was already at full capacity (10.84 m/s²). Plotting the
+published value puts the apparent moment of threat up to half a second late, which
+is exactly the moment the reviewer is placing a window against.
+
+`clip_replay.raw_target_decel` rebuilds the pre-slew `target_raw` from the recorded
+tick (`engaged`, `time_to_brake` against `brake_ttb + brake_response_window_s`,
+`required_decel_ms2` clamped to `effective_max_decel_ms2`) and `replay_clip` puts it
+on every `ReviewFrame` as `raw_target_ms2`. It was inexact only under the latched-hold
+floor, which no longer exists, so clips recorded on preview.23 or older can read below
+the recorded target during a hold tail. It is never wrong about onset timing, which is
+what it is drawn for. `required_decel_ms2` is already raw and needs no rebuild.
+
+### Filter tuning charts (C)
+
+The scene answers "what did AEB decide". It cannot answer "why did this vehicle's
+speed read 42 m/s while it was doing 36", which is a radar-filter question and the
+one that a suspicious clip usually turns into. `C` opens a separate top-level window
+plotting one vehicle's chain over the clip: the speed chain (raw through
+`speed_ema`, `speed_corr` and `acc_speed`), the accel chain against its gate
+thresholds, the step 4 gates including `tau`, the four lag entry gates, and a row
+per filter state flag. `tools/README.md` documents the lanes and the axes.
+
+Nothing is simulated. While the chart window is open, `ClipLoader.load` derives
+the trace from the same `decode_radar_stream` result as the review frames, about
+0.1 s. A tagging pass does not build it. Opening the window later reuses the
+stream kept on the decoded clip, so it does not replay the radar again. Values
+are read off the replayed `Vehicle` objects, or rebuilt with the production helpers.
+
+Two decision bands sit above the lanes: `rec` from the clip, and `now` from
+`clip_eval.run_headless` at the working tree's constants, with the disagreements
+ticked. The re-run is 0.8 s a clip, more than the rest of the load put together,
+so it is a lazy follow-up job that only fires while the chart window is open. Do
+not move it into `ClipLoader.load`: that cost lands on every clip in a tagging
+pass, which is the one thing the review tool is optimised against.
+
+The step 4 gates are the exception: `_acc_speed_step` returns only a speed, so the
+tool restates that arithmetic to expose `tau`, `ramp`, `consistency` and `ff_gate`.
+Every frame carries the residual between the rebuilt `acc_speed` and the recorded
+one, and `tests/aeb/test_filter_charts.py` fails if they ever disagree. Do not
+relax that test: without it the gate lane can drift away from `traffic.py` and keep
+drawing confident, wrong curves.
+
+The two windows share one clock and one keymap. Scrubbing either moves both, the
+vehicle picker follows the labelled target until it is used by hand, and every
+review binding still works while the chart window has focus, so a tagging pass
+never has to click back.
+
+### Should-trigger window proposal
+
+`recorded_band` proposes the span the live AEB reacted over: the warn-or-brake
+ticks, or the ticks with a finite `time_to_collision` when it stayed silent. Over
+the 133 labelled `tp` clips in the local store that band matches the human window
+within 0.3 s at **both** ends for 66% of clips (median error 0.01 s start, 0.02 s
+end).
+
+The proposal is drawn dashed on the strip and **never applied on load**; `W`
+commits it. That is deliberate. The corpus exists to judge AEB, so seeding ground
+truth from AEB's own output and saving it unexamined would quietly encode "AEB was
+right". `fn` clips are the case that proves it: the recorded band is wrong there by
+definition, which is what makes them misses.
+
+---
+
+## 12. Screenshot capture
+
+`core/aeb/screenshot.py::grab_thumbnail()` supplies the optional
+`thumbnail_jpeg` clip field; `capture.py` calls it off-thread
+(`AEBClipRecorder._start_thumbnail_grab`) so no control loop is touched. Two
+properties are load-bearing, not incidental, and must not be relaxed without
+updating the claims linked below.
+
+### Game-window crop only
+
+`FindWindowW(None, title)` is tried for the vanilla titles then the
+TruckersMP titles ("Euro Truck Simulator 2 Multiplayer", "American Truck
+Simulator Multiplayer"), in that order (`ctypes`, no pywin32 dependency).
+FindWindowW is an exact-title match, so the vanilla string alone misses
+TMP and every contributed TMP clip after the crop landed with no
+screenshot. If no title hits, `FindWindowW("prism3d", None)` is the
+fallback: that is the SCS window class, shared by SP and TMP. The handle
+is cached and revalidated with `IsWindow` before every capture, since the
+game can be restarted between clips. `GetWindowRect` gives the bbox
+passed to `ImageGrab.grab(bbox=...)`.
+
+**No game window found means `None`, never a full-monitor grab.** Before
+this, `ImageGrab.grab()` took no bbox and captured the whole primary
+display: a user with the game on a second monitor uploaded whatever sat on
+the first one, and one sampled clip in the local store shows a strip of
+desktop chrome along the top edge. Do not reintroduce an unconditional
+fallback grab; it defeats the reason this code exists.
+
+Non-Windows platforms never look up a window (`ctypes.windll` does not exist
+there) and always return `None`. `_game_window_rect()` checks
+`sys.platform` before any `ctypes.windll` access, so importing this module
+on Linux CI stays safe; keep any new Windows-only call behind that guard.
+
+### `_MAX_PX = 240`: text must not survive
+
+At the previous `480x270`, sampled real clips had a readable speedometer,
+speed-limit signs, a route HUD city name, job cargo/payment figures, and a
+full in-game notification sentence. The clip-contribution consent prompt
+tells contributors "text is not legible", and that sentence is only true at
+240x135, so this constant backs a user-facing claim. Raising it makes the
+claim false.
+
+Resolution ladder on one sampled frame at quality 50: 480x270 (17.5 KB) text
+readable; 360x203 (10.9 KB) marginal; 240x135 (5.7 KB) illegible with road
+layout still clear; 160x90 (3.1 KB) vehicles too mushy to tag. 240x135 was
+re-checked against the two hardest sampled frames, a TMP scene with nametags
+and a frame with a notification popup, and no text survives either.
+
+Existing clips in the store stay at 480x270; only newly captured ones drop
+to 240x135. `tools/aeb_review.py` renders both sizes, aspect-correct, from
+the original decoded pixmap each time rather than re-scaling a scaled copy.
+
+### Scaled displays: thread DPI, not a process-wide flip
+
+`ImageGrab.grab` measures the screen in physical pixels. `GetWindowRect`
+on a thread that is not per-monitor aware returns virtualized coordinates.
+On a 4K display at 175% those are 1/1.75 of the real window, so the crop
+is a corner of the game (measured: logical 842x601 against a 1474x1052
+window) and in-game text survives the 240 px downscale. That breaks the
+consent claim that text is not legible.
+
+`grab_thumbnail` calls `SetThreadDpiAwarenessContext`
+(`DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`) around both the rect query
+and the grab, then restores the previous context. Both calls have to sit
+inside it: Pillow sets per-monitor awareness only while measuring, then
+restores the caller's context before the blit. The thumbnail thread has
+no windows, so the thread override is allowed. Do not move this to
+`SetProcessDpiAwarenessContext`. A process-wide flip rescales the Qt
+settings panel and debug windows.
+
+If the thread context call fails, the crop is left as-is and a debug line
+is logged. Do not "fix" that by multiplying the rect by `dpi/96`: a
+process that is already system-DPI aware would be scaled twice.
+
+---
+
+## 13. Clip contribution intake policy
+
+`core/aeb/intake_policy.py` holds the server's terms for the opt-in clip
+sharing: whether intake is open at all, and the floors a clip has to clear.
+Nothing uploads yet; this is the gate the uploader will consult.
+
+`contribution_enabled()` also gates capture itself: `core/aeb/capture.py` starts
+a recorder when `Settings.debug` **or** the opt-in is current. A contribute-only
+user gets `capture_tn=False` so the `shadow_near` and `random` background
+triggers never fire. Someone who is both debug and contributing keeps the debug
+behaviour.
+
+### No clip store rotates
+
+`ClipStore` never evicts, in any mode and in any root (local corpus, the
+contributed pull root, a tester's store). Clips leave a store only by an explicit
+`delete`: the review tool, or the uploader's delete-on-accept for a contribute-only
+user. The one bound is the disk: `write` returns `None` while the clip drive has
+less than `_MIN_FREE_BYTES` (2 GB) free, warning once per low-space episode.
+Relabelling rewrites in place and is not gated.
+
+Do not reintroduce a cap. The mode is per process but the directory is per
+machine: the release build (debug off, contributing) and a debug checkout both
+write `default_clip_root()`, and on 2026-09-13 the release build's 100 MB
+contributor cap evicted 809 corpus clips on its first save. Growth without a cap
+is small: a contribute-only store keeps only what triage or eligibility held back,
+about 38% of captures by the section 15 corpus, and every tester combined sent
+about 230 MB in the five weeks before triage.
+
+### Fetched only for users who opted in
+
+`start_policy_fetch()` returns `None` and starts no thread unless
+`contribution_enabled()` is true, which requires both `Settings.aeb_contribute`
+and a consent version at or above `CONSENT_VERSION`. A machine that never ticked
+the box therefore makes **no request to the server at all**, which is what keeps
+this a continuation of the consent the user already gave rather than a new
+network behaviour. Do not move the fetch above that gate.
+
+It is a plain daemon thread at boot, like `core/update_check`, so the Qt main
+thread never waits on it. Failures are logged and swallowed.
+
+### Fail closed
+
+`upload_blocked_reason()` returns a reason string, or `None` to allow. Every
+unknown is a refusal: no policy cached, a policy that cannot be parsed, an
+unparseable version against a floor, and the dataclass defaults themselves all
+refuse. `accepting: false` is the fleet kill switch and needs no client release.
+
+The document is a static JSON file at the edge rather than an endpoint, so it
+costs nothing to serve and cannot be knocked over.
+
+### Cache
+
+The **raw response text** is cached in `Settings.aeb_intake_policy_json`, not the
+parsed fields, so a field added server-side survives a round trip through an
+older client. `aeb_intake_checked` stamps the last successful fetch and is only
+advanced after a response parses, so a bad response retries on the next boot
+rather than being cached as a refusal for a full window. The refresh window comes
+from the cached policy's own `refresh_hours`.
+
+---
+
+## 14. Clip upload
+
+`core/aeb/upload.py` is the **only** module in this package that may send a clip
+anywhere, and `tests/aeb/test_upload_egress.py` asserts that by scanning the
+package rather than trusting the convention. `intake_policy.py` is the one other
+module allowed to make a request at all, and it only fetches the kill switch.
+
+### Consent is checked twice
+
+Once in `capture._on_clip_written`, which is where a clip enters the upload path,
+and once in `ClipUploader._handle` before the socket is opened. The first check
+is not redundant: since the capture gate widened to `debug or
+contribution_enabled()`, the writer callback also fires for debug testers who
+never opted in, and their clips must never reach the queue. **A config flag is
+never consent.** Both checks read the setting live, so unticking the box stops
+uploads immediately rather than at the next boot.
+
+### Eligibility is per clip, never per store
+
+`clip_ineligible_reason()` judges each clip from its own metadata:
+
+- `shadow_near` and `random` are background negatives and are never contributed.
+- A thumbnail whose long side exceeds `screenshot._MAX_PX` predates the
+  game-window crop and may show the whole monitor with legible text.
+- An unreadable thumbnail, unreadable metadata, or a non-null `client_id` all
+  refuse. Fail closed.
+
+The capture-time TN exclusion does not cover this, because a user who is both
+debug and contributing keeps `capture_tn=True` by design and their store holds
+clips from many builds. Judge the image, not a version string.
+
+### Responses
+
+Sends are paced by `_MIN_SEND_GAP_S`. A clip is captured about once a minute, but
+the queue holds up to `_QUEUE_MAX`, so a machine that was offline would otherwise
+drain it back to back. An edge rate limit counts requests rather than intentions,
+and a contributor tripping one on their own recovery traffic loses every clip
+still queued, since a paused uploader drops rather than retries. Measured against
+the live rule on 2026-08-10: it fires from about the fifth rapid request.
+
+`accepted` and `duplicate` delete locally; `quota` and `closed` pause the whole
+uploader for the server's `retry_after_s`; a bare `429` pauses on the status
+alone, because an edge throttle answers with an HTML page carrying no `reason`
+and would otherwise read as an ordinary refusal. Everything else is kept and not
+retried. Network errors and 5xx retry four times with bounded backoff, waiting on
+the stop event so shutdown stays prompt. **A debug user never deletes**, whatever
+`aeb_delete_after_upload` says: that store is the working corpus.
+
+### One notification per clip
+
+Exactly one of "sent" or "saved" fires for a given clip. The uploader announces a
+successful send, coalescing after the first into a summary once per
+`_NOTIFY_COOLDOWN_S`, held while AEB is intervening (`note_intervention`, called
+from the capture tick). When a clip stays on the machine the `on_kept` callback
+fires instead, and `capture._notify_kept` shows the old "AEB clip saved" popup to
+debug users only. Refusals and offline machines never claim a send.
+
+`aeb_submissions.jsonl` beside the store records one line per attempt, capped at
+5000 lines, carrying no coordinates and no image data. It is what makes
+delete-on-ack defensible, and it is also what drives the retry pass below.
+
+### Holdover retry, driven by the log and not by the store
+
+A clip is offered once, at the moment it is written. Without a retry pass an
+offline machine, or an hour of server downtime, silently costs every clip
+captured in that window: a failed send is abandoned and no later run knows the
+clip exists.
+
+`_retry_pending()` runs on the uploader thread before the queue loop. It reads
+`SubmissionLog.retryable_clip_ids()`, which returns ids whose **most recent**
+entry is in `_RETRYABLE_RESULTS`, and re-offers up to `_RETRY_BATCH` of them
+oldest-first through the normal `_handle()` path, so eligibility, consent and
+pacing all still apply.
+
+`paused` is one of those results, which is why the pause check sits **after** the
+eligibility check rather than first: a clip held back by a pause needs a log
+entry to be recoverable, while one that was never going to be sent must stay out
+of the log entirely. Without that, hitting the daily cap at noon would lose every
+clip captured for the rest of the day.
+
+**A clip with no log entry is unreachable from here.** That is the safety
+property, and it holds by construction rather than by a filter: a back
+catalogue, anything captured before this feature shipped, and everything the
+eligibility rules refuse have no entries, so a retry pass cannot reach them. Do
+not replace the log lookup with a store scan.
+
+## 15. Upload triage: which clips still carry information
+
+`core/aeb/clip_triage.py` is the second eligibility gate. Section 14 judges a
+clip on privacy and provenance; this one judges whether it says anything the
+corpus does not already hold. It runs in `ClipUploader._triage_reason`, on the
+uploader thread, after the metadata gate and before the pause check, so a clip
+it refuses never gets a submission-log entry and is therefore unreachable from
+the retry pass by the same construction section 14 relies on.
+
+### Measured, not assumed
+
+Every threshold below comes from replaying the 852 labelled contributed clips
+held on 2026-09-10 and scoring each candidate rule by how much of the reviewer's
+time it saves against what it costs in labelled positives. "Waste" means a clip
+that was tagged `ignore` or `tn`, the two outcomes that consume a review slot and
+return nothing. Baseline waste rate over that corpus was 50.6%.
+
+| Rule | dropped | waste | tp lost | fn lost | fp lost |
+|---|---|---|---|---|---|
+| no traffic in the clip | 31 | 100% | 0 | 0 | 0 |
+| nothing came within `NEAR_RANGE_M` | 80 | 92.5% | 0 | 1 | 5 |
+| min TTC past `QUIET_TTC_S` and no brake | 97 | 100% | 0 | 0 | 0 |
+| **all three** | **208** | **97.1%** | **0** | **1** | **5** |
+
+Survivor waste rate falls to 35.6% with all 237 true positives intact. The three
+rules are cheap because each names a clip in which nothing ever approached ego:
+they are not a proxy for "boring", they are a statement that the recorded scene
+contains no encounter to judge.
+
+### Rules that were measured and rejected
+
+Traffic density and ego speed both **fail** as filters, in the direction opposite
+to intuition. Median vehicle count is 8 on waste clips against 29 on useful ones,
+and median ego speed at the action is 59 km/h on waste against 50 km/h on useful.
+Dense, slow scenes are where the events are. `crossing` geometry is 83.6% waste
+and `codirectional` is 40.9%, so the geometry that looks least interesting is the
+one worth keeping. Do not reintroduce a "dense and slow is noise" rule.
+
+A crash trigger with nothing in ego's corridor scores 99.1% waste, and it is
+still **deliberately not implemented**. A collision that AEB never saw coming is
+exactly what the crash trigger exists to capture, and a rule keyed on "no target
+was ever in the corridor" would refuse the clearest misses this corpus can hold.
+`test_a_crash_clip_that_missed_a_close_target_still_goes` pins that.
+
+### The straight sub-40 class is sampled, not refused
+
+Bucketing the corpus by relative motion, speed band, corridor gap and lane gives
+81 distinct scenes, and the top five cover 44% of all clips. The largest single
+bucket, a co-directional in-lane lead below 40 km/h, is 160 clips on its own. It
+is repetitive but **not** low value at 35.0% waste, so banning it would cost real
+positives: over the survivors of the three rules above it is 136 clips carrying
+66 tp and 13 fn.
+
+`is_straight_slow()` therefore feeds `sample_keeps()` rather than
+`triage_reason()`. One clip in `STRAIGHT_SAMPLE_EVERY` is sent, counting the
+first as sent, so the class keeps a trickle of coverage and a regression in it
+still surfaces between versions. The position counter lives in
+`Settings.aeb_triage_straight_seen` rather than in the uploader, because a driver
+who relaunches often would otherwise send the first clip of every session and
+land far above one in ten.
+
+### Fail open, unlike section 14
+
+`SceneSummary.decoded` is False when the clip has no AEB ticks or the radar
+stream will not replay, and every geometry rule is skipped in that case. Triage
+is a redundancy filter, so a clip it cannot judge is offered. That is the
+opposite of the consent and thumbnail gates, which fail closed on purpose: those
+protect the contributor, this one only protects the reviewer's afternoon.
+
+Definitions here mirror `tools/aeb_agent/features.py` so the shipped gate and the
+offline corpus tooling agree on what a primary target is. If `_primary` or the
+co-directional test drifts from that file, the measured rates above stop
+describing what the gate does.
+
+---
+
+## 16. Replay timebase
+
+`core/aeb/clip_timebase.py` (`replay_frames`) is where every replay gets its radar
+frames: `decode_radar_stream`, `cold_start_speeds`, headless scoring, the review
+tool, triage and the ACC harness. It returns copies and never mutates the clip.
+`decode_radar_stream(clip, as_recorded=True)` skips both corrections below, for a
+probe that needs the capture-time input.
+
+Step counting does not build `Vehicle` objects. It unpacks position, speed and
+the TMP flag from each traffic slot, with the same occupied-slot rule as
+`TrafficReader._build_vehicles_from_raw` (non-zero position and quaternion).
+Parked-buffer vehicles are skipped by `_pair_steps` and never override a traffic
+id, so they are not decoded here. The smoothing pass still builds full vehicles.
+`_VEH_HDR` has to stay in step with `_VEHICLE_OBJECT_FORMAT`.
+
+### Legacy pairing (schema 4 and older)
+
+Those clips carry the ego pose from the telemetry thread, up to three physics steps
+older than the traffic buffer beside it (`core/radar/README.md` section 16). Replay
+re-pairs them from data the clip already holds:
+
+- **Ego steps** per frame pair: `|displacement| * 60 / speed`, with the speed read at
+  the end of the step, rounded when within 0.25 of a whole number.
+- **Traffic steps**: every car in one buffer moved the same whole number of steps.
+  AI cars carry their speed; TMP cars do not, so their travel per step is measured
+  over a +-6 frame window, first on wall time and then on the step index that pass
+  produced. One AI car or two agreeing TMP cars decide the count.
+- **Lag**: the running sum of traffic minus ego steps, re-anchored on its minimum
+  over +-45 frames (the freshest telemetry poll lags zero) and clamped to 3. An
+  uncounted pair holds the lag rather than guessing.
+- Ego is advanced by the lag along the midpoint heading, with speed and yaw moved on
+  their per-step rates.
+
+Where nothing can be counted, TMP scenes with one or two cars or a stopped scene, the
+recorded pairing is kept, so the worst case is the old replay.
+
+### The simulated clock (every schema)
+
+Live radar integrates vehicle kinematics on `simulatedTime` at the traffic step. No
+clip records it, and adding a field would bump `CONSENT_VERSION`, so replay rebuilds
+it: each segment's `t_wall` becomes `t0 + steps / 60` when its counts cover at least
+half the frame pairs and explain its wall duration within 5 %. Synthetic test clips
+that do not move in physics steps fail that check and keep `t_wall`.
+
+### What it did to the corpus
+
+Measured 2026-09-14 over 747 labelled clips, after the local store had been pruned
+to 298 files, so the totals do not compare with earlier sections:
+
+| | cost | FN | TP | FP | false warn | TN |
+|---|---|---|---|---|---|---|
+| wall clock, recorded pairing | +404.59 | 64 | 388 | 110 | 25 | 155 |
+| re-pairing only | +380.31 | 62 | 389 | 111 | 24 | 155 |
+| simulated clock only | +788.86 | 75 | 375 | 106 | 28 | 156 |
+| **both (shipped)** | **+617.49** | 70 | 382 | 107 | 26 | 157 |
+
+Re-pairing is a clean gain. The clock costs score, and about equally in SP (+186,
+where the rebuilt clock is exact) and TMP (+199), so it is not a reconstruction
+artefact: AEB's entry path was tuned against the wall clock's timing noise. It was
+adopted anyway, for three measured reasons:
+
+- **It removes phantom engagements.** `d16d0575` no longer engages at all (the
+  latched-hold test replays it `as_recorded` for that reason), and 9 must-not-trigger
+  clips stop braking, against 6 that start.
+- **Much of the loss was labels built on noise.** The corpus is mostly
+  `auto_engagement` captures, recorded because an older AEB fired, and many positive
+  labels were drawn around that trigger. Where the trigger came from wall-clock noise,
+  the clean clock reads as a miss.
+- **Closed loop it is not later.** Against a lead braking at 4 to 10 m/s2 ahead of
+  three rigs at 60 to 100 km/h and 0.8 to 2.0 s headway (108 cases, positions on
+  physics steps, the `_lead_brake_sim.py` harness), the step clock engages 0.27 s
+  earlier on average, worst residual gap -0.11 m against -0.15 m, and no case loses
+  more than 0.25 m.
+
+### After the 2026-09-15 relabel
+
+Lukas re-reviewed every clip whose verdict the timebase flipped and every
+slow-approach-at-speed positive (ego at 60 km/h or more, lead closing under 25 km/h),
+by hand. On the restored store, 1280 labelled clips:
+
+| | cost | FN | TP | FP | false warn | TN |
+|---|---|---|---|---|---|---|
+| wall clock, recorded pairing | +23.21 | 85 | 573 | 131 | 32 | 448 |
+| **physics-step timebase** | **+94.12** | 89 | 567 | 126 | 34 | 451 |
+
+The relabel took the timebase's cost from +240 to +71. What is left is real, not
+labelling: the 12 positives the step clock still loses were each reviewed and kept
+(`0b0bcfd8`, `280b8d64`, `5e8ac731`, `6895548c`, `72406b04`, `73490d0f`, `7a2b27df`,
+`7c1e86b1`, `7e2f395c`, `a7c911a9`, `ccc7eaa4`, `dc321ac6`). Every remaining
+positive is a danger AEB must brake for, however the longitudinal estimates read it;
+the fix belongs in the entry path, never in the labels. The step clock also adds 21
+phantom brakes or warnings (17 TMP) against 20 it removes.
+
+Two labelling rules came out of the pass:
+
+- **A TMP lead stall is `ignore`, never `fp`.** The lead's position freezes, reads
+  0 km/h at highway speed, then snaps back (`1223f8d3`, `430f5fd0`, `9ca453d8`,
+  `f54e3098`, `ef817c01`). At onset that is the same observable as a dead stop, so an
+  `fp` label would teach entry to wait on real sudden stops.
+- **A slow approach whose lead never braked is not a positive.** Measure it on the
+  step clock: closing speed from the gap slope, lead deceleration from a fit of its
+  own positions, never from AEB's decision stream.
+
+---
+
+*Source: `core/aeb/thread.py`, `core/aeb/filters.py`, `core/aeb/calibration.py`,
+`core/aeb/lane_frame.py`, `core/radar/*`: LD-Tech / MonoCruise.*
+

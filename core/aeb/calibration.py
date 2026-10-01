@@ -1,0 +1,304 @@
+"""AEB calibration: single source of truth for all tunable constants."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import math
+
+from core.radar.ego_path_model import EgoPathParams
+
+
+@dataclass(frozen=True)
+class AEBCalibration:
+    # Brake / TTB
+    full_brake_decel: float = 7.8
+    ego_decel_frac: float = 0.9
+    warn_ttb: float = 1.3
+    brake_ttb: float = 0.2
+    brake_release_ttb: float = 0.5
+    risk_confirm_s: float = 0.05
+    risk_confirm_oncoming_s: float = 0.10
+    brake_response_window_s: float = 0.30
+    brake_worsens_hysteresis_ms: float = 0.5
+
+    # Geometry / corridor
+    # Flush standoff vs parked trailer (2026-08-11 clearance probe).
+    ego_half_width: float = 1.265
+    ego_half_length: float = 3.333
+    corridor_margin: float = 0.5
+    # Near-parallel capsule contacts: margin * scale at parallel; see core/aeb/README.md.
+    capsule_parallel_margin_scale: float = 0.3
+    stop_buffer: float = 0.7
+    # Response-lag gap term (v_closing * this): brake build-up, and since the
+    # engage bar moved off ego_decel_frac, the only entry margin (README §7).
+    stop_buffer_response_s: float = 0.30
+    stop_buffer_response_trailer_s: float = 0.40
+    # Reserve release after engagement: 0 holds it, 0.35 bleeds it off over the
+    # measured build-up. Measured trade in TUNING.md; held is shipped.
+    aeb_reserve_release_s: float = 0.35
+    # Rejected 2026-07-19: response distance cap, threat-age tiering, engage 0.9 (README §7).
+    elevation_margin: float = 5.0
+    max_range: float = 200.0
+    arc_start_pctg: float = 0.2
+    collision_samples: int = 36
+
+    # Arc horizon
+    arc_horizon_min: float = 2.5
+    arc_horizon_max: float = 3.0
+
+    # Lane-frame thresholds
+    lane_half_width: float = 1.95
+    lane_separation: float = 3.9
+
+    # Yaw / fwd-dot regimes
+    head_on_dot: float = -0.7
+    near_head_on_dot: float = -0.5
+    co_directional_dot: float = 0.7
+    # Target reversing faster than this: regimes use travel direction (README travel frame).
+    reversing_speed_ms: float = 1.0
+
+    # Curvature / dynamics
+    turning_diverge_kappa: float = 0.007
+    shared_turn_max_kappa: float = 0.05
+    turn_complete_curvature_scale: float = 3.0
+    evasion_g: float = 0.08 * 9.81
+    evasion_g_oncoming: float = 0.13 * 9.81
+    evasion_max_dkappa: float = 0.008
+    # Dead: kept for clip-metadata compatibility. Ego curvature now comes from
+    # EgoPathModel (core/radar/ego_path_model.py), see core/aeb/README.md §1.
+    yaw_rate_steer_gain: float = 12.0
+
+    # Ego path: steer-led, gain learned per vehicle, grip capped (README §1).
+    # Prior stays the historical value; the learner is what makes it accurate.
+    ego_path_gain_prior: float = math.radians(12.0)
+    ego_path_gain_learning_enabled: bool = True
+    ego_path_cap_enabled: bool = True
+    ego_path_meas_window_s: float = 0.13
+    ego_path_learn_window_s: float = 0.25
+    ego_path_learn_min_steer: float = 0.012
+    ego_path_learn_max_lat_ms2: float = 3.5
+    ego_path_learn_tau_s: float = 8.0
+    ego_path_sat_ratio: float = 0.75
+    ego_path_sat_release_ratio: float = 0.85
+    ego_path_sat_min_lat_ms2: float = 4.0
+    ego_path_sat_enter_s: float = 0.15
+    ego_path_sat_exit_s: float = 0.20
+    ego_path_sat_cap_margin: float = 0.10
+
+    # Target path: pos slice + yaw rate blend; see core/aeb/README.md (target curvature).
+    aeb_pos_history_len: int = 10
+    aeb_yaw_blend: float = 0.7
+
+    # One-Euro on blended kappa; knobs in README §7 and target-curvature section.
+    aeb_kappa_one_euro_min_cutoff: float = 1.0
+    aeb_kappa_one_euro_beta: float = 100.0
+    aeb_kappa_one_euro_d_cutoff: float = 0.3
+    aeb_kappa_one_euro_beta_turn_scale: float = 20.0
+
+    # Co-directional diverge
+    co_dir_diverge_lookahead_s: float = 0.25
+    co_same_turn_lookahead_scale: float = 0.5
+    # In-lane pass-through dip samples in _is_approaching; CoDirectionalDivergeFilter (README).
+    diverge_dip_samples: int = 8
+
+    # Sweep-pass / corner-entry stationary
+    sweep_pass_max_target_speed: float = 1.0
+    corner_entry_min_distance: float = 1.0
+    # Mode B (in-lane geometric consistency): MP queue at corner entry
+    corner_entry_min_road_bend: float = 0.10        # rad (~5.7°)
+    corner_entry_min_lateral: float = 0.4           # m
+    corner_entry_lateral_tol: float = 1.5           # m
+
+    # TMP rel-speed filter
+    tmp_filter_split_kmh: float = 50.0
+    tmp_filter_rel_above_kmh: float = 5.0
+    tmp_filter_rel_below_kmh: float = 50.0
+    user_brake_latch: float = 0.12
+    # FF assist ramps in from here to user_brake_latch (README pedal authority).
+    ff_assist_ramp_lo: float = 0.03
+
+    # TmpCrossTrafficFilter straight-snapshot center hit threshold (README TmpCrossTrafficFilter).
+    tmp_cross_center_hit_dist: float = 2.5
+
+    # Perpendicular halo: |sin(yaw diff)| * (base + speed * this). Radial is separate.
+    cross_zone_base: float = 1.0
+    cross_zone_speed: float = 0.3
+    cross_zone_radial: float = 0.7
+
+    # OutOfLaneParallelFilter horizon lane scan count; see README OutOfLaneParallelFilter.
+    out_of_lane_scan_samples: int = 10
+    # Stationary angled adjacent: shallow graze (min d_abs) with far end out of lane.
+    stationary_ool_graze_min_m: float = 0.90
+    stationary_ool_graze_max_m: float = 1.50
+    stationary_ool_span_scale: float = 1.5
+
+    # Oncoming evasion kappa scaling
+    opposite_lane_kappa_scale: float = 2.0
+    # OppositeLaneFilter body-separation fast path: the measured miss must also
+    # clear this multiple of the body bar. 0 trusts pose alone (README).
+    oncoming_body_sep_miss_scale: float = 0.25
+    # Turn-into-path: CBDR miss closing this fast (m/s) with ego turning skips
+    # OppositeLane body-sep / Fix B (README turn-into-path). e0fd ~ -5.6 m/s.
+    oncoming_closing_dmiss_rate_mps: float = -1.5
+    # Straight-frame |lat| must collapse under this (m) with the miss-rate gate.
+    # 0.85 recovers e0fd; 7c635440 id162 ~0.72 stays TN via remaining evasion.
+    oncoming_closing_lat_m: float = 0.85
+    # Closing skip requires arc inflation vs |lat|; kills false closing on
+    # adjacent head-on (6a35 engage d_abs/|lat|~9.3) while e0fd (~30) still skips.
+    oncoming_closing_dabs_lat_ratio: float = 10.0
+    # Shared bend: target kappa this fraction of ego's means it tracks the same
+    # road, so |lat| grazing the nose is a pass (7d76 0.73-0.97, e0fd 0.00-0.04).
+    oncoming_shared_bend_ratio: float = 0.5
+    # Soft pose clearance under clear_bar for OppositeLane body-sep (m).
+    # 0.80 locks 887 engage (d_abs 1.58 vs clear ~2.32) and 280 (1.8 vs ~2.31).
+    oncoming_body_sep_soft_m: float = 0.80
+    # Fail-closed max-g refuse: Opp arm 7 m (opp_fast 4.5 @ ≥60 km/h); TmpCross 3 m.
+    # opp_fast is provisional n=1 (0af8); see TUNING.md / cards/0af8aedb_recovery.md.
+    max_evasion_lat_g: float = 0.35 * 9.81
+    max_evasion_min_lat_m: float = 7.0
+    max_evasion_min_lat_m_opp_fast: float = 4.5
+    max_evasion_opp_fast_kmh: float = 60.0
+    max_evasion_min_lat_m_tmp_cross: float = 3.0
+    # TmpCross: pass when body already in ego lane band. Off: +FP without new FN win
+    # once max_evasion recovers cca/e09.
+    tmp_cross_in_corridor_pass: bool = False
+
+    # Fix A: near-head-on cross-zone reduction
+    near_head_on_cross_scale: float = 0.3
+    near_head_on_lateral_min: float = 3.0
+
+    # Continuous-decel AEB (rate-limit, deadband, slope-aware engagement)
+    aeb_target_deadband_ms2: float = 0.4
+    aeb_target_refresh_min_s: float = 0.20
+    aeb_target_rate_ms3: float = 8.0
+    # While engaged the pedal controller tracks this target, so a slow software ramp
+    # only delays the bite; the plant's own 0.15 s lag is the real jerk limit.
+    aeb_target_rate_engaged_ms3: float = 30.0
+    aeb_engage_frac: float = 0.90
+    # Graded hedge skip for aligned in-lane traffic; 0.85 in-game trial from
+    # 2026-08-11 equals aeb_engage_frac, so grading is flat (README, TUNING.md).
+    aeb_engage_frac_certain: float = 0.90
+    aeb_disarm_frac: float = 0.45
+    # Geometry latch while colliding unbraked ttc inside window (anti-pumping; README).
+    disarm_hold_ttc_s: float = 3.0
+    aeb_warn_near_full_frac: float = 0.85
+    brake_actuator_lag_s: float = 0.10
+    # New engagements only fire when |ego_speed| is above this threshold.
+    aeb_min_engage_speed_kmh: float = 5.0
+    # Comfort floor on |v_ego - v_target|: a target closing slower than this
+    # is barred from engagement entry (README closing-speed floor).
+    aeb_min_closing_ms: float = 1.0
+    # Trailers are ignored below this |ego_speed|: coupling and uncoupling
+    # drive the truck under one on purpose (README low-speed trailer ignore).
+    trailer_ignore_below_kmh: float = 20.0
+    # Tiered engage confirm windows; brake-TTB slam exempt (README continuous-decel).
+    aeb_engage_confirm_s: float = 0.06
+    aeb_engage_confirm_oblique_s: float = 0.40
+    aeb_certain_fwd_dot: float = 0.90
+    # Oblique warn must lead oblique engage by >= 0.1 s (README warn persistence).
+    # 0.30 trades short clear-pass cues for fewer phantom beeps; see TUNING.md TODO.
+    aeb_warn_confirm_oblique_s: float = 0.30
+    # Fully engage-vetoed out-of-lane sets warn only after this occupancy window.
+    # Latency, never silence: a persisting course still warns (README).
+    aeb_warn_confirm_vetoed_s: float = 1.00
+    aeb_warn_frac: float = 0.50
+    # Evidence-class warn windows: oncoming sets and sets a full lane off the
+    # ego arc are the two phantom-beep classes (README warn persistence).
+    aeb_warn_confirm_oncoming_s: float = 2.00
+    aeb_warn_confirm_wide_lat_s: float = 0.60
+    aeb_warn_wide_lat_m: float = 4.0
+    # Wide class survives this much lapse, so a target closing under the bar
+    # cannot buy back the instant warn. Bridges a dropout, not a re-approach.
+    aeb_warn_wide_lat_sticky_s: float = 0.20
+    # Even certain geometry must show this much raw warn before the instant
+    # bypass fires; kills single-frame demand spikes the state hold stretches.
+    aeb_warn_instant_min_s: float = 0.05
+    # The TTB-slam warn shortcut assumes an in-path target; a set this far off
+    # the arc must still clear the wide-lateral window.
+    aeb_warn_ttb_needs_narrow: bool = True
+    # No genuine corpus warn opens beyond 80 m; a beep that far out is noise.
+    aeb_warn_max_range_m: float = 90.0
+
+    # OccupancyConfirm lapse tolerance; shared by risk/engage/warn (README).
+    aeb_confirm_occupancy: float = 0.6
+    aeb_confirm_max_gap_frames: int = 2
+
+    # CBDR LOS veto on engagement entry only; crash-confirmed ids exempt (README LOS veto).
+    los_veto_enabled: bool = True
+    los_veto_window_s: float = 0.6
+    los_veto_min_samples: int = 12
+    los_veto_min_range_m: float = 25.0
+    los_veto_miss_dist_m: float = 6.0
+    # Head-on branch: antiparallel pairs clear each other on measured lateral
+    # gap alone, so the miss bar drops to body clearance (README LOS veto).
+    los_veto_headon_miss_dist_m: float = 2.8
+    los_veto_headon_min_range_m: float = 20.0
+    # Straight-line CBDR is void for a manoeuvring target; kappa is only
+    # trustworthy above this speed (kappa = yaw_rate / v blows up near zero).
+    los_veto_headon_max_kappa: float = 0.05
+    los_veto_headon_min_speed_ms: float = 5.0
+
+    # Engagement-entry vetoes for hits that rest on unsupportable extrapolation
+    # (README engagement-entry vetoes). Warn and FF assist are untouched.
+    extrap_veto_enabled: bool = True
+    turn_veto_min_kappa: float = 0.012
+    turn_veto_min_ttc_s: float = 1.2
+    # 6 m/s closing must stay unvetoed (test_codir_veto_is_a_band_around_matched_speed).
+    codir_adjacent_veto_axial_ms: float = 2.0
+    codir_adjacent_veto_miss_m: float = 2.0
+    # Range past which an unseen bend moves a non-co-directional target by more
+    # than a lane, so its lane stops being evidence (README lane confidence).
+    lane_confidence_range_m: float = 30.0
+
+    # Clearance-based required decel (README continuous-decel). False restores
+    # the pre-clearance relative-frame path and is how the corpus is A/B'd.
+    clearance_required_enabled: bool = True
+    clearance_horizon_s: float = 5.0
+    clearance_samples: int = 24
+    clearance_far_samples: int = 8
+    clearance_refine_steps: int = 4
+    # Margin past the frame a crosser vacates the corridor on, so ego does not
+    # arrive on its tail. Only applies when occupancy ends inside the window.
+    clearance_clear_margin_s: float = 0.30
+
+    # Follow-threat: kinematic hold + lane/converge gate; README follow-threat section.
+    follow_threat_window_s: float = 0.6
+    follow_threat_min_span_s: float = 0.45
+    follow_threat_min_samples: int = 8
+    follow_threat_min_decel_ms2: float = 0.8
+    follow_threat_min_closing_ms: float = 0.5
+    follow_threat_min_lat_converge_ms: float = 0.3
+    # Sweep-past on a bend collapses d_abs at 15-25 m/s (8e213c9e); a cut-in stays ~2-7.
+    follow_threat_max_lat_converge_ms: float = 10.0
+    follow_threat_hold_s: float = 2.0
+    follow_threat_max_range_m: float = 80.0
+
+    # Latched ids: filter bypass only, never a brake hold (README latched-threat).
+    # Kept while ahead within the steer-in band, for at most latched_max_s past the last hit.
+    latched_scope_release_s: float = 0.5
+    latched_steer_in_half_width_m: float = 5.5
+    latched_max_s: float = 2.0
+
+
+DEFAULT = AEBCalibration()
+
+
+def ego_path_params(cal: AEBCalibration = DEFAULT) -> EgoPathParams:
+    """EgoPathModel tunables from the calibration AEB is running."""
+    return EgoPathParams(
+        gain_prior=cal.ego_path_gain_prior,
+        learn_enabled=cal.ego_path_gain_learning_enabled,
+        cap_enabled=cal.ego_path_cap_enabled,
+        meas_window_s=cal.ego_path_meas_window_s,
+        learn_window_s=cal.ego_path_learn_window_s,
+        learn_min_steer=cal.ego_path_learn_min_steer,
+        learn_max_lat_ms2=cal.ego_path_learn_max_lat_ms2,
+        learn_tau_s=cal.ego_path_learn_tau_s,
+        sat_ratio=cal.ego_path_sat_ratio,
+        sat_release_ratio=cal.ego_path_sat_release_ratio,
+        sat_min_lat_ms2=cal.ego_path_sat_min_lat_ms2,
+        sat_enter_s=cal.ego_path_sat_enter_s,
+        sat_exit_s=cal.ego_path_sat_exit_s,
+        sat_cap_margin=cal.ego_path_sat_cap_margin,
+    )
+

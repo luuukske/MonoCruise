@@ -1,0 +1,356 @@
+"""Set-speed PID child. See core/longitudinal/README.md."""
+
+from __future__ import annotations
+
+import logging
+import math
+
+from core.settings import Settings
+from core.thread_management.registry import registry
+
+from .accel_envelope import (
+    envelope_ms2,
+    resolve_profile,
+    rise_limited_ms2,
+    usable_capacity_ms2,
+)
+from .base import LongCtx, LongitudinalController, LongOutput
+
+logger = logging.getLogger(__name__)
+
+# Speed clamp for the set point (km/h)
+_SPEED_MIN_KMH = 30.0
+_SPEED_MAX_KMH = 130.0
+
+# Low-pass time constant (s) for telemetry speed used only in the PID D-term.
+_CC_KD_SPEED_SMOOTH_TAU_S = 0.15
+
+# EMA time constants (s)
+_CC_OUTPUT_EMA_TAU_S = 0.40
+_CC_TARGET_SPEED_EMA_TAU_S = 0.5
+
+# Gearshift D-term freeze: mirrors mapper's gearshift state machine
+_CC_CLUTCH_ACTIVE_THRESHOLD = 0.05
+_CC_GEARSHIFT_BLOCK_DURATION_S = 0.5
+_CC_GEARSHIFT_RAMP_DURATION_S = 1.0
+
+# Game throttle threshold above which CC bypasses brake-side output EMA
+_CC_GAME_THROTTLE_OVERRIDE = 0.1
+
+# Integral leak time constant (s) while the sending_thread hold FSM owns
+_HOLD_INTEGRAL_LEAK_TAU_S: float = 2.0
+
+# Capacity smoothing. The published estimate is per-gear and steps at every
+# See `core/longitudinal/README.md`.
+_CAPACITY_EMA_TAU_S: float = 0.8
+
+
+class CruiseController(LongitudinalController):
+    """Set-speed PID with output smoothing, target management, and disarm guard."""
+
+    name = "cc"
+
+    def __init__(self) -> None:
+        self._enabled: bool = False
+        self._target_kmh: float | None = None
+
+        # PID state
+        self._integral_error: float = 0.0
+        self._last_target_for_integral: float | None = None
+
+        # D-term: speed EMA
+        self._kd_smooth_speed_ms: float | None = None
+
+        # Output EMA + target EMA
+        self._output_ema_accel_ms2: float | None = None
+        self._target_speed_ema_ms: float | None = None
+
+        # Accel-envelope state: smoothed capability estimate and the previous
+        # emitted bid, which the per-profile rise limit is measured against.
+        self._capacity_ema_ms2: float | None = None
+        self._prev_bid_ms2: float | None = None
+
+        # Gearshift D-freeze state
+        self._cc_clutch_active: bool = False
+        self._cc_clutch_release_mono: float = -math.inf
+        self._cc_prev_d_factor: float = 1.0
+
+    # External state: read by the orchestrator for publishing/UI
+
+    @property
+    def active(self) -> bool:
+        """True when this controller is bidding (enabled + has a target)."""
+        return self._enabled and self._target_kmh is not None
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @property
+    def target_speed_kmh(self) -> float | None:
+        return self._target_kmh
+
+    # Lifecycle controls: driven by the orchestrator's button FSM
+
+    def enable(self) -> None:
+        self._enabled = True
+
+    def disable(self) -> None:
+        self._enabled = False
+
+    def set_target_kmh(self, v: float) -> None:
+        self._target_kmh = self._clamp_target_kmh(v)
+
+    def set_target_from_speed_kmh(self, speed_kmh: float) -> None:
+        self._target_kmh = self._clamp_target_kmh(round(speed_kmh))
+
+    def change_target_kmh(self, delta: float) -> None:
+        """Adjust set speed: coarse steps grid-snap, fine steps add."""
+        if self._target_kmh is None:
+            return
+        inc = int(round(float(delta)))
+        abs_inc = abs(inc)
+        if abs_inc >= 5:
+            ts = int(round(float(self._target_kmh)))
+            if inc > 0:
+                ts = ((ts // abs_inc) + 1) * abs_inc
+            elif ts % abs_inc == 0:
+                ts = ((ts // abs_inc) - 1) * abs_inc
+            else:
+                ts = (ts // abs_inc) * abs_inc
+            self._target_kmh = self._clamp_target_kmh(float(ts))
+        else:
+            self._target_kmh = self._clamp_target_kmh(
+                float(self._target_kmh) + float(delta),
+            )
+
+    # Main step
+
+    def step(self, ctx: LongCtx) -> LongOutput:
+        # Re-clamp target each tick so a tightened global limit drags the
+        # See `core/longitudinal/README.md`.
+        if self._target_kmh is not None:
+            clamped = self._clamp_target_kmh(self._target_kmh)
+            if clamped != self._target_kmh:
+                self._target_kmh = clamped
+
+        # Inactive: clear runtime smoothing/integrators so handover to active
+        # later starts clean. Target and enabled flag are preserved.
+        if not self.active:
+            self._reset_runtime_state()
+            return LongOutput(None, False)
+
+        # External gates: telemetry, pause, device, em_stop
+        if not (ctx.connected and not ctx.paused and not ctx.device_lost and not ctx.em_stop):
+            return LongOutput(None, False)
+
+        # Stepped once per tick: the clutch edge detector inside it must not
+        # see the same tick twice, so the D-term takes this value as an argument.
+        d_factor = self._gearshift_d_factor(ctx.now, ctx.game_clutch)
+
+        wanted_accel = self._speed_to_accel(ctx, d_factor)
+
+        # User game-throttle override: when user is pressing gas in-game and CC
+        # wants to brake, bypass output EMA so brake response is immediate.
+        if ctx.game_throttle > _CC_GAME_THROTTLE_OVERRIDE and wanted_accel < 0.0:
+            self._output_ema_accel_ms2 = wanted_accel
+        wanted_accel = self._smooth_output_accel_ema(wanted_accel, ctx.dt)
+
+        # Speed-scheduled ceiling, bounded by what the truck can actually deliver.
+        # See `core/longitudinal/README.md`.
+        profile = resolve_profile(getattr(Settings, "cc_accel_profile", None))
+        capacity = self._update_capacity_ema(ctx.dt, d_factor)
+        accel_min = float(Settings.cc_accel_min_ms2)
+        accel_max = min(
+            envelope_ms2(ctx.speed_ms, profile, capacity),
+            float(Settings.cc_accel_max_ms2),
+        )
+        wanted_accel = max(accel_min, min(accel_max, wanted_accel))
+
+        # Neutral has no torque path to the wheels, so a rise limit buys no
+        # comfort there and only delays the auto-neutral launch gate.
+        if ctx.gear_dashboard != 0:
+            wanted_accel = rise_limited_ms2(
+                wanted_accel, self._prev_bid_ms2, profile, ctx.dt,
+            )
+        self._prev_bid_ms2 = wanted_accel
+
+        return LongOutput(wanted_accel, True)
+
+    def reset(self) -> None:
+        self._reset_runtime_state()
+
+    def _reset_runtime_state(self) -> None:
+        """Clear smoothers/integrators. Does not change enabled/target."""
+        self._integral_error = 0.0
+        self._kd_smooth_speed_ms = None
+        self._output_ema_accel_ms2 = None
+        self._target_speed_ema_ms = None
+        self._capacity_ema_ms2 = None
+        self._prev_bid_ms2 = None
+
+    # Internals
+
+    @staticmethod
+    def _clamp_target_kmh(v: float) -> float:
+        upper = _SPEED_MAX_KMH
+        glim = Settings.global_speed_limit_kmh
+        if glim is not None and isinstance(glim, (int, float)) and math.isfinite(float(glim)):
+            upper = min(upper, float(glim))
+        return max(_SPEED_MIN_KMH, min(upper, v))
+
+    def _gearshift_d_factor(self, now: float, clutch: float) -> float:
+        """0.0 while clutched or in post-release block, 0→1 over ramp, 1 otherwise. See `core/longitudinal/README.md`."""
+        now_safe = now if math.isfinite(now) else 0.0
+        clutch_pressed = clutch > _CC_CLUTCH_ACTIVE_THRESHOLD
+
+        if clutch_pressed and not self._cc_clutch_active:
+            self._cc_clutch_active = True
+        elif not clutch_pressed and self._cc_clutch_active:
+            self._cc_clutch_active = False
+            self._cc_clutch_release_mono = now_safe
+
+        if clutch_pressed:
+            return 0.0
+        time_since_release = now_safe - self._cc_clutch_release_mono
+        if time_since_release < _CC_GEARSHIFT_BLOCK_DURATION_S:
+            return 0.0
+        if time_since_release < _CC_GEARSHIFT_BLOCK_DURATION_S + _CC_GEARSHIFT_RAMP_DURATION_S:
+            return (time_since_release - _CC_GEARSHIFT_BLOCK_DURATION_S) / _CC_GEARSHIFT_RAMP_DURATION_S
+        return 1.0
+
+    @staticmethod
+    def _read_hold_active_safe() -> bool:
+        """Lookup `sending_thread.data.hold_active` defensively. See `core/longitudinal/README.md`."""
+        try:
+            st = registry.get_thread("sending_thread")
+        except KeyError:
+            return False
+        except Exception:
+            logger.debug("hold_active registry read failed", exc_info=True)
+            return False
+        if st is None:
+            return False
+        try:
+            with st.data._lock:
+                return bool(st.data.hold_active)
+        except Exception:
+            logger.debug("hold_active lock/attr read failed", exc_info=True)
+            return False
+
+    @staticmethod
+    def _read_capacity_safe() -> float | None:
+        """Lookup the mapper's accel capacity estimate defensively. See `core/longitudinal/README.md`."""
+        try:
+            st = registry.get_thread("sending_thread")
+        except KeyError:
+            return None
+        except Exception:
+            logger.debug("accel capacity registry read failed", exc_info=True)
+            return None
+        if st is None:
+            return None
+        try:
+            with st.data._lock:
+                raw = getattr(st.data, "mapper_est_max_accel_ms2", None)
+        except Exception:
+            logger.debug("accel capacity lock/attr read failed", exc_info=True)
+            return None
+        return usable_capacity_ms2(raw)
+
+    def _update_capacity_ema(self, dt: float, d_factor: float) -> float | None:
+        """Smooth the per-gear capacity so the ceiling does not step at each shift.
+
+        Frozen while the driveline is open so no mid-shift value is ingested, and
+        held (not cleared) when the estimate goes unknown for a tick.
+        """
+        raw = self._read_capacity_safe()
+        if raw is None or d_factor <= 0.0:
+            return self._capacity_ema_ms2
+        if self._capacity_ema_ms2 is None:
+            self._capacity_ema_ms2 = raw
+        else:
+            tau = _CAPACITY_EMA_TAU_S
+            alpha = dt / (tau + dt) if tau > 0.0 else 1.0
+            self._capacity_ema_ms2 += alpha * (raw - self._capacity_ema_ms2)
+        return self._capacity_ema_ms2
+
+    def _speed_to_accel(self, ctx: LongCtx, d_factor: float) -> float:
+        speed_ms = ctx.speed_ms
+        target_kmh = self._target_kmh
+        if target_kmh is None:
+            return 0.0
+
+        if self._last_target_for_integral != target_kmh:
+            self._integral_error = 0.0
+            self._last_target_for_integral = target_kmh
+
+        # In Speed-limiter mode, CC's m/s² output caps the user pedal in
+        # See `core/longitudinal/README.md`.
+        target_ms = target_kmh / 3.6
+        target_ms = self._smooth_target_speed_ema(target_ms, ctx.dt)
+
+        # Speed error only. Grade feed-forward lives in AccelToPedals, not here.
+        kp = float(Settings.cc_kp)
+        ki = float(Settings.cc_ki)
+        kd = float(Settings.cc_kd)
+        clamp = float(Settings.cc_integral_clamp)
+
+        error_ms = target_ms - speed_ms
+        # Freeze + leak the integral while the sending_thread hold FSM owns
+        # See `core/longitudinal/README.md`.
+        if self._read_hold_active_safe():
+            leak = math.exp(-max(ctx.dt, 0.0) / max(_HOLD_INTEGRAL_LEAK_TAU_S, 1e-6))
+            self._integral_error *= leak
+        else:
+            self._integral_error += error_ms * ctx.dt
+        self._integral_error = max(-clamp, min(clamp, self._integral_error))
+
+        if d_factor <= 0.0:
+            # Freeze D-term during clutch + block window: prevents spurious
+            # derivative spike from stalled-then-jumping speed on re-engage.
+            speed_deriv = 0.0
+        else:
+            # Leading edge of the ramp: reseed EMA so first post-block
+            # derivative starts at zero, not against stale pre-clutch value.
+            if self._cc_prev_d_factor <= 0.0:
+                self._kd_smooth_speed_ms = speed_ms
+            tau = _CC_KD_SPEED_SMOOTH_TAU_S
+            alpha = ctx.dt / (tau + ctx.dt) if tau > 0.0 else 1.0
+            if self._kd_smooth_speed_ms is None:
+                self._kd_smooth_speed_ms = speed_ms
+                speed_deriv = 0.0
+            else:
+                prev_smooth = self._kd_smooth_speed_ms
+                self._kd_smooth_speed_ms = alpha * speed_ms + (1.0 - alpha) * prev_smooth
+                speed_deriv = (self._kd_smooth_speed_ms - prev_smooth) / ctx.dt
+        self._cc_prev_d_factor = d_factor
+
+        p_term = kp * error_ms
+        i_term = ki * self._integral_error
+        d_term = -kd * speed_deriv * d_factor
+
+        return p_term + i_term + d_term
+
+    def _smooth_output_accel_ema(self, raw_ms2: float, dt: float) -> float:
+        tau = _CC_OUTPUT_EMA_TAU_S
+        alpha = dt / (tau + dt) if tau > 0.0 else 1.0
+        if self._output_ema_accel_ms2 is None:
+            self._output_ema_accel_ms2 = raw_ms2
+        else:
+            self._output_ema_accel_ms2 = (
+                alpha * raw_ms2 + (1.0 - alpha) * self._output_ema_accel_ms2
+            )
+        return self._output_ema_accel_ms2
+
+    def _smooth_target_speed_ema(self, target_ms: float, dt: float) -> float:
+        tau = _CC_TARGET_SPEED_EMA_TAU_S
+        alpha = dt / (tau + dt) if tau > 0.0 else 1.0
+        if self._target_speed_ema_ms is None:
+            self._target_speed_ema_ms = target_ms
+        else:
+            self._target_speed_ema_ms = (
+                alpha * target_ms + (1.0 - alpha) * self._target_speed_ema_ms
+            )
+        return self._target_speed_ema_ms
+
