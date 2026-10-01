@@ -99,6 +99,17 @@ def test_promote_unreleased(repo, fixed_today):
     assert text.index("## [Unreleased]") < text.index("## [1.1.0-preview.1]")
 
 
+def test_promote_unreleased_with_scheduled_date(repo, fixed_today):
+    write_changelog(repo.changelog, unreleased_body="\n### Added\n- thing one\n")
+    release._promote_unreleased("1.1.0", "2026-10-02")
+    assert "## [1.1.0] - 2026-10-02" in repo.changelog.read_text(encoding="utf-8")
+
+
+def test_release_date_rejects_garbage():
+    with pytest.raises(SystemExit):
+        release._release_date("next friday")
+
+
 def test_cmd_bump_refuses_empty_unreleased(repo):
     args = argparse.Namespace(set=None, level="patch", pre=None, dry_run=True)
     with pytest.raises(SystemExit):

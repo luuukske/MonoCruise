@@ -1,10 +1,12 @@
 ﻿name: build-and-release
 
-# Tag push (vX.Y.Z) publishes a real release. tools/release.py bump has already
+# Tag push (vX.Y.Z) builds a real release. tools/release.py bump has already
 # created that release as a draft, authored by the contributor who ran it, so
-# this workflow only attaches artifacts and un-drafts it. That is what keeps the
-# release credited to a person instead of github-actions[bot]: a release author
+# this workflow only attaches artifacts. That is what keeps the release
+# credited to a person instead of github-actions[bot]: a release author
 # is fixed at creation and cannot be reassigned later.
+# Prerelease tags are un-drafted here. Stable tags stay a draft until someone
+# publishes them on GitHub, so a launch can be timed and done from any browser.
 #
 # workflow_dispatch lets you produce a build artifact without publishing:
 # pass publish=true to publish anyway (uses core/version.py as the version).
@@ -151,7 +153,7 @@ jobs:
 
       # The draft already exists, made by tools/release.py under the
       # contributor's own account. Title, notes and the prerelease flag came
-      # with it, so all that is left is the artifacts and the publish.
+      # with it, so all that is left is the artifacts and, for prereleases, the publish.
       - name: Publish release
         if: steps.version.outputs.kind == 'tag'
         shell: bash
@@ -168,7 +170,11 @@ jobs:
             exit 1
           fi
           gh release upload "$tag" artifacts/* --clobber
-          gh release edit "$tag" --draft=false
+          if [[ "$tag" == *-* ]]; then
+            gh release edit "$tag" --draft=false
+          else
+            echo "Stable release: artifacts attached, left as a draft. Publish it on GitHub when ready."
+          fi
 
       # Dispatch builds are bot-authored by design: nobody drafted them, and a
       # dev build credited to CI is honest.
