@@ -1,0 +1,98 @@
+name: Bug report
+description: Something in MonoCruise does not work as it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Questions and setup help are quicker on [Discord](https://discord.gg/MM9eV4CSxt).
+        If ACC or AEB braked at the wrong moment, say where and what the traffic around you was doing.
+
+  - type: input
+    id: version
+    attributes:
+      label: MonoCruise version
+      description: Shown in the bottom right corner of the MonoCruise window.
+      placeholder: "1.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: game
+    attributes:
+      label: Game
+      options:
+        - Euro Truck Simulator 2
+        - American Truck Simulator
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Singleplayer or TruckersMP
+      options:
+        - Singleplayer
+        - TruckersMP
+        - Both
+    validations:
+      required: true
+
+  - type: dropdown
+    id: feature
+    attributes:
+      label: What is affected
+      multiple: true
+      options:
+        - Adaptive Cruise Control (ACC)
+        - Emergency Braking (AEB)
+        - Cruise control
+        - Speed limiter
+        - One-Pedal Drive
+        - Pedal or button setup
+        - Installing, updating or autostart
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to make it happen again
+      description: Optional. Steps, or how often it happens.
+      placeholder: |
+        1. Turn on ACC behind a truck
+        2. ...
+
+  - type: input
+    id: hardware
+    attributes:
+      label: Pedals or wheel
+      placeholder: "e.g. Logitech G29, MOZA R5 + SR-P"
+
+  - type: dropdown
+    id: gearbox
+    attributes:
+      label: Gearbox setting in the game
+      options:
+        - Automatic
+        - Simple automatic
+        - Manual / sequential
+        - H-shifter
+        - Not sure
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log files
+      description: |
+        Drag `monocruise.log` into this box, and `monocruise.prev.log` if you restarted MonoCruise since the problem.
+        Both are in the MonoCruise install folder, by default `%LOCALAPPDATA%\Programs\MonoCruise` (paste that into the Explorer address bar). File paths are removed from the logs.
