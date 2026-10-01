@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.0] - 2026-10-02
 [Watch the MonoCruise v1.1 trailer](https://ld-tech.org/media/monocruise-v1.1.webm)
 
 MonoCruise rebuilt from the ground up. Coming from v1.0.x? Uninstall it first, then set up your pedals and buttons again. From here on MonoCruise updates itself.
