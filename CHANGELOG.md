@@ -12,6 +12,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+### Fixed
+- **Hazards came on when you stomped the brake while stopped**: a hard press at a standstill switched the hazards on. They now only come on for a hard brake while driving.
+
 ## [1.1.0] - 2026-10-02
 [Watch the MonoCruise v1.1 trailer](https://ld-tech.org/media/monocruise-v1.1.webm)
 

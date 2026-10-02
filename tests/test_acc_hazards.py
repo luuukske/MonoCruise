@@ -5,6 +5,7 @@ from core.sending_thread.thread import (
     _HAZARD_BRAKE_CLEAR,
     _HAZARD_GAS_RESET,
     _HAZARD_HARD_BRAKE,
+    _HAZARD_MIN_SPEED_KMH,
     hazard_action_for_sent_pedals,
 )
 
@@ -26,6 +27,29 @@ def test_hard_brake_turns_hazards_on():
     assert _HAZARD_HARD_BRAKE == 0.8
     assert _action(0.0, 0.85) == "on"
     assert _action(0.0, 0.8) == "on"
+
+
+def test_stomp_at_standstill_does_not_turn_hazards_on():
+    assert _HAZARD_MIN_SPEED_KMH == 10.0
+    assert _action(0.0, 1.0, speed_kmh=0.0) is None
+    assert _action(0.0, 1.0, speed_kmh=-0.0) is None
+    assert _action(0.0, 1.0, speed_kmh=_HAZARD_MIN_SPEED_KMH) is None
+    assert _action(0.0, 1.0, speed_kmh=-15.0) is None
+    assert _action(0.0, 1.0, speed_kmh=10.5) == "on"
+
+
+def test_stomp_held_from_rest_does_not_fire_once_rolling():
+    _, hard = hazard_action_for_sent_pedals(
+        0.0,
+        1.0,
+        speed_kmh=0.0,
+        aeb_warn=False,
+        user_override=False,
+        autodisable=True,
+        was_hard=False,
+    )
+    assert hard is True
+    assert _action(0.0, 1.0, speed_kmh=12.0, was_hard=hard) is None
 
 
 def test_held_hard_brake_does_not_retrigger():
