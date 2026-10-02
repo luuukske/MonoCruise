@@ -1,0 +1,1744 @@
+﻿# MonoCruise Radar (shared fundamentals)
+
+> Authoritative reference for **coordinate system, rotation, world→ego
+> transforms, the shared-memory traffic buffer, Vehicle state/smoothing,
+> and ArcPath geometry**. Read this before touching any code that
+> consumes ETS2 telemetry, traffic, or predicted paths.
+>
+> AEB- and ACC-specific logic live in `core/aeb/README.md` and
+> `core/acc/README.md` respectively: both of them build on the concepts
+> defined here.
+>
+> Agent workflow and do-not-break rules: top-level `AGENTS.md`.
+
+---
+
+## 1. Coordinate System
+
+ETS2 uses a right-handed 3D system. Ground plane = **XZ**. Y = elevation (filter only).
+
+| Axis | Meaning | Increases toward |
+|------|---------|-----------------|
+| X | Lateral | East (right) |
+| Y | Elevation | Up: **never used in 2D math** |
+| Z | Longitudinal | South (forward at default orientation) |
+
+Telemetry keys: `coordinateX`, `coordinateY`, `coordinateZ`.
+
+---
+
+## 2. Ego Truck Yaw (`rotationX`)
+
+- Telemetry key is `rotationX`: this is **yaw**, not pitch. The name is wrong.
+- Range: `0.0–1.0` (normalised full circle). `0.0 = South`, `0.25 = West`, `0.5 = North`, `0.75 = East`.
+- Direction: counter-clockwise when increasing.
+
+### Conversion: pick the right one
+
+```python
+# Radar / top-down view (ETS2radar.py): +0.5 aligns 0 to North (screen-up)
+yaw_rad = (yaw_norm + 0.5) * 2 * math.pi
+
+# AEB / ACC / arc geometry: NO +0.5 offset
+ego_yaw_rad = yaw_norm * 2.0 * math.pi
+```
+
+> **WARNING: do not mix these up.**
+> Adding `+0.5` in the arc-geometry context rotates the ego forward
+> vector 180°, reversing the ego arc. The forward vector
+> `fwd = (-sin, -cos)` already points North at `yaw=0` without the offset.
+> If only the ego arc points backward, the bug is in this conversion —
+> not in `traffic.py`.
+
+`RadarThread` publishes both forms (`ego_yaw_norm` and `ego_yaw_rad`)
+under the data lock; consumers should prefer `ego_yaw_rad`.
+
+---
+
+## 3. Traffic Vehicle Rotation (Quaternion)
+
+```python
+class Quaternion:
+    def __init__(self, w, x, y, z):
+        self.w = w
+        self.x = y   # intentional swap: compensates for ETS2 internal axis ordering
+        self.y = x   # intentional swap
+        self.z = z
+```
+
+> **Do not remove the x/y swap.** It is not a bug. Removing it breaks all traffic vehicle rotations.
+
+`euler()` returns `(pitch, yaw, roll)` in degrees:
+- Yaw range: `-180` to `+180`
+- `yaw = 0` → South
+- Positive = counter-clockwise (CCW)
+
+In corner geometry (`get_corners`, `rotate_around_point`) yaw is **negated** (`-yaw`) to convert CCW→CW for screen conventions (numpy / OpenCV).
+
+---
+
+## 4. World → Ego Space
+
+All rendering and scoring is in **ego-space** (ego = origin, forward = screen-up).
+
+```python
+dx = vehicle.position.x - ego_x
+dz = vehicle.position.z - ego_z
+rx, rz = rotate_point(-dx, dz, -yaw_rad)
+# rz > 0 = in front of ego
+# rx > 0 = to the right of ego
+```
+
+Both sign flips are mandatory:
+- `-dx` corrects ETS2's leftward X convention.
+- `-yaw_rad` rotates the world opposite to ego heading so ego always faces up.
+
+---
+
+## 5. Shared Memory Buffer (`Local\ETS2LATraffic`)
+
+Defined in `core/radar/reader.py`; consumed by `RadarThread` only: AEB
+and ACC receive ready-made ``Vehicle`` instances from radar data.
+
+```python
+_VEHICLE_FORMAT        = "ffffffffffffhhbb"   # 16 fields
+_TRAILER_FORMAT        = "ffffffffff"         # 10 fields per trailer slot
+_VEHICLE_OBJECT_FORMAT = _VEHICLE_FORMAT + _TRAILER_FORMAT * 3
+_TOTAL_FORMAT          = "=" + _VEHICLE_OBJECT_FORMAT * 40
+_BUF_SIZE              = 6960
+_VEH_STRIDE            = 46  # fields per vehicle slot (16 + 3*10)
+```
+
+### Vehicle field layout (index → field)
+
+| Idx | Field | Type | Notes |
+|-----|-------|------|-------|
+| 0 | position.x | float | World X |
+| 1 | position.y | float | Elevation: never used in 2D |
+| 2 | position.z | float | World Z |
+| 3 | rotation.w | float | Quaternion W |
+| 4 | rotation.x (input) | float | Stored as `self.y` after axis swap |
+| 5 | rotation.y (input) | float | Stored as `self.x` after axis swap |
+| 6 | rotation.z | float | Quaternion Z |
+| 7 | size.width | float | metres |
+| 8 | size.height | float | metres: unused in 2D |
+| 9 | size.length | float | metres |
+| 10 | speed | float | AI = use as-is from buffer (may be signed in singleplayer). TMP = LS fit of longitudinal motion over up to `_TMP_SPEED_HISTORY_LEN` position-history samples, else single-interval Δ/dt; then speed-dependent EMA of raw speed (see §7). |
+| 11 | acceleration | float | m/s²: AI = buffer as-is. TMP buffer value is **ignored**; `Vehicle.acceleration` is EMA of the time derivative of filtered TMP speed (see §7). Arcs use `accel_for_arc()` (= `acceleration`). |
+| 12 | trailer_count | short | 0–3 |
+| 13 | id | short | Per-frame continuity key |
+| 14 | is_tmp | byte | `1` = TMP multiplayer (ETS2LA); `0` = AI. Consumer threads may apply TMP-specific filters (e.g. AEB's rel-speed split: see `core/aeb/README.md`). |
+| 15 | is_trailer | byte | `1` = trailer record, `0` = tractor |
+
+### Trailer slots (offsets 16, 26, 36)
+
+Each trailer = 10 floats: `position.x/y/z`, `rotation.w/x/y/z`, `size.width/height/length`.
+A slot is valid if `position` is non-zero.
+
+**TMP trailer pivot fix**: TMP pivot is at the front coupler, not center. `correct_position()` shifts it backward:
+
+```python
+offset_x = (length / 2) * math.sin(yaw_rad)
+offset_z = (length / 2) * math.cos(yaw_rad)
+```
+
+Non-TMP trailer positions are already centered: use `tr.position` directly.
+
+---
+
+## 6. Vehicle Corner Geometry
+
+### AI and TMP alike: symmetric about the pivot
+
+```python
+back_z  = position.z + length / 2
+front_z = position.z - length / 2
+left_x  = position.x - width  / 2
+right_x = position.x + width  / 2
+```
+
+> History (2026-07-19): AI bodies used an asymmetric `0.82/0.18` split for a
+> long time, claimed here as a "pivot correction". It was wrong: the AEB debug
+> window always drew symmetric boxes, Lukas ground-truthed THAT display to
+> ~0.1 m in-game, and dual-convention standoff measurements on live AEB-stop
+> clips (fa1525e6, 2a32b9b8) matched only the symmetric model. The asymmetric
+> split extended every AI collision body `0.32·length` past its real rear:
+> a constant phantom (~1.6 m cars, ~3.9 m for a 12 m tractor) that made AEB
+> brake for air behind AI traffic. Do not reintroduce asymmetric offsets
+> without new standoff measurements of the same kind. (TMP trailer
+> front-coupler correction in §5 is a separate, still-valid fix.)
+
+### Corner rotation
+
+```python
+pitch, yaw, roll = vehicle.rotation.euler()
+corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
+# roll=0 intentional: top-down view ignores banking
+```
+
+---
+
+## 7. Vehicle State & Smoothing
+
+### Fields: positions raw; speed/accel filtered (AI + TMP)
+
+| Field | Source | Use for |
+|-------|--------|---------|
+| `position.x/z` | **Unfiltered** shared-memory world coordinates | Arc start position, rendering, collision geometry |
+| `_smooth_yaw` | Wrap-safe EMA of `rotation.euler()[1]` in radians (`_RAW_YAW_ALPHA = 0.5`, AI and TMP) | **Arc curvature. Never use `rotation.euler()` directly for arcs.** |
+| `speed` | Accel-corrected smoothed speed (`speed_corr`): see filter chain below. AI + TMP | AEB arc direction, TTB |
+| `acc_speed` | ACC speed: adaptive filter on `speed_corr`: sub-deadband per-tick changes get a long time constant, larger changes a short one when they agree with the de-noised trend; standstill latch clamps to exactly 0 near rest (filter chain below). Runs on the **ACC chain** (long position window only). AI + TMP | ACC following-distance only |
+| `acceleration` | Nonlinear EMA of `d(speed_ema)/dt` over the speed-scaled `_ACCEL_FIT_WINDOW_S`: see filter chain below. Runs on the **AEB chain**, so it fits the short window's raw speed during a confirmed hard brake. Never floored or overridden (§7 "No floor on `acceleration`"). AI + TMP (buffer field 11 unused) | Arc decel/accel via `_accel_to_arc_params()` |
+| `acc_accel` | Same derivation and the **same window** on the **ACC chain**: long position window only. AI + TMP | ACC `a_lead` (CAH) only |
+| `angular_velocity` | Degrees/s from rotation delta/dt | Arc curvature via `κ = ω_rad/speed` |
+| `_position_history` | `(t, x, z)` tuples appended each full update (AI + TMP); capped at `_POSITION_HISTORY_LEN = 25` | TMP raw-speed LS fit (uses last `_TMP_SPEED_HISTORY_LEN = 20`), `curvature_from_history`, ACC trail arcs |
+| `_trail_history` | `(t, x, z)` retained on a **distance** grid (`_TRAIL_MIN_STEP_M = 0.5 m`), capped by span (`_TRAIL_SPAN_M = 40 m`), count (`_TRAIL_MAX_LEN = 64`) and age (`_TRAIL_MAX_AGE_S = 6.0 s`) | ACC trail arcs and road-model samples **only** |
+| `_speed_ema_history` | `(t, speed_ema)` tuples appended each full update (AI + TMP); capped at `_SPEED_EMA_HISTORY_LEN` | LS-slope fits: `accel` over `_ACCEL_FIT_WINDOW_S` x `_accel_window_scale`, `accel_trend` over the fixed `_ACC_SPEED_ACCEL_WINDOW_S` |
+
+### Two position buffers: time-capped vs distance-retained
+
+`_position_history` is **time/count capped** (25 full-update samples, ~1.7 s) and
+must stay that way: the TMP raw-speed LS fit, `curvature_from_history` and AEB's
+`pos_kappa` all need a *recent* window, and a distance-gated buffer would stall
+them when a vehicle slows.
+
+That cap is wrong for geometry. At 2 m/s the 25 samples span 3.3 m, so ACC's
+1 m downsample gate left too few points and every slow vehicle read `NO_HISTORY`
+(66 % of tracked frames below 20 km/h on the clip corpus, median trail span
+0.4 m). `_trail_history` therefore retains on a **distance grid** instead: a
+sample is kept only once the vehicle has moved `_TRAIL_MIN_STEP_M`, so at speed
+it degenerates to the frame rate and at low speed it holds older samples rather
+than discarding them. Measured: `NO_HISTORY` below 20 km/h 66.2 % -> 51.0 %,
+median span 0.4 m -> 6.1 m.
+
+Two rules for consumers:
+
+- **Fits only, never per-segment heading.** At 0.5 m spacing with a few cm of
+  position noise, adjacent-sample heading carries ~6 deg of error per segment.
+  The win is that a least-squares fit over the whole span averages that down.
+- **The age cap is a correctness constraint, not memory management.** A stopped
+  vehicle's buffer freezes, which is wanted (it preserves the trail from when it
+  was moving), but a long window on a slow vehicle spans a *manoeuvre*, and a
+  circle fitted across a lane change or a turn describes a path the vehicle is
+  no longer on.
+
+  **It was 2.0 s and is now 6.0 s**, which overturns an earlier measurement on
+  this same corpus that ages of 3 s and above bought "no extra recall" for a
+  stationary false-lock rise of 2.3 % -> 4.1 %. That reading was correct when it
+  was taken and is now stale: evidence gating, the shared road model and the
+  arc-length centreline all arrived afterwards, and they are what turned the
+  extra trail from noise into signal. Re-measured at 6.0 s, false lock rises
+  only 2.4 % -> 2.7 % against a 6.0 % bound, and the recall is no longer absent:
+
+  | | 2.0 s | 6.0 s |
+  |---|---|---|
+  | in-path latch, 0-10 km/h | 1.09 s | **0.95 s** |
+  | in-path recall, 0-10 km/h | 31.8 % | **42.0 %** |
+  | in-path latch, 10-20 km/h | 0.92 s | **0.31 s** |
+  | moving in-corridor recall, overall | 43.9 % | **46.4 %** |
+  | ACC lock p50 | 0.89 s | **0.55 s** |
+  | trail span p50, 0-10 km/h | 3.5 m | **8.8 m** |
+  | trail span p50, 40-70 km/h | 27.7 m | **39.3 m** |
+
+  Note the last row: at 2.0 s the age cap was truncating the trail well below
+  70 km/h, so this was never only a slow-traffic constraint. The span cap binds
+  at 2.06 s at 70 km/h, which is why raising the age changes nothing above it.
+
+  **Do not raise it further without re-measuring lead release.** 8.0 s is better
+  again for slow traffic (latch 0.38 s, recall 45.7 %) and was rejected because
+  it puts ACC's hook p90 over its bound; the manoeuvre-span problem above is
+  real and this is where it starts to show.
+
+### Speed & acceleration: filter chain (AI + TMP)
+
+World `position.x/z` are **not** low-pass filtered. `update_from_last()` runs the
+same 4-signal chain for AI and TMP (`_smooth_vehicle_kinematics()` in
+`traffic.py`); only the raw-speed source differs:
+
+- **AI** raw speed = buffer field 10 as-is.
+- **TMP** raw speed = LS fit of longitudinal motion over the last
+  `_TMP_SPEED_HISTORY_LEN` `(t, x, z)` position-history samples: fit `s ≈ v·τ`
+  with `s = dot(p − p₀, fwd(smooth_yaw))`, `τ = t − t₀`, and the **free-intercept**
+  slope `v = Σ((τ−τ̄)(s−s̄))/Σ((τ−τ̄)²)`.
+  Chord below 0.025 m → `raw_speed = 0`; one sample → single-interval `Δraw/dt`.
+  The window is deliberately ~1.3 s long: TMP transmits remote-vehicle position
+  with a ~1 Hz netcode-reconciliation ripple (local interpolation undershoots,
+  then a periodic authoritative update snaps it forward); a window spanning
+  2–3 ripple cycles averages that jitter out so the derived speed does not
+  oscillate. Buffer fields 10/11 are never used for TMP physics.
+
+#### Why the intercept is free
+
+The fit used to be forced through `window[0]` (`v = Σ(τ s)/Σ(τ²)`), which gives the
+**oldest** sample in the window unbounded leverage. Two consequences, both measured
+on the 2026-09-09 clips 1f14b55a and a653cf15:
+
+- Whatever lands on `window[0]` sets the fit. A TMP position rewind that reached the
+  anchor stepped raw speed +3.0 m/s (7.20 → 10.22) on a lead that was in fact
+  decelerating smoothly the whole time; a lag-freeze hole reaching the anchor stepped
+  it +2.4 m/s. Both fire ~1.4 s *after* their cause, because that is the window span,
+  which is why they never look connected to anything on the chart.
+- Through-origin reports the speed at `τ = 0.375·T`, free-intercept at `τ = 0.5·T`.
+  During decel the anchored form is therefore **more** stale, over-reading a braking
+  lead by `0.625·a·T` instead of `0.5·a·T`.
+
+Free-intercept fixes both: no sample outranks any other, and the decel lag drops by
+`0.125·a·T`. Corpus cost −386.56 → **−421.00** (793 clips), false negatives 41 → 40,
+true positives 339 → 341.
+
+**Do not re-anchor it to buy responsiveness.** The staleness this estimator has left
+is the window length, not the intercept; shortening `_RAW_SPEED_HISTORY_LEN` is the
+knob, and it trades against the ~1 Hz netcode ripple the window exists to average out.
+
+**Hard-brake transient (AI + TMP):** the long position window remains the
+default, but it takes about a second to forget pre-brake motion after a lead
+stops. A second LS estimate over the latest 5 full-update samples is selected
+after two frames consistently show at least 2 m/s² deceleration, at least
+0.4 m/s speed loss, non-increasing interval speeds, and no near-zero interval.
+The last condition prevents a constant-speed packet stall from qualifying as a
+brake. Once selected, the short estimate stays active through standstill and a
+subsequent launch; it returns to the long estimate after both agree within
+0.3 m/s for 3 moving frames. At standstill it does not release, which prevents
+stale long-window samples from raising the speed again.
+
+**A knocked-back crash enters the transient directly** (TMP, trailer records
+included for as long as the crash latch holds). A crash scatters the interval
+speeds, so the brake test above never qualifies on one: on 168ba6a8 the short
+window read 5 m/s while the long window still said 21, and it went on lagging by
+about 0.4 s. Once a crash is confirmed with knock-back evidence (see "Crash
+detection") and the short window reads at least `_CRASH_SHORT_MIN_LOSS_MS`
+(2 m/s) slower than the long one in the direction of travel, the short window is
+selected, and it hands back through the same convergence rule. Only knock-back
+counts: a confirmation from collapse or a vertical jolt alone can be a stall
+artefact on a cresting truck, and on aeedafdf that version dropped the speed of
+an oncoming truck through a TMP position dip and cost a true positive. The
+short window may read negative when the body is shoved back, and that is kept.
+
+The transient changes only the raw speed that enters steps 1-3. `acceleration`
+is the step-2 fit of that speed and nothing else; normal cruise, ACC filtering and
+the long-window TMP ripple rejection are unchanged.
+
+**No floor on `acceleration`.** Until September 2026 a confirmed transient also
+overrode step 2 with `accel = min(accel, -min(recent_decel, 6.0))`, re-measuring
+the short-window decel every frame. It was removed because it invented threats:
+
+- **The check it keyed on fires on publish jitter.** Traffic positions carry a
+  few milliseconds of publish jitter, enough to scatter interval speeds by 16-18 %
+  on a constant-speed track, against a 0.4 m/s loss requirement. The two-frame
+  confirmation re-reads 3 of the same 4 intervals, so it is not independent
+  evidence. 84 % of clips latch at least once, 68 % of latches have no matching
+  decel on the ACC chain, and 181 tracks that never slowed anywhere in their clip
+  peaked at exactly -6.00, the clamp.
+- **Every false fire could only add threat.** The override was one-directional,
+  bypassed both smoothers and was written back into `_smooth_accel`, so it also
+  left a ~0.3 s decay tail. `acceleration` bends the target's predicted arc into a
+  stop through `_accel_to_arc_params`.
+- **On real brakes it overshot rather than tracked.** Against a non-causal fit of
+  the whole track, no floor was closer on 66.3 % of 793 genuine latches: median
+  error 2.94 m/s2 with it, 2.65 without, and it overshot truth by a median
+  2.56 m/s2. The p90 is the one place it helped (6.81 against 7.24).
+
+Priced before removal. **Corpus** (792 clips): -419.73 to -378.65, 15 clips
+changed at all, and all but -0.72 of the cost is `60198ac0` going from true
+positive to miss. There the lead held about 5.5 m/s while its raw speed wobbled
+between 4.2 and 6.3; the floor pinned -6.00 for two frames, lifted required decel
+from about 5 to 15 m/s2, and that spike was the whole brake. The recorded ego
+braking in that clip came from the live AEB of the client that captured it, which
+an open-loop replay cannot separate. The other brake it trimmed, the tail of
+`47ff41e8`, was on a vehicle already pulling away. **Closed loop**: a lead braking
+at 4-10 m/s2 ahead of three rigs at 60-100 km/h and 0.8-2.0 s headway, its
+positions run through `Vehicle` with publish jitter, into the shipped clearance
+demand, follow-threat override, entry bar and `AEBDecelController` on the fitted
+brake plant. The worst residual gap was identical with and without the floor
+(-0.20 m at median plant lag, -0.21 m at p90), no single case moved by more than
+0.08 m, and engagement came at most 0.04 s later. A closing lead gets its arc
+decel from the follow-threat track, which is why the floor barely reached it.
+
+Do not re-add it. If a gated version is ever tried, apply it to the output only,
+never write it back into `_smooth_accel`, and confirm on non-overlapping windows.
+
+### Two chains: AEB reads the short window, ACC never does
+
+`_smooth_vehicle_kinematics()` runs steps 1-3 **twice**, once per consumer, and
+step 4 on the ACC chain only:
+
+| Chain | Raw input | Outputs | State |
+|-------|-----------|---------|-------|
+| AEB | hard-brake-selected raw speed (short window when a brake is confirmed) | `speed`, `acceleration` | `_speed_ema`, `_smooth_accel`, `_speed_ema_history` |
+| ACC | long position window only | `acc_speed`, `acc_accel` | `_acc_speed_ema`, `_acc_smooth_accel`, `_acc_speed_ema_history` |
+
+The short window is an AEB responsiveness device and ACC never needed it. On TMP
+it latches on packet stalls and then stays selected a **median of 1.83 s (p90
+4.91 s) past the end of a stall that itself lasted 0.27 s**, a 6.6x overhang
+that ACC read as a sustained lead brake and answered with a hard brake of its
+own. Filtering the stall out is not possible: a stall and a real brake are the
+same observable until the speed either returns or does not, and TMP buffer
+fields 10/11 are identically zero so there is no second signal. Keeping the
+short window off the ACC path removes the exposure instead. Measured on the TMP
+clip corpus: phantom `a_lead` peak p50 2.98 -> 0.32 m/s², harmful stall events
+548 -> 431, AEB clip-corpus score unchanged at +347.28.
+
+The two chains are **never aliased**, even on frames where both raw speeds
+agree: they carry separate EMA and history state and stay diverged for a window
+after any brake transient.
+
+**Hard-decel following gap**: sitting on the long window makes ACC read a real
+lead brake ~1 m/s optimistic, so it follows closer than intended on a hard stop.
+Switching ACC onto the short window during a sustained brake was tried and
+rejected in testing: it recovers the gap but the following stops feeling smooth.
+Do not retry that shape.
+
+What worked instead was retuning step 4, whose slow tau was long enough that the
+feed-forward ran near open loop. `_ACC_SPEED_TAU_SLOW_S` 2.0 -> 1.6 and
+`_ACC_SPEED_ACCEL_FLOOR` 0.35 -> 0.15: gap conceded per hard decel 5.37 -> 4.24 m
+with stall poison and worst-frame jerk unchanged, AEB corpus bit-identical.
+
+The binding constraint is `test_convoy_sawtooth_attenuated_at_cruise`. Note that
+a corpus-wide "steady-following deviation" statistic **disagreed** with it and
+made the change look like a free win; trust the targeted synthetic test. The
+sawtooth cost is carried almost entirely by the tau, not the floor, so the floor
+is taken in full: tau 2.0 -> 0.1997, 1.6 -> 0.2462, 1.4 -> 0.2775, 1.2 -> 0.3158
+(over the 0.30 bound). 1.6 keeps real margin; 1.4 buys 0.05 m for half of it.
+
+**Crash bypass**: when `crash_confirmed`, the caller passes the AEB raw speed to
+both chains, so a crashed vehicle reaches ACC through the same unfiltered
+estimate as AEB with nothing extra in between.
+
+Position mismatch holds the *brake-transient* state without advancing it and
+clears an unconfirmed entry; the speed itself does advance, see "Held frames
+coast" below. Sub-frames copy state unchanged. Lag-freeze early returns
+and clock re-anchors reset it; a culled/disappeared id loses it with the
+`Vehicle` instance. TMP lag freeze still runs first and owns the output while
+active.
+
+```python
+# 1. speed_ema : plain EMA of raw speed (no lag compensation)
+alpha      = _tmp_speed_ema_alpha(|avg(prev_speed_ema, raw_speed)|)   # 1.0 rest → 0.25 @ 90 km/h
+speed_ema  = alpha * raw_speed + (1 - alpha) * prev_speed_ema
+# 2. accel : LS slope of the speed_ema history over a speed-scaled window, light EMA
+win        = _ACCEL_FIT_WINDOW_S * _accel_window_scale(speed_ema)   # both chains
+accel_raw  = least_squares_slope( (t, speed_ema) samples within win )
+accel      = prev_accel + _ACCEL_EMA_ALPHA * (accel_raw - prev_accel)
+# 3. speed_corr : lag-compensated; τ is the step-1 EMA settling time
+speed_corr = speed_ema + clamp(accel * dt*(1-alpha)/alpha, ±_SPEED_CORR_CLAMP_MS)
+# 4. acc_speed : ACC speed: adaptive low-pass on speed_corr + feed-forward
+delta        = speed_corr - prev_acc_speed
+ramp         = clamp((|delta| - _ACC_SPEED_DEADBAND_MS) / _ACC_SPEED_DEADBAND_MS, 0, 1)
+speed_factor = _ACC_SPEED_SMOOTH_MIN + (1 - _ACC_SPEED_SMOOTH_MIN) * min(1, |speed_corr| / _ACC_SPEED_SMOOTH_REF_MS)
+accel_trend  = LS slope of speed_ema history over _ACC_SPEED_ACCEL_WINDOW_S
+if |accel_trend| ≤ _ACC_SPEED_FF_GATE_LO_MS2 or accel_trend·delta ≤ 0: ramp = 0   # trend-agreement gate
+accel_long   = LS slope of speed_ema history over _ACC_SPEED_CONSIST_WINDOW_S
+consistency  = 0 if accel_trend·accel_long ≤ 0 else max(min(1, |accel_long|/|accel_trend|),
+               clamp((|accel_long| - _ACC_SPEED_CONSIST_MAG_LO_MS2) / (MAG_HI - MAG_LO), 0, 1))
+accel_ramp   = clamp((|accel_trend| - _ACC_SPEED_ACCEL_LO_MS2) / (_ACC_SPEED_ACCEL_HI_MS2 - _ACC_SPEED_ACCEL_LO_MS2), 0, 1) · consistency
+accel_factor = 1 - (1 - _ACC_SPEED_ACCEL_FLOOR) * accel_ramp
+tau          = (_ACC_SPEED_TAU_SLOW_S + (_ACC_SPEED_TAU_FAST_S - _ACC_SPEED_TAU_SLOW_S) * ramp) * speed_factor * accel_factor
+alpha_a      = dt / (tau + dt)
+ff_gate      = clamp((|accel_trend| - _ACC_SPEED_FF_GATE_LO_MS2) / (_ACC_SPEED_FF_GATE_HI_MS2 - _ACC_SPEED_FF_GATE_LO_MS2), 0, 1) · consistency
+accel_ff     = clamp(accel, ±_ACC_SPEED_FF_ACCEL_CLAMP_MS2)
+predicted    = prev_acc_speed + accel_ff * dt * ff_gate
+acc_speed    = predicted + alpha_a * (speed_corr - predicted)
+# standstill latch: |acc_speed| < _ACC_SPEED_STANDSTILL_ENTER_MS with no real
+# trend → acc_speed = 0, latched; released after |speed_corr| >
+# _ACC_SPEED_STANDSTILL_RELEASE_MS sustained _ACC_SPEED_STANDSTILL_RELEASE_S
+```
+
+#### One fit window for both chains, scaled by speed
+
+`_ACCEL_FIT_WINDOW_S` is **1.50 s** and both chains fit it. It was 0.70 s and
+AEB-only for the fast estimate; the wider window is now the standard because a
+0.70 s least-squares fit over `speed_ema` is noise, not trend, and both consumers
+were paying for it: AEB built target arcs from it, ACC read it as `a_lead`.
+
+The window is then multiplied by `_accel_window_scale(speed_ema)`, a clamped
+saturating exponential in the vehicle's **own** speed: `_ACCEL_WINDOW_SCALE_MIN`
+(0.30) at rest, exactly 1.0 at `_ACCEL_WINDOW_REF_MS` (100 km/h). The shape is
+`(1 - e^{-k x}) / (1 - e^{-k})` with `x = v / v_ref` and `k = 1.42`, which pins
+~1.05 s at 40 km/h and 1.50 s at 100 km/h, then flattens (asymptote ~1.83 s).
+`_ACCEL_WINDOW_SCALE_MAX` (1.60) is a backstop; the curve saturates near 1.22
+and never reaches it.
+
+| target speed | 0 | 20 | **40** | 60 | 80 | **100** | 120 | 160+ km/h |
+|---|---|---|---|---|---|---|---|---|
+| fit window | 0.45 | 0.79 | **1.05** | 1.24 | 1.39 | **1.50** | 1.58 | 1.69 s |
+
+The argument for the ramp is that a braking event's time scale goes with speed: a
+lead shedding 30 km/h is done in about a second, where the same decel from 100 km/h
+runs three, so a window tuned at motorway speed spans the whole low-speed event.
+100 km/h is the 1.0 anchor. The exponential (vs the old linear ramp at 80 km/h)
+keeps town windows short while stopping the motorway end from stretching past
+~1.7 s.
+
+**What it costs AEB.** 792 labelled clips, cost lower is better. Figures below
+are the linear ramp at 80 km/h, not the exponential at 100 km/h:
+
+| variant | AEB fit window | cost | TP | LATE | FN | FP | FW |
+|---|---|---|---|---|---|---|---|
+| old | 0.70 flat | **-435.01** | 341 | 12 | 39 | 37 | 15 |
+| window only | 1.50 flat | -432.32 | 341 | 11 | 40 | 36 | 15 |
+| ramp only | 0.70 x scale | -360.65 | 339 | 13 | 40 | 37 | 14 |
+| linear@80 | 1.50 x scale | **-424.73** | 341 | 11 | 40 | 38 | 14 |
+
+Three things that table is saying. **The wider window is close to free**: no
+labelled positive drops to a miss, the true-positive count does not move, and the
+2.48 s phantom brake on `2b98649d` goes silent outright. **The high half of the
+ramp is unpriceable here**: clamping the scale to `[1.0, 1.6]` reproduces the flat
+1.50 run on all 792 clips bit for bit, and clamping it to `[0.30, 1.0]` reproduces
+the linear@80 run bit for bit, so every AEB cost in that ramp is bought below the
+80 km/h reference and nothing at all above it. **The ramp on its own is bad for
+AEB**: on the old 0.70 s base it drops `cdd9e5cb` from a true positive to a miss
+(+31.88), `fb2ba37e` to late (+16.54), and stretches an existing phantom on
+`2ad4514f` from 1.52 s to 7.32 s (+21.15), the last of which is a slow or stopped
+target whose accel estimate went noisy. On the 1.50 s base it costs +10.27, which
+is what the wider window is buying back.
+
+**What it costs ACC, and why the ramp is not optional there.** The ACC response
+probes cannot see this change at all: `acc_probe_rig` publishes `a_lead` straight
+onto a stub lead, so the radar chain never runs. The instrument is
+`_acc_accel_lag.py`, a local probe in the gitignored `tools/aeb_corpus_run/`, which
+replays clips twice and measures
+when `acc_accel` crosses the 2 m/s2 bar that `a_lead` consumers react to. 250
+clips, 2808 lead-brake onsets:
+
+| vs the old 0.70 s window | 1.50 flat | **1.50 x scale** |
+|---|---|---|
+| onsets that never reach the bar | 402 (14.3 %) | **181 (6.4 %)** |
+| onset lag p50 / p90 | 0.135 / 0.500 s | **0.000 / 0.273 s** |
+| peak decel kept, p50 / p10 | 0.869 / 0.603 | **1.000 / 0.780** |
+| onset lag p50 / p90, 0-20 km/h | 0.205 / 0.545 s | **0.000 / 0.000 s** |
+| onset lag p50 / p90, 80+ km/h | 0.136 / 0.543 s | 0.070 / 0.611 s |
+
+The ramp halves every cost of the wider window and removes it outright below
+20 km/h, which is the whole reason it exists. The residual 6.4 % is a bar-crossing
+artefact rather than a lost brake: 80.7 % of those onsets peaked between 2.0 and
+2.5 m/s2 on the old signal and land at a median of 1.77 on the new one, only two
+of 181 peaked above 4 m/s2, and three of 181 were below 20 km/h.
+
+**Step 4 is deliberately exempt from the scale.** `accel_trend` and `accel_long`
+are not acceleration measurements for a consumer, they are discriminators whose
+windows were tuned against artefact periods that do not shrink when a vehicle
+slows: TMP's ~1 Hz netcode ripple, the 2-4 s convoy drift-and-snap cycle, and the
+~1 Hz crash-bounce rock. Scaling them removes the discrimination exactly where
+those artefacts live. Measured: with the scale applied to step 4 the standstill
+latch never engages on a crash bounce, because a 0.45 s window fits the individual
+half cycles instead of averaging them, and
+`test_standstill_bounce_latches_acc_speed_to_zero`,
+`test_bounce_does_not_release_latch` and `test_launch_releases_latch_and_tracks`
+all fail. None of that is visible in the clip corpus, because `acc_speed` is
+ACC-only.
+
+**Pinned bounds after the window change.**
+`test_accel_estimate_lags_at_highway_onset_then_tracks` pins the diluted 0.5 s
+onset at 20 m/s (about -0.94 m/s2) and the recovered track once the window fills.
+That harness feeds a synthetic speed trace straight into the chain, so the short
+window never engages and the lag it pins is the whole cost on any decel the
+hard-brake transient does not confirm. The corpus figures in this section were
+measured while the hard-brake floor still existed; its removal is priced on its
+own above. Town reactivity is
+`test_accel_estimate_stays_reactive_in_town`: at 20 km/h the 0.5 s onset still
+clears -2.2 m/s2, which is the whole reason the ramp exists.
+`test_hard_brake_ramp_tracks_with_bounded_lag` moved 0.96 to 1.04 m/s on a 6 m/s2
+synthetic ramp; the bound is 1.15 m/s.
+
+Step 4 makes `acc_speed` both noise-free and responsive: properties a linear
+EMA cannot give at once. The per-tick change `delta = speed_corr -
+prev_acc_speed` sets the filter time constant: a `|delta|` at or below
+`_ACC_SPEED_DEADBAND_MS` (0.7 m/s) uses the long `_ACC_SPEED_TAU_SLOW_S`
+(1.6 s), so sensor noise and TMP packet jitter are filtered out almost
+entirely; `tau` then ramps **continuously** down to the fast
+`_ACC_SPEED_TAU_FAST_S` (0.08 s) as `|delta|` grows, reaching it at twice the
+deadband (1.4 m/s). Because `tau` is continuous in `|delta|`, there is no
+discontinuity when the input crosses the deadband. The filter runs on
+`speed_corr`, already de-spiked by steps 1–3, so step 4 only suppresses residual
+wobble, not raw spikes.
+
+The fast-tau ramp is **trend-gated**: it opens only when `delta` points the
+same way as the de-noised `accel_trend` and `|accel_trend| >
+_ACC_SPEED_FF_GATE_LO_MS2`. A crash-bounce oscillation (a vehicle rocking to a
+standstill after a collision) produces large residuals whose direction
+disagrees with the near-zero trend half the time, so it stays on the slow tau
+instead of passing through; a genuine hard brake raises `|accel_trend|` past
+the gate within ~0.2 s and both the fast tau and the feed-forward open
+together (same threshold family). The worst-case cost vs an ungated ramp is
+~0.2 s of extra `acc_speed` settling at the onset of an instant slam, during
+which AEB's `speed` is unaffected.
+
+The feed-forward and the tau-reduction are further scaled by **trend
+consistency**. TMP convoy reconciliation wobbles remote speed in slow
+drift-and-snap cycles (~2-4 s); each drift phase reads as a genuine ramp on
+the 1.5 s `accel_trend` window, and before this factor the feed-forward
+integrated the wobble straight into `acc_speed` (~0.8× pass-through on long
+constant-speed convoy drives). A real ramp accumulates net speed change on a
+longer horizon; a zero-mean wobble does not, so `accel_long` (LS slope over
+`_ACC_SPEED_CONSIST_WINDOW_S` = 4 s) separates them. `consistency` is the
+larger of the slope ratio `|accel_long|/|accel_trend|` and a magnitude ramp
+on `|accel_long|` (`_ACC_SPEED_CONSIST_MAG_LO/HI_MS2`, 0.4→1.0): the ratio
+converges slowly on a fresh brake because the long window still holds
+pre-brake cruise, but any real brake pushes `|accel_long|` past the magnitude
+ramp within ~1-1.5 s, while a wobble never sustains it (sawtooth `accel_long`
+stays ≤ ~0.2 m/s²). Zero on sign mismatch. Measured effect: sawtooth
+pass-through drops to ~0.24×; a hard (-6 m/s²) lead brake reads ~1 m/s
+optimistic for ~1 s before the magnitude term restores the feed-forward and
+lag returns to ≈ 0 by 2 s. The fast-tau residual gate is deliberately NOT
+consistency-scaled: it is the onset-tracking safety path, and the lead's
+braking is still reported to ACC instantly through `acceleration` (CAH input),
+which none of these gates touch.
+
+**Standstill latch**: once `|acc_speed| < _ACC_SPEED_STANDSTILL_ENTER_MS`
+(0.3 m/s) with `|accel_trend| < _ACC_SPEED_ACCEL_LO_MS2` (no real ramp),
+`acc_speed` is clamped to exactly 0 and latched (`Vehicle._acc_standstill`).
+Release requires `|speed_corr| > _ACC_SPEED_STANDSTILL_RELEASE_MS` (0.6 m/s)
+sustained for `_ACC_SPEED_STANDSTILL_RELEASE_S` (0.5 s) of full frames
+(`Vehicle._acc_release_s`; any frame back below the threshold resets the
+timer). The sustain window is what keeps a bounce latched: a ±1 m/s 1 Hz
+crash-rock exceeds 0.6 m/s for only ~0.3 s per half-cycle, so it never
+releases, while a launching lead crosses 0.6 m/s and stays above it. A
+crashed vehicle wobbling around zero thus presents a clean `v_lead = 0` to
+the IIDM/CAH controller; a genuine launch releases ~0.5 s after crossing
+0.6 m/s and is then tracked by the trend-agreeing fast path.
+
+`tau` is also **speed-scaled**: it is multiplied by `speed_factor`, which is 1.0
+at `_ACC_SPEED_SMOOTH_REF_MS` (90 km/h) and above and falls linearly to
+`_ACC_SPEED_SMOOTH_MIN` at rest. Smoothing matters mainly at cruising speed; at
+low speed `acc_speed` leans on the incoming `speed_corr` instead: both `tau`
+endpoints shrink together, so the deadband behaviour is unchanged, just faster.
+
+`tau` is further **acceleration-scaled**. A vehicle in a steady deceleration or
+acceleration produces little position noise: it does not *need* heavy
+smoothing, and heavy smoothing there only adds lag. So `tau` is multiplied by
+`accel_factor`: 1.0 while coasting, falling to `_ACC_SPEED_ACCEL_FLOOR` (0.15) once the
+de-noised acceleration `accel_trend` (an LS slope of `speed_ema` over
+`_ACC_SPEED_ACCEL_WINDOW_S`) reaches `_ACC_SPEED_ACCEL_HI_MS2`. Accelerations
+below `_ACC_SPEED_ACCEL_LO_MS2` count as cruise noise and are ignored, so cruise
+smoothing is untouched. `accel_factor` no longer collapses `tau` to zero: the
+feed-forward below carries the accuracy: it just trims smoothing on a ramp
+(which has fewer artifacts) so the residual settles faster.
+
+The adaptive low-pass alone lags a *sustained* ramp by `accel·tau`: a
+persistent bias, and this is the safety-critical part: during a decel
+`acc_speed` reads high, so ACC underestimates the closing rate, a collision
+risk. The **feed-forward** removes it with no windup and no overshoot. Before
+the low-pass corrects toward `speed_corr`, `acc_speed` is advanced one step
+along the responsive `accel`: `predicted = prev_acc_speed + accel·dt·ff_gate`,
+then `acc_speed = predicted + alpha_a·(speed_corr − predicted)`. On a constant
+ramp the prediction matches the true per-tick advance, so the residual the
+low-pass sees: and the steady-state lag: fall to ≈ 0 *regardless* of `tau`.
+When the ramp ends `accel` returns to 0 and the prediction cleanly vanishes;
+there is no integrator state to unwind, hence no trailing overshoot.
+
+The prediction must not inject cruise noise. It is gated by `ff_gate`, a ramp on
+the de-noised `|accel_trend|`: zero below `_ACC_SPEED_FF_GATE_LO_MS2`, full at
+`_ACC_SPEED_FF_GATE_HI_MS2`. While coasting `|accel_trend|` sits at ≈ 0.06 m/s²
+(the LS window averages the ±0.5 m/s 1 Hz wobble out), well below the gate, so
+`ff_gate = 0`, the prediction is exactly zero, and `acc_speed` is a pure
+low-pass. The gate uses the *robust* `accel_trend` (slow but noise-free) to
+decide *whether* a ramp is real; the prediction uses the *fast* `accel` to
+decide *how hard*: so a real ramp is both detected without false-triggering on
+wobble and tracked responsively. `accel` is clamped to
+`_ACC_SPEED_FF_ACCEL_CLAMP_MS2` so a crash spike cannot jump `acc_speed`.
+
+Exposed as `self.speed = speed_corr` and `self.acceleration = accel` (AEB
+chain), `self.acc_speed = acc_speed` and `self.acc_accel = acc_accel` (ACC
+chain); `speed_ema` is the internal `_speed_ema` intermediate. On the first full frame after spawn every signal initialises to
+`raw_speed` (`acc_speed` to `speed_corr`) with `accel = 0`. The step-1/3 `α`
+decreases with |speed| (more smoothing when fast); step 4's `α` is set by the
+adaptive `tau`. Step 4 carries three state values frame to frame: `acc_speed`
+(the output, fed back as `prev_acc_speed`), the standstill latch
+`_acc_standstill`, and the release timer `_acc_release_s`.
+
+**Arc / collision**: `Vehicle.accel_for_arc()` is `return self.acceleration`.
+TMP vehicles initialise `acceleration = 0` until the first `update_from_last`;
+`get_arc()` and all arc callers use this field for `_accel_to_arc_params`.
+
+### Lag / freeze detection (TMP vehicles only)
+
+TMP vehicles derive speed from raw position delta.  If ETS2 stops sending
+position updates for a vehicle (network lag), the same raw coordinates arrive
+every frame, which would snap the derived speed to 0 and then back: causing
+false speed readings and, worse, false AEB triggers.
+
+**Detection criterion (per full-update frame):**
+
+```python
+raw_disp_sq    = (raw_x - prev._raw_x)² + (raw_z - prev._raw_z)²
+expected_disp  = abs(prev.speed) * dt
+is_lag         = (abs(prev.speed) > _LAG_MIN_SPEED_MS          # was moving
+                  and raw_disp_sq < (expected_disp * _LAG_DISP_RATIO)²)
+                 # raw moved less than 10 % of expected displacement
+```
+
+**Entry gates** (`Vehicle._lag_entry_allowed`, entry only, never continuation).
+The criterion above compares raw motion against `prev.speed`, which is the
+filter's *own* output. On a hard stop that output lags truth by about a second,
+so a genuine stop satisfies the criterion by construction: the staleness is both
+the evidence for freezing and the thing the freeze then preserves. Four gates
+break that circle; all must pass to open a freeze.
+
+1. **Hard-brake veto**: `prev._raw_brake_active` blocks entry. A confirmed
+   deceleration ramp is measured motion, so the target is stopping, not stalled.
+   The latch also fires on publish jitter (see "No floor on `acceleration`"), so
+   it does block some genuine stall freezes, and it was costed for removal on that
+   basis. **It stays: it is the only gate that catches some real stops.** On
+   `c6e05e3d` a vehicle came to a near-instant stop from 15 m/s and gates 2-4 all
+   passed; without gate 1 the freeze held it at 15.3 m/s for 0.4 s, AEB let go
+   about 17 m from it and never came back while the driver was on full brake. The cost of keeping
+   it is smoothing: `12cc15e6` reads a real stall as a stop and brakes 0.24 s
+   earlier than a freeze would let it.
+2. **Rotation**: max per-axis rotation delta as a rate must stay under
+   `_LAG_ROT_LIVE_DEG_S` (2 deg/s). A packet stall freezes the whole pose;
+   a crashing vehicle keeps rotating at 10+ deg/s. Note this gate says nothing
+   about a vehicle braking in a straight line, which is why the two below exist.
+3. **Recent raw speed** (`_LAG_ENTRY_RAW_SPEED_MS`): path-length speed over the
+   last `_LAG_ENTRY_WINDOW` intervals of `_position_history` must reach the
+   threshold. Measured from raw positions only, so a stale filtered speed cannot
+   satisfy it.
+4. **Raw decay** (`_LAG_ENTRY_DECAY_MIN`): that window over the one before it.
+   A stall from cruise keeps both windows equal; a target already braking shows
+   the recent window collapsing first.
+
+Gates 3 and 4 fall open when `_position_history` is too short to measure, so a
+freshly spawned track keeps the pre-gate behaviour rather than being judged on
+one or two samples. An established freeze window is not bounced by mid-stall
+rotation flicker or by the raw windows going quiet during the freeze.
+
+Why this ordering: the freeze mutes a vehicle's true speed, so a wrong freeze on
+a real stop hides a stationary obstacle (clips f7a2793c and b3419ab0 pinned
+stopped traffic at 4.6 to 9.5 m/s for 0.9 to 1.5 s, and f7a2793c ended in a
+collision). A missed freeze on a real stall only costs smoothing. The gates are
+deliberately biased toward not freezing.
+
+**Freeze duration is TTC-scaled** so a close vehicle's real stop is not masked
+by the filter (a 0.5 s freeze on a vehicle 1 s ahead would rear-end ego). Let
+`gap_3d = |vehicle_pos − ego_pos|` and
+`ttc = gap_3d / max(ego_speed, _LAG_FREEZE_EGO_SPEED_FLOOR)` (1.0 m/s floor),
+then:
+
+```python
+if ttc <= _LAG_FREEZE_TTC_LO:   freeze_dur = 0.0                 # 0.3 s → no freeze
+if ttc >= _LAG_FREEZE_TTC_HI:   freeze_dur = _LAG_FREEZE_DUR_MAX # 4.0 s → 0.5 s
+else: freeze_dur = K · ln(ttc / _LAG_FREEZE_TTC_LO)              # K = max/ln(hi/lo)
+```
+
+Sample points: 0.3 s → 0.00 s, 0.5 s → 0.10 s, 1.0 s → 0.23 s, 2.0 s → 0.37 s,
+4.0 s → 0.50 s. `ego_x/y/z` and `ego_speed` are passed into
+`Vehicle.update_from_last()` from `TrafficReader.read()`.
+
+**Three-state machine:**
+
+| Elapsed since first frozen frame | Action |
+|----------------------------------|--------|
+| `freeze_dur == 0` (TTC ≤ 0.3 s)  | **No freeze**: reset `_lag_since`, fall through. A real stop close to ego is treated as real immediately. |
+| 0 – `freeze_dur` | **Freeze**: hold last position; coast speed on the frozen accel, capped by the quadratic ramp `prev_speed × (1 − frac²)` where `frac = elapsed / freeze_dur` (see "Held frames coast", below); return early. AEB sees the vehicle at its last known position decelerating toward 0. |
+| ≥ `freeze_dur` | **Release**: set `lag_confirmed = True`, fall through to normal update. Speed falls to 0. AEB detects the stopped obstacle naturally via arc collision. |
+| Raw position moves again | Reset `_lag_since = None`, `lag_confirmed = False`. |
+
+`lag_confirmed` is a public flag on `Vehicle`. Consumer threads do not need
+to read it: once released, the vehicle's speed = 0 and the existing AEB arc
+collision logic handles the stationary obstacle without special-casing.
+
+### Yaw EMA: wrap-safe, α = 0.5 (AI and TMP)
+
+```python
+diff       = (raw_yaw - smooth_yaw + math.pi) % (2 * math.pi) - math.pi
+smooth_yaw = smooth_yaw + _RAW_YAW_ALPHA * diff   # _RAW_YAW_ALPHA = 0.5
+```
+
+### Speed sign detection
+
+**AI (singleplayer):** Use buffer speed as-is. The buffer may already provide
+signed speed (positive = forward, negative = reverse). Do not derive or flip
+sign from displacement: that can make vehicles appear to move backwards.
+
+**TMP (multiplayer):** Speed magnitude is not trusted from the buffer; on full
+frames derive it from up to twenty `(t, x, z)` samples (longitudinal LS along `fwd`),
+with single-interval fallback and the same forward dot for sign on that path.
+
+```python
+# Fallback when history has one sample only:
+dist = math.sqrt(disp_x**2 + disp_y**2 + disp_z**2)
+direction = 1.0 if (disp_x*fwd_x + disp_z*fwd_z) >= 0.0 else -1.0
+speed = direction * dist / dt
+```
+
+### Position mismatch (TMP only)
+
+Detects out-of-order packets where the raw position jumps back against the direction of travel for a limited number of frames. A longer run of backward frames is real backward motion and passes.
+
+**Detection:** `travel * dot(raw_disp, prev_smooth_fwd) < -_POS_MISMATCH_BACKWARD_THRESHOLD`, which is **0.00 m**: any component against the direction of travel flags the frame. `travel` is -1 once `prev.speed < -_POS_MISMATCH_REVERSE_MS` (**1.0 m/s**), so for a vehicle that is already reversing a *forward* jump is the rewind.
+
+**Action:** Increment `_pos_mismatch_frames`; while it is at most `_POS_MISMATCH_MAX_FRAMES` (**5**, `Vehicle.pos_mismatch_holding`) hold `_smooth_x/z`, carry `acceleration` and `acc_accel` from prev and coast `speed` and `acc_speed` on them (see "Held frames coast", below), and return early **after** yaw EMA and angular_velocity have run. Path, arc construction, and all other state are unaffected. A forward step resets the count. Crash detection sees the frame first: a step back that comes with rotation jerk confirms a crash and passes at once (see "Crash detection", shove), because a rewind moves a vehicle back along its path and a crash moves its rotation too.
+
+**Past the cap the run is real.** From the sixth consecutive backward full frame on, raw position passes and keeps passing for as long as the run lasts: a truck reversing, a vehicle shoved back in a collision, or one bounced back by a head-on. The old cap reset the counter instead, released a single frame and re-armed, so a reversing truck was held 5 frames in 6, lagged by up to 0.5 m, and read -0.8 to -1.5 m/s against a real -2.9 (clip d80936f9). A packet stall (byte-identical position) inside an accepted run keeps the count, so a stalling reverse is not re-held. A stall during a hold still resets it as before: carrying the hold across stalls kept a stalled in-lane trailer frozen and cost the TP on 6f2377d7.
+
+**Why 5 is the line.** Measured on 2126 clips through the radar chain, in full frames: rewinds of TMP vehicles moving forward at more than 2 m/s before and after the run last 1 to 4 frames in 1915 of 1951 runs, 5 frames in 26, and 6 or more in 10. Most of those 10 lose half their speed across the run (16.6 -> 6.9 m/s, 15.4 -> 2.4 m/s), which is what a collision looks like. The filter stays armed at every speed; an earlier version skipped it below 1 m/s instead, which fixed one FP (13d8b3d7) by accident and is not what the filter is for.
+
+**Measured** (with the AEB travel frame, `core/aeb/README.md`): local -386.93 -> -421.15 against the pre-change baseline, remote +358.71 -> +326.27. Every verdict that moved improved; 13d8b3d7 is back to its baseline FP.
+
+**Known gap, deliberately left open.** The detection reference is `prev._raw_x/_raw_z`, which advances on held frames, so the guard sees the *rate* of a rewind and not the fact that the position is still behind the last sample `_position_history` accepted. It therefore releases as soon as motion turns forward, and the sample it then appends can sit behind the previous history entry (0.27 m on clip 1f14b55a). Measured on 120 clips / 1901 TMP tracks: 13 % of clips admit at least one backward step, median 0.24 m, worst 4.3 m.
+
+Two closures were built and measured against the corpus, and **both cost score**: referencing the last accepted sample and reseeding history at the cap (−374.71), and clamping a backward step to zero forward progress at the append (−411.80), against **−421.00** for leaving it alone. Once the raw-speed fit stopped anchoring on `window[0]` (see "Why the intercept is free"), a lone backward sample carries only its 1/20 share of the fit, and the residual step on 1f14b55a is +0.47 m/s with or without either guard. Do not re-add a guard here on correctness grounds alone: the defect is real but the estimator no longer amplifies it, and every version tried traded AEB outcome for buffer hygiene. Re-measure if `_position_history` gains a consumer that *is* sensitive to a single backward sample.
+
+### Held frames coast on their frozen accel
+
+Both holds above suspend the raw position stream, and both used to suspend the
+*speed* with it. That is safe on a cruising target and dangerous on a braking
+one: a hold reports the target still doing what it was doing at hold entry, so a
+lead standing on the brakes reads as coasting for the whole hold, and every
+consumer (AEB required-decel, ACC gap law) under-reads the threat.
+
+`Vehicle._advance_held_kinematics` replaces the hold with a coast. Each lane
+keeps its own frozen accel and integrates on it:
+
+```python
+speed     = _hold_coast_speed(prev.speed,     prev.acceleration, dt)
+acc_speed = _hold_coast_speed(prev.acc_speed, prev.acc_accel,    dt)
+```
+
+`_hold_coast_speed` integrates only the component that shrinks `|speed|`
+(`accel * speed < 0`), never crosses zero, and never flips sign. The asymmetry
+is deliberate: a hold has no evidence, and extrapolating a target *faster* would
+invent motion it may not have and move every consumer toward less braking, the
+one direction a stalled stream must never move. A target that was accelerating
+into the hold therefore still reads flat, exactly as it did before.
+
+The lag freeze passes its `1 − frac²` ramp in as `decay` and the slower of the
+two wins, so the freeze still ramps into the stationary reading it releases
+into, and the coast only binds early in the window where `frac²` is ~0. Because
+the entry gates only open a freeze on a target with no measured decay
+(gates 3 and 4), the frozen accel there is usually ~0 and the coast is inert;
+position mismatch has no such gates and is where this actually bites.
+
+The coasted value is written to `_smooth_speed`, `_speed_ema` and
+`_acc_speed_ema` as well, or the release frame blends the new raw sample
+against the pre-hold speed and undoes the coast in a single step. The
+`_speed_ema_history` LS windows are deliberately *not* appended to during a
+hold: they keep the hole, so the accel fit at release measures a real slope over
+real elapsed time instead of a fabricated one.
+
+**Measured** (792-clip corpus, `score_once.py` in the gitignored `tools/aeb_corpus_run/`):
+−431.57 → −435.01, 9 clips moved, no verdict flipped in either direction
+(FN 39, FP 37, false-warn 15, late 12 both before and after). The gain is TP
+quality: engagement moves earlier on targets whose brake was being held flat.
+Found on clip 2da7f2fb, where a 5-frame rewind at t ≈ 7.1 s pinned a lead
+braking at −4.6 m/s² to 14.17 m/s for 0.27 s while the gap closed 51.6 → 45.5 m.
+
+### Pose jump (TMP only, full frames only)
+
+TMP sometimes relocates a vehicle instead of driving it: a parked vehicle
+swings round at 450-750 deg/s and flies several metres a frame to a new spot, a
+desynced one snaps 8-20 m along the road, a respawn lands 45-70 m away. Read as
+motion, a relocation becomes speed. On bc99e7ff a parked vehicle that flew 22 m
+read 20 m/s and AEB braked for it; on 41867763 one landed 6 m from ego reading
+17 m/s; and the spin on the way confirmed crashes too.
+
+`_pose_jumped` runs first on every full TMP frame, measured from the last
+accepted history sample:
+
+| state | a jump is |
+|---|---|
+| moving | a step faster than `_POSE_JUMP_MAX_MS` (100 m/s), timed from its arrival at that sample so a stall catch-up reads its real pace |
+| standing: \|speed\| under 2 m/s over the last 3 s | a step over 2.5 m, or a turn faster than 300 deg/s |
+| within `_POSE_JUMP_SETTLE_S` (1 s) of a jump from standing | a step over 1.0 m, or a turn faster than 150 deg/s |
+
+A jump is taken, not held: the pose moves to where TMP now puts it, but the
+motion history restarts there (`_reanchor_after_pose_jump`). Position history
+and trail are reseeded at the held speed along the new heading, the smoothed yaw
+takes the new heading, filtered speeds are held, and no crash rate or
+displacement may span the jump. A crash already confirmed stays latched. The
+guard arms after `_POSE_JUMP_MIN_UPDATES` filter updates, because a vehicle
+entering range has no speed to judge a step by.
+
+Why these bars:
+
+- **Moving.** Implied speeds of moving TMP vehicles reach 69 m/s at p99.99 from
+  frame timing alone, so 100 m/s stays clear. A bar relative to the vehicle's
+  own estimate was tried first and is wrong: TMP catching a vehicle up runs it
+  at 45 m/s past a 15 m/s estimate (fe811101, 4b20d80b), the guard held it at the
+  stale speed, and each held frame made the next step look like a jump again.
+- **Standing.** Nothing moves a standing vehicle 2.5 m in one frame, and the
+  54 frames where one turned faster than 300 deg/s (27 clips) were relocations
+  or rotation snaps at rest wherever checked. Real crash spins measured up to
+  about 470 deg/s, all on moving vehicles.
+- **Settle window.** A flight lasts 0.3-0.9 s and its tail steps are under
+  2.5 m, so without the window the tail read as motion, and once the estimate
+  passed 2 m/s the vehicle counted as moving. The window opens only on a jump
+  from outside it, so a vehicle that really drives off after landing is let go
+  after 1 s instead of being reseeded for ever.
+
+Measured over 1511 TMP clips: 623 reseeded frames in 63 clips, 146 of them
+within 60 m of ego. Crash confirmations that follow a pose jump fall from 75 to
+23. AEB clip corpus: local -759.86 -> -760.89 (c5d6411a quality 0.13 -> 0.26),
+remote -537.96 -> -491.25. bc99e7ff goes from a false brake to silent.
+**7e2a64b7 goes from a true positive to a miss (+47.67)**, and that positive was
+a phantom: the trailer (198) relocated 70 m at 4.0 s, the lag freeze kept the
+pre-jump sample in its history for 3.4 s, and the LS fit read it as 12-30 m/s on
+a trailer standing in ego's lane. When that phantom decayed at 6.9-7.4 s it made
+the trailer a follow threat, the only thing that took it past
+`TmpRelSpeedFilter`, which suppresses targets under 50 km/h relative speed at
+ego speeds of 50 km/h and below. The guard is right; that filter is the gap.
+
+### Crash detection (TMP only, full frames only)
+
+A crash confirms when a **rotation-jerk frame coincides with a kinematic
+anomaly** on live data. Runs before position-mismatch and lag early-returns so
+a crash-induced backward jump is not silently swallowed. Sub-frames carry the
+latched flag but never evaluate (their tiny dt amplifies quantization noise
+into phantom rates).
+
+**Stall immunity**: rotation rates are computed between *live* frames only. A
+frozen frame (position and rotation byte-identical to prev: a packet stall)
+holds the rate baseline, so the stall's entry rate-drop reads as nothing and
+its exit snap is averaged over the whole stall span: a clean resume shows
+≈ the pre-stall rate and produces no jerk. Only a vehicle that actually
+crashed *during* the stall resumes with a genuinely different average rate.
+
+**Rotation jerk**: per-axis rate (deg/s) from `rotation.euler()`
+(pitch/yaw/roll) over the span since the last live frame. Jerk = change in
+rate against **either of the last two live rates** (`_prev_rates`,
+`_prev2_rates`). Thresholds sit above normal TMP rotation noise (pitch/roll
+deltas of several deg/s, yaw to ~25 on curves) and below measured crash
+rotation (pitch 19+, roll 60+, yaw 100+ on clip 397148fd):
+
+| Axis | Jerk threshold |
+|------|---------------|
+| Pitch | 12 deg/s |
+| Yaw | 40 deg/s |
+| Roll | 20 deg/s |
+
+Two live rates, not one, because TMP interpolates a remote pose between
+packets, so a single impact reaches the rate over two consecutive live frames.
+Every crash in the pending-evaluation clips built its rotation that way, each
+step under its bar: the trailer record of the rig on dc3c6e29 pitched
+0 -> 9 -> 17 deg/s, the trailer on 168ba6a8 rolled 1 -> 18 -> 29, and vehicle
+190 on 8aefa3a2, bounced back by a head-on with ego, went +31 -> +6 -> -18 in yaw.
+The one-frame test missed all three onsets, and position mismatch then held the
+knocked-back body at its cruise speed: 27.4 m/s for 5 frames on dc3c6e29, 15.9 m/s
+for 5 frames on 8aefa3a2.
+
+**Kinematic anomaly** (same frame, any of):
+- Vertical jerk: `|ΔY - prev ΔY| > 0.08 m` (a jerk, not a slope, so a steady
+  grade never qualifies),
+- XZ direction reversal: `cos(prev_disp, cur_disp) < -0.3` when both
+  displacement magnitudes exceed 0.025 m,
+- Displacement collapse: displacement summed over the last TWO live frames
+  under 50 % of `|prev.speed| × Σspan` while `|prev.speed| > 3 m/s`. Two frames
+  because TMP's ~1 Hz position-reconciliation ripple dips single-frame ratios
+  to ~0.3-0.5 while its 2-frame sum stays ≈ 1.0; a physical stop keeps
+  consecutive frames collapsed (a 1-frame 50 % collapse implies ~0.5·v/dt
+  m/s² of decel, far beyond braking). Never across frozen frames: TMP resumes
+  from where it froze without catching up, so neither the resume step nor the
+  one after it reads as a collapse (aeedafdf).
+- Shove: a step back against travel of more than `_CRASH_SHOVE_MIN_M` (2.5 cm)
+  while `|prev.speed| > _CRASH_SHOVE_MIN_SPEED_MS` (3 m/s), with the same
+  reference and travel sign position mismatch uses. That is exactly the frame
+  position mismatch would hold as a rewind. A rewind only moves the vehicle back
+  along its own path; a crash moves its rotation too, so the rotation jerk is what
+  tells them apart. With no rotation jerk the step is still held as a rewind.
+
+Reversal and shove are **knock-back** evidence and are always evaluated, even
+when another check has already qualified the frame. They also set
+`_crash_knock_until`, which lets the crash hand its raw speed to the short
+position window (see "Hard-brake transient"). Collapse and vertical jerk confirm
+a crash but never do that.
+
+**Planar checks measure from the last live frame** (`_last_live_xz`). A
+sub-frame snaps `prev._raw_x` forward, so on a full frame the frame-to-frame
+step covers only the time since the sub-frame, about half of `dt`. Measured
+against that, the 2-frame collapse ratio sat near 0.5 on every cruising frame
+and passed on two thirds of all frames with rotation jerk: the detector was in
+effect rotation jerk alone. Collapse and reversal now use the displacement
+since the last live frame over its own span. The shove test keeps the
+frame-to-frame step on purpose, because it has to see what position mismatch
+sees. The vertical check still uses the frame-to-frame `ΔY`: its jerk form
+compares two steps of the same cadence.
+
+The window and the reference fix belong together. The two-frame window on the
+snapped collapse flagged 1.10 % of moving frames and turned 249434e3 from a
+false warn into a false brake: a crosser 130 m out whose rotation stream had
+stalled and then caught up, confirmed through the snap.
+
+The shove needs travel. Without the 3 m/s floor, 53 of 99 shove confirmations
+came from vehicles below it: slow reversing, turning on the spot and standstill
+jitter, where a step back says nothing. The floor also gives up real low-speed
+contact, such as a standing car shoved sideways 5 m from ego on d3754cf7; a
+stationary body that gets hit is left to the reversal and vertical checks.
+
+**Latch**: a qualifying frame sets `_crash_hold_until = t + _CRASH_HOLD_S`
+(2.0 s); `crash_confirmed` stays true until the hold expires and refreshes on
+every qualifying frame. Consumers see a stable event flag, not per-frame
+flicker.
+
+**Measured** over 1511 TMP clips, every moving TMP record including trailer
+records (the first corroborated version took the flag from 9.7 % to 0.8 % of
+moving frames against the jerk-only detector; this is the step after it). The
+middle column is the rotation window, the shove and the live-frame reference;
+the last adds the pose-jump guard and the frozen-frame rule on collapse:
+
+| | before | detector | + pose jump |
+|---|---|---|---|
+| moving frames flagged | 0.738 % | 0.407 % | **0.326 %** |
+| moving records ever flagged | 3.08 % | 2.19 % | **1.92 %** |
+| confirmations | 870 | 644 | 576 |
+
+| crash | confirmed before | after |
+|---|---|---|
+| dc3c6e29 trailer 3 | 4.788 s, held as a rewind 4.00-4.28 | **4.004** |
+| dc3c6e29 tractor 4 | 3.936 | 4.004 |
+| 168ba6a8 trailer 4 | 4.047 | **3.937** |
+| 168ba6a8 tractor 5 | 3.844 | 3.937 |
+| 8aefa3a2 vehicle 190 | never, held 5 frames | **4.827** |
+| 397148fd trailer 440 | 7.137 | 7.137 |
+
+The tractors lose a frame because their old confirmation came from the snapped
+collapse, not from anything they did. On crash clip 397148fd the flag still
+holds continuously on the crashing road train from impact through ego's
+collision window, and fires on no pre-crash frame.
+
+AEB clip corpus: local -759.98 -> -759.86, remote -535.84 -> -537.96, no verdict
+lost. 2faae5bd goes from a false brake to silent (a crosser 126 m out confirmed
+only through the snap). One positive loses quality, eb67cc2d 0.92 -> 0.74: a
+lead at 105 km/h rolls through a lane-change wobble and then brakes at about
+15 m/s², the old detector confirmed it through the snap on the wobble, and the
+steps back that follow carry no rotation, so they are now held as rewinds.
+Replayed brake onset moves earlier on the pending crash clips: dc3c6e29
+4.59 -> 4.49 s, 168ba6a8 4.47 -> 4.42 s. The crash short window (see
+"Hard-brake transient") then takes them to 4.26 s and 4.25 s. Measured on its
+own with the frozen-frame rule: local -760.89 -> -763.90, remote -491.25 ->
+-491.41, no verdict moved; b9802c7d 0.33 -> 0.77 is the largest gain, 8335e15a
+1.00 -> 0.80 the largest loss: a lead crashing 41 m ahead now reads its real
+stop, and the stale 25 m/s arc that crossed ego's path 0.3 s earlier is gone.
+
+**Effect of `crash_confirmed`:** disables the position-mismatch filter and the
+lag freeze for that vehicle, and pins the ACC chain's raw input to the AEB
+one. Position, speed, and acceleration are derived from raw data as normal.
+Any displacement: even tiny: passes through unfiltered. Speed and acceleration
+are **not** overridden; AEB evaluates the vehicle from live kinematics. With
+knock-back evidence the raw speed comes from the short position window, which
+is still a measurement, not an override (see "Hard-brake transient"). In
+`core/aeb/thread.py` the flag additionally (a) bypasses the LOS-rate
+engagement veto (a crashed target's track violates the veto's
+constant-velocity assumption, and the tractor point can predict a miss while
+its trailer blocks the lane: crash clip 397148fd) and (b) grants the
+near-certain confirm window at engagement entry (a spun wreck's lane / heading
+classification is unreliable).
+
+### Sub-frame pass (dt < 0.05 s)
+
+**AI:** state unchanged; speed/accel from last full update; pose from `_smooth_x/z`.
+
+**TMP:** pose is snapped to the **latest** buffer `position.x/z` every read (not held at
+the last full tick). If `|Δraw| > 0.025 m` over `t_now − prev.time`, **`_raw_speed`** is
+recomputed as `±|Δ|/dt` (same forward dot as full updates) for diagnostics; **`speed`**
+stays the last full-tick filtered value until the next `dt ≥ 0.05 s` update. Skipped
+during lag freeze (`_lag_since` inside the TTC-scaled freeze window), position-mismatch hold
+(`_pos_mismatch_frames > 0`), and `crash_confirmed`. Acceleration is still carried
+from the last full update on sub-frames.
+
+### First sighting: the pose carried on a sub-frame
+
+A vehicle's first frame only stamps `Vehicle.time`; the frame after it is a
+sub-frame (dt < 0.05 s), which freezes `Vehicle.time` at the sighting. The pose
+carried through that sub-frame must be the one that matches the frozen time. It
+used to be the newly decoded pose, so the first full update measured one frame of
+travel and divided it by two frames of dt: a car entering radar range at 72 km/h
+read **36 km/h**, and the LS window then took about five full updates to climb
+back. The cold branch now holds `prev.position`, the same way the warm branch
+holds `_smooth_x/z`.
+
+This is a live bug, not only a replay one: every vehicle that comes into range
+mid-drive went through it.
+
+### Cold-start speed seeding (offline replay only)
+
+`Vehicle.seed_cold_start_speed(speed, t_now)` fills the speed chain, the raw
+anchor, the yaw and a two-sample velocity-seeded `_position_history` for a vehicle
+being seen for the first time, using the same idiom as
+`_hold_across_clock_discontinuity`. Two samples on purpose: enough for the LS raw
+speed fit, one short of `curvature_from_history`, which must stay unknown rather
+than read a fabricated straight prehistory as kappa = 0.
+
+`TrafficReader.set_cold_start_speeds()` installs the mapping and only clip replay
+calls it, because measuring the speed needs frames the live reader has not read
+yet. Each id is seeded once: a vehicle that drops out and returns mid-clip is a
+genuine cold start, and the clip-start measurement no longer describes it. A live
+`read` must never be given a non-empty mapping.
+
+### Simulation clock (pause / hitch)
+
+Vehicle kinematics use SCS **`simulatedTime`** (µs → seconds) as `Vehicle.time` /
+`update_from_last` `t_now`, not `time.time()`. Radar reads it from the SCS
+telemetry block in the traffic buffer's game frame (§16), falling back to
+`TelemetryThreadData.simulated_time_us`. While paused, radar does **not** call
+`TrafficReader.read`: frozen positions plus a still-ticking sim clock would
+pull every derived speed toward 0. `RadarData.t_mono` is also held so AEB/ACC
+treat the frame as stale. On unpause, radar force-reanchors the reader
+(filtered speeds held, position / speed-EMA histories velocity-seeded) so the
+LS raw-speed fit cannot span the gap — even when `simulatedTime` did not jump.
+`TrafficReader` also re-bases when successive presented `t_now` values jump by
+more than `_READER_CLOCK_GAP_S` (0.5 s) or go backwards. Switching between wall
+and sim domains clears per-id state and ego path history.
+`update_from_last` must not treat large `Vehicle` dt as a pause: sub-frames
+freeze `Vehicle.time`, so dt since the last full update is not a pause signal.
+
+If `simulated_time_us == 0` (SDK not ready), radar falls back to wall time.
+Clip replay rebuilds the simulated clock from physics-step counts
+(`core/aeb/README.md` section 16), keeps recorded `t_wall` where the counts cannot
+explain a segment, and uses the same pause-skip + reanchor path.
+
+---
+
+## 8. Arc Path Geometry
+
+Each vehicle carries an `ArcPath` (circular arc or straight ray). Enables O(1) position lookups.
+
+### Forward vector: FIXED, do not change
+
+```python
+fwd_x = -math.sin(yaw_rad)
+fwd_z = -math.cos(yaw_rad)
+```
+
+If the ego arc points backward, the bug is in the `rotationX → yaw_rad` conversion, not here.
+
+### Key fields
+
+| Field | Description |
+|-------|-------------|
+| `start_x / start_z` | From smoothed `position` |
+| `yaw_rad` | From `_smooth_yaw`: never from `rotation.euler()` directly |
+| `speed` | `build()` normalises to `abs` and flips `fwd` if originally negative |
+| `curvature` | `κ = ω_rad_s / abs_speed`. Positive = left turn (CCW). |
+| `half_width` | `size.width / 2` by default |
+| `fwd_len` / `back_len` | Capsule body extents ahead of / behind the reference (0 = point/disc). Set by AEB via `capsule_extents`. Collision uses the derived `_cap_fwd`/`_cap_back` (extents minus `half_width`, clamped ≥ 0) so the capsule's rounded end cap lands ON the body end instead of `half_width` past it; the raw fields stay the physical body ends for centreline sampling (`_any_body_in_ego_lane`) |
+| `parallel_margin_scale` | Scales corridor margin for near-parallel capsule contacts (1.0 = full margin). AEB ego arcs set `cal.capsule_parallel_margin_scale` |
+| `decel` | Ego braking arc, head-on target arc, or non-head-on target arc when the vehicle is decelerating. Derived via `_accel_to_arc_params()`. Mutually exclusive with `accel`. |
+| `arc_length` | Accounts for decel/accel to stop |
+| `is_straight` | True if `|κ| < 1e-6` or `speed < 0.001` |
+
+### Arc center (curved only)
+
+```python
+# sign = +1 for left turn (κ > 0), -1 for right
+center_x = start_x + sign * radius * fwd_z
+center_z = start_z + sign * radius * (-fwd_x)
+```
+
+### Collision detection
+
+`arc_arc_collision(a, b, margin, n_samples, min_lateral_gap=0.0)` returns `(time_s, hit_x, hit_z)` or `None`.
+
+- Both straight, no decel/accel, no body extents → closed-form quadratic O(1)
+- Otherwise → time-synchronised sampling + 6-step bisection O(n)
+- With `fwd_len`/`back_len` set, overlap is segment-to-segment (swept body), not point-to-point
+- Corridor threshold = `a.half_width + b.half_width + margin`
+- The half_width radius applies isotropically around the segment, so segments are the `_cap_fwd`/`_cap_back` extents (body ends minus `half_width`). Full-length segments would extend each body `half_width` past its bumpers (~2.4 m of phantom length between two trucks): AEB fired a constant ~3 m early on close approaches. Side faces stay exact; only the rectangle corners round off, which the corridor margin absorbs
+- When either arc sets `parallel_margin_scale < 1`, the effective margin per sample blends `margin * scale` (parallel headings) to `margin` (perpendicular) by `sin(|heading_diff|)`. Near-parallel bodies hold their separation across samples, so the full margin only manufactures side-graze hits on adjacent-lane traffic
+- AEB narrows vehicle half_width by 0.1 m per side to reduce false positives from measurement noise
+
+#### `min_lateral_gap`: head-on turn filter
+
+When `min_lateral_gap > 0`, a candidate hit is suppressed if the perpendicular distance between the two arc centerlines (measured along `a`'s instantaneous heading at the hit point) is ≥ this value. This prevents false positives when ego and an oncoming vehicle both enter a curve: their arcs overlap in the forward dimension, but the vehicles remain in their own lanes laterally. AEB owns the activation policy; see `core/aeb/README.md`.
+
+```python
+# Lateral separation via cross product (2D):
+lat = abs((bz - az) * fwd_x_a - (bx - ax) * fwd_z_a)
+if lat >= min_lateral_gap:
+    suppress hit
+```
+
+- Applied in both `_ray_ray_collision` and `_sampled_collision`
+- In the sampled path, the lateral check runs at each coarse sample **before** entering bisection; during bisection, a failing lateral check advances `lo` rather than breaking, so the refiner keeps searching for a sample where lanes genuinely cross
+
+---
+
+## 9. Forward Vector & Position Prediction
+
+```python
+yaw_rad   = math.radians(yaw_degrees)
+forward_x = -math.sin(yaw_rad)   # lateral
+forward_z = -math.cos(yaw_rad)   # longitudinal
+
+# Future position (get_position_in)
+x_new = position.x - speed * math.sin(yaw_rad)
+z_new = position.z - speed * math.cos(yaw_rad)
+```
+
+Negative signs are required: without them, `yaw=0` (South) points the wrong way.
+
+---
+
+## 10. Yaw Alignment Scoring
+
+```python
+d        = vehicle_yaw_deg - ego_yaw_deg
+yaw_diff = min(abs(d), abs(d + 360), abs(d - 360))
+# ~0°   → same direction (co-directional, lane candidate)
+# ~180° → oncoming traffic
+# 45–135° → cross-traffic
+```
+
+---
+
+## 11. Position-Based Curvature
+
+Traffic vehicles derive curvature from a circumscribed circle fit over `_position_history` (`Vehicle.curvature_from_history()`), falling back to `angular_velocity / speed` when fewer than 3 samples are available.
+
+Ego uses the same math in `core/radar/ego_path.py::ego_curvature_from_history`, fed by `RadarThread._ego_position_history`. `RadarThread` publishes the result as `RadarData.ego_curvature` (may be `None`).
+
+**Consumer policy: the history fit is for ACC only.**
+
+- **ACC** uses `RadarData.ego_curvature` for in-path scoring. The
+  smoothed, geometry-based value matches the smoothing applied to target
+  vehicles, so scoring stays consistent across long horizons.
+- **AEB** does **not** read `RadarData.ego_curvature`. It steps
+  `EgoPathModel` instead (below). The ego arc must react instantly to driver
+  input: a history-based fit lags the truck through transients and produces
+  corridor-misalignment false positives / negatives during and after corners.
+
+Sign convention: positive = left turn (κ > 0), matching `ArcPath`. `gameSteer`
+is counterclockwise-positive, so positive steer is a left turn too, and ego yaw
+decreases through a right-hander.
+
+### Ego path model (`core/radar/ego_path_model.py`)
+
+`EgoPathModel` answers "where is ego actually going", from three signals that
+each cover the others' blind spot. AEB owns an instance and steps it once per
+new radar frame on `RadarData.ego_t_kin`; timing it on `t_mono` would be wrong,
+because `time.monotonic()` is 15.6 ms granular on Windows against 33 ms frames.
+
+| Part | What it gives | Measured basis |
+| --- | --- | --- |
+| `gain * steer` | zero-lag intent | steer to curvature is linear and lag-free in ETS2: best cross-correlation shift is 0 frames (<= 35 ms) over 437 corpus clips |
+| learned `gain` | the vehicle being driven | per-clip gains run 0.09 to 0.24 across ~2100 clips; fleet median 0.19 |
+| grip cap | what the tires still deliver | saturated plateaus run 6 to 13 m/s^2 and rise with speed, so no constant describes them |
+
+`kappa_meas` is a yaw delta over ~0.13 s of frame-paired poses, not a circle
+fit: over that window a 3-point fit is dominated by its own noise, while the
+yaw signal is clean. There is no bias term, because there is nothing to
+correct: the median per-clip straight-line steering offset is worth 0.06 m of
+lateral error at 75 m (p90 0.35 m).
+
+Gates exist so the two adaptations never take each other's work. The learner
+only accepts steady steer at low lateral load and skips the 2 s after a
+crash-sized speed step; the cap only engages above a lateral-accel floor. See
+`core/aeb/README.md` §1 for the rule that binds them and for the replay seeding.
+
+`kappa_cap` is published only while the cap is armed (`sat_weight > 0`).
+Unarmed it is the measured line, not a ceiling, and it is not a bound any
+consumer may apply.
+
+---
+
+## 12. RadarThread Interface
+
+Registry name: `radar_thread`. Runs at 30 Hz.
+
+**Vehicle cap**: each frame (traffic + parked combined) is culled to the
+`_MAX_TRACKED_VEHICLES` (24) vehicles nearest ego in
+`reader.py::_smooth_and_build`, before the smoothing chain runs. The cull
+must keep the *nearest* vehicles so threats stay tracked; never cap by
+buffer slot order. Culled vehicles lose their per-id smoothing state and
+re-enter via the normal fresh-spawn init. Live `read` and headless
+`replay_frame` share the cull, so captured clips reproduce it.
+
+```python
+rt = registry.get_thread("radar_thread")
+with rt.data._lock:
+    vehicles      = rt.data.vehicles          # list[Vehicle]: shared refs, do not mutate
+    trailer_vehicles = rt.data.trailer_vehicles  # nested trailers wrapped as Vehicles
+    tmp_session   = rt.data.tmp_session       # True if any vehicle has is_tmp
+    ego_x         = rt.data.ego_x
+    ego_y         = rt.data.ego_y
+    ego_z         = rt.data.ego_z
+    ego_yaw_rad   = rt.data.ego_yaw_rad
+    ego_speed     = rt.data.ego_speed         # m/s
+    ego_pitch_rad = rt.data.ego_pitch_rad     # NEGATED grade: see §15 doubly-negated frame
+    ego_steer     = rt.data.ego_steer
+    ego_has_trailer = rt.data.ego_has_trailer
+    ego_curvature = rt.data.ego_curvature     # None → fall back to yaw-rate proxy
+    off_surface_ids = rt.data.off_surface_ids # frozenset[int], see §15
+    road_surface  = rt.data.road_surface      # RoadSurface (ego plane + curvature)
+    paused        = rt.data.paused
+    t_mono        = rt.data.t_mono            # snapshot time (monotonic)
+```
+
+When `paused` is True, `t_mono` is held so consumers treat the frame as
+stale. Vehicle kinematics are **not** advanced while paused (frozen world
+positions plus a still-ticking simulated clock would pull every speed toward
+0). On unpause the traffic reader force-reanchors: filtered speeds are held
+and position histories are velocity-seeded so the LS raw-speed fit does not
+span the gap. See §7 "Simulation clock".
+
+### Trailer vehicles
+
+`trailer_vehicles` wraps each nested trailer (offsets 16/26/36: see §5) as a
+standalone `Vehicle` via `traffic.vehicle_from_trailer`. A road train exposes
+only the tractor and first trailer as top-level vehicles; every trailer behind
+the first is a nested `Trailer` on that first trailer, invisible to consumers
+that iterate the vehicle list. The wrapped records get synthetic ids
+(`_TRAILER_VEHICLE_ID_BASE +` parent id + slot) so position history and speed
+smoothing carry forward per-id like any real vehicle. TMP trailer position is
+shifted from the front coupler to the body center (`correct_position()`).
+
+**Consumer policy: `trailer_vehicles` is for ACC only.** ACC scores it
+alongside `vehicles`. AEB must **not** read it: AEB already walks nested
+trailers via `Vehicle.trailers`, so consuming this list there would
+double-count each trailer.
+
+---
+
+## 13. Quick Reference: Formulas (shared)
+
+| Formula | Code / Notes |
+|---------|-------------|
+| Ego yaw → rad (radar render) | `(yaw + 0.5) * 2 * pi` |
+| Ego yaw → rad (arcs) | `yaw_norm * 2 * pi` (no +0.5) |
+| Ego yaw → degrees | `yaw * 360` |
+| World → ego-space | `rotate_point(-dx, dz, -yaw_rad)` |
+| 2D rotation | `rx = dx*cos(a) - dz*sin(a); rz = dx*sin(a) + dz*cos(a)` |
+| Forward vector | `fwd_x = -sin(yaw); fwd_z = -cos(yaw)` |
+| Future position | `x -= speed*sin(yaw); z -= speed*cos(yaw)` |
+| Yaw wraparound diff | `min(\|d\|, \|d+360\|, \|d-360\|)` |
+| Corner Z (AI and TMP) | `± length / 2` about the pivot |
+| Braking distance | `v² / (2 × decel)` (implicit in `build()` when `t_stop < horizon`) |
+| Arc accel→decel params | `_accel_to_arc_params(accel, override_decel)` → `(decel, accel)` |
+| Quaternion euler yaw | `atan2(2*(y*z + w*x), w²-x²-y²+z²)` degrees |
+| Arc curvature | `κ = omega_rad_s / abs_speed` |
+| Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
+| TMP raw speed | Free-intercept LS on longitudinal `(t,x,z)` history (max `_TMP_SPEED_HISTORY_LEN` full frames): `v = Σ((τ−τ̄)(s−s̄))/Σ((τ−τ̄)²)`; else `Δraw/dt`, signed via forward dot |
+| Speed / accel filter (AI + TMP) | Long-window position LS raw speed by default; confirmed hard braking temporarily selects a 5-sample LS suffix. Then `_smooth_vehicle_kinematics()` runs `speed_ema` (EMA of raw) → `accel` (LS slope, never floored) → `speed_corr = speed_ema + accel·τ` (`self.speed`) → `acc_speed` (adaptive low-pass on `speed_corr`: `tau` ramps `_ACC_SPEED_TAU_SLOW_S`→`_ACC_SPEED_TAU_FAST_S` as the per-tick change grows past `_ACC_SPEED_DEADBAND_MS` **and agrees with the de-noised trend**, and is scaled down at low speed and during a steady decel/accel: plus a constant-accel feed-forward, gated by de-noised `accel_trend`, that zeroes sustained-ramp lag with no windup; standstill latch clamps to 0 near rest with hysteresis release; `self.acc_speed`) |
+| AI vs TMP raw speed | AI = buffer field 10; TMP = position-history LS fit. Filter chain identical after that |
+| Positions | No EMA: always raw world coordinates |
+| Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > _LAG_MIN_SPEED_MS` (5 m/s) AND all four entry gates pass → decay speed: `prev_speed × (1 − frac²)`, release after the TTC-scaled `freeze_dur` (≤ 0.5 s) |
+| Lag entry gates | no armed brake transient AND rotation rate < 2 deg/s AND recent raw window ≥ `_LAG_ENTRY_RAW_SPEED_MS` AND recent/older raw ≥ `_LAG_ENTRY_DECAY_MIN` |
+| Pos mismatch | `dot(raw_disp, prev_fwd) < -0.00 m` AND `is_tmp` AND `frames < 5` → hold smooth pos + speed, allow yaw |
+| Pose jump | standing (\|speed\| < 2 m/s for 3 s): step > 2.5 m OR turn > 300 deg/s; moving: step > 100 m/s from arrival; 1 s after a standing jump: step > 1.0 m OR turn > 150 deg/s → take the pose, reseed history at held speed, no crash rate spans it |
+| Crash detection | live-frame rotation jerk against either of the last two live rates (pitch 12 / yaw 40 / roll 20 deg/s) AND kinematic anomaly (vertical jerk > 0.08 m OR XZ reversal cos < -0.3 OR 2-frame disp collapse < 50 %, both from the last live frame and never across frozen frames, OR a step back against travel above 3 m/s); confirm latches 2.0 s; disables pos-mismatch filter and lag freeze; knock-back (reversal or step back) hands raw speed to the short window once it reads 2 m/s slower |
+| Yaw EMA (wrap-safe) | `smooth += 0.5 * ((raw - smooth + π) % 2π - π)` |
+| TMP trailer pivot fix | `pos.x += (len/2)*sin(yaw); pos.z += (len/2)*cos(yaw)` |
+| Target road surface (§15) | `v.position.y - 0.58 * v.size.height` (ego's is `ego_y`) |
+| Road height prediction (§15) | `m0*s + clamp(0.5*κ_v*s², ±2 m)`, `m0 = tan(ego_pitch_rad)` = **minus** the grade, paired with a backwards `s` |
+| Elevation band (§15) | `1.2 + 0.0006*s²` (cap 15) `+ 0.25*height` |
+| Target road grade (§15) | `m1 = m0*sin²(Δyaw) − tan(target_pitch)*cos(Δyaw)` |
+| Vertical-curvature test (§15) | `max(\|6D/s² − 2M/s\|, \|4M/s − 6D/s²\|) ≤ max(0.006, 6/s²)` |
+
+---
+
+## 14. Critical Rules: Do Not Break
+
+Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep that in sync if you change them). Prefer short glanceable comments in code; put long explanation here.
+
+- **No long comments.** Do not write long comments to explain code. Edit this README if you need to explain something long, otherwise use small one-line comments.
+- **Quaternion x/y swap is intentional.** Never remove it.
+- **`rotationX` in telemetry is yaw.** The name is misleading.
+- **Radar render uses `+0.5` offset; arc-geometry threads do not.** Do not mix them.
+- **`-dx` and `-yaw_rad` in ego-space transform are both required.**
+- **All vehicle bodies are symmetric `± length/2` about the pivot (AI and TMP).** The historical asymmetric 0.82/0.18 AI offsets were a `0.32·length` rear phantom (see §6 history); do not reintroduce them.
+- **Always use `_smooth_yaw` for arc construction**, never `rotation.euler()` directly.
+- **Y axis is never used in 2D math**, only for elevation filtering.
+- **Elevation is decided once, in radar.** `RadarThread` publishes
+  `off_surface_ids`; AEB and ACC read it and must not re-derive an elevation
+  test of their own. Two consumers computing it separately is how the old
+  duplicated pitch window drifted (§15).
+- **Traffic `position.y` is a body datum, not the road.** Subtract
+  `BODY_DATUM_FRAC * size.height` before comparing it with `ego_y`. Never
+  compare the two raw: that is a systematic bias of up to ~2.3 m (§15).
+- **Traffic euler pitch is the negated road grade**, and only its ego-axis
+  component is evidence. Roll is not a usable cross-grade signal (§15).
+- **The elevation gate fails open, never closed.** Unusable target rotation,
+  ego pose, body height or ego history all widen the test rather than
+  suppress. Marginal failures need `SUPPRESS_CONFIRM_FRAMES` consecutive
+  frames, and latched AEB threats bypass the gate outright (§15).
+- **Arc forward vector formula is `(-sin, -cos)`.** Do not flip signs or swap to `(sin, cos)`.
+- **Speed/accel filtering runs for AI and TMP** via `_smooth_vehicle_kinematics()`: the 4-signal chain `speed_ema → accel → speed_corr → acc_speed`. `self.speed` is the accel-corrected `speed_corr`; `self.acc_speed` is the adaptive-filtered ACC speed (ACC only); `self.acceleration` is the LS-slope `accel`. World positions are not low-pass filtered.
+- **Hard-brake raw-speed mode requires a measured deceleration ramp.** Never activate the short position window from a zero-displacement sample alone: below `_LAG_MIN_SPEED_MS`, a TMP packet stall is not owned by lag freeze and would look like a stopped obstacle. The one other entry is a crash with knock-back evidence whose short window reads 2 m/s slower: never widen it to collapse or vertical-jerk confirmations, which a stall on a cresting truck produces (aeedafdf lost a true positive that way).
+- **An armed hard-brake transient vetoes lag entry.** A confirmed decel ramp is measured motion, so the target is stopping and must reach AEB raw. This inverts the older "freeze always wins" priority, which pinned stopping traffic at a stale speed. The latch's false fires on publish jitter do not make this veto removable: on `c6e05e3d` it is the only gate that keeps a real stop out of a freeze (§7, lag entry gates).
+- **Lag freeze owns kinematics once it opens.** A freeze that does open still resets hard-brake transient state; the short estimator must not bypass or advance during the freeze early return.
+- **Lag entry gates read raw positions, never `prev.speed`.** The freeze criterion itself compares against the filter's own output, so gating on that output too would be circular: a stale speed would justify the freeze that keeps it stale. `_lag_entry_allowed` measures `_position_history` directly.
+- **`acceleration` is kinematic-only**: buffer field 11 is ignored for AI and TMP; `accel_for_arc()` reads `self.acceleration` (least-squares slope of the `speed_ema` history, light-EMA smoothed).
+- **Nothing floors or overrides `acceleration`.** The hard-brake transient feeds the short window's raw speed into the chain and stops there. The old `min(accel, -recent_decel)` floor fired on publish jitter, could only add threat, and re-seeded `_smooth_accel` with its own output (§7, "No floor on `acceleration`").
+- **`acc_speed` is ACC-only.** AEB and arc geometry use `self.speed`; never swap them.
+- **TMP lag freeze holds position, filtered speed decay, and internal EMA state.** Do not advance position during a freeze: that would snap when updates resume.
+- **Lag freeze speed decays quadratically: `prev_speed × (1 − frac²)`.** Never hold speed constant during lag: it keeps downstream threads informed while smoothly approaching 0.
+- **`lag_confirmed` is set by `traffic.py`, not by consumer threads.** A confirmed-stopped vehicle has speed = 0 and is detected as a stationary obstacle by the existing arc collision logic.
+- **Position mismatch (TMP only) runs before lag detection.** It is mutually exclusive with lag: a backward jump is not near-stationary. The `not _skip_position_update` guard on the lag block enforces this.
+- **Position mismatch holds at most `_POS_MISMATCH_MAX_FRAMES (5)` frames per backward run, and the rest of the run passes.** A longer run is reversing or a collision shove. Do not go back to resetting at the cap: re-arming held a reversing truck 5 frames in 6. Without any cap a genuine crash or prolonged backward event would be silently swallowed.
+- **Position mismatch tests against the direction of travel, at every speed.** Testing against the heading alone rejects every forward jump of a reversing vehicle as real and every backward one as a rewind.
+- **Crash detection does not override speed or acceleration.** It disables the pos-mismatch filter and lag freeze so raw position data passes through unfiltered, and with knock-back evidence it selects the short position window, which is measured data. Nothing sets a speed or clamps it.
+- **Crash detection runs before pos-mismatch and lag early-returns.** Both signals (rotation jerk and a kinematic anomaly) must fire on the same live frame; the confirmation then latches for `_CRASH_HOLD_S` so consumers never see per-frame flicker.
+- **Crash rotation rates span packet stalls.** A frozen (byte-identical) frame must not advance the rate baseline: the stall-exit snap has to read as its average rate, or every stall resume fires a phantom crash (the pre-fix detector flagged 59.7 % of TMP vehicles).
+- **A step back with rotation jerk is a crash, not a rewind.** The shove anomaly is what stops position mismatch from holding a knocked-back vehicle at its cruise speed (27.4 m/s for 5 frames on dc3c6e29). It uses the position-mismatch reference and travel sign so the two tests judge the same frame, and it needs travel above 3 m/s.
+- **Crash jerk spans two live frames; collapse and reversal measure from the last live frame.** Keep both: the wider window on the sub-frame-snapped displacement flagged 1.10 % of moving frames and cost a false brake on 249434e3 (§7, Crash detection).
+- **A TMP pose jump is taken, never read as motion.** It runs before crash detection and reseeds the history instead of holding the pose: holding would hide a vehicle TMP has put in front of ego. Do not judge a moving vehicle against its own speed estimate: a catch-up runs it far past the estimate, and every reseeded frame then looks like another jump. The settle window opens only from outside itself, or a vehicle that drives off after landing is held for ever (§7, Pose jump).
+- **Lag entry requires a non-live rotation stream** (`_LAG_ROT_LIVE_DEG_S`): a frozen position with crash-scale rotation is a physical stop and must reach AEB raw, not decay behind the freeze. Necessary but not sufficient: a vehicle braking to a stop in a straight line has ~0 rotation, so the raw-motion gates carry that case.
+- **Vehicle longitudinal accel for arcs**: `Vehicle.accel_for_arc()` → `self.acceleration` (TMP = filtered kinematic; AI = buffer). Then `_accel_to_arc_params(accel, override_decel)`.
+- **AI (singleplayer) speed is used as-is from the buffer.** Do not derive/flip sign from displacement or turning vehicles can be misclassified as reversing.
+- **`Vehicle.curvature_from_history()` is the curvature source.** Returns circumscribed-circle curvature from `_position_history`; `None` when < 3 samples (caller falls back to yaw-rate); `0.0` when near-stationary. Both TMP and AI vehicles populate `_position_history` in `update_from_last()`.
+- **Consumer threads must not open the traffic shared-memory buffer.** Read vehicles from `registry.get_thread("radar_thread").data.vehicles` under the data lock. Mutating Vehicle instances from consumer threads corrupts the per-id smoothing state carried forward by the reader.
+- **Ego pose, speed and `simulatedTime` are read in the traffic buffer's game frame** (§16), from the SCS telemetry block, never from `telemetry_thread.data` while that block is readable. One step of staleness against the traffic is the whole defect §16 removed.
+
+---
+
+## 15. Road-Surface Elevation Gate (shared AEB/ACC)
+
+`core/radar/elevation.py`. `RadarThread` steps it once per frame over
+`vehicles + trailer_vehicles` and publishes `RadarData.off_surface_ids`;
+AEB and ACC both read that id set and never re-derive it. One computation,
+one set of constants, so the two consumers cannot drift apart.
+
+### What it replaced
+
+A fixed window on the pitch tangent, duplicated in three AEB call sites and
+one ACC one:
+
+```python
+expected_y = ego_y + rz * math.tan(ego_pitch_rad)
+if abs(v.position.y - expected_y) > 5.0:   # cal.elevation_margin
+    continue
+```
+
+Two defects, both structural rather than a bad constant:
+
+- **A systematic ~2 m bias.** Traffic `position.y` is the *body datum*, not
+  the road under it, while ego `coordinateY` is the road surface. Fitting
+  `dy = a·height + b` on level ground over 41,216 corpus samples gives
+  `a = 0.5565`, `b = +0.076 m`, residual p90 0.24 m. The through-origin fit
+  is `0.5808`, and the ratio holds across body classes (0.52 to 0.61 for
+  heights 1.5 to 4.0 m), so the datum is proportional to height and the
+  worst per-class error is ~0.22 m. Uncorrected, that bias ate 40 % of the
+  5 m budget before any geometry was considered.
+- **A tangent extrapolated to arbitrary range.** The error of a straight
+  line drawn from ego's instantaneous pitch grows quadratically, so a single
+  scalar margin is simultaneously far too loose near ego and far too tight
+  far from it. Measured on 250 clips, the old window dropped **4.06 % of
+  candidate leads above 85 km/h and 11.31 % on grades past 3 deg**, while
+  admitting **53 %** of the traffic sitting more than 3 m below ego's road
+  inside 80 m. A first version of the replacement then over-corrected on
+  transients and crests; see "the three conditions" below.
+
+### The model
+
+```python
+dy   = v.position.y - BODY_DATUM_FRAC * v.size.height - ego_y   # road to road
+m0   = tan(ego_pitch_rad)                                       # MINUS ego road grade
+kv   = quadratic LS fit of ego's own (arc length, elevation) history
+pred = m0 * s + clamp(0.5 * kv * s**2, +-2 m)
+```
+
+Ego pitch supplies the grade and the history supplies only the **curvature**.
+That split is measured, not assumed: taking the grade from the history fit
+instead is far worse (predictor error p90 6.62 m vs 1.06 m at 45-60 m,
+because the fit's linear coefficient is noisy at the endpoint). Adding the
+curvature term roughly halves the remaining error:
+
+| range | tangent p99 / p100 | with ego curvature p99 / p100 |
+|-------|--------------------|-------------------------------|
+| 30-45 m | 1.78 / 2.62 m | **0.97 / 1.63 m** |
+| 45-60 m | 2.06 / 3.24 m | **1.52 / 2.81 m** |
+| 60-80 m | 3.40 / 8.16 m | **1.95 / 6.71 m** |
+| 80-110 m | 4.80 / 7.06 m | **3.09 / 5.06 m** |
+| 110-160 m | 8.12 / 11.76 m | 8.02 / 9.76 m |
+
+The fit is usable on **84.2 % of moving frames** and shifts the prediction at
+60 m by a median 0.25 m, p90 1.31 m, so the clamp binds only in the tail.
+
+### Two tests, evaluated in order
+
+**1. Profile band.** `|dy - pred(s)| <= band(s)`, with
+`band(s) = 1.2 + 0.0011·s² (cap 15) + 0.25·height`. Range-aware, so it is
+**tighter than the old window inside ~65 m and wider beyond it**. The
+height-proportional term is a failsafe, not a fit: it guarantees a body whose
+datum the fit does not describe can never be gated on that correction alone
+(the term is ~4x the measured worst-class datum error).
+
+**2. Grade consistency.** Only reached when the band passes, and only past
+12 m. Fit the cubic joining `(0, 0, m0)` to `(s, dy, m1)` and take its peak
+vertical curvature:
+
+```python
+dev   = dy - m0 * s
+dm    = m1 - m0
+k_req = max(|6·dev/s² - 2·dm/s|, |4·dm/s - 6·dev/s²|)
+k_max = max(0.006, 6.0 / s**2)
+```
+
+`m1` is the road grade under the target, read from its own rotation. Traffic
+euler pitch is accurate: on near co-directional traffic within 25 m the
+regression against ego pitch is slope +1.008, corr 0.974, median error
+0.26 deg. It runs **opposite to `ego_pitch_rad`**, which is what the `-tan`
+below cancels; measured against ego's own travel it *is* the road grade
+(co-directional slope +0.869, corr +0.916 over 200 clips). The difference
+matters only if you touch the signs: see "the doubly-negated frame" below.
+Only the ego-axis component is evidence, so the estimate falls back to ego's
+own grade as the heading turns away:
+
+```python
+m1 = m0 * sin(yaw_diff)**2 - tan(target_pitch) * cos(yaw_diff)
+```
+
+At `yaw_diff = 0` that is the target's grade, at 180 deg it is the same grade
+read backwards, and at 90 deg it is exactly `m0`, i.e. no evidence and no
+suppression. **Roll carries no usable cross-grade** (corr 0.26, slope 0.107
+against ego pitch on near-perpendicular traffic), so it is only used to
+detect an unusable pose.
+
+This is the test that catches the reported false positive: a hill running
+down into a low bridge points ego's tangent straight at the traffic
+underneath, so the height residual is small and only the target sitting on a
+*flat* road gives it away.
+
+**3. Target-perspective fallback.** Both tests above start from ego's pitch,
+so both inherit whatever ego's pitch gets wrong. The fallback runs the
+*target's* own tangent back to ego instead, and rescues the vehicle when it
+lands on ego's road:
+
+```python
+abs(dy - m1 * s) <= 2.0 + 0.03 * abs(s)
+```
+
+It is consulted only after the band or the grade test has already failed, and
+only when `m1` was actually **observed**: past `_MIN_GRADE_ALIGN_COS` the
+target's heading carries no along-ego grade, `m1` collapses to `m0`, and the
+expression degenerates into the ego tangent it exists to be independent of.
+Gating on that is load-bearing, not tidiness: ungated it re-admits a
+perpendicular vehicle under a bridge whenever ego is pitched down at it, which
+is the original false positive.
+
+### The doubly-negated frame: do not "fix" one sign
+
+Every quantity in this section runs with the opposite sign to the physical one,
+and they cancel in pairs. Measured against ground truth (ego's own `dy/ds`
+along the direction it actually travelled, 870 clips):
+
+| quantity | truth | what the gate uses |
+|---|---|---|
+| telemetry `rotationY` | **is** the grade, +ve = climbing (slope +0.990, corr +0.972) | `thread.py` publishes `ego_pitch_rad = -rotationY`, so `m0 = -grade` |
+| traffic euler pitch | **is** the grade (co-dir slope +0.869, corr +0.916) | `target_grade` negates it, so `m1 = -grade` |
+| forward range | ego forward is `-(dx·sin+dz·cos)` (slope −0.999, corr −1.000) | `ElevationGate.step` builds `s = +(dx·sin+dz·cos)`, so `s = -forward` |
+
+Every expression pairs two of them, so the frame is exactly invariant:
+`predict` is `m0·s` plus an even `s²` term; `required_curvature` has
+`dev = dy - m0·s` and `dm/s` where `dm` and `s` both flip; `_fallback_holds` is
+`|dy - m1·s|`; everything else uses `abs(s)`.
+
+**Verified, not argued.** Running the gate twice per frame, once as shipped and
+once with all three un-negated together, gives identical suppressed-id sets on
+**71,419 of 71,419 frames** over 250 clips. Partial flips are destructive:
+pitch alone drops 0.23 % of shallow leads at 3+ deg grade, the forward axis
+alone drops 60 %. If you change one sign here you must change all three, and
+the only thing you win is readability.
+
+The one place the negation does **not** cancel is gravity, which has nothing to
+pair against: see the slope term in `core/aeb/README.md`. `MAX_EGO_GRADE` is
+public because AEB applies the same plausibility bound to it.
+
+### Ego grade is smoothed, and absurd pitch reads level
+
+A truck pitches on its suspension over level crossings, kerbs and potholes;
+the road under it does not. Ego grade is therefore an EMA
+(`_GRADE_EMA_ALPHA` 0.15 per frame at radar's fixed 30 Hz, so a one-frame
+spike moves it by a seventh), and any reading past `MAX_EGO_GRADE` (0.18) is
+discarded as level rather than clamped. Measured `|ego pitch|` p100 over the
+corpus is 0.126, so 0.18 is above anything real and a larger reading is
+always garbage. Without this, a measured 88 deg/s bounce put `m0` at +0.42 and
+the prediction at **+34 m** at 80 m range, which dropped every lead ahead.
+
+### Failsafes
+
+The gate suppresses, so a wrong suppression is a missed collision. Every
+uncertain path fails open:
+
+- **Unusable target rotation** (zero quaternion, roll > 15 deg, pitch >
+  20 deg: a wreck, a spun or jackknifed rig) drops `m1` back to `m0`, which
+  reduces the test to the band alone. Wrecks keep their pipeline seat.
+- **Unusable ego pose**: non-finite pitch, or a grade past 0.18, reads level;
+  everything else is smoothed before use.
+- **Missing or absurd `size.height`** skips the datum and widens the band by
+  the full plausible datum instead. Height is clamped to 0.5-5.0 m before it
+  scales anything.
+- **Unusable ego history** (short span, fit rms > 0.15 m, curvature past
+  0.01, a teleport) drops the curvature term, leaving the tangent.
+- **The target-perspective fallback** is a second opinion that never
+  suppresses, only rescues, and it is inert whenever the target's grade was
+  not actually observed.
+- **Persistence.** A *marginal* failure must repeat for
+  `SUPPRESS_CONFIRM_FRAMES` (3, i.e. 100 ms at 30 Hz) before the id is
+  suppressed, and one passing frame clears the count. A single rotation or
+  pitch glitch therefore cannot drop a target. A **gross** failure (past
+  twice the bar, or past the 20 m hard cap) suppresses on the first frame,
+  so a real bridge is not admitted for three frames while the counter runs.
+- **Latched AEB threats bypass the gate entirely** (`core/aeb/thread.py`
+  subtracts `_latched_threat_ids`): once AEB is braking for a target, no
+  elevation reading may take it away.
+
+### Measured effect
+
+250 clips, per vehicle-frame, old gate vs new.
+
+Candidate leads (co-directional, moving, within 6 m laterally, 10-150 m)
+dropped by the gate. This is the ACC tracking-loss defect:
+
+| ego speed | n | old | new |
+|-----------|---|-----|-----|
+| 0-50 km/h | 15801 | 1.240 % | 0.196 % |
+| 50-70 | 12890 | 1.808 % | 0.000 % |
+| 70-85 | 7874 | 1.461 % | 0.000 % |
+| 85+ | 7114 | **4.062 %** | **0.000 %** |
+
+| \|ego grade\| | n | old | new |
+|---------------|---|-----|-----|
+| < 1 deg | 28035 | 0.571 % | 0.000 % |
+| 1-3 deg | 11381 | 1.678 % | 0.193 % |
+| 3+ deg | 4263 | **11.307 %** | **0.211 %** |
+
+Widening the same set to 9 m laterally and every range band, 55,915
+lead-frames: dropped **1.89 % -> 0.09 %**, and at 110-160 m
+**8.31 % -> 0.00 %**.
+
+### The three conditions that broke the first version
+
+In-game testing found lead loss at level crossings, cresting a hill onto
+standing traffic, and tight descending corners. Splitting every lead-frame by
+how far the target sits from ego's road plane localises all three, and shows
+what the fix has to be measured against. `shallow` (within 4 m) is the traffic
+you actually follow; `deep` is bridge decks and switchback levels.
+
+| condition | n | old, shallow | now, shallow | old, deep | now, deep |
+|-----------|---|--------------|--------------|-----------|-----------|
+| all | 44012 / 2760 | 1.416 % | **0.005 %** | 8.44 % | 1.88 % |
+| calm and flat | 20262 / 173 | 0.000 % | 0.000 % | 70.5 % | 0.00 % |
+| ego pitch transient | 498 / 62 | 2.811 % | **0.000 %** | 17.7 % | 14.5 % |
+| cresting | 3664 / 580 | 0.000 % | 0.000 % | 13.1 % | 6.03 % |
+| tight descent | 55 / 41 | 0.000 % | 0.000 % | 100 % | 85.4 % |
+
+Read the split before reacting to a headline number. The tight-descent bucket
+looked catastrophic at 42.7 % of all its lead-frames, but **every one of those
+drops was a deep target**: traffic 9 to 10 m below on the switchback level of
+a hairpin, which is not reachable in the range being tested and which the gate
+is right to drop. No shallow lead was ever dropped in a tight descent, before
+or after. The genuine regressions were the transient bucket (2.8 % of shallow
+leads) and the deep-target rates generally.
+
+**An ego-curvature abstain was built for the hairpin case and rejected.**
+Switching the tests off past 25 m whenever ego path curvature exceeded a
+threshold took the tight-descent bucket to zero, but it cost a false warn on a
+labelled clip (118d02c9), and a bisect pinned that flip on the abstain alone.
+The threshold cannot be set safely: that clip runs a twisty descent at
+`|kappa|` p50 0.0166 / max 0.0339, overlapping the hairpin it was meant to
+catch. Since the split above shows the hairpin drops were correct anyway, the
+escape bought nothing real. Do not reintroduce it.
+
+Traffic whose road surface is more than 3 m below ego's, inside 80 m: the
+under-bridge population, 38,190 rows. Suppression **46.9 % -> 69.8 %**
+overall, and by range **67.2 -> 98.5 %** (8-20 m), **63.2 -> 95.5 %**
+(20-30 m), 45.8 -> 76.8 % (30-45 m), 41.8 -> 60.8 % (45-60 m),
+34.0 -> 45.7 % (60-80 m). Total suppression across all tracked vehicles
+*falls* (18.0 % -> 13.0 %): the gate redistributes rather than tightening,
+trading 27.9 -> 4.7 % at 110-160 m for 15.7 -> 19.8 % inside 20 m. Of the
+new gate's suppressions, 70 % come from the band, 18 % from the grade test
+and 12 % from the hard cap.
+
+Widening the band and adding the fallback cost some of this: before those
+changes the same measurement read 72.8 % overall and 99.8 % inside 20 m. That
+is the price of taking shallow-lead loss to zero in the table above, and it is
+paid almost entirely beyond 30 m, where AEB is not the thing at stake.
+
+**The residual is deliberate.** Beyond ~45 m a perpendicular vehicle a few
+metres below ego is genuinely ambiguous: the same geometry describes a real
+lead on a descending road, and the target's own pitch carries no ego-axis
+grade at 90 deg. Closing that gap needs a traffic-anchored elevation profile
+(other vehicles corroborating the road ahead), which is not built here.
+
+Choosing `_K_FLOOR` on band-passing rows over 250 clips (440,309 rows,
+54,181 of them co-directional moving leads, 40,724 more than 3 m below):
+
+| floor | leads lost | below-road caught |
+|-------|-----------|-------------------|
+| 0.012 | 0.000 % | 0.37 % |
+| 0.010 | 0.000 % | 0.80 % |
+| 0.008 | 0.000 % | 1.56 % |
+| **0.006** | **0.009 %** | **3.26 %** |
+| 0.004 | 0.170 % | 11.86 % |
+
+0.006 is shipped: it gives the grade test roughly nine times the authority of
+0.012 for five lost lead-frames in 54,181, and it clears the hill-into-bridge
+case (`k_req` 0.0117) with margin.
+
+AEB clip corpus, 636 labelled clips: verdict counts **identical** to the
+pre-gate baseline (FN 48, FP 18, false-warn 9, late 7, TN 331, TP 223). Three
+clips changed at all, all staying in their class (total cost +18.34 ->
++19.32). ACC corpus over 120 clips: in-corridor moving frames 52,268 ->
+53,549, lead frames 14,334 -> 14,420, stationary false-lock rate 4.11 % ->
+3.96 %, hook p90 1.20 -> 0.97 s.
+
+The corpus holds no bridge clip, so it can only show the absence of
+regression, never the fix. Both reported symptoms need an in-game check.
+
+---
+
+## 16. Ego Pose and Traffic Share One Game Frame
+
+### The defect
+
+Until September 2026 radar paired a traffic buffer read fresh at the radar tick
+with an ego pose copied from `telemetry_thread`, which polls SCS telemetry at
+50 Hz on its own schedule. Ego and traffic both move in whole 1/60 s physics
+steps: ego advances `speed / 60` per step (speed read at the end of the step),
+and every AI car in one buffer advances the same number of steps. The ego copy
+trailed the traffic snapshot by 0 to 3 steps, changing frame to frame, so range
+to every target carried `v_ego * lag / 60`: about 0.4 m per step at 90 km/h,
+plus a mean bias of roughly one step because ego always read behind itself. The
+same stale sample supplied `simulatedTime`, so the kinematics clock jittered
+against the positions it was timing.
+
+Range residual against a smooth fit on the step clock, 360-clip sample:
+
+| | SP p50 / p90 | TMP p50 / p90 |
+|---|---|---|
+| recorded pairing | 0.144 / 0.23 m | 0.152 / 0.27 m |
+| re-paired onto the traffic step | 0.001 / 0.003 m | 0.010 / 0.13 m |
+
+Much of the "publish jitter" in §7 ("No floor on `acceleration`") is timestamp
+error of this kind. AI raw-speed third-difference sigma over 40 SP clips (642
+tracks), replay on the old wall clock against the rebuilt step clock: p50 0.048 ->
+**0.024** m/s, p90 0.247 -> **0.075**. Hard-brake transient latches on tracks whose
+buffer speed never moved more than 0.5 m/s: 54 -> **6** across 122 tracks.
+
+### The fix
+
+`core/radar/scs_pose.py` reads the timing-critical fields (position, yaw, pitch,
+speed, `simulatedTime`, `paused`) straight from the SCS telemetry block at fixed
+offsets, identical in plugin revisions 10 and 12 and cross-checked against
+`truck_telemetry` when the block opens. `RadarThread._sample_traffic_and_pose`
+reads `simulatedTime`, copies the traffic and parked buffers
+(`TrafficReader.copy_raw`), then reads the pose; if `simulatedTime` moved in
+between, it retries once. `read_raw` decodes the copy afterwards, so decoding
+cost never sits between the two reads. Steering, trailer, mass, wheels and
+blinkers still come from `telemetry_thread`: a step of staleness costs them
+nothing. If the block cannot be opened, or its revision or offsets are not
+recognised, radar keeps the telemetry thread pose and logs a warning once.
+
+**Not verified in game yet:** that the ETS2LA traffic plugin and SCS telemetry
+publish in the same game frame, and that `simulatedTime` advances exactly 1/60 s
+per step. A constant one-frame offset between the two plugins would not jitter,
+and replay's legacy re-pairing lands on the same convention, so old and new clips
+would still agree. Check with one SP drive: per-frame ego and traffic step counts
+should match on nearly every frame (38 % did before).
+
+### Sub-frames on the step lattice
+
+On the simulated clock `dt` is a multiple of 1/60 s, and three steps land exactly
+on `_LOCATION_UPDATE_FREQUENCY` (0.05 s), where float rounding picked the branch.
+`is_sub_frame` adds `_SUB_FRAME_EPS_S` so exactly three steps is always a
+sub-frame. That keeps full updates at four steps or more, the ~70 ms cadence the
+filter chain was tuned on with ~28 Hz reads. The other side of the lattice (three
+steps runs the chain) was measured: it lost labelled positives this side keeps,
+among them `3224c16c` (stopped car 14.7 m ahead at 44 km/h), `403e9c4f`,
+`1a4fa80f`, `4d8f47a2` and `b6f9a8c8`.
+
+---
+
+---
+
+*Source: `core/radar/traffic.py`, `core/radar/reader.py`, `core/radar/thread.py`, `core/radar/ego_path.py`: LD-Tech / MonoCruise.*
+

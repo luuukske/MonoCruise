@@ -1,0 +1,762 @@
+"""MonoCruise – Main application window. Assembles banner, settings panel, gear button,..."""
+from __future__ import annotations
+
+import logging
+import os
+import time
+from typing import TYPE_CHECKING
+
+from PySide6.QtCore import (
+    QEvent,
+    QEasingCurve,
+    QParallelAnimationGroup,
+    QPropertyAnimation,
+    Qt,
+    QTimer,
+    Signal,
+)
+from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+    QGraphicsOpacityEffect,
+)
+
+from core.speed_units import display_from_ms, format_kmh, unit_label
+from core.thread_management.registry import registry
+from core.usage_hours import (
+    RESET_EXEMPT_FIELDS,
+    UsageTracker,
+    prompt_is_due,
+    record_prompt_dismissed,
+)
+from ui.cc_panel.main import cc_panel as CcPanel
+from ui.main_window.banner import BannerState, BannerWidget
+from ui.main_window.confirmation_overlay import show_confirmation
+from ui.main_window.consent_overlay import show_consent
+from ui.main_window.constants import (
+    APP_NAME,
+    SETTINGS_PANEL_WIDTH,
+    STYLESHEET,
+    WINDOW_HEIGHT,
+    WINDOW_WIDTH,
+)
+from ui.main_window.settings_panel import SettingsPanel
+from ui.main_window.support_overlay import show_support
+from ui.overlay_topmost import OVERLAY_KEEP_MS, reassert_topmost
+
+_CC_LEAD_SPEED_MIN_INTERVAL_S = 0.5
+
+# The cruise panel stays up this long after the game SDK drops, so a single
+# failed telemetry read does not blink it off.
+_CC_PANEL_DISCONNECT_GRACE_S = 3.0
+
+# The support prompt waits this long after the window becomes visible, so it
+# never lands on top of a window the user is still bringing up.
+_SUPPORT_PROMPT_DELAY_S = 3.0
+
+if TYPE_CHECKING:
+    from core.settings import Settings
+
+logger = logging.getLogger(__name__)
+
+_PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+
+_BANNER_STATE_NAMES: dict[BannerState, str] = {
+    BannerState.WAITING: "waiting",
+    BannerState.CONNECTED: "connected",
+    BannerState.LOST: "lost",
+}
+
+
+class MonoCruiseWindow(QMainWindow):
+    """Top‑level MonoCruise window (700×500, dark theme). Emits ``window_closed`` when the..."""
+
+    # Signal emitted when the window is closed by the user
+    window_closed = Signal()
+
+    def __init__(self, settings: "Settings", version: str = "v2.0.0") -> None:
+        super().__init__()
+        self._settings = settings
+        self._version = version
+        self._closing = False
+        # Startup visibility is decided lazily once telemetry has produced a
+        # first result; until then the window stays hidden.
+        self._startup_visibility_applied = False
+        self._open_on_taskbar = False
+
+        # Support prompt: usage accrues whenever the game is connected, the
+        # prompt itself only appears on a window the user can actually see.
+        self._usage = UsageTracker(settings)
+        self._support_overlay = None
+        self._support_prompt_done = False
+        self._support_visible_since: float | None = None
+
+        # Window properties
+        self.setWindowTitle(APP_NAME)
+        self.setMinimumSize(WINDOW_WIDTH, WINDOW_HEIGHT)
+        self.resize(WINDOW_WIDTH, WINDOW_HEIGHT)
+        self.setStyleSheet(STYLESHEET)
+
+        icon_path = os.path.join(_PROJECT_ROOT, "icon.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
+        # Central widget
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(5, 5, 5, 5)
+        root.setSpacing(0)
+
+        # Banner
+        self._banner = BannerWidget()
+        root.addWidget(self._banner)
+
+        # Body (settings panel + right area)
+        body = QWidget()
+        body_lay = QHBoxLayout(body)
+        body_lay.setContentsMargins(0, 5, 0, 0)
+        body_lay.setSpacing(0)
+
+        self._settings_panel = SettingsPanel(
+            self,
+            self._settings,
+            on_save=self._save,
+            on_reset=self._reset_settings,
+            show_confirm=self._show_confirmation,
+            show_consent=self._show_consent,
+        )
+        body_lay.addWidget(self._settings_panel)
+
+        # Right area (gear icon at top‑left, rest is empty space)
+        right = QWidget()
+        right.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        right_lay = QVBoxLayout(right)
+        right_lay.setContentsMargins(0, 0, 0, 0)
+
+        self._gear_btn = QPushButton()
+        self._gear_btn.setObjectName("gearButton")
+        self._gear_btn.setFixedSize(32, 32)
+        gear_path = os.path.join(_PROJECT_ROOT, "ui/main_window/assets/gear.png")
+        if os.path.exists(gear_path):
+            self._gear_btn.setIcon(QIcon(QPixmap(gear_path)))
+            self._gear_btn.setIconSize(self._gear_btn.size())
+        else:
+            self._gear_btn.setText("⚙")
+        self._gear_btn.clicked.connect(lambda: self.toggle_settings())
+        right_lay.addWidget(
+            self._gear_btn,
+            alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+        )
+        right_lay.addStretch()
+        right_lay.addWidget(self._build_preview_placeholder())
+        right_lay.addStretch()
+        # Matches the gear button so the placeholder sits on the area's true centre.
+        right_lay.addSpacing(self._gear_btn.height())
+
+        body_lay.addWidget(right)
+        root.addWidget(body, 1)
+
+        # Version label (bottom‑right, absolute position)
+        self._version_label = QLabel(self._version, central)
+        self._version_label.setObjectName("versionLabel")
+        self._version_label.adjustSize()
+
+        # Settings panel slide animation
+        self._panel_anim = QPropertyAnimation(
+            self._settings_panel, b"maximumWidth"
+        )
+        self._panel_anim.setDuration(300)
+        self._panel_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        self._panel_opacity_effect = QGraphicsOpacityEffect(self._settings_panel)
+        self._settings_panel.setGraphicsEffect(self._panel_opacity_effect)
+        self._panel_opacity_effect.setOpacity(1.0)
+        self._panel_fade_anim = QPropertyAnimation(
+            self._panel_opacity_effect, b"opacity"
+        )
+        self._panel_fade_anim.setDuration(300)
+        self._panel_fade_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        self._panel_anim_group = QParallelAnimationGroup(self)
+        self._panel_anim_group.addAnimation(self._panel_anim)
+        self._panel_anim_group.addAnimation(self._panel_fade_anim)
+        self._panel_open = True
+
+        try:
+            self._shown_game = int(self._settings.last_game)
+        except (TypeError, ValueError):
+            self._shown_game = 1
+
+        # Registry polling timer (reads thread state → updates UI)
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(100)
+        self._poll_timer.timeout.connect(self._poll_threads)
+        self._poll_timer.start()
+
+        # NVIDIA overlay + alt-tab drops topmost while Qt still reports visible.
+        # Reassert slowly. Do not raise_() here: see ui/overlay_topmost.py.
+        self._overlay_keep_timer = QTimer(self)
+        self._overlay_keep_timer.setInterval(OVERLAY_KEEP_MS)
+        self._overlay_keep_timer.timeout.connect(self._reassert_overlays)
+        self._overlay_keep_timer.start()
+
+        # Cruise control floater (Qt main thread only; see CcPanel docstring)
+        self._cc_panel: CcPanel | None = None
+        self._cc_panel_scale_snap: float | None = None
+        self._cc_panel_update_snap: tuple | None = None
+        # Throttle lead-speed integer updates so telemetry jitter does not flicker the label.
+        self._cc_lead_speed_emit_val: int | None = None
+        self._cc_lead_speed_emit_ts: float = 0.0
+        # Panel only shows while the game runs (pause and menus included).
+        self._cc_game_seen_mono: float | None = None
+        self._cc_game_live: bool = False
+        self._init_cc_panel()
+
+        # Apply loaded settings to widgets
+        self._settings_panel.apply_settings(self._settings)
+
+    # Properties for external reads
+
+    @property
+    def banner_state_name(self) -> str:
+        return _BANNER_STATE_NAMES.get(self._banner.state, "waiting")
+
+    @property
+    def is_settings_open(self) -> bool:
+        return self._panel_open
+
+    @property
+    def is_open_on_taskbar(self) -> bool:
+        return self._open_on_taskbar
+
+    @staticmethod
+    def _build_preview_placeholder() -> QWidget:
+        """Stand-in for the live preview that will fill the right area."""
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(16, 0, 16, 0)
+        lay.setSpacing(4)
+
+        title = QLabel("Live preview coming soon")
+        title.setObjectName("previewTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(title)
+
+        subtitle = QLabel("You will be able to tune MonoCruise live in this panel.")
+        subtitle.setObjectName("previewSubtitle")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setWordWrap(True)
+        lay.addWidget(subtitle)
+        return box
+
+    # Settings panel slide
+
+    def toggle_settings(self, *, force_close: bool = False) -> None:
+        target_open = not self._panel_open
+        if force_close:
+            target_open = False
+        if target_open == self._panel_open:
+            return
+
+        self._panel_anim_group.stop()
+        if not target_open:
+            self._settings_panel.cancel_configuring()
+        else:
+            try:
+                self._settings_panel.refresh_autostart_availability()
+            except Exception:
+                logger.exception("settings panel: autostart availability refresh failed")
+        start = self._settings_panel.maximumWidth()
+        end = SETTINGS_PANEL_WIDTH if target_open else 0
+        self._panel_anim.setStartValue(start)
+        self._panel_anim.setEndValue(end)
+        opacity_start = self._panel_opacity_effect.opacity()
+        opacity_end = 1.0 if target_open else 0.0
+        self._panel_fade_anim.setStartValue(opacity_start)
+        self._panel_fade_anim.setEndValue(opacity_end)
+        self._panel_open = target_open
+        self._panel_anim_group.start()
+
+    # Persistence
+
+    def _save(self) -> None:
+        try:
+            self._settings.save()
+        except Exception:
+            logger.exception("Failed to save settings")
+
+    def _reset_settings(self) -> None:
+        """Put every public field back to its dataclass default, except the
+        usage history in RESET_EXEMPT_FIELDS."""
+        from core.settings import Settings
+
+        # Settings is a singleton, so Settings() returns the live instance and
+        # reading defaults off it would write each value back onto itself.
+        with self._settings._state_lock:
+            for name, field in self._settings.__dataclass_fields__.items():
+                if name.startswith("_") or name in RESET_EXEMPT_FIELDS:
+                    continue
+                setattr(self._settings, name, Settings._dataclass_field_default(field))
+        self._settings.save()
+        self._settings_panel.apply_settings(self._settings)
+
+    # Confirmation overlay
+
+    def _show_confirmation(self, title, message, on_confirm, on_cancel=None):
+        show_confirmation(
+            self.centralWidget(), title, message, on_confirm, on_cancel
+        )
+
+    def _show_consent(self, on_accept, on_decline=None):
+        show_consent(self.centralWidget(), on_accept, on_decline)
+
+    # Banner convenience
+
+    def set_banner_state(self, state: BannerState) -> None:
+        self._banner.set_state(state)
+
+    # Startup visibility
+
+    def apply_startup_visibility(self) -> None:
+        """Initial startup behaviour. Always lands in the taskbar first (minimised) so a..."""
+        from core.telemetry_thread.thread import sdk_shm_active
+
+        self.showMinimized()
+        self._startup_visibility_applied = False
+
+        if sdk_shm_active() is False:
+            self.show_normally()
+            self._startup_visibility_applied = True
+            logger.info("Main window shown on startup (no game SDK mapping)")
+            return
+
+        logger.info(
+            "Main window minimised on startup (waiting for telemetry result)"
+        )
+
+    # Thread‑state polling
+
+    def _poll_threads(self) -> None:
+        """Poll registry thread data every 100 ms and refresh UI."""
+        try:
+            self._apply_deferred_startup_visibility()
+        except Exception:
+            logger.exception("main window poll: startup visibility failed")
+
+        try:
+            self._sync_speed_unit()
+        except Exception:
+            logger.exception("main window poll: speed unit sync failed")
+
+        try:
+            self._sync_cc_panel()
+        except Exception:
+            logger.exception("main window poll: CC panel sync failed")
+
+        try:
+            self._sync_update_indicator()
+        except Exception:
+            logger.exception("main window poll: update indicator sync failed")
+
+        try:
+            self._sync_support_prompt()
+        except Exception:
+            logger.exception("main window poll: support prompt sync failed")
+
+    def _apply_deferred_startup_visibility(self) -> None:
+        """Restore the window once telemetry's first result is known. Startup always begins..."""
+        if self._startup_visibility_applied:
+            return
+        try:
+            telemetry = registry.get_thread("telemetry_thread")
+        except KeyError:
+            return
+        try:
+            with telemetry.data._lock:
+                connected = bool(telemetry.data.is_connected)
+                manual = bool(telemetry.data.manual_start)
+        except Exception:
+            return
+        if not connected and not manual:
+            return  # telemetry has not produced a first result yet
+
+        self._startup_visibility_applied = True
+        if connected:
+            # Keep the minimized taskbar presence from apply_startup_visibility.
+            if not self.isMinimized():
+                self.showMinimized()
+            logger.info("startup: game connected, keeping window minimized")
+            return
+
+        self.show_normally()
+        logger.info("startup: no game, showing window normally")
+
+    def _sync_support_prompt(self) -> None:
+        """Accrue connected game time, then offer the support card when it is due."""
+        connected = False
+        try:
+            telemetry = registry.get_thread("telemetry_thread")
+            with telemetry.data._lock:
+                connected = bool(telemetry.data.is_connected)
+        except (KeyError, AttributeError):
+            pass
+        except Exception:
+            logger.debug("support prompt: telemetry unreadable", exc_info=True)
+
+        now = time.monotonic()
+        usage_seconds = self._usage.tick(connected, now)
+
+        if self._support_prompt_done or self._support_overlay is not None:
+            return
+        # Minimised or hidden means the app was auto-launched behind the game,
+        # which is exactly when this prompt must stay out of the way.
+        if not self._open_on_taskbar:
+            self._support_visible_since = None
+            return
+        if self._support_visible_since is None:
+            self._support_visible_since = now
+        if (now - self._support_visible_since) < _SUPPORT_PROMPT_DELAY_S:
+            return
+
+        try:
+            dismissed = int(self._settings.support_prompts_dismissed)
+        except (TypeError, ValueError):
+            dismissed = 0
+        if not prompt_is_due(usage_seconds, dismissed):
+            return
+
+        self._support_prompt_done = True
+        self._show_support_prompt()
+
+    def _show_support_prompt(self) -> None:
+        """One prompt per run; dismissing it schedules the next threshold."""
+        def _on_dismiss() -> None:
+            self._support_overlay = None
+            record_prompt_dismissed(self._settings)
+
+        logger.info(
+            "support prompt shown after %.1f usage hours", self._usage.usage_hours
+        )
+        self._support_overlay = show_support(self.centralWidget(), _on_dismiss)
+
+    def show_normally(self) -> None:
+        """Restore from minimized and bring the window to the foreground."""
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._open_on_taskbar = True
+
+    def _sync_update_indicator(self) -> None:
+        """Reflect a pending update on the banner + settings update button. Both derive from the
+        cached boot-check result (core.update_check), so this is a cheap main-thread read with no
+        network. Idempotent: the widgets no-op when the state is unchanged."""
+        from core.update_check import update_is_pending
+
+        pending = update_is_pending()
+        self._banner.set_update_ready(pending)
+        self._settings_panel.set_update_available(pending)
+
+    @staticmethod
+    def _cc_scale_mult(raw: object) -> float:
+        """Map settings value (e.g. 1.5 or '150%') to cc_panel scale multiplier."""
+        if raw is None:
+            return 1.0
+        if isinstance(raw, (int, float)):
+            x = float(raw)
+            return max(0.25, min(4.0, x / 100.0 if x > 4.0 else x))
+        s = str(raw).strip()
+        if s.endswith("%"):
+            try:
+                return max(0.25, min(4.0, float(s[:-1].strip()) / 100.0))
+            except ValueError:
+                return 1.0
+        try:
+            x = float(s)
+            return max(0.25, min(4.0, x / 100.0 if x > 4.0 else x))
+        except ValueError:
+            return 1.0
+
+    @staticmethod
+    def _cc_panel_display_mode(raw: str | None) -> str:
+        if raw == "Speed limiter":
+            return "Speed limiter"
+        return "Cruise control"
+
+    # Lead truck heuristic (trailer / count / length). See ui/cc_panel/README.md.
+    _TRUCK_LENGTH_M: float = 6.0
+
+    @classmethod
+    def _classify_lead_as_truck(cls, vehicle) -> bool:
+        if getattr(vehicle, "is_trailer", False):
+            return True
+        if int(getattr(vehicle, "trailer_count", 0) or 0) >= 1:
+            return True
+        size = getattr(vehicle, "size", None)
+        length = float(getattr(size, "length", 0.0) or 0.0) if size is not None else 0.0
+        return length >= cls._TRUCK_LENGTH_M
+
+    def _init_cc_panel(self) -> None:
+        try:
+            scale = self._cc_scale_mult(self._settings.cc_panel_scaling)
+            self._cc_panel_scale_snap = scale
+            px = int(self._settings.panel_x) if self._settings.panel_x is not None else 100
+            py = int(self._settings.panel_y) if self._settings.panel_y is not None else 100
+            mode = self._cc_panel_display_mode(self._settings.cc_mode)
+            self._cc_panel = CcPanel(
+                format_kmh(None),
+                cc_mode=mode,
+                cc_enabled=False,
+                x_co=px,
+                y_co=py,
+                acc_enabled=bool(self._settings.acc_enabled),
+                scale_mult=scale,
+            )
+            # Saved panel_x/y may be from another resolution: pull onto a visible desktop.
+            self._cc_panel.ensure_on_screen()
+        except Exception:
+            logger.exception("failed to create cruise control panel")
+            self._cc_panel = None
+
+    def _sync_speed_unit(self) -> None:
+        """Settings widgets follow last_game. The cruise panel reads it on its own poll."""
+        try:
+            game = int(self._settings.last_game)
+        except (TypeError, ValueError):
+            game = 1
+        if game == self._shown_game:
+            return
+        self._shown_game = game
+        self._settings_panel.refresh_speed_unit()
+
+    def _sync_cc_panel(self) -> None:
+        """Drive CcPanel from registry + Settings (AEB blink, speed limiter colours, etc.)."""
+        if self._cc_panel is None:
+            return
+
+        cruise_enabled = False
+        target_kmh: float | None = None
+        try:
+            cr = registry.get_thread("cruise_control_thread")
+            if cr is not None and cr.is_alive():
+                with cr.data._lock:
+                    cruise_enabled = bool(cr.data.cc_enabled)
+                    t = cr.data.target_speed_kmh
+                    target_kmh = float(t) if t is not None else None
+        except (KeyError, AttributeError):
+            pass
+
+        aeb_warn = False
+        try:
+            aeb = registry.get_thread("aeb_thread")
+            if aeb is not None and aeb.is_alive():
+                with aeb.data._lock:
+                    aeb_warn = bool(aeb.data.AEB_warn)
+        except (KeyError, AttributeError):
+            pass
+
+        acc_locked = False
+        acc_truck = False
+        lead_speed: int | None = None
+        try:
+            acc = registry.get_thread("acc_thread")
+            if acc is not None and acc.is_alive():
+                with acc.data._lock:
+                    has_lead = bool(acc.data.has_lead)
+                    primary = acc.data.leads[0] if (has_lead and acc.data.leads) else None
+                if primary is not None:
+                    acc_locked = True
+                    acc_truck = self._classify_lead_as_truck(primary.vehicle)
+                    # Integer in the driver's unit, so the label changes only on a new number.
+                    lead_speed = display_from_ms(primary.effective_speed_ms)
+        except (KeyError, AttributeError):
+            pass
+
+        # Rate-limit lead speed changes; None first/last pass through immediately.
+        now_mono = time.monotonic()
+        last_val = self._cc_lead_speed_emit_val
+        if lead_speed is None or last_val is None:
+            emit_now = True
+        else:
+            emit_now = (now_mono - self._cc_lead_speed_emit_ts) >= _CC_LEAD_SPEED_MIN_INTERVAL_S
+        if emit_now:
+            self._cc_lead_speed_emit_val = lead_speed
+            self._cc_lead_speed_emit_ts = now_mono
+        lead_speed = self._cc_lead_speed_emit_val
+
+        s = self._settings
+        with s._state_lock:
+            show_ui = bool(s.show_cc_ui)
+            cc_mode_raw = s.cc_mode
+            scaling_raw = s.cc_panel_scaling
+            acc_on = bool(s.acc_enabled)
+            try:
+                gap_level = max(1, min(4, int(s.acc_gap_level)))
+            except (TypeError, ValueError):
+                gap_level = 2
+
+        # Show whenever "Show CC UI" is on and the game runs (pause / menu included).
+        self._cc_game_live = self._game_live_for_cc_panel(now_mono)
+        should_show = show_ui and self._cc_game_live
+
+        new_scale = self._cc_scale_mult(scaling_raw)
+        if self._cc_panel_scale_snap != new_scale:
+            self._cc_panel_scale_snap = new_scale
+            self._cc_panel.update_scaling(new_scale)
+
+        display_mode = self._cc_panel_display_mode(cc_mode_raw)
+        unit = unit_label()
+        text = format_kmh(target_kmh)
+
+        update_snap = (
+            text, display_mode, cruise_enabled, aeb_warn, acc_on,
+            acc_locked, acc_truck, gap_level, lead_speed, unit,
+        )
+        if self._cc_panel_update_snap != update_snap:
+            self._cc_panel_update_snap = update_snap
+            self._cc_panel.update(
+                new_text=text,
+                cc_mode=display_mode,
+                cc_enabled=cruise_enabled,
+                AEB_warn=aeb_warn,
+                acc_enabled=acc_on,
+                acc_locked=acc_locked,
+                distance_to_lead=gap_level,
+                acc_truck=acc_truck,
+                lead_vehicle_speed=lead_speed,
+                speed_unit=unit,
+            )
+
+        if should_show:
+            self._cc_panel.ensure_on_screen()
+            if not self._cc_panel.is_visible():
+                self._cc_panel.show()
+        elif self._cc_panel.is_visible():
+            self._cc_panel.hide()
+
+    def _reassert_overlays(self) -> None:
+        """Every 5 s, put enabled overlays back above the game. See overlay_topmost.py."""
+        if self._closing:
+            return
+        try:
+            self._reassert_cc_panel()
+        except Exception:
+            logger.exception("overlay keep: cruise panel failed")
+        try:
+            self._reassert_bar()
+        except Exception:
+            logger.exception("overlay keep: pedal bar failed")
+        try:
+            self._reassert_popup()
+        except Exception:
+            logger.exception("overlay keep: popup failed")
+
+    def _reassert_cc_panel(self) -> None:
+        panel = self._cc_panel
+        if panel is None:
+            return
+        with self._settings._state_lock:
+            show_ui = bool(self._settings.show_cc_ui)
+        if not show_ui or not self._cc_game_live:
+            return
+        if not panel.is_visible():
+            panel.show()
+        panel.reassert_topmost()
+
+    def _game_live_for_cc_panel(self, now_mono: float) -> bool:
+        """True while the game SDK is connected, held for a short grace after it drops."""
+        connected = False
+        try:
+            telemetry = registry.get_thread("telemetry_thread")
+            with telemetry.data._lock:
+                connected = bool(telemetry.data.is_connected)
+        except (KeyError, AttributeError):
+            pass
+        except Exception:
+            logger.debug("cc panel: telemetry unreadable", exc_info=True)
+        if connected:
+            self._cc_game_seen_mono = now_mono
+            return True
+        seen = self._cc_game_seen_mono
+        return seen is not None and (now_mono - seen) < _CC_PANEL_DISCONNECT_GRACE_S
+
+    def _reassert_bar(self) -> None:
+        try:
+            bar = registry.get("visualization_bar")
+        except KeyError:
+            return
+        ensure = getattr(bar, "ensure_present", None)
+        if ensure is not None:
+            ensure()
+        reassert_topmost(bar)
+
+    def _reassert_popup(self) -> None:
+        from ui.popup.popup_window import PopupWindow
+
+        popup = PopupWindow._instance
+        if popup is None:
+            return
+        popup.reassert_if_showing()
+
+    # Overrides
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "_version_label"):
+            cw = self.centralWidget()
+            self._version_label.adjustSize()
+            self._version_label.move(
+                cw.width() - self._version_label.width() - 8,
+                cw.height() - self._version_label.height() - 4,
+            )
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # showMinimized() also fires showEvent; only "open on taskbar" when
+        # the window is actually visible and not minimized.
+        self._open_on_taskbar = self.isVisible() and not self.isMinimized()
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._open_on_taskbar = False
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            self._open_on_taskbar = self.isVisible() and not self.isMinimized()
+
+    def closeEvent(self, event) -> None:
+        """Handle window close: save settings, stop polling, signal shutdown."""
+        if self._closing:
+            event.accept()
+            return
+        self._closing = True
+        self._open_on_taskbar = False
+
+        self._poll_timer.stop()
+        self._overlay_keep_timer.stop()
+        if self._cc_panel is not None:
+            try:
+                self._cc_panel.stop()
+            except Exception:
+                logger.exception("failed to stop cruise control panel")
+            self._cc_panel = None
+        try:
+            self._settings.save()
+        except Exception:
+            logger.exception("Failed to save settings on close")
+
+        logger.info("Window closeEvent: emitting window_closed signal")
+        self.window_closed.emit()
+        event.accept()

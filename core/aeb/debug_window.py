@@ -1,0 +1,777 @@
+"""AEB debug visualisation: PySide6 top-down radar view (ego-locked)."""
+
+from __future__ import annotations
+
+import math
+import logging
+
+from PySide6.QtCore import Qt, QTimer, QPointF, QRectF
+from PySide6.QtGui import (
+    QPainter, QColor, QPen, QBrush, QPolygonF, QFont,
+    QRadialGradient, QPaintEvent,
+)
+from PySide6.QtWidgets import QWidget
+
+from core.thread_management.registry import registry
+from .thread import AEBState, AEBSnapshot
+from .debug_grid import draw_ground_markers, MAJOR_CLR as _MARKER_CLR
+from core.radar.traffic import ArcPath
+
+logger = logging.getLogger(__name__)
+
+_WIN_W = 1200
+_WIN_H = 700
+_BG = QColor(15, 15, 20)
+_GRID_MAJOR = QColor(40, 40, 50)
+_GRID_MINOR = QColor(28, 28, 35)
+_GRID_STEP_MAJOR = 25.0  # metres
+_GRID_STEP_MINOR = 5.0
+
+_EGO_CLR = QColor(70, 170, 255)
+_EGO_CORRIDOR = QColor(70, 170, 255, 50)
+_SAFE_CLR = QColor(80, 210, 130)
+_DANGER_CLR = QColor(240, 55, 55)
+_WARN_CLR = QColor(245, 185, 40)
+_SUPPRESSED_CLR = QColor(100, 100, 115)
+_BRAKE_SUPP_CLR = QColor(255, 140, 40)
+_EVASION_FILTER_CLR = QColor(0, 200, 200)
+_EVASION_FILTER_CORRIDOR = QColor(0, 200, 200, 25)
+_EVASION_FILTERED_CLR = QColor(0, 200, 200, 140)
+_TRAILER_CLR = QColor(180, 140, 80)
+_EGO_TRAILER_CLR = QColor(55, 130, 215)
+_ACC_LEAD_CLR = QColor(255, 80, 230)           # primary ACC lead: magenta
+_ACC_CANDIDATE_CLR = QColor(180, 110, 220)     # top-3 non-primary
+_ACC_CORRIDOR = QColor(255, 80, 230, 35)
+_HIT_CLR = QColor(255, 30, 30)
+_TEXT = QColor(200, 200, 215)
+_HUD_BG = QColor(0, 0, 0, 160)
+_HUD_BORDER = QColor(60, 60, 70)
+_TRAIL_ARC_CLR = QColor(130, 130, 200, 90)   # faint dashed line behind each vehicle
+_TRAIL_CROSS_CLR = QColor(255, 200, 80, 180) # ego-row crossing marker
+_TRAIL_ARC_HALF_SPAN_M = 50.0
+_TRAIL_ARC_SAMPLES = 32
+_ROAD_MODEL_SAMPLES = 24
+
+_EGO_TRAILER_HALF_W = 1.25
+_EGO_TRAILER_HALF_L = 6.8
+
+_REFRESH_MS = 33
+_PPM = 5.5
+_ARC_SAMPLES = 20
+_CORRIDOR_FADE_SEGMENTS = 16
+
+
+def _w2e(wx: float, wz: float, ex: float, ez: float, ey: float) -> tuple[float, float]:
+    dx = wx - ex
+    dz = wz - ez
+    c = math.cos(-ey)
+    s = math.sin(-ey)
+    return (-dx) * c - dz * s, (-dx) * s + dz * c
+
+
+def _e2s(rx: float, rz: float, cx: float, cy: float) -> tuple[float, float]:
+    # Negated so ego forward points up on screen.
+    return cx - rx * _PPM, cy + rz * _PPM
+
+
+class AEBDebugWindow(QWidget):
+
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        *,
+        snapshot_provider=None,
+        acc_provider=None,
+        auto_refresh: bool = True,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("AEB Debug Radar")
+        self.setMinimumSize(500, 500)
+        self.resize(_WIN_W, _WIN_H)
+
+        # Snapshot seam: registry poll vs clip replay inject; ACC overlay None in replay.
+        self._snapshot_provider = snapshot_provider or self._fetch
+        self._acc_provider = acc_provider or self._fetch_acc
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self.update)
+        if auto_refresh:
+            self._timer.start(_REFRESH_MS)
+
+        self._font_main = QFont("Segoe UI", 10)
+        self._font_small = QFont("Segoe UI", 8)
+        self._font_hud_title = QFont("Segoe UI Semibold", 11)
+        self._font_label = QFont("Segoe UI", 7)
+
+    @staticmethod
+    def _fetch() -> AEBSnapshot | None:
+        try:
+            aeb = registry.get_thread("aeb_thread")
+        except KeyError:
+            return None
+        if aeb is None or not aeb.is_alive():
+            return None
+        return aeb.data.snapshot
+
+    @staticmethod
+    def _fetch_acc() -> dict | None:
+        """ACC overlay fields for debug draw (enabled, lead, components, corridor)."""
+        try:
+            acc = registry.get_thread("acc_thread")
+        except KeyError:
+            return None
+        if acc is None or not acc.is_alive():
+            return None
+        try:
+            with acc.data._lock:
+                leads = list(acc.data.leads)
+                top = [(ld.vehicle.id, ld.score, ld.dist_m) for ld in leads]
+                components = dict(acc.data.debug_components)
+                return {
+                    "enabled": bool(acc.data.enabled),
+                    "lead_id": int(acc.data.lead_id),
+                    "top_ids": {int(t[0]) for t in top},
+                    "top_leads": top,
+                    "dist": float(acc.data.lead_dist_m),
+                    "rel": float(acc.data.lead_rel_speed_ms),
+                    "score": float(acc.data.lead_score),
+                    "components": components,
+                    "blinker": float(acc.data.debug_blinker),
+                    "ego_kappa": float(acc.data.debug_ego_kappa),
+                    "corridor_half": float(acc.data.debug_corridor_half),
+                    "road_model": acc.data.debug_road_model,
+                }
+        except AttributeError:
+            return None
+
+    def _ws(self, wx: float, wz: float, ex: float, ez: float, ey: float) -> tuple[float, float]:
+        rx, rz = _w2e(wx, wz, ex, ez, ey)
+        return _e2s(rx, rz, self.width() / 2.0, self.height() * 0.75)
+
+    def _sw(self, sx: float, sy: float, ex: float, ez: float, ey: float) -> tuple[float, float]:
+        """Screen pixel back to world metres. The ego rotation is its own inverse."""
+        rx = (self.width() / 2.0 - sx) / _PPM
+        rz = (sy - self.height() * 0.75) / _PPM
+        c = math.cos(-ey)
+        s = math.sin(-ey)
+        return ex - rx * c - rz * s, ez - rx * s + rz * c
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        snap = self._snapshot_provider()
+        acc = self._acc_provider()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.fillRect(self.rect(), _BG)
+
+        if snap is None:
+            p.setPen(QPen(_TEXT))
+            p.setFont(self._font_main)
+            p.drawText(self.rect(), Qt.AlignCenter, "AEB thread not running")
+            p.end()
+            return
+
+        ex, ez, ey = snap.ego_x, snap.ego_z, snap.ego_yaw
+        cx, cy = self.width() / 2.0, self.height() * 0.75
+
+        self._draw_grid(p, cx, cy)
+        draw_ground_markers(
+            p,
+            lambda wx, wz: self._ws(wx, wz, ex, ez, ey),
+            lambda sx, sy: self._sw(sx, sy, ex, ez, ey),
+            float(self.width()), float(self.height()),
+        )
+
+        # Nearest half of vehicles get full annotations; threats and ACC lead always full.
+        by_dist = sorted(
+            snap.vehicles,
+            key=lambda v: (v["x"] - ex) ** 2 + (v["z"] - ez) ** 2,
+        )
+        detailed_ids = {v["vid"] for v in by_dist[: (len(by_dist) + 1) // 2]}
+
+        # First pass: fitted trail arcs behind all vehicles, so labels
+        # and bodies always sit on top of the dashed line.
+        if acc is not None:
+            self._draw_road_model(p, acc, ex, ez, ey, snap.ego_yaw)
+            for v in snap.vehicles:
+                if v["vid"] in detailed_ids or v["vid"] == acc["lead_id"]:
+                    self._draw_trail_arc(p, v["vid"], acc, ex, ez, ey)
+
+        for v in snap.vehicles:
+            vid = v["vid"]
+            is_danger = vid in snap.colliding_ids
+            is_brake_supp = vid in snap.braking_worsens_ids
+            is_evasion_filtered = vid in snap.evasion_filtered_ids
+
+            is_acc_lead = acc is not None and acc["lead_id"] == vid
+            is_acc_top = acc is not None and vid in acc["top_ids"] and not is_acc_lead
+
+            detailed = vid in detailed_ids or is_danger or is_acc_lead
+
+            if is_evasion_filtered:
+                body_clr, corr_clr = _EVASION_FILTERED_CLR, QColor(_EVASION_FILTERED_CLR)
+            elif is_danger and is_brake_supp:
+                body_clr, corr_clr = _BRAKE_SUPP_CLR, QColor(_BRAKE_SUPP_CLR)
+            elif is_danger:
+                body_clr, corr_clr = _DANGER_CLR, QColor(_DANGER_CLR)
+            elif is_acc_lead:
+                body_clr, corr_clr = _ACC_LEAD_CLR, QColor(_ACC_LEAD_CLR)
+            elif is_acc_top:
+                body_clr, corr_clr = _ACC_CANDIDATE_CLR, QColor(_ACC_CANDIDATE_CLR)
+            else:
+                body_clr, corr_clr = _SAFE_CLR, QColor(_SAFE_CLR)
+
+            arcs = snap.vehicle_arcs.get(vid)
+            if arcs is not None and detailed:
+                arc_list = arcs if isinstance(arcs, list) else [arcs]
+                corr_clr.setAlpha(20)
+                for arc in arc_list:
+                    self._draw_arc_corridor(p, arc, ex, ez, ey, corr_clr)
+
+            self._draw_vehicle_box(
+                p, v["x"], v["z"], v["yaw"],
+                v["half_w"], v["length"], v["is_tmp"],
+                ex, ez, ey, body_clr,
+            )
+
+            if detailed:
+                sx, sy = self._ws(v["x"], v["z"], ex, ez, ey)
+                spd = v.get("speed_kmh", 0.0)
+                is_trailer_veh = v.get("is_trailer", False)
+                kin_swapped = v.get("kinematics_swapped", False)
+                is_tmp_veh = v.get("is_tmp", False)
+                tag = "TR" if is_trailer_veh else ""
+                tag += ("/TMP" if is_tmp_veh else "/AI") if tag else ("TMP" if is_tmp_veh else "AI")
+                self._draw_label(p, sx, sy - 14, f"{tag} {spd:.0f}", body_clr)
+                if is_trailer_veh:
+                    if kin_swapped:
+                        kin_text, kin_clr = "kin:tractor", _SAFE_CLR
+                    elif not is_tmp_veh:
+                        kin_text, kin_clr = "kin:raw (not TMP)", _DANGER_CLR
+                    else:
+                        kin_text, kin_clr = "kin:raw (no tractor<30m)", _DANGER_CLR
+                    self._draw_label(p, sx, sy - 26, kin_text, kin_clr)
+                self._draw_acc_components(p, sx, sy, vid, acc)
+
+            for tr in v.get("trailers", []):
+                yaw = tr["yaw"]
+                self._draw_vehicle_box(
+                    p, tr["x"], tr["z"], yaw,
+                    tr["half_w"], tr["length"], tr["is_tmp"],
+                    ex, ez, ey, _TRAILER_CLR,
+                )
+                if detailed:
+                    trsx, trsy = self._ws(tr["x"], tr["z"], ex, ez, ey)
+                    tr_spd = tr.get("speed_kmh", 0.0)
+                    self._draw_label(p, trsx, trsy - 14, f"TR {tr_spd:.0f}", _TRAILER_CLR)
+
+        if snap.ego_arc is not None:
+            self._draw_arc_corridor(p, snap.ego_arc, ex, ez, ey, _EGO_CORRIDOR)
+
+        if snap.evasion_left_arc is not None:
+            self._draw_arc_corridor(
+                p, snap.evasion_left_arc, ex, ez, ey,
+                _EVASION_FILTER_CORRIDOR,
+                edge_color=_EVASION_FILTER_CLR, edge_width=1.0,
+            )
+        if snap.evasion_right_arc is not None:
+            self._draw_arc_corridor(
+                p, snap.evasion_right_arc, ex, ez, ey,
+                _EVASION_FILTER_CORRIDOR,
+                edge_color=_EVASION_FILTER_CLR, edge_width=1.0,
+            )
+
+        if snap.ego_has_trailer:
+            fx = -math.sin(ey)
+            fz = -math.cos(ey)
+            reach = snap.ego_half_l + _EGO_TRAILER_HALF_L
+            self._draw_ego_box(
+                p, ex - fx * reach, ez - fz * reach, ey,
+                _EGO_TRAILER_HALF_W, _EGO_TRAILER_HALF_L,
+                ex, ez, ey, _EGO_TRAILER_CLR,
+            )
+
+        self._draw_ego_box(
+            p, ex, ez, ey, snap.ego_half_w, snap.ego_half_l,
+            ex, ez, ey, _EGO_CLR,
+        )
+
+        if snap.aeb_state >= AEBState.WARN and snap.time_to_collision < 100:
+            self._draw_hit_marker(p, snap.hit_x, snap.hit_z, ex, ez, ey)
+
+        self._draw_hud(p, snap)
+        self._draw_acc_hud(p, acc)
+
+        p.end()
+
+    def _draw_acc_hud(self, p: QPainter, acc: dict | None) -> None:
+        hud_w = 310
+        hud_h = 122
+        hud_x = 10
+        hud_y = 223  # below main AEB HUD (203+10+10)
+
+        p.setPen(QPen(_HUD_BORDER, 1))
+        p.setBrush(QBrush(_HUD_BG))
+        p.drawRoundedRect(QRectF(hud_x, hud_y, hud_w, hud_h), 8, 8)
+
+        x = hud_x + 14
+        y = hud_y + 20
+
+        if acc is None:
+            p.setFont(self._font_hud_title)
+            p.setPen(QPen(QColor(120, 120, 135)))
+            p.drawText(QPointF(x, y), "ACC thread not running")
+            return
+
+        title_clr = _ACC_LEAD_CLR if acc["enabled"] else QColor(120, 120, 135)
+        p.setFont(self._font_hud_title)
+        p.setPen(QPen(title_clr))
+        state = "ACC tracking" if acc["enabled"] else "ACC disabled"
+        p.drawText(QPointF(x, y), state)
+
+        y += 20
+        p.setFont(self._font_main)
+        p.setPen(QPen(_TEXT))
+        if acc["lead_id"] >= 0:
+            p.drawText(
+                QPointF(x, y),
+                f"Lead #{acc['lead_id']}  d={acc['dist']:.1f} m  "
+                f"rel={acc['rel']*3.6:+.0f} km/h  s={acc['score']:+.1f}",
+            )
+        else:
+            p.drawText(QPointF(x, y), "Lead: —")
+
+        y += 18
+        p.setFont(self._font_small)
+        n_top = len(acc["top_leads"])
+        n_tracked = len(acc.get("components", {}))
+        p.drawText(QPointF(x, y), f"in-lane: {n_top}   scored tracks: {n_tracked}")
+
+        kappa = acc.get("ego_kappa", 0.0)
+        if abs(kappa) > 1e-6:
+            radius = 1.0 / abs(kappa)
+            radius_str = f"{radius:.0f}m"
+        else:
+            radius_str = "∞"
+        ch = acc.get("corridor_half", 0.0)
+        kappa_clr = _WARN_CLR if (abs(kappa) > 1e-6 and 1.0 / abs(kappa) < 400.0) else _TEXT
+        y += 14
+        p.setPen(QPen(kappa_clr))
+        p.drawText(
+            QPointF(x, y),
+            f"ego κ={kappa:+.4f} (R={radius_str})   ½lane={ch:.2f}m",
+        )
+
+        y += 14
+        p.setPen(QPen(_TEXT))
+        p.drawText(QPointF(x, y), f"blinker scalar: {acc.get('blinker', 0.0):+.2f}")
+
+    def _draw_acc_components(
+        self,
+        p: QPainter,
+        sx: float,
+        sy: float,
+        vid: int,
+        acc: dict | None,
+    ) -> None:
+        """Minimal per-vehicle ACC score label."""
+        if acc is None:
+            return
+        comp = acc.get("components", {}).get(vid)
+        if comp is None:
+            return
+
+        score = comp["score"]
+        in_path = comp["in_path"]
+        seen = comp.get("seen", True)
+        score_clr = _SAFE_CLR if score > 0 else (_WARN_CLR if score > -2 else _DANGER_CLR)
+        tag = f"s{score:+.1f}"
+        if in_path:
+            tag += " IN"
+        if not seen:
+            tag += " decay"
+        self._draw_label(p, sx, sy + 14, tag, score_clr)
+
+    def _draw_grid(self, p: QPainter, cx: float, cy: float) -> None:
+        max_r = max(self.width(), self.height()) / _PPM + _GRID_STEP_MAJOR
+
+        p.setPen(QPen(_GRID_MINOR, 0.5, Qt.DotLine))
+        p.setBrush(Qt.NoBrush)
+        d = _GRID_STEP_MINOR
+        while d < max_r:
+            if abs(d % _GRID_STEP_MAJOR) > 0.01:
+                r = d * _PPM
+                p.drawEllipse(QPointF(cx, cy), r, r)
+            d += _GRID_STEP_MINOR
+
+        p.setBrush(Qt.NoBrush)
+        d = _GRID_STEP_MAJOR
+        while d < max_r:
+            r = d * _PPM
+            p.setPen(QPen(_GRID_MAJOR, 1, Qt.DotLine))
+            p.drawEllipse(QPointF(cx, cy), r, r)
+            p.setPen(QPen(QColor(70, 70, 85)))
+            p.setFont(self._font_label)
+            p.drawText(QPointF(cx + 3, cy - r + 11), f"{d:.0f}m")
+            d += _GRID_STEP_MAJOR
+
+        p.setPen(QPen(_GRID_MAJOR, 0.5))
+        p.drawLine(QPointF(cx, 0), QPointF(cx, self.height()))
+        p.drawLine(QPointF(0, cy), QPointF(self.width(), cy))
+
+    def _draw_arc_corridor(
+        self, p: QPainter,
+        arc: ArcPath,
+        ex: float, ez: float, ey: float,
+        fill_color: QColor,
+        edge_color: QColor | None = None,
+        edge_width: float = 1.0,
+    ) -> None:
+        left, right = arc.sample_corridor(_ARC_SAMPLES)
+        if len(left) < 2:
+            return
+
+        s_left = [self._ws(x, z, ex, ez, ey) for x, z in left]
+        s_right = [self._ws(x, z, ex, ez, ey) for x, z in right]
+
+        poly = QPolygonF()
+        for sx, sy in s_left:
+            poly.append(QPointF(sx, sy))
+        for sx, sy in reversed(s_right):
+            poly.append(QPointF(sx, sy))
+
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(fill_color))
+        p.drawPolygon(poly)
+
+        if edge_color is None:
+            ec = QColor(fill_color)
+            ec.setAlpha(min(fill_color.alpha() + 60, 200))
+        else:
+            ec = QColor(edge_color)
+
+        n = len(s_left)
+        for i in range(n - 1):
+            fade = 1.0 - (i + 1) / n
+            alpha = int(ec.alpha() * fade)
+            c = QColor(ec)
+            c.setAlpha(max(alpha, 8))
+            pen = QPen(c, edge_width)
+            pen.setCapStyle(Qt.RoundCap)
+            p.setPen(pen)
+            p.drawLine(QPointF(*s_left[i]), QPointF(*s_left[i + 1]))
+            p.drawLine(QPointF(*s_right[i]), QPointF(*s_right[i + 1]))
+
+    def _draw_vehicle_box(
+        self, p: QPainter,
+        wx: float, wz: float, yaw: float,
+        hw: float, length: float, is_tmp: bool,
+        ex: float, ez: float, ey: float,
+        color: QColor,
+    ) -> None:
+        hl = length / 2.0
+        corners_local = [(-hw, -hl), (hw, -hl), (hw, hl), (-hw, hl)]
+
+        s = math.sin(-yaw)
+        c = math.cos(-yaw)
+        world_corners = [
+            (wx + lx * c - lz * s, wz + lx * s + lz * c)
+            for lx, lz in corners_local
+        ]
+
+        poly = QPolygonF()
+        for cw, cz in world_corners:
+            sx, sy = self._ws(cw, cz, ex, ez, ey)
+            poly.append(QPointF(sx, sy))
+
+        fill = QColor(color)
+        fill.setAlpha(140)
+        p.setBrush(QBrush(fill))
+        p.setPen(QPen(color, 1.5))
+        p.drawPolygon(poly)
+
+        cx_w, cz_w = wx, wz
+        flen = min(length * 0.4, 4.0)
+        tip_x = wx - flen * math.sin(yaw)
+        tip_z = wz - flen * math.cos(yaw)
+        scx, scy = self._ws(cx_w, cz_w, ex, ez, ey)
+        stx, sty = self._ws(tip_x, tip_z, ex, ez, ey)
+        p.setPen(QPen(QColor(255, 255, 255, 160), 1.5))
+        p.drawLine(QPointF(scx, scy), QPointF(stx, sty))
+
+    def _draw_ego_box(
+        self, p: QPainter,
+        wx: float, wz: float, yaw: float,
+        hw: float, hl: float,
+        ex: float, ez: float, ey: float,
+        color: QColor,
+    ) -> None:
+        fx = -math.sin(yaw)
+        fz = -math.cos(yaw)
+        rx_d = fz
+        rz_d = -fx
+
+        corners = [
+            (wx - rx_d * hw - fx * hl, wz - rz_d * hw - fz * hl),
+            (wx + rx_d * hw - fx * hl, wz + rz_d * hw - fz * hl),
+            (wx + rx_d * hw + fx * hl, wz + rz_d * hw + fz * hl),
+            (wx - rx_d * hw + fx * hl, wz - rz_d * hw + fz * hl),
+        ]
+
+        poly = QPolygonF()
+        for cw, cz in corners:
+            sx, sy = self._ws(cw, cz, ex, ez, ey)
+            poly.append(QPointF(sx, sy))
+
+        fill = QColor(color)
+        fill.setAlpha(170)
+        p.setBrush(QBrush(fill))
+        p.setPen(QPen(color, 2.0))
+        p.drawPolygon(poly)
+
+    def _draw_hit_marker(
+        self, p: QPainter,
+        hx: float, hz: float,
+        ex: float, ez: float, ey: float,
+    ) -> None:
+        sx, sy = self._ws(hx, hz, ex, ez, ey)
+
+        grad = QRadialGradient(QPointF(sx, sy), 18)
+        grad.setColorAt(0.0, QColor(255, 50, 50, 180))
+        grad.setColorAt(0.5, QColor(255, 50, 50, 60))
+        grad.setColorAt(1.0, QColor(255, 50, 50, 0))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(grad))
+        p.drawEllipse(QPointF(sx, sy), 18, 18)
+
+        r = 7
+        p.setPen(QPen(_HIT_CLR, 2.5))
+        p.drawLine(QPointF(sx - r, sy - r), QPointF(sx + r, sy + r))
+        p.drawLine(QPointF(sx - r, sy + r), QPointF(sx + r, sy - r))
+
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(_HIT_CLR))
+        p.drawEllipse(QPointF(sx, sy), 3, 3)
+
+    def _draw_road_model(
+        self, p: QPainter, acc: dict,
+        ex: float, ez: float, ey: float, ego_yaw: float,
+    ) -> None:
+        """ACC shared road centreline, drawn out to where its samples reach."""
+        road = acc.get("road_model")
+        if road is None or getattr(road, "confidence", 0.0) <= 0.0:
+            return
+        span = max(getattr(road, "support_s_m", 0.0), 20.0)
+        fwd_x = -math.sin(ego_yaw)
+        fwd_z = -math.cos(ego_yaw)
+        right_x = -fwd_z
+        right_z = fwd_x
+        poly = QPolygonF()
+        for i in range(_ROAD_MODEL_SAMPLES):
+            # Walked in arc length, so the line keeps going round a tight bend.
+            x, y = road.point_at(span * i / (_ROAD_MODEL_SAMPLES - 1))
+            wx = ex + x * fwd_x + y * right_x
+            wz = ez + x * fwd_z + y * right_z
+            sx, sy = self._ws(wx, wz, ex, ez, ey)
+            poly.append(QPointF(sx, sy))
+        alpha = int(60 + 120 * max(0.0, min(1.0, road.confidence)))
+        pen = QPen(QColor(120, 220, 160, alpha), 1.6, Qt.DashLine)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawPolyline(poly)
+
+    def _draw_trail_arc(
+        self, p: QPainter, vid: int, acc: dict,
+        ex: float, ez: float, ey: float,
+    ) -> None:
+        """Faint dashed ACC trail arc around the target (+ crossing marker if any)."""
+        comp = acc.get("components", {}).get(vid)
+        if comp is None or not comp.get("trail_valid", False):
+            return
+
+        pen = QPen(_TRAIL_ARC_CLR, 1.0, Qt.DashLine)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+
+        if comp.get("trail_is_straight", False):
+            px = comp["trail_point_x"]
+            pz = comp["trail_point_z"]
+            dx_ = comp["trail_dir_x"]
+            dz_ = comp["trail_dir_z"]
+            span = _TRAIL_ARC_HALF_SPAN_M
+            ax, ay = self._ws(px - span * dx_, pz - span * dz_, ex, ez, ey)
+            bx, by = self._ws(px + span * dx_, pz + span * dz_, ex, ez, ey)
+            p.drawLine(QPointF(ax, ay), QPointF(bx, by))
+        else:
+            cx = comp["trail_cx"]
+            cz = comp["trail_cz"]
+            R = comp["trail_R"]
+            px = comp["trail_point_x"]
+            pz = comp["trail_point_z"]
+            if R < 1e-3:
+                return
+            target_ang = math.atan2(pz - cz, px - cx)
+            half_sweep = min(_TRAIL_ARC_HALF_SPAN_M / R, math.pi)
+            poly = QPolygonF()
+            n = _TRAIL_ARC_SAMPLES
+            for i in range(n):
+                frac = i / (n - 1)
+                ang = target_ang + (frac - 0.5) * 2.0 * half_sweep
+                wx = cx + R * math.cos(ang)
+                wz = cz + R * math.sin(ang)
+                ssx, ssy = self._ws(wx, wz, ex, ez, ey)
+                poly.append(QPointF(ssx, ssy))
+            p.drawPolyline(poly)
+
+        if comp.get("trail_crossing_valid", False):
+            cwx = comp["trail_crossing_x"]
+            cwz = comp["trail_crossing_z"]
+            mx, my = self._ws(cwx, cwz, ex, ez, ey)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(_TRAIL_CROSS_CLR))
+            p.drawEllipse(QPointF(mx, my), 3.0, 3.0)
+
+    def _draw_label(
+        self, p: QPainter, sx: float, sy: float, text: str, color: QColor,
+    ) -> None:
+        p.setFont(self._font_label)
+        fm = p.fontMetrics()
+        tw = fm.horizontalAdvance(text)
+        th = fm.height()
+        bg = QColor(0, 0, 0, 130)
+        rect = QRectF(sx - tw / 2 - 3, sy - th + 2, tw + 6, th + 1)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(bg))
+        p.drawRoundedRect(rect, 3, 3)
+        tc = QColor(color)
+        tc.setAlpha(220)
+        p.setPen(QPen(tc))
+        p.drawText(QPointF(sx - tw / 2, sy), text)
+
+    def _draw_hud(self, p: QPainter, snap: AEBSnapshot) -> None:
+        hud_w = 310
+        hud_h = 203
+        hud_x = 10
+        hud_y = 10
+
+        p.setPen(QPen(_HUD_BORDER, 1))
+        p.setBrush(QBrush(_HUD_BG))
+        p.drawRoundedRect(QRectF(hud_x, hud_y, hud_w, hud_h), 8, 8)
+
+        x = hud_x + 14
+        y = hud_y + 22
+
+        if snap.aeb_state == AEBState.BRAKE:
+            title_clr = _DANGER_CLR
+            title = "⚠ AEB EMERGENCY BRAKE"
+        elif snap.aeb_state == AEBState.WARN:
+            title_clr = _WARN_CLR
+            title = "⚠ AEB WARNING"
+        else:
+            title_clr = _SAFE_CLR
+            title = "✓ AEB STANDBY"
+
+        strip_clr = QColor(title_clr)
+        strip_clr.setAlpha(80)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(strip_clr))
+        p.drawRoundedRect(QRectF(hud_x + 2, hud_y + 2, hud_w - 4, 24), 6, 6)
+
+        p.setFont(self._font_hud_title)
+        p.setPen(QPen(title_clr))
+        p.drawText(QPointF(x, y), title)
+
+        y += 26
+        p.setFont(self._font_main)
+        p.setPen(QPen(_TEXT))
+
+        kmh = snap.ego_speed * 3.6
+        tmp_sess = getattr(snap, "tmp_traffic_session", False)
+        sess_txt = "TMP" if tmp_sess else "SP"
+        p.drawText(QPointF(x, y), f"Speed: {kmh:.0f} km/h   Session: {sess_txt}")
+
+        y += 18
+        nv = len(snap.vehicles)
+        nc = len(snap.colliding_ids)
+        ns = len(snap.suppressed_ids)
+        nb = len(snap.braking_worsens_ids)
+        p.drawText(QPointF(x, y), f"Tracked: {nv}   Threats: {nc}   Suppressed: {ns}")
+
+        y += 18
+        if snap.aeb_state >= AEBState.WARN:
+            p.setPen(QPen(title_clr))
+            ttc = f"{snap.time_to_collision:.2f}" if snap.time_to_collision < 100 else "∞"
+            ttb = f"{snap.time_to_brake:.2f}" if snap.time_to_brake < 100 else "∞"
+            p.drawText(QPointF(x, y), f"TTC: {ttc}s    TTB: {ttb}s")
+        else:
+            p.setPen(QPen(QColor(120, 120, 135)))
+            p.drawText(QPointF(x, y), "TTC::    TTB: —")
+
+        y += 18
+        p.setFont(self._font_small)
+
+        arc = snap.ego_arc
+        k_path = arc.curvature if arc is not None else 0.0
+        r_txt = f"R={1.0 / abs(k_path):.0f}m" if abs(k_path) > 1e-6 else "R=∞"
+        k_meas = snap.ego_kappa_meas
+        meas_txt = f"{k_meas:+.4f}" if k_meas is not None else "  —   "
+        p.setPen(QPen(_DANGER_CLR if snap.ego_path_saturated else _TEXT))
+        p.drawText(
+            QPointF(x, y),
+            f"path κ={k_path:+.4f} ({r_txt})  steer={snap.ego_kappa_steer:+.4f}  "
+            f"meas={meas_txt}",
+        )
+        y += 14
+        sat_txt = "GRIP CAP" if snap.ego_path_saturated else "linear"
+        p.drawText(QPointF(x, y), f"steer gain={snap.ego_steer_gain:.3f}  {sat_txt}")
+        y += 14
+        p.setPen(QPen(_TEXT))
+
+        if ns > 0:
+            p.setPen(QPen(_SUPPRESSED_CLR))
+            p.drawText(QPointF(x, y), f"{ns} vehicle(s) filter-suppressed")
+            y += 14
+
+        if nb > 0:
+            p.setPen(QPen(_BRAKE_SUPP_CLR))
+            p.drawText(QPointF(x, y), f"{nb} threat(s): braking would worsen TTC")
+            y += 14
+
+        nef = len(snap.evasion_filtered_ids)
+        if nef > 0:
+            p.setPen(QPen(_EVASION_FILTER_CLR))
+            p.drawText(QPointF(x, y), f"{nef} vehicle(s) evasion-filtered (corner/roadside)")
+
+        self._draw_legend(p)
+
+    def _draw_legend(self, p: QPainter) -> None:
+        lx = 10
+        ly = self.height() - 148
+        lw = 145
+        lh = 143
+
+        p.setPen(QPen(_HUD_BORDER, 1))
+        p.setBrush(QBrush(_HUD_BG))
+        p.drawRoundedRect(QRectF(lx, ly, lw, lh), 6, 6)
+
+        p.setFont(self._font_label)
+        items = [
+            (_EGO_CLR, "Ego corridor"),
+            (_SAFE_CLR, "Safe vehicle"),
+            (_DANGER_CLR, "Threat"),
+            (_WARN_CLR, "Warning"),
+            (_BRAKE_SUPP_CLR, "Braking worsens"),
+            (_SUPPRESSED_CLR, "Filter-suppressed"),
+            (_EVASION_FILTER_CLR, "Evasion-filtered"),
+            (_ACC_LEAD_CLR, "ACC lead"),
+            (_ACC_CANDIDATE_CLR, "ACC candidate"),
+            (_MARKER_CLR, "Ground 10/100 m"),
+        ]
+        y = ly + 13
+        for clr, label in items:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(clr))
+            p.drawRoundedRect(QRectF(lx + 8, y - 5, 8, 8), 2, 2)
+            p.setPen(QPen(_TEXT))
+            p.drawText(QPointF(lx + 22, y + 2), label)
+            y += 13
+

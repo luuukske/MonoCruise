@@ -1,0 +1,39 @@
+Brand marks bundled in ui/main_window/assets/
+=============================================
+
+MonoCruise ships the logos below only to label links that point at each
+service. It is nominative use: it identifies where a button goes. None of
+these organisations sponsors, endorses or is affiliated with MonoCruise.
+
+All trademarks and logos remain the property of their respective owners. A
+CC0 dedication on an icon file covers that file's artwork only, never the
+trademark it depicts.
+
+Where each file came from
+-------------------------
+
+github.png, patreon.png, reddit.png, steam.png
+  Simple Icons (https://simple-icons.org), released under CC0 1.0 Universal.
+  Full text in simple_icons-LICENSE.txt. Rendered from the project's SVG to
+  PNG and filled with the brand hex that Simple Icons records for each mark:
+  GitHub #181717, Patreon #000000, Reddit #FF4500, Steam #000000.
+  patreon.png predates this and is the same mark at a higher resolution, so
+  it was kept as it was.
+
+truckersmp.png
+  TruckersMP's own 32 px site icon, from truckersmp.com, unmodified except
+  for a palette to RGBA conversion. Their small-size reduction of the mark,
+  used at the size it was drawn for.
+
+scsforum.png
+  The symbol from the SCS Software logo on forum.scssoft.com. The shipped
+  file is a lockup of symbol plus "SCS SOFTWARE" wordmark; the wordmark is
+  unreadable at 14 px, so only the symbol is used. Not otherwise altered.
+
+youtube.png
+  Predates this notice. Shipped in the repository before the support prompt
+  existed and reused by it.
+
+If any of these owners objects to the use of their mark, replace the file in
+ui/main_window/assets/ with a text-only button: ui/main_window/support_overlay.py
+falls back to the label alone whenever the icon file is missing.

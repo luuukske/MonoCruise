@@ -1,0 +1,190 @@
+"""aeb_fetch: skip what is already local, validate before storing, stay off the local store."""
+from __future__ import annotations
+
+import pytest
+
+from core.aeb.clip_store import ClipStore, contributed_clip_root, default_clip_root, serialize_clip
+from tools import aeb_fetch
+
+from tests.aeb.test_clip_review import _build_replayable_clip
+
+
+class _FakeResponse:
+    def __init__(self, payload=None, content=b""):
+        self._payload = payload
+        self.content = content
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self):
+        return self._payload
+
+
+class _FakeSession:
+    """Stands in for requests.Session; records every call it is given."""
+
+    def __init__(self, rows, blobs):
+        self._rows = rows
+        self._blobs = blobs
+        self.headers: dict[str, str] = {}
+        self.fetched: list[str] = []
+
+    def get(self, url, params=None, timeout=None):
+        params = params or {}
+        if params.get("op") == "list":
+            return _FakeResponse(payload={"clips": self._rows, "count": len(self._rows)})
+        clip_id = params["clip_id"]
+        self.fetched.append(clip_id)
+        return _FakeResponse(content=self._blobs[clip_id])
+
+
+def _clip_blob(clip_id: str) -> bytes:
+    clip = _build_replayable_clip()
+    clip.metadata.clip_id = clip_id
+    return serialize_clip(clip)
+
+
+@pytest.fixture()
+def wired(monkeypatch, tmp_path):
+    monkeypatch.setenv("MONOCRUISE_PULL_TOKEN", "a-token")
+    ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"]
+    rows = [{"clip_id": i, "received_at": "2026-08-09T10:00:00Z", "trigger_source": "auto_engagement",
+             "session_kind": "SP", "bytes": 100, "client_version": "1.1.0"} for i in ids]
+    session = _FakeSession(rows, {i: _clip_blob(i) for i in ids})
+    monkeypatch.setattr(aeb_fetch, "_session", lambda token: session)
+    return session, ids, tmp_path
+
+
+def test_the_contributed_root_is_not_the_local_store():
+    """A pull must never be able to evict clips recorded on this machine."""
+    assert contributed_clip_root() != default_clip_root()
+    assert contributed_clip_root().name == "aeb_clips_contributed"
+
+
+def test_safe_pull_root_redirects_away_from_the_local_capture_store(tmp_path):
+    assert aeb_fetch.safe_pull_root(default_clip_root()) == contributed_clip_root()
+    assert aeb_fetch.safe_pull_root(None) == contributed_clip_root()
+    assert aeb_fetch.safe_pull_root(tmp_path) == tmp_path
+
+
+def test_a_missing_token_refuses_to_run(monkeypatch, tmp_path):
+    monkeypatch.delenv("MONOCRUISE_PULL_TOKEN", raising=False)
+    assert aeb_fetch.main(["--root", str(tmp_path)]) == 2
+
+
+def test_pull_missing_reports_a_missing_token(monkeypatch, tmp_path):
+    monkeypatch.delenv("MONOCRUISE_PULL_TOKEN", raising=False)
+    result = aeb_fetch.pull_missing(ClipStore(root=tmp_path))
+    assert result.error is not None
+    assert "MONOCRUISE_PULL_TOKEN" in result.error
+
+
+def test_clips_are_fetched_into_the_given_root(wired):
+    session, ids, tmp_path = wired
+    assert aeb_fetch.main(["--root", str(tmp_path)]) == 0
+
+    stored = {ClipStore(root=tmp_path).peek_metadata(c.path).clip_id
+              for c in ClipStore(root=tmp_path).list_clips()}
+    assert stored == set(ids)
+    assert sorted(session.fetched) == sorted(ids)
+
+
+def test_a_second_run_downloads_nothing(wired):
+    session, _ids, tmp_path = wired
+    aeb_fetch.main(["--root", str(tmp_path)])
+    session.fetched.clear()
+
+    assert aeb_fetch.main(["--root", str(tmp_path)]) == 0
+    assert session.fetched == []
+
+
+def test_list_only_downloads_nothing(wired):
+    session, _ids, tmp_path = wired
+    assert aeb_fetch.main(["--root", str(tmp_path), "--list"]) == 0
+    assert session.fetched == []
+    assert ClipStore(root=tmp_path).list_clips() == []
+
+
+def test_a_clobbered_clip_is_reported_not_counted(monkeypatch, tmp_path):
+    """Store filenames carry 8 characters of the clip_id; a collision loses one."""
+    monkeypatch.setenv("MONOCRUISE_PULL_TOKEN", "a-token")
+    # Same captured_at and the same first 8 characters means the same filename.
+    ids = ["deadbeef-1111-4111-8111-aaaaaaaaaaaa", "deadbeef-2222-4222-8222-bbbbbbbbbbbb"]
+    rows = [{"clip_id": i, "received_at": "2026-08-09T10:00:00Z"} for i in ids]
+    session = _FakeSession(rows, {i: _clip_blob(i) for i in ids})
+    monkeypatch.setattr(aeb_fetch, "_session", lambda token: session)
+
+    assert aeb_fetch.main(["--root", str(tmp_path)]) == 1
+    assert len(ClipStore(root=tmp_path).list_clips()) == 1
+
+
+def test_a_corrupt_download_is_not_stored(wired, monkeypatch):
+    """A truncated body must not land in the store looking like a real clip."""
+    session, ids, tmp_path = wired
+    monkeypatch.setattr(aeb_fetch, "fetch_clip", lambda *a, **k: b"not a gzipped clip")
+
+    assert aeb_fetch.main(["--root", str(tmp_path)]) == 1
+    assert ClipStore(root=tmp_path).list_clips() == []
+
+
+class _PagingSession:
+    """Stands in for the real endpoint: oldest first, capped, `since` inclusive."""
+
+    def __init__(self, rows, cap):
+        self._rows = rows
+        self._cap = cap
+        self.headers: dict[str, str] = {}
+        self.pages: list[str] = []
+
+    def get(self, url, params=None, timeout=None):
+        params = params or {}
+        since = str(params.get("since", ""))
+        self.pages.append(since)
+        rows = [r for r in self._rows if r["received_at"][:10] >= since]
+        limit = int(params.get("limit", self._cap))
+        return _FakeResponse(payload={"clips": rows[:min(limit, self._cap)]})
+
+
+def _row(day: int, n: int) -> dict:
+    return {"clip_id": f"{day:08d}-0000-4000-8000-{n:012d}",
+            "received_at": f"2026-08-{day:02d}T10:00:{n % 60:02d}Z"}
+
+
+def test_the_listing_is_paged_past_the_server_cap(monkeypatch):
+    """The server answers oldest first and caps the page, so one call is not the corpus."""
+    rows = [_row(day, n) for day in range(9, 15) for n in range(40)]
+    session = _PagingSession(rows, cap=50)
+
+    listed, truncated = aeb_fetch.list_all(session, aeb_fetch.BASE_URL, page=50)
+
+    assert not truncated
+    assert len(listed) == len(rows)
+    assert listed[-1]["received_at"].startswith("2026-08-14")
+    assert len(session.pages) > 1, "a single request cannot have covered the index"
+
+
+def test_a_day_larger_than_a_page_is_reported_truncated(monkeypatch):
+    """`since` has day granularity, so such a day cannot be walked past: say so."""
+    rows = [_row(9, n) for n in range(80)]
+    session = _PagingSession(rows, cap=50)
+
+    listed, truncated = aeb_fetch.list_all(session, aeb_fetch.BASE_URL, page=50)
+
+    assert truncated
+    assert len(listed) == 50
+
+
+def test_pull_missing_reports_what_the_server_holds(monkeypatch, tmp_path):
+    """The newest received time is the signal that a stale listing would hide."""
+    monkeypatch.setenv("MONOCRUISE_PULL_TOKEN", "a-token")
+    ids = ["33333333-3333-4333-8333-333333333333"]
+    rows = [{"clip_id": ids[0], "received_at": "2026-09-05T19:30:05Z"}]
+    session = _FakeSession(rows, {ids[0]: _clip_blob(ids[0])})
+    monkeypatch.setattr(aeb_fetch, "_session", lambda token: session)
+
+    result = aeb_fetch.pull_missing(ClipStore(root=tmp_path))
+
+    assert result.newest == "2026-09-05T19:30:05Z"
+    assert result.listed == 1
+    assert not result.truncated

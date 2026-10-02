@@ -1,0 +1,793 @@
+"""Dev-only PySide6 AEB clip labeling UI (repo root: python -m tools.aeb_review). Not shipped."""
+from __future__ import annotations
+
+import os
+import sys
+
+_repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _repo not in sys.path:
+    sys.path.insert(0, _repo)
+
+from collections import OrderedDict
+
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal, Slot
+from PySide6.QtWidgets import (
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QHBoxLayout,
+    QLabel, QLineEdit, QListWidget, QMainWindow, QPlainTextEdit,
+    QPushButton, QSpinBox, QVBoxLayout, QWidget,
+)
+
+from core.aeb.clip_replay import ReviewFrame
+from core.aeb.clip_schema import ClipMetadata, Label
+from core.aeb.clip_score import class_window_warning
+from core.aeb.clip_store import ClipInfo, ClipStore
+from tools.aeb_fetch import safe_pull_root
+from tools.aeb_review_widgets import (
+    DecisionStrip, Loaded, SceneWidget, ThumbnailView,
+    action_index, recorded_band, start_review_workers, stop_review_workers, store_origin,
+    _CLASSES, _CLASS_KEYS, _LOCAL_BG, _REMOTE_BG,
+    _button, _clip_item, _entry_visible, _fmt, _hline, _review_stores,
+    _KEY_ACTIONS, keymap_overlay, pull_landed_in_view, pull_status_text,
+)
+
+_STEP_COARSE = 10       # frames per Shift+arrow
+_CACHE_MAX = 8          # replayed clips held in RAM, about 14 MB each
+_PREFETCH_AHEAD = 4
+
+
+class ReviewWindow(QMainWindow):
+
+    load_requested = Signal(str, bool)
+    eval_requested = Signal(str, object)
+    trace_requested = Signal(str, object, object)
+    scan_requested = Signal(object)
+    pull_requested = Signal(object)
+
+    def __init__(self, stores: ClipStore | list[ClipStore]) -> None:
+        super().__init__()
+        self.setWindowTitle("AEB Clip Review")
+        self.resize(1650, 900)
+        self._stores = [stores] if isinstance(stores, ClipStore) else list(stores)
+        # Path-based load / label writes work through any store instance.
+        self._store = self._stores[0]
+        self._clip = None
+        self._path = None
+        self._frames: list[ReviewFrame] = []
+        self._idx = 0
+        self._target_vid: int | None = None
+        self._window: tuple[float, float] | None = None
+        self._proposal: tuple[float, float] | None = None
+        self._pulling = False
+        self._charts = None
+        self._loaded: Loaded | None = None
+
+        # Clip list cache: peek_metadata once per mtime+size; reload skips store re-reads.
+        self._entries: list[tuple[ClipInfo, ClipMetadata | None, str]] = []
+        self._meta_cache: dict[str, tuple[float, int, ClipMetadata | None]] = {}
+        self._visible: list[str] = []
+
+        # Decoded-clip LRU plus the request pipeline that fills it.
+        self._cache: OrderedDict[str, Loaded] = OrderedDict()
+        self._inflight: str | None = None
+        self._queue: list[str] = []
+        self._awaiting: str | None = None
+
+        self._play_timer = QTimer(self)
+        self._play_timer.timeout.connect(self._advance)
+
+        start_review_workers(self)
+
+        self._build_ui()
+        self._refresh_clips()
+
+    def _build_ui(self) -> None:
+        root = QWidget()
+        self.setCentralWidget(root)
+        row = QHBoxLayout(root)
+        row.addWidget(self._build_left())
+        row.addLayout(self._build_center(), 1)
+        row.addWidget(self._build_right())
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFocus()
+
+    def _build_left(self) -> QWidget:
+        left = QVBoxLayout()
+        header = QHBoxLayout()
+        header.addWidget(QLabel("Clips"))
+        header.addStretch(1)
+        self._refresh_btn = _button("Refresh", self._refresh_clips, width=70)
+        header.addWidget(self._refresh_btn)
+        left.addLayout(header)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("search id / trigger / notes")
+        self._search.setClearButtonEnabled(True)
+        self._search.textChanged.connect(self._apply_filter)
+        self._search.installEventFilter(self)
+        left.addWidget(self._search)
+
+        self._class_filter = QComboBox()
+        self._class_filter.addItems(["all", "untagged", "tagged"] + _CLASSES)
+        self._class_filter.setFocusPolicy(Qt.NoFocus)
+        self._class_filter.currentTextChanged.connect(lambda _t: self._apply_filter())
+        left.addWidget(self._class_filter)
+
+        self._list = QListWidget()
+        self._list.setFocusPolicy(Qt.NoFocus)
+        self._list.currentItemChanged.connect(self._on_select)
+        left.addWidget(self._list, 1)
+        self._count_lbl = QLabel("scanning...")
+        left.addWidget(self._count_lbl)
+        self._update_btn = _button("Update from server", self._update_from_server)
+        left.addWidget(self._update_btn)
+
+        lw = QWidget()
+        lw.setLayout(left)
+        lw.setFixedWidth(300)
+        return lw
+
+    def _build_center(self) -> QVBoxLayout:
+        center = QVBoxLayout()
+        self._scene = SceneWidget()
+        self._scene.vehicle_picked.connect(self._on_vehicle_picked)
+        center.addWidget(self._scene, 1)
+
+        self._keys_lbl = keymap_overlay(self._scene)
+
+        self._strip = DecisionStrip()
+        self._strip.seeked.connect(self._seek_time)
+        center.addWidget(self._strip)
+
+        transport = QHBoxLayout()
+        for text, fn in [("|<", self._first), ("<", self._prev),
+                         (">", self._next), (">|", self._last)]:
+            transport.addWidget(_button(text, fn, width=38))
+        self._play_btn = _button("Play", self._toggle_play)
+        transport.addWidget(self._play_btn)
+        self._time_lbl = QLabel("t=0.00s")
+        transport.addWidget(self._time_lbl)
+        transport.addSpacing(12)
+        self._veh_paths = QCheckBox("Vehicle paths")
+        self._veh_paths.setChecked(True)
+        self._veh_paths.setFocusPolicy(Qt.NoFocus)
+        self._veh_paths.toggled.connect(self._scene.set_vehicle_paths)
+        transport.addWidget(self._veh_paths)
+        transport.addSpacing(12)
+        transport.addWidget(QLabel("F1 keys"))
+        transport.addStretch(1)
+        self._decision_lbl = QLabel("")
+        transport.addWidget(self._decision_lbl)
+        center.addLayout(transport)
+        return center
+
+    def _build_right(self) -> QWidget:
+        right = QVBoxLayout()
+        self._clip_name_lbl = QLabel("(no clip selected)")
+        self._clip_name_lbl.setStyleSheet("font-weight:bold;")
+        self._clip_name_lbl.setWordWrap(True)
+        self._clip_name_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        right.addWidget(self._clip_name_lbl)
+        self._clip_meta_lbl = QLabel("")
+        self._clip_meta_lbl.setStyleSheet("color:#999;")
+        self._clip_meta_lbl.setWordWrap(True)
+        right.addWidget(self._clip_meta_lbl)
+
+        # Context screenshot grabbed at the trigger moment (above the labeling).
+        self._thumb = ThumbnailView()
+        right.addWidget(self._thumb)
+        right.addWidget(_hline())
+
+        right.addWidget(QLabel("<b>Label</b>"))
+        right.addWidget(QLabel("Class  (1-6)"))
+        self._class = QComboBox()
+        self._class.addItems(_CLASSES)
+        self._class.setFocusPolicy(Qt.NoFocus)
+        self._class.currentTextChanged.connect(lambda _t: self._sync_label_widgets())
+        right.addWidget(self._class)
+        self._warn_lbl = QLabel("")
+        self._warn_lbl.setWordWrap(True)
+        self._warn_lbl.setStyleSheet("color:#e0a020;")
+        right.addWidget(self._warn_lbl)
+
+        right.addWidget(QLabel("Severity 1-5  (PgUp/PgDn)"))
+        self._severity = QSpinBox()
+        self._severity.setRange(1, 5)
+        self._severity.setValue(3)
+        self._severity.setFocusPolicy(Qt.NoFocus)
+        right.addWidget(self._severity)
+
+        right.addWidget(_hline())
+        right.addWidget(QLabel("Should-trigger window  ( [ ] \\ W )"))
+        self._window_lbl = QLabel("none (must NOT trigger)")
+        right.addWidget(self._window_lbl)
+        self._proposal_lbl = QLabel("")
+        self._proposal_lbl.setStyleSheet("color:#50d282;")
+        self._proposal_lbl.setWordWrap(True)
+        right.addWidget(self._proposal_lbl)
+        wb = QHBoxLayout()
+        for text, fn in [("Start", self._win_start), ("End", self._win_end),
+                         ("Clear", self._win_clear), ("Accept", self._win_accept)]:
+            wb.addWidget(_button(text, fn))
+        right.addLayout(wb)
+
+        right.addWidget(_hline())
+        right.addWidget(QLabel("Target vehicle  (V)"))
+        tb = QHBoxLayout()
+        self._target_lbl = QLabel("none")
+        self._pick_btn = QPushButton("Pick on scene")
+        self._pick_btn.setCheckable(True)
+        self._pick_btn.setFocusPolicy(Qt.NoFocus)
+        self._pick_btn.toggled.connect(self._toggle_pick)
+        tb.addWidget(self._target_lbl, 1)
+        tb.addWidget(self._pick_btn)
+        right.addLayout(tb)
+
+        right.addWidget(QLabel("Desired peak decel (m/s2, 0 = unset)"))
+        self._desired = QDoubleSpinBox()
+        self._desired.setRange(0.0, 12.0)
+        self._desired.setSingleStep(0.5)
+        self._desired.setFocusPolicy(Qt.NoFocus)
+        right.addWidget(self._desired)
+
+        right.addWidget(QLabel("Notes  (Tab in, Esc out)"))
+        self._notes = QPlainTextEdit()
+        self._notes.setFixedHeight(70)
+        self._notes.setTabChangesFocus(True)   # Tab is a binding, not a note character
+        self._notes.installEventFilter(self)
+        right.addWidget(self._notes)
+
+        self._save_btn = _button("Save label  (Enter)", self._save_and_advance)
+        right.addWidget(self._save_btn)
+        self._status = QLabel("")
+        self._status.setWordWrap(True)
+        right.addWidget(self._status)
+        right.addStretch(1)
+
+        rw = QWidget()
+        rw.setLayout(right)
+        rw.setFixedWidth(320)
+        return rw
+
+    # Keyboard
+
+    def eventFilter(self, obj, event) -> bool:
+        """Esc leaves a text field so the single-key bindings work again."""
+        if (event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key_Escape
+                and obj in (self._notes, self._search)):
+            self.setFocus()
+            return True
+        return super().eventFilter(obj, event)
+
+    def focusNextPrevChild(self, next_: bool) -> bool:
+        """Tab is bound to the notes field, so it must not walk the focus chain."""
+        return False
+
+    def keyPressEvent(self, event) -> None:
+        key = event.key()
+        mods = event.modifiers()
+        shift = bool(mods & Qt.ShiftModifier)
+
+        if key in _CLASS_KEYS:
+            self._class.setCurrentText(_CLASS_KEYS[key])
+        elif key == Qt.Key_PageUp:
+            self._severity.setValue(min(5, self._severity.value() + 1))
+        elif key == Qt.Key_PageDown:
+            self._severity.setValue(max(1, self._severity.value() - 1))
+        elif key == Qt.Key_Left:
+            self._step(-_STEP_COARSE if shift else -1)
+        elif key == Qt.Key_Right:
+            self._step(_STEP_COARSE if shift else 1)
+        elif key == Qt.Key_N:
+            if mods & Qt.ControlModifier:
+                self._advance_to_untagged()
+            else:
+                self._step_clip(1)
+        elif key in _KEY_ACTIONS:
+            getattr(self, _KEY_ACTIONS[key])()
+        else:
+            super().keyPressEvent(event)
+
+    def _toggle_pick_mode(self) -> None:
+        self._pick_btn.setChecked(not self._pick_btn.isChecked())
+
+    def _prev_clip(self) -> None:
+        self._step_clip(-1)
+
+    def _focus_notes(self) -> None:
+        self._notes.setFocus()
+
+    def _toggle_keymap(self) -> None:
+        self._keys_lbl.setVisible(not self._keys_lbl.isVisible())
+
+    # Clip list
+
+    def _refresh_clips(self) -> None:
+        """Kick a background rescan; the list re-renders when it lands."""
+        self._count_lbl.setText("scanning...")
+        self.scan_requested.emit(dict(self._meta_cache))
+
+    def _update_from_server(self) -> None:
+        """Pull missing contributed clips; never writes into the local capture store."""
+        if self._pulling:
+            return
+        root = self._pull_target()
+        self._pulling = True
+        self._update_btn.setEnabled(False)
+        self._status.setText(f"updating from server into {root.name}...")
+        self.pull_requested.emit(root)
+
+    def _pull_target(self):
+        """Prefer the contributed store when it is in this view."""
+        for store in self._stores:
+            if store_origin(store) == "remote":
+                return store.root
+        return safe_pull_root(self._store.root)
+
+    @Slot(str)
+    def _on_pull_progress(self, msg: str) -> None:
+        self._status.setText(msg)
+
+    @Slot(object)
+    def _on_pull_finished(self, result) -> None:
+        self._pulling = False
+        self._update_btn.setEnabled(True)
+        self._status.setText(pull_status_text(result))
+        if result.error or not result.landed:
+            return
+        if pull_landed_in_view(result, self._stores):
+            self._refresh_clips()
+
+    @Slot(object)
+    def _on_scanned(self, entries) -> None:
+        # Accept (info, meta) or (info, meta, origin) so older call sites still work.
+        normalized: list[tuple[ClipInfo, ClipMetadata | None, str]] = []
+        for row in entries:
+            if len(row) == 2:
+                info, meta = row
+                origin = "local"
+            else:
+                info, meta, origin = row
+            normalized.append((info, meta, origin))
+        self._entries = normalized
+        self._meta_cache = {
+            str(info.path): (info.mtime, info.size_bytes, meta)
+            for info, meta, _origin in normalized
+        }
+        self._apply_filter()
+
+    def _apply_filter(self) -> None:
+        """Render the cached scan through the current search + class filter."""
+        search = self._search.text().strip().lower()
+        cls_filter = self._class_filter.currentText()
+        self._list.blockSignals(True)
+        self._list.clear()
+        self._visible = []
+        untagged = 0
+        remote_n = 0
+        for info, meta, origin in self._entries:
+            if origin == "remote":
+                remote_n += 1
+            if meta is None or meta.label is None:
+                untagged += 1
+            if not _entry_visible(meta, search, cls_filter):
+                continue
+            self._list.addItem(_clip_item(info, meta, origin))
+            self._visible.append(str(info.path))
+        local_n = len(self._entries) - remote_n
+        self._count_lbl.setText(
+            f"{len(self._visible)} shown / {len(self._entries)} total / "
+            f"{untagged} untagged  ({local_n} local, {remote_n} remote)"
+        )
+        self._reselect(self._path)
+        self._list.blockSignals(False)
+
+    def _reselect(self, path) -> None:
+        """Restore the selection to *path* after a rebuild, if still visible."""
+        if not path:
+            return
+        target = str(path)
+        for i in range(self._list.count()):
+            if self._list.item(i).data(Qt.UserRole) == target:
+                self._list.setCurrentRow(i)
+                return
+
+    def _row_of(self, path: str) -> int:
+        for i in range(self._list.count()):
+            if self._list.item(i).data(Qt.UserRole) == path:
+                return i
+        return -1
+
+    def _select_path(self, path: str) -> None:
+        i = self._row_of(path)
+        if i >= 0:
+            self._list.setCurrentRow(i)
+
+    def _is_untagged(self, path: str) -> bool:
+        cached = self._meta_cache.get(path)
+        meta = cached[2] if cached else None
+        return meta is None or meta.label is None
+
+    def _order_after_current(self) -> list[str]:
+        """Visible paths starting after the current clip, wrapping once."""
+        try:
+            i = self._visible.index(str(self._path))
+        except ValueError:
+            return list(self._visible)
+        return self._visible[i + 1:] + self._visible[:i]
+
+    def _step_clip(self, delta: int) -> None:
+        if not self._visible:
+            return
+        try:
+            i = self._visible.index(str(self._path))
+        except ValueError:
+            self._select_path(self._visible[0 if delta > 0 else -1])
+            return
+        j = max(0, min(len(self._visible) - 1, i + delta))
+        if j != i:
+            self._select_path(self._visible[j])
+
+    def _advance_to_untagged(self) -> None:
+        for path in self._order_after_current():
+            if self._is_untagged(path):
+                self._select_path(path)
+                return
+        self._status.setText("no untagged clips left in this filter")
+
+    def _on_select(self, current, _prev) -> None:
+        if current is None:
+            return
+        self._play_timer.stop()
+        self._play_btn.setText("Play")
+        path = current.data(Qt.UserRole)
+        self._path = path
+        self._awaiting = path
+
+        hit = self._cache.get(path)
+        if hit is not None:
+            self._cache.move_to_end(path)
+            self._show(path, hit)
+        else:
+            self._clip_name_lbl.setText("loading...")
+            self._request(path, urgent=True)
+
+    # Background decode pipeline
+
+    def _request(self, path: str, *, urgent: bool = False) -> None:
+        if path in self._cache or path == self._inflight:
+            return
+        if path in self._queue:
+            self._queue.remove(path)
+        if urgent:
+            self._queue.insert(0, path)
+        else:
+            self._queue.append(path)
+        self._pump()
+
+    def _pump(self) -> None:
+        if self._inflight is not None or not self._queue:
+            return
+        self._inflight = self._queue.pop(0)
+        charts = self._charts is not None and self._charts.isVisible()
+        self.load_requested.emit(self._inflight, charts)
+
+    @Slot(str, object, object, object, object)
+    def _on_loaded(self, path: str, clip, frames, trace, stream) -> None:
+        self._inflight = None
+        if clip is not None:
+            self._cache[path] = Loaded(
+                clip=clip, frames=frames,
+                proposal=recorded_band(frames), action_idx=action_index(frames),
+                trace=trace, stream=stream,
+            )
+            self._cache.move_to_end(path)
+            while len(self._cache) > _CACHE_MAX:
+                self._cache.popitem(last=False)
+        if path == self._awaiting:
+            if clip is None:
+                self._status.setText("failed to load clip")
+                self._clip_name_lbl.setText("(load failed)")
+            else:
+                self._show(path, self._cache[path])
+        self._pump()
+
+    def _prefetch(self) -> None:
+        """Queue the next few rows so the following selections land instantly."""
+        i = self._row_of(str(self._path))
+        if i < 0:
+            return
+        for path in self._visible[i + 1:i + 1 + _PREFETCH_AHEAD]:
+            self._request(path)
+
+    def _show(self, path: str, loaded: Loaded) -> None:
+        self._clip = loaded.clip
+        self._frames = loaded.frames
+        self._loaded = loaded
+        self._proposal = loaded.proposal
+        m = loaded.clip.metadata
+        self._clip_name_lbl.setText(m.clip_id)
+        self._thumb.set_jpeg(m.thumbnail_jpeg)
+        meta = (
+            f"{m.trigger_source} · {m.session_kind} · {m.captured_at}\n"
+            f"{m.frame_count} frames / {m.tick_count} ticks · v{m.client_version}"
+        )
+        size = self._thumb.source_size()
+        if size is not None:
+            meta += f" · thumb {size[0]}x{size[1]}"
+        self._clip_meta_lbl.setText(meta)
+        dur = self._frames[-1].t_rel if self._frames else 1.0
+        self._strip.set_frames(self._frames, dur)
+        self._strip.set_proposal(self._proposal)
+        self._idx = loaded.action_idx
+        # Preview already filled the form. Loading it again would wipe a keypress
+        # that landed while the radar replay was still running.
+        if getattr(self, "_form_path", None) != path:
+            self._load_label_into_form(loaded.clip)
+        else:
+            self._sync_label_widgets()
+        self._push_charts()
+        self._refresh()
+        self._prefetch()
+
+    # Label form
+
+    def _load_label_into_form(self, clip) -> None:
+        lbl = clip.metadata.label
+        if lbl is None:
+            self._class.setCurrentText("fp")
+            self._severity.setValue(3)
+            self._window = None
+            self._target_vid = None
+            self._desired.setValue(0.0)
+            self._notes.setPlainText("")
+        else:
+            self._class.setCurrentText(lbl.class_ if lbl.class_ in _CLASSES else "ignore")
+            self._severity.setValue(int(lbl.severity) if lbl.severity else 3)
+            if lbl.should_trigger:
+                self._window = (float(lbl.should_trigger["from_t"]),
+                                float(lbl.should_trigger["to_t"]))
+            else:
+                self._window = None
+            self._target_vid = lbl.target_vid
+            self._desired.setValue(lbl.desired_peak_decel_ms2 or 0.0)
+            self._notes.setPlainText(lbl.notes or "")
+        self._sync_label_widgets()
+
+    def _sync_label_widgets(self) -> None:
+        if self._window is None:
+            self._window_lbl.setText("none (must NOT trigger)")
+        else:
+            self._window_lbl.setText(f"{self._window[0]:.2f} .. {self._window[1]:.2f} s")
+        if self._proposal is None:
+            self._proposal_lbl.setText("no proposal (nothing recorded)")
+        elif self._window == self._proposal:
+            self._proposal_lbl.setText("proposal accepted")
+        else:
+            self._proposal_lbl.setText(
+                f"W accepts {self._proposal[0]:.2f} .. {self._proposal[1]:.2f} s"
+            )
+        self._target_lbl.setText("none" if self._target_vid is None else f"#{self._target_vid}")
+        self._strip.set_window(self._window)
+        if self._charts is not None:
+            self._charts.set_window(self._window)
+            self._charts.set_target(self._target_vid)
+        warn = class_window_warning(self._class.currentText(), self._window is not None)
+        self._warn_lbl.setText(f"⚠ {warn}" if warn else "")
+
+    def _win_start(self) -> None:
+        t = self._cur_t()
+        end = self._window[1] if self._window else t
+        self._window = (t, max(end, t))
+        self._sync_label_widgets()
+
+    def _win_end(self) -> None:
+        t = self._cur_t()
+        start = self._window[0] if self._window else 0.0
+        self._window = (min(start, t), t)
+        self._sync_label_widgets()
+
+    def _win_clear(self) -> None:
+        self._window = None
+        self._sync_label_widgets()
+
+    def _win_accept(self) -> None:
+        """Commit the proposed window. Deliberate: never applied on load."""
+        if self._proposal is None:
+            self._status.setText("no proposal for this clip")
+            return
+        self._window = self._proposal
+        self._sync_label_widgets()
+
+    def _toggle_pick(self, on: bool) -> None:
+        self._scene.pick_mode = on
+
+    def _on_vehicle_picked(self, vid: int) -> None:
+        self._target_vid = int(vid)
+        self._pick_btn.setChecked(False)
+        self._sync_label_widgets()
+
+    def _save(self) -> bool:
+        if self._path is None:
+            return False
+        st = None
+        if self._window is not None:
+            st = {"from_t": round(self._window[0], 3), "to_t": round(self._window[1], 3)}
+        lbl = Label(
+            class_=self._class.currentText(),
+            severity=int(self._severity.value()),
+            should_trigger=st,
+            target_vid=self._target_vid,
+            desired_peak_decel_ms2=(self._desired.value() or None),
+            notes=self._notes.toPlainText().strip(),
+        )
+        ok = self._store.write_label(self._path, lbl)
+        self._status.setText("saved" if ok else "save failed")
+        if ok:
+            # The rewrite invalidates one clip only: re-peek that one instead of
+            # rescanning, so a save stays in milliseconds at 600+ clips.
+            self._cache.pop(str(self._path), None)
+            self._refresh_entry(str(self._path))
+        return ok
+
+    def _refresh_entry(self, path: str) -> None:
+        meta = self._store.peek_metadata(path)
+        for i, (info, _old, origin) in enumerate(self._entries):
+            if str(info.path) != path:
+                continue
+            try:
+                st = info.path.stat()
+                info = ClipInfo(path=info.path, name=info.name,
+                                size_bytes=st.st_size, mtime=st.st_mtime)
+            except OSError:
+                pass
+            self._entries[i] = (info, meta, origin)
+            self._meta_cache[path] = (info.mtime, info.size_bytes, meta)
+            break
+        self._apply_filter()
+
+    def _save_and_advance(self) -> None:
+        candidates = self._order_after_current()
+        if not self._save():
+            return
+        for path in candidates:
+            if path in self._visible and self._is_untagged(path):
+                self._select_path(path)
+                return
+        for path in candidates:
+            if path in self._visible:
+                self._select_path(path)
+                self._status.setText("saved; no untagged clips left in this filter")
+                return
+
+    # Filter charts
+
+    def _toggle_charts(self) -> None:
+        """Open (or re-show) the tuning window. Built on first use, kept afterwards."""
+        if self._charts is None:
+            from tools.aeb_filter_charts import FilterChartWindow
+
+            self._charts = FilterChartWindow.attached_to(self)
+            self._push_charts()
+        elif self._charts.isVisible():
+            self._charts.hide()
+            self.setFocus()
+            return
+        self._charts.show()
+        self._charts.raise_()
+
+    def _push_charts(self) -> None:
+        """Hand the chart window the decoded clip, and ask for the re-run band."""
+        if self._charts is None or self._loaded is None:
+            return
+        self._charts.show_clip(self._loaded, self._frames, self._window,
+                               self._target_vid, self._cur_t())
+        if self._loaded.trace is None:
+            self.trace_requested.emit(str(self._path), self._loaded.clip, self._loaded.stream)
+        if self._loaded.evaluated is None:
+            self.eval_requested.emit(str(self._path), self._loaded.clip)
+
+    @Slot(str, object)
+    def _on_evaluated(self, path: str, track) -> None:
+        """The re-run decision landed; it belongs to whichever clip asked for it."""
+        cached = self._cache.get(path)
+        if cached is not None:
+            cached.evaluated = track or []
+        if path == str(self._path) and self._charts is not None:
+            self._charts.set_replayed(track or [])
+
+    # Transport
+
+    def _cur_t(self) -> float:
+        return self._frames[self._idx].t_rel if self._frames else 0.0
+
+    def _toggle_play(self) -> None:
+        if self._play_timer.isActive():
+            self._play_timer.stop()
+            self._play_btn.setText("Play")
+        elif self._frames:
+            self._play_timer.start(33)
+            self._play_btn.setText("Pause")
+
+    def _advance(self) -> None:
+        if self._idx >= len(self._frames) - 1:
+            self._play_timer.stop()
+            self._play_btn.setText("Play")
+            return
+        self._idx += 1
+        self._refresh()
+
+    def _step(self, delta: int) -> None:
+        if not self._frames:
+            return
+        self._idx = max(0, min(len(self._frames) - 1, self._idx + delta))
+        self._refresh()
+
+    def _first(self) -> None:
+        self._step(-len(self._frames))
+
+    def _last(self) -> None:
+        self._step(len(self._frames))
+
+    def _prev(self) -> None:
+        self._step(-1)
+
+    def _next(self) -> None:
+        self._step(1)
+
+    def _seek_time(self, t_rel: float) -> None:
+        if not self._frames:
+            return
+        self._idx = min(range(len(self._frames)),
+                        key=lambda i: abs(self._frames[i].t_rel - t_rel))
+        self._refresh()
+
+    def _refresh(self) -> None:
+        if not self._frames:
+            self._scene.set_snapshot(None)
+            return
+        f = self._frames[self._idx]
+        self._scene.set_snapshot(f.snapshot)
+        self._strip.set_cursor(f.t_rel)
+        if self._charts is not None:
+            self._charts.set_cursor(f.t_rel)
+        self._time_lbl.setText(f"t={f.t_rel:.2f}s  ({self._idx + 1}/{len(self._frames)})")
+        la = f.live_aeb
+        state = "BRAKE" if la.aeb_brake else ("WARN" if la.aeb_warn else "standby")
+        in_win = self._window is not None and self._window[0] <= f.t_rel <= self._window[1]
+        truth = "should-trigger" if in_win else ("must-not" if self._window is None else "outside")
+        self._decision_lbl.setText(
+            f"recorded: {state}  demand={f.raw_target_ms2:.1f}"
+            f" (sent {la.target_decel_ms2:.1f})  ttc={_fmt(la.time_to_collision)}"
+            f"  |  truth: {truth}"
+        )
+
+    def closeEvent(self, event) -> None:
+        self._play_timer.stop()
+        if self._charts is not None:
+            self._charts.deleteLater()
+            self._charts = None
+        stop_review_workers(self)
+        super().closeEvent(event)
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="AEB clip review.")
+    parser.add_argument("--root", default=None,
+                        help="open only this clip store (default: local + contributed)")
+    parser.add_argument("--contributed", action="store_true",
+                        help="open only the pulled-in contributed store")
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+
+    stores = _review_stores(root=args.root, contributed_only=args.contributed)
+    app = QApplication.instance() or QApplication(sys.argv)
+    win = ReviewWindow(stores)
+    labels = "+".join(store_origin(s) for s in stores)
+    win.setWindowTitle(f"AEB Clip Review  [{labels}]")
+    win.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

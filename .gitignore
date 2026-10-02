@@ -1,0 +1,50 @@
+# Python virtual environments
+.venv/
+venv/
+
+# Editor settings
+.vscode/
+.cursor/
+.claude/
+
+# Python cache files
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+
+# Logs
+*.log
+logs/
+
+# CSV exports / debug dumps
+*.csv
+
+# Local configuration (do not commit)
+config.json*
+
+# Runtime version marker written by the app for the updater
+installed_version.txt
+
+# SDK installer runtime state + downloaded-DLL cache
+sdk_state.json
+sdk_cache/
+
+# OS / misc
+.DS_Store
+live_accel_pedals_viz_30s.bat
+
+# personal documentation for MonoCruise
+docs/
+tools/aeb_corpus_run/
+
+# ACC response-map renders and their grids
+tools/acc_response_map_out/
+
+# PyInstaller / Inno Setup build outputs
+*.exe
+build/
+dist/
+installer/output/
+*.spec.bak
+release_notes.md

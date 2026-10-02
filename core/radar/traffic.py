@@ -1,0 +1,2144 @@
+"""Traffic Vehicle smoothing and ArcPath geometry. See core/radar/README.md."""
+
+from __future__ import annotations
+
+import math
+import time
+from dataclasses import dataclass
+from typing import Optional
+
+_MAX_ANGULAR_VELOCITY: float = 45.0
+_LOCATION_UPDATE_FREQUENCY: float = 0.05
+# Three 1/60 s physics steps land exactly on the bar, so float noise must not decide it.
+_SUB_FRAME_EPS_S: float = 1e-4
+# Reader kinematics clock gap (pause/hitch). See core/radar/README.md §7.
+_READER_CLOCK_GAP_S: float = 0.50
+
+# TMP speed / accel EMA: same hyperbolic law α(|v|) with different endpoints.
+# Reference speed for "at 90 km/h" is 25 m/s. See core/radar/README.md §7.
+_ALPHA_SPEED_SCALE: float = 90.0 / 3.6   # 25.0 m/s
+
+# Speed EMA on raw_speed: 1.0 at rest → 0.25 at 90 km/h.
+_SPEED_EMA_AT_REST: float = 1.0
+_SPEED_EMA_AT_90_KMH: float = 0.25
+_SPEED_EMA_CURVE_D: float = (
+    _ALPHA_SPEED_SCALE
+    * _SPEED_EMA_AT_90_KMH
+    / (_SPEED_EMA_AT_REST - _SPEED_EMA_AT_90_KMH)
+)
+
+# Accel: LS slope of speed_ema history, then light EMA. Both chains fit the same
+# de-noised window, speed-scaled below. See core/radar/README.md §7.
+_ACCEL_FIT_WINDOW_S: float = 1.50
+_ACCEL_EMA_ALPHA: float = 0.45
+# Saturating exponential in the vehicle's own speed: 1.0 at the reference,
+# ~1.05 s at 40 km/h. See core/radar/README.md §7.
+_ACCEL_WINDOW_REF_MS: float = 100.0 / 3.6
+_ACCEL_WINDOW_SCALE_MIN: float = 0.30
+_ACCEL_WINDOW_SCALE_MAX: float = 1.60
+_ACCEL_WINDOW_K: float = 1.42
+_ACCEL_WINDOW_EXP_DEN: float = 1.0 - math.exp(-_ACCEL_WINDOW_K)
+# acc_speed step-4 tunables. See core/radar/README.md §7.
+_SPEED_EMA_HISTORY_LEN: int = 120
+
+# Accel-correction term clamp (m/s): caps how far accel·τ can shift a speed.
+_SPEED_CORR_CLAMP_MS: float = 3.0
+
+# acc_speed step-4 tunables. See core/radar/README.md §7.
+_ACC_SPEED_DEADBAND_MS: float = 0.7
+_ACC_SPEED_TAU_SLOW_S: float = 1.6
+_ACC_SPEED_TAU_FAST_S: float = 0.08
+
+# acc_speed step-4 tunables. See core/radar/README.md §7.
+_ACC_SPEED_SMOOTH_REF_MS: float = 90.0 / 3.6   # 25 m/s
+_ACC_SPEED_SMOOTH_MIN: float = 0.15
+
+# acc_speed step-4 tunables. See core/radar/README.md §7.
+_ACC_SPEED_ACCEL_WINDOW_S: float = 1.5
+_ACC_SPEED_ACCEL_LO_MS2: float = 0.3
+_ACC_SPEED_ACCEL_HI_MS2: float = 1.5
+_ACC_SPEED_ACCEL_FLOOR: float = 0.15
+
+# acc_speed step-4 tunables. See core/radar/README.md §7.
+_ACC_SPEED_FF_GATE_LO_MS2: float = 0.12        # m/s² : feed-forward gate opens
+_ACC_SPEED_FF_GATE_HI_MS2: float = 0.30        # m/s² : feed-forward gate fully open
+_ACC_SPEED_FF_ACCEL_CLAMP_MS2: float = 6.0     # m/s² : clamp on the feed-forward accel
+
+# acc_speed step-4 tunables. See core/radar/README.md §7.
+_ACC_SPEED_CONSIST_WINDOW_S: float = 4.0
+_ACC_SPEED_CONSIST_MAG_LO_MS2: float = 0.4     # m/s² : |accel_long| where magnitude term starts
+_ACC_SPEED_CONSIST_MAG_HI_MS2: float = 1.0     # m/s² : |accel_long| granting full consistency
+
+# acc_speed step-4 tunables. See core/radar/README.md §7.
+_ACC_SPEED_STANDSTILL_ENTER_MS: float = 0.3    # m/s : |acc_speed| below this can latch
+_ACC_SPEED_STANDSTILL_RELEASE_MS: float = 0.6  # m/s : |speed_corr| above this releases
+_ACC_SPEED_STANDSTILL_RELEASE_S: float = 0.5   # s : sustained time above release speed
+
+# Yaw EMA (wrap-safe): AI and TMP (arc curvature).
+_RAW_YAW_ALPHA: float = 0.50
+
+# TMP lag detection: see core/radar/README.md §7 "Lag / freeze detection".
+_LAG_MIN_SPEED_MS: float = 5.0           # m/s : below this no lag detection runs
+_LAG_DISP_RATIO: float = 0.10           # flag lag if raw disp < 10 % of expected
+# Lag entry blocked when rotation looks live (not a stall). See core/radar/README.md §7.
+_LAG_ROT_LIVE_DEG_S: float = 2.0         # deg/s: rotation at/above this blocks entry
+# Lag entry needs raw-stream evidence, not the filter's own output, that the target
+# was still moving and was not already stopping. See core/radar/README.md §7.
+_LAG_ENTRY_WINDOW: int = 4               # raw intervals per comparison window
+_LAG_ENTRY_RAW_SPEED_MS: float = 4.0     # m/s : recent raw window under this blocks entry
+_LAG_ENTRY_DECAY_MIN: float = 0.50       # recent/older raw speed under this blocks entry
+
+# TMP lag/freeze tunables. See core/radar/README.md §7.
+_LAG_FREEZE_TTC_LO: float = 0.3                  # s   : freeze = 0 at/below this TTC
+_LAG_FREEZE_TTC_HI: float = 4.0                  # s   : freeze = max at/above this TTC
+_LAG_FREEZE_DUR_MAX: float = 0.5                 # s   : freeze cap (release after this)
+_LAG_FREEZE_EGO_SPEED_FLOOR: float = 1.0         # m/s : TTC denom floor
+_LAG_FREEZE_LOG_K: float = _LAG_FREEZE_DUR_MAX / math.log(
+    _LAG_FREEZE_TTC_HI / _LAG_FREEZE_TTC_LO
+)
+
+# Position mismatch (TMP only): out-of-order packet rejection.
+# Fires when raw position jumps against the direction of travel.
+_POS_MISMATCH_BACKWARD_THRESHOLD: float = 0.00   # m: min backward dot to flag
+# Held frames per backward run; a longer run is real backward motion (README §7).
+_POS_MISMATCH_MAX_FRAMES: int = 5
+_POS_MISMATCH_REVERSE_MS: float = 1.0            # m/s: signed speed below -this travels -fwd
+
+# TMP crash detection tunables. See core/radar/README.md §7.
+_CRASH_PITCH_JERK: float = 12.0                 # deg/s pitch rate delta threshold
+_CRASH_YAW_JERK: float = 40.0                   # deg/s yaw rate delta threshold
+_CRASH_ROLL_JERK: float = 20.0                  # deg/s roll rate delta threshold
+_CRASH_JERKS: tuple[float, float, float] = (_CRASH_PITCH_JERK, _CRASH_YAW_JERK, _CRASH_ROLL_JERK)
+# Backward step against travel that counts as a shove once rotation jerk fires with it.
+_CRASH_SHOVE_MIN_M: float = 0.025
+_CRASH_SHOVE_MIN_SPEED_MS: float = 3.0          # m/s travel below which a step back is jitter
+_CRASH_HOLD_S: float = 2.0                      # s latch past the last qualifying frame
+# Crash hands the raw speed to the short window once it reads this much slower.
+_CRASH_SHORT_MIN_LOSS_MS: float = 2.0
+_CRASH_FROZEN_EPS: float = 1e-6                 # deg / m: byte-identical frame detection
+# Vertical corroboration is a jerk (|Δy - prev Δy|), not a slope, so a steady
+# grade (Δy up to ~0.14 m/frame at highway speed) never qualifies.
+_CRASH_VERTICAL_JERK_M: float = 0.08            # m per-frame Δy change
+_CRASH_REVERSAL_COS: float = -0.3               # cos(prev disp, cur disp) below this
+_CRASH_REVERSAL_MIN_DISP_M: float = 0.025       # m both displacements must exceed
+# Crash disp-collapse uses two live frames (TMP ripple). See core/radar/README.md §7.
+_CRASH_DISP_COLLAPSE_RATIO: float = 0.5         # 2-frame disp under this frac of expected
+_CRASH_DISP_COLLAPSE_MIN_SPEED_MS: float = 3.0  # m/s prev speed for collapse check
+
+# TMP pose jump: a step no vehicle could have driven is a relocation, not motion.
+# See core/radar/README.md §7.
+_POSE_JUMP_STAND_MS: float = 2.0                # m/s: recent speed below this counts as standing
+_POSE_JUMP_STAND_M: float = 2.5                 # m a standing vehicle cannot cover in one step
+_POSE_JUMP_STAND_DEG_S: float = 300.0           # deg/s a standing vehicle cannot turn at
+# A relocation from standing plays out over several frames; its tail is held to tighter bars.
+_POSE_JUMP_SETTLE_S: float = 1.0
+_POSE_JUMP_SETTLE_M: float = 1.0
+_POSE_JUMP_SETTLE_DEG_S: float = 150.0
+_POSE_JUMP_MAX_MS: float = 100.0                # m/s: faster than anything drives
+_POSE_JUMP_SPEED_MEMORY_S: float = 3.0          # s of speed history that decides standing
+_POSE_JUMP_REST_EPS_M: float = 0.01             # m: history samples this close are one stop
+_POSE_JUMP_MIN_UPDATES: int = 3                 # filter updates before the guard arms
+
+_MIN_CURVATURE_RADIUS: float = 5.0
+_STRAIGHT_CURVATURE_EPS: float = 1e-6
+
+# Position history buffer (speed LS, curvature, ACC). See core/radar/README.md §7.
+_POSITION_HISTORY_LEN: int = 25
+
+# Geometry-only trail, retained on a distance grid instead of a time/count cap so
+# a slow vehicle still spans usable ground. See core/radar/README.md §7.
+_TRAIL_MIN_STEP_M: float = 0.5
+_TRAIL_SPAN_M: float = 40.0
+_TRAIL_MAX_LEN: int = 64
+# Age is a backstop, not the retention rule: the span cap binds at 2.06 s at
+# 70 km/h, so this only governs slow traffic. See core/acc/README.md §3.
+_TRAIL_MAX_AGE_S: float = 6.0
+_RAW_SPEED_HISTORY_LEN: int = 20
+_RAW_SPEED_NEAR_ZERO_CHORD: float = 0.025  # m: same gate as per-frame displacement
+_BUFFER_SIGN_SPEED_MS: float = 0.05        # m/s: below this, trust LS sign on AI
+
+# A hard-braking target temporarily uses a short position-fit window so the
+# long cruise window cannot keep reporting motion after the target has stopped.
+_RAW_BRAKE_SHORT_HISTORY_LEN: int = 5
+_RAW_BRAKE_CONFIRM_FRAMES: int = 2
+_RAW_BRAKE_MIN_DECEL_MS2: float = 2.0
+_RAW_BRAKE_MIN_SPEED_LOSS_MS: float = 0.4
+_RAW_BRAKE_MIN_INTERVAL_SPEED_MS: float = 0.25
+_RAW_BRAKE_MONOTONIC_TOL_MS: float = 0.15
+_RAW_BRAKE_CONVERGENCE_MS: float = 0.3
+_RAW_BRAKE_RELEASE_FRAMES: int = 3
+_RAW_BRAKE_STANDSTILL_SPEED_MS: float = 0.1
+
+
+def is_sub_frame(dt: float) -> bool:
+    """True when ``dt`` since the last full update is too short to run the chain.
+
+    Exactly three physics steps still counts, which keeps the ~70 ms cadence the chain was tuned on.
+    """
+    return dt < _LOCATION_UPDATE_FREQUENCY + _SUB_FRAME_EPS_S
+
+
+def _lag_freeze_duration(gap_3d: float, ego_speed: float) -> float:
+    """TTC-scaled lag freeze duration (seconds). See core/radar/README.md §7."""
+    ttc = gap_3d / max(ego_speed, _LAG_FREEZE_EGO_SPEED_FLOOR)
+    if ttc <= _LAG_FREEZE_TTC_LO:
+        return 0.0
+    if ttc >= _LAG_FREEZE_TTC_HI:
+        return _LAG_FREEZE_DUR_MAX
+    return _LAG_FREEZE_LOG_K * math.log(ttc / _LAG_FREEZE_TTC_LO)
+
+
+def _hold_coast_speed(prev_speed: float, accel: float, dt: float) -> float:
+    """Advance a held speed by its own frozen deceleration. See core/radar/README.md §7.
+
+    A hold has no new position evidence, so the last measured acceleration is the
+    best estimate of what the target did during it. Only the component that shrinks
+    |speed| is integrated: extrapolating a target *faster* would invent motion it may
+    not have and bias every consumer toward less braking, which is the one direction a
+    stalled stream must never move. The magnitude never crosses zero.
+    """
+    if dt <= 0.0 or accel * prev_speed >= 0.0:
+        return prev_speed
+    return math.copysign(max(0.0, abs(prev_speed) - abs(accel) * dt), prev_speed)
+
+
+def _min_magnitude(a: float, b: float) -> float:
+    """Whichever of two same-signed speeds is closer to zero."""
+    return a if abs(a) <= abs(b) else b
+
+
+def _raw_path_speed(
+    history: list[tuple[float, float, float]],
+    start: int,
+    end: int | None,
+) -> float | None:
+    """Unsigned path-length speed over ``history[start:end]``, else None."""
+    seg = history[start:end]
+    if len(seg) < 2:
+        return None
+    span = seg[-1][0] - seg[0][0]
+    if span <= 1e-9:
+        return None
+    dist = 0.0
+    for (_, x0, z0), (_, x1, z1) in zip(seg, seg[1:]):
+        dist += math.sqrt((x1 - x0) ** 2 + (z1 - z0) ** 2)
+    return dist / span
+
+
+def _raw_speed_from_position_history(
+    history: list[tuple[float, float, float]],
+    fwd_x: float,
+    fwd_z: float,
+) -> float | None:
+    """Signed m/s from (t,x,z) LS fit over _RAW_SPEED_HISTORY_LEN samples."""
+    if len(history) < 2:
+        return None
+    window = history[-_RAW_SPEED_HISTORY_LEN:] if len(history) > _RAW_SPEED_HISTORY_LEN else history
+    t0, x0, z0 = window[0]
+    tn, xn, zn = window[-1]
+    chord_dx = xn - x0
+    chord_dz = zn - z0
+    chord = math.sqrt(chord_dx * chord_dx + chord_dz * chord_dz)
+    if chord < _RAW_SPEED_NEAR_ZERO_CHORD:
+        return 0.0
+    # Free-intercept slope, not a fit through window[0]: see core/radar/README.md
+    # section 7 "Why the intercept is free".
+    n = 0
+    sum_tau = 0.0
+    sum_s = 0.0
+    for t, x, z in window:
+        n += 1
+        sum_tau += t - t0
+        sum_s += (x - x0) * fwd_x + (z - z0) * fwd_z
+    mean_tau = sum_tau / n
+    mean_s = sum_s / n
+    num = 0.0
+    den = 0.0
+    for t, x, z in window:
+        d_tau = (t - t0) - mean_tau
+        num += d_tau * (((x - x0) * fwd_x + (z - z0) * fwd_z) - mean_s)
+        den += d_tau * d_tau
+    if den < 1e-12:
+        dt = tn - t0
+        if dt < 1e-9:
+            return 0.0
+        direction = 1.0 if (chord_dx * fwd_x + chord_dz * fwd_z) >= 0.0 else -1.0
+        return direction * chord / dt
+    return num / den
+
+
+def _hard_brake_decel_from_position_history(
+    history: list[tuple[float, float, float]],
+    fwd_x: float,
+    fwd_z: float,
+) -> float | None:
+    """Return confirmed short-window deceleration magnitude, else None."""
+    if len(history) < _RAW_BRAKE_SHORT_HISTORY_LEN:
+        return None
+    window = history[-_RAW_BRAKE_SHORT_HISTORY_LEN:]
+    intervals: list[tuple[float, float]] = []
+    for (t0, x0, z0), (t1, x1, z1) in zip(window, window[1:]):
+        dt = t1 - t0
+        if dt <= 1e-9:
+            return None
+        speed = ((x1 - x0) * fwd_x + (z1 - z0) * fwd_z) / dt
+        intervals.append(((t0 + t1) * 0.5, speed))
+
+    direction = 1.0 if sum(speed for _, speed in intervals) >= 0.0 else -1.0
+    magnitudes = [speed * direction for _, speed in intervals]
+    if any(speed < _RAW_BRAKE_MIN_INTERVAL_SPEED_MS for speed in magnitudes):
+        return None
+    if any(
+        later > earlier + _RAW_BRAKE_MONOTONIC_TOL_MS
+        for earlier, later in zip(magnitudes, magnitudes[1:])
+    ):
+        return None
+
+    early_speed = 0.5 * (magnitudes[0] + magnitudes[1])
+    late_speed = 0.5 * (magnitudes[-2] + magnitudes[-1])
+    speed_loss = early_speed - late_speed
+    early_t = 0.5 * (intervals[0][0] + intervals[1][0])
+    late_t = 0.5 * (intervals[-2][0] + intervals[-1][0])
+    span = late_t - early_t
+    if span <= 1e-9:
+        return None
+    decel = speed_loss / span
+    if (
+        speed_loss < _RAW_BRAKE_MIN_SPEED_LOSS_MS
+        or decel < _RAW_BRAKE_MIN_DECEL_MS2
+    ):
+        return None
+    return decel
+
+
+def _raw_speed_from_kinematics(
+    buffer_speed: float,
+    position_history: list[tuple[float, float, float]],
+    fwd_x: float,
+    fwd_z: float,
+    prev_raw_x: float,
+    prev_raw_z: float,
+    prev_y: float,
+    raw_x: float,
+    raw_z: float,
+    raw_y: float,
+    dt: float,
+    preserve_buffer_sign: bool,
+) -> float:
+    """Raw m/s into the filter chain (AI/TMP sign rules). See core/radar/README.md §7."""
+    _ls = _raw_speed_from_position_history(position_history, fwd_x, fwd_z)
+    if _ls is not None:
+        if preserve_buffer_sign and abs(buffer_speed) > _BUFFER_SIGN_SPEED_MS:
+            return math.copysign(abs(_ls), buffer_speed)
+        return _ls
+    disp_x = raw_x - prev_raw_x
+    disp_z = raw_z - prev_raw_z
+    dist = math.sqrt(
+        disp_x * disp_x + (raw_y - prev_y) ** 2 + disp_z * disp_z
+    )
+    if dist > _RAW_SPEED_NEAR_ZERO_CHORD and dt > 1e-9:
+        direction = 1.0 if (disp_x * fwd_x + disp_z * fwd_z) >= 0.0 else -1.0
+        derived = direction * dist / dt
+        if preserve_buffer_sign and abs(buffer_speed) > _BUFFER_SIGN_SPEED_MS:
+            return math.copysign(abs(derived), buffer_speed)
+        return derived
+    return 0.0
+
+
+def _accel_to_arc_params(accel: float, override_decel: float = 0.0) -> tuple[float, float]:
+    """Map kinematic accel to ArcPath (decel, accel) with caps."""
+    if override_decel > 0.0:
+        return override_decel, 0.0
+    if accel < 0.0:
+        return min(-accel, 6.0), 0.0
+    return 0.0, min(accel, 4.0)
+
+
+def _tmp_speed_ema_alpha(speed_ms: float) -> float:
+    """Weight on the new raw speed sample. 1.0 at rest → 0.25 at 90 km/h."""
+    return (_SPEED_EMA_AT_REST * _SPEED_EMA_CURVE_D) / (
+        abs(speed_ms) + _SPEED_EMA_CURVE_D
+    )
+
+
+def _accel_window_scale(speed_ms: float) -> float:
+    """Multiplier on every accel fit window; 1.0 at ``_ACCEL_WINDOW_REF_MS``."""
+    x = abs(speed_ms) / _ACCEL_WINDOW_REF_MS
+    frac = (1.0 - math.exp(-_ACCEL_WINDOW_K * x)) / _ACCEL_WINDOW_EXP_DEN
+    scale = _ACCEL_WINDOW_SCALE_MIN + (1.0 - _ACCEL_WINDOW_SCALE_MIN) * frac
+    return max(_ACCEL_WINDOW_SCALE_MIN, min(_ACCEL_WINDOW_SCALE_MAX, scale))
+
+
+def _accel_from_speed_history(
+    history: list[tuple[float, float]],
+    window_s: float,
+) -> float:
+    """LS slope m/s² of speed samples within ``window_s``."""
+    if len(history) < 2:
+        return 0.0
+    t_new = history[-1][0]
+    window = [(t, s) for (t, s) in history if t_new - t <= window_s]
+    n = len(window)
+    if n < 2:
+        return 0.0
+    t_mean = sum(t for t, _ in window) / n
+    s_mean = sum(s for _, s in window) / n
+    num = 0.0
+    den = 0.0
+    for t, s in window:
+        dt_c = t - t_mean
+        num += dt_c * (s - s_mean)
+        den += dt_c * dt_c
+    if den < 1e-12:
+        return 0.0
+    return num / den
+
+
+def _speed_corr_chain(
+    raw_speed: float,
+    t_now: float,
+    dt: float,
+    prev_speed_ema: float | None,
+    prev_accel: float | None,
+    prev_speed_ema_history: list[tuple[float, float]] | None,
+) -> tuple[float, float, float, list[tuple[float, float]]]:
+    """Filter steps 1-3: speed_ema, accel, speed_corr. See core/radar/README.md §7."""
+    # Step 1: plain EMA of raw speed (no lag compensation).
+    if prev_speed_ema is None:
+        speed_ema = raw_speed
+        alpha_s = 1.0
+    else:
+        alpha_s = _tmp_speed_ema_alpha(abs((prev_speed_ema + raw_speed) * 0.5))
+        speed_ema = alpha_s * raw_speed + (1.0 - alpha_s) * prev_speed_ema
+
+    # Filter chain step (shared kinematics). See core/radar/README.md §7.
+    history = list(prev_speed_ema_history) if prev_speed_ema_history else []
+    history.append((t_now, speed_ema))
+    if len(history) > _SPEED_EMA_HISTORY_LEN:
+        history = history[-_SPEED_EMA_HISTORY_LEN:]
+    accel_raw = _accel_from_speed_history(
+        history, _ACCEL_FIT_WINDOW_S * _accel_window_scale(speed_ema))
+    if prev_accel is None:
+        accel = accel_raw
+    else:
+        accel = prev_accel + _ACCEL_EMA_ALPHA * (accel_raw - prev_accel)
+
+    # Step 3: lag-compensated speed. τ is the step-1 EMA's settling time.
+    tau_eff = dt * (1.0 - alpha_s) / alpha_s if alpha_s > 1e-6 else 0.0
+    correction = max(-_SPEED_CORR_CLAMP_MS, min(_SPEED_CORR_CLAMP_MS, accel * tau_eff))
+    speed_corr = speed_ema + correction
+    return speed_ema, accel, speed_corr, history
+
+
+def _acc_speed_step(
+    speed_corr: float,
+    history: list[tuple[float, float]],
+    accel: float,
+    dt: float,
+    prev_speed_ema: float | None,
+    prev_acc_speed: float | None,
+    prev_acc_standstill: bool,
+    prev_acc_release_s: float,
+) -> tuple[float, bool, float]:
+    """Step 4 of the filter chain. Returns (acc_speed, standstill, release_s)."""
+    # acc_speed step-4 tunables. See core/radar/README.md §7.
+    acc_standstill = prev_acc_standstill
+    acc_release_s = 0.0
+    if prev_speed_ema is None or prev_acc_speed is None:
+        acc_speed = speed_corr
+        acc_standstill = False
+    else:
+        delta = speed_corr - prev_acc_speed
+        ramp = (abs(delta) - _ACC_SPEED_DEADBAND_MS) / _ACC_SPEED_DEADBAND_MS
+        ramp = max(0.0, min(1.0, ramp))
+        # Smoothing scales with speed: full at the reference speed, light at rest.
+        speed_factor = _ACC_SPEED_SMOOTH_MIN + (1.0 - _ACC_SPEED_SMOOTH_MIN) * min(
+            1.0, abs(speed_corr) / _ACC_SPEED_SMOOTH_REF_MS)
+        # ...and with acceleration: a steady ramp is low-noise, track it closely.
+        accel_trend = _accel_from_speed_history(history, _ACC_SPEED_ACCEL_WINDOW_S)
+        # Fast tau only when residual agrees with trend. See core/radar/README.md §7.
+        if abs(accel_trend) <= _ACC_SPEED_FF_GATE_LO_MS2 or accel_trend * delta <= 0.0:
+            ramp = 0.0
+        # Trend consistency: a real ramp sustains its slope on the long window,
+        # convoy drift-and-snap wobble does not. Scales ff and tau reduction only.
+        accel_long = _accel_from_speed_history(history, _ACC_SPEED_CONSIST_WINDOW_S)
+        if accel_trend * accel_long <= 0.0:
+            consistency = 0.0
+        else:
+            ratio = min(1.0, abs(accel_long) / max(abs(accel_trend), 1e-6))
+            mag_span = _ACC_SPEED_CONSIST_MAG_HI_MS2 - _ACC_SPEED_CONSIST_MAG_LO_MS2
+            mag = max(0.0, min(1.0,
+                (abs(accel_long) - _ACC_SPEED_CONSIST_MAG_LO_MS2) / mag_span))
+            consistency = max(ratio, mag)
+        accel_span = _ACC_SPEED_ACCEL_HI_MS2 - _ACC_SPEED_ACCEL_LO_MS2
+        accel_ramp = max(0.0, min(1.0,
+            (abs(accel_trend) - _ACC_SPEED_ACCEL_LO_MS2) / accel_span)) * consistency
+        accel_factor = 1.0 - (1.0 - _ACC_SPEED_ACCEL_FLOOR) * accel_ramp
+        tau = _ACC_SPEED_TAU_SLOW_S + (_ACC_SPEED_TAU_FAST_S - _ACC_SPEED_TAU_SLOW_S) * ramp
+        tau *= speed_factor * accel_factor
+        alpha_a = dt / (tau + dt)
+        # acc_speed step-4 tunables. See core/radar/README.md §7.
+        ff_gate = max(0.0, min(1.0,
+            (abs(accel_trend) - _ACC_SPEED_FF_GATE_LO_MS2)
+            / (_ACC_SPEED_FF_GATE_HI_MS2 - _ACC_SPEED_FF_GATE_LO_MS2))) * consistency
+        accel_ff = max(-_ACC_SPEED_FF_ACCEL_CLAMP_MS2,
+                       min(_ACC_SPEED_FF_ACCEL_CLAMP_MS2, accel))
+        predicted = prev_acc_speed + accel_ff * dt * ff_gate
+        acc_speed = predicted + alpha_a * (speed_corr - predicted)
+
+        # Standstill latch: clamp acc_speed to 0 once it settles near zero with
+        # no real ramp; release on sustained speed_corr (hysteresis, see core/radar/README.md §7).
+        if acc_standstill:
+            if abs(speed_corr) > _ACC_SPEED_STANDSTILL_RELEASE_MS:
+                acc_release_s = prev_acc_release_s + dt
+            if acc_release_s >= _ACC_SPEED_STANDSTILL_RELEASE_S:
+                acc_standstill = False
+            else:
+                acc_speed = 0.0
+        elif (abs(acc_speed) < _ACC_SPEED_STANDSTILL_ENTER_MS
+                and abs(accel_trend) < _ACC_SPEED_ACCEL_LO_MS2):
+            acc_standstill = True
+            acc_speed = 0.0
+
+    return acc_speed, acc_standstill, acc_release_s
+
+
+def _smooth_vehicle_kinematics(
+    raw_speed: float,
+    acc_raw_speed: float,
+    t_now: float,
+    dt: float,
+    prev_speed_ema: float | None,
+    prev_accel: float | None,
+    prev_speed_ema_history: list[tuple[float, float]] | None,
+    prev_acc_speed_ema: float | None,
+    prev_acc_accel: float | None,
+    prev_acc_speed_ema_history: list[tuple[float, float]] | None,
+    prev_acc_speed: float | None,
+    prev_acc_standstill: bool = False,
+    prev_acc_release_s: float = 0.0,
+) -> tuple[float, float, float, list[tuple[float, float]],
+           float, float, list[tuple[float, float]], float, bool, float]:
+    """Dual AEB/ACC kinematics chains from raw speeds. See core/radar/README.md §7."""
+    speed_ema, accel, speed_corr, history = _speed_corr_chain(
+        raw_speed, t_now, dt,
+        prev_speed_ema, prev_accel, prev_speed_ema_history,
+    )
+
+    # Separate AEB vs ACC filter state. See core/radar/README.md §7.
+    acc_ema, acc_accel, acc_corr, acc_history = _speed_corr_chain(
+        acc_raw_speed, t_now, dt,
+        prev_acc_speed_ema, prev_acc_accel, prev_acc_speed_ema_history,
+    )
+
+    acc_speed, acc_standstill, acc_release_s = _acc_speed_step(
+        acc_corr, acc_history, acc_accel, dt,
+        prev_acc_speed_ema, prev_acc_speed,
+        prev_acc_standstill, prev_acc_release_s,
+    )
+
+    return (speed_ema, accel, speed_corr, history,
+            acc_ema, acc_accel, acc_history, acc_speed,
+            acc_standstill, acc_release_s)
+
+
+class Position:
+    __slots__ = ("x", "y", "z")
+
+    def __init__(self, x: float, y: float, z: float) -> None:
+        self.x = x
+        self.y = y
+        self.z = z
+
+    def __add__(self, other: "Position") -> "Position":
+        return Position(self.x + other.x, self.y + other.y, self.z + other.z)
+
+    def __sub__(self, other: "Position") -> "Position":
+        return Position(self.x - other.x, self.y - other.y, self.z - other.z)
+
+    def tuple(self) -> tuple[float, float, float]:
+        return (self.x, self.y, self.z)
+
+    def is_zero(self) -> bool:
+        return self.x == 0.0 and self.y == 0.0 and self.z == 0.0
+
+    def distance_to(self, other: "Position") -> float:
+        dx = self.x - other.x
+        dz = self.z - other.z
+        return math.sqrt(dx * dx + dz * dz)
+
+    def __repr__(self) -> str:
+        return f"Position({self.x:.2f}, {self.y:.2f}, {self.z:.2f})"
+
+
+class Quaternion:
+    """ETS2 traffic quaternion: x/y swap is intentional (core/radar/README.md §3)."""
+    __slots__ = ("w", "x", "y", "z", "_euler_cache")
+
+    def __init__(self, w: float, x: float, y: float, z: float) -> None:
+        self.w = w
+        self.x = y
+        self.y = x
+        self.z = z
+        self._euler_cache: tuple[float, float, float] | None = None
+
+    def euler(self) -> tuple[float, float, float]:
+        """(pitch, yaw, roll) in degrees. Cached: quaternion is immutable after init."""
+        if self._euler_cache is not None:
+            return self._euler_cache
+        yaw = math.atan2(
+            2.0 * (self.y * self.z + self.w * self.x),
+            self.w * self.w - self.x * self.x - self.y * self.y + self.z * self.z,
+        )
+        pitch = math.asin(
+            max(-1.0, min(1.0, -2.0 * (self.x * self.z - self.w * self.y)))
+        )
+        roll = math.atan2(
+            2.0 * (self.x * self.y + self.w * self.z),
+            self.w * self.w + self.x * self.x - self.y * self.y - self.z * self.z,
+        )
+        self._euler_cache = math.degrees(pitch), math.degrees(yaw), math.degrees(roll)
+        return self._euler_cache
+
+    def is_zero(self) -> bool:
+        return self.w == 0.0 and self.x == 0.0 and self.y == 0.0 and self.z == 0.0
+
+    def __repr__(self) -> str:
+        p, y, r = self.euler()
+        return f"Quaternion(pitch={p:.1f}, yaw={y:.1f}, roll={r:.1f})"
+
+
+class Size:
+    __slots__ = ("width", "height", "length")
+
+    def __init__(self, width: float, height: float, length: float) -> None:
+        self.width = width
+        self.height = height
+        self.length = length
+
+    def __repr__(self) -> str:
+        return f"Size({self.width:.2f}, {self.height:.2f}, {self.length:.2f})"
+
+
+class Trailer:
+    __slots__ = ("position", "rotation", "size", "is_tmp", "slot")
+
+    def __init__(self, position: Position, rotation: Quaternion,
+                 size: Size, is_tmp: bool = False, slot: int = -1) -> None:
+        self.position = position
+        self.rotation = rotation
+        self.size = size
+        self.is_tmp = is_tmp
+        # Buffer trailer-slot index (0..2). Stable across frames so the ACC
+        # trailer-as-vehicle wrapper can derive a continuous synthetic id.
+        self.slot = slot
+
+    def correct_position(self) -> Position:
+        """Shift TMP trailer pivot from front coupler to body center."""
+        _, yaw_deg, _ = self.rotation.euler()
+        yaw_rad = math.radians(yaw_deg)
+        return Position(
+            self.position.x + (self.size.length / 2.0) * math.sin(yaw_rad),
+            self.position.y,
+            self.position.z + (self.size.length / 2.0) * math.cos(yaw_rad),
+        )
+
+    def is_zero(self) -> bool:
+        return self.position.is_zero() and self.rotation.is_zero()
+
+
+@dataclass(slots=True)
+class ArcPath:
+    """Predicted path as a circular arc or straight ray.  See core/radar/README.md §8."""
+    start_x: float = 0.0
+    start_z: float = 0.0
+    yaw_rad: float = 0.0
+    speed: float = 0.0
+    curvature: float = 0.0
+    half_width: float = 1.15
+    horizon: float = 3.0
+    decel: float = 0.0
+    accel: float = 0.0
+
+    # ArcPath capsule collision fields. See core/radar/README.md §8.
+    fwd_len: float = 0.0
+    back_len: float = 0.0
+
+    # ArcPath capsule collision fields. See core/radar/README.md §8.
+    parallel_margin_scale: float = 1.0
+
+    is_straight: bool = True
+    center_x: float = 0.0
+    center_z: float = 0.0
+    radius: float = 0.0
+    angle0: float = 0.0
+    max_sweep: float = 0.0
+    arc_length: float = 0.0
+    fwd_x: float = 0.0
+    fwd_z: float = -1.0
+    _sign: float = 1.0
+    _has_body: bool = False
+    _cap_fwd: float = 0.0
+    _cap_back: float = 0.0
+
+    def build(self) -> "ArcPath":
+        """Fill ArcPath derived fields; call after assigning inputs."""
+        self._has_body = self.fwd_len > 1e-9 or self.back_len > 1e-9
+        # ArcPath capsule collision fields. See core/radar/README.md §8.
+        self._cap_fwd = max(self.fwd_len - self.half_width, 0.0)
+        self._cap_back = max(self.back_len - self.half_width, 0.0)
+        self.fwd_x = -math.sin(self.yaw_rad)
+        self.fwd_z = -math.cos(self.yaw_rad)
+
+        # Reversing: flip fwd to actual travel direction, normalise speed to abs.
+        if self.speed < -1e-3:
+            self.fwd_x = -self.fwd_x
+            self.fwd_z = -self.fwd_z
+        self.speed = abs(self.speed)
+
+        if self.speed < 1e-3:
+            self.is_straight = True
+            self.arc_length = 0.0
+            self.max_sweep = 0.0
+            return self
+
+        if self.decel > 0.0:
+            t_stop = self.speed / self.decel
+            if t_stop < self.horizon:
+                self.arc_length = self.speed * t_stop - 0.5 * self.decel * t_stop * t_stop
+            else:
+                t = self.horizon
+                self.arc_length = self.speed * t - 0.5 * self.decel * t * t
+        elif self.accel < 0.0:
+            t_stop = -self.speed / self.accel
+            if t_stop < self.horizon:
+                self.arc_length = self.speed * t_stop + 0.5 * self.accel * t_stop * t_stop
+            else:
+                t = self.horizon
+                self.arc_length = self.speed * t + 0.5 * self.accel * t * t
+        elif self.accel > 0.0:
+            t = self.horizon
+            self.arc_length = self.speed * t + 0.5 * self.accel * t * t
+        else:
+            self.arc_length = self.speed * self.horizon
+
+        if abs(self.curvature) < _STRAIGHT_CURVATURE_EPS:
+            self.is_straight = True
+            self.radius = 0.0
+            self.max_sweep = 0.0
+        else:
+            self.is_straight = False
+            self.radius = max(abs(1.0 / self.curvature), _MIN_CURVATURE_RADIUS)
+
+            self._sign = 1.0 if self.curvature > 0 else -1.0
+            self.center_x = self.start_x + self._sign * self.radius * self.fwd_z
+            self.center_z = self.start_z + self._sign * self.radius * (-self.fwd_x)
+
+            self.angle0 = math.atan2(
+                self.start_z - self.center_z,
+                self.start_x - self.center_x,
+            )
+            self.max_sweep = -self._sign * self.arc_length / self.radius
+
+        return self
+
+    def _dist_at_time(self, t: float) -> float:
+        """Distance travelled along the path at time t (constant speed, decel, or accel)."""
+        if self.decel > 0.0:
+            t_stop = self.speed / self.decel
+            if t >= t_stop:
+                return self.speed * t_stop - 0.5 * self.decel * t_stop * t_stop
+            return self.speed * t - 0.5 * self.decel * t * t
+        elif self.accel < 0.0:
+            t_stop = -self.speed / self.accel
+            if t >= t_stop:
+                return self.speed * t_stop + 0.5 * self.accel * t_stop * t_stop
+            return self.speed * t + 0.5 * self.accel * t * t
+        elif self.accel > 0.0:
+            return self.speed * t + 0.5 * self.accel * t * t
+        return self.speed * t
+
+    def position_at_dist(self, dist: float) -> tuple[float, float]:
+        """(x, z) at distance along the centerline (straight segment or arc)."""
+        dist = max(0.0, min(dist, self.arc_length))
+        if self.is_straight:
+            return (
+                self.start_x + dist * self.fwd_x,
+                self.start_z + dist * self.fwd_z,
+            )
+        frac = dist / self.arc_length if self.arc_length > 0 else 0.0
+        angle = self.angle0 + frac * self.max_sweep
+        return (
+            self.center_x + self.radius * math.cos(angle),
+            self.center_z + self.radius * math.sin(angle),
+        )
+
+    def position_at_time(self, t: float) -> tuple[float, float]:
+        """(x, z) at time t along the path (via _dist_at_time)."""
+        return self.position_at_dist(self._dist_at_time(t))
+
+    def heading_at_dist(self, dist: float) -> float:
+        """Heading (yaw_rad) at distance along the path."""
+        if self.is_straight:
+            return self.yaw_rad
+        dist = max(0.0, min(dist, self.arc_length))
+        frac = dist / self.arc_length if self.arc_length > 0 else 0.0
+        return self.yaw_rad + frac * self.max_sweep
+
+    def sample_points(self, n: int = 16) -> list[tuple[float, float]]:
+        """n evenly spaced (x, z) points along the centerline."""
+        if n < 2 or self.arc_length < 1e-6:
+            return [(self.start_x, self.start_z)]
+        pts = []
+        for i in range(n):
+            d = self.arc_length * i / (n - 1)
+            pts.append(self.position_at_dist(d))
+        return pts
+
+    def sample_corridor(self, n: int = 16) -> tuple[
+        list[tuple[float, float]], list[tuple[float, float]]
+    ]:
+        """Left and right boundary point lists for the path corridor (half_width)."""
+        if n < 2 or self.arc_length < 1e-6:
+            return [(self.start_x, self.start_z)], [(self.start_x, self.start_z)]
+
+        if self.is_straight:
+            left = []
+            right = []
+            for i in range(n):
+                d = self.arc_length * i / (n - 1)
+                x, z = self.position_at_dist(d)
+                h = self.heading_at_dist(d)
+                rx = -math.cos(h)
+                rz = math.sin(h)
+                left.append((x - rx * self.half_width, z - rz * self.half_width))
+                right.append((x + rx * self.half_width, z + rz * self.half_width))
+            return left, right
+
+        r_inner = max(self.radius - self.half_width, 0.5)
+        r_outer = self.radius + self.half_width
+        left = []
+        right = []
+        for i in range(n):
+            frac = i / (n - 1) if n > 1 else 1.0
+            angle = self.angle0 + frac * self.max_sweep
+            cx, cz = self.center_x, self.center_z
+            c, s = math.cos(angle), math.sin(angle)
+            inner_pt = (cx + r_inner * c, cz + r_inner * s)
+            outer_pt = (cx + r_outer * c, cz + r_outer * s)
+            if self._sign > 0:  # left turn: left = inner, right = outer
+                left.append(inner_pt)
+                right.append(outer_pt)
+            else:  # right turn: left = outer, right = inner
+                left.append(outer_pt)
+                right.append(inner_pt)
+        return left, right
+
+
+def build_arc(
+    x: float, z: float, yaw_rad: float, speed: float,
+    curvature: float, half_width: float, horizon: float,
+    decel: float = 0.0,
+    accel: float = 0.0,
+    fwd_len: float = 0.0,
+    back_len: float = 0.0,
+    parallel_margin_scale: float = 1.0,
+) -> ArcPath:
+    """Build an ArcPath (prefer over raw ArcPath()). See core/radar/README.md §8."""
+    return ArcPath(
+        start_x=x, start_z=z, yaw_rad=yaw_rad, speed=speed,
+        curvature=curvature, half_width=half_width, horizon=horizon,
+        decel=decel, accel=accel, fwd_len=fwd_len, back_len=back_len,
+        parallel_margin_scale=parallel_margin_scale,
+    ).build()
+
+
+def capsule_extents(
+    front_d: float, back_d: float, body_offset: float,
+) -> tuple[float, float]:
+    """Capsule fwd_len/back_len from pivot distances and arc reference offset."""
+    return max(front_d - body_offset, 0.0), max(back_d + body_offset, 0.0)
+
+
+def arc_arc_collision(
+    a: ArcPath,
+    b: ArcPath,
+    margin: float = 0.5,
+    n_samples: int = 24,
+    min_lateral_gap: float = 0.0,
+) -> Optional[tuple[float, float, float]]:
+    """Earliest arc corridor overlap time, or None. See core/radar/README.md §8."""
+    if a.arc_length < 1e-3 and b.arc_length < 1e-3:
+        return None
+
+    corridor_sq = (a.half_width + b.half_width + margin) ** 2
+    horizon = min(a.horizon, b.horizon)
+
+    # Capsule bodies (nonzero fwd_len/back_len) test segment overlap, not point
+    # overlap, so the closed-form ray-ray path (point-only) does not apply.
+    if (a.is_straight and b.is_straight
+            and not a._has_body and not b._has_body
+            and a.decel <= 0 and b.decel <= 0
+            and a.accel == 0.0 and b.accel == 0.0):
+        return _ray_ray_collision(a, b, corridor_sq, horizon, min_lateral_gap)
+
+    return _sampled_collision(
+        a, b, corridor_sq, horizon, n_samples, min_lateral_gap,
+        hw_sum=a.half_width + b.half_width, margin=margin,
+    )
+
+
+def _seg_seg_dist_sq_mid(
+    ax0: float, az0: float, ax1: float, az1: float,
+    bx0: float, bz0: float, bx1: float, bz1: float,
+) -> tuple[float, float, float]:
+    """Segment-segment distance squared and closest-pair midpoint."""
+    ux = ax1 - ax0
+    uz = az1 - az0
+    vx = bx1 - bx0
+    vz = bz1 - bz0
+    wx = ax0 - bx0
+    wz = az0 - bz0
+    a = ux * ux + uz * uz
+    b = ux * vx + uz * vz
+    c = vx * vx + vz * vz
+    d = ux * wx + uz * wz
+    e = vx * wx + vz * wz
+    den = a * c - b * b
+    if a <= 1e-12 and c <= 1e-12:
+        sc = 0.0
+        tc = 0.0
+    elif a <= 1e-12:
+        sc = 0.0
+        tc = min(1.0, max(0.0, e / c))
+    elif c <= 1e-12:
+        tc = 0.0
+        sc = min(1.0, max(0.0, -d / a))
+    else:
+        if den > 1e-12:
+            sc = (b * e - c * d) / den
+            sc = 0.0 if sc < 0.0 else (1.0 if sc > 1.0 else sc)
+        else:
+            sc = 0.0
+        tc = (b * sc + e) / c
+        if tc < 0.0:
+            tc = 0.0
+            sc = min(1.0, max(0.0, -d / a))
+        elif tc > 1.0:
+            tc = 1.0
+            sc = min(1.0, max(0.0, (b - d) / a))
+    cpax = ax0 + sc * ux
+    cpaz = az0 + sc * uz
+    cpbx = bx0 + tc * vx
+    cpbz = bz0 + tc * vz
+    dxx = cpax - cpbx
+    dzz = cpaz - cpbz
+    return dxx * dxx + dzz * dzz, (cpax + cpbx) * 0.5, (cpaz + cpbz) * 0.5
+
+
+def pair_body_dist_sq(a: ArcPath, b: ArcPath, t: float) -> float:
+    """Body distance squared at time t (capsule or point)."""
+    if a._has_body or b._has_body:
+        da = a._dist_at_time(t)
+        ax, az = a.position_at_dist(da)
+        ha = a.heading_at_dist(da)
+        afx = -math.sin(ha)
+        afz = -math.cos(ha)
+        db = b._dist_at_time(t)
+        bx, bz = b.position_at_dist(db)
+        hb = b.heading_at_dist(db)
+        bfx = -math.sin(hb)
+        bfz = -math.cos(hb)
+        dsq, _, _ = _seg_seg_dist_sq_mid(
+            ax + a._cap_fwd * afx, az + a._cap_fwd * afz,
+            ax - a._cap_back * afx, az - a._cap_back * afz,
+            bx + b._cap_fwd * bfx, bz + b._cap_fwd * bfz,
+            bx - b._cap_back * bfx, bz - b._cap_back * bfz,
+        )
+        return dsq
+    ax, az = a.position_at_time(t)
+    bx, bz = b.position_at_time(t)
+    return (ax - bx) ** 2 + (az - bz) ** 2
+
+
+def _ray_ray_collision(
+    a: ArcPath, b: ArcPath, corridor_sq: float, horizon: float,
+    min_lateral_gap: float = 0.0,
+) -> Optional[tuple[float, float, float]]:
+    """Straight ray-ray corridor hit time. See core/radar/README.md §8."""
+    dpx = a.start_x - b.start_x
+    dpz = a.start_z - b.start_z
+    dvx = a.speed * a.fwd_x - b.speed * b.fwd_x
+    dvz = a.speed * a.fwd_z - b.speed * b.fwd_z
+
+    A = dvx * dvx + dvz * dvz
+    B = 2.0 * (dpx * dvx + dpz * dvz)
+    C = dpx * dpx + dpz * dpz - corridor_sq
+
+    if C <= 0:
+        if min_lateral_gap > 0.0:
+            lat = abs(dpz * a.fwd_x - dpx * a.fwd_z)
+            if lat >= min_lateral_gap:
+                return None
+        return 0.0, (a.start_x + b.start_x) * 0.5, (a.start_z + b.start_z) * 0.5
+
+    if abs(A) < 1e-12:
+        return None
+
+    disc = B * B - 4.0 * A * C
+    if disc < 0:
+        return None
+
+    sqrt_disc = math.sqrt(disc)
+    t1 = (-B - sqrt_disc) / (2.0 * A)
+    t2 = (-B + sqrt_disc) / (2.0 * A)
+
+    t_hit = None
+    if 0.0 <= t1 <= horizon:
+        t_hit = t1
+    elif 0.0 <= t2 <= horizon:
+        t_hit = t2
+    elif t1 < 0 <= t2 and t2 <= horizon:
+        t_hit = 0.0
+
+    if t_hit is None:
+        return None
+
+    ax = a.start_x + t_hit * a.speed * a.fwd_x
+    az = a.start_z + t_hit * a.speed * a.fwd_z
+    bx = b.start_x + t_hit * b.speed * b.fwd_x
+    bz = b.start_z + t_hit * b.speed * b.fwd_z
+
+    if min_lateral_gap > 0.0:
+        lat = abs((bz - az) * a.fwd_x - (bx - ax) * a.fwd_z)
+        if lat >= min_lateral_gap:
+            return None
+
+    return t_hit, (ax + bx) * 0.5, (az + bz) * 0.5
+
+
+def _sampled_collision(
+    a: ArcPath, b: ArcPath, corridor_sq: float, horizon: float, n: int,
+    min_lateral_gap: float = 0.0,
+    hw_sum: float = 0.0, margin: float = 0.0,
+) -> Optional[tuple[float, float, float]]:
+    """Sampled + bisected arc collision (curves, capsules). See core/radar/README.md §8."""
+    has_body = a._has_body or b._has_body
+    need_lat = min_lateral_gap > 0.0
+    pms = (a.parallel_margin_scale
+           if a.parallel_margin_scale < b.parallel_margin_scale
+           else b.parallel_margin_scale)
+    scale_margin = has_body and pms < 1.0 and margin > 0.0
+
+    def _probe(t: float) -> tuple[float, float, float, float, float]:
+        if has_body:
+            da = a._dist_at_time(t)
+            ax, az = a.position_at_dist(da)
+            ha = a.heading_at_dist(da)
+            afx = -math.sin(ha)
+            afz = -math.cos(ha)
+            a0x = ax + a._cap_fwd * afx
+            a0z = az + a._cap_fwd * afz
+            a1x = ax - a._cap_back * afx
+            a1z = az - a._cap_back * afz
+            db = b._dist_at_time(t)
+            bx, bz = b.position_at_dist(db)
+            hb = b.heading_at_dist(db)
+            bfx = -math.sin(hb)
+            bfz = -math.cos(hb)
+            b0x = bx + b._cap_fwd * bfx
+            b0z = bz + b._cap_fwd * bfz
+            b1x = bx - b._cap_back * bfx
+            b1z = bz - b._cap_back * bfz
+            dsq, mx, mz = _seg_seg_dist_sq_mid(a0x, a0z, a1x, a1z,
+                                               b0x, b0z, b1x, b1z)
+            lat = abs((bz - az) * afx - (bx - ax) * afz) if need_lat else 0.0
+            if scale_margin:
+                cosd = afx * bfx + afz * bfz
+                if cosd < 0.0:
+                    cosd = -cosd
+                sind_sq = 1.0 - cosd * cosd
+                sind = math.sqrt(sind_sq) if sind_sq > 0.0 else 0.0
+                thr = hw_sum + margin * (pms + (1.0 - pms) * sind)
+                return dsq, mx, mz, lat, thr * thr
+            return dsq, mx, mz, lat, corridor_sq
+        ax, az = a.position_at_time(t)
+        bx, bz = b.position_at_time(t)
+        dsq = (ax - bx) ** 2 + (az - bz) ** 2
+        if need_lat:
+            h_a = a.heading_at_dist(a._dist_at_time(t))
+            fwd_x_a = -math.sin(h_a)
+            fwd_z_a = -math.cos(h_a)
+            lat = abs((bz - az) * fwd_x_a - (bx - ax) * fwd_z_a)
+        else:
+            lat = 0.0
+        return dsq, (ax + bx) * 0.5, (az + bz) * 0.5, lat, corridor_sq
+
+    best_t: Optional[float] = None
+    best_mx = 0.0
+    best_mz = 0.0
+
+    inv_n = 1.0 / n
+    for i in range(n + 1):
+        t = horizon * i * inv_n
+        dsq, mx, mz, lat, thr_sq = _probe(t)
+        if dsq < thr_sq:
+            if need_lat and lat >= min_lateral_gap:
+                continue
+            lo = max(t - horizon * inv_n, 0.0)
+            hi = t
+            best_t = t
+            best_mx = mx
+            best_mz = mz
+            for _ in range(6):
+                mid = (lo + hi) * 0.5
+                dsq2, mx2, mz2, lat2, thr2_sq = _probe(mid)
+                if dsq2 < thr2_sq and not (need_lat and lat2 >= min_lateral_gap):
+                    hi = mid
+                    best_t = mid
+                    best_mx = mx2
+                    best_mz = mz2
+                else:
+                    lo = mid
+            break
+
+    if best_t is None:
+        return None
+    return best_t, best_mx, best_mz
+
+
+class Vehicle:
+    """Traffic vehicle with arc-based path prediction."""
+
+    def __init__(
+        self,
+        position: Position,
+        rotation: Quaternion,
+        size: Size,
+        speed: float,
+        acceleration: float,
+        trailer_count: int,
+        trailers: list[Trailer],
+        id: int,
+        is_tmp: bool,
+        is_trailer: bool,
+        is_parked: bool = False,
+    ) -> None:
+        self.position = position
+        self.rotation = rotation
+        self.size = size
+        self.speed = speed
+        self.acc_speed = speed
+        # Shared-memory acceleration is not used for physics; kinematic value is
+        # filled in update_from_last(). Zero until the first update avoids spikes.
+        self.acceleration = 0.0
+        # ACC-side acceleration: long-window chain, no hard-brake floor.
+        self.acc_accel = 0.0
+        self.trailer_count = trailer_count
+        self.trailers = trailers
+        self.id = id
+        self.is_tmp = is_tmp
+        self.is_trailer = is_trailer
+        self.is_parked = is_parked
+
+        # Kinematics clock for update_from_last (seconds). Live radar overwrites
+        # with SCS simulatedTime/1e6 so pause/hitch gaps are not wall-clock dt.
+        self.time: float = time.time()
+        self.last_location = Position(0.0, 0.0, 0.0)
+        self.last_rotation = Quaternion(0.0, 0.0, 0.0, 0.0)
+        self.angular_velocity: float = 0.0
+
+        self._smooth_x: Optional[float] = None
+        self._smooth_z: Optional[float] = None
+        self._smooth_yaw: Optional[float] = None
+        self._raw_x: Optional[float] = None
+        self._raw_z: Optional[float] = None
+
+        # Speed/accel filter state (AI + TMP): see core/radar/README.md §7.
+        self._smooth_speed: Optional[float] = None
+        self._smooth_accel: Optional[float] = None
+        self._speed_ema: Optional[float] = None
+        self._speed_ema_history: list[tuple[float, float]] = []
+        self._raw_speed: Optional[float] = None
+        self._raw_brake_confirm_frames: int = 0
+        self._raw_brake_active: bool = False
+        self._raw_brake_converged_frames: int = 0
+        # Parallel steps 1-3 state for the ACC chain (long window only).
+        self._acc_speed_ema: Optional[float] = None
+        self._acc_smooth_accel: Optional[float] = None
+        self._acc_speed_ema_history: list[tuple[float, float]] = []
+        # acc_speed standstill latch (hysteresis state): see core/radar/README.md §7.
+        self._acc_standstill: bool = False
+        self._acc_release_s: float = 0.0
+        # (time, x, z) per full update: newest last, capped at _POSITION_HISTORY_LEN.
+        # Populated for both TMP and AI; speed LS fit uses a shorter internal window.
+        self._position_history: list[tuple[float, float, float]] = []
+        # Distance-retained geometry trail; fits only, never per-segment heading.
+        self._trail_history: list[tuple[float, float, float]] = []
+
+        # TMP lag/freeze tunables. See core/radar/README.md §7.
+        self._lag_since: Optional[float] = None
+        self.lag_confirmed: bool = False
+
+        # TMP position mismatch (out-of-order packets). See core/radar/README.md §7.
+        self._pos_mismatch_frames: int = 0
+        # TMP pose jump: end of the tighter window after a relocation from standing.
+        self._pose_jump_settle_until: float = -1.0
+
+        # TMP crash detection tunables. See core/radar/README.md §7.
+        # (pitch, yaw, roll) rates at the last two live frames, newest first.
+        self._prev_rates: Optional[tuple[float, float, float]] = None
+        self._prev2_rates: Optional[tuple[float, float, float]] = None
+        self._last_live_rot: Optional[tuple[float, float, float]] = None
+        self._last_live_rot_time: Optional[float] = None
+        self._last_live_xz: Optional[tuple[float, float]] = None
+        self._prev_disp_x: Optional[float] = None
+        self._prev_disp_z: Optional[float] = None
+        self._prev_disp_dt: Optional[float] = None
+        self._prev_disp_y: Optional[float] = None
+        self._crash_hold_until: float = -1.0
+        self._crash_knock_until: float = -1.0
+        self.crash_confirmed: bool = False
+
+        self._curvature_cache: float | None = None
+        self._curvature_cache_valid: bool = False
+
+    def accel_for_arc(self) -> float:
+        """Longitudinal acceleration for arc / collision (kinematic filter output)."""
+        return self.acceleration
+
+    def radar_speed_accel(self) -> tuple[float, float, float, float, float]:
+        """Debug tuple of internal speed/accel signals. See core/radar/README.md §7."""
+        raw_speed = self._raw_speed if self._raw_speed is not None else self.speed
+        speed_ema = self._speed_ema if self._speed_ema is not None else self.speed
+        return raw_speed, self.speed, speed_ema, self.acc_speed, self.acceleration
+
+    def _reset_raw_brake_transient(self) -> None:
+        self._raw_brake_confirm_frames = 0
+        self._raw_brake_active = False
+        self._raw_brake_converged_frames = 0
+
+    def _advance_held_kinematics(
+        self,
+        prev: "Vehicle",
+        dt: float,
+        decay: float | None = None,
+    ) -> None:
+        """Coast a held frame on its frozen accel. See core/radar/README.md §7.
+
+        Both holds (lag freeze, position mismatch) suspend the position stream, and
+        holding the *speed* with it made a hard-braking target read as still cruising
+        for the whole hold. Each lane keeps its own accel and coasts on it. ``decay``,
+        when given, is the lag freeze's ramp toward the stationary reading it releases
+        into; the slower of the two is used so the release stays continuous.
+        """
+        speed = _hold_coast_speed(prev.speed, prev.acceleration, dt)
+        acc_speed = _hold_coast_speed(prev.acc_speed, prev.acc_accel, dt)
+        if decay is not None:
+            speed = _min_magnitude(speed, prev.speed * decay)
+            acc_speed = _min_magnitude(acc_speed, prev.acc_speed * decay)
+        self.speed = speed
+        self.acc_speed = acc_speed
+        self.acceleration = prev.acceleration
+        self.acc_accel = prev.acc_accel
+        self._smooth_accel = prev._smooth_accel
+        self._acc_smooth_accel = prev._acc_smooth_accel
+        # Carry the coasted value into the filter state, or the release frame blends
+        # against the pre-hold speed and undoes the coast in one step.
+        self._smooth_speed = speed
+        self._speed_ema = speed
+        self._acc_speed_ema = acc_speed
+
+    def _lag_entry_allowed(self, prev: "Vehicle", dt: float) -> bool:
+        """Gate a new lag freeze on raw-stream evidence. See core/radar/README.md §7."""
+        if prev._raw_brake_active:
+            # A confirmed decel ramp is measured motion, so this is a stop, not a stall.
+            return False
+
+        _pe = prev.rotation.euler()
+        _ce = self.rotation.euler()
+        _rot_delta = max(
+            abs((_c - _p + 180.0) % 360.0 - 180.0) for _c, _p in zip(_ce, _pe)
+        )
+        if _rot_delta / dt >= _LAG_ROT_LIVE_DEG_S:
+            return False
+
+        _hist = self._position_history
+        _w = _LAG_ENTRY_WINDOW
+        _recent = _raw_path_speed(_hist, -(_w + 1), None)
+        if _recent is None:
+            # Too little raw history to judge: keep the pre-gate behaviour.
+            return True
+        if _recent < _LAG_ENTRY_RAW_SPEED_MS:
+            return False
+
+        _older = _raw_path_speed(_hist, -(2 * _w + 1), -_w)
+        if _older is None or _older <= 1e-9:
+            return True
+        return _recent / _older >= _LAG_ENTRY_DECAY_MIN
+
+    def _select_raw_speed(
+        self,
+        long_speed: float,
+        buffer_speed: float,
+        fwd_x: float,
+        fwd_z: float,
+    ) -> float:
+        """Select the short position fit during a confirmed hard brake or crash stop."""
+        short_history = self._position_history[-_RAW_BRAKE_SHORT_HISTORY_LEN:]
+        short_speed = _raw_speed_from_position_history(short_history, fwd_x, fwd_z)
+        if (self.time < self._crash_knock_until and short_speed is not None
+                and not self._raw_brake_active):
+            travel = -1.0 if long_speed < 0.0 else 1.0
+            # A crash stops the body faster than the long window forgets its speed.
+            if travel * (long_speed - short_speed) >= _CRASH_SHORT_MIN_LOSS_MS:
+                self._raw_brake_active = True
+                self._raw_brake_converged_frames = 0
+        # A trailer keeps the short window only for its crash, never for a brake of its own.
+        if self.is_trailer and not (self._raw_brake_active and self.crash_confirmed):
+            self._reset_raw_brake_transient()
+            return long_speed
+        if short_speed is None:
+            self._raw_brake_confirm_frames = 0
+            return long_speed
+        if not self.is_tmp and abs(buffer_speed) > _BUFFER_SIGN_SPEED_MS:
+            short_speed = math.copysign(abs(short_speed), buffer_speed)
+
+        recent_decel = _hard_brake_decel_from_position_history(
+            self._position_history, fwd_x, fwd_z,
+        )
+        qualifies = recent_decel is not None
+        if not self._raw_brake_active:
+            if qualifies:
+                self._raw_brake_confirm_frames += 1
+            else:
+                self._raw_brake_confirm_frames = 0
+            if self._raw_brake_confirm_frames >= _RAW_BRAKE_CONFIRM_FRAMES:
+                self._raw_brake_active = True
+                self._raw_brake_converged_frames = 0
+
+        if not self._raw_brake_active:
+            return long_speed
+
+        if (
+            abs(short_speed) > _RAW_BRAKE_STANDSTILL_SPEED_MS
+            and abs(short_speed - long_speed) <= _RAW_BRAKE_CONVERGENCE_MS
+        ):
+            self._raw_brake_converged_frames += 1
+        else:
+            self._raw_brake_converged_frames = 0
+        if self._raw_brake_converged_frames >= _RAW_BRAKE_RELEASE_FRAMES:
+            self._reset_raw_brake_transient()
+            return long_speed
+        return short_speed
+
+    def _tmp_apply_crash_rotation_jerk(self, prev: "Vehicle", t_now: float) -> None:
+        """TMP crash detect + latch on live frames. See core/radar/README.md §7."""
+        self._prev_rates = prev._prev_rates
+        self._prev2_rates = prev._prev2_rates
+        self._last_live_rot = prev._last_live_rot
+        self._last_live_rot_time = prev._last_live_rot_time
+        self._last_live_xz = prev._last_live_xz
+        self._prev_disp_x = prev._prev_disp_x
+        self._prev_disp_z = prev._prev_disp_z
+        self._prev_disp_dt = prev._prev_disp_dt
+        self._prev_disp_y = prev._prev_disp_y
+        self._crash_hold_until = prev._crash_hold_until
+        self._crash_knock_until = prev._crash_knock_until
+        self.crash_confirmed = t_now < self._crash_hold_until
+
+        dt = t_now - prev.time
+        if not self.is_tmp or prev._raw_x is None or dt < 1e-9:
+            return
+
+        def _adiff(a: float, b: float) -> float:
+            return (a - b + 180.0) % 360.0 - 180.0
+
+        dx = self.position.x - prev._raw_x
+        dz = self.position.z - prev._raw_z
+        dy = self.position.y - prev.position.y
+        cur = self.rotation.euler()
+        prev_rot = prev.rotation.euler()
+        rot_delta_prev = max(abs(_adiff(c, p)) for c, p in zip(cur, prev_rot))
+
+        if self._last_live_rot is None or self._last_live_xz is None:
+            self._last_live_rot = cur
+            self._last_live_rot_time = t_now
+            self._last_live_xz = (self.position.x, self.position.z)
+            self._prev_disp_x = dx
+            self._prev_disp_z = dz
+            self._prev_disp_dt = dt
+            self._prev_disp_y = dy
+            return
+
+        if (abs(dx) < _CRASH_FROZEN_EPS and abs(dz) < _CRASH_FROZEN_EPS
+                and rot_delta_prev < _CRASH_FROZEN_EPS):
+            # Stalled packet stream: hold the live baselines untouched.
+            return
+
+        span = t_now - self._last_live_rot_time
+        if span < 1e-9:
+            return
+        # A sub-frame snaps prev._raw_x forward, so the planar checks measure from the
+        # last live frame instead; otherwise every frame reads as a half-length step.
+        ldx = self.position.x - self._last_live_xz[0]
+        ldz = self.position.z - self._last_live_xz[1]
+        # Frozen frames in between: TMP resumes without catching up, so no collapse reading.
+        stalled = span > dt + 1e-6
+        base = self._last_live_rot
+        rates = (
+            _adiff(cur[0], base[0]) / span,
+            _adiff(cur[1], base[1]) / span,
+            _adiff(cur[2], base[2]) / span,
+        )
+
+        # TMP spreads one impact over consecutive packets, so a rate change is
+        # measured against both of the last two live rates.
+        _rot_jerk = any(
+            ref is not None
+            and any(abs(r - q) > th for r, q, th in zip(rates, ref, _CRASH_JERKS))
+            for ref in (self._prev_rates, self._prev2_rates)
+        )
+
+        if _rot_jerk:
+            # Knocked back: the body reversed or stepped back against travel. It is the
+            # evidence that the crash is stopping it (see _select_raw_speed).
+            _knocked = False
+            if self._prev_disp_x is not None:
+                _cur_mag = math.hypot(ldx, ldz)
+                _prev_mag = math.hypot(self._prev_disp_x, self._prev_disp_z)
+                if (_cur_mag > _CRASH_REVERSAL_MIN_DISP_M
+                        and _prev_mag > _CRASH_REVERSAL_MIN_DISP_M):
+                    _cos = ((ldx * self._prev_disp_x + ldz * self._prev_disp_z)
+                            / (_cur_mag * _prev_mag))
+                    _knocked = _cos < _CRASH_REVERSAL_COS
+            if (not _knocked
+                    and prev._smooth_yaw is not None
+                    and abs(prev.speed) > _CRASH_SHOVE_MIN_SPEED_MS):
+                # The step position mismatch would otherwise hold as a rewind.
+                _travel = -1.0 if prev.speed < -_POS_MISMATCH_REVERSE_MS else 1.0
+                _along = _travel * (dx * -math.sin(prev._smooth_yaw)
+                                    + dz * -math.cos(prev._smooth_yaw))
+                _knocked = _along < -_CRASH_SHOVE_MIN_M
+            _anomaly = _knocked or (self._prev_disp_y is not None
+                                    and abs(dy - self._prev_disp_y) > _CRASH_VERTICAL_JERK_M)
+            if (not _anomaly
+                    and not stalled
+                    and self._prev_disp_x is not None
+                    and self._prev_disp_dt is not None
+                    and abs(prev.speed) > _CRASH_DISP_COLLAPSE_MIN_SPEED_MS):
+                _disp2 = (math.hypot(ldx, ldz)
+                          + math.hypot(self._prev_disp_x, self._prev_disp_z))
+                _expected2 = abs(prev.speed) * (span + self._prev_disp_dt)
+                _anomaly = _disp2 < _expected2 * _CRASH_DISP_COLLAPSE_RATIO
+            if _anomaly:
+                self._crash_hold_until = t_now + _CRASH_HOLD_S
+                self.crash_confirmed = True
+            if _knocked:
+                self._crash_knock_until = t_now + _CRASH_HOLD_S
+
+        self._prev2_rates = self._prev_rates
+        self._prev_rates = rates
+        self._last_live_rot = cur
+        self._last_live_rot_time = t_now
+        self._last_live_xz = (self.position.x, self.position.z)
+        self._prev_disp_x = ldx
+        self._prev_disp_z = ldz
+        self._prev_disp_dt = None if stalled else span
+        self._prev_disp_y = dy
+
+    def _pose_jumped(self, prev: "Vehicle") -> bool:
+        """TMP pose moved farther than the vehicle could have driven. See core/radar/README.md §7."""
+        hist = self._position_history
+        if len(hist) < 2 or len(prev._speed_ema_history) < _POSE_JUMP_MIN_UPDATES:
+            return False
+        t_last, lx, lz = hist[-1]
+        step = math.hypot(self.position.x - lx, self.position.z - lz)
+        v_ref = abs(prev.speed)
+        for t, s in reversed(prev._speed_ema_history):
+            if t < t_last - _POSE_JUMP_SPEED_MEMORY_S:
+                break
+            v_ref = max(v_ref, abs(s))
+        if self.time < prev._pose_jump_settle_until:
+            max_step, max_turn = _POSE_JUMP_SETTLE_M, _POSE_JUMP_SETTLE_DEG_S
+        elif v_ref < _POSE_JUMP_STAND_MS:
+            max_step, max_turn = _POSE_JUMP_STAND_M, _POSE_JUMP_STAND_DEG_S
+        else:
+            # Timed from its arrival at the last position, so a stall catch-up reads its real pace.
+            k = len(hist) - 1
+            while (k > 0 and math.hypot(hist[k - 1][1] - lx, hist[k - 1][2] - lz)
+                   < _POSE_JUMP_REST_EPS_M):
+                k -= 1
+            return step > _POSE_JUMP_MAX_MS * (self.time - hist[k][0])
+        if step > max_step:
+            return True
+        # A relocation swings the pose round on the way; a standing vehicle cannot.
+        base = prev._last_live_rot
+        if base is None or prev._last_live_rot_time is None:
+            return False
+        span = self.time - prev._last_live_rot_time
+        turn = max(abs((c - b + 180.0) % 360.0 - 180.0)
+                   for c, b in zip(self.rotation.euler(), base))
+        return span > 1e-9 and turn > max_turn * span
+
+    def _reanchor_after_pose_jump(self, prev: "Vehicle", t_now: float) -> None:
+        """Restart the motion history where a TMP pose jump landed. See core/radar/README.md §7."""
+        raw_x = self.position.x
+        raw_z = self.position.z
+        self._smooth_x = raw_x
+        self._smooth_z = raw_z
+        self._smooth_yaw = math.radians(self.rotation.euler()[1])
+        self.angular_velocity = 0.0
+        self._lag_since = None
+        self.lag_confirmed = False
+        self._pos_mismatch_frames = 0
+        # No rate or displacement may span the jump; a crash already confirmed stays latched.
+        self._prev_rates = None
+        self._prev2_rates = None
+        self._last_live_rot = self.rotation.euler()
+        self._last_live_rot_time = t_now
+        self._last_live_xz = (raw_x, raw_z)
+        self._prev_disp_x = None
+        self._prev_disp_z = None
+        self._prev_disp_dt = None
+        self._prev_disp_y = None
+        self._crash_hold_until = prev._crash_hold_until
+        self._crash_knock_until = prev._crash_knock_until
+        self.crash_confirmed = t_now < self._crash_hold_until
+        # Only a jump outside the window opens one, so a vehicle that drives off is let go.
+        if abs(prev.speed) < _POSE_JUMP_STAND_MS and t_now >= prev._pose_jump_settle_until:
+            self._pose_jump_settle_until = t_now + _POSE_JUMP_SETTLE_S
+
+        self._reset_raw_brake_transient()
+        self.speed = prev.speed
+        self.acceleration = prev.acceleration
+        self.acc_speed = prev.acc_speed
+        self.acc_accel = prev.acc_accel
+
+        # Seeded along the new heading so the next LS fit returns the held speed.
+        dt_seed = _LOCATION_UPDATE_FREQUENCY
+        held_speed = float(prev.speed)
+        self._position_history = [
+            (t_now - dt_seed,
+             raw_x + held_speed * math.sin(self._smooth_yaw) * dt_seed,
+             raw_z + held_speed * math.cos(self._smooth_yaw) * dt_seed),
+            (t_now, raw_x, raw_z),
+        ]
+        self._trail_history = [(t_now, raw_x, raw_z)]
+
+    def seed_cold_start_speed(self, speed: float, t_now: float) -> None:
+        """Seed first-sighting filter state from an externally measured speed.
+
+        Offline replay only: the measurement needs samples after ``t_now``, which
+        live radar does not have. See core/radar/README.md section 7.
+        """
+        self.time = t_now
+        self.speed = speed
+        self.acc_speed = speed
+        self.acceleration = 0.0
+        self.acc_accel = 0.0
+        self._smooth_speed = speed
+        self._smooth_accel = 0.0
+        self._speed_ema = speed
+        self._acc_speed_ema = speed
+        self._acc_smooth_accel = 0.0
+        self._raw_speed = speed
+        self._acc_standstill = False
+        self._acc_release_s = 0.0
+
+        raw_x = self.position.x
+        raw_z = self.position.z
+        self._raw_x = raw_x
+        self._raw_z = raw_z
+        self._smooth_x = raw_x
+        self._smooth_z = raw_z
+        yaw = math.radians(self.rotation.euler()[1])
+        self._smooth_yaw = yaw
+
+        # Two samples only: enough for the LS fit to return the seeded speed,
+        # too few for curvature_from_history, which stays unknown as before.
+        dt_seed = _LOCATION_UPDATE_FREQUENCY
+        fwd_x = -math.sin(yaw)
+        fwd_z = -math.cos(yaw)
+        self._position_history = [
+            (t_now - dt_seed,
+             raw_x - speed * fwd_x * dt_seed,
+             raw_z - speed * fwd_z * dt_seed),
+            (t_now, raw_x, raw_z),
+        ]
+        self._trail_history = [(t_now, raw_x, raw_z)]
+        self._speed_ema_history = [(t_now - dt_seed, speed), (t_now, speed)]
+        self._acc_speed_ema_history = list(self._speed_ema_history)
+
+    def _hold_across_clock_discontinuity(self, prev: "Vehicle", t_now: float) -> None:
+        """Hold kinematics across reader clock discontinuity. See core/radar/README.md §7."""
+        self.time = t_now
+        self.last_location = prev.last_location
+        self.last_rotation = prev.last_rotation
+        self.angular_velocity = prev.angular_velocity
+        if abs(self.angular_velocity) > _MAX_ANGULAR_VELOCITY:
+            self.angular_velocity = 0.0
+
+        raw_x = self.position.x
+        raw_z = self.position.z
+        self._raw_x = raw_x
+        self._raw_z = raw_z
+        self._smooth_x = raw_x
+        self._smooth_z = raw_z
+        self._smooth_yaw = prev._smooth_yaw
+        if self._smooth_yaw is None:
+            self._smooth_yaw = math.radians(self.rotation.euler()[1])
+
+        self._lag_since = None
+        self.lag_confirmed = False
+        self._pos_mismatch_frames = 0
+        self._pose_jump_settle_until = -1.0
+        # Crash detection restarts on the new clock: rates and pose baseline
+        # cannot span the discontinuity, and the latch resets with them.
+        self._prev_rates = None
+        self._prev2_rates = None
+        self._last_live_rot = None
+        self._last_live_rot_time = None
+        self._last_live_xz = None
+        self._prev_disp_x = None
+        self._prev_disp_z = None
+        self._prev_disp_dt = None
+        self._prev_disp_y = None
+        self._crash_hold_until = -1.0
+        self._crash_knock_until = -1.0
+        self.crash_confirmed = False
+
+        self._smooth_speed = prev._smooth_speed
+        self._smooth_accel = prev._smooth_accel
+        self._speed_ema = prev._speed_ema
+        self._acc_speed_ema = prev._acc_speed_ema
+        self._acc_smooth_accel = prev._acc_smooth_accel
+        self._raw_speed = prev._raw_speed
+        self._reset_raw_brake_transient()
+        self.speed = prev.speed
+        self.acceleration = prev.acceleration
+        self.acc_speed = prev.acc_speed
+        self.acc_accel = prev.acc_accel
+        self._acc_standstill = prev._acc_standstill
+        self._acc_release_s = prev._acc_release_s
+
+        # Fresh histories on the new clock, seeded so the next LS raw-speed fit
+        # returns ~held speed instead of a 1-sample cold start or a catch-up spike.
+        dt_seed = _LOCATION_UPDATE_FREQUENCY
+        yaw = self._smooth_yaw if self._smooth_yaw is not None else 0.0
+        held_speed = float(prev.speed)
+        fwd_x = -math.sin(yaw)
+        fwd_z = -math.cos(yaw)
+        back_x = raw_x - held_speed * fwd_x * dt_seed
+        back_z = raw_z - held_speed * fwd_z * dt_seed
+        self._position_history = [
+            (t_now - dt_seed, back_x, back_z),
+            (t_now, raw_x, raw_z),
+        ]
+        self._trail_history = [(t_now, raw_x, raw_z)]
+        if prev._speed_ema is not None:
+            self._speed_ema_history = [
+                (t_now - dt_seed, prev._speed_ema),
+                (t_now, prev._speed_ema),
+            ]
+        else:
+            self._speed_ema_history = []
+        if prev._acc_speed_ema is not None:
+            self._acc_speed_ema_history = [
+                (t_now - dt_seed, prev._acc_speed_ema),
+                (t_now, prev._acc_speed_ema),
+            ]
+        else:
+            self._acc_speed_ema_history = []
+
+    def update_from_last(
+        self,
+        prev: "Vehicle",
+        t_now: float,
+        ego_x: float,
+        ego_y: float,
+        ego_z: float,
+        ego_speed: float,
+    ) -> None:
+        """Per-frame smoothing; ego pose feeds TMP lag freeze. See core/radar/README.md §7."""
+        dt = t_now - prev.time
+
+        # Clock went backwards (domain glitch): re-base without integrating.
+        if dt < 0.0:
+            self._hold_across_clock_discontinuity(prev, t_now)
+            return
+
+        # Sub-frame pass: carry forward all smoothed state unchanged.
+        if is_sub_frame(dt):
+            self.time = prev.time
+            self.last_location = prev.last_location
+            self.last_rotation = prev.last_rotation
+            self.angular_velocity = prev.angular_velocity
+            self._smooth_x = prev._smooth_x
+            self._smooth_z = prev._smooth_z
+            self._smooth_yaw = prev._smooth_yaw
+            self._raw_x = prev._raw_x
+            self._raw_z = prev._raw_z
+            self._lag_since = prev._lag_since
+            self.lag_confirmed = prev.lag_confirmed
+            self._pos_mismatch_frames = prev._pos_mismatch_frames
+            self._pose_jump_settle_until = prev._pose_jump_settle_until
+            self._prev_rates = prev._prev_rates
+            self._prev2_rates = prev._prev2_rates
+            self._last_live_rot = prev._last_live_rot
+            self._last_live_rot_time = prev._last_live_rot_time
+            self._last_live_xz = prev._last_live_xz
+            self._prev_disp_x = prev._prev_disp_x
+            self._prev_disp_z = prev._prev_disp_z
+            self._prev_disp_dt = prev._prev_disp_dt
+            self._prev_disp_y = prev._prev_disp_y
+            self._crash_hold_until = prev._crash_hold_until
+            self._crash_knock_until = prev._crash_knock_until
+            self.crash_confirmed = t_now < prev._crash_hold_until
+            self._smooth_speed = prev._smooth_speed
+            self._smooth_accel = prev._smooth_accel
+            self._speed_ema = prev._speed_ema
+            self._acc_speed_ema = prev._acc_speed_ema
+            self._acc_smooth_accel = prev._acc_smooth_accel
+            self._raw_speed = prev._raw_speed
+            self._raw_brake_confirm_frames = prev._raw_brake_confirm_frames
+            self._raw_brake_active = prev._raw_brake_active
+            self._raw_brake_converged_frames = prev._raw_brake_converged_frames
+            self._position_history = list(prev._position_history)
+            self._trail_history = list(prev._trail_history)
+            self._speed_ema_history = list(prev._speed_ema_history)
+            self._acc_speed_ema_history = list(prev._acc_speed_ema_history)
+            self._acc_standstill = prev._acc_standstill
+            self._acc_release_s = prev._acc_release_s
+            if abs(self.angular_velocity) > _MAX_ANGULAR_VELOCITY:
+                self.angular_velocity = 0.0
+            self.speed = prev.speed
+            self.acceleration = prev.acceleration
+            self.acc_speed = prev.acc_speed
+            self.acc_accel = prev.acc_accel
+
+            # TMP lag/freeze tunables. See core/radar/README.md §7.
+            _sf_lag_active = False
+            if self.is_tmp and prev._lag_since is not None and prev._raw_x is not None:
+                _sf_gap_3d = math.sqrt(
+                    (prev._raw_x - ego_x) ** 2
+                    + (prev.position.y - ego_y) ** 2
+                    + (prev._raw_z - ego_z) ** 2
+                )
+                _sf_freeze_dur = _lag_freeze_duration(_sf_gap_3d, ego_speed)
+                _sf_lag_active = (t_now - prev._lag_since) < _sf_freeze_dur
+            _sf_snap_ok = (
+                prev._raw_x is not None
+                and prev._smooth_yaw is not None
+            )
+            if self.is_tmp and not self.crash_confirmed:
+                if _sf_lag_active or prev.pos_mismatch_holding:
+                    _sf_snap_ok = False
+            if _sf_snap_ok:
+                # TMP sub-frame pose snap rules. See core/radar/README.md §7.
+                rx = self.position.x
+                rz = self.position.z
+                self._raw_x = rx
+                self._raw_z = rz
+                self._smooth_x = rx
+                self._smooth_z = rz
+                self.position.x = rx
+                self.position.z = rz
+            elif self._smooth_x is not None:
+                self.position.x = self._smooth_x
+                self.position.z = self._smooth_z
+            else:
+                # First sighting: hold the pose that matches the frozen time, or
+                # the next full update divides one frame of travel by two of dt.
+                self.position.x = prev.position.x
+                self.position.z = prev.position.z
+            return
+
+        self.time = t_now
+        self.last_location = prev.position
+        self.last_rotation = prev.rotation
+        self._smooth_x = prev._smooth_x
+        self._smooth_z = prev._smooth_z
+        self._smooth_yaw = prev._smooth_yaw
+        self._lag_since = prev._lag_since
+        self.lag_confirmed = False
+        self._pos_mismatch_frames = prev._pos_mismatch_frames
+        self._pose_jump_settle_until = prev._pose_jump_settle_until
+        # Crash state (rates, baselines, latch) is carried and re-evaluated by
+        # _tmp_apply_crash_rotation_jerk below.
+        self._smooth_speed = prev._smooth_speed
+        self._smooth_accel = prev._smooth_accel
+        self._speed_ema = prev._speed_ema
+        self._acc_speed_ema = prev._acc_speed_ema
+        self._acc_smooth_accel = prev._acc_smooth_accel
+        self._raw_speed = prev._raw_speed
+        self._raw_brake_confirm_frames = prev._raw_brake_confirm_frames
+        self._raw_brake_active = prev._raw_brake_active
+        self._raw_brake_converged_frames = prev._raw_brake_converged_frames
+        self._position_history = list(prev._position_history)
+        self._trail_history = list(prev._trail_history)
+        self._speed_ema_history = list(prev._speed_ema_history)
+        self._acc_speed_ema_history = list(prev._acc_speed_ema_history)
+        self._acc_standstill = prev._acc_standstill
+        self._acc_release_s = prev._acc_release_s
+
+        raw_x = self.position.x
+        raw_z = self.position.z
+        self._raw_x = raw_x
+        self._raw_z = raw_z
+
+        if self.is_tmp and self._pose_jumped(prev):
+            self._reanchor_after_pose_jump(prev, t_now)
+            return
+
+        # Type 3: Crash detection (TMP only, full frames only): corroborated
+        # rotation jerk with a hold latch; sub-frames carry the latched flag.
+        self._tmp_apply_crash_rotation_jerk(prev, t_now)
+
+        # TMP crash detection tunables. See core/radar/README.md §7.
+        _skip_position_update = False
+        if (self.is_tmp
+                and prev._smooth_yaw is not None
+                and prev._raw_x is not None):
+            _pm_dx = raw_x - prev._raw_x
+            _pm_dz = raw_z - prev._raw_z
+            _pm_fwd_x = -math.sin(prev._smooth_yaw)
+            _pm_fwd_z = -math.cos(prev._smooth_yaw)
+            # A rewind runs against the direction of travel, which is -fwd when reversing.
+            _pm_travel = -1.0 if prev.speed < -_POS_MISMATCH_REVERSE_MS else 1.0
+            _pm_along = _pm_travel * (_pm_dx * _pm_fwd_x + _pm_dz * _pm_fwd_z)
+            if self.crash_confirmed:
+                self._pos_mismatch_frames = 0
+            elif (_pm_dx == 0.0 and _pm_dz == 0.0
+                    and prev._pos_mismatch_frames > _POS_MISMATCH_MAX_FRAMES):
+                # Packet stall inside real backward motion: no evidence, the run survives it.
+                self._pos_mismatch_frames = prev._pos_mismatch_frames
+            elif _pm_along < -_POS_MISMATCH_BACKWARD_THRESHOLD:
+                self._pos_mismatch_frames = prev._pos_mismatch_frames + 1
+                _skip_position_update = self.pos_mismatch_holding
+            else:
+                self._pos_mismatch_frames = 0
+
+        # Type 2: TMP lag detection (near-stationary freeze with speed decay)
+        # Bypassed when crash_confirmed: any movement on a crashed vehicle is real position data.
+        if self.is_tmp and prev._raw_x is not None and not _skip_position_update and not self.crash_confirmed:
+            _raw_disp_sq = (raw_x - prev._raw_x) ** 2 + (raw_z - prev._raw_z) ** 2
+            _expected_disp = abs(prev.speed) * dt
+            _lag_threshold_sq = (_expected_disp * _LAG_DISP_RATIO) ** 2
+            # Entry gates run once, on the frame that would open the freeze.
+            if (abs(prev.speed) > _LAG_MIN_SPEED_MS
+                    and _raw_disp_sq < _lag_threshold_sq
+                    and (prev._lag_since is not None
+                         or self._lag_entry_allowed(prev, dt))):
+                if self._lag_since is None:
+                    self._lag_since = t_now
+                _lag_duration = t_now - self._lag_since
+                _gap_3d = math.sqrt(
+                    (raw_x - ego_x) ** 2
+                    + (self.position.y - ego_y) ** 2
+                    + (raw_z - ego_z) ** 2
+                )
+                _freeze_dur = _lag_freeze_duration(_gap_3d, ego_speed)
+                if _freeze_dur <= 0.0:
+                    # Too close to ego: a real stop must not be masked. Drop the
+                    # freeze entirely and let the normal update run.
+                    self._lag_since = None
+                elif _lag_duration < _freeze_dur:
+                    self._reset_raw_brake_transient()
+                    _lag_frac = _lag_duration / _freeze_dur
+                    self._smooth_x = prev._smooth_x
+                    self._smooth_z = prev._smooth_z
+                    self._smooth_yaw = prev._smooth_yaw
+                    self.angular_velocity = prev.angular_velocity
+                    self._advance_held_kinematics(
+                        prev, dt, decay=1.0 - _lag_frac * _lag_frac,
+                    )
+                    self._raw_speed = 0.0
+                    if self._smooth_x is not None:
+                        self.position.x = self._smooth_x
+                        self.position.z = self._smooth_z
+                    return
+                else:
+                    self._reset_raw_brake_transient()
+                    self.lag_confirmed = True
+            else:
+                self._lag_since = None
+
+        # Wrap-safe yaw EMA: runs first so angular_velocity uses smooth derivative
+        raw_yaw = math.radians(self.rotation.euler()[1])
+        if self._smooth_yaw is None:
+            self._smooth_yaw = raw_yaw
+        else:
+            diff = (raw_yaw - self._smooth_yaw + math.pi) % (2.0 * math.pi) - math.pi
+            self._smooth_yaw = self._smooth_yaw + _RAW_YAW_ALPHA * diff
+
+        # Angular velocity in deg/s: callers apply math.radians(), so keep degrees here
+        _prev_smooth_yaw_deg = math.degrees(prev._smooth_yaw) if prev._smooth_yaw is not None else prev.rotation.euler()[1]
+        _cur_smooth_yaw_deg = math.degrees(self._smooth_yaw)
+        _yaw_diff_deg = (_cur_smooth_yaw_deg - _prev_smooth_yaw_deg + 180.0) % 360.0 - 180.0
+        raw_av = _yaw_diff_deg / dt
+        self.angular_velocity = 0.0 if abs(raw_av) > _MAX_ANGULAR_VELOCITY else raw_av
+
+        # Position mismatch: hold smooth position, coast speed on the frozen accel;
+        # yaw already updated above.
+        if _skip_position_update:
+            self._raw_brake_confirm_frames = 0
+            if self._smooth_x is not None:
+                self.position.x = self._smooth_x
+                self.position.z = self._smooth_z
+            self._advance_held_kinematics(prev, dt)
+            return
+
+        # World position is unfiltered: arcs and debug use true coordinates.
+        self._smooth_x = raw_x
+        self._smooth_z = raw_z
+        self.position.x = raw_x
+        self.position.z = raw_z
+
+        fwd_x = -math.sin(self._smooth_yaw)
+        fwd_z = -math.cos(self._smooth_yaw)
+
+        # Append this frame to the shared position history (both TMP and AI).
+        # _position_history was already copied from prev; append directly.
+        self._position_history.append((t_now, raw_x, raw_z))
+        if len(self._position_history) > _POSITION_HISTORY_LEN:
+            self._position_history = self._position_history[-_POSITION_HISTORY_LEN:]
+        self._append_trail(t_now, raw_x, raw_z)
+
+        # Raw speed: TMP from position LS; AI keeps buffer sign. See core/radar/README.md §7.
+        _prx = prev._raw_x if prev._raw_x is not None else prev.position.x
+        _prz = prev._raw_z if prev._raw_z is not None else prev.position.z
+        raw_speed = _raw_speed_from_kinematics(
+            self.speed,
+            self._position_history,
+            fwd_x,
+            fwd_z,
+            _prx,
+            _prz,
+            prev.position.y,
+            raw_x,
+            raw_z,
+            self.position.y,
+            dt,
+            preserve_buffer_sign=not self.is_tmp,
+        )
+        # ACC: long window; AEB: hard-brake short window. See core/radar/README.md §7.
+        long_raw_speed = raw_speed
+        raw_speed = self._select_raw_speed(
+            raw_speed, self.speed, fwd_x, fwd_z,
+        )
+        acc_raw_speed = raw_speed if self.crash_confirmed else long_raw_speed
+
+        (speed_ema, accel, speed_corr, speed_ema_history,
+         acc_speed_ema, acc_accel, acc_speed_ema_history, acc_speed,
+         acc_standstill, acc_release_s) = _smooth_vehicle_kinematics(
+            raw_speed, acc_raw_speed, t_now, dt,
+            prev._speed_ema, prev._smooth_accel, prev._speed_ema_history,
+            prev._acc_speed_ema, prev._acc_smooth_accel,
+            prev._acc_speed_ema_history, prev.acc_speed,
+            prev._acc_standstill, prev._acc_release_s,
+        )
+        self._raw_speed = raw_speed
+        self._speed_ema = speed_ema
+        self._speed_ema_history = speed_ema_history
+        self._smooth_accel = accel
+        self._smooth_speed = speed_corr
+        self.speed = speed_corr
+        self.acceleration = accel
+        self._acc_speed_ema = acc_speed_ema
+        self._acc_speed_ema_history = acc_speed_ema_history
+        self._acc_smooth_accel = acc_accel
+        self.acc_speed = acc_speed
+        self.acc_accel = acc_accel
+        self._acc_standstill = acc_standstill
+        self._acc_release_s = acc_release_s
+
+    def _append_trail(self, t_now: float, raw_x: float, raw_z: float) -> None:
+        """Retain the geometry trail on a distance grid. See core/radar/README.md §7."""
+        trail = self._trail_history
+        if trail:
+            last_t, last_x, last_z = trail[-1]
+            if math.hypot(raw_x - last_x, raw_z - last_z) < _TRAIL_MIN_STEP_M:
+                return
+        trail.append((t_now, raw_x, raw_z))
+
+        # Drop from the oldest end on span, count, or age.
+        cutoff = t_now - _TRAIL_MAX_AGE_S
+        start = 0
+        while start < len(trail) - 1 and trail[start][0] < cutoff:
+            start += 1
+        span = 0.0
+        keep = len(trail) - 1
+        while keep > start:
+            _, x1, z1 = trail[keep]
+            _, x0, z0 = trail[keep - 1]
+            span += math.hypot(x1 - x0, z1 - z0)
+            if span >= _TRAIL_SPAN_M:
+                break
+            keep -= 1
+        start = max(start, keep, len(trail) - _TRAIL_MAX_LEN)
+        if start > 0:
+            self._trail_history = trail[start:]
+
+    def curvature_from_history(self) -> float | None:
+        """κ (1/m) from position history; cached per tick. See core/radar/README.md §11."""
+        if self._curvature_cache_valid:
+            return self._curvature_cache
+        result = self._compute_curvature()
+        self._curvature_cache = result
+        self._curvature_cache_valid = True
+        return result
+
+    def _compute_curvature(self) -> float | None:
+        hist = self._position_history
+        if len(hist) < 3:
+            return None
+        _, x0, z0 = hist[0]
+        _, xn, zn = hist[-1]
+        if (xn - x0) ** 2 + (zn - z0) ** 2 < 0.05 ** 2:
+            return 0.0
+
+        n = len(hist)
+        candidates = [(0, n // 2, n - 1)]
+        if n >= 5:
+            candidates.append((1, (n - 1) // 2, n - 2))
+        if n >= 7:
+            candidates += [(0, n // 3, n - 1), (0, 2 * n // 3, n - 1)]
+
+        total_k = 0.0
+        count = 0
+        for i, j, k in candidates:
+            _, ax, az = hist[i]
+            _, bx, bz = hist[j]
+            _, cx, cz = hist[k]
+            if (bx - ax) ** 2 + (bz - az) ** 2 < 0.05 ** 2:
+                continue
+            if (cx - bx) ** 2 + (cz - bz) ** 2 < 0.05 ** 2:
+                continue
+            D = 2.0 * (ax * (bz - cz) + bx * (cz - az) + cx * (az - bz))
+            if abs(D) < 1e-6:
+                count += 1  # collinear → κ = 0 contribution
+                continue
+            a2 = ax * ax + az * az
+            b2 = bx * bx + bz * bz
+            c2 = cx * cx + cz * cz
+            ux = (a2 * (bz - cz) + b2 * (cz - az) + c2 * (az - bz)) / D
+            uz = -(a2 * (bx - cx) + b2 * (cx - ax) + c2 * (ax - bx)) / D
+            R = max(math.sqrt((ax - ux) ** 2 + (az - uz) ** 2), _MIN_CURVATURE_RADIUS)
+            cross = (bx - ax) * (cz - bz) - (bz - az) * (cx - bx)
+            total_k += (-1.0 if cross > 0.0 else 1.0) / R
+            count += 1
+
+        return total_k / count if count > 0 else None
+
+    def get_arc(
+        self,
+        horizon: float = 3.0,
+        half_width: float | None = None,
+        decel: float = 0.0,
+        arc_start_pctg: float = 1.0,
+        curvature_override: float | None = None,
+        body_capsule: bool = False,
+    ) -> ArcPath:
+        """Vehicle ArcPath; optional ``body_capsule`` for AEB. See core/radar/README.md §8."""
+        yaw_rad = (
+            self._smooth_yaw
+            if self._smooth_yaw is not None
+            else math.radians(self.rotation.euler()[1])
+        )
+        abs_speed = abs(self.speed)
+        if curvature_override is not None:
+            curvature = curvature_override
+        else:
+            _hist_k = self.curvature_from_history()
+            if _hist_k is not None:
+                curvature = _hist_k
+            else:
+                curvature = math.radians(self.angular_velocity) / abs_speed if abs_speed > 0.5 else 0.0
+        effective_hw = half_width if half_width is not None else self.size.width / 2.0
+        effective_decel, effective_accel = _accel_to_arc_params(self.accel_for_arc(), decel)
+
+        is_reversing = self.speed < -1e-3
+        effective_p = (1.0 - arc_start_pctg) if is_reversing else arc_start_pctg
+        fwd_x = -math.sin(yaw_rad)
+        fwd_z = -math.cos(yaw_rad)
+        body_offset = (effective_p - 0.5) * self.size.length
+        start_x = self.position.x + body_offset * fwd_x
+        start_z = self.position.z + body_offset * fwd_z
+
+        cap_fwd_len = 0.0
+        cap_back_len = 0.0
+        if body_capsule:
+            # Symmetric +/- length/2 for AI and TMP alike (core/radar/README.md §6).
+            front_d = self.size.length * 0.5
+            back_d = self.size.length * 0.5
+            cap_fwd_len = max(front_d - body_offset, 0.0)
+            cap_back_len = max(back_d + body_offset, 0.0)
+
+        return build_arc(
+            start_x, start_z, yaw_rad, self.speed,
+            curvature, effective_hw, horizon,
+            decel=effective_decel, accel=effective_accel,
+            fwd_len=cap_fwd_len, back_len=cap_back_len,
+        )
+
+    def is_zero(self) -> bool:
+        return self.position.is_zero() and self.rotation.is_zero()
+
+    @property
+    def pos_mismatch_holding(self) -> bool:
+        """Position held as a rewind; past the cap the run counts as real backward motion."""
+        return 0 < self._pos_mismatch_frames <= _POS_MISMATCH_MAX_FRAMES
+
+    def get_corners(self) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]]:
+        """World corners; symmetric ± length/2 (core/radar/README.md §6)."""
+        yaw_rad = (
+            self._smooth_yaw
+            if self._smooth_yaw is not None
+            else math.radians(self.rotation.euler()[1])
+        )
+        fwd_x = -math.sin(yaw_rad)
+        fwd_z = -math.cos(yaw_rad)
+        right_x = -fwd_z
+        right_z = fwd_x
+        front_d = self.size.length * 0.5
+        back_d = self.size.length * 0.5
+        hw = self.size.width * 0.5
+        px = self.position.x
+        pz = self.position.z
+        return (
+            (px + front_d * fwd_x + hw * right_x, pz + front_d * fwd_z + hw * right_z),
+            (px + front_d * fwd_x - hw * right_x, pz + front_d * fwd_z - hw * right_z),
+            (px - back_d * fwd_x - hw * right_x, pz - back_d * fwd_z - hw * right_z),
+            (px - back_d * fwd_x + hw * right_x, pz - back_d * fwd_z + hw * right_z),
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"Vehicle(id={self.id}, pos={self.position}, "
+            f"speed={self.speed:.2f}, is_tmp={self.is_tmp}, "
+            f"is_parked={self.is_parked})"
+        )
+
+
+def vehicle_from_trailer(parent: Vehicle, trailer: Trailer, synthetic_id: int) -> Vehicle:
+    """Nested trailer as ACC-scored Vehicle (synthetic id). See core/radar/README.md §12."""
+    if trailer.is_tmp:
+        position = trailer.correct_position()
+    else:
+        src = trailer.position
+        position = Position(src.x, src.y, src.z)
+    return Vehicle(
+        position=position,
+        rotation=trailer.rotation,
+        size=trailer.size,
+        speed=parent.speed,
+        acceleration=parent.acceleration,
+        trailer_count=0,
+        trailers=[],
+        id=synthetic_id,
+        is_tmp=trailer.is_tmp,
+        is_trailer=True,
+        is_parked=parent.is_parked,
+    )
+
