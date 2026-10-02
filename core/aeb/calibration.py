@@ -181,7 +181,8 @@ class AEBCalibration:
     aeb_disarm_frac: float = 0.45
     # Geometry latch while colliding unbraked ttc inside window (anti-pumping; README).
     disarm_hold_ttc_s: float = 3.0
-    aeb_warn_near_full_frac: float = 0.85
+    # Must equal aeb_engage_frac (pinned in tests/aeb/test_confirm.py).
+    aeb_warn_near_full_frac: float = 0.90
     brake_actuator_lag_s: float = 0.10
     # New engagements only fire when |ego_speed| is above this threshold.
     aeb_min_engage_speed_kmh: float = 5.0
@@ -201,7 +202,9 @@ class AEBCalibration:
     # Fully engage-vetoed out-of-lane sets warn only after this occupancy window.
     # Latency, never silence: a persisting course still warns (README).
     aeb_warn_confirm_vetoed_s: float = 1.00
-    aeb_warn_frac: float = 0.50
+    # Demand bar for warn_by_decel. 0.50 beeped before drivers start braking for
+    # stopped traffic; the measured trade is in TUNING.md.
+    aeb_warn_frac: float = 0.60
     # Evidence-class warn windows: oncoming sets and sets a full lane off the
     # ego arc are the two phantom-beep classes (README warn persistence).
     aeb_warn_confirm_oncoming_s: float = 2.00
