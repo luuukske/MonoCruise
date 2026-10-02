@@ -1,6 +1,6 @@
 <a href="https://sourceforge.net/p/monocruise/"><img alt="Download MonoCruise" src="https://sourceforge.net/sflogo.php?type=18&amp;group_id=3904914" width=150></a>
-[![Download MonoCruise](https://img.shields.io/sourceforge/dw/monocruise.svg)](https://sourceforge.net/projects/monocruise/files/latest/download)
-[![Download MonoCruise](https://img.shields.io/sourceforge/dt/monocruise.svg)](https://sourceforge.net/projects/monocruise/files/latest/download)
+[![Download MonoCruise](https://img.shields.io/sourceforge/dw/monocruise.svg)](https://sourceforge.net/projects/monocruise/files/)
+[![Download MonoCruise](https://img.shields.io/sourceforge/dt/monocruise.svg)](https://sourceforge.net/projects/monocruise/files/)
 
 ## Visit the official site for accurate and up-to-date showcases and information: https://ld-tech.org/projects/monocruise/
 
@@ -47,9 +47,9 @@ Every feature (including ACC and AEB) works in TruckersMP and singleplayer ETS2/
 
 ## .exe install
 
-1. Download "MonoCruise.installer.exe" from SourceForge, or from the [latest release on GitHub](https://github.com/luuukske/MonoCruise/releases/latest).
+1. Download "MonoCruise.installer.exe" from the [latest release on GitHub](https://github.com/luuukske/MonoCruise/releases/latest).
 
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="https://sourceforge.net/projects/monocruise/files/latest/download"><img alt="Download MonoCruise" src="https://a.fsdn.com/con/app/sf-download-button" width=276 height=48 srcset="https://a.fsdn.com/con/app/sf-download-button?button_size=2x 2x"></a>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="https://github.com/luuukske/MonoCruise/releases/latest/download/MonoCruise.installer.exe"><img alt="Download the MonoCruise installer" src="https://img.shields.io/github/v/release/luuukske/MonoCruise?label=Download%20installer&style=for-the-badge"></a>
 
 2. Run the installer.
 
