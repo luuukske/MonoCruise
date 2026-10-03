@@ -280,18 +280,21 @@ class AEBDebugWindow(QWidget):
                 edge_color=_EVASION_FILTER_CLR, edge_width=1.0,
             )
 
+        fx = -math.sin(ey)
+        fz = -math.cos(ey)
         if snap.ego_has_trailer:
-            fx = -math.sin(ey)
-            fz = -math.cos(ey)
-            reach = snap.ego_half_l + _EGO_TRAILER_HALF_L
+            reach = snap.ego_rear_m + _EGO_TRAILER_HALF_L
             self._draw_ego_box(
                 p, ex - fx * reach, ez - fz * reach, ey,
                 _EGO_TRAILER_HALF_W, _EGO_TRAILER_HALF_L,
                 ex, ez, ey, _EGO_TRAILER_CLR,
             )
 
+        # Body centre sits off the placement origin once the SDK wheels are read.
+        mid = 0.5 * (snap.ego_front_m - snap.ego_rear_m)
         self._draw_ego_box(
-            p, ex, ez, ey, snap.ego_half_w, snap.ego_half_l,
+            p, ex + fx * mid, ez + fz * mid, ey,
+            snap.ego_half_w, 0.5 * (snap.ego_front_m + snap.ego_rear_m),
             ex, ez, ey, _EGO_CLR,
         )
 

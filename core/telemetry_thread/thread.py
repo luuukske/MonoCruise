@@ -19,6 +19,7 @@ from core.thread_management.registry import registry
 
 from core.settings import Settings
 from core.sending_thread.accel_to_pedals import compute_estimated_mass_kg
+from core.radar.ego_geometry import EgoGeometry, geometry_from_sdk
 
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,18 @@ def _window_open_on_taskbar() -> bool:
     except KeyError:
         return False
     return bool(getattr(main_window, "is_open_on_taskbar", False))
+
+
+def _log_geometry_change(truck_id: str, geometry: EgoGeometry | None) -> None:
+    if geometry is None:
+        logger.info("ego geometry: wheel layout unreadable for %s, using calibration body", truck_id)
+        return
+    logger.info(
+        "ego geometry for %s: length %.2f m (front %.2f, rear %.2f), width %.2f m, "
+        "path origin %.2f m behind placement",
+        truck_id, geometry.front_m + geometry.rear_m, geometry.front_m, geometry.rear_m,
+        2.0 * geometry.half_width_m, -geometry.path_origin_m,
+    )
 
 
 @dataclass
@@ -133,6 +146,9 @@ class TelemetryThreadData(ThreadData):
     # Total wheels in contact with the ground (tractor + all attached trailers).
     wheels_on_ground: int = 0
 
+    # Body size and path origin from the SDK wheel layout; None when unreadable.
+    ego_geometry: EgoGeometry | None = None
+
     request_quit: bool = False
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
@@ -188,6 +204,10 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.rotationY           = raw.get("rotationY", 0.0)
         data.hazardsActive       = raw.get("lightsHazards", False)
         data.truck_id            = str(raw.get("truckId", "") or "")
+        geometry = geometry_from_sdk(raw)
+        if geometry != data.ego_geometry:
+            _log_geometry_change(data.truck_id, geometry)
+        data.ego_geometry = geometry
         # trailer_count already counts leading slots with wheels and attached;
         # raw["trailer"] is an array of structs, so flat "trailer[0].x" keys never match.
         data.ego_has_trailer = data.trailer_count > 0

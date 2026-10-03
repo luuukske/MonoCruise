@@ -1256,6 +1256,7 @@ with rt.data._lock:
     ego_steer     = rt.data.ego_steer
     ego_has_trailer = rt.data.ego_has_trailer
     ego_curvature = rt.data.ego_curvature     # None → fall back to yaw-rate proxy
+    ego_geometry  = rt.data.ego_geometry      # EgoGeometry | None, see §17
     off_surface_ids = rt.data.off_surface_ids # frozenset[int], see §15
     road_surface  = rt.data.road_surface      # RoadSurface (ego plane + curvature)
     paused        = rt.data.paused
@@ -1735,6 +1736,96 @@ filter chain was tuned on with ~28 Hz reads. The other side of the lattice (thre
 steps runs the chain) was measured: it lost labelled positives this side keeps,
 among them `3224c16c` (stopped car 14.7 m ahead at 44 km/h), `403e9c4f`,
 `1a4fa80f`, `4d8f47a2` and `b6f9a8c8`.
+
+---
+
+## 17. Ego Body and Path Origin from the SDK Wheels
+
+`core/radar/ego_geometry.py`. The SDK publishes every truck wheel's position in
+vehicle space (`truckWheelPositionX/Z`: x right, z backward, origin = the
+placement `coordinateX/Z` reports) plus steerable and lift flags. Telemetry turns
+that into an `EgoGeometry` whenever the layout changes, radar publishes it as
+`ego_geometry`, and AEB and ACC read it from the same snapshot as the pose.
+
+### The body
+
+The fixed body AEB used before (`ego_half_length` 3.333, `ego_half_width` 1.265,
+symmetric about the origin) was fitted on one truck, `vehicle.volvo.fh_2024` 6x4,
+and is exact for it. The estimator carries that fit to any truck by anchoring on
+the axles instead of the origin:
+
+| | rule | reference rig |
+|---|---|---|
+| front | front-most wheel + 1.541 m overhang | 1.792 + 1.541 = 3.333 |
+| rear | rear-most wheel + 0.565 m overhang | 2.768 + 0.565 = 3.333 |
+| half width | widest wheel centre + 0.225 m | 1.040 + 0.225 = 1.265 |
+
+The overhangs and the tyre outboard are the reference rig's, derived from the
+calibration body and its wheel layout, so retuning the body moves them with it
+(`tests/test_ego_geometry.py` pins both directions). They are a carry-over, not a
+measurement: only the reference rig is verified. A conventional (ATS) nose likely
+has a shorter overhang than the cab-over it was fitted on, which reads its front
+slightly long, the conservative side for AEB. Implausible layouts (under four
+wheels, wheelbase outside 2 to 12 m, no rolling axle, non-finite values) give
+`None`, and every consumer then keeps its pre-wheel behaviour.
+
+### The path origin
+
+The ego arc must start at the point whose velocity follows the heading, or it is
+launched sideways. For a rigid vehicle at low speed that is the centre of the
+non-steered axles, so `path_origin_m` is the mean of the non-steered wheels that
+are on the ground (a lifted tag axle drops out; with no steer flags, everything
+more than 1 m behind the front axle counts). Measured on 1424 local clips, the
+point of zero sideslip (lateral velocity over yaw rate) sits behind placement by:
+
+| speed | median |
+|---|---|
+| 2 to 5 m/s | 2.05 m |
+| 5 to 10 m/s | 1.97 m |
+| 10 to 20 m/s | 1.83 m |
+| 20 to 40 m/s | 1.68 m |
+
+That is the rear axle group (2.09 m on the reference rig), drifting forward with
+speed as the rear tyres take a slip angle. The mean of all wheels (0.8 m) is the
+wrong point: on the clips its arc misses 40 to 90 % more than the rear mean's,
+depending on speed.
+
+AEB already started near there: `arc_start_pctg` 0.2 put the arc 2.0 m behind
+placement on a 6.67 m body. ACC started at the placement origin, 2.1 m ahead of
+the rear axle, so its arc left every bend rotated outward by `kappa * d` and
+missed by about `kappa * d * s`. ACC's own arc (blended steer and history
+curvature), median lateral miss 10 m ahead in bends, origin then rear-wheel mean:
+
+| speed | miss | median signed miss (bend-relative) |
+|---|---|---|
+| 2 to 5 m/s | 0.92 -> 0.58 m | -0.59 -> -0.14 m |
+| 5 to 10 m/s | 0.65 -> 0.31 m | -0.53 -> -0.06 m |
+| 10 to 20 m/s | 0.28 -> 0.11 m | -0.26 -> -0.02 m |
+| 20 to 40 m/s | 0.17 -> 0.06 m | -0.16 -> -0.01 m |
+
+The signed column is the point: the old miss was one-sided, so ACC's curvature
+tuning had not absorbed the offset. Ego's own path is the yardstick here, not
+the lane: a driver who holds the cab on the lane centre puts the lane circle
+`d^2 / 2R` outside the rear-axle circle, about 0.15 m at R = 50 m with the cab
+3.9 m ahead of the rear axle.
+`python tools/ego_geometry_probe.py --clips` reproduces both tables;
+`python tools/ego_geometry_probe.py` prints the live truck.
+
+### How consumers use it
+
+- **AEB**: the arc starts at `path_origin_m`, the capsule reaches `front_m` ahead
+  and `rear_m` behind placement (`capsule_extents`), the corridor uses
+  `half_width_m`. `None` builds `calibration_geometry` from `AEBCalibration`,
+  which is the old body to the bit. Clips from schema 6 record the geometry per
+  frame and replay with it; older clips replay the calibration body.
+- **ACC**: the arc starts at `path_origin_m`, and every distance is shifted back
+  onto the old reference (`arc_shift` in `ACCTracker.update`), so `dist_m` still
+  means "from the point `EGO_FRONT_OFFSET_M` behind the bumper". On the reference
+  rig that point is the placement origin and straight-road distances do not move;
+  a truck whose nose sits `front_delta_m` farther forward reports gaps that much
+  shorter. `None` keeps the origin-launched arc (tests and tools pass none).
+- The road model, trail crossings and the rear cone stay in the placement frame:
+  they are fitted on placement history, not on the arc.
 
 ---
 

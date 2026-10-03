@@ -122,6 +122,9 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
     if cal.ego_path_gain_learning_enabled:
         t._ego_path.gain = warm_steer_gain
     t._read_vehicle_key = lambda: None      # one clip is one vehicle
+    # Pre-v6 clips carry no wheel layout and replay the calibration body.
+    geometry = next((g for g in (f.ego.geometry() for f in clip.radar_frames) if g), None)
+    t._read_ego_geometry = lambda: geometry
     if warm:
         _apply_warm_state(t, clip.metadata.aeb_warm_state)
 

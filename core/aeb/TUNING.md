@@ -17,8 +17,8 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `ego_decel_frac` | 0.9 | Tracking headroom on the **command** only. It is not part of the entry bar: `engage_threshold` and `aeb_warn_near_full_frac` run off `capability_decel` (`capacity − downhill`), while the target cap, `aeb_disarm_frac` and `aeb_warn_frac` run off `effective_max`. Folding it into entry made the real bar 0.765 of capacity and pushed the 100 km/h engage point 3.7 m further out on a 13.89 m/s² double |
 | `warn_ttb` | 1.3 s | WARN threshold |
 | `brake_ttb` | 0.2 s | BRAKE threshold |
-| `ego_half_width` | 1.265 m | Ego arc corridor half-width (flush trailer standoff 2026-08-11) |
-| `ego_half_length` | 3.333 m | Ego capsule half-length (flush trailer standoff 2026-08-11; body extents via `capsule_extents`; collision segments are cap-aligned: extents minus half_width, see `core/radar/README.md` §8) |
+| `ego_half_width` | 1.265 m | Ego arc corridor half-width (flush trailer standoff 2026-08-11). Fitted on `vehicle.volvo.fh_2024` 6x4; live sessions now size every truck from its SDK wheels with this as the reference, and use it only when the layout is unreadable (`core/radar/README.md` §17) |
+| `ego_half_length` | 3.333 m | Ego capsule half-length (flush trailer standoff 2026-08-11; body extents via `capsule_extents`; collision segments are cap-aligned: extents minus half_width, see `core/radar/README.md` §8). Same reference role as `ego_half_width` |
 | `corridor_margin` | 0.5 m | Corridor padding for crossing-path sample uncertainty |
 | `cross_zone_base` | 1.0 m | Along-track pad in front of and behind a 90 deg target (`|sin(heading diff)|`). Collision and the stop demand both see it. 0 disables |
 | `cross_zone_speed` | 0.3 s | Extra along-track length (`this * speed`) on top of `cross_zone_base` |

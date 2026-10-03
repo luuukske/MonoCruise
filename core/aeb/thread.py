@@ -22,6 +22,7 @@ from core.radar.traffic import (
     capsule_extents, pair_body_dist_sq,
 )
 from core.radar.elevation import MAX_EGO_GRADE
+from core.radar.ego_geometry import EgoGeometry, calibration_geometry
 from core.radar.ego_path_model import EgoPathModel, EgoPathState
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT, ego_path_params
 from core.aeb.confirm import OccupancyConfirm
@@ -224,6 +225,9 @@ class AEBSnapshot:
     ego_speed: float = 0.0
     ego_half_w: float = 1.265
     ego_half_l: float = 3.333
+    # Body ends from the placement origin; asymmetric once the SDK wheels are read.
+    ego_front_m: float = 3.333
+    ego_rear_m: float = 3.333
     ego_arc: ArcPath | None = None
     ego_braked_arc: ArcPath | None = None
     ego_has_trailer: bool = False
@@ -1053,6 +1057,18 @@ class AEBThread(BaseThread):
         done = max(0.0, min(1.0, (now_mono - self._engage_pad_at_mono) / span))
         return latched * (1.0 - done)
 
+    def _read_ego_geometry(self) -> EgoGeometry | None:
+        """SDK wheel-layout body from the radar snapshot; None means the calibration body."""
+        try:
+            rt = registry.get_thread("radar_thread")
+            if rt is None or not rt.is_alive():
+                return None
+            with rt.data._lock:
+                geometry = getattr(rt.data, "ego_geometry", None)
+            return geometry if isinstance(geometry, EgoGeometry) else None
+        except (KeyError, AttributeError):
+            return None
+
     def _read_max_brake_ms2(self) -> float:
         """Physical AEB capacity from sending_thread; fallback if unavailable."""
         try:
@@ -1286,8 +1302,11 @@ class AEBThread(BaseThread):
         ego_kappa_cap = ego_path.kappa_cap
         ego_cap_weight = ego_path.sat_weight
 
-        ego_hw: float = cal.ego_half_width
-        ego_half_l: float = cal.ego_half_length
+        geometry = self._read_ego_geometry() or calibration_geometry(
+            cal.ego_half_length, cal.ego_half_width, cal.arc_start_pctg,
+        )
+        ego_hw: float = geometry.half_width_m
+        ego_half_l: float = geometry.half_length_m
 
         _max_brake_live = self._read_max_brake_ms2()
         effective_decel = cal.ego_decel_frac * _max_brake_live
@@ -1297,14 +1316,13 @@ class AEBThread(BaseThread):
 
         _ego_fwd_x = -math.sin(ego_yaw_rad)
         _ego_fwd_z = -math.cos(ego_yaw_rad)
-        _ego_body_offset = (cal.arc_start_pctg - 0.5) * (2.0 * ego_half_l)
+        # Arc starts at the path origin (rear-wheel mean, README §17); the body
+        # ends are measured from the placement origin, so the capsule is asymmetric.
+        _ego_body_offset = geometry.path_origin_m
         ego_front_x = ego_x + _ego_body_offset * _ego_fwd_x
         ego_front_z = ego_z + _ego_body_offset * _ego_fwd_z
-        # Ego body centered on ego_x with half-length ego_half_l; the arc
-        # reference sits _ego_body_offset behind center, so the capsule extents
-        # are asymmetric about the reference (front reaches farther than rear).
         ego_cap_fwd, ego_cap_back = capsule_extents(
-            ego_half_l, ego_half_l, _ego_body_offset,
+            geometry.front_m, geometry.rear_m, _ego_body_offset,
         )
 
         ego_arc = build_arc(
@@ -2294,6 +2312,7 @@ class AEBThread(BaseThread):
         snap = AEBSnapshot(
             ego_x=ego_x, ego_z=ego_z, ego_yaw=ego_yaw_rad,
             ego_speed=ego_speed, ego_half_w=ego_hw, ego_half_l=ego_half_l,
+            ego_front_m=geometry.front_m, ego_rear_m=geometry.rear_m,
             ego_arc=ego_arc, ego_braked_arc=ego_braked_arc,
             ego_has_trailer=ego_has_trailer,
             vehicles=vehicle_dicts, vehicle_arcs=vehicle_arcs,
@@ -2365,6 +2384,8 @@ class AEBThread(BaseThread):
                 ego_speed=ego_speed,
                 ego_hw=ego_hw,
                 ego_half_l=ego_half_l,
+                ego_front_m=geometry.front_m,
+                ego_rear_m=geometry.rear_m,
                 ego_cap_fwd=ego_cap_fwd,
                 ego_cap_back=ego_cap_back,
                 ego_front_to_surface=ego_front_to_surface,
@@ -2423,6 +2444,8 @@ class AEBThread(BaseThread):
         ego_cap_fwd: float,
         ego_cap_back: float,
         ego_front_to_surface: float,
+        ego_front_m: float | None = None,
+        ego_rear_m: float | None = None,
         ego_arc: ArcPath,
         vehicles_eff: list[Vehicle],
         vehicle_collision_data: dict,
@@ -2486,8 +2509,8 @@ class AEBThread(BaseThread):
                 max_rz = max(rz for _, rz in corners)
                 min_rx = min(rx for rx, _ in corners)
                 max_rx = max(rx for rx, _ in corners)
-                face_ahead = min_rz - ego_half_l
-                face_behind = -max_rz - ego_half_l
+                face_ahead = min_rz - (ego_front_m if ego_front_m is not None else ego_half_l)
+                face_behind = -max_rz - (ego_rear_m if ego_rear_m is not None else ego_half_l)
                 # Right-of-ego face: negative rx in this frame.
                 face_right = -max_rx - ego_hw if max_rx < 0.0 else None
 

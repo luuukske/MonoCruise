@@ -39,6 +39,7 @@ class AEBCalibration:
     # Rejected 2026-07-19: response distance cap, threat-age tiering, engage 0.9 (README §7).
     elevation_margin: float = 5.0
     max_range: float = 200.0
+    # Traffic arcs; ego starts at its SDK rear-wheel mean, or here when unreadable.
     arc_start_pctg: float = 0.2
     collision_samples: int = 36
 

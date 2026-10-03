@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 
+from .ego_geometry import EgoGeometry
 from .ego_path import EGO_POSITION_HISTORY_LEN, ego_curvature_from_history
 from .elevation import ElevationGate, EgoElevationTrack, RoadSurface, build_surface
 from .reader import TrafficReader
@@ -47,6 +48,8 @@ class RadarData(ThreadData):
     ego_steer: float = 0.0
     ego_has_trailer: bool = False
     paused: bool = False
+    # Body size and path origin from the SDK wheels (§17); None = calibration body.
+    ego_geometry: EgoGeometry | None = None
 
     # Geometry-based ego curvature (1/m). None ⇒ caller falls back to yaw-rate proxy.
     ego_curvature: float | None = None
@@ -148,6 +151,18 @@ class RadarThread(BaseThread):
             return simulated_time_us / 1_000_000.0
         return time.time()
 
+    def _read_geometry(self) -> EgoGeometry | None:
+        """SDK wheel-layout geometry; None if telemetry is down or has none."""
+        try:
+            tel = registry.get_thread("telemetry_thread")
+            if tel is None or not tel.is_alive():
+                return None
+            with tel.data._lock:
+                geometry = getattr(tel.data, "ego_geometry", None)
+            return geometry if isinstance(geometry, EgoGeometry) else None
+        except (KeyError, AttributeError):
+            return None
+
     def _read_blinkers(self) -> tuple[bool, bool]:
         """Telemetry blinkers for clip capture; False,False if telemetry is down."""
         try:
@@ -169,6 +184,7 @@ class RadarThread(BaseThread):
         ego_has_trailer: bool, paused: bool, ego_mass_kg: float,
         traffic_buf: bytes | None, parked_buf: bytes | None,
         ego_wheels: int = 0, ego_trailer_count: int = 0,
+        geometry: EgoGeometry | None = None,
     ) -> None:
         """Debug clip capture; never raises into the radar loop."""
         try:
@@ -181,6 +197,7 @@ class RadarThread(BaseThread):
                 wheels_on_ground=ego_wheels, trailer_count=ego_trailer_count,
                 blinkerLeft=bl_left, blinkerRight=bl_right,
             )
+            ego.set_geometry(geometry)
             recorder.push_radar_frame(RadarFrameRecord(
                 t_wall=t_wall, t_mono=now_mono, ego=ego,
                 traffic_buf=traffic_buf, parked_buf=parked_buf,
@@ -208,6 +225,7 @@ class RadarThread(BaseThread):
         road_surface: RoadSurface | None = None,
         t_kin: float | None = None,
         bump_t_mono: bool = False,
+        geometry: EgoGeometry | None = None,
     ) -> None:
         ego_yaw_rad = ego_yaw_norm * 2.0 * math.pi
         _pv = (ego_pitch_deg + 0.5) % 1.0 - 0.5
@@ -233,6 +251,7 @@ class RadarThread(BaseThread):
             self.data.ego_pitch_deg = math.degrees(ego_pitch_rad)
             self.data.ego_pitch_rad = ego_pitch_rad
             self.data.ego_has_trailer = ego_has_trailer
+            self.data.ego_geometry = geometry
             # Only overwrite curvature on a published (unpaused) frame.
             if bump_t_mono:
                 self.data.ego_curvature = ego_curvature
@@ -279,6 +298,7 @@ class RadarThread(BaseThread):
         (ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
          paused, ego_has_trailer, ego_pitch_deg, simulated_time_us,
          ego_mass_kg, ego_wheels, ego_trailer_count) = self._read_ego()
+        geometry = self._read_geometry()
         raw, pose = self._sample_traffic_and_pose()
         if pose is not None:
             # The telemetry thread's copy is up to 3 physics steps older than the traffic.
@@ -301,6 +321,7 @@ class RadarThread(BaseThread):
                 ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
                 ego_has_trailer, ego_pitch_deg, True,
                 bump_t_mono=False,
+                geometry=geometry,
             )
             capture = get_recorder()
             if capture is not None:
@@ -308,7 +329,7 @@ class RadarThread(BaseThread):
                     capture, time.monotonic(), time.time(),
                     ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
                     ego_pitch_deg, ego_has_trailer, True, ego_mass_kg, None, None,
-                    ego_wheels, ego_trailer_count,
+                    ego_wheels, ego_trailer_count, geometry,
                 )
             return
 
@@ -354,6 +375,7 @@ class RadarThread(BaseThread):
             road_surface=road_surface,
             t_kin=t_kin,
             bump_t_mono=True,
+            geometry=geometry,
         )
 
         capture = get_recorder()
@@ -365,6 +387,6 @@ class RadarThread(BaseThread):
                 ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
                 ego_pitch_deg, ego_has_trailer, False, ego_mass_kg,
                 self._traffic.last_traffic_bytes, self._traffic.last_parked_bytes,
-                ego_wheels, ego_trailer_count,
+                ego_wheels, ego_trailer_count, geometry,
             )
 
