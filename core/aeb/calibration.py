@@ -28,7 +28,8 @@ class AEBCalibration:
     corridor_margin: float = 0.5
     # Near-parallel capsule contacts: margin * scale at parallel; see core/aeb/README.md.
     capsule_parallel_margin_scale: float = 0.3
-    stop_buffer: float = 0.7
+    # Was 0.7 while the body was a guess for every truck but the reference rig (radar README §17).
+    stop_buffer: float = 0.5
     # Response-lag gap term (v_closing * this): brake build-up, and since the
     # engage bar moved off ego_decel_frac, the only entry margin (README §7).
     stop_buffer_response_s: float = 0.30
