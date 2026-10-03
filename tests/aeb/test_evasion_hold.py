@@ -167,6 +167,7 @@ class _CornerCtx:
         self.veh_fwd_z = -math.cos(yaw)
         self.ego_arc = None
         self.all_target_arcs: list = []
+        self.ego_speed = 15.0
 
 
 def _angled_body_ctx(*, centre_lat_m: float, latched: bool,
@@ -201,6 +202,12 @@ def test_corner_entry_body_in_lane_does_not_start_braking():
     mirrored = CornerEntryStationaryFilterMirrored(CAL)
     ctx = _angled_body_ctx(centre_lat_m=2.5, latched=False, ego_curvature=0.02)
     assert mirrored.apply(ctx).suppressed is True
+
+
+def test_corner_entry_lets_go_below_the_engage_floor():
+    ctx = _angled_body_ctx(centre_lat_m=2.5, latched=True)
+    ctx.ego_speed = 1.0
+    assert CornerEntryStationaryFilter(CAL).apply(ctx).suppressed is True
 
 
 def test_corner_entry_latched_queue_out_of_lane_stays_suppressed():

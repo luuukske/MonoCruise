@@ -17,7 +17,7 @@ from core.aeb.calibration import AEBCalibration
 from core.aeb.cross_zone import _apply_cross_zone, _cross_zone_padding
 from core.aeb.lane_frame import (
     Lane, project_to_ego_arc, classify, in_lane_closing, shares_bend,
-    _any_body_in_ego_lane, _body_centreline_d_abs,
+    _any_body_in_ego_lane, _any_body_ahead_in_ego_lane, _body_centreline_d_abs,
 )
 
 
@@ -176,10 +176,13 @@ def _is_approaching(a: ArcPath, b: ArcPath, t: float, dt: float = 0.1,
 
 
 def _latched_body_in_lane(ctx: "FilterContext", cal: AEBCalibration) -> bool:
-    """A target AEB is braking for whose body is still in ego's lane (README corner entry)."""
-    return ctx.v.id in ctx.latched_threat_ids and _any_body_in_ego_lane(
-        ctx.ego_arc, ctx.all_target_arcs, cal.lane_half_width,
-    )
+    """A target AEB is braking for, body still in ego's lane ahead (README latched-threat hold)."""
+    if ctx.v.id not in ctx.latched_threat_ids:
+        return False
+    # Below the engage floor the driver has authority, so the filter keeps its say.
+    if abs(ctx.ego_speed) * 3.6 < cal.aeb_min_engage_speed_kmh:
+        return False
+    return _any_body_ahead_in_ego_lane(ctx.ego_arc, ctx.all_target_arcs, cal.lane_half_width)
 
 
 def _stationary_adjacent_straddle(
@@ -595,7 +598,7 @@ class OppositeLaneFilter:
         self._cal = cal
 
     def apply(self, ctx: FilterContext) -> FilterResult:
-        if ctx.abs_v_speed <= 1.0:
+        if ctx.abs_v_speed <= 1.0 or _latched_body_in_lane(ctx, self._cal):
             return _PASS
         # Body-sep for near_head_on (6a35 collide before fd crosses head_on_dot);
         # full oncoming evasion arcs stay head_on-only.
@@ -762,7 +765,7 @@ class CoDirectionalDivergeFilter:
         self._cal = cal
 
     def apply(self, ctx: FilterContext) -> FilterResult:
-        if not ctx.co_directional:
+        if not ctx.co_directional or _latched_body_in_lane(ctx, self._cal):
             return _PASS
         # Follow-threat exempt: diverge reads arc extrapolation; jitter can call a
         # braking in-lane lead "diverging" moments before contact.
@@ -814,7 +817,7 @@ class TurningCrossTrafficFilter:
         self._cal = cal
 
     def apply(self, ctx: FilterContext) -> FilterResult:
-        if ctx.head_on or ctx.co_directional:
+        if ctx.head_on or ctx.co_directional or _latched_body_in_lane(ctx, self._cal):
             return _PASS
         cal = self._cal
         for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
@@ -852,7 +855,7 @@ class TmpCrossTrafficFilter:
         if not ctx.v.is_tmp:
             return _PASS
         # Models a TMP driver sweeping through a junction; reversing is a manoeuvre.
-        if ctx.co_directional or ctx.reversing:
+        if ctx.co_directional or ctx.reversing or _latched_body_in_lane(ctx, self._cal):
             return _PASS
         if ctx.abs_v_speed < 1.0:
             return _PASS

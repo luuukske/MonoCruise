@@ -622,9 +622,10 @@ straight-line path.
 - **A braked-for body still in ego's lane is never dropped** (Mode A, both
   stages). The lane bucket keys off the reference point, so a long or angled
   body whose centre reads `OPPOSITE_OR_OUTER` can still reach ego's lane. A
-  latched id with any body centreline sample inside `lane_half_width`
-  (`_latched_body_in_lane`, the trailer-in-lane primitive) passes Mode A; a
-  queue whose body stays out of the band is still suppressed when latched.
+  latched id with a body centreline sample inside `lane_half_width` and ahead
+  of ego's front (`_latched_body_in_lane`, shared with four more stages; see
+  the latched-threat hold) passes Mode A; a queue whose body stays out of the
+  band is still suppressed when latched.
   Without it the stage dropped the vehicle AEB was braking for whenever
   `|ego_curvature|` crossed `turning_diverge_kappa` mid-event: clip `da5dee09`
   released at 48 km/h 14 m short of a stopped truck (0.97 m off ego's driven
@@ -1428,14 +1429,48 @@ things:
 1. **TMP rel-speed pre-filter bypass**: `TmpRelSpeedFilter` (and the
    matching precompute prefilter in `thread.py::loop`) skip the rel-speed
    gate for any id in the latched set. Without this, ego matching a TMP
-   convoy partner's speed under braking drops `rel_kmh` below the 15 / 40
-   km/h threshold and the target leaves the pipeline mid-stop.
+   convoy partner's speed under braking drops `rel_kmh` below the 15 / 50
+   km/h bar (section 4) and the target leaves the pipeline mid-stop.
 2. **Spatial drop-filter bypass**: `OutOfLaneParallelFilter` and
    `EgoEvasionFilter` skip a latched id; `CornerEntryStationaryFilter` skips
-   a latched **Mode B** (`Lane.EGO`) id, and both corner-entry stages keep a
-   latched Mode A id whose body is still in ego's lane (see that section). The
-   0.08 g evasion pair and Mode B `implied_kappa` are pose-jitter sensitive at
-   short range and would otherwise fire on the vehicle AEB is already braking for.
+   a latched **Mode B** (`Lane.EGO`) id. The 0.08 g evasion pair and Mode B
+   `implied_kappa` are pose-jitter sensitive at short range and would otherwise
+   fire on the vehicle AEB is already braking for. Six more stages keep a
+   latched id whose **body is still in ego's lane ahead** (below).
+
+**Body still in ego's lane ahead.** `OppositeLaneFilter`,
+`CoDirectionalDivergeFilter`, `TurningCrossTrafficFilter`,
+`TmpCrossTrafficFilter` and both corner-entry stages (Mode A) pass a latched id
+when `_latched_body_in_lane` holds: a body centreline sample within
+`lane_half_width` of ego's arc **and** ahead of ego's front (`s > 0`, the arc
+starts at the front bumper), with ego at or above `aeb_min_engage_speed_kmh`.
+These stages predict that a target will leave ego's path (it diverges, turns
+off, sweeps past, or sits on a bend); before engagement that prediction is what
+keeps AEB quiet, but once AEB is braking for a body that is still physically in
+front of ego, the clearance demand already prices in the target's motion and
+lets go when it really clears. Re-running the prediction mid-brake let go of the
+vehicle instead (card 131, after the corner-entry case in `da5dee09`).
+
+- **Ahead, not alongside.** Without `s > 0`, a TMP car passing on ego's hip at
+  walking pace (`1a9f5ffa`, false positive) held the brake 2.3 s instead of
+  0.6 s, through standstill and roll-back.
+- **Engage floor.** Below `aeb_min_engage_speed_kmh` the driver has authority
+  and no new event can start, so the filters keep their say there.
+- **Body test, not every latched id.** Bypassing for any latched id gained less
+  (corpus cost -1321 against -1331).
+- **Entry unchanged.** Not-yet-latched targets still face every filter: the
+  same body test at entry braked for parked trailers at the roadside (see the
+  corner-entry section).
+- **Measured** over 1321 scored clips: no verdict change, cost -1312.0 to
+  -1330.9, 17 clips better (mostly TP quality, `77902df4` 0.20 to 0.98), two
+  existing false positives brake longer (`3fe405cd` +0.27 s, `88726134`
+  +0.07 s). Releases above 20 km/h with at least 3 m/s^2 of demand the tick
+  before, where ego's body then came within 0.5 m of the target in the
+  recording, fell 24 to 12 (`TmpCrossTrafficFilter`), 26 to 20
+  (`OppositeLaneFilter`), 20 to 17 (`CoDirectionalDivergeFilter`) and 6 to 4
+  (`TurningCrossTrafficFilter`). The rest are targets not yet in ego's lane
+  when AEB lets go (cut-ins, oncoming drifting in, side crossers): an entry
+  question, not a mid-brake one.
 3. **Instant re-engage**: a latched id that becomes colliding again engages
    through the `certain` path, with no confirm window. The demand still has to
    clear the engage bar.
