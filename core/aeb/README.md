@@ -680,8 +680,19 @@ into AND: that re-opens the shoulder FP class the 0.08 g filter exists for.
 When **any** slot in the frame has `is_tmp`, AEB pre-filters targets by
 **‖v_ego − v_target‖** (km/h) vs a **reference ego speed**:
 
-- ref **> 40 km/h** → threat only if rel **> 15 km/h**
-- ref **≤ 40 km/h** → threat only if rel **> 40 km/h**
+- ref **> 50 km/h** → threat only if rel **> 15 km/h**
+- ref **≤ 50 km/h** → threat only if rel **> 50 km/h**
+
+These are the effective bars of two stacked gates that carry different
+constants. The collision precompute in `thread.py` (`_tmp_collision_threat`:
+split 40, rel > 15 above it, rel > 40 at or below) skips a target before its
+arcs are built, and `TmpRelSpeedFilter` (`tmp_filter_split_kmh` 50,
+`tmp_filter_rel_above_kmh` 5, `tmp_filter_rel_below_kmh` 50) suppresses it in
+the pipeline. A target must pass both, so the 15 km/h bar comes from the
+precompute and the 50 km/h split and bar from the filter;
+`tmp_filter_rel_above_kmh` and the precompute's two 40s never bind. Moving one
+copy alone shifts only part of the band. Latched and follow-threat ids skip
+both gates.
 
 Reversing targets get no exemption. The floor keeps d80936f9 (a truck backing across
 ego's lane at 35 km/h relative) silent on purpose: exempting them re-opens the low-speed
