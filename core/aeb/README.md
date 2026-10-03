@@ -251,7 +251,7 @@ what ACC uses.
 | Module | Role |
 |--------|------|
 | `core/aeb/calibration.py` | Frozen `AEBCalibration` dataclass: all tunable constants. `DEFAULT` singleton used by both `thread.py` and tests. |
-| `core/aeb/lane_frame.py` | `Lane` enum, `project_to_ego_arc()`, `classify()`: arc-projected lane membership, replacing the old cross-product `lateral_offset`. |
+| `core/aeb/lane_frame.py` | `Lane` enum, `project_to_ego_arc()`, `classify()`: arc-projected lane membership, replacing the old cross-product `lateral_offset`. Also the body-in-lane primitives (`_any_body_in_ego_lane`, `_body_centreline_d_abs`). |
 | `core/aeb/filters.py` | Named filter pipeline: 12 stage classes + `FilterContext` + `build_pipeline()`. |
 | `core/aeb/thread.py` | `AEBThread`: data acquisition, ego-arc construction, pipeline dispatch, TTB/state output. |
 
@@ -610,15 +610,33 @@ straight-line path.
   direction, and `|dist · sin(road_bend / 2) − |lat_signed||` must fall within
   `corner_entry_lateral_tol`. Catches MP stopped queues whose lead vehicle
   projects to ego's straight axis but whose pose only makes sense on a curve.
-- Latched ids skip **Mode B only** (`lane == EGO`). Mode A's out-of-lane queue
+- Latched ids skip **Mode B** (`lane == EGO`). Mode A's out-of-lane queue
   must stay suppressed even if a graze latched the id.
   Mode B's `implied_kappa = road_bend / dist` grows as range falls, so a few
   degrees of yaw error that was legal at 40 m fires at 17 m while AEB is
   already braking. Do not add an in-lane bypass here: Mode B *is* the in-lane
   case (`fp_mp_stationary_corner_entry`). `CornerEntryStationaryFilterMirrored`
-  is Mode A and has no **latch** seat. Follow-threat ids do pass: a stopped
-  in-path cut-in can sit in `OPPOSITE_OR_OUTER` while occupying the corridor
-  (clip `c3c7a529`, d_abs ~4 m at bite).
+  is Mode A. Follow-threat ids do pass it: a stopped in-path cut-in can sit in
+  `OPPOSITE_OR_OUTER` while occupying the corridor (clip `c3c7a529`, d_abs ~4 m
+  at bite).
+- **A braked-for body still in ego's lane is never dropped** (Mode A, both
+  stages). The lane bucket keys off the reference point, so a long or angled
+  body whose centre reads `OPPOSITE_OR_OUTER` can still reach ego's lane. A
+  latched id with any body centreline sample inside `lane_half_width`
+  (`_latched_body_in_lane`, the trailer-in-lane primitive) passes Mode A; a
+  queue whose body stays out of the band is still suppressed when latched.
+  Without it the stage dropped the vehicle AEB was braking for whenever
+  `|ego_curvature|` crossed `turning_diverge_kappa` mid-event: clip `da5dee09`
+  released at 48 km/h 14 m short of a stopped truck (0.97 m off ego's driven
+  line), and `16e65bcc` released for 0.27 s at 80 km/h. The headway hold
+  removed in `59cc071` used to mask this. Measured over 2642 clips, releases
+  above 20 km/h of a body on ego's recorded driven line fell 17 to 4
+  (`CornerEntryStationaryFilter`) and 14 to 9 (`...Mirrored`), with no verdict
+  change and no new engagement. **Entry is deliberately unchanged**: applying
+  the same body test before engagement rescued two misses but braked for seven
+  parked trailers and cars whose bodies reach the band at the roadside. The
+  remaining Mirrored drops are mid-turn targets on ego's curved path, which
+  `project_to_ego_arc`'s `max(d_arc, d_straight)` reads as out of lane.
 
 ### `EgoEvasionFilter`
 
@@ -1403,9 +1421,10 @@ things:
    km/h threshold and the target leaves the pipeline mid-stop.
 2. **Spatial drop-filter bypass**: `OutOfLaneParallelFilter` and
    `EgoEvasionFilter` skip a latched id; `CornerEntryStationaryFilter` skips
-   only a latched **Mode B** (`Lane.EGO`) id. The 0.08 g evasion pair and
-   Mode B `implied_kappa` are pose-jitter sensitive at short range and would
-   otherwise fire on the vehicle AEB is already braking for.
+   a latched **Mode B** (`Lane.EGO`) id, and both corner-entry stages keep a
+   latched Mode A id whose body is still in ego's lane (see that section). The
+   0.08 g evasion pair and Mode B `implied_kappa` are pose-jitter sensitive at
+   short range and would otherwise fire on the vehicle AEB is already braking for.
 3. **Instant re-engage**: a latched id that becomes colliding again engages
    through the `certain` path, with no confirm window. The demand still has to
    clear the engage bar.
