@@ -1,3 +1,21 @@
+# MonoCruise Personal Edition: English source package
+
+This repository includes the complete personal source edition. For this edition,
+download **MonoCruise-GitHub-English.zip** from this repository's Releases page,
+extract it, then double-click **Start-MonoCruise.cmd**. If no release asset is
+available, use **Code > Download ZIP** and extract the repository instead.
+
+Read [DOWNLOAD_AND_INSTALL.txt](DOWNLOAD_AND_INSTALL.txt) for setup and
+[PERSONAL_EDITION.md](PERSONAL_EDITION.md) for the added features and limitations.
+The launcher prepares missing Python dependencies; physical pedals, game SDK
+setup and game bindings are still required. This package is not a prebuilt EXE.
+
+The original project's information and installation instructions follow below.
+Its installer/download links lead to the upstream edition and do not include
+this repository's personal modifications.
+
+---
+
 <a href="https://sourceforge.net/p/monocruise/"><img alt="Download MonoCruise" src="https://sourceforge.net/sflogo.php?type=18&amp;group_id=3904914" width=150></a>
 [![Download MonoCruise](https://img.shields.io/sourceforge/dw/monocruise.svg)](https://sourceforge.net/projects/monocruise/files/)
 [![Download MonoCruise](https://img.shields.io/sourceforge/dt/monocruise.svg)](https://sourceforge.net/projects/monocruise/files/)

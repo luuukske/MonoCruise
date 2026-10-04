@@ -1,0 +1,66 @@
+MONOCRUISE PERSONAL EDITION - DOWNLOAD AND INSTALL
+
+REQUIREMENTS
+Windows 10/11 x64, ETS2 or ATS, and physical USB/DirectInput pedals.
+Internet access is needed for initial setup and map preparation.
+This ZIP contains the complete modified source, not a prebuilt Windows EXE.
+
+DOWNLOAD
+1. Open the GitHub repository for this personal edition.
+2. Click Releases and select a release.
+3. Under Assets, download MonoCruise-GitHub-English.zip.
+   The repository maintainer must attach this ZIP to the release first.
+4. Right-click the ZIP and choose Extract All.
+5. Open the extracted MonoCruise folder.
+   Do not run files from inside the ZIP.
+If no release is available, use Code > Download ZIP and extract the repository.
+The official upstream installer is a different edition.
+
+FIRST START
+1. Double-click Start-MonoCruise.cmd in the application folder.
+2. Let it prepare Python and install the required packages.
+   Existing .venv environments are reused. Initial downloads can take time.
+3. Complete the SDK installation and pedal/game binding steps in README.md.
+4. Configure your input pedals and buttons in Settings.
+5. Launch ETS2/ATS or TruckersMP and check that telemetry and pedals connect.
+If startup fails, keep the terminal error text for troubleshooting.
+
+OPTIONAL ROAD MAP
+1. Run Prepare-Road-Map.cmd or Prepare-TruckLib-Map.cmd.
+2. Select the ETS2 installation folder containing base.scs.
+3. Wait for automatic tooling setup and map export to finish.
+   The current reader uses .NET 10; Node.js and Git are not required.
+4. Click Reload road map in the live view, or use Prepare map validation data
+   there to prepare and automatically reload the map.
+The map is saved as maps/roads.json. Game files are not modified.
+Road/model overlays are advisory; they do not disable AEB braking.
+Verified lane/shoulder boundaries and ProMods support are not established.
+
+OPTIONAL NCZ PLUGIN
+Close the game and run integrations/tmp_ncz/Install-NCZ.cmd.
+Alternatively copy MonoCruiseNCZ.dll into the game's bin/win_x64/plugins folder.
+Enable Settings > Pause AEB in TMP NCZ.
+If the plugin loads inside a zone, leave and enter again.
+See integrations/tmp_ncz/README.md for details and limitations.
+
+WARNING SOUND AND CLIP PLAYBACK
+Choose an AEB warning tone or import WAV/OGG/MP3 in Settings; adjust the volume.
+Run Watch-AEB-Clips.cmd to open the clip reviewer. Choose a clip and press Play
+or Space. Choose map JSON can load another map for the current session.
+
+UPDATING AN EXISTING COPY
+Close MonoCruise and back up config.json and config.json.bak.
+Copy the new project files over your existing application folder.
+Keep your maps, sounds and .venv directories.
+The upstream updater does not preserve personal modifications.
+
+FOR THE GITHUB MAINTAINER
+Upload the contents of the MonoCruise folder to the repository root.
+Keep LICENSE and all third-party license notices.
+Create a release and attach MonoCruise-GitHub-English.zip as an asset.
+Do not upload local settings, route logs, recordings, clips or game exports.
+
+VALIDATION LIMIT
+Development checks were performed on Linux. Actual Windows installation,
+physical pedal operation and live TruckersMP behavior were not verified here.
+Read PERSONAL_EDITION.md for feature-specific limitations.

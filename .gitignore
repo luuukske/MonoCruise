@@ -48,3 +48,7 @@ dist/
 installer/output/
 *.spec.bak
 release_notes.md
+
+# Standalone map-reader build products
+integrations/trucklib_reader/bin/
+integrations/trucklib_reader/obj/

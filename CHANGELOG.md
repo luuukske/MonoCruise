@@ -12,6 +12,17 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+### Added
+- **TruckersMP no-collision zones**: the optional NCZ bridge pauses AEB intervention inside protected areas and restores it outside.
+- **Experimental hazard flash trial**: opt into a five-second toggle experiment on hard braking, or test it from Settings; normal hazard state is restored afterward.
+- **Personal warning sounds**: choose a built-in tone or import your own short audio clip, adjust its volume and preview it.
+
+### Changed
+- **Refreshed interface**: a dark navy palette, clearer secondary text and rounded controls make settings easier to scan.
+
+### Fixed
+- **Measured crossing contact**: TMP turning traffic whose centre meets ego during the sweep stays eligible when measured miss is within body clearance and non-opening, even if its horizon endpoint clears the lane. Replay of ceadfde4 brakes 0.906 s earlier; seven other supplied clips retain their brake timing/counts.
+
 ## [1.1.1] - 2026-10-04
 ### Fixed
 - **Hazards came on when you stomped the brake while stopped**: a hard press at a standstill switched the hazards on. They now only come on for a hard brake while driving.
@@ -407,3 +418,56 @@ A ground-up rewrite focused on **stability** and **performance**, with a more re
 - ACC gap level can't be changed while actively following a lead vehicle: runtime adjustment is coming in a future update.
 - AEB is experimental and can false-trigger in corners and during lane changes, so it is **disabled by default** — enable it in settings. **Use with care**.
 
+
+Personal edition: advisory ETS2 road matching, bounded background map loader, settings status/reload, and a double-click local map preparation script. Road geometry does not change braking. Actual 1.61 extraction and Windows execution remain unverified.
+
+Personal edition: read-only TruckLib MapExporter SQLite adapter for lanes and junction endpoint geometry; 500 ms live map/AEB diagnostics and local user feedback journal. Side-junction diagnostics are heading-independent. No map-based braking or automatic threshold training enabled.
+
+Personal edition: automatic local Python/.NET SDK bootstrap, pinned exporter ZIP download, no Git/Node/C++ prerequisites, and game executable version detection. Windows installers remain untested in this Linux environment.
+
+Personal edition: main-window live radar/road preview and AEB status, section navigation, roomier settings controls, and stale-radar clearing.
+
+Personal edition: independent bounded road-rendering index, adjacent-cell lookup, muted elevated roads, and drawn-segment/position diagnostics. AEB matching and braking gates unchanged.
+
+Personal edition: fix TruckLib importer omitting ordinary roads when lane_points is empty; import roads via node positions/tangents, reject junction-only maps, and add one-click rebuild from existing SQLite export.
+
+Personal edition: replace custom sector parser with official TruckLib.ScsMap, auto-install .NET 10, reject unreliable legacy SQLite-derived maps, and re-export game archives with a separate GPL reader. Verified compilation and synthetic HashFS road round trip.
+
+- Personal edition: road centre lines in AEB clip review, map picker and status,
+  plus Watch-AEB-Clips.cmd for automatic setup and double-click replay launch.
+
+- Personal edition: explicit legacy road-size extraction with coverage metadata,
+  dashed extent overlays, and bounded AEB roadside shadow diagnostics. Unknown
+  template widths preserve regular AEB; no map-based brake veto is enabled.
+
+- Personal edition: automatic local driven-route recording and persistent purple
+  trace overlays, with a recording toggle, jump/stale/paused guards and storage
+  limits. Driven traces do not influence AEB or create inferred road boundaries.
+
+- Personal edition: automatic TruckLib.Models template measurements in road
+  exports, including parts, materials, variants, section extents and missing /
+  unsupported model counts. Reports are not inferred driving boundaries.
+
+### Personal edition: automatic template surface preview
+
+- Resolve conservative collision surface envelopes from official template_profiles
+  during background map load; unknown models remain unresolved.
+- Draw orange dotted model candidates on live radar and clip replay, separately
+  from yellow explicit definition widths, with nearby candidate counts.
+- Add unverified nested model surface shadow diagnostics to existing AEB context;
+  braking decisions, steer path, captured clips and manual labels are unchanged.
+- Validate two user roadside-braking clips for overlay presence and preserve
+  unknown classifications for missing side roads, road ends and target body overlap.
+- Validation: 1730 tests passed, 21 skipped; Ruff clean.
+
+### Personal edition: automatic surface evidence checks
+
+- Export PMD part-attribute ranges, explicit road-look offset evidence and per-road
+  variant override, additional-part and height-offset evidence.
+- Check selected collision visibility and supported placement automatically on map
+  load; old, missing and invalid evidence stays pending, inactive parts lose preview edges.
+- Show current-road checks and aggregate checked/pending counts. Add a Windows GUI
+  preparation button using the existing isolated exporter, then reload on success.
+- Structural checks do not approve driving lanes, physical alignment or brake vetoes.
+- Validation: full Python suite 1754 passed, 21 skipped; final targeted suite 73 passed;
+  Ruff clean; .NET build clean; synthetic archive and malformed binary-range checks passed.
