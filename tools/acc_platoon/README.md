@@ -17,7 +17,7 @@ Nothing here ships or is imported by the app.
 | Cruise PID, arbitration | **Real.** `CruiseController` and `CruiseControlThread._arbitrate_named`. Settings the stack reads are pinned to their shipped defaults for the run. |
 | AEB | **Real, opt-in.** The headless `AEBThread` from `core/aeb/clip_eval.py`, 30 Hz per client. AEB ships disabled, so scenarios run without it unless asked. The orchestrator's AEB-then-stop disarm is mirrored, plus a driver who taps resume. |
 | Standstill hold | **Real.** `HoldController`. |
-| Mapper and truck | Modelled: the command is tracked through a dead time and a first-order lag, inside engine power and brake capacity. Capacity (10.85 to 12.58 m/s²), dead time (0.12 s) and brake lag (0.19 to 0.31 s) are the fitted rigs of `tests/aeb/test_stop_distance_envelope.py`. |
+| Mapper and truck | Modelled: the command is tracked through a dead time and a first-order lag, inside engine power and brake capacity. Capacity (10.85 to 12.58 m/s²) and dead time (0.12 s) are the fitted rigs of `tests/aeb/test_stop_distance_envelope.py`. Cruise braking lags 0.19 to 0.31 s (the gentle-braking fit); while AEB brakes the lag is `tau_slam_s` 0.15 s, the p90 of measured full-pedal slams. |
 | TruckersMP | Modelled, calibrated on the clip corpus. Below. |
 
 Each client sees the others through its own TMP link, and a truck collides with the

@@ -333,8 +333,9 @@ physics staircase) gives tau 0.19 s median, 0.31 s p90, 0.38 s max, with 0.12 s 
 Build-up (dead + tau) is therefore 0.25 s median and 0.37 s p90. The observer's model taus
 (0.25 solo / 0.50 trailer) sit above that, which is the intended safe side, and the fit
 could not separate the load classes, so they are left alone. `stop_buffer_response_s` in AEB
-is sized against this, not against the model. Full-pedal slams are faster than this (tau
-0.08 s median, see the onset guard below), so the fit describes ordinary braking.
+was sized against this until 2026-10-04. Full-pedal slams are faster (tau 0.08 s median,
+build-up 0.24 s p90, see the onset guard below), so the fit describes ordinary braking
+and the pad now follows the slams (`core/aeb/TUNING.md`).
 
 `brake_efficiency.nominal_max_brake_decel_ms2` now defers to `baseline_brake_ms2` instead of
 carrying its own `11.5 * wheels/12 * 17000/mass`. That old form had the same `1/mass` error

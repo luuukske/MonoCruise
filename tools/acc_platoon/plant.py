@@ -25,7 +25,8 @@ HOLD_FLOOR_MS2: float = 0.3
 
 @dataclass(frozen=True)
 class TruckSpec:
-    """Brake capacity and lag come from the fitted rigs in tests/aeb/test_stop_distance_envelope.py."""
+    """Brake capacity from the fitted rigs in tests/aeb/test_stop_distance_envelope.py. Cruise
+    braking lags `tau_brake_s` (gentle-braking fit); an AEB slam builds in `tau_slam_s`."""
 
     label: str
     mass_t: float
@@ -35,6 +36,7 @@ class TruckSpec:
     launch_ms2: float = 1.6
     dead_time_s: float = 0.12
     tau_gas_s: float = 0.35
+    tau_slam_s: float = 0.15
 
     def gas_limit_ms2(self, v: float) -> float:
         """Net accel at full gas on a flat road: power or traction, less rolling and air drag."""
@@ -65,7 +67,8 @@ class TruckPlant:
         self.hold = HoldController(lambda d: min(1.0, max(0.0, d) / spec.brake_ms2))
         self.hold_out = HoldOutput()
 
-    def step(self, cmd_ms2: float, dt: float, crawl_follow: bool = False) -> None:
+    def step(self, cmd_ms2: float, dt: float, crawl_follow: bool = False,
+             slam: bool = False) -> None:
         spec = self.spec
         self.hold_out = self.hold.update(
             speed_kmh=self.v * 3.6, gear=1, pitch_norm=0.0, commanded_accel_ms2=cmd_ms2,
@@ -75,7 +78,8 @@ class TruckPlant:
         self._queue.append(cmd_ms2)
         target = self._queue.popleft()
         target = max(-spec.brake_ms2, min(spec.gas_limit_ms2(self.v), target))
-        tau = spec.tau_brake_s if target < self._lag_a else spec.tau_gas_s
+        brake_tau = spec.tau_slam_s if slam else spec.tau_brake_s
+        tau = brake_tau if target < self._lag_a else spec.tau_gas_s
         self._lag_a += (target - self._lag_a) * (1.0 - math.exp(-dt / tau))
         a = self._lag_a
         state = self.hold_out.state

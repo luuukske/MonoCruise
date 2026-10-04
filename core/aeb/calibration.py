@@ -31,10 +31,10 @@ class AEBCalibration:
     # Real bumper gap since ego_front_to_surface stopped adding half width (2026-10-04);
     # before that every stop ended ego_half_width + this short (README, clearance demand).
     stop_buffer: float = 0.5
-    # Response-lag gap term (v_closing * this): brake build-up, and since the
-    # engage bar moved off ego_decel_frac, the only entry margin (README §7).
-    stop_buffer_response_s: float = 0.30
-    stop_buffer_response_trailer_s: float = 0.40
+    # Response-lag gap term (v0 * this): AEB slam build-up, the only entry margin (README §7).
+    # Slams build in 0.24 s p90; trailer 0.25 touched in the TMP convoy sim (TUNING.md).
+    stop_buffer_response_s: float = 0.25
+    stop_buffer_response_trailer_s: float = 0.30
     # Reserve release after engagement: 0 holds it, 0.35 bleeds it off over the
     # measured build-up. Measured trade in TUNING.md; held is shipped.
     aeb_reserve_release_s: float = 0.35
