@@ -498,3 +498,7 @@ aside, the same as `coast_debug.csv`.
 ## Main pedal thread
 
 See `core/main_pedal_thread/README.md` for joystick, OPD, em_stop, and button capture.
+
+## Experimental hazard flash trial
+
+`experimental_hazard_flash` defaults off. The settings button queues a five-second trial, and enabled hard-brake hazards queue the same trial with restoration to ON. `HazardFlash` alternates requested hazard states only after telemetry confirms the preceding press and a 100 ms dwell. Trial presses last 80 ms and use the existing verification and retrigger limits. A one-second unconfirmed transition aborts the trial. Completion, disabling the option or disconnecting restores the pre-trial request, using the normal press duration. Accelerator autodisable cancels the trial and requests OFF. SDK button toggles do not control the game's lamp animation, so faster visible flashes are unverified and may not occur.

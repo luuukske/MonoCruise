@@ -14,6 +14,7 @@ import threading
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 from core.settings import Settings
+from core.sending_thread.hazard_flash import HazardFlash
 
 from core.aeb.calibration import DEFAULT as _AEB_CAL
 
@@ -357,6 +358,8 @@ class SendingThread(BaseThread):
         self._bool_presses: dict[str, float] = {}
         self._bool_overrides: dict[str, bool] = {}
 
+        self._hazard_flash = None
+        self._hazard_flash_request = False
         self._hazard_wanted: bool | None = None
         self._hazard_duration: float = HAZARD_PRESS_DURATION
         self._hazard_press_until: float = 0.0
@@ -536,6 +539,11 @@ class SendingThread(BaseThread):
             self._bool_overrides[name] = value
         logger.debug("set_bool: %s = %s", name, value)
 
+    def request_hazard_flash(self) -> None:
+        """Queue a five-second trial on the sending worker."""
+        with self._lock:
+            self._hazard_flash_request = True
+
     def change_hazards(self, wanted: bool, duration: float = HAZARD_PRESS_DURATION) -> None:
         """Request hazards ON or OFF with verification and up to 3 retriggers."""
         with self._lock:
@@ -564,7 +572,11 @@ class SendingThread(BaseThread):
         )
         if action == "on":
             self.change_hazards(True)
+            if Settings.experimental_hazard_flash and Settings.hazards_variable:
+                self._hazard_flash_request = True
         elif action == "off":
+            self._hazard_flash = None
+            self._hazard_flash_request = False
             with self._lock:
                 self._hazard_wanted = False
                 if self._hazard_phase == "idle":
@@ -837,6 +849,8 @@ class SendingThread(BaseThread):
         except Exception:
             logger.exception("SCSController init failed; thread will run with zero output")
             self._controller = None
+        self._hazard_flash = None
+        self._hazard_flash_request = False
         self._hazard_phase = "idle"
         self._hazard_wanted = None
         self._last_should_force = False
@@ -1192,7 +1206,7 @@ class SendingThread(BaseThread):
             if tel_hazards and not self._prev_tel_hazards:
                 with self._lock:
                     wanted_on = self._hazard_wanted is True
-                if not wanted_on:
+                if not wanted_on and self._hazard_flash is None:
                     self._hazard_user_override = True
             if not tel_hazards:
                 self._hazard_user_override = False
@@ -1212,7 +1226,7 @@ class SendingThread(BaseThread):
 
         if not connected:
             self._last_hard_brake = False
-            self._tick_hazards(controller, tel_hazards)
+            self._tick_hazards(controller, tel_hazards, connected=connected)
             self._spd_smooth = None
             self._spd_smooth_fast = None
             self._prev_spd_mono = None
@@ -1270,7 +1284,7 @@ class SendingThread(BaseThread):
 
         if not pedal_alive:
             self._last_hard_brake = False
-            self._tick_hazards(controller, tel_hazards)
+            self._tick_hazards(controller, tel_hazards, connected=connected)
             self._prev_mapper_owned_gas = False
             self._prev_applied_gas = 0.0
             self._clear_pause_held()
@@ -1341,7 +1355,7 @@ class SendingThread(BaseThread):
                 self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
-            self._tick_hazards(controller, tel_hazards)
+            self._tick_hazards(controller, tel_hazards, connected=connected)
             return
 
         opdgasval = 0.0
@@ -1355,7 +1369,7 @@ class SendingThread(BaseThread):
         except Exception as e:
             logger.debug("pedal read failed: %s", e)
             self._last_hard_brake = False
-            self._tick_hazards(controller, tel_hazards)
+            self._tick_hazards(controller, tel_hazards, connected=connected)
             self._prev_mapper_owned_gas = False
             self._prev_applied_gas = 0.0
             self._clear_pause_held()
@@ -1596,7 +1610,7 @@ class SendingThread(BaseThread):
         self._pause_held_abackward = logical_b
         self._pause_held_full_authority = full_authority
         self._apply_sent_brake_hazards(a, logical_b, speed_kmh, AEB_warn)
-        self._tick_hazards(controller, tel_hazards)
+        self._tick_hazards(controller, tel_hazards, connected=connected)
 
         # Close the observer loop on what the game actually received, not on the
         # controller's own request: hold, cushion and user brake all raise it.
@@ -1834,9 +1848,30 @@ class SendingThread(BaseThread):
                 with self._lock:
                     self._bool_presses.pop(name, None)
 
-    def _tick_hazards(self, controller: SCSController, tel_hazards: bool) -> None:
+    def _tick_hazards(self, controller: SCSController, tel_hazards: bool, *, connected: bool = True) -> None:
         """Hazard state machine with 3 phases: idle → pressing → verifying. See `core/sending_thread/README.md`."""
         now = time.monotonic()
+        with self._lock:
+            requested = self._hazard_flash_request
+            self._hazard_flash_request = False
+        enabled = bool(Settings.experimental_hazard_flash and Settings.hazards_variable)
+        if requested and enabled and connected and self._hazard_flash is None:
+            restore = tel_hazards or self._hazard_wanted is True
+            self._hazard_flash = HazardFlash.begin(now, restore, tel_hazards)
+            self.change_hazards(self._hazard_flash.target, duration=0.08)
+        trial = self._hazard_flash
+        if trial is not None:
+            target = trial.step(now, tel_hazards, self._hazard_phase == "idle", enabled and connected)
+            if target is not None:
+                self.change_hazards(target, duration=0.08 if trial.active else HAZARD_PRESS_DURATION)
+            if not trial.active:
+                self._hazard_flash = None
+        if not connected:
+            try:
+                controller.flasher4way = False
+            except (AttributeError, OSError, TypeError):
+                pass
+            return
 
         with self._lock:
             wanted = self._hazard_wanted
