@@ -4,7 +4,7 @@ The slider makes the same pedal brake harder (1/3 left, 1 centre, 3 right).
 Cruise and the driver's pedal send ``min(1, logical * 1.1 / I)``, so a given pedal
 brakes the same at every setting; capacity learning undoes that same remap with
 ``effective_brake_pedal``. AEB and em_stop pass ``full_authority``. AEB's own
-capacity lives in ``core/sending_thread/aeb_capacity.py``. I below 1.0 cannot be
+capacity and sent-axis pedal live in ``core/sending_thread/aeb_capacity.py``. I below 1.0 cannot be
 fully recovered; warn while AEB is enabled. See README.md.
 """
 
@@ -41,7 +41,8 @@ def apply_brake_intensity(
 ) -> float:
     """Logical [0, 1] pedal to the value written into SCS controls.
 
-    ``full_authority`` writes the logical pedal: AEB capacity is already physical.
+    ``full_authority`` writes the logical pedal: AEB has already placed its own pedal
+    on the sent axis (``AebPedalAxis``) and a slam must still reach 1.0.
     """
     p = min(max(float(logical), 0.0), 1.0)
     if p <= 0.0:

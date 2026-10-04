@@ -333,7 +333,8 @@ physics staircase) gives tau 0.19 s median, 0.31 s p90, 0.38 s max, with 0.12 s 
 Build-up (dead + tau) is therefore 0.25 s median and 0.37 s p90. The observer's model taus
 (0.25 solo / 0.50 trailer) sit above that, which is the intended safe side, and the fit
 could not separate the load classes, so they are left alone. `stop_buffer_response_s` in AEB
-is sized against this, not against the model.
+is sized against this, not against the model. Full-pedal slams are faster than this (tau
+0.08 s median, see the onset guard below), so the fit describes ordinary braking.
 
 `brake_efficiency.nominal_max_brake_decel_ms2` now defers to `baseline_brake_ms2` instead of
 carrying its own `11.5 * wheels/12 * 17000/mass`. That old form had the same `1/mass` error
@@ -371,6 +372,26 @@ supplies the correction.
   measured maximum is 0.38 s. A fully median model (0.19 s both) reaches 100% but fails the
   0.65 s case and the "uses the truck it has" peak. With a single solo-tuned model, trailer
   plants overshot the target decel by up to 39%.
+- **Onset guard** (`_AEB_ONSET_GUARD_S`, 1.0 s from engagement): the bias may add brake
+  but not remove it. AEB always opens with a slam, and slams build fast: 17 full-pedal
+  onsets in `brake_debug.csv` (2026-09-29 to 10-04, AEB and driver slams, solo and
+  trailer) fit dead time 0.075-0.15 s and tau 0.08 s median (0.02-0.19), while gentle
+  driver or cruise onsets fit 0.23-0.6 s. No single model fits both, and against the slower one the
+  residual during build-up read as bias and cut the pedal: 64-77% of target 0.3-0.6 s
+  after the hit at 100%, 155% and 300% alike. The stop sim put that dip at 0.49-0.74; the
+  guard holds it at 0.90-0.97 with every gap equal or larger. A faster model was tried
+  instead: it fixes fast plants but sends slow ones to 1.4-1.6x target and costs up to
+  0.3 m. The price is paid only when the truck brakes harder than AEB believes: up to
+  1.24x target for the first second on a truck 25% stronger, then 1.00x.
+- **Slider axis** (`AebPedalAxis`): the controller's pedal is a point on its capacity's
+  brake curve. Above `I = 1.1` the sending thread maps it to the sent pedal that delivers
+  that decel and maps the sent pedal back for the observer. The tune range runs through the
+  same remap as the driver's pedal; with a measured full pedal the extra between the tune
+  top and a sent 1.0 is spread linearly over the rest of the travel, unmeasured that part is
+  skipped. Full pedal is always a sent 1.0 so a slam reaches the slider's extra. Writing
+  the pedal raw braked `I / 1.1` times harder than planned (2.7x at 300%), which the
+  additive bias could only undo by cutting the pedal to ~0.06. At or below 1.1 the axis is
+  the identity.
 - **Measurement**: its own 0.12 s tracking differentiator. Do not point this at
   `_spd_smooth` (0.30 s), which `PedalCapacityTracker` and published telemetry depend on.
 - The commanded decel is floored at `AEB_ff_decel_ms2` so a stale or zero published
@@ -473,14 +494,14 @@ What follows from it:
   `effective_brake_pedal` = `min(1, sent * I / 1.1)`, and never scales decel, so
   `brake_scale` and `max_brake_ms2` stay in tune units at any slider.
 - **AEB capacity** comes from its own per-truck scale, see **AEB capacity per truck**
-  below. The extra a high slider buys at full pedal is traction-limited and rig
-  dependent, so it is left unused, on the safe side. Never let AEB's capacity exceed
-  `aeb_scale * baseline`: with the September learner recovered it would have believed
-  up to 2x the truck, and on 09-21 it already believed ~19.7 m/s2 against stops of at
-  most 17.5.
+  below. The extra a high slider buys at full pedal is rig and load dependent, so it is
+  credited only once measured on this truck, slider and load (**Full-pedal credit**).
+  Unmeasured, never let AEB's capacity exceed `aeb_scale * baseline`: with the September
+  learner recovered it would have believed up to 2x the truck, and on 09-21 it already
+  believed ~19.7 m/s2 against stops of at most 17.5.
 - **AEB and `em_stop`** still pass `full_authority=True` and write the logical
-  pedal, so a slam writes 1.0 and saturation cannot be starved. At a high slider
-  AEB's feedforward over-brakes mid-range; the observer takes that out.
+  pedal, so a slam writes 1.0 and saturation cannot be starved. AEB first puts its
+  own pedal on the sent axis (`AebPedalAxis`, see the AEB decel controller).
 - `brake_scale` persisted under the old learner is dropped once, keyed on
   `pedal_capacity_brake_model`.
 
@@ -538,9 +559,40 @@ by `baseline_brake_ms2`:
 | ATS 10-wheel, 36 t | 0.97, 0.97 | | |
 
 The model holds to about 5% at 100%. Above it the gain runs from +3% to +65% by load,
-which is why it stays uncredited: a scale learned on the 25.7 t load at 139% would
-over-read the 39.6 t load by about 13%. The ceiling stays 1.00 for the same carry-over
-reason as `brake_scale`.
+which is why `aeb_scale` never carries it: a scale learned on the 25.7 t load at 139%
+would over-read the 39.6 t load by about 13%. The ceiling stays 1.00 for the same
+carry-over reason as `brake_scale`.
+
+#### Full-pedal credit (`FullPedalStore`)
+
+Peaks over-state what a stop delivers. Averaged over each settled full-pedal stop
+instead, the FH bobtail at 135% stops at 1.27x the model (9 stops, 1.07-1.36) while AEB
+planned with 0.95x, so it fired when the stop needed about 75% of the truck: "too early"
+on 2026-10-04 even with the onset guard. The extra cannot be predicted (same trailer:
+1.03 at 17.5 t, 1.19 at 25.7 t, 1.05 at 39.6 t, all at 139%), so it is measured.
+
+- A **full-pedal stop** is a sent pedal of at least 0.97 on full authority (driver slam or
+  long AEB saturation). `FullPedalRun` fits a least-squares slope to the speed trace from
+  0.3 s after the slam while above 18 km/h, needs at least 0.5 s of it, and reports
+  `(decel - road load) / (baseline x frac(1))` when the pedal comes off. It does not use
+  the tracker's settled samples: during a slam the differentiated decel swings +-2 m/s2
+  on the 20 Hz physics staircase, and on 2026-10-04 two full stops from 124 and 75 km/h
+  produced one settled tick between them.
+- Stops are kept per `game|truck|trailers|slider`, then per load within 10% of mass (four
+  loads, last five stops each, 64 keys), persisted in `aeb_full_pedal`.
+- **Credit** needs two stops at this load and uses the weakest of the last five. Capacity
+  becomes `max(today, baseline x ratio / 1.1)`: the same 1/1.1 room a clean 100% user has,
+  never lower than the uncredited value. No transfer across loads or sliders. The weakest,
+  not a median, because the same truck and slider spread more than the room between
+  drives: the FH at 135% read 1.26-1.38 in the morning and 1.07-1.16 that evening
+  (2026-10-04, same speeds; cause not established, weather is the suspect).
+- In the stop sim (`stop_buffer` 0.5) an exact measurement moves the bobtail's engagement
+  at 80 km/h from 35.3 m to 30.2 m at 135% (28.2 m on the 25.7 t load at 150%) with every
+  gap at or above +0.12 m,
+  including extra-braking shapes the axis does not assume. A measurement 5% high lands at
+  the bumper (-0.03 m) only with the p90 build-up, which no AEB slam has shown.
+- Rain is not visible in telemetry. If wet grip cuts the extra, a dry measurement
+  over-reads it; this was accepted on 2026-10-04 for a later, more precise trigger.
 
 ## Brake debug log (`debug_csv.py`)
 

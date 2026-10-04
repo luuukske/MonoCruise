@@ -25,7 +25,16 @@ from core.scs_profile.intensity import (
 )
 
 from .accel_to_pedals import AccelToPedals, MapperSharedState, baseline_accel_ms2, baseline_brake_ms2
-from .aeb_capacity import AebCapacityStore, aeb_capacity_ms2, truck_key
+from .aeb_capacity import (
+    FULL_SENT,
+    AebCapacityStore,
+    AebPedalAxis,
+    FullPedalRun,
+    FullPedalStore,
+    aeb_capacity_ms2,
+    full_pedal_key,
+    truck_key,
+)
 from .debug_csv import BrakeDebugLog, open_debug_csv
 from .hold_controller import (
     HoldController,
@@ -138,6 +147,9 @@ _AEB_MEAS_TAU_S: float = 0.12
 # bias rather than lag, and it settles with the plant instead of behind it.
 _AEB_BIAS_TAU_S: float = 0.10
 _AEB_BIAS_CLAMP_FRAC: float = 0.6
+# Slams build in ~0.15 s, gentle braking in 0.3-0.5 s: no one model fits both, so after
+# engagement the observer may add brake but not take it away (the post-hit dip): README.
+_AEB_ONSET_GUARD_S: float = 1.0
 _AEB_PEDAL_HISTORY_S: float = 0.6
 
 # Idle-creep compensation for the user brake path. In gear 1 below the creep
@@ -183,6 +195,7 @@ class AEBDecelController:
         self._model_decel_ms2: float = 0.0
         self._model_filt_ms2: float = 0.0
         self._pedal_hist: list[tuple[float, float]] = []
+        self._engaged_at: float | None = None
 
     @property
     def active(self) -> bool:
@@ -201,6 +214,7 @@ class AEBDecelController:
             self._model_decel_ms2 = 0.0
             self._model_filt_ms2 = 0.0
             self._pedal_hist.clear()
+            self._engaged_at = None
         return aeb_brake and not was_active
 
     def note_applied_pedal(self, pedal: float, now: float) -> None:
@@ -274,6 +288,8 @@ class AEBDecelController:
         """Compute brake pedal [0, 1] for the current tick."""
         if not self._active or max_brake_ms2 <= 0.1:
             return 0.0
+        if self._engaged_at is None:
+            self._engaged_at = now
 
         self._update_observer(
             measured_decel_ms2, max_brake_ms2, decel_from_pedal_fn,
@@ -290,7 +306,10 @@ class AEBDecelController:
         commanded = max(target_decel_ms2, floor_decel_ms2)
         if commanded <= 0.0:
             return 0.0
-        wanted = max(0.0, min(commanded - self._bias_ms2, max_brake_ms2))
+        bias = self._bias_ms2
+        if now - self._engaged_at < _AEB_ONSET_GUARD_S:
+            bias = min(bias, 0.0)
+        wanted = max(0.0, min(commanded - bias, max_brake_ms2))
         return max(0.0, min(1.0, ff_pedal_fn(wanted, max_brake_ms2)))
 
 
@@ -375,6 +394,8 @@ class SendingThread(BaseThread):
         self._hold = HoldController(self._accel_mapper.brake_pedal_from_decel)
         self._capacity_tracker = PedalCapacityTracker()
         self._aeb_capacity = AebCapacityStore()
+        self._full_pedal = FullPedalStore()
+        self._full_run = FullPedalRun()
         self._brake_intensity = BrakeIntensityCache()
         self._low_i_aeb_warn = LowBrakeIntensityAebWarning()
         self._aeb_controller = AEBDecelController()
@@ -853,6 +874,7 @@ class SendingThread(BaseThread):
             baseline_accel=baseline_accel_ms2(0.0, False),
         )
         self._aeb_capacity.load_persisted()
+        self._full_pedal.load_persisted()
 
         if self._controller is not None:
             logger.debug("SCSController initialised")
@@ -1536,15 +1558,13 @@ class SendingThread(BaseThread):
         now_ctrl = time.monotonic()
         aeb_pedal = 0.0
         aeb_key = truck_key(tel_game, truck_id, ego_trailer_count)
+        aeb_i = self._brake_intensity.get(tel_game)
+        aeb_base = max(baseline_brake_ms2(mass_kg, has_t, wheels_on_ground), 0.1)
+        aeb_scale = self._aeb_capacity.scale(aeb_key)
+        aeb_full = self._full_pedal.ratio(full_pedal_key(aeb_key, aeb_i), mass_kg)
+        aeb_cap = max(aeb_capacity_ms2(aeb_base, aeb_scale, aeb_i, aeb_full), 0.1)
+        aeb_axis = AebPedalAxis(aeb_i, aeb_scale, aeb_cap / aeb_base, aeb_full)
         if _aeb_active and gasval < 0.8:
-            aeb_i = self._brake_intensity.get(tel_game)
-            aeb_cap = max(
-                aeb_capacity_ms2(
-                    baseline_brake_ms2(mass_kg, has_t, wheels_on_ground),
-                    self._aeb_capacity.scale(aeb_key), aeb_i,
-                ),
-                0.1,
-            )
             aeb_pedal = self._aeb_controller.step(
                 target_decel_ms2=AEB_target_decel,
                 floor_decel_ms2=AEB_ff_decel,
@@ -1557,7 +1577,8 @@ class SendingThread(BaseThread):
                 now=now_ctrl,
                 dt=dt_aeb,
             )
-            b = max(b, aeb_pedal)
+            # AEB runs on full authority, so put its pedal on the sent axis here.
+            b = max(b, aeb_axis.sent(aeb_pedal))
             a = 0.0
 
         # Bookkeeping for next tick's learn gate and handover re-seat.
@@ -1608,7 +1629,9 @@ class SendingThread(BaseThread):
 
         # Close the observer loop on what the game actually received, not on the
         # controller's own request: hold, cushion and user brake all raise it.
-        self._aeb_controller.note_applied_pedal(sent_b, now_ctrl)
+        self._aeb_controller.note_applied_pedal(
+            aeb_axis.applied(sent_b), now_ctrl,
+        )
 
         # Push the actual brake value sent this tick into the ring buffer so
         self._recent_brake_outputs.append(sent_b)
@@ -1647,8 +1670,21 @@ class SendingThread(BaseThread):
         settled = self._capacity_tracker.last_settled_brake_sample
         if settled is not None:
             self._aeb_capacity.observe(aeb_key, settled[0], settled[1], intensity)
+        full_key = full_pedal_key(aeb_key, intensity)
+        full_stop = self._full_run.tick(
+            full_authority and sent_b >= FULL_SENT, full_key, mass_kg, _base_brake,
+            speed_ms, mapper_road_load_ms2, now_ctrl,
+        )
+        if full_stop is not None:
+            self._full_pedal.observe_stop(*full_stop)
+            logger.debug(
+                "full-pedal stop %.1f t: %.3f of model (%d at this load)",
+                full_stop[1] / 1000.0, full_stop[2],
+                self._full_pedal.stops(full_stop[0], full_stop[1]),
+            )
         aeb_scale = self._aeb_capacity.scale(aeb_key)
-        aeb_max_brake = aeb_capacity_ms2(_base_brake, aeb_scale, intensity)
+        aeb_full = self._full_pedal.ratio(full_key, mass_kg)
+        aeb_max_brake = aeb_capacity_ms2(_base_brake, aeb_scale, intensity, aeb_full)
         if a > 0.01:
             # Creep subtracted so gear-1 samples learn the throttle-commanded
             self._capacity_tracker.update_accel(
@@ -1695,6 +1731,7 @@ class SendingThread(BaseThread):
                         "est_brake_ms2": tracker.max_brake_ms2,
                         "aeb_max_brake_ms2": aeb_max_brake,
                         "aeb_brake_scale": aeb_scale,
+                        "aeb_full_ratio": math.nan if aeb_full is None else aeb_full,
                         "brake_scale": tracker.brake_scale,
                         "baseline_brake_ms2": _base_brake,
                         "learn_gate": tracker.last_brake_gate,

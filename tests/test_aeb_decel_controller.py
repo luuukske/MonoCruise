@@ -124,22 +124,50 @@ def test_never_overshoots_the_target_decel():
 
     Covers plants faster and slower than the model, in both load classes.
     """
+    # A truck braking harder than believed may run 1.25x through the onset guard,
+    # then must settle; approved by Lukas 2026-10-04 (README, onset guard).
     cases = [
-        (5.0, dict(offset=-1.5), False),
-        (5.0, dict(offset=1.0), False),
-        (5.0, dict(true_max=12.5), False),
-        (2.0, dict(true_max=8.0, offset=-0.6), False),
-        (5.0, dict(dead=0.05, tau=0.10), False),
-        (5.0, dict(dead=0.08, tau=0.30), False),
-        (5.0, dict(offset=-0.6, dead=_AEB_PLANT_DEAD_TRAILER_S, tau=0.35), True),
+        (5.0, dict(offset=-1.5), False, 1.15),
+        (5.0, dict(offset=1.0), False, 1.25),
+        (5.0, dict(true_max=12.5), False, 1.25),
+        (2.0, dict(true_max=8.0, offset=-0.6), False, 1.15),
+        (5.0, dict(dead=0.05, tau=0.10), False, 1.15),
+        (5.0, dict(dead=0.08, tau=0.30), False, 1.15),
+        (5.0, dict(offset=-0.6, dead=_AEB_PLANT_DEAD_TRAILER_S, tau=0.35), True, 1.15),
         # Measured trailer plants top out at 0.38 s; the 0.80 s case went 2026-10-04 (README).
-        (5.0, dict(offset=-0.6, dead=_AEB_PLANT_DEAD_TRAILER_S, tau=0.65), True),
+        (5.0, dict(offset=-0.6, dead=_AEB_PLANT_DEAD_TRAILER_S, tau=0.65), True, 1.15),
+    ]
+    for target, kwargs, trailer, limit in cases:
+        trace = run(target, Plant(**kwargs), has_trailer=trailer)
+        peak = max(d for _, d, _, _ in trace)
+        assert peak <= limit * target, (
+            f"{kwargs} trailer={trailer}: peaked at {peak / target:.2f}x target"
+        )
+        if limit > 1.15:
+            late = [d for t, d, _, _ in trace if t > 1.8]
+            assert all(abs(d - target) < 0.35 for d in late), (
+                f"{kwargs}: still {late[-1] / target:.2f}x target after the guard"
+            )
+
+
+def test_does_not_let_go_after_a_fast_hit():
+    """Slams build in ~0.15 s solo or with a trailer (brake_debug.csv, 2026-10-04).
+
+    Against the slower model the observer read that as bias and cut the pedal:
+    64-77% of target in game at every slider, 0.69-0.74 here without the guard.
+    """
+    cases = [
+        (7.5, dict(true_max=11.0, dead=0.10, tau=0.03), False),
+        (7.5, dict(true_max=11.0, dead=0.075, tau=0.08), True),
+        (7.5, dict(dead=0.10, tau=0.03), False),
+        (5.0, dict(dead=0.10, tau=0.03), False),
     ]
     for target, kwargs, trailer in cases:
         trace = run(target, Plant(**kwargs), has_trailer=trailer)
-        peak = max(d for _, d, _, _ in trace)
-        assert peak <= 1.15 * target, (
-            f"{kwargs} trailer={trailer}: peaked at {peak / target:.2f}x target"
+        hit = next(t for t, d, _, _ in trace if d >= 0.9 * target)
+        low = min(d for t, d, _, _ in trace if hit < t <= hit + 1.5)
+        assert low >= 0.88 * target, (
+            f"{kwargs} trailer={trailer}: fell to {low / target:.2f}x target after the hit"
         )
 
 

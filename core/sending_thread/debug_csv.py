@@ -30,7 +30,7 @@ BRAKE_LOG_HEADER: list[str] = [
     "user_brake",
     "mapper_brake",
     "hold_brake",
-    "aeb_pedal",
+    "aeb_pedal",           # AEB controller output, before AebPedalAxis.sent
     "logical_brake",       # merged pedal before the intensity remap
     "sent_brake",          # written to the game
     "full_authority",
@@ -46,6 +46,7 @@ BRAKE_LOG_HEADER: list[str] = [
     "est_brake_ms2",       # learned capacity, tune units
     "aeb_max_brake_ms2",
     "aeb_brake_scale",     # per-truck AEB scale (aeb_capacity.py)
+    "aeb_full_ratio",      # credited full-pedal stop, decel / (baseline x frac(1))
     "brake_scale",
     "baseline_brake_ms2",
     "learn_gate",
