@@ -15,6 +15,7 @@ from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
+    QComboBox,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -26,6 +27,8 @@ from PySide6.QtWidgets import (
 )
 
 from core import checker_status
+from core.road_map.service import service as road_map_service
+from core.road_map.feedback import journal as road_feedback
 from core.input_bindings import binding_display_name, migrate_binding, resolve_held
 from core.longitudinal.accel_envelope import PROFILE_LABELS, resolve_profile
 from core.speed_units import (
@@ -59,6 +62,7 @@ from ui.main_window.widgets import (
     new_subtext,
 )
 from ui.popup.popup_window import PopupWindow
+from ui.main_window.sound_card import SoundCard
 
 if TYPE_CHECKING:
     from core.settings import Settings
@@ -143,7 +147,7 @@ class SettingsPanel(QWidget):
         card = QWidget()
         card.setObjectName("settingsCard")
         card.setStyleSheet(
-            f"QWidget#settingsCard {{ background-color: #333333; "
+            f"QWidget#settingsCard {{ background-color: #172235; "
             f"border-radius: {RADIUS_SETTINGS_PANEL}px; }}"
         )
         card_lay = QVBoxLayout(card)
@@ -213,6 +217,11 @@ class SettingsPanel(QWidget):
         header.addSpacing(right_margin)
         card_lay.addLayout(header)
 
+        navigation = QComboBox()
+        navigation.setMinimumHeight(36)
+        navigation.addItems(['Jump to section…', 'Inputs', 'Program settings', 'Cruise Control', 'One-Pedal-Drive'])
+        card_lay.addWidget(navigation)
+
         # Scroll area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -231,8 +240,8 @@ class SettingsPanel(QWidget):
         self._grid = QGridLayout(inner)
         self._grid.setContentsMargins(10, 8, 10, 10)
         # Small vertical spacing for rows so subtext stays tied to its setting.
-        self._grid.setHorizontalSpacing(4)
-        self._grid.setVerticalSpacing(4)
+        self._grid.setHorizontalSpacing(12)
+        self._grid.setVerticalSpacing(7)
         self._grid.setColumnStretch(0, 1)
         self._grid.setColumnMinimumWidth(1, 120)
         scroll.setWidget(inner)
@@ -247,6 +256,13 @@ class SettingsPanel(QWidget):
         self._build_cruise_control()
         self._build_one_pedal_drive()
         self._build_footer()
+
+        def jump_to_section(text):
+            for label in inner.findChildren(QLabel):
+                if label.objectName() == 'sectionHeader' and label.text() == text:
+                    scroll.ensureWidgetVisible(label, 0, 12)
+                    break
+        navigation.textActivated.connect(jump_to_section)
 
         # Bottom button bar (Patreon · YouTube · Hide X)
         bar = QHBoxLayout()
@@ -503,6 +519,18 @@ class SettingsPanel(QWidget):
             callback=self._on_hazards_toggled,
         )
 
+        new_label(p, self._r(0), 0, "Fast hazard trial (experimental):")
+        self.chk_fast_hazards = new_checkbutton(
+            p, self._r(), 1, s.experimental_hazard_flash,
+            callback=lambda v: self._set("experimental_hazard_flash", v),
+        )
+        self.btn_fast_hazards = QPushButton("Test / Stop (5s)")
+        self.btn_fast_hazards.clicked.connect(self._test_fast_hazards)
+        self._grid.addWidget(self.btn_fast_hazards, self._r(), 0, 1, 2)
+        self._fast_hazard_hint = QLabel("Enable to try on hard braking. Game flash timing may not change.")
+        self._fast_hazard_hint.setWordWrap(True)
+        self._grid.addWidget(self._fast_hazard_hint, self._r(), 0, 1, 2)
+
         # Autodisable hazards (conditionally visible)
         r_auto = self._r()
         new_label(p, r_auto, 0, "  Autodisable hazards:")
@@ -550,6 +578,59 @@ class SettingsPanel(QWidget):
         # Only the subtext toggles here -- the dropdown itself always stays
         # visible, unlike the whole-row conditionals (see _set_row_visible).
         self._preview_subtext.setVisible(s.update_channel.lower() == "preview")
+
+    def _poll_ncz_status(self) -> None:
+        if not self.isVisible():
+            return
+        try:
+            aeb = registry.get_thread("aeb_thread")
+            with aeb.data._lock:
+                state = aeb.data.tmp_ncz_state
+                suppressed = aeb.data.tmp_ncz_suppressed
+        except (KeyError, AttributeError):
+            state, suppressed = None, False
+        if suppressed:
+            text = "NCZ detected: AEB intervention paused."
+        elif state is False:
+            text = "Outside NCZ: normal AEB behavior."
+        elif state is True:
+            text = "NCZ detected; automatic pause is disabled."
+        else:
+            text = "NCZ unknown: AEB stays active. Requires MonoCruiseNCZ.dll."
+        self._ncz_hint.setText(text)
+        self._feedback_hint.setText(road_feedback.status)
+
+    def _mark_aeb_feedback(self, kind):
+        try:
+            aeb = registry.get_thread("aeb_thread")
+            with aeb.data._lock:
+                context = {"road": aeb.data.road_map_context,
+                           "junctions": aeb.data.road_map_junctions,
+                           "warning": bool(aeb.data.AEB_warn),
+                           "brake": bool(aeb.data.AEB_brake)}
+        except (KeyError, AttributeError):
+            context = {"aeb_available": False}
+        road_feedback.submit(kind, context)
+
+
+    def _test_fast_hazards(self) -> None:
+        try:
+            sender = registry.get_thread("sending_thread")
+            if getattr(sender, "_hazard_flash", None) is not None:
+                self.chk_fast_hazards.setChecked(False)
+                self._fast_hazard_hint.setText("Trial stopped; normal hazard state will be restored.")
+                return
+            telemetry = registry.get_thread("telemetry_thread")
+            with telemetry.data._lock:
+                connected = bool(telemetry.data.is_connected)
+            if not connected or not self._settings.hazards_variable:
+                self._fast_hazard_hint.setText("Connect to the game and enable Hazards first.")
+                return
+            self.chk_fast_hazards.setChecked(True)
+            sender.request_hazard_flash()
+            self._fast_hazard_hint.setText("Five-second trial requested. Click again to stop.")
+        except (KeyError, AttributeError):
+            self._fast_hazard_hint.setText("Connect to the game first.")
 
     def refresh_autostart_availability(self) -> None:
         """Grey the autostart toggle out while no background checker runs to act on it."""
@@ -767,6 +848,35 @@ class SettingsPanel(QWidget):
         aeb_lay.addWidget(self.chk_aeb)
         self._grid.addWidget(aeb_widget, r_aeb, 1)
         self._grid.setRowMinimumHeight(r_aeb, FIELD_ROW_HEIGHT)
+
+        new_label(p, self._r(0), 0, "Pause AEB in TMP NCZ:")
+        self.chk_ncz = new_checkbutton(
+            p, self._r(), 1, s.aeb_skip_tmp_ncz,
+            callback=lambda v: self._set("aeb_skip_tmp_ncz", v),
+        )
+        self._ncz_hint = QLabel("Requires MonoCruiseNCZ.dll. Unknown zone keeps AEB active.")
+        self._ncz_hint.setWordWrap(True)
+        self._grid.addWidget(self._ncz_hint, self._r(), 0, 1, 2)
+        self._ncz_timer = QTimer(self)
+        self._ncz_timer.timeout.connect(self._poll_ncz_status)
+        self._ncz_timer.start(500)
+
+        road_map_service.load()
+        feedback_row = QWidget()
+        feedback_layout = QHBoxLayout(feedback_row)
+        feedback_layout.setContentsMargins(0, 0, 0, 0)
+        for label, kind in (("Unnecessary brake", "false_brake"),
+                            ("Missed hazard", "missed_hazard")):
+            button = QPushButton(label)
+            button.clicked.connect(lambda checked=False, k=kind: self._mark_aeb_feedback(k))
+            feedback_layout.addWidget(button)
+        self._grid.addWidget(feedback_row, self._r(), 0, 1, 2)
+        self._feedback_hint = QLabel(road_feedback.status)
+        self._feedback_hint.setWordWrap(True)
+        self._grid.addWidget(self._feedback_hint, self._r(), 0, 1, 2)
+
+        self.sound_card = SoundCard(s, self._on_save)
+        self._grid.addWidget(self.sound_card, self._r(), 0, 1, 2)
 
         # Clip sharing (opt-in)
         r_share = self._r()
@@ -1510,6 +1620,8 @@ class SettingsPanel(QWidget):
     def apply_settings(self, s: "Settings") -> None:
         """Push every settings value into the corresponding widget."""
         self._settings = s
+        self.sound_card.sync()
+        self.chk_ncz.setChecked(s.aeb_skip_tmp_ncz)
 
         # Inputs
         if self._pedal_configuring:
@@ -1520,6 +1632,7 @@ class SettingsPanel(QWidget):
         self.refresh_autostart_availability()
         self.ent_polling.setText(str(s.polling_rate))
         self.chk_hazards.setChecked(s.hazards_variable)
+        self.chk_fast_hazards.setChecked(s.experimental_hazard_flash)
         self.chk_autodisable.setChecked(s.autodisable_hazards)
         self._set_row_visible(self._hazard_auto_row, s.hazards_variable)
         self.chk_horn.setChecked(s.horn_variable)

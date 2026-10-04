@@ -7,8 +7,10 @@ from core.update_check import REPO_NAME, REPO_OWNER
 # Application metadata
 APP_NAME = "MonoCruise"
 WINDOW_WIDTH = 700
+LIVE_WINDOW_WIDTH = 1120
 WINDOW_HEIGHT = 500
-SETTINGS_PANEL_WIDTH = 400
+LIVE_WINDOW_HEIGHT = 700
+SETTINGS_PANEL_WIDTH = 450
 
 # Project links, shared by the settings panel button bar and the support
 # prompt so a changed URL only has to move in one place.
@@ -18,20 +20,20 @@ PATREON_URL = "https://www.patreon.com/c/lukasdeschryver"
 YOUTUBE_URL = "https://www.youtube.com/@ld-tech_org"
 
 # Colour palette
-BG_COLOR       = "#2B2B2B"
-SETTINGS_COLOR = "#454545"
-WAITING_COLOR  = "#1f538d"
-CONNECTED_COLOR = "#304230"
+BG_COLOR       = "#101827"
+SETTINGS_COLOR = "#2b3b52"
+WAITING_COLOR  = "#2563eb"
+CONNECTED_COLOR = "#163d36"
 LOST_COLOR     = "#FF0000"
 # Update-ready banner amber; settings update control uses UPDATE_TINT green.
 UPDATE_COLOR   = "#3FB950"
 UPDATE_TINT    = "#52DC63"
-HEADER_BG      = "#454545"
-PREVIEW_TITLE_COLOR = "#808080"
-TEXT_COLOR     = "#d3d3d3"
-SUBTEXT_COLOR  = "#606060"
+HEADER_BG      = "#2b3b52"
+PREVIEW_TITLE_COLOR = "#e8eef7"
+TEXT_COLOR     = "#e8eef7"
+SUBTEXT_COLOR  = "#9caec5"
 PILL_RED       = "#FF0000"
-BUTTON_HOVER   = "#333366"
+BUTTON_HOVER   = "#3478f6"
 DANGER_TEXT    = "#8b0000"
 DISABLED_COLOR = "#F1F1F1"
 KEY_ON_COLOR   = "#1f53FF"
@@ -48,13 +50,13 @@ DANGER_BUTTON_HOVER   = "#A82020"
 
 # Border radii  (change individually as desired)
 RADIUS_BANNER         = 5   # BannerWidget (top status bar)
-RADIUS_SETTINGS_PANEL = 5   # SettingsPanel slide-in drawer
+RADIUS_SETTINGS_PANEL = 12   # SettingsPanel slide-in drawer
 RADIUS_SCROLL         = 5   # QScrollArea (settings scroll frame)
-RADIUS_BUTTON         = 5   # All QPushButton (factory standard across type)
-RADIUS_INPUT          = 5   # input fields: entries, dropdowns, bind buttons, mode switch
+RADIUS_BUTTON         = 8   # All QPushButton (factory standard across type)
+RADIUS_INPUT          = 8   # input fields: entries, dropdowns, bind buttons, mode switch
 
 # Settings row height (px) for all controls
-FIELD_ROW_HEIGHT = 25
+FIELD_ROW_HEIGHT = 30
 
 # Subtext gap above (layout) and below (QLabel margin) each field's subtext.
 SUBTEXT_GAP_TOP = 0
@@ -94,11 +96,11 @@ QLabel#sectionHeader {{
     font-weight: bold;
     padding: 6px 8px;
     border-radius: 5px;
-    qproperty-alignment: AlignCenter;
+    qproperty-alignment: AlignLeft;
 }}
 
 QLabel#versionLabel {{
-    color: #505050;
+    color: #9caec5;
     font-size: 11px;
     background-color: transparent;
 }}
@@ -360,7 +362,7 @@ QScrollArea {{
     background-color: transparent;
 }}
 QScrollBar:vertical {{
-    background-color: {"#333333"}; width: 8px; margin: 0;
+    background-color: #172235; width: 8px; margin: 0;
 }}
 QScrollBar::handle:vertical {{
     background-color: {SETTINGS_COLOR};
@@ -377,4 +379,11 @@ QFrame#dialogCard {{
     border: 1px solid {SETTINGS_COLOR};
     border-radius: 8px;
 }}
+"""
+STYLESHEET += """
+QFrame#soundCard { background: #1e2c42; border: 1px solid #344760; border-radius: 10px; }
+QSlider::groove:horizontal { height: 5px; background: #344760; border-radius: 2px; }
+QSlider::sub-page:horizontal { background: #60a5fa; border-radius: 2px; }
+QSlider::handle:horizontal { background: #e8eef7; width: 14px; margin: -5px 0; border-radius: 7px; }
+QComboBox { background: #101827; border: 1px solid #344760; border-radius: 6px; padding: 5px; }
 """

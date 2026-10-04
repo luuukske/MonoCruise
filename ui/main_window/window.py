@@ -41,12 +41,15 @@ from ui.main_window.confirmation_overlay import show_confirmation
 from ui.main_window.consent_overlay import show_consent
 from ui.main_window.constants import (
     APP_NAME,
+    LIVE_WINDOW_HEIGHT,
+    LIVE_WINDOW_WIDTH,
     SETTINGS_PANEL_WIDTH,
     STYLESHEET,
     WINDOW_HEIGHT,
     WINDOW_WIDTH,
 )
 from ui.main_window.settings_panel import SettingsPanel
+from ui.main_window.live_panel import LivePanel
 from ui.main_window.support_overlay import show_support
 from ui.overlay_topmost import OVERLAY_KEEP_MS, reassert_topmost
 
@@ -77,7 +80,7 @@ _BANNER_STATE_NAMES: dict[BannerState, str] = {
 
 
 class MonoCruiseWindow(QMainWindow):
-    """Top‑level MonoCruise window (700×500, dark theme). Emits ``window_closed`` when the..."""
+    """Top-level MonoCruise window with settings and live driving view. Emits ``window_closed`` when the..."""
 
     # Signal emitted when the window is closed by the user
     window_closed = Signal()
@@ -102,7 +105,7 @@ class MonoCruiseWindow(QMainWindow):
         # Window properties
         self.setWindowTitle(APP_NAME)
         self.setMinimumSize(WINDOW_WIDTH, WINDOW_HEIGHT)
-        self.resize(WINDOW_WIDTH, WINDOW_HEIGHT)
+        self.resize(LIVE_WINDOW_WIDTH, LIVE_WINDOW_HEIGHT)
         self.setStyleSheet(STYLESHEET)
 
         icon_path = os.path.join(_PROJECT_ROOT, "icon.ico")
@@ -136,7 +139,7 @@ class MonoCruiseWindow(QMainWindow):
         )
         body_lay.addWidget(self._settings_panel)
 
-        # Right area (gear icon at top‑left, rest is empty space)
+        # Right area: settings toggle and live driving view
         right = QWidget()
         right.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
@@ -158,11 +161,8 @@ class MonoCruiseWindow(QMainWindow):
             self._gear_btn,
             alignment=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
         )
-        right_lay.addStretch()
-        right_lay.addWidget(self._build_preview_placeholder())
-        right_lay.addStretch()
-        # Matches the gear button so the placeholder sits on the area's true centre.
-        right_lay.addSpacing(self._gear_btn.height())
+        self._live_panel = LivePanel()
+        right_lay.addWidget(self._live_panel, 1)
 
         body_lay.addWidget(right)
         root.addWidget(body, 1)
@@ -248,12 +248,12 @@ class MonoCruiseWindow(QMainWindow):
         lay.setContentsMargins(16, 0, 16, 0)
         lay.setSpacing(4)
 
-        title = QLabel("Live preview coming soon")
+        title = QLabel("Your drive. Your setup.")
         title.setObjectName("previewTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(title)
 
-        subtitle = QLabel("You will be able to tune MonoCruise live in this panel.")
+        subtitle = QLabel("Open Settings to connect your pedals, tune cruise control and personalize your AEB warning sound.")
         subtitle.setObjectName("previewSubtitle")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setWordWrap(True)
