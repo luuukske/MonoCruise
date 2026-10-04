@@ -624,6 +624,12 @@ class SettingsPanel(QWidget):
         self._accel_style_row = r_style
         self._set_row_visible(r_style, self._is_cruise_mode(s.cc_mode))
 
+        new_label(p, self._r(0), 0, "Auto set target speed to speed limit")
+        self.chk_autospeedtarget = new_checkbutton(
+            p, self._r(), 1, s.autospeedtarget_variable,
+            callback=lambda v: self._set("autospeedtarget_variable", v),
+        )
+
         # Global speed limiter (empty → None disables both CC clamp and
         # always-on limiter: see AGENTS.md global_speed_limit_kmh).
         limit_lo, limit_hi = global_limit_bounds()
@@ -1553,6 +1559,7 @@ class SettingsPanel(QWidget):
             self._refresh_bind_button(key)
         # Keep persisted values numeric; add units only in UI display.
         self.chk_autospeedlimit.setChecked(s.autospeedlimit_variable)
+        self.chk_autospeedtarget.setChecked(s.autospeedtarget_variable)
         self.refresh_speed_unit()
         self.chk_hold_reset.setChecked(s.long_press_reset)
         self.chk_show_speed.setChecked(s.show_cc_ui)

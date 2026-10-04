@@ -53,6 +53,7 @@ class CruiseControlThreadData(ThreadData):
     target_speed_kmh: float | None = None
     wanted_accel_ms2: float = 0.0
     active_controller: str = "none"  # "cc" | "limiter" | "none"
+    current_speedlimit: int = 0
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
@@ -164,6 +165,9 @@ class CruiseControlThread(BaseThread):
                             logger.info("Cannot engage with parking brake on", extra={"popup": True})
                         else:
                             logger.info("Can only engage in drive", extra={"popup": True})
+
+            # Set target speed to ingame speed limit, if the feature is enabled, and the speed limit has changed
+            if self.data.current_speedlimit != tel["game_speedlimit_kmh"] and Settings.autospeedtarget_variable: self._auto_target_speed(self._cc_ctrl,tel["game_speedlimit_kmh"])
 
             if any((cc_dec, cc_inc, cc_start)):
                 logger.debug(
@@ -385,6 +389,7 @@ class CruiseControlThread(BaseThread):
                     "game_clutch": float(tel.data.gameClutch),
                     "game_throttle": float(tel.data.gameThrottle),
                     "game_brake": float(getattr(tel.data, "gameBrake", 0.0)),
+                    "game_speedlimit_kmh": int(float(tel.data.speedLimit)*3.6),
                 }
         except Exception:
             return None
@@ -519,6 +524,13 @@ class CruiseControlThread(BaseThread):
             ))
             return
         cc.set_target_from_speed_kmh(speed_ms * 3.6)
+
+    def _auto_target_speed(self, cc: CruiseController, game_speedlimit_kmh):
+        """Set target speed to ingame speed limit"""
+        if game_speedlimit_kmh == 0: cc.disable()
+        cc.set_target_from_speed_kmh(float(game_speedlimit_kmh))
+        self.data.current_speedlimit = int(game_speedlimit_kmh)
+
 
     def _tick_button_fsm(
         self,
