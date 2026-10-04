@@ -92,6 +92,8 @@ HAZARD_MAX_RETRIGGERS: int = 3
 _HAZARD_HARD_BRAKE: float = 0.8
 _HAZARD_GAS_RESET: float = 0.60
 _HAZARD_BRAKE_CLEAR: float = 0.05
+# Same gate as the driver slam in main_pedal_thread: a stomp at rest is a hold.
+_HAZARD_MIN_SPEED_KMH: float = 10.0
 
 
 def hazard_action_for_sent_pedals(
@@ -116,7 +118,7 @@ def hazard_action_for_sent_pedals(
     ):
         action = "off"
     hard = brake >= _HAZARD_HARD_BRAKE
-    if hard and not was_hard:
+    if hard and not was_hard and speed_kmh > _HAZARD_MIN_SPEED_KMH:
         action = "on"
     return action, hard
 

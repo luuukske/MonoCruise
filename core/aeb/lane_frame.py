@@ -42,6 +42,56 @@ def project_to_ego_arc(ego_arc: ArcPath, x: float, z: float) -> tuple[float, flo
     return s, max(d_arc, d_straight)
 
 
+# Fractions along the rigid body capsule (rear -> front) for _any_body_in_ego_lane.
+# Five points bracket a long trailer with rear in-lane while centre rides outer.
+_BODY_LANE_SAMPLES = (0.0, 0.25, 0.5, 0.75, 1.0)
+
+
+def _any_body_in_ego_lane(
+    ego_arc: ArcPath, target_arcs: list[ArcPath], lane_half_width: float,
+) -> bool:
+    """Any target body centreline sample in ego lane at t=0 (trailer-in-lane rescue)."""
+    return any(
+        d <= lane_half_width
+        for d in _body_centreline_d_abs(ego_arc, target_arcs)
+    )
+
+
+def _any_body_ahead_in_ego_lane(
+    ego_arc: ArcPath, target_arcs: list[ArcPath], lane_half_width: float,
+) -> bool:
+    """Like _any_body_in_ego_lane, but only samples ahead of ego's front (the arc start)."""
+    return any(
+        s > 0.0 and d <= lane_half_width
+        for s, d in _body_centreline_samples(ego_arc, target_arcs)
+    )
+
+
+def _body_centreline_d_abs(
+    ego_arc: ArcPath, target_arcs: list[ArcPath],
+) -> list[float]:
+    """Arc-projected |d| for centreline samples along each target body at t=0."""
+    return [d for _, d in _body_centreline_samples(ego_arc, target_arcs)]
+
+
+def _body_centreline_samples(
+    ego_arc: ArcPath, target_arcs: list[ArcPath],
+) -> list[tuple[float, float]]:
+    """Arc-projected (s, |d|) for centreline samples along each target body at t=0."""
+    out: list[tuple[float, float]] = []
+    for arc in target_arcs:
+        # Heading, not arc.fwd_*: capsule extents are heading-relative, fwd flips on reverse.
+        fx, fz = -math.sin(arc.yaw_rad), -math.cos(arc.yaw_rad)
+        back = -arc.back_len
+        span = arc.fwd_len + arc.back_len
+        for frac in _BODY_LANE_SAMPLES:
+            s = back + span * frac
+            px = arc.start_x + s * fx
+            pz = arc.start_z + s * fz
+            out.append(project_to_ego_arc(ego_arc, px, pz))
+    return out
+
+
 def classify(d_abs: float, cal: AEBCalibration) -> Lane:
     """Map absolute lateral offset to Lane enum."""
     if d_abs <= cal.lane_half_width:
