@@ -15,6 +15,8 @@ from pathlib import Path
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 from core.settings import Settings
+from core.aeb.ncz_bridge import NCZReader
+from core.road_map.service import service as road_map_service
 
 from core.radar.traffic import (
     Vehicle,
@@ -317,6 +319,11 @@ def _should_sample_shadow_tn(snap: AEBSnapshot) -> bool:
 
 @dataclass
 class AEBData(ThreadData):
+    road_map_junctions: list | None = None
+    road_map_context: dict | None = None
+    road_edge_context: dict | None = None
+    tmp_ncz_state: bool | None = None
+    tmp_ncz_suppressed: bool = False
     AEB_warn: bool = False
     AEB_brake: bool = False
     time_to_brake: float = _INF
@@ -747,14 +754,25 @@ class _AEBSoundHandler:
             if not pygame.mixer.get_init():
                 pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=256)
                 pygame.mixer.init()
-            self._sound = pygame.mixer.Sound(sound_file_path)
-            self._sound.set_volume(0.8)
+            from core.aeb.sound_preferences import load_sound
+
+            self._sound = load_sound()
         except Exception as exc:
             logger.error(
-                "AEB sound init failed for %s (%s): sound disabled",
-                sound_file_path, exc,
+                "AEB sound initialization failed (%s): sound disabled",
+                type(exc).__name__,
             )
             self._sound = None
+
+    def replace_sound(self, sound) -> bool:
+        """Swap only while idle; the UI loads files outside the control worker."""
+        with self._lock:
+            if self._state != _SoundState.STOPPED:
+                return False
+            if self._sound_thread and self._sound_thread.is_alive():
+                return False
+            self._sound = sound
+            return True
 
     def start_warning(self) -> None:
         """Start loop; resumes an in-flight thread instead of spawning a second."""
@@ -952,6 +970,7 @@ class AEBThread(BaseThread):
         # Clip replay overrides _now, readers, and _aeb_active_fn (clip_eval).
         self._now = time.monotonic
         self._aeb_active_fn = None
+        self._ncz_reader = NCZReader()
 
     def _read_user_braking(self) -> bool:
         """Suppress warn when user/CC already braking unless near-full AEB demand."""
@@ -1258,6 +1277,14 @@ class AEBThread(BaseThread):
         (vehicles, ego_x, ego_y, ego_z, ego_yaw_rad, ego_speed, ego_pitch_deg,
          steer, ego_has_trailer, _ego_curvature_from_history, tmp_traffic_session,
          paused, radar_t_mono, off_surface_ids, ego_t_kin) = snapshot
+
+        road_context = (road_map_service.match(ego_x, ego_z, ego_y, ego_yaw_rad)
+                        if self._aeb_active_fn is None else None)
+        junction_context = (road_map_service.nearby_junctions(ego_x, ego_z, ego_y)
+                            if self._aeb_active_fn is None else None)
+        ncz_reader = getattr(self, "_ncz_reader", None)
+        ncz_state = ncz_reader.read() if tmp_traffic_session and ncz_reader is not None else None
+        ncz_suppressed = bool(tmp_traffic_session and Settings.aeb_skip_tmp_ncz and ncz_state is True)
 
         # Latched threats keep their pipeline seat: the shared gate must never
         # drop a target AEB is already braking for. See core/radar/README.md §15.
@@ -2234,6 +2261,18 @@ class AEBThread(BaseThread):
 
         aeb_brake = bool(self._engaged and target_published > 0.0)
 
+        if ncz_suppressed:
+            aeb_brake = False
+            aeb_warn = False
+            target_published = 0.0
+            aeb_ff_decel = 0.0
+            self._published_target_ms2 = 0.0
+            self._engaged = False
+            self._engage_confirm.reset()
+            self._engage_pad_dist_m = None
+            self._prev_state = AEBState.STANDBY
+            self._state_hold_until = 0.0
+
         if aeb_brake:
             new_state = AEBState.BRAKE
         elif aeb_warn:
@@ -2333,7 +2372,19 @@ class AEBThread(BaseThread):
         elif action == "stop":
             self._sound_handler.stop_warning()
 
+        edge_context = None
+        if self._aeb_active_fn is None:
+            edge_context = {}
+            for vehicle in [v for v in vehicles if v.id in colliding_ids][:8]:
+                radius = math.hypot(vehicle.size.length/2, vehicle.size.width/2)
+                edge_context[vehicle.id] = road_map_service.assess_roadside(
+                    vehicle.position.x, vehicle.position.z, vehicle.position.y, radius, vehicle.speed)
         with self.data._lock:
+            self.data.road_edge_context = edge_context
+            self.data.road_map_junctions = junction_context
+            self.data.road_map_context = road_context
+            self.data.tmp_ncz_state = ncz_state
+            self.data.tmp_ncz_suppressed = ncz_suppressed
             self.data.AEB_warn = aeb_warn
             self.data.AEB_brake = aeb_brake
             self.data.time_to_brake = time_to_brake
@@ -2598,6 +2649,7 @@ class AEBThread(BaseThread):
     def teardown(self) -> None:
         self._hmi_sound_prev = False
         self._sound_handler.cleanup()
+        self._ncz_reader.close()
         if self._radar_visualizer is not None:
             try:
                 self._radar_visualizer.stop()
@@ -2633,6 +2685,11 @@ class AEBThread(BaseThread):
         self._los_tracks.clear()
         self._d_miss_hist.clear()
         with self.data._lock:
+            self.data.road_map_junctions = None
+            self.data.road_map_context = None
+            self.data.road_edge_context = None
+            self.data.tmp_ncz_state = None
+            self.data.tmp_ncz_suppressed = False
             self.data.AEB_warn = False
             self.data.AEB_brake = False
             self.data.time_to_brake = _INF
@@ -2724,4 +2781,3 @@ class AEBThread(BaseThread):
                 return str(getattr(tel.data, "truck_id", "") or "") or None
         except AttributeError:
             return None
-

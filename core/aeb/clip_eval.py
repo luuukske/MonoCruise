@@ -60,6 +60,8 @@ def _make_headless(cal: AEBCalibration) -> AEBThread:
     t._radar_visualizer = None
     t._sound_handler = _NoSound()
     t._aeb_active_fn = lambda: True
+    t._ncz_reader.close()
+    t._ncz_reader = None
     t._capture_aeb_tick = lambda *a, **k: None   # never record during replay
     return t
 

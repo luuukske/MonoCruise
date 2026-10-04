@@ -845,7 +845,7 @@ class TurningCrossTrafficFilter:
 
 
 class TmpCrossTrafficFilter:
-    """TMP cross-traffic phantom suppression; straight center-miss vs turning endpoint. README."""
+    """TMP cross-traffic suppression with measured turning-contact rescue. README."""
     name = "TmpCrossTrafficFilter"
 
     def __init__(self, cal: AEBCalibration) -> None:
@@ -896,13 +896,14 @@ class TmpCrossTrafficFilter:
                 ctx.v_curvature, base_target_arc.half_width,
                 base_target_arc.horizon, decel=0.0,
             )
-            if straight:
-                # Straight TMP cross: centre meet = T-bone; centre miss = graze suppress.
-                if self._center_min_dist(ctx.ego_arc, sweep_arc) <= cal.tmp_cross_center_hit_dist:
-                    return _PASS
-            else:
-                # Jitter-prone turning snapshot: the endpoint-lane heuristic
-                # decides whether the swept arc clears ego's lane.
+            # A centre collision during the sweep cannot be cleared by its endpoint.
+            measured_collision = (ctx.d_miss is not None and ctx.d_miss <= clear_bar
+                                  and ctx.d_miss_rate is not None and ctx.d_miss_rate <= 0.0)
+            if ((straight or measured_collision)
+                    and self._center_min_dist(ctx.ego_arc, sweep_arc) <= cal.tmp_cross_center_hit_dist):
+                return _PASS
+            if not straight:
+                # Uncorroborated turning snapshots retain the endpoint-lane test.
                 end_x, end_z = sweep_arc.position_at_time(sweep_arc.horizon)
                 _, end_d_abs = project_to_ego_arc(ctx.ego_arc, end_x, end_z)
                 if classify(end_d_abs, cal) == Lane.EGO:

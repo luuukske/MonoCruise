@@ -275,7 +275,7 @@ pass, the vehicle enters collision evaluation.
 | `CoDirectionalDivergeFilter` | Co-directional arcs already diverging (Fix C + outer-lane same-turn) |
 | `TurningCrossTrafficFilter` | Cross-traffic turning through intersection (Fix D absorbed) |
 | `OutOfLaneParallelFilter` | Capsule lane-keeping adjacent / roadside traffic; also rear overtakers |
-| `TmpCrossTrafficFilter` | TMP-only: straight snapshot uses centre closest-approach (T-bone vs body-graze), turning snapshot uses full-horizon endpoint lane |
+| `TmpCrossTrafficFilter` | TMP-only: straight snapshot uses centre closest-approach (T-bone vs body-graze), turning snapshot uses measured centre-contact rescue before endpoint lane |
 | `SweepPassFilter` | Stationary cross-traffic ego turns through |
 | `CornerEntryStationaryFilter` | Stationary at corner entry: out-of-lane oncoming/co-dir, or in-lane with arc consistency |
 | `EgoEvasionFilter` | Ego can steer around target within 0.08 g (runs for `Lane.EGO` too) |
@@ -552,7 +552,10 @@ the snapshot's motion is (`ctx.v_curvature`):
   curvature makes the predicted centre path unreliable, so keep the full-horizon
   endpoint-lane test. Endpoint in `OPPOSITE_OR_OUTER` / `OFF_ROAD` → the target
   sweeps clear → **suppress**; endpoint in `Lane.EGO` → real continuing threat →
-  **pass**.
+  **pass**. Before suppressing, a centre encounter within
+  `tmp_cross_center_hit_dist` passes when the measured CBDR miss is within the
+  combined body half-widths and its measured rate is non-positive. Both measured
+  values must exist; an unknown track or an opening miss keeps the endpoint test.
 
 The split fixes a false negative in the old design, which used the endpoint
 test for **all** TMP cross-traffic. The endpoint answers "where does the target
@@ -563,8 +566,17 @@ suppressed at every range (no warn, no brake in TMP sessions until the crosser's
 measured speed dropped: corpus FN clip ffd29f9e). The centre-miss test answers
 the correct question for the trustworthy straight case: a real collision brings
 the reference centres to ~0 m, a body-only graze keeps them metres apart. The
-turning branch is unchanged and still suppresses the mid-turn jitter phantom
+turning branch retains its endpoint test unless a measured closing collision
+corroborates the sweep, and still suppresses the mid-turn jitter phantom
 (regression `fp_tmp_side_road_right_turn` phase 2, `fp_cross_traffic_completing_turn`).
+
+Clip ceadfde4 and its matching video show a crossing rig occupying the lane,
+not a roadside vehicle. The previous turning endpoint test discarded centre
+contacts before the target cleared the lane. Recorded-input replay moves the
+first brake from 4.500 s to 3.594 s with the measured-contact rescue. The seven
+other supplied clips retain their first-brake times and brake-tick counts;
+existing roadside false brakes are not fixed by this change. Replay does not
+simulate the changed ego trajectory, so it does not prove collision avoidance.
 
 Optional `tmp_cross_in_corridor_pass`: when enabled, do not graze-suppress if the
 body is already inside `|lat| ≤ lane_half_width` ahead with a closing (or unknown)
@@ -2354,3 +2366,17 @@ Two labelling rules came out of the pass:
 *Source: `core/aeb/thread.py`, `core/aeb/filters.py`, `core/aeb/calibration.py`,
 `core/aeb/lane_frame.py`, `core/radar/*`: LD-Tech / MonoCruise.*
 
+
+## Personal warning sounds
+
+`core/aeb/sound_preferences.py` creates original Chime and Pulse tones in memory, or loads the original warning and imported audio. Custom files are decoded and checked before being copied to the config directory's `sounds` folder under a content hash. Settings store only the basename. Invalid or missing custom audio falls back to Chime. Volume defaults to 50 percent.
+
+The settings card loads audio on the GUI thread and swaps it only when the warning handler and playback thread are idle. Control-worker timing and the existing two-tick HMI gate are unchanged. One-shot previews yield to active warnings. Clips must be 0.2 to 5 seconds and at most 10 MB.
+
+## TruckersMP no-collision zones
+
+`integrations/tmp_ncz` is a separate official TMP Client SDK plugin. It forwards NCZ entry/exit events through a local 32-byte, versioned shared-memory record. `ncz_bridge.py` opens it read-only, validates the sequence, magic, network connection and a 500 ms heartbeat age; missing, unknown, invalid and stale state leave AEB enabled. Initial state is unknown until an NCZ event arrives. Replay explicitly disables this live reader.
+
+When TMP traffic and a fresh entered state are present and `aeb_skip_tmp_ncz` is enabled, the radar and collision pipeline continue, but warning, brake and feedforward outputs are zeroed before HMI hold. Engagement and published target are reset so a previous brake cannot leak through the hold. The setting does not mutate the user's AEB enable preference. User braking, ACC and OPD are unchanged. The settings panel reports the detected state.
+
+Road map context is advisory only. core/road_map/service.py loads geometry outside the control loop and bounds live candidates to 512. AEB publishes the match without changing any threat, filter or brake outputs; headless replay skips this live map context.

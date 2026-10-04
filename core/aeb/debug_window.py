@@ -174,6 +174,7 @@ class AEBDebugWindow(QWidget):
         cx, cy = self.width() / 2.0, self.height() * 0.75
 
         self._draw_grid(p, cx, cy)
+        self._draw_map_background(p, snap)
         draw_ground_markers(
             p,
             lambda wx, wz: self._ws(wx, wz, ex, ez, ey),
@@ -302,6 +303,9 @@ class AEBDebugWindow(QWidget):
         self._draw_acc_hud(p, acc)
 
         p.end()
+
+    def _draw_map_background(self, p: QPainter, snap: AEBSnapshot) -> None:
+        """Optional read-only geometry supplied by the offline review widget."""
 
     def _draw_acc_hud(self, p: QPainter, acc: dict | None) -> None:
         hud_w = 310
@@ -774,4 +778,3 @@ class AEBDebugWindow(QWidget):
             p.setPen(QPen(_TEXT))
             p.drawText(QPointF(lx + 22, y + 2), label)
             y += 13
-
