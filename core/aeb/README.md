@@ -765,6 +765,7 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    a_k        = a_roll if a_roll * (t_k - lag) <= v0 else a_stop
    required_target   = max over k of a_k                 # INF when unavoidable
    required_decel    = max over targets of required_target
+   # ego_front_to_surface = fwd_len (capsule_extents), the bumper itself
    road_grade        = tan(ego_pitch_rad), 0 if |·| > MAX_EGO_GRADE
    slope_accel       = g · sin(atan(road_grade))      # +ve = uphill
    downhill_offset   = max(−slope_accel, 0)           # gravity stealing brake force
@@ -776,6 +777,11 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    report a low demand honestly, and with the old single-target selection it
    would have masked a slower-`ttb` lead behind it. `best_ttb` stays a separate
    aggregate for the TTB slam and the displays.
+   **`ego_front_to_surface` is `fwd_len`, the bumper.** The capsule insets its segment by
+   `half_width` and the cap lands on the body end (radar README), so adding `half_width`
+   again (2026-07-19 to 2026-10-04) put ego's front 1.27 m ahead of the real one on the
+   FH: every stop ended `ego_half_width + stop_buffer` short at any speed, 1.82-1.91 m in
+   that day's clips at `stop_buffer` 0.5. Every `stop_buffer` tuning before the fix carried it.
    **The build-up reserve is latched at engagement.** Before engagement the lag
    term is live, because the entry decision has to
    account for build-up. Once engaged it becomes a fixed distance

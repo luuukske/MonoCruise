@@ -203,15 +203,18 @@ def test_clip_33d87007_stops_braking_when_the_cut_in_is_matched():
 @pytest.mark.needs_clips
 @pytest.mark.skipif(_store_clip(CLIP_D16D0575) is None, reason="clip d16d0575 not in local clip store")
 def test_clip_d16d0575_stops_braking_when_the_threat_collapses():
-    """Entry is real on both clocks (0.74 s behind a lead braking 1.5 m/s^2); the tail is not.
+    """0.74 s behind a lead braking 1.5 m/s^2: entry on the recorded clock, the tail is not.
 
     The old hold braked at 0.4 m/s^2 of demand to 10.7 s. Now each brake ends with its hits,
-    and the lead closing in again on the recorded clock is a second, separate event.
+    and the lead closing in again on the recorded clock is a second, separate event. On the
+    simulated clock the demand peaks at 3.3 m/s^2 once the ego bumper is not placed half a
+    width too far forward (2026-10-04), so AEB stays out of it entirely.
     """
     from core.aeb.clip_store import ClipStore
 
     clip = ClipStore().load(_store_clip(CLIP_D16D0575))
     assert clip is not None
-    for as_recorded in (True, False):
-        last_hit, last_brake = _threat_and_brake_ends(clip, as_recorded=as_recorded)
-        assert last_brake <= last_hit + 0.1
+    last_hit, last_brake = _threat_and_brake_ends(clip, as_recorded=True)
+    assert last_brake <= last_hit + 0.1
+    ticks = run_headless(clip, cal=CAL, stream=decode_radar_stream(clip, as_recorded=False))
+    assert not any(e.aeb_brake for e in ticks)

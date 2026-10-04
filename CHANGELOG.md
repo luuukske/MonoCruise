@@ -16,6 +16,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ### Fixed
 - **AEB stepped in too early**: it judged your truck's brakes from gentle braking and from every truck you had driven, ignored how hard your truck really stops at full brake (much harder with the brake intensity slider turned up), and let go right after its first hard hit. It now learns each truck separately, and after two full-brake stops with a truck and load it steps in later to match, then keeps braking firmly after the first hit.
+- **AEB stopped far behind the vehicle ahead**: it placed your truck's front about 1.3 m further forward than it really is, so every AEB stop ended well short, even from walking pace. It now stops about half a metre behind.
 
 ## [1.1.1] - 2026-10-04
 ### Fixed

@@ -1426,8 +1426,9 @@ class AEBThread(BaseThread):
         best_clearance: ClearanceResult | None = None
         clearance_memo: dict[int, ClearanceResult | None] = {}
         clearance_clears_ids: set[int] = set()
-        # Ego travel to hit uses capsule tip offset from arc reference.
-        ego_front_to_surface = ego_cap_fwd + ego_hw
+        # fwd_len is already the bumper: the capsule's segment is inset by hw and its cap
+        # lands on it. Adding hw again stopped every AEB stop 1.27 m short (README).
+        ego_front_to_surface = ego_cap_fwd
         # certain_geom / nearcertain_geom drive tiered confirm (README tiered entry).
         certain_geom_ids: set[int] = set()
         nearcertain_geom_ids: set[int] = set()
@@ -2567,7 +2568,7 @@ class AEBThread(BaseThread):
             "  cal stop_buffer=%.3f response_s=%.3f corridor_margin=%.3f "
             "parallel_scale=%.2f slam_ttb=%.2fs reach@v slam=%.2fm\n"
             "  closing_dist=%.3f hit_dist=%.3f ego_travel=%.3f "
-            "ego_front_to_surface=%.3f (cap_fwd+hw) v_close=%.2f\n"
+            "ego_front_to_surface=%.3f (cap_fwd) v_close=%.2f\n"
             "  d_rel=%.3f d_ego=%.3f resp_term=%.3f codir_cap=%.2f\n"
             "  clearance vid=%s req=%.2f s_bind=%.2f t_bind=%.2f "
             "v_pass=%.2f clears=%s n=%d\n"

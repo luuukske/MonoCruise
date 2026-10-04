@@ -25,7 +25,7 @@ _EGO_OFFSET = (CAL.arc_start_pctg - 0.5) * (2.0 * CAL.ego_half_length)
 _CAP_FWD, _CAP_BACK = capsule_extents(
     CAL.ego_half_length, CAL.ego_half_length, _EGO_OFFSET,
 )
-_FRONT_TO_SURFACE = _CAP_FWD + CAL.ego_half_width
+_FRONT_TO_SURFACE = _CAP_FWD
 
 # The clear margin only fires when occupancy ends, so the co-directional
 # equivalences are unaffected by it. Zeroed anyway so they read as pure algebra.
@@ -107,6 +107,19 @@ def test_a_stationary_obstacle_reproduces_the_ego_frame_formula():
         d = gap - _FRONT_TO_SURFACE - CAL.stop_buffer - v0 * 0.30
         assert res.required_ms2 == pytest.approx(v0 * v0 / (2.0 * d), rel=0.02)
         assert not res.clears
+
+
+def test_the_stop_point_is_the_physical_bumper_plus_stop_buffer():
+    """2026-10-04: front_to_surface added half width to fwd_len, so every stop ended
+    1.27 m plus stop_buffer short of the target, at 6 km/h as at 90 (clips, FH bobtail)."""
+    assert _ego(10.0)._cap_fwd + CAL.ego_half_width == pytest.approx(_CAP_FWD), (
+        "the capsule tip is fwd_len, which is what front_to_surface must be"
+    )
+    bumper_gap = 12.0
+    for v0 in (1.7, 10.0, 25.0):
+        res = _solve(_ego(v0), [_lead(_CAP_FWD + bumper_gap, 0.0)], v0)
+        room = bumper_gap - CAL.stop_buffer
+        assert res.required_ms2 == pytest.approx(v0 * v0 / (2.0 * room), rel=0.02)
 
 
 def test_a_braking_lead_is_at_least_the_hand_rolled_stop_branch():
