@@ -15,6 +15,7 @@ from core.aeb.filters import (
     EgoEvasionFilter,
 )
 from core.aeb.lane_frame import Lane, classify, in_lane_closing
+from core.radar.traffic import build_arc
 from tests.aeb.harness import evaluate_frame
 from tests.aeb.scenarios.fp_mp_stationary_corner_entry import build as build_corner
 from tests.aeb.scenarios.fp_parked_shoulder import build as build_shoulder
@@ -164,6 +165,54 @@ class _CornerCtx:
         self.ego_fwd_z = 1.0
         self.veh_fwd_x = -math.sin(yaw)
         self.veh_fwd_z = -math.cos(yaw)
+        self.ego_arc = None
+        self.all_target_arcs: list = []
+        self.ego_speed = 15.0
+
+
+def _angled_body_ctx(*, centre_lat_m: float, latched: bool,
+                     ego_curvature: float = 0.0) -> _CornerCtx:
+    """Stopped 13 m body angled 16 deg, 15 m ahead: centre reads OPPOSITE_OR_OUTER,
+    body reaches ego's lane. Shape of da5dee09 / 16e65bcc."""
+    ctx = _CornerCtx(latched={1} if latched else None, lane=Lane.OPPOSITE_OR_OUTER)
+    ctx.ego_curvature = ego_curvature
+    ctx.ego_arc = build_arc(0.0, 0.0, 0.0, 15.0, 0.0, CAL.ego_half_width, 3.0)
+    ctx.all_target_arcs = [build_arc(
+        centre_lat_m, -15.0, math.radians(16.0), 0.0, 0.0, 1.25, 3.0,
+        fwd_len=6.5, back_len=6.5,
+    )]
+    return ctx
+
+
+def test_corner_entry_keeps_a_braked_for_body_still_in_lane():
+    stage = CornerEntryStationaryFilter(CAL)
+    assert stage.apply(_angled_body_ctx(centre_lat_m=2.5, latched=True)).suppressed is False
+
+
+def test_corner_entry_mirrored_keeps_a_braked_for_body_still_in_lane():
+    stage = CornerEntryStationaryFilterMirrored(CAL)
+    ctx = _angled_body_ctx(centre_lat_m=2.5, latched=True, ego_curvature=0.02)
+    assert stage.apply(ctx).suppressed is False
+
+
+def test_corner_entry_body_in_lane_does_not_start_braking():
+    """Entry is unchanged: parked trailers at the roadside reach the band too (7 new FPs)."""
+    stage = CornerEntryStationaryFilter(CAL)
+    assert stage.apply(_angled_body_ctx(centre_lat_m=2.5, latched=False)).suppressed is True
+    mirrored = CornerEntryStationaryFilterMirrored(CAL)
+    ctx = _angled_body_ctx(centre_lat_m=2.5, latched=False, ego_curvature=0.02)
+    assert mirrored.apply(ctx).suppressed is True
+
+
+def test_corner_entry_lets_go_below_the_engage_floor():
+    ctx = _angled_body_ctx(centre_lat_m=2.5, latched=True)
+    ctx.ego_speed = 1.0
+    assert CornerEntryStationaryFilter(CAL).apply(ctx).suppressed is True
+
+
+def test_corner_entry_latched_queue_out_of_lane_stays_suppressed():
+    stage = CornerEntryStationaryFilter(CAL)
+    assert stage.apply(_angled_body_ctx(centre_lat_m=4.5, latched=True)).suppressed is True
 
 
 def test_corner_entry_mode_b_still_fires_unlatched():

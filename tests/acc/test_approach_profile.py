@@ -11,7 +11,9 @@ import pytest
 from core.cruise_control_thread.acc_controller import (
     T_HEADWAY_BY_LEVEL_S, AdaptiveCruiseController, _LeadSnapshot,
 )
-from core.cruise_control_thread.approach_profile import approach_band, slew_delta
+from core.cruise_control_thread.approach_profile import (
+    approach_band, brake_follow_limit, slew_delta,
+)
 from core.settings import Settings
 
 DT = 1.0 / 60.0
@@ -72,6 +74,27 @@ def test_a_stopped_lead_is_braked_for_at_least_its_need():
     for dist, v in ((150.0, 13.9), (60.0, 20.0), (40.0, 20.0)):
         need = v * v / (2.0 * (dist - cfg.s0_m - cfg.approach_stop_margin_m))
         assert approach_band(cfg, 1.0, _lead(dist, 0.0), v, 1.1) <= max(-need, cfg.max_decel_ms2) + 1e-9
+
+
+def test_closing_on_a_braking_lead_is_not_braked_past_that_decel():
+    """The catch-up may meet the lead. It does not out-brake it while there is room."""
+    cfg = _cfg()
+    lead = _lead(25.0, 18.0, a_lead=-2.0)
+    gentle = brake_follow_limit(cfg, -1.5, lead, 22.0, 1.1, gap_excess_ms=0.0)
+    hard = brake_follow_limit(cfg, -5.0, lead, 22.0, 1.1, gap_excess_ms=0.0)
+    assert gentle == -1.5
+    assert hard == pytest.approx(-4.0)
+    assert brake_follow_limit(cfg, -5.0, lead, 22.0, 1.1, gap_excess_ms=3.0) == -5.0
+    cfg.follow_share = 0.0
+    assert brake_follow_limit(cfg, -5.0, lead, 22.0, 1.1, gap_excess_ms=0.0) == -5.0
+
+
+def test_a_matched_or_critical_brake_keeps_the_law():
+    cfg = _cfg()
+    mild = _lead(30.0, 22.0, a_lead=-2.0)
+    assert brake_follow_limit(cfg, -4.0, mild, 22.0, 1.1, gap_excess_ms=0.0) == -4.0
+    critical = _lead(20.0, 10.0, a_lead=-6.0)
+    assert brake_follow_limit(cfg, -6.4, critical, 25.0, 1.1, gap_excess_ms=0.0) == -6.4
 
 
 def test_the_pull_builds_slowly_and_gives_braking_back_at_once():

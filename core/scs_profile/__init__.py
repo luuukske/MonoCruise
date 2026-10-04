@@ -3,10 +3,8 @@
 from .intensity import (
     BrakeIntensityCache,
     LowBrakeIntensityAebWarning,
-    aeb_max_brake_ms2,
     apply_brake_intensity,
-    learn_decel_scale,
-    tune_unit_decel,
+    effective_brake_pedal,
 )
 from .reader import SelectedProfileSettings, brake_ui_scale, read_selected_profile
 
@@ -14,10 +12,8 @@ __all__ = [
     "BrakeIntensityCache",
     "LowBrakeIntensityAebWarning",
     "SelectedProfileSettings",
-    "aeb_max_brake_ms2",
     "apply_brake_intensity",
     "brake_ui_scale",
-    "learn_decel_scale",
+    "effective_brake_pedal",
     "read_selected_profile",
-    "tune_unit_decel",
 ]

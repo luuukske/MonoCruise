@@ -11,10 +11,71 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Changed
+- **ACC and AEB size up your own truck**: they now read your truck's length, width and wheelbase from the game instead of assuming one size, so AEB stops a little closer behind the vehicle ahead and ACC's predicted path no longer drifts to the outside of bends.
+
+### Fixed
+- **AEB stepped in too early**: it judged your truck's brakes from gentle braking and from every truck you had driven, assumed they take longer to bite than they do, ignored how hard your truck stops at full brake (much harder with the brake intensity slider turned up), and let go right after its first hard hit. It now steps in later, more so after two full-brake stops with a truck and load, and keeps braking firmly after the first hit.
+- **AEB stopped far behind the vehicle ahead**: it placed your truck's front about 1.3 m further forward than it really is, so every AEB stop ended well short, even from walking pace. It now stops about half a metre behind.
+
+## [1.1.1] - 2026-10-04
+### Fixed
+- **Hazards came on when you stomped the brake while stopped**: a hard press at a standstill switched the hazards on. They now only come on for a hard brake while driving.
+- **AEB warning beeped too early**: approaching slower or stopped traffic, the warning sounded before you would normally start braking, and sometimes while you already were. It now waits until the stop is actually getting tight; when AEB brakes is unchanged.
+- **AEB let go before the stop was done**: braking for stopped traffic in a bend, a car turning off, or a TruckersMP truck crossing, AEB could release halfway and brake again, or let go completely. It now keeps braking while the vehicle is still in your lane ahead.
+
+## [1.1.1-preview.1] - 2026-10-03
+### Fixed
+- **Hazards came on when you stomped the brake while stopped**: a hard press at a standstill switched the hazards on. They now only come on for a hard brake while driving.
+- **AEB warning beeped too early**: approaching slower or stopped traffic, the warning sounded before you would normally start braking, and sometimes while you already were. It now waits until the stop is actually getting tight; when AEB brakes is unchanged.
+- **AEB let go before the stop was done**: braking for stopped traffic in a bend, a car turning off, or a TruckersMP truck crossing, AEB could release halfway and brake again, or let go completely. It now keeps braking while the vehicle is still in your lane ahead.
+
+## [1.1.0] - 2026-10-02
+[Watch the MonoCruise v1.1 trailer](https://ld-tech.org/media/monocruise-v1.1.webm)
+
+MonoCruise rebuilt from the ground up. Coming from v1.0.x? Uninstall it first, then set up your pedals and buttons again. From here on MonoCruise updates itself.
+
+### Added
+- **Automatic Emergency Braking (AEB)**: watches the traffic along your path, warns you, and brakes for vehicles you would otherwise hit. Off by default; press the gas fully to override it.
+- **Built-in updater**: MonoCruise tells you when an update is out and installs it for you. Your settings are kept.
+- **ACC following distance**: four gap levels, set in the settings or changed while driving with an optional button.
+- **Acceleration style**: pick how eagerly cruise control pulls away.
+- **Global speed limit**: caps your truck at a set speed even with cruise off. A quick stab of the gas gets you past it.
+- **Any button works**: cruise buttons can be wheel buttons, hat directions, keyboard keys or USB button devices like stalks.
+- **Automatic game plugin install**: MonoCruise installs and updates the plugins it needs, also after a game update.
+- **American Truck Simulator in mph**.
+- **Help improve AEB and ACC**: opt-in sharing of short, anonymous recordings of AEB events. Off unless you tick it.
+
+### Changed
+- **ACC rebuilt**: finds the right vehicle in your lane through bends and lane changes, slows evenly for traffic and pulls away with it. It brake-checks far less than v1.0.
+- **Cruise control learns your truck**: it learns how hard your truck accelerates and brakes with its current load, and compensates for hills.
+- **New, more stable app**: a faster interface, and a part that crashes restarts on its own instead of taking MonoCruise down.
+- **Autostart**: chosen in the installer and switched on or off in the settings. The old background checker that antivirus flagged is gone.
+
+### Fixed
+- **ACC unstable since ETS2 1.58**: it works properly on current game versions again.
+- **ACC overreacting to TruckersMP lag spikes**.
+
+### Known
+- **ACC and AEB are still experimental**: ACC can brake harder than needed, and AEB can brake at junctions or for traffic changing lanes next to you.
+- **Windows may warn when installing**: MonoCruise is not code-signed yet. Click "More info", then "Run anyway".
+
+## [1.1.0-rc.26] - 2026-09-30
+### Fixed
+- **ACC lurched when pulling away behind slow traffic**: it waited too long when the truck ahead moved off gently or crept forward, then floored the gas and braked again, over and over. It now sees slow traffic moving sooner, pulls away and creeps along at its pace without stopping, and the gas no longer floors while the clutch is still engaging.
+- **Hazards flashed while you were overriding cruise**: taking over with the gas still turned the hazards on whenever cruise wanted a hard brake. They now follow the brake that actually goes to the truck.
+- **ACC braked harder than the truck ahead once you were already catching it**: in a line of traffic a modest slowdown could turn into a much harder brake, and the trucks behind copied it. The extra brake is now smaller while there is still room, and a close stop is unchanged.
+- **ACC braked too hard for a stop, then rolled closer**: with Braking intensity raised in game, the learned brakes drifted far weaker than the truck really is, so cruise pressed much harder than it asked for and let off with gap left. The slider is now read correctly and the brakes relearn once after updating, and emergency braking no longer counts on extra brake from a raised slider.
+
+### Removed
+- **Status line at the bottom of the window**: the small terminal-style strip that echoed setup messages is gone, and the settings panel now uses the space. Pedal and button setup still show their progress on the buttons themselves.
+
+## [1.1.0-rc.25] - 2026-09-28
 ### Fixed
 - **Set speed and the pedal bar could vanish and stay gone**: after some alt-tab sequences they never came back until a restart or toggling an overlay. They now put themselves back on screen.
-- **ACC braked hard at first when stopping for traffic, then crawled in**: it either held your speed until late and braked firmly, or braked much harder than needed and eased off all the way to the stop. It now slows you evenly, starting as soon as it sees stopped or much slower traffic ahead.
-- **ACC braked too hard and let go too slowly**: a hard stop ahead, or traffic past that vehicle, could jump straight to full brake, and the brake then hung on so you ended up far slower than the traffic. It now builds smoothly, stays moderate beyond the vehicle directly ahead, eases off once that vehicle holds its speed, and only an imminent collision still gets full brake at once.
+- **ACC braking for traffic was harsh and uneven**: it could brake late and hard, brake far harder than the stop needed and crawl the rest of the way, or jump to full brake for a hard stop or for traffic past that vehicle and then hang on. It now slows you evenly as soon as slower traffic is ahead, stays moderate beyond the vehicle directly ahead, lets go once that vehicle holds its speed, and only an imminent collision still gets full brake at once.
+- **Emergency braking was slow to see a crash ahead in multiplayer**: a truck knocked backwards in a collision could still read as driving at full speed for a moment, and its stop was seen late. A vehicle that pitches, rolls or spins as it is pushed back is now treated as crashed straight away, and its stop is seen as it happens.
+- **Emergency braking could react to a vehicle teleporting in multiplayer**: a parked vehicle that TMP moved to a new spot could read as driving fast and trigger a brake. A jump like that is no longer taken as speed.
 
 ## [1.1.0-rc.24] - 2026-09-24
 ### Added

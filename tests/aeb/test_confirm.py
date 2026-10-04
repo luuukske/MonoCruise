@@ -105,6 +105,12 @@ def test_calibration_preserves_warn_lead_invariant():
             <= CAL.aeb_engage_confirm_oblique_s - 0.1 + 1e-9)
 
 
+def test_near_full_warn_bar_matches_the_engage_bar():
+    # f39d262 raised the engage bar alone, leaving a band that warned a braking driver.
+    assert CAL.aeb_warn_near_full_frac == CAL.aeb_engage_frac
+    assert CAL.aeb_warn_near_full_frac <= CAL.aeb_engage_frac_certain
+
+
 def test_vetoed_warn_window_outlasts_the_oblique_one():
     # The fully-vetoed out-of-lane class waits longer than an ordinary oblique warn.
     assert CAL.aeb_warn_confirm_vetoed_s > CAL.aeb_warn_confirm_oblique_s

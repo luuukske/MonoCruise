@@ -40,6 +40,7 @@ examples:
   python tools/release.py bump --set 1.2.0-rc.1
   python tools/release.py bump minor --dry-run        # print plan, change nothing
   python tools/release.py bump patch --yes            # skip confirmation prompt
+  python tools/release.py bump patch --date 2026-10-02  # stamp the publish day, not today
   python tools/release.py notes 1.1.0
 """
 
@@ -117,8 +118,18 @@ def _unreleased_has_content() -> bool:
     return bool(body.strip())
 
 
-def _promote_unreleased(new_version: str) -> None:
-    today = _dt.date.today().isoformat()
+def _release_date(override: str | None = None) -> str:
+    """Changelog date: today, or an explicit YYYY-MM-DD when the publish is scheduled later."""
+    if override is None:
+        return _dt.date.today().isoformat()
+    try:
+        return _dt.date.fromisoformat(override).isoformat()
+    except ValueError:
+        raise SystemExit(f"--date must be YYYY-MM-DD, got {override!r}") from None
+
+
+def _promote_unreleased(new_version: str, release_date: str | None = None) -> None:
+    today = _release_date(release_date)
     text = CHANGELOG.read_text(encoding="utf-8")
     if not re.search(r"^##\s+\[Unreleased\]\s*$", text, re.M):
         raise SystemExit("CHANGELOG.md has no [Unreleased] heading")
@@ -264,8 +275,9 @@ def _print_plan(
     new_version: str,
     dry_run: bool,
     changelog_dirty: bool = False,
+    release_date: str | None = None,
 ) -> None:
-    today = _dt.date.today().isoformat()
+    today = _release_date(release_date)
     tag = f"v{new_version}"
     is_prerelease = "-" in new_version
     notes = (_extract_section("Unreleased") or "").strip()
@@ -309,6 +321,8 @@ def _print_plan(
         f"  - gh release create {tag} --draft --verify-tag"
         f" --title \"MonoCruise {tag}\"{prerelease_flag}"
     )
+    if not is_prerelease:
+        print("  - CI attaches the build; this stable draft stays unpublished until you publish it")
     print()
 
 
@@ -331,6 +345,7 @@ def cmd_bump(args: argparse.Namespace) -> None:
             "Add changelog entries before bumping."
         )
 
+    release_date = _release_date(getattr(args, "date", None))
     changelog_dirty = _check_clean_worktree()
     if not args.dry_run:
         _check_gh()
@@ -340,6 +355,7 @@ def cmd_bump(args: argparse.Namespace) -> None:
         new_version=new_version,
         dry_run=args.dry_run,
         changelog_dirty=changelog_dirty,
+        release_date=release_date,
     )
 
     if args.dry_run:
@@ -352,7 +368,7 @@ def cmd_bump(args: argparse.Namespace) -> None:
     print()
     print(f"Bumping {current} -> {new_version}")
     _write_version(new_version)
-    _promote_unreleased(new_version)
+    _promote_unreleased(new_version, release_date)
 
     tag = f"v{new_version}"
     _run(
@@ -366,7 +382,10 @@ def cmd_bump(args: argparse.Namespace) -> None:
     _run("git", "push", "origin", tag)
     _create_draft(tag, new_version)
     print(f"\nPushed {tag} and drafted its release.")
-    print("CI will attach the build artifacts and publish it under your name.")
+    if "-" in new_version:
+        print("CI will attach the build artifacts and publish it under your name.")
+    else:
+        print("CI will attach the build artifacts. Publish the draft on GitHub when you are ready.")
 
 
 def cmd_notes(args: argparse.Namespace) -> None:
@@ -418,6 +437,12 @@ def main() -> None:
         "--dry-run",
         action="store_true",
         help="print the release plan and exit without changing or creating anything",
+    )
+    bump.add_argument(
+        "--date",
+        dest="date",
+        metavar="YYYY-MM-DD",
+        help="changelog date for the release (default: today)",
     )
     bump.add_argument(
         "-y", "--yes",

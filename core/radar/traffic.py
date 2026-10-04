@@ -108,7 +108,13 @@ _POS_MISMATCH_REVERSE_MS: float = 1.0            # m/s: signed speed below -this
 _CRASH_PITCH_JERK: float = 12.0                 # deg/s pitch rate delta threshold
 _CRASH_YAW_JERK: float = 40.0                   # deg/s yaw rate delta threshold
 _CRASH_ROLL_JERK: float = 20.0                  # deg/s roll rate delta threshold
+_CRASH_JERKS: tuple[float, float, float] = (_CRASH_PITCH_JERK, _CRASH_YAW_JERK, _CRASH_ROLL_JERK)
+# Backward step against travel that counts as a shove once rotation jerk fires with it.
+_CRASH_SHOVE_MIN_M: float = 0.025
+_CRASH_SHOVE_MIN_SPEED_MS: float = 3.0          # m/s travel below which a step back is jitter
 _CRASH_HOLD_S: float = 2.0                      # s latch past the last qualifying frame
+# Crash hands the raw speed to the short window once it reads this much slower.
+_CRASH_SHORT_MIN_LOSS_MS: float = 2.0
 _CRASH_FROZEN_EPS: float = 1e-6                 # deg / m: byte-identical frame detection
 # Vertical corroboration is a jerk (|Δy - prev Δy|), not a slope, so a steady
 # grade (Δy up to ~0.14 m/frame at highway speed) never qualifies.
@@ -118,6 +124,20 @@ _CRASH_REVERSAL_MIN_DISP_M: float = 0.025       # m both displacements must exce
 # Crash disp-collapse uses two live frames (TMP ripple). See core/radar/README.md §7.
 _CRASH_DISP_COLLAPSE_RATIO: float = 0.5         # 2-frame disp under this frac of expected
 _CRASH_DISP_COLLAPSE_MIN_SPEED_MS: float = 3.0  # m/s prev speed for collapse check
+
+# TMP pose jump: a step no vehicle could have driven is a relocation, not motion.
+# See core/radar/README.md §7.
+_POSE_JUMP_STAND_MS: float = 2.0                # m/s: recent speed below this counts as standing
+_POSE_JUMP_STAND_M: float = 2.5                 # m a standing vehicle cannot cover in one step
+_POSE_JUMP_STAND_DEG_S: float = 300.0           # deg/s a standing vehicle cannot turn at
+# A relocation from standing plays out over several frames; its tail is held to tighter bars.
+_POSE_JUMP_SETTLE_S: float = 1.0
+_POSE_JUMP_SETTLE_M: float = 1.0
+_POSE_JUMP_SETTLE_DEG_S: float = 150.0
+_POSE_JUMP_MAX_MS: float = 100.0                # m/s: faster than anything drives
+_POSE_JUMP_SPEED_MEMORY_S: float = 3.0          # s of speed history that decides standing
+_POSE_JUMP_REST_EPS_M: float = 0.01             # m: history samples this close are one stop
+_POSE_JUMP_MIN_UPDATES: int = 3                 # filter updates before the guard arms
 
 _MIN_CURVATURE_RADIUS: float = 5.0
 _STRAIGHT_CURVATURE_EPS: float = 1e-6
@@ -1162,18 +1182,22 @@ class Vehicle:
 
         # TMP position mismatch (out-of-order packets). See core/radar/README.md §7.
         self._pos_mismatch_frames: int = 0
+        # TMP pose jump: end of the tighter window after a relocation from standing.
+        self._pose_jump_settle_until: float = -1.0
 
         # TMP crash detection tunables. See core/radar/README.md §7.
-        self._prev_pitch_rate: Optional[float] = None
-        self._prev_yaw_rate: Optional[float] = None
-        self._prev_roll_rate: Optional[float] = None
+        # (pitch, yaw, roll) rates at the last two live frames, newest first.
+        self._prev_rates: Optional[tuple[float, float, float]] = None
+        self._prev2_rates: Optional[tuple[float, float, float]] = None
         self._last_live_rot: Optional[tuple[float, float, float]] = None
         self._last_live_rot_time: Optional[float] = None
+        self._last_live_xz: Optional[tuple[float, float]] = None
         self._prev_disp_x: Optional[float] = None
         self._prev_disp_z: Optional[float] = None
         self._prev_disp_dt: Optional[float] = None
         self._prev_disp_y: Optional[float] = None
         self._crash_hold_until: float = -1.0
+        self._crash_knock_until: float = -1.0
         self.crash_confirmed: bool = False
 
         self._curvature_cache: float | None = None
@@ -1260,12 +1284,20 @@ class Vehicle:
         fwd_x: float,
         fwd_z: float,
     ) -> float:
-        """Select the short position fit only during a confirmed hard brake."""
-        if self.is_trailer:
-            self._reset_raw_brake_transient()
-            return long_speed
+        """Select the short position fit during a confirmed hard brake or crash stop."""
         short_history = self._position_history[-_RAW_BRAKE_SHORT_HISTORY_LEN:]
         short_speed = _raw_speed_from_position_history(short_history, fwd_x, fwd_z)
+        if (self.time < self._crash_knock_until and short_speed is not None
+                and not self._raw_brake_active):
+            travel = -1.0 if long_speed < 0.0 else 1.0
+            # A crash stops the body faster than the long window forgets its speed.
+            if travel * (long_speed - short_speed) >= _CRASH_SHORT_MIN_LOSS_MS:
+                self._raw_brake_active = True
+                self._raw_brake_converged_frames = 0
+        # A trailer keeps the short window only for its crash, never for a brake of its own.
+        if self.is_trailer and not (self._raw_brake_active and self.crash_confirmed):
+            self._reset_raw_brake_transient()
+            return long_speed
         if short_speed is None:
             self._raw_brake_confirm_frames = 0
             return long_speed
@@ -1302,16 +1334,17 @@ class Vehicle:
 
     def _tmp_apply_crash_rotation_jerk(self, prev: "Vehicle", t_now: float) -> None:
         """TMP crash detect + latch on live frames. See core/radar/README.md §7."""
-        self._prev_pitch_rate = prev._prev_pitch_rate
-        self._prev_yaw_rate = prev._prev_yaw_rate
-        self._prev_roll_rate = prev._prev_roll_rate
+        self._prev_rates = prev._prev_rates
+        self._prev2_rates = prev._prev2_rates
         self._last_live_rot = prev._last_live_rot
         self._last_live_rot_time = prev._last_live_rot_time
+        self._last_live_xz = prev._last_live_xz
         self._prev_disp_x = prev._prev_disp_x
         self._prev_disp_z = prev._prev_disp_z
         self._prev_disp_dt = prev._prev_disp_dt
         self._prev_disp_y = prev._prev_disp_y
         self._crash_hold_until = prev._crash_hold_until
+        self._crash_knock_until = prev._crash_knock_until
         self.crash_confirmed = t_now < self._crash_hold_until
 
         dt = t_now - prev.time
@@ -1328,9 +1361,10 @@ class Vehicle:
         prev_rot = prev.rotation.euler()
         rot_delta_prev = max(abs(_adiff(c, p)) for c, p in zip(cur, prev_rot))
 
-        if self._last_live_rot is None:
+        if self._last_live_rot is None or self._last_live_xz is None:
             self._last_live_rot = cur
             self._last_live_rot_time = t_now
+            self._last_live_xz = (self.position.x, self.position.z)
             self._prev_disp_x = dx
             self._prev_disp_z = dz
             self._prev_disp_dt = dt
@@ -1345,54 +1379,152 @@ class Vehicle:
         span = t_now - self._last_live_rot_time
         if span < 1e-9:
             return
+        # A sub-frame snaps prev._raw_x forward, so the planar checks measure from the
+        # last live frame instead; otherwise every frame reads as a half-length step.
+        ldx = self.position.x - self._last_live_xz[0]
+        ldz = self.position.z - self._last_live_xz[1]
+        # Frozen frames in between: TMP resumes without catching up, so no collapse reading.
+        stalled = span > dt + 1e-6
         base = self._last_live_rot
-        pitch_rate = _adiff(cur[0], base[0]) / span
-        yaw_rate = _adiff(cur[1], base[1]) / span
-        roll_rate = _adiff(cur[2], base[2]) / span
+        rates = (
+            _adiff(cur[0], base[0]) / span,
+            _adiff(cur[1], base[1]) / span,
+            _adiff(cur[2], base[2]) / span,
+        )
 
-        _rot_jerk = False
-        if self._prev_pitch_rate is not None:
-            if (
-                abs(pitch_rate - self._prev_pitch_rate) > _CRASH_PITCH_JERK
-                or abs(yaw_rate - self._prev_yaw_rate) > _CRASH_YAW_JERK
-                or abs(roll_rate - self._prev_roll_rate) > _CRASH_ROLL_JERK
-            ):
-                _rot_jerk = True
+        # TMP spreads one impact over consecutive packets, so a rate change is
+        # measured against both of the last two live rates.
+        _rot_jerk = any(
+            ref is not None
+            and any(abs(r - q) > th for r, q, th in zip(rates, ref, _CRASH_JERKS))
+            for ref in (self._prev_rates, self._prev2_rates)
+        )
 
         if _rot_jerk:
-            _anomaly = (self._prev_disp_y is not None
-                        and abs(dy - self._prev_disp_y) > _CRASH_VERTICAL_JERK_M)
-            if not _anomaly and self._prev_disp_x is not None:
-                _cur_mag = math.hypot(dx, dz)
+            # Knocked back: the body reversed or stepped back against travel. It is the
+            # evidence that the crash is stopping it (see _select_raw_speed).
+            _knocked = False
+            if self._prev_disp_x is not None:
+                _cur_mag = math.hypot(ldx, ldz)
                 _prev_mag = math.hypot(self._prev_disp_x, self._prev_disp_z)
                 if (_cur_mag > _CRASH_REVERSAL_MIN_DISP_M
                         and _prev_mag > _CRASH_REVERSAL_MIN_DISP_M):
-                    _cos = ((dx * self._prev_disp_x + dz * self._prev_disp_z)
+                    _cos = ((ldx * self._prev_disp_x + ldz * self._prev_disp_z)
                             / (_cur_mag * _prev_mag))
-                    if _cos < _CRASH_REVERSAL_COS:
-                        _anomaly = True
+                    _knocked = _cos < _CRASH_REVERSAL_COS
+            if (not _knocked
+                    and prev._smooth_yaw is not None
+                    and abs(prev.speed) > _CRASH_SHOVE_MIN_SPEED_MS):
+                # The step position mismatch would otherwise hold as a rewind.
+                _travel = -1.0 if prev.speed < -_POS_MISMATCH_REVERSE_MS else 1.0
+                _along = _travel * (dx * -math.sin(prev._smooth_yaw)
+                                    + dz * -math.cos(prev._smooth_yaw))
+                _knocked = _along < -_CRASH_SHOVE_MIN_M
+            _anomaly = _knocked or (self._prev_disp_y is not None
+                                    and abs(dy - self._prev_disp_y) > _CRASH_VERTICAL_JERK_M)
             if (not _anomaly
+                    and not stalled
                     and self._prev_disp_x is not None
                     and self._prev_disp_dt is not None
                     and abs(prev.speed) > _CRASH_DISP_COLLAPSE_MIN_SPEED_MS):
-                _disp2 = (math.hypot(dx, dz)
+                _disp2 = (math.hypot(ldx, ldz)
                           + math.hypot(self._prev_disp_x, self._prev_disp_z))
-                _expected2 = abs(prev.speed) * (dt + self._prev_disp_dt)
-                if _disp2 < _expected2 * _CRASH_DISP_COLLAPSE_RATIO:
-                    _anomaly = True
+                _expected2 = abs(prev.speed) * (span + self._prev_disp_dt)
+                _anomaly = _disp2 < _expected2 * _CRASH_DISP_COLLAPSE_RATIO
             if _anomaly:
                 self._crash_hold_until = t_now + _CRASH_HOLD_S
                 self.crash_confirmed = True
+            if _knocked:
+                self._crash_knock_until = t_now + _CRASH_HOLD_S
 
-        self._prev_pitch_rate = pitch_rate
-        self._prev_yaw_rate = yaw_rate
-        self._prev_roll_rate = roll_rate
+        self._prev2_rates = self._prev_rates
+        self._prev_rates = rates
         self._last_live_rot = cur
         self._last_live_rot_time = t_now
-        self._prev_disp_x = dx
-        self._prev_disp_z = dz
-        self._prev_disp_dt = dt
+        self._last_live_xz = (self.position.x, self.position.z)
+        self._prev_disp_x = ldx
+        self._prev_disp_z = ldz
+        self._prev_disp_dt = None if stalled else span
         self._prev_disp_y = dy
+
+    def _pose_jumped(self, prev: "Vehicle") -> bool:
+        """TMP pose moved farther than the vehicle could have driven. See core/radar/README.md §7."""
+        hist = self._position_history
+        if len(hist) < 2 or len(prev._speed_ema_history) < _POSE_JUMP_MIN_UPDATES:
+            return False
+        t_last, lx, lz = hist[-1]
+        step = math.hypot(self.position.x - lx, self.position.z - lz)
+        v_ref = abs(prev.speed)
+        for t, s in reversed(prev._speed_ema_history):
+            if t < t_last - _POSE_JUMP_SPEED_MEMORY_S:
+                break
+            v_ref = max(v_ref, abs(s))
+        if self.time < prev._pose_jump_settle_until:
+            max_step, max_turn = _POSE_JUMP_SETTLE_M, _POSE_JUMP_SETTLE_DEG_S
+        elif v_ref < _POSE_JUMP_STAND_MS:
+            max_step, max_turn = _POSE_JUMP_STAND_M, _POSE_JUMP_STAND_DEG_S
+        else:
+            # Timed from its arrival at the last position, so a stall catch-up reads its real pace.
+            k = len(hist) - 1
+            while (k > 0 and math.hypot(hist[k - 1][1] - lx, hist[k - 1][2] - lz)
+                   < _POSE_JUMP_REST_EPS_M):
+                k -= 1
+            return step > _POSE_JUMP_MAX_MS * (self.time - hist[k][0])
+        if step > max_step:
+            return True
+        # A relocation swings the pose round on the way; a standing vehicle cannot.
+        base = prev._last_live_rot
+        if base is None or prev._last_live_rot_time is None:
+            return False
+        span = self.time - prev._last_live_rot_time
+        turn = max(abs((c - b + 180.0) % 360.0 - 180.0)
+                   for c, b in zip(self.rotation.euler(), base))
+        return span > 1e-9 and turn > max_turn * span
+
+    def _reanchor_after_pose_jump(self, prev: "Vehicle", t_now: float) -> None:
+        """Restart the motion history where a TMP pose jump landed. See core/radar/README.md §7."""
+        raw_x = self.position.x
+        raw_z = self.position.z
+        self._smooth_x = raw_x
+        self._smooth_z = raw_z
+        self._smooth_yaw = math.radians(self.rotation.euler()[1])
+        self.angular_velocity = 0.0
+        self._lag_since = None
+        self.lag_confirmed = False
+        self._pos_mismatch_frames = 0
+        # No rate or displacement may span the jump; a crash already confirmed stays latched.
+        self._prev_rates = None
+        self._prev2_rates = None
+        self._last_live_rot = self.rotation.euler()
+        self._last_live_rot_time = t_now
+        self._last_live_xz = (raw_x, raw_z)
+        self._prev_disp_x = None
+        self._prev_disp_z = None
+        self._prev_disp_dt = None
+        self._prev_disp_y = None
+        self._crash_hold_until = prev._crash_hold_until
+        self._crash_knock_until = prev._crash_knock_until
+        self.crash_confirmed = t_now < self._crash_hold_until
+        # Only a jump outside the window opens one, so a vehicle that drives off is let go.
+        if abs(prev.speed) < _POSE_JUMP_STAND_MS and t_now >= prev._pose_jump_settle_until:
+            self._pose_jump_settle_until = t_now + _POSE_JUMP_SETTLE_S
+
+        self._reset_raw_brake_transient()
+        self.speed = prev.speed
+        self.acceleration = prev.acceleration
+        self.acc_speed = prev.acc_speed
+        self.acc_accel = prev.acc_accel
+
+        # Seeded along the new heading so the next LS fit returns the held speed.
+        dt_seed = _LOCATION_UPDATE_FREQUENCY
+        held_speed = float(prev.speed)
+        self._position_history = [
+            (t_now - dt_seed,
+             raw_x + held_speed * math.sin(self._smooth_yaw) * dt_seed,
+             raw_z + held_speed * math.cos(self._smooth_yaw) * dt_seed),
+            (t_now, raw_x, raw_z),
+        ]
+        self._trail_history = [(t_now, raw_x, raw_z)]
 
     def seed_cold_start_speed(self, speed: float, t_now: float) -> None:
         """Seed first-sighting filter state from an externally measured speed.
@@ -1460,18 +1592,20 @@ class Vehicle:
         self._lag_since = None
         self.lag_confirmed = False
         self._pos_mismatch_frames = 0
+        self._pose_jump_settle_until = -1.0
         # Crash detection restarts on the new clock: rates and pose baseline
         # cannot span the discontinuity, and the latch resets with them.
-        self._prev_pitch_rate = None
-        self._prev_yaw_rate = None
-        self._prev_roll_rate = None
+        self._prev_rates = None
+        self._prev2_rates = None
         self._last_live_rot = None
         self._last_live_rot_time = None
+        self._last_live_xz = None
         self._prev_disp_x = None
         self._prev_disp_z = None
         self._prev_disp_dt = None
         self._prev_disp_y = None
         self._crash_hold_until = -1.0
+        self._crash_knock_until = -1.0
         self.crash_confirmed = False
 
         self._smooth_speed = prev._smooth_speed
@@ -1548,16 +1682,18 @@ class Vehicle:
             self._lag_since = prev._lag_since
             self.lag_confirmed = prev.lag_confirmed
             self._pos_mismatch_frames = prev._pos_mismatch_frames
-            self._prev_pitch_rate = prev._prev_pitch_rate
-            self._prev_yaw_rate = prev._prev_yaw_rate
-            self._prev_roll_rate = prev._prev_roll_rate
+            self._pose_jump_settle_until = prev._pose_jump_settle_until
+            self._prev_rates = prev._prev_rates
+            self._prev2_rates = prev._prev2_rates
             self._last_live_rot = prev._last_live_rot
             self._last_live_rot_time = prev._last_live_rot_time
+            self._last_live_xz = prev._last_live_xz
             self._prev_disp_x = prev._prev_disp_x
             self._prev_disp_z = prev._prev_disp_z
             self._prev_disp_dt = prev._prev_disp_dt
             self._prev_disp_y = prev._prev_disp_y
             self._crash_hold_until = prev._crash_hold_until
+            self._crash_knock_until = prev._crash_knock_until
             self.crash_confirmed = t_now < prev._crash_hold_until
             self._smooth_speed = prev._smooth_speed
             self._smooth_accel = prev._smooth_accel
@@ -1627,6 +1763,7 @@ class Vehicle:
         self._lag_since = prev._lag_since
         self.lag_confirmed = False
         self._pos_mismatch_frames = prev._pos_mismatch_frames
+        self._pose_jump_settle_until = prev._pose_jump_settle_until
         # Crash state (rates, baselines, latch) is carried and re-evaluated by
         # _tmp_apply_crash_rotation_jerk below.
         self._smooth_speed = prev._smooth_speed
@@ -1649,6 +1786,10 @@ class Vehicle:
         raw_z = self.position.z
         self._raw_x = raw_x
         self._raw_z = raw_z
+
+        if self.is_tmp and self._pose_jumped(prev):
+            self._reanchor_after_pose_jump(prev, t_now)
+            return
 
         # Type 3: Crash detection (TMP only, full frames only): corroborated
         # rotation jerk with a hold latch; sub-frames carry the latched flag.

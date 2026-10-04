@@ -1192,7 +1192,102 @@ lead-speed release:
   It used to sit until the gap reached the 7 m window and then roll,
   which is fewer but larger stop-and-go events.
 
-Do not re-add a lead-speed term to the release.
+Do not re-add an `acc_speed` term to the release. §10.2's pace lift reads the
+lead's measured displacement instead, and still releases through the wanted
+accel.
+
+### 10.2 Pulling away
+
+At `v_ego = 0` the only lead-speed term IIDM has is `v * dv`, which is zero, so
+the release in §10.1 waits for the gap alone to pass about 5.5 m. From a 5 m
+stop, a lead pulling away at 0.3 m/s² takes about 1.4 s to open that, plus the
+TruckersMP delay; the follower then starts about 2 s behind it and catches up
+with 1.3 to 1.7 times the lead's acceleration, which is the "sits, then lunges"
+drivers feel. `acc_speed` also reads a lead under 0.6 m/s as exactly 0, so a
+creeping lead looks parked, and while crawling inside `s0 + v*T` IIDM brakes
+even as the lead opens the gap. `core/cruise_control_thread/pull_away.py`
+addresses all three, below 4 m/s of ego speed only:
+
+- **`LeadMotion`** measures the immediate lead's speed from its own
+  displacement: gap plus ego odometer, a least-squares slope over 0.5 s. It
+  confirms once that speed holds 0.15 m/s for 0.2 s, the lead has moved 0.12 m
+  in the last second, and it has not moved back more than 0.05 m in the last
+  two. It stays confirmed down to 0.08 m/s and resets on a new vehicle id, a
+  frame-to-frame jump over 0.8 m, or `crash_confirmed`. A start comes from
+  rest, while a crash-rocked vehicle swings back within its period, so after
+  its first swing a rock is never followed again.
+- **Latch floor.** While `acc_speed` is under 0.8 m/s the smoothed immediate
+  lead uses `max(acc_speed, measured)`. The raw lead the safety overlays read
+  is never touched.
+- **Pace lift.** The law is lifted toward `max(a_lead_ff, 0) + 0.6 (v_lead - v)
+  + 0.15 (s - s_want)`, capped at 1.0, plus a 0.35 launch bid at rest, since at
+  rest IIDM cannot see the lead's speed at all. It never lowers the law, is
+  zero for a lead under 0.1 m/s, zero inside 75 % of the wanted gap, fades in
+  over 0.2 m/s² of floor so it cannot step, and is gone by 5 m/s of ego speed.
+  The standstill hold evaluates the same lifted law, so its release and the
+  command agree.
+
+`pull_away_share = 0` turns all three off and is in
+`tools/acc_transition_probe.BASELINE`.
+
+Measured in the convoy sim (`tools/acc_platoon`, ten followers, TruckersMP
+netcode, seeds 1 to 3):
+
+| | before | after |
+|---|---|---|
+| `slow_pull_away`: first follower rolls after the lead | 1.35 to 1.37 s | 0.78 to 0.82 s |
+| `slow_pull_away`: worst relaunch hop | 2.13 to 2.22 s | 1.72 to 1.88 s |
+| brisk pull-away (1.0 m/s²): first follower | 2.12 to 2.17 s | 1.68 to 1.73 s |
+| `creep`: re-stops behind a lead that never stops | 11 to 12 | 6, 14, 6 |
+| `slow_pull_away`: worst speed over the truck ahead | 6.9 to 7.6 m/s | 4.6 to 5.1 m/s |
+
+What is left of the start delay is the TruckersMP delay, the lead physically
+starting to move, and the hold FSM's own dwell and brake ramp. The cost is at
+the back of a long queue: trucks 9 and 10 start sooner, so the queue is more
+compressed when the launch wave's hard stop reaches them, and they came to
+2.9 to 3.4 m of the truck ahead where they used to come to 3.6 to 4.7 m. No
+contact in any seed. Trucks 1 to 8 are equal or better.
+
+The hold FSM half of the crawl is §10.3.
+
+### 10.3 Crawl follow
+
+The hold FSM in `core/sending_thread/hold_controller.py` captures STOPPING on
+any command at or below zero under 2 km/h. Steady speed keeping behind a crawl
+commands about zero by definition, so behind a lead doing 2 km/h the first
+follower swung between 0.23 and 0.76 m/s and was captured two or three times
+every 15 s, and each capture was a stop and a relaunch. Nothing inside ACC can
+avoid it, and the capture cannot simply be lowered: ACC's own standstill hold
+publishes exactly 0.0 to stop, and the one-pedal auto hold relies on the same
+rule.
+
+So the cruise thread publishes `commanded_crawl_follow` on the telemetry thread
+next to the command, true only while ACC's bid is the command and ACC is
+following a lead `LeadMotion` confirms moving, outside its own standstill hold
+(`CruiseControlThread._crawl_follow`). The sending thread passes it to the hold
+FSM only while the tracking commander (`"cc"`) owns the command. While it is set,
+a command at or below zero under 2 km/h is still a stop if any of these holds,
+and otherwise it is speed keeping:
+
+- the command is at or below -0.3 m/s² (a real brake request);
+- speed is under 1 km/h;
+- the truck is rolling back at all;
+- at the measured deceleration, or the commanded one if larger, plus 30 % of
+  the uphill grade's pull, the truck would reach zero within 1 s.
+
+The last two exist for rollback. The deceleration estimate is a 0.15 s filter
+on speed inside the hold FSM. The grade share covers a mapper that under-reads
+the slope: without it a 20 % grade misread by 60 % rolled back 3 cm/s where the
+plain capture rolled back 1.5. With it, across 3 to 25 % grades and grade
+misreads of 0 to 100 %, crawl follow rolls back exactly as much as the plain
+capture (`tests/test_hold_crawl_follow.py`), and not at all for misreads up to
+30 %. Misreads of 60 % and more on steep grades roll back with or without it;
+that is the plain capture's timing against the hold brake's build-up, not this.
+
+Measured on `creep` (seeds 1 to 3): the first follower holds 0.54 to 0.57 m/s
+behind the 0.56 m/s lead with no capture, the second 0.47 to 0.63 m/s with none,
+and re-stops fell from 6, 14, 6 to 6, 7, 6. What is left is trucks 5 to 10
+overshooting in the start wave and then braking for real.
 
 ---
 

@@ -3,6 +3,7 @@ target gap, instead of IIDM's late-then-hard profile. See core/acc/ACC_ARCHITECT
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 from . import idm_cah
@@ -47,6 +48,19 @@ APPROACH_UPPER_ZERO_MS2: float = 4.5
 # The band's pull on the law builds at no more than this (m/s^3). Extra braking lets go
 # at the plain jerk rate, a softened law gets its braking back at once. §13.5.
 APPROACH_SLEW_MS3: float = 1.5
+# While closing, do not brake harder than the lead and the decel that meets its speed.
+# 0 disables. Matched speed is left to the lead law. See core/cruise_control_thread/README.md.
+FOLLOW_SHARE: float = 1.0
+FOLLOW_DV_LO_MS: float = 0.5
+FOLLOW_DV_HI_MS: float = 1.5
+# Short TTC belongs to the lead law and the overlays. The limit is fully off by the first.
+FOLLOW_TTC_OFF_S: float = 2.5
+FOLLOW_TTC_FULL_S: float = 4.0
+# Gap closing this much faster than the seen speeds means the lead is still slower
+# than it looks. Do not ease the brake on a late picture.
+FOLLOW_GAP_EXCESS_MS: float = 2.5
+# The most this may take off a too-hard brake. Releasing it fully made a hard stop late.
+FOLLOW_LIFT_MAX_MS2: float = 1.0
 
 
 def approach_band(
@@ -92,6 +106,38 @@ def approach_band(
     if out < upper:
         out += w_upper * (upper - out)
     return out
+
+
+def brake_follow_limit(
+    cfg: ACConfig,
+    a_law: float,
+    lead: _LeadSnapshot,
+    v_ego: float,
+    t_headway: float,
+    gap_excess_ms: float | None = None,
+) -> float:
+    """Raise a braking law that has run past the lead's decel while closing on it."""
+    if (a_law >= 0.0 or cfg.follow_share <= 0.0 or lead.a_lead_ms2 >= 0.0
+            or gap_excess_ms is None or gap_excess_ms > FOLLOW_GAP_EXCESS_MS):
+        return a_law
+    dv = v_ego - lead.v_lead_ms
+    closing = 1.0 - idm_cah.fade(dv, cfg.follow_dv_lo_ms, cfg.follow_dv_hi_ms)
+    room = lead.dist_m - cfg.s0_m
+    ttc = lead.dist_m / dv if dv > 0.3 else math.inf
+    far = 1.0 - idm_cah.fade(ttc, FOLLOW_TTC_OFF_S, FOLLOW_TTC_FULL_S)
+    if closing <= 0.0 or far <= 0.0 or room <= cfg.approach_room_min_m:
+        return a_law
+    kinematic = (dv * dv) / (2.0 * room) if dv > 0.0 else 0.0
+    need = max(kinematic, -lead.a_lead_ms2)
+    upper = -(cfg.approach_upper_gain * need + cfg.approach_upper_margin_ms2)
+    extra = cfg.approach_stopped_upper_extra_ms2 * idm_cah.fade(
+        lead.v_lead_ms, cfg.approach_stopped_full_ms, cfg.approach_stopped_zero_ms)
+    weight = (closing * far * cfg.follow_share * _room_weight(cfg, room)
+              * idm_cah.fade(need, cfg.approach_upper_full_ms2 + extra,
+                             cfg.approach_upper_zero_ms2 + extra))
+    if weight <= 0.0 or a_law >= upper:
+        return a_law
+    return a_law + min(FOLLOW_LIFT_MAX_MS2, weight * (upper - a_law))
 
 
 def _room_weight(cfg: ACConfig, room: float) -> float:

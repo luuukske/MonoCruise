@@ -4,10 +4,11 @@ The clip corpus cannot answer this. Its labels were tagged against one engage
 point, so moving the entry bar re-labels clips rather than scoring them, and its
 replay never touches the brake pedal at all. This drives the shipped required-
 decel formula, entry bar and `AEBDecelController` against a brake plant fitted
-to 61 recorded braking episodes, and asserts on residual gap.
+to full-pedal slams, the only way AEB brakes, and asserts on residual gap.
 
-Plant: dead time then first order on `frac(pedal) * capacity`. Fitted lag was
-tau 0.19 s median / 0.31 s p90, dead time 0.12 s.
+Plant: dead time then first order on `frac(pedal) * capacity`. 17 slams (AEB and
+driver, solo and trailer, 2026-10-04) fit tau 0.08 s median, build-up 0.20 s median
+and 0.24 s p90. The older 61-episode fit (tau 0.19 / 0.31) is mostly gentle braking.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from core.sending_thread.accel_to_pedals import brake_curve_fraction
 from core.sending_thread.thread import _AEB_MEAS_TAU_S, AEBDecelController
 
 DT = 0.01
-PLANT_TAU_MEDIAN, PLANT_TAU_P90, PLANT_DEAD = 0.19, 0.31, 0.12
+PLANT_TAU_MEDIAN, PLANT_TAU_P90, PLANT_DEAD = 0.08, 0.15, 0.10
 
 # (label, capacity m/s2 at pedal 1.0, has_trailer). Measured full-pedal stops.
 RIGS = (

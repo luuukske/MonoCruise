@@ -13,6 +13,7 @@ from core.aeb.thread import (
     AEBSnapshot, AEBState, _INF, _dampen_turning_curvature,
     _swap_trailer_kinematics,
 )
+from core.radar.ego_geometry import calibration_geometry
 from core.radar.ego_path_model import EgoPathModel, EgoPathState, warm_gain
 from core.radar.elevation import ElevationGate, EgoElevationTrack, build_surface
 from core.radar.reader import TrafficReader
@@ -161,8 +162,11 @@ def _build_snapshot(ego, vehicles: list[Vehicle], live: LiveAEB,
     ego_z = ego.coordinateZ
     ego_yaw = ego.rotationX * 2.0 * math.pi
     ego_speed = ego.speed
-    ego_hw = _CAL.ego_half_width
-    ego_hl = _CAL.ego_half_length
+    geometry = ego.geometry() or calibration_geometry(
+        _CAL.ego_half_length, _CAL.ego_half_width, _CAL.arc_start_pctg,
+    )
+    ego_hw = geometry.half_width_m
+    ego_hl = geometry.half_length_m
 
     capacity = max(consumed.max_brake_ms2, 1.0)
     t_stop = ego_speed / (_CAL.ego_decel_frac * capacity) if capacity > 0 else 0.0
@@ -172,7 +176,7 @@ def _build_snapshot(ego, vehicles: list[Vehicle], live: LiveAEB,
 
     fwd_x = -math.sin(ego_yaw)
     fwd_z = -math.cos(ego_yaw)
-    body_offset = (_CAL.arc_start_pctg - 0.5) * (2.0 * ego_hl)
+    body_offset = geometry.path_origin_m
     ego_arc = build_arc(
         ego_x + body_offset * fwd_x, ego_z + body_offset * fwd_z,
         ego_yaw, ego_speed, curv, ego_hw, horizon,
@@ -213,6 +217,7 @@ def _build_snapshot(ego, vehicles: list[Vehicle], live: LiveAEB,
     return AEBSnapshot(
         ego_x=ego_x, ego_z=ego_z, ego_yaw=ego_yaw,
         ego_speed=ego_speed, ego_half_w=ego_hw, ego_half_l=ego_hl,
+        ego_front_m=geometry.front_m, ego_rear_m=geometry.rear_m,
         ego_arc=ego_arc, ego_braked_arc=None,
         ego_has_trailer=bool(ego.ego_has_trailer),
         vehicles=[_vehicle_dict(v) for v in vehicles],

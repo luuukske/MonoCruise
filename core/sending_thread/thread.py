@@ -2,7 +2,6 @@ from __future__ import annotations
 
 """Sending thread: SCS I/O, mapper, hold, capacity. See core/sending_thread/README.md."""
 
-import csv
 import logging
 import math
 import time
@@ -21,11 +20,22 @@ from core.aeb.calibration import DEFAULT as _AEB_CAL
 from core.scs_profile.intensity import (
     BrakeIntensityCache,
     LowBrakeIntensityAebWarning,
-    aeb_max_brake_ms2,
     apply_brake_intensity,
+    effective_brake_pedal,
 )
 
 from .accel_to_pedals import AccelToPedals, MapperSharedState, baseline_accel_ms2, baseline_brake_ms2
+from .aeb_capacity import (
+    FULL_SENT,
+    AebCapacityStore,
+    AebPedalAxis,
+    FullPedalRun,
+    FullPedalStore,
+    aeb_capacity_ms2,
+    full_pedal_key,
+    truck_key,
+)
+from .debug_csv import BrakeDebugLog, open_debug_csv
 from .hold_controller import (
     HoldController,
     STATE_HOLDING,
@@ -86,34 +96,50 @@ BOOL_PRESS_DURATION: float = 0.1
 HAZARD_PRESS_DURATION: float = 0.4
 HAZARD_VERIFY_DELAY: float = 0.1
 HAZARD_MAX_RETRIGGERS: int = 3
-# Same floors as the driver's slam / autodisable. Cruise mapper output is
-# visible to hazards as if the driver pressed those pedals.
+# Driver slam floor and autodisable floor, applied to the pedals about to
+# be sent. A commander brake the merge dropped never reaches this check.
 _HAZARD_HARD_BRAKE: float = 0.8
 _HAZARD_GAS_RESET: float = 0.60
 _HAZARD_BRAKE_CLEAR: float = 0.05
+# Same gate as the driver slam in main_pedal_thread: a stomp at rest is a hold.
+_HAZARD_MIN_SPEED_KMH: float = 10.0
 
 
-def cruise_pedals_for_hazards(
-    user_gas: float,
-    user_brake: float,
-    mapper_gas: float,
-    mapper_brake: float,
-    cruise_active: bool,
-) -> tuple[float, float]:
-    """Cruise gas/brake look like the driver's pedals to automatic hazards."""
-    if not cruise_active:
-        return user_gas, user_brake
-    return max(user_gas, mapper_gas), max(user_brake, mapper_brake)
+def hazard_action_for_sent_pedals(
+    gas: float,
+    brake: float,
+    *,
+    speed_kmh: float,
+    aeb_warn: bool,
+    user_override: bool,
+    autodisable: bool,
+    was_hard: bool,
+) -> tuple[str | None, bool]:
+    """'on', 'off', or None from the pedals about to be sent. 'on' wins."""
+    action: str | None = None
+    if (
+        autodisable
+        and speed_kmh > 12.0
+        and gas >= _HAZARD_GAS_RESET
+        and brake < _HAZARD_BRAKE_CLEAR
+        and not aeb_warn
+        and not user_override
+    ):
+        action = "off"
+    hard = brake >= _HAZARD_HARD_BRAKE
+    if hard and not was_hard and speed_kmh > _HAZARD_MIN_SPEED_KMH:
+        action = "on"
+    return action, hard
 
 # Closed-loop decel controller: feedforward via the inverse brake curve plus a
 # disturbance observer that nulls environment error (grade, capacity, curve bias).
 _AEB_LEAD_CLAMP_MS2: float = 3.0
-# Brake plant model, fitted from engagement step responses in the clip corpus.
-# Both taus sit above the measured median deliberately, see the module README.
-_AEB_PLANT_DEAD_SOLO_S: float = 0.06
-_AEB_PLANT_TAU_SOLO_S: float = 0.25
-_AEB_PLANT_DEAD_TRAILER_S: float = 0.10
-_AEB_PLANT_TAU_TRAILER_S: float = 0.50
+# Brake plant model at the measured lag: median tau solo, p90 tau with a trailer.
+# The old 0.25 / 0.50 read the onset as bias and dropped the pedal after the slam: README.
+_AEB_PLANT_DEAD_SOLO_S: float = 0.10
+_AEB_PLANT_TAU_SOLO_S: float = 0.19
+_AEB_PLANT_DEAD_TRAILER_S: float = 0.12
+_AEB_PLANT_TAU_TRAILER_S: float = 0.31
 # Decel measurement filter for the AEB loop only. Deliberately faster than the
 # 0.30 s `_spd_smooth` that capacity learning and published telemetry tap.
 _AEB_MEAS_TAU_S: float = 0.12
@@ -121,6 +147,9 @@ _AEB_MEAS_TAU_S: float = 0.12
 # bias rather than lag, and it settles with the plant instead of behind it.
 _AEB_BIAS_TAU_S: float = 0.10
 _AEB_BIAS_CLAMP_FRAC: float = 0.6
+# Slams build in ~0.15 s, gentle braking in 0.3-0.5 s: no one model fits both, so after
+# engagement the observer may add brake but not take it away (the post-hit dip): README.
+_AEB_ONSET_GUARD_S: float = 1.0
 _AEB_PEDAL_HISTORY_S: float = 0.6
 
 # Idle-creep compensation for the user brake path. In gear 1 below the creep
@@ -166,6 +195,7 @@ class AEBDecelController:
         self._model_decel_ms2: float = 0.0
         self._model_filt_ms2: float = 0.0
         self._pedal_hist: list[tuple[float, float]] = []
+        self._engaged_at: float | None = None
 
     @property
     def active(self) -> bool:
@@ -184,6 +214,7 @@ class AEBDecelController:
             self._model_decel_ms2 = 0.0
             self._model_filt_ms2 = 0.0
             self._pedal_hist.clear()
+            self._engaged_at = None
         return aeb_brake and not was_active
 
     def note_applied_pedal(self, pedal: float, now: float) -> None:
@@ -257,6 +288,8 @@ class AEBDecelController:
         """Compute brake pedal [0, 1] for the current tick."""
         if not self._active or max_brake_ms2 <= 0.1:
             return 0.0
+        if self._engaged_at is None:
+            self._engaged_at = now
 
         self._update_observer(
             measured_decel_ms2, max_brake_ms2, decel_from_pedal_fn,
@@ -273,7 +306,10 @@ class AEBDecelController:
         commanded = max(target_decel_ms2, floor_decel_ms2)
         if commanded <= 0.0:
             return 0.0
-        wanted = max(0.0, min(commanded - self._bias_ms2, max_brake_ms2))
+        bias = self._bias_ms2
+        if now - self._engaged_at < _AEB_ONSET_GUARD_S:
+            bias = min(bias, 0.0)
+        wanted = max(0.0, min(commanded - bias, max_brake_ms2))
         return max(0.0, min(1.0, ff_pedal_fn(wanted, max_brake_ms2)))
 
 
@@ -348,6 +384,7 @@ class SendingThread(BaseThread):
         self._hazard_phase: str = "idle"
 
         self._last_should_force: bool = False
+        self._last_hard_brake: bool = False
         self._hazard_user_override: bool = False
         self._prev_tel_hazards: bool = False
         # Single mapper. CruiseControlThread publishes one m/s² bid covering
@@ -356,6 +393,9 @@ class SendingThread(BaseThread):
         # Hill-hold / stopping FSM. Reuses the mapper's brake inverse curve so
         self._hold = HoldController(self._accel_mapper.brake_pedal_from_decel)
         self._capacity_tracker = PedalCapacityTracker()
+        self._aeb_capacity = AebCapacityStore()
+        self._full_pedal = FullPedalStore()
+        self._full_run = FullPedalRun()
         self._brake_intensity = BrakeIntensityCache()
         self._low_i_aeb_warn = LowBrakeIntensityAebWarning()
         self._aeb_controller = AEBDecelController()
@@ -406,42 +446,16 @@ class SendingThread(BaseThread):
             self._project_root = Path(__file__).resolve().parents[2]
         except Exception:
             self._project_root = Path(".").resolve()
+        self._brake_log = BrakeDebugLog(self._project_root)
 
-    # Coast-down CSV logger 
-
-    @staticmethod
-    def _coast_header_differs(path) -> bool:
-        """True when the on-disk header does not match the current columns."""
-        try:
-            with path.open("r", newline="", encoding="utf-8") as fh:
-                return next(csv.reader(fh), []) != _COAST_LOG_HEADER_ROW
-        except OSError:
-            return False
+    # Coast-down CSV logger
 
     def _ensure_coast_log(self) -> None:
         if self._coast_log_file is not None:
             return
-        path = self._project_root / _COAST_LOG_NAME
-        write_header = not path.exists() or path.stat().st_size == 0
-        if not write_header and self._coast_header_differs(path):
-            # Appending new columns under an old header silently misaligns every
-            # later row. Rotate instead, so both files stay parseable.
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            try:
-                path.rename(path.with_name(f"{path.stem}_{stamp}{path.suffix}"))
-                write_header = True
-            except OSError:
-                logger.debug("coast_debug rotate failed", exc_info=True)
-        try:
-            self._coast_log_file = path.open("a", newline="", encoding="utf-8")
-            self._coast_log_writer = csv.writer(self._coast_log_file)
-            if write_header:
-                self._coast_log_writer.writerow(_COAST_LOG_HEADER_ROW)
-                self._coast_log_file.flush()
-        except OSError:
-            self._coast_log_file = None
-            self._coast_log_writer = None
-            logger.debug("coast_debug log unavailable", exc_info=True)
+        self._coast_log_file, self._coast_log_writer = open_debug_csv(
+            self._project_root / _COAST_LOG_NAME, _COAST_LOG_HEADER_ROW,
+        )
 
     def _log_coast_step(
         self,
@@ -552,6 +566,31 @@ class SendingThread(BaseThread):
             self._hazard_retriggers = 0
             self._hazard_phase = "idle"
         logger.debug("change_hazards: wanted=%s duration=%.3fs", wanted, duration)
+
+    def _apply_sent_brake_hazards(
+        self,
+        gas: float,
+        brake: float,
+        speed_kmh: float,
+        aeb_warn: bool,
+    ) -> None:
+        """Arm hazards from the brake about to be sent, then autodisable."""
+        action, self._last_hard_brake = hazard_action_for_sent_pedals(
+            gas,
+            brake,
+            speed_kmh=speed_kmh,
+            aeb_warn=aeb_warn,
+            user_override=self._hazard_user_override,
+            autodisable=bool(Settings.autodisable_hazards),
+            was_hard=self._last_hard_brake,
+        )
+        if action == "on":
+            self.change_hazards(True)
+        elif action == "off":
+            with self._lock:
+                self._hazard_wanted = False
+                if self._hazard_phase == "idle":
+                    self._hazard_retriggers = 0
 
     def reset_accel_mapper_smoothing(self) -> None:
         """Clear mapper smoothing/correction when cruise stops commanding."""
@@ -823,6 +862,7 @@ class SendingThread(BaseThread):
         self._hazard_phase = "idle"
         self._hazard_wanted = None
         self._last_should_force = False
+        self._last_hard_brake = False
         self._hazard_user_override = False
         self._prev_tel_hazards = False
         self._brake_active = False
@@ -833,6 +873,8 @@ class SendingThread(BaseThread):
             baseline_brake=baseline_brake_ms2(0.0, False),
             baseline_accel=baseline_accel_ms2(0.0, False),
         )
+        self._aeb_capacity.load_persisted()
+        self._full_pedal.load_persisted()
 
         if self._controller is not None:
             logger.debug("SCSController initialised")
@@ -899,6 +941,8 @@ class SendingThread(BaseThread):
         pedal_alive = pedal_thread is not None and pedal_thread.is_alive()
 
         em_stop = False
+        pedal_em_stop = False
+        device_lost = False
         AEB_brake = False
         AEB_warn = False
         AEB_target_decel = 0.0
@@ -907,7 +951,9 @@ class SendingThread(BaseThread):
         if pedal_thread is not None and pedal_alive:
             try:
                 with pedal_thread.data._lock:
-                    em_stop = bool(pedal_thread.data.em_stop)
+                    pedal_em_stop = bool(pedal_thread.data.em_stop)
+                    device_lost = bool(pedal_thread.data.device_lost)
+                em_stop = pedal_em_stop
             except Exception as e:
                 logger.debug("em_stop read failed: %s", e)
             try:
@@ -1007,6 +1053,7 @@ class SendingThread(BaseThread):
         mapper_pedal_state = 0
         mapper_creep_ms2 = 0.0
         wanted_a = 0.0
+        crawl_follow = False
         raw_a = 0.0
         measured_decel_ms2 = 0.0
         measured_decel_fast_ms2 = 0.0
@@ -1025,10 +1072,12 @@ class SendingThread(BaseThread):
         engine_rpm = 0.0
         wheels_on_ground = 0
         ego_trailer_count = 0
+        truck_id = ""
         if connected and tel_thread is not None and tel_thread.is_alive() and not tel_paused:
             try:
                 with tel_thread.data._lock:
                     wanted_a = float(tel_thread.data.commanded_accel_ms2)
+                    crawl_follow = bool(getattr(tel_thread.data, "commanded_crawl_follow", False))
                     mass_kg = float(tel_thread.data.estimated_total_mass_kg)
                     spd_ms = float(tel_thread.data.speed)
                     has_t = bool(tel_thread.data.ego_has_trailer)
@@ -1036,6 +1085,7 @@ class SendingThread(BaseThread):
                     ego_trailer_count = int(
                         getattr(tel_thread.data, "trailer_count", 0) or 0
                     )
+                    truck_id = str(getattr(tel_thread.data, "truck_id", "") or "")
                     road_pitch = float(tel_thread.data.rotationY)
                     tel_gear_dashboard = int(tel_thread.data.gear_dashboard)
                     tel_gear = int(tel_thread.data.gear)
@@ -1176,42 +1226,19 @@ class SendingThread(BaseThread):
                 self._hazard_user_override = False
             self._prev_tel_hazards = tel_hazards
 
-        if Settings.autodisable_hazards and pedal_thread is not None and pedal_alive:
-            try:
-                with pedal_thread.data._lock:
-                    gas_pct = pedal_thread.data.gasval
-                    brake_pct = pedal_thread.data.brakeval
-                gas_pct, brake_pct = cruise_pedals_for_hazards(
-                    gas_pct, brake_pct, mapper_gas, mapper_brake, cruise_active,
-                )
-                if (
-                    speed_kmh > 12.0
-                    and gas_pct >= _HAZARD_GAS_RESET
-                    and brake_pct < _HAZARD_BRAKE_CLEAR
-                    and not AEB_warn
-                    and not self._hazard_user_override
-                ):
-                    with self._lock:
-                        self._hazard_wanted = False
-                        if self._hazard_phase == "idle":
-                            self._hazard_retriggers = 0
-            except Exception as e:
-                logger.debug("autodisable_hazards read failed: %s", e)
-
-        should_force = (
-            not pedal_alive
-            or em_stop
-            or (cruise_active and mapper_brake >= _HAZARD_HARD_BRAKE)
-        )
-        if should_force and not self._last_should_force:
+        # Device loss sets em_stop without a hard brake. A driver slam and
+        # AEB reach the sent pedal instead, and are handled there.
+        pedals_lost = (not pedal_alive) or (device_lost and pedal_em_stop)
+        if pedals_lost and not self._last_should_force:
             self.change_hazards(True)
-        self._last_should_force = should_force
+        self._last_should_force = pedals_lost
 
-        self._tick_hazards(controller, tel_hazards)
         self._tick_bool_overrides(controller)
 
 
         if not connected:
+            self._last_hard_brake = False
+            self._tick_hazards(controller, tel_hazards)
             self._spd_smooth = None
             self._spd_smooth_fast = None
             self._prev_spd_mono = None
@@ -1268,6 +1295,8 @@ class SendingThread(BaseThread):
             return
 
         if not pedal_alive:
+            self._last_hard_brake = False
+            self._tick_hazards(controller, tel_hazards)
             self._prev_mapper_owned_gas = False
             self._prev_applied_gas = 0.0
             self._clear_pause_held()
@@ -1338,6 +1367,7 @@ class SendingThread(BaseThread):
                 self.data.hazardsActive = tel_hazards
                 self.data.horn_active = bool(getattr(controller, "horn", False))
                 self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
+            self._tick_hazards(controller, tel_hazards)
             return
 
         opdgasval = 0.0
@@ -1350,6 +1380,8 @@ class SendingThread(BaseThread):
                 opdgasval = float(getattr(pedal_thread.data, "opdgasval", 0.0))
         except Exception as e:
             logger.debug("pedal read failed: %s", e)
+            self._last_hard_brake = False
+            self._tick_hazards(controller, tel_hazards)
             self._prev_mapper_owned_gas = False
             self._prev_applied_gas = 0.0
             self._clear_pause_held()
@@ -1493,6 +1525,8 @@ class SendingThread(BaseThread):
             dt=dt_aeb,
             game_clutch=game_clutch,
             auto_neutral_active=self._autoneutral_neutral,
+            # Only while ACC's bid is the command; any other commander keeps the plain capture.
+            crawl_follow=crawl_follow and cruise_active_controller == "cc",
         )
         b = max(b, hold_out.brake_pedal)
 
@@ -1522,12 +1556,15 @@ class SendingThread(BaseThread):
         # AEB active: closed-loop decel controller writes the brake pedal. The
         # merge stays a max so a driver out-braking AEB always wins.
         now_ctrl = time.monotonic()
+        aeb_pedal = 0.0
+        aeb_key = truck_key(tel_game, truck_id, ego_trailer_count)
+        aeb_i = self._brake_intensity.get(tel_game)
+        aeb_base = max(baseline_brake_ms2(mass_kg, has_t, wheels_on_ground), 0.1)
+        aeb_scale = self._aeb_capacity.scale(aeb_key)
+        aeb_full = self._full_pedal.ratio(full_pedal_key(aeb_key, aeb_i), mass_kg)
+        aeb_cap = max(aeb_capacity_ms2(aeb_base, aeb_scale, aeb_i, aeb_full), 0.1)
+        aeb_axis = AebPedalAxis(aeb_i, aeb_scale, aeb_cap / aeb_base, aeb_full)
         if _aeb_active and gasval < 0.8:
-            aeb_i = self._brake_intensity.get(tel_game)
-            aeb_cap = max(
-                aeb_max_brake_ms2(self._capacity_tracker.max_brake_ms2, aeb_i),
-                0.1,
-            )
             aeb_pedal = self._aeb_controller.step(
                 target_decel_ms2=AEB_target_decel,
                 floor_decel_ms2=AEB_ff_decel,
@@ -1540,7 +1577,8 @@ class SendingThread(BaseThread):
                 now=now_ctrl,
                 dt=dt_aeb,
             )
-            b = max(b, aeb_pedal)
+            # AEB runs on full authority, so put its pedal on the sent axis here.
+            b = max(b, aeb_axis.sent(aeb_pedal))
             a = 0.0
 
         # Bookkeeping for next tick's learn gate and handover re-seat.
@@ -1586,10 +1624,14 @@ class SendingThread(BaseThread):
         self._pause_held_aforward = a
         self._pause_held_abackward = logical_b
         self._pause_held_full_authority = full_authority
+        self._apply_sent_brake_hazards(a, logical_b, speed_kmh, AEB_warn)
+        self._tick_hazards(controller, tel_hazards)
 
         # Close the observer loop on what the game actually received, not on the
         # controller's own request: hold, cushion and user brake all raise it.
-        self._aeb_controller.note_applied_pedal(sent_b, now_ctrl)
+        self._aeb_controller.note_applied_pedal(
+            aeb_axis.applied(sent_b), now_ctrl,
+        )
 
         # Push the actual brake value sent this tick into the ring buffer so
         self._recent_brake_outputs.append(sent_b)
@@ -1616,7 +1658,7 @@ class SendingThread(BaseThread):
             aeb_active=_aeb_active,
         )
 
-        # Capacity from the pedal the game received, decel scaled to 110% intensity.
+        # Capacity from the pedal the game received, read back through the remap.
         _base_brake = baseline_brake_ms2(mass_kg, has_t, wheels_on_ground)
         self._capacity_tracker.update_brake(
             max(float(sent_b), 0.0), measured_decel_ms2, speed_ms, brake_grade_rad,
@@ -1625,12 +1667,83 @@ class SendingThread(BaseThread):
             aeb_active=_aeb_active,
             brake_intensity=intensity,
         )
+        settled = self._capacity_tracker.last_settled_brake_sample
+        if settled is not None:
+            self._aeb_capacity.observe(aeb_key, settled[0], settled[1], intensity)
+        full_key = full_pedal_key(aeb_key, intensity)
+        full_stop = self._full_run.tick(
+            full_authority and sent_b >= FULL_SENT, full_key, mass_kg, _base_brake,
+            speed_ms, mapper_road_load_ms2, now_ctrl,
+        )
+        if full_stop is not None:
+            self._full_pedal.observe_stop(*full_stop)
+            logger.debug(
+                "full-pedal stop %.1f t: %.3f of model (%d at this load)",
+                full_stop[1] / 1000.0, full_stop[2],
+                self._full_pedal.stops(full_stop[0], full_stop[1]),
+            )
+        aeb_scale = self._aeb_capacity.scale(aeb_key)
+        aeb_full = self._full_pedal.ratio(full_key, mass_kg)
+        aeb_max_brake = aeb_capacity_ms2(_base_brake, aeb_scale, intensity, aeb_full)
         if a > 0.01:
             # Creep subtracted so gear-1 samples learn the throttle-commanded
             self._capacity_tracker.update_accel(
                 a, max(0.0, raw_a), speed_ms, brake_grade_rad, game_clutch, tel_gear,
                 mass_kg, has_t, road_load_ms2=mapper_road_load_ms2 - mapper_creep_ms2,
             )
+
+        # Debug only, after every output is committed: loop() zeroes the pedals on
+        # any exception, so a logging fault must never escape this block.
+        if Settings.debug:
+            try:
+                tracker = self._capacity_tracker
+                self._brake_log.tick(
+                    time.monotonic(),
+                    (speed_ms >= 1.0 and logical_b > 0.002)
+                    or game_brake > 0.02 or _aeb_active,
+                    {
+                        "speed_ms": speed_ms,
+                        "accel_ms2": raw_a,
+                        "decel_fast_ms2": measured_decel_fast_ms2,
+                        "road_load_ms2": mapper_road_load_ms2,
+                        "slope_rad": brake_grade_rad,
+                        "gear": tel_gear_dashboard,
+                        "game_clutch": game_clutch,
+                        "game_throttle": game_throttle,
+                        "game_brake": game_brake,
+                        "gas": a,
+                        "user_brake": pedal_brake,
+                        "mapper_brake": mapper_brake,
+                        "hold_brake": hold_out.brake_pedal,
+                        "aeb_pedal": aeb_pedal,
+                        "logical_brake": logical_b,
+                        "sent_brake": sent_b,
+                        "full_authority": full_authority,
+                        "brake_intensity": intensity,
+                        "tune_pedal": effective_brake_pedal(sent_b, intensity),
+                        "aeb_active": _aeb_active,
+                        "aeb_warn": AEB_warn,
+                        "aeb_target_decel_ms2": AEB_target_decel,
+                        "aeb_required_decel_ms2": AEB_required_decel,
+                        "cruise_active": cruise_active,
+                        "controller": cruise_active_controller,
+                        "wanted_ms2": wanted_a,
+                        "est_brake_ms2": tracker.max_brake_ms2,
+                        "aeb_max_brake_ms2": aeb_max_brake,
+                        "aeb_brake_scale": aeb_scale,
+                        "aeb_full_ratio": math.nan if aeb_full is None else aeb_full,
+                        "brake_scale": tracker.brake_scale,
+                        "baseline_brake_ms2": _base_brake,
+                        "learn_gate": tracker.last_brake_gate,
+                        "learn_count": tracker.brake_samples_accepted,
+                        "learn_candidate": tracker.last_brake_candidate_scale,
+                        "mass_kg": mass_kg,
+                        "wheels_on_ground": wheels_on_ground,
+                        "trailer_count": ego_trailer_count,
+                    },
+                )
+            except Exception:
+                logger.debug("brake_debug tick failed", exc_info=True)
 
         self._tick_bool_presses(controller)
 
@@ -1651,9 +1764,7 @@ class SendingThread(BaseThread):
             self.data.decel_measured_ms2 = measured_decel_ms2
             self.data.decel_measured_lead_ms2 = measured_decel_lead_ms2
             self.data.max_brake_ms2 = self._capacity_tracker.max_brake_ms2
-            self.data.aeb_max_brake_ms2 = aeb_max_brake_ms2(
-                self._capacity_tracker.max_brake_ms2, intensity,
-            )
+            self.data.aeb_max_brake_ms2 = aeb_max_brake
             self.data.mapper_commanded_ms2 = wanted_a
             self.data.mapper_control_wanted_ms2 = mapper_control_wanted_ms2
             self.data.mapper_raw_accel_ms2 = raw_a
@@ -1741,6 +1852,7 @@ class SendingThread(BaseThread):
         self._prev_aeb_loop_mono = None
         self._accel_mapper.close()
         self._close_coast_log()
+        self._brake_log.close()
         logger.debug("teardown complete")
 
     def _tick_bool_overrides(self, controller: SCSController) -> None:

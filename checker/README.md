@@ -16,6 +16,15 @@ while running, see `monocruise.py`), it launches `MonoCruise.exe` once for
 that game session. Everything it does is written to `checker.log` next to the
 exe.
 
+Before launching it reads one value from `config.json` at the install root:
+the in-app "Autostart MonoCruise" setting (`autostart_variable`). When that is
+off it logs the skip and waits for the next game session. A missing or
+unreadable config counts as on, so a config mid-write never cancels autostart.
+This is how the in-app toggle controls autostart without the app ever touching
+the startup registry key. MonoCruise probes the checker's own mutex
+(`core/checker_status.py`) and greys the toggle out when no checker is running,
+since the setting would then do nothing.
+
 It makes no network connections, reads no personal data, and touches no
 registry keys. See the module docstring in [ets2_checker.py](ets2_checker.py)
 for the full behaviour contract.

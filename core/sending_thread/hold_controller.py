@@ -17,6 +17,16 @@ _HOLD_RELEASE_ACCEL_MS2: float = 0.25        # commanded accel above this advanc
 _HOLD_RELEASE_DWELL_S: float = 0.15          # accel must stay above release for this long before `t` advances
 _HOLD_LAUNCH_RAMP_S: float = 0.6             # full release at t=T
 _HOLD_ROLLING_EXIT_SPEED_KMH: float = 1.0    # forward-gear speed needed to settle into ROLLING after ramp
+# Crawl follow: ACC keeping speed behind a lead it measures moving. A mild decel
+# there is speed keeping, not a stop, until one of these says the stop is real.
+_HOLD_CRAWL_STOP_ACCEL_MS2: float = -0.3
+_HOLD_CRAWL_FLOOR_KMH: float = 1.0
+# Stop time the hold brake needs to build before zero: capture while at least this is left.
+_HOLD_CRAWL_MIN_TO_ZERO_S: float = 1.0
+_HOLD_DECEL_TAU_S: float = 0.15
+# Uphill, this share of the grade's pull counts as decel the mapper may not be holding:
+# a steep hill captures as early as without crawl follow.
+_HOLD_CRAWL_GRADE_MARGIN: float = 0.3
 # Bulletproof safety net: if the truck is unambiguously moving in the gear
 _HOLD_DEFINITELY_ROLLING_KMH: float = 5.0
 
@@ -108,6 +118,8 @@ class HoldController:
         self._rollback_decel_ms2: float = 0.0  # closed-loop integrator (extra decel beyond slope FF)
         self._since_rollback_s: float = 3600.0  # time since rollback_v was last nonzero
         self._brake_pedal_from_decel = brake_pedal_from_decel
+        self._prev_speed_ms: float | None = None
+        self._decel_ms2: float = 0.0          # smoothed measured decel, positive slowing
 
     @property
     def state(self) -> str:
@@ -123,6 +135,26 @@ class HoldController:
         self._park_brake_high_s = 0.0
         self._rollback_decel_ms2 = 0.0
         self._since_rollback_s = 3600.0
+        self._prev_speed_ms = None
+        self._decel_ms2 = 0.0
+
+    def _track_decel(self, speed_ms: float, dt: float) -> None:
+        if self._prev_speed_ms is not None and dt > 1e-6:
+            alpha = 1.0 - math.exp(-dt / _HOLD_DECEL_TAU_S)
+            raw = (self._prev_speed_ms - speed_ms) / dt
+            self._decel_ms2 += alpha * (raw - self._decel_ms2)
+        self._prev_speed_ms = speed_ms
+
+    def _crawl_must_stop(self, speed_kmh: float, commanded_accel_ms2: float, rollback_v: float,
+                         pitch_rad: float) -> bool:
+        """While crawl-following, what still counts as a stop. Any doubt captures."""
+        if commanded_accel_ms2 <= _HOLD_CRAWL_STOP_ACCEL_MS2 or rollback_v > 0.0:
+            return True
+        if speed_kmh < _HOLD_CRAWL_FLOOR_KMH:
+            return True
+        uphill = max(0.0, GRAVITY_MS2 * math.sin(pitch_rad))
+        decel = max(self._decel_ms2, -commanded_accel_ms2, 0.0) + _HOLD_CRAWL_GRADE_MARGIN * uphill
+        return decel > 1e-3 and (speed_kmh / 3.6) / decel < _HOLD_CRAWL_MIN_TO_ZERO_S
 
     @staticmethod
     def _idle_creep_offset_ms2(pitch_rad: float, gear: int, speed_kmh: float) -> float:
@@ -258,6 +290,7 @@ class HoldController:
         dt: float,
         game_clutch: float = 0.0,
         auto_neutral_active: bool = False,
+        crawl_follow: bool = False,
     ) -> HoldOutput:
         """Advance the FSM by one tick and produce a brake floor. See `core/sending_thread/README.md`."""
         dt = max(0.0, _finite_or_zero(dt))
@@ -271,6 +304,7 @@ class HoldController:
 
         pitch_rad = self._smooth_pitch(pitch_norm, dt)
         rollback_v = self._rollback_velocity_ms(speed_kmh, gear)
+        self._track_decel(speed_kmh / 3.6, dt)
         gas_release = self._gas_release_fraction(opdgasval)
 
         # Active-rollback window: the ramp retreat and the ROLLING exit key on
@@ -322,6 +356,9 @@ class HoldController:
         if self._state == STATE_ROLLING:
             below_capture = abs(speed_kmh) < _HOLD_CAPTURE_SPEED_KMH
             decel_intent = commanded_accel_ms2 <= 0.0
+            if decel_intent and crawl_follow and gear > 0 and not auto_neutral_active:
+                decel_intent = self._crawl_must_stop(speed_kmh, commanded_accel_ms2, rollback_v,
+                                                     pitch_rad)
             if below_capture and decel_intent and (
                 forward_intent or reverse_intent or auto_neutral_active
             ):

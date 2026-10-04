@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and setup help
+    url: https://discord.gg/MM9eV4CSxt
+    about: Ask on the MonoCruise Discord, the community and moderators can help there.
+  - name: Feature ideas
+    url: https://github.com/luuukske/MonoCruise/discussions/categories/ideas
+    about: Share and discuss ideas for new features.

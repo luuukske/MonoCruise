@@ -12,6 +12,8 @@ from pathlib import Path
 
 from core.settings import Settings
 
+from .launch_governor import LaunchGovernor, launch_gas_cap
+
 logger = logging.getLogger(__name__)
 
 FUEL_KG_PER_LITER: float = 0.832
@@ -212,6 +214,16 @@ def brake_curve_fraction(pedal: float) -> float:
     return 1.0 - math.exp(-_BRAKE_CURVE_RATE * x ** _BRAKE_CURVE_POWER)
 
 
+def brake_curve_pedal(fraction: float) -> float:
+    """Inverse of `brake_curve_fraction`: pedal [0-1] that delivers *fraction* of capacity."""
+    f = _finite_or_zero(fraction)
+    if f <= 0.0:
+        return 0.0
+    if f >= brake_curve_fraction(1.0):
+        return 1.0
+    return min(1.0, (-math.log(1.0 - f) / _BRAKE_CURVE_RATE) ** (1.0 / _BRAKE_CURVE_POWER))
+
+
 def compute_estimated_mass_kg(
     unit_mass_kg: float,
     cargo_mass_kg: float,
@@ -361,6 +373,10 @@ class AccelToPedals:
         # step instead of slewing across two commanders' unrelated setpoints.
         self._pending_wanted_snap: bool = False
 
+        # Launch governor state and the gas this mapper returned last tick.
+        self._launch: LaunchGovernor = LaunchGovernor()
+        self._prev_out_gas: float = 0.0
+
         # Debug logging
         self._project_root = Path(__file__).resolve().parents[2]
         self._debug_log_file = None
@@ -388,6 +404,8 @@ class AccelToPedals:
         self._wanted_smooth = 0.0
         self._fast_integral = 0.0
         self._fast_deriv_smooth = 0.0
+        self._launch = LaunchGovernor()
+        self._prev_out_gas = 0.0
         # Shared
         s = self._shared
         s.raw_smooth = 0.0
@@ -875,6 +893,7 @@ class AccelToPedals:
         new_output_smooth_ms2 = s.output_smooth_ms2
         new_prev_gas_cmd = s.prev_gas_cmd
         new_accel_capacity_glide = s.accel_capacity_glide_ms2
+        new_launch = LaunchGovernor()
 
         if cruise_commanding:
             error_ms2 = new_wanted_smooth - new_raw_smooth
@@ -1008,6 +1027,27 @@ class AccelToPedals:
             gas_cmd = _clamp(effort, 0.0, 1.0)
             brake_cmd = _clamp(-effort, 0.0, 1.0)
 
+            # Ceiling only: the limiter's gas caps the driver's pedal, and AEB owns the brake.
+            new_launch, launch_cap = launch_gas_cap(
+                self._launch,
+                dt=dt,
+                enabled=gear_dash > 0 and not freeze_trim and not cap_mode,
+                clutch_pressed=clutch_applied > _GAME_CLUTCH_ACTIVE_THRESHOLD,
+                speed_ms=speed,
+                factor=factor,
+                wanted_ms2=new_wanted_smooth,
+                accel_ms2=new_raw_smooth_live,
+                hold_pedal=max(0.0, GRAVITY_MS2 * math.sin(grade_rad)) / max_a_use,
+                prev_gas=self._prev_out_gas,
+                mapper_gas=gas_cmd,
+                gain_scale=gain_scale,
+            )
+            if launch_cap is not None:
+                gas_cmd = min(gas_cmd, launch_cap)
+                # The rate limit must not drag gas back up to a trajectory run up in neutral.
+                if new_prev_gas_cmd is not None:
+                    new_prev_gas_cmd = min(new_prev_gas_cmd, launch_cap)
+
             # Rate limit on gas only (brake must be immediate)
             if new_prev_gas_cmd is not None:
                 max_delta = _GAS_RATE_LIMIT_PER_S * dt
@@ -1048,6 +1088,8 @@ class AccelToPedals:
         s.prev_gas_cmd = new_prev_gas_cmd
         s.prev_effort = effort
         s.accel_capacity_glide_ms2 = new_accel_capacity_glide
+        self._launch = new_launch
+        self._prev_out_gas = gas_cmd
 
         # Learning: integrator state only. learn=False freezes adaptation
         # (accumulation and anti-windup snaps) while someone else drives.

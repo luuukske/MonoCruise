@@ -11,7 +11,7 @@ import sys
 import webbrowser
 from typing import TYPE_CHECKING, Any, Callable
 
-from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core import checker_status
 from core.input_bindings import binding_display_name, migrate_binding, resolve_held
 from core.longitudinal.accel_envelope import PROFILE_LABELS, resolve_profile
 from core.speed_units import (
@@ -73,6 +74,12 @@ _BIND_KEYS = (
 
 _BIND_BUTTON_SIZE = (150, 30)
 _BIND_POLL_MS = 33.333
+
+# Shown under a greyed-out autostart toggle when the checker is not running.
+_AUTOSTART_LIMITED_TEXT = (
+    "Your installation config is limiting this feature. Reinstall with autostart "
+    "ticked, or enable MonoCruiseChecker in Task Manager > Startup apps."
+)
 
 # ACC gap level 1..4 (core/cruise_control_thread/acc_distance.py owns the range).
 _GAP_LEVEL_LABELS = ("1 (0.7s)", "2 (1.1s)", "3 (1.5s)", "4 (2.2s)")
@@ -366,7 +373,6 @@ class SettingsPanel(QWidget):
     def _on_connect_pedals(self) -> None:
         if self._pedal_configuring:
             self._stop_pedal_config()
-            self._set_cmd_hint("Pedal configuration cancelled.")
             return
 
         pt = self._get_thread("main_pedal_thread")
@@ -391,7 +397,6 @@ class SettingsPanel(QWidget):
         self._pedal_configuring = True
         self.lbl_conn_error.setText("")
         self.btn_connect.setText("Tap the brake pedal  (click to cancel)")
-        self._set_cmd_hint("Tap the brake pedal.")
 
     def _stop_pedal_config(self) -> None:
         """Cancel any active pedal configuration and restore the button."""
@@ -416,18 +421,15 @@ class SettingsPanel(QWidget):
             has_result = pt.data.pedal_config_result is not None
 
         if has_result:
-            res = pt.consume_pedal_config()
+            pt.consume_pedal_config()
             self._pedal_configuring = False
             self._refresh_pedal_widgets()
             self.lbl_conn_error.setText("")
-            name = (res or {}).get("device_name") or "pedals"
-            self._set_cmd_hint(f"Pedals connected: {name}.")
             return
 
         if not active:
             # Cancelled or restarted underneath us (e.g. watchdog restart).
             self._stop_pedal_config()
-            self._set_cmd_hint("Pedal configuration cancelled.")
             return
 
         text = (
@@ -437,8 +439,6 @@ class SettingsPanel(QWidget):
         )
         if self.btn_connect.text() != text:
             self.btn_connect.setText(text)
-            if stage == "gas":
-                self._set_cmd_hint("Brake axis saved. Tap the gas pedal.")
 
     def _poll_pedal_status(self) -> None:
         """Keep the 'Connected pedals' label in sync with the pedal thread."""
@@ -476,11 +476,15 @@ class SettingsPanel(QWidget):
 
         new_section_header(p, self._r(), "Program settings")
 
-        new_label(p, self._r(0), 0, "Autostart MonoCruise:")
-        self.chk_autostart = new_checkbutton(
-            p, self._r(), 1, s.autostart_variable,
-            callback=lambda v: self._set("autostart_variable", v),
+        self.chk_autostart, self._autostart_subtext, _ = self._field_with_subtext(
+            "Autostart MonoCruise:",
+            lambda c, r, col: new_checkbutton(
+                c, r, col, s.autostart_variable,
+                callback=lambda v: self._set("autostart_variable", v),
+            ),
+            _AUTOSTART_LIMITED_TEXT,
         )
+        self.refresh_autostart_availability()
 
         self.ent_polling, _, _ = self._field_with_subtext(
             "Target polling rate (Hz):",
@@ -546,6 +550,15 @@ class SettingsPanel(QWidget):
         # Only the subtext toggles here -- the dropdown itself always stays
         # visible, unlike the whole-row conditionals (see _set_row_visible).
         self._preview_subtext.setVisible(s.update_channel.lower() == "preview")
+
+    def refresh_autostart_availability(self) -> None:
+        """Grey the autostart toggle out while no background checker runs to act on it."""
+        available = checker_status.checker_running()
+        self.chk_autostart.parentWidget().setEnabled(available)
+        self._autostart_subtext.setVisible(not available)
+        # Unticked while unavailable, since nothing will start; the stored value is kept.
+        with QSignalBlocker(self.chk_autostart):
+            self.chk_autostart.setChecked(bool(self._settings.autostart_variable) and available)
 
     def _on_update_channel_changed(self, value: str) -> None:
         self._set("update_channel", value.lower())
@@ -900,11 +913,6 @@ class SettingsPanel(QWidget):
         btn.set_binding_text(binding_display_name(raw), is_none=b is None)
         btn.setToolTip(str(b.get("device_name") or "") if b else "")
 
-    def _set_cmd_hint(self, text: str) -> None:
-        set_cmd = getattr(self.window(), "set_cmd", None)
-        if callable(set_cmd):
-            set_cmd(text)
-
     # Button binding: click handling
 
     def _on_bind_clicked(self, key: str) -> None:
@@ -914,7 +922,6 @@ class SettingsPanel(QWidget):
             return
         if self._configuring_key == key:
             self._stop_configuring()
-            self._set_cmd_hint("Assignment cancelled.")
             return
         self._start_configuring(key)
 
@@ -926,11 +933,9 @@ class SettingsPanel(QWidget):
             return
         if self._unassign_armed:
             self._disarm_unassign()
-            self._set_cmd_hint("Unassign cancelled.")
             return
         self._unassign_armed = True
         self._set_unassign_armed_style(True)
-        self._set_cmd_hint("Click a configure button to unassign it.")
 
     def _disarm_unassign(self) -> None:
         self._unassign_armed = False
@@ -947,7 +952,6 @@ class SettingsPanel(QWidget):
         self._set(key, None)
         self._glow_suppress.discard(key)
         self._refresh_bind_button(key)
-        self._set_cmd_hint("Button unassigned.")
 
     # Button binding: capture lifecycle
 
@@ -978,10 +982,6 @@ class SettingsPanel(QWidget):
                 logger.debug("failed to start keyboard capture", exc_info=True)
 
         self._bind_buttons[key].set_configuring(True)
-        self._set_cmd_hint(
-            "Press a button, hat direction or key to assign. "
-            "Esc or click again to cancel."
-        )
 
     def _stop_configuring(self) -> None:
         key = self._configuring_key
@@ -1001,12 +1001,10 @@ class SettingsPanel(QWidget):
         """Abort any active capture / armed unassign (e.g. drawer closed)."""
         if self._configuring_key is not None:
             self._stop_configuring()
-            self._set_cmd_hint("Assignment cancelled.")
         if self._unassign_armed:
             self._disarm_unassign()
         if self._pedal_configuring:
             self._stop_pedal_config()
-            self._set_cmd_hint("Pedal configuration cancelled.")
 
     # Button binding: polling (QTimer, main thread)
 
@@ -1076,7 +1074,6 @@ class SettingsPanel(QWidget):
                 elif self._kb_capture_started and not kb_active:
                     # Esc pressed: keyboard hook cleared its capture flag.
                     self._stop_configuring()
-                    self._set_cmd_hint("Assignment cancelled.")
                     return
 
         if binding is not None and key is not None:
@@ -1096,7 +1093,6 @@ class SettingsPanel(QWidget):
             except Exception:
                 logger.debug("failed to set capture guard", exc_info=True)
         self._refresh_bind_button(key)
-        self._set_cmd_hint(f"Assigned {binding_display_name(binding)}.")
 
     def _steal_duplicates(self, binding: dict, *, except_key: str) -> None:
         """Move the input if it was bound to another action: one input, one action."""
@@ -1403,7 +1399,6 @@ class SettingsPanel(QWidget):
                     duration_ms=7000,
                 )
 
-        self._set_cmd_hint("Reinstalling SDK...")
         try:
             start_reinstall(_on_done)
         except Exception:
@@ -1522,7 +1517,7 @@ class SettingsPanel(QWidget):
         self._refresh_pedal_widgets()
 
         # Program settings
-        self.chk_autostart.setChecked(s.autostart_variable)
+        self.refresh_autostart_availability()
         self.ent_polling.setText(str(s.polling_rate))
         self.chk_hazards.setChecked(s.hazards_variable)
         self.chk_autodisable.setChecked(s.autodisable_hazards)

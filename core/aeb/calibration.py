@@ -28,17 +28,20 @@ class AEBCalibration:
     corridor_margin: float = 0.5
     # Near-parallel capsule contacts: margin * scale at parallel; see core/aeb/README.md.
     capsule_parallel_margin_scale: float = 0.3
-    stop_buffer: float = 0.7
-    # Response-lag gap term (v_closing * this): brake build-up, and since the
-    # engage bar moved off ego_decel_frac, the only entry margin (README §7).
-    stop_buffer_response_s: float = 0.30
-    stop_buffer_response_trailer_s: float = 0.40
+    # Real bumper gap since ego_front_to_surface stopped adding half width (2026-10-04);
+    # before that every stop ended ego_half_width + this short (README, clearance demand).
+    stop_buffer: float = 0.5
+    # Response-lag gap term (v0 * this): AEB slam build-up, the only entry margin (README §7).
+    # Slams build in 0.24 s p90; trailer 0.25 touched in the TMP convoy sim (TUNING.md).
+    stop_buffer_response_s: float = 0.25
+    stop_buffer_response_trailer_s: float = 0.30
     # Reserve release after engagement: 0 holds it, 0.35 bleeds it off over the
     # measured build-up. Measured trade in TUNING.md; held is shipped.
     aeb_reserve_release_s: float = 0.35
     # Rejected 2026-07-19: response distance cap, threat-age tiering, engage 0.9 (README §7).
     elevation_margin: float = 5.0
     max_range: float = 200.0
+    # Traffic arcs; ego starts at its SDK rear-wheel mean, or here when unreadable.
     arc_start_pctg: float = 0.2
     collision_samples: int = 36
 
@@ -181,7 +184,8 @@ class AEBCalibration:
     aeb_disarm_frac: float = 0.45
     # Geometry latch while colliding unbraked ttc inside window (anti-pumping; README).
     disarm_hold_ttc_s: float = 3.0
-    aeb_warn_near_full_frac: float = 0.85
+    # Must equal aeb_engage_frac (pinned in tests/aeb/test_confirm.py).
+    aeb_warn_near_full_frac: float = 0.90
     brake_actuator_lag_s: float = 0.10
     # New engagements only fire when |ego_speed| is above this threshold.
     aeb_min_engage_speed_kmh: float = 5.0
@@ -201,7 +205,9 @@ class AEBCalibration:
     # Fully engage-vetoed out-of-lane sets warn only after this occupancy window.
     # Latency, never silence: a persisting course still warns (README).
     aeb_warn_confirm_vetoed_s: float = 1.00
-    aeb_warn_frac: float = 0.50
+    # Demand bar for warn_by_decel. 0.50 beeped before drivers start braking for
+    # stopped traffic; the measured trade is in TUNING.md.
+    aeb_warn_frac: float = 0.60
     # Evidence-class warn windows: oncoming sets and sets a full lane off the
     # ego arc are the two phantom-beep classes (README warn persistence).
     aeb_warn_confirm_oncoming_s: float = 2.00

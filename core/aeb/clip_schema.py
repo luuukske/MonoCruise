@@ -7,9 +7,12 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from core.radar.ego_geometry import EgoGeometry
+
 # Bump on shape change. v2: mass_kg. v3: blinkerLeft/Right (False if absent).
 # v5: ego pose read in the traffic buffer's game frame; replay re-pairs older clips.
-SCHEMA_VERSION: int = 5
+# v6: ego body and path origin from the SDK wheel layout (None replays the calibration body).
+SCHEMA_VERSION: int = 6
 
 # Sentinel used by the AEB thread for "no threat this tick".
 _INF: float = 1e9
@@ -64,6 +67,25 @@ class EgoTelemetry:
     # Absent on pre-v3 clips; False is the safe default (no blinker bias in replay).
     blinkerLeft: bool = False
     blinkerRight: bool = False
+    # SDK wheel-layout body (v6); None on older clips and when the layout was unreadable.
+    ego_front_m: float | None = None
+    ego_rear_m: float | None = None
+    ego_half_width_m: float | None = None
+    ego_path_origin_m: float | None = None
+
+    def set_geometry(self, geometry: EgoGeometry | None) -> None:
+        if geometry is None:
+            return
+        self.ego_front_m = geometry.front_m
+        self.ego_rear_m = geometry.rear_m
+        self.ego_half_width_m = geometry.half_width_m
+        self.ego_path_origin_m = geometry.path_origin_m
+
+    def geometry(self) -> EgoGeometry | None:
+        vals = (self.ego_half_width_m, self.ego_front_m, self.ego_rear_m, self.ego_path_origin_m)
+        if any(v is None for v in vals):
+            return None
+        return EgoGeometry(*vals)
 
     def to_json(self) -> dict:
         return {
@@ -81,6 +103,10 @@ class EgoTelemetry:
             "trailer_count": self.trailer_count,
             "blinkerLeft": self.blinkerLeft,
             "blinkerRight": self.blinkerRight,
+            "ego_front_m": self.ego_front_m,
+            "ego_rear_m": self.ego_rear_m,
+            "ego_half_width_m": self.ego_half_width_m,
+            "ego_path_origin_m": self.ego_path_origin_m,
         }
 
     @classmethod
@@ -100,6 +126,10 @@ class EgoTelemetry:
             trailer_count=int(d.get("trailer_count", 0) or 0),
             blinkerLeft=bool(d.get("blinkerLeft", False)),
             blinkerRight=bool(d.get("blinkerRight", False)),
+            ego_front_m=_opt_float(d.get("ego_front_m")),
+            ego_rear_m=_opt_float(d.get("ego_rear_m")),
+            ego_half_width_m=_opt_float(d.get("ego_half_width_m")),
+            ego_path_origin_m=_opt_float(d.get("ego_path_origin_m")),
         )
 
 

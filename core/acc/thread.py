@@ -8,6 +8,7 @@ import logging
 import threading
 from dataclasses import dataclass, field
 
+from core.radar.ego_geometry import EgoGeometry
 from core.settings import Settings
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
@@ -103,6 +104,7 @@ class ACCThread(BaseThread):
                     rt.data.paused,
                     rt.data.t_mono,
                     frozenset(getattr(rt.data, "off_surface_ids", frozenset())),
+                    getattr(rt.data, "ego_geometry", None),
                 )
         except AttributeError:
             return None
@@ -135,7 +137,7 @@ class ACCThread(BaseThread):
             return
 
         (vehicles, trailer_vehicles, ex, ey, ez, eyaw, espeed, esteer,
-         ekappa, paused, t_radar, off_ids) = snap
+         ekappa, paused, t_radar, off_ids, geometry) = snap
 
         # Nested trailers (road-train trailers behind the first) ride in a
         # separate radar list; score them alongside top-level vehicles.
@@ -167,6 +169,7 @@ class ACCThread(BaseThread):
                 ego_history_kappa=ekappa,
                 blinker_left=bl_left, blinker_right=bl_right,
                 off_surface_ids=off_ids,
+                ego_geometry=geometry if isinstance(geometry, EgoGeometry) else None,
             )
         except Exception:
             logger.exception("acc tracker update failed; holding previous leads")

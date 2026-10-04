@@ -51,6 +51,19 @@ Blend weight is a linear ramp in `km/h`:
 proxy. ACC can (and should) use the smoothed history fit because
 tracking tolerates: and prefers: a little smoothing.
 
+### Where the arc starts
+
+The arc starts at the rear-wheel mean the SDK wheel layout gives
+(`RadarData.ego_geometry.path_origin_m`, about 2.1 m behind placement), not at
+placement: launched from placement it ran wide of every bend by
+`kappa * d * s`, a one-sided miss of 0.26 m 10 m ahead at 10 to 20 m/s, which
+the curvature blend had not absorbed. `ACCTracker.update` shifts every arc
+distance back by `path_origin_m - front_delta_m`, so `dist_m` keeps its meaning
+and `EGO_FRONT_OFFSET_M` (2.5) still applies; only a truck whose nose sits
+farther forward than the reference rig's reads shorter gaps. With no geometry
+the tracker launches from placement as before. Measurements and the estimator:
+`core/radar/README.md` §17.
+
 ### Path half-width
 
     half = LANE_BASE_HALF_M + sin(min(|steer|·1.5, 1) · π/2) · LANE_FLARE_HALF_M

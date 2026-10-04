@@ -192,6 +192,8 @@ class Settings(metaclass=_SingletonMeta):
     # PedalCapacityTracker: persisted estimates (0 = use baseline on next startup)
     # Learned brake correction on the rig baseline; dimensionless, 0 = unset.
     pedal_capacity_brake_scale: float = 0.0
+    # Model version the scale above was learned under; a mismatch relearns it.
+    pedal_capacity_brake_model: int = 0
     # Superseded by pedal_capacity_brake_scale: an absolute m/s2 cannot survive a
     # trailer hookup. Retained so existing config files still load.
     pedal_capacity_max_brake_ms2: float = 11.457
@@ -204,6 +206,10 @@ class Settings(metaclass=_SingletonMeta):
     pedal_capacity_accel_ratio_step: float = 0.0
     # Zero-pedal tractive accel: the intercept of the affine pedal model.
     pedal_capacity_accel_zero_offset_ms2: float = 0.0
+    # AEB brake scale per "game|truck|trailers", learned from firm braking only.
+    aeb_brake_scales: dict = field(default_factory=dict)
+    # Measured full-pedal stops per "game|truck|trailers|slider": [[mass_kg, [ratios]], ...].
+    aeb_full_pedal: dict = field(default_factory=dict)
 
     _saved_state: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     _state_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)

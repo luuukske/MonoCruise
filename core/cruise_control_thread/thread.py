@@ -313,7 +313,8 @@ class CruiseControlThread(BaseThread):
                 ("cc", cc_out), ("limiter", limiter_out), ("acc", acc_out),
             )
 
-            self._publish_telemetry_command(wanted_accel if commanding else 0.0)
+            crawl = self._crawl_follow(self._acc_ctrl, acc_out, wanted_accel, commanding, winner)
+            self._publish_telemetry_command(wanted_accel if commanding else 0.0, crawl)
             self._publish_data(commanding, wanted_accel if commanding else 0.0, mode, winner)
             self._maybe_reset_mapper_on_commanding_end(commanding, paused=bool(paused))
 
@@ -328,6 +329,7 @@ class CruiseControlThread(BaseThread):
             tel = registry.get_thread("telemetry_thread")
             with tel.data._lock:
                 tel.data.commanded_accel_ms2 = 0.0
+                tel.data.commanded_crawl_follow = False
         except (KeyError, AttributeError):
             pass
         self._request_mapper_reset()
@@ -339,6 +341,14 @@ class CruiseControlThread(BaseThread):
         if not bids:
             return 0.0, False
         return min(bids), True
+
+    @staticmethod
+    def _crawl_follow(acc_ctrl, acc_out: LongOutput, wanted: float, commanding: bool,
+                      winner: str) -> bool:
+        """ACC's bid is the command and it is following a lead it measures moving. §10.3."""
+        if not (commanding and winner == "cc" and acc_out.active and acc_out.wanted_ms2 is not None):
+            return False
+        return acc_out.wanted_ms2 <= wanted + 1e-6 and bool(acc_ctrl.crawl_follow)
 
     @staticmethod
     def _arbitrate_named(*items: tuple[str, LongOutput]) -> tuple[float, bool, str]:
@@ -625,11 +635,12 @@ class CruiseControlThread(BaseThread):
             if cc.target_speed_kmh is None:
                 self._capture_target(cc, tel["speed_ms"])
 
-    def _publish_telemetry_command(self, wanted_accel_ms2: float) -> None:
+    def _publish_telemetry_command(self, wanted_accel_ms2: float, crawl_follow: bool = False) -> None:
         try:
             tel = registry.get_thread("telemetry_thread")
             with tel.data._lock:
                 tel.data.commanded_accel_ms2 = float(wanted_accel_ms2)
+                tel.data.commanded_crawl_follow = bool(crawl_follow)
         except (KeyError, AttributeError):
             pass
 

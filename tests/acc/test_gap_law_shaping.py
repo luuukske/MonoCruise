@@ -20,6 +20,7 @@ from core.cruise_control_thread.idm_cah import (
 )
 from core.cruise_control_thread.approach_profile import approach_band
 from core.cruise_control_thread.brake_landing import BrakeLanding
+from core.cruise_control_thread.pull_away import pace_lift
 from core.settings import Settings
 
 DT = 1.0 / 30.0
@@ -506,6 +507,9 @@ def test_every_feature_knob_disables_its_feature_at_zero():
     stopped = _LeadSnapshot(vid=1, dist_m=150.0, v_lead_ms=0.0, a_lead_ms2=0.0, score=6.0, conf=1.0)
     assert approach_band(cfg, 0.9, stopped, 13.9, 1.1) == 0.9
     assert approach_band(_controller().config, 0.9, stopped, 13.9, 1.1) < 0.0
+    # Pull-away: a lead creeping off from a standstill leaves the law alone.
+    assert pace_lift(cfg, 0.0, 5.1, 0.0, 0.4, 0.2, 1.1) == 0.0
+    assert pace_lift(_controller().config, 0.0, 5.1, 0.0, 0.4, 0.2, 1.1) > 0.25
 
 
 def test_closing_relief_matches_the_requested_shape():
