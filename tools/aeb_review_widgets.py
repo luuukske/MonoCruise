@@ -16,7 +16,7 @@ from core.aeb.clip_replay import ReviewFrame, decode_radar_stream, replay_clip, 
 from core.aeb.clip_schema import Clip, ClipMetadata, Label
 from core.aeb.clip_store import ClipInfo, ClipStore, contributed_clip_root, default_clip_root
 from core.aeb.debug_window import AEBDebugWindow
-
+from tools.aeb_review_map import RoadMapOverlay
 TTC_INF = 100.0         # recorded sentinel is 1e9; past this there is no tracked threat
 _DECEL_AXIS_MIN = 8.0   # m/s2 floor; the axis grows to the clip's own brake capacity
 _TTC_AXIS_MAX = 8.0     # s
@@ -317,9 +317,8 @@ class PullWorker(QObject):
         self.finished.emit(result)
 
 
-class SceneWidget(AEBDebugWindow):
+class SceneWidget(RoadMapOverlay, AEBDebugWindow):
     """Debug renderer fed replayed snapshots; click picks the nearest vehicle."""
-
     vehicle_picked = Signal(int)
 
     def __init__(self) -> None:
@@ -328,6 +327,7 @@ class SceneWidget(AEBDebugWindow):
         self._snap = None
         self.pick_mode = False
         self.show_vehicle_paths = True
+        self.init_road_map()
 
     def _provide(self):
         """Snapshot as drawn: vehicle corridors stripped when the toggle is off."""

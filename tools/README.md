@@ -321,3 +321,33 @@ releases that link the moment it is used by hand.
 `ClipLoader` builds the trace on its own thread from the decode the replay
 already paid for, so opening the charts costs about 0.1 s per clip in the
 background and nothing on the GUI thread.
+
+## Clip review road overlay
+
+Watch-AEB-Clips.cmd opens the review tool using the same automatic Python setup
+as Start-MonoCruise.cmd. The default local maps/roads.json loads on a background
+thread. Choose map JSON allows another map for the current session, including
+an uploaded roads(2).json. The Show roads checkbox toggles blue centre lines
+behind the vehicles; map status and nearby segment count distinguish loading,
+missing data and places with no road geometry. The overlay uses the renderer's
+world-to-screen transform, and never changes replay snapshots or AEB decisions.
+It shows centre lines at every elevation, not road edges or lane boundaries;
+prefab junction paths are currently absent. A nearby centre line alone does not
+prove a parked target occupies the driving lane. Clip labels remain manual.
+
+The clip road background also draws dashed yellow definition extents when the
+selected JSON includes explicit widths. Centre-only exports draw no borders;
+road templates with unresolved model dimensions remain unknown. The overlay
+never creates a fixed width around every road and never alters replay decisions.
+
+Official JSON with template_profiles now resolves conservative model collision
+surface candidates automatically on background load. Replay draws these orange
+and dotted, separately from yellow explicit definition extents. Candidate counts
+appear in map controls; unknown models produce no model edges. These overlays
+are unverified and do not establish lane membership or change replay decisions.
+
+Automatic surface evidence checks run on map load. Global checked/pending counts
+appear in replay map status; a snapshot without height cannot prove a road match.
+Road-specific check details therefore stay in the live panel. New preparation
+exports PMD attribute ranges and placement/road-instance evidence; older JSON
+stays pending and is never promoted by repeated driving or clip playback.

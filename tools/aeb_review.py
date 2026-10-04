@@ -21,6 +21,7 @@ from core.aeb.clip_replay import ReviewFrame
 from core.aeb.clip_schema import ClipMetadata, Label
 from core.aeb.clip_score import class_window_warning
 from core.aeb.clip_store import ClipInfo, ClipStore
+from tools.aeb_review_map import RoadMapControls
 from tools.aeb_fetch import safe_pull_root
 from tools.aeb_review_widgets import (
     DecisionStrip, Loaded, SceneWidget, ThumbnailView,
@@ -131,6 +132,7 @@ class ReviewWindow(QMainWindow):
         self._scene = SceneWidget()
         self._scene.vehicle_picked.connect(self._on_vehicle_picked)
         center.addWidget(self._scene, 1)
+        center.addWidget(RoadMapControls(self._scene))
 
         self._keys_lbl = keymap_overlay(self._scene)
 
