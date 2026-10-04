@@ -114,11 +114,17 @@ class Settings(metaclass=_SingletonMeta):
 
     # Safety & warnings
     hazards_variable: bool = True
+    experimental_hazard_flash: bool = False
     autodisable_hazards: bool = True
     horn_variable: bool = True
     airhorn_variable: bool = True
     autostart_variable: bool = True
     AEB_enabled: bool = False
+    aeb_skip_tmp_ncz: bool = True
+    driven_routes_enabled: bool = True
+    aeb_sound_file: str = ""
+    aeb_sound_style: str = "Chime"
+    aeb_sound_volume: int = 50
     # Debug AEB clip capture: grab a screen thumbnail per clip for tagging context.
     aeb_capture_screenshots: bool = True
     # Opt-in clip sharing. Off until the consent prompt is accepted; the version
@@ -484,4 +490,3 @@ class Settings(metaclass=_SingletonMeta):
 
             self._saved_state = dict(current)
             return
-
