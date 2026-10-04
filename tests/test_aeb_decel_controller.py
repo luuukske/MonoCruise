@@ -132,8 +132,8 @@ def test_never_overshoots_the_target_decel():
         (5.0, dict(dead=0.05, tau=0.10), False),
         (5.0, dict(dead=0.08, tau=0.30), False),
         (5.0, dict(offset=-0.6, dead=_AEB_PLANT_DEAD_TRAILER_S, tau=0.35), True),
+        # Measured trailer plants top out at 0.38 s; the 0.80 s case went 2026-10-04 (README).
         (5.0, dict(offset=-0.6, dead=_AEB_PLANT_DEAD_TRAILER_S, tau=0.65), True),
-        (5.0, dict(offset=-0.6, dead=_AEB_PLANT_DEAD_TRAILER_S, tau=0.80), True),
     ]
     for target, kwargs, trailer in cases:
         trace = run(target, Plant(**kwargs), has_trailer=trailer)

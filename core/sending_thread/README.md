@@ -357,11 +357,20 @@ supplies the correction.
   carries, and the residual against measured decel is the environment bias. Because
   model and measurement share the lag, the residual is bias rather than lag, so it
   settles with the plant instead of behind it. No integrator, so nothing winds up.
-- **Load classes**: the plant model is keyed on trailer presence. Measured from the clip
-  corpus, a solo tractor reaches t63 in ~0.22 s while a trailer's air brakes need ~0.65 s.
-  Both model taus are set above the measured median deliberately: a model slower than the
-  real plant biases the observer toward under-braking, and only over-braking is dangerous.
-  With a single solo-tuned model, trailer plants overshot the target decel by up to 39%.
+- **Load classes**: the plant model is keyed on trailer presence and sits at the measured
+  lag: dead 0.10 s / tau 0.19 s solo (median of 61 braking episodes, dead 0.12), dead 0.12 s
+  / tau 0.31 s with a trailer (the p90; the 2026-08-12 trailer probe read 0.22-0.30 and
+  refuted the older ~0.65 s figure). The models used to sit at 0.25 / 0.50 s on purpose, so
+  the observer leaned toward under-braking. Drivers paid for it: during the engagement slam
+  the real truck ran far ahead of the slow model, the residual read as a large bias, and
+  the pedal fell to near zero while the target was still 4-10 m/s2 (every no-driver stop in
+  `brake_debug.csv`, 2026-10-04), which reads as "AEB braked for nothing". In the stop sim
+  at 100% slider the lowest decel after the hit went 87% -> 94% of target and the residual
+  gap +0.28 -> +0.46 m, p90 lag unchanged. `test_never_overshoots_the_target_decel` covers
+  trailer plants up to 0.65 s; its 0.80 s case was dropped with Lukas's approval, since the
+  measured maximum is 0.38 s. A fully median model (0.19 s both) reaches 100% but fails the
+  0.65 s case and the "uses the truck it has" peak. With a single solo-tuned model, trailer
+  plants overshot the target decel by up to 39%.
 - **Measurement**: its own 0.12 s tracking differentiator. Do not point this at
   `_spd_smooth` (0.30 s), which `PedalCapacityTracker` and published telemetry depend on.
 - The commanded decel is floored at `AEB_ff_decel_ms2` so a stale or zero published
@@ -463,12 +472,12 @@ What follows from it:
 - **Learning** reads the sent pedal back through the same remap,
   `effective_brake_pedal` = `min(1, sent * I / 1.1)`, and never scales decel, so
   `brake_scale` and `max_brake_ms2` stay in tune units at any slider.
-- **AEB capacity** is `aeb_max_brake_ms2 = tune_max * min(1, I / 1.1)`. The extra a
-  high slider buys at full pedal (15-22% on the A/B) is traction-limited and rig
-  dependent, so it is left unused, on the safe side. A low slider is priced as a
-  full force cut, which can only under-read it. Never let this exceed `tune_max`:
-  with the September learner recovered it would have believed up to 2x the truck,
-  and on 09-21 it already believed ~19.7 m/s2 against stops of at most 17.5.
+- **AEB capacity** comes from its own per-truck scale, see **AEB capacity per truck**
+  below. The extra a high slider buys at full pedal is traction-limited and rig
+  dependent, so it is left unused, on the safe side. Never let AEB's capacity exceed
+  `aeb_scale * baseline`: with the September learner recovered it would have believed
+  up to 2x the truck, and on 09-21 it already believed ~19.7 m/s2 against stops of at
+  most 17.5.
 - **AEB and `em_stop`** still pass `full_authority=True` and write the logical
   pedal, so a slam writes 1.0 and saturation cannot be starved. At a high slider
   AEB's feedforward over-brakes mid-range; the observer takes that out.
@@ -484,6 +493,54 @@ remapped axis. `recent_brake_outputs` and the AEB observer use the sent value,
 because `gameBrake` and the plant see that. CC's game-brake disengage compare
 reads that ring buffer. `max_brake_ms2` on `SendingThreadData` is in tune units;
 `aeb_max_brake_ms2` is what AEB reads.
+
+### AEB capacity per truck (`aeb_capacity.py`)
+
+AEB plans with `aeb_capacity_ms2(baseline, aeb_scale, I)`:
+
+`baseline * min(aeb_scale * frac(min(1, I/1.1)) / frac(1), min(1, I/1.1))`
+
+The second term is the slider cut AEB always used. At `I = 1.0` it is 1/1.1, and that
+is not an error to remove: the model matched the truck at 100% (table below), so a clean
+100% user engages at about 90% of what full pedal delivers, which is the room AEB needs
+to brake harder or step down. The first term is what the learner's own pedal model says
+full pedal gives at this slider. Taking the lower stops a low slider being counted twice:
+the learned scale already absorbs part of the cut, and multiplying the cut on top read a
+slider-minimum rig at 0.15 of the model while it stopped at about 0.45.
+
+`aeb_scale` is learned per truck, keyed `game|truck_id|trailer_count`, and only from
+firm braking: tune pedal at least 0.5, or a sent pedal of at least 0.9 on a slider too
+low to reach that. It takes the tracker's settled sample (`last_settled_brake_sample`)
+before the mapper's 1.35x cap gate, clamps it to 0.35-1.00 and moves at
+`0.04 * firmness^3` per sample, so one full stop converges. An unmeasured truck starts at
+0.95. At most 64 trucks are kept, least recently braked first out, persisted in
+`aeb_brake_scales`. The mapper and ACC keep the global `brake_scale` unchanged.
+
+Why it is separate, from 2026-10-03/04 data:
+
+- Light braking reads low through the brake curve and road load: tune pedal under 0.3
+  gave median candidates 0.69 at 135% and 0.47 at 100%, firm braking 0.96. Light samples
+  carried about half the learning weight, so the shared scale only drifted down.
+- One shared scale mixes trucks: a 19 min ATS drive moved the ETS2 FH's estimate from
+  0.940 to 0.888, though that ATS truck stops at 0.97 of the model.
+- Contributed v1.1.0 clips: 45 of 49 rig clusters ran AEB at or below 0.92 of the model,
+  20 had learned down to 0.60-0.88.
+
+Full-pedal stops 2026-10-04 (peak 0.5 s decel less road load, over `frac(1)`), divided
+by `baseline_brake_ms2`:
+
+| rig | 100% | 139% | 300% |
+|---|---|---|---|
+| FH bobtail 10.5 t | 1.03, 0.93 | 1.40 | 1.47 |
+| FH single, 17.5 t | 1.00, 0.96, 0.89 | 1.25 | 1.44 |
+| FH single, 25.7 t | 0.99 | 1.29 | 1.63-1.68 |
+| FH single, 39.6 t | 1.15, 1.09 | 1.14 | |
+| ATS 10-wheel, 36 t | 0.97, 0.97 | | |
+
+The model holds to about 5% at 100%. Above it the gain runs from +3% to +65% by load,
+which is why it stays uncredited: a scale learned on the 25.7 t load at 139% would
+over-read the 39.6 t load by about 13%. The ceiling stays 1.00 for the same carry-over
+reason as `brake_scale`.
 
 ## Brake debug log (`debug_csv.py`)
 

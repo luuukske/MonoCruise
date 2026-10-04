@@ -20,12 +20,12 @@ from core.aeb.calibration import DEFAULT as _AEB_CAL
 from core.scs_profile.intensity import (
     BrakeIntensityCache,
     LowBrakeIntensityAebWarning,
-    aeb_max_brake_ms2,
     apply_brake_intensity,
     effective_brake_pedal,
 )
 
 from .accel_to_pedals import AccelToPedals, MapperSharedState, baseline_accel_ms2, baseline_brake_ms2
+from .aeb_capacity import AebCapacityStore, aeb_capacity_ms2, truck_key
 from .debug_csv import BrakeDebugLog, open_debug_csv
 from .hold_controller import (
     HoldController,
@@ -125,12 +125,12 @@ def hazard_action_for_sent_pedals(
 # Closed-loop decel controller: feedforward via the inverse brake curve plus a
 # disturbance observer that nulls environment error (grade, capacity, curve bias).
 _AEB_LEAD_CLAMP_MS2: float = 3.0
-# Brake plant model, fitted from engagement step responses in the clip corpus.
-# Both taus sit above the measured median deliberately, see the module README.
-_AEB_PLANT_DEAD_SOLO_S: float = 0.06
-_AEB_PLANT_TAU_SOLO_S: float = 0.25
-_AEB_PLANT_DEAD_TRAILER_S: float = 0.10
-_AEB_PLANT_TAU_TRAILER_S: float = 0.50
+# Brake plant model at the measured lag: median tau solo, p90 tau with a trailer.
+# The old 0.25 / 0.50 read the onset as bias and dropped the pedal after the slam: README.
+_AEB_PLANT_DEAD_SOLO_S: float = 0.10
+_AEB_PLANT_TAU_SOLO_S: float = 0.19
+_AEB_PLANT_DEAD_TRAILER_S: float = 0.12
+_AEB_PLANT_TAU_TRAILER_S: float = 0.31
 # Decel measurement filter for the AEB loop only. Deliberately faster than the
 # 0.30 s `_spd_smooth` that capacity learning and published telemetry tap.
 _AEB_MEAS_TAU_S: float = 0.12
@@ -374,6 +374,7 @@ class SendingThread(BaseThread):
         # Hill-hold / stopping FSM. Reuses the mapper's brake inverse curve so
         self._hold = HoldController(self._accel_mapper.brake_pedal_from_decel)
         self._capacity_tracker = PedalCapacityTracker()
+        self._aeb_capacity = AebCapacityStore()
         self._brake_intensity = BrakeIntensityCache()
         self._low_i_aeb_warn = LowBrakeIntensityAebWarning()
         self._aeb_controller = AEBDecelController()
@@ -851,6 +852,7 @@ class SendingThread(BaseThread):
             baseline_brake=baseline_brake_ms2(0.0, False),
             baseline_accel=baseline_accel_ms2(0.0, False),
         )
+        self._aeb_capacity.load_persisted()
 
         if self._controller is not None:
             logger.debug("SCSController initialised")
@@ -1048,6 +1050,7 @@ class SendingThread(BaseThread):
         engine_rpm = 0.0
         wheels_on_ground = 0
         ego_trailer_count = 0
+        truck_id = ""
         if connected and tel_thread is not None and tel_thread.is_alive() and not tel_paused:
             try:
                 with tel_thread.data._lock:
@@ -1060,6 +1063,7 @@ class SendingThread(BaseThread):
                     ego_trailer_count = int(
                         getattr(tel_thread.data, "trailer_count", 0) or 0
                     )
+                    truck_id = str(getattr(tel_thread.data, "truck_id", "") or "")
                     road_pitch = float(tel_thread.data.rotationY)
                     tel_gear_dashboard = int(tel_thread.data.gear_dashboard)
                     tel_gear = int(tel_thread.data.gear)
@@ -1531,10 +1535,14 @@ class SendingThread(BaseThread):
         # merge stays a max so a driver out-braking AEB always wins.
         now_ctrl = time.monotonic()
         aeb_pedal = 0.0
+        aeb_key = truck_key(tel_game, truck_id, ego_trailer_count)
         if _aeb_active and gasval < 0.8:
             aeb_i = self._brake_intensity.get(tel_game)
             aeb_cap = max(
-                aeb_max_brake_ms2(self._capacity_tracker.max_brake_ms2, aeb_i),
+                aeb_capacity_ms2(
+                    baseline_brake_ms2(mass_kg, has_t, wheels_on_ground),
+                    self._aeb_capacity.scale(aeb_key), aeb_i,
+                ),
                 0.1,
             )
             aeb_pedal = self._aeb_controller.step(
@@ -1636,6 +1644,11 @@ class SendingThread(BaseThread):
             aeb_active=_aeb_active,
             brake_intensity=intensity,
         )
+        settled = self._capacity_tracker.last_settled_brake_sample
+        if settled is not None:
+            self._aeb_capacity.observe(aeb_key, settled[0], settled[1], intensity)
+        aeb_scale = self._aeb_capacity.scale(aeb_key)
+        aeb_max_brake = aeb_capacity_ms2(_base_brake, aeb_scale, intensity)
         if a > 0.01:
             # Creep subtracted so gear-1 samples learn the throttle-commanded
             self._capacity_tracker.update_accel(
@@ -1680,7 +1693,8 @@ class SendingThread(BaseThread):
                         "controller": cruise_active_controller,
                         "wanted_ms2": wanted_a,
                         "est_brake_ms2": tracker.max_brake_ms2,
-                        "aeb_max_brake_ms2": aeb_max_brake_ms2(tracker.max_brake_ms2, intensity),
+                        "aeb_max_brake_ms2": aeb_max_brake,
+                        "aeb_brake_scale": aeb_scale,
                         "brake_scale": tracker.brake_scale,
                         "baseline_brake_ms2": _base_brake,
                         "learn_gate": tracker.last_brake_gate,
@@ -1713,9 +1727,7 @@ class SendingThread(BaseThread):
             self.data.decel_measured_ms2 = measured_decel_ms2
             self.data.decel_measured_lead_ms2 = measured_decel_lead_ms2
             self.data.max_brake_ms2 = self._capacity_tracker.max_brake_ms2
-            self.data.aeb_max_brake_ms2 = aeb_max_brake_ms2(
-                self._capacity_tracker.max_brake_ms2, intensity,
-            )
+            self.data.aeb_max_brake_ms2 = aeb_max_brake
             self.data.mapper_commanded_ms2 = wanted_a
             self.data.mapper_control_wanted_ms2 = mapper_control_wanted_ms2
             self.data.mapper_raw_accel_ms2 = raw_a

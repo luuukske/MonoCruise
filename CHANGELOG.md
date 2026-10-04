@@ -14,6 +14,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ### Changed
 - **ACC and AEB size up your own truck**: they now read your truck's length, width and wheelbase from the game instead of assuming one size, so AEB stops a little closer behind the vehicle ahead and ACC's predicted path no longer drifts to the outside of bends.
 
+### Fixed
+- **AEB stepped in too early**: it judged your truck's brakes from every truck you had driven and from gentle braking, which made trucks look weaker than they are, and after its first hard hit it let go of the brake almost completely. It now learns each truck separately from firm braking only, and lets go less after the first hit.
+
 ## [1.1.1] - 2026-10-04
 ### Fixed
 - **Hazards came on when you stomped the brake while stopped**: a hard press at a standstill switched the hazards on. They now only come on for a hard brake while driving.

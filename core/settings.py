@@ -206,6 +206,8 @@ class Settings(metaclass=_SingletonMeta):
     pedal_capacity_accel_ratio_step: float = 0.0
     # Zero-pedal tractive accel: the intercept of the affine pedal model.
     pedal_capacity_accel_zero_offset_ms2: float = 0.0
+    # AEB brake scale per "game|truck|trailers", learned from firm braking only.
+    aeb_brake_scales: dict = field(default_factory=dict)
 
     _saved_state: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     _state_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)

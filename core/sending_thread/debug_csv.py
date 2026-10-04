@@ -45,6 +45,7 @@ BRAKE_LOG_HEADER: list[str] = [
     "wanted_ms2",
     "est_brake_ms2",       # learned capacity, tune units
     "aeb_max_brake_ms2",
+    "aeb_brake_scale",     # per-truck AEB scale (aeb_capacity.py)
     "brake_scale",
     "baseline_brake_ms2",
     "learn_gate",

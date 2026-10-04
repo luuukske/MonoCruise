@@ -3,10 +3,9 @@
 The slider makes the same pedal brake harder (1/3 left, 1 centre, 3 right).
 Cruise and the driver's pedal send ``min(1, logical * 1.1 / I)``, so a given pedal
 brakes the same at every setting; capacity learning undoes that same remap with
-``effective_brake_pedal``. AEB and em_stop pass ``full_authority``. Full pedal
-gains little at a high slider (traction, ABS), and AEB leaves it unused: capacity
-is ``tune_max * min(1, I / 1.1)``. I below 1.0 cannot be fully recovered; warn
-while AEB is enabled. See README.md.
+``effective_brake_pedal``. AEB and em_stop pass ``full_authority``. AEB's own
+capacity lives in ``core/sending_thread/aeb_capacity.py``. I below 1.0 cannot be
+fully recovered; warn while AEB is enabled. See README.md.
 """
 
 from __future__ import annotations
@@ -65,20 +64,6 @@ def effective_brake_pedal(sent: float, intensity: float | None) -> float:
     if intensity is None:
         return p
     return min(p * clamp_brake_intensity(intensity) / TUNE_BRAKE_INTENSITY, 1.0)
-
-
-def aeb_available_decel_scale(intensity: float | None) -> float:
-    """Share of the I=1.1 capacity AEB can count on. Never above 1.
-
-    Full pedal at 150% measured 1.29x the 100% figure, not 3x (traction, ABS); that
-    extra is left unused. A low slider is priced as a force cut: never over-reads.
-    """
-    return min(clamp_brake_intensity(intensity) / TUNE_BRAKE_INTENSITY, 1.0)
-
-
-def aeb_max_brake_ms2(tune_max: float, intensity: float | None) -> float:
-    """Physical decel at pedal 1.0 for AEB planning and the AEB controller."""
-    return max(float(tune_max), 0.0) * aeb_available_decel_scale(intensity)
 
 
 class BrakeIntensityCache:

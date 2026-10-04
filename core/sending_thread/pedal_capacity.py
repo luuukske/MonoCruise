@@ -169,6 +169,8 @@ class PedalCapacityTracker:
         self.last_brake_gate: str = ""
         self.brake_samples_accepted: int = 0
         self.last_brake_candidate_scale: float = 0.0
+        # (candidate scale, tune pedal) of this tick's settled sample, before the cap gate.
+        self.last_settled_brake_sample: tuple[float, float] | None = None
 
     @property
     def max_brake_ms2(self) -> float:
@@ -304,6 +306,7 @@ class PedalCapacityTracker:
         # estimate in the same tick, so only the correction is carried over.
         if baseline_ms2 > 0.0:
             self._max_brake_ms2 = self._brake_scale * baseline_ms2
+        self.last_settled_brake_sample = None
 
         now = time.monotonic()
         # Everything below runs in tune units: gates and the curve read the pedal the
@@ -385,6 +388,7 @@ class PedalCapacityTracker:
             sum(pedal_values) / len(pedal_values), _BRAKE_PEDAL_FLOOR
         )
         candidate = mean_decel / brake_curve_fraction(mean_pedal)
+        self.last_settled_brake_sample = (candidate / baseline_ms2, mean_pedal)
         if candidate > _brake_candidate_cap_ms2(baseline_ms2):
             self.last_brake_gate = "cap"
             return

@@ -79,8 +79,8 @@ So a given pedal brakes the same at every slider setting, the driver's own
 pedal included. That is the requirement, confirmed by feel: keep it.
 
 Capacity learning undoes the same remap with `effective_brake_pedal` and never
-scales decel. AEB counts on `tune_max * min(1, I / 1.1)`: the traction-limited
-extra a high slider adds at full pedal is left unused. AEB and a manual
+scales decel. AEB's capacity never credits the traction-limited extra a high
+slider adds at full pedal (`core/sending_thread/aeb_capacity.py`). AEB and a manual
 emergency-stop slam use `full_authority` and write the logical pedal. Do not go
 back to `p ** (I / 1.1)` or to UI%/100 as the gain (150% UI is `I = 3`, not 1.5).
 Measurements and the reasoning are in `core/sending_thread/README.md` under

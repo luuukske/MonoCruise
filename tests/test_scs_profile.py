@@ -13,8 +13,6 @@ from core.scs_profile.intensity import (
     TUNE_BRAKE_INTENSITY,
     BrakeIntensityCache,
     LowBrakeIntensityAebWarning,
-    aeb_available_decel_scale,
-    aeb_max_brake_ms2,
     apply_brake_intensity,
     effective_brake_pedal,
 )
@@ -321,14 +319,8 @@ def test_brake_ui_scale_labels():
     assert brake_ui_scale(3.0) == pytest.approx(1.5)
 
 
-def test_aeb_capacity_never_exceeds_the_tune():
-    """A high slider reaches full brake with less travel; it adds no brake. See README."""
-    tune = 10.0
-    assert aeb_available_decel_scale(TUNE_BRAKE_INTENSITY) == pytest.approx(1.0)
-    assert aeb_max_brake_ms2(tune, TUNE_BRAKE_INTENSITY) == pytest.approx(tune)
-    assert aeb_max_brake_ms2(tune, 2.158) == pytest.approx(tune)
-    assert aeb_max_brake_ms2(tune, 3.0) == pytest.approx(tune)
-    assert aeb_max_brake_ms2(tune, 0.5) == pytest.approx(tune * 0.5 / TUNE_BRAKE_INTENSITY)
+def test_a_high_slider_remaps_the_cruise_pedal_down():
+    """AEB's capacity side moved to tests/test_aeb_capacity.py."""
     assert apply_brake_intensity(0.5, 3.0) == pytest.approx(0.5 * TUNE_BRAKE_INTENSITY / 3.0)
 
 
