@@ -1,0 +1,38 @@
+MONOCRUISE NCZ BRIDGE - DOWNLOAD AND INSTALL
+
+1. Open the project repository on GitHub.
+2. Click Releases and open the release you want.
+3. Under Assets, download MonoCruise-NCZ-GitHub.zip.
+   The maintainer must attach this file to the release first.
+4. Right-click the ZIP, choose Extract All, and open MonoCruise-NCZ.
+5. Close ETS2, ATS and MonoCruise.
+6. Double-click Install-NCZ.cmd.
+   It installs into all detected ETS2/ATS Steam installations.
+   If asked, select the game folder containing bin.
+   If access is denied, right-click the installer and run as administrator.
+7. Start a compatible MonoCruise version and launch the game through TruckersMP.
+8. Accept the SDK/plugin prompt if one appears.
+9. Enable Settings > Pause AEB in TMP NCZ.
+10. Enter and leave an NCZ and check the displayed status.
+
+MANUAL INSTALLATION
+Copy MonoCruiseNCZ.dll into the game's bin/win_x64/plugins folder.
+Use this instead of the installer if you want to select only one game.
+
+IF THERE IS NO RELEASE
+Use Code > Download ZIP, then extract the repository.
+Keep the DLL and both installer files in the same folder.
+If the DLL is missing, see README.md for build instructions.
+
+IMPORTANT
+The DLL reports zone state; it does not brake or change collision settings.
+You need a MonoCruise version with the NCZ reader AND AEB integration.
+The original MonoCruise executable does not gain support from the DLL alone.
+If loaded inside an NCZ, leave and enter again to establish the state.
+Unknown, disconnected or stale data leaves AEB enabled.
+ACC and OPD are not paused by this feature.
+Real Windows/TruckersMP operation was not verified in the development environment.
+
+UNINSTALL
+Close the game and remove MonoCruiseNCZ.dll from bin/win_x64/plugins.
+Restore its .bak backup if you need the previous version.

@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.21)
+project(MonoCruiseNCZ LANGUAGES CXX)
+add_library(MonoCruiseNCZ SHARED bridge.cpp)
+target_compile_features(MonoCruiseNCZ PRIVATE cxx_std_17)
+target_include_directories(MonoCruiseNCZ PRIVATE include)
+set_target_properties(MonoCruiseNCZ PROPERTIES PREFIX "")
