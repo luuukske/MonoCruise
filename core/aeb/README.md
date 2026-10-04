@@ -251,7 +251,7 @@ what ACC uses.
 | Module | Role |
 |--------|------|
 | `core/aeb/calibration.py` | Frozen `AEBCalibration` dataclass: all tunable constants. `DEFAULT` singleton used by both `thread.py` and tests. |
-| `core/aeb/lane_frame.py` | `Lane` enum, `project_to_ego_arc()`, `classify()`: arc-projected lane membership, replacing the old cross-product `lateral_offset`. |
+| `core/aeb/lane_frame.py` | `Lane` enum, `project_to_ego_arc()`, `classify()`: arc-projected lane membership, replacing the old cross-product `lateral_offset`. Also the body-in-lane primitives (`_any_body_in_ego_lane`, `_body_centreline_d_abs`). |
 | `core/aeb/filters.py` | Named filter pipeline: 12 stage classes + `FilterContext` + `build_pipeline()`. |
 | `core/aeb/thread.py` | `AEBThread`: data acquisition, ego-arc construction, pipeline dispatch, TTB/state output. |
 
@@ -610,15 +610,34 @@ straight-line path.
   direction, and `|dist · sin(road_bend / 2) − |lat_signed||` must fall within
   `corner_entry_lateral_tol`. Catches MP stopped queues whose lead vehicle
   projects to ego's straight axis but whose pose only makes sense on a curve.
-- Latched ids skip **Mode B only** (`lane == EGO`). Mode A's out-of-lane queue
+- Latched ids skip **Mode B** (`lane == EGO`). Mode A's out-of-lane queue
   must stay suppressed even if a graze latched the id.
   Mode B's `implied_kappa = road_bend / dist` grows as range falls, so a few
   degrees of yaw error that was legal at 40 m fires at 17 m while AEB is
   already braking. Do not add an in-lane bypass here: Mode B *is* the in-lane
   case (`fp_mp_stationary_corner_entry`). `CornerEntryStationaryFilterMirrored`
-  is Mode A and has no **latch** seat. Follow-threat ids do pass: a stopped
-  in-path cut-in can sit in `OPPOSITE_OR_OUTER` while occupying the corridor
-  (clip `c3c7a529`, d_abs ~4 m at bite).
+  is Mode A. Follow-threat ids do pass it: a stopped in-path cut-in can sit in
+  `OPPOSITE_OR_OUTER` while occupying the corridor (clip `c3c7a529`, d_abs ~4 m
+  at bite).
+- **A braked-for body still in ego's lane is never dropped** (Mode A, both
+  stages). The lane bucket keys off the reference point, so a long or angled
+  body whose centre reads `OPPOSITE_OR_OUTER` can still reach ego's lane. A
+  latched id with a body centreline sample inside `lane_half_width` and ahead
+  of ego's front (`_latched_body_in_lane`, shared with four more stages; see
+  the latched-threat hold) passes Mode A; a queue whose body stays out of the
+  band is still suppressed when latched.
+  Without it the stage dropped the vehicle AEB was braking for whenever
+  `|ego_curvature|` crossed `turning_diverge_kappa` mid-event: clip `da5dee09`
+  released at 48 km/h 14 m short of a stopped truck (0.97 m off ego's driven
+  line), and `16e65bcc` released for 0.27 s at 80 km/h. The headway hold
+  removed in `59cc071` used to mask this. Measured over 2642 clips, releases
+  above 20 km/h of a body on ego's recorded driven line fell 17 to 4
+  (`CornerEntryStationaryFilter`) and 14 to 9 (`...Mirrored`), with no verdict
+  change and no new engagement. **Entry is deliberately unchanged**: applying
+  the same body test before engagement rescued two misses but braked for seven
+  parked trailers and cars whose bodies reach the band at the roadside. The
+  remaining Mirrored drops are mid-turn targets on ego's curved path, which
+  `project_to_ego_arc`'s `max(d_arc, d_straight)` reads as out of lane.
 
 ### `EgoEvasionFilter`
 
@@ -662,8 +681,19 @@ into AND: that re-opens the shoulder FP class the 0.08 g filter exists for.
 When **any** slot in the frame has `is_tmp`, AEB pre-filters targets by
 **‖v_ego − v_target‖** (km/h) vs a **reference ego speed**:
 
-- ref **> 40 km/h** → threat only if rel **> 15 km/h**
-- ref **≤ 40 km/h** → threat only if rel **> 40 km/h**
+- ref **> 50 km/h** → threat only if rel **> 15 km/h**
+- ref **≤ 50 km/h** → threat only if rel **> 50 km/h**
+
+These are the effective bars of two stacked gates that carry different
+constants. The collision precompute in `thread.py` (`_tmp_collision_threat`:
+split 40, rel > 15 above it, rel > 40 at or below) skips a target before its
+arcs are built, and `TmpRelSpeedFilter` (`tmp_filter_split_kmh` 50,
+`tmp_filter_rel_above_kmh` 5, `tmp_filter_rel_below_kmh` 50) suppresses it in
+the pipeline. A target must pass both, so the 15 km/h bar comes from the
+precompute and the 50 km/h split and bar from the filter;
+`tmp_filter_rel_above_kmh` and the precompute's two 40s never bind. Moving one
+copy alone shifts only part of the band. Latched and follow-threat ids skip
+both gates.
 
 Reversing targets get no exemption. The floor keeps d80936f9 (a truck backing across
 ego's lane at 35 km/h relative) silent on purpose: exempting them re-opens the low-speed
@@ -965,7 +995,7 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    - `AEB_brake` is true while engagement is latched and the published target
      is above zero. Other subsystems (cruise/HMI) gate off this flag.
    - **User-braking suppression**: when `_read_user_braking()` is true and
-     demand has not reached `aeb_warn_near_full_frac · effective_max`,
+     demand has not reached `aeb_warn_near_full_frac · capability_decel`,
      `AEB_warn` is forced false: a driver already braking is not warned about a
      threat they are handling. This silences the cue only. Engagement, the
      published target, and `AEB_brake` are untouched. Three sources count:
@@ -1399,13 +1429,48 @@ things:
 1. **TMP rel-speed pre-filter bypass**: `TmpRelSpeedFilter` (and the
    matching precompute prefilter in `thread.py::loop`) skip the rel-speed
    gate for any id in the latched set. Without this, ego matching a TMP
-   convoy partner's speed under braking drops `rel_kmh` below the 15 / 40
-   km/h threshold and the target leaves the pipeline mid-stop.
+   convoy partner's speed under braking drops `rel_kmh` below the 15 / 50
+   km/h bar (section 4) and the target leaves the pipeline mid-stop.
 2. **Spatial drop-filter bypass**: `OutOfLaneParallelFilter` and
    `EgoEvasionFilter` skip a latched id; `CornerEntryStationaryFilter` skips
-   only a latched **Mode B** (`Lane.EGO`) id. The 0.08 g evasion pair and
-   Mode B `implied_kappa` are pose-jitter sensitive at short range and would
-   otherwise fire on the vehicle AEB is already braking for.
+   a latched **Mode B** (`Lane.EGO`) id. The 0.08 g evasion pair and Mode B
+   `implied_kappa` are pose-jitter sensitive at short range and would otherwise
+   fire on the vehicle AEB is already braking for. Six more stages keep a
+   latched id whose **body is still in ego's lane ahead** (below).
+
+**Body still in ego's lane ahead.** `OppositeLaneFilter`,
+`CoDirectionalDivergeFilter`, `TurningCrossTrafficFilter`,
+`TmpCrossTrafficFilter` and both corner-entry stages (Mode A) pass a latched id
+when `_latched_body_in_lane` holds: a body centreline sample within
+`lane_half_width` of ego's arc **and** ahead of ego's front (`s > 0`, the arc
+starts at the front bumper), with ego at or above `aeb_min_engage_speed_kmh`.
+These stages predict that a target will leave ego's path (it diverges, turns
+off, sweeps past, or sits on a bend); before engagement that prediction is what
+keeps AEB quiet, but once AEB is braking for a body that is still physically in
+front of ego, the clearance demand already prices in the target's motion and
+lets go when it really clears. Re-running the prediction mid-brake let go of the
+vehicle instead (card 131, after the corner-entry case in `da5dee09`).
+
+- **Ahead, not alongside.** Without `s > 0`, a TMP car passing on ego's hip at
+  walking pace (`1a9f5ffa`, false positive) held the brake 2.3 s instead of
+  0.6 s, through standstill and roll-back.
+- **Engage floor.** Below `aeb_min_engage_speed_kmh` the driver has authority
+  and no new event can start, so the filters keep their say there.
+- **Body test, not every latched id.** Bypassing for any latched id gained less
+  (corpus cost -1321 against -1331).
+- **Entry unchanged.** Not-yet-latched targets still face every filter: the
+  same body test at entry braked for parked trailers at the roadside (see the
+  corner-entry section).
+- **Measured** over 1321 scored clips: no verdict change, cost -1312.0 to
+  -1330.9, 17 clips better (mostly TP quality, `77902df4` 0.20 to 0.98), two
+  existing false positives brake longer (`3fe405cd` +0.27 s, `88726134`
+  +0.07 s). Releases above 20 km/h with at least 3 m/s^2 of demand the tick
+  before, where ego's body then came within 0.5 m of the target in the
+  recording, fell 24 to 12 (`TmpCrossTrafficFilter`), 26 to 20
+  (`OppositeLaneFilter`), 20 to 17 (`CoDirectionalDivergeFilter`) and 6 to 4
+  (`TurningCrossTrafficFilter`). The rest are targets not yet in ego's lane
+  when AEB lets go (cut-ins, oncoming drifting in, side crossers): an entry
+  question, not a mid-brake one.
 3. **Instant re-engage**: a latched id that becomes colliding again engages
    through the `certain` path, with no confirm window. The demand still has to
    clear the engage bar.
@@ -1591,7 +1656,7 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 - **A measured miss may remove certainty, never grant it.** The vetoes exist because arc-projected lane membership is an extrapolation and the CBDR miss is a measurement, so a *large* measured miss removes certainty (head-on bar, matched-speed neighbour). The converse does not hold: `d_miss` scales as `omega * R^2 / v_rel`, so a small value at range is not evidence of danger, it is a short-baseline fit over a long lever arm. A `lane_confidence_miss_m` clause that restored certainty on a small miss was tried and removed after the corpus grew: it was wrong on all four clips it affected. Also do not let a veto fire with no measurement at all unless its own physics stands alone (the ego-turn branch does; the matched-speed branch deliberately does not).
 - **The engage fraction is graded by certainty, and only by certainty.** `aeb_engage_frac_certain` applies when a colliding, non-engage-vetoed target is in `certain_geom_ids`, the same set that grants the instant confirm path. Do not widen it to `nearcertain_geom_ids` or to demand magnitude: required-decel size is not a certainty signal (see the tiered entry gate), and the corpus shows every clip the lower bar newly brakes on is geometrically identical to the ones it rescues. Unlike the veto thresholds it has no flat band, so re-price it against the corpus rather than assuming it still holds.
 - **Co-directional targets are exempt from the lane-confidence range and the oblique confirm window.** Both exemptions rest on the same fact: a pair travelling the same way shares whatever bend it is on, so the bend's lateral error is common-mode. Removing either one costs true positives on vehicles merging in and stopping ahead, which read as oblique purely because `fwd_dot` lands just under `aeb_certain_fwd_dot`.
-- **Warn suppression while already braking.** `aeb_warn` is suppressed when `_read_user_braking()` is true UNLESS `effective_required >= cal.aeb_warn_near_full_frac × effective_max_decel`. That helper is true for the driver's physical `brakeval` above `_USER_BRAKE_LATCH_THRESHOLD` (0.03), or any `opdbrakeval` / `sending_thread.mapper_command_brake` above zero. All three taps are AEB-free by construction; never source it from `abackward` or `brake_output`, which carry AEB's own slam and FF and would silence the warn during engagement. The driver / ACC / OPD already addressing the threat does not need a redundant alert: only surface it when AEB itself wants near-full brake.
+- **Warn suppression while already braking.** `aeb_warn` is suppressed when `_read_user_braking()` is true UNLESS `effective_required >= cal.aeb_warn_near_full_frac × capability_decel`. That helper is true for the driver's physical `brakeval` above `_USER_BRAKE_LATCH_THRESHOLD` (0.03), or any `opdbrakeval` / `sending_thread.mapper_command_brake` above zero. All three taps are AEB-free by construction; never source it from `abackward` or `brake_output`, which carry AEB's own slam and FF and would silence the warn during engagement. The driver / ACC / OPD already addressing the threat does not need a redundant alert: only surface it when AEB itself wants near-full brake.
 
 ---
 

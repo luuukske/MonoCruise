@@ -17,7 +17,9 @@ See **Brake intensity** below.
 
 `hazards_variable` gates every automatic press. Pedal loss turns hazards on
 on the rising edge and leaves them on. So does a hard brake on the pedal
-actually sent to the game, at the driver's slam floor (0.8). That check sits
+actually sent to the game, at the driver's slam floor (0.8), above 10 km/h
+like the driver slam itself: a stomp at rest is a hold, not an emergency,
+and holding it does not arm the lamps once the truck rolls. That check sits
 after the user-override merge, so an ACC brake the driver has overridden
 never lights the lamps. Braking-intensity compensation is applied after this
 check and does not change the floor.
