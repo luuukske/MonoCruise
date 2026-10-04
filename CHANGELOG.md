@@ -12,6 +12,12 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-04
+### Fixed
+- **Hazards came on when you stomped the brake while stopped**: a hard press at a standstill switched the hazards on. They now only come on for a hard brake while driving.
+- **AEB warning beeped too early**: approaching slower or stopped traffic, the warning sounded before you would normally start braking, and sometimes while you already were. It now waits until the stop is actually getting tight; when AEB brakes is unchanged.
+- **AEB let go before the stop was done**: braking for stopped traffic in a bend, a car turning off, or a TruckersMP truck crossing, AEB could release halfway and brake again, or let go completely. It now keeps braking while the vehicle is still in your lane ahead.
+
 ## [1.1.1-preview.1] - 2026-10-03
 ### Fixed
 - **Hazards came on when you stomped the brake while stopped**: a hard press at a standstill switched the hazards on. They now only come on for a hard brake while driving.
