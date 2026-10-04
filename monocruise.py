@@ -85,6 +85,7 @@ from core.radar.thread import RadarThread
 from core.aeb.thread import AEBThread
 from core.acc.thread import ACCThread
 from core.aeb.debug_window import AEBDebugWindow
+from core.auto_speed_limit.thread import AutoSpeedLimit
 
 from ui.main_window import create_main_window
 from ui.popup.popup_window import PopupWindow
@@ -459,6 +460,7 @@ def main() -> None:
         RadarThread(),
         AEBThread(),
         ACCThread(),
+        AutoSpeedLimit(),
     ]
 
     for w in workers:

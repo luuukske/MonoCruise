@@ -11,6 +11,8 @@ import sys
 import webbrowser
 from typing import TYPE_CHECKING, Any, Callable
 
+from core.settings import Settings
+
 from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
@@ -637,6 +639,17 @@ class SettingsPanel(QWidget):
             "Empty to disable.",
         )
 
+        new_label(p, self._r(0), 0, "Global speed limit to ingame limit:")
+        self.chk_autospeedlimit = new_checkbutton(
+            p, self._r(), 1, s.autospeedlimit_variable,
+            callback=lambda v: self._set("autospeedlimit_variable", v),
+        )
+        new_subtext(
+            p, self._r(), 0,
+            "Remove and reenter global speed limit after turning this off.",
+            col_span=2,
+        )
+
         # Button configure rows
         new_label(p, self._r(0), 0, "Enable/Disable button:")
         self._add_bind_button(self._r(), "cc_start_button")
@@ -788,21 +801,23 @@ class SettingsPanel(QWidget):
         return unit_label()
 
     def _global_limit_field_value(self):
-        kmh = self._settings.global_speed_limit_kmh
-        if kmh is None:
-            return None
-        if uses_mph():
-            return display_from_kmh(float(kmh))
-        return kmh
+        if not Settings.autospeedlimit_variable:
+            kmh = self._settings.global_speed_limit_kmh
+            if kmh is None:
+                return None
+            if uses_mph():
+                return display_from_kmh(float(kmh))
+            return kmh
 
     def _on_global_limit(self, value) -> None:
-        if value is None:
-            self._set("global_speed_limit_kmh", None)
-            return
-        if uses_mph():
-            self._set("global_speed_limit_kmh", kmh_from_display(int(value)))
-            return
-        self._set("global_speed_limit_kmh", value)
+        if not Settings.autospeedlimit_variable:
+            if value is None:
+                self._set("global_speed_limit_kmh", None)
+                return
+            if uses_mph():
+                self._set("global_speed_limit_kmh", kmh_from_display(int(value)))
+                return
+            self._set("global_speed_limit_kmh", value)
 
     def _show_global_limit(self) -> None:
         le = self.ent_global_limit
@@ -1537,6 +1552,7 @@ class SettingsPanel(QWidget):
         for key in self._bind_buttons:
             self._refresh_bind_button(key)
         # Keep persisted values numeric; add units only in UI display.
+        self.chk_autospeedlimit.setChecked(s.autospeedlimit_variable)
         self.refresh_speed_unit()
         self.chk_hold_reset.setChecked(s.long_press_reset)
         self.chk_show_speed.setChecked(s.show_cc_ui)

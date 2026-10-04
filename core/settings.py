@@ -175,6 +175,7 @@ class Settings(metaclass=_SingletonMeta):
 
     # CC set-speed clamp and always-on limiter cap (Speed limiter mode); None disables.
     global_speed_limit_kmh: float | None = None
+    autospeedlimit_variable: bool = False
 
     # AccelToPedals tuning: split gas (PID) / brake (feedforward + trim PI) architecture.
     # Weight baselines and smoothing constants stay fixed in code.
