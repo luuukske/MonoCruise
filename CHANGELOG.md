@@ -11,6 +11,9 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Added
+- **Set speed adjusts to in-game speed limit**
+
 ### Changed
 - **ACC and AEB size up your own truck**: they now read your truck's length, width and wheelbase from the game instead of assuming one size, so AEB stops a little closer behind the vehicle ahead and ACC's predicted path no longer drifts to the outside of bends.
 
