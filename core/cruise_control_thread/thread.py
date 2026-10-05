@@ -232,6 +232,7 @@ class CruiseControlThread(BaseThread):
                 dt=dt,
                 speed_ms=float(tel["speed_ms"]),
                 gear_dashboard=int(tel["gear_dashboard"]),
+                retarderBrake=int(tel["retarderBrake"]),
                 park_brake=bool(tel["park_brake"]),
                 game_throttle=float(tel["game_throttle"]),
                 game_clutch=float(tel["game_clutch"]),
@@ -380,6 +381,7 @@ class CruiseControlThread(BaseThread):
                     "paused": bool(tel.data.paused),
                     "speed_ms": float(tel.data.speed),
                     "gear_dashboard": int(tel.data.gear_dashboard),
+                    "retarderBrake": int(tel.data.retarderBrake),
                     "park_brake": bool(tel.data.parkBrake),
                     "game_clutch": float(tel.data.gameClutch),
                     "game_throttle": float(tel.data.gameThrottle),
@@ -676,6 +678,11 @@ class CruiseControlThread(BaseThread):
             ):
                 cc.disable()
                 logger.info("CC disabled: brake pressed", extra={"popup": True})
+
+        if cc.enabled:
+            if ctx.retarderBrake > 0:
+                cc.disable()
+                logger.info("CC disabled: retarder active", extra={"popup": True})
 
         if (
             cc.enabled
