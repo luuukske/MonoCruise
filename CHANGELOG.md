@@ -20,6 +20,11 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ### Fixed
 - **AEB stepped in too early**: it judged your truck's brakes from gentle braking and from every truck you had driven, assumed they take longer to bite than they do, ignored how hard your truck stops at full brake (much harder with the brake intensity slider turned up), and let go right after its first hard hit. It now steps in later, more so after two full-brake stops with a truck and load, and keeps braking firmly after the first hit.
 - **AEB stopped far behind the vehicle ahead**: it placed your truck's front about 1.3 m further forward than it really is, so every AEB stop ended well short, even from walking pace. It now stops about half a metre behind.
+- **Brake pedal revved the engine after launch**: on some pedal sets the first brake press after starting MonoCruise also gave half throttle, until the gas pedal was touched once. Each pedal now only moves with its own input.
+- **"Connect to pedals" missed or mixed up pedals**: on some pedal sets a tap was not detected, a light tap on a load-cell brake was too small to count, or brake and gas came out swapped or reversed. Taps are now measured from where each pedal actually rests, and a light tap is enough.
+- **Pedals not found after a firmware update**: updating or renaming a wheel or pedal set made MonoCruise lose it, along with any buttons bound to it. It now finds the same device again.
+- **Button assignment picked up pedals**: pressing a pedal while assigning a cruise button could bind the pedal as that button. Only real buttons can be assigned now, and a pedal that was already bound asks to be reassigned.
+- **Hangs and repeating popups with button devices**: with a bound button device unplugged, while assigning buttons, or when connecting pedals on a rig with many devices, MonoCruise could hang briefly, and a device it could not read repeated its "disconnected" popup every two seconds.
 
 ## [1.1.1] - 2026-10-04
 ### Fixed
