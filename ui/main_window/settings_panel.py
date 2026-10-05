@@ -11,8 +11,6 @@ import sys
 import webbrowser
 from typing import TYPE_CHECKING, Any, Callable
 
-from core.settings import Settings
-
 from PySide6.QtCore import QSignalBlocker, QSize, Qt, QTimer
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
@@ -624,10 +622,13 @@ class SettingsPanel(QWidget):
         self._accel_style_row = r_style
         self._set_row_visible(r_style, self._is_cruise_mode(s.cc_mode))
 
-        new_label(p, self._r(0), 0, "Auto set target speed to speed limit")
-        self.chk_autospeedtarget = new_checkbutton(
-            p, self._r(), 1, s.autospeedtarget_variable,
-            callback=lambda v: self._set("autospeedtarget_variable", v),
+        self.chk_autospeedtarget, _, _ = self._field_with_subtext(
+            "Set speed follows road limit:",
+            lambda c, r, col: new_checkbutton(
+                c, r, col, s.autospeedtarget_variable,
+                callback=lambda v: self._set("autospeedtarget_variable", v),
+            ),
+            "Changes the set speed at each new speed limit sign.",
         )
 
         # Global speed limiter (empty → None disables both CC clamp and
@@ -645,15 +646,13 @@ class SettingsPanel(QWidget):
             "Empty to disable.",
         )
 
-        new_label(p, self._r(0), 0, "Global speed limit to ingame limit:")
-        self.chk_autospeedlimit = new_checkbutton(
-            p, self._r(), 1, s.autospeedlimit_variable,
-            callback=lambda v: self._set("autospeedlimit_variable", v),
-        )
-        new_subtext(
-            p, self._r(), 0,
-            "Remove and reenter global speed limit after turning this off.",
-            col_span=2,
+        self.chk_autospeedlimit, _, _ = self._field_with_subtext(
+            "Limit to road speed limit:",
+            lambda c, r, col: new_checkbutton(
+                c, r, col, s.autospeedlimit_variable,
+                callback=lambda v: self._set("autospeedlimit_variable", v),
+            ),
+            "Caps at the posted limit, or the global limit if lower.",
         )
 
         # Button configure rows
@@ -807,23 +806,21 @@ class SettingsPanel(QWidget):
         return unit_label()
 
     def _global_limit_field_value(self):
-        if not Settings.autospeedlimit_variable:
-            kmh = self._settings.global_speed_limit_kmh
-            if kmh is None:
-                return None
-            if uses_mph():
-                return display_from_kmh(float(kmh))
-            return kmh
+        kmh = self._settings.global_speed_limit_kmh
+        if kmh is None:
+            return None
+        if uses_mph():
+            return display_from_kmh(float(kmh))
+        return kmh
 
     def _on_global_limit(self, value) -> None:
-        if not Settings.autospeedlimit_variable:
-            if value is None:
-                self._set("global_speed_limit_kmh", None)
-                return
-            if uses_mph():
-                self._set("global_speed_limit_kmh", kmh_from_display(int(value)))
-                return
-            self._set("global_speed_limit_kmh", value)
+        if value is None:
+            self._set("global_speed_limit_kmh", None)
+            return
+        if uses_mph():
+            self._set("global_speed_limit_kmh", kmh_from_display(int(value)))
+            return
+        self._set("global_speed_limit_kmh", value)
 
     def _show_global_limit(self) -> None:
         le = self.ent_global_limit
@@ -1558,9 +1555,9 @@ class SettingsPanel(QWidget):
         for key in self._bind_buttons:
             self._refresh_bind_button(key)
         # Keep persisted values numeric; add units only in UI display.
+        self.refresh_speed_unit()
         self.chk_autospeedlimit.setChecked(s.autospeedlimit_variable)
         self.chk_autospeedtarget.setChecked(s.autospeedtarget_variable)
-        self.refresh_speed_unit()
         self.chk_hold_reset.setChecked(s.long_press_reset)
         self.chk_show_speed.setChecked(s.show_cc_ui)
         self.opt_scaling.setCurrentText(str(s.cc_panel_scaling) if s.cc_panel_scaling else "100%")

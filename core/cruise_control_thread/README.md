@@ -74,6 +74,32 @@ earlier as km/h is shown as the nearest mph and is not rewritten until the drive
 edits the box. A step that does not change the displayed number leaves the stored
 km/h alone, so a target set in ETS2 is not nudged just by pressing a blocked step.
 
+## Road speed limit (`road_limit.py`)
+
+The SDK publishes the posted limit of the road under the truck (`speedLimit`, m/s,
+0 where there is none). Two independent options in the cruise control settings
+use it:
+
+- **Limit to road speed limit** (`autospeedlimit_variable`): the global limit
+  becomes the lower of the driver's box and the posted limit. It is applied at
+  runtime through `CruiseController.global_limit_kmh`, which every former reader
+  of `global_speed_limit_kmh` now uses: the set-speed clamp, both limiter
+  branches and the ATS button grid. The setting itself is never written. The
+  first version saved each posted limit into it and cleared it on switch-off,
+  which erased the driver's own limit. The clamp stays destructive, like the
+  global limit: with only this option on, leaving a 50 zone keeps the set speed
+  at 50.
+- **Set speed follows road limit** (`autospeedtarget_variable`): each new posted
+  limit becomes the set speed (the limiter cap in Speed limiter mode), on the
+  driver's unit grid and under the global limit. It fires on a change only, so a
+  button adjustment survives until the next sign, including a brief flicker
+  through "no limit". A road with no posted limit keeps the set speed: disabling
+  CC there dropped ACC mid-follow without a word.
+
+The SDK value is a 32-bit float, so `int(v * 3.6)` reads 80 as 79 and 130 as
+129. `road_limit_kmh` rounds in the driver's unit, which also puts ATS limits on
+whole mph.
+
 ## ACC gap buttons (`acc_distance.py`)
 
 One button assigned cycles the level and wraps; two assigned step and clamp, and

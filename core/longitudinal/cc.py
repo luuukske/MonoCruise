@@ -53,6 +53,8 @@ class CruiseController(LongitudinalController):
     def __init__(self) -> None:
         self._enabled: bool = False
         self._target_kmh: float | None = None
+        # Road speed limit fed by the orchestrator; None while it does not cap.
+        self._road_limit_kmh: float | None = None
 
         # PID state
         self._integral_error: float = 0.0
@@ -89,6 +91,18 @@ class CruiseController(LongitudinalController):
     @property
     def target_speed_kmh(self) -> float | None:
         return self._target_kmh
+
+    @property
+    def global_limit_kmh(self) -> float | None:
+        """Lower of the driver's global limit and the road limit; None when neither applies."""
+        limits = [] if self._road_limit_kmh is None else [self._road_limit_kmh]
+        glim = Settings.global_speed_limit_kmh
+        if glim is not None and isinstance(glim, (int, float)) and math.isfinite(float(glim)):
+            limits.append(float(glim))
+        return min(limits) if limits else None
+
+    def set_road_limit_kmh(self, v: float | None) -> None:
+        self._road_limit_kmh = v
 
     # Lifecycle controls: driven by the orchestrator's button FSM
 
@@ -191,12 +205,11 @@ class CruiseController(LongitudinalController):
 
     # Internals
 
-    @staticmethod
-    def _clamp_target_kmh(v: float) -> float:
+    def _clamp_target_kmh(self, v: float) -> float:
         upper = _SPEED_MAX_KMH
-        glim = Settings.global_speed_limit_kmh
-        if glim is not None and isinstance(glim, (int, float)) and math.isfinite(float(glim)):
-            upper = min(upper, float(glim))
+        glim = self.global_limit_kmh
+        if glim is not None:
+            upper = min(upper, glim)
         return max(_SPEED_MIN_KMH, min(upper, v))
 
     def _gearshift_d_factor(self, now: float, clutch: float) -> float:

@@ -175,6 +175,7 @@ class Settings(metaclass=_SingletonMeta):
 
     # CC set-speed clamp and always-on limiter cap (Speed limiter mode); None disables.
     global_speed_limit_kmh: float | None = None
+    # Road speed limit from the SDK: lowers the cap above, and drives the CC set speed.
     autospeedlimit_variable: bool = False
     autospeedtarget_variable: bool = False
 

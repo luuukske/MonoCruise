@@ -60,6 +60,7 @@ def telemetry_data(**overrides) -> Data:
         gameClutch=0.0,
         gameThrottle=0.0,
         gameBrake=0.0,
+        speedLimit=0.0,
         commanded_accel_ms2=0.0,
     )
     fields.update(overrides)
