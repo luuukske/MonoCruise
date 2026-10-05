@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import threading
 
-from core.aeb.thread import _AEBSoundHandler, _SoundState, _hmi_sound_step
+from core.aeb.thread import _hmi_sound_step
+from core.aeb.warning_player import SoundState, WarningPlayer
 
 
 def test_first_warn_tick_does_not_start_sound():
@@ -69,26 +70,31 @@ def test_cue_end_needs_both_warn_and_brake_clear():
     assert prev is False
 
 
-def _handler_stub(*, state: _SoundState) -> _AEBSoundHandler:
-    h = object.__new__(_AEBSoundHandler)
+def _handler_stub(*, state: SoundState) -> WarningPlayer:
+    h = object.__new__(WarningPlayer)
     h._sound = object()
     h._state = state
     h._lock = threading.Lock()
     h._stop_extra_replays = 1
+    h._min_cycles = 1
+    h._cycles_played = 1
     h._replays_remaining = 1
+    h._cue_active = True
+    h._cleared_at = float("-inf")
+    h._one_shot = None
     return h
 
 
 def test_soft_stop_from_running_schedules_extra_replay():
-    h = _handler_stub(state=_SoundState.RUNNING)
+    h = _handler_stub(state=SoundState.RUNNING)
     h._replays_remaining = 0
     h.stop_warning()
-    assert h._state == _SoundState.SHUTTING_DOWN
+    assert h._state == SoundState.SHUTTING_DOWN
     assert h._replays_remaining == 1
 
 
 def test_soft_stop_does_not_cut_shutdown_tail():
-    h = _handler_stub(state=_SoundState.SHUTTING_DOWN)
+    h = _handler_stub(state=SoundState.SHUTTING_DOWN)
     h.stop_warning()
-    assert h._state == _SoundState.SHUTTING_DOWN
+    assert h._state == SoundState.SHUTTING_DOWN
     assert h._replays_remaining == 1
