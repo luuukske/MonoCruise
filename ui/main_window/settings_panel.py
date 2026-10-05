@@ -622,6 +622,15 @@ class SettingsPanel(QWidget):
         self._accel_style_row = r_style
         self._set_row_visible(r_style, self._is_cruise_mode(s.cc_mode))
 
+        self.chk_autospeedtarget, _, _ = self._field_with_subtext(
+            "Set speed follows road limit:",
+            lambda c, r, col: new_checkbutton(
+                c, r, col, s.autospeedtarget_variable,
+                callback=lambda v: self._set("autospeedtarget_variable", v),
+            ),
+            "Changes the set speed at each new speed limit sign.",
+        )
+
         # Global speed limiter (empty → None disables both CC clamp and
         # always-on limiter: see AGENTS.md global_speed_limit_kmh).
         limit_lo, limit_hi = global_limit_bounds()
@@ -635,6 +644,15 @@ class SettingsPanel(QWidget):
                 callback=self._on_global_limit,
             ),
             "Empty to disable.",
+        )
+
+        self.chk_autospeedlimit, _, _ = self._field_with_subtext(
+            "Limit to road speed limit:",
+            lambda c, r, col: new_checkbutton(
+                c, r, col, s.autospeedlimit_variable,
+                callback=lambda v: self._set("autospeedlimit_variable", v),
+            ),
+            "Caps at the posted limit, or the global limit if lower.",
         )
 
         # Button configure rows
@@ -1538,6 +1556,8 @@ class SettingsPanel(QWidget):
             self._refresh_bind_button(key)
         # Keep persisted values numeric; add units only in UI display.
         self.refresh_speed_unit()
+        self.chk_autospeedlimit.setChecked(s.autospeedlimit_variable)
+        self.chk_autospeedtarget.setChecked(s.autospeedtarget_variable)
         self.chk_hold_reset.setChecked(s.long_press_reset)
         self.chk_show_speed.setChecked(s.show_cc_ui)
         self.opt_scaling.setCurrentText(str(s.cc_panel_scaling) if s.cc_panel_scaling else "100%")

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 from core.cruise_control_thread.acc_distance import AccDistanceButtons
 from core.cruise_control_thread.press_counter import PressCounter
+from core.cruise_control_thread.road_limit import RoadLimit
 from core.longitudinal.acc import AdaptiveCruiseController
 from core.longitudinal.base import LongCtx, LongOutput
 from core.longitudinal.cc import CruiseController
@@ -81,6 +82,8 @@ class CruiseControlThread(BaseThread):
         self._cc_user_override: bool = False
         # Quick lift-and-press at the cap drops the limiter. See README.
         self._limiter_panic = LimiterPanicOverride()
+        # Road speed limit: optional global cap and optional set-speed follow. See README.
+        self._road_limit = RoadLimit()
 
         # Button FSM state: owns press timing only; acts on CC via _cc_ctrl.
         self._time_pressed_dec: float | None = None
@@ -187,6 +190,8 @@ class CruiseControlThread(BaseThread):
                 self.avg_framerate,
             )
 
+            self._road_limit.step(self._cc_ctrl, tel["speed_limit_ms"])
+
             # Drive CC button FSM and ACC distance FSM.
             if connected and not paused and not device_lost:
                 if not all_assigned:
@@ -241,6 +246,7 @@ class CruiseControlThread(BaseThread):
             )
 
             mode = Settings.cc_mode
+            glim = self._cc_ctrl.global_limit_kmh
 
             # Reset the inactive controller's PID state on mode flip to avoid
             if mode != self._prev_cc_mode:
@@ -265,8 +271,8 @@ class CruiseControlThread(BaseThread):
                     self._cc_ctrl.set_target_kmh(self._cc_ctrl.target_speed_kmh)
                     self._limiter_ctrl.set_target_kmh(self._cc_ctrl.target_speed_kmh)
                     self._limiter_ctrl.enable()
-                elif Settings.global_speed_limit_kmh is not None:
-                    self._limiter_ctrl.set_target_kmh(float(Settings.global_speed_limit_kmh))
+                elif glim is not None:
+                    self._limiter_ctrl.set_target_kmh(glim)
                     self._limiter_ctrl.enable()
                 else:
                     self._limiter_ctrl.disable()
@@ -277,8 +283,8 @@ class CruiseControlThread(BaseThread):
                 acc_out = LongOutput(None, False)
             else:
                 # Global limiter runs in parallel with CC as an always-on cap
-                if Settings.global_speed_limit_kmh is not None:
-                    self._limiter_ctrl.set_target_kmh(float(Settings.global_speed_limit_kmh))
+                if glim is not None:
+                    self._limiter_ctrl.set_target_kmh(glim)
                     self._limiter_ctrl.enable()
                 else:
                     self._limiter_ctrl.disable()
@@ -336,13 +342,6 @@ class CruiseControlThread(BaseThread):
         logger.debug("cruise_control_thread teardown complete")
 
     @staticmethod
-    def _arbitrate(*outs: LongOutput) -> tuple[float, bool]:
-        bids = [o.wanted_ms2 for o in outs if o.active and o.wanted_ms2 is not None]
-        if not bids:
-            return 0.0, False
-        return min(bids), True
-
-    @staticmethod
     def _crawl_follow(acc_ctrl, acc_out: LongOutput, wanted: float, commanding: bool,
                       winner: str) -> bool:
         """ACC's bid is the command and it is following a lead it measures moving. §10.3."""
@@ -385,6 +384,7 @@ class CruiseControlThread(BaseThread):
                     "game_clutch": float(tel.data.gameClutch),
                     "game_throttle": float(tel.data.gameThrottle),
                     "game_brake": float(getattr(tel.data, "gameBrake", 0.0)),
+                    "speed_limit_ms": float(getattr(tel.data, "speedLimit", 0.0)),
                 }
         except Exception:
             return None
@@ -506,7 +506,7 @@ class CruiseControlThread(BaseThread):
             return
         if uses_mph():
             cc.set_target_kmh(step_setpoint_kmh(
-                cc.target_speed_kmh, delta, Settings.global_speed_limit_kmh,
+                cc.target_speed_kmh, delta, cc.global_limit_kmh,
             ))
             return
         cc.change_target_kmh(delta)
@@ -515,7 +515,7 @@ class CruiseControlThread(BaseThread):
         """Snap the set speed to the current speed in the driver's unit."""
         if uses_mph():
             cc.set_target_kmh(quantize_speed_kmh(
-                speed_ms, Settings.global_speed_limit_kmh,
+                speed_ms, cc.global_limit_kmh,
             ))
             return
         cc.set_target_from_speed_kmh(speed_ms * 3.6)
