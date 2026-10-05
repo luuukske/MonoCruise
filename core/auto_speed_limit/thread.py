@@ -72,10 +72,9 @@ class AutoSpeedLimit(BaseThread):
             else:
                 speedlimit = int(speedlimit)
             Settings.save({"global_speed_limit_kmh": speedlimit})
-        elif not Settings.autospeedlimit_variable:
-            if just_enabled: # The global speed limit will not go back to the value set in the box after turning this checkbox off
-                Settings.save({"global_speed_limit_kmh": None}) # imo this is better (less confusing) than the global limit staying at the latest ingame limit
-                just_enabled = False
+        elif just_enabled: # The global speed limit will not go back to the value set in the box after turning the checkbox off
+            Settings.save({"global_speed_limit_kmh": None}) # imo this is better (less confusing) than the global limit staying at the latest ingame limit
+            just_enabled = False
 
 
     def teardown(self) -> None:
