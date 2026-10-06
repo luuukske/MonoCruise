@@ -780,8 +780,8 @@ the session is no longer TMP.
 
 ### No-collision zones
 
-The floor guesses; the plugin's no-collision zone state knows. While radar's
-NCZ gate is open (`core/radar/README.md` §18) every TMP id is in `ncz_ids`, and
+The floor guesses; TruckersMP's own zone event knows. While radar's NCZ gate is
+open (`core/radar/README.md` §18) every TMP id is in `ncz_ids`, and
 `_read_radar_snapshot` folds them into the set AEB skips with the off-surface
 ids, so they never reach the precompute or the pipeline. Latched ids stay, as
 with the elevation gate. The floor itself is unchanged: outside a zone it still

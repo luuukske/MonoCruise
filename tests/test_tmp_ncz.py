@@ -19,8 +19,8 @@ from core.radar.elevation import BODY_DATUM_FRAC
 from core.radar.reader import _BUF_SIZE, _TOTAL_FORMAT
 from core.radar.thread import RadarData
 from core.radar.tmp_state import (
-    ENTER_CONFIRM_S, STALE_AFTER_S, NoCollisionZoneGate, TmpState, TmpStateReader,
-    decode_state, ncz_vehicle_ids,
+    ENTER_CONFIRM_S, STALE_AFTER_S, TELEPORT_JUMP_M, NoCollisionZoneGate, TmpState,
+    TmpStateReader, decode_state, ncz_vehicle_ids,
 )
 from tests.aeb.harness import make_vehicle
 
@@ -48,12 +48,17 @@ def test_unknown_layout_version_reads_as_no_data():
     ("fresh", False),
     ("connected", False),
     ("in_no_collision_zone", False),
-    ("players_streamed", 0),
-    ("players_collidable", 1),
 ])
-def test_any_disagreeing_signal_means_somebody_can_collide(field, value):
-    assert _GHOSTS.nobody_can_collide
-    assert not replace(_GHOSTS, **{field: value}).nobody_can_collide
+def test_the_zone_needs_a_live_connected_plugin_saying_so(field, value):
+    assert _GHOSTS.in_zone
+    assert not replace(_GHOSTS, **{field: value}).in_zone
+
+
+def test_per_player_collision_counts_do_not_decide_the_zone():
+    # TruckersMP's CanCollideWith read "can collide" for trucks overlapping ego in a zone
+    # and "cannot" for a truck closing head-on outside one (2026-10-06): diagnostics only.
+    assert replace(_GHOSTS, players_collidable=12).in_zone
+    assert replace(_GHOSTS, players_streamed=0, players_collidable=0).in_zone
 
 
 def test_reader_goes_stale_when_the_heartbeat_stops():
@@ -70,7 +75,7 @@ def test_reader_never_trusts_a_zero_heartbeat():
     r = TmpStateReader()
     r._buf = bytearray(_state_bytes(heartbeat=0))
     assert not r.read(5.0).fresh
-    assert not r.read(5.0).nobody_can_collide
+    assert not r.read(5.0).in_zone
 
 
 def test_reader_without_shared_memory_reads_as_no_data():
@@ -79,16 +84,40 @@ def test_reader_without_shared_memory_reads_as_no_data():
     assert r.read(1.0) == TmpState()
 
 
-def test_gate_needs_agreement_to_hold_and_releases_at_once():
+def test_gate_needs_the_zone_to_hold_and_releases_at_once():
     gate = NoCollisionZoneGate()
     assert not gate.step(_GHOSTS, 10.0)
     assert not gate.step(_GHOSTS, 10.0 + ENTER_CONFIRM_S - 0.01)
     assert gate.step(_GHOSTS, 10.0 + ENTER_CONFIRM_S)
-    collidable = replace(_GHOSTS, players_collidable=1)
-    assert not gate.step(collidable, 10.5)
+    assert not gate.step(replace(_GHOSTS, in_no_collision_zone=False), 10.5)
     # Re-entry starts the confirmation over.
     assert not gate.step(_GHOSTS, 10.6)
     assert gate.step(_GHOSTS, 10.6 + ENTER_CONFIRM_S)
+
+
+def test_a_teleport_keeps_the_gate_shut_until_the_plugin_reports_no_zone():
+    gate = NoCollisionZoneGate()
+    gate.step(_GHOSTS, 0.0, (100.0, 100.0))
+    assert gate.step(_GHOSTS, 1.0, (101.0, 100.0))
+    far = (101.0 + TELEPORT_JUMP_M + 1.0, 100.0)
+    # A stuck zone flag after a ferry or respawn must not keep AEB blind.
+    assert not gate.step(_GHOSTS, 1.1, far)
+    assert not gate.step(_GHOSTS, 5.0, far)
+    # A stale or disconnected blip is not the plugin saying "no zone".
+    assert not gate.step(replace(_GHOSTS, fresh=False), 5.1, far)
+    assert not gate.step(_GHOSTS, 6.0, far)
+    assert not gate.step(replace(_GHOSTS, in_no_collision_zone=False), 6.1, far)
+    assert not gate.step(_GHOSTS, 6.2, far)
+    assert gate.step(_GHOSTS, 6.2 + ENTER_CONFIRM_S + 0.01, far)
+
+
+def test_driving_never_counts_as_a_teleport():
+    gate = NoCollisionZoneGate()
+    x = 0.0
+    for i in range(300):
+        x += 1.5  # 45 m/s at 30 Hz
+        gate.step(_GHOSTS, i / 30.0, (x, 0.0))
+    assert gate.active
 
 
 def test_gate_releases_when_the_writer_goes_stale():
@@ -174,3 +203,40 @@ def test_module_reads_only_the_state_buffer():
     # Player data (Steam ids) lives in ETS2LAMpPlayers; MonoCruise never opens it.
     assert TS._STATE_TAG.endswith("ETS2LAMpState")
     assert TS._STATE_SIZE == struct.calcsize(TS._STATE_FORMAT)
+
+
+def _aeb_frame(vehicles, ncz_ids, latched=frozenset()):
+    from core.aeb.calibration import DEFAULT
+    from core.aeb.clip_eval import _make_headless, _snapshot_tuple
+
+    t = _make_headless(DEFAULT)
+    t._latched_threat_ids = set(latched)
+    ego = EgoTelemetry(coordinateX=0.0, coordinateZ=0.0, rotationX=0.0, speed=20.0)
+    snap = _snapshot_tuple(ego, vehicles, 10.0, frozenset(ncz_ids), 10.0, frozenset(ncz_ids))
+    t._read_radar_snapshot = lambda: snap
+    t._read_ego_geometry = lambda: None
+    t._read_max_brake_ms2 = lambda: 7.8
+    t._read_user_braking = lambda: False
+    t._read_addressing_brake = lambda: False
+    t._read_vehicle_key = lambda: None
+    t._now = lambda: 10.0
+    t.loop()
+    return t.data.snapshot
+
+
+def test_debug_snapshot_shows_ghosts_without_evaluating_them():
+    ghost = make_vehicle(7, 0.0, -30.0, 0.0, 0.0, is_tmp=True)
+    ai = make_vehicle(8, 3.5, -40.0, 0.0, 0.0)
+    snap = _aeb_frame([ghost, ai], ncz_ids={7})
+    by_id = {v["vid"]: v for v in snap.vehicles}
+    assert by_id[7]["ghost"] is True
+    assert not by_id[8].get("ghost", False)
+    assert snap.ghost_ids == {7}
+    assert 7 not in snap.vehicle_arcs and 7 not in snap.colliding_ids
+
+
+def test_a_latched_ghost_is_drawn_as_a_threat_not_a_ghost():
+    ghost = make_vehicle(7, 0.0, -30.0, 0.0, 0.0, is_tmp=True)
+    snap = _aeb_frame([ghost], ncz_ids={7}, latched={7})
+    assert snap.ghost_ids == set()
+    assert not any(v.get("ghost") for v in snap.vehicles)

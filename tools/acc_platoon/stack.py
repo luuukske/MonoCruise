@@ -216,7 +216,7 @@ class Client:
         # Past its 3 s arc horizon AEB has nothing to say; leaving far rigs out saves its probe.
         near = [v for v in self.frame_vehicles if rig_front(v) - ego_pos <= TRACKER_RANGE_M]
         snap = (near, 0.0, 0.0, -ego_pos, 0.0, self.truck.v, 0.0, 0.0, True,
-                None, True, False, self.frame_t, frozenset(), self.frame_t)
+                None, True, False, self.frame_t, frozenset(), self.frame_t, frozenset())
         self.aeb._read_radar_snapshot = lambda: snap
         self.aeb.loop()
         self.aeb_brake = bool(self.aeb.data.AEB_brake)
