@@ -92,6 +92,7 @@ class TelemetryThreadData(ThreadData):
     speedLimit: float = 0.0     # m/s, 0.0 when no speed limit
     blinkerRight = False
     blinkerLight = False
+    retarderBrake: int = 0
 
     # Engine
     engine_rpm: float = 0.0
@@ -170,13 +171,14 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         data.rotationX           = raw.get("rotationX", 0.0)
         data.speed               = raw.get("speed", 0.0)
         data.blinkerLeft         = raw.get("blinkerLeftActive", False)
-        data.blinkerRight         = raw.get("blinkerRightActive", False)
+        data.blinkerRight        = raw.get("blinkerRightActive", False)
         data.cruise_control_speed= raw.get("cruiseControlSpeed", 0.0)
         data.speedLimit          = raw.get("speedLimit", 0.0)
         data.engine_rpm          = raw.get("engineRpm", 0.0)
         data.engine_rpm_max      = raw.get("engineRpmMax", 2000.0)
         data.gear                = raw.get("gear", 0)
         data.gear_dashboard      = raw.get("gearDashboard", 0)
+        data.retarderBrake       = raw.get("retarderBrake", 0)
         data.userThrottle        = raw.get("userThrottle", 0.0)
         data.userBrake           = raw.get("userBrake", 0.0)
         data.userSteer           = raw.get("gameSteer", 0.0) # use game values for ETS2LA compatibility for example

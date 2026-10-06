@@ -232,6 +232,7 @@ class CruiseControlThread(BaseThread):
                 dt=dt,
                 speed_ms=float(tel["speed_ms"]),
                 gear_dashboard=int(tel["gear_dashboard"]),
+                retarderBrake=int(tel["retarderBrake"]),
                 park_brake=bool(tel["park_brake"]),
                 game_throttle=float(tel["game_throttle"]),
                 game_clutch=float(tel["game_clutch"]),
@@ -380,6 +381,7 @@ class CruiseControlThread(BaseThread):
                     "paused": bool(tel.data.paused),
                     "speed_ms": float(tel.data.speed),
                     "gear_dashboard": int(tel.data.gear_dashboard),
+                    "retarderBrake": int(getattr(tel.data, "retarderBrake", 0) or 0),
                     "park_brake": bool(tel.data.parkBrake),
                     "game_clutch": float(tel.data.gameClutch),
                     "game_throttle": float(tel.data.gameThrottle),
@@ -665,17 +667,18 @@ class CruiseControlThread(BaseThread):
             self.data.active_controller = active_ctrl
 
     def _handle_cc_disengage_conditions(self, ctx: LongCtx) -> None:
-        """Disengage CC on user brake, park/reverse, or crash-then-stop. See `core/cruise_control_thread/README.md`."""
+        """Disengage CC on user brake, retarder, park/reverse, or crash-then-stop. See `core/cruise_control_thread/README.md`."""
         cc = self._cc_ctrl
 
         if cc.enabled:
             game_brake_excess = ctx.game_brake - ctx.commanded_brake_recent_max
-            if (
+            user_braking = (
                 ctx.user_raw_brake > _CC_RAW_BRAKE_DISENGAGE
                 or game_brake_excess > _CC_GAME_BRAKE_DISENGAGE
-            ):
+            )
+            if user_braking or ctx.retarderBrake > 0:
                 cc.disable()
-                logger.info("CC disabled: brake pressed", extra={"popup": True})
+                logger.info("CC disabled: %s", "brake pressed" if user_braking else "retarder active", extra={"popup": True})
 
         if (
             cc.enabled

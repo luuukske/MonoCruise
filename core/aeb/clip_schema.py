@@ -142,15 +142,20 @@ class RadarFrameRecord:
     ego: EgoTelemetry = field(default_factory=EgoTelemetry)
     traffic_buf: bytes | None = None
     parked_buf: bytes | None = None
+    # TruckersMP no-collision zone gate was active (core/radar/README.md §18). Older clips: False.
+    tmp_ncz: bool = False
 
     def to_json(self) -> dict:
-        return {
+        out = {
             "t_wall": self.t_wall,
             "t_mono": self.t_mono,
             "ego": self.ego.to_json(),
             "traffic_buf": _b64(self.traffic_buf),
             "parked_buf": _b64(self.parked_buf),
         }
+        if self.tmp_ncz:
+            out["tmp_ncz"] = True
+        return out
 
     @classmethod
     def from_json(cls, d: dict) -> "RadarFrameRecord":
@@ -160,6 +165,7 @@ class RadarFrameRecord:
             ego=EgoTelemetry.from_json(d.get("ego", {})),
             traffic_buf=_unb64(d.get("traffic_buf")),
             parked_buf=_unb64(d.get("parked_buf")),
+            tmp_ncz=bool(d.get("tmp_ncz", False)),
         )
 
 

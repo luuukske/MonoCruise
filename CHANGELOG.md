@@ -13,6 +13,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ## [Unreleased]
 ### Added
 - **Set speed adjusts to in-game speed limit**
+- **CC disengages if retarder is active**
 - **Choose the AEB warning sound and volume**: pick the original warning, a simple high beep, a Volvo Cars, Volvo Trucks or Tesla-style warning, and set its volume. All styles sound about as loud as the original and each behaves like the system it imitates: the Volvo Cars warning sounds once per emergency, and the Volvo Trucks warning adds a second sound on top while the truck brakes. A test button plays about a second of the warning so you can balance it against game audio (it does not brake).
 
 ### Changed
@@ -21,6 +22,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ### Fixed
 - **AEB braked late for a stopped vehicle in a turn**: while turning, a stopped car or truck in your path could be taken for one parked beside the road or around the bend until it was too late to stop. AEB no longer waits past the last moment it can still stop for it.
+- **AEB braked for TruckersMP players in no-collision zones**: you drive through other players there, so AEB now ignores them inside a zone (needs the updated game plugin).
 - **AEB stepped in at the wrong moment**: it judged your truck's brakes from gentle braking and from every truck you had driven, assumed they take longer to bite than they do, ignored how hard your truck stops at full brake (much harder with the brake intensity slider turned up), and let go right after its first hard hit. It now judges your own truck's brakes, steps in early enough to stop in time, and keeps braking firmly after the first hit.
 - **AEB stopped far behind the vehicle ahead**: it placed your truck's front about 1.3 m further forward than it really is, so every AEB stop ended well short, even from walking pace. It now stops about half a metre behind.
 - **Brake pedal revved the engine after launch**: on some pedal sets the first brake press after starting MonoCruise also gave half throttle, until the gas pedal was touched once. Each pedal now only moves with its own input.
