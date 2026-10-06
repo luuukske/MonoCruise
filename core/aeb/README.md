@@ -1289,10 +1289,12 @@ plus the reserve, so **5.8 is the correct number and 16.3 was inflated
 threefold** by the lateral part of `v_closing` on the bend. Do not "fix" either
 clip by re-inflating the demand.
 
-**Side effect worth knowing.** The demand layer now declines the measured
-clear-pass oncoming case on geometry alone, reaching the same verdict the LOS
-veto was added for (`test_the_clearance_model_alone_declines_the_measured_clear_pass`).
-The vetoes still run and still scope to engagement entry.
+**Side effect worth knowing.** At the old 0.90 engage bar the demand layer
+appeared to decline the measured clear-pass oncoming case on its own. It did
+not: the clearance demand spikes to about 17 m/s^2 as the bodies come level,
+and that spike was only too brief to confirm. At the 0.50 bar it confirms, so
+the LOS veto is what holds this case (`test_the_vetoes_are_what_hold_the_measured_clear_pass`).
+The vetoes still scope to engagement entry.
 
 ### LOS-rate engagement veto (CBDR)
 
@@ -1432,6 +1434,9 @@ constant-curvature extrapolation, and these range and miss bars should be
 re-derived against it rather than carried over.
 
 ### Geometry-graded engage fraction
+
+Shipped since 2026-10-06: both fractions at 0.50, flat (`core/aeb/TUNING.md`).
+The rest of this section is the history that led there.
 
 `aeb_engage_frac` (0.85) is a hedge: only take the brake off the driver once
 the situation needs most of the truck's capacity, because the geometry that

@@ -123,17 +123,19 @@ def test_oncoming_that_measurably_clears_does_not_engage():
     )
 
 
-def test_the_clearance_model_alone_declines_the_measured_clear_pass():
-    """The demand layer reaches the same verdict as the vetoes, from geometry.
+def test_the_vetoes_are_what_hold_the_measured_clear_pass():
+    """At the 0.50 engage bar the demand layer alone engages; the vetoes keep it off.
 
-    With every engagement-entry veto disabled, the relative-frame formula peaked
-    around 19 m/s2 on this pass and engaged. The clearance model knows the bodies
-    go by 2.85 m apart, so it never asks for more than the truck can comfortably
-    give and the vetoes are not what is holding the brake off here.
+    With every engagement-entry veto disabled the clearance demand spikes to about
+    17 m/s2 as the bodies come level. At the old 0.90 bar that spike was too brief
+    to confirm, which read as the demand layer declining the pass by itself. At
+    0.50 it confirms, so the vetoes are load-bearing here. If the first assertion
+    starts failing, the demand layer declines it again: restore that README claim.
     """
     clip = _bend_clip(_CLEAR_OFFSET)
     no_vetoes = replace(_OLD, clearance_required_enabled=True)
-    assert not any(e.aeb_brake for e in run_headless(clip, cal=no_vetoes))
+    assert any(e.aeb_brake for e in run_headless(clip, cal=no_vetoes))
+    assert not any(e.aeb_brake for e in run_headless(clip))
 
 
 def test_vetoes_leave_engagement_alone_on_clear_pass():

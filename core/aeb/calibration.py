@@ -177,15 +177,15 @@ class AEBCalibration:
     # While engaged the pedal controller tracks this target, so a slow software ramp
     # only delays the bite; the plant's own 0.15 s lag is the real jerk limit.
     aeb_target_rate_engaged_ms3: float = 30.0
-    aeb_engage_frac: float = 0.90
-    # Graded hedge skip for aligned in-lane traffic; 0.85 in-game trial from
-    # 2026-08-11 equals aeb_engage_frac, so grading is flat (README, TUNING.md).
-    aeb_engage_frac_certain: float = 0.90
+    # Flat bar. 0.90 was priced before the bumper moved back (2026-10-04).
+    # 0.50 is the 2026-10-06 reprice: corpus -915, 0.55 was -876.
+    aeb_engage_frac: float = 0.50
+    aeb_engage_frac_certain: float = 0.50
     aeb_disarm_frac: float = 0.45
     # Geometry latch while colliding unbraked ttc inside window (anti-pumping; README).
     disarm_hold_ttc_s: float = 3.0
     # Must equal aeb_engage_frac (pinned in tests/aeb/test_confirm.py).
-    aeb_warn_near_full_frac: float = 0.90
+    aeb_warn_near_full_frac: float = 0.50
     brake_actuator_lag_s: float = 0.10
     # New engagements only fire when |ego_speed| is above this threshold.
     aeb_min_engage_speed_kmh: float = 5.0

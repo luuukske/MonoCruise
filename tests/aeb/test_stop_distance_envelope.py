@@ -284,18 +284,21 @@ def test_the_build_up_reserve_is_latched_at_engagement():
 
 
 def test_releasing_the_reserve_buys_headroom_to_answer_a_lead():
-    """Why the release is shipped: it gets the command off the command cap.
+    """Why the release is shipped: it leaves the command room to brake harder.
 
-    Held, the command sits at the cap for ~80% of the event, so a lead that
-    suddenly brakes harder gets no increase because AEB is already at maximum.
-    Released, it tracks what the threat actually needs and has somewhere to go.
+    At the old 0.90 bar the held command sat at the cap for ~80% of the event, so a
+    lead that suddenly brakes harder got no increase. At 0.50 neither saturates on
+    this stop, but the release still ends it on the lower peak (6.9 against 8.1
+    m/s2 on the 100 km/h double), and that difference is the room to answer a lead.
     """
     released = stop_against_stationary(100, 13.89, 13.89, True)
     held = stop_against_stationary(100, 13.89, 13.89, True, cal=HELD)
-    assert released["saturated"] < held["saturated"] - 0.1, (
-        f"released {released['saturated']:.0%} vs held {held['saturated']:.0%}: "
+    assert released["peak"] < held["peak"] - 0.5, (
+        f"released peak {released['peak']:.1f} vs held {held['peak']:.1f}: "
         "the release must leave room to brake harder"
     )
+    assert released["peak"] < 0.85 * 13.89
+    assert released["saturated"] <= held["saturated"]
 
 
 def test_the_entry_bar_is_not_discounted_twice():
@@ -303,9 +306,9 @@ def test_the_entry_bar_is_not_discounted_twice():
 
     Both halves of the "AEB steps in far too early and then crawls to a stop"
     report, priced separately on an 18-wheel double at 100 km/h. The double hedge
-    is the small one: 3.7 m. Reading capacity as 8.90 instead of 13.89, which is
-    what 44 recorded engagements actually did, is worth 20 m on top, and it also
-    caps `effective_max_decel` at 8.0 on a truck that has 13.9.
+    is the small one, about 6 m at the 0.50 bar. Reading capacity as 8.90 instead
+    of 13.89, which is what 44 recorded engagements actually did, is worth 20 m
+    on top, and it also caps `effective_max_decel` at 8.0 on a truck that has 13.9.
     """
     capacity, v = 13.89, 100 / 3.6
     stale = 8.90
@@ -322,7 +325,9 @@ def test_the_entry_bar_is_not_discounted_twice():
 
     hedged = engage_gap(CAL.aeb_engage_frac * CAL.ego_decel_frac * capacity)
     stale_cap = engage_gap(CAL.aeb_engage_frac * CAL.ego_decel_frac * stale)
-    assert 3.0 < hedged - shipped["engage_gap"] < 5.0
+    assert 5.0 < hedged - shipped["engage_gap"] < 7.5
     assert stale_cap - hedged > 18.0, "capacity error must dominate the hedge"
 
-    assert shipped["peak"] > 0.85 * capacity, "and it must use the truck it has"
+    assert shipped["peak"] > 0.45 * capacity, (
+        "and it must still brake for the stop: about half the truck at the 0.50 bar"
+    )

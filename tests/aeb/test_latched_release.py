@@ -206,15 +206,14 @@ def test_clip_d16d0575_stops_braking_when_the_threat_collapses():
     """0.74 s behind a lead braking 1.5 m/s^2: entry on the recorded clock, the tail is not.
 
     The old hold braked at 0.4 m/s^2 of demand to 10.7 s. Now each brake ends with its hits,
-    and the lead closing in again on the recorded clock is a second, separate event. On the
-    simulated clock the demand peaks at 3.3 m/s^2 once the ego bumper is not placed half a
-    width too far forward (2026-10-04), so AEB stays out of it entirely.
+    and the lead closing in again is a second, separate event. On the simulated clock the
+    demand peaks at 8.1 m/s^2 against a 5.7 capacity read, so the 0.50 engage bar brakes
+    there too (4.4 s and 8.1 s); both brakes still end with their hits.
     """
     from core.aeb.clip_store import ClipStore
 
     clip = ClipStore().load(_store_clip(CLIP_D16D0575))
     assert clip is not None
-    last_hit, last_brake = _threat_and_brake_ends(clip, as_recorded=True)
-    assert last_brake <= last_hit + 0.1
-    ticks = run_headless(clip, cal=CAL, stream=decode_radar_stream(clip, as_recorded=False))
-    assert not any(e.aeb_brake for e in ticks)
+    for as_recorded in (True, False):
+        last_hit, last_brake = _threat_and_brake_ends(clip, as_recorded=as_recorded)
+        assert last_brake <= last_hit + 0.1, f"as_recorded={as_recorded}"
