@@ -14,11 +14,14 @@ from core.thread_management.registry import registry
 from core.settings import Settings
 from core.input_bindings import (
     binding_state,
+    joystick_guid_vid_pid,
     keyboard_is_pressed,
     migrate_binding,
     resolve_held,
     resolve_press_count,
 )
+from core.main_pedal_thread.joystick_pool import JoystickPool, pick_joystick
+from core.main_pedal_thread.pedal_axes import PedalAxes, TapDetector
 
 logger = logging.getLogger(__name__)
 
@@ -35,24 +38,32 @@ _DIR_IDX_TO_XY: dict[int, tuple[int, int]] = {
 }
 
 
-def _read_axis(device: pygame.joystick.JoystickType, axis: int, inverted: bool) -> float:
-    """Return a normalised [0.0, 1.0] value from a joystick axis."""
-    raw = device.get_axis(axis)
-    if inverted:
-        raw = -raw
-    return round((raw + 1) / 2, 3)
+def _find_joystick(guid_hex: str, *, min_axes: int = 0) -> pygame.joystick.JoystickType | None:
+    """Joystick with this GUID, else the only one with its vid:pid. See the README."""
+
+    def candidates():
+        for i in range(pygame.joystick.get_count()):
+            try:
+                js = pygame.joystick.Joystick(i)
+                yield js.get_guid(), js
+            except Exception as exc:
+                logger.debug("skipping joystick %d during enumeration: %s", i, exc)
+
+    js, by_vid_pid = pick_joystick(
+        candidates(), guid_hex, accept=lambda j: j.get_numaxes() >= min_axes,
+    )
+    if by_vid_pid:
+        logger.info(
+            "found %r by vid:pid %s: its GUID changed (renamed or new firmware)",
+            js.get_name(), joystick_guid_vid_pid(guid_hex),
+        )
+    return js
 
 
-def _find_joystick(guid_hex: str) -> pygame.joystick.JoystickType | None:
-    """Return the first joystick whose GUID matches *guid_hex*, or None."""
-    for i in range(pygame.joystick.get_count()):
-        try:
-            js = pygame.joystick.Joystick(i)
-            if js.get_guid() == guid_hex:
-                return js
-        except Exception as exc:
-            logger.debug("skipping joystick %d during enumeration: %s", i, exc)
-    return None
+def _pedal_axes_needed() -> int:
+    """Axis count a device must have to carry the configured pedals."""
+    axes = [a for a in (Settings.gasaxis, Settings.brakeaxis) if isinstance(a, int)]
+    return max(axes) + 1 if axes else 0
 
 
 def _opd_interpolate(y_lo: float, y_hi: float, x: float, x_lo: float, x_hi: float) -> float:
@@ -175,6 +186,8 @@ class MainPedalThread(BaseThread):
 
         self._device: pygame.joystick.JoystickType | None = None
         self._device_instance_id: int | None = None
+        # Gas and brake from the pedal device's own axis events only.
+        self._axes = PedalAxes()
 
         # Pedal reconnect state machine: non-blocking, advances each loop() tick.
         # States: None → "initial_wait" → "attempt" → "attempt_wait" → "reinit_wait" → "reinit"
@@ -197,9 +210,12 @@ class MainPedalThread(BaseThread):
         # previous tick's states: used for 0→1 capture detection
         self._prev_capture_states: dict[str, dict[int, bool]] = {}
 
-        # See `core/main_pedal_thread/README.md`.
+        # Every connected joystick, opened a few per tick for button capture and
+        # pedal configuration. See `core/main_pedal_thread/README.md`.
+        self._joy_pool = JoystickPool(pygame.joystick.get_count, pygame.joystick.Joystick)
+        # Set from the UI thread when a flow starts; the loop restarts the walk.
+        self._joy_pool_restart = False
         self._capture_scan_devices: dict[str, pygame.joystick.JoystickType] = {}
-        self._capture_scan_count: int = -1
         # Guard safety timeout: clear a stuck capture_guard (e.g. bound to a
         # device that never reports) so CC buttons cannot stay dead forever.
         self._capture_guard_ts: float = 0.0
@@ -214,9 +230,10 @@ class MainPedalThread(BaseThread):
         # Pedal configuration flow (thread-owned):
         # guid → joystick for every connected device while config is active.
         self._pconf_devices: dict[str, pygame.joystick.JoystickType] = {}
-        self._pconf_count: int = -1
-        # guid → {axis: resting value}, captured when a device is first seen.
-        self._pconf_baselines: dict[str, dict[int, float]] = {}
+        self._pconf_guid_by_instance: dict[int, str] = {}
+        self._pconf_names: dict[str, str] = {}
+        self._pconf_taps = TapDetector()
+        self._pconf_logged_walk = 0
         # Brake capture result, held until the gas axis is captured too.
         self._pconf_device_guid: str | None = None
         self._pconf_brake_axis: int | None = None
@@ -234,7 +251,7 @@ class MainPedalThread(BaseThread):
         # Pedal device (critical).
         pedal_guid = Settings.device
         if pedal_guid:
-            js = _find_joystick(pedal_guid)
+            js = _find_joystick(pedal_guid, min_axes=_pedal_axes_needed())
             if js is not None:
                 js.init()
                 self._device = js
@@ -276,8 +293,9 @@ class MainPedalThread(BaseThread):
         # Pedal configuration flow: runs before the telemetry gate so pedals
         # See `core/main_pedal_thread/README.md`.
         if self.data.pedal_config_active:
-            # Keep pumping SDL so get_axis() stays live and hot-plug
-            # bookkeeping (device added/removed) keeps working.
+            # Open every joystick before pumping, so this tick's axis events
+            # reach the tap detector. Hot-plug bookkeeping keeps working.
+            self._sync_pconf_devices()
             self._process_pygame_events(0.0)
             self._tick_pedal_config()
             if tel is not None:
@@ -300,7 +318,7 @@ class MainPedalThread(BaseThread):
         if tel is None:
             # Game closed: still pump SDL events and tick the reconnect FSM so
             # See `core/main_pedal_thread/README.md`.
-            self._process_pygame_events(0.0)
+            _, self._prev_brakeval = self._process_pygame_events(0.0)
             self._tick_reconnect()
             # Binding capture must work with the game closed; this publishes
             # joystick_capture_ready too. See `core/main_pedal_thread/README.md`.
@@ -356,6 +374,10 @@ class MainPedalThread(BaseThread):
 
         prev_brakeval = self._prev_brakeval
         prev_speed    = self._prev_speed
+        if self._axes.take_brake_went_live():
+            # After open or reconnect the brake reads 0 until it reports; a
+            # held brake's first report is not a stomp.
+            prev_brakeval = brakeval
 
         # Device lost guard (pedals only).
         if self.data.device_lost:
@@ -516,6 +538,7 @@ class MainPedalThread(BaseThread):
 
     def start_capture(self) -> None:
         """Enable joystick capture mode: next button/hat press populates capture_event."""
+        self._joy_pool_restart = True
         with self.data._lock:
             self.data.capture_active = True
             self.data.capture_event = None
@@ -545,41 +568,32 @@ class MainPedalThread(BaseThread):
 
     _CAPTURE_GUARD_TIMEOUT_S = 10.0
 
-    def _sync_capture_scan_devices(self, capture_active: bool) -> None:
-        """Enumerate every connected joystick while capture is active. See `core/main_pedal_thread/README.md`."""
+    def _step_joystick_pool(self) -> bool:
+        """Open a few more joysticks; True once all are open. See `core/main_pedal_thread/README.md`."""
+        if self._joy_pool_restart:
+            self._joy_pool_restart = False
+            self._joy_pool.restart()
+        return self._joy_pool.step()
+
+    def _sync_capture_scan_devices(self, capture_active: bool) -> bool:
+        """Every connected joystick while capture is active; True once all are open."""
         if not capture_active:
-            if self._capture_scan_devices:
-                self._capture_scan_devices = {}
-                self._capture_scan_count = -1
-            return
-        try:
-            count = pygame.joystick.get_count()
-        except Exception:
-            return
-        if count == self._capture_scan_count:
-            return
-        self._capture_scan_count = count
-        devices: dict[str, pygame.joystick.JoystickType] = {}
-        for i in range(count):
-            try:
-                js = pygame.joystick.Joystick(i)
-                js.init()
-                devices[js.get_guid()] = js
-            except Exception:
-                logger.debug("capture scan: skipping joystick %d", i, exc_info=True)
-        self._capture_scan_devices = devices
+            self._capture_scan_devices = {}
+            return False
+        done = self._step_joystick_pool()
+        self._capture_scan_devices = dict(self._joy_pool.devices)
+        return done
 
-
-    # Minimum axis movement from the resting baseline that counts as a tap.
-    _PCONF_TAP_THRESHOLD = 0.3
 
     def start_pedal_config(self) -> None:
         """Begin the tap-brake-then-gas pedal configuration flow."""
         # Reset internals BEFORE raising the active flag: the loop tick only
         # touches them once it sees pedal_config_active.
         self._pconf_devices = {}
-        self._pconf_count = -1
-        self._pconf_baselines = {}
+        self._pconf_guid_by_instance = {}
+        self._pconf_names = {}
+        self._pconf_taps.reset()
+        self._joy_pool_restart = True
         self._pconf_device_guid = None
         self._pconf_brake_axis = None
         self._pconf_brake_inverted = False
@@ -596,14 +610,19 @@ class MainPedalThread(BaseThread):
         """Abort pedal configuration without saving anything."""
         with self.data._lock:
             was_active = self.data.pedal_config_active
+            stage = self.data.pedal_config_stage
             self.data.pedal_config_active = False
             self.data.pedal_config_stage = ""
             self.data.pedal_config_result = None
-        self._pconf_devices = {}
-        self._pconf_count = -1
-        self._pconf_baselines = {}
         if was_active:
-            logger.info("pedal config cancelled")
+            # Read from the UI thread while the loop may still write: a racing
+            # dict only costs the detail, never the cancel.
+            try:
+                detail = self._pconf_taps.summary(dict(self._pconf_names))
+            except Exception:
+                detail = "unavailable"
+            logger.info("pedal config cancelled while waiting for %s tap; %s", stage, detail)
+        self._pconf_devices = {}
 
     def consume_pedal_config(self) -> dict | None:
         """Read + clear the finished pedal configuration result. See `core/main_pedal_thread/README.md`."""
@@ -614,76 +633,63 @@ class MainPedalThread(BaseThread):
 
     def _tick_pedal_config(self) -> None:
         """Advance the pedal configuration flow by one tick (never blocks). See `core/main_pedal_thread/README.md`."""
-        self._sync_pconf_devices()
-
         with self.data._lock:
             stage = self.data.pedal_config_stage
 
-        hit = self._pconf_detect_tap(stage)
+        hit = self._pconf_taps.take_hit()
         if hit is None:
             return
-        guid, axis, inverted = hit
 
         if stage == "brake":
-            self._pconf_device_guid = guid
-            self._pconf_brake_axis = axis
-            self._pconf_brake_inverted = inverted
-            logger.info("pedal config: brake axis %d (inverted=%s)", axis, inverted)
+            self._pconf_device_guid = hit.guid
+            self._pconf_brake_axis = hit.axis
+            self._pconf_brake_inverted = hit.inverted
+            self._pconf_taps.restrict(hit.guid, hit.axis)
+            logger.info(
+                "pedal config: brake axis %d on %r (inverted=%s)",
+                hit.axis, self._pconf_names.get(hit.guid, ""), hit.inverted,
+            )
             with self.data._lock:
                 self.data.pedal_config_stage = "gas"
         elif stage == "gas":
-            self._finish_pedal_config(guid, axis, inverted)
+            self._finish_pedal_config(hit.guid, hit.axis, hit.inverted)
 
     def _sync_pconf_devices(self) -> None:
-        """Enumerate connected joysticks and capture resting axis baselines. See `core/main_pedal_thread/README.md`."""
-        try:
-            count = pygame.joystick.get_count()
-        except Exception:
+        """Open every connected joystick and log what pygame can see. See `core/main_pedal_thread/README.md`."""
+        done = self._step_joystick_pool()
+        pool = self._joy_pool
+        self._pconf_devices = {
+            guid: js for guid, js in pool.devices.items()
+            if pool.names.get(guid) != "vJoy Device"
+        }
+        self._pconf_guid_by_instance = {
+            iid: guid for iid, guid in pool.guid_by_instance.items()
+            if guid in self._pconf_devices
+        }
+        for guid in self._pconf_devices:
+            self._pconf_names[guid] = pool.names.get(guid, "")
+        if not done or pool.walk == self._pconf_logged_walk:
             return
-        if count == self._pconf_count:
-            return
-        self._pconf_count = count
-        devices: dict[str, pygame.joystick.JoystickType] = {}
-        for i in range(count):
-            try:
-                js = pygame.joystick.Joystick(i)
-                if js.get_name() == "vJoy Device":
-                    continue
-                js.init()
-                devices[js.get_guid()] = js
-            except Exception:
-                logger.debug("pedal config: skipping joystick %d", i, exc_info=True)
-        self._pconf_devices = devices
-        for guid, js in devices.items():
-            if guid in self._pconf_baselines:
-                continue
-            try:
-                self._pconf_baselines[guid] = {
-                    a: js.get_axis(a) for a in range(js.get_numaxes())
-                }
-            except Exception:
-                logger.debug(
-                    "pedal config: baseline capture failed for a device", exc_info=True
-                )
 
-    def _pconf_detect_tap(self, stage: str) -> tuple[str, int, bool] | None:
-        """Return (guid, axis, inverted) for the first axis moved past the tap See `core/main_pedal_thread/README.md`."""
-        for guid, js in self._pconf_devices.items():
-            if stage == "gas" and guid != self._pconf_device_guid:
-                continue
-            baselines = self._pconf_baselines.get(guid)
-            if not baselines:
+        self._pconf_logged_walk = pool.walk
+        seen: list[str] = []
+        for guid, js in pool.devices.items():
+            name = pool.names.get(guid, "")
+            if guid not in self._pconf_devices:
+                seen.append(f"{name!r} skipped")
                 continue
             try:
-                for axis, baseline in baselines.items():
-                    if stage == "gas" and axis == self._pconf_brake_axis:
-                        continue
-                    delta = js.get_axis(axis) - baseline
-                    if abs(delta) > self._PCONF_TAP_THRESHOLD:
-                        return guid, axis, delta < 0
+                axes = js.get_numaxes()
             except Exception:
-                logger.debug("pedal config: axis read failed", exc_info=True)
-        return None
+                axes = "?"
+            seen.append(f"{name!r} ({joystick_guid_vid_pid(guid) or 'no vid:pid'}, {axes} axes)")
+        seen.extend(pool.errors)
+        logger.info("pedal config: joysticks: %s", "; ".join(seen) or "none")
+
+    def _pconf_on_axis(self, instance_id: int, axis: int, value: float) -> None:
+        guid = self._pconf_guid_by_instance.get(instance_id)
+        if guid is not None:
+            self._pconf_taps.on_motion(guid, axis, value)
 
     def _finish_pedal_config(self, guid: str, gas_axis: int, gas_inverted: bool) -> None:
         """Persist the detected configuration and adopt the device immediately."""
@@ -712,6 +718,8 @@ class MainPedalThread(BaseThread):
                 self._device_instance_id = None
         self._reconnect_state = None
         self._reconnect_js = None
+        # New axes: nothing is known about them until they report.
+        self._axes.reset()
 
         logger.info(
             "pedal config: gas axis %d (inverted=%s); pedals connected",
@@ -734,8 +742,6 @@ class MainPedalThread(BaseThread):
             self.data.pedal_config_result = result
 
         self._pconf_devices = {}
-        self._pconf_count = -1
-        self._pconf_baselines = {}
 
 
     def _get_telemetry(self) -> dict | None:
@@ -828,7 +834,7 @@ class MainPedalThread(BaseThread):
         with self.data._lock:
             capture_active = self.data.capture_active
 
-        self._sync_capture_scan_devices(capture_active)
+        scan_done = self._sync_capture_scan_devices(capture_active)
 
         # Gather all devices: pedals + button-binding devices (+ every
         # connected joystick while capture is active).
@@ -907,7 +913,7 @@ class MainPedalThread(BaseThread):
 
         with self.data._lock:
             self.data.joystick_button_states = dict(new_states)
-            if capture_active and self.data.capture_active:
+            if capture_active and self.data.capture_active and scan_done:
                 # All pygame joysticks are now in joystick_button_states;
                 # HID capture can exclude them by vid:pid.
                 self.data.joystick_capture_ready = True
@@ -994,14 +1000,12 @@ class MainPedalThread(BaseThread):
 
     def _process_pygame_events(self, speed: float) -> tuple[float, float]:
         """Handle all pending pygame events and return the current (gasval, brakeval)."""
-        gasval   = self.data.gasval
-        brakeval = self.data.brakeval
-
         if not pygame.get_init():
             pygame.init()
             pygame.joystick.init()
-            return gasval, brakeval
+            return self._axes.gas, self._axes.brake
 
+        configuring = self.data.pedal_config_active
         for event in pygame.event.get():
             if event.type == pygame.JOYDEVICEREMOVED:
                 self._handle_device_removed(event.instance_id)
@@ -1009,17 +1013,38 @@ class MainPedalThread(BaseThread):
             elif event.type == pygame.JOYDEVICEADDED:
                 self._handle_device_added()
 
-            elif event.type == pygame.JOYAXISMOTION and self._device is not None:
-                try:
-                    brakeval = _read_axis(self._device, Settings.brakeaxis, Settings.brake_inverted)
-                    gasval   = _read_axis(self._device, Settings.gasaxis,   Settings.gas_inverted)
-                except Exception as exc:
-                    logger.warning("error reading joystick axis: %s", exc)
+            elif event.type == pygame.JOYAXISMOTION:
+                if configuring:
+                    self._pconf_on_axis(event.instance_id, event.axis, event.value)
+                # Also while configuring, or a cancel leaves the pedals stale.
+                if self._device is not None and event.instance_id == self._device_instance_id:
+                    # Never re-read the other pedal here: an axis SDL has not
+                    # heard from yet reads 0.0, half travel. See the README.
+                    self._axes.on_motion(
+                        event.axis, event.value,
+                        gas_axis=Settings.gasaxis,
+                        brake_axis=Settings.brakeaxis,
+                        gas_inverted=Settings.gas_inverted,
+                        brake_inverted=Settings.brake_inverted,
+                    )
 
-        return gasval, brakeval
+        if self._device is not None:
+            try:
+                self._axes.refresh(
+                    self._device.get_axis,
+                    gas_axis=Settings.gasaxis,
+                    brake_axis=Settings.brakeaxis,
+                    gas_inverted=Settings.gas_inverted,
+                    brake_inverted=Settings.brake_inverted,
+                )
+            except Exception:
+                logger.debug("pedal axis refresh failed", exc_info=True)
+
+        return self._axes.gas, self._axes.brake
 
     def _handle_device_removed(self, instance_id: int) -> None:
         """Handle JOYDEVICEREMOVED for both pedal and button devices."""
+        self._joy_pool.remove_instance(instance_id)
         # Pedal device.
         if instance_id == self._device_instance_id:
             logger.warning(
@@ -1030,6 +1055,7 @@ class MainPedalThread(BaseThread):
                 self.data.device_lost = True
                 self.data.device_name = ""
             self._device = None
+            self._axes.reset()
             return
 
         # Button devices.
@@ -1093,21 +1119,18 @@ class MainPedalThread(BaseThread):
         if self._reconnect_state == "attempt":
             guid = Settings.device
             try:
-                js = _find_joystick(guid) if guid else None
+                js = _find_joystick(guid, min_axes=_pedal_axes_needed()) if guid else None
                 if js is not None:
                     js.init()
                     self._reconnect_js           = js
                     self._device                 = js
                     self._device_instance_id     = js.get_instance_id()
-                    try:
-                        brakeval = _read_axis(js, Settings.brakeaxis, Settings.brake_inverted)
-                        gasval   = _read_axis(js, Settings.gasaxis,   Settings.gas_inverted)
-                    except Exception:
-                        brakeval = 0.0
-                        gasval   = 0.0
+                    # A freshly opened axis reads 0.0 until it reports, so
+                    # both pedals start released rather than read.
+                    self._axes.reset()
                     with self.data._lock:
-                        self.data.brakeval    = brakeval
-                        self.data.gasval      = gasval
+                        self.data.brakeval    = 0.0
+                        self.data.gasval      = 0.0
                         self.data.device_name = js.get_name()
                     js.quit()
                     self._reconnect_state    = "reinit_wait"

@@ -14,13 +14,20 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ### Added
 - **Set speed adjusts to in-game speed limit**
 - **CC disengages if retarder is active**
+- **Choose the AEB warning sound and volume**: pick the original warning, a simple high beep, a Volvo Cars, Volvo Trucks or Tesla-style warning, and set its volume. All styles sound about as loud as the original and each behaves like the system it imitates: the Volvo Cars warning sounds once per emergency, and the Volvo Trucks warning adds a second sound on top while the truck brakes. A test button plays about a second of the warning so you can balance it against game audio (it does not brake).
 
 ### Changed
+- **Fewer shared AEB clips**: with "Help improve AEB and ACC" on, far fewer clips of everyday braking and of very fast or tight driving are sent, and the rest are capped per day. Clips where another driver cut in, crossed or reversed into your path are always sent.
 - **ACC and AEB size up your own truck**: they now read your truck's length, width and wheelbase from the game instead of assuming one size, so AEB stops a little closer behind the vehicle ahead and ACC's predicted path no longer drifts to the outside of bends.
 
 ### Fixed
 - **AEB stepped in too early**: it judged your truck's brakes from gentle braking and from every truck you had driven, assumed they take longer to bite than they do, ignored how hard your truck stops at full brake (much harder with the brake intensity slider turned up), and let go right after its first hard hit. It now steps in later, more so after two full-brake stops with a truck and load, and keeps braking firmly after the first hit.
 - **AEB stopped far behind the vehicle ahead**: it placed your truck's front about 1.3 m further forward than it really is, so every AEB stop ended well short, even from walking pace. It now stops about half a metre behind.
+- **Brake pedal revved the engine after launch**: on some pedal sets the first brake press after starting MonoCruise also gave half throttle, until the gas pedal was touched once. Each pedal now only moves with its own input.
+- **"Connect to pedals" missed or mixed up pedals**: on some pedal sets a tap was not detected, a light tap on a load-cell brake was too small to count, or brake and gas came out swapped or reversed. Taps are now measured from where each pedal actually rests, and a light tap is enough.
+- **Pedals not found after a firmware update**: updating or renaming a wheel or pedal set made MonoCruise lose it, along with any buttons bound to it. It now finds the same device again.
+- **Button assignment picked up pedals**: pressing a pedal while assigning a cruise button could bind the pedal as that button. Only real buttons can be assigned now, and a pedal that was already bound asks to be reassigned.
+- **Hangs and repeating popups with button devices**: with a bound button device unplugged, while assigning buttons, or when connecting pedals on a rig with many devices, MonoCruise could hang briefly, and a device it could not read repeated its "disconnected" popup every two seconds.
 
 ## [1.1.1] - 2026-10-04
 ### Fixed

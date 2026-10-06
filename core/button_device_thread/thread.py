@@ -11,7 +11,8 @@ from typing import Dict
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 from core.settings import Settings
-from core.input_bindings import migrate_binding
+from core.input_bindings import joystick_guid_vid_pid, migrate_binding
+from core.button_device_thread.hid_descriptor import ButtonLayout, read_button_layout
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,8 @@ except Exception:
 
 
 _RECONNECT_INTERVAL = 2.0  # seconds between reconnect attempts for a lost device
+# A device that opens but never delivers a report is retried this slowly.
+_UNREADABLE_RETRY_S = 30.0
 
 # A release must hold this long to count; a shorter dip is contact bounce,
 # which peaks near 7 ms on a MOZA stalk. Presses are never delayed.
@@ -47,6 +50,26 @@ _CAPTURE_MAX_SCAN_DEVICES = 16
 _CAPTURE_CONFIRM_S = 0.030
 # Skip generic mouse/keyboard usages; pygame joysticks excluded by vid:pid.
 _SKIP_GENERIC_USAGES = {0x02, 0x06, 0x07}
+# Joystick, gamepad, multi-axis: the only collections the capture scan opens.
+_GAME_CONTROLLER_USAGES = {0x04, 0x05, 0x08}
+
+
+def _pick_collection(infos: list[dict], *, controllers_only: bool) -> dict | None:
+    """Prefer the game-controller collection of a device: it carries the buttons."""
+    fallback = None
+    for info in infos:
+        if not info.get("path"):
+            continue
+        usage_page = info.get("usage_page") or 0
+        usage = info.get("usage") or 0
+        if usage_page == 0x01 and usage in _GAME_CONTROLLER_USAGES:
+            return info
+        if controllers_only or fallback is not None:
+            continue
+        if usage_page == 0x01 and usage in _SKIP_GENERIC_USAGES:
+            continue
+        fallback = info
+    return fallback
 
 
 def _parse_vid_pid(vid_pid: str) -> tuple[int, int] | None:
@@ -107,12 +130,21 @@ class ButtonDeviceThread(BaseThread):
         self._device_names: dict[str, str] = {}
         # vid_pid → monotonic time after which the next reconnect attempt is allowed
         self._reconnect_deadlines: dict[str, float] = {}
+        # vid_pid → button bits from the report descriptor (None: unknown, all bits)
+        self._layouts: dict[str, ButtonLayout | None] = {}
+        # Devices that delivered a report since they were opened.
+        self._read_ok: set[str] = set()
+        # One popup per session for an unreadable device or a non-button binding.
+        self._unreadable_warned: set[str] = set()
+        self._binding_warned: set[str] = set()
 
         # ── Capture scan (thread-owned; UI only toggles data.capture_active) ──
         # vid_pid → open hid.device for devices opened just for this capture
         self._capture_scan: dict[str, object] = {}
         self._capture_scan_names: dict[str, str] = {}
-        self._capture_scan_reports: dict[str, list[int]] = {}
+        self._capture_scan_layouts: dict[str, ButtonLayout | None] = {}
+        # vid_pid → {report_id: last raw report}
+        self._capture_scan_reports: dict[str, dict[int, list[int]]] = {}
         # vid_pid → previous tick's bits (first sighting doubles as baseline)
         self._capture_prev_bits: dict[str, dict[int, bool]] = {}
         # vid_pid → bits that changed during warm-up (axis/counter noise)
@@ -162,15 +194,7 @@ class ButtonDeviceThread(BaseThread):
                 self._drain_reports(vid_pid, device, now)
 
             except OSError:
-                name = self._device_names.get(vid_pid, vid_pid)
-                logger.warning("Button device %r disconnected", name, extra={"popup": True})
-                try:
-                    device.close()
-                except Exception:
-                    pass
-                self._devices[vid_pid] = None
-                self._reconnect_deadlines[vid_pid] = time.monotonic() + _RECONNECT_INTERVAL
-                self._reset_button_state(vid_pid)
+                self._on_read_failure(vid_pid, device)
                 new_states[vid_pid] = {}
                 new_counts[vid_pid] = {}
                 continue
@@ -188,6 +212,43 @@ class ButtonDeviceThread(BaseThread):
         with self.data._lock:
             self.data.button_states = new_states
             self.data.button_press_counts = new_counts
+
+    def _on_read_failure(self, vid_pid: str, device) -> None:
+        """Close a device whose read failed. Only a device that was working gets the disconnect popup."""
+        name = self._device_names.get(vid_pid, vid_pid)
+        try:
+            device.close()
+        except Exception:
+            pass
+        self._devices[vid_pid] = None
+        self._reset_button_state(vid_pid)
+        was_working = vid_pid in self._read_ok
+        self._read_ok.discard(vid_pid)
+
+        if was_working or not self._still_enumerated(vid_pid):
+            logger.warning("Button device %r disconnected", name, extra={"popup": True})
+            self._reconnect_deadlines[vid_pid] = time.monotonic() + _RECONNECT_INTERVAL
+            return
+        # Present but unreadable (no input reports, or held by another
+        # program): a 2 s retry only repeated the popup forever.
+        if vid_pid not in self._unreadable_warned:
+            self._unreadable_warned.add(vid_pid)
+            logger.warning(
+                "Button device %r cannot be read: reassign its cruise control buttons",
+                name,
+                extra={"popup": True},
+            )
+        self._reconnect_deadlines[vid_pid] = time.monotonic() + _UNREADABLE_RETRY_S
+
+    @staticmethod
+    def _still_enumerated(vid_pid: str) -> bool:
+        parsed = _parse_vid_pid(vid_pid)
+        if parsed is None or _hid is None:
+            return False
+        try:
+            return bool(_hid.enumerate(*parsed))
+        except Exception:
+            return False
 
     @staticmethod
     def _queue_edge(state: _ButtonState, value: bool) -> None:
@@ -214,6 +275,7 @@ class ButtonDeviceThread(BaseThread):
     def _drain_reports(self, vid_pid: str, device, now: float) -> None:
         """Consume every queued report and turn raw bit changes into logical edges."""
         states = self._buttons.setdefault(vid_pid, {})
+        layout = self._layouts.get(vid_pid)
         # A release that matured before this tick's reports must land first,
         # or a press arriving now would erase it.
         self._apply_release_hold(states, now)
@@ -224,10 +286,16 @@ class ButtonDeviceThread(BaseThread):
             raw = device.read(64, timeout_ms=0)  # non-blocking
             if not raw:
                 return
+            self._read_ok.add(vid_pid)
             self._last_reports[vid_pid] = raw
+            # Axis bits are never buttons, and another report ID's bytes must
+            # not overwrite this report's buttons.
+            allowed = layout.bits_for(raw) if layout is not None else None
             for byte_idx, byte_val in enumerate(raw):
                 for bit in range(8):
                     button_id = byte_idx * 8 + bit
+                    if allowed is not None and button_id not in allowed:
+                        continue
                     held = bool((byte_val >> bit) & 1)
                     state = states.setdefault(button_id, _ButtonState())
                     if held and not state.raw:
@@ -264,6 +332,43 @@ class ButtonDeviceThread(BaseThread):
         """Drop settled state so a reconnect never inherits a stale held button."""
         self._buttons.pop(vid_pid, None)
         self._last_reports.pop(vid_pid, None)
+
+    def _button_device_bindings(self) -> list[tuple[str, dict]]:
+        """(setting name, binding) for every CC button bound to a HID device."""
+        out: list[tuple[str, dict]] = []
+        for name in (
+            "cc_start_button", "cc_inc_button", "cc_dec_button",
+            "acc_dist_inc_button", "acc_dist_dec_button",
+        ):
+            try:
+                b = migrate_binding(getattr(Settings, name))
+            except Exception:
+                continue
+            if b and b.get("source") == "button_device" and b.get("vid_pid"):
+                out.append((name, b))
+        return out
+
+    def _check_bindings(self, vid_pid: str) -> None:
+        """Warn once when a binding points at a bit the device does not declare as a button."""
+        layout = self._layouts.get(vid_pid)
+        if layout is None or vid_pid in self._binding_warned:
+            return
+        for _name, binding in self._button_device_bindings():
+            if binding.get("vid_pid") != vid_pid:
+                continue
+            try:
+                button_id = int(binding.get("button_id"))
+            except (TypeError, ValueError):
+                continue
+            if layout.is_button(button_id):
+                continue
+            self._binding_warned.add(vid_pid)
+            logger.warning(
+                "A cruise control button is bound to a pedal or axis on %r: reassign it",
+                self._device_names.get(vid_pid, vid_pid),
+                extra={"popup": True},
+            )
+            return
 
     def teardown(self) -> None:
         self._teardown_capture_scan()
@@ -328,21 +433,19 @@ class ButtonDeviceThread(BaseThread):
         merged: dict[str, dict[int, bool]] = dict(tracked_states)
         for vid_pid, device in list(self._capture_scan.items()):
             try:
+                layout = self._capture_scan_layouts.get(vid_pid)
+                reports = self._capture_scan_reports.setdefault(vid_pid, {})
                 for _ in range(_MAX_REPORTS_PER_TICK):
                     if not self.running:
                         return
                     raw = device.read(64, timeout_ms=0)
                     if not raw:
                         break
-                    self._capture_scan_reports[vid_pid] = raw
-                report = self._capture_scan_reports.get(vid_pid)
-                if not report:
+                    report_id = raw[0] if layout is not None and layout.uses_report_ids else 0
+                    reports[report_id] = raw
+                if not reports:
                     continue
-                bits: dict[int, bool] = {}
-                for byte_idx, byte_val in enumerate(report):
-                    for bit in range(8):
-                        bits[byte_idx * 8 + bit] = bool((byte_val >> bit) & 1)
-                merged[vid_pid] = bits
+                merged[vid_pid] = self._scan_bits(reports, layout)
             except OSError:
                 try:
                     device.close()
@@ -402,8 +505,23 @@ class ButtonDeviceThread(BaseThread):
                     self._capture_candidate_ts = now
             self._capture_prev_bits[vid_pid] = dict(bits)
 
+    @staticmethod
+    def _scan_bits(
+        reports: dict[int, list[int]], layout: ButtonLayout | None,
+    ) -> dict[int, bool]:
+        """Button bits of a scanned device; every bit when its layout is unknown."""
+        bits: dict[int, bool] = {}
+        for report in reports.values():
+            allowed = layout.bits_for(report) if layout is not None else None
+            for byte_idx, byte_val in enumerate(report):
+                for bit in range(8):
+                    button_id = byte_idx * 8 + bit
+                    if allowed is None or button_id in allowed:
+                        bits[button_id] = bool((byte_val >> bit) & 1)
+        return bits
+
     def _open_capture_scan(self) -> None:
-        """Open non-tracked HID devices; skip generic inputs and pygame joysticks."""
+        """Open the game-controller collection of each non-tracked device pygame does not own."""
         if not _hid_available or _hid is None:
             return
         try:
@@ -413,37 +531,34 @@ class ButtonDeviceThread(BaseThread):
             return
 
         joystick_vid_pids = self._pygame_joystick_vid_pids()
-        seen: set[str] = set()
+        by_vid_pid: dict[str, list[dict]] = {}
         for info in infos:
-            if len(self._capture_scan) >= _CAPTURE_MAX_SCAN_DEVICES:
-                break
-            usage_page = info.get("usage_page") or 0
-            usage = info.get("usage") or 0
-            if usage_page == 0x01 and usage in _SKIP_GENERIC_USAGES:
-                continue
             vendor_id = info.get("vendor_id") or 0
             product_id = info.get("product_id") or 0
             if not vendor_id and not product_id:
                 continue
             vid_pid = f"{vendor_id:04x}:{product_id:04x}"
-            if vid_pid in seen or vid_pid in self._devices:
+            if vid_pid in self._devices or vid_pid in joystick_vid_pids:
                 continue
-            if vid_pid in joystick_vid_pids:
+            by_vid_pid.setdefault(vid_pid, []).append(info)
+
+        # open_path holds the GIL for the whole open, so opening every HID
+        # device (headsets, RGB controllers) can stall the whole program.
+        for vid_pid, candidates in by_vid_pid.items():
+            if len(self._capture_scan) >= _CAPTURE_MAX_SCAN_DEVICES:
+                break
+            info = _pick_collection(candidates, controllers_only=True)
+            if info is None:
                 continue
-            path = info.get("path")
-            if not path:
-                continue
-            seen.add(vid_pid)
             try:
                 device = _hid.device()
-                device.open_path(path)
+                device.open_path(info["path"])
                 device.set_nonblocking(True)
-                self._capture_scan[vid_pid] = device
-                self._capture_scan_names[vid_pid] = (
-                    info.get("product_string") or vid_pid
-                )
             except Exception:
                 continue
+            self._capture_scan[vid_pid] = device
+            self._capture_scan_names[vid_pid] = info.get("product_string") or vid_pid
+            self._capture_scan_layouts[vid_pid] = read_button_layout(device)
         logger.debug("capture scan opened %d HID devices", len(self._capture_scan))
 
     @staticmethod
@@ -471,14 +586,9 @@ class ButtonDeviceThread(BaseThread):
         except Exception:
             return out
         for guid in guids:
-            try:
-                if len(guid) >= 20:
-                    vid = int(guid[10:12] + guid[8:10], 16)
-                    pid = int(guid[18:20] + guid[16:18], 16)
-                    if vid or pid:
-                        out.add(f"{vid:04x}:{pid:04x}")
-            except ValueError:
-                continue
+            vid_pid = joystick_guid_vid_pid(guid)
+            if vid_pid is not None:
+                out.add(vid_pid)
         return out
 
     def _teardown_capture_scan(self) -> None:
@@ -489,6 +599,7 @@ class ButtonDeviceThread(BaseThread):
                 pass
         self._capture_scan = {}
         self._capture_scan_names = {}
+        self._capture_scan_layouts = {}
         self._capture_scan_reports = {}
         self._capture_prev_bits = {}
         self._capture_noise = {}
@@ -501,21 +612,7 @@ class ButtonDeviceThread(BaseThread):
 
     def _collect_vid_pids(self) -> set[str]:
         """Return all unique vid_pid strings from current button_device bindings."""
-        vid_pids: set[str] = set()
-        for name in (
-            "cc_start_button", "cc_inc_button", "cc_dec_button",
-            "acc_dist_inc_button", "acc_dist_dec_button",
-        ):
-            try:
-                raw = getattr(Settings, name)
-                b = migrate_binding(raw)
-                if b and b.get("source") == "button_device":
-                    vp = b.get("vid_pid")
-                    if vp:
-                        vid_pids.add(vp)
-            except Exception:
-                pass
-        return vid_pids
+        return {b["vid_pid"] for _name, b in self._button_device_bindings()}
 
     def _connect_tracked_devices(self) -> None:
         for vid_pid in self._collect_vid_pids():
@@ -549,38 +646,36 @@ class ButtonDeviceThread(BaseThread):
             self._devices[vid_pid] = None
             return False
 
-        path = None
-        product_name = None
+        # hid.device().open(vid, pid) is not used: it enumerates every HID
+        # device while holding the GIL, which stalled all threads per retry.
         try:
-            for info in _hid.enumerate(vendor_id, product_id):
-                usage_page = info.get("usage_page") or 0
-                usage = info.get("usage") or 0
-                if usage_page == 0x01 and usage in _SKIP_GENERIC_USAGES:
-                    continue
-                cand = info.get("path")
-                if not cand:
-                    continue
-                path = cand
-                product_name = info.get("product_string")
-                break
+            infos = _hid.enumerate(vendor_id, product_id)
         except Exception:
             logger.debug("hid enumerate failed for %s", vid_pid, exc_info=True)
+            infos = []
+        info = _pick_collection(infos, controllers_only=False)
+        if info is None:
+            self._devices[vid_pid] = None
+            logger.debug("button device %s not present", vid_pid)
+            return False
 
         try:
             device = _hid.device()
-            if path is not None:
-                device.open_path(path)
-            else:
-                # No filtered collection found; last resort (single-collection devices).
-                device.open(vendor_id, product_id)
+            device.open_path(info["path"])
             device.set_nonblocking(True)
-            name = product_name or device.get_product_string() or vid_pid
-            self._devices[vid_pid] = device
-            self._device_names[vid_pid] = name
-            logger.info("connected to button device: %s (%s)", name, vid_pid)
-            return True
         except Exception:
             self._devices[vid_pid] = None
             logger.debug("button device %s not available", vid_pid, exc_info=True)
             return False
+
+        name = info.get("product_string") or vid_pid
+        self._devices[vid_pid] = device
+        self._device_names[vid_pid] = name
+        self._layouts[vid_pid] = read_button_layout(device)
+        if vid_pid in self._unreadable_warned:
+            logger.debug("reopened unreadable button device %s", vid_pid)
+        else:
+            logger.info("connected to button device: %s (%s)", name, vid_pid)
+        self._check_bindings(vid_pid)
+        return True
 

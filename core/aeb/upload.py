@@ -21,7 +21,7 @@ from typing import Callable
 from core.aeb.clip_schema import SCHEMA_VERSION, ClipMetadata, utc_now_iso
 from core.aeb.clip_store import ClipStore, deserialize_clip
 from core.aeb.clip_triage import (
-    STRAIGHT_SAMPLE_EVERY, is_straight_slow, sample_keeps, summarize, triage_reason,
+    DAILY_BUDGET, counts_toward_budget, sample_class, sample_keeps, summarize, triage_reason,
 )
 from core.aeb.intake_policy import cached_policy, contribution_enabled, upload_blocked_reason
 from core.aeb.recorder import _TN_SOURCES
@@ -221,8 +221,10 @@ class ClipUploader:
         # boot scan never sits on whichever loop first asked for the recorder.
         self.retry_on_start = retry_on_start
         self._paused_until: float = 0.0
-        # Sample position used only when settings cannot be read or written.
-        self._straight_seen: int = 0
+        # Sample positions and the day's count, used only when settings cannot be
+        # read or written.
+        self._seen_fallback: dict[str, int] = {}
+        self._day_fallback: tuple[str, int] = ("", 0)
         # -inf so the first send of a session is never delayed.
         self._last_send_mono: float = float("-inf")
         self._intervening: bool = False
@@ -310,7 +312,7 @@ class ClipUploader:
         for _mtime, path in found[:limit]:
             if self._stop.is_set():
                 break
-            self._handle(path)
+            self._handle(path, retry=True)
             sent += 1
         if sent:
             logger.info("re-offered %d AEB clip(s) held over from a previous run", sent)
@@ -335,7 +337,7 @@ class ClipUploader:
             finally:
                 self._queue.task_done()
 
-    def _handle(self, path: Path) -> None:
+    def _handle(self, path: Path, *, retry: bool = False) -> None:
         # Consent is re-read per clip rather than captured at construction, so
         # unticking the box stops uploads immediately rather than next boot.
         if not contribution_enabled():
@@ -353,7 +355,7 @@ class ClipUploader:
             logger.debug("could not read %s for upload", path.name, exc_info=True)
             return self._kept(path)
 
-        held = self._triage_reason(blob)
+        held = self._triage_reason(blob, retry=retry)
         if held is not None:
             logger.debug("not contributing %s: %s", path.name, held)
             return self._kept(path)
@@ -381,12 +383,13 @@ class ClipUploader:
 
         self._send(path, blob, meta)
 
-    def _triage_reason(self, blob: bytes) -> str | None:
+    def _triage_reason(self, blob: bytes, *, retry: bool = False) -> str | None:
         """Why this clip carries nothing new, or None when it should be sent.
 
         Fails open: a clip this cannot judge is offered. Triage is a redundancy
         filter, so a decode failure must never become a silent refusal the way
-        the consent and thumbnail gates deliberately do.
+        the consent and thumbnail gates deliberately do. A retried clip already
+        won its sample and budget slot, so it never draws them again.
         """
         try:
             summary = summarize(deserialize_clip(blob))
@@ -394,36 +397,57 @@ class ClipUploader:
             logger.debug("AEB upload triage could not read a clip", exc_info=True)
             return None
         reason = triage_reason(summary)
-        if reason is not None:
+        if reason is not None or retry:
             return reason
-        if not is_straight_slow(summary):
-            return None
-        position = self._advance_straight_counter()
-        if sample_keeps(position, STRAIGHT_SAMPLE_EVERY):
-            return None
-        return f"straight below 40 km/h, sending 1 in {STRAIGHT_SAMPLE_EVERY}"
+        sampled = sample_class(summary)
+        if sampled is not None:
+            name, every = sampled
+            if not sample_keeps(self._advance_counter(name), every):
+                why = "straight below 40 km/h" if name == "straight" else summary.scene_why
+                return f"{why}, sending 1 in {every}"
+        if counts_toward_budget(summary) and not self._spend_daily_budget():
+            return f"daily limit of {DAILY_BUDGET} clips reached"
+        return None
 
-    def _advance_straight_counter(self) -> int:
-        """This clip's position in the straight sub-40 run, then persist the next.
+    def _advance_counter(self, name: str) -> int:
+        """This clip's position in its sampled class, then persist the next.
 
         Persisted rather than held in memory: the cadence has to survive a restart
-        or a driver who relaunches often would send far more than one in ten.
+        or a driver who relaunches often would send far more than one in N.
         """
+        key = f"aeb_triage_{name}_seen"
         try:
             from core.settings import Settings
 
-            position = int(getattr(Settings, "aeb_triage_straight_seen", 0) or 0)
-            Settings.save({"aeb_triage_straight_seen": position + 1})
+            position = int(getattr(Settings, key, 0) or 0)
+            Settings.save({key: position + 1})
             return position
         except Exception:
             logger.debug("could not advance the AEB triage sample counter", exc_info=True)
-            return self._straight_seen_fallback()
+            position = self._seen_fallback.get(name, 0)
+            self._seen_fallback[name] = position + 1
+            return position
 
-    def _straight_seen_fallback(self) -> int:
-        """In-memory position for when settings cannot be read or written."""
-        position = self._straight_seen
-        self._straight_seen = position + 1
-        return position
+    def _spend_daily_budget(self) -> bool:
+        """Take one of today's slots. False once the local day's budget is spent."""
+        today = time.strftime("%Y-%m-%d")
+        try:
+            from core.settings import Settings
+
+            day = str(getattr(Settings, "aeb_triage_day", "") or "")
+            used = int(getattr(Settings, "aeb_triage_day_sent", 0) or 0) if day == today else 0
+            if used >= DAILY_BUDGET:
+                return False
+            Settings.save({"aeb_triage_day": today, "aeb_triage_day_sent": used + 1})
+            return True
+        except Exception:
+            logger.debug("could not read the AEB triage daily count", exc_info=True)
+            day, used = self._day_fallback
+            used = used if day == today else 0
+            if used >= DAILY_BUDGET:
+                return False
+            self._day_fallback = (today, used + 1)
+            return True
 
     def _kept(self, path: Path) -> None:
         """The clip stays here. Never raises into the worker loop."""

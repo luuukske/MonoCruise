@@ -119,6 +119,9 @@ class Settings(metaclass=_SingletonMeta):
     airhorn_variable: bool = True
     autostart_variable: bool = True
     AEB_enabled: bool = False
+    # Warning style label from core/aeb/warning_sounds.py, and its volume in percent.
+    aeb_sound: str = "Original"
+    aeb_sound_volume: int = 100
     # Debug AEB clip capture: grab a screen thumbnail per clip for tagging context.
     aeb_capture_screenshots: bool = True
     # Opt-in clip sharing. Off until the consent prompt is accepted; the version
@@ -139,6 +142,12 @@ class Settings(metaclass=_SingletonMeta):
     # How many straight sub-40 clips this machine has triaged. Persisted so the
     # one-in-ten sample keeps its cadence across restarts, not a user knob.
     aeb_triage_straight_seen: int = 0
+    # Same cadence for standard in-lane braking and ego-caused scenes, plus the
+    # local day and how many clips it has sent (core/aeb/README.md section 15).
+    aeb_triage_standard_seen: int = 0
+    aeb_triage_reckless_seen: int = 0
+    aeb_triage_day: str = ""
+    aeb_triage_day_sent: int = 0
 
     # Cruise/ACC/Custom buttons
     cc_dec_button: object = None
