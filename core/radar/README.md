@@ -1881,6 +1881,10 @@ zero collidable players, as a second signal. Measured live on 2026-10-06
 - Outside a zone it read "cannot collide" for a truck closing head-on from 34 m
   to 8 m.
 - Beyond 30 m it was always "cannot".
+- Asked through the local player's handle instead
+  (`local.CanCollideWith(remote)`), it gave the same answers. Outside a zone,
+  398 of 403 samples within 15 m read "cannot". It only flips for a vehicle
+  practically touching ego, so per-vehicle ghosting is not possible with it.
 
 The zone event matched every entry and exit to the second. The veto kept the gate
 shut through both in-zone emergency brakes that day (clips `75dd6f2f`,
