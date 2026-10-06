@@ -253,6 +253,7 @@ what ACC uses.
 | `core/aeb/calibration.py` | Frozen `AEBCalibration` dataclass: all tunable constants. `DEFAULT` singleton used by both `thread.py` and tests. |
 | `core/aeb/lane_frame.py` | `Lane` enum, `project_to_ego_arc()`, `classify()`: arc-projected lane membership, replacing the old cross-product `lateral_offset`. Also the body-in-lane primitives (`_any_body_in_ego_lane`, `_body_centreline_d_abs`). |
 | `core/aeb/filters.py` | Named filter pipeline: 12 stage classes + `FilterContext` + `build_pipeline()`. |
+| `core/aeb/avoidability.py` | `AvoidabilityGate`, which ends a guess-based drop of a parked body at the braking deadline (§3, Avoidability gate). |
 | `core/aeb/thread.py` | `AEBThread`: data acquisition, ego-arc construction, pipeline dispatch, TTB/state output. |
 
 ---
@@ -279,6 +280,9 @@ pass, the vehicle enters collision evaluation.
 | `SweepPassFilter` | Stationary cross-traffic ego turns through |
 | `CornerEntryStationaryFilter` | Stationary at corner entry: out-of-lane oncoming/co-dir, or in-lane with arc consistency |
 | `EgoEvasionFilter` | Ego can steer around target within 0.08 g (runs for `Lane.EGO` too) |
+
+`OutOfLaneParallelFilter`, `SweepPassFilter` and both corner-entry stages run
+inside `AvoidabilityGate` (see "Avoidability gate" below).
 
 `FilterContext.d_miss` carries the measured CBDR miss for the vehicle, computed
 once per vehicle per frame by the `los_miss` memo in `thread.py::loop`. It is
@@ -610,6 +614,14 @@ straight-line path.
   direction, and `|dist · sin(road_bend / 2) − |lat_signed||` must fall within
   `corner_entry_lateral_tol`. Catches MP stopped queues whose lead vehicle
   projects to ego's straight axis but whose pose only makes sense on a curve.
+- The chord test is a guess that the road bends away, so both stages run
+  inside the avoidability gate (below), which ends the guess at the braking
+  deadline (`3837af63`: the stage held a 54 km/h stop, now braked from 4.84 s
+  instead of 5.11 s). An override that passed any closing CBDR miss inside
+  the two bodies was measured against it and not kept: 27 points worse
+  over the corpus, mostly longer false brakes beside parked cars, for two
+  low-speed catches (`5bf156fe`, `7ec4ff63`) whose demand never left half of
+  capacity.
 - Latched ids skip **Mode B** (`lane == EGO`). Mode A's out-of-lane queue
   must stay suppressed even if a graze latched the id.
   Mode B's `implied_kappa = road_bend / dist` grows as range falls, so a few
@@ -638,6 +650,66 @@ straight-line path.
   parked trailers and cars whose bodies reach the band at the roadside. The
   remaining Mirrored drops are mid-turn targets on ego's curved path, which
   `project_to_ego_arc`'s `max(d_arc, d_straight)` reads as out of lane.
+
+### Avoidability gate: a guess may not outlive the braking deadline
+
+`OutOfLaneParallelFilter`, `SweepPassFilter` and both corner-entry stages drop a
+stationary body on a guess about ego's own path: the road bends away, ego is
+sweeping past, the body is parked beside the lane. `build_pipeline` wraps each
+in `AvoidabilityGate`. The guess stands while AEB could still stop short of the
+body if it turns out wrong. Once the body's clearance demand reaches
+`brake_deadline_ms2`, the demand at which AEB engaging now just stops (the
+engage test at fraction 1: `capability_decel` less the downhill term), the drop
+is overruled and the hit goes through normal collision evaluation. Bar, confirm
+windows and engagement vetoes are unchanged.
+
+Every condition fails toward the stage's own verdict:
+
+| Condition | Why |
+|-----------|-----|
+| Parked by both the speed field and the raw position track (`v_ground_meas`, first to last LOS sample) | TMP can report 0 for a car pulling away (`addfcf09`: range 2.3 to 7.1 m at reported speed 0). Movers are out of scope: their unknown is the target, not ego's path, and an override on movers braked for crossers |
+| Measured CBDR line passes through a body (`measured_miss_inside_body`) | Evidence the arc's hit is not extrapolation alone. Uses the real corners of the tractor and every trailer on the side facing ego's line: a symmetric reach with the trailer length added both ways put a trailer 10 m off the line inside (`24b77ccb`) |
+| Predicted hit at `t > 0` | A body ego already overlaps (TMP ghosting beside ego) hits every path at once, and no brake or steer changes that (`addfcf09`, `e65b74ce`) |
+| Clearance demand `>= brake_deadline_ms2` | Past this point, keeping the drop bets a collision on the guess |
+
+**Why the brake side and not the steer side.** On the reported clips the body
+was avoidable by plain unwinding (zero extra lateral load) almost to the end:
+`cb0154bb` until 4.31 s, `ddf9b4fd` until 4.24 s. Meanwhile the demand passed
+full capacity at 4.25 s and 4.04 s. The stages held a stopped car past the last
+point where braking could still prevent the hit. A steer-limit gate was built
+and measured first: suppress only while some constant curvature inside the
+truck's grip clears the body, with grip from the corpus envelope (p99 of
+`v^2 |kappa_meas|` over 3334 clips: 7.9 m/s^2 at 6.5 m/s rising to 11.9 at
+30 m/s). It moved those two clips only to 4.35 s and 4.45 s, and a
+constant-curvature fan under-counts real escapes such as turn-then-straighten,
+so in yards it braked where the driver got through (`d6bb3129`, +0.7 s). With a
+0.35 g budget on the change of curvature it also overrode last-second swerves
+the driver completed (`9fa4c844`, `51d2b08d`, `280d4419`). Also measured and not
+shipped: keeping the drop past the deadline while ego's curvature rate, run to
+the hit, clears the bare body (a steer already under way). Corpus delta +0.02.
+
+**What it does not cover.** The window between the engage bar and capacity,
+where a guess still stands by design (`30ad90a1`: demand crosses the bar at
+4.12 s, the deadline releases at 4.43 s, AEB brakes at 4.60 s after its confirm
+windows, against 5.25 s without the gate). Moving targets (`736195a7` is held
+by the LOS veto, not by a stage).
+
+**Corpus** (1366 labelled clips, 2026-10-06, engage bar at 0.50, without the
+corner-entry override above):
+-1464.08 to -1511.46. `7f76bcfa` FN to TP; `0248961e`, `4c94e5cb`, `ce8fb093`
+FP to TN; `5bf156fe` late to FN and `7ec4ff63` TP to late (both under 30 km/h,
+demand never past half of capacity); `24b77ccb` TN to FP for 0.45 s, a label to
+review: it is an `auto_crash` clip whose speed falls 18.1 to 10.3 m/s at 8.00 s,
+0.03 s after the predicted hit on vid 19's trailer. Cost-only: 23 true
+positives better and 12 worse (11 of them lost the removed override's
+earlier release), 19 false positives cheaper and 6 costlier (already braking, now
+0.1 to 0.4 s sooner). On the bare stages `ddf9b4fd` braked at 4.82 s and
+`cb0154bb` at 4.87 s; with the gate 4.21 s and 4.18 s, against label windows
+opening at 4.17 s and 4.18 s.
+
+`tests/aeb/harness.py::evaluate_frame` builds its context without a LOS track
+or `clearance_fn`, so the gate fails closed there and scenarios see the bare
+stages. The gate's own cases are in `tests/aeb/test_avoidability_gate.py`.
 
 ### `EgoEvasionFilter`
 

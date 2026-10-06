@@ -475,6 +475,17 @@ def _los_predicted_miss(
     return abs(omega) * r_now * r_now / v_rel
 
 
+def _los_ground_speed(track) -> float | None:
+    """Target ground speed from first and last raw position in the LOS window."""
+    if len(track) < 2:
+        return None
+    t0, x0, z0, _, _ = track[0]
+    t1, x1, z1, _, _ = track[-1]
+    if t1 - t0 < 0.2:
+        return None
+    return math.hypot(x1 - x0, z1 - z0) / (t1 - t0)
+
+
 def _los_veto_bar(
     fwd_dot: float,
     abs_v_speed: float,
@@ -1332,6 +1343,26 @@ class AEBThread(BaseThread):
         newly_risky: set[int] = set()
 
         ego_pitch_rad = math.radians(ego_pitch_deg)
+        # ego_pitch_rad is the NEGATED grade and gravity has nothing to cancel
+        # against; a pose past the bound is a wreck, not a road (README slope term).
+        road_grade = math.tan(-ego_pitch_rad) if math.isfinite(ego_pitch_rad) else 0.0
+        if not math.isfinite(road_grade) or abs(road_grade) > MAX_EGO_GRADE:
+            road_grade = 0.0
+        slope_accel = _GRAVITY_MS2 * math.sin(math.atan(road_grade))
+        downhill_offset = max(-slope_accel, 0.0)
+        # Demand at which AEB engaging now just stops: the engage test at
+        # fraction 1 (README avoidability gate).
+        brake_deadline_ms2 = max(0.1, _max_brake_live - downhill_offset) - downhill_offset
+
+        def clearance_of(arcs: list[ArcPath]) -> ClearanceResult | None:
+            """Clearance demand against ``arcs`` with this frame's lag and pad."""
+            return clearance_required(
+                ego_arc, arcs, ego_speed, cal,
+                lag_s=(0.0 if engaged_pad_m is not None else load_response_s),
+                pad_m=(engaged_pad_m or 0.0),
+                front_to_surface=ego_front_to_surface,
+                near_horizon_s=dynamic_horizon,
+            )
 
         # Follow-threat flags must be current before the precompute prefilter
         # below reads them: a braking lead can cross under the rel-speed floor
@@ -1532,6 +1563,9 @@ class AEBThread(BaseThread):
                 off_surface_ids=off_surface_ids,
                 d_miss=los_miss(v),
                 d_miss_rate=los_miss_rate(v),
+                v_ground_meas=_los_ground_speed(trk),
+                brake_deadline_ms2=brake_deadline_ms2,
+                clearance_fn=clearance_of,
             )
 
             suppression_reasons[v.id] = []
@@ -1719,14 +1753,7 @@ class AEBThread(BaseThread):
                         if v.id in clearance_memo:
                             cres = clearance_memo[v.id]
                         else:
-                            cres = clearance_required(
-                                ego_arc, padded_target_arcs, ego_speed, cal,
-                                lag_s=(0.0 if engaged_pad_m is not None
-                                       else load_response_s),
-                                pad_m=(engaged_pad_m or 0.0),
-                                front_to_surface=ego_front_to_surface,
-                                near_horizon_s=dynamic_horizon,
-                            )
+                            cres = clearance_of(padded_target_arcs)
                             clearance_memo[v.id] = cres
                             if cres is not None and cres.clears:
                                 clearance_clears_ids.add(v.id)
@@ -1831,13 +1858,6 @@ class AEBThread(BaseThread):
         time_to_brake = best_ttb if (run_collision and best_ttb < _INF) else _INF
         display_ttc = best_unbraked_ttc
 
-        # ego_pitch_rad is the NEGATED grade and gravity has nothing to cancel
-        # against; a pose past the bound is a wreck, not a road (README slope term).
-        road_grade = math.tan(-ego_pitch_rad) if math.isfinite(ego_pitch_rad) else 0.0
-        if not math.isfinite(road_grade) or abs(road_grade) > MAX_EGO_GRADE:
-            road_grade = 0.0
-        slope_accel = _GRAVITY_MS2 * math.sin(math.atan(road_grade))
-        downhill_offset = max(-slope_accel, 0.0)
         capacity_estimate = _max_brake_live
         effective_max_decel = max(
             0.1, cal.ego_decel_frac * capacity_estimate - downhill_offset,

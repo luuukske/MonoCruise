@@ -20,6 +20,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **ACC and AEB size up your own truck**: they now read your truck's length, width and wheelbase from the game instead of assuming one size, so AEB stops a little closer behind the vehicle ahead and ACC's predicted path no longer drifts to the outside of bends.
 
 ### Fixed
+- **AEB braked late for a stopped vehicle in a turn**: while turning, a stopped car or truck in your path could be taken for one parked beside the road or around the bend until it was too late to stop. AEB no longer waits past the last moment it can still stop for it.
 - **AEB stepped in too early**: it judged your truck's brakes from gentle braking and from every truck you had driven, assumed they take longer to bite than they do, ignored how hard your truck stops at full brake (much harder with the brake intensity slider turned up), and let go right after its first hard hit. It now steps in later, more so after two full-brake stops with a truck and load, and keeps braking firmly after the first hit.
 - **AEB stopped far behind the vehicle ahead**: it placed your truck's front about 1.3 m further forward than it really is, so every AEB stop ended well short, even from walking pace. It now stops about half a metre behind.
 - **Brake pedal revved the engine after launch**: on some pedal sets the first brake press after starting MonoCruise also gave half throttle, until the gas pedal was touched once. Each pedal now only moves with its own input.

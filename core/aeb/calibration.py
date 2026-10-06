@@ -256,6 +256,10 @@ class AEBCalibration:
     # than a lane, so its lane stops being evidence (README lane confidence).
     lane_confidence_range_m: float = 30.0
 
+    # A stationary body may be dropped on a guess about ego's path only until
+    # braking alone could no longer stop short of it (README avoidability gate).
+    avoidability_gate_enabled: bool = True
+
     # Clearance-based required decel (README continuous-decel). False restores
     # the pre-clearance relative-frame path and is how the corpus is A/B'd.
     clearance_required_enabled: bool = True

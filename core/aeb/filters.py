@@ -359,6 +359,9 @@ class FilterContext:
     d_miss: float | None = None
     # d(d_miss)/dt over the LOS window; None until the track spans enough time.
     d_miss_rate: float | None = None
+    # Ground speed from the target's raw positions over the LOS window, so a
+    # TMP speed field stuck at 0 cannot pass for a parked body. None: too short.
+    v_ground_meas: float | None = None
 
     # Latched ids bypass TMP rel-speed and the spatial drop filters (README).
     latched_threat_ids: set = field(default_factory=set)
@@ -373,6 +376,13 @@ class FilterContext:
     # Populated during collision evaluation (set by the pipeline caller)
     unbraked_hit: tuple | None = None
     lateral_gap: float = 0.0
+
+    # Avoidability gate inputs: the demand at which AEB engaging now just stops,
+    # and the thread's clearance demand for a list of target arcs.
+    brake_deadline_ms2: float = 0.0
+    clearance_fn: object | None = None
+    deadline_passed: bool | None = None
+    deadline_released: bool = False
 
     @property
     def reversing(self) -> bool:
@@ -1057,7 +1067,6 @@ class CornerEntryStationaryFilter:
         expected_lat = ctx.dist * math.sin(0.5 * road_bend)
         if abs(expected_lat - abs(lat_signed)) > cal.corner_entry_lateral_tol:
             return _PASS
-
         return _suppress("CornerEntryStationaryFilter")
 
 
@@ -1163,6 +1172,9 @@ class EgoEvasionFilter:
 
 def build_pipeline(cal: AEBCalibration) -> list:
     """Return the ordered list of filter stage instances."""
+    # Local import: the gate module builds on this one (README avoidability gate).
+    from core.aeb.avoidability import AvoidabilityGate
+
     return [
         RangeFilter(cal),
         ElevationFilter(cal),
@@ -1173,11 +1185,11 @@ def build_pipeline(cal: AEBCalibration) -> list:
         OppositeLaneFilterMirrored(cal),
         CoDirectionalDivergeFilter(cal),
         TurningCrossTrafficFilter(cal),
-        OutOfLaneParallelFilter(cal),
+        AvoidabilityGate(OutOfLaneParallelFilter(cal), cal),
         TmpCrossTrafficFilter(cal),
-        SweepPassFilter(cal),
-        CornerEntryStationaryFilter(cal),
-        CornerEntryStationaryFilterMirrored(cal),
+        AvoidabilityGate(SweepPassFilter(cal), cal),
+        AvoidabilityGate(CornerEntryStationaryFilter(cal), cal),
+        AvoidabilityGate(CornerEntryStationaryFilterMirrored(cal), cal),
         EgoEvasionFilter(cal),
     ]
 
