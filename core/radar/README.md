@@ -1258,6 +1258,8 @@ with rt.data._lock:
     ego_curvature = rt.data.ego_curvature     # None → fall back to yaw-rate proxy
     ego_geometry  = rt.data.ego_geometry      # EgoGeometry | None, see §17
     off_surface_ids = rt.data.off_surface_ids # frozenset[int], see §15
+    ncz_ids       = rt.data.ncz_ids           # frozenset[int], TMP ghosts, AEB only, see §18
+    tmp_ncz_active = rt.data.tmp_ncz_active   # no-collision zone gate open, see §18
     road_surface  = rt.data.road_surface      # RoadSurface (ego plane + curvature)
     paused        = rt.data.paused
     t_mono        = rt.data.t_mono            # snapshot time (monotonic)
@@ -1826,6 +1828,70 @@ the lane: a driver who holds the cab on the lane centre puts the lane circle
   shorter. `None` keeps the origin-launched arc (tests and tools pass none).
 - The road model, trail crossings and the rear cone stay in the placement frame:
   they are fitted on placement history, not on the arc.
+
+---
+
+## 18. TruckersMP No-Collision Zones (AEB only)
+
+`core/radar/tmp_state.py`. Inside a TruckersMP no-collision zone (NCZ) other
+players are ghosts: ego drives through them. AEB braking for one is a pure false
+positive, and the TMP rel-speed floor (`core/aeb/README.md` §4) only hides the
+low-speed share of them.
+
+### Source
+
+The stock ETS2LA plugin cannot see collision state. The MonoCruise NCZ build of
+`ets2la_plugin.dll` (ETS2LA plugin `main` plus the TruckersMP client SDK, branch
+`monocruise/tmp-ncz`) adds two shared-memory files, written at 20 Hz from the
+TruckersMP client's per-frame callback on the game thread:
+
+| file | layout | read by MonoCruise |
+|---|---|---|
+| `Local\ETS2LAMpState` | 16 bytes, `=IIBBHHH`: version (1), heartbeat, connected, in_no_collision_zone, players_streamed, players_collidable, reserved | yes |
+| `Local\ETS2LAMpPlayers` | 40 x 183 bytes, nearest first: traffic vehicle record without the flags, u64 Steam id, u16 latency, bool has_collision | **no** |
+
+`in_no_collision_zone` follows the SDK's `OnNoCollisionZone` event and resets on
+every connect and disconnect. `players_collidable` counts streamed-in players
+whose `CanCollideWith(local)` is true **or unknown**. `ETS2LATraffic` keeps its
+old layout and its pattern-based TMP vehicles, so a stock or NCZ DLL is the same
+to everything else. With the stock DLL the state file stays zero and nothing
+changes.
+
+### The gate
+
+`NoCollisionZoneGate` is all-or-nothing. It opens only when every signal agrees
+for `ENTER_CONFIRM_S` (0.3 s): heartbeat advanced within `STALE_AFTER_S` (0.5 s),
+connected, inside a zone, at least one player streamed, and **zero** players
+collidable. Any disagreement closes it on the same frame. While it is open,
+radar publishes `ncz_ids`: every `is_tmp` vehicle, trailer records and nested
+trailers included. AI traffic is never in it.
+
+Two independent signals have to agree because the dangerous failure is the gate
+staying open next to a real truck: a missed leave event alone cannot do it while
+any streamed player still reports a collision.
+
+### Consumers
+
+- **AEB** folds `ncz_ids` into the ids it skips with the off-surface set (§15),
+  latched threats exempt. Replay reads the per-frame `tmp_ncz` flag clips now
+  record (`RadarFrameRecord.tmp_ncz`, absent = False) and does the same.
+- **ACC** does not read it. Following a ghost ahead is still the expected
+  behaviour in a queue.
+- Per-player suppression (one ghost among collidable players at a zone edge)
+  needs the player poses matched to radar vehicles. It is deliberately not done
+  yet: the poses are unverified and lag detection needs the same matching.
+
+### Do not
+
+- Read the Steam id or latency fields of `Local\ETS2LAMpPlayers`, or record its
+  bytes in clips: they identify other players, and clips are shared when "Help
+  improve AEB and ACC" is on. The probe reads only poses and `has_collision`.
+- Treat an unknown collision answer as a ghost, or let a stale or absent state
+  file open the gate.
+- Feed `ncz_ids` to ACC, or use them to relax the TMP rel-speed floor outside a
+  zone: lag ghosts still need it (v1.1.3).
+
+`tools/tmp_ncz_probe.py` shows the state live while driving.
 
 ---
 

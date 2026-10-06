@@ -381,7 +381,7 @@ class CruiseControlThread(BaseThread):
                     "paused": bool(tel.data.paused),
                     "speed_ms": float(tel.data.speed),
                     "gear_dashboard": int(tel.data.gear_dashboard),
-                    "retarderBrake": int(tel.data.retarderBrake),
+                    "retarderBrake": int(getattr(tel.data, "retarderBrake", 0) or 0),
                     "park_brake": bool(tel.data.parkBrake),
                     "game_clutch": float(tel.data.gameClutch),
                     "game_throttle": float(tel.data.gameThrottle),

@@ -21,6 +21,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **ACC and AEB size up your own truck**: they now read your truck's length, width and wheelbase from the game instead of assuming one size, so AEB stops a little closer behind the vehicle ahead and ACC's predicted path no longer drifts to the outside of bends.
 
 ### Fixed
+- **AEB braked for TruckersMP players in no-collision zones**: you drive through other players there, so AEB now ignores them inside a zone (needs the updated game plugin from the release notes).
 - **AEB stepped in too early**: it judged your truck's brakes from gentle braking and from every truck you had driven, assumed they take longer to bite than they do, ignored how hard your truck stops at full brake (much harder with the brake intensity slider turned up), and let go right after its first hard hit. It now steps in later, more so after two full-brake stops with a truck and load, and keeps braking firmly after the first hit.
 - **AEB stopped far behind the vehicle ahead**: it placed your truck's front about 1.3 m further forward than it really is, so every AEB stop ended well short, even from walking pace. It now stops about half a metre behind.
 - **Brake pedal revved the engine after launch**: on some pedal sets the first brake press after starting MonoCruise also gave half throttle, until the gas pedal was touched once. Each pedal now only moves with its own input.

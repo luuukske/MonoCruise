@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT, ego_path_params
 from core.aeb.clip_replay import decode_radar_stream, ego_path_replay, nearest_frame_t
 from core.radar.ego_path_model import EgoPathModel
+from core.radar.tmp_state import ncz_vehicle_ids
 from core.aeb.clip_schema import Clip
 from core.aeb.filters import VehicleCurvatureBlender, build_pipeline
 from core.aeb.thread import (
@@ -131,6 +132,8 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
     ticks = sorted(clip.aeb_ticks, key=lambda x: x.t_mono)
     all_t = [f.t_mono for f in clip.radar_frames] + [tk.t_mono for tk in ticks]
     t0 = min(all_t) if all_t else 0.0
+    # Live AEB skips no-collision zone ghosts with the off-surface ids (radar README §18).
+    ncz_frames = {f.t_mono for f in clip.radar_frames if f.tmp_ncz}
 
     out: list[EvalTick] = []
     for tk in ticks:
@@ -142,10 +145,10 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
         if ego is None:
             continue
 
-        snap = _snapshot_tuple(
-            ego, vehicles, ft, off_by_t.get(ft, frozenset()),
-            tkin_by_t.get(ft, 0.0),
-        )
+        skip_ids = off_by_t.get(ft, frozenset())
+        if ft in ncz_frames:
+            skip_ids = skip_ids | ncz_vehicle_ids(True, vehicles, [])
+        snap = _snapshot_tuple(ego, vehicles, ft, skip_ids, tkin_by_t.get(ft, 0.0))
         t._read_radar_snapshot = lambda s=snap: s
         t._read_max_brake_ms2 = lambda mb=tk.consumed.max_brake_ms2: mb
         t._read_user_braking = (

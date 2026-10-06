@@ -16,6 +16,7 @@ from .ego_path import EGO_POSITION_HISTORY_LEN, ego_curvature_from_history
 from .elevation import ElevationGate, EgoElevationTrack, RoadSurface, build_surface
 from .reader import TrafficReader
 from .scs_pose import ScsPose, ScsPoseReader
+from .tmp_state import NoCollisionZoneGate, TmpStateReader, ncz_vehicle_ids
 from .traffic import Vehicle
 
 from core.aeb.capture import get_recorder
@@ -59,6 +60,11 @@ class RadarData(ThreadData):
     off_surface_ids: frozenset[int] = frozenset()
     road_surface: RoadSurface = field(default_factory=RoadSurface)
 
+    # TruckersMP ids ego cannot collide with (no-collision zone). AEB only:
+    # see core/radar/README.md §18.
+    ncz_ids: frozenset[int] = frozenset()
+    tmp_ncz_active: bool = False
+
     # Monotonic time when snapshot was published.
     # Held (not bumped) while paused so AEB/ACC treat the frame as stale.
     t_mono: float = 0.0
@@ -83,6 +89,8 @@ class RadarThread(BaseThread):
         self._last_ego_hist_t: float = 0.0
         self._elevation_track = EgoElevationTrack()
         self._elevation_gate = ElevationGate()
+        self._tmp_state = TmpStateReader()
+        self._ncz_gate = NoCollisionZoneGate()
         # None until the first frame; then True when using SCS simulatedTime.
         self._kin_use_sim: bool | None = None
         self._was_paused: bool = False
@@ -94,6 +102,8 @@ class RadarThread(BaseThread):
     def teardown(self) -> None:
         self._traffic.close()
         self._pose.close()
+        self._tmp_state.close()
+        self._ncz_gate.clear()
         self._ego_position_history.clear()
         self._last_ego_hist_t = 0.0
         self._elevation_track.clear()
@@ -105,6 +115,8 @@ class RadarThread(BaseThread):
             self.data.trailer_vehicles = []
             self.data.tmp_session = False
             self.data.off_surface_ids = frozenset()
+            self.data.ncz_ids = frozenset()
+            self.data.tmp_ncz_active = False
         logger.debug("radar teardown complete")
 
     def _reset_kinematics_clock(self) -> None:
@@ -184,7 +196,7 @@ class RadarThread(BaseThread):
         ego_has_trailer: bool, paused: bool, ego_mass_kg: float,
         traffic_buf: bytes | None, parked_buf: bytes | None,
         ego_wheels: int = 0, ego_trailer_count: int = 0,
-        geometry: EgoGeometry | None = None,
+        geometry: EgoGeometry | None = None, tmp_ncz: bool = False,
     ) -> None:
         """Debug clip capture; never raises into the radar loop."""
         try:
@@ -200,7 +212,7 @@ class RadarThread(BaseThread):
             ego.set_geometry(geometry)
             recorder.push_radar_frame(RadarFrameRecord(
                 t_wall=t_wall, t_mono=now_mono, ego=ego,
-                traffic_buf=traffic_buf, parked_buf=parked_buf,
+                traffic_buf=traffic_buf, parked_buf=parked_buf, tmp_ncz=tmp_ncz,
             ))
         except Exception:
             logger.debug("radar clip capture failed", exc_info=True)
@@ -223,6 +235,8 @@ class RadarThread(BaseThread):
         ego_curvature: float | None = None,
         off_surface_ids: frozenset[int] | None = None,
         road_surface: RoadSurface | None = None,
+        ncz_ids: frozenset[int] | None = None,
+        tmp_ncz_active: bool | None = None,
         t_kin: float | None = None,
         bump_t_mono: bool = False,
         geometry: EgoGeometry | None = None,
@@ -241,6 +255,10 @@ class RadarThread(BaseThread):
                 self.data.off_surface_ids = off_surface_ids
             if road_surface is not None:
                 self.data.road_surface = road_surface
+            if ncz_ids is not None:
+                self.data.ncz_ids = ncz_ids
+            if tmp_ncz_active is not None:
+                self.data.tmp_ncz_active = tmp_ncz_active
             self.data.ego_x = ego_x
             self.data.ego_y = ego_y
             self.data.ego_z = ego_z
@@ -363,6 +381,9 @@ class RadarThread(BaseThread):
         off_surface_ids = self._elevation_gate.step(
             vehicles + trailer_vehicles, road_surface, ego_x, ego_z, ego_yaw_rad,
         )
+        t_gate = time.monotonic()
+        tmp_ncz = self._ncz_gate.step(self._tmp_state.read(t_gate), t_gate)
+        ncz_ids = ncz_vehicle_ids(tmp_ncz, vehicles, trailer_vehicles)
 
         self._publish_ego_fields(
             ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
@@ -373,6 +394,8 @@ class RadarThread(BaseThread):
             ego_curvature=ego_curvature,
             off_surface_ids=off_surface_ids,
             road_surface=road_surface,
+            ncz_ids=ncz_ids,
+            tmp_ncz_active=tmp_ncz,
             t_kin=t_kin,
             bump_t_mono=True,
             geometry=geometry,
@@ -387,6 +410,6 @@ class RadarThread(BaseThread):
                 ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
                 ego_pitch_deg, ego_has_trailer, False, ego_mass_kg,
                 self._traffic.last_traffic_bytes, self._traffic.last_parked_bytes,
-                ego_wheels, ego_trailer_count, geometry,
+                ego_wheels, ego_trailer_count, geometry, tmp_ncz,
             )
 

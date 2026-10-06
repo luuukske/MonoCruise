@@ -135,7 +135,7 @@ def rig_front(v: Vehicle) -> float:
 
 
 def _ctx(t: float, dt: float, v: float, aeb_brake: bool) -> LongCtx:
-    return LongCtx(now=t, dt=dt, speed_ms=v, gear_dashboard=1, park_brake=False,
+    return LongCtx(now=t, dt=dt, speed_ms=v, gear_dashboard=1, retarderBrake=0, park_brake=False,
                    game_throttle=0.0, game_clutch=0.0, game_brake=0.0, aeb_brake=aeb_brake,
                    connected=True, paused=False, em_stop=False, device_lost=False)
 

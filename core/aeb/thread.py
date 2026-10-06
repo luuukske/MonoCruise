@@ -1128,8 +1128,8 @@ class AEBThread(BaseThread):
          steer, ego_has_trailer, _ego_curvature_from_history, tmp_traffic_session,
          paused, radar_t_mono, off_surface_ids, ego_t_kin) = snapshot
 
-        # Latched threats keep their pipeline seat: the shared gate must never
-        # drop a target AEB is already braking for. See core/radar/README.md §15.
+        # Latched threats keep their pipeline seat: neither radar gate (elevation §15,
+        # no-collision zone §18) may drop a target AEB is already braking for.
         off_surface_ids = off_surface_ids - self._latched_threat_ids
 
         vehicles_eff = _swap_trailer_kinematics(vehicles)
@@ -2550,7 +2550,9 @@ class AEBThread(BaseThread):
                     bool(rt.data.tmp_session),
                     bool(rt.data.paused),
                     float(rt.data.t_mono),
-                    frozenset(getattr(rt.data, "off_surface_ids", frozenset())),
+                    # Ids AEB cannot hit: off ego's road (README §15) or no-collision zone ghosts (§18).
+                    frozenset(getattr(rt.data, "off_surface_ids", frozenset()))
+                    | frozenset(getattr(rt.data, "ncz_ids", frozenset())),
                     float(getattr(rt.data, "ego_t_kin", 0.0) or 0.0),
                 )
         except AttributeError:

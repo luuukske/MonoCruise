@@ -706,6 +706,16 @@ or CC/ACC program brake above the 0.03 deadzone, not OPD coast-down) saves
 latch held until state drops below WARN **and** brake released; cleared when
 the session is no longer TMP.
 
+### No-collision zones
+
+The floor guesses; the plugin's no-collision zone state knows. While radar's
+NCZ gate is open (`core/radar/README.md` §18) every TMP id is in `ncz_ids`, and
+`_read_radar_snapshot` folds them into the set AEB skips with the off-surface
+ids, so they never reach the precompute or the pipeline. Latched ids stay, as
+with the elevation gate. The floor itself is unchanged: outside a zone it still
+covers lag and netcode ghosts, and relaxing it is v1.1.3 work alongside lag
+detection.
+
 ---
 
 ## 5. AEB Thread Interface
