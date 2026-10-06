@@ -1852,23 +1852,40 @@ TruckersMP client's per-frame callback on the game thread:
 
 `in_no_collision_zone` follows the SDK's `OnNoCollisionZone` event and resets on
 every connect and disconnect. `players_collidable` counts streamed-in players
-whose `CanCollideWith(local)` is true **or unknown**. `ETS2LATraffic` keeps its
+whose `CanCollideWith(local)` is true or unknown (diagnostics only, see below).
+The player poses match the `ETS2LATraffic` TMP records exactly (0.0 m, same yaw,
+measured 2026-10-06). `ETS2LATraffic` keeps its
 old layout and its pattern-based TMP vehicles, so a stock or NCZ DLL is the same
 to everything else. With the stock DLL the state file stays zero and nothing
 changes.
 
 ### The gate
 
-`NoCollisionZoneGate` is all-or-nothing. It opens only when every signal agrees
+`NoCollisionZoneGate` is all-or-nothing. It opens once the zone signal has held
 for `ENTER_CONFIRM_S` (0.3 s): heartbeat advanced within `STALE_AFTER_S` (0.5 s),
-connected, inside a zone, at least one player streamed, and **zero** players
-collidable. Any disagreement closes it on the same frame. While it is open,
-radar publishes `ncz_ids`: every `is_tmp` vehicle, trailer records and nested
-trailers included. AI traffic is never in it.
+connected, and inside a zone. Losing any of them closes it on the same frame.
+While it is open, radar publishes `ncz_ids`: every `is_tmp` vehicle, trailer
+records and nested trailers included. AI traffic is never in it.
 
-Two independent signals have to agree because the dangerous failure is the gate
-staying open next to a real truck: a missed leave event alone cannot do it while
-any streamed player still reports a collision.
+The dangerous failure is the gate staying open next to a real truck, i.e. a zone
+flag stuck at 1. The plugin resets it on every connect and disconnect, and the
+gate adds a teleport guard: an ego jump over `TELEPORT_JUMP_M` (50 m) between
+radar frames (ferry, train, respawn) keeps it shut until the plugin itself
+reports "not in a zone". A stale or disconnected read does not clear the guard.
+
+**The per-player collision flag is not used.** The first build also required
+zero collidable players, as a second signal. Measured live on 2026-10-06
+(TruckersMP 0.7.7.11, SDK 1.1.0), `CanCollideWith` does not follow the zone:
+- Inside zones it read "can collide" for every truck overlapping ego's body
+  (25/25 samples), which only ghosts can do.
+- Outside a zone it read "cannot collide" for a truck closing head-on from 34 m
+  to 8 m.
+- Beyond 30 m it was always "cannot".
+
+The zone event matched every entry and exit to the second. The veto kept the gate
+shut through both in-zone emergency brakes that day (clips `75dd6f2f`,
+`37112635`); with it gone they replay without a warning or a brake. The counts
+stay in the state file for diagnostics.
 
 ### Consumers
 
@@ -1877,17 +1894,23 @@ any streamed player still reports a collision.
   record (`RadarFrameRecord.tmp_ncz`, absent = False) and does the same.
 - **ACC** does not read it. Following a ghost ahead is still the expected
   behaviour in a queue.
+- **AEB debug window** draws the skipped ghosts anyway, grey with a dashed
+  outline and a "TMP ghost" label, from `AEBSnapshot.ghost_ids` and the
+  `"ghost"` flag on their vehicle records. They carry no arcs and never reach
+  the pipeline; a latched ghost is drawn as the threat it still is.
 - Per-player suppression (one ghost among collidable players at a zone edge)
-  needs the player poses matched to radar vehicles. It is deliberately not done
-  yet: the poses are unverified and lag detection needs the same matching.
+  needs a per-player signal TruckersMP does not provide yet. Matching players to
+  radar vehicles is not the obstacle: the poses line up exactly.
 
 ### Do not
 
 - Read the Steam id or latency fields of `Local\ETS2LAMpPlayers`, or record its
   bytes in clips: they identify other players, and clips are shared when "Help
   improve AEB and ACC" is on. The probe reads only poses and `has_collision`.
-- Treat an unknown collision answer as a ghost, or let a stale or absent state
-  file open the gate.
+- Let a stale or absent state file open the gate, or clear the teleport guard on
+  anything but the plugin reporting "not in a zone".
+- Use `CanCollideWith` / `players_collidable` / `has_collision` to suppress
+  anything until TruckersMP fixes it: it reads "cannot collide" for real trucks.
 - Feed `ncz_ids` to ACC, or use them to relax the TMP rel-speed floor outside a
   zone: lag ghosts still need it (v1.1.3).
 

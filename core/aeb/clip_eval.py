@@ -87,7 +87,7 @@ def _apply_warm_state(t: AEBThread, ws) -> None:
 
 
 def _snapshot_tuple(ego, vehicles, radar_t_mono: float, off_ids=frozenset(),
-                    t_kin: float = 0.0):
+                    t_kin: float = 0.0, ncz_ids=frozenset()):
     """Build the tuple _read_radar_snapshot returns, from clip ego + vehicles."""
     return (
         vehicles,
@@ -103,6 +103,7 @@ def _snapshot_tuple(ego, vehicles, radar_t_mono: float, off_ids=frozenset(),
         radar_t_mono,
         frozenset(off_ids),
         t_kin,
+        frozenset(ncz_ids),
     )
 
 
@@ -145,10 +146,11 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
         if ego is None:
             continue
 
-        skip_ids = off_by_t.get(ft, frozenset())
-        if ft in ncz_frames:
-            skip_ids = skip_ids | ncz_vehicle_ids(True, vehicles, [])
-        snap = _snapshot_tuple(ego, vehicles, ft, skip_ids, tkin_by_t.get(ft, 0.0))
+        ghosts = ncz_vehicle_ids(ft in ncz_frames, vehicles, [])
+        snap = _snapshot_tuple(
+            ego, vehicles, ft, off_by_t.get(ft, frozenset()) | ghosts,
+            tkin_by_t.get(ft, 0.0), ghosts,
+        )
         t._read_radar_snapshot = lambda s=snap: s
         t._read_max_brake_ms2 = lambda mb=tk.consumed.max_brake_ms2: mb
         t._read_user_braking = (

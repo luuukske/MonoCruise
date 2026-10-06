@@ -202,6 +202,33 @@ def _tmp_collision_threat(ref_ego_kmh: float, rel_speed_kmh: float) -> bool:
     return rel_speed_kmh > _TMP_FILTER_REL_AT_OR_BELOW_SPLIT_KMH
 
 
+def _ghost_vehicle_dict(v: Vehicle) -> dict:
+    """Debug-window record for a no-collision zone ghost: drawn, never evaluated."""
+    yaw = v._smooth_yaw if v._smooth_yaw is not None else math.radians(v.rotation.euler()[1])
+    trailers = [
+        {
+            "x": tr.position.x, "z": tr.position.z,
+            "yaw": math.radians(tr.rotation.euler()[1]),
+            "half_w": tr.size.width / 2.0, "length": tr.size.length,
+            "is_tmp": tr.is_tmp, "speed_kmh": abs(v.speed) * 3.6,
+        }
+        for tr in v.trailers
+    ]
+    return {
+        "vid": v.id,
+        "x": v.position.x, "z": v.position.z,
+        "yaw": yaw,
+        "half_w": v.size.width / 2.0,
+        "length": v.size.length,
+        "is_tmp": v.is_tmp,
+        "is_trailer": getattr(v, "is_trailer", False),
+        "kinematics_swapped": getattr(v, "_debug_kinematics_swapped", False),
+        "speed_kmh": abs(v.speed) * 3.6,
+        "trailers": trailers,
+        "ghost": True,
+    }
+
+
 class AEBState(enum.IntEnum):
     STANDBY = 0
     WARN = 1
@@ -237,6 +264,8 @@ class AEBSnapshot:
     closing_floor_ids: set = field(default_factory=set)
     # Superset: LOS veto plus the extrapolation vetoes (README engagement vetoes).
     engage_vetoed_ids: set = field(default_factory=set)
+    # No-collision zone ghosts: drawn by the debug window, never evaluated (radar README §18).
+    ghost_ids: set = field(default_factory=set)
 
     # Clearance model: what the binding target demands, the speed ego could pass
     # its conflict at, and the ids whose occupancy ends inside the window.
@@ -1126,11 +1155,12 @@ class AEBThread(BaseThread):
             return
         (vehicles, ego_x, ego_y, ego_z, ego_yaw_rad, ego_speed, ego_pitch_deg,
          steer, ego_has_trailer, _ego_curvature_from_history, tmp_traffic_session,
-         paused, radar_t_mono, off_surface_ids, ego_t_kin) = snapshot
+         paused, radar_t_mono, off_surface_ids, ego_t_kin, ncz_ids) = snapshot
 
         # Latched threats keep their pipeline seat: neither radar gate (elevation §15,
         # no-collision zone §18) may drop a target AEB is already braking for.
         off_surface_ids = off_surface_ids - self._latched_threat_ids
+        ncz_ids = ncz_ids - self._latched_threat_ids
 
         vehicles_eff = _swap_trailer_kinematics(vehicles)
 
@@ -1328,6 +1358,7 @@ class AEBThread(BaseThread):
                 return None
             return (m1 - m0) / dt
         vehicle_dicts: list[dict] = []
+        ghost_ids: set[int] = set()
         vehicle_arcs: dict[int, list[ArcPath]] = {}
         newly_risky: set[int] = set()
 
@@ -1414,6 +1445,9 @@ class AEBThread(BaseThread):
                 if dist_sq > max_range_sq:
                     continue
                 if v.id in off_surface_ids:
+                    if v.id in ncz_ids:
+                        vehicle_dicts.append(_ghost_vehicle_dict(v))
+                        ghost_ids.add(v.id)
                     continue
                 dist = math.sqrt(dist_sq)
                 v_yaw_rad = (
@@ -2177,6 +2211,7 @@ class AEBThread(BaseThread):
             los_vetoed_ids=los_vetoed_ids,
             closing_floor_ids=closing_floor_ids,
             engage_vetoed_ids=engage_vetoed_ids,
+            ghost_ids=ghost_ids,
             clearance_required_ms2=(
                 min(best_clearance.required_ms2, _REQUIRED_CEIL_MS2)
                 if best_clearance is not None else 0.0),
@@ -2525,7 +2560,7 @@ class AEBThread(BaseThread):
     def _read_radar_snapshot(
         self,
     ) -> tuple[list[Vehicle], float, float, float, float, float, float, float,
-               bool, float | None, bool, bool, float, frozenset, float] | None:
+               bool, float | None, bool, bool, float, frozenset, float, frozenset] | None:
         """Radar snapshot tuple under lock; None if radar thread missing."""
         try:
             rt = registry.get_thread("radar_thread")
@@ -2554,6 +2589,7 @@ class AEBThread(BaseThread):
                     frozenset(getattr(rt.data, "off_surface_ids", frozenset()))
                     | frozenset(getattr(rt.data, "ncz_ids", frozenset())),
                     float(getattr(rt.data, "ego_t_kin", 0.0) or 0.0),
+                    frozenset(getattr(rt.data, "ncz_ids", frozenset())),
                 )
         except AttributeError:
             return None

@@ -3,7 +3,7 @@
 Run it next to the game while driving on TruckersMP:
 
     python tools/tmp_ncz_probe.py            # state line twice a second
-    python tools/tmp_ncz_probe.py --players  # plus the nearest players' collision flags
+    python tools/tmp_ncz_probe.py --players  # plus the nearest players (collision flag is diagnostic)
 
 Never imports ``core.settings`` and never reads Steam ids or latency from the player records.
 """
@@ -11,6 +11,7 @@ Never imports ``core.settings`` and never reads Steam ids or latency from the pl
 from __future__ import annotations
 
 import argparse
+import math
 import mmap
 import struct
 import sys
@@ -29,9 +30,20 @@ _PLAYERS_SIZE = 40 * _PLAYER_SIZE
 _HAS_COLLISION_OFFSET = 182
 # Vehicle record: x, y, z, qw, qx, qy, qz, width, height, length, speed.
 _VEHICLE_HEAD = "=11f"
+# Ego truck center (world) from the plugin's camera file: truck_pos_x at 100, truck_pos_z at 108.
+_CAMERA_TAG = r"Local\ETS2LACameraProps"
+_CAMERA_SIZE = 128
 
 
-def _player_rows(buf: mmap.mmap, limit: int) -> list[str]:
+def _ego_xz(camera: mmap.mmap | None) -> tuple[float, float] | None:
+    if camera is None:
+        return None
+    x = struct.unpack_from("=f", camera, 100)[0]
+    z = struct.unpack_from("=f", camera, 108)[0]
+    return None if x == 0.0 and z == 0.0 else (x, z)
+
+
+def _player_rows(buf: mmap.mmap, limit: int, ego: tuple[float, float] | None) -> list[str]:
     rows = []
     for slot in range(40):
         base = slot * _PLAYER_SIZE
@@ -39,8 +51,9 @@ def _player_rows(buf: mmap.mmap, limit: int) -> list[str]:
         if length <= 0.0 and x == 0.0 and z == 0.0:
             continue
         collides = buf[base + _HAS_COLLISION_OFFSET] != 0
+        dist = f"{math.hypot(x - ego[0], z - ego[1]):7.1f} m" if ego else "      ? m"
         rows.append(
-            f"    slot {slot:2d}  collides={'yes' if collides else 'NO '}  "
+            f"    slot {slot:2d}  collides={'yes' if collides else 'NO '}  dist={dist}  "
             f"x={x:10.1f} z={z:10.1f}  {length:4.1f} x {width:3.1f} m  {speed * 3.6:6.1f} km/h"
         )
         if len(rows) >= limit:
@@ -56,35 +69,43 @@ def main() -> int:
 
     reader = TmpStateReader()
     gate = NoCollisionZoneGate()
-    players = None
+    players = camera = None
     if args.players:
         try:
             players = mmap.mmap(0, _PLAYERS_SIZE, _PLAYERS_TAG)
+            camera = mmap.mmap(0, _CAMERA_SIZE, _CAMERA_TAG)
         except Exception as exc:
             print(f"player buffer unavailable: {exc}")
 
-    print(f"gate opens after {ENTER_CONFIRM_S:.1f} s of agreement; Ctrl+C to stop")
+    print(f"gate opens after {ENTER_CONFIRM_S:.1f} s in a zone; Ctrl+C to stop")
+    t0 = time.monotonic()
+    last_zone = last_active = None
     try:
         while True:
             now = time.monotonic()
             st = reader.read(now)
             active = gate.step(st, now)
+            if st.in_no_collision_zone != last_zone or active != last_active:
+                print(f">>> t={now - t0:6.1f} s  in_zone={int(st.in_no_collision_zone)}  "
+                      f"gate={'OPEN' if active else 'closed'}")
+                last_zone, last_active = st.in_no_collision_zone, active
             print(
-                f"fresh={int(st.fresh)} connected={int(st.connected)} "
+                f"t={now - t0:6.1f} s  fresh={int(st.fresh)} connected={int(st.connected)} "
                 f"in_zone={int(st.in_no_collision_zone)} streamed={st.players_streamed:3d} "
                 f"collidable={st.players_collidable:3d}  ->  "
                 f"{'AEB IGNORES TMP PLAYERS' if active else 'normal'}"
             )
             if players is not None:
-                for row in _player_rows(players, args.limit):
+                for row in _player_rows(players, args.limit, _ego_xz(camera)):
                     print(row)
             time.sleep(0.5)
     except KeyboardInterrupt:
         return 0
     finally:
         reader.close()
-        if players is not None:
-            players.close()
+        for buf in (players, camera):
+            if buf is not None:
+                buf.close()
 
 
 if __name__ == "__main__":

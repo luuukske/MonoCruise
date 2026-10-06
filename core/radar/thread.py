@@ -382,7 +382,8 @@ class RadarThread(BaseThread):
             vehicles + trailer_vehicles, road_surface, ego_x, ego_z, ego_yaw_rad,
         )
         t_gate = time.monotonic()
-        tmp_ncz = self._ncz_gate.step(self._tmp_state.read(t_gate), t_gate)
+        ego_xz = (ego_x, ego_z) if (ego_x or ego_z) else None
+        tmp_ncz = self._ncz_gate.step(self._tmp_state.read(t_gate), t_gate, ego_xz)
         ncz_ids = ncz_vehicle_ids(tmp_ncz, vehicles, trailer_vehicles)
 
         self._publish_ego_fields(

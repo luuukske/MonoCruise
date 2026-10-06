@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import mmap
 import struct
 from dataclasses import dataclass
@@ -20,13 +21,16 @@ _STATE_VERSION = 1
 
 # The plugin writes at 20 Hz; a writer that stops (game closed, plugin unloaded) must close the gate.
 STALE_AFTER_S: float = 0.5
-# Entering needs every signal to agree this long; leaving is immediate.
+# Entering needs the zone signal to hold this long; leaving is immediate.
 ENTER_CONFIRM_S: float = 0.3
+# A jump this far between radar frames is a teleport (ferry, respawn); no truck covers it in one frame.
+TELEPORT_JUMP_M: float = 50.0
 
 
 @dataclass(frozen=True)
 class TmpState:
-    """One read of the plugin state. ``fresh`` means the writer is still ticking."""
+    """One read of the plugin state; ``fresh`` means the writer is still ticking.
+    The player counts are diagnostics: TruckersMP's per-player collision flag is not usable."""
 
     fresh: bool = False
     connected: bool = False
@@ -35,15 +39,9 @@ class TmpState:
     players_collidable: int = 0
 
     @property
-    def nobody_can_collide(self) -> bool:
-        """Every signal agrees that no TruckersMP player can touch ego right now."""
-        return (
-            self.fresh
-            and self.connected
-            and self.in_no_collision_zone
-            and self.players_streamed > 0
-            and self.players_collidable == 0
-        )
+    def in_zone(self) -> bool:
+        """The live plugin reports ego inside a no-collision zone on a TruckersMP server."""
+        return self.fresh and self.connected and self.in_no_collision_zone
 
 
 def decode_state(raw: bytes, heartbeat_fresh: bool) -> TmpState:
@@ -119,13 +117,23 @@ class NoCollisionZoneGate:
         self._agree_since: float | None = None
         self.active: bool = False
         self._seen_data: bool = False
+        self._last_xz: tuple[float, float] | None = None
+        # Set by a teleport; only the plugin reporting "not in a zone" clears it.
+        self._teleported: bool = False
 
-    def step(self, state: TmpState, now: float) -> bool:
+    def step(self, state: TmpState, now: float, ego_xz: tuple[float, float] | None = None) -> bool:
         if state.fresh and not self._seen_data:
             self._seen_data = True
             logger.info("TruckersMP no-collision zone data from the game plugin is available")
 
-        if not state.nobody_can_collide:
+        if ego_xz is not None:
+            if self._last_xz is not None and math.dist(ego_xz, self._last_xz) > TELEPORT_JUMP_M:
+                self._teleported = True
+            self._last_xz = ego_xz
+        if self._teleported and state.fresh and state.connected and not state.in_no_collision_zone:
+            self._teleported = False
+
+        if not state.in_zone or self._teleported:
             self._agree_since = None
             self._set_active(False)
             return False
@@ -146,6 +154,8 @@ class NoCollisionZoneGate:
 
     def clear(self) -> None:
         self._agree_since = None
+        self._last_xz = None
+        self._teleported = False
         self._set_active(False)
 
 
