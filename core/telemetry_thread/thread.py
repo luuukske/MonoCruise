@@ -92,6 +92,7 @@ class TelemetryThreadData(ThreadData):
     speedLimit: float = 0.0     # m/s, 0.0 when no speed limit
     blinkerRight = False
     blinkerLight = False
+    retarderBrake: int = 0
 
     # Engine
     engine_rpm: float = 0.0
