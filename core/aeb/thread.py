@@ -2202,7 +2202,7 @@ class AEBThread(BaseThread):
             aeb_warn, aeb_brake, self._hmi_sound_prev,
         )
         if action == "start":
-            self._sound_handler.start_warning()
+            self._sound_handler.start_warning(braking=aeb_brake)
         elif action == "stop":
             self._sound_handler.stop_warning()
 

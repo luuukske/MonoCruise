@@ -82,6 +82,8 @@ def _handler_stub(*, state: SoundState) -> WarningPlayer:
     h._cue_active = True
     h._cleared_at = float("-inf")
     h._one_shot = None
+    h._brake_sound = None
+    h._braking = False
     return h
 
 

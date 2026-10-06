@@ -2405,15 +2405,16 @@ Two labelling rules came out of the pass:
 
 ## 17. Warning sound
 
-`core/aeb/warning_sounds.py` holds the styles; `WarningPlayer` in
-`core/aeb/warning_player.py` plays them. The cue itself (warn or brake, two-tick
-arm) is unchanged and lives in `_hmi_sound_step` in `thread.py`.
+`core/aeb/warning_sounds.py` holds the styles (Original, Simple, Volvo Cars, Volvo
+Trucks, Tesla; a settings file that still says "Volvo style" resolves to Volvo Cars)
+and `WarningPlayer` in `core/aeb/warning_player.py` plays them. The cue itself (warn
+or brake, two-tick arm) is unchanged and lives in `_hmi_sound_step` in `thread.py`.
 
-The Volvo and Tesla styles are **synthesized imitations**, never recordings: a
-sampled car warning would ship third-party audio. A reference clip may be measured
-to tune them, never bundled. Tesla style was measured off one on 2026-10-05: five
+The Volvo Cars, Volvo Trucks and Tesla styles are **synthesized imitations**, never
+recordings: a sampled car warning would ship third-party audio. A reference clip may be
+measured to tune them, never bundled. Tesla style was measured off one on 2026-10-05: five
 90 ms beeps on a 145 ms grid, 1100 Hz with a quarter-level 1165 Hz beating
-against it, flat level, no overtones, a burst every second. Volvo style was
+against it, flat level, no overtones, a burst every second. Volvo Cars style was
 fitted to the clip at 0:10 of YouTube video vY2U-dzoiEA. Its timbre is plain (1568 Hz,
 the octave below at -9 dB, the octave above at -23 dB); what a first by-ear version
 got wrong was the time shape, and it measured 10 to 15 dB off per tone. The fitted
@@ -2430,7 +2431,7 @@ loop has no phase jump, and a soft stop fades over 30 ms because the ring is sti
 about 35 dB under the strike where a stop lands. Tesla repeats with a 1.0 s period,
 so repeats never run together.
 
-Volvo style is `one_shot`, because the real system sounds once when it triggers
+Volvo Cars style is `one_shot`, because the real system sounds once when it triggers
 and never again during that event (Lukas, 2026-10-05). The cue can still flicker
 inside one event, so a new warning needs the cue clear for `rearm_s` (1.0 s) first;
 a cue that returns sooner is the same event and stays silent. Rendered from silence
@@ -2442,12 +2443,61 @@ style, exactly as in the car; the brake and the popup do not depend on it.
 |---|---|---|---|
 | Original | Lukas's own recording, shipped since 1.0 | replayed 0.15 s before it ends | one extra pass |
 | Simple | one 2.8 kHz beep | steady beeping | stops after the beep in flight |
-| Volvo style | two groups of three struck pips ringing out | once per AEB event, never repeated | always plays out |
+| Volvo Cars style | two groups of three struck pips ringing out | once per AEB event, never repeated | always plays out |
+| Volvo Trucks style | one 0.5 s bar: four notes, a pause; braking adds a layer on top | bar after bar, at least four | the bar in flight completes |
 | Tesla style | five beeps, then 0.275 s of silence (1.0 s period) | burst after burst | the burst always completes |
+
+### Volvo Trucks: two layers
+
+Measured on 2026-10-06 off a screen recording of a Volvo Trucks video that Lukas
+supplied (kept local, never bundled), with his timestamps for what is warn and what is
+brake. The recording has music and engine under it, and a first read took the 1.2 kHz
+double pips for the warning. They are something else in the video; Lukas named the
+443 Hz pulse train as the warning.
+
+Both layers live on one **bar** of 0.50123 s (the measured period, 2.0 Hz) cut into
+six slots of 83.5 ms. `Partial` is one frequency with a level per slot (dB, None for no
+note) and one envelope: delay, rise, hold, fade.
+
+- **Foundation**, slots 0 to 3, then a 167 ms pause. Each note is a 443 Hz tone held
+  72 ms with a 36 ms fade, a 1744 Hz ping that starts 4 ms late, rises over 30 ms and
+  fades in 19 ms, and clicks at 1317, 2195, 2641, 3083 and 3520 Hz that fade in 12 to 62
+  ms. The first note is 6 to 8 dB hotter than the next three. The reference's first
+  note of each event is a further 4 to 6 dB louder with a harder click; that is not
+  modelled, because a loop cannot play a different first bar.
+- **Brake layer**, slots 2 to 5 of the same bar: four pings at 1744 Hz. Each starts 12 ms
+  before its slot, rises in 3 ms, holds 24 ms and fades in 20 ms. A 443 Hz tone holds the
+  pause, from late in slot 3 until it has faded before the bar ends. Slots 0 and 1 are
+  silent. The fade is early so little of the tone wraps into the next bar: the layer is
+  switched on in that gap, and a tone still ringing there would click. The recording also
+  has a broadband tick near 150 ms, and smaller ones later in the bar. Those ticks do not
+  repeat from bar to bar (pairwise correlation about 0 across the steady brake bars), so
+  they are the truck's brakes in the video, not the warning, and they are not synthesized.
+
+Per-partial envelopes of the synthesized bars agree with the reference to 1 to 5 dB
+RMS (foundation 1.1 to 3.4). The brake ping's band envelope is about 4 dB RMS, its peaks
+within about 1 dB, and the pause tone about 2 dB. The shapes are least-squares fits
+(scratchpad, numpy; not shipped), floor-clamped so the recording's noise is not fitted.
+Each frequency is rounded to whole cycles per bar so the loop wraps in phase.
+
+The reference sounded at least four bars for every event, including the three that
+were only a warning, so `min_cycles` is 4. A soft stop never cuts a bar short. The
+bar the cue ends in completes, and the fade finishes in its pause: the pause is
+only 31 ms, so a fade aimed at the middle of it ran into the next bar's first note.
+
+The brake layer is not a second clip. A second `pygame` sound starts on the next mixer
+buffer, which on Windows is long enough to put the brake beeps off the foundation's
+beat. `render_with_brake` adds the layer onto the foundation's own samples, and the
+player queues that bar on the same channel. While a bar plays, a change in braking
+replaces the queued bar, so the swap is the bar boundary. The brake layer is silent
+there (`brake_gate_s`, the opening of the bar, and the pause at the end), so the swap
+does not click. A brake that begins during a bar is heard from the next one. A brake
+with no preceding warn starts on the mixed bar. `thread.py` passes `braking=aeb_brake`
+to `start_warning` each tick the cue holds.
 
 Synthesized cycles loop in the mixer (`loops=-1`) and are stopped inside the
 silence that closes a cycle, so the rhythm is sample-accurate and a stop never
-cuts a tone; a sleep-timed replay would jitter by the Windows clock step. All four
+cuts a tone; a sleep-timed replay would jitter by the Windows clock step. All five
 are built when the handler is created, because synthesis takes up to 70 ms and
 `start_warning` runs on the AEB tick. Style and volume are re-read from settings
 each time a warning starts from silence, never mid-warning.
@@ -2464,7 +2514,10 @@ Every style is matched to the original's **loudness**, not its peak: the loudest
 400 ms of K-weighted signal (ITU-R BS.1770, the broadcast loudness weighting), so a
 driver who switches style keeps the same level at the same volume setting.
 `test_every_style_sounds_as_loud_as_the_original` holds them within 1 dB, and a
-change to any style's tones or timing has to re-solve its `gain`. Volvo style is the
+change to any style's tones or timing has to re-solve its `gain`. Volvo Trucks lands within 0.1 dB with the foundation alone and 0.9 dB with the brake
+layer on top. The two layers share the scale that puts the foundation's peak at
+`gain`, so braking does not change the foundation's level and the sum stays under
+full scale. Volvo Cars style is the
 one exception, about 4 dB under the rest by request: its strike sets the peak, so
 it cannot reach the others' level without squashing the strike. A tanh limiter that
 did exactly that was tried and heard as clipping. The strike was cut from the fitted
@@ -2474,9 +2527,10 @@ it also carries 0.75 s of closing silence, so its ring dies out inside the buffe
 instead of being cut while still audible.
 
 The settings panel's test button (for streamers balancing it against game audio)
-drives `WarningTest`: one cue of `TEST_CUE_S` (2.5 s, about a warning plus the
-brake after it) through its own `WarningPlayer`, so the style's repeat rules apply
-exactly as in a real event. A press while it still sounds holds the cue longer,
+drives `WarningTest`: one cue of `TEST_CUE_S` (1.0 s of warning, no brake layer)
+through its own `WarningPlayer`, so the style's repeat rules apply exactly as in a
+real event. The trucks brake layer is not part of the button. It plays only while
+AEB is actually braking. A press while it still sounds holds the cue longer,
 as a returning warning does. It never touches the AEB thread's player: that one
 is soft-stopped on every idle AEB tick and would cut the test off. An idle press
 builds a fresh player, because AEB teardown quits the mixer under an old one.

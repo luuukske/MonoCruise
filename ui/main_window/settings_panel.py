@@ -810,7 +810,7 @@ class SettingsPanel(QWidget):
         new_label(p, r_test, 0, "  Test warning sound:")
         self._btn_aeb_test = QPushButton("Play")
         self._btn_aeb_test.setFixedSize(self.opt_aeb_sound.width(), 30)
-        self._btn_aeb_test.setToolTip("Plays the warning only; it does not brake.")
+        self._btn_aeb_test.setToolTip("Plays about a second of the warning. It does not brake the truck.")
         self._btn_aeb_test.clicked.connect(self._on_aeb_test_clicked)
         self._grid.addWidget(
             self._btn_aeb_test, r_test, 1,
