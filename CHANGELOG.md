@@ -13,6 +13,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ## [Unreleased]
 ### Added
 - **Set speed adjusts to in-game speed limit**
+- **CC disengages if retarder is active**
 - **Choose the AEB warning sound and volume**: pick the original warning, a simple high beep, a Volvo Cars, Volvo Trucks or Tesla-style warning, and set its volume. All styles sound about as loud as the original and each behaves like the system it imitates: the Volvo Cars warning sounds once per emergency, and the Volvo Trucks warning adds a second sound on top while the truck brakes. A test button plays about a second of the warning so you can balance it against game audio (it does not brake).
 
 ### Changed

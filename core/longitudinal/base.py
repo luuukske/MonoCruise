@@ -13,6 +13,7 @@ class LongCtx:
     dt: float                   # seconds since previous tick
     speed_ms: float
     gear_dashboard: int
+    retarderBrake: int
     park_brake: bool
     game_throttle: float
     game_clutch: float
