@@ -158,15 +158,11 @@ class CruiseControlThread(BaseThread):
             # Block-message: warn when user presses inc/start but truck is in
             # park or reverse (neutral no longer blocks engage; gas is cut instead).
             if connected and Settings.cc_mode == "Cruise control" and (cc_inc or cc_start):
-                if self._park_or_reverse_blocks_cc(
-                    tel["park_brake"], tel["gear_dashboard"]
-                ):
+                if self._park_or_reverse_blocks_cc(tel["park_brake"], tel["gear_dashboard"]):
                     if now - self._last_block_msg_mono > 2.0:
                         self._last_block_msg_mono = now
-                        if tel["park_brake"]:
-                            logger.info("Cannot engage with parking brake on", extra={"popup": True})
-                        else:
-                            logger.info("Can only engage in drive", extra={"popup": True})
+                        if tel["park_brake"]: logger.info("Cannot engage with parking brake on", extra={"popup": True})
+                        else: logger.info("Can only engage in drive", extra={"popup": True})
 
             if any((cc_dec, cc_inc, cc_start)):
                 logger.debug(
@@ -678,9 +674,7 @@ class CruiseControlThread(BaseThread):
                 ctx.user_raw_brake > _CC_RAW_BRAKE_DISENGAGE
                 or game_brake_excess > _CC_GAME_BRAKE_DISENGAGE
             )
-            if user_braking or ctx.retarderBrake > 0 or ctx.motorBrake:
-                cc.disable()
-                #logger.info("CC disabled: %s", "brake pressed" if user_braking else "retarder active", extra={"popup": True})
+            if user_braking or ctx.retarderBrake > 0 or ctx.motorBrake: cc.disable()
 
         if (
             cc.enabled
@@ -737,8 +731,7 @@ class CruiseControlThread(BaseThread):
                 "w",
                 priority=2,
             )
-        elif was and not self._limiter_panic.overridden:
-            logger.info("Speed limiter restored")
+        elif was and not self._limiter_panic.overridden: logger.info("Speed limiter restored")
 
     def _update_cc_override_latch(self, ctx: LongCtx, pedal: dict) -> None:
         """Latch/unlatch the user OPD-gas override of CC (cruise mode only). See `core/cruise_control_thread/README.md`."""
@@ -783,10 +776,8 @@ class CruiseControlThread(BaseThread):
         self, commanding: bool, *, paused: bool = False
     ) -> None:
         # Pause gates the CC bid without a real disengage. Keep mapper state
-        if paused:
-            return
-        if self._was_commanding and not commanding:
-            self._request_mapper_reset()
+        if paused: return
+        if self._was_commanding and not commanding: self._request_mapper_reset()
         self._was_commanding = commanding
 
     def _request_mapper_reset(self) -> None:
@@ -795,8 +786,6 @@ class CruiseControlThread(BaseThread):
         except KeyError:
             return
         try:
-            if st.is_alive():
-                st.reset_accel_mapper_smoothing()
+            if st.is_alive(): st.reset_accel_mapper_smoothing()
         except Exception:
             logger.debug("reset_accel_mapper_smoothing failed", exc_info=True)
-
