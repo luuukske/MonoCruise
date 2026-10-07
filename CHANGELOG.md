@@ -11,12 +11,14 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.2-preview.2] - 2026-10-07
 ### Added
 - **Scania-style AEB warning**: a new warning sound that imitates modern Scania trucks, one repeating four-beep pattern for both the warning and the braking.
 - **Engine brake turns cruise control off**: like the retarder, switching on the engine brake now disengages cruise control.
 
 ### Changed
-- **Volvo Cars warning sounds more like the car**: it now ends with the two soft repeats the real warning has, the last one barely audible.
+- **Volvo Cars warning sounds more like the car**: it now ends with the soft repeat the real warning has.
 - **No-collision zone plugin installs itself**: MonoCruise now puts the updated game plugin in place for ETS2 and ATS 1.61 by itself, so the TruckersMP no-collision zone fix no longer needs a manual download.
 
 ### Fixed
