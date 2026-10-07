@@ -158,11 +158,12 @@ class CruiseControlThread(BaseThread):
             # Block-message: warn when user presses inc/start but truck is in
             # park or reverse (neutral no longer blocks engage; gas is cut instead).
             if connected and Settings.cc_mode == "Cruise control" and (cc_inc or cc_start):
-                if self._park_or_reverse_blocks_cc(tel["park_brake"], tel["gear_dashboard"]):
+                if self._park_or_reverse_blocks_cc(tel["park_brake"], tel["gear_dashboard"]) or self._retarder_or_motorbrake_blocks_cc(tel["retarderBrake"], tel["motorBrake"]):
                     if now - self._last_block_msg_mono > 2.0:
                         self._last_block_msg_mono = now
                         if tel["park_brake"]: logger.info("Cannot engage with parking brake on", extra={"popup": True})
-                        else: logger.info("Can only engage in drive", extra={"popup": True})
+                        elif tel["gear_dashboard"] < 0: logger.info("Can only engage in drive", extra={"popup": True})
+                        else: logger.info("Retarder/engine brake enabled", extra={"popup": True})
 
             if any((cc_dec, cc_inc, cc_start)):
                 logger.debug(
@@ -409,6 +410,9 @@ class CruiseControlThread(BaseThread):
     def _park_or_reverse_blocks_cc(self, park_brake: bool, gear_dashboard: int) -> bool:
         """Park brake or reverse. Neutral no longer blocks: gas is cut instead."""
         return bool(park_brake) or gear_dashboard < 0
+
+    def _retarder_or_motorbrake_blocks_cc(self, retarderBrake, motorBrake: bool):
+        return retarderBrake > 0 or motorBrake
 
     def _read_auto_neutral_holding(self) -> bool:
         """True while sending_thread's auto-neutral owns the gearbox. See README."""
@@ -670,11 +674,8 @@ class CruiseControlThread(BaseThread):
 
         if cc.enabled:
             game_brake_excess = ctx.game_brake - ctx.commanded_brake_recent_max
-            user_braking = (
-                ctx.user_raw_brake > _CC_RAW_BRAKE_DISENGAGE
-                or game_brake_excess > _CC_GAME_BRAKE_DISENGAGE
-            )
-            if user_braking or ctx.retarderBrake > 0 or ctx.motorBrake: cc.disable()
+            user_braking = (ctx.user_raw_brake > _CC_RAW_BRAKE_DISENGAGE or game_brake_excess > _CC_GAME_BRAKE_DISENGAGE)
+            if user_braking or self._retarder_or_motorbrake_blocks_cc(ctx.retarderBrake, ctx.motorBrake): cc.disable()
 
         if (
             cc.enabled
