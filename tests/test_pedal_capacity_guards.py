@@ -108,14 +108,51 @@ def test_a_stronger_stop_teaches_as_fast_as_a_weaker_one(clock):
     assert up == pytest.approx(-down, abs=0.004)
 
 
-def test_gentle_press_drifts_estimate_slowly(clock):
-    """Soft presses still teach, but slowly: a 2 s gentle stop must barely move the estimate, so a
-    stretch of abnormal braking cannot poison it (estimate fell 9 -> 4 m/s2 in routine driving,
-    2026-07-19)."""
+def test_light_braking_teaches_nothing(clock):
+    """Light samples read 0.67 of the model where firm ones read 1.05 (4 days of
+    brake_debug.csv, 2026-10-07), so only firm braking teaches. A gentle stop used to
+    drift the estimate, and it fell 9 -> 4 m/s2 in routine driving (2026-07-19)."""
     t = _fresh()
-    _feed(t, clock, pedal=0.3, decel=1.2, ticks=60)
-    assert t.max_brake_ms2 == pytest.approx(BASE, rel=0.05)
-    assert t.max_brake_ms2 < BASE  # direction still correct
+    _feed(t, clock, pedal=0.3, decel=1.2, ticks=120)
+    assert t.max_brake_ms2 == BASE
+    assert t.brake_samples_accepted == 0
+    assert t.last_brake_gate == "light"
+
+
+def test_a_short_hard_tap_teaches_nothing(clock):
+    """Firm holds under 1.3 s were 3% of accepted samples and 56% of the scale's
+    movement. A settled, honest tap still has to be held past tap length."""
+    t = _fresh()
+    for _ in range(3):
+        _feed(t, clock, pedal=1.0, decel=4.0, ticks=36, aeb=True)   # 1.19 s held
+        _feed(t, clock, pedal=0.0, decel=0.0, ticks=10)
+    assert t.max_brake_ms2 == BASE
+    assert t.brake_samples_accepted == 0
+
+
+def test_a_hard_press_held_past_tap_length_teaches(clock):
+    t = _fresh()
+    _feed(t, clock, pedal=1.0, decel=4.0, ticks=36, aeb=True)
+    assert t.max_brake_ms2 == BASE
+    assert t.last_brake_gate == "hold"
+    _feed(t, clock, pedal=1.0, decel=4.0, ticks=6, aeb=True)        # 1.39 s held
+    assert t.max_brake_ms2 < BASE
+
+
+def test_easing_off_restarts_the_hold(clock):
+    """Dropping out of the firm band ends the hold; the next press starts from zero.
+    The smoothed pedal rides out a 0.1 s dither, so only a real ease-off counts."""
+    t = _fresh()
+    _feed(t, clock, pedal=1.0, decel=4.0, ticks=30, aeb=True)
+    _feed(t, clock, pedal=0.3, decel=4.0, ticks=8, aeb=True)
+    _feed(t, clock, pedal=1.0, decel=4.0, ticks=30, aeb=True)
+    assert t.max_brake_ms2 == BASE
+
+    dithered = _fresh()
+    _feed(dithered, clock, pedal=1.0, decel=4.0, ticks=30, aeb=True)
+    _feed(dithered, clock, pedal=0.3, decel=4.0, ticks=3, aeb=True)
+    _feed(dithered, clock, pedal=1.0, decel=4.0, ticks=30, aeb=True)
+    assert dithered.max_brake_ms2 < BASE
 
 
 def test_aeb_reteaches_fast_after_underperformance(clock):
@@ -213,11 +250,11 @@ def test_ripple_averages_instead_of_rectifying(clock):
 
 
 def test_settle_window_blocks_early_samples(clock):
-    """After a pedal step, no sample may fire until the smoothed pedal has
-    been flat for the full window (EMA convergence + window span, ~0.8 s)."""
+    """After a pedal step inside a hard hold, no sample may fire until the smoothed
+    pedal has been flat for the full window (EMA convergence + window span, ~0.8 s)."""
     t = _fresh(scale=0.85)
-    clock.t += 1.0
-    t.update_brake(0.0, 0.0, SPEED, 0.0, BASE)
+    _feed(t, clock, pedal=0.6, decel=0.85 * BASE * brake_curve_fraction(0.6), ticks=60)
+    assert t.brake_samples_accepted > 0
     _feed(t, clock, pedal=0.9, decel=8.5, ticks=18)   # 0.59 s after step
     assert t.max_brake_ms2 == pytest.approx(0.85 * BASE)
     _feed(t, clock, pedal=0.9, decel=8.5, ticks=15)   # 1.09 s after step
@@ -320,7 +357,7 @@ def test_a_high_slider_is_not_learned_as_weak_brakes(clock):
     from core.scs_profile.intensity import apply_brake_intensity, effective_brake_pedal
 
     intensity = 2.158
-    for logical, full_authority in ((1.0, True), (0.3, False), (0.6, False)):
+    for logical, full_authority in ((1.0, True), (0.6, False), (0.8, False)):
         t = _fresh(scale=1.0)
         sent = apply_brake_intensity(logical, intensity, full_authority=full_authority)
         physical = BASE * brake_curve_fraction(effective_brake_pedal(sent, intensity))
@@ -357,8 +394,9 @@ def test_hooking_a_trailer_moves_the_estimate_the_same_tick(clock):
     """
     solo_base, trailer_base = 10.22, 13.89
     t = _fresh()
-    _feed(t, clock, pedal=0.4, decel=3.0, ticks=80, baseline=solo_base)
+    _feed(t, clock, pedal=0.8, decel=6.0, ticks=80, baseline=solo_base)
     learned_scale = t.brake_scale
+    assert learned_scale < 1.0, "nothing learned, so the test proves nothing"
     assert t.max_brake_ms2 == pytest.approx(learned_scale * solo_base)
 
     t.update_brake(0.0, 0.0, SPEED, 0.0, trailer_base, road_load_ms2=0.0)

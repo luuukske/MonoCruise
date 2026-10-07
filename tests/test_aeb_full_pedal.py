@@ -185,6 +185,23 @@ def test_a_slam_is_measured_off_its_speed_trace():
     assert run.tick(False, FH, 10300.0, B, 0.0, 0.0, 200.0) is None
 
 
+def _tap(run, held_s, decel=1.2 * B * F1, v0=25.0, dt=0.016, road=0.6, t0=400.0):
+    t = t0
+    while t - t0 < held_s:
+        run.tick(True, FH, 10300.0, B, max(v0 - (decel + road) * (t - t0), 0.0), road, t)
+        t += dt
+    return run.tick(False, FH, 10300.0, B, v0 - (decel + road) * held_s, road, t)
+
+
+def test_a_short_hard_tap_is_not_a_stop():
+    """2026-10-06: 1.1 s taps from 72-85 km/h read 0.70 and 0.86 against 0.97-1.30 for
+    stops and set the bobtail's weakest-of-five credit. Taps under 1.3 s scattered
+    0.52-1.81x the model; a full pedal now has to be held past tap length."""
+    assert _tap(ac.FullPedalRun(), 1.15) is None
+    held = _tap(ac.FullPedalRun(), 1.45)
+    assert held is not None and held[2] == pytest.approx(1.2, rel=0.03)
+
+
 def test_a_short_or_slow_run_is_ignored():
     run = ac.FullPedalRun()
     assert _stop(run, 1.2 * B * F1, v0=8.0) is None, "under a second above 18 km/h"

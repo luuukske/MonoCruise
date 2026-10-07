@@ -115,7 +115,10 @@ Rules:
 
 Always-on brake decel and gas gain learning (replaces legacy brake efficiency tracker).
 
-**Brake**: `update_brake` every tick; accept samples only when pedal and decel settle.
+**Brake**: `update_brake` every tick; accept samples only when pedal and decel settle,
+and only from a **hard hold**: a firm press (tune pedal at least 0.5, or a sent pedal of at
+least 0.9 on a slider too low to reach that) held for `BRAKE_HOLD_MIN_S` (1.3 s). See
+**Taps do not teach** below.
 Candidate inverts the fitted brake curve; pedal³ weighting; a sample moves the estimate
 at the same rate whether the stop was harder or softer than the current figure. Road load
 canceled before sampling. Fast EMA during
@@ -127,6 +130,23 @@ learned as truck weakness. See **Brake intensity**.
 **Gas**: `update_accel` every tick that the pedal is above zero, learning the zero-pedal
 offset, the shape-function anchor and the per-gear ratio. Same acceptance discipline as the
 brake side, and for the same reason.
+
+### Taps do not teach
+
+Replayed over 4 days of `brake_debug.csv` (2026-10-04 to 10-07), firm holds shorter than
+1.3 s were 3% of the accepted brake samples and **56% of the scale's total movement**: the
+AEB rate is 0.30 per tick at full pedal, so the two or three settled ticks a tap produces
+became the estimate. Their candidates also spread wider (p10 0.86 against 0.93 for longer
+holds). Light braking (5013 samples) read a median 0.67 of the model against 1.05 for firm
+holds, the same bias that split off `aeb_scale`, and dragged the scale down slowly.
+
+So `update_brake` only learns once a firm press has been held `BRAKE_HOLD_MIN_S`, measured
+on the 0.10 s smoothed pedal: a 0.1 s dither does not end a hold, a real ease-off does.
+The same replay (from 1.00, at the log's 20 Hz) ends at 1.00, the ceiling, instead of 0.95. `aeb_scale`
+inherits the gate through `last_settled_brake_sample`, and `FullPedalRun` uses the same
+length (see **Full-pedal credit**). Cost: the mapper's scale now only moves on hard stops,
+so a driver who never brakes hard keeps the model (or what was persisted); the fast PI
+absorbs the light-pedal residual. Do not shorten the hold to buy samples.
 
 ### The pedal model is affine, not a line through the origin
 
@@ -456,7 +476,7 @@ does not run, so fixing it changes no behaviour until something calls `update()`
 
 A 3 px always-on-top `Qt.Tool` strip along the bottom of the primary screen. Created on
 the Qt main thread via `create_visualization_bar()`. It reads `aforward` / `abackward`
-and flashes on `em_stop` / `AEB_warn`.
+and flashes on `em_stop` / `AEB_cue` (the AEB sound's cue, warn or brake).
 
 It must not call `raise_()` from its animation timer. A per-frame raise fights
 `cc_panel` and can freeze Qt on Windows when the main window is minimised.
@@ -546,8 +566,9 @@ slider-minimum rig at 0.15 of the model while it stopped at about 0.45.
 
 `aeb_scale` is learned per truck, keyed `game|truck_id|trailer_count`, and only from
 firm braking: tune pedal at least 0.5, or a sent pedal of at least 0.9 on a slider too
-low to reach that. It takes the tracker's settled sample (`last_settled_brake_sample`)
-before the mapper's 1.35x cap gate, clamps it to 0.35-1.00 and moves at
+low to reach that, held past tap length (the tracker's hard hold, above). It takes the
+tracker's settled sample (`last_settled_brake_sample`) before the mapper's 1.35x cap
+gate, clamps it to 0.35-1.00 and moves at
 `0.04 * firmness^3` per sample, so one full stop converges. An unmeasured truck starts at
 0.95. At most 64 trucks are kept, least recently braked first out, persisted in
 `aeb_brake_scales`. The mapper and ACC keep the global `brake_scale` unchanged.
@@ -588,11 +609,18 @@ on 2026-10-04 even with the onset guard. The extra cannot be predicted (same tra
 
 - A **full-pedal stop** is a sent pedal of at least 0.97 on full authority (driver slam or
   long AEB saturation). `FullPedalRun` fits a least-squares slope to the speed trace from
-  0.3 s after the slam while above 18 km/h, needs at least 0.5 s of it, and reports
+  0.3 s after the slam while above 18 km/h, needs at least 1.0 s of it, and reports
   `(decel - road load) / (baseline x frac(1))` when the pedal comes off. It does not use
   the tracker's settled samples: during a slam the differentiated decel swings +-2 m/s2
   on the 20 Hz physics staircase, and on 2026-10-04 two full stops from 124 and 75 km/h
   produced one settled tick between them.
+- **Taps are not stops.** The minimum was 0.5 s of trace (a 0.8 s hold). Over 4 days of
+  logs, runs with under 1.0 s of trace scattered to p90 27% from the long-stop median
+  per rig and slider, with 10 readings more than 20% low; at 1.0 s, p90 21% and 4 low,
+  and holding longer gains nothing (the rest are the weak stops under the grip columns
+  below). Two 1.1 s taps on the FH bobtail at `I = 1.73` (72 and 85 km/h, released at
+  40-50) read 0.70 and 0.86 and became its credit. 1.0 s of trace after the 0.3 s settle
+  is the tracker's 1.3 s hold. Cost: a stop must start above roughly 60 km/h to count.
 - Stops are kept per `game|truck|trailers|slider`, then per load within 10% of mass (four
   loads, last five stops each, 64 keys), persisted in `aeb_full_pedal`.
 - **Credit** needs two stops at this load and uses the weakest of the last five. Capacity
