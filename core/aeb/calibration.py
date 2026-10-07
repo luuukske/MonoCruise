@@ -220,6 +220,16 @@ class AEBCalibration:
     # A clear threat warns once AEB would have to brake this much later; 0 disables.
     # 1.1 leaves a full second after the two-tick warn confirm.
     aeb_warn_lead_s: float = 1.1
+    # Near threat (README warn classes): a stopped aligned non-TMP body in a wider band,
+    # on a near-straight path within range. 0 band disables.
+    aeb_warn_near_band_m: float = 2.5
+    aeb_warn_near_hold_s: float = 0.2
+    aeb_warn_near_lead_s: float = 0.4
+    aeb_warn_near_max_kappa: float = 0.005
+    aeb_warn_near_max_range_m: float = 70.0
+    # Every other colliding non-crosser warns once AEB would have to brake this much
+    # later, through the usual confirm and class windows; 0 disables.
+    aeb_warn_other_lead_s: float = 0.4
     # Moving crossers (|fwd_dot| under the dot) warn only with the brake: last-second turns.
     aeb_warn_crossers_with_brake: bool = True
     aeb_warn_crosser_dot: float = 0.5

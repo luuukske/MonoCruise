@@ -796,8 +796,9 @@ Read from other threads (acquire `data._lock` first):
 
 ```python
 aeb = registry.get_thread("aeb_thread").data
-aeb.AEB_warn                       # bool: UI cue (warn fraction or TTB); sound is warn OR brake
+aeb.AEB_warn                       # bool: warn fraction or TTB, after user-braking suppression
 aeb.AEB_brake                      # bool: engagement latched and target > 0
+aeb.AEB_cue                        # bool: HMI cue (warn OR brake, sound's gate, quiet once stopped); all visuals read it
 aeb.AEB_target_decel_ms2           # float: rate-limited commanded decel (m/s²)
 aeb.AEB_ff_decel_ms2               # float: always-on additive FF decel (m/s²); 0 when no threat
 aeb.AEB_required_decel_ms2         # float: slope-corrected required decel
@@ -1142,6 +1143,26 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    means an engagement outbeats the user-braking suppression by construction,
    which is what "AEB engagement is the emergency override" above already
    promises.
+
+   The visuals (CC panel blink, pedal bar flicker) read `AEB_cue`, never
+   `AEB_warn`. It is the sound's own cue, true on every tick `start_warning`
+   runs and held `_HMI_CUE_OFF_DELAY_S` (0.2 s) after, so the 100 ms UI poll
+   cannot miss a pulse that beeped; the panel's 2 s afterglow then outlasts
+   every style's soft-stop tail. When the panel read `AEB_warn` the two split
+   whenever AEB braked without a warn: clip `f61ae726` braked 2.8 s with OPD
+   coast-down suppressing warn throughout (beep, no flash), and `7d9caa56`
+   held the brake 3.8 s at standstill on the geometry latch with zero demand,
+   so warn dropped while the beep ran on.
+
+   Once AEB has stopped the truck the whole cue goes quiet, sound and visuals
+   together (`_hmi_stopped_step`): the latch sets when the cue holds at
+   `|ego_speed| <= _HMI_STOPPED_SPEED_MS` (0.5 m/s, above the ~0.15 m/s
+   standstill jitter) and clears when warn and brake both end or ego moves off
+   past `aeb_min_engage_speed_kmh`. A standstill warning is not actionable, and
+   standstill warns flicker on `ttb = 0` ticks, so warn is muted with brake. The
+   "AEB intervention" popup, which has fired by then (0.5 s of brake, under
+   5 m/s), covers the hold. Engagement, the brake hold and the published
+   `AEB_brake` are untouched: this is HMI only.
 8. Head-on targets: modelled as also braking at `full_brake_decel (7.8 m/s²)`
    inside the collision pipeline (unchanged).
 
@@ -1175,6 +1196,39 @@ hold. Over the whole labelled corpus both classes together take the 0.85 build f
 31 false warns to 25 (crossers -8, clear class +2, no brake verdict moved); a 1.5 m band
 nets 30 and the lane band 32. Trailers parked 1-2 m off ego's path only qualify once they are inside the band,
 so their lead is shorter: the evidence at that range cannot tell them from a bend.
+
+**Complicated scenes get about 0.4 s.** Lukas, 2026-10-07: the full second is for dead-ahead
+threats only; everything else should warn about 0.4 s before the brake with as few false
+warns as possible. Two paths do that, both the same look-ahead test with a 0.4 s lead.
+
+*Near threat* (`aeb_warn_near_band_m`). A stopped body (`measured_stationary`) that is
+aligned with ego's travel (co-directional or facing ego), not a TruckersMP player, within
+`aeb_warn_near_max_range_m` (70 m), with ego on a near-straight path
+(`|kappa| <= aeb_warn_near_max_kappa`, 0.005 1/m), and inside `aeb_warn_near_band_m`
+(2.5 m) by both evidence lines for `aeb_warn_near_hold_s` (0.2 s) leads by
+`aeb_warn_near_lead_s` (0.4 s) and is never oncoming: a trailer parked facing the truck a
+metre or two off its path otherwise sat in the 2 s oncoming window until the brake. Each
+condition removed a measured false-warn source: TMP bodies were 22 of the 34 targets a broad
+draft warned for without a brake (queues and netcode jitter beside the lane), moving and
+crosswise bodies change at the last second, ego curvature above 0.005 is the unseen-bend
+projection again, and the range cap drops a queue first seen at 78 m. Test track: 6 stops
+that warned late or not at all now lead by 0.34-0.74 s. Labelled corpus: one
+`true_negative -> false_warn` (`de899e27`), no other verdict moved. That clip is a stopped
+car facing ego in the far lane of a gentle S-bend at 94 km/h; its offset closes 1.6 -> 1.1 m
+at 64 m exactly like the test-track trailer approaches, the warn comes 0.4 s before AEB would
+have braked, and the driver followed the bend 0.25 s after it.
+
+*Everything else* (`aeb_warn_other_lead_s`). Any other colliding target that is not a moving
+crosser raises the raw warn on the same test, but through the usual confirm and class
+windows (oblique, vetoed, oncoming, wide-lateral), so it can only bring a warn forward where
+those windows already allow one. Corpus cost zero, gain small: the corpus brakes in these
+scenes are mostly sudden. Over the 651 braked labelled positives the colliding set formed a
+median 0.34 s before the brake, and in half of them the target was still dropped by a filter
+0.4 s before it (parallel out-of-lane 133, opposite-lane and evasion 72, TMP rel-speed 31),
+released a median 0.12 s before the brake. A look-ahead cannot lead what the pipeline does not
+yet see. Measured and not shipped: a 0.6 s lead on both paths (+12 events warned 0.4 s ahead,
++10 false warns) and a warn look-ahead on the avoidability gate, warning before a guessed drop
+is released (+2 events, +1 false warn). Both trade about one false warn per early warn.
 
 **Moving crossers** (`aeb_warn_crossers_with_brake`). When every colliding target is a
 moving body crossing at `|fwd_dot| < aeb_warn_crosser_dot` (0.5), the cue starts with

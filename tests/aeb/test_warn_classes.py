@@ -1,4 +1,5 @@
-"""Warn classes: a clear threat warns a second ahead, a moving crosser only with the brake.
+"""Warn classes: a clear threat warns a second ahead, a complicated scene about 0.4 s,
+a moving crosser only with the brake.
 
 A clear threat is held dead ahead by both the ego arc and the measured line, driving
 ego's way or stopped. Facing ego it is still an obstacle, not oncoming traffic: the
@@ -23,7 +24,8 @@ from core.radar.reader import _BUF_SIZE, _TOTAL_FORMAT
 _HZ = 30.0
 _BODY_H = 3.0
 _OLD = replace(CAL, aeb_warn_clear_class=False, aeb_warn_lead_s=0.0,
-               aeb_warn_crossers_with_brake=False)
+               aeb_warn_crossers_with_brake=False, aeb_warn_near_band_m=0.0,
+               aeb_warn_other_lead_s=0.0)
 
 
 def _yaw_quat(yaw_deg: float) -> tuple[float, float, float, float]:
@@ -36,7 +38,7 @@ def _yaw_quat(yaw_deg: float) -> tuple[float, float, float, float]:
 
 
 def _clip(ego_ms: float, x0: float, z0: float, yaw_deg: float, speed: float,
-          n: int = 105) -> Clip:
+          n: int = 105, tmp: bool = False) -> Clip:
     """Ego on +Z at ``ego_ms``; one 6 m body driving its own heading at ``speed``."""
     dt = 1.0 / _HZ
     yaw = math.radians(yaw_deg)
@@ -46,7 +48,7 @@ def _clip(ego_ms: float, x0: float, z0: float, yaw_deg: float, speed: float,
         t = i * dt
         flat: list = [x0 + fx * speed * t, BODY_DATUM_FRAC * _BODY_H, z0 + fz * speed * t,
                       *_yaw_quat(yaw_deg), 2.5, _BODY_H, 6.0, speed, 0.0]
-        flat += [0, 3, 0, 0] + [0.0] * 30
+        flat += [0, 3, int(tmp), 0] + [0.0] * 30
         for _ in range(39):
             flat += [0.0] * 12 + [0, 0, 0, 0] + [0.0] * 30
         buf = struct.pack(_TOTAL_FORMAT, *flat)
@@ -91,13 +93,25 @@ def test_a_parked_body_facing_ego_warns_a_second_before_the_brake():
     assert _lead(old) < 0.05, "the oncoming class held the warn to the brake"
 
 
-def test_a_stopped_body_off_the_path_keeps_the_oncoming_wait():
-    """Queues facing ego clip the corridor on bends; exempting them cost 12 false warns."""
-    clip = _clip(ego_ms=18.0, x0=2.2, z0=60.0, yaw_deg=0.0, speed=0.0)
+def test_a_parked_body_beside_the_path_gets_the_short_lead():
+    """1.6 m off ego's path is a complicated scene: the near tier leads by about 0.4 s,
+    not the dead-ahead second, and lifts the oncoming wait that held it to the brake."""
+    clip = _clip(ego_ms=18.0, x0=1.6, z0=95.0, yaw_deg=0.0, speed=0.0, n=170)
     new = run_headless(clip)
-    assert any(t.colliding_ids for t in new), "the body must reach the corridor"
-    old = run_headless(clip, cal=_OLD)
-    assert [(t.aeb_warn, t.aeb_brake) for t in new] == [(t.aeb_warn, t.aeb_brake) for t in old]
+    no_near = run_headless(clip, cal=replace(CAL, aeb_warn_near_band_m=0.0))
+    assert _first(new, "aeb_brake") == _first(no_near, "aeb_brake"), "only the warn may move"
+    assert 0.3 <= _lead(new) < 0.75
+    assert _lead(no_near) < 0.05
+
+
+def test_a_tmp_body_beside_the_path_keeps_the_old_timing():
+    """A TMP position jitters by about the near band's width, so a TMP body facing ego
+    beside the path keeps the oncoming wait (README warn classes)."""
+    clip = _clip(ego_ms=18.0, x0=1.6, z0=95.0, yaw_deg=0.0, speed=0.0, n=170, tmp=True)
+    new = [(t.aeb_warn, t.aeb_brake) for t in run_headless(clip)]
+    old = [(t.aeb_warn, t.aeb_brake) for t in run_headless(clip, cal=_OLD)]
+    assert any(b for _, b in new), "the body must be braked for"
+    assert new == old
 
 
 def test_moving_head_on_traffic_keeps_the_oncoming_wait():
