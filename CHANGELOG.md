@@ -11,6 +11,7 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+- **CC disengages if motor brake is active**
 
 ## [1.1.2-preview.1] - 2026-10-06
 ### Added

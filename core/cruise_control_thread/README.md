@@ -10,7 +10,7 @@ Each tick: snapshot telemetry and pedal, run CC button FSM and ACC gap FSM, buil
 handle mode-flip PID reset, CC-only disengage, dispatch by `Settings.cc_mode`, publish
 `wanted_accel_ms2` and `active_controller` for `sending_thread` and UI.
 
-CC-only disengage: raw/game brake thresholds, retarder, park/reverse, disarm-on-stop, crash
+CC-only disengage: raw/game brake thresholds, retarder, motor brake, park/reverse, disarm-on-stop, crash
 speed drop. Neutral does not disengage: positive CC/ACC bids are clamped to 0 while
 `gear_dashboard == 0`, with a popup after 2 s continuous N. Skip the clamp while
 `auto_neutral_holding` so auto-neutral can see the launch bid and shift to drive.
