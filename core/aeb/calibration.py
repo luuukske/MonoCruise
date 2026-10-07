@@ -177,15 +177,16 @@ class AEBCalibration:
     # While engaged the pedal controller tracks this target, so a slow software ramp
     # only delays the bite; the plant's own 0.15 s lag is the real jerk limit.
     aeb_target_rate_engaged_ms3: float = 30.0
-    # Flat bar. 0.90 was priced before the bumper moved back (2026-10-04).
-    # 0.50 is the 2026-10-06 reprice: corpus -915, 0.55 was -876.
-    aeb_engage_frac: float = 0.50
-    aeb_engage_frac_certain: float = 0.50
+    # Also how hard AEB brakes: demand is tracked to the stop buffer. 0.50 felt slow (README).
+    aeb_engage_frac: float = 0.85
+    # Graded hedge skip for aligned in-lane traffic; 0.85 in-game trial from
+    # 2026-08-11 equals aeb_engage_frac, so grading is flat (README, TUNING.md).
+    aeb_engage_frac_certain: float = 0.85
     aeb_disarm_frac: float = 0.45
     # Geometry latch while colliding unbraked ttc inside window (anti-pumping; README).
     disarm_hold_ttc_s: float = 3.0
     # Must equal aeb_engage_frac (pinned in tests/aeb/test_confirm.py).
-    aeb_warn_near_full_frac: float = 0.50
+    aeb_warn_near_full_frac: float = 0.85
     brake_actuator_lag_s: float = 0.10
     # New engagements only fire when |ego_speed| is above this threshold.
     aeb_min_engage_speed_kmh: float = 5.0
@@ -211,6 +212,17 @@ class AEBCalibration:
     # Evidence-class warn windows: oncoming sets and sets a full lane off the
     # ego arc are the two phantom-beep classes (README warn persistence).
     aeb_warn_confirm_oncoming_s: float = 2.00
+    # Clear threat (README warn classes): ego arc and measured CBDR line both put it within
+    # aeb_warn_clear_band_m of ego's path for aeb_warn_clear_hold_s, driving ego's way or stopped.
+    aeb_warn_clear_class: bool = True
+    aeb_warn_clear_band_m: float = 1.0
+    aeb_warn_clear_hold_s: float = 0.50
+    # A clear threat warns once AEB would have to brake this much later; 0 disables.
+    # 1.1 leaves a full second after the two-tick warn confirm.
+    aeb_warn_lead_s: float = 1.1
+    # Moving crossers (|fwd_dot| under the dot) warn only with the brake: last-second turns.
+    aeb_warn_crossers_with_brake: bool = True
+    aeb_warn_crosser_dot: float = 0.5
     aeb_warn_confirm_wide_lat_s: float = 0.60
     aeb_warn_wide_lat_m: float = 4.0
     # Wide class survives this much lapse, so a target closing under the bar

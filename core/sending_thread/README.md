@@ -315,7 +315,9 @@ is only a capacity estimate once the plant has plateaued, and a stop from low sp
 for well under a second, so it never gets there. A fixed settling window then under-reports
 by up to 25% and fakes a decay across a run. With peak-A, four back-to-back bobtail stops
 20 s apart measured 9.19 / 9.01 / 9.51 / 9.41 (mean 9.28, ±2.7%) against a 9.74 prediction.
-No fade: ETS2 exposes neither brake temperature nor wear, so neither can be compensated.
+No fade in those four. The telemetry does carry `brakeTemperature` and `airPressure`
+(wear is not exposed); whether either moves ETS2's braking is open, see the grip columns
+in the brake debug log below.
 
 The old baseline was inverted *and* low, so for a loaded rig the partial-pedal candidate cap
 sat at 7.9 m/s² against a real 13-14: every truthful sample was rejected as contaminated and
@@ -384,6 +386,18 @@ supplies the correction.
   instead: it fixes fast plants but sends slow ones to 1.4-1.6x target and costs up to
   0.3 m. The price is paid only when the truck brakes harder than AEB believes: up to
   1.24x target for the first second on a truck 25% stronger, then 1.00x.
+- **Onset pre-fill** (`_AEB_PREFILL_*`): a command of at least 75% of what full pedal
+  delivers opens at full pedal, and hands over to tracking once the measured decel reaches
+  85% of the command or after 0.35 s. ETS2 builds a full pedal in well under 0.1 s (slam
+  fits on `brake_debug.csv`, tau 0.02-0.10 s) but a partial one like gentle braking (tau
+  0.1-0.5 s, dead time up to 0.17 s), and the build-up pad assumes a slam. AEB engages at
+  85% of the truck, so its tracked pedal sits just under full: on the slider-gain truck
+  that is the top of the tune range, sent 0.6 at 125%, which built at partial-pedal speed.
+  With a plant that builds like that, 90% of the command arrives in 0.15 s instead of 0.37 s
+  (0.22 s instead of 0.91 s on a truck 15% weaker than believed) and peaks at 1.1x. Routine
+  commands never pre-fill, which `test_a_routine_command_never_opens_at_full_pedal` pins.
+  This is not the 2026-08-11 engagement slam: that one was merged by `max` and held the
+  pedal at 1.0 for the whole event; this one ends on the controller's own clock.
 - **Slider axis** (`AebPedalAxis`): the controller's pedal is a point on its capacity's
   brake curve. Above `I = 1.1` the sending thread maps it to the sent pedal that delivers
   that decel and maps the sent pedal back for the observer. The tune range runs through the
@@ -405,9 +419,9 @@ supplies the correction.
   back only costs metres. This matters most downhill, where `effective_max_decel` also
   subtracts the gravity term: on an 8% grade the capped target inverts to pedal 0.67.
 
-Convergence is plant-limited, not filter-limited: solo reaches ~84% of target at 0.5 s
-and ~96% at 0.8 s; a trailer cannot do better than its own ~0.65 s brake build-up. The
-distance that build-up costs is paid for by `stop_buffer_response_s` in AEB, not here.
+Convergence of a routine command is plant-limited, not filter-limited: solo reaches ~84%
+of target at 0.5 s and ~96% at 0.8 s. An emergency command pre-fills instead (above). The
+distance the build-up costs is paid for by `stop_buffer_response_s` in AEB, not here.
 
 ## Hold controller (`hold_controller.py`)
 
@@ -604,6 +618,15 @@ before and after the intensity remap, the tune pedal learning inverts, AEB's
 target and demand, the learned capacity, and which gate ended the learner's tick.
 Off by default, so it never ships to drivers. A header change rotates the old file
 aside, the same as `coast_debug.csv`.
+
+The grip columns (lateral accel, steer, brake temperature, air pressure, wipers, the
+surface under most truck wheels, worst truck and trailer wheel slip, from
+`telemetry_thread.grip_debug_fields`) are there for one open question. Full-pedal stops
+on the FH plus a 17 t trailer at 125% read a median 1.1x the model over 33 slams, but
+about one in six came in at 0.4-0.79x (three of five on 2026-10-06), while partial
+braking in the same minutes held 0.82-0.98x. AEB engages at 85% of the truck, so a stop
+in those conditions can run out of brake. Slip near 1 on a weak stop means locked wheels
+(grip); normal slip with low air pressure or a hot brake points at the brake itself.
 
 ## Main pedal thread
 

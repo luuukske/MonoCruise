@@ -10,7 +10,9 @@ Other threads read:
 from __future__ import annotations
 
 import logging
+import math
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 import threading
 
@@ -27,6 +29,8 @@ logger = logging.getLogger(__name__)
 _MASS_LOG_INTERVAL_S = 1.0
 # Same mapping the background checker opens (checker/ets2_checker.py).
 _TELEMETRY_SHM_NAME = "Local\\SCSTelemetry"
+# Wheel slip is meaningless at walking pace, where rim speed and truck speed both vanish.
+_SLIP_MIN_SPEED_MS = 2.0
 
 
 def sdk_shm_active() -> bool | None:
@@ -46,6 +50,60 @@ def sdk_shm_active() -> bool | None:
         return bool(shm.buf[0])
     finally:
         shm.close()
+
+
+def _wheel_slip(velocities, radii, on_ground, count, speed_ms: float) -> float:
+    """Largest braking slip of a grounded wheel: 0 rolling free, 1 locked."""
+    speed = abs(float(speed_ms or 0.0))
+    if speed < _SLIP_MIN_SPEED_MS or not velocities or not radii or not on_ground:
+        return 0.0
+    worst = 0.0
+    for i in range(min(int(count or 0), len(velocities), len(radii), len(on_ground))):
+        if on_ground[i] and radii[i] > 0.0:
+            rim = abs(velocities[i]) * 2.0 * math.pi * radii[i]
+            worst = max(worst, 1.0 - rim / speed)
+    return worst
+
+
+def _grip_fields(raw: dict, speed_ms: float) -> tuple[str, float, float]:
+    """Surface under most truck wheels and the worst truck / trailer wheel slip."""
+    names = raw.get("substances") or []
+    grounded = raw.get("truckWheelOnGround") or []
+    ids = [s for s, g in zip(raw.get("truck_wheelSubstance") or [], grounded) if g]
+    surface = ""
+    if ids:
+        common = Counter(ids).most_common(1)[0][0]
+        surface = str(names[common]) if 0 <= common < len(names) else str(common)
+    truck = _wheel_slip(
+        raw.get("truck_wheelVelocity"), raw.get("truckWheelRadius"), grounded,
+        raw.get("truckWheelCount", 0), speed_ms,
+    )
+    trailer = 0.0
+    for unit in raw.get("trailer") or []:
+        if not unit.get("attached", False):
+            break
+        trailer = max(trailer, _wheel_slip(
+            unit.get("wheelVelocity"), unit.get("wheelRadius"), unit.get("wheelOnGround"),
+            unit.get("wheelCount", 0), speed_ms,
+        ))
+    return surface, truck, trailer
+
+
+_GRIP_DEBUG_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("lateral_ms2", "lv_accelerationX"),
+    ("steer", "userSteer"),
+    ("brake_temp_c", "brake_temperature_c"),
+    ("air_psi", "air_pressure_psi"),
+    ("wipers", "wipers"),
+    ("surface", "surface"),
+    ("truck_slip", "truck_wheel_slip"),
+    ("trailer_slip", "trailer_wheel_slip"),
+)
+
+
+def grip_debug_fields(data: object) -> dict[str, object]:
+    """Grip-related columns for brake_debug.csv; read under the data lock."""
+    return {column: getattr(data, attr, "") for column, attr in _GRIP_DEBUG_COLUMNS}
 
 
 def _window_open_on_taskbar() -> bool:
@@ -128,6 +186,15 @@ class TelemetryThreadData(ThreadData):
     # ACC is keeping speed behind a lead it measures moving: a mild decel is not a stop.
     commanded_crawl_follow: bool = False
 
+    # Grip diagnostics for brake_debug.csv only: full-pedal stops on one rig spread
+    # 0.4-1.2x of the model while partial braking held steady (core/sending_thread/README.md).
+    brake_temperature_c: float = 0.0
+    air_pressure_psi: float = 0.0
+    wipers: bool = False
+    surface: str = ""
+    truck_wheel_slip: float = 0.0
+    trailer_wheel_slip: float = 0.0
+
     # Vehicle state
     parkBrake: bool = False
     rotationY: float = 0.0          # pitch normalized [0, 1] full-circle: use _road_grade_from_norm to convert
@@ -204,6 +271,15 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
             trailer_wog += sum(1 for w in trailer.get("wheelOnGround", []) if w)
         data.wheels_on_ground = truck_wog + trailer_wog
         data.lv_accelerationX    = raw.get("lv_accelerationX", 0.0)
+        data.brake_temperature_c = float(raw.get("brakeTemperature", 0.0) or 0.0)
+        data.air_pressure_psi    = float(raw.get("airPressure", 0.0) or 0.0)
+        data.wipers              = bool(raw.get("wipers", False))
+        try:
+            data.surface, data.truck_wheel_slip, data.trailer_wheel_slip = _grip_fields(
+                raw, data.speed,
+            )
+        except (TypeError, ValueError, AttributeError, IndexError):
+            logger.debug("grip fields unreadable", exc_info=True)
         data.parkBrake           = raw.get("parkBrake", False)
         data.rotationY           = raw.get("rotationY", 0.0)
         data.hazardsActive       = raw.get("lightsHazards", False)
