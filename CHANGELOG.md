@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Changed
+- **No-collision zone plugin installs itself**: MonoCruise now puts the updated game plugin in place for ETS2 and ATS 1.61 by itself, so the TruckersMP no-collision zone fix no longer needs a manual download.
 
 ## [1.1.2-preview.1] - 2026-10-06
 ### Added

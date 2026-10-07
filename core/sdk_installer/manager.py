@@ -23,6 +23,7 @@ from .game_paths import (
     is_game_running,
     is_steam_installed,
 )
+from .overrides import overlay, override_for, replaces_installed
 from .remote import (
     RemoteFile,
     SdkSource,
@@ -82,7 +83,7 @@ def _find_conflicting(plugins_dir: Path) -> list[str]:
 class ManagedFileState:
     name: str
     installed: bool
-    up_to_date: bool  # meaningful only when the remote was consulted
+    up_to_date: bool  # meaningful when the remote was consulted, or for a plugin override
 
 
 @dataclass
@@ -169,6 +170,8 @@ class GameApplyResult:
     unsupported_reason: str = ""
     # Installed from the local cache because the source had nothing to offer.
     from_cache: bool = False
+    # Subset of ``installed`` that came from a bundled plugin override.
+    overrides: list[str] = field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -349,12 +352,18 @@ class SdkManager:
         games: list[GameSdkState] = []
         for scan in scans:
             listing = listings.get(scan.version)
+            if listing is not None:
+                listing = overlay(scan.version, listing)
             file_states: list[ManagedFileState] = []
             for name in self.tracked_files(scan.version):
                 installed = scan.present[name]
                 up_to_date = True
+                path = scan.plugins_dir / name
                 if installed and listing and name in listing:
-                    up_to_date = git_blob_sha_of(scan.plugins_dir / name) == listing[name].sha
+                    up_to_date = git_blob_sha_of(path) == listing[name].sha
+                elif installed:
+                    # Offline boot: a stock build an override replaces is stale on its own.
+                    up_to_date = not replaces_installed(scan.version, name, path)
                 file_states.append(ManagedFileState(name, installed, up_to_date))
             is_unsupported = scan.version in unsupported
             games.append(
@@ -454,15 +463,18 @@ class SdkManager:
             return {}  # only a legacy plugin to disable; that needs no network
 
         version = game.game_version
+        local = None if force_all else self._override_only_listing(game)
+        if local is not None:
+            return local
         try:
-            return self._source(version).list_files()
+            return overlay(version, self._source(version).list_files())
         except SdkSourceError as exc:
             unsupported = isinstance(exc, SdkVersionUnsupported)
             cached = self.cached_listing(version)
             if all(n in cached for n in self.tracked_files(version)):
                 log.info("installing the cached plugin set for game version %s: %s", version, exc)
                 result.from_cache = True
-                return cached
+                return overlay(version, cached)
             if unsupported:
                 # Not an error entry: a legacy plugin this pass disabled is
                 # still worth reporting alongside the version warning.
@@ -473,6 +485,21 @@ class SdkManager:
                 log.error("cannot install SDK, source unreachable: %s", exc)
                 result.errors.append(("source", str(exc)))
             return None
+
+    @staticmethod
+    def _override_only_listing(game: GameSdkState) -> dict[str, RemoteFile] | None:
+        """Bundled overrides alone, when they are all that is stale; installs need no network."""
+        if game.missing or not game.outdated:
+            return None
+        listing: dict[str, RemoteFile] = {}
+        for name in game.outdated:
+            override = override_for(game.game_version, name)
+            if override is None or not replaces_installed(
+                game.game_version, name, game.plugins_dir / name
+            ):
+                return None
+            listing[name] = override.remote()
+        return listing
 
     def apply(
         self,
@@ -541,9 +568,20 @@ class SdkManager:
                 try:
                     if on_progress:
                         on_progress(f"Installing {name} for {game.game_type.upper()}...")
-                    source_file = self._ensure_cached(game.game_version, remote)
+                    override = override_for(game.game_version, name)
+                    is_override = override is not None and remote.sha == override.sha
+                    if is_override:
+                        source_file = override.verified_path()
+                        log.info(
+                            "installing MonoCruise's build of %s for game version %s",
+                            name, game.game_version,
+                        )
+                    else:
+                        source_file = self._ensure_cached(game.game_version, remote)
                     self._copy_into_place(source_file, game.plugins_dir / name)
                     result.installed.append(name)
+                    if is_override:
+                        result.overrides.append(name)
                 except (SdkSourceError, OSError) as exc:
                     log.error("failed to install %s for %s: %s", name, game.game_type, exc)
                     result.errors.append((name, str(exc)))

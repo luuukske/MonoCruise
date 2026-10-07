@@ -108,6 +108,42 @@ Cache entries carry no download URL on purpose: a cached file is usable as it
 stands or not at all, so a fallback can never turn into a fetch of something
 that was never verified.
 
+## Temporary plugin override (`overrides.py`)
+
+ETS2LA's published plugin cannot see TruckersMP no-collision zones yet. Until it
+can, MonoCruise ships its own build of `ets2la_plugin.dll` for game 1.61: ETS2LA
+plugin `main` plus the TruckersMP client SDK. It is the source of
+`Local\ETS2LAMpState` (`core/radar/README.md` §18). The build lives in
+`overrides/<game version>/` next to its `LICENSES.txt` (both upstreams are MIT),
+and `monocruise.spec` bundles the folder.
+
+Each entry in `OVERRIDES` names a version, a file, the bundled file's git-blob
+SHA, and the upstream SHAs it may replace (`replaces`). Only those builds are ever
+overwritten:
+
+- **Offline boot.** An installed file whose SHA is in `replaces` counts as
+  outdated with no network call, and `apply()` installs the bundled copy without
+  one either (`_override_only_listing`). A running game defers it through the
+  usual "close the game, then Reinstall SDK" path.
+- **Consulted source.** `overlay()` swaps the override into the listing only
+  while upstream still serves a build in `replaces`. Once ETS2LA publishes
+  anything else, that build is the target and replaces ours.
+- **Anything unknown stays.** A dev build or any other SHA outside `replaces` is
+  left alone.
+- **Game updates end it.** The override is tied to one game version, so the
+  next game version's stock plugin installs as usual.
+- **Damaged bundle.** It is never copied: `verified_path()` checks the SHA
+  first, and the error is reported for that file.
+
+ETS2LA's own installer may put its stock build back. The next MonoCruise start
+swaps it again. Both builds write every buffer ETS2LA reads, so either app keeps
+working throughout.
+
+To retire it (ETS2LA ships the zones, or a new game version lands): delete the
+entry and its folder, and set `FORCE_REFETCH` for that one build so installs that
+still carry ours fetch upstream again. `tests/test_sdk_plugin_override.py` fails
+if a rebuilt DLL no longer matches its recorded SHA.
+
 ## Knobs (`manager.py`)
 
 - `DEFAULT_GAME_VERSION` - only used when the game's own version cannot be read.

@@ -333,6 +333,15 @@ def main() -> None:
                     "c",
                     duration_ms=9000,
                 )
+            elif all(set(r.installed) <= set(r.overrides) for r in changed):
+                log.info("SDK auto-install: installed MonoCruise's plugin build for %s", games)
+                PopupWindow.emit(
+                    "Game plugin updated",
+                    f"MonoCruise updated the game plugin for {games} so AEB knows "
+                    f"about TruckersMP no-collision zones. Start the game as usual.",
+                    "c",
+                    duration_ms=9000,
+                )
             else:
                 log.info("SDK auto-install: installed the plugin for %s", games)
                 PopupWindow.emit(

@@ -19,7 +19,7 @@ Long domain / tuning / coordinate docs live in module `README.md` files, not her
 - `core/cruise_control_thread/README.md`: orchestrator and ACC anticipation
 - `core/main_pedal_thread/README.md`: joystick, OPD, capture APIs
 - `core/button_device_thread/README.md`: HID button reading, report drain, debounce, capture scan
-- `core/sdk_installer/README.md`, `core/update_check/README.md`, `updater/README.md`, `shared/README.md`
+- `core/sdk_installer/README.md` (incl. the temporary `ets2la_plugin.dll` override for TruckersMP zones), `core/update_check/README.md`, `updater/README.md`, `shared/README.md`
 - `core/scs_profile/README.md`: selected ETS2/ATS profile, `g_trans`, `g_brake_intensity`, Steam Cloud split. Files and telemetry SHM only.
 - `checker/README.md`: background game-launch checker, mutex-based detection, AV-safe design
 - `tools/README.md`: offline probes. `acc_response_map.py` answers "what does the ACC gap law command here, and what did my change do to it" without the game running, and has a text/JSON mode built for agents.

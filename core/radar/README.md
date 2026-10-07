@@ -1843,7 +1843,9 @@ low-speed share of them.
 The stock ETS2LA plugin cannot see collision state. The MonoCruise NCZ build of
 `ets2la_plugin.dll` (ETS2LA plugin `main` plus the TruckersMP client SDK, branch
 `monocruise/tmp-ncz`) adds two shared-memory files, written at 20 Hz from the
-TruckersMP client's per-frame callback on the game thread:
+TruckersMP client's per-frame callback on the game thread. The SDK installer puts
+that build in place for game 1.61 as a temporary override
+(`core/sdk_installer/README.md`, "Temporary plugin override"):
 
 | file | layout | read by MonoCruise |
 |---|---|---|
