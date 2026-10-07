@@ -158,15 +158,16 @@ class CruiseControlThread(BaseThread):
             # Block-message: warn when user presses inc/start but truck is in
             # park or reverse (neutral no longer blocks engage; gas is cut instead).
             if connected and Settings.cc_mode == "Cruise control" and (cc_inc or cc_start):
-                if self._park_or_reverse_blocks_cc(
-                    tel["park_brake"], tel["gear_dashboard"]
-                ):
+                if (self._park_or_reverse_blocks_cc(tel["park_brake"], tel["gear_dashboard"])
+                        or tel["retarderBrake"] > 0 or tel["motorBrake"]):
                     if now - self._last_block_msg_mono > 2.0:
                         self._last_block_msg_mono = now
                         if tel["park_brake"]:
                             logger.info("Cannot engage with parking brake on", extra={"popup": True})
-                        else:
+                        elif tel["gear_dashboard"] < 0:
                             logger.info("Can only engage in drive", extra={"popup": True})
+                        else:
+                            logger.info("Retarder/engine brake enabled", extra={"popup": True})
 
             if any((cc_dec, cc_inc, cc_start)):
                 logger.debug(
@@ -233,6 +234,7 @@ class CruiseControlThread(BaseThread):
                 speed_ms=float(tel["speed_ms"]),
                 gear_dashboard=int(tel["gear_dashboard"]),
                 retarderBrake=int(tel["retarderBrake"]),
+                motorBrake=bool(tel["motorBrake"]),
                 park_brake=bool(tel["park_brake"]),
                 game_throttle=float(tel["game_throttle"]),
                 game_clutch=float(tel["game_clutch"]),
@@ -382,6 +384,7 @@ class CruiseControlThread(BaseThread):
                     "speed_ms": float(tel.data.speed),
                     "gear_dashboard": int(tel.data.gear_dashboard),
                     "retarderBrake": int(getattr(tel.data, "retarderBrake", 0) or 0),
+                    "motorBrake": bool(getattr(tel.data, "motorBrake", False) or False),
                     "park_brake": bool(tel.data.parkBrake),
                     "game_clutch": float(tel.data.gameClutch),
                     "game_throttle": float(tel.data.gameThrottle),
@@ -457,9 +460,7 @@ class CruiseControlThread(BaseThread):
         cut_gas = cc_cut or acc_cut
 
         dwell_ok = (ctx.now - self._neutral_since_mono) >= _CC_NEUTRAL_GAS_POPUP_DWELL_S
-        cooldown_ok = (
-            ctx.now - self._last_neutral_gas_popup_mono
-        ) >= _CC_NEUTRAL_GAS_POPUP_COOLDOWN_S
+        cooldown_ok = (ctx.now - self._last_neutral_gas_popup_mono) >= _CC_NEUTRAL_GAS_POPUP_COOLDOWN_S
         if cut_gas and dwell_ok and cooldown_ok:
             self._last_neutral_gas_popup_mono = ctx.now
             logger.info("CC can't accelerate in neutral", extra={"popup": True})
@@ -676,9 +677,9 @@ class CruiseControlThread(BaseThread):
                 ctx.user_raw_brake > _CC_RAW_BRAKE_DISENGAGE
                 or game_brake_excess > _CC_GAME_BRAKE_DISENGAGE
             )
-            if user_braking or ctx.retarderBrake > 0:
+            if user_braking or ctx.retarderBrake > 0 or ctx.motorBrake:
                 cc.disable()
-                logger.info("CC disabled: %s", "brake pressed" if user_braking else "retarder active", extra={"popup": True})
+                logger.info("CC disabled: %s", "brake pressed" if user_braking else "retarder or engine brake active")
 
         if (
             cc.enabled
@@ -797,4 +798,3 @@ class CruiseControlThread(BaseThread):
                 st.reset_accel_mapper_smoothing()
         except Exception:
             logger.debug("reset_accel_mapper_smoothing failed", exc_info=True)
-

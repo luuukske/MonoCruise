@@ -14,6 +14,7 @@ class LongCtx:
     speed_ms: float
     gear_dashboard: int
     retarderBrake: int
+    motorBrake: bool
     park_brake: bool
     game_throttle: float
     game_clutch: float
