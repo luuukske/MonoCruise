@@ -11,6 +11,9 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Fixed
+- **AEB braked too softly**: it stepped in early and then held only about half of what your truck can brake, which felt slow. It now waits until a hard stop is needed and brakes at about 85% of your truck's braking power right away, solo or with a trailer.
+- **AEB warned too late**: the warning often started only once AEB was already braking. With a vehicle right ahead in your lane, stopped or driving your way, it now comes at least a second before AEB brakes, while crossing traffic stays quiet until AEB brakes because it so often turns away at the last moment.
 
 ## [1.1.2-preview.1] - 2026-10-06
 ### Added

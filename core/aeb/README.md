@@ -1054,7 +1054,8 @@ aeb.snapshot                       # AEBSnapshot: full debug state
      silence, and share the vetoed window's instant bypasses, with one
      exception: the TTB slam presumes an in-path target, so
      `aeb_warn_ttb_needs_narrow` makes an all-wide-lateral set clear the
-     wide-lateral window even when `brake_ttb_active`. Separately,
+     wide-lateral window even when `brake_ttb_active`. See "Warn classes" below
+     for the two classes that override these windows. Separately,
      `aeb_warn_max_range_m` drops the raw warn when the nearest colliding
      target is past it: no corpus clip's genuine warn opens beyond ~80 m, and a
      beep about something further out is not actionable.
@@ -1143,6 +1144,42 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    promises.
 8. Head-on targets: modelled as also braking at `full_brake_decel (7.8 m/s²)`
    inside the collision pipeline (unchanged).
+
+### Warn classes: clear threats and crossers
+
+Lukas, 2026-10-06: a driver who is not paying attention should get at least a second
+of warning, and complicated scenes should stay quiet. Two classes do that, both in the
+collision loop of `core/aeb/thread.py` and both warn-only (no brake verdict moves).
+
+**Clear threat** (`aeb_warn_clear_class`). The ego arc and the measured CBDR line both
+put the body within `aeb_warn_clear_band_m` (1.0 m) of ego's path, the body drives
+ego's way (`co_directional`) or is stopped (`measured_stationary`), and that has held
+for `aeb_warn_clear_hold_s` (0.5 s). The hold timer runs before the collision horizon
+reaches the body, which only picks up a stopped car about 3 s out; counted from there,
+the hold ate the lead at speed. A clear threat:
+
+- warns once AEB would have to brake `aeb_warn_lead_s` (1.1 s) later if nothing
+  changed: the clearance demand with that much extra build-up lag reaching the engage
+  bar. 1.1 s leaves a full second after the two-tick warn confirm at steady speeds. The
+  usual user-braking suppression still applies, so a driver already braking hears
+  nothing new;
+- is never oncoming traffic, even facing ego: the 2 s oncoming window held the warn of
+  a parked trailer facing the truck to the brake tick on every test-track stop that day.
+
+Both evidence lines and the hold are load-bearing. Queues facing ego across an unseen
+bend project into ego's lane band at 36-66 m, and so do adjacent-lane queues for a
+co-directional body. On the local store the stopped-facing exemption alone cost 12
+`true_negative -> false_warn` with no band, 6 with the lane band (1.95 m), 5 at 1.0 m
+(one-tick flickers the 0.3 s state hold stretches into a beep), and 0 with the 0.5 s
+hold. Over the whole labelled corpus both classes together take the 0.85 build from
+31 false warns to 25 (crossers -8, clear class +2, no brake verdict moved); a 1.5 m band
+nets 30 and the lane band 32. Trailers parked 1-2 m off ego's path only qualify once they are inside the band,
+so their lead is shorter: the evidence at that range cannot tell them from a bend.
+
+**Moving crossers** (`aeb_warn_crossers_with_brake`). When every colliding target is a
+moving body crossing at `|fwd_dot| < aeb_warn_crosser_dot` (0.5), the cue starts with
+the brake. Perpendicular traffic turns or stops at the last second, these were 9 of the
+corpus false warns, and their warn lead before a real brake was already about zero.
 
 ### Clearance-based demand
 
@@ -1299,12 +1336,13 @@ plus the reserve, so **5.8 is the correct number and 16.3 was inflated
 threefold** by the lateral part of `v_closing` on the bend. Do not "fix" either
 clip by re-inflating the demand.
 
-**Side effect worth knowing.** At the old 0.90 engage bar the demand layer
-appeared to decline the measured clear-pass oncoming case on its own. It did
-not: the clearance demand spikes to about 17 m/s^2 as the bodies come level,
-and that spike was only too brief to confirm. At the 0.50 bar it confirms, so
-the LOS veto is what holds this case (`test_the_vetoes_are_what_hold_the_measured_clear_pass`).
-The vetoes still scope to engagement entry.
+**Side effect worth knowing.** With every veto disabled the demand layer does
+not engage on the measured clear-pass oncoming case, but not because the
+geometry declines it: the clearance demand spikes to about 17 m/s^2 as the
+bodies come level, and at the 0.90 bar that spike is too brief to confirm
+(`test_the_clearance_model_alone_declines_the_measured_clear_pass`). During the
+2026-10-06 trial of a 0.50 bar it did confirm, and the LOS veto held the case
+alone. The vetoes still scope to engagement entry.
 
 ### LOS-rate engagement veto (CBDR)
 
@@ -1445,8 +1483,12 @@ re-derived against it rather than carried over.
 
 ### Geometry-graded engage fraction
 
-Shipped since 2026-10-06: both fractions at 0.50, flat (`core/aeb/TUNING.md`).
-The rest of this section is the history that led there.
+Shipped: both fractions at 0.85, flat (`core/aeb/TUNING.md`). The demand is
+tracked to the stop buffer, so the bar is also how hard AEB brakes: Lukas asked
+for 90% of the truck, then set 85% for margin. A 0.50 bar was released in 1.1.2-preview.1 after a
+corpus reprice and reverted on 2026-10-06: it started early and then held about
+half the truck (6 m/s^2 on a trailer rig that stops at 14), which drivers felt
+as slow braking. The rest of this section is the history before that.
 
 `aeb_engage_frac` (0.85) is a hedge: only take the brake off the driver once
 the situation needs most of the truck's capacity, because the geometry that

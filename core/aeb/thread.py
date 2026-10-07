@@ -30,6 +30,7 @@ from core.aeb.lane_frame import project_to_ego_arc, classify, Lane
 from core.aeb.capture import get_recorder, note_intervention
 from core.aeb.clip_schema import AEBTickRecord, AEBWarmState, ConsumedContext, LiveAEB
 from core.aeb.warning_player import WarningPlayer
+from core.aeb.avoidability import measured_stationary
 from core.aeb.filters import (
     FilterContext, FilterResult,
     _build_vehicle_collision_data, _world_to_ego_forward, _cross_zone_padding,
@@ -753,6 +754,14 @@ def _hmi_sound_step(warn: bool, brake: bool, prev: bool) -> tuple[str, bool]:
     return ("stop", False)
 
 
+def _dead_ahead(ctx: FilterContext, cal: AEBCalibration) -> bool:
+    """Both the ego arc and the measured CBDR line put the body inside the clear band."""
+    if ctx.d_miss is None or abs(ctx.d_miss) > cal.aeb_warn_clear_band_m:
+        return False
+    _, d_abs = project_to_ego_arc(ctx.ego_arc, ctx.v.position.x, ctx.v.position.z)
+    return d_abs <= cal.aeb_warn_clear_band_m
+
+
 class AEBThread(BaseThread):
     loop_interval = 1 / 30
     max_restarts = 3
@@ -834,6 +843,7 @@ class AEBThread(BaseThread):
         )
         # vid -> last mono time the target sat a full lane off the ego arc.
         self._warn_wide_seen: dict[int, float] = {}
+        self._clear_since: dict[int, float] = {}
         self._published_target_ms2: float = 0.0
         self._last_target_change_mono: float = 0.0
         self._prev_loop_mono: float | None = None
@@ -1314,11 +1324,13 @@ class AEBThread(BaseThread):
         # Required decel is per target and aggregated by max, so the most
         # demanding threat drives the command even if it is not the soonest.
         best_required: float = 0.0
+        best_required_lead: float = 0.0
         best_required_engage: float = 0.0
         best_required_pad_rate: float = 0.0
         best_required_vid: int | None = None
         best_clearance: ClearanceResult | None = None
         clearance_memo: dict[int, ClearanceResult | None] = {}
+        lead_memo: dict[int, ClearanceResult | None] = {}
         clearance_clears_ids: set[int] = set()
         # fwd_len is already the bumper: the capsule's segment is inset by hw and its cap
         # lands on it. Adding hw again stopped every AEB stop 1.27 m short (README).
@@ -1331,6 +1343,8 @@ class AEBThread(BaseThread):
         # Warn-gate evidence classes: oncoming, and a full lane off the ego arc.
         oncoming_colliding_ids: set[int] = set()
         wide_lat_colliding_ids: set[int] = set()
+        clear_since: dict[int, float] = {}
+        crosser_colliding_ids: set[int] = set()
         wide_lat_checked_ids: set[int] = set()
         nearest_colliding_range: float = _INF
         los_vetoed_ids: set[int] = set()
@@ -1631,6 +1645,14 @@ class AEBThread(BaseThread):
                 head_on = ctx.head_on
                 near_head_on = ctx.near_head_on
                 lateral_gap = ctx.lateral_gap
+                # Clear threat: held dead ahead, driving ego's way or stopped. The hold runs
+                # before the collision horizon reaches it (README warn classes).
+                stopped = measured_stationary(ctx, cal)
+                if (cal.aeb_warn_clear_class and (ctx.co_directional or stopped)
+                        and _dead_ahead(ctx, cal)):
+                    clear_since[v.id] = self._clear_since.get(v.id, now_mono)
+                since = clear_since.get(v.id)
+                clear_threat = since is not None and now_mono - since >= cal.aeb_warn_clear_hold_s
 
                 # Re-derive cross_arcs respecting Fix A via lane classification
                 own_lane_for_fix_a = ctx.lane in (Lane.OPPOSITE_OR_OUTER, Lane.OFF_ROAD)
@@ -1685,10 +1707,13 @@ class AEBThread(BaseThread):
                             or getattr(v, "crash_confirmed", False)
                             or v.id in certain_geom_ids):
                         nearcertain_geom_ids.add(v.id)
-                    # Warn-persistence classes: evidence quality, not threat
-                    # level, so they add latency only (README warn persistence).
-                    if head_on or near_head_on:
+                    # Warn classes add latency only (README warn classes). A clear threat
+                    # is never oncoming traffic.
+                    if (head_on or near_head_on) and not clear_threat:
                         oncoming_colliding_ids.add(v.id)
+                    if (cal.aeb_warn_crossers_with_brake and not stopped
+                            and abs(ctx.fwd_dot) < cal.aeb_warn_crosser_dot):
+                        crosser_colliding_ids.add(v.id)
                     if v.id not in wide_lat_checked_ids:
                         wide_lat_checked_ids.add(v.id)
                         _, warn_d_abs = project_to_ego_arc(
@@ -1807,6 +1832,20 @@ class AEBThread(BaseThread):
                         )
                         pad_rate_t = closing_unbraked
 
+                    if (clear_threat and not self._engaged and cal.aeb_warn_lead_s > 0.0
+                            and cal.clearance_required_enabled):
+                        if v.id not in lead_memo:
+                            lead_memo[v.id] = clearance_required(
+                                ego_arc, padded_target_arcs, ego_speed, cal,
+                                lag_s=load_response_s + cal.aeb_warn_lead_s, pad_m=0.0,
+                                front_to_surface=ego_front_to_surface,
+                                near_horizon_s=dynamic_horizon,
+                            )
+                        ahead = lead_memo[v.id]
+                        if ahead is not None:
+                            best_required_lead = max(
+                                best_required_lead, min(ahead.required_ms2, _REQUIRED_CEIL_MS2),
+                            )
                     if required_t > best_required:
                         best_required = required_t
                         best_required_pad_rate = pad_rate_t
@@ -2083,9 +2122,17 @@ class AEBThread(BaseThread):
         warn_by_ttb = (
             run_collision and aeb_outputs_ok and time_to_brake < cal.warn_ttb
         )
-        warn_raw = bool(warn_by_decel or warn_by_ttb)
+        # AEB would have to brake for a clear in-lane threat within aeb_warn_lead_s.
+        warn_by_lead = (
+            run_collision
+            and aeb_outputs_ok
+            and threat_present
+            and best_required_lead + downhill_offset >= engage_threshold
+        )
+        warn_raw = bool(warn_by_decel or warn_by_ttb or warn_by_lead)
         # A beep about something this far out is not actionable, only noise.
-        if warn_raw and nearest_colliding_range > cal.aeb_warn_max_range_m:
+        if (warn_raw and not warn_by_lead
+                and nearest_colliding_range > cal.aeb_warn_max_range_m):
             warn_raw = False
 
         # Oblique warn occupancy gate; instant paths unchanged (README warn persistence).
@@ -2104,6 +2151,7 @@ class AEBThread(BaseThread):
 
         # Two more phantom-beep classes: every colliding target oncoming, or
         # every one a full lane off the ego arc. Both gate latency, not silence.
+        self._clear_since = clear_since
         warn_oncoming_only = bool(colliding_ids) and colliding_ids <= oncoming_colliding_ids
         self._warn_oncoming_confirm.window_s = cal.aeb_warn_confirm_oncoming_s
         self._warn_oncoming_confirm.observe(now_mono, warn_raw and warn_oncoming_only)
@@ -2128,7 +2176,7 @@ class AEBThread(BaseThread):
             )
             warn_hard = bool(self._engaged or warn_ttb_hard or warn_latched)
             warn_instant = warn_hard or (
-                any(vid in nearcertain_geom_ids for vid in colliding_ids)
+                (warn_by_lead or any(vid in nearcertain_geom_ids for vid in colliding_ids))
                 and self._warn_instant_confirm.confirmed(now_mono)
             )
             aeb_warn = warn_instant or self._warn_confirm.confirmed(now_mono)
@@ -2140,6 +2188,9 @@ class AEBThread(BaseThread):
                     aeb_warn = False
                 if (aeb_warn and warn_wide_lat_only
                         and not self._warn_wide_lat_confirm.confirmed(now_mono)):
+                    aeb_warn = False
+                # Moving crossers turn at the last second: their cue starts with the brake.
+                if aeb_warn and colliding_ids and colliding_ids <= crosser_colliding_ids:
                     aeb_warn = False
         else:
             aeb_warn = False
@@ -2545,6 +2596,7 @@ class AEBThread(BaseThread):
         self._warn_wide_lat_confirm.reset()
         self._warn_instant_confirm.reset()
         self._warn_wide_seen.clear()
+        self._clear_since.clear()
         self._risk_confirm.clear()
         self._published_target_ms2 = 0.0
         self._last_target_change_mono = 0.0

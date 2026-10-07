@@ -35,9 +35,9 @@ _BODY_Y: float = BODY_DATUM_FRAC * _BODY_H
 
 _HZ = 30.0
 _FLAT = replace(CAL, aeb_engage_frac_certain=CAL.aeb_engage_frac)
-# Shipped certain equals the base bar, so grading is flat. Drive a lower
-# certain bar explicitly; it has to sit under the shipped bar to be earlier.
-_GRADED = replace(CAL, aeb_engage_frac_certain=0.35)
+# The shipped default currently equals aeb_engage_frac (0.85 in-game trial from
+# 2026-08-11), so grading is flat. Drive the mechanism explicitly to keep it covered.
+_GRADED = replace(CAL, aeb_engage_frac_certain=0.70)
 
 
 def _stopped_ahead_clip(ego_ms: float, gap_m: float, capacity: float,
@@ -81,8 +81,8 @@ def _brake_range(clip: Clip, cal, ego_ms: float, gap_m: float) -> float | None:
 
 def test_graded_bar_brakes_earlier_on_an_in_lane_obstacle():
     """Same clip, same capacity: a lower certain-geometry bar engages further out."""
-    ego_ms, gap = 22.0, 110.0
-    clip = _stopped_ahead_clip(ego_ms, gap, capacity=10.0, n=120)
+    ego_ms, gap = 22.0, 60.0
+    clip = _stopped_ahead_clip(ego_ms, gap, capacity=10.0)
     flat_r = _brake_range(clip, _FLAT, ego_ms, gap)
     graded_r = _brake_range(clip, _GRADED, ego_ms, gap)
     assert flat_r is not None and graded_r is not None

@@ -123,19 +123,17 @@ def test_oncoming_that_measurably_clears_does_not_engage():
     )
 
 
-def test_the_vetoes_are_what_hold_the_measured_clear_pass():
-    """At the 0.50 engage bar the demand layer alone engages; the vetoes keep it off.
+def test_the_clearance_model_alone_declines_the_measured_clear_pass():
+    """With every engagement-entry veto disabled the demand layer still stays off.
 
-    With every engagement-entry veto disabled the clearance demand spikes to about
-    17 m/s2 as the bodies come level. At the old 0.90 bar that spike was too brief
-    to confirm, which read as the demand layer declining the pass by itself. At
-    0.50 it confirms, so the vetoes are load-bearing here. If the first assertion
-    starts failing, the demand layer declines it again: restore that README claim.
+    The relative-frame formula peaked around 19 m/s2 on this pass and engaged. The
+    clearance demand also spikes, to about 17 m/s2 as the bodies come level, but too
+    briefly to confirm at the 0.90 bar. Under the 2026-10-06 0.50 trial it confirmed
+    and only the LOS veto held the case, so a lower bar needs this test restated.
     """
     clip = _bend_clip(_CLEAR_OFFSET)
     no_vetoes = replace(_OLD, clearance_required_enabled=True)
-    assert any(e.aeb_brake for e in run_headless(clip, cal=no_vetoes))
-    assert not any(e.aeb_brake for e in run_headless(clip))
+    assert not any(e.aeb_brake for e in run_headless(clip, cal=no_vetoes))
 
 
 def test_vetoes_leave_engagement_alone_on_clear_pass():
