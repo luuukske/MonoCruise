@@ -678,7 +678,7 @@ class CruiseControlThread(BaseThread):
             )
             if user_braking or ctx.retarderBrake > 0:
                 cc.disable()
-                logger.info("CC disabled: %s", "brake pressed" if user_braking else "retarder active", extra={"popup": True})
+                #logger.info("CC disabled: %s", "brake pressed" if user_braking else "retarder active", extra={"popup": True})
 
         if (
             cc.enabled
