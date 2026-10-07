@@ -158,12 +158,16 @@ class CruiseControlThread(BaseThread):
             # Block-message: warn when user presses inc/start but truck is in
             # park or reverse (neutral no longer blocks engage; gas is cut instead).
             if connected and Settings.cc_mode == "Cruise control" and (cc_inc or cc_start):
-                if self._park_or_reverse_blocks_cc(tel["park_brake"], tel["gear_dashboard"]) or self._retarder_or_motorbrake_blocks_cc(tel["retarderBrake"], tel["motorBrake"]):
+                if (self._park_or_reverse_blocks_cc(tel["park_brake"], tel["gear_dashboard"])
+                        or tel["retarderBrake"] > 0 or tel["motorBrake"]):
                     if now - self._last_block_msg_mono > 2.0:
                         self._last_block_msg_mono = now
-                        if tel["park_brake"]: logger.info("Cannot engage with parking brake on", extra={"popup": True})
-                        elif tel["gear_dashboard"] < 0: logger.info("Can only engage in drive", extra={"popup": True})
-                        else: logger.info("Retarder/engine brake enabled", extra={"popup": True})
+                        if tel["park_brake"]:
+                            logger.info("Cannot engage with parking brake on", extra={"popup": True})
+                        elif tel["gear_dashboard"] < 0:
+                            logger.info("Can only engage in drive", extra={"popup": True})
+                        else:
+                            logger.info("Retarder/engine brake enabled", extra={"popup": True})
 
             if any((cc_dec, cc_inc, cc_start)):
                 logger.debug(
@@ -411,9 +415,6 @@ class CruiseControlThread(BaseThread):
         """Park brake or reverse. Neutral no longer blocks: gas is cut instead."""
         return bool(park_brake) or gear_dashboard < 0
 
-    def _retarder_or_motorbrake_blocks_cc(self, retarderBrake, motorBrake: bool):
-        return retarderBrake > 0 or motorBrake
-
     def _read_auto_neutral_holding(self) -> bool:
         """True while sending_thread's auto-neutral owns the gearbox. See README."""
         try:
@@ -459,9 +460,7 @@ class CruiseControlThread(BaseThread):
         cut_gas = cc_cut or acc_cut
 
         dwell_ok = (ctx.now - self._neutral_since_mono) >= _CC_NEUTRAL_GAS_POPUP_DWELL_S
-        cooldown_ok = (
-            ctx.now - self._last_neutral_gas_popup_mono
-        ) >= _CC_NEUTRAL_GAS_POPUP_COOLDOWN_S
+        cooldown_ok = (ctx.now - self._last_neutral_gas_popup_mono) >= _CC_NEUTRAL_GAS_POPUP_COOLDOWN_S
         if cut_gas and dwell_ok and cooldown_ok:
             self._last_neutral_gas_popup_mono = ctx.now
             logger.info("CC can't accelerate in neutral", extra={"popup": True})
@@ -674,8 +673,13 @@ class CruiseControlThread(BaseThread):
 
         if cc.enabled:
             game_brake_excess = ctx.game_brake - ctx.commanded_brake_recent_max
-            user_braking = (ctx.user_raw_brake > _CC_RAW_BRAKE_DISENGAGE or game_brake_excess > _CC_GAME_BRAKE_DISENGAGE)
-            if user_braking or self._retarder_or_motorbrake_blocks_cc(ctx.retarderBrake, ctx.motorBrake): cc.disable()
+            user_braking = (
+                ctx.user_raw_brake > _CC_RAW_BRAKE_DISENGAGE
+                or game_brake_excess > _CC_GAME_BRAKE_DISENGAGE
+            )
+            if user_braking or ctx.retarderBrake > 0 or ctx.motorBrake:
+                cc.disable()
+                logger.info("CC disabled: %s", "brake pressed" if user_braking else "retarder or engine brake active")
 
         if (
             cc.enabled
@@ -732,7 +736,8 @@ class CruiseControlThread(BaseThread):
                 "w",
                 priority=2,
             )
-        elif was and not self._limiter_panic.overridden: logger.info("Speed limiter restored")
+        elif was and not self._limiter_panic.overridden:
+            logger.info("Speed limiter restored")
 
     def _update_cc_override_latch(self, ctx: LongCtx, pedal: dict) -> None:
         """Latch/unlatch the user OPD-gas override of CC (cruise mode only). See `core/cruise_control_thread/README.md`."""
@@ -777,8 +782,10 @@ class CruiseControlThread(BaseThread):
         self, commanding: bool, *, paused: bool = False
     ) -> None:
         # Pause gates the CC bid without a real disengage. Keep mapper state
-        if paused: return
-        if self._was_commanding and not commanding: self._request_mapper_reset()
+        if paused:
+            return
+        if self._was_commanding and not commanding:
+            self._request_mapper_reset()
         self._was_commanding = commanding
 
     def _request_mapper_reset(self) -> None:
@@ -787,6 +794,7 @@ class CruiseControlThread(BaseThread):
         except KeyError:
             return
         try:
-            if st.is_alive(): st.reset_accel_mapper_smoothing()
+            if st.is_alive():
+                st.reset_accel_mapper_smoothing()
         except Exception:
             logger.debug("reset_accel_mapper_smoothing failed", exc_info=True)
