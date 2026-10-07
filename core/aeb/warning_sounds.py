@@ -1,4 +1,4 @@
-"""AEB warning sounds: the original recording plus four synthesized styles, and how each repeats.
+"""AEB warning sounds: the original recording plus five synthesized styles, and how each repeats.
 
 The styles are synthesized here, never sampled from a real car, so no third-party
 audio ships with MonoCruise. Pure Python apart from ``load`` and
@@ -105,6 +105,8 @@ class WarningSound:
     bar: tuple[Partial, ...] = ()
     brake_bar: tuple[Partial, ...] = ()
     bar_s: float = 0.0
+    # Where each slot starts, from the bar start; empty spaces the slots evenly.
+    slot_starts_s: tuple[float, ...] = ()
     # Where the last note of the bar has faded, from the bar start.
     sounding_s: float = 0.0
     brake_gate_s: tuple[float, float] = (0.0, 0.0)
@@ -145,8 +147,8 @@ SIMPLE = WarningSound(
     gain=0.493,
 )
 
-# Two groups of three struck pips ringing out of phase, the third accented, once per AEB
-# event. Fitted to a reference clip's per-tone envelopes, see README section 17.
+# Groups of three struck pips ringing out of phase, the third accented, once per AEB event;
+# the last group is 20 to 25 dB down. Fitted to a reference clip, see README section 17.
 def _cars_pip(level: float, octave: float, harmonic: float, gap_s: float) -> Tone:
     return Tone(1568.0, 0.0736, gap_s, partials=((0.5, octave), (2.0, harmonic)),
                 attack_s=0.0022, strike=5.0, strike_tau_s=0.0024, level=level,
@@ -160,9 +162,12 @@ _CARS_TONES = (
     _cars_pip(1.000, 0.306, 0.074, 0.0324),
     _cars_pip(1.000, 0.306, 0.074, 0.0354),
     _cars_pip(0.905, 0.529, 0.006, 0.0864),
+    _cars_pip(0.055, 0.306, 0.074, 0.0324),
+    _cars_pip(0.102, 0.306, 0.074, 0.0354),
+    _cars_pip(0.057, 0.529, 0.006, 0.0864),
 )
 VOLVO_CARS = WarningSound(
-    "Volvo Cars style", tones=_CARS_TONES, tail_s=0.7510, gain=0.95,
+    "Volvo Cars style", tones=_CARS_TONES, tail_s=0.376, gain=0.95,
     rings=((784.0, 0.080, 1.99), (1568.0, 0.102, 3.17), (3136.0, 0.014, 3.16)),
     ring_level=0.295, one_shot=True, rearm_s=1.0,
 )
@@ -200,13 +205,30 @@ VOLVO_TRUCKS = WarningSound(
     bar_s=0.50123, sounding_s=0.470, brake_gate_s=(0.012, 0.145), min_cycles=4, gain=0.8976,
 )
 
+# Four notes, high low low high, on an uneven grid: harmonics 1, 2, 4, 8 of 269.5 Hz.
+# One pattern for warn and brake. Fitted to a reference, see README section 17.
+_SCANIA_F0 = 269.5
+_SCANIA_NOTES = (
+    Partial(_SCANIA_F0, (-33.8, -32.9, -32.4, None), 0.005, 0.0035, 0.0568, 0.0336),
+    Partial(_SCANIA_F0, (None, None, None, -34.1), 0.0089, 0.0035, 0.1051, 0.015),
+    Partial(2 * _SCANIA_F0, (-28.5, -25.5, -25.5, None), 0.005, 0.0053, 0.0636, 0.0188),
+    Partial(2 * _SCANIA_F0, (None, None, None, -30.7), 0.0199, 0.0073, 0.0917, 0.0285),
+    Partial(4 * _SCANIA_F0, (-18.3, None, None, -22.8), 0.002, 0.0061, 0.0276, 0.0272),
+    Partial(4 * _SCANIA_F0, (None, -30.2, -29.9, None), 0.002, 0.0056, 0.0683, 0.0185),
+    Partial(8 * _SCANIA_F0, (-29.5, -32.0, -31.7, -31.8), 0.002, 0.0005, 0.0, 0.032),
+)
+SCANIA = WarningSound(
+    "Scania style", bar=_SCANIA_NOTES, bar_s=0.4714, slot_starts_s=(0.0, 0.095, 0.200, 0.303),
+    sounding_s=0.430, gain=0.97,
+)
+
 # Five flat beeps, 1100 Hz beating against 1165 Hz, one burst a second; a burst
 # always completes. Timing and pitch measured off a reference clip, not copied from it.
 _TESLA_BEEP = Tone(1100.0, 0.090, 0.055, partials=((1165.0 / 1100.0, 0.25),))
 TESLA = WarningSound("Tesla style", tones=(_TESLA_BEEP,) * 5, tail_s=0.275, gain=0.646)
 
 SOUNDS: dict[str, WarningSound] = {
-    s.label: s for s in (ORIGINAL, SIMPLE, VOLVO_CARS, VOLVO_TRUCKS, TESLA)
+    s.label: s for s in (ORIGINAL, SIMPLE, VOLVO_CARS, VOLVO_TRUCKS, SCANIA, TESLA)
 }
 SOUND_LABELS: tuple[str, ...] = tuple(SOUNDS)
 DEFAULT_SOUND: str = ORIGINAL.label
@@ -340,7 +362,8 @@ def _note_shape(p: Partial, rate: int) -> tuple[int, list[float]]:
     return onset, shape
 
 
-def _render_layer(parts: tuple[Partial, ...], n: int, rate: int) -> list[float]:
+def _render_layer(parts: tuple[Partial, ...], n: int, rate: int,
+                  starts_s: tuple[float, ...] = ()) -> list[float]:
     """One layer of a bar. Notes wrap past the bar end and each frequency fits whole
     cycles into the bar, so the loop has neither a gap nor a phase jump."""
     out = [0.0] * n
@@ -351,7 +374,10 @@ def _render_layer(parts: tuple[Partial, ...], n: int, rate: int) -> list[float]:
             if db is None:
                 continue
             amp = 10.0 ** (db / 20.0)
-            start = int(round(slot * n / len(p.slots_db))) + onset
+            if starts_s:
+                start = int(round(starts_s[slot] * rate)) + onset
+            else:
+                start = int(round(slot * n / len(p.slots_db))) + onset
             for j, v in enumerate(shape):
                 env[(start + j) % n] += amp * v
         w = 2.0 * math.pi * max(1, round(p.freq_hz * n / rate)) / n
@@ -367,8 +393,8 @@ def _render_bar(sound: WarningSound, rate: int) -> tuple[list[float], list[float
     The brake layer uses that same scale, so braking does not change the foundation.
     """
     n = int(round(sound.bar_s * rate))
-    base = _render_layer(sound.bar, n, rate)
-    brake = _render_layer(sound.brake_bar, n, rate)
+    base = _render_layer(sound.bar, n, rate, sound.slot_starts_s)
+    brake = _render_layer(sound.brake_bar, n, rate, sound.slot_starts_s)
     k = sound.gain / (max(abs(v) for v in base) or 1.0)
     return [v * k for v in base], [v * k for v in brake]
 

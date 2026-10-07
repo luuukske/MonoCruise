@@ -2589,11 +2589,11 @@ Two labelling rules came out of the pass:
 ## 17. Warning sound
 
 `core/aeb/warning_sounds.py` holds the styles (Original, Simple, Volvo Cars, Volvo
-Trucks, Tesla; a settings file that still says "Volvo style" resolves to Volvo Cars)
+Trucks, Scania, Tesla; a settings file that still says "Volvo style" resolves to Volvo Cars)
 and `WarningPlayer` in `core/aeb/warning_player.py` plays them. The cue itself (warn
 or brake, two-tick arm) is unchanged and lives in `_hmi_sound_step` in `thread.py`.
 
-The Volvo Cars, Volvo Trucks and Tesla styles are **synthesized imitations**, never
+The Volvo Cars, Volvo Trucks, Scania and Tesla styles are **synthesized imitations**, never
 recordings: a sampled car warning would ship third-party audio. A reference clip may be
 measured to tune them, never bundled. Tesla style was measured off one on 2026-10-05: five
 90 ms beeps on a 145 ms grid, 1100 Hz with a quarter-level 1165 Hz beating
@@ -2614,20 +2614,33 @@ loop has no phase jump, and a soft stop fades over 30 ms because the ring is sti
 about 35 dB under the strike where a stop lands. Tesla repeats with a 1.0 s period,
 so repeats never run together.
 
+Volvo Cars: soft third group (2026-10-07). Drivers reported two quiet retriggers after
+the main warning, the last barely audible. The 2026-10-05 fit had cut the reference at
+0.835 s, just before them. A second download of the same video, the full 35 s, was
+measured and deleted. It shows a third group of three pips exactly one group period
+(0.376 s) after the second. The levels are least-squares fits through
+`_render_ringing`, so the main pips' ring is counted. They come out at 0.055, 0.102
+and 0.057 of a main pip (-25, -20 and -25 dB), with 4 dB RMS error over that stretch.
+The first soft pip lands in the second group's ring and hardly stands out, which is why
+drivers hear two retriggers. The video cuts all sound about 90 ms into the last soft pip.
+That looks like an edit, so the fit stops there and the model lets the pip ring out.
+`tail_s` went from 0.751 to 0.376, so the one-shot is still 1.5 s long and ends in silence.
+
 Volvo Cars style is `one_shot`, because the real system sounds once when it triggers
 and never again during that event (Lukas, 2026-10-05). The cue can still flicker
 inside one event, so a new warning needs the cue clear for `rearm_s` (1.0 s) first;
 a cue that returns sooner is the same event and stays silent. Rendered from silence
 with no wrap or ring warm-up, since nothing precedes it. A soft stop never cuts it.
-The cost is deliberate: a long AEB brake is silent after the first 0.7 s in this
+The cost is deliberate: a long AEB brake is silent after the first 1.1 s in this
 style, exactly as in the car; the brake and the popup do not depend on it.
 
 | Style | Cycle | While the cue holds | When it ends |
 |---|---|---|---|
 | Original | Lukas's own recording, shipped since 1.0 | replayed 0.15 s before it ends | one extra pass |
 | Simple | one 2.8 kHz beep | steady beeping | stops after the beep in flight |
-| Volvo Cars style | two groups of three struck pips ringing out | once per AEB event, never repeated | always plays out |
+| Volvo Cars style | two groups of three struck pips, then a third group 20 to 25 dB down, ringing out | once per AEB event, never repeated | always plays out |
 | Volvo Trucks style | one 0.5 s bar: four notes, a pause; braking adds a layer on top | bar after bar, at least four | the bar in flight completes |
+| Scania style | one 0.47 s bar: four notes, high low low high, the same for warn and brake | bar after bar | the bar in flight completes |
 | Tesla style | five beeps, then 0.275 s of silence (1.0 s period) | burst after burst | the burst always completes |
 
 ### Volvo Trucks: two layers
@@ -2678,9 +2691,46 @@ does not click. A brake that begins during a bar is heard from the next one. A b
 with no preceding warn starts on the mixed bar. `thread.py` passes `braking=aeb_brake`
 to `start_warning` each tick the cue holds.
 
+### Scania: one pattern
+
+Measured on 2026-10-07 off 0:12 to 0:44 of YouTube video lEbKE8JCI6c (Euro NCAP tests of
+a Scania R-series), downloaded with Lukas's OK, measured in the session scratchpad and
+deleted. The clip has three warnings over music and engine noise. All three repeat one
+pattern, with no change between warning and braking (Lukas: Scania has one pattern,
+unlike Volvo).
+
+The bar is 0.4714 s. Note onsets fall at 0, 95, 200 and 303 ms, measured off each note's
+strike in 42 bars (within 3 ms). That grid is uneven, so the bar carries `slot_starts_s`
+in place of equal slots. Every note is harmonics 1, 2, 4 and 8 of one 269.5 Hz
+fundamental. Per note they measure 264 to 271, 536 to 539, 1078 to 1084 and 2140 to
+2160 Hz, and the code locks them to exact multiples. Harmonic 8 is a strike that fades in
+32 ms. Notes one and four lead with harmonic 4 (-18 and -23 dB, 28 ms hold, 27 ms fade).
+Notes two and three lead with harmonic 2 (-25.5 dB), with harmonic 4 about 5 dB under it,
+held about 65 ms. The fundamental sits 3 to 7 dB under harmonic 2 in every note. The
+fourth note's harmonic 2 starts 20 ms late and holds about 100 ms, so it carries on after
+the high tone and is still dying out at the loop point. A soft stop's fade lands on that
+tail, and `test_every_sound_ends_quiet_where_it_can_be_cut` checks that the tail only
+falls there rather than requiring silence.
+
+**The fundamental sets the pitch.** The first version left it out. A threshold on spectral
+contrast missed it because engine noise sits in that band, and Lukas heard the result as
+too high. The pitch is heard at 269.5 Hz only when that tone is present, so
+`test_the_scania_tone_keeps_its_low_fundamental` pins it. It shows up as a 269 Hz band
+envelope that follows every note and drops back to the floor in the gaps (-31 to -35 dB
+against a -43 dB floor). The 134 Hz band and the other low bands stay flat through the
+pattern, so they are engine noise.
+
+The parameters are least-squares fits to per-tone envelopes taken from the median over
+those 42 bars. The synthesized bar was put through the same band filters as the reference.
+Per-tone error is 0.8 dB RMS for the fundamental, 1.3 dB for harmonic 2, 2.4 dB for
+harmonic 4 and 2.9 dB for the strike. What is left at harmonic 4 is a dip in the middle of
+notes two and three that looks like beating in the recording; it is not modelled. In one
+warning the pattern stopped after the first note of a bar, which may be an edit in the
+video. The style finishes the bar in flight, like the others.
+
 Synthesized cycles loop in the mixer (`loops=-1`) and are stopped inside the
 silence that closes a cycle, so the rhythm is sample-accurate and a stop never
-cuts a tone; a sleep-timed replay would jitter by the Windows clock step. All five
+cuts a tone; a sleep-timed replay would jitter by the Windows clock step. All six
 are built when the handler is created, because synthesis takes up to 70 ms and
 `start_warning` runs on the AEB tick. Style and volume are re-read from settings
 each time a warning starts from silence, never mid-warning.
@@ -2700,13 +2750,15 @@ driver who switches style keeps the same level at the same volume setting.
 change to any style's tones or timing has to re-solve its `gain`. Volvo Trucks lands within 0.1 dB with the foundation alone and 0.9 dB with the brake
 layer on top. The two layers share the scale that puts the foundation's peak at
 `gain`, so braking does not change the foundation's level and the sum stays under
-full scale. Volvo Cars style is the
+full scale. Scania sits 0.4 dB under the original, inside the 1 dB band. Its first
+note sets the peak, about 4 dB over the other three, so `gain` 0.97 is as loud as it
+goes without clipping. No limiter, for the same reason as Volvo Cars below. Volvo Cars style is the
 one exception, about 4 dB under the rest by request: its strike sets the peak, so
 it cannot reach the others' level without squashing the strike. A tanh limiter that
 did exactly that was tried and heard as clipping. The strike was cut from the fitted
 8.6 to 5.0 instead (about 3.2x the held level against the reference's 4 to 5x),
 clean and still recognisable, and the level left where that lands. As a one-shot
-it also carries 0.75 s of closing silence, so its ring dies out inside the buffer
+it also carries 0.38 s of closing silence after the soft group, so its ring dies out inside the buffer
 instead of being cut while still audible.
 
 The settings panel's test button (for streamers balancing it against game audio)

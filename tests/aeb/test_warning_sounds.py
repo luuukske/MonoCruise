@@ -1,6 +1,7 @@
 """AEB warning styles: synthesis, settings, and each style's repeat rules."""
 from __future__ import annotations
 
+import math
 import threading
 from array import array
 
@@ -33,6 +34,12 @@ def test_every_sound_ends_quiet_where_it_can_be_cut(sound):
         # The brake layer's last ping is still fading at the loop point, far under the notes.
         assert max(abs(v) for v in pcm[-closing // 2:]) <= peak // 50
         return
+    if sound is ws.SCANIA:
+        # The last note's low tone is still dying out where a stop fades it: no note starts there.
+        win = closing // 4
+        levels = [max(abs(v) for v in pcm[-closing + k * win:][:win]) for k in range(4)]
+        assert levels == sorted(levels, reverse=True) and levels[-1] <= peak // 12
+        return
     assert max(abs(v) for v in pcm[-closing // 2:]) == 0
 
 
@@ -41,6 +48,22 @@ def test_a_ringing_cycle_loops_without_a_phase_jump():
     for freq, _tau, _phase in ws.VOLVO_CARS.rings:
         periods = freq * ws.VOLVO_CARS.cycle_s
         assert periods == pytest.approx(round(periods), abs=1e-9)
+
+
+def test_volvo_cars_ends_with_soft_retriggers():
+    """The third group is 20 to 25 dB under the main pips, its last pip quieter than the one before.
+    Drivers hear it as two soft retriggers, the last barely audible."""
+    main = [t.level for t in ws.VOLVO_CARS.tones[:6]]
+    soft = [t.level for t in ws.VOLVO_CARS.tones[6:]]
+    assert len(soft) == 3 and max(soft) < 0.15 * min(main)
+    assert soft[2] < soft[1]
+    rate = 44100
+    pcm = array("h", ws.render(ws.VOLVO_CARS, rate, 1))
+    peak = max(abs(v) for v in pcm)
+    onset = sum(t.dur_s + t.gap_s for t in ws.VOLVO_CARS.tones[:7])
+    a = int(onset * rate)
+    second = max(abs(v) for v in pcm[a:a + int(0.07 * rate)])
+    assert peak / 20 < second < peak / 6
 
 
 def test_unknown_labels_fall_back_to_the_original():
@@ -77,17 +100,20 @@ def test_the_choice_follows_the_settings():
 
 def test_each_style_repeats_like_the_system_it_imitates():
     # Original keeps its shipped tail; a buzzer stops after the beep in flight;
-    # a Volvo-style warning (two groups of three) and a Tesla-style burst complete.
+    # a Volvo-style warning (three groups of three) and a Tesla-style burst complete.
     assert (ws.ORIGINAL.min_cycles, ws.ORIGINAL.stop_extra_cycles) == (1, 1)
     assert (ws.SIMPLE.min_cycles, ws.SIMPLE.stop_extra_cycles) == (1, 0)
     assert (ws.VOLVO_CARS.min_cycles, ws.VOLVO_CARS.stop_extra_cycles) == (1, 0)
     assert (ws.TESLA.min_cycles, ws.TESLA.stop_extra_cycles) == (1, 0)
-    assert len(ws.VOLVO_CARS.tones) == 6 and len(ws.TESLA.tones) == 5
+    assert len(ws.VOLVO_CARS.tones) == 9 and len(ws.TESLA.tones) == 5
     assert ws.VOLVO_CARS.ringing and not ws.TESLA.ringing and not ws.SIMPLE.ringing
     assert ws.TESLA.cycle_s == pytest.approx(1.0)
     # A truck warning sounds at least four bars, however short the cue.
     assert (ws.VOLVO_TRUCKS.min_cycles, ws.VOLVO_TRUCKS.stop_extra_cycles) == (4, 0)
     assert ws.VOLVO_TRUCKS.cycle_s == pytest.approx(0.50123)
+    # Scania: one pattern for warn and brake, the bar in flight completes.
+    assert (ws.SCANIA.min_cycles, ws.SCANIA.stop_extra_cycles) == (1, 0)
+    assert ws.SCANIA.cycle_s == pytest.approx(0.4714) and not ws.SCANIA.layered
 
 
 @pytest.mark.parametrize("sound", [s for s in ws.SOUNDS.values() if s.synthesized],
@@ -294,7 +320,8 @@ def test_a_soft_stop_lets_the_one_warning_play_out_and_a_hard_stop_cuts_it(monke
 
 def test_looping_styles_are_not_one_shot():
     assert ws.VOLVO_CARS.one_shot
-    assert not any(s.one_shot for s in (ws.ORIGINAL, ws.SIMPLE, ws.VOLVO_TRUCKS, ws.TESLA))
+    assert not any(s.one_shot for s in (ws.ORIGINAL, ws.SIMPLE, ws.VOLVO_TRUCKS, ws.SCANIA,
+                                        ws.TESLA))
 
 
 def test_a_settings_file_from_before_the_trucks_style_still_resolves():
@@ -365,12 +392,55 @@ def test_the_brake_gate_lies_inside_the_brake_layers_silence():
     assert 0.0 < lo < hi and max(abs(v) for v in window) < 0.06 * peak
 
 
-@pytest.mark.parametrize("brake", [False, True])
-def test_a_truck_bar_loops_without_a_jump(brake):
+@pytest.mark.parametrize("sound, brake", [(ws.VOLVO_TRUCKS, False), (ws.VOLVO_TRUCKS, True),
+                                          (ws.SCANIA, False)])
+def test_a_truck_bar_loops_without_a_jump(sound, brake):
     """Every frequency fits whole cycles into the bar, so the wrap is as smooth as any sample."""
-    x = _bar(ws.VOLVO_TRUCKS, brake=brake)
+    x = _bar(sound, brake=brake)
     steps = [abs(b - a) for a, b in zip(x, x[1:])]
     assert abs(x[0] - x[-1]) <= max(steps)
+
+
+def _tone_level(x: list[float], freq: float, start_s: float, dur_s: float,
+                rate: int = 48000) -> float:
+    a = int(start_s * rate)
+    seg = x[a:a + int(dur_s * rate)]
+    w = 2.0 * math.pi * freq / rate
+    re = sum(v * math.cos(w * i) for i, v in enumerate(seg))
+    im = sum(v * math.sin(w * i) for i, v in enumerate(seg))
+    return math.hypot(re, im)
+
+
+def test_the_scania_pattern_is_high_low_low_high():
+    """Notes one and four lead with the high tone, two and three with the low one."""
+    x = _bar(ws.SCANIA, brake=False)
+    f0 = ws._SCANIA_F0
+    for k, start in enumerate(ws.SCANIA.slot_starts_s):
+        high = _tone_level(x, 4 * f0, start + 0.01, 0.06)
+        low = _tone_level(x, 2 * f0, start + 0.01, 0.06)
+        assert (high > 1.5 * low) if k in (0, 3) else (low > high), k
+
+
+def test_scania_notes_start_on_its_uneven_grid():
+    """Each note's strike lands on its own start, not on an even split of the bar."""
+    x = _bar(ws.SCANIA, brake=False)
+    lead = 0.02
+    looped = x[-int(lead * 48000):] + x
+    for start in ws.SCANIA.slot_starts_s:
+        before = _tone_level(looped, 8 * ws._SCANIA_F0, start + lead - 0.015, 0.015)
+        after = _tone_level(looped, 8 * ws._SCANIA_F0, start + lead, 0.015)
+        assert after > 3.0 * before, start
+
+
+def test_the_scania_tone_keeps_its_low_fundamental():
+    """Every tone is a harmonic of one fundamental, and that fundamental sounds in every note.
+    Without it the first version was heard as too high."""
+    f0 = ws._SCANIA_F0
+    assert all(p.freq_hz / f0 in (1, 2, 4, 8) for p in ws.SCANIA.bar)
+    x = _bar(ws.SCANIA, brake=False)
+    for start in ws.SCANIA.slot_starts_s:
+        low = _tone_level(x, f0, start + 0.02, 0.05)
+        assert low > 0.3 * _tone_level(x, 2 * f0, start + 0.02, 0.05), start
 
 
 def test_the_layers_are_the_same_length_so_they_stay_in_step():
