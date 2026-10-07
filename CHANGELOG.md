@@ -11,12 +11,19 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Added
+- **Scania-style AEB warning**: a new warning sound that imitates modern Scania trucks, one repeating four-beep pattern for both the warning and the braking.
+- **Engine brake turns cruise control off**: like the retarder, switching on the engine brake now disengages cruise control.
+
 ### Changed
+- **Volvo Cars warning sounds more like the car**: it now ends with the two soft repeats the real warning has, the last one barely audible.
 - **No-collision zone plugin installs itself**: MonoCruise now puts the updated game plugin in place for ETS2 and ATS 1.61 by itself, so the TruckersMP no-collision zone fix no longer needs a manual download.
 
 ### Fixed
 - **AEB braked too softly**: it stepped in early and then held only about half of what your truck can brake, which felt slow. It now waits until a hard stop is needed and brakes at about 85% of your truck's braking power right away, solo or with a trailer.
-- **AEB warned too late**: the warning often started only once AEB was already braking. With a vehicle right ahead in your lane, stopped or driving your way, it now comes at least a second before AEB brakes, while crossing traffic stays quiet until AEB brakes because it so often turns away at the last moment.
+- **AEB warned too late**: the warning often started only once AEB was already braking. With a vehicle right ahead in your lane, stopped or driving your way, it now comes at least a second before AEB brakes, and for a parked one slightly off your path about half a second, while crossing traffic stays quiet until AEB brakes because it so often turns away at the last moment.
+- **Brake learning thrown off by quick taps**: a short stab on the brake could convince MonoCruise your truck brakes weaker than it does, so AEB stepped in earlier and cruise braked harder than needed. It now only learns from hard braking held for more than a second.
+- **AEB warning beeped without flashing**: when AEB braked while you were off the gas, the warning sounded but the cruise panel and pedal bar stayed dark, and after an AEB stop the beep kept going after the flash ended. Sound and flash now always go together, and both end once AEB has brought you to a stop.
 
 ## [1.1.2-preview.1] - 2026-10-06
 ### Added
