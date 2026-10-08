@@ -62,6 +62,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      # Offline fallback for the game plugin: the live upstream set as of this build
+      # (core/sdk_installer/README.md, bundled fallback). A failed fetch fails the build.
+      - name: Fetch bundled game plugin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tools/fetch_sdk_bundle.py
+
       - name: Build MonoCruise.exe
         run: pyinstaller --noconfirm monocruise.spec
 

@@ -9,6 +9,11 @@ release on the user's channel (stable vs preview) to the running build. Results
 are cached in `Settings` so the UI can show a pending update without another
 network call.
 
+The release list comes from `shared.github_releases`, which falls back to the
+releases feed when the API is rate limited (shared VPN addresses). The feed only
+holds the newest 10 releases, so a channel missing from it raises instead of
+caching "no release": the known version is kept and the next boot retries.
+
 ## UI surfaces
 
 - **Popup (opt-in):** when `Settings.notify_for_updates` is true, a newer build

@@ -23,6 +23,7 @@ from .game_paths import (
     is_game_running,
     is_steam_installed,
 )
+from .bundled import bundled_listing
 from .overrides import overlay, override_for, replaces_installed
 from .remote import (
     RemoteFile,
@@ -102,8 +103,8 @@ class GameSdkState:
     # No plugin published upstream for game_version, in either direction.
     version_unsupported: bool = False
     unsupported_reason: str = ""
-    # A verified local copy of that version's file set exists, so an
-    # unsupported version can still be installed offline.
+    # The verified cache, topped up with the files shipped with the build,
+    # covers that version, so an unsupported (pruned) one still installs.
     cache_available: bool = False
 
     @property
@@ -170,6 +171,8 @@ class GameApplyResult:
     unsupported_reason: str = ""
     # Installed from the local cache because the source had nothing to offer.
     from_cache: bool = False
+    # Part of that set came from the files shipped with the build.
+    from_bundle: bool = False
     # Subset of ``installed`` that came from a bundled plugin override.
     overrides: list[str] = field(default_factory=list)
 
@@ -287,6 +290,17 @@ class SdkManager:
         listing = self.cached_listing(version)
         return all(name in listing for name in self.tracked_files(version))
 
+    def offline_listing(self, version: str) -> tuple[dict[str, RemoteFile], bool] | None:
+        """Verified cache topped up with the bundled set, and whether the bundle was needed."""
+        tracked = self.tracked_files(version)
+        cached = self.cached_listing(version)
+        if all(name in cached for name in tracked):
+            return cached, False
+        merged = {**bundled_listing(version), **cached}
+        if all(name in merged for name in tracked):
+            return merged, True
+        return None
+
     # State (records which MonoCruise version last confirmed the SDK)
 
     def _read_last_checked(self) -> str | None:
@@ -378,7 +392,9 @@ class SdkManager:
                     version_detected=scan.version_detected,
                     version_unsupported=is_unsupported,
                     unsupported_reason=unsupported.get(scan.version, ""),
-                    cache_available=is_unsupported and self.cache_is_complete(scan.version),
+                    cache_available=(
+                        is_unsupported and self.offline_listing(scan.version) is not None
+                    ),
                 )
             )
 
@@ -441,6 +457,10 @@ class SdkManager:
         """Return a verified local copy of ``remote``, downloading if needed."""
         cached = self.cache_dir(version) / remote.name
         if git_blob_sha_of(cached) != remote.sha:
+            if remote.local_path is not None:
+                if git_blob_sha_of(remote.local_path) != remote.sha:
+                    raise SdkSourceError(f"the bundled {remote.name} is missing or damaged")
+                return remote.local_path
             if not remote.download_url:
                 raise SdkSourceError(f"{remote.name} is not in the local cache")
             self._source(version).download(remote, cached)
@@ -456,8 +476,8 @@ class SdkManager:
     ) -> dict[str, RemoteFile] | None:
         """Files to install from, for this install's own game version.
 
-        Falls back to the verified cache when the source has nothing for that
-        version, so a pruned upstream folder cannot strand a working install.
+        Falls back to the verified cache, then the bundled set, when the API has
+        nothing for that version or cannot be asked (offline, rate limit, outage).
         """
         if not (force_all or game.missing or game.outdated):
             return {}  # only a legacy plugin to disable; that needs no network
@@ -470,11 +490,15 @@ class SdkManager:
             return overlay(version, self._source(version).list_files())
         except SdkSourceError as exc:
             unsupported = isinstance(exc, SdkVersionUnsupported)
-            cached = self.cached_listing(version)
-            if all(n in cached for n in self.tracked_files(version)):
-                log.info("installing the cached plugin set for game version %s: %s", version, exc)
+            offline = self.offline_listing(version)
+            if offline is not None:
+                listing, result.from_bundle = offline
                 result.from_cache = True
-                return overlay(version, cached)
+                log.info(
+                    "installing the %s plugin set for game version %s: %s",
+                    "bundled" if result.from_bundle else "cached", version, exc,
+                )
+                return overlay(version, listing)
             if unsupported:
                 # Not an error entry: a legacy plugin this pass disabled is
                 # still worth reporting alongside the version warning.

@@ -21,6 +21,7 @@ hygiene rules apply to every file in it.
 | `read_scs_profile.py` | Transmission and braking intensity for the selected ETS2/ATS profile. Steam Cloud vs local, `game.log.txt` identity, live `shifterType` when the SDK is up. `--json` for agents. |
 | `plot_coast.py` | Coast-fit plots for the mapper. |
 | `release.py`, `tune_visualizer.py` | Release packaging and live tuning UI. |
+| `fetch_sdk_bundle.py` | Build helper, run by `release.yml`: downloads the live ETS2LA game plugin set for every published game version into `core/sdk_installer/bundled/`, the app's offline fallback. See "Bundled fallback" in `core/sdk_installer/README.md`. |
 
 ---
 

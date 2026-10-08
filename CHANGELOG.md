@@ -19,6 +19,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **Less hard braking in convoys**: trucks behind the lead braked hard less often and let go of the brake sooner after a hard stop, so fewer of them come to a standstill and speed comes back faster.
 
 ### Fixed
+- **Game plugin and updates failed on a VPN or offline**: GitHub limits how often one internet address may ask for downloads and a VPN address is shared with many people, so the game plugin did not install and the updater showed no connection. The updater now has a second way to find releases, and MonoCruise brings its own copy of the game plugin for when it cannot download the latest one.
 - **Pedals on their own USB cable were never found**: pedal sets that plug into the PC separately from the wheel, such as the MOZA CRP2, did not show up when connecting pedals. They are now detected.
 
 ### Known

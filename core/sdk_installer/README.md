@@ -66,6 +66,9 @@ for.
    its filename, so `ets2la_1.60` is missing the moment the game becomes 1.61.
 3. Update detection compares the git-blob SHA the API reports against the SHA of
    the installed file - no binary is downloaded just to check for an update.
+4. When the API cannot be asked (offline, rate limit, outage), installs fall
+   back to the local cache, then to the set shipped with the build (see
+   **Bundled fallback**).
 
 ## Game version detection
 
@@ -107,6 +110,38 @@ an upstream prune from stranding a user whose plugin folder needs a repair;
 Cache entries carry no download URL on purpose: a cached file is usable as it
 stands or not at all, so a fallback can never turn into a fetch of something
 that was never verified.
+
+## Bundled fallback (`bundled.py`, `bundled/`)
+
+The live fetch above always comes first. Each build also ships the upstream
+file set of every published game version, as the fallback for when GitHub
+cannot be asked: no internet at all, or the contents API refusing. That API is
+unauthenticated, 60 requests per hour per IP address, and a VPN exit address
+shares that budget with everyone on it, so VPN users regularly got HTTP 403 and,
+on a fresh install with no cache, no plugin at all.
+
+- **Filled at build time, never committed.** `tools/fetch_sdk_bundle.py` runs in
+  `release.yml` before PyInstaller and downloads the live set into
+  `bundled/<game version>/`, SHA-checked against the API like any install, then
+  writes `manifest.json` (name -> git-blob SHA) last. Each release therefore
+  carries whatever upstream served when it was built; nothing pins a version in
+  code. A failed fetch fails the release build. The folders are gitignored; only
+  `bundled/LICENSES.txt` (all three plugins are MIT) is tracked.
+  `GITHUB_TOKEN` is sent to `api.github.com` only, so CI runners are not rate
+  limited either; the app itself never sends a token.
+- **Order on any API failure:** the verified cache when it is complete (it holds
+  what upstream last served this user, newer than the build), else the cache
+  topped up file by file from the bundle, else the error.
+  `GameApplyResult.from_bundle` says the bundle was needed. A version pruned
+  upstream (API 404) installs the same way, and `check()` then reports
+  `cache_available` instead of warning.
+- **Same integrity rule.** A bundled file is offered only while it still hashes
+  to its manifest entry, a set without a manifest is ignored, and entries carry
+  no download URL, so the fallback can never become an unverified fetch.
+- **Overrides still apply.** `overlay()` runs on the fallback listing too, so
+  the bundled 1.61 stock plugin gives way to the NCZ build like a listed one.
+- **Local builds** without a fetch just have no fallback. Run
+  `python tools/fetch_sdk_bundle.py` to fill it.
 
 ## Temporary plugin override (`overrides.py`)
 
@@ -162,7 +197,10 @@ is exactly the shape heuristic scanners dislike. Mitigations kept deliberately:
   descriptive User-Agent and the shared `requests` dependency (same as the
   updater).
 - Every download is integrity-checked: the git-blob SHA of the bytes must match
-  the SHA the API reported before anything is written.
+  the SHA the API reported before anything is written. Bundled files are checked
+  against the manifest the build wrote from those same SHAs.
+- The bundled DLLs are inert data inside the install folder: MonoCruise only
+  ever copies them, it never loads or runs them.
 - Downloads land in a cache first, then move into place atomically; a partial or
   mismatched file never reaches the game folder.
 - No process injection, no obfuscation, no executing downloaded content, no

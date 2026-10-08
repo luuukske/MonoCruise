@@ -21,6 +21,8 @@ datas = [
     ('core/aeb/AEB_warning.wav','core/aeb'),
     # Bundled plugin overrides (core/sdk_installer/README.md, temporary plugin override).
     ('core/sdk_installer/overrides', 'core/sdk_installer/overrides'),
+    # Offline game plugin fallback, filled by tools/fetch_sdk_bundle.py (release.yml).
+    ('core/sdk_installer/bundled', 'core/sdk_installer/bundled'),
     # Window icon: window.py resolves _PROJECT_ROOT to _internal when frozen.
     ('icon.ico',                '.'),
 ]

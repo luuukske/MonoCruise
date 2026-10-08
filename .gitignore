@@ -29,6 +29,9 @@ installed_version.txt
 # SDK installer runtime state + downloaded-DLL cache
 sdk_state.json
 sdk_cache/
+# Build-time game plugin fallback (tools/fetch_sdk_bundle.py); only its license notice is tracked.
+core/sdk_installer/bundled/*
+!core/sdk_installer/bundled/LICENSES.txt
 
 # OS / misc
 .DS_Store
