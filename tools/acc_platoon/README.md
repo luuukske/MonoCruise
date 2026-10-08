@@ -12,7 +12,7 @@ Nothing here ships or is imported by the app.
 | Layer | In the sim |
 |---|---|
 | Radar filter chain | **Real.** One `Vehicle` per remote rig per client, advanced with `update_from_last` on the physics-step clock, exactly as `TrafficReader` does: lag freeze, position mismatch, pose-jump guard, both speed chains. |
-| ACC tracker | Replaced. On a straight road it would publish the nearest in-path parts; the stand-in publishes the trailer rear and the tractor rear of every rig within 150 m (TMP trucks enter the chain rear part first, `core/acc/ACC_ARCHITECTURE.md` §9.8), top 3 by distance, score pinned at `SCORE_MAX`, kinematics from the rig (the TMP trailer swap). |
+| ACC tracker | Replaced. On a straight road it would publish the nearest in-path parts; the stand-in publishes the trailer rear and the tractor rear of every rig within 150 m (TMP trucks enter the chain rear part first, `core/acc/ACC_ARCHITECTURE.md` §9.8), top 5 by distance (`TRACKER_LEADS`, mirroring the tracker's `PUBLISHED_LEADS`), score pinned at `SCORE_MAX`, kinematics from the rig (the TMP trailer swap). |
 | ACC controller | **Real.** `core.longitudinal.acc.AdaptiveCruiseController` wrapping the shipped `AdaptiveCruiseController`, fed through its own `_read_acc_snapshot`. |
 | Cruise PID, arbitration | **Real.** `CruiseController` and `CruiseControlThread._arbitrate_named`. Settings the stack reads are pinned to their shipped defaults for the run. |
 | AEB | **Real, opt-in.** The headless `AEBThread` from `core/aeb/clip_eval.py`, 30 Hz per client. AEB ships disabled, so scenarios run without it unless asked. The orchestrator's AEB-then-stop disarm is mirrored, plus a driver who taps resume. |

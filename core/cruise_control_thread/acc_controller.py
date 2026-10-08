@@ -58,7 +58,7 @@ OPENING_GAIN_FULL_MS: float = 1.5
 # fraction of it: a deficit that deep is not worth leaving to the lead.
 OPENING_RELIEF_FADE_FRAC: float = 0.6
 
-MA_MAX_LEADS: int = 3
+MA_MAX_LEADS: int = 5
 MA_MIN_CHAIN_GAP_M: float = 4.0
 
 # Multi-vehicle anticipation coupling. Each anticipated lead's influence
@@ -77,7 +77,7 @@ ANT_CONF_TAU_DOWN_S: float = 0.80
 # When the immediate lead vanishes from the chain (lane-edge drift, id
 PRIMARY_GHOST_HOLD_S: float = 0.8
 # Virtual-lead prediction: fraction of the weighted upstream speed /
-ANT_KV: float = 0.4
+ANT_KV: float = 0.8
 ANT_KA: float = 0.5
 # Accel-side anticipation may raise the command at most this far above
 ANT_LIFT_MAX_MS2: float = 1.0
@@ -88,7 +88,7 @@ ANT_LIFT_TTC_FULL_S: float = 6.0
 ANT_LIFT_FADE_MS2: float = 0.3
 # The total anticipation delta is EMA-filtered so chain membership
 # changes (vehicle entering / leaving ego's lane) never step the output.
-ANT_TAU_S: float = 0.4
+ANT_TAU_S: float = 0.6
 # Stationary-lead failsafe: anticipation is fully disabled when the
 ANT_LEAD_MOVING_MIN_MS: float = 0.75
 ANT_LEAD_MOVING_FULL_MS: float = 1.5

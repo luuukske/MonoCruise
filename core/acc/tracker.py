@@ -69,6 +69,10 @@ from .trail_arc import (
 logger = logging.getLogger(__name__)
 
 
+# Leads published to the controller, nearest first. Five lets anticipation see the
+# convoy ahead of the immediate lead; three measured worse. See ACC_ARCHITECTURE §9.
+PUBLISHED_LEADS: int = 5
+
 # Filter bounds: vehicles outside these are never scored.
 _MAX_SCORE_RANGE_M: float = 150.0      # longitudinal cut-off.
 _REAR_DOT_THRESHOLD: float = -0.2      # rear half cone: fwd-dot below → skip.
@@ -837,7 +841,7 @@ class ACCTracker:
             )
         ]
         # Primary sort: closest first. Secondary: score (descending) breaks ties.
-        top = sorted(in_path, key=lambda item: (item[1].dist_m, -item[1].score))[:3]
+        top = sorted(in_path, key=lambda item: (item[1].dist_m, -item[1].score))[:PUBLISHED_LEADS]
 
         out: list[LeadInfo] = []
         for vid, st in top:

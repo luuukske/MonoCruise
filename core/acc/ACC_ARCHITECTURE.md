@@ -878,7 +878,7 @@ braking lead.
 
 ## 9. Multi-vehicle anticipation
 
-`ACCThread` already publishes the top-3 in-lane leads by score (see
+`ACCThread` publishes the top-5 in-lane leads by score (see
 `core/acc/README.md §6`). The controller treats them as a longitudinal
 chain. The command is composed as
 
@@ -902,7 +902,7 @@ Per tick, under `acc.data._lock`:
    lead's tracker `score`.
 3. Sort ascending by `dist_m`. Index 0 is the immediate lead, indices
    1+ are anticipated leads.
-4. Cap the chain at `MA_MAX_LEADS = 3`.
+4. Cap the chain at `MA_MAX_LEADS = 5` (§9.9).
 
 Vehicles that are not strictly ahead of the previous chain member by at
 least `ma_min_chain_gap_m` are dropped: they are either lateral noise
@@ -985,7 +985,7 @@ gated by two safety conditions:
 * **Decel-priority fade**: lift fades to zero as `delta_dec` grows past
   `ant_lift_fade_ms2`, so the two sides never fight.
 
-`delta_anticipation = delta_dec + lift`, then EMA (`ant_tau_s = 0.4 s`)
+`delta_anticipation = delta_dec + lift`, then EMA (`ant_tau_s = 0.6 s`, §9.9)
 before being added to `a_base`. Ego eases off the brake, or picks up
 throttle slightly earlier, when the pack ahead of the lead accelerates;
 it can never gain more than `ant_lift_max_ms2` over the immediate-lead law.
@@ -1101,6 +1101,61 @@ lead never did. It sharpens every lane call, the wrong ones included, so it is
 not shipped ahead of better lane evidence.
 
 ---
+
+### 9.9 Five published leads, a stronger upstream prediction, a slower output filter (2026-10-08)
+
+A 100-follower convoy at gap level 2 (`python -m tools.acc_platoon --scenario steady --followers 100`,
+see `tools/acc_platoon/README.md`) stopped 17 trucks and 5 hit each other while the lead held
+80 km/h. Three changes, each measured in that convoy:
+
+* **Five leads, not three.** A truck can occupy two chain entries (trailer rear and tractor
+  rear), so three entries reached only the truck ahead of the lead. Five reach three trucks
+  ahead. Four entries changed nothing; eight did no more than five.
+* **`ant_kv` 0.4 to 0.8.** The virtual lead takes this share of the upstream speed differential,
+  and it is the largest lever left in the convoy: with five leads, the stops of two seeds at
+  levels 2 and 3 went from 108 to 17 (1.0 gave 9 and 1.2 gave 6). 1.0 raised the laggy-client
+  worst case from 8 to 10 unprovoked brakes on another seed, so 0.8 is the value.
+* **`ant_tau_s` 0.4 s to 0.6 s.** Five leads alone raised steady-convoy unprovoked brakes past
+  the 10-follower ratchet (11 to 13). The slower output filter brings it back to 11.
+
+Results, 100 followers. Levels 2 and 3 over seeds 1 to 5 (40 runs each side); level 1 over seeds 1
+and 2 (8 runs each side).
+
+| | stopped | contacts | unprovoked brakes | mean peak decel |
+|---|---|---|---|---|
+| before, levels 2 and 3 | 414 | 91 | 1547 | 6.01 m/s² |
+| after, levels 2 and 3 | 50 | 0 | 1638 | 4.30 m/s² |
+| before, level 1 | 668 | 431 | 348 | 7.96 m/s² |
+| after, level 1 | 381 | 7 | 149 | 7.13 m/s² |
+
+Per scenario, levels 2 and 3, stopped / contacts / unprovoked, before to after: steady L2
+33/10/217 to 0/0/243, steady L3 0/0/234 to 0/0/232, slowdown L2 15/4/175 to 0/0/194, slowdown L3
+0/0/183 to 0/0/183, hard brake L2 62/47/180 to 37/0/190, hard brake L3 36/0/181 to 0/0/180,
+stop-and-go L2 237/30/169 to 13/0/208, stop-and-go L3 31/0/208 to 0/0/208.
+
+What is left: mild phantom brakes rise about 6% overall (about 12% in steady and slowdown at
+level 2), a hard brake at level 2 still stops trucks at the back, and level 1 still jams.
+
+Measured and not shipped (each either broke a pinned invariant or traded one failure for another):
+
+* **Closing-speed term of IIDM at 0.5** (`IIDM_DV_GAIN`): fewer steady stops and contacts, but a
+  stop into a slower lead then fires the TTC overlay (5 to 30 overlay ticks in the §8 approach
+  cases), and the clean-link convoy stops being calm (σ 0.85 km/h against 0.3).
+* **Lead-braking feedforward share 0** (§8.6): steady stops gone at level 2, but hard-brake
+  contacts rise from 0 to 7 at level 3.
+* **Gap-gated closing-speed term** (full gain only when the gap is off its wanted value): the
+  hard-brake contacts come back.
+* **Persistence gate on mild brake commands** (hold a brake between 0.5 and 2.5 m/s² for 0.5 s):
+  unprovoked brakes nearly double (243 against 129 on seed 1, four cells), from on-off cycling.
+* **Freeze-aware state estimate for TMP lead speed and accel** (a four-state filter that models
+  the TruckersMP clock error and extrapolates the sync delay). Lag falls from about 1.4 s to
+  0.6 s and single-truck phantom frames from 11% to about 2%, but the clean link no longer
+  settles (σ 1.3 km/h at the tail of 10 followers) and level 2 stop-and-go gets worse. The
+  prototype is not in the repo.
+* **Anticipation fade** (`ant_gap_zero_s`): 2.5 removes the gain entirely (289 stops against 89);
+  4.0 cuts stops further (54) but raises unprovoked brakes by 40%.
+* **Anticipation off** (`ma_max_leads = 1`): 501 stops and 376 contacts. The anticipation is what
+  holds the convoy together; any change to it has to be measured in the convoy.
 
 ## 10. Safety overlays
 
@@ -1294,7 +1349,7 @@ overshooting in the start wave and then braking for real.
 ## 11. Pipeline
 
 ```
-  ACCThread.data.leads[0..2]
+  ACCThread.data.leads[0..4]
         │
         ▼
   _read_acc_snapshot: sort by dist, sanity filter, lock-scoped copy

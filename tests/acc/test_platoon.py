@@ -45,22 +45,21 @@ TARGET_SNAP_BRAKE_MS2 = 0.5
 TARGET_PULL_AWAY_START_S = 0.5
 TARGET_CREEP_RESTOPS = 0
 
-BASELINE_STEADY_UNPROVOKED_BRAKES = 11
-BASELINE_STEADY_SPEED_STD_KMH = 10.1
-BASELINE_SLOWDOWN_HOP_GAIN = 1.34
-BASELINE_SLOWDOWN_STOPPED = 5
-BASELINE_HARD_BRAKE_STOPPED = 9
-BASELINE_HARD_BRAKE_CONTACTS = 8
-BASELINE_HARD_BRAKE_UNDERSHOOT_KMH = 18.3
-BASELINE_HARD_BRAKE_AEB_DISARMED = 9
-BASELINE_FULL_STOP_CONTACTS = 10
-BASELINE_QUEUE_STOP_GAP_M = 1.0
-BASELINE_QUEUE_RELAUNCH_HOP_S = 4.0
-BASELINE_SNAP_BRAKE_MS2 = 1.9
+BASELINE_STEADY_UNPROVOKED_BRAKES = 10
+BASELINE_STEADY_SPEED_STD_KMH = 5.9
+BASELINE_SLOWDOWN_HOP_GAIN = 1.32
+BASELINE_HARD_BRAKE_STOPPED = 7
+BASELINE_HARD_BRAKE_UNDERSHOOT_KMH = 18.2
+BASELINE_HARD_BRAKE_AEB_DISARMED = 2
+BASELINE_FULL_STOP_CONTACTS = 2
+BASELINE_QUEUE_STOP_GAP_M = 3.1
+BASELINE_QUEUE_RELAUNCH_HOP_S = 2.5
+BASELINE_SNAP_BRAKE_MS2 = 1.8
 BASELINE_LAGGY_UNPROVOKED_BRAKES = 8
 # Landed 2026-09-30 with ACC_ARCHITECTURE.md §10.2; before it 1.37 s and 12 re-stops.
-BASELINE_PULL_AWAY_START_S = 0.85
-BASELINE_CREEP_RESTOPS = 14
+# 2026-10-08: 0.82 s with five published leads (ACC_ARCHITECTURE.md §9.9).
+BASELINE_PULL_AWAY_START_S = 0.82
+BASELINE_CREEP_RESTOPS = 7
 
 
 def cases(seed: int = 1) -> dict[str, Scenario]:
@@ -175,7 +174,7 @@ def test_a_slowdown_does_not_grow_along_the_convoy(runs):
 def test_a_slowdown_to_60_does_not_stop_anyone(runs):
     r = runs["slowdown"]
     stopped = sum(s.stopped for s in metrics.truck_stats(r)[1:])
-    assert stopped <= BASELINE_SLOWDOWN_STOPPED, _why(r, f"{stopped} trucks stopped")
+    assert stopped <= TARGET_STOPPED, _why(r, f"{stopped} trucks stopped")
 
 
 def test_a_harsh_brake_to_30_does_not_become_a_standstill_jam(runs):
@@ -196,7 +195,7 @@ def test_acc_alone_in_a_harsh_brake_contacts(runs):
     """AEB ships disabled. ACC alone still lets the amplified wave reach trucks. Target 0."""
     r = runs["hard_brake"]
     hit = metrics.contacts(r)
-    assert len(hit) <= BASELINE_HARD_BRAKE_CONTACTS, _why(r, f"contacts at {hit}")
+    assert len(hit) <= TARGET_CONTACTS, _why(r, f"contacts at {hit}")
 
 
 def test_acc_alone_in_a_full_pedal_stop_contacts(runs):
@@ -310,9 +309,7 @@ def test_every_baseline_is_still_short_of_its_target():
         (BASELINE_LAGGY_UNPROVOKED_BRAKES, TARGET_UNPROVOKED_BRAKES, 1),
         (BASELINE_STEADY_SPEED_STD_KMH, TARGET_SPEED_STD_KMH, 1),
         (BASELINE_SLOWDOWN_HOP_GAIN, TARGET_HOP_GAIN, 1),
-        (BASELINE_SLOWDOWN_STOPPED, TARGET_STOPPED, 1),
         (BASELINE_HARD_BRAKE_STOPPED, TARGET_STOPPED, 1),
-        (BASELINE_HARD_BRAKE_CONTACTS, TARGET_CONTACTS, 1),
         (BASELINE_FULL_STOP_CONTACTS, TARGET_CONTACTS, 1),
         (BASELINE_HARD_BRAKE_UNDERSHOOT_KMH, TARGET_UNDERSHOOT_KMH, 1),
         (BASELINE_HARD_BRAKE_AEB_DISARMED, TARGET_DISARMED, 1),

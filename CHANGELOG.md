@@ -14,6 +14,13 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ### Added
 - **Option to turn off the deadzone for disengaging CC with the brake pedal**: Some people want it to disengage as soon as the pedal is touched, others want to be able to rest on the pedal
 
+### Changed
+- **Phantom jams in long convoys**: ACC only looked at the truck directly ahead of the lead, so one brake rolled back through the convoy into a standstill. It now looks three trucks ahead, so a steady or gently slowing convoy stops far less often.
+- **Less hard braking in convoys**: trucks behind the lead braked hard less often, with lower peak braking across the test convoys.
+
+### Known
+- **Convoys can still jam**: at the closest gap setting, and in hard stops or stop-and-go traffic at the default setting, trucks at the back can still come to a stop.
+
 ## [1.1.2-preview.2] - 2026-10-07
 ### Added
 - **Scania-style AEB warning**: a new warning sound that imitates modern Scania trucks, one repeating four-beep pattern for both the warning and the braking.
