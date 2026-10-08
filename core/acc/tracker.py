@@ -1,4 +1,4 @@
-"""Per-vehicle in-path tracker: ego arc, scoring, top-3 leads, trailer swap.
+"""Per-vehicle in-path tracker: ego arc, scoring, closest leads, trailer swap.
 
 Frame pipeline and blinker behaviour: ``core/acc/README.md`` §3–5."""
 
@@ -378,7 +378,7 @@ class ACCTracker:
         off_surface_ids: frozenset[int] = frozenset(),
         ego_geometry: EgoGeometry | None = None,
     ) -> list[LeadInfo]:
-        """Tick the tracker. Returns top-3 in-lane leads (after trailer swap).
+        """Tick the tracker. Returns up to PUBLISHED_LEADS in-lane leads, closest first (after trailer swap).
 
         Indicated-lane candidates are published separately on
         ``last_indicated_lead`` (R15); they never enter ``leads``."""

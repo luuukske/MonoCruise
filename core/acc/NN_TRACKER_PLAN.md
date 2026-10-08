@@ -88,7 +88,7 @@ held-out clip NLL. Temperature-scale on held-out clips afterwards (one scalar).
   quickly; the EMA is seeded at the first logit, not at 0.
 - Keep unchanged and downstream of the NN: `failsafe.py` (floors published score only),
   `blinker.py` indicated-lane candidacy and commit, `trailer_lock.resolve_tractor`,
-  `off_surface_ids` filtering, `IN_PATH_THRESHOLD`, closest-first top-3, never mutating
+  `off_surface_ids` filtering, `IN_PATH_THRESHOLD`, closest-first `PUBLISHED_LEADS`, never mutating
   `Vehicle`.
 - Any exception in the NN path (missing weights, numpy import, shape error) logs once and
   falls back to the geometric tracker for the session. ACC must never publish nothing
