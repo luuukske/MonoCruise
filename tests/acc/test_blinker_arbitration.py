@@ -226,6 +226,47 @@ def test_committed_pass_does_not_reghost_the_lead_left_behind():
     assert ctrl._ghost_vid is None
 
 
+def _slow_chain_scene():
+    """Lead at ego's speed with room, slower trucks beyond it: only anticipation brakes."""
+    leads = ((1, 50.0, 20.0), (2, 91.5, 12.0), (3, 133.0, 12.0))
+    raw = [_LeadSnapshot(vid=v, dist_m=d, v_lead_ms=s, a_lead_ms2=0.0, score=6.0)
+           for v, d, s in leads]
+    smooth = [_LeadSnapshot(vid=v, dist_m=d, v_lead_ms=s, a_lead_ms2=0.0, score=6.0,
+                            conf=1.0, a_lead_ff_ms2=0.0) for v, d, s in leads]
+    return raw, smooth
+
+
+def _run_blinker(ctrl, raw, smooth, ticks, t0, **kw):
+    a = 0.0
+    for i in range(ticks):
+        ctrl._prev_mono = t0 + i * _DT
+        a, _ = ctrl._compute_command(raw, smooth, 20.0, _DT, **kw)
+    return a
+
+
+def test_committed_change_lets_go_of_the_lane_ahead():
+    """Overtaking a slow platoon: the lane law allows it, so the arbiter stays in "lane",
+    and anticipation of the lane being left used to keep braking for the platoon."""
+    ctrl = AdaptiveCruiseController()
+    raw, smooth = _slow_chain_scene()
+    a_follow = _run_blinker(ctrl, raw, smooth, 90, 0.0)
+    assert ctrl._ant_delta_ms2 < -0.5
+    a_commit = _run_blinker(ctrl, raw, smooth, 60, 3.0, b_eff=1.0, committed=True, lane_offset_m=1.0)
+    assert ctrl._blinker.mode == "lane"
+    assert abs(ctrl._ant_delta_ms2) < 0.05
+    assert a_commit > a_follow + 1.0
+
+
+def test_uncommitted_intent_still_anticipates():
+    """Blinking without moving over is not leaving the lane: the platoon ahead still counts."""
+    ctrl = AdaptiveCruiseController()
+    raw, smooth = _slow_chain_scene()
+    _run_blinker(ctrl, raw, smooth, 90, 0.0)
+    before = ctrl._ant_delta_ms2
+    _run_blinker(ctrl, raw, smooth, 60, 3.0, b_eff=1.0, committed=False)
+    assert ctrl._ant_delta_ms2 == pytest.approx(before, abs=0.05)
+
+
 def test_worse_candidate_is_merged_min():
     """R6: tighter indicated lane takes the min of both constraints."""
     ctrl = AdaptiveCruiseController()

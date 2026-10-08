@@ -647,8 +647,8 @@ class AdaptiveCruiseController:
             self._ant_delta_ms2 = 0.0
             return a_base, cfg.at_clamp_slam
 
-        # Anticipation reads leads[] only. Skip during stage-2 pass release.
-        if self._blinker.mode == "pass" or len(chain_smooth) < 2:
+        # Anticipation reads leads[] only, so it stops once ego commits to leaving that lane.
+        if self._blinker.leaving_lane or len(chain_smooth) < 2:
             delta_target = 0.0
         else:
             delta_target = self._anticipation_delta(

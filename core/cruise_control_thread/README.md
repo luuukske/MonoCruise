@@ -202,6 +202,18 @@ separately from `leads[]`. This controller applies R5–R8 (freer-lane pass in t
 stages, tighter-lane min, hysteresis, TTC floor). Anticipation still reads
 `leads[]` only. Candidacy and the intent model: `core/acc/README.md` §5.
 
+**Anticipation stops once ego is leaving the lane** (`BlinkerArbiter.leaving_lane`:
+stage 2, committed, or the post-collapse release hold). `leads[]` is then the lane
+being left. Gating it on stage 2 alone was not enough: behind a slow platoon,
+anticipation holds ego back far enough that the immediate-lead law already allows
+the pass, so the arbiter never leaves `lane` and the platoon kept braking a
+committed overtake (measured 2026-10-08 with five leads at `ANT_KV` 0.8: about
+-1.15 m/s² held through the change, stage 2 after 3.2 s at 45 m and never at 35 m;
+with the gate the command reaches +1.0 m/s² 0.6 to 0.8 s after commit). Stage 1
+(blinking, not yet moving over) keeps anticipating. The immediate lead, the
+overlays and AEB are untouched, so a committed change still brakes for the
+vehicle actually ahead. Pinned by `test_committed_change_lets_go_of_the_lane_ahead`.
+
 **The indicated lead carries no collision authority.** `_pick_indicated_lead`
 publishes only vehicles that are *not* in ego's corridor, so by construction
 there is no collision path from ego's front to one. `_indicated_accel` therefore
