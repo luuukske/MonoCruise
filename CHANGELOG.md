@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Added
+- **Option to turn off the deadzone for disengaging CC with the brake pedal**: Some people want it to disengage as soon as the pedal is touched, others want to be able to rest on the pedal
 
 ## [1.1.2-preview.2] - 2026-10-07
 ### Added

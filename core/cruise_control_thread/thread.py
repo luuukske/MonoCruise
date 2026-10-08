@@ -48,13 +48,11 @@ _LONG_PRESS_START_S = 0.5
 @dataclass
 class CruiseControlThreadData(ThreadData):
     """Published state for sending_thread / UI."""
-
     active: bool = False
     cc_enabled: bool = False
     target_speed_kmh: float | None = None
     wanted_accel_ms2: float = 0.0
     active_controller: str = "none"  # "cc" | "limiter" | "none"
-
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
@@ -673,10 +671,10 @@ class CruiseControlThread(BaseThread):
 
         if cc.enabled:
             game_brake_excess = ctx.game_brake - ctx.commanded_brake_recent_max
-            user_braking = (
-                ctx.user_raw_brake > _CC_RAW_BRAKE_DISENGAGE
-                or game_brake_excess > _CC_GAME_BRAKE_DISENGAGE
-            )
+            if Settings.brakedeadzone_variable:
+                user_braking = (ctx.user_raw_brake > _CC_RAW_BRAKE_DISENGAGE or game_brake_excess > _CC_GAME_BRAKE_DISENGAGE)
+            else:
+                user_braking = (ctx.user_raw_brake > 0 or game_brake_excess > _CC_GAME_BRAKE_DISENGAGE)
             if user_braking or ctx.retarderBrake > 0 or ctx.motorBrake:
                 cc.disable()
                 logger.info("CC disabled: %s", "brake pressed" if user_braking else "retarder or engine brake active")

@@ -150,6 +150,7 @@ class Settings(metaclass=_SingletonMeta):
     aeb_triage_day_sent: int = 0
 
     # Cruise/ACC/Custom buttons
+    brakedeadzone_variable: bool = True
     cc_dec_button: object = None
     cc_inc_button: object = None
     cc_start_button: object = None
