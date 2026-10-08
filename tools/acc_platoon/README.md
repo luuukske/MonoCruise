@@ -18,73 +18,120 @@ Nothing here ships or is imported by the app.
 | AEB | **Real, opt-in.** The headless `AEBThread` from `core/aeb/clip_eval.py`, 30 Hz per client. AEB ships disabled, so scenarios run without it unless asked. The orchestrator's AEB-then-stop disarm is mirrored, plus a driver who taps resume. |
 | Standstill hold | **Real.** `HoldController`. |
 | Mapper and truck | Modelled: the command is tracked through a dead time and a first-order lag, inside engine power and brake capacity. Capacity (10.85 to 12.58 m/s²) and dead time (0.12 s) are the fitted rigs of `tests/aeb/test_stop_distance_envelope.py`. Cruise braking lags 0.19 to 0.31 s (the gentle-braking fit); while AEB brakes the lag is `tau_slam_s` 0.15 s, the p90 of measured full-pedal slams. |
+| Gearbox | Modelled, fitted on the mapper debug log: every truck, the lead included, shifts on the logged schedule and cuts its drive for each upshift. Below, "Gear shifts". |
 | TruckersMP | Modelled, calibrated on the clip corpus. Below. |
 
 Each client sees the others through its own TMP link, and a truck collides with the
 truck ahead **as its own client draws it**, which is how TMP collides remote
-trucks. The drawn gap is never larger than the true one while moving forward, so
-it is the conservative collision measure. Trucks do not pass through each other:
-contact clamps the follower to the rear it hit.
+trucks. Trucks do not pass through each other: contact clamps the follower to the
+rear it hit. While a truck brakes TMP draws it further forward than it is (below),
+so the drawn gap can be a few metres larger than the true one until TMP corrects it.
 
 ## The TruckersMP display model (`netcode.py`)
 
-Real TMP streams show no position noise. A remote truck is drawn on its **own past
-path**, replayed by a playback clock that runs a sync delay behind: constant-speed
-segments of 0.1 to 0.2 s, pauses (byte-identical positions) followed by 1.2 to
-1.3x catch-up, short backward runs, and a ~1 Hz wander from clock sync. So the
-model is a playback clock on the sender's true trajectory:
+Two layers, each measured on real remote-truck streams.
 
-* **Delay**: server `syncdelay` (TMP API: 200 ms on Simulation 1 and 2, 100 to
-  350 ms across servers) plus half of each side's ping.
-* **Segments**: every 0.10 to 0.20 s the clock picks a rate, `1 + err / 0.6 s`
-  plus noise, where `err` is how far it is behind its target. The target moves
-  every ~1 s by a clock-sync error.
-* **Pauses**: Poisson, lognormal length (median 30 ms), both sides' rates added.
-  Real pauses are mostly one or two frames.
-* **Rewinds**: 0.15 to 0.25 s at -1 to -20 % of real time.
-* **Pair roughness**: a pair is clean with probability `clean_share²`, otherwise
-  every artefact is scaled by U(0.4, 1.8). The corpus is that bimodal: a quarter of
-  streams are nearly perfect, the rest range from moderate to very rough.
+**Playback clock.** A remote truck is drawn on its own past path, replayed a sync
+delay behind (server `syncdelay`, 200 ms on Simulation 1 and 2, plus half of each
+side's ping). The clock runs in constant-rate segments of 0.10 to 0.20 s, `1 + err /
+0.6 s` plus jitter, and wanders ~1 Hz with clock sync. The jitter falls with speed:
+below ~18 m/s the drawn speed is a sawtooth of about ±10 % (90 % of streams at 6 to
+14 m/s, 10 % above 22 m/s); the ego truck's own telemetry shows a third of that at
+those speeds, so it is TMP, not driveline. Stalls freeze the drawn truck
+(byte-identical positions) and end in a catch-up:
 
-`LAGGY` is a deliberately bad connection (250 ms ping, heavy pauses and rewinds),
-harsher than the corpus tail. `CLEAN` is a perfect link one delay late, for A/B.
+* Rate falls with the sender's speed: per minute 2.0, 1.35, 0.9, 0.8, 0.4 at 1.5,
+  5.5, 11.5, 18.5, 26 m/s in the mean session. The fall holds inside one stream.
+* Length lognormal, median 90 ms, a tail to 1 s. After a stall the stream stays
+  fragile for 1.5 s (hazard x5, at most 20 per minute).
+* Hard acceleration and pulling away from rest stall every session alike.
+* **The receiver's session sets the rate**, not the pair: 83 % of the spread in
+  stall rate is between clips, 17 % between trucks in one clip. Sessions are
+  lognormal (σ 1.4) around the mean: 38 % of clips show no stall at all, a few
+  percent are ten times rougher. A client draws its session once and every truck it
+  sees shares it.
+
+**Braking overshoot.** TMP draws a braking truck with a speed that lags the
+sender's (0.8 s), so it runs ahead of its playback point and the lead grows
+roughly linearly. About 1.8 s after the lead passes 0.3 m TMP corrects it: it holds
+the truck still or runs it backwards for ~0.2 s (rewinds dominate hard braking),
+then the rest bleeds off over ~1.5 s while the drawn truck follows the sender. The
+lead is held within 0.09 s²/m x speed², so a truck that stops sheds its overshoot
+on the way down: corpus rewinds below 3 m/s are centimetres. This is where real TMP
+rewinds come from: at steady speed they are 50x rarer than in braking, and their
+rate rises roughly with deceleration squared.
+
+`LAGGY` is about the 99th-percentile session on a 250 ms ping. `CLEAN` is a perfect
+link one delay late, with no overshoot, for A/B.
 
 ### Calibration
 
 `python -m tools.acc_platoon --calibrate` measures both sides the same way, and
-`tests/acc/test_platoon_calibration.py` holds the model to it. Measured 2026-09-28
-against every clip in the local store (about 6400 TMP streams, 18 h of moving traffic),
-model `NORMAL` as the convoy tests draw it:
+`tests/acc/test_platoon_calibration.py` holds the model to it. The corpus is every
+clip in both stores (local and contributed), every label including untagged and
+ignore, deduplicated by clip id: 2041 clips whose replay rebuilt the physics-step
+clock, 54 675 TMP streams. The model side is 240 receiver sessions of six trucks in
+mixed traffic (`TrafficDriver` on the plant with its gearbox), so every speed and
+acceleration bin the corpus fills is filled.
 
-| Raw drawn position | corpus | model |
+**Only clips on the step clock count.** In 12 % of clips the replay could not rebuild
+it and kept wall time; there a repeated game frame reads as every truck stalling at
+once (81 % of their stall frames froze every moving truck, 30 % froze the ego as
+well). The live radar sees that frame's `simulatedTime` again and skips it as a
+sub-frame. Those clips were 92 % of the "rough" sessions and made the earlier
+calibration read 7.5 stalls per minute where the step-clock clips show 1.4.
+
+Measured 2026-10-08 (`calibrate.py`, model `NORMAL`):
+
+| Drawn position | corpus | model |
 |---|---|---|
-| per-frame speed ratio p10 / p90 | 0.899 / 1.109 | 0.930 / 1.102 |
-| residual RMS around a 2 s fit, p50 / p90 | 0.138 / 0.337 m | 0.172 / 0.342 m |
-| pauses per minute, length p50 / p90 | 7.5, 0.070 / 0.10 s | 7.7, 0.067 / 0.12 s |
-| rewinds per minute | 0.89 | 0.77 |
+| per-frame speed ratio p10 / p90 | 0.905 / 1.099 | 0.925 / 1.087 |
+| residual RMS around a 2 s fit, p50 / p90 | 0.134 / 0.344 m | 0.110 / 0.225 m |
+| stalls / rewinds per minute above 8 m/s | 1.43 / 0.60 | 1.44 / 0.39 |
+| steady stalls per minute at 0.5-3, 3-8, 8-15, 15-22, 22+ m/s | 5.6, 1.7, 0.78, 0.38, 0.16 | 4.2, 1.5, 0.70, 0.35, 0.10 |
+| sessions without a stall; per-session rate p90 / p99 (x mean) | 0.59; 5.6 / 25 | 0.62; 5.3 / 17 |
+| holds + rewinds per minute braking at 3-22 m/s, > 6, 3.5-6, 2-3.5, 0.8-2 m/s² | 38.9, 13.9, 6.5, 2.5 | 43.5, 29.7, 14.4, 1.8 |
+| drawn lead at the correction, 2-3.5, 3.5-6, > 6 m/s² | 1.9, 3.4, 5.8 m | 1.5, 2.4, 4.2 m |
+| radar frames 1 / 2 / 3 / 4 physics steps apart | 0.15 / 0.61 / 0.22 / 0.02 | the same, by construction |
 
-**Read the whole store.** Clips are bursty by session: the first calibration used a
-150-clip sample and measured 2.9 pauses per minute, a 400-clip sample measured 8.6,
-and quarters of the store range 5.4 to 9.8.
+The overshoot is read against a quadratic fitted 2 to 3.5 s either side of the
+correction. On model streams that reads 2.2 m where the model's own lead is 2.0 m,
+so the corpus numbers are real overshoot, and the model stays below them.
 
-What the shipped `Vehicle` chain makes of an artefact on a steady lead, which is
-the part that decides whether ACC brakes:
+What the shipped `Vehicle` chain makes of it, on streams above 8 m/s:
 
-| Response within 2 s | corpus | model |
+| | corpus | model |
 |---|---|---|
-| ACC chain, phantom decel after a pause, p50 / p90 | 0.55 / 2.25 m/s² | 0.90 / 1.79 m/s² |
-| ACC chain, phantom decel after a rewind, p50 | 3.26 m/s² | 1.72 m/s² |
-| ACC chain, no artefact, p90 | 1.86 m/s² | 1.31 m/s² |
-| ACC chain, \|`acc_accel`\| on steady stretches, p90 | 1.15 m/s² | 0.66 m/s² |
-| AEB chain, speed dip after a pause, p50 / p90 | 0.92 / 4.64 m/s | 2.11 / 4.43 m/s |
-| AEB chain, speed dip after a rewind, p50 | 2.97 m/s | 5.72 m/s |
+| abs(`acc_accel`) on steady stretches, p50 / p90 | 0.26 / 1.21 m/s² | 0.34 / 1.00 m/s² |
+| `acc_speed` error on steady stretches, p50 / p90 | 0.18 / 0.59 m/s | 0.17 / 0.47 m/s |
+| phantom decel within 2 s of a stall on a steady lead, p50 / p90 | 1.63 / 8.28 m/s² | 1.23 / 4.65 m/s² |
+| phantom decel with no artefact, p90 | 2.14 m/s² | 1.28 m/s² |
 
-**Read the second table before trusting a number.** On the ACC chain the model is
-at or below reality at p90, so a phantom brake the sim shows is one the game will
-show at least as often. On AEB's short window the model's rewinds bite about twice
-as hard as real ones, so phantom AEB counts are an upper bound and no test asserts
-on them. Rewinds cannot match both chains with one shape: real ones hit the long
-window harder and the short window softer than any backward run tried.
+**Read before trusting a number.** On the ACC chain the model is at or below the
+game, so a phantom brake the sim shows is one the game shows at least as often. The
+braking overshoot is also below the corpus, by 20 to 30 %. The one place the model is
+harsher: holds and rewinds at 2 to 6 m/s² come about twice as often as in the
+corpus; fixing that pushed the overshoot further below the corpus, so the test holds
+the gap (`BRAKING_FACTOR`) instead of tuning it away.
+
+### Gear shifts (`plant.py`, `shifts.py`)
+
+Fitted on `accel_to_pedals_debug.csv` (1.65 M rows at 10 Hz, 6270 upshifts):
+
+* **AMT** (the 12-, 13- and 14-speed boxes): drive below half for 0.90 / 1.25 / 1.55 s
+  (p10 / p50 / p90, 2128 clean upshifts). Torque starts to fall 0.8 s before the
+  gear number changes, is gone for ~0.3 s, and is back by ~1.3 s after. The model
+  ramps it out over 0.6 s, holds it off 0.3 ± 0.25 s (drawn per shift) and ramps it
+  back over 1.2 s, scaling whatever the engine was delivering.
+* **Length does not depend on throttle, acceleration, gear or speed** (|corr| 0.06,
+  0.14, 0.05). Hard acceleration shifts more often and loses more speed per shift,
+  not longer. `test_shift_length_does_not_grow_with_throttle` pins it.
+* **Torque-converter automatic** (the log's 6-speed drives): no cut, a dip to ~0.68
+  of the pre-shift acceleration. `POWERSHIFT`, not in the default fleet.
+* Schedule, 14-speed on its usual 4-6-8-10-11-12-13-14 path, median of 5014 upshifts:
+  11.8, 19.7, 27.6, 43.0, 55.3, 69.8, 88.7 km/h, 3 % lower at no throttle and 3 %
+  higher at full. Downshifts at 7.6 to 74.2 km/h; asked for 60 % of full power below
+  the kickdown speed (67 km/h out of 13th) it kicks down. At 80 km/h a truck is in 13th.
 
 ## Scenarios (`scenarios.py`)
 
@@ -102,11 +149,39 @@ All at gap level 2, 80 km/h, set speed 90 km/h, a mixed fleet, ten followers.
 | `stop_and_go` | 60 and 25 km/h in turns |
 | `slow_pull_away` | the convoy stands; the lead pulls away at 0.3 m/s² to 30 km/h |
 | `creep` | the convoy stands; the lead inches off at 2 km/h, below where `acc_speed` reads non-zero, and never stops |
+| `pull_through` | the convoy rolls at 30 km/h; the lead pulls through to 80 at full power, three upshifts |
 | `laggy_client` | holds 80 km/h, follower 5 is on `LAGGY` |
 | `blackout_brake` | `hard_brake` while follower 1 gets no update for 1.0 s, the worst pause seen |
 | `desync_snap` | holds 80 km/h, drawn 8 m closer to follower 1 for 0.3 s |
 
-## What it found (2026-09-28)
+## What it found
+
+### 2026-10-08, with the corpus-wide netcode and the gearbox
+
+Gap level 2, ten followers, seeds 1 to 3, ranges over the seeds.
+
+| Scenario | ACC alone | ACC with AEB |
+|---|---|---|
+| `steady` | 0 to 4 brakes in 40 s; worst speed σ 1.0 to 8.1 km/h, 27.6 km/h behind one 99th-percentile session | |
+| `slowdown` | worst hop gain 1.77 to 1.86; up to 6 trucks stop | |
+| `hard_brake` | all 10 stop, 3 to 6 collide, truck 1 stops from 30 km/h | 1 to 6 collide, closest -0.43 m; 8 disarmed |
+| `emergency_stop` | 5 to 10 collide | 4 to 9 collide; trucks behind locked ones creep up to 0.38 m |
+| `queue_stop` (2 m/s²) | 2 to 6 collide, bunched to 0 m; drive-off hops 4.6 s, seed 3 never drives off | |
+| `blackout_brake` | | 2 to 6 collide |
+| `laggy_client` | no contact, 4 to 6 brakes | |
+| `desync_snap` | truck 1 brakes 1.2 to 2.0 m/s², the TTC overlay does not trip | |
+| `slow_pull_away` | first follower after 0.85 to 0.97 s, no hop over 1.85 s | |
+| `creep` | 7 to 9 re-stops (was 14) | |
+| `pull_through` | 1 to 4 brakes, all netcode: none on a clean link | |
+
+Every new contact comes from the braking overshoot: with it switched off
+(`dead_reckoning=False`) `queue_stop` and `hard_brake` with AEB have none. The drawn
+lead runs metres ahead while it brakes, so ACC and AEB see the braking late, then
+the correction lands the truck metres closer in 0.2 s. Gear shifts change little
+here: switched off, the same scenarios give the same contacts.
+
+### 2026-09-28, the first netcode model
+
 
 Gap level 2, ten followers, seeds 1 to 3. AEB ships disabled, so "ACC alone" is
 what a default install does.
@@ -122,7 +197,7 @@ what a default install does.
 | `laggy_client` | no contact, closest 2.4 cm (seed 1) | |
 | `desync_snap` | truck 1 brakes 1.1 to 1.9 m/s², the TTC overlay does not trip | |
 
-Against the gap level, seed 1, ACC alone:
+Against the gap level, seed 1, ACC alone, first model:
 
 | | level 2 | level 3 | level 4 |
 |---|---|---|---|
@@ -142,20 +217,28 @@ Two separate mechanisms, and the clean link separates them:
 
 ## The tests
 
-`tests/acc/test_platoon.py` runs thirteen scenarios once per session in spawned
-worker processes: about 11 s on eight cores. Bounds come in two kinds. `TARGET_*`
-is the requirement. `BASELINE_*` is the worst of seeds 1 to 3 at landing where the
+`tests/acc/test_platoon.py` runs fifteen scenarios once per session in spawned
+worker processes: about 20 s on eight cores. `tests/acc/test_platoon_gearbox.py`
+holds the gearbox to the log constants (the log itself under `needs_clips`).
+Bounds come in two kinds. `TARGET_*` is the requirement. `BASELINE_*` is the worst of seeds 1 to 3 at landing where the
 stack is short of its target; lower it when ACC improves, never raise it, and once
 it reaches its target assert the target instead (a test enforces that ordering).
 
-Held as absolute requirements today: a clean link is calm; with AEB, no contact in
-the harsh brake, the blackout and the full stop; no creep at a standstill; trucks
-AEB switched off stay put; a stopped queue drives off again without the driver; a
-desync does not trip the TTC overlay; no contact behind a laggy client.
+Held as absolute requirements today: a clean link is calm and gear-shift dips alone
+brake nobody; no creep behind a queue that stopped on its own; trucks AEB switched
+off stay put; a stopped queue drives off again without the driver (seed 1; on seed
+3 a truck that touched the one ahead never does); a desync does not trip the TTC
+overlay; no contact behind a laggy client, in a pull-away, a creep or a pull-through.
 
-The ratchets are known to bite: restoring the brake release and landing from
-before `core/acc/ACC_ARCHITECTURE.md` §13.1 and §13.4 fails three of them (hop
-gain 1.87, undershoot 28 km/h, relaunch hop 4.9 s).
+Re-baselined 2026-10-08, with Lukas's approval, for the recalibrated netcode and the
+gearbox. The braking overshoot turned four no-contact requirements into ratchets
+with target 0: AEB in the harsh brake, the blackout and the full stop, and ACC alone
+in the queue stop; the creep behind AEB-locked trucks is a ratchet too.
+
+On the first netcode model the ratchets bit: restoring the brake release and
+landing from before `core/acc/ACC_ARCHITECTURE.md` §13.1 and §13.4 failed three of
+them (hop gain 1.87, undershoot 28 km/h, relaunch hop 4.9 s). Not re-measured on
+the 2026-10-08 model.
 
 ## Running
 
@@ -175,6 +258,10 @@ python -m tools.acc_platoon --scenario slowdown --clean --gap-level 3
 the netcode does from what the speed estimate's own lag does. A run costs about
 0.13 s per simulated second without AEB and twice that with it.
 
+Long queues: `Scenario(followers=100, visible_ahead=10, record_every=6)` draws only
+the ten trucks ahead each client's 200 m traffic buffer can hold and keeps traces at
+10 Hz; 100 trucks then cost about 1.5 s per simulated second.
+
 ## Metrics (`metrics.py`)
 
 | Metric | Meaning |
@@ -189,7 +276,10 @@ the netcode does from what the speed estimate's own lag does. A run costs about
 
 ## Limits
 
-Straight flat road, one lane, no gear shifts, no lateral motion and no cut-ins.
+Straight flat road, one lane, no lateral motion and no cut-ins. The gearbox has no
+manual (H-shifter) drivers: the log only holds AMT and a torque-converter box. Ego
+pose is exact: clips also show a one-step ego pairing slip on a few percent of
+frames, not modelled.
 The tracker is bypassed, so lock latency and score flicker are absent. The mapper is
 a lag model, not `AccelToPedals`. The lead is scripted and perfectly smooth unless
 `lead_wobble_ms2` is set. Collision is contact only, with no crash physics. The

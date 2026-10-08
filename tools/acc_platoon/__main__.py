@@ -57,20 +57,19 @@ def _scenario_report(name: str, seeds: list[int], level: int | None, as_json: bo
 
 
 def _calibration_report(clips: int | None, root: str | None) -> None:
-    from core.aeb.clip_store import default_clip_root
-
     from . import calibrate
 
-    streams = calibrate.corpus_streams(Path(root) if root else default_clip_root(), clips,
-                                       workers=min(8, os.cpu_count() or 1))
+    workers = min(8, os.cpu_count() or 1)
+    streams = calibrate.corpus_streams([Path(root)] if root else None, clips, workers=workers)
     if not streams:
         raise SystemExit("no TMP streams found; is the clip store there?")
-    synth = calibrate.model_streams()
-    print(f"{len(streams)} corpus streams against {len(synth)} synthetic ones")
-    print(calibrate.report(calibrate.raw_stats(streams), calibrate.raw_stats(synth)))
-    print(calibrate.report(calibrate.filter_stats(streams), calibrate.filter_stats(synth)))
-    print(calibrate.report(calibrate.artefact_response(streams),
-                           calibrate.artefact_response(synth)))
+    synth = calibrate.model_streams(sessions=240, workers=workers)
+    print(f"{len(streams)} corpus streams from {len({s.session for s in streams})} clips "
+          f"against {len(synth)} model streams")
+    print(calibrate.state_report(calibrate.state_table(streams), calibrate.state_table(synth)))
+    for measure in (calibrate.session_rates, calibrate.overshoot, calibrate.raw_stats):
+        print(calibrate.report(measure(streams), measure(synth)))
+    print(calibrate.report(calibrate.chain_stats(streams, workers), calibrate.chain_stats(synth, workers)))
 
 
 parser = argparse.ArgumentParser(prog="python -m tools.acc_platoon", description=__doc__)

@@ -6,6 +6,7 @@ tools/acc_platoon/README.md.
 """
 from __future__ import annotations
 
+import random
 import threading
 
 from core.acc.scoring import SCORE_MAX
@@ -144,13 +145,14 @@ class Client:
     """One truck. Index 0 is the scripted lead; the others run MonoCruise."""
 
     def __init__(self, idx: int, spec: TruckSpec, net: NetProfile, s0: float, v0: float,
-                 set_kmh: float, t0: float, dt: float, clock, with_aeb: bool) -> None:
+                 set_kmh: float, t0: float, dt: float, clock, with_aeb: bool,
+                 rng: random.Random | None = None) -> None:
         self.idx = idx
         self.spec = spec
         self.net = net
         self.set_kmh = set_kmh
         self.dt = dt
-        self.truck = TruckPlant(spec, s0, v0, dt)
+        self.truck = TruckPlant(spec, s0, v0, dt, rng)
         self.path = TruePath(t0, s0, v0)
         self.cmd = 0.0
         self.crawl_follow = False

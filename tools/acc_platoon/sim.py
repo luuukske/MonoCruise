@@ -24,8 +24,10 @@ from .plant import HEAVY, LIGHT, MEDIUM, RIG_LEN_M, TruckSpec
 from .stack import Client, Registry
 
 DT: float = 1.0 / PHYSICS_HZ
-# Physics steps between radar reads, measured on the clip corpus (1 to 3, mostly 2).
-FRAME_STEPS: tuple[int, ...] = (1, 2, 2, 2, 2, 2, 3, 3)
+# Physics steps between radar reads and their shares, measured on the clip corpus's step clock.
+FRAME_STEP_SHARES: tuple[tuple[int, float], ...] = ((1, 0.15), (2, 0.61), (3, 0.22), (4, 0.02))
+_STEPS: tuple[int, ...] = tuple(k for k, _ in FRAME_STEP_SHARES)
+_STEP_WEIGHTS: tuple[float, ...] = tuple(w for _, w in FRAME_STEP_SHARES)
 # AEB and ACC threads run at 30 Hz: every other physics step.
 AEB_EVERY_STEPS: int = 2
 # Scenario time 0 on the game clock. Radar sentinels assume a positive clock, as live.
@@ -73,6 +75,10 @@ class Scenario:
     resume_after_s: float | None = 2.0
     # Lead driver on a keyboard: throttle and lift bursts of this size, 1 to 4 s each.
     lead_wobble_ms2: float = 0.0
+    # Each client draws only this many trucks ahead (None: all). Long queues need few: the
+    # traffic buffer reaches 200 m. Traces are kept every `record_every` physics steps.
+    visible_ahead: int | None = None
+    record_every: int = 1
 
 
 @dataclass
@@ -88,6 +94,7 @@ class Trace:
     overlay: list[bool] = field(default_factory=list)
     aeb: list[bool] = field(default_factory=list)
     armed: list[bool] = field(default_factory=list)
+    gear: list[int] = field(default_factory=list)
     gap_drawn: list[float] = field(default_factory=list)
     gap_true: list[float] = field(default_factory=list)
     lead_v_seen: list[float] = field(default_factory=list)
@@ -103,6 +110,8 @@ class Run:
     nets: list[NetProfile]
     delays_s: list[float]
     resumes: list[int]
+    shifts: list[int] = field(default_factory=list)
+    sessions: list[float] = field(default_factory=list)
 
 
 class LeadDriver:
@@ -163,11 +172,13 @@ def _runtime(level: int, reg: Registry, clock: _Clock):
         acc_controller.registry, long_cc.registry, acc_controller.time = saved_mods
 
 
-def _build(sc: Scenario, clock: _Clock) -> tuple[list[Client], list[float]]:
+def _build(sc: Scenario, clock: _Clock) -> tuple[list[Client], list[float], list[float]]:
     rng = random.Random(sc.seed)
     n = sc.followers + 1
     specs = [sc.fleet[rng.randrange(len(sc.fleet))] for _ in range(n)]
     nets = [sc.nets[i] if i < len(sc.nets) else NORMAL for i in range(n)]
+    # Each client's session sets how rough every truck it draws looks.
+    sessions = [nets[i].session(rng) for i in range(n)]
     v0 = sc.v0_kmh / 3.6
     t0 = T_BASE_S - sc.warmup_s
     headway = T_HEADWAY_BY_LEVEL_S[sc.gap_level]
@@ -179,22 +190,24 @@ def _build(sc: Scenario, clock: _Clock) -> tuple[list[Client], list[float]]:
             delay = sc.sync_delay_s + 0.5 * (nets[i].ping_s + nets[i - 1].ping_s)
             delays.append(delay)
             front -= RIG_LEN_M + acc_controller.S0_M + v0 * headway + v0 * delay
-        clients.append(Client(i, specs[i], nets[i], front, v0, sc.set_kmh, t0, DT, clock, sc.aeb))
+        clients.append(Client(i, specs[i], nets[i], front, v0, sc.set_kmh, t0, DT, clock, sc.aeb,
+                              random.Random(rng.getrandbits(64))))
     for i, c in enumerate(clients):
-        for j in range(i):
+        nearest = 0 if sc.visible_ahead is None else max(0, i - sc.visible_ahead)
+        for j in range(nearest, i):
             glitches = tuple(replace(g, at_s=g.at_s + T_BASE_S)
                              for g in sc.glitches.get((j, i), ()))
             c.streams[j] = TmpStream(clients[j].path, nets[j], nets[i],
                                      random.Random(rng.getrandbits(64)), t0,
-                                     sc.sync_delay_s, glitches)
+                                     sc.sync_delay_s, glitches, sessions[i])
         c.next_frame = rng.randrange(3)
-    return clients, delays
+    return clients, delays, sessions
 
 
 def run(sc: Scenario) -> Run:
     """Simulate the scenario; scenario time 0 is the end of the warm-up."""
     clock = _Clock()
-    clients, delays = _build(sc, clock)
+    clients, delays, sessions = _build(sc, clock)
     lead, followers = clients[0], clients[1:]
     driver = LeadDriver(sc, random.Random(sc.seed * 104729 + 3))
     frame_rng = random.Random(sc.seed * 7919 + 17)
@@ -217,16 +230,17 @@ def run(sc: Scenario) -> Run:
             for c in followers:
                 _contact(c, clients[c.idx - 1], t_game)
             for c in clients:
-                c.path.append(c.truck.s)
+                c.path.append(c.truck.s, c.truck.v)
             clock.t = t_game
             lead.cmd = driver.command(t, lead.truck.v) if closed else 0.0
+            keep = k % sc.record_every == 0
             for c in followers:
                 for stream in c.streams.values():
                     stream.advance(t_game, DT)
                 c.acc_data.leads = c.next_leads
                 if k >= c.next_frame:
                     c.radar_frame(t_game, sc.split_trailers)
-                    c.next_frame = k + frame_rng.choice(FRAME_STEPS)
+                    c.next_frame = k + frame_rng.choices(_STEPS, _STEP_WEIGHTS)[0]
                 reg.client = c
                 acc_out = None
                 if closed:
@@ -234,8 +248,11 @@ def run(sc: Scenario) -> Run:
                         c.aeb_tick()
                     acc_out = c.control_tick(t_game, DT)
                     c.driver(t_game, c.streams[c.idx - 1].position(t_game), sc.resume_after_s)
-                _record_follower(traces[c.idx], c, clients[c.idx - 1], acc_out, t_game)
+                if keep:
+                    _record_follower(traces[c.idx], c, clients[c.idx - 1], acc_out, t_game)
             reg.client = None
+            if not keep:
+                continue
             times.append(t)
             for c in clients:
                 tr = traces[c.idx]
@@ -244,8 +261,9 @@ def run(sc: Scenario) -> Run:
                 tr.a.append(c.truck.a)
                 tr.cmd.append(c.cmd)
                 tr.hold.append(c.truck.hold_out.state)
+                tr.gear.append(c.truck.gear)
     return Run(sc, times, traces, [c.spec for c in clients], [c.net for c in clients], delays,
-               [c.resumes for c in clients])
+               [c.resumes for c in clients], [c.truck.shifts for c in clients], sessions)
 
 
 def _contact(c: Client, ahead: Client, t: float) -> None:
