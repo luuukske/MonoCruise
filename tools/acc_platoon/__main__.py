@@ -11,6 +11,9 @@ import tempfile
 from dataclasses import asdict, replace
 from pathlib import Path
 
+# Convoys longer than this print the decile summary instead of a row per truck.
+SUMMARY_ABOVE: int = 15
+
 
 def _sandbox_settings() -> Path:
     """Point core.settings at a throwaway copy before anything can load or save it."""
@@ -36,15 +39,20 @@ def _scenario_report(name: str, seeds: list[int], level: int | None, as_json: bo
         sc = factory(seed, aeb=True) if args.aeb else factory(seed)
         if level is not None:
             sc = replace(sc, gap_level=level)
+        if args.followers is not None:
+            sc = replace(sc, followers=args.followers)
         if args.clean:
             sc = replace(sc, nets=(CLEAN,) * (sc.followers + 1))
         r = run(sc)
         stats = metrics.truck_stats(r, 0.0)
         if as_json:
             out.append({"scenario": name, "seed": seed, "gap_level": sc.gap_level,
-                        "trucks": [asdict(s) for s in stats]})
+                        "followers": sc.followers, "trucks": [asdict(s) for s in stats]})
             continue
-        print(f"=== {name} seed {seed} gap level {sc.gap_level}")
+        print(f"=== {name} seed {seed} gap level {sc.gap_level} followers {sc.followers}")
+        if sc.followers > SUMMARY_ABOVE:
+            print(metrics.convoy_summary(r, stats))
+            continue
         print(metrics.table(stats))
         if sc.v0_kmh - stats[0].min_speed_kmh > 1.0:
             gains = metrics.dip_gains(stats, sc.v0_kmh)
@@ -77,6 +85,7 @@ parser = argparse.ArgumentParser(prog="python -m tools.acc_platoon", description
 parser.add_argument("--scenario", default="steady", help="name, or 'all'; see scenarios.ALL")
 parser.add_argument("--seeds", default="1", help="comma-separated seeds")
 parser.add_argument("--gap-level", type=int, default=None, help="override the scenario's level")
+parser.add_argument("--followers", type=int, default=None, help="override the scenario's convoy size")
 parser.add_argument("--clean", action="store_true", help="no netcode artefacts, for A/B")
 parser.add_argument("--aeb", action="store_true", help="run the headless AEB in every client")
 parser.add_argument("--json", action="store_true")

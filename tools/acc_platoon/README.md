@@ -175,6 +175,33 @@ python -m tools.acc_platoon --scenario slowdown --clean --gap-level 3
 the netcode does from what the speed estimate's own lag does. A run costs about
 0.13 s per simulated second without AEB and twice that with it.
 
+## Convoys of 100 (2026-10-08)
+
+`--followers 100` runs the same scenarios with 100 followers. A long convoy prints a decile
+summary instead of a row per truck. Each run takes about a minute.
+
+```bash
+python -m tools.acc_platoon --scenario steady --followers 100 --gap-level 2 --seeds 1,2,3
+```
+
+Before and after `ACC_ARCHITECTURE.md` §9.9 (five leads, `ant_kv` 0.8, `ant_tau_s` 0.6), seeds 1 to 5,
+levels 2 and 3, stopped / contacts / unprovoked brakes, summed over the seeds:
+
+| scenario | level | before | after |
+|---|---|---|---|
+| steady | 2 | 33 / 10 / 217 | 0 / 0 / 243 |
+| steady | 3 | 0 / 0 / 234 | 0 / 0 / 232 |
+| slowdown | 2 | 15 / 4 / 175 | 0 / 0 / 194 |
+| slowdown | 3 | 0 / 0 / 183 | 0 / 0 / 183 |
+| hard_brake | 2 | 62 / 47 / 180 | 37 / 0 / 190 |
+| hard_brake | 3 | 36 / 0 / 181 | 0 / 0 / 180 |
+| stop_and_go | 2 | 237 / 30 / 169 | 13 / 0 / 208 |
+| stop_and_go | 3 | 31 / 0 / 208 | 0 / 0 / 208 |
+
+Level 1 (seeds 1 and 2): stopped 668 to 381, contacts 431 to 7, unprovoked brakes 348 to 149.
+What is left: a hard brake at level 2 still stops trucks at the back, and level 1 still jams. The
+10-follower ratchets in `tests/acc/test_platoon.py` were lowered to the new worst-of-seeds values.
+
 ## Metrics (`metrics.py`)
 
 | Metric | Meaning |
