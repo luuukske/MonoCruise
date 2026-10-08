@@ -1181,7 +1181,7 @@ def build_pipeline(cal: AEBCalibration) -> list:
         LowSpeedTrailerFilter(cal),
         TmpRelSpeedFilter(),
         LaneClassifier(cal),
-        OppositeLaneFilter(cal),
+        AvoidabilityGate(OppositeLaneFilter(cal), cal, oncoming=True),
         OppositeLaneFilterMirrored(cal),
         CoDirectionalDivergeFilter(cal),
         TurningCrossTrafficFilter(cal),

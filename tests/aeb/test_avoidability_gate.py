@@ -14,7 +14,8 @@ from core.aeb.clearance import clearance_required
 from core.aeb.avoidability import AvoidabilityGate, measured_miss_inside_body
 from core.aeb.filters import (
     CornerEntryStationaryFilter, CornerEntryStationaryFilterMirrored, EgoEvasionFilter,
-    FilterResult, OutOfLaneParallelFilter, SweepPassFilter, TmpCrossTrafficFilter,
+    FilterResult, OppositeLaneFilter, OutOfLaneParallelFilter, SweepPassFilter,
+    TmpCrossTrafficFilter,
     build_pipeline,
 )
 from core.aeb.lane_frame import Lane
@@ -140,6 +141,34 @@ def test_trailer_counts_only_on_the_side_it_reaches():
     assert not measured_miss_inside_body(ctx_with(trailer(+8.0)))
 
 
+def _oncoming(ctx, *, d_miss: float = 0.0, rate: float | None = -2.0, head_on: bool = True):
+    ctx.head_on = head_on
+    ctx.d_miss = d_miss
+    ctx.d_miss_rate = rate
+    ctx.abs_v_speed = ctx.v_ground_meas = 20.0
+    return ctx
+
+
+def _onc_suppressed(ctx, cal=CAL) -> bool:
+    return AvoidabilityGate(_AlwaysDrops(), cal, oncoming=True).apply(ctx).suppressed
+
+
+def test_oncoming_drifting_in_ends_the_drop_at_the_deadline():
+    demand = _demand(25.0)
+    assert not _onc_suppressed(_oncoming(_ctx(25.0, deadline=demand - 0.5)))
+    assert _onc_suppressed(_oncoming(_ctx(25.0, deadline=demand + 0.5)))
+
+
+def test_oncoming_needs_a_closing_miss_inside_ego_width():
+    """Adjacent oncoming passes graze the bar; only a closing line through ego's own width counts."""
+    assert _onc_suppressed(_oncoming(_ctx(25.0, deadline=0.1), rate=-0.5))
+    assert _onc_suppressed(_oncoming(_ctx(25.0, deadline=0.1), rate=None))
+    assert _onc_suppressed(_oncoming(_ctx(25.0, deadline=0.1), d_miss=CAL.ego_half_width + 0.1))
+    assert _onc_suppressed(_oncoming(_ctx(25.0, deadline=0.1), head_on=False))
+    assert _onc_suppressed(_oncoming(_ctx(25.0, deadline=0.1)),
+                           replace(CAL, avoidability_gate_oncoming=False))
+
+
 def test_only_guess_stages_are_gated():
     gated = {
         type(s._inner) for s in build_pipeline(CAL) if isinstance(s, AvoidabilityGate)
@@ -147,6 +176,9 @@ def test_only_guess_stages_are_gated():
     assert gated == {
         OutOfLaneParallelFilter, SweepPassFilter,
         CornerEntryStationaryFilter, CornerEntryStationaryFilterMirrored,
+        OppositeLaneFilter,
     }
+    onc = [s for s in build_pipeline(CAL) if isinstance(s, AvoidabilityGate) and s._oncoming]
+    assert [type(s._inner) for s in onc] == [OppositeLaneFilter]
     bare = {type(s) for s in build_pipeline(CAL) if not isinstance(s, AvoidabilityGate)}
     assert {EgoEvasionFilter, TmpCrossTrafficFilter} <= bare

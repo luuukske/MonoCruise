@@ -96,22 +96,38 @@ def measured_stationary(ctx: "FilterContext", cal: AEBCalibration) -> bool:
     return max(ctx.abs_v_speed, ground) < cal.sweep_pass_max_target_speed
 
 
+def oncoming_drifting_in(ctx: "FilterContext", cal: AEBCalibration) -> bool:
+    """Oncoming whose measured miss line already crosses ego's own width and keeps closing."""
+    if not cal.avoidability_gate_oncoming or not (ctx.head_on or ctx.near_head_on):
+        return False
+    miss = getattr(ctx, "d_miss", None)
+    rate = getattr(ctx, "d_miss_rate", None)
+    return (miss is not None and rate is not None
+            and miss <= ctx.ego_hw and rate <= cal.oncoming_gate_dmiss_rate_mps)
+
+
 class AvoidabilityGate:
-    """Wraps a stage that drops a stationary body on a guess about ego's own path.
+    """Wraps a stage that drops a stationary body (or, ``oncoming``, a drifting-in car) on a guess.
 
     The drop stands only while braking could still stop short of the body if the guess is wrong.
     """
 
-    def __init__(self, inner, cal: AEBCalibration) -> None:
+    def __init__(self, inner, cal: AEBCalibration, *, oncoming: bool = False) -> None:
         self._inner = inner
         self._cal = cal
         self.name = inner.name
+        self._oncoming = oncoming
+
+    def _in_scope(self, ctx: FilterContext) -> bool:
+        if self._oncoming:
+            return oncoming_drifting_in(ctx, self._cal)
+        return measured_stationary(ctx, self._cal)
 
     def apply(self, ctx: FilterContext) -> FilterResult:
         res = self._inner.apply(ctx)
         cal = self._cal
         if (res.suppressed and cal.avoidability_gate_enabled
-                and measured_stationary(ctx, cal)
+                and self._in_scope(ctx)
                 and measured_miss_inside_body(ctx)
                 and braking_deadline_passed(ctx, cal)):
             ctx.deadline_released = True

@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Fixed
+- **AEB braked late for oncoming cars drifting into your lane**: an oncoming car slowly crossing the centre line was treated as staying in its own lane until very late. AEB now brakes once its path clearly runs into your truck.
 
 ## [1.1.2-preview.3] - 2026-10-08
 ### Added

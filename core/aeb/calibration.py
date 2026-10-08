@@ -281,6 +281,9 @@ class AEBCalibration:
     # A stationary body may be dropped on a guess about ego's path only until
     # braking alone could no longer stop short of it (README avoidability gate).
     avoidability_gate_enabled: bool = True
+    # Oncoming drifting in on OppositeLaneFilter (README avoidability gate, oncoming scope).
+    avoidability_gate_oncoming: bool = True
+    oncoming_gate_dmiss_rate_mps: float = -1.0
 
     # Clearance-based required decel (README continuous-decel). False restores
     # the pre-clearance relative-frame path and is how the corpus is A/B'd.

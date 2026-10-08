@@ -435,6 +435,9 @@ body-sep and Fix B κ expansion; also skip engagement-entry LOS / turn
 extrapolation vetoes so warn can promote to brake. Evasion clearance still may
 suppress. Colliding closing targets also earn `certain_geom` for instant engage.
 `OppositeLaneFilterMirrored` stays `Lane.EGO` only.
+The whole stage runs inside the avoidability gate's oncoming scope (below):
+a drop of a car whose measured line closes through ego's width ends at the
+braking deadline.
 
 **Shared bend beats the `|lat|` collapse.** `|lat|` is measured against ego's
 straight-ahead axis, so mid-corner it sweeps through zero on *every* oncoming
@@ -706,6 +709,24 @@ earlier release), 19 false positives cheaper and 6 costlier (already braking, no
 0.1 to 0.4 s sooner). On the bare stages `ddf9b4fd` braked at 4.82 s and
 `cb0154bb` at 4.87 s; with the gate 4.21 s and 4.18 s, against label windows
 opening at 4.17 s and 4.18 s.
+
+**Oncoming scope (`OppositeLaneFilter`, card 128).** The body-separation and
+evasion-arc drops are a guess too: that the oncoming car keeps to its own lane
+or that someone steers clear. `build_pipeline` wraps the stage in
+`AvoidabilityGate(..., oncoming=True)`, which swaps the stationarity condition
+for `oncoming_drifting_in`: `head_on` or `near_head_on`, the measured CBDR line
+inside ego's own half width (`d_miss <= ego_hw`, stricter than the body test
+the stationary scope uses) and still closing (`d_miss_rate <=
+oncoming_gate_dmiss_rate_mps`, -1.0 m/s). The other three rows of the table
+apply unchanged. Corpus (927 scored clips, 2026-10-08): -148.78 to -189.82;
+`c84e4989`, `9cc70333`, `0075fd8c` late to TP, `c3f71053` quality 0.09 to
+0.55, no TP lost, and six oncoming passes TN to FP, each a single brake of
+about 0.28 s (`6f5a1555`, `248f3efa`, `89e102a8`, `4f5910b5`, `3daaba45`,
+`bae7b8cd`). Measured and not kept: the scope without the two conditions
+(-208.36, but 23 new FPs, two of them 3 to 6 s long), either condition alone
+(-180.37 and -191.33, 16 and 10 new FPs), and a 0.10 s / 0.20 s persistence on
+top of both (-156.12 / -151.37: the gained TPs release on the same one or two
+frames the FPs do).
 
 `tests/aeb/harness.py::evaluate_frame` builds its context without a LOS track
 or `clearance_fn`, so the gate fails closed there and scenarios see the bare
@@ -1769,7 +1790,6 @@ low-speed dangers.
   additive in `sending_thread`, closed-loop controller in `sending_thread`)
   are gated by `gas_output / gasval >= 0.8`: full gas pedal is the user
   override and defeats AEB braking authority across every layer.
-
 ---
 
 ## 6. Elevation filter (shared road-surface gate)
