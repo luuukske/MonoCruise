@@ -54,6 +54,7 @@ class JoystickPool:
         self.names: dict[str, str] = {}
         self.guid_by_instance: dict[int, str] = {}
         self.errors: list[str] = []
+        self.hid_only: list[str] = []
         self._count = count
         self._next = 0
         self.walk += 1
@@ -81,6 +82,10 @@ class JoystickPool:
             try:
                 js = self._open_fn(index)
                 js.init()
+                if js.get_numaxes() == 0:
+                    # SDL 2.28 never listed buttons-only devices (MOZA stalk); the HID thread reads them.
+                    self.hid_only.append(js.get_name())
+                    continue
                 guid = js.get_guid()
                 self.devices[guid] = js
                 self.names[guid] = js.get_name()

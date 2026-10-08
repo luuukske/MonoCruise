@@ -91,6 +91,26 @@ HID scan never raw-scans a joystick pygame is still opening.
 Opening a force-feedback wheelbase through SDL resets its effects and takes
 exclusive access (Trello card 141), so every open avoided matters.
 
+## Pedals with no buttons need pygame-ce
+
+Pedal sets that connect to the PC on their own cable (MOZA CRP2, some
+Thrustmaster setups) report axes and no buttons. SDL 2.28, which plain pygame 2.6.1
+bundles, drops any DirectInput device unless it has both (`caps.dwAxes > 0 &&
+caps.dwButtons > 0` in `EnumJoystickDetectCallback`), so such pedals never
+reached pygame: the wheelbase was listed, the pedals were not, and every tap
+read "no axis events" (issue #15). SDL 2.30 removed the check, so
+`requirements.txt` uses `pygame-ce` (SDL 2.32). `tests/invariants` fails if plain
+`pygame` comes back; installing both lets the old one win the `pygame` import.
+The version is capped below 2.6 because `_tick_reconnect` calls `quit()` then
+`init()` on the same `Joystick`, which pygame-ce deprecated in 2.4 and may remove.
+Lift the cap only after the reconnect opens a fresh `Joystick(index)` instead.
+
+The same check hid buttons-only devices (MOZA Multi-function Stalk), which
+`button_device_thread` reads over HID with its bounce filter. The new SDL lists
+them, so `JoystickPool` leaves any device with no axes out and logs it as "left
+to HID" in the pedal config device line. Without that, a stalk captured through
+the joystick path would lose the debounce and double-trigger.
+
 ## Finding a device whose GUID changed
 
 An SDL GUID is the bus, a CRC16 of the device name, vid, pid and version. A

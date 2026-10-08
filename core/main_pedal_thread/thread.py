@@ -684,6 +684,7 @@ class MainPedalThread(BaseThread):
                 axes = "?"
             seen.append(f"{name!r} ({joystick_guid_vid_pid(guid) or 'no vid:pid'}, {axes} axes)")
         seen.extend(pool.errors)
+        seen.extend(f"{name!r} left to HID (no axes)" for name in pool.hid_only)
         logger.info("pedal config: joysticks: %s", "; ".join(seen) or "none")
 
     def _pconf_on_axis(self, instance_id: int, axis: int, value: float) -> None:

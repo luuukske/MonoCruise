@@ -14,6 +14,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ### Added
 - **Option to turn off the deadzone for disengaging CC with the brake pedal**: Some people want it to disengage as soon as the pedal is touched, others want to be able to rest on the pedal
 
+### Fixed
+- **Pedals on their own USB cable were never found**: pedal sets that plug into the PC separately from the wheel, such as the MOZA CRP2, did not show up when connecting pedals. They are now detected.
+
 ## [1.1.2-preview.2] - 2026-10-07
 ### Added
 - **Scania-style AEB warning**: a new warning sound that imitates modern Scania trucks, one repeating four-beep pattern for both the warning and the braking.

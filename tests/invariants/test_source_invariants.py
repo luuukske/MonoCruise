@@ -236,3 +236,14 @@ def test_brake_capacity_learns_from_the_sent_pedal_and_live_i():
     assert keywords.get("brake_intensity") == "intensity", (
         f"update_brake must pass live I, got {keywords}"
     )
+
+
+def test_runtime_requirements_use_pygame_ce():
+    """Plain pygame bundles SDL 2.28, which hides pedals (axes, no buttons) from joystick lists."""
+    names = []
+    for raw in (REPO / "requirements.txt").read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            names.append(line.split(">")[0].split("=")[0].split("<")[0].strip().lower())
+    assert "pygame-ce" in names, "requirements.txt must list pygame-ce (see core/main_pedal_thread/README.md)"
+    assert "pygame" not in names, "plain pygame would shadow pygame-ce and hide separate pedal sets again"

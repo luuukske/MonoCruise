@@ -96,6 +96,24 @@ def test_open_failures_are_recorded_and_removal_forgets_the_device():
     assert pool.devices == {}
 
 
+def test_buttons_only_devices_are_left_to_the_hid_thread():
+    stalk = FakeJs(STALK, 1, axes=0, name="MOZA Multi-function Stalk")
+    rig = Rig([FakeJs("g0", 0), stalk])
+    rig.opened = {0, 1}
+    pool = rig.pool()
+    assert pool.step() is True
+    assert set(pool.devices) == {"g0"}
+    assert 1 not in pool.guid_by_instance
+    assert pool.hid_only == ["MOZA Multi-function Stalk"]
+
+
+def test_axes_only_devices_such_as_pedals_stay_listed():
+    pedals = FakeJs("pedals", 0, axes=3, name="CRP2 Pedals")
+    pool = Rig([pedals]).pool()
+    assert pool.step() is True
+    assert pool.devices == {"pedals": pedals} and pool.hid_only == []
+
+
 def test_exact_guid_wins_and_stops_opening():
     seen: list[str] = []
 

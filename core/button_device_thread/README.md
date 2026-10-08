@@ -1,7 +1,8 @@
 # button_device_thread
 
 Reads buttons from HID devices that pygame/SDL does not expose as joysticks, so
-they can be bound to cruise control. Binding format lives in
+they can be bound to cruise control. `JoystickPool` leaves every device with no
+axes (a MOZA stalk) to this thread, as SDL 2.28 did, so it keeps this debounce. Binding format lives in
 `core/INPUT_BINDINGS.md`; a `button_device` binding is a `vid_pid` plus a
 `button_id`, where `button_id = byte_index * 8 + bit_index` into the raw report.
 
