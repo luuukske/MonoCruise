@@ -1365,7 +1365,7 @@ overshooting in the start wave and then braking for real.
         │
         ▼
   _jerk_limit       : |da/dt| ≤ 2.5 m/s³, bypassed on emergency;
-                       brake release chases the law with τ 0.30 s (§13.1)
+                       brake release chases the law with τ 0.20 s (§13.1)
         │
         ▼
   _output_filter    : light EMA (τ ≈ 36 ms), bypassed on emergency
@@ -1452,7 +1452,7 @@ constant per lead vehicle. `eff_dist = lead.dist_m − tail_m`.
 | Layer | Time constant / cap | Notes |
 |---|---|---|
 | Jerk limiter | `J_MAX = 2.5 m/s³` | Below 2.94 m/s³ comfort threshold (Bellem 2022). Bypassed on emergency. |
-| Brake release | `J_RELEASE_TAU_S = 0.30 s` | A braking command rising toward the law may chase it with this τ instead of `J_MAX`, never past zero, at any speed. §13.1. |
+| Brake release | `J_RELEASE_TAU_S = 0.20 s` | A braking command rising toward the law may chase it with this τ instead of `J_MAX`, never past zero, at any speed. §13.1. |
 | Gas after a brake | `J_GAS_PACE_MS3 = 0.8`, for `GAS_PACE_S = 2.0 s` after a command at or below `GAS_PACE_BRAKE_MS2 = -1.0` | Above the launch band (`LAUNCH_BAND_*`, 7 to 25 km/h ramp) the command climbs above zero no faster than this. §13.1. |
 | Brake landing | `LANDING_*` in `brake_landing.py` | Once the lead's smoothed speed stops falling, the immediate-lead law brakes no harder than it takes to land on it. §13.4. |
 | Approach profile | `APPROACH_*` in `approach_profile.py` | Toward a slower or stopped lead the immediate-lead law is held near the constant decel that meets it, not late-then-firm or hard-then-crawl. §13.5. |
@@ -1490,7 +1490,7 @@ with a 0.15 s lag, which rules out the mapper.
 law and `w` 1, or 0 on the paths below (`idm_cah.jerk_step`). Properties
 this buys, all pinned in `tests/acc/test_brake_release.py`:
 
-- Within about `J_MAX·τ` (0.75 m/s²) of the law it is the plain limit,
+- Within about `J_MAX·τ` (0.5 m/s² at τ 0.20 s) of the law it is the plain limit,
   bit for bit, so telemetry jitter still sees one symmetric rate and is
   not rectified into a weaker mean brake.
 - Brake onset and the gas side are untouched: a falling command and any
@@ -1549,6 +1549,30 @@ limiter there: over 12 seeds the release engaged on 0 of about 5000
 ticks at σ 1.0 and 1.5, and on 4 at σ 2.0. A stop behind a lead braking
 to zero also ends at the same gap, because the hold keeps the plain rate.
 
+**Re-tuned 2026-10-08: τ 0.30 s → 0.20 s.** Closed loop, perfect lead
+kinematics, lead brakes 4 m/s² and holds (`tests/acc/test_brake_release.py`
+fixture): 50 km/h, 25 km/h drop, hang 0.39 s → 0.14 s; 70 km/h, 20 km/h drop,
+undershoot 1.8 → 0.8 km/h and hang 0.51 → 0.37 s. Platoon ratchets, 10 trucks,
+seeds 1 to 3, worst seed: speed spread 5.8 → 4.8 km/h, slowdown hop 1.32 → 1.30,
+hard-brake stops 7 → 5, undershoot 18.2 → 16.3 km/h; the rest are unchanged.
+Single 0.5 s lag spike on one follower's lead, seeds 1 to 3: brake 1.46 → 1.34 s,
+speed loss −11%. 100 trucks, hard brake to 30 km/h, level 2: stopped 7 → 4;
+level 3: dip gain 1.45 → 1.38, hop gain 1.47 → 1.40. Without anticipation
+(`ma_max_leads = 1`): level 2 stopped 43 → 26, contacts 34 → 19. 10-truck jerk
+RMS: hard brake −14%, steady, slowdown and stop-and-go within +1%. Noise probe
+(80 km/h, lead braking 3 m/s², noise on `a_lead`): +0.7% RMS commanded jerk at
+σ 1.0 m/s², +4% at σ 2.0, peak unchanged. Costs: a lead that pumps the brake
+(level 3, 4 m/s² for 1 s, 0.7 s off, 4 m/s² for 1.5 s) peaks at −4.08 against
+−3.71 m/s² with +18% RMS commanded jerk, a single brake +6%; level 1 queue stops
+end 0.25 m closer on average (2.30 → 2.05 m, closer on 10 of 12 seeds, no
+contacts); 100 trucks, steady lead, unprovoked brake episodes 44 → 45 at level 2
+and 39 → 41 at level 3. Level 1 stop-and-go over 48 seeds is no worse: gaps under
+1 m 7 → 5, peaks above 7 m/s² 16 → 9, one contact either way. τ 0.15 recovered
+more (level 2 hard brake stopped 2, spike −17%) but cost more: the pumping lead
+peaked at −4.31 with +30% RMS and level 1 queue stops ended 0.3 m closer, so it
+was not shipped. τ 0.10 breaks the queue-gap floor (3.07 m against 3.1). Not
+replayed on clip `c5a0a74e`: the closed-loop fixture stands in.
+
 **Open, worked around in §13.4.** The lead-accel estimate still reads a
 finished brake for about 1 s (the 1.05–1.5 s fit window, then the 0.35 s
 and 0.50 s controller filters), and the brake feedforward carries it into
@@ -1590,6 +1614,18 @@ where no following gap avoids contact. `at_clamp_slam = True` restores the old
 snap for A/B work and is in `tools/acc_transition_probe.BASELINE`.
 
 ### 13.3 Measured, not shipped
+
+**Post-stall hold in the radar ACC chain (2026-10-08).** After a TMP stall that
+resumes at the pre-stall pace, holding the pre-stall lead speed and zero lead
+accel for 0.8 s halved the speed loss of an isolated 0.5 s freeze. It was reverted:
+the least-squares speed overshoots during catch-up and decays through zero accel,
+which re-triggers a brake on the laggy client (platoon unprovoked brakes 8 to 10,
+undershoot 18.2 to 18.8 km/h). Holding through the stall too removes the phantom
+stop on a single freeze but adds up to about 0.2 s of reaction to a real stop from
+cruise, and repeated stalls do not engage: the catch-up surge arms the hard-brake
+latch that the freeze entry gate reads, and that latch is shared with AEB. Perfect
+speed and accel input removes all of it (single freeze deficit 203 to 4), so the
+remaining cost is the radar's perception path, not the controller.
 
 The first two came out of the same stomp report and the same replay, the
 third out of §13.4's. None is in the code; this is so they are not

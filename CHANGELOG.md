@@ -16,7 +16,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ### Changed
 - **Phantom jams in long convoys**: ACC only looked at the truck directly ahead of the lead, so one brake rolled back through the convoy into a standstill. It now looks three trucks ahead, so a steady or gently slowing convoy stops far less often.
-- **Less hard braking in convoys**: trucks behind the lead braked hard less often, with lower peak braking across the test convoys.
+- **Less hard braking in convoys**: trucks behind the lead braked hard less often and let go of the brake sooner after a hard stop, so fewer of them come to a standstill and speed comes back faster.
 
 ### Known
 - **Convoys can still jam**: at the closest gap setting, and in hard stops or stop-and-go traffic at the default setting, trucks at the back can still come to a stop.

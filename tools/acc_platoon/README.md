@@ -202,6 +202,25 @@ Level 1 (seeds 1 and 2): stopped 668 to 381, contacts 431 to 7, unprovoked brake
 What is left: a hard brake at level 2 still stops trucks at the back, and level 1 still jams. The
 10-follower ratchets in `tests/acc/test_platoon.py` were lowered to the new worst-of-seeds values.
 
+### Brake release 0.20 s (2026-10-08)
+
+Release chase `J_RELEASE_TAU_S` 0.30 s → 0.20 s (`ACC_ARCHITECTURE.md` §13.1). Seed 1, 100 followers,
+stopped / contacts / unprovoked brakes, and the steady convoy's minimum speed. 0.15 s is shown
+because it was measured too and not shipped:
+
+| scenario | level | 0.30 s | 0.20 s (shipped) | 0.15 s |
+|---|---|---|---|---|
+| hard_brake | 2 | 7 / 0 / 28 | 4 / 0 / 27 | 2 / 0 / 29 |
+| hard_brake | 3 | 0 / 0 / 25 | 0 / 0 / 28 | 0 / 0 / 27 |
+| hard_brake, no anticipation (`ma_max_leads` 1) | 2 | 43 / 34 / 31 | 26 / 19 / 28 | 18 / 15 / 29 |
+| hard_brake, no anticipation | 3 | 9 / 8 / 33 | 8 / 6 / 36 | 8 / 6 / 33 |
+| steady, minimum speed, unprovoked | 2 | 50.4 km/h, 44 | 53.2 km/h, 45 | 53.9 km/h, 49 |
+| steady, minimum speed, unprovoked | 3 | 51.0 km/h, 39 | 53.1 km/h, 41 | 54.3 km/h, 40 |
+
+Level 3 hard brake: dip gain 1.45 → 1.38, hop gain 1.47 → 1.40, slowest truck 5.1 → 8.6 km/h.
+0.15 s recovered more but cost more under a lead that pumps the brake (`ACC_ARCHITECTURE.md` §13.1)
+and at level 1, which is why 0.20 s shipped.
+
 ## Metrics (`metrics.py`)
 
 | Metric | Meaning |
