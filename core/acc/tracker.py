@@ -1,4 +1,4 @@
-"""Per-vehicle in-path tracker: ego arc, scoring, top-3 leads, trailer swap.
+"""Per-vehicle in-path tracker: ego arc, scoring, closest leads, trailer swap.
 
 Frame pipeline and blinker behaviour: ``core/acc/README.md`` §3–5."""
 
@@ -68,6 +68,10 @@ from .trail_arc import (
 
 logger = logging.getLogger(__name__)
 
+
+# Leads published to the controller, nearest first. Five lets anticipation see the
+# convoy ahead of the immediate lead; three measured worse. See ACC_ARCHITECTURE §9.
+PUBLISHED_LEADS: int = 5
 
 # Filter bounds: vehicles outside these are never scored.
 _MAX_SCORE_RANGE_M: float = 150.0      # longitudinal cut-off.
@@ -374,7 +378,7 @@ class ACCTracker:
         off_surface_ids: frozenset[int] = frozenset(),
         ego_geometry: EgoGeometry | None = None,
     ) -> list[LeadInfo]:
-        """Tick the tracker. Returns top-3 in-lane leads (after trailer swap).
+        """Tick the tracker. Returns up to PUBLISHED_LEADS in-lane leads, closest first (after trailer swap).
 
         Indicated-lane candidates are published separately on
         ``last_indicated_lead`` (R15); they never enter ``leads``."""
@@ -837,7 +841,7 @@ class ACCTracker:
             )
         ]
         # Primary sort: closest first. Secondary: score (descending) breaks ties.
-        top = sorted(in_path, key=lambda item: (item[1].dist_m, -item[1].score))[:3]
+        top = sorted(in_path, key=lambda item: (item[1].dist_m, -item[1].score))[:PUBLISHED_LEADS]
 
         out: list[LeadInfo] = []
         for vid, st in top:

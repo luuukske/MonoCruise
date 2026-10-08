@@ -32,7 +32,7 @@ class ACCData(ThreadData):
     lead_rel_speed_ms: float = 0.0
     lead_score: float = 0.0
 
-    # Top-3 ordered by score (post trailer→tractor swap).  Empty when
+    # Up to tracker.PUBLISHED_LEADS, closest first (post trailer→tractor swap). Empty when
     # no vehicle has score > 0. In-lane only; never indicated-lane candidates.
     leads: list[LeadInfo] = field(default_factory=list)
     # Best indicated-lane candidate (blinker bias); separate from leads[] (R15).

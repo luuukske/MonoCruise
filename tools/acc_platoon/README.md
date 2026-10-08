@@ -12,7 +12,7 @@ Nothing here ships or is imported by the app.
 | Layer | In the sim |
 |---|---|
 | Radar filter chain | **Real.** One `Vehicle` per remote rig per client, advanced with `update_from_last` on the physics-step clock, exactly as `TrafficReader` does: lag freeze, position mismatch, pose-jump guard, both speed chains. |
-| ACC tracker | Replaced. On a straight road it would publish the nearest in-path parts; the stand-in publishes the trailer rear and the tractor rear of every rig within 150 m (TMP trucks enter the chain rear part first, `core/acc/ACC_ARCHITECTURE.md` §9.8), top 3 by distance, score pinned at `SCORE_MAX`, kinematics from the rig (the TMP trailer swap). |
+| ACC tracker | Replaced. On a straight road it would publish the nearest in-path parts; the stand-in publishes the trailer rear and the tractor rear of every rig within 150 m (TMP trucks enter the chain rear part first, `core/acc/ACC_ARCHITECTURE.md` §9.8), top 5 by distance (`TRACKER_LEADS`, mirroring the tracker's `PUBLISHED_LEADS`), score pinned at `SCORE_MAX`, kinematics from the rig (the TMP trailer swap). |
 | ACC controller | **Real.** `core.longitudinal.acc.AdaptiveCruiseController` wrapping the shipped `AdaptiveCruiseController`, fed through its own `_read_acc_snapshot`. |
 | Cruise PID, arbitration | **Real.** `CruiseController` and `CruiseControlThread._arbitrate_named`. Settings the stack reads are pinned to their shipped defaults for the run. |
 | AEB | **Real, opt-in.** The headless `AEBThread` from `core/aeb/clip_eval.py`, 30 Hz per client. AEB ships disabled, so scenarios run without it unless asked. The orchestrator's AEB-then-stop disarm is mirrored, plus a driver who taps resume. |
@@ -261,6 +261,74 @@ the netcode does from what the speed estimate's own lag does. A run costs about
 Long queues: `Scenario(followers=100, visible_ahead=10, record_every=6)` draws only
 the ten trucks ahead each client's 200 m traffic buffer can hold and keeps traces at
 10 Hz; 100 trucks then cost about 1.5 s per simulated second.
+
+## Convoys of 100 (2026-10-08)
+
+`--followers 100` runs the same scenarios with 100 followers. A long convoy prints a decile
+summary instead of a row per truck. Each run takes about a minute.
+
+```bash
+python -m tools.acc_platoon --scenario steady --followers 100 --gap-level 2 --seeds 1,2,3
+```
+
+Before and after `ACC_ARCHITECTURE.md` §9.9 (five leads, `ant_kv` 0.8, `ant_tau_s` 0.6), seeds 1 to 5,
+levels 2 and 3, stopped / contacts / unprovoked brakes, summed over the seeds. Measured on the
+earlier netcode model, before the step-clock recalibration and the gearbox:
+
+| scenario | level | before | after |
+|---|---|---|---|
+| steady | 2 | 33 / 10 / 217 | 0 / 0 / 243 |
+| steady | 3 | 0 / 0 / 234 | 0 / 0 / 232 |
+| slowdown | 2 | 15 / 4 / 175 | 0 / 0 / 194 |
+| slowdown | 3 | 0 / 0 / 183 | 0 / 0 / 183 |
+| hard_brake | 2 | 62 / 47 / 180 | 37 / 0 / 190 |
+| hard_brake | 3 | 36 / 0 / 181 | 0 / 0 / 180 |
+| stop_and_go | 2 | 237 / 30 / 169 | 13 / 0 / 208 |
+| stop_and_go | 3 | 31 / 0 / 208 | 0 / 0 / 208 |
+
+Level 1 (seeds 1 and 2): stopped 668 to 381, contacts 431 to 7, unprovoked brakes 348 to 149.
+What is left: a hard brake at level 2 still stops trucks at the back, and level 1 still jams. The
+10-follower ratchets in `tests/acc/test_platoon.py` were lowered to the new worst-of-seeds values.
+
+### Brake release 0.20 s (2026-10-08)
+
+Release chase `J_RELEASE_TAU_S` 0.30 s → 0.20 s (`ACC_ARCHITECTURE.md` §13.1). Seed 1, 100 followers,
+stopped / contacts / unprovoked brakes, and the steady convoy's minimum speed, on the earlier
+netcode model. 0.15 s is shown because it was measured too and not shipped:
+
+| scenario | level | 0.30 s | 0.20 s (shipped) | 0.15 s |
+|---|---|---|---|---|
+| hard_brake | 2 | 7 / 0 / 28 | 4 / 0 / 27 | 2 / 0 / 29 |
+| hard_brake | 3 | 0 / 0 / 25 | 0 / 0 / 28 | 0 / 0 / 27 |
+| hard_brake, no anticipation (`ma_max_leads` 1) | 2 | 43 / 34 / 31 | 26 / 19 / 28 | 18 / 15 / 29 |
+| hard_brake, no anticipation | 3 | 9 / 8 / 33 | 8 / 6 / 36 | 8 / 6 / 33 |
+| steady, minimum speed, unprovoked | 2 | 50.4 km/h, 44 | 53.2 km/h, 45 | 53.9 km/h, 49 |
+| steady, minimum speed, unprovoked | 3 | 51.0 km/h, 39 | 53.1 km/h, 41 | 54.3 km/h, 40 |
+
+Level 3 hard brake: dip gain 1.45 → 1.38, hop gain 1.47 → 1.40, slowest truck 5.1 → 8.6 km/h.
+0.15 s recovered more but cost more under a lead that pumps the brake (`ACC_ARCHITECTURE.md` §13.1)
+and at level 1, which is why 0.20 s shipped.
+
+### Both on the step-clock netcode and gearbox (2026-10-08)
+
+Ten followers, level 2, worst of seeds 1 to 3, the ACC before §9.9 against five leads with the
+0.20 s release. This is what the ratchets in `tests/acc/test_platoon.py` were lowered to:
+
+| metric | before | after |
+|---|---|---|
+| harsh brake, contacts without AEB | 6 | 1 |
+| harsh brake with AEB: contacts / least room / ACC disarmed | 6 / −0.44 m / 8 | 0 / 2.29 m / 3 |
+| blackout during a harsh brake, contacts with AEB | 6 | 0 |
+| full-pedal stop, contacts without / with AEB | 10 / 9 | 5 / 2 |
+| queue stop: contacts / least stop gap | 6 / 0.0 m | 0 / 3.35 m |
+| slowdown: hop gain / trucks stopped | 1.86 / 6 | 1.78 / 0 |
+| steady: worst speed spread / unprovoked brakes | 27.6 km/h / 4 | 18.0 km/h / 3 |
+| laggy client: unprovoked brakes / slowest truck | 6 / 0.0 km/h | 8 / 35.7 km/h |
+
+The laggy client brakes more often but far less deeply: one deep brake that stopped a truck on
+seed 3 became several shallow ones. On seed 2 of the queue stop the back of the queue is still
+rolling when the lead goes and stops again, so its relaunch hop reads 13.6 s; seeds 1 and 3 read
+2.0 and 2.2 s.
 
 ## Metrics (`metrics.py`)
 

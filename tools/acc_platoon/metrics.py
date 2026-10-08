@@ -206,6 +206,33 @@ def stop_gaps(run: Run, t: float) -> list[float]:
     return [math.nan] + [tr.gap_drawn[i] for tr in run.traces[1:]]
 
 
+def convoy_summary(run: Run, stats: list[TruckStats], bucket: int = 10) -> str:
+    """Long-convoy report: followers grouped in buckets of `bucket`, lead excluded."""
+    followers = stats[1:]
+    groups = [followers[i:i + bucket] for i in range(0, len(followers), bucket)]
+    brakes = unprovoked_brakes(run)[1:]
+    head = (f"followers {len(followers)}  gap level {run.scenario.gap_level}  "
+            f"stopped {sum(s.stopped for s in followers)}  contacts {len(contacts(run))}  "
+            f"unprovoked brakes {sum(brakes)} (max one truck {max(brakes)})")
+    lines = [head]
+    if run.scenario.v0_kmh - stats[0].min_speed_kmh > 1.0:
+        dips = dip_gains(stats, run.scenario.v0_kmh)[1:]
+        lines.append(f"dip gain max {max(dips):.2f} at truck {dips.index(max(dips)) + 1}  "
+                     f"hop gain max {max(hop_gains(stats, run.scenario.v0_kmh)):.2f}")
+    lines += [f"min speed {min(s.min_speed_kmh for s in followers):.1f} km/h",
+              "trucks      speed std   min km/h   peak dec   jerk rms   brakes"]
+    for k, grp in enumerate(groups):
+        lo, hi = grp[0].idx, grp[-1].idx
+        n = len(grp)
+        lines.append(
+            f"{lo:3d}..{hi:<3d}  {sum(s.speed_std_kmh for s in grp) / n:9.2f}  "
+            f"{sum(s.min_speed_kmh for s in grp) / n:9.1f}  "
+            f"{max(s.peak_decel_ms2 for s in grp):9.2f}  "
+            f"{sum(s.jerk_rms_ms3 for s in grp) / n:9.3f}  "
+            f"{sum(brakes[lo - 1:hi]):6d}")
+    return "\n".join(lines)
+
+
 def table(stats: list[TruckStats]) -> str:
     """Plain-text per-truck table for reports and assertion messages."""
     lines = [" #  truck         v min..max km/h  std   peak dec  cmd dec  brakes  gap drawn  true  overlay  aeb  disarm"]

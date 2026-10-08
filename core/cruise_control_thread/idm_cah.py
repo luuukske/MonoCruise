@@ -47,8 +47,8 @@ CLOSING_RELIEF_FULL_MS: float = 2.0 / 3.6
 TAU_ALEAD_FF_S: float = 0.50
 
 # Brake release chases the law with this time constant instead of the jerk rate,
-# at any speed, so a brake the law no longer wants lets go. 0 disables. §13.1.
-J_RELEASE_TAU_S: float = 0.30
+# at any speed, so a brake the law no longer wants lets go. 0 disables. §13.1, 0.20 since 2026-10-08.
+J_RELEASE_TAU_S: float = 0.20
 # After a brake the gas comes back at this jerk, for this long past the last brake
 # this hard. What keeps heavy traffic from feeling eager. 0 s disables. §13.1.
 J_GAS_PACE_MS3: float = 0.8

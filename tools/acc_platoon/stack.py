@@ -24,7 +24,7 @@ from .plant import EGO_FRONT_OFFSET_M, RIG_LEN_M, TRACTOR_LEN_M, TruckPlant, Tru
 
 # ACCTracker's longitudinal cut-off and how many in-path leads it publishes.
 TRACKER_RANGE_M: float = 150.0
-TRACKER_LEADS: int = 3
+TRACKER_LEADS: int = 5
 # Traffic-buffer reach: a truck further out is dropped and re-sighted cold.
 BUFFER_RANGE_M: float = 200.0
 TRAILER_ID_BASE: int = 1000

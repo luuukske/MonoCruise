@@ -1690,7 +1690,7 @@ classification, which §8 rule 2 keeps separate from ACC's history fit.
         lead_dist_m: float       # leads[0].dist_m
         lead_rel_speed_ms: float # leads[0].rel_speed_ms (lead - ego; neg = closing)
         lead_score: float        # leads[0].score
-        leads: list[LeadInfo]    # top-3 in-lane (score breaks ties), post trailer-swap
+        leads: list[LeadInfo]    # top-5 in-lane (score breaks ties), post trailer-swap
         indicated_lead: LeadInfo | None  # blinker candidate; never inside leads[]
         blinker_b_eff: float     # gated blinker scalar the controller arbitrates on
         ego_lat_vel_ms: float    # signed lateral vel (right +) for stage-2 commit

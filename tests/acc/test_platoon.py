@@ -54,31 +54,27 @@ TARGET_SNAP_BRAKE_MS2 = 0.5
 TARGET_PULL_AWAY_START_S = 0.5
 TARGET_CREEP_RESTOPS = 0
 
-BASELINE_STEADY_UNPROVOKED_BRAKES = 4
-# Seed 2 puts one follower on a ~99th-percentile session; seeds 1 and 3 read 8.1 and 1.0.
-BASELINE_STEADY_SPEED_STD_KMH = 27.6
-BASELINE_SLOWDOWN_HOP_GAIN = 1.86
-BASELINE_SLOWDOWN_STOPPED = 6
+# Lowered 2026-10-08 with five leads and the 0.20 s brake release (ACC_ARCHITECTURE.md §9.9, §13.1).
+BASELINE_STEADY_UNPROVOKED_BRAKES = 3
+# Seed 2 puts one follower on a ~99th-percentile session; seeds 1 and 3 read 8.1 and 0.7.
+BASELINE_STEADY_SPEED_STD_KMH = 18.0
+BASELINE_SLOWDOWN_HOP_GAIN = 1.78
 BASELINE_HARD_BRAKE_STOPPED = 10
-BASELINE_HARD_BRAKE_CONTACTS = 6
+BASELINE_HARD_BRAKE_CONTACTS = 1
 BASELINE_HARD_BRAKE_UNDERSHOOT_KMH = 28.3
-BASELINE_HARD_BRAKE_AEB_DISARMED = 8
-BASELINE_HARD_BRAKE_AEB_CONTACTS = 6
-BASELINE_HARD_BRAKE_AEB_MIN_GAP_M = -0.44
-BASELINE_BLACKOUT_AEB_CONTACTS = 6
-BASELINE_FULL_STOP_CONTACTS = 10
-BASELINE_FULL_STOP_AEB_CONTACTS = 9
-BASELINE_LOCKED_QUEUE_CREEP_M = 0.38
-BASELINE_QUEUE_STOP_CONTACTS = 6
-BASELINE_QUEUE_STOP_GAP_M = 0.0
-BASELINE_QUEUE_RELAUNCH_HOP_S = 4.65
-BASELINE_SNAP_BRAKE_MS2 = 2.04
-BASELINE_LAGGY_UNPROVOKED_BRAKES = 6
+BASELINE_HARD_BRAKE_AEB_DISARMED = 3
+BASELINE_FULL_STOP_CONTACTS = 5
+BASELINE_FULL_STOP_AEB_CONTACTS = 2
+BASELINE_QUEUE_STOP_GAP_M = 3.3
+BASELINE_QUEUE_RELAUNCH_HOP_S = 2.3
+BASELINE_SNAP_BRAKE_MS2 = 2.03
+# Raised 6 -> 8 with Lukas's approval (2026-10-08): five leads trade one deep brake for shallow ones.
+BASELINE_LAGGY_UNPROVOKED_BRAKES = 8
 # Before ACC_ARCHITECTURE.md §10.2 (2026-09-30) these were 1.37 s and 12 re-stops.
 BASELINE_PULL_AWAY_START_S = 0.97
-BASELINE_CREEP_RESTOPS = 9
+BASELINE_CREEP_RESTOPS = 8
 # Landed 2026-10-08 with the gearbox: the lead's shift dips seen through TMP.
-BASELINE_PULL_THROUGH_UNPROVOKED_BRAKES = 4
+BASELINE_PULL_THROUGH_UNPROVOKED_BRAKES = 3
 
 
 def cases(seed: int = 1) -> dict[str, Scenario]:
@@ -256,7 +252,7 @@ def test_a_slowdown_does_not_grow_along_the_convoy(runs):
 def test_a_slowdown_to_60_does_not_stop_anyone(runs):
     r = runs["slowdown"]
     stopped = sum(s.stopped for s in metrics.truck_stats(r)[1:])
-    assert stopped <= BASELINE_SLOWDOWN_STOPPED, _why(r, f"{stopped} trucks stopped")
+    assert stopped <= TARGET_STOPPED, _why(r, f"{stopped} trucks stopped")
 
 
 def test_a_harsh_brake_to_30_does_not_become_a_standstill_jam(runs):
@@ -292,9 +288,9 @@ def test_with_aeb_a_harsh_brake_ends_without_contact(runs):
     r = runs["hard_brake_aeb"]
     stats = metrics.truck_stats(r)
     hit = metrics.contacts(r)
-    assert len(hit) <= BASELINE_HARD_BRAKE_AEB_CONTACTS, _why(r, f"contacts at {hit}")
+    assert len(hit) <= TARGET_CONTACTS, _why(r, f"contacts at {hit}")
     room = min(s.min_gap_drawn_m for s in stats[1:])
-    assert room >= BASELINE_HARD_BRAKE_AEB_MIN_GAP_M, _why(r, f"least room {room:.2f} m")
+    assert room >= AEB_MIN_GAP_M, _why(r, f"least room {room:.2f} m")
 
 
 def test_with_aeb_a_harsh_brake_leaves_acc_switched_off(runs):
@@ -307,7 +303,7 @@ def test_with_aeb_a_harsh_brake_leaves_acc_switched_off(runs):
 def test_with_aeb_a_packet_blackout_during_a_harsh_brake_ends_without_contact(runs):
     r = runs["blackout_aeb"]
     hit = metrics.contacts(r)
-    assert len(hit) <= BASELINE_BLACKOUT_AEB_CONTACTS, _why(r, f"contacts at {hit}")
+    assert len(hit) <= TARGET_CONTACTS, _why(r, f"contacts at {hit}")
 
 
 def test_with_aeb_a_full_pedal_stop_ends_without_contact(runs):
@@ -322,13 +318,13 @@ def test_trucks_locked_by_an_aeb_stop_stay_put_and_the_rest_wait_behind_them(run
     rolled = metrics.moved_after_disarm(r)
     assert max(rolled) <= CREEP_TOL_M, _why(r, f"moved after disarm {rolled}")
     creep = metrics.standstill_creep(r, scenarios.EVENT_S, r.scenario.duration_s)
-    assert max(creep) <= BASELINE_LOCKED_QUEUE_CREEP_M, _why(r, f"creep {creep}")
+    assert max(creep) <= CREEP_TOL_M, _why(r, f"creep {creep}")
 
 
 def test_a_queue_stop_ends_without_contact_or_creep(runs):
     r = runs["queue_stop"]
     hit = metrics.contacts(r)
-    assert len(hit) <= BASELINE_QUEUE_STOP_CONTACTS, _why(r, f"contacts at {hit}")
+    assert len(hit) <= TARGET_CONTACTS, _why(r, f"contacts at {hit}")
     creep = metrics.standstill_creep(r, scenarios.EVENT_S, scenarios.QUEUE_GO_S)
     assert max(creep) <= CREEP_TOL_M, _why(r, f"creep {creep}")
 
@@ -342,7 +338,7 @@ def test_a_queue_stops_with_room_between_trucks(runs):
 
 def test_a_stopped_queue_drives_off_again(runs):
     """No stationary lock: every truck rolls off after the one ahead, without the driver.
-    Held on seed 1; on seed 3 a truck that touched the one ahead never rolls off."""
+    Held on seeds 1 and 3; on seed 2 the back is still rolling at the go and stops again (13.6 s)."""
     r = runs["queue_stop"]
     hops = relaunch_hops(r)
     assert None not in hops, _why(r, f"never drove off: {hops}")
@@ -414,18 +410,12 @@ def test_every_baseline_is_still_short_of_its_target():
         (BASELINE_LAGGY_UNPROVOKED_BRAKES, TARGET_UNPROVOKED_BRAKES, 1),
         (BASELINE_STEADY_SPEED_STD_KMH, TARGET_SPEED_STD_KMH, 1),
         (BASELINE_SLOWDOWN_HOP_GAIN, TARGET_HOP_GAIN, 1),
-        (BASELINE_SLOWDOWN_STOPPED, TARGET_STOPPED, 1),
         (BASELINE_HARD_BRAKE_STOPPED, TARGET_STOPPED, 1),
         (BASELINE_HARD_BRAKE_CONTACTS, TARGET_CONTACTS, 1),
         (BASELINE_FULL_STOP_CONTACTS, TARGET_CONTACTS, 1),
         (BASELINE_HARD_BRAKE_UNDERSHOOT_KMH, TARGET_UNDERSHOOT_KMH, 1),
         (BASELINE_HARD_BRAKE_AEB_DISARMED, TARGET_DISARMED, 1),
-        (BASELINE_HARD_BRAKE_AEB_CONTACTS, TARGET_CONTACTS, 1),
-        (BASELINE_HARD_BRAKE_AEB_MIN_GAP_M, AEB_MIN_GAP_M, -1),
-        (BASELINE_BLACKOUT_AEB_CONTACTS, TARGET_CONTACTS, 1),
         (BASELINE_FULL_STOP_AEB_CONTACTS, TARGET_CONTACTS, 1),
-        (BASELINE_LOCKED_QUEUE_CREEP_M, CREEP_TOL_M, 1),
-        (BASELINE_QUEUE_STOP_CONTACTS, TARGET_CONTACTS, 1),
         (BASELINE_QUEUE_RELAUNCH_HOP_S, TARGET_RELAUNCH_HOP_S, 1),
         (BASELINE_SNAP_BRAKE_MS2, TARGET_SNAP_BRAKE_MS2, 1),
         (BASELINE_QUEUE_STOP_GAP_M, TARGET_STOP_GAP_M, -1),

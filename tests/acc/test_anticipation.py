@@ -111,3 +111,13 @@ def test_braking_wave_ahead_of_the_lead_is_still_anticipated():
     delta = anticipation.anticipation_delta(
         cfg, raw, smooth, 25.0, a_base, 1.1, TTC_MIN_VCLOSE_MS)
     assert delta < -0.3
+
+
+def test_the_controller_chain_fits_what_the_tracker_publishes():
+    """The chain is cut from leads[]; asking for more than the tracker publishes changes nothing."""
+    from core.acc import tracker
+    from core.cruise_control_thread import acc_controller
+    from tools.acc_platoon import stack
+
+    assert acc_controller.MA_MAX_LEADS <= tracker.PUBLISHED_LEADS
+    assert stack.TRACKER_LEADS == tracker.PUBLISHED_LEADS
