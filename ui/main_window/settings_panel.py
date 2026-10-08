@@ -476,6 +476,17 @@ class SettingsPanel(QWidget):
         s = self._settings
         p = self._inner
 
+        new_label(p, self._r(0), 0, "Deadzone for brake detection:")
+        self.chk_brakedeadzone = new_checkbutton(
+            p, self._r(), 1, s.brakedeadzone_variable,
+            callback=lambda v: self._set("brakedeadzone_variable", v),
+        )
+        new_subtext(
+            p, self._r(), 0,
+            "For resting on the pedal without disengaging CC.",
+            col_span=2,
+        )
+        
         new_section_header(p, self._r(), "Program settings")
 
         self.chk_autostart, self._autostart_subtext, _ = self._field_with_subtext(
@@ -1589,6 +1600,7 @@ class SettingsPanel(QWidget):
         self._refresh_pedal_widgets()
 
         # Program settings
+        self.chk_brakedeadzone.setChecked(s.brakedeadzone_variable)
         self.refresh_autostart_availability()
         self.ent_polling.setText(str(s.polling_rate))
         self.chk_hazards.setChecked(s.hazards_variable)
