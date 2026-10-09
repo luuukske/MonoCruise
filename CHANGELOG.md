@@ -11,8 +11,12 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.2-preview.4] - 2026-10-10
+(hopefully) the last preview build before v1.1.2. Any critical bugs can be reported and will be fixed before the stable v1.1.2 release.
+
 ### Changed
-- **AEB warning sounds now repeat once more after the warning ends**: Simple, Volvo Trucks, Scania and Tesla styles play one extra full round after the warning clears, like the original. Volvo Trucks now sounds at least three rounds instead of four.
+- **AEB warning sounds now repeat once more after the warning ends**: Simple, Volvo Trucks, Scania and Tesla styles play one extra full round after the warning clears, like the original. Volvo Trucks now sounds at least three rounds instead of four. This makes warning triggers more obvious and less confusing.
 
 ### Fixed
 - **AEB braked late for oncoming cars drifting into your lane**: an oncoming car slowly crossing the centre line was treated as staying in its own lane until very late. AEB now brakes once its path clearly runs into your truck.
