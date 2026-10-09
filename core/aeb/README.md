@@ -2657,11 +2657,11 @@ style, exactly as in the car; the brake and the popup do not depend on it.
 | Style | Cycle | While the cue holds | When it ends |
 |---|---|---|---|
 | Original | Lukas's own recording, shipped since 1.0 | replayed 0.15 s before it ends | one extra pass |
-| Simple | one 2.8 kHz beep | steady beeping | stops after the beep in flight |
+| Simple | one 2.8 kHz beep | steady beeping | the beep in flight, then one more |
 | Volvo Cars style | two groups of three struck pips, then a third group 20 to 25 dB down, ringing out | once per AEB event, never repeated | always plays out |
-| Volvo Trucks style | one 0.5 s bar: four notes, a pause; braking adds a layer on top | bar after bar, at least four | the bar in flight completes |
-| Scania style | one 0.47 s bar: four notes, high low low high, the same for warn and brake | bar after bar | the bar in flight completes |
-| Tesla style | five beeps, then 0.275 s of silence (1.0 s period) | burst after burst | the burst always completes |
+| Volvo Trucks style | one 0.5 s bar: four notes, a pause; braking adds a layer on top | bar after bar, at least three | the bar in flight, then one more |
+| Scania style | one 0.47 s bar: four notes, high low low high, the same for warn and brake | bar after bar | the bar in flight, then one more |
+| Tesla style | five beeps, then 0.275 s of silence (1.0 s period) | burst after burst | the burst in flight, then one more |
 
 ### Volvo Trucks: two layers
 
@@ -2696,9 +2696,10 @@ within about 1 dB, and the pause tone about 2 dB. The shapes are least-squares f
 (scratchpad, numpy; not shipped), floor-clamped so the recording's noise is not fitted.
 Each frequency is rounded to whole cycles per bar so the loop wraps in phase.
 
-The reference sounded at least four bars for every event, including the three that
-were only a warning, so `min_cycles` is 4. A soft stop never cuts a bar short. The
-bar the cue ends in completes, and the fade finishes in its pause: the pause is
+The reference sounded at least four bars for every event; `min_cycles` is 3 by Lukas's
+call (2026-10-10). Every looping style, trucks included, plays one full extra cycle after
+the cue clears (`stop_extra_cycles=1`), as Original always did. A soft stop never cuts a
+bar short. The bar the cue ends in completes, and the fade finishes in its pause: the pause is
 only 31 ms, so a fade aimed at the middle of it ran into the next bar's first note.
 
 The brake layer is not a second clip. A second `pygame` sound starts on the next mixer

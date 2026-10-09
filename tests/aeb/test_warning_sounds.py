@@ -99,20 +99,19 @@ def test_the_choice_follows_the_settings():
 
 
 def test_each_style_repeats_like_the_system_it_imitates():
-    # Original keeps its shipped tail; a buzzer stops after the beep in flight;
-    # a Volvo-style warning (three groups of three) and a Tesla-style burst complete.
+    # Every looping style plays one full extra cycle after the cue; Volvo Cars is a one-shot.
     assert (ws.ORIGINAL.min_cycles, ws.ORIGINAL.stop_extra_cycles) == (1, 1)
-    assert (ws.SIMPLE.min_cycles, ws.SIMPLE.stop_extra_cycles) == (1, 0)
+    assert (ws.SIMPLE.min_cycles, ws.SIMPLE.stop_extra_cycles) == (1, 1)
     assert (ws.VOLVO_CARS.min_cycles, ws.VOLVO_CARS.stop_extra_cycles) == (1, 0)
-    assert (ws.TESLA.min_cycles, ws.TESLA.stop_extra_cycles) == (1, 0)
+    assert (ws.TESLA.min_cycles, ws.TESLA.stop_extra_cycles) == (1, 1)
     assert len(ws.VOLVO_CARS.tones) == 9 and len(ws.TESLA.tones) == 5
     assert ws.VOLVO_CARS.ringing and not ws.TESLA.ringing and not ws.SIMPLE.ringing
     assert ws.TESLA.cycle_s == pytest.approx(1.0)
-    # A truck warning sounds at least four bars, however short the cue.
-    assert (ws.VOLVO_TRUCKS.min_cycles, ws.VOLVO_TRUCKS.stop_extra_cycles) == (4, 0)
+    # A truck warning sounds at least three bars, however short the cue.
+    assert (ws.VOLVO_TRUCKS.min_cycles, ws.VOLVO_TRUCKS.stop_extra_cycles) == (3, 1)
     assert ws.VOLVO_TRUCKS.cycle_s == pytest.approx(0.50123)
-    # Scania: one pattern for warn and brake, the bar in flight completes.
-    assert (ws.SCANIA.min_cycles, ws.SCANIA.stop_extra_cycles) == (1, 0)
+    # Scania: one pattern for warn and brake.
+    assert (ws.SCANIA.min_cycles, ws.SCANIA.stop_extra_cycles) == (1, 1)
     assert ws.SCANIA.cycle_s == pytest.approx(0.4714) and not ws.SCANIA.layered
 
 
@@ -162,10 +161,16 @@ def test_a_short_cue_still_gets_the_style_minimum():
     assert h._replays_remaining == 1
 
 
-def test_a_long_cue_ends_with_the_cycle_in_flight():
+def test_a_long_cue_ends_with_one_extra_cycle_after_the_one_in_flight():
     h = _handler(ws.TESLA, cycles_played=3)
     h.stop_warning()
-    assert h._replays_remaining == 0
+    assert h._replays_remaining == 1
+
+
+def test_a_short_truck_cue_gets_three_bars_in_all():
+    h = _handler(ws.VOLVO_TRUCKS, cycles_played=1)
+    h.stop_warning()
+    assert h._replays_remaining == 2
 
 
 class _FakePlayer:

@@ -140,11 +140,11 @@ class WarningSound:
 # The recording shipped since 1.0: seamless loop, one extra pass after the cue.
 ORIGINAL = WarningSound("Original", overlap_s=0.15, stop_extra_cycles=1)
 
-# A piezo buzzer: steady high beeps while the cue holds, silent after the beep in flight.
+# A piezo buzzer: steady high beeps while the cue holds, one more after the beep in flight.
 SIMPLE = WarningSound(
     "Simple",
     tones=(Tone(2800.0, 0.10, 0.10, partials=((3.0, 0.12),)),),
-    gain=0.493,
+    stop_extra_cycles=1, gain=0.493,
 )
 
 # Groups of three struck pips ringing out of phase, the third accented, once per AEB event;
@@ -202,7 +202,7 @@ _TRUCK_BRAKE = (
 )
 VOLVO_TRUCKS = WarningSound(
     "Volvo Trucks style", bar=_TRUCK_FOUNDATION, brake_bar=_TRUCK_BRAKE,
-    bar_s=0.50123, sounding_s=0.470, brake_gate_s=(0.012, 0.145), min_cycles=4, gain=0.8976,
+    bar_s=0.50123, sounding_s=0.470, brake_gate_s=(0.012, 0.145), min_cycles=3, stop_extra_cycles=1, gain=0.8976,
 )
 
 # Four notes, high low low high, on an uneven grid: harmonics 1, 2, 4, 8 of 269.5 Hz.
@@ -219,13 +219,14 @@ _SCANIA_NOTES = (
 )
 SCANIA = WarningSound(
     "Scania style", bar=_SCANIA_NOTES, bar_s=0.4714, slot_starts_s=(0.0, 0.095, 0.200, 0.303),
-    sounding_s=0.430, gain=0.97,
+    sounding_s=0.430, stop_extra_cycles=1, gain=0.97,
 )
 
 # Five flat beeps, 1100 Hz beating against 1165 Hz, one burst a second; a burst
 # always completes. Timing and pitch measured off a reference clip, not copied from it.
 _TESLA_BEEP = Tone(1100.0, 0.090, 0.055, partials=((1165.0 / 1100.0, 0.25),))
-TESLA = WarningSound("Tesla style", tones=(_TESLA_BEEP,) * 5, tail_s=0.275, gain=0.646)
+TESLA = WarningSound("Tesla style", tones=(_TESLA_BEEP,) * 5, tail_s=0.275,
+                     stop_extra_cycles=1, gain=0.646)
 
 SOUNDS: dict[str, WarningSound] = {
     s.label: s for s in (ORIGINAL, SIMPLE, VOLVO_CARS, VOLVO_TRUCKS, SCANIA, TESLA)
