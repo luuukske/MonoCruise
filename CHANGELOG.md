@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.2-preview.5] - 2026-10-10
 ### Changed
 - **No-collision zone support has its own small game plugin**: MonoCruise no longer replaces the ETS2LA game plugin with a modified copy. It installs its own plugin next to it instead, which TruckersMP lists as "MonoCruise" and which keeps working across game updates.
 
