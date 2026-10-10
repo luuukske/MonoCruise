@@ -10,8 +10,9 @@ Each tick: snapshot telemetry and pedal, run CC button FSM and ACC gap FSM, buil
 handle mode-flip PID reset, CC-only disengage, dispatch by `Settings.cc_mode`, publish
 `wanted_accel_ms2` and `active_controller` for `sending_thread` and UI.
 
-CC-only disengage: raw/game brake thresholds, park/reverse, disarm-on-stop, crash
-speed drop. Neutral does not disengage: positive CC/ACC bids are clamped to 0 while
+CC-only disengage: raw/game brake thresholds (threshold for raw can be set to zero in settings),
+retarder, motor brake, park/reverse, disarm-on-stop, crash speed drop.
+Neutral does not disengage: positive CC/ACC bids are clamped to 0 while
 `gear_dashboard == 0`, with a popup after 2 s continuous N. Skip the clamp while
 `auto_neutral_holding` so auto-neutral can see the launch bid and shift to drive.
 Limiter path never sees these.
@@ -73,6 +74,32 @@ is 38 to 80 mph, the same 60 to 130 km/h range the ETS2 box uses. A limit saved
 earlier as km/h is shown as the nearest mph and is not rewritten until the driver
 edits the box. A step that does not change the displayed number leaves the stored
 km/h alone, so a target set in ETS2 is not nudged just by pressing a blocked step.
+
+## Road speed limit (`road_limit.py`)
+
+The SDK publishes the posted limit of the road under the truck (`speedLimit`, m/s,
+0 where there is none). Two independent options in the cruise control settings
+use it:
+
+- **Limit to road speed limit** (`autospeedlimit_variable`): the global limit
+  becomes the lower of the driver's box and the posted limit. It is applied at
+  runtime through `CruiseController.global_limit_kmh`, which every former reader
+  of `global_speed_limit_kmh` now uses: the set-speed clamp, both limiter
+  branches and the ATS button grid. The setting itself is never written. The
+  first version saved each posted limit into it and cleared it on switch-off,
+  which erased the driver's own limit. The clamp stays destructive, like the
+  global limit: with only this option on, leaving a 50 zone keeps the set speed
+  at 50.
+- **Set speed follows road limit** (`autospeedtarget_variable`): each new posted
+  limit becomes the set speed (the limiter cap in Speed limiter mode), on the
+  driver's unit grid and under the global limit. It fires on a change only, so a
+  button adjustment survives until the next sign, including a brief flicker
+  through "no limit". A road with no posted limit keeps the set speed: disabling
+  CC there dropped ACC mid-follow without a word.
+
+The SDK value is a 32-bit float, so `int(v * 3.6)` reads 80 as 79 and 130 as
+129. `road_limit_kmh` rounds in the driver's unit, which also puts ATS limits on
+whole mph.
 
 ## ACC gap buttons (`acc_distance.py`)
 
@@ -174,6 +201,18 @@ Tracker publishes `indicated_lead`, `blinker_b_eff` and `blinker_committed`
 separately from `leads[]`. This controller applies R5–R8 (freer-lane pass in two
 stages, tighter-lane min, hysteresis, TTC floor). Anticipation still reads
 `leads[]` only. Candidacy and the intent model: `core/acc/README.md` §5.
+
+**Anticipation stops once ego is leaving the lane** (`BlinkerArbiter.leaving_lane`:
+stage 2, committed, or the post-collapse release hold). `leads[]` is then the lane
+being left. Gating it on stage 2 alone was not enough: behind a slow platoon,
+anticipation holds ego back far enough that the immediate-lead law already allows
+the pass, so the arbiter never leaves `lane` and the platoon kept braking a
+committed overtake (measured 2026-10-08 with five leads at `ANT_KV` 0.8: about
+-1.15 m/s² held through the change, stage 2 after 3.2 s at 45 m and never at 35 m;
+with the gate the command reaches +1.0 m/s² 0.6 to 0.8 s after commit). Stage 1
+(blinking, not yet moving over) keeps anticipating. The immediate lead, the
+overlays and AEB are untouched, so a committed change still brakes for the
+vehicle actually ahead. Pinned by `test_committed_change_lets_go_of_the_lane_ahead`.
 
 **The indicated lead carries no collision authority.** `_pick_indicated_lead`
 publishes only vehicles that are *not* in ego's corridor, so by construction

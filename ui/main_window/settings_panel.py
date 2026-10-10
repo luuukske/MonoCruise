@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
 )
 
 from core import checker_status
+from core.aeb import warning_sounds
+from core.aeb.warning_player import WarningTest
 from core.input_bindings import binding_display_name, migrate_binding, resolve_held
 from core.longitudinal.accel_envelope import PROFILE_LABELS, resolve_profile
 from core.speed_units import (
@@ -474,6 +476,17 @@ class SettingsPanel(QWidget):
         s = self._settings
         p = self._inner
 
+        new_label(p, self._r(0), 0, "Deadzone for brake detection:")
+        self.chk_brakedeadzone = new_checkbutton(
+            p, self._r(), 1, s.brakedeadzone_variable,
+            callback=lambda v: self._set("brakedeadzone_variable", v),
+        )
+        new_subtext(
+            p, self._r(), 0,
+            "For resting on the pedal without disengaging CC.",
+            col_span=2,
+        )
+        
         new_section_header(p, self._r(), "Program settings")
 
         self.chk_autostart, self._autostart_subtext, _ = self._field_with_subtext(
@@ -622,6 +635,15 @@ class SettingsPanel(QWidget):
         self._accel_style_row = r_style
         self._set_row_visible(r_style, self._is_cruise_mode(s.cc_mode))
 
+        self.chk_autospeedtarget, _, _ = self._field_with_subtext(
+            "Set speed follows road limit:",
+            lambda c, r, col: new_checkbutton(
+                c, r, col, s.autospeedtarget_variable,
+                callback=lambda v: self._set("autospeedtarget_variable", v),
+            ),
+            "Changes the set speed at each new speed limit sign.",
+        )
+
         # Global speed limiter (empty → None disables both CC clamp and
         # always-on limiter: see AGENTS.md global_speed_limit_kmh).
         limit_lo, limit_hi = global_limit_bounds()
@@ -635,6 +657,15 @@ class SettingsPanel(QWidget):
                 callback=self._on_global_limit,
             ),
             "Empty to disable.",
+        )
+
+        self.chk_autospeedlimit, _, _ = self._field_with_subtext(
+            "Limit to road speed limit:",
+            lambda c, r, col: new_checkbutton(
+                c, r, col, s.autospeedlimit_variable,
+                callback=lambda v: self._set("autospeedlimit_variable", v),
+            ),
+            "Caps at the posted limit, or the global limit if lower.",
         )
 
         # Button configure rows
@@ -767,6 +798,39 @@ class SettingsPanel(QWidget):
         aeb_lay.addWidget(self.chk_aeb)
         self._grid.addWidget(aeb_widget, r_aeb, 1)
         self._grid.setRowMinimumHeight(r_aeb, FIELD_ROW_HEIGHT)
+
+        # Warning style, volume, and a sound-only test that repeats like a real warning.
+        r_sound = self._r(0)
+        new_label(p, r_sound, 0, "  Warning sound:")
+        self.opt_aeb_sound = new_optionmenu(
+            p, self._r(), 1,
+            values=list(warning_sounds.SOUND_LABELS),
+            default=warning_sounds.resolve(s.aeb_sound).label,
+            callback=self._on_aeb_sound_changed,
+        )
+        r_volume = self._r(0)
+        new_label(p, r_volume, 0, "  Warning volume:")
+        self.ent_aeb_volume = new_entry(
+            p, self._r(), 1,
+            value=warning_sounds.clamp_volume_pct(s.aeb_sound_volume), value_type=int,
+            minimum=warning_sounds.MIN_VOLUME_PCT, maximum=warning_sounds.MAX_VOLUME_PCT,
+            suffix="%",
+            callback=self._on_aeb_volume_changed,
+        )
+        r_test = self._r()
+        new_label(p, r_test, 0, "  Test warning sound:")
+        self._btn_aeb_test = QPushButton("Play")
+        self._btn_aeb_test.setFixedSize(self.opt_aeb_sound.width(), 30)
+        self._btn_aeb_test.setToolTip("Plays about a second of the warning. It does not brake the truck.")
+        self._btn_aeb_test.clicked.connect(self._on_aeb_test_clicked)
+        self._grid.addWidget(
+            self._btn_aeb_test, r_test, 1,
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self._grid.setRowMinimumHeight(r_test, FIELD_ROW_HEIGHT)
+        self._aeb_test = WarningTest()
+        self._aeb_sound_rows = (r_sound, r_volume, r_test)
+        self._set_aeb_sound_rows_visible(bool(s.AEB_enabled))
 
         # Clip sharing (opt-in)
         r_share = self._r()
@@ -1187,10 +1251,29 @@ class SettingsPanel(QWidget):
                     self.chk_aeb.setChecked(True),
                     self.chk_aeb.blockSignals(False),
                     self._set("AEB_enabled", True),
+                    self._set_aeb_sound_rows_visible(True),
                 ),
             )
         else:
             self._set("AEB_enabled", False)
+            self._set_aeb_sound_rows_visible(False)
+
+    def _set_aeb_sound_rows_visible(self, visible: bool) -> None:
+        for row in self._aeb_sound_rows:
+            self._set_row_visible(row, visible)
+
+    def _on_aeb_sound_changed(self, label: str) -> None:
+        self._set("aeb_sound", label)
+
+    def _on_aeb_volume_changed(self, value) -> None:
+        self._set("aeb_sound_volume", warning_sounds.clamp_volume_pct(value))
+
+    def _on_aeb_test_clicked(self) -> None:
+        # Commit a volume still being typed, so the test plays what was entered.
+        le = self.ent_aeb_volume
+        if le.text().strip() != str(le._mc_last_good[0]):
+            le.returnPressed.emit()
+        self._aeb_test.trigger()
 
     def _on_contribute_toggled(self, checked: bool) -> None:
         """Ticking opens the consent prompt; the setting only moves on accept."""
@@ -1517,6 +1600,7 @@ class SettingsPanel(QWidget):
         self._refresh_pedal_widgets()
 
         # Program settings
+        self.chk_brakedeadzone.setChecked(s.brakedeadzone_variable)
         self.refresh_autostart_availability()
         self.ent_polling.setText(str(s.polling_rate))
         self.chk_hazards.setChecked(s.hazards_variable)
@@ -1538,6 +1622,8 @@ class SettingsPanel(QWidget):
             self._refresh_bind_button(key)
         # Keep persisted values numeric; add units only in UI display.
         self.refresh_speed_unit()
+        self.chk_autospeedlimit.setChecked(s.autospeedlimit_variable)
+        self.chk_autospeedtarget.setChecked(s.autospeedtarget_variable)
         self.chk_hold_reset.setChecked(s.long_press_reset)
         self.chk_show_speed.setChecked(s.show_cc_ui)
         self.opt_scaling.setCurrentText(str(s.cc_panel_scaling) if s.cc_panel_scaling else "100%")
@@ -1559,6 +1645,16 @@ class SettingsPanel(QWidget):
         self.chk_aeb.blockSignals(True)
         self.chk_aeb.setChecked(s.AEB_enabled)
         self.chk_aeb.blockSignals(False)
+
+        self.opt_aeb_sound.blockSignals(True)
+        self.opt_aeb_sound.setCurrentText(warning_sounds.resolve(s.aeb_sound).label)
+        self.opt_aeb_sound.blockSignals(False)
+        volume = warning_sounds.clamp_volume_pct(s.aeb_sound_volume)
+        self.ent_aeb_volume.blockSignals(True)
+        self.ent_aeb_volume.setText(str(volume))
+        self.ent_aeb_volume.blockSignals(False)
+        self.ent_aeb_volume._mc_last_good[0] = volume
+        self._set_aeb_sound_rows_visible(bool(s.AEB_enabled))
 
         # OPD
         self.chk_opd.setChecked(bool(s.opd_mode_variable))

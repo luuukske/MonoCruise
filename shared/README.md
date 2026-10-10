@@ -27,3 +27,17 @@ Custom animated dropdown used by the MonoCruise app and the updater. Pixel-faith
 ## Markdown renderer (`markdown_renderer.py`)
 
 GitHub-flavoured markdown to HTML for release notes (updater + app). Alert blocks, lists, and `_style_tag()` embed multi-line CSS in triple-quoted strings; those are stylesheet literals, not documentation comments. A leading `.mp4` or `.webm` URL (bare or markdown link) is stripped for the updater `VideoPlayer`.
+
+## GitHub releases (`github_releases.py`)
+
+Release list for the updater and the app's boot update check. Unauthenticated REST API calls get 60 requests per hour per IP, and a VPN exit address shares that with every other user on it, so a rate-limited (or otherwise failed) API call falls back to `https://github.com/<owner>/<repo>/releases.atom`, which is not under that limit.
+
+The feed is turned into API-shaped dicts so callers need no second code path:
+
+- `tag_name`, `id` (the tag), `name` (title).
+- `prerelease`: the feed has no flag, so it is `'-' in tag`, the same rule `release.yml` publishes by.
+- `assets`: the one asset the updater needs, `Update-<tag>.zip`, at its `releases/download` URL. Not listed by the feed; the name is fixed by `release.yml`.
+- `body`: the feed carries GitHub's rendered HTML, so `html_to_markdown` maps it back to the markdown subset release notes use (headings, lists, bold, links, code) for `GitHubMarkdownRenderer`.
+
+Limits: newest 10 releases only, no pagination. `describe_failure` never quotes the response body, because GitHub's rate-limit message names the caller's IP address.
+

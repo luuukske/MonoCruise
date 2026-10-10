@@ -17,7 +17,11 @@ Directory and sentinel names must match `shared/updater_swap.py` (tests assert t
 
 ## Shared imports
 
-Markdown renderer and dropdown live at repo root (`shared/`), bundled via `updater.spec`. Repo root is added to `sys.path` for source and frozen builds.
+Markdown renderer, dropdown and the release list (`shared/github_releases.py`) live at repo root (`shared/`), bundled via `updater.spec`. Repo root is added to `sys.path` for source and frozen builds, before `github_api` is imported.
+
+## Rate-limited GitHub API
+
+`GitHubAPI.get_releases` falls back to the releases feed when the REST API refuses (VPN users share its per-IP limit). The feed lists the newest 10 releases only, so older versions disappear from the dropdown until the API answers again. The "No internet connection" page now means both sources failed.
 
 ## Windows "Installed apps" entry
 

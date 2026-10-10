@@ -1258,6 +1258,8 @@ with rt.data._lock:
     ego_curvature = rt.data.ego_curvature     # None → fall back to yaw-rate proxy
     ego_geometry  = rt.data.ego_geometry      # EgoGeometry | None, see §17
     off_surface_ids = rt.data.off_surface_ids # frozenset[int], see §15
+    ncz_ids       = rt.data.ncz_ids           # frozenset[int], TMP ghosts, AEB only, see §18
+    tmp_ncz_active = rt.data.tmp_ncz_active   # no-collision zone gate open, see §18
     road_surface  = rt.data.road_surface      # RoadSurface (ego plane + curvature)
     paused        = rt.data.paused
     t_mono        = rt.data.t_mono            # snapshot time (monotonic)
@@ -1826,6 +1828,133 @@ the lane: a driver who holds the cab on the lane centre puts the lane circle
   shorter. `None` keeps the origin-launched arc (tests and tools pass none).
 - The road model, trail crossings and the rear cone stay in the placement frame:
   they are fitted on placement history, not on the arc.
+
+---
+
+## 18. TruckersMP No-Collision Zones (AEB only)
+
+`core/radar/tmp_state.py`. Inside a TruckersMP no-collision zone (NCZ) other
+players are ghosts: ego drives through them. AEB braking for one is a pure false
+positive, and the TMP rel-speed floor (`core/aeb/README.md` §4) only hides the
+low-speed share of them.
+
+### Source
+
+MonoCruise's own TruckersMP plugin, `monocruise_tmp.dll`, built from
+`tmp_plugin/` (`tmp_plugin/README.md`) and installed beside ETS2LA's stock plugins
+by the SDK installer (`core/sdk_installer/README.md`, "MonoCruise's own plugins").
+It is a pure TruckersMP SDK plugin: no game-memory patterns, so no rebuild per game
+version. It writes one shared-memory file on every rendered frame:
+
+| file | layout |
+|---|---|
+| `Local\MonoCruiseTmpState` | 16 bytes, `=IIBBHHH`: version (1), heartbeat, connected, in_no_collision_zone, players_streamed, players_collidable (always 0), reserved |
+
+`in_no_collision_zone` follows the SDK's `OnNoCollisionZone` event and resets on
+every disconnect, not on connect: spawning inside a zone may report it before
+`OnConnected` (`tmp_plugin/README.md`). `players_streamed` counts stream-in minus stream-out
+events (diagnostics only). Shutdown zeroes the file, so the reader sees "no data"
+at once. Without the plugin the file stays zero and nothing changes. The state
+holds no player identity; the plugin reads none.
+
+TMP vehicles themselves still come from ETS2LA's `Local\ETS2LATraffic`. Until
+2026-10-10 the zone state came from a MonoCruise build of `ets2la_plugin.dll`
+(`Local\ETS2LAMpState`); the SDK installer swaps that build back to stock
+(`core/sdk_installer/overrides.py`, `RETIRED`).
+
+### The gate
+
+`NoCollisionZoneGate` is all-or-nothing. It opens once the zone signal has held
+for `ENTER_CONFIRM_S` (0.3 s): heartbeat advanced within `STALE_AFTER_S` (0.5 s),
+connected, and inside a zone. Losing any of them closes it on the same frame.
+While it is open, radar publishes `ncz_ids`: every `is_tmp` vehicle, trailer
+records and nested trailers included. AI traffic is never in it.
+
+The dangerous failure is the gate staying open next to a real truck, i.e. a zone
+flag stuck at 1. The plugin resets it on every disconnect and on shutdown, and the
+gate adds a teleport guard: an ego jump over `TELEPORT_JUMP_M` (50 m) between
+radar frames (ferry, train, respawn) keeps it shut until the plugin itself
+reports "not in a zone". A stale or disconnected read does not clear the guard.
+
+**The per-player collision flag is not used.** The first build also required
+zero collidable players, as a second signal. Measured live on 2026-10-06
+(TruckersMP 0.7.7.11, SDK 1.1.0, the earlier ETS2LA-based build polling from
+`OnPreRender`), `CanCollideWith` does not follow the zone:
+- Inside zones it read "can collide" for every truck overlapping ego's body
+  (25/25 samples), which only ghosts can do.
+- Outside a zone it read "cannot collide" for a truck closing head-on from 34 m
+  to 8 m.
+- Beyond 30 m it was always "cannot".
+- Asked through the local player's handle instead
+  (`local.CanCollideWith(remote)`), it gave the same answers. Outside a zone,
+  398 of 403 samples within 15 m read "cannot". It only flips for a vehicle
+  practically touching ego, so per-vehicle ghosting is not possible with it.
+
+The zone event matched every entry and exit to the second. The veto kept the gate
+shut through both in-zone emergency brakes that day (clips `75dd6f2f`,
+`37112635`); with it gone they replay without a warning or a brake.
+
+### Exit hold (per player)
+
+Leaving a zone does not make everyone solid at once: TruckersMP keeps a player
+ghosted while their rig still intersects ego, until the two separate. With the
+gate closed, AEB saw those bodies at contact range and braked; the synthetic
+replay in `tests/test_tmp_ncz.py` braked 3 frames after the exit at 54 and 72 km/h.
+
+`ExitGhostHold` closes that window from geometry alone, no per-player signal:
+
+- **Arms only on a reported exit.** `NoCollisionZoneGate.exited_zone` is true on
+  the one frame the gate closed because the fresh, connected plugin said "not in a
+  zone". A stale writer, a disconnect or a teleport arms nothing.
+- **Only bodies clearly inside ego.** A TMP body must overlap ego's box shrunk by
+  `EXIT_ARM_INSET_M` (0.2 m). Box slack between two real trucks (mirrors, rounded
+  corners) stays under that, and two solid trucks cannot overlap at all. Ego's box
+  is the §17 wheel geometry (reference rig when unreadable) from the placement
+  origin; ego's own trailer is not modelled, so a ghost inside only the trailer is
+  not held.
+- **Whole rigs.** A hit on a trailer record holds its tractor (the ACC sticky-lock
+  pairing, `core/acc/trailer_lock.py`, strict acquire) and every trailer of that
+  tractor, nested ones included, and the other way round.
+- **Released for good on separation.** A rig stays in `ncz_ids` while any member
+  still overlaps ego's unshrunk box. The first frame none does, it is solid again
+  and never re-armed, as in TruckersMP. A rig that leaves the frame is dropped.
+  The zone coming back or ego's pose going missing clears the hold.
+
+Clips record the exit frame (`RadarFrameRecord.tmp_ncz_exit`, absent = False) and
+replay re-runs the hold from it (`clip_eval.exit_ghosts_by_frame`). A clip whose
+window starts after the exit replays without the hold.
+
+### Consumers
+
+- **AEB** folds `ncz_ids` into the ids it skips with the off-surface set (§15),
+  latched threats exempt. Replay reads the per-frame `tmp_ncz` flag clips now
+  record (`RadarFrameRecord.tmp_ncz`, absent = False) and does the same.
+- **ACC** does not read it. Following a ghost ahead is still the expected
+  behaviour in a queue.
+- **AEB debug window** draws the skipped ghosts anyway, grey with a dashed
+  outline and a "TMP ghost" label, from `AEBSnapshot.ghost_ids` and the
+  `"ghost"` flag on their vehicle records. They carry no arcs and never reach
+  the pipeline; a latched ghost is drawn as the threat it still is.
+- Per-player suppression beyond the exit hold (one ghost among collidable players
+  at a zone edge) needs a per-player signal TruckersMP does not provide reliably
+  yet. Candidate SDK data is listed in `tmp_plugin/README.md`.
+
+### Do not
+
+- Read or record any player identity (Steam id, account id, name, latency) from
+  the SDK or another plugin's buffers: clips are shared when "Help improve AEB
+  and ACC" is on, and the plugin is described to TruckersMP users as reading none.
+- Let a stale or absent state file open the gate, or clear the teleport guard on
+  anything but the plugin reporting "not in a zone".
+- Arm the exit hold on anything but `exited_zone`, arm a body that is not inside
+  ego's inset box, extend a hold past separation, or re-arm a released rig: each
+  turns a real truck into a ghost.
+- Use `CanCollideWith` / `players_collidable` to suppress anything until it is
+  re-measured: it read "cannot collide" for real trucks.
+- Feed `ncz_ids` to ACC, or use them to relax the TMP rel-speed floor outside a
+  zone: lag ghosts still need it (v1.1.3).
+
+`tools/tmp_ncz_probe.py` shows the state live while driving.
 
 ---
 

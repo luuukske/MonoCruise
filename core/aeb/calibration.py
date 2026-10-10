@@ -177,15 +177,16 @@ class AEBCalibration:
     # While engaged the pedal controller tracks this target, so a slow software ramp
     # only delays the bite; the plant's own 0.15 s lag is the real jerk limit.
     aeb_target_rate_engaged_ms3: float = 30.0
-    aeb_engage_frac: float = 0.90
+    # Also how hard AEB brakes: demand is tracked to the stop buffer. 0.50 felt slow (README).
+    aeb_engage_frac: float = 0.85
     # Graded hedge skip for aligned in-lane traffic; 0.85 in-game trial from
     # 2026-08-11 equals aeb_engage_frac, so grading is flat (README, TUNING.md).
-    aeb_engage_frac_certain: float = 0.90
+    aeb_engage_frac_certain: float = 0.85
     aeb_disarm_frac: float = 0.45
     # Geometry latch while colliding unbraked ttc inside window (anti-pumping; README).
     disarm_hold_ttc_s: float = 3.0
     # Must equal aeb_engage_frac (pinned in tests/aeb/test_confirm.py).
-    aeb_warn_near_full_frac: float = 0.90
+    aeb_warn_near_full_frac: float = 0.85
     brake_actuator_lag_s: float = 0.10
     # New engagements only fire when |ego_speed| is above this threshold.
     aeb_min_engage_speed_kmh: float = 5.0
@@ -211,6 +212,27 @@ class AEBCalibration:
     # Evidence-class warn windows: oncoming sets and sets a full lane off the
     # ego arc are the two phantom-beep classes (README warn persistence).
     aeb_warn_confirm_oncoming_s: float = 2.00
+    # Clear threat (README warn classes): ego arc and measured CBDR line both put it within
+    # aeb_warn_clear_band_m of ego's path for aeb_warn_clear_hold_s, driving ego's way or stopped.
+    aeb_warn_clear_class: bool = True
+    aeb_warn_clear_band_m: float = 1.0
+    aeb_warn_clear_hold_s: float = 0.50
+    # A clear threat warns once AEB would have to brake this much later; 0 disables.
+    # 1.1 leaves a full second after the two-tick warn confirm.
+    aeb_warn_lead_s: float = 1.1
+    # Near threat (README warn classes): a stopped aligned non-TMP body in a wider band,
+    # on a near-straight path within range. 0 band disables.
+    aeb_warn_near_band_m: float = 2.5
+    aeb_warn_near_hold_s: float = 0.2
+    aeb_warn_near_lead_s: float = 0.4
+    aeb_warn_near_max_kappa: float = 0.005
+    aeb_warn_near_max_range_m: float = 70.0
+    # Every other colliding non-crosser warns once AEB would have to brake this much
+    # later, through the usual confirm and class windows; 0 disables.
+    aeb_warn_other_lead_s: float = 0.4
+    # Moving crossers (|fwd_dot| under the dot) warn only with the brake: last-second turns.
+    aeb_warn_crossers_with_brake: bool = True
+    aeb_warn_crosser_dot: float = 0.5
     aeb_warn_confirm_wide_lat_s: float = 0.60
     aeb_warn_wide_lat_m: float = 4.0
     # Wide class survives this much lapse, so a target closing under the bar
@@ -255,6 +277,13 @@ class AEBCalibration:
     # Range past which an unseen bend moves a non-co-directional target by more
     # than a lane, so its lane stops being evidence (README lane confidence).
     lane_confidence_range_m: float = 30.0
+
+    # A stationary body may be dropped on a guess about ego's path only until
+    # braking alone could no longer stop short of it (README avoidability gate).
+    avoidability_gate_enabled: bool = True
+    # Oncoming drifting in on OppositeLaneFilter (README avoidability gate, oncoming scope).
+    avoidability_gate_oncoming: bool = True
+    oncoming_gate_dmiss_rate_mps: float = -1.0
 
     # Clearance-based required decel (README continuous-decel). False restores
     # the pre-clearance relative-frame path and is how the corpus is A/B'd.

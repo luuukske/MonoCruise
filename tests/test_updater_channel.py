@@ -98,7 +98,9 @@ def test_get_releases_raises_when_offline(monkeypatch):
 
 def test_get_releases_raises_on_http_error(monkeypatch):
     class Resp:
-        status_code = 403  # rate-limited
+        status_code = 403  # rate-limited; the feed fallback gets the same answer
+        headers = {"X-RateLimit-Remaining": "0"}
+        text = ""
 
     monkeypatch.setattr(github_api.requests, "get", lambda *_a, **_k: Resp())
     api = github_api.GitHubAPI("luuukske", "MonoCruise")

@@ -14,6 +14,7 @@ import threading
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 from core.settings import Settings
+from core.telemetry_thread.thread import grip_debug_fields
 
 from core.aeb.calibration import DEFAULT as _AEB_CAL
 
@@ -151,6 +152,11 @@ _AEB_BIAS_CLAMP_FRAC: float = 0.6
 # engagement the observer may add brake but not take it away (the post-hit dip): README.
 _AEB_ONSET_GUARD_S: float = 1.0
 _AEB_PEDAL_HISTORY_S: float = 0.6
+# A command near the top of the pedal opens at full pedal: ETS2 builds a partial pedal
+# in 0.2-0.4 s, a full one in under 0.1 s, and the build-up pad assumes the latter (README).
+_AEB_PREFILL_MIN_FRAC: float = 0.75
+_AEB_PREFILL_END_FRAC: float = 0.85
+_AEB_PREFILL_MAX_S: float = 0.35
 
 # Idle-creep compensation for the user brake path. In gear 1 below the creep
 _CREEP_COMP_FULL_AT_PEDAL: float = 0.04
@@ -196,6 +202,7 @@ class AEBDecelController:
         self._model_filt_ms2: float = 0.0
         self._pedal_hist: list[tuple[float, float]] = []
         self._engaged_at: float | None = None
+        self._prefill_done: bool = False
 
     @property
     def active(self) -> bool:
@@ -215,6 +222,7 @@ class AEBDecelController:
             self._model_filt_ms2 = 0.0
             self._pedal_hist.clear()
             self._engaged_at = None
+            self._prefill_done = False
         return aeb_brake and not was_active
 
     def note_applied_pedal(self, pedal: float, now: float) -> None:
@@ -298,7 +306,8 @@ class AEBDecelController:
 
         # Past the pedal's reach there is nothing left to track. The headroom in
         # ego_decel_frac is a tracking margin, not a reason to hold brake back.
-        if demand_decel_ms2 >= decel_from_pedal_fn(1.0, max_brake_ms2):
+        full_decel = decel_from_pedal_fn(1.0, max_brake_ms2)
+        if demand_decel_ms2 >= full_decel:
             return 1.0
 
         # AEB never commands less decel than it says the threat requires; the
@@ -306,6 +315,14 @@ class AEBDecelController:
         commanded = max(target_decel_ms2, floor_decel_ms2)
         if commanded <= 0.0:
             return 0.0
+        if not self._prefill_done:
+            if (
+                commanded >= _AEB_PREFILL_MIN_FRAC * full_decel
+                and now - self._engaged_at < _AEB_PREFILL_MAX_S
+                and measured_decel_ms2 < _AEB_PREFILL_END_FRAC * commanded
+            ):
+                return 1.0
+            self._prefill_done = True
         bias = self._bias_ms2
         if now - self._engaged_at < _AEB_ONSET_GUARD_S:
             bias = min(bias, 0.0)
@@ -1073,9 +1090,12 @@ class SendingThread(BaseThread):
         wheels_on_ground = 0
         ego_trailer_count = 0
         truck_id = ""
+        grip_fields: dict[str, object] = {}
         if connected and tel_thread is not None and tel_thread.is_alive() and not tel_paused:
             try:
                 with tel_thread.data._lock:
+                    if Settings.debug:
+                        grip_fields = grip_debug_fields(tel_thread.data)
                     wanted_a = float(tel_thread.data.commanded_accel_ms2)
                     crawl_follow = bool(getattr(tel_thread.data, "commanded_crawl_follow", False))
                     mass_kg = float(tel_thread.data.estimated_total_mass_kg)
@@ -1740,6 +1760,7 @@ class SendingThread(BaseThread):
                         "mass_kg": mass_kg,
                         "wheels_on_ground": wheels_on_ground,
                         "trailer_count": ego_trailer_count,
+                        **grip_fields,
                     },
                 )
             except Exception:

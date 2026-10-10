@@ -557,12 +557,13 @@ class MonoCruiseWindow(QMainWindow):
         except (KeyError, AttributeError):
             pass
 
-        aeb_warn = False
+        # The sound's cue (warn or brake), so the panel never stays dark while AEB beeps.
+        aeb_cue = False
         try:
             aeb = registry.get_thread("aeb_thread")
             if aeb is not None and aeb.is_alive():
                 with aeb.data._lock:
-                    aeb_warn = bool(aeb.data.AEB_warn)
+                    aeb_cue = bool(aeb.data.AEB_cue)
         except (KeyError, AttributeError):
             pass
 
@@ -620,7 +621,7 @@ class MonoCruiseWindow(QMainWindow):
         text = format_kmh(target_kmh)
 
         update_snap = (
-            text, display_mode, cruise_enabled, aeb_warn, acc_on,
+            text, display_mode, cruise_enabled, aeb_cue, acc_on,
             acc_locked, acc_truck, gap_level, lead_speed, unit,
         )
         if self._cc_panel_update_snap != update_snap:
@@ -629,7 +630,7 @@ class MonoCruiseWindow(QMainWindow):
                 new_text=text,
                 cc_mode=display_mode,
                 cc_enabled=cruise_enabled,
-                AEB_warn=aeb_warn,
+                AEB_warn=aeb_cue,
                 acc_enabled=acc_on,
                 acc_locked=acc_locked,
                 distance_to_lead=gap_level,

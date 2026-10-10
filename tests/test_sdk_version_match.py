@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from core.sdk_installer import manager as mgr
+from core.sdk_installer import bundled as bundled_mod
 from core.sdk_installer.game_paths import detect_game_version
 from core.sdk_installer.remote import (
     RemoteFile,
@@ -91,6 +92,8 @@ def sdk(tmp_path, monkeypatch):
     monkeypatch.setattr(_FakeSource, "payloads", {v: _payload(v) for v in PUBLISHED})
     monkeypatch.setattr(_FakeSource, "published", PUBLISHED)
     monkeypatch.setattr(_FakeSource, "offline", False)
+    # A locally fetched real bundle would answer for the fake world's unpublished versions.
+    monkeypatch.setattr(bundled_mod, "BUNDLE_DIR", tmp_path / "bundled")
 
     manager = mgr.SdkManager(data_dir=tmp_path / "data")
     manager.add_game = _add_game  # type: ignore[attr-defined]

@@ -188,3 +188,28 @@ def test_the_tracker_hands_over_a_settled_sample_before_its_cap_gate(monkeypatch
 
     tracker.update_brake(0.0, 0.0, 20.0, 0.0, B, road_load_ms2=0.0)
     assert tracker.last_settled_brake_sample is None
+
+
+def test_a_short_firm_tap_hands_aeb_no_sample(monkeypatch):
+    """The tracker's hard-hold gate covers every learner fed from its settled samples."""
+
+    class _S:
+        mapper_brake_scale_ms2 = 6.5
+
+        @staticmethod
+        def save(values=None):
+            pass
+
+    monkeypatch.setattr(pc, "Settings", _S)
+    clock = [1000.0]
+    monkeypatch.setattr(pc.time, "monotonic", lambda: clock[0])
+    tracker = pc.PedalCapacityTracker()
+    decel = 0.9 * B * brake_curve_fraction(1.0)
+    handed = []
+    for tick in range(80):
+        clock[0] += 0.033
+        tracker.update_brake(1.0, decel, 20.0, 0.0, B, road_load_ms2=0.0)
+        if tracker.last_settled_brake_sample is not None:
+            handed.append(tick * 0.033)
+    assert handed, "a long hold must still hand samples over"
+    assert min(handed) >= pc.BRAKE_HOLD_MIN_S

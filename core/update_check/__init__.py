@@ -13,9 +13,8 @@ log = logging.getLogger("update_check")
 REPO_OWNER = "luuukske"
 REPO_NAME = "MonoCruise"
 
-# GitHub's unauthenticated releases API. One GET per fresh check; the 60 req/h
-# per-IP limit is ample given the throttle below.
-_RELEASES_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases"
+# One release-list GET per fresh check. A VPN exit address shares the API's 60 req/h
+# with everyone on it, so shared.github_releases falls back to the releases feed.
 _REQUEST_TIMEOUT = 15  # seconds, matches updater/github_api.py
 
 # Spacing between network checks (background checker may relaunch often).
@@ -56,15 +55,14 @@ def _is_newer(candidate_tag: str, current_text: str) -> bool:
 
 def _latest_tag_for_channel(channel: str) -> str:
     """Newest on-channel release tag from GitHub (newest-first list). Raises on error."""
-    import requests
+    from shared.github_releases import fetch_releases
 
-    resp = requests.get(_RELEASES_URL, timeout=_REQUEST_TIMEOUT)
-    resp.raise_for_status()
     want_prerelease = channel == "preview"
-    for release in resp.json():
-        if bool(release.get("prerelease", False)) == want_prerelease:
-            return release.get("tag_name") or ""
-    return ""
+    for release in fetch_releases(REPO_OWNER, REPO_NAME, timeout=_REQUEST_TIMEOUT):
+        if bool(release.get("prerelease", False)) == want_prerelease and release.get("tag_name"):
+            return release["tag_name"]
+    # The feed fallback only lists the newest 10; never cache "no release" from it.
+    raise LookupError(f"no {channel} release in the list GitHub returned")
 
 
 def update_is_pending() -> bool:

@@ -118,7 +118,7 @@ Not supported yet, but you can try it.
 - [Truck_Telemetry](https://github.com/dreagonmon/truck_telemetry): used to get telemetry data from the game.
 - [scscontroller](https://github.com/ETS2LA/scs-sdk-controller/tree/main): used to send commands to the game like braking, gas, hazards, etc.
 - [PySide6](https://doc.qt.io/qtforpython-6/): used as the UI framework.
-- [pygame](https://github.com/pygame/pygame): used to get pedal values and to play sounds.
+- [pygame-ce](https://github.com/pygame-community/pygame-ce): used to get pedal values and to play sounds.
 - [hidapi](https://github.com/trezor/cython-hidapi): used to read USB button devices.
 
 This project is licensed under the MIT License.

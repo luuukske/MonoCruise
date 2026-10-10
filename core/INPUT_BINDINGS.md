@@ -10,7 +10,7 @@ values; `resolve_held()` / `binding_state()` read live state.
 | str (legacy) | Keyboard key name (e.g. `"A"`) |
 | `{"source":"joystick","device_guid", "code", ...}` | Button or hat: hat virtual index = `button_count + hat_idx*4 + dir` (dir 0..3 = up/right/down/left) |
 | `{"source":"keyboard","code"}` | Key name |
-| `{"source":"button_device","vid_pid","button_id"}` | HID report bit: `button_id = byte_index*8 + bit_index` |
+| `{"source":"button_device","vid_pid","button_id"}` | HID report bit: `button_id = byte_index*8 + bit_index`. Only Button-page bits from the report descriptor count; see `core/button_device_thread/README.md` |
 
 Public helpers: `binding_display_name`, `keyboard_is_pressed`, `resolve_press_count`.
 

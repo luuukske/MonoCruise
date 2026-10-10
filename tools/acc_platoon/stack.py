@@ -6,6 +6,7 @@ tools/acc_platoon/README.md.
 """
 from __future__ import annotations
 
+import random
 import threading
 
 from core.acc.scoring import SCORE_MAX
@@ -23,7 +24,7 @@ from .plant import EGO_FRONT_OFFSET_M, RIG_LEN_M, TRACTOR_LEN_M, TruckPlant, Tru
 
 # ACCTracker's longitudinal cut-off and how many in-path leads it publishes.
 TRACKER_RANGE_M: float = 150.0
-TRACKER_LEADS: int = 3
+TRACKER_LEADS: int = 5
 # Traffic-buffer reach: a truck further out is dropped and re-sighted cold.
 BUFFER_RANGE_M: float = 200.0
 TRAILER_ID_BASE: int = 1000
@@ -135,7 +136,7 @@ def rig_front(v: Vehicle) -> float:
 
 
 def _ctx(t: float, dt: float, v: float, aeb_brake: bool) -> LongCtx:
-    return LongCtx(now=t, dt=dt, speed_ms=v, gear_dashboard=1, park_brake=False,
+    return LongCtx(now=t, dt=dt, speed_ms=v, gear_dashboard=1, retarderBrake=0, motorBrake=False, park_brake=False,
                    game_throttle=0.0, game_clutch=0.0, game_brake=0.0, aeb_brake=aeb_brake,
                    connected=True, paused=False, em_stop=False, device_lost=False)
 
@@ -144,13 +145,14 @@ class Client:
     """One truck. Index 0 is the scripted lead; the others run MonoCruise."""
 
     def __init__(self, idx: int, spec: TruckSpec, net: NetProfile, s0: float, v0: float,
-                 set_kmh: float, t0: float, dt: float, clock, with_aeb: bool) -> None:
+                 set_kmh: float, t0: float, dt: float, clock, with_aeb: bool,
+                 rng: random.Random | None = None) -> None:
         self.idx = idx
         self.spec = spec
         self.net = net
         self.set_kmh = set_kmh
         self.dt = dt
-        self.truck = TruckPlant(spec, s0, v0, dt)
+        self.truck = TruckPlant(spec, s0, v0, dt, rng)
         self.path = TruePath(t0, s0, v0)
         self.cmd = 0.0
         self.crawl_follow = False
@@ -216,7 +218,7 @@ class Client:
         # Past its 3 s arc horizon AEB has nothing to say; leaving far rigs out saves its probe.
         near = [v for v in self.frame_vehicles if rig_front(v) - ego_pos <= TRACKER_RANGE_M]
         snap = (near, 0.0, 0.0, -ego_pos, 0.0, self.truck.v, 0.0, 0.0, True,
-                None, True, False, self.frame_t, frozenset(), self.frame_t)
+                None, True, False, self.frame_t, frozenset(), self.frame_t, frozenset())
         self.aeb._read_radar_snapshot = lambda: snap
         self.aeb.loop()
         self.aeb_brake = bool(self.aeb.data.AEB_brake)

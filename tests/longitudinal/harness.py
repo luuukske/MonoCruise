@@ -13,6 +13,8 @@ def make_ctx(speed_ms: float, *, dt: float = 0.02, now: float = 0.0, **overrides
         dt=dt,
         speed_ms=speed_ms,
         gear_dashboard=1,
+        retarderBrake=0,
+        motorBrake=False,
         park_brake=False,
         game_throttle=0.0,
         game_clutch=0.0,
@@ -60,6 +62,7 @@ def telemetry_data(**overrides) -> Data:
         gameClutch=0.0,
         gameThrottle=0.0,
         gameBrake=0.0,
+        speedLimit=0.0,
         commanded_accel_ms2=0.0,
     )
     fields.update(overrides)

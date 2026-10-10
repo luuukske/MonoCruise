@@ -55,6 +55,15 @@ BRAKE_LOG_HEADER: list[str] = [
     "mass_kg",
     "wheels_on_ground",
     "trailer_count",
+    # Grip: why some full-pedal stops brake at 0.6x of others (telemetry_thread.grip_debug_fields).
+    "lateral_ms2",
+    "steer",
+    "brake_temp_c",
+    "air_psi",
+    "wipers",
+    "surface",
+    "truck_slip",          # worst grounded wheel: 0 rolling free, 1 locked
+    "trailer_slip",
 ]
 
 

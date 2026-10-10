@@ -11,6 +11,7 @@ from core.scs_profile.intensity import TUNE_BRAKE_INTENSITY, clamp_brake_intensi
 from core.settings import Settings
 
 from .accel_to_pedals import brake_curve_fraction, brake_curve_pedal
+from .pedal_capacity import BRAKE_HOLD_MIN_S, is_firm_sample, sent_share
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +20,6 @@ _F1: float = brake_curve_fraction(1.0)
 _PRIOR_SCALE: float = 0.95
 _SCALE_MIN: float = 0.35
 _SCALE_MAX: float = 1.00
-# Light braking reads 30-50% low through the brake curve, so only firm samples teach.
-_FIRM_TUNE_PEDAL: float = 0.5
-_FULL_SENT_PEDAL: float = 0.9
 _FULL_PEDAL: float = 0.999
 _ALPHA: float = 0.04
 _MAX_TRUCKS: int = 64
@@ -30,7 +28,8 @@ _SAVE_COOLDOWN_S: float = 30.0
 # Full-pedal stops: a sent 1.0 held long enough to settle, kept per load within 10%.
 FULL_SENT: float = 0.97
 _FULL_SETTLE_S: float = 0.3
-_FULL_RUN_MIN_S: float = 0.5
+# Shorter taps scattered 0.52-1.81x the model and set the weakest-of-five credit.
+_FULL_RUN_MIN_S: float = BRAKE_HOLD_MIN_S - _FULL_SETTLE_S
 _FULL_MIN_SPEED_MS: float = 5.0
 _FULL_MIN_SAMPLES: int = 8
 _FULL_MAX_SAMPLES: int = 4000
@@ -126,17 +125,6 @@ class AebPedalAxis:
         return brake_curve_pedal(decel / self._capacity)
 
 
-def _sent_share(tune_pedal: float, intensity: float | None) -> float:
-    """Sent pedal behind a tune-unit reading, capped at 1."""
-    return min(tune_pedal * TUNE_BRAKE_INTENSITY / clamp_brake_intensity(intensity), 1.0)
-
-
-def is_firm_sample(tune_pedal: float, intensity: float | None) -> bool:
-    """Firm braking, or a full sent pedal on a slider too low to reach the firm band."""
-    return (tune_pedal >= _FIRM_TUNE_PEDAL
-            or _sent_share(tune_pedal, intensity) >= _FULL_SENT_PEDAL)
-
-
 def _finite(value: object) -> float:
     try:
         result = float(value)  # type: ignore[arg-type]
@@ -184,7 +172,7 @@ class AebCapacityStore:
         if candidate <= 0.0:
             return
         candidate = min(max(candidate, _SCALE_MIN), _SCALE_MAX)
-        firmness = max(min(tune_pedal, 1.0), _sent_share(tune_pedal, intensity))
+        firmness = max(min(tune_pedal, 1.0), sent_share(tune_pedal, intensity))
         # Re-inserting keeps the dict in least-recently-used order for the size cap.
         current = self._scales.pop(key, _PRIOR_SCALE)
         self._scales[key] = current + _ALPHA * firmness ** 3 * (candidate - current)

@@ -19,6 +19,20 @@ except Exception:
     pass
 
 
+def joystick_guid_vid_pid(guid: str) -> str | None:
+    """'vvvv:pppp' from an SDL joystick GUID, or None for a name-based GUID."""
+    try:
+        if len(guid) < 20:
+            return None
+        vid = int(guid[10:12] + guid[8:10], 16)
+        pid = int(guid[18:20] + guid[16:18], 16)
+    except (TypeError, ValueError):
+        return None
+    if not vid and not pid:
+        return None
+    return f"{vid:04x}:{pid:04x}"
+
+
 def migrate_binding(raw: object) -> dict | None:
     """Legacy int/str to structured dict; dict with source unchanged."""
     if raw is None:

@@ -27,11 +27,12 @@ from styles import (
 )
 from packaging.version import Version, InvalidVersion
 
+# Repo root on sys.path for bundled `shared` (source tree and frozen updater).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from github_api import GitHubAPI
 from video_player import VideoPlayer
 
-# Repo root on sys.path for bundled `shared` (source tree and frozen updater).
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from shared import GitHubMarkdownRenderer, Theme
     from shared.dropdown import Dropdown, EASE_STD
