@@ -1,6 +1,6 @@
 """Bundled plugin overrides: installed over the stock build only, upstream updates win.
 
-See the "Temporary plugin override" section of core/sdk_installer/README.md. Nothing here
+See the "Plugin overrides" section of core/sdk_installer/README.md. Nothing here
 touches the network or a real game folder.
 """
 from __future__ import annotations

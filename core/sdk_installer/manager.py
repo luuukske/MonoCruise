@@ -25,6 +25,7 @@ from .game_paths import (
 )
 from .bundled import bundled_listing
 from .overrides import overlay, override_for, replaces_installed
+from .own import is_own, own_plugins
 from .remote import (
     RemoteFile,
     SdkSource,
@@ -379,6 +380,13 @@ class SdkManager:
                     # Offline boot: a stock build an override replaces is stale on its own.
                     up_to_date = not replaces_installed(scan.version, name, path)
                 file_states.append(ManagedFileState(name, installed, up_to_date))
+            # Our own plugins are checked against the build; that never needs the network.
+            for plugin in own_plugins():
+                path = scan.plugins_dir / plugin.name
+                installed = path.exists()
+                file_states.append(
+                    ManagedFileState(plugin.name, installed, not installed or plugin.is_current(path))
+                )
             is_unsupported = scan.version in unsupported
             games.append(
                 GameSdkState(
@@ -479,8 +487,9 @@ class SdkManager:
         Falls back to the verified cache, then the bundled set, when the API has
         nothing for that version or cannot be asked (offline, rate limit, outage).
         """
-        if not (force_all or game.missing or game.outdated):
-            return {}  # only a legacy plugin to disable; that needs no network
+        stale = [n for n in (*game.missing, *game.outdated) if not is_own(n)]
+        if not (force_all or stale):
+            return {}  # only a legacy plugin or our own plugins; neither needs the network
 
         version = game.game_version
         local = None if force_all else self._override_only_listing(game)
@@ -513,10 +522,12 @@ class SdkManager:
     @staticmethod
     def _override_only_listing(game: GameSdkState) -> dict[str, RemoteFile] | None:
         """Bundled overrides alone, when they are all that is stale; installs need no network."""
-        if game.missing or not game.outdated:
+        missing = [n for n in game.missing if not is_own(n)]
+        outdated = [n for n in game.outdated if not is_own(n)]
+        if missing or not outdated:
             return None
         listing: dict[str, RemoteFile] = {}
-        for name in game.outdated:
+        for name in outdated:
             override = override_for(game.game_version, name)
             if override is None or not replaces_installed(
                 game.game_version, name, game.plugins_dir / name
@@ -577,14 +588,21 @@ class SdkManager:
                 results.append(result)
                 continue
 
+            # Ours fit every game version, but are useless where ETS2LA's plugin is missing.
+            self._install_own(
+                game, result, force_all=force_all,
+                restrict_to_missing=restrict_to_missing, on_progress=on_progress,
+            )
+
             wanted = self._files_to_install(game, available, force_all=force_all)
             if restrict_to_missing:
                 # Loaded DLLs stay deferred; absent files install for next game start.
-                result.deferred_running = [
+                deferred = [
                     n for n in wanted
                     if n.endswith(".dll") and (game.plugins_dir / n).exists()
                 ]
-                wanted = [n for n in wanted if n not in result.deferred_running]
+                result.deferred_running += deferred
+                wanted = [n for n in wanted if n not in deferred]
             for name in wanted:
                 remote = available.get(name)
                 if remote is None:
@@ -627,7 +645,10 @@ class SdkManager:
         if force_all:
             tracked = self.tracked_files(game.game_version)
             return [n for n in (*tracked, *COURTESY_FILES) if n in remote_files]
-        wanted = [f.name for f in game.files if not f.installed or not f.up_to_date]
+        wanted = [
+            f.name for f in game.files
+            if (not f.installed or not f.up_to_date) and not is_own(f.name)
+        ]
         for name in COURTESY_FILES:
             remote = remote_files.get(name)
             if remote is None:
@@ -635,6 +656,34 @@ class SdkManager:
             if git_blob_sha_of(game.plugins_dir / name) != remote.sha:
                 wanted.append(name)
         return wanted
+
+    def _install_own(
+        self,
+        game: GameSdkState,
+        result: GameApplyResult,
+        *,
+        force_all: bool,
+        restrict_to_missing: bool,
+        on_progress: Callable[[str], None] | None,
+    ) -> None:
+        """Copy our bundled plugins in; independent of the game version and of the network."""
+        stale = set(game.missing) | set(game.outdated)
+        for plugin in own_plugins():
+            dest = game.plugins_dir / plugin.name
+            if not (force_all or plugin.name in stale):
+                continue
+            if restrict_to_missing and dest.exists():
+                result.deferred_running.append(plugin.name)
+                continue
+            try:
+                if on_progress:
+                    on_progress(f"Installing {plugin.name} for {game.game_type.upper()}...")
+                self._copy_into_place(plugin.verified_path(), dest)
+                result.installed.append(plugin.name)
+                log.info("installed MonoCruise's %s for %s", plugin.name, game.game_type)
+            except (SdkSourceError, OSError) as exc:
+                log.error("failed to install %s for %s: %s", plugin.name, game.game_type, exc)
+                result.errors.append((plugin.name, str(exc)))
 
     @staticmethod
     def _disable_legacy(path: Path) -> None:

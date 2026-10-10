@@ -23,6 +23,13 @@ version detection**):
 They are installed into each game's `bin/win_x64/plugins` folder. ETS2LA installs
 the same files, so the two coexist - matching files are simply left in place.
 
+Beside them goes one plugin MonoCruise builds itself, shipped inside the app (see
+**MonoCruise's own plugins**):
+
+| file | role |
+| --- | --- |
+| `monocruise_tmp.dll` | TruckersMP no-collision zone state for AEB (`tmp_plugin/`) |
+
 ## Superseded plugins (`LEGACY_FILES`)
 
 MonoCruise 1.0 shipped its own copies of two plugins under different filenames:
@@ -139,18 +146,41 @@ on a fresh install with no cache, no plugin at all.
   to its manifest entry, a set without a manifest is ignored, and entries carry
   no download URL, so the fallback can never become an unverified fetch.
 - **Overrides still apply.** `overlay()` runs on the fallback listing too, so
-  the bundled 1.61 stock plugin gives way to the NCZ build like a listed one.
+  a bundled stock plugin gives way to an override like a listed one.
 - **Local builds** without a fetch just have no fallback. Run
   `python tools/fetch_sdk_bundle.py` to fill it.
 
-## Temporary plugin override (`overrides.py`)
+## MonoCruise's own plugins (`own.py`, `own/`)
 
-ETS2LA's published plugin cannot see TruckersMP no-collision zones yet. Until it
-can, MonoCruise ships its own build of `ets2la_plugin.dll` for game 1.61: ETS2LA
-plugin `main` plus the TruckersMP client SDK. It is the source of
-`Local\ETS2LAMpState` (`core/radar/README.md` §18). The build lives in
-`overrides/<game version>/` next to its `LICENSES.txt` (both upstreams are MIT),
-and `monocruise.spec` bundles the folder.
+Plugins MonoCruise builds from this repository and ships inside the app, so they
+never touch the network: today only `monocruise_tmp.dll`, built from `tmp_plugin/`
+(`tmp_plugin/README.md`). They fit every game and game version, unlike ETS2LA's
+plugin, and live under their own name, so ETS2LA's files are never modified.
+
+- **Checked locally.** `check()` adds one `ManagedFileState` per own plugin, up to
+  date while the installed file hashes to the SHA in `OWN_PLUGINS`. A missing or
+  stale copy never makes `check()` consult the ETS2LA source, and installing it
+  needs no listing.
+- **Installed with the set.** `apply()` copies them after the upstream set, so an
+  unsupported game version (no ETS2LA plugin, nothing to install) gets none of
+  them either: alone they do nothing. A running game defers a loaded copy through
+  the usual close-and-reinstall path; an absent one installs for the next start.
+- **Same integrity rule as overrides.** `verified_path()` refuses a bundle that no
+  longer hashes to its recorded SHA, and the error is reported for that file.
+- **Reproducible.** The build uses `/Brepro`, so a rebuild of the same source with
+  the same toolchain gives the same bytes. `tests/test_sdk_own_plugins.py` fails if
+  the bundle no longer matches its recorded SHA, and checks that the plugin and
+  `core/radar/tmp_state.py` agree on the state layout.
+
+`monocruise.spec` bundles `own/`, next to its `LICENSES.txt` (TruckersMP SDK, MIT).
+
+## Plugin overrides (`overrides.py`)
+
+The mechanism for shipping MonoCruise's own build of an upstream file. None is
+active: the 1.61 `ets2la_plugin.dll` NCZ build was retired on 2026-10-10 in favour
+of `monocruise_tmp.dll`, so ETS2LA's plugin is never replaced. Its SHA is in
+`RETIRED`: an install still carrying it counts as stale even offline, and the stock
+file comes back on the next install (from the API, else the cache or the bundle).
 
 Each entry in `OVERRIDES` names a version, a file, the bundled file's git-blob
 SHA, and the upstream SHAs it may replace (`replaces`). Only those builds are ever
@@ -170,14 +200,10 @@ overwritten:
 - **Damaged bundle.** It is never copied: `verified_path()` checks the SHA
   first, and the error is reported for that file.
 
-ETS2LA's own installer may put its stock build back. The next MonoCruise start
-swaps it again. Both builds write every buffer ETS2LA reads, so either app keeps
-working throughout.
-
-To retire it (ETS2LA ships the zones, or a new game version lands): delete the
-entry and its folder, and set `FORCE_REFETCH` for that one build so installs that
-still carry ours fetch upstream again. `tests/test_sdk_plugin_override.py` fails
-if a rebuilt DLL no longer matches its recorded SHA.
+To retire one: delete the entry and its folder, and add its SHA to `RETIRED` so
+installs that still carry it go back to stock without a network round trip.
+`tests/test_sdk_plugin_override.py` fails if a rebuilt DLL no longer matches its
+recorded SHA.
 
 ## Knobs (`manager.py`)
 
@@ -201,6 +227,10 @@ is exactly the shape heuristic scanners dislike. Mitigations kept deliberately:
   against the manifest the build wrote from those same SHAs.
 - The bundled DLLs are inert data inside the install folder: MonoCruise only
   ever copies them, it never loads or runs them.
+- Our own plugin is built from source in this repository (`tmp_plugin/`),
+  reproducibly, with a version resource naming it, static CRT and no imports
+  beyond `KERNEL32.dll`. It is a TruckersMP SDK plugin: the client starts it only
+  after the user confirms the game's plugin disclaimer.
 - Downloads land in a cache first, then move into place atomically; a partial or
   mismatched file never reaches the game folder.
 - No process injection, no obfuscation, no executing downloaded content, no

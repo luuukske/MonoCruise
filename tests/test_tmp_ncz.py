@@ -200,9 +200,143 @@ def test_aeb_ignores_a_ghost_in_a_no_collision_zone():
 
 
 def test_module_reads_only_the_state_buffer():
-    # Player data (Steam ids) lives in ETS2LAMpPlayers; MonoCruise never opens it.
-    assert TS._STATE_TAG.endswith("ETS2LAMpState")
+    # The state comes from MonoCruise's own TruckersMP plugin; it carries no player identity.
+    assert TS._STATE_TAG.endswith("MonoCruiseTmpState")
     assert TS._STATE_SIZE == struct.calcsize(TS._STATE_FORMAT)
+
+
+def _left(**kw) -> TmpState:
+    return replace(_GHOSTS, in_no_collision_zone=False, **kw)
+
+
+def _open_gate() -> NoCollisionZoneGate:
+    gate = NoCollisionZoneGate()
+    gate.step(_GHOSTS, 0.0)
+    assert gate.step(_GHOSTS, 1.0)
+    return gate
+
+
+def test_gate_flags_only_a_reported_exit():
+    gate = _open_gate()
+    assert not gate.step(_left(), 1.1)
+    assert gate.exited_zone
+    assert not gate.step(_left(), 1.2)
+    assert not gate.exited_zone
+    # A stale writer or a dropped connection is not TruckersMP saying the zone ended.
+    for lost in (_left(fresh=False), _left(connected=False), replace(_GHOSTS, fresh=False)):
+        gate = _open_gate()
+        gate.step(lost, 1.1)
+        assert not gate.exited_zone
+    # Never opened, nothing to exit.
+    closed = NoCollisionZoneGate()
+    closed.step(_left(), 0.0)
+    assert not closed.exited_zone
+
+
+def test_a_teleport_is_not_a_zone_exit():
+    gate = NoCollisionZoneGate()
+    gate.step(_GHOSTS, 0.0, (0.0, 0.0))
+    assert gate.step(_GHOSTS, 1.0, (0.0, 0.0))
+    gate.step(_left(), 1.1, (TELEPORT_JUMP_M + 10.0, 0.0))
+    assert not gate.exited_zone
+
+
+_EGO = TS.ego_box(0.0, 0.0, 0.0, None)   # reference rig, centre at the origin, facing -z
+
+
+def _ghost(vid, x, z, **kw):
+    return make_vehicle(vid, x, z, 0.0, 0.0, is_tmp=True, **kw)
+
+
+def test_exit_hold_keeps_players_inside_ego_until_they_separate():
+    hold = TS.ExitGhostHold()
+    inside = _ghost(5, 0.0, -7.333)                # rear 1.0 m into ego's front
+    assert hold.step(False, True, _EGO, [inside]) == {5}
+    assert hold.step(False, False, _EGO, [inside]) == {5}
+    clear = _ghost(5, 0.0, -9.0)
+    assert hold.step(False, False, _EGO, [clear]) == frozenset()
+    # Separated once means collidable for good, as in TruckersMP.
+    assert hold.step(False, False, _EGO, [inside]) == frozenset()
+
+
+def test_exit_hold_never_takes_a_body_ego_is_not_clearly_inside():
+    hold = TS.ExitGhostHold()
+    neighbour = _ghost(6, 3.6, 0.0)                # next lane
+    grazing = _ghost(7, 0.0, -8.333 + 0.1)         # 0.1 m of box contact, under the arm inset
+    ai = make_vehicle(8, 0.0, -5.0, 0.0, 0.0)      # AI traffic is never a ghost
+    assert hold.step(False, True, _EGO, [neighbour, grazing, ai]) == frozenset()
+    # Only the exit frame arms; a ghost that comes inside later is a real truck.
+    assert hold.step(False, False, _EGO, [_ghost(9, 0.0, -5.0)]) == frozenset()
+
+
+def test_exit_hold_takes_the_whole_rig():
+    hold = TS.ExitGhostHold()
+    trailer = _ghost(11, 0.0, -6.0, is_trailer=True)
+    tractor = _ghost(10, 0.0, -17.0, length=6.0)    # ahead of its trailer, clear of ego
+    nested = _ghost(1_000_000 + 11 * 4, 0.0, -1.0e3, is_trailer=True)
+    other = _ghost(12, 0.0, -40.0)
+    assert hold.step(False, True, _EGO, [trailer, tractor, other], [nested]) == {
+        10, 11, 1_000_000 + 11 * 4,
+    }
+    # The tractor stays a ghost while any part of the rig is still inside ego.
+    assert hold.step(False, False, _EGO, [trailer, tractor]) == {10, 11, 1_000_000 + 11 * 4}
+    assert hold.step(False, False, _EGO, [_ghost(11, 0.0, -30.0, is_trailer=True), tractor]) == frozenset()
+
+
+def test_exit_hold_clears_when_the_zone_returns_or_the_pose_is_lost():
+    inside = _ghost(5, 0.0, -6.0)
+    for args in ((True, False, _EGO), (False, False, None)):
+        hold = TS.ExitGhostHold()
+        hold.step(False, True, _EGO, [inside])
+        assert hold.step(*args, [inside]) == frozenset()
+
+
+def test_ego_box_follows_the_wheel_geometry():
+    from core.radar.ego_geometry import EgoGeometry
+    g = EgoGeometry(half_width_m=1.3, front_m=5.0, rear_m=3.0, path_origin_m=-2.0)
+    box = TS.ego_box(10.0, 20.0, 0.0, g)
+    assert box.cx == pytest.approx(10.0) and box.cz == pytest.approx(19.0)
+    assert box.half_length == pytest.approx(4.0) and box.half_width == pytest.approx(1.3)
+
+
+def test_clip_frames_carry_the_exit_flag():
+    rec = RadarFrameRecord(t_wall=1.0, t_mono=1.0, tmp_ncz_exit=True)
+    assert RadarFrameRecord.from_json(rec.to_json()).tmp_ncz_exit
+    assert "tmp_ncz_exit" not in RadarFrameRecord(t_wall=1.0, t_mono=1.0).to_json()
+
+
+def _zone_exit_clip(offset_m: float, exit_reported: bool, v: float = 20.0) -> Clip:
+    """Zone for 3 s, then the exit, with a stopped ghost ``offset_m`` ahead of ego's origin."""
+    n, k, hz = 150, 90, 30.0
+    meta = ClipMetadata.create(trigger_source="auto_engagement", session_kind="TMP")
+    frames, ticks = [], []
+    for i in range(n):
+        t = i / hz
+        frames.append(RadarFrameRecord(
+            t_wall=1000.0 + t, t_mono=t,
+            ego=EgoTelemetry(coordinateX=0.0, coordinateZ=v * t, rotationX=0.5,
+                             rotationY=0.0, speed=v),
+            traffic_buf=_stopped_tmp_truck_buf(v * k / hz + offset_m, vid=3),
+            tmp_ncz=i < k, tmp_ncz_exit=exit_reported and i == k,
+        ))
+        ticks.append(AEBTickRecord(
+            t_mono=t, radar_t_mono=t,
+            consumed=ConsumedContext(max_brake_ms2=10.0, aeb_enabled=True),
+            live_aeb=LiveAEB(),
+        ))
+    return Clip(metadata=meta, radar_frames=frames, aeb_ticks=ticks)
+
+
+def test_aeb_ignores_a_ghost_still_inside_ego_after_the_zone():
+    # Without the hold this braked 3 frames after the exit (2026-10-10).
+    assert any(e.aeb_brake for e in run_headless(_zone_exit_clip(4.0, exit_reported=False)))
+    ev = run_headless(_zone_exit_clip(4.0, exit_reported=True))
+    assert not any(e.aeb_brake or e.aeb_warn for e in ev)
+
+
+def test_aeb_brakes_for_a_truck_that_was_clear_of_ego_at_the_exit():
+    # 1.7 m ahead of ego's bumper when the zone ended: collidable in TruckersMP.
+    assert any(e.aeb_brake for e in run_headless(_zone_exit_clip(8.0, exit_reported=True)))
 
 
 def _aeb_frame(vehicles, ncz_ids, latched=frozenset()):

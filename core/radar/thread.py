@@ -16,7 +16,9 @@ from .ego_path import EGO_POSITION_HISTORY_LEN, ego_curvature_from_history
 from .elevation import ElevationGate, EgoElevationTrack, RoadSurface, build_surface
 from .reader import TrafficReader
 from .scs_pose import ScsPose, ScsPoseReader
-from .tmp_state import NoCollisionZoneGate, TmpStateReader, ncz_vehicle_ids
+from .tmp_state import (
+    ExitGhostHold, NoCollisionZoneGate, TmpStateReader, ego_box, ncz_vehicle_ids,
+)
 from .traffic import Vehicle
 
 from core.aeb.capture import get_recorder
@@ -91,6 +93,7 @@ class RadarThread(BaseThread):
         self._elevation_gate = ElevationGate()
         self._tmp_state = TmpStateReader()
         self._ncz_gate = NoCollisionZoneGate()
+        self._ncz_exit_hold = ExitGhostHold()
         # None until the first frame; then True when using SCS simulatedTime.
         self._kin_use_sim: bool | None = None
         self._was_paused: bool = False
@@ -104,6 +107,7 @@ class RadarThread(BaseThread):
         self._pose.close()
         self._tmp_state.close()
         self._ncz_gate.clear()
+        self._ncz_exit_hold.clear()
         self._ego_position_history.clear()
         self._last_ego_hist_t = 0.0
         self._elevation_track.clear()
@@ -197,6 +201,7 @@ class RadarThread(BaseThread):
         traffic_buf: bytes | None, parked_buf: bytes | None,
         ego_wheels: int = 0, ego_trailer_count: int = 0,
         geometry: EgoGeometry | None = None, tmp_ncz: bool = False,
+        tmp_ncz_exit: bool = False,
     ) -> None:
         """Debug clip capture; never raises into the radar loop."""
         try:
@@ -213,6 +218,7 @@ class RadarThread(BaseThread):
             recorder.push_radar_frame(RadarFrameRecord(
                 t_wall=t_wall, t_mono=now_mono, ego=ego,
                 traffic_buf=traffic_buf, parked_buf=parked_buf, tmp_ncz=tmp_ncz,
+                tmp_ncz_exit=tmp_ncz_exit,
             ))
         except Exception:
             logger.debug("radar clip capture failed", exc_info=True)
@@ -384,7 +390,13 @@ class RadarThread(BaseThread):
         t_gate = time.monotonic()
         ego_xz = (ego_x, ego_z) if (ego_x or ego_z) else None
         tmp_ncz = self._ncz_gate.step(self._tmp_state.read(t_gate), t_gate, ego_xz)
-        ncz_ids = ncz_vehicle_ids(tmp_ncz, vehicles, trailer_vehicles)
+        tmp_ncz_exit = self._ncz_gate.exited_zone
+        exit_ghosts = self._ncz_exit_hold.step(
+            tmp_ncz, tmp_ncz_exit,
+            ego_box(ego_x, ego_z, ego_yaw_rad, geometry) if ego_xz is not None else None,
+            vehicles, trailer_vehicles,
+        )
+        ncz_ids = ncz_vehicle_ids(tmp_ncz, vehicles, trailer_vehicles) | exit_ghosts
 
         self._publish_ego_fields(
             ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
@@ -411,6 +423,6 @@ class RadarThread(BaseThread):
                 ego_x, ego_y, ego_z, ego_yaw_norm, ego_speed, ego_steer,
                 ego_pitch_deg, ego_has_trailer, False, ego_mass_kg,
                 self._traffic.last_traffic_bytes, self._traffic.last_parked_bytes,
-                ego_wheels, ego_trailer_count, geometry, tmp_ncz,
+                ego_wheels, ego_trailer_count, geometry, tmp_ncz, tmp_ncz_exit,
             )
 

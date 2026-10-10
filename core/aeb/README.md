@@ -804,7 +804,9 @@ the session is no longer TMP.
 The floor guesses; TruckersMP's own zone event knows. While radar's NCZ gate is
 open (`core/radar/README.md` §18) every TMP id is in `ncz_ids`, and
 `_read_radar_snapshot` folds them into the set AEB skips with the off-surface
-ids, so they never reach the precompute or the pipeline. Latched ids stay, as
+ids, so they never reach the precompute or the pipeline. After a reported zone
+exit, the rigs still inside ego stay in `ncz_ids` until they separate (radar §18,
+"Exit hold"). Latched ids stay, as
 with the elevation gate. The floor itself is unchanged: outside a zone it still
 covers lag and netcode ghosts, and relaxing it is v1.1.3 work alongside lag
 detection.

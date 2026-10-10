@@ -11,6 +11,11 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Changed
+- **No-collision zone support has its own small game plugin**: MonoCruise no longer replaces the ETS2LA game plugin with a modified copy. It installs its own plugin next to it instead, which TruckersMP lists as "MonoCruise" and which keeps working across game updates.
+
+### Fixed
+- **AEB braked right after leaving a TruckersMP no-collision zone**: players you were still driving through when the zone ended stay ghosts until you separate, but AEB braked for them. It now ignores them until you are clear of each other.
 
 ## [1.1.2-preview.4] - 2026-10-10
 (hopefully) the last preview build before v1.1.2. Any critical bugs can be reported and will be fixed before the stable v1.1.2 release.

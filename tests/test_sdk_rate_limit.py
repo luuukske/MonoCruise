@@ -176,7 +176,7 @@ def test_a_pruned_version_installs_from_the_bundle(sdk):
 
 
 def test_the_bundled_stock_build_still_gives_way_to_its_override(sdk, tmp_path, monkeypatch):
-    """Offline, a bundled 1.61-style stock plugin is swapped for the NCZ build."""
+    """Offline, a bundled stock plugin is swapped for an override build."""
     ours = b"monocruise ncz build"
     bundle = tmp_path / "override"
     (bundle / "1.60").mkdir(parents=True)

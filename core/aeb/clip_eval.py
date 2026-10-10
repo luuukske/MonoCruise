@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT, ego_path_params
 from core.aeb.clip_replay import decode_radar_stream, ego_path_replay, nearest_frame_t
 from core.radar.ego_path_model import EgoPathModel
-from core.radar.tmp_state import ncz_vehicle_ids
+from core.radar.tmp_state import ExitGhostHold, ego_box, ncz_vehicle_ids
 from core.aeb.clip_schema import Clip
 from core.aeb.filters import VehicleCurvatureBlender, build_pipeline
 from core.aeb.thread import (
@@ -107,6 +107,25 @@ def _snapshot_tuple(ego, vehicles, radar_t_mono: float, off_ids=frozenset(),
     )
 
 
+def exit_ghosts_by_frame(clip: Clip, veh_by_t, ego_by_t, frame_t) -> dict[float, frozenset[int]]:
+    """The zone-exit hold the radar ran, re-derived from the recorded gate flags (radar README §18)."""
+    flags = {f.t_mono: (f.tmp_ncz, f.tmp_ncz_exit) for f in clip.radar_frames}
+    if not any(exited for _, exited in flags.values()):
+        return {}
+    hold = ExitGhostHold()
+    out: dict[float, frozenset[int]] = {}
+    for ft in sorted(frame_t):
+        ego = ego_by_t.get(ft)
+        if ego is not None and not ego.paused:
+            active, exited = flags.get(ft, (False, False))
+            box = ego_box(ego.coordinateX, ego.coordinateZ, ego.rotationX * 2.0 * math.pi,
+                          ego.geometry())
+            hold.step(active, exited, box, veh_by_t.get(ft, []))
+        if hold.ids:
+            out[ft] = hold.ids
+    return out
+
+
 def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
                  warm: bool = True, stream=None) -> list[EvalTick]:
     """Re-run the AEB pipeline over the clip under ``cal``; one EvalTick per tick.
@@ -135,6 +154,7 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
     t0 = min(all_t) if all_t else 0.0
     # Live AEB skips no-collision zone ghosts with the off-surface ids (radar README §18).
     ncz_frames = {f.t_mono for f in clip.radar_frames if f.tmp_ncz}
+    exit_ghosts = exit_ghosts_by_frame(clip, veh_by_t, ego_by_t, frame_t)
 
     out: list[EvalTick] = []
     for tk in ticks:
@@ -146,7 +166,7 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
         if ego is None:
             continue
 
-        ghosts = ncz_vehicle_ids(ft in ncz_frames, vehicles, [])
+        ghosts = ncz_vehicle_ids(ft in ncz_frames, vehicles, []) | exit_ghosts.get(ft, frozenset())
         snap = _snapshot_tuple(
             ego, vehicles, ft, off_by_t.get(ft, frozenset()) | ghosts,
             tkin_by_t.get(ft, 0.0), ghosts,

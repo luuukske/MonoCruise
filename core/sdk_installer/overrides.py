@@ -1,6 +1,6 @@
 """MonoCruise's own builds of upstream game plugins, used until upstream ships the same.
 
-See the "Temporary plugin override" section of README.md in this package.
+See the "Plugin overrides" section of README.md in this package.
 """
 
 from __future__ import annotations
@@ -42,16 +42,14 @@ class PluginOverride:
         return self.path
 
 
-# ETS2LA plugin with the TruckersMP client SDK (no-collision zones), built from ETS2LA plugin
-# main + feat/truckersmp_sdk. Replaces only the stock 1.61 build; drop it once ETS2LA ships its own.
-OVERRIDES: tuple[PluginOverride, ...] = (
-    PluginOverride(
-        version="1.61",
-        name="ets2la_plugin.dll",
-        sha="607740aacb072faf2d0e497a4abee00930a95b1c",
-        replaces=frozenset({"ddb4c08481927fd90c1d254aa0e5705aa7ff2634"}),
-    ),
-)
+OVERRIDES: tuple[PluginOverride, ...] = ()
+
+# Builds of upstream files we once shipped as overrides. An install still carrying one is
+# stale even offline, so the stock file comes back.
+RETIRED: dict[tuple[str, str], frozenset[str]] = {
+    # The NCZ build of ets2la_plugin.dll, superseded by tmp_plugin/ (monocruise_tmp.dll).
+    ("1.61", "ets2la_plugin.dll"): frozenset({"607740aacb072faf2d0e497a4abee00930a95b1c"}),
+}
 
 
 def override_for(version: str, name: str) -> PluginOverride | None:
@@ -74,6 +72,10 @@ def overlay(version: str, listing: dict[str, RemoteFile]) -> dict[str, RemoteFil
 
 
 def replaces_installed(version: str, name: str, installed: Path) -> bool:
-    """True when ``installed`` is an upstream build an override exists to replace."""
+    """True when ``installed`` is a build an override replaces, or one of our retired overrides."""
     override = override_for(version, name)
-    return override is not None and git_blob_sha_of(installed) in override.replaces
+    retired = RETIRED.get((version, name), frozenset())
+    if override is None and not retired:
+        return False
+    sha = git_blob_sha_of(installed)
+    return sha in retired or (override is not None and sha in override.replaces)
