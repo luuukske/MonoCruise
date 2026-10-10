@@ -119,6 +119,9 @@ class Settings(metaclass=_SingletonMeta):
     airhorn_variable: bool = True
     autostart_variable: bool = True
     AEB_enabled: bool = False
+    # Warning style label from core/aeb/warning_sounds.py, and its volume in percent.
+    aeb_sound: str = "Original"
+    aeb_sound_volume: int = 100
     # Debug AEB clip capture: grab a screen thumbnail per clip for tagging context.
     aeb_capture_screenshots: bool = True
     # Opt-in clip sharing. Off until the consent prompt is accepted; the version
@@ -139,8 +142,15 @@ class Settings(metaclass=_SingletonMeta):
     # How many straight sub-40 clips this machine has triaged. Persisted so the
     # one-in-ten sample keeps its cadence across restarts, not a user knob.
     aeb_triage_straight_seen: int = 0
+    # Same cadence for standard in-lane braking and ego-caused scenes, plus the
+    # local day and how many clips it has sent (core/aeb/README.md section 15).
+    aeb_triage_standard_seen: int = 0
+    aeb_triage_reckless_seen: int = 0
+    aeb_triage_day: str = ""
+    aeb_triage_day_sent: int = 0
 
     # Cruise/ACC/Custom buttons
+    brakedeadzone_variable: bool = True
     cc_dec_button: object = None
     cc_inc_button: object = None
     cc_start_button: object = None
@@ -175,6 +185,9 @@ class Settings(metaclass=_SingletonMeta):
 
     # CC set-speed clamp and always-on limiter cap (Speed limiter mode); None disables.
     global_speed_limit_kmh: float | None = None
+    # Road speed limit from the SDK: lowers the cap above, and drives the CC set speed.
+    autospeedlimit_variable: bool = False
+    autospeedtarget_variable: bool = False
 
     # AccelToPedals tuning: split gas (PID) / brake (feedforward + trim PI) architecture.
     # Weight baselines and smoothing constants stay fixed in code.
@@ -206,6 +219,10 @@ class Settings(metaclass=_SingletonMeta):
     pedal_capacity_accel_ratio_step: float = 0.0
     # Zero-pedal tractive accel: the intercept of the affine pedal model.
     pedal_capacity_accel_zero_offset_ms2: float = 0.0
+    # AEB brake scale per "game|truck|trailers", learned from firm braking only.
+    aeb_brake_scales: dict = field(default_factory=dict)
+    # Measured full-pedal stops per "game|truck|trailers|slider": [[mass_kg, [ratios]], ...].
+    aeb_full_pedal: dict = field(default_factory=dict)
 
     _saved_state: dict = field(default_factory=dict, init=False, repr=False, compare=False)
     _state_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False, compare=False)

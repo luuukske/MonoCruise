@@ -253,6 +253,7 @@ what ACC uses.
 | `core/aeb/calibration.py` | Frozen `AEBCalibration` dataclass: all tunable constants. `DEFAULT` singleton used by both `thread.py` and tests. |
 | `core/aeb/lane_frame.py` | `Lane` enum, `project_to_ego_arc()`, `classify()`: arc-projected lane membership, replacing the old cross-product `lateral_offset`. Also the body-in-lane primitives (`_any_body_in_ego_lane`, `_body_centreline_d_abs`). |
 | `core/aeb/filters.py` | Named filter pipeline: 12 stage classes + `FilterContext` + `build_pipeline()`. |
+| `core/aeb/avoidability.py` | `AvoidabilityGate`, which ends a guess-based drop of a parked body at the braking deadline (§3, Avoidability gate). |
 | `core/aeb/thread.py` | `AEBThread`: data acquisition, ego-arc construction, pipeline dispatch, TTB/state output. |
 
 ---
@@ -279,6 +280,9 @@ pass, the vehicle enters collision evaluation.
 | `SweepPassFilter` | Stationary cross-traffic ego turns through |
 | `CornerEntryStationaryFilter` | Stationary at corner entry: out-of-lane oncoming/co-dir, or in-lane with arc consistency |
 | `EgoEvasionFilter` | Ego can steer around target within 0.08 g (runs for `Lane.EGO` too) |
+
+`OutOfLaneParallelFilter`, `SweepPassFilter` and both corner-entry stages run
+inside `AvoidabilityGate` (see "Avoidability gate" below).
 
 `FilterContext.d_miss` carries the measured CBDR miss for the vehicle, computed
 once per vehicle per frame by the `los_miss` memo in `thread.py::loop`. It is
@@ -431,6 +435,9 @@ body-sep and Fix B κ expansion; also skip engagement-entry LOS / turn
 extrapolation vetoes so warn can promote to brake. Evasion clearance still may
 suppress. Colliding closing targets also earn `certain_geom` for instant engage.
 `OppositeLaneFilterMirrored` stays `Lane.EGO` only.
+The whole stage runs inside the avoidability gate's oncoming scope (below):
+a drop of a car whose measured line closes through ego's width ends at the
+braking deadline.
 
 **Shared bend beats the `|lat|` collapse.** `|lat|` is measured against ego's
 straight-ahead axis, so mid-corner it sweeps through zero on *every* oncoming
@@ -610,6 +617,14 @@ straight-line path.
   direction, and `|dist · sin(road_bend / 2) − |lat_signed||` must fall within
   `corner_entry_lateral_tol`. Catches MP stopped queues whose lead vehicle
   projects to ego's straight axis but whose pose only makes sense on a curve.
+- The chord test is a guess that the road bends away, so both stages run
+  inside the avoidability gate (below), which ends the guess at the braking
+  deadline (`3837af63`: the stage held a 54 km/h stop, now braked from 4.84 s
+  instead of 5.11 s). An override that passed any closing CBDR miss inside
+  the two bodies was measured against it and not kept: 27 points worse
+  over the corpus, mostly longer false brakes beside parked cars, for two
+  low-speed catches (`5bf156fe`, `7ec4ff63`) whose demand never left half of
+  capacity.
 - Latched ids skip **Mode B** (`lane == EGO`). Mode A's out-of-lane queue
   must stay suppressed even if a graze latched the id.
   Mode B's `implied_kappa = road_bend / dist` grows as range falls, so a few
@@ -638,6 +653,84 @@ straight-line path.
   parked trailers and cars whose bodies reach the band at the roadside. The
   remaining Mirrored drops are mid-turn targets on ego's curved path, which
   `project_to_ego_arc`'s `max(d_arc, d_straight)` reads as out of lane.
+
+### Avoidability gate: a guess may not outlive the braking deadline
+
+`OutOfLaneParallelFilter`, `SweepPassFilter` and both corner-entry stages drop a
+stationary body on a guess about ego's own path: the road bends away, ego is
+sweeping past, the body is parked beside the lane. `build_pipeline` wraps each
+in `AvoidabilityGate`. The guess stands while AEB could still stop short of the
+body if it turns out wrong. Once the body's clearance demand reaches
+`brake_deadline_ms2`, the demand at which AEB engaging now just stops (the
+engage test at fraction 1: `capability_decel` less the downhill term), the drop
+is overruled and the hit goes through normal collision evaluation. Bar, confirm
+windows and engagement vetoes are unchanged.
+
+Every condition fails toward the stage's own verdict:
+
+| Condition | Why |
+|-----------|-----|
+| Parked by both the speed field and the raw position track (`v_ground_meas`, first to last LOS sample) | TMP can report 0 for a car pulling away (`addfcf09`: range 2.3 to 7.1 m at reported speed 0). Movers are out of scope: their unknown is the target, not ego's path, and an override on movers braked for crossers |
+| Measured CBDR line passes through a body (`measured_miss_inside_body`) | Evidence the arc's hit is not extrapolation alone. Uses the real corners of the tractor and every trailer on the side facing ego's line: a symmetric reach with the trailer length added both ways put a trailer 10 m off the line inside (`24b77ccb`) |
+| Predicted hit at `t > 0` | A body ego already overlaps (TMP ghosting beside ego) hits every path at once, and no brake or steer changes that (`addfcf09`, `e65b74ce`) |
+| Clearance demand `>= brake_deadline_ms2` | Past this point, keeping the drop bets a collision on the guess |
+
+**Why the brake side and not the steer side.** On the reported clips the body
+was avoidable by plain unwinding (zero extra lateral load) almost to the end:
+`cb0154bb` until 4.31 s, `ddf9b4fd` until 4.24 s. Meanwhile the demand passed
+full capacity at 4.25 s and 4.04 s. The stages held a stopped car past the last
+point where braking could still prevent the hit. A steer-limit gate was built
+and measured first: suppress only while some constant curvature inside the
+truck's grip clears the body, with grip from the corpus envelope (p99 of
+`v^2 |kappa_meas|` over 3334 clips: 7.9 m/s^2 at 6.5 m/s rising to 11.9 at
+30 m/s). It moved those two clips only to 4.35 s and 4.45 s, and a
+constant-curvature fan under-counts real escapes such as turn-then-straighten,
+so in yards it braked where the driver got through (`d6bb3129`, +0.7 s). With a
+0.35 g budget on the change of curvature it also overrode last-second swerves
+the driver completed (`9fa4c844`, `51d2b08d`, `280d4419`). Also measured and not
+shipped: keeping the drop past the deadline while ego's curvature rate, run to
+the hit, clears the bare body (a steer already under way). Corpus delta +0.02.
+
+**What it does not cover.** The window between the engage bar and capacity,
+where a guess still stands by design (`30ad90a1`: demand crosses the bar at
+4.12 s, the deadline releases at 4.43 s, AEB brakes at 4.60 s after its confirm
+windows, against 5.25 s without the gate). Moving targets (`736195a7` is held
+by the LOS veto, not by a stage).
+
+**Corpus** (1366 labelled clips, 2026-10-06, engage bar at 0.50, without the
+corner-entry override above):
+-1464.08 to -1511.46. `7f76bcfa` FN to TP; `0248961e`, `4c94e5cb`, `ce8fb093`
+FP to TN; `5bf156fe` late to FN and `7ec4ff63` TP to late (both under 30 km/h,
+demand never past half of capacity); `24b77ccb` TN to FP for 0.45 s, a label to
+review: it is an `auto_crash` clip whose speed falls 18.1 to 10.3 m/s at 8.00 s,
+0.03 s after the predicted hit on vid 19's trailer. Cost-only: 23 true
+positives better and 12 worse (11 of them lost the removed override's
+earlier release), 19 false positives cheaper and 6 costlier (already braking, now
+0.1 to 0.4 s sooner). On the bare stages `ddf9b4fd` braked at 4.82 s and
+`cb0154bb` at 4.87 s; with the gate 4.21 s and 4.18 s, against label windows
+opening at 4.17 s and 4.18 s.
+
+**Oncoming scope (`OppositeLaneFilter`, card 128).** The body-separation and
+evasion-arc drops are a guess too: that the oncoming car keeps to its own lane
+or that someone steers clear. `build_pipeline` wraps the stage in
+`AvoidabilityGate(..., oncoming=True)`, which swaps the stationarity condition
+for `oncoming_drifting_in`: `head_on` or `near_head_on`, the measured CBDR line
+inside ego's own half width (`d_miss <= ego_hw`, stricter than the body test
+the stationary scope uses) and still closing (`d_miss_rate <=
+oncoming_gate_dmiss_rate_mps`, -1.0 m/s). The other three rows of the table
+apply unchanged. Corpus (927 scored clips, 2026-10-08): -148.78 to -189.82;
+`c84e4989`, `9cc70333`, `0075fd8c` late to TP, `c3f71053` quality 0.09 to
+0.55, no TP lost, and six oncoming passes TN to FP, each a single brake of
+about 0.28 s (`6f5a1555`, `248f3efa`, `89e102a8`, `4f5910b5`, `3daaba45`,
+`bae7b8cd`). Measured and not kept: the scope without the two conditions
+(-208.36, but 23 new FPs, two of them 3 to 6 s long), either condition alone
+(-180.37 and -191.33, 16 and 10 new FPs), and a 0.10 s / 0.20 s persistence on
+top of both (-156.12 / -151.37: the gained TPs release on the same one or two
+frames the FPs do).
+
+`tests/aeb/harness.py::evaluate_frame` builds its context without a LOS track
+or `clearance_fn`, so the gate fails closed there and scenarios see the bare
+stages. The gate's own cases are in `tests/aeb/test_avoidability_gate.py`.
 
 ### `EgoEvasionFilter`
 
@@ -706,6 +799,18 @@ or CC/ACC program brake above the 0.03 deadzone, not OPD coast-down) saves
 latch held until state drops below WARN **and** brake released; cleared when
 the session is no longer TMP.
 
+### No-collision zones
+
+The floor guesses; TruckersMP's own zone event knows. While radar's NCZ gate is
+open (`core/radar/README.md` §18) every TMP id is in `ncz_ids`, and
+`_read_radar_snapshot` folds them into the set AEB skips with the off-surface
+ids, so they never reach the precompute or the pipeline. After a reported zone
+exit, the rigs still inside ego stay in `ncz_ids` until they separate (radar §18,
+"Exit hold"). Latched ids stay, as
+with the elevation gate. The floor itself is unchanged: outside a zone it still
+covers lag and netcode ghosts, and relaxing it is v1.1.3 work alongside lag
+detection.
+
 ---
 
 ## 5. AEB Thread Interface
@@ -714,8 +819,9 @@ Read from other threads (acquire `data._lock` first):
 
 ```python
 aeb = registry.get_thread("aeb_thread").data
-aeb.AEB_warn                       # bool: UI cue (warn fraction or TTB); sound is warn OR brake
+aeb.AEB_warn                       # bool: warn fraction or TTB, after user-braking suppression
 aeb.AEB_brake                      # bool: engagement latched and target > 0
+aeb.AEB_cue                        # bool: HMI cue (warn OR brake, sound's gate, quiet once stopped); all visuals read it
 aeb.AEB_target_decel_ms2           # float: rate-limited commanded decel (m/s²)
 aeb.AEB_ff_decel_ms2               # float: always-on additive FF decel (m/s²); 0 when no threat
 aeb.AEB_required_decel_ms2         # float: slope-corrected required decel
@@ -765,6 +871,7 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    a_k        = a_roll if a_roll * (t_k - lag) <= v0 else a_stop
    required_target   = max over k of a_k                 # INF when unavoidable
    required_decel    = max over targets of required_target
+   # ego_front_to_surface = fwd_len (capsule_extents), the bumper itself
    road_grade        = tan(ego_pitch_rad), 0 if |·| > MAX_EGO_GRADE
    slope_accel       = g · sin(atan(road_grade))      # +ve = uphill
    downhill_offset   = max(−slope_accel, 0)           # gravity stealing brake force
@@ -776,6 +883,11 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    report a low demand honestly, and with the old single-target selection it
    would have masked a slower-`ttb` lead behind it. `best_ttb` stays a separate
    aggregate for the TTB slam and the displays.
+   **`ego_front_to_surface` is `fwd_len`, the bumper.** The capsule insets its segment by
+   `half_width` and the cap lands on the body end (radar README), so adding `half_width`
+   again (2026-07-19 to 2026-10-04) put ego's front 1.27 m ahead of the real one on the
+   FH: every stop ended `ego_half_width + stop_buffer` short at any speed, 1.82-1.91 m in
+   that day's clips at `stop_buffer` 0.5. Every `stop_buffer` tuning before the fix carried it.
    **The build-up reserve is latched at engagement.** Before engagement the lag
    term is live, because the entry decision has to
    account for build-up. Once engaged it becomes a fixed distance
@@ -804,7 +916,7 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    100 km/h on a 13.89 m/s² double. Small next to the capacity error that
    shipped alongside it (20 m), but it compounds with it.
    `capacity_estimate` is read from `sending_thread.data.aeb_max_brake_ms2`
-   (`tune_max * I / 1.1`, physical full-pedal decel) with a fallback to
+   (per-truck `aeb_capacity_ms2`, physical full-pedal decel) with a fallback to
    `max_brake_ms2` then a constant. The tracker itself stays in I=1.1 units
    for the mapper and ACC. Clip replay overrides `_read_max_brake_ms2` with
    the recorded number and must not re-apply the live slider.
@@ -966,7 +1078,8 @@ aeb.snapshot                       # AEBSnapshot: full debug state
      silence, and share the vetoed window's instant bypasses, with one
      exception: the TTB slam presumes an in-path target, so
      `aeb_warn_ttb_needs_narrow` makes an all-wide-lateral set clear the
-     wide-lateral window even when `brake_ttb_active`. Separately,
+     wide-lateral window even when `brake_ttb_active`. See "Warn classes" below
+     for the two classes that override these windows. Separately,
      `aeb_warn_max_range_m` drops the raw warn when the nearest colliding
      target is past it: no corpus clip's genuine warn opens beyond ~80 m, and a
      beep about something further out is not actionable.
@@ -1053,8 +1166,97 @@ aeb.snapshot                       # AEBSnapshot: full debug state
    means an engagement outbeats the user-braking suppression by construction,
    which is what "AEB engagement is the emergency override" above already
    promises.
+
+   The visuals (CC panel blink, pedal bar flicker) read `AEB_cue`, never
+   `AEB_warn`. It is the sound's own cue, true on every tick `start_warning`
+   runs and held `_HMI_CUE_OFF_DELAY_S` (0.2 s) after, so the 100 ms UI poll
+   cannot miss a pulse that beeped; the panel's 2 s afterglow then outlasts
+   every style's soft-stop tail. When the panel read `AEB_warn` the two split
+   whenever AEB braked without a warn: clip `f61ae726` braked 2.8 s with OPD
+   coast-down suppressing warn throughout (beep, no flash), and `7d9caa56`
+   held the brake 3.8 s at standstill on the geometry latch with zero demand,
+   so warn dropped while the beep ran on.
+
+   Once AEB has stopped the truck the whole cue goes quiet, sound and visuals
+   together (`_hmi_stopped_step`): the latch sets when the cue holds at
+   `|ego_speed| <= _HMI_STOPPED_SPEED_MS` (0.5 m/s, above the ~0.15 m/s
+   standstill jitter) and clears when warn and brake both end or ego moves off
+   past `aeb_min_engage_speed_kmh`. A standstill warning is not actionable, and
+   standstill warns flicker on `ttb = 0` ticks, so warn is muted with brake. The
+   "AEB intervention" popup, which has fired by then (0.5 s of brake, under
+   5 m/s), covers the hold. Engagement, the brake hold and the published
+   `AEB_brake` are untouched: this is HMI only.
 8. Head-on targets: modelled as also braking at `full_brake_decel (7.8 m/s²)`
    inside the collision pipeline (unchanged).
+
+### Warn classes: clear threats and crossers
+
+Lukas, 2026-10-06: a driver who is not paying attention should get at least a second
+of warning, and complicated scenes should stay quiet. Two classes do that, both in the
+collision loop of `core/aeb/thread.py` and both warn-only (no brake verdict moves).
+
+**Clear threat** (`aeb_warn_clear_class`). The ego arc and the measured CBDR line both
+put the body within `aeb_warn_clear_band_m` (1.0 m) of ego's path, the body drives
+ego's way (`co_directional`) or is stopped (`measured_stationary`), and that has held
+for `aeb_warn_clear_hold_s` (0.5 s). The hold timer runs before the collision horizon
+reaches the body, which only picks up a stopped car about 3 s out; counted from there,
+the hold ate the lead at speed. A clear threat:
+
+- warns once AEB would have to brake `aeb_warn_lead_s` (1.1 s) later if nothing
+  changed: the clearance demand with that much extra build-up lag reaching the engage
+  bar. 1.1 s leaves a full second after the two-tick warn confirm at steady speeds. The
+  usual user-braking suppression still applies, so a driver already braking hears
+  nothing new;
+- is never oncoming traffic, even facing ego: the 2 s oncoming window held the warn of
+  a parked trailer facing the truck to the brake tick on every test-track stop that day.
+
+Both evidence lines and the hold are load-bearing. Queues facing ego across an unseen
+bend project into ego's lane band at 36-66 m, and so do adjacent-lane queues for a
+co-directional body. On the local store the stopped-facing exemption alone cost 12
+`true_negative -> false_warn` with no band, 6 with the lane band (1.95 m), 5 at 1.0 m
+(one-tick flickers the 0.3 s state hold stretches into a beep), and 0 with the 0.5 s
+hold. Over the whole labelled corpus both classes together take the 0.85 build from
+31 false warns to 25 (crossers -8, clear class +2, no brake verdict moved); a 1.5 m band
+nets 30 and the lane band 32. Trailers parked 1-2 m off ego's path only qualify once they are inside the band,
+so their lead is shorter: the evidence at that range cannot tell them from a bend.
+
+**Complicated scenes get about 0.4 s.** Lukas, 2026-10-07: the full second is for dead-ahead
+threats only; everything else should warn about 0.4 s before the brake with as few false
+warns as possible. Two paths do that, both the same look-ahead test with a 0.4 s lead.
+
+*Near threat* (`aeb_warn_near_band_m`). A stopped body (`measured_stationary`) that is
+aligned with ego's travel (co-directional or facing ego), not a TruckersMP player, within
+`aeb_warn_near_max_range_m` (70 m), with ego on a near-straight path
+(`|kappa| <= aeb_warn_near_max_kappa`, 0.005 1/m), and inside `aeb_warn_near_band_m`
+(2.5 m) by both evidence lines for `aeb_warn_near_hold_s` (0.2 s) leads by
+`aeb_warn_near_lead_s` (0.4 s) and is never oncoming: a trailer parked facing the truck a
+metre or two off its path otherwise sat in the 2 s oncoming window until the brake. Each
+condition removed a measured false-warn source: TMP bodies were 22 of the 34 targets a broad
+draft warned for without a brake (queues and netcode jitter beside the lane), moving and
+crosswise bodies change at the last second, ego curvature above 0.005 is the unseen-bend
+projection again, and the range cap drops a queue first seen at 78 m. Test track: 6 stops
+that warned late or not at all now lead by 0.34-0.74 s. Labelled corpus: one
+`true_negative -> false_warn` (`de899e27`), no other verdict moved. That clip is a stopped
+car facing ego in the far lane of a gentle S-bend at 94 km/h; its offset closes 1.6 -> 1.1 m
+at 64 m exactly like the test-track trailer approaches, the warn comes 0.4 s before AEB would
+have braked, and the driver followed the bend 0.25 s after it.
+
+*Everything else* (`aeb_warn_other_lead_s`). Any other colliding target that is not a moving
+crosser raises the raw warn on the same test, but through the usual confirm and class
+windows (oblique, vetoed, oncoming, wide-lateral), so it can only bring a warn forward where
+those windows already allow one. Corpus cost zero, gain small: the corpus brakes in these
+scenes are mostly sudden. Over the 651 braked labelled positives the colliding set formed a
+median 0.34 s before the brake, and in half of them the target was still dropped by a filter
+0.4 s before it (parallel out-of-lane 133, opposite-lane and evasion 72, TMP rel-speed 31),
+released a median 0.12 s before the brake. A look-ahead cannot lead what the pipeline does not
+yet see. Measured and not shipped: a 0.6 s lead on both paths (+12 events warned 0.4 s ahead,
++10 false warns) and a warn look-ahead on the avoidability gate, warning before a guessed drop
+is released (+2 events, +1 false warn). Both trade about one false warn per early warn.
+
+**Moving crossers** (`aeb_warn_crossers_with_brake`). When every colliding target is a
+moving body crossing at `|fwd_dot| < aeb_warn_crosser_dot` (0.5), the cue starts with
+the brake. Perpendicular traffic turns or stops at the last second, these were 9 of the
+corpus false warns, and their warn lead before a real brake was already about zero.
 
 ### Clearance-based demand
 
@@ -1211,10 +1413,13 @@ plus the reserve, so **5.8 is the correct number and 16.3 was inflated
 threefold** by the lateral part of `v_closing` on the bend. Do not "fix" either
 clip by re-inflating the demand.
 
-**Side effect worth knowing.** The demand layer now declines the measured
-clear-pass oncoming case on geometry alone, reaching the same verdict the LOS
-veto was added for (`test_the_clearance_model_alone_declines_the_measured_clear_pass`).
-The vetoes still run and still scope to engagement entry.
+**Side effect worth knowing.** With every veto disabled the demand layer does
+not engage on the measured clear-pass oncoming case, but not because the
+geometry declines it: the clearance demand spikes to about 17 m/s^2 as the
+bodies come level, and at the 0.90 bar that spike is too brief to confirm
+(`test_the_clearance_model_alone_declines_the_measured_clear_pass`). During the
+2026-10-06 trial of a 0.50 bar it did confirm, and the LOS veto held the case
+alone. The vetoes still scope to engagement entry.
 
 ### LOS-rate engagement veto (CBDR)
 
@@ -1354,6 +1559,13 @@ constant-curvature extrapolation, and these range and miss bars should be
 re-derived against it rather than carried over.
 
 ### Geometry-graded engage fraction
+
+Shipped: both fractions at 0.85, flat (`core/aeb/TUNING.md`). The demand is
+tracked to the stop buffer, so the bar is also how hard AEB brakes: Lukas asked
+for 90% of the truck, then set 85% for margin. A 0.50 bar was released in 1.1.2-preview.1 after a
+corpus reprice and reverted on 2026-10-06: it started early and then held about
+half the truck (6 m/s^2 on a trailer rig that stops at 14), which drivers felt
+as slow braking. The rest of this section is the history before that.
 
 `aeb_engage_frac` (0.85) is a hedge: only take the brake off the driver once
 the situation needs most of the truck's capacity, because the geometry that
@@ -1580,7 +1792,6 @@ low-speed dangers.
   additive in `sending_thread`, closed-loop controller in `sending_thread`)
   are gated by `gas_output / gasval >= 0.8`: full gas pedal is the user
   override and defeats AEB braking authority across every layer.
-
 ---
 
 ## 6. Elevation filter (shared road-surface gate)
@@ -1651,7 +1862,7 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 - **AEB pedal authority is two-layered, never binary-gated to zero.** AEB publishes `AEB_ff_decel_ms2` every tick when there is any real threat (`required_decel > 0`); sending_thread converts it to a brake pedal via the inverse FF curve and merges it as `b = max(b, aeb_ff_pedal)`. This is the **sub-engagement assist** layer: it adds force on top of user braking when the system warns but has not yet engaged. It is **ramped**, not gated: the assist weight rises linearly from 0 at `cal.ff_assist_ramp_lo` (0.03) to 1 at `cal.user_brake_latch` (0.12), and the merge is `b = max(b, b + (aeb_ff_pedal - b) * w)`. Below the ramp floor it contributes nothing, so it still cannot phantom-brake during normal manual cruising where routine lead-following yields a small non-zero `required_decel` (measured median FF pedal there: 0.004). At or above `user_brake_latch` the weight is 1 and the expression collapses to the original `max(b, aeb_ff_pedal)`, so behaviour above the old gate is unchanged. The ramp exists because a hard gate at 0.12 activated the assist only where the driver was already out-braking it (median jump **−0.187** pedal, i.e. inert) while blocking it across 0.03–0.12 where it would actually add force (median **+0.054**, 51% of those ticks carrying `ff_decel ≥ 2.0`). Dropping the gate outright instead was rejected: it left an 0.877-pedal worst-case jump off a 6% dab, which the ramp cuts to 0.476 and takes to zero above 0.60. When AEB engages (`AEB_brake == True`), main_pedal_thread cuts gas only; the brake is owned by `AEBDecelController` in sending_thread, which tracks `AEB_target_decel_ms2` (the **closed-loop** layer). All AEB pedal paths are gated by `gas_output >= 0.8` (full-gas user authority, the only override that can defeat AEB braking).
 
 **History (2026-08-11):** main_pedal_thread used to slam `brake_output = 1.0` on engagement. Because sending_thread merges every AEB path with `max()`, that slam pinned the pedal at 1.0 for the whole engagement and `AEBDecelController` never influenced the output: `AEB_target_decel_ms2` and its rate limit were dead code. Measured over 32 engagement clips, realized decel was a median **2.25x** the published target, which left **5 to 6 m** of unused gap on 65 km/h stops (0.2 m at crawl, hence the speed-squared symptom). An earlier attempt to drop the slam in favour of *pure FF* was reverted because AEB felt silenced; that failed for two reasons now fixed: the target ramped from 0 at `aeb_target_rate_ms3` (0.8 s to reach the requirement, so the first bite was ~0.005 pedal), and there was no pad for brake build-up. Engagement now steps the target straight to the requirement, and `stop_buffer_response_s` covers the plant lag. Do not restore the slam without re-reading the high-speed stop overshoot notes: a `max()`-merged constant of 1.0 silently disables every layer beneath it.
-- **AEB and em_stop send on the full brake axis.** The `g_brake_intensity` invert is for mapper/ACC. While `AEB_brake` or `em_stop` is true, `apply_brake_intensity(..., full_authority=True)` writes the logical pedal. AEB planning and `AEBDecelController` use `aeb_max_brake_ms2 = tune_max * I / 1.1` so the estimated max decel is the physical force pedal 1.0 can make. Sub-engagement FF assist stays on the invert and the unscaled tracker. `I < 1.0` cannot be fully recovered; warn hourly while AEB is enabled, never when it is off. Do not remap an engaged AEB back onto the 1.1 invert, and do not leave AEB planning on the unscaled tracker: that made a 150% slider look like the 1.1 tune.
+- **AEB and em_stop send on the full brake axis.** The `g_brake_intensity` invert is for mapper/ACC. While `AEB_brake` or `em_stop` is true, `apply_brake_intensity(..., full_authority=True)` writes the logical pedal. AEB planning and `AEBDecelController` use `aeb_max_brake_ms2` from `aeb_capacity_ms2` (`core/sending_thread/aeb_capacity.py`), the physical decel pedal 1.0 can make. Sub-engagement FF assist stays on the invert and the unscaled tracker. `I < 1.0` cannot be fully recovered; warn hourly while AEB is enabled, never when it is off. Do not remap an engaged AEB back onto the 1.1 invert, and do not leave AEB planning on the unscaled tracker: that made a 150% slider look like the 1.1 tune.
 - **Engagement-entry vetoes never touch warn timing beyond persistence, and never touch FF assist, disarm, or the holds.** `_los_veto_bar`, `_extrapolation_veto`, the closing-speed floor, and the lane-confidence range all feed `engage_vetoed_ids`, which is subtracted from the engagement-only aggregate chain (`best_ttb_engage` and friends) and from the `certain_geom` instant path. The full aggregates still drive `AEB_warn`, `AEB_ff_decel_ms2`, the disarm gate and the geometry latch. The one permitted coupling is `aeb_warn_confirm_vetoed_s`: when every colliding target is vetoed **and** out of ego's lane, warn waits on a longer occupancy window. That is a delay a persisting course clears, not a suppression, and a vetoed target may never be removed from the warn aggregate outright. Keep it that way: a wrong veto must cost latency on one target, never silence. Measured on the labelled corpus, the vetoes left warn coverage on positive clips unchanged (135 of 160 clips, identical lead-time distribution) while cutting warn ticks on must-not-trigger clips by 11 %.
 - **A measured miss may remove certainty, never grant it.** The vetoes exist because arc-projected lane membership is an extrapolation and the CBDR miss is a measurement, so a *large* measured miss removes certainty (head-on bar, matched-speed neighbour). The converse does not hold: `d_miss` scales as `omega * R^2 / v_rel`, so a small value at range is not evidence of danger, it is a short-baseline fit over a long lever arm. A `lane_confidence_miss_m` clause that restored certainty on a small miss was tried and removed after the corpus grew: it was wrong on all four clips it affected. Also do not let a veto fire with no measurement at all unless its own physics stands alone (the ego-turn branch does; the matched-speed branch deliberately does not).
 - **The engage fraction is graded by certainty, and only by certainty.** `aeb_engage_frac_certain` applies when a colliding, non-engage-vetoed target is in `certain_geom_ids`, the same set that grants the instant confirm path. Do not widen it to `nearcertain_geom_ids` or to demand magnitude: required-decel size is not a certainty signal (see the tiered entry gate), and the corpus shows every clip the lower bar newly brakes on is geometrically identical to the ones it rescues. Unlike the veto thresholds it has no flat band, so re-price it against the corpus rather than assuming it still holds.
@@ -2231,6 +2442,54 @@ still surfaces between versions. The position counter lives in
 who relaunches often would otherwise send the first clip of every session and
 land far above one in ten.
 
+### Scene classes: who caused the encounter
+
+Added 2026-10-05 after v1.1.0 stable pushed contributions to 150-200 clips a day,
+past both the server caps and a reviewer's day. The driver asked for fewer clips of
+ordinary AEB braking, fewer of ego driving recklessly, and more of other drivers
+cutting in or arriving at odd angles. `_classify_scene` sorts each clip into one
+of three classes plus unclassified, and the uploader treats them differently.
+
+Attribution is the core of it. A target entering ego's lane looks identical in the
+ego frame whether it steered or ego did, so each vehicle's own heading change over
+the 3 s before the entry decides it: the one that turned by `MOVER_DEG` while the
+other held is the one that moved. Both turning together within `CURVE_REL_DEG` is
+the road bending and attributes nothing; without that check every bend produced a
+fake lane entry.
+
+| Class | Rule | Upload |
+|---|---|---|
+| other driver | cut-in into ego's lane within 40 m, reversing, crossing, turning across, oncoming drifting in; ego at 20 km/h or more | always, outside the budget |
+| ego reckless | ego at `RECKLESS_SPEED_KMH` or more, ego changing lane into under 1 s of gap, ego in the oncoming lane | 1 in 10 |
+| standard | steady in-lane lead or stopped vehicle, nobody entered or turned | 1 in 4 (1 in 10 below 40 km/h, as before) |
+| unclassified | everything else | sent, within the budget |
+
+`DAILY_BUDGET` then caps what sampling lets through per local day. Crash clips are
+exempt: they carry 11 of the 14 contributed misses, which is the same reason G4 was
+refused above. Undecoded clips are exempt too, since triage fails open.
+
+`RECKLESS_SPEED_KMH` is 115, not 110: the 105-110 band is the TruckersMP limiter and
+held 4 misses, while every labelled clip past 115 was ignore, tp at 130+ or fp.
+
+Replayed over the 1599 contributed clips in capture order, against the triage
+before this change:
+
+| | before | after |
+|---|---|---|
+| clips sent | 1237 | 768 |
+| busiest day (2026-10-03) | 198 | 59 |
+| fn kept | 10 / 14 | 10 / 14 |
+| tp kept | 247 / 302 | 200 / 302 |
+| fp kept | 104 / 118 | 82 / 118 |
+| ignore kept | 398 / 667 | 285 / 667 |
+
+The other-driver class is **not** low-waste by label: crossing scenes are still
+about 79% ignore. It ships because the driver asked for that geometry, not because
+the labels recommend it. Sample counters and the day count live in settings for
+the same restart reason as the straight counter, and a retried clip never draws a
+sample or budget slot again: it won one when first offered, and drawing again
+used to refuse a retried straight clip nine times in ten.
+
 ### Fail open, unlike section 14
 
 `SceneSummary.decoded` is False when the clip has no AEB ticks or the radar
@@ -2348,6 +2607,193 @@ Two labelling rules came out of the pass:
 - **A slow approach whose lead never braked is not a positive.** Measure it on the
   step clock: closing speed from the gap slope, lead deceleration from a fit of its
   own positions, never from AEB's decision stream.
+
+## 17. Warning sound
+
+`core/aeb/warning_sounds.py` holds the styles (Original, Simple, Volvo Cars, Volvo
+Trucks, Scania, Tesla; a settings file that still says "Volvo style" resolves to Volvo Cars)
+and `WarningPlayer` in `core/aeb/warning_player.py` plays them. The cue itself (warn
+or brake, two-tick arm) is unchanged and lives in `_hmi_sound_step` in `thread.py`.
+
+The Volvo Cars, Volvo Trucks, Scania and Tesla styles are **synthesized imitations**, never
+recordings: a sampled car warning would ship third-party audio. A reference clip may be
+measured to tune them, never bundled. Tesla style was measured off one on 2026-10-05: five
+90 ms beeps on a 145 ms grid, 1100 Hz with a quarter-level 1165 Hz beating
+against it, flat level, no overtones, a burst every second. Volvo Cars style was
+fitted to the clip at 0:10 of YouTube video vY2U-dzoiEA. Its timbre is plain (1568 Hz,
+the octave below at -9 dB, the octave above at -23 dB); what a first by-ear version
+got wrong was the time shape, and it measured 10 to 15 dB off per tone. The fitted
+model, `_render_ringing`, is a dry pip (2 ms rise, a strike 8.6x the held level dying
+over 2.4 ms, 74 ms hold, 24 ms exponential fade) on shared oscillators so overlapping
+fades add, plus a ring per frequency: a one-pole follower of that tone's level
+(80 ms at 784 Hz, 102 ms at 1568 Hz, 14 ms at 3136 Hz) at 0.3 of it, phase-shifted
+against the pip (pi at 1568 Hz). That phase is real, not a fitting artefact: the
+reference dips to -55 dB right as each pip fades, where pip and ring cancel, then
+holds near -33 dB through the gap, which is the reverb a listener hears. Least
+squares on the per-tone envelopes of all six pips brought it to 2.0 / 2.2 / 1.3 dB
+RMS per tone. Ring frequencies are rounded to whole cycles per 1.0 s period so the
+loop has no phase jump, and a soft stop fades over 30 ms because the ring is still
+about 35 dB under the strike where a stop lands. Tesla repeats with a 1.0 s period,
+so repeats never run together.
+
+Volvo Cars: soft third group (2026-10-07). Drivers reported two quiet retriggers after
+the main warning, the last barely audible. The 2026-10-05 fit had cut the reference at
+0.835 s, just before them. A second download of the same video, the full 35 s, was
+measured and deleted. It shows a third group of three pips exactly one group period
+(0.376 s) after the second. The levels are least-squares fits through
+`_render_ringing`, so the main pips' ring is counted. They come out at 0.055, 0.102
+and 0.057 of a main pip (-25, -20 and -25 dB), with 4 dB RMS error over that stretch.
+The first soft pip lands in the second group's ring and hardly stands out, which is why
+drivers hear two retriggers. The video cuts all sound about 90 ms into the last soft pip.
+That looks like an edit, so the fit stops there and the model lets the pip ring out.
+`tail_s` went from 0.751 to 0.376, so the one-shot is still 1.5 s long and ends in silence.
+
+Volvo Cars style is `one_shot`, because the real system sounds once when it triggers
+and never again during that event (Lukas, 2026-10-05). The cue can still flicker
+inside one event, so a new warning needs the cue clear for `rearm_s` (1.0 s) first;
+a cue that returns sooner is the same event and stays silent. Rendered from silence
+with no wrap or ring warm-up, since nothing precedes it. A soft stop never cuts it.
+The cost is deliberate: a long AEB brake is silent after the first 1.1 s in this
+style, exactly as in the car; the brake and the popup do not depend on it.
+
+| Style | Cycle | While the cue holds | When it ends |
+|---|---|---|---|
+| Original | Lukas's own recording, shipped since 1.0 | replayed 0.15 s before it ends | one extra pass |
+| Simple | one 2.8 kHz beep | steady beeping | the beep in flight, then one more |
+| Volvo Cars style | two groups of three struck pips, then a third group 20 to 25 dB down, ringing out | once per AEB event, never repeated | always plays out |
+| Volvo Trucks style | one 0.5 s bar: four notes, a pause; braking adds a layer on top | bar after bar, at least three | the bar in flight, then one more |
+| Scania style | one 0.47 s bar: four notes, high low low high, the same for warn and brake | bar after bar | the bar in flight, then one more |
+| Tesla style | five beeps, then 0.275 s of silence (1.0 s period) | burst after burst | the burst in flight, then one more |
+
+### Volvo Trucks: two layers
+
+Measured on 2026-10-06 off a screen recording of a Volvo Trucks video that Lukas
+supplied (kept local, never bundled), with his timestamps for what is warn and what is
+brake. The recording has music and engine under it, and a first read took the 1.2 kHz
+double pips for the warning. They are something else in the video; Lukas named the
+443 Hz pulse train as the warning.
+
+Both layers live on one **bar** of 0.50123 s (the measured period, 2.0 Hz) cut into
+six slots of 83.5 ms. `Partial` is one frequency with a level per slot (dB, None for no
+note) and one envelope: delay, rise, hold, fade.
+
+- **Foundation**, slots 0 to 3, then a 167 ms pause. Each note is a 443 Hz tone held
+  72 ms with a 36 ms fade, a 1744 Hz ping that starts 4 ms late, rises over 30 ms and
+  fades in 19 ms, and clicks at 1317, 2195, 2641, 3083 and 3520 Hz that fade in 12 to 62
+  ms. The first note is 6 to 8 dB hotter than the next three. The reference's first
+  note of each event is a further 4 to 6 dB louder with a harder click; that is not
+  modelled, because a loop cannot play a different first bar.
+- **Brake layer**, slots 2 to 5 of the same bar: four pings at 1744 Hz. Each starts 12 ms
+  before its slot, rises in 3 ms, holds 24 ms and fades in 20 ms. A 443 Hz tone holds the
+  pause, from late in slot 3 until it has faded before the bar ends. Slots 0 and 1 are
+  silent. The fade is early so little of the tone wraps into the next bar: the layer is
+  switched on in that gap, and a tone still ringing there would click. The recording also
+  has a broadband tick near 150 ms, and smaller ones later in the bar. Those ticks do not
+  repeat from bar to bar (pairwise correlation about 0 across the steady brake bars), so
+  they are the truck's brakes in the video, not the warning, and they are not synthesized.
+
+Per-partial envelopes of the synthesized bars agree with the reference to 1 to 5 dB
+RMS (foundation 1.1 to 3.4). The brake ping's band envelope is about 4 dB RMS, its peaks
+within about 1 dB, and the pause tone about 2 dB. The shapes are least-squares fits
+(scratchpad, numpy; not shipped), floor-clamped so the recording's noise is not fitted.
+Each frequency is rounded to whole cycles per bar so the loop wraps in phase.
+
+The reference sounded at least four bars for every event; `min_cycles` is 3 by Lukas's
+call (2026-10-10). Every looping style, trucks included, plays one full extra cycle after
+the cue clears (`stop_extra_cycles=1`), as Original always did. A soft stop never cuts a
+bar short. The bar the cue ends in completes, and the fade finishes in its pause: the pause is
+only 31 ms, so a fade aimed at the middle of it ran into the next bar's first note.
+
+The brake layer is not a second clip. A second `pygame` sound starts on the next mixer
+buffer, which on Windows is long enough to put the brake beeps off the foundation's
+beat. `render_with_brake` adds the layer onto the foundation's own samples, and the
+player queues that bar on the same channel. While a bar plays, a change in braking
+replaces the queued bar, so the swap is the bar boundary. The brake layer is silent
+there (`brake_gate_s`, the opening of the bar, and the pause at the end), so the swap
+does not click. A brake that begins during a bar is heard from the next one. A brake
+with no preceding warn starts on the mixed bar. `thread.py` passes `braking=aeb_brake`
+to `start_warning` each tick the cue holds.
+
+### Scania: one pattern
+
+Measured on 2026-10-07 off 0:12 to 0:44 of YouTube video lEbKE8JCI6c (Euro NCAP tests of
+a Scania R-series), downloaded with Lukas's OK, measured in the session scratchpad and
+deleted. The clip has three warnings over music and engine noise. All three repeat one
+pattern, with no change between warning and braking (Lukas: Scania has one pattern,
+unlike Volvo).
+
+The bar is 0.4714 s. Note onsets fall at 0, 95, 200 and 303 ms, measured off each note's
+strike in 42 bars (within 3 ms). That grid is uneven, so the bar carries `slot_starts_s`
+in place of equal slots. Every note is harmonics 1, 2, 4 and 8 of one 269.5 Hz
+fundamental. Per note they measure 264 to 271, 536 to 539, 1078 to 1084 and 2140 to
+2160 Hz, and the code locks them to exact multiples. Harmonic 8 is a strike that fades in
+32 ms. Notes one and four lead with harmonic 4 (-18 and -23 dB, 28 ms hold, 27 ms fade).
+Notes two and three lead with harmonic 2 (-25.5 dB), with harmonic 4 about 5 dB under it,
+held about 65 ms. The fundamental sits 3 to 7 dB under harmonic 2 in every note. The
+fourth note's harmonic 2 starts 20 ms late and holds about 100 ms, so it carries on after
+the high tone and is still dying out at the loop point. A soft stop's fade lands on that
+tail, and `test_every_sound_ends_quiet_where_it_can_be_cut` checks that the tail only
+falls there rather than requiring silence.
+
+**The fundamental sets the pitch.** The first version left it out. A threshold on spectral
+contrast missed it because engine noise sits in that band, and Lukas heard the result as
+too high. The pitch is heard at 269.5 Hz only when that tone is present, so
+`test_the_scania_tone_keeps_its_low_fundamental` pins it. It shows up as a 269 Hz band
+envelope that follows every note and drops back to the floor in the gaps (-31 to -35 dB
+against a -43 dB floor). The 134 Hz band and the other low bands stay flat through the
+pattern, so they are engine noise.
+
+The parameters are least-squares fits to per-tone envelopes taken from the median over
+those 42 bars. The synthesized bar was put through the same band filters as the reference.
+Per-tone error is 0.8 dB RMS for the fundamental, 1.3 dB for harmonic 2, 2.4 dB for
+harmonic 4 and 2.9 dB for the strike. What is left at harmonic 4 is a dip in the middle of
+notes two and three that looks like beating in the recording; it is not modelled. In one
+warning the pattern stopped after the first note of a bar, which may be an edit in the
+video. The style finishes the bar in flight, like the others.
+
+Synthesized cycles loop in the mixer (`loops=-1`) and are stopped inside the
+silence that closes a cycle, so the rhythm is sample-accurate and a stop never
+cuts a tone; a sleep-timed replay would jitter by the Windows clock step. All six
+are built when the handler is created, because synthesis takes up to 70 ms and
+`start_warning` runs on the AEB tick. Style and volume are re-read from settings
+each time a warning starts from silence, never mid-warning.
+
+A cue that returns while the last cycle plays out resumes the loop. Before
+2026-10-05 the loop thread exited in that window and left the state `RUNNING`
+with no thread behind it, so the returning warning made no sound.
+
+Volume is a percent of `FULL_VOLUME` (0.8 mixer level), floored at `MIN_VOLUME_PCT`
+so a typed 0 cannot silently mute a collision warning. 100%, the default, is exactly
+the fixed 0.8 every warning played at before the setting existed.
+
+Every style is matched to the original's **loudness**, not its peak: the loudest
+400 ms of K-weighted signal (ITU-R BS.1770, the broadcast loudness weighting), so a
+driver who switches style keeps the same level at the same volume setting.
+`test_every_style_sounds_as_loud_as_the_original` holds them within 1 dB, and a
+change to any style's tones or timing has to re-solve its `gain`. Volvo Trucks lands within 0.1 dB with the foundation alone and 0.9 dB with the brake
+layer on top. The two layers share the scale that puts the foundation's peak at
+`gain`, so braking does not change the foundation's level and the sum stays under
+full scale. Scania sits 0.4 dB under the original, inside the 1 dB band. Its first
+note sets the peak, about 4 dB over the other three, so `gain` 0.97 is as loud as it
+goes without clipping. No limiter, for the same reason as Volvo Cars below. Volvo Cars style is the
+one exception, about 4 dB under the rest by request: its strike sets the peak, so
+it cannot reach the others' level without squashing the strike. A tanh limiter that
+did exactly that was tried and heard as clipping. The strike was cut from the fitted
+8.6 to 5.0 instead (about 3.2x the held level against the reference's 4 to 5x),
+clean and still recognisable, and the level left where that lands. As a one-shot
+it also carries 0.38 s of closing silence after the soft group, so its ring dies out inside the buffer
+instead of being cut while still audible.
+
+The settings panel's test button (for streamers balancing it against game audio)
+drives `WarningTest`: one cue of `TEST_CUE_S` (1.0 s of warning, no brake layer)
+through its own `WarningPlayer`, so the style's repeat rules apply exactly as in a
+real event. The trucks brake layer is not part of the button. It plays only while
+AEB is actually braking. A press while it still sounds holds the cue longer,
+as a returning warning does. It never touches the AEB thread's player: that one
+is soft-stopped on every idle AEB tick and would cut the test off. An idle press
+builds a fresh player, because AEB teardown quits the mixer under an old one.
+`busy()` counts a one-shot style's re-arm window as part of the event, so a press
+during it reuses the player and stays silent, as a real event would.
 
 ---
 

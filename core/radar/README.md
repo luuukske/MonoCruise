@@ -1256,7 +1256,10 @@ with rt.data._lock:
     ego_steer     = rt.data.ego_steer
     ego_has_trailer = rt.data.ego_has_trailer
     ego_curvature = rt.data.ego_curvature     # None → fall back to yaw-rate proxy
+    ego_geometry  = rt.data.ego_geometry      # EgoGeometry | None, see §17
     off_surface_ids = rt.data.off_surface_ids # frozenset[int], see §15
+    ncz_ids       = rt.data.ncz_ids           # frozenset[int], TMP ghosts, AEB only, see §18
+    tmp_ncz_active = rt.data.tmp_ncz_active   # no-collision zone gate open, see §18
     road_surface  = rt.data.road_surface      # RoadSurface (ego plane + curvature)
     paused        = rt.data.paused
     t_mono        = rt.data.t_mono            # snapshot time (monotonic)
@@ -1735,6 +1738,223 @@ filter chain was tuned on with ~28 Hz reads. The other side of the lattice (thre
 steps runs the chain) was measured: it lost labelled positives this side keeps,
 among them `3224c16c` (stopped car 14.7 m ahead at 44 km/h), `403e9c4f`,
 `1a4fa80f`, `4d8f47a2` and `b6f9a8c8`.
+
+---
+
+## 17. Ego Body and Path Origin from the SDK Wheels
+
+`core/radar/ego_geometry.py`. The SDK publishes every truck wheel's position in
+vehicle space (`truckWheelPositionX/Z`: x right, z backward, origin = the
+placement `coordinateX/Z` reports) plus steerable and lift flags. Telemetry turns
+that into an `EgoGeometry` whenever the layout changes, radar publishes it as
+`ego_geometry`, and AEB and ACC read it from the same snapshot as the pose.
+
+### The body
+
+The fixed body AEB used before (`ego_half_length` 3.333, `ego_half_width` 1.265,
+symmetric about the origin) was fitted on one truck, `vehicle.volvo.fh_2024` 6x4,
+and is exact for it. The estimator carries that fit to any truck by anchoring on
+the axles instead of the origin:
+
+| | rule | reference rig |
+|---|---|---|
+| front | front-most wheel + 1.541 m overhang | 1.792 + 1.541 = 3.333 |
+| rear | rear-most wheel + 0.565 m overhang | 2.768 + 0.565 = 3.333 |
+| half width | widest wheel centre + 0.225 m | 1.040 + 0.225 = 1.265 |
+
+The overhangs and the tyre outboard are the reference rig's, derived from the
+calibration body and its wheel layout, so retuning the body moves them with it
+(`tests/test_ego_geometry.py` pins both directions). They are a carry-over, not a
+measurement: only the reference rig is verified. A conventional (ATS) nose likely
+has a shorter overhang than the cab-over it was fitted on, which reads its front
+slightly long, the conservative side for AEB. Implausible layouts (under four
+wheels, wheelbase outside 2 to 12 m, no rolling axle, non-finite values) give
+`None`, and every consumer then keeps its pre-wheel behaviour.
+
+### The path origin
+
+The ego arc must start at the point whose velocity follows the heading, or it is
+launched sideways. For a rigid vehicle at low speed that is the centre of the
+non-steered axles, so `path_origin_m` is the mean of the non-steered wheels that
+are on the ground (a lifted tag axle drops out; with no steer flags, everything
+more than 1 m behind the front axle counts). Measured on 1424 local clips, the
+point of zero sideslip (lateral velocity over yaw rate) sits behind placement by:
+
+| speed | median |
+|---|---|
+| 2 to 5 m/s | 2.05 m |
+| 5 to 10 m/s | 1.97 m |
+| 10 to 20 m/s | 1.83 m |
+| 20 to 40 m/s | 1.68 m |
+
+That is the rear axle group (2.09 m on the reference rig), drifting forward with
+speed as the rear tyres take a slip angle. The mean of all wheels (0.8 m) is the
+wrong point: on the clips its arc misses 40 to 90 % more than the rear mean's,
+depending on speed.
+
+AEB already started near there: `arc_start_pctg` 0.2 put the arc 2.0 m behind
+placement on a 6.67 m body. ACC started at the placement origin, 2.1 m ahead of
+the rear axle, so its arc left every bend rotated outward by `kappa * d` and
+missed by about `kappa * d * s`. ACC's own arc (blended steer and history
+curvature), median lateral miss 10 m ahead in bends, origin then rear-wheel mean:
+
+| speed | miss | median signed miss (bend-relative) |
+|---|---|---|
+| 2 to 5 m/s | 0.92 -> 0.58 m | -0.59 -> -0.14 m |
+| 5 to 10 m/s | 0.65 -> 0.31 m | -0.53 -> -0.06 m |
+| 10 to 20 m/s | 0.28 -> 0.11 m | -0.26 -> -0.02 m |
+| 20 to 40 m/s | 0.17 -> 0.06 m | -0.16 -> -0.01 m |
+
+The signed column is the point: the old miss was one-sided, so ACC's curvature
+tuning had not absorbed the offset. Ego's own path is the yardstick here, not
+the lane: a driver who holds the cab on the lane centre puts the lane circle
+`d^2 / 2R` outside the rear-axle circle, about 0.15 m at R = 50 m with the cab
+3.9 m ahead of the rear axle.
+`python tools/ego_geometry_probe.py --clips` reproduces both tables;
+`python tools/ego_geometry_probe.py` prints the live truck.
+
+### How consumers use it
+
+- **AEB**: the arc starts at `path_origin_m`, the capsule reaches `front_m` ahead
+  and `rear_m` behind placement (`capsule_extents`), the corridor uses
+  `half_width_m`. `None` builds `calibration_geometry` from `AEBCalibration`,
+  which is the old body to the bit. Clips from schema 6 record the geometry per
+  frame and replay with it; older clips replay the calibration body.
+- **ACC**: the arc starts at `path_origin_m`, and every distance is shifted back
+  onto the old reference (`arc_shift` in `ACCTracker.update`), so `dist_m` still
+  means "from the point `EGO_FRONT_OFFSET_M` behind the bumper". On the reference
+  rig that point is the placement origin and straight-road distances do not move;
+  a truck whose nose sits `front_delta_m` farther forward reports gaps that much
+  shorter. `None` keeps the origin-launched arc (tests and tools pass none).
+- The road model, trail crossings and the rear cone stay in the placement frame:
+  they are fitted on placement history, not on the arc.
+
+---
+
+## 18. TruckersMP No-Collision Zones (AEB only)
+
+`core/radar/tmp_state.py`. Inside a TruckersMP no-collision zone (NCZ) other
+players are ghosts: ego drives through them. AEB braking for one is a pure false
+positive, and the TMP rel-speed floor (`core/aeb/README.md` §4) only hides the
+low-speed share of them.
+
+### Source
+
+MonoCruise's own TruckersMP plugin, `monocruise_tmp.dll`, built from
+`tmp_plugin/` (`tmp_plugin/README.md`) and installed beside ETS2LA's stock plugins
+by the SDK installer (`core/sdk_installer/README.md`, "MonoCruise's own plugins").
+It is a pure TruckersMP SDK plugin: no game-memory patterns, so no rebuild per game
+version. It writes one shared-memory file on every rendered frame:
+
+| file | layout |
+|---|---|
+| `Local\MonoCruiseTmpState` | 16 bytes, `=IIBBHHH`: version (1), heartbeat, connected, in_no_collision_zone, players_streamed, players_collidable (always 0), reserved |
+
+`in_no_collision_zone` follows the SDK's `OnNoCollisionZone` event and resets on
+every disconnect, not on connect: spawning inside a zone may report it before
+`OnConnected` (`tmp_plugin/README.md`). `players_streamed` counts stream-in minus stream-out
+events (diagnostics only). Shutdown zeroes the file, so the reader sees "no data"
+at once. Without the plugin the file stays zero and nothing changes. The state
+holds no player identity; the plugin reads none.
+
+TMP vehicles themselves still come from ETS2LA's `Local\ETS2LATraffic`. Until
+2026-10-10 the zone state came from a MonoCruise build of `ets2la_plugin.dll`
+(`Local\ETS2LAMpState`); the SDK installer swaps that build back to stock
+(`core/sdk_installer/overrides.py`, `RETIRED`).
+
+### The gate
+
+`NoCollisionZoneGate` is all-or-nothing. It opens once the zone signal has held
+for `ENTER_CONFIRM_S` (0.3 s): heartbeat advanced within `STALE_AFTER_S` (0.5 s),
+connected, and inside a zone. Losing any of them closes it on the same frame.
+While it is open, radar publishes `ncz_ids`: every `is_tmp` vehicle, trailer
+records and nested trailers included. AI traffic is never in it.
+
+The dangerous failure is the gate staying open next to a real truck, i.e. a zone
+flag stuck at 1. The plugin resets it on every disconnect and on shutdown, and the
+gate adds a teleport guard: an ego jump over `TELEPORT_JUMP_M` (50 m) between
+radar frames (ferry, train, respawn) keeps it shut until the plugin itself
+reports "not in a zone". A stale or disconnected read does not clear the guard.
+
+**The per-player collision flag is not used.** The first build also required
+zero collidable players, as a second signal. Measured live on 2026-10-06
+(TruckersMP 0.7.7.11, SDK 1.1.0, the earlier ETS2LA-based build polling from
+`OnPreRender`), `CanCollideWith` does not follow the zone:
+- Inside zones it read "can collide" for every truck overlapping ego's body
+  (25/25 samples), which only ghosts can do.
+- Outside a zone it read "cannot collide" for a truck closing head-on from 34 m
+  to 8 m.
+- Beyond 30 m it was always "cannot".
+- Asked through the local player's handle instead
+  (`local.CanCollideWith(remote)`), it gave the same answers. Outside a zone,
+  398 of 403 samples within 15 m read "cannot". It only flips for a vehicle
+  practically touching ego, so per-vehicle ghosting is not possible with it.
+
+The zone event matched every entry and exit to the second. The veto kept the gate
+shut through both in-zone emergency brakes that day (clips `75dd6f2f`,
+`37112635`); with it gone they replay without a warning or a brake.
+
+### Exit hold (per player)
+
+Leaving a zone does not make everyone solid at once: TruckersMP keeps a player
+ghosted while their rig still intersects ego, until the two separate. With the
+gate closed, AEB saw those bodies at contact range and braked; the synthetic
+replay in `tests/test_tmp_ncz.py` braked 3 frames after the exit at 54 and 72 km/h.
+
+`ExitGhostHold` closes that window from geometry alone, no per-player signal:
+
+- **Arms only on a reported exit.** `NoCollisionZoneGate.exited_zone` is true on
+  the one frame the gate closed because the fresh, connected plugin said "not in a
+  zone". A stale writer, a disconnect or a teleport arms nothing.
+- **Only bodies clearly inside ego.** A TMP body must overlap ego's box shrunk by
+  `EXIT_ARM_INSET_M` (0.2 m). Box slack between two real trucks (mirrors, rounded
+  corners) stays under that, and two solid trucks cannot overlap at all. Ego's box
+  is the §17 wheel geometry (reference rig when unreadable) from the placement
+  origin; ego's own trailer is not modelled, so a ghost inside only the trailer is
+  not held.
+- **Whole rigs.** A hit on a trailer record holds its tractor (the ACC sticky-lock
+  pairing, `core/acc/trailer_lock.py`, strict acquire) and every trailer of that
+  tractor, nested ones included, and the other way round.
+- **Released for good on separation.** A rig stays in `ncz_ids` while any member
+  still overlaps ego's unshrunk box. The first frame none does, it is solid again
+  and never re-armed, as in TruckersMP. A rig that leaves the frame is dropped.
+  The zone coming back or ego's pose going missing clears the hold.
+
+Clips record the exit frame (`RadarFrameRecord.tmp_ncz_exit`, absent = False) and
+replay re-runs the hold from it (`clip_eval.exit_ghosts_by_frame`). A clip whose
+window starts after the exit replays without the hold.
+
+### Consumers
+
+- **AEB** folds `ncz_ids` into the ids it skips with the off-surface set (§15),
+  latched threats exempt. Replay reads the per-frame `tmp_ncz` flag clips now
+  record (`RadarFrameRecord.tmp_ncz`, absent = False) and does the same.
+- **ACC** does not read it. Following a ghost ahead is still the expected
+  behaviour in a queue.
+- **AEB debug window** draws the skipped ghosts anyway, grey with a dashed
+  outline and a "TMP ghost" label, from `AEBSnapshot.ghost_ids` and the
+  `"ghost"` flag on their vehicle records. They carry no arcs and never reach
+  the pipeline; a latched ghost is drawn as the threat it still is.
+- Per-player suppression beyond the exit hold (one ghost among collidable players
+  at a zone edge) needs a per-player signal TruckersMP does not provide reliably
+  yet. Candidate SDK data is listed in `tmp_plugin/README.md`.
+
+### Do not
+
+- Read or record any player identity (Steam id, account id, name, latency) from
+  the SDK or another plugin's buffers: clips are shared when "Help improve AEB
+  and ACC" is on, and the plugin is described to TruckersMP users as reading none.
+- Let a stale or absent state file open the gate, or clear the teleport guard on
+  anything but the plugin reporting "not in a zone".
+- Arm the exit hold on anything but `exited_zone`, arm a body that is not inside
+  ego's inset box, extend a hold past separation, or re-arm a released rig: each
+  turns a real truck into a ghost.
+- Use `CanCollideWith` / `players_collidable` to suppress anything until it is
+  re-measured: it read "cannot collide" for real trucks.
+- Feed `ncz_ids` to ACC, or use them to relax the TMP rel-speed floor outside a
+  zone: lag ghosts still need it (v1.1.3).
+
+`tools/tmp_ncz_probe.py` shows the state live while driving.
 
 ---
 

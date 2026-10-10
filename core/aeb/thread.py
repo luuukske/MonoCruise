@@ -10,7 +10,6 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
@@ -22,6 +21,7 @@ from core.radar.traffic import (
     capsule_extents, pair_body_dist_sq,
 )
 from core.radar.elevation import MAX_EGO_GRADE
+from core.radar.ego_geometry import EgoGeometry, calibration_geometry
 from core.radar.ego_path_model import EgoPathModel, EgoPathState
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT, ego_path_params
 from core.aeb.confirm import OccupancyConfirm
@@ -29,6 +29,8 @@ from core.aeb.clearance import ClearanceResult, clearance_required
 from core.aeb.lane_frame import project_to_ego_arc, classify, Lane
 from core.aeb.capture import get_recorder, note_intervention
 from core.aeb.clip_schema import AEBTickRecord, AEBWarmState, ConsumedContext, LiveAEB
+from core.aeb.warning_player import WarningPlayer
+from core.aeb.avoidability import measured_stationary
 from core.aeb.filters import (
     FilterContext, FilterResult,
     _build_vehicle_collision_data, _world_to_ego_forward, _cross_zone_padding,
@@ -39,15 +41,6 @@ from core.aeb.filters import (
 
 logger = logging.getLogger(__name__)
 
-try:
-    import pygame
-    _PYGAME_AVAILABLE = True
-except ImportError:
-    _PYGAME_AVAILABLE = False
-
-_AEB_SOUND_PATH = str(Path(__file__).resolve().parent / "AEB_warning.wav")
-# Extra seamless-loop plays after stop_warning() (avoids a single short blip).
-_AEB_WARNING_STOP_EXTRA_REPLAYS = 1
 
 # Constants
 
@@ -155,6 +148,13 @@ _CRASH_SPEED_DROP_KMH: float = 5.0
 _BRAKE_POPUP_MIN_DURATION_S: float = 0.5
 _BRAKE_POPUP_STOPPED_SPEED_MS: float = 5
 
+# The published HMI cue outlives a sounding cue by this much, so the 100 ms UI
+# poll cannot miss a pulse the sound already started on (README section 7).
+_HMI_CUE_OFF_DELAY_S: float = 0.2
+# An AEB event that has stopped the truck goes quiet; the intervention popup
+# covers the standstill hold. Standstill telemetry jitters by about 0.15 m/s.
+_HMI_STOPPED_SPEED_MS: float = 0.5
+
 
 def _find_tractor_for_trailer(trailer: Vehicle, vehicles: list[Vehicle]) -> Vehicle | None:
     """Nearest same-heading non-trailer within radius; TMP and convoy AI slots."""
@@ -210,6 +210,33 @@ def _tmp_collision_threat(ref_ego_kmh: float, rel_speed_kmh: float) -> bool:
     return rel_speed_kmh > _TMP_FILTER_REL_AT_OR_BELOW_SPLIT_KMH
 
 
+def _ghost_vehicle_dict(v: Vehicle) -> dict:
+    """Debug-window record for a no-collision zone ghost: drawn, never evaluated."""
+    yaw = v._smooth_yaw if v._smooth_yaw is not None else math.radians(v.rotation.euler()[1])
+    trailers = [
+        {
+            "x": tr.position.x, "z": tr.position.z,
+            "yaw": math.radians(tr.rotation.euler()[1]),
+            "half_w": tr.size.width / 2.0, "length": tr.size.length,
+            "is_tmp": tr.is_tmp, "speed_kmh": abs(v.speed) * 3.6,
+        }
+        for tr in v.trailers
+    ]
+    return {
+        "vid": v.id,
+        "x": v.position.x, "z": v.position.z,
+        "yaw": yaw,
+        "half_w": v.size.width / 2.0,
+        "length": v.size.length,
+        "is_tmp": v.is_tmp,
+        "is_trailer": getattr(v, "is_trailer", False),
+        "kinematics_swapped": getattr(v, "_debug_kinematics_swapped", False),
+        "speed_kmh": abs(v.speed) * 3.6,
+        "trailers": trailers,
+        "ghost": True,
+    }
+
+
 class AEBState(enum.IntEnum):
     STANDBY = 0
     WARN = 1
@@ -224,6 +251,9 @@ class AEBSnapshot:
     ego_speed: float = 0.0
     ego_half_w: float = 1.265
     ego_half_l: float = 3.333
+    # Body ends from the placement origin; asymmetric once the SDK wheels are read.
+    ego_front_m: float = 3.333
+    ego_rear_m: float = 3.333
     ego_arc: ArcPath | None = None
     ego_braked_arc: ArcPath | None = None
     ego_has_trailer: bool = False
@@ -242,6 +272,8 @@ class AEBSnapshot:
     closing_floor_ids: set = field(default_factory=set)
     # Superset: LOS veto plus the extrapolation vetoes (README engagement vetoes).
     engage_vetoed_ids: set = field(default_factory=set)
+    # No-collision zone ghosts: drawn by the debug window, never evaluated (radar README §18).
+    ghost_ids: set = field(default_factory=set)
 
     # Clearance model: what the binding target demands, the speed ego could pass
     # its conflict at, and the ids whose occupancy ends inside the window.
@@ -319,6 +351,8 @@ def _should_sample_shadow_tn(snap: AEBSnapshot) -> bool:
 class AEBData(ThreadData):
     AEB_warn: bool = False
     AEB_brake: bool = False
+    # The sound's cue (warn or brake, quiet once stopped). Every AEB visual reads this.
+    AEB_cue: bool = False
     time_to_brake: float = _INF
     em_stop_requested: bool = False
     AEB_target_decel_ms2: float = 0.0
@@ -478,6 +512,17 @@ def _los_predicted_miss(
     if v_rel < 0.5:
         return None
     return abs(omega) * r_now * r_now / v_rel
+
+
+def _los_ground_speed(track) -> float | None:
+    """Target ground speed from first and last raw position in the LOS window."""
+    if len(track) < 2:
+        return None
+    t0, x0, z0, _, _ = track[0]
+    t1, x1, z1, _, _ = track[-1]
+    if t1 - t0 < 0.2:
+        return None
+    return math.hypot(x1 - x0, z1 - z0) / (t1 - t0)
 
 
 def _los_veto_bar(
@@ -718,142 +763,25 @@ def _hmi_sound_step(warn: bool, brake: bool, prev: bool) -> tuple[str, bool]:
     return ("stop", False)
 
 
-class _SoundState(enum.IntEnum):
-    STOPPED = 0
-    RUNNING = 1
-    SHUTTING_DOWN = 2
+def _path_offset(ctx: FilterContext) -> float | None:
+    """Larger of the ego-arc offset and the measured CBDR miss; None without a track."""
+    if ctx.d_miss is None:
+        return None
+    _, d_abs = project_to_ego_arc(ctx.ego_arc, ctx.v.position.x, ctx.v.position.z)
+    return max(abs(ctx.d_miss), d_abs)
 
 
-class _AEBSoundHandler:
-    """Pygame AEB warning loop with non-blocking stop and extra replay tail."""
+def _hmi_stopped_step(cue: bool, speed_ms: float, stopped: bool, resume_ms: float) -> bool:
+    """Latch set when the cue holds at standstill; cleared when the cue ends or ego moves off."""
+    speed = abs(speed_ms)
+    if not cue or speed >= resume_ms:
+        return False
+    return stopped or speed <= _HMI_STOPPED_SPEED_MS
 
-    def __init__(
-        self,
-        sound_file_path: str,
-        stop_extra_replays: int = _AEB_WARNING_STOP_EXTRA_REPLAYS,
-    ) -> None:
-        self._sound = None
-        self._state = _SoundState.STOPPED
-        self._sound_thread: threading.Thread | None = None
-        self._lock = threading.Lock()
-        self._stop_extra_replays = max(0, int(stop_extra_replays))
-        self._replays_remaining = 0
 
-        if not _PYGAME_AVAILABLE:
-            logger.warning("pygame not available: AEB sound disabled")
-            return
-
-        try:
-            if not pygame.mixer.get_init():
-                pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=256)
-                pygame.mixer.init()
-            self._sound = pygame.mixer.Sound(sound_file_path)
-            self._sound.set_volume(0.8)
-        except Exception as exc:
-            logger.error(
-                "AEB sound init failed for %s (%s): sound disabled",
-                sound_file_path, exc,
-            )
-            self._sound = None
-
-    def start_warning(self) -> None:
-        """Start loop; resumes an in-flight thread instead of spawning a second."""
-        if self._sound is None:
-            return
-        with self._lock:
-            if self._state == _SoundState.RUNNING:
-                return
-            self._replays_remaining = 0
-            if self._sound_thread is not None and self._sound_thread.is_alive():
-                self._state = _SoundState.RUNNING
-                logger.debug("AEB sound: existing loop resumed")
-                return
-            self._state = _SoundState.RUNNING
-            self._sound_thread = threading.Thread(
-                target=self._sound_loop_manager, daemon=True
-            )
-            self._sound_thread.start()
-            logger.debug("AEB sound: warning loop started")
-
-    def stop_warning(self, *, hard: bool = False) -> None:
-        """Soft: extra replays then finish. Hard: silence now, no tail."""
-        if self._sound is None:
-            return
-        with self._lock:
-            if hard:
-                if self._state == _SoundState.STOPPED:
-                    return
-                self._state = _SoundState.STOPPED
-                self._replays_remaining = 0
-                try:
-                    self._sound.stop()
-                except Exception:
-                    pass
-                logger.debug("AEB sound: hard stop")
-                return
-            if self._state == _SoundState.RUNNING:
-                self._state = _SoundState.SHUTTING_DOWN
-                self._replays_remaining = self._stop_extra_replays
-                logger.debug(
-                    "AEB sound: stop requested: %d extra replay(s) then finishing",
-                    self._replays_remaining,
-                )
-
-    def _sound_loop_manager(self) -> None:
-        sound_length = self._sound.get_length()
-        overlap_time = 0.15
-        sleep_duration = max(0.0, sound_length - overlap_time)
-        slice_s = 0.02
-
-        last_channel = self._sound.play()
-        aborted = False
-
-        while True:
-            deadline = time.monotonic() + sleep_duration
-            while time.monotonic() < deadline:
-                time.sleep(slice_s)
-                with self._lock:
-                    if self._state == _SoundState.STOPPED:
-                        aborted = True
-                        break
-            if aborted:
-                break
-            with self._lock:
-                if self._state == _SoundState.RUNNING:
-                    last_channel = self._sound.play()
-                elif self._state == _SoundState.SHUTTING_DOWN:
-                    if self._replays_remaining > 0:
-                        self._replays_remaining -= 1
-                        last_channel = self._sound.play()
-                    else:
-                        logger.debug(
-                            "AEB sound: extra replays done: letting current sound finish"
-                        )
-                        break
-                else:
-                    aborted = True
-                    break
-
-        if last_channel and not aborted:
-            while last_channel.get_busy():
-                time.sleep(0.01)
-                with self._lock:
-                    if self._state == _SoundState.STOPPED:
-                        break
-
-        with self._lock:
-            if self._state != _SoundState.RUNNING:
-                self._state = _SoundState.STOPPED
-        logger.debug("AEB sound: finished playing naturally, thread closing")
-
-    def cleanup(self) -> None:
-        """Silence immediately, wait for the loop thread, then quit the mixer."""
-        self.stop_warning(hard=True)
-        if self._sound_thread and self._sound_thread.is_alive():
-            self._sound_thread.join()
-        if _PYGAME_AVAILABLE and pygame.mixer.get_init():
-            pygame.mixer.quit()
-        logger.debug("AEB sound: cleanup complete")
+def _hmi_cue_until(action: str, now: float, until: float) -> float:
+    """Deadline of the published visual cue: refreshed on every tick the sound runs."""
+    return now + _HMI_CUE_OFF_DELAY_S if action == "start" else until
 
 
 class AEBThread(BaseThread):
@@ -877,8 +805,10 @@ class AEBThread(BaseThread):
         self._radar_visualizer = None
         self._radar_vis_last_vehicle_time: float = -1.0
         self._latched_filter_ego_kmh: float | None = None
-        self._sound_handler = _AEBSoundHandler(_AEB_SOUND_PATH)
+        self._sound_handler = WarningPlayer()
         self._hmi_sound_prev = False
+        self._hmi_cue_until = float("-inf")
+        self._hmi_stopped = False
         self._cal: AEBCalibration = _CAL_DEFAULT
         self._pipeline = build_pipeline(self._cal)
         # One-Euro per target kappa; stepped once per vehicle per frame (README).
@@ -937,6 +867,8 @@ class AEBThread(BaseThread):
         )
         # vid -> last mono time the target sat a full lane off the ego arc.
         self._warn_wide_seen: dict[int, float] = {}
+        self._clear_since: dict[int, float] = {}
+        self._near_since: dict[int, float] = {}
         self._published_target_ms2: float = 0.0
         self._last_target_change_mono: float = 0.0
         self._prev_loop_mono: float | None = None
@@ -1052,6 +984,18 @@ class AEBThread(BaseThread):
             return latched
         done = max(0.0, min(1.0, (now_mono - self._engage_pad_at_mono) / span))
         return latched * (1.0 - done)
+
+    def _read_ego_geometry(self) -> EgoGeometry | None:
+        """SDK wheel-layout body from the radar snapshot; None means the calibration body."""
+        try:
+            rt = registry.get_thread("radar_thread")
+            if rt is None or not rt.is_alive():
+                return None
+            with rt.data._lock:
+                geometry = getattr(rt.data, "ego_geometry", None)
+            return geometry if isinstance(geometry, EgoGeometry) else None
+        except (KeyError, AttributeError):
+            return None
 
     def _read_max_brake_ms2(self) -> float:
         """Physical AEB capacity from sending_thread; fallback if unavailable."""
@@ -1257,11 +1201,12 @@ class AEBThread(BaseThread):
             return
         (vehicles, ego_x, ego_y, ego_z, ego_yaw_rad, ego_speed, ego_pitch_deg,
          steer, ego_has_trailer, _ego_curvature_from_history, tmp_traffic_session,
-         paused, radar_t_mono, off_surface_ids, ego_t_kin) = snapshot
+         paused, radar_t_mono, off_surface_ids, ego_t_kin, ncz_ids) = snapshot
 
-        # Latched threats keep their pipeline seat: the shared gate must never
-        # drop a target AEB is already braking for. See core/radar/README.md §15.
+        # Latched threats keep their pipeline seat: neither radar gate (elevation §15,
+        # no-collision zone §18) may drop a target AEB is already braking for.
         off_surface_ids = off_surface_ids - self._latched_threat_ids
+        ncz_ids = ncz_ids - self._latched_threat_ids
 
         vehicles_eff = _swap_trailer_kinematics(vehicles)
 
@@ -1286,8 +1231,11 @@ class AEBThread(BaseThread):
         ego_kappa_cap = ego_path.kappa_cap
         ego_cap_weight = ego_path.sat_weight
 
-        ego_hw: float = cal.ego_half_width
-        ego_half_l: float = cal.ego_half_length
+        geometry = self._read_ego_geometry() or calibration_geometry(
+            cal.ego_half_length, cal.ego_half_width, cal.arc_start_pctg,
+        )
+        ego_hw: float = geometry.half_width_m
+        ego_half_l: float = geometry.half_length_m
 
         _max_brake_live = self._read_max_brake_ms2()
         effective_decel = cal.ego_decel_frac * _max_brake_live
@@ -1297,14 +1245,13 @@ class AEBThread(BaseThread):
 
         _ego_fwd_x = -math.sin(ego_yaw_rad)
         _ego_fwd_z = -math.cos(ego_yaw_rad)
-        _ego_body_offset = (cal.arc_start_pctg - 0.5) * (2.0 * ego_half_l)
+        # Arc starts at the path origin (rear-wheel mean, README §17); the body
+        # ends are measured from the placement origin, so the capsule is asymmetric.
+        _ego_body_offset = geometry.path_origin_m
         ego_front_x = ego_x + _ego_body_offset * _ego_fwd_x
         ego_front_z = ego_z + _ego_body_offset * _ego_fwd_z
-        # Ego body centered on ego_x with half-length ego_half_l; the arc
-        # reference sits _ego_body_offset behind center, so the capsule extents
-        # are asymmetric about the reference (front reaches farther than rear).
         ego_cap_fwd, ego_cap_back = capsule_extents(
-            ego_half_l, ego_half_l, _ego_body_offset,
+            geometry.front_m, geometry.rear_m, _ego_body_offset,
         )
 
         ego_arc = build_arc(
@@ -1402,14 +1349,18 @@ class AEBThread(BaseThread):
         # Required decel is per target and aggregated by max, so the most
         # demanding threat drives the command even if it is not the soonest.
         best_required: float = 0.0
+        best_required_lead: float = 0.0
+        best_required_other: float = 0.0
         best_required_engage: float = 0.0
         best_required_pad_rate: float = 0.0
         best_required_vid: int | None = None
         best_clearance: ClearanceResult | None = None
         clearance_memo: dict[int, ClearanceResult | None] = {}
+        lead_memo: dict[int, ClearanceResult | None] = {}
         clearance_clears_ids: set[int] = set()
-        # Ego travel to hit uses capsule tip offset from arc reference.
-        ego_front_to_surface = ego_cap_fwd + ego_hw
+        # fwd_len is already the bumper: the capsule's segment is inset by hw and its cap
+        # lands on it. Adding hw again stopped every AEB stop 1.27 m short (README).
+        ego_front_to_surface = ego_cap_fwd
         # certain_geom / nearcertain_geom drive tiered confirm (README tiered entry).
         certain_geom_ids: set[int] = set()
         nearcertain_geom_ids: set[int] = set()
@@ -1418,6 +1369,9 @@ class AEBThread(BaseThread):
         # Warn-gate evidence classes: oncoming, and a full lane off the ego arc.
         oncoming_colliding_ids: set[int] = set()
         wide_lat_colliding_ids: set[int] = set()
+        clear_since: dict[int, float] = {}
+        near_since: dict[int, float] = {}
+        crosser_colliding_ids: set[int] = set()
         wide_lat_checked_ids: set[int] = set()
         nearest_colliding_range: float = _INF
         los_vetoed_ids: set[int] = set()
@@ -1456,10 +1410,31 @@ class AEBThread(BaseThread):
                 return None
             return (m1 - m0) / dt
         vehicle_dicts: list[dict] = []
+        ghost_ids: set[int] = set()
         vehicle_arcs: dict[int, list[ArcPath]] = {}
         newly_risky: set[int] = set()
 
         ego_pitch_rad = math.radians(ego_pitch_deg)
+        # ego_pitch_rad is the NEGATED grade and gravity has nothing to cancel
+        # against; a pose past the bound is a wreck, not a road (README slope term).
+        road_grade = math.tan(-ego_pitch_rad) if math.isfinite(ego_pitch_rad) else 0.0
+        if not math.isfinite(road_grade) or abs(road_grade) > MAX_EGO_GRADE:
+            road_grade = 0.0
+        slope_accel = _GRAVITY_MS2 * math.sin(math.atan(road_grade))
+        downhill_offset = max(-slope_accel, 0.0)
+        # Demand at which AEB engaging now just stops: the engage test at
+        # fraction 1 (README avoidability gate).
+        brake_deadline_ms2 = max(0.1, _max_brake_live - downhill_offset) - downhill_offset
+
+        def clearance_of(arcs: list[ArcPath]) -> ClearanceResult | None:
+            """Clearance demand against ``arcs`` with this frame's lag and pad."""
+            return clearance_required(
+                ego_arc, arcs, ego_speed, cal,
+                lag_s=(0.0 if engaged_pad_m is not None else load_response_s),
+                pad_m=(engaged_pad_m or 0.0),
+                front_to_surface=ego_front_to_surface,
+                near_horizon_s=dynamic_horizon,
+            )
 
         # Follow-threat flags must be current before the precompute prefilter
         # below reads them: a braking lead can cross under the rel-speed floor
@@ -1542,6 +1517,9 @@ class AEBThread(BaseThread):
                 if dist_sq > max_range_sq:
                     continue
                 if v.id in off_surface_ids:
+                    if v.id in ncz_ids:
+                        vehicle_dicts.append(_ghost_vehicle_dict(v))
+                        ghost_ids.add(v.id)
                     continue
                 dist = math.sqrt(dist_sq)
                 v_yaw_rad = (
@@ -1660,6 +1638,9 @@ class AEBThread(BaseThread):
                 off_surface_ids=off_surface_ids,
                 d_miss=los_miss(v),
                 d_miss_rate=los_miss_rate(v),
+                v_ground_meas=_los_ground_speed(trk),
+                brake_deadline_ms2=brake_deadline_ms2,
+                clearance_fn=clearance_of,
             )
 
             suppression_reasons[v.id] = []
@@ -1691,6 +1672,24 @@ class AEBThread(BaseThread):
                 head_on = ctx.head_on
                 near_head_on = ctx.near_head_on
                 lateral_gap = ctx.lateral_gap
+                # Clear threat: held dead ahead, driving ego's way or stopped. The hold runs
+                # before the collision horizon reaches it (README warn classes).
+                stopped = measured_stationary(ctx, cal)
+                offset = (_path_offset(ctx) if cal.aeb_warn_clear_class
+                          and (ctx.co_directional or stopped) else None)
+                if offset is not None and offset <= cal.aeb_warn_clear_band_m:
+                    clear_since[v.id] = self._clear_since.get(v.id, now_mono)
+                if (offset is not None and offset <= cal.aeb_warn_near_band_m and stopped
+                        and (ctx.co_directional or head_on or near_head_on)
+                        and not ctx.v.is_tmp and ctx.dist <= cal.aeb_warn_near_max_range_m
+                        and abs(ctx.ego_curvature) <= cal.aeb_warn_near_max_kappa):
+                    near_since[v.id] = self._near_since.get(v.id, now_mono)
+                since = clear_since.get(v.id)
+                clear_threat = since is not None and now_mono - since >= cal.aeb_warn_clear_hold_s
+                since = near_since.get(v.id)
+                near_threat = since is not None and now_mono - since >= cal.aeb_warn_near_hold_s
+                warn_lead_s = (cal.aeb_warn_lead_s if clear_threat
+                               else cal.aeb_warn_near_lead_s if near_threat else 0.0)
 
                 # Re-derive cross_arcs respecting Fix A via lane classification
                 own_lane_for_fix_a = ctx.lane in (Lane.OPPOSITE_OR_OUTER, Lane.OFF_ROAD)
@@ -1745,10 +1744,13 @@ class AEBThread(BaseThread):
                             or getattr(v, "crash_confirmed", False)
                             or v.id in certain_geom_ids):
                         nearcertain_geom_ids.add(v.id)
-                    # Warn-persistence classes: evidence quality, not threat
-                    # level, so they add latency only (README warn persistence).
-                    if head_on or near_head_on:
+                    # Warn classes add latency only (README warn classes). A clear threat
+                    # is never oncoming traffic.
+                    if (head_on or near_head_on) and not (clear_threat or near_threat):
                         oncoming_colliding_ids.add(v.id)
+                    if (cal.aeb_warn_crossers_with_brake and not stopped
+                            and abs(ctx.fwd_dot) < cal.aeb_warn_crosser_dot):
+                        crosser_colliding_ids.add(v.id)
                     if v.id not in wide_lat_checked_ids:
                         wide_lat_checked_ids.add(v.id)
                         _, warn_d_abs = project_to_ego_arc(
@@ -1847,14 +1849,7 @@ class AEBThread(BaseThread):
                         if v.id in clearance_memo:
                             cres = clearance_memo[v.id]
                         else:
-                            cres = clearance_required(
-                                ego_arc, padded_target_arcs, ego_speed, cal,
-                                lag_s=(0.0 if engaged_pad_m is not None
-                                       else load_response_s),
-                                pad_m=(engaged_pad_m or 0.0),
-                                front_to_surface=ego_front_to_surface,
-                                near_horizon_s=dynamic_horizon,
-                            )
+                            cres = clearance_of(padded_target_arcs)
                             clearance_memo[v.id] = cres
                             if cres is not None and cres.clears:
                                 clearance_clears_ids.add(v.id)
@@ -1874,6 +1869,25 @@ class AEBThread(BaseThread):
                         )
                         pad_rate_t = closing_unbraked
 
+                    lead_s = warn_lead_s
+                    if lead_s <= 0.0 and v.id not in crosser_colliding_ids:
+                        lead_s = cal.aeb_warn_other_lead_s
+                    if (lead_s > 0.0 and not self._engaged
+                            and cal.clearance_required_enabled):
+                        if v.id not in lead_memo:
+                            lead_memo[v.id] = clearance_required(
+                                ego_arc, padded_target_arcs, ego_speed, cal,
+                                lag_s=load_response_s + lead_s, pad_m=0.0,
+                                front_to_surface=ego_front_to_surface,
+                                near_horizon_s=dynamic_horizon,
+                            )
+                        ahead = lead_memo[v.id]
+                        if ahead is not None:
+                            ahead_t = min(ahead.required_ms2, _REQUIRED_CEIL_MS2)
+                            if warn_lead_s > 0.0:
+                                best_required_lead = max(best_required_lead, ahead_t)
+                            else:
+                                best_required_other = max(best_required_other, ahead_t)
                     if required_t > best_required:
                         best_required = required_t
                         best_required_pad_rate = pad_rate_t
@@ -1959,13 +1973,6 @@ class AEBThread(BaseThread):
         time_to_brake = best_ttb if (run_collision and best_ttb < _INF) else _INF
         display_ttc = best_unbraked_ttc
 
-        # ego_pitch_rad is the NEGATED grade and gravity has nothing to cancel
-        # against; a pose past the bound is a wreck, not a road (README slope term).
-        road_grade = math.tan(-ego_pitch_rad) if math.isfinite(ego_pitch_rad) else 0.0
-        if not math.isfinite(road_grade) or abs(road_grade) > MAX_EGO_GRADE:
-            road_grade = 0.0
-        slope_accel = _GRAVITY_MS2 * math.sin(math.atan(road_grade))
-        downhill_offset = max(-slope_accel, 0.0)
         capacity_estimate = _max_brake_live
         effective_max_decel = max(
             0.1, cal.ego_decel_frac * capacity_estimate - downhill_offset,
@@ -2157,9 +2164,24 @@ class AEBThread(BaseThread):
         warn_by_ttb = (
             run_collision and aeb_outputs_ok and time_to_brake < cal.warn_ttb
         )
-        warn_raw = bool(warn_by_decel or warn_by_ttb)
+        # AEB would have to brake for a clear in-lane threat within aeb_warn_lead_s.
+        warn_by_lead = (
+            run_collision
+            and aeb_outputs_ok
+            and threat_present
+            and best_required_lead + downhill_offset >= engage_threshold
+        )
+        # Complicated scenes: the same test with a shorter lead and the usual windows.
+        warn_by_other = (
+            run_collision
+            and aeb_outputs_ok
+            and threat_present
+            and best_required_other + downhill_offset >= engage_threshold
+        )
+        warn_raw = bool(warn_by_decel or warn_by_ttb or warn_by_lead or warn_by_other)
         # A beep about something this far out is not actionable, only noise.
-        if warn_raw and nearest_colliding_range > cal.aeb_warn_max_range_m:
+        if (warn_raw and not warn_by_lead
+                and nearest_colliding_range > cal.aeb_warn_max_range_m):
             warn_raw = False
 
         # Oblique warn occupancy gate; instant paths unchanged (README warn persistence).
@@ -2178,6 +2200,8 @@ class AEBThread(BaseThread):
 
         # Two more phantom-beep classes: every colliding target oncoming, or
         # every one a full lane off the ego arc. Both gate latency, not silence.
+        self._clear_since = clear_since
+        self._near_since = near_since
         warn_oncoming_only = bool(colliding_ids) and colliding_ids <= oncoming_colliding_ids
         self._warn_oncoming_confirm.window_s = cal.aeb_warn_confirm_oncoming_s
         self._warn_oncoming_confirm.observe(now_mono, warn_raw and warn_oncoming_only)
@@ -2202,7 +2226,7 @@ class AEBThread(BaseThread):
             )
             warn_hard = bool(self._engaged or warn_ttb_hard or warn_latched)
             warn_instant = warn_hard or (
-                any(vid in nearcertain_geom_ids for vid in colliding_ids)
+                (warn_by_lead or any(vid in nearcertain_geom_ids for vid in colliding_ids))
                 and self._warn_instant_confirm.confirmed(now_mono)
             )
             aeb_warn = warn_instant or self._warn_confirm.confirmed(now_mono)
@@ -2214,6 +2238,9 @@ class AEBThread(BaseThread):
                     aeb_warn = False
                 if (aeb_warn and warn_wide_lat_only
                         and not self._warn_wide_lat_confirm.confirmed(now_mono)):
+                    aeb_warn = False
+                # Moving crossers turn at the last second: their cue starts with the brake.
+                if aeb_warn and colliding_ids and colliding_ids <= crosser_colliding_ids:
                     aeb_warn = False
         else:
             aeb_warn = False
@@ -2294,6 +2321,7 @@ class AEBThread(BaseThread):
         snap = AEBSnapshot(
             ego_x=ego_x, ego_z=ego_z, ego_yaw=ego_yaw_rad,
             ego_speed=ego_speed, ego_half_w=ego_hw, ego_half_l=ego_half_l,
+            ego_front_m=geometry.front_m, ego_rear_m=geometry.rear_m,
             ego_arc=ego_arc, ego_braked_arc=ego_braked_arc,
             ego_has_trailer=ego_has_trailer,
             vehicles=vehicle_dicts, vehicle_arcs=vehicle_arcs,
@@ -2304,6 +2332,7 @@ class AEBThread(BaseThread):
             los_vetoed_ids=los_vetoed_ids,
             closing_floor_ids=closing_floor_ids,
             engage_vetoed_ids=engage_vetoed_ids,
+            ghost_ids=ghost_ids,
             clearance_required_ms2=(
                 min(best_clearance.required_ms2, _REQUIRED_CEIL_MS2)
                 if best_clearance is not None else 0.0),
@@ -2325,17 +2354,24 @@ class AEBThread(BaseThread):
             ego_path_saturated=ego_path.saturated,
         )
 
+        self._hmi_stopped = _hmi_stopped_step(
+            aeb_warn or aeb_brake, ego_speed, self._hmi_stopped,
+            cal.aeb_min_engage_speed_kmh / 3.6,
+        )
+        hmi_live = not self._hmi_stopped
         action, self._hmi_sound_prev = _hmi_sound_step(
-            aeb_warn, aeb_brake, self._hmi_sound_prev,
+            aeb_warn and hmi_live, aeb_brake and hmi_live, self._hmi_sound_prev,
         )
         if action == "start":
-            self._sound_handler.start_warning()
+            self._sound_handler.start_warning(braking=aeb_brake)
         elif action == "stop":
             self._sound_handler.stop_warning()
+        self._hmi_cue_until = _hmi_cue_until(action, now_mono, self._hmi_cue_until)
 
         with self.data._lock:
             self.data.AEB_warn = aeb_warn
             self.data.AEB_brake = aeb_brake
+            self.data.AEB_cue = now_mono < self._hmi_cue_until
             self.data.time_to_brake = time_to_brake
             self.data.em_stop_requested = aeb_brake
             self.data.AEB_target_decel_ms2 = target_published
@@ -2365,6 +2401,8 @@ class AEBThread(BaseThread):
                 ego_speed=ego_speed,
                 ego_hw=ego_hw,
                 ego_half_l=ego_half_l,
+                ego_front_m=geometry.front_m,
+                ego_rear_m=geometry.rear_m,
                 ego_cap_fwd=ego_cap_fwd,
                 ego_cap_back=ego_cap_back,
                 ego_front_to_surface=ego_front_to_surface,
@@ -2423,6 +2461,8 @@ class AEBThread(BaseThread):
         ego_cap_fwd: float,
         ego_cap_back: float,
         ego_front_to_surface: float,
+        ego_front_m: float | None = None,
+        ego_rear_m: float | None = None,
         ego_arc: ArcPath,
         vehicles_eff: list[Vehicle],
         vehicle_collision_data: dict,
@@ -2486,8 +2526,8 @@ class AEBThread(BaseThread):
                 max_rz = max(rz for _, rz in corners)
                 min_rx = min(rx for rx, _ in corners)
                 max_rx = max(rx for rx, _ in corners)
-                face_ahead = min_rz - ego_half_l
-                face_behind = -max_rz - ego_half_l
+                face_ahead = min_rz - (ego_front_m if ego_front_m is not None else ego_half_l)
+                face_behind = -max_rz - (ego_rear_m if ego_rear_m is not None else ego_half_l)
                 # Right-of-ego face: negative rx in this frame.
                 face_right = -max_rx - ego_hw if max_rx < 0.0 else None
 
@@ -2544,7 +2584,7 @@ class AEBThread(BaseThread):
             "  cal stop_buffer=%.3f response_s=%.3f corridor_margin=%.3f "
             "parallel_scale=%.2f slam_ttb=%.2fs reach@v slam=%.2fm\n"
             "  closing_dist=%.3f hit_dist=%.3f ego_travel=%.3f "
-            "ego_front_to_surface=%.3f (cap_fwd+hw) v_close=%.2f\n"
+            "ego_front_to_surface=%.3f (cap_fwd) v_close=%.2f\n"
             "  d_rel=%.3f d_ego=%.3f resp_term=%.3f codir_cap=%.2f\n"
             "  clearance vid=%s req=%.2f s_bind=%.2f t_bind=%.2f "
             "v_pass=%.2f clears=%s n=%d\n"
@@ -2597,6 +2637,8 @@ class AEBThread(BaseThread):
 
     def teardown(self) -> None:
         self._hmi_sound_prev = False
+        self._hmi_cue_until = float("-inf")
+        self._hmi_stopped = False
         self._sound_handler.cleanup()
         if self._radar_visualizer is not None:
             try:
@@ -2613,6 +2655,8 @@ class AEBThread(BaseThread):
         self._warn_wide_lat_confirm.reset()
         self._warn_instant_confirm.reset()
         self._warn_wide_seen.clear()
+        self._clear_since.clear()
+        self._near_since.clear()
         self._risk_confirm.clear()
         self._published_target_ms2 = 0.0
         self._last_target_change_mono = 0.0
@@ -2635,6 +2679,7 @@ class AEBThread(BaseThread):
         with self.data._lock:
             self.data.AEB_warn = False
             self.data.AEB_brake = False
+            self.data.AEB_cue = False
             self.data.time_to_brake = _INF
             self.data.em_stop_requested = False
             self.data.AEB_target_decel_ms2 = 0.0
@@ -2648,7 +2693,7 @@ class AEBThread(BaseThread):
     def _read_radar_snapshot(
         self,
     ) -> tuple[list[Vehicle], float, float, float, float, float, float, float,
-               bool, float | None, bool, bool, float, frozenset, float] | None:
+               bool, float | None, bool, bool, float, frozenset, float, frozenset] | None:
         """Radar snapshot tuple under lock; None if radar thread missing."""
         try:
             rt = registry.get_thread("radar_thread")
@@ -2673,8 +2718,11 @@ class AEBThread(BaseThread):
                     bool(rt.data.tmp_session),
                     bool(rt.data.paused),
                     float(rt.data.t_mono),
-                    frozenset(getattr(rt.data, "off_surface_ids", frozenset())),
+                    # Ids AEB cannot hit: off ego's road (README §15) or no-collision zone ghosts (§18).
+                    frozenset(getattr(rt.data, "off_surface_ids", frozenset()))
+                    | frozenset(getattr(rt.data, "ncz_ids", frozenset())),
                     float(getattr(rt.data, "ego_t_kin", 0.0) or 0.0),
+                    frozenset(getattr(rt.data, "ncz_ids", frozenset())),
                 )
         except AttributeError:
             return None

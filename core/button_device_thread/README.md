@@ -1,13 +1,52 @@
 # button_device_thread
 
 Reads buttons from HID devices that pygame/SDL does not expose as joysticks, so
-they can be bound to cruise control. Binding format lives in
+they can be bound to cruise control. `JoystickPool` leaves every device with no
+axes (a MOZA stalk) to this thread, as SDL 2.28 did, so it keeps this debounce. Binding format lives in
 `core/INPUT_BINDINGS.md`; a `button_device` binding is a `vid_pid` plus a
 `button_id`, where `button_id = byte_index * 8 + bit_index` into the raw report.
 
 Publishes `data.button_states` as `{vid_pid: {button_id: bool}}`. `resolve_held()`
 in `core/input_bindings.py` reads it, `main_pedal_thread` republishes the bound
 buttons, and the press FSM in `core/cruise_control_thread` acts on the edges.
+
+## Only real buttons
+
+`hid_descriptor.parse_button_layout()` reads the device's report descriptor
+(`hid.device.get_report_descriptor()`, hidapi 0.14+) and keeps the bits of
+1-bit, variable, non-constant Input fields on the Button page (0x09), per
+report ID. Numbered reports arrive with the ID in byte 0, so their bits shift
+by 8. Output and feature items do not move input offsets.
+
+With a layout, the capture scan and the tracked-device reader ignore every
+other bit. Before this, every bit of every byte was a candidate, so pressing a
+pedal set the joystick scan did not own (a pygame-invisible device, or a
+name-based SDL GUID that defeats the vid:pid exclusion) bound an axis bit as a
+cruise button (issue #15). A descriptor also stops one report ID's bytes from
+overwriting another report's buttons. A device whose descriptor cannot be read
+keeps the old all-bits behaviour.
+
+A binding that points at a bit the descriptor does not declare as a button
+gets one popup per session asking the driver to reassign it, and never fires.
+
+## Opening devices
+
+`hid.device().open_path()` and `open(vid, pid)` hold the GIL for the whole call
+(cython-hidapi 0.15), and `open(vid, pid)` enumerates every HID device first.
+The old reconnect fell back to `open(vid, pid)` every 2 s while a bound device
+was absent, stalling every thread for a full enumeration each time. Connect now
+enumerates (which releases the GIL) and opens the path it found, or nothing.
+
+Both connect and the capture scan pick the game-controller collection
+(Generic Desktop joystick, gamepad, multi-axis) of a device. The scan opens
+nothing else, so headsets, RGB controllers and other vendor collections are no
+longer opened with the GIL held, and a device is never read through a
+collection that has no input reports.
+
+A read error on a device that has delivered a report is a disconnect: popup,
+retry every 2 s. A device that opens but never reads, and still enumerates, is
+unreadable: one popup per session, retry every 30 s. Before, it repeated the
+disconnect popup every 2 s forever.
 
 ## Report reading
 
@@ -92,9 +131,9 @@ which a whole press can collapse into a single drain burst and be missed.
 
 ## Capture
 
-`start_capture()` opens every non-tracked HID device (skipping mouse/keyboard
-usages and anything pygame already owns by vid:pid), watches for a 0 to 1
-transition, and hold-confirms it for `_CAPTURE_CONFIRM_S` before publishing
+`start_capture()` opens the game-controller collection of every non-tracked HID
+device pygame does not already own by vid:pid, watches its button bits for a
+0 to 1 transition, and hold-confirms it for `_CAPTURE_CONFIRM_S` before publishing
 `capture_event`. The confirm is a duration, not a tick count, so changing
 `loop_interval` cannot silently change how long a user must hold a button. Bits
 that change during warm-up are marked noisy and ignored for the rest of the

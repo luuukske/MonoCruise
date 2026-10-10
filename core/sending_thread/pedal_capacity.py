@@ -8,7 +8,11 @@ import time
 from collections import deque
 from typing import Deque
 
-from core.scs_profile.intensity import effective_brake_pedal
+from core.scs_profile.intensity import (
+    TUNE_BRAKE_INTENSITY,
+    clamp_brake_intensity,
+    effective_brake_pedal,
+)
 from core.settings import Settings
 
 from .accel_to_pedals import brake_curve_fraction, weight_factor
@@ -42,6 +46,11 @@ _BRAKE_CANDIDATE_MAX_FRACTION: float = 1.35
 # Two-speed brake learning. Routine presses are shallow (pedal³ weight) and
 _BRAKE_ALPHA_NORMAL: float = 0.02   # EMA alpha at full pedal, normal driving
 _BRAKE_ALPHA_AEB: float = 0.15      # EMA alpha at full pedal during AEB braking
+# Only a hard press held past tap length teaches, here and in AEB's learners: shorter
+# firm holds were 3% of accepted samples and 56% of the scale's movement. See README.
+_FIRM_TUNE_PEDAL: float = 0.5
+_FIRM_SENT_PEDAL: float = 0.9
+BRAKE_HOLD_MIN_S: float = 1.3
 
 # Shape-function model for per-gear gas gain. Two scalars parameterize the
 _RATIO_INIT: float = 1.27            # default until enough cross-gear samples settle the
@@ -122,6 +131,17 @@ def _brake_candidate_cap_ms2(baseline_ms2: float) -> float:
     return baseline_ms2 * _BRAKE_CANDIDATE_MAX_FRACTION
 
 
+def sent_share(tune_pedal: float, intensity: float | None) -> float:
+    """Sent pedal behind a tune-unit reading, capped at 1."""
+    return min(tune_pedal * TUNE_BRAKE_INTENSITY / clamp_brake_intensity(intensity), 1.0)
+
+
+def is_firm_sample(tune_pedal: float, intensity: float | None) -> bool:
+    """Firm braking, or a full sent pedal on a slider too low to reach the firm band."""
+    return (tune_pedal >= _FIRM_TUNE_PEDAL
+            or sent_share(tune_pedal, intensity) >= _FIRM_SENT_PEDAL)
+
+
 class PedalCapacityTracker:
     """Estimates vehicle max brake deceleration (single scalar) and gas See `core/sending_thread/README.md`."""
 
@@ -151,6 +171,7 @@ class PedalCapacityTracker:
         self._last_brake_step_mono: float = -math.inf
         self._brake_pedal_smooth: float | None = None
         self._last_brake_call_mono: float | None = None
+        self._hard_hold_start_mono: float | None = None
         self._decel_history: Deque[tuple[float, float]] = deque(
             maxlen=_DECEL_HISTORY_LIMIT
         )
@@ -169,6 +190,8 @@ class PedalCapacityTracker:
         self.last_brake_gate: str = ""
         self.brake_samples_accepted: int = 0
         self.last_brake_candidate_scale: float = 0.0
+        # (candidate scale, tune pedal) of this tick's settled sample, before the cap gate.
+        self.last_settled_brake_sample: tuple[float, float] | None = None
 
     @property
     def max_brake_ms2(self) -> float:
@@ -304,6 +327,7 @@ class PedalCapacityTracker:
         # estimate in the same tick, so only the correction is carried over.
         if baseline_ms2 > 0.0:
             self._max_brake_ms2 = self._brake_scale * baseline_ms2
+        self.last_settled_brake_sample = None
 
         now = time.monotonic()
         # Everything below runs in tune units: gates and the curve read the pedal the
@@ -318,12 +342,17 @@ class PedalCapacityTracker:
             smooth = pedal
             self._brake_pedal_history.clear()
             self._decel_history.clear()
+            self._hard_hold_start_mono = None
         else:
             a_s = 1.0 - math.exp(
                 -max(now - last, 1e-4) / _BRAKE_PEDAL_SMOOTH_TAU_S
             )
             smooth += a_s * (pedal - smooth)
         self._brake_pedal_smooth = smooth
+        if not is_firm_sample(smooth, brake_intensity):
+            self._hard_hold_start_mono = None
+        elif self._hard_hold_start_mono is None:
+            self._hard_hold_start_mono = now
 
         history = self._brake_pedal_history
         if history:
@@ -351,6 +380,13 @@ class PedalCapacityTracker:
             return
         if abs(slope_rad) > _MAX_SLOPE_RAD:
             self.last_brake_gate = "slope"
+            return
+        hold_start = self._hard_hold_start_mono
+        if hold_start is None:
+            self.last_brake_gate = "light"
+            return
+        if now - hold_start < BRAKE_HOLD_MIN_S:
+            self.last_brake_gate = "hold"
             return
 
         if now - self._last_brake_step_mono < _BRAKE_STEP_GUARD_S:
@@ -385,6 +421,7 @@ class PedalCapacityTracker:
             sum(pedal_values) / len(pedal_values), _BRAKE_PEDAL_FLOOR
         )
         candidate = mean_decel / brake_curve_fraction(mean_pedal)
+        self.last_settled_brake_sample = (candidate / baseline_ms2, mean_pedal)
         if candidate > _brake_candidate_cap_ms2(baseline_ms2):
             self.last_brake_gate = "cap"
             return

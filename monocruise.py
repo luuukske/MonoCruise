@@ -295,6 +295,7 @@ def main() -> None:
     def _auto_install_sdk(result: SdkCheckResult) -> None:
         """Boot-thread SDK apply; never closes game; defers loaded outdated DLLs."""
         from core.sdk_installer import get_manager
+        from core.sdk_installer.own import is_own
 
         try:
             results = get_manager().apply(
@@ -333,12 +334,19 @@ def main() -> None:
                     "c",
                     duration_ms=9000,
                 )
+            elif all(is_own(name) for r in changed for name in r.installed):
+                log.info("SDK auto-install: installed MonoCruise's TruckersMP plugin for %s", games)
+                PopupWindow.emit(
+                    "TruckersMP plugin installed",
+                    f"{games}\nactive after game restart",
+                    "c",
+                    duration_ms=9000,
+                )
             else:
                 log.info("SDK auto-install: installed the plugin for %s", games)
                 PopupWindow.emit(
-                    "Game plugin installed",
-                    f"MonoCruise installed the game plugin for {games}. Restart the "
-                    f"game to activate pedal control.",
+                    "Game plugins installed",
+                    f"{games}\nactive after game restart",
                     "c",
                     duration_ms=9000,
                 )

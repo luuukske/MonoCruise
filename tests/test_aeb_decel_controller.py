@@ -11,6 +11,7 @@ import math
 
 import pytest
 
+from core.aeb.calibration import DEFAULT as AEB_CAL
 from core.sending_thread.accel_to_pedals import brake_curve_fraction
 from core.sending_thread.thread import (
     _AEB_MEAS_TAU_S,
@@ -18,6 +19,7 @@ from core.sending_thread.thread import (
     _AEB_PLANT_DEAD_TRAILER_S,
     _AEB_PLANT_TAU_SOLO_S,
     _AEB_PLANT_TAU_TRAILER_S,
+    _AEB_PREFILL_MAX_S,
     AEBDecelController,
 )
 
@@ -60,6 +62,31 @@ class Plant:
                 break
         steady = max(0.0, self.true_max * brake_curve_fraction(applied) + self.offset)
         self.decel += (1.0 - math.exp(-dt / self.tau)) * (steady - self.decel)
+        return self.decel
+
+
+class LevelPlant(Plant):
+    """ETS2's build-up: a full pedal bites in well under 0.1 s, a quarter pedal in ~0.25 s.
+
+    Fitted on brake_debug.csv onsets (2026-09-29 to 10-06): sent 1.0 tau 0.02-0.10 s,
+    sent 0.05-0.3 tau 0.1-0.5 s. Tau is interpolated on the applied pedal.
+    """
+
+    def __init__(self, true_max: float = MAX_BRAKE, dead: float = 0.06) -> None:
+        super().__init__(true_max=true_max, dead=dead)
+
+    def step(self, pedal: float, now: float, dt: float) -> float:
+        self._hist.append((now, pedal))
+        applied = 0.0
+        for t, p in self._hist:
+            if t <= now - self.dead:
+                applied = p
+            else:
+                break
+        share = min(1.0, max(0.0, (applied - 0.2) / 0.8))
+        tau = 0.25 + (0.05 - 0.25) * share
+        steady = self.true_max * brake_curve_fraction(applied)
+        self.decel += (1.0 - math.exp(-dt / tau)) * (steady - self.decel)
         return self.decel
 
 
@@ -124,22 +151,50 @@ def test_never_overshoots_the_target_decel():
 
     Covers plants faster and slower than the model, in both load classes.
     """
+    # A truck braking harder than believed may run 1.25x through the onset guard,
+    # then must settle; approved by Lukas 2026-10-04 (README, onset guard).
     cases = [
-        (5.0, dict(offset=-1.5), False),
-        (5.0, dict(offset=1.0), False),
-        (5.0, dict(true_max=12.5), False),
-        (2.0, dict(true_max=8.0, offset=-0.6), False),
-        (5.0, dict(dead=0.05, tau=0.10), False),
-        (5.0, dict(dead=0.08, tau=0.30), False),
-        (5.0, dict(offset=-0.6, dead=_AEB_PLANT_DEAD_TRAILER_S, tau=0.35), True),
-        (5.0, dict(offset=-0.6, dead=_AEB_PLANT_DEAD_TRAILER_S, tau=0.65), True),
-        (5.0, dict(offset=-0.6, dead=_AEB_PLANT_DEAD_TRAILER_S, tau=0.80), True),
+        (5.0, dict(offset=-1.5), False, 1.15),
+        (5.0, dict(offset=1.0), False, 1.25),
+        (5.0, dict(true_max=12.5), False, 1.25),
+        (2.0, dict(true_max=8.0, offset=-0.6), False, 1.15),
+        (5.0, dict(dead=0.05, tau=0.10), False, 1.15),
+        (5.0, dict(dead=0.08, tau=0.30), False, 1.15),
+        (5.0, dict(offset=-0.6, dead=_AEB_PLANT_DEAD_TRAILER_S, tau=0.35), True, 1.15),
+        # Measured trailer plants top out at 0.38 s; the 0.80 s case went 2026-10-04 (README).
+        (5.0, dict(offset=-0.6, dead=_AEB_PLANT_DEAD_TRAILER_S, tau=0.65), True, 1.15),
+    ]
+    for target, kwargs, trailer, limit in cases:
+        trace = run(target, Plant(**kwargs), has_trailer=trailer)
+        peak = max(d for _, d, _, _ in trace)
+        assert peak <= limit * target, (
+            f"{kwargs} trailer={trailer}: peaked at {peak / target:.2f}x target"
+        )
+        if limit > 1.15:
+            late = [d for t, d, _, _ in trace if t > 1.8]
+            assert all(abs(d - target) < 0.35 for d in late), (
+                f"{kwargs}: still {late[-1] / target:.2f}x target after the guard"
+            )
+
+
+def test_does_not_let_go_after_a_fast_hit():
+    """Slams build in ~0.15 s solo or with a trailer (brake_debug.csv, 2026-10-04).
+
+    Against the slower model the observer read that as bias and cut the pedal:
+    64-77% of target in game at every slider, 0.69-0.74 here without the guard.
+    """
+    cases = [
+        (7.5, dict(true_max=11.0, dead=0.10, tau=0.03), False),
+        (7.5, dict(true_max=11.0, dead=0.075, tau=0.08), True),
+        (7.5, dict(dead=0.10, tau=0.03), False),
+        (5.0, dict(dead=0.10, tau=0.03), False),
     ]
     for target, kwargs, trailer in cases:
         trace = run(target, Plant(**kwargs), has_trailer=trailer)
-        peak = max(d for _, d, _, _ in trace)
-        assert peak <= 1.15 * target, (
-            f"{kwargs} trailer={trailer}: peaked at {peak / target:.2f}x target"
+        hit = next(t for t, d, _, _ in trace if d >= 0.9 * target)
+        low = min(d for t, d, _, _ in trace if hit < t <= hit + 1.5)
+        assert low >= 0.88 * target, (
+            f"{kwargs} trailer={trailer}: fell to {low / target:.2f}x target after the hit"
         )
 
 
@@ -206,12 +261,13 @@ def test_unmeetable_demand_goes_straight_to_full_pedal():
     ctrl = AEBDecelController()
     ctrl.update_active(True)
 
+    # Measured at the command: the onset pre-fill is over, so only the override can slam.
     def one(demand):
         return ctrl.step(
             target_decel_ms2=0.9 * MAX_BRAKE,   # what AEB may publish, capped
             floor_decel_ms2=0.9 * MAX_BRAKE,
             demand_decel_ms2=demand,
-            measured_decel_ms2=0.0,
+            measured_decel_ms2=0.9 * MAX_BRAKE,
             max_brake_ms2=MAX_BRAKE,
             ff_pedal_fn=pedal_from_decel,
             decel_from_pedal_fn=decel_from_pedal,
@@ -233,3 +289,50 @@ def test_saturation_override_does_not_touch_normal_stops():
     assert max(p for _, _, p, _ in trace) < 1.0
     settled = [d for t, d, _, _ in trace if t > 1.8]
     assert all(abs(d - 5.0) < 0.35 for d in settled)
+
+
+def _time_to(trace, level: float) -> float:
+    return next(t for t, d, _, _ in trace if d >= level)
+
+
+def test_an_emergency_command_bites_at_slam_speed():
+    """AEB engages at its bar's share of the truck, so its pedal sits just under full.
+
+    In ETS2 that pedal still builds like gentle braking, about 0.37 s to 90% of the
+    command, while the build-up pad assumes a slam. The pre-fill gets there in ~0.15 s.
+    """
+    target = AEB_CAL.aeb_engage_frac * MAX_BRAKE
+    for true_max in (MAX_BRAKE, 0.85 * MAX_BRAKE, 1.2 * MAX_BRAKE):
+        reach = min(target, decel_from_pedal(1.0, true_max))
+        trace = run(target, LevelPlant(true_max=true_max))
+        assert _time_to(trace, 0.9 * reach) <= 0.25, f"true max {true_max}"
+        settled = [d for t, d, _, _ in trace if t > 1.8]
+        assert all(abs(d - reach) < 0.45 for d in settled), f"true max {true_max}"
+    exact = run(target, LevelPlant())
+    assert max(d for _, d, _, _ in exact) <= 1.15 * target, "pre-fill must hand over, not slam on"
+
+
+def test_a_routine_command_never_opens_at_full_pedal():
+    """The pre-fill is for a command near the top of the pedal, not for tracked stops."""
+    for target in (2.0, 3.0, 5.0):
+        trace = run(target, LevelPlant())
+        assert max(p for _, _, p, _ in trace) < 1.0, f"target {target}"
+
+
+def test_the_pre_fill_ends_on_its_own_clock():
+    """A measurement that never rises must not hold full pedal past the pre-fill window."""
+    ctrl = AEBDecelController()
+    ctrl.update_active(True)
+    target = AEB_CAL.aeb_engage_frac * MAX_BRAKE
+    pedals = []
+    now = 0.0
+    while now < 1.0:
+        pedals.append((now, ctrl.step(
+            target_decel_ms2=target, floor_decel_ms2=target, demand_decel_ms2=target,
+            measured_decel_ms2=0.0, max_brake_ms2=MAX_BRAKE,
+            ff_pedal_fn=pedal_from_decel, decel_from_pedal_fn=decel_from_pedal,
+            has_trailer=False, now=now, dt=DT,
+        )))
+        now += DT
+    assert pedals[0][1] == 1.0
+    assert all(p < 1.0 for t, p in pedals if t >= _AEB_PREFILL_MAX_S + DT)

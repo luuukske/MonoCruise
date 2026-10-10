@@ -3,6 +3,8 @@ import requests
 import re
 from typing import Optional
 
+from shared.github_releases import ReleaseSourceError, fetch_releases
+
 _REQUEST_TIMEOUT = 15  # seconds
 
 
@@ -25,16 +27,14 @@ class GitHubAPI:
         return []
     
     def get_releases(self) -> list[dict]:
-        """Fetch all releases including pre-releases; raises GitHubAPIError when unreachable."""
+        """All releases incl. pre-releases, from the feed if the API is rate limited.
+        Raises GitHubAPIError when neither answers."""
         if self._releases_cache is not None:
             return self._releases_cache
         try:
-            response = requests.get(f"{self.base_url}/releases", timeout=_REQUEST_TIMEOUT)
-        except requests.RequestException as e:
-            raise GitHubAPIError(f"Cannot reach GitHub: {e}") from e
-        if response.status_code != 200:
-            raise GitHubAPIError(f"GitHub returned HTTP {response.status_code}")
-        self._releases_cache = response.json()
+            self._releases_cache = fetch_releases(self.owner, self.repo, timeout=_REQUEST_TIMEOUT)
+        except ReleaseSourceError as e:
+            raise GitHubAPIError(str(e)) from e
         return self._releases_cache
     
     def invalidate_cache(self):

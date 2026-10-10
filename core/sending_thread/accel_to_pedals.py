@@ -214,6 +214,16 @@ def brake_curve_fraction(pedal: float) -> float:
     return 1.0 - math.exp(-_BRAKE_CURVE_RATE * x ** _BRAKE_CURVE_POWER)
 
 
+def brake_curve_pedal(fraction: float) -> float:
+    """Inverse of `brake_curve_fraction`: pedal [0-1] that delivers *fraction* of capacity."""
+    f = _finite_or_zero(fraction)
+    if f <= 0.0:
+        return 0.0
+    if f >= brake_curve_fraction(1.0):
+        return 1.0
+    return min(1.0, (-math.log(1.0 - f) / _BRAKE_CURVE_RATE) ** (1.0 / _BRAKE_CURVE_POWER))
+
+
 def compute_estimated_mass_kg(
     unit_mass_kg: float,
     cargo_mass_kg: float,

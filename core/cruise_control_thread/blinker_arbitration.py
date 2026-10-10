@@ -98,6 +98,11 @@ class BlinkerArbiter:
             self.soft_ok_mono = now
         return self.soft_allowed
 
+    @property
+    def leaving_lane(self) -> bool:
+        """Committed to the indicated lane or still releasing the one left: leads[] is the old lane."""
+        return self.mode == "pass" or self.committed or self.released_vid is not None
+
     def _set_mode(self, mode: str, now: float) -> None:
         """Stamp only on a real change: mode_mono is the age of the mode.
 

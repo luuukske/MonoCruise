@@ -11,6 +11,8 @@ from pathlib import Path
 
 import requests
 
+from shared.github_releases import describe_failure
+
 log = logging.getLogger("sdk")
 
 _OWNER = "ETS2LA"
@@ -79,15 +81,21 @@ class RemoteFile:
     sha: str
     size: int
     download_url: str
+    # Set for a file shipped with the build: copied from here, never downloaded.
+    local_path: Path | None = None
 
 
 class SdkSource:
     """The ``Assets/SDKs/<version>/Windows`` folder for one game version."""
 
-    def __init__(self, version: str, *, owner: str = _OWNER, repo: str = _REPO):
+    def __init__(
+        self, version: str, *, owner: str = _OWNER, repo: str = _REPO, token: str | None = None
+    ):
         self.version = version
         self.owner = owner
         self.repo = repo
+        # Build-time fetch only (tools/fetch_sdk_bundle.py); the app never passes one.
+        self._token = token
         self._path = f"Assets/SDKs/{version}/{_SUBDIR}"
         self._listing: dict[str, RemoteFile] | None = None
 
@@ -98,6 +106,12 @@ class SdkSource:
     def _headers(self, accept: str) -> dict[str, str]:
         return {"User-Agent": _USER_AGENT, "Accept": accept}
 
+    def _api_headers(self) -> dict[str, str]:
+        headers = self._headers("application/vnd.github+json")
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        return headers
+
     def list_files(self, *, refresh: bool = False) -> dict[str, RemoteFile]:
         """Remote file listing (one API call, cached). Raises SdkSourceError on failure."""
         if self._listing is not None and not refresh:
@@ -105,9 +119,7 @@ class SdkSource:
 
         try:
             response = requests.get(
-                self.contents_url,
-                headers=self._headers("application/vnd.github+json"),
-                timeout=_REQUEST_TIMEOUT,
+                self.contents_url, headers=self._api_headers(), timeout=_REQUEST_TIMEOUT
             )
         except requests.RequestException as exc:
             raise SdkSourceError(f"cannot reach GitHub: {exc}") from exc
@@ -119,9 +131,7 @@ class SdkSource:
                 f"no game plugin is published for game version {self.version}"
             )
         if response.status_code != 200:
-            raise SdkSourceError(
-                f"GitHub returned HTTP {response.status_code} for SDK version {self.version}"
-            )
+            raise SdkSourceError(f"{describe_failure(response)} for SDK version {self.version}")
 
         try:
             entries = response.json()
@@ -155,11 +165,7 @@ class SdkSource:
         """
         url = f"https://api.github.com/repos/{self.owner}/{self.repo}/contents/{_VERSIONS_PATH}"
         try:
-            response = requests.get(
-                url,
-                headers=self._headers("application/vnd.github+json"),
-                timeout=_REQUEST_TIMEOUT,
-            )
+            response = requests.get(url, headers=self._api_headers(), timeout=_REQUEST_TIMEOUT)
             if response.status_code != 200:
                 return []
             entries = response.json()

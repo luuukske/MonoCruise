@@ -16,9 +16,12 @@ hygiene rules apply to every file in it.
 | `acc_platoon/` | Ten MonoCruise clients in a TruckersMP convoy, closed loop: does ACC absorb a disturbance or grow it into a phantom jam, and is it still safe? Real radar chain, ACC, cruise PID, hold and (opt-in) AEB per client; TMP netcode modelled and calibrated on the clip corpus. `tests/acc/test_platoon.py` stands on it. Read `tools/acc_platoon/README.md` first. |
 | `accel_envelope_probe.py` | What does the CC accel ceiling command at each speed, and how long is 0-50 / 0-90? Prints the per-profile table plus a capability-limited rig model (`--rig loaded`) so the light and loaded regimes can be compared. |
 | `brake_intensity_probe.py` | Reads `brake_debug.csv` (written with `debug` on): full-pedal capacity per braking-intensity value (how much a higher slider really adds at full brake), and lag-aligned partial braking against the learned capacity. Stdlib only, never imports `core.settings`. |
+| `ego_geometry_probe.py` | Ego body and path origin the SDK wheel layout gives for the live truck (`--json` for agents), and with `--clips` the evidence for the rear-wheel path origin over the local clip store. Never imports `core.settings`. See `core/radar/README.md` §17. |
+| `tmp_ncz_probe.py` | Live TruckersMP no-collision zone state from MonoCruise's plugin (`monocruise_tmp.dll`): heartbeat, connected, in-zone, streamed players and whether the AEB gate would open. The state carries no player identity. See `core/radar/README.md` §18. |
 | `read_scs_profile.py` | Transmission and braking intensity for the selected ETS2/ATS profile. Steam Cloud vs local, `game.log.txt` identity, live `shifterType` when the SDK is up. `--json` for agents. |
 | `plot_coast.py` | Coast-fit plots for the mapper. |
 | `release.py`, `tune_visualizer.py` | Release packaging and live tuning UI. |
+| `fetch_sdk_bundle.py` | Build helper, run by `release.yml`: downloads the live ETS2LA game plugin set for every published game version into `core/sdk_installer/bundled/`, the app's offline fallback. See "Bundled fallback" in `core/sdk_installer/README.md`. |
 
 ---
 

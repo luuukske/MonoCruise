@@ -33,6 +33,8 @@ _SAFE_CLR = QColor(80, 210, 130)
 _DANGER_CLR = QColor(240, 55, 55)
 _WARN_CLR = QColor(245, 185, 40)
 _SUPPRESSED_CLR = QColor(100, 100, 115)
+# No-collision zone ghost: grey body, dashed outline (radar README §18).
+_GHOST_CLR = QColor(150, 150, 160)
 _BRAKE_SUPP_CLR = QColor(255, 140, 40)
 _EVASION_FILTER_CLR = QColor(0, 200, 200)
 _EVASION_FILTER_CORRIDOR = QColor(0, 200, 200, 25)
@@ -40,7 +42,7 @@ _EVASION_FILTERED_CLR = QColor(0, 200, 200, 140)
 _TRAILER_CLR = QColor(180, 140, 80)
 _EGO_TRAILER_CLR = QColor(55, 130, 215)
 _ACC_LEAD_CLR = QColor(255, 80, 230)           # primary ACC lead: magenta
-_ACC_CANDIDATE_CLR = QColor(180, 110, 220)     # top-3 non-primary
+_ACC_CANDIDATE_CLR = QColor(180, 110, 220)     # published non-primary ACC leads
 _ACC_CORRIDOR = QColor(255, 80, 230, 35)
 _HIT_CLR = QColor(255, 30, 30)
 _TEXT = QColor(200, 200, 215)
@@ -198,6 +200,7 @@ class AEBDebugWindow(QWidget):
 
         for v in snap.vehicles:
             vid = v["vid"]
+            is_ghost = v.get("ghost", False)
             is_danger = vid in snap.colliding_ids
             is_brake_supp = vid in snap.braking_worsens_ids
             is_evasion_filtered = vid in snap.evasion_filtered_ids
@@ -207,7 +210,9 @@ class AEBDebugWindow(QWidget):
 
             detailed = vid in detailed_ids or is_danger or is_acc_lead
 
-            if is_evasion_filtered:
+            if is_ghost:
+                body_clr, corr_clr = _GHOST_CLR, QColor(_GHOST_CLR)
+            elif is_evasion_filtered:
                 body_clr, corr_clr = _EVASION_FILTERED_CLR, QColor(_EVASION_FILTERED_CLR)
             elif is_danger and is_brake_supp:
                 body_clr, corr_clr = _BRAKE_SUPP_CLR, QColor(_BRAKE_SUPP_CLR)
@@ -230,7 +235,7 @@ class AEBDebugWindow(QWidget):
             self._draw_vehicle_box(
                 p, v["x"], v["z"], v["yaw"],
                 v["half_w"], v["length"], v["is_tmp"],
-                ex, ez, ey, body_clr,
+                ex, ez, ey, body_clr, ghost=is_ghost,
             )
 
             if detailed:
@@ -241,8 +246,13 @@ class AEBDebugWindow(QWidget):
                 is_tmp_veh = v.get("is_tmp", False)
                 tag = "TR" if is_trailer_veh else ""
                 tag += ("/TMP" if is_tmp_veh else "/AI") if tag else ("TMP" if is_tmp_veh else "AI")
-                self._draw_label(p, sx, sy - 14, f"{tag} {spd:.0f}", body_clr)
-                if is_trailer_veh:
+                if is_ghost:
+                    # ACC still follows ghosts, so its lead keeps its colour on the label.
+                    label_clr = _ACC_LEAD_CLR if is_acc_lead else _GHOST_CLR
+                    self._draw_label(p, sx, sy - 14, f"{tag} ghost {spd:.0f}", label_clr)
+                else:
+                    self._draw_label(p, sx, sy - 14, f"{tag} {spd:.0f}", body_clr)
+                if is_trailer_veh and not is_ghost:
                     if kin_swapped:
                         kin_text, kin_clr = "kin:tractor", _SAFE_CLR
                     elif not is_tmp_veh:
@@ -254,15 +264,16 @@ class AEBDebugWindow(QWidget):
 
             for tr in v.get("trailers", []):
                 yaw = tr["yaw"]
+                tr_clr = _GHOST_CLR if is_ghost else _TRAILER_CLR
                 self._draw_vehicle_box(
                     p, tr["x"], tr["z"], yaw,
                     tr["half_w"], tr["length"], tr["is_tmp"],
-                    ex, ez, ey, _TRAILER_CLR,
+                    ex, ez, ey, tr_clr, ghost=is_ghost,
                 )
                 if detailed:
                     trsx, trsy = self._ws(tr["x"], tr["z"], ex, ez, ey)
                     tr_spd = tr.get("speed_kmh", 0.0)
-                    self._draw_label(p, trsx, trsy - 14, f"TR {tr_spd:.0f}", _TRAILER_CLR)
+                    self._draw_label(p, trsx, trsy - 14, f"TR {tr_spd:.0f}", tr_clr)
 
         if snap.ego_arc is not None:
             self._draw_arc_corridor(p, snap.ego_arc, ex, ez, ey, _EGO_CORRIDOR)
@@ -280,18 +291,21 @@ class AEBDebugWindow(QWidget):
                 edge_color=_EVASION_FILTER_CLR, edge_width=1.0,
             )
 
+        fx = -math.sin(ey)
+        fz = -math.cos(ey)
         if snap.ego_has_trailer:
-            fx = -math.sin(ey)
-            fz = -math.cos(ey)
-            reach = snap.ego_half_l + _EGO_TRAILER_HALF_L
+            reach = snap.ego_rear_m + _EGO_TRAILER_HALF_L
             self._draw_ego_box(
                 p, ex - fx * reach, ez - fz * reach, ey,
                 _EGO_TRAILER_HALF_W, _EGO_TRAILER_HALF_L,
                 ex, ez, ey, _EGO_TRAILER_CLR,
             )
 
+        # Body centre sits off the placement origin once the SDK wheels are read.
+        mid = 0.5 * (snap.ego_front_m - snap.ego_rear_m)
         self._draw_ego_box(
-            p, ex, ez, ey, snap.ego_half_w, snap.ego_half_l,
+            p, ex + fx * mid, ez + fz * mid, ey,
+            snap.ego_half_w, 0.5 * (snap.ego_front_m + snap.ego_rear_m),
             ex, ez, ey, _EGO_CLR,
         )
 
@@ -467,6 +481,7 @@ class AEBDebugWindow(QWidget):
         hw: float, length: float, is_tmp: bool,
         ex: float, ez: float, ey: float,
         color: QColor,
+        ghost: bool = False,
     ) -> None:
         hl = length / 2.0
         corners_local = [(-hw, -hl), (hw, -hl), (hw, hl), (-hw, hl)]
@@ -484,9 +499,9 @@ class AEBDebugWindow(QWidget):
             poly.append(QPointF(sx, sy))
 
         fill = QColor(color)
-        fill.setAlpha(140)
+        fill.setAlpha(45 if ghost else 140)
         p.setBrush(QBrush(fill))
-        p.setPen(QPen(color, 1.5))
+        p.setPen(QPen(color, 1.5, Qt.DashLine if ghost else Qt.SolidLine))
         p.drawPolygon(poly)
 
         cx_w, cz_w = wx, wz
@@ -495,7 +510,7 @@ class AEBDebugWindow(QWidget):
         tip_z = wz - flen * math.cos(yaw)
         scx, scy = self._ws(cx_w, cz_w, ex, ez, ey)
         stx, sty = self._ws(tip_x, tip_z, ex, ez, ey)
-        p.setPen(QPen(QColor(255, 255, 255, 160), 1.5))
+        p.setPen(QPen(QColor(255, 255, 255, 70 if ghost else 160), 1.5))
         p.drawLine(QPointF(scx, scy), QPointF(stx, sty))
 
     def _draw_ego_box(
@@ -649,7 +664,7 @@ class AEBDebugWindow(QWidget):
 
     def _draw_hud(self, p: QPainter, snap: AEBSnapshot) -> None:
         hud_w = 310
-        hud_h = 203
+        hud_h = 217
         hud_x = 10
         hud_y = 10
 
@@ -740,14 +755,20 @@ class AEBDebugWindow(QWidget):
         if nef > 0:
             p.setPen(QPen(_EVASION_FILTER_CLR))
             p.drawText(QPointF(x, y), f"{nef} vehicle(s) evasion-filtered (corner/roadside)")
+            y += 14
+
+        ng = len(getattr(snap, "ghost_ids", ()))
+        if ng > 0:
+            p.setPen(QPen(_GHOST_CLR))
+            p.drawText(QPointF(x, y), f"{ng} TMP ghost(s): no-collision zone, ignored")
 
         self._draw_legend(p)
 
     def _draw_legend(self, p: QPainter) -> None:
         lx = 10
-        ly = self.height() - 148
+        ly = self.height() - 161
         lw = 145
-        lh = 143
+        lh = 156
 
         p.setPen(QPen(_HUD_BORDER, 1))
         p.setBrush(QBrush(_HUD_BG))
@@ -762,6 +783,7 @@ class AEBDebugWindow(QWidget):
             (_BRAKE_SUPP_CLR, "Braking worsens"),
             (_SUPPRESSED_CLR, "Filter-suppressed"),
             (_EVASION_FILTER_CLR, "Evasion-filtered"),
+            (_GHOST_CLR, "NCZ ghost"),
             (_ACC_LEAD_CLR, "ACC lead"),
             (_ACC_CANDIDATE_CLR, "ACC candidate"),
             (_MARKER_CLR, "Ground 10/100 m"),

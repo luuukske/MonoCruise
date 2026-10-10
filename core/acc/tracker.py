@@ -1,4 +1,4 @@
-"""Per-vehicle in-path tracker: ego arc, scoring, top-3 leads, trailer swap.
+"""Per-vehicle in-path tracker: ego arc, scoring, closest leads, trailer swap.
 
 Frame pipeline and blinker behaviour: ``core/acc/README.md`` §3–5."""
 
@@ -8,6 +8,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 
+from core.radar.ego_geometry import EgoGeometry
 from core.radar.ego_path import EGO_POSITION_HISTORY_LEN
 from core.radar.traffic import Vehicle
 
@@ -67,6 +68,10 @@ from .trail_arc import (
 
 logger = logging.getLogger(__name__)
 
+
+# Leads published to the controller, nearest first. Five lets anticipation see the
+# convoy ahead of the immediate lead; three measured worse. See ACC_ARCHITECTURE §9.
+PUBLISHED_LEADS: int = 5
 
 # Filter bounds: vehicles outside these are never scored.
 _MAX_SCORE_RANGE_M: float = 150.0      # longitudinal cut-off.
@@ -371,8 +376,9 @@ class ACCTracker:
         ego_history_kappa: float | None,
         blinker_left: bool, blinker_right: bool,
         off_surface_ids: frozenset[int] = frozenset(),
+        ego_geometry: EgoGeometry | None = None,
     ) -> list[LeadInfo]:
-        """Tick the tracker. Returns top-3 in-lane leads (after trailer swap).
+        """Tick the tracker. Returns up to PUBLISHED_LEADS in-lane leads, closest first (after trailer swap).
 
         Indicated-lane candidates are published separately on
         ``last_indicated_lead`` (R15); they never enter ``leads``."""
@@ -391,9 +397,14 @@ class ACCTracker:
                 ref_st.last_road_lat if ref_st is not None else 0.0,
             )
 
+        # The arc starts at the rear-wheel mean, where heading and travel agree
+        # (core/radar/README.md §17); distances stay on the front-offset reference.
+        path_origin = ego_geometry.path_origin_m if ego_geometry is not None else 0.0
+        ref_pos = ego_geometry.front_delta_m if ego_geometry is not None else 0.0
+        arc_shift = path_origin - ref_pos
         ego_arc = build_ego_arc(
-            ego_x, ego_z, ego_yaw_rad, ego_speed_ms,
-            ego_steer, ego_history_kappa,
+            ego_x + path_origin * ego_fwd_x, ego_z + path_origin * ego_fwd_z,
+            ego_yaw_rad, ego_speed_ms, ego_steer, ego_history_kappa,
         )
         corridor_half = path_half_width(ego_steer)
 
@@ -474,6 +485,7 @@ class ACCTracker:
             longi, lat = self._project_onto_arc(
                 ego_arc, v.position.x, v.position.z, ego_fwd_x, ego_fwd_z,
             )
+            longi += arc_shift
 
             # Footprint corners: nearest forward corner dist_m; any corner in corridor → in_path.
             corner_projs = []
@@ -482,7 +494,7 @@ class ACCTracker:
                 arc_dist, arc_lat = self._project_onto_arc(
                     ego_arc, cx, cz, ego_fwd_x, ego_fwd_z,
                 )
-                corner_projs.append((arc_dist, arc_lat))
+                corner_projs.append((arc_dist + arc_shift, arc_lat))
                 sx, sy = self._ego_local(ego_x, ego_z, ego_fwd_x, ego_fwd_z, cx, cz)
                 road_s, road_off = road.road_coords(sx, sy)
                 w_road = road.trust_at(road_s)
@@ -493,7 +505,7 @@ class ACCTracker:
             if not fwd_corners:
                 # Stamp behind-history on an existing track only (no new tracks).
                 st_behind = self.tracks.get(v.id)
-                if st_behind is not None and straight_longi < EGO_FRONT_OFFSET_M:
+                if st_behind is not None and straight_longi - ref_pos < EGO_FRONT_OFFSET_M:
                     st_behind.last_behind_mono = now_mono
                 continue
             dist_m = min(ad for ad, _ in fwd_corners)
@@ -513,13 +525,13 @@ class ACCTracker:
                     ego_x, ego_z, ego_fwd_x, ego_fwd_z, cx, cz,
                 )[0]
                 for cx, cz in train_pts
-            )
+            ) - ref_pos
 
             st = self.tracks.get(v.id)
             if st is None:
                 st = TrackState()
                 self.tracks[v.id] = st
-            if straight_longi < EGO_FRONT_OFFSET_M:
+            if straight_longi - ref_pos < EGO_FRONT_OFFSET_M:
                 st.last_behind_mono = now_mono
 
             road_s, d_road = road.road_coords(straight_longi, straight_lat)
@@ -829,7 +841,7 @@ class ACCTracker:
             )
         ]
         # Primary sort: closest first. Secondary: score (descending) breaks ties.
-        top = sorted(in_path, key=lambda item: (item[1].dist_m, -item[1].score))[:3]
+        top = sorted(in_path, key=lambda item: (item[1].dist_m, -item[1].score))[:PUBLISHED_LEADS]
 
         out: list[LeadInfo] = []
         for vid, st in top:

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT, ego_path_params
 from core.aeb.clip_replay import decode_radar_stream, ego_path_replay, nearest_frame_t
 from core.radar.ego_path_model import EgoPathModel
+from core.radar.tmp_state import ExitGhostHold, ego_box, ncz_vehicle_ids
 from core.aeb.clip_schema import Clip
 from core.aeb.filters import VehicleCurvatureBlender, build_pipeline
 from core.aeb.thread import (
@@ -39,7 +40,7 @@ class EvalTick:
 
 
 class _NoSound:
-    def start_warning(self) -> None: ...
+    def start_warning(self, braking: bool = False) -> None: ...
     def stop_warning(self) -> None: ...
     def cleanup(self) -> None: ...
 
@@ -86,7 +87,7 @@ def _apply_warm_state(t: AEBThread, ws) -> None:
 
 
 def _snapshot_tuple(ego, vehicles, radar_t_mono: float, off_ids=frozenset(),
-                    t_kin: float = 0.0):
+                    t_kin: float = 0.0, ncz_ids=frozenset()):
     """Build the tuple _read_radar_snapshot returns, from clip ego + vehicles."""
     return (
         vehicles,
@@ -102,7 +103,27 @@ def _snapshot_tuple(ego, vehicles, radar_t_mono: float, off_ids=frozenset(),
         radar_t_mono,
         frozenset(off_ids),
         t_kin,
+        frozenset(ncz_ids),
     )
+
+
+def exit_ghosts_by_frame(clip: Clip, veh_by_t, ego_by_t, frame_t) -> dict[float, frozenset[int]]:
+    """The zone-exit hold the radar ran, re-derived from the recorded gate flags (radar README §18)."""
+    flags = {f.t_mono: (f.tmp_ncz, f.tmp_ncz_exit) for f in clip.radar_frames}
+    if not any(exited for _, exited in flags.values()):
+        return {}
+    hold = ExitGhostHold()
+    out: dict[float, frozenset[int]] = {}
+    for ft in sorted(frame_t):
+        ego = ego_by_t.get(ft)
+        if ego is not None and not ego.paused:
+            active, exited = flags.get(ft, (False, False))
+            box = ego_box(ego.coordinateX, ego.coordinateZ, ego.rotationX * 2.0 * math.pi,
+                          ego.geometry())
+            hold.step(active, exited, box, veh_by_t.get(ft, []))
+        if hold.ids:
+            out[ft] = hold.ids
+    return out
 
 
 def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
@@ -122,12 +143,18 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
     if cal.ego_path_gain_learning_enabled:
         t._ego_path.gain = warm_steer_gain
     t._read_vehicle_key = lambda: None      # one clip is one vehicle
+    # Pre-v6 clips carry no wheel layout and replay the calibration body.
+    geometry = next((g for g in (f.ego.geometry() for f in clip.radar_frames) if g), None)
+    t._read_ego_geometry = lambda: geometry
     if warm:
         _apply_warm_state(t, clip.metadata.aeb_warm_state)
 
     ticks = sorted(clip.aeb_ticks, key=lambda x: x.t_mono)
     all_t = [f.t_mono for f in clip.radar_frames] + [tk.t_mono for tk in ticks]
     t0 = min(all_t) if all_t else 0.0
+    # Live AEB skips no-collision zone ghosts with the off-surface ids (radar README §18).
+    ncz_frames = {f.t_mono for f in clip.radar_frames if f.tmp_ncz}
+    exit_ghosts = exit_ghosts_by_frame(clip, veh_by_t, ego_by_t, frame_t)
 
     out: list[EvalTick] = []
     for tk in ticks:
@@ -139,9 +166,10 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
         if ego is None:
             continue
 
+        ghosts = ncz_vehicle_ids(ft in ncz_frames, vehicles, []) | exit_ghosts.get(ft, frozenset())
         snap = _snapshot_tuple(
-            ego, vehicles, ft, off_by_t.get(ft, frozenset()),
-            tkin_by_t.get(ft, 0.0),
+            ego, vehicles, ft, off_by_t.get(ft, frozenset()) | ghosts,
+            tkin_by_t.get(ft, 0.0), ghosts,
         )
         t._read_radar_snapshot = lambda s=snap: s
         t._read_max_brake_ms2 = lambda mb=tk.consumed.max_brake_ms2: mb

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 from core.cruise_control_thread.acc_distance import AccDistanceButtons
 from core.cruise_control_thread.press_counter import PressCounter
+from core.cruise_control_thread.road_limit import RoadLimit
 from core.longitudinal.acc import AdaptiveCruiseController
 from core.longitudinal.base import LongCtx, LongOutput
 from core.longitudinal.cc import CruiseController
@@ -47,13 +48,11 @@ _LONG_PRESS_START_S = 0.5
 @dataclass
 class CruiseControlThreadData(ThreadData):
     """Published state for sending_thread / UI."""
-
     active: bool = False
     cc_enabled: bool = False
     target_speed_kmh: float | None = None
     wanted_accel_ms2: float = 0.0
     active_controller: str = "none"  # "cc" | "limiter" | "none"
-
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
@@ -81,6 +80,8 @@ class CruiseControlThread(BaseThread):
         self._cc_user_override: bool = False
         # Quick lift-and-press at the cap drops the limiter. See README.
         self._limiter_panic = LimiterPanicOverride()
+        # Road speed limit: optional global cap and optional set-speed follow. See README.
+        self._road_limit = RoadLimit()
 
         # Button FSM state: owns press timing only; acts on CC via _cc_ctrl.
         self._time_pressed_dec: float | None = None
@@ -155,15 +156,16 @@ class CruiseControlThread(BaseThread):
             # Block-message: warn when user presses inc/start but truck is in
             # park or reverse (neutral no longer blocks engage; gas is cut instead).
             if connected and Settings.cc_mode == "Cruise control" and (cc_inc or cc_start):
-                if self._park_or_reverse_blocks_cc(
-                    tel["park_brake"], tel["gear_dashboard"]
-                ):
+                if (self._park_or_reverse_blocks_cc(tel["park_brake"], tel["gear_dashboard"])
+                        or tel["retarderBrake"] > 0 or tel["motorBrake"]):
                     if now - self._last_block_msg_mono > 2.0:
                         self._last_block_msg_mono = now
                         if tel["park_brake"]:
                             logger.info("Cannot engage with parking brake on", extra={"popup": True})
-                        else:
+                        elif tel["gear_dashboard"] < 0:
                             logger.info("Can only engage in drive", extra={"popup": True})
+                        else:
+                            logger.info("Retarder/engine brake enabled", extra={"popup": True})
 
             if any((cc_dec, cc_inc, cc_start)):
                 logger.debug(
@@ -186,6 +188,8 @@ class CruiseControlThread(BaseThread):
                 pedal.get("pedal_loop_hz", 0.0),
                 self.avg_framerate,
             )
+
+            self._road_limit.step(self._cc_ctrl, tel["speed_limit_ms"])
 
             # Drive CC button FSM and ACC distance FSM.
             if connected and not paused and not device_lost:
@@ -227,6 +231,8 @@ class CruiseControlThread(BaseThread):
                 dt=dt,
                 speed_ms=float(tel["speed_ms"]),
                 gear_dashboard=int(tel["gear_dashboard"]),
+                retarderBrake=int(tel["retarderBrake"]),
+                motorBrake=bool(tel["motorBrake"]),
                 park_brake=bool(tel["park_brake"]),
                 game_throttle=float(tel["game_throttle"]),
                 game_clutch=float(tel["game_clutch"]),
@@ -241,6 +247,7 @@ class CruiseControlThread(BaseThread):
             )
 
             mode = Settings.cc_mode
+            glim = self._cc_ctrl.global_limit_kmh
 
             # Reset the inactive controller's PID state on mode flip to avoid
             if mode != self._prev_cc_mode:
@@ -265,8 +272,8 @@ class CruiseControlThread(BaseThread):
                     self._cc_ctrl.set_target_kmh(self._cc_ctrl.target_speed_kmh)
                     self._limiter_ctrl.set_target_kmh(self._cc_ctrl.target_speed_kmh)
                     self._limiter_ctrl.enable()
-                elif Settings.global_speed_limit_kmh is not None:
-                    self._limiter_ctrl.set_target_kmh(float(Settings.global_speed_limit_kmh))
+                elif glim is not None:
+                    self._limiter_ctrl.set_target_kmh(glim)
                     self._limiter_ctrl.enable()
                 else:
                     self._limiter_ctrl.disable()
@@ -277,8 +284,8 @@ class CruiseControlThread(BaseThread):
                 acc_out = LongOutput(None, False)
             else:
                 # Global limiter runs in parallel with CC as an always-on cap
-                if Settings.global_speed_limit_kmh is not None:
-                    self._limiter_ctrl.set_target_kmh(float(Settings.global_speed_limit_kmh))
+                if glim is not None:
+                    self._limiter_ctrl.set_target_kmh(glim)
                     self._limiter_ctrl.enable()
                 else:
                     self._limiter_ctrl.disable()
@@ -336,13 +343,6 @@ class CruiseControlThread(BaseThread):
         logger.debug("cruise_control_thread teardown complete")
 
     @staticmethod
-    def _arbitrate(*outs: LongOutput) -> tuple[float, bool]:
-        bids = [o.wanted_ms2 for o in outs if o.active and o.wanted_ms2 is not None]
-        if not bids:
-            return 0.0, False
-        return min(bids), True
-
-    @staticmethod
     def _crawl_follow(acc_ctrl, acc_out: LongOutput, wanted: float, commanding: bool,
                       winner: str) -> bool:
         """ACC's bid is the command and it is following a lead it measures moving. §10.3."""
@@ -381,10 +381,13 @@ class CruiseControlThread(BaseThread):
                     "paused": bool(tel.data.paused),
                     "speed_ms": float(tel.data.speed),
                     "gear_dashboard": int(tel.data.gear_dashboard),
+                    "retarderBrake": int(getattr(tel.data, "retarderBrake", 0) or 0),
+                    "motorBrake": bool(getattr(tel.data, "motorBrake", False) or False),
                     "park_brake": bool(tel.data.parkBrake),
                     "game_clutch": float(tel.data.gameClutch),
                     "game_throttle": float(tel.data.gameThrottle),
                     "game_brake": float(getattr(tel.data, "gameBrake", 0.0)),
+                    "speed_limit_ms": float(getattr(tel.data, "speedLimit", 0.0)),
                 }
         except Exception:
             return None
@@ -455,9 +458,7 @@ class CruiseControlThread(BaseThread):
         cut_gas = cc_cut or acc_cut
 
         dwell_ok = (ctx.now - self._neutral_since_mono) >= _CC_NEUTRAL_GAS_POPUP_DWELL_S
-        cooldown_ok = (
-            ctx.now - self._last_neutral_gas_popup_mono
-        ) >= _CC_NEUTRAL_GAS_POPUP_COOLDOWN_S
+        cooldown_ok = (ctx.now - self._last_neutral_gas_popup_mono) >= _CC_NEUTRAL_GAS_POPUP_COOLDOWN_S
         if cut_gas and dwell_ok and cooldown_ok:
             self._last_neutral_gas_popup_mono = ctx.now
             logger.info("CC can't accelerate in neutral", extra={"popup": True})
@@ -506,7 +507,7 @@ class CruiseControlThread(BaseThread):
             return
         if uses_mph():
             cc.set_target_kmh(step_setpoint_kmh(
-                cc.target_speed_kmh, delta, Settings.global_speed_limit_kmh,
+                cc.target_speed_kmh, delta, cc.global_limit_kmh,
             ))
             return
         cc.change_target_kmh(delta)
@@ -515,7 +516,7 @@ class CruiseControlThread(BaseThread):
         """Snap the set speed to the current speed in the driver's unit."""
         if uses_mph():
             cc.set_target_kmh(quantize_speed_kmh(
-                speed_ms, Settings.global_speed_limit_kmh,
+                speed_ms, cc.global_limit_kmh,
             ))
             return
         cc.set_target_from_speed_kmh(speed_ms * 3.6)
@@ -665,17 +666,18 @@ class CruiseControlThread(BaseThread):
             self.data.active_controller = active_ctrl
 
     def _handle_cc_disengage_conditions(self, ctx: LongCtx) -> None:
-        """Disengage CC on user brake, park/reverse, or crash-then-stop. See `core/cruise_control_thread/README.md`."""
+        """Disengage CC on user brake, retarder, park/reverse, or crash-then-stop. See `core/cruise_control_thread/README.md`."""
         cc = self._cc_ctrl
 
         if cc.enabled:
             game_brake_excess = ctx.game_brake - ctx.commanded_brake_recent_max
-            if (
-                ctx.user_raw_brake > _CC_RAW_BRAKE_DISENGAGE
-                or game_brake_excess > _CC_GAME_BRAKE_DISENGAGE
-            ):
+            if Settings.brakedeadzone_variable:
+                user_braking = (ctx.user_raw_brake > _CC_RAW_BRAKE_DISENGAGE or game_brake_excess > _CC_GAME_BRAKE_DISENGAGE)
+            else:
+                user_braking = (ctx.user_raw_brake > 0 or game_brake_excess > _CC_GAME_BRAKE_DISENGAGE)
+            if user_braking or ctx.retarderBrake > 0 or ctx.motorBrake:
                 cc.disable()
-                logger.info("CC disabled: brake pressed", extra={"popup": True})
+                logger.info("CC disabled: %s", "brake pressed" if user_braking else "retarder or engine brake active")
 
         if (
             cc.enabled
@@ -794,4 +796,3 @@ class CruiseControlThread(BaseThread):
                 st.reset_accel_mapper_smoothing()
         except Exception:
             logger.debug("reset_accel_mapper_smoothing failed", exc_info=True)
-

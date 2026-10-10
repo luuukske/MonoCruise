@@ -179,6 +179,16 @@ def test_user_brake_disengages_cc(rig):
     assert thread._cc_ctrl.enabled is False
 
 
+def test_retarder_disengages_cc(rig):
+    thread, tel, _, _, _ = rig
+    _engage_cc(thread)
+    thread.loop()
+
+    tel.data.set(retarderBrake=1)
+    thread.loop()
+    assert thread._cc_ctrl.enabled is False
+
+
 def test_the_mappers_own_commanded_brake_does_not_disengage_cc(rig):
     """CC braking through the mapper must not read as the driver braking."""
     thread, tel, _, sending, _ = rig
@@ -221,15 +231,17 @@ def test_a_crash_then_a_stop_disarms_cc(rig):
 
 
 def test_limiter_mode_ignores_the_disengage_conditions(rig, monkeypatch):
-    thread, _, pedal, _, settings = rig
+    thread, tel, pedal, _, settings = rig
     monkeypatch.setattr(settings, "cc_mode", "Speed limiter")
     _engage_cc(thread)
     thread.loop()
 
     pedal.data.set(brakeval=1.0)
+    tel.data.set(retarderBrake=1)
     for _ in range(3):
         thread.loop()
     assert thread._cc_ctrl.enabled is True
+    assert thread._limiter_ctrl.active is True
     assert thread._limiter_ctrl.active is True
 
 

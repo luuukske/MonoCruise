@@ -19,6 +19,10 @@ datas = [
     ('ui/popup/icons',          'ui/popup/icons'),
     ('ui/cc_panel/assets',      'ui/cc_panel/assets'),
     ('core/aeb/AEB_warning.wav','core/aeb'),
+    # MonoCruise's own game plugins, built from tmp_plugin/ (core/sdk_installer/README.md).
+    ('core/sdk_installer/own', 'core/sdk_installer/own'),
+    # Offline game plugin fallback, filled by tools/fetch_sdk_bundle.py (release.yml).
+    ('core/sdk_installer/bundled', 'core/sdk_installer/bundled'),
     # Window icon: window.py resolves _PROJECT_ROOT to _internal when frozen.
     ('icon.ico',                '.'),
 ]

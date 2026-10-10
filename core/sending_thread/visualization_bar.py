@@ -141,7 +141,7 @@ class VisualizationBar(QWidget):
         gas_output = 0.0
         brake_output = 0.0
         em_stop = False
-        AEB_warn = False
+        AEB_cue = False
 
         # SendingThread: aforward / abackward are logical pedals (pre intensity remap).
         try:
@@ -171,7 +171,7 @@ class VisualizationBar(QWidget):
             except Exception:
                 em_stop = False
 
-        # AEB warning (em_stop + setting) for flicker
+        # AEB HMI cue (warn or brake, as the sound) for flicker
         try:
             aeb_thread = registry.get_thread("aeb_thread")
         except KeyError:
@@ -180,9 +180,9 @@ class VisualizationBar(QWidget):
         if aeb_thread is not None and hasattr(aeb_thread, "data"):
             try:
                 with aeb_thread.data._lock:
-                    AEB_warn = bool(getattr(aeb_thread.data, "AEB_warn", False))
+                    AEB_cue = bool(getattr(aeb_thread.data, "AEB_cue", False))
             except Exception:
-                AEB_warn = False
+                AEB_cue = False
 
         # ACC/cruise control could increase smoothness here; kept commented out.
         # average = 20 if (cc_enabled and cc_locked) else 10
@@ -203,7 +203,7 @@ class VisualizationBar(QWidget):
 
         value = self.temp_gasval - self.temp_brakeval
 
-        if em_stop or AEB_warn:
+        if em_stop or AEB_cue:
             self.flicker_state = not self.flicker_state
             self.gas_rect = QRect(self.center, 0, self.screen_width - self.center, self.bar_width)
             self.brake_rect = QRect(0, 0, self.center, self.bar_width)

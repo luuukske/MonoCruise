@@ -16,9 +16,12 @@
 - **AEB warning**
   - when `AEB_warn=True`, the panel starts a **blink animation** and uses the AEB color
   - after `AEB_warn` turns off, the blink can continue briefly for visibility (cooldown)
-  - the main window samples `AEB_warn` every 100 ms. AEB sound waits a second
-    warn tick so a one-tick pulse cannot beep without a panel flash. When the
-    warn ends the beep finishes its cycle plus one extra replay.
+  - the main window passes the AEB thread's `AEB_cue` in as `AEB_warn`, every
+    100 ms. That is the sound's own cue (warn or brake, two-tick gate, held
+    0.2 s after), so the panel flashes whenever AEB beeps, including a brake
+    without a warn, and its cooldown outlasts the beep's closing cycle. Both
+    go quiet once AEB has stopped the truck; the intervention popup covers
+    the standstill hold.
 
 This panel is intended for **user-facing safety/status feedback**: it should remain responsive even when worker threads are busy and should not require those threads to touch Qt directly.
 

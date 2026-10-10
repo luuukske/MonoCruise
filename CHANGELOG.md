@@ -12,6 +12,102 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-10-11
+### Added
+- **Cruise control follows speed limit signs**: two new options. One changes your set speed at each new speed limit sign, the other caps your truck at the posted limit, or at your global limit if that is lower.
+- **Retarder and engine brake turn cruise control off**: switching either on disengages cruise control, and a popup tells you when one of them keeps cruise from engaging.
+- **Option to turn off the brake pedal deadzone**: cruise control can disengage the moment you touch the brake, or keep the deadzone so you can rest your foot on the pedal.
+- **Choose the AEB warning sound and volume**: pick the original warning, a simple high beep, or a Volvo Cars, Volvo Trucks, Scania or Tesla-style warning, and set its volume. A test button plays a short sample so you can balance it against game audio; it does not brake.
+
+### Changed
+- **Fewer phantom jams in convoys**: ACC only watched the truck directly ahead of the lead, so one brake rolled back through a convoy into a standstill. It now looks three trucks ahead and lets go of the brake sooner after a hard stop, so convoys stop far less often and get back up to speed faster.
+- **ACC follows bends better with your own truck's size**: ACC and AEB now read your truck's length, width and wheelbase from the game instead of assuming one size, so ACC's predicted path no longer drifts to the outside of bends.
+- **Fewer shared AEB clips**: with "Help improve AEB and ACC" on, far fewer clips of everyday braking and of very fast or tight driving are sent, and the rest are capped per day. Clips where another driver cut in, crossed or reversed into your path are always sent.
+
+### Fixed
+- **AEB stepped in at the wrong moment**: it judged your truck's brakes from gentle braking and from every truck you had driven, and let go right after its first hard hit. It now learns your own truck's brakes, waits until a hard stop is needed, then brakes at about 85% of your truck's braking power right away and keeps braking.
+- **AEB braked late in turns and for oncoming cars**: a stopped vehicle in your path while turning could be taken for one parked beside the road, and an oncoming car drifting over the centre line for one staying in its lane, until it was too late. AEB no longer waits past the last moment it can still stop for them.
+- **AEB stopped far behind the vehicle ahead**: it placed your truck's front about 1.3 m further forward than it really is, so every AEB stop ended well short. It now stops about half a metre behind.
+- **AEB braked for TruckersMP players in no-collision zones**: you drive through other players there, so AEB now ignores them inside a zone, and after it ends until you are clear of each other. This needs a small game plugin that MonoCruise installs by itself and TruckersMP lists as "MonoCruise".
+- **AEB warned too late**: the warning often started only once AEB was already braking. For a vehicle ahead in your lane it now comes at least a second before AEB brakes, while crossing traffic stays quiet until AEB brakes because it so often turns away at the last moment.
+- **AEB warning beeped without flashing**: when AEB braked while you were off the gas, the cruise panel and pedal bar stayed dark. Sound and flash now always go together, and both end once AEB has brought you to a stop.
+- **Quick brake taps threw off brake learning**: a short stab on the brake could convince MonoCruise your truck brakes weaker than it does, so AEB stepped in earlier and cruise braked harder than needed. It now only learns from hard braking held for more than a second.
+- **Pedals not found or mixed up**: pedal sets on their own USB cable, such as the MOZA CRP2, did not show up, a wheel or pedal set was lost after a firmware update, and on some sets a light tap was missed or brake and gas came out swapped. Pedals are now found and kept, and a light tap is enough to connect them.
+- **Brake pedal revved the engine after launch**: on some pedal sets the first brake press after starting MonoCruise also gave half throttle. Each pedal now only moves with its own input.
+- **Button assignment picked up pedals**: pressing a pedal while assigning a cruise button could bind it as that button. Only real buttons can be assigned now.
+- **Hangs and repeating popups with button devices**: with a bound button device unplugged, while assigning buttons, or when connecting pedals on a rig with many devices, MonoCruise could hang briefly or repeat its "disconnected" popup every two seconds.
+- **Game plugin and updates failed on a VPN or offline**: a shared VPN address quickly hits GitHub's download limit, so the game plugin did not install and the updater showed no connection. The updater now has a second way to find releases, and MonoCruise brings its own copy of the game plugin for when it cannot download the latest one.
+
+### Known
+- **Convoys can still jam**: at the closest gap setting, and in hard stops or stop-and-go traffic at the default setting, trucks at the back can still come to a stop.
+
+## [1.1.2-preview.5] - 2026-10-10
+### Changed
+- **No-collision zone support has its own small game plugin**: MonoCruise no longer replaces the ETS2LA game plugin with a modified copy. It installs its own plugin next to it instead, which TruckersMP lists as "MonoCruise" and which keeps working across game updates.
+
+### Fixed
+- **AEB braked right after leaving a TruckersMP no-collision zone**: players you were still driving through when the zone ended stay ghosts until you separate, but AEB braked for them. It now ignores them until you are clear of each other.
+
+## [1.1.2-preview.4] - 2026-10-10
+(hopefully) the last preview build before v1.1.2. Any critical bugs can be reported and will be fixed before the stable v1.1.2 release.
+
+### Changed
+- **AEB warning sounds now repeat once more after the warning ends**: Simple, Volvo Trucks, Scania and Tesla styles play one extra full round after the warning clears, like the original. Volvo Trucks now sounds at least three rounds instead of four. This makes warning triggers more obvious and less confusing.
+
+### Fixed
+- **AEB braked late for oncoming cars drifting into your lane**: an oncoming car slowly crossing the centre line was treated as staying in its own lane until very late. AEB now brakes once its path clearly runs into your truck.
+
+## [1.1.2-preview.3] - 2026-10-08
+### Added
+- **Option to turn off the deadzone for disengaging CC with the brake pedal**: Some people want it to disengage as soon as the pedal is touched, others want to be able to rest on the pedal
+
+### Changed
+- **Phantom jams in long convoys**: ACC only looked at the truck directly ahead of the lead, so one brake rolled back through the convoy into a standstill. It now looks three trucks ahead, so a steady or gently slowing convoy stops far less often.
+- **Less hard braking in convoys**: trucks behind the lead braked hard less often and let go of the brake sooner after a hard stop, so fewer of them come to a standstill and speed comes back faster.
+
+### Fixed
+- **Game plugin and updates failed on a VPN or offline**: GitHub limits how often one internet address may ask for downloads and a VPN address is shared with many people, so the game plugin did not install and the updater showed no connection. The updater now has a second way to find releases, and MonoCruise brings its own copy of the game plugin for when it cannot download the latest one.
+- **Pedals on their own USB cable were never found**: pedal sets that plug into the PC separately from the wheel, such as the MOZA CRP2, did not show up when connecting pedals. They are now detected.
+
+### Known
+- **Convoys can still jam**: at the closest gap setting, and in hard stops or stop-and-go traffic at the default setting, trucks at the back can still come to a stop.
+
+## [1.1.2-preview.2] - 2026-10-07
+### Added
+- **Scania-style AEB warning**: a new warning sound that imitates modern Scania trucks, one repeating four-beep pattern for both the warning and the braking.
+- **Engine brake turns cruise control off**: like the retarder, switching on the engine brake now disengages cruise control.
+
+### Changed
+- **Volvo Cars warning sounds more like the car**: it now ends with the soft repeat the real warning has.
+- **No-collision zone plugin installs itself**: MonoCruise now puts the updated game plugin in place for ETS2 and ATS 1.61 by itself, so the TruckersMP no-collision zone fix no longer needs a manual download.
+
+### Fixed
+- **AEB braked too softly**: it stepped in early and then held only about half of what your truck can brake, which felt slow. It now waits until a hard stop is needed and brakes at about 85% of your truck's braking power right away, solo or with a trailer.
+- **AEB warned too late**: the warning often started only once AEB was already braking. With a vehicle right ahead in your lane, stopped or driving your way, it now comes at least a second before AEB brakes, and for a parked one slightly off your path about half a second, while crossing traffic stays quiet until AEB brakes because it so often turns away at the last moment.
+- **Brake learning thrown off by quick taps**: a short stab on the brake could convince MonoCruise your truck brakes weaker than it does, so AEB stepped in earlier and cruise braked harder than needed. It now only learns from hard braking held for more than a second.
+- **AEB warning beeped without flashing**: when AEB braked while you were off the gas, the warning sounded but the cruise panel and pedal bar stayed dark, and after an AEB stop the beep kept going after the flash ended. Sound and flash now always go together, and both end once AEB has brought you to a stop.
+
+## [1.1.2-preview.1] - 2026-10-06
+### Added
+- **Set speed adjusts to in-game speed limit**
+- **CC disengages if retarder is active**
+- **Choose the AEB warning sound and volume**: pick the original warning, a simple high beep, a Volvo Cars, Volvo Trucks or Tesla-style warning, and set its volume. All styles sound about as loud as the original and each behaves like the system it imitates: the Volvo Cars warning sounds once per emergency, and the Volvo Trucks warning adds a second sound on top while the truck brakes. A test button plays about a second of the warning so you can balance it against game audio (it does not brake).
+
+### Changed
+- **Fewer shared AEB clips**: with "Help improve AEB and ACC" on, far fewer clips of everyday braking and of very fast or tight driving are sent, and the rest are capped per day. Clips where another driver cut in, crossed or reversed into your path are always sent.
+- **ACC and AEB size up your own truck**: they now read your truck's length, width and wheelbase from the game instead of assuming one size, so AEB stops a little closer behind the vehicle ahead and ACC's predicted path no longer drifts to the outside of bends.
+
+### Fixed
+- **AEB braked late for a stopped vehicle in a turn**: while turning, a stopped car or truck in your path could be taken for one parked beside the road or around the bend until it was too late to stop. AEB no longer waits past the last moment it can still stop for it.
+- **AEB braked for TruckersMP players in no-collision zones**: you drive through other players there, so AEB now ignores them inside a zone (needs the updated game plugin).
+- **AEB stepped in at the wrong moment**: it judged your truck's brakes from gentle braking and from every truck you had driven, assumed they take longer to bite than they do, ignored how hard your truck stops at full brake (much harder with the brake intensity slider turned up), and let go right after its first hard hit. It now judges your own truck's brakes, steps in early enough to stop in time, and keeps braking firmly after the first hit.
+- **AEB stopped far behind the vehicle ahead**: it placed your truck's front about 1.3 m further forward than it really is, so every AEB stop ended well short, even from walking pace. It now stops about half a metre behind.
+- **Brake pedal revved the engine after launch**: on some pedal sets the first brake press after starting MonoCruise also gave half throttle, until the gas pedal was touched once. Each pedal now only moves with its own input.
+- **"Connect to pedals" missed or mixed up pedals**: on some pedal sets a tap was not detected, a light tap on a load-cell brake was too small to count, or brake and gas came out swapped or reversed. Taps are now measured from where each pedal actually rests, and a light tap is enough.
+- **Pedals not found after a firmware update**: updating or renaming a wheel or pedal set made MonoCruise lose it, along with any buttons bound to it. It now finds the same device again.
+- **Button assignment picked up pedals**: pressing a pedal while assigning a cruise button could bind the pedal as that button. Only real buttons can be assigned now, and a pedal that was already bound asks to be reassigned.
+- **Hangs and repeating popups with button devices**: with a bound button device unplugged, while assigning buttons, or when connecting pedals on a rig with many devices, MonoCruise could hang briefly, and a device it could not read repeated its "disconnected" popup every two seconds.
+
 ## [1.1.1] - 2026-10-04
 ### Fixed
 - **Hazards came on when you stomped the brake while stopped**: a hard press at a standstill switched the hazards on. They now only come on for a hard brake while driving.

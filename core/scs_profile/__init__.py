@@ -3,7 +3,6 @@
 from .intensity import (
     BrakeIntensityCache,
     LowBrakeIntensityAebWarning,
-    aeb_max_brake_ms2,
     apply_brake_intensity,
     effective_brake_pedal,
 )
@@ -13,7 +12,6 @@ __all__ = [
     "BrakeIntensityCache",
     "LowBrakeIntensityAebWarning",
     "SelectedProfileSettings",
-    "aeb_max_brake_ms2",
     "apply_brake_intensity",
     "brake_ui_scale",
     "effective_brake_pedal",

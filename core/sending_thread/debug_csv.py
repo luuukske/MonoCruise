@@ -30,7 +30,7 @@ BRAKE_LOG_HEADER: list[str] = [
     "user_brake",
     "mapper_brake",
     "hold_brake",
-    "aeb_pedal",
+    "aeb_pedal",           # AEB controller output, before AebPedalAxis.sent
     "logical_brake",       # merged pedal before the intensity remap
     "sent_brake",          # written to the game
     "full_authority",
@@ -45,6 +45,8 @@ BRAKE_LOG_HEADER: list[str] = [
     "wanted_ms2",
     "est_brake_ms2",       # learned capacity, tune units
     "aeb_max_brake_ms2",
+    "aeb_brake_scale",     # per-truck AEB scale (aeb_capacity.py)
+    "aeb_full_ratio",      # credited full-pedal stop, decel / (baseline x frac(1))
     "brake_scale",
     "baseline_brake_ms2",
     "learn_gate",
@@ -53,6 +55,15 @@ BRAKE_LOG_HEADER: list[str] = [
     "mass_kg",
     "wheels_on_ground",
     "trailer_count",
+    # Grip: why some full-pedal stops brake at 0.6x of others (telemetry_thread.grip_debug_fields).
+    "lateral_ms2",
+    "steer",
+    "brake_temp_c",
+    "air_psi",
+    "wipers",
+    "surface",
+    "truck_slip",          # worst grounded wheel: 0 rolling free, 1 locked
+    "trailer_slip",
 ]
 
 
