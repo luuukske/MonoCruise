@@ -1,6 +1,6 @@
 ﻿# Runtime dependencies for MonoCruise.
 # Pin versions here once the project stabilises.
-PySide6
+PySide6<6.12  # 6.12.0 aborts Python at exit in CI (refcount bug); stable builds ship 6.11
 psutil
 pygame-ce>=2.5.8,<2.6  # SDL 2.30+ lists axes-only pedals; <2.6: pedal reconnect reinits a closed Joystick
 Pillow>=12.2.0  # AEB debug clip capture: screen thumbnail (ImageGrab + JPEG encode)

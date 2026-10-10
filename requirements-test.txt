@@ -4,7 +4,7 @@
 # in an agent sandbox, and no test touches them.
 pytest
 ruff  # lint gate in CI, config in ruff.toml
-PySide6  # updater tests load updater/updater.py, which is a Qt GUI
+PySide6<6.12  # same pin as requirements.txt; updater tests load updater/updater.py, which is a Qt GUI
 Pillow>=12.2.0  # AEB clip thumbnail encode/decode
 packaging  # updater version comparison
 requests  # updater GitHub API client
