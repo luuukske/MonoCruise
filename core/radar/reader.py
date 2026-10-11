@@ -7,6 +7,8 @@ import mmap
 import struct
 import time
 
+from . import tmp_sdk
+from .tmp_sdk import SdkFrame
 from .traffic import (
     Position,
     Quaternion,
@@ -167,6 +169,7 @@ class TrafficReader:
         ego_z: float,
         ego_speed: float,
         t_now: float | None = None,
+        sdk: SdkFrame | None = None,
     ) -> tuple[list[Vehicle], list[Vehicle]] | None:
         """Decode a ``copy_raw`` snapshot through the live smoothing path."""
         traffic, parked = raw
@@ -182,7 +185,7 @@ class TrafficReader:
         vehicles.extend(self._decode_parked(parked, {int(v.id) for v in vehicles}))
 
         kin_t = self.last_t_wall if t_now is None else float(t_now)
-        return self._smooth_and_build(vehicles, kin_t, ego_x, ego_y, ego_z, ego_speed)
+        return self._smooth_and_build(vehicles, kin_t, ego_x, ego_y, ego_z, ego_speed, sdk)
 
     @staticmethod
     def _build_vehicles_from_raw(raw: tuple) -> list[Vehicle]:
@@ -220,6 +223,7 @@ class TrafficReader:
     def _smooth_and_build(
         self, vehicles: list[Vehicle], t_now: float,
         ego_x: float, ego_y: float, ego_z: float, ego_speed: float,
+        sdk: SdkFrame | None = None,
     ) -> tuple[list[Vehicle], list[Vehicle]]:
         """Cull, smooth, build trailer vehicles. See core/radar/README.md §12."""
         if len(vehicles) > _MAX_TRACKED_VEHICLES:
@@ -229,6 +233,8 @@ class TrafficReader:
                 + (v.position.z - ego_z) ** 2
             )
             vehicles = vehicles[:_MAX_TRACKED_VEHICLES]
+        # TMP bodies take the SDK's own speed where it matches (core/radar/README.md §19).
+        tmp_sdk.attach(vehicles, sdk)
 
         # TMP sub-frame pose snap rules. See core/radar/README.md §7.
         reanchor = self._pending_reanchor
@@ -267,6 +273,7 @@ class TrafficReader:
         parked_bytes: bytes | None,
         ego_x: float, ego_y: float, ego_z: float, ego_speed: float,
         t_wall: float,
+        sdk: SdkFrame | None = None,
     ) -> tuple[list[Vehicle], list[Vehicle]] | None:
         """Headless clip replay through the same path as ``read``."""
         if traffic_bytes is None:
@@ -288,7 +295,7 @@ class TrafficReader:
         for v in vehicles:
             if v.id not in self._last_vehicles:
                 v.time = t_wall
-        return self._smooth_and_build(vehicles, t_wall, ego_x, ego_y, ego_z, ego_speed)
+        return self._smooth_and_build(vehicles, t_wall, ego_x, ego_y, ego_z, ego_speed, sdk)
 
     def _build_trailer_vehicles(
         self,

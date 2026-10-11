@@ -146,6 +146,8 @@ class RadarFrameRecord:
     tmp_ncz: bool = False
     # The gate closed on this frame because the plugin reported leaving the zone. Older clips: False.
     tmp_ncz_exit: bool = False
+    # TruckersMP SDK bodies the radar matched this frame, ages at read time (README §19). Older clips: None.
+    tmp_sdk_buf: bytes | None = None
 
     def to_json(self) -> dict:
         out = {
@@ -159,6 +161,8 @@ class RadarFrameRecord:
             out["tmp_ncz"] = True
         if self.tmp_ncz_exit:
             out["tmp_ncz_exit"] = True
+        if self.tmp_sdk_buf:
+            out["tmp_sdk_buf"] = _b64(self.tmp_sdk_buf)
         return out
 
     @classmethod
@@ -171,6 +175,7 @@ class RadarFrameRecord:
             parked_buf=_unb64(d.get("parked_buf")),
             tmp_ncz=bool(d.get("tmp_ncz", False)),
             tmp_ncz_exit=bool(d.get("tmp_ncz_exit", False)),
+            tmp_sdk_buf=_unb64(d.get("tmp_sdk_buf")),
         )
 
 

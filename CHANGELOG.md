@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Fixed
+- **Braking for lagging TruckersMP players**: a player whose connection hiccupped looked like a truck stopping dead, so ACC could brake for nothing. MonoCruise now reads each player's real speed from TruckersMP, ignores short lag spikes, and still brakes gradually if a truck ahead stays frozen.
 
 ## [1.1.2] - 2026-10-11
 ### Added

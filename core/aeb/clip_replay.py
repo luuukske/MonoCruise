@@ -17,6 +17,7 @@ from core.radar.ego_geometry import calibration_geometry
 from core.radar.ego_path_model import EgoPathModel, EgoPathState, warm_gain
 from core.radar.elevation import ElevationGate, EgoElevationTrack, build_surface
 from core.radar.reader import TrafficReader
+from core.radar.tmp_sdk import decode_frame
 from core.radar.traffic import (
     ArcPath, Vehicle, build_arc, is_sub_frame, _raw_speed_from_position_history,
 )
@@ -340,7 +341,7 @@ def decode_radar_stream(clip: Clip, as_recorded: bool = False, *,
         res = reader.replay_frame(
             f.traffic_buf, f.parked_buf,
             ego.coordinateX, ego.coordinateY, ego.coordinateZ, ego.speed,
-            f.t_wall,
+            f.t_wall, sdk=decode_frame(f.tmp_sdk_buf) if f.tmp_sdk_buf else None,
         )
         last_vehs = list(res[0]) if res is not None else []
         if elev_track is not None:
