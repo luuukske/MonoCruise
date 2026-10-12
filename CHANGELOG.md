@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.3-preview.1] - 2026-10-12
 ### Fixed
 - **Braking for lagging TruckersMP players**: a player whose connection hiccupped looked like a truck stopping dead, so ACC could brake for nothing. MonoCruise now reads each player's real speed from TruckersMP's SDK, ignores short lag spikes, and still brakes gradually if a truck ahead stays frozen.
 - **MonoCruise stalled for a moment when AEB stepped in**: with "Help improve AEB and ACC" on, the screenshot saved with each AEB clip paused all of MonoCruise, pedals included, for up to a second or two right as AEB warned or braked. The screenshot now runs alongside everything else without pausing it.
