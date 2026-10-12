@@ -11,6 +11,9 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Fixed
+- **AEB ignored slow TruckersMP traffic**: below 50 km/h AEB only reacted to other players closing much faster than you, so it could miss a truck backing across your lane or a car stopping in a jam. It now watches them like AI traffic.
+- **AEB braked for vehicles you were driving through**: a TruckersMP player you were ghosting through, or an AI car appearing on top of your truck, could set AEB off, and once it was braking it kept going even inside a no-collision zone. AEB now lets go of players in a zone and ignores any vehicle that sits inside your truck until you are apart.
 
 ## [1.1.3-preview.1] - 2026-10-12
 ### Fixed

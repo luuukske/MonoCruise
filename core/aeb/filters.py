@@ -331,8 +331,6 @@ class FilterContext:
     ego_fwd_z: float
     ego_hw: float
     dynamic_horizon: float
-    tmp_traffic_session: bool
-    ref_kmh_for_filter: float
     cal: AEBCalibration
 
     # Fields populated lazily by pipeline stages
@@ -363,7 +361,7 @@ class FilterContext:
     # TMP speed field stuck at 0 cannot pass for a parked body. None: too short.
     v_ground_meas: float | None = None
 
-    # Latched ids bypass TMP rel-speed and the spatial drop filters (README).
+    # Latched ids bypass the spatial drop filters (README).
     latched_threat_ids: set = field(default_factory=set)
 
     # Ids the shared radar elevation gate placed off ego's road surface,
@@ -536,43 +534,6 @@ class LowSpeedTrailerFilter:
         if fwd > 0.0:
             return _PASS
         return _suppress("LowSpeedTrailerFilter")
-
-
-def _vehicle_yaw_rad(v: "Vehicle") -> float:
-    if v._smooth_yaw is not None:
-        return v._smooth_yaw
-    _, yaw_deg, _ = v.rotation.euler()
-    return math.radians(yaw_deg)
-
-
-class TmpRelSpeedFilter:
-    name = "TmpRelSpeedFilter"
-
-    def apply(self, ctx: FilterContext) -> FilterResult:
-        if not ctx.tmp_traffic_session:
-            return _PASS
-        # Latched targets bypass the rel-speed gate so they don't drop out
-        # of the pipeline once ego matches their speed under braking.
-        if ctx.v.id in ctx.latched_threat_ids:
-            return _PASS
-        # Follow-threat bypass: sustained closing + own decel is real follow traffic;
-        # the rel-speed floor (no-collision-zone guard) must not silence it.
-        if ctx.v.id in ctx.follow_threat_ids:
-            return _PASS
-        v_yaw_rad = _vehicle_yaw_rad(ctx.v)
-        vf_x = -math.sin(v_yaw_rad)
-        vf_z = -math.cos(v_yaw_rad)
-        dvx = ctx.ego_speed * ctx.ego_fwd_x - ctx.v.speed * vf_x
-        dvz = ctx.ego_speed * ctx.ego_fwd_z - ctx.v.speed * vf_z
-        rel_kmh = 3.6 * math.hypot(dvx, dvz)
-        cal = ctx.cal
-        if ctx.ref_kmh_for_filter > cal.tmp_filter_split_kmh:
-            if rel_kmh <= cal.tmp_filter_rel_above_kmh:
-                return _suppress("TmpRelSpeedFilter")
-        else:
-            if rel_kmh <= cal.tmp_filter_rel_below_kmh:
-                return _suppress("TmpRelSpeedFilter")
-        return _PASS
 
 
 class LaneClassifier:
@@ -1134,10 +1095,9 @@ class EgoEvasionFilter:
                 and _any_body_in_ego_lane(
                     ctx.ego_arc, ctx.all_target_arcs, cal.lane_half_width)):
             return _PASS
-        # follow_threat exempt only inside the aggressive TMP band, where the
-        # latch rescues real low-speed dangers (README follow-threat flag).
+        # follow_threat is exempt at low ego speed only (README follow-threat flag).
         if (ctx.v.id in ctx.follow_threat_ids
-                and ctx.ref_kmh_for_filter <= cal.tmp_filter_split_kmh):
+                and ctx.ego_speed * 3.6 <= cal.follow_threat_evasion_exempt_kmh):
             return _PASS
         if ctx.ego_evasion_left is None or ctx.ego_evasion_right is None:
             return _PASS
@@ -1179,7 +1139,6 @@ def build_pipeline(cal: AEBCalibration) -> list:
         RangeFilter(cal),
         ElevationFilter(cal),
         LowSpeedTrailerFilter(cal),
-        TmpRelSpeedFilter(),
         LaneClassifier(cal),
         AvoidabilityGate(OppositeLaneFilter(cal), cal, oncoming=True),
         OppositeLaneFilterMirrored(cal),

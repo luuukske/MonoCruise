@@ -284,8 +284,6 @@ def evaluate_frame(
             ego_fwd_z=ego_fwd_z,
             ego_hw=ego_hw,
             dynamic_horizon=dynamic_horizon,
-            tmp_traffic_session=False,
-            ref_kmh_for_filter=ego_speed * 3.6,
             cal=cal,
             dx=dx, dz=dz,
             dist_sq=dist_sq, dist=dist,

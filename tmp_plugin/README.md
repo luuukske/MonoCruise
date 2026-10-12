@@ -114,7 +114,7 @@ with.
 | Yaw rate | `Vehicle` / `Trailer::GetAngularVelocity` | Target curvature without differentiating poses; crash rotation gates | Same |
 | Truck to trailer link | `Vehicle::GetTrailer`, `Player::GetTrailer` | Replaces the geometric pairing in ACC `trailer_lock`, AEB `_find_tractor_for_trailer` and the exit hold | Map trailer handles to `ETS2LATraffic` records by pose |
 | Exact body | `GetBoundingBox` + `GetPlacement` | Body size and centre offset; the TMP trailer pivot shift (`Trailer.correct_position`) | Box includes mirrors? |
-| Network sample arrival | `Player().OnUpdate` (timestamp only) | Tells a fresh network sample from client interpolation: lag freeze, pose jumps, the rel-speed floor | Measured 2026-10-11 (below): ~4.5 Hz |
+| Network sample arrival | `Player().OnUpdate` (timestamp only) | Tells a fresh network sample from client interpolation: lag freeze, pose jumps | Measured 2026-10-11 (below): ~4.5 Hz |
 | Per-player ghost flag | `Player::CanCollideWith` | Per-player suppression beyond the exit hold | Read "cannot" for real trucks on 2026-10-06; re-measure with poses side by side |
 | Own link quality | `Network().GetLastPing` | Ego-side lag for TMP confidence | Correlation with remote lag |
 | Track birth and death | `OnStreamIn` / `OnStreamOut`, `Vehicle().OnSpawned` / `OnDespawned` | Cold starts and id reuse without guessing | None |

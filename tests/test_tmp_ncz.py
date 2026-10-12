@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from core.aeb.clip_eval import run_headless
+from core.aeb.overlap_ghosts import OverlapGhostHold
 from core.aeb.clip_schema import (
     AEBTickRecord, Clip, ClipMetadata, ConsumedContext, EgoTelemetry, LiveAEB,
     RadarFrameRecord,
@@ -327,10 +328,18 @@ def _zone_exit_clip(offset_m: float, exit_reported: bool, v: float = 20.0) -> Cl
     return Clip(metadata=meta, radar_frames=frames, aeb_ticks=ticks)
 
 
-def test_aeb_ignores_a_ghost_still_inside_ego_after_the_zone():
-    # Without the hold this braked 3 frames after the exit (2026-10-10).
-    assert any(e.aeb_brake for e in run_headless(_zone_exit_clip(4.0, exit_reported=False)))
+def test_aeb_ignores_a_ghost_still_inside_ego_after_the_zone(monkeypatch):
+    # Without the hold this braked 3 frames after the exit (2026-10-10). The AEB overlap
+    # gate (core/aeb/README.md §4) covers this ghost too, so it is off for the control run.
+    with monkeypatch.context() as m:
+        m.setattr(OverlapGhostHold, "step", lambda self, *a: frozenset())
+        assert any(e.aeb_brake for e in run_headless(_zone_exit_clip(4.0, exit_reported=False)))
     ev = run_headless(_zone_exit_clip(4.0, exit_reported=True))
+    assert not any(e.aeb_brake or e.aeb_warn for e in ev)
+
+
+def test_aeb_overlap_gate_alone_ignores_a_ghost_deep_inside_ego():
+    ev = run_headless(_zone_exit_clip(4.0, exit_reported=False))
     assert not any(e.aeb_brake or e.aeb_warn for e in ev)
 
 
@@ -339,14 +348,15 @@ def test_aeb_brakes_for_a_truck_that_was_clear_of_ego_at_the_exit():
     assert any(e.aeb_brake for e in run_headless(_zone_exit_clip(8.0, exit_reported=True)))
 
 
-def _aeb_frame(vehicles, ncz_ids, latched=frozenset()):
+def _aeb_frame(vehicles, ncz_ids, latched=frozenset(), off_ids=frozenset()):
     from core.aeb.calibration import DEFAULT
     from core.aeb.clip_eval import _make_headless, _snapshot_tuple
 
     t = _make_headless(DEFAULT)
     t._latched_threat_ids = set(latched)
     ego = EgoTelemetry(coordinateX=0.0, coordinateZ=0.0, rotationX=0.0, speed=20.0)
-    snap = _snapshot_tuple(ego, vehicles, 10.0, frozenset(ncz_ids), 10.0, frozenset(ncz_ids))
+    snap = _snapshot_tuple(ego, vehicles, 10.0, frozenset(ncz_ids) | frozenset(off_ids), 10.0,
+                           frozenset(ncz_ids))
     t._read_radar_snapshot = lambda: snap
     t._read_ego_geometry = lambda: None
     t._read_max_brake_ms2 = lambda: 7.8
@@ -369,8 +379,15 @@ def test_debug_snapshot_shows_ghosts_without_evaluating_them():
     assert 7 not in snap.vehicle_arcs and 7 not in snap.colliding_ids
 
 
-def test_a_latched_ghost_is_drawn_as_a_threat_not_a_ghost():
+def test_a_zone_ghost_ends_the_latch_on_it():
+    # Driving into a truck parked in a zone kept AEB braking inside it (807b5b28).
     ghost = make_vehicle(7, 0.0, -30.0, 0.0, 0.0, is_tmp=True)
     snap = _aeb_frame([ghost], ncz_ids={7}, latched={7})
-    assert snap.ghost_ids == set()
-    assert not any(v.get("ghost") for v in snap.vehicles)
+    assert snap.ghost_ids == {7}
+    assert 7 not in snap.colliding_ids
+
+
+def test_an_off_road_body_keeps_its_latch():
+    body = make_vehicle(7, 0.0, -30.0, 0.0, 0.0, is_tmp=True)
+    snap = _aeb_frame([body], ncz_ids=set(), latched={7}, off_ids={7})
+    assert snap.ghost_ids == set() and 7 in snap.colliding_ids

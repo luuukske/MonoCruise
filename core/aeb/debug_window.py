@@ -33,7 +33,7 @@ _SAFE_CLR = QColor(80, 210, 130)
 _DANGER_CLR = QColor(240, 55, 55)
 _WARN_CLR = QColor(245, 185, 40)
 _SUPPRESSED_CLR = QColor(100, 100, 115)
-# No-collision zone ghost: grey body, dashed outline (radar README §18).
+# Ghost (no-collision zone, radar README §18, or deep overlap, AEB README §4): grey, dashed.
 _GHOST_CLR = QColor(150, 150, 160)
 _BRAKE_SUPP_CLR = QColor(255, 140, 40)
 _EVASION_FILTER_CLR = QColor(0, 200, 200)

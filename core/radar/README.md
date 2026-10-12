@@ -127,7 +127,7 @@ _VEH_STRIDE            = 46  # fields per vehicle slot (16 + 3*10)
 | 11 | acceleration | float | m/s²: AI = buffer as-is. TMP buffer value is **ignored**; `Vehicle.acceleration` is EMA of the time derivative of filtered TMP speed (see §7). Arcs use `accel_for_arc()` (= `acceleration`). |
 | 12 | trailer_count | short | 0–3 |
 | 13 | id | short | Per-frame continuity key |
-| 14 | is_tmp | byte | `1` = TMP multiplayer (ETS2LA); `0` = AI. Consumer threads may apply TMP-specific filters (e.g. AEB's rel-speed split: see `core/aeb/README.md`). |
+| 14 | is_tmp | byte | `1` = TMP multiplayer (ETS2LA); `0` = AI. Consumer threads may apply TMP-specific filters (e.g. AEB's `TmpCrossTrafficFilter`: see `core/aeb/README.md`). |
 | 15 | is_trailer | byte | `1` = trailer record, `0` = tractor |
 
 ### Trailer slots (offsets 16, 26, 36)
@@ -876,6 +876,7 @@ a trailer standing in ego's lane. When that phantom decayed at 6.9-7.4 s it made
 the trailer a follow threat, the only thing that took it past
 `TmpRelSpeedFilter`, which suppresses targets under 50 km/h relative speed at
 ego speeds of 50 km/h and below. The guard is right; that filter is the gap.
+(The filter was removed on 2026-10-12, and the clip brakes again: AEB §4.)
 
 ### Crash detection (TMP only, full frames only)
 
@@ -1835,8 +1836,8 @@ the lane: a driver who holds the cab on the lane centre puts the lane circle
 
 `core/radar/tmp_state.py`. Inside a TruckersMP no-collision zone (NCZ) other
 players are ghosts: ego drives through them. AEB braking for one is a pure false
-positive, and the TMP rel-speed floor (`core/aeb/README.md` §4) only hides the
-low-speed share of them.
+positive. AEB has no TMP speed floor any more (`core/aeb/README.md` §4), so the
+gate below is what keeps it quiet in a zone.
 
 ### Source
 
@@ -1926,8 +1927,8 @@ window starts after the exit replays without the hold.
 
 ### Consumers
 
-- **AEB** folds `ncz_ids` into the ids it skips with the off-surface set (§15),
-  latched threats exempt. Replay reads the per-frame `tmp_ncz` flag clips now
+- **AEB** folds `ncz_ids` into the ids it skips with the off-surface set (§15).
+  A latched threat in `ncz_ids` is released, not exempt (`core/aeb/README.md` §4). Replay reads the per-frame `tmp_ncz` flag clips now
   record (`RadarFrameRecord.tmp_ncz`, absent = False) and does the same.
 - **ACC** does not read it. Following a ghost ahead is still the expected
   behaviour in a queue.
@@ -1937,7 +1938,9 @@ window starts after the exit replays without the hold.
   the pipeline; a latched ghost is drawn as the threat it still is.
 - Per-player suppression beyond the exit hold (one ghost among collidable players
   at a zone edge) needs a per-player signal TruckersMP does not provide reliably
-  yet. Candidate SDK data is listed in `tmp_plugin/README.md`.
+  yet. Candidate SDK data is listed in `tmp_plugin/README.md`. Until then AEB's
+  overlap gate (`core/aeb/README.md` §4) covers the clearest case geometrically:
+  a body deep inside ego, anywhere, AI or TMP.
 
 ### Do not
 
@@ -1951,8 +1954,7 @@ window starts after the exit replays without the hold.
   turns a real truck into a ghost.
 - Use `CanCollideWith` / `players_collidable` to suppress anything until it is
   re-measured: it read "cannot collide" for real trucks.
-- Feed `ncz_ids` to ACC, or use them to relax the TMP rel-speed floor outside a
-  zone: lag ghosts still need it (v1.1.3).
+- Feed `ncz_ids` to ACC.
 
 `tools/tmp_ncz_probe.py` shows the state live while driving.
 

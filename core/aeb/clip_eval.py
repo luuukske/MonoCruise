@@ -76,7 +76,6 @@ def _apply_warm_state(t: AEBThread, ws) -> None:
     t._latched_hit_mono = {
         int(k): float(v) for k, v in getattr(ws, "latched_hit_mono", {}).items()
     }
-    t._latched_filter_ego_kmh = ws.latched_filter_ego_kmh
     t._published_target_ms2 = float(ws.target_decel_ms2)
     if ws.brake_hold_until_mono is not None:
         t._prev_state = AEBState.BRAKE

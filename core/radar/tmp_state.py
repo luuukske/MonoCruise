@@ -252,7 +252,7 @@ class ExitGhostHold:
             if v.is_tmp and (b := vehicle_box(v)) is not None
         }
         if exited_zone:
-            self._rigs = _rigs_inside(ego, vehicles, boxes)
+            self._rigs = rigs_inside(ego, vehicles, boxes, EXIT_ARM_INSET_M)
             if self._rigs:
                 logger.info(
                     "TruckersMP zone left with %d player(s) still overlapping ego: AEB keeps "
@@ -270,10 +270,21 @@ class ExitGhostHold:
         self._rigs = []
 
 
-def _rigs_inside(ego: Box, vehicles: Sequence[Vehicle], boxes: dict[int, Box]) -> list[frozenset[int]]:
-    """Whole rigs (tractor, trailer records, nested trailers) with a body clearly inside ego."""
-    inner = ego.shrunk(EXIT_ARM_INSET_M)
-    hit = {i for i, b in boxes.items() if boxes_overlap(inner, b)}
+def ids_inside(ego: Box, boxes: dict[int, Box], inset_m: float) -> set[int]:
+    """Bodies that overlap ego's box shrunk by ``inset_m`` on every side."""
+    inner = ego.shrunk(inset_m)
+    return {i for i, b in boxes.items() if boxes_overlap(inner, b)}
+
+
+def rigs_inside(
+    ego: Box, vehicles: Sequence[Vehicle], boxes: dict[int, Box], inset_m: float,
+) -> list[frozenset[int]]:
+    """Whole rigs (tractor, trailer records, nested trailers) with a body ``inset_m`` inside ego."""
+    return rigs_of(ids_inside(ego, boxes, inset_m), vehicles, boxes)
+
+
+def rigs_of(hit: set[int], vehicles: Sequence[Vehicle], boxes: dict[int, Box]) -> list[frozenset[int]]:
+    """The whole rig of each hit body, as sets of ids in ``boxes``."""
     if not hit:
         return []
     cache: dict[int, int] = {}
