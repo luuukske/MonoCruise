@@ -28,6 +28,12 @@ Polls every registered, watched, healthy thread:
 - `running == False` and `is_alive() is False` means crashed: restart immediately.
 - Heartbeat older than `HEARTBEAT_TIMEOUT` for `FREEZE_STREAK_RESTART` consecutive polls
   means frozen. The streak is a debounce; a single stale poll is a hiccup.
+- On a freeze, before restarting (or giving up), it logs where the thread is stuck:
+  the innermost `STACK_FRAMES` frames from `sys._current_frames()`, one warning line,
+  never a popup. A freeze leaves no trace of its own; the 2026-10-12 sending-thread
+  freezes took a log-and-replay hunt to pin on a 382 MB file read that this line would
+  have named. Paths are repo-relative, or their last two parts outside the repo, so
+  the log stays shareable.
 - At `restart_count >= max_restarts` the thread is marked unhealthy instead of restarted.
 - `telemetry_thread` with `data.request_quit` is never restarted: shutdown is the entry
   point's business.

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(monocruise_tmp VERSION 1.0.1 LANGUAGES CXX RC)
+project(monocruise_tmp VERSION 1.0.3 LANGUAGES CXX RC)
 
 if (NOT MSVC)
     message(FATAL_ERROR "The TruckersMP client is Windows x64 only; build with MSVC.")

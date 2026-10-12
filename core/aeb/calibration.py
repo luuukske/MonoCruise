@@ -41,6 +41,11 @@ class AEBCalibration:
     # Rejected 2026-07-19: response distance cap, threat-age tiering, engage 0.9 (README §7).
     elevation_margin: float = 5.0
     max_range: float = 200.0
+    # A body this far inside ego's box (past its half width) is a ghost, not an obstacle (README §4).
+    overlap_ghost_depth_m: float = 1.5
+    # Or one clearly inside (past box slack) this long without AEB latched on it: real contact is a frame.
+    overlap_ghost_contact_m: float = 0.2
+    overlap_ghost_persist_s: float = 0.3
     # Traffic arcs; ego starts at its SDK rear-wheel mean, or here when unreadable.
     arc_start_pctg: float = 0.2
     collision_samples: int = 36
@@ -112,10 +117,6 @@ class AEBCalibration:
     corner_entry_min_lateral: float = 0.4           # m
     corner_entry_lateral_tol: float = 1.5           # m
 
-    # TMP rel-speed filter
-    tmp_filter_split_kmh: float = 50.0
-    tmp_filter_rel_above_kmh: float = 5.0
-    tmp_filter_rel_below_kmh: float = 50.0
     user_brake_latch: float = 0.12
     # FF assist ramps in from here to user_brake_latch (README pedal authority).
     ff_assist_ramp_lo: float = 0.03
@@ -307,6 +308,8 @@ class AEBCalibration:
     follow_threat_max_lat_converge_ms: float = 10.0
     follow_threat_hold_s: float = 2.0
     follow_threat_max_range_m: float = 80.0
+    # At or below this ego speed a flagged lead skips EgoEvasionFilter (README follow-threat).
+    follow_threat_evasion_exempt_kmh: float = 50.0
 
     # Latched ids: filter bypass only, never a brake hold (README latched-threat).
     # Kept while ahead within the steer-in band, for at most latched_max_s past the last hit.

@@ -127,7 +127,7 @@ _VEH_STRIDE            = 46  # fields per vehicle slot (16 + 3*10)
 | 11 | acceleration | float | m/s²: AI = buffer as-is. TMP buffer value is **ignored**; `Vehicle.acceleration` is EMA of the time derivative of filtered TMP speed (see §7). Arcs use `accel_for_arc()` (= `acceleration`). |
 | 12 | trailer_count | short | 0–3 |
 | 13 | id | short | Per-frame continuity key |
-| 14 | is_tmp | byte | `1` = TMP multiplayer (ETS2LA); `0` = AI. Consumer threads may apply TMP-specific filters (e.g. AEB's rel-speed split: see `core/aeb/README.md`). |
+| 14 | is_tmp | byte | `1` = TMP multiplayer (ETS2LA); `0` = AI. Consumer threads may apply TMP-specific filters (e.g. AEB's `TmpCrossTrafficFilter`: see `core/aeb/README.md`). |
 | 15 | is_trailer | byte | `1` = trailer record, `0` = tractor |
 
 ### Trailer slots (offsets 16, 26, 36)
@@ -876,6 +876,7 @@ a trailer standing in ego's lane. When that phantom decayed at 6.9-7.4 s it made
 the trailer a follow threat, the only thing that took it past
 `TmpRelSpeedFilter`, which suppresses targets under 50 km/h relative speed at
 ego speeds of 50 km/h and below. The guard is right; that filter is the gap.
+(The filter was removed on 2026-10-12, and the clip brakes again: AEB §4.)
 
 ### Crash detection (TMP only, full frames only)
 
@@ -1835,8 +1836,8 @@ the lane: a driver who holds the cab on the lane centre puts the lane circle
 
 `core/radar/tmp_state.py`. Inside a TruckersMP no-collision zone (NCZ) other
 players are ghosts: ego drives through them. AEB braking for one is a pure false
-positive, and the TMP rel-speed floor (`core/aeb/README.md` §4) only hides the
-low-speed share of them.
+positive. AEB has no TMP speed floor any more (`core/aeb/README.md` §4), so the
+gate below is what keeps it quiet in a zone.
 
 ### Source
 
@@ -1926,8 +1927,8 @@ window starts after the exit replays without the hold.
 
 ### Consumers
 
-- **AEB** folds `ncz_ids` into the ids it skips with the off-surface set (§15),
-  latched threats exempt. Replay reads the per-frame `tmp_ncz` flag clips now
+- **AEB** folds `ncz_ids` into the ids it skips with the off-surface set (§15).
+  A latched threat in `ncz_ids` is released, not exempt (`core/aeb/README.md` §4). Replay reads the per-frame `tmp_ncz` flag clips now
   record (`RadarFrameRecord.tmp_ncz`, absent = False) and does the same.
 - **ACC** does not read it. Following a ghost ahead is still the expected
   behaviour in a queue.
@@ -1937,7 +1938,9 @@ window starts after the exit replays without the hold.
   the pipeline; a latched ghost is drawn as the threat it still is.
 - Per-player suppression beyond the exit hold (one ghost among collidable players
   at a zone edge) needs a per-player signal TruckersMP does not provide reliably
-  yet. Candidate SDK data is listed in `tmp_plugin/README.md`.
+  yet. Candidate SDK data is listed in `tmp_plugin/README.md`. Until then AEB's
+  overlap gate (`core/aeb/README.md` §4) covers the clearest case geometrically:
+  a body deep inside ego, anywhere, AI or TMP.
 
 ### Do not
 
@@ -1951,14 +1954,116 @@ window starts after the exit replays without the hold.
   turns a real truck into a ghost.
 - Use `CanCollideWith` / `players_collidable` to suppress anything until it is
   re-measured: it read "cannot collide" for real trucks.
-- Feed `ncz_ids` to ACC, or use them to relax the TMP rel-speed floor outside a
-  zone: lag ghosts still need it (v1.1.3).
+- Feed `ncz_ids` to ACC.
 
 `tools/tmp_ncz_probe.py` shows the state live while driving.
 
 ---
 
+## 19. TruckersMP SDK Motion: Speed and the Lag / Crash Split (experimental)
+
+`core/radar/tmp_sdk.py`. Positions, bodies, headings, history and every pose guard
+stay on ETS2LA's traffic buffer. For a TMP record the radar can match to a body
+in MonoCruise's own plugin block (`Local\MonoCruiseTmpVehicles`,
+`tmp_plugin/README.md`), two things change: the **measured speed** that enters the
+§7 chain, and how a **stall** and a **crash** are told apart. Anything without a
+match (AI, parked, beyond the plugin's 250 m, no plugin, every clip recorded
+before this) takes the §7 path unchanged.
+
+`SDK_SPEED_ENABLED` in `tmp_sdk.py` switches all of it off.
+
+### Why
+
+Measured on a 4.5 min TMP drive (`tools/tmp_sdk_analyze.py`, `tmp_plugin/README.md`
+"Measured"): the SDK velocity is the sender's own, carried in each packet at ~4.5 Hz;
+the client extrapolates a late player ~300 ms and then freezes it. The §7 position
+fit read those freezes as braking: 19 of 55 gaps of moving trucks fell more than
+2 m/s below the sender's own speed (worst 18 m/s), 14 overshot by more than 2 m/s
+afterwards. The lag freeze caught 2 of them: position jitter had latched
+`_raw_brake_active` on 37% of moving TMP updates, and its hard-brake veto blocked 31
+of 49 freezes. Gating the freeze on packet age alone was tried offline and is not
+enough: the dip comes after the stall, from the position window spanning it.
+
+### Matching
+
+`tmp_sdk.attach` runs in `TrafficReader._smooth_and_build` after the nearest-24 cull:
+greedy nearest pairs within `MATCH_M` (3 m), tractor records to SDK tractors and TMP
+trailer records to SDK trailers. Same-place offsets measured 1.3 m at p99 for both.
+`Vehicle.sdk` holds the body for that frame only.
+
+### Speed
+
+`_sdk_raw_speed`: the SDK velocity projected on the record's own smoothed heading,
+fed to both lanes as the raw speed (the hard-brake short window is not used, its
+state is reset). EMA, accel fit, `speed_corr` and `acc_speed` run as in §7, so the
+consumers see the same signals, only measured better.
+
+A **stall** (`netcode_stall`, packet older than `STALE_MS`, 300 ms):
+- While the client still extrapolates the body (it moved at least 10% of the
+  expected distance this frame), the speed stays the sender's: the body moves in
+  ego's world.
+- Once the pose is frozen, the speed is held for twice the TTC-scaled lag freeze
+  (`_lag_freeze_duration` F: 0 within 0.3 s TTC, 0.5 s from 4 s out), then ramps to
+  0 over one F with the §7 freeze shape, `held * (1 - frac^2)`. A lead at 1.5 s
+  headway holds until ~1.05 s after its last packet and is at 0 by ~1.45 s; the §7
+  freeze ramps over the same length but from ~0.45 s, then rebounds to ~13 m/s on
+  release. Close in, a frozen body is exactly what ego can hit, the same posture as
+  §7. Short far stalls (frozen under 1 s) are ignored; ACC brakes for longer ones,
+  and for any stall sooner the closer the body is.
+
+**Do not** move the stalled body forward on the SDK velocity. The client shows it
+frozen and catches it up at ~15% above its speed afterwards; the frozen pose is
+where a collision happens.
+
+A rewind (position mismatch) still holds the pose but keeps measuring the SDK speed.
+
+### Crash and lag
+
+`_apply_sdk_crash_evidence`, after the §7 crash detector:
+- **Lag**: while the packet is stale, a position-based crash confirmation from this
+  frame is reverted. A pose with no fresh packet behind it has no new evidence.
+- **Crash**: between two consecutive samples of one player (`tmp_sdk.crash_evidence`):
+  speed loss of at least 6 m/s at 30 m/s2 or more, a velocity turn of 200 deg/s or
+  more with both speeds at least 8 m/s, or a reversal (cosine at most -0.3, both
+  above 3 m/s). 30 min of crash-free TMP driving reached 24 m/s2 (a 7 -> 2 m/s stop),
+  17.5 m/s2 above 8 m/s, and 156 deg/s below 8 m/s (123 above); the first bars
+  (15 m/s2, 3 m/s, 120 deg/s) fired 4 times on that drive. It sets the §7 latch
+  (`_CRASH_HOLD_S`), so `crash_confirmed` means the same to AEB and ACC, and
+  `sdk_crash` marks it as SDK evidence.
+- Only consecutive counters within 3 of each other compare; a pose jump re-seeds,
+  so a reused id or a re-match cannot fake a crash.
+
+The SDK's angular velocity is always 0 for remote players, so rotation-based
+evidence stays on the §7 detector.
+
+### Clips
+
+`RadarFrameRecord.tmp_sdk_buf`: the bodies the radar matched that frame, ages at read
+time (`tmp_sdk.matched_only`, `tmp_sdk.encode_frame`); re-matching that subset pairs
+exactly as live did. Live frames are quantised the way the clip stores them,
+so replay (`clip_replay.decode_radar_stream`) gets the identical frame. It holds
+positions, velocities and sample ages only: no player identity, no latency.
+
+### Measured
+
+Radar chain replayed both ways (`tools/tmp_sdk_analyze.py`):
+
+| | 4.5 min drive | 25 min drive (71 trucks) |
+|---|---|---|
+| gaps more than 2 m/s below the sender's own speed | 19 -> 2 (worst 18 -> 2.4 m/s) | 3 -> 0 (worst 30.7 -> 0) |
+| overshoot over 2 m/s after a gap | 14 -> 0 | 0 -> 0 |
+| braking midpoint behind the reference, p50 / p90 | 0.31 / 0.95 -> 0.19 / 0.45 s | 0.28 / 0.39 -> 0.23 / 0.27 s |
+| crash confirmations on matched trucks | 0 -> 0 | 1 -> 1 |
+
+The 30.7 m/s case is a 1.2 s packet gap on a truck at 30.5 m/s: frozen on screen
+for 0.8 s, the §7 chain read it as stopped (the lag freeze never opened), the SDK
+chain held 30.5. Players at rest send less often (gaps to 2.3 s at speed 0), which
+flags `netcode_stall` harmlessly. No real crash on either drive: the crash rule is
+tested synthetically (`tests/test_tmp_sdk_motion.py`) only.
+
 ---
 
-*Source: `core/radar/traffic.py`, `core/radar/reader.py`, `core/radar/thread.py`, `core/radar/ego_path.py`: LD-Tech / MonoCruise.*
+---
+
+*Source: `core/radar/traffic.py`, `core/radar/reader.py`, `core/radar/thread.py`, `core/radar/ego_path.py`, `core/radar/tmp_sdk.py`: LD-Tech / MonoCruise.*
 

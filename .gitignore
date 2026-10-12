@@ -51,3 +51,6 @@ dist/
 installer/output/
 *.spec.bak
 release_notes.md
+
+# TMP SDK lag experiment recordings (tools/tmp_sdk_probe.py)
+tools/tmp_sdk_runs/

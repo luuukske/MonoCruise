@@ -254,7 +254,7 @@ def test_thread_no_shadow_on_non_spatial_filter_only():
     t._engaged = False
     snap = _tn_snap(
         suppression_reasons={
-            5: [FilterResult(suppressed=True, reason="TmpRelSpeedFilter")],
+            5: [FilterResult(suppressed=True, reason="LowSpeedTrailerFilter")],
         },
     )
     spy = _tick(t, snap, AEBState.STANDBY)

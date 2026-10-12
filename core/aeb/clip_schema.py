@@ -146,6 +146,8 @@ class RadarFrameRecord:
     tmp_ncz: bool = False
     # The gate closed on this frame because the plugin reported leaving the zone. Older clips: False.
     tmp_ncz_exit: bool = False
+    # TruckersMP SDK bodies the radar matched this frame, ages at read time (README §19). Older clips: None.
+    tmp_sdk_buf: bytes | None = None
 
     def to_json(self) -> dict:
         out = {
@@ -159,6 +161,8 @@ class RadarFrameRecord:
             out["tmp_ncz"] = True
         if self.tmp_ncz_exit:
             out["tmp_ncz_exit"] = True
+        if self.tmp_sdk_buf:
+            out["tmp_sdk_buf"] = _b64(self.tmp_sdk_buf)
         return out
 
     @classmethod
@@ -171,6 +175,7 @@ class RadarFrameRecord:
             parked_buf=_unb64(d.get("parked_buf")),
             tmp_ncz=bool(d.get("tmp_ncz", False)),
             tmp_ncz_exit=bool(d.get("tmp_ncz_exit", False)),
+            tmp_sdk_buf=_unb64(d.get("tmp_sdk_buf")),
         )
 
 
@@ -301,7 +306,6 @@ class AEBWarmState:
     latched_threat_ids: list[int] = field(default_factory=list)
     latched_scope_ok_mono: dict[int, float] = field(default_factory=dict)
     latched_hit_mono: dict[int, float] = field(default_factory=dict)
-    latched_filter_ego_kmh: float | None = None
     warn_hold_until_mono: float | None = None
     brake_hold_until_mono: float | None = None
     target_decel_ms2: float = 0.0
@@ -314,7 +318,6 @@ class AEBWarmState:
                 str(k): v for k, v in self.latched_scope_ok_mono.items()
             },
             "latched_hit_mono": {str(k): v for k, v in self.latched_hit_mono.items()},
-            "latched_filter_ego_kmh": self.latched_filter_ego_kmh,
             "warn_hold_until_mono": self.warn_hold_until_mono,
             "brake_hold_until_mono": self.brake_hold_until_mono,
             "target_decel_ms2": self.target_decel_ms2,
@@ -332,7 +335,6 @@ class AEBWarmState:
             latched_hit_mono={
                 int(k): float(v) for k, v in d.get("latched_hit_mono", {}).items()
             },
-            latched_filter_ego_kmh=_opt_float(d.get("latched_filter_ego_kmh")),
             warn_hold_until_mono=_opt_float(d.get("warn_hold_until_mono")),
             brake_hold_until_mono=_opt_float(d.get("brake_hold_until_mono")),
             target_decel_ms2=float(d.get("target_decel_ms2", 0.0)),

@@ -67,15 +67,19 @@ BRAKE_LOG_HEADER: list[str] = [
 ]
 
 
-def open_debug_csv(path: Path, header: list[str]):
+def open_debug_csv(path: Path, header: list[str], max_bytes: int | None = None):
     """Open *path* for appending under *header*. Returns (file, writer), or (None, None).
 
-    A file with a different header is rotated aside first: appending new columns
-    under an old header silently misaligns every later row.
+    A file with a different header, or one past *max_bytes*, is rotated aside first:
+    appending new columns under an old header silently misaligns every later row.
+    Only the header line is ever read, so opening costs the same at any file size.
     """
     try:
-        write_header = not path.exists() or path.stat().st_size == 0
-        if not write_header and _header_differs(path, header):
+        size = path.stat().st_size if path.exists() else 0
+        write_header = size == 0
+        if not write_header and (
+            (max_bytes is not None and size > max_bytes) or _header_differs(path, header)
+        ):
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             try:
                 path.rename(path.with_name(f"{path.stem}_{stamp}{path.suffix}"))

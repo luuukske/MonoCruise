@@ -647,6 +647,17 @@ target and demand, the learned capacity, and which gate ended the learner's tick
 Off by default, so it never ships to drivers. A header change rotates the old file
 aside, the same as `coast_debug.csv`.
 
+`accel_to_pedals_debug.csv` (the mapper, 10 Hz while it learns) goes through the same
+`open_debug_csv` and is also `debug`-only now. Until 2026-10-12 it was written in every
+build and its open read the **whole file** to check the header (`rf.read()`), on the
+sending thread, at the first learning tick of each thread lifetime. At 382 MB that was
+0.4-0.9 s idle and enough under game load to trip the watchdog (the 01:06:08 freeze on
+2026-10-12 landed 3 s after cruise control engaged), and each restart's replacement
+read it again. `open_debug_csv` reads the header line only (2 ms on the same file), so
+never let an open read past it. A file over `_DEBUG_LOG_MAX_BYTES` (512 MB) is rotated
+aside at open; `tools/acc_platoon/shifts.py` and `tools/tune_visualizer.py` read the live
+file only, so a rotation leaves earlier history in the `_<stamp>` file.
+
 The grip columns (lateral accel, steer, brake temperature, air pressure, wipers, the
 surface under most truck wheels, worst truck and trailer wheel slip, from
 `telemetry_thread.grip_debug_fields`) are there for one open question. Full-pedal stops

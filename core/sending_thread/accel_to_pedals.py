@@ -2,7 +2,6 @@ from __future__ import annotations
 
 """Commanded m/s² to gas/brake mapping. See core/sending_thread/README.md."""
 
-import csv
 import logging
 import math
 import time
@@ -12,6 +11,7 @@ from pathlib import Path
 
 from core.settings import Settings
 
+from .debug_csv import open_debug_csv
 from .launch_governor import LaunchGovernor, launch_gas_cap
 
 logger = logging.getLogger(__name__)
@@ -146,6 +146,8 @@ _DEBUG_LOG_HEADER_ROW: list[str] = [
     "error_pedal",
 ]
 _DEBUG_LOG_INTERVAL_S: float = 0.10  # 10 Hz
+# Rotated aside at open past this; tools read only the live file.
+_DEBUG_LOG_MAX_BYTES: int = 512 * 1024 * 1024
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -651,37 +653,14 @@ class AccelToPedals:
     # Debug logging
 
     def _ensure_debug_log(self) -> None:
+        # Header line only: reading the whole file here froze the sending thread (README).
         if self._debug_log_file is not None:
             return
-        path = self._project_root / _DEBUG_LOG_NAME
-        write_header = False
-        try:
-            if path.exists():
-                size = path.stat().st_size
-                if size == 0:
-                    write_header = True
-                elif size > 0:
-                    with path.open("r", encoding="utf-8-sig", newline="") as rf:
-                        first = rf.readline()
-                        tail = rf.read()
-                    if first and not first.lstrip("\ufeff").startswith("t_s,"):
-                        with path.open("w", newline="", encoding="utf-8") as wf:
-                            w = csv.writer(wf)
-                            w.writerow(_DEBUG_LOG_HEADER_ROW)
-                            wf.write(first)
-                            wf.write(tail)
-            else:
-                write_header = True
-
-            self._debug_log_file = path.open("a", newline="", encoding="utf-8")
-            self._debug_log_writer = csv.writer(self._debug_log_file)
-            if write_header:
-                self._debug_log_writer.writerow(_DEBUG_LOG_HEADER_ROW)
-                self._debug_log_file.flush()
-        except OSError:
-            self._debug_log_file = None
-            self._debug_log_writer = None
-            logger.debug("accel_to_pedals debug log unavailable", exc_info=True)
+        self._debug_log_file, self._debug_log_writer = open_debug_csv(
+            self._project_root / _DEBUG_LOG_NAME,
+            _DEBUG_LOG_HEADER_ROW,
+            max_bytes=_DEBUG_LOG_MAX_BYTES,
+        )
 
     def _log_debug_step(
         self,
@@ -718,6 +697,9 @@ class AccelToPedals:
         if now - self._last_debug_log_mono < _DEBUG_LOG_INTERVAL_S:
             return
         self._last_debug_log_mono = now
+        if not Settings.debug:
+            self.close()
+            return
         if self._debug_log_start_mono is None:
             self._debug_log_start_mono = now
         t_s = now - self._debug_log_start_mono

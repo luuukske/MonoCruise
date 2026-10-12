@@ -16,6 +16,7 @@ from .ego_path import EGO_POSITION_HISTORY_LEN, ego_curvature_from_history
 from .elevation import ElevationGate, EgoElevationTrack, RoadSurface, build_surface
 from .reader import TrafficReader
 from .scs_pose import ScsPose, ScsPoseReader
+from .tmp_sdk import SdkFrame, TmpSdkReader, encode_frame, matched_only
 from .tmp_state import (
     ExitGhostHold, NoCollisionZoneGate, TmpStateReader, ego_box, ncz_vehicle_ids,
 )
@@ -92,6 +93,7 @@ class RadarThread(BaseThread):
         self._elevation_track = EgoElevationTrack()
         self._elevation_gate = ElevationGate()
         self._tmp_state = TmpStateReader()
+        self._tmp_sdk = TmpSdkReader()
         self._ncz_gate = NoCollisionZoneGate()
         self._ncz_exit_hold = ExitGhostHold()
         # None until the first frame; then True when using SCS simulatedTime.
@@ -106,6 +108,7 @@ class RadarThread(BaseThread):
         self._traffic.close()
         self._pose.close()
         self._tmp_state.close()
+        self._tmp_sdk.close()
         self._ncz_gate.clear()
         self._ncz_exit_hold.clear()
         self._ego_position_history.clear()
@@ -201,7 +204,7 @@ class RadarThread(BaseThread):
         traffic_buf: bytes | None, parked_buf: bytes | None,
         ego_wheels: int = 0, ego_trailer_count: int = 0,
         geometry: EgoGeometry | None = None, tmp_ncz: bool = False,
-        tmp_ncz_exit: bool = False,
+        tmp_ncz_exit: bool = False, tmp_sdk: SdkFrame | None = None,
     ) -> None:
         """Debug clip capture; never raises into the radar loop."""
         try:
@@ -219,6 +222,7 @@ class RadarThread(BaseThread):
                 t_wall=t_wall, t_mono=now_mono, ego=ego,
                 traffic_buf=traffic_buf, parked_buf=parked_buf, tmp_ncz=tmp_ncz,
                 tmp_ncz_exit=tmp_ncz_exit,
+                tmp_sdk_buf=encode_frame(tmp_sdk) if tmp_sdk is not None else None,
             ))
         except Exception:
             logger.debug("radar clip capture failed", exc_info=True)
@@ -306,13 +310,14 @@ class RadarThread(BaseThread):
         ego_z: float,
         ego_speed: float,
         t_kin: float,
+        sdk: SdkFrame | None = None,
     ) -> tuple[list[Vehicle], list[Vehicle]] | None:
         capture = get_recorder()
         self._traffic.capture_raw = capture is not None
         if raw is None:
             return None
         return self._traffic.read_raw(
-            raw, ego_x, ego_y, ego_z, ego_speed, t_now=t_kin,
+            raw, ego_x, ego_y, ego_z, ego_speed, t_now=t_kin, sdk=sdk,
         )
 
     def loop(self) -> None:
@@ -374,7 +379,9 @@ class RadarThread(BaseThread):
         ego_curvature = ego_curvature_from_history(self._ego_position_history)
         self._elevation_track.push(ego_x, ego_z, ego_y)
 
-        traffic = self._read_traffic(raw, ego_x, ego_y, ego_z, ego_speed, t_kin)
+        # Read beside the traffic copy so packet ages describe the same frame (README §19).
+        sdk_frame = self._tmp_sdk.read()
+        traffic = self._read_traffic(raw, ego_x, ego_y, ego_z, ego_speed, t_kin, sdk_frame)
         if traffic is None:
             vehicles, trailer_vehicles = [], []
         else:
@@ -424,5 +431,6 @@ class RadarThread(BaseThread):
                 ego_pitch_deg, ego_has_trailer, False, ego_mass_kg,
                 self._traffic.last_traffic_bytes, self._traffic.last_parked_bytes,
                 ego_wheels, ego_trailer_count, geometry, tmp_ncz, tmp_ncz_exit,
+                matched_only(sdk_frame, vehicles),
             )
 

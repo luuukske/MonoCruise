@@ -11,6 +11,15 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Fixed
+- **AEB ignored slow TruckersMP traffic**: below 50 km/h AEB only reacted to other players closing much faster than you, so it could miss a truck backing across your lane or a car stopping in a jam. It now watches them like AI traffic.
+- **AEB braked for vehicles you were driving through**: a TruckersMP player you were ghosting through, or an AI car appearing on top of your truck, could set AEB off, and once it was braking it kept going even inside a no-collision zone. AEB now lets go of players in a zone and ignores any vehicle that sits inside your truck until you are apart.
+
+## [1.1.3-preview.1] - 2026-10-12
+### Fixed
+- **Braking for lagging TruckersMP players**: a player whose connection hiccupped looked like a truck stopping dead, so ACC could brake for nothing. MonoCruise now reads each player's real speed from TruckersMP's SDK, ignores short lag spikes, and still brakes gradually if a truck ahead stays frozen.
+- **MonoCruise stalled for a moment when AEB stepped in**: with "Help improve AEB and ACC" on, the screenshot saved with each AEB clip paused all of MonoCruise, pedals included, for up to a second or two right as AEB warned or braked. The screenshot now runs alongside everything else without pausing it.
+- **"Sending code has frozen" after turning on cruise control**: a cruise control log in the install folder kept growing and was read in full the first time cruise control engaged, which could freeze the pedals until MonoCruise restarted that part. The log is no longer written for drivers.
 
 ## [1.1.2] - 2026-10-11
 ### Added

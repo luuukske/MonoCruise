@@ -38,7 +38,7 @@ def _make_clip(clip_id: str = "test0001", trigger: str = "manual") -> Clip:
         calibration_id=cid,
         calibration=cfields,
         aeb_warm_state=AEBWarmState(engaged=True, latched_threat_ids=[7, 9],
-                                    latched_filter_ego_kmh=52.0, target_decel_ms2=3.5),
+                                    target_decel_ms2=3.5),
     )
     frames = [
         RadarFrameRecord(
@@ -75,7 +75,6 @@ def test_serialization_round_trip_preserves_streams_and_bytes():
     assert back.metadata.session_kind == "TMP"
     assert back.metadata.label is None
     assert back.metadata.aeb_warm_state.latched_threat_ids == [7, 9]
-    assert back.metadata.aeb_warm_state.latched_filter_ego_kmh == 52.0
 
     assert len(back.radar_frames) == 4
     assert len(back.aeb_ticks) == 4

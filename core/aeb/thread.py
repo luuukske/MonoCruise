@@ -23,6 +23,7 @@ from core.radar.traffic import (
 from core.radar.elevation import MAX_EGO_GRADE
 from core.radar.ego_geometry import EgoGeometry, calibration_geometry
 from core.radar.ego_path_model import EgoPathModel, EgoPathState
+from core.radar.tmp_state import ego_box
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT, ego_path_params
 from core.aeb.confirm import OccupancyConfirm
 from core.aeb.clearance import ClearanceResult, clearance_required
@@ -31,6 +32,7 @@ from core.aeb.capture import get_recorder, note_intervention
 from core.aeb.clip_schema import AEBTickRecord, AEBWarmState, ConsumedContext, LiveAEB
 from core.aeb.warning_player import WarningPlayer
 from core.aeb.avoidability import measured_stationary
+from core.aeb.overlap_ghosts import OverlapGhostHold
 from core.aeb.filters import (
     FilterContext, FilterResult,
     _build_vehicle_collision_data, _world_to_ego_forward, _cross_zone_padding,
@@ -53,10 +55,6 @@ _GRAVITY_MS2: float = 9.81
 # Brake-capacity floor used when sending_thread has not yet published an
 # estimate. Slope-corrected per tick before use; never read as a flat ceiling.
 _FULL_BRAKE_DECEL_FALLBACK: float = 7.8
-# TMP-only: |v_ego − v_target| (km/h) vs latched ref ego speed: see _latched_filter_ego_kmh.
-_TMP_FILTER_EGO_SPLIT_KMH: float = 40.0
-_TMP_FILTER_REL_ABOVE_SPLIT_KMH: float = 15.0
-_TMP_FILTER_REL_AT_OR_BELOW_SPLIT_KMH: float = 40.0
 # Physical-pedal deadzone only. OPD and mapper_command_brake silence warn at
 # any value above zero: they are already a commanded brake.
 _USER_BRAKE_LATCH_THRESHOLD: float = 0.03
@@ -77,7 +75,7 @@ def _addressing_brake_from_sources(
     brakeval: float = 0.0,
     program_brake: float = 0.0,
 ) -> bool:
-    """TMP latch / shadow sampler: physical or mapper above the deadzone."""
+    """Shadow sampler: physical or mapper above the deadzone."""
     return (
         brakeval > _USER_BRAKE_LATCH_THRESHOLD
         or program_brake > _USER_BRAKE_LATCH_THRESHOLD
@@ -203,15 +201,8 @@ def _swap_trailer_kinematics(vehicles: list[Vehicle]) -> list[Vehicle]:
     return out
 
 
-def _tmp_collision_threat(ref_ego_kmh: float, rel_speed_kmh: float) -> bool:
-    """TMP session only: True if target should participate in arc collision / TTB."""
-    if ref_ego_kmh > _TMP_FILTER_EGO_SPLIT_KMH:
-        return rel_speed_kmh > _TMP_FILTER_REL_ABOVE_SPLIT_KMH
-    return rel_speed_kmh > _TMP_FILTER_REL_AT_OR_BELOW_SPLIT_KMH
-
-
 def _ghost_vehicle_dict(v: Vehicle) -> dict:
-    """Debug-window record for a no-collision zone ghost: drawn, never evaluated."""
+    """Debug-window record for a ghost (zone or deep overlap): drawn, never evaluated."""
     yaw = v._smooth_yaw if v._smooth_yaw is not None else math.radians(v.rotation.euler()[1])
     trailers = [
         {
@@ -272,7 +263,7 @@ class AEBSnapshot:
     closing_floor_ids: set = field(default_factory=set)
     # Superset: LOS veto plus the extrapolation vetoes (README engagement vetoes).
     engage_vetoed_ids: set = field(default_factory=set)
-    # No-collision zone ghosts: drawn by the debug window, never evaluated (radar README §18).
+    # Zone and overlap ghosts: drawn by the debug window, never evaluated (README §4).
     ghost_ids: set = field(default_factory=set)
 
     # Clearance model: what the binding target demands, the speed ego could pass
@@ -804,7 +795,6 @@ class AEBThread(BaseThread):
         self._risk_confirm: dict[int, OccupancyConfirm] = {}
         self._radar_visualizer = None
         self._radar_vis_last_vehicle_time: float = -1.0
-        self._latched_filter_ego_kmh: float | None = None
         self._sound_handler = WarningPlayer()
         self._hmi_sound_prev = False
         self._hmi_cue_until = float("-inf")
@@ -878,6 +868,7 @@ class AEBThread(BaseThread):
         self._latched_scope_ok_mono: dict[int, float] = {}
         # Last tick each latched id was colliding; the latch expires latched_max_s later.
         self._latched_hit_mono: dict[int, float] = {}
+        self._overlap_ghosts = OverlapGhostHold()
         # Rate-limit for gap/collision box debug (Settings.debug only).
         self._gap_debug_last_mono: float = 0.0
         self._gap_debug_was_engaged: bool = False
@@ -892,7 +883,7 @@ class AEBThread(BaseThread):
         return _user_braking_from_sources(brakeval, opdbrakeval, program_brake)
 
     def _read_addressing_brake(self) -> bool:
-        """TMP rel-speed latch and shadow sampler. OPD coast-down is excluded."""
+        """Shadow sampler's brake test. OPD coast-down is excluded."""
         brakeval, _, _ = self._read_pedals_for_capture()
         program_brake = self._read_program_brake_for_capture()
         return _addressing_brake_from_sources(brakeval, program_brake)
@@ -1052,7 +1043,6 @@ class AEBThread(BaseThread):
             latched_threat_ids=sorted(self._latched_threat_ids),
             latched_scope_ok_mono=dict(self._latched_scope_ok_mono),
             latched_hit_mono=dict(self._latched_hit_mono),
-            latched_filter_ego_kmh=self._latched_filter_ego_kmh,
             warn_hold_until_mono=warn_hold,
             brake_hold_until_mono=brake_hold,
             target_decel_ms2=float(self._published_target_ms2),
@@ -1203,10 +1193,11 @@ class AEBThread(BaseThread):
          steer, ego_has_trailer, _ego_curvature_from_history, tmp_traffic_session,
          paused, radar_t_mono, off_surface_ids, ego_t_kin, ncz_ids) = snapshot
 
-        # Latched threats keep their pipeline seat: neither radar gate (elevation §15,
-        # no-collision zone §18) may drop a target AEB is already braking for.
+        # No player in a no-collision zone can be hit, so a zone ghost also ends the latch
+        # (README §4). The elevation gate (§15) never drops a latched target.
+        for vid in ncz_ids & self._latched_threat_ids:
+            self._release_latched(vid)
         off_surface_ids = off_surface_ids - self._latched_threat_ids
-        ncz_ids = ncz_ids - self._latched_threat_ids
 
         vehicles_eff = _swap_trailer_kinematics(vehicles)
 
@@ -1236,6 +1227,13 @@ class AEBThread(BaseThread):
         )
         ego_hw: float = geometry.half_width_m
         ego_half_l: float = geometry.half_length_m
+
+        # Bodies deep inside ego are ghosts, skipped and drawn like zone ghosts (README §4).
+        overlap_ghost_ids = self._overlap_ghosts.step(
+            ego_box(ego_x, ego_z, ego_yaw_rad, geometry), vehicles, now_mono, cal,
+        ) - self._latched_threat_ids
+        off_surface_ids = off_surface_ids | overlap_ghost_ids
+        ghost_skip_ids = ncz_ids | overlap_ghost_ids
 
         _max_brake_live = self._read_max_brake_ms2()
         effective_decel = cal.ego_decel_frac * _max_brake_live
@@ -1293,12 +1291,6 @@ class AEBThread(BaseThread):
         ego_fwd_x = ego_arc.fwd_x
         ego_fwd_z = ego_arc.fwd_z
 
-        ego_kmh_now = ego_speed * 3.6
-        ref_kmh_for_filter = (
-            self._latched_filter_ego_kmh
-            if self._latched_filter_ego_kmh is not None
-            else ego_kmh_now
-        )
         if self._radar_visualizer is not None:
             lead_id = self._read_acc_lead_id()
             lead_v = None
@@ -1436,16 +1428,15 @@ class AEBThread(BaseThread):
                 near_horizon_s=dynamic_horizon,
             )
 
-        # Follow-threat flags must be current before the precompute prefilter
-        # below reads them: a braking lead can cross under the rel-speed floor
-        # on the same frame it needs the bypass.
+        # Follow-threat flags must be current before the precompute below sizes
+        # a braking lead's arc decel from them.
         if run_collision:
             self._update_follow_threats(
                 vehicles_eff, ego_arc, ego_x, ego_z,
                 ego_fwd_x, ego_fwd_z, now_mono, cal,
             )
 
-        # Precompute per-vehicle collision arcs for vehicles passing range/elevation/TMP.
+        # Precompute per-vehicle collision arcs for vehicles passing range and the skip set.
         # Use vehicles_eff so TMP trailer-as-vehicles inherit tractor speed/acceleration.
         vehicle_collision_data: dict[int, tuple] = {}
         max_range_sq = cal.max_range ** 2
@@ -1458,18 +1449,6 @@ class AEBThread(BaseThread):
                     continue
                 if v.id in off_surface_ids:
                     continue
-                if (tmp_traffic_session
-                        and v.id not in self._latched_threat_ids
-                        and v.id not in self._follow_threat_ids):
-                    _, v_yaw_deg_pc, _ = v.rotation.euler()
-                    v_yaw_rad_pc = math.radians(v_yaw_deg_pc)
-                    vf_x = -math.sin(v_yaw_rad_pc)
-                    vf_z = -math.cos(v_yaw_rad_pc)
-                    dvx_pc = ego_speed * ego_fwd_x - v.speed * vf_x
-                    dvz_pc = ego_speed * ego_fwd_z - v.speed * vf_z
-                    rel_kmh_pc = 3.6 * math.hypot(dvx_pc, dvz_pc)
-                    if not _tmp_collision_threat(ref_kmh_for_filter, rel_kmh_pc):
-                        continue
                 follow_decel = _follow_threat_arc_decel(
                     v.id, self._follow_tracks, self._follow_threat_ids, cal,
                 )
@@ -1517,7 +1496,7 @@ class AEBThread(BaseThread):
                 if dist_sq > max_range_sq:
                     continue
                 if v.id in off_surface_ids:
-                    if v.id in ncz_ids:
+                    if v.id in ghost_skip_ids:
                         vehicle_dicts.append(_ghost_vehicle_dict(v))
                         ghost_ids.add(v.id)
                     continue
@@ -1620,8 +1599,6 @@ class AEBThread(BaseThread):
                 ego_fwd_z=ego_fwd_z,
                 ego_hw=ego_hw,
                 dynamic_horizon=dynamic_horizon,
-                tmp_traffic_session=tmp_traffic_session,
-                ref_kmh_for_filter=ref_kmh_for_filter,
                 cal=cal,
                 dx=dx, dz=dz,
                 dist_sq=dist_sq, dist=dist,
@@ -2310,14 +2287,6 @@ class AEBThread(BaseThread):
         except (KeyError, AttributeError):
             pass
 
-        user_brake = self._read_addressing_brake()
-        if not tmp_traffic_session:
-            self._latched_filter_ego_kmh = None
-        elif not aeb_warn and not user_brake:
-            self._latched_filter_ego_kmh = None
-        elif self._latched_filter_ego_kmh is None and (aeb_warn or user_brake):
-            self._latched_filter_ego_kmh = ego_kmh_now
-
         snap = AEBSnapshot(
             ego_x=ego_x, ego_z=ego_z, ego_yaw=ego_yaw_rad,
             ego_speed=ego_speed, ego_half_w=ego_hw, ego_half_l=ego_half_l,
@@ -2645,7 +2614,6 @@ class AEBThread(BaseThread):
                 self._radar_visualizer.stop()
             except Exception:
                 pass
-        self._latched_filter_ego_kmh = None
         self._engaged = False
         self._engage_pad_dist_m = None
         self._engage_confirm.reset()
@@ -2664,6 +2632,7 @@ class AEBThread(BaseThread):
         self._latched_threat_ids.clear()
         self._latched_scope_ok_mono.clear()
         self._latched_hit_mono.clear()
+        self._overlap_ghosts.clear()
         self._gap_debug_last_mono = 0.0
         self._gap_debug_was_engaged = False
         self._follow_tracks.clear()

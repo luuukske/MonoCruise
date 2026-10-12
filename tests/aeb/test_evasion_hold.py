@@ -51,7 +51,6 @@ class _EvasionCtx:
         fwd_dot: float = 1.0,
         lane: Lane = Lane.EGO,
         follow: set | None = None,
-        ref_kmh: float = 80.0,
     ) -> None:
         self.v = type("V", (), {"id": vid, "speed": v_speed})()
         self.latched_threat_ids = set() if latched is None else latched
@@ -60,7 +59,6 @@ class _EvasionCtx:
         self.lane = lane
         self.all_target_arcs = [_Boom(v_speed)]
         self.follow_threat_ids = set() if follow is None else follow
-        self.ref_kmh_for_filter = ref_kmh
         self.cal = CAL
         self.dx = dx
         self.dz = dz
