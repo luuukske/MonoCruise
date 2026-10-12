@@ -2161,7 +2161,7 @@ definition, which is what makes them misses.
 
 `core/aeb/screenshot.py::grab_thumbnail()` supplies the optional
 `thumbnail_jpeg` clip field; `capture.py` calls it off-thread
-(`AEBClipRecorder._start_thumbnail_grab`) so no control loop is touched. Two
+(`AEBClipRecorder._start_thumbnail_grab`) so no control loop is touched. Three
 properties are load-bearing, not incidental, and must not be relaxed without
 updating the claims linked below.
 
@@ -2175,8 +2175,8 @@ TMP and every contributed TMP clip after the crop landed with no
 screenshot. If no title hits, `FindWindowW("prism3d", None)` is the
 fallback: that is the SCS window class, shared by SP and TMP. The handle
 is cached and revalidated with `IsWindow` before every capture, since the
-game can be restarted between clips. `GetWindowRect` gives the bbox
-passed to `ImageGrab.grab(bbox=...)`.
+game can be restarted between clips. `GetWindowRect` gives the source rect
+of the screen copy (next section).
 
 **No game window found means `None`, never a full-monitor grab.** Before
 this, `ImageGrab.grab()` took no bbox and captured the whole primary
@@ -2184,6 +2184,27 @@ display: a user with the game on a second monitor uploaded whatever sat on
 the first one, and one sampled clip in the local store shows a strip of
 desktop chrome along the top edge. Do not reintroduce an unconditional
 fallback grab; it defeats the reason this code exists.
+
+### The copy must not hold the GIL
+
+The capture fires on the tick AEB warns or brakes, so it must not stop the
+control threads. `ImageGrab.grab(bbox=...)` did: on Windows Pillow copies the
+**whole primary monitor** (24 MB at 4K) and only then crops, all inside one C
+call that holds the GIL. Every Python thread, the sending thread included,
+stopped for the length of the copy: 60-250 ms measured with ETS2 open, and in
+the local clip store (2026-10-12) the worst loop gap per engagement clip had a
+median of 104 ms with a thumbnail against 37 ms without, up to 2.2 s, always
+at the trigger. Pedals were frozen for that long right as AEB took over.
+
+`_stretch_capture` copies only the window rect and lets GDI scale it straight
+to the thumbnail size (`StretchBlt`, `HALFTONE`, then `GetDIBits` of a
+240x135 bitmap), through plain `ctypes` calls, which drop the GIL. Measured
+on the same machine: 50-100 ms per capture and a 2.6 ms worst gap on a 2 ms
+ticker thread, against 67-146 ms for Pillow. Do not go back to `ImageGrab`
+or any other copy that runs inside one GIL-holding call. The source is still
+the screen DC (what is on screen inside the game rect), the same as before,
+and the GDI objects are freed in a `finally`; `GetDIBits` needs the bitmap
+deselected first.
 
 Non-Windows platforms never look up a window (`ctypes.windll` does not exist
 there) and always return `None`. `_game_window_rect()` checks
@@ -2211,7 +2232,7 @@ the original decoded pixmap each time rather than re-scaling a scaled copy.
 
 ### Scaled displays: thread DPI, not a process-wide flip
 
-`ImageGrab.grab` measures the screen in physical pixels. `GetWindowRect`
+The screen copy works in physical pixels. `GetWindowRect`
 on a thread that is not per-monitor aware returns virtualized coordinates.
 On a 4K display at 175% those are 1/1.75 of the real window, so the crop
 is a corner of the game (measured: logical 842x601 against a 1474x1052
@@ -2220,9 +2241,8 @@ consent claim that text is not legible.
 
 `grab_thumbnail` calls `SetThreadDpiAwarenessContext`
 (`DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`) around both the rect query
-and the grab, then restores the previous context. Both calls have to sit
-inside it: Pillow sets per-monitor awareness only while measuring, then
-restores the caller's context before the blit. The thumbnail thread has
+and the screen copy, then restores the previous context. Both calls have to
+sit inside it, or the source rect and the screen DC disagree on scale. The thumbnail thread has
 no windows, so the thread override is allowed. Do not move this to
 `SetProcessDpiAwarenessContext`. A process-wide flip rescales the Qt
 settings panel and debug windows.

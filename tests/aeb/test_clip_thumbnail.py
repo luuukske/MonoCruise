@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import importlib
 import io
 import sys
@@ -87,51 +88,64 @@ def test_grab_thumbnail_none_when_no_game_window(monkeypatch):
     assert screenshot_mod.grab_thumbnail() is None
 
 
-def test_grab_thumbnail_never_falls_back_to_full_grab(monkeypatch):
-    Image = pytest.importorskip("PIL.Image")
+def _bgrx(size):
+    w, h = size
+    return b"\x30\x20\x10\x00" * (w * h)
+
+
+@pytest.fixture
+def capture(monkeypatch):
+    """Stands in for the GDI copy; records (rect, size) of every call."""
+    calls: list[tuple] = []
+
+    def _fake(rect, size):
+        calls.append((rect, size))
+        return _bgrx(size)
+
+    monkeypatch.setattr(screenshot_mod, "_stretch_capture", _fake)
+    return calls
+
+
+def test_grab_thumbnail_never_falls_back_to_full_grab(monkeypatch, capture):
     image_grab_mod = pytest.importorskip("PIL.ImageGrab")
 
     monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
     monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: _FakeUser32(found_title=None))
-    calls = []
-
-    def _fake_grab(**kw):
-        calls.append(kw)
-        return Image.new("RGB", (10, 10))
-
-    monkeypatch.setattr(image_grab_mod, "grab", _fake_grab)
+    grabs = []
+    monkeypatch.setattr(image_grab_mod, "grab", lambda **kw: grabs.append(kw))
     result = screenshot_mod.grab_thumbnail()
     assert result is None
-    assert calls == []          # ImageGrab.grab is never invoked without a real window
+    assert capture == []        # no screen copy without a real window
+    assert grabs == []
 
 
-def test_grab_thumbnail_bbox_matches_window_rect(monkeypatch):
-    Image = pytest.importorskip("PIL.Image")
+def test_grab_thumbnail_never_uses_pillow_grab(monkeypatch, capture):
+    """Pillow's grab copies the whole monitor holding the GIL: 0.1-2.2 s of every thread stopped."""
     image_grab_mod = pytest.importorskip("PIL.ImageGrab")
 
+    def _gil_holder(**kw):
+        raise AssertionError("ImageGrab.grab must not be used")
+
+    monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
+    fake = _FakeUser32(found_title="Euro Truck Simulator 2", rect=(0, 0, 3840, 2160))
+    monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
+    monkeypatch.setattr(image_grab_mod, "grab", _gil_holder)
+    assert screenshot_mod.grab_thumbnail() is not None
+
+
+def test_grab_thumbnail_copies_exactly_the_window_rect(monkeypatch, capture):
     monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
     fake = _FakeUser32(found_title="Euro Truck Simulator 2", rect=(50, 40, 1330, 760))
     monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
-    calls = []
-
-    def _fake_grab(**kw):
-        calls.append(kw.get("bbox"))
-        return Image.new("RGB", (1280, 720))
-
-    monkeypatch.setattr(image_grab_mod, "grab", _fake_grab)
     result = screenshot_mod.grab_thumbnail()
     assert result is not None
-    assert calls == [(50, 40, 1330, 760)]
+    assert capture == [((50, 40, 1330, 760), (240, 135))]
 
 
-def test_grab_thumbnail_finds_ats_when_ets2_absent(monkeypatch):
-    Image = pytest.importorskip("PIL.Image")
-    image_grab_mod = pytest.importorskip("PIL.ImageGrab")
-
+def test_grab_thumbnail_finds_ats_when_ets2_absent(monkeypatch, capture):
     monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
     fake = _FakeUser32(found_title="American Truck Simulator", rect=(0, 0, 800, 600))
     monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
-    monkeypatch.setattr(image_grab_mod, "grab", lambda **kw: Image.new("RGB", (800, 600)))
     assert screenshot_mod.grab_thumbnail() is not None
     assert fake.found_titles == [
         "Euro Truck Simulator 2",
@@ -145,27 +159,19 @@ def test_grab_thumbnail_finds_ats_when_ets2_absent(monkeypatch):
     "Euro Truck Simulator 2 Multiplayer",
     "American Truck Simulator Multiplayer",
 ])
-def test_grab_thumbnail_finds_truckersmp_titles(monkeypatch, title):
-    Image = pytest.importorskip("PIL.Image")
-    image_grab_mod = pytest.importorskip("PIL.ImageGrab")
-
+def test_grab_thumbnail_finds_truckersmp_titles(monkeypatch, capture, title):
     monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
     fake = _FakeUser32(found_title=title, rect=(0, 0, 800, 600))
     monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
-    monkeypatch.setattr(image_grab_mod, "grab", lambda **kw: Image.new("RGB", (800, 600)))
     assert screenshot_mod.grab_thumbnail() is not None
     assert title in fake.found_titles
     assert fake.found_classes == []
 
 
-def test_grab_thumbnail_falls_back_to_prism3d_class(monkeypatch):
-    Image = pytest.importorskip("PIL.Image")
-    image_grab_mod = pytest.importorskip("PIL.ImageGrab")
-
+def test_grab_thumbnail_falls_back_to_prism3d_class(monkeypatch, capture):
     monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
     fake = _FakeUser32(found_class="prism3d", rect=(0, 0, 800, 600))
     monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
-    monkeypatch.setattr(image_grab_mod, "grab", lambda **kw: Image.new("RGB", (800, 600)))
     assert screenshot_mod.grab_thumbnail() is not None
     assert fake.found_titles == list(screenshot_mod._GAME_WINDOW_TITLES)
     assert fake.found_classes == ["prism3d"]
@@ -197,39 +203,147 @@ class _ScaledUser32(_FakeUser32):
 
 
 def test_grab_thumbnail_uses_physical_rect_on_scaled_display(monkeypatch):
-    Image = pytest.importorskip("PIL.Image")
-    image_grab_mod = pytest.importorskip("PIL.ImageGrab")
-
     monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
     fake = _ScaledUser32()
     monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
     calls = []
 
-    def _fake_grab(**kw):
-        calls.append(kw.get("bbox"))
-        return Image.new("RGB", (1474, 1052))
+    def _fake_capture(rect, size):
+        calls.append((rect, fake.ctx))
+        return _bgrx(size)
 
-    monkeypatch.setattr(image_grab_mod, "grab", _fake_grab)
+    monkeypatch.setattr(screenshot_mod, "_stretch_capture", _fake_capture)
     result = screenshot_mod.grab_thumbnail()
     assert result is not None
-    assert calls == [_ScaledUser32.PHYSICAL]
+    # The copy runs inside the per-monitor context too, not only the rect query.
+    assert calls == [(_ScaledUser32.PHYSICAL, screenshot_mod._DPI_CONTEXT_PER_MONITOR_V2)]
     assert fake.rect_ctx == screenshot_mod._DPI_CONTEXT_PER_MONITOR_V2
     assert fake.ctx == 1
 
 
 def test_dpi_context_restored_when_grab_fails(monkeypatch):
-    image_grab_mod = pytest.importorskip("PIL.ImageGrab")
-
     monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
     fake = _ScaledUser32()
     monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
 
-    def _boom(**kw):
+    def _boom(rect, size):
         raise OSError("grab failed")
 
-    monkeypatch.setattr(image_grab_mod, "grab", _boom)
+    monkeypatch.setattr(screenshot_mod, "_stretch_capture", _boom)
     assert screenshot_mod.grab_thumbnail() is None
     assert fake.ctx == 1
+
+
+def test_failed_screen_copy_gives_no_thumbnail(monkeypatch):
+    monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
+    fake = _FakeUser32(found_title="Euro Truck Simulator 2", rect=(0, 0, 800, 600))
+    monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
+    monkeypatch.setattr(screenshot_mod, "_stretch_capture", lambda rect, size: None)
+    assert screenshot_mod.grab_thumbnail() is None
+
+
+def test_window_without_area_is_never_copied(monkeypatch, capture):
+    monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
+    fake = _FakeUser32(found_title="Euro Truck Simulator 2", rect=(100, 100, 100, 400))
+    monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
+    assert screenshot_mod.grab_thumbnail() is None
+    assert capture == []
+
+
+@pytest.mark.parametrize("w, h, want", [
+    (3840, 2160, (240, 135)),
+    (1920, 1080, (240, 135)),
+    (1474, 1052, (240, 171)),
+    (1080, 1920, (135, 240)),
+    (200, 100, (200, 100)),       # never upscaled
+    (0, 600, None),
+    (800, -5, None),
+])
+def test_thumb_size(w, h, want):
+    assert screenshot_mod._thumb_size(w, h, 240) == want
+
+
+class _FakeGdi32:
+    """Tracks GDI object state so the capture's call order and cleanup can be checked."""
+
+    def __init__(self):
+        self.selected = None
+        self.deleted: list[str] = []
+        self.stretch = None
+        self.dib_while_selected = None
+        self.rows = None
+
+    def CreateCompatibleDC(self, dc):
+        return "mem"
+
+    def CreateCompatibleBitmap(self, dc, w, h):
+        return "bmp"
+
+    def SelectObject(self, dc, obj):
+        prev, self.selected = self.selected, obj
+        return prev or "stock"
+
+    def SetStretchBltMode(self, dc, mode):
+        return 1
+
+    def SetBrushOrgEx(self, dc, x, y, pt):
+        return 1
+
+    def StretchBlt(self, dst, dx, dy, dw, dh, src, sx, sy, sw, sh, rop):
+        self.stretch = (dst, dx, dy, dw, dh, src, sx, sy, sw, sh, rop)
+        return 1
+
+    def GetDIBits(self, dc, bmp, start, lines, buf, info, usage):
+        self.dib_while_selected = self.selected == "bmp"
+        hdr = info._obj.bmiHeader
+        data = b"\x30\x20\x10\x00" * (hdr.biWidth * -hdr.biHeight)
+        ctypes.memmove(buf, data, len(data))
+        return lines if self.rows is None else self.rows
+
+    def DeleteObject(self, obj):
+        self.deleted.append(obj)
+        return 1
+
+    def DeleteDC(self, dc):
+        self.deleted.append(dc)
+        return 1
+
+
+class _DcUser32:
+    def __init__(self):
+        self.released = []
+
+    def GetDC(self, hwnd):
+        return "screen"
+
+    def ReleaseDC(self, hwnd, dc):
+        self.released.append(dc)
+        return 1
+
+
+def test_stretch_capture_scales_the_rect_and_frees_every_gdi_object(monkeypatch):
+    gdi, user = _FakeGdi32(), _DcUser32()
+    monkeypatch.setattr(screenshot_mod, "_get_gdi32", lambda: gdi)
+    monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: user)
+
+    data = screenshot_mod._stretch_capture((50, 40, 1330, 760), (240, 135))
+    assert data == b"\x30\x20\x10\x00" * (240 * 135)
+    assert gdi.stretch == (
+        "mem", 0, 0, 240, 135, "screen", 50, 40, 1280, 720, screenshot_mod._SRCCOPY)
+    assert gdi.dib_while_selected is False      # GetDIBits rejects a selected bitmap
+    assert gdi.deleted == ["bmp", "mem"]
+    assert user.released == ["screen"]
+
+
+def test_stretch_capture_short_read_is_none_and_still_cleans_up(monkeypatch):
+    gdi, user = _FakeGdi32(), _DcUser32()
+    gdi.rows = 0
+    monkeypatch.setattr(screenshot_mod, "_get_gdi32", lambda: gdi)
+    monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: user)
+
+    assert screenshot_mod._stretch_capture((0, 0, 800, 600), (240, 180)) is None
+    assert gdi.deleted == ["bmp", "mem"]
+    assert user.released == ["screen"]
 
 
 def test_screenshot_does_not_set_process_dpi():
@@ -238,19 +352,20 @@ def test_screenshot_does_not_set_process_dpi():
     assert "SetProcessDpiAwareness" not in src
 
 
-def test_grab_thumbnail_output_long_side_is_240(monkeypatch):
+def test_grab_thumbnail_output_long_side_is_240(monkeypatch, capture):
     Image = pytest.importorskip("PIL.Image")
-    image_grab_mod = pytest.importorskip("PIL.ImageGrab")
 
     monkeypatch.setattr(screenshot_mod.sys, "platform", "win32")
     fake = _FakeUser32(found_title="American Truck Simulator", rect=(0, 0, 1920, 1080))
     monkeypatch.setattr(screenshot_mod, "_get_user32", lambda: fake)
-    monkeypatch.setattr(image_grab_mod, "grab", lambda **kw: Image.new("RGB", (1920, 1080)))
 
     b64 = screenshot_mod.grab_thumbnail()
     assert b64 is not None
     img = Image.open(io.BytesIO(base64.b64decode(b64)))
+    assert img.format == "JPEG"
     assert max(img.size) == 240
+    r, g, b = img.convert("RGB").getpixel((120, 67))
+    assert abs(r - 0x10) <= 6 and abs(g - 0x20) <= 6 and abs(b - 0x30) <= 6   # BGRX read as RGB
 
 
 def test_grab_thumbnail_none_on_non_windows(monkeypatch):
