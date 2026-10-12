@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
+import traceback
+from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
 from core.thread_management.base_thread import BaseThread
@@ -27,6 +30,33 @@ STOP_GRACE:            float = 0.2   # seconds: brief join() so a cleanly-stoppa
 LOW_FPS_THRESHOLD:    float = 0.70  # warn when actual FPS < this fraction of wanted FPS
 LOW_FPS_STREAK_WARN:  int   = 5     # consecutive low-fps polls before warning
 LOW_FPS_WARN_WINDOW:  float = 3.0   # seconds: if >1 thread warned in this window → "some threads"
+STACK_FRAMES:         int   = 12    # innermost frames logged for a frozen thread
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _short_path(filename: str) -> str:
+    """Repo-relative path, or the last two parts outside the repo: no user or machine names."""
+    path = Path(filename)
+    if not path.is_absolute():
+        return path.as_posix()
+    try:
+        return path.resolve().relative_to(_REPO_ROOT).as_posix()
+    except (ValueError, OSError):
+        return "/".join(path.parts[-2:])
+
+
+def frozen_stack(ident: int | None) -> str | None:
+    """Where a live thread is right now, innermost frame last, or None if it has no frame."""
+    if ident is None:
+        return None
+    frame = sys._current_frames().get(ident)
+    if frame is None:
+        return None
+    return " | ".join(
+        f"{_short_path(fs.filename)}:{fs.lineno} {fs.name}: {(fs.line or '').strip()}"
+        for fs in traceback.extract_stack(frame)[-STACK_FRAMES:]
+    )
 
 
 class Watchdog(BaseThread):
@@ -104,6 +134,11 @@ class Watchdog(BaseThread):
                     thread.healthy = False
                     continue
 
+            # Where it is stuck, before the restart moves it: the only evidence a freeze leaves.
+            if frozen and not crashed:
+                stack = frozen_stack(getattr(thread, "ident", None))
+                if stack:
+                    logger.warning("'%s' frozen at (innermost last): %s", tname, stack)
 
             if restart_count >= max_restarts:
                 # logging is handled in base_thread.py

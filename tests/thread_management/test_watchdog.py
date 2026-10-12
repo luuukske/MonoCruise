@@ -5,6 +5,7 @@ The watchdog is the crash-resilience layer itself, so it is driven here through
 """
 from __future__ import annotations
 
+import threading
 import types
 
 import pytest
@@ -236,3 +237,76 @@ def test_recovered_fps_cancels_a_pending_low_fps_warning(rig, caplog):
         worker.beat()
         dog.loop()
         assert "target FPS" not in caplog.text
+
+
+def _parked_in_a_known_place(release: threading.Event) -> None:
+    release.wait(10.0)
+
+
+@pytest.fixture
+def parked_thread():
+    release = threading.Event()
+    t = threading.Thread(target=_parked_in_a_known_place, args=(release,), daemon=True)
+    t.start()
+    yield t
+    release.set()
+    t.join(2.0)
+
+
+def _freeze(dog, clock):
+    clock.advance(HEARTBEAT_TIMEOUT + 0.1)
+    for _ in range(FREEZE_STREAK_RESTART):
+        dog.loop()
+
+
+def test_a_freeze_logs_where_the_thread_is_stuck(rig, caplog, parked_thread):
+    """A freeze leaves no trace of its own; the stack names the blocking call."""
+    dog, worker, made, clock = rig
+    worker.ident = parked_thread.ident
+    with caplog.at_level("WARNING", logger="watchdog"):
+        _freeze(dog, clock)
+
+    assert len(made) == 1
+    stack = [r for r in caplog.records if "frozen at" in r.getMessage()]
+    assert len(stack) == 1
+    msg = stack[0].getMessage()
+    assert "tests/thread_management/test_watchdog.py" in msg
+    assert "_parked_in_a_known_place" in msg
+    assert "release.wait(10.0)" in msg
+    assert str(wd_mod._REPO_ROOT) not in msg and "\\" not in msg   # no absolute paths
+    assert not getattr(stack[0], "popup", False)
+
+
+def test_the_stack_is_logged_before_the_restart_ceiling_too(rig, caplog, parked_thread):
+    dog, worker, made, clock = rig
+    worker.ident = parked_thread.ident
+    worker.restart_count = worker.max_restarts
+    with caplog.at_level("WARNING", logger="watchdog"):
+        _freeze(dog, clock)
+    assert made == []
+    assert "_parked_in_a_known_place" in caplog.text
+
+
+def test_no_stack_for_a_crash_or_an_unknown_thread(rig, caplog):
+    dog, worker, made, clock = rig
+    with caplog.at_level("WARNING", logger="watchdog"):
+        _freeze(dog, clock)               # no ident at all
+        assert len(made) == 1
+        made[0].crash()
+        made[0].ident = threading.get_ident()
+        dog.loop()                        # crashed, not frozen
+    assert "frozen at" not in caplog.text
+
+
+def test_frozen_stack_unknown_ident_is_none():
+    assert wd_mod.frozen_stack(None) is None
+    assert wd_mod.frozen_stack(-12345) is None
+
+
+def test_paths_outside_the_repo_keep_only_their_tail():
+    outside = wd_mod._REPO_ROOT.parent.parent / "someone" / "Lib" / "threading.py"
+    assert wd_mod._short_path(str(outside)) == "Lib/threading.py"
+    inside = wd_mod._REPO_ROOT / "core" / "sending_thread" / "thread.py"
+    assert wd_mod._short_path(str(inside)) == "core/sending_thread/thread.py"
+    # Frozen builds carry relative code paths; they pass through as-is.
+    assert wd_mod._short_path("core/sending_thread/thread.py") == "core/sending_thread/thread.py"
