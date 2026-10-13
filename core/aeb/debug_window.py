@@ -15,6 +15,9 @@ from PySide6.QtWidgets import QWidget
 from core.thread_management.registry import registry
 from .thread import AEBState, AEBSnapshot
 from .debug_grid import draw_ground_markers, MAJOR_CLR as _MARKER_CLR
+from .debug_overlays import (
+    draw_lanes, draw_map_path, draw_road_path, draw_trail_arc, fetch_map_label, fetch_map_window, overlay_legend,
+)
 from core.radar.traffic import ArcPath
 
 logger = logging.getLogger(__name__)
@@ -48,10 +51,6 @@ _HIT_CLR = QColor(255, 30, 30)
 _TEXT = QColor(200, 200, 215)
 _HUD_BG = QColor(0, 0, 0, 160)
 _HUD_BORDER = QColor(60, 60, 70)
-_TRAIL_ARC_CLR = QColor(130, 130, 200, 90)   # faint dashed line behind each vehicle
-_TRAIL_CROSS_CLR = QColor(255, 200, 80, 180) # ego-row crossing marker
-_TRAIL_ARC_HALF_SPAN_M = 50.0
-_TRAIL_ARC_SAMPLES = 32
 _ROAD_MODEL_SAMPLES = 24
 
 _EGO_TRAILER_HALF_W = 1.25
@@ -85,6 +84,7 @@ class AEBDebugWindow(QWidget):
         snapshot_provider=None,
         acc_provider=None,
         auto_refresh: bool = True,
+        map_provider=None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("AEB Debug Radar")
@@ -94,6 +94,9 @@ class AEBDebugWindow(QWidget):
         # Snapshot seam: registry poll vs clip replay inject; ACC overlay None in replay.
         self._snapshot_provider = snapshot_provider or self._fetch
         self._acc_provider = acc_provider or self._fetch_acc
+        # Lane window for the outlines: the map worker live, ``map_window`` in replay tools.
+        self.map_window = None
+        self._map_provider = map_provider or (lambda: self.map_window or fetch_map_window())
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.update)
@@ -142,6 +145,7 @@ class AEBDebugWindow(QWidget):
                     "ego_kappa": float(acc.data.debug_ego_kappa),
                     "corridor_half": float(acc.data.debug_corridor_half),
                     "road_model": acc.data.debug_road_model,
+                    "map_path": getattr(acc.data, "debug_map_path", None),
                 }
         except AttributeError:
             return None
@@ -182,6 +186,12 @@ class AEBDebugWindow(QWidget):
             lambda sx, sy: self._sw(sx, sy, ex, ez, ey),
             float(self.width()), float(self.height()),
         )
+        def to_screen(wx: float, wz: float) -> tuple[float, float]:
+            return self._ws(wx, wz, ex, ez, ey)
+
+        draw_lanes(p, self._map_provider(), to_screen, ex, ez)
+        if acc is not None and acc.get("map_path"):
+            draw_map_path(p, acc["map_path"][0], acc["map_path"][1], to_screen)
 
         # Nearest half of vehicles get full annotations; threats and ACC lead always full.
         by_dist = sorted(
@@ -196,7 +206,7 @@ class AEBDebugWindow(QWidget):
             self._draw_road_model(p, acc, ex, ez, ey, snap.ego_yaw)
             for v in snap.vehicles:
                 if v["vid"] in detailed_ids or v["vid"] == acc["lead_id"]:
-                    self._draw_trail_arc(p, v["vid"], acc, ex, ez, ey)
+                    draw_trail_arc(p, acc.get("components", {}).get(v["vid"]), to_screen)
 
         for v in snap.vehicles:
             vid = v["vid"]
@@ -277,6 +287,7 @@ class AEBDebugWindow(QWidget):
 
         if snap.ego_arc is not None:
             self._draw_arc_corridor(p, snap.ego_arc, ex, ez, ey, _EGO_CORRIDOR)
+        draw_road_path(p, snap.ego_road_arc, lambda x, z: self._ws(x, z, ex, ez, ey))
 
         if snap.evasion_left_arc is not None:
             self._draw_arc_corridor(
@@ -594,57 +605,6 @@ class AEBDebugWindow(QWidget):
         p.setBrush(Qt.NoBrush)
         p.drawPolyline(poly)
 
-    def _draw_trail_arc(
-        self, p: QPainter, vid: int, acc: dict,
-        ex: float, ez: float, ey: float,
-    ) -> None:
-        """Faint dashed ACC trail arc around the target (+ crossing marker if any)."""
-        comp = acc.get("components", {}).get(vid)
-        if comp is None or not comp.get("trail_valid", False):
-            return
-
-        pen = QPen(_TRAIL_ARC_CLR, 1.0, Qt.DashLine)
-        p.setPen(pen)
-        p.setBrush(Qt.NoBrush)
-
-        if comp.get("trail_is_straight", False):
-            px = comp["trail_point_x"]
-            pz = comp["trail_point_z"]
-            dx_ = comp["trail_dir_x"]
-            dz_ = comp["trail_dir_z"]
-            span = _TRAIL_ARC_HALF_SPAN_M
-            ax, ay = self._ws(px - span * dx_, pz - span * dz_, ex, ez, ey)
-            bx, by = self._ws(px + span * dx_, pz + span * dz_, ex, ez, ey)
-            p.drawLine(QPointF(ax, ay), QPointF(bx, by))
-        else:
-            cx = comp["trail_cx"]
-            cz = comp["trail_cz"]
-            R = comp["trail_R"]
-            px = comp["trail_point_x"]
-            pz = comp["trail_point_z"]
-            if R < 1e-3:
-                return
-            target_ang = math.atan2(pz - cz, px - cx)
-            half_sweep = min(_TRAIL_ARC_HALF_SPAN_M / R, math.pi)
-            poly = QPolygonF()
-            n = _TRAIL_ARC_SAMPLES
-            for i in range(n):
-                frac = i / (n - 1)
-                ang = target_ang + (frac - 0.5) * 2.0 * half_sweep
-                wx = cx + R * math.cos(ang)
-                wz = cz + R * math.sin(ang)
-                ssx, ssy = self._ws(wx, wz, ex, ez, ey)
-                poly.append(QPointF(ssx, ssy))
-            p.drawPolyline(poly)
-
-        if comp.get("trail_crossing_valid", False):
-            cwx = comp["trail_crossing_x"]
-            cwz = comp["trail_crossing_z"]
-            mx, my = self._ws(cwx, cwz, ex, ez, ey)
-            p.setPen(Qt.NoPen)
-            p.setBrush(QBrush(_TRAIL_CROSS_CLR))
-            p.drawEllipse(QPointF(mx, my), 3.0, 3.0)
-
     def _draw_label(
         self, p: QPainter, sx: float, sy: float, text: str, color: QColor,
     ) -> None:
@@ -766,9 +726,9 @@ class AEBDebugWindow(QWidget):
 
     def _draw_legend(self, p: QPainter) -> None:
         lx = 10
-        ly = self.height() - 161
+        ly = self.height() - 209
         lw = 145
-        lh = 156
+        lh = 204
 
         p.setPen(QPen(_HUD_BORDER, 1))
         p.setBrush(QBrush(_HUD_BG))
@@ -787,7 +747,7 @@ class AEBDebugWindow(QWidget):
             (_ACC_LEAD_CLR, "ACC lead"),
             (_ACC_CANDIDATE_CLR, "ACC candidate"),
             (_MARKER_CLR, "Ground 10/100 m"),
-        ]
+        ] + overlay_legend()
         y = ly + 13
         for clr, label in items:
             p.setPen(Qt.NoPen)
@@ -796,4 +756,6 @@ class AEBDebugWindow(QWidget):
             p.setPen(QPen(_TEXT))
             p.drawText(QPointF(lx + 22, y + 2), label)
             y += 13
+        p.setPen(QPen(_TEXT))
+        p.drawText(QPointF(lx + 8, y + 2), "Map: replay" if self.map_window is not None else fetch_map_label())
 

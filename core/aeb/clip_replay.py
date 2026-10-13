@@ -9,6 +9,7 @@ from core.aeb.calibration import DEFAULT as _CAL, ego_path_params
 from core.aeb.clip_schema import Clip, ConsumedContext, LiveAEB, RadarFrameRecord
 from core.aeb.clip_timebase import decode_buffers, replay_frames
 from core.aeb.filters import VehicleCurvatureBlender, _vehicle_curvature_blend, travel_sign
+from core.aeb.road_paths import RoadPaths
 from core.aeb.thread import (
     AEBSnapshot, AEBState, _INF, _dampen_turning_curvature,
     _swap_trailer_kinematics,
@@ -375,11 +376,12 @@ def clip_t0(clip: Clip) -> float:
     return min(ts) if ts else 0.0
 
 
-def replay_clip(clip: Clip, *, stream=None, radar_frames=None) -> list[ReviewFrame]:
+def replay_clip(clip: Clip, *, stream=None, radar_frames=None, map_provider=None) -> list[ReviewFrame]:
     """Decode + smooth the radar stream and build one ReviewFrame per AEB tick.
 
     ``stream`` and ``radar_frames`` reuse one ``replay_frames`` result. Passing
-    ``stream`` alone rebuilds the timebase for the ego-path gain.
+    ``stream`` alone rebuilds the timebase for the ego-path gain. ``map_provider(ego,
+    vehicles)`` (``tools/map_replay.ClipMap``) bends the drawn arcs the way AEB would.
     """
     if not clip.aeb_ticks and not clip.radar_frames:
         return []
@@ -405,6 +407,7 @@ def replay_clip(clip: Clip, *, stream=None, radar_frames=None) -> list[ReviewFra
     blender = VehicleCurvatureBlender(_CAL)
 
     cal_rec = clip.metadata.calibration or {}
+    road_paths = RoadPaths()
 
     out: list[ReviewFrame] = []
     for tk in sorted(clip.aeb_ticks, key=lambda x: x.t_mono):
@@ -427,11 +430,36 @@ def replay_clip(clip: Clip, *, stream=None, radar_frames=None) -> list[ReviewFra
             ego, vehicles_eff, tk.live_aeb, tk.consumed, blender, tk.t_mono,
             ego_path=path_state,
         )
+        if map_provider is not None:
+            snap = _bend_snapshot(snap, road_paths, map_provider(ego, vehicles_eff, tk.t_mono),
+                                  path_state.kappa_path, tk.t_mono)
         out.append(ReviewFrame(
             tk.t_mono - t0, tk.t_mono, snap, tk.live_aeb, tk.consumed,
             raw_target_decel(tk.live_aeb, cal_rec),
         ))
     return out
+
+
+def _bend_snapshot(snap: AEBSnapshot, road_paths: RoadPaths, map_snap, kappa: float,
+                   now: float) -> AEBSnapshot:
+    """The snapshot with ego's road path, and road-ahead targets bent, the way AEB does live."""
+    from dataclasses import replace
+
+    from core.aeb.lane_frame import road_ahead_in_lane
+    from core.radar.bent_path import BentPath
+
+    road_paths.frame(map_snap, _CAL, now)
+    if not road_paths.active or snap.ego_arc is None:
+        return snap
+    road = road_paths.bend_ego([snap.ego_arc], kappa)[0]
+    if not isinstance(road, BentPath):
+        return snap
+    arcs = dict(snap.vehicle_arcs)
+    for vid, lst in snap.vehicle_arcs.items():
+        if (lst and road_ahead_in_lane(road, snap.ego_arc, list(lst), _CAL.lane_half_width)
+                and road_paths.in_ego_lane(lst[0].start_x, lst[0].start_z, 2.25)):
+            arcs[vid] = road_paths.bend_target(vid, list(lst), lst[0].curvature)
+    return replace(snap, ego_road_arc=road, vehicle_arcs=arcs)
 
 
 def clip_duration(clip: Clip) -> float:

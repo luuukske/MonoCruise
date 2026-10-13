@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from core.radar.bent_path import offset_curvature
 from core.radar.traffic import (
     ArcPath, Vehicle,
     build_arc, arc_arc_collision, _accel_to_arc_params,
@@ -382,6 +383,7 @@ class FilterContext:
     deadline_passed: bool | None = None
     deadline_released: bool = False
 
+
     @property
     def reversing(self) -> bool:
         """Travelling against its heading: a manoeuvre, never oncoming road traffic."""
@@ -561,6 +563,25 @@ class LaneClassifier:
         return _PASS
 
 
+def _target_evasion_arc(base: ArcPath, dk: float, speed: float, decel: float) -> ArcPath:
+    """The target's arc turned by ``dk`` everywhere; a road-bent arc keeps its bend."""
+    return offset_curvature(base, dk, speed=speed, decel=decel, accel=0.0, parallel_margin_scale=1.0)
+
+
+def _in_lane_closing_on_bent_path(ctx: "FilterContext", cal: AEBCalibration) -> bool:
+    """``in_lane_closing`` measured along a road-bent ego path instead of the straight axis."""
+    arc = ctx.ego_arc
+    if not getattr(arc, "bent", False):
+        return False
+    s, side = arc.project(ctx.v.position.x, ctx.v.position.z)
+    if s <= 0.0 or s > arc.arc_length or abs(side) > cal.lane_half_width:
+        return False
+    h = arc.heading_at_dist(s)
+    along = travel_sign(ctx.v.speed, cal) * (-math.sin(h) * ctx.veh_fwd_x - math.cos(h) * ctx.veh_fwd_z)
+    closing = ctx.ego_speed - ctx.v_travel_speed * max(along, 0.0)
+    return closing > cal.aeb_min_closing_ms
+
+
 class OppositeLaneFilter:
     """Oncoming in own lane: body separation or evasion arcs (README OppositeLaneFilter)."""
     name = "OppositeLaneFilter"
@@ -641,22 +662,8 @@ class OppositeLaneFilter:
                     min(abs(ctx.ego_curvature), cal.shared_turn_max_kappa),
                 )
             evasion_decel = 0.0 if own_lane else base_target_arc.decel
-            tgt_left = build_arc(
-                base_target_arc.start_x, base_target_arc.start_z,
-                base_target_arc.yaw_rad, ctx.v.speed,
-                base_target_arc.curvature + delta_kappa_t,
-                base_target_arc.half_width, base_target_arc.horizon,
-                decel=evasion_decel,
-                fwd_len=base_target_arc.fwd_len, back_len=base_target_arc.back_len,
-            )
-            tgt_right = build_arc(
-                base_target_arc.start_x, base_target_arc.start_z,
-                base_target_arc.yaw_rad, ctx.v.speed,
-                base_target_arc.curvature - delta_kappa_t,
-                base_target_arc.half_width, base_target_arc.horizon,
-                decel=evasion_decel,
-                fwd_len=base_target_arc.fwd_len, back_len=base_target_arc.back_len,
-            )
+            tgt_left = _target_evasion_arc(base_target_arc, delta_kappa_t, ctx.v.speed, evasion_decel)
+            tgt_right = _target_evasion_arc(base_target_arc, -delta_kappa_t, ctx.v.speed, evasion_decel)
             left_clears = arc_arc_collision(
                 ctx.ego_arc, tgt_left, cal.corridor_margin, cal.collision_samples,
             ) is None
@@ -701,22 +708,8 @@ class OppositeLaneFilterMirrored:
             if unbraked_hit is None:
                 continue
 
-            tgt_left = build_arc(
-                base_target_arc.start_x, base_target_arc.start_z,
-                base_target_arc.yaw_rad, ctx.v.speed,
-                base_target_arc.curvature + delta_kappa_t,
-                base_target_arc.half_width, base_target_arc.horizon,
-                decel=0.0,
-                fwd_len=base_target_arc.fwd_len, back_len=base_target_arc.back_len,
-            )
-            tgt_right = build_arc(
-                base_target_arc.start_x, base_target_arc.start_z,
-                base_target_arc.yaw_rad, ctx.v.speed,
-                base_target_arc.curvature - delta_kappa_t,
-                base_target_arc.half_width, base_target_arc.horizon,
-                decel=0.0,
-                fwd_len=base_target_arc.fwd_len, back_len=base_target_arc.back_len,
-            )
+            tgt_left = _target_evasion_arc(base_target_arc, delta_kappa_t, ctx.v.speed, 0.0)
+            tgt_right = _target_evasion_arc(base_target_arc, -delta_kappa_t, ctx.v.speed, 0.0)
             left_clears = arc_arc_collision(
                 ctx.ego_arc, tgt_left, cal.corridor_margin, cal.collision_samples,
             ) is None
@@ -1087,6 +1080,10 @@ class EgoEvasionFilter:
                 ctx.dx, ctx.dz, ctx.ego_fwd_x, ctx.ego_fwd_z, ctx.ego_speed,
                 ctx.v_travel_speed, ctx.fwd_dot, cal.lane_half_width,
                 cal.aeb_min_closing_ms):
+            return _PASS
+        # The same rescue along a road-bent ego path: a crashed car in ego's lane
+        # round a bend is not something a 0.08 g swerve "clears" (README road-bent).
+        if not target_moving and _in_lane_closing_on_bent_path(ctx, cal):
             return _PASS
         # Trailer swing: out-of-lane co-dir mover with a body in-lane (README).
         if (ctx.lane != Lane.EGO

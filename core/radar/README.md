@@ -1124,6 +1124,18 @@ center_x = start_x + sign * radius * fwd_z
 center_z = start_z + sign * radius * (-fwd_x)
 ```
 
+### Heading convention on curved arcs (known, kept)
+
+`heading_at_dist` returns `yaw + frac * max_sweep`. `max_sweep` is the angle swept
+about the centre, which runs opposite to the yaw convention, so on a curved arc
+the body heading turns the other way from the motion: 2 deg/m of curvature over
+20 m puts the capsule 46 deg off the tangent. Correcting it is a one-sign change,
+but measured alone (`tools/aeb_heading_ab.py`, 1498 labelled clips) it moved the
+corpus cost 256.15 -> 629.81: 21 TP -> FN and 4 late -> FN against 44 FP -> TN.
+The stages and thresholds grew around the mirrored capsules, so the fix needs its
+own re-tune. `core/radar/bent_path.py` reproduces the same convention, so a road
+bend changes only where a path goes.
+
 ### Collision detection
 
 `arc_arc_collision(a, b, margin, n_samples, min_lateral_gap=0.0)` returns `(time_s, hit_x, hit_z)` or `None`.

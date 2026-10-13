@@ -317,6 +317,14 @@ class AEBCalibration:
     latched_steer_in_half_width_m: float = 5.5
     latched_max_s: float = 2.0
 
+    # Ego's road path, for targets only the road puts in its lane (README "Road-bent
+    # trajectories"). Blends into the lane over ramp_s; corners past max_lat are ignored.
+    road_bend_enabled: bool = True
+    road_bend_targets: bool = True
+    road_bend_share: float = 1.0
+    road_bend_ramp_s: float = 1.0
+    road_bend_max_lat_ms2: float = 25.0
+
 
 DEFAULT = AEBCalibration()
 

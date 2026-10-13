@@ -63,7 +63,8 @@ def occupancy_profile(
     lateral test runs before the arc-length one so `project_to_ego_arc` and its
     `atan2` are only paid for points already inside the corridor.
     """
-    straight = ego_arc.is_straight
+    bent = getattr(ego_arc, "bent", False)
+    straight = ego_arc.is_straight and not bent
     e_cx, e_cz, e_r = ego_arc.center_x, ego_arc.center_z, ego_arc.radius
     e_fx, e_fz = ego_arc.fwd_x, ego_arc.fwd_z
     e_sx, e_sz = ego_arc.start_x, ego_arc.start_z
@@ -91,7 +92,10 @@ def occupancy_profile(
             m_du = mx - e_sx
             m_dv = mz - e_sz
             m_s = m_du * e_fx + m_dv * e_fz
-            if straight:
+            if bent:
+                m_s, m_side = ego_arc.project(mx, mz)
+                m_lat = abs(m_side)
+            elif straight:
                 m_lat = abs(m_dv * e_fx - m_du * e_fz)
             else:
                 m_lat = abs(e_r - math.hypot(mx - e_cx, mz - e_cz))
@@ -115,7 +119,10 @@ def occupancy_profile(
                 off = back + span * frac
                 px = ax + off * t_fx
                 pz = az + off * t_fz
-                if straight:
+                if bent:
+                    p_s, p_side = ego_arc.project(px, pz)
+                    p_lat = abs(p_side)
+                elif straight:
                     p_du = px - e_sx
                     p_dv = pz - e_sz
                     p_s = p_du * e_fx + p_dv * e_fz

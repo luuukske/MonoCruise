@@ -17,6 +17,11 @@ from core.aeb.thread import (
 )
 
 
+# Replay map: ``factory(clip)`` returns ``provider(ego, vehicles, t) -> snapshot or None``. Tools
+# set it to replay with the local game map; None replays without a map, as clips do.
+REPLAY_MAP_FACTORY = None
+
+
 @dataclass
 class EvalTick:
     """One re-run tick's decision (candidate or parity)."""
@@ -62,6 +67,7 @@ def _make_headless(cal: AEBCalibration) -> AEBThread:
     t._sound_handler = _NoSound()
     t._aeb_active_fn = lambda: True
     t._capture_aeb_tick = lambda *a, **k: None   # never record during replay
+    t._read_map_snapshot = lambda: None
     return t
 
 
@@ -147,6 +153,7 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
     t._read_ego_geometry = lambda: geometry
     if warm:
         _apply_warm_state(t, clip.metadata.aeb_warm_state)
+    map_provider = REPLAY_MAP_FACTORY(clip) if REPLAY_MAP_FACTORY is not None else None
 
     ticks = sorted(clip.aeb_ticks, key=lambda x: x.t_mono)
     all_t = [f.t_mono for f in clip.radar_frames] + [tk.t_mono for tk in ticks]
@@ -171,6 +178,9 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
             tkin_by_t.get(ft, 0.0), ghosts,
         )
         t._read_radar_snapshot = lambda s=snap: s
+        if map_provider is not None:
+            map_snap = map_provider(ego, vehicles, tk.t_mono)
+            t._read_map_snapshot = lambda m=map_snap: m
         t._read_max_brake_ms2 = lambda mb=tk.consumed.max_brake_ms2: mb
         t._read_user_braking = (
             lambda c=tk.consumed: _user_braking_from_sources(

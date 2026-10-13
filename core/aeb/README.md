@@ -255,6 +255,8 @@ what ACC uses.
 | `core/aeb/filters.py` | Named filter pipeline: the stage classes + `FilterContext` + `build_pipeline()`. |
 | `core/aeb/overlap_ghosts.py` | `OverlapGhostHold`: bodies deep inside ego, skipped as ghosts until they separate (§4). |
 | `core/aeb/avoidability.py` | `AvoidabilityGate`, which ends a guess-based drop of a parked body at the braking deadline (§3, Avoidability gate). |
+| `core/aeb/road_paths.py` | Ego's road path and road-ahead targets' bent arcs from the map worker's routes (Road-bent trajectories). |
+| `core/aeb/debug_overlays.py` | Map lanes, the map path and ACC trail arcs drawn by the debug window. |
 | `core/aeb/thread.py` | `AEBThread`: data acquisition, ego-arc construction, pipeline dispatch, TTB/state output. |
 
 ---
@@ -728,6 +730,113 @@ frames the FPs do).
 `tests/aeb/harness.py::evaluate_frame` builds its context without a LOS track
 or `clearance_fn`, so the gate fails closed there and scenarios see the bare
 stages. The gate's own cases are in `tests/aeb/test_avoidability_gate.py`.
+
+### Road-bent trajectories
+
+AEB does not trust the map to drop anything, and it does not let the map move a
+decision it already makes. With a fresh map snapshot it builds one extra path,
+ego's road path, and uses it only for targets the road puts in ego's lane:
+
+1. **Following.** Ego gets a road path only while it follows its lane
+   (`core/road_layout/road_bend.py`): within 2.5 m of the lane, within 20° of its
+   heading, and turning inside the road's curvature over the next second of
+   travel, give or take 0.2 m/s² of lateral accel plus a quarter of the road's
+   curvature. Turning in early or late counts. The road just behind (the last
+   7.5 m of travel) joins that range, because the smoothed curvature at the foot
+   already leans into a bend a few metres ahead. A driver steering against the
+   bend, holding straight on past its start or changing lanes gets no road path.
+2. **Profile.** The road path starts on ego's own curvature (the steering-led
+   `EgoPathModel` value) and blends into the lane's curvature over
+   `road_bend_ramp_s` (1.0 s) of travel, 10 to 50 m: the lead into the bend. It
+   keeps ego's heading against the lane. Where two lanes become one (step 4) it
+   joins the merged lane by position instead: at a roundabout exit the curvature
+   blend carried a 2.8 degree heading error 4.4 m into the oncoming lane over 90 m.
+   Joining by position everywhere was measured too: 33 brakes added instead of 20,
+   two more labelled false brakes and one caught miss lost (cost -32 against -69).
+   It is a `BentPath` (`core/radar/bent_path.py`) with the braked and escape arcs
+   offset from it.
+3. **Corner limit.** From the start of the first corner that needs more than
+   `road_bend_max_lat_ms2` (25) at the vehicle's speed, the path keeps the
+   vehicle's own curvature: the corner is ignored where it begins, not where it
+   crosses the limit, or the path turns in halfway and then cuts across. 25 is
+   measured, not truck physics: on 600 clips the smoothed map curvature overstates
+   the line ETS2 drivers take, and they followed the map line through every band
+   up to 25 m/s² of map demand. At 4.0 (the first guess) the road path ran p50
+   1.3 m outside the real line at 3 s for 4 to 6 m/s² of demand and 3.8 to 8.9 m
+   from 6 to 12; at 25 it is within 1.2 m in every band. Above 25 it is map kinks,
+   and following them made the path worse (p90 4.5 m at 1 s without a limit).
+4. **Route.** Of the candidate routes (the router's, every branch past a tip,
+   overlapping lanes ego could be on) the ones whose end point needs the least
+   change of curvature from what the vehicle does now are tried first, and the
+   first one the vehicle is following wins (copies of one lane, branches sharing
+   its start, are tried once). Plain least force would send a truck steadily
+   following a curve down every straight exit. Where two lanes become one
+   (`LaneRoute.merge_s`: a lane ego could equally be on runs into the route), the
+   offset ego holds from either lane fades out by the merge, so the path joins the
+   merged lane instead of running on beside it; holding the offset put both the
+   ACC and the AEB path over the centre line after a two-lane roundabout exit.
+5. **Which targets.** A target is a road-ahead candidate when a body sample sits
+   ahead in ego's lane along the road path and none does along the plain arc
+   (`lane_frame.road_ahead_in_lane`), and its centre sits inside ego's map lane
+   (half a lane, 2.25 m, from the route centreline), so a car on the shoulder of a
+   bend stays with the plain arcs. A mover must also travel within 45° of the lane
+   there, so cross and oncoming traffic at junction curves stays plain.
+6. **Either path.** A candidate first runs today's pipeline on the plain arcs
+   (`_plain_flags`). If no stage drops it and the plain corridor is hit, today's
+   evaluation stands untouched; only otherwise is it judged on the road path, with
+   its own arcs bent along its lane by the same rules. Every other target, and
+   everything after the per-target loop (latches, holds, warn gate), sees the
+   plain arcs exactly as before. So the map can only add or advance braking.
+
+On the road path lanes are classified along its own centreline: the
+straight-line guard in `project_to_ego_arc` (`max(d_arc, d_straight)`) protects
+against ego's steering being extrapolated, and following the lane is the
+evidence the guard was missing. `EgoEvasionFilter`'s in-lane closer bypass is
+judged along it for stationary targets, so a crashed car in ego's lane round a
+bend is not "cleared" by a 0.08 g swerve off the steer arc. Bodies keep
+ArcPath's heading convention (`core/radar/README.md` §8).
+
+Why not bend every path. Replacing ego's arc with a bent path for every target
+was measured first, on the 1265 labelled clips the map covers: blending by
+position onto the lane erased ego's drift on straight roads and cost 24 true
+positives (cost 40.45 -> 314.59); keeping the drift (curvature blend gated on
+following) still lost 5 to 7, because a different path moves marginal clips
+across every threshold the filters were tuned on, and bending targets weakened
+cut-ins. Judging road-ahead candidates on the road path alone (without step 6)
+lost no labelled TP but an independent review found four unlabelled TMP clips
+where it braked later or not at all (`00379e62`, `98fe58eb`, `fd3def1e`,
+`d388de19`): a target today's arc already caught lost that catch. The user labels
+and the review are the safety arbiters, so the road may only add.
+
+Closed loop on a synthetic lane (`tests/aeb/test_road_bent_scenarios.py`, ego
+following the lane at 61 to 79 km/h):
+
+| scene | today warn / brake | with the map |
+|---|---|---|
+| crashed car in lane 55 m into an R 250 bend | 7.9 / 7.9 s | 6.6 / 6.9 s |
+| same, R 150 | 10.6 / 10.6 s | 9.3 / 10.0 s |
+| cars parked beside the bend, either side | unchanged | unchanged |
+| ego holds straight on past the bend start | unchanged | unchanged |
+| oncoming traffic in the bend | unchanged | unchanged |
+| R 60 bend at 90 km/h, car on the outside | 3.7 / 4.2 s | 3.7 / 4.2 s (corner ignored) |
+
+Corpus (`tools/map_aeb_ab.py`, 4283 clips on the map, 1271 labelled): decisions
+change on 429 clips and no brake is removed or delayed (one "ignore" clip loses
+6 brake ticks after the same onset). Braking is added on 20 (4 labelled misses
+caught, 3 labelled no-event clips that the review rated real threats, possibly
+TMP lag, 13 unlabelled) and starts earlier on 182; 6 labelled no-event clips
+gain a warning. Labelled cost 46.38 -> -69.74. Independent Sonnet review
+(`tools/map_judge_brief.md`, 106 clips over three rounds, labels hidden): no
+safety regression remains; the four found in round 2 are now identical to today
+or earlier; `c9a38ba4` (a slower rig directly ahead-right on a single-lane ramp,
+closing at 5 km/h) and `cc213123` stay unclear.
+
+Cost: profiles are rebuilt every 0.1 s and shifted along the path in between;
+only road-ahead targets are bent, and the road path's braked and escape arcs are
+built only in a frame that has one. Replayed AEB loop p50 +0.2 to 1.0 ms, p95 up
+to +5 ms. Without a map, or with `road_bend_enabled`
+off, there is no road path and AEB is bit-identical. Replays rebuild the map
+with `tools/map_replay.py`; `tools/map_aeb_ab.py` runs the A/B.
 
 ### `EgoEvasionFilter`
 

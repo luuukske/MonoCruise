@@ -17,7 +17,14 @@ class Lane(enum.IntEnum):
 
 
 def project_to_ego_arc(ego_arc: ArcPath, x: float, z: float) -> tuple[float, float]:
-    """Return (s, d_abs). Curved arcs use max(d_arc, d_straight); see core/aeb/README.md."""
+    """Return (s, d_abs). Curved arcs use max(d_arc, d_straight); see core/aeb/README.md.
+
+    A road-bent path answers along its own centreline: the bend already leaves ego
+    on its steering, so the straight-line guard would only undo the road's lead.
+    """
+    if getattr(ego_arc, "bent", False):
+        s, side = ego_arc.project(x, z)
+        return s, abs(side)
     dx = x - ego_arc.start_x
     dz = z - ego_arc.start_z
     s_straight = dx * ego_arc.fwd_x + dz * ego_arc.fwd_z
@@ -65,6 +72,44 @@ def _any_body_ahead_in_ego_lane(
         s > 0.0 and d <= lane_half_width
         for s, d in _body_centreline_samples(ego_arc, target_arcs)
     )
+
+
+# A mover counts as ahead in ego's lane only while travelling within this of the lane.
+_ROAD_AHEAD_MAX_ANGLE_COS = math.cos(math.radians(45.0))
+_ROAD_AHEAD_MOVING_MS = 2.0
+
+
+def road_ahead_in_lane(
+    road_arc: ArcPath, plain_arc: ArcPath, target_arcs: list[ArcPath], lane_half_width: float,
+) -> bool:
+    """A body ahead in ego's lane along the road-bent path but not along the plain arc.
+
+    A moving target must also travel along the lane there: one crossing it or coming the
+    other way at a junction curve stays with the plain arcs.
+    """
+    if not target_arcs:
+        return False
+    # One projection rules out the bodies nowhere near the road path before five each.
+    lead = target_arcs[0]
+    reach = lane_half_width + sum(a.fwd_len + a.back_len for a in target_arcs)
+    s0, side0 = road_arc.project(lead.start_x, lead.start_z)
+    if abs(side0) > reach or s0 < -reach:
+        return False
+    if _any_body_ahead_in_ego_lane(plain_arc, target_arcs, lane_half_width):
+        return False
+    moving = abs(target_arcs[0].speed) > _ROAD_AHEAD_MOVING_MS
+    for s, d in _body_centreline_samples(road_arc, target_arcs):
+        if s <= 0.0 or d > lane_half_width:
+            continue
+        if not moving:
+            return True
+        ax, az = road_arc.position_at_dist(s)
+        bx, bz = road_arc.position_at_dist(s + 1.0)
+        n = math.hypot(bx - ax, bz - az)
+        tx, tz = target_arcs[0].fwd_x, target_arcs[0].fwd_z
+        if n > 1e-6 and ((bx - ax) * tx + (bz - az) * tz) / n >= _ROAD_AHEAD_MAX_ANGLE_COS:
+            return True
+    return False
 
 
 def _body_centreline_d_abs(

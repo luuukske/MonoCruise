@@ -780,7 +780,12 @@ class ArcPath:
         return self.position_at_dist(self._dist_at_time(t))
 
     def heading_at_dist(self, dist: float) -> float:
-        """Heading (yaw_rad) at distance along the path."""
+        """Body heading (yaw_rad) at distance along the path.
+
+        On a curved arc this turns opposite to the motion (yaw - curvature * dist).
+        Known and kept: AEB is tuned on it, and the fix alone moved the corpus 256 -> 630
+        (core/radar/README.md §8, heading convention).
+        """
         if self.is_straight:
             return self.yaw_rad
         dist = max(0.0, min(dist, self.arc_length))

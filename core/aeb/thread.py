@@ -9,7 +9,7 @@ import math
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
@@ -23,11 +23,13 @@ from core.radar.traffic import (
 from core.radar.elevation import MAX_EGO_GRADE
 from core.radar.ego_geometry import EgoGeometry, calibration_geometry
 from core.radar.ego_path_model import EgoPathModel, EgoPathState
+from core.aeb.road_paths import RoadPaths
+from core.radar.bent_path import BentPath, bend_arc, offset_curvature
 from core.radar.tmp_state import ego_box
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT, ego_path_params
 from core.aeb.confirm import OccupancyConfirm
 from core.aeb.clearance import ClearanceResult, clearance_required
-from core.aeb.lane_frame import project_to_ego_arc, classify, Lane
+from core.aeb.lane_frame import project_to_ego_arc, classify, Lane, road_ahead_in_lane
 from core.aeb.capture import get_recorder, note_intervention
 from core.aeb.clip_schema import AEBTickRecord, AEBWarmState, ConsumedContext, LiveAEB
 from core.aeb.warning_player import WarningPlayer
@@ -44,9 +46,17 @@ from core.aeb.filters import (
 logger = logging.getLogger(__name__)
 
 
+def _live_map_snapshot():
+    """Fresh map worker snapshot, or None (missing or stale worker reads as no map)."""
+    from core.map_thread.thread import map_snapshot
+    return map_snapshot()
+
+
 # Constants
 
 _INF: float = 1e9
+# Half a map lane: a road-ahead target's centre must sit inside ego's lane edges.
+_MAP_LANE_HALF_M: float = 2.25
 # Unavoidable-geometry demand. Saturates every threshold without polluting logs
 # and clip records with an infinity the schema cannot round-trip.
 _REQUIRED_CEIL_MS2: float = 1000.0
@@ -247,6 +257,8 @@ class AEBSnapshot:
     ego_rear_m: float = 3.333
     ego_arc: ArcPath | None = None
     ego_braked_arc: ArcPath | None = None
+    # Ego's path leaned along its lane, evaluated for targets only the road puts in its lane.
+    ego_road_arc: ArcPath | None = None
     ego_has_trailer: bool = False
 
     vehicles: list = field(default_factory=list)
@@ -353,6 +365,18 @@ class AEBData(ThreadData):
     AEB_realized_decel_ms2: float = 0.0
     snapshot: AEBSnapshot = field(default_factory=AEBSnapshot)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+
+def _plain_flags(ctx: FilterContext, pipeline, cal: AEBCalibration, ego_arc: ArcPath) -> bool:
+    """Would today's arcs flag this target: no stage suppresses it and its corridor is hit."""
+    for stage in pipeline:
+        if stage.apply(ctx).suppressed:
+            return False
+    for group in (ctx.precomputed_cross_arcs or [[a] for a in ctx.all_target_arcs]):
+        if _earliest_hit(ego_arc, group, cal.corridor_margin, cal.collision_samples,
+                         ctx.lateral_gap) is not None:
+            return True
+    return False
 
 
 def _earliest_hit(
@@ -807,6 +831,10 @@ class AEBThread(BaseThread):
         self._ego_path = EgoPathModel(params=ego_path_params(self._cal))
         self._ego_path_cal: AEBCalibration = self._cal
         self._ego_path_t_kin: float | None = None
+        # Map worker snapshot; replay swaps this the way it swaps the radar read.
+        self._read_map_snapshot = _live_map_snapshot
+        # Road-bent arcs for ego and targets (README road-bent trajectories).
+        self._road_paths = RoadPaths()
         # LOS tracks for engagement-entry CBDR veto (README LOS veto).
         self._los_tracks: dict[int, deque] = {}
         # Per-target (t, d_miss) for turn-into-path closing rate (README).
@@ -1176,6 +1204,15 @@ class AEBThread(BaseThread):
         threading.Thread(target=_run, daemon=True).start()
         logger.info("RadarVisualizer running on http://127.0.0.1:5000")
 
+    def _bind_road_paths(self, cal: AEBCalibration) -> None:
+        """Bind this frame's map snapshot; a failing read leaves every arc plain."""
+        try:
+            snap = self._read_map_snapshot()
+        except Exception:
+            logger.debug("map snapshot unavailable this frame", exc_info=True)
+            snap = None
+        self._road_paths.frame(snap, cal, self._now())
+
     def loop(self) -> None:
         if not self.running:
             return
@@ -1273,6 +1310,7 @@ class AEBThread(BaseThread):
 
         ego_evasion_left: ArcPath | None = None
         ego_evasion_right: ArcPath | None = None
+        left_kappa = right_kappa = ego_curvature
         if run_collision and ego_speed > 1.0:
             left_kappa, right_kappa = _evasion_kappas(
                 ego_curvature, ego_speed, cal, ego_kappa_cap, ego_cap_weight,
@@ -1287,6 +1325,16 @@ class AEBThread(BaseThread):
                 right_kappa, ego_hw, dynamic_horizon,
                 fwd_len=ego_cap_fwd, back_len=ego_cap_back,
             )
+        plain_set = (ego_arc, ego_braked_arc, ego_evasion_left, ego_evasion_right)
+
+        # Ego's path leaned along its lane, for targets only the road puts in ego's lane
+        # (README road-bent). Every other target is evaluated on the plain arcs as before.
+        self._bind_road_paths(cal)
+        road_arc: BentPath | None = None
+        if self._road_paths.active:
+            bent = self._road_paths.bend_ego([ego_arc], ego_curvature)[0]
+            if isinstance(bent, BentPath):
+                road_arc = bent
 
         ego_fwd_x = ego_arc.fwd_x
         ego_fwd_z = ego_arc.fwd_z
@@ -1439,6 +1487,8 @@ class AEBThread(BaseThread):
         # Precompute per-vehicle collision arcs for vehicles passing range and the skip set.
         # Use vehicles_eff so TMP trailer-as-vehicles inherit tractor speed/acceleration.
         vehicle_collision_data: dict[int, tuple] = {}
+        # vid -> (bent target arcs, cross arcs) for targets evaluated on road_set.
+        road_ahead: dict[int, tuple] = {}
         max_range_sq = cal.max_range ** 2
         if run_collision:
             for v in vehicles_eff:
@@ -1459,12 +1509,37 @@ class AEBThread(BaseThread):
                     self._curvature_blender, now_mono,
                     follow_decel_ms2=follow_decel,
                 )
+                # Ahead in ego's lane twice over: along its road path and on the map lane itself,
+                # so a car on the shoulder of a bend stays with the plain arcs.
+                if road_arc is not None and all_t and road_ahead_in_lane(
+                        road_arc, ego_arc, all_t, cal.lane_half_width
+                ) and self._road_paths.in_ego_lane(vx, vz, _MAP_LANE_HALF_M):
+                    bent_t = self._road_paths.bend_target(
+                        v.id, all_t, all_t[0].curvature,
+                        (ego_x, ego_z, ego_fwd_x, ego_fwd_z),
+                    )
+                    road_ahead[v.id] = (
+                        bent_t, [_apply_cross_zone(bt, cross_pad, cal) for bt in bent_t],
+                    )
                 dist_sq = dx * dx + dz * dz
                 vehicle_collision_data[v.id] = (
                     all_t, cross_pad, cross_list,
                     dx, dz, dist_sq,
                     pc_yaw, pc_aspd, pc_fx, pc_fz, pc_curv,
                 )
+
+        # The road path's braked and escape arcs, built only for a frame that needs them.
+        road_set = None
+        if road_ahead:
+            road_set = (
+                road_arc,
+                bend_arc(ego_braked_arc, road_arc.kappa_s, road_arc.kappa_k, keep_flat=True)
+                if ego_braked_arc is not None else None,
+                offset_curvature(road_arc, left_kappa - ego_curvature, parallel_margin_scale=1.0)
+                if ego_evasion_left is not None else None,
+                offset_curvature(road_arc, right_kappa - ego_curvature, parallel_margin_scale=1.0)
+                if ego_evasion_right is not None else None,
+            )
 
         for v in vehicles_eff:
             vx, vz = v.position.x, v.position.z
@@ -1479,6 +1554,7 @@ class AEBThread(BaseThread):
             while trk and trk[0][0] < los_cutoff:
                 trk.popleft()
 
+            ego_arc, ego_braked_arc, ego_evasion_left, ego_evasion_right = plain_set
             pc = vehicle_collision_data.get(v.id)
             if pc is not None:
                 (all_target_arcs, cross_padding, precomputed_cross_arcs,
@@ -1578,6 +1654,9 @@ class AEBThread(BaseThread):
             }
 
             vehicle_arcs[v.id] = [veh_arc] + trailer_arcs
+            if pc is not None and all_target_arcs and isinstance(all_target_arcs[0], BentPath):
+                # Draw what AEB evaluates: the bent collision arcs.
+                vehicle_arcs[v.id] = list(all_target_arcs)
 
             if not run_collision:
                 vehicle_dicts.append(veh_dict)
@@ -1619,6 +1698,18 @@ class AEBThread(BaseThread):
                 brake_deadline_ms2=brake_deadline_ms2,
                 clearance_fn=clearance_of,
             )
+            # A road-ahead target keeps today's evaluation whenever today would flag it (passes
+            # every stage and is hit), so the road path only judges what today lets go.
+            if v.id in road_ahead and not _plain_flags(
+                    replace(ctx), self._pipeline, cal, plain_set[0]):
+                ego_arc, ego_braked_arc, ego_evasion_left, ego_evasion_right = road_set
+                all_target_arcs, precomputed_cross_arcs = road_ahead[v.id]
+                vehicle_arcs[v.id] = list(all_target_arcs)
+                ctx = replace(
+                    ctx, ego_arc=ego_arc, ego_braked_arc=ego_braked_arc,
+                    ego_evasion_left=ego_evasion_left, ego_evasion_right=ego_evasion_right,
+                    all_target_arcs=all_target_arcs, precomputed_cross_arcs=precomputed_cross_arcs,
+                )
 
             suppression_reasons[v.id] = []
             for stage in self._pipeline:
@@ -1926,6 +2017,7 @@ class AEBThread(BaseThread):
                     found_hit = True
 
                 vehicle_dicts.append(veh_dict)
+        ego_arc, ego_braked_arc, ego_evasion_left, ego_evasion_right = plain_set
 
         for vid in list(self._risk_confirm.keys()):
             if vid in newly_risky:
@@ -2292,6 +2384,7 @@ class AEBThread(BaseThread):
             ego_speed=ego_speed, ego_half_w=ego_hw, ego_half_l=ego_half_l,
             ego_front_m=geometry.front_m, ego_rear_m=geometry.rear_m,
             ego_arc=ego_arc, ego_braked_arc=ego_braked_arc,
+            ego_road_arc=road_arc,
             ego_has_trailer=ego_has_trailer,
             vehicles=vehicle_dicts, vehicle_arcs=vehicle_arcs,
             colliding_ids=colliding_ids, suppressed_ids=suppressed_ids,
