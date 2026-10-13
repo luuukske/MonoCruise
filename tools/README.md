@@ -22,7 +22,8 @@ hygiene rules apply to every file in it.
 | `read_scs_profile.py` | Transmission and braking intensity for the selected ETS2/ATS profile. Steam Cloud vs local, `game.log.txt` identity, live `shifterType` when the SDK is up. `--json` for agents. |
 | `road_layout_check.py` | Distance from a truck pose to the nearest lane centerline, including prefab junctions. See `core/road_layout/README.md`. |
 | `road_layout_view.py` | Live lane map while driving. Separate window, north up, loads a sector when the truck gets near it. Guardrails, signs and posts draw out to 400 m. |
-| `map_obstacle_probe.py` | Times and classifies trees, signs, pillars, guardrails and other map objects in one sector. Vegetation is a density band, not individual trees. |
+| `map_obstacle_probe.py`, `map_obstacle_parse.py`, `map_obstacle_props.py` | Times and classifies trees, signs, pillars, guardrails and other map objects in one sector. Vegetation is a density band, not individual trees. `map_obstacle_props.py` plugs them into the standalone lane view; the runtime map reads lanes only. |
+| `map_lane_audit.py`, `map_path_eval.py`, `map_target_eval.py`, `map_path_render.py`, `map_aeb_ab.py`, `map_replay.py` | Map lanes against AI, TMP and ego trails; ego and target predicted paths against the truth; one-frame renders; AEB with and without the map; the map snapshot for any clip replay. See `core/road_layout/README.md`. Output in `tools/map_lane_audit_out/` (gitignored). |
 | `plot_coast.py` | Coast-fit plots for the mapper. |
 | `release.py`, `tune_visualizer.py` | Release packaging and live tuning UI. |
 | `fetch_sdk_bundle.py` | Build helper, run by `release.yml`: downloads the live ETS2LA game plugin set for every published game version into `core/sdk_installer/bundled/`, the app's offline fallback. See "Bundled fallback" in `core/sdk_installer/README.md`. |

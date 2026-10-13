@@ -119,6 +119,12 @@ class Settings(metaclass=_SingletonMeta):
     airhorn_variable: bool = True
     autostart_variable: bool = True
     AEB_enabled: bool = False
+    # Lane geometry from the installed game's own map files (core/map_thread).
+    # Off means ACC and AEB never see the map: today's behaviour exactly.
+    map_data_enabled: bool = True
+    # Layer TruckersMP's own map additions over the base map while connected to a server.
+    # A config.json switch only; off leaves the base game's roads.
+    map_tmp_enabled: bool = True
     # Warning style label from core/aeb/warning_sounds.py, and its volume in percent.
     aeb_sound: str = "Original"
     aeb_sound_volume: int = 100

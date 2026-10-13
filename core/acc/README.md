@@ -485,17 +485,39 @@ Rejected on the same corpus, both measured after the prior was in:
 - **Moving the base arc onto the curvature the fit reports at ego, then refitting.**
   Costs 7 points of coverage and doubles the p99 at 150 m for no fewer excursions.
 
-### Lane direction
+### Map path (nested over this model)
 
-The map can publish the lane ego is in. Its samples are the line ego would
-drive by holding its current sideways offset, so the fit takes the lane's
-direction and does not steer that offset back to the lane centre. Points
-close to ego are blended into the truck's own heading, fully at the bumper
-and not at all by about 50 m, which keeps a vehicle straight ahead from being
-scored out of lane by a small heading error in the map. When ego sits between
-two lanes of similar score, and is not on a centreline, those two directions
-are averaged by how far ego is from each. A trail that disagrees still
-outvotes the lane. With nothing published the fit is unchanged.
+With a fresh map snapshot (`core/map_thread/`), each corner lateral and each
+target's offset is pulled toward its offset from the fused map path, by that
+path's trust at the target's distance:
+
+    lat = w_map * map_lat + (1 - w_map) * (w_road * road_lat + (1 - w_road) * arc_lat)
+
+The map path leaves ego on this tracker's own arc curvature and follows ego's
+lane at ego's current offset (`core/road_layout/README.md`, the predicted path),
+so near ego nothing moves. Map trust is **not** evidence: counting it as
+evidence bought a few more points of bend recall but let never-moved cars score
+past the stationary validation latch (§3). Without a map `map_ctx` is None and the tracker is bit-identical; the
+geometric lead failsafe keeps reading the raw arc laterals (§10). The road
+model itself is not fitted on map data: map rows inside the fit (an earlier
+experiment) inflated `trust_at`, which is calibrated on traffic-only fits.
+
+Measured with `tools/map_acc_eval.py` (435 clips, truth = distance to ego's own
+later path; locked = score above the confidence floor), base -> map:
+
+| | <5 deg | 5-15 deg | 15-30 deg | >=30 deg |
+|---|---|---|---|---|
+| in-lane moving, locked | 85.5 -> 89.0 % | 71.3 -> 83.8 % | 58.3 -> 79.6 % | 25.0 -> 47.5 % |
+| in-lane stationary, in path | 65.9 -> 80.2 % | 57.7 -> 75.8 % | 24.9 -> 49.8 % | 13.7 -> 30.1 % |
+| adjacent moving, in path | 10.4 -> 6.8 % | 22.0 -> 13.4 % | 22.0 -> 11.9 % | 21.2 -> 15.8 % |
+| adjacent moving, locked | 5.9 -> 5.9 % | 8.6 -> 9.8 % | 4.2 -> 5.6 % | 2.1 -> 3.1 % |
+| adjacent stationary, locked | 1.8 -> 0.9 % | 1.6 -> 1.4 % | 0.2 -> 2.1 % | 0.0 -> 0.6 % |
+
+Adjacent cars sit in the corridor far less often; the small rise in adjacent
+locks in bends is mostly lock hold on the many more leads now locked. One
+low-speed TMP clip (`183b3427`, ego crawling on a lane apart from the main road)
+holds the whole rise of outer stationary locks on straights. Needs an in-game
+A/B before it ships; `map_data_enabled` switches it off.
 
 ### Base arc: why the centreline is not a polynomial alone
 

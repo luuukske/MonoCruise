@@ -5,6 +5,13 @@ header, then a per-type payload). Anything that is not a road is skipped so
 the node table at the end stays aligned. A parse that does not consume the
 file is a layout miss, not a short read to ignore.
 
+TruckersMP mod sectors come in older versions. Three item layouts differ and are
+branched on ``_Cur.version``: terrain (one field fewer before 902), sign (no
+board list before 906) and curve (one entry, no mask, before 907). Only the
+versions in ``_OLD_VERSIONS`` are read, because each was checked to consume its
+files exactly and to agree with the base game on shared roads; any other older
+version is refused. See core/road_layout/README.md.
+
 Node positions are stored in 1/256 m. The ground plane is X and Z, Y up,
 matching telemetry `coordinateX/Y/Z`.
 """
@@ -101,11 +108,16 @@ class SectorError(ValueError):
     """The sector bytes do not match the template this reader knows."""
 
 
+# Older sector versions seen in TruckersMP archives and verified against the base game.
+_OLD_VERSIONS = frozenset({896, 898, 900, 901, 903, 905, 906})
+
+
 class _Cur:
-    def __init__(self, data: bytes) -> None:
+    def __init__(self, data: bytes, version: int = 907) -> None:
         self.b = data
         self.i = 0
         self.n = len(data)
+        self.version = version
 
     def _take(self, k: int) -> memoryview:
         if self.i + k > self.n:
@@ -207,7 +219,8 @@ def _skip_terrain(c: _Cur) -> None:
     c.skip(12)
     c.f32()
     c.f32()
-    c.u32()
+    if c.version >= 902:
+        c.u32()
     c.skip((8 + 2) * 3)
     for _ in range(2):
         c.u16()
@@ -384,18 +397,7 @@ def _skip_trigger(c: _Cur) -> None:
         c.f32()
 
 
-def _skip_sign(c: _Cur) -> None:
-    c.token()
-    c.u64()
-    c.token()
-    c.token()
-    for _ in range(c.u8()):
-        c.token()
-        c.token()
-        c.token()
-    template = c.u64_str()
-    if template == "":
-        return
+def _sign_boards(c: _Cur) -> None:
     for _ in range(c.u32()):
         c.token()
         flags = c.u8()
@@ -404,6 +406,9 @@ def _skip_sign(c: _Cur) -> None:
             c.i8()
         if flags & 0x02:
             c.token()
+
+
+def _sign_attributes(c: _Cur) -> None:
     for _ in range(c.u32()):
         c.u32()
         c.token()
@@ -424,6 +429,23 @@ def _skip_sign(c: _Cur) -> None:
                 c.u64()
             else:
                 raise SectorError(f"sign attribute {version} at {c.i}")
+
+
+def _skip_sign(c: _Cur) -> None:
+    c.token()
+    c.u64()
+    c.token()
+    c.token()
+    for _ in range(c.u8()):
+        c.token()
+        c.token()
+        c.token()
+    template = c.u64_str()
+    if template == "":
+        return
+    if c.version >= 906:
+        _sign_boards(c)
+    _sign_attributes(c)
 
 
 def _skip_traffic_rule(c: _Cur) -> None:
@@ -471,32 +493,42 @@ def _skip_far_model(c: _Cur) -> None:
     _u64s(c)
 
 
+def _curve_entry(c: _Cur, current: bool) -> None:
+    if current:
+        c.token()
+        c.u32()
+    c.u32()
+    c.f32()
+    c.f32()
+    c.f32()
+    c.token()
+    c.u32()
+    c.f32()
+    c.token()
+    c.token()
+    c.token()
+    c.token()
+    c.skip(4 * c.u32())
+    if current:
+        for _ in range(5):
+            c.f32()
+
+
 def _skip_curve(c: _Cur) -> None:
+    if c.version >= 907:
+        c.u64()
+        c.u64()
+        c.skip(16)
+        c.f32()
+        for _ in range(c.u32().bit_count()):
+            _curve_entry(c, True)
+        return
+    c.token()
     c.u64()
     c.u64()
     c.skip(16)
     c.f32()
-    count = c.u32().bit_count()
-    for _ in range(count):
-        c.token()
-        c.u32()
-        c.u32()
-        c.f32()
-        c.f32()
-        c.f32()
-        c.token()
-        c.u32()
-        c.f32()
-        c.token()
-        c.token()
-        c.token()
-        c.token()
-        c.skip(4 * c.u32())
-        c.f32()
-        c.f32()
-        c.f32()
-        c.f32()
-        c.f32()
+    _curve_entry(c, False)
 
 
 def _skip_camera_path(c: _Cur) -> None:
@@ -608,6 +640,9 @@ def parse_sector(data: bytes) -> SectorMesh:
     """Roads and nodes from one sector `.base` blob."""
     c = _Cur(data)
     version = c.u32()
+    if version < 907 and version not in _OLD_VERSIONS:
+        raise SectorError(f"version {version}: layout not verified")
+    c.version = version
     c.token()
     c.u32()
     mesh = SectorMesh(version=version)

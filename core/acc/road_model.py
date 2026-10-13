@@ -395,9 +395,6 @@ def _predict(beta, basis) -> float:
 
 
 _EGO_SOURCE_ID = -1
-# Map lane. Not recentred: the points are already the centreline through ego.
-_LANE_SOURCE_ID = -8
-_LANE_SAMPLE_WEIGHT = 0.55
 
 
 def _grouped_rows(
@@ -612,7 +609,6 @@ def _rows_for_base(
     ego_samples: list[tuple[float, float]],
     target_samples: list[tuple[int, float, float, float]],
     kappa: float,
-    lane_samples: list[tuple[float, float]] | None = None,
 ):
     """Project every sample onto the base arc at ``kappa`` and build the rows.
 
@@ -631,30 +627,7 @@ def _rows_for_base(
             base_targets.append((sid, s_m, normal, w))
     rows, n_sources = _grouped_rows(base_ego, base_targets)
     support = max((s for _, s, _, w in base_targets if w > 0.0), default=0.0)
-    lane_rows, lane_support = _lane_rows(lane_samples, kappa, span)
-    if lane_rows:
-        rows.extend(lane_rows)
-        n_sources += 1
-        support = max(support, lane_support)
     return rows, n_sources, support
-
-
-def _lane_rows(lane_samples, kappa: float, span: float):
-    """Lane points stay absolute. A vehicle trail is recentred; this is not one."""
-    if not lane_samples:
-        return [], 0.0
-    rows = []
-    support = 0.0
-    for x, y in lane_samples:
-        s_m, normal = arc_coords(kappa, x, y)
-        if s_m <= 0.0 or abs(s_m) > span:
-            continue
-        rows.append((_LANE_SOURCE_ID, _basis(s_m), normal, _LANE_SAMPLE_WEIGHT))
-        if s_m > support:
-            support = s_m
-    if len(rows) < _MIN_SOURCE_SAMPLES:
-        return [], 0.0
-    return rows, support
 
 
 def _trail_kappa(points: list[tuple[float, float]]) -> float | None:
@@ -733,24 +706,22 @@ def fit_road_model(
     ego_samples: list[tuple[float, float]],
     target_samples: list[tuple[int, float, float, float]],
     fallback_kappa: float = 0.0,
-    lane_samples: list[tuple[float, float]] | None = None,
 ) -> RoadModel:
     """Fit the shared centreline; falls back to constant curvature when weak.
 
     ``ego_samples`` are ego's own recent path in the current ego frame (x behind
-    ego is negative). ``target_samples`` are ``(source_id, x, y, weight)``.
-    ``lane_samples`` are ego-frame points on the lane-direction centreline."""
+    ego is negative). ``target_samples`` are ``(source_id, x, y, weight)``."""
     base_kappa = _rebased_kappa(fallback_kappa, target_samples)
     # Ego's path lies on the base arc only while the base is ego's own
     # curvature, and it never described the road ahead anyway (README §9).
     ego_rows = ego_samples if base_kappa == fallback_kappa else []
     rows, n_sources, support = _rows_for_base(
-        ego_rows, target_samples, base_kappa, lane_samples,
+        ego_rows, target_samples, base_kappa,
     )
     if len(rows) < 4 and base_kappa != fallback_kappa:
         base_kappa = fallback_kappa
         rows, n_sources, support = _rows_for_base(
-            ego_samples, target_samples, base_kappa, lane_samples,
+            ego_samples, target_samples, base_kappa,
         )
     if len(rows) < 4:
         return from_curvature(fallback_kappa)

@@ -325,14 +325,14 @@ def extend_lane(
     return tuple(spans)
 
 
-def _best_join(
+def join_candidates(
     near: "LineIndex",
     tip: tuple[float, float],
     tip_dir: tuple[float, float],
     seen: set[int],
-    prefabs: list[int],
-) -> tuple[float, int, int | None, bool, int] | None:
-    best = None
+) -> list[tuple[float, int, int]]:
+    """Lines that start where ``tip`` ends, as ``(cost, index, joined_end)``, cheapest first."""
+    found: list[tuple[float, int, int]] = []
     tx, tz = tip
     for index in near.around(tx, tz, _JOIN_M):
         if index in seen:
@@ -340,8 +340,7 @@ def _best_join(
         pts = _pts(near.lines[index])
         if len(pts) < 2:
             continue
-        pid = _prefab_id(near.lines[index])
-        hit: tuple[float, int, tuple[float, float]] | None = None
+        hit: tuple[float, int] | None = None
         for end in (0, len(pts) - 1):
             ex, ez = pts[end][0], pts[end][1]
             dist = math.hypot(ex - tx, ez - tz)
@@ -355,13 +354,26 @@ def _best_join(
                 continue
             cost = dist + _CHAIN_M_PER_RAD * ang
             if hit is None or cost < hit[0]:
-                hit = (cost, end, enter)
-        if hit is None:
-            continue
-        second = _stops(pid, prefabs)
-        if best is None or hit[0] < best[0]:
-            best = (hit[0], index, pid, second, hit[1])
-    return best
+                hit = (cost, end)
+        if hit is not None:
+            found.append((hit[0], index, hit[1]))
+    found.sort()
+    return found
+
+
+def _best_join(
+    near: "LineIndex",
+    tip: tuple[float, float],
+    tip_dir: tuple[float, float],
+    seen: set[int],
+    prefabs: list[int],
+) -> tuple[float, int, int | None, bool, int] | None:
+    found = join_candidates(near, tip, tip_dir, seen)
+    if not found:
+        return None
+    cost, index, end = found[0]
+    pid = _prefab_id(near.lines[index])
+    return cost, index, pid, _stops(pid, prefabs), end
 
 
 def _stops(pid: int | None, prefabs: list[int]) -> bool:

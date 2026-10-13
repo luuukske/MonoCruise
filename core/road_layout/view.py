@@ -2,7 +2,7 @@
 
 North is up and the truck stays in the centre. Sectors load on a side thread
 when the view can reach them. The bright line is the lane the truck is in, drawn forward until just before
-the sixth prefab, or 200 m. The pink line is the road model.
+the sixth prefab, or 200 m. The pink line is the fused map path ACC and AEB use.
 Map objects out to 400 m each have their own color. Point at one to read its name.
 """
 
@@ -10,23 +10,25 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 
 from PySide6.QtCore import QObject, QPointF, QThread, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPaintEvent, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
-from core.acc.lane_direction import LaneDirection, centreline_world, lane_direction_samples
-from core.acc.road_model import fit_road_model
 from core.radar.scs_pose import ScsPose, ScsPoseReader
+from core.radar.tmp_state import TmpStateReader
 from core.road_layout.ego_lane import (
     EgoLaneChoice,
     EgoLaneTrack,
     LineIndex,
     extend_lane,
     path_curvature,
-    ranked_lanes,
 )
+from core.road_layout.ego_route import build_route
 from core.road_layout.live import LiveMap, MapFrame, MapLine
+from core.road_layout.map_path import build_map_path, world_points
+from core.road_layout.tmp_mods import TmpOverlayOpener
 
 log = logging.getLogger("road_layout")
 
@@ -46,6 +48,7 @@ _TICK_MS = 50
 _MOVE_M = 50.0
 _HOLD_M = 2.5
 _HOLD_DOT = 0.992
+_TMP_HOLD_S = 60.0
 
 
 class _Worker(QObject):
@@ -53,15 +56,18 @@ class _Worker(QObject):
     status = Signal(str)
     failed = Signal(str)
 
-    def __init__(self) -> None:
+    def __init__(self, props_factory=None) -> None:
         super().__init__()
         self._map: LiveMap | None = None
+        self._props_factory = props_factory
+        self._tmp_state = TmpStateReader()
+        self._tmp_seen = -math.inf
 
     @Slot()
     def open_catalogs(self) -> None:
         self.status.emit("Indexing the map")
         try:
-            self._map = LiveMap.open_installed()
+            self._map = LiveMap.open_installed(props_factory=self._props_factory)
         except FileNotFoundError as exc:
             log.warning("lane map index failed: %s", exc)
             self.failed.emit(str(exc))
@@ -72,10 +78,30 @@ class _Worker(QObject):
             return
         self.status.emit("Waiting for the game")
 
+    def _follow_truckersmp(self) -> None:
+        """Layer TruckersMP's map additions while the plugin reports a server connection."""
+        now = time.monotonic()
+        state = self._tmp_state.read(now)
+        if state.fresh and state.connected:
+            self._tmp_seen = now
+        want = now - self._tmp_seen <= _TMP_HOLD_S
+        if want == self._map.overlaid:
+            return
+        opener = TmpOverlayOpener("ets2")
+        while not opener.step():
+            pass
+        self._map.set_overlay(opener.archives if want else [])
+        log.info("lane map: TruckersMP additions %s", "on" if self._map.overlaid else "off")
+
     @Slot(float, float)
     def on_pose(self, x: float, z: float) -> None:
         if self._map is None:
             return
+        try:
+            self._follow_truckersmp()
+        except Exception:
+            log.exception("TruckersMP map additions failed, game map only")
+            self._tmp_seen = -math.inf
         if self._map.stale(x, z):
             self.status.emit("Loading sector")
         try:
@@ -94,7 +120,7 @@ class LaneMapWindow(QWidget):
 
     _ask = Signal(float, float)
 
-    def __init__(self) -> None:
+    def __init__(self, props_factory=None) -> None:
         super().__init__()
         self.setWindowTitle("Lane map")
         self.resize(960, 720)
@@ -117,7 +143,7 @@ class LaneMapWindow(QWidget):
         self._pointer: QPointF | None = None
         self._req: tuple[float, float] | None = None
         self._thread = QThread(self)
-        self._worker = _Worker()
+        self._worker = _Worker(props_factory)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.open_catalogs)
         self._ask.connect(self._worker.on_pose)
@@ -409,7 +435,7 @@ class LaneMapWindow(QWidget):
         speed = pose.speed * 3.6
         lines = [
             "North up. Scroll to zoom. Objects to 400 m.",
-            "Pink line is the road model.",
+            "Pink line is the fused map path.",
             f"{speed:.0f} km/h" if speed >= 0.5 else "Stopped",
             _lane_text(frame.lines, choice),
             f"Sectors {frame.sectors}",
@@ -443,45 +469,17 @@ def _nose(pose: ScsPose) -> tuple[float, float]:
 
 
 def _road_model_line(track, pts, lines, near, pose, fx, fz, choice, chain):
-    """World points of the fitted centreline. Reuses the lane already extended."""
+    """World points of the fused map path: steering near the truck, the lane further out."""
+    del pts, chain
+    if choice is None:
+        return ()
+    yaw = pose.yaw_norm * 2.0 * math.pi
+    route = build_route(lines, near, choice.index, pose.x, pose.z, fx, fz)
     kappa = path_curvature(track.points())
-    ranked = ranked_lanes(pts, pose.x, pose.z, fx, fz, near, kappa)
-    routes = []
-    for index, dist, cost in ranked:
-        spans = chain if choice is not None and index == choice.index else extend_lane(
-            lines, index, pose.x, pose.z, fx, fz, near,
-        )
-        route = _join_spans(spans)
-        if len(route) >= 2:
-            routes.append(LaneDirection(route, dist, cost))
-    samples = lane_direction_samples(routes, pose.x, pose.z, fx, fz)
-    ego = []
-    for hx, hz in track.points():
-        dx = hx - pose.x
-        dz = hz - pose.z
-        ego.append((dx * fx + dz * fz, dx * (-fz) + dz * fx))
-    model = fit_road_model(ego, [], kappa, samples or None)
-    return centreline_world(model, pose.x, pose.z, fx, fz)
-
-
-def _join_spans(spans) -> tuple[tuple[float, float], ...]:
-    pts: list[tuple[float, float]] = []
-    for span in spans:
-        chunk = list(span.pts)
-        if len(chunk) < 2:
-            continue
-        if pts:
-            last = pts[-1]
-            if _gap(chunk[-1], last) < _gap(chunk[0], last):
-                chunk.reverse()
-            if _gap(chunk[0], last) < 0.5:
-                chunk = chunk[1:]
-        pts.extend(chunk)
-    return tuple(pts)
-
-
-def _gap(a, b) -> float:
-    return math.hypot(a[0] - b[0], a[1] - b[1])
+    path = build_map_path(route, pose.x, pose.z, -math.sin(yaw), -math.cos(yaw), kappa, pose.speed)
+    if path is None:
+        return ()
+    return world_points(path, pose.x, pose.z, -math.sin(yaw), -math.cos(yaw))
 
 
 def _lane_text(lines: tuple[MapLine, ...], choice: EgoLaneChoice | None) -> str:

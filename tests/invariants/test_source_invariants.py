@@ -247,3 +247,19 @@ def test_runtime_requirements_use_pygame_ce():
             names.append(line.split(">")[0].split("=")[0].split("<")[0].strip().lower())
     assert "pygame-ce" in names, "requirements.txt must list pygame-ce (see core/main_pedal_thread/README.md)"
     assert "pygame" not in names, "plain pygame would shadow pygame-ce and hide separate pedal sets again"
+
+
+def test_core_never_imports_tools():
+    """``tools/`` is not bundled, so a core import of it fails only in the frozen build."""
+    offenders = []
+    for path in _py_files(REPO / "core"):
+        for node in ast.walk(_parse(path)):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            elif isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            else:
+                continue
+            if any(name == "tools" or name.startswith("tools.") for name in names):
+                offenders.append(f"{_rel(path)}:{node.lineno}")
+    assert not offenders, f"core imports tools: {offenders}"

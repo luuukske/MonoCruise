@@ -86,14 +86,21 @@ def write_credit(out_dir: Path, clip_id: str) -> Path:
 
 def render_frames(clip, out_dir: Path, *, width: int = 1280, height: int = 720,
                   start_t: float | None = None, end_t: float | None = None,
-                  vehicle_paths: bool = True, progress=None) -> dict:
-    """Write one PNG per replayed tick in the window. Returns a summary dict."""
+                  vehicle_paths: bool = True, progress=None, lanes: bool = False) -> dict:
+    """Write one PNG per replayed tick in the window. Returns a summary dict.
+
+    ``lanes`` draws map lanes and the fused map path from the local game map.
+    """
     from core.aeb.clip_replay import replay_clip
 
     from tools.aeb_review_widgets import SceneWidget
 
     _app()
-    frames = replay_clip(clip)
+    clip_map = None
+    if lanes:
+        from tools.map_replay import ClipMap
+        clip_map = ClipMap(clip)
+    frames = replay_clip(clip, map_provider=clip_map)
     if not frames:
         return {"written": 0, "reason": "clip replayed to no frames"}
     lo = start_t if start_t is not None else frames[0].t_rel
@@ -105,6 +112,8 @@ def render_frames(clip, out_dir: Path, *, width: int = 1280, height: int = 720,
     out_dir.mkdir(parents=True, exist_ok=True)
     scene = SceneWidget()
     scene.set_vehicle_paths(vehicle_paths)
+    if clip_map is not None:
+        scene.map_window = clip_map.window
     scene.resize(width, height)
     written = 0
     for i, frame in enumerate(picked):

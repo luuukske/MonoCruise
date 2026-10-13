@@ -195,3 +195,45 @@ def _node(uid: int, x: float, y: float, z: float) -> bytes:
         + _f32(1.0) + _f32(0.0) + _f32(0.0) + _f32(0.0)
         + _u64(0) + _u64(0) + _u32(0)
     )
+
+
+def _node_at(uid: int, x: float, z: float, ahead_x: float, ahead_z: float) -> MapNode:
+    """Node whose ahead vector (local -Z) points along ``(ahead_x, ahead_z)``."""
+    import math
+
+    yaw = math.atan2(ahead_z, ahead_x)
+    half = (yaw + math.pi / 2.0) / 2.0
+    return MapNode(uid, x, 0.0, z, math.cos(half), 0.0, -math.sin(half), 0.0)
+
+
+def _arc_length(pts) -> float:
+    import math
+
+    return sum(math.hypot(b[0] - a[0], b[2] - a[2]) for a, b in zip(pts, pts[1:]))
+
+
+def test_stored_length_tangent_reproduces_the_stored_length():
+    """SCS stores the length of a spline whose tangent is that length; the chord cuts it short."""
+    import math
+
+    start = _node_at(1, 0.0, 0.0, 1.0, 0.0)
+    end = _node_at(2, 200.0, 200.0, 0.0, 1.0)
+    stored = 300.0
+    for _ in range(40):
+        stored = _arc_length(sample_centerline(start, end, steps=400, length=stored))
+    chord_pts = sample_centerline(start, end, steps=400)
+    stored_pts = sample_centerline(start, end, steps=400, length=stored)
+    assert abs(_arc_length(stored_pts) - stored) / stored < 0.005
+    assert _arc_length(chord_pts) < stored * 0.995
+    mid_gap = math.hypot(stored_pts[200][0] - chord_pts[200][0], stored_pts[200][2] - chord_pts[200][2])
+    assert mid_gap > 3.0
+
+
+def test_implausible_stored_length_falls_back_to_the_chord():
+    from core.road_layout.centerline import road_tangent_m
+
+    start = _node_at(1, 0.0, 0.0, 1.0, 0.0)
+    end = _node_at(2, 100.0, 0.0, 1.0, 0.0)
+    assert road_tangent_m(start, end, 98.0) is None
+    assert road_tangent_m(start, end, 400.0) is None
+    assert road_tangent_m(start, end, 101.0) == 101.0

@@ -82,6 +82,7 @@ from core.button_device_thread.thread import ButtonDeviceThread
 from core.cruise_control_thread.thread import CruiseControlThread
 from core.sending_thread.thread import SendingThread, create_visualization_bar
 from core.radar.thread import RadarThread
+from core.map_thread.thread import MapThread
 from core.aeb.thread import AEBThread
 from core.acc.thread import ACCThread
 from core.aeb.debug_window import AEBDebugWindow
@@ -465,6 +466,7 @@ def main() -> None:
         CruiseControlThread(),
         SendingThread(),
         RadarThread(),
+        MapThread(),
         AEBThread(),
         ACCThread(),
     ]

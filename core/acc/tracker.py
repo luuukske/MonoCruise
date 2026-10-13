@@ -6,10 +6,10 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from core.radar.ego_geometry import EgoGeometry
+from core.road_layout.path_context import build_path_context
 from core.radar.ego_path import EGO_POSITION_HISTORY_LEN
 from core.radar.traffic import Vehicle
 
@@ -34,7 +34,6 @@ from .failsafe import (
     failsafe_decay,
     failsafe_step,
 )
-from .lane_direction import LaneDirection, lane_direction_samples
 from .road_model import (
     SOURCE_RESIDUAL_DELTA_M,
     RoadModel,
@@ -203,8 +202,6 @@ class ACCTracker:
     _source_trust: dict[int, float] = field(default_factory=dict)
     # Carries the centreline across frames in sample space (README §9).
     _road_smoother: RoadSmoother = field(default_factory=RoadSmoother)
-    # Map lanes for the road model. None leaves the fit as it is today.
-    _lane_directions: tuple[LaneDirection, ...] | None = None
 
     _last_primary_vid: int | None = None
 
@@ -217,6 +214,7 @@ class ACCTracker:
     last_ego_kappa_used: float = 0.0
     last_corridor_half: float = 0.0
     last_road_model: RoadModel = field(default_factory=RoadModel)
+    last_map_ctx: object | None = None
 
     @staticmethod
     def _ego_local(
@@ -346,18 +344,7 @@ class ACCTracker:
                 continue
             for sx, sy in in_span:
                 target_samples.append((v.id, sx, sy, weight))
-        lane_samples = None
-        if self._lane_directions:
-            lane_samples = lane_direction_samples(
-                self._lane_directions, ego_x, ego_z, ego_fwd_x, ego_fwd_z,
-            )
-        return fit_road_model(
-            ego_samples, target_samples, fallback_kappa, lane_samples or None,
-        )
-
-    def set_lane_directions(self, routes: Sequence[LaneDirection] | None) -> None:
-        """Publish the lane ego is in. Empty clears it and the fit stays as before."""
-        self._lane_directions = tuple(routes) if routes else None
+        return fit_road_model(ego_samples, target_samples, fallback_kappa)
 
     @staticmethod
     def _apply_validation(
@@ -392,6 +379,7 @@ class ACCTracker:
         blinker_left: bool, blinker_right: bool,
         off_surface_ids: frozenset[int] = frozenset(),
         ego_geometry: EgoGeometry | None = None,
+        map_snapshot=None,
     ) -> list[LeadInfo]:
         """Tick the tracker. Returns up to PUBLISHED_LEADS in-lane leads, closest first (after trailer swap).
 
@@ -422,6 +410,12 @@ class ACCTracker:
             ego_yaw_rad, ego_speed_ms, ego_steer, ego_history_kappa,
         )
         corridor_half = path_half_width(ego_steer)
+        # Map path nested over the road/arc blend; None leaves every lateral as it was (README §9).
+        map_ctx = build_path_context(
+            map_snapshot, ego_x, ego_z, ego_fwd_x, ego_fwd_z,
+            ego_arc.curvature, ego_speed_ms, path_origin,
+        ) if map_snapshot is not None else None
+        self.last_map_ctx = map_ctx
 
         self._push_ego_history(now_mono, ego_x, ego_z)
         road = self._build_road_model(
@@ -513,9 +507,10 @@ class ACCTracker:
                 sx, sy = self._ego_local(ego_x, ego_z, ego_fwd_x, ego_fwd_z, cx, cz)
                 road_s, road_off = road.road_coords(sx, sy)
                 w_road = road.trust_at(road_s)
-                corner_lats.append(
-                    w_road * road_off + (1.0 - w_road) * arc_lat
-                )
+                corner_lat = w_road * road_off + (1.0 - w_road) * arc_lat
+                if map_ctx is not None:
+                    corner_lat = map_ctx.blend(cx, cz, corner_lat)[0]
+                corner_lats.append(corner_lat)
             fwd_corners = [(ad, lt) for ad, lt in corner_projs if ad >= 0.0]
             if not fwd_corners:
                 # Stamp behind-history on an existing track only (no new tracks).
@@ -612,6 +607,9 @@ class ACCTracker:
             st.last_trail_offset = arc_offset
             if road_w > 0.0:
                 arc_offset = road_w * d_road + (1.0 - road_w) * arc_offset
+            # Map trust moves the lateral only; it is no evidence of where the target drives (§9).
+            if map_ctx is not None:
+                arc_offset = map_ctx.blend(v.position.x, v.position.z, arc_offset)[0]
             # Floored: the ego arc is itself a measurement, so the blend is never
             # evidence-free and cannot fall through to scoring on path (README §3).
             evidence = max(

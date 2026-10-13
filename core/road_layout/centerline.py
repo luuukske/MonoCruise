@@ -1,9 +1,10 @@
 """Road centerline: Hermite spline through the two nodes of a road item.
 
-The tangent at each node is that node's ahead direction times the XZ chord
-length. Ahead is local -Z of the node quaternion, the same yaw the map
-tools use. On the base map that direction agrees with the chord on every
-road (mean dot about 0.96).
+The tangent at each node is that node's ahead direction times the road's
+stored length (the XZ chord when that length is implausible). Ahead is local
+-Z of the node quaternion. A chord-length tangent cuts every long bend short:
+AI traffic sat p50 1.6 m off it mid-span on 60-120 degree bends with 150-400 m
+chords, and 0.06 m off the stored-length spline (core/road_layout/README.md).
 """
 
 from __future__ import annotations
@@ -12,6 +13,9 @@ import math
 from dataclasses import dataclass
 
 from core.road_layout.sector import MapNode, SectorMesh
+
+_MIN_LENGTH_RATIO = 0.99
+_MAX_LENGTH_RATIO = 3.0
 
 
 @dataclass(frozen=True)
@@ -42,14 +46,19 @@ def sample_span(
     fx1: float,
     fz1: float,
     steps: int = 16,
+    tangent_m: float | None = None,
 ) -> list[tuple[float, float, float, float, float]]:
-    """Samples ``(x, y, z, forward_x, forward_z)`` along one Hermite span."""
+    """Samples ``(x, y, z, forward_x, forward_z)`` along one Hermite span.
+
+    ``tangent_m`` is the tangent magnitude at both nodes; None uses the XZ chord.
+    """
     steps = max(int(steps), 1)
     dx = x1 - x0
     dz = z1 - z0
     chord = math.hypot(dx, dz)
-    m0x, m0z = fx0 * chord, fz0 * chord
-    m1x, m1z = fx1 * chord, fz1 * chord
+    mag = chord if tangent_m is None else tangent_m
+    m0x, m0z = fx0 * mag, fz0 * mag
+    m1x, m1z = fx1 * mag, fz1 * mag
     points: list[tuple[float, float, float, float, float]] = []
     for i in range(steps + 1):
         t = i / steps
@@ -67,10 +76,24 @@ def sample_span(
     return points
 
 
+def road_tangent_m(start: MapNode, end: MapNode, length: float) -> float | None:
+    """Tangent magnitude that reproduces the road's stored length; None keeps the chord.
+
+    A stored length under 0.99x or over 3x the chord is not trusted.
+    """
+    chord = math.hypot(end.x - start.x, end.z - start.z)
+    if chord < 1e-6 or not math.isfinite(length):
+        return None
+    if length < chord * _MIN_LENGTH_RATIO or length > chord * _MAX_LENGTH_RATIO:
+        return None
+    return length
+
+
 def sample_centerline(
     start: MapNode,
     end: MapNode,
     steps: int = 16,
+    length: float | None = None,
 ) -> list[tuple[float, float, float]]:
     """World (x, y, z) samples. Y is linear between the nodes."""
     f0x, f0z = node_forward_xz(start)
@@ -79,6 +102,7 @@ def sample_centerline(
         start.x, start.y, start.z, f0x, f0z,
         end.x, end.y, end.z, f1x, f1z,
         steps,
+        None if length is None else road_tangent_m(start, end, length),
     )
     return [(x, y, z) for x, y, z, _fx, _fz in span]
 
@@ -96,7 +120,7 @@ def nearest_centerline(
         end = mesh.nodes.get(road.end_uid)
         if start is None or end is None:
             continue
-        pts = sample_centerline(start, end, steps)
+        pts = sample_centerline(start, end, steps, road.length)
         for i in range(len(pts) - 1):
             dist, y = _segment_xz(x, z, pts[i], pts[i + 1])
             if best is None or dist < best.distance_m:

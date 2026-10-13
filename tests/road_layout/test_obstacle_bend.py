@@ -1,6 +1,6 @@
 """A guardrail curve follows the node headings. The chord between the ends does not."""
 
-from core.road_layout.live import _assign_colors
+from tools.map_obstacle_props import _assign_colors
 from core.road_layout.sector import MapNode
 from tools.map_obstacle_probe import bend_points, is_clutter
 

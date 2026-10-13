@@ -53,6 +53,8 @@ class ACCData(ThreadData):
     debug_ego_kappa: float = 0.0
     debug_corridor_half: float = 0.0
     debug_road_model: RoadModel = field(default_factory=RoadModel)
+    # (world points, trust) of the fused map path, or None without a map (debug window).
+    debug_map_path: tuple | None = None
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
@@ -107,6 +109,16 @@ class ACCThread(BaseThread):
                     getattr(rt.data, "ego_geometry", None),
                 )
         except AttributeError:
+            return None
+
+    @staticmethod
+    def _read_map():
+        """Fresh map worker snapshot, or None; a missing worker reads as no map."""
+        from core.map_thread.thread import map_snapshot
+        try:
+            return map_snapshot()
+        except Exception:
+            logger.debug("map snapshot unreadable", exc_info=True)
             return None
 
     def _read_blinkers(self) -> tuple[bool, bool]:
@@ -170,6 +182,7 @@ class ACCThread(BaseThread):
                 blinker_left=bl_left, blinker_right=bl_right,
                 off_surface_ids=off_ids,
                 ego_geometry=geometry if isinstance(geometry, EgoGeometry) else None,
+                map_snapshot=self._read_map(),
             )
         except Exception:
             logger.exception("acc tracker update failed; holding previous leads")
@@ -249,4 +262,8 @@ class ACCThread(BaseThread):
             self.data.debug_ego_kappa = self._tracker.last_ego_kappa_used
             self.data.debug_corridor_half = self._tracker.last_corridor_half
             self.data.debug_road_model = self._tracker.last_road_model
+            map_ctx = self._tracker.last_map_ctx
+            self.data.debug_map_path = (
+                (map_ctx.world_path(), map_ctx.path.trust) if map_ctx is not None else None
+            )
 

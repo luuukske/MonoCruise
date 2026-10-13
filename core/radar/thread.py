@@ -67,6 +67,8 @@ class RadarData(ThreadData):
     # see core/radar/README.md §18.
     ncz_ids: frozenset[int] = frozenset()
     tmp_ncz_active: bool = False
+    # The TruckersMP plugin reports a live server connection (map worker only).
+    tmp_connected: bool = False
 
     # Monotonic time when snapshot was published.
     # Held (not bumped) while paused so AEB/ACC treat the frame as stale.
@@ -124,6 +126,7 @@ class RadarThread(BaseThread):
             self.data.off_surface_ids = frozenset()
             self.data.ncz_ids = frozenset()
             self.data.tmp_ncz_active = False
+            self.data.tmp_connected = False
         logger.debug("radar teardown complete")
 
     def _reset_kinematics_clock(self) -> None:
@@ -247,6 +250,7 @@ class RadarThread(BaseThread):
         road_surface: RoadSurface | None = None,
         ncz_ids: frozenset[int] | None = None,
         tmp_ncz_active: bool | None = None,
+        tmp_connected: bool | None = None,
         t_kin: float | None = None,
         bump_t_mono: bool = False,
         geometry: EgoGeometry | None = None,
@@ -269,6 +273,8 @@ class RadarThread(BaseThread):
                 self.data.ncz_ids = ncz_ids
             if tmp_ncz_active is not None:
                 self.data.tmp_ncz_active = tmp_ncz_active
+            if tmp_connected is not None:
+                self.data.tmp_connected = tmp_connected
             self.data.ego_x = ego_x
             self.data.ego_y = ego_y
             self.data.ego_z = ego_z
@@ -396,7 +402,8 @@ class RadarThread(BaseThread):
         )
         t_gate = time.monotonic()
         ego_xz = (ego_x, ego_z) if (ego_x or ego_z) else None
-        tmp_ncz = self._ncz_gate.step(self._tmp_state.read(t_gate), t_gate, ego_xz)
+        tmp_state = self._tmp_state.read(t_gate)
+        tmp_ncz = self._ncz_gate.step(tmp_state, t_gate, ego_xz)
         tmp_ncz_exit = self._ncz_gate.exited_zone
         exit_ghosts = self._ncz_exit_hold.step(
             tmp_ncz, tmp_ncz_exit,
@@ -416,6 +423,7 @@ class RadarThread(BaseThread):
             road_surface=road_surface,
             ncz_ids=ncz_ids,
             tmp_ncz_active=tmp_ncz,
+            tmp_connected=tmp_state.fresh and tmp_state.connected,
             t_kin=t_kin,
             bump_t_mono=True,
             geometry=geometry,

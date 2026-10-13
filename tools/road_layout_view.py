@@ -24,11 +24,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.road_layout.view import LaneMapWindow
+from tools.map_obstacle_props import ObstacleProps
 
 
 def main() -> int:
     app = QApplication(sys.argv)
-    window = LaneMapWindow()
+    window = LaneMapWindow(props_factory=ObstacleProps)
     window.show()
     window.start()
     return app.exec()
