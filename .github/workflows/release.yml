@@ -11,22 +11,34 @@
 # workflow_dispatch lets you produce a build artifact without publishing:
 # pass publish=true to publish anyway (uses core/version.py as the version).
 # Dispatch builds have no contributor draft, so they are authored by the bot.
+#
+# Publishing a stable release also makes its installer the SourceForge default
+# download (job sourceforge-default, tools/README.md). Dispatch with
+# sourceforge_tag set runs only that job, for an existing stable tag.
 on:
   push:
     tags:
       - 'v*.*.*'
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       publish:
         description: 'Publish a GitHub release (uses core/version.py)?'
         required: false
         default: 'false'
+      sourceforge_tag:
+        description: 'Only set the SourceForge default download to this stable tag (e.g. v1.1.2)'
+        required: false
+        default: ''
 
 permissions:
   contents: write  # needed to upload assets to a release and to publish it
 
 jobs:
   build:
+    # A published release or a SourceForge-only dispatch must not rebuild.
+    if: github.event_name != 'release' && github.event.inputs.sourceforge_tag == ''
     runs-on: windows-latest
 
     steps:
@@ -195,4 +207,86 @@ jobs:
           files: artifacts/*
           prerelease: ${{ contains(steps.version.outputs.tag, '-') }}
           draft: false
+
+  # Stable only: previews are undrafted by the build job with GITHUB_TOKEN, which
+  # never fires `release`, and the checks below refuse any pre-release tag too.
+  sourceforge-default:
+    if: >-
+      (github.event_name == 'release' && !github.event.release.prerelease)
+      || github.event.inputs.sourceforge_tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Set installer as SourceForge default download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SF_API_KEY: ${{ secrets.SF_API_KEY }}
+          TAG: ${{ github.event.release.tag_name || github.event.inputs.sourceforge_tag }}
+        run: |
+          set -euo pipefail
+          project="monocruise"
+
+          if [[ -z "${SF_API_KEY}" ]]; then
+            echo "::error::Repository secret SF_API_KEY is not set (SourceForge account page, Releases API Key)."
+            exit 1
+          fi
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'${TAG}' is not a stable tag (vX.Y.Z); previews never become the default."
+            exit 1
+          fi
+          state=$(gh release view "${TAG}" --json isDraft,isPrerelease --jq '.isDraft or .isPrerelease')
+          if [[ "${state}" != "false" ]]; then
+            echo "::error::Release ${TAG} is a draft or prerelease; publish it first."
+            exit 1
+          fi
+
+          # SourceForge mirrors the GitHub release on its own, a few minutes after
+          # publish, under /<tag>/. Read the real file name from its listing.
+          find_installer() {
+            curl -fsS --max-time 30 "https://sourceforge.net/projects/${project}/rss?path=/${TAG}" \
+              | grep -oE '<title><!\[CDATA\[[^]]+\]\]></title>' \
+              | sed -E 's/<title><!\[CDATA\[(.*)\]\]><\/title>/\1/' \
+              | grep -iE "^/${TAG}/[^/]*installer[^/]*\.exe$" | head -n 1
+          }
+          file=""
+          for attempt in $(seq 1 30); do
+            file=$(find_installer || true)
+            if [[ -n "${file}" ]]; then break; fi
+            echo "Installer for ${TAG} is not on SourceForge yet (attempt ${attempt}/30), waiting 60s"
+            sleep 60
+          done
+          if [[ -z "${file}" ]]; then
+            echo "::error::No installer for ${TAG} appeared on SourceForge in 30 minutes. Re-run this job once it is there."
+            exit 1
+          fi
+          echo "Installer on SourceForge: ${file}"
+
+          # The key goes in on stdin so it never appears on a command line.
+          url="https://sourceforge.net/projects/${project}/files${file// /%20}"
+          resp=$(printf 'api_key=%s' "${SF_API_KEY}" | curl -sS --max-time 60 -X PUT \
+            -H "Accept: application/json" \
+            -d "default=windows&default=mac&default=linux&default=bsd&default=solaris&default=others" \
+            -d @- "${url}")
+          if ! jq -e '.result' <<< "${resp}" > /dev/null 2>&1; then
+            msg=$(jq -r '.error // "unexpected response"' <<< "${resp}" 2>/dev/null || echo "non-JSON response")
+            echo "::error::SourceForge refused the request: ${msg}"
+            exit 1
+          fi
+          echo "Default download for: $(jq -r '.result.x_sf.default' <<< "${resp}")"
+
+          # Informational: SourceForge may serve this a little stale.
+          best=$(curl -fsS --max-time 30 -H "Accept: application/json" \
+            "https://sourceforge.net/projects/${project}/best_release.json" || echo "{}")
+          for os in windows mac linux; do
+            got=$(jq -r --arg os "${os}" '.platform_releases[$os].filename // "none"' <<< "${best}" 2>/dev/null || echo "none")
+            if [[ "${got}" == "${file}" ]]; then
+              echo "${os}: ${got}"
+            else
+              echo "::warning::SourceForge still lists ${got} for ${os} (expected ${file}); it may just be cached."
+            fi
+          done
 
