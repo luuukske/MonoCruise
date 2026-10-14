@@ -1,7 +1,9 @@
 """Local game map for clip replays: the map worker's snapshot, rebuilt from a clip's poses.
 
 Clips never carry map data. A replay that wants the map reads it from this
-machine's own game install, matched to the clip by where its ego drives.
+machine's own game install, matched to the clip by where its ego drives. A
+TruckersMP clip also gets the TruckersMP map additions the launcher lists today,
+as the live worker does; a clip from before those mods were current can differ.
 
     from tools.map_replay import install
     install()   # core.aeb.clip_eval.run_headless now replays with the map
@@ -25,14 +27,30 @@ _BOX_PAD_M = 300.0
 _REFRESH_S = 0.05
 
 
-def game_map(game: str):
+def game_map(game: str, tmp: bool = False):
+    """The installed map, with the TruckersMP additions layered over it when ``tmp``."""
     if game not in _MAPS:
         from core.road_layout.game_map import GameMap
         try:
             _MAPS[game] = GameMap.open_installed(game)
         except (FileNotFoundError, OSError):
             _MAPS[game] = None
-    return _MAPS[game]
+    base = _MAPS[game]
+    if not tmp or base is None:
+        return base
+    key = (game, "tmp")
+    if key not in _MAPS:
+        from core.road_layout.tmp_mods import TmpOverlayOpener
+
+        opener = TmpOverlayOpener(game)
+        while not opener.step():
+            pass
+        _MAPS[key] = base.with_overlay(opener.archives) if opener.archives else base
+    return _MAPS[key]
+
+
+def is_tmp(clip) -> bool:
+    return getattr(clip.metadata, "session_kind", "") == "TMP"
 
 
 def _poses(clip):
@@ -58,7 +76,7 @@ def match_clip(clip):
     box = (min(xs) - _BOX_PAD_M, max(xs) + _BOX_PAD_M, min(zs) - _BOX_PAD_M, max(zs) + _BOX_PAD_M)
     sample = poses[:: max(1, len(poses) // 30)]
     for game in ("ets2", "ats"):
-        gm = game_map(game)
+        gm = game_map(game, is_tmp(clip))
         if gm is None:
             continue
         window = gm.lanes_in_box(*box)

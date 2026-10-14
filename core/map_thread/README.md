@@ -64,7 +64,9 @@ open like the game's own archives (`core/road_layout/archive.py`, `tmp_mods.py`)
 - The map snapshot's `tmp` flag says which map is serving; the AEB debug window's
   legend shows it ("Map: game + TMP"). The standalone lane map
   (`tools/road_layout_view.py`) keeps its own loader and follows the plugin's
-  connection flag the same way. Replays and clip viewers use the base map only.
+  connection flag the same way. Replays and clip viewers rebuild the map locally
+  (`tools/map_replay.py`); a TruckersMP clip gets the additions the launcher lists
+  today, so a clip from before those mods were current can differ from what ran live.
 
 ## What consumers may do
 
