@@ -263,6 +263,10 @@ class AEBSnapshot:
     closing_floor_ids: set = field(default_factory=set)
     # Superset: LOS veto plus the extrapolation vetoes (README engagement vetoes).
     engage_vetoed_ids: set = field(default_factory=set)
+    # Engage entry with the demand bar taken out, and the ids it may engage on.
+    # Never gates a brake: corpus scoring reads it (README corpus scoring).
+    geom_engage: bool = False
+    engage_eligible_ids: set = field(default_factory=set)
     # Zone and overlap ghosts: drawn by the debug window, never evaluated (README §4).
     ghost_ids: set = field(default_factory=set)
 
@@ -826,6 +830,12 @@ class AEBThread(BaseThread):
             self._cal.aeb_confirm_max_gap_frames,
             self._cal.aeb_engage_confirm_oblique_s,
         )
+        # Same confirm on the geometry-only entry test (snapshot geom_engage).
+        self._geom_confirm = OccupancyConfirm(
+            self._cal.aeb_confirm_occupancy,
+            self._cal.aeb_confirm_max_gap_frames,
+            self._cal.aeb_engage_confirm_oblique_s,
+        )
         # Oblique warn occupancy; shorter window than oblique engage (README).
         self._warn_confirm = OccupancyConfirm(
             self._cal.aeb_confirm_occupancy,
@@ -1370,6 +1380,8 @@ class AEBThread(BaseThread):
         closing_floor_ids: set[int] = set()
         # Superset of los_vetoed_ids: every target barred from engagement entry.
         engage_vetoed_ids: set[int] = set()
+        # Confirmed hits that feed the engage aggregates: not vetoed, braking helps.
+        engage_eligible_ids: set[int] = set()
         los_veto_memo: dict[int, bool] = {}
         los_miss_memo: dict[int, float | None] = {}
 
@@ -1915,6 +1927,7 @@ class AEBThread(BaseThread):
                     if vetoed:
                         engage_vetoed_ids.add(v.id)
                     if not vetoed:
+                        engage_eligible_ids.add(v.id)
                         if required_t > best_required_engage:
                             best_required_engage = required_t
                         if ttb < best_ttb_engage:
@@ -2034,6 +2047,19 @@ class AEBThread(BaseThread):
             run_collision
             and best_ttb_engage < cal.brake_ttb + cal.brake_response_window_s
         )
+        # Tiered engage confirm window and the instant paths: TTB slam, certain
+        # geometry, latched (README tiered entry).
+        confirm_window_s = (
+            cal.aeb_engage_confirm_s
+            if any(vid in nearcertain_geom_ids for vid in colliding_ids)
+            else cal.aeb_engage_confirm_oblique_s
+        )
+        instant_engage = (
+            brake_ttb_engage_active
+            or any(vid in certain_geom_ids and vid not in engage_vetoed_ids
+                   for vid in colliding_ids)
+            or any(vid in self._latched_threat_ids for vid in colliding_ids)
+        )
 
         if self._engaged:
             if (effective_required < disarm_threshold
@@ -2049,23 +2075,10 @@ class AEBThread(BaseThread):
                          and aeb_speed_ok
                          and (effective_required_engage >= engage_threshold
                               or brake_ttb_engage_active))
-            # Tiered engage confirm window + occupancy observe (README tiered entry).
-            self._engage_confirm.window_s = (
-                cal.aeb_engage_confirm_s
-                if any(vid in nearcertain_geom_ids for vid in colliding_ids)
-                else cal.aeb_engage_confirm_oblique_s
-            )
+            self._engage_confirm.window_s = confirm_window_s
             self._engage_confirm.observe(now_mono, qualified)
             if qualified:
-                # Instant engage paths: TTB slam, certain geom, latched (README).
-                certain = (
-                    brake_ttb_engage_active
-                    or any(vid in certain_geom_ids and vid not in engage_vetoed_ids
-                           for vid in colliding_ids)
-                    or any(vid in self._latched_threat_ids
-                           for vid in colliding_ids)
-                )
-                if certain or self._engage_confirm.confirmed(now_mono):
+                if instant_engage or self._engage_confirm.confirmed(now_mono):
                     self._engaged = True
                     # Latch the build-up reserve on the rate the binding
                     # constraint actually closes at (README section 7).
@@ -2076,6 +2089,15 @@ class AEBThread(BaseThread):
                             pad_rate, cal, load_response_s,
                         )
                         self._engage_pad_at_mono = now_mono
+
+        # The entry test with the demand bar taken out: filtering alone would let AEB
+        # brake here. Never gates a brake; corpus scoring reads it (README).
+        geom_qualified = run_collision and aeb_speed_ok and bool(engage_eligible_ids)
+        self._geom_confirm.window_s = confirm_window_s
+        self._geom_confirm.observe(now_mono, geom_qualified)
+        geom_engage = geom_qualified and (
+            instant_engage or self._geom_confirm.confirmed(now_mono)
+        )
 
         # Promote every currently-colliding target into the latched set so later
         # frames keep it in the pipeline; its lifetime starts at this hit.
@@ -2301,6 +2323,8 @@ class AEBThread(BaseThread):
             los_vetoed_ids=los_vetoed_ids,
             closing_floor_ids=closing_floor_ids,
             engage_vetoed_ids=engage_vetoed_ids,
+            geom_engage=geom_engage,
+            engage_eligible_ids=engage_eligible_ids,
             ghost_ids=ghost_ids,
             clearance_required_ms2=(
                 min(best_clearance.required_ms2, _REQUIRED_CEIL_MS2)

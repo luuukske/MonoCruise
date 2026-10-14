@@ -7,7 +7,8 @@ from dataclasses import replace
 
 from core.aeb.calibration import DEFAULT
 from core.aeb.clip_eval import (
-    diff_calibrations, outcome_under, parity_report, run_headless,
+    TRIGGER_SLACK_S, EvalTick, diff_calibrations, outcome_under, parity_report,
+    run_headless,
 )
 from core.aeb.clip_schema import (
     AEBTickRecord, Clip, ClipMetadata, ConsumedContext, EgoTelemetry, Label,
@@ -33,8 +34,8 @@ def _stopped_vehicle_buf(px: float, pz: float, vid: int) -> bytes:
     return buf
 
 
-def _collision_clip(n: int = 90, hz: float = 30.0) -> Clip:
-    """Ego at 20 m/s closing on a stopped vehicle 45 m directly ahead (+z)."""
+def _collision_clip(n: int = 90, hz: float = 30.0, px: float = 0.0) -> Clip:
+    """Ego at 20 m/s closing on a stopped vehicle 45 m ahead (+z), ``px`` m to the side."""
     dt = 1.0 / hz
     meta = ClipMetadata.create(trigger_source="auto_engagement", session_kind="SP")
     frames, ticks = [], []
@@ -45,7 +46,7 @@ def _collision_clip(n: int = 90, hz: float = 30.0) -> Clip:
             t_wall=1000.0 + t, t_mono=t,
             ego=EgoTelemetry(coordinateX=0.0, coordinateZ=ego_z, rotationX=0.5,
                              rotationY=0.0, speed=20.0),
-            traffic_buf=_stopped_vehicle_buf(0.0, 45.0, vid=3),
+            traffic_buf=_stopped_vehicle_buf(px, 45.0, vid=3),
             parked_buf=None,
         ))
         ticks.append(AEBTickRecord(
@@ -143,3 +144,73 @@ def test_outcome_false_warn_when_warn_without_brake(monkeypatch):
     assert o.warn_window == (0.0, 0.5)
     assert o.brake_window is None
     assert not o.engaged
+
+
+# The engage bar can never be met and the TTB slam never fires: no brake at all.
+_NO_BAR = replace(DEFAULT, aeb_engage_frac=1e4, aeb_engage_frac_certain=1e4, brake_ttb=-1e3)
+
+
+def _labelled_tp(clip: Clip) -> Clip:
+    bt = [e.t_rel for e in run_headless(clip) if e.aeb_brake]
+    clip.metadata.label = Label(class_="tp", severity=4,
+                                should_trigger={"from_t": bt[0], "to_t": bt[-1]})
+    return clip
+
+
+def test_engage_bar_cannot_turn_a_geometric_hit_into_a_miss():
+    clip = _labelled_tp(_collision_clip())
+    assert not any(e.aeb_brake for e in run_headless(clip, cal=_NO_BAR))
+    o = outcome_under(clip, _NO_BAR)
+    assert o.verdict == "true_positive"
+    assert not o.braked_in_window and not o.engaged
+
+
+def test_target_off_the_path_is_a_geometric_miss():
+    clip = _collision_clip(px=8.0)
+    assert not any(e.geom_engage or e.aeb_brake for e in run_headless(clip))
+    clip.metadata.label = Label(class_="fn", severity=3,
+                                should_trigger={"from_t": 0.5, "to_t": 2.5})
+    assert outcome_under(clip).verdict == "false_negative"
+
+
+def _tick(t: float, brake: bool = False, geom: bool = False) -> EvalTick:
+    return EvalTick(t_rel=t, t_mono=t, aeb_warn=brake, aeb_brake=brake, engaged=brake,
+                    target_decel_ms2=0.0, required_decel_ms2=0.0, time_to_brake=1e9,
+                    time_to_collision=1e9, geom_engage=geom)
+
+
+def _outcome(monkeypatch, ticks, window=(4.0, 5.0)):
+    clip = _collision_clip(n=2)
+    clip.metadata.label = Label(class_="tp", severity=3,
+                                should_trigger={"from_t": window[0], "to_t": window[1]})
+    monkeypatch.setattr("core.aeb.clip_eval.run_headless", lambda *a, **k: ticks)
+    return outcome_under(clip, burn_in_s=0.0)
+
+
+def test_geometry_inside_the_window_is_a_hit_and_outside_is_late_or_miss(monkeypatch):
+    inside = _outcome(monkeypatch, [_tick(3.0), _tick(4.5, geom=True), _tick(6.0)])
+    assert inside.verdict == "true_positive" and not inside.braked_in_window
+    late = _outcome(monkeypatch, [_tick(4.5), _tick(5.5, geom=True)])
+    assert late.verdict == "late"
+    early = _outcome(monkeypatch, [_tick(3.5, geom=True), _tick(4.5)])
+    assert early.verdict == "false_negative"
+
+
+def test_brake_held_into_the_window_is_a_hit(monkeypatch):
+    o = _outcome(monkeypatch, [_tick(3.8, brake=True, geom=True), _tick(4.2, brake=True)])
+    assert o.verdict == "true_positive" and o.braked_in_window
+    assert o.stray_onsets == ()
+
+
+def test_only_onsets_past_the_slack_are_stray(monkeypatch):
+    lo, hi = 4.0 - TRIGGER_SLACK_S, 5.0 + TRIGGER_SLACK_S
+    ticks = [
+        _tick(lo - 0.5, brake=True), _tick(lo - 0.4),
+        _tick(lo + 0.5, brake=True), _tick(lo + 0.6),
+        _tick(4.5, brake=True, geom=True), _tick(4.6),
+        _tick(hi - 0.5, brake=True), _tick(hi - 0.4),
+        _tick(hi + 0.5, brake=True),
+    ]
+    o = _outcome(monkeypatch, ticks)
+    assert o.verdict == "true_positive"
+    assert o.stray_onsets == (lo - 0.5, hi + 0.5)

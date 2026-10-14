@@ -1978,12 +1978,11 @@ shipped `_required_decel_two_frame`, the shipped entry bar, the real
 `AEBDecelController`, and a brake plant fitted to 61 recorded braking episodes
 (dead time 0.12 s, tau 0.19 s median / 0.31 s p90). It reports residual gap.
 
-**Use it, not the corpus, whenever the engage point moves.** Corpus labels were
-tagged against one engage point, so shifting the bar re-labels clips instead of
-scoring them, and the shift always reads as a swing in FN. Worse, headless
-replay scores the engagement decision and never touches the brake pedal, so it
-is structurally blind to whether the truck actually stops. The corpus arbitrates
-*filtering*; this arbitrates *timing*.
+**Use it, not the corpus, whenever the engage point moves.** The corpus scores
+positives on geometry and cannot see the bar there at all (see corpus scoring
+below), and headless replay never touches the brake pedal, so it is structurally
+blind to whether the truck actually stops. The corpus arbitrates *filtering*;
+this arbitrates *timing*.
 
 What it pins:
 
@@ -2007,6 +2006,58 @@ What it pins:
 The closed loop converges onto the distance it planned for, finishing on
 `stop_buffer`, so there is no slack beyond what the pad and the capacity
 estimate provide. That is why both are treated as safety parameters.
+
+### Corpus scoring: filtering, not timing
+
+`core/aeb/clip_score.py` scores the labelled corpus on the verdicts from
+`clip_eval.outcome_under`. Since 2026-10-14 it judges which vehicles the
+pipeline lets through, not when or for how long AEB braked. Lukas: the corpus is
+for filtering vehicles, not for re-testing the longitudinal behaviour around the
+recorded interventions. A replay rides the recorded trajectory, already slowed
+by the live brake, so a later bar never sees the demand it would have met.
+
+- **Positives** (clips with a should-trigger window) are a TP when, on some tick
+  inside the window, AEB brakes or the snapshot's `geom_engage` is set. That flag
+  is the engagement entry test with the demand bar taken out: speed floor, an
+  engage-eligible target (colliding, risk-confirmed, braking does not worsen it,
+  no entry veto) and the same tiered confirm with the same instant paths. It
+  never gates a brake. Late when that first happens after the window, FN when
+  never. The bar, the pads and the capacity cannot move a positive; the filters,
+  the hit test, `braking_worsens`, the entry vetoes and the confirm windows can.
+- **Negatives** keep their rule: any brake is a false positive, a warn alone a
+  false warn.
+- **Stray triggers.** A brake onset more than `TRIGGER_SLACK_S` (1.5 s) outside
+  a positive's window adds one false trigger to that clip. Closer than that is
+  timing: dropping the bar from 0.85 to 0.5 moves an onset about 1.3 s at
+  90 km/h on an 8 m/s² truck, and of the replayed onsets before a window, 105
+  sit within 1.25 s of it and the next one is past 1.5 s.
+- **Flat costs.** A TP earns `TP_REWARD` per severity point with no overlap or
+  peak-decel quality. A false trigger costs `FP_TRIGGER_COST` per severity
+  point (1.0; the median phantom brake cost 0.93 under the old duration and
+  intensity formula) however long it held or hard it braked, a false warn a
+  quarter of that.
+
+Onsets are attributed by time, not by vehicle id. `target_vid` is on 110
+positives and requiring it changes two verdicts, one of them a wrong label
+(`04764cb8` names the adjacent-lane car while AEB brakes, correctly, for the
+crash dead ahead), and TMP trailers carry their own ids, so attributing onsets
+by id mostly found tractor/trailer pairs.
+
+**What it no longer sees.** The score rewards braking less: a higher engage bar
+removes false positives and never costs a positive, so a pipeline that never
+brakes scores like perfect filtering. The stop-distance envelope above guards
+that direction. `format_corpus` prints "braked in window N/M positives" so the
+effect stays visible, unscored. A truncated brake is invisible too.
+
+Measured on the local store, 960 scored clips, old scorer against this one:
+total -318.51 to -1768.00, TP 385 to 421, FN 53 to 19, late 13 to 11; false
+positives (65), false warns (14) and true negatives (430) unchanged, with
+identical brake streams. 33 FN and 4 late became TP; 39 TPs are on geometry
+alone, and 13 of the 14 of those with a `target_vid` engage on the labelled
+target. `ccc7eaa4` went TP to late: its only in-window reaction was a warn, and
+the old TP came from a brake 4.65 s before the window. 23 positives carry stray
+triggers. Corpus totals quoted before 2026-10-14, here and in the radar README,
+used the old scorer and are not comparable.
 
 ### Corpus result
 
