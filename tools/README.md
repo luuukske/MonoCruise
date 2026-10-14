@@ -20,7 +20,7 @@ hygiene rules apply to every file in it.
 | `tmp_ncz_probe.py` | Live TruckersMP no-collision zone state from MonoCruise's plugin (`monocruise_tmp.dll`): heartbeat, connected, in-zone, streamed players and whether the AEB gate would open. The state carries no player identity. See `core/radar/README.md` §18. |
 | `read_scs_profile.py` | Transmission and braking intensity for the selected ETS2/ATS profile. Steam Cloud vs local, `game.log.txt` identity, live `shifterType` when the SDK is up. `--json` for agents. |
 | `plot_coast.py` | Coast-fit plots for the mapper. |
-| `release.py`, `tune_visualizer.py` | Release packaging and live tuning UI. |
+| `release.py`, `tune_visualizer.py` | Release packaging and live tuning UI. The stable-release SourceForge step is in `release.yml`, see "SourceForge default download" below. |
 | `fetch_sdk_bundle.py` | Build helper, run by `release.yml`: downloads the live ETS2LA game plugin set for every published game version into `core/sdk_installer/bundled/`, the app's offline fallback. See "Bundled fallback" in `core/sdk_installer/README.md`. |
 
 ---
@@ -324,3 +324,27 @@ releases that link the moment it is used by hand.
 `ClipLoader` builds the trace on its own thread from the decode the replay
 already paid for, so opening the charts costs about 0.1 s per clip in the
 background and nothing on the GUI thread.
+
+## SourceForge default download
+
+Publishing a **stable** release on GitHub makes its installer the file behind
+the standard Download button on SourceForge, for every platform. This is the
+`sourceforge-default` job in `.github/workflows/release.yml`.
+
+SourceForge mirrors the GitHub release by itself a few minutes after publish,
+under `/<tag>/`. The job polls its file listing for up to 30 minutes, then sets
+the installer as default with SourceForge's release API. Without it,
+SourceForge picks a default per platform by heuristic: Mac and Linux visitors
+were being handed the newest upload, a preview.
+
+- **Secret:** repository secret `SF_API_KEY`, the "Releases API Key" generated
+  on the SourceForge account page of a project admin or release technician.
+- **Previews never qualify.** The job runs on `release: published`, and CI
+  publishes previews with `GITHUB_TOKEN`, which fires no workflow. It also
+  refuses any draft, prerelease or non `vX.Y.Z` tag, so a manual run cannot
+  promote one either.
+- **Retry or test:** run the workflow by hand with `sourceforge_tag` set to an
+  existing stable tag. Only this job runs, no build. The step logs what
+  SourceForge now lists per platform; that list may be cached for a while.
+- **Timing:** a stable release stays a draft until you publish it, so the
+  default flips when you publish, not when CI attaches the build.
