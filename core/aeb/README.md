@@ -2215,6 +2215,16 @@ The review scene does not read `off_by_t`, so its decode skips the elevation
 gate. The chart re-run decodes again with the gate on, because headless AEB
 reads those ids. Do not feed the review stream into `run_headless`.
 
+### Map overlay
+
+The Map checkbox (off by default) draws this machine's lane edges for the clip
+and AEB's road-bent ego path, the same dashed line as the live debug window.
+Matching and that second replay run on their own thread, so tagging stays on
+the plain arcs until the overlay is ready. No installed map, or a drive that
+does not sit on one, leaves the plain view and says so next to the checkbox.
+The overlay is draw-only: recorded decisions and the label form do not change.
+The review scene never reads the live map worker.
+
 ### The clip list
 
 A rescan used to gunzip every clip's metadata on the decode thread. On 2275

@@ -324,7 +324,7 @@ class SceneWidget(AEBDebugWindow):
 
     def __init__(self) -> None:
         super().__init__(snapshot_provider=lambda: self._provide(),
-                         acc_provider=lambda: None, auto_refresh=False)
+                         acc_provider=lambda: None, auto_refresh=False, map_provider=lambda: self.map_window)
         self._snap = None
         self.pick_mode = False
         self.show_vehicle_paths = True

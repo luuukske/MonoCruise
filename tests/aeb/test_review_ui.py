@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -17,7 +18,8 @@ from core.aeb.clip_store import ClipStore
 from tools import aeb_fetch
 from tools.aeb_fetch import PullResult
 from tools.aeb_review import ReviewWindow, _LOCAL_BG, _REMOTE_BG
-from tools.aeb_review_widgets import ThumbnailView, action_index, recorded_band
+from tools.aeb_review_map import MapReplayWorker
+from tools.aeb_review_widgets import Loaded, ThumbnailView, action_index, recorded_band
 
 from tests.aeb.test_clip_review import _build_replayable_clip
 from tests.aeb.test_fetch_tool import _FakeSession, _clip_blob
@@ -417,3 +419,81 @@ def test_merged_view_can_label_a_remote_clip(tmp_path, qapp, monkeypatch):
         assert remote_store.peek_metadata(path).label.class_ == "fp"
     finally:
         win.close()
+
+
+def test_map_toggle_draws_lanes_and_road_path(tmp_path, qapp):
+    win, store, path = _seeded_window(tmp_path, qapp)
+    try:
+        clip = store.load(path)
+        win._loaded = Loaded(
+            clip=clip, frames=win._frames, proposal=win._proposal, action_idx=0,
+        )
+        win._clip = clip
+        kicked = []
+        win._kick_map = lambda p: kicked.append(p)
+        assert win._map_chk.isChecked() is False
+        win._map_chk.setChecked(True)
+        assert kicked == [str(path)]
+        assert win._map_lbl.text() == "matching..."
+
+        road = object()
+        bent = [replace(f, snapshot=replace(f.snapshot, ego_road_arc=road)) for f in win._frames]
+        window = object()
+        win._on_mapped(str(path), ("ets2", bent, window))
+        assert win._scene.map_window is window
+        assert win._scene._snap.ego_road_arc is road
+        assert win._map_lbl.text() == "ets2"
+
+        win._map_chk.setChecked(False)
+        assert win._scene.map_window is None
+        assert win._scene._snap.ego_road_arc is None
+        assert win._map_lbl.text() == ""
+    finally:
+        win.close()
+
+
+def test_map_worker_replays_through_the_clip_map(qapp, monkeypatch):
+    calls = {"n": 0}
+
+    class Fake:
+        game = "ats"
+        window = "lane-window"
+
+        def __init__(self, clip) -> None:
+            pass
+
+        def __call__(self, ego, vehicles=(), t=None):
+            calls["n"] += 1
+            return None
+
+    monkeypatch.setattr("tools.map_replay.ClipMap", Fake)
+    worker = MapReplayWorker()
+    got = []
+    worker.mapped.connect(lambda path, result: got.append((path, result)))
+    worker.replay("clip-path", _build_replayable_clip(), None)
+    assert calls["n"] > 0
+    assert got[0][0] == "clip-path"
+    assert got[0][1][0] == "ats"
+    assert got[0][1][2] == "lane-window"
+    assert got[0][1][1]
+
+
+def test_map_worker_skips_replay_when_the_drive_matches_nothing(qapp, monkeypatch):
+    class Fake:
+        game = None
+        window = None
+
+        def __init__(self, clip) -> None:
+            pass
+
+    monkeypatch.setattr("tools.map_replay.ClipMap", Fake)
+
+    def boom(*_a, **_k):
+        raise AssertionError("replayed without a map")
+
+    monkeypatch.setattr("tools.aeb_review_map.replay_clip", boom)
+    worker = MapReplayWorker()
+    got = []
+    worker.mapped.connect(lambda _path, result: got.append(result))
+    worker.replay("p", object(), None)
+    assert got == [("nomatch",)]

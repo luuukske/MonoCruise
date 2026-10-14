@@ -22,6 +22,7 @@ from core.aeb.clip_schema import ClipMetadata, Label
 from core.aeb.clip_score import class_window_warning
 from core.aeb.clip_store import ClipInfo, ClipStore
 from tools.aeb_fetch import safe_pull_root
+from tools.aeb_review_map import map_toggle
 from tools.aeb_review_widgets import (
     DecisionStrip, Loaded, SceneWidget, ThumbnailView,
     action_index, recorded_band, start_review_workers, stop_review_workers, store_origin,
@@ -42,6 +43,7 @@ class ReviewWindow(QMainWindow):
     trace_requested = Signal(str, object, object)
     scan_requested = Signal(object)
     pull_requested = Signal(object)
+    map_requested = Signal(str, object, object)
 
     def __init__(self, stores: ClipStore | list[ClipStore]) -> None:
         super().__init__()
@@ -152,6 +154,7 @@ class ReviewWindow(QMainWindow):
         self._veh_paths.setFocusPolicy(Qt.NoFocus)
         self._veh_paths.toggled.connect(self._scene.set_vehicle_paths)
         transport.addWidget(self._veh_paths)
+        transport.addWidget(map_toggle(self))
         transport.addSpacing(12)
         transport.addWidget(QLabel("F1 keys"))
         transport.addStretch(1)
@@ -528,6 +531,7 @@ class ReviewWindow(QMainWindow):
         self._push_charts()
         self._refresh()
         self._prefetch()
+        self._note_map()
 
     # Label form
 
@@ -767,6 +771,7 @@ class ReviewWindow(QMainWindow):
             self._charts.deleteLater()
             self._charts = None
         stop_review_workers(self)
+        self._stop_map()
         super().closeEvent(event)
 
 
