@@ -17,6 +17,8 @@ _EGO_CHAR = "E"
 # One glyph per id, never reused: a repeated letter reads as one vehicle in two
 # places, which is the exact confusion these maps exist to prevent.
 _GLYPHS = "abcdfghijklmnopqrstuvwxyz0123456789"
+# Drawn lane edges sit this far either side of the map lane centre.
+LANE_EDGE_M = 2.0
 
 
 def glyph_map(vids) -> dict[int, str]:
@@ -40,21 +42,74 @@ def _cells(fwd_m: float, right_m: float, span_fwd: float, span_side: float,
     return row, col
 
 
+def _densify(pts, step_m: float = 0.5):
+    """Points every `step_m` along an ego-frame polyline, so a sparse route draws solid."""
+    out = []
+    for (f0, r0), (f1, r1) in zip(pts, pts[1:]):
+        n = max(1, int(math.hypot(f1 - f0, r1 - r0) / step_m))
+        for k in range(n):
+            a = k / n
+            out.append((f0 + a * (f1 - f0), r0 + a * (r1 - r0)))
+    if pts:
+        out.append(tuple(pts[-1]))
+    return out
+
+
+def _offset(pts, right_m: float):
+    """An ego-frame polyline moved `right_m` to the right of its own travel."""
+    out = []
+    for i, (f, r) in enumerate(pts):
+        a = pts[max(i - 1, 0)]
+        b = pts[min(i + 1, len(pts) - 1)]
+        df, dr = b[0] - a[0], b[1] - a[1]
+        n = math.hypot(df, dr)
+        if n < 1e-9:
+            continue
+        out.append((f - dr / n * right_m, r + df / n * right_m))
+    return out
+
+
+def _draw_overlay(grid, overlay, span_fwd, span_side, rows, cols) -> None:
+    route = [tuple(p) for p in overlay.get("route") or []]
+    path = [tuple(p) for p in overlay.get("path") or []]
+    if len(route) >= 2:
+        dense = _densify(route)
+        for side in (-LANE_EDGE_M, LANE_EDGE_M):
+            for f, r in _offset(dense, side):
+                cell = _cells(f, r, span_fwd, span_side, rows, cols)
+                if cell is not None:
+                    grid[cell[0]][cell[1]] = ":"
+        for f, r in dense:
+            cell = _cells(f, r, span_fwd, span_side, rows, cols)
+            if cell is not None:
+                grid[cell[0]][cell[1]] = "~"
+    if len(path) >= 2:
+        for f, r in _densify(path):
+            cell = _cells(f, r, span_fwd, span_side, rows, cols)
+            if cell is not None:
+                grid[cell[0]][cell[1]] = "+"
+
+
 def render(frame, *, span_fwd: float = 80.0, span_side: float = 20.0,
            rows: int = 24, cols: int = 61,
-           glyphs: dict[int, str] | None = None) -> str:
-    """One ReviewFrame as an ASCII map plus a legend line per drawn vehicle."""
+           glyphs: dict[int, str] | None = None, overlay: dict | None = None) -> str:
+    """One ReviewFrame as an ASCII map plus a legend line per drawn vehicle.
+
+    With an `overlay` (from the scene context) the map shows ego's real later path and
+    its lane from the game map instead of straight reference lines.
+    """
     snap = frame.snapshot
     grid = [[" "] * cols for _ in range(rows)]
-    for r in range(rows):
-        grid[r][cols // 2] = "."
-    lane_cols = []
-    for edge in (-_CAL.lane_separation, _CAL.lane_separation):
-        col = int(round((edge + span_side) / (2.0 * span_side) * (cols - 1)))
-        if 0 <= col < cols:
-            lane_cols.append(col)
-            for r in range(rows):
-                grid[r][col] = ":"
+    if overlay is not None:
+        _draw_overlay(grid, overlay, span_fwd, span_side, rows, cols)
+    else:
+        for r in range(rows):
+            grid[r][cols // 2] = "."
+        for edge in (-_CAL.lane_separation, _CAL.lane_separation):
+            col = int(round((edge + span_side) / (2.0 * span_side) * (cols - 1)))
+            if 0 <= col < cols:
+                for r in range(rows):
+                    grid[r][col] = ":"
 
     if glyphs is None:
         glyphs = glyph_map(v["vid"] for v in snap.vehicles)
@@ -96,8 +151,14 @@ def render(frame, *, span_fwd: float = 80.0, span_side: float = 20.0,
               f"state {snap.aeb_state.name}  ttc "
               f"{_fmt_inf(snap.time_to_collision)}  ttb "
               f"{_fmt_inf(snap.time_to_brake)}")
+    if overlay is None:
+        key = "':' = straight reference lines, NOT the road"
+    elif overlay.get("route"):
+        key = "'+' = where ego really drove next, '~' = ego's lane centre per map, ':' = its edges"
+    else:
+        key = "'+' = where ego really drove next, no map lane here"
     scale = (f"  [forward {span_fwd:.0f} m up, +/-{span_side:.0f} m across; "
-             f"':' = lane separation, uppercase = colliding]")
+             f"{key}; uppercase = AEB called it colliding]")
     body = "\n".join("  |" + "".join(row) + "|" for row in grid)
     return "\n".join([header, scale, body] + legend)
 

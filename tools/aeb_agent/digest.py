@@ -30,13 +30,19 @@ def _f(value: float, digits: int = 2) -> str:
     return f"{value:.{digits}f}"
 
 
-def _header(row: ClipRow, feats: ClipFeatures) -> list[str]:
+def _header(row: ClipRow, feats: ClipFeatures, full: bool = False) -> list[str]:
+    """Clip header. Capture time, client version and file name only with `full`.
+
+    Agent dossiers leave them out: an agent never needs them, and contributed clips
+    go to a hosted model with as little attached as possible.
+    """
     mass = ("?" if feats.ego_mass_kg is None
             else f"{feats.ego_mass_kg / 1000.0:.1f} t")
-    return [
-        f"CLIP {row.clip_id}  ({row.origin} store)",
-        f"  file        {Path(row.path).name}",
-        f"  captured    {row.captured_at}  client {row.client_version}",
+    ident = [f"CLIP {row.clip_id}  ({row.origin} store)"]
+    if full:
+        ident += [f"  file        {Path(row.path).name}",
+                  f"  captured    {row.captured_at}  client {row.client_version}"]
+    return ident + [
         f"  session     {row.session_kind}   trigger {row.trigger_source}"
         f"   brake_reached={row.brake_reached}",
         f"  duration    {feats.duration_s:.2f} s over {feats.tick_count} AEB ticks"
@@ -72,13 +78,15 @@ def _label_block(row: ClipRow) -> list[str]:
     return out
 
 
-def _live_block(feats: ClipFeatures) -> list[str]:
+def _live_block(feats: ClipFeatures, flags: dict | None = None) -> list[str]:
     band = ("none" if not feats.recorded_band else
             f"{feats.recorded_band[0]:.2f} .. {feats.recorded_band[1]:.2f} s")
+    episodes = (flags or {}).get("brake_episodes")
     return [
         "RECORDED AEB (what the shipped build did at capture time)",
         f"  warn {feats.warn_ticks} ticks, brake {feats.brake_ticks} ticks, "
-        f"engaged {feats.engaged_ticks} ticks",
+        f"engaged {feats.engaged_ticks} ticks"
+        + (f", {episodes} separate brake episode(s)" if episodes is not None else ""),
         f"  first warn {_f(feats.first_warn_t) if feats.first_warn_t is not None else '-'}"
         f"  first brake "
         f"{_f(feats.first_brake_t) if feats.first_brake_t is not None else '-'}",
@@ -89,7 +97,27 @@ def _live_block(feats: ClipFeatures) -> list[str]:
     ]
 
 
-def _driver_block(feats: ClipFeatures) -> list[str]:
+def _lane_cf_line(ctx: dict | None) -> list[str]:
+    """The map-lane ghost's verdict, when the context ran one."""
+    from tools.aeb_agent.lane_ghost import grade
+
+    lcf = (ctx or {}).get("lane_cf") or {}
+    if not lcf:
+        return []
+    if not lcf.get("ran"):
+        return [f"  lane ghost    not run: {lcf.get('reason', '?')}"]
+    g = grade(lcf)
+    held = "held its speed" if lcf.get("mode") == "lane_held_speed" else "kept the recorded speed"
+    line = (f"  lane ghost    followed ego's map lane and {held} for {lcf.get('horizon_s', 0):.2f} s"
+            + (" (stopped at a junction)" if lcf.get("stops_at_branch") else ""))
+    verdict = (f"  lane verdict  {g['verdict'].upper()}: nearest approach "
+               f"{lcf.get('min_separation_m', 0):+.1f} m to vid {lcf.get('target_vid')} at "
+               f"{lcf.get('dt_at_min_s', 0):.2f} s past the fork, drift +/-{g['drift_m']:.1f} m"
+               + ("" if g["credible"] else "; not trustworthy this far out"))
+    return [line, verdict]
+
+
+def _driver_block(feats: ClipFeatures, ctx: dict | None = None) -> list[str]:
     """What the driver did and what would have happened had they not.
 
     This block outranks the recorded geometry. A swerve leaves a near miss on the
@@ -104,6 +132,7 @@ def _driver_block(feats: ClipFeatures) -> list[str]:
         out.append("  counterfactual not needed: the recorded path already is "
                    "the no-action path")
         return out
+    lane = _lane_cf_line(ctx)
     bits = [f"{inter.get('kind')} at t={inter.get('t', 0):.2f}s"]
     if "swerve" in (inter.get("kind") or ""):
         bits.append(f"steer {inter.get('steer_before', 0):+.3f} -> "
@@ -118,7 +147,7 @@ def _driver_block(feats: ClipFeatures) -> list[str]:
     out.append("  intervention  " + ", ".join(bits))
     if not cf.get("ran"):
         out.append(f"  counterfactual not run: {cf.get('reason', '?')}")
-        return out
+        return out + lane
     mode = cf.get("mode", "")
     held = {
         "heading": (f"held {inter.get('yaw_rate_before', 0):+.3f} rad/s and "
@@ -138,9 +167,17 @@ def _driver_block(feats: ClipFeatures) -> list[str]:
                f"by then (measured p90)"
                + ("" if cf.get("credible")
                   else "; past 1.5 s this is not trustworthy"))
-    if cf.get("verdict") in ("collides", "likely"):
+    out += lane
+    if cf.get("verdict") in ("collides", "likely") or any(
+            v in line for line in lane for v in ("COLLIDES", "LIKELY")):
         out.append("  READ THIS     the driver avoided contact. The clean pass on "
                    "the record is the rescue, not the scene.")
+    if lane and "swerve" in (inter.get("kind") or "") and "brake" not in (inter.get("kind") or ""):
+        out.append("  which ghost   prefer the lane ghost: after a swerve it drifts 1.5 m by "
+                   "2 s where the held-yaw ghost drifts 4.6 m (p90)")
+    elif lane:
+        out.append("  which ghost   after a brake or lift both ghosts guess the speed and "
+                   "drift alike; weigh them equally")
     return out
 
 
@@ -182,6 +219,245 @@ def _target_block(feats: ClipFeatures, limit: int = 6) -> list[str]:
     return out
 
 
+_REL_WORDS = {
+    "ego_lane": "in ego's lane",
+    "ego_lane_wrong_way": "in ego's lane, driving toward ego",
+    "across_ego_lane": "across ego's lane (crossing or turning)",
+    "adjacent_left": "in the next lane on the left, same direction",
+    "adjacent_right": "in the next lane on the right, same direction",
+    "oncoming_left": "in an oncoming lane on the left",
+    "oncoming_right": "in an oncoming lane on the right",
+    "crossing_left": "crossing ego's road, now on the left",
+    "crossing_right": "crossing ego's road, now on the right",
+    "beside_road_left": "beside ego's road on the left",
+    "beside_road_right": "beside ego's road on the right",
+    "beyond_route": "beyond the stretch of road the map route covers",
+    "off_lane": "not on any mapped lane (parked, yard or shoulder)",
+    "unknown": "no map relation",
+}
+
+
+def rel_words(rel: str) -> str:
+    """Plain words for a context `map_rel` code."""
+    if not rel:
+        return _REL_WORDS["unknown"]
+    behind = rel.startswith("behind_")
+    core, _, extra = rel.removeprefix("behind_").partition("+")
+    text = _REL_WORDS.get(core, core)
+    if behind:
+        text = "behind ego, " + text
+    if extra == "off_lane":
+        text += ", and not on any mapped lane (parked, yard or shoulder)"
+    return text
+
+
+def _what(t: dict) -> str:
+    """Short description of a context target: who drives it and roughly what it is."""
+    who = "TMP" if t.get("is_tmp") else "AI"
+    length = t.get("length_m") or 0.0
+    if t.get("is_trailer"):
+        body = "trailer"
+    elif length < 6.5:
+        body = "car"
+    elif length < 13.0:
+        body = "truck"
+    else:
+        body = "long rig"
+    return f"{who} {body}"
+
+
+def _ref(t: dict) -> dict:
+    return t.get("approach") or t.get("action") or {}
+
+
+def _path_words(t: dict, ctx: dict) -> str:
+    """What ego's real path says about one target, in a sentence fragment."""
+    p = _ref(t)
+    d, s = p.get("path_d"), p.get("path_s")
+    if d is None or s is None:
+        return "ego's real path gives no reading"
+    if s < 0.0:
+        return "it was already behind ego"
+    verdict = _VERDICT_WORDS.get(t.get("in_path", ""), "")
+    if p.get("path_reached"):
+        when = f", ego got there at {p['t_arrive']:.2f} s" if p.get("t_arrive") is not None else ""
+        return (f"ego's real path later passed {abs(d):.1f} m from its centre{when} "
+                f"({verdict})")
+    how = ("its map lane" if ctx.get("map_matched") and (ctx.get("ego") or {}).get("on_lane")
+           else "a straight line")
+    return (f"ego ended {p.get('path_short_m', 0.0):.1f} m short of its centre; continuing ego's path "
+            f"along {how} passes {abs(d):.1f} m from its centre ({verdict})")
+
+
+_VERDICT_WORDS = {
+    "in_path": "bodies overlap: it was in ego's path",
+    "brushing": "within 1 m of touching",
+    "clear": "clear of ego's path",
+    "unknown": "no reading",
+}
+
+
+def _ego_words(ctx: dict) -> list[str]:
+    if not ctx.get("map_matched"):
+        return ["Road: this clip did not match the local game map (area not installed, "
+                "or a TruckersMP layout that has changed). Judge lanes from ego's real path."]
+    ego = ctx.get("ego") or {}
+    if not ego.get("on_lane"):
+        return ["Road: ego is not on any mapped lane at the action (yard, car park, fuel "
+                "station or off-road). Lane words below are weak here."]
+    kind = "a junction lane" if ego.get("lane_kind") == "prefab" else "a road lane"
+    lanes = ""
+    if ego.get("lanes_total"):
+        same = ego.get("lanes_same_dir")
+        lanes = (f" ({same} lane(s) its way, {ego['lanes_total']} in all)" if same
+                 else f" ({ego['lanes_total']} lanes in all)")
+    out = [f"Road: ego on {kind}{lanes}, {ego.get('offset_m', 0.0):+.1f} m right of the "
+           f"lane centre, heading {ego.get('heading_err_deg', 0.0):+.0f} deg off it."]
+    b50, b100 = ego.get("bend_50_deg"), ego.get("bend_100_deg")
+    if b50 is None and b100 is None:
+        shape = "unknown past the map's reach"
+    elif max(abs(b50 or 0.0), abs(b100 or 0.0)) < 5.0:
+        shape = "straight for 100 m"
+    else:
+        ref = b100 if b100 is not None else b50
+        turn = "right" if ref > 0 else "left"
+        shape = (f"bends {turn}: {abs(b50 or 0.0):.0f} deg within 50 m, "
+                 f"{abs(b100 or 0.0):.0f} deg within 100 m")
+    bits = [f"Road ahead {shape}."]
+    if ego.get("branch_s") is not None:
+        bits.append(f"Junction or exit {ego['branch_s']:.0f} m ahead: ego's route past it "
+                    f"is not certain.")
+    if ego.get("merge_s") is not None:
+        bits.append(f"Two lanes merge {ego['merge_s']:.0f} m ahead.")
+    if ego.get("lane_change_t") is not None:
+        bits.append(f"Ego changed lane at {ego['lane_change_t']:.2f} s.")
+    out.append(" ".join(bits))
+    return out
+
+
+def _conflicts(t: dict) -> list[str]:
+    """Where the straight-ahead numbers, the map and ego's real path disagree."""
+    p = _ref(t)
+    out = []
+    lat, d, rel = p.get("lat"), p.get("path_d"), p.get("map_rel") or ""
+    reach = 1.265 + (t.get("half_w_m") or 1.0)
+    in_path = t.get("in_path") == "in_path"
+    if lat is not None and d is not None and p.get("path_s", -1) is not None \
+            and (p.get("path_s") or -1) >= 0:
+        if abs(lat) <= 1.95 and abs(d) > reach + 1.0:
+            out.append(f"vid {t['vid']}: the straight-ahead view puts it in ego's lane "
+                       f"(lat {lat:+.1f}), but ego's real path passed {abs(d):.1f} m off it.")
+        elif abs(lat) > 1.95 + 1.0 and in_path:
+            out.append(f"vid {t['vid']}: the straight-ahead view puts it {lat:+.1f} m to the "
+                       f"side, but it was in ego's path (bend or turn).")
+    if rel.startswith("ego_lane") and d is not None and abs(d) > reach + 1.0:
+        out.append(f"vid {t['vid']}: map says ego's lane, ego's real path passed "
+                   f"{abs(d):.1f} m off: a lane change, a junction turn or a map offset.")
+    if (rel.startswith("adjacent") or rel.startswith("oncoming")) and in_path:
+        out.append(f"vid {t['vid']}: map says another lane, yet ego's real path ran through "
+                   f"it: ego changed lane, or the map lane is offset here.")
+    return out
+
+
+OVERLAP_M = -0.5
+
+
+def overlapping(ctx: dict | None) -> list[dict]:
+    """Vehicles whose body went more than half a metre into ego's, deepest first."""
+    hits = [t for t in (ctx or {}).get("targets") or []
+            if t.get("real_min_sep_m", 1e9) < OVERLAP_M]
+    return sorted(hits, key=lambda t: t["real_min_sep_m"])
+
+
+def clip_flags(clip, frames) -> dict:
+    """Per-clip facts the cached features lack: NCZ share and separate AEB brake episodes."""
+    radar = list(clip.radar_frames)
+    ncz = sum(1 for f in radar if getattr(f, "tmp_ncz", False)) / max(len(radar), 1)
+    episodes, last = 0, None
+    for f in frames:
+        if f.live_aeb.aeb_brake:
+            if last is None or f.t_rel - last > 1.0:
+                episodes += 1
+            last = f.t_rel
+    return {"ncz_frac": round(ncz, 3), "brake_episodes": episodes}
+
+
+def situation_block(feats: ClipFeatures, ctx: dict | None) -> list[str]:
+    """Plain-language summary of the scene, computed from the recording and the map."""
+    out = ["SITUATION (computed from the recording and the local map, not AEB's opinion)"]
+    if not ctx or ctx.get("error") == "too few usable ticks":
+        out.append("  no scene context for this clip")
+        return out
+    for line in _ego_words(ctx):
+        out.append("  " + line)
+    out.append(f"  Ego: {feats.ego_speed_at_action_kmh:.0f} km/h at the action "
+               f"(t={ctx.get('t_action', 0.0):.2f} s), {ctx.get('ego_end_speed_kmh', 0.0):.0f} "
+               f"km/h at the end of the clip, {ctx.get('ego_travel_m', 0.0):.0f} m driven in all.")
+    over = overlapping(ctx)
+    if over:
+        who = ", ".join(f"vid {t['vid']} ({t['real_min_sep_m']:+.1f} m)" for t in over[:4])
+        out.append(f"  OVERLAP {len(over)} vehicle(s) drove into ego's body without a crash "
+                   f"response: {who}. In TruckersMP that is ghosting (no-collision zone or desync).")
+    ncz = (ctx.get("_clip_flags") or {}).get("ncz_frac")
+    if ncz:
+        out.append(f"  TruckersMP no-collision zone was active on {ncz:.0%} of frames.")
+    targets = {t["vid"]: t for t in ctx.get("targets") or []}
+    hp = ctx.get("hindsight_primary")
+    if hp is not None and hp in targets:
+        t = targets[hp]
+        p = _ref(t)
+        out.append(f"  Primary by hindsight: vid {hp} ({_what(t)}, {t.get('length_m', 0):.1f} m, "
+                   f"{t.get('speed_kmh', 0):.0f} km/h), {rel_words(p.get('map_rel', ''))} "
+                   f"at {p.get('t', 0):.2f} s; {_path_words(t, ctx)}. Closest real gap "
+                   f"{t.get('real_min_sep_m', 0):.1f} m at {t.get('t_real_min', 0):.2f} s.")
+    else:
+        out.append("  Primary by hindsight: none. No vehicle sat in ego's real or "
+                   "extended path at the approach.")
+    if feats.primary_vid is not None and feats.primary_vid != hp:
+        t = targets.get(feats.primary_vid)
+        where = (f"{rel_words(_ref(t).get('map_rel', ''))}; {_path_words(t, ctx)}"
+                 if t else "not near ego's path at the approach")
+        out.append(f"  The straight-corridor primary is vid {feats.primary_vid} instead: {where}.")
+    for t in (ctx.get("targets") or [])[:5]:
+        if t["vid"] not in (hp, feats.primary_vid) and t.get("real_min_sep_m", 1e9) > 5.0:
+            continue
+        for line in _conflicts(t):
+            out.append("  CONFLICT " + line)
+    return out
+
+
+def evidence_block(ctx: dict | None, limit: int = 8) -> list[str]:
+    """One row per nearby vehicle: ego's real path, the map lane, and the real outcome."""
+    if not ctx or not ctx.get("targets"):
+        return []
+    out = [f"EVIDENCE (at the approach, t={ctx.get('t_approach', 0):.2f} s; path_d is "
+           f"how far right of ego's real path the vehicle sat, + right / - left)",
+           "   vid   what         inPath    path_d  path_s  reached     map               "
+           "map_d  laneDist  realGap@t"]
+    hp = ctx.get("hindsight_primary")
+    for t in ctx["targets"][:limit]:
+        p = _ref(t)
+        mark = "*" if t["vid"] == hp else " "
+        reached = ("yes" if p.get("path_reached")
+                   else f"short {p.get('path_short_m', 0):.0f}m" if p.get("path_s") is not None
+                   else "-")
+        rel = (p.get("map_rel") or "unknown")[:17]
+        out.append(
+            f"  {mark}{t['vid']:<6}{_what(t):<13}{t.get('in_path', '?'):<9}"
+            f"{_num(p.get('path_d'), '+7.1f')} {_num(p.get('path_s'), '7.1f')}  "
+            f"{reached:<10}  {rel:<17} {_num(p.get('map_d'), '+6.1f')}  "
+            f"{_num(p.get('lane_dist_m'), '7.1f')}   "
+            f"{t.get('real_min_sep_m', 0):5.1f}@{t.get('t_real_min', 0):.2f}")
+    return out
+
+
+def _num(value, fmt: str) -> str:
+    if value is None:
+        width = int("".join(ch for ch in fmt.split(".")[0] if ch.isdigit()) or 6)
+        return "-".rjust(width)
+    return format(value, fmt)
+
+
 def _role(t: dict) -> str:
     if t["speed_max_kmh"] < 2.0:
         return "stationary"
@@ -193,8 +469,19 @@ def _role(t: dict) -> str:
     return "crossing"
 
 
+def _demand_at(demand: list, t: float) -> float | None:
+    """Hindsight demand nearest `t`, from the context's (t, req, gap, v) rows."""
+    if not demand:
+        return None
+    times = [row[0] for row in demand]
+    j = bisect.bisect_left(times, t)
+    cands = [k for k in (j - 1, j) if 0 <= k < len(demand)]
+    k = min(cands, key=lambda i: abs(times[i] - t))
+    return demand[k][1] if abs(times[k] - t) <= 0.1 else None
+
+
 def _timeline(frames, feats: ClipFeatures, vid: int | None,
-              steer_at=None) -> list[str]:
+              steer_at=None, demand=None) -> list[str]:
     """Per-tick table around the action, thinned to a readable row count."""
     if not frames:
         return ["TIMELINE    (no ticks)"]
@@ -204,9 +491,11 @@ def _timeline(frames, feats: ClipFeatures, vid: int | None,
     step = max(1, len(window) // _TIMELINE_MAX_ROWS)
     out = [
         f"TIMELINE    ticks {lo:.1f}-{hi:.1f} s, every {step} tick(s); "
-        f"tracking vid {vid}",
+        f"tracking vid {vid}"
+        + ("; hsReq = decel needed to stop closing on it along ego's real path"
+           if demand else ""),
         "     t     ego   state  ttc    ttb    req    raw   targ  "
-        "fwd    lat   vspd  steer  gas  brk  colliding",
+        "fwd    lat   vspd  steer  gas  brk  " + ("hsReq  " if demand else "") + "colliding",
     ]
     for f in window[::step]:
         snap = f.snapshot
@@ -219,6 +508,9 @@ def _timeline(frames, feats: ClipFeatures, vid: int | None,
                 vspd = veh["speed_kmh"]
                 break
         coll = ",".join(str(i) for i in sorted(snap.colliding_ids)[:4]) or "-"
+        if demand:
+            hs = _demand_at(demand, f.t_rel)
+            coll = ("   -   " if hs is None else f"{hs:6.2f} ") + coll
         state = snap.aeb_state.name[:5]
         out.append(
             f"  {f.t_rel:6.2f} {snap.ego_speed * 3.6:6.1f}  {state:<6}"
@@ -314,21 +606,33 @@ def ab_block(result) -> list[str]:
 
 def build(row: ClipRow, clip, *, feats: ClipFeatures | None = None,
           scenes: int = 3, timeline: bool = True, replay: bool = False,
-          ab_result=None) -> str:
-    """Full text dossier for one clip."""
+          ab_result=None, ctx: dict | None = None, full_header: bool = False) -> str:
+    """Full text dossier for one clip.
+
+    `ctx` adds the SITUATION and EVIDENCE blocks and real-path scenes.
+    """
     feats = feats if feats is not None else extract(clip, row.path)
     frames = replay_clip(clip)
+    flags = clip_flags(clip, frames)
+    if ctx is not None:
+        ctx = dict(ctx, _clip_flags=flags)
     vid = feats.primary_vid
-    parts: list[list[str]] = [
-        _header(row, feats),
-        _label_block(row),
+    if ctx and ctx.get("hindsight_primary") is not None:
+        vid = ctx["hindsight_primary"]
+    parts: list[list[str]] = [_header(row, feats, full=full_header), _label_block(row)]
+    if ctx is not None:
+        parts.append(situation_block(feats, ctx))
+    parts += [
         ["SCENE       " + (", ".join(feats.scenario) or "(untagged)")],
         (["FLAGS       " + f for f in feats.flags] if feats.flags
          else ["FLAGS       none"]),
-        _driver_block(feats),
-        _live_block(feats),
-        _target_block(feats),
+        _driver_block(feats, ctx),
+        _live_block(feats, flags),
     ]
+    evidence = evidence_block(ctx)
+    if evidence:
+        parts.append(evidence)
+    parts.append(_target_block(feats))
     ab_lines = ab_block(ab_result)
     if ab_lines:
         parts.append(ab_lines)
@@ -336,17 +640,27 @@ def build(row: ClipRow, clip, *, feats: ClipFeatures | None = None,
     if replay:
         text += "\n" + "\n".join(replay_block(clip))
     if timeline:
-        text += "\n" + "\n".join(_timeline(frames, feats, vid))
+        demand_vid = (ctx or {}).get("demand_vid", (ctx or {}).get("window_target"))
+        demand = (ctx or {}).get("demand") if demand_vid == vid else None
+        text += "\n" + "\n".join(_timeline(frames, feats, vid, demand=demand))
     if scenes > 0 and frames:
         glyphs = glyph_map(_near_vids(frames))
-        times = _scene_times(feats, frames)[:scenes]
+        overlays = (ctx or {}).get("overlays") or {}
+        if overlays:
+            times = [overlays[k]["t"] for k in ("approach", "action") if k in overlays]
+            times.append(feats.action_t + 1.0)
+        else:
+            times = _scene_times(feats, frames)
         picked = []
-        for t in times:
+        for t in times[:scenes]:
             best = min(frames, key=lambda f: abs(f.t_rel - t))
             if best not in picked:
                 picked.append(best)
-        text += "\n\nSCENES\n" + "\n\n".join(
-            render(f, glyphs=glyphs) for f in picked)
+        rendered = []
+        for f in picked:
+            overlay = next((o for o in overlays.values() if abs(o["t"] - f.t_rel) <= 0.06), None)
+            rendered.append(render(f, glyphs=glyphs, overlay=overlay))
+        text += "\n\nSCENES\n" + "\n\n".join(rendered)
     return text
 
 

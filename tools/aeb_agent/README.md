@@ -4,54 +4,40 @@ Headless AEB clip corpus tooling for an agent. Dev only, never shipped, never
 imported by the app. Everything runs without Qt and without the game.
 
 `tools/aeb_review.py` is the human tool: it plays the clip, draws the scene and
-lets a person mark a window in a couple of seconds. It is still the arbiter. This
-package exists because the corpus now grows faster than a person can watch it, so
-an agent can do the reading, the sorting and the first pass at a verdict, and the
-person spends their time confirming rather than searching.
+lets a person label it. **It is the only thing that labels a clip.** This package
+reads clips and labels so an agent can analyse them: find the clips behind a
+corpus change, explain why a filter fired, audit labels for a person to recheck.
 
 ```bash
 python -m tools.aeb_agent --help
 ```
 
-## The one rule that is not negotiable
+## Labels are human-only
 
-**Never take a should-trigger window from AEB's own output.** The corpus exists to
-judge AEB. A window copied from the ticks AEB reacted on encodes "AEB was right"
-into the ground truth, and every later measurement made against it is circular.
-`recorded band` is printed in every dossier because it is useful context, and
-`apply` refuses a window that matches it to within 0.05 s unless you pass
-`--allow-recorded-window` and say in the rationale what you checked.
+Nothing here writes, proposes or pre-fills a label (AGENTS.md, "AEB clip labels are
+human-only"; `tests/invariants/test_source_invariants.py` enforces it). The
+`propose` / `apply` path and the labelling prompts were removed on 2026-10-15; see
+"Why there is no agent labeller" below before suggesting one.
 
-`fn` clips are the case that proves it: the recorded band is wrong there by
-definition, which is what makes them misses.
+The rule that came before it still holds for the people labelling: **never take a
+should-trigger window from AEB's own output.** A window copied from the ticks AEB
+reacted on encodes "AEB was right" into the ground truth. `recorded band` is
+printed in every dossier as context, and the `window_is_recorded` audit rule
+catches a window that matches it.
 
 ## Workflow
 
 ```bash
 python -m tools.aeb_agent index --features       # one-time, a few minutes
+python -m tools.aeb_agent context                # hindsight + map evidence, ~40 min pooled
 python -m tools.aeb_agent stats                  # what is in the corpus
-python -m tools.aeb_agent list --unlabeled --limit 40
+python -m tools.aeb_agent list --label fp --limit 40
 python -m tools.aeb_agent show <id> --replay     # read one clip
-python -m tools.aeb_agent propose <id> --class fp --severity 2 --rationale "..."
-python -m tools.aeb_agent apply                  # dry run, prints what would change
-python -m tools.aeb_agent apply --commit         # writes, and journals every change
+python -m tools.aeb_agent audit                  # labels a person should recheck
 ```
 
-Nothing before `apply --commit` touches a clip file. `journal` lists what was
-written and `revert <id> --commit` puts the previous label back, exactly.
-
-For a batch pass, `triage` writes one dossier per clip into the workspace plus a
-`worklist.json`, so the reading is file-by-file instead of one giant transcript:
-
-```bash
-python -m tools.aeb_agent triage --unlabeled --scenario crossing --limit 40
-```
-
-Then append one JSON object per line to `proposals.jsonl` directly (the same
-shape `propose` writes: `clip_id`, `label_class`, `severity`, `window`,
-`rationale`, `confidence`, `reviewer`, `mtime`, `size_bytes`) and run `apply`.
-That is far cheaper than one `propose` invocation per clip. Copy `mtime` and
-`size_bytes` from the worklist so the staleness check can do its job.
+For a batch read, `triage` writes one dossier per clip into the workspace plus a
+`worklist.json`, so the reading is file-by-file instead of one giant transcript.
 
 ## Commands
 
@@ -67,10 +53,9 @@ That is far cheaper than one `propose` invocation per clip. Copy `mtime` and
 | `clearance` | A/B a calibration flag per clip; defaults to the 9eee3dd clearance rewrite |
 | `thumbs` | Export clip screenshots so a human can flip through a shortlist |
 | `render` | Export a clip's debug view as a PNG sequence, for video work |
-| `propose` | Append one proposed label change to `proposals.jsonl` |
-| `apply` | Validate the proposals; write only with `--commit` |
-| `journal` / `revert` | What was applied, and how to undo it |
 | `score` | The corpus objective under the working tree, per store |
+| `context` | Build the hindsight + map scene context (about 1 s per clip, pooled) and report map coverage |
+| `drift` | p90 drift of the held-yaw ghost against the lane ghost, on clips with no intervention |
 
 Filters compose on `list`, `stats` and `audit`: `--label`, `--scenario`,
 `--session`, `--origin`, `--trigger`, `--sev-min/--sev-max`, `--since/--until`,
@@ -79,9 +64,13 @@ Add `--json` for machine output, `--fast` to skip the feature cache.
 
 ## Reading a dossier
 
-`show` prints six blocks. What each one is worth:
+`show` prints these blocks. What each one is worth:
 
-- **CLIP / LABEL** are facts about the file and the existing verdict.
+- **CLIP / LABEL** are facts about the file and the existing verdict. Capture
+  time, client version and file name only with `--full-header`.
+- **SITUATION** and **EVIDENCE** come from the scene context (below): where ego
+  really drove, where its lane went, and where each vehicle sat on both. They
+  outrank TARGETS on any bend or junction.
 - **SCENE** is the scenario tag set, derived from geometry. **FLAGS** are
   data-quality problems: paused frames, a short capture, AEB switched off.
 - **RECORDED AEB** is what the shipped build did *at capture time*, under whatever
@@ -93,8 +82,11 @@ Add `--json` for machine output, `--fast` to skip the feature cache.
   `dot` is the cosine between ego heading and target heading: `+1` co-directional,
   `-1` oncoming, near `0` perpendicular. `lat` is positive to the right.
 - **TIMELINE** is per tick around the action, tracking the primary target.
-- **SCENES** are ASCII maps, forward up the page, `:` marking lane separation and
-  an uppercase glyph marking a vehicle AEB currently calls colliding.
+- **SCENES** are ASCII maps, forward up the page, an uppercase glyph marking a
+  vehicle AEB currently calls colliding. With a scene context, `+` is where ego
+  really drove next, `~` is ego's lane centre from the map and `:` its edges.
+  Without one, `:` are straight reference lines at the lane separation, which on
+  a bend are not the road.
 
 `--replay` adds what the *working tree* does on the clip now. Use it when you are
 asking "is this still a miss", not when you are asking "was this label right".
@@ -264,24 +256,11 @@ signal, and its entry conditions (rotation liveness, raw-window speed, decay
 ratio) are what separate a real stall from a slow update. See
 `core/radar/README.md` section 7.
 
-## What the tool refuses
-
-`apply` skips a proposal, rather than writing it, when:
-
-- the class is not one of the six, or severity is outside 1..5 on a real class;
-- the class and window contradict each other;
-- the window is empty, reversed, or outside the clip;
-- the window matches AEB's recorded reaction band (see the rule above);
-- there is no rationale;
-- confidence is below `--min-confidence`;
-- the clip file changed on disk since the proposal was made.
-
-A skip is printed with its reason and the run continues. Nothing partially applies.
-
 ## Where things live
 
-The workspace holds `index.json`, `features.json`, `proposals.jsonl` and
-`journal.jsonl`. It defaults to `tools/aeb_corpus_run/agent/`, which is gitignored,
+The workspace holds `index.json`, `features.json` and `context.json`, plus
+`journal.jsonl`, the record of the agent label writes made before labels became
+human-only (Grok 4.6, September 2026). It defaults to `tools/aeb_corpus_run/agent/`, which is gitignored,
 and `MONOCRUISE_AEB_AGENT_DIR` overrides it. Clip files themselves live in the two
 stores that `core/aeb/clip_store.py` defines and are never copied into the repo.
 
@@ -291,15 +270,70 @@ rebuild, which is only needed when `FEATURES_VERSION` changes.
 
 ## Prompts
 
-Two ready prompts live beside this file:
+`PROMPT_trailer_shortlist.md` builds a bucketed shortlist of AEB saves worth
+showing in a release video. Local clips only, for the reason below.
 
-- `PROMPT_untagged_pass.md` labels every untagged clip, in batches, until none
-  remain.
-- `PROMPT_recheck_context.md` rechecks existing labels against the driver and
-  counterfactual block, tiered so the 934 clips with no intervention are not
-  re-read for nothing.
-- `PROMPT_trailer_shortlist.md` builds a bucketed shortlist of AEB saves worth
-  showing in a release video. Local clips only, for the reason below.
+## Scene context: hindsight and the map
+
+`context.py` answers the question the straight-ahead TARGETS table gets wrong on
+bends and at junctions: was this vehicle in the path ego was on? Two sources, kept
+apart so a reader can weigh them:
+
+- **Hindsight.** Ego's recorded future path from the approach moment (1.5 s
+  before the action). A vehicle ego later drove through was in its path, whatever
+  `lat` says. Where ego stopped short, the path continues along its map lane, or
+  straight without a map, and the dossier says which (`reached` / `short`).
+- **The local game map** (`tools/map_replay.py`): ego's lane, the road shape
+  ahead, junctions, and each vehicle's lane relative to ego's lane route.
+
+The hindsight primary is the nearest vehicle whose body overlapped ego's real or
+extended path at the approach. It differs from the straight-corridor primary on
+30 % of the clips that have one.
+
+`hsReq` is the constant decel that stops ego closing on that primary along its
+real path, printed in the timeline.
+
+**Map evidence is for analysis only.** Nothing in `context.py` feeds AEB, `core/`
+or a clip file. An agent may read the derived lane relations and the ego-frame
+lane lines in a dossier (Lukas, 2026-10-14); the map's sector data, world
+coordinates and archive contents never leave the machine.
+
+The dossier also prints an `OVERLAP` line when vehicles drove into ego's body
+without a crash response, with the TruckersMP no-collision-zone share where the
+clip recorded one (older clips did not), and the number of separate AEB brake
+episodes.
+
+### The lane ghost
+
+`lane_ghost.py` flies the no-intervention ghost along ego's lane route at its
+held offset, instead of the held yaw rate, while ego was on its lane at the fork
+(within 1.2 m and 8 deg). It stops at a junction, where the route is no longer
+certain. The dossier prints both ghosts. `drift` measures both against ego's
+real path on clips with no intervention, forked 3.5 s before the action so AEB
+has not acted yet; see "Where the numbers came from" for the table.
+
+## Why there is no agent labeller
+
+Built and measured on 2026-10-14, then removed at Lukas's call. A Grok 4.7 agent
+in Cursor read these dossiers (SITUATION, EVIDENCE, both ghosts, his written
+reasons for `ignore`) and answered fixed questions that a table turned into a
+class. On 150 held-out clips he had labelled himself it matched him on 47 %,
+with 41 % harmful errors (a wrong positive or negative, or a real class on a clip
+he ignored). An evidence-only rule managed 42 %.
+
+The errors were not misreadings. 51 of the 59 harmful ones were clips he labelled
+`ignore` that the evidence reads as clean threats or clean false alarms. His
+`ignore` means "would mislead the tuning of the geometry filters": position
+noise, TruckersMP ghosting, driver intent, AEB bugs, several triggers, reckless
+driving, or doubt. That is a judgement the recording does not carry. Even on clean
+clips with an unmistakable threat, 35 % of his August labels and 59 % of his
+September ones were `ignore`. Labels are human-only since.
+
+### Contributed clips
+
+Agents analyse contributed clips as text only: `thumbs` skips them unless a person
+asks with `--include-contributed`, and the dossier header leaves out capture time,
+client version and file name unless `--full-header` asks for them.
 
 ## Rendering a clip as footage
 
@@ -346,3 +380,29 @@ The corpus at the time of writing: 1852 clips (1068 local, 784 pulled), 1117
 labelled, 735 unreviewed. `audit` over it returns 84 suspicions across 76 clips,
 12 of them high. Those counts move as the corpus grows; re-run rather than
 quoting them.
+
+Scene context, 2026-10-14, over 5828 clips (1875 local, 3953 pulled):
+
+| Store / session | clips | map matched |
+|---|---|---|
+| local TMP | 1072 | 90 % |
+| local SP | 803 | 82 % |
+| pulled TMP | 2535 | 78 % |
+| pulled SP | 1418 | 52 % |
+
+Pulled SP matches worst: contributors drive map areas this install lacks. The
+hindsight primary differed from the straight-corridor primary on 1264 of 4174
+clips that have one (30 %).
+
+Ghost drift, `drift` over the clips with no intervention, forked 3.5 s before the
+action (p90 metres; 1630 forks constant-rate, 1404 where ego was on its lane):
+
+| ghost | 1.0 s | 1.5 s | 2.0 s | 3.0 s | bend 2.0 s |
+|---|---|---|---|---|---|
+| held yaw, recorded speed (swerve) | 1.33 | 2.65 | 4.60 | 10.95 | 6.66 |
+| lane, recorded speed (swerve) | 1.03 | 1.32 | 1.47 | 2.00 | 1.56 |
+| recorded heading, held speed (brake/lift) | 1.29 | 2.12 | 3.26 | 6.48 | 3.75 |
+| lane, held speed (brake/lift) | 1.32 | 2.27 | 3.41 | 6.64 | 3.61 |
+
+After a swerve the lane ghost stays inside the 2.75 m credibility band for the
+full 3 s; after a brake or lift the speed guess dominates and the two are equal.

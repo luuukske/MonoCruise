@@ -69,15 +69,19 @@ def save_cache(rows: dict[str, dict]) -> None:
     _cache_path().write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _key(row: ClipRow) -> str:
+def cache_key(row: ClipRow) -> str:
     return f"{row.path}|{row.mtime:.6f}|{row.size_bytes}"
+
+
+# Old name, still imported by local scripts under tools/aeb_corpus_run/.
+_key = cache_key
 
 
 def features_for(rows: list[ClipRow], *, workers: int | None = None,
                  rebuild: bool = False, progress=None) -> dict[str, ClipFeatures]:
     """Feature rows keyed by clip_id, filling and persisting the cache as needed."""
     cache = {} if rebuild else load_cache()
-    todo = [r for r in rows if _key(r) not in cache]
+    todo = [r for r in rows if cache_key(r) not in cache]
     if todo:
         n_workers = default_workers() if workers is None else max(1, int(workers))
         if progress is not None:
@@ -87,7 +91,7 @@ def features_for(rows: list[ClipRow], *, workers: int | None = None,
             for i, row in enumerate(todo):
                 got = extract_path(row.path)
                 if got is not None:
-                    cache[_key(row)] = got
+                    cache[cache_key(row)] = got
                 if progress is not None and (i + 1) % 50 == 0:
                     progress(f"  {i + 1}/{len(todo)}")
         else:
@@ -100,14 +104,14 @@ def features_for(rows: list[ClipRow], *, workers: int | None = None,
                     row = futs[fut]
                     got = fut.result()
                     if got is not None:
-                        cache[_key(row)] = got
+                        cache[cache_key(row)] = got
                     if progress is not None and (done % 50 == 0 or done == len(todo)):
                         progress(f"  {done}/{len(todo)}")
         save_cache(cache)
 
     out: dict[str, ClipFeatures] = {}
     for row in rows:
-        raw = cache.get(_key(row))
+        raw = cache.get(cache_key(row))
         if raw is None:
             continue
         out[row.clip_id] = ClipFeatures(**raw)
@@ -117,7 +121,7 @@ def features_for(rows: list[ClipRow], *, workers: int | None = None,
 def prune_cache(rows: list[ClipRow]) -> int:
     """Drop cache entries whose file identity is no longer in the index."""
     cache = load_cache()
-    live = {_key(r) for r in rows}
+    live = {cache_key(r) for r in rows}
     stale = [k for k in cache if k not in live]
     for k in stale:
         cache.pop(k, None)

@@ -1,7 +1,7 @@
 """Agent-facing AEB corpus CLI: python -m tools.aeb_agent <command>. Dev only.
 
-Read tools/aeb_agent/README.md before using this. Every command is read-only
-except `apply` and `revert`, and both of those are dry runs without --commit.
+Read tools/aeb_agent/README.md before using this. No command writes to a clip:
+labels are set by a person in tools/aeb_review.py, never by this tool.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ if _repo not in sys.path:
 
 logging.getLogger("ui.popup.popup_window").setLevel(logging.CRITICAL)
 
-from tools.aeb_agent import ab, audit, digest, labels  # noqa: E402
+from tools.aeb_agent import ab, audit, cli_context, digest  # noqa: E402
 from tools.aeb_agent.corpus import (  # noqa: E402
     build_index, composition, filter_rows, load_clip,
 )
@@ -137,9 +137,17 @@ def cmd_show(args) -> int:
         result = None
         if args.ab:
             result = ab.results_for([row], progress=_note).get(row.clip_id)
-        print(digest.build(row, clip, scenes=args.scenes,
+        ctx = None
+        feats = None
+        if not args.no_context:
+            from tools.aeb_agent.context_cache import context_for
+            feats = features_for([row], workers=1).get(row.clip_id)
+            if feats is not None:
+                ctx = context_for([row], {row.clip_id: feats}, workers=1).get(row.clip_id)
+        print(digest.build(row, clip, feats=feats, scenes=args.scenes,
                            timeline=not args.no_timeline, replay=args.replay,
-                           ab_result=result))
+                           ab_result=result, ctx=ctx,
+                           full_header=args.full_header))
         print()
     return 0
 
@@ -168,8 +176,12 @@ def cmd_scene(args) -> int:
 
 
 def cmd_triage(args) -> int:
-    """Write one dossier file per clip plus a worklist, for a batch review pass."""
+    """Write one dossier file per clip plus a worklist, for reading in batches. Never labels."""
+    from tools.aeb_agent.context_cache import context_for
+
     _index, rows, feats = _select(args, need_features=True)
+    ctx_by_id = {} if args.no_context else context_for(
+        rows, feats, workers=args.workers, progress=_note)
     abs_by_id = {}
     if not args.no_ab:
         abs_by_id = ab.results_for(rows, workers=args.workers, progress=_note)
@@ -180,32 +192,34 @@ def cmd_triage(args) -> int:
         clip = load_clip(row)
         if clip is None:
             continue
+        ctx = ctx_by_id.get(row.clip_id)
         text = digest.build(row, clip, feats=feats.get(row.clip_id),
                             scenes=args.scenes, replay=args.replay,
-                            ab_result=abs_by_id.get(row.clip_id))
+                            ab_result=abs_by_id.get(row.clip_id), ctx=ctx)
         dest = out_dir / f"{row.short}.txt"
         dest.write_text(text, encoding="utf-8")
         f = feats.get(row.clip_id)
         a = abs_by_id.get(row.clip_id)
-        worklist.append({
+        item = {
             "clip_id": row.clip_id, "short": row.short, "dossier": dest.name,
             "current_class": row.label_class, "severity": row.severity,
             "window": row.window,
             "scenario": (f.scenario if f else []), "flags": (f.flags if f else []),
-            "clearance_changed": bool(a and a.changed),
-            "clearance_material": bool(a and a.material),
-            "clearance_tag": (a.tag if a else ""),
-            "clearance_direction": (a.direction if a else "unknown"),
-            "mtime": row.mtime, "size_bytes": row.size_bytes,
-        })
+            "hindsight_primary": (ctx or {}).get("hindsight_primary"),
+            "map_matched": bool((ctx or {}).get("map_matched")),
+        }
+        if not args.no_ab:
+            item.update({"clearance_changed": bool(a and a.changed),
+                         "clearance_material": bool(a and a.material),
+                         "clearance_tag": (a.tag if a else ""),
+                         "clearance_direction": (a.direction if a else "unknown")})
+        worklist.append(item)
         if args.verbose or i % 25 == 0:
             _note(f"  {i}/{len(rows)} {row.short}")
     index_file = out_dir / "worklist.json"
     index_file.write_text(json.dumps(worklist, indent=1), encoding="utf-8")
     print(json.dumps({"clips": len(worklist), "dir": str(out_dir),
-                      "worklist": index_file.name,
-                      "next": "read each dossier, then append to proposals.jsonl "
-                              "and run: python -m tools.aeb_agent apply"}, indent=1))
+                      "worklist": index_file.name}, indent=1))
     return 0
 
 
@@ -218,6 +232,12 @@ def cmd_thumbs(args) -> int:
     import base64
 
     _index, rows, feats = _select(args, need_features=not args.fast)
+    held = [r for r in rows if r.origin != "local"]
+    if held and not args.include_contributed:
+        # Contributed screenshots stay out of agent workspaces: labelling is text only.
+        rows = [r for r in rows if r.origin == "local"]
+        _note(f"{len(held)} contributed clips skipped; --include-contributed exports them "
+              f"for a person to view, never for an agent")
     out_dir = workspace() / args.out
     out_dir.mkdir(parents=True, exist_ok=True)
     written = missing = 0
@@ -310,73 +330,6 @@ def cmd_index(args) -> int:
     return 0
 
 
-def cmd_propose(args) -> int:
-    index = build_index(args.store)
-    row = index.resolve(args.clip)
-    window = None
-    if args.window:
-        parts = [float(x) for x in args.window.replace(",", " ").split()]
-        if len(parts) != 2:
-            print("--window needs two numbers: 'from to'", file=sys.stderr)
-            return 2
-        window = parts
-    prop = labels.Proposal(
-        clip_id=row.clip_id, label_class=args.set_class, severity=args.severity,
-        window=window, target_vid=args.target_vid, notes=args.notes,
-        rationale=args.rationale, confidence=args.confidence,
-        reviewer=args.reviewer, window_source=args.window_source,
-        mtime=row.mtime, size_bytes=row.size_bytes,
-    )
-    path = labels.append_proposal(prop, labels.proposals_path(args.file))
-    print(json.dumps({"appended": row.short, "file": str(path)}))
-    return 0
-
-
-def cmd_apply(args) -> int:
-    index = build_index(args.store)
-    props = labels.read_proposals(labels.proposals_path(args.file))
-    if not props:
-        print("no proposals found", file=sys.stderr)
-        return 1
-    feats = {}
-    rows = [index.resolve(p.clip_id) for p in props]
-    feats = features_for(rows, workers=args.workers, progress=_note)
-    checks = [labels.validate(p, index, feats, min_confidence=args.min_confidence,
-                              allow_recorded_window=args.allow_recorded_window)
-              for p in props]
-    for check in checks:
-        print(check.line())
-    result = labels.apply_checks(checks, index, commit=args.commit)
-    print(json.dumps(result), file=sys.stderr)
-    if not args.commit:
-        print("dry run: pass --commit to write", file=sys.stderr)
-    return 0
-
-
-def cmd_journal(args) -> int:
-    entries = labels.read_journal()
-    if args.json:
-        print(json.dumps(entries[-args.limit:] if args.limit else entries, indent=1))
-        return 0
-    for entry in (entries[-args.limit:] if args.limit else entries):
-        before = entry.get("before", {}) or {}
-        after = entry.get("after", {}) or {}
-        print(f"{entry['at']}  {entry['clip_id'][:8]}  "
-              f"{before.get('class') or '-'} -> {after.get('class')}  "
-              f"({entry.get('reviewer')}) {entry.get('rationale', '')[:70]}")
-    print(f"{len(entries)} journal entries", file=sys.stderr)
-    return 0
-
-
-def cmd_revert(args) -> int:
-    index = build_index(args.store)
-    result = labels.revert(args.clip, index, commit=args.commit)
-    print(json.dumps(result))
-    if not args.commit:
-        print("dry run: pass --commit to write", file=sys.stderr)
-    return 0
-
-
 def cmd_score(args) -> int:
     from core.aeb.clip_score import format_corpus
     from core.aeb.clip_store import ClipStore
@@ -460,6 +413,10 @@ def build_parser() -> argparse.ArgumentParser:
                       help="also run the working-tree AEB over the clip")
     show.add_argument("--ab", action="store_true",
                       help="also A/B the 9eee3dd clearance flag on this clip")
+    show.add_argument("--no-context", action="store_true", dest="no_context",
+                      help="skip the hindsight + map SITUATION and EVIDENCE blocks")
+    show.add_argument("--full-header", action="store_true", dest="full_header",
+                      help="also print file name, capture time and client version")
     show.set_defaults(func=cmd_show)
 
     scene = sub.add_parser("scene", help="ASCII top-down maps for one clip")
@@ -479,12 +436,18 @@ def build_parser() -> argparse.ArgumentParser:
     tri.add_argument("--replay", action="store_true")
     tri.add_argument("--no-ab", action="store_true", dest="no_ab",
                      help="skip the clearance-flag A/B block")
+    tri.add_argument("--no-context", action="store_true", dest="no_context",
+                     help="skip the hindsight + map SITUATION and EVIDENCE blocks")
     tri.set_defaults(func=cmd_triage)
+
+    cli_context.register(sub, _add_filters)
 
     th = sub.add_parser("thumbs",
                         help="export clip screenshots for a human to flip through")
     _add_filters(th)
     th.add_argument("--out", default="thumbs", help="subdirectory of the workspace")
+    th.add_argument("--include-contributed", action="store_true", dest="include_contributed",
+                    help="also export contributed clips' screenshots, for a person only")
     th.set_defaults(func=cmd_thumbs)
 
     rn = sub.add_parser("render",
@@ -524,45 +487,6 @@ def build_parser() -> argparse.ArgumentParser:
     idx.add_argument("--refresh-features", action="store_true", dest="refresh_features")
     idx.add_argument("--workers", type=int, default=None)
     idx.set_defaults(func=cmd_index)
-
-    prop = sub.add_parser("propose", help="append one label proposal")
-    prop.add_argument("clip")
-    prop.add_argument("--store", default="both", choices=("both", "local", "remote"))
-    prop.add_argument("--class", dest="set_class", required=True)
-    prop.add_argument("--severity", type=int, default=3)
-    prop.add_argument("--window", default="", help="'from to' in seconds")
-    prop.add_argument("--target-vid", type=int, default=None, dest="target_vid")
-    prop.add_argument("--notes", default="")
-    prop.add_argument("--rationale", required=True,
-                      help="why, in one sentence; refused if empty")
-    prop.add_argument("--confidence", type=float, default=0.0)
-    prop.add_argument("--reviewer", default="agent")
-    prop.add_argument("--window-source", default="judged", dest="window_source",
-                      choices=("judged", "recorded", "unchanged"))
-    prop.add_argument("--file", default="", help="proposals file name")
-    prop.set_defaults(func=cmd_propose)
-
-    app = sub.add_parser("apply", help="validate proposals, write with --commit")
-    app.add_argument("--store", default="both", choices=("both", "local", "remote"))
-    app.add_argument("--file", default="")
-    app.add_argument("--commit", action="store_true")
-    app.add_argument("--workers", type=int, default=None)
-    app.add_argument("--min-confidence", type=float, default=0.0,
-                     dest="min_confidence")
-    app.add_argument("--allow-recorded-window", action="store_true",
-                     dest="allow_recorded_window")
-    app.set_defaults(func=cmd_apply)
-
-    jr = sub.add_parser("journal", help="applied label changes, newest last")
-    jr.add_argument("--limit", type=int, default=40)
-    jr.add_argument("--json", action="store_true")
-    jr.set_defaults(func=cmd_journal)
-
-    rev = sub.add_parser("revert", help="restore pre-change labels from the journal")
-    rev.add_argument("clip", nargs="+")
-    rev.add_argument("--store", default="both", choices=("both", "local", "remote"))
-    rev.add_argument("--commit", action="store_true")
-    rev.set_defaults(func=cmd_revert)
 
     sc = sub.add_parser("score", help="corpus objective under the working tree")
     sc.add_argument("--store", default="both", choices=("both", "local", "remote"))

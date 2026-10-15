@@ -263,3 +263,63 @@ def test_core_never_imports_tools():
             if any(name == "tools" or name.startswith("tools.") for name in names):
                 offenders.append(f"{_rel(path)}:{node.lineno}")
     assert not offenders, f"core imports tools: {offenders}"
+
+
+# Clip labels are set by a person in the review tool (AGENTS.md, "Clip labels are human-only").
+_LABEL_WRITERS = {"tools/aeb_review.py"}
+_LABEL_BUILDERS = {
+    "core/aeb/clip_schema.py",
+    # ClipStore.write_label itself: applies what the review tool hands it.
+    "core/aeb/clip_store.py",
+    # Debug background clips get a capture-time `tn`, unvalidated and marked auto-tagged.
+    "core/aeb/recorder.py",
+    "tools/aeb_review.py",
+    # Rebuilds the review tool's index from labels already stored in clips.
+    "tools/aeb_review_widgets.py",
+}
+
+
+def _label_scope():
+    roots = ("core", "tools", "ui", "shared", "updater", "checker")
+    for path in _py_files(*(REPO / r for r in roots if (REPO / r).is_dir())):
+        rel = _rel(path)
+        # Gitignored local scratch: absent in CI, so it cannot ship a label writer.
+        if rel.startswith("tools/aeb_corpus_run/"):
+            continue
+        yield path, rel
+
+
+def _is_metadata(node: ast.AST) -> bool:
+    if isinstance(node, ast.Attribute):
+        return node.attr == "metadata"
+    return isinstance(node, ast.Name) and node.id in ("meta", "metadata")
+
+
+def test_clip_labels_are_written_only_by_the_human_review_tool():
+    """No script, agent or rule may write, build or bulk-edit a clip label.
+
+    A Grok 4.7 labeller matched the human labels on 47 % of held-out clips; the
+    `ignore` call is a human judgement the recording does not carry.
+    """
+    offenders = []
+    for path, rel in _label_scope():
+        for node in ast.walk(_parse(path)):
+            if isinstance(node, ast.Call):
+                fn = node.func
+                name = (fn.attr if isinstance(fn, ast.Attribute)
+                        else fn.id if isinstance(fn, ast.Name) else "")
+                if name == "write_label" and rel not in _LABEL_WRITERS:
+                    offenders.append(f"{rel}:{node.lineno} calls write_label")
+                if name == "Label" and rel not in _LABEL_BUILDERS:
+                    offenders.append(f"{rel}:{node.lineno} builds a Label")
+            targets = (node.targets if isinstance(node, ast.Assign)
+                       else [node.target] if isinstance(node, (ast.AugAssign, ast.AnnAssign))
+                       else [])
+            for t in targets:
+                if (isinstance(t, ast.Attribute) and t.attr == "label"
+                        and _is_metadata(t.value) and rel not in _LABEL_BUILDERS):
+                    offenders.append(f"{rel}:{node.lineno} assigns metadata.label")
+    assert not offenders, (
+        "clip labels are human-only, set in tools/aeb_review.py (AGENTS.md): "
+        + ", ".join(offenders)
+    )
