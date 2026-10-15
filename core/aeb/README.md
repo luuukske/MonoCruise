@@ -2171,8 +2171,10 @@ Do **not** include `speed` in the inverse formula.
 
 `python -m tools.aeb_review` (dev only, never shipped). `tools/aeb_review.py` holds
 the window and the label form; `tools/aeb_review_widgets.py` holds the scene, the
-timeline strip, the key table and the background decoder; `tools/aeb_filter_trace.py`
-and `tools/aeb_filter_charts.py` hold the `C` filter-tuning window.
+timeline strip, the key table and the background decoder; `tools/aeb_review_transport.py`
+holds playback; `tools/aeb_filter_trace.py` and `tools/aeb_filter_charts.py` hold the
+`C` filter-tuning window. Reviewers (below) add `tools/aeb_review_remote.py`,
+`tools/aeb_review_claims.py` and `tools/aeb_review_import.py`.
 
 ### Ground reference markers
 
@@ -2342,6 +2344,58 @@ right". `fn` clips are the case that proves it: the recorded band is wrong there
 definition, which is what makes them misses.
 
 ---
+
+### Reviewers
+
+A few people Lukas enrolled tag clips too, as internal helpers (2026-10-15).
+Dev tooling only; nothing here ships.
+
+**Who.** Each reviewer has a handle (`r_` plus 2 to 16 lowercase letters or
+digits) and a token. The ld-tech endpoint `api/v1/aeb_review.php` keeps only the
+token's sha256 in its server config. Lukas's tool claims with the pull token.
+
+**Claims, so nobody tags a clip twice.** Selecting a clip claims it for 2 h,
+moving on unsaved releases it, saving marks it done. A clip someone else holds
+or tagged says so in the list, and Ctrl+N and save-and-advance skip it; it can
+still be opened. A reviewer's "Get batch" claims 50 random untagged clips for
+7 days, and the next batch comes only after 80% of this one is tagged.
+`python -m tools.aeb_review_remote --seed-done` marks every clip Lukas tagged
+done, so none is handed out. A network failure never blocks tagging: Lukas's
+done ids and reviewers' labels wait in `aeb_reviews/` next to the clip stores
+and are retried.
+
+**Lukas's labels never leave this machine.** His saves send the clip id only.
+The server keeps reviewers' labels as records, never inside a clip, and refuses
+to serve a clip that carries a label.
+
+**What a reviewer receives.** Batch clips only, redacted on serve:
+`captured_at` and `calibration_id` blanked, `client_version` cut to
+major.minor, and every `t_wall` shifted by one random whole number of seconds
+(at least 30 days) inside [2^30, 2^31) s. One binade has one float spacing, so
+every difference stays exact. Replay decides the same but is not bit-identical
+in general: the radar's LS speed slope and AEB's LOS-rate fit average absolute
+timestamps, which moved target decel by 8e-14 m/s2 on one of four real clips,
+with no decision change. Positions, thumbnail and calibration are kept because
+the verdict depends on them. Positions are not noised (position noise is itself
+an `ignore` reason) and the world is not translated (the map overlay needs real
+coordinates).
+
+**Own clips.** `--reviewer --own` opens the reviewer's own capture store. Debug
+keeps clips after upload under the same id, so claims dedupe against Lukas's
+pulled copy. A labelled clip the server never received goes up whole with its
+label stripped, indexed as a review upload so no batch hands it out.
+
+**Import.** `python -m tools.aeb_review_import` reports; `--apply` writes. It is
+the only code allowed to move a reviewer's label into a clip (AGENTS.md): it
+never writes over a label, re-reads each clip right before writing, sets `by`
+to the reviewer's handle, backs up every file it rewrites under
+`aeb_reviews/backup/`, and lists reviewers who disagree instead of picking one.
+`--remove-reviewer r_xxxx` clears every label that reviewer set. A label Lukas
+saves over a reviewer's becomes his (`by` empty).
+
+**Leaks.** Nothing stops a reviewer keeping what they saw. A leaked reviewer
+token reaches that reviewer's batch and at most 150 clip downloads a day, and
+the claims table records who held which clip.
 
 ## 12. Screenshot capture
 

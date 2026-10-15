@@ -266,7 +266,11 @@ def test_core_never_imports_tools():
 
 
 # Clip labels are set by a person in the review tool (AGENTS.md, "Clip labels are human-only").
-_LABEL_WRITERS = {"tools/aeb_review.py"}
+_LABEL_WRITERS = {
+    "tools/aeb_review.py",
+    # Moves enrolled reviewers' labels in, never over a label; tests/aeb/test_review_import.py.
+    "tools/aeb_review_import.py",
+}
 _LABEL_BUILDERS = {
     "core/aeb/clip_schema.py",
     # ClipStore.write_label itself: applies what the review tool hands it.

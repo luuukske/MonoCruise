@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QFrame, QLabel, QListWidgetItem, QPushButton, QWid
 
 from core.aeb.clip_replay import ReviewFrame, decode_radar_stream, replay_clip, replay_frames
 from core.aeb.clip_schema import Clip, ClipMetadata, Label
-from core.aeb.clip_store import ClipInfo, ClipStore, contributed_clip_root, default_clip_root
+from core.aeb.clip_store import ClipInfo, ClipStore, contributed_clip_root
 from core.aeb.debug_window import AEBDebugWindow
 
 TTC_INF = 100.0         # recorded sentinel is 1e9; past this there is no tracked threat
@@ -113,7 +113,7 @@ class ThumbnailView(QLabel):
 
 
 _INDEX_NAME = ".review_index.json"
-_INDEX_VERSION = 1
+_INDEX_VERSION = 2   # 2: rows carry the label's reviewer handle
 
 
 def _read_index(store: ClipStore) -> dict:
@@ -152,7 +152,8 @@ def _write_index(store: ClipStore, rows: dict) -> None:
 
 def _meta_from_index(row: dict) -> ClipMetadata:
     cls = row.get("label")
-    label = Label(class_=str(cls), notes=str(row.get("notes") or "")) if cls else None
+    label = (Label(class_=str(cls), notes=str(row.get("notes") or ""), by=str(row.get("by") or ""))
+             if cls else None)
     return ClipMetadata(
         clip_id=str(row.get("clip_id") or ""),
         trigger_source=str(row.get("trigger") or ""),
@@ -169,6 +170,7 @@ def _index_row(meta: ClipMetadata | None, mtime_ns: int, size: int) -> dict:
         "trigger": meta.trigger_source if meta else "",
         "label": label.class_ if label else None,
         "notes": (label.notes or "") if label else "",
+        "by": label.by if label else "",
     }
 
 
@@ -674,15 +676,18 @@ def _entry_visible(meta: ClipMetadata | None, search: str, cls_filter: str) -> b
 
 
 def _clip_item(info: ClipInfo, meta: ClipMetadata | None,
-               origin: str = "local") -> QListWidgetItem:
-    """One list row: clip id, tag badge, trigger source, and size."""
+               origin: str = "local", claim=None) -> QListWidgetItem:
+    """One list row: clip id, tag badge, trigger source, size, and who else has it."""
     tagged = meta is not None and meta.label is not None
     cls = meta.label.class_ if tagged else None
     trig = meta.trigger_source if meta else "?"
     badge = f"● {cls}" if tagged else "○ untagged"
+    if tagged and meta.label.by:
+        badge += f" ({meta.label.by})"
     kb = info.size_bytes // 1024
     cid = meta.clip_id[:8] if meta else "????????"
-    item = QListWidgetItem(f"{cid}   {badge}\n{trig}  {kb} KB")
+    held = f"  · {claim.describe()}" if claim is not None and claim.blocks else ""
+    item = QListWidgetItem(f"{cid}   {badge}\n{trig}  {kb} KB{held}")
     item.setData(Qt.UserRole, str(info.path))
     item.setBackground(QBrush(_REMOTE_BG if origin == "remote" else _LOCAL_BG))
     return item
@@ -786,15 +791,3 @@ def stop_review_workers(win) -> None:
     for thread in (win._load_thread, win._scan_thread):
         thread.quit()
         thread.wait(2000)
-
-
-def _review_stores(*, root: str | None, contributed_only: bool) -> list[ClipStore]:
-    """Default view merges local + contributed; flags narrow it to one root."""
-    if root:
-        return [ClipStore(root=root)]
-    if contributed_only:
-        return [ClipStore(root=contributed_clip_root())]
-    return [
-        ClipStore(root=default_clip_root()),
-        ClipStore(root=contributed_clip_root()),
-    ]

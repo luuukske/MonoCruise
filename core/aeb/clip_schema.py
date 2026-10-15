@@ -351,9 +351,11 @@ class Label:
     target_vid: int | None = None
     desired_peak_decel_ms2: float | None = None
     notes: str = ""
+    # Who set it: empty for Lukas, else an enrolled reviewer's handle (r_...).
+    by: str = ""
 
     def to_json(self) -> dict:
-        return {
+        out = {
             "class": self.class_,
             "severity": self.severity,
             "should_trigger": self.should_trigger,
@@ -361,6 +363,9 @@ class Label:
             "desired_peak_decel_ms2": self.desired_peak_decel_ms2,
             "notes": self.notes,
         }
+        if self.by:
+            out["by"] = self.by
+        return out
 
     @classmethod
     def from_json(cls, d: dict) -> "Label":
@@ -371,6 +376,7 @@ class Label:
             target_vid=_opt_int(d.get("target_vid")),
             desired_peak_decel_ms2=_opt_float(d.get("desired_peak_decel_ms2")),
             notes=str(d.get("notes", "")),
+            by=str(d.get("by") or ""),
         )
 
 

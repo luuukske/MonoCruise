@@ -22,12 +22,15 @@ from core.aeb.clip_schema import ClipMetadata, Label
 from core.aeb.clip_score import class_window_warning
 from core.aeb.clip_store import ClipInfo, ClipStore
 from tools.aeb_fetch import safe_pull_root
+from tools.aeb_review_claims import claims_setup
 from tools.aeb_review_map import map_toggle
+from tools.aeb_review_remote import ReviewClient, review_stores
+from tools.aeb_review_transport import ReviewTransport
 from tools.aeb_review_widgets import (
     DecisionStrip, Loaded, SceneWidget, ThumbnailView,
     action_index, recorded_band, start_review_workers, stop_review_workers, store_origin,
     _CLASSES, _CLASS_KEYS, _LOCAL_BG, _REMOTE_BG,
-    _button, _clip_item, _entry_visible, _fmt, _hline, _review_stores,
+    _button, _clip_item, _entry_visible, _hline,
     _KEY_ACTIONS, keymap_overlay, pull_landed_in_view, pull_status_text,
 )
 
@@ -36,7 +39,7 @@ _CACHE_MAX = 8          # replayed clips held in RAM, about 14 MB each
 _PREFETCH_AHEAD = 4
 
 
-class ReviewWindow(QMainWindow):
+class ReviewWindow(ReviewTransport, QMainWindow):
 
     load_requested = Signal(str, bool)
     eval_requested = Signal(str, object)
@@ -44,8 +47,10 @@ class ReviewWindow(QMainWindow):
     scan_requested = Signal(object)
     pull_requested = Signal(object)
     map_requested = Signal(str, object, object)
+    remote_requested = Signal(str, object)
 
-    def __init__(self, stores: ClipStore | list[ClipStore]) -> None:
+    def __init__(self, stores: ClipStore | list[ClipStore], *,
+                 client: ReviewClient | None = None, reviewer: bool = False) -> None:
         super().__init__()
         self.setWindowTitle("AEB Clip Review")
         self.resize(1650, 900)
@@ -80,6 +85,9 @@ class ReviewWindow(QMainWindow):
         start_review_workers(self)
 
         self._build_ui()
+        claims_setup(self, client, reviewer=reviewer)
+        if reviewer:
+            self._update_btn.setText("Get batch")
         self._refresh_clips()
 
     def _build_ui(self) -> None:
@@ -174,6 +182,10 @@ class ReviewWindow(QMainWindow):
         self._clip_meta_lbl.setStyleSheet("color:#999;")
         self._clip_meta_lbl.setWordWrap(True)
         right.addWidget(self._clip_meta_lbl)
+        # Who else is on this clip (claims), so two people never tag it twice.
+        self._claim_lbl = QLabel("")
+        self._claim_lbl.setWordWrap(True)
+        right.addWidget(self._claim_lbl)
 
         # Context screenshot grabbed at the trigger moment (above the labeling).
         self._thumb = ThumbnailView()
@@ -310,12 +322,16 @@ class ReviewWindow(QMainWindow):
         self.scan_requested.emit(dict(self._meta_cache))
 
     def _update_from_server(self) -> None:
-        """Pull missing contributed clips; never writes into the local capture store."""
+        """Pull missing contributed clips, or a reviewer's batch; never into the capture store."""
         if self._pulling:
             return
-        root = self._pull_target()
         self._pulling = True
         self._update_btn.setEnabled(False)
+        if self._reviewer:
+            self._status.setText("getting batch...")
+            self._claims_batch(self._store.root)
+            return
+        root = self._pull_target()
         self._status.setText(f"updating from server into {root.name}...")
         self.pull_requested.emit(root)
 
@@ -357,6 +373,7 @@ class ReviewWindow(QMainWindow):
             for info, meta, _origin in normalized
         }
         self._apply_filter()
+        self._claims_refresh()
 
     def _apply_filter(self) -> None:
         """Render the cached scan through the current search + class filter."""
@@ -374,7 +391,7 @@ class ReviewWindow(QMainWindow):
                 untagged += 1
             if not _entry_visible(meta, search, cls_filter):
                 continue
-            self._list.addItem(_clip_item(info, meta, origin))
+            self._list.addItem(_clip_item(info, meta, origin, self._claim_of(meta)))
             self._visible.append(str(info.path))
         local_n = len(self._entries) - remote_n
         self._count_lbl.setText(
@@ -406,9 +423,11 @@ class ReviewWindow(QMainWindow):
             self._list.setCurrentRow(i)
 
     def _is_untagged(self, path: str) -> bool:
+        """Untagged and nobody else holds it, so moving on never lands on taken work."""
         cached = self._meta_cache.get(path)
         meta = cached[2] if cached else None
-        return meta is None or meta.label is None
+        claim = self._claim_of(meta)
+        return (meta is None or meta.label is None) and not (claim is not None and claim.blocks)
 
     def _order_after_current(self) -> list[str]:
         """Visible paths starting after the current clip, wrapping once."""
@@ -445,6 +464,7 @@ class ReviewWindow(QMainWindow):
         path = current.data(Qt.UserRole)
         self._path = path
         self._awaiting = path
+        self._claim_select(path)
 
         hit = self._cache.get(path)
         if hit is not None:
@@ -517,6 +537,8 @@ class ReviewWindow(QMainWindow):
         size = self._thumb.source_size()
         if size is not None:
             meta += f" · thumb {size[0]}x{size[1]}"
+        if m.label is not None and m.label.by:
+            meta += f"\nlabel set by reviewer {m.label.by}"
         self._clip_meta_lbl.setText(meta)
         dur = self._frames[-1].t_rel if self._frames else 1.0
         self._strip.set_frames(self._frames, dur)
@@ -631,6 +653,7 @@ class ReviewWindow(QMainWindow):
             # rescanning, so a save stays in milliseconds at 600+ clips.
             self._cache.pop(str(self._path), None)
             self._refresh_entry(str(self._path))
+            self._claim_saved(str(self._path), lbl)
         return ok
 
     def _refresh_entry(self, path: str) -> None:
@@ -699,72 +722,6 @@ class ReviewWindow(QMainWindow):
         if path == str(self._path) and self._charts is not None:
             self._charts.set_replayed(track or [])
 
-    # Transport
-
-    def _cur_t(self) -> float:
-        return self._frames[self._idx].t_rel if self._frames else 0.0
-
-    def _toggle_play(self) -> None:
-        if self._play_timer.isActive():
-            self._play_timer.stop()
-            self._play_btn.setText("Play")
-        elif self._frames:
-            self._play_timer.start(33)
-            self._play_btn.setText("Pause")
-
-    def _advance(self) -> None:
-        if self._idx >= len(self._frames) - 1:
-            self._play_timer.stop()
-            self._play_btn.setText("Play")
-            return
-        self._idx += 1
-        self._refresh()
-
-    def _step(self, delta: int) -> None:
-        if not self._frames:
-            return
-        self._idx = max(0, min(len(self._frames) - 1, self._idx + delta))
-        self._refresh()
-
-    def _first(self) -> None:
-        self._step(-len(self._frames))
-
-    def _last(self) -> None:
-        self._step(len(self._frames))
-
-    def _prev(self) -> None:
-        self._step(-1)
-
-    def _next(self) -> None:
-        self._step(1)
-
-    def _seek_time(self, t_rel: float) -> None:
-        if not self._frames:
-            return
-        self._idx = min(range(len(self._frames)),
-                        key=lambda i: abs(self._frames[i].t_rel - t_rel))
-        self._refresh()
-
-    def _refresh(self) -> None:
-        if not self._frames:
-            self._scene.set_snapshot(None)
-            return
-        f = self._frames[self._idx]
-        self._scene.set_snapshot(f.snapshot)
-        self._strip.set_cursor(f.t_rel)
-        if self._charts is not None:
-            self._charts.set_cursor(f.t_rel)
-        self._time_lbl.setText(f"t={f.t_rel:.2f}s  ({self._idx + 1}/{len(self._frames)})")
-        la = f.live_aeb
-        state = "BRAKE" if la.aeb_brake else ("WARN" if la.aeb_warn else "standby")
-        in_win = self._window is not None and self._window[0] <= f.t_rel <= self._window[1]
-        truth = "should-trigger" if in_win else ("must-not" if self._window is None else "outside")
-        self._decision_lbl.setText(
-            f"recorded: {state}  demand={f.raw_target_ms2:.1f}"
-            f" (sent {la.target_decel_ms2:.1f})  ttc={_fmt(la.time_to_collision)}"
-            f"  |  truth: {truth}"
-        )
-
     def closeEvent(self, event) -> None:
         self._play_timer.stop()
         if self._charts is not None:
@@ -772,6 +729,7 @@ class ReviewWindow(QMainWindow):
             self._charts = None
         stop_review_workers(self)
         self._stop_map()
+        self._stop_claims()
         super().closeEvent(event)
 
 
@@ -783,12 +741,22 @@ def main(argv: list[str] | None = None) -> int:
                         help="open only this clip store (default: local + contributed)")
     parser.add_argument("--contributed", action="store_true",
                         help="open only the pulled-in contributed store")
+    parser.add_argument("--reviewer", action="store_true",
+                        help="tag a batch from the server (MONOCRUISE_REVIEWER_TOKEN)")
+    parser.add_argument("--own", action="store_true",
+                        help="with --reviewer: tag your own recorded clips instead of a batch")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
-    stores = _review_stores(root=args.root, contributed_only=args.contributed)
+    stores = review_stores(root=args.root, contributed_only=args.contributed,
+                           reviewer=args.reviewer, own=args.own)
+    # Lukas claims with the pull token; without one the tool works as before, unclaimed.
+    client = ReviewClient.from_env(admin=not args.reviewer)
     app = QApplication.instance() or QApplication(sys.argv)
-    win = ReviewWindow(stores)
+    win = ReviewWindow(stores, client=client, reviewer=args.reviewer)
     labels = "+".join(store_origin(s) for s in stores)
+    if args.reviewer:
+        labels = "reviewer, own clips" if args.own else "reviewer, batch"
+        win._update_btn.setVisible(not args.own)
     win.setWindowTitle(f"AEB Clip Review  [{labels}]")
     win.show()
     return app.exec()
