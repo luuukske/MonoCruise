@@ -186,7 +186,7 @@ corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
 |-------|--------|---------|
 | `position.x/z` | **Unfiltered** shared-memory world coordinates | Arc start position, rendering, collision geometry |
 | `_smooth_yaw` | Wrap-safe EMA of `rotation.euler()[1]` in radians (`_RAW_YAW_ALPHA = 0.5`, AI and TMP) | **Arc curvature. Never use `rotation.euler()` directly for arcs.** |
-| `speed` | Accel-corrected smoothed speed (`speed_corr`): see filter chain below. AI + TMP | AEB arc direction, TTB |
+| `speed` | Accel-corrected smoothed speed (`speed_corr`): see filter chain below. AI + TMP; a TMP body matched to the SDK reads the sender's own speed unfiltered (§19) | AEB arc direction, TTB |
 | `acc_speed` | ACC speed: adaptive filter on `speed_corr`: sub-deadband per-tick changes get a long time constant, larger changes a short one when they agree with the de-noised trend; standstill latch clamps to exactly 0 near rest (filter chain below). Runs on the **ACC chain** (long position window only). AI + TMP | ACC following-distance only |
 | `acceleration` | Nonlinear EMA of `d(speed_ema)/dt` over the speed-scaled `_ACCEL_FIT_WINDOW_S`: see filter chain below. Runs on the **AEB chain**, so it fits the short window's raw speed during a confirmed hard brake. Never floored or overridden (§7 "No floor on `acceleration`"). AI + TMP (buffer field 11 unused) | Arc decel/accel via `_accel_to_arc_params()` |
 | `acc_accel` | Same derivation and the **same window** on the **ACC chain**: long position window only. AI + TMP | ACC `a_lead` (CAH) only |
@@ -1995,8 +1995,31 @@ trailer records to SDK trailers. Same-place offsets measured 1.3 m at p99 for bo
 
 `_sdk_raw_speed`: the SDK velocity projected on the record's own smoothed heading,
 fed to both lanes as the raw speed (the hard-brake short window is not used, its
-state is reset). EMA, accel fit, `speed_corr` and `acc_speed` run as in §7, so the
-consumers see the same signals, only measured better.
+state is reset). The accel fit and the whole ACC lane (`acc_speed`, `acc_accel`) run
+as in §7.
+
+**AEB's `speed` is that value unfiltered** (`AEB_RAW_SPEED` in `tmp_sdk.py`). It is the
+sender's own physics speed, so the step-1 EMA and step-3 correction had no noise to
+remove and only added lag: on a crash-sized drop (25 -> 4 m/s in one packet) the
+filtered speed read 17.2 m/s on the frame the packet landed, took 0.13 to 0.27 s to
+come within 1 m/s, then undershot by about 1 m/s. Raw it is exact on that frame.
+`acceleration` stays the step-2 fit of the filtered lane: a per-packet difference
+reaches 17.5 m/s2 in normal driving, and an inflated accel bends the target's arc
+into a stop (§7, "No floor on `acceleration`"). ACC keeps the filter because the speed
+is a 4.5 Hz staircase that would step the gap law at every packet.
+
+**Match dropouts.** TruckersMP rubber-banding can push the shown pose past `MATCH_M`
+for a few frames (615 dropouts in 328k tracked frames within 80 m, p50 1 frame, p90 4).
+The filtered chain hid that because both paths shared one EMA; raw, the speed would
+alternate between the sender's value and the position fit (`6f9a69bb`: 23.8 and
+17 m/s on alternate frames). `_bridge_sdk_dropout` keeps AEB on the last SDK speed for
+`DROPOUT_HOLD_S` (0.3 s) and then fades it to the position fit over `DROPOUT_FADE_S`
+(0.5 s). Steps over 5 m/s at a match change: 2 filtered, 24 raw without the bridge, 6
+with it; the six are re-matches onto the sender's speed after the fit had drifted
+(52.6 m/s on a 24 m/s truck) and stall recoveries, both corrections toward the sender.
+A crash confirmed on the position track ends the hold: it is newer evidence than the
+last packet. The bridge sits in `Vehicle`, not in `attach`, because a clip stores only
+the bodies live matching paired, so a wider gate could never be replayed.
 
 A **stall** (`netcode_stall`, packet older than `STALE_MS`, 300 ms):
 - While the client still extrapolates the body (it moved at least 10% of the
@@ -2053,7 +2076,15 @@ Radar chain replayed both ways (`tools/tmp_sdk_analyze.py`):
 | gaps more than 2 m/s below the sender's own speed | 19 -> 2 (worst 18 -> 2.4 m/s) | 3 -> 0 (worst 30.7 -> 0) |
 | overshoot over 2 m/s after a gap | 14 -> 0 | 0 -> 0 |
 | braking midpoint behind the reference, p50 / p90 | 0.31 / 0.95 -> 0.19 / 0.45 s | 0.28 / 0.39 -> 0.23 / 0.27 s |
+| AEB speed behind the sender on braking, filtered -> raw, p50 / p90 | 0.16 / 0.21 -> 0.02 / 0.04 s | 0.05 / 0.23 -> 0.01 / 0.04 s |
 | crash confirmations on matched trucks | 0 -> 0 | 1 -> 1 |
+
+AEB replayed on the 321 clips that carry SDK frames, filtered -> raw speed with the
+dropout bridge: labelled cost -72.00 unchanged (40 scored, no verdict changed), brake
+onset 24 clips earlier and 13 later (median -0.03 s, latest +0.14 s), 2 unlabelled clips
+gain a brake and 6 lose one (2 of them labelled ignore). On TP `addd0abb` the brake now
+ends 0.3 s sooner: after a -11 m/s2 stop the step-3 correction read the lead at 8.1 m/s
+while the sender reported 9.0 to 9.4 at a steady gap.
 
 The 30.7 m/s case is a 1.2 s packet gap on a truck at 30.5 m/s: frozen on screen
 for 0.8 s, the §7 chain read it as stopped (the lag freeze never opened), the SDK

@@ -12,6 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Fixed
+- **AEB was slow to see a TruckersMP truck stop suddenly**: AEB smoothed the speed TruckersMP reports for each player, so a truck ahead crashing or stopping hard took a moment to show. AEB now uses that speed as reported and reacts as soon as it arrives; ACC still follows smoothly.
 - **AEB ignored slow TruckersMP traffic**: below 50 km/h AEB only reacted to other players closing much faster than you, so it could miss a truck backing across your lane or a car stopping in a jam. It now watches them like AI traffic.
 - **AEB braked for vehicles you were driving through**: a TruckersMP player you were ghosting through, or an AI car appearing on top of your truck, could set AEB off, and once it was braking it kept going even inside a no-collision zone. AEB now lets go of players in a zone and ignores any vehicle that sits inside your truck until you are apart.
 

@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from . import tmp_sdk
 from .tmp_sdk import SdkBody, crash_evidence
 
 _MAX_ANGULAR_VELOCITY: float = 45.0
@@ -1211,6 +1212,8 @@ class Vehicle:
         self._sdk_arrival_s: float = 0.0
         self._sdk_vx: float = 0.0
         self._sdk_vz: float = 0.0
+        self._sdk_aeb_speed: float | None = None
+        self._sdk_aeb_t: float = 0.0
 
         self._curvature_cache: float | None = None
         self._curvature_cache_valid: bool = False
@@ -1505,6 +1508,7 @@ class Vehicle:
         self.lag_confirmed = False
         self._pos_mismatch_frames = 0
         self._sdk_updates = None
+        self._sdk_aeb_speed = None
         # No rate or displacement may span the jump; a crash already confirmed stays latched.
         self._prev_rates = None
         self._prev2_rates = None
@@ -1911,7 +1915,7 @@ class Vehicle:
                     prev, t_now, -math.sin(self._smooth_yaw), -math.cos(self._smooth_yaw),
                     ego_x, ego_y, ego_z, ego_speed,
                 )
-                self._run_speed_chain(prev, t_now, dt, sdk_speed, sdk_speed)
+                self._run_speed_chain(prev, t_now, dt, sdk_speed, sdk_speed, aeb_raw=tmp_sdk.AEB_RAW_SPEED)
                 return
             self._advance_held_kinematics(prev, dt)
             return
@@ -1938,7 +1942,7 @@ class Vehicle:
             raw_speed = self._sdk_raw_speed(
                 prev, t_now, fwd_x, fwd_z, ego_x, ego_y, ego_z, ego_speed,
             )
-            self._run_speed_chain(prev, t_now, dt, raw_speed, raw_speed)
+            self._run_speed_chain(prev, t_now, dt, raw_speed, raw_speed, aeb_raw=tmp_sdk.AEB_RAW_SPEED)
             return
 
         # Raw speed: TMP from position LS; AI keeps buffer sign. See core/radar/README.md §7.
@@ -1965,10 +1969,12 @@ class Vehicle:
         )
         acc_raw_speed = raw_speed if self.crash_confirmed else long_raw_speed
         self._run_speed_chain(prev, t_now, dt, raw_speed, acc_raw_speed)
+        if self._sdk_aeb_speed is not None:
+            self._bridge_sdk_dropout(t_now)
 
     def _run_speed_chain(
         self, prev: "Vehicle", t_now: float, dt: float,
-        raw_speed: float, acc_raw_speed: float,
+        raw_speed: float, acc_raw_speed: float, aeb_raw: bool = False,
     ) -> None:
         """Steps 1-4 of the speed chain on both lanes. See core/radar/README.md §7."""
         (speed_ema, accel, speed_corr, speed_ema_history,
@@ -1984,8 +1990,13 @@ class Vehicle:
         self._speed_ema = speed_ema
         self._speed_ema_history = speed_ema_history
         self._smooth_accel = accel
-        self._smooth_speed = speed_corr
-        self.speed = speed_corr
+        # SDK body: AEB's speed is the sender's own, unfiltered (core/radar/README.md §19).
+        aeb_speed = raw_speed if aeb_raw else speed_corr
+        self._smooth_speed = aeb_speed
+        self.speed = aeb_speed
+        if aeb_raw:
+            self._sdk_aeb_speed = aeb_speed
+            self._sdk_aeb_t = t_now
         self.acceleration = accel
         self._acc_speed_ema = acc_speed_ema
         self._acc_speed_ema_history = acc_speed_ema_history
@@ -2001,6 +2012,8 @@ class Vehicle:
         self._sdk_arrival_s = prev._sdk_arrival_s
         self._sdk_vx = prev._sdk_vx
         self._sdk_vz = prev._sdk_vz
+        self._sdk_aeb_speed = prev._sdk_aeb_speed
+        self._sdk_aeb_t = prev._sdk_aeb_t
         self.netcode_stall = self.sdk is not None and self.sdk.stale
         self.sdk_crash = prev.sdk_crash and self.sdk is not None
 
@@ -2024,6 +2037,18 @@ class Vehicle:
             self._sdk_vz = sdk.vz
         self.crash_confirmed = t_now < self._crash_hold_until
         self.sdk_crash = self.sdk_crash and self.crash_confirmed
+
+    def _bridge_sdk_dropout(self, t_now: float) -> None:
+        """A lost SDK match holds AEB on the sender's last speed, then fades to the fit (§19)."""
+        elapsed = t_now - self._sdk_aeb_t
+        w = 1.0 - (elapsed - tmp_sdk.DROPOUT_HOLD_S) / tmp_sdk.DROPOUT_FADE_S
+        if self.crash_confirmed or w <= 0.0:
+            # A crash on the position track is fresher evidence than the last packet.
+            self._sdk_aeb_speed = None
+            return
+        w = min(1.0, w)
+        self.speed = w * self._sdk_aeb_speed + (1.0 - w) * self.speed
+        self._smooth_speed = self.speed
 
     def _sdk_raw_speed(
         self, prev: "Vehicle", t_now: float, fwd_x: float, fwd_z: float,

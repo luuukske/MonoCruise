@@ -129,7 +129,7 @@ def test_a_real_stop_tracks_down_without_a_crash():
         worst_lag = max(worst_lag, v.speed - sender.speed)
         assert not v.crash_confirmed
     assert v.speed < 0.5
-    assert worst_lag < 3.0, "one packet interval of 7 m/s2 is 1.5 m/s; the EMA adds a little"
+    assert worst_lag < 2.0, "one packet interval of 7 m/s2 is about 1.9 m/s, AEB adds no filter lag"
 
 
 def test_a_crash_between_two_packets_confirms():
@@ -279,3 +279,67 @@ def test_a_long_frozen_stall_ramps_down_like_the_lag_freeze():
     assert t_10 - t_90 >= 3 * DT - 1e-9, "ramped over several frames, not stepped"
     assert t_10 <= frozen_at + 3.0 * freeze + 0.3
     assert trace[-1][1] < 0.5
+
+
+def _drop_on_next_packet(v: Vehicle, sender: Sender, to_speed: float) -> Vehicle:
+    while sender.t - sender.pkt_t < PACKET_S - DT:
+        sender.advance(DT)
+        v = _frame(v, sender, 300.0, 0.0)
+    sender.speed = to_speed
+    sender.advance(DT)
+    return _frame(v, sender, 300.0, 0.0)
+
+
+def test_aeb_reads_a_crash_drop_the_frame_its_packet_lands():
+    """AEB's speed is the packet's own: no EMA between a crash and AEB. ACC keeps its filter."""
+    sender = Sender(25.0)
+    v = _drop_on_next_packet(_cruise(sender, 3.0), sender, 4.0)
+    assert sender.pkt_v == 4.0
+    assert v.speed == 4.0
+    assert v.acc_speed > 10.0
+
+
+def test_aeb_raw_speed_switch_restores_the_filtered_speed(monkeypatch):
+    monkeypatch.setattr(tmp_sdk, "AEB_RAW_SPEED", False)
+    sender = Sender(25.0)
+    v = _drop_on_next_packet(_cruise(sender, 3.0), sender, 4.0)
+    assert v.speed > 10.0
+
+
+def _dropout(v: Vehicle, sender: Sender, seconds: float, shown_speed: float) -> list[float]:
+    """The SDK match is lost while the client shows the body at ``shown_speed``."""
+    z, t, speeds = sender.shown_z, sender.t, []
+    for _ in range(int(round(seconds / DT))):
+        t += DT
+        z -= shown_speed * DT
+        cur = _vehicle(z)
+        attach([cur], None)
+        cur.update_from_last(v, t, 0.0, 1.0, 300.0, 0.0)
+        v = cur
+        speeds.append(v.speed)
+    return speeds, v
+
+
+def test_a_short_match_dropout_keeps_the_senders_speed():
+    """Rubber-banding can push the shown pose past the match gate for a frame or four."""
+    sender = Sender(20.0)
+    speeds, _ = _dropout(_cruise(sender, 3.0), sender, 4 * DT, shown_speed=12.0)
+    assert speeds == [20.0] * 4
+
+
+def test_a_long_match_dropout_fades_to_the_position_fit_without_a_step():
+    sender = Sender(20.0)
+    speeds, v = _dropout(_cruise(sender, 3.0), sender, 1.5, shown_speed=12.0)
+    assert max(abs(b - a) for a, b in zip(speeds, speeds[1:])) < 2.0
+    assert v._sdk_aeb_speed is None
+    assert speeds[-1] < 16.0
+
+
+def test_a_crash_on_the_position_track_ends_the_dropout_hold():
+    sender = Sender(20.0)
+    v = _cruise(sender, 3.0)
+    v._crash_hold_until = sender.t + 2.0
+    speeds, v = _dropout(v, sender, DT, shown_speed=12.0)
+    assert v.crash_confirmed
+    assert v._sdk_aeb_speed is None
+    assert speeds[0] != 20.0
