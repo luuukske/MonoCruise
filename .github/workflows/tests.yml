@@ -35,14 +35,15 @@ jobs:
           pip install -r requirements-test.txt
 
       # needs_clips tests replay AEB clips from a local clip store that is not
-      # in the repo, so they are deselected here rather than left to skip
+      # in the repo, and needs_msvc tests build a native host that needs
+      # Windows, so both are deselected here rather than left to skip
       # silently. MONOCRUISE_STRICT_SKIPS turns any *other* skip into a build
       # failure: a test that skips is a test asserting nothing.
       - name: Run tests
         env:
           QT_QPA_PLATFORM: offscreen
           MONOCRUISE_STRICT_SKIPS: '1'
-        run: pytest -q --strict-markers -m "not needs_clips"
+        run: pytest -q --strict-markers -m "not needs_clips and not needs_msvc"
 
       # Runs after the tests on purpose: a style nit must never mask a real
       # test failure for a whole cycle. Rule set is narrow, see ruff.toml.
