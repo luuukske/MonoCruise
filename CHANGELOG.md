@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.3-preview.2] - 2026-10-18
 ### Fixed
 - **AEB was slow to see a TruckersMP truck stop suddenly**: AEB smoothed the speed TruckersMP reports for each player, so a truck ahead crashing or stopping hard took a moment to show. AEB now switches to that speed as reported the moment a truck ahead brakes hard.
 - **ACC overreacted behind TruckersMP players in slow traffic**: in jams ACC answered every small speed change of a player ahead, braking and accelerating with them. It now smooths those out, and still reacts sooner to real braking than before players' own speed was used.
