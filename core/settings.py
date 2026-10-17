@@ -115,8 +115,8 @@ class Settings(metaclass=_SingletonMeta):
     # Safety & warnings
     hazards_variable: bool = True
     autodisable_hazards: bool = True
-    horn_variable: bool = True
-    airhorn_variable: bool = True
+    # Brake hold at a stop. Off, a stopped truck is not held and can roll.
+    hill_assist: bool = True
     autostart_variable: bool = True
     AEB_enabled: bool = False
     # Warning style label from core/aeb/warning_sounds.py, and its volume in percent.

@@ -461,6 +461,13 @@ from ever rolling back further than the plain capture; do not relax one without
 re-running the hill grid in `tests/test_hold_crawl_follow.py`. Rationale and
 measurements: `core/acc/ACC_ARCHITECTURE.md` §10.3.
 
+`Settings.hill_assist` (default on) is the driver's switch for this hold.
+Off, the FSM is reset to ROLLING, except while AEB is braking, which still
+runs it. Below the 2 km/h capture, a command that is not asking to slow also
+drops the mapper brake, so sitting still does not keep the pedal down. The
+driver's own pedal, the OPD creep-cancel cushion, and AEB stay. A truck on a
+hill will roll. Do not remove the switch to stop that roll.
+
 ## Brake efficiency (`brake_efficiency.py`)
 
 Optional cruise-only degradation warning via EMA of measured vs expected decel. Flat-road

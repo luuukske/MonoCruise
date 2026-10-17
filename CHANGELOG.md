@@ -11,6 +11,11 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Added
+- **Hill assist can be turned off**: MonoCruise held the brake whenever you were stopped. A new switch, on by default, turns that hold off so the truck can roll while you sit still. Your own brake still works, and so does emergency braking.
+
+### Removed
+- **Automatic horn**: the horn and airhorn switches are gone. The horn did not come on reliably.
 
 ## [1.1.3-preview.2] - 2026-10-18
 ### Fixed
