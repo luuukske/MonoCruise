@@ -823,8 +823,7 @@ on top of ego. `OverlapGhostHold` (`core/aeb/overlap_ghosts.py`), stepped once p
 AEB tick in `AEBThread.loop`, finds them and AEB skips them like zone ghosts:
 
 - **Deep, or inside for too long.** A body arms the hold when it overlaps ego's
-  box shrunk by `overlap_ghost_depth_m` (1.5 m) on every side: past ego's half
-  width, so it has crossed ego's centreline. It also arms once it has stayed
+  box shrunk by `overlap_ghost_depth_m` (0.3 m) on every side. It also arms once it has stayed
   inside ego's box shrunk by `overlap_ghost_contact_m` (0.2 m, the exit hold's box
   slack) for `overlap_ghost_persist_s` (0.3 s) without a break; a gap between
   steps longer than that (a pause) restarts the count. Ego's box is the §17
@@ -854,7 +853,21 @@ just past a zone exit, AEB latched one 1.05 m inside after 0.75 s and kept
 braking as it went deeper (`f392c9ce`, 2026-10-12). It also catches what the
 latch would otherwise protect, since nothing AEB has not latched is exempt.
 
-Why 1.5 m: replayed with the gate off, AEB's first engagement on 705 labelled
+Why 0.5 m: Lukas lowered the bar from 1.5 m on 2026-10-17 to ghost more
+overlapping bodies. It sits under the 0.73 m real-contact depth measured below,
+which the 1.5 m history says not to do. Corpus replay, tick by tick, on the 975
+scored clips: no verdict moved and the score is bit-identical (-1753.00). The
+hold differs on 63 clips; on 62 nothing AEB does changed, and `cca0f835` loses 18
+ticks of brake and warn, 17 of them after its window (8.17 to 9.12 s, window ends
+8.20 s): the impact tail, where the body is deep and no longer latched. No clip
+gained a tick. Probed lower: 0.3 m is identical to 0.5; 0.2 m loses 38 ticks on
+4 clips and turns `3b90c5e8` and `0492498b` from late into misses, still with no
+gain. The corpus cannot see the exposed case: a positive is a TP if any
+tick of its window engages, so a fast crash where the first frames of overlap are
+already past 0.5 m (the `eb92f30d` class, 155 km/h closing, 0.73 m at first
+engagement) loses its last frames unseen.
+
+Why 1.5 m (history): replayed with the gate off, AEB's first engagement on 705 labelled
 positives found the colliding body overlapping ego in 10 of them, by 0.73 m at
 most (`eb92f30d`, SP, 155 km/h closing), apart from `d2989cac` (below). The
 ghosts it braked for were 1.7 to 2.4 m inside at that moment and 2.2 m or more at
@@ -871,7 +884,7 @@ walking pace) go silent; `000a3c1a` brakes 1.4 s instead of 5.3 s. One cost:
 and slid on through it to 2.8 m. AEB's late brake there came after the impact and
 after the labelled window, and is now blocked: late becomes a miss.
 
-Do not lower the bar under the real-contact depths above, arm on shallow overlap,
+Do not lower the bar further, arm on shallow overlap,
 measure nested trailers on a different body from the one AEB evaluates, or drop
 the latched exemption: each turns a real crash into a ghost.
 
