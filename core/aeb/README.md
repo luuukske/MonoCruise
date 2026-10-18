@@ -2422,7 +2422,11 @@ token's sha256 in its server config. Lukas's tool claims with the pull token.
 moving on unsaved releases it, saving marks it done. A clip someone else holds
 or tagged says so in the list, and Ctrl+N and save-and-advance skip it; it can
 still be opened. A reviewer's "Get batch" claims 50 random untagged clips for
-7 days, and the next batch comes only after 80% of this one is tagged.
+7 days, and the next batch comes only after 80% of this one is tagged. A clip
+that arrived with a label (a contributor tagged it locally) is never drawn: the
+batch opens each candidate, marks a labelled one tagged by `intake` for good so
+it is not opened again, and gives up after 400 candidates per call to keep the
+claims lock short.
 `python -m tools.aeb_review_remote --seed-done` marks every clip Lukas tagged
 done, so none is handed out. A network failure never blocks tagging: Lukas's
 done ids and reviewers' labels wait in `aeb_reviews/` next to the clip stores

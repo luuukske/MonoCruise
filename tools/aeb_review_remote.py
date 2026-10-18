@@ -92,6 +92,8 @@ class Claim:
         return bool(self.state) and not self.mine
 
     def describe(self) -> str:
+        if self.by == "intake":
+            return "already tagged"
         who = "Lukas" if self.by == "lukas" else ("another reviewer" if self.by == "reviewer" else self.by)
         if self.mine:
             return "claimed by you" if self.state == "open" else "tagged by you"

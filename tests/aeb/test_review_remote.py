@@ -78,6 +78,8 @@ def test_claims_read_as_mine_for_the_right_caller():
     assert reviewer.claim_of({"state": "done", "by": "you"}).mine
     taken = reviewer.claim_of({"state": "done", "by": "lukas"})
     assert taken.blocks and taken.describe() == "already tagged by Lukas"
+    arrived = reviewer.claim_of({"state": "done", "by": "intake"})
+    assert arrived.blocks and arrived.describe() == "already tagged"
     assert not Claim().blocks
 
 
