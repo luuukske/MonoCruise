@@ -25,13 +25,14 @@ from tools.aeb_fetch import safe_pull_root
 from tools.aeb_review_claims import claims_setup
 from tools.aeb_review_map import map_toggle
 from tools.aeb_review_remote import ReviewClient, review_stores
+from tools.aeb_review_sync import import_labels, on_pulled, start as start_sync, stop_sync, sync_setup
 from tools.aeb_review_transport import ReviewTransport
 from tools.aeb_review_widgets import (
     DecisionStrip, Loaded, SceneWidget, ThumbnailView,
     action_index, recorded_band, start_review_workers, stop_review_workers, store_origin,
     _CLASSES, _CLASS_KEYS, _LOCAL_BG, _REMOTE_BG,
     _button, _clip_item, _entry_visible, _hline,
-    _KEY_ACTIONS, keymap_overlay, pull_landed_in_view, pull_status_text,
+    _KEY_ACTIONS, keymap_overlay,
 )
 
 _STEP_COARSE = 10       # frames per Shift+arrow
@@ -86,8 +87,7 @@ class ReviewWindow(ReviewTransport, QMainWindow):
 
         self._build_ui()
         claims_setup(self, client, reviewer=reviewer)
-        if reviewer:
-            self._update_btn.setText("Get batch")
+        sync_setup(self, client)
         self._refresh_clips()
 
     def _build_ui(self) -> None:
@@ -128,8 +128,11 @@ class ReviewWindow(ReviewTransport, QMainWindow):
         left.addWidget(self._list, 1)
         self._count_lbl = QLabel("scanning...")
         left.addWidget(self._count_lbl)
-        self._update_btn = _button("Update from server", self._update_from_server)
+        self._update_btn = _button("Sync with server", lambda: start_sync(self))
         left.addWidget(self._update_btn)
+        self._import_btn = _button("Import reviewer labels", lambda: import_labels(self))
+        self._import_btn.setVisible(False)
+        left.addWidget(self._import_btn)
 
         lw = QWidget()
         lw.setLayout(left)
@@ -321,20 +324,6 @@ class ReviewWindow(ReviewTransport, QMainWindow):
         self._count_lbl.setText("scanning...")
         self.scan_requested.emit(dict(self._meta_cache))
 
-    def _update_from_server(self) -> None:
-        """Pull missing contributed clips, or a reviewer's batch; never into the capture store."""
-        if self._pulling:
-            return
-        self._pulling = True
-        self._update_btn.setEnabled(False)
-        if self._reviewer:
-            self._status.setText("getting batch...")
-            self._claims_batch(self._store.root)
-            return
-        root = self._pull_target()
-        self._status.setText(f"updating from server into {root.name}...")
-        self.pull_requested.emit(root)
-
     def _pull_target(self):
         """Prefer the contributed store when it is in this view."""
         for store in self._stores:
@@ -348,13 +337,7 @@ class ReviewWindow(ReviewTransport, QMainWindow):
 
     @Slot(object)
     def _on_pull_finished(self, result) -> None:
-        self._pulling = False
-        self._update_btn.setEnabled(True)
-        self._status.setText(pull_status_text(result))
-        if result.error or not result.landed:
-            return
-        if pull_landed_in_view(result, self._stores):
-            self._refresh_clips()
+        on_pulled(self, result)
 
     @Slot(object)
     def _on_scanned(self, entries) -> None:
@@ -497,6 +480,13 @@ class ReviewWindow(ReviewTransport, QMainWindow):
     @Slot(str, object, object, object, object)
     def _on_loaded(self, path: str, clip, frames, trace, stream) -> None:
         self._inflight = None
+        if path in self._stale:
+            # An import rewrote the file while it decoded: read it again.
+            self._stale.discard(path)
+            if path == self._awaiting:
+                self._request(path, urgent=True)
+            self._pump()
+            return
         if clip is not None:
             self._cache[path] = Loaded(
                 clip=clip, frames=frames,
@@ -635,6 +625,9 @@ class ReviewWindow(ReviewTransport, QMainWindow):
     def _save(self) -> bool:
         if self._path is None:
             return False
+        if self._importing:
+            self._status.setText("importing reviewer labels; save again when it finishes")
+            return False
         st = None
         if self._window is not None:
             st = {"from_t": round(self._window[0], 3), "to_t": round(self._window[1], 3)}
@@ -730,6 +723,7 @@ class ReviewWindow(ReviewTransport, QMainWindow):
         stop_review_workers(self)
         self._stop_map()
         self._stop_claims()
+        stop_sync(self)
         super().closeEvent(event)
 
 

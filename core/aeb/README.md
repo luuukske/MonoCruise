@@ -2238,7 +2238,7 @@ the window and the label form; `tools/aeb_review_widgets.py` holds the scene, th
 timeline strip, the key table and the background decoder; `tools/aeb_review_transport.py`
 holds playback; `tools/aeb_filter_trace.py` and `tools/aeb_filter_charts.py` hold the
 `C` filter-tuning window. Reviewers (below) add `tools/aeb_review_remote.py`,
-`tools/aeb_review_claims.py` and `tools/aeb_review_import.py`.
+`tools/aeb_review_claims.py`, `tools/aeb_review_sync.py` and `tools/aeb_review_import.py`.
 
 ### Ground reference markers
 
@@ -2421,7 +2421,7 @@ token's sha256 in its server config. Lukas's tool claims with the pull token.
 **Claims, so nobody tags a clip twice.** Selecting a clip claims it for 2 h,
 moving on unsaved releases it, saving marks it done. A clip someone else holds
 or tagged says so in the list, and Ctrl+N and save-and-advance skip it; it can
-still be opened. A reviewer's "Get batch" claims 50 random untagged clips for
+still be opened. A reviewer's sync claims 50 random untagged clips for
 7 days, and the next batch comes only after 80% of this one is tagged. A clip
 that arrived with a label (a contributor tagged it locally) is never drawn: the
 batch opens each candidate, marks a labelled one tagged by `intake` for good so
@@ -2431,6 +2431,32 @@ claims lock short.
 done, so none is handed out. A network failure never blocks tagging: Lukas's
 done ids and reviewers' labels wait in `aeb_reviews/` next to the clip stores
 and are retried.
+
+**Done never clobbers a reviewer.** `done` skips a clip a reviewer holds open
+or has tagged, so their label still lands and the claims table keeps who
+tagged it. It answers `skipped` and `held` (still open); held ids stay pending
+and go again on the next push, so a clip whose lease runs out is still marked.
+The `intake` marker is not a reviewer and is replaced.
+
+**Sync with server.** One button, steps in order, one status line each. A
+failed step keeps its queue on disk and the later steps still run.
+
+- Reviewer: send queued labels, then remove clips the server has as finished
+  and download the open batch. The prune comes after the send, because a
+  label the server asks the clip for is uploaded from the local file. A saved
+  label cannot be edited after the sync that sent it: its clip is gone.
+- Lukas: send pending done ids (ids only), pull contributed clips, then read
+  every reviewer record and show the import as a dry run. "Import N reviewer
+  labels" writes only after a yes, through `apply_plan`: it skips the clip open
+  in the window, never touches a disputed or labelled clip, and saving waits
+  until it ends. Reviewer labels come down only this way; his never go up.
+
+Claims keep their own thread; the batch, the records and the import run on a
+sync thread with its own HTTP session, so a 50-clip batch never queues a claim.
+The button is off while a sync runs and refuses a second one within 30 s. A
+batch clip that failed in transit is fetched once more, a refused one never,
+and the daily clip cap stops the batch. The batch prune refuses the pull token:
+for it every clip Lukas tagged reads as "done, mine".
 
 **Lukas's labels never leave this machine.** His saves send the clip id only.
 The server keeps reviewers' labels as records, never inside a clip, and refuses
@@ -2446,14 +2472,17 @@ timestamps, which moved target decel by 8e-14 m/s2 on one of four real clips,
 with no decision change. Positions, thumbnail and calibration are kept because
 the verdict depends on them. Positions are not noised (position noise is itself
 an `ignore` reason) and the world is not translated (the map overlay needs real
-coordinates).
+coordinates). A `should_trigger` window is `t_rel` from `t_mono`, in the review
+tool and in scoring, and the shift touches only `t_wall`, so a window set on a
+redacted copy fits the original (`tests/aeb/test_review_redaction.py`).
 
 **Own clips.** `--reviewer --own` opens the reviewer's own capture store. Debug
 keeps clips after upload under the same id, so claims dedupe against Lukas's
 pulled copy. A labelled clip the server never received goes up whole with its
 label stripped, indexed as a review upload so no batch hands it out.
 
-**Import.** `python -m tools.aeb_review_import` reports; `--apply` writes. It is
+**Import.** `python -m tools.aeb_review_import` reports; `--apply` writes. Sync
+with server runs the same report and the same apply. It is
 the only code allowed to move a reviewer's label into a clip (AGENTS.md): it
 never writes over a label, re-reads each clip right before writing, sets `by`
 to the reviewer's handle, backs up every file it rewrites under
@@ -2462,7 +2491,7 @@ to the reviewer's handle, backs up every file it rewrites under
 saves over a reviewer's becomes his (`by` empty).
 
 **Leaks.** Nothing stops a reviewer keeping what they saw. A leaked reviewer
-token reaches that reviewer's batch and at most 150 clip downloads a day, and
+token reaches that reviewer's batch and at most 300 clip downloads a day, and
 the claims table records who held which clip.
 
 ## 12. Screenshot capture

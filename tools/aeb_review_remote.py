@@ -107,12 +107,22 @@ class ClaimResult:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class DoneResult:
+    """What a done call did. ``held``: ids a reviewer still holds open, worth sending again later."""
+
+    done: int = 0
+    skipped: int = 0
+    held: tuple[str, ...] = ()
+
+
 class ReviewClient:
     """Thin wrapper over the endpoint. Network failures raise; refusals come back as data."""
 
     def __init__(self, token: str, *, admin: bool, base_url: str = REVIEW_URL, http=None) -> None:
         self.admin = admin
         self.base_url = base_url
+        self._token = token
         if http is None:
             import requests
 
@@ -124,6 +134,10 @@ class ReviewClient:
     def from_env(cls, *, admin: bool, base_url: str = REVIEW_URL) -> "ReviewClient | None":
         token = os.environ.get(ADMIN_TOKEN_ENV if admin else REVIEWER_TOKEN_ENV, "").strip()
         return cls(token, admin=admin, base_url=base_url) if token else None
+
+    def fork(self) -> "ReviewClient":
+        """The same caller on its own HTTP session, for another thread."""
+        return ReviewClient(self._token, admin=self.admin, base_url=self.base_url)
 
     def _get(self, op: str, **params):
         return self._http.get(self.base_url, params={"op": op, **params}, timeout=_TIMEOUT)
@@ -185,13 +199,18 @@ class ReviewClient:
         table = self._json(resp).get("claims") or {}
         return {str(k): v for k, v in table.items() if isinstance(v, dict)}
 
-    def done(self, ids: list[str]) -> int:
-        n = 0
+    def done(self, ids: list[str]) -> DoneResult:
+        """Mark clips tagged by Lukas. Ids only; the server skips what a reviewer holds or tagged."""
+        done = skipped = 0
+        held: list[str] = []
         for i in range(0, len(ids), _IDS_PER_CALL):
             resp = self._post("done", {"ids": ids[i:i + _IDS_PER_CALL]})
             resp.raise_for_status()
-            n += int(self._json(resp).get("done") or 0)
-        return n
+            body = self._json(resp)
+            done += int(body.get("done") or 0)
+            skipped += int(body.get("skipped") or 0)
+            held += [str(c) for c in body.get("held") or [] if isinstance(c, str)]
+        return DoneResult(done=done, skipped=skipped, held=tuple(held))
 
     def batch(self) -> list[str]:
         resp = self._get("batch")
@@ -296,6 +315,12 @@ class BatchResult:
     failed: int = 0
     pruned: int = 0
     error: str | None = None
+    left: int = 0           # not tried: the daily clip cap was reached, or the sync stopped
+    capped: bool = False
+
+
+class _NotLanded(Exception):
+    """The clip arrived but did not land; fetching it again would spend the cap for nothing."""
 
 
 def peek_all(store: ClipStore) -> list[tuple[Path, ClipMetadata | None]]:
@@ -309,26 +334,51 @@ def _ids_by_path(store: ClipStore) -> dict[str, Path]:
     return {meta.clip_id: path for path, meta in peek_all(store) if meta is not None and meta.clip_id}
 
 
+def _fetch_into(client: ReviewClient, store: ClipStore, cid: str) -> int | None:
+    """None when the clip landed, else the 4xx status that refused it, or 0 for a transient failure."""
+    try:
+        clip = deserialize_clip(client.fetch_clip(cid))
+        if clip.metadata.clip_id != cid or store.write(clip) is None:
+            raise _NotLanded(cid[:8])
+    except _NotLanded:
+        logger.debug("batch clip %s did not land", cid[:8])
+        return 400
+    except Exception as exc:
+        logger.debug("batch clip %s failed", cid[:8], exc_info=True)
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        return status if isinstance(status, int) and 400 <= status < 500 else 0
+    return None
+
+
 def pull_batch(
     client: ReviewClient,
     store: ClipStore,
     *,
     outbox: Outbox | None = None,
     on_progress: Callable[[str], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> BatchResult:
-    """Drop finished clips, then download the open batch into ``store``. Never raises."""
+    """Drop finished clips, then download the open batch into ``store``. Never raises.
+
+    Reviewers only: for the pull token every clip Lukas tagged reads as "done, mine",
+    so the prune would delete his corpus.
+    """
     def note(msg: str) -> None:
         if on_progress is not None:
             on_progress(msg)
 
+    if getattr(client, "admin", False):
+        return BatchResult(error="refusing a reviewer batch with the pull token")
     if safe_review_root(store.root) != store.root:
         return BatchResult(error="refusing to download a batch into a corpus store")
     try:
         local = _ids_by_path(store)
+        states = client.states(sorted(local))
+        # Read after the states: a label sent meanwhile is still queued, or already acknowledged.
         queued = {r.get("clip_id") for r in (outbox or Outbox()).pending()}
         pruned = 0
         # A clip the server has as tagged by you is finished: keep no copy of it.
-        for cid, claim in client.states(sorted(local)).items():
+        for cid, claim in states.items():
             if claim.mine and claim.state == "done" and cid not in queued and store.delete(local[cid]):
                 pruned += 1
                 del local[cid]
@@ -337,18 +387,24 @@ def pull_batch(
         return BatchResult(error=f"batch failed: {exc}")
     todo = [cid for cid in ids if cid not in local]
     saved = failed = 0
+    capped = False
     for i, cid in enumerate(todo, start=1):
+        if should_stop is not None and should_stop():
+            break
         note(f"fetching {i}/{len(todo)}: {cid[:8]}")
-        try:
-            clip = deserialize_clip(client.fetch_clip(cid))
-            if clip.metadata.clip_id != cid or store.write(clip) is None:
-                raise OSError("clip did not land")
-        except Exception:
-            logger.debug("batch clip %s failed", cid[:8], exc_info=True)
-            failed += 1
+        why = _fetch_into(client, store, cid)
+        if why == 0:
+            # One retry per sync: the server counts a fetch against the cap before reading the clip.
+            why = _fetch_into(client, store, cid)
+        if why is None:
+            saved += 1
             continue
-        saved += 1
-    return BatchResult(held=len(ids), saved=saved, failed=failed, pruned=pruned)
+        failed += 1
+        if why == 429:
+            capped = True
+            break
+    return BatchResult(held=len(ids), saved=saved, failed=failed, pruned=pruned,
+                       left=len(todo) - saved - failed, capped=capped)
 
 
 def labelled_ids(stores: list[ClipStore]) -> list[str]:
@@ -378,7 +434,8 @@ def main(argv: list[str] | None = None) -> int:
         ids = labelled_ids(stores)
         print(f"{len(ids)} tagged clip(s) found; marking done")
         try:
-            print(f"server marked {client.done(ids)} done")
+            res = client.done(ids)
+            print(f"server marked {res.done} done, skipped {res.skipped} a reviewer holds or tagged")
         except Exception as exc:
             print(f"done failed: {exc}", file=sys.stderr)
             return 1

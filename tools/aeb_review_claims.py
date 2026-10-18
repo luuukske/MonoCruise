@@ -13,8 +13,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 
-from core.aeb.clip_store import ClipStore
-from tools.aeb_review_remote import Claim, Outbox, ReviewClient, pull_batch, reviews_root
+from tools.aeb_review_remote import Claim, DoneResult, Outbox, ReviewClient, reviews_root
+from tools.aeb_review_sync import on_queue_sent
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,11 @@ class _PendingDone:
 
 
 class ClaimsWorker(QObject):
-    """Every network call off the GUI thread. One op at a time, in order."""
+    """Claims and the two queues on disk, off the GUI thread. One op at a time, in order.
+
+    Sole writer of the outbox and the pending done ids. Slow sync steps run on
+    the sync worker (`tools/aeb_review_sync.py`), so a batch never queues a claim.
+    """
 
     result = Signal(str, object)  # op, payload
 
@@ -66,6 +70,16 @@ class ClaimsWorker(QObject):
             logger.debug("review %s failed", op, exc_info=True)
             self.result.emit("error", (op, exc.__class__.__name__))
 
+    def _push_done(self, cid: str | None) -> DoneResult:
+        """Send every pending id; keep the ones a reviewer still holds, and all of them on a failure."""
+        ids = self._pending_done.load() + ([cid] if cid else [])
+        self._pending_done.save(ids)
+        if not ids:
+            return DoneResult()
+        res = self._client.done(ids)
+        self._pending_done.save(list(res.held))
+        return res
+
     def _run(self, op: str, arg) -> None:
         client = self._client
         if op == "claim":
@@ -74,11 +88,7 @@ class ClaimsWorker(QObject):
         elif op == "release":
             client.release(arg)
         elif op == "done":
-            ids = self._pending_done.load() + ([arg] if arg else [])
-            self._pending_done.save(ids)
-            if ids:
-                client.done(ids)
-                self._pending_done.save([])
+            self._push_done(arg)
         elif op == "submit":
             cid, label_json, path = arg
             self._outbox.add(cid, label_json, path)
@@ -88,10 +98,16 @@ class ClaimsWorker(QObject):
                 self.result.emit("submitted", self._outbox.flush(client))
         elif op == "states":
             self.result.emit("states", client.states(arg))
-        elif op == "batch":
-            res = pull_batch(client, ClipStore(root=arg), outbox=self._outbox,
-                             on_progress=lambda msg: self.result.emit("progress", msg))
-            self.result.emit("batch", res)
+        elif op == "sync_done":
+            try:
+                res, err = self._push_done(None), ""
+            except Exception as exc:
+                logger.debug("pushing done ids failed", exc_info=True)
+                res, err = None, exc.__class__.__name__
+            self.result.emit("sync_pushed", (res, len(self._pending_done.load()), err))
+        elif op == "sync_flush":
+            sent, problems = self._outbox.flush(client)
+            self.result.emit("sync_flushed", (sent, problems, len(self._outbox.pending())))
 
 
 class _ClaimsBridge(QObject):
@@ -117,7 +133,6 @@ def claims_setup(win, client: ReviewClient | None, *, reviewer: bool) -> None:
     win._claim_saved = lambda path, label: on_saved(win, path, label)
     win._claim_of = lambda meta: claim_of(win, meta)
     win._claims_refresh = lambda: refresh(win)
-    win._claims_batch = lambda root: request_batch(win, root)
     win._stop_claims = lambda: stop_claims(win)
     win._claims_thread = None
     if client is None:
@@ -211,15 +226,6 @@ def refresh(win) -> None:
     win.remote_requested.emit("flush" if win._reviewer else "done", None if win._reviewer else "")
 
 
-def request_batch(win, root) -> None:
-    if win._claim_client is None:
-        win._status.setText("no reviewer token: set MONOCRUISE_REVIEWER_TOKEN")
-        win._pulling = False
-        win._update_btn.setEnabled(True)
-        return
-    win.remote_requested.emit("batch", str(root))
-
-
 def update_row(win, path: str) -> None:
     """Redraw one list row after its claim changed, without rebuilding the list."""
     from tools.aeb_review_widgets import _clip_item
@@ -266,22 +272,11 @@ def on_result(win, op: str, payload) -> None:
             win._status.setText(text)
             _show(win, "label sent" if sent and not problems else text,
                   _MINE_STYLE if sent and not problems else _BLOCKED_STYLE)
-    elif op == "progress":
-        win._status.setText(str(payload))
-    elif op == "batch":
-        win._pulling = False
-        win._update_btn.setEnabled(True)
-        if payload.error:
-            win._status.setText(payload.error)
-            return
-        win._status.setText(
-            f"batch: {payload.held} held, {payload.saved} downloaded, "
-            f"{payload.failed} failed, {payload.pruned} finished removed")
-        win._refresh_clips()
+    elif op in ("sync_pushed", "sync_flushed"):
+        on_queue_sent(win, payload)
     elif op == "error":
         what, err = payload
-        if what == "batch":
-            win._pulling = False
-            win._update_btn.setEnabled(True)
-        if what in ("claim", "batch", "submit"):
+        if what in ("sync_done", "sync_flush"):
+            on_queue_sent(win, None, err)
+        elif what in ("claim", "submit"):
             win._status.setText(f"server unreachable ({what}: {err}); work is kept and retried")

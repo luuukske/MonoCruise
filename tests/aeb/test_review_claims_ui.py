@@ -12,7 +12,7 @@ from core.aeb.clip_store import ClipStore
 from tests.aeb.test_clip_capture import _make_clip
 from tools import aeb_review_claims, aeb_review_remote
 from tools.aeb_review import ReviewWindow
-from tools.aeb_review_remote import Claim, ClaimResult, ReviewClient
+from tools.aeb_review_remote import Claim, ClaimResult, DoneResult, ReviewClient
 
 
 @pytest.fixture(scope="module")
@@ -49,7 +49,7 @@ class _FakeClient:
 
     def done(self, ids):
         self.done_ids.extend(ids)
-        return len(ids)
+        return DoneResult(done=len(ids))
 
     def states(self, ids):
         return {}

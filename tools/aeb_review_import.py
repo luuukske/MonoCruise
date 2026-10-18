@@ -19,6 +19,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _repo not in sys.path:
@@ -90,10 +91,16 @@ def _backup(path: Path, backup_dir: Path) -> None:
     shutil.copy2(path, backup_dir / path.name)
 
 
-def apply_plan(plan: ImportPlan, store: ClipStore, backup_dir: Path) -> int:
-    """Write the planned labels. Re-reads each clip first: a label set meanwhile is kept."""
+def apply_plan(plan: ImportPlan, store: ClipStore, backup_dir: Path, *,
+               skip: Callable[[Path], bool] | None = None) -> int:
+    """Write the planned labels. Re-reads each clip first: a label set meanwhile is kept.
+
+    ``skip(path)`` true leaves that clip alone, e.g. the one open in the review window.
+    """
     written = 0
     for path, label_json in plan.write:
+        if skip is not None and skip(path):
+            continue
         meta = store.peek_metadata(path)
         if meta is None or meta.label is not None or not REVIEWER_RE.match(label_json.get("by", "")):
             continue
@@ -136,8 +143,19 @@ def scan_local(stores: list[ClipStore]) -> dict[str, tuple[Path, ClipMetadata | 
     return out
 
 
-def _stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+def new_backup_dir() -> Path:
+    """Where this run's originals go; one directory per run."""
+    return reviews_root() / "backup" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def save_journal(records: list[dict], plan: ImportPlan) -> None:
+    """Keep the fetched records, and the disputed clips for a person to settle, next to the stores."""
+    root = reviews_root()
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "reviews.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    if plan.disputed:
+        (root / "disputed.json").write_text(json.dumps(plan.disputed, indent=1), encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -149,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
 
     stores = [ClipStore(root=default_clip_root()), ClipStore(root=contributed_clip_root())]
     local = scan_local(stores)
-    backup_dir = reviews_root() / "backup" / _stamp()
+    backup_dir = new_backup_dir()
 
     if args.remove_reviewer:
         if not REVIEWER_RE.match(args.remove_reviewer):
@@ -171,18 +189,13 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"reviews failed: {exc}", file=sys.stderr)
         return 1
-    root = reviews_root()
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "reviews.jsonl").write_text(
-        "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
-
     plan = plan_import(records, local)
+    save_journal(records, plan)
     print(f"{len(records)} record(s): {len(plan.write)} to write, {plan.kept} already labelled, "
           f"{len(plan.disputed)} disputed, {len(plan.missing)} not local, {plan.rejected} rejected")
     if plan.missing:
-        print("  not local: run 'Update from server' in the review tool, then import again")
+        print("  not local: run 'Sync with server' in the review tool, then import again")
     if plan.disputed:
-        (root / "disputed.json").write_text(json.dumps(plan.disputed, indent=1), encoding="utf-8")
         for cid, recs in plan.disputed.items():
             print(f"  disputed {cid[:8]}: " + ", ".join(f"{r['by']}={r['label']['class']}" for r in recs))
     if args.apply and plan.write:

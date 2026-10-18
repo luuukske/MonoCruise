@@ -8,7 +8,7 @@ from __future__ import annotations
 import copy
 
 from core.aeb.clip_eval import run_headless
-from core.aeb.clip_replay import replay_clip
+from core.aeb.clip_replay import clip_t0, replay_clip
 from core.aeb.clip_schema import Label
 from tests.aeb.test_clip_eval import _collision_clip
 
@@ -54,6 +54,17 @@ def test_aeb_decides_the_same_on_a_shifted_clock():
         moved = _shifted(clip, seconds)
         assert _decisions(moved) == base
         assert [(f.t_rel, f.live_aeb.aeb_brake) for f in replay_clip(moved)] == base_review
+
+
+def test_label_windows_live_on_the_clock_the_shift_leaves_alone():
+    # A should_trigger window is t_rel from t_mono, in the review tool and in scoring;
+    # the server shifts only t_wall, so a window set on a redacted copy fits the original.
+    clip = _real_clock_clip()
+    base = [t.t_rel for t in run_headless(clip)]
+    for seconds in _SHIFTS_S:
+        moved = _shifted(clip, seconds)
+        assert clip_t0(moved) == clip_t0(clip)
+        assert [t.t_rel for t in run_headless(moved)] == base
 
 
 def test_lukas_labels_serialise_exactly_as_before_and_reviewer_labels_carry_their_handle():
