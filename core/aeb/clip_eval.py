@@ -42,6 +42,8 @@ class EvalTick:
     clearance_v_pass_ms: float = 0.0
     clearance_t_bind_s: float = 0.0
     clearance_clears_ids: set = field(default_factory=set)
+    geom_engage: bool = False
+    engage_eligible_ids: set = field(default_factory=set)
 
 
 class _NoSound:
@@ -216,6 +218,8 @@ def run_headless(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
             clearance_v_pass_ms=float(snap_out.clearance_v_pass_ms),
             clearance_t_bind_s=float(snap_out.clearance_t_bind_s),
             clearance_clears_ids=set(snap_out.clearance_clears_ids),
+            geom_engage=bool(snap_out.geom_engage),
+            engage_eligible_ids=set(snap_out.engage_eligible_ids),
         ))
     return out
 
@@ -301,7 +305,7 @@ class CandidateDiff:
 
 @dataclass
 class Outcome:
-    """A calibration's outcome on one labelled clip, judged against its window.
+    """A calibration's outcome on one labelled clip, judged on geometry (README corpus scoring).
 
     Verdicts: ``true_positive``, ``false_negative``, ``late``, ``false_positive``
     (must-not-trigger + brake), ``false_warn`` (must-not-trigger + warn only),
@@ -315,6 +319,35 @@ class Outcome:
     peak_decel_ms2: float
     verdict: str
     warn_window: tuple | None = None  # (from_t, to_t) t_rel where the candidate warned
+    # Brake onsets more than TRIGGER_SLACK_S outside the window; should-trigger only.
+    stray_onsets: tuple = ()
+    braked_in_window: bool = False    # diagnostic: never scored
+
+
+# Onsets closer than this to the window are timing: the engage bar alone moves one
+# about this far at highway speed. Farther out they are stray triggers (README).
+TRIGGER_SLACK_S: float = 1.5
+
+
+def _brake_onsets(evs: list[EvalTick]) -> list[float]:
+    """t_rel of every brake rising edge; a brake already on at the first tick counts."""
+    out: list[float] = []
+    prev = False
+    for e in evs:
+        if e.aeb_brake and not prev:
+            out.append(e.t_rel)
+        prev = e.aeb_brake
+    return out
+
+
+def _positive_verdict(evs: list[EvalTick], st: tuple) -> str:
+    """Geometry or brake inside the window, else after it, else a miss."""
+    acted = [e.t_rel for e in evs if e.geom_engage or e.aeb_brake]
+    if any(st[0] <= t <= st[1] for t in acted):
+        return "true_positive"
+    if any(t > st[1] for t in acted):
+        return "late"
+    return "false_negative"
 
 
 def outcome_under(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
@@ -333,6 +366,8 @@ def outcome_under(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
     if lbl is not None and lbl.should_trigger:
         st = (float(lbl.should_trigger["from_t"]), float(lbl.should_trigger["to_t"]))
 
+    strays: tuple = ()
+    braked_in_window = False
     if lbl is None:
         verdict = "unlabeled"
     elif st is None:
@@ -342,17 +377,17 @@ def outcome_under(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
             verdict = "false_warn"
         else:
             verdict = "true_negative"
-    elif not engaged:
-        verdict = "false_negative"
-    elif bw[0] > st[1]:
-        verdict = "late"
     else:
-        verdict = "true_positive"
+        verdict = _positive_verdict(evs, st)
+        braked_in_window = any(st[0] <= e.t_rel <= st[1] for e in braked)
+        strays = tuple(t for t in _brake_onsets(evs)
+                       if t < st[0] - TRIGGER_SLACK_S or t > st[1] + TRIGGER_SLACK_S)
 
     return Outcome(
         label_class=(lbl.class_ if lbl else "unlabeled"),
         should_trigger=st, engaged=engaged, brake_window=bw,
         peak_decel_ms2=peak, verdict=verdict, warn_window=ww,
+        stray_onsets=strays, braked_in_window=braked_in_window,
     )
 
 

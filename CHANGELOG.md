@@ -13,9 +13,18 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ## [Unreleased]
 ### Added
 - **ACC follows the lanes through bends**: MonoCruise reads the lane layout from the map files already in your ETS2 or ATS install, and in TruckersMP the roads its launcher added, offline and read only, so ACC holds the right lead through bends and stops counting cars in the next lane. Without the map files it works as before.
+- **Hill assist can be turned off**: MonoCruise held the brake whenever you were stopped. A new switch, on by default, turns that hold off so the truck can roll while you sit still. Your own brake still works, and so does emergency braking.
 
 ### Fixed
 - **AEB was late for a stopped car round a bend**: AEB only saw a stopped or crashed vehicle in your lane once your truck had turned into the bend. With the map files it now looks ahead along your lane while you follow it and brakes earlier; everything else it brakes for is unchanged.
+
+### Removed
+- **Automatic horn**: the horn and airhorn switches are gone. The horn did not come on reliably.
+
+## [1.1.3-preview.2] - 2026-10-18
+### Fixed
+- **AEB was slow to see a TruckersMP truck stop suddenly**: AEB smoothed the speed TruckersMP reports for each player, so a truck ahead crashing or stopping hard took a moment to show. AEB now switches to that speed as reported the moment a truck ahead brakes hard.
+- **ACC overreacted behind TruckersMP players in slow traffic**: in jams ACC answered every small speed change of a player ahead, braking and accelerating with them. It now smooths those out, and still reacts sooner to real braking than before players' own speed was used.
 - **AEB ignored slow TruckersMP traffic**: below 50 km/h AEB only reacted to other players closing much faster than you, so it could miss a truck backing across your lane or a car stopping in a jam. It now watches them like AI traffic.
 - **AEB braked for vehicles you were driving through**: a TruckersMP player you were ghosting through, or an AI car appearing on top of your truck, could set AEB off, and once it was braking it kept going even inside a no-collision zone. AEB now lets go of players in a zone and ignores any vehicle that sits inside your truck until you are apart.
 

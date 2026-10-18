@@ -41,8 +41,8 @@ class AEBCalibration:
     # Rejected 2026-07-19: response distance cap, threat-age tiering, engage 0.9 (README §7).
     elevation_margin: float = 5.0
     max_range: float = 200.0
-    # A body this far inside ego's box (past its half width) is a ghost, not an obstacle (README §4).
-    overlap_ghost_depth_m: float = 1.5
+    # A body this far inside ego's box is a ghost, not an obstacle (README §4).
+    overlap_ghost_depth_m: float = 0.3
     # Or one clearly inside (past box slack) this long without AEB latched on it: real contact is a frame.
     overlap_ghost_contact_m: float = 0.2
     overlap_ghost_persist_s: float = 0.3

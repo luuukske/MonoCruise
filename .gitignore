@@ -45,6 +45,9 @@ tools/aeb_corpus_run/
 tools/acc_response_map_out/
 tools/map_lane_audit_out/
 
+# Map lane audit renders (264 MB, local only)
+tools/map_lane_audit_out/
+
 # PyInstaller / Inno Setup build outputs
 *.exe
 build/

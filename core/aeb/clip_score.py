@@ -1,8 +1,8 @@
-"""Corpus objective over labelled clip replays: safety-weighted FN/late, comfort FP, TP reward.
+"""Corpus objective over labelled clip replays: filtering, not brake timing (README corpus scoring).
 
-Must-not-trigger clips pay comfort cost for any reaction: brake FPs use intensity
-times duration; warn-only FPs (``false_warn``) use ``FP_WARN_SCALE`` times duration
-so a beep costs less than a phantom stop but still moves the corpus total.
+Positives are judged on whether the geometry would let AEB engage inside the window,
+so the engage bar and the rest of the longitudinal tuning cannot move them. Every false
+trigger costs the same flat amount, however long it held or however hard it braked.
 """
 
 from __future__ import annotations
@@ -18,10 +18,9 @@ SAFETY_SCALE: float = 10.0
 COMFORT_SCALE: float = 1.0
 TP_REWARD: float = 2.0
 LATE_SAFETY_FRACTION: float = 0.5
-# A false positive always costs at least this fraction of a full-duration brake,
-# so even a brief phantom brake is penalised.
-FP_MIN_DURATION_S: float = 0.3
-# Warn-only FP intensity vs a full-brake FP of equal duration (beep << slam).
+# One false trigger: a brake in a must-not-trigger clip, or a stray one in a positive.
+FP_TRIGGER_COST: float = 1.0
+# Warn-only FP vs a brake FP (beep << slam).
 FP_WARN_SCALE: float = 0.25
 
 
@@ -33,6 +32,11 @@ class ClipScore:
     verdict: str
     cost: float
     detail: str = ""
+    stray: bool = False              # positive clip that also braked outside its window
+    braked_in_window: bool = False   # diagnostic, never scored
+
+
+_POSITIVE_VERDICTS = ("true_positive", "false_negative", "late")
 
 
 @dataclass
@@ -41,6 +45,16 @@ class CorpusScore:
     scored: int = 0
     verdict_counts: dict = field(default_factory=dict)
     per_clip: list = field(default_factory=list)   # list[ClipScore]
+
+    @property
+    def stray_clips(self) -> int:
+        return sum(1 for sc in self.per_clip if sc.stray)
+
+    @property
+    def positives_braked(self) -> tuple[int, int]:
+        """(braked inside the window, positives): what the geometric verdict cannot see."""
+        pos = [sc for sc in self.per_clip if sc.verdict in _POSITIVE_VERDICTS]
+        return sum(1 for sc in pos if sc.braked_in_window), len(pos)
 
 
 def class_window_warning(class_: str, has_window: bool) -> str | None:
@@ -77,49 +91,34 @@ def _severity(clip: Clip) -> int:
     return max(1, int(lbl.severity)) if (lbl and lbl.severity) else 3
 
 
-def _overlap(a: tuple | None, b: tuple | None) -> float:
-    if a is None or b is None:
-        return 0.0
-    lo = max(a[0], b[0])
-    hi = min(a[1], b[1])
-    return max(0.0, hi - lo)
-
-
-def _tp_quality(clip: Clip, o: Outcome) -> float:
-    """0..1: window overlap fraction, scaled by closeness to desired peak decel."""
-    st = o.should_trigger
-    st_len = (st[1] - st[0]) if st else 0.0
-    if st_len > 1e-6:
-        overlap = min(1.0, _overlap(o.brake_window, st) / st_len)
-    else:
-        overlap = 1.0
-    peak_match = 1.0
-    desired = clip.metadata.label.desired_peak_decel_ms2 if clip.metadata.label else None
-    if desired:
-        peak_match = max(0.0, 1.0 - abs(o.peak_decel_ms2 - desired) / max(desired, 1e-3))
-    return overlap * peak_match
-
-
-def _cost(clip: Clip, o: Outcome, sev: int, cal: AEBCalibration) -> tuple[float, str]:
-    if o.verdict == "false_negative":
-        return sev * SAFETY_SCALE, "MISS: should have braked, never did"
-    if o.verdict == "late":
-        return sev * SAFETY_SCALE * LATE_SAFETY_FRACTION, "LATE: engaged after the window"
+def _cost(o: Outcome, sev: int) -> tuple[float, str]:
+    """Verdict cost; a positive with stray onsets also pays one flat false trigger."""
     if o.verdict == "false_positive":
         dur = (o.brake_window[1] - o.brake_window[0]) if o.brake_window else 0.0
-        intensity = o.peak_decel_ms2 / max(cal.full_brake_decel, 1e-3)
-        return (sev * COMFORT_SCALE * intensity * (FP_MIN_DURATION_S + dur),
+        return (sev * COMFORT_SCALE * FP_TRIGGER_COST,
                 f"FP: braked {dur:.2f}s @ {o.peak_decel_ms2:.1f} m/s2")
     if o.verdict == "false_warn":
         dur = (o.warn_window[1] - o.warn_window[0]) if o.warn_window else 0.0
-        return (sev * COMFORT_SCALE * FP_WARN_SCALE * (FP_MIN_DURATION_S + dur),
+        return (sev * COMFORT_SCALE * FP_TRIGGER_COST * FP_WARN_SCALE,
                 f"FP-warn: {dur:.2f}s")
-    if o.verdict == "true_positive":
-        q = _tp_quality(clip, o)
-        return -sev * TP_REWARD * q, f"TP: correct (quality {q:.2f})"
     if o.verdict == "true_negative":
         return 0.0, "TN: correctly silent"
-    return 0.0, o.verdict
+    if o.verdict == "false_negative":
+        cost, detail = sev * SAFETY_SCALE, "MISS: geometry never let AEB engage in the window"
+    elif o.verdict == "late":
+        cost = sev * SAFETY_SCALE * LATE_SAFETY_FRACTION
+        detail = "LATE: geometry let AEB engage only after the window"
+    elif o.verdict == "true_positive":
+        cost = -sev * TP_REWARD
+        detail = ("TP: braked in the window" if o.braked_in_window
+                  else "TP: geometry engages in the window, no brake")
+    else:
+        return 0.0, o.verdict
+    if o.stray_onsets:
+        cost += sev * COMFORT_SCALE * FP_TRIGGER_COST
+        onsets = ", ".join(f"{t:.2f}" for t in o.stray_onsets)
+        detail += f"; stray trigger at {onsets} s"
+    return cost, detail
 
 
 def score_clip(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
@@ -131,8 +130,9 @@ def score_clip(clip: Clip, cal: AEBCalibration = _CAL_DEFAULT,
     burn = burn_in_s if burn_in_s is not None else clip.metadata.burn_in_s
     o = outcome_under(clip, cal, burn_in_s=burn)
     sev = _severity(clip)
-    cost, detail = _cost(clip, o, sev, cal)
-    return ClipScore(clip.metadata.clip_id, lbl.class_, sev, o.verdict, cost, detail)
+    cost, detail = _cost(o, sev)
+    return ClipScore(clip.metadata.clip_id, lbl.class_, sev, o.verdict, cost, detail,
+                     stray=bool(o.stray_onsets), braked_in_window=o.braked_in_window)
 
 
 def score_corpus(clips, cal: AEBCalibration = _CAL_DEFAULT,
@@ -171,4 +171,7 @@ def format_corpus(cs: CorpusScore, title: str = "") -> str:
         )
     counts = "  ".join(f"{k}={v}" for k, v in sorted(cs.verdict_counts.items()))
     lines.append(f"  TOTAL {cs.total_cost:+.2f}  over {cs.scored} clips   ({counts})")
+    braked, positives = cs.positives_braked
+    lines.append(f"  stray triggers in {cs.stray_clips} positive clips; "
+                 f"braked in window {braked}/{positives} positives (not scored)")
     return "\n".join(lines)

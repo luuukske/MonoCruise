@@ -129,7 +129,7 @@ def test_a_real_stop_tracks_down_without_a_crash():
         worst_lag = max(worst_lag, v.speed - sender.speed)
         assert not v.crash_confirmed
     assert v.speed < 0.5
-    assert worst_lag < 3.0, "one packet interval of 7 m/s2 is 1.5 m/s; the EMA adds a little"
+    assert worst_lag < 2.0, "one packet interval of 7 m/s2 is about 1.9 m/s, AEB adds no filter lag"
 
 
 def test_a_crash_between_two_packets_confirms():
@@ -279,3 +279,165 @@ def test_a_long_frozen_stall_ramps_down_like_the_lag_freeze():
     assert t_10 - t_90 >= 3 * DT - 1e-9, "ramped over several frames, not stepped"
     assert t_10 <= frozen_at + 3.0 * freeze + 0.3
     assert trace[-1][1] < 0.5
+
+
+def _drop_on_next_packet(v: Vehicle, sender: Sender, to_speed: float) -> Vehicle:
+    while sender.t - sender.pkt_t < PACKET_S - DT:
+        sender.advance(DT)
+        v = _frame(v, sender, 300.0, 0.0)
+    sender.speed = to_speed
+    sender.advance(DT)
+    return _frame(v, sender, 300.0, 0.0)
+
+
+def test_aeb_reads_a_crash_drop_the_frame_its_packet_lands():
+    """AEB's speed is the packet's own: no EMA between a crash and AEB. ACC keeps its filter."""
+    sender = Sender(25.0)
+    v = _drop_on_next_packet(_cruise(sender, 3.0), sender, 4.0)
+    assert sender.pkt_v == 4.0
+    assert v.speed == 4.0
+    assert v.acc_speed > 10.0
+
+
+def test_aeb_raw_speed_switch_restores_the_filtered_speed(monkeypatch):
+    monkeypatch.setattr(tmp_sdk, "AEB_RAW_SHORT_WINDOW", False)
+    sender = Sender(25.0)
+    v = _drop_on_next_packet(_cruise(sender, 3.0), sender, 4.0)
+    assert v.speed > 10.0
+
+
+def _dropout(v: Vehicle, sender: Sender, seconds: float, shown_speed: float) -> list[float]:
+    """The SDK match is lost while the client shows the body at ``shown_speed``."""
+    z, t, speeds = sender.shown_z, sender.t, []
+    for _ in range(int(round(seconds / DT))):
+        t += DT
+        z -= shown_speed * DT
+        cur = _vehicle(z)
+        attach([cur], None)
+        cur.update_from_last(v, t, 0.0, 1.0, 300.0, 0.0)
+        v = cur
+        speeds.append(v.speed)
+    return speeds, v
+
+
+def _hard_drop(sender: Sender, to_speed: float) -> Vehicle:
+    v = _drop_on_next_packet(_cruise(sender, 3.0), sender, to_speed)
+    assert v._sdk_short_active
+    return v
+
+
+def test_in_cruise_a_short_match_dropout_stays_continuous():
+    """Rubber-banding can push the shown pose past the match gate for a frame or four."""
+    sender = Sender(20.0)
+    v = _cruise(sender, 3.0)
+    speeds, _ = _dropout(v, sender, 4 * DT, shown_speed=12.0)
+    steps = [abs(b - a) for a, b in zip([v.speed] + speeds, speeds)]
+    assert max(steps) < 2.5, "the position fit's own response, never the 8 m/s gap in one step"
+
+
+def test_on_the_raw_speed_a_short_match_dropout_keeps_it():
+    sender = Sender(25.0)
+    v = _hard_drop(sender, 21.0)
+    assert not v.crash_confirmed
+    speeds, _ = _dropout(v, sender, 4 * DT, shown_speed=12.0)
+    assert speeds == [21.0] * 4
+
+
+def test_a_long_match_dropout_moves_to_the_position_fit_without_a_step():
+    sender = Sender(20.0)
+    speeds, v = _dropout(_cruise(sender, 3.0), sender, 1.5, shown_speed=12.0)
+    assert max(abs(b - a) for a, b in zip(speeds, speeds[1:])) < 2.0
+    assert v._sdk_aeb_speed is None
+    assert speeds[-1] < 16.0
+
+
+def test_a_crash_on_the_position_track_ends_the_dropout_hold(monkeypatch):
+    sender = Sender(25.0)
+    v = _hard_drop(sender, 4.0)
+    detect = Vehicle._tmp_apply_crash_rotation_jerk
+
+    def crash_now(self, prev, t_now):
+        detect(self, prev, t_now)
+        self._crash_hold_until = t_now + _CRASH_HOLD_S
+        self.crash_confirmed = True
+
+    monkeypatch.setattr(Vehicle, "_tmp_apply_crash_rotation_jerk", crash_now)
+    speeds, v = _dropout(v, sender, DT, shown_speed=12.0)
+    assert v._sdk_aeb_speed is None
+    assert speeds[0] != 4.0
+
+
+def test_an_sdk_crash_keeps_the_dropout_hold():
+    """The crash packet is the evidence; losing the match right after must not hand AEB the stale fit."""
+    sender = Sender(25.0)
+    v = _hard_drop(sender, 4.0)
+    assert v.crash_confirmed and v.sdk_crash
+    speeds, _ = _dropout(v, sender, 4 * DT, shown_speed=12.0)
+    assert speeds == [4.0] * 4
+
+
+def _wobble(sender: Sender, v: Vehicle, amp: float, hz: float, seconds: float) -> list[Vehicle]:
+    out, t0 = [], sender.t
+    for _ in range(int(seconds / DT)):
+        accel = amp * 2.0 * math.pi * hz * math.cos(2.0 * math.pi * hz * (sender.t - t0))
+        sender.advance(DT, accel=accel)
+        v = _frame(v, sender, 300.0, 0.0)
+        out.append(v)
+    return out
+
+
+def test_a_jerky_lead_in_slow_traffic_reads_smooth_to_acc():
+    """A +-0.5 m/s, 1 Hz wobble at 5 m/s swung acc_accel 2.2 m/s2 peak to peak without the pre-filter."""
+    sender = Sender(5.0)
+    frames = _wobble(sender, _cruise(sender, 2.0), 0.5, 1.0, 6.0)[30:]
+    values = [f.acc_accel for f in frames]
+    assert max(values) - min(values) < 1.0
+    assert not any(f._sdk_short_active for f in frames)
+
+
+def test_a_gentle_brake_stays_on_the_filter():
+    sender = Sender(15.0)
+    v = _cruise(sender, 2.0)
+    for _ in range(int(3.0 / DT)):
+        sender.advance(DT, accel=-1.5)
+        v = _frame(v, sender, 300.0, 0.0)
+        assert not v._sdk_short_active
+
+
+def test_a_hard_brake_puts_aeb_on_the_raw_speed_and_releases_after():
+    """ACC keeps the filter through the brake; AEB hands back once raw and filter agree."""
+    sender = Sender(20.0)
+    v = _cruise(sender, 2.0)
+    raw_frames = 0
+    while sender.speed > 8.0:
+        sender.advance(DT, accel=-8.0)
+        v = _frame(v, sender, 300.0, 0.0)
+        if v._sdk_short_active:
+            raw_frames += 1
+            assert v.speed == sender.pkt_v
+            assert v.acc_speed > v.speed
+    assert raw_frames >= 3
+    for _ in range(int(2.0 / DT)):
+        sender.advance(DT)
+        v = _frame(v, sender, 300.0, 0.0)
+    assert not v._sdk_short_active
+    assert abs(v.speed - sender.speed) < 0.3
+
+
+def test_the_pre_filter_is_acc_only(monkeypatch):
+    """AEB keeps the 1.1.3-preview.1 chain off the short window; a slower AEB lost 0.17 s on a TP."""
+    traces = []
+    for tau in (1e-6, 0.5):
+        monkeypatch.setattr(tmp_sdk, "SDK_SPEED_TAU_REST_S", tau)
+        monkeypatch.setattr(tmp_sdk, "SDK_SPEED_TAU_FAST_S", tau)
+        sender = Sender(25.0)
+        v = _cruise(sender, 2.0)
+        trace = []
+        for _ in range(int(1.0 / DT)):
+            sender.advance(DT, accel=-1.5)
+            v = _frame(v, sender, 300.0, 0.0)
+            trace.append((v.speed, v.acceleration, v.acc_speed, v._sdk_short_active))
+        traces.append(trace)
+    assert not any(row[3] for trace in traces for row in trace)
+    assert [row[:2] for row in traces[0]] == [row[:2] for row in traces[1]]
+    assert [row[2] for row in traces[0]] != [row[2] for row in traces[1]]

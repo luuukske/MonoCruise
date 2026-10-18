@@ -526,16 +526,13 @@ class SettingsPanel(QWidget):
         self._hazard_auto_row = r_auto
         self._set_row_visible(r_auto, s.hazards_variable)
 
-        new_label(p, self._r(0), 0, "Horn:")
-        self.chk_horn = new_checkbutton(
-            p, self._r(), 1, s.horn_variable,
-            callback=lambda v: self._set("horn_variable", v),
-        )
-
-        new_label(p, self._r(0), 0, "Airhorn:")
-        self.chk_airhorn = new_checkbutton(
-            p, self._r(), 1, s.airhorn_variable,
-            callback=lambda v: self._set("airhorn_variable", v),
+        self.chk_hill_assist, _, _ = self._field_with_subtext(
+            "Hill assist:",
+            lambda c, r, col: new_checkbutton(
+                c, r, col, s.hill_assist,
+                callback=lambda v: self._set("hill_assist", v),
+            ),
+            "Holds the brake while stopped. Off, the truck can roll.",
         )
 
         new_label(p, self._r(0), 0, "Live bottom bar:")
@@ -1606,8 +1603,7 @@ class SettingsPanel(QWidget):
         self.chk_hazards.setChecked(s.hazards_variable)
         self.chk_autodisable.setChecked(s.autodisable_hazards)
         self._set_row_visible(self._hazard_auto_row, s.hazards_variable)
-        self.chk_horn.setChecked(s.horn_variable)
-        self.chk_airhorn.setChecked(s.airhorn_variable)
+        self.chk_hill_assist.setChecked(s.hill_assist)
         self.chk_live_bar.setChecked(s.bar_variable)
         self.chk_notify_updates.setChecked(s.notify_for_updates)
         self.opt_channel.setCurrentText(s.update_channel.capitalize())

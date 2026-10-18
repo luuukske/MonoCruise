@@ -7,8 +7,10 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
-#include <memory>
+#include <new>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -66,6 +68,16 @@ namespace
     constexpr size_t kVehiclesSize      = sizeof( VehiclesHeader ) + kMaxSlots * sizeof( VehicleSlot );
     constexpr float kMaxRangeM          = 250.0f;
 
+    // Samples arrive at about 4.5 Hz, so 20 Hz loses nothing. Each publish gets a time budget for
+    // collecting players and another for reading rigs, nearest first, so one slow client cannot stall a frame.
+    constexpr int64_t kVehiclesPeriodUs = 50000;
+    constexpr int64_t kCollectBudgetUs  = 800;
+    constexpr int64_t kFillBudgetUs     = 1200;
+    constexpr size_t kMaxArrivals       = 4096;
+
+    // Oldest client build the vehicle block was checked against. Older or unreadable builds run zone-state-only.
+    constexpr uint32_t kMinClient[ 4 ] = { 0, 7, 7, 11 };
+
     constexpr uint8_t kKindTractor      = 0;
     constexpr uint8_t kKindTrailer      = 1;
     constexpr uint8_t kKindLocalTractor = 2;
@@ -76,28 +88,40 @@ namespace
     constexpr uint8_t kFlagAngular   = 4;
     constexpr uint8_t kFlagSampled   = 8;
 
-    std::unique_ptr< TruckersMP::Session > g_session;
-    HANDLE g_mapping     = nullptr;
-    StateData* g_state   = nullptr;
-    uint32_t g_heartbeat = 0;
-
-    std::atomic< bool > g_connected{ false };
-    std::atomic< bool > g_in_zone{ false };
-    std::atomic< int > g_streamed{ 0 };
-
-    HANDLE g_vehicles_mapping = nullptr;
-    uint8_t* g_vehicles       = nullptr;
-    int64_t g_qpc_freq        = 1;
-    bool g_vehicles_faulted   = false;
-
     // Arrival of each player's network samples, keyed by the opaque SDK handle. OnUpdate may run off the render thread.
     struct SampleArrival
     {
         int64_t last_qpc = 0;
         uint32_t count   = 0;
     };
-    SRWLOCK g_arrivals_lock = SRWLOCK_INIT;
-    std::unordered_map< uint64_t, SampleArrival > g_arrivals;
+
+    struct Arrivals
+    {
+        SRWLOCK lock = SRWLOCK_INIT;
+        std::unordered_map< uint64_t, SampleArrival > map;
+    };
+
+    // The session, the arrivals and both mappings are leaked on purpose: nothing here has a destructor
+    // that runs at DLL detach or process exit, because the client may be gone by then.
+    TruckersMP::Session* g_session = nullptr;
+    HANDLE g_mapping               = nullptr;
+    StateData* g_state             = nullptr;
+    uint32_t g_heartbeat           = 0;
+    std::atomic< Arrivals* > g_arrivals{ nullptr };
+
+    HANDLE g_vehicles_mapping = nullptr;
+    uint8_t* g_vehicles       = nullptr;
+    int64_t g_qpc_freq        = 1;
+    int64_t g_next_vehicles   = 0;
+    bool g_vehicles_enabled   = false;
+    bool g_budget_warned      = false;
+
+    std::atomic< bool > g_live{ false };
+    std::atomic< bool > g_dead{ false };
+    std::atomic< unsigned long > g_fault_code{ 0 };
+    std::atomic< bool > g_connected{ false };
+    std::atomic< bool > g_in_zone{ false };
+    std::atomic< int > g_streamed{ 0 };
 
     int64_t qpc_now()
     {
@@ -106,14 +130,150 @@ namespace
         return t.QuadPart;
     }
 
-    void forget_all_arrivals()
+    // Blocking only where the plugin is live; shutdown asks for a try-lock so a lock left held by a fault cannot hang it.
+    void forget_all_arrivals( bool wait )
     {
-        AcquireSRWLockExclusive( &g_arrivals_lock );
-        g_arrivals.clear();
-        ReleaseSRWLockExclusive( &g_arrivals_lock );
+        Arrivals* arrivals = g_arrivals.load();
+        if ( arrivals == nullptr )
+        {
+            return;
+        }
+        if ( wait )
+        {
+            AcquireSRWLockExclusive( &arrivals->lock );
+        }
+        else if ( !TryAcquireSRWLockExclusive( &arrivals->lock ) )
+        {
+            return;
+        }
+        arrivals->map.clear();
+        ReleaseSRWLockExclusive( &arrivals->lock );
     }
 
-    void log( TruckersMP::LogLevel level, const char* text )
+    // The mappings stay mapped until process exit; only their contents are cleared.
+    void zero_published()
+    {
+        if ( g_state != nullptr )
+        {
+            std::memset( g_state, 0, sizeof( StateData ) );
+        }
+        if ( g_vehicles != nullptr )
+        {
+            *reinterpret_cast< volatile uint32_t* >( g_vehicles + offsetof( VehiclesHeader, heartbeat ) ) = 0;
+            MemoryBarrier();
+            std::memset( g_vehicles, 0, kVehiclesSize );
+        }
+    }
+
+    // Debugger and thread-naming exceptions are not faults. Kept tiny: it can run on a nearly full stack.
+    int seh_filter( unsigned long code )
+    {
+        switch ( code )
+        {
+        case 0x40010006:
+        case 0x4001000A:
+        case 0x406D1388:
+        case 0x80000003:
+        case 0x80000004:
+            return EXCEPTION_CONTINUE_SEARCH;
+        default:
+            g_fault_code = code;
+            return EXCEPTION_EXECUTE_HANDLER;
+        }
+    }
+
+    // No C++ objects may live in a function with __try, so this stays a bare trampoline.
+    bool run_seh( void ( *fn )( void* ), void* ctx )
+    {
+        __try
+        {
+            fn( ctx );
+            return true;
+        }
+        __except ( seh_filter( GetExceptionCode() ) )
+        {
+            return false;
+        }
+    }
+
+    // True when f ran to the end: a hardware fault or a C++ exception inside it both read as false.
+    template < typename F >
+    bool run_guarded( F& f )
+    {
+        struct Call
+        {
+            F* f;
+            bool threw;
+        } call{ &f, false };
+        auto thunk = []( void* ctx ) {
+            Call* c = static_cast< Call* >( ctx );
+            try
+            {
+                ( *c->f )();
+            }
+            catch ( ... )
+            {
+                c->threw = true;
+                g_fault_code = 0xE06D7363;
+            }
+        };
+        return run_seh( thunk, &call ) && !call.threw;
+    }
+
+    void log_after_fault( const char* text )
+    {
+        TruckersMP::Session* session = g_session;
+        if ( session == nullptr )
+        {
+            return;
+        }
+        auto call = [ & ] { session->Core().LogMessage( TruckersMP::LogLevel::Error, text ); };
+        run_guarded( call );
+    }
+
+    // The first fault silences the plugin for good: published memory is zeroed (readers see no writer) and
+    // nothing calls the SDK again. Logged once, with a call that is itself guarded.
+    void enter_dead( const char* where )
+    {
+        if ( g_dead.exchange( true ) )
+        {
+            return;
+        }
+        zero_published();
+        char text[ 160 ];
+        std::snprintf(
+            text, sizeof text, "[MonoCruise] A TruckersMP call faulted (0x%08lX in %s); plugin off until restart.",
+            g_fault_code.load(), where
+        );
+        log_after_fault( text );
+    }
+
+    template < typename F >
+    bool guard( const char* where, F&& f )
+    {
+        if ( g_dead.load() )
+        {
+            return false;
+        }
+        if ( run_guarded( f ) )
+        {
+            return true;
+        }
+        enter_dead( where );
+        return false;
+    }
+
+    template < typename F >
+    void callback( const char* where, F&& f )
+    {
+        if ( g_live.load() )
+        {
+            guard( where, f );
+        }
+    }
+
+    // Only inside a guard: it is an SDK call.
+    void sdk_log( TruckersMP::LogLevel level, const char* text )
     {
         if ( g_session != nullptr )
         {
@@ -121,8 +281,17 @@ namespace
         }
     }
 
+    void log_guarded( TruckersMP::LogLevel level, const char* text )
+    {
+        guard( "log", [ & ] { sdk_log( level, text ); } );
+    }
+
     bool open_state()
     {
+        if ( g_state != nullptr )
+        {
+            return true;
+        }
         g_mapping = CreateFileMappingW(
             INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof( StateData ), kStateName
         );
@@ -142,6 +311,10 @@ namespace
 
     bool open_vehicles()
     {
+        if ( g_vehicles != nullptr )
+        {
+            return true;
+        }
         g_vehicles_mapping = CreateFileMappingW(
             INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, static_cast< DWORD >( kVehiclesSize ), kVehiclesName
         );
@@ -159,101 +332,111 @@ namespace
         return true;
     }
 
-    void close_state()
+    // Unregistering keeps a client that unloads the DLL after shutdown from calling into freed code.
+    void unregister_listeners()
     {
-        // Version 0 tells the reader there is no writer, without waiting for the heartbeat to go stale.
-        if ( g_state != nullptr )
+        if ( g_session == nullptr )
         {
-            std::memset( g_state, 0, sizeof( StateData ) );
-            UnmapViewOfFile( g_state );
-            g_state = nullptr;
+            return;
         }
-        if ( g_mapping != nullptr )
-        {
-            CloseHandle( g_mapping );
-            g_mapping = nullptr;
-        }
-    }
-
-    void close_vehicles()
-    {
-        if ( g_vehicles != nullptr )
-        {
-            std::memset( g_vehicles, 0, kVehiclesSize );
-            UnmapViewOfFile( g_vehicles );
-            g_vehicles = nullptr;
-        }
-        if ( g_vehicles_mapping != nullptr )
-        {
-            CloseHandle( g_vehicles_mapping );
-            g_vehicles_mapping = nullptr;
-        }
-        forget_all_arrivals();
+        TruckersMP::Session& session = *g_session;
+        session.Network().OnConnected.UnregisterAll();
+        session.Network().OnDisconnected.UnregisterAll();
+        session.Gameplay().OnNoCollisionZone.UnregisterAll();
+        session.Player().OnStreamIn.UnregisterAll();
+        session.Player().OnStreamOut.UnregisterAll();
+        session.Player().OnUpdate.UnregisterAll();
+        session.Render().OnPreRender.UnregisterAll();
     }
 
     void shutdown()
     {
-        // Destroying the session unregisters every listener before the shared memory goes.
-        g_session.reset();
-        close_vehicles();
-        close_state();
-        g_vehicles_faulted = false;
-        g_connected = false;
-        g_in_zone   = false;
-        g_streamed  = 0;
-        g_heartbeat = 0;
+        g_live = false;
+        guard( "shutdown", [] { unregister_listeners(); } );
+        zero_published();
+        forget_all_arrivals( false );
+        g_session          = nullptr;
+        g_vehicles_enabled = false;
+        g_next_vehicles    = 0;
+        g_connected        = false;
+        g_in_zone          = false;
+        g_streamed         = 0;
+        g_heartbeat        = 0;
     }
 
     void on_connection( bool connected )
     {
-        // Cleared on disconnect only: spawning inside a zone may report it before OnConnected.
-        g_connected = connected;
-        g_streamed  = 0;
-        if ( !connected )
-        {
-            g_in_zone = false;
-        }
-        forget_all_arrivals();
-        log( TruckersMP::LogLevel::Info, connected ? "[MonoCruise] Connected." : "[MonoCruise] Disconnected." );
+        callback( "connection", [ & ] {
+            // Cleared on disconnect only: spawning inside a zone may report it before OnConnected.
+            g_connected = connected;
+            g_streamed  = 0;
+            if ( !connected )
+            {
+                g_in_zone = false;
+            }
+            forget_all_arrivals( true );
+            g_next_vehicles = 0;
+            sdk_log( TruckersMP::LogLevel::Info, connected ? "[MonoCruise] Connected." : "[MonoCruise] Disconnected." );
+        } );
     }
 
     void on_zone( bool entered )
     {
-        const bool was_in_zone = g_in_zone.exchange( entered );
-        if ( entered )
-        {
-            log( TruckersMP::LogLevel::Info, g_connected ? "[MonoCruise] Entered a no-collision zone."
-                                                         : "[MonoCruise] Entered a no-collision zone before connecting." );
-        }
-        else
-        {
-            log( TruckersMP::LogLevel::Info, was_in_zone ? "[MonoCruise] Left a no-collision zone."
-                                                         : "[MonoCruise] Left a no-collision zone that was never reported entered." );
-        }
+        callback( "zone", [ & ] {
+            const bool was_in_zone = g_in_zone.exchange( entered );
+            if ( entered )
+            {
+                sdk_log(
+                    TruckersMP::LogLevel::Info, g_connected ? "[MonoCruise] Entered a no-collision zone."
+                                                            : "[MonoCruise] Entered a no-collision zone before connecting."
+                );
+            }
+            else
+            {
+                sdk_log(
+                    TruckersMP::LogLevel::Info, was_in_zone ? "[MonoCruise] Left a no-collision zone."
+                                                            : "[MonoCruise] Left a no-collision zone that was never reported entered."
+                );
+            }
+        } );
     }
 
     // Network-rate callback: record the arrival only, the SDK forbids calling back into it from here.
     void on_player_update( uint64_t handle )
     {
+        Arrivals* arrivals = g_arrivals.load();
+        if ( arrivals == nullptr )
+        {
+            return;
+        }
         const int64_t now = qpc_now();
-        AcquireSRWLockExclusive( &g_arrivals_lock );
+        AcquireSRWLockExclusive( &arrivals->lock );
         try
         {
-            SampleArrival& arrival = g_arrivals[ handle ];
+            if ( arrivals->map.size() >= kMaxArrivals )
+            {
+                arrivals->map.clear();
+            }
+            SampleArrival& arrival = arrivals->map[ handle ];
             arrival.last_qpc       = now;
             ++arrival.count;
         }
         catch ( ... )
         {
         }
-        ReleaseSRWLockExclusive( &g_arrivals_lock );
+        ReleaseSRWLockExclusive( &arrivals->lock );
     }
 
     void forget_player( uint64_t handle )
     {
-        AcquireSRWLockExclusive( &g_arrivals_lock );
-        g_arrivals.erase( handle );
-        ReleaseSRWLockExclusive( &g_arrivals_lock );
+        Arrivals* arrivals = g_arrivals.load();
+        if ( arrivals == nullptr )
+        {
+            return;
+        }
+        AcquireSRWLockExclusive( &arrivals->lock );
+        arrivals->map.erase( handle );
+        ReleaseSRWLockExclusive( &arrivals->lock );
     }
 
     void publish()
@@ -314,18 +497,30 @@ namespace
         bool local;
     };
 
+    struct Budget
+    {
+        int64_t start;
+        int64_t limit;
+
+        bool spent() const { return qpc_now() - start > limit; }
+    };
+
     VehicleSlot base_slot( const Candidate& c, uint16_t rig, int64_t now )
     {
         SampleArrival arrival;
-        bool sampled = false;
-        AcquireSRWLockShared( &g_arrivals_lock );
-        const auto found = g_arrivals.find( c.player.RawHandle().m_value );
-        if ( found != g_arrivals.end() )
+        bool sampled         = false;
+        Arrivals* arrivals   = g_arrivals.load();
+        if ( arrivals != nullptr )
         {
-            arrival = found->second;
-            sampled = arrival.last_qpc != 0;
+            AcquireSRWLockShared( &arrivals->lock );
+            const auto found = arrivals->map.find( c.player.RawHandle().m_value );
+            if ( found != arrivals->map.end() )
+            {
+                arrival = found->second;
+                sampled = arrival.last_qpc != 0;
+            }
+            ReleaseSRWLockShared( &arrivals->lock );
         }
-        ReleaseSRWLockShared( &g_arrivals_lock );
 
         VehicleSlot base   = {};
         base.distance_m    = c.distance_m;
@@ -340,8 +535,8 @@ namespace
         return base;
     }
 
-    // One rig (tractor, then its trailer) per candidate, nearest first, while two slots remain.
-    size_t fill_rigs( const std::vector< Candidate >& candidates, VehicleSlot* slots, int64_t now )
+    // One rig (tractor, then its trailer) per candidate, nearest first, while two slots and budget remain.
+    size_t fill_rigs( const std::vector< Candidate >& candidates, VehicleSlot* slots, int64_t now, const Budget& budget, bool& over )
     {
         size_t count = 0;
         uint16_t rig = 0;
@@ -349,6 +544,11 @@ namespace
         {
             if ( count + 2 > kMaxSlots )
             {
+                break;
+            }
+            if ( budget.spent() )
+            {
+                over = true;
                 break;
             }
             const auto vehicle = c.player.GetVehicle();
@@ -382,15 +582,16 @@ namespace
 
     // Player queries run only on a server. Network().GetLastPing() is never called: off a server it
     // dereferences null inside client 0.7.7.11 and crashed the game at the main menu (2026-10-11).
-    void publish_vehicles()
+    void publish_vehicles( int64_t now )
     {
         if ( g_vehicles == nullptr || g_session == nullptr )
         {
             return;
         }
-        auto& session     = *g_session;
-        const int64_t now = qpc_now();
-        const bool online = g_connected.load();
+        auto& session       = *g_session;
+        const Budget collect{ now, g_qpc_freq * kCollectBudgetUs / 1000000 };
+        const bool online   = g_connected.load();
+        bool over         = false;
 
         std::vector< Candidate > candidates;
         const auto local         = online ? session.Player().GetLocalPlayer() : std::nullopt;
@@ -403,6 +604,11 @@ namespace
         {
             for ( const auto& player : *players )
             {
+                if ( collect.spent() )
+                {
+                    over = true;
+                    break;
+                }
                 if ( !player.IsValid() || player.RawHandle().m_value == local_key )
                 {
                     continue;
@@ -419,7 +625,8 @@ namespace
         } );
 
         static VehicleSlot slots[ kMaxSlots ];
-        const size_t count = fill_rigs( candidates, slots, now );
+        const Budget fill{ qpc_now(), g_qpc_freq * kFillBudgetUs / 1000000 };
+        const size_t count = fill_rigs( candidates, slots, now, fill, over );
 
         VehiclesHeader header = {};
         header.version        = kVehiclesVersion;
@@ -438,33 +645,112 @@ namespace
         std::memcpy( g_vehicles, &header, sizeof( VehiclesHeader ) );
         MemoryBarrier();
         *live = g_heartbeat;
-    }
 
-    void report_vehicles_fault()
-    {
-        if ( g_vehicles != nullptr )
+        if ( over && !g_budget_warned )
         {
-            std::memset( g_vehicles, 0, sizeof( VehiclesHeader ) );
+            g_budget_warned = true;
+            sdk_log( TruckersMP::LogLevel::Warning, "[MonoCruise] Vehicle motion block over its time budget; the farthest rigs were left out." );
         }
-        log( TruckersMP::LogLevel::Error, "[MonoCruise] A TruckersMP SDK call faulted; vehicle motion block off until restart." );
     }
 
-    // Experimental: a fault inside the TruckersMP client switches the block off instead of taking the game down.
-    void publish_vehicles_guarded()
+    void publish_vehicles_throttled()
     {
-        if ( g_vehicles_faulted )
+        if ( !g_vehicles_enabled || g_vehicles == nullptr )
         {
             return;
         }
-        __try
+        const int64_t now = qpc_now();
+        if ( now < g_next_vehicles )
         {
-            publish_vehicles();
+            return;
         }
-        __except ( EXCEPTION_EXECUTE_HANDLER )
+        g_next_vehicles = now + g_qpc_freq * kVehiclesPeriodUs / 1000000;
+        publish_vehicles( now );
+    }
+
+    // Up to four dotted numbers after an optional leading v. Anything else is unreadable and counts as untested.
+    bool client_is_tested( const std::string& version )
+    {
+        uint32_t parts[ 4 ] = { 0, 0, 0, 0 };
+        size_t at           = 0;
+        size_t count        = 0;
+        while ( at < version.size() && ( version[ at ] == ' ' || version[ at ] == 'v' || version[ at ] == 'V' ) )
         {
-            g_vehicles_faulted = true;
-            report_vehicles_fault();
+            ++at;
         }
+        while ( at < version.size() && count < 4 )
+        {
+            if ( version[ at ] < '0' || version[ at ] > '9' )
+            {
+                return false;
+            }
+            uint32_t value = 0;
+            for ( ; at < version.size() && version[ at ] >= '0' && version[ at ] <= '9'; ++at )
+            {
+                value = value * 10 + static_cast< uint32_t >( version[ at ] - '0' );
+                if ( value > 99999 )
+                {
+                    return false;
+                }
+            }
+            parts[ count++ ] = value;
+            if ( at < version.size() && version[ at ] == '.' )
+            {
+                ++at;
+            }
+            else
+            {
+                break;
+            }
+        }
+        while ( at < version.size() && ( version[ at ] == ' ' || version[ at ] == '\r' || version[ at ] == '\n' ) )
+        {
+            ++at;
+        }
+        if ( count == 0 || at != version.size() )
+        {
+            return false;
+        }
+        for ( size_t i = 0; i < 4; ++i )
+        {
+            if ( parts[ i ] != kMinClient[ i ] )
+            {
+                return parts[ i ] > kMinClient[ i ];
+            }
+        }
+        return true;
+    }
+
+    void register_listeners( TruckersMP::Session& session )
+    {
+        session.Network().OnConnected.Register( [] { on_connection( true ); } );
+        session.Network().OnDisconnected.Register( [] { on_connection( false ); } );
+        session.Gameplay().OnNoCollisionZone.Register(
+            []( TruckersMP::GameplayNoCollisionZoneEvent& e ) { on_zone( e.GetEntered() ); }
+        );
+        session.Player().OnStreamIn.Register( []( TruckersMP::PlayerStreamInEvent& ) {
+            callback( "stream-in", [] { ++g_streamed; } );
+        } );
+        session.Player().OnStreamOut.Register( []( TruckersMP::PlayerStreamOutEvent& e ) {
+            callback( "stream-out", [ &e ] {
+                --g_streamed;
+                forget_player( e.GetPlayer().RawHandle().m_value );
+            } );
+        } );
+        session.Player().OnUpdate.Register( []( TruckersMP::PlayerUpdateEvent& e ) {
+            callback( "update", [ &e ] { on_player_update( e.GetPlayer().RawHandle().m_value ); } );
+        } );
+
+        if ( !session.Render().IsAvailable() )
+        {
+            sdk_log( TruckersMP::LogLevel::Warning, "[MonoCruise] Render module unavailable; the zone state will not update." );
+        }
+        session.Render().OnPreRender.Register( [] {
+            callback( "render", [] {
+                publish();
+                publish_vehicles_throttled();
+            } );
+        } );
     }
 }
 
@@ -473,63 +759,97 @@ TMP_EXPORT bool TMP_API truckersmp_init( const TruckersMP_Host* host, TruckersMP
     TruckersMP::PluginInfo info;
     info.m_name        = "MonoCruise";
     info.m_author      = "LD-Tech";
-    info.m_version     = "1.0.3";
+    info.m_version     = "1.0.4";
     info.m_description = "No-collision zone state and nearby vehicle motion for MonoCruise. Reads no player identities.";
-    TruckersMP::FillPluginDesc( desc, info );
 
     shutdown();
+    g_dead       = false;
+    g_fault_code = 0;
+    g_budget_warned = false;
 
-    // Returning false makes the client unload the DLL without truckersmp_shutdown, so clean up first.
-    g_session = TruckersMP::Session::Create( host );
-    if ( g_session == nullptr )
+    // Returning false makes the client unload the DLL without truckersmp_shutdown, so nothing may stay registered.
+    TruckersMP::Session* session = nullptr;
+    const bool created           = guard( "init", [ & ] {
+        TruckersMP::FillPluginDesc( desc, info );
+        session = TruckersMP::Session::Create( host ).release();
+    } );
+    if ( !created || session == nullptr )
     {
         return false;
     }
+    g_session = session;
+
     if ( !open_state() )
     {
-        log( TruckersMP::LogLevel::Error, "[MonoCruise] Could not open the shared state." );
+        log_guarded( TruckersMP::LogLevel::Error, "[MonoCruise] Could not open the shared state." );
         shutdown();
         return false;
     }
     LARGE_INTEGER freq;
     QueryPerformanceFrequency( &freq );
     g_qpc_freq = freq.QuadPart > 0 ? freq.QuadPart : 1;
-    if ( !open_vehicles() )
+    if ( g_arrivals.load() == nullptr )
     {
-        log( TruckersMP::LogLevel::Warning, "[MonoCruise] Could not open the vehicle motion block; the zone state is unaffected." );
+        g_arrivals = new ( std::nothrow ) Arrivals;
     }
 
-    auto& session = *g_session;
-    session.Network().OnConnected.Register( [] { on_connection( true ); } );
-    session.Network().OnDisconnected.Register( [] { on_connection( false ); } );
-    session.Gameplay().OnNoCollisionZone.Register(
-        []( TruckersMP::GameplayNoCollisionZoneEvent& e ) { on_zone( e.GetEntered() ); }
-    );
-    session.Player().OnStreamIn.Register( []( TruckersMP::PlayerStreamInEvent& ) { ++g_streamed; } );
-    session.Player().OnStreamOut.Register( []( TruckersMP::PlayerStreamOutEvent& e ) {
-        --g_streamed;
-        forget_player( e.GetPlayer().RawHandle().m_value );
+    std::string client;
+    bool have_client = false;
+    const bool asked = guard( "init", [ & ] {
+        if ( const auto version = session->Core().ClientVersion() )
+        {
+            client      = *version;
+            have_client = true;
+        }
     } );
-    session.Player().OnUpdate.Register(
-        []( TruckersMP::PlayerUpdateEvent& e ) { on_player_update( e.GetPlayer().RawHandle().m_value ); }
-    );
-
-    if ( !session.Render().IsAvailable() )
+    if ( !asked )
     {
-        log( TruckersMP::LogLevel::Warning, "[MonoCruise] Render module unavailable; the zone state will not update." );
+        shutdown();
+        return false;
     }
-    session.Render().OnPreRender.Register( [] {
-        publish();
-        publish_vehicles_guarded();
+    g_vehicles_enabled = have_client && client_is_tested( client );
+    if ( g_vehicles_enabled && !open_vehicles() )
+    {
+        g_vehicles_enabled = false;
+        log_guarded( TruckersMP::LogLevel::Warning, "[MonoCruise] Could not open the vehicle motion block; the zone state is unaffected." );
+    }
+    if ( !g_vehicles_enabled )
+    {
+        std::string text = have_client ? "[MonoCruise] TruckersMP client " + client + " is not at or above the tested 0.7.7.11 or is unreadable; zone state only."
+                                       : "[MonoCruise] TruckersMP client version unavailable; zone state only.";
+        log_guarded( TruckersMP::LogLevel::Warning, text.c_str() );
+    }
+
+    // From here the client holds our callbacks, so a fault leaves the plugin loaded and inert instead of unloading it.
+    g_live = true;
+    if ( !guard( "init", [ & ] { register_listeners( *session ); } ) )
+    {
+        return true;
+    }
+    guard( "init", [ & ] {
+        g_connected = session->Network().IsConnected().value_or( false );
+        if ( g_connected.load() )
+        {
+            if ( const auto players = session->Player().GetAllPlayers() )
+            {
+                g_streamed = static_cast< int >( players->size() );
+            }
+        }
+        sdk_log( TruckersMP::LogLevel::Info, "[MonoCruise] No-collision zone state ready." );
     } );
-
-    g_connected = session.Network().IsConnected().value_or( false );
-    if ( const auto players = session.Player().GetAllPlayers() )
-    {
-        g_streamed = static_cast< int >( players->size() );
-    }
-    log( TruckersMP::LogLevel::Info, "[MonoCruise] No-collision zone state ready." );
     return true;
 }
 
 TMP_EXPORT void TMP_API truckersmp_shutdown( void ) { shutdown(); }
+
+// At detach only our own memory is touched: the client may already be gone, and the loader lock is held.
+BOOL WINAPI DllMain( HINSTANCE, DWORD reason, LPVOID )
+{
+    if ( reason == DLL_PROCESS_DETACH )
+    {
+        g_live = false;
+        g_dead = true;
+        zero_published();
+    }
+    return TRUE;
+}

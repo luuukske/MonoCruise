@@ -932,8 +932,7 @@ on top of ego. `OverlapGhostHold` (`core/aeb/overlap_ghosts.py`), stepped once p
 AEB tick in `AEBThread.loop`, finds them and AEB skips them like zone ghosts:
 
 - **Deep, or inside for too long.** A body arms the hold when it overlaps ego's
-  box shrunk by `overlap_ghost_depth_m` (1.5 m) on every side: past ego's half
-  width, so it has crossed ego's centreline. It also arms once it has stayed
+  box shrunk by `overlap_ghost_depth_m` (0.3 m) on every side. It also arms once it has stayed
   inside ego's box shrunk by `overlap_ghost_contact_m` (0.2 m, the exit hold's box
   slack) for `overlap_ghost_persist_s` (0.3 s) without a break; a gap between
   steps longer than that (a pause) restarts the count. Ego's box is the §17
@@ -963,7 +962,21 @@ just past a zone exit, AEB latched one 1.05 m inside after 0.75 s and kept
 braking as it went deeper (`f392c9ce`, 2026-10-12). It also catches what the
 latch would otherwise protect, since nothing AEB has not latched is exempt.
 
-Why 1.5 m: replayed with the gate off, AEB's first engagement on 705 labelled
+Why 0.5 m: Lukas lowered the bar from 1.5 m on 2026-10-17 to ghost more
+overlapping bodies. It sits under the 0.73 m real-contact depth measured below,
+which the 1.5 m history says not to do. Corpus replay, tick by tick, on the 975
+scored clips: no verdict moved and the score is bit-identical (-1753.00). The
+hold differs on 63 clips; on 62 nothing AEB does changed, and `cca0f835` loses 18
+ticks of brake and warn, 17 of them after its window (8.17 to 9.12 s, window ends
+8.20 s): the impact tail, where the body is deep and no longer latched. No clip
+gained a tick. Probed lower: 0.3 m is identical to 0.5; 0.2 m loses 38 ticks on
+4 clips and turns `3b90c5e8` and `0492498b` from late into misses, still with no
+gain. The corpus cannot see the exposed case: a positive is a TP if any
+tick of its window engages, so a fast crash where the first frames of overlap are
+already past 0.5 m (the `eb92f30d` class, 155 km/h closing, 0.73 m at first
+engagement) loses its last frames unseen.
+
+Why 1.5 m (history): replayed with the gate off, AEB's first engagement on 705 labelled
 positives found the colliding body overlapping ego in 10 of them, by 0.73 m at
 most (`eb92f30d`, SP, 155 km/h closing), apart from `d2989cac` (below). The
 ghosts it braked for were 1.7 to 2.4 m inside at that moment and 2.2 m or more at
@@ -980,7 +993,7 @@ walking pace) go silent; `000a3c1a` brakes 1.4 s instead of 5.3 s. One cost:
 and slid on through it to 2.8 m. AEB's late brake there came after the impact and
 after the labelled window, and is now blocked: late becomes a miss.
 
-Do not lower the bar under the real-contact depths above, arm on shallow overlap,
+Do not lower the bar further, arm on shallow overlap,
 measure nested trailers on a different body from the one AEB evaluates, or drop
 the latched exemption: each turns a real crash into a ghost.
 
@@ -2087,12 +2100,11 @@ shipped `_required_decel_two_frame`, the shipped entry bar, the real
 `AEBDecelController`, and a brake plant fitted to 61 recorded braking episodes
 (dead time 0.12 s, tau 0.19 s median / 0.31 s p90). It reports residual gap.
 
-**Use it, not the corpus, whenever the engage point moves.** Corpus labels were
-tagged against one engage point, so shifting the bar re-labels clips instead of
-scoring them, and the shift always reads as a swing in FN. Worse, headless
-replay scores the engagement decision and never touches the brake pedal, so it
-is structurally blind to whether the truck actually stops. The corpus arbitrates
-*filtering*; this arbitrates *timing*.
+**Use it, not the corpus, whenever the engage point moves.** The corpus scores
+positives on geometry and cannot see the bar there at all (see corpus scoring
+below), and headless replay never touches the brake pedal, so it is structurally
+blind to whether the truck actually stops. The corpus arbitrates *filtering*;
+this arbitrates *timing*.
 
 What it pins:
 
@@ -2116,6 +2128,58 @@ What it pins:
 The closed loop converges onto the distance it planned for, finishing on
 `stop_buffer`, so there is no slack beyond what the pad and the capacity
 estimate provide. That is why both are treated as safety parameters.
+
+### Corpus scoring: filtering, not timing
+
+`core/aeb/clip_score.py` scores the labelled corpus on the verdicts from
+`clip_eval.outcome_under`. Since 2026-10-14 it judges which vehicles the
+pipeline lets through, not when or for how long AEB braked. Lukas: the corpus is
+for filtering vehicles, not for re-testing the longitudinal behaviour around the
+recorded interventions. A replay rides the recorded trajectory, already slowed
+by the live brake, so a later bar never sees the demand it would have met.
+
+- **Positives** (clips with a should-trigger window) are a TP when, on some tick
+  inside the window, AEB brakes or the snapshot's `geom_engage` is set. That flag
+  is the engagement entry test with the demand bar taken out: speed floor, an
+  engage-eligible target (colliding, risk-confirmed, braking does not worsen it,
+  no entry veto) and the same tiered confirm with the same instant paths. It
+  never gates a brake. Late when that first happens after the window, FN when
+  never. The bar, the pads and the capacity cannot move a positive; the filters,
+  the hit test, `braking_worsens`, the entry vetoes and the confirm windows can.
+- **Negatives** keep their rule: any brake is a false positive, a warn alone a
+  false warn.
+- **Stray triggers.** A brake onset more than `TRIGGER_SLACK_S` (1.5 s) outside
+  a positive's window adds one false trigger to that clip. Closer than that is
+  timing: dropping the bar from 0.85 to 0.5 moves an onset about 1.3 s at
+  90 km/h on an 8 m/s² truck, and of the replayed onsets before a window, 105
+  sit within 1.25 s of it and the next one is past 1.5 s.
+- **Flat costs.** A TP earns `TP_REWARD` per severity point with no overlap or
+  peak-decel quality. A false trigger costs `FP_TRIGGER_COST` per severity
+  point (1.0; the median phantom brake cost 0.93 under the old duration and
+  intensity formula) however long it held or hard it braked, a false warn a
+  quarter of that.
+
+Onsets are attributed by time, not by vehicle id. `target_vid` is on 110
+positives and requiring it changes two verdicts, one of them a wrong label
+(`04764cb8` names the adjacent-lane car while AEB brakes, correctly, for the
+crash dead ahead), and TMP trailers carry their own ids, so attributing onsets
+by id mostly found tractor/trailer pairs.
+
+**What it no longer sees.** The score rewards braking less: a higher engage bar
+removes false positives and never costs a positive, so a pipeline that never
+brakes scores like perfect filtering. The stop-distance envelope above guards
+that direction. `format_corpus` prints "braked in window N/M positives" so the
+effect stays visible, unscored. A truncated brake is invisible too.
+
+Measured on the local store, 960 scored clips, old scorer against this one:
+total -318.51 to -1768.00, TP 385 to 421, FN 53 to 19, late 13 to 11; false
+positives (65), false warns (14) and true negatives (430) unchanged, with
+identical brake streams. 33 FN and 4 late became TP; 39 TPs are on geometry
+alone, and 13 of the 14 of those with a `target_vid` engage on the labelled
+target. `ccc7eaa4` went TP to late: its only in-window reaction was a warn, and
+the old TP came from a brake 4.65 s before the window. 23 positives carry stray
+triggers. Corpus totals quoted before 2026-10-14, here and in the radar README,
+used the old scorer and are not comparable.
 
 ### Corpus result
 

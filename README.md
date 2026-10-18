@@ -34,10 +34,10 @@ Every feature (including ACC and AEB) works in TruckersMP and singleplayer ETS2/
 - Exponential braking and accelerating: configurable non-linear pedal curves
 - Learns how hard your truck can accelerate and brake, so cruise and ACC stay accurate with any load
 - Hill compensation, and follows the in-game Braking intensity slider
+- Hill assist: holds the brake while you are stopped, and can be turned off so the truck rolls
 
 **Comfort & automation**
 - Auto start and stop together with the game, for non-intrusive UX
-- Automatically horn when braking hard
 - Auto enable hazard lights when braking for traffic, auto disable on acceleration
 - Live braking and accelerating bar on the bottom of the screen
 

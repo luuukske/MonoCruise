@@ -35,10 +35,21 @@ FLAG_PLACEMENT, FLAG_LINEAR, FLAG_ANGULAR, FLAG_SAMPLED = 1, 2, 4, 8
 
 # Experimental switch: False keeps every TMP speed on the position fit.
 SDK_SPEED_ENABLED: bool = True
+# AEB switches to the raw SDK speed while the filter lags a hard change; ACC never does.
+AEB_RAW_SHORT_WINDOW: bool = True
+# AEB takes the raw speed once it sits this far below the filtered one.
+SDK_SHORT_ENTER_MS: float = 1.0
+# Pre-filter on ACC's SDK speed, speed-scaled: the §7 chain barely smooths at low speed.
+SDK_SPEED_TAU_REST_S: float = 0.5
+SDK_SPEED_TAU_FAST_S: float = 0.15
+SDK_SPEED_TAU_REF_MS: float = 25.0
 # Same-place bodies sit within 1.3 m (p99, tractors and trailers); queued rigs are farther apart.
 MATCH_M: float = 3.0
 # The client extrapolates a late player for ~300 ms, then freezes it (measured 2026-10-11).
 STALE_MS: float = 300.0
+# A match dropout (p90 4 frames) on the raw speed holds it, then fades to the position fit.
+DROPOUT_HOLD_S: float = 0.3
+DROPOUT_FADE_S: float = 0.5
 # A writer that stops ticking (game closed, plugin unloaded) is no data.
 WRITER_STALE_S: float = 0.5
 

@@ -186,7 +186,7 @@ corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
 |-------|--------|---------|
 | `position.x/z` | **Unfiltered** shared-memory world coordinates | Arc start position, rendering, collision geometry |
 | `_smooth_yaw` | Wrap-safe EMA of `rotation.euler()[1]` in radians (`_RAW_YAW_ALPHA = 0.5`, AI and TMP) | **Arc curvature. Never use `rotation.euler()` directly for arcs.** |
-| `speed` | Accel-corrected smoothed speed (`speed_corr`): see filter chain below. AI + TMP | AEB arc direction, TTB |
+| `speed` | Accel-corrected smoothed speed (`speed_corr`): see filter chain below. AI + TMP; a TMP body matched to the SDK reads the sender's own speed, raw during a hard change (§19) | AEB arc direction, TTB |
 | `acc_speed` | ACC speed: adaptive filter on `speed_corr`: sub-deadband per-tick changes get a long time constant, larger changes a short one when they agree with the de-noised trend; standstill latch clamps to exactly 0 near rest (filter chain below). Runs on the **ACC chain** (long position window only). AI + TMP | ACC following-distance only |
 | `acceleration` | Nonlinear EMA of `d(speed_ema)/dt` over the speed-scaled `_ACCEL_FIT_WINDOW_S`: see filter chain below. Runs on the **AEB chain**, so it fits the short window's raw speed during a confirmed hard brake. Never floored or overridden (§7 "No floor on `acceleration`"). AI + TMP (buffer field 11 unused) | Arc decel/accel via `_accel_to_arc_params()` |
 | `acc_accel` | Same derivation and the **same window** on the **ACC chain**: long position window only. AI + TMP | ACC `a_lead` (CAH) only |
@@ -255,7 +255,10 @@ World `position.x/z` are **not** low-pass filtered. `update_from_last()` runs th
 same 4-signal chain for AI and TMP (`_smooth_vehicle_kinematics()` in
 `traffic.py`); only the raw-speed source differs:
 
-- **AI** raw speed = buffer field 10 as-is.
+- **AI** raw speed = the same position LS fit as TMP below; buffer field 10 gives only
+  its **sign** ("Speed sign detection"). Field 10 itself is ~9x cleaner than the fit
+  and was priced as the raw input on 2026-09-11: worse at the shipped engage bar, a wash
+  once the bar is swept, so the fit stayed.
 - **TMP** raw speed = LS fit of longitudinal motion over the last
   `_TMP_SPEED_HISTORY_LEN` `(t, x, z)` position-history samples: fit `s ≈ v·τ`
   with `s = dot(p − p₀, fwd(smooth_yaw))`, `τ = t − t₀`, and the **free-intercept**
@@ -1323,7 +1326,7 @@ double-count each trailer.
 | Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
 | TMP raw speed | Free-intercept LS on longitudinal `(t,x,z)` history (max `_TMP_SPEED_HISTORY_LEN` full frames): `v = Σ((τ−τ̄)(s−s̄))/Σ((τ−τ̄)²)`; else `Δraw/dt`, signed via forward dot |
 | Speed / accel filter (AI + TMP) | Long-window position LS raw speed by default; confirmed hard braking temporarily selects a 5-sample LS suffix. Then `_smooth_vehicle_kinematics()` runs `speed_ema` (EMA of raw) → `accel` (LS slope, never floored) → `speed_corr = speed_ema + accel·τ` (`self.speed`) → `acc_speed` (adaptive low-pass on `speed_corr`: `tau` ramps `_ACC_SPEED_TAU_SLOW_S`→`_ACC_SPEED_TAU_FAST_S` as the per-tick change grows past `_ACC_SPEED_DEADBAND_MS` **and agrees with the de-noised trend**, and is scaled down at low speed and during a steady decel/accel: plus a constant-accel feed-forward, gated by de-noised `accel_trend`, that zeroes sustained-ramp lag with no windup; standstill latch clamps to 0 near rest with hysteresis release; `self.acc_speed`) |
-| AI vs TMP raw speed | AI = buffer field 10; TMP = position-history LS fit. Filter chain identical after that |
+| AI vs TMP raw speed | Both the position-history LS fit; AI takes the sign from buffer field 10; an SDK-matched TMP body takes the sender's speed (§19). Filter chain identical after that |
 | Positions | No EMA: always raw world coordinates |
 | Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > _LAG_MIN_SPEED_MS` (5 m/s) AND all four entry gates pass → decay speed: `prev_speed × (1 − frac²)`, release after the TTC-scaled `freeze_dur` (≤ 0.5 s) |
 | Lag entry gates | no armed brake transient AND rotation rate < 2 deg/s AND recent raw window ≥ `_LAG_ENTRY_RAW_SPEED_MS` AND recent/older raw ≥ `_LAG_ENTRY_DECAY_MIN` |
@@ -2005,10 +2008,57 @@ trailer records to SDK trailers. Same-place offsets measured 1.3 m at p99 for bo
 
 ### Speed
 
-`_sdk_raw_speed`: the SDK velocity projected on the record's own smoothed heading,
-fed to both lanes as the raw speed (the hard-brake short window is not used, its
-state is reset). EMA, accel fit, `speed_corr` and `acc_speed` run as in §7, so the
-consumers see the same signals, only measured better.
+`_sdk_raw_speed`: the SDK velocity projected on the record's own smoothed heading.
+`_run_sdk_speed_chain` then hands the two lanes what §7 hands them, with the SDK in
+place of the position windows: ACC a smoothed speed, AEB the plain chain plus a raw
+short window during a hard change.
+
+**ACC: pre-filtered.** ACC's lane takes the SDK speed through a time-constant EMA,
+`SDK_SPEED_TAU_REST_S` (0.5 s) at rest falling linearly to `SDK_SPEED_TAU_FAST_S`
+(0.15 s) at `SDK_SPEED_TAU_REF_MS` (25 m/s), and then the §7 chain. The chain alone is
+not enough here: its smoothing was tuned on the position fit, which is itself a 1.3 s
+window, and at low speed it all but switches off (EMA weight ~1, accel window 0.45 s).
+Fed the SDK speed directly (1.1.3-preview.1), a TruckersMP player in a jam who drives
+on and off the throttle came through as a lead swinging -6.5 to +3.9 m/s2 within
+seconds, and ACC answered every swing. With the pre-filter, below 8 m/s, `acc_accel`
+jerk on the 25 min drive is 3.64 -> 3.15 m/s3 RMS (the old position fit: 3.00), and a
+1 Hz +-0.5 m/s wobble at 5 m/s moves it 2.2 -> 0.8 m/s2 peak to peak. It still reacts
+sooner than the position fit: the -2 m/s2 crossing on lead braking lags p50 0.77 s
+below 8 m/s and 1.05 s above (position fit 1.37 / 1.53 s, unfiltered SDK 0.47 / 0.82 s).
+On the 2026-10-16 TruckersMP jam drive that reported it (16 clips, leads within 60 m),
+outside crashes: jerk RMS 4.92 -> 2.57 m/s3, p99 |`acc_accel`| 8.42 -> 5.77 m/s2. During
+a confirmed crash ACC still takes the raw speed (§7 crash bypass, 2.0 s latch), so a
+crashed truck rocking on its suspension still reaches it (jerk RMS 38.5 there, 12.4
+with the pre-filter in place of the bypass); that bypass is unchanged.
+
+**AEB: the plain chain, raw in a hard change.** AEB's lane takes the SDK speed into the
+§7 chain unfiltered, as in 1.1.3-preview.1; that chain's EMA is all the smoothing it
+gets. The pre-filter was tried on AEB too and is kept off it: on labelled TP `40591e38`
+(tailgating at 5 m behind a lead braking at ~4 m/s2) it held AEB's speed 0.6 m/s high
+and braked 0.17 s later. Once the raw SDK speed sits `SDK_SHORT_ENTER_MS` (1 m/s) below
+the pre-filtered one in the direction of travel, or a crash is confirmed, AEB takes the
+raw speed outright: `speed` is the sender's value and the AEB accel fit runs on it. It
+hands back after the §7 release rule (`_RAW_BRAKE_CONVERGENCE_MS` for
+`_RAW_BRAKE_RELEASE_FRAMES`). A gentle 1.5 m/s2 brake never enters it, an 8 m/s2 one
+within about two packets, and a crash-sized drop (25 -> 4 m/s in one packet) on the
+frame it lands, where the chain read 17.2 m/s and took 0.13 to 0.27 s to come within
+1 m/s. Raw full time was tried first (`b43735d`): it stepped AEB's speed at every
+packet and on every match dropout and bought no labelled clip. ACC never takes the
+short window, except the §7 crash bypass; `AEB_RAW_SHORT_WINDOW` in `tmp_sdk.py`
+switches it off. While it is active the §7 position short window is armed too, so a
+dropout inside the event falls back to the 5-sample fit and not the 1.3 s window that
+still holds the pre-brake motion.
+
+**Match dropouts.** TruckersMP rubber-banding can push the shown pose past `MATCH_M`
+for a few frames (615 dropouts in 328k tracked frames within 80 m, p50 1 frame, p90 4).
+Outside the short window the shared EMA keeps that continuous. On the raw speed it
+would not (`6f9a69bb`: 23.8 and 17 m/s on alternate frames when AEB was raw full time),
+so `_bridge_sdk_dropout` holds the last raw speed for `DROPOUT_HOLD_S` (0.3 s) and then
+fades to the position fit over `DROPOUT_FADE_S` (0.5 s). A crash the position track
+confirms during the dropout ends the hold: it is newer than the last packet. An SDK
+crash does not, because the crash packet is the evidence and the position fit still
+reads the pre-crash speed. The bridge sits in `Vehicle`, not in `attach`, because a clip
+stores only the bodies live matching paired, so a wider gate could never be replayed.
 
 A **stall** (`netcode_stall`, packet older than `STALE_MS`, 300 ms):
 - While the client still extrapolates the body (it moved at least 10% of the
@@ -2065,7 +2115,16 @@ Radar chain replayed both ways (`tools/tmp_sdk_analyze.py`):
 | gaps more than 2 m/s below the sender's own speed | 19 -> 2 (worst 18 -> 2.4 m/s) | 3 -> 0 (worst 30.7 -> 0) |
 | overshoot over 2 m/s after a gap | 14 -> 0 | 0 -> 0 |
 | braking midpoint behind the reference, p50 / p90 | 0.31 / 0.95 -> 0.19 / 0.45 s | 0.28 / 0.39 -> 0.23 / 0.27 s |
+| AEB speed behind the sender on braking, preview.1 -> short window, p50 / p90 | 0.16 / 0.21 -> 0.02 / 0.04 s | 0.05 / 0.23 -> 0.01 / 0.04 s |
 | crash confirmations on matched trucks | 0 -> 0 | 1 -> 1 |
+
+AEB replayed on the 321 clips that carry SDK frames, 1.1.3-preview.1 -> the short
+window: labelled cost -72.00 unchanged (40 scored, no verdict changed), 75 clips change,
+brake onset 17 earlier and 8 later (median -0.03 s, latest +0.11 s), one unlabelled clip
+gains a brake and one loses it. Steps over 5 m/s at a match change: 2 -> 2 (24 with AEB
+raw full time and no bridge). After a long frozen stall ends the pre-filter takes about
+0.3 s to climb back to the sender, so AEB can read a lead up to 2.3 m/s slow for that
+long (2 such gaps on the 4.5 min drive, as before).
 
 The 30.7 m/s case is a 1.2 s packet gap on a truck at 30.5 m/s: frozen on screen
 for 0.8 s, the §7 chain read it as stopped (the lag freeze never opened), the SDK

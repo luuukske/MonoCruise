@@ -27,7 +27,7 @@ if _REAL_CONFIG.is_file():
 # A skip carrying one of these markers is a known, accepted gap. Anything else
 # that skips is a test silently asserting nothing, which is what the gate below
 # is for.
-_ALLOWED_SKIP_MARKERS = ("needs_clips",)
+_ALLOWED_SKIP_MARKERS = ("needs_clips", "needs_msvc")
 _STRICT_SKIPS = os.environ.get("MONOCRUISE_STRICT_SKIPS", "") not in ("", "0")
 _unexpected_skips: dict[str, str] = {}
 
@@ -36,6 +36,10 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "needs_clips: needs an AEB clip fixture that lives outside the repo",
+    )
+    config.addinivalue_line(
+        "markers",
+        "needs_msvc: builds a native test host, so it needs Windows with MSVC",
     )
 
 
