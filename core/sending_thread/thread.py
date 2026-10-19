@@ -1193,6 +1193,7 @@ class SendingThread(BaseThread):
                         tel_gear, mass_kg, has_t
                     ),
                     max_brake_ms2=self._capacity_tracker.max_brake_ms2,
+                    accel_offset_ms2=self._capacity_tracker.accel_zero_offset_ms2,
                     road_pitch=road_pitch,
                     cruise_commanding=mapper_engaged,
                     gear_dashboard=tel_gear_dashboard,

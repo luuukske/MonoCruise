@@ -14,6 +14,9 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ### Added
 - **Hill assist can be turned off**: MonoCruise held the brake whenever you were stopped. A new switch, on by default, turns that hold off so the truck can roll while you sit still. Your own brake still works, and so does emergency braking.
 
+### Fixed
+- **Gas pedal jumped while accelerating hard**: on a fast truck the gas stayed too high through a pull and then got chopped off. Below cruising speed it now eases off once the truck is clearly pulling harder than expected.
+
 ### Removed
 - **Automatic horn**: the horn and airhorn switches are gone. The horn did not come on reliably.
 

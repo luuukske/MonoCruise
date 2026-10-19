@@ -111,6 +111,12 @@ Rules:
   dead time plus the measurement's tracking differentiator), and `KI_RISE` sets the phase
   margin against it: about 1 rad/s crossover and 55 degrees at the fitted gain.
 
+## Low-speed strength (`strength_scale.py`)
+
+A pull below about 12 m/s measures roughly twice the slope the gas map is dividing by, including in the anchor gear. At cruise speed the same map is close. The persisted learner never sees the pull: the pedal and the accel are both moving, so every settle gate stays shut, the feedforward stays hot, and the fast trim chops the pedal off once the surge shows up in the 0.30 s differentiator.
+
+`StrengthScale` is not that learner. While the clutch is closed, the pedal has been steady, and speed is under 12 m/s, a pull that outruns the model raises one scale (rise about 0.3 s, ceiling 2.6). A sag, a shift, or gear 1 below 3 m/s does not move it. The scale multiplies capacity fully below 8 m/s and fades to 1 by 20 m/s, so a town pull does not leave the highway pedal short. It can fall back toward 1 over about 8 s when a real low-speed sample says the truck is no longer that strong. Until the scale is actually above 1 the pedal is still `demand / capacity`. Once it is up, the pedal uses `(demand - offset) / slope` so the corrected full-pedal number is not divided through the origin.
+
 ## Pedal capacity (`pedal_capacity.py`)
 
 Always-on brake decel and gas gain learning (replaces legacy brake efficiency tracker).

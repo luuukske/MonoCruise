@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -13,6 +13,13 @@ from core.settings import Settings
 
 from .debug_csv import open_debug_csv
 from .launch_governor import LaunchGovernor, launch_gas_cap
+from .strength_scale import (
+    StrengthScale,
+    applied_scale,
+    gas_from_demand,
+    map_capacity,
+    update as update_strength,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +322,8 @@ class MapperSharedState:
 
     # Gas-capacity glide state (m/s² at gas=1.0): the capacity actually used
     accel_capacity_glide_ms2: float | None = None
+    # Live multiplier for a low-speed pull that outruns the learned capacity.
+    strength: StrengthScale = field(default_factory=StrengthScale)
 
     # Capacity estimates (single source of truth, fed in from PedalCapacityTracker).
     estimated_max_accel_ms2: float | None = None
@@ -378,6 +387,8 @@ class AccelToPedals:
         # Launch governor state and the gas this mapper returned last tick.
         self._launch: LaunchGovernor = LaunchGovernor()
         self._prev_out_gas: float = 0.0
+        # Map pedal before the launch cap, so a cap is not learned as extra strength.
+        self._prev_map_gas: float = 0.0
 
         # Debug logging
         self._project_root = Path(__file__).resolve().parents[2]
@@ -756,6 +767,7 @@ class AccelToPedals:
         *,
         max_accel_ms2: float = 0.0,
         max_brake_ms2: float = 0.0,
+        accel_offset_ms2: float = 0.0,
         cruise_commanding: bool = False,
         road_pitch: float = 0.0,
         gear_dashboard: int = 0,
@@ -958,6 +970,14 @@ class AccelToPedals:
                 )
             max_a_use = max(new_accel_capacity_glide, 0.1)
             max_b_use = max(new_max_brake or 0.1, 0.1)
+            offset_use = max(0.0, _finite_or_zero(accel_offset_ms2))
+            update_strength(
+                s.strength, dt, self._prev_map_gas, new_raw_smooth_live,
+                road_load_accel, max_a_use, speed, gear_dash, factor,
+                clutch_applied, offset_use,
+            )
+            strength = applied_scale(s.strength.scale, speed)
+            map_cap = max(map_capacity(max_a_use, s.strength.scale, speed), 0.1)
 
             # Pure-FF pedal for diagnostics (what the mapping would give with no trim)
             combined_ff_only = new_wanted_smooth + effective_road_load
@@ -965,19 +985,19 @@ class AccelToPedals:
             if new_wanted_smooth > 0.0 and combined_ff_only < 0.0:
                 combined_ff_only = 0.0
             if combined_ff_only >= 0.0:
-                ff = combined_ff_only / max_a_use
+                ff = gas_from_demand(combined_ff_only, map_cap, offset_use, strength)
             else:
                 ff = -self._brake_pedal_from_decel(-combined_ff_only, max_b_use)
             # Gas-side FF saturation = unsatisfiable bid (headroom cap).
-            ff_saturated = combined_ff_only > max_a_use
+            ff_saturated = combined_ff_only > map_cap
 
             # Unified mapping: FF + fast trim through the same capacity scaling.
             combined = combined_ff_only + fast_trim_ms2
             combined = self._adaptive_output_ema_step(new_output_smooth_ms2, combined, dt)
             new_output_smooth_ms2 = combined
             if combined >= 0.0:
-                unclamped_effort = combined / max_a_use
-                capacity_used = max_a_use
+                unclamped_effort = gas_from_demand(combined, map_cap, offset_use, strength)
+                capacity_used = map_cap
             else:
                 unclamped_effort = -self._brake_pedal_from_decel(-combined, max_b_use)
                 capacity_used = max_b_use
@@ -992,7 +1012,7 @@ class AccelToPedals:
                 and factor > 0.0
             ):
                 if effort >= 1.0:
-                    combined_sat = max_a_use
+                    combined_sat = map_cap
                 else:
                     combined_sat = -max_b_use
                 desired_fast_sum = combined_sat - combined_ff_only
@@ -1008,6 +1028,7 @@ class AccelToPedals:
 
             gas_cmd = _clamp(effort, 0.0, 1.0)
             brake_cmd = _clamp(-effort, 0.0, 1.0)
+            self._prev_map_gas = gas_cmd
 
             # Ceiling only: the limiter's gas caps the driver's pedal, and AEB owns the brake.
             new_launch, launch_cap = launch_gas_cap(
