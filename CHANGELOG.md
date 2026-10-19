@@ -16,6 +16,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ### Fixed
 - **Gas pedal jumped while accelerating hard**: on a fast truck the gas stayed too high through a pull and then got chopped off. Below cruising speed it now eases off once the truck is clearly pulling harder than expected.
+- **Acceleration styles felt weak in town and faded too early**: Normal and Efficiency now pull properly up to town speeds and ease off smoothly toward the highway, and Sport is full throttle with no cap. ACC no longer holds them back on an empty road or behind a car far ahead, and the gas no longer sags at the end of a full-throttle pull or climb.
 
 ### Removed
 - **Automatic horn**: the horn and airhorn switches are gone. The horn did not come on reliably.

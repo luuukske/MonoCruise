@@ -1011,16 +1011,18 @@ class AccelToPedals:
                 and not (cap_mode and effort >= 1.0)
                 and factor > 0.0
             ):
-                if effort >= 1.0:
-                    combined_sat = map_cap
+                if effort >= 1.0 and error_ms2 > 0.0:
+                    # Railed and still short: hold. Snapping cancelled a bid above capability
+                    # and left -1.5 behind, so the pedal sagged once the bid came back in range.
+                    new_fast_integral = self._fast_integral
                 else:
-                    combined_sat = -max_b_use
-                desired_fast_sum = combined_sat - combined_ff_only
-                new_fast_integral = _clamp(
-                    desired_fast_sum - fast_p - fast_d,
-                    -_FAST_I_CLAMP_MS2,
-                    _FAST_I_CLAMP_MS2,
-                )
+                    combined_sat = map_cap if effort >= 1.0 else -max_b_use
+                    desired_fast_sum = combined_sat - combined_ff_only
+                    new_fast_integral = _clamp(
+                        desired_fast_sum - fast_p - fast_d,
+                        -_FAST_I_CLAMP_MS2,
+                        _FAST_I_CLAMP_MS2,
+                    )
                 fast_i = new_fast_integral
 
             # Diagnostic: pedal-units delta contributed by fast trim (post-clamp).

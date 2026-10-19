@@ -300,7 +300,7 @@ class CruiseControlThread(BaseThread):
                     cc_out = self._cc_ctrl.step(ctx)
                 limiter_out = self._limiter_ctrl.step(ctx)
                 if cc_out.active:
-                    acc_out = self._acc_ctrl.step(ctx)
+                    acc_out = self._acc_ctrl.step(ctx, cc_out.wanted_ms2)
                 else:
                     self._acc_ctrl.reset()
                     acc_out = LongOutput(None, False)

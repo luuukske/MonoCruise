@@ -45,6 +45,15 @@ gearshift integrator freeze, and tuning CSV rows when high-demand estimates unde
   accelerating with no accel bid, so it cannot keep FF on gas over a crest.
 - Adaptive accel/brake estimates learn from load-compensated accel (`raw + road_load`),
   so a slope cannot bias the learned full-pedal capability.
+- Fast-trim anti-windup: while the gas pedal is railed and the truck is still short of
+  the bid, the fast integrator is held. It used to be back-calculated to the rail, which
+  for a bid above capability meant cancelling the excess and pinning it at -1.5 m/s²; the
+  pedal then sagged once the bid came back into range and unwound at 0.25 m/s² per
+  second. A closed-loop run of the real mapper (40 t, 50 to 75 km/h) finished 2 to 3 s
+  sooner with the hold. With the truck over-delivering at the rail, and on the brake
+  side, the back-calculation is unchanged. Sport bids far above capability on purpose
+  and the CC envelope no longer stops at 0.95 x the estimate, so this path is common now
+  (`core/longitudinal/README.md`). Enforced by `tests/test_mapper_rail_hold.py`.
 - Also holds the shared telemetry mass-estimate helper that `telemetry_thread` uses.
 
 ### Launch governor (`launch_governor.py`)

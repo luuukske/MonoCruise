@@ -225,13 +225,17 @@ def test_a_junk_usage_minute_count_loads_as_zero(cfg):
 def test_legacy_accel_ceiling_is_remapped_to_the_safety_rail(cfg):
     """cc_accel_max_ms2 was the accel ceiling; it is now only a rail above the envelope.
 
-    Leaving the old shipped 1.0 in place would cap every acceleration profile at
-    today's flat value and silently undo the speed-scheduled envelope.
+    Leaving the old shipped 1.0, or the later 2.5 rail, in place would cap the
+    low-speed pull under the curve.
     """
     primary, _ = cfg
     _write(primary, {"cc_accel_max_ms2": 1.0})
     Settings.load()
-    assert Settings.cc_accel_max_ms2 == 2.5
+    assert Settings.cc_accel_max_ms2 == 4.0
+
+    _write(primary, {"cc_accel_max_ms2": 2.5})
+    Settings.load()
+    assert Settings.cc_accel_max_ms2 == 4.0
 
 
 def test_a_deliberately_tuned_accel_ceiling_survives_the_remap(cfg):

@@ -235,6 +235,11 @@ gearbox. The braking overshoot turned four no-contact requirements into ratchets
 with target 0: AEB in the harsh brake, the blackout and the full stop, and ACC alone
 in the queue stop; the creep behind AEB-locked trucks is a ratchet too.
 
+The pull-through ratchet went from 3 to 4 on 2026-10-20, with Lukas's approval, when CC
+lost its 0.95 x capability cap (`core/longitudinal/README.md`): heavy followers catching up
+now use full power. Only seed 1 moved, by one brake on truck 8; over seeds 1 to 12 it read
+13 against 12 unprovoked brakes and 46 against 47 brake events, the other 11 seeds equal.
+
 On the first netcode model the ratchets bit: restoring the brake release and
 landing from before `core/acc/ACC_ARCHITECTURE.md` §13.1 and §13.4 failed three of
 them (hop gain 1.87, undershoot 28 km/h, relaunch hop 4.9 s). Not re-measured on

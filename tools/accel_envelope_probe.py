@@ -15,10 +15,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.longitudinal.accel_envelope import (  # noqa: E402
-    HEADROOM_FRAC,
     PROFILES,
     AccelProfile,
-    envelope_ms2,
     shape_ceiling_ms2,
 )
 
@@ -51,8 +49,8 @@ _GEAR_TOP_KMH: tuple[tuple[int, float], ...] = (
     (7, 47.0), (8, 57.0), (9, 68.0), (10, 80.0), (11, 95.0), (12, 200.0),
 )
 
-# Rig presets as (mass in tonnes, has_trailer). "ideal" disables the capability
-# term entirely, which is the comfort shape on its own.
+# Rig presets as (mass in tonnes, has_trailer). "ideal" is a truck that can always
+# deliver the request, which is the comfort shape on its own.
 RIGS: dict[str, tuple[float, bool] | None] = {
     "ideal": None,
     "solo": (8.0, False),
@@ -91,7 +89,10 @@ def capacity_ms2(speed_ms: float, rig: tuple[float, bool] | None, ratio: float, 
 def ceiling_ms2(
     speed_ms: float, profile: AccelProfile, rig: RigSpec, ratio: float, anchor: float
 ) -> float:
-    return envelope_ms2(speed_ms, profile, capacity_ms2(speed_ms, rig, ratio, anchor))
+    """What the truck delivers: the request, or full pedal when it asks for more."""
+    requested = shape_ceiling_ms2(speed_ms, profile)
+    cap = capacity_ms2(speed_ms, rig, ratio, anchor)
+    return requested if cap is None else min(requested, cap)
 
 
 def legacy_ceiling_ms2(speed_ms: float, rig: RigSpec, ratio: float, anchor: float) -> float:
@@ -131,7 +132,7 @@ def _fmt(value: float) -> str:
 
 def _rig_caption(name: str, rig: RigSpec, ratio: float, anchor: float) -> str:
     if rig is None:
-        return f"rig: {name} (capability term disabled, comfort shape only)"
+        return f"rig: {name} (unlimited truck, comfort shape only)"
     mass_t, trailer = rig
     return (
         f"rig: {name} ({mass_t:.0f} t{', trailer' if trailer else ''}, "
@@ -141,7 +142,7 @@ def _rig_caption(name: str, rig: RigSpec, ratio: float, anchor: float) -> str:
 
 
 def report_text(name: str, rig: RigSpec, ratio: float, anchor: float) -> str:
-    lines = [_rig_caption(name, rig, ratio, anchor), f"headroom fraction: {HEADROOM_FRAC:.2f}", ""]
+    lines = [_rig_caption(name, rig, ratio, anchor), ""]
 
     header = f"{'km/h':>5} {'gear':>5} {'cap':>6} {'today':>6}"
     header += "".join(f"{p.label:>12}" for p in PROFILES)
@@ -158,7 +159,7 @@ def report_text(name: str, rig: RigSpec, ratio: float, anchor: float) -> str:
             row += f"{value:>11.2f}{bound}"
         lines.append(row)
 
-    lines += ["", "'c' marks a cell where capability binds instead of the comfort shape.", ""]
+    lines += ["", "'c' marks a cell where the truck cannot deliver the request (full pedal).", ""]
 
     lines.append(f"{'profile':>12}" + "".join(f"{f'0-{t}':>8}" for t in TIME_TARGETS_KMH))
     legacy = [_fmt(legacy_time_to_kmh(t, rig, ratio, anchor)) for t in TIME_TARGETS_KMH]
@@ -184,7 +185,6 @@ def report_json(name: str, rig: RigSpec, ratio: float, anchor: float) -> dict:
         "weight_factor": None if rig is None else round(weight_factor(*rig), 4),
         "anchor_norm_ms2": anchor,
         "ratio_step": ratio,
-        "headroom_frac": HEADROOM_FRAC,
         "legacy_ceiling_ms2": LEGACY_CEILING_MS2,
         "legacy_seconds_from_rest": {
             str(t): round(legacy_time_to_kmh(t, rig, ratio, anchor), 2)
@@ -192,11 +192,11 @@ def report_json(name: str, rig: RigSpec, ratio: float, anchor: float) -> dict:
         },
         "profiles": {
             p.label: {
+                "uncapped": p.uncapped,
                 "launch_ms2": p.launch_ms2,
-                "knee_kmh": round(p.knee_ms * 3.6, 1),
-                "taper_power": p.taper_power,
-                "floor_ms2": p.floor_ms2,
-                "rise_jerk_ms3": p.rise_jerk_ms3,
+                "half_kmh": round(p.half_ms * 3.6, 1),
+                "cruise_ms2": p.cruise_ms2,
+                "rise_jerk_ms3": p.rise_jerk_ms3 if math.isfinite(p.rise_jerk_ms3) else None,
                 "ceiling_by_kmh": {
                     str(kmh): round(ceiling_ms2(kmh / 3.6, p, rig, ratio, anchor), 4)
                     for kmh in TABLE_SPEEDS_KMH

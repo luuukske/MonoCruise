@@ -26,9 +26,10 @@ BACKUP_PATH = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".bak")
 # Brief coast-fit (0.01) made mapping worse. Remap that value back to 0.07.
 _COAST_FIT_MAPPER_ROLLING_RESISTANCE = 0.01
 
-# cc_accel_max_ms2 used to be the accel ceiling itself. It is now only a safety
-# rail above the speed-scheduled envelope, so the old shipped default is remapped.
+# cc_accel_max_ms2 used to be the accel ceiling itself, then a 2.5 rail that sat
+# under Normal's low-speed pull. Both shipped values are remapped to the default.
 _LEGACY_CC_ACCEL_MAX_MS2 = 1.0
+_PREVIOUS_RAIL_CC_ACCEL_MAX_MS2 = 2.5
 
 _log = logging.getLogger("settings")
 
@@ -170,9 +171,9 @@ class Settings(metaclass=_SingletonMeta):
     cc_ki: float = 0.0
     cc_kd: float = 0.2
     cc_integral_clamp: float = 3.0
-    # Safety rail above the envelope in core/longitudinal/accel_envelope.py,
-    # not the shaper. Lowering it caps every acceleration profile.
-    cc_accel_max_ms2: float = 2.5
+    # Safety rail above the envelope in core/longitudinal/accel_envelope.py, not the
+    # shaper. Lowering it caps Efficiency and Normal; Sport ignores it.
+    cc_accel_max_ms2: float = 4.0
     cc_accel_min_ms2: float = -1.0
 
     # PID tuning for SpeedLimiter: independent of CC so each can be tuned separately.
@@ -378,7 +379,10 @@ class Settings(metaclass=_SingletonMeta):
                             fv = None
                         if (
                             fv is not None
-                            and abs(fv - _LEGACY_CC_ACCEL_MAX_MS2) < 1e-9
+                            and (
+                                abs(fv - _LEGACY_CC_ACCEL_MAX_MS2) < 1e-9
+                                or abs(fv - _PREVIOUS_RAIL_CC_ACCEL_MAX_MS2) < 1e-9
+                            )
                         ):
                             f = self.__dataclass_fields__[k]
                             v = cls._dataclass_field_default(f)
