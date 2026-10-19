@@ -344,8 +344,9 @@ def test_aeb_overlap_gate_alone_ignores_a_ghost_deep_inside_ego():
 
 
 def test_aeb_brakes_for_a_truck_that_was_clear_of_ego_at_the_exit():
-    # 1.7 m ahead of ego's bumper when the zone ended: collidable in TruckersMP.
-    assert any(e.aeb_brake for e in run_headless(_zone_exit_clip(8.0, exit_reported=True)))
+    # 1.7 m ahead of ego's bumper when the zone ended: collidable in TruckersMP. At 10 m/s ego
+    # is under 0.3 m in by AEB's first tick, so the overlap gate (README §4) leaves it alone.
+    assert any(e.aeb_brake for e in run_headless(_zone_exit_clip(8.0, exit_reported=True, v=10.0)))
 
 
 def _aeb_frame(vehicles, ncz_ids, latched=frozenset(), off_ids=frozenset()):
