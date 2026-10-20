@@ -125,6 +125,12 @@ class Settings(metaclass=_SingletonMeta):
     # Layer TruckersMP's own map additions over the base map while connected to a server.
     # A config.json switch only; off leaves the base game's roads.
     map_tmp_enabled: bool = True
+    # Lane departure rumble on the wheel's force feedback (core/lane_departure). Config only, off by default.
+    ldw_enabled: bool = False
+    ldw_intensity: float = 1.0
+    ldw_min_speed_kmh: float = 60.0
+    # Bench test: warn on every close call, ignoring blinker, deliberate steering and bend rules.
+    ldw_test_mode: bool = False
     # Warning style label from core/aeb/warning_sounds.py, and its volume in percent.
     aeb_sound: str = "Original"
     aeb_sound_volume: int = 100
