@@ -189,9 +189,22 @@ Three changes close it:
   slope dominates. Between them neither term is separable, so neither is learned. The offset
   band is additionally skipped whenever the modelled slope contribution already exceeds the
   offset, which is what keeps low gears (slope 5+ m/s2) out of the intercept fit.
-- **Authority gate.** A slope sample must still carry `_ACCEL_MIN_AUTHORITY_MS2` (0.10) and
-  `_ACCEL_MIN_AUTHORITY_FRAC` (0.25) of the measurement once the offset is removed. This is
-  what keeps a constant-speed reading out of an acceleration-capability estimate.
+- **Authority gate.** A slope sample must still carry `_ACCEL_MIN_AUTHORITY_MS2` (0.10),
+  `_ACCEL_MIN_AUTHORITY_FRAC` (0.25) of the measurement and, since 2026-10-20,
+  `_ACCEL_MIN_AUTHORITY_ROAD_FRAC` (0.5) of the road load that was added back, once the offset
+  is removed. This is what keeps a constant-speed reading out of an acceleration-capability
+  estimate. Each sample's log residual is also clamped at `_ACCEL_RESIDUAL_MAX` (0.15). The
+  road term exists because the road-load model's error lands on the authority whole: a 10 t
+  truck holding 100 km/h needs gas 0.15-0.5, so its authority sat at 0.1-0.3 m/s2 against
+  0.4-1.1 of modelled load. Dividing by it read the truck as
+  2.5x weaker within a second (estimate 2.37 -> 0.89 m/s2, anchor 2.56 -> 0.59 in one burst),
+  the gas map turned 2.5x too steep, and CC and the limiter pumped the pedal 0 to 0.5 at about
+  1 Hz. A flat absolute floor of 0.30 replayed almost as well but stopped a heavy truck's
+  settled weak pull from teaching (`test_a_depressed_sample_would_have_dropped_the_anchor_without_the_gates`),
+  which is why the floor scales with road load instead. Re-measure with
+  `tools/capacity_learner_replay.py <date>`, which feeds the log into `update_accel` at the
+  live 100 Hz. Enforced by `tests/test_accel_capacity_cruise.py` and
+  `tests/test_pedal_capacity_guards.py`.
 - **Candidate rejection restored.** The per-candidate bound existed as
   `_clamp(candidate, _ACCEL_GAIN_MIN_MS2, _ACCEL_GAIN_MAX_MS2)` until commit `e151848`
   replaced the per-gear dict with the shape function; the bounds were renamed to
