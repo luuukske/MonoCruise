@@ -186,6 +186,9 @@ class AEBCalibration:
     aeb_disarm_frac: float = 0.45
     # Geometry latch while colliding unbraked ttc inside window (anti-pumping; README).
     disarm_hold_ttc_s: float = 3.0
+    # Engagement ends after this long at standstill: braking cannot change a stopped ego's fate.
+    aeb_standstill_release_kmh: float = 0.5
+    aeb_standstill_release_s: float = 0.5
     # Must equal aeb_engage_frac (pinned in tests/aeb/test_confirm.py).
     aeb_warn_near_full_frac: float = 0.85
     brake_actuator_lag_s: float = 0.10

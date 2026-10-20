@@ -26,7 +26,7 @@ namespace
         uint8_t in_no_collision_zone;
         uint16_t players_streamed;
         uint16_t players_collidable;
-        uint16_t reserved;
+        uint16_t zone_events;  // +1 per OnNoCollisionZone event, wraps; clears the reader's teleport guard
     };
 
     // Local\MonoCruiseTmpVehicles (experimental), decoded by tools/tmp_sdk_probe.py. Bump kVehiclesVersion on any change.
@@ -59,7 +59,7 @@ namespace
     static_assert( sizeof( VehiclesHeader ) == 24 );
     static_assert( sizeof( VehicleSlot ) == 80 );
 
-    constexpr uint32_t kStateVersion = 1;
+    constexpr uint32_t kStateVersion = 2;
     constexpr wchar_t kStateName[]   = L"Local\\MonoCruiseTmpState";
 
     constexpr uint32_t kVehiclesVersion = 1;
@@ -121,6 +121,7 @@ namespace
     std::atomic< unsigned long > g_fault_code{ 0 };
     std::atomic< bool > g_connected{ false };
     std::atomic< bool > g_in_zone{ false };
+    std::atomic< uint16_t > g_zone_events{ 0 };
     std::atomic< int > g_streamed{ 0 };
 
     int64_t qpc_now()
@@ -360,6 +361,7 @@ namespace
         g_next_vehicles    = 0;
         g_connected        = false;
         g_in_zone          = false;
+        g_zone_events      = 0;
         g_streamed         = 0;
         g_heartbeat        = 0;
     }
@@ -384,6 +386,7 @@ namespace
     {
         callback( "zone", [ & ] {
             const bool was_in_zone = g_in_zone.exchange( entered );
+            ++g_zone_events;
             if ( entered )
             {
                 sdk_log(
@@ -457,6 +460,7 @@ namespace
         data.connected            = g_connected ? 1 : 0;
         data.in_no_collision_zone = g_in_zone ? 1 : 0;
         data.players_streamed     = static_cast< uint16_t >( streamed < 0 ? 0 : ( streamed > 0xFFFF ? 0xFFFF : streamed ) );
+        data.zone_events          = g_zone_events.load();
         std::memcpy( g_state, &data, sizeof( StateData ) );
     }
 
@@ -759,7 +763,7 @@ TMP_EXPORT bool TMP_API truckersmp_init( const TruckersMP_Host* host, TruckersMP
     TruckersMP::PluginInfo info;
     info.m_name        = "MonoCruise";
     info.m_author      = "LD-Tech";
-    info.m_version     = "1.0.4";
+    info.m_version     = "1.0.5";
     info.m_description = "No-collision zone state and nearby vehicle motion for MonoCruise. Reads no player identities.";
 
     shutdown();

@@ -16,6 +16,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **Hill assist can be turned off**: MonoCruise held the brake whenever you were stopped. A new switch, on by default, turns that hold off so the truck can roll while you sit still. Your own brake still works, and so does emergency braking.
 
 ### Fixed
+- **AEB braked for TruckersMP trucks overlapping yours**: after a teleport into a no-collision zone AEB didn't know it was in one, braked for the trucks sitting inside yours and held the brake at a standstill. Zones are now recognised after a teleport, a vehicle sitting inside your truck is always ignored, and AEB lets go half a second after you stop.
 - **AEB was late for a stopped car round a bend**: AEB only saw a stopped or crashed vehicle in your lane once your truck had turned into the bend. With the map files it now looks ahead along your lane while you follow it and brakes earlier; everything else it brakes for is unchanged.
 
 ### Removed
