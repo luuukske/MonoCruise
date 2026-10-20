@@ -83,6 +83,11 @@ _ACCEL_SLOPE_MIN_PEDAL: float = 0.35
 # a share of the measurement. Keeps a reading that is mostly offset off the slope.
 _ACCEL_MIN_AUTHORITY_MS2: float = 0.10
 _ACCEL_MIN_AUTHORITY_FRAC: float = 0.25
+# And as a share of the road load added back: its model error lands on the authority whole.
+_ACCEL_MIN_AUTHORITY_ROAD_FRAC: float = 0.50
+# One sample may move log(anchor) at most this far before the learning rate.
+# A light truck holding speed read as 2.5x weaker within a second without it.
+_ACCEL_RESIDUAL_MAX: float = 0.15
 
 # Gear-dwell gate. After a gear change the driveline is still restoring
 # torque, so accel is depressed for reasons that have nothing to do with gas.
@@ -580,7 +585,8 @@ class PedalCapacityTracker:
         # from reading as capability: without it the whole offset lands on gain.
         authority = mean_accel - self._accel_zero_offset_ms2
         if authority < max(
-            _ACCEL_MIN_AUTHORITY_MS2, _ACCEL_MIN_AUTHORITY_FRAC * mean_accel
+            _ACCEL_MIN_AUTHORITY_MS2, _ACCEL_MIN_AUTHORITY_FRAC * mean_accel,
+            _ACCEL_MIN_AUTHORITY_ROAD_FRAC * abs(road_load_ms2),
         ):
             return
 
@@ -608,7 +614,7 @@ class PedalCapacityTracker:
             return
 
         log_anchor = math.log(self._accel_anchor_gain_ms2)
-        residual = log_m - (log_anchor + x * log_ratio)
+        residual = _clamp(log_m - (log_anchor + x * log_ratio), -_ACCEL_RESIDUAL_MAX, _ACCEL_RESIDUAL_MAX)
 
         weight = mean_pedal ** _WEIGHT_POWER
         lr_anchor = _ACCEL_BASE_ALPHA * weight
