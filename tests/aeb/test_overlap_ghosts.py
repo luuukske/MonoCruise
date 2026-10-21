@@ -90,7 +90,7 @@ def test_a_nested_trailer_inside_ego_takes_the_vehicle_that_tows_it():
     assert 20 in hold.step(_EGO, [tractor], _now(), DEFAULT)
 
 
-def _aeb_frame(vehicles, latched=frozenset()):
+def _aeb_thread(vehicles, latched=frozenset()):
     t = _make_headless(DEFAULT)
     t._latched_threat_ids = set(latched)
     ego = EgoTelemetry(coordinateX=0.0, coordinateZ=0.0, rotationX=0.0, speed=10.0)
@@ -103,7 +103,11 @@ def _aeb_frame(vehicles, latched=frozenset()):
     t._read_vehicle_key = lambda: None
     t._now = lambda: 10.0
     t.loop()
-    return t.data.snapshot
+    return t
+
+
+def _aeb_frame(vehicles, latched=frozenset()):
+    return _aeb_thread(vehicles, latched).data.snapshot
 
 
 def test_aeb_draws_a_deep_overlap_as_a_ghost_and_never_evaluates_it():
@@ -113,9 +117,13 @@ def test_aeb_draws_a_deep_overlap_as_a_ghost_and_never_evaluates_it():
     assert next(v for v in snap.vehicles if v["vid"] == 7)["ghost"] is True
 
 
-def test_aeb_keeps_a_body_at_the_bumper_and_a_latched_threat():
+def test_aeb_keeps_a_body_at_the_bumper():
     snap = _aeb_frame([_body(7, 0.2, is_tmp=True)])
     assert snap.ghost_ids == set() and 7 in snap.colliding_ids
-    # A threat AEB already brakes for keeps its seat however deep it gets.
-    snap = _aeb_frame([_body(7, _DEPTH + 0.5, is_tmp=True)], latched={7})
-    assert snap.ghost_ids == set() and 7 in snap.colliding_ids
+
+
+def test_a_latched_threat_deep_inside_ego_is_a_ghost_and_loses_its_latch():
+    # Lukas 2026-10-20: past the depth bar a body is ignored no matter what, latched included.
+    t = _aeb_thread([_body(7, _DEPTH + 0.5, is_tmp=True)], latched={7})
+    assert t.data.snapshot.ghost_ids == {7} and 7 not in t.data.snapshot.colliding_ids
+    assert 7 not in t._latched_threat_ids

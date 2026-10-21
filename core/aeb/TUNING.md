@@ -36,6 +36,8 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `clearance_refine_steps` | 4 | Golden-section steps inside the argmax bracket. 0 leaves grid error on a lead whose demand peaks at a short `t*` |
 | `clearance_clear_margin_s` | 0.30 s | Hold the last conflict position this long past the frame a crosser vacates it, so ego does not arrive on its tail. Only applies when occupancy ends inside the window, so a co-directional lead never sees it (pinned by `test_the_clear_margin_never_fires_for_a_co_directional_lead`) |
 | `disarm_hold_ttc_s` | 3.0 s | Geometry latch window while engaged: hold the event while any colliding target's unbraked ttc is inside it (anti-pumping; was `warn_ttb`) |
+| `aeb_standstill_release_kmh` | 0.5 km/h | Ego speed under which an engagement counts as at standstill (README, standstill release) |
+| `aeb_standstill_release_s` | 0.5 s | Standstill dwell after which the engagement ends and the latched set is cleared; a stop shorter than this changes nothing |
 | `capsule_parallel_margin_scale` | 0.3 | Near-parallel capsule contacts use `margin * scale` blended by heading sine toward full margin at perpendicular; kills adjacent-lane side-graze FPs (ab524f87 / 29bf31b8). 1.0 disables |
 | `lane_half_width` | 1.95 m | EGO lane boundary |
 | `lane_separation` | 3.9 m | Road lane pitch |

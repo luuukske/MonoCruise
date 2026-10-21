@@ -26,8 +26,9 @@ from core.radar.tmp_state import (
 from tests.aeb.harness import make_vehicle
 
 
-def _state_bytes(version=1, heartbeat=1, connected=1, in_zone=1, streamed=5, collidable=0) -> bytes:
-    return struct.pack("=IIBBHHH", version, heartbeat, connected, in_zone, streamed, collidable, 0)
+def _state_bytes(version=1, heartbeat=1, connected=1, in_zone=1, streamed=5, collidable=0,
+                 events=0) -> bytes:
+    return struct.pack("=IIBBHHH", version, heartbeat, connected, in_zone, streamed, collidable, events)
 
 
 _GHOSTS = TmpState(fresh=True, connected=True, in_no_collision_zone=True,
@@ -40,8 +41,13 @@ def test_decode_reads_the_plugin_layout():
                           players_streamed=7, players_collidable=2)
 
 
+def test_layout_2_carries_the_zone_event_count_and_layout_1_does_not():
+    assert decode_state(_state_bytes(version=2, events=9), heartbeat_fresh=True).zone_events == 9
+    assert decode_state(_state_bytes(version=1, events=9), heartbeat_fresh=True).zone_events is None
+
+
 def test_unknown_layout_version_reads_as_no_data():
-    assert decode_state(_state_bytes(version=2), heartbeat_fresh=True) == TmpState()
+    assert decode_state(_state_bytes(version=3), heartbeat_fresh=True) == TmpState()
     assert decode_state(_state_bytes(version=0), heartbeat_fresh=True) == TmpState()
 
 
@@ -110,6 +116,43 @@ def test_a_teleport_keeps_the_gate_shut_until_the_plugin_reports_no_zone():
     assert not gate.step(replace(_GHOSTS, in_no_collision_zone=False), 6.1, far)
     assert not gate.step(_GHOSTS, 6.2, far)
     assert gate.step(_GHOSTS, 6.2 + ENTER_CONFIRM_S + 0.01, far)
+
+
+def _counted(events: int, **kw) -> TmpState:
+    return replace(_GHOSTS, zone_events=events, **kw)
+
+
+def test_a_teleport_into_another_zone_opens_on_the_zone_event():
+    # 2026-10-20 (clip f42de1cc): TruckersMP said "left" at the teleport and "entered" 2 s later,
+    # both before radar saw a fresh frame at the destination. The guard held the gate shut for 60 s.
+    gate = NoCollisionZoneGate()
+    gate.step(_counted(1), 0.0, (100.0, 100.0))
+    assert gate.step(_counted(1), 1.0, (101.0, 100.0))
+    far = (101.0 + TELEPORT_JUMP_M + 1.0, 100.0)
+    assert not gate.step(_counted(1, fresh=False), 1.1, far)      # loading: no rendered frame
+    assert not gate.step(_counted(3), 3.0, far)
+    assert gate.step(_counted(3), 3.0 + ENTER_CONFIRM_S + 0.01, far)
+
+
+def test_a_zone_event_after_the_jump_frame_opens_it_too():
+    gate = NoCollisionZoneGate()
+    gate.step(_counted(4), 0.0, (100.0, 100.0))
+    far = (100.0 + TELEPORT_JUMP_M + 1.0, 100.0)
+    assert not gate.step(_counted(4), 0.1, far)
+    assert not gate.step(_counted(5), 0.2, far)
+    assert gate.step(_counted(5), 0.2 + ENTER_CONFIRM_S + 0.01, far)
+
+
+def test_a_stuck_flag_with_no_zone_event_still_keeps_the_gate_shut():
+    gate = NoCollisionZoneGate()
+    gate.step(_counted(2), 0.0, (100.0, 100.0))
+    assert gate.step(_counted(2), 1.0, (101.0, 100.0))
+    far = (101.0 + TELEPORT_JUMP_M + 1.0, 100.0)
+    for i in range(100):
+        assert not gate.step(_counted(2), 1.1 + i * 0.1, far)
+    # An event read while stale or disconnected does not count until a live read carries it.
+    assert not gate.step(_counted(3, fresh=False), 20.0, far)
+    assert not gate.step(_counted(3, connected=False), 20.1, far)
 
 
 def test_driving_never_counts_as_a_teleport():

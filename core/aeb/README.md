@@ -770,8 +770,8 @@ into AND: that re-opens the shoulder FP class the 0.08 g filter exists for.
 
 AEB skips two kinds of body before they reach the precompute or the pipeline,
 and draws them in the debug window as ghosts (grey, dashed, `AEBSnapshot.ghost_ids`).
-A zone ghost is skipped even while latched, and ends the latch; an overlap ghost
-never drops a latched id. TruckersMP targets otherwise run the same pipeline as
+Both kinds are skipped even while latched, and end the latch. TruckersMP targets
+otherwise run the same pipeline as
 AI traffic: there is no TMP speed floor any more.
 
 ### No TMP speed floor (removed 2026-10-12)
@@ -841,8 +841,9 @@ AEB tick in `AEBThread.loop`, finds them and AEB skips them like zone ghosts:
   unshrunk box, then is released. Unlike the exit hold, a new deep overlap arms
   it again.
 - **AI and TMP alike.** Neither can overlap ego that far for real.
-- **Latched ids exempt.** A target AEB already brakes for keeps its seat however
-  deep it gets.
+- **Latched ids too.** A latched body that arms the hold is released from the latch
+  (`_release_latched`) and skipped, as a zone ghost is. Lukas, 2026-10-20: past the
+  depth bar a body is ignored no matter what (see "Why no latched exemption").
 
 Why the persistence arm: real contact is an impact, not a slow merge. Of the
 labelled positives that overlapped their target at AEB's first engagement, none
@@ -850,8 +851,23 @@ had been 0.2 m inside for more than 0.08 s (the contact frame), while the ghosts
 had been for 0.65 to 7.6 s. Without it, a ghost that slides in slowly reaches the
 engage bar before the depth bar: driving at 13 km/h through TMP trucks parked
 just past a zone exit, AEB latched one 1.05 m inside after 0.75 s and kept
-braking as it went deeper (`f392c9ce`, 2026-10-12). It also catches what the
-latch would otherwise protect, since nothing AEB has not latched is exempt.
+braking as it went deeper (`f392c9ce`, 2026-10-12).
+
+Why no latched exemption (removed 2026-10-20, Lukas's decision over the measured
+cost): AEB braked among TruckersMP trucks that drove into ego in a zone the gate had
+missed (`f42de1cc`, radar §18 teleport guard), because each had been latched on
+approach and a latched body was never a ghost. Lukas wants a body past the depth
+bar ignored without exception and judged the crash clips' box depths unreliable
+(early previews sized car bodies as trucks). Corpus A/B on 1734 labelled clips,
+exemption kept vs removed: the release fired on 159 clips, 149 of them real
+crashes; 134 brake less (6667 -> 4163 ticks), and in 126 crash clips AEB lets go
+after impact at a median 24 km/h (p90 66, max 109; 47 above 40 km/h, e.g.
+`c62004d2` from 74 km/h, `5c0982fe` from 52). The affected clips span every build,
+18 from 1.1.1 on. `148e8a47` turns from TP to late, `55848211` scores better, four
+false brakes get shorter (`bfbb351e` 125 -> 18 ticks); net +17 on the score, which
+cannot see post-impact braking. Replay rides the already-braked recording, so the
+live speeds would be higher. The zone fix alone silences `f42de1cc`; this rule is
+for ghosts the zone gate never sees.
 
 Why 0.5 m: Lukas lowered the bar from 1.5 m on 2026-10-17 to ghost more
 overlapping bodies. It sits under the 0.73 m real-contact depth measured below,
@@ -874,7 +890,7 @@ ghosts it braked for were 1.7 to 2.4 m inside at that moment and 2.2 m or more a
 their deepest. Bars of 1.0, 1.5 and 2.0 m score identically; 1.5 leaves room on
 both sides. Real threats do get deeper once ego is into them (2.5 m inside its
 labelled window on `f217b4eb`), every time after AEB had engaged: that is what
-the latched exemption is for.
+the latched exemption was for until 2026-10-20 (above).
 
 Measured on top of the floor removal: local -275.98 -> -277.27, remote +542.79 ->
 +537.79. `aeaa0d6c` (SP trailer appearing inside a stopped ego), `addfcf09` (TMP
@@ -884,9 +900,10 @@ walking pace) go silent; `000a3c1a` brakes 1.4 s instead of 5.3 s. One cost:
 and slid on through it to 2.8 m. AEB's late brake there came after the impact and
 after the labelled window, and is now blocked: late becomes a miss.
 
-Do not lower the bar further, arm on shallow overlap,
-measure nested trailers on a different body from the one AEB evaluates, or drop
-the latched exemption: each turns a real crash into a ghost.
+Do not lower the bar further, arm on shallow overlap, or
+measure nested trailers on a different body from the one AEB evaluates: each turns
+a real crash into a ghost. Bringing the latched exemption back is Lukas's call: it
+restores post-impact braking and AEB braking inside latched ghosts together.
 
 ---
 
@@ -1714,10 +1731,10 @@ TTB slam, or `geom_threat_latched` (still colliding, unbraked TTC inside
 `disarm_hold_ttc_s`). When the danger passes, AEB lets go. Membership does three
 things:
 
-1. **Skip-set exemption**: the elevation gate (§6) and overlap ghosts (§4) never
-   drop a latched id. A target that ego has already hit, or that the netcode
-   moves into ego mid-stop, stays the target. No-collision zone ghosts are the
-   exception: they end the latch (§4).
+1. **Skip-set exemption**: the elevation gate (§6) never drops a latched id. A
+   target the netcode moves off the road surface mid-stop stays the target.
+   No-collision zone ghosts and overlap ghosts are the exception: they end the
+   latch (§4).
 2. **Spatial drop-filter bypass**: `OutOfLaneParallelFilter` and
    `EgoEvasionFilter` skip a latched id; `CornerEntryStationaryFilter` skips
    a latched **Mode B** (`Lane.EGO`) id. The 0.08 g evasion pair and Mode B
@@ -1799,6 +1816,22 @@ walking pace once the lead is momentarily faster, so a driver who never brakes
 rolls into the stopped lead below `aeb_min_engage_speed_kmh`. Accepted by design
 (2026-09-23): AEB decides whether a danger exists, and with none predicted it
 coasts. Do not add a stop-completion hold to cover this case.
+
+**Standstill release.** An engagement ends after `aeb_standstill_release_s` (0.5 s)
+with |ego speed| under `aeb_standstill_release_kmh` (0.5 km/h), and the whole latched
+set is released with it. Braking cannot change the fate of a stopped ego, and a hold
+that survives there is geometry alone. The log of 2026-10-20 shows the failure:
+`engaged=True` for 26 s at 0 km/h among TruckersMP trucks that overlapped ego (rig
+extents inside ego's width), `why=geom_latch`, `ttc=0.000`. Each truck had joined the
+latched set while AEB was engaged, which then exempted it from the overlap-ghost hold
+(§4), and each hit refreshed its own latch, so neither `latched_max_s` nor the ghost
+rule could end it. Overlap ghosts now end the latch themselves; the release still
+covers a latched body touching ego short of the ghost bars (inside
+`overlap_ghost_contact_m`), which refreshes its latch the same way. New engagements still need `aeb_min_engage_speed_kmh`, so
+nothing re-engages at rest. Do not widen the speed to the engage floor: that would
+cut the end of real stops, which the stop-distance envelope guards. A promotion-time
+overlap check alone would not have helped: those trucks were adjacent when they
+joined the latch and overlapped later. Enforced by `tests/aeb/test_standstill_release.py`.
 
 | Knob | Default | Role |
 |------|---------|------|
@@ -1926,7 +1959,7 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 
 - **AEB is a consumer of `RadarThread`.** Do not open the traffic shared-memory buffer directly and do not mutate `Vehicle` instances.
 - **Elevation comes from radar's `off_surface_ids`, minus the latched set.** Do not reintroduce a local pitch-window test in `thread.py` or `filters.py`, and do not tune `cal.elevation_margin`: it is dead, kept only so recorded clip calibrations still deserialize. See `core/radar/README.md` §15.
-- **Ghosts are skipped, never filtered by speed.** There is no TMP speed floor (§4); do not bring one back to fix a TMP false brake. A zone ghost ends the latch; `OverlapGhostHold` arms past `overlap_ghost_depth_m` or after `overlap_ghost_persist_s` inside ego, on the bodies AEB evaluates, and never drops a latched id.
+- **Ghosts are skipped, never filtered by speed.** There is no TMP speed floor (§4); do not bring one back to fix a TMP false brake. A zone ghost ends the latch; `OverlapGhostHold` arms past `overlap_ghost_depth_m` or after `overlap_ghost_persist_s` inside ego, on the bodies AEB evaluates, and ends the latch of a latched body it arms on (Lukas, 2026-10-20, over a measured loss of post-impact braking, §4).
 - **AEB ego curvature is the yaw-rate proxy, full stop.** Do not read `RadarData.ego_curvature` from AEB.
 - **Target-vehicle curvature is the `_vehicle_curvature_blend` helper** (sliced position fit blended with `angular_velocity`-derived yaw rate, weighted by `cal.aeb_yaw_blend`, then One-Euro filtered per-vehicle by `AEBThread._curvature_blender`). Do not call `v.curvature_from_history()` directly from AEB paths and do not enlarge `aeb_pos_history_len` toward 25. The blender must be stepped exactly **once per vehicle per frame**: any new call site must thread the existing `ctx.v_curvature` through rather than re-invoking `_vehicle_curvature_blend(...)` with the production blender.
 - **`co_directional` must use `fwd_dot > 0.7`, not `abs(fwd_dot) > 0.7`.** The two flags must be mutually exclusive with `head_on`.

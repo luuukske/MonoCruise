@@ -824,6 +824,8 @@ class AEBThread(BaseThread):
         # Build-up reserve latched at engagement (m); None = compute from speed.
         self._engage_pad_dist_m: float | None = None
         self._engage_pad_at_mono: float = 0.0
+        # Since when ego has been at standstill while engaged (README standstill release).
+        self._standstill_since: float | None = None
         # Engage confirm: geometry-graded window_s each frame (README tiered entry).
         self._engage_confirm = OccupancyConfirm(
             self._cal.aeb_confirm_occupancy,
@@ -1239,9 +1241,13 @@ class AEBThread(BaseThread):
         ego_half_l: float = geometry.half_length_m
 
         # Bodies deep inside ego are ghosts, skipped and drawn like zone ghosts (README §4).
+        # Latched or not: a latched body this deep ends its latch, as a zone ghost does.
         overlap_ghost_ids = self._overlap_ghosts.step(
             ego_box(ego_x, ego_z, ego_yaw_rad, geometry), vehicles, now_mono, cal,
-        ) - self._latched_threat_ids
+        )
+        for vid in overlap_ghost_ids & self._latched_threat_ids:
+            self._release_latched(vid)
+            logger.info("AEB released a latched threat that is now inside ego: a ghost")
         off_surface_ids = off_surface_ids | overlap_ghost_ids
         ghost_skip_ids = ncz_ids | overlap_ghost_ids
 
@@ -2061,8 +2067,28 @@ class AEBThread(BaseThread):
             or any(vid in self._latched_threat_ids for vid in colliding_ids)
         )
 
+        # A stopped ego cannot be saved by braking, so a geometry or TTB hold at standstill
+        # (bodies alongside, t=0 capsule hits) is released after a short dwell (README).
+        if self._engaged and ego_kmh_abs < cal.aeb_standstill_release_kmh:
+            if self._standstill_since is None:
+                self._standstill_since = now_mono
+        else:
+            self._standstill_since = None
+        standstill_release = (
+            self._engaged
+            and self._standstill_since is not None
+            and now_mono - self._standstill_since >= cal.aeb_standstill_release_s
+        )
+
         if self._engaged:
-            if (effective_required < disarm_threshold
+            if standstill_release:
+                logger.info("AEB released: ego is at a standstill")
+                self._engaged = False
+                self._engage_pad_dist_m = None
+                self._standstill_since = None
+                for vid in list(self._latched_threat_ids):
+                    self._release_latched(vid)
+            elif (effective_required < disarm_threshold
                     and not brake_ttb_active
                     and not geom_threat_latched):
                 self._engaged = False
@@ -2640,6 +2666,7 @@ class AEBThread(BaseThread):
                 pass
         self._engaged = False
         self._engage_pad_dist_m = None
+        self._standstill_since = None
         self._engage_confirm.reset()
         self._warn_confirm.reset()
         self._warn_vetoed_confirm.reset()

@@ -15,13 +15,13 @@ to be rebuilt when the TruckersMP SDK changes, or when we want new data from it.
 
 | offset | field | type | meaning |
 |---|---|---|---|
-| 0 | version | u32 | layout version, 1; 0 = no writer |
+| 0 | version | u32 | layout version, 2 (1 up to plugin 1.0.4, same fields with offset 14 unused); 0 = no writer |
 | 4 | heartbeat | u32 | +1 per write, skips 0 |
 | 8 | connected | u8 | connected to a TruckersMP server |
 | 9 | in_no_collision_zone | u8 | `Gameplay().OnNoCollisionZone`; cleared on disconnect and shutdown, not on connect (see below) |
 | 10 | players_streamed | u16 | stream-in minus stream-out events, diagnostics only |
 | 12 | players_collidable | u16 | always 0 (not measured) |
-| 14 | reserved | u16 | 0 |
+| 14 | zone_events | u16 | +1 per `OnNoCollisionZone` event, wraps; zeroed on shutdown only. Lets the reader's teleport guard see that TruckersMP judged the zone after a jump (`core/radar/README.md` §18) |
 
 `truckersmp_shutdown` zeroes the file, so MonoCruise reads "no data" at once
 rather than waiting for the heartbeat to go stale.
@@ -177,7 +177,10 @@ cmake --build <short build dir>
 
 Keep the build directory path short: MSVC fails with C1041 on very long ones.
 The build is reproducible (`/Brepro`, static CRT, only `KERNEL32.dll` imported),
-so the same source and toolchain give the same bytes.
+so the same source and toolchain give the same bytes. 1.0.5 was built without
+CMake, by `cl` / `rc` / `link` with the flags above and CMake's Release defaults;
+the code section matched a CMake build of 1.0.4 byte for byte but the file did not,
+so a CMake rebuild of 1.0.5 needs the SHA updated.
 
 To ship a new build:
 

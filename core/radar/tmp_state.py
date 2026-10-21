@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 _STATE_TAG = r"Local\MonoCruiseTmpState"
 _STATE_FORMAT = "=IIBBHHH"
 _STATE_SIZE = 16
-_STATE_VERSION = 1
+_STATE_VERSION = 2
+# Plugins up to 1.0.4 write layout 1: the same fields, without the zone event count.
+_STATE_VERSION_NO_EVENTS = 1
 
 # A writer that stops (game closed, plugin unloaded) must close the gate.
 STALE_AFTER_S: float = 0.5
@@ -44,6 +46,8 @@ class TmpState:
     in_no_collision_zone: bool = False
     players_streamed: int = 0
     players_collidable: int = 0
+    # Zone enter/leave events the plugin has seen (wraps at 2**16); None from a layout 1 plugin.
+    zone_events: int | None = None
 
     @property
     def in_zone(self) -> bool:
@@ -53,10 +57,10 @@ class TmpState:
 
 def decode_state(raw: bytes, heartbeat_fresh: bool) -> TmpState:
     """Unpack the 16-byte state; an unknown layout version reads as no data."""
-    version, _heartbeat, connected, in_zone, streamed, collidable, _ = struct.unpack(
+    version, _heartbeat, connected, in_zone, streamed, collidable, events = struct.unpack(
         _STATE_FORMAT, raw[:_STATE_SIZE],
     )
-    if version != _STATE_VERSION:
+    if version not in (_STATE_VERSION, _STATE_VERSION_NO_EVENTS):
         return TmpState()
     return TmpState(
         fresh=heartbeat_fresh,
@@ -64,6 +68,7 @@ def decode_state(raw: bytes, heartbeat_fresh: bool) -> TmpState:
         in_no_collision_zone=bool(in_zone),
         players_streamed=int(streamed),
         players_collidable=int(collidable),
+        zone_events=int(events) if version == _STATE_VERSION else None,
     )
 
 
@@ -127,8 +132,11 @@ class NoCollisionZoneGate:
         self.exited_zone: bool = False
         self._seen_data: bool = False
         self._last_xz: tuple[float, float] | None = None
-        # Set by a teleport; only the plugin reporting "not in a zone" clears it.
+        # Set by a teleport; cleared by the plugin reporting "not in a zone" or a zone event after the jump.
         self._teleported: bool = False
+        # Zone event count of the last fresh read, and of the last fresh read before the teleport.
+        self._fresh_events: int | None = None
+        self._events_at_jump: int | None = None
 
     def step(self, state: TmpState, now: float, ego_xz: tuple[float, float] | None = None) -> bool:
         was_active = self.active
@@ -141,9 +149,15 @@ class NoCollisionZoneGate:
         if ego_xz is not None:
             if self._last_xz is not None and math.dist(ego_xz, self._last_xz) > TELEPORT_JUMP_M:
                 self._teleported = jumped = True
+                self._events_at_jump = self._fresh_events
             self._last_xz = ego_xz
-        if self._teleported and state.fresh and state.connected and not state.in_no_collision_zone:
+        if self._teleported and state.fresh and state.connected and (
+                not state.in_no_collision_zone or self._zone_event_since_jump(state)):
             self._teleported = False
+            if state.in_no_collision_zone:
+                logger.info("TruckersMP reported a no-collision zone after a teleport: trusting it")
+        if state.fresh and state.zone_events is not None:
+            self._fresh_events = state.zone_events
 
         if not state.in_zone or self._teleported:
             self._agree_since = None
@@ -159,6 +173,11 @@ class NoCollisionZoneGate:
         self._set_active(now - self._agree_since >= ENTER_CONFIRM_S)
         return self.active
 
+    def _zone_event_since_jump(self, state: TmpState) -> bool:
+        """TruckersMP raised a zone event after the jump, so its flag describes where ego is now."""
+        return (state.zone_events is not None and self._events_at_jump is not None
+                and state.zone_events != self._events_at_jump)
+
     def _set_active(self, active: bool) -> None:
         if active == self.active:
             return
@@ -172,6 +191,8 @@ class NoCollisionZoneGate:
         self._agree_since = None
         self._last_xz = None
         self._teleported = False
+        self._fresh_events = None
+        self._events_at_jump = None
         self.exited_zone = False
         self._set_active(False)
 

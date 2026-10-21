@@ -1852,7 +1852,7 @@ version. It writes one shared-memory file on every rendered frame:
 
 | file | layout |
 |---|---|
-| `Local\MonoCruiseTmpState` | 16 bytes, `=IIBBHHH`: version (1), heartbeat, connected, in_no_collision_zone, players_streamed, players_collidable (always 0), reserved |
+| `Local\MonoCruiseTmpState` | 16 bytes, `=IIBBHHH`: version (2; 1 is read without the last field), heartbeat, connected, in_no_collision_zone, players_streamed, players_collidable (always 0), zone_events |
 
 `in_no_collision_zone` follows the SDK's `OnNoCollisionZone` event and resets on
 every disconnect, not on connect: spawning inside a zone may report it before
@@ -1878,7 +1878,20 @@ The dangerous failure is the gate staying open next to a real truck, i.e. a zone
 flag stuck at 1. The plugin resets it on every disconnect and on shutdown, and the
 gate adds a teleport guard: an ego jump over `TELEPORT_JUMP_M` (50 m) between
 radar frames (ferry, train, respawn) keeps it shut until the plugin itself
-reports "not in a zone". A stale or disconnected read does not clear the guard.
+reports "not in a zone", or reports a zone event raised after the jump. A stale
+or disconnected read does not clear the guard.
+
+The zone event is the plugin's `zone_events` count (layout 2, plugin 1.0.5): +1 on
+every `OnNoCollisionZone`. The gate keeps the count of the last fresh read before
+the jump; a fresh, connected read with a different count means TruckersMP judged
+the zone at the destination, so its flag is trusted. A flag stuck from before the
+teleport raises no event and still keeps the gate shut. Why: a teleport from one
+zone into another (2026-10-20, clip `f42de1cc`) logged "left" at the jump and
+"entered" 2 s later, both before radar's first fresh frame at the destination,
+which already read "in a zone". The guard never saw "not in a zone", held the gate
+shut for the whole 60 s in the destination zone, and AEB braked among the ~20 TMP
+rigs parked there. Every teleport that day did the same. A layout 1 plugin has no
+count and keeps the old rule.
 
 **The per-player collision flag is not used.** The first build also required
 zero collidable players, as a second signal. Measured live on 2026-10-06
@@ -1951,7 +1964,8 @@ window starts after the exit replays without the hold.
   the SDK or another plugin's buffers: clips are shared when "Help improve AEB
   and ACC" is on, and the plugin is described to TruckersMP users as reading none.
 - Let a stale or absent state file open the gate, or clear the teleport guard on
-  anything but the plugin reporting "not in a zone".
+  anything but a fresh, connected plugin reporting "not in a zone" or a zone event
+  after the jump.
 - Arm the exit hold on anything but `exited_zone`, arm a body that is not inside
   ego's inset box, extend a hold past separation, or re-arm a released rig: each
   turns a real truck into a ghost.

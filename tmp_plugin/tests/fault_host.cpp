@@ -589,7 +589,7 @@ namespace
     struct StateRead
     {
         uint32_t version, heartbeat;
-        int connected, zone;
+        int connected, zone, zone_events;
     };
 
     StateRead read_state()
@@ -601,6 +601,9 @@ namespace
             std::memcpy( &s.heartbeat, g_state_view.bytes + 4, 4 );
             s.connected = g_state_view.bytes[ 8 ];
             s.zone      = g_state_view.bytes[ 9 ];
+            uint16_t events = 0;
+            std::memcpy( &events, g_state_view.bytes + 14, 2 );
+            s.zone_events = events;
         }
         return s;
     }
@@ -691,16 +694,16 @@ namespace
         CHECK( g_listeners.size() == 7 );
         warm_up();
         const StateRead s = read_state();
-        CHECK( s.version == 1 && s.heartbeat != 0 && s.connected == 1 && s.zone == 0 );
+        CHECK( s.version == 2 && s.heartbeat != 0 && s.connected == 1 && s.zone == 0 && s.zone_events == 0 );
         const VehiclesRead v = read_vehicles();
         CHECK( v.version == 1 && v.heartbeat != 0 && v.count > 0 && v.connected == 1 && v.any_sampled );
 
         fire_zone( true );
         render();
-        CHECK( read_state().zone == 1 );
+        CHECK( read_state().zone == 1 && read_state().zone_events == 1 );
         fire_zone( false );
         render();
-        CHECK( read_state().zone == 0 );
+        CHECK( read_state().zone == 0 && read_state().zone_events == 2 );
 
         const int hits        = g_hits[ "Players.GetAllPlayers" ];
         const uint32_t before = read_state().heartbeat;

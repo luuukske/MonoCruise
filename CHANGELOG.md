@@ -17,6 +17,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 ### Fixed
 - **Gas pedal jumped while accelerating hard**: on a fast truck the gas stayed too high through a pull and then got chopped off. Below cruising speed it now eases off once the truck is clearly pulling harder than expected.
 - **Acceleration styles felt weak in town and faded too early**: Normal and Efficiency now pull properly up to town speeds and ease off smoothly toward the highway, and Sport is full throttle with no cap. ACC no longer holds them back on an empty road or behind a car far ahead, and the gas no longer sags at the end of a full-throttle pull or climb.
+- **AEB braked for TruckersMP trucks overlapping yours**: after a teleport into a no-collision zone AEB didn't know it was in one, braked for the trucks sitting inside yours and held the brake at a standstill. Zones are now recognised after a teleport, a vehicle sitting inside your truck is always ignored, and AEB lets go half a second after you stop.
 
 ### Removed
 - **Automatic horn**: the horn and airhorn switches are gone. The horn did not come on reliably.
