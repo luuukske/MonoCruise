@@ -38,10 +38,9 @@ _DEFAULT_ZERO_OFFSET_MS2: float = 0.50
 # and projected back to the anchor gear. Mass-normalized, so a rig divides it out.
 _DEFAULT_ANCHOR_NORM_MS2: float = 2.124 * _DEFAULT_RATIO ** 2
 _REFERENCE_MASS_T: float = 20.0
-_WEIGHT_SPAN_T: float = 12.7
-_WEIGHT_STRENGTH: float = 0.27
-_WEIGHT_MIN_FACTOR: float = 0.55
-_WEIGHT_MAX_FACTOR: float = 1.85
+_WEIGHT_MASS_EXP: float = 0.85
+_WEIGHT_MIN_FACTOR: float = 0.40
+_WEIGHT_MAX_FACTOR: float = 4.0
 _TRAILER_WEIGHT_BIAS: float = 1.02
 # Speed at which each gear is engaged, top of the band, from a 12-speed stack.
 _GEAR_TOP_KMH: tuple[tuple[int, float], ...] = (
@@ -63,7 +62,7 @@ RigSpec = tuple[float, bool] | None
 
 
 def weight_factor(mass_t: float, has_trailer: bool) -> float:
-    factor = 1.0 + ((mass_t - _REFERENCE_MASS_T) / _WEIGHT_SPAN_T) * _WEIGHT_STRENGTH
+    factor = (max(mass_t, 0.0) / _REFERENCE_MASS_T) ** _WEIGHT_MASS_EXP
     factor = max(_WEIGHT_MIN_FACTOR, min(_WEIGHT_MAX_FACTOR, factor))
     if has_trailer:
         factor = min(_WEIGHT_MAX_FACTOR, factor * _TRAILER_WEIGHT_BIAS)

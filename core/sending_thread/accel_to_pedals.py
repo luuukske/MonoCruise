@@ -28,11 +28,17 @@ GRAVITY_MS2: float = 9.81
 
 # Weight / mass helpers
 _REFERENCE_MASS_KG: float = 20_000.0
-_WEIGHT_SPAN_TONS: float = 12.7
-_WEIGHT_STRENGTH: float = 0.27
-_WEIGHT_MIN_FACTOR: float = 0.55
-_WEIGHT_MAX_FACTOR: float = 1.85
+# Gas slope scales as mass^-0.85: full-throttle pulls matched on gear and speed, 17 t
+# against 25-41 t (README, "Gas capacity and mass"). The old linear law was ~0.45.
+_WEIGHT_MASS_EXP: float = 0.85
+_WEIGHT_MIN_FACTOR: float = 0.40
+_WEIGHT_MAX_FACTOR: float = 4.0
 _TRAILER_WEIGHT_BIAS: float = 1.02
+# The linear law before 2026-10-21, kept only to migrate anchors learned under it.
+_LEGACY_WEIGHT_SPAN_TONS: float = 12.7
+_LEGACY_WEIGHT_STRENGTH: float = 0.27
+_LEGACY_WEIGHT_MIN_FACTOR: float = 0.55
+_LEGACY_WEIGHT_MAX_FACTOR: float = 1.85
 # Brake capability, fitted to full-pedal stops across four rigs. Mass exponent
 # is 0.25, not 1: air brakes are load-sensed (README has the numbers).
 _BRAKE_FIT_COEFF: float = 70.8
@@ -172,16 +178,29 @@ def _finite_or_zero(value: object) -> float:
 
 
 def weight_factor(total_mass_kg: float, has_trailer: bool) -> float:
+    """Gas-side mass normalization: 1.0 at the reference mass, a power law in mass."""
+    if not Settings.weight_adjustment:
+        return 1.0
+    mass_kg = max(0.0, _finite_or_zero(total_mass_kg))
+    factor = (mass_kg / _REFERENCE_MASS_KG) ** _WEIGHT_MASS_EXP
+    factor = _clamp(factor, _WEIGHT_MIN_FACTOR, _WEIGHT_MAX_FACTOR)
+    if has_trailer:
+        factor = min(_WEIGHT_MAX_FACTOR, factor * _TRAILER_WEIGHT_BIAS)
+    return factor
+
+
+def legacy_weight_factor(total_mass_kg: float, has_trailer: bool) -> float:
+    """The pre-2026-10-21 linear law. Only for migrating a persisted anchor."""
     if not Settings.weight_adjustment:
         return 1.0
     current_tons = max(0.0, _finite_or_zero(total_mass_kg)) / 1000.0
     ref_tons = _REFERENCE_MASS_KG / 1000.0
     factor = 1.0 + (
-        ((current_tons - ref_tons) / _WEIGHT_SPAN_TONS) * _WEIGHT_STRENGTH
+        ((current_tons - ref_tons) / _LEGACY_WEIGHT_SPAN_TONS) * _LEGACY_WEIGHT_STRENGTH
     )
-    factor = _clamp(factor, _WEIGHT_MIN_FACTOR, _WEIGHT_MAX_FACTOR)
+    factor = _clamp(factor, _LEGACY_WEIGHT_MIN_FACTOR, _LEGACY_WEIGHT_MAX_FACTOR)
     if has_trailer:
-        factor = min(_WEIGHT_MAX_FACTOR, factor * _TRAILER_WEIGHT_BIAS)
+        factor = min(_LEGACY_WEIGHT_MAX_FACTOR, factor * _TRAILER_WEIGHT_BIAS)
     return factor
 
 

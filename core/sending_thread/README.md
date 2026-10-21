@@ -232,11 +232,67 @@ independently reproducing the 0.504 measured from coast. Top gear at 17 t reads 
 against a measured **1.02**; before the fix the persisted state gave **0.203** against the same
 truth, which is why a bid over 0.2 m/s2 floored the throttle.
 
-**Still open, deliberately not fixed here.** `weight_factor` is a straight line in tonnes with
-an effective mass exponent of ~0.46 where the data reads 0.65-1.0, so the residual error grows
-with mass: top gear reads 1.6x high at 40 t while it is exact at 17 t. It is load-bearing for
-the mapper's round trip on every rig, so re-fitting it is its own change with its own probe,
-the way `baseline_brake_ms2` was done.
+### Gas capacity and mass
+
+The anchor is one number shared by every rig, normalized to 20 t by `weight_factor`: learning
+multiplies a candidate by it and the mapper divides the estimate by it. So `weight_factor` alone
+decides what a trailer change does to the gas map before a single sample is learned at the new
+mass. Since 2026-10-21 it is `(mass / 20 t) ^ 0.85`, clamped to 0.40-4.0 (about 7-100 t), times
+1.02 with a trailer.
+
+**Why it changed.** Until then it was a straight line in tonnes (`1 + 0.27 * (t - 20) / 12.7`,
+clamped 0.55-1.85), an effective exponent of ~0.45. Between 10.5 t and 40.8 t it moved 1.84x
+where the truck moves 3-4x. On 2026-10-20 Lukas unhooked a 40.8 t load: gear 9 delivered
+~2.7 m/s2 on 55 % gas against an estimate of 1.66, the gas map was 2-3x too steep, and CC and the
+limiter pumped the pedal at about 1 Hz, the same symptom as the cruise collapse above. The
+1.85 ceiling also sat at 37 t, so every heavier rig read as 37 t.
+
+**How 0.85 was measured.** Full-throttle pulls (gas at least 0.85 for 0.5 s, clutch closed for
+0.8 s, gear held 1.5 s, grade under 0.08 rad, accel over 0.2 m/s2), slope taken as
+`(accel + road load - 0.5) / gas`, binned by gear and by 2 m/s of speed so engine speed is matched,
+17 t against 25, 31 and 41 t on the same 14-speed tractor, 2026-09-28 to 10-20 (10-03 excluded, a
+12-speed truck). 59 matched cells give a weighted median exponent of **0.85**, mean 0.86, most
+cells 0.75-0.95, with no trend between the 25, 31 and 41 t bands (0.92, 0.84, 0.87). A
+power-per-mass check (`mass * authority * speed` at full throttle) stays at 510-650 kW from 17 to
+41 t, which also says close to 1/mass. Physics says 1.0 for a pure force over mass; the shortfall
+is most likely mass the road-load model treats as fixed (driveline inertia, aero as a force).
+Fitting without the speed match reads 0.6-0.9, because a heavier truck sits lower in each gear.
+
+`tools/capacity_learner_replay.py <month> --bands` adds a transfer check: the error on pulls
+taken after a mass change of over 1.4x, before the anchor has learned at the new mass. Over
+2026-08 to 10-20 (measured / believed, median):
+
+| law | after going heavier | after going lighter |
+|-----|--------------------:|--------------------:|
+| linear (old, `--legacy-mass-law`) | 0.86 | 1.23 |
+| mass^1.0 | 1.13 | 0.95 |
+| **mass^0.85** | **1.04** | **1.02** |
+
+Either error direction pumps the gas in one of the two transitions, under-reading after the
+change makes the map steep, so the exponent that balances both is the one to want. October on its
+own is worse for every law (heavier, old / 1.0 / 0.85: 1.33 / 1.99 / 1.75): its "heavier" pulls are mostly launches
+in gears 4-8 right after an anchor that was learned on a bobtail in a yard, where the shape
+function's gear extrapolation and the dirt surface both read low. That is not a mass-law error.
+
+**Not validated: the bobtail end.** Settled full-throttle pulls under 12 t are a few dozen, mostly
+in a yard on dirt (rolling resistance the road-load model does not have) or at motorway speed
+(where an aero force the model under-counts weighs most on a light truck). They read weaker
+than any exponent predicts, so 10 t sits on the extrapolation. A bobtail-versus-loaded drive on
+flat tarmac, same tractor, steady pulls in gears 8-12 and steady 80-100 km/h cruise, would settle
+it.
+
+**Migration.** An anchor persisted before 2026-10-21 was normalized under the linear law, so
+read under the new one it moves every rig but 20 t (capability +37 % at 10.5 t, +7 % at 17 t,
+-21 % at 41 t). `pedal_capacity_accel_mass_model` (2) marks the law the anchor is in. An older one is
+re-expressed once, at the first `update_accel` with a mass over 3 t, by
+`weight_factor / legacy_weight_factor` at that mass, and written with the new version at once: the
+rig the driver starts on keeps exactly the gas map it had, and every other rig moves to the new
+law. Every capacity save carries the version, so a later start never migrates twice.
+
+**No per-load state and no faster relearn on a mass change.** With the law right the anchor is
+already right at the new mass, and a load-keyed anchor would split the samples that a light rig
+gets few of (bobtail pulls are under 1 % of the log). What is still shared across rigs that should
+not be is the truck: a second tractor with another engine teaches the same anchor.
 
 ### Gear-shift poisoning (the post-shift pedal step)
 
