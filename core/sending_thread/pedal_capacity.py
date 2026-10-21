@@ -15,7 +15,7 @@ from core.scs_profile.intensity import (
 )
 from core.settings import Settings
 
-from .accel_to_pedals import brake_curve_fraction, weight_factor
+from .accel_to_pedals import brake_curve_fraction, legacy_weight_factor, weight_factor
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,10 @@ _LEGACY_SEED_GEAR: int = 8           # legacy max_accel_ms2 was mostly learned i
 # pedal slope now, so these are the old full-pedal bounds less the offset.
 _ACCEL_ANCHOR_MIN_MS2: float = 0.2
 _ACCEL_ANCHOR_MAX_MS2: float = 7.5
+# Mass law the persisted anchor is normalized under. 2: `weight_factor` is a power law;
+# an older anchor is re-expressed once, at the first rig it drives, keeping that rig's map.
+_ACCEL_MASS_MODEL_VERSION: int = 2
+_MIGRATE_MIN_MASS_KG: float = 3000.0
 
 # Zero-pedal tractive accel. At gas 0 in gear the sim still drives the truck,
 # so accel vs pedal is affine, not a line through the origin. See README.
@@ -168,6 +172,8 @@ class PedalCapacityTracker:
         self._saved_accel_offset: float = _ACCEL_OFFSET_INIT_MS2
         # Legacy scalar kept as a fallback before the anchor is seeded.
         self._global_accel_scalar: float = 0.0
+        # Mass law the anchor is in; load_persisted marks an older one for migration.
+        self._accel_mass_model: int = _ACCEL_MASS_MODEL_VERSION
         self._last_save_mono: float = 0.0
         self._last_clutch_mono: float = -math.inf
         self._brake_pedal_history: Deque[tuple[float, float]] = deque(
@@ -272,6 +278,9 @@ class PedalCapacityTracker:
             anchor, _ACCEL_ANCHOR_MIN_MS2, _ACCEL_ANCHOR_MAX_MS2
         )
         self._saved_accel_anchor = self._accel_anchor_gain_ms2
+        self._accel_mass_model = int(_safe_float(
+            getattr(Settings, "pedal_capacity_accel_mass_model", 0)
+        ))
         logger.debug(
             "pedal_capacity loaded: brake=%.2f m/s² accel_anchor=%.2f m/s² (at gear %d) ratio=%.3f",
             self._max_brake_ms2, self._accel_anchor_gain_ms2, _ANCHOR_GEAR,
@@ -467,6 +476,8 @@ class PedalCapacityTracker:
     ) -> None:
         """Feed one acceleration sample into the shape-function anchor EMA. See `core/sending_thread/README.md`."""
         now = time.monotonic()
+        if self._accel_mass_model != _ACCEL_MASS_MODEL_VERSION:
+            self._migrate_mass_model(total_mass_kg, has_trailer, now)
 
         # Gear-change tracking: unconditional so the dwell timer is correct
         # even when the prior sample was rejected for another reason.
@@ -638,6 +649,25 @@ class PedalCapacityTracker:
         )
         self._maybe_save(now)
 
+    def _migrate_mass_model(self, total_mass_kg: float, has_trailer: bool, now: float) -> None:
+        """Re-express an anchor learned under the linear mass law so this rig reads as before."""
+        mass = _safe_float(total_mass_kg)
+        if mass < _MIGRATE_MIN_MASS_KG:
+            return
+        ratio = (max(weight_factor(mass, has_trailer), 1e-6)
+                 / max(legacy_weight_factor(mass, has_trailer), 1e-6))
+        before = self._accel_anchor_gain_ms2
+        if before > 0.0:
+            self._accel_anchor_gain_ms2 = _clamp(
+                before * ratio, _ACCEL_ANCHOR_MIN_MS2, _ACCEL_ANCHOR_MAX_MS2,
+            )
+        self._accel_mass_model = _ACCEL_MASS_MODEL_VERSION
+        logger.info(
+            "gas capacity moved to the power mass law at %.1f t (anchor %.3f -> %.3f)",
+            mass / 1000.0, before, self._accel_anchor_gain_ms2,
+        )
+        self._write(now)
+
     def _maybe_save(self, now: float) -> None:
         if now - self._last_save_mono < _SAVE_COOLDOWN_S:
             return
@@ -662,6 +692,9 @@ class PedalCapacityTracker:
                 and ratio_drift < _SAVE_THRESHOLD
                 and offset_drift < _SAVE_THRESHOLD):
             return
+        self._write(now)
+
+    def _write(self, now: float) -> None:
         try:
             Settings.save(values={
                 "pedal_capacity_brake_scale": round(self._brake_scale, 4),
@@ -670,6 +703,7 @@ class PedalCapacityTracker:
                 "pedal_capacity_accel_zero_offset_ms2": round(
                     self._accel_zero_offset_ms2, 3
                 ),
+                "pedal_capacity_accel_mass_model": self._accel_mass_model,
             })
             self._saved_brake_scale = self._brake_scale
             self._saved_accel_anchor = self._accel_anchor_gain_ms2
