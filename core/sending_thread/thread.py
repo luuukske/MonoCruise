@@ -25,7 +25,13 @@ from core.scs_profile.intensity import (
     effective_brake_pedal,
 )
 
-from .accel_to_pedals import AccelToPedals, MapperSharedState, baseline_accel_ms2, baseline_brake_ms2
+from .accel_to_pedals import (
+    AccelToPedals,
+    MapperSharedState,
+    baseline_accel_ms2,
+    baseline_brake_ms2,
+    weight_factor,
+)
 from .aeb_capacity import (
     FULL_SENT,
     AebCapacityStore,
@@ -36,7 +42,7 @@ from .aeb_capacity import (
     full_pedal_key,
     truck_key,
 )
-from .debug_csv import BrakeDebugLog, open_debug_csv
+from .debug_csv import BrakeDebugLog, GasLearnDebugLog, open_debug_csv
 from .hold_controller import (
     HoldController,
     STATE_HOLDING,
@@ -463,6 +469,7 @@ class SendingThread(BaseThread):
         except Exception:
             self._project_root = Path(".").resolve()
         self._brake_log = BrakeDebugLog(self._project_root)
+        self._gas_learn_log = GasLearnDebugLog(self._project_root)
 
     # Coast-down CSV logger
 
@@ -1769,6 +1776,32 @@ class SendingThread(BaseThread):
                 )
             except Exception:
                 logger.debug("brake_debug tick failed", exc_info=True)
+            try:
+                if a > 0.01:
+                    tracker = self._capacity_tracker
+                    self._gas_learn_log.tick(time.monotonic(), True, {
+                        "speed_ms": speed_ms,
+                        "gear": tel_gear,
+                        "gas_cmd": a,
+                        "gas_owner": "mapper" if mapper_owned_gas else "driver",
+                        "controller": cruise_active_controller,
+                        "game_throttle": game_throttle,
+                        "raw_ms2": raw_a,
+                        "road_load_ms2": mapper_road_load_ms2 - mapper_creep_ms2,
+                        "slope_rad": brake_grade_rad,
+                        "game_clutch": game_clutch,
+                        "mass_kg": mass_kg,
+                        "has_trailer": has_t,
+                        "learn_gate": tracker.last_accel_gate,
+                        "learn_count": tracker.accel_samples_accepted,
+                        "accel_anchor": tracker.accel_anchor_ms2,
+                        "accel_ratio": tracker.accel_ratio_step,
+                        "accel_offset_ms2": tracker.accel_zero_offset_ms2,
+                        "est_accel_ms2": tracker.accel_gain_for_gear(tel_gear, mass_kg, has_t)
+                        / max(weight_factor(mass_kg, has_t), 1e-6),
+                    })
+            except Exception:
+                logger.debug("gas_learn_debug tick failed", exc_info=True)
 
         self._tick_bool_presses(controller)
 
@@ -1874,6 +1907,7 @@ class SendingThread(BaseThread):
         self._accel_mapper.close()
         self._close_coast_log()
         self._brake_log.close()
+        self._gas_learn_log.close()
         logger.debug("teardown complete")
 
     def _tick_bool_overrides(self, controller: SCSController) -> None:

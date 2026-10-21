@@ -27,8 +27,11 @@ _MIN_DECEL_MS2: float = 0.3         # ignore near-zero decel (coasting / noise)
 _MIN_ACCEL_MS2: float = 0.2         # ignore near-zero accel
 _MAX_SLOPE_RAD: float = 0.15        # ~8.6°: skip extreme slopes (sensor uncertainty)
 _WEIGHT_POWER: float = 3.0          # alpha scaled by pedal^3: full pedal dominates
-_ACCEL_BASE_ALPHA: float = 0.08     # EMA alpha at full gas pedal, no underperformance
-# Brake uses this both ways. Gas uses it only when the sample is below the estimate.
+# Gas rates are per second of accepted samples, not per tick: at 100 Hz the old per-tick
+# alphas re-fit the whole gas map to under a second of driving. See README.
+_ACCEL_ANCHOR_RATE_PER_S: float = 0.5  # log-space anchor rate at full gas pedal
+_ACCEL_LEARN_DT_MAX_S: float = 0.05    # one call never counts for more than this
+# Brake only. Gas learns at one rate both ways: a fast fall is what steepened the map.
 _UNDERPERFORM_MULT: float = 2.0
 _CLUTCH_GUARD_S: float = 0.5        # seconds after clutch to skip gas learning
 _CLUTCH_ACTIVE_THRESHOLD: float = 0.05
@@ -58,8 +61,8 @@ _RATIO_INIT: float = 1.27            # default until enough cross-gear samples s
                                      # project the legacy max_accel scalar to the anchor
 _RATIO_MIN: float = 1.05             # absolute bounds: outside is unphysical for any
 _RATIO_MAX: float = 1.45             # common truck transmission
-_RATIO_BASE_ALPHA: float = 0.02      # log-space ratio learning rate at gas=1.0. Lower
-                                     # than the anchor's because each sample's update
+_RATIO_RATE_PER_S: float = 0.125     # log-space ratio rate per second at gas=1.0, a
+                                     # quarter of the anchor's as with the old alphas
 _ANCHOR_GEAR: int = 6                # mid-stack reference gear
 _LEGACY_SEED_GEAR: int = 8           # legacy max_accel_ms2 was mostly learned in top
                                      # cruise gears; project from here when seeding
@@ -78,7 +81,7 @@ _MIGRATE_MIN_MASS_KG: float = 3000.0
 _ACCEL_OFFSET_INIT_MS2: float = 0.50
 _ACCEL_OFFSET_MIN_MS2: float = 0.0
 _ACCEL_OFFSET_MAX_MS2: float = 1.5
-_ACCEL_OFFSET_ALPHA: float = 0.02
+_ACCEL_OFFSET_RATE_PER_S: float = 0.125
 # Band split for the affine fit. The offset dominates below the first bound and
 # the slope above the second; between them neither term is separable.
 _ACCEL_OFFSET_MAX_PEDAL: float = 0.25
@@ -201,6 +204,9 @@ class PedalCapacityTracker:
         self.last_brake_gate: str = ""
         self.brake_samples_accepted: int = 0
         self.last_brake_candidate_scale: float = 0.0
+        # Same for the gas side, for the gas learning debug log.
+        self.last_accel_gate: str = ""
+        self.accel_samples_accepted: int = 0
         # (candidate scale, tune pedal) of this tick's settled sample, before the cap gate.
         self.last_settled_brake_sample: tuple[float, float] | None = None
 
@@ -213,6 +219,16 @@ class PedalCapacityTracker:
     def accel_zero_offset_ms2(self) -> float:
         """Tractive accel the engine delivers at gas=0 in gear (m/s²)."""
         return self._accel_zero_offset_ms2
+
+    @property
+    def accel_anchor_ms2(self) -> float:
+        """Learned gas pedal slope at the anchor gear, mass-normalized (m/s²)."""
+        return self._accel_anchor_gain_ms2
+
+    @property
+    def accel_ratio_step(self) -> float:
+        """Learned gas gain ratio between neighbouring gears."""
+        return self._accel_ratio_step
 
     @property
     def brake_scale(self) -> float:
@@ -497,6 +513,7 @@ class PedalCapacityTracker:
         if last_call is None or now - last_call > _ACCEL_SETTLE_WINDOW_S:
             self._gas_pedal_history.clear()
             self._accel_history.clear()
+        dt = 0.0 if last_call is None else _clamp(now - last_call, 0.0, _ACCEL_LEARN_DT_MAX_S)
 
         history = self._gas_pedal_history
         if history:
@@ -519,47 +536,58 @@ class PedalCapacityTracker:
         if game_clutch > _CLUTCH_ACTIVE_THRESHOLD:
             self._last_clutch_mono = now
         if now - self._last_clutch_mono < _CLUTCH_GUARD_S:
+            self.last_accel_gate = "clutch"
             return
 
         g = g_now
         if g <= 0:
+            self.last_accel_gate = "gear"
             return
 
         # Gear-dwell gate. Low gears (1–3) are engaged so briefly per launch
         dwell = _LOW_GEAR_DWELL_S if g <= _LOW_GEAR_DWELL_MAX_GEAR else _GEAR_DWELL_S
         if now - self._last_gear_change_mono < dwell:
+            self.last_accel_gate = "dwell"
             return
 
         if speed_ms < _MIN_ACCEL_SPEED_MS:
+            self.last_accel_gate = "speed"
             return
         if gas_output < _ACCEL_PEDAL_FLOOR:
+            self.last_accel_gate = "pedal"
             return
         if abs(slope_rad) > _MAX_SLOPE_RAD:
+            self.last_accel_gate = "slope"
             return
 
         if now - self._last_gas_step_mono < _GAS_STEP_GUARD_S:
+            self.last_accel_gate = "step"
             return
 
         oldest_in_window = history[0][1]
         if (history[-1][0] - history[0][0] < _GAS_SETTLE_WINDOW_S
                 or abs(gas_output - oldest_in_window) > _GAS_SETTLE_TOLERANCE):
+            self.last_accel_gate = "pedal_settle"
             return
 
         # Accel settled: a gain read while the accel signal is still moving
         # measures the disturbance, not the truck.
         if a_hist[-1][0] - a_hist[0][0] < _ACCEL_SETTLE_WINDOW_S:
+            self.last_accel_gate = "accel_window"
             return
         accel_values = [a for _, a in a_hist]
         a_max = max(accel_values)
         if a_max - min(accel_values) > max(
             _ACCEL_SETTLE_ABS_MS2, _ACCEL_SETTLE_FRAC * abs(a_max)
         ):
+            self.last_accel_gate = "accel_settle"
             return
 
         # Window means on both sides, so telemetry ripple averages out instead
         # of picking whichever tick the gate happened to open on.
         mean_accel = sum(accel_values) / len(accel_values)
         if mean_accel < _MIN_ACCEL_MS2:
+            self.last_accel_gate = "accel_min"
             return
         pedal_values = [p for _, p in history]
         mean_pedal = max(
@@ -575,21 +603,26 @@ class PedalCapacityTracker:
         if mean_pedal <= _ACCEL_OFFSET_MAX_PEDAL:
             slope_part = slope_here * mean_pedal
             if slope_part > self._accel_zero_offset_ms2:
+                self.last_accel_gate = "offset_slope"
                 return
             cand_offset = mean_accel - slope_part
             if not (_ACCEL_OFFSET_MIN_MS2 <= cand_offset <= _ACCEL_OFFSET_MAX_MS2):
+                self.last_accel_gate = "offset_range"
                 return
             self._accel_zero_offset_ms2 = _clamp(
                 self._accel_zero_offset_ms2
-                + _ACCEL_OFFSET_ALPHA
+                + min(_ACCEL_OFFSET_RATE_PER_S * dt, 1.0)
                 * (cand_offset - self._accel_zero_offset_ms2),
                 _ACCEL_OFFSET_MIN_MS2, _ACCEL_OFFSET_MAX_MS2,
             )
+            self.last_accel_gate = "offset"
+            self.accel_samples_accepted += 1
             self._maybe_save(now)
             return
 
         # Dead band: neither term is separable here, so learn neither.
         if mean_pedal < _ACCEL_SLOPE_MIN_PEDAL:
+            self.last_accel_gate = "dead_band"
             return
 
         # Slope band. Removing the offset is what stops a constant-speed cruise
@@ -599,6 +632,7 @@ class PedalCapacityTracker:
             _ACCEL_MIN_AUTHORITY_MS2, _ACCEL_MIN_AUTHORITY_FRAC * mean_accel,
             _ACCEL_MIN_AUTHORITY_ROAD_FRAC * abs(road_load_ms2),
         ):
+            self.last_accel_gate = "authority"
             return
 
         # Per-pedal slope at current mass, then mass-normalized.
@@ -614,13 +648,16 @@ class PedalCapacityTracker:
         # existed per-candidate before the shape function replaced the gear dict.
         implied_anchor = math.exp(log_m - x * log_ratio)
         if not (_ACCEL_ANCHOR_MIN_MS2 <= implied_anchor <= _ACCEL_ANCHOR_MAX_MS2):
+            self.last_accel_gate = "range"
             return
 
+        self.accel_samples_accepted += 1
         if self._accel_anchor_gain_ms2 <= 0.0:
             # First valid sample: seed the anchor from this single sample
             self._accel_anchor_gain_ms2 = _clamp(
                 implied_anchor, _ACCEL_ANCHOR_MIN_MS2, _ACCEL_ANCHOR_MAX_MS2,
             )
+            self.last_accel_gate = "seed"
             self._maybe_save(now)
             return
 
@@ -628,13 +665,8 @@ class PedalCapacityTracker:
         residual = _clamp(log_m - (log_anchor + x * log_ratio), -_ACCEL_RESIDUAL_MAX, _ACCEL_RESIDUAL_MAX)
 
         weight = mean_pedal ** _WEIGHT_POWER
-        lr_anchor = _ACCEL_BASE_ALPHA * weight
-        lr_ratio = _RATIO_BASE_ALPHA * weight
-        if residual < 0.0:
-            lr_anchor *= _UNDERPERFORM_MULT
-            lr_ratio *= _UNDERPERFORM_MULT
-        lr_anchor = min(lr_anchor, 1.0)
-        lr_ratio = min(lr_ratio, 0.5)
+        lr_anchor = min(_ACCEL_ANCHOR_RATE_PER_S * weight * dt, 1.0)
+        lr_ratio = min(_RATIO_RATE_PER_S * weight * dt, 0.5)
 
         # Ratio step normalized by the lever arm: unnormalized, top gear learned
         # it 8x faster and walked the pair's degenerate direction. See README.
@@ -647,6 +679,7 @@ class PedalCapacityTracker:
         self._accel_ratio_step = _clamp(
             math.exp(log_ratio), _RATIO_MIN, _RATIO_MAX,
         )
+        self.last_accel_gate = "ok"
         self._maybe_save(now)
 
     def _migrate_mass_model(self, total_mass_kg: float, has_trailer: bool, now: float) -> None:

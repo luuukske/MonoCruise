@@ -232,6 +232,44 @@ independently reproducing the 0.504 measured from coast. Top gear at 17 t reads 
 against a measured **1.02**; before the fix the persisted state gave **0.203** against the same
 truth, which is why a bid over 0.2 m/s2 floored the throttle.
 
+### Gas learning rate is per second
+
+Until 2026-10-21 the anchor, ratio and offset moved by a fixed alpha per call: 0.08 x pedal³
+for the anchor, doubled when the sample read weaker than the estimate. At the 100 Hz loop
+that is a time constant of about 0.06 s, so the gas map was whatever the last half second
+of settled pedal said. The 0.15 residual clamp bounds one step, not a reading that persists.
+
+On 2026-10-21, with the cruise-noise and mass-law fixes already live, a 10.5 t truck's anchor
+went 1.75 -> 0.69 -> 0.38 in about two minutes. It fell while the driver had the pedal (a
+limiter bypass at 100-105 km/h, then manual driving), which `accel_to_pedals_debug.csv` does
+not record because it only logs while the mapper commands; replaying the rows it did record
+kept the anchor at 1.79. The map turned about 2.5x too steep and the limiter pumped the gas
+0 -> 0.44 at about 1 Hz at a steady 100 km/h. A synthetic floored pedal reading 40 % of the
+model halved the anchor in 0.75 s.
+
+Each step is now `rate x pedal³ x dt`, dt the time since the previous call (capped at
+0.05 s), so learning speed no longer depends on the loop rate: `_ACCEL_ANCHOR_RATE_PER_S` 0.5
+at full pedal, ratio and offset 0.125, the same 4:1 split the alphas had. Gas no longer uses
+`_UNDERPERFORM_MULT`: an estimate that is too low is the one that steepens the map and pumps;
+one that is too high only makes the gas lazy, and the fast trim covers it. Replayed over the
+October mapper log at 100 Hz:
+
+| rate | time inside a >25 % fall within 60 s | worst 60 s fall | pull measured / believed, median |
+|---|---|---|---|
+| per call (old) | 15.4 % | x0.25 | 1.02 |
+| 1.0 / s | 3.3 % | x0.29 | 1.08 |
+| **0.5 / s** | **1.7 %** | **x0.46** | **1.10** |
+| 0.25 / s | 0.5 % | x0.59 | 1.13 |
+
+The pull error rises because a fast learner re-fits each pull while it happens and so
+predicts pulls well by construction; a slow one settles between pulls and cruise, which one
+anchor cannot both fit. 0.5 was taken because every existing learner test passes at it
+unchanged; 0.25 is the next step if the map still drifts. Cost: a truck that really differs
+needs about 10 s of settled full-pedal pulls to move the map 2x (30 s at 70 % pedal), and
+the fast trim carries the difference meanwhile. Why the driver's own pulls read weak at
+100+ km/h is not known yet; `gas_learn_debug.csv` (see **Debug logs**) records them. Do not go
+back to per-call alphas. Enforced by `tests/test_accel_capacity_cruise.py`.
+
 ### Gas capacity and mass
 
 The anchor is one number shared by every rig, normalized to 20 t by `weight_factor`: learning
@@ -732,7 +770,7 @@ on 2026-10-04 even with the onset guard. The extra cannot be predicted (same tra
 - Rain is not visible in telemetry. If wet grip cuts the extra, a dry measurement
   over-reads it; this was accepted on 2026-10-04 for a later, more precise trigger.
 
-## Brake debug log (`debug_csv.py`)
+## Debug logs (`debug_csv.py`)
 
 With `debug` on in `config.json`, `brake_debug.csv` at the project root gets every
 braking tick at 20 Hz plus a 2 s tail: speed, the 0.30 s and 0.12 s decel
@@ -752,6 +790,14 @@ read it again. `open_debug_csv` reads the header line only (2 ms on the same fil
 never let an open read past it. A file over `_DEBUG_LOG_MAX_BYTES` (512 MB) is rotated
 aside at open; `tools/acc_platoon/shifts.py` and `tools/tune_visualizer.py` read the live
 file only, so a rotation leaves earlier history in the `_<stamp>` file.
+
+`gas_learn_debug.csv` gets every tick `update_accel` is fed at 10 Hz, whoever owns the gas:
+the inputs exactly as the learner received them (sent gas, accel, road load less creep, mass
+and trailer), `gas_owner` (mapper or driver), the gate that ended the learner's tick, and the
+anchor, ratio, offset and full-pedal estimate after it. The mapper log covers only the ticks
+the mapper commanded, so the 2026-10-21 collapse, which happened on the driver's pedal, left
+no trace in it. `tools/capacity_learner_replay.py --csv gas_learn_debug.csv` replays it. Same
+512 MB rotation as the mapper log.
 
 The grip columns (lateral accel, steer, brake temperature, air pressure, wipers, the
 surface under most truck wheels, worst truck and trailer wheel slip, from

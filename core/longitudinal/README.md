@@ -167,6 +167,18 @@ set so the cap is back on the first connected tick. The zeroed pedals in
 `sending_thread`'s disconnected branch used to be the only defence against that stale
 bid.
 
+### D-term on low-passed speed
+
+The D-term differentiates the same power-shaped error as the P-term, but on speed through a
+0.10 s low-pass (`_KD_SPEED_SMOOTH_TAU_S`). Telemetry speed only moves at the game's ~20 Hz
+physics rate while the limiter ticks at the polling rate (100 Hz), so the tick-to-tick
+derivative was zero for four ticks and five times too large on the fifth, and the bid jumped
+by up to 0.4 m/s² between 10 Hz log samples (2026-10-21). Gains, the overshoot boost and how
+fast the cap reacts are unchanged: on a 20 Hz staircase at 0.25 m/s² the low-pass cuts the
+D-term ripple from 0.23 to 0.02 m/s² with the same mean. Do not smooth the output instead: the
+limiter's positive bid caps the driver's own pedal, and a slower cap lets the truck through
+the limit. Enforced by `tests/longitudinal/test_limiter_d_term.py`.
+
 ### Overshoot protection
 
 The kp term already bids strong decel for small overshoots; recovery time is mostly set
