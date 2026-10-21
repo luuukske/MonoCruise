@@ -8,7 +8,7 @@ import logging
 from PySide6.QtCore import Qt, QTimer, QPointF, QRectF
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QBrush, QPolygonF, QFont,
-    QRadialGradient, QPaintEvent,
+    QRadialGradient, QPaintEvent, QPixmap,
 )
 from PySide6.QtWidgets import QWidget
 
@@ -48,18 +48,15 @@ _HIT_CLR = QColor(255, 30, 30)
 _TEXT = QColor(200, 200, 215)
 _HUD_BG = QColor(0, 0, 0, 160)
 _HUD_BORDER = QColor(60, 60, 70)
-_TRAIL_ARC_CLR = QColor(130, 130, 200, 90)   # faint dashed line behind each vehicle
-_TRAIL_CROSS_CLR = QColor(255, 200, 80, 180) # ego-row crossing marker
-_TRAIL_ARC_HALF_SPAN_M = 50.0
-_TRAIL_ARC_SAMPLES = 32
 _ROAD_MODEL_SAMPLES = 24
 
 _EGO_TRAILER_HALF_W = 1.25
 _EGO_TRAILER_HALF_L = 6.8
 
-_REFRESH_MS = 33
+_REFRESH_MS = 50
 _PPM = 5.5
 _ARC_SAMPLES = 20
+_EDGE_FADE_BANDS = 5
 _CORRIDOR_FADE_SEGMENTS = 16
 
 
@@ -95,6 +92,9 @@ class AEBDebugWindow(QWidget):
         self._snapshot_provider = snapshot_provider or self._fetch
         self._acc_provider = acc_provider or self._fetch_acc
 
+        self._grid_pm: QPixmap | None = None
+        self._grid_key: tuple | None = None
+
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.update)
         if auto_refresh:
@@ -117,7 +117,7 @@ class AEBDebugWindow(QWidget):
 
     @staticmethod
     def _fetch_acc() -> dict | None:
-        """ACC overlay fields for debug draw (enabled, lead, components, corridor)."""
+        """ACC overlay fields for debug draw (enabled, lead, corridor)."""
         try:
             acc = registry.get_thread("acc_thread")
         except KeyError:
@@ -128,7 +128,6 @@ class AEBDebugWindow(QWidget):
             with acc.data._lock:
                 leads = list(acc.data.leads)
                 top = [(ld.vehicle.id, ld.score, ld.dist_m) for ld in leads]
-                components = dict(acc.data.debug_components)
                 return {
                     "enabled": bool(acc.data.enabled),
                     "lead_id": int(acc.data.lead_id),
@@ -137,7 +136,7 @@ class AEBDebugWindow(QWidget):
                     "dist": float(acc.data.lead_dist_m),
                     "rel": float(acc.data.lead_rel_speed_ms),
                     "score": float(acc.data.lead_score),
-                    "components": components,
+                    "tracked": len(acc.data.debug_components),
                     "blinker": float(acc.data.debug_blinker),
                     "ego_kappa": float(acc.data.debug_ego_kappa),
                     "corridor_half": float(acc.data.debug_corridor_half),
@@ -190,13 +189,8 @@ class AEBDebugWindow(QWidget):
         )
         detailed_ids = {v["vid"] for v in by_dist[: (len(by_dist) + 1) // 2]}
 
-        # First pass: fitted trail arcs behind all vehicles, so labels
-        # and bodies always sit on top of the dashed line.
         if acc is not None:
             self._draw_road_model(p, acc, ex, ez, ey, snap.ego_yaw)
-            for v in snap.vehicles:
-                if v["vid"] in detailed_ids or v["vid"] == acc["lead_id"]:
-                    self._draw_trail_arc(p, v["vid"], acc, ex, ez, ey)
 
         for v in snap.vehicles:
             vid = v["vid"]
@@ -232,6 +226,17 @@ class AEBDebugWindow(QWidget):
                 for arc in arc_list:
                     self._draw_arc_corridor(p, arc, ex, ez, ey, corr_clr)
 
+            # Bodies, labels and trailers of a rig that is off the widget are not drawn.
+            sx, sy = self._ws(v["x"], v["z"], ex, ez, ey)
+            reach_px = _PPM * (
+                v["length"] + sum(tr["length"] for tr in v.get("trailers", []))
+            ) + 40.0
+            if not (
+                -reach_px <= sx <= self.width() + reach_px
+                and -reach_px <= sy <= self.height() + reach_px
+            ):
+                continue
+
             self._draw_vehicle_box(
                 p, v["x"], v["z"], v["yaw"],
                 v["half_w"], v["length"], v["is_tmp"],
@@ -239,7 +244,6 @@ class AEBDebugWindow(QWidget):
             )
 
             if detailed:
-                sx, sy = self._ws(v["x"], v["z"], ex, ez, ey)
                 spd = v.get("speed_kmh", 0.0)
                 is_trailer_veh = v.get("is_trailer", False)
                 kin_swapped = v.get("kinematics_swapped", False)
@@ -260,7 +264,6 @@ class AEBDebugWindow(QWidget):
                     else:
                         kin_text, kin_clr = "kin:raw (no tractor<30m)", _DANGER_CLR
                     self._draw_label(p, sx, sy - 26, kin_text, kin_clr)
-                self._draw_acc_components(p, sx, sy, vid, acc)
 
             for tr in v.get("trailers", []):
                 yaw = tr["yaw"]
@@ -357,8 +360,10 @@ class AEBDebugWindow(QWidget):
         y += 18
         p.setFont(self._font_small)
         n_top = len(acc["top_leads"])
-        n_tracked = len(acc.get("components", {}))
-        p.drawText(QPointF(x, y), f"in-lane: {n_top}   scored tracks: {n_tracked}")
+        p.drawText(
+            QPointF(x, y),
+            f"in-lane: {n_top}   scored tracks: {acc.get('tracked', 0)}",
+        )
 
         kappa = acc.get("ego_kappa", 0.0)
         if abs(kappa) > 1e-6:
@@ -379,33 +384,23 @@ class AEBDebugWindow(QWidget):
         p.setPen(QPen(_TEXT))
         p.drawText(QPointF(x, y), f"blinker scalar: {acc.get('blinker', 0.0):+.2f}")
 
-    def _draw_acc_components(
-        self,
-        p: QPainter,
-        sx: float,
-        sy: float,
-        vid: int,
-        acc: dict | None,
-    ) -> None:
-        """Minimal per-vehicle ACC score label."""
-        if acc is None:
-            return
-        comp = acc.get("components", {}).get(vid)
-        if comp is None:
-            return
-
-        score = comp["score"]
-        in_path = comp["in_path"]
-        seen = comp.get("seen", True)
-        score_clr = _SAFE_CLR if score > 0 else (_WARN_CLR if score > -2 else _DANGER_CLR)
-        tag = f"s{score:+.1f}"
-        if in_path:
-            tag += " IN"
-        if not seen:
-            tag += " decay"
-        self._draw_label(p, sx, sy + 14, tag, score_clr)
-
     def _draw_grid(self, p: QPainter, cx: float, cy: float) -> None:
+        # The grid is ego-locked, so it only changes with the widget size.
+        key = (self.width(), self.height(), self.devicePixelRatioF())
+        if self._grid_key != key:
+            dpr = key[2]
+            pm = QPixmap(int(key[0] * dpr), int(key[1] * dpr))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.transparent)
+            gp = QPainter(pm)
+            gp.setRenderHint(QPainter.Antialiasing, True)
+            self._paint_grid(gp, cx, cy)
+            gp.end()
+            self._grid_pm = pm
+            self._grid_key = key
+        p.drawPixmap(0, 0, self._grid_pm)
+
+    def _paint_grid(self, p: QPainter, cx: float, cy: float) -> None:
         max_r = max(self.width(), self.height()) / _PPM + _GRID_STEP_MAJOR
 
         p.setPen(QPen(_GRID_MINOR, 0.5, Qt.DotLine))
@@ -447,15 +442,17 @@ class AEBDebugWindow(QWidget):
         s_left = [self._ws(x, z, ex, ez, ey) for x, z in left]
         s_right = [self._ws(x, z, ex, ez, ey) for x, z in right]
 
-        poly = QPolygonF()
-        for sx, sy in s_left:
-            poly.append(QPointF(sx, sy))
-        for sx, sy in reversed(s_right):
-            poly.append(QPointF(sx, sy))
+        # A corridor wholly outside the widget costs nothing to skip.
+        xs, ys = zip(*(s_left + s_right))
+        if max(xs) < 0 or min(xs) > self.width() or max(ys) < 0 or min(ys) > self.height():
+            return
+
+        l_pts = [QPointF(*pt) for pt in s_left]
+        r_pts = [QPointF(*pt) for pt in s_right]
 
         p.setPen(Qt.NoPen)
         p.setBrush(QBrush(fill_color))
-        p.drawPolygon(poly)
+        p.drawPolygon(QPolygonF(l_pts + r_pts[::-1]))
 
         if edge_color is None:
             ec = QColor(fill_color)
@@ -463,17 +460,22 @@ class AEBDebugWindow(QWidget):
         else:
             ec = QColor(edge_color)
 
-        n = len(s_left)
-        for i in range(n - 1):
-            fade = 1.0 - (i + 1) / n
-            alpha = int(ec.alpha() * fade)
+        # The edge fades with distance in a few polyline bands, not one pen per segment.
+        n = len(l_pts)
+        bands = min(_EDGE_FADE_BANDS, n - 1)
+        pen = QPen(ec, edge_width)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        for b in range(bands):
+            i0 = b * (n - 1) // bands
+            i1 = (b + 1) * (n - 1) // bands
+            mid = (i0 + i1 - 1) // 2
             c = QColor(ec)
-            c.setAlpha(max(alpha, 8))
-            pen = QPen(c, edge_width)
-            pen.setCapStyle(Qt.RoundCap)
+            c.setAlpha(max(int(ec.alpha() * (1.0 - (mid + 1) / n)), 8))
+            pen.setColor(c)
             p.setPen(pen)
-            p.drawLine(QPointF(*s_left[i]), QPointF(*s_left[i + 1]))
-            p.drawLine(QPointF(*s_right[i]), QPointF(*s_right[i + 1]))
+            p.drawPolyline(QPolygonF(l_pts[i0:i1 + 1]))
+            p.drawPolyline(QPolygonF(r_pts[i0:i1 + 1]))
 
     def _draw_vehicle_box(
         self, p: QPainter,
@@ -593,57 +595,6 @@ class AEBDebugWindow(QWidget):
         p.setPen(pen)
         p.setBrush(Qt.NoBrush)
         p.drawPolyline(poly)
-
-    def _draw_trail_arc(
-        self, p: QPainter, vid: int, acc: dict,
-        ex: float, ez: float, ey: float,
-    ) -> None:
-        """Faint dashed ACC trail arc around the target (+ crossing marker if any)."""
-        comp = acc.get("components", {}).get(vid)
-        if comp is None or not comp.get("trail_valid", False):
-            return
-
-        pen = QPen(_TRAIL_ARC_CLR, 1.0, Qt.DashLine)
-        p.setPen(pen)
-        p.setBrush(Qt.NoBrush)
-
-        if comp.get("trail_is_straight", False):
-            px = comp["trail_point_x"]
-            pz = comp["trail_point_z"]
-            dx_ = comp["trail_dir_x"]
-            dz_ = comp["trail_dir_z"]
-            span = _TRAIL_ARC_HALF_SPAN_M
-            ax, ay = self._ws(px - span * dx_, pz - span * dz_, ex, ez, ey)
-            bx, by = self._ws(px + span * dx_, pz + span * dz_, ex, ez, ey)
-            p.drawLine(QPointF(ax, ay), QPointF(bx, by))
-        else:
-            cx = comp["trail_cx"]
-            cz = comp["trail_cz"]
-            R = comp["trail_R"]
-            px = comp["trail_point_x"]
-            pz = comp["trail_point_z"]
-            if R < 1e-3:
-                return
-            target_ang = math.atan2(pz - cz, px - cx)
-            half_sweep = min(_TRAIL_ARC_HALF_SPAN_M / R, math.pi)
-            poly = QPolygonF()
-            n = _TRAIL_ARC_SAMPLES
-            for i in range(n):
-                frac = i / (n - 1)
-                ang = target_ang + (frac - 0.5) * 2.0 * half_sweep
-                wx = cx + R * math.cos(ang)
-                wz = cz + R * math.sin(ang)
-                ssx, ssy = self._ws(wx, wz, ex, ez, ey)
-                poly.append(QPointF(ssx, ssy))
-            p.drawPolyline(poly)
-
-        if comp.get("trail_crossing_valid", False):
-            cwx = comp["trail_crossing_x"]
-            cwz = comp["trail_crossing_z"]
-            mx, my = self._ws(cwx, cwz, ex, ez, ey)
-            p.setPen(Qt.NoPen)
-            p.setBrush(QBrush(_TRAIL_CROSS_CLR))
-            p.drawEllipse(QPointF(mx, my), 3.0, 3.0)
 
     def _draw_label(
         self, p: QPainter, sx: float, sy: float, text: str, color: QColor,

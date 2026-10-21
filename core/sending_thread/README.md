@@ -569,6 +569,10 @@ A 3 px always-on-top `Qt.Tool` strip along the bottom of the primary screen. Cre
 the Qt main thread via `create_visualization_bar()`. It reads `aforward` / `abackward`
 and flashes on `em_stop` / `AEB_cue` (the AEB sound's cue, warn or brake).
 
+The 10 ms tick and its per-tick smoothing stay as they are, but `update()` runs only when
+the gas rect, brake rect or flicker colour changed. Idle ticks used to repaint the full-width
+translucent window at 100 Hz on the Qt main thread for nothing.
+
 It must not call `raise_()` from its animation timer. A per-frame raise fights
 `cc_panel` and can freeze Qt on Windows when the main window is minimised.
 `WindowStaysOnTopHint` does not survive the NVIDIA overlay plus alt-tab: Qt still
