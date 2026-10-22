@@ -1,7 +1,7 @@
 """TP: TMP truck facing ego at an angle, backing across ego's lane at 70 km/h.
 
-d80936f9's pose above the TMP split, where the rel-speed floor lets it through. Heading
-reads oncoming (fwd_dot -0.67) and was dropped as such; travel reads crossing.
+d80936f9's pose at road speed. Heading reads oncoming (fwd_dot -0.67) and was
+dropped as such; travel reads crossing.
 """
 import math
 

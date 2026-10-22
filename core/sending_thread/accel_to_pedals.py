@@ -2,17 +2,24 @@ from __future__ import annotations
 
 """Commanded m/s² to gas/brake mapping. See core/sending_thread/README.md."""
 
-import csv
 import logging
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 from core.settings import Settings
 
+from .debug_csv import open_debug_csv
 from .launch_governor import LaunchGovernor, launch_gas_cap
+from .strength_scale import (
+    StrengthScale,
+    applied_scale,
+    gas_from_demand,
+    map_capacity,
+    update as update_strength,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +28,17 @@ GRAVITY_MS2: float = 9.81
 
 # Weight / mass helpers
 _REFERENCE_MASS_KG: float = 20_000.0
-_WEIGHT_SPAN_TONS: float = 12.7
-_WEIGHT_STRENGTH: float = 0.27
-_WEIGHT_MIN_FACTOR: float = 0.55
-_WEIGHT_MAX_FACTOR: float = 1.85
+# Gas slope scales as mass^-0.85: full-throttle pulls matched on gear and speed, 17 t
+# against 25-41 t (README, "Gas capacity and mass"). The old linear law was ~0.45.
+_WEIGHT_MASS_EXP: float = 0.85
+_WEIGHT_MIN_FACTOR: float = 0.40
+_WEIGHT_MAX_FACTOR: float = 4.0
 _TRAILER_WEIGHT_BIAS: float = 1.02
+# The linear law before 2026-10-21, kept only to migrate anchors learned under it.
+_LEGACY_WEIGHT_SPAN_TONS: float = 12.7
+_LEGACY_WEIGHT_STRENGTH: float = 0.27
+_LEGACY_WEIGHT_MIN_FACTOR: float = 0.55
+_LEGACY_WEIGHT_MAX_FACTOR: float = 1.85
 # Brake capability, fitted to full-pedal stops across four rigs. Mass exponent
 # is 0.25, not 1: air brakes are load-sensed (README has the numbers).
 _BRAKE_FIT_COEFF: float = 70.8
@@ -146,6 +159,8 @@ _DEBUG_LOG_HEADER_ROW: list[str] = [
     "error_pedal",
 ]
 _DEBUG_LOG_INTERVAL_S: float = 0.10  # 10 Hz
+# Rotated aside at open past this; tools read only the live file.
+_DEBUG_LOG_MAX_BYTES: int = 512 * 1024 * 1024
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -163,16 +178,29 @@ def _finite_or_zero(value: object) -> float:
 
 
 def weight_factor(total_mass_kg: float, has_trailer: bool) -> float:
+    """Gas-side mass normalization: 1.0 at the reference mass, a power law in mass."""
+    if not Settings.weight_adjustment:
+        return 1.0
+    mass_kg = max(0.0, _finite_or_zero(total_mass_kg))
+    factor = (mass_kg / _REFERENCE_MASS_KG) ** _WEIGHT_MASS_EXP
+    factor = _clamp(factor, _WEIGHT_MIN_FACTOR, _WEIGHT_MAX_FACTOR)
+    if has_trailer:
+        factor = min(_WEIGHT_MAX_FACTOR, factor * _TRAILER_WEIGHT_BIAS)
+    return factor
+
+
+def legacy_weight_factor(total_mass_kg: float, has_trailer: bool) -> float:
+    """The pre-2026-10-21 linear law. Only for migrating a persisted anchor."""
     if not Settings.weight_adjustment:
         return 1.0
     current_tons = max(0.0, _finite_or_zero(total_mass_kg)) / 1000.0
     ref_tons = _REFERENCE_MASS_KG / 1000.0
     factor = 1.0 + (
-        ((current_tons - ref_tons) / _WEIGHT_SPAN_TONS) * _WEIGHT_STRENGTH
+        ((current_tons - ref_tons) / _LEGACY_WEIGHT_SPAN_TONS) * _LEGACY_WEIGHT_STRENGTH
     )
-    factor = _clamp(factor, _WEIGHT_MIN_FACTOR, _WEIGHT_MAX_FACTOR)
+    factor = _clamp(factor, _LEGACY_WEIGHT_MIN_FACTOR, _LEGACY_WEIGHT_MAX_FACTOR)
     if has_trailer:
-        factor = min(_WEIGHT_MAX_FACTOR, factor * _TRAILER_WEIGHT_BIAS)
+        factor = min(_LEGACY_WEIGHT_MAX_FACTOR, factor * _TRAILER_WEIGHT_BIAS)
     return factor
 
 
@@ -313,6 +341,8 @@ class MapperSharedState:
 
     # Gas-capacity glide state (m/s² at gas=1.0): the capacity actually used
     accel_capacity_glide_ms2: float | None = None
+    # Live multiplier for a low-speed pull that outruns the learned capacity.
+    strength: StrengthScale = field(default_factory=StrengthScale)
 
     # Capacity estimates (single source of truth, fed in from PedalCapacityTracker).
     estimated_max_accel_ms2: float | None = None
@@ -376,6 +406,8 @@ class AccelToPedals:
         # Launch governor state and the gas this mapper returned last tick.
         self._launch: LaunchGovernor = LaunchGovernor()
         self._prev_out_gas: float = 0.0
+        # Map pedal before the launch cap, so a cap is not learned as extra strength.
+        self._prev_map_gas: float = 0.0
 
         # Debug logging
         self._project_root = Path(__file__).resolve().parents[2]
@@ -651,37 +683,14 @@ class AccelToPedals:
     # Debug logging
 
     def _ensure_debug_log(self) -> None:
+        # Header line only: reading the whole file here froze the sending thread (README).
         if self._debug_log_file is not None:
             return
-        path = self._project_root / _DEBUG_LOG_NAME
-        write_header = False
-        try:
-            if path.exists():
-                size = path.stat().st_size
-                if size == 0:
-                    write_header = True
-                elif size > 0:
-                    with path.open("r", encoding="utf-8-sig", newline="") as rf:
-                        first = rf.readline()
-                        tail = rf.read()
-                    if first and not first.lstrip("\ufeff").startswith("t_s,"):
-                        with path.open("w", newline="", encoding="utf-8") as wf:
-                            w = csv.writer(wf)
-                            w.writerow(_DEBUG_LOG_HEADER_ROW)
-                            wf.write(first)
-                            wf.write(tail)
-            else:
-                write_header = True
-
-            self._debug_log_file = path.open("a", newline="", encoding="utf-8")
-            self._debug_log_writer = csv.writer(self._debug_log_file)
-            if write_header:
-                self._debug_log_writer.writerow(_DEBUG_LOG_HEADER_ROW)
-                self._debug_log_file.flush()
-        except OSError:
-            self._debug_log_file = None
-            self._debug_log_writer = None
-            logger.debug("accel_to_pedals debug log unavailable", exc_info=True)
+        self._debug_log_file, self._debug_log_writer = open_debug_csv(
+            self._project_root / _DEBUG_LOG_NAME,
+            _DEBUG_LOG_HEADER_ROW,
+            max_bytes=_DEBUG_LOG_MAX_BYTES,
+        )
 
     def _log_debug_step(
         self,
@@ -718,6 +727,9 @@ class AccelToPedals:
         if now - self._last_debug_log_mono < _DEBUG_LOG_INTERVAL_S:
             return
         self._last_debug_log_mono = now
+        if not Settings.debug:
+            self.close()
+            return
         if self._debug_log_start_mono is None:
             self._debug_log_start_mono = now
         t_s = now - self._debug_log_start_mono
@@ -774,6 +786,7 @@ class AccelToPedals:
         *,
         max_accel_ms2: float = 0.0,
         max_brake_ms2: float = 0.0,
+        accel_offset_ms2: float = 0.0,
         cruise_commanding: bool = False,
         road_pitch: float = 0.0,
         gear_dashboard: int = 0,
@@ -976,6 +989,14 @@ class AccelToPedals:
                 )
             max_a_use = max(new_accel_capacity_glide, 0.1)
             max_b_use = max(new_max_brake or 0.1, 0.1)
+            offset_use = max(0.0, _finite_or_zero(accel_offset_ms2))
+            update_strength(
+                s.strength, dt, self._prev_map_gas, new_raw_smooth_live,
+                road_load_accel, max_a_use, speed, gear_dash, factor,
+                clutch_applied, offset_use,
+            )
+            strength = applied_scale(s.strength.scale, speed)
+            map_cap = max(map_capacity(max_a_use, s.strength.scale, speed), 0.1)
 
             # Pure-FF pedal for diagnostics (what the mapping would give with no trim)
             combined_ff_only = new_wanted_smooth + effective_road_load
@@ -983,19 +1004,19 @@ class AccelToPedals:
             if new_wanted_smooth > 0.0 and combined_ff_only < 0.0:
                 combined_ff_only = 0.0
             if combined_ff_only >= 0.0:
-                ff = combined_ff_only / max_a_use
+                ff = gas_from_demand(combined_ff_only, map_cap, offset_use, strength)
             else:
                 ff = -self._brake_pedal_from_decel(-combined_ff_only, max_b_use)
             # Gas-side FF saturation = unsatisfiable bid (headroom cap).
-            ff_saturated = combined_ff_only > max_a_use
+            ff_saturated = combined_ff_only > map_cap
 
             # Unified mapping: FF + fast trim through the same capacity scaling.
             combined = combined_ff_only + fast_trim_ms2
             combined = self._adaptive_output_ema_step(new_output_smooth_ms2, combined, dt)
             new_output_smooth_ms2 = combined
             if combined >= 0.0:
-                unclamped_effort = combined / max_a_use
-                capacity_used = max_a_use
+                unclamped_effort = gas_from_demand(combined, map_cap, offset_use, strength)
+                capacity_used = map_cap
             else:
                 unclamped_effort = -self._brake_pedal_from_decel(-combined, max_b_use)
                 capacity_used = max_b_use
@@ -1009,16 +1030,18 @@ class AccelToPedals:
                 and not (cap_mode and effort >= 1.0)
                 and factor > 0.0
             ):
-                if effort >= 1.0:
-                    combined_sat = max_a_use
+                if effort >= 1.0 and error_ms2 > 0.0:
+                    # Railed and still short: hold. Snapping cancelled a bid above capability
+                    # and left -1.5 behind, so the pedal sagged once the bid came back in range.
+                    new_fast_integral = self._fast_integral
                 else:
-                    combined_sat = -max_b_use
-                desired_fast_sum = combined_sat - combined_ff_only
-                new_fast_integral = _clamp(
-                    desired_fast_sum - fast_p - fast_d,
-                    -_FAST_I_CLAMP_MS2,
-                    _FAST_I_CLAMP_MS2,
-                )
+                    combined_sat = map_cap if effort >= 1.0 else -max_b_use
+                    desired_fast_sum = combined_sat - combined_ff_only
+                    new_fast_integral = _clamp(
+                        desired_fast_sum - fast_p - fast_d,
+                        -_FAST_I_CLAMP_MS2,
+                        _FAST_I_CLAMP_MS2,
+                    )
                 fast_i = new_fast_integral
 
             # Diagnostic: pedal-units delta contributed by fast trim (post-clamp).
@@ -1026,6 +1049,7 @@ class AccelToPedals:
 
             gas_cmd = _clamp(effort, 0.0, 1.0)
             brake_cmd = _clamp(-effort, 0.0, 1.0)
+            self._prev_map_gas = gas_cmd
 
             # Ceiling only: the limiter's gas caps the driver's pedal, and AEB owns the brake.
             new_launch, launch_cap = launch_gas_cap(

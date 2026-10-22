@@ -344,4 +344,28 @@ step between brake command and `NO_LEAD_CEILING_MS2`.
 ### No-lead path
 
 Ceiling routed through the same jerk and output filter as real commands so `_prev_cmd_ms2`
-stays continuous (see ACC architecture §15).
+stays continuous (see ACC architecture §15). The orchestrator hands CC's bid to the ACC
+child, which passes a free-road target (the bid, between `NO_LEAD_CEILING_MS2` 1.5 and one
+onset dead band above `a_max`, 2.5); with no lead that target is the ceiling, so ACC no
+longer caps the acceleration profile on an empty road. Without a target (every probe and
+tool calling `accel_cap_ms2` with one argument) the ceiling is the old 1.5. Rationale:
+`core/longitudinal/README.md`, "ACC with no lead, or a lead far ahead".
+
+### Free-road lift
+
+`free_road_lift.py`, applied to the command just before the jerk limiter. A far lead gets
+about IIDM's free-road accel `a_max (1 - (v/v0)^δ)` from the law, so every tracked lead out
+to 150 m used to cap the driver's profile near 1.5 m/s². The command is raised toward the
+free-road target by a weight that is a smoothstep on `law / a_free`: 0 at or below 0.88,
+1 at 0.98. At gap level 3 from 30 km/h behind an equal-speed lead that is 0.60 at 30 m,
+0.91 at 60 m and 0.97 at 100 m.
+
+- It never lowers the law, never touches an emergency output, and below 0.88 the command
+  is bit-identical to the law (pinned on randomly sampled binding states by
+  `tests/acc/test_free_road_lift.py`). Close following, approach, landing, standstill,
+  pull-away, anticipation and the overlays all sit below the band.
+- It is stateless on purpose: the weight falls the same tick the law starts to bind.
+  Far-lead law noise is small (about 0.01 of ratio per 1 m/s of lead speed error), so the
+  command moves by under 0.1 m/s² for it.
+- Do not lower the 0.88 edge to make ACC livelier in traffic: at 10 km/h it is what keeps a
+  lead 30 m ahead (3x the wanted gap) on the plain law.

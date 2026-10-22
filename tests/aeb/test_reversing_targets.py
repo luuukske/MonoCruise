@@ -9,7 +9,7 @@ import math
 
 from core.aeb.calibration import DEFAULT as CAL
 from core.aeb.filters import (
-    FilterContext, LaneClassifier, TmpRelSpeedFilter,
+    FilterContext, LaneClassifier,
     _body_centreline_d_abs, _build_vehicle_collision_data, travel_sign,
 )
 from core.radar.traffic import build_arc, capsule_extents
@@ -26,7 +26,7 @@ def _ego_arc():
                      CAL.arc_horizon_max, fwd_len=fwd_len, back_len=back_len)
 
 
-def _ctx(v, tmp: bool = False) -> FilterContext:
+def _ctx(v) -> FilterContext:
     ego_arc = _ego_arc()
     arcs, pad, cross, v_yaw, abs_v, vfx, vfz, v_curv = _build_vehicle_collision_data(
         v, CAL.arc_horizon_max, math.pi, ego_arc.fwd_x, ego_arc.fwd_z, CAL,
@@ -37,8 +37,7 @@ def _ctx(v, tmp: bool = False) -> FilterContext:
         ego_x=0.0, ego_y=0.0, ego_z=0.0, ego_yaw_rad=math.pi,
         ego_speed=_EGO_SPEED, ego_pitch_rad=0.0, ego_curvature=0.0,
         ego_fwd_x=ego_arc.fwd_x, ego_fwd_z=ego_arc.fwd_z, ego_hw=CAL.ego_half_width,
-        dynamic_horizon=CAL.arc_horizon_max, tmp_traffic_session=tmp,
-        ref_kmh_for_filter=_EGO_SPEED * 3.6, cal=CAL,
+        dynamic_horizon=CAL.arc_horizon_max, cal=CAL,
         dx=v.position.x, dz=v.position.z,
         dist_sq=v.position.x ** 2 + v.position.z ** 2,
         dist=math.hypot(v.position.x, v.position.z),
@@ -48,8 +47,8 @@ def _ctx(v, tmp: bool = False) -> FilterContext:
     )
 
 
-def _classified(v, tmp: bool = False) -> FilterContext:
-    ctx = _ctx(v, tmp)
+def _classified(v) -> FilterContext:
+    ctx = _ctx(v)
     LaneClassifier(CAL).apply(ctx)
     return ctx
 
@@ -103,18 +102,6 @@ def test_reversing_arc_does_not_assume_the_driver_brakes():
     )[0][0]
     assert fwd.decel == CAL.full_brake_decel
     assert rev.decel == 0.0
-
-
-def test_tmp_rel_speed_floor_still_owns_slow_reversing_traffic():
-    """d80936f9 at 40 km/h stays silent by design: exempting reversing costs TMP FPs."""
-    f = TmpRelSpeedFilter()
-    truck = make_vehicle(vid=1, x=-4.5, z=12.0, yaw_deg=48.0, speed=-2.9, is_tmp=True)
-    slow = _ctx(truck, tmp=True)
-    assert slow.ref_kmh_for_filter <= CAL.tmp_filter_split_kmh
-    assert f.apply(slow).suppressed
-    fast = _ctx(truck, tmp=True)
-    fast.ego_speed, fast.ref_kmh_for_filter = 20.0, 72.0
-    assert not f.apply(fast).suppressed
 
 
 def test_body_samples_stay_on_the_body_when_reversing():

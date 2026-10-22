@@ -127,7 +127,7 @@ _VEH_STRIDE            = 46  # fields per vehicle slot (16 + 3*10)
 | 11 | acceleration | float | m/s²: AI = buffer as-is. TMP buffer value is **ignored**; `Vehicle.acceleration` is EMA of the time derivative of filtered TMP speed (see §7). Arcs use `accel_for_arc()` (= `acceleration`). |
 | 12 | trailer_count | short | 0–3 |
 | 13 | id | short | Per-frame continuity key |
-| 14 | is_tmp | byte | `1` = TMP multiplayer (ETS2LA); `0` = AI. Consumer threads may apply TMP-specific filters (e.g. AEB's rel-speed split: see `core/aeb/README.md`). |
+| 14 | is_tmp | byte | `1` = TMP multiplayer (ETS2LA); `0` = AI. Consumer threads may apply TMP-specific filters (e.g. AEB's `TmpCrossTrafficFilter`: see `core/aeb/README.md`). |
 | 15 | is_trailer | byte | `1` = trailer record, `0` = tractor |
 
 ### Trailer slots (offsets 16, 26, 36)
@@ -186,7 +186,7 @@ corner = rotate_around_point(corner, ground_middle, pitch, -yaw, roll=0)
 |-------|--------|---------|
 | `position.x/z` | **Unfiltered** shared-memory world coordinates | Arc start position, rendering, collision geometry |
 | `_smooth_yaw` | Wrap-safe EMA of `rotation.euler()[1]` in radians (`_RAW_YAW_ALPHA = 0.5`, AI and TMP) | **Arc curvature. Never use `rotation.euler()` directly for arcs.** |
-| `speed` | Accel-corrected smoothed speed (`speed_corr`): see filter chain below. AI + TMP | AEB arc direction, TTB |
+| `speed` | Accel-corrected smoothed speed (`speed_corr`): see filter chain below. AI + TMP; a TMP body matched to the SDK reads the sender's own speed, raw during a hard change (§19) | AEB arc direction, TTB |
 | `acc_speed` | ACC speed: adaptive filter on `speed_corr`: sub-deadband per-tick changes get a long time constant, larger changes a short one when they agree with the de-noised trend; standstill latch clamps to exactly 0 near rest (filter chain below). Runs on the **ACC chain** (long position window only). AI + TMP | ACC following-distance only |
 | `acceleration` | Nonlinear EMA of `d(speed_ema)/dt` over the speed-scaled `_ACCEL_FIT_WINDOW_S`: see filter chain below. Runs on the **AEB chain**, so it fits the short window's raw speed during a confirmed hard brake. Never floored or overridden (§7 "No floor on `acceleration`"). AI + TMP (buffer field 11 unused) | Arc decel/accel via `_accel_to_arc_params()` |
 | `acc_accel` | Same derivation and the **same window** on the **ACC chain**: long position window only. AI + TMP | ACC `a_lead` (CAH) only |
@@ -255,7 +255,10 @@ World `position.x/z` are **not** low-pass filtered. `update_from_last()` runs th
 same 4-signal chain for AI and TMP (`_smooth_vehicle_kinematics()` in
 `traffic.py`); only the raw-speed source differs:
 
-- **AI** raw speed = buffer field 10 as-is.
+- **AI** raw speed = the same position LS fit as TMP below; buffer field 10 gives only
+  its **sign** ("Speed sign detection"). Field 10 itself is ~9x cleaner than the fit
+  and was priced as the raw input on 2026-09-11: worse at the shipped engage bar, a wash
+  once the bar is swept, so the fit stayed.
 - **TMP** raw speed = LS fit of longitudinal motion over the last
   `_TMP_SPEED_HISTORY_LEN` `(t, x, z)` position-history samples: fit `s ≈ v·τ`
   with `s = dot(p − p₀, fwd(smooth_yaw))`, `τ = t − t₀`, and the **free-intercept**
@@ -876,6 +879,7 @@ a trailer standing in ego's lane. When that phantom decayed at 6.9-7.4 s it made
 the trailer a follow threat, the only thing that took it past
 `TmpRelSpeedFilter`, which suppresses targets under 50 km/h relative speed at
 ego speeds of 50 km/h and below. The guard is right; that filter is the gap.
+(The filter was removed on 2026-10-12, and the clip brakes again: AEB §4.)
 
 ### Crash detection (TMP only, full frames only)
 
@@ -1310,7 +1314,7 @@ double-count each trailer.
 | Arc center | `cx = x + sign*R*fwd_z; cz = z + sign*R*(-fwd_x)` |
 | TMP raw speed | Free-intercept LS on longitudinal `(t,x,z)` history (max `_TMP_SPEED_HISTORY_LEN` full frames): `v = Σ((τ−τ̄)(s−s̄))/Σ((τ−τ̄)²)`; else `Δraw/dt`, signed via forward dot |
 | Speed / accel filter (AI + TMP) | Long-window position LS raw speed by default; confirmed hard braking temporarily selects a 5-sample LS suffix. Then `_smooth_vehicle_kinematics()` runs `speed_ema` (EMA of raw) → `accel` (LS slope, never floored) → `speed_corr = speed_ema + accel·τ` (`self.speed`) → `acc_speed` (adaptive low-pass on `speed_corr`: `tau` ramps `_ACC_SPEED_TAU_SLOW_S`→`_ACC_SPEED_TAU_FAST_S` as the per-tick change grows past `_ACC_SPEED_DEADBAND_MS` **and agrees with the de-noised trend**, and is scaled down at low speed and during a steady decel/accel: plus a constant-accel feed-forward, gated by de-noised `accel_trend`, that zeroes sustained-ramp lag with no windup; standstill latch clamps to 0 near rest with hysteresis release; `self.acc_speed`) |
-| AI vs TMP raw speed | AI = buffer field 10; TMP = position-history LS fit. Filter chain identical after that |
+| AI vs TMP raw speed | Both the position-history LS fit; AI takes the sign from buffer field 10; an SDK-matched TMP body takes the sender's speed (§19). Filter chain identical after that |
 | Positions | No EMA: always raw world coordinates |
 | Lag detection | `raw_disp < 10 % of (prev_speed × dt)` AND `prev_speed > _LAG_MIN_SPEED_MS` (5 m/s) AND all four entry gates pass → decay speed: `prev_speed × (1 − frac²)`, release after the TTC-scaled `freeze_dur` (≤ 0.5 s) |
 | Lag entry gates | no armed brake transient AND rotation rate < 2 deg/s AND recent raw window ≥ `_LAG_ENTRY_RAW_SPEED_MS` AND recent/older raw ≥ `_LAG_ENTRY_DECAY_MIN` |
@@ -1835,8 +1839,8 @@ the lane: a driver who holds the cab on the lane centre puts the lane circle
 
 `core/radar/tmp_state.py`. Inside a TruckersMP no-collision zone (NCZ) other
 players are ghosts: ego drives through them. AEB braking for one is a pure false
-positive, and the TMP rel-speed floor (`core/aeb/README.md` §4) only hides the
-low-speed share of them.
+positive. AEB has no TMP speed floor any more (`core/aeb/README.md` §4), so the
+gate below is what keeps it quiet in a zone.
 
 ### Source
 
@@ -1848,7 +1852,7 @@ version. It writes one shared-memory file on every rendered frame:
 
 | file | layout |
 |---|---|
-| `Local\MonoCruiseTmpState` | 16 bytes, `=IIBBHHH`: version (1), heartbeat, connected, in_no_collision_zone, players_streamed, players_collidable (always 0), reserved |
+| `Local\MonoCruiseTmpState` | 16 bytes, `=IIBBHHH`: version (2; 1 is read without the last field), heartbeat, connected, in_no_collision_zone, players_streamed, players_collidable (always 0), zone_events |
 
 `in_no_collision_zone` follows the SDK's `OnNoCollisionZone` event and resets on
 every disconnect, not on connect: spawning inside a zone may report it before
@@ -1874,7 +1878,20 @@ The dangerous failure is the gate staying open next to a real truck, i.e. a zone
 flag stuck at 1. The plugin resets it on every disconnect and on shutdown, and the
 gate adds a teleport guard: an ego jump over `TELEPORT_JUMP_M` (50 m) between
 radar frames (ferry, train, respawn) keeps it shut until the plugin itself
-reports "not in a zone". A stale or disconnected read does not clear the guard.
+reports "not in a zone", or reports a zone event raised after the jump. A stale
+or disconnected read does not clear the guard.
+
+The zone event is the plugin's `zone_events` count (layout 2, plugin 1.0.5): +1 on
+every `OnNoCollisionZone`. The gate keeps the count of the last fresh read before
+the jump; a fresh, connected read with a different count means TruckersMP judged
+the zone at the destination, so its flag is trusted. A flag stuck from before the
+teleport raises no event and still keeps the gate shut. Why: a teleport from one
+zone into another (2026-10-20, clip `f42de1cc`) logged "left" at the jump and
+"entered" 2 s later, both before radar's first fresh frame at the destination,
+which already read "in a zone". The guard never saw "not in a zone", held the gate
+shut for the whole 60 s in the destination zone, and AEB braked among the ~20 TMP
+rigs parked there. Every teleport that day did the same. A layout 1 plugin has no
+count and keeps the old rule.
 
 **The per-player collision flag is not used.** The first build also required
 zero collidable players, as a second signal. Measured live on 2026-10-06
@@ -1926,8 +1943,8 @@ window starts after the exit replays without the hold.
 
 ### Consumers
 
-- **AEB** folds `ncz_ids` into the ids it skips with the off-surface set (§15),
-  latched threats exempt. Replay reads the per-frame `tmp_ncz` flag clips now
+- **AEB** folds `ncz_ids` into the ids it skips with the off-surface set (§15).
+  A latched threat in `ncz_ids` is released, not exempt (`core/aeb/README.md` §4). Replay reads the per-frame `tmp_ncz` flag clips now
   record (`RadarFrameRecord.tmp_ncz`, absent = False) and does the same.
 - **ACC** does not read it. Following a ghost ahead is still the expected
   behaviour in a queue.
@@ -1937,7 +1954,9 @@ window starts after the exit replays without the hold.
   the pipeline; a latched ghost is drawn as the threat it still is.
 - Per-player suppression beyond the exit hold (one ghost among collidable players
   at a zone edge) needs a per-player signal TruckersMP does not provide reliably
-  yet. Candidate SDK data is listed in `tmp_plugin/README.md`.
+  yet. Candidate SDK data is listed in `tmp_plugin/README.md`. Until then AEB's
+  overlap gate (`core/aeb/README.md` §4) covers the clearest case geometrically:
+  a body deep inside ego, anywhere, AI or TMP.
 
 ### Do not
 
@@ -1945,20 +1964,179 @@ window starts after the exit replays without the hold.
   the SDK or another plugin's buffers: clips are shared when "Help improve AEB
   and ACC" is on, and the plugin is described to TruckersMP users as reading none.
 - Let a stale or absent state file open the gate, or clear the teleport guard on
-  anything but the plugin reporting "not in a zone".
+  anything but a fresh, connected plugin reporting "not in a zone" or a zone event
+  after the jump.
 - Arm the exit hold on anything but `exited_zone`, arm a body that is not inside
   ego's inset box, extend a hold past separation, or re-arm a released rig: each
   turns a real truck into a ghost.
 - Use `CanCollideWith` / `players_collidable` to suppress anything until it is
   re-measured: it read "cannot collide" for real trucks.
-- Feed `ncz_ids` to ACC, or use them to relax the TMP rel-speed floor outside a
-  zone: lag ghosts still need it (v1.1.3).
+- Feed `ncz_ids` to ACC.
 
 `tools/tmp_ncz_probe.py` shows the state live while driving.
 
 ---
 
+## 19. TruckersMP SDK Motion: Speed and the Lag / Crash Split (experimental)
+
+`core/radar/tmp_sdk.py`. Positions, bodies, headings, history and every pose guard
+stay on ETS2LA's traffic buffer. For a TMP record the radar can match to a body
+in MonoCruise's own plugin block (`Local\MonoCruiseTmpVehicles`,
+`tmp_plugin/README.md`), two things change: the **measured speed** that enters the
+§7 chain, and how a **stall** and a **crash** are told apart. Anything without a
+match (AI, parked, beyond the plugin's 250 m, no plugin, every clip recorded
+before this) takes the §7 path unchanged.
+
+`SDK_SPEED_ENABLED` in `tmp_sdk.py` switches all of it off.
+
+### Why
+
+Measured on a 4.5 min TMP drive (`tools/tmp_sdk_analyze.py`, `tmp_plugin/README.md`
+"Measured"): the SDK velocity is the sender's own, carried in each packet at ~4.5 Hz;
+the client extrapolates a late player ~300 ms and then freezes it. The §7 position
+fit read those freezes as braking: 19 of 55 gaps of moving trucks fell more than
+2 m/s below the sender's own speed (worst 18 m/s), 14 overshot by more than 2 m/s
+afterwards. The lag freeze caught 2 of them: position jitter had latched
+`_raw_brake_active` on 37% of moving TMP updates, and its hard-brake veto blocked 31
+of 49 freezes. Gating the freeze on packet age alone was tried offline and is not
+enough: the dip comes after the stall, from the position window spanning it.
+
+### Matching
+
+`tmp_sdk.attach` runs in `TrafficReader._smooth_and_build` after the nearest-24 cull:
+greedy nearest pairs within `MATCH_M` (3 m), tractor records to SDK tractors and TMP
+trailer records to SDK trailers. Same-place offsets measured 1.3 m at p99 for both.
+`Vehicle.sdk` holds the body for that frame only.
+
+### Speed
+
+`_sdk_raw_speed`: the SDK velocity projected on the record's own smoothed heading.
+`_run_sdk_speed_chain` then hands the two lanes what §7 hands them, with the SDK in
+place of the position windows: ACC a smoothed speed, AEB the plain chain plus a raw
+short window during a hard change.
+
+**ACC: pre-filtered.** ACC's lane takes the SDK speed through a time-constant EMA,
+`SDK_SPEED_TAU_REST_S` (0.5 s) at rest falling linearly to `SDK_SPEED_TAU_FAST_S`
+(0.15 s) at `SDK_SPEED_TAU_REF_MS` (25 m/s), and then the §7 chain. The chain alone is
+not enough here: its smoothing was tuned on the position fit, which is itself a 1.3 s
+window, and at low speed it all but switches off (EMA weight ~1, accel window 0.45 s).
+Fed the SDK speed directly (1.1.3-preview.1), a TruckersMP player in a jam who drives
+on and off the throttle came through as a lead swinging -6.5 to +3.9 m/s2 within
+seconds, and ACC answered every swing. With the pre-filter, below 8 m/s, `acc_accel`
+jerk on the 25 min drive is 3.64 -> 3.15 m/s3 RMS (the old position fit: 3.00), and a
+1 Hz +-0.5 m/s wobble at 5 m/s moves it 2.2 -> 0.8 m/s2 peak to peak. It still reacts
+sooner than the position fit: the -2 m/s2 crossing on lead braking lags p50 0.77 s
+below 8 m/s and 1.05 s above (position fit 1.37 / 1.53 s, unfiltered SDK 0.47 / 0.82 s).
+On the 2026-10-16 TruckersMP jam drive that reported it (16 clips, leads within 60 m),
+outside crashes: jerk RMS 4.92 -> 2.57 m/s3, p99 |`acc_accel`| 8.42 -> 5.77 m/s2. During
+a confirmed crash ACC still takes the raw speed (§7 crash bypass, 2.0 s latch), so a
+crashed truck rocking on its suspension still reaches it (jerk RMS 38.5 there, 12.4
+with the pre-filter in place of the bypass); that bypass is unchanged.
+
+**AEB: the plain chain, raw in a hard change.** AEB's lane takes the SDK speed into the
+§7 chain unfiltered, as in 1.1.3-preview.1; that chain's EMA is all the smoothing it
+gets. The pre-filter was tried on AEB too and is kept off it: on labelled TP `40591e38`
+(tailgating at 5 m behind a lead braking at ~4 m/s2) it held AEB's speed 0.6 m/s high
+and braked 0.17 s later. Once the raw SDK speed sits `SDK_SHORT_ENTER_MS` (1 m/s) below
+the pre-filtered one in the direction of travel, or a crash is confirmed, AEB takes the
+raw speed outright: `speed` is the sender's value and the AEB accel fit runs on it. It
+hands back after the §7 release rule (`_RAW_BRAKE_CONVERGENCE_MS` for
+`_RAW_BRAKE_RELEASE_FRAMES`). A gentle 1.5 m/s2 brake never enters it, an 8 m/s2 one
+within about two packets, and a crash-sized drop (25 -> 4 m/s in one packet) on the
+frame it lands, where the chain read 17.2 m/s and took 0.13 to 0.27 s to come within
+1 m/s. Raw full time was tried first (`b43735d`): it stepped AEB's speed at every
+packet and on every match dropout and bought no labelled clip. ACC never takes the
+short window, except the §7 crash bypass; `AEB_RAW_SHORT_WINDOW` in `tmp_sdk.py`
+switches it off. While it is active the §7 position short window is armed too, so a
+dropout inside the event falls back to the 5-sample fit and not the 1.3 s window that
+still holds the pre-brake motion.
+
+**Match dropouts.** TruckersMP rubber-banding can push the shown pose past `MATCH_M`
+for a few frames (615 dropouts in 328k tracked frames within 80 m, p50 1 frame, p90 4).
+Outside the short window the shared EMA keeps that continuous. On the raw speed it
+would not (`6f9a69bb`: 23.8 and 17 m/s on alternate frames when AEB was raw full time),
+so `_bridge_sdk_dropout` holds the last raw speed for `DROPOUT_HOLD_S` (0.3 s) and then
+fades to the position fit over `DROPOUT_FADE_S` (0.5 s). A crash the position track
+confirms during the dropout ends the hold: it is newer than the last packet. An SDK
+crash does not, because the crash packet is the evidence and the position fit still
+reads the pre-crash speed. The bridge sits in `Vehicle`, not in `attach`, because a clip
+stores only the bodies live matching paired, so a wider gate could never be replayed.
+
+A **stall** (`netcode_stall`, packet older than `STALE_MS`, 300 ms):
+- While the client still extrapolates the body (it moved at least 10% of the
+  expected distance this frame), the speed stays the sender's: the body moves in
+  ego's world.
+- Once the pose is frozen, the speed is held for twice the TTC-scaled lag freeze
+  (`_lag_freeze_duration` F: 0 within 0.3 s TTC, 0.5 s from 4 s out), then ramps to
+  0 over one F with the §7 freeze shape, `held * (1 - frac^2)`. A lead at 1.5 s
+  headway holds until ~1.05 s after its last packet and is at 0 by ~1.45 s; the §7
+  freeze ramps over the same length but from ~0.45 s, then rebounds to ~13 m/s on
+  release. Close in, a frozen body is exactly what ego can hit, the same posture as
+  §7. Short far stalls (frozen under 1 s) are ignored; ACC brakes for longer ones,
+  and for any stall sooner the closer the body is.
+
+**Do not** move the stalled body forward on the SDK velocity. The client shows it
+frozen and catches it up at ~15% above its speed afterwards; the frozen pose is
+where a collision happens.
+
+A rewind (position mismatch) still holds the pose but keeps measuring the SDK speed.
+
+### Crash and lag
+
+`_apply_sdk_crash_evidence`, after the §7 crash detector:
+- **Lag**: while the packet is stale, a position-based crash confirmation from this
+  frame is reverted. A pose with no fresh packet behind it has no new evidence.
+- **Crash**: between two consecutive samples of one player (`tmp_sdk.crash_evidence`):
+  speed loss of at least 6 m/s at 30 m/s2 or more, a velocity turn of 200 deg/s or
+  more with both speeds at least 8 m/s, or a reversal (cosine at most -0.3, both
+  above 3 m/s). 30 min of crash-free TMP driving reached 24 m/s2 (a 7 -> 2 m/s stop),
+  17.5 m/s2 above 8 m/s, and 156 deg/s below 8 m/s (123 above); the first bars
+  (15 m/s2, 3 m/s, 120 deg/s) fired 4 times on that drive. It sets the §7 latch
+  (`_CRASH_HOLD_S`), so `crash_confirmed` means the same to AEB and ACC, and
+  `sdk_crash` marks it as SDK evidence.
+- Only consecutive counters within 3 of each other compare; a pose jump re-seeds,
+  so a reused id or a re-match cannot fake a crash.
+
+The SDK's angular velocity is always 0 for remote players, so rotation-based
+evidence stays on the §7 detector.
+
+### Clips
+
+`RadarFrameRecord.tmp_sdk_buf`: the bodies the radar matched that frame, ages at read
+time (`tmp_sdk.matched_only`, `tmp_sdk.encode_frame`); re-matching that subset pairs
+exactly as live did. Live frames are quantised the way the clip stores them,
+so replay (`clip_replay.decode_radar_stream`) gets the identical frame. It holds
+positions, velocities and sample ages only: no player identity, no latency.
+
+### Measured
+
+Radar chain replayed both ways (`tools/tmp_sdk_analyze.py`):
+
+| | 4.5 min drive | 25 min drive (71 trucks) |
+|---|---|---|
+| gaps more than 2 m/s below the sender's own speed | 19 -> 2 (worst 18 -> 2.4 m/s) | 3 -> 0 (worst 30.7 -> 0) |
+| overshoot over 2 m/s after a gap | 14 -> 0 | 0 -> 0 |
+| braking midpoint behind the reference, p50 / p90 | 0.31 / 0.95 -> 0.19 / 0.45 s | 0.28 / 0.39 -> 0.23 / 0.27 s |
+| AEB speed behind the sender on braking, preview.1 -> short window, p50 / p90 | 0.16 / 0.21 -> 0.02 / 0.04 s | 0.05 / 0.23 -> 0.01 / 0.04 s |
+| crash confirmations on matched trucks | 0 -> 0 | 1 -> 1 |
+
+AEB replayed on the 321 clips that carry SDK frames, 1.1.3-preview.1 -> the short
+window: labelled cost -72.00 unchanged (40 scored, no verdict changed), 75 clips change,
+brake onset 17 earlier and 8 later (median -0.03 s, latest +0.11 s), one unlabelled clip
+gains a brake and one loses it. Steps over 5 m/s at a match change: 2 -> 2 (24 with AEB
+raw full time and no bridge). After a long frozen stall ends the pre-filter takes about
+0.3 s to climb back to the sender, so AEB can read a lead up to 2.3 m/s slow for that
+long (2 such gaps on the 4.5 min drive, as before).
+
+The 30.7 m/s case is a 1.2 s packet gap on a truck at 30.5 m/s: frozen on screen
+for 0.8 s, the §7 chain read it as stopped (the lag freeze never opened), the SDK
+chain held 30.5. Players at rest send less often (gaps to 2.3 s at speed 0), which
+flags `netcode_stall` harmlessly. No real crash on either drive: the crash rule is
+tested synthetically (`tests/test_tmp_sdk_motion.py`) only.
+
 ---
 
-*Source: `core/radar/traffic.py`, `core/radar/reader.py`, `core/radar/thread.py`, `core/radar/ego_path.py`: LD-Tech / MonoCruise.*
+---
+
+*Source: `core/radar/traffic.py`, `core/radar/reader.py`, `core/radar/thread.py`, `core/radar/ego_path.py`, `core/radar/tmp_sdk.py`: LD-Tech / MonoCruise.*
 

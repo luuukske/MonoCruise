@@ -37,7 +37,7 @@ class OwnPlugin:
 
 # Built from tmp_plugin/ (TruckersMP no-collision zone state, core/radar/README.md §18).
 OWN_PLUGINS: tuple[OwnPlugin, ...] = (
-    OwnPlugin(name="monocruise_tmp.dll", sha="6f4769af30fd5437d5d60f4b561d600bd4314f6c"),
+    OwnPlugin(name="monocruise_tmp.dll", sha="9f4dbd2477808c65668df4babf7c41506bc9be23"),
 )
 
 

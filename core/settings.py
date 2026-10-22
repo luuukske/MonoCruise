@@ -26,9 +26,10 @@ BACKUP_PATH = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".bak")
 # Brief coast-fit (0.01) made mapping worse. Remap that value back to 0.07.
 _COAST_FIT_MAPPER_ROLLING_RESISTANCE = 0.01
 
-# cc_accel_max_ms2 used to be the accel ceiling itself. It is now only a safety
-# rail above the speed-scheduled envelope, so the old shipped default is remapped.
+# cc_accel_max_ms2 used to be the accel ceiling itself, then a 2.5 rail that sat
+# under Normal's low-speed pull. Both shipped values are remapped to the default.
 _LEGACY_CC_ACCEL_MAX_MS2 = 1.0
+_PREVIOUS_RAIL_CC_ACCEL_MAX_MS2 = 2.5
 
 _log = logging.getLogger("settings")
 
@@ -115,8 +116,8 @@ class Settings(metaclass=_SingletonMeta):
     # Safety & warnings
     hazards_variable: bool = True
     autodisable_hazards: bool = True
-    horn_variable: bool = True
-    airhorn_variable: bool = True
+    # Brake hold at a stop. Off, a stopped truck is not held and can roll.
+    hill_assist: bool = True
     autostart_variable: bool = True
     AEB_enabled: bool = False
     # Warning style label from core/aeb/warning_sounds.py, and its volume in percent.
@@ -170,9 +171,9 @@ class Settings(metaclass=_SingletonMeta):
     cc_ki: float = 0.0
     cc_kd: float = 0.2
     cc_integral_clamp: float = 3.0
-    # Safety rail above the envelope in core/longitudinal/accel_envelope.py,
-    # not the shaper. Lowering it caps every acceleration profile.
-    cc_accel_max_ms2: float = 2.5
+    # Safety rail above the envelope in core/longitudinal/accel_envelope.py, not the
+    # shaper. Lowering it caps Efficiency and Normal; Sport ignores it.
+    cc_accel_max_ms2: float = 4.0
     cc_accel_min_ms2: float = -1.0
 
     # PID tuning for SpeedLimiter: independent of CC so each can be tuned separately.
@@ -219,6 +220,8 @@ class Settings(metaclass=_SingletonMeta):
     pedal_capacity_accel_ratio_step: float = 0.0
     # Zero-pedal tractive accel: the intercept of the affine pedal model.
     pedal_capacity_accel_zero_offset_ms2: float = 0.0
+    # Mass law the anchor above is normalized under; an older one is migrated once.
+    pedal_capacity_accel_mass_model: int = 0
     # AEB brake scale per "game|truck|trailers", learned from firm braking only.
     aeb_brake_scales: dict = field(default_factory=dict)
     # Measured full-pedal stops per "game|truck|trailers|slider": [[mass_kg, [ratios]], ...].
@@ -378,7 +381,10 @@ class Settings(metaclass=_SingletonMeta):
                             fv = None
                         if (
                             fv is not None
-                            and abs(fv - _LEGACY_CC_ACCEL_MAX_MS2) < 1e-9
+                            and (
+                                abs(fv - _LEGACY_CC_ACCEL_MAX_MS2) < 1e-9
+                                or abs(fv - _PREVIOUS_RAIL_CC_ACCEL_MAX_MS2) < 1e-9
+                            )
                         ):
                             f = self.__dataclass_fields__[k]
                             v = cls._dataclass_field_default(f)

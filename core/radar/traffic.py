@@ -7,6 +7,9 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from . import tmp_sdk
+from .tmp_sdk import SdkBody, crash_evidence
+
 _MAX_ANGULAR_VELOCITY: float = 45.0
 _LOCATION_UPDATE_FREQUENCY: float = 0.05
 # Three 1/60 s physics steps land exactly on the bar, so float noise must not decide it.
@@ -1200,6 +1203,22 @@ class Vehicle:
         self._crash_knock_until: float = -1.0
         self.crash_confirmed: bool = False
 
+        # TruckersMP SDK motion (experimental): set per frame by the reader. See core/radar/README.md §19.
+        self.sdk: SdkBody | None = None
+        self.netcode_stall: bool = False
+        self.sdk_crash: bool = False
+        self._sdk_stall_since: float | None = None
+        self._sdk_updates: int | None = None
+        self._sdk_arrival_s: float = 0.0
+        self._sdk_vx: float = 0.0
+        self._sdk_vz: float = 0.0
+        self._sdk_aeb_speed: float | None = None
+        self._sdk_aeb_t: float = 0.0
+        self._sdk_filt: float | None = None
+        self._sdk_filt_t: float = 0.0
+        self._sdk_short_active: bool = False
+        self._sdk_short_converged: int = 0
+
         self._curvature_cache: float | None = None
         self._curvature_cache_valid: bool = False
 
@@ -1492,6 +1511,10 @@ class Vehicle:
         self._lag_since = None
         self.lag_confirmed = False
         self._pos_mismatch_frames = 0
+        self._sdk_updates = None
+        self._sdk_aeb_speed = None
+        self._sdk_filt = None
+        self._sdk_short_active = False
         # No rate or displacement may span the jump; a crash already confirmed stays latched.
         self._prev_rates = None
         self._prev2_rates = None
@@ -1662,6 +1685,7 @@ class Vehicle:
     ) -> None:
         """Per-frame smoothing; ego pose feeds TMP lag freeze. See core/radar/README.md §7."""
         dt = t_now - prev.time
+        self._carry_sdk_state(prev)
 
         # Clock went backwards (domain glitch): re-base without integrating.
         if dt < 0.0:
@@ -1794,6 +1818,8 @@ class Vehicle:
         # Type 3: Crash detection (TMP only, full frames only): corroborated
         # rotation jerk with a hold latch; sub-frames carry the latched flag.
         self._tmp_apply_crash_rotation_jerk(prev, t_now)
+        if self.sdk is not None:
+            self._apply_sdk_crash_evidence(prev, t_now)
 
         # TMP crash detection tunables. See core/radar/README.md §7.
         _skip_position_update = False
@@ -1821,7 +1847,10 @@ class Vehicle:
 
         # Type 2: TMP lag detection (near-stationary freeze with speed decay)
         # Bypassed when crash_confirmed: any movement on a crashed vehicle is real position data.
-        if self.is_tmp and prev._raw_x is not None and not _skip_position_update and not self.crash_confirmed:
+        if self.sdk is not None:
+            # Packet age says stall or not; the speed below keeps the sender's own value.
+            self._lag_since = None
+        elif self.is_tmp and prev._raw_x is not None and not _skip_position_update and not self.crash_confirmed:
             _raw_disp_sq = (raw_x - prev._raw_x) ** 2 + (raw_z - prev._raw_z) ** 2
             _expected_disp = abs(prev.speed) * dt
             _lag_threshold_sq = (_expected_disp * _LAG_DISP_RATIO) ** 2
@@ -1886,6 +1915,14 @@ class Vehicle:
             if self._smooth_x is not None:
                 self.position.x = self._smooth_x
                 self.position.z = self._smooth_z
+            if self.sdk is not None:
+                # A rewind holds the pose, but the sender's speed is still measured.
+                sdk_speed = self._sdk_raw_speed(
+                    prev, t_now, -math.sin(self._smooth_yaw), -math.cos(self._smooth_yaw),
+                    ego_x, ego_y, ego_z, ego_speed,
+                )
+                self._run_sdk_speed_chain(prev, t_now, dt, sdk_speed)
+                return
             self._advance_held_kinematics(prev, dt)
             return
 
@@ -1904,6 +1941,15 @@ class Vehicle:
         if len(self._position_history) > _POSITION_HISTORY_LEN:
             self._position_history = self._position_history[-_POSITION_HISTORY_LEN:]
         self._append_trail(t_now, raw_x, raw_z)
+
+        if self.sdk is not None:
+            # TMP body matched to the SDK: the sender's own speed, no position window.
+            self._reset_raw_brake_transient()
+            raw_speed = self._sdk_raw_speed(
+                prev, t_now, fwd_x, fwd_z, ego_x, ego_y, ego_z, ego_speed,
+            )
+            self._run_sdk_speed_chain(prev, t_now, dt, raw_speed)
+            return
 
         # Raw speed: TMP from position LS; AI keeps buffer sign. See core/radar/README.md §7.
         _prx = prev._raw_x if prev._raw_x is not None else prev.position.x
@@ -1928,7 +1974,15 @@ class Vehicle:
             raw_speed, self.speed, fwd_x, fwd_z,
         )
         acc_raw_speed = raw_speed if self.crash_confirmed else long_raw_speed
+        self._run_speed_chain(prev, t_now, dt, raw_speed, acc_raw_speed)
+        if self._sdk_aeb_speed is not None:
+            self._bridge_sdk_dropout(prev, t_now)
 
+    def _run_speed_chain(
+        self, prev: "Vehicle", t_now: float, dt: float,
+        raw_speed: float, acc_raw_speed: float, aeb_raw: bool = False,
+    ) -> None:
+        """Steps 1-4 of the speed chain on both lanes. See core/radar/README.md §7."""
         (speed_ema, accel, speed_corr, speed_ema_history,
          acc_speed_ema, acc_accel, acc_speed_ema_history, acc_speed,
          acc_standstill, acc_release_s) = _smooth_vehicle_kinematics(
@@ -1942,8 +1996,10 @@ class Vehicle:
         self._speed_ema = speed_ema
         self._speed_ema_history = speed_ema_history
         self._smooth_accel = accel
-        self._smooth_speed = speed_corr
-        self.speed = speed_corr
+        # SDK short window: AEB's speed is the sender's own, unfiltered (core/radar/README.md §19).
+        aeb_speed = raw_speed if aeb_raw else speed_corr
+        self._smooth_speed = aeb_speed
+        self.speed = aeb_speed
         self.acceleration = accel
         self._acc_speed_ema = acc_speed_ema
         self._acc_speed_ema_history = acc_speed_ema_history
@@ -1952,6 +2008,127 @@ class Vehicle:
         self.acc_accel = acc_accel
         self._acc_standstill = acc_standstill
         self._acc_release_s = acc_release_s
+
+    def _carry_sdk_state(self, prev: "Vehicle") -> None:
+        self._sdk_stall_since = prev._sdk_stall_since
+        self._sdk_updates = prev._sdk_updates
+        self._sdk_arrival_s = prev._sdk_arrival_s
+        self._sdk_vx = prev._sdk_vx
+        self._sdk_vz = prev._sdk_vz
+        self._sdk_aeb_speed = prev._sdk_aeb_speed
+        self._sdk_aeb_t = prev._sdk_aeb_t
+        self._sdk_filt = prev._sdk_filt
+        self._sdk_filt_t = prev._sdk_filt_t
+        self._sdk_short_active = prev._sdk_short_active
+        self._sdk_short_converged = prev._sdk_short_converged
+        self.netcode_stall = self.sdk is not None and self.sdk.stale
+        self.sdk_crash = prev.sdk_crash and self.sdk is not None
+
+    def _apply_sdk_crash_evidence(self, prev: "Vehicle", t_now: float) -> None:
+        """Packet age and SDK velocity tell lag from a crash. See core/radar/README.md §19."""
+        sdk = self.sdk
+        if self.netcode_stall and self._crash_hold_until > prev._crash_hold_until:
+            # A pose with no fresh packet behind it is lag: it cannot confirm a crash.
+            self._crash_hold_until = prev._crash_hold_until
+            self._crash_knock_until = prev._crash_knock_until
+        if sdk.sampled and sdk.updates != self._sdk_updates:
+            # Only consecutive samples of one player: a reused id or a re-match restarts the count.
+            if self._sdk_updates is not None and 0 < sdk.updates - self._sdk_updates <= 3 and crash_evidence(
+                self._sdk_vx, self._sdk_vz, sdk.vx, sdk.vz, sdk.arrival_s - self._sdk_arrival_s,
+            ):
+                self._crash_hold_until = max(self._crash_hold_until, t_now + _CRASH_HOLD_S)
+                self.sdk_crash = True
+            self._sdk_updates = sdk.updates
+            self._sdk_arrival_s = sdk.arrival_s
+            self._sdk_vx = sdk.vx
+            self._sdk_vz = sdk.vz
+        self.crash_confirmed = t_now < self._crash_hold_until
+        self.sdk_crash = self.sdk_crash and self.crash_confirmed
+
+    def _run_sdk_speed_chain(self, prev: "Vehicle", t_now: float, dt: float, raw: float) -> None:
+        """ACC takes a pre-filtered SDK speed; AEB takes it raw while the filter lags a hard change (§19)."""
+        filt = self._sdk_filt
+        if filt is None or t_now - self._sdk_filt_t > tmp_sdk.DROPOUT_HOLD_S:
+            filt = raw
+        else:
+            frac = min(1.0, abs(filt) / tmp_sdk.SDK_SPEED_TAU_REF_MS)
+            tau = tmp_sdk.SDK_SPEED_TAU_REST_S + (tmp_sdk.SDK_SPEED_TAU_FAST_S - tmp_sdk.SDK_SPEED_TAU_REST_S) * frac
+            filt += (1.0 - math.exp(-(t_now - self._sdk_filt_t) / tau)) * (raw - filt)
+        self._sdk_filt = filt
+        self._sdk_filt_t = t_now
+
+        travel = -1.0 if filt < 0.0 else 1.0
+        if not tmp_sdk.AEB_RAW_SHORT_WINDOW:
+            self._sdk_short_active = False
+        elif not self._sdk_short_active:
+            if self.crash_confirmed or travel * (filt - raw) >= tmp_sdk.SDK_SHORT_ENTER_MS:
+                self._sdk_short_active = True
+                self._sdk_short_converged = 0
+        else:
+            # Same release as the position short window: agreement for a few frames.
+            if abs(filt - raw) <= _RAW_BRAKE_CONVERGENCE_MS and not self.crash_confirmed:
+                self._sdk_short_converged += 1
+            else:
+                self._sdk_short_converged = 0
+            if self._sdk_short_converged >= _RAW_BRAKE_RELEASE_FRAMES:
+                self._sdk_short_active = False
+
+        short = self._sdk_short_active
+        # A dropout inside the event falls back to the short position window, not the long one.
+        self._raw_brake_active = short
+        self._raw_brake_converged_frames = 0
+        self._raw_brake_confirm_frames = 0
+        # The pre-filter is ACC's: on AEB's lane it cost 0.17 s on a labelled tailgating TP.
+        acc_in = raw if self.crash_confirmed else filt
+        self._run_speed_chain(prev, t_now, dt, raw, acc_in, aeb_raw=short)
+        # Only the raw speed needs a bridge over a dropout; the shared filter keeps the rest continuous.
+        self._sdk_aeb_speed = self.speed if short else None
+        self._sdk_aeb_t = t_now
+
+    def _bridge_sdk_dropout(self, prev: "Vehicle", t_now: float) -> None:
+        """A lost SDK match holds AEB on the sender's last speed, then fades to the fit (§19)."""
+        elapsed = t_now - self._sdk_aeb_t
+        w = 1.0 - (elapsed - tmp_sdk.DROPOUT_HOLD_S) / tmp_sdk.DROPOUT_FADE_S
+        if self._crash_hold_until > prev._crash_hold_until or w <= 0.0:
+            # A crash the position track confirms during the dropout is newer than the last packet.
+            self._sdk_aeb_speed = None
+            return
+        w = min(1.0, w)
+        self.speed = w * self._sdk_aeb_speed + (1.0 - w) * self.speed
+        self._smooth_speed = self.speed
+
+    def _sdk_raw_speed(
+        self, prev: "Vehicle", t_now: float, fwd_x: float, fwd_z: float,
+        ego_x: float, ego_y: float, ego_z: float, ego_speed: float,
+    ) -> float:
+        """SDK velocity along the body; a frozen stall holds it only as long as the lag freeze would."""
+        sdk = self.sdk
+        along = sdk.vx * fwd_x + sdk.vz * fwd_z
+        if not self.netcode_stall:
+            self._sdk_stall_since = None
+            return along
+        # While the client still extrapolates the body it is moving in ego's world: nothing to judge.
+        dt = t_now - prev.time
+        if prev._raw_x is not None and dt > 0.0:
+            step = math.hypot(self.position.x - prev._raw_x, self.position.z - prev._raw_z)
+            if step >= _LAG_DISP_RATIO * abs(along) * dt:
+                return along
+        if self._sdk_stall_since is None:
+            self._sdk_stall_since = t_now
+        gap_3d = math.sqrt(
+            (self.position.x - ego_x) ** 2
+            + (self.position.y - ego_y) ** 2
+            + (self.position.z - ego_z) ** 2
+        )
+        # Hold for twice the lag freeze (0 within 0.3 s TTC, 1 s far out), then the §7 freeze ramp to 0.
+        freeze = _lag_freeze_duration(gap_3d, ego_speed)
+        past_hold = t_now - self._sdk_stall_since - 2.0 * freeze
+        if past_hold < 0.0:
+            return along
+        if past_hold < freeze:
+            frac = past_hold / freeze
+            return along * (1.0 - frac * frac)
+        return 0.0
 
     def _append_trail(self, t_now: float, raw_x: float, raw_z: float) -> None:
         """Retain the geometry trail on a distance grid. See core/radar/README.md §7."""

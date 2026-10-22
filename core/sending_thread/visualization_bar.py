@@ -30,6 +30,7 @@ class VisualizationBar(QWidget):
         self.gas_rect = QRect()
         self.brake_rect = QRect()
         self.flicker_color = _TRANSPARENT
+        self._painted_key: tuple | None = None
         self._tracked_screen = None
 
         self.setWindowFlags(
@@ -223,7 +224,15 @@ class VisualizationBar(QWidget):
 
             self.timer.setInterval(10)
 
-        self.update()
+        # Idle ticks leave the rects as they were; repainting the full-width window is wasted.
+        key = (
+            self.gas_rect.getRect(),
+            self.brake_rect.getRect(),
+            self.flicker_color.rgba() if self.flicker_color is not None else None,
+        )
+        if key != self._painted_key:
+            self._painted_key = key
+            self.update()
 
     def ensure_present(self) -> None:
         """GUI thread. Re-open an enabled bar whose timer was stopped."""

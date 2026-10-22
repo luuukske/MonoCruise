@@ -252,7 +252,8 @@ what ACC uses.
 |--------|------|
 | `core/aeb/calibration.py` | Frozen `AEBCalibration` dataclass: all tunable constants. `DEFAULT` singleton used by both `thread.py` and tests. |
 | `core/aeb/lane_frame.py` | `Lane` enum, `project_to_ego_arc()`, `classify()`: arc-projected lane membership, replacing the old cross-product `lateral_offset`. Also the body-in-lane primitives (`_any_body_in_ego_lane`, `_body_centreline_d_abs`). |
-| `core/aeb/filters.py` | Named filter pipeline: 12 stage classes + `FilterContext` + `build_pipeline()`. |
+| `core/aeb/filters.py` | Named filter pipeline: the stage classes + `FilterContext` + `build_pipeline()`. |
+| `core/aeb/overlap_ghosts.py` | `OverlapGhostHold`: bodies deep inside ego, skipped as ghosts until they separate (§4). |
 | `core/aeb/avoidability.py` | `AvoidabilityGate`, which ends a guess-based drop of a parked body at the braking deadline (§3, Avoidability gate). |
 | `core/aeb/thread.py` | `AEBThread`: data acquisition, ego-arc construction, pipeline dispatch, TTB/state output. |
 
@@ -270,7 +271,6 @@ pass, the vehicle enters collision evaluation.
 | `RangeFilter` | Distance gate (`cal.max_range`) |
 | `ElevationFilter` | Membership in radar's `off_surface_ids` (core/radar/README.md §15) |
 | `LowSpeedTrailerFilter` | Trailers while ego is below `cal.trailer_ignore_below_kmh` |
-| `TmpRelSpeedFilter` | TMP session relative-speed pre-filter |
 | `LaneClassifier` | Populates `ctx` geometry fields; sets `ctx.lane` via `lane_frame` |
 | `OppositeLaneFilter` | Oncoming vehicles in their own lane (collapses Fix A + Fix B) |
 | `CoDirectionalDivergeFilter` | Co-directional arcs already diverging (Fix C + outer-lane same-turn) |
@@ -353,9 +353,9 @@ reversing truck therefore sat in a regime that contradicted its own arc:
 - Clip d80936f9: a TMP truck facing ego at an angle (heading `fwd_dot` -0.67)
   backed across ego's lane at 2.9 m/s. The heading frame called it oncoming in
   its own lane, so `OppositeLaneFilter` and the 3.9 m head-on lateral gap
-  dropped it and the arc assumed it would stop at `full_brake_decel`. At 40 km/h
-  that clip stays silent by design (the TMP rel-speed floor, §4); at road speed
-  the same pose is scenario `tp_reversing_truck_backs_across_path`.
+  dropped it and the arc assumed it would stop at `full_brake_decel`. It brakes
+  since the TMP speed floor went (§4); at road speed the same pose is scenario
+  `tp_reversing_truck_backs_across_path`.
 - Clip 66874532: a rig heading ego's way (`fwd_dot` +0.85) backed diagonally into
   ego's lane at 4.5 m/s. The heading frame got that one right by accident: it
   read co-directional, which is the one class that was not wrong for it.
@@ -380,11 +380,8 @@ The rule has two halves, and both are needed:
    `tp_reversing_rig_backs_into_lane` pins the warn time that exposes it.
 
 `TmpCrossTrafficFilter` also skips reversing targets by name: it models a TMP
-driver sweeping through a junction. **`TmpRelSpeedFilter` does not.** Exempting
-reversing targets from the floor made d80936f9 brake and would bring back the
-low-speed TMP false positives the floor exists for; the travel frame is for
-reversing traffic that clears the floor, not a way around it. Geometric
-stages (`CoDirectionalDivergeFilter`, `TurningCrossTrafficFilter`,
+driver sweeping through a junction. Geometric stages
+(`CoDirectionalDivergeFilter`, `TurningCrossTrafficFilter`,
 `OutOfLaneParallelFilter`, `EgoEvasionFilter`) run unchanged in the travel frame.
 
 `_body_centreline_d_abs` samples along the heading (`arc.yaw_rad`), not
@@ -762,54 +759,151 @@ closing), not the lane bucket, because a parked truck's arc origin inflates
 | In-lane closer | ahead, straight `\|lat\| <= lane_half_width`, closing `> aeb_min_closing_ms` (1.0), and co-directional or stationary | Pre-brake rescue for a lead in the lane band. Weak closing stays on the 0.08 g check. Shoulder FPs sit outside the band (`fp_parked_shoulder` x=2.2). |
 | Head-on | `head_on` **and** target moving | Oncoming traffic belongs to `OppositeLaneFilter`, which runs its own evasion arcs at `evasion_g_oncoming`. A *stationary* target facing ego is a parked obstacle, not oncoming, so it runs the check unless the in-lane closer bypass already took it. |
 | Trailer swing | out-of-lane co-directional mover with a body inside `lane_half_width` | Genuine rear-end course; crash clip 434f0401 must never be evasion-suppressed. This is the one place the trailer-in-lane rescue is deliberately *stronger* than `Lane.EGO`. |
-| Follow-threat | `v.id in follow_threat_ids` **and** `ref_kmh_for_filter <= tmp_filter_split_kmh` | Inside the low-speed TMP band `TmpRelSpeedFilter` drops targets unless relative speed exceeds `tmp_filter_rel_below_kmh`, which discards real low-speed dangers; the behavioral latch is the fallback there. Above the split the latch is ACC-shaped lead tracking, which does not establish danger, so it no longer shields a target. |
+| Follow-threat | `v.id in follow_threat_ids` **and** ego at or below `follow_threat_evasion_exempt_kmh` (50 km/h) | Measured to keep low-speed true positives (follow-threat flag section). Above it the latch is ACC-shaped lead tracking, which does not establish danger, so it does not shield a target. |
 
 Do not change the OR-of-sides rule (suppress if *either* 0.08 g arc misses)
 into AND: that re-opens the shoulder FP class the 0.08 g filter exists for.
 
 ---
 
-## 4. TMP rel-speed pre-filter
+## 4. Ghosts: bodies AEB cannot hit
 
-When **any** slot in the frame has `is_tmp`, AEB pre-filters targets by
-**‖v_ego − v_target‖** (km/h) vs a **reference ego speed**:
+AEB skips two kinds of body before they reach the precompute or the pipeline,
+and draws them in the debug window as ghosts (grey, dashed, `AEBSnapshot.ghost_ids`).
+Both kinds are skipped even while latched, and end the latch. TruckersMP targets
+otherwise run the same pipeline as
+AI traffic: there is no TMP speed floor any more.
 
-- ref **> 50 km/h** → threat only if rel **> 15 km/h**
-- ref **≤ 50 km/h** → threat only if rel **> 50 km/h**
+### No TMP speed floor (removed 2026-10-12)
 
-These are the effective bars of two stacked gates that carry different
-constants. The collision precompute in `thread.py` (`_tmp_collision_threat`:
-split 40, rel > 15 above it, rel > 40 at or below) skips a target before its
-arcs are built, and `TmpRelSpeedFilter` (`tmp_filter_split_kmh` 50,
-`tmp_filter_rel_above_kmh` 5, `tmp_filter_rel_below_kmh` 50) suppresses it in
-the pipeline. A target must pass both, so the 15 km/h bar comes from the
-precompute and the 50 km/h split and bar from the filter;
-`tmp_filter_rel_above_kmh` and the precompute's two 40s never bind. Moving one
-copy alone shifts only part of the band. Latched and follow-threat ids skip
-both gates.
+Until v1.1.3, `TmpRelSpeedFilter` and a twin in the collision precompute dropped
+every TMP target under 15 km/h relative speed above 50 km/h, and under 50 km/h
+relative below it, against an ego speed latched at warn onset. It stood in for a
+no-collision zone signal that did not exist yet, and it hid real low-speed
+dangers with the ghosts: below 50 km/h the follow-threat flag was AEB's only way
+in (card 127), and a truck backing across ego's lane at 40 km/h (`d80936f9`)
+stayed silent by design. The zone gate below, the exit hold (radar §18), TMP SDK
+speed with the lag split (radar §19) and the overlap gate cover what it guessed
+at.
 
-Reversing targets get no exemption. The floor keeps d80936f9 (a truck backing across
-ego's lane at 35 km/h relative) silent on purpose: exempting them re-opens the low-speed
-TMP false positives the floor was added for. See the travel frame section.
-
-Reference is current ego speed unless **latched**: the first frame with
-`AEBState ≥ WARN` or addressing brake (`_read_addressing_brake`: driver pedal
-or CC/ACC program brake above the 0.03 deadzone, not OPD coast-down) saves
-`ego_kmh`;
-latch held until state drops below WARN **and** brake released; cleared when
-the session is no longer TMP.
+Measured on removal (933 local / 548 remote labelled clips): local -189.82 ->
+-275.98, remote +618.41 -> +542.79. Seven misses or late brakes now brake in time
+(`d80936f9`, `ccc7eaa4`, `ed2d9555`, `2f525a54`, `208f32fb`, `676db3b8`,
+`7e2a64b7`). The costs are the false brakes the floor had been hiding: `af84dcc5`
+(oncoming TMP truck passing at 1.5 m, 12.7 m/s^2), `8e213c9e` (TMP trailer beside
+a bend at 50 km/h whose demand steps 0.06 -> 10.3 m/s^2 in one frame), `000a3c1a`
+and `1a9f5ffa` braking longer (both fixed by the overlap gate), and three false
+warns under a second. Do not bring a speed floor back to fix one of these: find
+the stage that let it through, as for AI traffic.
 
 ### No-collision zones
 
-The floor guesses; TruckersMP's own zone event knows. While radar's NCZ gate is
-open (`core/radar/README.md` §18) every TMP id is in `ncz_ids`, and
-`_read_radar_snapshot` folds them into the set AEB skips with the off-surface
-ids, so they never reach the precompute or the pipeline. After a reported zone
-exit, the rigs still inside ego stay in `ncz_ids` until they separate (radar §18,
-"Exit hold"). Latched ids stay, as
-with the elevation gate. The floor itself is unchanged: outside a zone it still
-covers lag and netcode ghosts, and relaxing it is v1.1.3 work alongside lag
-detection.
+While radar's zone gate is open (`core/radar/README.md` §18) every TMP id is in
+`ncz_ids`, and `_read_radar_snapshot` folds them into the set AEB skips with the
+off-surface ids. After a reported zone exit, the rigs still inside ego stay in
+`ncz_ids` until they separate (radar §18, "Exit hold").
+
+**A zone ghost ends the latch.** At the top of `AEBThread.loop` every latched id in
+`ncz_ids` is released (`_release_latched`), so it is skipped like any other zone
+ghost. Inside a reported zone no player can be hit, latched or not. The exemption
+it replaces only ever acted when the zone opened mid-brake, and that is the case
+that turned into a ghost: driving at walking pace into trucks parked inside a
+zone, AEB latched them before the zone opened and then braked inside them for as
+long as ego overlapped them, since an overlapping body collides every frame and
+refreshes its own latch (`807b5b28`, 2026-10-12). A wrong zone flag next to a
+real truck is the gate's own failure to guard (radar §18: fresh, connected,
+confirmed, teleport guard); it already drops every unlatched truck.
+
+### Overlap ghosts
+
+Two solid bodies cannot sit inside each other, so a body found deep inside ego is
+not something AEB can hit: a TruckersMP player ghosted by lag, by a zone ego
+cannot see, or by TruckersMP pulling two crashed players apart; an AI car spawned
+on top of ego. `OverlapGhostHold` (`core/aeb/overlap_ghosts.py`), stepped once per
+AEB tick in `AEBThread.loop`, finds them and AEB skips them like zone ghosts:
+
+- **Deep, or inside for too long.** A body arms the hold when it overlaps ego's
+  box shrunk by `overlap_ghost_depth_m` (0.3 m) on every side. It also arms once it has stayed
+  inside ego's box shrunk by `overlap_ghost_contact_m` (0.2 m, the exit hold's box
+  slack) for `overlap_ghost_persist_s` (0.3 s) without a break; a gap between
+  steps longer than that (a pause) restarts the count. Ego's box is the §17
+  wheel geometry from `ego_box`, the one the radar exit hold uses.
+- **The bodies AEB evaluates.** Vehicle records via `vehicle_box`, nested trailers
+  centred on `tr.position` as AEB's own arcs and debug view place them. ACC's
+  `trailer_vehicles` shift TMP nested trailers from the coupler to the centre;
+  with that body, ego sat 1 m inside the second trailer of TMP doubles it was
+  following at 20 m (`b08d8245`, `ee735383`). A first version measured that
+  body and, with a 0.5 m bar, lost 12 true positives, most of them to it.
+- **Whole rigs.** A hit on any body holds its rig: TMP trailer records with their
+  tractor (`rigs_inside`, the exit hold's pairing) and a vehicle with its nested
+  trailers.
+- **Held until separation.** A rig stays a ghost while any member overlaps ego's
+  unshrunk box, then is released. Unlike the exit hold, a new deep overlap arms
+  it again.
+- **AI and TMP alike.** Neither can overlap ego that far for real.
+- **Latched ids too.** A latched body that arms the hold is released from the latch
+  (`_release_latched`) and skipped, as a zone ghost is. Lukas, 2026-10-20: past the
+  depth bar a body is ignored no matter what (see "Why no latched exemption").
+
+Why the persistence arm: real contact is an impact, not a slow merge. Of the
+labelled positives that overlapped their target at AEB's first engagement, none
+had been 0.2 m inside for more than 0.08 s (the contact frame), while the ghosts
+had been for 0.65 to 7.6 s. Without it, a ghost that slides in slowly reaches the
+engage bar before the depth bar: driving at 13 km/h through TMP trucks parked
+just past a zone exit, AEB latched one 1.05 m inside after 0.75 s and kept
+braking as it went deeper (`f392c9ce`, 2026-10-12).
+
+Why no latched exemption (removed 2026-10-20, Lukas's decision over the measured
+cost): AEB braked among TruckersMP trucks that drove into ego in a zone the gate had
+missed (`f42de1cc`, radar §18 teleport guard), because each had been latched on
+approach and a latched body was never a ghost. Lukas wants a body past the depth
+bar ignored without exception and judged the crash clips' box depths unreliable
+(early previews sized car bodies as trucks). Corpus A/B on 1734 labelled clips,
+exemption kept vs removed: the release fired on 159 clips, 149 of them real
+crashes; 134 brake less (6667 -> 4163 ticks), and in 126 crash clips AEB lets go
+after impact at a median 24 km/h (p90 66, max 109; 47 above 40 km/h, e.g.
+`c62004d2` from 74 km/h, `5c0982fe` from 52). The affected clips span every build,
+18 from 1.1.1 on. `148e8a47` turns from TP to late, `55848211` scores better, four
+false brakes get shorter (`bfbb351e` 125 -> 18 ticks); net +17 on the score, which
+cannot see post-impact braking. Replay rides the already-braked recording, so the
+live speeds would be higher. The zone fix alone silences `f42de1cc`; this rule is
+for ghosts the zone gate never sees.
+
+Why 0.5 m: Lukas lowered the bar from 1.5 m on 2026-10-17 to ghost more
+overlapping bodies. It sits under the 0.73 m real-contact depth measured below,
+which the 1.5 m history says not to do. Corpus replay, tick by tick, on the 975
+scored clips: no verdict moved and the score is bit-identical (-1753.00). The
+hold differs on 63 clips; on 62 nothing AEB does changed, and `cca0f835` loses 18
+ticks of brake and warn, 17 of them after its window (8.17 to 9.12 s, window ends
+8.20 s): the impact tail, where the body is deep and no longer latched. No clip
+gained a tick. Probed lower: 0.3 m is identical to 0.5; 0.2 m loses 38 ticks on
+4 clips and turns `3b90c5e8` and `0492498b` from late into misses, still with no
+gain. The corpus cannot see the exposed case: a positive is a TP if any
+tick of its window engages, so a fast crash where the first frames of overlap are
+already past 0.5 m (the `eb92f30d` class, 155 km/h closing, 0.73 m at first
+engagement) loses its last frames unseen.
+
+Why 1.5 m (history): replayed with the gate off, AEB's first engagement on 705 labelled
+positives found the colliding body overlapping ego in 10 of them, by 0.73 m at
+most (`eb92f30d`, SP, 155 km/h closing), apart from `d2989cac` (below). The
+ghosts it braked for were 1.7 to 2.4 m inside at that moment and 2.2 m or more at
+their deepest. Bars of 1.0, 1.5 and 2.0 m score identically; 1.5 leaves room on
+both sides. Real threats do get deeper once ego is into them (2.5 m inside its
+labelled window on `f217b4eb`), every time after AEB had engaged: that is what
+the latched exemption was for until 2026-10-20 (above).
+
+Measured on top of the floor removal: local -275.98 -> -277.27, remote +542.79 ->
++537.79. `aeaa0d6c` (SP trailer appearing inside a stopped ego), `addfcf09` (TMP
+car inside ego from the first frame) and `1a9f5ffa` (TMP cars on ego's hip at
+walking pace) go silent; `000a3c1a` brakes 1.4 s instead of 5.3 s. One cost:
+`d2989cac` (sev 1) swiped a parked TMP trailer at 40 km/h, lost 8 km/h on impact
+and slid on through it to 2.8 m. AEB's late brake there came after the impact and
+after the labelled window, and is now blocked: late becomes a miss.
+
+Do not lower the bar further, arm on shallow overlap, or
+measure nested trailers on a different body from the one AEB evaluates: each turns
+a real crash into a ghost. Bringing the latched exemption back is Lukas's call: it
+restores post-impact braking and AEB braking inside latched ghosts together.
 
 ---
 
@@ -1132,10 +1226,9 @@ aeb.snapshot                       # AEBSnapshot: full debug state
      output back and silence its own warning. The old `if self._engaged:
      return False` guard existed only to paper over that contamination.
 
-     The TMP rel-speed latch and the shadow-near sampler still use
-     `_read_addressing_brake` (physical / mapper above 0.03, no OPD): OPD
-     coast-down is on whenever the foot is off the gas, and would pin that
-     latch for the rest of the session.
+     The shadow-near sampler uses `_read_addressing_brake` instead (physical /
+     mapper above 0.03, no OPD): OPD coast-down is on whenever the foot is off
+     the gas, and would keep the sampler from ever firing.
 7. Hold semantics: warn/brake state holds for 0.3 s after a downgrade to
    suppress chatter, identical to the old WARN→STANDBY hold. The hold shapes
    `aeb_state` and `AEB_brake`, but must **not** re-assert `AEB_warn` on a tick
@@ -1638,11 +1731,10 @@ TTB slam, or `geom_threat_latched` (still colliding, unbraked TTC inside
 `disarm_hold_ttc_s`). When the danger passes, AEB lets go. Membership does three
 things:
 
-1. **TMP rel-speed pre-filter bypass**: `TmpRelSpeedFilter` (and the
-   matching precompute prefilter in `thread.py::loop`) skip the rel-speed
-   gate for any id in the latched set. Without this, ego matching a TMP
-   convoy partner's speed under braking drops `rel_kmh` below the 15 / 50
-   km/h bar (section 4) and the target leaves the pipeline mid-stop.
+1. **Skip-set exemption**: the elevation gate (§6) never drops a latched id. A
+   target the netcode moves off the road surface mid-stop stays the target.
+   No-collision zone ghosts and overlap ghosts are the exception: they end the
+   latch (§4).
 2. **Spatial drop-filter bypass**: `OutOfLaneParallelFilter` and
    `EgoEvasionFilter` skip a latched id; `CornerEntryStationaryFilter` skips
    a latched **Mode B** (`Lane.EGO`) id. The 0.08 g evasion pair and Mode B
@@ -1725,6 +1817,22 @@ rolls into the stopped lead below `aeb_min_engage_speed_kmh`. Accepted by design
 (2026-09-23): AEB decides whether a danger exists, and with none predicted it
 coasts. Do not add a stop-completion hold to cover this case.
 
+**Standstill release.** An engagement ends after `aeb_standstill_release_s` (0.5 s)
+with |ego speed| under `aeb_standstill_release_kmh` (0.5 km/h), and the whole latched
+set is released with it. Braking cannot change the fate of a stopped ego, and a hold
+that survives there is geometry alone. The log of 2026-10-20 shows the failure:
+`engaged=True` for 26 s at 0 km/h among TruckersMP trucks that overlapped ego (rig
+extents inside ego's width), `why=geom_latch`, `ttc=0.000`. Each truck had joined the
+latched set while AEB was engaged, which then exempted it from the overlap-ghost hold
+(§4), and each hit refreshed its own latch, so neither `latched_max_s` nor the ghost
+rule could end it. Overlap ghosts now end the latch themselves; the release still
+covers a latched body touching ego short of the ghost bars (inside
+`overlap_ghost_contact_m`), which refreshes its latch the same way. New engagements still need `aeb_min_engage_speed_kmh`, so
+nothing re-engages at rest. Do not widen the speed to the engage floor: that would
+cut the end of real stops, which the stop-distance envelope guards. A promotion-time
+overlap check alone would not have helped: those trucks were adjacent when they
+joined the latch and overlapped later. Enforced by `tests/aeb/test_standstill_release.py`.
+
 | Knob | Default | Role |
 |------|---------|------|
 | `latched_scope_release_s` | 0.5 s | Grace before a latched id outside the steer-in band is dropped |
@@ -1742,20 +1850,23 @@ A braking cut-in often decels before its centre enters ego lane. A parked body
 ego sweeps past on a bend collapses `d_abs` at 15-25 m/s and must not inherit
 the flag (`8e213c9e`).
 
-   Flagged ids bypass `TmpRelSpeedFilter`, are exempt from
-`CoDirectionalDivergeFilter`, are exempt from `EgoEvasionFilter` **only while
-`ref_kmh_for_filter <= tmp_filter_split_kmh`** (the latched-id and in-lane
-closer bypasses are separate and speed-agnostic), and get follow-track decel
-on collision arcs so a braking lead does not clip through on constant-speed
-projection. Implemented in `AEBThread._update_follow_threats`.
+   Flagged ids are exempt from `CoDirectionalDivergeFilter`, are exempt from
+`EgoEvasionFilter` **only while ego is at or below
+`follow_threat_evasion_exempt_kmh`** (the latched-id and in-lane closer bypasses
+are separate and speed-agnostic), and get follow-track decel on collision arcs so
+a braking lead does not clip through on constant-speed projection. Implemented in
+`AEBThread._update_follow_threats`.
 
 The speed gate on the evasion exemption is deliberate. The flag is a
 lead-following signal of the same shape ACC uses, and following something is
-not evidence that it is dangerous, so above the split it must not be able to
-wave a target past a geometric filter. Below the split it stays unconditional
-because `TmpRelSpeedFilter` is at its most aggressive there
-(`rel > tmp_filter_rel_below_kmh` to survive) and would otherwise discard real
-low-speed dangers.
+not evidence that it is dangerous, so at road speed it must not be able to wave
+a target past a geometric filter. Below 50 km/h the exemption began as the
+fallback for the TMP speed floor, which discarded real low-speed dangers there.
+The floor is gone (§4), and dropping the exemption with it was measured
+(2026-10-12): `865b4db7` (sev 3) becomes a miss, while three false brakes get much
+shorter (`6764072a` 3.5 s -> 0.3 s, `c5f01c56` 2.1 s -> 0.5 s). Kept for the
+miss; re-measure before removing it. The gate reads live ego speed: the warn-onset
+latch it used to share with the floor went with it.
 
 | Knob | Default | Role |
 |------|---------|------|
@@ -1763,6 +1874,7 @@ low-speed dangers.
 | `follow_threat_hold_s` | 2.0 s | Hold after kinematic qualification |
 | `follow_threat_min_decel_ms2` | 0.8 m/s² | Min own-decel slope to qualify |
 | `follow_threat_max_lat_converge_ms` | 10.0 m/s | Cap on the out-of-lane lat-converge seat; sweep-past is faster |
+| `follow_threat_evasion_exempt_kmh` | 50 km/h | Ego speed at or below which a flagged lead skips `EgoEvasionFilter` |
 
 ### Closed-loop coupling
 
@@ -1847,6 +1959,7 @@ Agent-facing copy of these rules also lives in the top-level `AGENTS.md` (keep t
 
 - **AEB is a consumer of `RadarThread`.** Do not open the traffic shared-memory buffer directly and do not mutate `Vehicle` instances.
 - **Elevation comes from radar's `off_surface_ids`, minus the latched set.** Do not reintroduce a local pitch-window test in `thread.py` or `filters.py`, and do not tune `cal.elevation_margin`: it is dead, kept only so recorded clip calibrations still deserialize. See `core/radar/README.md` §15.
+- **Ghosts are skipped, never filtered by speed.** There is no TMP speed floor (§4); do not bring one back to fix a TMP false brake. A zone ghost ends the latch; `OverlapGhostHold` arms past `overlap_ghost_depth_m` or after `overlap_ghost_persist_s` inside ego, on the bodies AEB evaluates, and ends the latch of a latched body it arms on (Lukas, 2026-10-20, over a measured loss of post-impact braking, §4).
 - **AEB ego curvature is the yaw-rate proxy, full stop.** Do not read `RadarData.ego_curvature` from AEB.
 - **Target-vehicle curvature is the `_vehicle_curvature_blend` helper** (sliced position fit blended with `angular_velocity`-derived yaw rate, weighted by `cal.aeb_yaw_blend`, then One-Euro filtered per-vehicle by `AEBThread._curvature_blender`). Do not call `v.curvature_from_history()` directly from AEB paths and do not enlarge `aeb_pos_history_len` toward 25. The blender must be stepped exactly **once per vehicle per frame**: any new call site must thread the existing `ctx.v_curvature` through rather than re-invoking `_vehicle_curvature_blend(...)` with the production blender.
 - **`co_directional` must use `fwd_dot > 0.7`, not `abs(fwd_dot) > 0.7`.** The two flags must be mutually exclusive with `head_on`.
@@ -1911,12 +2024,11 @@ shipped `_required_decel_two_frame`, the shipped entry bar, the real
 `AEBDecelController`, and a brake plant fitted to 61 recorded braking episodes
 (dead time 0.12 s, tau 0.19 s median / 0.31 s p90). It reports residual gap.
 
-**Use it, not the corpus, whenever the engage point moves.** Corpus labels were
-tagged against one engage point, so shifting the bar re-labels clips instead of
-scoring them, and the shift always reads as a swing in FN. Worse, headless
-replay scores the engagement decision and never touches the brake pedal, so it
-is structurally blind to whether the truck actually stops. The corpus arbitrates
-*filtering*; this arbitrates *timing*.
+**Use it, not the corpus, whenever the engage point moves.** The corpus scores
+positives on geometry and cannot see the bar there at all (see corpus scoring
+below), and headless replay never touches the brake pedal, so it is structurally
+blind to whether the truck actually stops. The corpus arbitrates *filtering*;
+this arbitrates *timing*.
 
 What it pins:
 
@@ -1940,6 +2052,58 @@ What it pins:
 The closed loop converges onto the distance it planned for, finishing on
 `stop_buffer`, so there is no slack beyond what the pad and the capacity
 estimate provide. That is why both are treated as safety parameters.
+
+### Corpus scoring: filtering, not timing
+
+`core/aeb/clip_score.py` scores the labelled corpus on the verdicts from
+`clip_eval.outcome_under`. Since 2026-10-14 it judges which vehicles the
+pipeline lets through, not when or for how long AEB braked. Lukas: the corpus is
+for filtering vehicles, not for re-testing the longitudinal behaviour around the
+recorded interventions. A replay rides the recorded trajectory, already slowed
+by the live brake, so a later bar never sees the demand it would have met.
+
+- **Positives** (clips with a should-trigger window) are a TP when, on some tick
+  inside the window, AEB brakes or the snapshot's `geom_engage` is set. That flag
+  is the engagement entry test with the demand bar taken out: speed floor, an
+  engage-eligible target (colliding, risk-confirmed, braking does not worsen it,
+  no entry veto) and the same tiered confirm with the same instant paths. It
+  never gates a brake. Late when that first happens after the window, FN when
+  never. The bar, the pads and the capacity cannot move a positive; the filters,
+  the hit test, `braking_worsens`, the entry vetoes and the confirm windows can.
+- **Negatives** keep their rule: any brake is a false positive, a warn alone a
+  false warn.
+- **Stray triggers.** A brake onset more than `TRIGGER_SLACK_S` (1.5 s) outside
+  a positive's window adds one false trigger to that clip. Closer than that is
+  timing: dropping the bar from 0.85 to 0.5 moves an onset about 1.3 s at
+  90 km/h on an 8 m/s² truck, and of the replayed onsets before a window, 105
+  sit within 1.25 s of it and the next one is past 1.5 s.
+- **Flat costs.** A TP earns `TP_REWARD` per severity point with no overlap or
+  peak-decel quality. A false trigger costs `FP_TRIGGER_COST` per severity
+  point (1.0; the median phantom brake cost 0.93 under the old duration and
+  intensity formula) however long it held or hard it braked, a false warn a
+  quarter of that.
+
+Onsets are attributed by time, not by vehicle id. `target_vid` is on 110
+positives and requiring it changes two verdicts, one of them a wrong label
+(`04764cb8` names the adjacent-lane car while AEB brakes, correctly, for the
+crash dead ahead), and TMP trailers carry their own ids, so attributing onsets
+by id mostly found tractor/trailer pairs.
+
+**What it no longer sees.** The score rewards braking less: a higher engage bar
+removes false positives and never costs a positive, so a pipeline that never
+brakes scores like perfect filtering. The stop-distance envelope above guards
+that direction. `format_corpus` prints "braked in window N/M positives" so the
+effect stays visible, unscored. A truncated brake is invisible too.
+
+Measured on the local store, 960 scored clips, old scorer against this one:
+total -318.51 to -1768.00, TP 385 to 421, FN 53 to 19, late 13 to 11; false
+positives (65), false warns (14) and true negatives (430) unchanged, with
+identical brake streams. 33 FN and 4 late became TP; 39 TPs are on geometry
+alone, and 13 of the 14 of those with a `target_vid` engage on the labelled
+target. `ccc7eaa4` went TP to late: its only in-window reaction was a warn, and
+the old TP came from a brake 4.65 s before the window. 23 positives carry stray
+triggers. Corpus totals quoted before 2026-10-14, here and in the radar README,
+used the old scorer and are not comparable.
 
 ### Corpus result
 
@@ -2161,7 +2325,7 @@ definition, which is what makes them misses.
 
 `core/aeb/screenshot.py::grab_thumbnail()` supplies the optional
 `thumbnail_jpeg` clip field; `capture.py` calls it off-thread
-(`AEBClipRecorder._start_thumbnail_grab`) so no control loop is touched. Two
+(`AEBClipRecorder._start_thumbnail_grab`) so no control loop is touched. Three
 properties are load-bearing, not incidental, and must not be relaxed without
 updating the claims linked below.
 
@@ -2175,8 +2339,8 @@ TMP and every contributed TMP clip after the crop landed with no
 screenshot. If no title hits, `FindWindowW("prism3d", None)` is the
 fallback: that is the SCS window class, shared by SP and TMP. The handle
 is cached and revalidated with `IsWindow` before every capture, since the
-game can be restarted between clips. `GetWindowRect` gives the bbox
-passed to `ImageGrab.grab(bbox=...)`.
+game can be restarted between clips. `GetWindowRect` gives the source rect
+of the screen copy (next section).
 
 **No game window found means `None`, never a full-monitor grab.** Before
 this, `ImageGrab.grab()` took no bbox and captured the whole primary
@@ -2184,6 +2348,27 @@ display: a user with the game on a second monitor uploaded whatever sat on
 the first one, and one sampled clip in the local store shows a strip of
 desktop chrome along the top edge. Do not reintroduce an unconditional
 fallback grab; it defeats the reason this code exists.
+
+### The copy must not hold the GIL
+
+The capture fires on the tick AEB warns or brakes, so it must not stop the
+control threads. `ImageGrab.grab(bbox=...)` did: on Windows Pillow copies the
+**whole primary monitor** (24 MB at 4K) and only then crops, all inside one C
+call that holds the GIL. Every Python thread, the sending thread included,
+stopped for the length of the copy: 60-250 ms measured with ETS2 open, and in
+the local clip store (2026-10-12) the worst loop gap per engagement clip had a
+median of 104 ms with a thumbnail against 37 ms without, up to 2.2 s, always
+at the trigger. Pedals were frozen for that long right as AEB took over.
+
+`_stretch_capture` copies only the window rect and lets GDI scale it straight
+to the thumbnail size (`StretchBlt`, `HALFTONE`, then `GetDIBits` of a
+240x135 bitmap), through plain `ctypes` calls, which drop the GIL. Measured
+on the same machine: 50-100 ms per capture and a 2.6 ms worst gap on a 2 ms
+ticker thread, against 67-146 ms for Pillow. Do not go back to `ImageGrab`
+or any other copy that runs inside one GIL-holding call. The source is still
+the screen DC (what is on screen inside the game rect), the same as before,
+and the GDI objects are freed in a `finally`; `GetDIBits` needs the bitmap
+deselected first.
 
 Non-Windows platforms never look up a window (`ctypes.windll` does not exist
 there) and always return `None`. `_game_window_rect()` checks
@@ -2211,7 +2396,7 @@ the original decoded pixmap each time rather than re-scaling a scaled copy.
 
 ### Scaled displays: thread DPI, not a process-wide flip
 
-`ImageGrab.grab` measures the screen in physical pixels. `GetWindowRect`
+The screen copy works in physical pixels. `GetWindowRect`
 on a thread that is not per-monitor aware returns virtualized coordinates.
 On a 4K display at 175% those are 1/1.75 of the real window, so the crop
 is a corner of the game (measured: logical 842x601 against a 1474x1052
@@ -2220,9 +2405,8 @@ consent claim that text is not legible.
 
 `grab_thumbnail` calls `SetThreadDpiAwarenessContext`
 (`DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`) around both the rect query
-and the grab, then restores the previous context. Both calls have to sit
-inside it: Pillow sets per-monitor awareness only while measuring, then
-restores the caller's context before the blit. The thumbnail thread has
+and the screen copy, then restores the previous context. Both calls have to
+sit inside it, or the source rect and the screen DC disagree on scale. The thumbnail thread has
 no windows, so the thread override is allowed. Do not move this to
 `SetProcessDpiAwarenessContext`. A process-wide flip rescales the Qt
 settings panel and debug windows.

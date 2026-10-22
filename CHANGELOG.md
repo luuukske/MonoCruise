@@ -12,6 +12,47 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-10-23
+### Added
+- **Hill assist can be turned off**: MonoCruise held the brake whenever you were stopped. A new hill assist switch, on by default, can turn that hold off so the truck rolls while you sit still; your own brake and emergency braking still work.
+
+### Fixed
+- **ACC braked for lagging TruckersMP players**: a lag spike looked like a truck stopping dead, and in jams ACC followed every small speed change of the player ahead. It now uses each player's real speed from TruckersMP's SDK, ignores short lag, and still brakes gradually for a truck that stays frozen.
+- **AEB was late or blind to some TruckersMP trucks**: a truck ahead stopping hard took a moment to show, and below 50 km/h AEB could miss a truck backing across your lane or a car stopping in a jam. It now reacts as the truck brakes and watches players like AI traffic.
+- **AEB braked for vehicles you were driving through**: ghosted players, including right after a teleport into a no-collision zone, or a vehicle sitting inside your truck could set AEB off, even at a standstill. They are now ignored until you are apart, and AEB lets go half a second after you stop.
+- **Acceleration felt weak in town and the gas jumped in hard pulls**: Normal and Efficiency now pull properly up to town speeds and ease off toward the highway, Sport is full throttle with no cap, and ACC no longer holds them back on an empty road. The gas no longer jumps or sags at the end of a hard pull.
+- **Cruise control, ACC and the speed limiter pumped the gas**: on a light truck, after a trailer change, or after driving on your own pedal, the gas could rock on and off about once a second. MonoCruise now learns your truck's pulling power steadily, and the limiter no longer jitters.
+- **MonoCruise froze at times**: with "Help improve AEB and ACC" on, an AEB clip's screenshot could pause everything for a second or two, and a growing cruise control log could freeze the pedals when cruise first engaged. Both are fixed.
+
+### Removed
+- **Automatic horn**: the horn and airhorn switches are gone, as the horn did not come on reliably.
+
+## [1.1.3-preview.3] - 2026-10-21
+### Added
+- **Hill assist can be turned off**: MonoCruise held the brake whenever you were stopped. A new switch, on by default, turns that hold off so the truck can roll while you sit still. Your own brake still works, and so does emergency braking.
+
+### Fixed
+- **Gas pedal jumped while accelerating hard**: on a fast truck the gas stayed too high through a pull and then got chopped off. Below cruising speed it now eases off once the truck is clearly pulling harder than expected.
+- **Acceleration styles felt weak in town and faded too early**: Normal and Efficiency now pull properly up to town speeds and ease off smoothly toward the highway, and Sport is full throttle with no cap. ACC no longer holds them back on an empty road or behind a car far ahead, and the gas no longer sags at the end of a full-throttle pull or climb.
+- **Cruise control, ACC and the speed limiter pumped the gas**: on a light truck, after hooking or unhooking a trailer, or after a stretch of driving on your own pedal, the gas could rock on and off about once a second at a steady speed. MonoCruise now learns your truck's pulling power steadily across loads, so a few odd seconds can no longer throw it off, and the limiter no longer jitters the gas.
+- **AEB braked for TruckersMP trucks overlapping yours**: after a teleport into a no-collision zone AEB didn't know it was in one, braked for the trucks sitting inside yours and held the brake at a standstill. Zones are now recognised after a teleport, a vehicle sitting inside your truck is always ignored, and AEB lets go half a second after you stop.
+
+### Removed
+- **Automatic horn**: the horn and airhorn switches are gone. The horn did not come on reliably.
+
+## [1.1.3-preview.2] - 2026-10-18
+### Fixed
+- **AEB was slow to see a TruckersMP truck stop suddenly**: AEB smoothed the speed TruckersMP reports for each player, so a truck ahead crashing or stopping hard took a moment to show. AEB now switches to that speed as reported the moment a truck ahead brakes hard.
+- **ACC overreacted behind TruckersMP players in slow traffic**: in jams ACC answered every small speed change of a player ahead, braking and accelerating with them. It now smooths those out, and still reacts sooner to real braking than before players' own speed was used.
+- **AEB ignored slow TruckersMP traffic**: below 50 km/h AEB only reacted to other players closing much faster than you, so it could miss a truck backing across your lane or a car stopping in a jam. It now watches them like AI traffic.
+- **AEB braked for vehicles you were driving through**: a TruckersMP player you were ghosting through, or an AI car appearing on top of your truck, could set AEB off, and once it was braking it kept going even inside a no-collision zone. AEB now lets go of players in a zone and ignores any vehicle that sits inside your truck until you are apart.
+
+## [1.1.3-preview.1] - 2026-10-12
+### Fixed
+- **Braking for lagging TruckersMP players**: a player whose connection hiccupped looked like a truck stopping dead, so ACC could brake for nothing. MonoCruise now reads each player's real speed from TruckersMP's SDK, ignores short lag spikes, and still brakes gradually if a truck ahead stays frozen.
+- **MonoCruise stalled for a moment when AEB stepped in**: with "Help improve AEB and ACC" on, the screenshot saved with each AEB clip paused all of MonoCruise, pedals included, for up to a second or two right as AEB warned or braked. The screenshot now runs alongside everything else without pausing it.
+- **"Sending code has frozen" after turning on cruise control**: a cruise control log in the install folder kept growing and was read in full the first time cruise control engaged, which could freeze the pedals until MonoCruise restarted that part. The log is no longer written for drivers.
+
 ## [1.1.2] - 2026-10-11
 ### Added
 - **Cruise control follows speed limit signs**: two new options. One changes your set speed at each new speed limit sign, the other caps your truck at the posted limit, or at your global limit if that is lower.

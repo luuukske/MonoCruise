@@ -44,6 +44,9 @@ tools/aeb_corpus_run/
 # ACC response-map renders and their grids
 tools/acc_response_map_out/
 
+# Map lane audit renders (264 MB, local only)
+tools/map_lane_audit_out/
+
 # PyInstaller / Inno Setup build outputs
 *.exe
 build/
@@ -51,3 +54,6 @@ dist/
 installer/output/
 *.spec.bak
 release_notes.md
+
+# TMP SDK lag experiment recordings (tools/tmp_sdk_probe.py)
+tools/tmp_sdk_runs/

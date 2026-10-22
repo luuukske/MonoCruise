@@ -41,91 +41,95 @@ speed. With `cc_kp = 0.5` any speed error above ~8 km/h saturated it, so MonoCru
 commanded the same acceleration at 15 km/h as at 85 km/h. That is wrong at both ends,
 which is what users reported: weak off the line, a shove at highway speed.
 
-The replacement is two terms combined with `min()`. Neither is sufficient alone.
+The replacement is a comfort shape per profile. `Settings.cc_accel_max_ms2` survives
+as a hard rail on top, default 4.0, above every shape; the old shipped 1.0 and 2.5
+are remapped to it on load, and a value a driver set to something else is left alone.
+
+### The shape
 
 ```
-shape = a_launch                                  v <= v_knee
-      = max(a_floor, a_launch * (v_knee / v)**p)  v > v_knee
-
-a_env = min(shape, HEADROOM_FRAC * a_cap)   when a_cap is usable
-      = shape                               otherwise
+a(v) = a_cruise + (a_launch - a_cruise) / (1 + (v / v_half)²)
 ```
 
-`Settings.cc_accel_max_ms2` survives as a hard rail applied on top, not as the shaper.
-Its default moved from 1.0 to 2.5 and the old value is remapped on load.
+Flat at rest (zero slope, so a launch does not start on a jerk step), halfway to the
+cruise value at `v_half`, and smooth everywhere: there is no knee.
 
-### The shape term
+| Profile | a_launch | v_half | a_cruise | rise jerk | 20 km/h | 50 km/h | 85 km/h |
+|---|---|---|---|---|---|---|---|
+| Efficiency | 1.50 | 32 km/h | 0.35 | 1.0 m/s³ | 1.18 | 0.68 | 0.49 |
+| Normal | 2.20 | 45 km/h | 0.50 | 2.0 m/s³ | 1.92 | 1.26 | 0.87 |
+| Sport | none | | | none | | | |
 
-The comfort law: what a driver wants to feel at a given speed, following a
-power-limited vehicle (strong off the line, tapering with speed). It is **absolute**,
-because comfort has nothing to do with how much engine is available. An empty tractor
-with 3.5 m/s² on tap must not be handed 3.5 m/s².
+Normal is the default. Efficiency is the same curve at 55 to 70 % of Normal at every
+speed, so it feels like a gentler Normal rather than a different character.
 
-| Profile | a_launch | v_knee | p | a_floor | rise jerk |
-|---|---|---|---|---|---|
-| Efficiency | 1.05 | 12 km/h | 0.50 | 0.30 | 0.5 m/s³ |
-| Normal | 2.00 | 26.25 km/h | 1.00 | 0.45 | 1.3 m/s³ |
-| Sport | 2.50 | 40 km/h | 0.45 | 1.20 | 2.5 m/s³ |
+Why this family (2026-10-19): a flat launch to a knee at 10 to 12 km/h, then a power
+taper, asked Efficiency for 0.14 m/s² at 50 km/h and Normal for 0.29 at 85. The pull
+was gone before the truck left town, and a highway resume crawled.
+`test_the_pull_does_not_fall_away_through_town_speeds` pins the fix: no 10 km/h step
+may cost more than a fifth of the pull.
 
-Normal is the default. Three things about that table are deliberate and easy to
-undo by accident:
+Sport has no shape. The speed error is the bid, with no `cc_accel_max_ms2` rail and
+no rise limit, so whenever the bid is more than the gear can do the pedal is on the
+floor. That is a standing driver decision (2026-10-19): Sport is always uncapped.
 
-- **Normal's `a_launch * v_knee` is pinned.** At `p = 1.0` that product *is* the
-  whole tail (`a = a_launch * v_knee / v`), so raising the launch and lowering the
-  knee in step leaves every value above 35 km/h bit identical to the 1.50 / 35 km/h
-  curve it replaced. That is what "more off the line, unchanged at speed" means here.
-  Pinned by `test_normal_raised_the_launch_without_touching_the_highway_tail`.
-- **Efficiency's knee sits just above the launch itself.** A flat plateau held out to
-  30 km/h asked for more pedal than the speed warranted. The early knee plus a shallow
-  `p` drops the post-launch band (0.81 at 20 km/h against 1.15 before) while leaving
-  the highway tail near where it already was (0.39 at 85 km/h against 0.41).
-- **Sport is meant never to bind on flat ground.** Capability at gas=1.0 tops out near
-  1.4 m/s² above 40 km/h even on a light rig, and Sport's shape stays above that at
-  every speed, so the capability guard is the binding term everywhere the truck is
-  moving. The driver meets this ceiling only where the engine runs out, which in
-  practice means steep inclines. `a_launch` equals the default `cc_accel_max_ms2`
-  rail on purpose, so the rail is never the sole binder below the shape.
+`tools/accel_envelope_probe.py` prints the table, 0-50 / 0-90 times, and where a rig
+model cannot deliver the request.
 
-### The capability term
+### No capability term
 
-`a_cap` is the truck's real acceleration at gas=1.0 in the current gear and at the
-current mass, read from `sending_thread.data.mapper_est_max_accel_ms2`.
+Removed 2026-10-19. The envelope used to be `min(shape, 0.95 * a_cap)`, with `a_cap`
+the mapper's published `mapper_est_max_accel_ms2`. That estimate is not good enough
+to cap a request with. In the 2026-10-19 mapper log it read 1.36 m/s² in 4th to 8th
+gear while the truck pulled 1.0 to 1.6 on 20 to 50 % gas (the mapper's own
+`StrengthScale` knew; the published estimate does not carry it), so a town pull was
+held at 1.29 m/s². At 85 km/h it read 2.05 where full pedal gave 1.33, so it never
+bound there. It could only hurt.
 
-**`HEADROOM_FRAC` is not a comfort knob and must not become per-profile.** The obvious
-reading of "respect capability" is a per-mode share, say Normal = 0.70 x capability.
-Work the case with `tools/accel_envelope_probe.py --rig loaded`: a 40 t rig at
-85 km/h has 0.71 m/s² at gas=1.0. A 0.70 share commands 0.50, while today's
-unachievable 1.0 request rails the pedal and the truck delivers its full 0.71. The
-share would make loaded trucks *slower than no envelope at all*, which is the exact
-complaint this work exists to fix.
+A truck that really cannot meet the shape now rails the pedal, which is what a driver
+does and what Sport does on purpose. The mapper is built for that: its fast integrator
+is back-calculated while the pedal is saturated, and its slow integrator does not wind
+against a railed pedal.
 
-So the fraction is a single control constant at 0.95, whose only job is to keep the
-pedal just off the rail so the mapper's fast PI keeps trim authority and
-`ff_saturated` stops firing in steady cruise.
+Do not bring it back as a per-profile share either. Normal = 0.70 x capability was
+costed and rejected before the estimate was even in question: a 40 t rig at 85 km/h
+has 0.71 m/s² at gas=1.0, so the share commands 0.50 where railing delivers 0.71.
 
-Which term binds, on a 40 t rig with the cold-start capacity anchor: Efficiency and
-Normal are shape-bound at every speed, and Sport is capability-bound above roughly
-30 km/h. So the capability guard is in practice a Sport-only limiter, and the two
-calmer profiles never see it. On a steep incline the mapper's grade feed-forward
-pushes the pedal past the rail and the truck falls short of even the capability
-figure, which is the one place a Sport driver notices a ceiling at all.
+### ACC with no lead, or a lead far ahead
 
-### Reading the capability estimate
+ACC's cap is min-merged with the cruise bid. With no lead it used to bid a flat
+`NO_LEAD_CEILING_MS2` (1.5 m/s²), which capped every profile on an empty road: in the
+2026-10-19 log Sport held exactly 1.50 to 90 km/h. Behind any tracked lead (tracker range
+150 m) the IIDM law did the same thing through its free-road term, `a_max (1 - (v/v0)^δ)`
+with `a_max` 1.5, even when the lead was far away and pulling away.
 
-- Fetched with the same defensive registry pattern as `_read_hold_active_safe`. A
-  missing or crashed `sending_thread` yields unknown, never an exception.
-- Non-finite or `<= 0.05` counts as **unknown**, and the envelope falls back to `shape`
-  alone. The publisher legitimately zeroes the field while disconnected or idle, so
-  this path is normal rather than exceptional.
-- The published value is per-gear and steps by the learned ratio (~1.27) at every
-  shift. `_CAPACITY_EMA_TAU_S` smooths it, frozen while `_gearshift_d_factor()` is 0
-  so no mid-shift value is ingested, and held rather than cleared when the estimate
-  goes unknown for a tick.
+The orchestrator now hands CC's bid to the ACC child, which turns it into a free-road
+target (`free_road_target_ms2` in `core/longitudinal/acc.py`): the bid clamped to
+`[NO_LEAD_CEILING_MS2, a_max + j_onset_dead]`, 1.5 to 2.5 m/s². With no lead that target
+is ACC's cap. With a lead, `core/cruise_control_thread/free_road_lift.py` raises the law
+toward it while the law already grants nearly its whole free-road accel, and not at all
+once the lead binds (`core/cruise_control_thread/README.md`, "Free-road lift"). Both go
+through ACC's own jerk limiter and output filter. Below 1.5 nothing changed.
+
+The 2.5 bound is load-bearing. From it, a lead that starts to bind (law near 1.4) is met
+at the plain 2.5 m/s³ jerk rate, because the drop stays inside the onset chase's 1.0 m/s²
+dead band. A 4.0 bound stepped the command down through the onset chase every time a car
+came into range. Normal's strongest bid (2.2) is under it, so ACC never caps Normal or
+Efficiency on a free road; Sport with ACC on is held at 2.5 there, which no truck exceeds
+outside the lowest gears. With ACC off Sport has no ceiling at all.
+
+Measured behind a faster lead 80 m ahead (closed loop, 3.0 m/s² truck): 0 to 40 km/h took
+7.8 s on the law alone, 5.4 s on Normal and 4.8 s on Sport, with the gap above 115 m.
+Closing on a slower or stopped lead from 150 m, minimum gap and peak decel were identical
+with and without the lift and top speed rose by at most 0.9 km/h, because closing speed
+takes the law out of the band within a second or two. The platoon sim is bit-identical
+with the lift on and off, on Normal and on Sport. Enforced by
+`tests/acc/test_no_lead_follow.py` and `tests/acc/test_free_road_lift.py`.
 
 ### Rise limiting
 
-Comfort is dominated by jerk, not peak acceleration, so each profile rate-limits how
-fast its bid may climb. Two details are load-bearing:
+Comfort is dominated by jerk, not peak acceleration, so each comfort profile
+rate-limits how fast its bid may climb. Two details are load-bearing:
 
 - The limit is measured against `max(prev_bid, 0)`, not the raw previous bid. Against a
   raw -0.5 a bid moving to +0.3 would be held negative for several ticks and read as
@@ -162,6 +166,18 @@ limiter bids nothing and resets its PID state, while the enabled flag and target
 set so the cap is back on the first connected tick. The zeroed pedals in
 `sending_thread`'s disconnected branch used to be the only defence against that stale
 bid.
+
+### D-term on low-passed speed
+
+The D-term differentiates the same power-shaped error as the P-term, but on speed through a
+0.10 s low-pass (`_KD_SPEED_SMOOTH_TAU_S`). Telemetry speed only moves at the game's ~20 Hz
+physics rate while the limiter ticks at the polling rate (100 Hz), so the tick-to-tick
+derivative was zero for four ticks and five times too large on the fifth, and the bid jumped
+by up to 0.4 m/s² between 10 Hz log samples (2026-10-21). Gains, the overshoot boost and how
+fast the cap reacts are unchanged: on a 20 Hz staircase at 0.25 m/s² the low-pass cuts the
+D-term ripple from 0.23 to 0.02 m/s² with the same mean. Do not smooth the output instead: the
+limiter's positive bid caps the driver's own pedal, and a slower cap lets the truck through
+the limit. Enforced by `tests/longitudinal/test_limiter_d_term.py`.
 
 ### Overshoot protection
 

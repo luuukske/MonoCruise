@@ -86,6 +86,20 @@ def _finite_or_zero(value: object) -> float:
     return result
 
 
+def release_stationary_auto_brake(
+    hill_assist: bool,
+    aeb_active: bool,
+    speed_kmh: float,
+    wanted_ms2: float,
+) -> bool:
+    """Hill assist off: a stop with no braking command must not keep the pedal down."""
+    if hill_assist or aeb_active:
+        return False
+    if abs(_finite_or_zero(speed_kmh)) >= _HOLD_CAPTURE_SPEED_KMH:
+        return False
+    return _finite_or_zero(wanted_ms2) >= 0.0
+
+
 def _road_grade_rad_from_norm(pitch: float) -> float:
     """Convert telemetry rotationY (normalized full-circle) to clamped radians. See `core/sending_thread/README.md`."""
     val = _finite_or_zero(pitch)
@@ -291,8 +305,12 @@ class HoldController:
         game_clutch: float = 0.0,
         auto_neutral_active: bool = False,
         crawl_follow: bool = False,
+        enabled: bool = True,
     ) -> HoldOutput:
         """Advance the FSM by one tick and produce a brake floor. See `core/sending_thread/README.md`."""
+        if not enabled:
+            self.reset()
+            return HoldOutput()
         dt = max(0.0, _finite_or_zero(dt))
         speed_kmh = _finite_or_zero(speed_kmh)
         gear = int(_finite_or_zero(gear))

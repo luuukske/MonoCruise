@@ -25,7 +25,13 @@ from core.scs_profile.intensity import (
     effective_brake_pedal,
 )
 
-from .accel_to_pedals import AccelToPedals, MapperSharedState, baseline_accel_ms2, baseline_brake_ms2
+from .accel_to_pedals import (
+    AccelToPedals,
+    MapperSharedState,
+    baseline_accel_ms2,
+    baseline_brake_ms2,
+    weight_factor,
+)
 from .aeb_capacity import (
     FULL_SENT,
     AebCapacityStore,
@@ -36,13 +42,14 @@ from .aeb_capacity import (
     full_pedal_key,
     truck_key,
 )
-from .debug_csv import BrakeDebugLog, open_debug_csv
+from .debug_csv import BrakeDebugLog, GasLearnDebugLog, open_debug_csv
 from .hold_controller import (
     HoldController,
     STATE_HOLDING,
     STATE_LAUNCHING,
     STATE_ROLLING,
     STATE_STOPPING,
+    release_stationary_auto_brake,
 )
 from .pedal_capacity import PedalCapacityTracker
 from .scscontroller import SCSController
@@ -335,8 +342,6 @@ class SendingThreadData(ThreadData):
     aforward: float = 0.0
     abackward: float = 0.0
     hazardsActive: bool = False
-    horn_active: bool = False
-    airhorn_active: bool = False
     decel_measured_ms2: float = 0.0
     decel_measured_lead_ms2: float = 0.0
     mapper_commanded_ms2: float = 0.0
@@ -464,6 +469,7 @@ class SendingThread(BaseThread):
         except Exception:
             self._project_root = Path(".").resolve()
         self._brake_log = BrakeDebugLog(self._project_root)
+        self._gas_learn_log = GasLearnDebugLog(self._project_root)
 
     # Coast-down CSV logger
 
@@ -1176,6 +1182,9 @@ class SendingThread(BaseThread):
                     mapper_learn = False
                 self._prev_active_controller = cruise_active_controller
 
+                # Hill assist off leaves the hold in ROLLING so the integral is not frozen.
+                if not (bool(Settings.hill_assist) or _aeb_active):
+                    self._hold.reset()
                 # Freeze the mapper's slow integral when the hold FSM owns
                 hold_freeze_slow_i = self._hold.state in (
                     STATE_STOPPING, STATE_HOLDING, STATE_LAUNCHING
@@ -1191,6 +1200,7 @@ class SendingThread(BaseThread):
                         tel_gear, mass_kg, has_t
                     ),
                     max_brake_ms2=self._capacity_tracker.max_brake_ms2,
+                    accel_offset_ms2=self._capacity_tracker.accel_zero_offset_ms2,
                     road_pitch=road_pitch,
                     cruise_commanding=mapper_engaged,
                     gear_dashboard=tel_gear_dashboard,
@@ -1283,8 +1293,6 @@ class SendingThread(BaseThread):
                 self.data.hold_state = STATE_ROLLING
                 self.data.auto_neutral_holding = False
                 self.data.hazardsActive = tel_hazards
-                self.data.horn_active = bool(getattr(controller, "horn", False))
-                self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
                 self.data.decel_active = False
                 self.data.decel_brake_output = 0.0
                 self.data.user_gas_above_mapper = False
@@ -1334,8 +1342,6 @@ class SendingThread(BaseThread):
                 # must not read as "neutral released" to cruise_control.
                 self.data.auto_neutral_holding = self._auto_neutral_owns_gearbox()
                 self.data.hazardsActive = tel_hazards
-                self.data.horn_active = bool(getattr(controller, "horn", False))
-                self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
                 self.data.decel_active = False
                 self.data.decel_brake_output = 0.0
                 self.data.user_gas_above_mapper = False
@@ -1385,8 +1391,6 @@ class SendingThread(BaseThread):
                 self.data.abackward = logical_b
                 self.data.recent_brake_outputs = tuple(self._recent_brake_outputs)
                 self.data.hazardsActive = tel_hazards
-                self.data.horn_active = bool(getattr(controller, "horn", False))
-                self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
             self._tick_hazards(controller, tel_hazards)
             return
 
@@ -1419,8 +1423,6 @@ class SendingThread(BaseThread):
                 # must not read as "neutral released" to cruise_control.
                 self.data.auto_neutral_holding = self._auto_neutral_owns_gearbox()
                 self.data.hazardsActive = tel_hazards
-                self.data.horn_active = bool(getattr(controller, "horn", False))
-                self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
                 self.data.decel_active = False
                 self.data.decel_brake_output = 0.0
                 self.data.user_gas_above_mapper = False
@@ -1507,6 +1509,8 @@ class SendingThread(BaseThread):
                     a = max(opdgasval, mapper_gas)
 
         # Brake merge: when the user is overriding CC/ACC with OPD gas, drop
+        # the mapper brake. driver_b is that pedal before the mapper is added.
+        driver_b = b
         if not cc_overridden_by_opd:
             b = max(b, mapper_brake)
 
@@ -1547,8 +1551,14 @@ class SendingThread(BaseThread):
             auto_neutral_active=self._autoneutral_neutral,
             # Only while ACC's bid is the command; any other commander keeps the plain capture.
             crawl_follow=crawl_follow and cruise_active_controller == "cc",
+            enabled=bool(Settings.hill_assist) or _aeb_active,
         )
-        b = max(b, hold_out.brake_pedal)
+        if release_stationary_auto_brake(
+            bool(Settings.hill_assist), _aeb_active, speed_kmh, wanted_a,
+        ):
+            b = driver_b
+        else:
+            b = max(b, hold_out.brake_pedal)
 
         # Mapper creep-cancel cushion (OPD or auto-neutral only). Full cancel
         cushion = self._tick_gear_engage_cushion(
@@ -1622,9 +1632,10 @@ class SendingThread(BaseThread):
             b = 0.0
         # end human made
 
-        # Brake-light bump: when the truck is stationary in gear with the
+        # Brake-light bump: stationary in gear, only while hill assist is holding.
         if (
-            abs(speed_kmh) < 0.5
+            bool(Settings.hill_assist)
+            and abs(speed_kmh) < 0.5
             and gear != 0
             and engine_rpm > 100.0
             and b < 0.001
@@ -1765,6 +1776,32 @@ class SendingThread(BaseThread):
                 )
             except Exception:
                 logger.debug("brake_debug tick failed", exc_info=True)
+            try:
+                if a > 0.01:
+                    tracker = self._capacity_tracker
+                    self._gas_learn_log.tick(time.monotonic(), True, {
+                        "speed_ms": speed_ms,
+                        "gear": tel_gear,
+                        "gas_cmd": a,
+                        "gas_owner": "mapper" if mapper_owned_gas else "driver",
+                        "controller": cruise_active_controller,
+                        "game_throttle": game_throttle,
+                        "raw_ms2": raw_a,
+                        "road_load_ms2": mapper_road_load_ms2 - mapper_creep_ms2,
+                        "slope_rad": brake_grade_rad,
+                        "game_clutch": game_clutch,
+                        "mass_kg": mass_kg,
+                        "has_trailer": has_t,
+                        "learn_gate": tracker.last_accel_gate,
+                        "learn_count": tracker.accel_samples_accepted,
+                        "accel_anchor": tracker.accel_anchor_ms2,
+                        "accel_ratio": tracker.accel_ratio_step,
+                        "accel_offset_ms2": tracker.accel_zero_offset_ms2,
+                        "est_accel_ms2": tracker.accel_gain_for_gear(tel_gear, mass_kg, has_t)
+                        / max(weight_factor(mass_kg, has_t), 1e-6),
+                    })
+            except Exception:
+                logger.debug("gas_learn_debug tick failed", exc_info=True)
 
         self._tick_bool_presses(controller)
 
@@ -1778,8 +1815,6 @@ class SendingThread(BaseThread):
             self.data.auto_neutral_holding = self._auto_neutral_owns_gearbox()
             self.data.recent_brake_outputs = tuple(self._recent_brake_outputs)
             self.data.hazardsActive = tel_hazards
-            self.data.horn_active = bool(getattr(controller, "horn", False))
-            self.data.airhorn_active = bool(getattr(controller, "airhorn", False))
             self.data.decel_active = False
             self.data.decel_brake_output = 0.0
             self.data.decel_measured_ms2 = measured_decel_ms2
@@ -1838,8 +1873,6 @@ class SendingThread(BaseThread):
             self.data.hold_state = STATE_ROLLING
             self.data.auto_neutral_holding = False
             self.data.hazardsActive = False
-            self.data.horn_active = False
-            self.data.airhorn_active = False
             self.data.decel_active = False
             self.data.decel_brake_output = 0.0
             self.data.decel_measured_ms2 = 0.0
@@ -1874,6 +1907,7 @@ class SendingThread(BaseThread):
         self._accel_mapper.close()
         self._close_coast_log()
         self._brake_log.close()
+        self._gas_learn_log.close()
         logger.debug("teardown complete")
 
     def _tick_bool_overrides(self, controller: SCSController) -> None:

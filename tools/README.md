@@ -14,13 +14,15 @@ hygiene rules apply to every file in it.
 | `clip_export/` | Clean top-down showcase video of one clip for trailers and docs: auto-reframes on ego and the threat, removes 60 Hz tick jitter. Read `tools/clip_export/README.md` first. |
 | `aeb_agent/` | Headless clip review for an agent: text dossiers instead of watching a clip, scenario tags, mistag audit, and a validated propose/apply/revert path for labels. Read `tools/aeb_agent/README.md` first. |
 | `acc_platoon/` | Ten MonoCruise clients in a TruckersMP convoy, closed loop: does ACC absorb a disturbance or grow it into a phantom jam, and is it still safe? Real radar chain, ACC, cruise PID, hold and (opt-in) AEB per client; TMP netcode modelled and calibrated on the clip corpus. `tests/acc/test_platoon.py` stands on it. Read `tools/acc_platoon/README.md` first. |
-| `accel_envelope_probe.py` | What does the CC accel ceiling command at each speed, and how long is 0-50 / 0-90? Prints the per-profile table plus a capability-limited rig model (`--rig loaded`) so the light and loaded regimes can be compared. |
+| `capacity_learner_replay.py` | Replays one day of `accel_to_pedals_debug.csv` into the gas-side capacity learner at the live loop rate and prints how far the high-gear estimate wandered. `--csv gas_learn_debug.csv` replays every tick the learner saw, the driver's own pedal included. Run it before touching any `update_accel` gate (`core/sending_thread/README.md`). Never saves. |
+| `accel_envelope_probe.py` | What does the CC accel ceiling command at each speed, and how long is 0-50 / 0-90? Prints the per-profile table; `--rig loaded` (or `solo`, `midweight`) limits the request to a rig model's full-pedal accel, so the light and loaded regimes can be compared. |
 | `brake_intensity_probe.py` | Reads `brake_debug.csv` (written with `debug` on): full-pedal capacity per braking-intensity value (how much a higher slider really adds at full brake), and lag-aligned partial braking against the learned capacity. Stdlib only, never imports `core.settings`. |
 | `ego_geometry_probe.py` | Ego body and path origin the SDK wheel layout gives for the live truck (`--json` for agents), and with `--clips` the evidence for the rear-wheel path origin over the local clip store. Never imports `core.settings`. See `core/radar/README.md` §17. |
 | `tmp_ncz_probe.py` | Live TruckersMP no-collision zone state from MonoCruise's plugin (`monocruise_tmp.dll`): heartbeat, connected, in-zone, streamed players and whether the AEB gate would open. The state carries no player identity. See `core/radar/README.md` §18. |
+| `tmp_sdk_probe.py`, `tmp_sdk_analyze.py` | TMP lag experiment: does the TruckersMP SDK's own vehicle velocity and network sample arrival beat the position-derived speed and the lag freeze? `tmp_sdk_probe.py live` shows the nearest bodies, `record` writes SDK block, ETS2LA traffic and ego pose to `tools/tmp_sdk_runs/` (gitignored); `tmp_sdk_analyze.py <file>` matches bodies, replays the radar chain at 30 Hz and reports speed lead, packet gaps and freezes. Needs plugin 1.0.3 (`tmp_plugin/README.md`, "Experimental vehicle block"). |
 | `read_scs_profile.py` | Transmission and braking intensity for the selected ETS2/ATS profile. Steam Cloud vs local, `game.log.txt` identity, live `shifterType` when the SDK is up. `--json` for agents. |
 | `plot_coast.py` | Coast-fit plots for the mapper. |
-| `release.py`, `tune_visualizer.py` | Release packaging and live tuning UI. |
+| `release.py`, `tune_visualizer.py` | Release packaging and live tuning UI. The stable-release SourceForge step is in `release.yml`, see "SourceForge default download" below. |
 | `fetch_sdk_bundle.py` | Build helper, run by `release.yml`: downloads the live ETS2LA game plugin set for every published game version into `core/sdk_installer/bundled/`, the app's offline fallback. See "Bundled fallback" in `core/sdk_installer/README.md`. |
 
 ---
@@ -324,3 +326,27 @@ releases that link the moment it is used by hand.
 `ClipLoader` builds the trace on its own thread from the decode the replay
 already paid for, so opening the charts costs about 0.1 s per clip in the
 background and nothing on the GUI thread.
+
+## SourceForge default download
+
+Publishing a **stable** release on GitHub makes its installer the file behind
+the standard Download button on SourceForge, for every platform. This is the
+`sourceforge-default` job in `.github/workflows/release.yml`.
+
+SourceForge mirrors the GitHub release by itself a few minutes after publish,
+under `/<tag>/`. The job polls its file listing for up to 30 minutes, then sets
+the installer as default with SourceForge's release API. Without it,
+SourceForge picks a default per platform by heuristic: Mac and Linux visitors
+were being handed the newest upload, a preview.
+
+- **Secret:** repository secret `SF_API_KEY`, the "Releases API Key" generated
+  on the SourceForge account page of a project admin or release technician.
+- **Previews never qualify.** The job runs on `release: published`, and CI
+  publishes previews with `GITHUB_TOKEN`, which fires no workflow. It also
+  refuses any draft, prerelease or non `vX.Y.Z` tag, so a manual run cannot
+  promote one either.
+- **Retry or test:** run the workflow by hand with `sourceforge_tag` set to an
+  existing stable tag. Only this job runs, no build. The step logs what
+  SourceForge now lists per platform; that list may be cached for a while.
+- **Timing:** a stable release stays a draft until you publish it, so the
+  default flips when you publish, not when CI attaches the build.

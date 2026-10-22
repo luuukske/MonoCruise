@@ -13,6 +13,10 @@ logger = logging.getLogger(__name__)
 
 _TARGET_SPEED_EMA_TAU_S = 0.5
 
+# D-term speed low-pass. Telemetry speed steps at the game's ~20 Hz physics rate, so a
+# tick-to-tick derivative of it spiked the bid. Short, so the limiter stays quick.
+_KD_SPEED_SMOOTH_TAU_S = 0.10
+
 # Overshoot kp boost: multiplier reached once overshoot exceeds the blend band.
 _OVERSHOOT_BOOST = 2.0
 _OVERSHOOT_BOOST_BAND_MS = 0.3
@@ -42,6 +46,11 @@ _ACCEL_TRACK_TAU_S = 0.15
 _LIMITER_MAX_DECEL_MS2 = 1.0
 
 
+def _shaped(error_ms: float) -> float:
+    """Power-shaped error: small errors amplified, large errors compressed."""
+    return math.copysign(abs(error_ms) ** 0.9, error_ms)
+
+
 class SpeedLimiter(LongitudinalController):
     """Set-speed PID for the speed-limiter mode."""
 
@@ -52,7 +61,8 @@ class SpeedLimiter(LongitudinalController):
         self._target_kmh: float | None = None
 
         self._integral_error: float = 0.0
-        self._prev_shaped_error: float | None = None
+        self._prev_d_shaped_error: float | None = None
+        self._kd_speed_smooth_ms: float | None = None
         self._last_target_for_integral: float | None = None
         self._target_speed_ema_ms: float | None = None
 
@@ -87,7 +97,8 @@ class SpeedLimiter(LongitudinalController):
 
     def reset(self) -> None:
         self._integral_error = 0.0
-        self._prev_shaped_error = None
+        self._prev_d_shaped_error = None
+        self._kd_speed_smooth_ms = None
         self._last_target_for_integral = None
         self._target_speed_ema_ms = None
         self._accel_track_smooth_ms = None
@@ -115,13 +126,15 @@ class SpeedLimiter(LongitudinalController):
         clamp = float(Settings.limiter_integral_clamp)
 
         error_ms = target_ms - ctx.speed_ms
-        # Power-shaped error: small errors amplified, large errors compressed.
-        shaped_error = math.copysign(abs(error_ms) ** 0.9, error_ms)
+        shaped_error = _shaped(error_ms)
         self._integral_error += shaped_error * ctx.dt
         self._integral_error = max(-clamp, min(clamp, self._integral_error))
 
-        d_term = kd * (shaped_error - self._prev_shaped_error) / ctx.dt if self._prev_shaped_error is not None else 0.0
-        self._prev_shaped_error = shaped_error
+        # Same shaped error, on low-passed speed, so the D-term does not chatter.
+        d_shaped_error = _shaped(target_ms - self._smooth_kd_speed(ctx.speed_ms, ctx.dt))
+        prev_d = self._prev_d_shaped_error
+        d_term = kd * (d_shaped_error - prev_d) / ctx.dt if prev_d is not None else 0.0
+        self._prev_d_shaped_error = d_shaped_error
 
         # Boost kp when overshooting so ego decelerates faster back to the limit.
         # See `core/longitudinal/README.md`.
@@ -191,6 +204,15 @@ class SpeedLimiter(LongitudinalController):
         alpha = 1.0 - math.exp(-dt / max(tau, 1e-6))
         self._accel_track_smooth_ms += alpha * (speed_ms - self._accel_track_smooth_ms)
         return accel
+
+    def _smooth_kd_speed(self, speed_ms: float, dt: float) -> float:
+        tau = _KD_SPEED_SMOOTH_TAU_S
+        alpha = dt / (tau + dt) if tau > 0.0 else 1.0
+        if self._kd_speed_smooth_ms is None:
+            self._kd_speed_smooth_ms = speed_ms
+        else:
+            self._kd_speed_smooth_ms += alpha * (speed_ms - self._kd_speed_smooth_ms)
+        return self._kd_speed_smooth_ms
 
     def _smooth_target_ema(self, target_ms: float, dt: float) -> float:
         tau = _TARGET_SPEED_EMA_TAU_S

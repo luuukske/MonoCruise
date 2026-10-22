@@ -1,9 +1,9 @@
-"""The CC accel ceiling is speed-scheduled and bounded by truck capability.
+"""The CC accel ceiling is a speed-scheduled comfort shape, and Sport has none.
 
 A flat ceiling (the old cc_accel_max_ms2 = 1.0) is wrong at both ends: weak off
-the line, a shove at highway speed. The shape function fixes that. The capability
-term keeps the request honest, but only as a headroom guard: a per-profile share
-of capability would make a loaded truck slower than no envelope at all.
+the line, a shove at highway speed. The shape fixes that. There is no capability
+term: the estimate under-read low gears about 2x and held town pulls at 1.3 m/s2
+on a truck doing that at a third of its pedal (mapper log, 2026-10-19).
 """
 from __future__ import annotations
 
@@ -14,11 +14,9 @@ import pytest
 import core.longitudinal.cc as cc_mod
 from core.longitudinal.accel_envelope import (
     EFFICIENCY,
-    HEADROOM_FRAC,
     NORMAL,
     PROFILES,
     SPORT,
-    envelope_ms2,
     resolve_profile,
     rise_limited_ms2,
     shape_ceiling_ms2,
@@ -38,14 +36,14 @@ class _FakeSettings:
     cc_kd = 0.2
     cc_integral_clamp = 3.0
     cc_accel_min_ms2 = -1.0
-    cc_accel_max_ms2 = 2.5
+    cc_accel_max_ms2 = 4.0
     cc_accel_profile = "Normal"
 
 
 @pytest.fixture
 def fake_settings(monkeypatch):
     _FakeSettings.cc_accel_profile = "Normal"
-    _FakeSettings.cc_accel_max_ms2 = 2.5
+    _FakeSettings.cc_accel_max_ms2 = 4.0
     monkeypatch.setattr(cc_mod, "Settings", _FakeSettings)
     return _FakeSettings
 
@@ -85,20 +83,24 @@ def test_shape_is_monotone_non_increasing_in_speed(profile):
         assert faster <= slower + 1e-12
 
 
-@pytest.mark.parametrize("profile", PROFILES, ids=lambda p: p.label)
-def test_shape_is_continuous_at_the_knee(profile):
-    below = shape_ceiling_ms2(profile.knee_ms - 1e-6, profile)
-    at = shape_ceiling_ms2(profile.knee_ms, profile)
-    above = shape_ceiling_ms2(profile.knee_ms + 1e-6, profile)
-    assert below == pytest.approx(at, abs=1e-6)
-    assert above == pytest.approx(at, abs=1e-6)
+@pytest.mark.parametrize("profile", (EFFICIENCY, NORMAL), ids=lambda p: p.label)
+def test_shape_has_no_kink_anywhere(profile):
+    """A knee is a jerk step the driver feels; the slope must change gradually."""
+    h = 0.01
+    slopes = [
+        (shape_ceiling_ms2(v + h, profile) - shape_ceiling_ms2(v, profile)) / h
+        for v in (i * 0.05 for i in range(800))
+    ]
+    assert abs(slopes[0]) < 1e-3, "the launch must start flat"
+    for a, b in zip(slopes, slopes[1:]):
+        assert abs(b - a) < 2e-3
 
 
-@pytest.mark.parametrize("profile", PROFILES, ids=lambda p: p.label)
+@pytest.mark.parametrize("profile", (EFFICIENCY, NORMAL), ids=lambda p: p.label)
 def test_shape_stays_inside_its_own_bounds(profile):
     for v in SPEEDS_MS:
         value = shape_ceiling_ms2(v, profile)
-        assert profile.floor_ms2 - 1e-12 <= value <= profile.launch_ms2 + 1e-12
+        assert profile.cruise_ms2 - 1e-12 <= value <= profile.launch_ms2 + 1e-12
 
 
 def test_profiles_are_strictly_ordered_at_every_speed():
@@ -115,36 +117,43 @@ def test_default_profile_answers_both_halves_of_the_complaint():
     assert shape_ceiling_ms2(85 / 3.6, NORMAL) < 1.0, "a shove at highway speed"
 
 
-def test_normal_raised_the_launch_without_touching_the_highway_tail():
-    """The tail is launch_ms2 * knee_ms when taper_power is 1.0, and it is pinned."""
-    assert NORMAL.taper_power == 1.0
-    assert NORMAL.launch_ms2 * NORMAL.knee_ms == pytest.approx(1.50 * (35 / 3.6))
-    for kmh in (40, 50, 70, 85, 110):
-        v = kmh / 3.6
-        assert shape_ceiling_ms2(v, NORMAL) == pytest.approx((1.50 * (35 / 3.6)) / v)
+@pytest.mark.parametrize("profile", (EFFICIENCY, NORMAL), ids=lambda p: p.label)
+def test_the_pull_does_not_fall_away_through_town_speeds(profile):
+    """2026-10-19: Efficiency asked 0.14 m/s2 at 50 km/h and felt broken.
 
-
-def test_efficiency_eases_off_right_after_launch():
-    """The old flat plateau out to 30 km/h asked for more pedal than the speed warranted."""
-    assert shape_ceiling_ms2(20 / 3.6, EFFICIENCY) < 1.0
-    assert EFFICIENCY.knee_ms < 15 / 3.6, "taper has to start just above the launch"
-    # The highway tail is deliberately left near where it already was.
-    assert shape_ceiling_ms2(85 / 3.6, EFFICIENCY) == pytest.approx(0.40, abs=0.05)
-
-
-def test_sport_is_high_enough_that_capability_is_the_real_limit():
-    """Sport should be met only where the truck runs out of engine.
-
-    Capability at gas=1.0 tops out near 1.4 m/s2 even on a light rig above
-    40 km/h, so a shape above that is never the binding term on flat ground.
+    No 10 km/h step may cost more than a fifth of the pull.
     """
-    for kmh in (40, 60, 85, 110, 130):
-        assert shape_ceiling_ms2(kmh / 3.6, SPORT) > 1.4
+    for kmh in range(0, 130, 10):
+        here = shape_ceiling_ms2(kmh / 3.6, profile)
+        nxt = shape_ceiling_ms2((kmh + 10) / 3.6, profile)
+        assert nxt > 0.8 * here, f"{profile.label} drops off a cliff at {kmh} km/h"
 
 
-def test_broken_speed_telemetry_bids_the_least_not_the_most():
+def test_normal_keeps_a_real_pull_until_well_past_town_speed():
+    assert shape_ceiling_ms2(30 / 3.6, NORMAL) > 1.5
+    assert shape_ceiling_ms2(50 / 3.6, NORMAL) > 1.1
+    assert shape_ceiling_ms2(90 / 3.6, NORMAL) > 0.75, "a highway resume must not crawl"
+
+
+def test_efficiency_is_a_softer_normal_at_every_speed():
+    """Same curve family: the driver feels one character, gentler, not a new shape."""
+    for v in SPEEDS_MS:
+        ratio = shape_ceiling_ms2(v, EFFICIENCY) / shape_ceiling_ms2(v, NORMAL)
+        assert 0.5 <= ratio <= 0.75, f"ratio {ratio:.2f} at {v * 3.6:.0f} km/h"
+    assert shape_ceiling_ms2(90 / 3.6, EFFICIENCY) > 0.4, "a highway resume must not crawl"
+
+
+def test_sport_has_no_acceleration_ceiling():
+    """Full throttle at every speed: the shape is not a comfort curve."""
+    for kmh in (0, 10, 40, 85, 130):
+        assert shape_ceiling_ms2(kmh / 3.6, SPORT) > 20.0
+    assert SPORT.uncapped
+
+
+@pytest.mark.parametrize("profile", PROFILES, ids=lambda p: p.label)
+def test_broken_speed_telemetry_bids_the_least_not_the_most(profile):
     for bad in (float("nan"), float("inf"), None, "fast"):
-        assert shape_ceiling_ms2(bad, SPORT) == SPORT.floor_ms2
+        assert shape_ceiling_ms2(bad, profile) <= min(profile.cruise_ms2, 0.5)
 
 
 # Profile lookup
@@ -164,38 +173,6 @@ def test_settings_normalizer_matches_the_profile_table():
     assert Settings._normalize_accel_profile(None) == "Normal"
 
 
-# Envelope
-
-
-def test_abundant_capability_leaves_the_comfort_shape_in_charge():
-    v = 20 / 3.6
-    assert envelope_ms2(v, NORMAL, 10.0) == pytest.approx(shape_ceiling_ms2(v, NORMAL))
-
-
-def test_scarce_capability_binds_with_headroom_left():
-    v = 20 / 3.6
-    assert envelope_ms2(v, NORMAL, 0.5) == pytest.approx(HEADROOM_FRAC * 0.5)
-
-
-@pytest.mark.parametrize("unknown", [None, 0.0, -1.0, float("nan"), float("inf"), "n/a"])
-def test_unknown_capability_falls_back_to_the_shape(unknown):
-    v = 60 / 3.6
-    assert envelope_ms2(v, NORMAL, unknown) == pytest.approx(shape_ceiling_ms2(v, NORMAL))
-
-
-def test_capability_guard_never_asks_for_more_than_the_truck_has():
-    for cap in (0.2, 0.4, 0.8, 1.6):
-        for v in SPEEDS_MS:
-            assert envelope_ms2(v, SPORT, cap) <= cap
-
-
-def test_profiles_converge_when_capability_is_the_binding_term():
-    """A loaded truck at highway speed has no choice left to make."""
-    v, cap = 70 / 3.6, 0.40
-    values = {envelope_ms2(v, p, cap) for p in PROFILES}
-    assert len(values) == 1
-
-
 # Rise limit
 
 
@@ -212,7 +189,11 @@ def test_falling_bids_are_never_rate_limited():
 
 
 def test_first_commanding_tick_ramps_from_zero():
-    assert rise_limited_ms2(2.0, None, SPORT, 0.02) == pytest.approx(SPORT.rise_jerk_ms3 * 0.02)
+    assert rise_limited_ms2(2.0, None, NORMAL, 0.02) == pytest.approx(NORMAL.rise_jerk_ms3 * 0.02)
+
+
+def test_sport_does_not_ramp_the_bid():
+    assert rise_limited_ms2(4.0, None, SPORT, 0.02) == 4.0
 
 
 def test_rise_limit_respects_the_profile_ordering():
@@ -226,8 +207,7 @@ def test_rise_limit_respects_the_profile_ordering():
 # CruiseController integration
 
 
-def test_bid_ceiling_falls_as_speed_rises(cc, sending):
-    sending.set(mapper_est_max_accel_ms2=10.0)
+def test_bid_ceiling_falls_as_speed_rises(cc):
     low = settle(cc, 20 / 3.6)
     cc.reset()
     high = settle(cc, 85 / 3.6)
@@ -236,8 +216,7 @@ def test_bid_ceiling_falls_as_speed_rises(cc, sending):
     assert high == pytest.approx(shape_ceiling_ms2(85 / 3.6, NORMAL), abs=1e-3)
 
 
-def test_selected_profile_changes_the_bid_ceiling(cc, sending, fake_settings):
-    sending.set(mapper_est_max_accel_ms2=10.0)
+def test_selected_profile_changes_the_bid_ceiling(cc, fake_settings):
     seen = {}
     for label in ("Efficiency", "Normal", "Sport"):
         fake_settings.cc_accel_profile = label
@@ -246,9 +225,14 @@ def test_selected_profile_changes_the_bid_ceiling(cc, sending, fake_settings):
     assert seen["Efficiency"] < seen["Normal"] < seen["Sport"]
 
 
-def test_capacity_estimate_caps_the_bid(cc, sending):
-    sending.set(mapper_est_max_accel_ms2=0.5)
-    assert settle(cc, 20 / 3.6) == pytest.approx(HEADROOM_FRAC * 0.5, abs=1e-3)
+@pytest.mark.parametrize("estimate", [0.0, 0.5, 1.3, 10.0])
+def test_the_capacity_estimate_never_holds_the_bid_down(cc, sending, estimate):
+    """2026-10-19 log: 0.95 x an estimate of 1.36 held a town pull at 1.29 m/s2.
+
+    The truck did that on 20 to 50 % gas; a truck that really is weaker rails the pedal.
+    """
+    sending.set(mapper_est_max_accel_ms2=estimate)
+    assert settle(cc, 20 / 3.6) == pytest.approx(shape_ceiling_ms2(20 / 3.6, NORMAL), abs=1e-3)
 
 
 def test_a_missing_sending_thread_does_not_raise(cc):
@@ -256,44 +240,43 @@ def test_a_missing_sending_thread_does_not_raise(cc):
     assert settle(cc, 50 / 3.6) == pytest.approx(shape_ceiling_ms2(50 / 3.6, NORMAL), abs=1e-3)
 
 
-def test_a_gear_change_does_not_step_the_ceiling(cc, sending):
-    """Published capacity is per-gear and jumps at each shift; the EMA absorbs it."""
-    sending.set(mapper_est_max_accel_ms2=0.60)
-    before = settle(cc, 50 / 3.6)
-    sending.set(mapper_est_max_accel_ms2=0.60 / 1.27)
-    after = cc.step(make_ctx(50 / 3.6, dt=0.02)).wanted_ms2
-    assert after < before
-    assert after > before * 0.97, "one tick moved the ceiling like a raw gear step"
-
-
-def test_the_safety_rail_still_caps_every_profile(cc, sending, fake_settings):
-    fake_settings.cc_accel_profile = "Sport"
+def test_the_safety_rail_caps_the_calmer_profiles(cc, fake_settings):
+    fake_settings.cc_accel_profile = "Efficiency"
     fake_settings.cc_accel_max_ms2 = 0.6
-    sending.set(mapper_est_max_accel_ms2=10.0)
     assert settle(cc, 20 / 3.6) == pytest.approx(0.6, abs=1e-3)
 
 
-def test_braking_authority_is_untouched_by_the_envelope(cc, sending):
+def test_sport_ignores_the_safety_rail(cc, fake_settings):
+    fake_settings.cc_accel_profile = "Sport"
+    fake_settings.cc_accel_max_ms2 = 0.6
+    assert settle(cc, 20 / 3.6) > 2.0
+
+
+def test_sport_bids_the_speed_error_from_the_first_tick(cc, fake_settings):
+    """No ramp and no ceiling: the pedal is meant to reach the floor at once."""
+    fake_settings.cc_accel_profile = "Sport"
+    assert cc.step(make_ctx(40 / 3.6, dt=0.02)).wanted_ms2 > 5.0
+
+
+def test_braking_authority_is_untouched_by_the_envelope(cc):
     """Overspeed: the bid must reach the unchanged negative clamp."""
-    sending.set(mapper_est_max_accel_ms2=0.3)
     cc.set_target_kmh(50.0)
     assert settle(cc, 110 / 3.6) == pytest.approx(_FakeSettings.cc_accel_min_ms2, abs=1e-3)
 
 
-def test_the_bid_is_always_finite(cc, sending):
-    for cap in (0.0, 0.3, 5.0):
-        sending.set(mapper_est_max_accel_ms2=cap)
+@pytest.mark.parametrize("label", ["Efficiency", "Normal", "Sport"])
+def test_the_bid_is_always_finite(cc, fake_settings, label):
+    fake_settings.cc_accel_profile = label
+    for kmh in (0, 20, 60, 130):
         cc.reset()
-        assert math.isfinite(settle(cc, 60 / 3.6, ticks=50))
+        assert math.isfinite(settle(cc, kmh / 3.6, ticks=50))
 
 
-def test_the_rise_limit_is_bypassed_in_neutral(cc, sending):
+def test_the_rise_limit_is_bypassed_in_neutral(cc):
     """Auto-neutral shifts back to drive off this bid crossing 0.25 m/s2.
 
-    Ramping from zero in neutral buys no comfort (no torque path to the wheels)
-    and delays every launch by up to half a second.
+    Ramping from zero in neutral buys no comfort and delays every launch.
     """
-    sending.set(mapper_est_max_accel_ms2=10.0)
     first = cc.step(make_ctx(2.0 / 3.6, dt=0.02, gear_dashboard=0)).wanted_ms2
     assert first > 0.25
 

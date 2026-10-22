@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 BRAKE_LOG_NAME: str = "brake_debug.csv"
 _BRAKE_LOG_INTERVAL_S: float = 0.05    # 20 Hz, the game's physics rate
 _BRAKE_LOG_TAIL_S: float = 2.0         # keep logging this long after braking ends
-_BRAKE_LOG_RETRY_S: float = 30.0       # back off after a failed open
+_LOG_RETRY_S: float = 30.0             # back off after a failed open
 BRAKE_LOG_HEADER: list[str] = [
     "t_s",
     "utc",
@@ -66,16 +66,48 @@ BRAKE_LOG_HEADER: list[str] = [
     "trailer_slip",
 ]
 
+# Gas learning inputs while the pedal is down, whoever owns it. The mapper log only
+# runs while the mapper commands, so the driver's own pulls never reached a replay.
+GAS_LEARN_LOG_NAME: str = "gas_learn_debug.csv"
+_GAS_LEARN_LOG_INTERVAL_S: float = 0.10    # 10 Hz, the mapper log's rate
+_GAS_LEARN_LOG_MAX_BYTES: int = 512 * 1024 * 1024
+GAS_LEARN_LOG_HEADER: list[str] = [
+    "t_s",
+    "utc",
+    "speed_ms",
+    "gear",
+    "gas_cmd",             # gas written to the game, what update_accel learns from
+    "gas_owner",           # mapper (its gas won the merge) or driver
+    "controller",
+    "game_throttle",
+    "raw_ms2",             # update_accel's measured accel, before its max(0, .)
+    "road_load_ms2",       # as passed to update_accel: road load less idle creep
+    "slope_rad",
+    "game_clutch",
+    "mass_kg",
+    "has_trailer",
+    "learn_gate",          # gate that ended the learner's last tick, "ok" when it learned
+    "learn_count",
+    "accel_anchor",
+    "accel_ratio",
+    "accel_offset_ms2",
+    "est_accel_ms2",       # full-pedal capability for this gear and mass, real units
+]
 
-def open_debug_csv(path: Path, header: list[str]):
+
+def open_debug_csv(path: Path, header: list[str], max_bytes: int | None = None):
     """Open *path* for appending under *header*. Returns (file, writer), or (None, None).
 
-    A file with a different header is rotated aside first: appending new columns
-    under an old header silently misaligns every later row.
+    A file with a different header, or one past *max_bytes*, is rotated aside first:
+    appending new columns under an old header silently misaligns every later row.
+    Only the header line is ever read, so opening costs the same at any file size.
     """
     try:
-        write_header = not path.exists() or path.stat().st_size == 0
-        if not write_header and _header_differs(path, header):
+        size = path.stat().st_size if path.exists() else 0
+        write_header = size == 0
+        if not write_header and (
+            (max_bytes is not None and size > max_bytes) or _header_differs(path, header)
+        ):
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             try:
                 path.rename(path.with_name(f"{path.stem}_{stamp}{path.suffix}"))
@@ -109,11 +141,18 @@ def _fmt(value: object) -> str:
     return str(value)
 
 
-class BrakeDebugLog:
-    """Every braking tick at 20 Hz plus a short tail, for offline brake-response fits."""
+class TickDebugLog:
+    """Rate-limited rows while *active* plus a tail, opened lazily, never raising OSError."""
 
-    def __init__(self, root: Path) -> None:
-        self._path = root / BRAKE_LOG_NAME
+    def __init__(
+        self, root: Path, name: str, header: list[str],
+        interval_s: float, tail_s: float, max_bytes: int | None = None,
+    ) -> None:
+        self._path = root / name
+        self._header = header
+        self._interval_s = interval_s
+        self._tail_s = tail_s
+        self._max_bytes = max_bytes
         self._file = None
         self._writer = None
         self._start_mono: float | None = None
@@ -122,17 +161,17 @@ class BrakeDebugLog:
         self._retry_at: float = -math.inf
 
     def tick(self, now: float, active: bool, row: dict[str, object]) -> None:
-        """Write *row* when braking is active or inside its tail. Never raises OSError."""
+        """Write *row* when active or inside the tail. Never raises OSError."""
         if active:
-            self._active_until = now + _BRAKE_LOG_TAIL_S
-        if now > self._active_until or now - self._last_write_mono < _BRAKE_LOG_INTERVAL_S:
+            self._active_until = now + self._tail_s
+        if now > self._active_until or now - self._last_write_mono < self._interval_s:
             return
         if self._writer is None:
             if now < self._retry_at:
                 return
-            self._file, self._writer = open_debug_csv(self._path, BRAKE_LOG_HEADER)
+            self._file, self._writer = open_debug_csv(self._path, self._header, self._max_bytes)
             if self._writer is None:
-                self._retry_at = now + _BRAKE_LOG_RETRY_S
+                self._retry_at = now + _LOG_RETRY_S
                 return
         self._last_write_mono = now
         if self._start_mono is None:
@@ -141,10 +180,10 @@ class BrakeDebugLog:
         values["t_s"] = now - self._start_mono
         values["utc"] = datetime.now(timezone.utc).isoformat()
         try:
-            self._writer.writerow([_fmt(values.get(k, "")) for k in BRAKE_LOG_HEADER])
+            self._writer.writerow([_fmt(values.get(k, "")) for k in self._header])
             self._file.flush()
         except OSError:
-            logger.debug("brake_debug write failed", exc_info=True)
+            logger.debug("%s write failed", self._path.name, exc_info=True)
 
     def close(self) -> None:
         if self._file is not None:
@@ -154,3 +193,22 @@ class BrakeDebugLog:
                 pass
         self._file = None
         self._writer = None
+
+
+class BrakeDebugLog(TickDebugLog):
+    """Every braking tick at 20 Hz plus a short tail, for offline brake-response fits."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(
+            root, BRAKE_LOG_NAME, BRAKE_LOG_HEADER, _BRAKE_LOG_INTERVAL_S, _BRAKE_LOG_TAIL_S,
+        )
+
+
+class GasLearnDebugLog(TickDebugLog):
+    """Every gas tick the learner sees, driver's pedal included, for offline replays."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(
+            root, GAS_LEARN_LOG_NAME, GAS_LEARN_LOG_HEADER, _GAS_LEARN_LOG_INTERVAL_S, 0.0,
+            max_bytes=_GAS_LEARN_LOG_MAX_BYTES,
+        )

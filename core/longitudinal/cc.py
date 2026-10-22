@@ -8,12 +8,7 @@ import math
 from core.settings import Settings
 from core.thread_management.registry import registry
 
-from .accel_envelope import (
-    envelope_ms2,
-    resolve_profile,
-    rise_limited_ms2,
-    usable_capacity_ms2,
-)
+from .accel_envelope import resolve_profile, rise_limited_ms2, shape_ceiling_ms2
 from .base import LongCtx, LongitudinalController, LongOutput
 
 logger = logging.getLogger(__name__)
@@ -40,10 +35,6 @@ _CC_GAME_THROTTLE_OVERRIDE = 0.1
 # Integral leak time constant (s) while the sending_thread hold FSM owns
 _HOLD_INTEGRAL_LEAK_TAU_S: float = 2.0
 
-# Capacity smoothing. The published estimate is per-gear and steps at every
-# See `core/longitudinal/README.md`.
-_CAPACITY_EMA_TAU_S: float = 0.8
-
 
 class CruiseController(LongitudinalController):
     """Set-speed PID with output smoothing, target management, and disarm guard."""
@@ -67,9 +58,7 @@ class CruiseController(LongitudinalController):
         self._output_ema_accel_ms2: float | None = None
         self._target_speed_ema_ms: float | None = None
 
-        # Accel-envelope state: smoothed capability estimate and the previous
-        # emitted bid, which the per-profile rise limit is measured against.
-        self._capacity_ema_ms2: float | None = None
+        # Previous emitted bid, which the per-profile rise limit is measured against.
         self._prev_bid_ms2: float | None = None
 
         # Gearshift D-freeze state
@@ -170,20 +159,22 @@ class CruiseController(LongitudinalController):
             self._output_ema_accel_ms2 = wanted_accel
         wanted_accel = self._smooth_output_accel_ema(wanted_accel, ctx.dt)
 
-        # Speed-scheduled ceiling, bounded by what the truck can actually deliver.
-        # See `core/longitudinal/README.md`.
+        # Speed-scheduled comfort ceiling. See `core/longitudinal/README.md`.
         profile = resolve_profile(getattr(Settings, "cc_accel_profile", None))
-        capacity = self._update_capacity_ema(ctx.dt, d_factor)
         accel_min = float(Settings.cc_accel_min_ms2)
-        accel_max = min(
-            envelope_ms2(ctx.speed_ms, profile, capacity),
-            float(Settings.cc_accel_max_ms2),
-        )
-        wanted_accel = max(accel_min, min(accel_max, wanted_accel))
+        if profile.uncapped:
+            # Sport: no shape and no settings rail.
+            wanted_accel = max(accel_min, wanted_accel)
+        else:
+            accel_max = min(
+                shape_ceiling_ms2(ctx.speed_ms, profile),
+                float(Settings.cc_accel_max_ms2),
+            )
+            wanted_accel = max(accel_min, min(accel_max, wanted_accel))
 
-        # Neutral has no torque path to the wheels, so a rise limit buys no
-        # comfort there and only delays the auto-neutral launch gate.
-        if ctx.gear_dashboard != 0:
+        # Neutral skips the rise limit (no torque path, and auto-neutral waits on it).
+        # Sport is not ramped either: the pedal is meant to reach the floor at once.
+        if ctx.gear_dashboard != 0 and not profile.uncapped:
             wanted_accel = rise_limited_ms2(
                 wanted_accel, self._prev_bid_ms2, profile, ctx.dt,
             )
@@ -200,7 +191,6 @@ class CruiseController(LongitudinalController):
         self._kd_smooth_speed_ms = None
         self._output_ema_accel_ms2 = None
         self._target_speed_ema_ms = None
-        self._capacity_ema_ms2 = None
         self._prev_bid_ms2 = None
 
     # Internals
@@ -250,43 +240,6 @@ class CruiseController(LongitudinalController):
         except Exception:
             logger.debug("hold_active lock/attr read failed", exc_info=True)
             return False
-
-    @staticmethod
-    def _read_capacity_safe() -> float | None:
-        """Lookup the mapper's accel capacity estimate defensively. See `core/longitudinal/README.md`."""
-        try:
-            st = registry.get_thread("sending_thread")
-        except KeyError:
-            return None
-        except Exception:
-            logger.debug("accel capacity registry read failed", exc_info=True)
-            return None
-        if st is None:
-            return None
-        try:
-            with st.data._lock:
-                raw = getattr(st.data, "mapper_est_max_accel_ms2", None)
-        except Exception:
-            logger.debug("accel capacity lock/attr read failed", exc_info=True)
-            return None
-        return usable_capacity_ms2(raw)
-
-    def _update_capacity_ema(self, dt: float, d_factor: float) -> float | None:
-        """Smooth the per-gear capacity so the ceiling does not step at each shift.
-
-        Frozen while the driveline is open so no mid-shift value is ingested, and
-        held (not cleared) when the estimate goes unknown for a tick.
-        """
-        raw = self._read_capacity_safe()
-        if raw is None or d_factor <= 0.0:
-            return self._capacity_ema_ms2
-        if self._capacity_ema_ms2 is None:
-            self._capacity_ema_ms2 = raw
-        else:
-            tau = _CAPACITY_EMA_TAU_S
-            alpha = dt / (tau + dt) if tau > 0.0 else 1.0
-            self._capacity_ema_ms2 += alpha * (raw - self._capacity_ema_ms2)
-        return self._capacity_ema_ms2
 
     def _speed_to_accel(self, ctx: LongCtx, d_factor: float) -> float:
         speed_ms = ctx.speed_ms
