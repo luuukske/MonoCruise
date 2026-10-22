@@ -12,6 +12,21 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-10-23
+### Added
+- **Hill assist can be turned off**: MonoCruise held the brake whenever you were stopped. A new hill assist switch, on by default, can turn that hold off so the truck rolls while you sit still; your own brake and emergency braking still work.
+
+### Fixed
+- **ACC braked for lagging TruckersMP players**: a lag spike looked like a truck stopping dead, and in jams ACC followed every small speed change of the player ahead. It now uses each player's real speed from TruckersMP's SDK, ignores short lag, and still brakes gradually for a truck that stays frozen.
+- **AEB was late or blind to some TruckersMP trucks**: a truck ahead stopping hard took a moment to show, and below 50 km/h AEB could miss a truck backing across your lane or a car stopping in a jam. It now reacts as the truck brakes and watches players like AI traffic.
+- **AEB braked for vehicles you were driving through**: ghosted players, including right after a teleport into a no-collision zone, or a vehicle sitting inside your truck could set AEB off, even at a standstill. They are now ignored until you are apart, and AEB lets go half a second after you stop.
+- **Acceleration felt weak in town and the gas jumped in hard pulls**: Normal and Efficiency now pull properly up to town speeds and ease off toward the highway, Sport is full throttle with no cap, and ACC no longer holds them back on an empty road. The gas no longer jumps or sags at the end of a hard pull.
+- **Cruise control, ACC and the speed limiter pumped the gas**: on a light truck, after a trailer change, or after driving on your own pedal, the gas could rock on and off about once a second. MonoCruise now learns your truck's pulling power steadily, and the limiter no longer jitters.
+- **MonoCruise froze at times**: with "Help improve AEB and ACC" on, an AEB clip's screenshot could pause everything for a second or two, and a growing cruise control log could freeze the pedals when cruise first engaged. Both are fixed.
+
+### Removed
+- **Automatic horn**: the horn and airhorn switches are gone, as the horn did not come on reliably.
+
 ## [1.1.3-preview.3] - 2026-10-21
 ### Added
 - **Hill assist can be turned off**: MonoCruise held the brake whenever you were stopped. A new switch, on by default, turns that hold off so the truck can roll while you sit still. Your own brake still works, and so does emergency braking.
