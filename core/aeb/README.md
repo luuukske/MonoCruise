@@ -289,6 +289,7 @@ pass, the vehicle enters collision evaluation.
 | `OppositeLaneFilter` | Oncoming vehicles in their own lane (collapses Fix A + Fix B) |
 | `CoDirectionalDivergeFilter` | Co-directional arcs already diverging (Fix C + outer-lane same-turn) |
 | `TurningCrossTrafficFilter` | Cross-traffic turning through intersection (Fix D absorbed) |
+| `TurnCompletionFilter` | Crosser turning into the oncoming lane whose turn-then-hold path never reaches ego's corridor |
 | `OutOfLaneParallelFilter` | Capsule lane-keeping adjacent / roadside traffic; also rear overtakers |
 | `TmpCrossTrafficFilter` | TMP-only: straight snapshot uses centre closest-approach (T-bone vs body-graze), turning snapshot uses full-horizon endpoint lane |
 | `SweepPassFilter` | Stationary cross-traffic ego turns through |
@@ -548,6 +549,46 @@ hit, so it leaks exactly on the wiggle ticks that create the FP (passing
 clips f0b2ace6 / 02642609). A genuine cut-in brings its body into the EGO
 band and is not suppressed here; braking_worsens covers the same class if
 anything still reaches collision eval.
+
+### `TurnCompletionFilter`
+
+A car coming out of a side road and turning into the oncoming lane is measured
+mid-turn: heading 95-125 degrees off ego's, curvature 0.02-0.08 1/m. Every target
+arc holds that curvature for the whole horizon, so the arc keeps rotating past
+anti-parallel and curls into ego's lane, where the real car straightens out
+5-13 m to ego's side. Fix D (`_dampen_turning_curvature`) only divides the
+curvature by 3 and stops acting at `fwd_dot <= near_head_on_dot`, so these reached
+collision evaluation and the clearance demand read the ceiling. This was the
+largest single shape among labelled crossing false brakes (42 of 78 by the cluster
+read), and only 8 of 95 crossing true positives looked like it.
+
+The stage predicts the turn the way it ends: rotate at the measured `|v_curvature|`
+until the heading is anti-parallel to ego, then hold it. It suppresses only when
+that path, sampled at the body centre and both ends, never comes within
+`ego_hw + target_hw + corridor_margin + turn_complete_clear_m` (1.0 m) of ego's arc
+anywhere along ego's reach. A car turning across ego's lane to reach the far lane
+crosses the corridor on that path and is kept, whatever the timing. Scope, each
+condition failing toward the brake:
+
+- Moving (`turn_complete_min_speed_ms`, 2 m/s), turning at least
+  `turn_complete_min_kappa` (0.008), not co-directional, not head-on, not reversing.
+- Turning toward anti-parallel. A turn toward ego's heading (pulling out ahead) was
+  measured with the same model and turned good intervention `a83af583` into a miss
+  for no gain, so it stays out.
+- Not latched, not follow-flagged, no trailer and not a trailer record (off-tracking
+  puts a trailer inside the tractor's path).
+- Not in `Lane.EGO` and no body sample in ego's lane band.
+
+The turn direction comes from the target's own arc positions, not
+`heading_at_dist`, which turns opposite to the motion on curved arcs (radar README
+§8).
+
+Measured (2026-10-24, 2629 scored clips, local and contributed stores): 9 false
+positives to silent (`6ab6d921`, `8f7cc4ae`, `09f0f0dd`, `d7d06ad6`, `d24c3111`,
+`5eb10077`, `c8492f1b`, `f4428a15`, `5614ec5e`), no positive moved. Curvature floor
+0.02 cleared 6, 0.012 cleared 8; the clearance pad at 0.5 m or 1.0 m made no
+difference. Straight crossers that pass ahead of a slow ego are untouched: the
+perpendicular halo sees them first by design (clearance-based demand).
 
 ### `TmpCrossTrafficFilter`
 
@@ -1888,7 +1929,16 @@ latch it used to share with the floor went with it.
 | `follow_threat_hold_s` | 2.0 s | Hold after kinematic qualification |
 | `follow_threat_min_decel_ms2` | 0.8 m/s² | Min own-decel slope to qualify |
 | `follow_threat_max_lat_converge_ms` | 10.0 m/s | Cap on the out-of-lane lat-converge seat; sweep-past is faster |
+| `follow_threat_max_arc_decel_ms2` | 6.0 m/s² | Cap on the decel a flagged lead's arc assumes, the same cap kinematic accel gets in `_accel_to_arc_params` |
 | `follow_threat_evasion_exempt_kmh` | 50 km/h | Ego speed at or below which a flagged lead skips `EgoEvasionFilter` |
+
+**Arc decel cap.** The flagged lead's arc decel is the least-squares slope of its
+speed field over the window, and a TruckersMP speed dip (22 to 11 m/s in a few
+ticks, `08eb7c46`) read as 18.7 m/s² and stopped the arc in ego's lane. Kinematic
+accel was always capped at 6 m/s² on its way into an arc; the follow path was not.
+Capping it the same way (2026-10-24, 2629 clips): one false brake (`e4d8fa91`) and
+two stray brakes in positives (`a104d298`, `d392d507`) went, nothing else moved, and
+the stop-distance envelope is unchanged. A cap at 8 m/s² changed nothing.
 
 ### Closed-loop coupling
 

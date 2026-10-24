@@ -1134,6 +1134,7 @@ def build_pipeline(cal: AEBCalibration) -> list:
     """Return the ordered list of filter stage instances."""
     # Local import: the gate module builds on this one (README avoidability gate).
     from core.aeb.avoidability import AvoidabilityGate
+    from core.aeb.turn_completion import TurnCompletionFilter
 
     return [
         RangeFilter(cal),
@@ -1144,6 +1145,7 @@ def build_pipeline(cal: AEBCalibration) -> list:
         OppositeLaneFilterMirrored(cal),
         CoDirectionalDivergeFilter(cal),
         TurningCrossTrafficFilter(cal),
+        TurnCompletionFilter(cal),
         AvoidabilityGate(OutOfLaneParallelFilter(cal), cal),
         TmpCrossTrafficFilter(cal),
         AvoidabilityGate(SweepPassFilter(cal), cal),

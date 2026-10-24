@@ -632,7 +632,7 @@ def _follow_threat_arc_decel(
     own_decel = -_ls_slope(trk, 2)
     if own_decel < cal.follow_threat_min_decel_ms2:
         return None
-    return own_decel
+    return min(own_decel, cal.follow_threat_max_arc_decel_ms2)
 
 
 def _build_vehicle_collision_data(

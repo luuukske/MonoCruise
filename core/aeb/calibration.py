@@ -121,6 +121,13 @@ class AEBCalibration:
     # FF assist ramps in from here to user_brake_latch (README pedal authority).
     ff_assist_ramp_lo: float = 0.03
 
+    # TurnCompletionFilter: a crosser turning at least this hard toward anti-parallel is
+    # dropped when its turn-then-hold path clears ego's corridor by this much (README).
+    turn_complete_enabled: bool = True
+    turn_complete_min_kappa: float = 0.008
+    turn_complete_min_speed_ms: float = 2.0
+    turn_complete_clear_m: float = 1.0
+
     # TmpCrossTrafficFilter straight-snapshot center hit threshold (README TmpCrossTrafficFilter).
     tmp_cross_center_hit_dist: float = 2.5
 
@@ -310,6 +317,8 @@ class AEBCalibration:
     # Sweep-past on a bend collapses d_abs at 15-25 m/s (8e213c9e); a cut-in stays ~2-7.
     follow_threat_max_lat_converge_ms: float = 10.0
     follow_threat_hold_s: float = 2.0
+    # Same cap kinematic accel gets in _accel_to_arc_params; a TMP speed dip read 18.7 m/s².
+    follow_threat_max_arc_decel_ms2: float = 6.0
     follow_threat_max_range_m: float = 80.0
     # At or below this ego speed a flagged lead skips EgoEvasionFilter (README follow-threat).
     follow_threat_evasion_exempt_kmh: float = 50.0
