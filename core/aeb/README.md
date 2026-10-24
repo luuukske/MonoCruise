@@ -661,7 +661,14 @@ straight-line path.
 
 - Symmetric road-bend formula: `road_bend = acos(|fwd_dot|)`: folds oncoming
   (`fwd_dot ≈ -1`) and co-directional (`fwd_dot ≈ +1`) cases into `[0, π/2]`.
-- Implied curvature `road_bend / dist` must exceed `turning_diverge_kappa`.
+- Implied curvature `road_bend / dist` must exceed `corner_entry_min_implied_kappa`
+  (0.005, both stages). It used to share `turning_diverge_kappa` (0.007), which
+  left stopped TruckersMP queues 50-60 m out on a gentle bend (heading 15 degrees
+  off, implied 0.0036-0.0044) to brake for (`d811181d`). Measured 2026-10-24 over
+  2629 clips: 0.004 and 0.005 clear the same three false positives (`d811181d`,
+  `84532316`, `8b916d74`) with no positive moved, 0.0035 one more, and 0.0025 turns
+  true positive `c7546a38` into a miss. 0.005 is the end of that band furthest from
+  the loss.
 - **Mode A** (out-of-lane): vehicle in `OPPOSITE_OR_OUTER`/`OFF_ROAD` → suppress.
   Covers the original "around the bend" oncoming case, now also co-directional.
 - **Mode B** (in-lane): vehicle in `Lane.EGO` → require geometric consistency

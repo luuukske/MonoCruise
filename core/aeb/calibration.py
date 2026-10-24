@@ -116,6 +116,8 @@ class AEBCalibration:
     corner_entry_min_road_bend: float = 0.10        # rad (~5.7°)
     corner_entry_min_lateral: float = 0.4           # m
     corner_entry_lateral_tol: float = 1.5           # m
+    # Implied road curvature (bend / range) both corner-entry stages need (README).
+    corner_entry_min_implied_kappa: float = 0.005
 
     user_brake_latch: float = 0.12
     # FF assist ramps in from here to user_brake_latch (README pedal authority).

@@ -1005,7 +1005,7 @@ class CornerEntryStationaryFilter:
             return _PASS
 
         implied_kappa = road_bend / ctx.dist
-        if implied_kappa <= cal.turning_diverge_kappa:
+        if implied_kappa <= cal.corner_entry_min_implied_kappa:
             return _PASS
 
         if ctx.lane != Lane.EGO:
@@ -1052,7 +1052,7 @@ class CornerEntryStationaryFilterMirrored:
             return _PASS
 
         implied_kappa = road_bend / ctx.dist
-        if implied_kappa <= cal.turning_diverge_kappa:
+        if implied_kappa <= cal.corner_entry_min_implied_kappa:
             return _PASS
 
         # Follow-threat: stopped cut-in can sit in OPPO while occupying the
