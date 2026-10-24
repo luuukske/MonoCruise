@@ -71,7 +71,8 @@ class AEBCalibration:
     turn_complete_curvature_scale: float = 3.0
     evasion_g: float = 0.08 * 9.81
     evasion_g_oncoming: float = 0.13 * 9.81
-    evasion_max_dkappa: float = 0.008
+    # Low-speed escape cap; 0.008 bound below 10 m/s and hid walking-pace swerves (README).
+    evasion_max_dkappa: float = 0.016
     # Dead: kept for clip-metadata compatibility. Ego curvature now comes from
     # EgoPathModel (core/radar/ego_path_model.py), see core/aeb/README.md §1.
     yaw_rate_steer_gain: float = 12.0

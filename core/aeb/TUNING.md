@@ -60,7 +60,7 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `max_evasion_opp_fast_kmh` | 60.0 | Target speed for opp_fast arm. Provisional; do not retune as if corpus-fit |
 | `max_evasion_min_lat_m_tmp_cross` | 3.0 | TmpCross arm (lower): cca-class TMP never hits Opp head_on |
 | `tmp_cross_in_corridor_pass` | false | TmpCross: pass when `|lat| ≤ lane_half_width` ahead (and miss closing) |
-| `evasion_max_dkappa` | 0.008 /m | Max curvature offset for evasion arcs |
+| `evasion_max_dkappa` | 0.016 /m | Max curvature offset for evasion arcs; binds below about 7 m/s. 0.008 to 0.016 cleared 3 labelled false brakes, flat to 0.025, no positive moved (2026-10-24) |
 | `opposite_lane_kappa_scale` | 2.0 | Kappa multiplier when target in own lane |
 | `turning_diverge_kappa` | 0.007 /m | Corner threshold for Fix-C/D conditions; also the straight/turning split in `TmpCrossTrafficFilter` |
 | `tmp_cross_center_hit_dist` | 2.5 m | `TmpCrossTrafficFilter` straight-snapshot genuine-crosser threshold: centre closest-approach at/below this is a real T-bone (pass), above is a body-graze clear (suppress) |

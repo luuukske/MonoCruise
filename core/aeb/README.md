@@ -807,6 +807,15 @@ limited; in the linear regime neither is. The allowance fades with
 `sat_weight` rather than switching, because clamping outright on the arming
 frame stepped the corridor edge 1.8x as far as the path under it.
 
+**The low-speed cap.** `evasion_max_dkappa` caps the offset, and at 0.008 it bound
+below about 10 m/s, where `evasion_g / v²` would allow far more: the escape arcs
+assumed a truck at walking pace could barely steer, so bodies the driver was
+plainly turning past at a yard or junction reached collision evaluation. 0.016
+binds below about 7 m/s. Measured 2026-10-24 over 2629 clips: 0.010 and 0.012
+cleared 2 false brakes, 0.016 to 0.025 cleared 3 (`2f02076c`, `6ef94605`,
+`063950fc`), no positive moved at any value. The same cap bounds the
+`OppositeLaneFilter` evasion arcs.
+
 **`ctx.lane == Lane.EGO` by itself never bypasses this stage.** Lane-EGO
 classification is not evidence of danger: stationary shoulder vehicles and
 passing traffic on wide or curved roads land in the EGO bucket routinely, and
