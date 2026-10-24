@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Fixed
+- **AEB could treat a stopped or crashing TruckersMP trailer as moving**: when another truck passed beside a stopped trailer, AEB could give the trailer that truck's speed, parked trailers could pick up a passing truck's speed too, and a crash seen on the truck was not applied to its trailer. Trailers are now matched to the truck actually pulling them, using TruckersMP's own trailer link where available, and a crash on either part counts for the whole rig.
 
 ## [1.1.3] - 2026-10-23
 ### Added

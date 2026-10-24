@@ -1,4 +1,4 @@
-"""TMP trailer→tractor sticky lock for ACC LeadInfo kinematics (README §4)."""
+"""TMP trailer→tractor sticky lock: the SDK rig link first, geometry as fallback (README §4)."""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ _TRACTOR_LOCK_VALID_LONGI_MAX_M: float = 25.0
 _TRACTOR_LOCK_VALID_LAT_MAX_M: float = 4.0
 _TRACTOR_LOCK_VALID_YAW_MAX_DEG: float = 60.0
 TRAILER_VEHICLE_ID_BASE: int = 1_000_000
+# A linked tractor sits 4-10 m from its trailer (p1-p99 over 657 clips); past this the pairing is a mismatch.
+_SDK_LINK_MAX_M: float = 20.0
 
 
 def _trailer_local_frame(
@@ -58,16 +60,46 @@ def _passes_loose(longi: float, lat: float, yaw_delta_deg: float) -> bool:
     )
 
 
+def sdk_tractor(trailer: Vehicle, vehicles: list[Vehicle]) -> Vehicle | None:
+    """The tractor record whose SDK body shares the trailer's rig in this write, if both matched."""
+    sdk = getattr(trailer, "sdk", None)
+    if sdk is None or not sdk.is_trailer:
+        return None
+    for other in vehicles:
+        o = getattr(other, "sdk", None)
+        if o is None or other.is_trailer or o.is_trailer or o.rig != sdk.rig:
+            continue
+        dx = other.position.x - trailer.position.x
+        dz = other.position.z - trailer.position.z
+        return other if math.hypot(dx, dz) <= _SDK_LINK_MAX_M else None
+    return None
+
+
+def _other_rig(trailer: Vehicle, other: Vehicle) -> bool:
+    """Both bodies matched in one SDK write and the plugin put them on different rigs."""
+    a = getattr(trailer, "sdk", None)
+    b = getattr(other, "sdk", None)
+    return a is not None and b is not None and a.rig != b.rig
+
+
 def resolve_tractor(
     trailer: Vehicle,
     vehicles: list[Vehicle],
     cache: dict[int, int],
+    *,
+    use_sdk: bool = True,
 ) -> Vehicle | None:
-    """Sticky TMP tractor for a trailer; strict acquire, loose revalidate."""
+    """Sticky TMP tractor for a trailer: SDK rig link, else strict acquire and loose revalidate."""
+    if use_sdk:
+        linked = sdk_tractor(trailer, vehicles)
+        if linked is not None:
+            cache[trailer.id] = linked.id
+            return linked
     cached_id = cache.get(trailer.id)
     if cached_id is not None:
         cached = next((o for o in vehicles if o.id == cached_id), None)
-        if cached is not None and cached.is_tmp and not cached.is_trailer:
+        if (cached is not None and cached.is_tmp and not cached.is_trailer
+                and not (use_sdk and _other_rig(trailer, cached))):
             longi, lat, yaw_delta = _trailer_local_frame(trailer, cached)
             if _passes_loose(longi, lat, yaw_delta):
                 return cached
@@ -79,6 +111,8 @@ def resolve_tractor(
         if other.id == trailer.id:
             continue
         if not other.is_tmp or other.is_trailer:
+            continue
+        if use_sdk and _other_rig(trailer, other):
             continue
         longi, lat, yaw_delta = _trailer_local_frame(trailer, other)
         if not _passes_strict(longi, lat, yaw_delta):

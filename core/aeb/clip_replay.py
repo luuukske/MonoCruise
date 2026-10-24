@@ -406,6 +406,7 @@ def replay_clip(clip: Clip, *, stream=None, radar_frames=None) -> list[ReviewFra
 
     cal_rec = clip.metadata.calibration or {}
 
+    trailer_locks: dict[int, int] = {}
     out: list[ReviewFrame] = []
     for tk in sorted(clip.aeb_ticks, key=lambda x: x.t_mono):
         ft = nearest_frame_t(frame_t, tk.radar_t_mono)
@@ -415,7 +416,7 @@ def replay_clip(clip: Clip, *, stream=None, radar_frames=None) -> list[ReviewFra
             ego = frames[0].ego
         if ego is None:
             continue
-        vehicles_eff = _swap_trailer_kinematics(vehicles)
+        vehicles_eff = _swap_trailer_kinematics(vehicles, trailer_locks)
         t_kin = tkin_by_t.get(ft, 0.0) if ft is not None else 0.0
         if t_kin > 0.0 and not ego.paused:
             path_state = ego_path.step(

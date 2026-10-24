@@ -24,6 +24,7 @@ from core.radar.elevation import MAX_EGO_GRADE
 from core.radar.ego_geometry import EgoGeometry, calibration_geometry
 from core.radar.ego_path_model import EgoPathModel, EgoPathState
 from core.radar.tmp_state import ego_box
+from core.acc.trailer_lock import resolve_tractor
 from core.aeb.calibration import AEBCalibration, DEFAULT as _CAL_DEFAULT, ego_path_params
 from core.aeb.confirm import OccupancyConfirm
 from core.aeb.clearance import ClearanceResult, clearance_required
@@ -117,9 +118,7 @@ _NEAR_HEAD_ON_LATERAL_MIN: float = 3.0
 _SHARED_TURN_MAX_KAPPA: float = 0.05
 _TURN_COMPLETE_CURVATURE_SCALE: float = 3.0
 
-_TRAILER_TRACTOR_RADIUS_M: float = 30.0
 _TRAILER_SWAP_SPEED_THRESHOLD_MS: float = 0.5
-_TRAILER_TRACTOR_HEADING_DOT: float = 0.9
 
 # Debug shadow_near TN sampler; not in AEBCalibration (recorder rate-limits).
 _SHADOW_MIN_SPEED_MS: float = 2.0
@@ -154,42 +153,18 @@ _HMI_CUE_OFF_DELAY_S: float = 0.2
 _HMI_STOPPED_SPEED_MS: float = 0.5
 
 
-def _find_tractor_for_trailer(trailer: Vehicle, vehicles: list[Vehicle]) -> Vehicle | None:
-    """Nearest same-heading non-trailer within radius; TMP and convoy AI slots."""
-    _, tr_yaw_deg, _ = trailer.rotation.euler()
-    tr_yaw = math.radians(tr_yaw_deg)
-    tr_fx = -math.sin(tr_yaw)
-    tr_fz = -math.cos(tr_yaw)
-
-    best: Vehicle | None = None
-    best_d_sq = _TRAILER_TRACTOR_RADIUS_M * _TRAILER_TRACTOR_RADIUS_M
-    for other in vehicles:
-        if other.id == trailer.id:
-            continue
-        if other.is_trailer:
-            continue
-        dx = other.position.x - trailer.position.x
-        dz = other.position.z - trailer.position.z
-        d_sq = dx * dx + dz * dz
-        if d_sq >= best_d_sq:
-            continue
-        _, o_yaw_deg, _ = other.rotation.euler()
-        o_yaw = math.radians(o_yaw_deg)
-        o_fx = -math.sin(o_yaw)
-        o_fz = -math.cos(o_yaw)
-        if tr_fx * o_fx + tr_fz * o_fz < _TRAILER_TRACTOR_HEADING_DOT:
-            continue
-        best_d_sq = d_sq
-        best = other
-    return best
-
-
-def _swap_trailer_kinematics(vehicles: list[Vehicle]) -> list[Vehicle]:
-    """Shallow-copy trailer kinematics from nearest tractor; see README TMP trailer swap."""
+def _swap_trailer_kinematics(vehicles: list[Vehicle], cache: dict[int, int]) -> list[Vehicle]:
+    """Shallow-copy TMP trailer kinematics from its locked tractor; see README TMP trailer swap."""
+    # Every TMP trailer keeps its lock warm, so a slowing trailer swaps from a lock held through the bend.
+    tractors: dict[int, Vehicle | None] = {
+        v.id: resolve_tractor(v, vehicles, cache) for v in vehicles if v.is_tmp and v.is_trailer
+    }
+    for vid in [k for k in cache if k not in tractors]:
+        del cache[vid]
     out: list[Vehicle] = []
     for v in vehicles:
-        if v.is_trailer and abs(v.speed) < _TRAILER_SWAP_SPEED_THRESHOLD_MS:
-            tractor = _find_tractor_for_trailer(v, vehicles)
+        if v.id in tractors and abs(v.speed) < _TRAILER_SWAP_SPEED_THRESHOLD_MS:
+            tractor = tractors[v.id]
             if tractor is not None:
                 eff = copy.copy(v)
                 eff.speed = tractor.speed
@@ -807,6 +782,8 @@ class AEBThread(BaseThread):
         self._pipeline = build_pipeline(self._cal)
         # One-Euro per target kappa; stepped once per vehicle per frame (README).
         self._curvature_blender = VehicleCurvatureBlender(self._cal)
+        # TMP trailer id -> locked tractor id for the kinematic swap (core/acc/trailer_lock.py).
+        self._trailer_to_tractor: dict[int, int] = {}
         # Ego path: steer-led, gain learned from the driven line, grip capped.
         self._ego_path = EgoPathModel(params=ego_path_params(self._cal))
         self._ego_path_cal: AEBCalibration = self._cal
@@ -1211,7 +1188,7 @@ class AEBThread(BaseThread):
             self._release_latched(vid)
         off_surface_ids = off_surface_ids - self._latched_threat_ids
 
-        vehicles_eff = _swap_trailer_kinematics(vehicles)
+        vehicles_eff = _swap_trailer_kinematics(vehicles, self._trailer_to_tractor)
 
         # Brake build-up pad, keyed on load: a trailer's air brakes take about
         # three times longer to reach full decel than a solo tractor.
@@ -2694,6 +2671,7 @@ class AEBThread(BaseThread):
         self._brake_span_start_mono = None
         self._brake_popup_fired = False
         self._curvature_blender.prune(set())
+        self._trailer_to_tractor.clear()
         self._los_tracks.clear()
         self._d_miss_hist.clear()
         with self.data._lock:

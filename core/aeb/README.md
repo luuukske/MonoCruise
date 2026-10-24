@@ -41,12 +41,26 @@ stall, fresh spawn). Without correction, AEB sees a "stationary" obstacle
 directly ahead of ego and triggers falsely.
 
 `_swap_trailer_kinematics()` in `thread.py` walks the vehicle list once at the
-top of each loop. For every `is_tmp` + `is_trailer` entry it locates the
-nearest non-trailer TMP vehicle within 30 m (the pulling tractor) and returns
-a shallow copy with `speed` and `acceleration` replaced by the tractor's
-filtered values. The trailer's pose, yaw, curvature, and trailer-flag stay
-its own: only the kinematics it cannot self-measure are inherited. ACC has
-the same swap in `core/acc/tracker.py::_top_leads`.
+top of each loop. Every `is_tmp` + `is_trailer` entry resolves its tractor
+through ACC's lock, `core/acc/trailer_lock.py::resolve_tractor` (the SDK rig
+link first, then the strict / loose geometric lock, see `core/acc/README.md`
+§4), with its own sticky cache on `AEBThread._trailer_to_tractor`. A trailer
+under 0.5 m/s returns as a shallow copy with `speed` and `acceleration`
+replaced by the tractor's filtered values. The trailer's pose, yaw, curvature,
+and trailer-flag stay its own: only the kinematics it cannot self-measure are
+inherited. ACC has the same swap in `core/acc/tracker.py::_top_leads`.
+Parked trailers and any other non-TMP trailer record are never swapped.
+
+Until 2026-10-24 the swap took the nearest same-heading non-trailer within 30 m,
+TMP or not, parked trailers included. Against the SDK link on 657 clips it picked
+the wrong tractor on 17.5% of the frames where it fired: a truck more than 2 m
+off the trailer's axis (next lane) in half the wrong picks, the next truck in the
+queue ahead in a third, the one behind in the rest, each nearer to the trailer's
+centre than its own tractor (median 6.7 m ahead). A stopped trailer ahead of ego
+took a moving truck's speed in 72 tracks across 56 clips, two thirds of those
+frames from the next lane, and a parked trailer ahead of ego in 7 tracks across
+6 clips. The lock leaves 0 of either (`tools/tmp_trailer_link_probe.py`). Do not
+bring back a nearest-body pairing.
 
 Only the precompute and main collision iterations consume `vehicles_eff`. The
 radar visualizer still reads the original `vehicles` so raw vs filtered speed

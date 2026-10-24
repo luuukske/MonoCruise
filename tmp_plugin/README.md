@@ -208,7 +208,7 @@ with.
 |---|---|---|---|
 | World velocity | `Vehicle` / `Trailer::GetLinearVelocity` | TMP speed is an LS fit over ~1.3 s of positions (radar §7): late on a braking lead, rippled by netcode. Direction of travel for reversing targets (`travel_sign`) | Measured 2026-10-11 (below): the sender's own velocity, carried in each packet |
 | Yaw rate | `Vehicle` / `Trailer::GetAngularVelocity` | Target curvature without differentiating poses; crash rotation gates | Same |
-| Truck to trailer link | `Vehicle::GetTrailer`, `Player::GetTrailer` | Replaces the geometric pairing in ACC `trailer_lock`, AEB `_find_tractor_for_trailer` and the exit hold | Map trailer handles to `ETS2LATraffic` records by pose |
+| Truck to trailer link | `Vehicle::GetTrailer`, `Player::GetTrailer` | **Wired (2026-10-24)**: the slot `rig` index is the first choice in `core/acc/trailer_lock.py`, used by ACC, AEB's trailer swap and the whole-rig holds | Second and later trailers are not written; ETS2LA nests them on the first |
 | Exact body | `GetBoundingBox` + `GetPlacement` | Body size and centre offset; the TMP trailer pivot shift (`Trailer.correct_position`) | Box includes mirrors? |
 | Network sample arrival | `Player().OnUpdate` (timestamp only) | Tells a fresh network sample from client interpolation: lag freeze, pose jumps | Measured 2026-10-11 (below): ~4.5 Hz |
 | Per-player ghost flag | `Player::CanCollideWith` | Per-player suppression beyond the exit hold | Read "cannot" for real trucks on 2026-10-06; re-measure with poses side by side |
