@@ -565,7 +565,7 @@ read), and only 8 of 95 crossing true positives looked like it.
 The stage predicts the turn the way it ends: rotate at the measured `|v_curvature|`
 until the heading is anti-parallel to ego, then hold it. It suppresses only when
 that path, sampled at the body centre and both ends, never comes within
-`ego_hw + target_hw + corridor_margin + turn_complete_clear_m` (1.0 m) of ego's arc
+`ego_hw + target_hw + corridor_margin + turn_complete_clear_m` (0 m: the corridor the hit test itself uses) of ego's arc
 anywhere along ego's reach. A car turning across ego's lane to reach the far lane
 crosses the corridor on that path and is kept, whatever the timing. Scope, each
 condition failing toward the brake:
@@ -586,8 +586,10 @@ The turn direction comes from the target's own arc positions, not
 Measured (2026-10-24, 2629 scored clips, local and contributed stores): 9 false
 positives to silent (`6ab6d921`, `8f7cc4ae`, `09f0f0dd`, `d7d06ad6`, `d24c3111`,
 `5eb10077`, `c8492f1b`, `f4428a15`, `5614ec5e`), no positive moved. Curvature floor
-0.02 cleared 6, 0.012 cleared 8; the clearance pad at 0.5 m or 1.0 m made no
-difference. Straight crossers that pass ahead of a slow ego are untouched: the
+0.02 cleared 6, 0.012 cleared 8, 0.006 nothing more. The pad started at 1.0 m;
+1.0 and 0.5 clear the same nine, 0.25 one more (`fbd896b2`), and 0 a second
+(`c626671f`), with no positive moved anywhere in that range, so the shipped pad is 0:
+the predicted path only has to stay out of the corridor the hit test uses. Straight crossers that pass ahead of a slow ego are untouched: the
 perpendicular halo sees them first by design (clearance-based demand).
 
 ### `TmpCrossTrafficFilter`

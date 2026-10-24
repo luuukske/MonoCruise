@@ -125,11 +125,11 @@ class AEBCalibration:
     ff_assist_ramp_lo: float = 0.03
 
     # TurnCompletionFilter: a crosser turning at least this hard toward anti-parallel is
-    # dropped when its turn-then-hold path clears ego's corridor by this much (README).
+    # dropped when its turn-then-hold path stays this far outside the hit corridor (README).
     turn_complete_enabled: bool = True
     turn_complete_min_kappa: float = 0.008
     turn_complete_min_speed_ms: float = 2.0
-    turn_complete_clear_m: float = 1.0
+    turn_complete_clear_m: float = 0.0
 
     # TmpCrossTrafficFilter straight-snapshot center hit threshold (README TmpCrossTrafficFilter).
     tmp_cross_center_hit_dist: float = 2.5
