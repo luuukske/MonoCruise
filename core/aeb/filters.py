@@ -840,6 +840,15 @@ class TmpCrossTrafficFilter:
             closing = rate is None or rate <= cal.oncoming_closing_dmiss_rate_mps
             if lat <= cal.lane_half_width and axial > 0.0 and closing:
                 return _PASS
+        straight = abs(ctx.v_curvature) < cal.turning_diverge_kappa
+        miss, rate = getattr(ctx, "d_miss", None), getattr(ctx, "d_miss_rate", None)
+        keep_m = cal.tmp_cross_los_keep_straight_m if straight else cal.tmp_cross_los_keep_m
+        if (miss is not None and rate is not None and miss < keep_m
+                and rate <= cal.oncoming_closing_dmiss_rate_mps
+                and ctx.dist <= cal.tmp_cross_los_keep_range_m
+                and ctx.fwd_dot >= cal.tmp_cross_los_keep_min_fwd_dot
+                and ctx.abs_v_speed >= cal.tmp_cross_los_keep_min_speed_ms):
+            return _PASS
         v_hw_coll = max(ctx.v.size.width / 2.0 - 0.1, 0.3)
         clear_bar = ctx.ego_hw + v_hw_coll
         _, d_abs = project_to_ego_arc(ctx.ego_arc, ctx.v.position.x, ctx.v.position.z)
@@ -847,7 +856,6 @@ class TmpCrossTrafficFilter:
                 ctx, cal, clear_bar, d_abs=d_abs,
                 min_lat_m=cal.max_evasion_min_lat_m_tmp_cross):
             return _PASS
-        straight = abs(ctx.v_curvature) < cal.turning_diverge_kappa
         any_hit = False
         for arc_idx, base_target_arc in enumerate(ctx.all_target_arcs):
             cross_arcs = (ctx.precomputed_cross_arcs[arc_idx]
@@ -912,6 +920,13 @@ class OutOfLaneParallelFilter:
         if not (ctx.co_directional or stationary):
             return _PASS
         if ctx.v.id in ctx.follow_threat_ids or ctx.v.id in ctx.latched_threat_ids:
+            return _PASS
+        miss, rate = getattr(ctx, "d_miss", None), getattr(ctx, "d_miss_rate", None)
+        if (miss is not None and rate is not None and miss < cal.out_of_lane_los_keep_m
+                and rate <= cal.out_of_lane_los_keep_rate_mps
+                and ctx.dist <= cal.out_of_lane_los_keep_range_m
+                and abs(-ctx.dx * ctx.ego_fwd_z + ctx.dz * ctx.ego_fwd_x)
+                >= cal.out_of_lane_los_keep_min_lat_m):
             return _PASS
         # Angled parked body: shallow ego-lane graze with far end adjacent.
         if (stationary and _stationary_adjacent_straddle(

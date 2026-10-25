@@ -550,6 +550,17 @@ clips f0b2ace6 / 02642609). A genuine cut-in brings its body into the EGO
 band and is not suppressed here; braking_worsens covers the same class if
 anything still reaches collision eval.
 
+**LOS keep.** The centre scan judges the body on ego's predicted arc; the measured
+line of sight can disagree. A body whose CBDR miss (`d_miss`, centre to centre) is
+under `out_of_lane_los_keep_m` (1.95 m) and not opening (`d_miss_rate <=
+out_of_lane_los_keep_rate_mps`, 0) is kept, but only within
+`out_of_lane_los_keep_range_m` (20 m), where a straight-line miss still holds on a
+bend, and only while it sits at least `out_of_lane_los_keep_min_lat_m` (2.2 m) to
+ego's side. Corpus 2026-10-25: `9dd61ad5`, `23b45d39`, `bfbb018d` FN to TP;
+`2b98649d` TN to FP and `a6b22e0f` to a false warn. Without the range the keep added
+15 worse clips, the false brakes about 50 m out on bends; without the lateral bar,
+bodies at ego's lane edge added stray onsets (`caaa583f`, `261c0185`).
+
 ### `TurnCompletionFilter`
 
 A car coming out of a side road and turning into the oncoming lane is measured
@@ -641,6 +652,20 @@ so any positive "never suppress below this hit time" floor would leak that
 regression. A turning TMP target that is genuinely on a collision course and
 close-in relies on the engagement-certainty gate + TTB slam net downstream, not
 this stage.
+
+**LOS keep.** Both branches judge one jittered snapshot. The measured line of sight
+averages the track over `los_veto_window_s`, so when it says the crosser is coming
+at ego the stage keeps it: `d_miss` under `tmp_cross_los_keep_m` (1.5 m; 2.5 m,
+`tmp_cross_los_keep_straight_m`, for a straight snapshot, the same bar as
+`tmp_cross_center_hit_dist`), closing at `oncoming_closing_dmiss_rate_mps`
+(-1.5 m/s), within `tmp_cross_los_keep_range_m` (28 m), and only for a real
+crosser: `fwd_dot >= tmp_cross_los_keep_min_fwd_dot` (-0.9; a near head-on car
+belongs to the oncoming stages) moving at `tmp_cross_los_keep_min_speed_ms`
+(6 m/s) or more, so junction crawlers stay with the sweep tests. Corpus
+2026-10-25: the bare keep turned 9 FN into TP for 25 worse clips; the range cut
+that to 15, the `fwd_dot` and speed bars to one TN to FP (`98a28656`, the same
+picture as the rescued `865b4db7`). The two bars are flat: -0.93 and 6.7 m/s
+score the same.
 
 Uses a freshly-built non-braking arc from the **undamped** `ctx.v_curvature`
 (rather than `base_target_arc`) in both branches: the standard arc may be
@@ -788,6 +813,22 @@ about 0.28 s (`6f5a1555`, `248f3efa`, `89e102a8`, `4f5910b5`, `3daaba45`,
 (-180.37 and -191.33, 16 and 10 new FPs), and a 0.10 s / 0.20 s persistence on
 top of both (-156.12 / -151.37: the gained TPs release on the same one or two
 frames the FPs do).
+
+**Wide band (2026-10-25).** A car closing on a miss line between ego's half width
+and `oncoming_gate_wide_m` (2.4 m) also counts, at its own rate
+(`oncoming_gate_wide_rate_mps`, -0.25 m/s), but only at road speed (`ego_speed >=
+oncoming_gate_wide_min_speed_ms`, 14 m/s) and only for a car the arc does not
+already place in the opposite lane (`oncoming_gate_wide_opposite_lane` False): one
+holding its own lane on that line is the ordinary pass. Past
+`oncoming_gate_wide_range_m` (45 m) the band needs the base closing rate: on a
+bend the straight-line miss of a car that stays in its lane drifts in slowly
+(`test_the_clearance_model_alone_declines_the_measured_clear_pass` read about
+1.8 m closing at -0.6 to -0.9 m/s from 48 to 60 m), while the far rescues closed
+at -3 to -16 m/s. The
+body test and the deadline still apply. Measured on 2625 clips: the bare band -64 (9 worse), with a
+10 m/s floor -70 (5 worse), plus the lane condition -79 (1 worse). Not kept:
+releasing before the deadline for a miss under 0.6 m closing at 2.5 m/s (+3, one
+new FP, nothing gained).
 
 `tests/aeb/harness.py::evaluate_frame` builds its context without a LOS track
 or `clearance_fn`, so the gate fails closed there and scenarios see the bare

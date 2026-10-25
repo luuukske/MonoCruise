@@ -17,6 +17,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **AEB braked when a TruckersMP player's speed glitched**: a brief dip in a player's reported speed could make AEB think they were stopping dead in front of you. It now assumes no harder braking than a vehicle can really do.
 - **AEB braked for stopped traffic around a gentle bend**: a queue standing on a slow bend far ahead could look like it was in your lane. AEB now reads the bend from the way the stopped vehicles face, as it already did on sharper bends.
 - **AEB braked while you steered past something at walking pace**: in yards and junctions AEB assumed the truck could barely steer at low speed, so it braked for vehicles you were clearly turning around. It now allows for the steering a slow truck really has.
+- **AEB missed some vehicles heading straight for you**: a TruckersMP car crossing your path, an oncoming car drifting into your lane, or a vehicle beside you veering in could be written off as passing clear. AEB now also checks the line each vehicle is really closing on and brakes when it is coming at you up close.
 
 ## [1.1.3] - 2026-10-23
 ### Added

@@ -141,6 +141,12 @@ class AEBCalibration:
 
     # OutOfLaneParallelFilter horizon lane scan count; see README OutOfLaneParallelFilter.
     out_of_lane_scan_samples: int = 10
+    # Keep a body beside ego whose measured miss is under this (m, 0 off), not opening,
+    # inside the range (README OutOfLaneParallelFilter, LOS keep).
+    out_of_lane_los_keep_m: float = 1.95
+    out_of_lane_los_keep_rate_mps: float = 0.0
+    out_of_lane_los_keep_range_m: float = 20.0
+    out_of_lane_los_keep_min_lat_m: float = 2.2
     # Stationary angled adjacent: shallow graze (min d_abs) with far end out of lane.
     stationary_ool_graze_min_m: float = 0.90
     stationary_ool_graze_max_m: float = 1.50
@@ -176,6 +182,13 @@ class AEBCalibration:
     # TmpCross: pass when body already in ego lane band. Off: +FP without new FN win
     # once max_evasion recovers cca/e09.
     tmp_cross_in_corridor_pass: bool = False
+    # TmpCross keeps a real crosser whose measured miss is under this (m, 0 off) and closing
+    # at oncoming_closing_dmiss_rate_mps; wider bar for straight snapshots (README, LOS keep).
+    tmp_cross_los_keep_m: float = 1.5
+    tmp_cross_los_keep_straight_m: float = 2.5
+    tmp_cross_los_keep_range_m: float = 28.0
+    tmp_cross_los_keep_min_fwd_dot: float = -0.9
+    tmp_cross_los_keep_min_speed_ms: float = 6.0
 
     # Fix A: near-head-on cross-zone reduction
     near_head_on_cross_scale: float = 0.3
@@ -298,6 +311,13 @@ class AEBCalibration:
     # Oncoming drifting in on OppositeLaneFilter (README avoidability gate, oncoming scope).
     avoidability_gate_oncoming: bool = True
     oncoming_gate_dmiss_rate_mps: float = -1.0
+    # Wider scope (m, 0 keeps ego's half width) at its own rate inside the range (the base
+    # rate past it), ego speed, and (False) a car off the opposite lane (README).
+    oncoming_gate_wide_m: float = 2.4
+    oncoming_gate_wide_rate_mps: float = -0.25
+    oncoming_gate_wide_min_speed_ms: float = 14.0
+    oncoming_gate_wide_opposite_lane: bool = False
+    oncoming_gate_wide_range_m: float = 45.0
 
     # Clearance-based required decel (README continuous-decel). False restores
     # the pre-clearance relative-frame path and is how the corpus is A/B'd.
