@@ -72,6 +72,17 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `evasion_max_dkappa` | 0.016 /m | Max curvature offset for evasion arcs; binds below about 7 m/s. 0.008 to 0.016 cleared 3 labelled false brakes, flat to 0.025, no positive moved (2026-10-24) |
 | `opposite_lane_kappa_scale` | 2.0 | Kappa multiplier when target in own lane |
 | `turning_diverge_kappa` | 0.007 /m | Corner threshold for Fix-C/D conditions; also the straight/turning split in `TmpCrossTrafficFilter` |
+| `bend_chain_enabled` | True | `BendChainFilter`: a stopped oncoming car whose neighbours bend their lane beside ego (README) |
+| `bend_chain_min_facing` | 0.7 | Target heading dot with ego must be at or below minus this (without it: 2 TPs lost offline) |
+| `bend_chain_max_speed_ms` | 3.0 m/s | Crawl bar; 0 = parked only (-0.75 instead of -7.5); crawlers are deadline-held in the stage |
+| `bend_chain_trailer_targets` | True | A TMP trailer record may be the target |
+| `bend_chain_min_mates` | 3 | Lane-mates needed, at least one ahead of and one behind the target |
+| `bend_chain_s_min_m` / `_s_max_m` | 3 / 70 m | Mate distance along the target's heading |
+| `bend_chain_k_max` / `_k_tol` | 0.05 / 0.006 /m | Max implied curvature; position and heading curvature must agree within the tolerance |
+| `bend_chain_lat_tol_m` | 1.0 m | Mate position off the heading-predicted bend (without it: 22 TPs dropped offline) |
+| `bend_chain_max_gap_m` | 40 m | Max extrapolation from the member nearest ego |
+| `bend_chain_clear_m` | 2.6 m | Ego offset from the fitted lane needed to drop (2.2: same offline) |
+| `bend_chain_max_angle_deg` | 15° | Ego heading against the lane tangent |
 | `tmp_cross_center_hit_dist` | 2.5 m | `TmpCrossTrafficFilter` straight-snapshot genuine-crosser threshold: centre closest-approach at/below this is a real T-bone (pass), above is a body-graze clear (suppress) |
 | `tmp_cross_los_keep_m` / `_straight_m` | 1.5 / 2.5 m | TmpCross LOS keep: measured miss under this (turning / straight snapshot), closing at `oncoming_closing_dmiss_rate_mps`, keeps the crosser (0 disables) |
 | `tmp_cross_los_keep_range_m` | 28 m | LOS keep range (no range: 25 worse, 28 m: 15) |

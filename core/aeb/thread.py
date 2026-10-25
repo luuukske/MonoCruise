@@ -1607,6 +1607,7 @@ class AEBThread(BaseThread):
                 cross_padding=cross_padding,
                 latched_threat_ids=self._latched_threat_ids,
                 follow_threat_ids=self._follow_threat_ids,
+                frame_vehicles=vehicles_eff,
                 off_surface_ids=off_surface_ids,
                 d_miss=los_miss(v),
                 d_miss_rate=los_miss_rate(v),

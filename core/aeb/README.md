@@ -294,10 +294,11 @@ pass, the vehicle enters collision evaluation.
 | `TmpCrossTrafficFilter` | TMP-only: straight snapshot uses centre closest-approach (T-bone vs body-graze), turning snapshot uses full-horizon endpoint lane |
 | `SweepPassFilter` | Stationary cross-traffic ego turns through |
 | `CornerEntryStationaryFilter` | Stationary at corner entry: out-of-lane oncoming/co-dir, or in-lane with arc consistency |
+| `BendChainFilter` | Stopped or crawling car facing ego whose neighbours bend their lane beside ego, not through it |
 | `EgoEvasionFilter` | Ego can steer around target within 0.08 g (runs for `Lane.EGO` too) |
 
-`OutOfLaneParallelFilter`, `SweepPassFilter` and both corner-entry stages run
-inside `AvoidabilityGate` (see "Avoidability gate" below).
+`OutOfLaneParallelFilter`, `SweepPassFilter`, both corner-entry stages and
+`BendChainFilter` run inside `AvoidabilityGate` (see "Avoidability gate" below).
 
 `FilterContext.d_miss` carries the measured CBDR miss for the vehicle, computed
 once per vehicle per frame by the `los_miss` memo in `thread.py::loop`. It is
@@ -833,6 +834,41 @@ new FP, nothing gained).
 `tests/aeb/harness.py::evaluate_frame` builds its context without a LOS track
 or `clearance_fn`, so the gate fails closed there and scenarios see the bare
 stages. The gate's own cases are in `tests/aeb/test_avoidability_gate.py`.
+
+### `BendChainFilter`
+
+A queue standing in the oncoming lane on a bend sits on ego's arc while ego has
+not yet steered into the bend, so each stopped car reads as an obstacle dead
+ahead. The other vehicles say where the road goes: `core/aeb/bend_chain.py` reads
+the bend from them, never from a map or the road model (the road model follows
+too slowly for AEB).
+
+- Target: stopped or crawling (`max(speed, measured ground speed) <=
+  bend_chain_max_speed_ms`, 3 m/s; an unknown track keeps it), facing ego (heading
+  dot `<= -bend_chain_min_facing`, 0.7), not latched or follow-flagged.
+  TruckersMP trailer records may be the target (`bend_chain_trailer_targets`):
+  the braking id was often the trailer.
+- Lane-mates: every other non-trailer vehicle in `FilterContext.frame_vehicles`
+  `bend_chain_s_min_m..s_max_m` (3-70 m) along the target's heading whose
+  position and heading agree on one circle through the target: implied
+  curvatures `2 lo / s^2` and `dh / s` within `bend_chain_k_tol` (0.006) and the
+  position within `bend_chain_lat_tol_m` (1 m) of the heading-predicted bend. The
+  last test is what keeps a car one lane over at 40 m from passing for a mate on
+  a fake bend. A mate may face either way.
+- At least `bend_chain_min_mates` (3), with mates both ahead of and behind the
+  target. The fitted lane is extrapolated to ego only from the member nearest
+  ego along it (`bend_chain_max_gap_m`, 40 m), and the target is dropped when ego
+  sits `bend_chain_clear_m` (2.6 m) or more off that lane, heading within
+  `bend_chain_max_angle_deg` (15 degrees) of its tangent.
+
+The stage runs inside the avoidability gate, whose parked scope ends a drop at
+the braking deadline. A crawler is outside that scope, so the stage applies the
+same deadline and body test to it itself. Corpus 2026-10-25 (2625 clips):
+-5796.5 to -5804.0, `48397295` and `772faf71` FP to TN, `167806f4` and
+`9f205c43` false warns cleared, nothing worse. Offline, without the facing
+condition, the same fit dropped 2 true positives (same-direction queues). Parked
+cars only: -0.75. Without the crawler's deadline hold: -14.5, the extra two
+(`2ea43aa9`, `e85c4635`) braking at the deadline.
 
 ### `EgoEvasionFilter`
 

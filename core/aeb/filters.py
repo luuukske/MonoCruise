@@ -350,6 +350,8 @@ class FilterContext:
     cross_padding: float = 0.0
     all_target_arcs: list = field(default_factory=list)
     precomputed_cross_arcs: list | None = None
+    # Every vehicle in the radar frame, for stages that read the scene.
+    frame_vehicles: list = field(default_factory=list)
     lane: Lane = Lane.EGO
 
     # Measured CBDR miss for this vehicle this frame; None when the track is
@@ -1149,6 +1151,7 @@ def build_pipeline(cal: AEBCalibration) -> list:
     """Return the ordered list of filter stage instances."""
     # Local import: the gate module builds on this one (README avoidability gate).
     from core.aeb.avoidability import AvoidabilityGate
+    from core.aeb.bend_chain import BendChainFilter
     from core.aeb.turn_completion import TurnCompletionFilter
 
     return [
@@ -1166,6 +1169,7 @@ def build_pipeline(cal: AEBCalibration) -> list:
         AvoidabilityGate(SweepPassFilter(cal), cal),
         AvoidabilityGate(CornerEntryStationaryFilter(cal), cal),
         AvoidabilityGate(CornerEntryStationaryFilterMirrored(cal), cal),
+        AvoidabilityGate(BendChainFilter(cal), cal),
         EgoEvasionFilter(cal),
     ]
 

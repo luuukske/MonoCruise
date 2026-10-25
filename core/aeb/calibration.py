@@ -131,6 +131,22 @@ class AEBCalibration:
     turn_complete_min_speed_ms: float = 2.0
     turn_complete_clear_m: float = 0.0
 
+    # BendChainFilter: stopped oncoming car whose neighbours bend their lane past ego (README).
+    bend_chain_enabled: bool = True
+    bend_chain_min_facing: float = 0.7
+    bend_chain_min_mates: int = 3
+    bend_chain_s_min_m: float = 3.0
+    bend_chain_s_max_m: float = 70.0
+    bend_chain_k_max: float = 0.05
+    bend_chain_k_tol: float = 0.006
+    bend_chain_lat_tol_m: float = 1.0
+    bend_chain_max_gap_m: float = 40.0
+    bend_chain_clear_m: float = 2.6
+    bend_chain_max_angle_deg: float = 15.0
+    # Crawl bar (m/s, 0 = parked only, deadline-held in the stage) and TMP trailer targets.
+    bend_chain_max_speed_ms: float = 3.0
+    bend_chain_trailer_targets: bool = True
+
     # TmpCrossTrafficFilter straight-snapshot center hit threshold (README TmpCrossTrafficFilter).
     tmp_cross_center_hit_dist: float = 2.5
 

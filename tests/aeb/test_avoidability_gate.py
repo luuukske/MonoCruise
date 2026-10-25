@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from core.aeb.calibration import DEFAULT as CAL
 from core.aeb.clearance import clearance_required
 from core.aeb.avoidability import AvoidabilityGate, measured_miss_inside_body
+from core.aeb.bend_chain import BendChainFilter
 from core.aeb.filters import (
     CornerEntryStationaryFilter, CornerEntryStationaryFilterMirrored, EgoEvasionFilter,
     FilterResult, OppositeLaneFilter, OutOfLaneParallelFilter, SweepPassFilter,
@@ -196,7 +197,7 @@ def test_only_guess_stages_are_gated():
     assert gated == {
         OutOfLaneParallelFilter, SweepPassFilter,
         CornerEntryStationaryFilter, CornerEntryStationaryFilterMirrored,
-        OppositeLaneFilter,
+        OppositeLaneFilter, BendChainFilter,
     }
     onc = [s for s in build_pipeline(CAL) if isinstance(s, AvoidabilityGate) and s._oncoming]
     assert [type(s._inner) for s in onc] == [OppositeLaneFilter]
