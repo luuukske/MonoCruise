@@ -97,3 +97,27 @@ class TurnCompletionFilter:
                 if 0.0 <= s <= reach and d_abs < bar:
                     return _PASS
         return _suppress("TurnCompletionFilter")
+
+
+class TightTurnFilter:
+    """Walking-pace turn: the arc wraps onto bodies the measured line says ego pulls away from."""
+    name = "TightTurnFilter"
+
+    def __init__(self, cal: AEBCalibration) -> None:
+        self._cal = cal
+
+    def apply(self, ctx: "FilterContext") -> FilterResult:
+        from core.aeb.avoidability import braking_deadline_passed, measured_miss_inside_body
+        cal = self._cal
+        if not cal.tight_turn_enabled or abs(ctx.ego_curvature) < cal.tight_turn_min_kappa:
+            return _PASS
+        if ctx.v.id in ctx.latched_threat_ids or ctx.v.id in ctx.follow_threat_ids:
+            return _PASS
+        rate = getattr(ctx, "d_miss_rate", None)
+        if getattr(ctx, "d_miss", None) is None or rate is None or rate < cal.tight_turn_min_rate_mps:
+            return _PASS
+        # The guess ends where braking could no longer stop short (README avoidability gate).
+        if measured_miss_inside_body(ctx) and braking_deadline_passed(ctx, cal):
+            ctx.deadline_released = True
+            return _PASS
+        return _suppress("TightTurnFilter")

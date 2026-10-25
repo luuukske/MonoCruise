@@ -72,6 +72,9 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `evasion_max_dkappa` | 0.016 /m | Max curvature offset for evasion arcs; binds below about 7 m/s. 0.008 to 0.016 cleared 3 labelled false brakes, flat to 0.025, no positive moved (2026-10-24) |
 | `opposite_lane_kappa_scale` | 2.0 | Kappa multiplier when target in own lane |
 | `turning_diverge_kappa` | 0.007 /m | Corner threshold for Fix-C/D conditions; also the straight/turning split in `TmpCrossTrafficFilter` |
+| `tight_turn_enabled` | True | `TightTurnFilter`: drop a body in a walking-pace turn whose measured miss is not closing (README) |
+| `tight_turn_min_kappa` | 0.1 /m | Ego curvature for the stage (0.08 with an opening miss reached one TP) |
+| `tight_turn_min_rate_mps` | 0.0 m/s | Measured miss must not be closing |
 | `bend_chain_enabled` | True | `BendChainFilter`: a stopped oncoming car whose neighbours bend their lane beside ego (README) |
 | `bend_chain_min_facing` | 0.7 | Target heading dot with ego must be at or below minus this (without it: 2 TPs lost offline) |
 | `bend_chain_max_speed_ms` | 3.0 m/s | Crawl bar; 0 = parked only (-0.75 instead of -7.5); crawlers are deadline-held in the stage |
@@ -100,7 +103,7 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `ff_assist_ramp_lo` | 0.03 | Bottom of the FF-assist ramp; below it the assist contributes nothing. Matches `_USER_BRAKE_LATCH_THRESHOLD`, the physical-pedal warn deadzone. OPD and mapper warn suppression use any value above zero, not this floor |
 | `aeb_confirm_occupancy` | 0.6 | Min qualified fraction over the trailing confirm window for the three `OccupancyConfirm` streaks (risk / engage / warn) to fire |
 | `aeb_confirm_max_gap_frames` | 2 | Max consecutive unqualified frames tolerated before a confirm streak drops; absorbs isolated collision-grid / TMP-jitter dropouts |
-| `aeb_certain_fwd_dot` | 0.90 | `|fwd_dot|` above which an in-lane colliding target is "certain" and skips the confirm wait |
+| `aeb_certain_fwd_dot` | 0.94 | `|fwd_dot|` above which an in-lane colliding target is "certain" and skips the confirm wait (0.90 until 2026-10-25; 0.95 same, 0.97 loses two TPs) |
 | `aeb_warn_confirm_oncoming_s` | 2.00 s | Warn occupancy while *every* colliding target is head-on / near-head-on (opposite-carriageway phantom class) |
 | `aeb_warn_clear_class` | True | Clear threat (README, Warn classes): ego arc and measured CBDR line both within `aeb_warn_clear_band_m` of ego's path for `aeb_warn_clear_hold_s`, driving ego's way or stopped. Gets the look-ahead warn and is never oncoming. False restores the old classes for A/B |
 | `aeb_warn_clear_band_m` | 1.0 m | The test-track trailer sat at 0.3-0.9 m by both measures when straight ahead; queues across a bend at 1.2-1.9 m. Trailers parked 1-2 m off the path get a shorter lead. Against the 0.85 build both warn classes take the labelled corpus from 31 to 25 false warns (crossers -8, clear class +2, no brake verdict moved); a 1.5 m band nets 30, the lane band (1.95 m) 32 |

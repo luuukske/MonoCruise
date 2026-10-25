@@ -295,6 +295,7 @@ pass, the vehicle enters collision evaluation.
 | `SweepPassFilter` | Stationary cross-traffic ego turns through |
 | `CornerEntryStationaryFilter` | Stationary at corner entry: out-of-lane oncoming/co-dir, or in-lane with arc consistency |
 | `BendChainFilter` | Stopped or crawling car facing ego whose neighbours bend their lane beside ego, not through it |
+| `TightTurnFilter` | Walking-pace turn (radius 10 m or less) whose arc wraps onto a body the measured line is not closing on |
 | `EgoEvasionFilter` | Ego can steer around target within 0.08 g (runs for `Lane.EGO` too) |
 
 `OutOfLaneParallelFilter`, `SweepPassFilter`, both corner-entry stages and
@@ -603,6 +604,20 @@ positives to silent (`6ab6d921`, `8f7cc4ae`, `09f0f0dd`, `d7d06ad6`, `d24c3111`,
 (`c626671f`), with no positive moved anywhere in that range, so the shipped pad is 0:
 the predicted path only has to stay out of the corridor the hit test uses. Straight crossers that pass ahead of a slow ego are untouched: the
 perpendicular halo sees them first by design (clearance-based demand).
+
+### `TightTurnFilter`
+
+At walking pace in a tight turn (`|ego_curvature| >= tight_turn_min_kappa`, 0.1
+1/m, a radius of 10 m or less) ego's arc wraps round within the horizon and sweeps
+onto parked and slow bodies beside the turn. The measured line of sight says
+whether ego is closing on the body: a known track whose miss is not closing
+(`d_miss_rate >= tight_turn_min_rate_mps`, 0) drops it, latched and follow-flagged
+ids excepted. Like the gated stages the drop ends at the braking deadline when
+the measured line passes through the body (`core/aeb/turn_completion.py`).
+Measured 2026-10-25 on the per-onset traces: every true positive in a turn that
+tight was closing at -1.4 m/s or faster; corpus `346fe93a` and `ed1e366a` FP to
+TN, nothing worse. It runs bare after `BendChainFilter`, before
+`EgoEvasionFilter`.
 
 ### `TmpCrossTrafficFilter`
 
@@ -1713,7 +1728,7 @@ exemptions: the trailer-in-lane rescue must survive both (clip 434f0401).
 
 - **Ego-turn extrapolation** (non-co-directional targets). A hit reachable only
   by holding the current steer for `turn_veto_min_ttc_s` (1.2 s) while
-  `|ego_curvature| >= turn_veto_min_kappa` (0.012, about R 83 m) is vetoed.
+  `|ego_curvature| >= turn_veto_min_kappa` (0.010, about R 100 m) is vetoed.
   Real turns are transient (entry, apex, exit); a constant-curvature ego arc
   swept 20-30 degrees into a junction manufactures crossings with traffic on
   the road ego is turning onto. Near-term hits and straight-line driving are
@@ -1724,7 +1739,8 @@ exemptions: the trailer-in-lane rescue must survive both (clip 434f0401).
 - **Matched-speed neighbour** (co-directional, out of lane). Vetoed when the
   axial closing speed `ego_speed - v_target_along_ego` is in
   `[0, codir_adjacent_veto_axial_ms)` (2.0 m/s) **and** the measured
-  `d_miss >= codir_adjacent_veto_miss_m` (2.0 m). Braking removes at most the
+  `d_miss >= codir_adjacent_veto_miss_m` (1.5 m; 2.0 until 2026-10-25, the drop
+  cleared one FP with nothing worse). Braking removes at most the
   axial component, so at under 7 km/h of axial closure any predicted contact is
   lateral and brakes do not steer. Raising this to 4.0 silenced `bbed6ec4` but
   turned `5366cb63` TP into FN and `cf0b2767` TP into LATE; reverted. The lower bound of the band matters: a
@@ -2294,7 +2310,12 @@ clips: `lane_confidence_range_m` is flat over 25-33 m,
 0.008-0.018, `turn_veto_min_ttc_s` over 0.8-1.2 s, and
 `codir_adjacent_veto_axial_ms` over 1.5-2.0 m/s. `turn_veto_min_kappa` 0.008
 removes one more sev-1 false positive but sits one step from 0.006, which
-costs a true positive; 0.012 keeps the margin instead.
+costs a true positive; 0.012 kept the margin until 2026-10-25. On 2625 clips
+0.010 clears four FPs with nothing worse, 0.008 turns `bdcfb9ad` TP into late:
+the veto only holds entry while the hit is 1.2 s or more out, so the cliff is
+latency, not a miss, and 0.010 ships. On the same corpus `aeb_certain_fwd_dot`
+0.94 and 0.95 clear the same six (0.90 before), 0.97 loses two TPs: 0.94 keeps
+the margin.
 `aeb_engage_frac_certain` is the exception and has no such band: see the
 geometry-graded engage section for its trade curve.
 

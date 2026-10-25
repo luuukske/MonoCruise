@@ -130,6 +130,10 @@ class AEBCalibration:
     turn_complete_min_kappa: float = 0.008
     turn_complete_min_speed_ms: float = 2.0
     turn_complete_clear_m: float = 0.0
+    # TightTurnFilter: ego curving this hard with the measured miss not closing (README).
+    tight_turn_enabled: bool = True
+    tight_turn_min_kappa: float = 0.1
+    tight_turn_min_rate_mps: float = 0.0
 
     # BendChainFilter: stopped oncoming car whose neighbours bend their lane past ego (README).
     bend_chain_enabled: bool = True
@@ -242,7 +246,7 @@ class AEBCalibration:
     # Tiered engage confirm windows; brake-TTB slam exempt (README continuous-decel).
     aeb_engage_confirm_s: float = 0.06
     aeb_engage_confirm_oblique_s: float = 0.40
-    aeb_certain_fwd_dot: float = 0.90
+    aeb_certain_fwd_dot: float = 0.94
     # Oblique warn must lead oblique engage by >= 0.1 s (README warn persistence).
     # 0.30 trades short clear-pass cues for fewer phantom beeps; see TUNING.md TODO.
     aeb_warn_confirm_oblique_s: float = 0.30
@@ -312,11 +316,11 @@ class AEBCalibration:
     # Engagement-entry vetoes for hits that rest on unsupportable extrapolation
     # (README engagement-entry vetoes). Warn and FF assist are untouched.
     extrap_veto_enabled: bool = True
-    turn_veto_min_kappa: float = 0.012
+    turn_veto_min_kappa: float = 0.010
     turn_veto_min_ttc_s: float = 1.2
     # 6 m/s closing must stay unvetoed (test_codir_veto_is_a_band_around_matched_speed).
     codir_adjacent_veto_axial_ms: float = 2.0
-    codir_adjacent_veto_miss_m: float = 2.0
+    codir_adjacent_veto_miss_m: float = 1.5
     # Range past which an unseen bend moves a non-co-directional target by more
     # than a lane, so its lane stops being evidence (README lane confidence).
     lane_confidence_range_m: float = 30.0
