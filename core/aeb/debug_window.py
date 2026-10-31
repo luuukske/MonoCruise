@@ -17,6 +17,7 @@ from .thread import AEBState, AEBSnapshot
 from .debug_grid import draw_ground_markers, MAJOR_CLR as _MARKER_CLR
 from .debug_overlays import (
     draw_lanes, draw_map_path, draw_road_path, fetch_map_label, fetch_map_window, overlay_legend,
+    world_transform,
 )
 from core.radar.traffic import ArcPath
 
@@ -170,9 +171,9 @@ class AEBDebugWindow(QWidget):
         acc = self._acc_provider()
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
-        p.fillRect(self.rect(), _BG)
 
         if snap is None:
+            p.fillRect(self.rect(), _BG)
             p.setPen(QPen(_TEXT))
             p.setFont(self._font_main)
             p.drawText(self.rect(), Qt.AlignCenter, "AEB thread not running")
@@ -189,12 +190,11 @@ class AEBDebugWindow(QWidget):
             lambda sx, sy: self._sw(sx, sy, ex, ez, ey),
             float(self.width()), float(self.height()),
         )
-        def to_screen(wx: float, wz: float) -> tuple[float, float]:
-            return self._ws(wx, wz, ex, ez, ey)
-
-        draw_lanes(p, self._map_provider(), to_screen, ex, ez)
+        xform = world_transform(ex, ez, ey, cx, cy, _PPM)
+        reach_m = math.hypot(max(cx, self.width() - cx), max(cy, self.height() - cy)) / _PPM
+        draw_lanes(p, self._map_provider(), xform, ex, ez, reach_m)
         if acc is not None and acc.get("map_path"):
-            draw_map_path(p, acc["map_path"][0], acc["map_path"][1], to_screen)
+            draw_map_path(p, acc["map_path"][0], acc["map_path"][1], xform)
 
         # Nearest half of vehicles get full annotations; threats and ACC lead always full.
         by_dist = sorted(
@@ -400,13 +400,14 @@ class AEBDebugWindow(QWidget):
         p.drawText(QPointF(x, y), f"blinker scalar: {acc.get('blinker', 0.0):+.2f}")
 
     def _draw_grid(self, p: QPainter, cx: float, cy: float) -> None:
-        # The grid is ego-locked, so it only changes with the widget size.
+        # The grid is ego-locked, so it only changes with the widget size. Background baked in:
+        # an opaque pixmap blits about 1 ms faster at 175% than fill plus alpha blend.
         key = (self.width(), self.height(), self.devicePixelRatioF())
         if self._grid_key != key:
             dpr = key[2]
-            pm = QPixmap(int(key[0] * dpr), int(key[1] * dpr))
+            pm = QPixmap(math.ceil(key[0] * dpr), math.ceil(key[1] * dpr))
             pm.setDevicePixelRatio(dpr)
-            pm.fill(Qt.transparent)
+            pm.fill(_BG)
             gp = QPainter(pm)
             gp.setRenderHint(QPainter.Antialiasing, True)
             self._paint_grid(gp, cx, cy)
