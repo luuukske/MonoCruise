@@ -23,7 +23,7 @@ from core.lane_departure.detector import (
     project,
     smooth_heading,
 )
-from core.radar.ego_geometry import EgoGeometry
+from core.radar.ego_geometry import REF_PATH_ORIGIN_M, EgoGeometry
 
 HZ = 20.0
 DT = 1.0 / HZ
@@ -65,7 +65,7 @@ def frame_at(t, route, radius, lateral, psi, **kw):
         z=_arc_z(s, radius) + lateral * math.sin(phi),
         yaw_rad=-(phi + psi), speed_ms=SPEED, steer_right=0.0, gear=1, brake=0.0,
         blinker_left=False, blinker_right=False, hazards=False, paused=False, aeb_active=False,
-        half_width_m=HALF_WIDTH, front_m=FRONT, rear_m=REAR, route=route,
+        half_width_m=HALF_WIDTH, front_m=FRONT, rear_m=REAR, path_m=0.0, route=route,
     )
     base.update(kw)
     return Frame(**base)
@@ -160,8 +160,8 @@ def test_the_rear_corner_counts_when_angled_away_from_the_edge():
 
 def test_the_body_comes_from_the_sdk_geometry():
     geometry = EgoGeometry(half_width_m=1.3, front_m=4.1, rear_m=3.2, path_origin_m=-2.0)
-    assert body_from_geometry(geometry) == (1.3, 4.1, 3.2)
-    assert body_from_geometry(None) == (HALF_WIDTH, FRONT, REAR)
+    assert body_from_geometry(geometry) == (1.3, 4.1, 3.2, -2.0)
+    assert body_from_geometry(None) == (HALF_WIDTH, FRONT, REAR, REF_PATH_ORIGIN_M)
     wide = drive(drift(0.4), half_width_m=1.5)
     narrow = drive(drift(0.4))
     assert warns(wide)[0].gap_m == pytest.approx(warns(narrow)[0].gap_m, abs=0.05)
@@ -312,21 +312,36 @@ def test_gentle_steering_away_from_the_edge_does_not_mute_it():
     assert any(d.active for d in drive(plan))
 
 
-def no_reaction_on_a_right_bend(t):
-    """R 300 m with the wheel held straight: the truck runs out toward the left, the outside."""
-    kappa = 1.0 / 300.0
-    if t < DRIFT_START:
-        return 0.0, 0.0, {}
-    tau = t - DRIFT_START
-    return -0.5 * SPEED * SPEED * kappa * tau * tau, -kappa * SPEED * tau, {}
+def no_reaction(radius):
+    """A right bend with the wheel held straight: the truck runs out toward the left, the outside."""
+    kappa = 1.0 / radius
+
+    def plan(t):
+        if t < DRIFT_START:
+            return 0.0, 0.0, {}
+        tau = t - DRIFT_START
+        return -0.5 * SPEED * SPEED * kappa * tau * tau, -kappa * SPEED * tau, {}
+
+    return plan
 
 
-def test_no_reaction_on_a_bend_cues_early_and_warns_at_the_outside_line():
-    decisions = drive(no_reaction_on_a_right_bend, radius=300.0)
+no_reaction_on_a_right_bend = no_reaction(300.0)
+
+
+def test_no_reaction_on_a_slight_bend_cues_early_and_warns_at_the_outside_line():
+    decisions = drive(no_reaction(700.0), radius=700.0)
     cue, warn = cues(decisions)[0], warns(decisions)[0]
     assert cue.side == warn.side == SIDE_LEFT
     assert decisions.index(warn) - decisions.index(cue) >= 4
     assert cue.gap_m <= LINE + TN.approach_range_m + 0.05
+    assert LINE - 0.2 < warn.gap_m <= LINE and warn.allow_m == TN.warn_overlap_m
+
+
+def test_no_reaction_in_a_tight_corner_warns_at_the_outside_line_without_a_cue():
+    decisions = drive(no_reaction_on_a_right_bend, radius=300.0)
+    warn = warns(decisions)[0]
+    assert not cues(decisions) and warn.side == SIDE_LEFT
+    assert any(d.near_miss == "bend_tight" for d in decisions)
     assert LINE - 0.2 < warn.gap_m <= LINE and warn.allow_m == TN.warn_overlap_m
     assert decisions.index(warn) * DT < DRIFT_START + 1.2
 
@@ -544,7 +559,7 @@ def test_understeering_toward_the_outside_of_a_bend_warns_at_the_line_with_no_al
     warn = warns(decisions)[0]
     assert warn.side == SIDE_LEFT
     assert warn.allow_m == TN.warn_overlap_m and LINE - 0.05 < warn.gap_m <= LINE
-    assert cues(decisions)
+    assert not cues(decisions)
 
 
 def test_a_sharp_bend_is_silent():
@@ -669,10 +684,12 @@ def test_a_cue_that_ends_does_not_disarm_the_line_warning():
     assert LINE - 0.1 < warns(decisions)[0].gap_m <= LINE
 
 
-def test_a_fast_departure_toward_the_inside_of_a_bend_still_cues():
-    decisions = drive(drift(1.5, 1.0), radius=300.0)
-    assert cues(decisions) and cues(decisions)[0].side == SIDE_RIGHT
-    assert not cues(drive(drift(0.4, 1.0), radius=300.0))
+def test_a_tight_corner_never_cues_and_a_steady_slight_bend_cues_like_a_straight():
+    tight = drive(drift(1.5, 1.0), radius=300.0)
+    assert not cues(tight) and warns(tight)[0].side == SIDE_RIGHT
+    for side, expected in ((1.0, SIDE_RIGHT), (-1.0, SIDE_LEFT)):
+        slight = drive(drift(0.5, side), radius=700.0)
+        assert cues(slight) and cues(slight)[0].side == expected
 
 
 def test_a_straight_prefab_lane_without_branch_or_merge_is_a_standard_lane():

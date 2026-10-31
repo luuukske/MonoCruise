@@ -41,12 +41,29 @@ There are two triggers on the same lane data, and they differ in what they sense
   over 0.6 s, capped at 1.5 m/s^2), and the truck is drifting toward the edge at 0.4 m/s or more.
   It only exists near the edge: the corner must be within 0.4 m of the warning line, so a fast
   move in the middle of the lane is ignored. It escalates to the full rumble when the line is
-  reached. A slow wander (under 0.4 m/s) gets no
-  cue, only the line warning. On the inside of a bend (curvature toward that edge of 1/1000 or
-  more) the cue also needs the truck pointing at the edge by 3 degrees or more, because cutting
-  a corner steers that way; the outside edge, where a truck with a still wheel runs out, keeps
-  the plain rule. Sharp bends stay silent as a whole (`bend_sharp`), and the heading is read from
-  the smoothed lane tangent so a coarse polyline cannot fake a closing speed.
+  reached. A slow wander (under 0.4 m/s) gets no cue, only the line warning. The cue follows the
+  change of curvature, not the curvature itself, over the road from ego to `max(30 m, 3 s)`
+  ahead, each zone held 2 s after it clears:
+  - **Steady slight bend** (curvature varying by less than 1/1000 across that road, gentler than
+    R 400): the cue works as on a straight, both edges.
+  - **Curvature changing** (entry, exit, wavy roads; `bend_change`): a drift there is mostly
+    positioning and timing, turning in late or unwinding late. The cue is kept for the driver who
+    is not paying attention: it is muted while the wheel has moved away from that edge in the
+    last 1.5 s (0.008 of lock net, or 0.03 per second), a driver already correcting, and a still
+    wheel or one moving toward the edge cues as on a straight.
+  - **Tight corner** (R 400 or tighter anywhere from 10 m behind to 3 s ahead; `bend_tight`):
+    never a cue, and a cue already running ends. Only the line warning is left.
+
+  Sharp bends stay silent as a whole (`bend_sharp`), and the heading is read from the smoothed
+  lane tangent so a coarse polyline cannot fake a closing speed.
+
+Lateral speed is read at the rear axle group (`EgoGeometry.path_origin_m`, `core/radar/README.md`
+section 17), the point that rolls along the heading: the heading is compared with the lane tangent
+there, and a corner's speed adds the heading rate times its distance ahead of that axle. Read at
+the placement origin, 2.1 m ahead of it on the reference rig, a steady bend read as drift toward
+the outside of `v * kappa * d` (0.35 m/s at 90 km/h on R 150), which cued trucks holding a line
+near the outer marking and muted inside-edge warnings as `returning`. Without readable wheels the
+reference rig's axle is used.
 
 Both are muted while the truck moves toward the lane centre at 0.2 m/s or more (`returning`),
 so a driver who is already steering back is not rumbled at, even if the corner is still over the
@@ -75,6 +92,8 @@ A truck centre more than three half lanes from the route is `off_route`.
 | `speed`, `reverse`, `paused`, `stale`, `aeb`, `brake`, `tmp_map` | below 60 km/h (disarm 50), reversing, game paused, radar older than 0.25 s, AEB cue, brake 0.7 or more (hard braking only), TruckersMP map overlay |
 | `lane_settle` | first 1 s on a lane after a lane switch of the router, a junction, no map or stale data (a fork or fast bend ahead does not restart it) |
 | `bend_sharp` | lane curvature of 1/90 m or more |
+| `bend_change` | approach cue only: lane curvature varies by 1/1000 or more from ego to `max(30 m, 3 s)` ahead (`dkappa` in the log), held 2 s, and the wheel moved away from that edge in the last 1.5 s (`steer_away`); the line warning still applies |
+| `bend_tight` | approach cue only: curvature of 1/400 or more from 10 m behind to `max(30 m, 3 s)` ahead, held 2 s; the line warning still applies |
 | `blinker` | that side's lamp (or hazards) is on, or went off under 2 s ago |
 | `deliberate` | the wheel moved toward that edge by 0.06 of lock or more over the last 2 s, or at 0.3 per second or more over 0.3 s; held 1 s |
 | `intent` | the heading toward that edge is 1.2 degrees or more and the wheel moved toward it (0.015 of lock net over 2 s, or 0.06 per second); held 2 s |
@@ -152,7 +171,7 @@ straights and 0.15 to 0.5 m on bends from R 1000 to R 90. So a driver who cuts b
 will feel it. Thin data from AEB clips, so the numbers are placeholders like the rest.
 
 Cost: on a left bend (right-hand traffic) the inside edge is the oncoming lane, which gets the
-same allowance and no cue. Trailer off-tracking is not modelled.
+same allowance, and no cue in a tight corner. Trailer off-tracking is not modelled.
 
 On straights 8 of 21 clips had the truck's median position more than 0.5 m from the map's lane
 centre (3 more than 1 m). Whether that is map error or how those drivers drive is open; a road

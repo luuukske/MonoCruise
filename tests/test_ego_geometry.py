@@ -46,6 +46,7 @@ def test_reference_constants_track_the_aeb_calibration():
 def test_path_origin_is_the_rear_wheel_mean():
     g = _ref()
     assert g.path_origin_m == pytest.approx(REF_REAR_MEAN)
+    assert eg.REF_PATH_ORIGIN_M == pytest.approx(REF_REAR_MEAN, abs=1e-3)
     # The 20 % rule it replaces sat within 0.1 m of it on this truck.
     old = (CAL.arc_start_pctg - 0.5) * 2.0 * CAL.ego_half_length
     assert abs(g.path_origin_m - old) < 0.1

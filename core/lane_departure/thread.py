@@ -213,14 +213,15 @@ class LaneDepartureThread(BaseThread):
         body = body_from_geometry(geometry)
         if body != self._body:
             self._body = body
-            logger.info("lane departure body: width %.2f m, %.2f m ahead and %.2f m behind the origin (%s)",
-                        2.0 * body[0], body[1], body[2], "SDK wheels" if geometry is not None else "reference rig")
+            logger.info("lane departure body: width %.2f m, %.2f m ahead and %.2f m behind the origin, "
+                        "rear axle %.2f m behind (%s)", 2.0 * body[0], body[1], body[2], -body[3],
+                        "SDK wheels" if geometry is not None else "reference rig")
         snap = self._read_map()
         return Frame(
             t=t_radar, age_s=time.monotonic() - t_radar, x=x, z=z, yaw_rad=yaw, speed_ms=speed,
             steer_right=-steer, gear=gear, brake=brake, blinker_left=left, blinker_right=right,
             hazards=hazards, paused=paused, aeb_active=self._read_aeb(),
-            half_width_m=body[0], front_m=body[1], rear_m=body[2],
+            half_width_m=body[0], front_m=body[1], rear_m=body[2], path_m=body[3],
             route=getattr(snap, "route", None), tmp_map=bool(getattr(snap, "tmp", False)),
         )
 
@@ -230,9 +231,9 @@ class LaneDepartureThread(BaseThread):
             self._plugin_state = state
             logger.info("FFB plugin: present=%s hooked=%s dead=%s", *state)
         features = ("side=%d gap=%.2f m allow=%.2f m tlc=%.2f s drift=%.2f m/s psi=%.1f deg kappa=%.4f "
-                    "speed=%.0f km/h steer_net=%.3f steer_peak=%.3f")
-        values = (d.side, d.gap_m, d.allow_m, d.tlc_s, d.closing_ms, d.psi_deg, d.kappa, d.speed_kmh,
-                  d.steer_net, d.steer_peak)
+                    "dkappa=%.4f speed=%.0f km/h steer_net=%.3f steer_peak=%.3f steer_away=%.3f")
+        values = (d.side, d.gap_m, d.allow_m, d.tlc_s, d.closing_ms, d.psi_deg, d.kappa, d.kappa_change,
+                  d.speed_kmh, d.steer_net, d.steer_peak, d.steer_away)
         if d.started:
             logger.info("lane departure %s: " + features, "approach cue" if d.level == LEVEL_CLOSE else "rumble", *values)
             return

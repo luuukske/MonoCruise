@@ -16,6 +16,7 @@ REF_HALF_WIDTH_M: float = 1.265
 _REF_FRONT_AXLE_Z: float = -1.7925
 _REF_LAST_AXLE_Z: float = 2.7678
 _REF_MAX_TRACK_HALF_M: float = 1.04
+REF_PATH_ORIGIN_M: float = -2.093
 
 # Overhangs and tyre outboard carried over from the reference rig to any truck.
 FRONT_OVERHANG_M: float = REF_HALF_LENGTH_M + _REF_FRONT_AXLE_Z
