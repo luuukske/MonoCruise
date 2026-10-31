@@ -22,10 +22,6 @@ _PATH_HI = QColor(150, 235, 120)
 _ROAD_PATH_CLR = QColor(235, 215, 90, 170)
 _PATH_LO = QColor(245, 150, 60)
 _REACH_M = 260.0
-_TRAIL_ARC_CLR = QColor(130, 130, 200, 90)
-_TRAIL_CROSS_CLR = QColor(255, 200, 80, 180)
-_TRAIL_ARC_HALF_SPAN_M = 50.0
-_TRAIL_ARC_SAMPLES = 32
 
 _cache: dict = {"window": None, "outlines": ()}
 
@@ -61,39 +57,6 @@ def fetch_map_window():
 
     snap = map_snapshot(1.0)
     return None if snap is None else snap.window
-
-
-def draw_trail_arc(p: QPainter, comp: dict | None, to_screen) -> None:
-    """Faint dashed ACC trail arc around a target, plus its ego-row crossing marker."""
-    if comp is None or not comp.get("trail_valid", False):
-        return
-    p.setPen(QPen(_TRAIL_ARC_CLR, 1.0, Qt.DashLine))
-    p.setBrush(Qt.NoBrush)
-    if comp.get("trail_is_straight", False):
-        px, pz = comp["trail_point_x"], comp["trail_point_z"]
-        dx, dz = comp["trail_dir_x"], comp["trail_dir_z"]
-        span = _TRAIL_ARC_HALF_SPAN_M
-        ax, ay = to_screen(px - span * dx, pz - span * dz)
-        bx, by = to_screen(px + span * dx, pz + span * dz)
-        p.drawLine(QPointF(ax, ay), QPointF(bx, by))
-    else:
-        cx, cz, radius = comp["trail_cx"], comp["trail_cz"], comp["trail_R"]
-        if radius < 1e-3:
-            return
-        target = math.atan2(comp["trail_point_z"] - cz, comp["trail_point_x"] - cx)
-        half_sweep = min(_TRAIL_ARC_HALF_SPAN_M / radius, math.pi)
-        poly = QPolygonF()
-        n = _TRAIL_ARC_SAMPLES
-        for i in range(n):
-            ang = target + (i / (n - 1) - 0.5) * 2.0 * half_sweep
-            sx, sy = to_screen(cx + radius * math.cos(ang), cz + radius * math.sin(ang))
-            poly.append(QPointF(sx, sy))
-        p.drawPolyline(poly)
-    if comp.get("trail_crossing_valid", False):
-        mx, my = to_screen(comp["trail_crossing_x"], comp["trail_crossing_z"])
-        p.setPen(Qt.NoPen)
-        p.setBrush(QBrush(_TRAIL_CROSS_CLR))
-        p.drawEllipse(QPointF(mx, my), 3.0, 3.0)
 
 
 def draw_lanes(p: QPainter, window, to_screen, ex: float, ez: float) -> None:

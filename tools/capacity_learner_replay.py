@@ -1,9 +1,11 @@
 """Replay accel_to_pedals_debug.csv into PedalCapacityTracker.update_accel, offline.
 
-The log is written at about 10 Hz; the sending thread learns at the polling rate, so rows
-are linearly interpolated to `--hz` before they are fed in. Mass comes from `gain_scale`
-(20 t / mass) and every row is treated as solo, which the log does not record. Saves are
-disabled, so the live config.json is never touched. See core/sending_thread/README.md.
+The log is written at about 10 Hz and rows are linearly interpolated to `--hz` before they
+are fed in; the learner's rates are per second, so `--hz` only sets the interpolation. The
+mapper log only covers ticks the mapper commanded: `--csv gas_learn_debug.csv` (debug builds)
+replays every tick the learner saw, the driver's own pedal included, with its mass and trailer.
+On the mapper log mass comes from `gain_scale` (20 t / mass) and every row is treated as solo.
+Saves are disabled, so the live config.json is never touched. See core/sending_thread/README.md.
 
 `--bands` adds the online prediction error per mass band: on each logged pull (gas at least
 0.35, accel over 0.4 m/s2, clutch closed) the measured authority against what the learner
@@ -36,8 +38,8 @@ _FIELDS = ("t_s", "speed_ms", "gear", "gas_cmd", "raw_ms2", "road_load_ms2",
            "slope_rad", "game_clutch", "gain_scale", "est_accel_ms2")
 
 
-def _lerp(a: dict, b: dict, w: float) -> dict:
-    return {k: a[k] + w * (b[k] - a[k]) for k in _FIELDS}
+def _lerp(a: dict, b: dict, w: float, fields: tuple[str, ...]) -> dict:
+    return {k: a[k] + w * (b[k] - a[k]) for k in fields}
 
 
 def _band(mass_t: float) -> str:
@@ -77,18 +79,23 @@ def replay(path: Path, date: str, anchor: float, ratio: float, offset: float, hz
         reader = csv.reader(f)
         hdr = next(reader)
         ix = {h: i for i, h in enumerate(hdr)}
+        # The gas learning log carries mass and trailer; the mapper log only `gain_scale`.
+        own_log = "mass_kg" in ix
+        extra = ("mass_kg", "has_trailer") if own_log else ("gain_scale",)
+        fields = tuple(k for k in _FIELDS if k != "gain_scale") + extra
         for row in reader:
             if len(row) != len(hdr) or not row[ix["utc"]].startswith(date):
                 continue
             try:
-                cur = {k: float(row[ix[k]]) for k in _FIELDS}
+                cur = {k: float(row[ix[k]]) for k in fields}
             except ValueError:
                 continue
             cur["utc"] = row[ix["utc"]][11:19]
             if prev is None or not 0.0 < cur["t_s"] - prev["t_s"] < 1.0:
                 prev = cur
                 continue
-            mass = 20_000.0 / max(cur["gain_scale"], 0.1)
+            mass = cur["mass_kg"] if own_log else 20_000.0 / max(cur["gain_scale"], 0.1)
+            trailer = own_log and cur["has_trailer"] > 0.5
             err = _pull_error(tr, cur, mass)
             if err is not None:
                 errors.setdefault(_band(mass / 1000.0), []).append(err)
@@ -97,18 +104,18 @@ def replay(path: Path, date: str, anchor: float, ratio: float, offset: float, hz
                     errors.setdefault(f"after change, {kind}", []).append(err)
             steps = max(1, round((cur["t_s"] - prev["t_s"]) * hz))
             for k in range(steps):
-                at = _lerp(prev, cur, (k + 1) / steps)
+                at = _lerp(prev, cur, (k + 1) / steps, fields)
                 clock[0] = at["t_s"]
                 if at["gas_cmd"] > 0.01:
                     tr.update_accel(at["gas_cmd"], max(0.0, at["raw_ms2"]), at["speed_ms"],
                                     at["slope_rad"], at["game_clutch"], int(cur["gear"]), mass,
-                                    False, road_load_ms2=at["road_load_ms2"])
+                                    trailer, road_load_ms2=at["road_load_ms2"])
             if tr._accel_anchor_gain_ms2 != last_anchor:
                 updates, last_anchor = updates + 1, tr._accel_anchor_gain_ms2
                 learned_mass = mass
             gear = int(cur["gear"])
             if gear > 0:
-                est = tr.accel_gain_for_gear(gear, mass, False) / weight_factor(mass, False)
+                est = tr.accel_gain_for_gear(gear, mass, trailer) / weight_factor(mass, trailer)
                 trace.append((cur["utc"], gear, est, cur["est_accel_ms2"]))
             prev = cur
     return tr, trace, updates, errors
@@ -121,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--anchor", type=float, default=2.164, help="starting slope anchor at gear 6")
     ap.add_argument("--ratio", type=float, default=1.073)
     ap.add_argument("--offset", type=float, default=0.694)
-    ap.add_argument("--hz", type=float, default=100.0, help="learning rate of the live loop")
+    ap.add_argument("--hz", type=float, default=100.0, help="interpolation rate, the live loop's")
     ap.add_argument("--trace-every", type=int, default=0, help="print every Nth high-gear row")
     ap.add_argument("--bands", action="store_true", help="print prediction error per mass band")
     ap.add_argument("--legacy-mass-law", action="store_true",

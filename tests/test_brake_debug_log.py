@@ -6,7 +6,10 @@ import csv
 from core.sending_thread.debug_csv import (
     BRAKE_LOG_HEADER,
     BRAKE_LOG_NAME,
+    GAS_LEARN_LOG_HEADER,
+    GAS_LEARN_LOG_NAME,
     BrakeDebugLog,
+    GasLearnDebugLog,
     open_debug_csv,
 )
 
@@ -47,6 +50,24 @@ def test_a_changed_header_rotates_the_old_file(tmp_path):
     assert _rows(path)[0] == BRAKE_LOG_HEADER
     rotated = [p for p in tmp_path.iterdir() if p.name != BRAKE_LOG_NAME]
     assert len(rotated) == 1 and _rows(rotated[0])[0] == ["t_s", "old_column"]
+
+
+def test_gas_learning_log_writes_at_10_hz_while_the_pedal_is_down_only(tmp_path):
+    log = GasLearnDebugLog(tmp_path)
+    t = 100.0
+    for _ in range(100):                               # 1 s of gas at 100 Hz
+        t += 0.01
+        log.tick(t, True, {"gas_cmd": 0.8, "gas_owner": "driver", "learn_gate": "ok"})
+    for _ in range(100):                               # 1 s off the pedal: no tail
+        t += 0.01
+        log.tick(t, False, {"gas_cmd": 0.0})
+    log.close()
+
+    rows = _rows(tmp_path / GAS_LEARN_LOG_NAME)
+    assert rows[0] == GAS_LEARN_LOG_HEADER
+    assert 9 <= len(rows) - 1 <= 11
+    first = dict(zip(GAS_LEARN_LOG_HEADER, rows[1]))
+    assert first["gas_owner"] == "driver" and first["learn_gate"] == "ok"
 
 
 def test_an_unwritable_root_never_raises(tmp_path):

@@ -102,8 +102,17 @@ def oncoming_drifting_in(ctx: "FilterContext", cal: AEBCalibration) -> bool:
         return False
     miss = getattr(ctx, "d_miss", None)
     rate = getattr(ctx, "d_miss_rate", None)
-    return (miss is not None and rate is not None
-            and miss <= ctx.ego_hw and rate <= cal.oncoming_gate_dmiss_rate_mps)
+    if miss is None or rate is None:
+        return False
+    if miss <= ctx.ego_hw and rate <= cal.oncoming_gate_dmiss_rate_mps:
+        return True
+    return (cal.oncoming_gate_wide_m > 0.0 and miss <= cal.oncoming_gate_wide_m
+            and rate <= cal.oncoming_gate_wide_rate_mps
+            and ctx.ego_speed >= cal.oncoming_gate_wide_min_speed_ms
+            and (cal.oncoming_gate_wide_opposite_lane
+                 or getattr(ctx, "lane", None) != Lane.OPPOSITE_OR_OUTER)
+            and (ctx.dist <= cal.oncoming_gate_wide_range_m
+                 or rate <= cal.oncoming_gate_dmiss_rate_mps))
 
 
 class AvoidabilityGate:

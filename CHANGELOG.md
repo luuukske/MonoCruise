@@ -11,14 +11,40 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Fixed
+- **AEB could treat a stopped or crashing TruckersMP trailer as moving**: when another truck passed beside a stopped trailer, AEB could give the trailer that truck's speed, parked trailers could pick up a passing truck's speed too, and a crash seen on the truck was not applied to its trailer. Trailers are now matched to the truck actually pulling them, using TruckersMP's own trailer link where available, and a crash on either part counts for the whole rig.
+- **AEB braked for cars turning out of a side road**: a car pulling out and turning into the oncoming lane looked like it would swing into your lane, so AEB could brake hard as it straightened out beside you. AEB now expects the turn to finish and stays quiet unless that path actually reaches your lane.
+- **AEB braked when a TruckersMP player's speed glitched**: a brief dip in a player's reported speed could make AEB think they were stopping dead in front of you. It now assumes no harder braking than a vehicle can really do.
+- **AEB braked for stopped traffic around a bend**: a queue standing on a bend ahead, including one waiting in the oncoming lane, could look like it was in your lane. AEB now reads the bend from the way the stopped vehicles face and from the line the queue forms.
+- **AEB braked while you steered past something at walking pace**: in yards, junctions and tight turns AEB assumed the truck could barely steer at low speed, or that the turn would wrap on into parked vehicles beside it, so it braked for things you were clearly turning around. It now allows for the steering a slow truck really has and ignores vehicles you are pulling away from.
+- **AEB missed some vehicles heading straight for you**: a TruckersMP car crossing your path, an oncoming car drifting into your lane, or a vehicle beside you veering in could be written off as passing clear. AEB now also checks the line each vehicle is really closing on and brakes when it is coming at you up close.
+- **AEB was late for a stopped car round a bend**: AEB only saw a stopped or crashed vehicle in your lane once your truck had turned into the bend. With the map files it now looks ahead along your lane while you follow it and brakes earlier; everything else it brakes for is unchanged.
+
+## [1.1.3] - 2026-10-23
+### Added
+- **Hill assist can be turned off**: MonoCruise held the brake whenever you were stopped. A new hill assist switch, on by default, can turn that hold off so the truck rolls while you sit still; your own brake and emergency braking still work.
+
+### Fixed
+- **ACC braked for lagging TruckersMP players**: a lag spike looked like a truck stopping dead, and in jams ACC followed every small speed change of the player ahead. It now uses each player's real speed from TruckersMP's SDK, ignores short lag, and still brakes gradually for a truck that stays frozen.
+- **AEB was late or blind to some TruckersMP trucks**: a truck ahead stopping hard took a moment to show, and below 50 km/h AEB could miss a truck backing across your lane or a car stopping in a jam. It now reacts as the truck brakes and watches players like AI traffic.
+- **AEB braked for vehicles you were driving through**: ghosted players, including right after a teleport into a no-collision zone, or a vehicle sitting inside your truck could set AEB off, even at a standstill. They are now ignored until you are apart, and AEB lets go half a second after you stop.
+- **Acceleration felt weak in town and the gas jumped in hard pulls**: Normal and Efficiency now pull properly up to town speeds and ease off toward the highway, Sport is full throttle with no cap, and ACC no longer holds them back on an empty road. The gas no longer jumps or sags at the end of a hard pull.
+- **Cruise control, ACC and the speed limiter pumped the gas**: on a light truck, after a trailer change, or after driving on your own pedal, the gas could rock on and off about once a second. MonoCruise now learns your truck's pulling power steadily, and the limiter no longer jitters.
+- **MonoCruise froze at times**: with "Help improve AEB and ACC" on, an AEB clip's screenshot could pause everything for a second or two, and a growing cruise control log could freeze the pedals when cruise first engaged. Both are fixed.
+
+### Removed
+- **Automatic horn**: the horn and airhorn switches are gone, as the horn did not come on reliably.
+
+## [1.1.3-preview.3] - 2026-10-21
 ### Added
 - **ACC follows the lanes through bends**: MonoCruise reads the lane layout from the map files already in your ETS2 or ATS install, and in TruckersMP the roads its launcher added, offline and read only, so ACC holds the right lead through bends and stops counting cars in the next lane. Without the map files it works as before.
 - **Hill assist can be turned off**: MonoCruise held the brake whenever you were stopped. A new switch, on by default, turns that hold off so the truck can roll while you sit still. Your own brake still works, and so does emergency braking.
 
 ### Fixed
-- **Cruise control pumped the gas on a light truck**: holding speed without a heavy load, or right after dropping a trailer, cruise control and the speed limiter could rock the gas pedal on and off about once a second. MonoCruise now keeps a better estimate of your truck's pulling power across loads, so the gas stays smooth after hooking or unhooking.
+- **Gas pedal jumped while accelerating hard**: on a fast truck the gas stayed too high through a pull and then got chopped off. Below cruising speed it now eases off once the truck is clearly pulling harder than expected.
+- **Acceleration styles felt weak in town and faded too early**: Normal and Efficiency now pull properly up to town speeds and ease off smoothly toward the highway, and Sport is full throttle with no cap. ACC no longer holds them back on an empty road or behind a car far ahead, and the gas no longer sags at the end of a full-throttle pull or climb.
+- **Cruise control, ACC and the speed limiter pumped the gas**: on a light truck, after hooking or unhooking a trailer, or after a stretch of driving on your own pedal, the gas could rock on and off about once a second at a steady speed. MonoCruise now learns your truck's pulling power steadily across loads, so a few odd seconds can no longer throw it off, and the limiter no longer jitters the gas.
 - **AEB braked for TruckersMP trucks overlapping yours**: after a teleport into a no-collision zone AEB didn't know it was in one, braked for the trucks sitting inside yours and held the brake at a standstill. Zones are now recognised after a teleport, a vehicle sitting inside your truck is always ignored, and AEB lets go half a second after you stop.
-- **AEB was late for a stopped car round a bend**: AEB only saw a stopped or crashed vehicle in your lane once your truck had turned into the bend. With the map files it now looks ahead along your lane while you follow it and brakes earlier; everything else it brakes for is unchanged.
 
 ### Removed
 - **Automatic horn**: the horn and airhorn switches are gone. The horn did not come on reliably.

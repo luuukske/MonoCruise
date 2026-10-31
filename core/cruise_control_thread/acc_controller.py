@@ -16,7 +16,7 @@ from .blinker_arbitration import (
     BlinkerArbiter,
     BlinkerState,
 )
-from . import anticipation, approach_profile, brake_landing, idm_cah, pull_away, standstill_hold
+from . import anticipation, approach_profile, brake_landing, free_road_lift, idm_cah, pull_away, standstill_hold
 
 logger = logging.getLogger(__name__)
 
@@ -305,7 +305,7 @@ class AdaptiveCruiseController:
 
     crawl_follow = property(lambda self: self._motion.confirmed and not self._standstill.held)
 
-    def accel_cap_ms2(self, ego_speed_ms: float) -> float:
+    def accel_cap_ms2(self, ego_speed_ms: float, free_road_ms2: float | None = None) -> float:
         now = time.monotonic()
         if self._prev_mono is None:
             dt = DT_FALLBACK_S
@@ -332,7 +332,7 @@ class AdaptiveCruiseController:
             self._blinker.released_vid = None
             self._standstill.reset()
             self._motion.reset()
-            target = self.config.no_lead_ceiling_ms2
+            target = self.config.no_lead_ceiling_ms2 if free_road_ms2 is None else free_road_ms2
             return self._output_filter(
                 self._jerk_limit(target, dt, False, v_ego, law_release=False), dt, False)
 
@@ -347,12 +347,12 @@ class AdaptiveCruiseController:
 
         a_raw, is_emergency = self._compute_command(
             chain_raw, chain_smooth, v_ego, dt,
-            indicated_raw=indicated_raw,
-            indicated_smooth=indicated_smooth,
+            indicated_raw=indicated_raw, indicated_smooth=indicated_smooth,
             b_eff=blinker.b_eff,
             committed=blinker.committed,
             lane_offset_m=blinker.lane_offset_m,
         )
+        a_raw = free_road_lift.lift(self.config, a_raw, free_road_ms2, v_ego, is_emergency)
         return self._output_filter(self._jerk_limit(a_raw, dt, is_emergency, v_ego), dt, is_emergency)
 
     def reset(self) -> None:

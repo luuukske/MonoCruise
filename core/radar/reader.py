@@ -7,6 +7,8 @@ import mmap
 import struct
 import time
 
+from core.acc.trailer_lock import resolve_tractor
+
 from . import tmp_sdk
 from .tmp_sdk import SdkFrame
 from .traffic import (
@@ -69,11 +71,14 @@ class TrafficReader:
         # Replay-only first-sighting speeds, vehicle id -> m/s. Live leaves empty.
         self._cold_start_speeds: dict[int, float] = {}
         self._cold_started: set[int] = set()
+        # TMP trailer record id -> locked tractor id for rig coupling (README §7).
+        self._trailer_locks: dict[int, int] = {}
 
     def clear_kinematics_state(self) -> None:
         """Clear per-id smoothing after clock domain change. See core/radar/README.md §7."""
         self._last_vehicles.clear()
         self._last_trailer_vehicles.clear()
+        self._trailer_locks.clear()
         self._last_kin_t = None
         self._pending_reanchor = False
 
@@ -244,14 +249,22 @@ class TrafficReader:
             reanchor = reanchor or gap > _READER_CLOCK_GAP_S or gap < 0.0
         self._last_kin_t = t_now
 
-        for v in vehicles:
+        # Tractors first, so a TMP trailer record updates against its tractor's frame (README §7, rig coupling).
+        rigs: list[tuple[Vehicle, Vehicle]] = []
+        trailer_ids = {v.id for v in vehicles if v.is_tmp and v.is_trailer}
+        for vid in [k for k in self._trailer_locks if k not in trailer_ids]:
+            del self._trailer_locks[vid]
+        for v in sorted(vehicles, key=lambda v: v.id in trailer_ids):
             if v.id in self._last_vehicles:
                 prev = self._last_vehicles[v.id]
                 if reanchor:
                     v._hold_across_clock_discontinuity(prev, t_now)
                 else:
+                    tractor = self._rig_tractor(v, vehicles) if v.id in trailer_ids else None
+                    if tractor is not None:
+                        rigs.append((v, tractor))
                     v.update_from_last(
-                        prev, t_now, ego_x, ego_y, ego_z, ego_speed,
+                        prev, t_now, ego_x, ego_y, ego_z, ego_speed, rig_tractor=tractor,
                     )
             elif int(v.id) in self._cold_start_speeds and int(v.id) not in self._cold_started:
                 # One shot: a vehicle that reappears mid-clip is a genuine cold
@@ -261,11 +274,22 @@ class TrafficReader:
             else:
                 # TMP sub-frame pose snap rules. See core/radar/README.md §7.
                 v.time = t_now
+        # A crash only the trailer saw is the tractor's too; it reaches the tractor's speed next frame.
+        for trailer, tractor in rigs:
+            tractor.share_crash_from(trailer, t_now)
         self._last_vehicles = {v.id: v for v in vehicles}
         trailer_vehicles = self._build_trailer_vehicles(
             vehicles, t_now, ego_x, ego_y, ego_z, ego_speed, reanchor=reanchor,
         )
         return vehicles, trailer_vehicles
+
+    def _rig_tractor(self, trailer: Vehicle, vehicles: list[Vehicle]) -> Vehicle | None:
+        """The TMP trailer record's locked tractor (``trailer_lock``); None on any failure."""
+        try:
+            return resolve_tractor(trailer, vehicles, self._trailer_locks)
+        except Exception:
+            logger.debug("TMP trailer lock failed for one record", exc_info=True)
+            return None
 
     def replay_frame(
         self,

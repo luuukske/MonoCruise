@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from core.aeb.calibration import DEFAULT as CAL
 from core.aeb.clearance import clearance_required
 from core.aeb.avoidability import AvoidabilityGate, measured_miss_inside_body
+from core.aeb.bend_chain import BendChainFilter
 from core.aeb.filters import (
     CornerEntryStationaryFilter, CornerEntryStationaryFilterMirrored, EgoEvasionFilter,
     FilterResult, OppositeLaneFilter, OutOfLaneParallelFilter, SweepPassFilter,
@@ -169,6 +170,26 @@ def test_oncoming_needs_a_closing_miss_inside_ego_width():
                            replace(CAL, avoidability_gate_oncoming=False))
 
 
+def test_wide_oncoming_scope_needs_speed_and_a_car_off_the_opposite_lane():
+    """The 1.3 to 2.4 m band counts only at road speed for a car the arc puts in ego's lane."""
+    wide = replace(CAL, oncoming_gate_wide_m=2.4, oncoming_gate_wide_rate_mps=-0.25,
+                   oncoming_gate_wide_min_speed_ms=14.0, oncoming_gate_wide_opposite_lane=False)
+
+    def ctx(lane=Lane.EGO, speed=_V, dist=30.0, rate=-0.5):
+        c = _oncoming(_ctx(25.0, deadline=0.1), d_miss=2.0, rate=rate)
+        c.lane, c.ego_speed, c.dist = lane, speed, dist
+        return c
+
+    wide = replace(wide, oncoming_gate_wide_range_m=45.0)
+    assert _onc_suppressed(ctx(), replace(CAL, oncoming_gate_wide_m=0.0))
+    assert not _onc_suppressed(ctx(), wide)
+    assert _onc_suppressed(ctx(lane=Lane.OPPOSITE_OR_OUTER), wide)
+    assert _onc_suppressed(ctx(speed=10.0), wide)
+    # Past the range a slow drift is a bend artefact; only the base closing rate counts.
+    assert _onc_suppressed(ctx(dist=60.0), wide)
+    assert not _onc_suppressed(ctx(dist=60.0, rate=-2.0), wide)
+
+
 def test_only_guess_stages_are_gated():
     gated = {
         type(s._inner) for s in build_pipeline(CAL) if isinstance(s, AvoidabilityGate)
@@ -176,7 +197,7 @@ def test_only_guess_stages_are_gated():
     assert gated == {
         OutOfLaneParallelFilter, SweepPassFilter,
         CornerEntryStationaryFilter, CornerEntryStationaryFilterMirrored,
-        OppositeLaneFilter,
+        OppositeLaneFilter, BendChainFilter,
     }
     onc = [s for s in build_pipeline(CAL) if isinstance(s, AvoidabilityGate) and s._oncoming]
     assert [type(s._inner) for s in onc] == [OppositeLaneFilter]

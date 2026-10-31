@@ -73,8 +73,9 @@ BASELINE_LAGGY_UNPROVOKED_BRAKES = 8
 # Before ACC_ARCHITECTURE.md §10.2 (2026-09-30) these were 1.37 s and 12 re-stops.
 BASELINE_PULL_AWAY_START_S = 0.97
 BASELINE_CREEP_RESTOPS = 8
-# Landed 2026-10-08 with the gearbox: the lead's shift dips seen through TMP.
-BASELINE_PULL_THROUGH_UNPROVOKED_BRAKES = 3
+# Raised 3 -> 4 with Lukas's approval (2026-10-20): no capability cap on CC, seed 1 only;
+# seeds 1-12 read 13 against 12 unprovoked and 46 against 47 brake events.
+BASELINE_PULL_THROUGH_UNPROVOKED_BRAKES = 4
 
 
 def cases(seed: int = 1) -> dict[str, Scenario]:

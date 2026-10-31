@@ -191,6 +191,12 @@ In our regime `v0 ≫ v` so `a_free ≈ a_max`. The free term remains in the
 formula because it shapes the transition near `s = s*` correctly even
 when `a_free` happens to equal `a_max`.
 
+While the law grants nearly all of `a_free` the lead is not constraining, and
+`free_road_lift.py` raises the command toward the driver's acceleration profile
+instead of holding it at `a_max`. The law itself is unchanged and below 0.88 of
+`a_free` the command is bit-identical to it; see
+`core/cruise_control_thread/README.md`, "Free-road lift".
+
 IIDM piecewise (Treiber & Kesting 2013, ch. 11.3.4):
 
 ```

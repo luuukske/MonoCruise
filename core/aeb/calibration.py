@@ -71,7 +71,8 @@ class AEBCalibration:
     turn_complete_curvature_scale: float = 3.0
     evasion_g: float = 0.08 * 9.81
     evasion_g_oncoming: float = 0.13 * 9.81
-    evasion_max_dkappa: float = 0.008
+    # Low-speed escape cap; 0.008 bound below 10 m/s and hid walking-pace swerves (README).
+    evasion_max_dkappa: float = 0.016
     # Dead: kept for clip-metadata compatibility. Ego curvature now comes from
     # EgoPathModel (core/radar/ego_path_model.py), see core/aeb/README.md §1.
     yaw_rate_steer_gain: float = 12.0
@@ -116,10 +117,39 @@ class AEBCalibration:
     corner_entry_min_road_bend: float = 0.10        # rad (~5.7°)
     corner_entry_min_lateral: float = 0.4           # m
     corner_entry_lateral_tol: float = 1.5           # m
+    # Implied road curvature (bend / range) both corner-entry stages need (README).
+    corner_entry_min_implied_kappa: float = 0.005
 
     user_brake_latch: float = 0.12
     # FF assist ramps in from here to user_brake_latch (README pedal authority).
     ff_assist_ramp_lo: float = 0.03
+
+    # TurnCompletionFilter: a crosser turning at least this hard toward anti-parallel is
+    # dropped when its turn-then-hold path stays this far outside the hit corridor (README).
+    turn_complete_enabled: bool = True
+    turn_complete_min_kappa: float = 0.008
+    turn_complete_min_speed_ms: float = 2.0
+    turn_complete_clear_m: float = 0.0
+    # TightTurnFilter: ego curving this hard with the measured miss not closing (README).
+    tight_turn_enabled: bool = True
+    tight_turn_min_kappa: float = 0.1
+    tight_turn_min_rate_mps: float = 0.0
+
+    # BendChainFilter: stopped oncoming car whose neighbours bend their lane past ego (README).
+    bend_chain_enabled: bool = True
+    bend_chain_min_facing: float = 0.7
+    bend_chain_min_mates: int = 3
+    bend_chain_s_min_m: float = 3.0
+    bend_chain_s_max_m: float = 70.0
+    bend_chain_k_max: float = 0.05
+    bend_chain_k_tol: float = 0.006
+    bend_chain_lat_tol_m: float = 1.0
+    bend_chain_max_gap_m: float = 40.0
+    bend_chain_clear_m: float = 2.6
+    bend_chain_max_angle_deg: float = 15.0
+    # Crawl bar (m/s, 0 = parked only, deadline-held in the stage) and TMP trailer targets.
+    bend_chain_max_speed_ms: float = 3.0
+    bend_chain_trailer_targets: bool = True
 
     # TmpCrossTrafficFilter straight-snapshot center hit threshold (README TmpCrossTrafficFilter).
     tmp_cross_center_hit_dist: float = 2.5
@@ -131,6 +161,12 @@ class AEBCalibration:
 
     # OutOfLaneParallelFilter horizon lane scan count; see README OutOfLaneParallelFilter.
     out_of_lane_scan_samples: int = 10
+    # Keep a body beside ego whose measured miss is under this (m, 0 off), not opening,
+    # inside the range (README OutOfLaneParallelFilter, LOS keep).
+    out_of_lane_los_keep_m: float = 1.95
+    out_of_lane_los_keep_rate_mps: float = 0.0
+    out_of_lane_los_keep_range_m: float = 20.0
+    out_of_lane_los_keep_min_lat_m: float = 2.2
     # Stationary angled adjacent: shallow graze (min d_abs) with far end out of lane.
     stationary_ool_graze_min_m: float = 0.90
     stationary_ool_graze_max_m: float = 1.50
@@ -166,6 +202,13 @@ class AEBCalibration:
     # TmpCross: pass when body already in ego lane band. Off: +FP without new FN win
     # once max_evasion recovers cca/e09.
     tmp_cross_in_corridor_pass: bool = False
+    # TmpCross keeps a real crosser whose measured miss is under this (m, 0 off) and closing
+    # at oncoming_closing_dmiss_rate_mps; wider bar for straight snapshots (README, LOS keep).
+    tmp_cross_los_keep_m: float = 1.5
+    tmp_cross_los_keep_straight_m: float = 2.5
+    tmp_cross_los_keep_range_m: float = 28.0
+    tmp_cross_los_keep_min_fwd_dot: float = -0.9
+    tmp_cross_los_keep_min_speed_ms: float = 6.0
 
     # Fix A: near-head-on cross-zone reduction
     near_head_on_cross_scale: float = 0.3
@@ -203,7 +246,7 @@ class AEBCalibration:
     # Tiered engage confirm windows; brake-TTB slam exempt (README continuous-decel).
     aeb_engage_confirm_s: float = 0.06
     aeb_engage_confirm_oblique_s: float = 0.40
-    aeb_certain_fwd_dot: float = 0.90
+    aeb_certain_fwd_dot: float = 0.94
     # Oblique warn must lead oblique engage by >= 0.1 s (README warn persistence).
     # 0.30 trades short clear-pass cues for fewer phantom beeps; see TUNING.md TODO.
     aeb_warn_confirm_oblique_s: float = 0.30
@@ -273,11 +316,11 @@ class AEBCalibration:
     # Engagement-entry vetoes for hits that rest on unsupportable extrapolation
     # (README engagement-entry vetoes). Warn and FF assist are untouched.
     extrap_veto_enabled: bool = True
-    turn_veto_min_kappa: float = 0.012
+    turn_veto_min_kappa: float = 0.010
     turn_veto_min_ttc_s: float = 1.2
     # 6 m/s closing must stay unvetoed (test_codir_veto_is_a_band_around_matched_speed).
     codir_adjacent_veto_axial_ms: float = 2.0
-    codir_adjacent_veto_miss_m: float = 2.0
+    codir_adjacent_veto_miss_m: float = 1.5
     # Range past which an unseen bend moves a non-co-directional target by more
     # than a lane, so its lane stops being evidence (README lane confidence).
     lane_confidence_range_m: float = 30.0
@@ -288,6 +331,13 @@ class AEBCalibration:
     # Oncoming drifting in on OppositeLaneFilter (README avoidability gate, oncoming scope).
     avoidability_gate_oncoming: bool = True
     oncoming_gate_dmiss_rate_mps: float = -1.0
+    # Wider scope (m, 0 keeps ego's half width) at its own rate inside the range (the base
+    # rate past it), ego speed, and (False) a car off the opposite lane (README).
+    oncoming_gate_wide_m: float = 2.4
+    oncoming_gate_wide_rate_mps: float = -0.25
+    oncoming_gate_wide_min_speed_ms: float = 14.0
+    oncoming_gate_wide_opposite_lane: bool = False
+    oncoming_gate_wide_range_m: float = 45.0
 
     # Clearance-based required decel (README continuous-decel). False restores
     # the pre-clearance relative-frame path and is how the corpus is A/B'd.
@@ -310,6 +360,8 @@ class AEBCalibration:
     # Sweep-past on a bend collapses d_abs at 15-25 m/s (8e213c9e); a cut-in stays ~2-7.
     follow_threat_max_lat_converge_ms: float = 10.0
     follow_threat_hold_s: float = 2.0
+    # Same cap kinematic accel gets in _accel_to_arc_params; a TMP speed dip read 18.7 m/s².
+    follow_threat_max_arc_decel_ms2: float = 6.0
     follow_threat_max_range_m: float = 80.0
     # At or below this ego speed a flagged lead skips EgoEvasionFilter (README follow-threat).
     follow_threat_evasion_exempt_kmh: float = 50.0

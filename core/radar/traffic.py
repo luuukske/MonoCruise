@@ -1242,6 +1242,12 @@ class Vehicle:
         self._raw_brake_active = False
         self._raw_brake_converged_frames = 0
 
+    def share_crash_from(self, other: "Vehicle", t_now: float) -> None:
+        """Take a rig partner's crash latch: tractor and trailer are one player (README §7, rig coupling)."""
+        self._crash_hold_until = max(self._crash_hold_until, other._crash_hold_until)
+        self._crash_knock_until = max(self._crash_knock_until, other._crash_knock_until)
+        self.crash_confirmed = t_now < self._crash_hold_until
+
     def _advance_held_kinematics(
         self,
         prev: "Vehicle",
@@ -1687,8 +1693,12 @@ class Vehicle:
         ego_y: float,
         ego_z: float,
         ego_speed: float,
+        rig_tractor: "Vehicle | None" = None,
     ) -> None:
-        """Per-frame smoothing; ego pose feeds TMP lag freeze. See core/radar/README.md §7."""
+        """Per-frame smoothing; ego pose feeds TMP lag freeze. See core/radar/README.md §7.
+
+        ``rig_tractor``: this trailer record's locked tractor, already updated this frame; its crash latch is shared.
+        """
         dt = t_now - prev.time
         self._carry_sdk_state(prev)
 
@@ -1825,6 +1835,8 @@ class Vehicle:
         self._tmp_apply_crash_rotation_jerk(prev, t_now)
         if self.sdk is not None:
             self._apply_sdk_crash_evidence(prev, t_now)
+        if rig_tractor is not None:
+            self.share_crash_from(rig_tractor, t_now)
 
         # TMP crash detection tunables. See core/radar/README.md §7.
         _skip_position_update = False

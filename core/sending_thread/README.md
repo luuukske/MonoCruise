@@ -45,6 +45,15 @@ gearshift integrator freeze, and tuning CSV rows when high-demand estimates unde
   accelerating with no accel bid, so it cannot keep FF on gas over a crest.
 - Adaptive accel/brake estimates learn from load-compensated accel (`raw + road_load`),
   so a slope cannot bias the learned full-pedal capability.
+- Fast-trim anti-windup: while the gas pedal is railed and the truck is still short of
+  the bid, the fast integrator is held. It used to be back-calculated to the rail, which
+  for a bid above capability meant cancelling the excess and pinning it at -1.5 m/s²; the
+  pedal then sagged once the bid came back into range and unwound at 0.25 m/s² per
+  second. A closed-loop run of the real mapper (40 t, 50 to 75 km/h) finished 2 to 3 s
+  sooner with the hold. With the truck over-delivering at the rail, and on the brake
+  side, the back-calculation is unchanged. Sport bids far above capability on purpose
+  and the CC envelope no longer stops at 0.95 x the estimate, so this path is common now
+  (`core/longitudinal/README.md`). Enforced by `tests/test_mapper_rail_hold.py`.
 - Also holds the shared telemetry mass-estimate helper that `telemetry_thread` uses.
 
 ### Launch governor (`launch_governor.py`)
@@ -110,6 +119,12 @@ Rules:
 - Retune against the plant fit, not by feel. The loop delay is roughly half a second (plant
   dead time plus the measurement's tracking differentiator), and `KI_RISE` sets the phase
   margin against it: about 1 rad/s crossover and 55 degrees at the fitted gain.
+
+## Low-speed strength (`strength_scale.py`)
+
+A pull below about 12 m/s measures roughly twice the slope the gas map is dividing by, including in the anchor gear. At cruise speed the same map is close. The persisted learner never sees the pull: the pedal and the accel are both moving, so every settle gate stays shut, the feedforward stays hot, and the fast trim chops the pedal off once the surge shows up in the 0.30 s differentiator.
+
+`StrengthScale` is not that learner. While the clutch is closed, the pedal has been steady, and speed is under 12 m/s, a pull that outruns the model raises one scale (rise about 0.3 s, ceiling 2.6). A sag, a shift, or gear 1 below 3 m/s does not move it. The scale multiplies capacity fully below 8 m/s and fades to 1 by 20 m/s, so a town pull does not leave the highway pedal short. It can fall back toward 1 over about 8 s when a real low-speed sample says the truck is no longer that strong. Until the scale is actually above 1 the pedal is still `demand / capacity`. Once it is up, the pedal uses `(demand - offset) / slope` so the corrected full-pedal number is not divided through the origin.
 
 ## Pedal capacity (`pedal_capacity.py`)
 
@@ -216,6 +231,44 @@ Replaying the fixed learner over the same 1.3 M rows, the offset converges to **
 independently reproducing the 0.504 measured from coast. Top gear at 17 t reads **1.029 m/s2**
 against a measured **1.02**; before the fix the persisted state gave **0.203** against the same
 truth, which is why a bid over 0.2 m/s2 floored the throttle.
+
+### Gas learning rate is per second
+
+Until 2026-10-21 the anchor, ratio and offset moved by a fixed alpha per call: 0.08 x pedal³
+for the anchor, doubled when the sample read weaker than the estimate. At the 100 Hz loop
+that is a time constant of about 0.06 s, so the gas map was whatever the last half second
+of settled pedal said. The 0.15 residual clamp bounds one step, not a reading that persists.
+
+On 2026-10-21, with the cruise-noise and mass-law fixes already live, a 10.5 t truck's anchor
+went 1.75 -> 0.69 -> 0.38 in about two minutes. It fell while the driver had the pedal (a
+limiter bypass at 100-105 km/h, then manual driving), which `accel_to_pedals_debug.csv` does
+not record because it only logs while the mapper commands; replaying the rows it did record
+kept the anchor at 1.79. The map turned about 2.5x too steep and the limiter pumped the gas
+0 -> 0.44 at about 1 Hz at a steady 100 km/h. A synthetic floored pedal reading 40 % of the
+model halved the anchor in 0.75 s.
+
+Each step is now `rate x pedal³ x dt`, dt the time since the previous call (capped at
+0.05 s), so learning speed no longer depends on the loop rate: `_ACCEL_ANCHOR_RATE_PER_S` 0.5
+at full pedal, ratio and offset 0.125, the same 4:1 split the alphas had. Gas no longer uses
+`_UNDERPERFORM_MULT`: an estimate that is too low is the one that steepens the map and pumps;
+one that is too high only makes the gas lazy, and the fast trim covers it. Replayed over the
+October mapper log at 100 Hz:
+
+| rate | time inside a >25 % fall within 60 s | worst 60 s fall | pull measured / believed, median |
+|---|---|---|---|
+| per call (old) | 15.4 % | x0.25 | 1.02 |
+| 1.0 / s | 3.3 % | x0.29 | 1.08 |
+| **0.5 / s** | **1.7 %** | **x0.46** | **1.10** |
+| 0.25 / s | 0.5 % | x0.59 | 1.13 |
+
+The pull error rises because a fast learner re-fits each pull while it happens and so
+predicts pulls well by construction; a slow one settles between pulls and cruise, which one
+anchor cannot both fit. 0.5 was taken because every existing learner test passes at it
+unchanged; 0.25 is the next step if the map still drifts. Cost: a truck that really differs
+needs about 10 s of settled full-pedal pulls to move the map 2x (30 s at 70 % pedal), and
+the fast trim carries the difference meanwhile. Why the driver's own pulls read weak at
+100+ km/h is not known yet; `gas_learn_debug.csv` (see **Debug logs**) records them. Do not go
+back to per-call alphas. Enforced by `tests/test_accel_capacity_cruise.py`.
 
 ### Gas capacity and mass
 
@@ -554,6 +607,10 @@ A 3 px always-on-top `Qt.Tool` strip along the bottom of the primary screen. Cre
 the Qt main thread via `create_visualization_bar()`. It reads `aforward` / `abackward`
 and flashes on `em_stop` / `AEB_cue` (the AEB sound's cue, warn or brake).
 
+The 10 ms tick and its per-tick smoothing stay as they are, but `update()` runs only when
+the gas rect, brake rect or flicker colour changed. Idle ticks used to repaint the full-width
+translucent window at 100 Hz on the Qt main thread for nothing.
+
 It must not call `raise_()` from its animation timer. A per-frame raise fights
 `cc_panel` and can freeze Qt on Windows when the main window is minimised.
 `WindowStaysOnTopHint` does not survive the NVIDIA overlay plus alt-tab: Qt still
@@ -713,7 +770,7 @@ on 2026-10-04 even with the onset guard. The extra cannot be predicted (same tra
 - Rain is not visible in telemetry. If wet grip cuts the extra, a dry measurement
   over-reads it; this was accepted on 2026-10-04 for a later, more precise trigger.
 
-## Brake debug log (`debug_csv.py`)
+## Debug logs (`debug_csv.py`)
 
 With `debug` on in `config.json`, `brake_debug.csv` at the project root gets every
 braking tick at 20 Hz plus a 2 s tail: speed, the 0.30 s and 0.12 s decel
@@ -733,6 +790,14 @@ read it again. `open_debug_csv` reads the header line only (2 ms on the same fil
 never let an open read past it. A file over `_DEBUG_LOG_MAX_BYTES` (512 MB) is rotated
 aside at open; `tools/acc_platoon/shifts.py` and `tools/tune_visualizer.py` read the live
 file only, so a rotation leaves earlier history in the `_<stamp>` file.
+
+`gas_learn_debug.csv` gets every tick `update_accel` is fed at 10 Hz, whoever owns the gas:
+the inputs exactly as the learner received them (sent gas, accel, road load less creep, mass
+and trailer), `gas_owner` (mapper or driver), the gate that ended the learner's tick, and the
+anchor, ratio, offset and full-pedal estimate after it. The mapper log covers only the ticks
+the mapper commanded, so the 2026-10-21 collapse, which happened on the driver's pedal, left
+no trace in it. `tools/capacity_learner_replay.py --csv gas_learn_debug.csv` replays it. Same
+512 MB rotation as the mapper log.
 
 The grip columns (lateral accel, steer, brake temperature, air pressure, wipers, the
 surface under most truck wheels, worst truck and trailer wheel slip, from

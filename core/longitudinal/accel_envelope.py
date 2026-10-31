@@ -5,13 +5,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-# Keeps the pedal just off the rail so the mapper's fast PI keeps trim authority.
-# Never a per-profile share: see `core/longitudinal/README.md` for why.
-HEADROOM_FRAC: float = 0.95
-
-# Below this the capacity estimate is treated as unknown rather than as a real
-# ceiling. The publisher legitimately zeroes it while disconnected or idle.
-_MIN_USABLE_CAPACITY_MS2: float = 0.05
+# Above any speed-error bid the cruise PID produces. Sport returns this instead
+# of a comfort curve, so the pedal goes to the floor until the set speed is close.
+_UNCAPPED_BID_MS2: float = 50.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,43 +16,38 @@ class AccelProfile:
 
     label: str
     launch_ms2: float
-    knee_ms: float
-    taper_power: float
-    floor_ms2: float
+    half_ms: float
+    cruise_ms2: float
     rise_jerk_ms3: float
+    # No shape, settings rail or rise limit. The speed error is the bid.
+    uncapped: bool = False
 
 
-# The knee sits just above the launch itself so the taper starts early: holding
-# a flat ceiling out to 30 km/h asked for more pedal than the speed warranted.
+# Same curve family for both comfort profiles, so Efficiency feels like a softer
+# Normal at every speed instead of a different shape.
 EFFICIENCY = AccelProfile(
     label="Efficiency",
-    launch_ms2=1.05,
-    knee_ms=12.0 / 3.6,
-    taper_power=0.50,
-    floor_ms2=0.30,
-    rise_jerk_ms3=0.5,
+    launch_ms2=1.50,
+    half_ms=32.0 / 3.6,
+    cruise_ms2=0.35,
+    rise_jerk_ms3=1.0,
 )
 
-# launch_ms2 * knee_ms is the whole tail when taper_power is 1.0, so raising the
-# launch and lowering the knee in step leaves every value above 35 km/h identical.
 NORMAL = AccelProfile(
     label="Normal",
-    launch_ms2=2.00,
-    knee_ms=26.25 / 3.6,
-    taper_power=1.00,
-    floor_ms2=0.45,
-    rise_jerk_ms3=1.3,
+    launch_ms2=2.20,
+    half_ms=45.0 / 3.6,
+    cruise_ms2=0.50,
+    rise_jerk_ms3=2.0,
 )
 
-# Deliberately above any rig's capability, so the capability guard binds instead
-# and the driver meets a ceiling only where the engine does. See the README.
 SPORT = AccelProfile(
     label="Sport",
-    launch_ms2=2.50,
-    knee_ms=40.0 / 3.6,
-    taper_power=0.45,
-    floor_ms2=1.20,
-    rise_jerk_ms3=2.5,
+    launch_ms2=_UNCAPPED_BID_MS2,
+    half_ms=45.0 / 3.6,
+    cruise_ms2=_UNCAPPED_BID_MS2,
+    rise_jerk_ms3=math.inf,
+    uncapped=True,
 )
 
 PROFILES: tuple[AccelProfile, ...] = (EFFICIENCY, NORMAL, SPORT)
@@ -76,42 +67,21 @@ def resolve_profile(name: object) -> AccelProfile:
 
 
 def shape_ceiling_ms2(speed_ms: float, profile: AccelProfile) -> float:
-    """Comfort law: what a driver wants to feel at this speed, ignoring capability."""
+    """Comfort law: what a driver wants to feel at this speed.
+
+    Flat at rest, halfway to the cruise value at `half_ms`, smooth everywhere.
+    """
     try:
         v = float(speed_ms)
     except (TypeError, ValueError):
-        return profile.floor_ms2
+        v = math.nan
     if not math.isfinite(v):
         # Broken speed telemetry: bid the least, never the most.
-        return profile.floor_ms2
-    if v <= profile.knee_ms:
-        return profile.launch_ms2
-    taper = profile.launch_ms2 * (profile.knee_ms / v) ** profile.taper_power
-    return max(profile.floor_ms2, taper)
-
-
-def usable_capacity_ms2(capacity_ms2: object) -> float | None:
-    """The published capacity estimate, or None when it carries no information."""
-    try:
-        cap = float(capacity_ms2)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(cap) or cap <= _MIN_USABLE_CAPACITY_MS2:
-        return None
-    return cap
-
-
-def envelope_ms2(
-    speed_ms: float,
-    profile: AccelProfile,
-    capacity_ms2: object = None,
-) -> float:
-    """Positive accel ceiling: the comfort shape, bounded by what the truck can do."""
-    shape = shape_ceiling_ms2(speed_ms, profile)
-    cap = usable_capacity_ms2(capacity_ms2)
-    if cap is None:
-        return shape
-    return min(shape, HEADROOM_FRAC * cap)
+        return 0.0 if profile.uncapped else profile.cruise_ms2
+    if profile.uncapped:
+        return _UNCAPPED_BID_MS2
+    x = max(v, 0.0) / profile.half_ms
+    return profile.cruise_ms2 + (profile.launch_ms2 - profile.cruise_ms2) / (1.0 + x * x)
 
 
 def rise_limited_ms2(
@@ -124,6 +94,8 @@ def rise_limited_ms2(
 
     A None `prev_bid_ms2` means the first commanding tick, which ramps from zero.
     """
+    if profile.uncapped:
+        return wanted_ms2
     prev = 0.0 if prev_bid_ms2 is None else float(prev_bid_ms2)
     if not math.isfinite(prev):
         prev = 0.0

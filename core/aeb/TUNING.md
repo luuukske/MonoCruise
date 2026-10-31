@@ -28,6 +28,11 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `stop_buffer_response_trailer_s` | 0.30 s | Same term with a trailer attached, and the term that dominates trigger distance at speed. Trailer slams build up no slower than solo ones, so the stop-distance envelope would take 0.25, but in the TMP convoy sim (`tools/acc_platoon`, lead stops dead from 80 km/h, three seeds) 0.25 put two followers on the truck ahead: there the pad also pays for seeing a braking lead through netcode. 0.30 is contact-free with 0.29-0.63 m left, 0.35 leaves 0.56-0.79 m, the old 0.40 0.91-1.05 m (all on the slam plant). Was 0.50, then 0.40 against the gentle-braking fit |
 | `aeb_target_rate_engaged_ms3` | 30 m/s³ | Target slew while engaged. The engagement edge itself is exempt and steps straight to the requirement: ramping from zero used to cost the entire brake build-up window |
 | `aeb_engage_frac_certain` | 0.85 | **In-game trial from 2026-08-11**, was 0.70. Now equal to `aeb_engage_frac`, so the geometry grading is flat and aligned in-lane traffic no longer skips the uncertainty hedge (`tests/aeb/test_engage_sensitivity.py::test_graded_bar_brakes_earlier_on_an_in_lane_obstacle` fails by design while this holds). Note this knob does not soften braking: required decel is recomputed as the gap closes, so engaging later means engaging at a *higher* demand. On clip `ac6b48b4` the engage-tick command rises 6.26 to 7.61 m/s², and headroom below `effective_max` for the loop to recover a build-up shortfall drops from 30% to 15% |
+| `oncoming_gate_wide_m` | 2.4 m | Oncoming gate scope also covers a miss line out to this, past ego's half width (0 disables) |
+| `oncoming_gate_wide_rate_mps` | −0.25 m/s | Wide band closing rate |
+| `oncoming_gate_wide_min_speed_ms` | 14 m/s | Wide band only at road speed (no floor: 9 worse clips, 10 m/s: 5; 10 m/s also kept a stray onset in 66cf7904) |
+| `oncoming_gate_wide_range_m` | 45 m | Past this the wide band needs `oncoming_gate_dmiss_rate_mps`: a slow drift far out is a bend artefact |
+| `oncoming_gate_wide_opposite_lane` | False | Wide band skips a car the arc places in the opposite lane (True at 10 m/s: 4 more worse clips) |
 | `avoidability_gate_enabled` | True | Lets the four guess stages (`OutOfLaneParallelFilter`, `SweepPassFilter`, both corner-entry stages) drop a parked body only until its clearance demand reaches the braking deadline (README, Avoidability gate). False restores the bare stages; that is how the corpus is A/B'd. No threshold to tune: the deadline is the engage test at fraction 1 |
 | `clearance_required_enabled` | True | Clearance demand model. False restores the relative-frame `_required_decel_two_frame` / `_codir_required_cap` path; that is how the corpus is A/B'd. It reverts the **formula only**, not the `max`-over-targets aggregation, which is unconditional: OFF therefore differs from the pre-change tree on exactly the multi-target clips (2 on the store as of 2026-08-23, `e66a2827` and `e9aaf92b`, both `false_negative -> true_positive`) |
 | `clearance_horizon_s` | 5.0 s | How far the occupancy profile is sampled. Independent of `arc_horizon_max`: collision detection keeps `dynamic_horizon` so no filter verdict moves. Past the window a still-occupying target is linearly extrapolated to the closed-form peak, so this is not a demand cliff |
@@ -42,6 +47,10 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `lane_half_width` | 1.95 m | EGO lane boundary |
 | `lane_separation` | 3.9 m | Road lane pitch |
 | `out_of_lane_scan_samples` | 10 | OutOfLaneParallelFilter horizon lane scan count |
+| `out_of_lane_los_keep_m` | 1.95 m | OutOfLaneParallelFilter LOS keep: measured CBDR miss under this keeps the body (0 disables) |
+| `out_of_lane_los_keep_rate_mps` | 0.0 m/s | LOS keep needs the miss not opening |
+| `out_of_lane_los_keep_range_m` | 20 m | LOS keep range; past it the straight-line miss is wrong on bends (no range: 15 new FPs at ~50 m) |
+| `out_of_lane_los_keep_min_lat_m` | 2.2 m | LOS keep only for a body this far to ego's side; nearer bodies are the centre scan's case |
 | `stationary_ool_graze_min_m` | 0.90 m | Stationary straddle: closest centreline sample must stay above this |
 | `stationary_ool_graze_max_m` | 1.50 m | Stationary straddle: closest sample must stay at or below this |
 | `stationary_ool_span_scale` | 1.5 | Stationary straddle: farthest sample ≥ `lane_half_width ×` this |
@@ -60,10 +69,28 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `max_evasion_opp_fast_kmh` | 60.0 | Target speed for opp_fast arm. Provisional; do not retune as if corpus-fit |
 | `max_evasion_min_lat_m_tmp_cross` | 3.0 | TmpCross arm (lower): cca-class TMP never hits Opp head_on |
 | `tmp_cross_in_corridor_pass` | false | TmpCross: pass when `|lat| ≤ lane_half_width` ahead (and miss closing) |
-| `evasion_max_dkappa` | 0.008 /m | Max curvature offset for evasion arcs |
+| `evasion_max_dkappa` | 0.016 /m | Max curvature offset for evasion arcs; binds below about 7 m/s. 0.008 to 0.016 cleared 3 labelled false brakes, flat to 0.025, no positive moved (2026-10-24) |
 | `opposite_lane_kappa_scale` | 2.0 | Kappa multiplier when target in own lane |
 | `turning_diverge_kappa` | 0.007 /m | Corner threshold for Fix-C/D conditions; also the straight/turning split in `TmpCrossTrafficFilter` |
+| `tight_turn_enabled` | True | `TightTurnFilter`: drop a body in a walking-pace turn whose measured miss is not closing (README) |
+| `tight_turn_min_kappa` | 0.1 /m | Ego curvature for the stage (0.08 with an opening miss reached one TP) |
+| `tight_turn_min_rate_mps` | 0.0 m/s | Measured miss must not be closing |
+| `bend_chain_enabled` | True | `BendChainFilter`: a stopped oncoming car whose neighbours bend their lane beside ego (README) |
+| `bend_chain_min_facing` | 0.7 | Target heading dot with ego must be at or below minus this (without it: 2 TPs lost offline) |
+| `bend_chain_max_speed_ms` | 3.0 m/s | Crawl bar; 0 = parked only (-0.75 instead of -7.5); crawlers are deadline-held in the stage |
+| `bend_chain_trailer_targets` | True | A TMP trailer record may be the target |
+| `bend_chain_min_mates` | 3 | Lane-mates needed, at least one ahead of and one behind the target |
+| `bend_chain_s_min_m` / `_s_max_m` | 3 / 70 m | Mate distance along the target's heading |
+| `bend_chain_k_max` / `_k_tol` | 0.05 / 0.006 /m | Max implied curvature; position and heading curvature must agree within the tolerance |
+| `bend_chain_lat_tol_m` | 1.0 m | Mate position off the heading-predicted bend (without it: 22 TPs dropped offline) |
+| `bend_chain_max_gap_m` | 40 m | Max extrapolation from the member nearest ego |
+| `bend_chain_clear_m` | 2.6 m | Ego offset from the fitted lane needed to drop (2.2: same offline) |
+| `bend_chain_max_angle_deg` | 15° | Ego heading against the lane tangent |
 | `tmp_cross_center_hit_dist` | 2.5 m | `TmpCrossTrafficFilter` straight-snapshot genuine-crosser threshold: centre closest-approach at/below this is a real T-bone (pass), above is a body-graze clear (suppress) |
+| `tmp_cross_los_keep_m` / `_straight_m` | 1.5 / 2.5 m | TmpCross LOS keep: measured miss under this (turning / straight snapshot), closing at `oncoming_closing_dmiss_rate_mps`, keeps the crosser (0 disables) |
+| `tmp_cross_los_keep_range_m` | 28 m | LOS keep range (no range: 25 worse, 28 m: 15) |
+| `tmp_cross_los_keep_min_fwd_dot` | −0.9 | LOS keep only for a crosser, not a near head-on car (identical at −0.93) |
+| `tmp_cross_los_keep_min_speed_ms` | 6.0 m/s | LOS keep skips junction crawlers (identical at 6.7; `fwd_dot` alone: 3 more FPs) |
 | `co_same_turn_lookahead_scale` | 0.5 | Extended lookahead fraction of horizon |
 | `diverge_dip_samples` | 8 | `_is_approaching` window samples for the in-lane pass-through dip check |
 | `aeb_engage_confirm_s` | 0.06 s | Sustained-qualification wait for near-certain engagement entries (3rd tick at 30 Hz) |
@@ -76,7 +103,7 @@ instance to `build_pipeline(cal)` or `evaluate_frame(frame, cal)`.
 | `ff_assist_ramp_lo` | 0.03 | Bottom of the FF-assist ramp; below it the assist contributes nothing. Matches `_USER_BRAKE_LATCH_THRESHOLD`, the physical-pedal warn deadzone. OPD and mapper warn suppression use any value above zero, not this floor |
 | `aeb_confirm_occupancy` | 0.6 | Min qualified fraction over the trailing confirm window for the three `OccupancyConfirm` streaks (risk / engage / warn) to fire |
 | `aeb_confirm_max_gap_frames` | 2 | Max consecutive unqualified frames tolerated before a confirm streak drops; absorbs isolated collision-grid / TMP-jitter dropouts |
-| `aeb_certain_fwd_dot` | 0.90 | `|fwd_dot|` above which an in-lane colliding target is "certain" and skips the confirm wait |
+| `aeb_certain_fwd_dot` | 0.94 | `|fwd_dot|` above which an in-lane colliding target is "certain" and skips the confirm wait (0.90 until 2026-10-25; 0.95 same, 0.97 loses two TPs) |
 | `aeb_warn_confirm_oncoming_s` | 2.00 s | Warn occupancy while *every* colliding target is head-on / near-head-on (opposite-carriageway phantom class) |
 | `aeb_warn_clear_class` | True | Clear threat (README, Warn classes): ego arc and measured CBDR line both within `aeb_warn_clear_band_m` of ego's path for `aeb_warn_clear_hold_s`, driving ego's way or stopped. Gets the look-ahead warn and is never oncoming. False restores the old classes for A/B |
 | `aeb_warn_clear_band_m` | 1.0 m | The test-track trailer sat at 0.3-0.9 m by both measures when straight ahead; queues across a bend at 1.2-1.9 m. Trailers parked 1-2 m off the path get a shorter lead. Against the 0.85 build both warn classes take the labelled corpus from 31 to 25 false warns (crossers -8, clear class +2, no brake verdict moved); a 1.5 m band nets 30, the lane band (1.95 m) 32 |

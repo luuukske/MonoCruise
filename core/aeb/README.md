@@ -41,12 +41,26 @@ stall, fresh spawn). Without correction, AEB sees a "stationary" obstacle
 directly ahead of ego and triggers falsely.
 
 `_swap_trailer_kinematics()` in `thread.py` walks the vehicle list once at the
-top of each loop. For every `is_tmp` + `is_trailer` entry it locates the
-nearest non-trailer TMP vehicle within 30 m (the pulling tractor) and returns
-a shallow copy with `speed` and `acceleration` replaced by the tractor's
-filtered values. The trailer's pose, yaw, curvature, and trailer-flag stay
-its own: only the kinematics it cannot self-measure are inherited. ACC has
-the same swap in `core/acc/tracker.py::_top_leads`.
+top of each loop. Every `is_tmp` + `is_trailer` entry resolves its tractor
+through ACC's lock, `core/acc/trailer_lock.py::resolve_tractor` (the SDK rig
+link first, then the strict / loose geometric lock, see `core/acc/README.md`
+§4), with its own sticky cache on `AEBThread._trailer_to_tractor`. A trailer
+under 0.5 m/s returns as a shallow copy with `speed` and `acceleration`
+replaced by the tractor's filtered values. The trailer's pose, yaw, curvature,
+and trailer-flag stay its own: only the kinematics it cannot self-measure are
+inherited. ACC has the same swap in `core/acc/tracker.py::_top_leads`.
+Parked trailers and any other non-TMP trailer record are never swapped.
+
+Until 2026-10-24 the swap took the nearest same-heading non-trailer within 30 m,
+TMP or not, parked trailers included. Against the SDK link on 657 clips it picked
+the wrong tractor on 17.5% of the frames where it fired: a truck more than 2 m
+off the trailer's axis (next lane) in half the wrong picks, the next truck in the
+queue ahead in a third, the one behind in the rest, each nearer to the trailer's
+centre than its own tractor (median 6.7 m ahead). A stopped trailer ahead of ego
+took a moving truck's speed in 72 tracks across 56 clips, two thirds of those
+frames from the next lane, and a parked trailer ahead of ego in 7 tracks across
+6 clips. The lock leaves 0 of either (`tools/tmp_trailer_link_probe.py`). Do not
+bring back a nearest-body pairing.
 
 Only the precompute and main collision iterations consume `vehicles_eff`. The
 radar visualizer still reads the original `vehicles` so raw vs filtered speed
@@ -277,14 +291,17 @@ pass, the vehicle enters collision evaluation.
 | `OppositeLaneFilter` | Oncoming vehicles in their own lane (collapses Fix A + Fix B) |
 | `CoDirectionalDivergeFilter` | Co-directional arcs already diverging (Fix C + outer-lane same-turn) |
 | `TurningCrossTrafficFilter` | Cross-traffic turning through intersection (Fix D absorbed) |
+| `TurnCompletionFilter` | Crosser turning into the oncoming lane whose turn-then-hold path never reaches ego's corridor |
 | `OutOfLaneParallelFilter` | Capsule lane-keeping adjacent / roadside traffic; also rear overtakers |
 | `TmpCrossTrafficFilter` | TMP-only: straight snapshot uses centre closest-approach (T-bone vs body-graze), turning snapshot uses full-horizon endpoint lane |
 | `SweepPassFilter` | Stationary cross-traffic ego turns through |
 | `CornerEntryStationaryFilter` | Stationary at corner entry: out-of-lane oncoming/co-dir, or in-lane with arc consistency |
+| `BendChainFilter` | Stopped or crawling car facing ego whose neighbours bend their lane beside ego, not through it |
+| `TightTurnFilter` | Walking-pace turn (radius 10 m or less) whose arc wraps onto a body the measured line is not closing on |
 | `EgoEvasionFilter` | Ego can steer around target within 0.08 g (runs for `Lane.EGO` too) |
 
-`OutOfLaneParallelFilter`, `SweepPassFilter` and both corner-entry stages run
-inside `AvoidabilityGate` (see "Avoidability gate" below).
+`OutOfLaneParallelFilter`, `SweepPassFilter`, both corner-entry stages and
+`BendChainFilter` run inside `AvoidabilityGate` (see "Avoidability gate" below).
 
 `FilterContext.d_miss` carries the measured CBDR miss for the vehicle, computed
 once per vehicle per frame by the `los_miss` memo in `thread.py::loop`. It is
@@ -537,6 +554,73 @@ clips f0b2ace6 / 02642609). A genuine cut-in brings its body into the EGO
 band and is not suppressed here; braking_worsens covers the same class if
 anything still reaches collision eval.
 
+**LOS keep.** The centre scan judges the body on ego's predicted arc; the measured
+line of sight can disagree. A body whose CBDR miss (`d_miss`, centre to centre) is
+under `out_of_lane_los_keep_m` (1.95 m) and not opening (`d_miss_rate <=
+out_of_lane_los_keep_rate_mps`, 0) is kept, but only within
+`out_of_lane_los_keep_range_m` (20 m), where a straight-line miss still holds on a
+bend, and only while it sits at least `out_of_lane_los_keep_min_lat_m` (2.2 m) to
+ego's side. Corpus 2026-10-25: `9dd61ad5`, `23b45d39`, `bfbb018d` FN to TP;
+`2b98649d` TN to FP and `a6b22e0f` to a false warn. Without the range the keep added
+15 worse clips, the false brakes about 50 m out on bends; without the lateral bar,
+bodies at ego's lane edge added stray onsets (`caaa583f`, `261c0185`).
+
+### `TurnCompletionFilter`
+
+A car coming out of a side road and turning into the oncoming lane is measured
+mid-turn: heading 95-125 degrees off ego's, curvature 0.02-0.08 1/m. Every target
+arc holds that curvature for the whole horizon, so the arc keeps rotating past
+anti-parallel and curls into ego's lane, where the real car straightens out
+5-13 m to ego's side. Fix D (`_dampen_turning_curvature`) only divides the
+curvature by 3 and stops acting at `fwd_dot <= near_head_on_dot`, so these reached
+collision evaluation and the clearance demand read the ceiling. This was the
+largest single shape among labelled crossing false brakes (42 of 78 by the cluster
+read), and only 8 of 95 crossing true positives looked like it.
+
+The stage predicts the turn the way it ends: rotate at the measured `|v_curvature|`
+until the heading is anti-parallel to ego, then hold it. It suppresses only when
+that path, sampled at the body centre and both ends, never comes within
+`ego_hw + target_hw + corridor_margin + turn_complete_clear_m` (0 m: the corridor the hit test itself uses) of ego's arc
+anywhere along ego's reach. A car turning across ego's lane to reach the far lane
+crosses the corridor on that path and is kept, whatever the timing. Scope, each
+condition failing toward the brake:
+
+- Moving (`turn_complete_min_speed_ms`, 2 m/s), turning at least
+  `turn_complete_min_kappa` (0.008), not co-directional, not head-on, not reversing.
+- Turning toward anti-parallel. A turn toward ego's heading (pulling out ahead) was
+  measured with the same model and turned good intervention `a83af583` into a miss
+  for no gain, so it stays out.
+- Not latched, not follow-flagged, no trailer and not a trailer record (off-tracking
+  puts a trailer inside the tractor's path).
+- Not in `Lane.EGO` and no body sample in ego's lane band.
+
+The turn direction comes from the target's own arc positions, not
+`heading_at_dist`, which turns opposite to the motion on curved arcs (radar README
+§8).
+
+Measured (2026-10-24, 2629 scored clips, local and contributed stores): 9 false
+positives to silent (`6ab6d921`, `8f7cc4ae`, `09f0f0dd`, `d7d06ad6`, `d24c3111`,
+`5eb10077`, `c8492f1b`, `f4428a15`, `5614ec5e`), no positive moved. Curvature floor
+0.02 cleared 6, 0.012 cleared 8, 0.006 nothing more. The pad started at 1.0 m;
+1.0 and 0.5 clear the same nine, 0.25 one more (`fbd896b2`), and 0 a second
+(`c626671f`), with no positive moved anywhere in that range, so the shipped pad is 0:
+the predicted path only has to stay out of the corridor the hit test uses. Straight crossers that pass ahead of a slow ego are untouched: the
+perpendicular halo sees them first by design (clearance-based demand).
+
+### `TightTurnFilter`
+
+At walking pace in a tight turn (`|ego_curvature| >= tight_turn_min_kappa`, 0.1
+1/m, a radius of 10 m or less) ego's arc wraps round within the horizon and sweeps
+onto parked and slow bodies beside the turn. The measured line of sight says
+whether ego is closing on the body: a known track whose miss is not closing
+(`d_miss_rate >= tight_turn_min_rate_mps`, 0) drops it, latched and follow-flagged
+ids excepted. Like the gated stages the drop ends at the braking deadline when
+the measured line passes through the body (`core/aeb/turn_completion.py`).
+Measured 2026-10-25 on the per-onset traces: every true positive in a turn that
+tight was closing at -1.4 m/s or faster; corpus `346fe93a` and `ed1e366a` FP to
+TN, nothing worse. It runs bare after `BendChainFilter`, before
+`EgoEvasionFilter`.
+
 ### `TmpCrossTrafficFilter`
 
 TMP-only filter that absorbs MP-data uncertainty for routine intersection
@@ -587,6 +671,20 @@ regression. A turning TMP target that is genuinely on a collision course and
 close-in relies on the engagement-certainty gate + TTB slam net downstream, not
 this stage.
 
+**LOS keep.** Both branches judge one jittered snapshot. The measured line of sight
+averages the track over `los_veto_window_s`, so when it says the crosser is coming
+at ego the stage keeps it: `d_miss` under `tmp_cross_los_keep_m` (1.5 m; 2.5 m,
+`tmp_cross_los_keep_straight_m`, for a straight snapshot, the same bar as
+`tmp_cross_center_hit_dist`), closing at `oncoming_closing_dmiss_rate_mps`
+(-1.5 m/s), within `tmp_cross_los_keep_range_m` (28 m), and only for a real
+crosser: `fwd_dot >= tmp_cross_los_keep_min_fwd_dot` (-0.9; a near head-on car
+belongs to the oncoming stages) moving at `tmp_cross_los_keep_min_speed_ms`
+(6 m/s) or more, so junction crawlers stay with the sweep tests. Corpus
+2026-10-25: the bare keep turned 9 FN into TP for 25 worse clips; the range cut
+that to 15, the `fwd_dot` and speed bars to one TN to FP (`98a28656`, the same
+picture as the rescued `865b4db7`). The two bars are flat: -0.93 and 6.7 m/s
+score the same.
+
 Uses a freshly-built non-braking arc from the **undamped** `ctx.v_curvature`
 (rather than `base_target_arc`) in both branches: the standard arc may be
 truncated by target-side full-brake modeling at near-head-on angles, and its
@@ -608,7 +706,14 @@ straight-line path.
 
 - Symmetric road-bend formula: `road_bend = acos(|fwd_dot|)`: folds oncoming
   (`fwd_dot ≈ -1`) and co-directional (`fwd_dot ≈ +1`) cases into `[0, π/2]`.
-- Implied curvature `road_bend / dist` must exceed `turning_diverge_kappa`.
+- Implied curvature `road_bend / dist` must exceed `corner_entry_min_implied_kappa`
+  (0.005, both stages). It used to share `turning_diverge_kappa` (0.007), which
+  left stopped TruckersMP queues 50-60 m out on a gentle bend (heading 15 degrees
+  off, implied 0.0036-0.0044) to brake for (`d811181d`). Measured 2026-10-24 over
+  2629 clips: 0.004 and 0.005 clear the same three false positives (`d811181d`,
+  `84532316`, `8b916d74`) with no positive moved, 0.0035 one more, and 0.0025 turns
+  true positive `c7546a38` into a miss. 0.005 is the end of that band furthest from
+  the loss.
 - **Mode A** (out-of-lane): vehicle in `OPPOSITE_OR_OUTER`/`OFF_ROAD` → suppress.
   Covers the original "around the bend" oncoming case, now also co-directional.
 - **Mode B** (in-lane): vehicle in `Lane.EGO` → require geometric consistency
@@ -727,6 +832,22 @@ about 0.28 s (`6f5a1555`, `248f3efa`, `89e102a8`, `4f5910b5`, `3daaba45`,
 top of both (-156.12 / -151.37: the gained TPs release on the same one or two
 frames the FPs do).
 
+**Wide band (2026-10-25).** A car closing on a miss line between ego's half width
+and `oncoming_gate_wide_m` (2.4 m) also counts, at its own rate
+(`oncoming_gate_wide_rate_mps`, -0.25 m/s), but only at road speed (`ego_speed >=
+oncoming_gate_wide_min_speed_ms`, 14 m/s) and only for a car the arc does not
+already place in the opposite lane (`oncoming_gate_wide_opposite_lane` False): one
+holding its own lane on that line is the ordinary pass. Past
+`oncoming_gate_wide_range_m` (45 m) the band needs the base closing rate: on a
+bend the straight-line miss of a car that stays in its lane drifts in slowly
+(`test_the_clearance_model_alone_declines_the_measured_clear_pass` read about
+1.8 m closing at -0.6 to -0.9 m/s from 48 to 60 m), while the far rescues closed
+at -3 to -16 m/s. The
+body test and the deadline still apply. Measured on 2625 clips: the bare band -64 (9 worse), with a
+10 m/s floor -70 (5 worse), plus the lane condition -79 (1 worse). Not kept:
+releasing before the deadline for a miss under 0.6 m closing at 2.5 m/s (+3, one
+new FP, nothing gained).
+
 `tests/aeb/harness.py::evaluate_frame` builds its context without a LOS track
 or `clearance_fn`, so the gate fails closed there and scenarios see the bare
 stages. The gate's own cases are in `tests/aeb/test_avoidability_gate.py`.
@@ -838,6 +959,41 @@ to +5 ms. Without a map, or with `road_bend_enabled`
 off, there is no road path and AEB is bit-identical. Replays rebuild the map
 with `tools/map_replay.py`; `tools/map_aeb_ab.py` runs the A/B.
 
+### `BendChainFilter`
+
+A queue standing in the oncoming lane on a bend sits on ego's arc while ego has
+not yet steered into the bend, so each stopped car reads as an obstacle dead
+ahead. The other vehicles say where the road goes: `core/aeb/bend_chain.py` reads
+the bend from them, never from a map or the road model (the road model follows
+too slowly for AEB).
+
+- Target: stopped or crawling (`max(speed, measured ground speed) <=
+  bend_chain_max_speed_ms`, 3 m/s; an unknown track keeps it), facing ego (heading
+  dot `<= -bend_chain_min_facing`, 0.7), not latched or follow-flagged.
+  TruckersMP trailer records may be the target (`bend_chain_trailer_targets`):
+  the braking id was often the trailer.
+- Lane-mates: every other non-trailer vehicle in `FilterContext.frame_vehicles`
+  `bend_chain_s_min_m..s_max_m` (3-70 m) along the target's heading whose
+  position and heading agree on one circle through the target: implied
+  curvatures `2 lo / s^2` and `dh / s` within `bend_chain_k_tol` (0.006) and the
+  position within `bend_chain_lat_tol_m` (1 m) of the heading-predicted bend. The
+  last test is what keeps a car one lane over at 40 m from passing for a mate on
+  a fake bend. A mate may face either way.
+- At least `bend_chain_min_mates` (3), with mates both ahead of and behind the
+  target. The fitted lane is extrapolated to ego only from the member nearest
+  ego along it (`bend_chain_max_gap_m`, 40 m), and the target is dropped when ego
+  sits `bend_chain_clear_m` (2.6 m) or more off that lane, heading within
+  `bend_chain_max_angle_deg` (15 degrees) of its tangent.
+
+The stage runs inside the avoidability gate, whose parked scope ends a drop at
+the braking deadline. A crawler is outside that scope, so the stage applies the
+same deadline and body test to it itself. Corpus 2026-10-25 (2625 clips):
+-5796.5 to -5804.0, `48397295` and `772faf71` FP to TN, `167806f4` and
+`9f205c43` false warns cleared, nothing worse. Offline, without the facing
+condition, the same fit dropped 2 true positives (same-direction queues). Parked
+cars only: -0.75. Without the crawler's deadline hold: -14.5, the extra two
+(`2ea43aa9`, `e85c4635`) braking at the deadline.
+
 ### `EgoEvasionFilter`
 
 After all previous stages pass, checks if ego could steer around the target
@@ -853,6 +1009,15 @@ route. The arc that unwinds asks for less curvature than the path and is never
 limited; in the linear regime neither is. The allowance fades with
 `sat_weight` rather than switching, because clamping outright on the arming
 frame stepped the corridor edge 1.8x as far as the path under it.
+
+**The low-speed cap.** `evasion_max_dkappa` caps the offset, and at 0.008 it bound
+below about 10 m/s, where `evasion_g / v²` would allow far more: the escape arcs
+assumed a truck at walking pace could barely steer, so bodies the driver was
+plainly turning past at a yard or junction reached collision evaluation. 0.016
+binds below about 7 m/s. Measured 2026-10-24 over 2629 clips: 0.010 and 0.012
+cleared 2 false brakes, 0.016 to 0.025 cleared 3 (`2f02076c`, `6ef94605`,
+`063950fc`), no positive moved at any value. The same cap bounds the
+`OppositeLaneFilter` evasion arcs.
 
 **`ctx.lane == Lane.EGO` by itself never bypasses this stage.** Lane-EGO
 classification is not evidence of danger: stationary shoulder vehicles and
@@ -1672,7 +1837,7 @@ exemptions: the trailer-in-lane rescue must survive both (clip 434f0401).
 
 - **Ego-turn extrapolation** (non-co-directional targets). A hit reachable only
   by holding the current steer for `turn_veto_min_ttc_s` (1.2 s) while
-  `|ego_curvature| >= turn_veto_min_kappa` (0.012, about R 83 m) is vetoed.
+  `|ego_curvature| >= turn_veto_min_kappa` (0.010, about R 100 m) is vetoed.
   Real turns are transient (entry, apex, exit); a constant-curvature ego arc
   swept 20-30 degrees into a junction manufactures crossings with traffic on
   the road ego is turning onto. Near-term hits and straight-line driving are
@@ -1683,7 +1848,8 @@ exemptions: the trailer-in-lane rescue must survive both (clip 434f0401).
 - **Matched-speed neighbour** (co-directional, out of lane). Vetoed when the
   axial closing speed `ego_speed - v_target_along_ego` is in
   `[0, codir_adjacent_veto_axial_ms)` (2.0 m/s) **and** the measured
-  `d_miss >= codir_adjacent_veto_miss_m` (2.0 m). Braking removes at most the
+  `d_miss >= codir_adjacent_veto_miss_m` (1.5 m; 2.0 until 2026-10-25, the drop
+  cleared one FP with nothing worse). Braking removes at most the
   axial component, so at under 7 km/h of axial closure any predicted contact is
   lateral and brakes do not steer. Raising this to 4.0 silenced `bbed6ec4` but
   turned `5366cb63` TP into FN and `cf0b2767` TP into LATE; reverted. The lower bound of the band matters: a
@@ -1983,7 +2149,16 @@ latch it used to share with the floor went with it.
 | `follow_threat_hold_s` | 2.0 s | Hold after kinematic qualification |
 | `follow_threat_min_decel_ms2` | 0.8 m/s² | Min own-decel slope to qualify |
 | `follow_threat_max_lat_converge_ms` | 10.0 m/s | Cap on the out-of-lane lat-converge seat; sweep-past is faster |
+| `follow_threat_max_arc_decel_ms2` | 6.0 m/s² | Cap on the decel a flagged lead's arc assumes, the same cap kinematic accel gets in `_accel_to_arc_params` |
 | `follow_threat_evasion_exempt_kmh` | 50 km/h | Ego speed at or below which a flagged lead skips `EgoEvasionFilter` |
+
+**Arc decel cap.** The flagged lead's arc decel is the least-squares slope of its
+speed field over the window, and a TruckersMP speed dip (22 to 11 m/s in a few
+ticks, `08eb7c46`) read as 18.7 m/s² and stopped the arc in ego's lane. Kinematic
+accel was always capped at 6 m/s² on its way into an arc; the follow path was not.
+Capping it the same way (2026-10-24, 2629 clips): one false brake (`e4d8fa91`) and
+two stray brakes in positives (`a104d298`, `d392d507`) went, nothing else moved, and
+the stop-distance envelope is unchanged. A cap at 8 m/s² changed nothing.
 
 ### Closed-loop coupling
 
@@ -2244,7 +2419,12 @@ clips: `lane_confidence_range_m` is flat over 25-33 m,
 0.008-0.018, `turn_veto_min_ttc_s` over 0.8-1.2 s, and
 `codir_adjacent_veto_axial_ms` over 1.5-2.0 m/s. `turn_veto_min_kappa` 0.008
 removes one more sev-1 false positive but sits one step from 0.006, which
-costs a true positive; 0.012 keeps the margin instead.
+costs a true positive; 0.012 kept the margin until 2026-10-25. On 2625 clips
+0.010 clears four FPs with nothing worse, 0.008 turns `bdcfb9ad` TP into late:
+the veto only holds entry while the hit is 1.2 s or more out, so the cliff is
+latency, not a miss, and 0.010 ships. On the same corpus `aeb_certain_fwd_dot`
+0.94 and 0.95 clear the same six (0.90 before), 0.97 loses two TPs: 0.94 keeps
+the margin.
 `aeb_engage_frac_certain` is the exception and has no such band: see the
 geometry-graded engage section for its trade curve.
 

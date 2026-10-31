@@ -12,9 +12,9 @@ from tests.aeb.harness import make_vehicle
 
 _EGO = ego_box(0.0, 0.0, 0.0, None)        # reference rig at the origin, facing -z
 _DEPTH = DEFAULT.overlap_ghost_depth_m
+_LINGER = 0.5 * (DEFAULT.overlap_ghost_contact_m + _DEPTH)   # clearly inside the slack, short of the depth
 _FRONT_Z = -_EGO.half_length               # ego's front bumper
 # Past box slack, short of the depth bar: clear of the contact edge whatever the bars are set to.
-_MID_INSIDE = 0.5 * (DEFAULT.overlap_ghost_contact_m + _DEPTH)
 
 
 _clock = [0.0]
@@ -44,7 +44,7 @@ def test_a_body_deep_inside_ego_stays_a_ghost_until_it_separates():
 
 def test_contact_short_of_the_depth_is_not_a_ghost_at_once():
     hold = OverlapGhostHold()
-    bumper = _body(5, _DEPTH - 0.1, is_tmp=True)
+    bumper = _body(5, _LINGER, is_tmp=True)
     neighbour = make_vehicle(6, 3.6, 0.0, 0.0, 0.0, is_tmp=True)
     assert hold.step(_EGO, [bumper, neighbour], _now(), DEFAULT) == frozenset()
 
@@ -52,7 +52,7 @@ def test_contact_short_of_the_depth_is_not_a_ghost_at_once():
 def test_a_body_that_stays_inside_ego_becomes_a_ghost():
     # Real contact lasts a frame before AEB latches; 0.08 s at most on the labelled corpus.
     hold = OverlapGhostHold()
-    body = _body(5, _MID_INSIDE)
+    body = _body(5, _LINGER)
     persist = DEFAULT.overlap_ghost_persist_s
     assert hold.step(_EGO, [body], 0.0, DEFAULT) == frozenset()
     assert hold.step(_EGO, [body], persist - 0.03, DEFAULT) == frozenset()
@@ -63,7 +63,7 @@ def test_box_slack_and_broken_contact_never_add_up_to_a_ghost():
     hold = OverlapGhostHold()
     slack = _body(5, DEFAULT.overlap_ghost_contact_m - 0.1)
     assert all(hold.step(_EGO, [slack], _now(), DEFAULT) == frozenset() for _ in range(60))
-    inside = _body(6, _MID_INSIDE)
+    inside = _body(6, _LINGER)
     hold.step(_EGO, [inside], _now(), DEFAULT)
     # A pause longer than the persistence window starts the count over.
     assert hold.step(_EGO, [inside], _now(1.0), DEFAULT) == frozenset()

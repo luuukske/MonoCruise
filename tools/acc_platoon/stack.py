@@ -232,7 +232,7 @@ class Client:
         ctx = _ctx(t, dt, self.truck.v, self.aeb_brake)
         self._disengage(ctx)
         cc_out = self.cc.step(ctx)
-        acc_out = self.acc.step(ctx) if cc_out.active else LongOutput(None, False)
+        acc_out = self.acc.step(ctx, cc_out.wanted_ms2) if cc_out.active else LongOutput(None, False)
         if not cc_out.active:
             self.acc.reset()
         wanted, commanding, winner = CruiseControlThread._arbitrate_named(("cc", cc_out), ("acc", acc_out))

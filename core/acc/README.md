@@ -1327,12 +1327,26 @@ history and smoothing (synthetic per-id continuity), so it scores and
 locks exactly like a real vehicle, and a wrapped trailer lead still
 goes through the trailer→tractor kinematic swap above.
 
-TMP top-level trailers have no buffer parent link. `ACCTracker._resolve_tractor`
-locks a tractor with a **strict** gate on first pick (longi 3–16 m, |lat| ≤ 1.5 m,
-|Δyaw| ≤ 15°) and a **loose** gate when revalidating a cached pair (longi 1–25 m,
-|lat| ≤ 4 m, |Δyaw| ≤ 60°). Among strict candidates, lowest
-`|lat| + 0.05·|longi−10| + 0.2·|Δyaw|` wins. Wrapped nested trailers
-(`id ≥ 1_000_000`) skip locking and use their own filtered kinematics.
+TMP top-level trailers have no buffer parent link. `trailer_lock.resolve_tractor`
+(also used by AEB's swap and `tmp_state.rigs_of`) takes the pairing in this order:
+
+1. **SDK rig link.** When `tmp_sdk.attach` matched both the trailer record and a
+   tractor record to bodies the plugin wrote on the same rig (`Vehicle::GetTrailer`,
+   `core/radar/README.md` §19), that tractor wins and seeds the cache. A partner
+   more than 20 m away is a mismatch and is ignored. Measured over 657 clips the
+   link exists on 76% of TMP trailer-record frames; the rest fall through.
+2. **Cached pair**, revalidated with the **loose** gate (longi 1–25 m,
+   |lat| ≤ 4 m, |Δyaw| ≤ 60°). A lock the SDK acquired in a bend therefore holds
+   when the link drops for a frame.
+3. **Strict acquire** (longi 3–16 m, |lat| ≤ 1.5 m, |Δyaw| ≤ 15°); among strict
+   candidates, lowest `|lat| + 0.05·|longi−10| + 0.2·|Δyaw|` wins.
+
+In 2 and 3, a candidate the SDK matched to a different rig than the trailer is
+never picked. Without the SDK the strict gate misses real links past 15° of
+articulation (10% of linked frames had no strict pick) and picked the wrong
+tractor on 2.2%. `resolve_tractor(..., use_sdk=False)` is the geometry-only lock,
+for tooling. Wrapped nested trailers (`id ≥ 1_000_000`) skip locking and use their
+own filtered kinematics.
 
 ---
 

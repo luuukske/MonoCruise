@@ -1026,6 +1026,42 @@ its trailer blocks the lane: crash clip 397148fd) and (b) grants the
 near-certain confirm window at engagement entry (a spun wreck's lane / heading
 classification is unreliable).
 
+### Rig coupling (TMP trailer records)
+
+A TMP trailer record and its tractor are separate records with separate chains,
+but one player and one rig. `TrafficReader._smooth_and_build` updates every
+non-trailer first, then each TMP trailer record with its locked tractor
+(`core/acc/trailer_lock.resolve_tractor`: the SDK rig link, else the geometric
+lock, on a reader-owned sticky cache) passed to `update_from_last` as
+`rig_tractor`. Only the crash latch crosses the link, both ways:
+
+- **Tractor to trailer.** The trailer takes the tractor's `_crash_hold_until` and
+  `_crash_knock_until` (the later of the two) right after its own crash evidence,
+  so a tractor crash disables the trailer's lag freeze and opens its knock-back
+  short window in the same frame.
+- **Trailer to tractor.** After all updates the tractor takes the trailer's latch
+  the same way (`Vehicle.share_crash_from`); that reaches the tractor's speed
+  chain on its next frame.
+
+Sharing creates no evidence: the stale-packet rule and every detector bar still
+apply to the body that confirmed. Before it, 38 of 198 locked rigs with a crash
+flag had it on the tractor only and 12 on the trailer only (657 SDK clips). Corpus
+(2086 labelled clips, against the same tree without it): tractor to trailer turns
+one positive from a miss into a TP, trailer to tractor moves nothing, no verdict lost.
+
+**Speed is not coupled.** A trailer record with no SDK body has no short window for
+its own braking (`_select_raw_speed`: trailers keep it only for their crash), so on
+a hard-braking rig it reads faster than its tractor (median 1.7 m/s, more than
+2 m/s on 46% of hard-brake frames; an SDK-matched trailer 0.9%). Handing it the
+tractor's short-window speed while that window ran (2026-10-24) cost 68 on the
+corpus over 46 clips: four TPs became misses, one late, about a dozen false brakes.
+On TMP the tractor's position short window latches on netcode jitter, and on
+`b6ba1b34` it held through tractor speeds of 0, 28, 0 and 48 m/s; coupled, the
+stopped trailer ahead read 7 to 28 m/s and AEB missed it. That is the same reason
+trailers never get the short window for a brake of their own. Do not bring the
+coupling back on the position short window; the trailer's own pose, yaw, curvature,
+speed, lag freeze and position hold stay its own.
+
 ### Sub-frame pass (dt < 0.05 s)
 
 **AI:** state unchanged; speed/accel from last full update; pose from `_smooth_x/z`.
@@ -1941,8 +1977,8 @@ replay in `tests/test_tmp_ncz.py` braked 3 frames after the exit at 54 and 72 km
   is the §17 wheel geometry (reference rig when unreadable) from the placement
   origin; ego's own trailer is not modelled, so a ghost inside only the trailer is
   not held.
-- **Whole rigs.** A hit on a trailer record holds its tractor (the ACC sticky-lock
-  pairing, `core/acc/trailer_lock.py`, strict acquire) and every trailer of that
+- **Whole rigs.** A hit on a trailer record holds its tractor (the ACC pairing,
+  `core/acc/trailer_lock.py`: the SDK rig link, else strict acquire) and every trailer of that
   tractor, nested ones included, and the other way round.
 - **Released for good on separation.** A rig stays in `ncz_ids` while any member
   still overlaps ego's unshrunk box. The first frame none does, it is solid again
@@ -2018,7 +2054,9 @@ enough: the dip comes after the stall, from the position window spanning it.
 `tmp_sdk.attach` runs in `TrafficReader._smooth_and_build` after the nearest-24 cull:
 greedy nearest pairs within `MATCH_M` (3 m), tractor records to SDK tractors and TMP
 trailer records to SDK trailers. Same-place offsets measured 1.3 m at p99 for both.
-`Vehicle.sdk` holds the body for that frame only.
+`Vehicle.sdk` holds the body for that frame only. Its `rig` index pairs a trailer with
+its tractor within one write; `core/acc/trailer_lock.py` takes that as the trailer to
+tractor link before any geometry (`core/acc/README.md` §4).
 
 ### Speed
 
