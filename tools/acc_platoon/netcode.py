@@ -16,6 +16,8 @@ from dataclasses import dataclass
 PHYSICS_HZ: float = 60.0
 # TMP API `syncdelay` for Simulation 1 and 2; other servers run 100 to 350 ms.
 SYNC_DELAY_S: float = 0.20
+# Packets carrying the sender's SDK velocity, measured on a TMP drive (core/radar/README.md §19).
+SDK_PACKET_HZ: float = 4.5
 
 SEG_MIN_S: float = 0.10
 SEG_MAX_S: float = 0.20
@@ -213,6 +215,17 @@ class TmpStream:
         self._fix_left = 0.0
         self._fix_rate = 0.0
         self.corrections = 0
+        # SDK velocity (core/radar/README.md §19): the sender's own speed, one packet per
+        # `SDK_PACKET_HZ` after a one-way trip; a stall is a run of missing packets.
+        self._latency_s = 0.5 * (sender.ping_s + receiver.ping_s)
+        self.sdk_speed = path.speed_at(t0 - self._latency_s)
+        self.sdk_arrival = t0
+        self.sdk_updates = 0
+        # Its own generator, seeded off a copy: the netcode draws stay bit-identical without it.
+        twin = random.Random()
+        twin.setstate(rng.getstate())
+        self._sdk_rng = random.Random(twin.getrandbits(64) ^ 0x5DC0)
+        self._next_packet = t0 + self._sdk_rng.uniform(0.0, 1.0 / SDK_PACKET_HZ)
 
     def _stall_rate(self, v: float, a: float) -> float:
         """Stalls per second at the sender's speed and accel."""
@@ -293,6 +306,11 @@ class TmpStream:
                 self._offset = rng.gauss(0.0, self._sync_sigma)
             self._next_sync = t + SYNC_PERIOD_S * rng.uniform(0.9, 1.1)
         self.stalled = t < self._paused_until
+        if not self.stalled and t >= self._next_packet:
+            self.sdk_speed = self.path.speed_at(t - self._latency_s)
+            self.sdk_arrival = t
+            self.sdk_updates += 1
+            self._next_packet = t + self._sdk_rng.uniform(0.8, 1.2) / SDK_PACKET_HZ
         if self.stalled:
             # A stall freezes the drawn truck and ends in a segment that carries the catch-up.
             self._seg_end = t

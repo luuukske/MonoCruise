@@ -79,6 +79,8 @@ class Scenario:
     # traffic buffer reaches 200 m. Traces are kept every `record_every` physics steps.
     visible_ahead: int | None = None
     record_every: int = 1
+    # Every client runs MonoCruise's TMP plugin: radar takes each rig's speed from the SDK.
+    sdk: bool = False
 
 
 @dataclass
@@ -239,7 +241,7 @@ def run(sc: Scenario) -> Run:
                     stream.advance(t_game, DT)
                 c.acc_data.leads = c.next_leads
                 if k >= c.next_frame:
-                    c.radar_frame(t_game, sc.split_trailers)
+                    c.radar_frame(t_game, sc.split_trailers, sc.sdk)
                     c.next_frame = k + frame_rng.choices(_STEPS, _STEP_WEIGHTS)[0]
                 reg.client = c
                 acc_out = None

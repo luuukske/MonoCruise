@@ -17,6 +17,7 @@ from core.cruise_control_thread.thread import CruiseControlThread
 from core.longitudinal import acc as long_acc
 from core.longitudinal import cc as long_cc
 from core.longitudinal.base import LongCtx, LongOutput
+from core.radar.tmp_sdk import FLAG_LINEAR, FLAG_SAMPLED, KIND_TRACTOR, SdkBody
 from core.radar.traffic import Position, Quaternion, Size, Vehicle
 
 from .netcode import NetProfile, TmpStream, TruePath
@@ -118,10 +119,17 @@ class RadarView:
         self.vid = vid
         self.vehicle: Vehicle | None = None
 
-    def read(self, front_s: float, t_now: float, ego_s: float, ego_speed: float) -> Vehicle:
+    def read(self, front_s: float, t_now: float, ego_s: float, ego_speed: float,
+             stream: TmpStream | None = None) -> Vehicle:
         center = front_s - 0.5 * RIG_LEN_M
         v = Vehicle(Position(0.0, 0.0, -center), _FWD, _RIG_SIZE, 0.0, 0.0, 1, [],
                     self.vid, True, False)
+        if stream is not None:
+            # Matched to the plugin's body: the sender's own speed (core/radar/README.md §19).
+            age_ms = 1000.0 * (t_now - stream.sdk_arrival)
+            v.sdk = SdkBody(0.0, 0.0, -center, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -stream.sdk_speed,
+                            0.0, 0.0, 0.0, age_ms, stream.sdk_updates, 0.0, KIND_TRACTOR,
+                            FLAG_LINEAR | FLAG_SAMPLED, self.vid)
         if self.vehicle is None:
             v.time = t_now
         else:
@@ -182,7 +190,7 @@ class Client:
         self.resumes = 0
         self.contacts = 0
 
-    def radar_frame(self, t: float, split_trailers: bool) -> None:
+    def radar_frame(self, t: float, split_trailers: bool, sdk: bool = False) -> None:
         """Read every drawn rig ahead, then publish what ACCTracker would on a straight road."""
         ego_front = self.truck.s
         ego_pos = ego_front - EGO_FRONT_OFFSET_M
@@ -196,7 +204,7 @@ class Client:
             view = self.views.get(j)
             if view is None:
                 view = self.views[j] = RadarView(j)
-            veh = view.read(drawn, t, ego_pos, self.truck.v)
+            veh = view.read(drawn, t, ego_pos, self.truck.v, stream if sdk else None)
             seen.append(veh)
             front = rig_front(veh)
             rears = [(TRAILER_ID_BASE + j, front - RIG_LEN_M)]

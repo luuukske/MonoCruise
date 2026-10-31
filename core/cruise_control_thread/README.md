@@ -336,6 +336,19 @@ While ACC's bid is the command and it follows a lead it measures moving, the
 thread publishes `commanded_crawl_follow` beside the command, so the hold FSM
 does not read steady speed keeping under 2 km/h as a stop (§10.3).
 
+### Lead gear shifts
+
+`shift_debt.py`. A TruckersMP truck pulling away stalls for about a second at
+each upshift, and ACC used to lift off for every stall and then stall again at
+its own upshift. While the immediate lead stalls off a steady pull, the law sees
+its pull held and the speed it lost credited back, and ego's own stall repays
+the credit. Only the smoothed lead the law reads changes; the raw lead the
+overlays read, anticipation and the standstill hold do not. Braking, a lead
+under 3 m/s, a weak pull, or a slower vehicle ahead of the lead turn it off.
+`shift_hold_s = 0` restores the old law. Rationale, real-clip numbers and convoy
+measurements: `core/acc/ACC_ARCHITECTURE.md` §9.11. Enforced by
+`tests/acc/test_shift_debt.py`.
+
 ### Lead-loss grace
 
 Brief empty-chain ticks reuse the last chain for `LEAD_LOSS_GRACE_S` so IIDM state does not

@@ -16,7 +16,7 @@ from .blinker_arbitration import (
     BlinkerArbiter,
     BlinkerState,
 )
-from . import anticipation, approach_profile, brake_landing, free_road_lift, idm_cah, pull_away, standstill_hold
+from . import anticipation, approach_profile, brake_landing, free_road_lift, idm_cah, pull_away, shift_debt, standstill_hold
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +211,8 @@ class ACConfig:
     approach_share: float = approach_profile.APPROACH_SHARE
     follow_share: float = approach_profile.FOLLOW_SHARE
     pull_away_share: float = 1.0
+    shift_hold_s: float = shift_debt.HOLD_S
+    shift_credit_max_ms: float = shift_debt.CREDIT_MAX_MS
     follow_dv_lo_ms: float = approach_profile.FOLLOW_DV_LO_MS
     follow_dv_hi_ms: float = approach_profile.FOLLOW_DV_HI_MS
     approach_dv_lo_ms: float = approach_profile.APPROACH_DV_LO_MS
@@ -300,6 +302,7 @@ class AdaptiveCruiseController:
         self._standstill = standstill_hold.StandstillHold()
         self._motion = pull_away.LeadMotion()
         self._landing = brake_landing.BrakeLanding()
+        self._shift = shift_debt.ShiftDebt()
         self._since_brake_s = math.inf
         self._approach_delta = 0.0
 
@@ -369,6 +372,7 @@ class AdaptiveCruiseController:
         self._standstill.reset()
         self._motion.reset()
         self._landing.reset()
+        self._shift.reset()
         self._since_brake_s = math.inf
         self._approach_delta = 0.0
 
@@ -396,9 +400,7 @@ class AdaptiveCruiseController:
         a_lead = _clamp(a_lead, cfg.emergency_decel_ms2, cfg.max_accel_ms2)
         return _LeadSnapshot(vid, dist_m, v_lead, a_lead, score, crashed=crashed)
 
-    def _read_acc_snapshot(
-        self,
-    ) -> tuple[list[_LeadSnapshot], _LeadSnapshot | None, BlinkerState]:
+    def _read_acc_snapshot(self) -> tuple[list[_LeadSnapshot], _LeadSnapshot | None, BlinkerState]:
         """In-lane chain, indicated lead, blinker state. Anticipation uses chain only."""
         idle = BlinkerState()
         try:
@@ -420,11 +422,7 @@ class AdaptiveCruiseController:
         except (AttributeError, TypeError, ValueError):
             return [], None, idle
 
-        snapshots: list[_LeadSnapshot] = []
-        for lead in raw_leads:
-            snap = self._lead_to_snapshot(lead)
-            if snap is not None:
-                snapshots.append(snap)
+        snapshots = [s for s in map(self._lead_to_snapshot, raw_leads) if s is not None]
         indicated_snap = self._lead_to_snapshot(indicated) if indicated is not None else None
 
         if not snapshots:
@@ -588,7 +586,8 @@ class AdaptiveCruiseController:
                 t_headway * BLINKER_STAGE1_HEADWAY_SCALE,
             )
 
-        primary = chain_smooth[0]
+        primary = self._shift.step(cfg, now, primary_raw, chain_smooth[0], self._landing.ego_accel_ms2,
+                                   cfg.s0_m + v_ego * t_lane, chain_raw[1:3])
         a_base = self._lead_law(
             primary.dist_m, v_ego, primary.v_lead_ms, primary.a_lead_ms2, t_lane,
             primary.a_lead_ff_ms2,

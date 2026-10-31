@@ -64,6 +64,14 @@ rate rises roughly with deceleration squared.
 `LAGGY` is about the 99th-percentile session on a 250 ms ping. `CLEAN` is a perfect
 link one delay late, with no overshoot, for A/B.
 
+**SDK speed** (`Scenario.sdk`, off by default so the ratchets keep their numbers). With
+MonoCruise's TruckersMP plugin the radar takes each matched rig's speed from the sender's own SDK
+velocity (`core/radar/README.md` §19). Each stream then carries one packet per `SDK_PACKET_HZ`
+(4.5 Hz, measured) with the sender's speed one ping-half old; a stall is a run of missing packets,
+so the packet age runs past the 300 ms stale bar exactly when the drawn truck freezes. The view
+attaches an `SdkBody` before `update_from_last`, as `tmp_sdk.attach` does live. Positions stay the
+drawn ones. The packets draw from their own generator, so `sdk=False` is bit-identical to before.
+
 ### Calibration
 
 `python -m tools.acc_platoon --calibrate` measures both sides the same way, and
@@ -294,6 +302,41 @@ earlier netcode model, before the step-clock recalibration and the gearbox:
 Level 1 (seeds 1 and 2): stopped 668 to 381, contacts 431 to 7, unprovoked brakes 348 to 149.
 What is left: a hard brake at level 2 still stops trucks at the back, and level 1 still jams. The
 10-follower ratchets in `tests/acc/test_platoon.py` were lowered to the new worst-of-seeds values.
+
+### Convoys of 100, SDK speed (2026-10-31)
+
+Same scenarios, gap level 2, seeds 1 and 2, the shipped controller, with `Scenario.sdk` on and off.
+Stopped / unprovoked brakes / slowest truck, summed or worst over the seeds:
+
+| scenario | without SDK speed | with SDK speed |
+|---|---|---|
+| pull_through | 85 / 23 / 0 km/h | 0 / 0 / 19.3 km/h |
+| stop_and_go | 83 / 28 / 0 km/h | 0 / 1 / 19.8 km/h |
+| steady | 7 / 26 / 0 km/h | 0 / 0 / 76.7 km/h |
+| slowdown | 0 / 18 / 4.6 km/h | 0 / 0 / 42.2 km/h |
+| hard_brake | 21 / 19, 3 contacts | 2 / 0, no contact |
+
+The phantom jams of the 100-truck runs are the position fit's reading of TMP stalls, not the gap
+law: with the sender's own speed they are gone. Judge ACC changes with `sdk=True` as well, and on
+100 trucks: a gas-side low-pass that smoothed ten followers made the hundred string-unstable
+(`core/acc/ACC_ARCHITECTURE.md` §9.10).
+
+### Shift wobble, perfect perception and shift debt (2026-10-31)
+
+Ten followers, seeds 1 to 3, `sdk=True`. Command reversals of 0.2 m/s² or more in the pull-through
+(5 to 30 s), per truck:
+
+| variant | reversals |
+|---|---|
+| shipped controller | 5.80 |
+| lead's true speed and accel straight into ACC, no perception lag | 5.50 |
+| the same truth 0.6 s / 1.2 s late | 6.40 / 6.23 |
+
+The law mirrors each upshift stall of the lead in phase; perception lag only moves the phase. The
+fix that worked is on the law's input, `core/cruise_control_thread/shift_debt.py`
+(`core/acc/ACC_ARCHITECTURE.md` §9.11, measurements there). Its metric counts reversals per minute
+of the command clipped at the truck's own gas limit, while the truck ahead pulls: in the
+pull-through most heavy rigs rail at full gas, where a command reversal never reaches the wheels.
 
 ### Brake release 0.20 s (2026-10-08)
 

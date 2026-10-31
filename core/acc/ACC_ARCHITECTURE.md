@@ -1163,6 +1163,127 @@ Measured and not shipped (each either broke a pinned invariant or traded one fai
 * **Anticipation off** (`ma_max_leads = 1`): 501 stops and 376 contacts. The anticipation is what
   holds the convoy together; any change to it has to be measured in the convoy.
 
+### 9.10 Measured, not shipped: smoothing a lead's gear shifts (2026-10-31)
+
+A truck pulling away cuts its drive for about 1.25 s at every upshift (`tools/acc_platoon/README.md`,
+"Gear shifts"). Through the SDK pre-filter and the §7 chain each cut reaches the controller about
+1.2 s late, as a short overshoot of `v_lead` and then a stall, and at the wanted gap the law matches
+it: behind a lead pulling at 0.6 m/s², a follower with no gearbox of its own went 0.65 → −0.09 →
+0.6 m/s² at every lead shift, lifting off just as the lead pulled again. IIDM's speed-matching term
+carries most of it, not `a_lead` or the nudge. The root is perception lag, not the law.
+
+Everything below was measured in `tools/acc_platoon` at gap level 2, with the SDK speed
+(`Scenario.sdk`, which v1.2 clients have) and without, ten followers over seeds 1 to 3 and a hundred
+over seeds 1 and 2. "Reversals" are swings of 0.2 m/s² or more in a follower's command while the
+lead pulls (5 to 30 s), per truck; with the SDK the 100-truck pull-through reads 5.27 untouched.
+
+* **Gas-side low-pass** (1.5 s on the positive command, gated on room, TTC, closing speed, ego
+  speed and a lead not braking, braking passed straight through). Ten trucks: pull-through
+  reversals 5.80 → 3.37, every other scenario smoother, no gap lost. A hundred trucks: string
+  unstable, a truck mid-convoy fell to 6 km/h in the pull-through against 19 untouched (min gap
+  9.5 → 5.8 m) and stop-and-go dipped to 14 km/h against 20. Split by side, all of it is the
+  slowed **rise**. Smoothing only the fall (holding the gas above a falling law, at most 0.25 and
+  past a 0.1 dead band) keeps the hundred-truck convoy as it was but also keeps almost nothing of
+  the gain (5.27 → 5.19), and it costs the laggy-client ratchet one unprovoked brake (9 against 8)
+  whichever gate is added. Without the dead band it also broke `desync_snap` (2.08 against 2.03).
+  Any lag on ego's gas side trades string stability for smoothness; the convoy shows the bill.
+* **Holding the lead's pull through the dip** (a held `a_lead` peak, trusted for a dip as long as a
+  shift, dropped on braking): reversals 5.80 → 3.83 with a box hold, but 1.6 m less stop-and-go gap
+  (brake onset waited while the accel estimate ramped from pull into braking), nothing with a fading
+  trust. A speed credit on top overshot; forgiving ego's closing speed during the dip gave nothing at
+  a safe room gate and contacts without the SDK at a looser one.
+* **Bounded-braking CAH in the lead-brake feedforward** (for the far-lead overreaction: the lead
+  brakes 2.5 s more, then holds, and ego keeps its wanted gap through it; plain CAH inside the
+  wanted gap, past 4 m/s² and for a lead that would stop). It cut the far-start law from −2.07 to
+  −1.72 m/s² open loop, but closed loop the follower kept more speed and braked harder later
+  (2.50 → 2.66 m/s² at 1.6 times the wanted gap), the emergency stop tripped the overlay more, and
+  nothing moved in the hundred-truck runs. It also exposes the deliberately hard `max(a_acc, a_cah)`
+  of §8.7 inside the small-braking zone (gain jump 0.43 against the 0.2 pin) and relaxes past the
+  floor `test_closing_relief_cannot_relax_past_the_floor` defines with the plain feedforward.
+
+What the hundred-truck convoy does show: without the SDK speed, 31 to 52 trucks stop in a
+pull-through or stop-and-go and one rough session braked 6.4 m/s² with its lead 30 m ahead; with it
+none stop (`tools/acc_platoon/README.md`, "Convoys of 100, SDK speed"). Shortening the SDK
+pre-filter does not help either: halving it (0.25 / 0.075 s) or removing it left the ten-truck
+pull-through at 5.63 and 5.87 reversals against 5.80. Halving it did help elsewhere (hard brake: two
+trucks stopped → none, closest 4.0 → 8.0 m) but the laggy client tripped the overlay 15 ticks
+against none, and the pre-filter exists for the TMP jam overreaction measured in
+`core/radar/README.md` §19, which the sim does not model; any change there needs that clip replay
+first. Perception lag turned out not to be the lever at all, see §9.11.
+
+### 9.11 Shift debt: riding through a lead's gear-shift stall (2026-10-31)
+
+**What the wobble is.** Feeding the controller the lead's true speed and accel, with no
+perception lag at all, cut the ten-truck pull-through only from 5.80 to 5.50 reversals; delaying
+that truth by 0.6 or 1.2 s gave 6.40 and 6.23. The law mirrors each stall of the lead in phase,
+and lag only moves the phase. IIDM's speed-matching term prices a 0.7 m/s stall of one second as
+metres of gap error while the gap itself moves about 0.5 m. A follower that lifts off for the
+lead's upshift then stalls again at its own upshift, at the same road speed, so the same loss is
+counted twice.
+
+**What real TruckersMP pulls look like** (1636 clips with SDK frames plus the long probe drives in
+`tools/tmp_sdk_runs/`, measured on the sender's own SDK speed): plateaus last 0.5 / 1.0 / 1.75 s
+(p10 / p50 / p90) at 2.5 to 13.5 m/s (median 6.7), between pulls of 1.7 to 2.0 m/s², with the
+plateau itself flat (about +0.05 m/s²). About half of all pulls show none. The SDK carries no
+gear, RPM or throttle, so a shift is only seen in the speed. `acc_accel` is the SDK accel about
+1.0 s late and dips only to 0.22 of the pull in a plateau; `acc_speed` trails the SDK speed by
+0.65 s. AI traffic barely steps (0.04 plateaus per second for AI trucks against 0.13 for TMP).
+
+**Mechanism** (`core/cruise_control_thread/shift_debt.py`). It changes only the immediate lead's
+smoothed snapshot the law reads. The raw lead (overlays, standstill hold, soft TTC), anticipation
+and `a_free` keep the unmodified chain.
+
+* A stall is the lead's accel falling below 0.7 of its pull level within 0.9 s, off a pull of at
+  least 0.5 m/s² that held 0.8 of its level for 0.8 s before. A lead decelerating past −0.3 is
+  braking and ends everything at once.
+* For up to 1.6 s the law sees the pull held (`a_lead` and `a_lead_ff`) and the lead's speed plus
+  a credit: what it would have gained at its pull level minus what it did, at most 0.8 m/s. A
+  stall that outlives the hold was no shift, and its credit fades out over 0.6 s.
+* Ego's own stall since then repays the credit, measured the same way on ego's accel. The credit
+  is zero while ego is not pulling, never closes more than 4 % of the gap per second, fades out
+  between 0.6 and 0.8 of the wanted gap, and ends 3.5 s after the stall, fading over 1 s.
+* Off below 3 m/s of lead speed, and while either of the next two chain members is 0.5 m/s
+  slower than the lead or braking.
+
+**Why each guard exists.** The accel hold alone and the credit alone each kept about a third of
+the gain. Without the 3 m/s floor and the 0.5 m/s² arming, every ACC follower settling behind its
+own lead looked like a stall, and slow pull-aways ended in a 0.8 to 1.0 m/s² brake against
+0.4. The steady-pull test and the expiry fade came from the same case one step earlier.
+
+**Measured** in `tools/acc_platoon` at gap level 2 with the SDK speed. The wobble is command
+reversals of 0.2 m/s² or more per minute, with the command clipped at what the truck can deliver
+and counted only while the truck ahead pulls: a heavy truck railing at full gas feels no
+reversal above its limit.
+
+| Scenario | 10 trucks, seeds 1-3 | 100 trucks, seeds 1-2 |
+|---|---|---|
+| pull-through | 10.96 → 8.29 | 6.08 → 5.07 |
+| queue stop, restart | 19.39 → 16.02 | 15.82 → 13.38 |
+| emergency stop, restart | 15.52 → 13.63 | |
+| slowdown | | 8.87 → 8.47 |
+| stop-and-go | 7.71 → 7.40 | 7.87 → 7.93 |
+| slow pull-away | 12.67 → 12.19 | |
+| hard brake | 15.91 → 16.21 | 10.41 → 10.41 |
+| steady | | 0 → 0 |
+
+Stops, contacts, minimum gap, peak decel and the slowest truck are unchanged in every scenario at
+both sizes, and every `tests/acc/test_platoon.py` ratchet passes. Without the SDK speed the effect
+is within noise. Arming at 0.3 m/s² instead of 0.5 gave more on a hundred trucks (pull-through
+4.56, slowdown 6.33) but raised the pull-through's peak brake 0.68 → 0.79 m/s² and kept the slow
+pull-away brake at 0.65 against 0.43: weak pulls ending are not worth crediting.
+
+**Also measured, not shipped:** compensating ego's own shift (the law sees the speed ego would
+have without its cut) changed nothing; a lead-speed trend (2.5 s regression, ±0.5 m/s) cut the
+pull-through by a sixth but made stop-and-go worse until gated off on braking, and then gave
+less than this; releasing the hold on the raw SDK packet deceleration changed nothing over the
+`acc_accel` test.
+
+**Limits.** The sim's pulls (0.8 to 1.2 m/s²) are gentler than TruckersMP's, and the stall test
+reads `acc_accel`, which in real clips never reaches half the pull in 54 % of plateaus before
+they end. Expect a smaller effect in game than in the sim. `shift_hold_s = 0` restores the old
+law (in the probe `BASELINE`); `shift_credit_max_ms = 0` keeps only the hold. Enforced by
+`tests/acc/test_shift_debt.py`.
+
 ## 10. Safety overlays
 
 Sit on top of the IIDM/CAH/ACC blend. Each can short-circuit the rest of
