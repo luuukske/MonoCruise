@@ -41,8 +41,8 @@ compares them.
 - Known limit: DirectInput holds the last force it was given. If the game is paused in the
   middle of a rumble (at most 2 s), that last sample, at most 3000 of 10000, stays on the wheel
   until the game sends its next force.
-- Unknown: whether TruckersMP's client tolerates patching DirectInput function pointers. Use
-  singleplayer until that is answered.
+- TruckersMP: moderation answered that the risk is the user's responsibility, so the rumble
+  runs on TMP too. Not yet tested in game there.
 
 ## Build
 

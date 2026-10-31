@@ -222,7 +222,7 @@ class LaneDepartureThread(BaseThread):
             steer_right=-steer, gear=gear, brake=brake, blinker_left=left, blinker_right=right,
             hazards=hazards, paused=paused, aeb_active=self._read_aeb(),
             half_width_m=body[0], front_m=body[1], rear_m=body[2], path_m=body[3],
-            route=getattr(snap, "route", None), tmp_map=bool(getattr(snap, "tmp", False)),
+            route=getattr(snap, "route", None),
         )
 
     def _note(self, d: Decision, status: PluginStatus) -> None:

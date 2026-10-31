@@ -581,7 +581,6 @@ def test_a_truck_far_from_its_lane_is_off_route():
     ("reverse", dict(gear=-1), "reverse"),
     ("brake", dict(brake=0.8), "brake"),
     ("stale", dict(age_s=0.4), "stale"),
-    ("tmp", dict(tmp_map=True), "tmp_map"),
 ])
 def test_gates_keep_the_detector_silent(name, kw, reason):
     decisions = drive(drift(0.4), **kw)

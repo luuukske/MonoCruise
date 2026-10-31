@@ -89,7 +89,7 @@ A truck centre more than three half lanes from the route is `off_route`.
 | Reason | Meaning |
 |---|---|
 | `no_map`, `route_kind`, `short_route`, `branch`, `merge`, `off_route` | no route, a lane that is neither a road lane nor a straight prefab lane (below), route ends or forks within `max(40 m, 2 s)`, truck far off the route |
-| `speed`, `reverse`, `paused`, `stale`, `aeb`, `brake`, `tmp_map` | below 60 km/h (disarm 50), reversing, game paused, radar older than 0.25 s, AEB cue, brake 0.7 or more (hard braking only), TruckersMP map overlay |
+| `speed`, `reverse`, `paused`, `stale`, `aeb`, `brake` | below 60 km/h (disarm 50), reversing, game paused, radar older than 0.25 s, AEB cue, brake 0.7 or more (hard braking only) |
 | `lane_settle` | first 1 s on a lane after a lane switch of the router, a junction, no map or stale data (a fork or fast bend ahead does not restart it) |
 | `bend_sharp` | lane curvature of 1/90 m or more |
 | `bend_change` | approach cue only: lane curvature varies by 1/1000 or more from ego to `max(30 m, 3 s)` ahead (`dkappa` in the log), held 2 s, and the wheel moved away from that edge in the last 1.5 s (`steer_away`); the line warning still applies |
@@ -198,5 +198,5 @@ gate, the shared-memory layout against `plugins/ffb/ffb_cmd.h`).
 ## Not done
 
 Side-coded cues, edge class (oncoming lane or not), trailer swept path, UI, installer
-integration, ATS validation, TruckersMP (see `plugins/ffb/README.md`), and the lane keeping
+integration, ATS validation, and the lane keeping
 aid. The command block reserves a torque field for it that the plugin ignores.

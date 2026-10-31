@@ -118,7 +118,6 @@ class Frame:
     rear_m: float
     path_m: float
     route: object | None
-    tmp_map: bool = False
 
 
 @dataclass(frozen=True)
@@ -417,8 +416,6 @@ class LaneDetector:
         tn = self.tune
         if f.route is None:
             return "no_map"
-        if f.tmp_map:
-            return "tmp_map"
         if f.paused:
             return "paused"
         if f.age_s > tn.max_age_s:
