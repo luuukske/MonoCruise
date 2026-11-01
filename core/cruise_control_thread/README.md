@@ -349,6 +349,14 @@ under 3 m/s, a weak pull, or a slower vehicle ahead of the lead turn it off.
 measurements: `core/acc/ACC_ARCHITECTURE.md` §9.11. Enforced by
 `tests/acc/test_shift_debt.py`.
 
+Ego's own upshift is the other half (`shift_debt.OwnShiftHold`, §9.12). While
+ego's drive is cut the law kept climbing, as the lead pulled away and ego lost
+speed. The gas followed it, and the truck kicked when the clutch closed. A cut
+is ego's accel falling away under a command that still asks for the pull. Until
+the drive is back, the command may not rise above its value at the cut. After
+that it climbs back to the law at 1 m/s³. It only holds rises, so braking and
+lower commands pass straight through. `own_shift_hold_s = 0` switches it off.
+
 ### Lead-loss grace
 
 Brief empty-chain ticks reuse the last chain for `LEAD_LOSS_GRACE_S` so IIDM state does not

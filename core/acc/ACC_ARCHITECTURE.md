@@ -1284,6 +1284,56 @@ they end. Expect a smaller effect in game than in the sim. `shift_hold_s = 0` re
 law (in the probe `BASELINE`); `shift_credit_max_ms = 0` keeps only the hold. Enforced by
 `tests/acc/test_shift_debt.py`.
 
+### 9.12 Own shift hold: no kick out of ego's own upshift (2026-11-01)
+
+With §9.11 in, Lukas drove a TruckersMP convoy and reckless traffic and still felt the pull-away
+step. The mapper debug log of that drive shows where it is. Over 35 upshifts taken while pulling
+(command above 0.25 m/s² in the 1.5 s before), median values against the moment the logged gear
+changes:
+
+| t (s) | -1.0 | 0.0 | +0.5 | +1.0 | +1.5 | +2.0 | +3.0 |
+|---|---|---|---|---|---|---|---|
+| command (m/s²) | 0.54 | 0.69 | 0.82 | 0.69 | 0.59 | 0.52 | 0.31 |
+| measured accel | 0.56 | -0.04 | -0.08 | 0.18 | 0.44 | 0.46 | 0.24 |
+| gas | 0.29 | 0.38 | 0.49 | 0.59 | 0.40 | 0.35 | 0.26 |
+
+The drive falls away about 0.7 s before the gear number changes and is back about 1 s after it.
+In the convoy pull-aways the command climbed 0.3 to 0.8 m/s² through the cut, because the lead
+pulled away while ego could not follow, and the gas followed the command through the
+mapper's feedforward. The trim is frozen across a shift, the feedforward is not. When the clutch
+closed, ego came out at 0.9 to 1.85 m/s², 0.3 to 0.6 above the command at the time and up to
+twice the pull before the shift. It then eased off and shifted again. Shifts where the command
+stayed flat came out at the commanded accel, with no kick. So the felt step is the drive cut,
+which is the game's gearbox, plus a kick that MonoCruise added.
+
+`shift_debt.OwnShiftHold` runs in `_jerk_limit`, after the jerk step. A `PullDip` tracks ego's pull
+level from its tracked accel, with no braking reset, so a cut on an uphill still counts. A cut
+starts when the accel drops below `DIP_SHARE` of that level while the previous command still asks
+for that share or more. A slowdown the law asked for drops the command first and never counts.
+Until the accel is back, or for at most `OWN_HOLD_S` (2.5 s), the command may not rise above its
+value when the cut began. After that the cap climbs at `OWN_RISE_MS3` (1 m/s³) until it meets the
+law. It never raises a command and never holds a lower one, and it is off below 3 m/s.
+
+The convoy sim cannot show the kick. Its gas does not preload during a cut, and its leads pull no
+harder than ego, so its followers' commands stayed flat through their own shifts (median 0.83 →
+0.71). §9.11's "compensating ego's own shift changed nothing" was the same blind spot. The sim is
+the safety check here, not the measure:
+
+| Scenario (ezz before → after) | 10 trucks, seeds 1-3 | 100 trucks, seeds 1-2 |
+|---|---|---|
+| pull-through | 8.29 → 7.61 | 5.07 → 4.73 |
+| queue stop, restart | 16.02 → 16.09 | 13.38 → 13.23 |
+| emergency stop, restart | 13.63 → 13.00 | |
+| slowdown | | 8.47 → 7.53 |
+| stop-and-go | 7.40 → 7.31 | 7.93 → 7.80 |
+| slow pull-away | 12.19 → 12.42 | |
+| hard brake | 16.21 → 14.18 | |
+
+Stops, contacts, minimum gap and peak decel are unchanged at both sizes. Ten trucks end about
+1 % longer after a restart, a hundred end the same length. Judge changes on the mapper debug log of a real pull-away: `accel_to_pedals_debug.csv`
+carries the command, measured accel, gas and gear at 10 Hz. `own_shift_hold_s = 0` switches it
+off (in the probe `BASELINE`). Enforced by `tests/acc/test_shift_debt.py`.
+
 ## 10. Safety overlays
 
 Sit on top of the IIDM/CAH/ACC blend. Each can short-circuit the rest of

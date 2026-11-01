@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from core.cruise_control_thread import shift_debt
 from core.cruise_control_thread.acc_controller import AdaptiveCruiseController, _LeadSnapshot
-from core.cruise_control_thread.shift_debt import ShiftDebt
+from core.cruise_control_thread.shift_debt import OwnShiftHold, ShiftDebt
 
 DT = 1.0 / 60.0
 PULL = 0.8
@@ -127,3 +127,69 @@ def test_zero_hold_switches_it_off():
     cfg.shift_hold_s = 0.0
     rows = _drive(_stall, cfg=cfg)
     assert all(r[2].a_lead_ms2 == r[1].a_lead_ms2 and r[3] == 0.0 for r in rows)
+
+
+def _own(ego_accel, law, v=10.0, cfg=None, secs=8.0):
+    """Step an OwnShiftHold closed on its own output; returns per-tick (t, law, out)."""
+    cfg = cfg or _cfg()
+    hold, prev, rows = OwnShiftHold(), law(0.0), []
+    for i in range(int(secs / DT)):
+        t = i * DT
+        out = hold.step(cfg, DT, ego_accel(t), prev, law(t), v)
+        rows.append((t, law(t), out))
+        prev = out
+    return rows
+
+
+def _cut(t, start=3.0, length=1.8):
+    """Ego pulling at PULL with its own drive gone for `length`."""
+    return 0.0 if start <= t < start + length else PULL
+
+
+def _rising(t):
+    """The law climbing while ego's drive is cut: the lead pulls away meanwhile."""
+    return PULL if t < 3.2 else min(1.4, PULL + 0.8 * (t - 3.2))
+
+
+def test_the_command_does_not_climb_while_egos_drive_is_cut():
+    rows = _own(_cut, _rising)
+    assert all(abs(r[2] - PULL) < 1e-9 for r in rows if 3.0 <= r[0] < 4.8)
+
+
+def test_after_the_cut_the_command_climbs_back_gently():
+    rows = _own(_cut, _rising)
+    after = [r for r in rows if r[0] >= 4.8]
+    steps = [(b[2] - a[2]) / DT for a, b in zip(after, after[1:])]
+    assert max(steps) <= shift_debt.OWN_RISE_MS3 + 1e-6
+    assert after[-1][2] == after[-1][1]
+
+
+def test_the_law_can_always_go_lower_through_a_cut():
+    rows = _own(_cut, lambda t: PULL if t < 3.3 else -1.0)
+    assert all(r[2] == r[1] for r in rows if r[0] >= 3.3)
+
+
+def test_a_slowdown_the_command_asked_for_is_no_cut():
+    """The command falls first and ego follows: nothing is held when the law climbs again."""
+    def law(t):
+        return PULL if t < 3.0 else (0.1 if t < 4.5 else 1.2)
+    rows = _own(lambda t: PULL if t < 3.4 else 0.1, law)
+    assert all(r[2] == r[1] for r in rows)
+
+
+def test_a_cut_that_outlives_the_hold_lets_go():
+    rows = _own(lambda t: _cut(t, length=6.0), _rising, secs=10.0)
+    late = [r for r in rows if r[0] > 3.0 + shift_debt.OWN_HOLD_S + 1.5]
+    assert all(r[2] == r[1] for r in late)
+
+
+def test_below_walking_pace_the_own_hold_does_nothing():
+    rows = _own(_cut, _rising, v=2.0)
+    assert all(r[2] == r[1] for r in rows)
+
+
+def test_zero_own_hold_switches_it_off():
+    cfg = _cfg()
+    cfg.own_shift_hold_s = 0.0
+    rows = _own(_cut, _rising, cfg=cfg)
+    assert all(r[2] == r[1] for r in rows)

@@ -19,7 +19,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 - **AEB braked while you steered past something at walking pace**: in yards, junctions and tight turns AEB assumed the truck could barely steer at low speed, or that the turn would wrap on into parked vehicles beside it, so it braked for things you were clearly turning around. It now allows for the steering a slow truck really has and ignores vehicles you are pulling away from.
 - **AEB missed some vehicles heading straight for you**: a TruckersMP car crossing your path, an oncoming car drifting into your lane, or a vehicle beside you veering in could be written off as passing clear. AEB now also checks the line each vehicle is really closing on and brakes when it is coming at you up close.
 - **AEB was late for a stopped car round a bend**: AEB only saw a stopped or crashed vehicle in your lane once your truck had turned into the bend. With the map files it now looks ahead along your lane while you follow it and brakes earlier; everything else it brakes for is unchanged.
-- **ACC accelerated in steps behind a truck pulling away**: each time the truck ahead changed gear, ACC eased off the gas just as it pulled again and then caught up, so pulling away in a jam felt wobbly. ACC now rides through the truck ahead's gear changes when there is room, and still reacts straight away when it brakes.
+- **ACC accelerated in steps when pulling away**: at every gear change, the truck ahead's or your own, ACC eased off or kicked back in, so pulling away in a jam felt wobbly. ACC now rides through gear changes smoothly, and still reacts straight away when the truck ahead brakes.
 
 ## [1.1.3] - 2026-10-23
 ### Added

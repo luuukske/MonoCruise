@@ -49,14 +49,20 @@ AHEAD_SLOWER_MS: float = 0.5
 # Below this the standstill gap dominates the law and a lead settling behind its own lead
 # looks like a stall: it cost a 0.8 m/s^2 brake at the end of every slow pull-away.
 SPEED_MIN_MS: float = 3.0
+# Ego's own cut, from the drive falling away to it pulling again, lasts 1.7 to 2.2 s in game.
+OWN_HOLD_S: float = 2.5
+# After its own cut the command climbs back to the law at this rate.
+OWN_RISE_MS3: float = 1.0
 
 
 class PullDip:
     """Pull level and stalls of one accelerating vehicle, from its acceleration."""
 
-    __slots__ = ("peak", "dip_t", "braked", "lost_ms", "expired", "_t", "_hist", "_steady", "_arm")
+    __slots__ = ("peak", "dip_t", "braked", "lost_ms", "expired", "_t", "_hist", "_steady", "_arm",
+                 "_brake")
 
-    def __init__(self, steady: bool = False, arm_ms2: float = PULL_MS2) -> None:
+    def __init__(self, steady: bool = False, arm_ms2: float = PULL_MS2,
+                 brake_ms2: float = BRAKE_MS2) -> None:
         self.peak = 0.0
         self.dip_t: float | None = None
         self.braked = False
@@ -68,6 +74,7 @@ class PullDip:
         self._hist: deque[tuple[float, float]] = deque()
         self._steady = steady
         self._arm = arm_ms2
+        self._brake = brake_ms2
 
     def step(self, now: float, accel: float, hold_s: float) -> float:
         """The accel to believe: the pull level while it stalls, else `accel`."""
@@ -77,7 +84,7 @@ class PullDip:
             self._hist.append((now, accel))
             while self._hist[0][0] < now - DROP_S - STEADY_S:
                 self._hist.popleft()
-        if accel < BRAKE_MS2:
+        if accel < self._brake:
             self.braked, self.dip_t, self.peak = True, None, 0.0
             return accel
         if accel > PULL_MS2:
@@ -123,6 +130,7 @@ class ShiftDebt:
         self._debt: tuple[float, float, float, float, float] | None = None
         self._fade: tuple[float, float] | None = None
         self.credit_ms = 0.0
+        self.own = OwnShiftHold()
 
     def step(self, cfg: ACConfig, now: float, raw: _LeadSnapshot, smooth: _LeadSnapshot,
              a_ego: float, s_want: float, ahead: list[_LeadSnapshot]) -> _LeadSnapshot:
@@ -180,3 +188,47 @@ class ShiftDebt:
                 self._debt = None
                 return 0.0
         return credit
+
+
+class OwnShiftHold:
+    """Ego's own gear-shift cut: the command may not climb while the drive is gone.
+
+    A rise asked for during the cut only preloads the gas, and the truck kicked when the clutch
+    closed. Only rises are held; the law can always go lower. See ACC_ARCHITECTURE.md §9.12.
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self._dip = PullDip(brake_ms2=-math.inf)
+        self._t = 0.0
+        self._in_dip = False
+        self._holding = False
+        self.cap_ms2: float | None = None
+
+    def step(self, cfg: ACConfig, dt: float, a_ego: float, prev: float, a_new: float,
+             v_ego: float) -> float:
+        """`a_new`, held at the command from before the cut while ego's drive is cut."""
+        if cfg.own_shift_hold_s <= 0.0:
+            return a_new
+        self._t += dt
+        self._dip.step(self._t, a_ego, cfg.own_shift_hold_s)
+        dip, started = self._dip.dip_t is not None, self._dip.dip_t is not None and not self._in_dip
+        self._in_dip = dip
+        if prev <= 0.0 or v_ego < SPEED_MIN_MS:
+            self._holding, self.cap_ms2 = False, None
+            return a_new
+        # A dip the command asked for is ego slowing on purpose, not its drive cut.
+        if started and prev >= DIP_SHARE * self._dip.peak:
+            self._holding, self.cap_ms2 = True, prev
+        elif self._holding and not dip:
+            self._holding = False
+        if self.cap_ms2 is None:
+            return a_new
+        if not self._holding:
+            self.cap_ms2 += OWN_RISE_MS3 * dt
+            if self.cap_ms2 >= a_new:
+                self.cap_ms2 = None
+                return a_new
+        return min(a_new, self.cap_ms2)

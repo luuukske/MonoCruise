@@ -21,7 +21,7 @@ from core.cruise_control_thread.idm_cah import (
 from core.cruise_control_thread.approach_profile import approach_band
 from core.cruise_control_thread.brake_landing import BrakeLanding
 from core.cruise_control_thread.pull_away import pace_lift
-from core.cruise_control_thread.shift_debt import ShiftDebt
+from core.cruise_control_thread.shift_debt import OwnShiftHold, ShiftDebt
 from core.settings import Settings
 
 DT = 1.0 / 30.0
@@ -522,6 +522,12 @@ def test_every_feature_knob_disables_its_feature_at_zero():
                                  conf=1.0, a_lead_ff_ms2=a)
             seen[name] = debt.step(conf, i * DT, lead, lead, 0.8, 18.0, [])
     assert seen["baseline"].a_lead_ms2 == 0.0 and seen["default"].a_lead_ms2 > 0.5
+    # Own shift hold: a law rising through ego's own drive cut reaches the command as it is.
+    for name, conf in (("baseline", cfg), ("default", _controller().config)):
+        hold = OwnShiftHold()
+        for i in range(int(4.0 / DT)):
+            seen[name] = hold.step(conf, DT, 0.6 if i * DT < 3.0 else 0.0, 0.6, 1.2 if i * DT >= 3.2 else 0.6, 10.0)
+    assert seen["baseline"] == 1.2 and seen["default"] == 0.6
 
 
 def test_closing_relief_matches_the_requested_shape():

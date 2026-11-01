@@ -213,6 +213,7 @@ class ACConfig:
     pull_away_share: float = 1.0
     shift_hold_s: float = shift_debt.HOLD_S
     shift_credit_max_ms: float = shift_debt.CREDIT_MAX_MS
+    own_shift_hold_s: float = shift_debt.OWN_HOLD_S
     follow_dv_lo_ms: float = approach_profile.FOLLOW_DV_LO_MS
     follow_dv_hi_ms: float = approach_profile.FOLLOW_DV_HI_MS
     approach_dv_lo_ms: float = approach_profile.APPROACH_DV_LO_MS
@@ -744,9 +745,7 @@ class AdaptiveCruiseController:
         return idm_cah.lead_law(self.config, dist_m, v_ego, v_lead, a_lead,
                                 t_headway, a_lead_ff)
 
-    def _indicated_accel(
-        self, ind: _LeadSnapshot, v_ego: float, t_headway: float,
-    ) -> float:
+    def _indicated_accel(self, ind: _LeadSnapshot, v_ego: float, t_headway: float) -> float:
         """Indicated-lane gap demand, bounded to comfort braking.
 
         A candidate is published only from outside ego's corridor, so there is
@@ -781,6 +780,7 @@ class AdaptiveCruiseController:
                 band = idm_cah.fade(v_ego, cfg.launch_band_full_ms, cfg.launch_band_zero_ms)
                 rate = cfg.j_gas_pace_ms3 + band * (cfg.j_max_ms3 - cfg.j_gas_pace_ms3)
                 a_new = min(a_new, max(prev, 0.0) + rate * dt)
+            a_new = self._shift.own.step(cfg, dt, self._landing.ego_accel_ms2, prev, a_new, v_ego)
         if a_new <= cfg.gas_pace_brake_ms2:
             self._since_brake_s = 0.0
         self._prev_cmd_ms2 = a_new
