@@ -67,10 +67,13 @@ def review_stores(*, root: str | None, contributed_only: bool,
                   reviewer: bool = False, own: bool = False) -> list[ClipStore]:
     """Stores the review tool opens. Default merges local + contributed; flags narrow it.
 
-    A reviewer sees their own capture store (``own``) or their batch store, never both.
+    ``own`` is the local capture store alone, with or without ``reviewer``. A reviewer
+    otherwise sees their batch store, never both.
     """
+    if own:
+        return [ClipStore(root=default_clip_root())]
     if reviewer:
-        return [ClipStore(root=default_clip_root() if own else reviewer_clip_root())]
+        return [ClipStore(root=reviewer_clip_root())]
     if root:
         return [ClipStore(root=root)]
     if contributed_only:

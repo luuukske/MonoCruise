@@ -738,7 +738,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--reviewer", action="store_true",
                         help="tag a batch from the server (MONOCRUISE_REVIEWER_TOKEN)")
     parser.add_argument("--own", action="store_true",
-                        help="with --reviewer: tag your own recorded clips instead of a batch")
+                        help="show only your own recorded clips; with --reviewer, tag them instead of a batch")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
     stores = review_stores(root=args.root, contributed_only=args.contributed,
@@ -748,9 +748,11 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     win = ReviewWindow(stores, client=client, reviewer=args.reviewer)
     labels = "+".join(store_origin(s) for s in stores)
-    if args.reviewer:
-        labels = "reviewer, own clips" if args.own else "reviewer, batch"
-        win._update_btn.setVisible(not args.own)
+    if args.own:
+        labels = "reviewer, own clips" if args.reviewer else "own clips"
+        win._update_btn.setVisible(False)
+    elif args.reviewer:
+        labels = "reviewer, batch"
     win.setWindowTitle(f"AEB Clip Review  [{labels}]")
     win.show()
     return app.exec()
