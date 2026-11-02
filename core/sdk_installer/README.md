@@ -29,6 +29,7 @@ Beside them goes one plugin MonoCruise builds itself, shipped inside the app (se
 | file | role |
 | --- | --- |
 | `monocruise_tmp.dll` | TruckersMP no-collision zone state for AEB (`tmp_plugin/`) |
+| `monocruise_ffb.dll` | lane departure rumble and lane keeping steering (`plugins/ffb/`), opt-in |
 
 ## Superseded plugins (`LEGACY_FILES`)
 
@@ -153,8 +154,8 @@ on a fresh install with no cache, no plugin at all.
 ## MonoCruise's own plugins (`own.py`, `own/`)
 
 Plugins MonoCruise builds from this repository and ships inside the app, so they
-never touch the network: today only `monocruise_tmp.dll`, built from `tmp_plugin/`
-(`tmp_plugin/README.md`). They fit every game and game version, unlike ETS2LA's
+never touch the network: `monocruise_tmp.dll`, built from `tmp_plugin/` (`tmp_plugin/README.md`),
+and `monocruise_ffb.dll`, built from `plugins/ffb/` (`plugins/ffb/README.md`). They fit every game and game version, unlike ETS2LA's
 plugin, and live under their own name, so ETS2LA's files are never modified.
 
 - **Checked locally.** `check()` adds one `ManagedFileState` per own plugin, up to
@@ -165,6 +166,12 @@ plugin, and live under their own name, so ETS2LA's files are never modified.
   unsupported game version (no ETS2LA plugin, nothing to install) gets none of
   them either: alone they do nothing. A running game defers a loaded copy through
   the usual close-and-reinstall path; an absent one installs for the next start.
+- **Opt-in.** An entry with `wanted` (the FFB plugin: `ldw_enabled`, `lka_enabled` or
+  `la_enabled` on) is checked and installed only while wanted or already in the folder. It patches the
+  wheel's force, so no driver gets it unasked; a copy left behind after the driver picks None is still
+  kept current, and passes the game's force through. Picking Warn or Steer in the settings installs it
+  at once (`start_own_install`) on the boot install's rules: a running game gets an absent copy for its
+  next start, and a loaded one is never replaced.
 - **Same integrity rule as overrides.** `verified_path()` refuses a bundle that no
   longer hashes to its recorded SHA, and the error is reported for that file.
 - **Reproducible.** The build uses `/Brepro`, so a rebuild of the same source with
@@ -231,6 +238,10 @@ is exactly the shape heuristic scanners dislike. Mitigations kept deliberately:
   reproducibly, with a version resource naming it, static CRT and no imports
   beyond `KERNEL32.dll`. It is a TruckersMP SDK plugin: the client starts it only
   after the user confirms the game's plugin disclaimer.
+- The FFB plugin (`plugins/ffb/`) is built the same way, reproducibly with static CRT,
+  importing only `KERNEL32.dll` and `DINPUT8.dll`. The game loads it as an SDK plugin
+  and it patches the game's own force feedback effect from there; it is installed only
+  for drivers who turned lane departure on.
 - Downloads land in a cache first, then move into place atomically; a partial or
   mismatched file never reaches the game folder.
 - No process injection, no obfuscation, no executing downloaded content, no

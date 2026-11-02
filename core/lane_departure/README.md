@@ -2,8 +2,10 @@
 
 Rumbles the wheel's force feedback when the truck drifts out of its lane without the
 driver meaning to (LDW, `Settings.ldw_enabled`), and, as a separate switch, steers it back with a
-short pulse (LKA, `Settings.lka_enabled`, see "Lane keeping assist" below). Both off by default,
-config.json only, no UI. LA (`core/la/README.md`) reuses the same lane data, the same plugin and
+short pulse (LKA, `Settings.lka_enabled`, see "Lane keeping assist" below). Both off by default. The
+settings panel's Lane departure dropdown (under Emergency Braking, BETA) sets them together: None, Warn (the
+rumble) or Steer (the rumble and the pulses); a pick other than None installs the FFB plugin
+(`plugins/ffb/README.md`). LA (`core/la/README.md`) reuses the same lane data, the same plugin and
 this thread, which owns the command block for all three; each is switched on separately.
 
 ```
@@ -282,8 +284,9 @@ not the standards' text). Known gaps, open:
   wrong place. No trailer: the cab can be inside while the trailer crosses.
 - The intent thresholds it inherits from the detector are still set by reasoning, not by driving.
 
-**Config** (config.json): `lka_enabled` (false), `lka_strength` (1.0, 0 to 2, scales the servo like
-`la_strength`), `lka_tmp_enabled` (false: off on TruckersMP until moderation answers for steering). The
+**Config**: `lka_enabled` (false, Steer in the dropdown), `lka_strength` (1.0, 0 to 2, scales the servo like
+`la_strength`), `lka_tmp_enabled` (true: TruckersMP moderation gave the go-ahead for steering, 2026-11-02;
+config.json only, false keeps it off there). The
 arm speed is `ldw_min_speed_kmh`; the wheel inertia and the fixed calibration are LA's keys
 (`la_wheel_inertia`, `la_force_per_ms2`, `la_kappa_per_steer`), one wheel and one truck. `ldw_test_mode`
 reaches it too, since it reads the detector: every close call starts a pulse, blinker or not.
@@ -299,5 +302,4 @@ pulse and 2 s after.
 
 Side-coded cues, acting on the edge class (a firmer or earlier pulse toward an oncoming lane or the road
 edge), radar traffic in the next lane (an oncoming car, one beside or closing from behind, steering back
-through steering-intent mutes), a hands-on check for LKA, trailer swept path, UI, installer integration
-and ATS validation. LA, the continuous lane assist prototype, is in `core/la/`.
+through steering-intent mutes), a hands-on check for LKA, trailer swept path and ATS validation. LA, the continuous lane assist prototype, is in `core/la/`.

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from core.radar import tmp_state
+from core.settings import Settings
 from core.sdk_installer import manager as mgr
 from core.sdk_installer import overrides as ov_mod
 from core.sdk_installer import own as own_mod
@@ -30,6 +31,26 @@ def own(tmp_path, monkeypatch):
     item = own_mod.OwnPlugin(_NAME, git_blob_sha(_OURS), bundle)
     monkeypatch.setattr(own_mod, "OWN_PLUGINS", (item,))
     return item
+
+
+_FFB = "monocruise_ffb.dll"
+_FFB_BYTES = b"monocruise_ffb.dll test build"
+
+
+@pytest.fixture
+def opt_in(tmp_path, monkeypatch):
+    """Our plugin plus one wanted only while ``opt_in["on"]``, like the FFB plugin and the lane settings."""
+    bundle = tmp_path / "own"
+    bundle.mkdir()
+    (bundle / _NAME).write_bytes(_OURS)
+    (bundle / _FFB).write_bytes(_FFB_BYTES)
+    want = {"on": False}
+    items = (
+        own_mod.OwnPlugin(_NAME, git_blob_sha(_OURS), bundle),
+        own_mod.OwnPlugin(_FFB, git_blob_sha(_FFB_BYTES), bundle, wanted=lambda: want["on"]),
+    )
+    monkeypatch.setattr(own_mod, "OWN_PLUGINS", items)
+    return want
 
 
 def _ours(game: Path) -> bytes:
@@ -137,3 +158,66 @@ def test_the_plugin_writes_the_layout_the_radar_reads():
     assert name == tmp_state._STATE_TAG
     assert f"sizeof( StateData ) == {tmp_state._STATE_SIZE}" in src
     assert re.search(r"kStateVersion\s*=\s*(\d+)", src).group(1) == str(tmp_state._STATE_VERSION)
+
+
+def test_an_opt_in_plugin_is_installed_only_while_wanted(sdk, opt_in):
+    game = sdk.add_game("ets2", "1.60")
+    sdk.apply(sdk.check().games_needing_action)
+    assert _ours(game) == _OURS and not (_plugins(game) / _FFB).exists()
+    _FakeSource.offline = True
+    assert not sdk.check().needs_action, "nobody asked for it: nothing to do"
+
+    opt_in["on"] = True
+    check = sdk.check()
+    assert not check.consulted_remote and check.games[0].missing == [_FFB]
+    assert sdk.apply(check.games_needing_action)[0].installed == [_FFB]
+    assert (_plugins(game) / _FFB).read_bytes() == _FFB_BYTES
+
+
+def test_an_opt_in_plugin_left_installed_is_kept_current(sdk, opt_in):
+    game = sdk.add_game("ets2", "1.60")
+    opt_in["on"] = True
+    sdk.apply(sdk.check().games_needing_action)
+    opt_in["on"] = False
+    (_plugins(game) / _FFB).write_bytes(b"an older monocruise_ffb.dll")
+
+    check = sdk.check()
+    assert check.games[0].outdated == [_FFB], "switched off but still in the game folder"
+    sdk.apply(check.games_needing_action)
+    assert (_plugins(game) / _FFB).read_bytes() == _FFB_BYTES
+
+
+def test_reinstall_leaves_out_an_opt_in_plugin_nobody_wants(sdk, opt_in):
+    game = sdk.add_game("ets2", "1.60")
+
+    results = sdk.apply(sdk.locate_games(), force_all=True)
+
+    assert results[0].success and results[0].installed and _FFB not in results[0].installed
+    assert not (_plugins(game) / _FFB).exists()
+
+
+def test_switching_it_on_installs_it_at_once_beside_a_running_game(sdk, opt_in, monkeypatch):
+    game = sdk.add_game("ets2", "1.60")
+    sdk.apply(sdk.check().games_needing_action)
+    monkeypatch.setattr(mgr, "_default_manager", sdk)
+    monkeypatch.setattr(mgr, "is_game_running", lambda game_type: True)
+    opt_in["on"] = True
+    done: list = []
+
+    mgr.start_own_install(_FFB, done.append).join(5)
+    assert [r.installed for r in done[0]] == [[_FFB]], "absent from the game, so it installs for the next start"
+    assert (_plugins(game) / _FFB).read_bytes() == _FFB_BYTES
+
+    done.clear()
+    mgr.start_own_install(_FFB, done.append).join(5)
+    assert done == [[]], "already there and current: nothing to do"
+
+
+@pytest.mark.parametrize("key", ["ldw_enabled", "lka_enabled", "la_enabled"])
+def test_the_shipped_ffb_plugin_is_wanted_by_any_lane_feature(monkeypatch, key):
+    ffb, s = own_mod.own_plugin(_FFB), Settings.instance()
+    for name in ("ldw_enabled", "lka_enabled", "la_enabled"):
+        monkeypatch.setattr(s, name, False)
+    assert ffb.label == "Lane departure plugin" and not ffb.wanted()
+    monkeypatch.setattr(s, key, True)
+    assert ffb.wanted()

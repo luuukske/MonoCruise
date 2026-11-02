@@ -89,6 +89,16 @@ _GAP_LEVEL_LABELS = ("1 (0.7s)", "2 (1.1s)", "3 (1.5s)", "4 (2.2s)")
 # Extra breathing room under the Unassign button, before the next setting.
 _UNASSIGN_GAP = 10
 
+# Lane departure: Warn rumbles the wheel at the line, Steer also steers back (core/lane_departure/README.md).
+_LDW_MODES = ("None", "Warn", "Steer")
+_FFB_PLUGIN = "monocruise_ffb.dll"
+
+
+def _ldw_mode(s: Any) -> str:
+    """The dropdown's view of ``ldw_enabled`` and ``lka_enabled``; LKA alone (config only) reads as Steer."""
+    return "Steer" if s.lka_enabled else "Warn" if s.ldw_enabled else "None"
+
+
 # Resolve project‑root path for assets (gear.png, patreon.png, youtube.png
 # live at the project root in the original repo).
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -829,6 +839,12 @@ class SettingsPanel(QWidget):
         self._aeb_sound_rows = (r_sound, r_volume, r_test)
         self._set_aeb_sound_rows_visible(bool(s.AEB_enabled))
 
+        self.opt_ldw, _, _ = self._field_with_subtext(
+            "Lane departure:",
+            self._build_ldw_field,
+            "Needs a force feedback wheel. Steer also steers you back.",
+        )
+
         # Clip sharing (opt-in)
         r_share = self._r()
         new_label(p, r_share, 0, "Help improve AEB and ACC:")
@@ -1272,6 +1288,71 @@ class SettingsPanel(QWidget):
             le.returnPressed.emit()
         self._aeb_test.trigger()
 
+    def _build_ldw_field(self, container: QWidget, row: int, col: int) -> Any:
+        """BETA pill and the None / Warn / Steer dropdown in one cell."""
+        combo = new_optionmenu(
+            container, row, col,
+            values=_LDW_MODES,
+            default=_ldw_mode(self._settings),
+            callback=self._on_ldw_mode_changed,
+        )
+        grid = container.layout()
+        grid.removeWidget(combo)
+        cell = QWidget()
+        cell.setObjectName("transparentRow")
+        cell.setStyleSheet("QWidget#transparentRow { background: transparent; }")
+        lay = QHBoxLayout(cell)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        lay.addStretch()
+        lay.addWidget(new_beta_pill())
+        lay.addWidget(combo)
+        grid.addWidget(cell, row, col)
+        return combo
+
+    def _on_ldw_mode_changed(self, mode: str) -> None:
+        self._settings.ldw_enabled = mode != "None"
+        self._set("lka_enabled", mode == "Steer")
+        if mode != "None":
+            self._install_ffb_plugin()
+
+    def _install_ffb_plugin(self) -> None:
+        """Install the FFB plugin the first time it is needed; a running game keeps what it loaded."""
+        from core.sdk_installer import GameApplyResult, start_own_install
+
+        # SDK worker callback; PopupWindow.emit is thread-safe onto the GUI thread.
+        def _on_done(results: list["GameApplyResult"] | None) -> None:
+            if results is None or any(r.errors for r in results):
+                PopupWindow.emit(
+                    "Lane departure plugin",
+                    "MonoCruise could not install the lane departure plugin. Use Reinstall SDK in settings.",
+                    "w",
+                    duration_ms=9000,
+                )
+                return
+            installed = [r.game_type.upper() for r in results if _FFB_PLUGIN in r.installed]
+            deferred = [r.game_type.upper() for r in results if _FFB_PLUGIN in r.deferred_running]
+            if installed:
+                PopupWindow.emit(
+                    "Lane departure plugin installed",
+                    f"{', '.join(installed)}\nactive after game restart",
+                    "c",
+                    duration_ms=9000,
+                )
+            if deferred:
+                PopupWindow.emit(
+                    "Lane departure plugin update pending",
+                    f"{', '.join(deferred)} is running an outdated plugin. Close the game, then use "
+                    f"Reinstall SDK in settings to finish updating.",
+                    "n",
+                    duration_ms=9000,
+                )
+
+        try:
+            start_own_install(_FFB_PLUGIN, _on_done)
+        except Exception:
+            logger.exception("failed to start the lane departure plugin install")
+
     def _on_contribute_toggled(self, checked: bool) -> None:
         """Ticking opens the consent prompt; the setting only moves on accept."""
         if not checked:
@@ -1651,6 +1732,10 @@ class SettingsPanel(QWidget):
         self.ent_aeb_volume.blockSignals(False)
         self.ent_aeb_volume._mc_last_good[0] = volume
         self._set_aeb_sound_rows_visible(bool(s.AEB_enabled))
+
+        self.opt_ldw.blockSignals(True)
+        self.opt_ldw.setCurrentText(_ldw_mode(s))
+        self.opt_ldw.blockSignals(False)
 
         # OPD
         self.chk_opd.setChecked(bool(s.opd_mode_variable))

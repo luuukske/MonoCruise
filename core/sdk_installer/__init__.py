@@ -23,6 +23,7 @@ from .manager import (
     check_sdk,
     get_manager,
     start_boot_check,
+    start_own_install,
     start_reinstall,
 )
 from .remote import SdkSource, SdkSourceError, SdkVersionUnsupported, unsupported_reason
@@ -48,6 +49,7 @@ __all__ = [
     "check_sdk",
     "get_manager",
     "start_boot_check",
+    "start_own_install",
     "start_reinstall",
     "SdkSource",
     "SdkSourceError",

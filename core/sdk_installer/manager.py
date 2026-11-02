@@ -384,6 +384,8 @@ class SdkManager:
             for plugin in own_plugins():
                 path = scan.plugins_dir / plugin.name
                 installed = path.exists()
+                if not plugin.tracked(installed):
+                    continue
                 file_states.append(
                     ManagedFileState(plugin.name, installed, not installed or plugin.is_current(path))
                 )
@@ -670,7 +672,7 @@ class SdkManager:
         stale = set(game.missing) | set(game.outdated)
         for plugin in own_plugins():
             dest = game.plugins_dir / plugin.name
-            if not (force_all or plugin.name in stale):
+            if not (force_all or plugin.name in stale) or not plugin.tracked(dest.exists()):
                 continue
             if restrict_to_missing and dest.exists():
                 result.deferred_running.append(plugin.name)
@@ -739,6 +741,35 @@ def start_boot_check(
             log.exception("SDK boot-check callback failed")
 
     thread = threading.Thread(target=_run, name="sdk_boot_check", daemon=True)
+    thread.start()
+    return thread
+
+
+def start_own_install(
+    name: str,
+    on_result: Callable[[list[GameApplyResult] | None], None],
+) -> threading.Thread:
+    """Daemon install of one of our plugins just switched on, like the boot install; never closes a game.
+
+    ``on_result(None)`` on failure, ``[]`` when every install already holds a current copy.
+    """
+
+    def _run() -> None:
+        try:
+            manager = get_manager()
+            games = [g for g in manager.check().games if name in (*g.missing, *g.outdated)]
+            results: list[GameApplyResult] | None = (
+                manager.apply(games, allow_running_missing=True) if games else []
+            )
+        except Exception:
+            log.exception("installing %s failed", name)
+            results = None
+        try:
+            on_result(results)
+        except Exception:
+            log.exception("plugin install callback failed")
+
+    thread = threading.Thread(target=_run, name="sdk_own_install", daemon=True)
     thread.start()
     return thread
 

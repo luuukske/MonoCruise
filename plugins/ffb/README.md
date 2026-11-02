@@ -4,9 +4,10 @@ An ETS2 / ATS SDK plugin that adds a short zero-mean rumble (`core/lane_departur
 and the LA's steering (`core/la/README.md`) to the game's own constant-force
 effect while MonoCruise asks for them. It is the probe in `plugins/ffb_probe` grown a command
 channel. The steering axis is never written and with no request the game's force passes through
-untouched. It is not part of
-the SDK installer: copy the DLL by hand, remove the probe DLL if it is installed (two
-plugins cannot both patch the effect), and delete the DLL to remove it.
+untouched. MonoCruise ships it and the SDK installer puts it in the game once the driver picks Warn or
+Steer under Lane departure (or LA is on), never before (`core/sdk_installer/README.md`, MonoCruise's own
+plugins). Set back to None it stays, idle, and is kept current. Remove the probe DLL if it is installed
+(two plugins cannot both patch the effect), and delete the DLL to remove it.
 
 ## How it works
 
@@ -96,8 +97,9 @@ compares them.
   middle of a rumble or a push, that last sample (rumble and torque at most 3000 of 10000 each)
   stays on the wheel until the game sends its next force.
 - TruckersMP: moderation answered that the risk is the user's responsibility, so the rumble
-  runs on TMP too. Not yet tested in game there. The assist torque stays off on TMP
-  (`la_tmp_enabled`) until moderation has answered for a steering torque.
+  runs on TMP too. Not yet tested in game there. Moderation gave the go-ahead for steering too
+  (2026-11-02): the lane keeping assist runs on TMP (`lka_tmp_enabled`, on by default). LA, the test
+  prototype, stays off there (`la_tmp_enabled`).
 
 ## Build
 
@@ -110,12 +112,15 @@ cl /nologo /std:c11 /O2 /W3 /MT /LD ffb.c /link /DEF:ffb.def /Brepro dinput8.lib
 
 The second command writes `ffb.dll`; rename it `monocruise_ffb.dll` and copy it to the game's
 `bin/win_x64/plugins`. Imports are `DINPUT8.dll` and `KERNEL32.dll` only. The tools expect a
-local copy in `plugins/ffb/build/` (ignored by git).
+local copy in `plugins/ffb/build/` (ignored by git). To ship a change, copy it to
+`core/sdk_installer/own/monocruise_ffb.dll` and put its git-blob SHA in `core/sdk_installer/own.py`;
+`tests/test_sdk_own_plugins.py` fails until they match. `/Brepro` makes a rebuild of the same source
+byte-identical.
 
 ## Try it
 
-1. Install the DLL, start the game, drive for a few seconds. The game log should say
-   `ffb: constant force hooked`.
+1. Pick Warn under Lane departure in the settings (it installs the DLL) or install it by hand, start
+   the game, drive for a few seconds. The game log should say `ffb: constant force hooked`.
 2. `python tools/ldw_rumble_test.py` rumbles the wheel for 2 s (the game must be driving,
    not paused). MonoCruise may stay open.
 3. With MonoCruise closed, set `"ldw_enabled": true` in config.json, start it and drift
