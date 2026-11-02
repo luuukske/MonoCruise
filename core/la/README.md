@@ -1,0 +1,378 @@
+# LA: lane assist (prototype, hidden)
+
+LA is the codename for the lane assist prototype, so it is not confused with the lane keeping assist
+(LKA) being added to lane departure, which is a separate feature. Steers the truck along its current
+lane, bends included, by turning the wheel through its force feedback. The driver keeps their hands
+on the wheel and always wins. It keeps the lane only: it never changes lanes, never takes a
+junction, fork or merge, hands sharp bends back, and lets go when the hands leave the wheel. Full
+self driving is ETS2LA's job and stays out of scope. Off by default and config only (`la_enabled`,
+no UI): it is for testers who were told how to switch it on. `la_follow_all` is a test switch that
+keeps it on through junctions, forks and merges (see "When it is off").
+
+The lane keeping assist (LKA, `core/lane_departure/README.md`) runs this core in its pulse mode
+(`AssistTuning.pulse`): standby at no authority, in over 0.15 s while the lane departure detector asks for a
+pulse on a side, the correction steered to a line 0.5 m inside that edge, out over 0.5 s with the correction
+dropped. The pulse mode skips the ring guard, the weave guard, the hands-off check, the 2 s rise and re-arm and
+LA's own blinker and swerve mutes (Lukas, 2026-11-02: it lasts a second or three); the caps and the override
+stay. A pulse's servo is one-sided: it never pushes toward the line it saves (`servo_only`, see the LKA section
+there), so LA's override counts only a wheel held short of its target during a pulse.
+Evasive steering support, much later, is meant to plug in as a path source ("Adding a path source").
+
+```
+radar_thread + telemetry_thread + map_thread
+        |  LaneDepartureThread (20 Hz) -> AssistRunner (runner.py)
+        |      path source: WantedPath (path.py), the lane follower passes LANE
+        |      path tracking: LaneAssist (controller.py) on the lane fit (lane_model.py) -> target angle, rate
+        |      wheel actuator: WheelActuator (actuator.py) -> servo request
+        |      calibration: ForceCalibration (calibration.py) -> Gains
+        v
+Local\MonoCruiseFfbCmd v4 (core/lane_departure/command.py)
+        -> plugins/ffb: damped PID on the wheel angle at the game's FFB rate, on top of the game's own force
+```
+
+`controller.py`, `actuator.py`, `path.py`, `lane_model.py` and `calibration.py` are pure logic, `runner.py` reads settings and
+keeps the logs. The lane departure thread hosts it because one writer owns the command block; the rumble and the
+assist run side by side and are switched separately. The route arrives in the lane departure detector's frame
+(`core/lane_departure/README.md`); offset, heading and curvature come from the assist's own lane fit.
+Nothing here touches ACC, AEB, CC or the pedals.
+
+## How it turns the wheel
+
+Two loops, each where it can run fast enough:
+
+- **Path tracking** (MonoCruise, 20 Hz) turns the lane, plus any wanted path, into a target wheel angle and the
+  rate it is moving at.
+- **The wheel servo** (the plugin, at the game's FFB rate) holds the wheel on that target with a PID on the
+  wheel angle, added to the game's own force: `kp` on the error, `kd` on the rate error, `ki` on the error over
+  time. The target is moved on at its rate between MonoCruise's updates (for at most 0.15 s), so the wheel never
+  sees a 20 Hz staircase. The game's force is kept whole by default, so the wheel still feels like the game: its
+  weight, its turn-in, its bumps. In a steady bend the servo's integral carries what the driver's arms would.
+
+The servo is designed as a second-order response on the wheel's inertia (rim with hands, `la_wheel_inertia`,
+650 force units per lock per s^2 by default): 2 Hz, 0.7 of critical damping, the integral at 0.3 of the
+bandwidth. The game's own centring answers the wheel angle almost at once (57000 per lock within 50 ms at
+97 km/h on the third drive, close to the calibrated spring), so it counts toward that stiffness: the servo adds
+only what the game's spring at the current speed does not give, never less than a quarter, and damping and
+integral are sized on the total. That keeps the wheel equally stiff and damped at every speed. `la_strength`
+scales the total. Caps: the servo 3000 of 10000 (the plugin's own cap), its damping 1500, its integral the cap.
+
+`la_cancel_share` (0 by default) removes a share of the game's steady force while the servo holds: the
+magnitude low-passed at 1.5 s, so turn-in weight, corrections and bumps still come through, faded with the
+servo, at most 6000. It is there for a wheel whose servo runs out of room in hard bends; in the model the lane
+is kept as well without it (worst 0.19 m after 20 s against 0.17 m with a full cancel).
+
+### Why it is built this way (drives of 2026-11-01, Moza R3, light in-game FFB)
+
+1. The first versions added a correction or a "hold" on top of the game's centring, sized by the game's own
+   force. That centring was 100 to 400 of 10000 while assisting: too light to move a wheel against its own
+   friction and the driver's resting hands, so it could not take a bend.
+2. A stiff pull on the wheel angle (4 to 8 times the game's spring) took the bends but buzzed at 3 to 4 Hz, the
+   plugin's buzz guard at a median 0.67: a stiffness with no damping, fed back a frame late, rings. The rim's
+   inertia (about 650) was read off that ring: 4 times the spring at 90 km/h rang at 3.3 Hz.
+3. The hold needed a model of the game's force, and that model would not stay put: one drive it flattened in
+   harder bends (`593 * a^0.72`, 777 per m/s^2 at 0.5 against 431 at 3.5), the next it was nearly straight
+   (`540 * a^0.93`). With a straight line the hold was 28 to 47 % too strong in bends and the truck cut every one.
+4. MonoCruise's target moved in 20 Hz steps (up to 200 units of pull each, p95), the "jumps".
+
+So the plugin now holds the wheel with its own damped servo on top of the game's force, its integral replacing
+the model of that force, and moves the target on between updates. A first v4 build cancelled the game's slow
+force outright; that took the game's feel away while assisting, and is now an option. In the design study (`tests/la/servo_sim.py`, 60 Hz, a frame plus 8 ms of
+delay) the 2 Hz design stays stable from half to twice the design inertia, with or without 350 units of dry
+friction and hands, and tracks a moving target within 0.001 of lock; 2.5 Hz rang at half the inertia and 3 Hz at
+the design inertia itself. Damping on the old 40 ms low-passed wheel speed made ringing worse on the bench; the
+servo reads the speed through a 6 ms low-pass.
+
+The **ring guard** stays as the backstop for a wheel much lighter than designed: it cuts the servo to 0.8 each
+time the plugin's buzz guard fires (once per drop), halves it when the wheel swings through the target past
+0.004 of lock four times within 2 s, and cuts it to zero on a swing past 0.02 that comes within 0.5 s of the one
+before (a ring at 1 Hz or more, caught half a swing later than before; Lukas, 2026-11-01). On drives 7 to 9 a
+single swing past 0.02 fired 11 times, always 0.7 to 5 s after the previous one: the slow overshoot of a big return
+or a lane crossing. Each took the servo to zero for 30 to 120 s, and at 8 to 30 % of its stiffness the truck then
+swayed up to 2.4 m through its lane at 0.15 Hz. It comes back over 30 s;
+a cut within a minute of the last doubles that, up to 120 s. A rim four times lighter than designed, with no
+hands, still rings in the model; set `la_wheel_inertia` lower for such a wheel. Swings within 1 s after the wheel
+sat still for 0.3 s or more, 0.008 of lock or more off the target, do not count (Lukas, 2026-11-01): on drive 8 a
+hand or a stalled reading held it 2 to 4 s while the servo pushed, the wheel snapped 0.03 to 0.06 past the target
+when let go, and that one swing took the servo to zero for up to two minutes. A ringing wheel is never still that
+long. Nor does a swing count when the target moved more than the swing itself since the one before (Lukas,
+2026-11-01): a ring swings round a still target, while on drive 10 a roundabout's lanes swung the target and the
+wheel chasing it read as a ring, halved the servo and then cut it to zero; the truck swayed up to 2.5 m for two
+minutes with no force to speak of. Replayed on drives 7 to 10 that leaves only the buzz cuts; the light rim with no
+hands still rings round its target in the model and is still cut.
+
+## The target angle
+
+```
+kappa_cmd = bend scale * lane curvature one servo lag ahead  +  wanted path curvature  +  correction / v^2
+target    = -kappa_cmd / g_s                                 g_s = curvature per unit of steering, learned
+```
+
+- **Bend feedforward**: the lane's own curvature, from the lane fit, is what makes it take bends on its own. It is
+  read as far ahead as the wheel trails its target: the game's spring the servo's integral has to carry, over that
+  integral's gain (`WheelActuator.lag_s`, 0.05 to 0.4 s). That lag grows with speed: drives 5 and 6 measured
+  0.15 s at 80 to 90 km/h and 0.25 s at 100 to 130 km/h, as predicted, while the truck's path follows the wheel
+  within a tick. A fixed 0.4 s led the wheel by up to 0.25 s: the truck turned in early, cut inside, unwound early
+  and left every bend 0.4 to 1.35 m wide (drive 6). In the model, on a straight-bend-straight lane at R 150 and the
+  game's spring at 90 km/h, that was 0.30 m inside and 0.34 m wide; read one lag ahead it is 0.01 m either way.
+- **Bend scale**: in steady bends (curvature past 1/700, engaged, drift under 0.1 m/s) the command is what the
+  truck needs, so its ratio to the map curvature is learned over 15 s of such bends, bounded 0.8 to 1.2. On the
+  drives the map curvature and the steering gain disagreed by 7 % in steady bends and about 12 % in tight ones
+  (0.20 against the calibrated 0.186 per lock), enough to cut every bend. In the model a steering gain 12 % off
+  either way now settles within 0.08 m of the centre in a bend.
+- **Correction** toward the learned centre plus the wanted path's offset: 1.0 m/s^2 per metre past a 0.05 m soft
+  free zone, 2.0 per m/s of drift, smoothly capped at 2 m/s^2, plus a slow integral (0.05 per m per s, bounded at
+  0.8 m/s^2) built only while fully engaged and steady, leaking over 20 s otherwise. It was 0.6 and 1.6 with a
+  0.1 m zone; the precise servo made the stronger centring stable in the model. The cap was 1 m/s^2 until drive 6,
+  where a 0.6 m/s drift at 130 km/h sat on it (halved by the weave guard) for 3 s and reached the next lane; at 2 a
+  1 m/s drift is caught 0.15 m sooner and back within 0.2 m in half the time, and near the centre nothing changes.
+  Stiffer gains (1.3 to 2.5 per metre) overshot and wove in the model, because of the servo's lag.
+- **Stop before the line**: drifting toward a lane line faster than 0.3 m/s, the correction is at least the
+  lateral decel that stops the drift before the body reaches the line, with the room counted from where the truck
+  will be one servo lag plus 0.2 s later, up to 5 m/s^2. In the model it takes a 2 m/s drift 0.5 m less far
+  (1.27 m against 1.75); the wheel's own lag and the servo's cap are what limit it beyond that. It fades out from
+  the centre to a metre past it on the far side: as a hard floor it also forbade any pull toward the far line,
+  which is the way home from beyond the other one, so on drive 8 the truck came back at about 0.3 m/s.
+- **Heading** against the lane is filtered at 0.05 s from the lane fit, 0.15 s from the polyline fallback. The loop from
+  correction to the truck's sideways motion measured 0.25 to 0.3 s on drive 8 and the filter added to it: in the
+  model with the truck's path 0.2 s behind its wheel, a 1.2 m/s kick overshot 0.39 m and a 1.8 m/s one 0.87 m with
+  five `weave` cuts at 0.15 s, against 0.18 m and 0.39 m with one at 0.05 s.
+- **Drift ahead**: the correction acts on the offset and drift 0.15 s on (`lat_predict_s`), from the wheel's own
+  angle: the curvature it gives through the learned steering gain against the lane's through the bend scale, so it
+  is zero in a steady bend. The lane shows a correction about that late (0.075 s of measurement plus the heading
+  filter, drive 8), and acting on the late drift overshot every return. The wheel's part is capped at the
+  correction's ceiling, so a stalled steering reading (drive 8) moves the drift by 0.3 m/s at most. In the model a
+  1.2 m/s kick with the truck 0.3 s behind its wheel overshot 0.36 m and settled in 7 s, and 0.14 m in 2 s with it;
+  0.2 s behind, 0.18 m against 0.02 m, with no `weave` cut either way. A longer horizon stalls the return when the truck answers at once; 0.15 s
+  holds from 0.05 to 0.3 s of lag. It does not replace the weave guard: counting only flips across the centre, the
+  heavy, self-aligning wheel with resting hands still swung out of a bend in the model, with prediction or without.
+- **Bumpless and smooth**: the target starts at the wheel and follows the wanted angle with a critically damped
+  second-order follower at 3 Hz, at most 0.2 of lock per second; starting from rest, it does not yank when it
+  engages. Its rate is smooth and goes with the target. It was a 0.12 s low-pass, whose tick-to-tick rate
+  zigzagged and fed the servo's damping (over 300 units of it 3 % of the time on the fifth drive); 2 Hz added
+  enough lag to graze the line in the model. The limit was 0.04 of lock per second, sized for engaging: on drive 7
+  a prefab's right kink into a left one at 100 km/h held the target on it for over a second and the truck hit a
+  pole 3 m out. In the model that kink went 3.4 m out at 0.04 and 0.5 m at 0.1 or more (a sharper one 7.3 m and
+  0.8 m).
+
+## The lane under the truck
+
+The map rebuilds ego's route 20 times a second from ego's foot point on the lane, interpolated on the chord
+between the lane's own vertices (10 m apart on roads). Read straight off that polyline, bends went wrong on the
+fifth drive:
+
+- the heading against the lane jumped at every rebuild, because the first span and its midpoint moved with the
+  foot: the drift jittered 0.12 m/s tick to tick (p90 0.25) above 2.5 m/s^2 of cornering against 0.005 on
+  straights. The correction followed it, the `weave` guard cut its gain (0.68 median), and the target's rate sat
+  on its limit;
+- a chord sags `L^2 / 8R` inside the lane (0.08 m for 10 m at R 150), so a truck on the lane read as outside it
+  and was steered inside: 0.1 to 0.2 m median toward the inside of bends.
+
+`LaneModel` (`lane_model.py`) keeps the lane's own vertices, everything past the foot, across rebuilds while the
+new route continues on the same vertices, up to 40 m behind ego, and fits a quadratic in ego's frame weighted
+over 25 m each side. Offset, heading and curvature at the rear axle come from that fit, the feedforward's
+curvature from a second fit 0.4 s ahead. On a new lane, with nothing behind ego yet, the fit reaches 50 m ahead
+instead; with too few vertices the polyline is used as before. In the model, on routes rebuilt the map's way at
+R 150, the drift jittered 0.29 m/s tick to tick off the polyline and 0.02 off the fit, and the target's rate
+fell from its 0.04 limit to 0.004. The polyline still decides `off_route`, forks, merges and the bend peaks.
+`lane_fit_m = 0` (code only) goes back to the polyline.
+
+The route is the lane the truck is in, so crossing a line moves it to the next lane: the offset jumps by a lane
+width. Normally that starts the lane over (`lane_settle`). With `la_always_on` the lane it left stays the
+reference instead: the jump is carried as a shift on the offset (event `carry`), so the pull home and the stop
+before the line keep working across the line, until the route is back on that lane or 10 s pass (not while the
+truck is still heading home), after which the new lane is taken. A gap in the geometry (any gate) ends the carry and
+the next jump after it starts the lane over, and so does a jump or a shift past 6 m (a parallel road, a re-plan).
+The bias, the bend scale and the correction's integral do not learn while carrying. On drive 8, 13 crossings each
+started the lane over, with no correction for 1.5 s, and then centred the truck in the next lane. The lane keeping assist will need the same carry with a rule for when the
+driver meant the change (blinker, steering through it).
+
+A lane that moves under the truck faster than a truck moves (more than 6 m/s sideways that its drift does not
+explain, or its drift changing faster than 20 m/s^2) is the geometry, not the truck: a roundabout's or junction's
+lanes trading places, often over two ticks so that each stays under the 1.5 m jump. The target then holds where it
+is for 0.5 s after the last such tick (the wheel stays put, the driver can still steer) and the lane starts over
+(event `geometry`). On drive 10, at 70 km/h in a roundabout, the lane went 1.9 m out and back in half a second and
+read as 11 m/s of drift. Normal driving sits far below either line (p99 1.6 m/s and 5 m/s^2 on drives 7 to 10);
+those drives cross them 10 times, all at junction speeds or far off the lane.
+
+## Calibration
+
+`ForceCalibration` fits two lines on steady cornering samples (40 km/h or more, lateral accel within
+0.3 m/s^2 over 0.8 s, game force under 9000, 120 s forgetting, 20 s of samples to start):
+
+| fit | used for | ready when |
+|---|---|---|
+| game force per m/s^2 of cornering (`k_a`) | its sign is the wheel's torque direction; the logs show the game's spring | spread 0.25 m/s^2, r 0.7, 100 to 30000 |
+| curvature per unit of steering (`g_s`) | the target angle | spread 0.004, r 0.7, positive, 0.05 to 0.8 per metre |
+
+Both keep learning while the assist steers: the game's own force is read before the plugin changes it. Each fit
+locks its first sign (a later flip is a `conflict` and keeps the assist off until restart) and, once ready,
+holds its last good value through a weak stretch (`held`). `la_force_per_ms2` and `la_kappa_per_steer` fix them
+by hand. Drives so far: +480 to +735 per m/s^2 (r 0.94 to 0.99) and 0.184 to 0.187 per metre per lock (r 1.00)
+within a minute.
+
+## Adding a path source
+
+The lane follower is one path source. A later one (lane departure prevention, collision avoidance with a wanted
+travel path) plugs in at `LaneAssist.update(..., path=WantedPath(...))`:
+
+- `offset_m`: where it wants the rear axle, metres right of the lane centre; the correction steers there
+  instead of the learned centre alone (they add).
+- `kappa`: extra rightward path curvature on top of the lane's, the feedforward for a swerve shape.
+- `source`: its name, carried on `AssistOutput.source` and into the logs.
+
+Path tracking (target angle, bumpless walk, override, hands-on check) and the wheel actuator (servo, caps, ring
+guard) stay the same for every source, and so does the calibration. What a new source has to decide for itself,
+and is not done here: whether its own request may outrank the driver mutes (blinker, override, evade), how fast
+`target_rate` may move for it (0.2 of lock per second covers the lane's own kinks; the servo itself follows
+faster targets), and a cap on the offset it may ask for. It must never weaken the driver override
+or the caps.
+
+## The driver always wins
+
+| Reason | Meaning |
+|---|---|
+| `override` | the wheel held still (under 0.05 of lock per second) more than 0.015 of lock from the target for 0.3 s, or held still for 0.5 s with the servo pushing at 80 % of its cap net of the game's force (firm hands holding against it). In a bend the servo carries the game's centring on its own near its cap; counting the servo alone handed three bends back on the fifth drive. Fades out in 0.4 s, holds 2 s, and rejoins only within 0.6 m of a lane centre, so a lane change without a blinker is not pulled back |
+| `blinker` | either lamp or hazards, held 2 s after it goes off |
+| `evade` | a hard wheel move (0.15 of lock in 1 s, or 0.6 per second); 3 s |
+| `hands_off` | the wheel follows the target with no tremor: the servo error's ripple (its deviation from a 1 s mean, rms over 3 s) under 0.0008 of lock. Rumble after 10 s, lets go after 15 s, back as soon as the wheel moves at 0.02 of lock per second |
+
+A released wheel swinging past the target is not an override: it is moving. A wheel on its way to the target
+with the servo at its cap is not one either. The servo's damping resists a fast hand by at most 1500 of 10000.
+The hands-on threshold is a placeholder with no measurement behind it; the 10 s summary logs the ripple's median.
+
+## Smooth on and off
+
+Every authority change is a ramp under a smoothstep: in over 2 s and only after 1 s without any mute,
+out over 1 s on a gate and 0.4 s when the driver acts. The servo's gains, its cap and any cancel all follow that
+ramp, and the plugin fades the servo in over 0.3 s and out over 0.2 s on top.
+Forks, merges, route ends and junction lanes count after lasting 0.5 s. Bends taper the authority from 1/200 to
+none at 1/100 (`bend`, `bend_sharp`). If the lateral correction itself keeps flipping sides while engaged (three
+times in 8 s past 0.3 m/s^2), its slope halves and comes back over 60 s (`weave`); its 2 m/s^2 ceiling and the
+stop before the line stay, so a cut never weakens a big correction (drive 6 sat on a halved ceiling into the next
+lane).
+
+## Caps
+
+The servo 3000 of 10000 (the plugin's cap, the whole assist 4000), its damping 1500, its integral its cap, any
+cancelled game force 6000 and never more than the game's own, whatever MonoCruise sends. A stale heartbeat (0.25 s), a steering channel
+older than 0.15 s, or a game that is not driving fades everything out, the cancel included.
+
+## Model results
+
+`tests/la/test_controller.py`, closed loop at 90 km/h on four rims (the design inertia, twice it, and
+four times lighter; viscous friction 0.1 to 0.3 of critical), with 350 units of dry friction unless noted,
+starting 0.5 m off the line:
+
+- hands resting, R 300, the game's force on the wheel angle or on the truck's cornering: never out of the lane
+  on any rim, within 0.4 m after 20 s;
+- hands off, the three rims near the design, R 800, 300 and 200: never out of the lane, no false override;
+- a 0.4 m/s drift or a 0.8 m offset on a straight: caught, overshoots at most 0.45 m, within 0.45 m;
+- a steering gain 15 % off either way, hands resting: settles in the lane; on the way in it can graze the
+  line by up to 0.1 m;
+- the rim four times lighter, no hands, no friction: rings, the guard cuts it, the shake stays under 0.12 of lock;
+- R 150 to 300 on routes rebuilt the map's way every tick, 10 m vertices, no dry friction: drift jitter under
+  0.04 m/s tick to tick and centred within 0.05 m. With 350 units of dry friction and resting hands the wheel
+  sticks and slips and the truck sways about 0.15 m every 4 s in a bend, fit or polyline alike.
+
+What the model does not know: the real rim inertia, friction and firmware damping, the game's real frame rate
+and delay, and how hands load a wheel. These are the model's numbers, not the game's.
+
+## Where the driver keeps the truck
+
+The map has no paint, and on straights the driven line sat over 0.5 m off the map's lane centre in 8 of 21
+clips. The centre the assist steers to follows the driver: a 20 s low-pass of the offset, learned only
+while steady, on straights and gentle curves (under 1/1000), without blinker, swerve or lane settle,
+bounded at 0.3 m. It starts over on `no_map`, `off_route` and `stale`; a lane change keeps it.
+
+## When it is off
+
+| Reason | Meaning |
+|---|---|
+| `no_data`, `no_map`, `paused`, `stale`, `reverse` | as in lane departure |
+| `speed` | below `la_min_speed_kmh` (60), disarm 10 below |
+| `tmp` | TruckersMP map active and `la_tmp_enabled` off (the default: moderation cleared the rumble, not steering) |
+| `aeb`, `brake` | AEB cue, brake 0.7 or more |
+| `off_route` | more than three half lanes from the route |
+| `short_route`, `branch`, `merge`, `route_kind` | after 0.5 s: route ends, forks or joins within `max(40 m, 2 s)`, or a junction lane |
+| `bend`, `bend_sharp` | authority tapered by the bend, none from 1/100 |
+| `calibrating` | no usable `k_a` or `g_s` yet |
+| `plugin` | no version 4 plugin, not hooked, dead, or its steering channel stopped |
+| `lane_settle` | first 1.5 s on a lane |
+
+`la_follow_all` (test only) drops `short_route`, `branch`, `merge` and `route_kind`, and tapers bends by
+the lateral acceleration the lane asks for now and 0.4 s ahead (`v^2 * kappa` from 4 to none at 6 m/s^2), not
+by the tightest bend in the next seconds. That demand is held while it eases (falling 1 m/s^2 per second), so the
+authority does not bounce with it inside a bend. A lane switch (`lane_settle`) keeps the authority and steers on the bend
+alone for 1.5 s instead of letting go. At a fork it follows whichever branch the route picked, the one needing the
+least change of curvature that the truck is following, so it can pull toward a branch the driver did not mean;
+steering against it or a blinker hands back as usual. Every driver mute, the speed gate, AEB, brake and
+`off_route` stay.
+
+`la_always_on` (test only) is for judging the servo through tight bends without it letting go: it implies
+`la_follow_all`, removes the bend limit, and never hands back to the driver: no `override`, `evade`, `blinker` or
+`hands_off`, and no hands-on rumble. The speed gate, `no_map`, `off_route`, `stale`, `paused`, `reverse`, AEB and
+the brake gate stay, and so do the caps, the ring guard, the plugin's buzz guard and the weave guard. The servo is
+capped at 3000 of 10000, so a hand on the rim still overpowers it; with the switch on it just keeps pushing. A
+line crossed keeps the lane it left as the reference (see the lane under the truck).
+
+## Config (config.json only)
+
+| Key | Default | |
+|---|---|---|
+| `la_enabled` | false | on/off |
+| `la_strength` | 1.0 | 0 to 2: scales the servo's stiffness (damping follows). 0 is no servo |
+| `la_wheel_inertia` | 0 (650) | the rim with hands the servo is designed on; lower for a light wheel that buzzes, higher for a heavy one that feels slow |
+| `la_cancel_share` | 0 | share of the game's steady FFB force removed while it steers, 0 to 1; 0 keeps the game's feel |
+| `la_min_speed_kmh` | 60 | arm speed |
+| `la_force_per_ms2`, `la_kappa_per_steer` | 0 | 0 learns them; any other value is used as is, sign included |
+| `la_tmp_enabled` | false | allow on TruckersMP |
+| `la_follow_all` | false | test: keep it on through junctions, forks, merges and lane switches |
+| `la_always_on` | false | test: never hand back to the driver and no bend limit; hands-on check off |
+| `debug` | false | also writes `la_debug.csv` (Logs) |
+
+## Logs
+
+`LA on/off`; the settings when they change (and at start while `la_follow_all` is on); the
+calibration on every state change (at most once per 10 s) and every 60 s while usable; one line per yield,
+swerve, weave cut, ring cut or hands-off with offset, centre, drift, target, wheel and the hands ripple; every
+10 s the seconds per reason, applied torque, the game's own centring and what is left of it with the assist
+added (while assisting), the spring at the current
+speed, learned centre, weave gain, the servo's ring scale (`stiffness`), the bend scale, the plugin's buzz scale,
+the game's FFB rate and the hands ripple median. No coordinates.
+
+With `debug` on, `la_debug.csv` in the project folder gets a row every 50 ms while the assist is not
+idle (and 2 s after): reason, authority, offset, centre, drift, bend feedforward, correction, target and its
+rate, the plugin's wheel angle and speed, the game's force, the servo and the cancelled force, the integral,
+gains, cap, every guard's scale, the bend scale, the FFB rate, whether the lane fit was in use, and the plugin's
+FFB and steering frame counters. No coordinates, local only, rotated at 50 MB.
+
+## Testing
+
+1. Build and install the version 4 plugin (`plugins/ffb/README.md`); the game must be closed to replace it.
+2. `python tools/la_torque_test.py` holds +800 then -800 with no lane data: note which way each pushes.
+3. `"la_enabled": true`, drive bends at 40 km/h or more until `LA calibration` shows the cornering
+   and steering fits ready (about a minute). A positive spring must match "+800 pushed left".
+4. On a road with gentle bends at 60 km/h or more, hands resting lightly: the wheel should turn into bends
+   by itself and hold the lane. Steer against it, use a blinker, and let go for 15 s to see each hand-back.
+   A `ring cut` line or a buzzing wheel means the servo is too stiff for that wheel: lower
+   `la_wheel_inertia` (or `la_strength`).
+
+Unit tests: `tests/la/` (closed loop, every gate and mute, calibration, the thread end to end),
+`tests/lane_departure/test_command.py` (layout against `plugins/ffb/ffb_cmd.h`), and the plugin's
+`ffb_signal_test.c`.
+
+## Not done
+
+The servo's cap against the game's centring: the game pushes back about 590 units per m/s^2 of cornering, so
+the cap bounds the bend it can hold at any speed: 2500 held about 4.2 m/s^2 (in the model at the game's spring
+at 130 km/h, an R 150 at 25 m/s ran off), the plugin's own 3000 (Lukas, 2026-11-01, for the tight-bend tests)
+about 5 m/s^2. Past that the wheel stops on the cap and the truck runs wide; `la_cancel_share` is the other
+lever. The cap is the force a driver has to overpower.
+The plugin's buzz guard: on the fifth drive it fired 22 times, nearly all on straights with light hands, in
+bursts that halved the servo three times within 0.6 s down to 0.13, so it stayed weak for 10 to 20 s (below 1
+for 21 % of the engaged time). The target's rate zigzag explains part of it. Since drive 12 it counts only swings
+of the wheel itself with the push flipping between them, and recovers in 4 s (`plugins/ffb/README.md`): the old
+count of push flips alone tripped on a still wheel. Whether that also ends LA's straight-road cuts is not driven yet.
+Measuring the wheel's inertia in the plugin instead of assuming it, the hands-on threshold from measurement,
+departure prevention, persisting the calibration and the bend scale between sessions, trailer, ATS validation,
+TruckersMP (moderation), UI. Every number above is a starting point set by reasoning and the model, not by driving.

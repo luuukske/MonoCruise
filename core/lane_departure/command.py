@@ -1,12 +1,14 @@
 """Shared-memory command channel to the game-side FFB plugin (plugins/ffb).
 
-The plugin creates ``Local\\MonoCruiseFfbCmd`` and owns the waveform. This side sends intent only
-and bumps a heartbeat every call, so a stalled app lets the plugin fade out on its own.
+The plugin creates ``Local\\MonoCruiseFfbCmd`` and owns the waveform, the torque ramp and the steering
+servo. This side sends intent only and bumps a heartbeat every call, so a stalled app lets the plugin
+fade out on its own. Steering values are ``truck.input.steering`` units, counterclockwise positive.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import mmap
 import struct
 import sys
@@ -16,32 +18,88 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 TAG = r"Local\MonoCruiseFfbCmd"
-SIZE = 32
-VERSION = 1
+SIZE = 96
+SERVO3_SIZE = 64
+LEGACY_SIZE = 32
+VERSION = 4
+SERVO3_VERSION = 3
+TORQUE_VERSION = 2
+RUMBLE_ONLY_VERSION = 1
 PEAK_UNITS = 1600
 PEAK_CAP_UNITS = 3000
+TORQUE_CAP_UNITS = 3000
+SERVO_CAP_UNITS = 3000
 CMD_NONE = 0
 CMD_RUMBLE = 1
 _RETRY_S = 2.0
 
 _U32 = struct.Struct("=I")
 _CMD = struct.Struct("=BBH")
+_I16 = struct.Struct("=h")
+_F32 = struct.Struct("=f")
+_SERVO = struct.Struct("=fffHbb")
+_SERVO4 = struct.Struct("=fff")
 _OFF_VERSION = 0
 _OFF_HEARTBEAT = 4
 _OFF_CMD = 8
 _OFF_SEQ = 12
+_OFF_TORQUE = 16
+_OFF_GAME_FORCE = 18
 _OFF_STATUS = 20
 _OFF_FRAMES = 24
+_OFF_APPLIED = 28
+_OFF_SERVO_APPLIED = 30
+_OFF_SERVO = 32
+_OFF_STEER = 48
+_OFF_STEER_RATE = 52
+_OFF_STEER_FRAMES = 56
+_OFF_SERVO_SCALE = 60
+_OFF_SERVO4 = 64
+_OFF_STAMP = 76
+_OFF_INTEG = 80
+_OFF_FRAME_HZ = 84
+_OFF_CANCEL_APPLIED = 88
 
 STATUS_HOOKED = 1
 STATUS_FORCE_SEEN = 2
 STATUS_RUMBLING = 4
 STATUS_DEAD = 8
+STATUS_TORQUE = 16
+STATUS_SERVO = 32
+STATUS_STEER = 64
+STATUS_ONE_SIDED = 128
+
+
+@dataclass(frozen=True)
+class ServoCommand:
+    """Hold the wheel on ``target``, moving at ``rate``: a PID with ``kp`` per unit of error, ``kd`` per unit of rate
+    error and ``ki`` per unit of error and second, capped. ``cancel`` is the share of the game's slow force replaced.
+
+    ``direction`` is the torque sign that turns the wheel counterclockwise; 0 is off. ``only`` +1 or -1: the servo
+    pushes only that way (counterclockwise positive), never back; 0 both ways.
+    """
+
+    target: float = 0.0
+    kp: float = 0.0
+    ki: float = 0.0
+    cap: int = 0
+    direction: int = 0
+    rate: float = 0.0
+    kd: float = 0.0
+    cancel: float = 0.0
+    only: int = 0
+
+
+SERVO_OFF = ServoCommand()
 
 
 @dataclass(frozen=True)
 class PluginStatus:
-    """What the plugin reports back. ``present`` is False until it has stamped the layout version."""
+    """What the plugin reports back. ``present`` is False until it has stamped the layout version.
+
+    Version 1 only rumbles, version 2 adds a torque, version 3 the wheel's own angle and a servo, version 4 the
+    damped servo that cancels the game's slow force. Only version 4 steers.
+    """
 
     present: bool = False
     hooked: bool = False
@@ -49,21 +107,70 @@ class PluginStatus:
     rumbling: bool = False
     dead: bool = False
     frames: int = 0
+    version: int = 0
+    game_force: int = 0
+    applied: int = 0
+    torquing: bool = False
+    servoing: bool = False
+    steer_ok: bool = False
+    one_sided: bool = False
+    steer: float = 0.0
+    steer_rate: float = 0.0
+    steer_frames: int = 0
+    servo_applied: int = 0
+    servo_scale: float = 1.0
+    servo_integ: float = 0.0
+    frame_hz: float = 0.0
+    cancel_applied: int = 0
+
+    @property
+    def torque_capable(self) -> bool:
+        return self.present and self.version >= TORQUE_VERSION and self.hooked and not self.dead
+
+    @property
+    def servo_capable(self) -> bool:
+        return self.torque_capable and self.version >= VERSION and self.steer_ok
 
 
 def decode_status(raw: bytes) -> PluginStatus:
     version = _U32.unpack_from(raw, _OFF_VERSION)[0]
-    if version != VERSION:
+    sizes = {RUMBLE_ONLY_VERSION: LEGACY_SIZE, TORQUE_VERSION: LEGACY_SIZE, SERVO3_VERSION: SERVO3_SIZE, VERSION: SIZE}
+    if version not in sizes or len(raw) < sizes[version]:
         return PluginStatus()
     bits = _U32.unpack_from(raw, _OFF_STATUS)[0]
-    return PluginStatus(
+    base = dict(
         present=True,
         hooked=bool(bits & STATUS_HOOKED),
         force_seen=bool(bits & STATUS_FORCE_SEEN),
         rumbling=bool(bits & STATUS_RUMBLING),
         dead=bool(bits & STATUS_DEAD),
         frames=_U32.unpack_from(raw, _OFF_FRAMES)[0],
+        version=version,
     )
+    if version >= TORQUE_VERSION:
+        base.update(
+            game_force=_I16.unpack_from(raw, _OFF_GAME_FORCE)[0],
+            applied=_I16.unpack_from(raw, _OFF_APPLIED)[0],
+            torquing=bool(bits & STATUS_TORQUE),
+        )
+    if version >= SERVO3_VERSION:
+        base.update(
+            servoing=bool(bits & STATUS_SERVO),
+            steer_ok=bool(bits & STATUS_STEER),
+            one_sided=bool(bits & STATUS_ONE_SIDED),
+            steer=_F32.unpack_from(raw, _OFF_STEER)[0],
+            steer_rate=_F32.unpack_from(raw, _OFF_STEER_RATE)[0],
+            steer_frames=_U32.unpack_from(raw, _OFF_STEER_FRAMES)[0],
+            servo_applied=_I16.unpack_from(raw, _OFF_SERVO_APPLIED)[0],
+            servo_scale=_F32.unpack_from(raw, _OFF_SERVO_SCALE)[0],
+        )
+    if version >= VERSION:
+        base.update(
+            servo_integ=_F32.unpack_from(raw, _OFF_INTEG)[0],
+            frame_hz=_F32.unpack_from(raw, _OFF_FRAME_HZ)[0],
+            cancel_applied=_I16.unpack_from(raw, _OFF_CANCEL_APPLIED)[0],
+        )
+    return PluginStatus(**base)
 
 
 def intensity_units(scale: float) -> int:
@@ -71,15 +178,41 @@ def intensity_units(scale: float) -> int:
     return max(0, min(PEAK_CAP_UNITS, round(PEAK_UNITS * scale)))
 
 
+def torque_units(torque: float) -> int:
+    """Assist torque out of 10000, signed as the game's own force, clamped to the plugin's cap."""
+    if not math.isfinite(torque):
+        return 0
+    return max(-TORQUE_CAP_UNITS, min(TORQUE_CAP_UNITS, round(torque)))
+
+
+def servo_fields(cmd: ServoCommand) -> tuple:
+    """The servo request as written, ``(target, kp, ki, cap, direction, rate, kd, cancel, only)``.
+
+    Anything non-finite, a negative gain or no direction is off.
+    """
+    values = (cmd.target, cmd.kp, cmd.ki, cmd.rate, cmd.kd, cmd.cancel)
+    gains = (cmd.kp, cmd.ki, cmd.kd)
+    if cmd.direction not in (-1, 1) or not all(math.isfinite(v) for v in values) or min(gains) < 0.0:
+        return (0.0, 0.0, 0.0, 0, 0, 0.0, 0.0, 0.0, 0)
+    target = max(-1.0, min(1.0, cmd.target))
+    cap = max(0, min(SERVO_CAP_UNITS, int(cmd.cap)))
+    only = (cmd.only > 0) - (cmd.only < 0)
+    return (target, cmd.kp, cmd.ki, cap, cmd.direction, cmd.rate, cmd.kd, max(0.0, min(1.0, cmd.cancel)), only)
+
+
 class RumbleChannel:
     """Writer for the command block. Absent plugin, non-Windows or any failure reads as ``PluginStatus()``."""
 
     def __init__(self) -> None:
         self._buf: mmap.mmap | None = None
+        self._size = SIZE
         self._next_open = 0.0
         self._heartbeat = 0
         self._seq = 0
         self._sent: tuple[int, int, int] | None = None
+        self._sent_torque: int | None = None
+        self._sent_servo: tuple | None = None
+        self._stamp = 0
 
     @property
     def is_open(self) -> bool:
@@ -91,27 +224,42 @@ class RumbleChannel:
         if sys.platform != "win32" or now < self._next_open:
             return False
         self._next_open = now + _RETRY_S
-        try:
-            self._buf = mmap.mmap(0, SIZE, TAG)
-        except Exception:
-            logger.debug("FFB command block unavailable", exc_info=True)
-            return False
-        return True
+        for size in (SIZE, SERVO3_SIZE, LEGACY_SIZE):
+            try:
+                self._buf = mmap.mmap(0, size, TAG)
+            except Exception:
+                logger.debug("FFB command block unavailable at %d bytes", size, exc_info=True)
+                continue
+            self._size = size
+            return True
+        return False
 
-    def publish(self, active: bool, side: int, units: int, now: float | None = None) -> PluginStatus:
+    def publish(
+        self, active: bool, side: int, units: int, now: float | None = None, torque: float = 0,
+        servo: ServoCommand = SERVO_OFF,
+    ) -> PluginStatus:
         """Send this tick's request. Nothing is written until the plugin has stamped its layout version.
 
-        The request is written only when it changes, so a second writer (the rumble test tool)
-        is not cancelled by this one repeating "no rumble"; the heartbeat is bumped every call.
+        Rumble, torque and servo are written only when they change, so a second writer (the test tools)
+        is not cancelled by this one repeating "nothing"; the heartbeat is bumped every call.
         """
         now = time.monotonic() if now is None else now
         if not self._open(now):
             return PluginStatus()
         try:
-            status = decode_status(bytes(self._buf[:SIZE]))
+            status = decode_status(bytes(self._buf[:self._size]))
             if not status.present:
-                self._sent = None
+                self._sent = self._sent_torque = self._sent_servo = None
                 return status
+            if status.version >= TORQUE_VERSION and torque_units(torque) != self._sent_torque:
+                self._sent_torque = torque_units(torque)
+                _I16.pack_into(self._buf, _OFF_TORQUE, self._sent_torque)
+            if status.version >= VERSION and servo_fields(servo) != self._sent_servo:
+                fields = self._sent_servo = servo_fields(servo)
+                _SERVO4.pack_into(self._buf, _OFF_SERVO4, *fields[5:8])
+                _SERVO.pack_into(self._buf, _OFF_SERVO, *fields[:5], fields[8])
+                self._stamp = (self._stamp + 1) & 0xFFFFFFFF
+                _U32.pack_into(self._buf, _OFF_STAMP, self._stamp)
             want = (CMD_RUMBLE, side, units) if active else (CMD_NONE, 0, 0)
             if want != self._sent:
                 if active and (self._sent is None or self._sent[0] != CMD_RUMBLE):
@@ -128,9 +276,9 @@ class RumbleChannel:
             return PluginStatus()
 
     def stop(self) -> None:
-        """Ask for silence once; used when the feature is switched off or the thread ends."""
+        """Ask for silence, no torque and no servo once; used when the feature is switched off or the thread ends."""
         if self._buf is not None:
-            self.publish(False, 0, 0)
+            self.publish(False, 0, 0, torque=0, servo=SERVO_OFF)
 
     def close(self) -> None:
         if self._buf is not None:
@@ -139,4 +287,4 @@ class RumbleChannel:
             except Exception:
                 logger.debug("FFB command block close failed", exc_info=True)
         self._buf = None
-        self._sent = None
+        self._sent = self._sent_torque = self._sent_servo = None

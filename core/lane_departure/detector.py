@@ -97,6 +97,7 @@ class Frame:
     """One tick of inputs. ``steer_right`` is positive when the wheel is turned right.
 
     ``path_m`` is the rear axle group ahead of the origin (negative: behind), the point that rolls along the heading.
+    ``lanes`` is the map's lane window around ego; only the lane keeping assist reads it.
     """
 
     t: float
@@ -118,6 +119,7 @@ class Frame:
     rear_m: float
     path_m: float
     route: object | None
+    lanes: object | None = None
 
 
 @dataclass(frozen=True)
@@ -362,7 +364,13 @@ class LaneDetector:
         self._tight_until = -_INF
         self._change_until = -_INF
         self._steer: deque[tuple[float, float]] = deque()
+        self.edges: dict[int, _Edge] = {}
         self._clear_track()
+
+    @property
+    def evade_until(self) -> float:
+        """Until when a hard wheel move mutes both sides."""
+        return self._evade_until
 
     def _clear_track(self) -> None:
         self._hist: deque[tuple[float, float]] = deque()
@@ -385,6 +393,7 @@ class LaneDetector:
             st.blink_until = st.delib_until = st.intent_until = -_INF
 
     def _off(self, reason: str, kmh: float) -> Decision:
+        self.edges = {}
         self._hist.clear()
         if reason in _FRESH_START:
             self._lane_since = None
@@ -508,7 +517,9 @@ class LaneDetector:
                 cue_zone, away,
             )
         if t - self._lane_since < tn.steady_s:
+            self.edges = {}
             return Decision(reason="lane_settle", speed_kmh=kmh, kappa=kappa)
+        self.edges = edges
         return self._decide(t, kmh, kappa, psi, edges, high - low)
 
     def _steer_input(self, t: float, peaks) -> tuple[float, float, float]:

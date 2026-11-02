@@ -1,9 +1,10 @@
-# Lane departure rumble (prototype)
+# Lane departure rumble and lane keeping assist (prototype)
 
 Rumbles the wheel's force feedback when the truck drifts out of its lane without the
-driver meaning to. Stage 1 is the warning only. A lane keeping aid would reuse the same
-lane data and the same plugin, and does not exist yet. Off by default (`Settings.ldw_enabled`,
-config.json only, no UI).
+driver meaning to (LDW, `Settings.ldw_enabled`), and, as a separate switch, steers it back with a
+short pulse (LKA, `Settings.lka_enabled`, see "Lane keeping assist" below). Both off by default,
+config.json only, no UI. LA (`core/la/README.md`) reuses the same lane data, the same plugin and
+this thread, which owns the command block for all three; each is switched on separately.
 
 ```
 radar_thread + telemetry_thread + map_thread
@@ -195,8 +196,108 @@ blinker and deliberate steering, so crossing a line by hand proves the whole
 chain; the speed, route and AEB gates still apply. Unit tests: `tests/lane_departure/` (synthetic straight and curved lanes, every
 gate, the shared-memory layout against `plugins/ffb/ffb_cmd.h`).
 
+## Lane keeping assist
+
+A short steer back when the detector above catches an unintended drift out of the lane, into the next
+lane, off the road or into the oncoming lane. It reads the detector and never changes it: the rumble
+warns exactly as it does without it (`test_lane_departure_warns_exactly_the_same_with_it_on`), and with
+`ldw_enabled` off the detector still runs for it, silently. It steers through LA's core (`core/la/`, the
+lane fit, path tracking and servo) in its pulse mode; LA outranks it when both are on. Pure logic in
+`lka.py` (when to start and stop) and `edges.py` (what lies past each line), settings and logs in
+`lka_runner.py`.
+
+**When it starts.** On the detector's own episode on a side, the approach cue or the line warning, with
+the same mutes: blinker on that side, deliberate steering, a wheel that made the heading, a swerve,
+`latched`, `returning`, and every gate (speed, AEB, hard braking, stale data, junctions, forks, merges,
+sharp bends). The detector mutes its approach cue in bends; there LKA still starts on the same test
+(0.8 s to the warning line, drifting at 0.4 m/s or more, within 0.4 m of it), but only on a straight or
+a bend's outer edge: running wide is caught early, while cutting the inside of a bend keeps to the line
+warning, as in LDW. It needs no swerve in the last 5 s (the detector's own hold is 2 s, and a pulse must
+not steer back onto what the driver swerved round), at most 8 pulses a minute (a pulse a gate ends within
+0.5 s does not count), and LA's calibration (about a minute of bends after each start). Straight prefab
+lanes count like roads, as in LDW: drive 12 had departures there that warned and got no pulse.
+
+**What it does.** Authority in over 0.15 s. The target is LA's: bend feedforward, the stop before the
+line, and the correction, which in a pulse steers to a line 0.5 m inside the edge it saves instead of
+the lane centre. It lets go once the body is 0.15 m back inside the warning line (so the detector re-arms)
+and no longer drifting toward it, fading out over 0.5 s. It also ends on any driver mute on that side, an
+override (a wheel held short of the target, toward the line), the body 1.5 m past the edge (out for good),
+a gate, or after 3 s. It rides
+through the detector's silences for a fork, a join, a route end or a junction lane ahead (`branch`,
+`merge`, `short_route`, `route_kind`), judging the line from LA's own lane fit and the blinker meanwhile:
+on drive 12 those silences ended 11 of 14 pulses mid-correction, one 0.64 s in with the truck 0.23 m over.
+Every other silence (no map, stale data, a lane switch, speed, AEB, the brake, a sharp bend) ends it.
+
+**One way only (Lukas, 2026-11-02).** A pulse never pushes the wheel toward the line it saves, not even to
+take back its own steering: the plugin's servo is one-sided for it (`servo_only` in the command block,
+`plugins/ffb/README.md`), so at the game's FFB rate any push toward the line, the damping's included, is
+clipped to nothing and its integral cannot build that way. A driver steering home harder than the pulse
+wants feels no push back at all, and the moment the wheel is short of what the drift needs it pushes again,
+at once and from where the wheel is. A first try that detected the driver from MonoCruise's 20 Hz view
+still pushed back for 0.3 to 1 s. The pulse needs a plugin that reports it can (status bit 128, built on
+2026-11-02, after 15:17): with an older one LKA stays off (`plugin`) and says so once.
+
+Because a pulse cannot straighten the wheel it turned, the game's centring and the driver's hands do, and a
+truck swinging home can reach the other line. For 2.5 s after a pulse the other line therefore starts its
+own pulse on the detector's tests even where the detector reads the turned wheel as the driver's intent
+(`deliberate`, `intent`, `latched`), and that pulse is not ended by them; a blinker or a swerve still is. It
+too pushes only away from its own line, so the two catch the swing between them.
+
+**What it keeps and drops (Lukas, 2026-11-02).** Kept: the servo's cap (3000 of 10000, a hand always
+overpowers it), LA's override (a wheel held still off the target for 0.3 s, or held against the servo
+near its cap; yields in 0.4 s), the plugin's own buzz guard (since drive 12 a real ring of the wheel only,
+see `plugins/ffb/README.md`), and every detector mute and gate. Dropped
+for a pulse, which lasts a second or three: LA's ring guard, weave guard, hands-off check, the 2 s rise
+and 1 s re-arm, LA's blinker and swerve mutes (the detector's per-side ones decide) and the lane carry.
+
+**What lies past the line.** At each start the map is asked what lies one lane width past that line,
+half a second ahead of the bumper: a parallel lane whose traffic runs ego's way (`lane`), the other way
+(`oncoming`), none (`edge`: the road's edge, or a median to the other carriageway), or `unknown` (no map
+window, or a lane of unknown travel). It is logged with each pulse; nothing acts on it yet.
+
+**In the model** (`tests/lane_departure/test_lka.py`, the LA servo model at 90 km/h, truck 0.3 s behind
+its wheel): a still-wheel drift on a straight of 0.3 to 1.2 m/s, wheel free, stays within 0.1 m of either
+line over 16 s, a pulse at the line and a gentler one at the other as the swing home is caught, each 1.8
+to 2.3 s; a driver holding 80 to 90 % of a bend's steering goes 0.03 to 0.06 m past at R 400 and 0.38 to
+0.43 m at R 250. Euro NCAP's lane keeping bar is 0.3 m past the line. With resting hands whose friction
+(350) holds the wheel where a pulse left it, the truck swings from line to line and the swings grow (2 to
+15 m out within 16 s, at the model's spring and at the game's): nothing straightens the wheel. These are
+the model's numbers, not the game's, whose centring at speed is about twice the model's.
+
+**Against real systems** (a Haiku review, 2026-11-02, of UN R79, Euro NCAP and maker manuals; summaries,
+not the standards' text). Known gaps, open:
+
+- No hands-on check: real systems nag and stand by without hands; here a sleeping driver in a long bend
+  gets a pulse every few seconds up to the per-minute limit, with the rumble only if LDW is on.
+- With LDW off, or in a bend where LDW mutes its cue, the pulse comes with no warning first (R79 asks
+  for one at the latest when it intervenes).
+- The cap is a share of the wheel's own peak: about 1 Nm on a 4 Nm wheel, 6 Nm or more on a direct
+  drive. R79 caps override effort at 50 N at the rim; `lka_strength` is the lever.
+- The override takes 0.3 s to notice and 0.4 s to fade. A driver correcting harder than the pulse is not
+  resisted (one way only), but a pulse cannot straighten the wheel it turned either; real systems do both.
+- Resting hands that hold whatever angle the wheel was left at make pulses swing the truck from line to
+  line in the model (above). A gentle pull back toward the lane's angle, weaker than any hand, would stop
+  it but goes against "never push back".
+- The lane is the map's centre plus 2.25 m; where the map sits off the paint, a pulse can come at the
+  wrong place. No trailer: the cab can be inside while the trailer crosses.
+- The intent thresholds it inherits from the detector are still set by reasoning, not by driving.
+
+**Config** (config.json): `lka_enabled` (false), `lka_strength` (1.0, 0 to 2, scales the servo like
+`la_strength`), `lka_tmp_enabled` (false: off on TruckersMP until moderation answers for steering). The
+arm speed is `ldw_min_speed_kmh`; the wheel inertia and the fixed calibration are LA's keys
+(`la_wheel_inertia`, `la_force_per_ms2`, `la_kappa_per_steer`), one wheel and one truck. `ldw_test_mode`
+reaches it too, since it reads the detector: every close call starts a pulse, blinker or not.
+
+**Logs.** `LKA on/off` (and `waiting while LA steers`), its settings, the shared calibration as for LA,
+one line per pulse start (side, what lies past the line, gap, drift, time to line, speed, and the core's
+state: `pulse`, or a mute such as `calibrating`) and end (why, how long, closest gap), one per departure the
+detector caught that got no pulse (`skips`: the per-minute limit, a recent swerve, an override), and every 10 s
+while it pulsed the LA summary. With `debug` on, `lka_debug.csv` gets LA's columns at 20 Hz during a
+pulse and 2 s after.
+
 ## Not done
 
-Side-coded cues, edge class (oncoming lane or not), trailer swept path, UI, installer
-integration, ATS validation, and the lane keeping
-aid. The command block reserves a torque field for it that the plugin ignores.
+Side-coded cues, acting on the edge class (a firmer or earlier pulse toward an oncoming lane or the road
+edge), radar traffic in the next lane (an oncoming car, one beside or closing from behind, steering back
+through steering-intent mutes), a hands-on check for LKA, trailer swept path, UI, installer integration
+and ATS validation. LA, the continuous lane assist prototype, is in `core/la/`.

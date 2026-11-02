@@ -132,6 +132,29 @@ class Settings(metaclass=_SingletonMeta):
     ldw_min_speed_kmh: float = 60.0
     # Bench test: warn on every close call, ignoring blinker, deliberate steering and bend rules.
     ldw_test_mode: bool = False
+    # Lane keeping assist: a short steer back when the LDW detector catches a drift out of the lane, on the LA
+    # core (core/lane_departure/lka.py). Config only, off by default; works with the rumble on or off.
+    lka_enabled: bool = False
+    lka_strength: float = 1.0
+    # Off on TruckersMP until moderation has answered for a steering torque.
+    lka_tmp_enabled: bool = False
+    # LA steering through the same FFB plugin's servo (core/la). Config only, testers, no UI.
+    la_enabled: bool = False
+    la_strength: float = 1.0
+    la_min_speed_kmh: float = 60.0
+    # Fixed calibration for debugging: game force per m/s^2 of cornering, curvature per unit; 0 learns them.
+    la_force_per_ms2: float = 0.0
+    # The rim with hands, force units per lock per s^2; the servo is designed on it. 0 is the default (650).
+    la_wheel_inertia: float = 0.0
+    # Share of the game's steady FFB force removed while the assist steers, 0 to 1; 0 keeps the game's feel.
+    la_cancel_share: float = 0.0
+    la_kappa_per_steer: float = 0.0
+    # Off on TruckersMP until moderation has answered for a steering torque (they cleared the rumble).
+    la_tmp_enabled: bool = False
+    # Test: keep steering through junctions, forks and merges; bends limited by lateral acceleration only.
+    la_follow_all: bool = False
+    # Test: steer above the arm speed whatever the driver does (no hand-backs, no hands-on check, no bend limit).
+    la_always_on: bool = False
     # Warning style label from core/aeb/warning_sounds.py, and its volume in percent.
     aeb_sound: str = "Original"
     aeb_sound_volume: int = 100

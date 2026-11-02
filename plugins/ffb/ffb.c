@@ -1,6 +1,7 @@
-/* Adds a zero-mean rumble onto ETS2's constant-force effect while MonoCruise asks for one.
-   The steering axis is never written. With no request the game force is passed through.
-   Requests arrive in Local\MonoCruiseFfbCmd (ffb_cmd.h); a stale heartbeat means silence. */
+/* Adds a zero-mean rumble and the LA (a damped steering servo on top of the game's own force) onto ETS2's
+   constant-force effect. The steering axis is never written: the servo only pushes the rim, so a hand always wins.
+   With no request the game force is passed through. Requests arrive in Local\MonoCruiseFfbCmd (ffb_cmd.h); a stale
+   heartbeat fades everything out. */
 
 #define UNICODE
 #define _UNICODE
@@ -40,6 +41,14 @@ static const GUID k_iid_di8_w = {
 
 typedef void (WINAPI *ScsLogFn)(int type, const char *message);
 typedef int (WINAPI *ScsRegEventFn)(unsigned int event, void *cb, void *ctx);
+typedef void (WINAPI *ScsChannelCb)(const char *name, unsigned int index, const void *value, void *ctx);
+typedef int (WINAPI *ScsRegChannelFn)(const char *name, unsigned int index, unsigned int type, unsigned int flags,
+                                      ScsChannelCb cb, void *ctx);
+
+#define SCS_U32_NIL 0xFFFFFFFFu
+#define SCS_VALUE_TYPE_FLOAT 5u
+#define SCS_CHANNEL_EACH_FRAME 1u
+#define SCS_VALUE_OFFSET 8
 typedef HRESULT (WINAPI *CreateDevFn)(void *self, const GUID *guid, void **out, void *unk);
 typedef HRESULT (WINAPI *SetFmtFn)(void *self, const DIDATAFORMAT *fmt);
 typedef HRESULT (WINAPI *CreateFxFn)(void *self, const GUID *guid, const DIEFFECT *eff, void **out, void *unk);
@@ -85,12 +94,27 @@ static volatile LONG g_have_mag;
 static volatile LONG g_first_mag;
 static volatile LONG g_bad_size;
 static volatile LONG g_rumbling;
+static volatile LONG g_applied;
+static volatile LONG g_servoing;
+static volatile LONG g_steer_ok;
+static volatile LONG g_steer_count;
+static volatile float g_steer;
+static volatile float g_steer_rate;
+static volatile float g_steer_rate_fast;
+static uint32_t g_stamp_last;
+static LARGE_INTEGER g_stamp_at;
+static double g_frame_hz;
+static LARGE_INTEGER g_steer_at;
 static LARGE_INTEGER g_qpf;
 static LARGE_INTEGER g_qpc;
 static LARGE_INTEGER g_hb_at;
 static uint32_t g_hb_last;
 static int g_seen;
 static FfbWave g_wave;
+static FfbTorque g_torque;
+static FfbServo g_servo;
+static double g_force_lp;
+static double g_force_steady;
 static Patch g_patches[8];
 static int g_npatches;
 static void *g_set_vt[2];
@@ -228,7 +252,7 @@ static double tick_dt(void) {
     return dt;
 }
 
-static int request_live(void) {
+static int block_live(void) {
     LARGE_INTEGER now;
     uint32_t hb;
     double age;
@@ -242,16 +266,79 @@ static int request_live(void) {
         g_hb_at = now;
     }
     age = g_qpf.QuadPart ? (double)(now.QuadPart - g_hb_at.QuadPart) / (double)g_qpf.QuadPart : 0.0;
-    return hb != 0 && age <= FFB_STALE_S && g_map->command == FFB_CMD_RUMBLE;
+    return hb != 0 && age <= FFB_STALE_S;
 }
 
-static long current_delta(void) {
+static int steer_fresh(void) {
+    LARGE_INTEGER now;
+    if (!InterlockedOr(&g_steer_ok, 0) || g_steer_at.QuadPart == 0 || g_qpf.QuadPart == 0) {
+        return 0;
+    }
+    QueryPerformanceCounter(&now);
+    return (double)(now.QuadPart - g_steer_at.QuadPart) / (double)g_qpf.QuadPart <= FFB_STEER_STALE_S;
+}
+
+static double target_age(uint32_t stamp) {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    if (stamp != g_stamp_last || g_stamp_at.QuadPart == 0) {
+        g_stamp_last = stamp;
+        g_stamp_at = now;
+        return 0.0;
+    }
+    return g_qpf.QuadPart ? (double)(now.QuadPart - g_stamp_at.QuadPart) / (double)g_qpf.QuadPart : 0.0;
+}
+
+static double servo_delta(int live, double dt) {
+    double raw = 0.0;
+    int on = live && g_map && g_map->servo_dir != 0 && steer_fresh();
+    if (on) {
+        FfbServoIn in;
+        double target;
+        in.target = (double)g_map->servo_target;
+        in.rate = (double)g_map->servo_rate;
+        in.kp = (double)g_map->servo_kp;
+        in.kd = (double)g_map->servo_kd;
+        in.ki = (double)g_map->servo_ki;
+        in.cap = (double)g_map->servo_cap;
+        in.dir = (int)g_map->servo_dir;
+        in.only = g_map->servo_only > 0 ? 1 : (g_map->servo_only < 0 ? -1 : 0);
+        target = ffb_servo_target(in.target, in.rate, target_age(g_map->servo_stamp));
+        raw = ffb_servo_pid(&g_servo, &in, target, (double)g_steer, (double)g_steer_rate_fast, dt);
+    }
+    return ffb_servo_step(&g_servo, raw, on, g_wave.gain > 0.0 ? NAN : (double)g_steer, dt);
+}
+
+static long current_delta(LONG game_mag) {
     double dt = tick_dt();
-    int on = request_live();
+    int live = block_live();
     double amp = g_map ? (double)g_map->intensity : 0.0;
-    long delta = ffb_round(ffb_wave_step(&g_wave, amp, on, dt));
+    double want = g_map ? (double)g_map->torque : 0.0;
+    double sum = ffb_wave_step(&g_wave, amp, live && g_map->command == FFB_CMD_RUMBLE, dt);
+    double base = ffb_torque_step(&g_torque, want, live, dt);
+    double servo = servo_delta(live, dt);
+    double assist = ffb_clamp(base + servo, FFB_ASSIST_CAP);
+    double cancel;
+    g_force_lp = ffb_force_step(g_force_lp, (double)game_mag, dt);
+    g_force_steady += ((double)game_mag - g_force_steady) * (1.0 - exp(-ffb_dt_clamp(dt) / FFB_CANCEL_TAU_S));
+    cancel = ffb_cancel_term(g_force_steady, g_map ? (double)g_map->servo_cancel : 0.0, ffb_ease(g_servo.gain));
+    sum += assist + cancel;
+    if (dt > 0.0) {
+        g_frame_hz = g_frame_hz > 0.0 ? g_frame_hz + (1.0 / dt - g_frame_hz) * 0.02 : 1.0 / dt;
+    }
+    if (g_map) {
+        g_map->game_force = (int16_t)ffb_round(g_force_lp);
+        g_map->applied = (int16_t)ffb_round(assist);
+        g_map->servo_applied = (int16_t)ffb_round(servo);
+        g_map->servo_scale = (float)g_servo.scale;
+        g_map->servo_integ = (float)g_servo.integ;
+        g_map->frame_hz = (float)g_frame_hz;
+        g_map->cancel_applied = (int16_t)ffb_round(cancel);
+    }
     InterlockedExchange(&g_rumbling, g_wave.gain > 0.0);
-    return delta;
+    InterlockedExchange(&g_applied, (LONG)ffb_round(assist));
+    InterlockedExchange(&g_servoing, g_servo.gain > 0.0);
+    return ffb_round(sum);
 }
 
 static HRESULT hook_set_body(SetFn orig, void *self, const DIEFFECT *eff, DWORD flags) {
@@ -281,7 +368,7 @@ static HRESULT hook_set_body(SetFn orig, void *self, const DIEFFECT *eff, DWORD 
         g_first_mag = game_mag;
         g_have_mag = 1;
     }
-    delta = current_delta();
+    delta = current_delta(game_mag);
     if (delta == 0) {
         InterlockedDecrement(&g_depth);
         return orig(self, eff, flags);
@@ -555,6 +642,23 @@ static void open_map(void) {
     }
     if (g_map) {
         g_map->command = FFB_CMD_NONE;
+        g_map->torque = 0;
+        g_map->game_force = 0;
+        g_map->applied = 0;
+        g_map->servo_applied = 0;
+        g_map->servo_dir = 0;
+        g_map->servo_only = 0;
+        g_map->servo_kp = 0.0f;
+        g_map->servo_ki = 0.0f;
+        g_map->servo_scale = 1.0f;
+        g_map->servo_rate = 0.0f;
+        g_map->servo_kd = 0.0f;
+        g_map->servo_cancel = 0.0f;
+        g_map->servo_stamp = 0;
+        g_map->servo_integ = 0.0f;
+        g_map->frame_hz = 0.0f;
+        g_map->cancel_applied = 0;
+        g_map->steer_frames = 0;
         g_map->status = 0;
         g_map->frames = 0;
         g_map->version = FFB_CMD_VERSION;
@@ -577,18 +681,29 @@ static void publish_status(void) {
     if (g_rumbling) {
         bits |= FFB_ST_RUMBLING;
     }
+    if (g_applied) {
+        bits |= FFB_ST_TORQUE;
+    }
+    if (g_servoing) {
+        bits |= FFB_ST_SERVO;
+    }
+    if (g_steer_ok) {
+        bits |= FFB_ST_STEER;
+    }
     if (g_dead) {
         bits |= FFB_ST_DEAD;
     }
-    g_map->status = bits;
+    g_map->status = bits | FFB_ST_ONE_SIDED;
 }
 
 static void WINAPI on_frame(unsigned int event, const void *info, void *ctx) {
     static int logged_rumble;
+    static int logged_torque;
     static int logged_mag;
     static int logged_hook;
     static int logged_dead;
     int rumbling;
+    int torque;
     (void)event;
     (void)info;
     (void)ctx;
@@ -621,6 +736,51 @@ static void WINAPI on_frame(unsigned int event, const void *info, void *ctx) {
     if (rumbling != logged_rumble) {
         logged_rumble = rumbling;
         log_msg(rumbling ? "ffb: rumble on" : "ffb: rumble off");
+    }
+    torque = g_servoing ? 1 : 0;
+    if (torque != logged_torque) {
+        logged_torque = torque;
+        log_msg(torque ? "ffb: steering servo on" : "ffb: steering servo off");
+    }
+}
+
+/* truck.input.steering, every frame: the wheel's own angle, counterclockwise positive. */
+static void WINAPI on_steering(const char *name, unsigned int index, const void *value, void *ctx) {
+    static LARGE_INTEGER last;
+    static float prev;
+    LARGE_INTEGER now;
+    float v;
+    double dt;
+    (void)name;
+    (void)index;
+    (void)ctx;
+    if (!value || *(const unsigned int *)value != SCS_VALUE_TYPE_FLOAT) {
+        return;
+    }
+    v = *(const float *)((const char *)value + SCS_VALUE_OFFSET);
+    if (!(v == v)) {
+        return;
+    }
+    QueryPerformanceCounter(&now);
+    dt = (last.QuadPart && g_qpf.QuadPart) ? (double)(now.QuadPart - last.QuadPart) / (double)g_qpf.QuadPart : 0.0;
+    if (dt > 0.0 && dt < 0.2) {
+        double raw = (double)(v - prev) / dt;
+        g_steer_rate = (float)((double)g_steer_rate + (raw - (double)g_steer_rate) * (1.0 - exp(-dt / FFB_STEER_RATE_TAU_S)));
+        g_steer_rate_fast = (float)((double)g_steer_rate_fast
+                                    + (raw - (double)g_steer_rate_fast) * (1.0 - exp(-dt / FFB_RATE_FAST_TAU_S)));
+    } else {
+        g_steer_rate = 0.0f;
+        g_steer_rate_fast = 0.0f;
+    }
+    last = now;
+    prev = v;
+    g_steer = v;
+    g_steer_at = now;
+    InterlockedIncrement(&g_steer_count);
+    if (g_map) {
+        g_map->steer = v;
+        g_map->steer_rate = g_steer_rate;
+        g_map->steer_frames = (uint32_t)g_steer_count;
     }
 }
 
@@ -665,6 +825,7 @@ __declspec(dllexport) int WINAPI scs_telemetry_init(unsigned int version, const 
     g_log = init->common.log;
     g_live = 1;
     QueryPerformanceFrequency(&g_qpf);
+    ffb_servo_init(&g_servo);
     open_map();
     __try {
         install_hook();
@@ -676,7 +837,15 @@ __declspec(dllexport) int WINAPI scs_telemetry_init(unsigned int version, const 
         init->register_for_event(3, (void *)on_drive_state, NULL);
         init->register_for_event(4, (void *)on_drive_state, NULL);
     }
-    log_msg("ffb: ready, waiting for rumble requests");
+    if (init->register_for_channel) {
+        ScsRegChannelFn reg = (ScsRegChannelFn)init->register_for_channel;
+        if (reg("truck.input.steering", SCS_U32_NIL, SCS_VALUE_TYPE_FLOAT, SCS_CHANNEL_EACH_FRAME, on_steering, NULL) == 0) {
+            InterlockedExchange(&g_steer_ok, 1);
+        } else {
+            log_msg("ffb: steering channel unavailable, servo off");
+        }
+    }
+    log_msg("ffb: ready, waiting for rumble and LA requests");
     return 0;
 }
 
@@ -684,6 +853,12 @@ __declspec(dllexport) void WINAPI scs_telemetry_shutdown(void) {
     unpatch_all();
     if (g_map) {
         g_map->command = FFB_CMD_NONE;
+        g_map->torque = 0;
+        g_map->applied = 0;
+        g_map->servo_dir = 0;
+        g_map->servo_cancel = 0.0f;
+        g_map->servo_applied = 0;
+        g_map->cancel_applied = 0;
         g_map->status = 0;
         g_map->version = 0;
         UnmapViewOfFile(g_map);
