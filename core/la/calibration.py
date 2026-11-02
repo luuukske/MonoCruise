@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from core.lane_departure.detector import _slope
 
@@ -33,6 +33,10 @@ class CalTuning:
     gain_min: float = 0.05
     gain_max: float = 0.8
     gain_corr: float = 0.7
+    sign_tau_s: float = 30.0
+    sign_min_s: float = 2.0
+    sign_corr: float = 0.6
+    sign_spread: float = 0.002
 
 
 @dataclass(frozen=True)
@@ -47,7 +51,10 @@ class Estimate:
 
 @dataclass(frozen=True)
 class Calibration:
-    """``force_per_ms2`` is game force units per m/s^2 of rightward cornering; steering is rightward, of full lock."""
+    """``force_per_ms2`` is game force units per m/s^2 of rightward cornering; steering is rightward, of full lock.
+
+    ``saved`` is the one kept from an earlier drive: waiting for its check, confirmed, rejected, or empty without one.
+    """
 
     force_per_ms2: float | None = None
     corr: float = 0.0
@@ -55,6 +62,7 @@ class Calibration:
     weight_s: float = 0.0
     state: str = "learning"
     kappa_per_steer: Estimate = field(default_factory=Estimate)
+    saved: str = ""
 
     @property
     def servo_ready(self) -> bool:
@@ -136,13 +144,24 @@ class ForceCalibration:
     """Regresses the game's force on lateral acceleration and ego's curvature on steering.
 
     Samples come from steady cornering only. Steering is the plugin's own wheel angle when it has one. Force on
-    steering is not fitted: pooled over speeds it reads low, since tight bends are taken slower.
+    steering is not fitted for its size: pooled over speeds it reads low, since tight bends are taken slower.
+
+    ``saved`` is ``(force_per_ms2, kappa_per_steer)`` from an earlier drive, used until the live fits are ready once
+    the game's force against the wheel angle on this drive has its sign (``_check_saved``): a wrong sign steers toward
+    the line.
     """
 
-    def __init__(self, tuning: CalTuning | None = None) -> None:
+    def __init__(self, tuning: CalTuning | None = None, saved: tuple[float, float] | None = None) -> None:
         tn = self.tune = tuning or CalTuning()
         self._accel = _Gauge(tn.tau_s, tn.min_spread_ms2, tn.min_corr, tn.slope_min, tn.slope_max)
         self._gain = _Gauge(tn.tau_s, tn.min_steer_spread, tn.gain_corr, tn.gain_min, tn.gain_max, positive=True)
+        self._sign = _Fit(tn.sign_tau_s)
+        self._saved: tuple[float, float] | None = None
+        self._saved_state = ""
+        if saved is not None:
+            force, gain = saved
+            if tn.slope_min <= abs(force) <= tn.slope_max and tn.gain_min <= gain <= tn.gain_max:
+                self._saved, self._saved_state = (force, gain), "waiting"
         self._heading: deque[tuple[float, float]] = deque()
         self._steady: deque[tuple[float, float, float, float]] = deque()
         self._last_t: float | None = None
@@ -179,6 +198,9 @@ class ForceCalibration:
             self._steady.append((t, accel, float(game_force), steer_right))
         while self._steady and t - self._steady[0][0] > tn.steady_window_s:
             self._steady.popleft()
+        fresh = t - self._frames_at <= tn.fresh_s and abs(game_force) < tn.force_limit
+        if dt > 0.0 and fresh and speed_ms >= tn.min_speed_ms:
+            self._sign.add(steer_right, float(game_force), dt)
         if dt > 0.0 and self._accept(t, speed_ms, game_force):
             n = len(self._steady)
             accel = sum(s[1] for s in self._steady) / n
@@ -200,8 +222,32 @@ class ForceCalibration:
 
     def result(self) -> Calibration:
         w = self.tune.min_weight_s
-        accel = self._accel.estimate(w)
+        accel, gain = self._accel.estimate(w), self._gain.estimate(w)
+        saved = self._check_saved()
+        if saved == "confirmed" and self._saved is not None:
+            if accel.value is None and accel.state != "conflict":
+                accel = replace(accel, value=self._saved[0], state="saved")
+            if gain.value is None and gain.state != "conflict":
+                gain = replace(gain, value=self._saved[1], state="saved")
         return Calibration(
             force_per_ms2=accel.value, corr=accel.corr, spread_ms2=accel.spread, weight_s=self._accel.fit.w,
-            state=accel.state, kappa_per_steer=self._gain.estimate(w),
+            state=accel.state, kappa_per_steer=gain, saved=saved,
         )
+
+    def _check_saved(self) -> str:
+        """The game's force against the wheel angle answers within seconds of any steering at speed, bends or not; its
+        sign is the cornering fit's. Agreeing, the saved sign is locked as the live one; disagreeing, it is dropped.
+        """
+        tn = self.tune
+        if self._saved is None or self._saved_state != "waiting":
+            return self._saved_state
+        slope, corr, spread = self._sign.stats()
+        if self._sign.w < tn.sign_min_s or spread < tn.sign_spread or abs(corr) < tn.sign_corr:
+            return self._saved_state
+        sign = 1 if self._saved[0] > 0.0 else -1
+        if (slope > 0.0) == (sign > 0) and self._accel.sign in (0, sign):
+            self._accel.sign = sign
+            self._saved_state = "confirmed"
+        else:
+            self._saved, self._saved_state = None, "rejected"
+        return self._saved_state

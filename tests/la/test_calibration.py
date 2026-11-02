@@ -142,3 +142,42 @@ def test_a_still_wheel_teaches_no_steering_gain():
     assert result.force_per_ms2 is not None
     assert result.kappa_per_steer.value is None and not result.servo_ready
 
+
+
+def weave(t: float) -> float:
+    """Gentle steering either way on a straight-ish road, as on any drive: no steady bend in it."""
+    return 0.5 * math.sin(1.3 * t)
+
+
+def test_a_saved_calibration_is_used_once_this_drive_agrees_on_the_wheel_direction():
+    cal = ForceCalibration(saved=(1800.0, 0.19))
+    assert cal.result().saved == "waiting" and cal.result().force_per_ms2 is None
+    result = drive(cal, weave, lambda a: 1800.0 * a, 5.0, gain=0.19)
+    assert result.saved == "confirmed"
+    assert (result.force_per_ms2, result.state) == (1800.0, "saved")
+    assert (result.kappa_per_steer.value, result.kappa_per_steer.state) == (0.19, "saved")
+
+
+def test_a_saved_calibration_that_pushes_the_other_way_is_dropped():
+    result = drive(ForceCalibration(saved=(-1800.0, 0.19)), weave, lambda a: 1800.0 * a, 5.0, gain=0.19)
+    assert result.saved == "rejected" and result.force_per_ms2 is None
+
+
+def test_without_steering_a_saved_calibration_waits():
+    result = drive(ForceCalibration(saved=(1800.0, 0.19)), lambda t: 0.0, lambda a: 1800.0 * a, 30.0, gain=0.19)
+    assert result.saved == "waiting" and result.force_per_ms2 is None
+
+
+def test_the_live_fits_take_over_and_cannot_flip_the_saved_direction():
+    cal = ForceCalibration(saved=(1800.0, 0.19))
+    drive(cal, weave, lambda a: 1800.0 * a, 5.0, gain=0.19)
+    live = drive(cal, bends, lambda a: 2400.0 * a, 120.0, t0=5.0, gain=0.2)
+    assert live.state == "ready" and live.force_per_ms2 == pytest.approx(2400.0, rel=0.1)
+    assert live.kappa_per_steer.value == pytest.approx(0.2, rel=0.05)
+    flipped = drive(cal, bends, lambda a: -2400.0 * a, 400.0, t0=125.0, gain=0.2)
+    assert flipped.state == "conflict"
+
+
+def test_an_implausible_saved_calibration_is_ignored():
+    assert ForceCalibration(saved=(5.0, 0.19)).result().saved == ""
+    assert ForceCalibration(saved=(1800.0, 3.0)).result().saved == ""

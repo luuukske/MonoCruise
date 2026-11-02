@@ -25,6 +25,7 @@ from core.lane_departure.detector import (
 )
 
 from .actuator import STRENGTH_MAX, Gains, Wheel, WheelActuator, WheelTuning, ease
+from .hand_push import HandPush
 from .lane_model import LaneModel
 from .path import LANE, WantedPath
 
@@ -68,6 +69,14 @@ class AssistTuning:
     wheel: WheelTuning = field(default_factory=WheelTuning)
     insist_hold: float = 0.8
     insist_hold_s: float = 0.5
+    freeze_at: float = 0.4
+    give_from: float = 0.5
+    give_full: float = 0.8
+    resist_tau_s: float = 0.15
+    resist_min_push: float = 500.0
+    resist_home_rate: float = 0.02
+    freeze_floor: float = 300.0
+    give_done: float = 0.98
     psi_tau_s: float = 0.05
     psi_poly_tau_s: float = 0.15
     rise_s: float = 2.0
@@ -214,6 +223,8 @@ class LaneAssist:
         self._pulse_side = SIDE_NONE
         self._fresh_lane()
         self._clear_hands()
+        self._clear_resist()
+        self._rejoin = True
 
     def _fresh_lane(self) -> None:
         self._lane_since: float | None = None
@@ -226,6 +237,11 @@ class LaneAssist:
         self._carry_since = 0.0
         self._geo: tuple[float, float] | None = None
 
+    def _clear_resist(self) -> None:
+        self._resist = 0.0
+        self._give = 0.0
+        self._frozen: float | None = None
+
     def _clear_hands(self) -> None:
         self._err_mean: float | None = None
         self._hands: deque[tuple[float, float]] = deque()
@@ -234,6 +250,7 @@ class LaneAssist:
 
     def _restart(self) -> None:
         self._steer.clear()
+        self._clear_resist()
         self._fresh_lane()
         self._clear_hands()
         self._auth = self._bias = self._lat_hold = 0.0
@@ -263,10 +280,11 @@ class LaneAssist:
         return self._wheel.ring_scale
 
     def update(self, f: Frame | None, gains: Gains | None, wheel: Wheel, tmp: bool = False,
-               path: WantedPath = LANE, engage: int = SIDE_NONE) -> AssistOutput:
+               path: WantedPath = LANE, engage: int = SIDE_NONE, hand: HandPush | None = None) -> AssistOutput:
         """One tick. ``gains`` is None while the calibration is learning; ``wheel.ok`` needs a version 4 plugin.
 
-        ``path`` is what a path source wants on top of the lane; the lane follower passes ``LANE``.
+        ``path`` is what a path source wants on top of the lane; the lane follower passes ``LANE``. ``hand`` is the
+        driver's estimated push (``hand_push.py``), which a pulse yields to.
         """
         if f is None:
             self._restart()
@@ -289,7 +307,7 @@ class LaneAssist:
                 self._lane.reset()
                 self._bias = 0.0
             return self._fade(f.t, dt, reason, kmh, gains, wheel)
-        return self._assist(f, dt, kmh, geom, gains, wheel, path, engage)
+        return self._assist(f, dt, kmh, geom, gains, wheel, path, engage, hand)
 
     def _advance(self, f: Frame) -> float:
         tn = self.tune
@@ -384,10 +402,12 @@ class LaneAssist:
         return "", _Geom(offset, psi, kappa, ahead, soft, ceiling, fit is not None)
 
     def _assist(self, f: Frame, dt: float, kmh: float, g: _Geom, gains: Gains | None, wheel: Wheel,
-                path: WantedPath, engage: int = SIDE_NONE) -> AssistOutput:
+                path: WantedPath, engage: int = SIDE_NONE, hand: HandPush | None = None) -> AssistOutput:
         tn = self.tune
         t = f.t
         if engage != SIDE_NONE:
+            if engage != self._pulse_side:
+                self._clear_resist()
             self._pulse_side = engage
         event = self._carry(t, g.offset, f.speed_ms)
         g = replace(g, offset=g.offset + self._shift)
@@ -441,6 +461,7 @@ class LaneAssist:
         err = (self._target - wheel.steer) if self._target is not None and wheel.ok else 0.0
         if not tn.pulse and self._wheel.guard(t, dt, err, wheel, self._auth, self._target):
             event = event or "ring"
+        self._watch_resist(dt, hand, wheel)
         if self._override(t, dt, err, g.offset - self._bias, wheel):
             event = event or "override"
         hands = self._watch_hands(t, dt, err, wheel)
@@ -457,11 +478,14 @@ class LaneAssist:
             self._target = wheel.steer if wheel.ok else None
             self._target_rate = 0.0
             self._pulse_side = SIDE_NONE
+            self._clear_resist()
         reason = mute or ("bend_sharp" if g.ceiling <= 0.0 else "bend" if g.ceiling < 1.0 else "assist")
         if tn.pulse and not mute:
             reason = "pulse" if self._auth > 0.0 else "standby"
         only = (1 if self._pulse_side == SIDE_RIGHT else -1) if tn.pulse and self._pulse_side != SIDE_NONE else 0
         servo = self._wheel.commands(gains, self._target, self._target_rate, self._auth, wheel, self._speed, only)
+        if self._frozen is not None and servo.cap:
+            servo = replace(servo, cap=min(servo.cap, round(self._frozen * ease(self._auth))))
         return AssistOutput(
             servo=servo, authority=self._auth, reason=reason, event=event, source=path.source, fitted=g.fitted,
             rumble=self._hands_off_t >= tn.hands_warn_s and self._auth > 0.0, offset_m=g.offset, drift_ms=drift,
@@ -570,12 +594,36 @@ class LaneAssist:
         return line if self._pulse_side == SIDE_RIGHT else -line
 
     def _step_pulse(self, dt: float, engage: int, mute: str) -> None:
-        """In fast while a pulse is asked for, out when it ends; quicker still when the driver acts."""
+        """In fast while a pulse is asked for, out when it ends; quicker still when the driver acts, and down to what
+        the driver's push leaves it (``_watch_resist``) at that rate.
+        """
         tn = self.tune
-        if engage != SIDE_NONE and not mute:
-            self._auth = min(1.0, self._auth + dt / tn.pulse_rise_s)
+        ceiling = 1.0 - self._give
+        if engage != SIDE_NONE and not mute and self._auth > ceiling:
+            self._auth = max(ceiling, self._auth - dt / tn.yield_s)
+        elif engage != SIDE_NONE and not mute:
+            self._auth = min(ceiling, self._auth + dt / tn.pulse_rise_s)
         else:
             self._auth = max(0.0, self._auth - dt / (tn.yield_s if mute in _DRIVER_MUTES else tn.pulse_fall_s))
+
+    def _watch_resist(self, dt: float, hand: HandPush | None, wheel: Wheel) -> None:
+        """The driver's push against a pulse as a share of the pulse's own (Lukas, 2026-11-03): from ``freeze_at`` the
+        pulse pushes no harder, and from ``give_from`` to ``give_full`` it hands back, latched for the pulse.
+
+        Its servo's integral wound the force to 3000 in 0.7 s against a held wheel, faster than the push showed. Not
+        counted while the pulse turns the wheel home: resting hands' damping and friction resist only motion.
+        """
+        tn = self.tune
+        if not tn.pulse or self._pulse_side == SIDE_NONE or hand is None or self._auth <= 0.0 or dt <= 0.0:
+            return
+        only = 1 if self._pulse_side == SIDE_RIGHT else -1
+        pushed = hand.push >= tn.resist_min_push and math.isfinite(hand.against)
+        if not pushed or only * wheel.rate > tn.resist_home_rate:
+            return
+        self._resist += (1.0 - math.exp(-dt / tn.resist_tau_s)) * (hand.against / hand.push - self._resist)
+        if self._frozen is None and self._resist >= tn.freeze_at:
+            self._frozen = max(tn.freeze_floor, hand.push) / max(0.2, ease(self._auth))
+        self._give = max(self._give, ease((self._resist - tn.give_from) / (tn.give_full - tn.give_from)))
 
     def _override(self, t: float, dt: float, err: float, rel: float, wheel: Wheel) -> bool:
         """A wheel held still away from the target is the driver steering; True on the tick it yields.
@@ -583,20 +631,27 @@ class LaneAssist:
         Still, because a released wheel swinging past the target is not a driver. So is a still wheel pushed near the
         servo's cap net of the game's force: firm hands hold it. In a bend the servo carries the game's centring.
         After the hold it rejoins only near a lane centre, so a lane change without a blinker is not pulled back. A pulse
-        counts only a wheel held short of its target: past it, toward home, its one-sided servo does nothing.
+        counts only a wheel held short of its target: past it, toward home, its one-sided servo does nothing. It also
+        yields once the driver's push has taken all of its authority (``_watch_resist``).
         """
         tn = self.tune
         if tn.always_on:
             return False
+        if tn.pulse and self._give >= tn.give_done and self._override_until <= t:
+            self._override_t = self._insist_t = 0.0
+            self._override_until = t + tn.override_hold_s
+            self._rejoin = False
+            return True
         if self._auth < 0.3 or self._override_until > t:
             self._override_t = self._insist_t = 0.0
-            if self._override_until > t and abs(rel) > tn.rejoin_m:
+            if self._override_until > t and abs(rel) > tn.rejoin_m and self._rejoin:
                 self._override_until = max(self._override_until, t + dt)
             return False
         short = (err if self._pulse_side == SIDE_RIGHT else -err) if tn.pulse else abs(err)
         held = short > tn.override_err and abs(wheel.rate) < tn.override_still
         self._override_t = self._override_t + dt if held else 0.0
         cap = self._wheel.cap(self._auth)
+        cap = min(cap, self._frozen * ease(self._auth)) if self._frozen is not None else cap
         net = wheel.push + wheel.game
         pinned = cap > 0.0 and abs(net) >= tn.insist_hold * cap and abs(wheel.rate) < tn.override_still
         self._insist_t = self._insist_t + dt if pinned else 0.0
@@ -604,6 +659,7 @@ class LaneAssist:
             return False
         self._override_t = self._insist_t = 0.0
         self._override_until = t + tn.override_hold_s
+        self._rejoin = True
         return True
 
     def _watch_hands(self, t: float, dt: float, err: float, wheel: Wheel) -> str:

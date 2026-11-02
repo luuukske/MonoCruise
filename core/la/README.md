@@ -210,6 +210,17 @@ holds its last good value through a weak stretch (`held`). `la_force_per_ms2` an
 by hand. Drives so far: +480 to +735 per m/s^2 (r 0.94 to 0.99) and 0.184 to 0.187 per metre per lock (r 1.00)
 within a minute.
 
+Live fits ready on both are kept for the next start (`la_saved_calibration`, at most once a minute and on a 3 %
+change), because learning took the first one to two minutes of every drive: on 2026-11-02 the first six lane
+keeping pulses had no force. A saved calibration is used only once the drive confirms the wheel's direction,
+since a wrong sign steers toward the line: the game's force against the wheel angle at 40 km/h or more (bends
+or not, 2 s of it, r 0.6, 0.002 of lock of spread) must have the saved sign, and that drive's force against
+the angle was -41900 per lock at r -0.96 (the cornering fit's sign, as the angle here is counterclockwise).
+Confirmed, it fills in until the live fits are ready, and its sign is locked, so a live fit that later reads the
+other way is a `conflict`. Disagreeing, it is dropped with a warning and the calibration learns afresh. The
+steering gain carried to another truck is off by a few percent at most on the drives so far; the bend scale and
+the correction take that up.
+
 ## Adding a path source
 
 The lane follower is one path source. A later one (lane departure prevention, collision avoidance with a wanted
@@ -231,7 +242,7 @@ or the caps.
 
 | Reason | Meaning |
 |---|---|
-| `override` | the wheel held still (under 0.05 of lock per second) more than 0.015 of lock from the target for 0.3 s, or held still for 0.5 s with the servo pushing at 80 % of its cap net of the game's force (firm hands holding against it). In a bend the servo carries the game's centring on its own near its cap; counting the servo alone handed three bends back on the fifth drive. Fades out in 0.4 s, holds 2 s, and rejoins only within 0.6 m of a lane centre, so a lane change without a blinker is not pulled back |
+| `override` | the wheel held still (under 0.05 of lock per second) more than 0.015 of lock from the target for 0.3 s, or held still for 0.5 s with the servo pushing at 80 % of its cap net of the game's force (firm hands holding against it). In a bend the servo carries the game's centring on its own near its cap; counting the servo alone handed three bends back on the fifth drive. A lane keeping pulse also stops pushing harder and then hands back as the driver's estimated push against it grows ("The driver's push"; `core/lane_departure/README.md`, handing back): a driver gripping the wheel is paying attention (Lukas, 2026-11-02). Fades out in 0.4 s, holds 2 s, and rejoins only within 0.6 m of a lane centre, so a lane change without a blinker is not pulled back |
 | `blinker` | either lamp or hazards, held 2 s after it goes off |
 | `evade` | a hard wheel move (0.15 of lock in 1 s, or 0.6 per second); 3 s |
 | `hands_off` | the wheel follows the target with no tremor: the servo error's ripple (its deviation from a 1 s mean, rms over 3 s) under 0.0008 of lock. Rumble after 10 s, lets go after 15 s, back as soon as the wheel moves at 0.02 of lock per second |
@@ -239,6 +250,42 @@ or the caps.
 A released wheel swinging past the target is not an override: it is moving. A wheel on its way to the target
 with the servo at its cap is not one either. The servo's damping resists a fast hand by at most 1500 of 10000.
 The hands-on threshold is a placeholder with no measurement behind it; the 10 s summary logs the ripple's median.
+
+## The driver's push
+
+`hand_push.py` estimates the driver's torque on the rim every tick from what the plugin reports: what the wheel's
+motion needs (`la_wheel_inertia` times its angular acceleration, from the plugin's wheel rate) less what the game
+and the assist push (the game's force with the plugin's 0.1 s low-pass undone, the assist applied, any cancelled
+force). Counterclockwise positive like the wheel, in the plugin's units out of 10000, smoothed at 0.1 s. A lane
+keeping pulse yields to it (`override`, below); LA itself only logs it (Lukas, 2026-11-02: a pulse pushed back
+harder than wanted while avoiding an accident).
+
+Most of it is the driver holding the wheel against the game's centring: in standby on the drive of 2026-11-02 it
+was the game's force negated, up to 3300 in bends. So during a pulse what counts is the change since the pulse
+began, toward the line it saves (`against`), set against the pulse's own push away from that line (`push`).
+Passive hands, the wheel's friction and its damping can at most cancel the push; only a driver steering toward the
+line goes past it (`beyond`). Re-estimated from that drive's `lka_debug.csv` (38 pulses):
+
+- four of the five pulses that turned the wheel home by 0.03 lock or more met at most 560 against; the fifth, a
+  lane change at 2.4 m/s that ended `out`, met 2680 against its 3000;
+- the override at 20:59:54 met 2470 against 3000: the driver held the wheel still at the servo's cap for 0.4 s
+  before the override noticed;
+- five went past the pulse's own push by 930 to 1730, 0.5 to 1.3 s in: the driver steering through it (one of
+  them 1.5 m over the line already). Pulses whose wheel moved under 0.01 lock read up to 500 past it, hence the
+  500 the logs count from.
+
+What it does not know: the wheel's own damping and friction read as hand (they only resist motion, so never past
+the push); the wheel rate is low-passed at 0.04 s in the plugin and read at 20 Hz, so fast swings are off by a few
+hundred units; the plugin's own rumble shakes the rim (`rumbling` in the CSV). In the model
+(`tests/la/test_hand_push.py`) a free wheel reads under 40 % of a ramped push on the way and under 100 once
+settled, a held wheel within 5 % of the push. `python tools/la_torque_test.py` checks it on the real wheel with the truck
+standing: hands off it should read about 0, the wheel held still about minus the torque. If it is too rough, the
+plugin could estimate it at the game's FFB rate from the raw force (offset 90 of the block is free).
+
+`la_debug.csv` and `lka_debug.csv` carry `hand`, `steer_accel`, `pulse_push`, `hand_against`, `servo_only` and
+`rumbling`. Each LKA pulse end line says how hard the pulse pushed, how hard the driver pushed against it and when
+the driver first went 500 past the pulse's own push. `python tools/lka_pushback.py` lists every pulse of a drive,
+re-estimating files written before the columns existed.
 
 ## Smooth on and off
 
@@ -325,6 +372,7 @@ line crossed keeps the lane it left as the reference (see the lane under the tru
 | `la_cancel_share` | 0 | share of the game's steady FFB force removed while it steers, 0 to 1; 0 keeps the game's feel |
 | `la_min_speed_kmh` | 60 | arm speed |
 | `la_force_per_ms2`, `la_kappa_per_steer` | 0 | 0 learns them; any other value is used as is, sign included |
+| `la_saved_calibration` | {} | written by MonoCruise: the last live calibration, used at the next start once the drive confirms its sign (Calibration) |
 | `la_tmp_enabled` | false | allow on TruckersMP |
 | `la_follow_all` | false | test: keep it on through junctions, forks, merges and lane switches |
 | `la_always_on` | false | test: never hand back to the driver and no bend limit; hands-on check off |
@@ -374,5 +422,5 @@ for 21 % of the engaged time). The target's rate zigzag explains part of it. Sin
 of the wheel itself with the push flipping between them, and recovers in 4 s (`plugins/ffb/README.md`): the old
 count of push flips alone tripped on a still wheel. Whether that also ends LA's straight-road cuts is not driven yet.
 Measuring the wheel's inertia in the plugin instead of assuming it, the hands-on threshold from measurement,
-departure prevention, persisting the calibration and the bend scale between sessions, trailer, ATS validation,
+departure prevention, persisting the bend scale between sessions, trailer, ATS validation,
 TruckersMP (moderation), UI. Every number above is a starting point set by reasoning and the model, not by driving.

@@ -83,7 +83,8 @@ Re-arming never needs a recentre. After a rumble the side is disarmed until the 
 0.15 m inside the warning line for 0.3 s and 1 s has passed. The cue and the line warning are
 armed separately: a cue that ends never disarms the line warning, so a truck that hovers just
 short of the line and then crosses it is still warned. A truck that keeps straddling a line gets
-one warning, not a train of them. At most 12 episodes per minute.
+one warning, not a train of them. There is no per-minute limit (Lukas, 2026-11-02: it was 12; a driver
+who is not paying attention feels each rumble).
 
 A truck centre more than three half lanes from the route is `off_route`.
 
@@ -212,17 +213,27 @@ lane fit, path tracking and servo) in its pulse mode; LA outranks it when both a
 the same mutes: blinker on that side, deliberate steering, a wheel that made the heading, a swerve,
 `latched`, `returning`, and every gate (speed, AEB, hard braking, stale data, junctions, forks, merges,
 sharp bends). The detector mutes its approach cue in bends; there LKA still starts on the same test
-(0.8 s to the warning line, drifting at 0.4 m/s or more, within 0.4 m of it), but only on a straight or
-a bend's outer edge: running wide is caught early, while cutting the inside of a bend keeps to the line
-warning, as in LDW. It needs no swerve in the last 5 s (the detector's own hold is 2 s, and a pulse must
-not steer back onto what the driver swerved round), at most 8 pulses a minute (a pulse a gate ends within
-0.5 s does not count), and LA's calibration (about a minute of bends after each start). Straight prefab
-lanes count like roads, as in LDW: drive 12 had departures there that warned and got no pulse.
+(0.8 s to the warning line, drifting at 0.4 m/s or more, within 0.4 m of it) on a straight or a bend's
+outer edge: running wide is caught early. On a bend's inner edge it does so only for a run at 0.8 m/s or
+more; a slower corner cut keeps to the line warning, as in LDW (on 2026-11-02 a 1.5 m/s run into the
+oncoming lane on the inside of an R 90 waited for the line and went 0.5 m over). An approach start, this
+test or the detector's own cue, also needs the truck itself drifting toward the line at 0.2 m/s or more by
+LA's lane fit (`drift` in the skips): the detector reads its heading off the route polyline, which in fast
+bends showed up to 0.8 m/s toward the outer line while the truck was heading home. On 2026-11-02 that was 17
+of 47 pulse starts, among them every 0.2 s stutter and the pulse the driver held at the servo's cap at
+20:59:55. A start at the line warning stays position only. It needs no swerve in the last 5 s (the
+detector's own hold is 2 s, and a pulse must not steer back onto what the driver swerved round), no
+override still holding (it used to start a pulse with no force), and LA's calibration: about a minute of bends on
+the first drive, then the saved one once the drive confirms the wheel's direction (`core/la/README.md`,
+Calibration). Straight prefab lanes count like roads, as in LDW: drive 12 had departures there that warned
+and got no pulse.
 
 **What it does.** Authority in over 0.15 s. The target is LA's: bend feedforward, the stop before the
 line, and the correction, which in a pulse steers to a line 0.5 m inside the edge it saves instead of
 the lane centre. It lets go once the body is 0.15 m back inside the warning line (so the detector re-arms)
-and no longer drifting toward it, fading out over 0.5 s. It also ends on any driver mute on that side, an
+and no longer drifting toward it, by the detector and by LA's lane fit (0.05 m/s at most: the detector's
+drift alone flickered home in fast bends and let go 0.2 s in), fading out over 0.5 s. It also ends on any
+driver mute on that side, an
 override (a wheel held short of the target, toward the line), the body 1.5 m past the edge (out for good),
 a gate, or after 3 s. It rides
 through the detector's silences for a fork, a join, a route end or a junction lane ahead (`branch`,
@@ -245,12 +256,35 @@ own pulse on the detector's tests even where the detector reads the turned wheel
 (`deliberate`, `intent`, `latched`), and that pulse is not ended by them; a blinker or a swerve still is. It
 too pushes only away from its own line, so the two catch the swing between them.
 
+The pulse's own line gets the same 2.5 s while the truck still drifts out at 0.4 m/s (and 0.2 by the lane
+fit): released short of home, the turned wheel comes back toward that line, the detector read it as intent
+and latched, or kept the side disarmed after its warning, and nothing fired again. There, and in any pulse,
+`deliberate`, `intent` and `latched` count as the driver only once the wheel has turned toward the line past
+where it was as the first pulse began (0.01 of lock). In the model, a sleeping driver holding 85 % of an
+R 250 on a truck that answers its wheel within 0.05 to 0.1 s ran 64 to 66 m off the road with no pulse and
+no rumble; now it stays within 0.4 m of the line.
+
 **What it keeps and drops (Lukas, 2026-11-02).** Kept: the servo's cap (3000 of 10000, a hand always
 overpowers it), LA's override (a wheel held still off the target for 0.3 s, or held against the servo
-near its cap; yields in 0.4 s), the plugin's own buzz guard (since drive 12 a real ring of the wheel only,
+near its cap; yields in 0.4 s) and the hand-back to the driver's push (below), the plugin's own buzz guard (since drive 12 a real ring of the wheel only,
 see `plugins/ffb/README.md`), and every detector mute and gate. Dropped
 for a pulse, which lasts a second or three: LA's ring guard, weave guard, hands-off check, the 2 s rise
 and 1 s re-arm, LA's blinker and swerve mutes (the detector's per-side ones decide) and the lane carry.
+
+**Handing back to the driver's push (Lukas, 2026-11-02 and 03).** The driver's estimated push against a pulse
+(`core/la/README.md`, "The driver's push") is read as a share of the pulse's own push, smoothed over 0.15 s,
+while the pulse pushes 500 or more and is not turning the wheel home (resting hands' damping and friction resist
+only a moving wheel). From 40 % the pulse pushes no harder: its cap is frozen at its push then, and the plugin
+clamps the servo's integral to it. From 50 % its authority falls toward what the share leaves (nothing at 80 %),
+at the driver yield rate (0.4 s for all of it), and at 98 % it hands back: the core yields and holds off 2 s,
+without the rule that waits for a lane centre. Freeze and hand-back are latched for the pulse. Why: the servo's
+integral wound the force up to 3000 in about 0.7 s against a held wheel, faster than the push showed (a median
+2500 when the driver's share first held 50 %), and the old test, 75 % of the pulse's push for 0.3 s and then a
+0.45 s fade, let go 0.9 to 1.5 s into a fight. A slower integral was measured instead and cost a sleeping driver
+0.35 m past the line at R 400 (0.03 m now). The cost of this one, by decision: in the model a sleeping driver
+whose resting hands hold 90 % of an R 400 is handed back once, the detector then stays disarmed past the line,
+and the truck runs 18.7 m wide in 12 s against 0.03 m when the pulse ignored the push
+(`test_heavy_resting_hands_in_a_bend_count_as_a_grip`, a ratchet). A free wheel never reads as a push.
 
 **What lies past the line.** At each start the map is asked what lies one lane width past that line,
 half a second ahead of the bumper: a parallel lane whose traffic runs ego's way (`lane`), the other way
@@ -270,13 +304,17 @@ the model's numbers, not the game's, whose centring at speed is about twice the 
 not the standards' text). Known gaps, open:
 
 - No hands-on check: real systems nag and stand by without hands; here a sleeping driver in a long bend
-  gets a pulse every few seconds up to the per-minute limit, with the rumble only if LDW is on.
+  gets a pulse every few seconds, with the rumble only if LDW is on. There is no per-minute limit (Lukas,
+  2026-11-02: it was 8; a driver gripping the wheel is paying attention, and one who is not feels the pulls).
 - With LDW off, or in a bend where LDW mutes its cue, the pulse comes with no warning first (R79 asks
   for one at the latest when it intervenes).
 - The cap is a share of the wheel's own peak: about 1 Nm on a 4 Nm wheel, 6 Nm or more on a direct
   drive. R79 caps override effort at 50 N at the rim; `lka_strength` is the lever.
-- The override takes 0.3 s to notice and 0.4 s to fade. A driver correcting harder than the pulse is not
-  resisted (one way only), but a pulse cannot straighten the wheel it turned either; real systems do both.
+- Like real systems it yields on the driver's torque, here an estimate (handing back, above). The still-wheel
+  override alone held the full 3000 for up to 3.5 s on 2026-11-02: it reads the servo net of the game's
+  centring (2280, under its 2400 bar) or a wheel 0.013 to 0.016 short of its 0.015 bar. A driver correcting
+  harder than the pulse is not resisted (one way only), but a pulse cannot straighten the wheel it turned
+  either; real systems do both.
 - Resting hands that hold whatever angle the wheel was left at make pulses swing the truck from line to
   line in the model (above). A gentle pull back toward the lane's angle, weaker than any hand, would stop
   it but goes against "never push back".
@@ -293,8 +331,11 @@ reaches it too, since it reads the detector: every close call starts a pulse, bl
 
 **Logs.** `LKA on/off` (and `waiting while LA steers`), its settings, the shared calibration as for LA,
 one line per pulse start (side, what lies past the line, gap, drift, time to line, speed, and the core's
-state: `pulse`, or a mute such as `calibrating`) and end (why, how long, closest gap), one per departure the
-detector caught that got no pulse (`skips`: the per-minute limit, a recent swerve, an override), and every 10 s
+state: `pulse`, or a mute such as `calibrating`) and end (why, how long, closest gap, and the driver's estimated
+push against it: `core/la/README.md`, "The driver's push"; `tools/lka_pushback.py` lists it per pulse from
+`lka_debug.csv`), one per departure the
+detector caught that got no pulse (`skips`: a recent swerve, an override, a truck not
+drifting out by the lane fit), and every 10 s
 while it pulsed the LA summary. With `debug` on, `lka_debug.csv` gets LA's columns at 20 Hz during a
 pulse and 2 s after.
 

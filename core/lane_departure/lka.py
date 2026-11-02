@@ -8,12 +8,11 @@ itself is not changed by it. See core/lane_departure/README.md, "Lane keeping as
 from __future__ import annotations
 
 import math
-from collections import deque
 from dataclasses import dataclass
 from typing import NamedTuple
 
 from . import edges as edge_kinds
-from .detector import SIDE_LEFT, SIDE_NONE, SIDE_RIGHT, Decision, LaneDetector, project
+from .detector import LEVEL_CLOSE, SIDE_LEFT, SIDE_NONE, SIDE_RIGHT, Decision, LaneDetector, project
 
 class _Seen(NamedTuple):
     gap: float
@@ -37,9 +36,11 @@ class LkaTuning:
     catch_s: float = 2.5
     out_far_m: float = 1.5
     evade_hold_s: float = 5.0
-    per_min: int = 8
-    refund_s: float = 0.5
     crossing_s: float = 0.5
+    back_drift_ms: float = 0.05
+    start_drift_ms: float = 0.2
+    inner_drift_ms: float = 0.8
+    own_steer: float = 0.01
 
 
 @dataclass(frozen=True)
@@ -63,10 +64,10 @@ class LaneKeeping:
         self._side = SIDE_NONE
         self._since = 0.0
         self._beyond = ""
-        self._starts: deque[float] = deque()
         self._evade_seen = -1e9
         self._ended: tuple[int, float] = (SIDE_NONE, -1e9)
         self._caught = False
+        self._ref: tuple[int, float] = (SIDE_NONE, math.nan)
 
     @property
     def side(self) -> int:
@@ -80,7 +81,7 @@ class LaneKeeping:
         """This tick's pulse. ``steered`` is the LA core's last output: where it sees the truck, its correction and
         whether it yielded.
         """
-        yielded = getattr(steered, "event", "") == "override"
+        yielded = getattr(steered, "event", "") == "override" or getattr(steered, "reason", "") == "override"
         tn = self.tune
         if detector.evade_until > t:
             self._evade_seen = t
@@ -89,57 +90,74 @@ class LaneKeeping:
             if not end:
                 return Pulse(self._side, "", self._beyond, t - self._since, self._side)
             pulse = Pulse(SIDE_NONE, end, self._beyond, t - self._since, self._side)
-            if end == "gate" and pulse.elapsed_s < tn.refund_s and self._starts and self._starts[-1] == self._since:
-                self._starts.pop()
             self._ended = (self._side, t)
             self._side = SIDE_NONE
             return pulse
-        side = decision.side if decision.started else self._early(detector)
+        side = decision.side if decision.started else self._early(detector, steered)
         caught = side == SIDE_NONE and not decision.started
-        side = side or (self._catch(t, detector) if caught else SIDE_NONE)
+        side = side or (self._catch(t, detector, steered) if caught else SIDE_NONE)
         if side == SIDE_NONE:
             return Pulse()
-        while self._starts and t - self._starts[0] > 60.0:
-            self._starts.popleft()
+        cue = decision.started and decision.level == LEVEL_CLOSE
         why = ("override" if yielded else "swerve" if t - self._evade_seen < tn.evade_hold_s
-               else "rate" if len(self._starts) >= tn.per_min else "")
+               else "drift" if cue and not self._heading_out(side, steered) else "")
         if why:
             return Pulse(event="skipped", line=side, reason=why) if decision.started else Pulse()
-        self._starts.append(t)
+        last, at = self._ended
+        if not (side == last == self._ref[0] and t - at <= tn.catch_s):
+            self._ref = (side, getattr(steered, "steer", math.nan))
         self._side = side
         self._since = t
-        self._caught = caught
+        self._caught = caught and side != last
         self._beyond = self._class(frame, side)
         return Pulse(self._side, "start", self._beyond, 0.0, side)
 
-    @staticmethod
-    def _early(detector: LaneDetector) -> int:
-        """The detector's approach cue test where it mutes the cue in bends, on a straight or a bend's outer edge only.
-
-        Running wide is caught early; cutting the inside of a bend gets the line warning alone, as in LDW.
+    def _early(self, detector: LaneDetector, steered) -> int:
+        """The detector's approach cue test where it mutes the cue in bends: on a straight or a bend's outer edge, and
+        on its inner edge only for a run at ``inner_drift_ms`` or more; a slow corner cut gets the line warning alone.
         """
         tn = detector.tune
         for side, e in detector.edges.items():
-            if e.hard or e.bend > 0.0 or not e.armed_close or not e.close:
+            if e.hard or not e.armed_close or not e.close or (e.bend > 0.0 and e.drift < self.tune.inner_drift_ms):
+                continue
+            if not self._heading_out(side, steered):
                 continue
             if 0.0 < e.margin <= tn.approach_range_m and e.tlc <= tn.approach_tlc_s:
                 return side
         return SIDE_NONE
 
-    def _catch(self, t: float, detector: LaneDetector) -> int:
+    def _catch(self, t: float, detector: LaneDetector, steered) -> int:
         """Just after a pulse, the other line on the detector's own tests even where it reads the wheel the pulse turned
         as the driver's intent: a pulse can only push away from its line, so the swing home is the other line's to stop.
+
+        Its own line too while the truck still drifts out at the cue's speed: the detector keeps that line disarmed
+        after its warning and reads the turned wheel coming back as intent, neither the driver while ``_unwinding``.
         """
         tn, ldw = self.tune, detector.tune
         last, at = self._ended
         if last == SIDE_NONE or t - at > tn.catch_s:
             return SIDE_NONE
-        side = SIDE_LEFT if last == SIDE_RIGHT else SIDE_RIGHT
-        e = detector.edges.get(side)
-        if e is None or e.hard not in _OWN or e.gap <= -tn.out_far_m:
-            return SIDE_NONE
-        near = e.close and 0.0 < e.margin <= ldw.approach_range_m and e.tlc <= ldw.approach_tlc_s
-        return side if near or (e.margin <= 0.0 and e.drift > 0.0) else SIDE_NONE
+        for side in (SIDE_LEFT if last == SIDE_RIGHT else SIDE_RIGHT, last):
+            e = detector.edges.get(side)
+            if e is None or e.hard not in _OWN or e.gap <= -tn.out_far_m:
+                continue
+            if side == last and not (e.close and self._heading_out(side, steered)
+                                     and (not e.hard or self._unwinding(side, steered))):
+                continue
+            near = e.close and 0.0 < e.margin <= ldw.approach_range_m and e.tlc <= ldw.approach_tlc_s
+            if near or (e.margin <= 0.0 and e.drift > 0.0):
+                return side
+        return SIDE_NONE
+
+    def _unwinding(self, side: int, steered) -> bool:
+        """The wheel has not turned toward that line past where it was as the line's first pulse began: a steering mute
+        there is the pulse's own wheel coming back, which the detector read as intent and latched (2026-11-02 model).
+        """
+        ref_side, ref = self._ref
+        steer = getattr(steered, "steer", math.nan)
+        if ref_side != side or not (math.isfinite(ref) and math.isfinite(steer)):
+            return False
+        return (ref - steer if side == SIDE_RIGHT else steer - ref) <= self.tune.own_steer
 
     def _end(self, t: float, decision: Decision, detector: LaneDetector, frame, yielded: bool, steered) -> str:
         tn = self.tune
@@ -150,17 +168,38 @@ class LaneKeeping:
             e = self._seen(detector, frame, steered)
             if e is None:
                 return "gate"
-        if e.hard in _DRIVER and not (self._caught and e.hard in _OWN):
+        if e.hard in _DRIVER and not (e.hard in _OWN and (self._caught or self._unwinding(self._side, steered))):
             return "driver"
         if yielded:
             return "override"
         if e.gap <= -tn.out_far_m:
             return "out"
-        if e.margin >= tn.back_margin_m and e.drift <= 0.0:
+        if e.margin >= tn.back_margin_m and e.drift <= 0.0 and self._parallel(steered):
             return "back"
         if t - self._since >= tn.max_s:
             return "timeout"
         return ""
+
+    def _heading_out(self, side: int, steered) -> bool:
+        """The truck itself drifts toward that line at ``start_drift_ms`` or more by the LA core's lane fit (none: the
+        detector decides). The detector's heading comes off the route polyline, which in fast bends read up to 0.8 m/s
+        toward the outer line while the truck headed home: 17 of 47 pulse starts on 2026-11-02, the 20:59:55 override
+        and every stutter among them.
+        """
+        drift = getattr(steered, "drift_ms", math.nan)
+        if not math.isfinite(drift) or not math.isfinite(getattr(steered, "offset_m", math.nan)):
+            return True
+        return (drift if side == SIDE_RIGHT else -drift) >= self.tune.start_drift_ms
+
+    def _parallel(self, steered) -> bool:
+        """The truck itself no longer heads toward the line, by the LA core's lane fit (none: the detector decides).
+
+        The detector's polyline drift flickers in fast bends: pulses let go 0.2 s in, the truck still pointing out.
+        """
+        drift = getattr(steered, "drift_ms", math.nan)
+        if not math.isfinite(drift) or not math.isfinite(getattr(steered, "offset_m", math.nan)):
+            return True
+        return (drift if self._side == SIDE_RIGHT else -drift) <= self.tune.back_drift_ms
 
     def _seen(self, detector: LaneDetector, frame, steered) -> _Seen | None:
         """The pulse's line as the LA core sees it, while the detector keeps quiet for a fork or a join ahead."""

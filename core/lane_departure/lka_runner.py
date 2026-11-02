@@ -20,7 +20,10 @@ from .lka import Pulse
 
 logger = logging.getLogger(__name__)
 
-_SKIPS = {"rate": "the per-minute limit", "swerve": "a swerve in the last seconds", "override": "the driver took over"}
+_SKIPS = {"swerve": "a swerve in the last seconds", "override": "the driver took over",
+          "drift": "the truck itself is not drifting toward it (lane fit)"}
+# Past the pulse's own push by this much is the driver steering through it; still wheels read up to 500 (2026-11-02).
+_BEYOND_UNITS = 500.0
 
 
 class LkaRunner(AssistRunner):
@@ -32,6 +35,8 @@ class LkaRunner(AssistRunner):
         super().__init__(*args, **kwargs)
         self._closest = math.inf
         self._one_sided_warned = False
+        self._pushed = self._against = self._beyond = math.nan
+        self._beyond_at = math.nan
 
     def _wheel(self, status: PluginStatus) -> Wheel:
         """A pulse needs the plugin's one-sided servo, so it can never push back toward the line; older ones steer
@@ -54,6 +59,10 @@ class LkaRunner(AssistRunner):
         return request
 
     def _log_pulse(self, pulse: Pulse, edge) -> None:
+        if pulse.event == "start":
+            self._pushed = self._against = self._beyond = self._beyond_at = math.nan
+        if pulse.side:
+            self._note_push(pulse.elapsed_s)
         if pulse.side and edge is not None:
             self._closest = min(self._closest, edge.gap)
         if pulse.event == "skipped":
@@ -66,8 +75,27 @@ class LkaRunner(AssistRunner):
                         edge.gap if edge else math.nan, edge.drift if edge else math.nan,
                         edge.tlc if edge else math.nan, self.output.speed_kmh, self.output.reason)
         elif pulse.event:
-            logger.info("LKA pulse ends (%s) after %.2f s: closest %.2f m inside the line (negative: past it)",
-                        pulse.event, pulse.elapsed_s, self._closest)
+            logger.info("LKA pulse ends (%s) after %.2f s: closest %.2f m inside the line (negative: past it); %s",
+                        pulse.event, pulse.elapsed_s, self._closest, self._push_note())
+
+    def _note_push(self, elapsed_s: float) -> None:
+        """Peaks of the pulse's own push and the driver's push against it, and when the driver first went past it."""
+        p = self.push
+        if not (math.isfinite(p.push) and math.isfinite(p.against)):
+            return
+        self._pushed = p.push if math.isnan(self._pushed) else max(self._pushed, p.push)
+        self._against = p.against if math.isnan(self._against) else max(self._against, p.against)
+        self._beyond = p.beyond if math.isnan(self._beyond) else max(self._beyond, p.beyond)
+        if math.isnan(self._beyond_at) and p.beyond >= _BEYOND_UNITS:
+            self._beyond_at = elapsed_s
+
+    def _push_note(self) -> str:
+        if math.isnan(self._pushed):
+            return "driver's push not estimated"
+        note = f"pushed up to {self._pushed:.0f}, the driver against it up to {self._against:.0f}"
+        if math.isnan(self._beyond_at):
+            return note + ", never past the pulse's own push"
+        return note + f", past the pulse's own push from {self._beyond_at:.2f} s (by up to {self._beyond:.0f})"
 
     def _tuning(self) -> tuple[tuple, AssistTuning, tuple]:
         arm = _setting("ldw_min_speed_kmh", 60.0)

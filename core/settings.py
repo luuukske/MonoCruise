@@ -150,6 +150,8 @@ class Settings(metaclass=_SingletonMeta):
     # Share of the game's steady FFB force removed while the assist steers, 0 to 1; 0 keeps the game's feel.
     la_cancel_share: float = 0.0
     la_kappa_per_steer: float = 0.0
+    # The learned calibration kept for the next start (force_per_ms2, kappa_per_steer); used once the drive confirms it.
+    la_saved_calibration: dict = field(default_factory=dict)
     # Off on TruckersMP until moderation has answered for a steering torque (they cleared the rumble).
     la_tmp_enabled: bool = False
     # Test: keep steering through junctions, forks and merges; bends limited by lateral acceleration only.

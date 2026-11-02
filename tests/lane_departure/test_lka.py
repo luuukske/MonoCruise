@@ -10,8 +10,11 @@ from types import SimpleNamespace
 import pytest
 
 from core.la.controller import AssistTuning, Gains, LaneAssist, Wheel
+from core.la.hand_push import HandPush, HandPushEstimator, PushTuning
 from core.lane_departure import command as cmd
-from core.lane_departure.detector import SIDE_LEFT, SIDE_NONE, SIDE_RIGHT, Decision, LaneDetector, Tuning, _Edge
+from core.lane_departure.detector import (
+    LEVEL_CLOSE, LEVEL_WARN, SIDE_LEFT, SIDE_NONE, SIDE_RIGHT, Decision, LaneDetector, Tuning, _Edge,
+)
 from core.lane_departure.lka import LaneKeeping, LkaTuning
 from core.settings import Settings
 from tests.la.servo_sim import Rig
@@ -24,19 +27,24 @@ LINE = Tuning().half_lane_m - HALF_WIDTH
 RESTING = dict(stick=350.0, hand_mass=3.0, hand_damp=1.5)
 
 
-def keep(drift=None, radius=None, seconds=12.0, hands=0.0, hands_at=None, driver=None, pushes=None, **frame_kw):
+def keep(drift=None, radius=None, seconds=12.0, hands=0.0, hands_at=None, driver=None, pushes=None, feel=False,
+         **frame_kw):
     """Detector, pulse trigger and the LA core in pulse mode, closed loop on the modelled wheel and truck.
 
     ``drift`` kicks the truck sideways at 3 s; ``driver(t, rig)`` moves the hands. Rows: ``(t, e, ed, out, pulse)``.
-    ``pushes`` collects ``(t, servo torque counterclockwise, the pulse's side)`` from the modelled plugin.
+    ``pushes`` collects ``(t, servo torque counterclockwise, the pulse's side)`` from the modelled plugin. ``feel``
+    hands the core the driver's push estimated as the runner does, from the plugin's readings, so a pulse yields to it.
     """
-    rig = Rig(radius=radius, **{k: frame_kw.pop(k) for k in ("stick", "hand_mass", "hand_damp") if k in frame_kw})
+    rig = Rig(radius=radius, **{k: frame_kw.pop(k) for k in ("stick", "hand_mass", "hand_damp", "yaw_lag_s")
+                                if k in frame_kw})
     rig.settle_on_lane()
     rig.hands, rig.hands_at = hands, rig.steer if hands_at is None else hands_at
     assist, det, keeping = LaneAssist(PULSE), LaneDetector(), LaneKeeping()
     gains = Gains(rig.spring / (rig.gain * SPEED * SPEED), rig.gain)
     route = make_route(radius, length=2500.0 if radius is None else min(2500.0, 1.5 * math.pi * abs(radius)))
-    rows, out = [], None
+    rows, out, hand = [], None, None
+    est = HandPushEstimator(PushTuning(inertia=rig.inertia * (1.0 + rig.hand_mass)))
+    rate_lp, game_lp = 0.0, rig.game_force
     for i in range(int(seconds / DT)):
         t = i * DT
         if drift is not None and abs(t - 3.0) < 1e-6:
@@ -47,9 +55,13 @@ def keep(drift=None, radius=None, seconds=12.0, hands=0.0, hands_at=None, driver
         pulse = keeping.update(t, det.update(f), det, f, out)
         wheel_now = Wheel(ok=True, steer=rig.steer, rate=rig.plugin.rate, push=rig.plugin.servo_applied,
                           buzz=rig.plugin.scale, game=rig.game_force)
-        out = assist.update(f, gains, wheel_now, engage=pulse.side)
+        out = assist.update(f, gains, wheel_now, engage=pulse.side, hand=hand if feel else None)
         rows.append((t, rig.e, rig.ed, out, pulse))
         rig.run(out.servo, out.torque, DT)
+        rate_lp += (rig.rate - rate_lp) * (1.0 - math.exp(-DT / 0.04))
+        game_lp += (rig.game_force - game_lp) * (1.0 - math.exp(-DT / 0.10))
+        hand = est.update(DT if i else 0.0, rate_lp, game_lp, rig.plugin.value + rig.plugin.base, 0.0, 1,
+                          out.servo.only)
         if pushes is not None:
             pushes.append((t, rig.plugin.value * (1 if gains.force_per_ms2 > 0.0 else -1), out.servo.only))
     return rows
@@ -85,6 +97,75 @@ def test_cutting_the_inside_of_a_bend_waits_for_the_line_warning():
     assert LaneKeeping().update(1.0, Decision(), det, _frame(), None).side == SIDE_NONE
     det.edges[SIDE_RIGHT] = _edge(margin=0.2, drift=0.6, tlc=0.4)
     assert LaneKeeping().update(1.0, Decision(), det, _frame(), None).side == SIDE_RIGHT, "a straight or outer edge"
+
+
+def test_a_fast_run_into_the_inside_of_a_bend_starts_early():
+    """2026-11-02: 1.5 m/s into the oncoming lane on the inside of an R 90 waited for the line and went 0.5 m over."""
+    det = _detector()
+    det.edges = {SIDE_RIGHT: _edge(margin=0.3, drift=1.0, tlc=0.3, bend=0.2), SIDE_LEFT: _edge(margin=2.0, drift=-1.0)}
+    assert LaneKeeping().update(1.0, Decision(), det, _frame(), None).side == SIDE_RIGHT
+
+
+@pytest.mark.parametrize("radius", [250.0, -250.0])
+@pytest.mark.parametrize("lag", [0.1, 0.05])
+def test_a_sleeping_driver_in_a_bend_on_a_quick_truck_stays_near_the_lane(radius, lag):
+    """The game's truck follows its wheel within a tick. Released early, the wheel came back toward the line, the detector
+    read it as intent and latched, and the truck ran off the road with no pulse and no rumble.
+    """
+    rows = keep(None, radius=radius, seconds=16.0, hands=20000.0, hands_at=0.85 * (-1.0 / radius / GAIN),
+                yaw_lag_s=lag, **RESTING)
+    assert past_line(rows) < 0.5
+
+
+def test_a_pulse_holds_on_while_the_truck_itself_still_heads_out():
+    """In a bend the cab's corner reads home as soon as it turns in; nine 0.2 s pulses in a row on 2026-11-02."""
+    keeping = LaneKeeping()
+    keeping.update(0.0, START, _detector(), _frame(), None)
+    det = _detector()
+    det.edges = {SIDE_RIGHT: _edge(margin=0.3, drift=-0.1)}
+    steered = SimpleNamespace(event="", reason="pulse", offset_m=0.5, drift_ms=0.3, steer=0.0)
+    assert keeping.update(0.2, Decision(), det, _frame(), steered).event == ""
+    steered.drift_ms = 0.0
+    assert keeping.update(0.4, Decision(), det, _frame(), steered).event == "back"
+
+
+@pytest.mark.parametrize("drift, starts", [(-0.05, False), (0.3, True)])
+def test_an_early_start_needs_the_truck_itself_drifting_out(drift, starts):
+    """The detector reads 0.8 m/s toward the outer line of a fast bend; the lane fit says where the truck heads."""
+    det = _detector()
+    det.edges = {SIDE_RIGHT: _edge(margin=0.3, drift=0.8, tlc=0.4), SIDE_LEFT: _edge(margin=2.0, drift=-0.8)}
+    steered = SimpleNamespace(event="", reason="standby", offset_m=0.6, drift_ms=drift, steer=0.03)
+    assert (LaneKeeping().update(1.0, Decision(), det, _frame(), steered).side == SIDE_RIGHT) == starts
+    cue = Decision(started=True, side=SIDE_RIGHT, level=LEVEL_CLOSE)
+    pulse = LaneKeeping().update(1.0, cue, det, _frame(), steered)
+    assert pulse.event == ("start" if starts else "skipped")
+    warn = Decision(started=True, side=SIDE_RIGHT, level=LEVEL_WARN)
+    assert LaneKeeping().update(1.0, warn, det, _frame(), steered).event == "start", "the line warning: position only"
+
+
+def test_no_pulse_starts_while_the_core_still_holds_off_for_the_driver():
+    held = SimpleNamespace(event="", reason="override", offset_m=0.0, drift_ms=0.0, steer=0.0)
+    pulse = LaneKeeping().update(1.0, START, _detector(), _frame(), held)
+    assert (pulse.side, pulse.event, pulse.reason) == (SIDE_NONE, "skipped", "override")
+
+
+@pytest.mark.parametrize("steer, starts", [(0.025, True), (0.0, False)])
+def test_the_wheel_coming_back_after_a_pulse_is_not_the_driver(steer, starts):
+    """The pulse turned the wheel from 0.02 to 0.05 (counterclockwise, away from the right line). Coming back to 0.025
+    is its own wheel; past 0.02 toward the line is the driver.
+    """
+    keeping, det = LaneKeeping(), _detector()
+    steered = SimpleNamespace(event="", reason="pulse", offset_m=0.5, drift_ms=0.0, steer=0.02)
+    keeping.update(0.0, START, det, _frame(), steered)
+    det.edges = {SIDE_RIGHT: _edge(margin=0.3, drift=-0.5)}
+    steered.steer = 0.05
+    assert keeping.update(1.0, Decision(), det, _frame(), steered).event == "back"
+    det.edges = {SIDE_RIGHT: _edge(margin=0.3, drift=0.6, tlc=0.5, hard="intent")}
+    steered.steer, steered.drift_ms = steer, 0.3
+    pulse = keeping.update(1.5, Decision(), det, _frame(), steered)
+    assert (pulse.event == "start") == starts
+    if starts:
+        assert keeping.update(1.6, Decision(), det, _frame(), steered).event == "", "and it does not end it either"
 
 
 def test_a_blinker_toward_the_line_means_no_pulse():
@@ -177,23 +258,74 @@ def test_a_swerve_holds_pulses_off_for_five_seconds():
     assert keeping.update(6.1, START, det, _frame(), None).side == SIDE_RIGHT
 
 
-def test_at_most_eight_pulses_a_minute_and_a_straight_prefab_lane_counts_like_a_road():
+def test_no_per_minute_limit_and_a_straight_prefab_lane_counts_like_a_road():
+    """Lukas, 2026-11-02: no cap; a driver gripping the wheel is paying attention, and one who is not feels the pulls."""
     keeping = LaneKeeping()
     assert keeping.update(0.0, START, _detector(), _frame("prefab"), None).event == "start", "drive 12: LDW warned there"
     keeping.reset()
-    for i in range(1, 8):
-        assert keeping.update(5.0 * i, START, _detector(), _frame(), None).event == "start"
+    for i in range(1, 20):
+        assert keeping.update(3.0 * i, START, _detector(), _frame(), None).event == "start"
         keeping.reset()
-    skipped = keeping.update(45.0, START, _detector(), _frame(), None)
-    assert (skipped.side, skipped.event, skipped.line, skipped.reason) == (SIDE_NONE, "skipped", SIDE_RIGHT, "rate")
-    assert keeping.update(61.0, START, _detector(), _frame(), None).side == SIDE_RIGHT
 
 
-def test_a_pulse_a_gate_ends_at_once_does_not_count_toward_the_limit():
-    keeping = LaneKeeping(LkaTuning(per_min=1))
-    keeping.update(0.0, START, _detector(), _frame(), None)
-    assert keeping.update(0.2, Decision(reason="no_map"), _detector(), _frame(), None).event == "gate"
-    assert keeping.update(1.0, START, _detector(), _frame(), None).event == "start", "drive 12: 0.17 s pulses cost one"
+def _held(push, against, rate=0.0, seconds=3.0):
+    """A pulse off the right line against a driver whose estimated push stays fixed; ``rate`` turns the wheel home."""
+    assist = LaneAssist(replace(PULSE, settle_s=0.0))
+    route = make_route(None, length=2500.0)
+    hand = HandPush(hand=-against, accel=0.0, push=push, against=against)
+    target, rows = 0.0, []
+    for i in range(int(seconds / DT)):
+        out = assist.update(frame_at(i * DT, route, None, 0.5, 0.01), Gains(FORCE, GAIN),
+                            Wheel(ok=True, steer=target, rate=rate), engage=SIDE_RIGHT, hand=hand)
+        target = out.target
+        rows.append((i * DT, out))
+    return rows
+
+
+@pytest.mark.parametrize("push, against, yields", [(3000.0, 2400.0, True), (3000.0, 1000.0, False),
+                                                    (400.0, 400.0, False)])
+def test_a_pulse_hands_back_gradually_as_the_driver_pushes_back(push, against, yields):
+    """2026-11-02 and 03: pulses wound up to 3000 in 0.7 s against a held wheel and took up to 3 s to let go."""
+    rows = _held(push, against)
+    first = next((t for t, o in rows if o.event == "override"), None)
+    assert (first is not None) == yields
+    if yields:
+        assert first <= 1.0
+        handing = [o.authority for t, o in rows if t < first and 0.05 < o.authority < 0.95]
+        assert len(handing) >= 3, "eased out, not dropped"
+
+
+def test_a_pulse_pushes_no_harder_once_the_driver_holds_back_with_40_percent_of_it():
+    """Its integral wound the force up against the held wheel faster than the driver's push showed."""
+    held = _held(1500.0, 700.0)
+    assert not any(o.event == "override" for _, o in held), "under half: no hand-back"
+    assert max(o.servo.cap for t, o in held if t > 1.0) <= 1500
+    assert max(o.servo.cap for t, o in _held(1500.0, 300.0) if t > 1.0) == 3000, "light hands change nothing"
+
+
+@pytest.mark.parametrize("drift", [0.3, 0.8, 1.2])
+def test_a_free_wheel_never_reads_as_a_driver_pushing_back(drift):
+    rows = keep(drift, seconds=16.0, feel=True)
+    assert not any(o.event == "override" for _, _, _, o, _ in rows)
+    assert past_line(rows) < 0.3
+
+
+def test_heavy_resting_hands_in_a_bend_count_as_a_grip():
+    """By decision (Lukas, 2026-11-03): a driver gripping the wheel is paying attention, and one who is not feels the
+    pulls. The model's sleeping driver whose resting hands hold 90 % of an R 400 is handed back once; past the line
+    the detector stays disarmed, and the truck ran 18.7 m wide in 12 s, against 0.03 m when the pulse ignored the push.
+    """
+    rows = keep(None, radius=400.0, seconds=16.0, hands=20000.0, hands_at=0.9 * (-1.0 / 400.0 / GAIN), feel=True,
+                **RESTING)
+    assert any(o.event == "override" for _, _, _, o, _ in rows)
+    assert past_line(rows) < 20.0, "a ratchet: lower it when the trade-off improves, never raise it"
+
+
+def test_resistance_does_not_count_while_the_pulse_turns_the_wheel_home():
+    """Resting hands' damping and friction resist only a moving wheel; a driver fighting holds it or turns it out."""
+    rows = _held(3000.0, 2400.0, rate=0.05)
+    assert not any(o.event == "override" for _, o in rows)
+    assert max(o.servo.cap for t, o in rows if t > 1.0) == 3000
 
 
 def _core(offset, drift, accel=0.0):
@@ -354,6 +486,16 @@ def test_with_the_rumble_off_it_steers_back_and_never_rumbles(monkeypatch, lka_o
     assert all(c[0] == cmd.CMD_NONE for c in commands), "no LDW, no rumble"
     assert "pulse" in reasons
     assert "LKA steers back from the right line" in caplog.text
+
+
+def test_each_pulse_end_says_how_hard_the_driver_pushed_against_it(monkeypatch, lka_only, caplog):
+    caplog.set_level("INFO")
+    world = lka_wheel(World(monkeypatch))
+    thread = world.thread()
+    _drive(world, thread)
+    ends = [r.getMessage() for r in caplog.records if r.getMessage().startswith("LKA pulse ends")]
+    assert ends and all("the driver against it up to" in m for m in ends)
+    assert math.isfinite(thread._lka.push.hand)
 
 
 def test_lane_departure_warns_exactly_the_same_with_it_on(monkeypatch, lka_only):

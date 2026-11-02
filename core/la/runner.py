@@ -20,6 +20,7 @@ from core.settings import Settings
 
 from .calibration import Calibration, ForceCalibration
 from .controller import STRENGTH_MAX, AssistOutput, AssistTuning, Gains, LaneAssist, Wheel, WheelTuning
+from .hand_push import HandPush, HandPushEstimator, PushTuning
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,8 @@ _REF_MS = 80.0 / 3.6
 _EVENT_LOG_S = 1.0
 _CAL_LOG_S = 60.0
 _CAL_FLAP_S = 10.0
+_CAL_SAVE_S = 60.0
+_CAL_SAVE_CHANGE = 0.03
 _STEER_STALE_S = 0.3
 _ARM_MARGIN_KMH = 10.0
 _IDLE = frozenset({"speed", "no_map", "no_data", "paused", "off"})
@@ -37,7 +40,8 @@ _DEBUG_HEADER = [
     "t_s", "utc", "speed_kmh", "reason", "event", "authority", "offset_m", "centre_m", "drift_ms", "kappa_ff",
     "accel_fb_ms2", "target", "target_rate", "steer", "steer_rate", "game_force", "applied", "servo_applied",
     "cancel_applied", "integ", "kp", "kd", "ki", "cap", "cancel", "stiffness_scale", "weave_gain", "servo_scale",
-    "ff_scale", "frame_hz", "hands_rms", "lane_fit", "ffb_frames", "steer_frames", "preview_s",
+    "ff_scale", "frame_hz", "hands_rms", "lane_fit", "ffb_frames", "steer_frames", "preview_s", "servo_only",
+    "rumbling", "steer_accel", "hand", "pulse_push", "hand_against",
 ]
 _EVENTS = {
     "override": "yields, the driver steers",
@@ -62,6 +66,16 @@ def _show(value: float | None) -> float:
     return math.nan if value is None else value
 
 
+def saved_calibration() -> tuple[float, float] | None:
+    """``(force_per_ms2, kappa_per_steer)`` kept from an earlier drive (``Settings.la_saved_calibration``), or None."""
+    raw = getattr(Settings, "la_saved_calibration", None)
+    try:
+        force, gain = float(raw["force_per_ms2"]), float(raw["kappa_per_steer"])
+    except (TypeError, KeyError, ValueError):
+        return None
+    return (force, gain) if math.isfinite(force) and math.isfinite(gain) and force and gain > 0.0 else None
+
+
 @dataclass(frozen=True)
 class Request:
     """What this tick sends to the plugin for the LA."""
@@ -83,6 +97,8 @@ class AssistRunner:
         self._out = AssistOutput()
         self._cal_state: tuple = ()
         self._cal_logged = 0.0
+        self._cal_saved_at = -math.inf
+        self._saved_seen = ""
         self._plugin_warned = False
         self._last_event_log = 0.0
         self._steer_frames: int | None = None
@@ -97,6 +113,9 @@ class AssistRunner:
         self._game_sum = self._felt_sum = 0.0
         self._assist_ticks = 0
         self._last_gains: Gains | None = None
+        self._hand = HandPushEstimator()
+        self._push = HandPush()
+        self._push_at: float | None = None
         root = debug_root or Path(__file__).resolve().parents[2]
         self._debug = TickDebugLog(root, self.DEBUG_NAME, _DEBUG_HEADER, 0.05, 2.0, _DEBUG_MAX_BYTES)
 
@@ -104,10 +123,17 @@ class AssistRunner:
     def output(self) -> AssistOutput:
         return self._out
 
+    @property
+    def push(self) -> HandPush:
+        """The driver's estimated push on the rim this tick; a lane keeping pulse yields to it."""
+        return self._push
+
     def reset(self) -> None:
-        """Back to silence; the calibration survives a toggle, a restart of the app does not."""
+        """Back to silence; the calibration survives a toggle and is kept for the next start."""
         self._assist = LaneAssist(self._assist.tune)
         self._out = AssistOutput()
+        self._hand.reset()
+        self._push = HandPush()
 
     def step(self, frame: Frame | None, repeat: bool, status: PluginStatus, tmp: bool, engage: int = 0) -> Request:
         """This tick's request. ``repeat`` means the radar frame did not move since the last call.
@@ -118,14 +144,30 @@ class AssistRunner:
         if not repeat:
             wheel = self._wheel(status)
             gains = self._gains(frame, status, wheel)
-            self._out = self._assist.update(frame, gains, wheel, tmp, engage=engage)
+            self._out = self._assist.update(frame, gains, wheel, tmp, engage=engage, hand=self._push)
             self._note(status)
+        self._watch_push(status)
         self._account(self._out, status)
         self._record(status)
         return Request(self._out.torque, self._out.servo, self._out.rumble)
 
     def close(self) -> None:
         self._debug.close()
+
+    def _watch_push(self, status: PluginStatus) -> None:
+        """The driver's push from the plugin's readings, every tick; it needs the wheel's torque direction.
+
+        ``perf_counter``: the step is a divisor, and ``monotonic`` can tick at 15.6 ms on Windows.
+        """
+        now = time.perf_counter()
+        dt = now - self._push_at if self._push_at is not None else 0.0
+        self._push_at = now
+        gains = self._last_gains
+        direction = (1 if gains.force_per_ms2 > 0.0 else -1) if gains is not None and gains.force_per_ms2 else 0
+        if not status.servo_capable:
+            direction = 0
+        self._push = self._hand.update(dt, status.steer_rate, status.game_force, status.applied, status.cancel_applied,
+                                       direction, self._out.servo.only)
 
     def _record(self, status: PluginStatus) -> None:
         """20 Hz rows to the debug file while ``Settings.debug`` is on and the assist is not idle."""
@@ -143,7 +185,9 @@ class AssistRunner:
             "stiffness_scale": self._assist.ring_scale, "weave_gain": self._assist.gain,
             "servo_scale": status.servo_scale, "ff_scale": self._assist.ff_scale, "frame_hz": status.frame_hz,
             "hands_rms": out.hands_rms, "lane_fit": int(out.fitted), "ffb_frames": status.frames,
-            "steer_frames": status.steer_frames, "preview_s": out.preview_s,
+            "steer_frames": status.steer_frames, "preview_s": out.preview_s, "servo_only": servo.only,
+            "rumbling": status.rumbling, "steer_accel": self._push.accel, "hand": self._push.hand,
+            "pulse_push": self._push.push, "hand_against": self._push.against,
         })
 
     def _follow_settings(self) -> None:
@@ -154,6 +198,7 @@ class AssistRunner:
             logger.info(*line)
         self._key = key
         self._assist = LaneAssist(tuning)
+        self._hand = HandPushEstimator(PushTuning(inertia=tuning.wheel.inertia))
 
     def _tuning(self) -> tuple[tuple, AssistTuning, tuple]:
         """The settings key, the tuning it gives and a log line for it (empty: only log a change)."""
@@ -191,10 +236,37 @@ class AssistRunner:
         else:
             cal = self._cal.result()
         self._log_calibration(cal)
+        self._keep_calibration(cal)
         force = _setting("la_force_per_ms2", 0.0) or cal.force_per_ms2
         kappa = _setting("la_kappa_per_steer", 0.0) or cal.kappa_per_steer.value
         self._last_gains = None if force is None or kappa is None or kappa <= 0.0 else Gains(force, kappa)
         return self._last_gains
+
+    def _keep_calibration(self, cal: Calibration) -> None:
+        """Says once what became of the saved calibration, and saves a live one ready on both fits for the next start,
+        at most once a minute and only when it moved by 3 %.
+        """
+        if cal.saved != self._saved_seen:
+            self._saved_seen = cal.saved
+            if cal.saved == "confirmed":
+                logger.info("%s calibration: using the one saved from an earlier drive until this drive's is ready; "
+                            "the wheel's force direction checked against this drive", self.LABEL)
+            elif cal.saved == "rejected":
+                logger.warning("%s calibration: the saved one pushes the wheel the other way from this drive; it is "
+                               "dropped and the calibration learns afresh", self.LABEL)
+        now = time.monotonic()
+        if cal.state != "ready" or cal.kappa_per_steer.state != "ready" or now - self._cal_saved_at < _CAL_SAVE_S:
+            return
+        self._cal_saved_at = now
+        force, gain = cal.force_per_ms2, cal.kappa_per_steer.value
+        old = saved_calibration()
+        if old and abs(force / old[0] - 1.0) <= _CAL_SAVE_CHANGE and abs(gain / old[1] - 1.0) <= _CAL_SAVE_CHANGE:
+            return
+        try:
+            Settings.save(values={"la_saved_calibration": {"force_per_ms2": round(force, 1),
+                                                           "kappa_per_steer": round(gain, 4)}})
+        except Exception:
+            logger.debug("la_saved_calibration save failed", exc_info=True)
 
     def _log_calibration(self, cal: Calibration) -> None:
         now = time.monotonic()

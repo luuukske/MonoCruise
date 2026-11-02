@@ -7,6 +7,7 @@ import csv
 import pytest
 
 from core.la import runner as runner_mod
+from core.la.calibration import Calibration, Estimate
 from core.la.runner import AssistRunner
 from core.lane_departure.command import PluginStatus
 from core.settings import Settings
@@ -39,6 +40,7 @@ def test_it_records_while_assisting_with_debug_on(monkeypatch, settings, tmp_pat
     with (tmp_path / "la_debug.csv").open(newline="", encoding="utf-8") as fh:
         rows = list(csv.DictReader(fh))
     assert rows and {"steer", "target", "target_rate", "kp", "kd", "cancel", "game_force"} <= set(rows[0])
+    assert {"hand", "steer_accel", "pulse_push", "hand_against", "servo_only", "rumbling"} <= set(rows[0])
     assert not any(k in rows[0] for k in ("x", "z", "pos_x", "pos_z")), "no coordinates"
     assert any(r["reason"] == "assist" for r in rows)
 
@@ -47,3 +49,14 @@ def test_nothing_is_written_without_debug(monkeypatch, settings, tmp_path):
     monkeypatch.setattr(settings, "debug", False, raising=False)
     drive(AssistRunner(debug_root=tmp_path))
     assert not (tmp_path / "la_debug.csv").exists()
+
+
+def test_a_ready_calibration_is_kept_for_the_next_start(monkeypatch, settings, tmp_path):
+    monkeypatch.setattr(settings, "la_saved_calibration", {}, raising=False)
+    runner = AssistRunner(debug_root=tmp_path)
+    runner._keep_calibration(Calibration(force_per_ms2=900.0, state="held",
+                                         kappa_per_steer=Estimate(0.2, state="held")))
+    assert runner_mod.saved_calibration() is None, "only live fits ready on both are kept"
+    runner._keep_calibration(Calibration(force_per_ms2=706.0, state="ready",
+                                         kappa_per_steer=Estimate(0.179, state="ready")))
+    assert runner_mod.saved_calibration() == (706.0, 0.179)

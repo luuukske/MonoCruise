@@ -62,7 +62,6 @@ class Tuning:
     rearm_m: float = 0.15
     rearm_hold_s: float = 0.3
     cooldown_s: float = 1.0
-    max_per_min: int = 12
     min_rumble_s: float = 1.0
     max_rumble_s: float = 4.0
     out_far_m: float = 1.5
@@ -355,7 +354,6 @@ class LaneDetector:
         self._last_xz: tuple[float, float] | None = None
         self._last_t = 0.0
         self._sides = {SIDE_LEFT: _Side(), SIDE_RIGHT: _Side()}
-        self._warns: deque[float] = deque()
         self._active = SIDE_NONE
         self._level = LEVEL_NONE
         self._level_since = 0.0
@@ -669,8 +667,6 @@ class LaneDetector:
                 self._hold(t, e)
         near_miss = ""
         if self._active == SIDE_NONE:
-            while self._warns and t - self._warns[0] > 60.0:
-                self._warns.popleft()
             for side in sorted(_SIDES, key=lambda s: edges[s].margin):
                 e = edges[side]
                 if 0.0 < e.margin <= e.bend:
@@ -678,7 +674,7 @@ class LaneDetector:
                 level = self._want(e)
                 if not level:
                     continue
-                muted = self._mute(e, level) or ("rate" if len(self._warns) >= tn.max_per_min else "")
+                muted = self._mute(e, level)
                 if muted:
                     near_miss = near_miss or muted
                     continue
@@ -703,8 +699,6 @@ class LaneDetector:
         if level == LEVEL_WARN:
             st.armed_warn = False
             st.last_warn = t
-        if self._active == SIDE_NONE:
-            self._warns.append(t)
         self._active = side
         self._level = level
         self._level_since = t

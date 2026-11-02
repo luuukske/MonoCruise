@@ -15,7 +15,7 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 
 from core.la.calibration import ForceCalibration
-from core.la.runner import AssistRunner, Request
+from core.la.runner import AssistRunner, Request, saved_calibration
 from core.radar.ego_geometry import EgoGeometry
 from core.settings import Settings
 from core.thread_management.base_thread import BaseThread, ThreadData
@@ -58,7 +58,7 @@ class LaneDepartureThread(BaseThread):
         self._la_on = False
         self._lka_on = False
         self._detect_on = False
-        calibration = ForceCalibration()
+        calibration = ForceCalibration(saved=saved_calibration())
         self._assist = AssistRunner(calibration=calibration)
         self._lka = LkaRunner(calibration=calibration)
         self._keeping = LaneKeeping()
