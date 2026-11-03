@@ -12,7 +12,7 @@ from core.lane_departure.display import ALERT_COLOR, LEFT, WARN_COLOR
 # Each leg runs this share of the screen height from the corner; the first part stays fully red, then fades.
 EXTENT_OF_HEIGHT = 0.25
 SOLID_SHARE = 0.40
-THICKNESS_PX = 5
+THICKNESS_PX = 6
 _FADE_STOPS = 8
 
 

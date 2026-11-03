@@ -623,7 +623,7 @@ The bar is `WA_ShowWithoutActivating` and `WindowDoesNotAcceptFocus` for the sam
 The bar owns two more windows, one per bottom corner of its screen. On the side LDW is rumbling for, or an
 LKA pulse steers away from, that corner turns steady dark orange, or blinks red when side traffic makes that
 lane unsafe (`firing_alert`, colours and blink from `display.py`): a leg along the bottom edge and one up the side, each
-25 % of the screen height long, solid for the first 40 % and then fading out, 5 px thick against the bar's
+25 % of the screen height long, solid for the first 40 % and then fading out, 6 px thick against the bar's
 3 px. The bottom leg runs into the exact corner and the side leg starts on top of it, so the two
 never overlap while fading. They follow `core/lane_departure/display.py` like the CC panel's lines: on at once, held 1 s after
 firing stops, then a 0.25 s fade; only while the FFB plugin is hooked, never while AEB or an emergency stop

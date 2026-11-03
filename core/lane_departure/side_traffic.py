@@ -34,7 +34,7 @@ class SideTuning:
     beside_front_m: float = 2.0
     beside_rear_m: float = 1.0
     # A body leaving the beside zone this soon, at its speed relative to the rig, no longer counts.
-    exit_s: float = 0.2
+    exit_s: float = 0.4
     # Time lookahead: a body that reaches the rig within this long, at today's closing speed.
     same_way_s: float = 3.0
     oncoming_s: float = 2.5
