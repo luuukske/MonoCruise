@@ -22,15 +22,17 @@ from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
 
 from .command import PluginStatus, RumbleChannel, intensity_units
-from .detector import LEVEL_CLOSE, Decision, Frame, LaneDetector, Tuning, body_from_geometry
+from .detector import LEVEL_CLOSE, SIDE_LEFT, SIDE_RIGHT, Decision, Frame, LaneDetector, Tuning, body_from_geometry
 from .lka import LaneKeeping, Pulse
 from .lka_runner import LkaRunner
+from .side_traffic import BESIDE, LEFT, RIGHT, Ego, SideState, SideTraffic
 
 logger = logging.getLogger(__name__)
 
 _LOG_EVERY_S = 1.0
 _SUMMARY_S = 10.0
 _ARM_MARGIN_KMH = 10.0
+_SIDE_SUMMARY_S = 60.0
 
 
 @dataclass
@@ -40,9 +42,14 @@ class LaneDepartureData(ThreadData):
     reason: str = "off"
     assist_reason: str = "off"
     assist_torque: float = 0.0
-    # For the CC panel's lane lines: the detector's reason while LDW or LKA watches, and the side acted on.
+    # For the CC panel's lane lines and the bar's corners: the detector's reason while LDW or LKA watches, the side
+    # acted on, and whether side traffic makes the lane past that line unsafe (an alert, not a warning).
     watch_reason: str = "off"
     firing_side: int = 0
+    firing_alert: bool = False
+    # Side traffic (side_traffic.py): what makes moving over unsafe per side, "" when nothing does.
+    side_left: str = ""
+    side_right: str = ""
     plugin: PluginStatus = field(default_factory=PluginStatus)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
@@ -78,6 +85,16 @@ class LaneDepartureThread(BaseThread):
         self._last_loop = 0.0
         self._min_gap = math.inf
         self._min_margin = math.inf
+        self._side = SideTraffic()
+        self._side_state = SideState()
+        self._traffic: tuple = ((), frozenset(), ())
+        self._rig_logged: tuple | None = None
+        self._side_lit: Counter = Counter()
+        self._side_onsets: Counter = Counter()
+        self._side_window = 0.0
+        self._side_last = 0.0
+        self._side_failed = False
+        self._alerting = False
 
     def setup(self) -> None:
         logger.debug("lane departure setup complete")
@@ -102,6 +119,9 @@ class LaneDepartureThread(BaseThread):
         lka = lka and not la
         frame = self._read_frame()
         repeat = frame is not None and frame.t == self._last_frame_t and frame.age_s <= self._detector.tune.max_age_s
+        side = self._step_side(frame, repeat) if ldw or lka else SideState()
+        if frame is not None:
+            frame = replace(frame, unsafe_left=side.left is not None, unsafe_right=side.right is not None)
         decision = Decision()
         if ldw or lka:
             decision = replace(self._last_decision, started=False) if repeat else self._detector.update(frame)
@@ -123,7 +143,89 @@ class LaneDepartureThread(BaseThread):
         if ldw:
             self._account(decision)
         firing = self._pulse.side if lka and self._pulse.side else decision.side if ldw and decision.active else 0
-        self._publish(decision if ldw else Decision(), status, decision.reason if ldw or lka else "off", firing)
+        alert = self._alert(firing, side)
+        self._publish(decision if ldw else Decision(), status, decision.reason if ldw or lka else "off", firing, side,
+                      alert)
+
+    def _alert(self, firing: int, side: SideState) -> bool:
+        """LDW or LKA acting toward a lane that side traffic makes unsafe; logged once per episode."""
+        hit = side.at(LEFT if firing == SIDE_LEFT else RIGHT) if firing else None
+        alert = hit is not None
+        if alert and not self._alerting:
+            logger.info("lane departure toward an unsafe lane: %s, %s %s", "left" if firing == SIDE_LEFT else "right",
+                        hit.kind, "TMP" if hit.tmp else "AI")
+        self._alerting = alert
+        return alert
+
+    def _step_side(self, frame: Frame | None, repeat: bool) -> SideState:
+        """Side traffic for this tick: it lifts the driver-intent mutes toward an unsafe lane and drives the alert."""
+        if repeat:
+            return self._side_state
+        try:
+            return self._judge_side(frame)
+        except Exception:
+            # Side traffic must never stop the rumble or a pulse running in the same loop; warn once.
+            (logger.debug if self._side_failed else logger.warning)("side traffic failed", exc_info=True)
+            self._side_failed = True
+            self._side_state = SideState(reason="error")
+            return self._side_state
+
+    def _judge_side(self, frame: Frame | None) -> SideState:
+        vehicles, skip, trailers = self._traffic
+        if frame is None or frame.paused or frame.age_s > self._detector.tune.max_age_s:
+            state = self._side.update(time.monotonic(), None, (), skip, None, None)
+        else:
+            ego = Ego(frame.x, frame.z, frame.yaw_rad, frame.speed_ms, frame.half_width_m, frame.front_m,
+                      frame.rear_m, trailers)
+            state = self._side.update(frame.t, ego, vehicles, skip, frame.route, frame.lanes)
+            self._note_rig(trailers)
+        self._note_side(state)
+        self._side_state = state
+        return state
+
+    def _note_rig(self, trailers) -> None:
+        length = self._side.rig_length_m
+        if not math.isfinite(length):
+            return
+        key = (len(trailers), round(length))
+        if key == self._rig_logged:
+            return
+        self._rig_logged = key
+        gap = getattr(trailers[0], "hitch_gap_m", math.nan) if trailers else math.nan
+        logger.info("side traffic rig: %d trailer(s), %.1f m long%s", len(trailers), length,
+                    f", kingpin {gap:.2f} m from the fifth wheel" if math.isfinite(gap) else "")
+
+    def _note_side(self, state: SideState) -> None:
+        """One line per side lighting up or changing kind; every 60 s, how long each side was lit."""
+        now = time.monotonic()
+        dt = min(now - self._side_last, 0.2) if self._side_last else 0.0
+        self._side_last = now
+        for side, name in ((LEFT, "left"), (RIGHT, "right")):
+            hit, before = state.at(side), self._side_state.at(side)
+            if hit is None:
+                if before is not None:
+                    logger.debug("side traffic %s clear", name)
+                continue
+            self._side_lit[name] += dt
+            if before is not None and before.kind == hit.kind and before.vid == hit.vid:
+                continue
+            onset = before is None or before.kind != hit.kind
+            if onset:
+                self._side_onsets[hit.kind] += 1
+            closing = "" if hit.kind == BESIDE else f", gap {hit.gap_m:.1f} m, time {hit.time_s:.1f} s"
+            (logger.info if onset else logger.debug)(
+                "side traffic %s: %s %s, %.1f m long, %.1f m off our lane centre, closing %.1f m/s%s, "
+                "lane past the line %s", name, hit.kind, "TMP" if hit.tmp else "AI", hit.length_m,
+                abs(hit.lateral_m), hit.closing_ms, closing, hit.lane)
+        if now - self._side_window < _SIDE_SUMMARY_S:
+            return
+        if self._side_window and (self._side_lit or self._side_onsets):
+            logger.info("side traffic last %.0f s: lit left %.1f s, right %.1f s | %s", now - self._side_window,
+                        self._side_lit["left"], self._side_lit["right"],
+                        ", ".join(f"{k} {n}" for k, n in self._side_onsets.most_common()) or "no onsets")
+        self._side_lit.clear()
+        self._side_onsets.clear()
+        self._side_window = now
 
     def _keep_lane(self, frame: Frame | None, repeat: bool, decision: Decision) -> Request:
         """A lane keeping pulse on the detector's own departures; the detector is read, never changed."""
@@ -216,6 +318,8 @@ class LaneDepartureThread(BaseThread):
         self._channel.stop()
         self._channel.close()
         self._status = PluginStatus()
+        self._side.reset()
+        self._side_state = SideState()
         self._publish(Decision(), PluginStatus())
 
     @staticmethod
@@ -235,9 +339,11 @@ class LaneDepartureThread(BaseThread):
                 d = radar.data
                 return (
                     d.ego_x, d.ego_z, d.ego_yaw_rad, d.ego_speed, bool(d.paused), d.t_mono,
-                    getattr(d, "ego_geometry", None),
+                    getattr(d, "ego_geometry", None), list(getattr(d, "vehicles", ()) or ()),
+                    frozenset(getattr(d, "off_surface_ids", frozenset()))
+                    | frozenset(getattr(d, "ncz_ids", frozenset())),
                 )
-        except AttributeError:
+        except (AttributeError, TypeError):
             return None
 
     def _read_telemetry(self):
@@ -250,7 +356,7 @@ class LaneDepartureThread(BaseThread):
                 return (
                     float(d.userSteer), int(d.gear), float(d.userBrake),
                     bool(getattr(d, "blinkerLeft", False)), bool(getattr(d, "blinkerRight", False)),
-                    bool(d.hazardsActive),
+                    bool(d.hazardsActive), tuple(getattr(d, "ego_trailers", ()) or ()),
                 )
         except (AttributeError, TypeError, ValueError):
             return None
@@ -279,8 +385,9 @@ class LaneDepartureThread(BaseThread):
         tel = self._read_telemetry()
         if radar is None or tel is None:
             return None
-        x, z, yaw, speed, paused, t_radar, geometry = radar
-        steer, gear, brake, left, right, hazards = tel
+        x, z, yaw, speed, paused, t_radar, geometry, vehicles, skip = radar
+        steer, gear, brake, left, right, hazards, trailers = tel
+        self._traffic = (vehicles, skip, trailers)
         geometry = geometry if isinstance(geometry, EgoGeometry) else None
         body = body_from_geometry(geometry)
         if body != self._body:
@@ -315,13 +422,18 @@ class LaneDepartureThread(BaseThread):
             self._last_near_log = now
             logger.debug("lane departure muted by %s: " + features, d.near_miss, *values)
 
-    def _publish(self, d: Decision, status: PluginStatus, watch_reason: str = "off", firing_side: int = 0) -> None:
+    def _publish(self, d: Decision, status: PluginStatus, watch_reason: str = "off", firing_side: int = 0,
+                 side: SideState | None = None, alert: bool = False) -> None:
+        side = side or SideState()
         with self.data._lock:
             self.data.active = d.active
             self.data.side = d.side
             self.data.reason = d.reason
             self.data.watch_reason = watch_reason
             self.data.firing_side = firing_side
+            self.data.firing_alert = alert
+            self.data.side_left = side.left.kind if side.left is not None else ""
+            self.data.side_right = side.right.kind if side.right is not None else ""
             steering = self._assist if self._la_on else self._lka if self._lka_on else None
             self.data.assist_reason = steering.output.reason if steering is not None else "off"
             self.data.assist_torque = float(status.applied) if steering is not None else 0.0

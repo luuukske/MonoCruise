@@ -19,7 +19,17 @@ if not __name__ == "__main__":
     from core.settings import Settings
 else:
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from core.lane_departure.display import DISABLED, LEFT, RIGHT, STANDBY, WARN, LaneLines
+from core.lane_departure.display import (
+    ALERT,
+    ALERT_COLOR,
+    DISABLED,
+    LEFT,
+    RIGHT,
+    STANDBY,
+    WARN,
+    WARN_COLOR,
+    LaneLines,
+)
 from PySide6.QtCore import Qt, QTimer, Signal, QByteArray, QRectF, QPointF
 from PySide6.QtGui import (
     QPainter,
@@ -73,7 +83,8 @@ LANE_LINE_COLOR = "#F1F1F1"
 _LANE_STYLES = {
     DISABLED: (LANE_LINE_COLOR, 0.30, 4.0),
     STANDBY: (LANE_LINE_COLOR, 1.0, 4.0),
-    WARN: (AEB_COLOR, 1.0, 4.5),
+    WARN: (WARN_COLOR, 1.0, 4.5),
+    ALERT: (ALERT_COLOR, 1.0, 4.5),
 }
 _LANE_GAP_PX = 5.0
 _LANE_TICK_MS = 16
@@ -318,8 +329,8 @@ class _PanelWidget(QWidget):
         if needs_color or needs_icon:
             p._text_color = cc_panel._color_for_mode(p._cc_mode, p._cc_enabled)
 
-        if "lane_state" in changes or "lane_side" in changes:
-            p._lane.set(p._lane_state, p._lane_side, time.monotonic())
+        if "lane_state" in changes or "lane_side" in changes or "lane_alert" in changes:
+            p._lane.set(p._lane_state, p._lane_side, time.monotonic(), p._lane_alert)
             self._lane_tick()
 
         # Drive lead-visible animation from current state.
@@ -1626,6 +1637,7 @@ class _PanelWidget(QWidget):
         lane = self._p._lane
         if not lane.visible():
             return
+        now = time.monotonic()
         y_bot = y_top + block_h
         slant = 2.0 * sc / pitch * block_h
         gap = _LANE_GAP_PX * sc
@@ -1634,7 +1646,7 @@ class _PanelWidget(QWidget):
         for side in (LEFT, RIGHT):
             x_bot = ax - gap if side == LEFT else ax + area_sz - 1 + gap
             x_top = x_bot - side * slant
-            for style, weight in lane.weights(side).items():
+            for style, weight in lane.shown(side, now).items():
                 if weight <= 0.0:
                     continue
                 color_hex, alpha, width = _LANE_STYLES[style]
@@ -1729,6 +1741,7 @@ class cc_panel:
         self._distance_to_lead = 2
         self._lane_state = "off"
         self._lane_side = 0
+        self._lane_alert = False
         self._lane = LaneLines()
         self._AEB_warn = False
         self._AEB_warn_off_time = 0.0
@@ -1819,6 +1832,7 @@ class cc_panel:
         speed_unit: str | None = None,
         lane_state: str | None = None,
         lane_side: int | None = None,
+        lane_alert: bool | None = None,
     ):
         """Update the display. Thread-safe, never drops changes. Safe to call at high..."""
         d: dict = {}
@@ -1846,6 +1860,8 @@ class cc_panel:
             d["lane_state"] = lane_state
         if lane_side is not None:
             d["lane_side"] = lane_side
+        if lane_alert is not None:
+            d["lane_alert"] = bool(lane_alert)
         if complete_update:
             d["_complete_update"] = True
         if not d:
@@ -1948,6 +1964,7 @@ if __name__ == "__main__":
         "lead_vehicle_speed": None,
         "lane_state": "off",
         "lane_side": 0,
+        "lane_alert": False,
     }
 
     LEAD_SPEEDS = [None, 110.0]
@@ -1970,6 +1987,7 @@ if __name__ == "__main__":
         print("  1/2/3/4 = distance_to_lead (lines)   b = AEB_warn")
         print("  v = lead_vehicle_speed (cycle: None/60/80/96/110)")
         print("  k = lane lines (cycle off/disabled/standby)   w = lane warning (cycle none/left/right)")
+        print("  r = lane warning is an alert (unsafe lane, blinking red)")
         print("  h = help   q = quit")
         print(f"\n  Now: mode={state['cc_mode']!r} enabled={state['cc_enabled']} "
               f"locked={state['acc_locked']} acc={state['acc_enabled']} truck={state['acc_truck']} "
@@ -2029,6 +2047,9 @@ if __name__ == "__main__":
             elif key == "w":
                 state["lane_side"] = LANE_SIDES[(LANE_SIDES.index(state["lane_side"]) + 1) % len(LANE_SIDES)]
                 print(f"  lane_side = {state['lane_side']}")
+            elif key == "r":
+                state["lane_alert"] = not state["lane_alert"]
+                print(f"  lane_alert = {state['lane_alert']}")
             else:
                 print("  Unknown key. Press h for help.")
                 continue

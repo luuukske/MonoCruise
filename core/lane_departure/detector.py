@@ -97,6 +97,7 @@ class Frame:
 
     ``path_m`` is the rear axle group ahead of the origin (negative: behind), the point that rolls along the heading.
     ``lanes`` is the map's lane window around ego; only the lane keeping assist reads it.
+    ``unsafe_left`` / ``unsafe_right``: side traffic makes moving over that way unsafe (side_traffic.py).
     """
 
     t: float
@@ -119,6 +120,14 @@ class Frame:
     path_m: float
     route: object | None
     lanes: object | None = None
+    unsafe_left: bool = False
+    unsafe_right: bool = False
+
+
+def unsafe_toward(frame, side: int) -> bool:
+    """Side traffic makes moving over that way unsafe; a frame without the fields is safe."""
+    name = "unsafe_left" if side == SIDE_LEFT else "unsafe_right" if side == SIDE_RIGHT else ""
+    return bool(getattr(frame, name, False)) if name else False
 
 
 @dataclass(frozen=True)
@@ -595,6 +604,9 @@ class LaneDetector:
             hard = "evade"
         elif st.latched:
             hard = "latched"
+        if unsafe_toward(f, side):
+            # Toward a lane side traffic makes unsafe the driver's intent (blinker, steering) mutes nothing; a swerve does.
+            hard = "evade" if evading else ""
         if tn.test_mode:
             hard = ""
         drift = sign * drift_right

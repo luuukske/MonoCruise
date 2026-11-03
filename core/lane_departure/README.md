@@ -102,11 +102,11 @@ A truck centre more than three half lanes from the route is `off_route`.
 | `bend_sharp` | lane curvature of 1/90 m or more |
 | `bend_change` | approach cue only: lane curvature varies by 1/1000 or more from ego to `max(30 m, 3 s)` ahead (`dkappa` in the log), held 2 s, and the wheel moved away from that edge in the last 1.5 s (`steer_away`); the line warning still applies |
 | `bend_tight` | approach cue only: curvature of 1/400 or more from 10 m behind to `max(30 m, 3 s)` ahead, held 2 s; the line warning still applies |
-| `blinker` | that side's lamp (or hazards) is on, or went off under 2 s ago |
+| `blinker` | that side's lamp (or hazards) is on, or went off under 2 s ago; not toward an unsafe lane (Side traffic) |
 | `deliberate` | the wheel moved toward that edge by 0.06 of lock or more over the last 2 s, or at 0.3 per second or more over 0.3 s; held 1 s |
 | `intent` | the heading toward that edge is 1.2 degrees or more and the wheel moved toward it (0.015 of lock net over 2 s, or 0.06 per second); held 2 s |
 | `evade` | a hard wheel move in either direction (0.15 of lock net over 2 s, or 0.6 per second over 0.3 s) mutes both sides for 2 s: a swerve and its counter-steer |
-| `latched` | reached the warning line while blinking or steering deliberately: silent until back inside it |
+| `latched` | reached the warning line while blinking or steering deliberately: silent until back inside it. `deliberate`, `intent` and `latched` do not mute toward an unsafe lane either (Side traffic) |
 | `returning` | moving toward the lane centre at 0.2 m/s or more; mutes the line warning (the cue needs a drift toward the edge anyway) |
 | `bend_inner` | not a mute: the tyre is over the inside line but within the bend allowance (reported for tuning) |
 
@@ -343,8 +343,50 @@ drifting out by the lane fit), and every 10 s
 while it pulsed the LA summary. With `debug` on, `lka_debug.csv` gets LA's columns at 20 Hz during a
 pulse and 2 s after.
 
+## Side traffic
+
+`side_traffic.py`, dev only for Lukas so far, always on with LDW or LKA. Per side, the vehicle that makes moving
+over a lane unsafe right now. It does two things (Lukas, 2026-11-03), and nothing else:
+
+- **Intent stops counting toward an unsafe lane.** The thread hands the sides to the detector
+  (`Frame.unsafe_left` / `unsafe_right`), and on such a side the blinker, `deliberate`, `intent` and `latched`
+  mute nothing, so a driver who signals and moves over calmly into a car is warned, and LKA pulses (its pulse
+  mode reads the same edges; the ride through a fork ignores the lamp there too). A swerve (`evade`) still mutes,
+  and so does every gate. Once the lane is clear again the mutes are back, so a lane change finishes as before.
+- **The warning says so.** LDW or LKA acting shows on the CC panel's lane line and the bottom bar's corner in
+  steady dark orange; acting toward an unsafe lane blinks hard red (`firing_alert`), on both. An episode that is
+  an alert at any time stays one to its end, and both are held 1 s after LDW and LKA stop (`display.LaneLines`).
+  Side traffic alone, with LDW and LKA not acting, shows nothing and never moves the wheel
+  (`test_side_traffic_alone_lights_nothing_and_never_moves_the_wheel`).
+
+Every number below is a placeholder in `SideTuning`, set by reasoning.
+
+- **The frame.** Ego's lane from the map: the route ahead (240 m) and `route_behind` (120 m, rebuilt every 10 m
+  or on a lane change; a straight line back where the map has none). Each body is placed by its centre's arc
+  length and offset from the lane centre, its corners on the tangent there, so bends need no prediction.
+- **The rig.** The tractor (`EgoGeometry`) and every attached trailer from the SDK (`TrailerBody`,
+  `core/radar/README.md` §17, ends estimated). Its rear and front are the farthest corners along the lane.
+- **Beside**: a body that reaches from 1 m behind the rig to 2 m ahead of it, entirely clear of the rig on that
+  side and centred within 7 m of the lane centre, oncoming or not. A body that overlaps the rig is a ghost.
+- **Everything else is a time lookahead** (Lukas, 2026-11-03), one lane over (centre 2.6 to 7 m off), within
+  200 m, at today's closing speed; distance alone never counts, so a car at our speed just behind or ahead stays
+  dark. **Behind** (we are being overtaken): travelling our way and reaching the rig's rear within 3 s.
+  **Ahead** (we overtake it): travelling our way, slower, and reached by our bumper within 3 s. **Oncoming**:
+  travelling the other way and reaching the bumper within 2.5 s.
+- **Left out**: parked vehicles, radar's off-surface and no-collision-zone ids, crossing traffic (more than 60
+  degrees off the lane), anything below 30 km/h, and a body one lane over where the map has no lane past that
+  line (`edges.beyond` says `edge`: a median or a shoulder). Unknown or no map window keeps it.
+- **Held** 0.3 s after it clears; a gate (speed, no map, stale or paused data, the rig off the lane frame) drops
+  it at once.
+
+`LaneDepartureData.side_left` / `side_right` carry the kind (`beside`, `behind`, `ahead`, `oncoming`, or ""). Logs: one
+`info` line per side lighting up or changing kind (AI or TMP, length, offset, closing speed, gap and time, what
+the map has past the line), the rig once it changes (trailers, length, kingpin to fifth wheel gap), and every
+60 s how long each side was lit with onsets per kind, and one line per LDW/LKA episode that turns into an alert.
+No coordinates and no player identity.
+
 ## Not done
 
 Side-coded cues, acting on the edge class (a firmer or earlier pulse toward an oncoming lane or the road
-edge), radar traffic in the next lane (an oncoming car, one beside or closing from behind, steering back
-through steering-intent mutes), a hands-on check for LKA, trailer swept path and ATS validation. LA, the continuous lane assist prototype, is in `core/la/`.
+edge), side traffic for players (thresholds from drives, a switch), a hands-on check for LKA, trailer swept path
+and ATS validation. LA, the continuous lane assist prototype, is in `core/la/`.

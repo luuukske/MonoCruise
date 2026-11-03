@@ -132,6 +132,10 @@ branches part; they never guess which branch the driver takes.
 backwards; the route orients each span from the previous tip. Without that an
 S-bend route folded back on itself.
 
+`route_behind` follows ego's lane the other way from its foot, the same
+assembly with the direction flipped; the lane departure thread's side traffic
+experiment reads traffic behind the rig in it.
+
 ## The predicted path (`map_path.py`, `path_context.py`)
 
 Ego frame, x forward, y right. The path leaves ego on the consumer's own arc

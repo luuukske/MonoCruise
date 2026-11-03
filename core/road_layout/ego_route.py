@@ -183,6 +183,17 @@ def build_route(
     )
 
 
+def route_behind(window, index: int, x: float, z: float, fwd_x: float, fwd_z: float,
+                 reach_m: float = _ROUTE_MAX_M) -> tuple[tuple[float, float], ...]:
+    """Lane ``index`` of ``window`` behind the foot of ``(x, z)``, running against ``fwd``; empty off the map."""
+    lanes = getattr(window, "lanes", ())
+    near = getattr(window, "index", None)
+    if not lanes or near is None or not 0 <= index < len(lanes):
+        return ()
+    main = _assemble(lanes, near, index, x, z, -fwd_x, -fwd_z)
+    return () if main is None else _clip(main[1], reach_m)
+
+
 def _assemble(lanes, near, index, x, z, dx, dz):
     """``(spans, route pts, span boundaries by s, foot and tangent)`` for one lane."""
     spans = extend_lane(lanes, index, x, z, dx, dz, near)

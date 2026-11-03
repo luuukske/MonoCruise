@@ -21,7 +21,7 @@ from core.thread_management.registry import registry
 
 from core.settings import Settings
 from core.sending_thread.accel_to_pedals import compute_estimated_mass_kg
-from core.radar.ego_geometry import EgoGeometry, geometry_from_sdk
+from core.radar.ego_geometry import EgoGeometry, TrailerBody, geometry_from_sdk, trailer_bodies_from_sdk
 
 
 logger = logging.getLogger(__name__)
@@ -218,6 +218,8 @@ class TelemetryThreadData(ThreadData):
 
     # Body size and path origin from the SDK wheel layout; None when unreadable.
     ego_geometry: EgoGeometry | None = None
+    # Attached trailers' bodies in the tractor's frame (core/radar/README.md §17); empty when bobtail or unreadable.
+    ego_trailers: tuple[TrailerBody, ...] = ()
 
     request_quit: bool = False
 
@@ -290,6 +292,7 @@ def _apply_telemetry(data: TelemetryThreadData, raw: dict) -> None:
         if geometry != data.ego_geometry:
             _log_geometry_change(data.truck_id, geometry)
         data.ego_geometry = geometry
+        data.ego_trailers = trailer_bodies_from_sdk(raw)
         # trailer_count already counts leading slots with wheels and attached;
         # raw["trailer"] is an array of structs, so flat "trailer[0].x" keys never match.
         data.ego_has_trailer = data.trailer_count > 0

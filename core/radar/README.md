@@ -1881,6 +1881,18 @@ the lane: a driver who holds the cab on the lane centre puts the lane circle
 - The road model, trail crossings and the rear cone stay in the placement frame:
   they are fitted on placement history, not on the arc.
 
+### Attached trailers (`trailer_bodies_from_sdk`)
+
+The telemetry thread publishes `ego_trailers`, one `TrailerBody` per leading attached trailer with wheels
+(the same slots `trailer_count` counts): its body centre ahead of and right of the tractor's placement origin,
+its heading relative to the tractor's and its half length and width, all from the SDK's trailer and truck
+placements of the same tick, so a consumer places them on its own ego pose. The SDK gives the kingpin
+(`hookPosition`) and the wheels, not the body: the front is assumed 1.3 m ahead of the kingpin, the rear past
+the last axle by 35 % of the kingpin to last axle span (1.0 to 3.5 m), the width 2.55 m. `hitch_gap_m` is the
+first trailer's kingpin distance from the tractor's fifth wheel (`truckHookPosition`), a check on the reading.
+Only the lane departure thread's side traffic experiment uses it (`core/lane_departure/README.md`); AEB, ACC and
+the LDW body stay tractor-only.
+
 ---
 
 ## 18. TruckersMP No-Collision Zones (AEB only)

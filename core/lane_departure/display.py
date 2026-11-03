@@ -7,8 +7,12 @@ import math
 OFF = "off"
 DISABLED = "disabled"
 STANDBY = "standby"
+# LDW or LKA acting: steady dark orange. Acting toward a lane side traffic makes unsafe: blinking red.
 WARN = "warn"
-STYLES = (DISABLED, STANDBY, WARN)
+ALERT = "alert"
+STYLES = (DISABLED, STANDBY, WARN, ALERT)
+WARN_COLOR = "#FF8C00"
+ALERT_COLOR = "#FF0000"
 
 LEFT = -1
 RIGHT = 1
@@ -28,6 +32,8 @@ _STANDBY_REASONS = frozenset({
 HOLD_S = 1.0
 SETTLE_S = 0.4
 FADE_S = 0.25
+# The alert blinks on and off this long each (4 Hz), starting lit.
+BLINK_S = 0.125
 
 
 def base_state(reason: str, plugin_ok: bool) -> str:
@@ -51,7 +57,10 @@ def panel_side(detector_side: int) -> int:
 
 
 class LaneLines:
-    """Per-side style weights. A warning shows at once and is held 1 s after it stops; other changes settle, then fade."""
+    """Per-side style weights. A warning shows at once and is held 1 s after it stops; other changes settle, then fade.
+
+    A warning that is an alert at any time stays one until it ends, hold included; ``shown`` applies its blink.
+    """
 
     def __init__(self) -> None:
         self._base = OFF
@@ -60,19 +69,26 @@ class LaneLines:
         self._firing = 0
         self._warn_side = 0
         self._warn_until = -math.inf
+        self._alert = False
+        self._alert_since = 0.0
         self._t: float | None = None
         self._fading = False
         self._w ={side: dict.fromkeys(STYLES, 0.0) for side in (LEFT, RIGHT)}
 
-    def set(self, base: str, firing_side: int, now: float) -> None:
+    def set(self, base: str, firing_side: int, now: float, alert: bool = False) -> None:
         self.step(now)
         if base != self._pending:
             self._pending = base
             self._pending_since = now
         if firing_side:
+            fresh = firing_side != self._warn_side or now >= self._warn_until
+            if alert and (fresh or not self._alert):
+                self._alert_since = now
+            self._alert = alert or (self._alert and not fresh)
             self._warn_side = firing_side
             self._warn_until = math.inf
-            self._w[firing_side] = {s: (1.0 if s == WARN else 0.0) for s in STYLES}
+            style = ALERT if self._alert else WARN
+            self._w[firing_side] = {s: (1.0 if s == style else 0.0) for s in STYLES}
         elif self._firing:
             self._warn_until = now + HOLD_S
         self._firing = firing_side
@@ -80,8 +96,18 @@ class LaneLines:
 
     def target(self, side: int, now: float) -> str:
         if side == self._warn_side and now < self._warn_until:
-            return WARN
+            return ALERT if self._alert else WARN
         return self._base
+
+    def blink_on(self, now: float) -> bool:
+        return int(max(0.0, now - self._alert_since) / BLINK_S) % 2 == 0
+
+    def shown(self, side: int, now: float) -> dict[str, float]:
+        """Style weights as drawn: the alert's blink applied."""
+        weights = dict(self._w[side])
+        if not self.blink_on(now):
+            weights[ALERT] = 0.0
+        return weights
 
     def step(self, now: float) -> None:
         # A fade starts from where it was asked for, not from the last time anything moved.
@@ -123,4 +149,6 @@ class LaneLines:
             waits.append(self._pending_since + SETTLE_S - now)
         if self._warn_side and math.isfinite(self._warn_until):
             waits.append(self._warn_until - now)
+        if self._warn_side and self._alert and now < self._warn_until:
+            waits.append(BLINK_S - (max(0.0, now - self._alert_since) % BLINK_S))
         return max(0.0, min(waits)) if waits else None

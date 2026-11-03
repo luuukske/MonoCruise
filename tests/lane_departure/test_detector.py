@@ -763,3 +763,26 @@ def test_a_pose_jump_restarts_the_detector():
     assert drive(drift(0.4), detector=detector, seconds=6.5)[-1].active
     jumped = detector.update(replace(frame_at(6.55, make_route(), None, 1.2, 0.016), x=900.0, z=900.0))
     assert not jumped.active
+
+
+def test_toward_an_unsafe_lane_a_blinker_no_longer_mutes_the_warning():
+    assert any(d.active for d in drive(drift(0.4, blinker_right=True, unsafe_right=True)))
+    assert not any(d.active for d in drive(drift(0.4, blinker_right=True, unsafe_left=True))), "the other side"
+
+
+def test_toward_an_unsafe_lane_a_calm_lane_change_warns():
+    def plan(t):
+        lateral, psi, _ = drift(0.8)(t)
+        return lateral, psi, {**wheel_toward_right(0.02)(t), "blinker_right": True, "unsafe_right": True}
+
+    assert any(d.active for d in drive(plan))
+
+
+def test_toward_an_unsafe_lane_a_swerve_still_mutes():
+    def plan(t):
+        lateral, psi, _ = drift(1.3)(t)
+        return lateral, psi, {"steer_right": 0.3 * max(0.0, t - DRIFT_START + 0.5), "unsafe_right": True}
+
+    decisions = drive(plan)
+    assert not any(d.active for d in decisions)
+    assert any(d.near_miss == "evade" for d in decisions)

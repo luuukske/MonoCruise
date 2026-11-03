@@ -1,16 +1,18 @@
-"""Red bottom screen corner on the side LDW/LKA acted on; part of the live bottom bar. See README, Visualization bar."""
+"""Bottom screen corner on the side LDW/LKA acted on, orange or blinking red; part of the live bottom bar.
+
+See README, Visualization bar.
+"""
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QLinearGradient, QPainter
 from PySide6.QtWidgets import QWidget
 
-from core.lane_departure.display import LEFT
+from core.lane_departure.display import ALERT_COLOR, LEFT, WARN_COLOR
 
 # Each leg runs this share of the screen height from the corner; the first part stays fully red, then fades.
 EXTENT_OF_HEIGHT = 0.25
 SOLID_SHARE = 0.40
 THICKNESS_PX = 5
-_RED = QColor("red")
 _FADE_STOPS = 8
 
 
@@ -28,7 +30,8 @@ class LaneCorner(QWidget):
     def __init__(self, side: int, parent: QWidget | None = None):
         super().__init__(parent)
         self.side = side
-        self.weight = 0.0
+        self.warn = 0.0
+        self.alert = 0.0
         self.extent = 1
         self.setWindowFlags(
             Qt.FramelessWindowHint
@@ -47,32 +50,38 @@ class LaneCorner(QWidget):
         x = left if self.side == LEFT else left + width - self.extent
         self.setGeometry(x, top + height - self.extent, self.extent, self.extent)
 
-    def set_weight(self, weight: float) -> None:
-        weight = min(1.0, max(0.0, weight))
-        if weight != self.weight:
-            self.weight = weight
+    def set_weights(self, warn: float, alert: float) -> None:
+        """How much of the orange warning and of the red alert shows, each 0 to 1 (the alert's blink applied)."""
+        warn, alert = min(1.0, max(0.0, warn)), min(1.0, max(0.0, alert))
+        if (warn, alert) != (self.warn, self.alert):
+            self.warn, self.alert = warn, alert
             self.update()
 
-    def _gradient(self, start: QPointF, end: QPointF) -> QLinearGradient:
+    @staticmethod
+    def _gradient(start: QPointF, end: QPointF, color: QColor, weight: float) -> QLinearGradient:
         g = QLinearGradient(start, end)
         for i in range(_FADE_STOPS + 1):
             f = SOLID_SHARE + (1.0 - SOLID_SHARE) * i / _FADE_STOPS
-            c = QColor(_RED)
-            c.setAlphaF(self.weight * _alpha_at(f))
+            c = QColor(color)
+            c.setAlphaF(weight * _alpha_at(f))
             g.setColorAt(f, c)
-        c = QColor(_RED)
-        c.setAlphaF(self.weight)
+        c = QColor(color)
+        c.setAlphaF(weight)
         g.setColorAt(0.0, c)
         return g
 
     def paintEvent(self, _event):
-        if self.weight <= 0.0:
+        layers = [(QColor(code), w) for code, w in ((WARN_COLOR, self.warn), (ALERT_COLOR, self.alert)) if w > 0.0]
+        if not layers:
             return
         e, t = float(self.extent), float(THICKNESS_PX)
         corner_x, far_x = (0.0, e) if self.side == LEFT else (e, 0.0)
         side_x = 0.0 if self.side == LEFT else e - t
         painter = QPainter(self)
-        # The bottom leg owns the corner square; the side leg starts above it so a fade never doubles up there.
-        painter.fillRect(QRectF(0.0, e - t, e, t), self._gradient(QPointF(corner_x, 0.0), QPointF(far_x, 0.0)))
-        painter.fillRect(QRectF(side_x, 0.0, t, e - t), self._gradient(QPointF(0.0, e), QPointF(0.0, 0.0)))
+        for color, weight in layers:
+            # The bottom leg owns the corner square; the side leg starts above it so a fade never doubles up there.
+            along = self._gradient(QPointF(corner_x, 0.0), QPointF(far_x, 0.0), color, weight)
+            up = self._gradient(QPointF(0.0, e), QPointF(0.0, 0.0), color, weight)
+            painter.fillRect(QRectF(0.0, e - t, e, t), along)
+            painter.fillRect(QRectF(side_x, 0.0, t, e - t), up)
         painter.end()

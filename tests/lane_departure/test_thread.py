@@ -203,3 +203,62 @@ def test_lka_alone_shows_the_lane_and_the_side_its_pulse_steers_from(monkeypatch
     assert not thread.data.active
     assert thread._pulse.side != 0
     assert thread.data.firing_side == thread._pulse.side
+
+
+def _side_run(monkeypatch, traffic: bool, steps: int = 20):
+    from tests.lane_departure.test_side_traffic import Car
+
+    world = World(monkeypatch)
+    thread = world.thread()
+    seen = []
+    for i in range(steps):
+        world.radar.data.vehicles = [Car(40.0 + SPEED * i * DT, 4.5)] if traffic else []
+        world.step(thread, i)
+        seen.append(world.command())
+    return thread, seen
+
+
+def test_side_traffic_alone_lights_nothing_and_never_moves_the_wheel(monkeypatch, enabled):
+    thread, seen = _side_run(monkeypatch, True)
+    assert (thread.data.side_left, thread.data.side_right) == ("", "beside")
+    assert (thread.data.firing_side, thread.data.firing_alert) == (0, False)
+    _empty, baseline = _side_run(monkeypatch, False)
+    assert seen == baseline
+
+
+def _unsafe_drift(monkeypatch, blinker: bool, traffic: bool, steps: int = 110):
+    """A drift to the right at 0.5 m/s, optionally with the right blinker and a car beside us on the right."""
+    from tests.lane_departure.test_side_traffic import Car
+
+    world = World(monkeypatch)
+    world.tel.data.blinkerRight = blinker
+    thread = world.thread()
+    seen, firing = [], []
+    psi = 0.5 / SPEED
+    for i in range(steps):
+        t = i * DT
+        world.radar.data.vehicles = [Car(40.0 + SPEED * t, 4.5)] if traffic else []
+        world.step(thread, i, 0.0 if t < DRIFT_START else 0.5 * (t - DRIFT_START), psi if t >= DRIFT_START else 0.0)
+        seen.append(world.command())
+        firing.append((thread.data.firing_side, thread.data.firing_alert))
+    return thread, seen, firing
+
+
+def test_a_blinker_toward_an_unsafe_lane_still_rumbles_and_alerts(monkeypatch, enabled):
+    _thread, seen, firing = _unsafe_drift(monkeypatch, blinker=True, traffic=True)
+    assert (cmd.CMD_RUMBLE, 2, cmd.PEAK_UNITS) in seen
+    assert (2, True) in firing
+
+
+def test_a_warning_toward_a_safe_lane_is_not_an_alert(monkeypatch, enabled):
+    _thread, _seen, firing = _unsafe_drift(monkeypatch, blinker=False, traffic=False)
+    assert (2, False) in firing
+    assert not any(alert for _side, alert in firing)
+
+
+def test_lka_pulses_through_a_blinker_toward_an_unsafe_lane(monkeypatch):
+    monkeypatch.setattr(Settings.instance(), "lka_enabled", True, raising=False)
+    thread, _seen, firing = _unsafe_drift(monkeypatch, blinker=True, traffic=True)
+    assert (2, True) in firing
+    _thread, _seen, quiet = _unsafe_drift(monkeypatch, blinker=True, traffic=False)
+    assert all(side == 0 for side, _alert in quiet), "a safe lane keeps the blinker's mute"

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import NamedTuple
 
 from . import edges as edge_kinds
-from .detector import LEVEL_CLOSE, SIDE_LEFT, SIDE_NONE, SIDE_RIGHT, Decision, LaneDetector, project
+from .detector import LEVEL_CLOSE, SIDE_LEFT, SIDE_NONE, SIDE_RIGHT, Decision, LaneDetector, project, unsafe_toward
 
 class _Seen(NamedTuple):
     gap: float
@@ -208,8 +208,9 @@ class LaneKeeping:
             return None
         sign = 1.0 if self._side == SIDE_RIGHT else -1.0
         lamp = frame.blinker_right if self._side == SIDE_RIGHT else frame.blinker_left
+        blinking = (lamp or frame.hazards) and not unsafe_toward(frame, self._side)
         gap = detector.tune.half_lane_m - frame.half_width_m - sign * offset
-        return _Seen(gap, gap + detector.tune.warn_overlap_m, sign * drift, "blinker" if lamp or frame.hazards else "")
+        return _Seen(gap, gap + detector.tune.warn_overlap_m, sign * drift, "blinker" if blinking else "")
 
     def _class(self, frame, side: int) -> str:
         """What lies past that line where the truck would cross it, half a second ahead of the bumper."""

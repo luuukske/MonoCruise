@@ -52,7 +52,7 @@ All methods below are safe to call from any thread **unless noted otherwise**.
   - `cc_panel(text_content, cc_mode="Cruise control", cc_enabled=True, x_co=100, y_co=100, acc_enabled=False, scale_mult=1)`
 
 - **Update state**
-  - `update(new_text=None, cc_mode=None, cc_enabled=None, acc_locked=None, distance_to_lead=None, AEB_warn=None, complete_update=False, acc_enabled=None, acc_truck=None, lead_vehicle_speed=..., speed_unit=None, lane_state=None, lane_side=None)`
+  - `update(new_text=None, cc_mode=None, cc_enabled=None, acc_locked=None, distance_to_lead=None, AEB_warn=None, complete_update=False, acc_enabled=None, acc_truck=None, lead_vehicle_speed=..., speed_unit=None, lane_state=None, lane_side=None, lane_alert=None)`
   - Only provided fields are changed; omitted fields keep their previous values.
   - `complete_update=True` forces a full recalculation (useful if you changed multiple coupled fields or want to be extra safe after a state resync).
   - Coalesced: safe to invoke on every loop iteration; pending keys merge until the next GUI flush.
@@ -154,10 +154,13 @@ per-side style weights.
 | `off` | no lines (as before) | LDW and LKA off, no map or lane, stale or paused data, plugin missing or not hooked |
 | `disabled` | white, 30 % | lane known, system stands down: speed gate, sharp bend, fork, merge, route end, lane settle, hard braking, AEB, reverse |
 | `standby` | full white | armed; the mutes of one close call (blinker, deliberate steering, swerve, returning) stay standby so a lane change does not flicker |
-| warning | AEB red, slightly wider, that side only | LDW rumbling (`firing_side`) or an LKA pulse steering away from that line |
+| warning | dark orange, steady, slightly wider, that side only | LDW rumbling (`firing_side`) or an LKA pulse steering away from that line |
+| alert | red, blinking at 4 Hz, slightly wider, that side only | the same toward a lane side traffic makes unsafe (`firing_alert`, `core/lane_departure/README.md`, Side traffic) |
 
 - A warning shows at once and stays 1 s after LDW/LKA stops, so the driver can tell it was MonoCruise and not the game.
-  Firing again inside that second restarts it; the other side firing takes over at once.
+  Firing again inside that second restarts it; the other side firing takes over at once. An alert is a warning:
+  same hold, and once an episode is an alert it stays one to its end; its blink starts lit. Colours and the blink
+  live in `display.py` (`WARN_COLOR`, `ALERT_COLOR`, `BLINK_S`), shared with the bar's corners.
 - Other changes must hold 0.4 s before they show (a lane-settle or stale blip never reaches the screen), then fade over 0.25 s.
 - An unknown detector reason reads as `disabled`: the panel never shows armed on a guess. Add new detector reasons to a
   bucket in `core/lane_departure/display.py`.

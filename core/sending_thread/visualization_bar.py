@@ -5,7 +5,7 @@ from PySide6.QtWidgets import QWidget, QApplication
 from PySide6.QtCore import Qt, QTimer, QRect
 from PySide6.QtGui import QPainter, QColor
 
-from core.lane_departure.display import LEFT, RIGHT, STANDBY, WARN, LaneLines, panel_side, plugin_ok
+from core.lane_departure.display import ALERT, LEFT, RIGHT, STANDBY, WARN, LaneLines, panel_side, plugin_ok
 from core.settings import Settings
 from core.thread_management.registry import registry
 
@@ -52,6 +52,7 @@ class VisualizationBar(QWidget):
         # Lane departure corners: own windows, shown, hidden and kept on top with the bar.
         self._lane = LaneLines()
         self._lane_side = 0
+        self._lane_alert = False
         self.corners = (LaneCorner(LEFT, self), LaneCorner(RIGHT, self))
         for corner in self.corners:
             corner.setWindowOpacity(0.8)
@@ -201,7 +202,7 @@ class VisualizationBar(QWidget):
                 AEB_cue = False
 
         # LDW rumbling or an LKA pulse, only while the FFB plugin can act on it (as the CC panel's lines).
-        lane_side = 0
+        lane_side, lane_alert = 0, False
         try:
             lane_thread = registry.get_thread("lane_departure_thread")
         except KeyError:
@@ -211,17 +212,19 @@ class VisualizationBar(QWidget):
             try:
                 with lane_thread.data._lock:
                     firing = int(getattr(lane_thread.data, "firing_side", 0))
+                    alert = bool(getattr(lane_thread.data, "firing_alert", False))
                     plugin = getattr(lane_thread.data, "plugin", None)
                 lane_side = panel_side(firing) if plugin_ok(plugin) else 0
+                lane_alert = alert and bool(lane_side)
             except Exception:
-                lane_side = 0
+                lane_side, lane_alert = 0, False
 
         # ACC/cruise control could increase smoothness here; kept commented out.
         # average = 20 if (cc_enabled and cc_locked) else 10
 
         close_bar = not bar_active
 
-        self._step_corners(lane_side, close_bar or em_stop or AEB_cue)
+        self._step_corners(lane_side, lane_alert, close_bar or em_stop or AEB_cue)
 
         if close_bar and max(self.temp_gasval, self.temp_brakeval) < 0.0005:
             self.timer.stop()
@@ -269,15 +272,22 @@ class VisualizationBar(QWidget):
             self._painted_key = key
             self.update()
 
-    def _step_corners(self, lane_side: int, silenced: bool) -> None:
-        """A warning shows at once and is held 1 s after it stops; AEB, an emergency stop or a closing bar clear it."""
+    def _step_corners(self, lane_side: int, alert: bool, silenced: bool) -> None:
+        """A warning or an alert shows at once and is held 1 s after it stops, the alert blinking (display.LaneLines).
+
+        AEB, an emergency stop or a closing bar clear it.
+        """
         now = time.monotonic()
-        if lane_side != self._lane_side:
-            self._lane_side = lane_side
-            self._lane.set(STANDBY, lane_side, now)
+        if (lane_side, alert) != (self._lane_side, self._lane_alert):
+            self._lane_side, self._lane_alert = lane_side, alert
+            self._lane.set(STANDBY, lane_side, now, alert)
         self._lane.step(now)
         for corner in self.corners:
-            corner.set_weight(0.0 if silenced else self._lane.weights(corner.side)[WARN])
+            shown = self._lane.shown(corner.side, now)
+            if silenced:
+                corner.set_weights(0.0, 0.0)
+            else:
+                corner.set_weights(shown[WARN], shown[ALERT])
 
     def ensure_present(self) -> None:
         """GUI thread. Re-open an enabled bar whose timer was stopped."""

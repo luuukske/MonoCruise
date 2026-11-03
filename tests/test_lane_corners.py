@@ -9,6 +9,7 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QRegion
 from PySide6.QtWidgets import QApplication, QWidget
 
+from core.lane_departure import display as ll
 from core.lane_departure.display import LEFT, RIGHT
 from core.sending_thread import lane_corners as lc
 from core.sending_thread.lane_corners import LaneCorner
@@ -39,7 +40,7 @@ def _red_alpha(img: QImage, x: int, y: int) -> int:
 def test_a_corner_is_solid_near_the_corner_and_fades_along_both_legs(qapp, side):
     corner = LaneCorner(side)
     corner.place(0, 0, 1600, 800)
-    corner.set_weight(1.0)
+    corner.set_weights(0.0, 1.0)
     e = corner.extent
     assert e == round(800 * lc.EXTENT_OF_HEIGHT)
     img = _render(corner)
@@ -64,7 +65,7 @@ def test_a_corner_is_solid_near_the_corner_and_fades_along_both_legs(qapp, side)
 def test_the_legs_do_not_overlap_while_fading(qapp, side):
     corner = LaneCorner(side)
     corner.place(0, 0, 1600, 800)
-    corner.set_weight(0.5)
+    corner.set_weights(0.0, 0.5)
     e, t = corner.extent, lc.THICKNESS_PX
     img = _render(corner)
     edge = 2 if side == LEFT else e - 3
@@ -89,7 +90,7 @@ class _Threads:
     def __init__(self, monkeypatch):
         plugin = SimpleNamespace(present=True, hooked=True, dead=False)
         self.lane = SimpleNamespace(
-            alive=True, data=SimpleNamespace(_lock=threading.Lock(), firing_side=0, plugin=plugin),
+            alive=True, data=SimpleNamespace(_lock=threading.Lock(), firing_side=0, firing_alert=False, plugin=plugin),
         )
         self.lane.is_alive = lambda: self.lane.alive
         self.aeb = SimpleNamespace(data=SimpleNamespace(_lock=threading.Lock(), AEB_cue=False))
@@ -119,7 +120,7 @@ def bar(qapp, monkeypatch):
 
 
 def _weights(bar):
-    return [c.weight for c in bar.corners]
+    return [c.warn + c.alert for c in bar.corners]
 
 
 def test_the_bar_lights_the_corner_on_the_side_acted_on(bar):
@@ -128,7 +129,7 @@ def test_the_bar_lights_the_corner_on_the_side_acted_on(bar):
     assert _weights(bar) == [1.0, 0.0]
     bar.threads.lane.data.firing_side = 2
     bar._animate_inner()
-    assert bar.corners[1].weight == 1.0
+    assert _weights(bar)[1] == 1.0
 
 
 def test_the_corner_stays_lit_after_firing_stops(bar):
@@ -180,3 +181,27 @@ def test_corners_sit_in_the_bottom_corners_of_the_bar_screen(bar):
     assert left.geometry().bottomLeft() == geo.bottomLeft()
     assert right.geometry().bottomRight() == geo.bottomRight()
     assert left.width() == round(geo.height() * lc.EXTENT_OF_HEIGHT)
+
+
+def test_a_warning_is_orange_and_an_alert_red(qapp):
+    corner = LaneCorner(LEFT)
+    corner.place(0, 0, 1600, 800)
+    y = corner.extent - 2
+    corner.set_weights(1.0, 0.0)
+    warn = QColor.fromRgba(_render(corner).pixel(1, y))
+    assert (warn.red(), warn.green() > 100, warn.blue() < 60) == (255, True, True)
+    corner.set_weights(0.0, 1.0)
+    alert = QColor.fromRgba(_render(corner).pixel(1, y))
+    assert (alert.red(), alert.green(), alert.blue()) == (255, 0, 0)
+    corner.deleteLater()
+
+
+def test_the_bar_shows_an_alert_and_holds_it_like_a_warning(bar, monkeypatch):
+    monkeypatch.setattr(ll, "BLINK_S", 10.0)
+    data = bar.threads.lane.data
+    data.firing_side, data.firing_alert = 2, True
+    bar._animate_inner()
+    assert [(c.warn, c.alert) for c in bar.corners] == [(0.0, 0.0), (0.0, 1.0)]
+    data.firing_side, data.firing_alert = 0, False
+    bar._animate_inner()
+    assert bar.corners[1].alert == 1.0, "held 1 s, still an alert"

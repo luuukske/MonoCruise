@@ -138,3 +138,96 @@ def geometry_from_sdk(raw: dict) -> EgoGeometry | None:
         )
     except (TypeError, ValueError):
         return None
+
+
+# Attached trailers: the SDK gives their pose, kingpin and wheels, not their body, so the ends are estimated.
+TRAILER_KINGPIN_SETBACK_M: float = 1.3
+TRAILER_HALF_WIDTH_M: float = 1.275
+_TRAILER_REAR_SHARE: float = 0.35
+_TRAILER_REAR_MIN_M: float = 1.0
+_TRAILER_REAR_MAX_M: float = 3.5
+_TRAILER_MIN_SPAN_M: float = 1.0
+_TRAILER_MAX_SPAN_M: float = 16.0
+_TRAILER_MAX_OFFSET_M: float = 60.0
+
+
+@dataclass(frozen=True)
+class TrailerBody:
+    """One attached trailer's body in the tractor's frame, from the SDK; see core/radar/README.md §17.
+
+    ``yaw_rel_rad`` is its heading minus the tractor's, in ``ego_yaw_rad``'s sense. ``hitch_gap_m`` is how far
+    its kingpin sits from the tractor's fifth wheel (first trailer only, NaN otherwise): a check on the reading.
+    """
+
+    ahead_m: float
+    right_m: float
+    yaw_rel_rad: float
+    half_length_m: float
+    half_width_m: float = TRAILER_HALF_WIDTH_M
+    hitch_gap_m: float = math.nan
+
+
+def _forward(yaw_norm: float) -> tuple[float, float]:
+    yaw = yaw_norm * 2.0 * math.pi
+    return -math.sin(yaw), -math.cos(yaw)
+
+
+def _trailer_body(unit: dict, origin: tuple[float, float, float], fifth_wheel) -> TrailerBody | None:
+    n = int(unit.get("wheelCount", 0) or 0)
+    zs = [float(v) for v in (unit.get("wheelPositionZ") or ())[:n]]
+    wx, wz, yaw_norm = float(unit["worldX"]), float(unit["worldZ"]), float(unit["rotationX"])
+    hook_x, hook_z = float(unit.get("hookPositionX", 0.0)), float(unit.get("hookPositionZ", 0.0))
+    if not zs or not _finite(wx, wz, yaw_norm, hook_x, hook_z, *zs):
+        return None
+    # Trailer space runs z backward, like the truck's.
+    kingpin, last_axle = -hook_z, -max(zs)
+    span = kingpin - last_axle
+    if not (_TRAILER_MIN_SPAN_M <= span <= _TRAILER_MAX_SPAN_M):
+        return None
+    rear = last_axle - min(_TRAILER_REAR_MAX_M, max(_TRAILER_REAR_MIN_M, _TRAILER_REAR_SHARE * span))
+    front = kingpin + TRAILER_KINGPIN_SETBACK_M
+    tfx, tfz = _forward(yaw_norm)
+    centre = 0.5 * (front + rear)
+    cx, cz, truck_yaw = origin
+    fx, fz = _forward(truck_yaw)
+    dx, dz = wx + centre * tfx - cx, wz + centre * tfz - cz
+    ahead, right = dx * fx + dz * fz, dx * -fz + dz * fx
+    if math.hypot(ahead, right) > _TRAILER_MAX_OFFSET_M:
+        return None
+    rel = (yaw_norm - truck_yaw) * 2.0 * math.pi
+    rel = math.atan2(math.sin(rel), math.cos(rel))
+    gap = math.nan
+    if fifth_wheel is not None:
+        px, pz = wx + kingpin * tfx + hook_x * -tfz, wz + kingpin * tfz + hook_x * tfx
+        gap = math.hypot(px - fifth_wheel[0], pz - fifth_wheel[1])
+    return TrailerBody(ahead, right, rel, 0.5 * (front - rear), hitch_gap_m=gap)
+
+
+def trailer_bodies_from_sdk(raw: dict) -> tuple[TrailerBody, ...]:
+    """The leading attached trailers with wheels (as ``trailer_count``), in slot order; unreadable ones left out."""
+    try:
+        cx, cz, yaw = float(raw["coordinateX"]), float(raw["coordinateZ"]), float(raw["rotationX"])
+        units = list(raw.get("trailer") or ())
+    except (KeyError, TypeError, ValueError):
+        return ()
+    if not _finite(cx, cz, yaw):
+        return ()
+    fx, fz = _forward(yaw)
+    try:
+        hz, hx = float(raw.get("truckHookPositionZ", 0.0)), float(raw.get("truckHookPositionX", 0.0))
+        fifth_wheel = (cx - hz * fx + hx * -fz, cz - hz * fz + hx * fx)
+    except (TypeError, ValueError):
+        fifth_wheel = None
+    out: list[TrailerBody] = []
+    first = True
+    for unit in units:
+        try:
+            if not unit.get("attached", False) or int(unit.get("wheelCount", 0) or 0) <= 0:
+                break
+            body = _trailer_body(unit, (cx, cz, yaw), fifth_wheel if first else None)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            body = None
+        first = False
+        if body is not None:
+            out.append(body)
+    return tuple(out)

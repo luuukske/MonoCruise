@@ -589,17 +589,19 @@ class MonoCruiseWindow(QMainWindow):
             pass
 
         # Lane lines: off unless LDW or LKA watches a lane and the FFB plugin can act on it.
-        lane_state, lane_side = LANE_OFF, 0
+        lane_state, lane_side, lane_alert = LANE_OFF, 0, False
         try:
             ld = registry.get_thread("lane_departure_thread")
             if ld is not None and ld.is_alive():
                 with ld.data._lock:
                     watch_reason = str(ld.data.watch_reason)
                     firing_side = int(ld.data.firing_side)
+                    firing_alert = bool(getattr(ld.data, "firing_alert", False))
                     plugin = ld.data.plugin
                 can_act = lane_plugin_ok(plugin)
                 lane_state = lane_base_state(watch_reason, can_act)
                 lane_side = lane_panel_side(firing_side) if can_act else 0
+                lane_alert = firing_alert and bool(lane_side)
         except (KeyError, AttributeError, TypeError, ValueError):
             pass
 
@@ -641,7 +643,7 @@ class MonoCruiseWindow(QMainWindow):
 
         update_snap = (
             text, display_mode, cruise_enabled, aeb_cue, acc_on,
-            acc_locked, acc_truck, gap_level, lead_speed, unit, lane_state, lane_side,
+            acc_locked, acc_truck, gap_level, lead_speed, unit, lane_state, lane_side, lane_alert,
         )
         if self._cc_panel_update_snap != update_snap:
             self._cc_panel_update_snap = update_snap
@@ -658,6 +660,7 @@ class MonoCruiseWindow(QMainWindow):
                 speed_unit=unit,
                 lane_state=lane_state,
                 lane_side=lane_side,
+                lane_alert=lane_alert,
             )
 
         if should_show:
