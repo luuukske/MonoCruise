@@ -8,8 +8,8 @@ from PySide6.QtCore import QPoint
 from PySide6.QtGui import QColor, QFontMetrics, QImage, QPainter, QRegion
 from PySide6.QtWidgets import QApplication, QWidget
 
-from ui.cc_panel import lane_lines as ll
-from ui.cc_panel.lane_lines import DISABLED, LEFT, OFF, RIGHT, STANDBY, WARN, LaneLines
+from core.lane_departure import display as ll
+from core.lane_departure.display import DISABLED, LEFT, OFF, RIGHT, STANDBY, WARN, LaneLines
 
 
 @pytest.mark.parametrize("reason, plugin_ok, state", [

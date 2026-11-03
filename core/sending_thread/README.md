@@ -618,6 +618,20 @@ reports the window visible, so `show()` never runs again. The main window puts i
 back every 5 s with `SetWindowPos` (`ui/overlay_topmost.py`) without activating it.
 The bar is `WA_ShowWithoutActivating` and `WindowDoesNotAcceptFocus` for the same reason.
 
+### Lane departure corners (`lane_corners.py`)
+
+The bar owns two more windows, one per bottom corner of its screen. On the side LDW is rumbling for, or an
+LKA pulse steers away from, that corner turns red: a leg along the bottom edge and one up the side, each
+25 % of the screen height long, solid for the first 40 % and then fading out, 5 px thick against the bar's
+3 px. The bottom leg runs into the exact corner and the side leg starts on top of it, so the two
+never overlap while fading. They follow `core/lane_departure/display.py` like the CC panel's lines: on at once, held 1 s after
+firing stops, then a 0.25 s fade; only while the FFB plugin is hooked, never while AEB or an emergency stop
+flashes the bar. They are the bar's in every other way: the "Live bottom bar" switch (`bar_variable`) shows
+and hides them, the bar's tick drives them, `ensure_present` reopens them and the main window's 5 s
+`SetWindowPos` keeps them on top. They are separate windows because growing the 3 px strip to hold the side
+legs would make it a full-width window a quarter of the screen tall. Idle, they are transparent and
+click-through and never repaint.
+
 ## Brake intensity (`core/scs_profile/intensity.py`)
 
 In-game **Braking intensity** (`g_brake_intensity`, 1/3 left, 1 centre, 3 right)

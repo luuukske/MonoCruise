@@ -145,8 +145,8 @@ Lines are cached per distance setting. Vehicle cutout uses DestinationOut on an 
 ## Lane lines (LDW / LKA)
 
 `update(lane_state=..., lane_side=...)` draws one slanted line on each side of the distance lines, on their
-perspective, only while the distance lines show (ACC in cruise control mode, no AEB flash). `lane_lines.py` is the
-Qt-free part: it maps the lane departure thread's `watch_reason` and FFB plugin status to a state, and holds the
+perspective, only while the distance lines show (ACC in cruise control mode, no AEB flash). `core/lane_departure/display.py`
+is the Qt-free part, shared with the bottom bar's corners (`core/sending_thread/README.md`): it maps the lane departure thread's `watch_reason` and FFB plugin status to a state, and holds the
 per-side style weights.
 
 | State | Look | When |
@@ -160,7 +160,7 @@ per-side style weights.
   Firing again inside that second restarts it; the other side firing takes over at once.
 - Other changes must hold 0.4 s before they show (a lane-settle or stale blip never reaches the screen), then fade over 0.25 s.
 - An unknown detector reason reads as `disabled`: the panel never shows armed on a guess. Add new detector reasons to a
-  bucket in `lane_lines.py`.
+  bucket in `core/lane_departure/display.py`.
 - Blue lane lines are reserved for a later mode; LDW and LKA stay white and red.
 - Cost: two pen strokes per paint, no caches. `_lane_timer` is single-shot and only runs while a fade, settle or hold
   is pending.

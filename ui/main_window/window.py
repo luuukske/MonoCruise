@@ -27,6 +27,10 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
 )
 
+from core.lane_departure.display import OFF as LANE_OFF
+from core.lane_departure.display import base_state as lane_base_state
+from core.lane_departure.display import panel_side as lane_panel_side
+from core.lane_departure.display import plugin_ok as lane_plugin_ok
 from core.speed_units import display_from_ms, format_kmh, unit_label
 from core.thread_management.registry import registry
 from core.usage_hours import (
@@ -35,9 +39,6 @@ from core.usage_hours import (
     prompt_is_due,
     record_prompt_dismissed,
 )
-from ui.cc_panel.lane_lines import OFF as LANE_OFF
-from ui.cc_panel.lane_lines import base_state as lane_base_state
-from ui.cc_panel.lane_lines import panel_side as lane_panel_side
 from ui.cc_panel.main import cc_panel as CcPanel
 from ui.main_window.banner import BannerState, BannerWidget
 from ui.main_window.confirmation_overlay import show_confirmation
@@ -596,9 +597,9 @@ class MonoCruiseWindow(QMainWindow):
                     watch_reason = str(ld.data.watch_reason)
                     firing_side = int(ld.data.firing_side)
                     plugin = ld.data.plugin
-                plugin_ok = bool(plugin.present and plugin.hooked and not plugin.dead)
-                lane_state = lane_base_state(watch_reason, plugin_ok)
-                lane_side = lane_panel_side(firing_side) if plugin_ok else 0
+                can_act = lane_plugin_ok(plugin)
+                lane_state = lane_base_state(watch_reason, can_act)
+                lane_side = lane_panel_side(firing_side) if can_act else 0
         except (KeyError, AttributeError, TypeError, ValueError):
             pass
 
@@ -721,6 +722,8 @@ class MonoCruiseWindow(QMainWindow):
         if ensure is not None:
             ensure()
         reassert_topmost(bar)
+        for corner in getattr(bar, "corners", ()):
+            reassert_topmost(corner)
 
     def _reassert_popup(self) -> None:
         from ui.popup.popup_window import PopupWindow

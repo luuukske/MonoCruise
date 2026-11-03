@@ -17,9 +17,9 @@ from PySide6.QtWidgets import (
 )
 if not __name__ == "__main__":
     from core.settings import Settings
-    from ui.cc_panel.lane_lines import DISABLED, LEFT, RIGHT, STANDBY, WARN, LaneLines
 else:
-    from lane_lines import DISABLED, LEFT, RIGHT, STANDBY, WARN, LaneLines
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from core.lane_departure.display import DISABLED, LEFT, RIGHT, STANDBY, WARN, LaneLines
 from PySide6.QtCore import Qt, QTimer, Signal, QByteArray, QRectF, QPointF
 from PySide6.QtGui import (
     QPainter,

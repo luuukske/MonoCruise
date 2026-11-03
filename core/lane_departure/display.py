@@ -1,4 +1,4 @@
-"""Lane lines beside the ACC distance lines: LDW/LKA state for the CC panel. Qt-free; see ui/cc_panel/README.md."""
+"""LDW/LKA display state for the CC panel lane lines and the bottom bar corners. Qt-free; see ui/cc_panel/README.md."""
 
 from __future__ import annotations
 
@@ -37,6 +37,12 @@ def base_state(reason: str, plugin_ok: bool) -> str:
     if reason in _STANDBY_REASONS:
         return STANDBY
     return DISABLED
+
+
+def plugin_ok(status) -> bool:
+    """The FFB plugin can act on a departure: loaded, hooked into the game's force, not faulted."""
+    return bool(getattr(status, "present", False) and getattr(status, "hooked", False)
+                and not getattr(status, "dead", False))
 
 
 def panel_side(detector_side: int) -> int:
