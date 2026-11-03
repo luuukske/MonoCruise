@@ -40,6 +40,9 @@ class LaneDepartureData(ThreadData):
     reason: str = "off"
     assist_reason: str = "off"
     assist_torque: float = 0.0
+    # For the CC panel's lane lines: the detector's reason while LDW or LKA watches, and the side acted on.
+    watch_reason: str = "off"
+    firing_side: int = 0
     plugin: PluginStatus = field(default_factory=PluginStatus)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
@@ -119,7 +122,8 @@ class LaneDepartureThread(BaseThread):
         self._note(decision if ldw else Decision(), status)
         if ldw:
             self._account(decision)
-        self._publish(decision if ldw else Decision(), status)
+        firing = self._pulse.side if lka and self._pulse.side else decision.side if ldw and decision.active else 0
+        self._publish(decision if ldw else Decision(), status, decision.reason if ldw or lka else "off", firing)
 
     def _keep_lane(self, frame: Frame | None, repeat: bool, decision: Decision) -> Request:
         """A lane keeping pulse on the detector's own departures; the detector is read, never changed."""
@@ -311,11 +315,13 @@ class LaneDepartureThread(BaseThread):
             self._last_near_log = now
             logger.debug("lane departure muted by %s: " + features, d.near_miss, *values)
 
-    def _publish(self, d: Decision, status: PluginStatus) -> None:
+    def _publish(self, d: Decision, status: PluginStatus, watch_reason: str = "off", firing_side: int = 0) -> None:
         with self.data._lock:
             self.data.active = d.active
             self.data.side = d.side
             self.data.reason = d.reason
+            self.data.watch_reason = watch_reason
+            self.data.firing_side = firing_side
             steering = self._assist if self._la_on else self._lka if self._lka_on else None
             self.data.assist_reason = steering.output.reason if steering is not None else "off"
             self.data.assist_torque = float(status.applied) if steering is not None else 0.0

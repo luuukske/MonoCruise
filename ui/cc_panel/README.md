@@ -52,7 +52,7 @@ All methods below are safe to call from any thread **unless noted otherwise**.
   - `cc_panel(text_content, cc_mode="Cruise control", cc_enabled=True, x_co=100, y_co=100, acc_enabled=False, scale_mult=1)`
 
 - **Update state**
-  - `update(new_text=None, cc_mode=None, cc_enabled=None, acc_locked=None, distance_to_lead=None, AEB_warn=None, complete_update=False, acc_enabled=None, acc_truck=None)`
+  - `update(new_text=None, cc_mode=None, cc_enabled=None, acc_locked=None, distance_to_lead=None, AEB_warn=None, complete_update=False, acc_enabled=None, acc_truck=None, lead_vehicle_speed=..., speed_unit=None, lane_state=None, lane_side=None)`
   - Only provided fields are changed; omitted fields keep their previous values.
   - `complete_update=True` forces a full recalculation (useful if you changed multiple coupled fields or want to be extra safe after a state resync).
   - Coalesced: safe to invoke on every loop iteration; pending keys merge until the next GUI flush.
@@ -141,6 +141,29 @@ panel.update(AEB_warn=False)  # blink may continue briefly (cooldown)
 ## ACC distance lines and vehicle cutout
 
 Lines are cached per distance setting. Vehicle cutout uses DestinationOut on an offscreen buffer each frame; pixmaps at max scale, drawn at animated scale. Bbox from settled targets keeps cache keys stable.
+
+## Lane lines (LDW / LKA)
+
+`update(lane_state=..., lane_side=...)` draws one slanted line on each side of the distance lines, on their
+perspective, only while the distance lines show (ACC in cruise control mode, no AEB flash). `lane_lines.py` is the
+Qt-free part: it maps the lane departure thread's `watch_reason` and FFB plugin status to a state, and holds the
+per-side style weights.
+
+| State | Look | When |
+|---|---|---|
+| `off` | no lines (as before) | LDW and LKA off, no map or lane, stale or paused data, plugin missing or not hooked |
+| `disabled` | white, 30 % | lane known, system stands down: speed gate, sharp bend, fork, merge, route end, lane settle, hard braking, AEB, reverse |
+| `standby` | full white | armed; the mutes of one close call (blinker, deliberate steering, swerve, returning) stay standby so a lane change does not flicker |
+| warning | AEB red, slightly wider, that side only | LDW rumbling (`firing_side`) or an LKA pulse steering away from that line |
+
+- A warning shows at once and stays 1 s after LDW/LKA stops, so the driver can tell it was MonoCruise and not the game.
+  Firing again inside that second restarts it; the other side firing takes over at once.
+- Other changes must hold 0.4 s before they show (a lane-settle or stale blip never reaches the screen), then fade over 0.25 s.
+- An unknown detector reason reads as `disabled`: the panel never shows armed on a guess. Add new detector reasons to a
+  bucket in `lane_lines.py`.
+- Blue lane lines are reserved for a later mode; LDW and LKA stay white and red.
+- Cost: two pen strokes per paint, no caches. `_lane_timer` is single-shot and only runs while a fade, settle or hold
+  is pending.
 
 ## Lead speed indicator
 

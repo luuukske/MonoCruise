@@ -17,6 +17,9 @@ from PySide6.QtWidgets import (
 )
 if not __name__ == "__main__":
     from core.settings import Settings
+    from ui.cc_panel.lane_lines import DISABLED, LEFT, RIGHT, STANDBY, WARN, LaneLines
+else:
+    from lane_lines import DISABLED, LEFT, RIGHT, STANDBY, WARN, LaneLines
 from PySide6.QtCore import Qt, QTimer, Signal, QByteArray, QRectF, QPointF
 from PySide6.QtGui import (
     QPainter,
@@ -26,6 +29,7 @@ from PySide6.QtGui import (
     QPixmap,
     QImage,
     QPainterPath,
+    QPen,
     QCursor,
     QGuiApplication,
     QLinearGradient,
@@ -63,6 +67,16 @@ _LEAD_TICK_MS = 16
 
 _VEHICLE_ANIM_MS = 350
 _VEHICLE_TICK_MS = 16
+
+# LDW/LKA lane lines beside the distance lines: (colour, opacity, width in logical px). Blue stays free on purpose.
+LANE_LINE_COLOR = "#F1F1F1"
+_LANE_STYLES = {
+    DISABLED: (LANE_LINE_COLOR, 0.30, 4.0),
+    STANDBY: (LANE_LINE_COLOR, 1.0, 4.0),
+    WARN: (AEB_COLOR, 1.0, 4.5),
+}
+_LANE_GAP_PX = 5.0
+_LANE_TICK_MS = 16
 
 # Sentinel for update(lead_vehicle_speed=...): distinguishes "not provided" from None ("no lead").
 _LEAD_UNSET = object()
@@ -140,6 +154,11 @@ class _PanelWidget(QWidget):
         # Reused offscreen buffer for lines+cutout composite (avoids per-frame alloc).
         self._lines_composite_buf: QPixmap | None = None
 
+        # Runs only while lane lines fade, settle or hold a warning; idle otherwise.
+        self._lane_timer = QTimer(self)
+        self._lane_timer.setSingleShot(True)
+        self._lane_timer.timeout.connect(self._lane_tick)
+
         self._setup_window()
 
         # QueuedConnection avoids deadlock when update() runs on the GUI thread
@@ -181,6 +200,7 @@ class _PanelWidget(QWidget):
         self._p.running = False
         self._p._blink_running = False
         self._blink_timer.stop()
+        self._lane_timer.stop()
         self.close()
 
     def _on_move(self, x: int, y: int):
@@ -298,12 +318,27 @@ class _PanelWidget(QWidget):
         if needs_color or needs_icon:
             p._text_color = cc_panel._color_for_mode(p._cc_mode, p._cc_enabled)
 
+        if "lane_state" in changes or "lane_side" in changes:
+            p._lane.set(p._lane_state, p._lane_side, time.monotonic())
+            self._lane_tick()
+
         # Drive lead-visible animation from current state.
         new_lead_target = 1.0 if self._should_show_lead() else 0.0
         if new_lead_target != p._lead_anim_target:
             self._start_lead_anim(new_lead_target)
 
         self.update()
+
+    def _lane_tick(self) -> None:
+        lane = self._p._lane
+        now = time.monotonic()
+        lane.step(now)
+        self.update()
+        wait = lane.wake_in(now)
+        if wait is None:
+            self._lane_timer.stop()
+        else:
+            self._lane_timer.start(max(_LANE_TICK_MS, int(wait * 1000.0) + 1))
 
     # AEB blink
 
@@ -1582,6 +1617,39 @@ class _PanelWidget(QWidget):
                 1.0,
                 draw_all_lines,
             )
+        self._paint_lane_lines(pa, ax, ay + lines_start_rel + 1 - car_up_lines, area_sz, sc, lines_h_block, lw + ls)
+
+    def _paint_lane_lines(
+        self, pa: QPainter, ax: int, y_top: float, area_sz: int, sc: float, block_h: int, pitch: int,
+    ) -> None:
+        """One slanted line per side, outside the distance lines and on their perspective."""
+        lane = self._p._lane
+        if not lane.visible():
+            return
+        y_bot = y_top + block_h
+        slant = 2.0 * sc / pitch * block_h
+        gap = _LANE_GAP_PX * sc
+        pa.save()
+        pa.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        for side in (LEFT, RIGHT):
+            x_bot = ax - gap if side == LEFT else ax + area_sz - 1 + gap
+            x_top = x_bot - side * slant
+            for style, weight in lane.weights(side).items():
+                if weight <= 0.0:
+                    continue
+                color_hex, alpha, width = _LANE_STYLES[style]
+                color = QColor(color_hex)
+                color.setAlphaF(alpha * weight)
+                pen = QPen(color, width * sc)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                pa.setPen(pen)
+                # Round caps stay inside the block's height.
+                inset = 0.5 * width * sc / block_h
+                pa.drawLine(
+                    QPointF(x_bot + (x_top - x_bot) * inset, y_bot - (y_bot - y_top) * inset),
+                    QPointF(x_top - (x_top - x_bot) * inset, y_top + (y_bot - y_top) * inset),
+                )
+        pa.restore()
 
     # drag
     def moveEvent(self, event):
@@ -1659,6 +1727,9 @@ class cc_panel:
         self._acc_locked = False
         self._last_locked_acc_truck: bool | None = None
         self._distance_to_lead = 2
+        self._lane_state = "off"
+        self._lane_side = 0
+        self._lane = LaneLines()
         self._AEB_warn = False
         self._AEB_warn_off_time = 0.0
         self._last_AEB_warn_true = 0.0
@@ -1746,6 +1817,8 @@ class cc_panel:
         acc_truck: bool | None = None,
         lead_vehicle_speed=_LEAD_UNSET,
         speed_unit: str | None = None,
+        lane_state: str | None = None,
+        lane_side: int | None = None,
     ):
         """Update the display. Thread-safe, never drops changes. Safe to call at high..."""
         d: dict = {}
@@ -1769,6 +1842,10 @@ class cc_panel:
             d["lead_vehicle_speed"] = lead_vehicle_speed
         if speed_unit is not None:
             d["speed_unit"] = speed_unit
+        if lane_state is not None:
+            d["lane_state"] = lane_state
+        if lane_side is not None:
+            d["lane_side"] = lane_side
         if complete_update:
             d["_complete_update"] = True
         if not d:
@@ -1869,9 +1946,13 @@ if __name__ == "__main__":
         "distance_to_lead": 3,
         "AEB_warn": False,
         "lead_vehicle_speed": None,
+        "lane_state": "off",
+        "lane_side": 0,
     }
 
     LEAD_SPEEDS = [None, 110.0]
+    LANE_STATES = ["off", "disabled", "standby"]
+    LANE_SIDES = [0, -1, 1]
 
     def update_scaling():
         time.sleep(3)
@@ -1888,11 +1969,12 @@ if __name__ == "__main__":
         print("  l = acc_locked          a = acc_enabled   t = acc_truck")
         print("  1/2/3/4 = distance_to_lead (lines)   b = AEB_warn")
         print("  v = lead_vehicle_speed (cycle: None/60/80/96/110)")
+        print("  k = lane lines (cycle off/disabled/standby)   w = lane warning (cycle none/left/right)")
         print("  h = help   q = quit")
         print(f"\n  Now: mode={state['cc_mode']!r} enabled={state['cc_enabled']} "
               f"locked={state['acc_locked']} acc={state['acc_enabled']} truck={state['acc_truck']} "
               f"lines={state['distance_to_lead']} AEB={state['AEB_warn']} text={state['new_text']!r} "
-              f"lead={state['lead_vehicle_speed']!r}\n")
+              f"lead={state['lead_vehicle_speed']!r} lane={state['lane_state']} side={state['lane_side']}\n")
 
     def keyboard_test():
         print_help()
@@ -1941,6 +2023,12 @@ if __name__ == "__main__":
                     if state["lead_vehicle_speed"] in LEAD_SPEEDS else 0
                 state["lead_vehicle_speed"] = LEAD_SPEEDS[i]
                 print(f"  lead_vehicle_speed = {state['lead_vehicle_speed']!r}")
+            elif key == "k":
+                state["lane_state"] = LANE_STATES[(LANE_STATES.index(state["lane_state"]) + 1) % len(LANE_STATES)]
+                print(f"  lane_state = {state['lane_state']}")
+            elif key == "w":
+                state["lane_side"] = LANE_SIDES[(LANE_SIDES.index(state["lane_side"]) + 1) % len(LANE_SIDES)]
+                print(f"  lane_side = {state['lane_side']}")
             else:
                 print("  Unknown key. Press h for help.")
                 continue

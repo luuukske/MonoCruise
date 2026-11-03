@@ -175,3 +175,31 @@ def test_teardown_asks_for_silence(monkeypatch, enabled):
     thread.teardown()
     assert world.command() == (cmd.CMD_NONE, 0, 0)
     assert not thread.data.active
+
+
+def test_the_panel_sees_the_side_acted_on(monkeypatch, enabled):
+    world = World(monkeypatch)
+    thread = world.thread()
+    drift_run(world, thread, steps=110)
+    assert thread.data.active
+    assert thread.data.firing_side == thread.data.side != 0
+    assert thread.data.watch_reason in ("warn", "approach")
+
+
+def test_switched_off_the_panel_sees_no_lane(monkeypatch):
+    world = World(monkeypatch)
+    thread = world.thread()
+    drift_run(world, thread, steps=110)
+    assert thread.data.watch_reason == "off"
+    assert thread.data.firing_side == 0
+
+
+def test_lka_alone_shows_the_lane_and_the_side_its_pulse_steers_from(monkeypatch):
+    monkeypatch.setattr(Settings.instance(), "lka_enabled", True, raising=False)
+    world = World(monkeypatch)
+    thread = world.thread()
+    drift_run(world, thread, steps=110)
+    assert thread.data.watch_reason != "off"
+    assert not thread.data.active
+    assert thread._pulse.side != 0
+    assert thread.data.firing_side == thread._pulse.side

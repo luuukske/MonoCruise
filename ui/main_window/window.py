@@ -35,6 +35,9 @@ from core.usage_hours import (
     prompt_is_due,
     record_prompt_dismissed,
 )
+from ui.cc_panel.lane_lines import OFF as LANE_OFF
+from ui.cc_panel.lane_lines import base_state as lane_base_state
+from ui.cc_panel.lane_lines import panel_side as lane_panel_side
 from ui.cc_panel.main import cc_panel as CcPanel
 from ui.main_window.banner import BannerState, BannerWidget
 from ui.main_window.confirmation_overlay import show_confirmation
@@ -584,6 +587,21 @@ class MonoCruiseWindow(QMainWindow):
         except (KeyError, AttributeError):
             pass
 
+        # Lane lines: off unless LDW or LKA watches a lane and the FFB plugin can act on it.
+        lane_state, lane_side = LANE_OFF, 0
+        try:
+            ld = registry.get_thread("lane_departure_thread")
+            if ld is not None and ld.is_alive():
+                with ld.data._lock:
+                    watch_reason = str(ld.data.watch_reason)
+                    firing_side = int(ld.data.firing_side)
+                    plugin = ld.data.plugin
+                plugin_ok = bool(plugin.present and plugin.hooked and not plugin.dead)
+                lane_state = lane_base_state(watch_reason, plugin_ok)
+                lane_side = lane_panel_side(firing_side) if plugin_ok else 0
+        except (KeyError, AttributeError, TypeError, ValueError):
+            pass
+
         # Rate-limit lead speed changes; None first/last pass through immediately.
         now_mono = time.monotonic()
         last_val = self._cc_lead_speed_emit_val
@@ -622,7 +640,7 @@ class MonoCruiseWindow(QMainWindow):
 
         update_snap = (
             text, display_mode, cruise_enabled, aeb_cue, acc_on,
-            acc_locked, acc_truck, gap_level, lead_speed, unit,
+            acc_locked, acc_truck, gap_level, lead_speed, unit, lane_state, lane_side,
         )
         if self._cc_panel_update_snap != update_snap:
             self._cc_panel_update_snap = update_snap
@@ -637,6 +655,8 @@ class MonoCruiseWindow(QMainWindow):
                 acc_truck=acc_truck,
                 lead_vehicle_speed=lead_speed,
                 speed_unit=unit,
+                lane_state=lane_state,
+                lane_side=lane_side,
             )
 
         if should_show:

@@ -12,7 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Added
-- **Lane departure warning and lane keeping (beta)**: a new Lane departure option under Emergency Braking rumbles a force feedback wheel when you drift over a lane line (Warn), or also steers you back with a short nudge (Steer). MonoCruise installs its game plugin for it when you pick one.
+- **Lane departure warning and lane keeping (beta)**: a new Lane departure option under Emergency Braking rumbles a force feedback wheel when you drift over a lane line (Warn), or also steers you back with a short nudge (Steer), and MonoCruise installs its game plugin for it when you pick one. With ACC on, the cruise control panel shows lane lines beside the distance lines: white when watching, dimmed while paused, red on the side it just acted on.
 
 ### Fixed
 - **AEB could treat a stopped or crashing TruckersMP trailer as moving**: when another truck passed beside a stopped trailer, AEB could give the trailer that truck's speed, parked trailers could pick up a passing truck's speed too, and a crash seen on the truck was not applied to its trailer. Trailers are now matched to the truck actually pulling them, using TruckersMP's own trailer link where available, and a crash on either part counts for the whole rig.

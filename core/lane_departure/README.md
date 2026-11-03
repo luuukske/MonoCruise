@@ -20,6 +20,9 @@ Local\MonoCruiseFfbCmd  (command.py)  ->  plugins/ffb  ->  game's constant-force
 game side. Nothing here touches ACC, AEB, CC or the pedals, and the map stays a prior:
 no map, a stale snapshot or `map_data_enabled` off means silence.
 
+`LaneDepartureData.watch_reason` (the detector's reason while LDW or LKA watches) and `firing_side` (LDW rumbling, or
+the line an LKA pulse steers from) feed the CC panel's lane lines (`ui/cc_panel/README.md`); display only.
+
 ## What is measured
 
 The lane is the centre polyline of `MapSnapshot.route` plus or minus half a lane
