@@ -992,7 +992,7 @@ class MainPedalThread(BaseThread):
         return bool(states.get(code, False))
 
     def _resolve_keyboard_binding(self, binding: dict) -> bool:
-        """Ask the keyboard library whether this key is currently held."""
+        """True while the bound key is held."""
         key = binding.get("code")
         if not key:
             return False

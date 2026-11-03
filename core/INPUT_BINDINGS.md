@@ -9,7 +9,7 @@ values; `resolve_held()` / `binding_state()` read live state.
 | int (legacy) | Joystick button on configured pedal device |
 | str (legacy) | Keyboard key name (e.g. `"A"`) |
 | `{"source":"joystick","device_guid", "code", ...}` | Button or hat: hat virtual index = `button_count + hat_idx*4 + dir` (dir 0..3 = up/right/down/left) |
-| `{"source":"keyboard","code"}` | Key name |
+| `{"source":"keyboard","code"}` | Key name. A number-row digit is `"1"`. A numpad digit is `"Numpad 1"`, and that name stays put with Num Lock on or off. A saved plain `"1"` is the number row only |
 | `{"source":"button_device","vid_pid","button_id"}` | HID report bit: `button_id = byte_index*8 + bit_index`. Only Button-page bits from the report descriptor count; see `core/button_device_thread/README.md` |
 
 Public helpers: `binding_display_name`, `keyboard_is_pressed`, `resolve_press_count`.

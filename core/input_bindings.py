@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from core.keyboard_thread.keys import is_digit_code
 from core.thread_management.registry import registry
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,8 @@ def binding_state(binding: object) -> bool | None:
             key = b.get("code")
             if not key:
                 return False
+            if is_digit_code(key):
+                return _digit_held(str(key))
             if not _keyboard_available or _kb is None:
                 return None
             return bool(_kb.is_pressed(key))
@@ -166,15 +169,33 @@ def binding_display_name(raw: object) -> str:
 
 
 def keyboard_is_pressed(key: str) -> bool:
-    """Thread-safe wrapper around keyboard.is_pressed(). Returns False if unavailable."""
-    if not _keyboard_available or _kb is None:
-        return False
+    """True while this key is held. False when it is up or the source is down."""
     if not key:
+        return False
+    if is_digit_code(key):
+        return _digit_held(str(key)) is True
+    if not _keyboard_available or _kb is None:
         return False
     try:
         return bool(_kb.is_pressed(key))
     except Exception:
         return False
+
+
+def _digit_held(key: str) -> bool | None:
+    """Held state for a number-row or numpad digit, None if the thread is not up."""
+    code = str(key).capitalize()
+    try:
+        kt = registry.get_thread("keyboard_thread")
+        with kt.data._lock:
+            if not getattr(kt.data, "is_available", False):
+                return None
+            return code in kt.data.keys_held
+    except (KeyError, AttributeError):
+        return None
+    except Exception:
+        logger.debug("failed to read held state for %s", code, exc_info=True)
+        return None
 
 
 def _resolve_joystick(binding: dict) -> bool:
@@ -198,7 +219,7 @@ def _resolve_keyboard(binding: dict) -> bool:
     key = binding.get("code")
     if not key:
         return False
-    return keyboard_is_pressed(key)
+    return keyboard_is_pressed(str(key))
 
 
 def _resolve_button_device(binding: dict) -> bool:

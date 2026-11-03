@@ -1,4 +1,4 @@
-"""Keyboard library lifecycle wrapper; is_pressed used from input_bindings."""
+"""Keyboard library lifecycle wrapper; held digits are read from this thread."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import logging
 import threading
 from dataclasses import dataclass, field
 
+from core.keyboard_thread.keys import binding_code, is_digit_code
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry  # noqa: F401  (keep for watchdog compat)
 
@@ -28,8 +29,11 @@ class KeyboardThreadData(ThreadData):
     # {capitalized key name: monotonic press count} for bound keys only. Read
     # from the OS hook so a tap shorter than a consumer's tick still counts.
     key_press_counts: dict = field(default_factory=dict, repr=False)
+    # Digit keys currently down, including unbound ones. The library's own
+    # held check cannot tell the number row from the numpad.
+    keys_held: set = field(default_factory=set, repr=False)
     capture_active: bool = False
-    capture_event: str | None = None  # capitalized key name when captured, e.g. "A", "Space"
+    capture_event: str | None = None  # "A", "Space", "1", "Numpad 1"
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
 
@@ -61,7 +65,9 @@ class KeyboardThread(BaseThread):
         except Exception:
             pass
 
+        self._keys_down.clear()
         with self.data._lock:
+            self.data.keys_held = set()
             self.data.is_available = True
         self._refresh_watched_keys()
         self._install_press_counter()
@@ -96,34 +102,46 @@ class KeyboardThread(BaseThread):
         """Count press edges for bound keys from the OS hook, ignoring auto-repeat."""
         if not _keyboard_available or _kb is None:
             return
-        data = self.data
-
-        def _on_event(event) -> None:
-            name = getattr(event, "name", None)
-            if not name:
-                return
-            key = str(name).capitalize()
-            if key not in self._watched_keys:
-                return
-            if getattr(event, "event_type", None) == "down":
-                # Held keys repeat at the OS repeat rate; only the first counts.
-                if key in self._keys_down:
-                    return
-                self._keys_down.add(key)
-                with data._lock:
-                    counts = dict(data.key_press_counts)
-                    counts[key] = counts.get(key, 0) + 1
-                    data.key_press_counts = counts
-            else:
-                self._keys_down.discard(key)
 
         try:
-            self._press_hook = _kb.hook(_on_event, suppress=False)
+            self._press_hook = _kb.hook(self._on_key_event, suppress=False)
         except Exception:
             logger.debug("failed to install keyboard press counter", exc_info=True)
 
+    def _on_key_event(self, event) -> None:
+        """Update held digits and count a press edge for a bound key."""
+        code = binding_code(event)
+        if not code:
+            return
+        down = getattr(event, "event_type", None) == "down"
+        if is_digit_code(code):
+            with self.data._lock:
+                held = set(self.data.keys_held)
+                if down:
+                    held.add(code)
+                else:
+                    held.discard(code)
+                self.data.keys_held = held
+        if code not in self._watched_keys:
+            return
+        if down:
+            # Held keys repeat at the OS repeat rate; only the first counts.
+            if code in self._keys_down:
+                return
+            self._keys_down.add(code)
+            with self.data._lock:
+                counts = dict(self.data.key_press_counts)
+                counts[code] = counts.get(code, 0) + 1
+                self.data.key_press_counts = counts
+        else:
+            self._keys_down.discard(code)
+
     def teardown(self) -> None:
         self._remove_capture_hook()
+        self._keys_down.clear()
+        with self.data._lock:
+            self.data.keys_held = set()
+            self.data.is_available = False
         if _keyboard_available and _kb is not None:
             try:
                 _kb.unhook_all()
@@ -163,29 +181,26 @@ class KeyboardThread(BaseThread):
         if not _keyboard_available or _kb is None:
             return
 
-        data = self.data
-
-        def _on_press(event) -> None:
-            name = getattr(event, "name", None)
-            if not name:
-                return
-            key = name.capitalize()
-            if key in ("Esc", "Escape"):
-                with data._lock:
-                    data.capture_active = False
-                return
-            # Skip modifier-only keys that can't be unambiguously bound
-            if key in ("Shift", "Ctrl", "Alt", "Win", "Tab", "Caps Lock"):
-                return
-            with data._lock:
-                if data.capture_active and data.capture_event is None:
-                    data.capture_event = key
-                    data.capture_active = False
-
         try:
-            self._capture_hook = _kb.on_press(_on_press, suppress=False)
+            self._capture_hook = _kb.on_press(self._on_capture_press, suppress=False)
         except Exception:
             logger.debug("failed to install keyboard capture hook", exc_info=True)
+
+    def _on_capture_press(self, event) -> None:
+        code = binding_code(event)
+        if not code:
+            return
+        if code in ("Esc", "Escape"):
+            with self.data._lock:
+                self.data.capture_active = False
+            return
+        # Skip modifier-only keys that can't be unambiguously bound
+        if code in ("Shift", "Ctrl", "Alt", "Win", "Tab", "Caps Lock"):
+            return
+        with self.data._lock:
+            if self.data.capture_active and self.data.capture_event is None:
+                self.data.capture_event = code
+                self.data.capture_active = False
 
     def _remove_capture_hook(self) -> None:
         hook = self._capture_hook
