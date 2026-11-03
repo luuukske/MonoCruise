@@ -367,7 +367,10 @@ Every number below is a placeholder in `SideTuning`, set by reasoning.
 - **The rig.** The tractor (`EgoGeometry`) and every attached trailer from the SDK (`TrailerBody`,
   `core/radar/README.md` §17, ends estimated). Its rear and front are the farthest corners along the lane.
 - **Beside**: a body that reaches from 1 m behind the rig to 2 m ahead of it, entirely clear of the rig on that
-  side and centred within 7 m of the lane centre, oncoming or not. A body that overlaps the rig is a ghost.
+  side and centred within 7 m of the lane centre, oncoming or not. A body that overlaps the rig is a ghost. A
+  body that leaves that zone within 0.2 s at its speed relative to the rig no longer counts (Lukas, 2026-11-04: a
+  car we pass dropping off a long trailer's rear, or one that passed us clearing the bumper as we pull out), and
+  is released at once rather than held; one at our speed never leaves.
 - **Everything else is a time lookahead** (Lukas, 2026-11-03), one lane over (centre 2.6 to 7 m off), within
   200 m, at today's closing speed; distance alone never counts, so a car at our speed just behind or ahead stays
   dark. **Behind** (we are being overtaken): travelling our way and reaching the rig's rear within 3 s.

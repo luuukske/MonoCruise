@@ -33,6 +33,8 @@ class SideTuning:
     far_m: float = 7.0
     beside_front_m: float = 2.0
     beside_rear_m: float = 1.0
+    # A body leaving the beside zone this soon, at its speed relative to the rig, no longer counts.
+    exit_s: float = 0.2
     # Time lookahead: a body that reaches the rig within this long, at today's closing speed.
     same_way_s: float = 3.0
     oncoming_s: float = 2.5
@@ -180,7 +182,10 @@ def _vehicle_boxes(v):
 
 
 class SideTraffic:
-    """Per side, the vehicle that makes moving over unsafe now, held ``hold_s`` after it clears."""
+    """Per side, the vehicle that makes moving over unsafe now, held ``hold_s`` after it clears.
+
+    A vehicle dropped because it is leaving the beside zone is not held: the hold would undo ``exit_s``.
+    """
 
     def __init__(self, tuning: SideTuning | None = None) -> None:
         self.tune = tuning or SideTuning()
@@ -210,6 +215,7 @@ class SideTraffic:
         if rig is None:
             return self._out(t, "off_route", {})
         found: dict[int, Hit] = {}
+        leaving: dict[int, set[int]] = {s: set() for s in _SIDES}
         lanes: dict[tuple[int, int], str] = {}
         reach = tn.reach_m + rig[1] - rig[0] + 20.0
         for v in vehicles or ():
@@ -217,13 +223,15 @@ class SideTraffic:
             if vid in skip_ids or getattr(v, "is_parked", False):
                 continue
             for corners, speed in _vehicle_boxes(v):
-                hit = self._judge(frame, rig, ego, corners, speed, v, reach, window, lanes)
-                if hit is None:
+                judged = self._judge(frame, rig, ego, corners, speed, v, reach, window, lanes)
+                if judged is None:
                     continue
-                side, hit = hit
-                if _more_urgent(hit, found.get(side)):
+                side, hit, exiting = judged
+                if exiting:
+                    leaving[side].add(hit.vid)
+                elif _more_urgent(hit, found.get(side)):
                     found[side] = hit
-        return self._out(t, "clear", found)
+        return self._out(t, "clear", found, leaving)
 
     def _frame(self, route, window, ego: Ego) -> LaneFrame:
         """Ego's lane from ``behind_route_m`` behind to ``ahead_route_m`` ahead, along travel."""
@@ -262,7 +270,8 @@ class SideTraffic:
         self.rig_length_m = max(ss) - min(ss)
         return min(ss), max(ss), min(ds), max(ds)
 
-    def _judge(self, frame, rig, ego, corners, speed, v, reach, window, lanes) -> tuple[int, Hit] | None:
+    def _judge(self, frame, rig, ego, corners, speed, v, reach, window, lanes) -> tuple[int, Hit, bool] | None:
+        """``(side, hit, leaving)`` for a body that makes a side unsafe, ``leaving`` when it clears the zone in time."""
         tn = self.tune
         cx = 0.25 * sum(c[0] for c in corners)
         cz = 0.25 * sum(c[1] for c in corners)
@@ -292,11 +301,14 @@ class SideTraffic:
         kind = ""
         gap = closing = 0.0
         when = math.inf
-        if hi >= rear - tn.beside_rear_m and lo <= front + tn.beside_front_m:
+        exiting = False
+        zone = (rear - tn.beside_rear_m, front + tn.beside_front_m)
+        if hi >= zone[0] and lo <= zone[1]:
             clear = d_lo > rig_right if side == RIGHT else d_hi < rig_left
             if not clear:
                 return None
             kind, closing = BESIDE, along - v_ego
+            exiting = _exit_time(lo, hi, zone, closing) <= tn.exit_s
         elif abs(d_c) < tn.near_m:
             return None
         else:
@@ -319,22 +331,33 @@ class SideTraffic:
             lane = lanes[key]
             if lane == edge_kinds.EDGE:
                 return None
-        return side, Hit(kind, int(getattr(v, "id", -1)), bool(getattr(v, "is_tmp", False)), gap, d_c, closing,
-                         when, lane, length)
+        hit = Hit(kind, int(getattr(v, "id", -1)), bool(getattr(v, "is_tmp", False)), gap, d_c, closing, when, lane,
+                  length)
+        return side, hit, exiting
 
-    def _out(self, t: float, reason: str, found: dict[int, Hit]) -> SideState:
+    def _out(self, t: float, reason: str, found: dict[int, Hit], leaving=None) -> SideState:
         sides: dict[int, Hit | None] = {}
         for side in _SIDES:
             hit = found.get(side)
             held, until = self._held[side]
+            gone = held is not None and leaving is not None and held.vid in leaving[side]
             if hit is not None:
                 self._held[side] = (hit, t + self.tune.hold_s)
-            elif held is not None and reason == "clear" and t < until:
+            elif held is not None and reason == "clear" and t < until and not gone:
                 hit = held
             else:
                 self._held[side] = (None, -math.inf)
             sides[side] = hit
         return SideState(sides[LEFT], sides[RIGHT], reason)
+
+
+def _exit_time(lo: float, hi: float, zone: tuple[float, float], rel: float) -> float:
+    """Seconds until a body spanning ``lo``..``hi`` along the lane leaves ``zone`` at ``rel`` relative to the rig."""
+    if rel > 0.0:
+        return (zone[1] - lo) / rel
+    if rel < 0.0:
+        return (hi - zone[0]) / -rel
+    return math.inf
 
 
 def _more_urgent(hit: Hit, than: Hit | None) -> bool:
