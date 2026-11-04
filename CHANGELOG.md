@@ -11,6 +11,8 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+
+## [1.1.4-preview.1] - 2026-11-04
 ### Added
 - **Gas and brake on one axis**: pedals that share one stick axis, resting in the middle with brake one way and gas the other, can be connected by tapping the brake and then the gas.
 
