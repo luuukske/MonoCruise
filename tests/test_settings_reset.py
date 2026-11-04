@@ -63,12 +63,14 @@ def test_reset_clears_a_bound_pedal(window):
     s.gasaxis = 4
     s.brakeaxis = 5
     s.gas_inverted = True
+    s.shared_pedal_axis = True
 
     window._reset_settings()
 
     assert s.gasaxis is None
     assert s.brakeaxis is None
     assert s.gas_inverted is False
+    assert s.shared_pedal_axis is False
 
 
 def test_usage_history_survives_a_reset(window):

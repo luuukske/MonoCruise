@@ -11,6 +11,9 @@ The `[Unreleased]` block accumulates changes between releases. `tools/release.py
 renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
+### Added
+- **Gas and brake on one axis**: pedals that share one stick axis, resting in the middle with brake one way and gas the other, can be connected by tapping the brake and then the gas.
+
 ### Fixed
 - **Pedals died on startup on some PCs**: MonoCruise could report a crash as soon as it opened and then stop reading the pedals until you restarted it. It now keeps reading them when the display driver will not start.
 - **AEB could treat a stopped or crashing TruckersMP trailer as moving**: when another truck passed beside a stopped trailer, AEB could give the trailer that truck's speed, parked trailers could pick up a passing truck's speed too, and a crash seen on the truck was not applied to its trailer. Trailers are now matched to the truck actually pulling them, using TruckersMP's own trailer link where available, and a crash on either part counts for the whole rig.
