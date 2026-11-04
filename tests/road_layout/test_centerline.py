@@ -79,6 +79,149 @@ def test_one_plus_one_lanes_sit_half_a_lane_off_the_spline():
     assert hit.kind == "road"
 
 
+def test_a_taper_meets_the_continued_road_and_keeps_its_own_far_end():
+    from core.road_layout.lanes import lane_lines
+    from core.road_layout.looks import RoadLook
+    from core.road_layout.sector import MapNode, MapRoad, SectorMesh
+
+    def node(uid, x, z):
+        return MapNode(uid, x, 0.0, z, 1.0, 0.0, 0.0, 0.0)
+
+    wide = RoadLook("ger12", ["a", "a"], ["a", "a"], offset_m=5.0)
+    narrow = RoadLook("ger11", ["a", "a"], ["a", "a"], offset_m=2.0)
+    # Two wide pieces settle each other. The narrow piece joins only the second.
+    nodes = {
+        1: node(1, 0.0, 0.0),
+        2: node(2, 0.0, -200.0),
+        3: node(3, 0.0, -300.0),
+        4: node(4, 0.0, -480.0),
+    }
+    mesh = SectorMesh(nodes=nodes, roads=[
+        MapRoad(1, "ger12", 1, 2, 200.0),
+        MapRoad(2, "ger12", 2, 3, 100.0),
+        MapRoad(3, "ger11", 3, 4, 180.0),
+    ])
+    looks = {"ger12": wide, "ger11": narrow}
+    lines = lane_lines(mesh, looks, None, steps=4)
+    taper = [line for line in lines if line.uid == 3 and line.lane_index == 1]
+    kept = [line for line in lines if line.uid == 2 and line.lane_index == 1]
+    assert len(taper) == 1 and len(kept) == 1
+    # Outer right lane: wide is 11.75 m, narrow's own is 8.75 m.
+    assert abs(taper[0].points[0][0] - 11.75) < 0.02
+    assert abs(taper[0].points[-1][0] - 8.75) < 0.02
+    assert abs(kept[0].points[-1][0] - 11.75) < 0.02
+    assert abs(kept[0].points[0][0] - 11.75) < 0.02
+    mid = taper[0].points[len(taper[0].points) // 2]
+    assert abs(mid[0] - 10.25) < 0.05
+    left = next(line for line in lines if line.uid == 3 and line.lane_index == 3)
+    assert abs(left.points[0][0] + 11.75) < 0.02
+    assert abs(left.points[-1][0] + 8.75) < 0.02
+    assert taper[0].lateral_m == 8.75
+
+
+def test_a_continued_look_still_tapers_off_the_previous_one():
+    from core.road_layout.lanes import lane_lines
+    from core.road_layout.looks import RoadLook
+    from core.road_layout.sector import MapNode, MapRoad, SectorMesh
+
+    def node(uid, x, z):
+        return MapNode(uid, x, 0.0, z, 1.0, 0.0, 0.0, 0.0)
+
+    wide = RoadLook("ger12", ["a", "a"], ["a", "a"], offset_m=5.0)
+    narrow = RoadLook("ger11", ["a", "a"], ["a", "a"], offset_m=2.0)
+    # Both looks continue as themselves. The wide piece begins at the join.
+    mesh = SectorMesh(nodes={
+        1: node(1, 0.0, 0.0),
+        2: node(2, 0.0, -160.0),
+        3: node(3, 0.0, -320.0),
+        4: node(4, 0.0, -480.0),
+        5: node(5, 0.0, -640.0),
+    }, roads=[
+        MapRoad(1, "ger11", 1, 2, 160.0),
+        MapRoad(2, "ger11", 2, 3, 160.0),
+        MapRoad(3, "ger12", 3, 4, 160.0),
+        MapRoad(4, "ger12", 4, 5, 160.0),
+    ])
+    looks = {"ger12": wide, "ger11": narrow}
+    lines = lane_lines(mesh, looks, None, steps=4)
+    opening = next(line for line in lines if line.uid == 3 and line.lane_index == 1)
+    previous = next(line for line in lines if line.uid == 2 and line.lane_index == 1)
+    carried = next(line for line in lines if line.uid == 4 and line.lane_index == 1)
+    assert abs(opening.points[0][0] - 8.75) < 0.02
+    assert abs(opening.points[-1][0] - 11.75) < 0.02
+    assert abs(previous.points[0][0] - 8.75) < 0.02
+    assert abs(previous.points[-1][0] - 8.75) < 0.02
+    assert abs(carried.points[0][0] - 11.75) < 0.02
+    assert abs(carried.points[-1][0] - 11.75) < 0.02
+
+
+def test_a_fork_or_a_crossing_does_not_move_the_lane():
+    from core.road_layout.lanes import lane_lines
+    from core.road_layout.looks import RoadLook
+    from core.road_layout.sector import MapNode, MapRoad, SectorMesh
+
+    def node(uid, x, z):
+        return MapNode(uid, x, 0.0, z, 1.0, 0.0, 0.0, 0.0)
+
+    wide = RoadLook("ger12", ["a", "a"], ["a", "a"], offset_m=5.0)
+    narrow = RoadLook("ger11", ["a", "a"], ["a", "a"], offset_m=2.0)
+    looks = {"ger12": wide, "ger11": narrow}
+    # Two wide roads arrive at the same node, so the narrow piece has no single join.
+    fork = SectorMesh(nodes={
+        1: node(1, 0.0, -100.0),
+        2: node(2, 4.0, -100.0),
+        3: node(3, 0.0, -200.0),
+        4: node(4, 0.0, -380.0),
+        5: node(5, 0.0, 0.0),
+        6: node(6, 4.0, 0.0),
+    }, roads=[
+        MapRoad(1, "ger12", 5, 1, 100.0),
+        MapRoad(2, "ger12", 1, 3, 100.0),
+        MapRoad(3, "ger12", 6, 2, 100.0),
+        MapRoad(4, "ger12", 2, 3, 100.0),
+        MapRoad(5, "ger11", 3, 4, 180.0),
+    ])
+    fork_line = next(
+        line for line in lane_lines(fork, looks, None, steps=4)
+        if line.uid == 5 and line.lane_index == 1
+    )
+    assert abs(fork_line.points[0][0] - 8.75) < 0.02
+    # A road that crosses the join is not a continuation, and it does not block the real one.
+    cross = SectorMesh(nodes={
+        1: node(1, 0.0, 0.0),
+        2: node(2, 0.0, -200.0),
+        3: node(3, 0.0, -300.0),
+        4: node(4, 0.0, -480.0),
+        5: node(5, -80.0, -300.0),
+    }, roads=[
+        MapRoad(1, "ger12", 1, 2, 200.0),
+        MapRoad(2, "ger12", 2, 3, 100.0),
+        MapRoad(3, "ger11", 3, 4, 180.0),
+        MapRoad(4, "ger12", 5, 3, 80.0),
+    ])
+    crossed = next(
+        line for line in lane_lines(cross, looks, None, steps=4)
+        if line.uid == 3 and line.lane_index == 1
+    )
+    assert abs(crossed.points[0][0] - 11.75) < 0.02
+    assert abs(crossed.points[-1][0] - 8.75) < 0.02
+    only_cross = SectorMesh(nodes={
+        3: node(3, 0.0, -300.0),
+        4: node(4, 0.0, -480.0),
+        5: node(5, -80.0, -300.0),
+        7: node(7, 80.0, -300.0),
+    }, roads=[
+        MapRoad(3, "ger11", 3, 4, 180.0),
+        MapRoad(4, "ger12", 5, 3, 80.0),
+        MapRoad(6, "ger12", 3, 7, 80.0),
+    ])
+    alone = next(
+        line for line in lane_lines(only_cross, looks, None, steps=4)
+        if line.uid == 3 and line.lane_index == 1
+    )
+    assert abs(alone.points[0][0] - 8.75) < 0.02
+
+
 def test_a_long_road_has_more_points_than_a_short_one():
     from core.road_layout.lanes import lane_lines
     from core.road_layout.sector import MapNode, MapRoad, SectorMesh

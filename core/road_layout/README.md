@@ -56,6 +56,18 @@ middle lane. A look with only left lanes is the mirror of that.
 A per-lane shift from the look is added when the template asks for one.
 Positive is to the right of travel, from the start node toward the end node.
 
+Two connected roads can list the same lanes and still carry different
+`road_offset` values, so a constant shift misses by that difference at the
+shared node. The painted lanes stay continuous. Roads are chained start to
+end, and the piece whose start sits on the join takes the previous piece's
+lateral there and fades back to its own lateral at its far end. The previous
+piece keeps its own, so the two meet. The previous piece has to be the one
+continuation within about 35 degrees, with the same lanes. A fork is left
+alone. `lateral_m` stays the look's own offset. German motorway looks
+`ger11` (2 m) and `ger12` (5 m) do this in both orders, including where each
+look continues as itself, and a prefab at the far end stays on that piece's
+own lanes.
+
 Junctions, roundabouts and merges are not road items. Each driving line
 through them is a nav curve in the prefab's `.ppd`, already one lane. The
 sector names the world node the prefab's origin sits on, and the curve is

@@ -17,13 +17,16 @@ from core.road_layout.sector import MapNode, SectorMesh
 # A short junction stays at the caller's step count. A long bend grows from here.
 _SAMPLE_M = 10.0
 _MAX_STEPS = 80
+# A continuation, not a crossing or a fork mouth. About 35 degrees.
+_JOIN_COS = math.cos(math.radians(35.0))
+_LATERAL_EPS_M = 0.05
 
 
 @dataclass(frozen=True)
 class LaneLine:
     """One sampled lane. ``kind`` is ``road`` or ``prefab``.
 
-    ``uid`` is the road or prefab item; ``lateral_m`` is a road lane's offset from the spline.
+    ``uid`` is the road or prefab item. ``lateral_m`` is the look's own offset from the spline.
     ``travel`` is +1 when traffic runs in point order, -1 against it, 0 when unknown.
     """
 
@@ -62,6 +65,7 @@ def lane_lines(
     ``prefab_tangent`` is ``chord`` or ``circle``.
     """
     lines: list[LaneLine] = []
+    joined_by_uid = _join_laterals(mesh, looks, apply_shift)
     for road in mesh.roads:
         start = mesh.nodes.get(road.start_uid)
         end = mesh.nodes.get(road.end_uid)
@@ -76,11 +80,13 @@ def lane_lines(
             _road_magnitude(start, end, road.length, road_tangent),
         )
         travels = _travels(look, len(laterals))
+        joined = joined_by_uid.get(road.uid)
         for index, lateral in enumerate(laterals):
+            start_lat, end_lat = (joined[0][index], joined[1][index]) if joined else (lateral, lateral)
             lines.append(LaneLine(
                 "road",
                 road.look,
-                tuple(_shift(span, lateral)),
+                _lane_points(span, lateral, start_lat, end_lat),
                 None,
                 road.uid,
                 index,
@@ -192,9 +198,121 @@ def _circle_magnitude(
     return chord * 2.0 * math.tan(turn / 4.0) / math.sin(turn / 2.0)
 
 
+def _lane_points(span, own: float, start: float, end: float) -> tuple:
+    """Constant shift, or a fade from ``start`` at the first sample to ``end`` at the last."""
+    if abs(start - own) < _LATERAL_EPS_M and abs(end - own) < _LATERAL_EPS_M:
+        return tuple(_shift(span, own))
+    if abs(start - end) < _LATERAL_EPS_M:
+        return tuple(_shift(span, start))
+    return tuple(_shift_fade(span, start, end))
+
+
 def _shift(span, lateral: float):
     for x, y, z, fx, fz in span:
         yield (x + lateral * (-fz), y, z + lateral * fx)
+
+
+def _shift_fade(span, start: float, end: float):
+    last = max(len(span) - 1, 1)
+    for i, (x, y, z, fx, fz) in enumerate(span):
+        lateral = start + (end - start) * (i / last)
+        yield (x + lateral * (-fz), y, z + lateral * fx)
+
+
+def _join_laterals(
+    mesh: SectorMesh,
+    looks: dict[str, RoadLook],
+    apply_shift: bool,
+) -> dict[int, tuple[list[float], list[float]]]:
+    """Laterals at (start, end). The piece that begins at an offset change tapers off the previous look."""
+    by_node: dict[int, list] = {}
+    own: dict[int, list[float]] = {}
+    roads = []
+    seen: set[int] = set()
+    for road in mesh.roads:
+        if road.uid in seen:
+            continue
+        if mesh.nodes.get(road.start_uid) is None or mesh.nodes.get(road.end_uid) is None:
+            continue
+        look = looks.get(road.look)
+        laterals = look.laterals(apply_shift=apply_shift) if look is not None else None
+        if not laterals:
+            continue
+        seen.add(road.uid)
+        roads.append(road)
+        own[road.uid] = laterals
+        by_node.setdefault(road.start_uid, []).append(road)
+        by_node.setdefault(road.end_uid, []).append(road)
+    out: dict[int, tuple[list[float], list[float]]] = {}
+    for road in roads:
+        mine = own[road.uid]
+        start_lat = _from_upstream(
+            mine, _aligned(mesh, looks, by_node, road, mine, True, apply_shift),
+        )
+        if start_lat is not mine:
+            out[road.uid] = (start_lat, mine)
+    return out
+
+
+def _from_upstream(mine: list[float], group: list) -> list[float]:
+    """The one road that arrives at our start, when its lanes differ. Our end keeps ``mine``."""
+    arriving = [item for item in group if item[2]]
+    if len(arriving) != 1:
+        return mine
+    _nid, lats, _arrives = arriving[0]
+    if _close(lats, mine):
+        return mine
+    return lats
+
+
+def _aligned(mesh, looks, by_node, road, mine, at_start: bool, apply_shift: bool) -> list:
+    node_uid = road.start_uid if at_start else road.end_uid
+    start = mesh.nodes[road.start_uid]
+    end = mesh.nodes[road.end_uid]
+    ours = _chord(start, end)
+    look = looks.get(road.look)
+    if ours is None or look is None:
+        return []
+    found = []
+    seen: set[int] = set()
+    for other in by_node.get(node_uid, ()):
+        if other.uid == road.uid or other.uid in seen:
+            continue
+        seen.add(other.uid)
+        other_look = looks.get(other.look)
+        if other_look is None:
+            continue
+        if (len(other_look.lanes_right), len(other_look.lanes_left)) != (
+            len(look.lanes_right), len(look.lanes_left)
+        ):
+            continue
+        other_start = mesh.nodes.get(other.start_uid)
+        other_end = mesh.nodes.get(other.end_uid)
+        if other_start is None or other_end is None:
+            continue
+        direction = _chord(other_start, other_end)
+        if direction is None or ours[0] * direction[0] + ours[1] * direction[1] < _JOIN_COS:
+            continue
+        laterals = other_look.laterals(apply_shift=apply_shift)
+        if len(laterals) != len(mine):
+            continue
+        found.append((other.uid, laterals, other.end_uid == node_uid))
+    return found
+
+
+def _chord(start: MapNode, end: MapNode):
+    dx = end.x - start.x
+    dz = end.z - start.z
+    length = math.hypot(dx, dz)
+    if length < 1e-3:
+        return None
+    return dx / length, dz / length
+
+
+def _close(lats, mine: list[float]) -> bool:
+    return len(lats) == len(mine) and all(
+        abs(a - b) < _LATERAL_EPS_M for a, b in zip(lats, mine)
+    )
 
 
 def _segment(x: float, z: float, a, b) -> tuple[float, float]:
