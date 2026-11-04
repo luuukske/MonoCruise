@@ -32,6 +32,7 @@ def _thread(monkeypatch, *, enabled=True, game="ets2", pose=(0.0, 0.0, 0.4, 1.0,
     monkeypatch.setattr(mt, "_enabled", lambda: enabled)
     monkeypatch.setattr(mt, "_running_game", lambda: game)
     monkeypatch.setattr(mt, "_ego_pose", lambda: pose)
+    monkeypatch.setattr(mt, "_mod_mounts", lambda game: ())
     thread = mt.MapThread()
     thread.running = True
     thread._game = game
@@ -75,10 +76,12 @@ def test_stale_or_missing_snapshot_reads_as_no_map(monkeypatch):
 
 
 class _OverlayMap(_StubMap):
-    def with_overlay(self, archives):
+    def with_overlay(self, archives, mark_added=True):
         self.overlaid = list(archives)
         overlay = _OverlayMap()
         overlay.is_overlay = True
+        overlay.mark_added = mark_added
+        overlay.layered_on = self
         return overlay
 
 
@@ -144,6 +147,62 @@ def test_no_archives_is_tried_once_and_the_base_map_stays(monkeypatch):
         thread.loop()
     assert thread._map is thread._base_map and state["opened"] == 1
     assert thread.data.snapshot.status == "ready" and not thread.data.snapshot.tmp
+
+
+class _Pack:
+    def listdir(self, key):
+        return ([], []) if key == "map/europe" else None
+
+
+def test_mounted_mods_layer_under_the_truckersmp_map(monkeypatch):
+    from pathlib import Path
+
+    thread, _ = _tmp_thread(monkeypatch)
+    thread._base_map.map_name = "europe"
+
+    class _ModOpener:
+        def __init__(self, game, mounts=None):
+            self.archives = [_Pack()]
+            self.done = False
+
+        def step(self):
+            self.done = True
+            return True
+
+    monkeypatch.setattr(mt, "ModOverlayOpener", _ModOpener)
+    monkeypatch.setattr(mt, "_mod_mounts", lambda game: (Path("pack.scs"),))
+    thread.loop()
+    assert thread._mod_map is not None and thread._mod_map.mark_added is False
+    assert thread._map.layered_on is thread._mod_map and thread._map.mark_added is True
+    assert thread.data.snapshot.status == "ready" and thread.data.snapshot.tmp
+
+
+def test_clearing_the_mounted_mods_returns_to_the_base_under_truckersmp(monkeypatch):
+    from pathlib import Path
+
+    thread, _ = _tmp_thread(monkeypatch)
+    thread._base_map.map_name = "europe"
+    listed = {"mods": (Path("pack.scs"),)}
+
+    class _ModOpener:
+        def __init__(self, game, mounts=None):
+            self.archives = [_Pack()] if mounts else []
+            self.done = False
+
+        def step(self):
+            self.done = True
+            return True
+
+    monkeypatch.setattr(mt, "ModOverlayOpener", _ModOpener)
+    monkeypatch.setattr(mt, "_mod_mounts", lambda game: listed["mods"])
+    thread.loop()
+    assert thread._mod_map is not None
+    listed["mods"] = ()
+    thread._mod_check_at = 0.0
+    thread.loop()
+    assert thread._mod_map is None
+    assert thread._map.layered_on is thread._base_map
+    assert thread.data.snapshot.tmp
 
 
 def test_a_broken_overlay_build_keeps_the_base_map(monkeypatch):

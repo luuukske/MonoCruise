@@ -269,7 +269,100 @@ class ZipArchive:
         return sorted(listing[0]), sorted(listing[1])
 
 
-Archive = HashFs | HashFsV1 | ZipArchive
+class DirArchive:
+    """One mod package that is a plain directory. Read only, and never held open.
+
+    A path that leaves the directory, including through a link, is ignored.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.path = root
+        self._root = root.resolve()
+
+    def _resolve(self, key: str) -> Path | None:
+        parts = [part for part in key.replace("\\", "/").split("/") if part]
+        if any(part in (".", "..") for part in parts):
+            return None
+        try:
+            resolved = self._root.joinpath(*parts).resolve()
+            resolved.relative_to(self._root)
+        except (OSError, ValueError):
+            return None
+        return resolved
+
+    def has(self, key: str) -> bool:
+        path = self._resolve(key)
+        return path is not None and path.is_file()
+
+    def get(self, key: str) -> bytes | None:
+        path = self._resolve(key)
+        if path is None or not path.is_file():
+            return None
+        try:
+            if path.stat().st_size > _MAX_ENTRY_BYTES:
+                raise ValueError("directory entry too large")
+            return path.read_bytes()
+        except OSError:
+            return None
+
+    def listdir(self, key: str) -> tuple[list[str], list[str]] | None:
+        path = self._resolve(key)
+        if path is None or not path.is_dir():
+            return None
+        subdirs: list[str] = []
+        files: list[str] = []
+        try:
+            children = list(path.iterdir())
+        except OSError:
+            return None
+        for child in children:
+            try:
+                child.resolve().relative_to(self._root)
+            except (OSError, ValueError):
+                continue
+            if child.is_dir():
+                subdirs.append(child.name)
+            elif child.is_file():
+                files.append(child.name)
+        return sorted(subdirs), sorted(files)
+
+
+class MountedMod:
+    """A mod package, with its ``base`` part as a fallback root.
+
+    Since ETS2 1.48 the game always mounts a package's ``base`` directory.
+    ``dlc_*`` parts are mounted only for an owned DLC, and this reader does not
+    guess which of those the game mounted.
+    """
+
+    def __init__(self, inner: Archive) -> None:
+        self._inner = inner
+        self.path = inner.path
+
+    def _keys(self, key: str):
+        bare = key.strip("/")
+        yield bare
+        yield f"base/{bare}" if bare else "base"
+
+    def has(self, key: str) -> bool:
+        return any(self._inner.has(candidate) for candidate in self._keys(key))
+
+    def get(self, key: str) -> bytes | None:
+        for candidate in self._keys(key):
+            blob = self._inner.get(candidate)
+            if blob is not None:
+                return blob
+        return None
+
+    def listdir(self, key: str) -> tuple[list[str], list[str]] | None:
+        for candidate in self._keys(key):
+            listing = self._inner.listdir(candidate)
+            if listing is not None:
+                return listing
+        return None
+
+
+Archive = HashFs | HashFsV1 | ZipArchive | DirArchive | MountedMod
 
 
 def open_archive(path: Path) -> Archive:
@@ -281,6 +374,12 @@ def open_archive(path: Path) -> Archive:
     if head[:4] == b"SCS#" and int.from_bytes(head[4:8], "little") == 1:
         return HashFsV1(path)
     return HashFs(path)
+
+
+def open_mounted(path: Path) -> MountedMod:
+    """The mounted-mod reader for a file or a directory package. Raises ``ValueError``."""
+    inner = DirArchive(path) if path.is_dir() else open_archive(path)
+    return MountedMod(inner)
 
 
 def _bounded_inflate(blob: bytes, size: int, raw: bool = False) -> bytes:

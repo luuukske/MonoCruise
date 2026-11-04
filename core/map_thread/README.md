@@ -68,6 +68,38 @@ open like the game's own archives (`core/road_layout/archive.py`, `tmp_mods.py`)
   (`tools/map_replay.py`); a TruckersMP clip gets the additions the launcher lists
   today, so a clip from before those mods were current can differ from what ran live.
 
+## Map mods
+
+ProMods and other map mods are the same sector files, shipped as `.scs`, `.zip`,
+or a plain folder. The game mounts only the packages enabled for this session.
+TruckersMP does that itself on a ProMods server and leaves the single-player
+mod list unused, so the list in `profile.sii` is not the source. `game.log.txt`
+is: each `mounted to mod pool` line, in order, after the latest `New profile
+selected`. The file stays on disk after the game exits, which is what clip
+review uses.
+
+- Only a path under that user directory's `mod` folder, or the Steam workshop
+  folder for ETS2 or ATS, is opened. Anything else in the log is ignored. The
+  path is not logged.
+- The layer is built when one mounted package contains the map. The other
+  mounted packages are read with it, so a definition package beside the map
+  still supplies road looks and prefabs. A package with no map in the set is
+  left out.
+- A package is read like a game archive. A directory package is read in place.
+  A `base/` directory inside the package is used when the map is not at the
+  package root (the game always mounts that part). `dlc_*` parts are not: the
+  game mounts those only for an owned DLC, and this reader does not guess which.
+- The packages layer under TruckersMP's `.mp` files. That keeps a listed
+  TruckersMP fix on top. A ProMods-server log was not available to confirm the
+  game mounts them in that order.
+- A sector the package replaces and the parser cannot read has no lanes there.
+  The buried-lane drop stays on the TruckersMP layer only. It was measured on
+  TruckersMP junctions, not on map mods.
+- Clip replay (`tools/map_replay.py`) uses these packages only when the stock
+  map, including TruckersMP's additions for a TruckersMP clip, does not follow
+  the driven path and the modded map does. A clip that already fits the stock
+  map is left on it, so today's log does not redraw an older drive.
+
 ## What consumers may do
 
 - Read `map_snapshot()` (fresh `ready` snapshot or None). Never open archives,

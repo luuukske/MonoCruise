@@ -18,6 +18,7 @@ from pathlib import Path
 from core.road_layout.ego_route import EgoRouter, LaneRoute
 from core.road_layout.game_map import GameMap, GameMapOpener, LaneWindow
 from core.road_layout.target_path import TargetRouter
+from core.road_layout.mod_mounts import ModOverlayOpener, live_mounts
 from core.road_layout.tmp_mods import TmpOverlayOpener
 from core.thread_management.base_thread import BaseThread, ThreadData
 from core.thread_management.registry import registry
@@ -38,6 +39,8 @@ _TARGET_BUDGET_S = 0.015
 
 # TruckersMP's map additions stay on this long after the last sign of a server.
 _TMP_HOLD_S = 60.0
+# How often to re-read the game log for newly mounted map packages.
+_MOD_POLL_S = 2.0
 
 _GAMES = {1: "ets2", 2: "ats"}
 
@@ -82,6 +85,10 @@ class MapThread(BaseThread):
         self._overlay_map: GameMap | None = None
         self._overlay_opener: TmpOverlayOpener | None = None
         self._overlay_failed = False
+        self._mod_opener: ModOverlayOpener | None = None
+        self._mod_map: GameMap | None = None
+        self._mod_mounts: tuple[Path, ...] | None = None
+        self._mod_check_at = 0.0
         self._tmp_on = False
         self._tmp_seen = -math.inf
         self._window: LaneWindow | None = None
@@ -110,7 +117,9 @@ class MapThread(BaseThread):
         if self._map is None:
             self._open_step()
             return
-        self._tmp_step(time.monotonic())
+        now = time.monotonic()
+        self._mod_step(now)
+        self._tmp_step(now)
         x, y, z, fwd_x, fwd_z = pose
         if not self._window_step(x, z):
             return
@@ -132,6 +141,10 @@ class MapThread(BaseThread):
         self._overlay_map = None
         self._overlay_opener = None
         self._overlay_failed = False
+        self._mod_opener = None
+        self._mod_map = None
+        self._mod_mounts = None
+        self._mod_check_at = 0.0
         self._tmp_on = False
         self._window = None
         self._pending = []
@@ -179,11 +192,8 @@ class MapThread(BaseThread):
         if want and self._overlay_map is None and not self._build_overlay():
             return
         self._tmp_on = want
-        self._map = self._overlay_map if want else self._base_map
-        self._window = None
-        self._pending = []
-        self._router.reset()
-        self._targets = TargetRouter()
+        self._map = self._overlay_map if want else self._floor()
+        self._invalidate_window()
         self._log_status("TruckersMP map additions on" if want else "TruckersMP map additions off")
 
     def _build_overlay(self) -> bool:
@@ -200,7 +210,7 @@ class MapThread(BaseThread):
             archives = self._overlay_opener.archives
             self._overlay_opener = None
             if archives:
-                self._overlay_map = self._base_map.with_overlay(archives)
+                self._overlay_map = self._floor().with_overlay(archives)
                 self._log_status(f"TruckersMP map archives open ({len(archives)})")
                 return True
             self._log_status("no TruckersMP map archives found, base map stays")
@@ -209,6 +219,89 @@ class MapThread(BaseThread):
         self._overlay_opener = None
         self._overlay_failed = True
         return False
+
+    def _floor(self) -> GameMap | None:
+        """The map under TruckersMP's layer: mounted mods, or the base game."""
+        return self._mod_map or self._base_map
+
+    def _mod_step(self, now: float) -> None:
+        """Layer the packages the game log says are mounted. The log is on disk, game or not."""
+        if self._base_map is None:
+            return
+        if self._mod_opener is not None:
+            self._pump_mods()
+            return
+        if now < self._mod_check_at:
+            return
+        self._mod_check_at = now + _MOD_POLL_S
+        mounts = _mod_mounts(self._game)
+        if mounts is None:
+            self._mod_check_at = now
+            return
+        if mounts == self._mod_mounts:
+            return
+        self._mod_mounts = mounts
+        if not mounts:
+            if self._mod_map is not None:
+                self._apply_mods([])
+            return
+        self._mod_opener = ModOverlayOpener(self._game, mounts)
+        self._pump_mods()
+
+    def _pump_mods(self) -> None:
+        opener = self._mod_opener
+        if opener is None:
+            return
+        started = time.monotonic()
+        try:
+            while time.monotonic() - started < _BUDGET_S and self.running:
+                if opener.step():
+                    break
+            if not opener.done:
+                return
+            archives = opener.archives
+            self._mod_opener = None
+        except Exception:
+            logger.warning("map mods unreadable, base map stays", exc_info=True)
+            self._mod_opener = None
+            self._mod_map = None
+            return
+        if not self._packages_have_map(archives):
+            if self._mod_map is not None:
+                self._apply_mods([])
+            return
+        self._apply_mods(archives)
+
+    def _packages_have_map(self, archives: list) -> bool:
+        name = self._base_map.map_name if self._base_map is not None else ""
+        return any(archive.listdir(f"map/{name}") is not None for archive in archives)
+
+    def _apply_mods(self, archives: list) -> None:
+        had = self._mod_map is not None
+        if not archives and not had:
+            return
+        try:
+            self._mod_map = self._base_map.with_overlay(archives, mark_added=False) if archives else None
+        except Exception:
+            logger.warning("map mods unreadable, base map stays", exc_info=True)
+            self._mod_map = None
+            archives = []
+        if archives:
+            self._log_status(f"map mods open ({len(archives)})")
+        elif had:
+            self._log_status("map mods off")
+        self._overlay_map = None
+        self._overlay_opener = None
+        self._overlay_failed = False
+        self._tmp_on = False
+        self._map = self._floor()
+        self._invalidate_window()
+
+    def _invalidate_window(self) -> None:
+        self._window = None
+        self._pending = []
+        self._router.reset()
+        self._targets = TargetRouter()
 
     def _window_step(self, x: float, z: float) -> bool:
         """Keep the lane window around ego. False while sectors are still loading."""
@@ -296,6 +389,15 @@ def _enabled() -> bool:
     except Exception:
         logger.debug("settings unreadable, map stays off")
         return False
+
+
+def _mod_mounts(game: str) -> tuple[Path, ...] | None:
+    """Packages the game mounted. None while the log read is still in progress."""
+    try:
+        return live_mounts(game)
+    except Exception:
+        logger.warning("map mods unreadable, base map stays", exc_info=True)
+        return ()
 
 
 def _tmp_enabled() -> bool:

@@ -78,6 +78,8 @@ class GameMap:
         self._base_map: GameMap | None = None
         self._overlay_archives: list[Archive] = []
         self._added: set[int] = set()
+        # TruckersMP's buried-lane drop. User map mods turn it off for their own layer.
+        self._mark_added = True
 
     @classmethod
     def open_installed(cls, game: str = "ets2") -> "GameMap":
@@ -95,8 +97,11 @@ class GameMap:
             raise FileNotFoundError(opener.error or "map did not open")
         return opener.result
 
-    def with_overlay(self, archives: Sequence[Archive]) -> "GameMap":
-        """This map with *archives* layered on top: later archives replace sectors, looks and prefabs."""
+    def with_overlay(self, archives: Sequence[Archive], *, mark_added: bool = True) -> "GameMap":
+        """Layer *archives* on top. Later ones replace sectors, looks and prefabs.
+
+        ``mark_added`` is the buried-lane drop. On for TruckersMP, off for a user map mod.
+        """
         overlay = object.__new__(GameMap)
         overlay.map_name = self.map_name
         overlay._map_archives = self._map_archives + [
@@ -111,6 +116,7 @@ class GameMap:
         overlay._base_map = self
         overlay._overlay_archives = list(archives)
         overlay._added = set()
+        overlay._mark_added = mark_added
         return overlay
 
     def sector(self, key: tuple[int, int]) -> SectorMesh:
@@ -130,7 +136,7 @@ class GameMap:
                 log.warning("map sector %+d %+d unreadable, no lanes there", ix, iz)
             self.failed_sectors.add(key)
             mesh = SectorMesh()
-        if self._base_map is not None and mesh.sectors:
+        if self._base_map is not None and self._mark_added and mesh.sectors:
             self._note_added(key, mesh)
         self._sectors[key] = mesh
         while len(self._sectors) > _SECTOR_CACHE:

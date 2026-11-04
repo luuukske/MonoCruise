@@ -167,6 +167,11 @@ def _detect_game() -> str:
     return newest[1] if newest else "ets2"
 
 
+def game_user_dir(game: str) -> Path | None:
+    """The game's user directory: Documents, or the OneDrive copy, whichever was written last."""
+    return _find_user_dir(game)
+
+
 def _find_user_dir(game: str) -> Path | None:
     folder = _GAME_FOLDERS.get(game)
     if not folder:

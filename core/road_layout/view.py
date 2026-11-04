@@ -28,6 +28,7 @@ from core.road_layout.ego_lane import (
 from core.road_layout.ego_route import build_route
 from core.road_layout.live import LiveMap, MapFrame, MapLine
 from core.road_layout.map_path import build_map_path, world_points
+from core.road_layout.mod_mounts import ModOverlayOpener
 from core.road_layout.tmp_mods import TmpOverlayOpener
 
 log = logging.getLogger("road_layout")
@@ -62,6 +63,8 @@ class _Worker(QObject):
         self._props_factory = props_factory
         self._tmp_state = TmpStateReader()
         self._tmp_seen = -math.inf
+        self._mod_archives: list = []
+        self._tmp_on = False
 
     @Slot()
     def open_catalogs(self) -> None:
@@ -76,7 +79,25 @@ class _Worker(QObject):
             log.exception("lane map index failed")
             self.failed.emit("Could not open the game map.")
             return
+        self._load_mods()
         self.status.emit("Waiting for the game")
+
+    def _load_mods(self) -> None:
+        """Packages the game log mounted. The log is on disk, so the game can be closed."""
+        try:
+            opener = ModOverlayOpener("ets2")
+            while not opener.step():
+                pass
+            archives = list(opener.archives)
+            name = self._map.map_name if self._map is not None else ""
+            holding = [archive for archive in archives if archive.listdir(f"map/{name}") is not None]
+            if holding and self._map is not None:
+                self._mod_archives = archives
+                self._map.set_overlay(archives)
+                log.info("lane map: %d map mod(s)", len(holding))
+        except Exception:
+            log.warning("map mods unreadable, game map only", exc_info=True)
+            self._mod_archives = []
 
     def _follow_truckersmp(self) -> None:
         """Layer TruckersMP's map additions while the plugin reports a server connection."""
@@ -85,13 +106,17 @@ class _Worker(QObject):
         if state.fresh and state.connected:
             self._tmp_seen = now
         want = now - self._tmp_seen <= _TMP_HOLD_S
-        if want == self._map.overlaid:
+        if want == self._tmp_on:
             return
-        opener = TmpOverlayOpener("ets2")
-        while not opener.step():
-            pass
-        self._map.set_overlay(opener.archives if want else [])
-        log.info("lane map: TruckersMP additions %s", "on" if self._map.overlaid else "off")
+        archives = list(self._mod_archives)
+        if want:
+            opener = TmpOverlayOpener("ets2")
+            while not opener.step():
+                pass
+            archives.extend(opener.archives)
+        self._map.set_overlay(archives)
+        self._tmp_on = want
+        log.info("lane map: TruckersMP additions %s", "on" if want else "off")
 
     @Slot(float, float)
     def on_pose(self, x: float, z: float) -> None:

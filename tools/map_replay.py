@@ -4,6 +4,9 @@ Clips never carry map data. A replay that wants the map reads it from this
 machine's own game install, matched to the clip by where its ego drives. A
 TruckersMP clip also gets the TruckersMP map additions the launcher lists today,
 as the live worker does; a clip from before those mods were current can differ.
+Map packages the game log says were mounted are tried only when the stock map
+does not follow the driven path and the modded map does. The log is on disk,
+so this does not need the game running.
 
     from tools.map_replay import install
     install()   # core.aeb.clip_eval.run_headless now replays with the map
@@ -27,8 +30,12 @@ _BOX_PAD_M = 300.0
 _REFRESH_S = 0.05
 
 
-def game_map(game: str, tmp: bool = False):
-    """The installed map, with the TruckersMP additions layered over it when ``tmp``."""
+def game_map(game: str, tmp: bool = False, mods: bool = False):
+    """The installed map. TruckersMP additions when ``tmp``, mounted mods when ``mods``.
+
+    Mods layer under the TruckersMP additions and do not feed the buried-lane drop.
+    No mounted packages leaves the same object as ``mods`` false.
+    """
     if game not in _MAPS:
         from core.road_layout.game_map import GameMap
         try:
@@ -36,17 +43,43 @@ def game_map(game: str, tmp: bool = False):
         except (FileNotFoundError, OSError):
             _MAPS[game] = None
     base = _MAPS[game]
-    if not tmp or base is None:
+    if base is None:
+        return None
+    if not tmp and not mods:
         return base
-    key = (game, "tmp")
+    key = (game, tmp, mods)
     if key not in _MAPS:
+        _MAPS[key] = _layered(base, game, tmp, mods)
+    return _MAPS[key]
+
+
+def _layered(base, game: str, tmp: bool, mods: bool):
+    layered = base
+    if mods:
+        from core.road_layout.mod_mounts import ModOverlayOpener
+
+        opener = ModOverlayOpener(game)
+        while not opener.step():
+            pass
+        if not opener.archives:
+            return game_map(game, tmp, False)
+        layered = layered.with_overlay(opener.archives, mark_added=False)
+    if tmp:
         from core.road_layout.tmp_mods import TmpOverlayOpener
 
         opener = TmpOverlayOpener(game)
         while not opener.step():
             pass
-        _MAPS[key] = base.with_overlay(opener.archives) if opener.archives else base
-    return _MAPS[key]
+        if opener.archives:
+            layered = layered.with_overlay(opener.archives)
+    return layered
+
+
+def mod_map_fits(base_hits: int, mod_hits: int, samples: int, share: float = _MATCH_SHARE) -> bool:
+    """True when the stock map misses the drive and the modded map follows it."""
+    if samples <= 0:
+        return False
+    return base_hits < share * samples <= mod_hits
 
 
 def is_tmp(clip) -> bool:
@@ -66,8 +99,6 @@ def _poses(clip):
 
 def match_clip(clip):
     """``(game, window)`` whose lanes ego drives on for most of the clip, else ``(None, None)``."""
-    from core.road_layout.ego_route import EgoRouter
-
     poses = _poses(clip)
     if len(poses) < 10:
         return None, None
@@ -75,20 +106,53 @@ def match_clip(clip):
     zs = [p[2] for p in poses]
     box = (min(xs) - _BOX_PAD_M, max(xs) + _BOX_PAD_M, min(zs) - _BOX_PAD_M, max(zs) + _BOX_PAD_M)
     sample = poses[:: max(1, len(poses) // 30)]
+    tmp = is_tmp(clip)
     for game in ("ets2", "ats"):
-        gm = game_map(game, is_tmp(clip))
-        if gm is None:
-            continue
-        window = gm.lanes_in_box(*box)
-        router = EgoRouter()
-        hits = 0
-        for x, y, z, fx, fz in sample:
-            route = router.step(window, x, y, z, fx, fz)
-            if route is not None and abs(route.offset_m) < _MATCH_OFFSET_M:
-                hits += 1
-        if hits >= _MATCH_SHARE * len(sample):
-            return game, window
+        found = _fit(game, tmp, False, box, sample)
+        if found is not None:
+            return found
+    for game in ("ets2", "ats"):
+        found = _fit(game, tmp, True, box, sample)
+        if found is not None:
+            return found
     return None, None
+
+
+def _fit(game: str, tmp: bool, mods: bool, box, sample):
+    from core.road_layout.ego_route import EgoRouter
+
+    plain = game_map(game, tmp, False)
+    gm = game_map(game, tmp, mods)
+    if gm is None or (mods and gm is plain):
+        return None
+    window = gm.lanes_in_box(*box)
+    router = EgoRouter()
+    hits = 0
+    for x, y, z, fx, fz in sample:
+        route = router.step(window, x, y, z, fx, fz)
+        if route is not None and abs(route.offset_m) < _MATCH_OFFSET_M:
+            hits += 1
+    if mods:
+        base_hits = _hits(plain, box, sample) if plain is not None else 0
+        if not mod_map_fits(base_hits, hits, len(sample)):
+            return None
+        return game, window
+    if hits >= _MATCH_SHARE * len(sample):
+        return game, window
+    return None
+
+
+def _hits(gm, box, sample) -> int:
+    from core.road_layout.ego_route import EgoRouter
+
+    window = gm.lanes_in_box(*box)
+    router = EgoRouter()
+    hits = 0
+    for x, y, z, fx, fz in sample:
+        route = router.step(window, x, y, z, fx, fz)
+        if route is not None and abs(route.offset_m) < _MATCH_OFFSET_M:
+            hits += 1
+    return hits
 
 
 class ClipMap:

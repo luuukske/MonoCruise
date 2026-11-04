@@ -27,9 +27,10 @@ sign is part of the four-digit field, so column 0 row -2 is `sec+0000-0002.base`
 
 `base_map.scs` holds the base map. A DLC archive that contains the same path
 replaces that sector. Archives are opened in filename order and the last copy
-wins. Map mods in the user folder are not consulted. TruckersMP's `.mp` files are
-layered on top while connected to a server (HashFS v1 or zip, `tmp_mods.py`,
-core/map_thread/README.md).
+wins. Map packages the game mounted sit on top of that, and TruckersMP's `.mp`
+files sit on top of the packages (HashFS or zip, `mod_mounts.py`, `tmp_mods.py`,
+core/map_thread/README.md). The mod folder is not scanned: a package counts
+only when the game log says it was mounted.
 
 Paths are hashed with CityHash64 from CityHash 1.0.3. The 1.1 hash that current
 PyPI builds ship does not match these archives. The empty string is the one
