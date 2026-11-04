@@ -22,6 +22,7 @@ from core.input_bindings import (
 )
 from core.main_pedal_thread.joystick_pool import JoystickPool, pick_joystick
 from core.main_pedal_thread.pedal_axes import PedalAxes, TapDetector
+from core.main_pedal_thread.pygame_video import PygameVideo, publish_released
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +184,7 @@ class MainPedalThread(BaseThread):
     def __init__(self) -> None:
         super().__init__(name="main_pedal_thread")
         self.data = MainPedalThreadData()
+        self._video = PygameVideo()
 
         self._device: pygame.joystick.JoystickType | None = None
         self._device_instance_id: int | None = None
@@ -245,8 +247,9 @@ class MainPedalThread(BaseThread):
 
 
     def setup(self) -> None:
-        pygame.init()
-        pygame.joystick.init()
+        self._video.start(pygame)
+        if self._video.failed:
+            return
 
         # Pedal device (critical).
         pedal_guid = Settings.device
@@ -276,6 +279,16 @@ class MainPedalThread(BaseThread):
 
     def loop(self) -> None:
         if not self.running:
+            return
+        # event.get() raises if video never came up, which used to kill this thread.
+        if self._video.failed:
+            if self._video.take_failure():
+                logger.warning(
+                    "Joystick input cannot be read. Restart MonoCruise.",
+                    extra={"popup": True},
+                )
+            self._video.release(pygame)
+            publish_released(self.data)
             return
 
         polling_rate = max(Settings.polling_rate, 10)
@@ -1001,13 +1014,9 @@ class MainPedalThread(BaseThread):
 
     def _process_pygame_events(self, speed: float) -> tuple[float, float]:
         """Handle all pending pygame events and return the current (gasval, brakeval)."""
-        if not pygame.get_init():
-            pygame.init()
-            pygame.joystick.init()
-            return self._axes.gas, self._axes.brake
-
+        events = self._video.read(pygame)
         configuring = self.data.pedal_config_active
-        for event in pygame.event.get():
+        for event in events:
             if event.type == pygame.JOYDEVICEREMOVED:
                 self._handle_device_removed(event.instance_id)
 

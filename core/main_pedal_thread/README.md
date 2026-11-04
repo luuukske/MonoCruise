@@ -14,6 +14,23 @@
 
 Does not send to the game, hazard/horn, cruise logic, AEB, or keyboard hook lifecycle.
 
+## Video init
+
+`pygame.init()` does not raise when the video subsystem fails. It returns a
+failure count, `pygame.get_init()` stays true, and `pygame.event.get()` then
+raises `video system not initialized`. That killed this thread on machines
+where the display driver will not start (a remote session, a broken GPU
+driver, a bad `SDL_VIDEODRIVER`), and the watchdog retried the same init until
+it gave up. Joystick events are pumped through that call, and this process
+never opens a window, so a failed display init is retried once with the dummy
+SDL video driver. The log line records the init counts, the driver name, and
+the SDL error from the direct retry.
+
+If the dummy driver is still down, the thread stays up instead of crashing.
+The next loop closes the joysticks (so they are not held open while unread)
+and publishes released pedals and button holds, with one popup. It does not
+call `pygame.quit()`: the mixer is shared with the AEB warning sounds.
+
 ## Pedal axes come from their own events
 
 `gasval` and `brakeval` move only on a `JOYAXISMOTION` event of that exact axis

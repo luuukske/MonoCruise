@@ -12,6 +12,7 @@ renames it to the released version and starts a fresh `[Unreleased]` above it.
 
 ## [Unreleased]
 ### Fixed
+- **Pedals died on startup on some PCs**: MonoCruise could report a crash as soon as it opened and then stop reading the pedals until you restarted it. It now keeps reading them when the display driver will not start.
 - **AEB could treat a stopped or crashing TruckersMP trailer as moving**: when another truck passed beside a stopped trailer, AEB could give the trailer that truck's speed, parked trailers could pick up a passing truck's speed too, and a crash seen on the truck was not applied to its trailer. Trailers are now matched to the truck actually pulling them, using TruckersMP's own trailer link where available, and a crash on either part counts for the whole rig.
 - **AEB braked for cars turning out of a side road**: a car pulling out and turning into the oncoming lane looked like it would swing into your lane, so AEB could brake hard as it straightened out beside you. AEB now expects the turn to finish and stays quiet unless that path actually reaches your lane.
 - **AEB braked when a TruckersMP player's speed glitched**: a brief dip in a player's reported speed could make AEB think they were stopping dead in front of you. It now assumes no harder braking than a vehicle can really do.
